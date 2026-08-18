@@ -651,3 +651,219 @@ describe("[146.1-04 / B3] the 23505 branch enters the resolve arm only for a wiz
     expect(extra?.pg_code).toBe("23505");
   });
 });
+
+// ---------------------------------------------------------------------------
+// 146.1-04 / A2 + C4 — TERMINAL STATUS, AND THE TWO FAIL-CLOSED PATHS
+// ---------------------------------------------------------------------------
+
+/**
+ * A2 — THE CROSS-FLOW ECHO. This is an access-control defect (ASVS V4), not a
+ * cosmetic one.
+ *
+ * The partial unique index the 23505 fires on is
+ * `(user_id, wizard_session_id, source) WHERE wizard_session_id IS NOT NULL`
+ * (20260728120000:167-169). `status` is NOT in the key. And
+ * `src/lib/wizard/localStorage.ts` restores `wizard_session_id`
+ * unconditionally from ONE shared storage key, so the manager flow and the
+ * CONTRIB-02 contribution flow can arrive carrying the SAME session id.
+ *
+ * So a manager-flow resubmit (terminal status 'pending_review' — the admin
+ * publish queue's membership predicate) could resolve onto a row committed as
+ * 'private' and be echoed 200. The row's own status was then echoed back, so
+ * the caller was told "saved" for a strategy that will never enter the review
+ * queue — and in the other direction an owner-only contribution's id is handed
+ * to the manager flow.
+ *
+ * ⛔ The refusal reuses the EXISTING `refuse()` closure. Minting a code here
+ * would move `KNOWN_CSV_FINALIZE_CODES`, `EXPECTED_TABLE_SIZE` and the
+ * vocabulary invariant in the same commit, for a state the user cannot act on
+ * differently.
+ */
+
+/** POST as the CONTRIB-02 contribution flow (terminal status 'private'). */
+function postContribution(
+  series: Array<{ date: string; daily_return: number }>,
+) {
+  return POST(
+    new NextRequest("http://localhost:3000/api/strategies/csv-finalize", {
+      method: "POST",
+      body: JSON.stringify({
+        wizard_session_id: SESSION,
+        fmt: "daily_returns",
+        strategy_name: "Alpha",
+        daily_returns_series: series,
+        metadata: { description: "cr01 oracle marker" },
+        entry_context: "contribution",
+      }),
+      headers: {
+        "Content-Type": "application/json",
+        Origin: "http://localhost:3000",
+      },
+    }),
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  ) as any;
+}
+
+/** The reason string every `refuse()` capture carries in its Error message. */
+function refusalReasons(): string[] {
+  return vi
+    .mocked(captureToSentry)
+    .mock.calls.filter(
+      (c) =>
+        (c[1] as { tags?: { step?: string } } | undefined)?.tags?.step ===
+        "finalize-resolve-refused",
+    )
+    .map((c) => (c[0] as Error).message);
+}
+
+/** The committed series that makes an identical-retry resolve succeed. */
+function armCommitted2024() {
+  seriesProbe.count = 3;
+  seriesProbe.minDate = "2024-01-31";
+  seriesProbe.maxDate = "2024-03-29";
+}
+
+describe("[146.1-04 / A2] the resolve arm refuses a TERMINAL-STATUS mismatch", () => {
+  it("🔴 manager resubmit onto a committed 'private' contribution row is REFUSED", async () => {
+    // Without this, the manager flow is handed an owner-only contribution's id
+    // and told it was saved — and the strategy never enters the admin review
+    // queue, because 'private' is not the queue's membership predicate.
+    arm23505({ id: EXISTING_ID, name: "Alpha", status: "private" });
+    armCommitted2024();
+
+    const res = await post(SERIES_2024);
+
+    expect(
+      res.status,
+      "a manager-flow submission was answered with a 'private' row's id — a " +
+        "cross-flow echo, and the strategy will never reach the review queue",
+    ).toBe(409);
+    const body = await res.json();
+    expect(body.ok).toBe(false);
+    expect(body.code).toBe("CSV_SESSION_REUSED");
+    expect(res.headers.get("cache-control")).toContain("no-store");
+    expect(
+      updateCalls,
+      "this submission's metadata was applied to a row belonging to the " +
+        "other flow",
+    ).toEqual([]);
+    expect(sentrySteps()).toContain("finalize-resolve-refused");
+  });
+
+  it("🔴 THE OTHER DIRECTION: a contribution resubmit onto a committed 'pending_review' row is REFUSED", async () => {
+    // Both directions, deliberately. One-direction-only coverage lets a
+    // half-fix ship green.
+    arm23505({ id: EXISTING_ID, name: "Alpha", status: "pending_review" });
+    armCommitted2024();
+
+    const res = await postContribution(SERIES_2024);
+
+    expect(res.status).toBe(409);
+    const body = await res.json();
+    expect(body.code).toBe("CSV_SESSION_REUSED");
+    expect(updateCalls).toEqual([]);
+  });
+
+  it("POSITIVE: a contribution retry onto its OWN 'private' row still 200-echoes", async () => {
+    // The counterpart that keeps the refusal from being refuse-everything.
+    // Without it, A2 is satisfied by an arm that dead-ends every resubmit.
+    arm23505({ id: EXISTING_ID, name: "Alpha", status: "private" });
+    armCommitted2024();
+
+    const res = await postContribution(SERIES_2024);
+
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.ok).toBe(true);
+    expect(body.strategy_id).toBe(EXISTING_ID);
+    expect(body.status).toBe("private");
+    expect(updateCalls).toHaveLength(1);
+  });
+
+  it("an ABSENT status column is NOT read as a mismatch — absence is not a value", async () => {
+    // The guard mirrors the name check's `typeof === "string" &&` shape for
+    // exactly this reason. A guard that refuses every row whose `status` did
+    // not come back would ship green without this case.
+    arm23505({ id: EXISTING_ID, name: "Alpha", status: undefined });
+    armCommitted2024();
+
+    const res = await post(SERIES_2024);
+
+    expect(
+      res.status,
+      "a row with no readable status was refused as though a mismatch had " +
+        "been OBSERVED — absence rendered as a measurement",
+    ).toBe(200);
+    const body = await res.json();
+    expect(body.ok).toBe(true);
+  });
+
+  it("the STATUS comparison runs BEFORE the name check — the reason names the flow, not the name", async () => {
+    // A manager request landing on a 'private' row is a wrong-FLOW answer
+    // whether or not the names happen to differ too. If the name check spoke
+    // first the Sentry reason would send an operator hunting a rename.
+    arm23505({ id: EXISTING_ID, name: "Renamed", status: "private" });
+    armCommitted2024();
+
+    const res = await post(SERIES_2024);
+
+    expect(res.status).toBe(409);
+    const reasons = refusalReasons();
+    expect(reasons).toHaveLength(1);
+    expect(
+      reasons[0],
+      "the refusal was attributed to the NAME while the actual fact is that " +
+        "two different product flows collided on one session fence",
+    ).toMatch(/terminal status/i);
+    expect(reasons[0]).not.toMatch(/name mismatch/i);
+  });
+});
+
+describe("[146.1-04 / C4] both resolve-arm fail-closed paths answer 503 and write NOTHING", () => {
+  it("C4a — a FAILED strategies re-fetch fails closed (503) and issues zero metadata updates", async () => {
+    // supabase-js RESOLVES on a read failure rather than throwing, so an
+    // unchecked binding reads as "no row" — a read we could not make rendered
+    // as a measurement. Asserting only the status code would miss a
+    // fail-closed path that still issued the metadata UPDATE.
+    arm23505({ id: EXISTING_ID, name: "Alpha", status: "pending_review" });
+    resolveFetch.error = { code: "57014", message: "statement timeout" };
+
+    const res = await post(SERIES_2024);
+
+    expect(res.status).toBe(503);
+    const body = await res.json();
+    expect(body.ok).toBe(false);
+    expect(body.code).toBe("CSV_PERSIST_FAIL");
+    expect(
+      updateCalls,
+      "the route applied this submission's metadata after failing to read " +
+        "what is already committed",
+    ).toEqual([]);
+    expect(sentrySteps()).toContain("finalize-resolve-read-fail");
+  });
+
+  it("C4b — a re-fetch that finds NO committed row fails closed (503), never fabricates an echo", async () => {
+    // A 23505 with nothing to resolve to: a TOCTOU delete, an RLS hide, or a
+    // non-session 23505 that slipped every upstream gate. We cannot establish
+    // what exists, so we refuse.
+    arm23505(null);
+
+    const res = await post(SERIES_2024);
+
+    expect(res.status).toBe(503);
+    const body = await res.json();
+    expect(body.code).toBe("CSV_PERSIST_FAIL");
+    expect(updateCalls).toEqual([]);
+  });
+
+  it("C4b — a re-fetch row whose id is NOT a uuid fails closed too", async () => {
+    arm23505({ id: "not-a-uuid", name: "Alpha", status: "pending_review" });
+
+    const res = await post(SERIES_2024);
+
+    expect(res.status).toBe(503);
+    const body = await res.json();
+    expect(body.code).toBe("CSV_PERSIST_FAIL");
+    expect(updateCalls).toEqual([]);
+  });
+});

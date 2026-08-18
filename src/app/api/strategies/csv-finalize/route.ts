@@ -762,6 +762,12 @@ async function resolveExistingStrategyOrRefuse(
     wizardSessionId: string;
     strategyName: string;
     rows: CsvDailyReturnRow[];
+    // 146.1 / A2 — DECLARED ON PURPOSE, AND THE GATE FOR THE WHOLE FIX. The
+    // caller has always passed a wider object and TypeScript's structural
+    // typing let it compile, so this field was PRESENT at runtime and
+    // INVISIBLE to this function. Nothing below could compare against it
+    // until it was named here.
+    terminalStatus: "pending_review" | "private";
   },
   opts: { logPrefix: string; correlationId: string },
 ): Promise<FinalizeAtomicOutcome> {
@@ -858,6 +864,44 @@ async function resolveExistingStrategyOrRefuse(
       ),
     };
   };
+
+  // 146.1 / A2 check 0 — TERMINAL STATUS, ahead of the name check.
+  //
+  // THE MECHANISM. The 23505 that brought us here fires on the partial unique
+  // index `(user_id, wizard_session_id, source) WHERE wizard_session_id IS NOT
+  // NULL` (20260728120000:167-169). `status` is NOT in that key — and the
+  // index's own COMMENT explains why `source` is: `wizard_session_id` is
+  // restored UNCONDITIONALLY from ONE shared localStorage key
+  // (src/lib/wizard/localStorage.ts), so unrelated wizard runs arrive carrying
+  // the same session id. `source` separates the CSV flow from a draft; nothing
+  // separated the MANAGER flow from a CONTRIB-02 contribution, because both
+  // are source='csv' and differ only in the terminal status they asked for.
+  //
+  // WHAT THAT COST. A manager-flow resubmit could resolve onto a row committed
+  // as 'private' and be echoed 200 with that row's id and status: the caller
+  // is told "saved" for a strategy that will never enter the admin review
+  // queue ('pending_review' is that queue's membership predicate) — and in the
+  // other direction an owner-only contribution's id is handed to the manager
+  // flow. That is an access-control answer, not a cosmetic one.
+  //
+  // ⚠️ `typeof === "string" &&` MIRRORS THE NAME CHECK BELOW, for the same
+  // reason: a row whose `status` did not come back is an ABSENT reading, not
+  // an observed mismatch. Refusing on absence would render a read we could not
+  // make as a measurement.
+  //
+  // ⛔ The refusal goes through the EXISTING `refuse()` — 409 /
+  // CSV_SESSION_REUSED / no-store / one Sentry capture. A new code would move
+  // KNOWN_CSV_FINALIZE_CODES, EXPECTED_TABLE_SIZE and the vocabulary invariant
+  // in the same commit, for a state the user cannot act on differently
+  // (create-with-key states this reasoning at its own unresolvable arm).
+  if (
+    typeof existingRow.status === "string" &&
+    existingRow.status !== args.terminalStatus
+  ) {
+    return refuse(
+      `terminal status mismatch (committed '${existingRow.status}', this submission asked for '${args.terminalStatus}')`,
+    );
+  }
 
   // CR-01 check 1 — NAME, before anything else. A changed track record is a
   // NEW strategy; a renamed resubmit must never resolve to the old row.
