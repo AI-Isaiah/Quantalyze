@@ -592,17 +592,30 @@ async function finalizeAtomicOrErrorResponse(
   // carries `finalize_csv_strategy_with_returns`, so this call is type-checked
   // against the real signature and re-enters the audit-coverage law. Restoring
   // the cast would silently un-check the argument names on a money path.
-  const { data: newStrategyId, error } = await supabase.rpc(
-    "finalize_csv_strategy_with_returns",
-    {
-      p_user_id: args.userId,
-      p_wizard_session_id: args.wizardSessionId,
-      p_fmt: args.fmt,
-      p_strategy_name: args.strategyName,
-      p_rows: args.rows,
-      p_terminal_status: args.terminalStatus,
-    },
-  );
+  // ⚠️ CSV FINALIZE EMITS NO AUDIT EVENT — a real gap, named rather than papered
+  // over. The sibling `create-with-key` skips `create_wizard_strategy` on the
+  // grounds that "the user-visible creation is audited at finalize time"; that
+  // rationale CANNOT be reused here, because this call IS finalize — it commits a
+  // user-visible strategy + verification + dailies in one transaction. Emitting
+  // the event needs an audit-taxonomy decision (event type, payload, actor) that
+  // is a behaviour change, not a by-product of a types regen, so it is filed in
+  // TODOS.md rather than smuggled into this commit.
+  //
+  // 146.1-07 task 1: this call was invisible to the audit law TWICE over — first
+  // behind `supabase.rpc as unknown as (…)`, then behind a line break that put
+  // the RPC name off the `.rpc(` line the law scans line-by-line. Keep the name
+  // on the same line as `.rpc(`.
+  //
+  // @audit-skip: no audit event on the CSV finalize path today; the gap is filed
+  // in TODOS.md (146.1 execution notes) and needs an audit-taxonomy decision.
+  const { data: newStrategyId, error } = await supabase.rpc("finalize_csv_strategy_with_returns", {
+    p_user_id: args.userId,
+    p_wizard_session_id: args.wizardSessionId,
+    p_fmt: args.fmt,
+    p_strategy_name: args.strategyName,
+    p_rows: args.rows,
+    p_terminal_status: args.terminalStatus,
+  });
 
   // TS-13 discipline (140.3-02): the success check validates the PAYLOAD,
   // not just error-null — a 2xx that lost its id must not strand the

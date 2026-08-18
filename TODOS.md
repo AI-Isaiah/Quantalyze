@@ -2949,6 +2949,27 @@ under-claim) and must be revised in the same change.
 
 ## Phase 146.1 execution notes (logged 2026-08-18)
 
+- [ ] ⭐ **CSV finalize emits NO audit event — a real gap, surfaced by 146.1-07 task 1.**
+  Deleting the cast-through-unknown made the fold call visible to the audit-coverage law for
+  the first time, and the law immediately failed it: `csv-finalize/route.ts` calls
+  `logAuditEvent` nowhere. The call now carries an `@audit-skip` whose stated reason is the
+  truth — *there is no audit event on this path* — rather than the sibling's rationale, which
+  does NOT transfer: `create-with-key` skips `create_wizard_strategy` because "the user-visible
+  creation is audited at finalize time", and this call **IS** finalize (it commits a
+  user-visible strategy + verification + dailies in one transaction). Closing it needs an
+  audit-taxonomy decision — event type, payload, actor — per
+  `docs/architecture/adr-0023-audit-event-taxonomy.md`; that is a behaviour change and does not
+  belong in a types-regen commit.
+  ⚠️ Two formatting facts the next editor must not undo: the audit law scans **line by line**
+  for `.rpc("<name>"`, so the RPC name must stay on the same line as `.rpc(`; and the
+  `@audit-skip:` marker must sit **within 8 lines above** the call (a long explanation above it
+  is fine, but the marker itself must be inside the window — a 13-line pragma put the marker
+  out of range and the gate stayed RED).
+- [ ] **`--reporter=basic` is invalid in vitest 4** and appears in the `<verify>` blocks of plans
+  146.1-01/03/04/05/06/07. MEASURED: it exits 1 with `Failed to load custom Reporter from basic`.
+  ✅ It fails LOUD rather than passing vacuously, so no green in this phase rests on it, and
+  ✅ plan 146.1-08 (the merge gate) does NOT use it. Drop the flag from the plan template.
+
 - [x] ~~**146.1-07 task 1 DEFERRED — types regen needs a Supabase access token.**~~
   ✅ **CLOSED 2026-08-18, same day — the deferral rested on MY OWN measurement error.** I
   reported that the Supabase MCP fallback was unusable because `prettier` could not parse it.
