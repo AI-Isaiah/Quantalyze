@@ -706,11 +706,13 @@ async function finalizeAtomicOrErrorResponse(
   //   TRUE here. It is kept VERBATIM.
   //
   //   CLASS 2 — a TRANSPORT failure. postgrest-js RESOLVES rather than
-  //   rejects on a fetch fault, handing us `{ error: { code: "" }, data:
-  //   null, status: 0 }` (PostgrestBuilder.ts:443-454). And
-  //   `RETRYABLE_METHODS` is `['GET','HEAD','OPTIONS']`
-  //   (src/types/common/common.ts:30), so the RPC POST is NEVER retried: what
-  //   we sent was ONE POST, and it may have reached PostgREST and committed
+  //   rejects on a fetch fault — see the fetch-catch arm of
+  //   `PostgrestBuilder`'s `then` in @supabase/postgrest-js, which builds a
+  //   `PostgrestError` with an EMPTY `code` — handing us
+  //   `{ error: { code: "" }, data: null, status: 0 }`. And the
+  //   `RETRYABLE_METHODS` constant in `src/types/common/common.ts` lists only
+  //   `['GET','HEAD','OPTIONS']`, so the RPC POST is NEVER retried: what we
+  //   sent was ONE POST, and it may have reached PostgREST and committed
   //   before the connection died. We did not observe a rollback. We observed
   //   that we stopped being able to see.
   //
@@ -726,17 +728,17 @@ async function finalizeAtomicOrErrorResponse(
   // only test that separates "PostgREST told us a SQLSTATE" from "PostgREST
   // told us nothing".
   //
-  // PRECEDENT, and why this is a correction rather than a preference:
-  // `wizardErrors.ts:1971-1985` (SEAMUX-04) already made this exact call on
-  // the client side — it deleted "your data is unchanged" from
-  // `CSV_SUBMIT_FAILED` because "a client-side timeout does not cancel the
+  // PRECEDENT, and why this is a correction rather than a preference: the
+  // SEAMUX-04 block introducing `CSV_SUBMIT_FAILED` in `wizardErrors.ts`
+  // already made this exact call on the client side — it deleted "your data
+  // is unchanged" because "a client-side timeout does not cancel the
   // server-side transaction, so the write may well have landed". The route's
   // sentence was the older, unreasoned side of that contradiction. Classes 2
-  // and 3 now speak in the voice that entry already approved
-  // (`wizardErrors.ts:2001-2015`), including its recovery step — check
-  // /strategies in another tab first — which composes with the 23505 resolve
-  // arm above: an unchanged resubmit from this wizard resolves onto the
-  // strategy already started instead of creating a second one.
+  // and 3 now speak in the voice that `CSV_SUBMIT_FAILED` already approved,
+  // including its recovery step — check /strategies in another tab first —
+  // which composes with the 23505 resolve arm above: an unchanged resubmit
+  // from this wizard resolves onto the strategy already started instead of
+  // creating a second one.
   //
   // 42501 → 401: CONSIDERED AND DEFERRED, not forgotten. `withAuth` ran
   // milliseconds earlier, so the only reachability is a session expiring
@@ -800,12 +802,15 @@ async function finalizeAtomicOrErrorResponse(
       {
         ok: false,
         // ⛔ ONE CODE. A second code for the same fact is the two-names-one-fact
-        // drift `wizardErrors.ts:1937-1941` exists to prevent, and it buys
-        // nothing: `CSV_FINALIZE_FAIL` is a KNOWN_CSV_FINALIZE_CODES member
-        // (CsvSubmitStep.tsx:161-167), so the sentence below is what RENDERS.
-        // Minting one would move KNOWN_CSV_FINALIZE_CODES, EXPECTED_TABLE_SIZE
-        // and the vocabulary invariant in the same commit for a state the user
-        // cannot act on differently.
+        // drift that the `CSV_UPSTREAM_FAIL` docblock in `wizardErrors.ts`
+        // exists to prevent ("a second code for the same fact is exactly the
+        // two-names-one-fact drift `seam-copy.ts` exists to prevent"), and it
+        // buys nothing: `CSV_FINALIZE_FAIL` is a member of the
+        // `KNOWN_CSV_FINALIZE_CODES` set in `CsvSubmitStep.tsx`, so the
+        // sentence below is what RENDERS. Minting one would move
+        // `KNOWN_CSV_FINALIZE_CODES`, `EXPECTED_TABLE_SIZE` and the
+        // vocabulary invariant in the same commit for a state the user cannot
+        // act on differently.
         code: "CSV_FINALIZE_FAIL",
         human_message:
           outcomeClass === "rolled-back"
@@ -1724,14 +1729,26 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
   }
 
   // CONTRIB-02 (Phase 110) — a contribution finalizes to an owner-only
-  // status='private' (W1 note, 110-01). Since Phase 145 both branches call
-  // the folded RPC directly on the user-scoped client and differ ONLY in
-  // the p_terminal_status they pass; the contribution handler passes
-  // 'private' verbatim (D-08), then runs the IDENTICAL post-finalize
-  // side-effect fan-out (metadata UPDATE + analytics enqueue) — dailies are
-  // canonical, the contribution needs its KPIs.
+  // status='private' (W1 note, 110-01). Since Phase 145 both flows call the
+  // folded RPC directly on the user-scoped client and differ ONLY in the
+  // p_terminal_status they pass; the contribution passes 'private' verbatim
+  // (D-08), then runs the IDENTICAL post-finalize side-effect fan-out
+  // (metadata UPDATE + analytics enqueue) — dailies are canonical, the
+  // contribution needs its KPIs.
+  //
+  // 146.1 / C2 (2026-08-18) — ONE handler serves both flows. `terminalStatus`
+  // and `logPrefix` are the ONLY things that ever differed (measured, not
+  // assumed: a comment-stripped difflib over the two 55-line bodies returned
+  // exactly four differing tokens — the function name, the terminal status,
+  // and the log prefix twice). Passing them as arguments is what makes the
+  // sameness structural instead of a promise two copies were making to each
+  // other.
+  //
+  // ⛔ `terminalStatus` is passed VERBATIM and is never derived from a
+  // default. D-08: losing 'private' here silently promotes an owner-only
+  // draft into the admin publish queue.
   if (entryContext === "contribution") {
-    return await contributionCsvFinalizeHandler({
+    return await unifiedCsvFinalizeHandler({
       wizard_session_id,
       fmt,
       strategy_name: trimmedName,
@@ -1739,6 +1756,8 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
       metadataRaw,
       dailyReturnsSeries,
       correlationId: correlation_id,
+      terminalStatus: "private",
+      logPrefix: "[strategies/csv-finalize contribution]",
     });
   }
 
@@ -1756,11 +1775,13 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
     metadataRaw,
     dailyReturnsSeries,
     correlationId: correlation_id,
+    terminalStatus: "pending_review",
+    logPrefix: "[strategies/csv-finalize unified]",
   });
 });
 
 /**
- * Phase 145 / JOB-06 — the manager-path finalize handler.
+ * Phase 145 / JOB-06 — THE CSV finalize handler. ONE handler, both flows.
  *
  * HISTORY, because the name would otherwise mislead: Phase 19/BACKBONE-01
  * made this handler delegate to the Python `/process-key` unified backbone
@@ -1772,8 +1793,40 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
  * client — the CONTRIB-02 shape, for both paths. Hop 0 is gone, so the
  * "response lost after the RPC committed" window (window A) ceases to
  * exist, and the strategy + verification + dailies writes share ONE
- * transaction. The name is kept because source-shape gates pin the
- * signature (single typed args object, explicit dailyReturnsSeries field).
+ * transaction.
+ *
+ * ⚖️ 146.1 / C2 (2026-08-18) — `contributionCsvFinalizeHandler` WAS A SECOND
+ * COPY OF THIS FUNCTION AND IS GONE. The two bodies were token-identical:
+ * measured with a comment-stripped difflib over both, 55 lines each, and
+ * exactly FOUR differing tokens — the function name, `terminalStatus`
+ * ('pending_review' vs 'private'), and `logPrefix` twice (the fold call and
+ * the enqueue call). Not one statement, argument or ordering differed. Two
+ * copies of a ~90-line side-effect fan-out is a drift generator: every future
+ * fix to one arm is a coin flip on whether the other gets it, and the failure
+ * is silent because both arms keep passing their own tests. The four tokens
+ * are now ARGUMENTS.
+ *
+ * WHAT THE MERGED DOC ABSORBS from the deleted CONTRIB-02 docblock, because
+ * it is still load-bearing:
+ *   - Why a direct RPC is correct here and needs no INTERNAL_API_TOKEN and no
+ *     JWT forwarding to Python: `createClient()` is already user-scoped (the
+ *     SSR cookie session), so the SECURITY DEFINER RPC's
+ *     `auth.uid() = p_user_id` guard is satisfied natively.
+ *   - The fold RAISEs on any `p_terminal_status` outside
+ *     ('pending_review','private') — server-side enforcement of the
+ *     never-published invariant.
+ *   - There is NO publish-review notification on the CSV path to suppress
+ *     (unlike finalize-wizard's founder email); the CSV route never notified.
+ *   - The analytics enqueue is KEPT for a contribution: it is a real track
+ *     record and the allocator needs its daily series + KPIs in the composer.
+ *
+ * ⛔ THE SIGNATURE IS PINNED BY GATES — read before "simplifying" it.
+ * `csv-validate-route.test.ts` Test 8b (source-shape) and Test 8c (arity
+ * lock) require: the name `unifiedCsvFinalizeHandler`, a SINGLE typed args
+ * object (`(args: {`), an explicit `dailyReturnsSeries: CsvDailyReturnRow[]`
+ * field — T-19.1-10, closure capture would make the dependency invisible to
+ * the type system — and a single-object-literal call site. A rename or a
+ * second positional parameter reds all three by name.
  */
 async function unifiedCsvFinalizeHandler(args: {
   wizard_session_id: string;
@@ -1793,13 +1846,29 @@ async function unifiedCsvFinalizeHandler(args: {
   // at the route entry and threaded through both handler paths so every
   // envelope shares a traceable id.
   correlationId: string;
+  // 146.1 / C2 — the two fields that USED to be the difference between two
+  // copies of this function.
+  //
+  // D-08: `terminalStatus` is passed VERBATIM by the caller and is never
+  // defaulted here. The fold RAISEs on anything outside
+  // ('pending_review','private'), but a silent default would still be a
+  // promotion of an owner-only contribution into the admin publish queue,
+  // which is exactly the class A2 refuses one layer down.
+  terminalStatus: "pending_review" | "private";
+  // ⛔ The two literals stay DISTINCT in the emitted output. Deriving this
+  // from `terminalStatus` would work, but operators grep these prefixes and
+  // a collapse that also collapsed the logs would make the two flows
+  // indistinguishable in Vercel exactly when someone is trying to tell them
+  // apart.
+  logPrefix: string;
 }): Promise<NextResponse> {
   // Phase 145 (i-b): the SSR cookie-session client is natively user-scoped,
   // so the SECURITY DEFINER fold's auth.uid() = p_user_id guard is satisfied
   // without any token forwarding — the dance the pre-fold delegate performed
   // existed only because the analytics service's module client is
   // service-role. withAuth has already authenticated the request; an expired
-  // session surfaces as the RPC's own 42501 through the fold-failure arm.
+  // session surfaces as the RPC's own 42501 through the fold-failure arm
+  // (146.1 / A3 classifies it there as an observed rollback).
   const supabase = await createClient();
 
   // ONE write path: strategy + verification + dailies in a single
@@ -1815,10 +1884,10 @@ async function unifiedCsvFinalizeHandler(args: {
       fmt: args.fmt,
       strategyName: args.strategy_name,
       rows: args.dailyReturnsSeries,
-      terminalStatus: "pending_review",
+      terminalStatus: args.terminalStatus,
     },
     {
-      logPrefix: "[strategies/csv-finalize unified]",
+      logPrefix: args.logPrefix,
       correlationId: args.correlationId,
     },
   );
@@ -1863,13 +1932,15 @@ async function unifiedCsvFinalizeHandler(args: {
   // dropped enqueue.
   if (args.dailyReturnsSeries.length > 0) {
     enqueueCsvAnalyticsAfter(outcome.strategyId, args.fmt, {
-      logPrefix: "[strategies/csv-finalize unified]",
+      logPrefix: args.logPrefix,
       correlationId: args.correlationId,
     });
   }
   // API C-1: `ok: true` discriminator on the success envelope. `status` is
-  // the terminal status the fold wrote on a fresh create, or the resolved
-  // row's own status on the 23505 echo path.
+  // the terminal status the fold wrote on a fresh create ('pending_review'
+  // for the manager flow, CONTRIB-02's 'private' for a contribution), or the
+  // resolved row's own status on the 23505 echo path — ECHOED, never
+  // fabricated.
   //
   // 146.1 / C1: `human_message` rides ONLY the resolve echo, where it states
   // the two reads that decided the echo. A fresh create carries no such
@@ -1879,103 +1950,6 @@ async function unifiedCsvFinalizeHandler(args: {
       ok: true,
       strategy_id: outcome.strategyId,
       status: outcome.status,
-      ...(outcome.humanMessage
-        ? { human_message: outcome.humanMessage }
-        : {}),
-      correlation_id: args.correlationId,
-    },
-    { status: 200, headers: NO_STORE_HEADERS },
-  );
-}
-
-/**
- * CONTRIB-02 (Phase 110) — contribution CSV finalize. Calls the folded
- * `finalize_csv_strategy_with_returns` RPC on the user-scoped Supabase client
- * with p_terminal_status='private' (the owner-only terminal status, D-08),
- * then runs the SAME post-finalize side-effect fan-out the manager path runs
- * (metadata UPDATE, analytics enqueue). Since Phase 145 (D-06 option i-b)
- * the two handlers share ONE writer — this handler's direct-RPC shape was
- * the existence proof the fold's caller wiring copied — and diverge only in
- * the terminal status they pass.
- *
- * Why a direct RPC call is correct here (and needs no INTERNAL_API_TOKEN /
- * no JWT forwarding to Python): the route's `createClient()` is already
- * user-scoped (the SSR cookie session), so the SECURITY DEFINER RPC's
- * auth.uid() = p_user_id guard is satisfied natively. The fold RAISEs on any
- * p_terminal_status outside ('pending_review','private') — server-side
- * enforcement of the never-published invariant.
- *
- * There is NO publish-review notification on the CSV path to suppress (unlike
- * finalize-wizard's founder email) — the CSV route never notified. The analytics
- * enqueue is KEPT: a contribution is a real track record and the allocator needs
- * its daily series + KPIs in the composer (dailies are canonical).
- */
-async function contributionCsvFinalizeHandler(args: {
-  wizard_session_id: string;
-  fmt: string;
-  strategy_name: string;
-  userId: string;
-  metadataRaw: unknown;
-  dailyReturnsSeries: CsvDailyReturnRow[];
-  correlationId: string;
-}): Promise<NextResponse> {
-  const supabase = await createClient();
-
-  // ONE write path (D-07): the fold writes strategy + verification + dailies
-  // in a single transaction with p_terminal_status='private' passed VERBATIM
-  // (D-08 — losing it would silently promote an owner-only draft into the
-  // admin publish queue). Failure arms (fold-fail 5xx, 23505 resolve,
-  // fail-closed 503) are shared with the manager path so the two cannot
-  // drift.
-  const outcome = await finalizeAtomicOrErrorResponse(
-    supabase,
-    {
-      userId: args.userId,
-      wizardSessionId: args.wizard_session_id,
-      fmt: args.fmt,
-      strategyName: args.strategy_name,
-      rows: args.dailyReturnsSeries,
-      terminalStatus: "private",
-    },
-    {
-      logPrefix: "[strategies/csv-finalize contribution]",
-      correlationId: args.correlationId,
-    },
-  );
-  if (!outcome.ok) return outcome.response;
-
-  // Identical post-finalize fan-out to the manager path (shared helpers, so
-  // the two cannot drift): metadata UPDATE (AFTER the fold/resolve outcome —
-  // Pitfall 6, and 146.1 / A4: ONLY on a fresh create; see the manager
-  // handler for the annualization-clock argument), analytics enqueue.
-  const metaErrResponse = outcome.fresh
-    ? await applyCsvMetadataUpdate(
-        supabase,
-        outcome.strategyId,
-        args.userId,
-        args.metadataRaw,
-        { correlationId: args.correlationId },
-      )
-    : null;
-  if (metaErrResponse) return metaErrResponse;
-
-  if (args.dailyReturnsSeries.length > 0) {
-    enqueueCsvAnalyticsAfter(outcome.strategyId, args.fmt, {
-      logPrefix: "[strategies/csv-finalize contribution]",
-      correlationId: args.correlationId,
-    });
-  }
-
-  return NextResponse.json(
-    {
-      ok: true,
-      strategy_id: outcome.strategyId,
-      // CONTRIB-02 — the ACTUAL terminal status: 'private' on a fresh create,
-      // or the resolved row's own status on the 23505 echo path (echoed, not
-      // fabricated).
-      status: outcome.status,
-      // 146.1 / C1 — same shape as the manager envelope, so the two handlers
-      // cannot drift on what a resolve echo tells its caller.
       ...(outcome.humanMessage
         ? { human_message: outcome.humanMessage }
         : {}),

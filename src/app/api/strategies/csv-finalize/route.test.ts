@@ -335,10 +335,18 @@ describe("POST /api/strategies/csv-finalize — CONTRIB-02 private-by-default co
     // D-11: the copy states the TRUE transaction outcome — nothing survived.
     expect(String(body.human_message)).toContain("Nothing was saved");
     // D-12: the fold failure is captured with the folded step tag.
+    //
+    // 146.1-05 / A3 — this case KEEPS `finalize-fold-fail`, and that is the
+    // discrimination: a 5-character SQLSTATE means PostgREST returned a body,
+    // so the fold ran and RAISEd, and with no handler clause the whole
+    // transaction rolled back. Paired with the F-OBS case below (which moved
+    // to `finalize-fold-outcome-unknown`), the two prove the split is real
+    // rather than a blanket rename.
     expect(vi.mocked(captureToSentry)).toHaveBeenCalledTimes(1);
     expect(vi.mocked(captureToSentry)).toHaveBeenCalledWith(
       expect.objectContaining({ code: "22023" }),
       expect.objectContaining({
+        extra: expect.objectContaining({ outcome_class: "rolled-back" }),
         tags: expect.objectContaining({
           surface: "csv-finalize",
           step: "finalize-fold-fail",
@@ -366,11 +374,28 @@ describe("POST /api/strategies/csv-finalize — CONTRIB-02 private-by-default co
     expect(afterMock).not.toHaveBeenCalled();
     // Captured with a synthesized Error (no rpc error object).
     expect(vi.mocked(captureToSentry)).toHaveBeenCalledTimes(1);
+    // ⚠️ 146.1-05 / A3 — THE STEP TAG MOVED, DELIBERATELY, AND THIS IS THE
+    // CLASS THAT MOVED IT. `!error` plus a non-UUID return is a 2xx from
+    // PostgREST: the transaction COMMITTED and only the strategy id failed to
+    // reach us. Bucketing that under `finalize-fold-fail` — beside the
+    // SQLSTATE raises, which really did roll back — merged an outcome that
+    // may have left a live strategy row with outcomes that provably did not.
+    // The commit-agnostic classes now carry their own tag so the honest arm's
+    // firing rate is measurable, and `outcome_class` names which one fired.
     expect(vi.mocked(captureToSentry)).toHaveBeenCalledWith(
       expect.any(Error),
       expect.objectContaining({
-        tags: expect.objectContaining({ step: "finalize-fold-fail" }),
-        extra: expect.objectContaining({ rpc_error_code: null }),
+        // ONE `extra` key. The first draft of this edit added a second one
+        // beside the existing `rpc_error_code` assertion; vitest took the
+        // LAST literal and silently dropped the `outcome_class` check, so the
+        // test passed while asserting nothing new. `tsc` (TS1117) caught it.
+        extra: expect.objectContaining({
+          rpc_error_code: null,
+          outcome_class: "committed-lost-id",
+        }),
+        tags: expect.objectContaining({
+          step: "finalize-fold-outcome-unknown",
+        }),
       }),
     );
     consoleErr.mockRestore();
