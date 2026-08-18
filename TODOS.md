@@ -2906,6 +2906,26 @@ under-claim) and must be revised in the same change.
 
 ## Phase 146.1 execution notes (logged 2026-08-18)
 
+- [ ] ⛔ **146.1-07 task 1 DEFERRED — types regen needs a Supabase access token.** Founder
+  answered the plan's blocking checkpoint `regen-blocked` on 2026-08-18. MEASURED that day:
+  `SUPABASE_ACCESS_TOKEN` absent from the environment, `~/.supabase/access-token` absent, and
+  the Supabase MCP `generate_typescript_types` fallback returns 129,458 characters on ONE line
+  which `prettier --parser typescript` cannot parse — so no canonical-format regen was
+  possible. Confirmed the same day that the regen is genuinely NEEDED, not cosmetic: the fold
+  `finalize_csv_strategy_with_returns` IS live on PROD (6 args, both parents gone from
+  `pg_proc`) and is ABSENT from the committed `src/lib/database.types.ts`, which is precisely
+  why `src/app/api/strategies/csv-finalize/route.ts:592` still carries
+  `supabase.rpc as unknown as (…)`. That cast stays until a credentialled regen runs, and
+  while it stays the fold call sits OUTSIDE the audit-coverage law.
+  **To close:** `npx supabase login` then
+  `npx supabase gen types typescript --linked > src/lib/database.types.ts`, delete the cast,
+  re-run tsc + `audit-coverage.test.ts`.
+  ⛔ **Do NOT hand-edit `src/lib/database.types.ts`** — it is a generated file and the next
+  regeneration silently overwrites hand edits, which is the drift hazard its own header warns
+  about. Tasks 2-4 of plan 146.1-07 were NOT blocked by this and proceeded.
+
+
+
 - [ ] ⭐ **Comment-blind greps have now failed THREE times in one phase — make it a lint, not
   a habit.** (1) the fold self-verify's `%5000%` substring, satisfied by a widened `50000`
   (fixed, PR #691); (2) my own `BETWEEN -10 AND 100` check, which false-flagged a COMMENT
