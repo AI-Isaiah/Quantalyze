@@ -13,8 +13,16 @@
  *
  * No INSERT/UPDATE/DELETE policy exists for authenticated users — rows
  * are written exclusively by the SECURITY DEFINER csv finalize RPC (since
- * Phase 145 the folded finalize_csv_strategy_with_returns), which the
- * csv-finalize-rpc.test.ts integration test covers.
+ * Phase 145 the folded finalize_csv_strategy_with_returns), which
+ * `supabase/tests/test_csv_finalize_atomic_fold.sql` covers — Part 3 for
+ * the verification-row write, Parts 6 and 7 for the input guards that
+ * refuse a write outright.
+ *
+ * (Re-pointed 2026-08-18, Phase 146.1 / v1.19 review B5: this used to cite
+ * the retired csv-finalize RPC vitest suite, whose live-DB cases called a
+ * function migration 20260819120000 had DROPped and which CI never executed.
+ * A citation that outlives the thing it cites is how a reader concludes a
+ * behaviour is covered when nothing checks it.)
  *
  * This file pins the RLS contract end-to-end against the live test
  * Supabase project (qmnijlgmdhviwzwfyzlc):
