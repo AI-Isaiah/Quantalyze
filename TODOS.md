@@ -2799,9 +2799,32 @@ Items stay open HERE until 146.1 ships; close them here when it does.
   completely" is unobservable for transport-lost / non-uuid-2xx shapes — branch the copy on
   SQLSTATE presence. Also consider mapping `error.code === '42501'` to a 401 re-auth
   envelope instead of the generic 500 (narrow reachability; withAuth ran ms earlier).
-- [ ] **Python tombstone envelope**: `flow_type=csv, step=finalize` now answers 422
-  `MISSING_STRATEGY_ID`, which misdirects stale/external callers — consider an explicit
-  `CSV_FINALIZE_MOVED` refusal arm (`process_key.py:~1136`).
+- [x] **Python tombstone envelope — MESSAGE fixed in Phase 146.1-07 (2026-08-18).**
+  `flow_type=csv, step=finalize` still answers 422 `MISSING_STRATEGY_ID` (deliberately —
+  see the gated option below), but the `human_message` no longer tells the caller to supply
+  `context.strategy_id`. It now states that CSV finalize moved to the Next.js route in
+  migration `20260819120000` and that this service is no longer a writer for that flow.
+  The default sentence is byte-identical for every other caller, pinned by
+  `test_non_csv_missing_strategy_id_message_is_byte_identical` and
+  `test_csv_non_finalize_step_keeps_the_default_message` (neuters C4-BLEED and
+  C4-FLOWONLY both observed RED).
+- [ ] ⛔ **OPTION `CSV_FINALIZE_MOVED` — a dedicated error code for the tombstone arm.
+  GATED ON WIZFORM-02 CLOSING. Do not pick this up before that gate opens.**
+  **What it is:** replace the `MISSING_STRATEGY_ID` code on the
+  `flow_type='csv' + step='finalize'` arm with a code that names the actual refusal, so a
+  caller can branch on the code rather than parse the sentence.
+  **Why it is NOT shipped:** a new code must enter the WIZFORM-02 coverage-law population,
+  and **WIZFORM-02 is recorded OPEN** — server-classified codes still render as
+  `code: UNKNOWN` at the wizard (Phase 153 span verification FAILED 2026-08-13). Minting the
+  code today ships it straight into a known-broken classification path, which is strictly
+  worse than an honest message under an existing, correctly-rendered code.
+  **Cost when the gate opens:** (1) add the code to the coverage-law population and satisfy
+  whatever the law requires of a new code; (2) add a wizard-side classification entry so it
+  does not render UNKNOWN, and a render test proving it; (3) the honest sentence shipped by
+  146.1-07 stays — the code is additive to it, not a replacement, or the message regresses
+  to naming only a code.
+  **Where:** `analytics-service/routers/process_key.py` (the tombstone branch beside the
+  API-6 envelope); the deliberate non-minting is recorded in the comment there.
 - [ ] **service_role default-ACL EXECUTE on the fold** contradicts the migration header's
   "authenticated ONLY" claim (inert today: auth.uid() guard 42501s it). Either add
   `REVOKE ... FROM service_role` + STEP 3(b)/Part 1 assertions (re-apply the REVOKE to TEST

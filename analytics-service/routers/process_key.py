@@ -1142,14 +1142,43 @@ async def process_key(
         # API-6 — Phase 17 DESIGN-05 envelope (top-level code/human_message,
         # not nested under `detail`). The wizard's error renderer reads the
         # envelope shape directly off the response body.
+        #
+        # Phase 146.1-07 (C4) — TOMBSTONE MESSAGE, NOT A NEW CODE. The
+        # fall-through above is deliberate, but the sentence a caller reads was
+        # not: "context.strategy_id is required" tells a stale or external CSV
+        # finalize caller to supply a field, when the truth is that this
+        # endpoint stopped being a writer for that flow entirely. Supplying the
+        # field would not help; it would take them down a path that no longer
+        # exists here.
+        #
+        # ⛔ The code stays `MISSING_STRATEGY_ID`. Minting `CSV_FINALIZE_MOVED`
+        # would put a NEW code into the WIZFORM-02 coverage-law population, and
+        # that class is recorded OPEN — server-classified codes still render as
+        # `code: UNKNOWN` at the wizard, so a new code would ship straight into
+        # a known-broken classification path. The option is filed in TODOS.md
+        # gated on WIZFORM-02 closing.
+        #
+        # ⚠️ The DEFAULT sentence below is byte-identical to what every other
+        # caller received before this change. A copy fix that leaks into
+        # unrelated 422s is a regression dressed as copy; both arms are pinned
+        # by tests.
+        if body.flow_type == "csv" and step == "finalize":
+            human_message = (
+                "CSV finalize moved to the Next.js route in migration "
+                "20260819120000 and this service is no longer a writer for "
+                "that flow. Supplying context.strategy_id will not change "
+                "this answer — submit through /api/strategies/csv-finalize."
+            )
+        else:
+            human_message = (
+                "context.strategy_id is required for this flow_type. "
+                "Validate-only flows must set context.step='validate'."
+            )
         return JSONResponse(
             status_code=422,
             content=_envelope_error(
                 "MISSING_STRATEGY_ID",
-                (
-                    "context.strategy_id is required for this flow_type. "
-                    "Validate-only flows must set context.step='validate'."
-                ),
+                human_message,
                 correlation_id,
                 None,
             ),
