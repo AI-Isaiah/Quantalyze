@@ -45,15 +45,30 @@ function failureResponse(result: Awaited<ReturnType<typeof postProcessKey>>) {
 }
 
 /**
- * Phase 19.1 (2026-05-27) — user-auth SECURITY DEFINER RPCs are gated on
- * auth.uid() = p_user_id. The unified router can only satisfy that if a
- * Next.js route forwards the end user's access token, which postProcessKey
- * must place in the X-User-Access-Token header. These tests pin that the header
- * is present exactly when (and only when) userAccessToken is supplied.
- * (Phase 145: csv-finalize — the historical consumer — left this seam; the
- * transport contract is KEPT per the 140.x obligation and stays pinned here.)
+ * Phase 146.1 / B2 (2026-08-18) — INVERTED, NOT DELETED.
+ *
+ * ⭐ THE PREMISE FLIPPED. Phase 19.1 pinned that `postProcessKey` PLACES the end
+ * user's access token in `X-User-Access-Token` whenever `userAccessToken` was
+ * supplied, so the unified router could satisfy `auth.uid() = p_user_id` on
+ * user-auth SECURITY DEFINER RPCs. The v1.19 xhigh review measured the far side
+ * and found nothing ever read it: `analytics-service/services/db.py`'s
+ * `get_user_scoped_supabase` — the only reader — has had ZERO production
+ * callers since Phase 145, and `analytics-service/tests/test_process_key.py`
+ * (~:2220) actively PINS that non-use. A live end-user Supabase JWT was
+ * crossing the Vercel→Railway boundary on every keys/sync and every
+ * session-bearing teaser request and being read by no one. The
+ * `userAccessToken` option and its conditional header spread are gone.
+ *
+ * ⛔ THESE CASES ARE INVERTED RATHER THAN DELETED ON PURPOSE. An inverted
+ * assertion fires the day someone re-adds the forward; a deleted one never
+ * does, and deletion is indistinguishable from "we stopped caring".
+ *
+ * ⛔ The `Authorization` assertion in each case is UNCHANGED and is the VACUITY
+ * FENCE for the absence assertions beside it: it proves the headers object is
+ * real and populated, so a `toBeUndefined()` that passed because the whole
+ * object vanished reds here instead of shipping as a green absence.
  */
-describe("postProcessKey — X-User-Access-Token forwarding", () => {
+describe("postProcessKey — X-User-Access-Token is NOT forwarded (B2)", () => {
   const realFetch = global.fetch;
 
   beforeEach(() => {
@@ -85,7 +100,21 @@ describe("postProcessKey — X-User-Access-Token forwarding", () => {
     >;
   }
 
-  it("forwards the user JWT as X-User-Access-Token when userAccessToken is set", async () => {
+  /**
+   * Case-insensitive ABSENCE over the whole header object.
+   *
+   * ⛔ `headers["X-User-Access-Token"] === undefined` ALONE IS NOT AN ABSENCE
+   * ASSERTION on a plain object: it is satisfied by a differently-CASED key
+   * (`x-user-access-token`), which is exactly what a re-added spread would
+   * plausibly look like, and `fetch` would send it just the same.
+   */
+  function accessTokenKeys(headers: Record<string, string>): string[] {
+    return Object.keys(headers).filter(
+      (k) => k.toLowerCase() === "x-user-access-token",
+    );
+  }
+
+  it("emits no X-User-Access-Token on the csv finalize shape that used to carry it", async () => {
     const fetchMock = mockFetchOk();
 
     const result = await postProcessKey({
@@ -94,18 +123,19 @@ describe("postProcessKey — X-User-Access-Token forwarding", () => {
       context: { step: "finalize" },
       userId: "u1",
       correlationId: "c1",
-      userAccessToken: "jwt-abc",
     });
 
     expect(result.ok).toBe(true);
     expect(fetchMock).toHaveBeenCalledOnce();
     const headers = headersOf(fetchMock);
-    expect(headers["X-User-Access-Token"]).toBe("jwt-abc");
-    // The internal-token Bearer is unchanged (separate credential).
+    expect(accessTokenKeys(headers)).toEqual([]);
+    expect(headers["X-User-Access-Token"]).toBeUndefined();
+    // The internal-token Bearer is unchanged (separate credential), and it is
+    // the vacuity fence: absence only means something on a populated object.
     expect(headers["Authorization"]).toBe("Bearer internal-test-token");
   });
 
-  it("omits X-User-Access-Token when no userAccessToken (validate-only / teaser)", async () => {
+  it("emits no X-User-Access-Token on the validate-only / teaser shape either", async () => {
     const fetchMock = mockFetchOk();
 
     await postProcessKey({
@@ -117,6 +147,7 @@ describe("postProcessKey — X-User-Access-Token forwarding", () => {
     });
 
     const headers = headersOf(fetchMock);
+    expect(accessTokenKeys(headers)).toEqual([]);
     expect(headers["X-User-Access-Token"]).toBeUndefined();
     expect(headers["Authorization"]).toBe("Bearer internal-test-token");
   });

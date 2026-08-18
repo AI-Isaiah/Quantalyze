@@ -6,6 +6,9 @@ import {
   type FetchMock,
 } from "@/test/helpers/fetch";
 import { seedBreakerOpen } from "@/test/helpers/upstash-breaker";
+// 146.1 / B2 — the scrub case's vacuity fence reads production's own floor
+// rather than re-typing a number that could drift away from it.
+import { MIN_REDACTABLE_SECRET_LENGTH } from "@/lib/seam-redaction";
 
 /**
  * Phase 140 / SC-1a — route-level SEAM integration proof for
@@ -64,7 +67,14 @@ const ownership = vi.hoisted(() => ({
 }));
 
 /**
- * 140.3-02 / TS-15 — the session the route forwards as `X-User-Access-Token`.
+ * A realistic end-user Supabase JWT.
+ *
+ * ⚠️ 146.1 / B2 (2026-08-18) — THIS FIXTURE OUTLIVED ITS ORIGINAL PURPOSE AND IS
+ * STILL LOAD-BEARING, in a DIFFERENT way: `sessionState` below is seeded with it
+ * so the route has a perfectly READABLE session, which is what makes the
+ * inverted wire case meaningful. "Nothing forwarded because nothing was there"
+ * would be vacuous; "nothing forwarded even though a live session existed" is
+ * the actual claim.
  *
  * The value's LENGTH is load-bearing for the redaction case: a realistic JWT is
  * ~200 characters, and it deliberately contains no `SEAM_PRESERVE_TOKENS` member
@@ -127,8 +137,9 @@ vi.mock("@/lib/supabase/server", () => ({
   createClient: async () => ({
     auth: {
       getUser: async () => ({ data: { user: authState.user }, error: null }),
-      // 140.3-02 / TS-15 — the session whose access_token becomes
-      // `X-User-Access-Token` on the outgoing request.
+      // 146.1 / B2 — the session is still MOCKED READABLE on purpose even
+      // though the route no longer reads it for this header. A readable
+      // session is what makes the "not on the wire" case non-vacuous.
       getSession: async () => ({
         data: { session: sessionState.session },
         error: null,
@@ -408,18 +419,24 @@ describe("POST /api/keys/sync — REAL client through the seam (SC-1a)", () => {
   });
 
   /**
-   * Phase 140.3-02 / TS-15 — the token is ON THE WIRE, and a transport error
-   * that embeds it does not put it in a log line.
+   * Phase 146.1 / B2 (2026-08-18) — THE PREMISE IS INVERTED, THE CASE IS NOT
+   * DELETED.
    *
-   * These two cases are the reason TS-15 sits AFTER plan 140.2-08 rather than
-   * before it: `X-User-Access-Token` is a LIVE end-user Supabase JWT, undici
-   * embeds outgoing headers in `err.message`, and forwarding before the
-   * scrubber exists ships a window in which a production log carries that JWT.
-   * The coverage is proven BY EXECUTION here, not inferred from the leaf's
-   * existence — which is exactly how the SECOND log site on this path (the
-   * core's own transport arm) was found still leaking.
+   * TS-15 (140.3-02) pinned that the session access token RIDES the outgoing
+   * request as `X-User-Access-Token`. The v1.19 xhigh review measured the far
+   * side and found no reader: `analytics-service/services/db.py`'s
+   * `get_user_scoped_supabase` has had ZERO production callers since Phase 145,
+   * and `analytics-service/tests/test_process_key.py` (~:2220) PINS that
+   * non-use. So a LIVE end-user Supabase JWT was crossing the Vercel→Railway
+   * boundary on EVERY resync — the money-onboarding chokepoint — and being read
+   * by nobody. The forward is gone; this case now pins its absence.
+   *
+   * ⛔ INVERTED, NOT DELETED, and the distinction is the whole point: an
+   * inverted assertion reds the day someone re-adds the forward, while a
+   * deleted one is silent forever and is indistinguishable from "we stopped
+   * caring".
    */
-  it("TS-15: the session access token rides the outgoing request as X-User-Access-Token", async () => {
+  it("B2: a READABLE session does NOT put X-User-Access-Token on the outgoing request", async () => {
     fetchMock.mockResolvedValue(
       new Response(JSON.stringify({ ok: true, queued: true }), {
         status: 202,
@@ -427,31 +444,88 @@ describe("POST /api/keys/sync — REAL client through the seam (SC-1a)", () => {
       }),
     );
 
+    // Non-vacuity, stated before the assertion it protects: the mocked session
+    // IS readable and DOES hold a live JWT, so "nothing on the wire" cannot be
+    // explained by "there was nothing to send".
+    expect(sessionState.session?.access_token).toBe(TEST_USER_JWT);
+
     const res = await postAsUser();
     expect(res.status).toBe(202);
 
     const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    const headers = init.headers as Record<string, string>;
+    // The seam WAS crossed and the headers object IS populated — otherwise the
+    // absence assertions below would pass on an empty object.
+    expect(headers["Authorization"]).toMatch(/^Bearer /);
+    // ABSENCE, case-insensitively over the whole key set. A single-key lookup
+    // is satisfied by a differently-cased re-add (`x-user-access-token`), which
+    // `fetch` would send just the same.
     expect(
-      (init.headers as Record<string, string>)["X-User-Access-Token"],
-      "Without this header the analytics service cannot build a user-scoped, " +
-        "RLS-enforcing client, so PYAPI-01's explicit Python ownership filter " +
-        "is the only belt rather than the second one — TS-15.",
-    ).toBe(TEST_USER_JWT);
+      Object.keys(headers).filter(
+        (k) => k.toLowerCase() === "x-user-access-token",
+      ),
+      "A live end-user Supabase JWT is on the wire again. The only reader on " +
+        "the far side has zero callers (146.1 / B2) — decide deliberately " +
+        "whether to re-open that exposure, and write the reason down.",
+    ).toEqual([]);
+    expect(JSON.stringify(headers)).not.toContain(TEST_USER_JWT);
   });
 
-  it("TS-15 SCRUB COVERAGE: a transport error embedding the JWT leaks neither the JWT nor its syscall token", async () => {
-    fetchMock.mockRejectedValue(
-      new Error(
-        `connect ECONNREFUSED 10.0.0.1:443 (headers: {"Authorization":"Bearer test-internal-token","X-User-Access-Token":"${TEST_USER_JWT}"})`,
-      ),
-    );
+  /**
+   * ⚠️ 146.1 / B2 — THE FIXTURE'S CREDENTIAL CHANGED; THE MECHANISM UNDER TEST
+   * DID NOT, AND THAT IS THE POINT.
+   *
+   * This case used to embed `X-User-Access-Token` in the transport error. No
+   * caller sends that header any more, so pinning it here would assert that the
+   * core scrubs a value NOTHING EVER HANDED IT — unsatisfiable by construction,
+   * and the only way to make it green again would be to re-add the very forward
+   * B2 removed. A test that can only pass by reverting the change is not
+   * coverage, it is a hostage.
+   *
+   * `X-Tenant-Claim` is the replacement, chosen because it has the SAME
+   * properties that made the JWT the right probe: a real outgoing
+   * credential-bearing header, computed PER REQUEST (an HMAC over the tenant
+   * id), whose value NO `SEAM_SECRET_ENV_NAMES` member can reach. Only
+   * `credentialHeaderValues(requestInit)` — the DERIVED mechanism that made the
+   * 140.3-02 fix a CLASS result — can scrub it. So this case still proves
+   * exactly what it always proved, about a credential the seam actually carries.
+   *
+   * ⭐ IT ALSO CAUGHT A LIVE PRE-EXISTING LEAK. With this probe in place the
+   * CLIENT's own log site was shown to ship the tenant claim VERBATIM: it used
+   * a caller-declared `[args.userAccessToken]` array, which no more reaches a
+   * tenant claim than an env list does. `process-key-client.ts` now derives.
+   *
+   * The error message is built from the REAL outgoing headers rather than a
+   * hand-typed literal, which is also closer to what undici actually produces.
+   */
+  it("SCRUB COVERAGE (B2): a transport error embedding this request's OWN per-request credential leaks neither it nor the syscall token", async () => {
+    let tenantClaim = "";
+    fetchMock.mockImplementation(async (...args: unknown[]) => {
+      const headers = (args[1] as RequestInit).headers as Record<
+        string,
+        string
+      >;
+      tenantClaim = headers["X-Tenant-Claim"];
+      throw new Error(
+        `connect ECONNREFUSED 10.0.0.1:443 (headers: ${JSON.stringify(headers)})`,
+      );
+    });
     // The suite's beforeEach already silences console.error; re-spy so THIS
     // case can read what was written rather than only that it was written.
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
 
     const res = await postAsUser();
     expect(res.status).toBe(502);
-    expect(await res.text()).not.toContain(TEST_USER_JWT);
+
+    // VACUITY FENCE, before anything is asserted about the scrub. A blank or
+    // short claim would be REFUSED by `MIN_REDACTABLE_SECRET_LENGTH`, and
+    // `not.toContain("")` is true of every string ever written.
+    expect(
+      tenantClaim?.length ?? 0,
+      "the seam sent no usable X-Tenant-Claim, so this case is asserting " +
+        "nothing — fix the probe before trusting the scrub assertions below",
+    ).toBeGreaterThanOrEqual(MIN_REDACTABLE_SECRET_LENGTH);
+    expect(await res.text()).not.toContain(tenantClaim);
 
     const logged = errorSpy.mock.calls
       .map((c) => c.map(String).join(" "))
@@ -459,13 +533,15 @@ describe("POST /api/keys/sync — REAL client through the seam (SC-1a)", () => {
     // BOTH log sites on this path are asserted by one read of the spy: the
     // client's `/process-key upstream fetch threw:` and the core's own
     // `network failure reaching the analytics service:`. The second one was
-    // uncovered until this plan — see `credentialHeaderValues` in
-    // `resilient-fetch.ts`.
+    // uncovered by 140.3-02 — see `credentialHeaderValues` in
+    // `resilient-fetch.ts`; the FIRST one was still leaking until 146.1 / B2.
     expect(
       logged,
-      "A seam log line carrying a LIVE user Supabase JWT is the exact leak the " +
-        "redaction leaf exists to close — TRAP-1.",
-    ).not.toContain(TEST_USER_JWT);
+      "A seam log line carrying this request's signed tenant claim is the " +
+        "same leak class the redaction leaf exists to close. No env list can " +
+        "reach a per-request value — only the DERIVED header scrub can — so " +
+        "this reddening means that derivation broke — TRAP-1.",
+    ).not.toContain(tenantClaim);
     expect(logged).toContain("network failure reaching the analytics service");
     expect(logged).toContain("/process-key upstream fetch threw");
     // ⚠️ The other half of TRAP-1: over-redaction destroys the diagnosis, and a

@@ -1033,21 +1033,28 @@ describe("[140.3-02 / TS-02] POST /api/keys/sync — the duplicate branch keys o
 });
 
 /**
- * Phase 140.3-02 / TS-15 — the resync flow forwards the end user's Supabase
- * access token to the choke point.
+ * Phase 146.1 / B2 (2026-08-18) — INVERTED FROM TS-15, NOT DELETED.
  *
- * WHY IT MATTERS: only the CSV finalize flow forwarded it before, so a
- * user-scoped (RLS-enforcing) Supabase client was unavailable on onboard/resync.
- * That is exactly why PYAPI-01's second defence layer had to be an explicit
- * Python `strategies` id+user_id filter rather than letting RLS do it. With the
- * token forwarded, that filter becomes belt-and-braces rather than the only belt.
+ * TS-15 (140.3-02) pinned that the resync flow THREADS the end user's Supabase
+ * access token into the choke point, so the analytics service could build a
+ * user-scoped (RLS-enforcing) client and PYAPI-01's explicit Python
+ * `strategies` id+user_id filter would become belt-and-braces rather than the
+ * only belt.
  *
- * The header itself is emitted by the client, conditionally, from this VALUE —
- * these cases pin the value reaching the choke point, which is the whole of this
- * route's half of the contract. The redaction proof lives in
+ * ⭐ THE MEASUREMENT THAT FLIPPED IT. The v1.19 xhigh review read the far side:
+ * `analytics-service/services/db.py`'s `get_user_scoped_supabase` — the ONLY
+ * reader — has had zero production callers since Phase 145, and
+ * `analytics-service/tests/test_process_key.py` (~:2220) actively PINS that
+ * non-use. No user-scoped client is ever constructed on onboard/resync, so the
+ * filter was ALWAYS the only belt and the token was pure exposure surface.
+ * The forward is gone; these cases pin its absence at this route's boundary.
+ *
+ * ⛔ INVERTED, NOT DELETED: an inverted assertion reds the day the forward
+ * returns, and this file is the only place the ROUTE's half of the contract is
+ * observable (the client is mocked here). The wire-level proof lives in
  * `route.seam.test.ts`, where the REAL client and the REAL transport run.
  */
-describe("[140.3-02 / TS-15] POST /api/keys/sync — forwards X-User-Access-Token, and fabricates nothing without a session", () => {
+describe("[146.1 / B2] POST /api/keys/sync — does NOT forward X-User-Access-Token, with or without a session", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     rateLimitResult.success = true;
@@ -1076,19 +1083,26 @@ describe("[140.3-02 / TS-15] POST /api/keys/sync — forwards X-User-Access-Toke
     });
   });
 
-  it("threads the session access token into the choke point", async () => {
+  it("does NOT thread the session access token into the choke point, even with a READABLE session", async () => {
     const { POST } = await import("./route");
     const res = await POST(makeReq({ strategy_id: TEST_STRATEGY_ID }));
 
     expect(res.status).toBe(202);
+    // Non-vacuity, before the absence it protects: the mocked session IS
+    // readable, so "nothing threaded" cannot be explained by "nothing existed".
+    expect(sessionState.session?.access_token).toBe("test-user-jwt");
+    const threadedArgs = mockPostProcessKey.mock.calls[0]?.[0] ?? {};
     expect(
-      mockPostProcessKey.mock.calls[0]?.[0]?.userAccessToken,
-      "Without the token the analytics service cannot build a user-scoped, " +
-        "RLS-enforcing client, and PYAPI-01's explicit Python ownership filter " +
-        "is the ONLY belt rather than the second one — TS-15.",
-    ).toBe("test-user-jwt");
-    // The pre-existing tenant identity must survive alongside it: dropping
-    // X-User-Id re-opens the CT-4 cross-tenant rate-limit-bucket defect.
+      Object.keys(threadedArgs).filter(
+        (k) => k.toLowerCase() === "useraccesstoken",
+      ),
+      "A live end-user Supabase JWT is being threaded into the seam again. " +
+        "Its only reader (db.py get_user_scoped_supabase) has zero callers and " +
+        "a Python gate pins that non-use — 146.1 / B2. Re-open deliberately.",
+    ).toEqual([]);
+    // The pre-existing tenant identity must survive the removal: dropping
+    // X-User-Id re-opens the CT-4 cross-tenant rate-limit-bucket defect. It is
+    // also the vacuity fence — the call really was made, with real arguments.
     expect(mockPostProcessKey).toHaveBeenCalledWith(
       expect.objectContaining({ flow_type: "resync", userId: TEST_USER.id }),
     );
@@ -1101,6 +1115,9 @@ describe("[140.3-02 / TS-15] POST /api/keys/sync — forwards X-User-Access-Toke
     const res = await POST(makeReq({ strategy_id: TEST_STRATEGY_ID }));
 
     // Fabricating a value would be an elevation-of-privilege bug, not a shim.
+    // ⛔ UNCHANGED by 146.1 / B2 — it was green before the removal and is green
+    // after, which is what proves the inversion above did not simply delete
+    // assertions until the file agreed with the code.
     expect(mockPostProcessKey.mock.calls[0]?.[0]?.userAccessToken).toBeUndefined();
     // And the forwarding is an ENHANCEMENT, not a gate: the caller is already
     // authenticated and ownership is already proven, so an unreadable session

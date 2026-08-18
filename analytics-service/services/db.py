@@ -88,11 +88,24 @@ def get_user_scoped_supabase(user_access_token: str) -> Client:
     token (forwarded by a Next.js route in the ``X-User-Access-Token``
     header) so the RPC sees the real user.
 
-    ⚠️ Phase 145: the process_key csv-finalize branch that was this client's
-    only caller was deleted (the route calls the fold directly on its SSR
-    user-scoped client). The utility and the header forwarding are KEPT per
-    the standing 140.x obligation (user-scoped pre-checks on onboard/resync)
-    — do not delete either as "unused".
+    ⛔ Phase 146.1 / B2 (2026-08-18): NOTHING FORWARDS THAT HEADER ANY MORE,
+    so this function currently describes a transport that does not exist. Read
+    the paragraph above as a specification, not as a description of live
+    behaviour. Phase 145 deleted the process_key csv-finalize branch that was
+    this client's only caller; the v1.19 xhigh review then measured the TS side
+    and found the two remaining emitters (``keys/sync`` and
+    ``verify-strategy``) were sending a live end-user JWT that no one read, so
+    both forwards were removed. ``tests/test_process_key.py:2220-2221`` pins
+    that non-use and is expected to stay GREEN.
+
+    THE FUNCTION IS KEPT ON PURPOSE and must not be deleted as "unused".
+    Deleting it would unilaterally foreclose the NOT-TAKEN option (b) — wiring
+    a genuinely user-scoped client — which remains a founder call. The 140.2
+    obligation it served is DISCHARGED BY SUBSTITUTION rather than abandoned:
+    the ownership pre-check is the explicit ``strategies`` id+user_id filter in
+    ``routers/process_key.py`` (~:1147-1157), already shipped and gated. See
+    ``.planning/phases/140.1-.../140.1-TS-OBLIGATIONS.md`` TS-15 for the dated
+    superseding note.
 
     Construction mirrors the frontend's user client: the anon key is the
     PostgREST ``apikey`` (the API gateway requires a project key — a raw user

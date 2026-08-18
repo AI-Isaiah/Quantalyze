@@ -41,6 +41,7 @@
 - **The wizard first-hop drop** — 143's documented non-coverage. ⚠️ Do NOT absorb it into 145 by widening a predicate. → TODOS.
 - **Deleting the inert `feature_flags.process_key_unified_backbone` row / dead Vercel-Railway env vars.** ⛔ `20260620120000:86-89` RAISEs at apply if that row reads `off`. → TODOS with that constraint attached.
 - **Forwarding `X-User-Access-Token` on onboard/resync** (140.1 obligation) — not this phase.
+  ⛔ RESOLVED 2026-08-18 by Phase 146.1 / B2, in the opposite direction: the forward was REMOVED from keys/sync and verify-strategy rather than extended, because the only Python reader has zero callers. See 140.1-TS-OBLIGATIONS.md TS-15.
 </user_constraints>
 
 ---

@@ -11,20 +11,23 @@ import {
   rateLimitDenyJson,
 } from "@/lib/ratelimit";
 import { postProcessKey } from "@/lib/process-key-client";
-import { createClient } from "@/lib/supabase/server";
 // 140.3-13a / SEAMUX-08 — the ONE lazy-Sentry helper, applied under the SINGLE
 // capture policy written out in full in `src/app/api/admin/match/eval/route.ts`.
 //
-// ⚠️ THIS ROUTE IS THE SECRET-BEARING ONE OF THIS PLAN'S FOUR. It holds a LIVE
-// user Supabase JWT (`userAccessToken`, forwarded by TS-15) and the caller's
-// RAW exchange `api_key` / `api_secret` from the request body. No module-level
-// env list can know those three values, so every capture below names them in
-// `secrets: [...]` — that argument is the ONLY thing standing between undici's
-// header-inlining (TRAP-1) and a credential leaving our infrastructure for a
-// third party. `140.3-02` closed a live end-user JWT log leak one wave-set ago;
-// adding an observability channel must not re-open it through Sentry instead.
+// ⚠️ THIS ROUTE IS STILL THE SECRET-BEARING ONE OF THIS PLAN'S FOUR. WHAT THE
+// BOUNDARY CARRIES TODAY (Phase 146.1 / B2, 2026-08-18): the caller's RAW
+// exchange `api_key` / `api_secret`, which this handler puts in the OUTGOING
+// REQUEST BODY. It no longer carries a live end-user Supabase JWT — the
+// `X-User-Access-Token` forward that TS-15 added was removed here because the
+// only reader on the far side has zero callers (see the B2 block below the
+// teaser context). No module-level env list can know a value that arrived in
+// THIS request, so every capture below still names them in `secrets: [...]` —
+// that argument is the ONLY thing standing between undici's header-inlining
+// (TRAP-1) and a credential leaving our infrastructure for a third party.
+// `140.3-02` closed a live end-user JWT log leak; adding an observability
+// channel must not re-open it through Sentry instead.
 import { captureToSentry } from "@/lib/sentry-capture";
-// 140.4-07 / SEAMRIM-06 — the same three per-request credentials the block above
+// 140.4-07 / SEAMRIM-06 — the same per-request credentials the block above
 // names for Sentry apply verbatim to the CONSOLE. Until this import, they were
 // applied to Sentry ONLY, and the three console sites below logged the caught
 // value raw — on the PUBLIC, anonymous route that declares them.
@@ -227,62 +230,59 @@ async function unifiedVerifyStrategyHandler(
   }
 
   /**
-   * Phase 140.3-02 / TS-15 — forward the end user's Supabase access token WHEN,
-   * AND ONLY WHEN, one exists.
+   * Phase 146.1 / B2 (2026-08-18) — THE FORWARD WAS REMOVED HERE, at BOTH sites.
    *
-   * ⚠️ THIS ROUTE IS PUBLIC, AND THAT IS THE WHOLE REASON THE READ IS SHAPED
-   * THIS WAY. The landing-page teaser is unauthenticated by design (CSRF +
-   * per-IP limit + payload validation are its only gates), but nothing stops an
-   * ALREADY SIGNED-IN visitor from submitting it. Those two cases must diverge:
-   *   · a session exists  → forward it, so the unified router can build a
-   *     user-scoped, RLS-enforcing client for this caller.
-   *   · no session        → forward NOTHING. The header is optional by
-   *     construction and a fabricated one would be an elevation-of-privilege
-   *     bug, not a compatibility shim. There is no fallback value here, and
-   *     there must never be one.
+   * This block used to read the request's Supabase session and hand the
+   * resulting LIVE end-user JWT to `postProcessKey` (which set it as
+   * `X-User-Access-Token`) and to `perRequestSecrets` below. The v1.19 xhigh
+   * review measured the far side: the only Python reader,
+   * `services/db.py get_user_scoped_supabase`, has ZERO production callers, and
+   * the `not hasattr(..., "get_user_scoped_supabase")` gate in
+  // `analytics-service/tests/test_process_key.py` actively PINS that
+   * non-use. Nothing in `analytics-service` reads the header at all.
    *
-   * The read is best-effort and TOTAL: `createClient()` reads request cookies,
-   * and a public endpoint must not 500 because a cookie jar was unreadable. A
-   * failure degrades to the anonymous case, which is this route's normal case.
+   * ⚠️ THIS ROUTE IS PUBLIC, so the removal is strictly a reduction. The old
+   * shape was session-conditional precisely because a FABRICATED value on an
+   * unauthenticated route would be elevation of privilege; forwarding NOTHING
+   * on every path is the same guarantee with no live credential in flight. The
+   * `verify-strategy` "no session forwards nothing" seam case is retained and
+   * unchanged — it is the proof the inversion did not simply delete assertions.
    *
-   * ⚠️ The value is handed to `postProcessKey` as a VALUE, never assembled into
-   * a header here, so it reaches `scrubSeamError(message, [userAccessToken])` at
-   * the client's transport log site — undici embeds outgoing headers in
-   * `err.message`, and this one is a live user JWT.
+   * The 140.2 obligation that justified the forward is DISCHARGED BY
+   * SUBSTITUTION, not abandoned: the ownership pre-check is already shipped as
+   * the explicit Python `strategies` id+user_id filter
+   * (`_caller_owns_strategy` in `analytics-service/routers/process_key.py`). See
+   * `.planning/phases/140.1-.../140.1-TS-OBLIGATIONS.md` TS-15 for the dated
+   * superseding note and the NOT-TAKEN option (b).
+   *
+   * ⛔ The header name STAYS on `resilient-fetch.ts`'s CREDENTIAL_HEADER_NAMES
+   * scrub enumeration on purpose — that scrub DERIVES its per-request secrets
+   * from the outgoing headers, so it covers whatever this seam carries next.
    */
-  let userAccessToken: string | undefined;
-  try {
-    const authClient = await createClient();
-    const {
-      data: { session },
-    } = await authClient.auth.getSession();
-    userAccessToken = session?.access_token;
-  } catch {
-    // Anonymous is the expected case on this route — not worth a log line.
-    userAccessToken = undefined;
-  }
 
   /**
    * 140.3-13a / SEAMUX-08 — the per-request credentials every `captureToSentry`
    * in this handler must name.
    *
    * Declared ONCE, here, rather than re-typed at each of the four call sites:
-   * four sites each remembering three values is the instance-not-class shape
+   * four sites each remembering the same values is the instance-not-class shape
    * this programme has already paid for, and the failure mode is silent — a
    * capture that forgets one still succeeds, still looks correct in review, and
    * ships the credential to a third party.
    *
-   * All three are unknowable to any module-level env list:
-   *   · `userAccessToken` — a LIVE end-user Supabase JWT (TS-15 forwards it, so
-   *     undici can inline it into an outgoing-header error message: TRAP-1);
+   * ⛔ THIS ARRAY MUST NOT SHRINK TO NOTHING AND MUST NOT BE DELETED. Phase
+   * 146.1 / B2 removed ONE member (`userAccessToken`) because the route stopped
+   * forwarding it, NOT because per-request scrubbing stopped mattering. Both
+   * remaining members are unknowable to any module-level env list:
    *   · `api_key` / `api_secret` — the caller's RAW exchange credentials, which
-   *     this handler puts in the outgoing request body.
+   *     this handler puts in the outgoing request BODY. undici inlines that
+   *     body into `err.message` (TRAP-1) and nothing in
+   *     `SEAM_SECRET_ENV_NAMES` can reach a value that arrived in the request.
    *
    * ⚠️ `undefined` members are harmless — `scrubSeamString` skips non-strings —
-   * so the anonymous case (no session) needs no separate array.
+   * so a body field the caller omitted needs no separate array.
    */
   const perRequestSecrets: readonly unknown[] = [
-    userAccessToken,
     body.api_key,
     body.api_secret,
   ];
@@ -301,8 +301,6 @@ async function unifiedVerifyStrategyHandler(
     // so the upstream rate limiter buckets all anonymous landing-page
     // traffic to a shared key, isolated from authenticated tenants.
     userId: "public",
-    // TS-15 — present ONLY when a session was readable; see the block above.
-    userAccessToken,
   });
   if (!result.ok) return result.response;
 

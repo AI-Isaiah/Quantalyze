@@ -2,6 +2,9 @@ import { NextResponse } from "next/server";
 import { getCorrelationId } from "@/lib/correlation-id";
 import {
   resilientFetch,
+  // 146.1 / B2 — ONE definition of "which outgoing headers are credentials",
+  // shared with the core rather than re-typed here. See the transport catch.
+  credentialHeaderValues,
   SeamConfigError,
   SEAM_BUDGETS,
   type SeamBudgetKey,
@@ -343,21 +346,6 @@ export interface PostProcessKeyArgs {
    * window, isolated from any authenticated tenant.
    */
   userId: string;
-  /**
-   * Phase 19.1 (2026-05-27) — the END USER's Supabase access token (JWT),
-   * forwarded as the `X-User-Access-Token` header so the unified router can
-   * call SECURITY DEFINER RPCs that enforce `auth.uid() = p_user_id`. The
-   * analytics service's service-role client has no `auth.uid()`; without
-   * this such an RPC raises 42501 "called without an auth session".
-   *
-   * ⚠️ Phase 145: the CSV finalize step — the only caller that passed this —
-   * left this seam (the route calls the folded finalize RPC directly on its
-   * SSR user client, per 145-DECISION.md). The option and the header
-   * forwarding are KEPT per the standing 140.x obligation (user-scoped
-   * pre-checks on onboard/resync need this transport) — do not delete as
-   * "unused".
-   */
-  userAccessToken?: string;
 }
 
 export type PostProcessKeyResult =
@@ -469,41 +457,63 @@ export async function postProcessKey(
    * calling `json()` twice.
    */
   let body: unknown;
+  /**
+   * Phase 146.1 / B2 (2026-08-18) — HOISTED OUT OF THE `resilientFetch` CALL so
+   * the transport catch below can DERIVE this request's secrets from it instead
+   * of re-typing them.
+   *
+   * ⛔ NOT A STYLE CHANGE. The catch used to call
+   * `scrubSeamError(message, [args.userAccessToken])` — a caller-DECLARED list
+   * — so it scrubbed the one credential someone remembered and shipped
+   * `X-Tenant-Claim`, the signed HMAC that SELECTS the rate-limit bucket,
+   * VERBATIM into the Vercel log on every seam transport failure. The core's own
+   * log site never had that bug because it always derived
+   * (`credentialHeaderValues(requestInit)`); this site could not, because the
+   * headers were an anonymous object literal inside the call. Now they are not.
+   * ⛔ Do not inline this back.
+   */
+  const outgoingHeaders: Record<string, string> = {
+    "Content-Type": "application/json",
+    Authorization: `Bearer ${internalToken}`,
+    "X-Correlation-Id": correlationId,
+    // CT-4 (army2) — forward tenant id for cross-tenant rate-limit
+    // isolation. See PostProcessKeyArgs.userId for the contract.
+    // NOTE: this header is UNSIGNED and the Python limiter deliberately
+    // ignores it for bucketing. It survives for logging/diagnostics; the
+    // signed X-Tenant-Claim below is what actually selects the bucket.
+    "X-User-Id": args.userId,
+    // Phase 140.1 / PYAPI-02 — the signed half of the same identity. This
+    // is the ONE chokepoint: all five postProcessKey callers share this
+    // headers assembly, so minting here is what makes per-tenant throttling
+    // live end-to-end. Teaser callers pass userId "public", which mints the
+    // shared anonymous bucket rather than a tenant one. Minted ABOVE, not
+    // inline: see the tenantClaim block for why the call must not sit inside
+    // this try.
+    "X-Tenant-Claim": tenantClaim,
+    // Phase 146.1 / B2 (2026-08-18) — THE `X-User-Access-Token` SPREAD WAS
+    // REMOVED HERE, together with the `userAccessToken` option that fed it.
+    // Phase 19.1 added it so the unified router could call user-auth SECURITY
+    // DEFINER RPCs as the user; the v1.19 xhigh review measured the far side
+    // and found the only Python reader (`services/db.py
+    // get_user_scoped_supabase`) has ZERO production callers, with
+    // the `not hasattr(..., "get_user_scoped_supabase")` gate in
+    // `analytics-service/tests/test_process_key.py` actively PINNING that non-use. A
+    // live end-user JWT that crosses this boundary and is never read is pure
+    // exposure surface, so this seam no longer sends one. The two former
+    // emitters were keys/sync and verify-strategy.
+    //
+    // ⛔ `x-user-access-token` STAYS in `resilient-fetch.ts`'s
+    // CREDENTIAL_HEADER_NAMES. That scrub DERIVES its per-request secrets from
+    // the outgoing headers (`credentialHeaderValues`), so it is a CLASS fix
+    // covering whatever this seam carries next; pruning the name would demote
+    // it to an instance fix.
+  };
   try {
     // Headers and body pass through the core byte-for-byte. A dropped
     // X-User-Id re-opens the CT-4 cross-tenant rate-limit-bucket defect.
     res = await resilientFetch(budgetKey, "/process-key", {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${internalToken}`,
-        "X-Correlation-Id": correlationId,
-        // CT-4 (army2) — forward tenant id for cross-tenant rate-limit
-        // isolation. See PostProcessKeyArgs.userId for the contract.
-        // NOTE: this header is UNSIGNED and the Python limiter deliberately
-        // ignores it for bucketing. It survives for logging/diagnostics; the
-        // signed X-Tenant-Claim below is what actually selects the bucket.
-        "X-User-Id": args.userId,
-        // Phase 140.1 / PYAPI-02 — the signed half of the same identity. This
-        // is the ONE chokepoint: all five postProcessKey callers share this
-        // headers assembly, so minting here is what makes per-tenant throttling
-        // live end-to-end. Teaser callers pass userId "public", which mints the
-        // shared anonymous bucket rather than a tenant one. Minted ABOVE, not
-        // inline: see the tenantClaim block for why the call must not sit inside
-        // this try.
-        "X-Tenant-Claim": tenantClaim,
-        // Phase 19.1 — forward the end user's access token so the unified
-        // router can call user-auth SECURITY DEFINER RPCs as the user.
-        // v1.19 review (2026-08-18): TWO production callers still pass it —
-        // keys/sync and verify-strategy — while the Python side's only
-        // reader (db.py get_user_scoped_supabase) has ZERO callers, so the
-        // header is sent but never read. Drop-vs-wire is the Phase 146.1
-        // adjudication; db.py is the authoritative record of the consumer
-        // side. The transport is kept per the 140.x obligation above.
-        ...(args.userAccessToken
-          ? { "X-User-Access-Token": args.userAccessToken }
-          : {}),
-      },
+      headers: outgoingHeaders,
       body: JSON.stringify({
         flow_type: args.flow_type,
         source: args.source,
@@ -648,17 +658,33 @@ export async function postProcessKey(
     // distinguish "we never reached upstream" from "upstream rejected us".
     const message = err instanceof Error ? err.message : "Network error";
     // SEAMCORE-06 / TRAP-1 — THE undici site. This is the one that actually
-    // leaks: undici embeds the outgoing headers in `err.message`, and this
-    // request's headers are `Authorization: Bearer <INTERNAL_API_TOKEN>`,
-    // `X-Tenant-Claim`, and — for any caller passing userAccessToken
-    // (keys/sync and verify-strategy still do; v1.19 review 2026-08-18) —
-    // `X-User-Access-Token`, a LIVE end-user Supabase JWT. The token comes
-    // from the leaf's env list; the JWT cannot, so it is passed explicitly.
-    // The syscall token survives, which is the whole reason the raw message
-    // is not simply dropped.
+    // leaks: undici embeds the outgoing headers in `err.message`.
+    //
+    // ⚠️ Phase 146.1 / B2 (2026-08-18) — THE SECOND ARGUMENT WAS NOT DROPPED, IT
+    // WAS PROMOTED FROM DECLARED TO DERIVED, and that closed a LIVE leak this
+    // plan found BY EXECUTION rather than by reading.
+    //
+    // It used to be `[args.userAccessToken]` — a hand-typed list of the one
+    // credential someone remembered. B2 removed that forward, but the list was
+    // never the whole truth even before: this request ALSO carries
+    // `X-Tenant-Claim`, the signed HMAC that SELECTS the rate-limit bucket, and
+    // it is per-request, so no `SEAM_SECRET_ENV_NAMES` member could ever reach
+    // it. Every seam transport failure therefore wrote that claim VERBATIM into
+    // the Vercel log — while the core's own log site, two frames away, redacted
+    // it correctly because it always DERIVED.
+    //
+    // ⛔ Do not replace this with a literal array "for clarity". A declared list
+    // is convention; a caller who forgets is silently back to leaking, which is
+    // the exact failure mode `credentialHeaderValues` was written to end.
+    // ⛔ Do not delete the `scrubSeamError` call: it is also what keeps the env
+    // secrets (INTERNAL_API_TOKEN) out of this line, and the syscall token
+    // survives it — which is the whole reason the raw message is not dropped.
     console.error(
       `[${tag}] /process-key upstream fetch threw:`,
-      scrubSeamError(message, [args.userAccessToken]),
+      scrubSeamError(
+        message,
+        credentialHeaderValues({ headers: outgoingHeaders }),
+      ),
     );
     return {
       ok: false,

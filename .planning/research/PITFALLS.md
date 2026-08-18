@@ -209,7 +209,7 @@ The TODOS bullet may describe a bug that was true at some point in the Phase-19 
 - Write a regression test that reproduces (or fails to reproduce) the specific 42501 against current `main` before writing any fix — "I could not reproduce this" is a valid, useful research outcome per this project's own honesty discipline, and prevents wasted phase scope.
 
 **Warning signs:**
-A fix PR that re-adds `X-User-Access-Token` forwarding that already exists (git diff shows no functional change); a requirement written directly from the TODOS bullet text without a corresponding "reproduced on commit X" note.
+A fix PR that re-adds `X-User-Access-Token` forwarding that already exists (git diff shows no functional change) ⛔ **CORRECTED 2026-08-18 — Phase 146.1 / B2.** That warning sign has INVERTED: the forwarding no longer exists anywhere (it was removed from keys/sync and verify-strategy because the only Python reader has zero callers, pinned by `tests/test_process_key.py:2220-2221`). A PR re-adding it today is NOT a no-op diff — it is a new live-credential exposure, and `src/lib/seam-user-jwt-emitters.invariant.test.ts` will red by name. See `140.1-TS-OBLIGATIONS.md` TS-15.; a requirement written directly from the TODOS bullet text without a corresponding "reproduced on commit X" note.
 
 **Maps to:** JOB. Verification: a reproduction test run against current `main` BEFORE the phase starts, documenting pass/fail, so the phase's actual target is the verified-real gap.
 
