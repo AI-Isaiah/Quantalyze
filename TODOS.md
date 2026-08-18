@@ -2831,3 +2831,51 @@ clean up opportunistically; none is a persistent user-facing defect or data-inte
   the resume path where a changed file reaches the server resolve arm. Server-side equality
   refusal (shipped 2026-08-18) is the operative fence; persisting the signature in the signed
   saveWizardState envelope makes the client fence defense-in-depth again.
+
+## Phase 146 — RATE-04 value-parity candidates (logged 2026-08-18, D-146-4: retuning is founder territory)
+
+Source: `.planning/phases/146-rate/146-AUDIT.md` §3 (fresh at HEAD `e912e38b`). Every number
+below was re-read from source that session. Standing caveats: Python slowapi storage is
+`memory://` PER REPLICA (values are floors ×N, order-of-magnitude only); `userActionLimiter`
+backs ~9 surfaces — the remedy for any of its flows is a NEW named limiter, never a resize.
+
+- [ ] **Bridge flow 30× mismatch — mint a new named Vercel limiter.** Measured: Vercel
+  `userActionLimiter` 5/min/user = 300/h (`ratelimit.ts:97`; `bridge/route.ts:94`) vs Python
+  `/portfolio-bridge` 10/h/tenant (`portfolio.py:1899-1901`). ~10 clicks exhaust the backend
+  bucket, then the seam 429s requests the front door allowed. Recommendation: mint
+  `bridgeComputeLimiter` ≈10/3600s for this flow (mirrors the Python budget; truthful
+  Retry-After) — do NOT resize `userActionLimiter` (shared ~9 surfaces). Landing it must add
+  the limiter docblock rationale and update any pinned deny-shape tests in the same commit.
+- [ ] **Portfolio-optimizer flow 30× mismatch — same remedy as Bridge (shared new limiter).**
+  Measured: Vercel `userActionLimiter` 5/min/user = 300/h (`ratelimit.ts:97`;
+  `portfolio-optimizer/route.ts:113`) vs Python `/portfolio-optimizer` 10/h/tenant
+  (`portfolio.py:1637-1639`). Recommendation: put this flow on the same new
+  `bridgeComputeLimiter` (~10/3600s) minted for Bridge — one new named bucket, two
+  compute-heavy adopters; docblock + test-roster updates same commit.
+- [ ] **L-9 `/optimize-weights` per-tenant floor out of pattern (post-TS-04 re-look).**
+  Measured: Python 20/min/tenant = 1200/h (`optimizer.py:43-45`) vs max legitimate
+  Vercel-forwarded 5/min/user = 300/h (`scenario/optimize/route.ts:151`) — 4× headroom where
+  the match.py siblings deliberately size 1.5× (30/min over 20/min). No UX harm (Vercel gates
+  first); defense-in-depth sizing only, ×N replicas under memory://. Recommendation: tighten
+  to 10/minute per tenant (2× headroom, sibling pattern); the literal pin in
+  `analytics-service/tests/test_limiter_identity.py` MUST move in the same commit.
+- [ ] **verify-strategy teaser: per-IP front door cannot see the shared anon bucket.**
+  Measured: Vercel `publicIpLimiter` 10/min per IP = 600/h/IP (`ratelimit.ts:117`;
+  `verify-strategy/route.ts:59`) vs Python `/process-key` anon tier 30/h in ONE platform-wide
+  shared bucket (`rate_limit.py:107`, `:148` "Everything anonymous shares ONE bucket",
+  `:337`). A handful of concurrent anonymous visitors exhaust the platform's teaser capacity;
+  it is also a growth ceiling (~30 verifications/h total). The shared bucket is a deliberate
+  anti-abuse control (docblock: one anon IP once drained the whole platform window,
+  `rate_limit.py:89-91`) — founder call required. Recommendation: key the anon tier per-IP
+  (30/h per IP) to preserve the anti-abuse intent while removing the shared ceiling, or raise
+  the shared tier when teaser traffic warrants.
+- [ ] **csv-validate: 12× over the shared `/process-key` tenant tier + stale docblock
+  citation.** Measured: Vercel `csvValidateLimiter` 20/min/user = 1200/h (`ratelimit.ts:206`)
+  vs `/process-key` tenant 100/h (`rate_limit.py:100`) SHARED with keys/sync and
+  finalize-wizard. The docblock's own 3-5/min iteration estimate sustained = 180-300/h >
+  100/h — plausible legitimate exhaustion mid-iteration (softened ×N replicas). Also the
+  `csvValidateLimiter` docblock (`ratelimit.ts:195-206`) still justifies its value against
+  "the upstream 30/hour cap" in `routers/csv.py`, but the route rides `/process-key` at HEAD
+  (`csv-validate/route.ts:6` imports `postProcessKey`; `/csv/validate` has no TS caller).
+  Recommendation: founder call between raising `_PROCESS_KEY_TENANT_LIMIT` or adding a
+  csv-scoped tier; fix the stale docblock citation in the same commit as whichever lands.

@@ -219,7 +219,193 @@ documented alias (`export const withRateLimit = …` over `withAuthLimited`'s
 limiter step) — deliberately NOT built here (D-146-1 forbids re-opening the
 call in-phase).
 
-## §3 — RATE-04: limit-value parity audit — PENDING
+## §3 — RATE-04 / TS-22: limit-value parity audit (fresh at HEAD `e912e38b`, 2026-08-18)
 
-Owned by Plan 146-03. Not cut here; do not cite this file for RATE-04 until
-that plan lands its section.
+**Surface note:** this audit covers the FULL current 14-route seam census (§1)
+plus the pertinent non-seam Python endpoints — not the requirement's "seven
+already-limited routes". That count is an artifact of the stale list RATE-01
+replaced (research Open Question 4; full-surface recommended and adopted).
+Every number below was re-read from source at THIS HEAD this session; the
+146-RESEARCH.md tables were used as method (which files, which comparisons),
+never as data. `git diff --name-only 70a8918d..HEAD -- src/app/api
+src/lib/ratelimit.ts` is EMPTY, so the §1 census site lines remain valid at
+this HEAD verbatim; limiter values were nonetheless re-read directly.
+
+**Two standing caveats (frame every verdict below):**
+
+1. **Python slowapi storage is `memory://` per replica** (ASSUMPTION-3,
+   `services/rate_limit.py` docstring; research Pitfall 5). Every Python value
+   is a FLOOR ×N Railway replicas, reset on deploy. This audit sizes
+   order-of-magnitude only; precision tuning is effort the storage cannot
+   honor.
+2. **Shared Vercel buckets:** `userActionLimiter` (5/60s, `ratelimit.ts:97`)
+   backs ~9 seam surfaces plus `trades/upload` and `intro` — a resize for one
+   route resizes all. The remedy recommendation for any such flow is "mint a
+   new named limiter" (the codebase's established move, see
+   `csvValidateLimiter`'s docblock `:195-206`), never "resize
+   userActionLimiter". `scenarioPeerLimiter` (`:175-193`) is a documented
+   LOAD-BEARING probe-oracle security control — its docblock must be cited
+   before any change proposal touching it (T-146-09; no such proposal below).
+
+**Verdict semantics:** MISMATCH = the two tiers disagree such that plausible
+legitimate use produces backend seam 429s the front door permitted (or a
+defense-in-depth floor is materially out of the codebase's own pattern), and a
+value/bucket change is recommended → exactly one TODOS.md bullet per D-146-4.
+CONSISTENT = aligned, or deliberate burst-vs-sustained layering with citation.
+
+### Table A — Vercel limiter values (re-read from `src/lib/ratelimit.ts` at HEAD)
+
+| Limiter | Value | Def line | Seam routes backed (census §1) |
+|---|---|---|---|
+| `userActionLimiter` | 5/60s | :97 | bridge, keys/[id]/permissions, keys/sync arm 2, keys/validate-and-encrypt, portfolio-optimizer, scenario/optimize, composite/add-key, create-with-key, finalize-wizard (9) |
+| `keysSyncUserLimiter` | 30/60s | :105 | keys/sync arm 1 |
+| `publicIpLimiter` | 10/60s | :117 | verify-strategy (per IP) |
+| `adminActionLimiter` | 20/60s | :121 | admin/match/eval, admin/match/recompute |
+| `simulatorLimiter` | 20/3600s | :126 | simulator |
+| `csvValidateLimiter` | 20/60s | :206 | strategies/csv-validate |
+
+### Table B — Python slowapi limits (re-read from routers at HEAD)
+
+| Endpoint | Limit | Scope / key | Site |
+|---|---|---|---|
+| `/optimize-weights` | 20/minute | `optimize_weights` per tenant | optimizer.py:43-45 |
+| `/csv/validate` | 30/hour | `csv_validate` per tenant | csv.py:62-64 — **no TS caller**; csv-validate rides `/process-key` |
+| `/validate-key` | 100/hour | `validate_key` per tenant | exchange.py:1023-1025 |
+| `/encrypt-key` | 100/hour | `encrypt_key` per tenant | exchange.py:1184-1186 |
+| `/fetch-trades` | 10/hour | `fetch_trades` per tenant | exchange.py:1227-1229 — **no TS caller** |
+| `/match/recompute` | 30/minute | `match_recompute` per tenant | match.py:1626-1634 |
+| `/match/eval` | 30/minute | `match_eval` per tenant | match.py:1856-1860 |
+| `/portfolio-analytics` | 10/hour | `portfolio_analytics` per tenant | portfolio.py:1575-1577 — **no TS caller** |
+| `/portfolio-optimizer` | 10/hour | `portfolio_optimizer` per tenant | portfolio.py:1637-1639 |
+| `/portfolio-bridge` | 10/hour | `portfolio_bridge` per tenant | portfolio.py:1899-1901 |
+| `/verify-strategy` | 5/hour | `verify_strategy` per tenant | portfolio.py:2204-2206 — **no TS caller**; teaser rides `/process-key` |
+| simulator | 20/hour IP-keyed decorator (FINDING-10 quarantined) + in-handler per-user 20/3600s | `req.user_id` | simulator.py:234 (decorator), :111-112 + :136 (user quota) |
+| `/process-key` | dynamic: tenant `100/hour` (rate_limit.py:100), anon `30/hour` — **ONE shared platform-wide bucket** (`{scope}:anon`, rate_limit.py:107, :148, :337) — under platform ceiling `500/hour` (:114) | dual decorators | process_key.py:878-879 |
+| internal.py permissions probe | 10/min per `key_id`, hand-rolled in-memory token bucket | per key | internal.py:125, :202 |
+
+### Per-flow parity table
+
+A flow = the Vercel route + the Python endpoint(s) its seam call spends tokens
+on. Mapping re-derived fresh from route imports at HEAD (`validate-and-encrypt`
+calls `validateKey` :309 + `encryptKey` :325; `keys/sync`, `csv-validate`,
+`finalize-wizard`, `verify-strategy` import `postProcessKey`;
+`composite/add-key` + `create-with-key` import `validateKey`+`encryptKey`),
+cross-checked against the `rate_limit.py` docstring token-cost table (:74-93).
+
+| # | Flow | Vercel effective | Python effective | Verdict |
+|---|---|---|---|---|
+| 1 | bridge → `/portfolio-bridge` | 5/min/user = 300/h | 10/h/tenant | **MISMATCH** (30×) |
+| 2 | portfolio-optimizer → `/portfolio-optimizer` | 5/min/user = 300/h | 10/h/tenant | **MISMATCH** (30×) |
+| 3 | scenario/optimize → `/optimize-weights` | 5/min/user = 300/h | 20/min/tenant = 1200/h | CONSISTENT ordering (Vercel gates first) — but floor out of pattern, see H-4 |
+| 4 | keys/validate-and-encrypt → `/validate-key` + `/encrypt-key` | 5/min/user = 300/h burst | 100/h/tenant binding (2 tokens, two SEPARATE 100/h buckets depleting in lockstep) | CONSISTENT (burst vs sustained layering; legit connect volume ≪ 100/h) |
+| 5 | composite/add-key AND create-with-key → same two exchange buckets | 5/min/user = 300/h each | shared 100/h/tenant per bucket | CONSISTENT (same layering; aggregate legit ≪ cap) |
+| 6 | keys/sync → `/process-key` (resync) | arm 1 ceiling 30/min/user = 1800/h; arm 2 5/min per (user,strategy) | tenant 100/h + ceiling 500/h | CONSISTENT (layering; resyncs are event-driven, not sustained) |
+| 7 | strategies/csv-validate → `/process-key` | 20/min/user = 1200/h | shared tenant 100/h | **MISMATCH** (12×; see below) |
+| 8 | strategies/finalize-wizard → `/process-key` | 5/min/user = 300/h | shared tenant 100/h | CONSISTENT (finalize fires once per wizard) |
+| 9 | verify-strategy (anon teaser) → `/process-key` anon | 10/min per IP = 600/h **per IP** | 30/h in ONE shared platform-wide anon bucket | **MISMATCH** (structural: per-IP front door cannot see platform-wide exhaustion) |
+| 10 | admin/match/recompute → `/match/recompute` | 20/min/admin = 1200/h | 30/min/tenant = 1800/h | CONSISTENT (deliberate 1.5× defense-in-depth floor, match.py:1626-1632 comment) |
+| 11 | admin/match/eval → `/match/eval` | 20/min/admin = 1200/h | 30/min/tenant = 1800/h | CONSISTENT (same deliberate sizing, match.py:1856-1860) |
+| 12 | simulator → simulator.py | 20/h/user | 20/h/user in-handler (+ quarantined 20/h IP decorator) | CONSISTENT (deliberately matched — simulator.py:111 "match the 20/hour front-door ceiling") |
+| 13 | keys/[id]/permissions → internal.py probe | 5/min/user = 300/h | 10/min per key_id = 600/h | CONSISTENT (Python is the looser floor) |
+
+**Unpaired Python rows** (no TS caller at HEAD — dead-side floors, no flow
+verdict): `/csv/validate` 30/h, `/fetch-trades` 10/h, `/portfolio-analytics`
+10/h, `/verify-strategy` 5/h. Nothing on the seam spends them today; they cost
+nothing and guard direct-to-Railway calls.
+
+### The five pre-identified hypotheses — explicit verdicts
+
+**H-1 — bridge/portfolio-optimizer: Vercel permits 30× the Python budget.
+CONFIRMED** (rows 1-2; 300/h vs 10/h, both sides re-read fresh). A single
+user's legitimate exploration exhausts the Python tenant bucket in ~10 clicks
+(~2 minutes at the Vercel-permitted rate), after which the seam answers 429s
+the front door said were allowed. **Which side is wrong: Vercel.**
+`userActionLimiter` is a generic 5/min sensitive-POST bucket, not sized to
+these compute-heavy flows; the Python 10/h is the deliberate compute cap
+(audit-2026-05-07 L-0045, portfolio.py:179). Corrected value: mint a NEW named
+Vercel limiter (e.g. `bridgeComputeLimiter`, ~10/3600s) for bridge +
+portfolio-optimizer so the front door mirrors the backend budget and the 429
+carries a truthful Retry-After — per caveat 2, NEVER resize
+`userActionLimiter`. → two TODOS bullets (one per flow), values queued per
+D-146-4.
+
+**H-2 — validate-and-encrypt dual buckets. CONFIRMED as mechanism, flow
+CONSISTENT.** Each connect spends 2 tokens from two SEPARATE 100/h buckets
+(`validate_key` exchange.py:1023, `encrypt_key` exchange.py:1184; call sites
+route.ts:309/:325 fresh). Because the buckets deplete in lockstep the binding
+sustained cap is 100 connects/h/tenant — far above legitimate key-connect
+volume — with the 5/min front door as the burst cap. Deliberate layering, not
+a defect; no value change recommended, no TODOS bullet.
+
+**H-3 — verify-strategy anon platform bucket. CONFIRMED** (row 9). The Python
+anon tier is ONE shared platform-wide bucket ("Everything anonymous shares ONE
+bucket", rate_limit.py:148; `f"{scope}:anon"` :337) at 30/h, while the Vercel
+tier is per-IP (600/h per IP) — a handful of concurrent anonymous visitors
+exhaust the shared bucket and the per-IP front door structurally cannot see
+it. **Which side is wrong: neither trivially** — the shared anon bucket is a
+deliberate anti-abuse control (its docblock records one anonymous IP draining
+the whole platform's window, rate_limit.py:89-91; cited here per T-146-09
+before proposing any change). But it is also a hard growth ceiling of ~30
+teaser verifications/hour platform-wide. Corrected-value candidate (founder
+call): key the anon tier per-IP (`30/h` per IP) or raise the shared tier as
+teaser traffic grows. → TODOS bullet.
+
+**H-4 — L-9 `/optimize-weights` per-tenant re-look (post-TS-04). CONFIRMED as
+out of pattern (too loose).** Fresh: 20/minute per tenant (optimizer.py:43-45)
+= 1200/h vs a max legitimate Vercel-forwarded rate of 300/h (scenario/optimize
+5/min) — 4× headroom, where the match.py siblings deliberately size 1.5×
+(30/min floor over a 20/min forwarded ceiling). Under caveat 1 the floor is
+really 4×N replicas. No user-visible harm (Vercel gates first — row 3
+CONSISTENT ordering), so this is a defense-in-depth sizing note, not a UX
+defect. Corrected-value candidate: 10/minute per tenant (2× headroom, sibling
+pattern); the literal pin in `test_limiter_identity.py` must move in the same
+commit. → TODOS bullet.
+
+**H-5 (TODOS "H1" row) — seam retry double-spends Python tokens. CONFIRMED as
+live mechanism; decision: RECORD-ACCEPT.** A granted seam retry is a second
+HTTP request and burns a second token from the Python limiter — including
+`/process-key`'s shared platform ceiling — during exactly the incidents
+retries fire in. Exposure was already narrowed by D-01/D-03 (TODOS.md
+FINDING-8-residual: only onboard-with-a-key retries today; `resync` no longer
+does). **Accepted for this phase:** a retry exemption (retry-marked requests
+or token refunds) is a NEW mechanism, out of LIGHT-depth character
+(146-CONTEXT founder ruling; research Open Question 3 recommended exactly
+this). **Reversal point = the ship human gate.** No TODOS value bullet — this
+is a recorded decision, not a value candidate.
+
+### Additional finding (not among the five hypotheses)
+
+**Row 7 — csv-validate vs `/process-key` tenant tier, plus a stale docblock
+citation.** `csvValidateLimiter`'s docblock (`ratelimit.ts:195-206`) justifies
+20/min by alignment with "the upstream Python service['s] own 30/hour cap"
+in `routers/csv.py` — but fresh at HEAD the route does NOT call `/csv/validate`
+(no TS caller, Table B): it rides `/process-key` (route.ts:6 imports
+`postProcessKey`), whose tenant tier is 100/h SHARED with keys/sync and
+finalize-wizard. The docblock's own iteration estimate (3-5 validations/min)
+sustained for an hour is 180-300/h > 100/h — plausible legitimate exhaustion
+mid-iteration, softened by caveat 1 (×N replicas). Candidates (founder call):
+raise `_PROCESS_KEY_TENANT_LIMIT` or add a csv-scoped tier; and fix the stale
+docblock citation. Both are code changes under the fence — queued to TODOS,
+not touched here (D-146-4).
+
+### Recorded scope decisions
+
+- **Cron surfaces out of scope:** `warm-analytics` and
+  `/api/match/cron-recompute` are deliberately unlimited cron/service-key
+  surfaces (requirements decision #7 + A2; 146-02 SUMMARY recorded the
+  cron-recompute note in rate_limit.py's docstring).
+- **Zero live values changed by this phase:** verified by the git-diff gate
+  (`git diff --name-only -- src/lib/ratelimit.ts analytics-service/routers/`
+  = empty at commit time). Every remediation lives in TODOS.md per D-146-4.
+
+### TODOS candidates filed (5 bullets, D-146-4)
+
+1. Bridge flow: Vercel 300/h vs Python 10/h — mint new named limiter.
+2. Portfolio-optimizer flow: Vercel 300/h vs Python 10/h — same remedy, shared
+   new limiter with bullet 1.
+3. L-9 `/optimize-weights`: 20/min/tenant floor vs 300/h forwarded ceiling —
+   candidate 10/min; literal pin moves same commit.
+4. verify-strategy anon: 600/h per IP vs 30/h shared platform anon bucket —
+   per-IP anon keying or raised tier; anti-abuse docblock cited.
+5. csv-validate: Vercel 1200/h vs shared `/process-key` tenant 100/h + stale
+   `csvValidateLimiter` docblock citation — tier decision + docblock fix.
