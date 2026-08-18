@@ -1370,6 +1370,68 @@ class TestReaperThresholdInvariant:
 # ---------------------------------------------------------------------------
 
 
+class TestTerminalizerWindowInvariant:
+    """Phase 144 / v1.19 review (2026-08-18). The compute_jobs orphaned-running
+    terminalizer's arm-A window (4h on claimed_at, migration 20260817120000)
+    MUST exceed the longest a HEALTHY worker can legitimately hold a claim:
+    the batch-tail ceiling, p_batch_size x max(TIMEOUT_PER_KIND). The
+    migration derives 5 x 30 min = 2.5 h in PROSE ONLY — before this gate,
+    raising any TIMEOUT_PER_KIND entry past 48 min silently turned the
+    terminalizer into a destroyer of live jobs (failed_final is outside
+    CLAIMABLE_STATUSES per 20260719073701, and mark_compute_job_done fences
+    on status='running', so the in-flight run can never complete). Mirrors
+    TestReaperThresholdInvariant, which couples the 16h strategy_analytics
+    reaper to the same constants; the SQL/TS gates for THIS window pin only
+    the string literal and stay green when the worker side moves."""
+
+    def test_batch_tail_ceiling_stays_inside_arm_a_window(self) -> None:
+        from services.job_worker import TIMEOUT_PER_KIND
+
+        # Batch size: main_worker.py passes it as a literal RPC argument (no
+        # named constant). Extract every occurrence; all claim sites must
+        # agree or the ceiling below is computed against the wrong batch.
+        worker_src = pathlib.Path(main_worker.__file__).read_text()
+        sizes = {int(m) for m in re.findall(r'"p_batch_size":\s*(\d+)', worker_src)}
+        assert sizes, (
+            "no p_batch_size literal found in main_worker.py - the claim "
+            "call moved; re-anchor this gate, do not delete it"
+        )
+        assert len(sizes) == 1, (
+            f"main_worker.py claim sites disagree on p_batch_size: {sorted(sizes)}"
+        )
+        batch_size = sizes.pop()
+
+        # Window: parse arm A from the migration that registered the cron
+        # body PROD actually runs (20260817120000; the TS gate pins the same
+        # literal, so a window change reddens both sides together).
+        migration = (
+            pathlib.Path(__file__).resolve().parents[2]
+            / "supabase"
+            / "migrations"
+            / "20260817120000_retention_orphaned_running_terminalize.sql"
+        )
+        m = re.search(
+            r"claimed_at < now\(\) - interval '(\d+) hours'", migration.read_text()
+        )
+        assert m, (
+            "arm-A window literal not found in 20260817120000 - the "
+            "terminalizer body moved; re-anchor this gate, do not delete it"
+        )
+        window_s = int(m.group(1)) * 3600
+
+        max_timeout_s = max(TIMEOUT_PER_KIND.values())
+        ceiling_s = batch_size * max_timeout_s
+        assert ceiling_s < window_s, (
+            f"batch-tail ceiling {ceiling_s:.0f}s (p_batch_size={batch_size} x "
+            f"max(TIMEOUT_PER_KIND)={max_timeout_s:.0f}s) meets or exceeds the "
+            f"terminalizer's {window_s}s arm-A window. A HEALTHY worker's "
+            "batch-tail job would be terminalized failed_final mid-compute - "
+            "work destroyed, user shown 'interrupted' on a healthy compute. "
+            "Widen the window in a NEW migration (never edit 20260817120000's "
+            "registered body) or lower the timeout."
+        )
+
+
 class TestClaimRpcFallback:
     """audit-2026-05-07 C-0190 — when migration 086 has not been applied,
     the worker must catch SQLSTATE 42883 from claim_compute_jobs_with_priority

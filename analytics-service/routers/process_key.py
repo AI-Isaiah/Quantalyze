@@ -441,13 +441,15 @@ def _caller_owns_strategy(
     this promotes that warning to a refusal on the one path that then reads
     ANOTHER table by that caller-supplied id.
 
-    Deliberately uses the service-role client: no flow forwards
-    ``X-User-Access-Token`` today (the csv-finalize branch that consumed it
-    was deleted in Phase 145; the client-side forwarding capability is kept
-    per the 140.x obligation), so a user-scoped (RLS-enforcing) client is
-    not available on onboard/resync and the ownership predicate has to be an
-    explicit filter. Forwarding that header on every authenticated flow is a
-    recorded Phase 140.2 obligation.
+    Deliberately uses the service-role client: ``X-User-Access-Token`` is
+    still FORWARDED by two Next routes (keys/sync, verify-strategy — v1.19
+    review 2026-08-18) but nothing here READS it: ``get_user_scoped_supabase``
+    (db.py) has had zero callers since Phase 145 deleted the csv-finalize
+    branch that consumed it. No user-scoped (RLS-enforcing) client is
+    therefore constructed on onboard/resync and the ownership predicate has
+    to be an explicit filter. Forwarding on every authenticated flow is a
+    recorded Phase 140.2 obligation; drop-vs-wire is the Phase 146.1
+    adjudication.
 
     Not wrapped in try/except on purpose: a lookup failure is a service-side
     fault, and answering 403 to it would blame the caller for our outage. The

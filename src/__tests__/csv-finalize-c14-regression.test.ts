@@ -41,7 +41,6 @@
  *   NEW-C14-09: daily_return magnitude > 10 → 400 CSV_INVALID_FORMAT
  *   NEW-C14-10: impossible calendar date / future date → 400
  *   NEW-C14-12: trimmed name checked for length (trailing spaces not rejected)
- *   RED-TEAM-L2: retry-enable predicate (CSV_DUPLICATE_SESSION never re-enables)
  */
 
 // @vitest-environment node
@@ -244,9 +243,10 @@ describe("FOLD-FAIL-CAPTURE (145-05 A): a failed fold answers the truthful nothi
 
     // The truthful copy: the fold has NO EXCEPTION block, so a failed
     // finalize commits nothing — and the code is CSV_FINALIZE_FAIL (not
-    // CSV_PERSIST_FAIL) so the wizard's retry predicate re-enables Submit
-    // beside the "safe to try again" sentence (Plan 04 key decision;
-    // RED-TEAM-L2 below pins the predicate side of that pairing).
+    // CSV_PERSIST_FAIL) so the wizard re-enables Submit beside the "safe to
+    // try again" sentence (Plan 04 key decision; the wizard's branch-1 arm
+    // now re-enables unconditionally — v1.19 review 2026-08-18 removed the
+    // dead CSV_DUPLICATE_SESSION fence).
     expect(res.status).toBe(500);
     expect(body.ok).toBe(false);
     expect(body.code).toBe("CSV_FINALIZE_FAIL");
@@ -707,50 +707,5 @@ describe("NEW-C14-12: trimmed strategy_name length check", () => {
     const body = await res.json();
     expect(res.status).toBe(400);
     expect(body.code).toBe("CSV_INVALID_FORMAT");
-  });
-});
-
-// ══════════════════════════════════════════════════════════════════════════
-
-describe("RED-TEAM-L2: CSV_DUPLICATE_SESSION must not re-enable Submit (infinite retry guard)", () => {
-  // The Submit-button enable/disable logic in CsvSubmitStep is:
-  //   if (data.code !== "CSV_DUPLICATE_SESSION") {
-  //     setSubmitting(false);  // re-enable
-  //   }
-  // We test this as a pure predicate to avoid heavy React rendering setup.
-  // The invariant: CSV_DUPLICATE_SESSION must NOT re-enable Submit, because
-  // re-clicking Submit triggers the same 23505 → lookup-fails → 409 loop.
-  // Phase 145 ship-review fix: CSV_PERSIST_FAIL left the fence — its sole
-  // post-fold emitter is the fail-closed resolve 503, which persists nothing
-  // and instructs "Try again shortly."; fencing it stranded the user on a
-  // dead button. RED observed: the pre-fix predicate fails the flipped
-  // expectation below.
-
-  function shouldReEnableSubmit(code: string | undefined): boolean {
-    return code !== "CSV_DUPLICATE_SESSION";
-  }
-
-  it("does NOT re-enable Submit for CSV_DUPLICATE_SESSION (RED-TEAM-L2)", () => {
-    // Pre-fix this was true (Submit re-enabled) → infinite retry loop
-    expect(shouldReEnableSubmit("CSV_DUPLICATE_SESSION")).toBe(false);
-  });
-
-  it("re-enables Submit for CSV_PERSIST_FAIL (post-fold: fail-closed 503, nothing persisted, retry instructed)", () => {
-    expect(shouldReEnableSubmit("CSV_PERSIST_FAIL")).toBe(true);
-  });
-
-  it("re-enables Submit for CSV_FINALIZE_FAIL (safe to retry)", () => {
-    // Phase 145 pairing: the fold-failure 500 carries CSV_FINALIZE_FAIL
-    // precisely so its honest "safe to try again" copy sits beside a LIVE
-    // Submit button (145-05 A asserts the copy side).
-    expect(shouldReEnableSubmit("CSV_FINALIZE_FAIL")).toBe(true);
-  });
-
-  it("re-enables Submit for CSV_INVALID_FORMAT (safe to retry after correcting input)", () => {
-    expect(shouldReEnableSubmit("CSV_INVALID_FORMAT")).toBe(true);
-  });
-
-  it("re-enables Submit for undefined code (unknown error, safe to retry)", () => {
-    expect(shouldReEnableSubmit(undefined)).toBe(true);
   });
 });

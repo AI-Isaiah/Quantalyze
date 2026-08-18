@@ -355,24 +355,12 @@ export function CsvSubmitStep({
           // dead button (page-refresh was the only recovery). Retry is safe:
           // a committed prior attempt re-raises 23505 and the resolve arm
           // echoes the existing id.
-          // Keep button disabled for:
-          //   CSV_DUPLICATE_SESSION — admin lookup failed after 23505; retrying will
-          //     hit 23505 again and loop indefinitely. The error copy already says
-          //     "Refresh the page to see your submitted strategy."
-          //     RED-TEAM-L2: without this guard, Submit was re-enabled and the user
-          //     could trigger an infinite 23505 → lookup-fails → 409 CSV_DUPLICATE_SESSION
-          //     → re-enabled Submit cycle.
-          //
-          // ⚠️ 140.5-05 — THE FENCE MOVED WITH THE READ, DELIBERATELY, AND IT
-          // LIVES ON BRANCH 1 ONLY. Both codes it names are route-minted, so
-          // only this branch can carry them; leaving it below the arm would
-          // have made it read as if it also governed the hop and fallback
-          // branches, where it can never fire. A regression test pins the
-          // fence's membership — the behaviour is a property, not an accident
-          // of statement order.
-          if (data.code !== "CSV_DUPLICATE_SESSION") {
-            setSubmitting(false);
-          }
+          // v1.19 review (2026-08-18): the last fenced code,
+          // CSV_DUPLICATE_SESSION, was DEAD — it is not in
+          // KNOWN_CSV_FINALIZE_CODES (so this branch could never carry it)
+          // and no emitter exists anywhere in the repo. Every code this
+          // branch CAN carry is safe to retry, so Submit always re-enables.
+          setSubmitting(false);
           return;
         }
 
