@@ -3134,7 +3134,18 @@ class TestReconcileSweepAlert:
 # read on both sides, which is what makes THIS contract load-bearing.
 # ---------------------------------------------------------------------------
 
-_SWEEP_MIGRATION_NAME = "20260816140000_reconcile_dropped_enqueue_sweep.sql"
+# ⚠️ MOVED 2026-08-18 (B4, Phase 146.1) FROM
+# "20260816140000_reconcile_dropped_enqueue_sweep.sql". Migration 20260819130500
+# re-registers the same cron jobname at the same cadence with ONE conjunct
+# changed (it exempts a 'failed_final' row whose last_error carries the
+# terminalizer's fixed audit literal), so the body 20260816140000 registered is
+# no longer the body pg_cron runs. Per the POINTER HYGIENE rule stated above,
+# this constant and src/__tests__/reconcile-dropped-enqueue-sweep.test.ts's
+# FIX_TS/FIX_FILENAME move in the SAME commit as the migration. The marker
+# contract this file pins is UNCHANGED by that migration — the metadata the
+# sweep stamps and dispatch_tick() reads is identical — so only the pointer
+# moves, not a single assertion below.
+_SWEEP_MIGRATION_NAME = "20260819130500_reconcile_sweep_readmit_terminalized_orphans.sql"
 
 
 def _sweep_migration_path() -> pathlib.Path:
