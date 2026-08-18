@@ -196,12 +196,12 @@ Plans:
   4. A committed audit of the seven existing limiter VALUES against real Python-side cost exists, with adjustments applied where a value was wrong — the substantive remaining RATE question.
   5. A `withRateLimit(handler, limiter)` HOF exists and composes alongside `withAuth`/`withRole`, wired on the routes this phase touches — so the no-CI-gate hand-wiring weakness has a structural successor. *(Disposition locked D-146-1, 146-CONTEXT.md: satisfied VERIFIED-EXISTING by `withAuthLimited` + `withAdminAuth({rateLimitKey})` + the two CI gates, with a fresh-grep receipt — no second wrapper; reversal point = ship gate.)*
 
-**Plans:** 3 plans
+**Plans:** 1/3 plans executed
 
 Plans:
 **Wave 1**
 
-- [ ] 146-01-PLAN.md — RATE-02 eval limiter (mirror recompute, 3 rosters same-commit) + RATE-01 fresh census + RATE-05 VERIFIED-EXISTING receipt into 146-AUDIT.md; retire stale TODOS bullet
+- [x] 146-01-PLAN.md — RATE-02 eval limiter (mirror recompute, 3 rosters same-commit) + RATE-01 fresh census + RATE-05 VERIFIED-EXISTING receipt into 146-AUDIT.md; retire stale TODOS bullet
 
 **Wave 2** *(blocked on Wave 1)*
 
