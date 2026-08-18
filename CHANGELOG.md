@@ -1,5 +1,33 @@
 # Changelog
 
+## [0.66.0.0] - 2026-08-18
+### feat: v1.19 RATE — every seam route is rate-limited, both stacks agree on the 429 contract (closes RATE-01..05)
+
+The rate-limit audit Phase 146 existed to produce, plus the two verified gaps it found, closed.
+
+**What ships**
+
+- **The last unlimited admin seam route is limited**: `admin/match/eval` now runs
+  `adminActionLimiter` behind the admin gate (429 + Retry-After / 503 on misconfig), and the
+  no-limiter quarantine list in the living posture invariant is EMPTY — any future
+  limiterless seam route fails CI by construction.
+- **Python `match.py` `/recompute` + `/eval` get slowapi tenant limits** (30/minute,
+  tenant-or-platform keyed); the deliberate "these routes have no limiter" tripwire test was
+  retired only after its final RED was recorded, replaced by route-set + drive-to-429 gates.
+- **One 429 shape**: the four remaining bare-scalar `HTTPException(429)` sites now speak the
+  `service_error` envelope with Retry-After preserved — clients see one contract everywhere.
+- **Cross-language tenant-claim parity is pinned to fixture bytes**: TS and Python both
+  verify against the same committed `tenant-claim-parity.json`; a one-hex-char flip reddens
+  the new pytest binding.
+- **The value-parity audit (146-AUDIT.md)**: 13 flows compared fresh, five hypotheses each
+  CONFIRMED/REFUTED — headline: the Vercel side permits 30× the Python budget on
+  bridge/portfolio-optimizer. Per the locked decision, live limit VALUES were NOT touched;
+  five retuning candidates are founder-queued in TODOS with both measured numbers each.
+- **RATE-05 closed as VERIFIED-EXISTING**: `withAuthLimited` + the living invariants ARE the
+  required enforcement; receipt with fresh greps committed, no second wrapper minted.
+
+No migration in this release; nothing applies to the database at merge.
+
 ## [0.65.0.0] - 2026-08-18
 ### feat: v1.19 JOB-06 — a CSV finalize is now ONE transaction; a partial failure can no longer strand a strategy (closes SC#2/SC#3)
 
