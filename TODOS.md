@@ -2904,6 +2904,36 @@ an option nobody can decide:**
 (a), the honest-copy sentence shipped by (b) becomes wrong in the other direction (it would
 under-claim) and must be revised in the same change.
 
+## Phase 146.1 execution notes (logged 2026-08-18)
+
+- [ ] ⭐ **Comment-blind greps have now failed THREE times in one phase — make it a lint, not
+  a habit.** (1) the fold self-verify's `%5000%` substring, satisfied by a widened `50000`
+  (fixed, PR #691); (2) my own `BETWEEN -10 AND 100` check, which false-flagged a COMMENT
+  explaining the neuter as executable drift; (3) plan 146.1-04's C1 gate,
+  `grep -qiE '…checksum…' && fail`, which was **already broken at its own base commit** —
+  it matches honest prose at `route.ts:819` ("closing it needs a checksum, not two reads").
+  The executor correctly REFUSED to delete truthful prose to make a grep pass and measured
+  intent instead (`sha256|createHash|content_hash|digest` → zero, no crypto import;
+  orchestrator re-verified with a comment-stripping parse). ⭐ The general rule: a grep over
+  source that does not strip comments is unreliable in BOTH directions — vacuous when it
+  should fire, false-positive when it should not. Candidate fix: a shared
+  `scripts/grep-code.sh` that strips comments, used by every plan `<verify>`.
+- [ ] **A2 residual — absent `status` column echoes the `?? "pending_review"` fallback**, so a
+  contribution request can be *reported* as `pending_review` even though the arm writes
+  nothing to the DB. Refusing would violate the absence rule F-04-4 pins; the honest fix is
+  omitting the field, which changes the `CsvSubmitStep` contract and needs its own item.
+- [ ] **C1 echo copy is rendered by nothing today.** Plan 04 added `human_message` to the
+  resolve-echo 200 envelope so the honest sentence has somewhere to live, but
+  `CsvSubmitStep` branches on `!res.ok`/`data.ok` and never reads it. Either surface it or
+  record that the honesty is API-level only.
+- [ ] **`csv-finalize-c14-regression.test.ts` lost one discrimination to A2.** Its
+  resolve-echo case used to post the manager flow against a committed `private` row — the
+  exact cross-flow combination A2 now refuses 409. The fixture was re-pointed to
+  `entry_context: "contribution"`, so echoed and requested status are now provably equal on
+  every surviving echo and that case can no longer prove "echoed, not fabricated" on its
+  own. The discrimination moved to the new refusal cases; noted so nobody reads the weaker
+  case as full coverage.
+
 ## Phase 146 — RATE-04 value-parity candidates (logged 2026-08-18, D-146-4: retuning is founder territory)
 
 Source: `.planning/phases/146-rate/146-AUDIT.md` §3 (fresh at HEAD `e912e38b`). Every number
