@@ -65,6 +65,21 @@ import routers.portfolio  # noqa: F401
 import routers.simulator  # noqa: F401
 from services import rate_limit as rl
 
+import pytest as _pytest
+
+
+@_pytest.fixture(autouse=True)
+def _reset_limiter_buckets():
+    """Ship-review fix: the claimless platform bucket is PATH-keyed and shared
+    across every test in the process; without a reset, this module's 31-call
+    drive-to-429 probe drains platform:/api/match/recompute for later files
+    (measured: TestRecomputeSerializationLock reds when run in-process after
+    the probe). Reset before AND after so ordering never matters."""
+    rl.limiter.reset()
+    yield
+    rl.limiter.reset()
+
+
 # ---------------------------------------------------------------------------
 # The class, enumerated. LITERALS — copied from RESEARCH Q1.4's L-table, not
 # derived from the code under test.
@@ -619,7 +634,12 @@ class TestClassClosure:
         app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
         app.include_router(match_mod.router)
 
-        # Unique per-run credential → a PRIVATE limiter bucket. Without it
+        # NOTE (ship-review 2026-08-18): a unique X-Service-Key does NOT isolate —
+# the claimless arm of tenant_or_platform_key keys on request PATH only
+# (rate_limit.py _platform_bucket), so every claimless call shares ONE
+# platform:<path> bucket. Isolation comes from the autouse limiter reset
+# below, not from the credential. Original (false) rationale: unique
+# per-run credential → private bucket. Without it
         # this drive exhausts the shared unverified-credential bucket and a
         # sibling file's match POSTs (test_match_router.py drives ~23 of them)
         # inherit a spent budget for the next 60 seconds.

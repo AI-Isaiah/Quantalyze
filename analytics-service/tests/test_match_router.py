@@ -18,6 +18,19 @@ from uuid import uuid4
 import pytest
 from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
+from services import rate_limit as _rl
+
+
+@pytest.fixture(autouse=True)
+def _reset_limiter_buckets():
+    """Ship-review fix 2026-08-18: ~23 claimless POSTs here share the
+    PATH-keyed platform bucket; under the 30/min budget, fast in-process
+    ordering can leak RateLimitExceeded into unrelated assertions. Reset
+    both sides of every test so ordering never matters."""
+    _rl.limiter.reset()
+    yield
+    _rl.limiter.reset()
+
 
 
 # ---------------------------------------------------------------------------
@@ -3808,9 +3821,12 @@ def _direct_recompute_request() -> Request:
 
     146-02 / RATE-03 put a slowapi decorator on ``recompute``; slowapi's
     wrapper insists the ``request`` argument is a real starlette Request. The
-    unique per-call X-Service-Key gives each direct call a PRIVATE limiter
-    bucket, so these tests can never be throttled by (or exhaust) the shared
-    unverified-credential bucket the HTTP-driven tests use.
+    NOTE (ship-review 2026-08-18): a unique X-Service-Key does NOT mint a
+    private bucket — the claimless arm of tenant_or_platform_key keys on
+    request PATH only, so every claimless call in this process shares ONE
+    platform:<path> bucket. Isolation actually comes from the module's
+    autouse limiter reset below (measured: without it, the limiter_identity
+    probe's drained bucket reds this file's lock tests in-process).
     """
     return Request({
         "type": "http",
