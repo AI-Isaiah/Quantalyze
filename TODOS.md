@@ -2841,13 +2841,33 @@ Items stay open HERE until 146.1 ships; close them here when it does.
   `strategies_user_wizard_session_source_uniq`, but `csv_daily_returns_strategy_date_key`
   can also raise it (direct-RPC duplicate dates); the resolve arm keys on SQLSTATE alone —
   discriminate on constraint name, or document.
-- [ ] **Stale-comment batch from the fold re-point** (grouped; all cosmetic): the
-  csv-validate-route.test.ts behaviors-pinned TOC items 6–8/13 still describe the persist
-  RPC; route.test.ts `rpcMock` comment names both dropped RPCs; csv-validate-route:~898
-  beforeEach comment still says "Phase 106 Stage B ... persist_csv_daily_returns"; orphaned
-  `INTERNAL_API_TOKEN` env sets in csv-finalize-cross-submission-merge.test.ts:150 and the
-  re-pointed csv-validate describes; atomic-fold gate Part 2c is belt-to-2a's-suspenders
-  (savepoint semantics) — annotate.
+- [x] **Stale-comment batch from the fold re-point — DONE in Phase 146.1-07 (2026-08-18).**
+  Every claim was grep-verified at HEAD BEFORE it was touched; the ones the grep CONFIRMED
+  were left alone rather than given a fresh date. Ground truth for the batch: migration
+  `20260819120000:349-350` DROPs both `finalize_csv_strategy` and `persist_csv_daily_returns`.
+  - CORRECTED: csv-validate-route.test.ts TOC items 6 and 7 (item 6 named the dropped persist
+    RPC; item 7 named `CSV_PERSIST_FAIL`, which no test in the file pins — Test 7 pins
+    `CSV_FINALIZE_FAIL`). csv-validate-route.test.ts:~898 beforeEach ("Phase 106 Stage B ...
+    the SHARED persist_csv_daily_returns RPC"). csv-finalize/route.test.ts:~60 `rpcMock`
+    comment (named both dropped RPCs).
+  - LEFT ALONE, verified accurate: TOC item 8 — Tests 8a (runtime), 8b (source-shape) and
+    8c (arity lock) all exist and match the comment.
+  - REMOVED: the orphaned `process.env.INTERNAL_API_TOKEN` set in
+    csv-finalize-cross-submission-merge.test.ts (line 177 at HEAD, not the 150 this item
+    recorded). The route reads no such variable; the suite was re-run to confirm the
+    removal changed nothing.
+  - ANNOTATED: atomic-fold gate Part 2c — the enclosing `BEGIN ... EXCEPTION WHEN OTHERS`
+    is an implicit PL/pgSQL subtransaction, so once Part 2a establishes that the call
+    RAISED, the 0/0/0 counts follow by savepoint semantics rather than by anything the fold
+    does. Kept (it still discriminates a write that ESCAPES the subtransaction) with a note
+    saying so, so nobody reads a green 2c as independent atomicity evidence.
+- [ ] **Residual: `INTERNAL_API_TOKEN` env sets inside csv-validate-route.test.ts.** NOT
+  touched by the 146.1-07 batch, deliberately. The file mixes csv-VALIDATE describes (which
+  legitimately forward to the Python service with that token, and pin its absence at
+  `:808`/`:1883`) with csv-FINALIZE describes (which no longer need it). Separating the ~28
+  occurrences requires per-describe analysis, and a wrong removal would make a token-absence
+  arm vacuous rather than merely untidy. Cosmetic; do it as its own pass with the suite run
+  between each removal, or split the file.
 - [ ] ⚠️ **Migration-timestamp coordination (self-expiring 2026-08-19 12:00 UTC)**: the fold
   is stamped `20260819120000` (future-dated at merge). Until that instant, any OTHER
   migration must carry a timestamp ABOVE it or it trips the backdated-migration guard.

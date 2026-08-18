@@ -894,9 +894,12 @@ describe("/api/strategies/csv-finalize — strategy_name validation", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     checkLimitMock.mockResolvedValue({ success: true, retryAfter: 0 });
-    // Phase 106 Stage B: the unified path runs the SHARED
-    // persist_csv_daily_returns RPC; default it to success so the success-path
-    // metadata tests reach the UPDATE. Validation (400) tests never hit it.
+    // The unified path runs the SINGLE folded RPC
+    // (`finalize_csv_strategy_with_returns`); default it to success so the
+    // success-path metadata tests reach the UPDATE. Validation (400) tests
+    // never hit it. (Was "Phase 106 Stage B ... the SHARED
+    // persist_csv_daily_returns RPC" — migration 20260819120000:350 DROPped
+    // that function; there is one RPC on this path now, not two.)
     rpcMock.mockResolvedValue({ data: 0, error: null });
   });
 
@@ -1133,10 +1136,14 @@ describe("/api/strategies/csv-finalize — strategy_name validation", () => {
 //   4.  Finite numeric daily_return — NaN / Infinity → 400.
 //   5.  Duplicate-date guard (T-19.1-04, PR #274) — repeated date → 400
 //       BEFORE the persist RPC has a chance to throw 23505.
-//   6.  Legacy path persist — persist_csv_daily_returns RPC called with
-//       the new strategy id + parsed rows.
-//   7.  Persist failure → 500 CSV_PERSIST_FAIL with strategy id in
-//       debug_context.
+//   6.  The FOLD receives the parsed rows as p_rows — strategy row and
+//       dailies land in ONE transaction. (Was: "persist_csv_daily_returns
+//       RPC called with the new strategy id"; migration 20260819120000:350
+//       DROPped that function along with finalize_csv_strategy, and Test 6
+//       has pinned the fold since.)
+//   7.  Fold RPC failure → 500 CSV_FINALIZE_FAIL. (Was CSV_PERSIST_FAIL,
+//       which no test in this file pins — the two-RPC split it named no
+//       longer exists.)
 //   8.  Unified path explicit param — runtime + strict source-shape +
 //       arity-lock checks make closure capture detectable as a
 //       regression (T-19.1-10).

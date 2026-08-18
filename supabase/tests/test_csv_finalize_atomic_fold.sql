@@ -195,6 +195,21 @@ BEGIN
   -- strategies INSERT ran before the cast raised; if ANY row survives, the
   -- fold has a handler clause (or split transactions) and the orphan-strategy
   -- class SC#2 dissolves is back.
+  --
+  -- ⚠️ HONESTY NOTE (Phase 146.1-07, cosmetic batch): Part 2c is BELT to Part
+  -- 2a's BRACES, not an independent measurement. The `BEGIN ... EXCEPTION WHEN
+  -- OTHERS` block above is an implicit PL/pgSQL SUBTRANSACTION (a savepoint),
+  -- so when the fold raises, that subtransaction rolls back and every write
+  -- the fold made is undone by PL/pgSQL semantics — regardless of anything the
+  -- fold itself does. Once Part 2a has established that the call RAISED, these
+  -- three counts are 0/0/0 by construction.
+  --
+  -- It is kept because it is nearly free and it still discriminates the one
+  -- case the savepoint cannot undo: a write that ESCAPES the subtransaction
+  -- (dblink, an autonomous-transaction extension, or any out-of-transaction
+  -- side channel added to the fold later). Do not read a green Part 2c as
+  -- independent evidence of the fold's atomicity — Part 2a is what carries
+  -- that, and the route-level suites carry the rest.
   SELECT count(*) INTO n_strat FROM public.strategies
    WHERE user_id = probe_user AND wizard_session_id = probe_session;
   SELECT count(*) INTO n_sv FROM public.strategy_verifications
