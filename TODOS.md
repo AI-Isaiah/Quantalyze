@@ -869,9 +869,14 @@ governs by CONTENT TYPE, and their content is prose/forms — rung 1.
 - **Vercel→Railway seam has no resilience** — `analytics-client.ts` has no fetch timeout /
   retries / circuit breaker; a hung Railway request holds a Vercel lambda open until the
   platform kills it and cascade-500s `keys/sync` / `verify-strategy` / `admin/match/*`.
-- **Rate limiting only on 6 routes** — the authed routes that hit the Python service
+- ~~**Rate limiting only on 6 routes**~~ — **CLOSED 2026-08-18** (Phase 146 / RATE-01):
+  stale since at latest audit-2026-05-07. Every route this bullet named
   (`verify-strategy`, `keys/{sync,validate,encrypt}`, `admin/match/recompute`,
-  `admin/partner-import`, `trades/upload`, `intro`) are unlimited → arbitrary quota burn.
+  `admin/partner-import`, `trades/upload`, `intro`) is verified LIMITED at HEAD
+  `70a8918d`; `admin/match/eval` (the one real remaining gap) gained its limiter
+  in the same phase. The authoritative census — route × limiter × value × key
+  shape, fresh-derived twice — is `.planning/phases/146-rate/146-AUDIT.md` §1,
+  which replaces this list.
 - **Cron/email idempotency & budget** — founder-LP cron double-email if lambda dies post-Resend
   (idempotency row on `(cron_name, year_month)`); founder-LP 85s worst-case > 60s maxDuration;
   Resend webhook svix-id idempotency store; email correlation-id fragmentation (per-email not
