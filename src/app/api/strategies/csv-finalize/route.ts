@@ -588,29 +588,21 @@ async function finalizeAtomicOrErrorResponse(
   },
   opts: { logPrefix: string; correlationId: string },
 ): Promise<FinalizeAtomicOutcome> {
-  const { data: newStrategyId, error } = await (
-    supabase.rpc as unknown as (
-      fn: "finalize_csv_strategy_with_returns",
-      rpcArgs: {
-        p_user_id: string;
-        p_wizard_session_id: string;
-        p_fmt: string;
-        p_strategy_name: string;
-        p_rows: CsvDailyReturnRow[];
-        p_terminal_status: string;
-      },
-    ) => Promise<{
-      data: string | null;
-      error: { code?: string; message?: string } | null;
-    }>
-  )("finalize_csv_strategy_with_returns", {
-    p_user_id: args.userId,
-    p_wizard_session_id: args.wizardSessionId,
-    p_fmt: args.fmt,
-    p_strategy_name: args.strategyName,
-    p_rows: args.rows,
-    p_terminal_status: args.terminalStatus,
-  });
+  // 146.1-07 task 1: the cast-through-unknown is GONE. `database.types.ts` now
+  // carries `finalize_csv_strategy_with_returns`, so this call is type-checked
+  // against the real signature and re-enters the audit-coverage law. Restoring
+  // the cast would silently un-check the argument names on a money path.
+  const { data: newStrategyId, error } = await supabase.rpc(
+    "finalize_csv_strategy_with_returns",
+    {
+      p_user_id: args.userId,
+      p_wizard_session_id: args.wizardSessionId,
+      p_fmt: args.fmt,
+      p_strategy_name: args.strategyName,
+      p_rows: args.rows,
+      p_terminal_status: args.terminalStatus,
+    },
+  );
 
   // TS-13 discipline (140.3-02): the success check validates the PAYLOAD,
   // not just error-null — a 2xx that lost its id must not strand the

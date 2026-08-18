@@ -2906,26 +2906,24 @@ under-claim) and must be revised in the same change.
 
 ## Phase 146.1 execution notes (logged 2026-08-18)
 
-- [ ] ⛔ **146.1-07 task 1 DEFERRED — types regen needs a Supabase access token.** Founder
-  answered the plan's blocking checkpoint `regen-blocked` on 2026-08-18. MEASURED that day:
-  `SUPABASE_ACCESS_TOKEN` absent from the environment, `~/.supabase/access-token` absent, and
-  the Supabase MCP `generate_typescript_types` fallback returns 129,458 characters on ONE line
-  which `prettier --parser typescript` cannot parse — so no canonical-format regen was
-  possible. Confirmed the same day that the regen is genuinely NEEDED, not cosmetic: the fold
-  `finalize_csv_strategy_with_returns` IS live on PROD (6 args, both parents gone from
-  `pg_proc`) and is ABSENT from the committed `src/lib/database.types.ts`, which is precisely
-  why `src/app/api/strategies/csv-finalize/route.ts:592` still carries
-  `supabase.rpc as unknown as (…)`. That cast stays until a credentialled regen runs, and
-  while it stays the fold call sits OUTSIDE the audit-coverage law.
-  **To close:** `npx supabase login` then
-  `npx supabase gen types typescript --linked > src/lib/database.types.ts`, delete the cast,
-  re-run tsc + `audit-coverage.test.ts`.
-  ⛔ **Do NOT hand-edit `src/lib/database.types.ts`** — it is a generated file and the next
-  regeneration silently overwrites hand edits, which is the drift hazard its own header warns
-  about. Tasks 2-4 of plan 146.1-07 were NOT blocked by this and proceeded.
-
-
-
+- [x] ~~**146.1-07 task 1 DEFERRED — types regen needs a Supabase access token.**~~
+  ✅ **CLOSED 2026-08-18, same day — the deferral rested on MY OWN measurement error.** I
+  reported that the Supabase MCP fallback was unusable because `prettier` could not parse it.
+  It could not parse it because I fed prettier the **JSON envelope**, not the TypeScript:
+  `generate_typescript_types` returns `{"types":"export type Json =…"}`, so the 129,458
+  "one line" was a JSON string containing 4,133 escaped newlines. Extracting the `types` field
+  yields ordinary TypeScript that needs no formatting at all — the Supabase CLI emits
+  semicolon-free output and so does the MCP, so running prettier over it was itself the thing
+  that produced a 7,758-line churn diff. Raw extraction diffs **34 lines**.
+  **Executed without any token:** extract `types` → prepend the hand-written header (which the
+  generator does NOT emit, so a naive `> file` redirect would have destroyed it, including the
+  CRITICAL NUMERIC-precision audit note) → re-apply the two `HAND-PATCHED` tripwire comments the
+  file itself warns must survive a regen → delete the cast at `route.ts:592`.
+  **Verified:** net diff to the types file is **11 lines**, purely the fold's signature; the
+  `notify_*` columns and the `scenarios` block survived; `tsc` clean WITH the cast deleted (which
+  is the actual proof the signature is right); `database.types.test.ts` + `audit-coverage` +
+  the three csv-finalize suites 138 passed; lint 0 errors; and re-introducing an `as any` cast
+  trips 3 lint errors, so the type safety is enforced rather than merely present.
 - [ ] ⭐ **Comment-blind greps have now failed THREE times in one phase — make it a lint, not
   a habit.** (1) the fold self-verify's `%5000%` substring, satisfied by a widened `50000`
   (fixed, PR #691); (2) my own `BETWEEN -10 AND 100` check, which false-flagged a COMMENT

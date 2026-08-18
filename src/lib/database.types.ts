@@ -46,7 +46,6 @@
  * generated `Database` type — surfacing future regenerations that drop
  * a column the helpers depend on.
  */
-
 export type Json =
   | string
   | number
@@ -3711,6 +3710,17 @@ export type Database = {
       fetch_strategy_lazy_metrics: {
         Args: { p_panel_id: string; p_strategy_id: string }
         Returns: Json
+      }
+      finalize_csv_strategy_with_returns: {
+        Args: {
+          p_fmt: string
+          p_rows: Json
+          p_strategy_name: string
+          p_terminal_status?: string
+          p_user_id: string
+          p_wizard_session_id: string
+        }
+        Returns: string
       }
       finalize_wizard_strategy: {
         Args: {
