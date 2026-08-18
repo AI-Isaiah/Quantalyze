@@ -194,9 +194,22 @@ Plans:
   2. Burst requests to `admin/match/eval` beyond a per-`user.id` limit sized to real eval-tooling cadence receive `429` + `Retry-After`.
   3. Requests hitting Railway's `routers/match.py` (`/recompute`, `/eval`) directly — bypassing Vercel with a leaked `X-Service-Key` — are rejected `429` by server-side slowapi limits mirroring `portfolio.py`'s pattern (defense-in-depth).
   4. A committed audit of the seven existing limiter VALUES against real Python-side cost exists, with adjustments applied where a value was wrong — the substantive remaining RATE question.
-  5. A `withRateLimit(handler, limiter)` HOF exists and composes alongside `withAuth`/`withRole`, wired on the routes this phase touches — so the no-CI-gate hand-wiring weakness has a structural successor.
+  5. A `withRateLimit(handler, limiter)` HOF exists and composes alongside `withAuth`/`withRole`, wired on the routes this phase touches — so the no-CI-gate hand-wiring weakness has a structural successor. *(Disposition locked D-146-1, 146-CONTEXT.md: satisfied VERIFIED-EXISTING by `withAuthLimited` + `withAdminAuth({rateLimitKey})` + the two CI gates, with a fresh-grep receipt — no second wrapper; reversal point = ship gate.)*
 
-**Plans**: TBD
+**Plans:** 3 plans
+
+Plans:
+**Wave 1**
+
+- [ ] 146-01-PLAN.md — RATE-02 eval limiter (mirror recompute, 3 rosters same-commit) + RATE-01 fresh census + RATE-05 VERIFIED-EXISTING receipt into 146-AUDIT.md; retire stale TODOS bullet
+
+**Wave 2** *(blocked on Wave 1)*
+
+- [ ] 146-02-PLAN.md — RATE-03/TS-21 match.py slowapi limiters (5 gates same-commit, tripwire deleted) + TS-23-remainder 429→service_error w/ Retry-After preserved + TS-36 parity pytest; pytest+mypy --strict from analytics-service/
+
+**Wave 3** *(blocked on Waves 1-2)*
+
+- [ ] 146-03-PLAN.md — RATE-04/TS-22 value parity audit (fresh tables at HEAD, per-mismatch recommendations, value candidates → TODOS per D-146-4) + phase close w/ checkbox discipline
 
 ---
 
