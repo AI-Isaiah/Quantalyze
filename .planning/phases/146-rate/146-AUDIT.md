@@ -409,3 +409,38 @@ not touched here (D-146-4).
    per-IP anon keying or raised tier; anti-abuse docblock cited.
 5. csv-validate: Vercel 1200/h vs shared `/process-key` tenant 100/h + stale
    `csvValidateLimiter` docblock citation — tier decision + docblock fix.
+
+## §4 — Phase close (2026-08-18, closed at HEAD `828a881e`)
+
+Phase 146 base: merge-base with origin/main = `8432a0b6`. Wave commits:
+`70a8918d`/`f583572c` (146-01), `bad30cf8`/`9323c1cd`/`2030a158` (146-02),
+`828a881e` (146-03 §3 + TODOS).
+
+**Success-criteria status (each pointing at its evidence):**
+
+| SC | Status | Evidence |
+|---|---|---|
+| SC1 — committed census replacing the stale route list | MET | §1 (twice-derived, 14 routes / 15 sites, quarantine empty; stale TODOS bullet retired) |
+| SC2 — `admin/match/eval` 429 + Retry-After per user.id | MET | 146-01 (commit `70a8918d`); re-proven green at close: vitest trio 3 files / 62 tests, EXIT=0 |
+| SC3 — direct-to-Railway match.py 429s (slowapi) | MET | 146-02 (commit `bad30cf8`); re-proven green at close: full pytest 5178 passed / 89 skipped, EXIT=0; `mypy --strict --follow-imports=silent services/ routers/ models/` — no issues in 91 files, EXIT=0 |
+| SC4 — committed value audit, adjustments where wrong | MET as ANALYSIS + QUEUED remediation | §3 (13 flows, 4 MISMATCH verdicts, 5 hypothesis verdicts); value ADJUSTMENTS founder-queued to TODOS.md per locked D-146-4 — ROADMAP SC4 annotated with this disposition |
+| SC5 — `withRateLimit` HOF | MET as VERIFIED-EXISTING (D-146-1) | §2 fresh-grep receipts; ROADMAP SC5 annotation |
+
+**Closure discipline (recorded outputs):**
+
+- REQUIREMENTS.md RATE-01..05 all still `- [ ]` — count of `^- \[ \] \*\*RATE-0`
+  rows = **5** (verification owns ticks, not execution).
+- Phase diff vs merge-base contains **0** files under `supabase/migrations/`
+  (`git diff --name-only 8432a0b6...HEAD -- supabase/migrations/ | wc -l` = 0).
+- Zero code diffs under `src/lib/ratelimit.ts` + `analytics-service/routers/`
+  from plan 03 (Task-1 git-diff gate: `audit-clean`).
+
+**Open reversal points for the ship human gate (surfaced, not absorbed):**
+
+1. **D-146-1 / RATE-05 disposition** — VERIFIED-EXISTING, no `withRateLimit`
+   symbol minted; cheapest conforming follow-up is a documented alias (§2).
+2. **H-5 retry double-spend RECORD-ACCEPT** — a retry exemption is a new
+   mechanism deliberately not built at LIGHT depth (§3).
+3. **Five TODOS value candidates** — bridge + portfolio-optimizer new limiter,
+   L-9 tighten, verify-strategy anon keying, csv-validate tier + docblock
+   (§3; TODOS.md "Phase 146 — RATE-04 value-parity candidates").
