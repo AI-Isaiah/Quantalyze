@@ -177,6 +177,7 @@ vi.mock("next/server", async () => {
 });
 
 import { NextRequest } from "next/server";
+import { captureToSentry } from "@/lib/sentry-capture";
 import { POST } from "@/app/api/strategies/csv-finalize/route";
 
 const SESSION = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
@@ -455,5 +456,534 @@ describe("[140.4-16 / CR-01, re-pointed by 145] the 23505 resolve arm refuses a 
       "the route applied this submission's metadata after failing to " +
         "establish whether resolving was safe",
     ).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 146.1-04 / B3 — WHICH 23505 EARNS THE RESOLVE ARM
+// ---------------------------------------------------------------------------
+
+/**
+ * The fold's dailies INSERT is a plain INSERT with no `ON CONFLICT`, so a
+ * duplicate-date payload raises 23505 on `csv_daily_returns_strategy_date_key`
+ * (migration 20260624120000:55-56) — a SECOND, real source of this SQLSTATE on
+ * this path. Undiscriminated, it entered the resolve arm, found no committed
+ * row and answered 503 "try again shortly": a retry invitation for a permanent
+ * input defect that will fail identically forever.
+ *
+ * ⭐ THE ORACLE IS BEHAVIOURAL. Every case below asserts on whether the
+ * `strategies` re-fetch was ISSUED (`resolveFetch.filters`) and on the write
+ * vector (`updateCalls`) — never on whether the source contains a particular
+ * `if`. A test that asserts the shape of the fix cannot detect a fix that is
+ * wired to nothing.
+ */
+
+/** The dailies unique index (20260624120000:55-56) — the second 23505 source. */
+const DAILIES_DUP_KEY_ERROR = {
+  code: "23505",
+  message:
+    'duplicate key value violates unique constraint "csv_daily_returns_strategy_date_key"',
+};
+
+/** The SUPERSEDED session index (20260602190000:52), still listed by the leaf. */
+const SUPERSEDED_DUP_KEY_ERROR = {
+  code: "23505",
+  message:
+    'duplicate key value violates unique constraint "strategies_user_wizard_session_uniq"',
+};
+
+/** A 23505 carrying no parseable constraint name → `pgConstraintName` = null. */
+const UNPARSEABLE_DUP_KEY_ERROR = {
+  code: "23505",
+  message: "duplicate key value violates a unique constraint",
+};
+
+/** Drive the fold into a 23505 carrying an ARBITRARY error shape. */
+function arm23505With(
+  err: { code?: string; message?: string },
+  row: { id: string; name?: string; status?: string } | null,
+) {
+  rpcMock.mockImplementation(async (name: string) => {
+    if (name === "finalize_csv_strategy_with_returns") {
+      return { data: null, error: err };
+    }
+    return { data: null, error: null };
+  });
+  resolveFetch.row = row;
+}
+
+/** Every Sentry step tag captured during the request, in order. */
+function sentrySteps(): string[] {
+  return vi
+    .mocked(captureToSentry)
+    .mock.calls.map(
+      (c) => (c[1] as { tags?: { step?: string } } | undefined)?.tags?.step ?? "",
+    );
+}
+
+describe("[146.1-04 / B3] the 23505 branch enters the resolve arm only for a wizard-session fence", () => {
+  it("ANTI-REGRESSION: the session constraint STILL resolves — the re-fetch is issued", async () => {
+    arm23505With(DUP_KEY_ERROR, {
+      id: EXISTING_ID,
+      name: "Alpha",
+      status: "pending_review",
+    });
+    seriesProbe.count = 3;
+    seriesProbe.minDate = "2024-01-31";
+    seriesProbe.maxDate = "2024-03-29";
+
+    const res = await post(SERIES_2024);
+
+    expect(res.status).toBe(200);
+    expect(
+      resolveFetch.filters,
+      "B3 narrowed the predicate so far that the ONE 23505 the arm exists " +
+        "for no longer reaches it — the instructed retry now dead-ends",
+    ).toHaveLength(1);
+  });
+
+  it("the SUPERSEDED session constraint name still resolves (older databases)", async () => {
+    arm23505With(SUPERSEDED_DUP_KEY_ERROR, {
+      id: EXISTING_ID,
+      name: "Alpha",
+      status: "pending_review",
+    });
+    seriesProbe.count = 3;
+    seriesProbe.minDate = "2024-01-31";
+    seriesProbe.maxDate = "2024-03-29";
+
+    const res = await post(SERIES_2024);
+
+    expect(res.status).toBe(200);
+    expect(resolveFetch.filters).toHaveLength(1);
+  });
+
+  it("🔴 THE DAILIES-INDEX 23505 does NOT enter the resolve arm and is not answered with a retry invitation", async () => {
+    // A duplicate-date payload that slipped the route boundary raises 23505 on
+    // the dailies index. Resolving it is meaningless — there is no committed
+    // strategy this session collided with — and the arm's fail-closed 503 tells
+    // the user to "try again shortly" for a defect that is permanent.
+    arm23505With(DAILIES_DUP_KEY_ERROR, {
+      id: EXISTING_ID,
+      name: "Alpha",
+      status: "pending_review",
+    });
+
+    const res = await post(SERIES_2024);
+
+    expect(
+      resolveFetch.filters,
+      "the strategies re-fetch was issued for a 23505 that named the DAILIES " +
+        "index — the wrong arm is deciding this request",
+    ).toEqual([]);
+    expect(seriesProbe.reads).toEqual([]);
+    expect(
+      res.status,
+      "a permanent payload defect was answered with the resolve arm's " +
+        "retryable 503 ('try again shortly')",
+    ).not.toBe(503);
+    const body = await res.json();
+    expect(body.ok).toBe(false);
+    expect(
+      body.code,
+      "the dailies-index 23505 must fall through to the fold-failure arm",
+    ).toBe("CSV_FINALIZE_FAIL");
+    expect(
+      updateCalls,
+      "this submission's metadata was written despite the fold rolling back",
+    ).toEqual([]);
+  });
+
+  it("an UNPARSEABLE 23505 STILL enters the resolve arm — null is UNKNOWN, not 'no constraint'", async () => {
+    // `pgConstraintName` returns null when it could not READ a name, not when
+    // no constraint was violated. Pre-existing behaviour for UNKNOWN is
+    // any-23505 → resolve, and the arm already fails CLOSED (503) when it finds
+    // no committed row. Making null bypass the arm converts that fail-closed
+    // 503 into a fail-open 500 carrying the wrong copy.
+    arm23505With(UNPARSEABLE_DUP_KEY_ERROR, {
+      id: EXISTING_ID,
+      name: "Alpha",
+      status: "pending_review",
+    });
+    seriesProbe.count = 3;
+    seriesProbe.minDate = "2024-01-31";
+    seriesProbe.maxDate = "2024-03-29";
+
+    const res = await post(SERIES_2024);
+
+    expect(
+      resolveFetch.filters,
+      "an unparseable 23505 skipped the resolve arm — the leaf's UNKNOWN " +
+        "contract was 'simplified' away",
+    ).toHaveLength(1);
+    expect(res.status).toBe(200);
+  });
+
+  it("a NAMED-but-unrecognised constraint is FAIL-LOUD: a distinct Sentry step tag carries the name", async () => {
+    // Silence here would bury the arrival of a new constraint on this path
+    // inside a generic fold failure. The name is safe to tag: it comes from
+    // `message`, which Postgres composes from catalog names only.
+    arm23505With(DAILIES_DUP_KEY_ERROR, {
+      id: EXISTING_ID,
+      name: "Alpha",
+      status: "pending_review",
+    });
+
+    await post(SERIES_2024);
+
+    const steps = sentrySteps();
+    expect(
+      steps,
+      "no capture named the unrecognised constraint — the class is silent",
+    ).toContain("finalize-23505-unknown-constraint");
+    expect(steps).not.toContain("finalize-resolve-refused");
+    expect(steps).not.toContain("finalize-resolve-read-fail");
+    const named = vi
+      .mocked(captureToSentry)
+      .mock.calls.find(
+        (c) =>
+          (c[1] as { tags?: { step?: string } } | undefined)?.tags?.step ===
+          "finalize-23505-unknown-constraint",
+      );
+    const extra = (named?.[1] as { extra?: Record<string, unknown> } | undefined)
+      ?.extra;
+    expect(extra?.constraint).toBe("csv_daily_returns_strategy_date_key");
+    expect(extra?.pg_code).toBe("23505");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 146.1-04 / A2 + C4 — TERMINAL STATUS, AND THE TWO FAIL-CLOSED PATHS
+// ---------------------------------------------------------------------------
+
+/**
+ * A2 — THE CROSS-FLOW ECHO. This is an access-control defect (ASVS V4), not a
+ * cosmetic one.
+ *
+ * The partial unique index the 23505 fires on is
+ * `(user_id, wizard_session_id, source) WHERE wizard_session_id IS NOT NULL`
+ * (20260728120000:167-169). `status` is NOT in the key. And
+ * `src/lib/wizard/localStorage.ts` restores `wizard_session_id`
+ * unconditionally from ONE shared storage key, so the manager flow and the
+ * CONTRIB-02 contribution flow can arrive carrying the SAME session id.
+ *
+ * So a manager-flow resubmit (terminal status 'pending_review' — the admin
+ * publish queue's membership predicate) could resolve onto a row committed as
+ * 'private' and be echoed 200. The row's own status was then echoed back, so
+ * the caller was told "saved" for a strategy that will never enter the review
+ * queue — and in the other direction an owner-only contribution's id is handed
+ * to the manager flow.
+ *
+ * ⛔ The refusal reuses the EXISTING `refuse()` closure. Minting a code here
+ * would move `KNOWN_CSV_FINALIZE_CODES`, `EXPECTED_TABLE_SIZE` and the
+ * vocabulary invariant in the same commit, for a state the user cannot act on
+ * differently.
+ */
+
+/** POST as the CONTRIB-02 contribution flow (terminal status 'private'). */
+function postContribution(
+  series: Array<{ date: string; daily_return: number }>,
+) {
+  return POST(
+    new NextRequest("http://localhost:3000/api/strategies/csv-finalize", {
+      method: "POST",
+      body: JSON.stringify({
+        wizard_session_id: SESSION,
+        fmt: "daily_returns",
+        strategy_name: "Alpha",
+        daily_returns_series: series,
+        metadata: { description: "cr01 oracle marker" },
+        entry_context: "contribution",
+      }),
+      headers: {
+        "Content-Type": "application/json",
+        Origin: "http://localhost:3000",
+      },
+    }),
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  ) as any;
+}
+
+/** The reason string every `refuse()` capture carries in its Error message. */
+function refusalReasons(): string[] {
+  return vi
+    .mocked(captureToSentry)
+    .mock.calls.filter(
+      (c) =>
+        (c[1] as { tags?: { step?: string } } | undefined)?.tags?.step ===
+        "finalize-resolve-refused",
+    )
+    .map((c) => (c[0] as Error).message);
+}
+
+/** The committed series that makes an identical-retry resolve succeed. */
+function armCommitted2024() {
+  seriesProbe.count = 3;
+  seriesProbe.minDate = "2024-01-31";
+  seriesProbe.maxDate = "2024-03-29";
+}
+
+describe("[146.1-04 / A2] the resolve arm refuses a TERMINAL-STATUS mismatch", () => {
+  it("🔴 manager resubmit onto a committed 'private' contribution row is REFUSED", async () => {
+    // Without this, the manager flow is handed an owner-only contribution's id
+    // and told it was saved — and the strategy never enters the admin review
+    // queue, because 'private' is not the queue's membership predicate.
+    arm23505({ id: EXISTING_ID, name: "Alpha", status: "private" });
+    armCommitted2024();
+
+    const res = await post(SERIES_2024);
+
+    expect(
+      res.status,
+      "a manager-flow submission was answered with a 'private' row's id — a " +
+        "cross-flow echo, and the strategy will never reach the review queue",
+    ).toBe(409);
+    const body = await res.json();
+    expect(body.ok).toBe(false);
+    expect(body.code).toBe("CSV_SESSION_REUSED");
+    expect(res.headers.get("cache-control")).toContain("no-store");
+    expect(
+      updateCalls,
+      "this submission's metadata was applied to a row belonging to the " +
+        "other flow",
+    ).toEqual([]);
+    expect(sentrySteps()).toContain("finalize-resolve-refused");
+  });
+
+  it("🔴 THE OTHER DIRECTION: a contribution resubmit onto a committed 'pending_review' row is REFUSED", async () => {
+    // Both directions, deliberately. One-direction-only coverage lets a
+    // half-fix ship green.
+    arm23505({ id: EXISTING_ID, name: "Alpha", status: "pending_review" });
+    armCommitted2024();
+
+    const res = await postContribution(SERIES_2024);
+
+    expect(res.status).toBe(409);
+    const body = await res.json();
+    expect(body.code).toBe("CSV_SESSION_REUSED");
+    expect(updateCalls).toEqual([]);
+  });
+
+  it("POSITIVE: a contribution retry onto its OWN 'private' row still 200-echoes", async () => {
+    // The counterpart that keeps the refusal from being refuse-everything.
+    // Without it, A2 is satisfied by an arm that dead-ends every resubmit.
+    arm23505({ id: EXISTING_ID, name: "Alpha", status: "private" });
+    armCommitted2024();
+
+    const res = await postContribution(SERIES_2024);
+
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.ok).toBe(true);
+    expect(body.strategy_id).toBe(EXISTING_ID);
+    expect(body.status).toBe("private");
+    expect(updateCalls).toHaveLength(1);
+  });
+
+  it("an ABSENT status column is NOT read as a mismatch — absence is not a value", async () => {
+    // The guard mirrors the name check's `typeof === "string" &&` shape for
+    // exactly this reason. A guard that refuses every row whose `status` did
+    // not come back would ship green without this case.
+    arm23505({ id: EXISTING_ID, name: "Alpha", status: undefined });
+    armCommitted2024();
+
+    const res = await post(SERIES_2024);
+
+    expect(
+      res.status,
+      "a row with no readable status was refused as though a mismatch had " +
+        "been OBSERVED — absence rendered as a measurement",
+    ).toBe(200);
+    const body = await res.json();
+    expect(body.ok).toBe(true);
+  });
+
+  it("the STATUS comparison runs BEFORE the name check — the reason names the flow, not the name", async () => {
+    // A manager request landing on a 'private' row is a wrong-FLOW answer
+    // whether or not the names happen to differ too. If the name check spoke
+    // first the Sentry reason would send an operator hunting a rename.
+    arm23505({ id: EXISTING_ID, name: "Renamed", status: "private" });
+    armCommitted2024();
+
+    const res = await post(SERIES_2024);
+
+    expect(res.status).toBe(409);
+    const reasons = refusalReasons();
+    expect(reasons).toHaveLength(1);
+    expect(
+      reasons[0],
+      "the refusal was attributed to the NAME while the actual fact is that " +
+        "two different product flows collided on one session fence",
+    ).toMatch(/terminal status/i);
+    expect(reasons[0]).not.toMatch(/name mismatch/i);
+  });
+});
+
+describe("[146.1-04 / C4] both resolve-arm fail-closed paths answer 503 and write NOTHING", () => {
+  it("C4a — a FAILED strategies re-fetch fails closed (503) and issues zero metadata updates", async () => {
+    // supabase-js RESOLVES on a read failure rather than throwing, so an
+    // unchecked binding reads as "no row" — a read we could not make rendered
+    // as a measurement. Asserting only the status code would miss a
+    // fail-closed path that still issued the metadata UPDATE.
+    arm23505({ id: EXISTING_ID, name: "Alpha", status: "pending_review" });
+    resolveFetch.error = { code: "57014", message: "statement timeout" };
+
+    const res = await post(SERIES_2024);
+
+    expect(res.status).toBe(503);
+    const body = await res.json();
+    expect(body.ok).toBe(false);
+    expect(body.code).toBe("CSV_PERSIST_FAIL");
+    expect(
+      updateCalls,
+      "the route applied this submission's metadata after failing to read " +
+        "what is already committed",
+    ).toEqual([]);
+    expect(sentrySteps()).toContain("finalize-resolve-read-fail");
+  });
+
+  it("C4b — a re-fetch that finds NO committed row fails closed (503), never fabricates an echo", async () => {
+    // A 23505 with nothing to resolve to: a TOCTOU delete, an RLS hide, or a
+    // non-session 23505 that slipped every upstream gate. We cannot establish
+    // what exists, so we refuse.
+    arm23505(null);
+
+    const res = await post(SERIES_2024);
+
+    expect(res.status).toBe(503);
+    const body = await res.json();
+    expect(body.code).toBe("CSV_PERSIST_FAIL");
+    expect(updateCalls).toEqual([]);
+  });
+
+  it("C4b — a re-fetch row whose id is NOT a uuid fails closed too", async () => {
+    arm23505({ id: "not-a-uuid", name: "Alpha", status: "pending_review" });
+
+    const res = await post(SERIES_2024);
+
+    expect(res.status).toBe(503);
+    const body = await res.json();
+    expect(body.code).toBe("CSV_PERSIST_FAIL");
+    expect(updateCalls).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 146.1-04 / C1 — THE ECHO SAYS WHAT WAS COMPARED, AND NOTHING MORE
+// ---------------------------------------------------------------------------
+
+/**
+ * The resolve arm makes exactly TWO reads of the committed series: its row
+ * COUNT and its [min, max] date boundaries. It does not read a single daily
+ * value. The residual is documented and ACCEPTED in the route: equal count and
+ * equal boundaries with different interior values still echoes 200.
+ *
+ * ⚖️ FOUNDER CALL (C1): option (b) — honest copy — ships. Option (a), a content
+ * hash over the payload, would close the residual but needs persisted state: a
+ * third migration in a phase already carrying two, a backfill for every
+ * already-committed row, and a nullable-hash fail-open period. It is filed in
+ * TODOS.md with that cost.
+ *
+ * ⭐ THE ASSERTION IS ON ABSENCE. A presence-only check ("does it contain the
+ * new sentence?") is satisfied by CONCATENATING the new sentence onto the old
+ * over-claiming one — the same hole as the `%5000%` substring failure. Both
+ * polarities are asserted here.
+ */
+
+/**
+ * Claims the arm CANNOT make from a count and two boundary dates. Each is a
+ * sentence a reader would act on: "verified" and "confirmed" assert an
+ * observation, "identical"/"element by element"/"matches the file you
+ * submitted" assert equality of the interior values specifically.
+ */
+const OVERCLAIM_PHRASES: RegExp[] = [
+  /\bverified\b/i,
+  /\bconfirmed\b/i,
+  /\bidentical\b/i,
+  /element[\s-]by[\s-]element/i,
+  /matches (?:the )?(?:file|series|track record) you (?:submitted|uploaded)/i,
+  /\bevery (?:row|value|daily)\b/i,
+];
+
+describe("[146.1-04 / C1] the 200 echo states what was compared and does not over-claim", () => {
+  it("the resolve echo carries copy naming BOTH reads and admitting what was not read", async () => {
+    arm23505({ id: EXISTING_ID, name: "Alpha", status: "pending_review" });
+    armCommitted2024();
+
+    const res = await post(SERIES_2024);
+
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.ok).toBe(true);
+    expect(
+      typeof body.human_message,
+      "the 200 echo says nothing about what it compared, so a caller cannot " +
+        "tell a fresh save from a resolve onto a row it never re-read",
+    ).toBe("string");
+    // What it DID read.
+    expect(body.human_message).toMatch(/row count/i);
+    expect(body.human_message).toMatch(/first and last date/i);
+    // ⭐ What it did NOT read — the admission is the whole point of C1.
+    expect(
+      body.human_message,
+      "the echo does not admit that the individual daily values were never " +
+        "compared, which is precisely the residual the arm accepts",
+    ).toMatch(/not the individual daily values/i);
+  });
+
+  it("🔴 ABSENCE: the echo carries NO claim the two reads cannot support", async () => {
+    // ⛔ This is the assertion that survives CONCATENATION. Restoring an
+    // over-claiming sentence ALONGSIDE the honest one leaves every presence
+    // check above green and REDs only here.
+    arm23505({ id: EXISTING_ID, name: "Alpha", status: "pending_review" });
+    armCommitted2024();
+
+    const res = await post(SERIES_2024);
+    const body = await res.json();
+    const msg = String(body.human_message ?? "");
+
+    for (const phrase of OVERCLAIM_PHRASES) {
+      expect(
+        msg,
+        `the 200 echo asserts ${phrase} — an observation the arm never made. ` +
+          "It read a row count and two boundary dates; it read no daily value " +
+          "at all, and a caller acting on this sentence is acting on a claim " +
+          "the server cannot support.",
+      ).not.toMatch(phrase);
+    }
+  });
+
+  it("a FRESH create carries no such note — nothing was resolved, so nothing was compared", async () => {
+    // The discrimination that keeps the note honest in the other direction: a
+    // first submit really did write this payload, and telling that caller
+    // "we compared boundaries" would be its own fabricated observation.
+    const res = await post(SERIES_2024);
+
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.ok).toBe(true);
+    expect(body.human_message).toBeUndefined();
+  });
+
+  it("BEHAVIOUR UNCHANGED: equal count and boundaries with different interior values still echoes 200", async () => {
+    // C1 is a COPY change, not a refusal change. The residual stays open by
+    // decision; what changed is that the envelope stops implying it is closed.
+    arm23505({ id: EXISTING_ID, name: "Alpha", status: "pending_review" });
+    seriesProbe.count = 3;
+    seriesProbe.minDate = "2024-01-31";
+    seriesProbe.maxDate = "2024-03-29";
+
+    // Same dates, DIFFERENT returns — indistinguishable to a count + boundary
+    // read, and accepted as such.
+    const res = await post([
+      { date: "2024-01-31", daily_return: 0.99 },
+      { date: "2024-02-29", daily_return: -0.5 },
+      { date: "2024-03-29", daily_return: 0.42 },
+    ]);
+
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.ok).toBe(true);
+    expect(body.strategy_id).toBe(EXISTING_ID);
   });
 });

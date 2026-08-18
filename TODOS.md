@@ -2860,6 +2860,50 @@ csv-finalize-rpc.test.ts points at a DROPped RPC (nine 22023 assertions coverage
 C1 interior-values echo (FOUNDER: hash vs honest copy) · C2 duplicate handler collapse ·
 C3 TEST sweep-cron seed residual (mitigated).
 
+### C1 option (a) — content hash over the CSV payload (NOT taken in Phase 146.1)
+
+**Status: filed, not scheduled. Option (b) — honest copy — SHIPPED in Phase 146.1
+(plan 146.1-04), and option (b) is what a reader finds in the code today.** The 200
+resolve echo in `src/app/api/strategies/csv-finalize/route.ts` now carries a
+`human_message` stating that the arm compared the committed series' ROW COUNT and its
+FIRST and LAST dates — and explicitly NOT the individual daily values — and the residual
+comment beside the series-equality check records this founder call. The predicate did not
+change; the envelope stopped implying an observation that was never made.
+
+**The residual that stays open.** The resolve arm makes exactly two reads of the committed
+series (count, and [min,max] boundary dates). A resubmit whose payload has the SAME row
+count and the SAME first/last dates but DIFFERENT interior values is indistinguishable to
+those two reads and is still echoed 200. The identical-retry case dominates by
+construction, which is why (b) is defensible; but the hole is real and is not closed.
+
+**What option (a) would cost — filed WITH its price, because an option without its cost is
+an option nobody can decide:**
+
+- [ ] **A content hash persisted at CREATE time.** Requires a new column on `strategies`
+      (or a field on `strategy_verifications`) holding a digest of the canonicalised
+      daily-returns payload, written inside `finalize_csv_strategy_with_returns` so it
+      shares the fold's transaction. The resolve arm then compares the resubmit's digest
+      against the committed one and refuses on mismatch — a real equality check instead of
+      two boundary reads.
+- [ ] **Cost 1 — a THIRD migration.** Phase 146.1 already carries two
+      (`20260819130000` fold input guards, `20260819130500` sweep readmit), each with its
+      own PROD-risk TEST rehearsal. A third means a third rehearsal and a third apply
+      window.
+- [ ] **Cost 2 — a BACKFILL question for every already-committed row.** Existing CSV
+      strategies have no digest. Computing one requires re-reading each strategy's
+      `csv_daily_returns` series and canonicalising it exactly as the write path does — and
+      any canonicalisation drift between backfill and write silently refuses honest
+      retries forever.
+- [ ] **Cost 3 — a nullable-hash FAIL-OPEN period.** Between the migration and the
+      completed backfill, `hash IS NULL` means "not measured", not "no match". The arm must
+      keep the count+boundary behaviour for those rows (absence is not a value), so the
+      residual persists for every pre-backfill row until the backfill lands. That window
+      needs a decided length and an observable end.
+
+**Re-opening it is a phase of its own, not an amendment to 146.1.** If the founder chooses
+(a), the honest-copy sentence shipped by (b) becomes wrong in the other direction (it would
+under-claim) and must be revised in the same change.
+
 ## Phase 146 — RATE-04 value-parity candidates (logged 2026-08-18, D-146-4: retuning is founder territory)
 
 Source: `.planning/phases/146-rate/146-AUDIT.md` §3 (fresh at HEAD `e912e38b`). Every number
