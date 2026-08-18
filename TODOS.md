@@ -2879,3 +2879,16 @@ backs ~9 surfaces — the remedy for any of its flows is a NEW named limiter, ne
   (`csv-validate/route.ts:6` imports `postProcessKey`; `/csv/validate` has no TS caller).
   Recommendation: founder call between raising `_PROCESS_KEY_TENANT_LIMIT` or adding a
   csv-scoped tier; fix the stale docblock citation in the same commit as whichever lands.
+
+## Phase 146 close-out notes (logged 2026-08-18)
+
+- [ ] **`analytics-service/tests/` are outside the mypy --strict gate — test_match_router.py
+  alone carries 274 strict errors.** The canonical gate (`python3 -m mypy --strict
+  --follow-imports=silent services/ routers/ models/`, clean at 91 files) deliberately
+  excludes tests/; measured 2026-08-18 while verifying the limiter-flake fix: running strict
+  on tests/test_match_router.py reports 274 errors (untyped fixtures/mocks — pre-existing,
+  not introduced by Phase 146). Decide: either annotate the test tree incrementally and
+  widen the gate directory-by-directory (start with the limiter/parity test files, which are
+  newest), or record tests/ as permanently out of strict scope in a mypy config comment so
+  the next session doesn't re-derive this. Never widen the gate in the same commit as a
+  behavior change.

@@ -100,11 +100,11 @@ investor factsheet on a spinner that never resolves.
 
 ### RATE — Rate limiting (audit + close verified gaps)
 
-- [ ] **RATE-01**: A kickoff re-grep produces the authoritative current gap list (every `src/app/api` route calling either seam client, checked for `checkLimit`), replacing the stale `TODOS.md` route list as the basis for this group's scope.
-- [ ] **RATE-02**: `admin/match/eval` enforces a rate limit keyed on `user.id`, sized to real eval-tooling cadence — the one verified Next.js-layer gap.
-- [ ] **RATE-03**: The Python `routers/match.py` endpoints (`/recompute`, `/eval`) enforce server-side slowapi limits mirroring `portfolio.py`'s pattern, giving defense-in-depth if a leaked `X-Service-Key` reaches Railway directly and bypasses the Vercel-side limiter.
-- [ ] **RATE-04**: Existing limiter VALUES on the seven already-limited routes are audited against real Python-side cost and adjusted where wrong — the substantive remaining RATE question is whether each route has the RIGHT limit, not whether it has one.
-- [ ] **RATE-05**: A `withRateLimit(handler, limiter)` HOF exists and composes alongside `withAuth`/`withRole`, so a newly-added route cannot silently ship with no limiter (today's per-route hand-wiring has no CI gate).
+- [x] **RATE-01**: A kickoff re-grep produces the authoritative current gap list (every `src/app/api` route calling either seam client, checked for `checkLimit`), replacing the stale `TODOS.md` route list as the basis for this group's scope.
+- [x] **RATE-02**: `admin/match/eval` enforces a rate limit keyed on `user.id`, sized to real eval-tooling cadence — the one verified Next.js-layer gap.
+- [x] **RATE-03**: The Python `routers/match.py` endpoints (`/recompute`, `/eval`) enforce server-side slowapi limits mirroring `portfolio.py`'s pattern, giving defense-in-depth if a leaked `X-Service-Key` reaches Railway directly and bypasses the Vercel-side limiter.
+- [x] **RATE-04**: Existing limiter VALUES on the seven already-limited routes are audited against real Python-side cost and adjusted where wrong — the substantive remaining RATE question is whether each route has the RIGHT limit, not whether it has one.
+- [x] **RATE-05**: A `withRateLimit(handler, limiter)` HOF exists and composes alongside `withAuth`/`withRole`, so a newly-added route cannot silently ship with no limiter (today's per-route hand-wiring has no CI gate).
 
 ---
 
@@ -1491,11 +1491,11 @@ Populated during roadmap creation.
 | AUM-04 | Phase 151 (v1.17) | ⛔ **ROOT CAUSE of AUM=0** — blank slate was FORCED: all-or-nothing `perKeyDailiesGateSatisfied` hides "From my book". ⭐ MANAGER-side mt5 keys pin the ALLOCATOR's gate false permanently (cross-role contamination) |
 | AUM-05 | Phase 151 (v1.17) | Pending — **sFOX will crash the holdings sync identically** (`get_balances` not `fetch_balance`); invisible only because the flag is off. ⛔ close BEFORE sFOX go-live; fix the non-ccxt CLASS not the MT5 instance |
 | NAV-01 | Phase 149 (v1.17 — own phase, split 2026-08-04) | Pending — **SHARPENED 2026-08-04: a RANKING at discovery parity**, not a list — every uploaded key + derived strategy incl. private/draft, same columns/sort/`#n`+percentile; REUSE the existing ranking component/query (visibility predicate via `withPublishedOrOwner` is the only difference); honest pending states, never zeros. ⛔ depends on OWN-02 (Phase 148 — strictly before) |
-| RATE-01 | Phase 146 | Pending |
-| RATE-02 | Phase 146 | Pending |
-| RATE-03 | Phase 146 | Pending |
-| RATE-04 | Phase 146 | Pending |
-| RATE-05 | Phase 146 | Pending |
+| RATE-01 | Phase 146 | Complete (2026-08-18, PR #690) |
+| RATE-02 | Phase 146 | Complete (2026-08-18, PR #690) |
+| RATE-03 | Phase 146 | Complete (2026-08-18, PR #690) |
+| RATE-04 | Phase 146 | Complete (2026-08-18, PR #690) |
+| RATE-05 | Phase 146 | Complete (2026-08-18, PR #690) |
 | PYAPI-01..10 | Phase 140.1 | Complete (9/10; gaps deferred) |
 | PYAPIFIX-01..06 | Phase 140.1.1 | Complete |
 | PYAPIFIX2-01..06 | Phase 140.1.2 | Complete (PYAPIFIX2-01 Python half only — render half owned by 140.3 / TS-35) |
