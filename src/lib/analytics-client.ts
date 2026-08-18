@@ -920,17 +920,18 @@ export async function recomputeMatch(
       force,
       actor_id: actorId,
     },
-    // TS-04: INERT — /api/match/recompute has NO Python limiter at all (TS-21,
-    // owned by Phase 146). Sent anyway, for the same reason as the simulator.
+    // TS-04 → 146-02: LIVE — /api/match/recompute now carries a slowapi
+    // 30/minute limit keyed on this claim (scope ``match_recompute``, RATE-03);
+    // the tenantId sent here is consumed by tenant_or_platform_key.
     { budgetKey: "match-recompute", tenantId: actorId },
   );
   return parseResponse(RecomputeMatchResponseSchema, data, "/api/match/recompute");
 }
 
 /**
- * Phase 140.2-09 / TS-04 — `tenant` is REQUIRED here even though the claim is
- * INERT: `/api/match/eval` has no Python limiter at all (TS-21, owned by Phase
- * 146).
+ * Phase 140.2-09 / TS-04 → 146-02: the claim is now LIVE — `/api/match/eval`
+ * carries a slowapi 30/minute limit keyed on it (scope ``match_eval``,
+ * RATE-03 / TS-21 closed).
  *
  * This is the ONE wrapper that had no identity of any kind, and it is exactly
  * the member a "thread it into the three that need it" reading would have left

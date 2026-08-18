@@ -107,9 +107,12 @@ per-tenant quota lives in-handler against ``req.user_id``
 (``_check_simulator_user_rate``), so the IP key is a ceiling, not the quota — but
 the ceiling is still platform-wide behind the edge proxy.
 
-⚠️ **No limiter at all:** ``routers/match.py`` ``POST /api/match/recompute`` and
-``GET /api/match/eval``, both seam-reachable (``analytics-client.ts:399,418``).
-RATE-03 / Phase 146 owns adding one. Recorded here, not fixed here.
+Phase 146-02 / RATE-03 — the match gap, CLOSED: ``routers/match.py``
+``POST /api/match/recompute`` and ``GET /api/match/eval`` now carry
+``30/minute`` limits keyed by ``partial(tenant_or_platform_key, scope=...)``
+(scopes ``match_recompute`` / ``match_eval``). ``POST /api/match/cron-recompute``
+deliberately stays unlimited: cron surface, service-key gated (requirements
+decision #7 analogy; A2 recorded OUT of scope).
 
 ⚠️ **Storage is ``memory://`` and therefore per-replica** (ASSUMPTION-3). With N
 Railway replicas every number above is N× looser and buckets reset unevenly on
