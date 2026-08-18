@@ -688,10 +688,63 @@ async function finalizeAtomicOrErrorResponse(
   }
 
   // ── The fold-failure arm (D-07, D-11, D-12) ────────────────────────────
-  // A non-23505 RPC error, or a 2xx whose payload lost the id. Under the
-  // fold NOTHING was persisted (the rollback is total), so the copy below
-  // states exactly that and invites a retry — which arrives as a clean
-  // first submit, not a 23505.
+  // A non-23505 RPC error, or a 2xx whose payload lost the id.
+  //
+  // ⚖️ 146.1 / A3 (2026-08-18) — THE CLAIM THAT WAS REMOVED, AND FROM WHICH
+  // ARRIVALS.
+  //
+  // This arm used to answer EVERY arrival with one sentence: "Nothing was
+  // saved — the submission rolled back completely, so it is safe to try
+  // again." Three distinct outcome classes reach here, and that sentence is
+  // an honest observation for exactly ONE of them.
+  //
+  //   CLASS 1 — a SQLSTATE-bearing RPC error (22023 / 42501 / 22007 / 22P02 /
+  //   23502 / …). PostgREST returned a BODY carrying a 5-character `code`,
+  //   which means the fold ran and RAISEd. The fold has no EXCEPTION handler
+  //   clause, so the raise aborts the function and every write in its single
+  //   transaction rolls back (20260819120000:82-96). The rollback claim is
+  //   TRUE here. It is kept VERBATIM.
+  //
+  //   CLASS 2 — a TRANSPORT failure. postgrest-js RESOLVES rather than
+  //   rejects on a fetch fault, handing us `{ error: { code: "" }, data:
+  //   null, status: 0 }` (PostgrestBuilder.ts:443-454). And
+  //   `RETRYABLE_METHODS` is `['GET','HEAD','OPTIONS']`
+  //   (src/types/common/common.ts:30), so the RPC POST is NEVER retried: what
+  //   we sent was ONE POST, and it may have reached PostgREST and committed
+  //   before the connection died. We did not observe a rollback. We observed
+  //   that we stopped being able to see.
+  //
+  //   CLASS 3 — a 2xx whose id did not survive (TS-13, `!error` and a
+  //   non-UUID return). A 2xx from PostgREST means the transaction COMMITTED;
+  //   only the id failed to reach us. "Nothing was saved" is not merely
+  //   unsupported here, it is provably the wrong way round.
+  //
+  // ⛔ THE DISCRIMINATOR IS AN EXPLICIT LENGTH CHECK, NOT TRUTHINESS. Class
+  // 2's `code` is the EMPTY STRING, which is falsy, so `if (error?.code)`
+  // silently merges classes 2 and 3 into one and then answers both with
+  // whichever copy the other branch holds. `error.code.length === 5` is the
+  // only test that separates "PostgREST told us a SQLSTATE" from "PostgREST
+  // told us nothing".
+  //
+  // PRECEDENT, and why this is a correction rather than a preference:
+  // `wizardErrors.ts:1971-1985` (SEAMUX-04) already made this exact call on
+  // the client side — it deleted "your data is unchanged" from
+  // `CSV_SUBMIT_FAILED` because "a client-side timeout does not cancel the
+  // server-side transaction, so the write may well have landed". The route's
+  // sentence was the older, unreasoned side of that contradiction. Classes 2
+  // and 3 now speak in the voice that entry already approved
+  // (`wizardErrors.ts:2001-2015`), including its recovery step — check
+  // /strategies in another tab first — which composes with the 23505 resolve
+  // arm above: an unchanged resubmit from this wizard resolves onto the
+  // strategy already started instead of creating a second one.
+  //
+  // 42501 → 401: CONSIDERED AND DEFERRED, not forgotten. `withAuth` ran
+  // milliseconds earlier, so the only reachability is a session expiring
+  // INSIDE one request; and a 401 on a POST the wizard treats as retryable
+  // would throw the user into a login redirect mid-submit. The honest
+  // improvement is a distinguishing `debug_context`, which this arm now
+  // carries (`outcome_class`), not a status change. Revisit only with a
+  // measured 42501 rate from the Sentry tags below.
   console.error(
     `${opts.logPrefix} finalize_csv_strategy_with_returns failed [correlation_id=${opts.correlationId}]:`,
     // SEAMRIM-06 — `.code` is the five-character SQLSTATE, allowlisted by
@@ -707,6 +760,24 @@ async function finalizeAtomicOrErrorResponse(
   // option needed: the error is a PostgREST error from the SSR client (no
   // forwarded JWT header exists on this path any more), mirroring the
   // metadata-update capture's shape.
+  // 146.1 / A3 — the class, computed ONCE and used for the copy, the Sentry
+  // step tag and the debug_context alike, so the three can never disagree
+  // about what happened. `rolled-back` is the only one that observed a
+  // rollback.
+  const outcomeClass: "rolled-back" | "transport-unknown" | "committed-lost-id" =
+    typeof error?.code === "string" && error.code.length === 5
+      ? "rolled-back"
+      : error
+        ? "transport-unknown"
+        : "committed-lost-id";
+  // Classes 2 and 3 carry their OWN step tag. Merged into one bucket, the
+  // honest arm's firing rate is unmeasurable, and nobody can ever tell
+  // whether the deferred 42501→401 question or a real transport problem is
+  // the live one.
+  const sentryStep =
+    outcomeClass === "rolled-back"
+      ? "finalize-fold-fail"
+      : "finalize-fold-outcome-unknown";
   captureToSentry(
     error ??
       new Error(
@@ -715,10 +786,11 @@ async function finalizeAtomicOrErrorResponse(
         )})`,
       ),
     {
-      tags: { surface: "csv-finalize", step: "finalize-fold-fail" },
+      tags: { surface: "csv-finalize", step: sentryStep },
       extra: {
         correlation_id: opts.correlationId,
         rpc_error_code: error?.code ?? null,
+        outcome_class: outcomeClass,
       },
     },
   );
@@ -727,10 +799,29 @@ async function finalizeAtomicOrErrorResponse(
     response: NextResponse.json(
       {
         ok: false,
+        // ⛔ ONE CODE. A second code for the same fact is the two-names-one-fact
+        // drift `wizardErrors.ts:1937-1941` exists to prevent, and it buys
+        // nothing: `CSV_FINALIZE_FAIL` is a KNOWN_CSV_FINALIZE_CODES member
+        // (CsvSubmitStep.tsx:161-167), so the sentence below is what RENDERS.
+        // Minting one would move KNOWN_CSV_FINALIZE_CODES, EXPECTED_TABLE_SIZE
+        // and the vocabulary invariant in the same commit for a state the user
+        // cannot act on differently.
         code: "CSV_FINALIZE_FAIL",
         human_message:
-          "Your strategy could not be saved. Nothing was saved — the submission rolled back completely, so it is safe to try again. Contact support@quantalyze.com if it persists.",
-        debug_context: { rpc_error_code: error?.code ?? null },
+          outcomeClass === "rolled-back"
+            ? // CLASS 1 — VERBATIM, unchanged. The database told us it raised;
+              // the fold has no handler clause; the rollback is total. Making
+              // this one vague too would be the failure mode on the other
+              // side of the same defect.
+              "Your strategy could not be saved. Nothing was saved — the submission rolled back completely, so it is safe to try again. Contact support@quantalyze.com if it persists."
+            : // CLASSES 2 and 3 — commit-agnostic, in the voice
+              // `CSV_SUBMIT_FAILED` already approved. It states what we do not
+              // know, then puts the NON-DESTRUCTIVE check first.
+              "We could not confirm whether your strategy was saved. The save step did not report back, so we cannot promise it completed or that it did not. Open your strategies list in another tab first: if the strategy is listed, the save completed and you are done. If it is not listed, submit the same file again — an unchanged resubmit from this wizard resolves to the strategy you already started instead of creating a second one. Contact support@quantalyze.com if it persists.",
+        debug_context: {
+          rpc_error_code: error?.code ?? null,
+          outcome_class: outcomeClass,
+        },
         correlation_id: opts.correlationId,
       },
       { status: 500, headers: NO_STORE_HEADERS },
@@ -1204,11 +1295,27 @@ async function writeFailedStrategyAnalyticsPlaceholder(
     }
   } catch (placeholderThrow) {
     // SEAMRIM-06 — the WHOLE ternary is replaced by one leaf call, not just the
-    // `.message` arm. This is the CSV finalize flow, whose outgoing headers
-    // carry `X-User-Access-Token` (a live end-user Supabase JWT), and
-    // `err.message` is precisely where undici puts them. Scrubbing one arm and
-    // leaving `String(placeholderThrow)` — which renders `name: message` — would
-    // be an instance fix of a two-reference site.
+    // `.message` arm, and `err.message` is precisely where undici inlines
+    // whatever headers it was handed. Scrubbing one arm and leaving
+    // `String(placeholderThrow)` — which renders `name: message` — would be an
+    // instance fix of a two-reference site.
+    //
+    // ⚠️ 146.1 / A3 (2026-08-18) — CORRECTED. This comment used to justify the
+    // scrub by claiming "this is the CSV finalize flow, whose outgoing headers
+    // carry `X-User-Access-Token` (a live end-user Supabase JWT)". That is
+    // FALSE and was already false before this change: this route calls
+    // `postProcessKey` nowhere (zero matches in this file), so it forwards no
+    // user JWT to anything. Since Phase 145 it talks only to PostgREST via the
+    // SSR cookie-session client and, here, the service-role admin client.
+    //
+    // The SCRUB STAYS, and the reason is unchanged in substance: what this
+    // path actually hands out is a service-role `apikey`/`Authorization`
+    // header pair on the admin client, plus a Postgres connection string in
+    // some fault shapes, and undici renders request headers into fetch error
+    // messages the same way regardless of WHICH credential they carry. The
+    // false premise was the naming of the credential, not the need to scrub
+    // it. ⛔ Do not "simplify" the scrub away on the strength of the
+    // correction.
     console.warn(
       `${opts.logPrefix} ${opts.subcontext} strategy_analytics placeholder upsert threw (non-blocking) [correlation_id=${opts.correlationId}]: ${scrubSeamError(placeholderThrow)}`,
     );
