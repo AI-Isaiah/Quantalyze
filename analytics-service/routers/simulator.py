@@ -245,19 +245,22 @@ async def portfolio_simulator(request: Request, req: SimulatorRequest) -> dict[s
     # server-set ``req.user_id`` (the key_func cannot see the parsed body). One
     # user exhausting their quota must NOT 429 another user on the same IP.
     if not _check_simulator_user_rate(req.user_id):
-        raise HTTPException(
-            status_code=429,
+        # TS-23 (146-02, D-146-3): migrated onto the nested service_error
+        # envelope — internal.py's worked example, the ONE winning 429
+        # raise-site shape. The wait stays the WINDOW, not the LIMIT
+        # (PYAPIFIX2-04): `_SIMULATOR_USER_RATE_LIMIT` is a COUNT of 20, and
+        # advertising it would promise a 20-second wait for an hour-long window
+        # (~180 rejected retries per throttled user). Read from the same
+        # constant `_check_simulator_user_rate` enforces.
+        raise service_error(
+            429,
+            "RATE_LIMITED",
+            retryable=True,
+            retry_after=_SIMULATOR_USER_RATE_WINDOW_SEC,
             detail=(
                 "Simulator rate limit exceeded "
                 f"({_SIMULATOR_USER_RATE_LIMIT}/hour per user) — please retry later"
             ),
-            # PYAPIFIX2-04 — the wait is the WINDOW, not the LIMIT.
-            # `_SIMULATOR_USER_RATE_LIMIT` (interpolated in the copy above) is a
-            # COUNT of 20; using it here would advertise a 20-second wait for an
-            # hour-long window and invite ~180 rejected retries per throttled
-            # user. Read from the same constant `_check_simulator_user_rate`
-            # enforces.
-            headers={"Retry-After": str(_SIMULATOR_USER_RATE_WINDOW_SEC)},
         )
 
     supabase = get_supabase()

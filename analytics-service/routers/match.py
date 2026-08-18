@@ -36,11 +36,12 @@ import asyncio
 import logging
 import time
 from datetime import datetime, timezone
+from functools import partial
 from typing import Annotated, Any
 from uuid import UUID, uuid4
 
 import pandas as pd
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel
 
 from services.db import (
@@ -64,6 +65,7 @@ from services.match_engine import (
 from services.match_eval import (
     compute_hit_rate_metrics,
 )
+from services.rate_limit import limiter, tenant_or_platform_key
 
 router = APIRouter(prefix="/api/match", tags=["match"])
 logger = logging.getLogger("quantalyze.analytics")
@@ -1621,7 +1623,16 @@ def _is_allocator_profile(allocator_id: str) -> bool | None:
 
 
 @router.post("/recompute")
-async def recompute(req: RecomputeRequest) -> dict[str, Any]:
+@limiter.limit(
+    # RATE-03 / TS-21 (146-02, D-146-2): defense-in-depth floor for a leaked
+    # X-Service-Key looping Railway directly. 30/min per tenant sits ABOVE the
+    # max legitimate Vercel-forwarded rate (20/min per admin via
+    # adminActionLimiter on both siblings post-146-01) and brutally below an
+    # unauthenticated-loop abuse rate. Storage is memory:// per replica
+    # (ASSUMPTION-3): an order-of-magnitude floor, not a quota.
+    "30/minute", key_func=partial(tenant_or_platform_key, scope="match_recompute")
+)
+async def recompute(request: Request, req: RecomputeRequest) -> dict[str, Any]:
     """Single-allocator recompute. Called from the Next.js admin /api/admin/match/recompute."""
     # Stringify the UUID once for Supabase / downstream sync helpers.
     allocator_id = str(req.allocator_id)
@@ -1737,23 +1748,26 @@ async def recompute(req: RecomputeRequest) -> dict[str, Any]:
             _now = time.monotonic()
             _last = _force_last_run.get(allocator_id, 0.0)
             if _now - _last < FORCE_RECOMPUTE_MIN_INTERVAL_S:
-                wait_s = int(FORCE_RECOMPUTE_MIN_INTERVAL_S - (_now - _last))
-                raise HTTPException(
-                    status_code=429,
+                # TS-23 (146-02, D-146-3): migrated onto the nested
+                # service_error envelope — internal.py's worked example, the ONE
+                # winning 429 raise-site shape. `wait_s` stays derived from the
+                # same interval the guard checks (never RETRY_AFTER_SECONDS,
+                # never a fresh literal — PYAPIFIX2-04 preserved). NOW clamped
+                # to >= 1: the contract's _validate requires a positive
+                # Retry-After, and the body interpolates the SAME clamped value
+                # so header and copy still agree (the old unclamped
+                # "Retry-After: 0" arm is traded away for the one-shape
+                # contract).
+                wait_s = max(1, int(FORCE_RECOMPUTE_MIN_INTERVAL_S - (_now - _last)))
+                raise service_error(
+                    429,
+                    "RATE_LIMITED",
+                    retryable=True,
+                    retry_after=wait_s,
                     detail=(
                         f"force recompute for {allocator_id} throttled: "
                         f"retry after {wait_s}s (min interval {FORCE_RECOMPUTE_MIN_INTERVAL_S}s)"
                     ),
-                    # PYAPIFIX2-04. `wait_s` — the SAME number the copy above
-                    # promises, and derived from the same interval the guard
-                    # checks. Never RETRY_AFTER_SECONDS (services/error_contract
-                    # is explicit that a 429's wait is a limiter WINDOW, not a
-                    # property of a dependency) and never a fresh literal.
-                    # NOT clamped with max(1, ...): int() truncation near expiry
-                    # yields 0, and "Retry-After: 0" means "retry now" — RFC
-                    # 9110 §10.2.3 — which is exactly what the body says. A
-                    # clamp would make header and body disagree.
-                    headers={"Retry-After": str(wait_s)},
                 )
             # Stamp optimistically inside the lock so concurrent requests that
             # arrive while scoring is in-flight also see the window. On scoring
@@ -1839,7 +1853,14 @@ async def recompute(req: RecomputeRequest) -> dict[str, Any]:
 
 
 @router.get("/eval")
+@limiter.limit(
+    # RATE-03 / TS-21 (146-02, D-146-2): same defense-in-depth floor as
+    # /recompute above — 30/min per tenant, sized above the 20/min legitimate
+    # Vercel-forwarded ceiling; per-replica memory:// storage.
+    "30/minute", key_func=partial(tenant_or_platform_key, scope="match_eval")
+)
 async def eval_metrics(
+    request: Request,
     # M-0608: enforce the 1..365 bound at the type layer via Query(ge=, le=)
     # rather than an imperative `if lookback_days < 1 ...: raise` in the body.
     # FastAPI emits an automatic 422 with structured loc/type detail (which the

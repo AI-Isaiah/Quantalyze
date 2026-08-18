@@ -46,6 +46,7 @@ import hmac
 import pathlib
 import time
 import tokenize
+import uuid
 from typing import Any
 
 import pytest
@@ -58,10 +59,26 @@ from slowapi.errors import RateLimitExceeded
 # fully populated no matter which tests pytest collected first.
 import routers.csv  # noqa: F401
 import routers.exchange  # noqa: F401
+import routers.match  # noqa: F401
 import routers.optimizer  # noqa: F401
 import routers.portfolio  # noqa: F401
 import routers.simulator  # noqa: F401
 from services import rate_limit as rl
+
+import pytest as _pytest
+
+
+@_pytest.fixture(autouse=True)
+def _reset_limiter_buckets():
+    """Ship-review fix: the claimless platform bucket is PATH-keyed and shared
+    across every test in the process; without a reset, this module's 31-call
+    drive-to-429 probe drains platform:/api/match/recompute for later files
+    (measured: TestRecomputeSerializationLock reds when run in-process after
+    the probe). Reset before AND after so ordering never matters."""
+    rl.limiter.reset()
+    yield
+    rl.limiter.reset()
+
 
 # ---------------------------------------------------------------------------
 # The class, enumerated. LITERALS — copied from RESEARCH Q1.4's L-table, not
@@ -558,6 +575,14 @@ class TestClassClosure:
         expected = {row[2] for row in IP_KEYED_CLASS} | {
             # FINDING-10, quarantined: still IP-keyed, still not this plan's.
             "routers.simulator.portfolio_simulator",
+            # RATE-03 / TS-21 (146-02, D-146-2): the Phase 146 gap CLOSED —
+            # both match routes joined the shared tenant-keyed surface
+            # (scopes ``match_recompute`` / ``match_eval``, 30/minute). NOT
+            # added to IP_KEYED_CLASS: that table is the enumerated PYAPI-03
+            # defect class with an asserted size of 9, and these routes were
+            # never IP-keyed — they had no limiter at all.
+            "routers.match.recompute",
+            "routers.match.eval_metrics",
         }
         registered = {
             name for name in rl.limiter._route_limits if name.startswith("routers.")
@@ -586,19 +611,63 @@ class TestClassClosure:
                 assert isinstance(limit.key_func, functools.partial), name
                 assert limit.key_func.func is rl.tenant_or_platform_key, name
 
-    def test_match_routes_still_have_no_limiter(self) -> None:
-        """RATE-03 / Phase 146's gap, recorded as an executable note.
+    def test_match_recompute_actually_throttles(self, monkeypatch: Any) -> None:
+        """RATE-03 / TS-21 (146-02) behavioural oracle: a direct hit past
+        30/min on a match route answers 429.
 
-        ``/api/match/recompute`` and ``/api/match/eval`` are seam-reachable
-        (``analytics-client.ts:399,418``) and carry NO limiter at all. Adding one
-        is out of scope here; this asserts the gap still has the shape Phase 146
-        will be handed, and goes red the day someone closes it so the note gets
-        deleted instead of rotting.
+        Replaces ``test_match_routes_still_have_no_limiter`` — that tripwire's
+        docstring ordered its own deletion the day the gap closed, and 146-02
+        closed it. Mirrors ``test_default_keyed_route_actually_throttles``:
+        real requests through the REAL ``routers.match`` router, driven until
+        a 429 arrives. ``_is_allocator_profile`` is stubbed to return ``None``
+        so every budget-spending call answers a fast deterministic 503 (the
+        Supabase-down arm) instead of touching a live DB — slowapi's
+        check-and-hit runs BEFORE the handler body, so budget is consumed
+        either way.
         """
-        import routers.match  # noqa: F401
+        import routers.match as match_mod
 
-        assert not [n for n in rl.limiter._route_limits if n.startswith("routers.match.")]
-        assert not [n for n in rl.limiter._dynamic_route_limits if n.startswith("routers.match.")]
+        monkeypatch.setattr(match_mod, "_is_allocator_profile", lambda _aid: None)
+
+        app = FastAPI()
+        app.state.limiter = rl.limiter
+        app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+        app.include_router(match_mod.router)
+
+        # NOTE (ship-review 2026-08-18): a unique X-Service-Key does NOT isolate —
+# the claimless arm of tenant_or_platform_key keys on request PATH only
+# (rate_limit.py _platform_bucket), so every claimless call shares ONE
+# platform:<path> bucket. Isolation comes from the autouse limiter reset
+# below, not from the credential. Original (false) rationale: unique
+# per-run credential → private bucket. Without it
+        # this drive exhausts the shared unverified-credential bucket and a
+        # sibling file's match POSTs (test_match_router.py drives ~23 of them)
+        # inherit a spent budget for the next 60 seconds.
+        probe_credential = f"rate03-probe-{uuid.uuid4()}"
+
+        throttled = None
+        with TestClient(app) as client:
+            # BOUNDED-AND-DRIVEN, same rationale as _drive_until_throttled:
+            # the registered limit is 30/minute, so 31 calls pin the bound.
+            for _ in range(31):
+                resp = client.post(
+                    "/api/match/recompute",
+                    json={"allocator_id": str(uuid.uuid4())},
+                    headers={"X-Service-Key": probe_credential},
+                )
+                if resp.status_code == 429:
+                    throttled = resp
+                    break
+                assert resp.status_code == 503, (
+                    "harness: a budget-spending call must reach the stubbed "
+                    f"handler. Got {resp.status_code}: {resp.text[:300]}"
+                )
+
+        assert throttled is not None, (
+            "/api/match/recompute never answered 429 within 31 calls — the "
+            "RATE-03 slowapi floor is not enforced."
+        )
+        assert throttled.status_code == 429
 
 
 # ---------------------------------------------------------------------------

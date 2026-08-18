@@ -671,3 +671,79 @@ describe("[140.3-G8 / SEAMUX-03] GET /api/admin/match/eval — machine code per 
     expect((await res.json()).code).toBe("UNKNOWN");
   });
 });
+
+/**
+ * 146-01 / RATE-02 — the deny arms, behaviourally (SEAMRIM-05's admin shape,
+ * mirroring the posture invariant's admin/match/recompute block).
+ *
+ * The limiter module is NOT mocked wholesale: `checkLimit` is spied on the
+ * REAL `@/lib/ratelimit` (imported from the same post-`vi.resetModules()`
+ * registry as the route — the class-identity warning in this file's header
+ * applies to module identity too), so the `rateLimitDenyJson` under test is
+ * the production builder and the 503-vs-429 decision is the chokepoint's own,
+ * not a double's. `vi.spyOn` + `restoreAllMocks`, never `vi.stubGlobal`
+ * (DEF-16-1, the CI Node 22 lesson).
+ */
+describe("[146-01 / RATE-02] GET /api/admin/match/eval — deny arms through the real chokepoint", () => {
+  beforeEach(() => {
+    userState.current = { id: "admin-1" };
+    adminFlag.isAdmin = true;
+    evalState.lastArgs = null;
+    evalState.throwValue = null;
+    evalState.result = { rows: [] };
+    vi.resetModules();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  it("limit exhausted → 429 RATE_LIMITED with Retry-After, keyed on user.id, BEFORE the seam call", async () => {
+    const ratelimit = await import("@/lib/ratelimit");
+    const spy = vi
+      .spyOn(ratelimit, "checkLimit")
+      .mockResolvedValue({ success: false, retryAfter: 42 });
+    const { GET } = await import("./route");
+
+    const res = await GET(makeReq());
+
+    expect(res.status).toBe(429);
+    // Byte-wise like the posture invariant's recompute pins: `toEqual` on
+    // parsed JSON does not compare key order (140.4-16 / WR-03).
+    expect(await res.clone().text()).toBe(
+      '{"error":"Too many requests","code":"RATE_LIMITED"}',
+    );
+    expect(res.headers.get("Retry-After")).toBe("42");
+    expect(res.headers.get("Cache-Control")).toBe("private, no-store");
+    // RATE-02: keyed on the authenticated admin's user.id — NOT IP — on the
+    // sibling recompute's shared adminActionLimiter bucket.
+    expect(spy).toHaveBeenCalledWith(
+      ratelimit.adminActionLimiter,
+      "match-eval:admin-1",
+    );
+    // The deny returns before the seam call ever happens.
+    expect(evalState.lastArgs).toBeNull();
+  });
+
+  it("limiter MISCONFIGURED → 503 SEAM_MISCONFIGURED — never a 429 blaming the admin during OUR outage", async () => {
+    const ratelimit = await import("@/lib/ratelimit");
+    vi.spyOn(ratelimit, "checkLimit").mockResolvedValue({
+      success: false,
+      retryAfter: 60,
+      reason: "ratelimit_misconfigured",
+    });
+    const { GET } = await import("./route");
+
+    const res = await GET(makeReq());
+
+    expect(res.status).toBe(503);
+    expect(await res.json()).toEqual({
+      error: "Rate limiter unavailable",
+      code: "SEAM_MISCONFIGURED",
+    });
+    expect(res.headers.get("Retry-After")).toBe("60");
+    expect(res.headers.get("Cache-Control")).toBe("private, no-store");
+    expect(evalState.lastArgs).toBeNull();
+  });
+});

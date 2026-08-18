@@ -16,8 +16,21 @@ from unittest.mock import MagicMock
 from uuid import uuid4
 
 import pytest
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
+from services import rate_limit as _rl
+
+
+@pytest.fixture(autouse=True)
+def _reset_limiter_buckets():
+    """Ship-review fix 2026-08-18: ~23 claimless POSTs here share the
+    PATH-keyed platform bucket; under the 30/min budget, fast in-process
+    ordering can leak RateLimitExceeded into unrelated assertions. Reset
+    both sides of every test so ordering never matters."""
+    _rl.limiter.reset()
+    yield
+    _rl.limiter.reset()
+
 
 
 # ---------------------------------------------------------------------------
@@ -1387,7 +1400,12 @@ class TestForceRecomputeThrottle:
         assert r.status_code == 429, (
             "force=True within the min-interval must be throttled 429 (NEW-C08-06)"
         )
-        assert "throttled" in r.json()["detail"].lower()
+        # TS-23 (146-02, D-146-3): the site migrated onto the nested
+        # service_error envelope — the one winning 429 raise-site shape.
+        envelope = r.json()["detail"]
+        assert envelope["code"] == "RATE_LIMITED"
+        assert envelope["retryable"] is True
+        assert "throttled" in envelope["detail"].lower()
 
         # PYAPIFIX2-04 — the throttle must ADVERTISE the wait it is enforcing.
         # Without Retry-After the caller either gives up on a condition that
@@ -1399,14 +1417,15 @@ class TestForceRecomputeThrottle:
             "header is the only thing that says WHEN"
         )
 
-        # (a) CONSISTENCY: the body already promises a number ("retry after Ns").
-        # The header must be that same number. A header that disagrees with the
-        # sentence beside it is worse than either alone — the caller cannot tell
-        # which to believe. This is also why the value is NOT clamped with
-        # max(1, ...): near window expiry int() truncation yields 0, and
-        # "Retry-After: 0" (retry now) is both RFC-valid and exactly what the
-        # body says.
-        promised = re.search(r"retry after (\d+)s", r.json()["detail"])
+        # (a) CONSISTENCY: the body copy already promises a number ("retry
+        # after Ns"). The header must be that same number. A header that
+        # disagrees with the sentence beside it is worse than either alone —
+        # the caller cannot tell which to believe. TS-23 (146-02) re-derived
+        # this pin: the value IS now clamped with max(1, ...) because
+        # service_error's _validate requires a positive Retry-After — and the
+        # body interpolates the SAME clamped value, so the consistency
+        # property survives the clamp.
+        promised = re.search(r"retry after (\d+)s", envelope["detail"])
         assert promised is not None, (
             "the throttle copy interpolates the wait; if that changed, this "
             "consistency pin must be re-derived, not deleted"
@@ -3797,6 +3816,26 @@ class TestForceThrottleStateEviction:
         assert alloc_id in match_mod._force_last_run
 
 
+def _direct_recompute_request() -> Request:
+    """A real starlette Request for DIRECT recompute() calls.
+
+    146-02 / RATE-03 put a slowapi decorator on ``recompute``; slowapi's
+    wrapper insists the ``request`` argument is a real starlette Request. The
+    NOTE (ship-review 2026-08-18): a unique X-Service-Key does NOT mint a
+    private bucket — the claimless arm of tenant_or_platform_key keys on
+    request PATH only, so every claimless call in this process shares ONE
+    platform:<path> bucket. Isolation actually comes from the module's
+    autouse limiter reset below (measured: without it, the limiter_identity
+    probe's drained bucket reds this file's lock tests in-process).
+    """
+    return Request({
+        "type": "http",
+        "method": "POST",
+        "path": "/api/match/recompute",
+        "headers": [(b"x-service-key", f"direct-recompute-{uuid4()}".encode())],
+    })
+
+
 class TestRecomputeSerializationLock:
     """NEW-C08-06: two concurrent (non-forced) recompute() calls for the SAME
     allocator must NOT both score — that would write two match_batches rows
@@ -3849,7 +3888,10 @@ class TestRecomputeSerializationLock:
 
         req1 = m.RecomputeRequest(allocator_id=aid)
         req2 = m.RecomputeRequest(allocator_id=aid)
-        r1, r2 = await asyncio.gather(m.recompute(req1), m.recompute(req2))
+        r1, r2 = await asyncio.gather(
+            m.recompute(_direct_recompute_request(), req1),
+            m.recompute(_direct_recompute_request(), req2),
+        )
 
         assert len(score_calls) == 1, (
             f"expected exactly ONE score for the same allocator, got "
@@ -3897,8 +3939,8 @@ class TestRecomputeSerializationLock:
         monkeypatch.setattr(m, "_retention_sweep", lambda allocator_id, keep=7: 0)
 
         await asyncio.gather(
-            m.recompute(m.RecomputeRequest(allocator_id=aid1)),
-            m.recompute(m.RecomputeRequest(allocator_id=aid2)),
+            m.recompute(_direct_recompute_request(), m.RecomputeRequest(allocator_id=aid1)),
+            m.recompute(_direct_recompute_request(), m.RecomputeRequest(allocator_id=aid2)),
         )
 
         assert sorted(score_calls) == sorted([aid1, aid2]), "both allocators scored"

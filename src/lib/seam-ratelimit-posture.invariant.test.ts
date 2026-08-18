@@ -94,10 +94,12 @@ const SEAM_IMPORT_EDGE = new RegExp(
  * ⚠️ THIS IS LOAD-BEARING, NOT COSMETIC, AND IT IS A REAL SHAPE IN THIS EXACT
  * POPULATION. `admin/match/eval/route.ts` and `admin/match/recompute/route.ts`
  * both carry the line *"Same pairing as rateLimitDenyJson (…)"* in a COMMENT.
- * `eval` has no limiter at all, so an unstripped scan reads it as adopting the
- * chokepoint and reports this class closed while it is open — the precise way a
- * source guard becomes worse than no guard. Both polarities are self-tested
- * below.
+ * Until 146-01 `eval` had no limiter at all, so an unstripped scan read it as
+ * adopting the chokepoint and reported this class closed while it was open —
+ * the precise way a source guard becomes worse than no guard. (eval now has a
+ * real `checkLimit` + builder call, but the comment-strip stays load-bearing:
+ * the prose mention would otherwise inflate its per-arm deny count.) Both
+ * polarities are self-tested below.
  */
 function stripComments(src: string): string {
   return src
@@ -177,6 +179,11 @@ const NO_LIMITER_ROUTES = SCANS.filter((s) => s.checkLimitSites === 0);
  * rather than letting it inherit whatever the author typed.
  */
 const EXPECTED_LIMITER_ROUTES: readonly string[] = [
+  // 146-01 / RATE-02: eval gained the sibling recompute's adminActionLimiter
+  // (20/min, keyed `match-eval:<user.id>`) with a chokepoint-routed deny; the
+  // NO_LIMITER_QUARANTINE below shrank to [] in the SAME commit, as its
+  // docblock always demanded.
+  "src/app/api/admin/match/eval/route.ts",
   "src/app/api/admin/match/recompute/route.ts",
   "src/app/api/bridge/route.ts",
   "src/app/api/keys/[id]/permissions/route.ts",
@@ -197,20 +204,20 @@ const EXPECTED_LIMITER_ROUTES: readonly string[] = [
 ];
 
 /**
- * The seam route with NO limiter, quarantined by an EQUALITY rather than a
+ * Seam routes with NO limiter, quarantined by an EQUALITY rather than a
  * containment check.
  *
- * `admin/match/eval` is the genuine no-limiter row. Adding a limiter to it is a
- * policy decision about a new rate cap, not an error-contract fix, and this
- * plan deliberately did not make it. The shape here is
- * `analytics-service/tests/test_limiter_identity.py:462-479`'s, and so is its
- * reason: IF IT IS EVER GIVEN A LIMITER, THIS QUARANTINE MUST SHRINK IN THE
- * SAME COMMIT. An equality forces that; a containment check would let a stale
- * exemption outlive the thing it exempted.
+ * EMPTY SINCE 146-01 / RATE-02. `admin/match/eval` was the one genuine
+ * no-limiter row; it now reuses the sibling recompute's `adminActionLimiter`
+ * with a chokepoint-routed deny, and this quarantine SHRANK IN THE SAME
+ * COMMIT as that change — exactly what the equality below exists to force.
+ * The shape remains `analytics-service/tests/test_limiter_identity.py`'s, and
+ * so does its reason: a containment check would let a stale exemption outlive
+ * the thing it exempted, and a NEW entry appearing here means an UNLIMITED
+ * seam route — decide whether that is intended and write the reason down
+ * beside this roster.
  */
-const NO_LIMITER_QUARANTINE: readonly string[] = [
-  "src/app/api/admin/match/eval/route.ts",
-];
+const NO_LIMITER_QUARANTINE: readonly string[] = [];
 
 describe("[140.4-13 / SEAMRIM-05] structural — every seam limiter deny goes through the chokepoint", () => {
   it("the scan is not vacuous (a scanner that matched nothing would report agreement forever)", () => {

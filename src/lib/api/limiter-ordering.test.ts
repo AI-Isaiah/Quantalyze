@@ -129,6 +129,13 @@ const NO_INPUT = new Set([
   "account/export/route.ts",
   "admin/allocators/[id]/holdings/route.ts",
   "admin/deletion-requests/[id]/approve/route.ts",
+  // 146-01 / RATE-02 — admin match-eval GET. Admin-gated (isAdminUser), then
+  // adminActionLimiter keyed `match-eval:<user.id>` (per-user, NOT IP), but NO
+  // request body: the only inputs are query params (lookback_days /
+  // partner_tag), so the "burn-a-token-on-bad-input" bug cannot occur — same
+  // NO_INPUT shape as the browse/returns siblings below. Deny routed through
+  // rateLimitDenyJson (pinned by route.test.ts + the seam posture invariant).
+  "admin/match/eval/route.ts",
   // Public BTC benchmark GET — added to PUBLIC_ROUTES so the anonymous
   // scenario-share recipient page can self-fetch the overlay. publicIpLimiter
   // (10/min/IP), no request body (symbol hard-coded), limit-FIRST before the DB
