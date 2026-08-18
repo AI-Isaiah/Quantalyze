@@ -442,17 +442,23 @@ BEGIN
   END IF;
 
   -- (d) the 5000 cap survived (20260522111839:160-162). Without it a direct
-  --     RPC caller can insert an unbounded series in one call.
-  IF v_fn_src NOT LIKE '%5000%' THEN
-    RAISE EXCEPTION '145 FOLD: the 5000-row cap literal is gone from finalize_csv_strategy_with_returns - a direct RPC caller can insert an unbounded series (the route validator is bypassable by construction)';
+  --     RPC caller can insert an unbounded series in one call. Bounded regex
+  --     over the COMMENT-STRIPPED body, not a whole-body '%5000%' LIKE: the
+  --     substring false-PASSes on a widened '50000' literal and on a deleted
+  --     guard whose surviving comment also says 5000 — the substring-gate
+  --     class the two cron migrations fixed with word-bounded regexes
+  --     (v1.19 review 2026-08-18).
+  v_code := regexp_replace(v_fn_src, '--[^\n]*', '', 'g');
+  IF v_code !~ 'jsonb_array_length\(p_rows\)\s*>\s*5000\M' THEN
+    RAISE EXCEPTION '145 FOLD: the guard statement "jsonb_array_length(p_rows) > 5000" is gone from finalize_csv_strategy_with_returns (deleted or widened) - a direct RPC caller can insert an unbounded series (the route validator is bypassable by construction)';
   END IF;
 
-  -- (e) NO handler clause in the comment-stripped body. Class-separated regex
-  --     on purpose: a bare token match would false-hit every RAISE statement.
-  --     A handler ANYWHERE in this body can commit a partial write set, which
-  --     is the orphan-strategy class this migration exists to dissolve (D-07;
+  -- (e) NO handler clause in the comment-stripped body (v_code, stripped in
+  --     (d) above). Class-separated regex on purpose: a bare token match
+  --     would false-hit every RAISE statement. A handler ANYWHERE in this
+  --     body can commit a partial write set, which is the orphan-strategy
+  --     class this migration exists to dissolve (D-07;
   --     20260728120000:80-87 extended to three writes).
-  v_code := regexp_replace(v_fn_src, '--[^\n]*', '', 'g');
   IF v_code ~ 'EXCEPTION[[:space:]]+WHEN' THEN
     RAISE EXCEPTION '145 FOLD: finalize_csv_strategy_with_returns contains a handler clause - a swallowed error can commit a strategies row without its dailies, which is EXACTLY the orphan class SC#2 dissolves; remove the handler, never "harden" this body with one';
   END IF;

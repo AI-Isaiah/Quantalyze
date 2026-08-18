@@ -2778,6 +2778,11 @@ Fixed at ship time (not listed): the CSV_PERSIST_FAIL retry fence (user-facing d
 and the pytest discriminator-suite re-point. Everything below is deliberate deferral —
 clean up opportunistically; none is a persistent user-facing defect or data-integrity break.
 
+**→ ABSORBED INTO PHASE 146.1 (2026-08-18):** the v1.19 xhigh milestone review picked this
+whole list up as roster item C4 (with overlaps mapped: fold value guards + fmt-blind
+empty-rows → A1, copy honesty → A3, 23505 second source → B3, rpc-test re-point → B5).
+Items stay open HERE until 146.1 ships; close them here when it does.
+
 - [ ] **Re-point `src/__tests__/csv-finalize-rpc.test.ts` at the fold** (deferred-items #5,
   now verifiable: TEST carries `finalize_csv_strategy_with_returns`). Live-DB-only suite,
   never in CI; still names the DROPped `finalize_csv_strategy` so every skipIf-live case
@@ -2831,6 +2836,29 @@ clean up opportunistically; none is a persistent user-facing defect or data-inte
   the resume path where a changed file reaches the server resolve arm. Server-side equality
   refusal (shipped 2026-08-18) is the operative fence; persisting the signature in the signed
   saveWizardState envelope makes the client fence defense-in-depth again.
+
+## v1.19 xhigh milestone review (2026-08-18) → Phase 146.1 owns the residue
+
+15 confirmed findings across `43069db9..4e3effb0` (PRs #687–#690). Full roster with file
+anchors: `.planning/phases/146.1-review-v1-19-xhigh-close-out-fold-guards-resolve-arm-honesty/146.1-CONTEXT.md`.
+
+**Fixed same-day** (`fix/v1.19-review-easy`): dead CSV_DUPLICATE_SESSION fence + vacuous
+predicate test deleted; `TestTerminalizerWindowInvariant` couples the 4h terminalizer
+window to `p_batch_size × max(TIMEOUT_PER_KIND)` (RED observed at simulated 5h); three
+false "nobody forwards X-User-Access-Token" comments corrected; fold self-verify check (d)
+`%5000%` substring → comment-stripped bounded regex (proven on TEST: widen-RAISES,
+guard-deleted-comment-kept-RAISES — the old check false-PASSed the latter).
+
+**→ Phase 146.1** (not re-listed item-by-item here; the CONTEXT roster is the working
+copy): A1 fold NULL/[] zero-dailies commits · A2 resolve arm ignores private-vs-
+pending_review status · A3 "Nothing was saved" copy on unknowable-commit arms · A4
+echoed-outcome metadata overwrite + missing re-enqueue · B1 Python rate-limit
+bypass-by-omission (route-enumeration gate) · B2 X-User-Access-Token drop-vs-wire
+adjudication · B3 any-23505 undiscriminated (pgConstraintName) · B4 terminalizer×sweep
+non-composition (widen conjunct — same item as the RESEARCH §6 residual above) · B5
+csv-finalize-rpc.test.ts points at a DROPped RPC (nine 22023 assertions coverage-gone) ·
+C1 interior-values echo (FOUNDER: hash vs honest copy) · C2 duplicate handler collapse ·
+C3 TEST sweep-cron seed residual (mitigated).
 
 ## Phase 146 — RATE-04 value-parity candidates (logged 2026-08-18, D-146-4: retuning is founder territory)
 

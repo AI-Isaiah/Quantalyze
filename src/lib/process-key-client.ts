@@ -493,9 +493,13 @@ export async function postProcessKey(
         // this try.
         "X-Tenant-Claim": tenantClaim,
         // Phase 19.1 — forward the end user's access token so the unified
-        // router can call user-auth SECURITY DEFINER RPCs as the user. No
-        // production caller passes it since Phase 145 (csv-finalize left this
-        // seam); the transport is kept per the 140.x obligation above.
+        // router can call user-auth SECURITY DEFINER RPCs as the user.
+        // v1.19 review (2026-08-18): TWO production callers still pass it —
+        // keys/sync and verify-strategy — while the Python side's only
+        // reader (db.py get_user_scoped_supabase) has ZERO callers, so the
+        // header is sent but never read. Drop-vs-wire is the Phase 146.1
+        // adjudication; db.py is the authoritative record of the consumer
+        // side. The transport is kept per the 140.x obligation above.
         ...(args.userAccessToken
           ? { "X-User-Access-Token": args.userAccessToken }
           : {}),
@@ -646,8 +650,8 @@ export async function postProcessKey(
     // SEAMCORE-06 / TRAP-1 — THE undici site. This is the one that actually
     // leaks: undici embeds the outgoing headers in `err.message`, and this
     // request's headers are `Authorization: Bearer <INTERNAL_API_TOKEN>`,
-    // `X-Tenant-Claim`, and — for any caller passing userAccessToken (none in
-    // production since Phase 145, but the transport is kept) —
+    // `X-Tenant-Claim`, and — for any caller passing userAccessToken
+    // (keys/sync and verify-strategy still do; v1.19 review 2026-08-18) —
     // `X-User-Access-Token`, a LIVE end-user Supabase JWT. The token comes
     // from the leaf's env list; the JWT cannot, so it is passed explicitly.
     // The syscall token survives, which is the whole reason the raw message

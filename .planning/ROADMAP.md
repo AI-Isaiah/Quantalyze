@@ -279,6 +279,24 @@ unpublished strategy; AUM-05 will hit sFOX the day its flag flips. **A fix scope
 
 ## Phase Details
 
+### Phase 146.1: REVIEW: v1.19 xhigh close-out — fold guards, resolve-arm honesty, rate-gate completeness (INSERTED)
+
+**Goal:** The 15-finding v1.19 xhigh review (2026-08-18) is closed: the fold refuses
+NULL/empty/poisoned series (22023), the resolve arm refuses cross-flow and
+constraint-mismatched echoes, failure copy never claims rollback it cannot observe, the
+Python rate-limit surface has a route-enumeration gate a new route cannot silently bypass,
+and the terminalizer's failed_final rows no longer exclude their strategies from the
+reconciliation sweep — plus the v1.19-topical TODOS deferrals absorbed into one pass.
+**Requirements**: roster in `146.1-CONTEXT.md` (A1–A4 user-facing/data-integrity,
+B1–B5 structural, C1–C4 adjudication/hygiene). Four easy findings already fixed same-day
+on `fix/v1.19-review-easy`.
+**Depends on:** Phase 146
+**Plans:** 0 plans
+
+Plans:
+
+- [ ] TBD (run /gsd-plan-phase 146.1 to break down)
+
 ### Phase 147: SCEN-01 — The scenario engine receives the real series
 
 **Goal**: A strategy added to a scenario contributes its actual return series — never silent zeros
