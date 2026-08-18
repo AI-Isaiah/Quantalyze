@@ -2,19 +2,19 @@
 gsd_state_version: 1.0
 milestone: v1.19
 milestone_name: JOB/RATE — job-lifecycle reliability and the rate limits that hold
-current_phase: 153.7
-current_phase_name: RATE — audit + close the two verified rate-limit gaps
+current_phase: 146.1
+current_phase_name: REVIEW — v1.19 xhigh close-out (fold guards, resolve-arm honesty, rate-gate completeness)
 status: ready_to_plan
-stopped_at: Completed 146-03-PLAN.md (phase 146 close)
+stopped_at: v1.19 4/4 phases shipped; xhigh milestone review merged (PR #691, 76adf961) inserted Phase 146.1 for its 11 residual findings
 last_updated: "2026-08-18T02:53:00.806Z"
-last_activity: 2026-08-17
-last_activity_desc: "Phase 144 closed end-to-end with first-PROD-tick verification; Phase 145 Waves 1-2 complete — SC#1 verdict committed, (i-b) founder decision locked, arm 4 live-verified on TEST (200 + UUID, zero 42501)"
+last_activity: 2026-08-18
+last_activity_desc: "v1.19 shipped complete (143-146, v0.63-v0.66); founder-directed xhigh milestone review returned 15 findings — 4 fixed and merged as v0.66.0.1 (76adf961), 11 filed as Phase 146.1"
 progress:
-  total_phases: 4
+  total_phases: 5
   completed_phases: 4
   total_plans: 16
   completed_plans: 16
-  percent: 100
+  percent: 80
 ---
 
 # Project State — Quantalyze
