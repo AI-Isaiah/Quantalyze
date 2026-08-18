@@ -158,9 +158,18 @@ vi.mock("@/lib/supabase/server", () => ({
 }));
 
 const adminFromMock = vi.hoisted(() => vi.fn());
+/**
+ * 146.1-05 / A4 — the analytics enqueue's ACTUAL rpc, hoisted so it is STABLE
+ * across `createAdminClient()` calls. The previous inline `vi.fn()` was minted
+ * fresh on every call, so nothing could observe whether the enqueue ran at
+ * all. A4 changes one post-outcome side effect (the metadata UPDATE) and must
+ * prove it did NOT change the other.
+ */
+const enqueueRpcMock = vi.hoisted(() => vi.fn());
 vi.mock("@/lib/supabase/admin", () => ({
   createAdminClient: () => ({
-    rpc: vi.fn(async () => ({ error: null })),
+    rpc: (name: string, rpcArgs: Record<string, unknown>) =>
+      enqueueRpcMock(name, rpcArgs),
     from: (table: string) => adminFromMock(table),
   }),
 }));
@@ -169,11 +178,24 @@ process.env.INTERNAL_API_TOKEN = "test-internal-token";
 
 vi.mock("@/lib/sentry-capture", () => ({ captureToSentry: vi.fn() }));
 
+/**
+ * 146.1-05 / A4 — `after()` callbacks are RECORDED rather than dropped. This
+ * mock was a no-op, which made the enqueue side effect invisible to every
+ * case in this file. Recording is behaviourally identical by default (the
+ * callback still does not run unless a test calls `flushAfter()`), and it
+ * makes "was the compute job actually enqueued?" assertable.
+ */
+const afterCallbacks = vi.hoisted(() => [] as Array<() => unknown>);
 vi.mock("next/server", async () => {
   const actual = await vi.importActual<typeof import("next/server")>(
     "next/server",
   );
-  return { ...actual, after: () => {} };
+  return {
+    ...actual,
+    after: (fn: () => unknown) => {
+      afterCallbacks.push(fn);
+    },
+  };
 });
 
 import { NextRequest } from "next/server";
@@ -181,6 +203,18 @@ import { captureToSentry } from "@/lib/sentry-capture";
 import { POST } from "@/app/api/strategies/csv-finalize/route";
 
 const SESSION = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
+
+/**
+ * Run every `after()` callback the request scheduled, to completion, then
+ * clear the queue. Awaiting here is what makes the enqueue assertions
+ * deterministic (the callback awaits `import()` + `admin.rpc` internally).
+ */
+async function flushAfter(): Promise<void> {
+  const pending = afterCallbacks.splice(0, afterCallbacks.length);
+  for (const cb of pending) {
+    await cb();
+  }
+}
 
 /** The exact PostgREST shape the session index's 23505 surfaces as. */
 const DUP_KEY_ERROR = {
@@ -243,6 +277,10 @@ beforeEach(() => {
   seriesProbe.error = null;
   seriesProbe.reads.length = 0;
   updateCalls.length = 0;
+  afterCallbacks.length = 0;
+  // `vi.clearAllMocks()` above strips the implementation, and the enqueue
+  // callback destructures the result — restore it every test.
+  enqueueRpcMock.mockResolvedValue({ error: null });
   checkLimitMock.mockResolvedValue({ success: true, retryAfter: 0 });
   // Default: the fold succeeds and returns a fresh id.
   rpcMock.mockImplementation(async (name: string) => {
@@ -358,11 +396,15 @@ describe("[140.4-16 / CR-01, re-pointed by 145] the 23505 resolve arm refuses a 
     expect(body.ok).toBe(true);
     expect(body.strategy_id).toBe(EXISTING_ID);
     // The resolve arm persisted NOTHING itself (the dailies are guaranteed
-    // present — the fold committed all-or-nothing): exactly ONE fold call
-    // (which rolled back), and the only post-resolve write is the metadata
-    // UPDATE, which is the retry completing its fan-out.
+    // present — the fold committed all-or-nothing): exactly ONE fold call,
+    // which rolled back.
     expect(foldCalls()).toHaveLength(1);
-    expect(updateCalls).toHaveLength(1);
+    // WARNING 146.1-05 / A4 — CHANGED FROM 1 TO 0, deliberately, and this
+    // line WAS the defect A4 closes. An echo is the SAME submission arriving
+    // twice; applying THIS request's metadata to the already-committed row is
+    // a mutation the user never asked for. See the A4 block at the end of
+    // this file for the economic argument.
+    expect(updateCalls).toEqual([]);
   });
 
   it("🔴 RED-TEAM RT-1: a SUPERSET file (appended month) is refused — containment is not identity", async () => {
@@ -777,7 +819,8 @@ describe("[146.1-04 / A2] the resolve arm refuses a TERMINAL-STATUS mismatch", (
     expect(body.ok).toBe(true);
     expect(body.strategy_id).toBe(EXISTING_ID);
     expect(body.status).toBe("private");
-    expect(updateCalls).toHaveLength(1);
+    // 146.1-05 / A4 — an echo writes no metadata (was 1 before A4).
+    expect(updateCalls).toEqual([]);
   });
 
   it("an ABSENT status column is NOT read as a mismatch — absence is not a value", async () => {
@@ -985,5 +1028,147 @@ describe("[146.1-04 / C1] the 200 echo states what was compared and does not ove
     const body = await res.json();
     expect(body.ok).toBe(true);
     expect(body.strategy_id).toBe(EXISTING_ID);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 146.1-05 / A4 — AN ECHO MUST NOT REWRITE THE COMMITTED ROW'S METADATA
+// ---------------------------------------------------------------------------
+
+/**
+ * A 23505 resolve echo means exactly this: a PRIOR attempt for this (user,
+ * wizard_session, source='csv') already committed, and THIS attempt's own
+ * writes rolled back completely. The route nevertheless ran
+ * `applyCsvMetadataUpdate` with THIS request's metadata against the committed
+ * row.
+ *
+ * THE ECONOMIC ORACLE — why this is money math, not hygiene. `asset_class`
+ * decides the annualization clock: sqrt(365) for crypto, sqrt(252) for
+ * traditional (#597 part 2), and `buildMetadataUpdatePayload` persists the
+ * picker choice VERBATIM. The KPIs — Sharpe, Sortino, Calmar, CAGR — are
+ * computed by the analytics worker from the dailies the FIRST submission
+ * committed, under the clock THAT submission declared. So a retry that flips
+ * `asset_class` rewrote the label while the stored numbers kept the old
+ * convention: a Sharpe computed on 252 and displayed as a 365 crypto track
+ * record. Nothing in the system reconciles the two. For `fmt='trades'` the
+ * enqueue gate (`dailyReturnsSeries.length > 0`) means no recompute is even
+ * scheduled, so the mismatch is permanent — on a product whose whole value is
+ * a verified track record.
+ *
+ * THE ORACLE IS THE WRITE VECTOR, NEVER THE RETURN VALUE. Every case below
+ * drives the real route and watches `updateCalls`. Asserting `fresh === false`
+ * on `FinalizeAtomicOutcome` would pass with the field wired to nothing at
+ * all — testing the helper instead of the wiring.
+ */
+
+/** POST carrying an ARBITRARY metadata block (the A4 cases need asset_class). */
+function postWithMetadata(
+  series: Array<{ date: string; daily_return: number }>,
+  metadata: Record<string, unknown>,
+) {
+  return POST(
+    new NextRequest("http://localhost:3000/api/strategies/csv-finalize", {
+      method: "POST",
+      body: JSON.stringify({
+        wizard_session_id: SESSION,
+        fmt: "daily_returns",
+        strategy_name: "Alpha",
+        daily_returns_series: series,
+        metadata,
+      }),
+      headers: {
+        "Content-Type": "application/json",
+        Origin: "http://localhost:3000",
+      },
+    }),
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  ) as any;
+}
+
+/** Every rpc name the flushed `after()` callbacks issued on the admin client. */
+function enqueuedRpcNames(): string[] {
+  return enqueueRpcMock.mock.calls.map((c) => String(c[0]));
+}
+
+describe("[146.1-05 / A4] the metadata UPDATE belongs to the create, never to its echo", () => {
+  it("POSITIVE: a FRESH create still applies this submission's asset_class", async () => {
+    // Load-bearing. Without it, "skip the UPDATE on an echo" is
+    // indistinguishable from "never UPDATE at all", and never-updating would
+    // silently drop every CSV strategy's category, markets, description AND
+    // its annualization clock.
+    const res = await postWithMetadata(SERIES_2024, { asset_class: "crypto" });
+
+    expect(res.status).toBe(200);
+    expect(
+      updateCalls,
+      "the fresh create stopped writing its metadata — A4 gated the create " +
+        "path instead of the echo path",
+    ).toHaveLength(1);
+    expect(updateCalls[0].payload).toMatchObject({ asset_class: "crypto" });
+  });
+
+  it("RED an ECHO issues NO metadata UPDATE at all", async () => {
+    arm23505({ id: EXISTING_ID, name: "Alpha", status: "pending_review" });
+    armCommitted2024();
+
+    const res = await postWithMetadata(SERIES_2024, { asset_class: "crypto" });
+
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.ok).toBe(true);
+    expect(
+      updateCalls,
+      "the echo rewrote the already-committed row with THIS request's " +
+        "metadata — a mutation applied to a row the user had already " +
+        "committed, on a submission the route itself reports as 'nothing " +
+        "new was written'",
+    ).toEqual([]);
+  });
+
+  it("RED ECONOMIC ORACLE: a retry that FLIPS asset_class cannot rewrite the annualization clock", async () => {
+    // The committed row was saved as a TRADITIONAL track record and its
+    // stored KPIs were computed on sqrt(252). This retry declares 'crypto'
+    // (sqrt(365)). If the UPDATE lands, the row claims 365 while every
+    // persisted Sharpe/Sortino/CAGR still carries 252 — and no recompute
+    // reconciles them (for fmt='trades' none is even enqueued).
+    arm23505({ id: EXISTING_ID, name: "Alpha", status: "pending_review" });
+    armCommitted2024();
+
+    await postWithMetadata(SERIES_2024, { asset_class: "crypto" });
+
+    const clockWrites = updateCalls.filter((c) => "asset_class" in c.payload);
+    expect(
+      clockWrites,
+      "a retry rewrote the committed strategy's annualization clock while " +
+        "its stored KPIs keep the OLD convention — a Sharpe computed on 252 " +
+        "presented as a 365 crypto track record",
+    ).toEqual([]);
+    expect(updateCalls).toEqual([]);
+  });
+
+  it("the analytics enqueue STILL fires on a FRESH create", async () => {
+    // A4 gates ONE side effect. This is the arm that reds if it gated the
+    // fan-out wholesale, which would leave the strategy polling forever.
+    await postWithMetadata(SERIES_2024, { asset_class: "crypto" });
+    await flushAfter();
+
+    expect(enqueuedRpcNames()).toContain("enqueue_compute_job");
+  });
+
+  it("the analytics enqueue STILL fires on an ECHO — A4 gates the UPDATE, not the enqueue", async () => {
+    // Deliberate: re-enqueueing an echo is harmless-to-good (Phase 143's
+    // sweep would do it anyway), and a series-bearing echo whose first
+    // attempt lost its enqueue is exactly the case that needs it.
+    arm23505({ id: EXISTING_ID, name: "Alpha", status: "pending_review" });
+    armCommitted2024();
+
+    await postWithMetadata(SERIES_2024, { asset_class: "crypto" });
+    await flushAfter();
+
+    expect(
+      enqueuedRpcNames(),
+      "A4 skipped the enqueue along with the UPDATE — an echo whose first " +
+        "attempt lost its enqueue now never computes",
+    ).toContain("enqueue_compute_job");
   });
 });

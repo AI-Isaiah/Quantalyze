@@ -541,6 +541,31 @@ type FinalizeAtomicOutcome =
       strategyId: string;
       status: string;
       /**
+       * 146.1 / A4 — WHICH of the two ok:true paths produced this outcome.
+       * `true` = the fold CREATED the row on this request. `false` = a 23505
+       * resolved onto a row a PRIOR request committed, and this request wrote
+       * nothing.
+       *
+       * The callers use it to decide whether the post-outcome metadata UPDATE
+       * is theirs to issue. On an echo it is not: the submission already
+       * happened, and re-applying THIS request's metadata rewrites a
+       * committed row — including `asset_class`, which is the annualization
+       * clock (sqrt(365) crypto vs sqrt(252) traditional, #597 part 2) that
+       * the already-stored KPIs were computed under.
+       *
+       * REQUIRED, never optional. Marking this field optional (a `?` on the
+       * declaration) would let a future third return site omit it, defaulting
+       * to `undefined` -> falsy -> silently treated as an echo, which is the
+       * exact silence this field exists to prevent. Requiredness is what
+       * forces the compiler to name every construction site.
+       *
+       * (The wrong shape is described rather than spelled, because the gate
+       * that pins this is a raw grep over the source and would match its own
+       * counter-example in a comment — the comment-blind grep class this
+       * phase has now hit three times.)
+       */
+      fresh: boolean;
+      /**
        * 146.1 / C1 — set ONLY on the 23505 resolve echo, never on a fresh
        * create. It carries the arm's own statement of what it compared, so a
        * 200 that did not write this payload cannot be mistaken for one that
@@ -591,7 +616,14 @@ async function finalizeAtomicOrErrorResponse(
   // not just error-null — a 2xx that lost its id must not strand the
   // wizard's SyncProgress poller.
   if (!error && isUuid(newStrategyId)) {
-    return { ok: true, strategyId: newStrategyId, status: args.terminalStatus };
+    // 146.1 / A4 — this request CREATED the row, so its metadata fan-out is
+    // this request's to run.
+    return {
+      ok: true,
+      strategyId: newStrategyId,
+      status: args.terminalStatus,
+      fresh: true,
+    };
   }
 
   if (error?.code === "23505") {
@@ -1033,6 +1065,10 @@ async function resolveExistingStrategyOrRefuse(
     ok: true,
     strategyId: existingRow.id,
     status: existingRow.status ?? "pending_review",
+    // 146.1 / A4 — NOT a create. A PRIOR request committed this row; this one
+    // rolled back entirely. The callers skip the metadata UPDATE on the
+    // strength of this field.
+    fresh: false,
     humanMessage:
       "An earlier attempt in this wizard session had already saved this " +
       "strategy, so nothing new was written. We compared the saved track " +
@@ -1686,13 +1722,32 @@ async function unifiedCsvFinalizeHandler(args: {
   // applyCsvMetadataUpdate. Deliberately AFTER the fold/resolve outcome:
   // on the resolve path this is what makes the 409 refusal truthful — the
   // identity checks ran before any metadata write (Phase 145 / D-09, D-11).
-  const metaErrResponse = await applyCsvMetadataUpdate(
-    supabase,
-    outcome.strategyId,
-    args.userId,
-    args.metadataRaw,
-    { correlationId: args.correlationId },
-  );
+  //
+  // 146.1 / A4 (2026-08-18) — AND ONLY ON A FRESH CREATE. Before this, an
+  // ECHOED 23505 outcome ran this UPDATE with THIS request's metadata against
+  // a row a PRIOR request had committed. `buildMetadataUpdatePayload` copies
+  // `asset_class` verbatim, and `asset_class` IS the annualization clock
+  // (sqrt(365) crypto / sqrt(252) traditional, #597 part 2). The stored KPIs
+  // were computed by the worker from the FIRST submission's dailies under the
+  // clock THAT submission declared, so a retry with a flipped picker value
+  // relabelled the row while every persisted Sharpe/Sortino/CAGR kept the old
+  // convention — and for fmt='trades' the enqueue gate below skips the
+  // recompute that might have reconciled them, making the mismatch permanent.
+  //
+  // SKIP, not "re-enqueue after". The enqueue is `after()`-scheduled and
+  // non-blocking, so there is no ordering between it and this UPDATE to rely
+  // on; skipping is both simpler and strictly safer. An echo is the SAME
+  // submission arriving twice — honouring its metadata is honouring a
+  // mutation the user never asked for.
+  const metaErrResponse = outcome.fresh
+    ? await applyCsvMetadataUpdate(
+        supabase,
+        outcome.strategyId,
+        args.userId,
+        args.metadataRaw,
+        { correlationId: args.correlationId },
+      )
+    : null;
   if (metaErrResponse) return metaErrResponse;
 
   // Phase 19.1 / T-19.1-05 / PR #275 + Maintainability W-2: shared
@@ -1784,14 +1839,17 @@ async function contributionCsvFinalizeHandler(args: {
 
   // Identical post-finalize fan-out to the manager path (shared helpers, so
   // the two cannot drift): metadata UPDATE (AFTER the fold/resolve outcome —
-  // Pitfall 6), analytics enqueue.
-  const metaErrResponse = await applyCsvMetadataUpdate(
-    supabase,
-    outcome.strategyId,
-    args.userId,
-    args.metadataRaw,
-    { correlationId: args.correlationId },
-  );
+  // Pitfall 6, and 146.1 / A4: ONLY on a fresh create; see the manager
+  // handler for the annualization-clock argument), analytics enqueue.
+  const metaErrResponse = outcome.fresh
+    ? await applyCsvMetadataUpdate(
+        supabase,
+        outcome.strategyId,
+        args.userId,
+        args.metadataRaw,
+        { correlationId: args.correlationId },
+      )
+    : null;
   if (metaErrResponse) return metaErrResponse;
 
   if (args.dailyReturnsSeries.length > 0) {
