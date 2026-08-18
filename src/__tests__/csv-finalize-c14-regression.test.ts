@@ -376,6 +376,27 @@ describe("RESOLVE-ECHO-READ-ONLY (145-05 C): 23505 + matching identity → 200 e
     // Matching name; status 'private' — the echoed status must come from the
     // READ, never be fabricated: a CONTRIB-02 contribution row must not be
     // reported back as 'pending_review'.
+    //
+    // ⚠️ RE-POINTED BY 146.1-04 / A2 (2026-08-18) — READ THIS BEFORE RESTORING
+    // THE OLD FIXTURE. This case used to send NO `entry_context`, i.e. the
+    // MANAGER flow (terminal status 'pending_review'), against a committed
+    // 'private' row. That combination is now REFUSED 409: `status` is not in
+    // the partial unique index the 23505 fires on, and `wizard_session_id` is
+    // restored from one shared localStorage key, so a manager-flow resubmit
+    // could land on an owner-only contribution row and be told "saved" for a
+    // strategy that never enters the admin review queue. The fixture now sends
+    // the CONTRIBUTION flow, which is the caller this committed row actually
+    // belongs to; every read-only assertion below is unchanged.
+    //
+    // ⛔ HONEST SCOPE — what this case can no longer prove ALONE. A2 refuses
+    // every echo whose committed status differs from the request's, so on any
+    // surviving echo path the echoed status and the requested terminal status
+    // are provably EQUAL. A hardcoded `status: args.terminalStatus` would
+    // therefore satisfy this assertion too. The discrimination did not
+    // disappear, it MOVED: it now lives in the refusal cases in
+    // `csv-finalize-cross-submission-merge.test.ts` ("manager resubmit onto a
+    // committed 'private' contribution row is REFUSED", and its mirror), which
+    // are the cases where the two values can differ at all.
     strategiesMaybeSingleMock.mockResolvedValueOnce({
       data: { id: EXISTING_ID, name: "Test Strategy", status: "private" },
       error: null,
@@ -396,7 +417,11 @@ describe("RESOLVE-ECHO-READ-ONLY (145-05 C): 23505 + matching identity → 200 e
 
     // NO metadata in the body: any write observed below came from inside the
     // resolve path, which is exactly what the read-only contract forbids.
-    const res = await POST(makeRequest(validBody()));
+    // `entry_context: "contribution"` → terminal status 'private', matching the
+    // committed row above (146.1-04 / A2).
+    const res = await POST(
+      makeRequest(validBody({ entry_context: "contribution" })),
+    );
     const body = await res.json();
 
     expect(res.status).toBe(200);

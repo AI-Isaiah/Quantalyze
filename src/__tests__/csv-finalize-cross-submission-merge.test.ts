@@ -867,3 +867,123 @@ describe("[146.1-04 / C4] both resolve-arm fail-closed paths answer 503 and writ
     expect(updateCalls).toEqual([]);
   });
 });
+
+// ---------------------------------------------------------------------------
+// 146.1-04 / C1 — THE ECHO SAYS WHAT WAS COMPARED, AND NOTHING MORE
+// ---------------------------------------------------------------------------
+
+/**
+ * The resolve arm makes exactly TWO reads of the committed series: its row
+ * COUNT and its [min, max] date boundaries. It does not read a single daily
+ * value. The residual is documented and ACCEPTED in the route: equal count and
+ * equal boundaries with different interior values still echoes 200.
+ *
+ * ⚖️ FOUNDER CALL (C1): option (b) — honest copy — ships. Option (a), a content
+ * hash over the payload, would close the residual but needs persisted state: a
+ * third migration in a phase already carrying two, a backfill for every
+ * already-committed row, and a nullable-hash fail-open period. It is filed in
+ * TODOS.md with that cost.
+ *
+ * ⭐ THE ASSERTION IS ON ABSENCE. A presence-only check ("does it contain the
+ * new sentence?") is satisfied by CONCATENATING the new sentence onto the old
+ * over-claiming one — the same hole as the `%5000%` substring failure. Both
+ * polarities are asserted here.
+ */
+
+/**
+ * Claims the arm CANNOT make from a count and two boundary dates. Each is a
+ * sentence a reader would act on: "verified" and "confirmed" assert an
+ * observation, "identical"/"element by element"/"matches the file you
+ * submitted" assert equality of the interior values specifically.
+ */
+const OVERCLAIM_PHRASES: RegExp[] = [
+  /\bverified\b/i,
+  /\bconfirmed\b/i,
+  /\bidentical\b/i,
+  /element[\s-]by[\s-]element/i,
+  /matches (?:the )?(?:file|series|track record) you (?:submitted|uploaded)/i,
+  /\bevery (?:row|value|daily)\b/i,
+];
+
+describe("[146.1-04 / C1] the 200 echo states what was compared and does not over-claim", () => {
+  it("the resolve echo carries copy naming BOTH reads and admitting what was not read", async () => {
+    arm23505({ id: EXISTING_ID, name: "Alpha", status: "pending_review" });
+    armCommitted2024();
+
+    const res = await post(SERIES_2024);
+
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.ok).toBe(true);
+    expect(
+      typeof body.human_message,
+      "the 200 echo says nothing about what it compared, so a caller cannot " +
+        "tell a fresh save from a resolve onto a row it never re-read",
+    ).toBe("string");
+    // What it DID read.
+    expect(body.human_message).toMatch(/row count/i);
+    expect(body.human_message).toMatch(/first and last date/i);
+    // ⭐ What it did NOT read — the admission is the whole point of C1.
+    expect(
+      body.human_message,
+      "the echo does not admit that the individual daily values were never " +
+        "compared, which is precisely the residual the arm accepts",
+    ).toMatch(/not the individual daily values/i);
+  });
+
+  it("🔴 ABSENCE: the echo carries NO claim the two reads cannot support", async () => {
+    // ⛔ This is the assertion that survives CONCATENATION. Restoring an
+    // over-claiming sentence ALONGSIDE the honest one leaves every presence
+    // check above green and REDs only here.
+    arm23505({ id: EXISTING_ID, name: "Alpha", status: "pending_review" });
+    armCommitted2024();
+
+    const res = await post(SERIES_2024);
+    const body = await res.json();
+    const msg = String(body.human_message ?? "");
+
+    for (const phrase of OVERCLAIM_PHRASES) {
+      expect(
+        msg,
+        `the 200 echo asserts ${phrase} — an observation the arm never made. ` +
+          "It read a row count and two boundary dates; it read no daily value " +
+          "at all, and a caller acting on this sentence is acting on a claim " +
+          "the server cannot support.",
+      ).not.toMatch(phrase);
+    }
+  });
+
+  it("a FRESH create carries no such note — nothing was resolved, so nothing was compared", async () => {
+    // The discrimination that keeps the note honest in the other direction: a
+    // first submit really did write this payload, and telling that caller
+    // "we compared boundaries" would be its own fabricated observation.
+    const res = await post(SERIES_2024);
+
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.ok).toBe(true);
+    expect(body.human_message).toBeUndefined();
+  });
+
+  it("BEHAVIOUR UNCHANGED: equal count and boundaries with different interior values still echoes 200", async () => {
+    // C1 is a COPY change, not a refusal change. The residual stays open by
+    // decision; what changed is that the envelope stops implying it is closed.
+    arm23505({ id: EXISTING_ID, name: "Alpha", status: "pending_review" });
+    seriesProbe.count = 3;
+    seriesProbe.minDate = "2024-01-31";
+    seriesProbe.maxDate = "2024-03-29";
+
+    // Same dates, DIFFERENT returns — indistinguishable to a count + boundary
+    // read, and accepted as such.
+    const res = await post([
+      { date: "2024-01-31", daily_return: 0.99 },
+      { date: "2024-02-29", daily_return: -0.5 },
+      { date: "2024-03-29", daily_return: 0.42 },
+    ]);
+
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.ok).toBe(true);
+    expect(body.strategy_id).toBe(EXISTING_ID);
+  });
+});

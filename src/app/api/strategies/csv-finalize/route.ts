@@ -536,7 +536,19 @@ export function buildMetadataUpdatePayload(
  * one place to delete when the types regeneration lands.
  */
 type FinalizeAtomicOutcome =
-  | { ok: true; strategyId: string; status: string }
+  | {
+      ok: true;
+      strategyId: string;
+      status: string;
+      /**
+       * 146.1 / C1 — set ONLY on the 23505 resolve echo, never on a fresh
+       * create. It carries the arm's own statement of what it compared, so a
+       * 200 that did not write this payload cannot be mistaken for one that
+       * did. A fresh create leaves it undefined and its envelope is byte
+       * identical to before.
+       */
+      humanMessage?: string;
+    }
   | { ok: false; response: NextResponse };
 
 async function finalizeAtomicOrErrorResponse(
@@ -936,6 +948,16 @@ async function resolveExistingStrategyOrRefuse(
   // Residual (documented, accepted): equal count and boundaries with
   // different interior values still echoes — the identical-retry case
   // dominates by construction; closing it needs a checksum, not two reads.
+  //
+  // 146.1 / C1 (2026-08-18) — FOUNDER CALL, option (b). The residual STAYS
+  // OPEN by decision. Option (a) — a content hash over the payload persisted
+  // at create time — would close it, and is filed in TODOS.md WITH its cost:
+  // a third migration in a phase already carrying two, a backfill for every
+  // already-committed row, and a nullable-hash fail-open period while that
+  // backfill runs. What changed here is NOT the predicate: it is that the 200
+  // envelope now STATES these two reads instead of leaving the caller to
+  // assume the series was checked. See the echo return at the end of this
+  // function.
   {
     let minDate = "";
     let maxDate = "";
@@ -979,13 +1001,31 @@ async function resolveExistingStrategyOrRefuse(
     }
   }
 
-  // Both checks passed: this IS the instructed retry of the same submission.
-  // The committed series was READ to match this payload's count and
-  // boundaries (presence is proven, not assumed), so there is nothing to
-  // persist — echo the existing id. `status` is
-  // ECHOED from the row rather than hardcoded: the row may sit at 'private'
-  // (a CONTRIB-02 contribution); reporting a status we did not read would be
-  // fabricating an observation.
+  // Every check passed, so this is CONSISTENT with the instructed retry of
+  // the same submission and there is nothing to persist — echo the existing
+  // id. `status` is ECHOED from the row rather than hardcoded: reporting a
+  // status we did not read would be fabricating an observation.
+  //
+  // ⚖️ 146.1 / C1 (2026-08-18) — THE CLAIM THAT WAS REMOVED, AND WHY.
+  //
+  // This comment used to read "this IS the instructed retry of the same
+  // submission … presence is proven, not assumed", and the 200 envelope said
+  // nothing at all — so the caller received a bare success indistinguishable
+  // from a fresh save. Neither was supportable. The arm makes exactly TWO
+  // reads of the committed series: its row COUNT and its [min, max] boundary
+  // dates. It reads no daily VALUE, so it cannot distinguish this payload
+  // from any other payload sharing that count and those two dates. "Proven"
+  // was a word for an observation that was never made.
+  //
+  // FOUNDER CALL: option (b), honest copy, ships. Option (a) — a content hash
+  // — would make the strong claim true and is filed in TODOS.md with its full
+  // cost (third migration + backfill + nullable-hash fail-open period), so
+  // the decision can be re-opened with the same information. ⛔ No hash, no
+  // checksum and no new column is implemented here, deliberately.
+  //
+  // The register is `wizardErrors.ts`'s SEAMUX-04 precedent: state the fact,
+  // keep the uncertainty, do not editorialise, and put a non-destructive
+  // check ahead of any re-submit.
   console.warn(
     `${opts.logPrefix} 23505 resolved to the existing strategy [correlation_id=${opts.correlationId}] strategy_id=${existingRow.id}`,
   );
@@ -993,6 +1033,12 @@ async function resolveExistingStrategyOrRefuse(
     ok: true,
     strategyId: existingRow.id,
     status: existingRow.status ?? "pending_review",
+    humanMessage:
+      "An earlier attempt in this wizard session had already saved this " +
+      "strategy, so nothing new was written. We compared the saved track " +
+      "record's row count and its first and last dates against this file — " +
+      "not the individual daily values — so open the strategy to check it " +
+      "holds the numbers you meant to upload.",
   };
 }
 
@@ -1662,11 +1708,18 @@ async function unifiedCsvFinalizeHandler(args: {
   // API C-1: `ok: true` discriminator on the success envelope. `status` is
   // the terminal status the fold wrote on a fresh create, or the resolved
   // row's own status on the 23505 echo path.
+  //
+  // 146.1 / C1: `human_message` rides ONLY the resolve echo, where it states
+  // the two reads that decided the echo. A fresh create carries no such
+  // field, so this envelope is unchanged for every first submit.
   return NextResponse.json(
     {
       ok: true,
       strategy_id: outcome.strategyId,
       status: outcome.status,
+      ...(outcome.humanMessage
+        ? { human_message: outcome.humanMessage }
+        : {}),
       correlation_id: args.correlationId,
     },
     { status: 200, headers: NO_STORE_HEADERS },
@@ -1756,6 +1809,11 @@ async function contributionCsvFinalizeHandler(args: {
       // or the resolved row's own status on the 23505 echo path (echoed, not
       // fabricated).
       status: outcome.status,
+      // 146.1 / C1 — same shape as the manager envelope, so the two handlers
+      // cannot drift on what a resolve echo tells its caller.
+      ...(outcome.humanMessage
+        ? { human_message: outcome.humanMessage }
+        : {}),
       correlation_id: args.correlationId,
     },
     { status: 200, headers: NO_STORE_HEADERS },
