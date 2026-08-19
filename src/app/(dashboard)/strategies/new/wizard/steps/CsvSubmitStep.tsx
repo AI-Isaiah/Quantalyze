@@ -149,11 +149,15 @@ const CSV_SUBMIT_STEP_HEADINGS_CONTRIBUTION = {
  * falls to the hop and the `Retry-After` this route stamps reaches the only CSV
  * panel that can render a wait.
  *
- * ⭐ `CSV_PERSIST_FAIL` is the member that matters most. Its route sentence says
- * the strategy WAS created and the series was NOT saved, so routing it to §4a —
- * whose copy asserts *"Nothing was saved."* — would print a reassurance the
- * route has just contradicted. A negative control asserts that phrase is absent
- * from the DOM on this code, so the unreachability is tested, not intended.
+ * ⭐ `CSV_PERSIST_FAIL` is the member that matters most. Its route sentence
+ * REFUSES to say what is already saved — at HEAD (re-read 2026-08-19; the
+ * wording quoted here before 146.2-07 was the pre-145 sentence, re-cut in 146.1
+ * and gone from the route) it reads *"We could not confirm what is already
+ * saved for this strategy, so we stopped before writing anything of this
+ * submission."* Routing that to §4a — whose copy asserts *"Nothing was
+ * saved."* — would print, as a reassurance, the one fact the route has just
+ * declined to claim. A negative control asserts that phrase is absent from the
+ * DOM on this code, so the unreachability is tested, not intended.
  *
  * ⚠️ TYPED `string`, NOT `WizardErrorCode`: five of the six are the ROUTE's
  * vocabulary and are not members of that union.

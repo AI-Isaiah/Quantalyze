@@ -25,12 +25,22 @@
  * ── THE NEGATIVE CONTROLS, AND WHY `CSV_PERSIST_FAIL` IS THE SHARPEST ────────
  *
  * §4a's copy asserts *"Nothing was saved."* This route's `CSV_PERSIST_FAIL`
- * emitter says, in the route's own words, *"Your strategy was created but the
- * daily-return data could not be saved."* Routing that code to §4a would print
- * a reassurance the route has just contradicted — a false statement about the
- * user's data, authored by the phase whose subject is false statements. The
- * control asserts the phrase is ABSENT, so "unreachable" is tested rather than
- * intended.
+ * emitter refuses to assert that. In the route's own words at HEAD (re-read
+ * 2026-08-19 — see the W1 note on the fixtures below; the sentence quoted here
+ * before 146.2-07 had been re-cut in 146.1 and no longer existed):
+ * *"We could not confirm what is already saved for this strategy, so we
+ * stopped before writing anything of this submission."* The scope is exact and
+ * it is NARROWER than §4a's: nothing of THIS submission was written, and what
+ * an earlier attempt may already have committed is precisely the thing the
+ * route says it could not establish. Pasting *"Nothing was saved."* underneath
+ * would assert, as a reassurance, the one fact the sentence above it declines
+ * to claim. The control asserts the phrase is ABSENT, so "unreachable" is
+ * tested rather than intended.
+ *
+ * (The pre-145 reading — strategy created, series lost, contact support — died
+ * with `persist_csv_daily_returns`. The code's sole emitter is now the
+ * fail-closed 503 in the 23505 resolve arm, which wrote NOTHING; that is also
+ * why the sibling case below asserts Submit stays LIVE.)
  *
  * `vi.spyOn` + `restoreAllMocks`, never `vi.stubGlobal` (DEF-16-1).
  */
@@ -48,14 +58,54 @@ const FOUNDER_CAUSE = "This is on our side, not your data. Nothing was saved.";
 /** The §4a clause that is affirmatively FALSE on the persist-fail arm. */
 const NOTHING_WAS_SAVED = "Nothing was saved";
 
-/** `csv-finalize/route.ts` — the 500 persist-fail emitter, verbatim. */
+/**
+ * ⚠️ 146.2-07 / W1 — RE-TYPED FROM HEAD, AND WHY THE OLD PAIR WAS A LIE.
+ *
+ * The two constants below carried the label "verbatim" while naming sentences
+ * that existed NOWHERE in `route.ts`: 146.1 re-cut both emitters and left the
+ * fixtures behind. The cases stayed GREEN throughout — they mock the wire, so
+ * any string round-trips — which is exactly what makes the defect worth a plan:
+ * a false provenance claim is invisible to the suite and teaches the next
+ * reader to trust it. Re-derived from `src/app/api/strategies/csv-finalize/
+ * route.ts` at post-146.2-01 HEAD and re-verified 2026-08-19 by joining these
+ * concatenations and diffing them against the route's own literals.
+ *
+ * Still HAND-TYPED, never imported (the :44-45 rule above): an imported
+ * constant makes the assertion and the implementation the same oracle, and the
+ * case would then pass on a route that had silently changed its copy. The cost
+ * of that choice is precisely this drift — so if you move a route sentence,
+ * move these WITH it and re-date this comment.
+ *
+ * ⛔ AND KNOW WHAT THE SUITE DOES **NOT** CHECK. Each constant is on BOTH sides
+ * of its arm — it is the mocked wire AND the expected DOM — so altering a word
+ * of it changes both and the suite stays GREEN (measured 2026-08-19 under the
+ * 146.2-07 W1 neuter). What the arms enforce is the PAIRING: the panel renders
+ * the sentence the ROUTE sent, not the copy table's title (proved by feeding the
+ * mock a decoy — both arms then red by name). The correspondence to route.ts
+ * is enforced by this comment and nothing else. A static grep coupling the two
+ * files was weighed and declined here (see the 146.2-07 SUMMARY); if this pair
+ * drifts a second time, that is the fix to reach for.
+ */
+
+/**
+ * `csv-finalize/route.ts` — the CSV_PERSIST_FAIL emitter, verbatim. Post-145
+ * this code has ONE emitter: the fail-closed 503 in the 23505 resolve arm's
+ * `failClosed()` (route.ts:1099 at time of writing). The 500 persist-fail
+ * emitter the old fixture quoted died with `persist_csv_daily_returns`.
+ */
 const ROUTE_PERSIST_FAIL =
-  "Your strategy was created but the daily-return data could not be saved. " +
-  "Contact support@quantalyze.com with your strategy id so we can recover.";
-/** `csv-finalize/route.ts` — the 409 cross-submission refusal, verbatim. */
+  "We could not confirm what is already saved for this strategy, so we " +
+  "stopped before writing anything of this submission. Try again shortly.";
+/**
+ * `csv-finalize/route.ts` — the DEFAULT 409 refusal literal in `refuse()`
+ * (route.ts:1182), verbatim. 146.2-01 gave `refuse()` an optional
+ * arm-specific sentence; this is the default the name / series / A2 arms still
+ * carry, and it is byte-unchanged by that plan.
+ */
 const ROUTE_SESSION_REUSED =
-  "This strategy already holds a different track record, so we stopped before " +
-  "writing. Nothing was changed. Start a new strategy to upload a different file.";
+  "This wizard session already created a strategy with a different track " +
+  "record, so we refused before writing anything of this submission. Start " +
+  "a new strategy to upload a different file.";
 /** `csv-finalize/route.ts` — one of the twenty `CSV_INVALID_FORMAT` messages. */
 const ROUTE_INVALID_FORMAT = "Invalid request body.";
 /** `csv-finalize/route.ts` — the WR-07-shaped corrected misconfigured body. */
@@ -230,9 +280,10 @@ describe("[140.5-05] ⛔ NEGATIVE CONTROLS — csv-finalize's own vocabulary kee
   });
 
   it("⭐ CSV_PERSIST_FAIL keeps its own sentence, and 'Nothing was saved' is ABSENT", async () => {
-    // The route says the strategy WAS created and the series was NOT saved.
-    // §4a's reassurance is affirmatively false here, so it must be provably
-    // unreachable — not merely un-routed.
+    // The route says it could not confirm what is already saved and that it
+    // stopped before writing anything of THIS submission. §4a's flat "Nothing
+    // was saved." asserts the very fact the route declined to assert, so it
+    // must be provably unreachable — not merely un-routed.
     fetchSpy.mockResolvedValue(
       jsonResponse(
         {
@@ -251,9 +302,9 @@ describe("[140.5-05] ⛔ NEGATIVE CONTROLS — csv-finalize's own vocabulary kee
     expect(screen.getByText(ROUTE_PERSIST_FAIL)).toBeInTheDocument();
     expect(
       panelText(),
-      "the panel told a user whose data was NOT saved that nothing was saved. " +
-        "The route's own sentence says the strategy was created and the series " +
-        "was lost; §4a's reassurance is false on this arm.",
+      "the panel reassured a user that nothing was saved, on the one arm whose " +
+        "own sentence says we could not confirm what is already saved. §4a " +
+        "asserts as a fact what the route above it refuses to claim.",
     ).not.toContain(NOTHING_WAS_SAVED);
     expect(panelText()).not.toContain(FOUNDER_TITLE);
   });
