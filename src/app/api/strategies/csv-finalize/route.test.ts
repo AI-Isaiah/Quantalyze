@@ -149,6 +149,17 @@ vi.mock("@/lib/sentry-capture", () => ({
   captureToSentry: vi.fn(),
 }));
 
+// 146.2-06 / T-146.2-12 — the finalize audit emission, mocked out HERE for a
+// specific reason: `logAuditEventAsUser` also schedules through `after()`, so
+// leaving it real would make `afterMock`'s call COUNT below mean "enqueue plus
+// audit" instead of "enqueue". Mocking it keeps that count a statement about
+// the analytics enqueue, which is what the assertion is named for — and gives
+// this file its own handle on the emission (asserted directly below).
+const logAuditEventAsUserMock = vi.hoisted(() => vi.fn());
+vi.mock("@/lib/audit", () => ({
+  logAuditEventAsUser: logAuditEventAsUserMock,
+}));
+
 // Capture after() scheduling so we can assert the analytics enqueue is queued.
 const afterMock = vi.hoisted(() => vi.fn());
 vi.mock("next/server", async () => {
@@ -314,8 +325,25 @@ describe("POST /api/strategies/csv-finalize — CONTRIB-02 private-by-default co
     const finalize = rpcCall("finalize_csv_strategy_with_returns");
     expect(finalize).toBeDefined();
     expect(finalize![1].p_rows).toEqual(VALID_SERIES);
-    // The compute_analytics enqueue is scheduled via after().
+    // The compute_analytics enqueue is scheduled via after(). The audit
+    // emission is mocked out above, so this count is still a statement about
+    // the ENQUEUE and nothing else — that is why the mock exists.
     expect(afterMock).toHaveBeenCalledTimes(1);
+    // 146.2-06 — and the commit is attributable. The contribution flow is a
+    // FRESH create, so it carries the same forensic obligation as the manager
+    // flow; a per-flow gap here would mean owner-only contributions were the
+    // one strategy creation nobody could audit.
+    expect(
+      logAuditEventAsUserMock,
+      "a contribution finalize committed a track record with no forensic row — the audit obligation is per-CREATE, not per-flow",
+    ).toHaveBeenCalledTimes(1);
+    expect(
+      (logAuditEventAsUserMock.mock.calls[0] as unknown[])[2],
+    ).toMatchObject({
+      action: "strategy.csv_finalize",
+      entity_type: "strategy",
+      entity_id: NEW_STRATEGY_ID,
+    });
   });
 
   it("contribution fold RPC error → 500 CSV_FINALIZE_FAIL (nothing saved — the fold rolled back), no orphaned success", async () => {
