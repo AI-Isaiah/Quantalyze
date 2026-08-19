@@ -2949,6 +2949,17 @@ under-claim) and must be revised in the same change.
 
 ## Phase 146.1 execution notes (logged 2026-08-18)
 
+- [ ] ⚠️ **Local absolute paths (incl. the operator's macOS username) are committed across
+  ~50 historical `.planning/` docs on a PUBLIC repo.** Surfaced 2026-08-19 when
+  `gstack-redact-prepush` flagged a MEDIUM finding on the 146.1 branch. I redacted ONLY the
+  file this PR introduces (`146.1-02-SUMMARY.md`) and deliberately did NOT sweep the other
+  ~50: they are pre-existing, already public, and rewriting historical planning records is
+  not this PR's business. Do it as its own commit — `s|/Users/<user>/claude-projects/quantalyze|<repo-root>|`
+  then `s|/Users/<user>|<home>|` across `.planning/**`, verified with a no-allowlist
+  gitleaks/redact scan (the allowlist is PATH-based over `.planning/`, so the default scan
+  will not see them).
+
+
 - [ ] ⭐ **CSV finalize emits NO audit event — a real gap, surfaced by 146.1-07 task 1.**
   Deleting the cast-through-unknown made the fold call visible to the audit-coverage law for
   the first time, and the law immediately failed it: `csv-finalize/route.ts` calls
