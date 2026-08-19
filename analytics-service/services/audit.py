@@ -186,6 +186,11 @@ AuditAction = Literal[
     # test test_action_literal_matches_ts_union stays green.
     "strategy.ownership_mark",
     "strategy.rename",
+    # --- Phase 146.2 / T-146.2-12: the CSV finalize commit (TS-only call
+    # site -- the fold is invoked from the Next.js csv-finalize route). Kept
+    # here so the TS<->Python AuditAction parity test
+    # test_action_literal_matches_ts_union stays green.
+    "strategy.csv_finalize",
     "api_key.revoke",
     "trades.upload",
     "admin.partner_import",

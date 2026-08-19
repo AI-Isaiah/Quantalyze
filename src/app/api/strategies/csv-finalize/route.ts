@@ -15,6 +15,13 @@ import {
   WIZARD_SESSION_CONSTRAINTS,
 } from "@/lib/api/pgConstraintName";
 import { NO_STORE_HEADERS } from "@/lib/api/headers";
+// 146.2-06 / T-146.2-12 — STATIC, matching the preferences route's call-site
+// shape. The two `await import("@/lib/supabase/admin")` sites further down live
+// inside `after()` epilogues where the lazy load costs nothing; this emission
+// runs on the request path, where a dynamic import would add a resolution hop
+// to every successful finalize.
+import { logAuditEventAsUser } from "@/lib/audit";
+import { createAdminClient } from "@/lib/supabase/admin";
 
 /**
  * POST /api/strategies/csv-finalize — Phase 15 / CSV-01, refolded by
@@ -661,22 +668,29 @@ async function finalizeAtomicOrErrorResponse(
   // carries `finalize_csv_strategy_with_returns`, so this call is type-checked
   // against the real signature and re-enters the audit-coverage law. Restoring
   // the cast would silently un-check the argument names on a money path.
-  // ⚠️ CSV FINALIZE EMITS NO AUDIT EVENT — a real gap, named rather than papered
-  // over. The sibling `create-with-key` skips `create_wizard_strategy` on the
-  // grounds that "the user-visible creation is audited at finalize time"; that
-  // rationale CANNOT be reused here, because this call IS finalize — it commits a
-  // user-visible strategy + verification + dailies in one transaction. Emitting
-  // the event needs an audit-taxonomy decision (event type, payload, actor) that
-  // is a behaviour change, not a by-product of a types regen, so it is filed in
-  // TODOS.md rather than smuggled into this commit.
+  //
+  // 146.2-06 — THE @audit-skip IS GONE, AND THAT IS THE POINT. It was an
+  // honest placeholder ("no audit event on the CSV finalize path today"), but a
+  // pragma is an exemption: while it sat here the audit-coverage law
+  // (src/__tests__/audit-coverage.test.ts) waved this mutation through. This
+  // call commits a user-visible strategy + its verification row + its whole
+  // daily-returns series in ONE transaction — the creation of a track record on
+  // a product whose entire value is that the record is trustworthy — and it was
+  // the only such write with no forensic row at all. `create-with-key` skips
+  // `create_wizard_strategy` on the grounds that "the user-visible creation is
+  // audited at finalize time"; that rationale cannot be reused HERE, because
+  // this IS finalize. With the pragma removed the law now REQUIRES the emission
+  // below and reds if anyone deletes it (T-146.2-12, repudiation).
+  //
+  // ⚠️ THE EMISSION MUST STAY WITHIN 60 LINES BELOW THIS CALL. That is the
+  // law's own coverage window (audit-coverage.test.ts `isCovered`), so moving
+  // the emit further down — to the enqueue epilogue, say — silently
+  // un-instruments this mutation again while every test stays green.
   //
   // 146.1-07 task 1: this call was invisible to the audit law TWICE over — first
   // behind `supabase.rpc as unknown as (…)`, then behind a line break that put
   // the RPC name off the `.rpc(` line the law scans line-by-line. Keep the name
   // on the same line as `.rpc(`.
-  //
-  // @audit-skip: no audit event on the CSV finalize path today; the gap is filed
-  // in TODOS.md (146.1 execution notes) and needs an audit-taxonomy decision.
   const { data: newStrategyId, error } = await supabase.rpc("finalize_csv_strategy_with_returns", {
     p_user_id: args.userId,
     p_wizard_session_id: args.wizardSessionId,
@@ -690,6 +704,45 @@ async function finalizeAtomicOrErrorResponse(
   // not just error-null — a 2xx that lost its id must not strand the
   // wizard's SyncProgress poller.
   if (!error && isUuid(newStrategyId)) {
+    // 146.2-06 / T-146.2-12 — THE FORENSIC ROW FOR THE FINALIZE COMMIT.
+    //
+    // ⭐ HERE, AND ONLY HERE. This branch is the ONE place the fold is known to
+    // have committed a NEW strategy. The 23505 resolve arm below returns
+    // `fresh: false` precisely because a PRIOR request wrote that row and this
+    // one rolled back entirely — emitting there would manufacture a second
+    // creation record for one creation, which on an append-only audit log is
+    // not a duplicate but a false fact.
+    //
+    // `logAuditEventAsUser` with an ADMIN client, NOT `logAuditEvent` with the
+    // user client — the C-2 lesson from the preferences route. The emission is
+    // scheduled through `after()` and settles AFTER the response flushes, and
+    // `log_audit_event` derives its actor from `auth.uid()`; a short-TTL JWT
+    // that expires inside that deferred window yields a 200 with no audit row
+    // at all. The service-role path is JWT-immune and takes the acting user id
+    // explicitly — and `args.userId` is trustworthy here because `withAuth`
+    // established it before the handler ran.
+    //
+    // Fire-and-forget by contract: a failed emission is Sentry-reported inside
+    // `emitAsUser` and must NOT change this response. The strategy IS committed
+    // — failing the request over its forensic row would roll back nothing and
+    // would tell the user their upload failed when it did not.
+    //
+    // Metadata carries no track-record CONTENT: the row count and the format,
+    // which is what a forensic reader needs to tie this event to a submission,
+    // plus the correlation id that joins it to the console + Sentry lines.
+    logAuditEventAsUser(createAdminClient(), args.userId, {
+      action: "strategy.csv_finalize",
+      entity_type: "strategy",
+      entity_id: newStrategyId,
+      metadata: {
+        fmt: args.fmt,
+        row_count: args.rows.length,
+        terminal_status: args.terminalStatus,
+        wizard_session_id: args.wizardSessionId,
+        correlation_id: opts.correlationId,
+      },
+    });
+
     // 146.1 / A4 — this request CREATED the row, so its metadata fan-out is
     // this request's to run.
     return {

@@ -3056,3 +3056,55 @@ backs ~9 surfaces — the remedy for any of its flows is a NEW named limiter, ne
   newest), or record tests/ as permanently out of strict scope in a mypy config comment so
   the next session doesn't re-derive this. Never widen the gate in the same commit as a
   behavior change.
+
+## Phase 146.2 — recorded deferrals (logged 2026-08-19)
+
+*The founder rule: an item ABSORBED into a phase is deleted from this file, but an item the
+phase deliberately does NOT fix must be re-recorded here. Silent drop is forbidden. All four
+below were re-verified against HEAD on 2026-08-19 before being written down.*
+
+- [ ] **`20260819150000_reconcile_sweep_readmit_attempt_ceiling.sql:283-288` — the performance
+  note cites the WRONG index.** It says the scalar subquery runs "over compute_jobs indexed by
+  strategy_id (20260808120000 and the table's own FK index)". Neither citation holds:
+  `20260808120000` creates `idx_strategies_user_id` on `strategies(user_id)` (`:127`), which is
+  a different table and a different column; and PostgreSQL does **not** auto-create indexes for
+  foreign keys, so there is no "table's own FK index". The index that actually supports the
+  subquery is `compute_jobs_strategy_id ON compute_jobs (strategy_id) WHERE strategy_id IS NOT
+  NULL`, created by `20260412094454_sync_strategy_analytics_status.sql:68-70`.
+  ⚠️ **The SUBSTANCE of the performance claim survives** — a supporting index does exist and no
+  new one is needed; only the provenance is wrong. Prose-only, non-blocking (the stopping rule
+  keeps citation defects off the blocking path). **Fix:** re-point the citation to
+  `20260412094454:68-70` and delete the FK-index phrase, in whatever commit next touches that
+  migration's header. Do NOT edit the migration solely for this — it is already applied.
+- [ ] **`20260819150000_...:283-288` — the same note asserts an execution ORDER the planner does
+  not promise.** It says the subquery runs "only AFTER the three cheaper NOT EXISTS conjuncts
+  have already discarded the corpus". PostgreSQL gives no guarantee about conjunct evaluation
+  order; cost estimates normally place the `NOT EXISTS` semi-joins first, but that is a
+  tendency, not a contract. **Reword to:** "the planner is free to order these conjuncts; cost
+  estimates normally place the NOT EXISTS semi-joins first." No behavioural impact — the
+  candidate set is bounded by `LIMIT 25` downstream and the sweep runs hourly. Prose-only,
+  non-blocking; same commit as the citation fix above.
+- [ ] **csv-finalize A2 arm: the 409 refusal sentence does not describe the case it fires on.**
+  The terminal-status-mismatch arm (`csv-finalize/route.ts`, A2 check 0) refuses through
+  `refuse()` with the shipped DEFAULT literal — "This wizard session already created a strategy
+  with **a different track record** …" — but A2 fires when the track record is the SAME and the
+  FLOW differs (a manager resubmit landing on a committed `private` contribution row, or the
+  mirror). Deferred by plan 146.2-01 on purpose: that literal is pinned by name in
+  `CsvSubmitStep.upstream-arm.test.tsx` and in the c14 regression suite, and moving a pinned
+  sentence in a plan whose whole margin of safety was that no sentence moved would have been
+  reckless. **The fix is now two lines**: 146.2-01 gave `refuse()` an optional second
+  `humanMessage` parameter, so this arm needs its own sentence passed and a test arm re-pointed.
+  Copy-only ⇒ non-blocking per the stopping rule.
+- [ ] **`process-key-client.ts` transport catch: a TRAP-1-shaped error could inline BODY
+  credentials into a seam-level CONSOLE line.** The catch scrubs via `scrubSeamError(err)` whose
+  per-request secret set is DERIVED from the OUTGOING HEADERS
+  (`resilient-fetch.ts` `CREDENTIAL_HEADER_NAMES` → `credentialHeaderValues`, documented at
+  `process-key-client.ts:505-509`). That is a deliberate class fix for header-borne credentials,
+  and it is strictly better than the caller-declared list it replaced — but a credential carried
+  in the request BODY is not in the derived set, so an upstream error message echoing it back
+  would survive the scrub into the console line. **Sentry is unaffected: verified 2026-08-19,
+  the file contains zero `captureToSentry` call sites**, so the exposure is Vercel function logs
+  only. Not a live leak — no known body-borne credential crosses this seam today; recorded so
+  the next credential added to a `/process-key` body is not added blind. **Fix direction:** widen
+  the derived secret set to include body values of known credential-shaped keys, or assert at the
+  seam that no credential-shaped key appears in the body.

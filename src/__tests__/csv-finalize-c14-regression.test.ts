@@ -164,6 +164,15 @@ vi.mock("@/lib/sentry-capture", () => ({
   captureToSentry: vi.fn(),
 }));
 
+// 146.2-06 / T-146.2-12 — the finalize audit emission. Mocked so the emission
+// is OBSERVABLE: `audit-coverage.test.ts` is a static grep over the source and
+// proves only that a call is written near the mutation, never that the call is
+// reached, reached ONCE, or reached with the right event.
+const logAuditEventAsUserMock = vi.hoisted(() => vi.fn());
+vi.mock("@/lib/audit", () => ({
+  logAuditEventAsUser: logAuditEventAsUserMock,
+}));
+
 vi.mock("next/server", async () => {
   const actual = await vi.importActual<typeof import("next/server")>("next/server");
   return { ...actual, after: vi.fn() };
@@ -501,6 +510,137 @@ describe("RESOLVE-ECHO-READ-ONLY (145-05 C): 23505 + matching identity → 200 e
         String(c[0]).includes("23505 resolved to the existing strategy"),
       ),
     ).toBe(true);
+  });
+});
+
+// ══════════════════════════════════════════════════════════════════════════
+
+/**
+ * AUDIT-FINALIZE (146.2-06, absorbed item 1 / T-146.2-12) — THE FORENSIC ROW.
+ *
+ * The `@audit-skip` pragma above the fold call is gone, so
+ * `audit-coverage.test.ts` now REQUIRES an emission there. That law is a
+ * static grep: it proves a call is WRITTEN within its 60-line window, and
+ * nothing else. It would stay green if the call sat on an unreachable branch,
+ * fired on every echo as well, or named the wrong entity. This describe drives
+ * the behaviour.
+ *
+ * ⭐ THE SECOND CASE IS THE LOAD-BEARING ONE. A 23505 resolve echo means a
+ * PRIOR request committed the strategy and THIS one rolled back entirely.
+ * Emitting there would write a second creation record for one creation — on an
+ * append-only log that is not a duplicate, it is a false fact, and it would
+ * make the audit trail claim two track records were created where one was.
+ */
+describe("AUDIT-FINALIZE (146.2-06): the fold's commit emits strategy.csv_finalize — on the FRESH create only", () => {
+  const FRESH_ID = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+
+  let warnSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    checkLimitMock.mockResolvedValue({ success: true, retryAfter: 0 });
+    warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    warnSpy.mockRestore();
+  });
+
+  it("a fresh finalize emits exactly one strategy.csv_finalize event anchored on the NEW strategy id", async () => {
+    rpcMock.mockResolvedValueOnce({ data: FRESH_ID, error: null });
+    updateMock.mockResolvedValueOnce({ error: null });
+
+    const res = await POST(
+      makeRequest(
+        validBody({
+          daily_returns_series: [
+            { date: "2024-01-01", daily_return: 0.01 },
+            { date: "2024-01-02", daily_return: -0.02 },
+          ],
+        }),
+      ),
+    );
+    expect(res.status).toBe(200);
+
+    expect(
+      logAuditEventAsUserMock,
+      "the CSV finalize committed a strategy, its verification row and its whole track record with NO forensic row — the one user-visible creation in the product that nobody could attribute afterwards",
+    ).toHaveBeenCalledTimes(1);
+
+    const [, actingUserId, event] = logAuditEventAsUserMock.mock.calls[0] as [
+      unknown,
+      string,
+      { action: string; entity_type: string; entity_id: string; metadata?: Record<string, unknown> },
+    ];
+    // Attribution comes from the withAuth-established user id, not from the
+    // body — the mocked withAuth above supplies exactly this id.
+    expect(actingUserId).toBe("00000000-0000-0000-0000-000000000abc");
+    expect(event.action).toBe("strategy.csv_finalize");
+    expect(event.entity_type).toBe("strategy");
+    expect(
+      event.entity_id,
+      "the event was anchored on something other than the strategy the fold just committed — a forensic row that cannot be joined to the thing it describes",
+    ).toBe(FRESH_ID);
+    expect(event.metadata).toMatchObject({
+      fmt: "daily_returns",
+      row_count: 2,
+      terminal_status: "pending_review",
+    });
+    expect(event.metadata?.correlation_id).toBeTruthy();
+  });
+
+  it("a 23505 resolve ECHO emits NOTHING — this request created no strategy", async () => {
+    rpcMock.mockResolvedValueOnce({
+      data: null,
+      error: {
+        code: "23505",
+        message:
+          'duplicate key value violates unique constraint "strategies_user_wizard_session_source_uniq"',
+      },
+    });
+    strategiesMaybeSingleMock.mockResolvedValueOnce({
+      data: {
+        id: EXISTING_ID,
+        name: "Test Strategy",
+        status: "private",
+        category_id: COMMITTED_CATEGORY_ID,
+        asset_class: "traditional",
+      },
+      error: null,
+    });
+    dailiesRangeLimitMock.mockResolvedValueOnce({
+      data: [{ date: "2024-01-01" }],
+      count: 1,
+      error: null,
+    });
+    dailiesRangeLimitMock.mockResolvedValueOnce({
+      data: [{ date: "2024-01-01" }],
+      error: null,
+    });
+
+    const res = await POST(
+      makeRequest(validBody({ entry_context: "contribution" })),
+    );
+    expect(res.status).toBe(200);
+
+    expect(
+      logAuditEventAsUserMock,
+      "an echo wrote a CREATION record for a strategy a PRIOR request created — on an append-only log that is a false fact, not a duplicate",
+    ).not.toHaveBeenCalled();
+  });
+
+  it("a FAILED fold emits nothing — there is no strategy to attribute", async () => {
+    rpcMock.mockResolvedValueOnce({
+      data: null,
+      error: { code: "22023", message: "fold refused the payload" },
+    });
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const res = await POST(makeRequest(validBody()));
+    expect(res.status).toBe(500);
+    expect(logAuditEventAsUserMock).not.toHaveBeenCalled();
+
+    errorSpy.mockRestore();
   });
 });
 

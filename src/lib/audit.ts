@@ -426,6 +426,19 @@ export type AuditAction =
   // the union-s first semicolon.)
   | "strategy.ownership_mark"
   | "strategy.rename"
+  // --- Phase 146.2 / T-146.2-12: the CSV finalize commit -------------------
+  // csv_finalize = the wizard-s CSV upload committed a strategy, its
+  // verification row and its whole daily-returns series in ONE transaction
+  // (finalize_csv_strategy_with_returns). It is the user-visible CREATION of a
+  // track record, and it was the only such write in the product with no
+  // forensic row at all -- create-with-key skips create_wizard_strategy on the
+  // grounds that the creation is audited at finalize time, and this IS
+  // finalize. Emitted on the FRESH commit only -- a 23505 resolve echo writes
+  // no new strategy and has nothing to attribute.
+  // (Keep this comment free of the semicolon character and of double
+  // quotes -- the Python parity test-s TS union parser captures only up to
+  // the union-s first semicolon.)
+  | "strategy.csv_finalize"
   | "api_key.revoke"
   | "trades.upload"
   | "admin.partner_import"
@@ -633,6 +646,12 @@ export const AUDIT_ACTION_ENTITY_TYPE_MAP = {
   // Phase 150 / OWN-03 — entity_id is the strategies id for both.
   "strategy.ownership_mark": "strategy",
   "strategy.rename": "strategy",
+  // Phase 146.2 / T-146.2-12 — entity_id is the newly committed strategies id.
+  // `strategy` is the internally-consistent entity_type for the same reason
+  // `trades.upload` anchors there: the fold writes a strategy, a verification
+  // row and N dailies in one transaction, and the strategy is the ownership
+  // anchor the other two hang off.
+  "strategy.csv_finalize": "strategy",
   "api_key.revoke": "api_key",
   // B4c reconciliation: ADR-0023 L149 + the call site both anchor on
   // strategy (entity_id = strategies.id; "trades.upload is a bulk insert,
