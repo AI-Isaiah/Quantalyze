@@ -308,9 +308,18 @@ Plans:
 
 ### Phase 146.2: REVIEW: 146.1 post-merge close-out — the echo path must not silently drop a strategy's classification, and the passphrase must not reach Sentry (INSERTED)
 
-**Goal:** [Urgent work - to be planned]
-**Requirements**: TBD
-**Depends on:** Phase 146
+**Goal:** A CSV finalize that recovers via the resubmit path A3's own copy instructs lands the user's classification instead of silently defaulting it, and no raw exchange credential reaches Sentry.
+
+**Success criteria:**
+1. A resubmission that takes the 23505 echo path applies the submitted `category_id`/`asset_class` when the committed row has none, and REFUSES (409 `CSV_SESSION_REUSED`) when a present classification conflicts — the A2 identity rule extended to the second identity field.
+2. `passphrase` is scrubbed from every Sentry capture site on the verify-strategy route, and the docblock's enumeration matches the array.
+3. The B4 readmit predicate cannot drive an unbounded reaped-orphan retry loop.
+4. RT-3's re-mint persists the NEW session id — a reload in the re-mint window cannot resume a spent id with the burn cleared.
+5. Each fix carries a regression test that is observed RED under a named neuter.
+
+**Requirements**: R1 (blocker), R2 (security), R3–R7 (correctness/honesty), W1–W3 (carried from the 145/146.1 verifications)
+**Depends on:** Phase 146.1 (PR #692, squash `a6a2dee8`) — this phase reviews ITS output
+**PROD exposure:** re-measured 2026-08-19 at plan time — `suspect_and_visible = 0`, zero csv strategies created since A4 ⇒ forward-fix only, NO backfill in scope
 **Plans:** 0 plans
 
 Plans:
