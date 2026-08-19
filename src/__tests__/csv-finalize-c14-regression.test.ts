@@ -185,6 +185,17 @@ function makeRequest(body: Record<string, unknown>): NextRequest {
 const VALID_SESSION = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
 const VALID_SERIES = [{ date: "2024-01-01", daily_return: 0.01 }];
 const EXISTING_ID = "cccccccc-cccc-cccc-cccc-cccccccccccc";
+// 146.2-06 — the committed row's classification, DECLARED in the resolve-arm
+// fixtures rather than omitted. Since 146.2-01 the resolve select reads
+// `category_id, asset_class` and decides a tri-state on them where `undefined`
+// (absent), `null` (measured SQL NULL) and a string each mean something
+// DIFFERENT. A fixture that leaves the field out silently selects the absent
+// branch, so every case here declares what it means. It must be a real UUID:
+// `parseCsvMetadata` accepts `category_id` only when `isUuid()` passes and
+// silently drops anything else, so a placeholder string would make the request
+// side absent and a comparison would pass for the wrong reason (146.2-01
+// deviation 2).
+const COMMITTED_CATEGORY_ID = "dddddddd-dddd-dddd-dddd-dddddddddddd";
 
 function validBody(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
@@ -298,8 +309,21 @@ describe("RESOLVE-REFUSED (145-05 B): 23505 + name mismatch → 409 CSV_SESSION_
     });
     // The committed row holds a DIFFERENT name: a changed track record is a
     // NEW strategy, so the resolve arm must refuse (CR-01 check 1).
+    //
+    // 146.2-06 — `category_id` / `asset_class` DECLARED (see
+    // COMMITTED_CATEGORY_ID). The classification tri-state sits BELOW the name
+    // check and is never reached on this path, so the values cannot change the
+    // outcome; they are declared anyway so that if the checks were ever
+    // reordered, this case would exercise a defined state rather than an
+    // accidental one.
     strategiesMaybeSingleMock.mockResolvedValueOnce({
-      data: { id: EXISTING_ID, name: "A Different Strategy", status: "pending_review" },
+      data: {
+        id: EXISTING_ID,
+        name: "A Different Strategy",
+        status: "pending_review",
+        category_id: COMMITTED_CATEGORY_ID,
+        asset_class: "traditional",
+      },
       error: null,
     });
 
@@ -388,17 +412,43 @@ describe("RESOLVE-ECHO-READ-ONLY (145-05 C): 23505 + matching identity → 200 e
     // the CONTRIBUTION flow, which is the caller this committed row actually
     // belongs to; every read-only assertion below is unchanged.
     //
-    // ⛔ HONEST SCOPE — what this case can no longer prove ALONE. A2 refuses
+    // ⭐ 146.2-06 (absorbed item 4) — WHAT THIS CASE PROVES ALONE, RESTORED
+    // AND BOUNDED. Read this before weakening the `status` assertion below.
+    //
+    // The seeded status is 'private', chosen because it is NOT the constant
+    // 'pending_review' that the echo's removed fallback (`existingRow.status
+    // ?? "pending_review"`, deleted by 146.2-01) would have produced. With
+    // that fallback gone, replacing the echoed value with ANY hardcoded
+    // literal — the old fallback constant first among them — reds this case.
+    // That is "echoed, not fabricated", and this case carries it on its own
+    // again. Observed: hardcoding the echo to "pending_review" reds exactly
+    // this case (146.2-06-SUMMARY.md, neuter N5).
+    //
+    // ⛔ WHAT IT STILL CANNOT PROVE, STATED RATHER THAN IMPLIED. A2 refuses
     // every echo whose committed status differs from the request's, so on any
     // surviving echo path the echoed status and the requested terminal status
-    // are provably EQUAL. A hardcoded `status: args.terminalStatus` would
-    // therefore satisfy this assertion too. The discrimination did not
-    // disappear, it MOVED: it now lives in the refusal cases in
-    // `csv-finalize-cross-submission-merge.test.ts` ("manager resubmit onto a
-    // committed 'private' contribution row is REFUSED", and its mirror), which
-    // are the cases where the two values can differ at all.
+    // are provably EQUAL — no test can separate `existingRow.status` from
+    // `args.terminalStatus` here, because the code guarantees they are the
+    // same value. That specific substitution is discriminated by the refusal
+    // cases in `csv-finalize-cross-submission-merge.test.ts` ("manager
+    // resubmit onto a committed 'private' contribution row is REFUSED", and
+    // its mirror), which are the cases where the two CAN differ at all.
+    //
+    // 146.2-06 — `category_id` / `asset_class` are DECLARED, not omitted.
+    // Post-146.2-01 the resolve select reads both and decides a tri-state on
+    // them, so an omitted `category_id` would put this case on the ABSENT
+    // (arm c) branch by accident. Declaring a real UUID puts it on the
+    // CLASSIFIED (arm b) branch deliberately; this request sends no metadata,
+    // so its own classification is absent and the arm no-ops — which is the
+    // state the zero-writes assertions below are actually about.
     strategiesMaybeSingleMock.mockResolvedValueOnce({
-      data: { id: EXISTING_ID, name: "Test Strategy", status: "private" },
+      data: {
+        id: EXISTING_ID,
+        name: "Test Strategy",
+        status: "private",
+        category_id: COMMITTED_CATEGORY_ID,
+        asset_class: "traditional",
+      },
       error: null,
     });
     // Series-equality check (CR-01 check 2, as READS — red-team fix
@@ -427,7 +477,10 @@ describe("RESOLVE-ECHO-READ-ONLY (145-05 C): 23505 + matching identity → 200 e
     expect(res.status).toBe(200);
     expect(body.ok).toBe(true);
     expect(body.strategy_id).toBe(EXISTING_ID);
-    expect(body.status).toBe("private");
+    expect(
+      body.status,
+      "the echoed status was not the one READ from the committed row — a value nobody observed was reported back as this strategy's state",
+    ).toBe("private");
 
     // BOTH identity checks ran, as READS.
     expect(strategiesMaybeSingleMock).toHaveBeenCalledTimes(1);
@@ -448,6 +501,172 @@ describe("RESOLVE-ECHO-READ-ONLY (145-05 C): 23505 + matching identity → 200 e
         String(c[0]).includes("23505 resolved to the existing strategy"),
       ),
     ).toBe(true);
+  });
+});
+
+// ══════════════════════════════════════════════════════════════════════════
+
+/**
+ * RESOLVE-READ-FAIL (146.2-06, absorbed item 5) — THE TWO UNDRIVEN
+ * FAIL-CLOSED ARMS.
+ *
+ * `resolveExistingStrategyOrRefuse` funnels every unusable read into ONE
+ * `failClosed()` helper, which answers 503 CSV_PERSIST_FAIL and captures with
+ * `tags.step = "finalize-resolve-read-fail"`. Two of its call sites had NO
+ * test at all before this describe:
+ *
+ *   A. the strategies re-fetch RESOLVED with an error object — supabase-js
+ *      resolves on a read failure rather than throwing, so an unchecked
+ *      binding would read as "no row", i.e. a FAILED READ rendered as a
+ *      MEASUREMENT (the C-3 lesson the arm's docblock names).
+ *   B. the re-fetch resolved `data: null` with NO error — a 23505 with no
+ *      committed row to resolve to (TOCTOU delete, RLS hide, or a non-session
+ *      23505 that slipped every upstream gate).
+ *
+ * ⭐ EACH CASE ASSERTS THE STEP TAG, NOT JUST THE STATUS CODE. The 503 alone
+ * is satisfied by any refusal; what makes these arms operable is that the
+ * capture is findable under one grep-unique step string. Both cases were
+ * observed RED under a retag of that string in `route.ts` (records in
+ * 146.2-06-SUMMARY.md), which is what proves they pin the TAG.
+ */
+describe("RESOLVE-READ-FAIL (146.2-06): both fail-closed resolve arms answer 503 and capture step=finalize-resolve-read-fail", () => {
+  let errorSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    checkLimitMock.mockResolvedValue({ success: true, retryAfter: 0 });
+    errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    errorSpy.mockRestore();
+  });
+
+  function arm23505() {
+    rpcMock.mockResolvedValueOnce({
+      data: null,
+      error: {
+        code: "23505",
+        message:
+          'duplicate key value violates unique constraint "strategies_user_wizard_session_source_uniq"',
+      },
+    });
+  }
+
+  it("A: the strategies re-fetch RESOLVES with an error → 503 CSV_PERSIST_FAIL, step-tagged capture, zero writes", async () => {
+    arm23505();
+    // Resolved-not-thrown, which is exactly the supabase-js shape that makes
+    // an unchecked binding dangerous here.
+    strategiesMaybeSingleMock.mockResolvedValueOnce({
+      data: null,
+      error: { code: "57014", message: "canceling statement due to statement timeout" },
+    });
+
+    const res = await POST(
+      makeRequest(
+        validBody({ metadata: { description: "must never be written on a fail-closed refusal" } }),
+      ),
+    );
+    const body = await res.json();
+
+    expect(
+      res.status,
+      "a resolve read that FAILED was not distinguished from a resolve read that found nothing — the fence answered as though it had measured something",
+    ).toBe(503);
+    expect(body.ok).toBe(false);
+    expect(body.code).toBe("CSV_PERSIST_FAIL");
+    expect(body.human_message).toContain(
+      "could not confirm what is already saved",
+    );
+
+    const call = findCapture("finalize-resolve-read-fail");
+    expect(
+      call,
+      "the fail-closed arm fired with no capture under its own step tag — the 503 is invisible to ops",
+    ).toBeDefined();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const opts = call![1] as any;
+    expect(opts.tags.surface).toBe("csv-finalize");
+    expect(opts.extra.correlation_id).toBeTruthy();
+    // ⭐ THE CAPTURED ERROR IS THE READ ERROR ITSELF, and this assertion is
+    // what makes case A discriminate from case B at all. Both arms funnel into
+    // the SAME `failClosed()` helper, so both answer 503 under the same step
+    // tag: on status + tag alone, deleting `if (refetchErr) return
+    // failClosed(...)` would let this payload fall through to the
+    // no-committed-row arm (`data` IS null here) and the case would still
+    // pass — pinning nothing. The forensic payload is where the two differ:
+    // arm A carries the driver's error (its SQLSTATE is how ops tells a
+    // statement timeout from an RLS hide), arm B carries a synthetic Error.
+    expect(
+      opts && call![0],
+      "the capture did not carry the READ error — the fail-closed 503 arrived in Sentry with no SQLSTATE, so a statement timeout is indistinguishable from a vanished row",
+    ).toMatchObject({ code: "57014" });
+
+    // Nothing of THIS submission was written — the copy says so.
+    expect(updateMock).not.toHaveBeenCalled();
+    expect(insertMock).not.toHaveBeenCalled();
+    expect(upsertMock).not.toHaveBeenCalled();
+
+    // The console line survives alongside Sentry (Vercel log parity).
+    expect(
+      errorSpy.mock.calls.some((c: unknown[]) =>
+        String(c[0]).includes("23505 resolve strategies read failed"),
+      ),
+    ).toBe(true);
+  });
+
+  it("B: the re-fetch resolves data null with NO error → same 503 and the SAME step tag", async () => {
+    arm23505();
+    strategiesMaybeSingleMock.mockResolvedValueOnce({ data: null, error: null });
+
+    const res = await POST(makeRequest(validBody()));
+    const body = await res.json();
+
+    expect(
+      res.status,
+      "a 23505 with no committed row to resolve to was not refused — the arm cannot establish what exists and must not echo",
+    ).toBe(503);
+    expect(body.code).toBe("CSV_PERSIST_FAIL");
+    expect(body.strategy_id).toBeUndefined();
+
+    const call = findCapture("finalize-resolve-read-fail");
+    expect(call).toBeDefined();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    expect((call![1] as any).tags.surface).toBe("csv-finalize");
+    // The mirror of case A's assertion: THIS arm's capture carries the
+    // synthetic Error naming the condition, because there was no driver error
+    // to carry. The two arms are separable in Sentry, not just in the code.
+    expect(String((call![0] as Error)?.message)).toContain(
+      "re-fetch found no committed row",
+    );
+
+    expect(updateMock).not.toHaveBeenCalled();
+    expect(insertMock).not.toHaveBeenCalled();
+    expect(upsertMock).not.toHaveBeenCalled();
+  });
+
+  it("B': a row that came back WITHOUT a usable id takes the same arm (isUuid is part of the predicate)", async () => {
+    arm23505();
+    // A row exists but its id is unusable — `!isUuid(existingRow.id)` is the
+    // second half of the no-committed-row predicate, and a case driving only
+    // `data: null` would leave it unpinned.
+    //
+    // 146.2-06 — `category_id` / `asset_class` are ABSENT here ON PURPOSE, and
+    // so is any expectation about them: this predicate sits ABOVE the
+    // classification tri-state, so an unusable id must refuse before anything
+    // reads a classification at all. Declaring them would suggest this arm
+    // consults them.
+    strategiesMaybeSingleMock.mockResolvedValueOnce({
+      data: { id: "not-a-uuid", name: "Test Strategy", status: "pending_review" },
+      error: null,
+    });
+
+    const res = await POST(makeRequest(validBody()));
+    const body = await res.json();
+
+    expect(res.status).toBe(503);
+    expect(body.code).toBe("CSV_PERSIST_FAIL");
+    expect(findCapture("finalize-resolve-read-fail")).toBeDefined();
   });
 });
 
