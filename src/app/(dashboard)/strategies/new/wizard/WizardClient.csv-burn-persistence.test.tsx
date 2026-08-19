@@ -259,6 +259,20 @@ async function awaitHydration() {
   });
 }
 
+/**
+ * Read the CURRENTLY PERSISTED wizard envelope. The signed shape is
+ * `{ p: <json payload string>, … }`, matching the ad-hoc reads the burn/clear
+ * waiters below already do.
+ */
+function readPersistedEnvelope(): {
+  wizardSessionId?: string;
+  failedCsvSubmitSig?: string | null;
+} {
+  const raw = localStore["quantalyze_wizard_state_v1"];
+  expect(raw).toBeTruthy();
+  return JSON.parse(JSON.parse(raw as string).p);
+}
+
 async function failSubmitAndAwaitPersistedBurn() {
   fireEvent.click(screen.getByTestId("submit-fail"));
   await waitFor(() => {
@@ -384,5 +398,68 @@ describe("WizardClient — RT-3: the burned CSV submission survives a reload", (
     await Promise.resolve();
 
     expect(newWizardSessionIdMock.mock.calls.length).toBe(mintsAfterHydration);
+  });
+
+  /**
+   * R4 (v1.19 review of 146.1) — THE PAIR MUST NOT DE-SYNC. The clear case
+   * above proves the burn reaches storage; this proves the re-mint's OTHER
+   * half does too. The re-mint writes the envelope and swaps the session id;
+   * if the write carries the RETIRED id, the reload window between that write
+   * and the next save restores a SPENT session id with the fence DISARMED —
+   * strictly the worst of both states, and precisely what RT-3 exists to
+   * prevent. The changed resubmit then takes the server's equality refusal
+   * (409) with no burn left to re-mint it, so the user is stuck. Nothing
+   * repairs it: the name autosave is gated on step `csv_upload` and the
+   * re-mint fires past it.
+   *
+   * ⭐ ASSERTING THE PAIR IN ONE CASE IS THE POINT. Either half alone passes
+   * on the defective ordering — the burn is cleared (this file's case above
+   * already covers that) and the id is *a* valid id (just the spent one).
+   * Only "the persisted id is the NEWLY MINTED one AND the burn is cleared"
+   * can fail on it.
+   */
+  it("persists the NEW session id together with the cleared burn, so a reload in the re-mint window cannot resume a spent id", async () => {
+    const first = render(<WizardClient initialDraft={null} />);
+    await advanceToSubmit();
+    await failSubmitAndAwaitPersistedBurn();
+    first.unmount();
+
+    render(<WizardClient initialDraft={null} />);
+    await awaitHydration();
+    // The id the failed submit SPENT — restored from the envelope, and the id
+    // the server's idempotency arm has already seen.
+    const spentSessionId = readPersistedEnvelope().wizardSessionId;
+    expect(spentSessionId).toBeTruthy();
+    const mintsAfterHydration = newWizardSessionIdMock.mock.calls.length;
+
+    // The user comes back with a CORRECTED file: the re-mint path.
+    uploadPayload = { ...uploadPayload, dailyReturnsSeries: SERIES_B };
+    fireEvent.click(await screen.findByTestId("fire-upload-success"));
+
+    // The re-mint happened, and its envelope write has LANDED (the cleared
+    // burn is the signal — the same one the case above waits on), so what we
+    // read next is the state a reload right now would resume from.
+    await waitFor(() => {
+      expect(newWizardSessionIdMock.mock.calls.length).toBeGreaterThan(
+        mintsAfterHydration,
+      );
+      expect(readPersistedEnvelope().failedCsvSubmitSig ?? null).toBeNull();
+    });
+
+    const mintedSessionId = newWizardSessionIdMock.mock.results.at(-1)?.value as
+      | string
+      | undefined;
+    expect(mintedSessionId).toBeTruthy();
+    expect(mintedSessionId).not.toBe(spentSessionId);
+
+    const resumed = readPersistedEnvelope();
+    expect(
+      resumed.wizardSessionId,
+      "a reload here must resume the FRESH session id: the persisted envelope carries the retired one, so the corrected resubmit would replay a spent id with the burn already cleared",
+    ).toBe(mintedSessionId);
+    expect(
+      resumed.failedCsvSubmitSig ?? null,
+      "…and it must resume with the burn cleared: a fence armed against content the user already corrected locks the resubmit out forever",
+    ).toBeNull();
   });
 });
