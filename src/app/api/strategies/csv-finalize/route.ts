@@ -98,6 +98,19 @@ const MAX_NAME_CHARS = MAGNITUDE_CAPS.MAX_NAME_CHARS;
 // duplicate).
 const MAX_DAILY_RETURNS_ROWS = 5000;
 const DAILY_RETURNS_DATE_REGEX = /^\d{4}-\d{2}-\d{2}$/;
+/**
+ * R7 (146.2-06) — the earliest date a daily-returns row may carry.
+ *
+ * ⛔ THIS IS A COPY OF THE FOLD'S OWN LITERAL, and the two must stay equal.
+ * `finalize_csv_strategy_with_returns` GUARD 9 refuses `(elem->>'date')::DATE
+ * < DATE '1900-01-01'` with SQLSTATE 22023
+ * (`20260819151000_csv_finalize_fold_guard1_null_safe.sql:369`, carried
+ * unchanged from `20260819130000:350`). See the fence in
+ * `parseDailyReturnsSeries` for why mirroring it route-side matters: a fold
+ * 22023 is answered 500 "safe to try again", which is false for an input that
+ * fails identically forever.
+ */
+const MIN_DAILY_RETURN_DATE = "1900-01-01";
 
 /**
  * One row in the persisted CSV daily-returns series. Mirrors the JSONB
@@ -234,6 +247,42 @@ export function parseDailyReturnsSeries(raw: unknown): ParsedDailyReturnsSeries 
         ok: false,
         code: "CSV_INVALID_FORMAT",
         message: `daily_returns_series[${i}].date is in the future: ${r.date}.`,
+        debug_context: { row: i, date: r.date },
+      };
+    }
+    // R7 (146.2-06) — THE DATE LOWER BOUND, MIRRORING THE FOLD.
+    //
+    // The fold already refuses this row (GUARD 9,
+    // 20260819151000_csv_finalize_fold_guard1_null_safe.sql:369 —
+    // `OR (elem->>'date')::DATE < DATE '1900-01-01'`) with SQLSTATE 22023.
+    // But a fold 22023 is a CLASS 1 rolled-back failure here, answered 500
+    // CSV_FINALIZE_FAIL whose copy says the submission is SAFE TO TRY AGAIN.
+    // It is not: this input fails identically forever, so the user is invited
+    // into a retry loop that cannot terminate. Classify it at the boundary
+    // instead — which is what the two SIBLING fences above already do: the
+    // |daily_return| <= 10 bound mirrors GUARD 9's `BETWEEN -10 AND 10`, and
+    // the future-date arm mirrors its `> now()::date` conjunct. Only the
+    // lower bound was missing.
+    //
+    // ⛔ `MIN_DAILY_RETURN_DATE` IS THE FOLD'S LITERAL, COPIED — not rounded
+    // to the Unix epoch or to anything tidier. A route bound TIGHTER than the
+    // fold's silently refuses payloads the database would accept; a LOOSER one
+    // re-opens the retry-copy 500 this closes. If GUARD 9's literal ever
+    // moves, this one moves in the same commit.
+    //
+    // The comparison is LEXICOGRAPHIC on purpose, and it is sound here for the
+    // same reason the resolve arm's min/max scan and its ORDER BY date reads
+    // are (see the note at the series-equality check): `date` is fixed-width
+    // `YYYY-MM-DD`, regex-validated at the top of this loop and calendar-
+    // validated immediately above, and for that format lexicographic and
+    // chronological order coincide. Comparing the already-parsed Date object
+    // would work too; the string form keeps the fence textually identical to
+    // the SQL literal it mirrors.
+    if (r.date < MIN_DAILY_RETURN_DATE) {
+      return {
+        ok: false,
+        code: "CSV_INVALID_FORMAT",
+        message: `daily_returns_series[${i}].date is before the earliest supported date ${MIN_DAILY_RETURN_DATE}: ${r.date}.`,
         debug_context: { row: i, date: r.date },
       };
     }

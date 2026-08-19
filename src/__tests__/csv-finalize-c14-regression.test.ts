@@ -706,6 +706,65 @@ describe("NEW-C14-10: date validation (round-trip + future)", () => {
 
 // ══════════════════════════════════════════════════════════════════════════
 
+/**
+ * R7 (146.2-06) — THE DATE LOWER BOUND, AS A ROUTE-SIDE MIRROR OF THE FOLD.
+ *
+ * The fold refuses a pre-1900 row itself (GUARD 9,
+ * `20260819151000_csv_finalize_fold_guard1_null_safe.sql:369`:
+ * `OR (elem->>'date')::DATE < DATE '1900-01-01'`) with SQLSTATE 22023. On the
+ * route, a fold 22023 is a CLASS 1 "rolled-back" failure → 500
+ * CSV_FINALIZE_FAIL, whose copy tells the user the submission is **safe to try
+ * again**. It is not: the same file fails identically forever. A permanent
+ * input answered with retry copy is the defect; the fix is to classify it at
+ * the boundary, where the route ALREADY mirrors the fold's other two fences
+ * (the |daily_return| <= 10 magnitude bound mirrors GUARD 9's `BETWEEN -10 AND
+ * 10`, and the future-date arm mirrors its `> now()::date` conjunct).
+ *
+ * ⛔ 1900-01-01 IS THE FOLD'S LITERAL, COPIED. Do not "round" it to 1970, to
+ * the Unix epoch, or to whatever the next reviewer finds tidier: a route bound
+ * TIGHTER than the fold's silently rejects payloads the database would accept,
+ * and a bound LOOSER than the fold's re-opens exactly the retry-copy 500 this
+ * closes. The two literals must be the same string.
+ */
+describe("R7 (146.2-06): date lower bound mirrors the fold's DATE '1900-01-01' fence", () => {
+  it("rejects '1899-12-31' — the row the fold would 22023 — with a row-indexed 400", () => {
+    const result = parseDailyReturnsSeries([
+      { date: "2024-01-01", daily_return: 0.01 },
+      { date: "1899-12-31", daily_return: 0.01 },
+    ]);
+    expect(
+      result.ok,
+      "a pre-1900 row still reaches the fold, which refuses it 22023 — surfaced to the user as a 500 that says the submission is safe to try again, about an input that will fail identically forever",
+    ).toBe(false);
+    if (!result.ok) {
+      expect(result.code).toBe("CSV_INVALID_FORMAT");
+      // Row-indexed, same register as the future-date arm it mirrors.
+      expect(result.message).toContain("daily_returns_series[1].date");
+      expect(result.message).toContain("1900-01-01");
+      expect(result.debug_context).toMatchObject({ row: 1, date: "1899-12-31" });
+    }
+  });
+
+  it("accepts '1900-01-01' exactly — the fence is `< 1900-01-01`, not `<=`", () => {
+    const result = parseDailyReturnsSeries([
+      { date: "1900-01-01", daily_return: 0.01 },
+    ]);
+    expect(
+      result.ok,
+      "the boundary date itself was rejected — a route bound TIGHTER than the fold's refuses payloads the database would have accepted",
+    ).toBe(true);
+  });
+
+  it("rejects '0001-01-01' (a spreadsheet zero-date export)", () => {
+    const result = parseDailyReturnsSeries([
+      { date: "0001-01-01", daily_return: 0.01 },
+    ]);
+    expect(result.ok).toBe(false);
+  });
+});
+
+// ══════════════════════════════════════════════════════════════════════════
+
 describe("NEW-C14-12: trimmed strategy_name length check", () => {
   beforeEach(() => {
     vi.clearAllMocks();
