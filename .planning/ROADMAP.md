@@ -320,11 +320,33 @@ Plans:
 **Requirements**: R1 (blocker), R2 (security), R3–R7 (correctness/honesty), W1–W3 (carried from the 145/146.1 verifications)
 **Depends on:** Phase 146.1 (PR #692, squash `a6a2dee8`) — this phase reviews ITS output
 **PROD exposure:** re-measured 2026-08-19 at plan time — `suspect_and_visible = 0`, zero csv strategies created since A4 ⇒ forward-fix only, NO backfill in scope
-**Plans:** 0 plans
+**Plans:** 8 plans across 3 waves. ⛔ Sequencing is the file-collision map: `csv-finalize/route.ts` is
+SINGLE-OWNER SERIAL (plan 01 wave 1, plan 06 wave 2); the two migrations are one-way doors with
+in-plan decision checkpoints, and plan 08 is the ORCHESTRATOR-ONLY 146.1-08-pattern migration gate
+(TEST rehearsal → blocking merge checkpoint → PROD census) — it cannot be delegated to a worktree
+agent. THE CRUX is ratified in plan 01: `category_id IS NULL` is the never-classified discriminator
+(asset_class is NOT NULL DEFAULT 'traditional' — indistinguishable from a user choice), and the
+trades-echo FILL-safety hole is settled with evidence (trades strategies structurally carry no
+stored KPIs: enqueue gate + sweep dailies conjunct, both self-verify-pinned).
 
 Plans:
 
-- [ ] TBD (run /gsd-plan-phase 146.2 to break down)
+**Wave 1**
+
+- [ ] 146.2-01-r1-echo-classification-fill-refuse-PLAN.md — R1 BLOCKER: resolve-arm tri-state FILL/REFUSE/no-op on `category_id IS NULL`, A2-residual fail-closed status echo, economic oracle survives unchanged
+- [ ] 146.2-02-r2-passphrase-sentry-scrub-PLAN.md — R2 SECURITY: passphrase joins the scrub array via a shared credential tuple; TRAP-1 seam test RED-first
+- [ ] 146.2-03-r4-remint-persists-new-id-PLAN.md — R4: mint-first ordering, one save carries new id + cleared burn
+- [ ] 146.2-04-r3-readmit-ceiling-migration-PLAN.md — R3: sweep readmit ceiling via marker-row count (zero DDL), migration `20260819150000`, gate arm C5 + the carried B4-BLANKET neuter actually RUN (checkpoint: ceiling N)
+- [ ] 146.2-05-r5-fold-guard1-null-safe-w3-pins-PLAN.md — R5+W3+W2: fold GUARD 1 `IS NULL OR` migration `20260819151000` + snapshot regen, standing prosrc no-handler + service_role pins, double-submit prose re-cut (checkpoint: one-way door)
+
+**Wave 2** *(blocked on plan 01)*
+
+- [ ] 146.2-06-r7-resolve-pins-audit-event-PLAN.md — R7 date lower-bound mirror; undriven fail-closed arms pinned by step tag; c14 echo discrimination restored; `strategy.csv_finalize` audit event (absorbed item, decided IN SCOPE); two TODOS deferrals re-recorded
+- [ ] 146.2-07-r6-echo-copy-render-w1-fixtures-PLAN.md — R6: echo `human_message` renders in-step with explicit continue (product call taken); W1 provenance constants re-typed from HEAD
+
+**Wave 3** *(blocked on plans 04+05; ORCHESTRATOR-ONLY)*
+
+- [ ] 146.2-08-migration-gate-orchestrator-PLAN.md — 146.1-08 pattern: TEST rehearsal of both migrations with all gate arms armed, blocking merge checkpoint, post-merge PROD census (ceiling body, one cron tick, GUARD 1 arm, ACLs, exposure still 0)
 
 ### Phase 147: SCEN-01 — The scenario engine receives the real series
 
