@@ -921,6 +921,106 @@ describe("WR-04 (Phase 53): explicit null category_id → 400 (defense-in-depth 
 
 // ══════════════════════════════════════════════════════════════════════════
 
+describe("WR-02 (Phase 146.2 review): present-but-invalid category_id → 400, never a silent drop", () => {
+  // WHY THIS MATTERS ECONOMICALLY, not just structurally.
+  //
+  // Phase 146.2 makes `category_id IS NULL` on the committed row the FILL
+  // discriminator for the 23505 echo, because `strategies.asset_class` is
+  // NOT NULL DEFAULT 'traditional' and therefore cannot distinguish "never
+  // classified" from "the user chose traditional". The whole FILL/REFUSE split
+  // rests on one claim: a committed NULL is observable proof the metadata
+  // UPDATE never ran.
+  //
+  // A silently-dropped non-UUID category_id FALSIFIES that claim — it commits a
+  // row with category_id NULL for which the UPDATE *did* run. A later
+  // same-session resubmit then reads NULL, takes the FILL arm, and rewrites
+  // description / aum / markets / strategy_types the user never resubmitted:
+  // the A4 mutation-on-an-echo the split exists to forbid.
+  //
+  // The wizard cannot reach this (MetadataStep gates Submit on a non-null
+  // categoryId sourced from discovery_categories). An authenticated API client
+  // — a stale build, an integration, a script — can.
+  beforeEach(() => {
+    vi.clearAllMocks();
+    checkLimitMock.mockResolvedValue({ success: true, retryAfter: 0 });
+  });
+
+  it("rejects a present-but-non-UUID category_id string with 400 CSV_INVALID_FORMAT, before the RPC", async () => {
+    const res = await POST(
+      makeRequest(
+        validBody({ metadata: { category_id: "systematic-macro" } }),
+      ),
+    );
+    const body = await res.json();
+    expect(res.status).toBe(400);
+    expect(body.ok).toBe(false);
+    expect(body.code).toBe("CSV_INVALID_FORMAT");
+    expect(body.debug_context?.field).toContain("category_id");
+    // Rejected at the parse boundary: nothing was committed, so no row exists
+    // whose NULL category_id could later be misread as "never classified".
+    expect(rpcMock).not.toHaveBeenCalled();
+  });
+
+  it("rejects a non-string category_id (number) with 400 CSV_INVALID_FORMAT, before the RPC", async () => {
+    const res = await POST(
+      makeRequest(validBody({ metadata: { category_id: 42 } })),
+    );
+    const body = await res.json();
+    expect(res.status).toBe(400);
+    expect(body.code).toBe("CSV_INVALID_FORMAT");
+    expect(body.debug_context?.field).toContain("category_id");
+    expect(rpcMock).not.toHaveBeenCalled();
+  });
+
+  it("rejects a UUID-shaped-but-invalid category_id with 400 CSV_INVALID_FORMAT", async () => {
+    // Right length and hyphenation, non-hex characters — isUuid must reject it
+    // rather than the arm falling through to a silent drop.
+    const res = await POST(
+      makeRequest(
+        validBody({
+          metadata: { category_id: "zzzzzzzz-zzzz-zzzz-zzzz-zzzzzzzzzzzz" },
+        }),
+      ),
+    );
+    const body = await res.json();
+    expect(res.status).toBe(400);
+    expect(body.code).toBe("CSV_INVALID_FORMAT");
+    expect(rpcMock).not.toHaveBeenCalled();
+  });
+
+  it("still accepts a valid UUID (the fix rejects only what was previously dropped)", async () => {
+    rpcMock.mockResolvedValueOnce({
+      data: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+      error: null,
+    });
+    updateMock.mockResolvedValueOnce({ error: null });
+    const res = await POST(
+      makeRequest(
+        validBody({
+          metadata: { category_id: "ffffffff-ffff-ffff-ffff-ffffffffffff" },
+        }),
+      ),
+    );
+    expect(res.status).toBe(200);
+    expect((await res.json()).ok).toBe(true);
+  });
+
+  it("still accepts the category_id key ABSENT — the metadata-less path is untouched", async () => {
+    // The ABSENT case is a legitimate path and must NOT be swept up by the new
+    // `!== undefined` arm. If this ever reddens, the fix over-reached.
+    rpcMock.mockResolvedValueOnce({
+      data: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+      error: null,
+    });
+    updateMock.mockResolvedValueOnce({ error: null });
+    const res = await POST(makeRequest(validBody({ metadata: {} })));
+    expect(res.status).toBe(200);
+    expect((await res.json()).ok).toBe(true);
+  });
+});
+
+// ══════════════════════════════════════════════════════════════════════════
+
 describe("WR-04 (Phase 53): parseCsvMetadata shared validator (both guard paths)", () => {
   // The handler tests above prove the PRE-create call site rejects null. This
   // pins the SHARED validator directly so the contract holds regardless of which

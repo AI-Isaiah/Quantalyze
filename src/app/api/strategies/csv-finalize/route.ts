@@ -413,7 +413,30 @@ export function parseCsvMetadata(raw: unknown): ParseCsvMetadataResult {
       message:
         "category_id is required — select a strategy category before submitting.",
     };
-  } else if (typeof obj.category_id === "string" && isUuid(obj.category_id)) {
+  } else if (obj.category_id !== undefined) {
+    // WR-02 (Phase 146.2 review): a present-but-invalid category_id used to be
+    // dropped SILENTLY, contradicting this block's own "better UX than a silent
+    // drop" contract eight lines above and diverging from every sibling field
+    // (asset_class and aum both 400 on present-but-invalid, NEW-C14-03).
+    //
+    // Pre-146.2 that only cost discovery visibility. This phase makes the drop
+    // LOAD-BEARING: `category_id IS NULL` on the committed row is the FILL
+    // discriminator (see the 23505 resolve arm), because asset_class is
+    // NOT NULL DEFAULT 'traditional' and so cannot distinguish "never
+    // classified" from "chose traditional". A silent drop mints a row that
+    // reads "never classified" even though the metadata UPDATE *did* run —
+    // so a later same-session resubmit takes the FILL arm and rewrites
+    // description/aum/markets/strategy_types the user never resubmitted,
+    // which is exactly the A4 mutation-on-an-echo the FILL/REFUSE split exists
+    // to forbid. Reject at the boundary so "a committed NULL proves the UPDATE
+    // never ran" is actually true.
+    if (typeof obj.category_id !== "string" || !isUuid(obj.category_id)) {
+      return {
+        ok: false,
+        field: "metadata.category_id",
+        message: `category_id must be a UUID (got ${JSON.stringify(obj.category_id)}).`,
+      };
+    }
     out.category_id = obj.category_id;
   }
 
