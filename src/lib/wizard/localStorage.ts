@@ -313,6 +313,20 @@ export async function saveWizardState(
  */
 let saveQueue: Promise<void> = Promise.resolve();
 
+/**
+ * Resolve once every queued `saveWizardState` has settled.
+ *
+ * RT-3 made saves both SERIALIZED and slower (the sticky carry-forward adds an
+ * async read + HMAC verify when the caller omits `failedCsvSubmitSig`). Callers
+ * fire them with `void`, so a save started before a teardown can now land AFTER
+ * it — resurrecting state that was deliberately cleared. This is the
+ * synchronization point that hazard needs; it is not test-only scaffolding.
+ * `saveQueue` never rejects (`writeWizardState` swallows), so awaiting is safe.
+ */
+export function flushWizardStateSaves(): Promise<void> {
+  return saveQueue;
+}
+
 async function writeWizardState(
   state: Omit<WizardLocalState, "savedAt">,
 ): Promise<void> {
