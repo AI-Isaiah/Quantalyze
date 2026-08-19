@@ -868,6 +868,34 @@ governs by CONTENT TYPE, and their content is prose/forms — rung 1.
   jobs). Window already widened 2h→4h.
 
 ### Reliability / observability
+- **No cron migration in the repo has EVER asserted `cron.job.username`/`database`** (found
+  2026-08-19 by the RLS audit of Phase 146.2's R3 migration; INHERITED gap, not introduced —
+  logged as a CLASS fix, deliberately not point-fixed into `20260819150000`).
+  `cron.job.username` defaults to `current_user` **at `cron.schedule` time**, so re-registration
+  is precisely the operation that re-derives a job's privilege. Every cron self-verify in this
+  repo reads `command` + `schedule` and never `username`/`database`/`active`. Two undetectable
+  drift paths, both requiring a non-`postgres` applier:
+  (a) a different superuser (e.g. `supabase_admin`) → the body silently runs with superuser
+  rights thereafter, and the `count(*) = 1` gate still passes;
+  (b) a non-BYPASSRLS applier → pg_cron's stock `cron.job` RLS (`USING (username = current_user)`)
+  HIDES the postgres-owned row → `IF EXISTS` is false → no unschedule → the unique index on
+  `(jobname, username)` permits a **SECOND** row → the sweep fires twice hourly (per-tick radius
+  25 → 50). ⚠️ **The `v_count <> 1` guard is RLS-BLIND to this and would read 1 and pass green.**
+  **Measured 2026-08-19:** owner is `postgres` on both PROD and TEST, so neither path is currently
+  reachable via the normal merge pipeline — this is hardening, not a live break.
+  **Fix:** add `username = 'postgres'` + `database = current_database()` equality assertions to
+  the STEP-2 self-verify of every cron-registering migration going forward, with a
+  consequence-naming message. Evidence of the ratified owner: `20260816140000:375`.
+- **The readmit ceiling is SILENT at exactly the moment it gives up** (found 2026-08-19 by the
+  RLS audit of Phase 146.2 R3; the fix's own new blind spot). At the ceiling the sweep inserts
+  nothing → no `compute_jobs` row → no `{"source":"reconcile-sweep"}` metadata → the worker-side
+  capture at `analytics-service/main_worker.py:754` never fires. **The alert is keyed on the
+  HEAL**, so the transition from "recovering hourly" to "abandoned for ~90 days" emits NO signal,
+  and the strategy's owner has no user surface for it. Not a leak and not a data-integrity
+  defect — filed against Rule 12 (fail loud). **Founder decision needed:** body-side audit row on
+  exhaustion vs. an external exhaustion query/alert. ⚠️ Interacts with the 90-day retention wall,
+  which DELETES the marker rows that ARE the counter — so the bound is "3 per retention window",
+  and a strategy can silently resume cycling after ~90d with no notification at either edge.
 - **csv-finalize is non-transactional** → orphan strategy rows on partial failure. Wrap in one
   txn or add Sentry alert + orphan-cleanup cron.
 - **`after()` enqueue silent-failure** → strategy has data but no compute job → stuck
