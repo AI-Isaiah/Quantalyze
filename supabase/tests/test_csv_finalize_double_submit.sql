@@ -222,10 +222,49 @@ BEGIN
   -- Part 3 — the rollback, ASSERTED rather than assumed — THREE tables
   -- ======================================================================
   -- The folded body has NO handler clause, so the unhandled 23505 aborts the
-  -- function and the enclosing statement and ALL THREE inserts roll back. If
-  -- a future edit adds a handler that swallows the violation after any
-  -- INSERT — or catches it, writes dailies onto the existing strategy, and
-  -- re-raises — the counts below catch it.
+  -- function and the enclosing statement and ALL THREE inserts roll back.
+  --
+  -- ⚠️ HONESTY NOTE, SCOPE OF WHAT THE COUNTS BELOW CATCH (v1.19
+  -- review-of-146.1 finding W2; same register as the 146.1-07 note at
+  -- test_csv_finalize_atomic_fold.sql Part 2c). This header used to claim the
+  -- counts catch a future handler that "swallows the violation after any
+  -- INSERT — OR catches it, writes dailies onto the existing strategy, and
+  -- re-raises". The first half is true. THE SECOND HALF WAS NOT, and it is
+  -- retracted here rather than left standing:
+  --
+  -- Both variants were MEASURED on a throwaway postgres:16 over a miniature
+  -- schema (phase 146.2 plan 05), by installing each handler in the fold and
+  -- re-running this file — not reasoned about:
+  --
+  --   * SWALLOW variant — a handler that catches the 23505, writes, and
+  --     returns normally: CAUGHT, twice over. Part 2a reds first ("the SECOND
+  --     finalize ... SUCCEEDED and returned <id>") and stops the file under
+  --     ON_ERROR_STOP; and the counts themselves do move — the same double
+  --     submit driven outside this file reads strategies=1,
+  --     verifications=2, dailies=3 against Part 3's expected 1 / 1 / 3, so
+  --     Part 3b would red on its own if 2a ever went away.
+  --   * CATCH-WRITE-AND-RE-RAISE variant — NOT caught, and not catchable by
+  --     ANY row count. A plpgsql EXCEPTION block is an implicit
+  --     SUBTRANSACTION (a savepoint). When the handler re-raises, that
+  --     subtransaction rolls back, so the handler's OWN writes are undone by
+  --     plpgsql semantics regardless of anything the fold does. MEASURED:
+  --     with `EXCEPTION WHEN OTHERS THEN RAISE;` appended to the fold, Parts
+  --     1, 2 and 3 of this file all report OK and Part 3 prints the same
+  --     "exactly 1 ... 1 ... 3" it prints on a healthy body. Counting rows
+  --     cannot distinguish "no handler" from "a handler whose writes were
+  --     rolled back" — only STRUCTURE can.
+  --
+  -- The re-raise variant is fenced, but somewhere else: the standing
+  -- comment-stripped prosrc assertion at
+  -- supabase/tests/test_csv_finalize_atomic_fold.sql Part 1d reds on ANY
+  -- handler clause in the deployed body, catch-and-re-raise included. If that
+  -- pin is ever deleted, this variant becomes unfenced across the whole suite
+  -- — do not delete it, and do not restore the retracted claim here to paper
+  -- over its absence.
+  --
+  -- What Parts 3a-3c below assert therefore stands unchanged and is worth
+  -- keeping: the FIRST submission's rows survive the rejected second call
+  -- intact — neither deleted, nor doubled, nor upserted over.
   SELECT count(*) INTO row_cnt
     FROM public.strategies
    WHERE user_id = uid_a AND wizard_session_id = session_a;
