@@ -815,6 +815,22 @@ governs by CONTENT TYPE, and their content is prose/forms — rung 1.
   changes in the undeployed delta).
 
 ### Money-path correctness (latent / flag-gated / edge cases)
+- **`getPercentiles` folds FAILED-computation KPIs into published rankings** (found 2026-08-19
+  during Phase 146.2 planning; NOT in 146.2 scope — that phase fixes the csv echo FILL guard,
+  not this). `PERCENTILE_ANALYTICS_COLUMNS` (`src/lib/queries.ts:126-127`) is
+  `"cagr, sharpe, sortino, calmar, max_drawdown, volatility, cumulative_return"` — it does not
+  SELECT `computation_status` at all, so a published strategy whose analytics row is
+  `computation_status='failed'` contributes its **stale/partial** KPIs to the percentile
+  distribution **for every other strategy's rank**. `StrategyTable.tsx:1091` likewise renders
+  `formatNumber(s.analytics.sharpe)` ungated (only the status *chip* is gated).
+  ⚠️ **The gating is per-surface, not systemic**: the detail page and factsheet PDFs DO gate on
+  `computation_status`, and nearly every other projection in `queries.ts` selects it — the
+  percentile path is the outlier. Measured on PROD 2026-08-19: 7 csv strategies carry a non-null
+  `sharpe`+`cagr` on a `failed` row.
+  **Fix:** add `computation_status` to `PERCENTILE_ANALYTICS_COLUMNS` and exclude non-`complete`
+  rows from the percentile population; decide separately whether `StrategyTable` should render a
+  failed row's metrics at all. **Test must pin the ECONOMICS** — a failed row must not move
+  another strategy's percentile rank.
 - ~~**Unified-backbone CSV-finalize breaks if flag on**~~ — **CLOSED 2026-08-17 (Phase 145
   SC#1, verdict CANNOT REPRODUCE)**. Of this bullet's own two remedies, **"forward JWT"
   shipped in Phase 19.1** (2026-05-27; verified at HEAD: `route.ts:1324` forwards
