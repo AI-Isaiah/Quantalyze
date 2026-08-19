@@ -451,7 +451,7 @@ describe("[140.3-13a / SEAMUX-08] POST /api/verify-strategy — the Sentry paylo
     process.env = { ...ORIGINAL_ENV };
   });
 
-  function postReqWithSecret(): NextRequest {
+  function postReqWithSecret(includePassphrase = true): NextRequest {
     return new NextRequest("http://localhost:3000/api/verify-strategy", {
       method: "POST",
       headers: {
@@ -465,7 +465,9 @@ describe("[140.3-13a / SEAMUX-08] POST /api/verify-strategy — the Sentry paylo
         api_secret: RAW_API_SECRET,
         // 146.2 / R2 — `exchange: "okx"` above is a passphrase-bearing venue,
         // so this is the shape a REAL OKX teaser submit has, not a contrivance.
-        passphrase: RAW_PASSPHRASE,
+        // A caller on a two-credential venue omits it; `includePassphrase:false`
+        // is that caller, and the wire case below asserts both shapes.
+        ...(includePassphrase ? { passphrase: RAW_PASSPHRASE } : {}),
       }),
     });
   }
@@ -542,6 +544,66 @@ describe("[140.3-13a / SEAMUX-08] POST /api/verify-strategy — the Sentry paylo
       "the syscall token was destroyed — ECONNREFUSED is the most valuable thing in a transport line",
     ).toContain("ECONNREFUSED");
     errorSpy.mockRestore();
+  });
+
+  /**
+   * 146.2 / R2 — THE OTHER HALF OF THE TUPLE CLAIM, and the reason the scrub
+   * assertion above is not vacuous.
+   *
+   * The route now builds the outgoing `context` credentials AND
+   * `perRequestSecrets` from ONE `bodyCredentials` declaration. The case above
+   * proves the SCRUB side; this proves the WIRE side, so "scrubbed" can never
+   * be achieved by quietly no longer sending the credential (which would break
+   * every OKX/KuCoin/Coinbase verification while the security test went green).
+   *
+   * It also pins the omission rule the refactor generalised: a caller who sends
+   * no passphrase must produce a context with NO `passphrase` key. The scrub
+   * array takes the member unconditionally — `scrubSeamString` skips
+   * non-strings — but the wire must not grow a null field the Python side
+   * never saw.
+   */
+  it("146.2 / R2 WIRE SIDE: all three body credentials still reach /process-key, and an omitted passphrase stays omitted", async () => {
+    fetchMock.mockResolvedValue(successResponse());
+    const { POST } = await import("./route");
+
+    expect((await POST(postReqWithSecret())).status).toBe(200);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    const sent = JSON.parse(init.body as string) as {
+      context: Record<string, unknown>;
+    };
+    expect(
+      sent.context,
+      "a body credential stopped reaching the upstream — the scrub above must never be satisfied by not sending the value",
+    ).toMatchObject({
+      api_key: RAW_API_KEY,
+      api_secret: RAW_API_SECRET,
+      passphrase: RAW_PASSPHRASE,
+    });
+    // PR-X5 allowlist, restated as a fact: the spread cannot widen the context.
+    expect(Object.keys(sent.context).sort()).toEqual([
+      "api_key",
+      "api_secret",
+      "email",
+      "exchange",
+      "passphrase",
+    ]);
+
+    // ⚠️ A fresh Response per call, not `mockClear()` alone: a `Response` body
+    // can be read once, so replaying the first one answers 502 for a reason
+    // that has nothing to do with this case's claim.
+    fetchMock.mockClear();
+    fetchMock.mockResolvedValue(successResponse());
+    expect((await POST(postReqWithSecret(false))).status).toBe(200);
+    const [, init2] = fetchMock.mock.calls[0] as [string, RequestInit];
+    const sent2 = JSON.parse(init2.body as string) as {
+      context: Record<string, unknown>;
+    };
+    expect(sent2.context).toMatchObject({ api_key: RAW_API_KEY });
+    expect(
+      Object.keys(sent2.context),
+      "the wire shape changed: a caller on a two-credential venue now sends a passphrase key",
+    ).not.toContain("passphrase");
   });
 
   it("ANTI-REGRESSION: a clean terminal success dispatches NOTHING to Sentry", async () => {
