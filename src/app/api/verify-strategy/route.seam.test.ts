@@ -409,6 +409,20 @@ describe("[140.3-13a / SEAMUX-08] POST /api/verify-strategy — the Sentry paylo
    * this case claims.
    */
   const RAW_API_KEY = "AK_LIVE_9f3a1c7e5b2d84a6f0c1e3d5";
+  /**
+   * The caller's RAW exchange passphrase — the THIRD body credential, added by
+   * 146.2 / R2 (2026-08-19).
+   *
+   * ⚠️ THIS IS NOT A SYNTHETIC EXTRA. On OKX, KuCoin and Coinbase the
+   * `passphrase` is a first-class exchange credential: possession of
+   * key + secret + passphrase is possession of the account. This route puts it
+   * in the outgoing request BODY at the same site as the other two, so undici
+   * inlines all THREE into `err.message` (TRAP-1) on a transport failure. Until
+   * 146.2 / R2 the route's `perRequestSecrets` named only two of the three, so
+   * this one crossed to a third party in the clear while the file's own
+   * docblock read as a complete enumeration.
+   */
+  const RAW_PASSPHRASE = "PPH_LIVE_r4T7wQ2eZ9mK5xB1nV8sJ6h";
 
   // ⚠️ A SIBLING describe does NOT inherit the outer one's `beforeEach`. The
   // full seam setup is repeated here deliberately: without `shared.store
@@ -449,6 +463,9 @@ describe("[140.3-13a / SEAMUX-08] POST /api/verify-strategy — the Sentry paylo
         exchange: "okx",
         api_key: RAW_API_KEY,
         api_secret: RAW_API_SECRET,
+        // 146.2 / R2 — `exchange: "okx"` above is a passphrase-bearing venue,
+        // so this is the shape a REAL OKX teaser submit has, not a contrivance.
+        passphrase: RAW_PASSPHRASE,
       }),
     });
   }
@@ -468,8 +485,10 @@ describe("[140.3-13a / SEAMUX-08] POST /api/verify-strategy — the Sentry paylo
    * JWT, AND THE CLAIM IS UNCHANGED.
    *
    * `perRequestSecrets` used to be `[userAccessToken, api_key, api_secret]`.
-   * The route no longer reads a session, so the array is `[api_key, api_secret]`
-   * — BOTH still unknowable to any module-level env list, which is the property
+   * The route no longer reads a session, so the array is the three BODY
+   * credentials `[api_key, api_secret, passphrase]` (146.2 / R2 added the third
+   * — 146.1 shipped it with only two while the caller was sending all three)
+   * — ALL still unknowable to any module-level env list, which is the property
    * this case exists to pin. Probing the (now never-present) JWT would assert
    * that `scrubSeamError` removes a value the route was never given, which is
    * impossible by construction and would have to be "fixed" by re-adding the
@@ -485,7 +504,8 @@ describe("[140.3-13a / SEAMUX-08] POST /api/verify-strategy — the Sentry paylo
     adminState.persistThrow = new Error(
       `connect ECONNREFUSED 10.0.0.9:5432 ` +
         `(headers: {"X-Internal-Token":"test-internal-token-32-chars-long"}, ` +
-        `body: {"api_key":"${RAW_API_KEY}","api_secret":"${RAW_API_SECRET}"})`,
+        `body: {"api_key":"${RAW_API_KEY}","api_secret":"${RAW_API_SECRET}",` +
+        `"passphrase":"${RAW_PASSPHRASE}"})`,
     );
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
 
@@ -508,6 +528,10 @@ describe("[140.3-13a / SEAMUX-08] POST /api/verify-strategy — the Sentry paylo
       message,
       "the caller's RAW exchange api_secret was dispatched to Sentry",
     ).not.toContain(RAW_API_SECRET);
+    expect(
+      message,
+      "the caller's RAW exchange passphrase was dispatched to Sentry. On OKX/KuCoin/Coinbase it is a full third credential, and — exactly like the key and the secret — it arrived in the REQUEST BODY, so no module-level env list can reach it. Only the route's `secrets` array can name it, which is why omitting it from `perRequestSecrets` must redden here.",
+    ).not.toContain(RAW_PASSPHRASE);
     // UNDER-redaction, the env half — a different mechanism, asserted separately
     // so a regression in one cannot hide behind the other.
     expect(message).not.toContain("test-internal-token-32-chars-long");
