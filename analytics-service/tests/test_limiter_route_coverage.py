@@ -68,6 +68,10 @@ the VCR cassettes and makes LIVE broker calls.
 
 from __future__ import annotations
 
+import json
+import pathlib
+import subprocess
+import sys
 from typing import Any
 
 import pytest
@@ -102,80 +106,80 @@ def _reset_limiter_buckets() -> Any:
 # ---------------------------------------------------------------------------
 
 
-def _import_app() -> Any:
-    """Import ``main`` INSIDE the call, never at module import time.
+_PROBE_SRC = r"""
+import json, sys
+from fastapi.routing import APIRoute
+import main
+from services import rate_limit as rl
 
-    ``test_limiter_identity.py:58`` and ``:227`` document why: the limiter
-    registries are populated at DECORATION time (i.e. at router-module import),
-    and sibling suites in the same pytest process reload router modules to swap
-    in a no-op limiter. Importing at module scope would freeze whatever the
-    surface looked like at collection time.
+derived = [
+    f"{r.endpoint.__module__}.{r.endpoint.__name__}"
+    for r in main.app.routes
+    if isinstance(r, APIRoute)
+]
+print(json.dumps({
+    "derived": sorted(derived),
+    "static": sorted(rl.limiter._route_limits),
+    "dynamic": {k: len(v) for k, v in rl.limiter._dynamic_route_limits.items()},
+}))
+"""
 
-    ``main`` is the correct single import because it performs every
-    ``include_router`` (``main.py:811-825``). Importing individual routers would
-    risk a PARTIAL surface — which is the exact vacuity failure the fence below
-    exists to catch, so it must not be built into the derivation.
+_probe_cache: dict[str, Any] | None = None
+
+
+def _probe() -> dict[str, Any]:
+    """Enumerate the route/limit surface in a CLEAN interpreter.
+
+    ⚠️ THIS RUNS IN A SUBPROCESS ON PURPOSE, and the reason is measured, not
+    stylistic. Importing ``main`` in-process makes this gate a hostage to
+    whatever every previously-collected test module did to ``sys.modules``.
+    Concretely: a sibling installs ``MagicMock()`` entries for modules it does
+    not want to import for real, a ``MagicMock`` ITERATES AS EMPTY
+    (``list(iter(MagicMock())) == []``), and ``FastAPI.include_router``
+    iterates ``router.routes`` — so if ``main`` is first imported under those
+    stubs, all ten ``include_router`` calls at ``main.py:811-825`` add ZERO
+    routes and the crippled ``app`` is cached for the rest of the session.
+
+    CI hit exactly that (1 route instead of 20) while the full suite passed
+    locally, because the two environments install different optional
+    dependencies and therefore collect a different set of test modules in a
+    different order. An in-process repair was tried first and did NOT hold in
+    CI. A fresh interpreter is the only derivation that cannot be polluted —
+    and it measures the surface the way PRODUCTION builds it, which is what
+    this gate is about.
+
+    ⛔ Do not "optimise" this back to a plain ``import main``. The anti-vacuity
+    fence below is what catches the failure, and a truncated surface makes the
+    coverage partition agree with everything.
     """
-    import sys as _sys
-    from types import ModuleType as _ModuleType
-
-    from fastapi.routing import APIRoute as _APIRoute
-
-    def _route_count(mod: Any) -> int:
-        app = getattr(mod, "app", None)
-        if app is None:
-            return 0
-        return len([r for r in app.routes if isinstance(r, _APIRoute)])
-
-    cached = _sys.modules.get("main")
-    if cached is not None and _route_count(cached) >= MIN_API_ROUTES:
-        return cached.app
-
-    # ⚠️ POLLUTION REPAIR — measured 2026-08-19, CI-only, and NOT a workaround
-    # for a flaky test.
-    #
-    # `tests/test_c19_portfolio_fixes.py:89-90` inserts `MagicMock()` into
-    # `sys.modules` for modules it does not want to import for real. A
-    # `MagicMock` ITERATES AS EMPTY (`list(iter(MagicMock())) == []`, verified),
-    # and `FastAPI.include_router` iterates `router.routes` — so if `main` is
-    # first imported while those stubs are installed, all ten `include_router`
-    # calls at `main.py:811-825` add ZERO routes. `@app.get("/health")` then
-    # registers the only real route, and that crippled `app` is cached in
-    # `sys.modules` for the whole session. CI hit exactly this (1 route instead
-    # of 20); locally the import order differs and it never fired.
-    #
-    # Evict ONLY the fakes plus `main` itself, then import fresh. Real router
-    # modules are left alone deliberately: dropping a genuinely-imported module
-    # would hand later tests a second, non-identical copy — the identity trap
-    # `tests/limiter_stub.py:88-104` documents.
-    for name, mod in list(_sys.modules.items()):
-        if name == "main" or name == "routers" or name.startswith("routers."):
-            if name == "main" or not isinstance(mod, _ModuleType):
-                _sys.modules.pop(name, None)
-                package_name, _, attribute = name.rpartition(".")
-                package = _sys.modules.get(package_name)
-                if package is not None and hasattr(package, attribute):
-                    delattr(package, attribute)
-
-    import main
-
-    return main.app
+    global _probe_cache
+    if _probe_cache is None:
+        proc = subprocess.run(
+            [sys.executable, "-c", _PROBE_SRC],
+            cwd=str(pathlib.Path(__file__).resolve().parents[1]),
+            capture_output=True,
+            text=True,
+            timeout=180,
+        )
+        assert proc.returncode == 0, (
+            "the clean-interpreter probe failed to import the app. This is a "
+            "REAL failure, not a harness quirk: production imports `main` the "
+            f"same way.\nstdout={proc.stdout}\nstderr={proc.stderr}"
+        )
+        _probe_cache = json.loads(proc.stdout.strip().splitlines()[-1])
+    return _probe_cache
 
 
-def _api_routes() -> list[APIRoute]:
-    """Every ``APIRoute`` on the app.
+def _api_routes() -> list[str]:
+    """Every real API endpoint key on the app, from the clean-interpreter probe.
 
-    The ``isinstance`` filter is load-bearing and is NOT a stylistic choice:
-    FastAPI's four built-in documentation routes (``/openapi.json``, ``/docs``,
-    ``/docs/oauth2-redirect``, ``/redoc``) are plain ``starlette.routing.Route``
-    objects, not ``APIRoute``, so this check excludes them exactly
-    [MEASURED this session: 20 APIRoute + 4 non-APIRoute].
-
-    ⛔ Never filter by path prefix instead. A prefix denylist is an open-ended
-    string match that a future author extends "just for this one route", which
-    is how a coverage gate quietly becomes an opt-out list.
+    ⛔ Never filter by path prefix. A prefix denylist is an open-ended string
+    match that a future author extends "just for this one route", which is how a
+    coverage gate quietly becomes an opt-out list. The probe already excludes
+    FastAPI's four built-in doc routes structurally, by `isinstance(r, APIRoute)`
+    — they are plain `starlette.routing.Route` objects.
     """
-    return [r for r in _import_app().routes if isinstance(r, APIRoute)]
+    return _probe()["derived"]
 
 
 def _endpoint_key(route: APIRoute) -> str:
@@ -192,7 +196,7 @@ def _endpoint_key(route: APIRoute) -> str:
 
 
 def _derived_keys() -> set[str]:
-    return {_endpoint_key(r) for r in _api_routes()}
+    return set(_api_routes())
 
 
 def _limited_keys() -> set[str]:
@@ -205,8 +209,8 @@ def _limited_keys() -> set[str]:
     unlimited. The dynamic arm is ALSO pinned separately below, so a refactor
     that flattens it into a static limit stays visible.
     """
-    _import_app()  # guarantee decoration-time population regardless of ordering
-    return set(rl.limiter._route_limits) | set(rl.limiter._dynamic_route_limits)
+    probe = _probe()
+    return set(probe["static"]) | set(probe["dynamic"])
 
 
 # ---------------------------------------------------------------------------
@@ -374,8 +378,7 @@ class TestRouteLimitCoverage:
         == 2``]. The count is pinned because dropping one of a pair is exactly
         the kind of edit that reads as a no-op in review.
         """
-        _import_app()
-        dynamic = rl.limiter._dynamic_route_limits
+        dynamic = _probe()["dynamic"]
         key = "routers.process_key.process_key"
         assert key in dynamic, (
             f"{key} is no longer in the CALLABLE-limit registry. Its limits were "
@@ -384,8 +387,11 @@ class TestRouteLimitCoverage:
             "dropped, the busiest ingestion route on the service just went "
             "unlimited. Re-anchor this gate, do not delete it."
         )
-        assert len(dynamic[key]) == 2, (
-            f"{key} carries {len(dynamic[key])} callable limit(s), expected 2 "
+        # The probe returns the COUNT per key (the limit objects themselves do
+        # not survive a process boundary). The count is the property being
+        # pinned, so nothing is lost.
+        assert dynamic[key] == 2, (
+            f"{key} carries {dynamic[key]} callable limit(s), expected 2 "
             "(`routers/process_key.py:871, 880-881`). One of the pair was "
             "removed - confirm that is intended and update this literal."
         )
