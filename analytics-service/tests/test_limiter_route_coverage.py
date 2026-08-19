@@ -116,6 +116,47 @@ def _import_app() -> Any:
     risk a PARTIAL surface — which is the exact vacuity failure the fence below
     exists to catch, so it must not be built into the derivation.
     """
+    import sys as _sys
+    from types import ModuleType as _ModuleType
+
+    from fastapi.routing import APIRoute as _APIRoute
+
+    def _route_count(mod: Any) -> int:
+        app = getattr(mod, "app", None)
+        if app is None:
+            return 0
+        return len([r for r in app.routes if isinstance(r, _APIRoute)])
+
+    cached = _sys.modules.get("main")
+    if cached is not None and _route_count(cached) >= MIN_API_ROUTES:
+        return cached.app
+
+    # ⚠️ POLLUTION REPAIR — measured 2026-08-19, CI-only, and NOT a workaround
+    # for a flaky test.
+    #
+    # `tests/test_c19_portfolio_fixes.py:89-90` inserts `MagicMock()` into
+    # `sys.modules` for modules it does not want to import for real. A
+    # `MagicMock` ITERATES AS EMPTY (`list(iter(MagicMock())) == []`, verified),
+    # and `FastAPI.include_router` iterates `router.routes` — so if `main` is
+    # first imported while those stubs are installed, all ten `include_router`
+    # calls at `main.py:811-825` add ZERO routes. `@app.get("/health")` then
+    # registers the only real route, and that crippled `app` is cached in
+    # `sys.modules` for the whole session. CI hit exactly this (1 route instead
+    # of 20); locally the import order differs and it never fired.
+    #
+    # Evict ONLY the fakes plus `main` itself, then import fresh. Real router
+    # modules are left alone deliberately: dropping a genuinely-imported module
+    # would hand later tests a second, non-identical copy — the identity trap
+    # `tests/limiter_stub.py:88-104` documents.
+    for name, mod in list(_sys.modules.items()):
+        if name == "main" or name == "routers" or name.startswith("routers."):
+            if name == "main" or not isinstance(mod, _ModuleType):
+                _sys.modules.pop(name, None)
+                package_name, _, attribute = name.rpartition(".")
+                package = _sys.modules.get(package_name)
+                if package is not None and hasattr(package, attribute):
+                    delattr(package, attribute)
+
     import main
 
     return main.app
