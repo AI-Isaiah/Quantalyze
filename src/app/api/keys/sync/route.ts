@@ -413,50 +413,32 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
       resolvedSource = keyRow.exchange;
     }
   }
-  // Phase 140.3-02 / TS-15 — forward the END USER's Supabase access token so the
-  // unified router can build a USER-SCOPED (RLS-enforcing) client. Only the CSV
-  // finalize flow forwarded it before, which is why PYAPI-01's second defence
-  // layer had to be an explicit Python `strategies` id+user_id filter rather
-  // than letting RLS do it. With the token forwarded, that filter becomes
-  // belt-and-braces rather than the only belt.
+  // Phase 146.1 / B2 (2026-08-18) — THE FORWARD WAS REMOVED HERE. This block
+  // used to read the session and hand `postProcessKey` a LIVE end-user Supabase
+  // JWT for the `X-User-Access-Token` header. The v1.19 xhigh review measured
+  // the far side: the only Python reader, `services/db.py
+  // get_user_scoped_supabase`, has ZERO production callers, and
+  // the `not hasattr(..., "get_user_scoped_supabase")` gate in
+  // `analytics-service/tests/test_process_key.py` actively PINS that
+  // non-use. Nothing in `analytics-service` reads the header. A live credential
+  // that crosses a service boundary and is never read is pure exposure surface,
+  // so it is no longer sent.
   //
-  // BEST-EFFORT ON PURPOSE, and the direction is deliberate. `csv-finalize`
-  // fails CLOSED (401) on a missing session because its RPC is SECURITY DEFINER
-  // and CANNOT run without `auth.uid()`. Here the token is an ENHANCEMENT: the
-  // caller is already authenticated (withAuth ran `getUser` above) and ownership
-  // is already proven by the user-scoped select above, so a session read that
-  // hiccups must not fail a resync on the money-onboarding chokepoint. The
-  // header is optional by construction — an absent token simply sends no header.
+  // The 140.2 obligation that justified the forward is DISCHARGED BY
+  // SUBSTITUTION, not abandoned: the ownership pre-check it was meant to enable
+  // is already shipped as the explicit Python `strategies` id+user_id filter
+  // (`_caller_owns_strategy` in `analytics-service/routers/process_key.py`). See
+  // `.planning/phases/140.1-.../140.1-TS-OBLIGATIONS.md` TS-15 for the dated
+  // superseding note and the NOT-TAKEN option (b).
   //
-  // ⚠️ This token is a LIVE user JWT and undici embeds outgoing headers in
-  // `err.message`. It is passed to `postProcessKey` as a VALUE (never assembled
-  // into a header here) so it reaches `scrubSeamError(message, [userAccessToken])`
-  // at the client's transport log site. Do not hand-roll a second path.
-  let userAccessToken: string | undefined;
-  try {
-    const {
-      data: { session },
-    } = await supabase.auth.getSession();
-    userAccessToken = session?.access_token;
-  } catch (sessionErr) {
-    // SEAMRIM-06 — the WHOLE caught value goes through the leaf, not `.message`.
-    // `err.message` is exactly where undici puts the outgoing headers, so a
-    // hand-rolled `instanceof Error ? err.message : String(err)` is the banned
-    // shape rather than a mitigation of it. `scrubSeamError` is total and
-    // renders both arms (Error and non-Error), so the ternary buys nothing.
-    // No per-request secret is passed: `userAccessToken` is the value this try
-    // block was ASSIGNING, so it is necessarily still `undefined` here.
-    console.warn(
-      `[keys/sync] could not read the session to forward X-User-Access-Token (non-blocking) for ${strategy_id}:`,
-      scrubSeamError(sessionErr),
-    );
-  }
+  // ⛔ The header name STAYS on `resilient-fetch.ts`'s CREDENTIAL_HEADER_NAMES
+  // scrub enumeration on purpose — pruning it would be an instance fix that
+  // re-opens the class for whatever this seam carries next.
 
   return await unifiedKeysSyncHandler({
     strategy_id,
     userId: user.id,
     source: resolvedSource,
-    userAccessToken,
   });
 });
 
@@ -589,12 +571,6 @@ async function unifiedKeysSyncHandler(args: {
   strategy_id: string;
   userId: string;
   source: string;
-  /**
-   * TS-15 — the end user's Supabase JWT, when a session was readable. OPTIONAL
-   * by construction: the client emits `X-User-Access-Token` only when this is
-   * present, so an absent value fabricates nothing.
-   */
-  userAccessToken?: string;
 }): Promise<NextResponse> {
   const result = await postProcessKey({
     flow_type: "resync",
@@ -606,9 +582,6 @@ async function unifiedKeysSyncHandler(args: {
     routeTag: "keys/sync",
     // CT-4 (army2) — forward tenant id for cross-tenant rate-limit isolation.
     userId: args.userId,
-    // TS-15 — see the block at the call site for why this is best-effort here
-    // and fail-CLOSED at csv-finalize.
-    userAccessToken: args.userAccessToken,
   });
   if (!result.ok) return result.response;
 

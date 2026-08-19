@@ -622,10 +622,19 @@ describe("[140.3-02 / TS-12] POST /api/verify-strategy — success is decided by
  * scrubber deleted, which is exactly the vacuous-oracle shape this phase keeps
  * finding.
  *
- * ⚠️ THIS ROUTE IS THE SECRET-BEARING ONE OF THIS PLAN'S FOUR. It holds a LIVE
- * user Supabase JWT and the caller's RAW exchange credentials at the same time.
- * `140.3-02` closed a live end-user JWT log leak one wave-set ago; an
- * observability channel added here must not re-open it through Sentry.
+ * ⚠️ THIS ROUTE IS STILL THE SECRET-BEARING ONE OF THIS PLAN'S FOUR, BUT WHAT
+ * IT HOLDS CHANGED (Phase 146.1 / B2, 2026-08-18). It carries the caller's RAW
+ * exchange `api_key` / `api_secret` in the OUTGOING BODY. It no longer holds a
+ * live end-user Supabase JWT: the `X-User-Access-Token` forward TS-15 added was
+ * removed because the only Python reader (`services/db.py
+ * get_user_scoped_supabase`) has ZERO callers, pinned by
+ * `tests/test_process_key.py:2220-2221`.
+ *
+ * ⛔ THE `secrets` CASES BELOW WERE NARROWED, NOT WEAKENED. They still assert
+ * that every capture NAMES its per-request credentials, and both survivors are
+ * still unknowable to any module-level env list — which is the entire property.
+ * `140.3-02` closed a live end-user JWT log leak; an observability channel added
+ * here must not re-open it through Sentry for whatever the route carries next.
  */
 describe("[140.3-13a / SEAMUX-08] POST /api/verify-strategy — Sentry capture policy", () => {
   /** A live-shaped Supabase JWT, long enough to clear the redaction floor. */
@@ -641,7 +650,14 @@ describe("[140.3-13a / SEAMUX-08] POST /api/verify-strategy — Sentry capture p
     api_secret: RAW_API_SECRET,
   };
 
-  /** A session IS readable, so the JWT is in scope and must be named. */
+  /**
+   * A session IS readable.
+   *
+   * ⚠️ 146.1 / B2 — KEPT READABLE ON PURPOSE even though the route no longer
+   * reads it for `X-User-Access-Token`. A readable session is what makes "the
+   * JWT is NOT named in `secrets`" a real observation rather than a vacuous one:
+   * the value exists and is still not carried.
+   */
   function mockSessionPresent() {
     vi.doMock("@/lib/supabase/server", () => ({
       createClient: async () => ({
@@ -723,7 +739,7 @@ describe("[140.3-13a / SEAMUX-08] POST /api/verify-strategy — Sentry capture p
     expect(capture![0]).toBeInstanceOf(Error);
   });
 
-  it("🔴 THE SECRETS ARGUMENT: every capture NAMES the live JWT and both raw exchange credentials", async () => {
+  it("🔴 THE SECRETS ARGUMENT: every capture NAMES both raw exchange credentials — and no longer carries the JWT at all (146.1 / B2)", async () => {
     mockSessionPresent();
     mockAdmin(vi.fn());
     mockUpstream({ ok: false, code: "AUTH_FAILED" });
@@ -736,9 +752,19 @@ describe("[140.3-13a / SEAMUX-08] POST /api/verify-strategy — Sentry capture p
       secrets,
       "no per-request secrets were named. No module-level env list can know a live user JWT or a caller's raw exchange credentials, so this array is the ONLY thing stopping undici's inlined headers reaching a third party (TRAP-1).",
     ).toBeDefined();
-    expect(secrets).toContain(LIVE_JWT);
     expect(secrets).toContain(RAW_API_KEY);
     expect(secrets).toContain(RAW_API_SECRET);
+    // ⚠️ 146.1 / B2 — INVERTED, NOT DELETED. This used to be
+    // `expect(secrets).toContain(LIVE_JWT)`. The route no longer reads the
+    // session, so naming the JWT here would be impossible without re-adding the
+    // forward. Asserting its ABSENCE keeps the case falsifiable in the other
+    // direction: if someone re-introduces the session read, this reddens and
+    // they must come and decide, rather than inheriting it silently.
+    expect(
+      secrets,
+      "the route is carrying a live end-user Supabase JWT again — its only " +
+        "reader has zero callers (146.1 / B2). Re-open that deliberately.",
+    ).not.toContain(LIVE_JWT);
   });
 
   it("POSITIVE: a createAdminClient config fault IS captured, at level fatal, with its secrets", async () => {
@@ -760,7 +786,12 @@ describe("[140.3-13a / SEAMUX-08] POST /api/verify-strategy — Sentry capture p
     expect(capture, "the config arm's own comment promises Sentry").toBeDefined();
     expect(capture![1].tags?.step).toBe("admin-client-config");
     expect(capture![1].level).toBe("fatal");
-    expect(capture![1].secrets).toContain(LIVE_JWT);
+    // 146.1 / B2 — was `toContain(LIVE_JWT)`. Probing a credential the route no
+    // longer holds would assert nothing; `RAW_API_KEY` is per-request, in
+    // flight, and equally unreachable by any env list, so dropping
+    // `perRequestSecrets` from THIS arm still reddens here.
+    expect(capture![1].secrets).toContain(RAW_API_KEY);
+    expect(capture![1].secrets).not.toContain(LIVE_JWT);
   });
 
   it("POSITIVE: a returned persist error IS captured", async () => {

@@ -1,11 +1,18 @@
 -- Test: dropped-enqueue reconciliation sweep (JOB-04, Phase 143).
 --
--- Guards migration
+-- Guards migrations
 -- 20260816140000_reconcile_dropped_enqueue_sweep.sql: the pg_cron job
 -- reconcile_dropped_enqueue_sweep, its '35 * * * *' cadence, its five predicate
 -- conjuncts, its 1-hour grace window, its LIMIT-25 bound and the
 -- {source: reconcile-sweep, detected_at} metadata marker the analytics worker
 -- reads to fire its Sentry alert.
+-- 20260819130500_reconcile_sweep_readmit_terminalized_orphans.sql (B4, Phase
+-- 146.1): the SAME job re-registered under the SAME name and cadence with ONE
+-- conjunct changed -- the zero-jobs test now exempts a 'failed_final' row whose
+-- last_error carries Phase 144's fixed orphaned_running_reaped audit literal.
+-- ⚠️ The jobname is the stable identifier and is unchanged; the JOBID is NOT
+-- (unschedule + schedule assigns a fresh one, 20260817120000:420-426), so every
+-- assertion in this file keys on the name.
 --
 -- Why the sweep exists (Rule 9 -- the WHY, not just the WHAT)
 -- ----------------------------------------------------------
@@ -160,12 +167,68 @@
 -- this body does read created_at, that file is a retention-DELETE register and
 -- this job is neither.
 --
+-- ⚠️ C3 -- THE TEST-PROJECT SWEEP-CRON RESIDUAL (recorded 2026-08-18, Phase
+-- 146.1; tracked in TODOS.md as D-13). DOCUMENT-ONLY. Read the refusal at the
+-- end before acting on any of it.
+-- ---------------------------------------------------------------------------
+-- (a) THIS FILE IS NOT THE SOURCE OF THE RESIDUAL. Every part that writes opens
+--     its own transaction and closes with ROLLBACK, and Part 2 additionally
+--     DELETEs its seed user belt-and-braces. No seed here survives its part.
+--
+-- (b) THE HAZARD IS A FUTURE SEED VARIANT, not today's file. A seed that is
+--     dailies-bearing AND leaves a NON-TERMINAL job row behind -- i.e. one that
+--     escaped a rollback -- would feed exactly one permanently-unclaimable
+--     'pending' compute_jobs row into the shared TEST project. That matters
+--     because of the 05:30 UTC TEST-DB job backlog: cron jobid 9
+--     (derive-allocator-key-dailies) fans out one job per api_key on a project
+--     that has NO draining worker, and stale 'pending' rows sort AHEAD in
+--     claim_compute_jobs_with_priority -- so one leaked row does not sit
+--     harmlessly, it takes precedence and deepens a backlog that already
+--     reddens the `python` CI job on a daily schedule.
+--
+-- (c) THE PER-TICK BOUND CONTAINS IT. Migration 20260819130500 WIDENS the
+--     candidate set (terminalizer-marked orphans are readmitted) but does NOT
+--     touch `LIMIT 25`, which is anchored word-bounded in Part 1, in that
+--     migration's STEP 2 and in the vitest sibling. A widened predicate
+--     therefore cannot flood the queue; at worst it drains at 25/hour.
+--
+-- (d) ⚠️ A DATED CLAIM, NOT A FACT -- RE-MEASURE BEFORE RELYING ON IT. The
+--     terminalizer's own header records a CENSUS OF 2026-08-17: ~396 genuinely
+--     stuck arm-A 'running' rows on the TEST project
+--     (20260817120000:355-356). Those rows are not marked today, because
+--     nothing has terminalized them yet. If they ARE terminalized, they become
+--     ~396 rows carrying the orphaned_running_reaped audit literal, and every
+--     one of them whose strategy also has dailies and no analytics becomes
+--     sweep-eligible under 20260819130500 -- a few hundred TEST strategies
+--     healing at <=25/hour rather than never. That is bounded and it is the
+--     intended behaviour, but it is a step change on a shared CI project and it
+--     must not arrive as a surprise. ⛔ THIS IS WHY PLAN 146.1-08 COUNTS
+--     terminalizer-marked rows ON TEST (and on PROD) IMMEDIATELY BEFORE MERGE.
+--     A census quoted without its date is how a dated claim becomes an assumed
+--     fact; this one is dated 2026-08-17 and is already stale by construction.
+--
+-- (e) ⛔ THE REFUSAL, IN WRITING. C3 is the one item in this phase that tempts a
+--     cleanup migration, so the refusal is recorded rather than assumed:
+--       * NEVER delete a 'pending' compute_jobs row, here or in a migration.
+--         A leaked row is a diagnosable nuisance; a DELETE that races a real
+--         enqueue is silent job loss, and the deferred orphaned-running purge
+--         (DELETE-vs-reset) is unresolved for exactly this reason.
+--       * NEVER unschedule cron jobid 9 (derive-allocator-key-dailies), or any
+--         cron job other than reconcile_dropped_enqueue_sweep BY NAME.
+--       * NEVER touch the process_key_unified_backbone flag row.
+--     C3 is document-or-guard, lowest priority. It is documented here. It is
+--     NOT a cleanup migration and must not become one.
+--
 -- Usage:
 --   psql "$TEST_SUPABASE_DB_URL" -v ON_ERROR_STOP=1 -f \
 --     supabase/tests/test_reconcile_dropped_enqueue_sweep.sql
 --
--- Run order: AFTER migration 20260816140000 is applied to the project. Before
--- that, Part 1 REDs by design.
+-- Run order: AFTER migrations 20260816140000 AND 20260819130500 are applied to
+-- the project. Before 20260816140000, Part 1 REDs by design (the job is not
+-- registered at all). Before 20260819130500 but after 20260816140000, Part 1's
+-- B4 marker anchor and Part 2's arm C4 RED -- also by design, and that is this
+-- commit's TDD RED: it arrives on the PR's FIRST sql-tests run, before Plan
+-- 146.1-08 applies the new migration to the TEST project.
 
 -- ==========================================================================
 -- Part 1 -- STRUCTURAL, UNGATED, ZERO SIDE EFFECTS. This is the part that must
@@ -187,6 +250,8 @@ DECLARE
   v_mat      INTEGER;
   v_anchor   INTEGER;
   v_jobs     INTEGER;
+  v_stripped TEXT;
+  v_marker   INTEGER;
 BEGIN
   -- Deliberately an EXCEPTION, not a skip. Part 1's whole job is to be the
   -- free-standing RED, and it is also what turns a missing `cron` schema into a
@@ -243,6 +308,26 @@ BEGIN
   v_jobs := (length(upper(v_command)) - length(replace(upper(v_command), 'PUBLIC.COMPUTE_JOBS', ''))) / length('PUBLIC.COMPUTE_JOBS');
   IF v_jobs <> 2 THEN
     RAISE EXCEPTION 'TEST FAILED (1/JOB-04/D-02): the deployed body names public.compute_jobs % times, expected 2 (the zero-jobs NOT EXISTS conjunct + the INSERT target). One means the zero-jobs conjunct is GONE and the INSERT target alone is satisfying this gate, so every strategy holding a healthy in-flight chain -- a running derive_broker_dailies mid-chain, most of all -- would be re-enqueued on the next tick. Zero means the sweep no longer writes at all.', v_jobs;
+  END IF;
+
+  -- ----- B4: the terminalizer-marker exemption (20260819130500) ---------
+  -- ⚠️ ANCHORED OVER A COMMENT-STRIPPED BODY, and that is required rather than
+  -- fastidious. cron.job.command preserves SQL comments verbatim, so an anchor
+  -- run over the raw command false-PASSes the exact neuter it exists to catch:
+  -- delete the exemption from the CODE and leave its comment behind. Same
+  -- defect class as the marker literal a Sentry tag satisfied (143-03,
+  -- f62c3866) and the unbounded percent-LIKE this milestone corrected on the
+  -- fold's self-verify. This anchor mirrors the migration's own STEP 2, and it
+  -- is the one that runs CONTINUOUSLY -- STEP 2 runs once, at apply time, and
+  -- proves nothing about what pg_cron holds today. The behavioural counterpart
+  -- is Part 2 arm C4.
+  v_stripped := regexp_replace(v_command, '--[^\n]*', '', 'g');
+  v_marker := (length(upper(v_stripped)) - length(replace(upper(v_stripped), 'ORPHANED_RUNNING_REAPED', ''))) / length('ORPHANED_RUNNING_REAPED');
+  IF v_marker <> 1 THEN
+    RAISE EXCEPTION 'TEST FAILED (1/JOB-04/B4): the deployed body carries the terminalizer audit marker % times in EXECUTABLE code, expected exactly 1. Zero means Phase 146.1 exemption has been lost from the deployed body, so a chain-mid orphan that 144 terminalized for its audit trail once again excludes its own strategy from this sweep FOREVER -- dailies present, no analytics row, recovered by nobody and with no user surface once the wizard 15-minute amber backstop has passed. More than one means the conjunct was duplicated, or the marker leaked into a second clause nothing else gates.', v_marker;
+  END IF;
+  IF v_stripped NOT ILIKE '%IS TRUE%' THEN
+    RAISE EXCEPTION 'TEST FAILED (1/JOB-04/B4): the deployed body carries the terminalizer-marker exemption WITHOUT its IS TRUE wrapper. last_error is NULLABLE and NULL LIKE ''x%%'' is NULL, not FALSE, so the unwrapped form evaluates to NULL for a failed_final row with no error text, that row drops out of the NOT EXISTS subquery, and a GENUINE permanent failure is HEALED -- an hourly retry loop with no attempt ceiling, which is the arm-C2 failure mode this exemption was written not to cause. Part 2 arm C2b is the behavioural half of this pin.';
   END IF;
   IF v_command NOT ILIKE '%public.strategy_analytics%' THEN
     RAISE EXCEPTION 'TEST FAILED (1/JOB-04): the deployed body does not reference public.strategy_analytics. That conjunct is the ONLY protection for healthy retention-aged strategies (retention_compute_jobs_done DELETEs done rows at 30 days), so its absence is a mass re-enqueue of the entire historical corpus on the next tick.';
@@ -342,7 +427,7 @@ BEGIN
     RAISE EXCEPTION 'TEST FAILED (1/JOB-04): the deployed body calls the enqueue RPC. Its race-loss arm RAISEs serialization_failure, and a RAISE inside a pg_cron body aborts the ENTIRE tick -- the healed count is lost, the NOTICE never runs, and every remaining candidate is skipped. A direct INSERT with ON CONFLICT DO NOTHING has no such arm.';
   END IF;
 
-  RAISE NOTICE 'Part 1 OK: reconcile_dropped_enqueue_sweep registered exactly once at 35 * * * *, with the five predicate conjuncts anchored, the four excluded statuses present, the marker keys pinned, LIMIT 25 / SKIP LOCKED / ON CONFLICT DO NOTHING present, 1 MATERIALIZED batch, 2 grace-anchor reads, and no IN-subquery LIMIT, rejected anchor column or enqueue RPC.';
+  RAISE NOTICE 'Part 1 OK: reconcile_dropped_enqueue_sweep registered exactly once at 35 * * * *, with the five predicate conjuncts anchored, the four excluded computation_status values present, the terminalizer-marker exemption present exactly once in executable code and carrying its IS TRUE wrapper, the marker keys pinned, LIMIT 25 / SKIP LOCKED / ON CONFLICT DO NOTHING present, 1 MATERIALIZED batch, 2 grace-anchor reads, and no IN-subquery LIMIT, rejected anchor column or enqueue RPC.';
 END
 $$;
 
@@ -354,8 +439,10 @@ $$;
 --   A2  dailies past grace, analytics at 'pending'           -> MUST be healed
 --   B   dailies stamped now() (inside the grace window)      -> MUST be untouched
 --   C1  a RUNNING derive_broker_dailies job (a DIFFERENT kind) -> MUST be untouched
---   C2  only a failed_final job                              -> MUST be untouched
+--   C2  only a GENUINE failed_final job (non-marker last_error) -> MUST be untouched
+--   C2b only a failed_final job with a NULL last_error        -> MUST be untouched
 --   C3  only a done job                                      -> MUST be untouched
+--   C4  only a TERMINALIZER-MARKED failed_final job          -> MUST BE HEALED
 --   D1  analytics 'complete'                                 -> MUST be untouched
 --   D2  analytics 'complete_with_warnings'                   -> MUST be untouched
 --   D3  analytics 'failed'                                   -> MUST be untouched
@@ -367,9 +454,38 @@ $$;
 -- conjunct is deleted or if the anchor is wrong. A2 and D4 are the split pair:
 -- 'pending' belongs to this sweep, 'computing' belongs to 142 reaper.
 --
+-- ⭐ C2 AND C4 ARE THE DISCRIMINATING PAIR (B4, Phase 146.1, migration
+-- 20260819130500). Neither arm is evidence on its own, and a future editor who
+-- reds one of them must understand that the other is the reason it cannot
+-- simply be relaxed:
+--   * C4 ALONE would also pass under the BLANKET "no NON-TERMINAL row"
+--     widening -- the fix the v1.19 roster originally proposed and which this
+--     phase REFUSED. So C4 alone cannot tell the narrow fix from the blanket
+--     one.
+--   * C2 ALONE would also pass under NO FIX AT ALL, since the pre-146.1 body
+--     excluded every strategy carrying any job row whatsoever. So C2 alone
+--     cannot tell the narrow fix from the unfixed body.
+-- Together they pin exactly one predicate: readmit a terminalizer-produced
+-- orphan, keep excluding a settled permanent failure. ⛔ Do NOT delete, invert
+-- or weaken C1, C2, C2b or C3 to make a wider predicate pass -- that is the
+-- fix-the-test antipattern, and C2's message names the cost in full.
+--
+-- C2b is the THREE-VALUED-LOGIC arm. last_error is NULLABLE, and
+-- `NULL LIKE 'x%'` is NULL, not FALSE. A marker exemption written WITHOUT an
+-- explicit `IS TRUE` wrapper evaluates to NULL for a NULL-last_error row, that
+-- row drops out of the NOT EXISTS subquery, and a GENUINE permanent failure
+-- carrying no error text is HEALED -- the arm-C2 failure mode arriving through
+-- the back door. MEASURED 2026-08-18 on a throwaway postgres:16 over a
+-- miniature of the conjunct: the unwrapped form heals this seed, the wrapped
+-- form does not. This arm is what keeps that wrapper from being "simplified"
+-- away, and it is the same trap this phase's A1 half closes on the fold with
+-- IS DISTINCT FROM.
+--
 -- Untouched arms assert ZERO compute_jobs rows CARRYING THE MARKER for their own
--- strategy id -- not zero job rows, because C1/C2/C3 deliberately have one. That
--- is what makes the assertion identity-scoped AND kind-of-write-scoped at once.
+-- strategy id -- not zero job rows, because C1/C2/C2b/C3 deliberately have one.
+-- That is what makes the assertion identity-scoped AND kind-of-write-scoped at
+-- once. C4 is the mirror image: it has a pre-existing job row too, and asserts
+-- that exactly ONE MARKED row was added alongside it.
 -- ==========================================================================
 BEGIN;
 SET LOCAL lock_timeout = '5s';
@@ -381,8 +497,10 @@ DECLARE
   v_a2       uuid;   -- heal: analytics 'pending'
   v_b        uuid;   -- skip: in grace
   v_c1       uuid;   -- skip: running derive_broker_dailies job
-  v_c2       uuid;   -- skip: failed_final job
+  v_c2       uuid;   -- skip: GENUINE failed_final job (non-marker last_error)
+  v_c2b      uuid;   -- skip: failed_final job with a NULL last_error
   v_c3       uuid;   -- skip: done job
+  v_c4       uuid;   -- HEAL: terminalizer-marked failed_final job (B4)
   v_d1       uuid;   -- skip: analytics complete
   v_d2       uuid;   -- skip: analytics complete_with_warnings
   v_d3       uuid;   -- skip: analytics failed
@@ -428,7 +546,9 @@ BEGIN
   INSERT INTO public.strategies (user_id, name) VALUES (v_user, 'job04-arm-b')  RETURNING id INTO v_b;
   INSERT INTO public.strategies (user_id, name) VALUES (v_user, 'job04-arm-c1') RETURNING id INTO v_c1;
   INSERT INTO public.strategies (user_id, name) VALUES (v_user, 'job04-arm-c2') RETURNING id INTO v_c2;
+  INSERT INTO public.strategies (user_id, name) VALUES (v_user, 'job04-arm-c2b') RETURNING id INTO v_c2b;
   INSERT INTO public.strategies (user_id, name) VALUES (v_user, 'job04-arm-c3') RETURNING id INTO v_c3;
+  INSERT INTO public.strategies (user_id, name) VALUES (v_user, 'job04-arm-c4') RETURNING id INTO v_c4;
   INSERT INTO public.strategies (user_id, name) VALUES (v_user, 'job04-arm-d1') RETURNING id INTO v_d1;
   INSERT INTO public.strategies (user_id, name) VALUES (v_user, 'job04-arm-d2') RETURNING id INTO v_d2;
   INSERT INTO public.strategies (user_id, name) VALUES (v_user, 'job04-arm-d3') RETURNING id INTO v_d3;
@@ -437,7 +557,7 @@ BEGIN
   INSERT INTO public.strategies (user_id, name, status)
     VALUES (v_user, 'job04-arm-f', 'archived') RETURNING id INTO v_f;
 
-  v_seeded := ARRAY[v_a, v_a2, v_b, v_c1, v_c2, v_c3, v_d1, v_d2, v_d3, v_d4, v_e, v_f];
+  v_seeded := ARRAY[v_a, v_a2, v_b, v_c1, v_c2, v_c2b, v_c3, v_c4, v_d1, v_d2, v_d3, v_d4, v_e, v_f];
 
   -- Dailies for every arm. Arm B is stamped FRESH (inside the grace window);
   -- every other arm is stamped a century back so it is past grace by
@@ -451,7 +571,9 @@ BEGIN
     (v_b,  DATE '2026-01-02', 0.001, v_fresh),
     (v_c1, DATE '2026-01-02', 0.001, v_old),
     (v_c2, DATE '2026-01-02', 0.001, v_old),
+    (v_c2b, DATE '2026-01-02', 0.001, v_old),
     (v_c3, DATE '2026-01-02', 0.001, v_old),
+    (v_c4, DATE '2026-01-02', 0.001, v_old),
     (v_d1, DATE '2026-01-02', 0.001, v_old),
     (v_d2, DATE '2026-01-02', 0.001, v_old),
     (v_d3, DATE '2026-01-02', 0.001, v_old),
@@ -473,14 +595,56 @@ BEGIN
     (kind, strategy_id, status, priority, attempts, next_attempt_at, claim_token, claimed_at)
   VALUES ('derive_broker_dailies', v_c1, 'running', 'normal', 1, now(), gen_random_uuid(), now());
 
-  -- Arms C2/C3: TERMINAL job rows. These are the retention-aged shape -- the
-  -- partial unique index does NOT cover 'done' / 'failed_final', so if the
-  -- zero-jobs conjunct were weakened nothing downstream would stop the re-insert.
+  -- Arms C2 / C2b / C3 / C4: TERMINAL job rows. These are the retention-aged
+  -- shape -- the partial unique index does NOT cover 'done' / 'failed_final',
+  -- so if the zero-jobs conjunct were weakened nothing downstream would stop
+  -- the re-insert. Three of the four MUST stay excluded; exactly one (C4) must
+  -- be readmitted, and the ONLY thing separating them is last_error.
+  --
+  -- arm C2: a GENUINE permanent failure. ⚠️ The last_error text is EXPLICIT and
+  -- deliberately NOT the terminalizer marker. Leaving it NULL (as this seed did
+  -- before B4) would make the arm non-discriminating: it would then be covered
+  -- by C2b's three-valued-logic path rather than by the marker comparison, and
+  -- the neuter that swaps the marker LIKE for a bare `last_error IS NOT NULL`
+  -- would false-PASS. With real non-marker text present, that neuter REDs this
+  -- arm -- which is what proves the predicate discriminates on the MARKER and
+  -- not merely on the presence of some text. MEASURED 2026-08-18 on a
+  -- postgres:16 miniature: under the IS-NOT-NULL neuter this seed IS healed.
+  INSERT INTO public.compute_jobs
+    (kind, strategy_id, status, priority, attempts, next_attempt_at, last_error)
+  VALUES
+    ('compute_analytics_from_csv', v_c2, 'failed_final', 'normal', 3, now(),
+     'binance rejected the stored credentials (401): the API key has been revoked or has expired');
+
+  -- arm C2b: the SAME genuine permanent failure with a NULL last_error -- the
+  -- three-valued-logic seed. See the pair note in this part's header for why a
+  -- marker exemption without an explicit IS TRUE wrapper HEALS this row.
+  -- last_error is omitted rather than written as NULL so the seed matches the
+  -- real shape a handler leaves behind when it terminalizes without text.
   INSERT INTO public.compute_jobs
     (kind, strategy_id, status, priority, attempts, next_attempt_at)
   VALUES
-    ('compute_analytics_from_csv', v_c2, 'failed_final', 'normal', 3, now()),
+    ('compute_analytics_from_csv', v_c2b, 'failed_final', 'normal', 3, now());
+
+  -- arm C3: a completed job. Nothing about B4 touches this shape.
+  INSERT INTO public.compute_jobs
+    (kind, strategy_id, status, priority, attempts, next_attempt_at)
+  VALUES
     ('compute_analytics_from_csv', v_c3, 'done',         'normal', 1, now());
+
+  -- arm C4 (B4, migration 20260819130500): a TERMINALIZER-PRODUCED orphan. The
+  -- last_error literal is copied EXACTLY from the terminalizer's arm A at
+  -- 20260817120000:622 -- it is the fixed audit text that cron body stamps, and
+  -- its 2-occurrence count is gated in that migration's own STEP 2, so marker
+  -- drift REDs there before it could silently un-key the exemption here.
+  -- This row is NOT a handler verdict: no handler ever looked at the job, the
+  -- worker vanished holding the claim. Excluding it forever is what left the
+  -- strategy with dailies, no analytics and nobody to recover it.
+  INSERT INTO public.compute_jobs
+    (kind, strategy_id, status, priority, attempts, next_attempt_at, last_error)
+  VALUES
+    ('compute_analytics_from_csv', v_c4, 'failed_final', 'normal', 3, now(),
+     'orphaned_running_reaped: no worker completed this job within the 4h claim window');
 
   -- Arms D1-D4: the four excluded computation_status values.
   INSERT INTO public.strategy_analytics (strategy_id, computation_status)
@@ -552,7 +716,9 @@ BEGIN
     RAISE EXCEPTION 'TEST FAILED (2/arm C1/JOB-04/D-02/SC#3): a strategy with a RUNNING derive_broker_dailies job was healed (% sweep-marked jobs). The zero-jobs conjunct has been kind-scoped. derive_broker_dailies upserts the dailies and only THEN enqueues its follow-on, both inside the still-running parent, so kind-scoping re-enqueues a HEALTHY IN-FLIGHT CHAIN and races the chain against itself.', v_cnt;
   END IF;
 
-  -- ----- arms C2/C3: terminal job rows ---------------------------------
+  -- ----- arms C2/C2b/C3: terminal job rows that MUST stay excluded ------
+  -- ⚠️ C2 is one half of the B4 discriminating pair; arm C4 below is the other.
+  -- Do not relax either one in isolation -- see this part's header.
   SELECT count(*) INTO v_cnt
     FROM public.compute_jobs
    WHERE strategy_id = v_c2 AND metadata->>'source' = 'reconcile-sweep';
@@ -561,9 +727,25 @@ BEGIN
   END IF;
   SELECT count(*) INTO v_cnt
     FROM public.compute_jobs
+   WHERE strategy_id = v_c2b AND metadata->>'source' = 'reconcile-sweep';
+  IF v_cnt <> 0 THEN
+    RAISE EXCEPTION 'TEST FAILED (2/arm C2b/JOB-04/B4/SC#3): a strategy whose only compute_jobs row is a failed_final carrying a NULL last_error was healed (% sweep-marked jobs). This is the THREE-VALUED-LOGIC hole: NULL LIKE ''x%%'' is NULL, not FALSE, so a marker exemption written without an explicit IS TRUE wrapper evaluates to NULL for this row, the row drops out of the NOT EXISTS subquery, and a GENUINE permanent failure with no error text becomes an hourly retry loop with no attempt ceiling -- arm C2 failure mode arriving through the back door. Restore the IS TRUE wrapper on the exemption in the deployed body; do NOT relax this arm.', v_cnt;
+  END IF;
+  SELECT count(*) INTO v_cnt
+    FROM public.compute_jobs
    WHERE strategy_id = v_c3 AND metadata->>'source' = 'reconcile-sweep';
   IF v_cnt <> 0 THEN
     RAISE EXCEPTION 'TEST FAILED (2/arm C3/JOB-04/SC#3): a strategy whose only compute_jobs row is done was healed (% sweep-marked jobs). The partial unique index does not cover done either, so this is a straight duplicate enqueue of work that already completed.', v_cnt;
+  END IF;
+
+  -- ----- arm C4: THE MUST-HEAL COUNTERPART (B4) -------------------------
+  -- ⚠️ This is the ONLY arm in the C family that asserts a heal, and it is what
+  -- makes C2 a DISCRIMINATOR rather than a restatement of the unfixed body.
+  SELECT count(*) INTO v_cnt
+    FROM public.compute_jobs
+   WHERE strategy_id = v_c4 AND metadata->>'source' = 'reconcile-sweep';
+  IF v_cnt <> 1 THEN
+    RAISE EXCEPTION 'TEST FAILED (2/arm C4/JOB-04/SC#3/B4): a strategy whose only compute_jobs row is a TERMINALIZER-PRODUCED orphan -- failed_final carrying the fixed orphaned_running_reaped audit literal Phase 144 cron body stamps -- got % sweep-marked jobs, expected exactly 1. Zero means migration 20260819130500 exemption is missing from the deployed body, or was written without its IS TRUE wrapper, and the two mechanisms do not compose: 144 terminalizes a chain-mid orphan for the AUDIT TRAIL, that row then trips this sweep ANY-status conjunct, and the strategy is recovered by NOBODY -- not the worker (the job is terminal), not the sweep (this conjunct), and not the user (no surface at all once the wizard 15-minute amber backstop has passed). A lost-worker row is not a handler verdict. More than one means the bounded batch is inserting duplicates.', v_cnt;
   END IF;
 
   -- ----- arm D1: THE MASS-RE-ENQUEUE TRIPWIRE (D-03) -------------------
@@ -615,15 +797,20 @@ BEGIN
   -- ----- whole-block invariant -----------------------------------------
   -- Identity-scoped, never a global count. This catches an arm being healed that
   -- no individual assertion above happened to name -- e.g. a future arm added
-  -- without its own check. Exactly TWO of this block's twelve seeds are healable.
+  -- without its own check. Exactly THREE of this block's fourteen seeds are
+  -- healable (A, A2 and -- since B4 -- C4). ⚠️ This count moved from 2/12 to
+  -- 3/14 in the SAME commit as migration 20260819130500; a whole-block
+  -- invariant left at the old number would RED for the right reason with the
+  -- wrong message, and one left unscoped would stop catching the arm nobody
+  -- named.
   SELECT count(*) INTO v_cnt
     FROM public.compute_jobs
    WHERE strategy_id = ANY (v_seeded) AND metadata->>'source' = 'reconcile-sweep';
-  IF v_cnt <> 2 THEN
-    RAISE EXCEPTION 'TEST FAILED (2/whole-block/JOB-04): one tick produced % sweep-marked jobs across MY twelve seeded strategies, expected exactly 2 (arms A and A2). Every other arm is a documented false-positive guard, so any other number means a guard fell or a heal was lost -- and the per-arm assertions above should name which.', v_cnt;
+  IF v_cnt <> 3 THEN
+    RAISE EXCEPTION 'TEST FAILED (2/whole-block/JOB-04): one tick produced % sweep-marked jobs across MY fourteen seeded strategies, expected exactly 3 (arms A, A2 and C4). Every other arm is a documented false-positive guard, so any other number means a guard fell or a heal was lost -- and the per-arm assertions above should name which.', v_cnt;
   END IF;
 
-  RAISE NOTICE 'Part 2 OK: the two orphan arms were healed with a pending compute_analytics_from_csv job carrying the reconcile-sweep marker and detected_at; the in-grace, any-job (running/failed_final/done), terminal-analytics (complete/complete_with_warnings/failed), computing, composite and archived arms were all left untouched.';
+  RAISE NOTICE 'Part 2 OK: the THREE healable arms (A no-analytics, A2 pending-analytics, C4 terminalizer-marked orphan) each got one pending compute_analytics_from_csv job carrying the reconcile-sweep marker and detected_at; the in-grace (B), running-other-kind (C1), genuine-failed_final (C2), NULL-last_error-failed_final (C2b), done (C3), terminal-analytics (D1 complete / D2 complete_with_warnings / D3 failed), computing (D4), composite (E) and archived (F) arms were all left untouched.';
 
   -- Teardown, belt-and-suspenders; the ROLLBACK also discards everything.
   DELETE FROM auth.users WHERE id = v_user;
@@ -660,7 +847,9 @@ ROLLBACK;
 --
 -- The SINGLE-MUTATION proofs live elsewhere and this part must never be credited
 -- with them:
---   * the zero-jobs conjunct  -> Part 2 arms C1/C2/C3 (kind-scope it and C1 REDs)
+--   * the zero-jobs conjunct  -> Part 2 arms C1/C2/C2b/C3/C4 (kind-scope it and
+--     C1 REDs; delete B4's marker exemption and C4 REDs; widen it to a blanket
+--     status list and C2 + C3 BOTH RED)
 --   * ON CONFLICT / SKIP LOCKED under a real race -> the three-case READ COMMITTED
 --     two-session experiment recorded in 143-02-SUMMARY.md. It needs TWO sessions
 --     and therefore CANNOT be expressed in this single-session psql file. ⛔ That

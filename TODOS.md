@@ -2799,9 +2799,32 @@ Items stay open HERE until 146.1 ships; close them here when it does.
   completely" is unobservable for transport-lost / non-uuid-2xx shapes — branch the copy on
   SQLSTATE presence. Also consider mapping `error.code === '42501'` to a 401 re-auth
   envelope instead of the generic 500 (narrow reachability; withAuth ran ms earlier).
-- [ ] **Python tombstone envelope**: `flow_type=csv, step=finalize` now answers 422
-  `MISSING_STRATEGY_ID`, which misdirects stale/external callers — consider an explicit
-  `CSV_FINALIZE_MOVED` refusal arm (`process_key.py:~1136`).
+- [x] **Python tombstone envelope — MESSAGE fixed in Phase 146.1-07 (2026-08-18).**
+  `flow_type=csv, step=finalize` still answers 422 `MISSING_STRATEGY_ID` (deliberately —
+  see the gated option below), but the `human_message` no longer tells the caller to supply
+  `context.strategy_id`. It now states that CSV finalize moved to the Next.js route in
+  migration `20260819120000` and that this service is no longer a writer for that flow.
+  The default sentence is byte-identical for every other caller, pinned by
+  `test_non_csv_missing_strategy_id_message_is_byte_identical` and
+  `test_csv_non_finalize_step_keeps_the_default_message` (neuters C4-BLEED and
+  C4-FLOWONLY both observed RED).
+- [ ] ⛔ **OPTION `CSV_FINALIZE_MOVED` — a dedicated error code for the tombstone arm.
+  GATED ON WIZFORM-02 CLOSING. Do not pick this up before that gate opens.**
+  **What it is:** replace the `MISSING_STRATEGY_ID` code on the
+  `flow_type='csv' + step='finalize'` arm with a code that names the actual refusal, so a
+  caller can branch on the code rather than parse the sentence.
+  **Why it is NOT shipped:** a new code must enter the WIZFORM-02 coverage-law population,
+  and **WIZFORM-02 is recorded OPEN** — server-classified codes still render as
+  `code: UNKNOWN` at the wizard (Phase 153 span verification FAILED 2026-08-13). Minting the
+  code today ships it straight into a known-broken classification path, which is strictly
+  worse than an honest message under an existing, correctly-rendered code.
+  **Cost when the gate opens:** (1) add the code to the coverage-law population and satisfy
+  whatever the law requires of a new code; (2) add a wizard-side classification entry so it
+  does not render UNKNOWN, and a render test proving it; (3) the honest sentence shipped by
+  146.1-07 stays — the code is additive to it, not a replacement, or the message regresses
+  to naming only a code.
+  **Where:** `analytics-service/routers/process_key.py` (the tombstone branch beside the
+  API-6 envelope); the deliberate non-minting is recorded in the comment there.
 - [ ] **service_role default-ACL EXECUTE on the fold** contradicts the migration header's
   "authenticated ONLY" claim (inert today: auth.uid() guard 42501s it). Either add
   `REVOKE ... FROM service_role` + STEP 3(b)/Part 1 assertions (re-apply the REVOKE to TEST
@@ -2818,13 +2841,33 @@ Items stay open HERE until 146.1 ships; close them here when it does.
   `strategies_user_wizard_session_source_uniq`, but `csv_daily_returns_strategy_date_key`
   can also raise it (direct-RPC duplicate dates); the resolve arm keys on SQLSTATE alone —
   discriminate on constraint name, or document.
-- [ ] **Stale-comment batch from the fold re-point** (grouped; all cosmetic): the
-  csv-validate-route.test.ts behaviors-pinned TOC items 6–8/13 still describe the persist
-  RPC; route.test.ts `rpcMock` comment names both dropped RPCs; csv-validate-route:~898
-  beforeEach comment still says "Phase 106 Stage B ... persist_csv_daily_returns"; orphaned
-  `INTERNAL_API_TOKEN` env sets in csv-finalize-cross-submission-merge.test.ts:150 and the
-  re-pointed csv-validate describes; atomic-fold gate Part 2c is belt-to-2a's-suspenders
-  (savepoint semantics) — annotate.
+- [x] **Stale-comment batch from the fold re-point — DONE in Phase 146.1-07 (2026-08-18).**
+  Every claim was grep-verified at HEAD BEFORE it was touched; the ones the grep CONFIRMED
+  were left alone rather than given a fresh date. Ground truth for the batch: migration
+  `20260819120000:349-350` DROPs both `finalize_csv_strategy` and `persist_csv_daily_returns`.
+  - CORRECTED: csv-validate-route.test.ts TOC items 6 and 7 (item 6 named the dropped persist
+    RPC; item 7 named `CSV_PERSIST_FAIL`, which no test in the file pins — Test 7 pins
+    `CSV_FINALIZE_FAIL`). csv-validate-route.test.ts:~898 beforeEach ("Phase 106 Stage B ...
+    the SHARED persist_csv_daily_returns RPC"). csv-finalize/route.test.ts:~60 `rpcMock`
+    comment (named both dropped RPCs).
+  - LEFT ALONE, verified accurate: TOC item 8 — Tests 8a (runtime), 8b (source-shape) and
+    8c (arity lock) all exist and match the comment.
+  - REMOVED: the orphaned `process.env.INTERNAL_API_TOKEN` set in
+    csv-finalize-cross-submission-merge.test.ts (line 177 at HEAD, not the 150 this item
+    recorded). The route reads no such variable; the suite was re-run to confirm the
+    removal changed nothing.
+  - ANNOTATED: atomic-fold gate Part 2c — the enclosing `BEGIN ... EXCEPTION WHEN OTHERS`
+    is an implicit PL/pgSQL subtransaction, so once Part 2a establishes that the call
+    RAISED, the 0/0/0 counts follow by savepoint semantics rather than by anything the fold
+    does. Kept (it still discriminates a write that ESCAPES the subtransaction) with a note
+    saying so, so nobody reads a green 2c as independent atomicity evidence.
+- [ ] **Residual: `INTERNAL_API_TOKEN` env sets inside csv-validate-route.test.ts.** NOT
+  touched by the 146.1-07 batch, deliberately. The file mixes csv-VALIDATE describes (which
+  legitimately forward to the Python service with that token, and pin its absence at
+  `:808`/`:1883`) with csv-FINALIZE describes (which no longer need it). Separating the ~28
+  occurrences requires per-describe analysis, and a wrong removal would make a token-absence
+  arm vacuous rather than merely untidy. Cosmetic; do it as its own pass with the suite run
+  between each removal, or split the file.
 - [ ] ⚠️ **Migration-timestamp coordination (self-expiring 2026-08-19 12:00 UTC)**: the fold
   is stamped `20260819120000` (future-dated at merge). Until that instant, any OTHER
   migration must carry a timestamp ABOVE it or it trips the backdated-migration guard.
@@ -2859,6 +2902,146 @@ non-composition (widen conjunct — same item as the RESEARCH §6 residual above
 csv-finalize-rpc.test.ts points at a DROPped RPC (nine 22023 assertions coverage-gone) ·
 C1 interior-values echo (FOUNDER: hash vs honest copy) · C2 duplicate handler collapse ·
 C3 TEST sweep-cron seed residual (mitigated).
+
+### C1 option (a) — content hash over the CSV payload (NOT taken in Phase 146.1)
+
+**Status: filed, not scheduled. Option (b) — honest copy — SHIPPED in Phase 146.1
+(plan 146.1-04), and option (b) is what a reader finds in the code today.** The 200
+resolve echo in `src/app/api/strategies/csv-finalize/route.ts` now carries a
+`human_message` stating that the arm compared the committed series' ROW COUNT and its
+FIRST and LAST dates — and explicitly NOT the individual daily values — and the residual
+comment beside the series-equality check records this founder call. The predicate did not
+change; the envelope stopped implying an observation that was never made.
+
+**The residual that stays open.** The resolve arm makes exactly two reads of the committed
+series (count, and [min,max] boundary dates). A resubmit whose payload has the SAME row
+count and the SAME first/last dates but DIFFERENT interior values is indistinguishable to
+those two reads and is still echoed 200. The identical-retry case dominates by
+construction, which is why (b) is defensible; but the hole is real and is not closed.
+
+**What option (a) would cost — filed WITH its price, because an option without its cost is
+an option nobody can decide:**
+
+- [ ] **A content hash persisted at CREATE time.** Requires a new column on `strategies`
+      (or a field on `strategy_verifications`) holding a digest of the canonicalised
+      daily-returns payload, written inside `finalize_csv_strategy_with_returns` so it
+      shares the fold's transaction. The resolve arm then compares the resubmit's digest
+      against the committed one and refuses on mismatch — a real equality check instead of
+      two boundary reads.
+- [ ] **Cost 1 — a THIRD migration.** Phase 146.1 already carries two
+      (`20260819130000` fold input guards, `20260819130500` sweep readmit), each with its
+      own PROD-risk TEST rehearsal. A third means a third rehearsal and a third apply
+      window.
+- [ ] **Cost 2 — a BACKFILL question for every already-committed row.** Existing CSV
+      strategies have no digest. Computing one requires re-reading each strategy's
+      `csv_daily_returns` series and canonicalising it exactly as the write path does — and
+      any canonicalisation drift between backfill and write silently refuses honest
+      retries forever.
+- [ ] **Cost 3 — a nullable-hash FAIL-OPEN period.** Between the migration and the
+      completed backfill, `hash IS NULL` means "not measured", not "no match". The arm must
+      keep the count+boundary behaviour for those rows (absence is not a value), so the
+      residual persists for every pre-backfill row until the backfill lands. That window
+      needs a decided length and an observable end.
+
+**Re-opening it is a phase of its own, not an amendment to 146.1.** If the founder chooses
+(a), the honest-copy sentence shipped by (b) becomes wrong in the other direction (it would
+under-claim) and must be revised in the same change.
+
+## Phase 146.1 execution notes (logged 2026-08-18)
+
+- [ ] ⚠️ **Two competing FastAPI route-enumeration helpers now coexist; consolidate on one.**
+  `fastapi>=0.139` defers `include_router`, so `app.routes` holds opaque `_IncludedRouter`
+  placeholders and a flat `isinstance(r, APIRoute)` scan sees only app-decorated handlers.
+  Two independent fixes exist:
+  (a) `tests/test_validate_key_venue_transient.py::_effective` — hand-rolled recursion into
+      `route.original_router.routes`; yields the ORIGINAL route objects, whose `.path` is
+      **UNPREFIXED**. Correct only because every `include_router` in `main.py:811-825` is
+      currently bare. **Latent trap:** the first `include_router(..., prefix="/x")` makes its
+      path matching silently miss, and that file's lookup then raises "no route registered"
+      (loud) — but any future path-based reader of the same helper would go quietly wrong.
+  (b) `tests/test_limiter_route_coverage.py` — `fastapi.routing.iter_route_contexts`, the
+      flattener FastAPI's own `get_openapi` uses; composes prefixes correctly.
+  Prefer (b) and retire (a). Not done here: (a) is green today and is outside this PR's scope.
+  ⭐ Process note: (a) already documented this exact behaviour **in-repo** before I began
+  debugging it. Grep for `_IncludedRouter` / `original_router` before theorising next time.
+
+- [ ] ⚠️ **Local absolute paths (incl. the operator's macOS username) are committed across
+  ~50 historical `.planning/` docs on a PUBLIC repo.** Surfaced 2026-08-19 when
+  `gstack-redact-prepush` flagged a MEDIUM finding on the 146.1 branch. I redacted ONLY the
+  file this PR introduces (`146.1-02-SUMMARY.md`) and deliberately did NOT sweep the other
+  ~50: they are pre-existing, already public, and rewriting historical planning records is
+  not this PR's business. Do it as its own commit — `s|/Users/<user>/claude-projects/quantalyze|<repo-root>|`
+  then `s|/Users/<user>|<home>|` across `.planning/**`, verified with a no-allowlist
+  gitleaks/redact scan (the allowlist is PATH-based over `.planning/`, so the default scan
+  will not see them).
+
+
+- [ ] ⭐ **CSV finalize emits NO audit event — a real gap, surfaced by 146.1-07 task 1.**
+  Deleting the cast-through-unknown made the fold call visible to the audit-coverage law for
+  the first time, and the law immediately failed it: `csv-finalize/route.ts` calls
+  `logAuditEvent` nowhere. The call now carries an `@audit-skip` whose stated reason is the
+  truth — *there is no audit event on this path* — rather than the sibling's rationale, which
+  does NOT transfer: `create-with-key` skips `create_wizard_strategy` because "the user-visible
+  creation is audited at finalize time", and this call **IS** finalize (it commits a
+  user-visible strategy + verification + dailies in one transaction). Closing it needs an
+  audit-taxonomy decision — event type, payload, actor — per
+  `docs/architecture/adr-0023-audit-event-taxonomy.md`; that is a behaviour change and does not
+  belong in a types-regen commit.
+  ⚠️ Two formatting facts the next editor must not undo: the audit law scans **line by line**
+  for `.rpc("<name>"`, so the RPC name must stay on the same line as `.rpc(`; and the
+  `@audit-skip:` marker must sit **within 8 lines above** the call (a long explanation above it
+  is fine, but the marker itself must be inside the window — a 13-line pragma put the marker
+  out of range and the gate stayed RED).
+- [ ] **`--reporter=basic` is invalid in vitest 4** and appears in the `<verify>` blocks of plans
+  146.1-01/03/04/05/06/07. MEASURED: it exits 1 with `Failed to load custom Reporter from basic`.
+  ✅ It fails LOUD rather than passing vacuously, so no green in this phase rests on it, and
+  ✅ plan 146.1-08 (the merge gate) does NOT use it. Drop the flag from the plan template.
+
+- [x] ~~**146.1-07 task 1 DEFERRED — types regen needs a Supabase access token.**~~
+  ✅ **CLOSED 2026-08-18, same day — the deferral rested on MY OWN measurement error.** I
+  reported that the Supabase MCP fallback was unusable because `prettier` could not parse it.
+  It could not parse it because I fed prettier the **JSON envelope**, not the TypeScript:
+  `generate_typescript_types` returns `{"types":"export type Json =…"}`, so the 129,458
+  "one line" was a JSON string containing 4,133 escaped newlines. Extracting the `types` field
+  yields ordinary TypeScript that needs no formatting at all — the Supabase CLI emits
+  semicolon-free output and so does the MCP, so running prettier over it was itself the thing
+  that produced a 7,758-line churn diff. Raw extraction diffs **34 lines**.
+  **Executed without any token:** extract `types` → prepend the hand-written header (which the
+  generator does NOT emit, so a naive `> file` redirect would have destroyed it, including the
+  CRITICAL NUMERIC-precision audit note) → re-apply the two `HAND-PATCHED` tripwire comments the
+  file itself warns must survive a regen → delete the cast at `route.ts:592`.
+  **Verified:** net diff to the types file is **11 lines**, purely the fold's signature; the
+  `notify_*` columns and the `scenarios` block survived; `tsc` clean WITH the cast deleted (which
+  is the actual proof the signature is right); `database.types.test.ts` + `audit-coverage` +
+  the three csv-finalize suites 138 passed; lint 0 errors; and re-introducing an `as any` cast
+  trips 3 lint errors, so the type safety is enforced rather than merely present.
+- [ ] ⭐ **Comment-blind greps have now failed THREE times in one phase — make it a lint, not
+  a habit.** (1) the fold self-verify's `%5000%` substring, satisfied by a widened `50000`
+  (fixed, PR #691); (2) my own `BETWEEN -10 AND 100` check, which false-flagged a COMMENT
+  explaining the neuter as executable drift; (3) plan 146.1-04's C1 gate,
+  `grep -qiE '…checksum…' && fail`, which was **already broken at its own base commit** —
+  it matches honest prose at `route.ts:819` ("closing it needs a checksum, not two reads").
+  The executor correctly REFUSED to delete truthful prose to make a grep pass and measured
+  intent instead (`sha256|createHash|content_hash|digest` → zero, no crypto import;
+  orchestrator re-verified with a comment-stripping parse). ⭐ The general rule: a grep over
+  source that does not strip comments is unreliable in BOTH directions — vacuous when it
+  should fire, false-positive when it should not. Candidate fix: a shared
+  `scripts/grep-code.sh` that strips comments, used by every plan `<verify>`.
+- [ ] **A2 residual — absent `status` column echoes the `?? "pending_review"` fallback**, so a
+  contribution request can be *reported* as `pending_review` even though the arm writes
+  nothing to the DB. Refusing would violate the absence rule F-04-4 pins; the honest fix is
+  omitting the field, which changes the `CsvSubmitStep` contract and needs its own item.
+- [ ] **C1 echo copy is rendered by nothing today.** Plan 04 added `human_message` to the
+  resolve-echo 200 envelope so the honest sentence has somewhere to live, but
+  `CsvSubmitStep` branches on `!res.ok`/`data.ok` and never reads it. Either surface it or
+  record that the honesty is API-level only.
+- [ ] **`csv-finalize-c14-regression.test.ts` lost one discrimination to A2.** Its
+  resolve-echo case used to post the manager flow against a committed `private` row — the
+  exact cross-flow combination A2 now refuses 409. The fixture was re-pointed to
+  `entry_context: "contribution"`, so echoed and requested status are now provably equal on
+  every surviving echo and that case can no longer prove "echoed, not fabricated" on its
+  own. The discrimination moved to the new refusal cases; noted so nobody reads the weaker
+  case as full coverage.
 
 ## Phase 146 — RATE-04 value-parity candidates (logged 2026-08-18, D-146-4: retuning is founder territory)
 

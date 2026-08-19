@@ -2,11 +2,12 @@
 -- Canonical current body of this function, replayed from supabase/migrations/**.
 -- Regenerate with `npm run schema:functions`. See tech-debt #2.
 
--- source migration: 20260819120000_csv_finalize_atomic_fold.sql
+-- source migration: 20260819130000_csv_finalize_fold_input_guards.sql
 -- ==========================================================================
--- STEP 1 — the folded function
+-- STEP 1 — the replaced function (CREATE OR REPLACE; the function is NOT
+--          dropped, so its ACLs and its OID survive)
 -- ==========================================================================
-CREATE FUNCTION public.finalize_csv_strategy_with_returns(
+CREATE OR REPLACE FUNCTION public.finalize_csv_strategy_with_returns(
   p_user_id           UUID,
   p_wizard_session_id UUID,
   p_fmt               TEXT,
@@ -23,23 +24,23 @@ DECLARE
   v_auth_uid     UUID := auth.uid();
   v_strategy_id  UUID;
 BEGIN
-  -- CONTRIB-02 guard (T-110-02, D-08): restrict the terminal status;
+  -- GUARD 1 — CONTRIB-02 guard (T-110-02, D-08): restrict the terminal status;
   -- 'published' is unreachable from any finalize caller. FIRST statement so it
-  -- RAISEs before any write (parent: 20260728120000:215-219, verbatim; only
-  -- the function name in the message changed).
+  -- RAISEs before any write (parent: 20260819120000:225-231, verbatim).
+  -- Gated behaviorally by test_csv_finalize_atomic_fold.sql Part 3d.
   IF p_terminal_status NOT IN ('pending_review', 'private') THEN
     RAISE EXCEPTION 'finalize_csv_strategy_with_returns: p_terminal_status % is not allowed (expected pending_review or private)',
       p_terminal_status
       USING ERRCODE = '22023';
   END IF;
 
-  -- Caller-identity guards (parent: 20260728120000:225-234). The route layer
-  -- calls with the authenticated user's id; we assert it matches the JWT so a
-  -- SECURITY DEFINER RPC can't be abused via service_role to write rows under
-  -- another user. persist's identical pair (20260522111839:127-136) is folded
-  -- into this single copy. The message literal below is pinned by
-  -- supabase/tests/test_csv_finalize_auth_guard.sql Part A — change both
-  -- together or not at all.
+  -- GUARD 2 — Caller-identity guards (parent: 20260819120000:233-251,
+  -- verbatim). The route layer calls with the authenticated user's id; we
+  -- assert it matches the JWT so a SECURITY DEFINER RPC can't be abused via
+  -- service_role to write rows under another user. This pair is also what
+  -- confines finding A1's blast radius to the caller's OWN tenant. The message
+  -- literal below is pinned by supabase/tests/test_csv_finalize_auth_guard.sql
+  -- Part A — change both together or not at all.
   IF v_auth_uid IS NULL THEN
     RAISE EXCEPTION 'finalize_csv_strategy_with_returns called without an auth session'
       USING ERRCODE = '42501';
@@ -51,14 +52,31 @@ BEGIN
       USING ERRCODE = '42501';
   END IF;
 
-  -- Format whitelist (parent: 20260728120000:237-240, verbatim).
-  IF p_fmt NOT IN ('daily_returns','daily_nav','trades') THEN
+  -- GUARD 3 — (new, v1.19 review A1) p_rows NULL. Every rows guard below this
+  -- point is a three-valued-logic comparison that a NULL argument PASSES:
+  -- jsonb_typeof(NULL) is NULL, NULL <> 'array' is NULL, and plpgsql takes the
+  -- ELSE branch on a NULL IF condition. MEASURED on a throwaway
+  -- postgres:16-alpine (146.1-RESEARCH.md §1.2): before this guard,
+  -- p_rows := NULL returned a UUID for a strategy with zero dailies that the
+  -- Phase 143 sweep cannot heal. This guard sits ABOVE the jsonb_typeof guard
+  -- so the NULL case gets its own distinguishing message.
+  IF p_rows IS NULL THEN
+    RAISE EXCEPTION 'finalize_csv_strategy_with_returns: p_rows is required (got NULL)'
+      USING ERRCODE = '22023';
+  END IF;
+
+  -- GUARD 4 — Format whitelist (parent: 20260819120000:254-257), CHANGED to be
+  -- NULL-explicit: p_fmt NOT IN (...) is NULL when p_fmt is NULL, and plpgsql
+  -- then takes the ELSE branch, so a NULL fmt used to pass the whitelist
+  -- entirely. The 'invalid fmt' distinguishing substring is preserved verbatim
+  -- so no existing gate moves.
+  IF p_fmt IS NULL OR p_fmt NOT IN ('daily_returns','daily_nav','trades') THEN
     RAISE EXCEPTION 'finalize_csv_strategy_with_returns: invalid fmt %', p_fmt
       USING ERRCODE = '22023';
   END IF;
 
-  -- Strategy-name guards (parent: 20260728120000:248-256, verbatim): 1-80
-  -- chars, two raises with distinguishing substrings so tests can pin each
+  -- GUARD 5 — Strategy-name guards (parent: 20260819120000:262-272, verbatim):
+  -- 1-80 chars, two raises with distinguishing substrings so tests can pin each
   -- separately from the fmt guard.
   IF p_strategy_name IS NULL OR length(p_strategy_name) = 0 THEN
     RAISE EXCEPTION 'finalize_csv_strategy_with_returns: p_strategy_name is required'
@@ -70,26 +88,70 @@ BEGIN
       USING ERRCODE = '22023';
   END IF;
 
-  -- Rows type guard (parent: 20260522111839:153-155, verbatim): p_rows MUST
-  -- be an array before jsonb_array_length is called on it.
+  -- GUARD 6 — Rows type guard (parent: 20260819120000:275-278, verbatim):
+  -- p_rows MUST be an array before jsonb_array_length is called on it.
   IF jsonb_typeof(p_rows) <> 'array' THEN
     RAISE EXCEPTION 'finalize_csv_strategy_with_returns: p_rows must be a JSONB array, got %', jsonb_typeof(p_rows)
       USING ERRCODE = '22023';
   END IF;
 
-  -- Row-count cap (parent: 20260522111839:160-162, verbatim): the route
-  -- validator also enforces <=5000 upstream; this is defense-in-depth so a
-  -- direct RPC caller cannot insert an unbounded series.
+  -- GUARD 7 — Row-count cap (parent: 20260819120000:283-286, verbatim): the
+  -- route validator also enforces <=5000 upstream; this is defense-in-depth so
+  -- a direct RPC caller cannot insert an unbounded series. ⛔ The spelling of
+  -- this line is pinned by a word-bounded regex in STEP 4 below and in the
+  -- parent's STEP 3(d) — a widened literal is the exact false-PASS class this
+  -- phase exists to close.
   IF jsonb_array_length(p_rows) > 5000 THEN
     RAISE EXCEPTION 'finalize_csv_strategy_with_returns: p_rows exceeds 5000 rows (got %)', jsonb_array_length(p_rows)
       USING ERRCODE = '22023';
   END IF;
 
-  -- NOTE the parents' empty-array raise is deliberately ABSENT here: an empty
-  -- array is the legitimate fmt='trades' no-series case (route.ts:521's skip,
-  -- moved into this body as the length gate on the dailies INSERT below).
+  -- GUARD 8 — (new, v1.19 review A1) empty array, NARROWED to fmt='trades'.
+  -- 20260819120000:288-290 recorded that the parents' empty-array raise is
+  -- deliberately ABSENT because an empty array is the legitimate fmt='trades'
+  -- no-series case. That reasoning is preserved, not reverted: 'trades' still
+  -- finalizes with zero dailies (pinned unwrapped by Part 4 of the fold gate).
+  -- Every OTHER fmt asking to persist a daily series with no rows in it is
+  -- refused. ⛔ IS DISTINCT FROM, never <>: p_fmt <> 'trades' is NULL when
+  -- p_fmt is NULL and the guard would not fire (MEASURED). Today GUARD 4
+  -- already refuses a NULL fmt, so this is defense in depth behind it — it
+  -- exists so a future edit to GUARD 4 cannot silently re-open the hole.
+  -- Placed AFTER GUARD 4 so a bogus fmt still reports 'invalid fmt'.
+  IF jsonb_array_length(p_rows) = 0 AND p_fmt IS DISTINCT FROM 'trades' THEN
+    RAISE EXCEPTION 'finalize_csv_strategy_with_returns: p_rows is empty and fmt % accepts no empty series (only fmt=trades finalizes with zero dailies)',
+      p_fmt
+      USING ERRCODE = '22023';
+  END IF;
 
-  -- Insert the strategies row (parent: 20260728120000:278-288, column list
+  -- GUARD 9 — (new, v1.19 review A1) the value scan, evaluated BEFORE the
+  -- strategies INSERT so a poisoned element costs the caller an error, never a
+  -- committed row. See "READ THIS BEFORE SIMPLIFYING" (iii) and (iv) in the
+  -- header for why this is ONE BETWEEN rather than three predicates, and why
+  -- the date fence is spelled in explicit UTC.
+  IF EXISTS (
+    SELECT 1
+      FROM jsonb_array_elements(p_rows) elem
+     WHERE elem->>'daily_return' IS NULL
+        OR elem->>'date' IS NULL
+        OR NOT ((elem->>'daily_return')::DOUBLE PRECISION BETWEEN -10 AND 10)
+        OR (elem->>'date')::DATE > (now() AT TIME ZONE 'UTC')::date
+        OR (elem->>'date')::DATE < DATE '1900-01-01'
+  ) THEN
+    RAISE EXCEPTION 'finalize_csv_strategy_with_returns: p_rows contains an unusable element (a missing date or daily_return, a daily_return that is NaN/Infinity or outside +/-10, or a date in the future or before 1900) - refused before any write'
+      USING ERRCODE = '22023';
+  END IF;
+
+  -- GUARD 10 — (new, v1.19 review A1) duplicate dates within one payload. See
+  -- "READ THIS BEFORE SIMPLIFYING" (v): without this the dailies INSERT raises
+  -- 23505 on csv_daily_returns_strategy_date_key, which the route's resolve arm
+  -- mistakes for the double-submit fence.
+  IF (SELECT count(*) <> count(DISTINCT elem->>'date')
+        FROM jsonb_array_elements(p_rows) elem) THEN
+    RAISE EXCEPTION 'finalize_csv_strategy_with_returns: p_rows contains duplicate dates - a track record cannot carry two returns for one day, and persisting it would raise 23505 from the dailies unique index instead of a legible input error'
+      USING ERRCODE = '22023';
+  END IF;
+
+  -- Insert the strategies row (parent: 20260819120000:299-310, column list
   -- EXACT). source='csv' marks the ingestion path; status=p_terminal_status
   -- ('pending_review' manager flow, 'private' CONTRIB-02 contribution flow).
   -- wizard_session_id is WRITTEN here (Phase 140.4 / SEAMRIM-03): this single
@@ -109,9 +171,9 @@ BEGIN
   )
   RETURNING id INTO v_strategy_id;
 
-  -- Insert the verification row (parent: 20260728120000:299-305, verbatim).
-  -- FK ordering note preserved from the parent (:295-298): PostgreSQL allows
-  -- the strategy_verifications.strategy_id FK to reference the just-inserted
+  -- Insert the verification row (parent: 20260819120000:317-324, verbatim).
+  -- FK ordering note preserved from the parent: PostgreSQL allows the
+  -- strategy_verifications.strategy_id FK to reference the just-inserted
   -- strategy because both inserts run in the same transaction (the SECURITY
   -- DEFINER function body is implicitly transactional). The FK check happens
   -- at COMMIT, not at the second INSERT.
@@ -123,16 +185,16 @@ BEGIN
     NULL, NULL
   );
 
-  -- The dailies write (parent: 20260522111839:173-181, ADAPTED per the header
-  -- delta list): length-gated (trades no-series case), plain INSERT (a fresh
-  -- strategy id cannot conflict; duplicate dates are a route-boundary 400),
-  -- and written against the 20260624120000 shape — naming exactly
-  -- (strategy_id, date, daily_return) leaves api_key_id/allocator_id NULL,
-  -- which satisfies the csv_daily_returns_source_xor CHECK; the
+  -- The dailies write (parent: 20260819120000:335-343, verbatim):
+  -- length-gated (trades no-series case), plain INSERT (a fresh strategy id
+  -- cannot conflict; duplicate dates are now refused by GUARD 10 above and at
+  -- the route boundary), and written against the 20260624120000 shape — naming
+  -- exactly (strategy_id, date, daily_return) leaves api_key_id/allocator_id
+  -- NULL, which satisfies the csv_daily_returns_source_xor CHECK; the
   -- owner-coherence trigger is gated WHEN api_key_id IS NOT NULL and never
-  -- fires for these rows. A malformed element (date or daily_return cast
-  -- failure) raises here and rolls back ALL THREE inserts — that rollback IS
-  -- the SC#2 mechanism.
+  -- fires for these rows. A malformed element that survived GUARD 9 (a
+  -- non-numeric daily_return string, say) raises here and rolls back ALL THREE
+  -- inserts — that rollback IS the SC#2 mechanism.
   IF jsonb_array_length(p_rows) > 0 THEN
     INSERT INTO csv_daily_returns (strategy_id, date, daily_return)
     SELECT

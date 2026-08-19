@@ -10,6 +10,10 @@ import { canonicalizeExchangeList } from "@/lib/constants";
 import { MAGNITUDE_CAPS } from "@/lib/closed-sets";
 import { captureToSentry } from "@/lib/sentry-capture";
 import { scrubSeamError } from "@/lib/seam-redaction";
+import {
+  pgConstraintName,
+  WIZARD_SESSION_CONSTRAINTS,
+} from "@/lib/api/pgConstraintName";
 import { NO_STORE_HEADERS } from "@/lib/api/headers";
 
 /**
@@ -532,7 +536,44 @@ export function buildMetadataUpdatePayload(
  * one place to delete when the types regeneration lands.
  */
 type FinalizeAtomicOutcome =
-  | { ok: true; strategyId: string; status: string }
+  | {
+      ok: true;
+      strategyId: string;
+      status: string;
+      /**
+       * 146.1 / A4 — WHICH of the two ok:true paths produced this outcome.
+       * `true` = the fold CREATED the row on this request. `false` = a 23505
+       * resolved onto a row a PRIOR request committed, and this request wrote
+       * nothing.
+       *
+       * The callers use it to decide whether the post-outcome metadata UPDATE
+       * is theirs to issue. On an echo it is not: the submission already
+       * happened, and re-applying THIS request's metadata rewrites a
+       * committed row — including `asset_class`, which is the annualization
+       * clock (sqrt(365) crypto vs sqrt(252) traditional, #597 part 2) that
+       * the already-stored KPIs were computed under.
+       *
+       * REQUIRED, never optional. Marking this field optional (a `?` on the
+       * declaration) would let a future third return site omit it, defaulting
+       * to `undefined` -> falsy -> silently treated as an echo, which is the
+       * exact silence this field exists to prevent. Requiredness is what
+       * forces the compiler to name every construction site.
+       *
+       * (The wrong shape is described rather than spelled, because the gate
+       * that pins this is a raw grep over the source and would match its own
+       * counter-example in a comment — the comment-blind grep class this
+       * phase has now hit three times.)
+       */
+      fresh: boolean;
+      /**
+       * 146.1 / C1 — set ONLY on the 23505 resolve echo, never on a fresh
+       * create. It carries the arm's own statement of what it compared, so a
+       * 200 that did not write this payload cannot be mistaken for one that
+       * did. A fresh create leaves it undefined and its envelope is byte
+       * identical to before.
+       */
+      humanMessage?: string;
+    }
   | { ok: false; response: NextResponse };
 
 async function finalizeAtomicOrErrorResponse(
@@ -547,22 +588,27 @@ async function finalizeAtomicOrErrorResponse(
   },
   opts: { logPrefix: string; correlationId: string },
 ): Promise<FinalizeAtomicOutcome> {
-  const { data: newStrategyId, error } = await (
-    supabase.rpc as unknown as (
-      fn: "finalize_csv_strategy_with_returns",
-      rpcArgs: {
-        p_user_id: string;
-        p_wizard_session_id: string;
-        p_fmt: string;
-        p_strategy_name: string;
-        p_rows: CsvDailyReturnRow[];
-        p_terminal_status: string;
-      },
-    ) => Promise<{
-      data: string | null;
-      error: { code?: string; message?: string } | null;
-    }>
-  )("finalize_csv_strategy_with_returns", {
+  // 146.1-07 task 1: the cast-through-unknown is GONE. `database.types.ts` now
+  // carries `finalize_csv_strategy_with_returns`, so this call is type-checked
+  // against the real signature and re-enters the audit-coverage law. Restoring
+  // the cast would silently un-check the argument names on a money path.
+  // ⚠️ CSV FINALIZE EMITS NO AUDIT EVENT — a real gap, named rather than papered
+  // over. The sibling `create-with-key` skips `create_wizard_strategy` on the
+  // grounds that "the user-visible creation is audited at finalize time"; that
+  // rationale CANNOT be reused here, because this call IS finalize — it commits a
+  // user-visible strategy + verification + dailies in one transaction. Emitting
+  // the event needs an audit-taxonomy decision (event type, payload, actor) that
+  // is a behaviour change, not a by-product of a types regen, so it is filed in
+  // TODOS.md rather than smuggled into this commit.
+  //
+  // 146.1-07 task 1: this call was invisible to the audit law TWICE over — first
+  // behind `supabase.rpc as unknown as (…)`, then behind a line break that put
+  // the RPC name off the `.rpc(` line the law scans line-by-line. Keep the name
+  // on the same line as `.rpc(`.
+  //
+  // @audit-skip: no audit event on the CSV finalize path today; the gap is filed
+  // in TODOS.md (146.1 execution notes) and needs an audit-taxonomy decision.
+  const { data: newStrategyId, error } = await supabase.rpc("finalize_csv_strategy_with_returns", {
     p_user_id: args.userId,
     p_wizard_session_id: args.wizardSessionId,
     p_fmt: args.fmt,
@@ -575,18 +621,137 @@ async function finalizeAtomicOrErrorResponse(
   // not just error-null — a 2xx that lost its id must not strand the
   // wizard's SyncProgress poller.
   if (!error && isUuid(newStrategyId)) {
-    return { ok: true, strategyId: newStrategyId, status: args.terminalStatus };
+    // 146.1 / A4 — this request CREATED the row, so its metadata fan-out is
+    // this request's to run.
+    return {
+      ok: true,
+      strategyId: newStrategyId,
+      status: args.terminalStatus,
+      fresh: true,
+    };
   }
 
   if (error?.code === "23505") {
-    return await resolveExistingStrategyOrRefuse(supabase, args, opts);
+    /**
+     * 146.1 / B3 — A 23505 ON THIS PATH IS NOT ONE FACT.
+     *
+     * The arm below existed undiscriminated, so EVERY unique violation the
+     * fold could raise was routed to the wizard-session resolver. There are
+     * two real sources: the session fence
+     * `strategies_user_wizard_session_source_uniq` (20260728120000:167-169),
+     * which IS "a prior attempt for this session already committed", and the
+     * dailies index `csv_daily_returns_strategy_date_key`
+     * (20260624120000:55-56), which is a duplicate-date PAYLOAD defect. The
+     * fold's dailies INSERT carries no `ON CONFLICT`, so the second one is
+     * reachable. Resolving it means telling the user "try again shortly"
+     * (the resolve arm's 503) about a defect that will fail identically
+     * forever — and burying the arrival of any future constraint in silence.
+     *
+     * ⛔ `null` MUST ENTER THE RESOLVE ARM. `pgConstraintName` returns null
+     * when it could not READ a name, NOT when no constraint was violated
+     * (its own docblock states this as the caller contract). Pre-existing
+     * behaviour for UNKNOWN is any-23505 → resolve, and the resolve arm
+     * already fails CLOSED — it refuses with 503 when it cannot find a
+     * committed row, so a mis-routed non-session 23505 answers honestly
+     * rather than fabricating an echo. Tightening this to
+     * `constraint !== null && WIZARD_SESSION_CONSTRAINTS.has(constraint)`
+     * would convert that fail-closed 503 into a fail-open 500 carrying the
+     * wrong copy. This is the non-obvious half of the fix; do not "simplify"
+     * it.
+     *
+     * ⛔ The name comes from `message` and never `details` — `details`
+     * carries client-supplied key values, so reading it would let a caller
+     * steer which arm answers them. That is the leaf's decision; do not
+     * improve it here.
+     */
+    const constraint = pgConstraintName(error);
+    if (constraint === null || WIZARD_SESSION_CONSTRAINTS.has(constraint)) {
+      return await resolveExistingStrategyOrRefuse(supabase, args, opts);
+    }
+    // A NAMED constraint we do not recognise. Fall through to the
+    // fold-failure arm (nothing was persisted — the rollback is total, which
+    // is exactly what that arm's copy says), but say so first: a new unique
+    // index arriving on this path must not be indistinguishable from a
+    // generic RPC failure. Same shape as create-with-key's
+    // `draft-rpc-unknown-constraint` capture.
+    console.error(
+      `${opts.logPrefix} 23505 named an UNRECOGNISED constraint [correlation_id=${opts.correlationId}]:`,
+      constraint,
+      scrubSeamError(error),
+    );
+    captureToSentry(error, {
+      tags: {
+        surface: "csv-finalize",
+        step: "finalize-23505-unknown-constraint",
+      },
+      extra: {
+        correlation_id: opts.correlationId,
+        pg_code: error.code,
+        constraint,
+      },
+    });
   }
 
   // ── The fold-failure arm (D-07, D-11, D-12) ────────────────────────────
-  // A non-23505 RPC error, or a 2xx whose payload lost the id. Under the
-  // fold NOTHING was persisted (the rollback is total), so the copy below
-  // states exactly that and invites a retry — which arrives as a clean
-  // first submit, not a 23505.
+  // A non-23505 RPC error, or a 2xx whose payload lost the id.
+  //
+  // ⚖️ 146.1 / A3 (2026-08-18) — THE CLAIM THAT WAS REMOVED, AND FROM WHICH
+  // ARRIVALS.
+  //
+  // This arm used to answer EVERY arrival with one sentence: "Nothing was
+  // saved — the submission rolled back completely, so it is safe to try
+  // again." Three distinct outcome classes reach here, and that sentence is
+  // an honest observation for exactly ONE of them.
+  //
+  //   CLASS 1 — a SQLSTATE-bearing RPC error (22023 / 42501 / 22007 / 22P02 /
+  //   23502 / …). PostgREST returned a BODY carrying a 5-character `code`,
+  //   which means the fold ran and RAISEd. The fold has no EXCEPTION handler
+  //   clause, so the raise aborts the function and every write in its single
+  //   transaction rolls back (20260819120000:82-96). The rollback claim is
+  //   TRUE here. It is kept VERBATIM.
+  //
+  //   CLASS 2 — a TRANSPORT failure. postgrest-js RESOLVES rather than
+  //   rejects on a fetch fault — see the fetch-catch arm of
+  //   `PostgrestBuilder`'s `then` in @supabase/postgrest-js, which builds a
+  //   `PostgrestError` with an EMPTY `code` — handing us
+  //   `{ error: { code: "" }, data: null, status: 0 }`. And the
+  //   `RETRYABLE_METHODS` constant in `src/types/common/common.ts` lists only
+  //   `['GET','HEAD','OPTIONS']`, so the RPC POST is NEVER retried: what we
+  //   sent was ONE POST, and it may have reached PostgREST and committed
+  //   before the connection died. We did not observe a rollback. We observed
+  //   that we stopped being able to see.
+  //
+  //   CLASS 3 — a 2xx whose id did not survive (TS-13, `!error` and a
+  //   non-UUID return). A 2xx from PostgREST means the transaction COMMITTED;
+  //   only the id failed to reach us. "Nothing was saved" is not merely
+  //   unsupported here, it is provably the wrong way round.
+  //
+  // ⛔ THE DISCRIMINATOR IS AN EXPLICIT LENGTH CHECK, NOT TRUTHINESS. Class
+  // 2's `code` is the EMPTY STRING, which is falsy, so `if (error?.code)`
+  // silently merges classes 2 and 3 into one and then answers both with
+  // whichever copy the other branch holds. `error.code.length === 5` is the
+  // only test that separates "PostgREST told us a SQLSTATE" from "PostgREST
+  // told us nothing".
+  //
+  // PRECEDENT, and why this is a correction rather than a preference: the
+  // SEAMUX-04 block introducing `CSV_SUBMIT_FAILED` in `wizardErrors.ts`
+  // already made this exact call on the client side — it deleted "your data
+  // is unchanged" because "a client-side timeout does not cancel the
+  // server-side transaction, so the write may well have landed". The route's
+  // sentence was the older, unreasoned side of that contradiction. Classes 2
+  // and 3 now speak in the voice that `CSV_SUBMIT_FAILED` already approved,
+  // including its recovery step — check /strategies in another tab first —
+  // which composes with the 23505 resolve arm above: an unchanged resubmit
+  // from this wizard resolves onto the strategy already started instead of
+  // creating a second one.
+  //
+  // 42501 → 401: CONSIDERED AND DEFERRED, not forgotten. `withAuth` ran
+  // milliseconds earlier, so the only reachability is a session expiring
+  // INSIDE one request; and a 401 on a POST the wizard treats as retryable
+  // would throw the user into a login redirect mid-submit. The honest
+  // improvement is a distinguishing `debug_context`, which this arm now
+  // carries (`outcome_class`), not a status change. Revisit only with a
+  // measured 42501 rate from the Sentry tags below.
   console.error(
     `${opts.logPrefix} finalize_csv_strategy_with_returns failed [correlation_id=${opts.correlationId}]:`,
     // SEAMRIM-06 — `.code` is the five-character SQLSTATE, allowlisted by
@@ -602,6 +767,24 @@ async function finalizeAtomicOrErrorResponse(
   // option needed: the error is a PostgREST error from the SSR client (no
   // forwarded JWT header exists on this path any more), mirroring the
   // metadata-update capture's shape.
+  // 146.1 / A3 — the class, computed ONCE and used for the copy, the Sentry
+  // step tag and the debug_context alike, so the three can never disagree
+  // about what happened. `rolled-back` is the only one that observed a
+  // rollback.
+  const outcomeClass: "rolled-back" | "transport-unknown" | "committed-lost-id" =
+    typeof error?.code === "string" && error.code.length === 5
+      ? "rolled-back"
+      : error
+        ? "transport-unknown"
+        : "committed-lost-id";
+  // Classes 2 and 3 carry their OWN step tag. Merged into one bucket, the
+  // honest arm's firing rate is unmeasurable, and nobody can ever tell
+  // whether the deferred 42501→401 question or a real transport problem is
+  // the live one.
+  const sentryStep =
+    outcomeClass === "rolled-back"
+      ? "finalize-fold-fail"
+      : "finalize-fold-outcome-unknown";
   captureToSentry(
     error ??
       new Error(
@@ -610,10 +793,11 @@ async function finalizeAtomicOrErrorResponse(
         )})`,
       ),
     {
-      tags: { surface: "csv-finalize", step: "finalize-fold-fail" },
+      tags: { surface: "csv-finalize", step: sentryStep },
       extra: {
         correlation_id: opts.correlationId,
         rpc_error_code: error?.code ?? null,
+        outcome_class: outcomeClass,
       },
     },
   );
@@ -622,10 +806,32 @@ async function finalizeAtomicOrErrorResponse(
     response: NextResponse.json(
       {
         ok: false,
+        // ⛔ ONE CODE. A second code for the same fact is the two-names-one-fact
+        // drift that the `CSV_UPSTREAM_FAIL` docblock in `wizardErrors.ts`
+        // exists to prevent ("a second code for the same fact is exactly the
+        // two-names-one-fact drift `seam-copy.ts` exists to prevent"), and it
+        // buys nothing: `CSV_FINALIZE_FAIL` is a member of the
+        // `KNOWN_CSV_FINALIZE_CODES` set in `CsvSubmitStep.tsx`, so the
+        // sentence below is what RENDERS. Minting one would move
+        // `KNOWN_CSV_FINALIZE_CODES`, `EXPECTED_TABLE_SIZE` and the
+        // vocabulary invariant in the same commit for a state the user cannot
+        // act on differently.
         code: "CSV_FINALIZE_FAIL",
         human_message:
-          "Your strategy could not be saved. Nothing was saved — the submission rolled back completely, so it is safe to try again. Contact support@quantalyze.com if it persists.",
-        debug_context: { rpc_error_code: error?.code ?? null },
+          outcomeClass === "rolled-back"
+            ? // CLASS 1 — VERBATIM, unchanged. The database told us it raised;
+              // the fold has no handler clause; the rollback is total. Making
+              // this one vague too would be the failure mode on the other
+              // side of the same defect.
+              "Your strategy could not be saved. Nothing was saved — the submission rolled back completely, so it is safe to try again. Contact support@quantalyze.com if it persists."
+            : // CLASSES 2 and 3 — commit-agnostic, in the voice
+              // `CSV_SUBMIT_FAILED` already approved. It states what we do not
+              // know, then puts the NON-DESTRUCTIVE check first.
+              "We could not confirm whether your strategy was saved. The save step did not report back, so we cannot promise it completed or that it did not. Open your strategies list in another tab first: if the strategy is listed, the save completed and you are done. If it is not listed, submit the same file again — an unchanged resubmit from this wizard resolves to the strategy you already started instead of creating a second one. Contact support@quantalyze.com if it persists.",
+        debug_context: {
+          rpc_error_code: error?.code ?? null,
+          outcome_class: outcomeClass,
+        },
         correlation_id: opts.correlationId,
       },
       { status: 500, headers: NO_STORE_HEADERS },
@@ -636,14 +842,28 @@ async function finalizeAtomicOrErrorResponse(
 /**
  * ⚠️ CR-01 — THE 23505 RESOLVE ARM. Read this before "simplifying" it away.
  *
- * Under the fold a 23505 has exactly ONE reachable meaning: a PRIOR attempt
- * for this (user, wizard_session, source='csv') FULLY committed — strategy,
- * verification AND dailies, all-or-nothing — and this attempt's own writes
- * rolled back completely. (The dailies unique index can also raise 23505 on
- * a duplicate-date payload in principle, but the route boundary 400s
- * duplicate dates before any dispatch — parseDailyReturnsSeries is the
- * load-bearing gate — and if one ever slipped through, the re-fetch below
- * finds no committed row and the arm fails CLOSED rather than echoing.)
+ * Under the fold a 23505 that REACHES THIS ARM has exactly ONE reachable
+ * meaning: a PRIOR attempt for this (user, wizard_session, source='csv')
+ * FULLY committed — strategy, verification AND dailies, all-or-nothing — and
+ * this attempt's own writes rolled back completely.
+ *
+ * ⚠️ 146.1 / B3 — "REACHES THIS ARM" IS NOW LOAD-BEARING, AND THE PARAGRAPH
+ * IT REPLACED WAS WRONG. The previous wording called the dailies unique
+ * violation hypothetical ("in principle"). It is not: the index
+ * `csv_daily_returns_strategy_date_key` is real (20260624120000:55-56) and
+ * the fold's dailies INSERT is a plain INSERT with NO `ON CONFLICT`, so a
+ * duplicate-date payload raises 23505 there for certain. What made it
+ * unreachable in practice was a single upstream gate, and "one gate holds"
+ * is not a property this arm can verify. The caller now DISCRIMINATES: only
+ * `null` (unparseable → UNKNOWN, pre-existing behaviour) or a
+ * `WIZARD_SESSION_CONSTRAINTS` member enters here; a dailies-index 23505
+ * falls through to the fold-failure arm instead of being offered a retry it
+ * can never succeed at.
+ *
+ * 146.1-01's A1 duplicate-date guard removes the one concrete payload known
+ * to reach that index. This fence is DEFENSE IN DEPTH against any future
+ * source — a second writer, a relaxed boundary, a new index — not a
+ * restatement of that guard.
  *
  * The arm is READ-ONLY. It persists nothing and it must verify identity
  * BEFORE anything of THIS submission is written — the metadata UPDATE runs
@@ -687,6 +907,12 @@ async function resolveExistingStrategyOrRefuse(
     wizardSessionId: string;
     strategyName: string;
     rows: CsvDailyReturnRow[];
+    // 146.1 / A2 — DECLARED ON PURPOSE, AND THE GATE FOR THE WHOLE FIX. The
+    // caller has always passed a wider object and TypeScript's structural
+    // typing let it compile, so this field was PRESENT at runtime and
+    // INVISIBLE to this function. Nothing below could compare against it
+    // until it was named here.
+    terminalStatus: "pending_review" | "private";
   },
   opts: { logPrefix: string; correlationId: string },
 ): Promise<FinalizeAtomicOutcome> {
@@ -784,6 +1010,44 @@ async function resolveExistingStrategyOrRefuse(
     };
   };
 
+  // 146.1 / A2 check 0 — TERMINAL STATUS, ahead of the name check.
+  //
+  // THE MECHANISM. The 23505 that brought us here fires on the partial unique
+  // index `(user_id, wizard_session_id, source) WHERE wizard_session_id IS NOT
+  // NULL` (20260728120000:167-169). `status` is NOT in that key — and the
+  // index's own COMMENT explains why `source` is: `wizard_session_id` is
+  // restored UNCONDITIONALLY from ONE shared localStorage key
+  // (src/lib/wizard/localStorage.ts), so unrelated wizard runs arrive carrying
+  // the same session id. `source` separates the CSV flow from a draft; nothing
+  // separated the MANAGER flow from a CONTRIB-02 contribution, because both
+  // are source='csv' and differ only in the terminal status they asked for.
+  //
+  // WHAT THAT COST. A manager-flow resubmit could resolve onto a row committed
+  // as 'private' and be echoed 200 with that row's id and status: the caller
+  // is told "saved" for a strategy that will never enter the admin review
+  // queue ('pending_review' is that queue's membership predicate) — and in the
+  // other direction an owner-only contribution's id is handed to the manager
+  // flow. That is an access-control answer, not a cosmetic one.
+  //
+  // ⚠️ `typeof === "string" &&` MIRRORS THE NAME CHECK BELOW, for the same
+  // reason: a row whose `status` did not come back is an ABSENT reading, not
+  // an observed mismatch. Refusing on absence would render a read we could not
+  // make as a measurement.
+  //
+  // ⛔ The refusal goes through the EXISTING `refuse()` — 409 /
+  // CSV_SESSION_REUSED / no-store / one Sentry capture. A new code would move
+  // KNOWN_CSV_FINALIZE_CODES, EXPECTED_TABLE_SIZE and the vocabulary invariant
+  // in the same commit, for a state the user cannot act on differently
+  // (create-with-key states this reasoning at its own unresolvable arm).
+  if (
+    typeof existingRow.status === "string" &&
+    existingRow.status !== args.terminalStatus
+  ) {
+    return refuse(
+      `terminal status mismatch (committed '${existingRow.status}', this submission asked for '${args.terminalStatus}')`,
+    );
+  }
+
   // CR-01 check 1 — NAME, before anything else. A changed track record is a
   // NEW strategy; a renamed resubmit must never resolve to the old row.
   if (
@@ -817,6 +1081,16 @@ async function resolveExistingStrategyOrRefuse(
   // Residual (documented, accepted): equal count and boundaries with
   // different interior values still echoes — the identical-retry case
   // dominates by construction; closing it needs a checksum, not two reads.
+  //
+  // 146.1 / C1 (2026-08-18) — FOUNDER CALL, option (b). The residual STAYS
+  // OPEN by decision. Option (a) — a content hash over the payload persisted
+  // at create time — would close it, and is filed in TODOS.md WITH its cost:
+  // a third migration in a phase already carrying two, a backfill for every
+  // already-committed row, and a nullable-hash fail-open period while that
+  // backfill runs. What changed here is NOT the predicate: it is that the 200
+  // envelope now STATES these two reads instead of leaving the caller to
+  // assume the series was checked. See the echo return at the end of this
+  // function.
   {
     let minDate = "";
     let maxDate = "";
@@ -860,13 +1134,31 @@ async function resolveExistingStrategyOrRefuse(
     }
   }
 
-  // Both checks passed: this IS the instructed retry of the same submission.
-  // The committed series was READ to match this payload's count and
-  // boundaries (presence is proven, not assumed), so there is nothing to
-  // persist — echo the existing id. `status` is
-  // ECHOED from the row rather than hardcoded: the row may sit at 'private'
-  // (a CONTRIB-02 contribution); reporting a status we did not read would be
-  // fabricating an observation.
+  // Every check passed, so this is CONSISTENT with the instructed retry of
+  // the same submission and there is nothing to persist — echo the existing
+  // id. `status` is ECHOED from the row rather than hardcoded: reporting a
+  // status we did not read would be fabricating an observation.
+  //
+  // ⚖️ 146.1 / C1 (2026-08-18) — THE CLAIM THAT WAS REMOVED, AND WHY.
+  //
+  // This comment used to read "this IS the instructed retry of the same
+  // submission … presence is proven, not assumed", and the 200 envelope said
+  // nothing at all — so the caller received a bare success indistinguishable
+  // from a fresh save. Neither was supportable. The arm makes exactly TWO
+  // reads of the committed series: its row COUNT and its [min, max] boundary
+  // dates. It reads no daily VALUE, so it cannot distinguish this payload
+  // from any other payload sharing that count and those two dates. "Proven"
+  // was a word for an observation that was never made.
+  //
+  // FOUNDER CALL: option (b), honest copy, ships. Option (a) — a content hash
+  // — would make the strong claim true and is filed in TODOS.md with its full
+  // cost (third migration + backfill + nullable-hash fail-open period), so
+  // the decision can be re-opened with the same information. ⛔ No hash, no
+  // checksum and no new column is implemented here, deliberately.
+  //
+  // The register is `wizardErrors.ts`'s SEAMUX-04 precedent: state the fact,
+  // keep the uncertainty, do not editorialise, and put a non-destructive
+  // check ahead of any re-submit.
   console.warn(
     `${opts.logPrefix} 23505 resolved to the existing strategy [correlation_id=${opts.correlationId}] strategy_id=${existingRow.id}`,
   );
@@ -874,6 +1166,16 @@ async function resolveExistingStrategyOrRefuse(
     ok: true,
     strategyId: existingRow.id,
     status: existingRow.status ?? "pending_review",
+    // 146.1 / A4 — NOT a create. A PRIOR request committed this row; this one
+    // rolled back entirely. The callers skip the metadata UPDATE on the
+    // strength of this field.
+    fresh: false,
+    humanMessage:
+      "An earlier attempt in this wizard session had already saved this " +
+      "strategy, so nothing new was written. We compared the saved track " +
+      "record's row count and its first and last dates against this file — " +
+      "not the individual daily values — so open the strategy to check it " +
+      "holds the numbers you meant to upload.",
   };
 }
 
@@ -1003,11 +1305,27 @@ async function writeFailedStrategyAnalyticsPlaceholder(
     }
   } catch (placeholderThrow) {
     // SEAMRIM-06 — the WHOLE ternary is replaced by one leaf call, not just the
-    // `.message` arm. This is the CSV finalize flow, whose outgoing headers
-    // carry `X-User-Access-Token` (a live end-user Supabase JWT), and
-    // `err.message` is precisely where undici puts them. Scrubbing one arm and
-    // leaving `String(placeholderThrow)` — which renders `name: message` — would
-    // be an instance fix of a two-reference site.
+    // `.message` arm, and `err.message` is precisely where undici inlines
+    // whatever headers it was handed. Scrubbing one arm and leaving
+    // `String(placeholderThrow)` — which renders `name: message` — would be an
+    // instance fix of a two-reference site.
+    //
+    // ⚠️ 146.1 / A3 (2026-08-18) — CORRECTED. This comment used to justify the
+    // scrub by claiming "this is the CSV finalize flow, whose outgoing headers
+    // carry `X-User-Access-Token` (a live end-user Supabase JWT)". That is
+    // FALSE and was already false before this change: this route calls
+    // `postProcessKey` nowhere (zero matches in this file), so it forwards no
+    // user JWT to anything. Since Phase 145 it talks only to PostgREST via the
+    // SSR cookie-session client and, here, the service-role admin client.
+    //
+    // The SCRUB STAYS, and the reason is unchanged in substance: what this
+    // path actually hands out is a service-role `apikey`/`Authorization`
+    // header pair on the admin client, plus a Postgres connection string in
+    // some fault shapes, and undici renders request headers into fetch error
+    // messages the same way regardless of WHICH credential they carry. The
+    // false premise was the naming of the credential, not the need to scrub
+    // it. ⛔ Do not "simplify" the scrub away on the strength of the
+    // correction.
     console.warn(
       `${opts.logPrefix} ${opts.subcontext} strategy_analytics placeholder upsert threw (non-blocking) [correlation_id=${opts.correlationId}]: ${scrubSeamError(placeholderThrow)}`,
     );
@@ -1416,14 +1734,26 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
   }
 
   // CONTRIB-02 (Phase 110) — a contribution finalizes to an owner-only
-  // status='private' (W1 note, 110-01). Since Phase 145 both branches call
-  // the folded RPC directly on the user-scoped client and differ ONLY in
-  // the p_terminal_status they pass; the contribution handler passes
-  // 'private' verbatim (D-08), then runs the IDENTICAL post-finalize
-  // side-effect fan-out (metadata UPDATE + analytics enqueue) — dailies are
-  // canonical, the contribution needs its KPIs.
+  // status='private' (W1 note, 110-01). Since Phase 145 both flows call the
+  // folded RPC directly on the user-scoped client and differ ONLY in the
+  // p_terminal_status they pass; the contribution passes 'private' verbatim
+  // (D-08), then runs the IDENTICAL post-finalize side-effect fan-out
+  // (metadata UPDATE + analytics enqueue) — dailies are canonical, the
+  // contribution needs its KPIs.
+  //
+  // 146.1 / C2 (2026-08-18) — ONE handler serves both flows. `terminalStatus`
+  // and `logPrefix` are the ONLY things that ever differed (measured, not
+  // assumed: a comment-stripped difflib over the two 55-line bodies returned
+  // exactly four differing tokens — the function name, the terminal status,
+  // and the log prefix twice). Passing them as arguments is what makes the
+  // sameness structural instead of a promise two copies were making to each
+  // other.
+  //
+  // ⛔ `terminalStatus` is passed VERBATIM and is never derived from a
+  // default. D-08: losing 'private' here silently promotes an owner-only
+  // draft into the admin publish queue.
   if (entryContext === "contribution") {
-    return await contributionCsvFinalizeHandler({
+    return await unifiedCsvFinalizeHandler({
       wizard_session_id,
       fmt,
       strategy_name: trimmedName,
@@ -1431,6 +1761,8 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
       metadataRaw,
       dailyReturnsSeries,
       correlationId: correlation_id,
+      terminalStatus: "private",
+      logPrefix: "[strategies/csv-finalize contribution]",
     });
   }
 
@@ -1448,11 +1780,13 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
     metadataRaw,
     dailyReturnsSeries,
     correlationId: correlation_id,
+    terminalStatus: "pending_review",
+    logPrefix: "[strategies/csv-finalize unified]",
   });
 });
 
 /**
- * Phase 145 / JOB-06 — the manager-path finalize handler.
+ * Phase 145 / JOB-06 — THE CSV finalize handler. ONE handler, both flows.
  *
  * HISTORY, because the name would otherwise mislead: Phase 19/BACKBONE-01
  * made this handler delegate to the Python `/process-key` unified backbone
@@ -1464,8 +1798,40 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
  * client — the CONTRIB-02 shape, for both paths. Hop 0 is gone, so the
  * "response lost after the RPC committed" window (window A) ceases to
  * exist, and the strategy + verification + dailies writes share ONE
- * transaction. The name is kept because source-shape gates pin the
- * signature (single typed args object, explicit dailyReturnsSeries field).
+ * transaction.
+ *
+ * ⚖️ 146.1 / C2 (2026-08-18) — `contributionCsvFinalizeHandler` WAS A SECOND
+ * COPY OF THIS FUNCTION AND IS GONE. The two bodies were token-identical:
+ * measured with a comment-stripped difflib over both, 55 lines each, and
+ * exactly FOUR differing tokens — the function name, `terminalStatus`
+ * ('pending_review' vs 'private'), and `logPrefix` twice (the fold call and
+ * the enqueue call). Not one statement, argument or ordering differed. Two
+ * copies of a ~90-line side-effect fan-out is a drift generator: every future
+ * fix to one arm is a coin flip on whether the other gets it, and the failure
+ * is silent because both arms keep passing their own tests. The four tokens
+ * are now ARGUMENTS.
+ *
+ * WHAT THE MERGED DOC ABSORBS from the deleted CONTRIB-02 docblock, because
+ * it is still load-bearing:
+ *   - Why a direct RPC is correct here and needs no INTERNAL_API_TOKEN and no
+ *     JWT forwarding to Python: `createClient()` is already user-scoped (the
+ *     SSR cookie session), so the SECURITY DEFINER RPC's
+ *     `auth.uid() = p_user_id` guard is satisfied natively.
+ *   - The fold RAISEs on any `p_terminal_status` outside
+ *     ('pending_review','private') — server-side enforcement of the
+ *     never-published invariant.
+ *   - There is NO publish-review notification on the CSV path to suppress
+ *     (unlike finalize-wizard's founder email); the CSV route never notified.
+ *   - The analytics enqueue is KEPT for a contribution: it is a real track
+ *     record and the allocator needs its daily series + KPIs in the composer.
+ *
+ * ⛔ THE SIGNATURE IS PINNED BY GATES — read before "simplifying" it.
+ * `csv-validate-route.test.ts` Test 8b (source-shape) and Test 8c (arity
+ * lock) require: the name `unifiedCsvFinalizeHandler`, a SINGLE typed args
+ * object (`(args: {`), an explicit `dailyReturnsSeries: CsvDailyReturnRow[]`
+ * field — T-19.1-10, closure capture would make the dependency invisible to
+ * the type system — and a single-object-literal call site. A rename or a
+ * second positional parameter reds all three by name.
  */
 async function unifiedCsvFinalizeHandler(args: {
   wizard_session_id: string;
@@ -1485,13 +1851,29 @@ async function unifiedCsvFinalizeHandler(args: {
   // at the route entry and threaded through both handler paths so every
   // envelope shares a traceable id.
   correlationId: string;
+  // 146.1 / C2 — the two fields that USED to be the difference between two
+  // copies of this function.
+  //
+  // D-08: `terminalStatus` is passed VERBATIM by the caller and is never
+  // defaulted here. The fold RAISEs on anything outside
+  // ('pending_review','private'), but a silent default would still be a
+  // promotion of an owner-only contribution into the admin publish queue,
+  // which is exactly the class A2 refuses one layer down.
+  terminalStatus: "pending_review" | "private";
+  // ⛔ The two literals stay DISTINCT in the emitted output. Deriving this
+  // from `terminalStatus` would work, but operators grep these prefixes and
+  // a collapse that also collapsed the logs would make the two flows
+  // indistinguishable in Vercel exactly when someone is trying to tell them
+  // apart.
+  logPrefix: string;
 }): Promise<NextResponse> {
   // Phase 145 (i-b): the SSR cookie-session client is natively user-scoped,
   // so the SECURITY DEFINER fold's auth.uid() = p_user_id guard is satisfied
   // without any token forwarding — the dance the pre-fold delegate performed
   // existed only because the analytics service's module client is
   // service-role. withAuth has already authenticated the request; an expired
-  // session surfaces as the RPC's own 42501 through the fold-failure arm.
+  // session surfaces as the RPC's own 42501 through the fold-failure arm
+  // (146.1 / A3 classifies it there as an observed rollback).
   const supabase = await createClient();
 
   // ONE write path: strategy + verification + dailies in a single
@@ -1507,10 +1889,10 @@ async function unifiedCsvFinalizeHandler(args: {
       fmt: args.fmt,
       strategyName: args.strategy_name,
       rows: args.dailyReturnsSeries,
-      terminalStatus: "pending_review",
+      terminalStatus: args.terminalStatus,
     },
     {
-      logPrefix: "[strategies/csv-finalize unified]",
+      logPrefix: args.logPrefix,
       correlationId: args.correlationId,
     },
   );
@@ -1521,13 +1903,32 @@ async function unifiedCsvFinalizeHandler(args: {
   // applyCsvMetadataUpdate. Deliberately AFTER the fold/resolve outcome:
   // on the resolve path this is what makes the 409 refusal truthful — the
   // identity checks ran before any metadata write (Phase 145 / D-09, D-11).
-  const metaErrResponse = await applyCsvMetadataUpdate(
-    supabase,
-    outcome.strategyId,
-    args.userId,
-    args.metadataRaw,
-    { correlationId: args.correlationId },
-  );
+  //
+  // 146.1 / A4 (2026-08-18) — AND ONLY ON A FRESH CREATE. Before this, an
+  // ECHOED 23505 outcome ran this UPDATE with THIS request's metadata against
+  // a row a PRIOR request had committed. `buildMetadataUpdatePayload` copies
+  // `asset_class` verbatim, and `asset_class` IS the annualization clock
+  // (sqrt(365) crypto / sqrt(252) traditional, #597 part 2). The stored KPIs
+  // were computed by the worker from the FIRST submission's dailies under the
+  // clock THAT submission declared, so a retry with a flipped picker value
+  // relabelled the row while every persisted Sharpe/Sortino/CAGR kept the old
+  // convention — and for fmt='trades' the enqueue gate below skips the
+  // recompute that might have reconciled them, making the mismatch permanent.
+  //
+  // SKIP, not "re-enqueue after". The enqueue is `after()`-scheduled and
+  // non-blocking, so there is no ordering between it and this UPDATE to rely
+  // on; skipping is both simpler and strictly safer. An echo is the SAME
+  // submission arriving twice — honouring its metadata is honouring a
+  // mutation the user never asked for.
+  const metaErrResponse = outcome.fresh
+    ? await applyCsvMetadataUpdate(
+        supabase,
+        outcome.strategyId,
+        args.userId,
+        args.metadataRaw,
+        { correlationId: args.correlationId },
+      )
+    : null;
   if (metaErrResponse) return metaErrResponse;
 
   // Phase 19.1 / T-19.1-05 / PR #275 + Maintainability W-2: shared
@@ -1536,107 +1937,27 @@ async function unifiedCsvFinalizeHandler(args: {
   // dropped enqueue.
   if (args.dailyReturnsSeries.length > 0) {
     enqueueCsvAnalyticsAfter(outcome.strategyId, args.fmt, {
-      logPrefix: "[strategies/csv-finalize unified]",
+      logPrefix: args.logPrefix,
       correlationId: args.correlationId,
     });
   }
   // API C-1: `ok: true` discriminator on the success envelope. `status` is
-  // the terminal status the fold wrote on a fresh create, or the resolved
-  // row's own status on the 23505 echo path.
+  // the terminal status the fold wrote on a fresh create ('pending_review'
+  // for the manager flow, CONTRIB-02's 'private' for a contribution), or the
+  // resolved row's own status on the 23505 echo path — ECHOED, never
+  // fabricated.
+  //
+  // 146.1 / C1: `human_message` rides ONLY the resolve echo, where it states
+  // the two reads that decided the echo. A fresh create carries no such
+  // field, so this envelope is unchanged for every first submit.
   return NextResponse.json(
     {
       ok: true,
       strategy_id: outcome.strategyId,
       status: outcome.status,
-      correlation_id: args.correlationId,
-    },
-    { status: 200, headers: NO_STORE_HEADERS },
-  );
-}
-
-/**
- * CONTRIB-02 (Phase 110) — contribution CSV finalize. Calls the folded
- * `finalize_csv_strategy_with_returns` RPC on the user-scoped Supabase client
- * with p_terminal_status='private' (the owner-only terminal status, D-08),
- * then runs the SAME post-finalize side-effect fan-out the manager path runs
- * (metadata UPDATE, analytics enqueue). Since Phase 145 (D-06 option i-b)
- * the two handlers share ONE writer — this handler's direct-RPC shape was
- * the existence proof the fold's caller wiring copied — and diverge only in
- * the terminal status they pass.
- *
- * Why a direct RPC call is correct here (and needs no INTERNAL_API_TOKEN /
- * no JWT forwarding to Python): the route's `createClient()` is already
- * user-scoped (the SSR cookie session), so the SECURITY DEFINER RPC's
- * auth.uid() = p_user_id guard is satisfied natively. The fold RAISEs on any
- * p_terminal_status outside ('pending_review','private') — server-side
- * enforcement of the never-published invariant.
- *
- * There is NO publish-review notification on the CSV path to suppress (unlike
- * finalize-wizard's founder email) — the CSV route never notified. The analytics
- * enqueue is KEPT: a contribution is a real track record and the allocator needs
- * its daily series + KPIs in the composer (dailies are canonical).
- */
-async function contributionCsvFinalizeHandler(args: {
-  wizard_session_id: string;
-  fmt: string;
-  strategy_name: string;
-  userId: string;
-  metadataRaw: unknown;
-  dailyReturnsSeries: CsvDailyReturnRow[];
-  correlationId: string;
-}): Promise<NextResponse> {
-  const supabase = await createClient();
-
-  // ONE write path (D-07): the fold writes strategy + verification + dailies
-  // in a single transaction with p_terminal_status='private' passed VERBATIM
-  // (D-08 — losing it would silently promote an owner-only draft into the
-  // admin publish queue). Failure arms (fold-fail 5xx, 23505 resolve,
-  // fail-closed 503) are shared with the manager path so the two cannot
-  // drift.
-  const outcome = await finalizeAtomicOrErrorResponse(
-    supabase,
-    {
-      userId: args.userId,
-      wizardSessionId: args.wizard_session_id,
-      fmt: args.fmt,
-      strategyName: args.strategy_name,
-      rows: args.dailyReturnsSeries,
-      terminalStatus: "private",
-    },
-    {
-      logPrefix: "[strategies/csv-finalize contribution]",
-      correlationId: args.correlationId,
-    },
-  );
-  if (!outcome.ok) return outcome.response;
-
-  // Identical post-finalize fan-out to the manager path (shared helpers, so
-  // the two cannot drift): metadata UPDATE (AFTER the fold/resolve outcome —
-  // Pitfall 6), analytics enqueue.
-  const metaErrResponse = await applyCsvMetadataUpdate(
-    supabase,
-    outcome.strategyId,
-    args.userId,
-    args.metadataRaw,
-    { correlationId: args.correlationId },
-  );
-  if (metaErrResponse) return metaErrResponse;
-
-  if (args.dailyReturnsSeries.length > 0) {
-    enqueueCsvAnalyticsAfter(outcome.strategyId, args.fmt, {
-      logPrefix: "[strategies/csv-finalize contribution]",
-      correlationId: args.correlationId,
-    });
-  }
-
-  return NextResponse.json(
-    {
-      ok: true,
-      strategy_id: outcome.strategyId,
-      // CONTRIB-02 — the ACTUAL terminal status: 'private' on a fresh create,
-      // or the resolved row's own status on the 23505 echo path (echoed, not
-      // fabricated).
-      status: outcome.status,
+      ...(outcome.humanMessage
+        ? { human_message: outcome.humanMessage }
+        : {}),
       correlation_id: args.correlationId,
     },
     { status: 200, headers: NO_STORE_HEADERS },

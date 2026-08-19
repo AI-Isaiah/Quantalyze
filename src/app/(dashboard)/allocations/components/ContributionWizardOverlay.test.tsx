@@ -23,6 +23,7 @@
  *      draft.
  */
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import { flushWizardStateSaves } from "@/lib/wizard/localStorage";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 // mountCount proves `key=` actually tears down + remounts. useRealWizard flips
@@ -202,6 +203,13 @@ beforeEach(async () => {
   // SERVER draft alone. Guarded: the storage implementation differs between
   // the local and CI node versions (`clear` is not always present), and this
   // must not be the thing that reddens.
+  // ⚠️ DRAIN BEFORE CLEARING. Saves are fire-and-forget (`void saveWizardState`)
+  // and, since RT-3, serialized behind an async read + HMAC verify — so a save
+  // started by the PREVIOUS test can settle after this clear and write its
+  // state back into THIS one. That is exactly what reddened TRAP-4 on CI's
+  // Node 22 while passing on Node 25: the test passes alone and fails in file
+  // order, because the straggler lands between the clear and the assertion.
+  await flushWizardStateSaves();
   try {
     window.localStorage?.clear?.();
   } catch {

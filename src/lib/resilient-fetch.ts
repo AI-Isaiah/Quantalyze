@@ -1885,9 +1885,13 @@ function isDeadlineError(err: unknown): boolean {
 /**
  * Outgoing header NAMES whose VALUES are credentials, lower-cased for matching.
  *
- * Hand-typed, and every member is a header this seam actually sends:
+ * Hand-typed. Every member is a header this seam sends or HAS sent — see
+ * the x-user-access-token note below for why a retired one stays:
  *   authorization        `Bearer <INTERNAL_API_TOKEN>` on all three seam paths.
- *   x-user-access-token  a LIVE end-user Supabase JWT.
+ *   x-user-access-token  a LIVE end-user Supabase JWT. ⛔ RETAINED WITH NO
+ *                        CURRENT EMITTER as of Phase 146.1 / B2 (2026-08-18)
+ *                        — see `credentialHeaderValues` below for why
+ *                        removing an emitter-less name re-opens the class.
  *   x-tenant-claim       the signed HMAC claim that SELECTS the rate-limit bucket.
  *   x-service-key        `ANALYTICS_SERVICE_KEY` on the analytics client.
  *   x-internal-token     the same internal token under its other name.
@@ -1917,10 +1921,8 @@ const CREDENTIAL_HEADER_NAMES: readonly string[] = [
  *
  * That was a LIVE leak, not a latent one, and it predates this plan:
  * `strategies/csv-finalize` forwarded that JWT through this exact core from
- * Phase 19.1 until Phase 145 moved finalize off the seam (the derived scrub
- * below stays — any future caller of the kept userAccessToken option is
- * covered). The client's own log site was covered by plan 140.2-08 (it passes
- * `args.userAccessToken` explicitly); THIS site was not, because its enumeration
+ * Phase 19.1 until Phase 145 moved finalize off the seam. The client's own log
+ * site was covered by plan 140.2-08; THIS site was not, because its enumeration
  * was of the CLIENT's sites. Found by execution, not by reading, when 140.3-02
  * drove a token-bearing transport error through the route — recorded in that
  * plan's SUMMARY as a correction to 140.2-08's count.
@@ -1934,8 +1936,38 @@ const CREDENTIAL_HEADER_NAMES: readonly string[] = [
  * TOTAL BY CONSTRUCTION: it feeds a catch block, so every branch returns and
  * nothing propagates. All three `HeadersInit` shapes are handled because the
  * core does not control how a caller spells its headers.
+ *
+ * ⚠️ WHAT THE SEAM CARRIES TODAY (Phase 146.1 / B2, 2026-08-18). NO caller sends
+ * `X-User-Access-Token` any more: `process-key-client`'s `userAccessToken`
+ * option and its conditional header spread are GONE, and so are its two
+ * emitters (`keys/sync`, `verify-strategy`). The only Python reader
+ * (`services/db.py get_user_scoped_supabase`) had zero production callers and a
+ * gate in `analytics-service/tests/test_process_key.py` (the
+ * `not hasattr(..., "get_user_scoped_supabase")` assertion) pins that non-use.
+ * The live
+ * credential headers are now `Authorization`, `X-Tenant-Claim`, `X-Service-Key`
+ * and `X-Internal-Token`.
+ *
+ * ⛔ `x-user-access-token` NEVERTHELESS STAYS IN `CREDENTIAL_HEADER_NAMES`, and
+ * pruning it as "unused" is the mistake this note exists to prevent. The scrub
+ * is DERIVED from the headers the core was actually asked to send, so an entry
+ * with no current emitter costs one array member and covers the next one
+ * automatically; removing it converts a class fix back into an instance fix
+ * that reds nothing on the day it matters.
+ *
+ * ⭐ EXPORTED as of Phase 146.1 / B2, and the reason is the argument above.
+ * `process-key-client`'s OWN transport log site used a caller-DECLARED array
+ * (`[args.userAccessToken]`), so it scrubbed the one credential someone
+ * remembered and shipped `X-Tenant-Claim` — the signed HMAC that SELECTS the
+ * rate-limit bucket — VERBATIM to the Vercel log on every seam transport
+ * failure. That is precisely the "a caller who forgets is silently back to
+ * leaking" failure this function was written to end, and it survived because
+ * the client had no way to REUSE the derivation. Now it does. ⛔ A new seam log
+ * site must call THIS, not hand-type a list.
  */
-function credentialHeaderValues(init: RequestInit | undefined): string[] {
+export function credentialHeaderValues(
+  init: RequestInit | undefined,
+): string[] {
   const values: string[] = [];
   try {
     const headers = init?.headers;
@@ -2513,8 +2545,11 @@ export async function resilientFetch(
       // old behaviour by accident rather than by decision. Across a
       // cross-origin 302 Node strips `Authorization` but forwards
       // `X-Service-Key`, `X-Internal-Token` and `X-User-Access-Token`
-      // VERBATIM — this seam carries all three. It also removes the "up to 20
-      // hops silently consume the budget" problem.
+      // VERBATIM. This seam carries the first two today; it carried the third
+      // until Phase 146.1 / B2 (2026-08-18) removed the forward, and
+      // `redirect: "error"` is why that removal was a reduction rather than a
+      // prerequisite. It also removes the "up to 20 hops silently consume the
+      // budget" problem.
       redirect: "error",
       signal: deadline,
     });
@@ -2546,6 +2581,12 @@ export async function resilientFetch(
     // scrubbed `Authorization` and shipped `X-User-Access-Token` — a LIVE
     // end-user Supabase JWT — verbatim. See `credentialHeaderValues` for the
     // full statement; do not drop the argument to "simplify" the call.
+    //
+    // ⛔ AND DO NOT DROP IT BECAUSE THE JWT IS GONE. Phase 146.1 / B2
+    // (2026-08-18) removed the last `X-User-Access-Token` emitter, but the
+    // argument is `credentialHeaderValues(requestInit)` — DERIVED from whatever
+    // headers THIS request carries — not a hardcoded list of one credential. It
+    // is the mechanism, not the caller, and it must outlive both.
     console.error(
       deadlineExceeded
         ? `[resilient-fetch] ${budgetKey}: deadline exceeded after ${timeoutMs}ms`

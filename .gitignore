@@ -121,3 +121,6 @@ tool-results/
 scripts/audit-close-findings.py
 scripts/extract-fixlist-section.sh
 scripts/mark-reverified-closed.py
+
+# GSD runtime sentinel — machine-written, timestamped, not source
+.gsd/

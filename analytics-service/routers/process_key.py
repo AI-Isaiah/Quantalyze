@@ -434,22 +434,32 @@ def _caller_owns_strategy(
     **Fails closed on a missing/blank user_id.** A row cannot be owned by
     nobody, so "no user_id" is a miss, not a bypass — otherwise the whole gate
     would be opt-out by omission. Every non-teaser production caller forwards
-    ``context.user_id`` (``keys/sync/route.ts:417``,
-    ``finalize-wizard/route.ts:1310``, ``keys/validate-and-encrypt/route.ts:210``;
+    ``context.user_id`` (``keys/sync/route.ts``,
+    ``finalize-wizard/route.ts``, ``keys/validate-and-encrypt/route.ts``;
     csv-finalize left this seam in Phase 145 — the route calls the folded RPC
     directly), and the I-SEC2 warning below already flags the absent case —
     this promotes that warning to a refusal on the one path that then reads
     ANOTHER table by that caller-supplied id.
 
-    Deliberately uses the service-role client: ``X-User-Access-Token`` is
-    still FORWARDED by two Next routes (keys/sync, verify-strategy — v1.19
-    review 2026-08-18) but nothing here READS it: ``get_user_scoped_supabase``
-    (db.py) has had zero callers since Phase 145 deleted the csv-finalize
-    branch that consumed it. No user-scoped (RLS-enforcing) client is
-    therefore constructed on onboard/resync and the ownership predicate has
-    to be an explicit filter. Forwarding on every authenticated flow is a
-    recorded Phase 140.2 obligation; drop-vs-wire is the Phase 146.1
-    adjudication.
+    ⭐ **THIS FILTER IS THE ONLY BELT, PERMANENTLY, AND THAT IS NOW A DECISION
+    RATHER THAN A GAP.** Phase 146.1 / B2 (2026-08-18) settled the drop-vs-wire
+    adjudication in favour of DROPPING: ``X-User-Access-Token`` is no longer
+    forwarded by ANY Next route. It had two emitters (keys/sync,
+    verify-strategy) and zero readers — ``get_user_scoped_supabase`` (db.py)
+    has had no callers since Phase 145 deleted the csv-finalize branch that
+    consumed it, and ``tests/test_process_key.py`` (~:2220) pins that non-use —
+    so a live end-user JWT was crossing a service boundary and being read by
+    nobody. The Phase 140.2 obligation to "forward it on every authenticated
+    flow" is therefore DISCHARGED BY SUBSTITUTION: this explicit filter IS the
+    substitute, already shipped and gated. See
+    ``.planning/phases/140.1-.../140.1-TS-OBLIGATIONS.md`` TS-15 for the dated
+    superseding note and the NOT-TAKEN option (b).
+
+    ⛔ Do not "restore" the forward to make a 42501 go away. Wiring a genuinely
+    user-scoped client is option (b): it needs the non-use gate flipped and an
+    RLS analysis for every read that would newly run as the user rather than
+    ``service_role``. It remains a founder call, which is why
+    ``get_user_scoped_supabase`` was kept rather than deleted.
 
     Not wrapped in try/except on purpose: a lookup failure is a service-side
     fault, and answering 403 to it would blame the caller for our outage. The
@@ -1132,14 +1142,43 @@ async def process_key(
         # API-6 — Phase 17 DESIGN-05 envelope (top-level code/human_message,
         # not nested under `detail`). The wizard's error renderer reads the
         # envelope shape directly off the response body.
+        #
+        # Phase 146.1-07 (C4) — TOMBSTONE MESSAGE, NOT A NEW CODE. The
+        # fall-through above is deliberate, but the sentence a caller reads was
+        # not: "context.strategy_id is required" tells a stale or external CSV
+        # finalize caller to supply a field, when the truth is that this
+        # endpoint stopped being a writer for that flow entirely. Supplying the
+        # field would not help; it would take them down a path that no longer
+        # exists here.
+        #
+        # ⛔ The code stays `MISSING_STRATEGY_ID`. Minting `CSV_FINALIZE_MOVED`
+        # would put a NEW code into the WIZFORM-02 coverage-law population, and
+        # that class is recorded OPEN — server-classified codes still render as
+        # `code: UNKNOWN` at the wizard, so a new code would ship straight into
+        # a known-broken classification path. The option is filed in TODOS.md
+        # gated on WIZFORM-02 closing.
+        #
+        # ⚠️ The DEFAULT sentence below is byte-identical to what every other
+        # caller received before this change. A copy fix that leaks into
+        # unrelated 422s is a regression dressed as copy; both arms are pinned
+        # by tests.
+        if body.flow_type == "csv" and step == "finalize":
+            human_message = (
+                "CSV finalize moved to the Next.js route in migration "
+                "20260819120000 and this service is no longer a writer for "
+                "that flow. Supplying context.strategy_id will not change "
+                "this answer — submit through /api/strategies/csv-finalize."
+            )
+        else:
+            human_message = (
+                "context.strategy_id is required for this flow_type. "
+                "Validate-only flows must set context.step='validate'."
+            )
         return JSONResponse(
             status_code=422,
             content=_envelope_error(
                 "MISSING_STRATEGY_ID",
-                (
-                    "context.strategy_id is required for this flow_type. "
-                    "Validate-only flows must set context.step='validate'."
-                ),
+                human_message,
                 correlation_id,
                 None,
             ),

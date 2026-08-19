@@ -894,9 +894,12 @@ describe("/api/strategies/csv-finalize — strategy_name validation", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     checkLimitMock.mockResolvedValue({ success: true, retryAfter: 0 });
-    // Phase 106 Stage B: the unified path runs the SHARED
-    // persist_csv_daily_returns RPC; default it to success so the success-path
-    // metadata tests reach the UPDATE. Validation (400) tests never hit it.
+    // The unified path runs the SINGLE folded RPC
+    // (`finalize_csv_strategy_with_returns`); default it to success so the
+    // success-path metadata tests reach the UPDATE. Validation (400) tests
+    // never hit it. (Was "Phase 106 Stage B ... the SHARED
+    // persist_csv_daily_returns RPC" — migration 20260819120000:350 DROPped
+    // that function; there is one RPC on this path now, not two.)
     rpcMock.mockResolvedValue({ data: 0, error: null });
   });
 
@@ -1133,10 +1136,14 @@ describe("/api/strategies/csv-finalize — strategy_name validation", () => {
 //   4.  Finite numeric daily_return — NaN / Infinity → 400.
 //   5.  Duplicate-date guard (T-19.1-04, PR #274) — repeated date → 400
 //       BEFORE the persist RPC has a chance to throw 23505.
-//   6.  Legacy path persist — persist_csv_daily_returns RPC called with
-//       the new strategy id + parsed rows.
-//   7.  Persist failure → 500 CSV_PERSIST_FAIL with strategy id in
-//       debug_context.
+//   6.  The FOLD receives the parsed rows as p_rows — strategy row and
+//       dailies land in ONE transaction. (Was: "persist_csv_daily_returns
+//       RPC called with the new strategy id"; migration 20260819120000:350
+//       DROPped that function along with finalize_csv_strategy, and Test 6
+//       has pinned the fold since.)
+//   7.  Fold RPC failure → 500 CSV_FINALIZE_FAIL. (Was CSV_PERSIST_FAIL,
+//       which no test in this file pins — the two-RPC split it named no
+//       longer exists.)
 //   8.  Unified path explicit param — runtime + strict source-shape +
 //       arity-lock checks make closure capture detectable as a
 //       regression (T-19.1-10).
@@ -1401,7 +1408,14 @@ describe("/api/strategies/csv-finalize — daily_returns_series (Phase 19.1)", (
     // commits nothing on failure, so the retry invitation is honest.
     expect(json.human_message).toMatch(/Nothing was saved/);
     expect(json.human_message).toMatch(/support@quantalyze\.com/i);
-    expect(json.debug_context).toMatchObject({ rpc_error_code: "42501" });
+    // 146.1-05 / A3 — a 5-character SQLSTATE means PostgREST returned a BODY:
+    // the fold ran and RAISEd, and with no handler clause the whole
+    // transaction rolled back. This class keeps its claim, and the class is
+    // now named in the envelope so the copy and the diagnosis cannot drift.
+    expect(json.debug_context).toMatchObject({
+      rpc_error_code: "42501",
+      outcome_class: "rolled-back",
+    });
     // No metadata write after a failed fold (Pitfall 6 ordering).
     expect(updateMock).not.toHaveBeenCalled();
     errSpy.mockRestore();
@@ -1985,6 +1999,283 @@ describe("[140.3-G7 / SEAMUX-03] csv-validate — arm-agnostic fences", () => {
       }
     } finally {
       errorSpy.mockRestore();
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 146.1-05 / A3 — THE FOLD-FAILURE ARM SAYS ONLY WHAT IT OBSERVED
+// ---------------------------------------------------------------------------
+
+/**
+ * One arm, three outcome classes, and until 146.1-05 one sentence for all
+ * three: "Nothing was saved — the submission rolled back completely."
+ *
+ * That is an observation, and the route made it in exactly one of the three
+ * cases:
+ *
+ *   CLASS 1 — a SQLSTATE-bearing RPC error. PostgREST returned a body with a
+ *   5-character `code`, so the fold ran and RAISEd; it has no EXCEPTION
+ *   handler clause, so the raise aborts and every write in its single
+ *   transaction rolls back. TRUE. Kept verbatim.
+ *
+ *   CLASS 2 — a TRANSPORT failure. postgrest-js RESOLVES rather than rejects
+ *   on a fetch fault, handing the caller `{ error: { code: "" }, status: 0 }`,
+ *   and `RETRYABLE_METHODS` excludes POST — so the ONE POST we sent may have
+ *   reached PostgREST and committed before the connection died. Unknowable.
+ *
+ *   CLASS 3 — a 2xx whose id did not survive (TS-13). A 2xx from PostgREST
+ *   means the transaction COMMITTED; only the id was lost. "Nothing was
+ *   saved" is not merely unsupported here — it is the wrong way round.
+ *
+ * ⛔ `code: ""` IS FALSY. The single most likely wrong implementation is
+ * `if (error?.code)`, which merges classes 2 and 3 and then answers both with
+ * whichever branch the other one holds. The class-2 fixture below exists to
+ * catch precisely that.
+ *
+ * ⭐ THE CLASS-2/3 ASSERTIONS ARE ON ABSENCE. A presence-only check ("does it
+ * contain the new sentence?") is satisfied by CONCATENATING the new sentence
+ * onto the old over-claiming one — the same satisfiable-by-addition hole as
+ * the `%5000%` substring gate. And class 1 is asserted on PRESENCE, because
+ * "make everything vague" is the failure mode on the other side.
+ *
+ * Precedent: `wizardErrors.ts:1971-1985` (SEAMUX-04) already deleted "your
+ * data is unchanged" from `CSV_SUBMIT_FAILED` for this exact reason. The
+ * route's sentence was the older, unreasoned side of that contradiction.
+ */
+
+/** Claims this arm cannot make when it did not observe the transaction end. */
+const ROLLBACK_CLAIM_PHRASES: RegExp[] = [
+  /nothing was saved/i,
+  /rolled back/i,
+  /\bsafe to try again\b/i,
+];
+
+describe("[146.1-05 / A3] the fold-failure arm's copy is commit-agnostic where the commit is", () => {
+  const A3_SESSION = "00000000-0000-0000-0000-0000000000a3";
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    checkLimitMock.mockResolvedValue({ success: true, retryAfter: 0 });
+    process.env.INTERNAL_API_TOKEN = "test-token";
+    adminRpcMock.mockResolvedValue({ data: null, error: null });
+    adminUpsertMock.mockReturnValue({ error: null });
+    adminSelectMaybeSingleMock.mockResolvedValue({ data: null, error: null });
+    sentryState.captured.length = 0;
+    STATE.runAfterCallback = false;
+    STATE.afterPromise = undefined;
+  });
+
+  /** Drive the fold to an ARBITRARY resolved shape and POST one submission. */
+  async function postFold(
+    result: { data: unknown; error: { code?: string; message?: string } | null },
+    name: string,
+  ) {
+    rpcMock.mockImplementation(async (fn: string) => {
+      if (fn === "finalize_csv_strategy_with_returns") return result;
+      return { data: null, error: null };
+    });
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { POST } = await import("@/app/api/strategies/csv-finalize/route");
+    const res = await POST(
+      makeJsonRequest({
+        wizard_session_id: A3_SESSION,
+        fmt: "daily_returns",
+        strategy_name: name,
+        daily_returns_series: [{ date: "2024-01-01", daily_return: 0.01 }],
+        metadata: { description: "a3 oracle marker" },
+      }),
+    );
+    const json = await res.json();
+    errSpy.mockRestore();
+    return { res, json };
+  }
+
+  /**
+   * The EXACT shape postgrest-js resolves with on a transport fault
+   * (PostgrestBuilder.ts:443-454). The empty-string `code` is the whole point.
+   */
+  const TRANSPORT_FAULT = {
+    data: null,
+    error: {
+      code: "",
+      message: "FetchError: request to http://db/rest/v1/rpc failed, reason: socket hang up",
+    },
+  };
+
+  it("CLASS 1 (PRESENCE): a 5-char SQLSTATE keeps the rollback claim VERBATIM", async () => {
+    // The other-side failure mode. Without this arm, "make every class vague"
+    // ships green — and the one case where the database DID tell us it rolled
+    // back is the one case the user can act on with confidence.
+    const { res, json } = await postFold(
+      { data: null, error: { code: "22023", message: "p_rows must not be empty" } },
+      "A3 class 1",
+    );
+
+    expect(res.status).toBe(500);
+    expect(json.code).toBe("CSV_FINALIZE_FAIL");
+    expect(json.human_message).toBe(
+      "Your strategy could not be saved. Nothing was saved — the submission rolled back completely, so it is safe to try again. Contact support@quantalyze.com if it persists.",
+    );
+    expect(json.debug_context).toMatchObject({
+      rpc_error_code: "22023",
+      outcome_class: "rolled-back",
+    });
+  });
+
+  it("RED CLASS 2 (ABSENCE): a TRANSPORT failure claims no rollback — the POST never retried, so the commit is unknowable", async () => {
+    const { res, json } = await postFold(TRANSPORT_FAULT, "A3 class 2");
+
+    expect(res.status).toBe(500);
+    expect(json.code).toBe("CSV_FINALIZE_FAIL");
+    const msg = String(json.human_message ?? "");
+    for (const phrase of ROLLBACK_CLAIM_PHRASES) {
+      expect(
+        msg,
+        `the envelope asserts ${phrase} after a TRANSPORT failure. ` +
+          "postgrest-js resolves rather than rejects on a fetch fault, and " +
+          "RETRYABLE_METHODS excludes POST — so exactly one POST was sent and " +
+          "it may have reached PostgREST and committed before the connection " +
+          "died. The server did not observe a rollback; it observed that it " +
+          "stopped being able to see.",
+      ).not.toMatch(phrase);
+    }
+    // And it says something USEFUL instead — the non-destructive check first.
+    expect(msg).toMatch(/could not confirm/i);
+    expect(msg).toMatch(/another tab/i);
+    expect(json.debug_context).toMatchObject({
+      rpc_error_code: "",
+      outcome_class: "transport-unknown",
+    });
+  });
+
+  it("RED CLASS 3 (ABSENCE): a 2xx with a lost id claims no rollback — a 2xx means it COMMITTED", async () => {
+    const { res, json } = await postFold(
+      { data: "not-a-uuid", error: null },
+      "A3 class 3",
+    );
+
+    expect(res.status).toBe(500);
+    const msg = String(json.human_message ?? "");
+    for (const phrase of ROLLBACK_CLAIM_PHRASES) {
+      expect(
+        msg,
+        `the envelope asserts ${phrase} after a 2xx from PostgREST. A 2xx ` +
+          "means the transaction COMMITTED and only the strategy id failed to " +
+          "reach us — the claim is not merely unsupported here, it is the " +
+          "wrong way round, and it steers the user away from the strategy " +
+          "they now own.",
+      ).not.toMatch(phrase);
+    }
+    expect(msg).toMatch(/could not confirm/i);
+    expect(json.debug_context).toMatchObject({
+      rpc_error_code: null,
+      outcome_class: "committed-lost-id",
+    });
+  });
+
+  it("RED TRUTHINESS TRAP: class 2 is NOT answered with class 1's copy — `code: \"\"` is falsy", async () => {
+    // This is the same fixture as class 2, asserted from the other side: an
+    // `if (error?.code)` discriminator sends the empty-string code down the
+    // no-error branch, which is class 3's. Both would then be commit-agnostic
+    // and this file would pass — so the discriminating assertion is that the
+    // two classes are told APART in debug_context and in the Sentry extra.
+    const { json } = await postFold(TRANSPORT_FAULT, "A3 truthiness");
+
+    expect(
+      json.debug_context?.outcome_class,
+      "a transport failure was classified as a lost-id 2xx — the " +
+        "discriminator collapsed on the empty-string SQLSTATE, which is the " +
+        "single most likely wrong implementation of this branch",
+    ).toBe("transport-unknown");
+  });
+
+  it("RED A PostgREST-LEVEL code (non-empty, NOT 5 chars) is commit-agnostic, not a rollback claim", async () => {
+    // ⭐ THE FIXTURE THAT DISCRIMINATES THE LENGTH CHECK FROM TRUTHINESS.
+    //
+    // The class-2 fixture alone does NOT: this arm's second branch tests
+    // `error` PRESENCE, not `error.code`, so swapping the length check for
+    // `error?.code` still routes the empty-string code to `transport-unknown`.
+    // Measured, not assumed — the A3-TRUTHY neuter ran GREEN against the
+    // class-2 fixture and this case was added because of it.
+    //
+    // A NON-EMPTY, NON-5-CHARACTER code is the arrival that tells the two
+    // implementations apart. PostgREST emits its OWN codes — `PGRST301`
+    // (expired JWT), `PGRST116`, `PGRST002` — and they are not SQLSTATEs: they
+    // mean PostgREST itself refused or failed, so we have NOT been told the
+    // fold ran and raised. Under truthiness they would be answered "nothing
+    // was saved — the submission rolled back completely", which is the same
+    // fabricated observation A3 exists to delete. Only a length test says
+    // "PostgREST handed us a SQLSTATE" rather than "PostgREST handed us
+    // something".
+    const { json } = await postFold(
+      {
+        data: null,
+        error: { code: "PGRST301", message: "JWT expired" },
+      },
+      "A3 pgrst code",
+    );
+
+    const msg = String(json.human_message ?? "");
+    for (const phrase of ROLLBACK_CLAIM_PHRASES) {
+      expect(
+        msg,
+        `the envelope asserts ${phrase} for a PostgREST-level code. ` +
+          "`PGRST301` is not a SQLSTATE — it means PostgREST refused or " +
+          "failed, not that the fold ran and raised, so the transaction's " +
+          "fate was never reported to us.",
+      ).not.toMatch(phrase);
+    }
+    expect(
+      json.debug_context?.outcome_class,
+      "a non-SQLSTATE code was classified as an observed rollback — the " +
+        "discriminator is testing whether a code EXISTS instead of whether " +
+        "it is a SQLSTATE",
+    ).toBe("transport-unknown");
+  });
+
+  it("the two commit-agnostic classes carry their OWN Sentry step tag", async () => {
+    // Merged into `finalize-fold-fail`, the honest arm's firing rate is
+    // unmeasurable and nobody can tell a real transport problem from the
+    // deferred 42501 question.
+    await postFold(TRANSPORT_FAULT, "A3 sentry tag");
+    await vi.waitFor(() =>
+      expect(sentryState.captured.length).toBeGreaterThan(0),
+    );
+    const steps = sentryState.captured.map((c) => c.options.tags?.step);
+    expect(steps).toContain("finalize-fold-outcome-unknown");
+    expect(steps).not.toContain("finalize-fold-fail");
+  });
+
+  it("class 1 KEEPS the original Sentry step tag — the existing bucket does not move", async () => {
+    await postFold(
+      { data: null, error: { code: "42501", message: "not accessible" } },
+      "A3 sentry tag class 1",
+    );
+    await vi.waitFor(() =>
+      expect(sentryState.captured.length).toBeGreaterThan(0),
+    );
+    const steps = sentryState.captured.map((c) => c.options.tags?.step);
+    expect(steps).toContain("finalize-fold-fail");
+  });
+
+  it("ALL THREE classes keep one code, 500, no-store and zero metadata writes", async () => {
+    // The envelope invariants are shared. A copy branch must not become a
+    // status branch, a code branch, or a caching change — and a failed fold
+    // must still write nothing (Pitfall 6 ordering).
+    for (const [label, result] of [
+      ["class 1", { data: null, error: { code: "22023", message: "x" } }],
+      ["class 2", TRANSPORT_FAULT],
+      ["class 3", { data: null, error: null }],
+    ] as const) {
+      updateMock.mockClear();
+      const { res, json } = await postFold(result, `A3 invariants ${label}`);
+      expect(res.status, label).toBe(500);
+      expect(json.code, label).toBe("CSV_FINALIZE_FAIL");
+      expect(json.ok, label).toBe(false);
+      expect(res.headers.get("cache-control"), label).toContain("no-store");
+      expect(typeof json.correlation_id, label).toBe("string");
+      expect(updateMock, label).not.toHaveBeenCalled();
     }
   });
 });

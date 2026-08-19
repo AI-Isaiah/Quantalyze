@@ -497,6 +497,7 @@ re-rank this from prospective hardening to a live cleanup. Measure before scopin
   env vars.** ⛔ Not here: `20260620120000:86-89` RAISEs at apply time if that row reads `off`, so
   a careless cleanup can redden a future migration apply. → TODOS, with that constraint attached.
 - **Forwarding `X-User-Access-Token` on onboard/resync** so a user-scoped pre-check is possible
+  ⛔ RESOLVED 2026-08-18 by Phase 146.1 / B2, in the opposite direction: the forward was REMOVED rather than extended (zero readers on the far side). See 140.1-TS-OBLIGATIONS.md TS-15.
   there too — a standing 140.x obligation
   (`140.1-TS-OBLIGATIONS.md:251`), not this phase's business.
 </deferred>

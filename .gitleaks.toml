@@ -24,6 +24,12 @@ description = "Known test fixtures and placeholder env samples"
 #
 # - .env.example: documented placeholder values only (your-anon-key,
 #   your-service-role-key, etc.). Contributors need this file.
+# - src/app/api/verify-strategy/route.seam.test.ts: the seam breaker suite's
+#   RAW_API_KEY fixture ("AK_LIVE_..."), a synthetic exchange key used to
+#   assert that scrubSeamError REDACTS per-request secrets from undici error
+#   messages. 146.1 / B2 promoted it from carried-in-fixture to ASSERTED when
+#   the live user JWT stopped being forwarded, so it must stay key-SHAPED to
+#   be falsifiable. The identical fixture in route.test.ts is already covered.
 # - src/lib/admin/pii-scrub.test.ts: unit test for the PII scrubber;
 #   contains a canonical JWT fixture
 #   (eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NSJ9.SflKxwRJSMe...) used to
@@ -77,6 +83,7 @@ paths = [
   '''(^|/)package-lock\.json$''',
   '''(^|/)\.planning/''',
   '''(^|/)src/app/api/webhooks/resend/route\.test\.ts$''',
+  '''(^|/)src/app/api/verify-strategy/route\.seam\.test\.ts$''',
   '''(^|/)analytics-service/tests/cassettes/''',
   # fix-list.md was historically copied to the repo root by audit-fix
   # automation. It contains audit prose describing high-entropy
