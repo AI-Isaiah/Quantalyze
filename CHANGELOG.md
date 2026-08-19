@@ -1,5 +1,96 @@
 # Changelog
 
+## [0.67.0.0] - 2026-08-19
+### fix: v1.19 xhigh review close-out — Phase 146.1 lands the remaining 13 findings (#692)
+
+The eleven findings Phase 146.1 was created to hold, plus two more surfaced while executing
+it. Shipped across 8 plans / 6 waves.
+
+**User-facing / data-integrity**
+
+- **A2 — cross-flow echo.** The 23505 resolve arm never compared the committed row's
+  terminal status to the request's, so a contribution committed as `private` could be echoed
+  back as success into the manager flow and **never enter the admin review queue**. Now
+  refuses, naming the flow rather than the filename.
+- **A3 — dishonest failure copy.** "Nothing was saved — the submission rolled back
+  completely" was asserted for transport failures (postgrest *resolves* rather than rejects
+  and never retries POSTs, so the commit is **unknowable**) and for the lost-id 2xx, where it
+  provably **committed**. Now scoped to the one class that can earn it; the rest get
+  commit-agnostic copy leading with the non-destructive check.
+- **A4 — echo-path metadata.** Echoed retries overwrote committed metadata while
+  `fmt='trades'` skipped re-enqueue, leaving stored KPIs on the old √252-vs-√365 clock while
+  the row claimed the new asset class.
+- **A1 — fold input guards** (migration `20260819130000`). NULL/empty `p_rows`,
+  NaN/±Inf/out-of-range values, far-future dates, duplicate dates. Boundary hardening on the
+  direct-RPC path, not a live break: the route path already 400s these.
+
+**Structural**
+
+- **B1 — rate-limit bypass by omission.** RATE-03's declared goal ("a new route cannot
+  silently bypass") was not actually enforced — every gate was self-referential over routes
+  that *had* decorated. The new gate derives the population from the app's own route table
+  and compares it to a quarantine roster **by set equality**, so an undecorated route reddens
+  CI by name.
+- **B2 — live user JWT removed from the wire.** `keys/sync` and `verify-strategy` forwarded
+  an end-user Supabase JWT into a service whose only reader has had **zero callers since
+  Phase 145**. Sent on every resync, read by nobody. Removed, with an invariant pinning an
+  EMPTY emitter roster by equality, and the Phase 140.2 obligation retired in the same commit.
+- **B3** — 23505 is now discriminated by constraint name, so a duplicate-date payload no
+  longer gets "try again shortly" for a permanent defect.
+- **B4 — terminalizer × sweep** (migration `20260819130500`). The review's *proposed* fix
+  would have reddened shipped gates C2/C3, whose reason is that re-enqueueing a settled
+  permanent failure creates an hourly retry loop with no attempt ceiling. Uses the narrow
+  `orphaned_running_reaped:%` marker instead, INSERT-only, with a must-heal arm forming a
+  discriminating pair. Preventive: **PROD population measured ZERO**.
+- **B5** — the live-DB rpc suite no longer calls the DROPped parent; its 12 CI unit tests are
+  preserved and the guard cases re-homed to SQL.
+
+**Also in this release**
+
+- **The rate-limit coverage gate was passing vacuously in CI.** `fastapi>=0.139` defers
+  `include_router`: `app.routes` holds an opaque `_IncludedRouter` placeholder per include, so
+  a flat `isinstance(r, APIRoute)` scan saw **1 route of 20**. Enumeration now goes through
+  `iter_route_contexts`, the flattener FastAPI's own OpenAPI generator uses. A local
+  interpreter behind the pin flattens eagerly and hid this — the anti-vacuity fence is what
+  caught it.
+- **A wizard test raced its own storage writes** under CI's Node 22: a fire-and-forget save
+  from one test landed after the next test cleared storage. Fixed at the cause with an
+  explicit flush rather than a timing tweak.
+
+⚠️ **TWO migrations applied to the database at merge**: `20260819130000` (A1 fold input
+guards) and `20260819130500` (B4 readmit sweep). Both rehearsed on TEST with every guard
+verified behaviourally before landing.
+
+## [0.66.0.1] - 2026-08-18
+### fix: v1.19 xhigh review — the easy batch (4 findings) (#691)
+
+A founder-directed xhigh code review of the whole v1.19 milestone (PRs #687–#690) returned
+**15 verified findings** across 10 finder angles. This is the batch that was cheap to close;
+Phase 146.1 (0.67.0.0 above) holds the rest.
+
+**What ships**
+
+- **Dead retry fence deleted** (`CsvSubmitStep.tsx`). The guard sat inside a branch gated on
+  a code list that does not contain it, and no emitter exists anywhere in the repo — the
+  condition was provably always true. Its "regression test" re-implemented the predicate
+  locally and never imported the component, so deleting the fence could not fail it. Both
+  deleted.
+- **Terminalizer window invariant added.** The 4h window was derived from
+  `p_batch_size × max(TIMEOUT_PER_KIND)` **in prose only**. Raising any timeout past 48 min
+  would have made the terminalizer mark a *healthy* worker's batch-tail job `failed_final`
+  mid-run — outside `CLAIMABLE_STATUSES`, so the in-flight run could never complete — while
+  the SQL gate, TS gate and migration self-verify all stayed green on the string literal. The
+  new gate computes the ceiling from live constants; RED observed at a simulated 5h ceiling.
+- **Three false comments corrected.** All claimed no production caller forwards
+  `X-User-Access-Token` since Phase 145, while two routes still did. (B2 above removed the
+  forwarding itself.)
+- **Fold self-verify check (d) de-vacuumed.** `NOT LIKE '%5000%'` is satisfied by a widened
+  `50000` literal and by a deleted guard whose comment still says 5000. Replaced with a
+  comment-stripped bounded regex, proven against the deployed TEST body.
+
+No new migration in this release. Deliberate invariant-11 exception: it edits the
+already-applied `20260819120000`, which is therefore not re-applied at merge.
+
 ## [0.66.0.0] - 2026-08-18
 ### feat: v1.19 RATE — every seam route is rate-limited, both stacks agree on the 429 contract (closes RATE-01..05)
 
