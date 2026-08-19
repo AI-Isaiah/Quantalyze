@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { CsvSubmitStep } from "./CsvSubmitStep";
 import type { MetadataDraft } from "./MetadataStep";
 
@@ -270,5 +270,181 @@ describe("CsvSubmitStep — #597 part 2 asset_class forwarding", () => {
     const [, init] = fetchSpy.mock.calls[0] as [string, RequestInit];
     const body = JSON.parse(init.body as string) as { entry_context?: string };
     expect(body.entry_context).toBe("contribution");
+  });
+});
+
+/**
+ * 146.2-07 / R6 — THE ECHO SENTENCE MUST REACH THE HUMAN IT WAS WRITTEN FOR.
+ *
+ * 146.1 / C1 attached `human_message` to the 23505 resolve echo: the founder-
+ * chosen honesty sentence that states WHAT WAS COMPARED (row count, first and
+ * last dates) and what was NOT (the individual daily values), and instructs the
+ * user to open the strategy and check. The server said it. The client read
+ * `human_message` on `!res.ok` ONLY — a 200 with `ok: true` went straight to
+ * `onSubmitted`, which `WizardClient` hooks to `clearWizardState()` +
+ * `router.push('/strategies')`. The sentence was computed, put on the wire, and
+ * rendered NOWHERE. A mitigation nobody can read is not a mitigation.
+ *
+ * The two cases below are a pair on purpose: the echo case proves the sentence
+ * arrives, and the FRESH case proves the new branch cannot leak into the
+ * first-submit flow (which must stay byte-identical — it carries no
+ * `human_message`, so it must still auto-continue).
+ *
+ * ── HAND-TYPED WIRE FIXTURES (independent oracles, never imported) ───────────
+ * Both sentences below are re-typed from
+ * `src/app/api/strategies/csv-finalize/route.ts` at HEAD and re-verified
+ * 2026-08-19 (post-146.2-01). They are hand-typed rather than imported for the
+ * reason `CsvSubmitStep.upstream-arm.test.tsx:44-45` gives: the assertion and
+ * the implementation must be independent oracles. The provenance claim is a
+ * CLAIM — W1 in this same plan exists because two constants carried that label
+ * after the sentences they named had been re-cut, so if you move a route
+ * sentence, move these WITH it and re-date this comment.
+ */
+
+/**
+ * `csv-finalize/route.ts` — `resolveExistingCsvStrategy`'s default
+ * `humanMessage` (the no-op / no-fill echo), verbatim, verified 2026-08-19.
+ */
+const ROUTE_ECHO_SENTENCE =
+  "An earlier attempt in this wizard session had already saved this " +
+  "strategy, so nothing new was written. We compared the saved track " +
+  "record's row count and its first and last dates against this file — " +
+  "not the individual daily values — so open the strategy to check it " +
+  "holds the numbers you meant to upload.";
+
+/**
+ * `csv-finalize/route.ts` — `CLASSIFICATION_CONFLICT_MESSAGE`, the arm-specific
+ * 409 sentence 146.2-01 added to the REFUSE arm, verbatim, verified 2026-08-19.
+ */
+const ROUTE_CLASSIFICATION_CONFLICT =
+  "This wizard session already created a strategy with a different " +
+  "classification, so we refused before writing anything of this submission. " +
+  "Open the strategy you already started, or start a new strategy to upload " +
+  "this file with the classification you want.";
+
+const ECHOED_ID = "33333333-3333-4333-8333-333333333333";
+
+function jsonResponse(body: unknown, status: number) {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { "Content-Type": "application/json" },
+  });
+}
+
+function mountAndSubmit(onSubmitted: (id: string) => void) {
+  render(
+    <CsvSubmitStep
+      wizardSessionId="22222222-2222-2222-2222-222222222222"
+      fmt="daily_returns"
+      strategyName="echo path"
+      preview={PREVIEW}
+      dailyReturnsSeries={SERIES}
+      metadata={META}
+      onSubmitted={onSubmitted}
+      onBack={() => {}}
+    />,
+  );
+  fireEvent.click(screen.getByTestId("wizard-csv-submit-cta"));
+}
+
+describe("CsvSubmitStep — 146.2-07 / R6 the echo sentence renders", () => {
+  let fetchSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    fetchSpy = vi.spyOn(globalThis, "fetch");
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    cleanup();
+  });
+
+  it("⭐ ECHO: a 200 ok:true carrying human_message RENDERS the sentence and does NOT navigate", async () => {
+    fetchSpy.mockResolvedValue(
+      jsonResponse(
+        {
+          ok: true,
+          strategy_id: ECHOED_ID,
+          status: "pending_review",
+          human_message: ROUTE_ECHO_SENTENCE,
+          correlation_id: "wizard:12121212-3434-4545-8656-767676767676",
+        },
+        200,
+      ),
+    );
+    const onSubmitted = vi.fn();
+    mountAndSubmit(onSubmitted);
+
+    // The sentence itself, verbatim off the wire — no client editorialising.
+    await screen.findByTestId("wizard-csv-echo-notice");
+    expect(screen.getByText(ROUTE_ECHO_SENTENCE)).toBeInTheDocument();
+
+    // …and the user is still HERE to read it. Auto-navigating would defeat the
+    // sentence's own instruction ("open the strategy to check it holds the
+    // numbers you meant to upload") by tearing the wizard down first.
+    expect(
+      onSubmitted,
+      "the step navigated away on the very response whose copy asks the user " +
+        "to stop and check — the sentence is spoken and never heard",
+    ).not.toHaveBeenCalled();
+
+    // ANTI-VACUITY: the assertion above passes trivially on a component that
+    // stopped submitting at all. Continue must still complete the flow, once,
+    // with the ECHOED id (not a fabricated one).
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    fireEvent.click(screen.getByTestId("wizard-csv-echo-continue"));
+    expect(onSubmitted).toHaveBeenCalledTimes(1);
+    expect(onSubmitted).toHaveBeenCalledWith(ECHOED_ID);
+  });
+
+  it("CONTROL: a FRESH 200 (no human_message) auto-continues, exactly as before", async () => {
+    fetchSpy.mockResolvedValue(
+      jsonResponse(
+        {
+          ok: true,
+          strategy_id: ECHOED_ID,
+          status: "pending_review",
+          correlation_id: null,
+        },
+        200,
+      ),
+    );
+    const onSubmitted = vi.fn();
+    mountAndSubmit(onSubmitted);
+
+    await waitFor(() => expect(onSubmitted).toHaveBeenCalledWith(ECHOED_ID));
+    expect(
+      screen.queryByTestId("wizard-csv-echo-notice"),
+      "the echo branch leaked into the first-submit flow — a user who has " +
+        "just created a strategy was told an earlier attempt had saved it",
+    ).toBeNull();
+  });
+
+  it("⭐ REFUSE (146.2-01): the 409 classification-conflict sentence reaches the user and the step stays put", async () => {
+    // 146.2-01 gave `refuse()` an arm-specific sentence. That envelope is
+    // `ok: false` + `CSV_SESSION_REUSED`, so it lands on the ROUTE-VOCABULARY
+    // branch and renders through the CSV panel — a user who is refused is told
+    // why AND what to do next. Pinned here because the arm is new: nothing else
+    // in this suite proves the plan-01 sentence survives the client.
+    fetchSpy.mockResolvedValue(
+      jsonResponse(
+        {
+          ok: false,
+          code: "CSV_SESSION_REUSED",
+          human_message: ROUTE_CLASSIFICATION_CONFLICT,
+          debug_context: { strategy_id: ECHOED_ID },
+          correlation_id: null,
+        },
+        409,
+      ),
+    );
+    const onSubmitted = vi.fn();
+    mountAndSubmit(onSubmitted);
+
+    await screen.findByTestId("wizard-csv-error");
+    expect(screen.getByText(ROUTE_CLASSIFICATION_CONFLICT)).toBeInTheDocument();
+    expect(onSubmitted).not.toHaveBeenCalled();
+    // A refusal is not a success: the echo notice must NOT appear beside it.
+    expect(screen.queryByTestId("wizard-csv-echo-notice")).toBeNull();
   });
 });

@@ -202,6 +202,24 @@ export function CsvSubmitStep({
    * the wire names none — `—` was half of DEF-140.4-C.
    */
   const [correlationId] = useState<string>(() => getWizardCorrelationId());
+  /**
+   * 146.2-07 / R6 — THE ECHO NOTICE. A THIRD piece of state, and deliberately
+   * not a widening of either envelope above: this is not an error. The submit
+   * SUCCEEDED; what the server has to add is that the strategy was already
+   * saved by an earlier attempt and that its own comparison was partial.
+   * Folding it into `envelope` would render it through `CsvValidationEnvelope`
+   * — a `role="alert"` negative-tinted panel — and tell a user whose data is
+   * safe that something failed.
+   *
+   * Non-null ⇒ the step HOLDS: `onSubmitted` (which `WizardClient` hooks to
+   * `clearWizardState()` + `router.push('/strategies')`) is deferred to an
+   * explicit Continue. Auto-navigating would tear the wizard down mid-sentence,
+   * on the one response whose copy asks the user to stop and check.
+   */
+  const [echoNotice, setEchoNotice] = useState<{
+    message: string;
+    strategyId: string;
+  } | null>(null);
 
   /** The ONE writer for the CSV panel; it clears the shared one. */
   const showCsvEnvelope = useCallback(
@@ -238,6 +256,9 @@ export function CsvSubmitStep({
     // Clears BOTH panels, so a wait advertised by the previous response cannot
     // survive into this attempt (TRAP-3).
     showCsvEnvelope(null);
+    // 146.2-07 — and the echo notice, for the same reason: a sentence about a
+    // PREVIOUS response must never stand beside this attempt's outcome.
+    setEchoNotice(null);
     setSubmitting(true);
 
     try {
@@ -421,10 +442,52 @@ export function CsvSubmitStep({
         return;
       }
 
+      // Fires on BOTH arms below, at RESPONSE time. Step 3 completed either
+      // way — only the navigation defers — so gating this on the notice would
+      // silently drop a completion event for every echoed submit.
       trackForQuantsEventClient("wizard_step_complete_3", {
         wizard_session_id: wizardSessionId,
         strategy_id: data.strategy_id,
       });
+
+      // ⭐ 146.2-07 / R6 — THE ECHO DISCRIMINATOR.
+      //
+      // 146.1 / C1 attached `human_message` to the 23505 resolve echo: the
+      // sentence that states WHAT the route compared (the saved track record's
+      // row count and its first and last dates) and what it did NOT (the
+      // individual daily values), then instructs the user to open the strategy
+      // and check. Until now this client read `human_message` on `!res.ok`
+      // ONLY, so the sentence was computed, serialised, sent — and rendered
+      // nowhere. A mitigation the user cannot read is not a mitigation.
+      //
+      // THE DISCRIMINATOR IS THE BODY, NOT THE STATUS. Control reaches here
+      // only on a success (every error arm returned above), so re-testing
+      // `res.ok` would buy nothing and would EXCLUDE the legacy 409-with-
+      // ok:true idempotent shape — also a success, and a success that carries
+      // a sentence must show it. `ok === true` plus a non-empty
+      // `human_message` is exactly the echo: `route.ts` spreads that field in
+      // only when `resolveExistingCsvStrategy` supplies it, so a fresh create
+      // carries no such key and falls through to the unchanged auto-continue.
+      //
+      // The sentence renders VERBATIM. The register it is written in
+      // (SEAMUX-04: state the fact, keep the uncertainty, do not editorialise)
+      // lives server-side; re-voicing it here would fork the copy.
+      if (
+        data.ok === true &&
+        typeof data.human_message === "string" &&
+        data.human_message.trim().length > 0
+      ) {
+        setEchoNotice({
+          message: data.human_message,
+          strategyId: data.strategy_id,
+        });
+        // Not a disabled "Submitting…" button: the submit is DONE. The CTA is
+        // swapped for Continue below, so no dead control is left on screen
+        // (v1.11 UAT direction — no disabled buttons).
+        setSubmitting(false);
+        return;
+      }
+
       onSubmitted(data.strategy_id);
     } catch (err) {
       // 140.5-05 / TRAP-1, as a PROPERTY: a caught transport error must not be
@@ -512,6 +575,43 @@ export function CsvSubmitStep({
         </div>
       )}
 
+      {/* ⭐ 146.2-07 / R6 — the echo notice. DESIGN.md contract, stated:
+          • NOT the error envelope. `ErrorEnvelope`'s authoring rule ("every
+            error path MUST call buildEnvelope") governs ERROR paths; this is a
+            200. Its shell is `role="alert"` + `border-negative/30
+            bg-negative/5`, and red is reserved for "permanent / negative only"
+            — the strategy IS saved, so red would be a false statement.
+          • AMBER, per the semantic-color gates as widened 2026-07-02
+            ("transient/recoverable states — whether the system or a disclosed
+            one-click user action performs the recovery"). The outstanding
+            uncertainty here is resolved by exactly such a disclosed user
+            action: open the strategy and check the numbers. Muted would say
+            "nothing to flag", which is false; red would say "broken", which is
+            also false.
+          • Shell verbatim from the nearest existing pattern — the two wizard
+            warning strips (`WizardIpAllowlistHint`, `WithdrawalWarningStrip`)
+            and `/security`'s banner all use `rounded-md border
+            border-warning/30 bg-warning/5 px-4 py-3`. No left stripe (the
+            colored-left-border card is an AI-Slop Ban row), no icon, no
+            client-authored heading.
+          • `role="status"` + `aria-live="polite"` — DESIGN-05's a11y minimum
+            for a NON-BLOCKING state change (`role="alert"` is reserved for
+            blocking errors). The sentence is announced without stealing focus.
+          • Body in `text-text-primary`, not the strips' `text-text-secondary`:
+            this is the response's primary content and the a11y floor should
+            not rest on the tinted fill (DESIGN.md measures amber-700 at 4.56:1
+            on `bg-warning/5`; near-black clears it with room). */}
+      {echoNotice && (
+        <div
+          role="status"
+          aria-live="polite"
+          data-testid="wizard-csv-echo-notice"
+          className="mt-4 rounded-md border border-warning/30 bg-warning/5 px-4 py-3"
+        >
+          <p className="text-body text-text-primary">{echoNotice.message}</p>
+        </div>
+      )}
+
       <div className="mt-6 flex gap-3">
         <Button
           variant="secondary"
@@ -521,15 +621,30 @@ export function CsvSubmitStep({
         >
           Back
         </Button>
-        <Button
-          onClick={handleSubmit}
-          disabled={submitting}
-          data-testid="wizard-csv-submit-cta"
-        >
-          {submitting
-            ? headings.submittingCtaLabel
-            : headings.submitCtaLabel}
-        </Button>
+        {echoNotice ? (
+          /* The submit already succeeded, so the submit CTA is RETIRED rather
+             than left live beside a sentence saying the strategy is saved —
+             two contradictory affordances, and the primary of the pair would
+             invite a resubmit that can only echo again. Continue is the single
+             forward action and completes the flow the response arrived on. */
+          <Button
+            type="button"
+            onClick={() => onSubmitted(echoNotice.strategyId)}
+            data-testid="wizard-csv-echo-continue"
+          >
+            Continue
+          </Button>
+        ) : (
+          <Button
+            onClick={handleSubmit}
+            disabled={submitting}
+            data-testid="wizard-csv-submit-cta"
+          >
+            {submitting
+              ? headings.submittingCtaLabel
+              : headings.submitCtaLabel}
+          </Button>
+        )}
       </div>
     </section>
   );
