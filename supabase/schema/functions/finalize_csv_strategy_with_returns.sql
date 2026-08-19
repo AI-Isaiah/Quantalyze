@@ -2,7 +2,7 @@
 -- Canonical current body of this function, replayed from supabase/migrations/**.
 -- Regenerate with `npm run schema:functions`. See tech-debt #2.
 
--- source migration: 20260819130000_csv_finalize_fold_input_guards.sql
+-- source migration: 20260819151000_csv_finalize_fold_guard1_null_safe.sql
 -- ==========================================================================
 -- STEP 1 — the replaced function (CREATE OR REPLACE; the function is NOT
 --          dropped, so its ACLs and its OID survive)
@@ -26,9 +26,21 @@ DECLARE
 BEGIN
   -- GUARD 1 — CONTRIB-02 guard (T-110-02, D-08): restrict the terminal status;
   -- 'published' is unreachable from any finalize caller. FIRST statement so it
-  -- RAISEs before any write (parent: 20260819120000:225-231, verbatim).
+  -- RAISEs before any write (parent: 20260819120000:225-231).
   -- Gated behaviorally by test_csv_finalize_atomic_fold.sql Part 3d.
-  IF p_terminal_status NOT IN ('pending_review', 'private') THEN
+  --
+  -- CHANGED here (146.2 review R5) to be NULL-explicit, in the SAME shape
+  -- GUARD 4 and GUARD 5 already use. p_terminal_status NOT IN (...) evaluates
+  -- to NULL for a NULL argument and plpgsql takes the ELSE branch on a NULL IF
+  -- condition, so a NULL terminal status used to walk past this whitelist
+  -- entirely — and past everything else, because nothing below refuses it
+  -- either. It surfaced as a 23502 NOT NULL violation from strategies.status:
+  -- an error naming a COLUMN rather than the offending input, and one the
+  -- route's classifier has no arm for, while the COMMENT ERRCODE map below
+  -- promised 22023 for an invalid terminal status. The message literal, its
+  -- argument and ERRCODE '22023' are UNCHANGED so no existing gate anchor
+  -- moves; a NULL renders as <NULL> in the "% is not allowed" slot.
+  IF p_terminal_status IS NULL OR p_terminal_status NOT IN ('pending_review', 'private') THEN
     RAISE EXCEPTION 'finalize_csv_strategy_with_returns: p_terminal_status % is not allowed (expected pending_review or private)',
       p_terminal_status
       USING ERRCODE = '22023';
