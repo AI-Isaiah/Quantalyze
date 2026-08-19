@@ -109,6 +109,19 @@ def _reset_limiter_buckets() -> Any:
 _PROBE_SRC = r"""
 import json, sys
 from fastapi.routing import APIRoute
+
+# ⚠️ IMPORT THE ROUTERS FIRST, THEN `main`. If `main` is imported first and any
+# router module participates in an import cycle back to `main`, that module is
+# still PARTIALLY INITIALISED when `main` reaches its `include_router` calls:
+# its `router` object exists but its `@router.post` decorators have not run yet,
+# so `include_router` copies ZERO routes. The module then finishes and looks
+# complete to any later reader — which is why CI's diagnostics showed every
+# router carrying its full route count while `main.app` held only `/health`.
+# Importing the leaves first means every decorator has run before `main` asks.
+import routers.cron, routers.exchange, routers.match, routers.portfolio  # noqa: F401,E401
+import routers.optimizer, routers.simulator, routers.internal, routers.csv  # noqa: F401,E401
+import routers.process_key, routers.debug_key_flow  # noqa: F401,E401
+
 import main
 from services import rate_limit as rl
 
@@ -126,6 +139,18 @@ diag = {
     "cwd": os.getcwd(),
     "main_file": getattr(main, "__file__", None),
     "sys_path_head": sys.path[:3],
+    # What the app ACTUALLY holds, by class name and path. If the count is right
+    # but `derived` is short, the isinstance filter is the thing that is wrong
+    # (two fastapi copies, or a custom route_class), not the registration.
+    "app_route_classes": sorted(
+        {type(r).__name__ for r in main.app.routes}
+    ),
+    "app_route_total": len(main.app.routes),
+    "app_route_paths": sorted(
+        getattr(r, "path", "?") for r in main.app.routes
+    )[:30],
+    "apiroute_module": APIRoute.__module__,
+    "fastapi_file": __import__("fastapi").__file__,
 }
 try:
     import routers as _routers_pkg
