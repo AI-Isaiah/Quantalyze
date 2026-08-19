@@ -57,10 +57,29 @@ vi.mock("@/lib/ratelimit", () => ({
 
 const USER_ID = "00000000-0000-0000-0000-000000000abc";
 const EXISTING_ID = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+/** 146.2-01 / R1 — a discovery category. A UUID because `parseCsvMetadata`
+ * accepts `category_id` only when `isUuid()` passes; any other string is
+ * silently dropped, which would make the REQUEST side absent instead of
+ * present and quietly defuse the arms below. */
+const CATEGORY_ID = "cccccccc-cccc-cccc-cccc-cccccccccccc";
+/** A DIFFERENT category — the conflict arm's "present and different" value. */
+const OTHER_CATEGORY_ID = "dddddddd-dddd-dddd-dddd-dddddddddddd";
 
-/** The resolve arm's strategies re-fetch: row + error + recorded filters. */
+/** The resolve arm's strategies re-fetch: row + error + recorded filters.
+ *
+ * 146.2-01 / R1 — the row shape now carries the two CLASSIFICATION columns the
+ * resolve arm reads. They are OPTIONAL on purpose: a fixture that omits them
+ * models an ABSENT reading (the column did not come back), which is a different
+ * fact from `category_id: null` (the column came back and holds SQL NULL). Only
+ * the arms that need one of those two facts declare them. */
 const resolveFetch = vi.hoisted(() => ({
-  row: null as { id: string; name?: string; status?: string } | null,
+  row: null as {
+    id: string;
+    name?: string;
+    status?: string;
+    category_id?: string | null;
+    asset_class?: string;
+  } | null,
   error: null as { code?: string; message?: string } | null,
   /** Every eq-filter set the arm re-fetched with, so C-08 scope is assertable. */
   filters: [] as Array<Record<string, unknown>>,
@@ -77,6 +96,22 @@ const seriesProbe = vi.hoisted(() => ({
   error: null as { code?: string; message?: string } | null,
   /** Every ordered read the route made ('asc' | 'desc'), so coverage of both
    * boundary reads is assertable. */
+  reads: [] as string[],
+}));
+
+/**
+ * 146.2-01 / R1 — the CLOCK-SAFETY GUARD's read of `strategy_analytics`.
+ *
+ * The guard fires only on an EMPTY-series (fmt='trades') echo, where no
+ * recompute is enqueued and so nothing would reconcile a moved annualization
+ * clock. `row: null` is the DEFAULT and it is a MEASURED absence — the read
+ * happened and returned no row — which is why every pre-existing arm in this
+ * file is untouched by the branch's arrival.
+ */
+const analyticsProbe = vi.hoisted(() => ({
+  row: null as Record<string, unknown> | null,
+  error: null as { code?: string; message?: string } | null,
+  /** Every strategy_id the guard read with, so "the read happened" is assertable. */
   reads: [] as string[],
 }));
 
@@ -124,6 +159,20 @@ vi.mock("@/lib/supabase/server", () => ({
             },
           };
           return chain;
+        }
+        if (table === "strategy_analytics") {
+          // 146.2-01 / R1 — the clock-safety guard's read:
+          // .select(<the 7 ranked KPI columns>).eq(strategy_id).maybeSingle().
+          // Without this branch the guard would fall into the series-probe
+          // shape below, whose table assertion would fail it.
+          return {
+            eq: (_col: string, val: string) => ({
+              maybeSingle: async () => {
+                analyticsProbe.reads.push(val);
+                return { data: analyticsProbe.row, error: analyticsProbe.error };
+              },
+            }),
+          };
         }
         // The CR-01 series-equality check (READ) against committed dailies:
         // .select("date", {count}).eq(strategy_id).order(date, asc).limit(1)
@@ -281,6 +330,9 @@ beforeEach(() => {
   seriesProbe.maxDate = null;
   seriesProbe.error = null;
   seriesProbe.reads.length = 0;
+  analyticsProbe.row = null;
+  analyticsProbe.error = null;
+  analyticsProbe.reads.length = 0;
   updateCalls.length = 0;
   afterCallbacks.length = 0;
   // `vi.clearAllMocks()` above strips the implementation, and the enqueue
@@ -307,7 +359,15 @@ afterEach(() => {
 });
 
 /** Drive the fold into its 23505 arm with a resolvable committed row. */
-function arm23505(row: { id: string; name?: string; status?: string } | null) {
+function arm23505(
+  row: {
+    id: string;
+    name?: string;
+    status?: string;
+    category_id?: string | null;
+    asset_class?: string;
+  } | null,
+) {
   rpcMock.mockImplementation(async (name: string) => {
     if (name === "finalize_csv_strategy_with_returns") {
       return { data: null, error: DUP_KEY_ERROR };
@@ -1112,11 +1172,32 @@ describe("[146.1-05 / A4] the metadata UPDATE belongs to the create, never to it
     expect(updateCalls[0].payload).toMatchObject({ asset_class: "crypto" });
   });
 
-  it("RED an ECHO issues NO metadata UPDATE at all", async () => {
-    arm23505({ id: EXISTING_ID, name: "Alpha", status: "pending_review" });
+  it("RED an echo against a CLASSIFIED row issues NO metadata UPDATE", async () => {
+    // 146.2-01 / R1 NARROWED THIS ARM. It used to pin `updateCalls == []` for
+    // EVERY echo, which did not merely miss R1 — it ASSERTED it: a row
+    // committed with no classification at all could never receive one, so a
+    // crypto track record stayed on the sqrt(252) column default forever. The
+    // rule A4 actually needs is about a row that ALREADY carries the user's
+    // classification: re-applying this request's metadata there would honour a
+    // mutation the user never asked for.
+    //
+    // `category_id` is the never-classified discriminator (the fixture declares
+    // a real UUID here, and the request sends the SAME one — `parseCsvMetadata`
+    // drops a non-UUID category_id, which would make the request side absent
+    // rather than matching).
+    arm23505({
+      id: EXISTING_ID,
+      name: "Alpha",
+      status: "pending_review",
+      category_id: CATEGORY_ID,
+      asset_class: "crypto",
+    });
     armCommitted2024();
 
-    const res = await postWithMetadata(SERIES_2024, { asset_class: "crypto" });
+    const res = await postWithMetadata(SERIES_2024, {
+      asset_class: "crypto",
+      category_id: CATEGORY_ID,
+    });
 
     expect(res.status).toBe(200);
     const body = await res.json();
@@ -1175,5 +1256,261 @@ describe("[146.1-05 / A4] the metadata UPDATE belongs to the create, never to it
       "A4 skipped the enqueue along with the UPDATE — an echo whose first " +
         "attempt lost its enqueue now never computes",
     ).toContain("enqueue_compute_job");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 146.2-01 / R1 — THE ECHO PATH MUST NOT SILENTLY DROP THE CLASSIFICATION
+// ---------------------------------------------------------------------------
+
+/**
+ * The recovery A3's own copy instructs ("submit the same file again — an
+ * unchanged resubmit from this wizard resolves to the strategy you already
+ * started") lands on the 23505 resolve arm. When the FIRST attempt committed
+ * the row but died before the metadata UPDATE, that row carries NO
+ * classification at all — and A4's echo gate skipped the UPDATE, so the user's
+ * choice was dropped for good: `asset_class` stayed at the column default
+ * ('traditional' ⇒ sqrt(252)) while the file was a crypto track record, and
+ * `category_id` stayed NULL so the row never entered discovery. There is no
+ * post-creation editor for either field, so the user cannot repair it.
+ *
+ * ⭐ THE DISCRIMINATOR IS `category_id IS NULL`, NEVER `asset_class`.
+ * `strategies.asset_class` is `NOT NULL DEFAULT 'traditional'`
+ * (20260709130000:26-27), so on that column "never classified" and "the user
+ * chose traditional" are the SAME stored value — filling there would overwrite
+ * a legitimate choice, which is precisely what the ECONOMIC ORACLE above
+ * forbids. `category_id` has no default and the fold's INSERT never writes it,
+ * while `applyCsvMetadataUpdate` writes BOTH fields in one atomic UPDATE — so a
+ * committed NULL is observable proof that UPDATE never ran.
+ *
+ * ⭐ THE CLOCK-SAFETY GUARD (the empty-series arms). Filling `asset_class` MOVES
+ * the annualization clock. On a series-bearing echo that is safe because the
+ * enqueue still fires after the awaited UPDATE, so the stored KPIs recompute
+ * under the filled clock. On an fmt='trades' echo NO recompute is scheduled
+ * (the enqueue is gated on `dailyReturnsSeries.length > 0`), so the route must
+ * MEASURE — on this request, against this strategy — whether stored KPIs
+ * already exist, and refuse if they do. The measured columns are exactly the
+ * seven `PERCENTILE_ANALYTICS_COLUMNS` that rankings fold (queries.ts:126-127).
+ * A refusal writes NOTHING: a `category_id`-only partial fill would promote the
+ * row into discovery and make KPIs computed under a DIFFERENT clock reachable
+ * in listings and percentile ranks.
+ */
+
+/** POST an fmt='trades' submission — the format that produces NO series, and
+ * therefore the echo on which no recompute will follow the clock. */
+function postTradesWithMetadata(metadata: Record<string, unknown>) {
+  return POST(
+    new NextRequest("http://localhost:3000/api/strategies/csv-finalize", {
+      method: "POST",
+      body: JSON.stringify({
+        wizard_session_id: SESSION,
+        fmt: "trades",
+        strategy_name: "Alpha",
+        daily_returns_series: [],
+        metadata,
+      }),
+      headers: {
+        "Content-Type": "application/json",
+        Origin: "http://localhost:3000",
+      },
+    }),
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  ) as any;
+}
+
+/** The measured PROD shape of the historical failed-with-KPIs class: 7 of the
+ * 22 csv strategies with zero dailies carry a non-null `sharpe` AND `cagr` on a
+ * `computation_status='failed'` analytics row, computed 2026-05-27 under
+ * sqrt(252). Their KPIs are read UNGATED by the discovery listing
+ * (StrategyTable.tsx:1091) and folded into percentile ranks
+ * (getPercentiles, queries.ts). */
+const PROD_FAILED_WITH_KPIS = {
+  cagr: 0.32,
+  sharpe: 1.41,
+  sortino: null,
+  calmar: null,
+  max_drawdown: null,
+  volatility: null,
+  cumulative_return: null,
+  computation_status: "failed",
+};
+
+describe("[146.2-01 / R1] an echo FILLS an absent classification and REFUSES a conflicting one", () => {
+  it("RED FILL: an echo against a row committed with NO classification lands this request's clock", async () => {
+    // The R1 chain: the fold committed, the connection died before the metadata
+    // UPDATE, and the user did what the failure copy told them to do.
+    // `category_id: null` is the proof that UPDATE never ran; `asset_class`
+    // reads the column DEFAULT, which is not a user choice.
+    arm23505({
+      id: EXISTING_ID,
+      name: "Alpha",
+      status: "pending_review",
+      category_id: null,
+      asset_class: "traditional",
+    });
+    armCommitted2024();
+
+    const res = await postWithMetadata(SERIES_2024, {
+      asset_class: "crypto",
+      category_id: CATEGORY_ID,
+    });
+    await flushAfter();
+
+    expect(res.status).toBe(200);
+    expect(
+      updateCalls,
+      "the recovery resubmit dropped the user's classification — the crypto " +
+        "track record keeps the 'traditional' column default, so its KPIs are " +
+        "annualized sqrt(252) and published as 'Verified', with no editor " +
+        "anywhere in the product that could repair it",
+    ).toHaveLength(1);
+    expect(updateCalls[0].payload).toMatchObject({
+      asset_class: "crypto",
+      category_id: CATEGORY_ID,
+    });
+    // THE ECONOMIC PAIR: the clock lands AND the recompute rides it. A FILL
+    // without the enqueue would relabel the row as crypto while every stored
+    // Sharpe/Sortino/CAGR kept the sqrt(252) convention.
+    expect(
+      enqueuedRpcNames(),
+      "the clock moved but nothing recomputes the KPIs under it — the same " +
+        "mismatch the ECONOMIC ORACLE forbids, arrived at from the other side",
+    ).toContain("enqueue_compute_job");
+  });
+
+  it("RED REFUSE: an echo whose classification CONFLICTS with the committed one is a 409 with zero writes", async () => {
+    // The committed row IS classified, and differently. This is not a dropped
+    // classification to repair — it is a mutation, and the stored KPIs were
+    // computed under the committed clock.
+    arm23505({
+      id: EXISTING_ID,
+      name: "Alpha",
+      status: "pending_review",
+      category_id: OTHER_CATEGORY_ID,
+      asset_class: "traditional",
+    });
+    armCommitted2024();
+
+    const res = await postWithMetadata(SERIES_2024, {
+      asset_class: "crypto",
+      category_id: CATEGORY_ID,
+    });
+
+    expect(res.status).toBe(409);
+    const body = await res.json();
+    expect(body.ok).toBe(false);
+    expect(body.code).toBe("CSV_SESSION_REUSED");
+    expect(
+      updateCalls,
+      "a conflicting resubmit rewrote the committed row's classification — " +
+        "the 409's 'we refused before writing anything' copy would be a lie",
+    ).toEqual([]);
+    // SEAMUX-04: the sentence must describe THIS refusal. The default 409
+    // sentence talks about "a different track record", which is not what
+    // happened here — the file is identical, the CLASSIFICATION is not.
+    expect(typeof body.human_message).toBe("string");
+    expect(
+      String(body.human_message).toLowerCase(),
+      "the refusal reused the different-track-record sentence for a " +
+        "classification conflict — the user is told the wrong thing about " +
+        "their own submission",
+    ).toContain("classification");
+  });
+
+  it("RED TRADES FILL (KPIs measured ABSENT): an empty-series echo fills both fields and enqueues nothing", async () => {
+    // fmt='trades' produces no series, so no recompute follows this echo. The
+    // guard READ the strategy's analytics row on THIS request and found none —
+    // a MEASURED absence, not an assumed one. Nothing exists that the missing
+    // recompute could leave stale, so the FILL is clock-safe.
+    arm23505({
+      id: EXISTING_ID,
+      name: "Alpha",
+      status: "pending_review",
+      category_id: null,
+      asset_class: "traditional",
+    });
+
+    const res = await postTradesWithMetadata({
+      asset_class: "crypto",
+      category_id: CATEGORY_ID,
+    });
+    await flushAfter();
+
+    expect(res.status).toBe(200);
+    expect(
+      updateCalls,
+      "the trades recovery resubmit dropped the classification — same R1 " +
+        "defect, on the one fmt where no recompute would ever have healed it",
+    ).toHaveLength(1);
+    expect(updateCalls[0].payload).toMatchObject({
+      asset_class: "crypto",
+      category_id: CATEGORY_ID,
+    });
+    expect(
+      enqueuedRpcNames(),
+      "an empty-series submission scheduled a compute job — there are no " +
+        "dailies for it to read",
+    ).not.toContain("enqueue_compute_job");
+    expect(
+      analyticsProbe.reads,
+      "the FILL happened without the guard ever reading strategy_analytics — " +
+        "clock safety was assumed rather than measured",
+    ).toEqual([EXISTING_ID]);
+  });
+
+  it("RED TRADES REFUSE (KPIs measured PRESENT): stored KPIs on an empty-series echo refuse 409 and write nothing", async () => {
+    // The historical PROD class: a zero-dailies strategy whose failed analytics
+    // row nonetheless carries a sharpe and a cagr computed under sqrt(252).
+    // FILLing here would move the clock with no recompute AND promote the row
+    // into discovery, where those stale numbers are read ungated.
+    arm23505({
+      id: EXISTING_ID,
+      name: "Alpha",
+      status: "pending_review",
+      category_id: null,
+      asset_class: "traditional",
+    });
+    analyticsProbe.row = { ...PROD_FAILED_WITH_KPIS };
+
+    const res = await postTradesWithMetadata({
+      asset_class: "crypto",
+      category_id: CATEGORY_ID,
+    });
+    await flushAfter();
+
+    expect(res.status).toBe(409);
+    const body = await res.json();
+    expect(body.ok).toBe(false);
+    expect(body.code).toBe("CSV_SESSION_REUSED");
+    expect(
+      updateCalls,
+      "the clock moved over stored KPIs that nothing will recompute, AND the " +
+        "category_id write promoted the row into discovery — a Sharpe " +
+        "computed on 252 now ranks in the listings under a crypto label",
+    ).toEqual([]);
+    expect(enqueuedRpcNames()).toEqual([]);
+    expect(typeof body.human_message).toBe("string");
+  });
+
+  it("RED A2 RESIDUAL: a committed row whose status did not come back fails closed instead of echoing 'pending_review'", async () => {
+    // The arm's own comment says "reporting a status we did not read would be
+    // fabricating an observation" — while `?? "pending_review"` did exactly
+    // that. A contribution ('private') could be reported as being in the admin
+    // review queue on the strength of a fallback nobody measured.
+    arm23505({ id: EXISTING_ID, name: "Alpha" });
+    armCommitted2024();
+
+    const res = await postWithMetadata(SERIES_2024, { asset_class: "crypto" });
+
+    expect(res.status).toBe(503);
+    const body = await res.json();
+    expect(body.ok).toBe(false);
+    expect(body.code).toBe("CSV_PERSIST_FAIL");
+    expect(
+      JSON.stringify(body),
+      "the echo reported a terminal status it never read — the fabricated " +
+        "'pending_review' is indistinguishable from a measured one",
+    ).not.toContain("pending_review");
+    expect(updateCalls).toEqual([]);
   });
 });
