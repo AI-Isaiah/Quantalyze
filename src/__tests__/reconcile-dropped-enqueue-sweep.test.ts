@@ -5,8 +5,11 @@ import { describe, it, expect } from "vitest";
 // JOB-04 / Phase 143 — migration-content gate for the dropped-enqueue
 // reconciliation sweep. Originally pointed at
 // supabase/migrations/20260816140000_...; RE-POINTED 2026-08-18 (B4, Phase
-// 146.1) at supabase/migrations/20260819130500_..., which re-registers the same
-// cron jobname at the same cadence with ONE conjunct changed.
+// 146.1) at 20260819130500_..., and again 2026-08-19 (R3, Phase 146.2) at
+// supabase/migrations/20260819150000_..., each of which re-registers the same
+// cron jobname at the same cadence with ONE conjunct changed or added. The
+// current one ADDS the readmit ATTEMPT CEILING that bounds the readmission path
+// B4 opened.
 //
 // THE HOLE THIS GUARDS. POST /api/strategies/csv-finalize runs the finalize
 // write SYNCHRONOUSLY in the request and commits it (since Phase 145 as ONE
@@ -60,20 +63,21 @@ import { describe, it, expect } from "vitest";
 
 const REPO_ROOT = join(__dirname, "..", "..");
 const MIGRATIONS_DIR = join(REPO_ROOT, "supabase", "migrations");
-// ⚠️ P-7 POINTER, MOVED 2026-08-18 (B4, Phase 146.1) FROM 20260816140000.
+// ⚠️ P-7 POINTER, MOVED 2026-08-19 (R3, Phase 146.2) FROM 20260819130500, which
+// had itself moved it 2026-08-18 FROM 20260816140000.
 // These constants are a HAND-MAINTAINED pointer at whichever migration REGISTERS
-// the currently-running cron body. Migration 20260819130500 re-registers the
-// same jobname at the same cadence with one conjunct changed (the
-// terminalizer-marker exemption), so the body 20260816140000 registered is no
-// longer what pg_cron runs. Leaving the pointer behind would make every
-// assertion in this file guard a SUPERSEDED body while staying green —
-// structurally the same defect D-19 fixed one layer down. The forward-drift
-// sweep at the bottom of this file is the backstop that makes such a violation
-// visible, and it fired on exactly this change. The sibling pointer
+// the currently-running cron body. Migration 20260819150000 re-registers the
+// same jobname at the same cadence with one conjunct ADDED (the readmit ATTEMPT
+// CEILING), so the body 20260819130500 registered is no longer what pg_cron
+// runs. Leaving the pointer behind would make every assertion in this file guard
+// a SUPERSEDED body while staying green — structurally the same defect D-19
+// fixed one layer down. The forward-drift sweep at the bottom of this file is
+// the backstop that makes such a violation visible, and it has now fired on two
+// consecutive re-registrations. The sibling pointer
 // analytics-service/tests/test_main_worker.py::_SWEEP_MIGRATION_NAME moves in
 // the SAME commit.
-const FIX_TS = "20260819130500";
-const FIX_FILENAME = `${FIX_TS}_reconcile_sweep_readmit_terminalized_orphans.sql`;
+const FIX_TS = "20260819150000";
+const FIX_FILENAME = `${FIX_TS}_reconcile_sweep_readmit_attempt_ceiling.sql`;
 const FIX_PATH = join(MIGRATIONS_DIR, FIX_FILENAME);
 
 // ORACLE INDEPENDENCE. Every literal below is declared LOCALLY and names its
@@ -196,23 +200,29 @@ describe("JOB-04 dropped-enqueue reconciliation sweep migration content gate", (
     // migration's STEP 2 self-verify and
     // supabase/tests/test_reconcile_dropped_enqueue_sweep.sql Part 1) move in
     // the SAME commit.
-    // ⚠️ B4 (Phase 146.1) did NOT move this count. The terminalizer-marker
-    // exemption adds a PREDICATE inside the existing NOT EXISTS subquery, not a
-    // second table reference — so the conjunct still names the table once and
-    // the INSERT target still names it once. COUNTED in the drafted body, not
-    // assumed. If a future edit does move it, this count and its two SQL
-    // siblings move in the SAME commit.
+    // ⚠️ B4 (Phase 146.1) did NOT move this count — its exemption added a
+    // PREDICATE inside the existing NOT EXISTS subquery, not a second table
+    // reference. R3 (Phase 146.2, migration 20260819150000) DOES move it, from
+    // 2 to 3: the readmit attempt ceiling is a NEW scalar subquery over the
+    // same table. COUNTED in the drafted body, not assumed, and this count
+    // moved together with its two SQL siblings (that migration's STEP 2 and
+    // supabase/tests/test_reconcile_dropped_enqueue_sweep.sql Part 1) in the
+    // SAME commit.
     const jobRefs = [...body.matchAll(/public\.compute_jobs/gi)].length;
     expect(
       jobRefs,
-      `the body names public.compute_jobs ${jobRefs} time(s), expected 2 (the ` +
+      `the body names public.compute_jobs ${jobRefs} time(s), expected 3 (the ` +
         `zero-jobs NOT EXISTS conjunct — which since B4 carries the ` +
-        `terminalizer-marker exemption inside it — plus the INSERT target). ` +
-        `One means the zero-jobs conjunct is GONE and the INSERT target alone ` +
-        `is satisfying this gate — the sweep would re-enqueue every strategy ` +
-        `holding a healthy in-flight chain, a running derive_broker_dailies ` +
-        `mid-chain most of all. Zero means the sweep no longer writes at all.`,
-    ).toBe(2);
+        `terminalizer-marker exemption inside it — plus the R3 readmit-ceiling ` +
+        `subquery, plus the INSERT target). Two means ONE of the two ` +
+        `predicates is gone: without the zero-jobs conjunct the sweep ` +
+        `re-enqueues every strategy holding a healthy in-flight chain, a ` +
+        `running derive_broker_dailies mid-chain most of all; without the ` +
+        `ceiling subquery a strategy whose input reliably kills its worker ` +
+        `rides the reap-readmit cycle forever. One means only the INSERT ` +
+        `target survives and is satisfying this gate by itself. Zero means the ` +
+        `sweep no longer writes at all.`,
+    ).toBe(3);
     expect(
       body,
       "the body does not reference public.strategy_analytics. That conjunct is " +
@@ -270,16 +280,48 @@ describe("JOB-04 dropped-enqueue reconciliation sweep migration content gate", (
     const body = cronBody(readFileSync(FIX_PATH, "utf8"));
     const code = body.replace(/--[^\n]*/g, "");
 
+    // ⚠️ EXPECTED COUNT MOVED FROM 1 TO 2 (R3, Phase 146.2): the B4 exemption
+    // plus the R3 readmit ceiling, both keyed on the same fixed audit literal.
     const markerRefs = [...code.matchAll(/orphaned_running_reaped/gi)].length;
     expect(
       markerRefs,
       `the body carries Phase 144's terminalizer audit marker ${markerRefs} ` +
-        `time(s) in EXECUTABLE code, expected exactly 1. Zero means the ` +
-        `exemption is gone and a chain-mid orphan the terminalizer reaped for ` +
-        `its AUDIT TRAIL once again excludes its own strategy from this sweep ` +
-        `forever — dailies present, no analytics, recovered by nobody and with ` +
-        `no user surface once the wizard's 15-minute amber backstop has passed.`,
-    ).toBe(1);
+        `time(s) in EXECUTABLE code, expected exactly 2 (the B4 readmit ` +
+        `exemption + the R3 attempt ceiling). One means one of the pair is ` +
+        `gone. Without the exemption, a chain-mid orphan the terminalizer ` +
+        `reaped for its AUDIT TRAIL once again excludes its own strategy from ` +
+        `this sweep forever — dailies present, no analytics, recovered by ` +
+        `nobody and with no user surface once the wizard's 15-minute amber ` +
+        `backstop has passed. Without the ceiling those readmissions are ` +
+        `unbounded. Zero means both are gone.`,
+    ).toBe(2);
+
+    // ⭐ R3 — THE READMIT ATTEMPT CEILING, the third text sibling (with the
+    // migration's own STEP 2 and the .sql gate's Part 1). Body-scoped and
+    // comment-stripped, so the neuter "delete the clause, keep its comment"
+    // REDs here. Two assertions, because either alone is weak: the LITERAL
+    // alone would pass a body counting the wrong rows, and the SHAPE alone
+    // would pass a widened bound. MEASURED 2026-08-19 on a throwaway
+    // postgres:16 — the '< 30' body and the comment-only body both RED against
+    // the migration's STEP 2. Behavioural counterparts: .sql arms C5 / C5b.
+    expect(
+      code,
+      "the body carries no word-bounded readmit ceiling of < 3. Either the " +
+        "bound is gone — a strategy whose input reliably kills its worker then " +
+        "rides the reap-readmit cycle forever at one worker slot every ~5 " +
+        "hours, the unbounded retry loop B4's own header names three times as " +
+        "the mode it must not cause — or it was widened to a value that merely " +
+        "STARTS with 3, or relaxed to <= 3, buying cycles nobody ratified.",
+    ).toMatch(/<\s*3(?![0-9])/);
+    expect(
+      code,
+      "the body does not compare a COUNT OF TERMINALIZER-MARKED ROWS against " +
+        "the ceiling. The bound is only meaningful if it counts the attempt " +
+        "signal itself — the marker rows, the one thing that rises by exactly " +
+        "one per reap-readmit cycle (144 terminalizes IN PLACE, this sweep " +
+        "INSERTs anew). Counting all compute_jobs rows instead would exclude " +
+        "healthy strategies that merely have history.",
+    ).toMatch(/count\(\*\)[^;]*orphaned_running_reaped[^;]*<\s*3(?![0-9])/i);
 
     expect(
       code,
