@@ -3108,3 +3108,25 @@ below were re-verified against HEAD on 2026-08-19 before being written down.*
   the next credential added to a `/process-key` body is not added blind. **Fix direction:** widen
   the derived secret set to include body values of known credential-shaped keys, or assert at the
   seam that no credential-shaped key appears in the body.
+
+- [ ] **`csv-finalize/route.ts:733` — `createAdminClient()` is evaluated on the request path,
+  outside the fire-and-forget guard, immediately after an irreversible commit** (found
+  2026-08-19 by the Phase 146.2 code review, WR-01; non-blocking per the stopping rule —
+  it needs a MISCONFIGURED environment to fire, and production is configured).
+  `logAuditEventAsUser(createAdminClient(), …)` evaluates its first argument **before** the
+  call, so it sits outside `logAuditEventAsUser`'s own `try` (`src/lib/audit.ts:922-930`).
+  `createAdminClient` throws synchronously when `NEXT_PUBLIC_SUPABASE_URL` or
+  `SUPABASE_SERVICE_ROLE_KEY` is unset (`src/lib/supabase/admin.ts:14-16`), and `withAuth`
+  has no `try`/`catch` anywhere — so the throw escapes to Next as an opaque 500 with no
+  `code` and no `human_message`, **on the branch where the fold has already committed**.
+  The site's own docblock three lines above (`route.ts:725-728`) states the opposite
+  contract: "a failed emission … must NOT change this response".
+  ⚠️ **Class instance, not a novel pattern**: the call shape matches
+  `preferences/route.ts:221` and `account/deletion-request/route.ts:141`. csv-finalize is
+  the highest-stakes member because the throw lands after a committed track record.
+  The two pre-existing admin usages in this same file are both inside `after()` epilogues
+  wrapped in try/catch (`route.ts:1583-1585`, `:1699-1701`) — this is the first on the
+  request path. Recovery exists (the resubmit takes the 23505 arm, which never reaches this
+  line), so the defect is the **false failure report**, not permanent loss.
+  **Fix:** wrap the `createAdminClient()` evaluation in its own try/catch that logs +
+  captures and does not rethrow — and close the CLASS, not just this site.
