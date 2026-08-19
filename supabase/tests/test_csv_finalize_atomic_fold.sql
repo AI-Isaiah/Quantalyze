@@ -111,14 +111,15 @@
 -- ==========================================================================
 DO $$
 DECLARE
-  v_cnt    INT;
-  v_secdef BOOLEAN;
-  v_nargs  INT;
-  v_fn_src TEXT;
-  v_code   TEXT;
+  v_cnt       INT;
+  v_secdef    BOOLEAN;
+  v_nargs     INT;
+  v_fn_src    TEXT;
+  v_code      TEXT;
+  v_proconfig TEXT[];
 BEGIN
-  SELECT count(*), bool_and(p.prosecdef), min(p.pronargs)
-    INTO v_cnt, v_secdef, v_nargs
+  SELECT count(*), bool_and(p.prosecdef), min(p.pronargs), min(p.proconfig)
+    INTO v_cnt, v_secdef, v_nargs, v_proconfig
     FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
    WHERE n.nspname = 'public' AND p.proname = 'finalize_csv_strategy_with_returns';
 
@@ -133,6 +134,55 @@ BEGIN
   END IF;
   IF v_nargs <> 6 THEN
     RAISE EXCEPTION 'TEST FAILED (Part 1): finalize_csv_strategy_with_returns has % args, expected 6 - the route caller passes 6 named arguments and would 42883', v_nargs;
+  END IF;
+
+  -- ---- 1b — THE STANDING search_path PIN (146.2 review-of-05 finding 2) ---
+  -- ⭐ WHY THIS LINE EXISTS. This gate already pinned prosecdef, the arity,
+  -- all three ACLs and the no-handler prosrc property — but never proconfig.
+  -- So the search_path pin was asserted ONLY at apply time, by
+  -- 20260819151000's STEP 4(b2), in a file that will never run again. It is
+  -- the MORE dangerous of the two properties the pair guards: prosecdef going
+  -- FALSE breaks every finalize loudly and instantly (the writes start failing
+  -- RLS), whereas the search_path going missing breaks NOTHING visibly — the
+  -- function keeps working for every honest caller while an RLS-exempt
+  -- definer-rights body silently resolves strategies, strategy_verifications
+  -- and csv_daily_returns through the CALLER's search_path. Any authenticated
+  -- caller able to create a schema could then point the finalize writes at
+  -- attacker-owned shadow tables, outside the tenant-scoped originals
+  -- entirely. A CREATE OR REPLACE that drops the SET clause applies green and,
+  -- before this line, no recurring gate would have reddened.
+  --
+  -- ⛔ REGEX, NOT EQUALITY — A DELIBERATE DEPARTURE FROM THE NEAREST IN-REPO
+  -- PRECEDENT, and the reason is MEASURED, not reasoned. The precedent,
+  -- test_cutover_strategy_metrics_keys_atomic.sql Test 1, asserts
+  -- `'search_path=public, pg_temp' = ANY(proconfig)` — an exact string
+  -- compare. Measured on a throwaway PG16 (16.14), an equality test is SAFE
+  -- against re-rendering: `= public,pg_catalog` and `= "public", pg_catalog`
+  -- both normalise to the identical stored entry `search_path=public,
+  -- pg_catalog`, so spacing and quoting do NOT break it (the broader
+  -- "pg_get_functiondef re-renders it" worry does not apply — proconfig is
+  -- not read through pg_get_functiondef at all). What DOES break it is the
+  -- VALUE's content, and both breaking cases are healthy databases:
+  --     SET search_path = pg_catalog, public          -> equality f, regex t
+  --     SET search_path = public, pg_catalog, pg_temp -> equality f, regex t
+  -- A reorder and a hardening addition each leave the property this line
+  -- exists to protect fully intact — the body still resolves through a FIXED
+  -- list rather than the caller's — while an equality test reds. A gate that
+  -- fails on a healthy database is worse than none, because it teaches the
+  -- next author to delete it. This check therefore reuses the regex form the
+  -- migration's own STEP 4(b2) settled on: the entry must BE a search_path
+  -- assignment (anchored ^) and must name both schemas WORD-BOUNDED, which is
+  -- what keeps it from going soft — measured RED on `search_path=public`
+  -- (pg_catalog dropped), on `search_path=public_evil, pg_catalog` (a
+  -- look-alike schema: `\M` refuses to end a word inside `public_evil`), and
+  -- on proconfig NULL entirely.
+  IF NOT EXISTS (
+    SELECT 1 FROM unnest(coalesce(v_proconfig, ARRAY[]::text[])) cfg
+     WHERE cfg ~ '^search_path='
+       AND cfg ~ '\mpublic\M'
+       AND cfg ~ '\mpg_catalog\M'
+  ) THEN
+    RAISE EXCEPTION 'TEST FAILED (Part 1b): finalize_csv_strategy_with_returns has lost its "SET search_path = public, pg_catalog" pin (proconfig=%) - a SECURITY DEFINER body without one resolves strategies/strategy_verifications/csv_daily_returns through the CALLER''s search_path, so any authenticated caller who can create a schema redirects every finalize write to attacker-owned shadow tables while the function still looks healthy. Re-issue the SET clause on the function; never relax this assertion', v_proconfig;
   END IF;
 
   IF NOT has_function_privilege('authenticated',
@@ -216,7 +266,7 @@ BEGIN
     RAISE EXCEPTION 'TEST FAILED (Part 1d): finalize_csv_strategy_with_returns contains a handler clause - a swallowed error commits a strategies row without its dailies, which is EXACTLY the orphan class SC#2 dissolves, and a catch-write-and-re-raise handler is invisible to every row-count oracle in this suite because the subtransaction rolls its writes back too. Remove the handler; never "harden" this body with one (the function COMMENT says so, and 20260819120000:80-96 explains why)';
   END IF;
 
-  RAISE NOTICE 'Part 1 OK: finalize_csv_strategy_with_returns is live (one 6-arg SECDEF overload; authenticated EXECUTE; anon and service_role both shut out; no handler clause in the comment-stripped body).';
+  RAISE NOTICE 'Part 1 OK: finalize_csv_strategy_with_returns is live (one 6-arg SECDEF overload; search_path pinned to public + pg_catalog; authenticated EXECUTE; anon and service_role both shut out; no handler clause in the comment-stripped body).';
 END $$;
 
 -- ==========================================================================

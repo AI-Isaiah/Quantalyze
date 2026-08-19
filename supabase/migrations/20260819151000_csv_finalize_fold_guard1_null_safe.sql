@@ -1,8 +1,13 @@
--- Migration: GUARD 1 (the p_terminal_status whitelist) becomes NULL-safe on
--- finalize_csv_strategy_with_returns. The function is REPLACED in place; it is
--- NOT dropped and its signature does not move.
+-- Migration: the two remaining NULL-unsafe guards on
+-- finalize_csv_strategy_with_returns become NULL-safe — GUARD 1 (the
+-- p_terminal_status whitelist) and GUARD 2 (the caller-identity comparison).
+-- The function is REPLACED in place; it is NOT dropped and its signature does
+-- not move.
 --
--- Phase 146.2 / v1.19 review-of-146.1 finding R5.
+-- Phase 146.2 / v1.19 review-of-146.1 finding R5, plus finding 1 of the
+-- migration review of this very file (closed here, before it was applied
+-- anywhere — the filename still says guard1 because renaming an in-flight
+-- migration file is a worse trade than a filename that under-describes it).
 --
 -- Why this migration exists
 -- -------------------------
@@ -66,19 +71,38 @@
 --      UNCHANGED, so the distinguishing substring every gate anchors on
 --      ("p_terminal_status % is not allowed") does not move. GUARD 1's
 --      explanatory comment gains the reason for the new arm.
---   2. STEP 4 gains check (h2): the IS NULL arm must be present in the
---      deployed body. Check (h) — the NOT IN whitelist itself — is UNCHANGED
---      and still matches the second half of the new condition.
---   3. STEP 3's COMMENT ERRCODE map moves "(incl. NULL)" so it reads on the
+--   2. GUARD 2's caller-identity comparison adopts `IS DISTINCT FROM`
+--      (146.2 review-of-05 finding 1 — added to this file BEFORE it was
+--      applied anywhere):
+--        IF v_auth_uid IS DISTINCT FROM p_user_id THEN
+--      p_user_id is caller-controlled with no DEFAULT, so a direct-RPC caller
+--      can pass explicit null; `<>` was then NULL, plpgsql took the ELSE
+--      branch and the identity guard passed silently, surfacing downstream as
+--      a 23502 from strategies.user_id — the SAME pathology as R5, in the
+--      SAME file, one guard below it. The RAISE, its format string, both
+--      arguments and ERRCODE '42501' are UNCHANGED, so the substring
+--      test_csv_finalize_auth_guard.sql Part B anchors on ("does not match
+--      auth.uid") does not move. GUARD 2's explanatory comment gains the
+--      reason and the shape rule.
+--   3. STEP 4 gains checks (h2) and (h3): the GUARD 1 IS NULL arm and the
+--      GUARD 2 IS DISTINCT FROM spelling must both be present in the deployed
+--      body. Check (h) — the NOT IN whitelist itself — is UNCHANGED and still
+--      matches the second half of GUARD 1's new condition; NO pre-existing
+--      check covered GUARD 2 at all.
+--   4. STEP 3's COMMENT ERRCODE map moves "(incl. NULL)" so it reads on the
 --      terminal status as well as the fmt. Both are now true; before this
 --      migration only the fmt half was.
---   4. STEP 0's pre-flight message names 20260819130000 as the state this file
+--   5. STEP 0's pre-flight message names 20260819130000 as the state this file
 --      was authored against (it named 20260819120000 in the parent).
 --   EVERYTHING ELSE — the signature line and all 6 argument names/types/order
 --   and the p_terminal_status DEFAULT, SECURITY DEFINER, the pinned
---   `SET search_path = public, pg_catalog`, GUARDS 2-10 verbatim, all three
---   INSERTs verbatim, the STEP 2 grant/REVOKE trio, and every other STEP 4
---   check (a)-(g) and (i)-(p) — is byte-preserved from 20260819130000.
+--   `SET search_path = public, pg_catalog`, the ABSENCE of STRICT, GUARDS
+--   3-10 verbatim, all three INSERTs verbatim, the STEP 2 grant/REVOKE trio,
+--   and every other STEP 4 check (a)-(g) and (i)-(p) — is byte-preserved from
+--   20260819130000. ⚠️ The absence of STRICT is load-bearing and is NOT a
+--   stylistic omission: a STRICT plpgsql function returns NULL for a NULL
+--   argument WITHOUT ENTERING THE BODY, which would make every NULL guard in
+--   this file unreachable and turn all of them into silence.
 --
 -- >>> READ THIS BEFORE SIMPLIFYING <<<
 -- ------------------------------------
@@ -93,11 +117,17 @@
 -- (ii) The ORDERING is load-bearing and unchanged: GUARD 1 stays FIRST so it
 --     RAISEs before any write (D-08), and the empty-array refusal stays AFTER
 --     the fmt whitelist so a bogus fmt still reports "invalid fmt".
--- (iii) The new arm is spelled `IS NULL OR`, matching GUARD 4 (:285) and
---     GUARD 5 (:293) exactly, rather than `IS DISTINCT FROM` or `coalesce()`.
---     One spelling for one job: a reader who has learned the shape at GUARD 4
+-- (iii) GUARD 1's new arm is spelled `IS NULL OR`, matching GUARD 4 and
+--     GUARD 5 exactly, rather than `IS DISTINCT FROM` or `coalesce()`. One
+--     spelling for one job: a reader who has learned the shape at GUARD 4
 --     must not have to re-learn it at GUARD 1, and STEP 4's regexes are
---     written against that one shape.
+--     written against that one shape. GUARD 2 is spelled `IS DISTINCT FROM`
+--     instead, and that is NOT drift — it is the OTHER half of one rule:
+--     `x IS NULL OR x NOT IN (...)` for a WHITELIST, `a IS DISTINCT FROM b`
+--     for a BINARY comparison (GUARD 8 already carries the second half and
+--     states it as law). A whitelist cannot be written as IS DISTINCT FROM,
+--     and writing GUARD 2 as `p_user_id IS NULL OR v_auth_uid <> p_user_id`
+--     is the identical predicate with a redundant arm bolted on.
 --
 -- ERRCODE map: unchanged from 20260819130000:119-141 except that "invalid
 -- terminal status" is now honestly reported as 22023 for a NULL as well as for
@@ -213,19 +243,41 @@ BEGIN
       USING ERRCODE = '22023';
   END IF;
 
-  -- GUARD 2 — Caller-identity guards (parent: 20260819120000:233-251,
-  -- verbatim). The route layer calls with the authenticated user's id; we
-  -- assert it matches the JWT so a SECURITY DEFINER RPC can't be abused via
-  -- service_role to write rows under another user. This pair is also what
-  -- confines finding A1's blast radius to the caller's OWN tenant. The message
-  -- literal below is pinned by supabase/tests/test_csv_finalize_auth_guard.sql
-  -- Part A — change both together or not at all.
+  -- GUARD 2 — Caller-identity guards (parent: 20260819120000:233-251). The
+  -- route layer calls with the authenticated user's id; we assert it matches
+  -- the JWT so a SECURITY DEFINER RPC can't be abused via service_role to
+  -- write rows under another user. This pair is also what confines finding
+  -- A1's blast radius to the caller's OWN tenant. The message literals below
+  -- are pinned by supabase/tests/test_csv_finalize_auth_guard.sql Parts A and
+  -- B — change both together or not at all.
   IF v_auth_uid IS NULL THEN
     RAISE EXCEPTION 'finalize_csv_strategy_with_returns called without an auth session'
       USING ERRCODE = '42501';
   END IF;
 
-  IF v_auth_uid <> p_user_id THEN
+  -- CHANGED here (146.2 review-of-05) to be NULL-safe. This was the SOLE
+  -- remaining violator of the law this same file states at GUARD 8: ⛔ IS
+  -- DISTINCT FROM, never <>. p_user_id is caller-controlled and carries no
+  -- DEFAULT, so an authenticated direct-RPC caller can pass an explicit JSON
+  -- null; `v_auth_uid <> p_user_id` then evaluated to NULL, plpgsql took the
+  -- ELSE branch on a NULL IF condition, and the identity guard SILENTLY
+  -- PASSED. Nothing below refused it either — GUARDS 3-10 touch only
+  -- p_rows / p_fmt / p_strategy_name — so it reached the strategies INSERT
+  -- and surfaced as a 23502 NOT NULL violation from strategies.user_id. That
+  -- is R5's pathology verbatim: an error naming a COLUMN instead of the
+  -- offending input, while this function's own COMMENT ERRCODE map (STEP 3)
+  -- promises 42501 for "no session or identity mismatch" — and a NULL
+  -- p_user_id IS an identity mismatch. The message literal, both its
+  -- arguments and ERRCODE '42501' are UNCHANGED so no existing gate anchor
+  -- moves; a NULL renders as <NULL> in the "p_user_id (%)" slot.
+  -- ⚠️ THE SHAPE RULE, so the two spellings in this file do not read as
+  -- drift: an `x NOT IN (...)` whitelist takes `x IS NULL OR ...`
+  -- (GUARDS 1, 4, 5); a BINARY comparison takes IS DISTINCT FROM
+  -- (GUARDS 2 and 8). Both are NULL-safe; neither is usable at the other's
+  -- site — `IS DISTINCT FROM` cannot express a set membership, and
+  -- `p_user_id IS NULL OR v_auth_uid <> p_user_id` is the same predicate
+  -- spelled with a redundant arm.
+  IF v_auth_uid IS DISTINCT FROM p_user_id THEN
     RAISE EXCEPTION 'finalize_csv_strategy_with_returns: p_user_id (%) does not match auth.uid (%)',
       p_user_id, v_auth_uid
       USING ERRCODE = '42501';
@@ -623,6 +675,20 @@ BEGIN
   --      the anti-NULL migration itself. This check is the discriminator.
   IF v_code !~ 'p_terminal_status[[:space:]]+IS[[:space:]]+NULL[[:space:]]+OR[[:space:]]+p_terminal_status[[:space:]]+NOT[[:space:]]+IN' THEN
     RAISE EXCEPTION '146.2 R5: the terminal-status whitelist is no longer NULL-explicit - p_terminal_status NOT IN (...) evaluates to NULL for a NULL argument and plpgsql takes the ELSE branch, so a direct-RPC caller passing NULL walks past the whitelist and past every guard below it, and the failure surfaces as a 23502 from strategies.status naming a column instead of the input, while this function''s own COMMENT promises 22023';
+  END IF;
+
+  -- (h3) GUARD 2 — the identity comparison is NULL-SAFE (146.2
+  --      review-of-05). Nothing in the (a)-(p) set pinned GUARD 2 at all, and
+  --      no shape here can be inferred from the grant checks in (b): those
+  --      assert WHO may call, never what the body does with the id it is
+  --      handed. `v_auth_uid <> p_user_id` and `v_auth_uid IS DISTINCT FROM
+  --      p_user_id` are indistinguishable to every other check in this block,
+  --      which is exactly how the unsafe spelling survived inside the
+  --      anti-NULL migration itself — twice now, at GUARD 1 and here. This
+  --      line is the discriminator, and it reads the COMMENT-STRIPPED body so
+  --      a comment quoting the safe spelling cannot false-PASS it.
+  IF v_code !~ 'v_auth_uid[[:space:]]+IS[[:space:]]+DISTINCT[[:space:]]+FROM' THEN
+    RAISE EXCEPTION '146.2 review-of-05: the caller-identity comparison is no longer NULL-safe - v_auth_uid <> p_user_id evaluates to NULL when a direct-RPC caller passes an explicit null p_user_id and plpgsql takes the ELSE branch, so the identity guard silently passes and the call reaches the strategies INSERT, where it surfaces as a 23502 from strategies.user_id naming a column instead of the offending input, while this function''s COMMENT promises 42501 for an identity mismatch';
   END IF;
 
   -- (i) GUARD 3 — the NULL p_rows refusal.
