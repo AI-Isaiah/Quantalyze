@@ -2949,6 +2949,22 @@ under-claim) and must be revised in the same change.
 
 ## Phase 146.1 execution notes (logged 2026-08-18)
 
+- [ ] ⚠️ **Two competing FastAPI route-enumeration helpers now coexist; consolidate on one.**
+  `fastapi>=0.139` defers `include_router`, so `app.routes` holds opaque `_IncludedRouter`
+  placeholders and a flat `isinstance(r, APIRoute)` scan sees only app-decorated handlers.
+  Two independent fixes exist:
+  (a) `tests/test_validate_key_venue_transient.py::_effective` — hand-rolled recursion into
+      `route.original_router.routes`; yields the ORIGINAL route objects, whose `.path` is
+      **UNPREFIXED**. Correct only because every `include_router` in `main.py:811-825` is
+      currently bare. **Latent trap:** the first `include_router(..., prefix="/x")` makes its
+      path matching silently miss, and that file's lookup then raises "no route registered"
+      (loud) — but any future path-based reader of the same helper would go quietly wrong.
+  (b) `tests/test_limiter_route_coverage.py` — `fastapi.routing.iter_route_contexts`, the
+      flattener FastAPI's own `get_openapi` uses; composes prefixes correctly.
+  Prefer (b) and retire (a). Not done here: (a) is green today and is outside this PR's scope.
+  ⭐ Process note: (a) already documented this exact behaviour **in-repo** before I began
+  debugging it. Grep for `_IncludedRouter` / `original_router` before theorising next time.
+
 - [ ] ⚠️ **Local absolute paths (incl. the operator's macOS username) are committed across
   ~50 historical `.planning/` docs on a PUBLIC repo.** Surfaced 2026-08-19 when
   `gstack-redact-prepush` flagged a MEDIUM finding on the 146.1 branch. I redacted ONLY the
