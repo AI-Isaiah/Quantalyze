@@ -2683,25 +2683,6 @@ that migration; each is a settled plan-time call with its own reason for living 
   so unscheduling reddens the `sql-tests` gate instead. Recorded as the WON'T-FIX half of JOB-08
   (`.planning/REQUIREMENTS.md`, JOB-08 resolution block).
 
-- [ ] **(RESEARCH §6 residual, v1.19+) A terminalized chain-mid orphan is excluded from Phase 143's
-  reconciliation sweep FOREVER — widen the zero-jobs conjunct to "no NON-TERMINAL row".** This is
-  the residual the terminalizer creates by design and it is named rather than hidden: Phase 144
-  makes an orphaned row SURVIVE as `failed_final` instead of vanishing, and Phase 143's sweep
-  requires `NOT EXISTS (… public.compute_jobs cj WHERE cj.strategy_id = s.id)` — **any** row,
-  terminal included (`20260816140000:729-732`). So the surviving row permanently excludes its
-  strategy from reconciliation. It bites a **chain-mid** orphan hardest (e.g. `derive_broker_dailies`
-  orphaned before it enqueues `compute_analytics_from_csv`, `job_worker.py:526`): Phase 142 will
-  terminalize the `strategy_analytics` row so the user is *told*, but nobody re-runs the work.
-  ⚠️ Note the interaction that makes this less visible than it looks — before Phase 144 the row was
-  DELETEd, so the strategy became sweep-eligible; the exclusion is NEW, and it is the price paid for
-  the audit trail. Candidate fix: widen that conjunct to "no NON-TERMINAL `compute_jobs` row". That
-  is a change to a **shipped** predicate and needs its own safety analysis — the header at
-  `20260816140000:72-82` argues the safety is carried by the terminal-`strategy_analytics` conjunct
-  rather than by the zero-jobs one, so the widening may be tractable — plus an explicit look at the
-  31-day retention interaction (`retention_compute_jobs_done` deletes `done` rows at 30 days, so a
-  strategy can re-enter sweep eligibility by retention alone and the two mechanisms must not race).
-  A separate phase, never a rider on the terminalizer.
-
 - [ ] **(D-09) Fixture hygiene: `test_compute_jobs_fencing.py` is the attributed producer of the
   `running` + `claimed_at IS NULL` orphan class — stamp `claimed_at` in its two direct UPDATEs.**
   `analytics-service/tests/test_compute_jobs_fencing.py:1138-1152` and `:1191-1205` drive a row to
@@ -2783,22 +2764,6 @@ whole list up as roster item C4 (with overlaps mapped: fold value guards + fmt-b
 empty-rows → A1, copy honesty → A3, 23505 second source → B3, rpc-test re-point → B5).
 Items stay open HERE until 146.1 ships; close them here when it does.
 
-- [ ] **Re-point `src/__tests__/csv-finalize-rpc.test.ts` at the fold** (deferred-items #5,
-  now verifiable: TEST carries `finalize_csv_strategy_with_returns`). Live-DB-only suite,
-  never in CI; still names the DROPped `finalize_csv_strategy` so every skipIf-live case
-  42883s. Also re-point the stale cover-citation in `strategy-verifications-rls.test.ts:17`.
-- [ ] **Pin the `finalize-resolve-read-fail` capture + the two undriven fail-closed arms**
-  (`route.ts:737` refetchErr, `:749` no-committed-row): two new cases in
-  csv-finalize-cross-submission-merge.test.ts, each observed RED under a step-tag neuter.
-- [ ] **Add a fold gate Part 3d: `p_terminal_status='published'` → 22023 before any write**
-  (the whitelist guard at migration line 225 is currently unpinned by any gate).
-- [ ] **Regenerate `database.types.ts` against TEST (post-fold) + delete the rpc
-  cast-through-unknown in route.ts** so the fold call re-enters the audit-coverage law
-  (deferred-items #3 residual; the current types diff is a hand-edit no DB state produces).
-- [ ] **Copy honesty on the fold-failure arm sub-classes** (`route.ts:627`): "rolled back
-  completely" is unobservable for transport-lost / non-uuid-2xx shapes — branch the copy on
-  SQLSTATE presence. Also consider mapping `error.code === '42501'` to a 401 re-auth
-  envelope instead of the generic 500 (narrow reachability; withAuth ran ms earlier).
 - [x] **Python tombstone envelope — MESSAGE fixed in Phase 146.1-07 (2026-08-18).**
   `flow_type=csv, step=finalize` still answers 422 `MISSING_STRATEGY_ID` (deliberately —
   see the gated option below), but the `human_message` no longer tells the caller to supply
@@ -2825,18 +2790,6 @@ Items stay open HERE until 146.1 ships; close them here when it does.
   to naming only a code.
   **Where:** `analytics-service/routers/process_key.py` (the tombstone branch beside the
   API-6 envelope); the deliberate non-minting is recorded in the comment there.
-- [ ] **service_role default-ACL EXECUTE on the fold** contradicts the migration header's
-  "authenticated ONLY" claim (inert today: auth.uid() guard 42501s it). Either add
-  `REVOKE ... FROM service_role` + STEP 3(b)/Part 1 assertions (re-apply the REVOKE to TEST
-  manually — the file itself must NOT re-run there), or amend the header/COMMENT to document
-  the default-ACL reality (the 20260814120000 post-verify (c) treatment).
-- [ ] **Fold value guards for direct-RPC callers**: `(elem->>'daily_return')::DOUBLE PRECISION`
-  accepts NaN/Infinity/1e300 and far-future dates that the route boundary rejects — add
-  22023 pre-INSERT raises mirroring the route checks (carried over from the dropped parent,
-  not a regression; poisons only the caller's own pending_review/private strategy).
-- [ ] **fmt-blind empty-rows allowance**: direct RPC with `p_fmt='daily_returns'` +
-  `p_rows='[]'` commits a zero-dailies strategy (own-tenant). Scope the empty allowance to
-  fmt='trades' or document the acceptance in the header delta list.
 - [ ] **23505 second source**: the ERRCODE map/COMMENT attribute 23505 solely to
   `strategies_user_wizard_session_source_uniq`, but `csv_daily_returns_strategy_date_key`
   can also raise it (direct-RPC duplicate dates); the resolve arm keys on SQLSTATE alone —
@@ -2868,18 +2821,6 @@ Items stay open HERE until 146.1 ships; close them here when it does.
   occurrences requires per-describe analysis, and a wrong removal would make a token-absence
   arm vacuous rather than merely untidy. Cosmetic; do it as its own pass with the suite run
   between each removal, or split the file.
-- [ ] ⚠️ **Migration-timestamp coordination (self-expiring 2026-08-19 12:00 UTC)**: the fold
-  is stamped `20260819120000` (future-dated at merge). Until that instant, any OTHER
-  migration must carry a timestamp ABOVE it or it trips the backdated-migration guard.
-  Phase 146 planning: if 146 ships a migration before Aug 19 noon UTC, stamp it
-  `2026081913…`+.
-- [ ] **Persist the burned csv-submit content signature across refresh** (red-team RT-3):
-  `WizardClient.tsx` `failedCsvSubmitSigRef` is a useRef while `wizardSessionId` IS persisted —
-  the mint-a-fresh-session-on-content-change fence evaporates on refresh/tab-restore, exactly
-  the resume path where a changed file reaches the server resolve arm. Server-side equality
-  refusal (shipped 2026-08-18) is the operative fence; persisting the signature in the signed
-  saveWizardState envelope makes the client fence defense-in-depth again.
-
 ## v1.19 xhigh milestone review (2026-08-18) → Phase 146.1 owns the residue
 
 15 confirmed findings across `43069db9..4e3effb0` (PRs #687–#690). Full roster with file
@@ -2976,22 +2917,6 @@ under-claim) and must be revised in the same change.
   will not see them).
 
 
-- [ ] ⭐ **CSV finalize emits NO audit event — a real gap, surfaced by 146.1-07 task 1.**
-  Deleting the cast-through-unknown made the fold call visible to the audit-coverage law for
-  the first time, and the law immediately failed it: `csv-finalize/route.ts` calls
-  `logAuditEvent` nowhere. The call now carries an `@audit-skip` whose stated reason is the
-  truth — *there is no audit event on this path* — rather than the sibling's rationale, which
-  does NOT transfer: `create-with-key` skips `create_wizard_strategy` because "the user-visible
-  creation is audited at finalize time", and this call **IS** finalize (it commits a
-  user-visible strategy + verification + dailies in one transaction). Closing it needs an
-  audit-taxonomy decision — event type, payload, actor — per
-  `docs/architecture/adr-0023-audit-event-taxonomy.md`; that is a behaviour change and does not
-  belong in a types-regen commit.
-  ⚠️ Two formatting facts the next editor must not undo: the audit law scans **line by line**
-  for `.rpc("<name>"`, so the RPC name must stay on the same line as `.rpc(`; and the
-  `@audit-skip:` marker must sit **within 8 lines above** the call (a long explanation above it
-  is fine, but the marker itself must be inside the window — a 13-line pragma put the marker
-  out of range and the gate stayed RED).
 - [ ] **`--reporter=basic` is invalid in vitest 4** and appears in the `<verify>` blocks of plans
   146.1-01/03/04/05/06/07. MEASURED: it exits 1 with `Failed to load custom Reporter from basic`.
   ✅ It fails LOUD rather than passing vacuously, so no green in this phase rests on it, and
@@ -3027,22 +2952,6 @@ under-claim) and must be revised in the same change.
   source that does not strip comments is unreliable in BOTH directions — vacuous when it
   should fire, false-positive when it should not. Candidate fix: a shared
   `scripts/grep-code.sh` that strips comments, used by every plan `<verify>`.
-- [ ] **A2 residual — absent `status` column echoes the `?? "pending_review"` fallback**, so a
-  contribution request can be *reported* as `pending_review` even though the arm writes
-  nothing to the DB. Refusing would violate the absence rule F-04-4 pins; the honest fix is
-  omitting the field, which changes the `CsvSubmitStep` contract and needs its own item.
-- [ ] **C1 echo copy is rendered by nothing today.** Plan 04 added `human_message` to the
-  resolve-echo 200 envelope so the honest sentence has somewhere to live, but
-  `CsvSubmitStep` branches on `!res.ok`/`data.ok` and never reads it. Either surface it or
-  record that the honesty is API-level only.
-- [ ] **`csv-finalize-c14-regression.test.ts` lost one discrimination to A2.** Its
-  resolve-echo case used to post the manager flow against a committed `private` row — the
-  exact cross-flow combination A2 now refuses 409. The fixture was re-pointed to
-  `entry_context: "contribution"`, so echoed and requested status are now provably equal on
-  every surviving echo and that case can no longer prove "echoed, not fabricated" on its
-  own. The discrimination moved to the new refusal cases; noted so nobody reads the weaker
-  case as full coverage.
-
 ## Phase 146 — RATE-04 value-parity candidates (logged 2026-08-18, D-146-4: retuning is founder territory)
 
 Source: `.planning/phases/146-rate/146-AUDIT.md` §3 (fresh at HEAD `e912e38b`). Every number

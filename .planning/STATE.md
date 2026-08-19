@@ -2,19 +2,19 @@
 gsd_state_version: 1.0
 milestone: v1.19
 milestone_name: JOB/RATE — job-lifecycle reliability and the rate limits that hold
-current_phase: 146.1
-current_phase_name: REVIEW — v1.19 xhigh close-out (fold guards, resolve-arm honesty, rate-gate completeness)
+current_phase: 146.2
+current_phase_name: REVIEW — 146.1 post-merge close-out (echo-path classification, passphrase scrubbing)
 status: ready_to_plan
-stopped_at: v1.19 4/4 phases shipped; xhigh milestone review merged (PR #691, 76adf961) inserted Phase 146.1 for its 11 residual findings
-last_updated: "2026-08-18T02:53:00.806Z"
-last_activity: 2026-08-18
-last_activity_desc: "v1.19 shipped complete (143-146, v0.63-v0.66); founder-directed xhigh milestone review returned 15 findings — 4 fixed and merged as v0.66.0.1 (76adf961), 11 filed as Phase 146.1"
+stopped_at: v1.19 5/5 phases shipped (143-146 + 146.1, PR #692 a6a2dee8, both migrations LIVE on PROD). Post-merge review of 146.1 returned 1 BLOCKER + 6 findings -> Phase 146.2 INSERTED. Milestone close BLOCKED on it.
+last_updated: "2026-08-19T11:05:00.000Z"
+last_activity: 2026-08-19
+last_activity_desc: "146.1 merged as v0.67.0.0 (PR #692); CHANGELOG backfilled for 0.66.0.1+0.67.0.0 (PR #693). Verification sweep: 143/144/146 passed (144 gaps_found was STALE - closed by event, corrected), 145 human_needed 3/3 SC, 146.1 gaps_found 12/13. Two independent reviewers CONVERGED on one blocker: the csv-finalize echo path drops classification on the recovery A3 instructs, permanently mis-annualizing a crypto track record (PROD population measured ZERO). Phase 146.2 inserted; TODOS swept 134->119 open."
 progress:
-  total_phases: 5
-  completed_phases: 4
-  total_plans: 16
-  completed_plans: 16
-  percent: 80
+  total_phases: 6
+  completed_phases: 5
+  total_plans: 24
+  completed_plans: 24
+  percent: 83
 ---
 
 # Project State — Quantalyze

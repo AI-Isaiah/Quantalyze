@@ -154,7 +154,7 @@ Plans:
   2. A fault injected between `finalize_csv_strategy`, `persist_csv_daily_returns`, and the `after()` enqueue leaves no orphan strategy row — either the steps share one SECURITY DEFINER transaction, or explicit compensating cleanup runs + Sentry alerts (the choice recorded per the reproduction outcome and the CONTRIB-02 `p_terminal_status` owner-only variant's survival).
   3. Happy-path csv-finalize behavior is unchanged — including the CONTRIB-02 owner-only private-finalize path if the RPCs are folded.
 
-**Plans**: 5/6 plans executed
+**Plans**: 6/6 plans executed
 
 Plans:
 **Wave 1**
@@ -297,14 +297,25 @@ CONTEXT-named lanes are parallel (wave 1). ⚠️ Both migrations AUTO-APPLY to 
 
 Plans:
 
-- [ ] 146.1-01-PLAN.md — wave 1 · A1 fold input guards (NULL / empty-non-trades / NaN·Inf·magnitude / absurd-date / duplicate-date) as a `CREATE OR REPLACE` forward migration `20260819130000`, its self-verify, the regenerated snapshot, the new fold-gate Parts, B5's re-homed 22023 guards, C4's Part 3d and the `service_role` REVOKE
-- [ ] 146.1-02-PLAN.md — wave 1 · B1 Python route-enumeration gate over `main.app.routes` with an empty-by-equality quarantine roster — RATE-03's "a new route cannot silently bypass" made true on the Python side, zero runtime change
-- [ ] 146.1-03-PLAN.md — wave 1 · B4 sweep readmits terminalizer-produced orphans via the NARROW marker predicate (migration `20260819130500`) + new must-heal arm C4; ⛔ the roster's blanket widening is refused — it reddens shipped arms C2/C3. Plus C3 documented
-- [ ] 146.1-04-PLAN.md — wave 2 · route cluster part 1 (serial): B3 constraint-name discrimination → A2 terminal-status refusal → C1 honest echo copy, plus C4's two resolve-arm fail-closed pins
-- [ ] 146.1-05-PLAN.md — wave 3 · route cluster part 2 (serial): A4 required `fresh` discriminator gating the metadata UPDATE → A3 commit-agnostic copy on the transport / lost-id classes → C2 handler collapse with its source-shape gates rewritten, not deleted
-- [ ] 146.1-06-PLAN.md — wave 4 · B2 founder call: STOP forwarding `X-User-Access-Token` from both routes, add a zero-emitter equality gate, and AMEND the Phase 140.2 obligation repo-wide in the SAME commit
-- [ ] 146.1-07-PLAN.md — wave 5 · C4 remainder: types regen + cast-through-unknown deletion + the audit-law consequence (coupled, one commit); RT-3 burned-signature persistence in the signed envelope; Python tombstone message-only (no new code — WIZFORM-02 is OPEN); the stale-comment batch
-- [ ] 146.1-08-PLAN.md — wave 6 · ORCHESTRATOR-ONLY pre/post-merge migration gate: PROD+TEST census, TEST rehearsal of both migrations, both SQL gate files EXECUTED on TEST, 14 named neuters observed RED and restored, blocking merge checkpoint, then post-merge PROD verification including one real `cron.job_run_details` tick
+- [x] 146.1-01-PLAN.md — wave 1 · A1 fold input guards (NULL / empty-non-trades / NaN·Inf·magnitude / absurd-date / duplicate-date) as a `CREATE OR REPLACE` forward migration `20260819130000`, its self-verify, the regenerated snapshot, the new fold-gate Parts, B5's re-homed 22023 guards, C4's Part 3d and the `service_role` REVOKE
+- [x] 146.1-02-PLAN.md — wave 1 · B1 Python route-enumeration gate over `main.app.routes` with an empty-by-equality quarantine roster — RATE-03's "a new route cannot silently bypass" made true on the Python side, zero runtime change
+- [x] 146.1-03-PLAN.md — wave 1 · B4 sweep readmits terminalizer-produced orphans via the NARROW marker predicate (migration `20260819130500`) + new must-heal arm C4; ⛔ the roster's blanket widening is refused — it reddens shipped arms C2/C3. Plus C3 documented
+- [x] 146.1-04-PLAN.md — wave 2 · route cluster part 1 (serial): B3 constraint-name discrimination → A2 terminal-status refusal → C1 honest echo copy, plus C4's two resolve-arm fail-closed pins
+- [x] 146.1-05-PLAN.md — wave 3 · route cluster part 2 (serial): A4 required `fresh` discriminator gating the metadata UPDATE → A3 commit-agnostic copy on the transport / lost-id classes → C2 handler collapse with its source-shape gates rewritten, not deleted
+- [x] 146.1-06-PLAN.md — wave 4 · B2 founder call: STOP forwarding `X-User-Access-Token` from both routes, add a zero-emitter equality gate, and AMEND the Phase 140.2 obligation repo-wide in the SAME commit
+- [x] 146.1-07-PLAN.md — wave 5 · C4 remainder: types regen + cast-through-unknown deletion + the audit-law consequence (coupled, one commit); RT-3 burned-signature persistence in the signed envelope; Python tombstone message-only (no new code — WIZFORM-02 is OPEN); the stale-comment batch
+- [x] 146.1-08-PLAN.md — wave 6 · ORCHESTRATOR-ONLY pre/post-merge migration gate: PROD+TEST census, TEST rehearsal of both migrations, both SQL gate files EXECUTED on TEST, 14 named neuters observed RED and restored, blocking merge checkpoint, then post-merge PROD verification including one real `cron.job_run_details` tick
+
+### Phase 146.2: REVIEW: 146.1 post-merge close-out — the echo path must not silently drop a strategy's classification, and the passphrase must not reach Sentry (INSERTED)
+
+**Goal:** [Urgent work - to be planned]
+**Requirements**: TBD
+**Depends on:** Phase 146
+**Plans:** 0 plans
+
+Plans:
+
+- [ ] TBD (run /gsd-plan-phase 146.2 to break down)
 
 ### Phase 147: SCEN-01 — The scenario engine receives the real series
 
