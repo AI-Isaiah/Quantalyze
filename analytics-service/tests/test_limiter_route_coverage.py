@@ -117,10 +117,43 @@ derived = [
     for r in main.app.routes
     if isinstance(r, APIRoute)
 ]
+# Diagnostics: when this probe reports a truncated surface the ONLY place it
+# has ever done so is CI, so it must carry enough context to diagnose itself
+# from the log alone rather than costing another round-trip.
+import os
+diag = {
+    "python": sys.version.split()[0],
+    "cwd": os.getcwd(),
+    "main_file": getattr(main, "__file__", None),
+    "sys_path_head": sys.path[:3],
+}
+try:
+    import routers as _routers_pkg
+    diag["routers_pkg_file"] = getattr(_routers_pkg, "__file__", None)
+    diag["routers_pkg_path"] = list(getattr(_routers_pkg, "__path__", []))
+    per_router = {}
+    for _name in ("cron","exchange","match","portfolio","optimizer",
+                  "simulator","internal","csv","process_key","debug_key_flow"):
+        try:
+            _m = __import__(f"routers.{_name}", fromlist=["router"])
+            _r = getattr(_m, "router", None)
+            per_router[_name] = {
+                "module_file": getattr(_m, "__file__", None),
+                "type": type(_m).__name__,
+                "router_type": type(_r).__name__,
+                "n_routes": len(getattr(_r, "routes", [])),
+            }
+        except Exception as exc:  # noqa: BLE001 - diagnostics must not mask
+            per_router[_name] = {"import_error": f"{type(exc).__name__}: {exc}"}
+    diag["per_router"] = per_router
+except Exception as exc:  # noqa: BLE001
+    diag["routers_pkg_error"] = f"{type(exc).__name__}: {exc}"
+
 print(json.dumps({
     "derived": sorted(derived),
     "static": sorted(rl.limiter._route_limits),
     "dynamic": {k: len(v) for k, v in rl.limiter._dynamic_route_limits.items()},
+    "diag": diag,
 }))
 """
 
@@ -290,6 +323,7 @@ class TestRouteLimitCoverage:
         """
         routes = _api_routes()
         assert len(routes) >= MIN_API_ROUTES, (
+            f"DIAG={json.dumps(_probe().get('diag', {}), indent=2)}\n"
             f"the APIRoute walk found only {len(routes)} routes (expected at "
             f"least {MIN_API_ROUTES}). `main.app.routes` moved, or `main` no "
             "longer performs every `include_router`, so the coverage partition "
