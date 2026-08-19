@@ -1,5 +1,72 @@
 # Changelog
 
+## [0.68.0.0] - 2026-08-20
+### fix: v1.19 Phase 146.2 — the echo path must not silently drop a strategy's classification (#694)
+
+The post-merge close-out of Phase 146.1's own code review: seven findings (R1–R7), shipped
+across 8 plans / 3 waves.
+
+**User-facing / data-integrity**
+
+- **R1 — a retry silently discarded the classification you submitted.** When a first attempt
+  had already committed, the duplicate-session echo returned success and threw the request's
+  `category_id`/`asset_class` away, so a strategy you classified as crypto stayed
+  `traditional` forever. The crux is that `strategies.asset_class` is `NOT NULL DEFAULT
+  'traditional'` — "never classified" and "you chose traditional" are **byte-identical**, so
+  the discriminator has to be `category_id IS NULL` (nullable, written by the same atomic
+  UPDATE). The echo now FILLs an absent classification and **REFUSES 409** on a conflicting
+  one rather than overwriting it, because overwriting would leave stored Sharpe/Sortino/CAGR
+  on the old √252-vs-√365 clock while the row claimed the new asset class. Never change the
+  annualization clock without guaranteeing the recompute that reconciles it.
+- **R6 — the honest-uncertainty sentence reached the wire and died there.** Phase 146.1
+  attached a `human_message` to the 23505 echo explaining what had actually been saved;
+  nothing on the client ever rendered it. The step now shows it, **holds instead of
+  navigating**, and gives you an explicit Continue that completes the flow with the echoed
+  strategy id.
+- **R2 — an exchange passphrase reached Sentry unredacted.** OKX-style keys carry a third
+  credential the scrub array never listed. The wire payload and the scrub array now derive
+  from **one** declaration, so a credential cannot be *sent* without being *scrubbed*.
+- **R4 — a corrected re-submit persisted the spent session id.** The re-mint saved the
+  retired id alongside the cleared burn, leaving a window where the wizard could resubmit
+  under an id already spent. One save now carries the new id and the cleared burn together.
+
+**Structural**
+
+- **R3 — the self-healing sweep gets an attempt ceiling** (migration `20260819150000`).
+  The B4 readmit predicate could re-enqueue a reaped orphan hourly forever. Bounded at three
+  `orphaned_running_reaped:%` markers per strategy, AND'ed into the batch CTE so it can only
+  ever shrink the candidate set.
+- **R5 — the csv-finalize fold's guards become NULL-safe** (migration `20260819151000`).
+  `NULL NOT IN (…)` evaluates to NULL, not true, so GUARD 1 fell through its own ELSE and
+  silently passed; GUARD 2's `<>` did the same. Now `IS NULL OR NOT IN` and `IS DISTINCT
+  FROM`, which makes the COMMENT's ERRCODE map truthful. Two hunks, four non-comment lines.
+- **R7 — a pre-1900 date is refused at the route boundary**, 400 `CSV_INVALID_FORMAT`,
+  instead of letting the fold's 22023 surface to you as a retryable 500. The CSV finalize
+  commit is also **attributable for the first time** (`strategy.csv_finalize` audit action),
+  with the audit-coverage law as its standing gate.
+
+**Also in this release**
+
+- **The FILL arm stopped claiming repairs it had not made.** An echo carrying *no*
+  classification still took the FILL arm and wrote its `description`/`aum` onto a row a
+  prior request had committed — the mutation-on-an-echo the clock-safety rule exists to
+  forbid — while reporting a classification had been applied.
+- **A present-but-invalid `category_id` is refused instead of dropped in silence.** The
+  route rejected an explicit `null` but let a non-UUID string, a number or an object fall
+  through unvalidated — contradicting its own "better UX than a silent drop" comment and
+  diverging from `asset_class`/`aum`, which both 400. Pre-existing, but this release makes it
+  load-bearing: it would commit a row reading "never classified" for which the metadata
+  UPDATE *did* run, re-opening the very retry-overwrite R1 closes.
+- Four Phase 146.2 deferrals recorded rather than silently dropped, plus three findings
+  surfaced during planning and review that are **out of this phase's scope**: failed-computation
+  KPIs folding into published percentile rankings, no cron migration ever asserting
+  `cron.job.username`, and the readmit ceiling being silent at the exact moment it gives up.
+
+⚠️ **TWO migrations applied to the database at merge**: `20260819150000` (readmit attempt
+ceiling) and `20260819151000` (fold GUARD 1/2 NULL-safety). Both rehearsed on TEST and
+verified behaviourally — 22023 and 42501 raised on the NULL arms, with a control probe
+proving GUARD 1 still discriminates — before landing.
+
 ## [0.67.0.0] - 2026-08-19
 ### fix: v1.19 xhigh review close-out — Phase 146.1 lands the remaining 13 findings (#692)
 
