@@ -110,24 +110,39 @@ _PROBE_SRC = r"""
 import json, sys
 from fastapi.routing import APIRoute
 
-# ⚠️ IMPORT THE ROUTERS FIRST, THEN `main`. If `main` is imported first and any
-# router module participates in an import cycle back to `main`, that module is
-# still PARTIALLY INITIALISED when `main` reaches its `include_router` calls:
-# its `router` object exists but its `@router.post` decorators have not run yet,
-# so `include_router` copies ZERO routes. The module then finishes and looks
-# complete to any later reader — which is why CI's diagnostics showed every
-# router carrying its full route count while `main.app` held only `/health`.
-# Importing the leaves first means every decorator has run before `main` asks.
-import routers.cron, routers.exchange, routers.match, routers.portfolio  # noqa: F401,E401
-import routers.optimizer, routers.simulator, routers.internal, routers.csv  # noqa: F401,E401
-import routers.process_key, routers.debug_key_flow  # noqa: F401,E401
-
 import main
 from services import rate_limit as rl
 
+# ⚠️ `app.routes` IS NOT A FLAT LIST OF ROUTES on the pinned FastAPI. Since
+# 0.139 `include_router` is DEFERRED: each call appends one opaque
+# `_IncludedRouter` placeholder to `app.routes` and the child routes are
+# materialised only on demand. So `isinstance(r, APIRoute)` over `app.routes`
+# sees ONLY the handlers decorated directly on `app` — MEASURED as 1 of 20
+# under fastapi 0.139.0 (the pin, and what CI installs) versus 20 of 20 under
+# 0.135.1. A local interpreter that has drifted behind the pin therefore
+# passes this gate while CI fails it; that drift is what hid this for a day.
+#
+# `iter_route_contexts` is the flattener FastAPI's own `get_openapi` uses, and
+# `.original_route` hands back the underlying APIRoute with its endpoint
+# identity (`__module__`/`__name__`) intact — which is the join key into
+# slowapi's registries. If a future FastAPI renames it, the fallback below
+# returns the truncated surface and the MIN_API_ROUTES fence reddens rather
+# than the gate silently agreeing with everything.
+try:
+    from fastapi.routing import iter_route_contexts as _iter_ctx
+except ImportError:  # fastapi < 0.139 — `app.routes` is already flat
+    _iter_ctx = None
+
+if _iter_ctx is not None:
+    _walk = [c.original_route for c in _iter_ctx(main.app.routes)]
+    _enumeration = "iter_route_contexts"
+else:
+    _walk = list(main.app.routes)
+    _enumeration = "app.routes"
+
 derived = [
     f"{r.endpoint.__module__}.{r.endpoint.__name__}"
-    for r in main.app.routes
+    for r in _walk
     if isinstance(r, APIRoute)
 ]
 # Diagnostics: when this probe reports a truncated surface the ONLY place it
@@ -151,6 +166,10 @@ diag = {
     )[:30],
     "apiroute_module": APIRoute.__module__,
     "fastapi_file": __import__("fastapi").__file__,
+    "fastapi_version": __import__("fastapi").__version__,
+    # Which enumeration ran. A truncated surface reported as "app.routes" on a
+    # modern fastapi means the flattener was renamed, not that routes vanished.
+    "enumeration": _enumeration,
 }
 try:
     import routers as _routers_pkg
@@ -198,13 +217,16 @@ def _probe() -> dict[str, Any]:
     stubs, all ten ``include_router`` calls at ``main.py:811-825`` add ZERO
     routes and the crippled ``app`` is cached for the rest of the session.
 
-    CI hit exactly that (1 route instead of 20) while the full suite passed
-    locally, because the two environments install different optional
-    dependencies and therefore collect a different set of test modules in a
-    different order. An in-process repair was tried first and did NOT hold in
-    CI. A fresh interpreter is the only derivation that cannot be polluted —
-    and it measures the surface the way PRODUCTION builds it, which is what
-    this gate is about.
+    That pollution risk is real but it is NOT what reddened CI. The observed
+    "1 route instead of 20" was the deferred-``include_router`` change in the
+    pinned fastapi 0.139 (see the enumeration note in ``_PROBE_SRC``); this
+    subprocess was already in place and did not fix it, which is precisely how
+    that hypothesis got falsified. The isolation is kept on its own merits —
+    it removes a whole class of order-dependent failure from a 5000-test
+    session — not as a remedy for the version gap.
+
+    A fresh interpreter also measures the surface the way PRODUCTION builds
+    it, which is what this gate is about.
 
     ⛔ Do not "optimise" this back to a plain ``import main``. The anti-vacuity
     fence below is what catches the failure, and a truncated surface makes the
