@@ -1347,91 +1347,139 @@ async function resolveExistingStrategyOrRefuse(
   let fillHumanMessage: string | undefined;
 
   if (existingRow.category_id === null) {
-    // (a) NEVER CLASSIFIED → FILL. Clock safety is established differently on
-    // each arm, because what makes the fill safe is the RECOMPUTE that follows
-    // it, and only one arm gets one.
-    if (args.rows.length === 0) {
-      // (a2) EMPTY-SERIES ECHO (fmt='trades') — no recompute will fire, so
-      // moving the clock here would be permanent. THE CLOCK-SAFETY GUARD: one
-      // owner-scoped read (the same user-scoped client, so strategies_select
-      // RLS fences it) of the strategy's stored KPIs.
-      //
-      // ⛔ The column set MIRRORS `PERCENTILE_ANALYTICS_COLUMNS`
-      // (the constant `getPercentiles` projects in `queries.ts`) — the exact
-      // columns both percentile callers fold into rankings. The guard measures precisely what a
-      // clock relabel would misrepresent.
-      //
-      // ⚠️ A row CAN exist here with KPI values. `writeFailedStrategyAnalyticsPlaceholder`
-      // below writes `strategy_analytics` rows with no compute job at all — it
-      // writes status/error/flags and NO KPI columns, but PROD carries 7
-      // zero-dailies csv strategies whose failed rows DO hold a sharpe and a
-      // cagr, computed 2026-05-27 under older code. Under current code no
-      // KPI-VALUE writer runs without a completed compute job (both enqueuers
-      // are dailies-gated), so those are a historical class — which is why
-      // this is a per-row MEASUREMENT and never an assumption.
-      const { data: storedAnalytics, error: analyticsErr } = await supabase
-        .from("strategy_analytics")
-        .select(
-          "cagr, sharpe, sortino, calmar, max_drawdown, volatility, cumulative_return",
-        )
-        .eq("strategy_id", existingRow.id)
-        .maybeSingle();
-      if (analyticsErr) {
-        // Unconfirmable clock safety is not a licence to write. `.code` is the
-        // allowlisted SQLSTATE (SEAMRIM-06); the rest of the read error is not
-        // carried into the synthetic message.
-        const sqlstate =
-          typeof (analyticsErr as { code?: unknown }).code === "string"
-            ? (analyticsErr as { code: string }).code
-            : "(no code)";
-        return failClosed(
-          new Error(
-            `clock-safety guard: the strategy_analytics read failed (${sqlstate}), so stored-KPI absence could not be measured on this request`,
-          ),
-          "strategy_analytics",
-        );
-      }
-      const storedKpis = storedAnalytics as Record<string, unknown> | null;
-      // `!== null` and not a truthiness test: a stored 0 (a real cagr of zero)
-      // is a KPI. A column that came back `undefined` — schema drift — is an
-      // absent reading and counts as PRESENT here on purpose: it is the
-      // conservative direction, and absence of a measurement never licenses
-      // moving the clock.
-      const storedKpiPresent =
-        storedKpis !== null &&
-        CLOCK_SAFETY_KPI_COLUMNS.some((col) => storedKpis[col] !== null);
-      if (storedKpiPresent) {
-        // REFUSE, and write NOTHING — not even `category_id`. A partial fill
-        // would promote a row that is currently discovery-invisible into the
-        // listing join, making KPIs computed under a DIFFERENT clock reachable
-        // in the browse table and in percentile ranks. Half-applying a
-        // classification is also exactly the silent partial drop this whole
-        // change exists to stop.
-        return refuse(
-          "clock-safety: stored KPIs present on a never-classified row and no recompute path exists on an empty-series echo",
-          "An earlier attempt in this wizard session had already saved this " +
-            "strategy without the classification you chose, and it already " +
-            "carries computed metrics. Changing its classification now would " +
-            "relabel those metrics without recomputing them, so we changed " +
-            "nothing. Start a new strategy to upload this file with the " +
-            "classification you want.",
-        );
-      }
+    // (a) NEVER CLASSIFIED → FILL — and never before clock safety has been
+    // MEASURED, on this request, against this strategy.
+    //
+    // ⚖️ 146.2-02 / BL-02 (2026-08-19) — THE ASYMMETRY WAS THE DEFECT. This
+    // guard used to sit INSIDE `if (args.rows.length === 0)`. The empty-series
+    // arm measured the stored KPIs and refused; the series-bearing arm filled
+    // unguarded, on the premise that "the enqueue below fires after the awaited
+    // UPDATE, so the recompute is the reconciliation. No guard read is needed."
+    //
+    // That premise ASSUMED the one side effect this file carries ~150 lines of
+    // fallback machinery for. `enqueueCsvAnalyticsAfter` is `after()`-scheduled
+    // and non-blocking, and Phase 143's sweep exists precisely because the
+    // enqueue DROPS. When it drops after a fill, nothing heals it:
+    // `writeFailedStrategyAnalyticsPlaceholder` returns early once the row is a
+    // terminal success, and the Phase 143 sweep excludes `computation_status IN
+    // (…,'complete',…)` (20260819150000:397-402). The steady state is a
+    // crypto-labelled, discovery-visible, `complete` row whose Sharpe, Sortino,
+    // Calmar and CAGR were computed on sqrt(252) — the EXACT outcome the
+    // empty-series arm refuses to create, reached from the arm with no guard.
+    //
+    // ⛔ ONE RULE, BOTH ARMS, NOT NEGOTIABLE: never move the annualization
+    // clock without GUARANTEEING the recompute that reconciles it. An `after()`
+    // enqueue is not a guarantee. What makes a fill safe is the MEASURED
+    // ABSENCE of KPIs a clock move would misrepresent — never the arm it
+    // arrived on.
+    //
+    // ⛔ AND THE SYMMETRY IS UPWARD. Gating the series-bearing fill on the
+    // enqueue having been ISSUED was rejected: the enqueue is scheduled to run
+    // AFTER the response, so awaiting it would mean enqueueing BEFORE this
+    // UPDATE — recomputing the KPIs under the very clock the fill was about to
+    // replace (see the ⛔ ORDER IS LOAD-BEARING note at the call site). And
+    // "issued" is not "ran": that is what Phase 143 is about.
+    //
+    // THE GUARD ITSELF: one owner-scoped read (the same user-scoped client, so
+    // strategies_select RLS fences it) of the strategy's stored KPIs.
+    //
+    // ⛔ The column set MIRRORS `PERCENTILE_ANALYTICS_COLUMNS`
+    // (the constant `getPercentiles` projects in `queries.ts`) — the exact
+    // columns both percentile callers fold into rankings. The guard measures precisely what a
+    // clock relabel would misrepresent.
+    //
+    // ⚠️ A row CAN exist here with KPI values. `writeFailedStrategyAnalyticsPlaceholder`
+    // below writes `strategy_analytics` rows with no compute job at all — it
+    // writes status/error/flags and NO KPI columns, but PROD carries 7
+    // zero-dailies csv strategies whose failed rows DO hold a sharpe and a
+    // cagr, computed 2026-05-27 under older code. Under current code no
+    // KPI-VALUE writer runs without a completed compute job (both enqueuers
+    // are dailies-gated), so those are a historical class — which is why
+    // this is a per-row MEASUREMENT and never an assumption. On the
+    // series-bearing arm the population is wider still: any row the worker
+    // already finished for the FIRST attempt is a completed, KPI-bearing row.
+    const { data: storedAnalytics, error: analyticsErr } = await supabase
+      .from("strategy_analytics")
+      .select(
+        "cagr, sharpe, sortino, calmar, max_drawdown, volatility, cumulative_return",
+      )
+      .eq("strategy_id", existingRow.id)
+      .maybeSingle();
+    if (analyticsErr) {
+      // Unconfirmable clock safety is not a licence to write. `.code` is the
+      // allowlisted SQLSTATE (SEAMRIM-06); the rest of the read error is not
+      // carried into the synthetic message.
+      const sqlstate =
+        typeof (analyticsErr as { code?: unknown }).code === "string"
+          ? (analyticsErr as { code: string }).code
+          : "(no code)";
+      return failClosed(
+        new Error(
+          `clock-safety guard: the strategy_analytics read failed (${sqlstate}), so stored-KPI absence could not be measured on this request`,
+        ),
+        "strategy_analytics",
+      );
     }
-    // (a1) SERIES-BEARING ECHO — the enqueue below fires after the awaited
-    // UPDATE, so the stored KPIs recompute under the FILLED clock. No guard
-    // read is needed: the recompute is the reconciliation.
-    // (a2, continued) — or the guard MEASURED no stored KPIs, so there is
-    // nothing the missing recompute could leave stale.
-    fillClassification = true;
-    fillHumanMessage =
-      "An earlier attempt in this wizard session had already saved this " +
-      "strategy, but it was saved without the details you entered — " +
-      "including the category and the asset class that decides how its " +
-      "returns are annualized — so we applied them to it now. We compared " +
-      "the saved track record's row count and its first and last dates " +
-      "against this file, not the individual daily values, so open the " +
-      "strategy to check it holds the numbers you meant to upload.";
+    const storedKpis = storedAnalytics as Record<string, unknown> | null;
+    // `!== null` and not a truthiness test: a stored 0 (a real cagr of zero)
+    // is a KPI. A column that came back `undefined` — schema drift — is an
+    // absent reading and counts as PRESENT here on purpose: it is the
+    // conservative direction, and absence of a measurement never licenses
+    // moving the clock.
+    const storedKpiPresent =
+      storedKpis !== null &&
+      CLOCK_SAFETY_KPI_COLUMNS.some((col) => storedKpis[col] !== null);
+    if (storedKpiPresent) {
+      // REFUSE, and write NOTHING — not even `category_id`. A partial fill
+      // would promote a row that is currently discovery-invisible into the
+      // listing join, making KPIs computed under a DIFFERENT clock reachable
+      // in the browse table and in percentile ranks. Half-applying a
+      // classification is also exactly the silent partial drop this whole
+      // change exists to stop.
+      //
+      // The REASON names the arm, because the two arms are unsafe for
+      // different reasons and an operator reading the log needs to know which
+      // one fired. The empty-series string is byte-unchanged from plan 01.
+      return refuse(
+        args.rows.length === 0
+          ? "clock-safety: stored KPIs present on a never-classified row and no recompute path exists on an empty-series echo"
+          : "clock-safety: stored KPIs present on a never-classified row and the only reconciling recompute is an after() enqueue that is not guaranteed to run",
+        "An earlier attempt in this wizard session had already saved this " +
+          "strategy without the classification you chose, and it already " +
+          "carries computed metrics. Changing its classification now would " +
+          "relabel those metrics without recomputing them, so we changed " +
+          "nothing. Start a new strategy to upload this file with the " +
+          "classification you want.",
+      );
+    }
+    // The guard MEASURED no stored KPIs, so there is nothing a moved clock
+    // could leave stale on either arm.
+    //
+    // ⚖️ 146.2-02 / BL-01 (2026-08-19) — A FILL THIS REQUEST CANNOT SUPPLY IS
+    // NOT A FILL. `fillClassification` widens the metadata gate at the call
+    // site and `fillHumanMessage` tells the user their category and asset class
+    // were applied. Both are false when THIS request carries neither: the
+    // widened gate would hand `buildMetadataUpdatePayload` whatever else the
+    // blob holds — a description, an aum — and write it onto a row a PRIOR
+    // request committed, which is the mutation-on-an-echo A4 forbids; or the
+    // payload is empty, no UPDATE runs at all, and the user is told their
+    // classification was applied to it. The fill exists to land a DROPPED
+    // classification, so it requires one to land. No fill, no refusal → the
+    // plain echo, which is the status quo ante and the safe direction.
+    if (
+      args.requestedCategoryId !== null ||
+      args.requestedAssetClass !== null
+    ) {
+      fillClassification = true;
+      fillHumanMessage =
+        "An earlier attempt in this wizard session had already saved this " +
+        "strategy, but it was saved without the details you entered — " +
+        "including the category and the asset class that decides how its " +
+        "returns are annualized — so we applied them to it now. We compared " +
+        "the saved track record's row count and its first and last dates " +
+        "against this file, not the individual daily values, so open the " +
+        "strategy to check it holds the numbers you meant to upload.";
+    }
   } else if (typeof existingRow.category_id === "string") {
     // (b) ALREADY CLASSIFIED → compare PRESENT vs PRESENT. A conflict is a
     // mutation, not a repair: the committed row's stored KPIs were computed
@@ -1762,40 +1810,66 @@ function enqueueCsvAnalyticsAfter(
  * fence, so a session-reuse 409 had already overwritten the resolved
  * strategy's metadata while telling the user nothing had been written.
  *
- * Returns null on success (or when there is nothing to update).
- * Returns a 400 NextResponse when parseCsvMetadata signals a
- * present-but-invalid field (NEW-C14-03 / NEW-C14-05) — unreachable in
- * practice because the identical parse already ran pre-create. The UPDATE
- * failure path (RLS/22P02) is non-fatal — it logs + captures to Sentry
- * but returns null so the strategy row already persisted is not rolled
- * back.
+ * ⚖️ 146.2-02 / BL-01 (2026-08-19) — THE OUTCOME IS REPORTED, NOT SWALLOWED.
+ * This helper used to answer `NextResponse | null`, where `null` meant BOTH
+ * "the UPDATE landed" and "the UPDATE failed and I logged it" — the caller
+ * could not tell them apart, and the 146.2-01 FILL arm answered 200 with copy
+ * that said "so we applied them to it now" over a failed write. A user told
+ * their classification was repaired does not retry, so the crypto track record
+ * keeps `asset_class 'traditional'` and its KPIs keep sqrt(252) FOREVER —
+ * strictly worse than the R1 bug, which at least said nothing.
+ *
+ * ⛔ The FAILURE SEMANTICS ARE UNCHANGED HERE and the decision moved to the
+ * caller, deliberately: the fresh-create path's non-fatal handling of an UPDATE
+ * failure is long-standing (the strategy row already persisted must not be
+ * rolled back), and only the arm 146.2-01 introduced needs a different answer.
+ * This function now only REPORTS; nothing about which outcome is fatal is
+ * decided inside it.
+ *
+ *   'applied'       → the UPDATE ran and PostgREST returned no error.
+ *   'noop'          → there was nothing to write, so no UPDATE was issued.
+ *   'invalid'       → parseCsvMetadata signalled a present-but-invalid field
+ *                     (NEW-C14-03 / NEW-C14-05) — unreachable in practice
+ *                     because the identical parse already ran pre-create. Carries
+ *                     the 400 the caller must return.
+ *   'update_failed' → the UPDATE was issued and PostgREST returned an error
+ *                     (RLS/22P02). Logged + captured to Sentry here, as before.
  */
+type CsvMetadataUpdateResult =
+  | { kind: "applied" }
+  | { kind: "noop" }
+  | { kind: "invalid"; response: NextResponse }
+  | { kind: "update_failed" };
+
 async function applyCsvMetadataUpdate(
   supabase: SupabaseClient,
   strategyId: string,
   userId: string,
   metadataRaw: unknown,
   opts: { correlationId: string },
-): Promise<NextResponse | null> {
+): Promise<CsvMetadataUpdateResult> {
   // NEW-C14-03 + NEW-C14-05: parseCsvMetadata now returns a discriminated
   // union. A present-but-invalid field (bad aum, over-cap description) is
   // a caller error — surface it as a 400 so the wizard can show a specific
   // field error instead of silently publishing a bad factsheet.
   const parsed = parseCsvMetadata(metadataRaw);
   if (!parsed.ok) {
-    return NextResponse.json(
-      {
-        ok: false,
-        code: "CSV_INVALID_FORMAT",
-        human_message: parsed.message,
-        debug_context: { field: parsed.field },
-        correlation_id: opts.correlationId,
-      },
-      { status: 400, headers: NO_STORE_HEADERS },
-    );
+    return {
+      kind: "invalid",
+      response: NextResponse.json(
+        {
+          ok: false,
+          code: "CSV_INVALID_FORMAT",
+          human_message: parsed.message,
+          debug_context: { field: parsed.field },
+          correlation_id: opts.correlationId,
+        },
+        { status: 400, headers: NO_STORE_HEADERS },
+      ),
+    };
   }
   const updatePayload = buildMetadataUpdatePayload(parsed.payload);
-  if (Object.keys(updatePayload).length === 0) return null;
+  if (Object.keys(updatePayload).length === 0) return { kind: "noop" };
   // @audit-skip: continuation of the csv-wizard strategy creation
   // flow — finalize_csv_strategy_with_returns created the row milliseconds
   // ago (SECURITY DEFINER, audit-skipped like create_wizard_strategy +
@@ -1822,8 +1896,12 @@ async function applyCsvMetadataUpdate(
       tags: { surface: "csv-finalize", step: "metadata-update" },
       extra: { strategy_id: strategyId, correlation_id: opts.correlationId },
     });
+    // 146.2-02 / BL-01: the log + capture above are unchanged; what changed is
+    // that the caller now LEARNS this happened instead of receiving the same
+    // `null` a success returns.
+    return { kind: "update_failed" };
   }
-  return null;
+  return { kind: "applied" };
 }
 
 export const POST = withAuth(async (req: NextRequest, user: User) => {
@@ -2308,16 +2386,58 @@ async function unifiedCsvFinalizeHandler(args: {
   // enqueue below, so on a series-bearing fill the worker reads the POST-FILL
   // clock. Moving the enqueue above this line would recompute the KPIs under
   // the clock the fill was about to replace.
-  const metaErrResponse = outcome.fresh || outcome.fillClassification
-    ? await applyCsvMetadataUpdate(
-        supabase,
-        outcome.strategyId,
-        args.userId,
-        args.metadataRaw,
-        { correlationId: args.correlationId },
-      )
-    : null;
-  if (metaErrResponse) return metaErrResponse;
+  //
+  // ⚖️ 146.2-02 / BL-01 (2026-08-19) — AND THE FILL ARM READS THE OUTCOME.
+  // `applyCsvMetadataUpdate` used to answer `null` for BOTH "the UPDATE landed"
+  // and "the UPDATE failed, I logged it and captured it", so this call site
+  // could not tell them apart and answered 200 either way. On the FRESH path
+  // that is the long-standing and deliberate call: the strategy row already
+  // persisted, and rolling the request back over a metadata write would be
+  // worse. On the FILL arm it is a LIE with a cost — the echo's copy says "so
+  // we applied them to it now", and a user who is told the repair happened does
+  // not retry. The strategy then keeps `category_id NULL` (invisible to
+  // discovery) and `asset_class 'traditional'` (sqrt(252)) on a crypto track
+  // record, with no post-creation editor anywhere in the product that could fix
+  // it. Silence, as R1 shipped it, was better than a false receipt.
+  //
+  // REFUSING COSTS NOTHING HERE, which is why this arm can afford the truth:
+  // the strategy is already committed, this request wrote nothing, and the
+  // resubmit is idempotent — the fill discriminator (`category_id IS NULL`)
+  // still reads NULL, so the next attempt takes the same arm and repairs it.
+  //
+  // `!== "applied"` and not `=== "update_failed"`: 'noop' means no UPDATE was
+  // issued at all, which is equally not a repair. The fill arm now answers 200
+  // only when an UPDATE actually ran and actually succeeded.
+  if (outcome.fresh || outcome.fillClassification) {
+    const metaResult = await applyCsvMetadataUpdate(
+      supabase,
+      outcome.strategyId,
+      args.userId,
+      args.metadataRaw,
+      { correlationId: args.correlationId },
+    );
+    if (metaResult.kind === "invalid") return metaResult.response;
+    if (outcome.fillClassification && metaResult.kind !== "applied") {
+      console.warn(
+        `${args.logPrefix} classification FILL did not land (${metaResult.kind}) — refusing to report it as applied [correlation_id=${args.correlationId}] strategy_id=${outcome.strategyId}`,
+      );
+      return NextResponse.json(
+        {
+          ok: false,
+          code: "CSV_PERSIST_FAIL",
+          human_message:
+            "An earlier attempt in this wizard session had already saved this " +
+            "strategy, and we tried to apply the category and asset class you " +
+            "entered to it just now — but that write did not land, so nothing " +
+            "was changed. Submit the same file again shortly; it will not " +
+            "create a second strategy.",
+          debug_context: { strategy_id: outcome.strategyId },
+          correlation_id: args.correlationId,
+        },
+        { status: 503, headers: NO_STORE_HEADERS },
+      );
+    }
+  }
 
   // Phase 19.1 / T-19.1-05 / PR #275 + Maintainability W-2: shared
   // helper for the enqueue side-effect. Same non-blocking semantics —

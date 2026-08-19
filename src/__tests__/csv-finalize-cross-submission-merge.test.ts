@@ -120,6 +120,17 @@ const updateCalls = vi.hoisted(
   () => [] as Array<{ payload: Record<string, unknown> }>,
 );
 
+/**
+ * 146.2-02 / BL-01 — what PostgREST answers the metadata UPDATE with. It was
+ * hardwired to `{ error: null }`, so NO case in this file could reach the
+ * failure path, and the FILL arm's 200-over-a-failed-write was invisible to
+ * every assertion here. `error: null` stays the default, so every pre-existing
+ * arm is untouched.
+ */
+const updateOutcome = vi.hoisted(
+  () => ({ error: null as { code?: string; message?: string } | null }),
+);
+
 const rpcMock = vi.hoisted(() => vi.fn());
 
 vi.mock("@/lib/supabase/server", () => ({
@@ -139,7 +150,7 @@ vi.mock("@/lib/supabase/server", () => ({
         eq: () => ({
           eq: () => {
             updateCalls.push({ payload });
-            return Promise.resolve({ error: null });
+            return Promise.resolve({ error: updateOutcome.error });
           },
         }),
       }),
@@ -334,6 +345,7 @@ beforeEach(() => {
   analyticsProbe.error = null;
   analyticsProbe.reads.length = 0;
   updateCalls.length = 0;
+  updateOutcome.error = null;
   afterCallbacks.length = 0;
   // `vi.clearAllMocks()` above strips the implementation, and the enqueue
   // callback destructures the result — restore it every test.
@@ -1527,6 +1539,278 @@ describe("[146.2-01 / R1] an echo FILLS an absent classification and REFUSES a c
       "the echo reported a terminal status it never read — the fabricated " +
         "'pending_review' is indistinguishable from a measured one",
     ).not.toContain("pending_review");
+    expect(updateCalls).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 146.2-02 — REVIEW-BLOCKER CLOSURE ON THE FILL ARM 146.2-01 INTRODUCED
+// ---------------------------------------------------------------------------
+
+/**
+ * Two data-integrity defects the phase's own code review found in the arm
+ * above. Both are about the same thing from two directions: the FILL arm makes
+ * a CLAIM it has not established.
+ *
+ * BL-01 — IT CLAIMS THE REPAIR HAPPENED. `applyCsvMetadataUpdate` answered
+ * `null` on a FAILED UPDATE (it logged and captured to Sentry, then returned
+ * the same value a success returns), and the call site only tested for a
+ * response object. So a 42501 on the fill answered 200 carrying "…so we applied
+ * them to it now." A user who is told the repair landed does not retry, and the
+ * crypto track record keeps `asset_class 'traditional'` — sqrt(252) on
+ * sqrt(365) returns — permanently, with no post-creation editor to fix it. That
+ * is strictly worse than the R1 bug it replaced, which said nothing at all.
+ *
+ * BL-02 — IT CLAIMS THE RECONCILIATION WILL HAPPEN. The series-bearing arm
+ * filled unguarded on the premise "the recompute is the reconciliation", while
+ * the empty-series arm MEASURED the stored KPIs and refused. But the recompute
+ * is an `after()` enqueue — the exact side effect Phase 143's sweep exists
+ * because it DROPS. And a drop after a fill is unhealable: the placeholder
+ * writer returns early on a terminal success, and the Phase 143 sweep excludes
+ * `computation_status IN (…,'complete',…)`. The steady state is a
+ * crypto-labelled, discovery-visible, `complete` row whose Sharpe and CAGR were
+ * computed on sqrt(252) — precisely what the empty-series arm refuses to
+ * create.
+ *
+ * THE ECONOMIC INVARIANT BOTH ARMS SERVE, stated independently of any
+ * implementation: a strategy's stored KPIs and its `asset_class` label must
+ * name the SAME annualization clock — sqrt(365) for crypto, sqrt(252) for
+ * traditional (#597 part 2). The route may only move that label when it has
+ * established that nothing stale is left wearing the old one. "Established" is
+ * a measurement or a guarantee; it is never a premise about a scheduled job.
+ */
+describe("[146.2-02 / BL-01] a FILL that did not land cannot be reported as applied", () => {
+  it("🔴 the metadata UPDATE FAILS on the FILL arm — the echo must not answer 200 'we applied them to it now'", async () => {
+    // The R1 chain, with the repair itself failing: RLS denies the UPDATE.
+    arm23505({
+      id: EXISTING_ID,
+      name: "Alpha",
+      status: "pending_review",
+      category_id: null,
+      asset_class: "traditional",
+    });
+    armCommitted2024();
+    updateOutcome.error = {
+      code: "42501",
+      message: "new row violates row-level security policy",
+    };
+
+    const res = await postWithMetadata(SERIES_2024, {
+      asset_class: "crypto",
+      category_id: CATEGORY_ID,
+    });
+    await flushAfter();
+
+    // The write vector, not the return value: the UPDATE was genuinely
+    // attempted, so this arm cannot pass by declining to write.
+    expect(
+      updateCalls,
+      "the fill never issued the UPDATE at all — this case is not testing " +
+        "the failure path it claims to test",
+    ).toHaveLength(1);
+    expect(updateCalls[0].payload).toMatchObject({ asset_class: "crypto" });
+
+    expect(
+      res.status,
+      "a FAILED classification repair answered 200 — the crypto track record " +
+        "keeps the 'traditional' clock (sqrt(252) on sqrt(365) returns) and " +
+        "the user, told it was repaired, will never retry",
+    ).toBe(503);
+    const body = await res.json();
+    expect(body.ok).toBe(false);
+    expect(body.code).toBe("CSV_PERSIST_FAIL");
+    expect(
+      String(body.human_message ?? ""),
+      "the refusal reused the FILL's success copy — it still tells the user " +
+        "their classification was applied",
+    ).not.toContain("so we applied them to it now");
+    // SEAMUX-04: state the fact and put a non-destructive next step ahead of
+    // the resubmit. The fill is idempotent — `category_id` still reads NULL.
+    expect(String(body.human_message ?? "").toLowerCase()).toContain(
+      "did not land",
+    );
+  });
+
+  it("ANTI-REGRESSION: a FAILED UPDATE on a FRESH CREATE is still non-fatal — the persisted row is not rolled back", async () => {
+    // Load-bearing counterweight. BL-01's fix must NOT change the long-standing
+    // create-path semantics: `finalize_csv_strategy_with_returns` already
+    // committed the strategy and its dailies, so answering 503 there would tell
+    // the user nothing was saved while a strategy sits in their account. If
+    // this arm reds, the fix leaked out of the arm 146.2-01 introduced.
+    updateOutcome.error = {
+      code: "42501",
+      message: "new row violates row-level security policy",
+    };
+
+    const res = await postWithMetadata(SERIES_2024, { asset_class: "crypto" });
+
+    expect(res.status).toBe(200);
+    expect(updateCalls).toHaveLength(1);
+  });
+
+  it("🔴 an echo carrying NO classification is not a FILL — it neither claims one nor mutates the committed row", async () => {
+    // `fillClassification` widens the metadata gate. With nothing to fill, that
+    // widened gate wrote this request's OTHER metadata onto a row a PRIOR
+    // request committed — the mutation-on-an-echo A4 forbids — while the copy
+    // told the user their category and asset class had been applied. Neither
+    // field is in this payload; `description` is, and it must not land.
+    arm23505({
+      id: EXISTING_ID,
+      name: "Alpha",
+      status: "pending_review",
+      category_id: null,
+      asset_class: "traditional",
+    });
+    armCommitted2024();
+
+    const res = await postWithMetadata(SERIES_2024, {
+      description: "a mutation the user never asked for",
+    });
+
+    expect(res.status).toBe(200);
+    expect(
+      updateCalls,
+      "an echo with no classification to fill still rewrote the committed " +
+        "row's metadata — A4's rule, breached through the fill arm's gate",
+    ).toEqual([]);
+    const body = await res.json();
+    expect(
+      String(body.human_message ?? ""),
+      "the echo claimed a classification repair on a request that carried no " +
+        "classification",
+    ).not.toContain("so we applied them to it now");
+  });
+});
+
+describe("[146.2-02 / BL-02] the series-bearing FILL measures the clock safety it used to assume", () => {
+  it("🔴 THE ECONOMIC CASE: a series-bearing fill over COMPLETE, sqrt(252)-computed KPIs is refused", async () => {
+    // The committed row is never-classified (`category_id` NULL ⇒ the first
+    // attempt's metadata UPDATE never ran) AND the worker already finished it:
+    // `computation_status: 'complete'` with a real sharpe and cagr, computed
+    // under the column default 'traditional' ⇒ sqrt(252).
+    //
+    // This request declares crypto ⇒ sqrt(365). Filling moves the LABEL. The
+    // only thing that would move the NUMBERS is the `after()` enqueue, which is
+    // not guaranteed to run — and if it drops, nothing heals it: the
+    // placeholder writer returns early on a terminal success and the Phase 143
+    // sweep excludes 'complete'. The row would sit crypto-labelled and
+    // discovery-visible with sqrt(252) numbers, which is the exact state the
+    // empty-series arm refuses to create.
+    arm23505({
+      id: EXISTING_ID,
+      name: "Alpha",
+      status: "pending_review",
+      category_id: null,
+      asset_class: "traditional",
+    });
+    armCommitted2024();
+    analyticsProbe.row = {
+      ...PROD_FAILED_WITH_KPIS,
+      computation_status: "complete",
+    };
+
+    const res = await postWithMetadata(SERIES_2024, {
+      asset_class: "crypto",
+      category_id: CATEGORY_ID,
+    });
+    await flushAfter();
+
+    expect(
+      analyticsProbe.reads,
+      "the series-bearing fill never READ strategy_analytics — clock safety " +
+        "was assumed from the arm it arrived on, not measured on this request",
+    ).toEqual([EXISTING_ID]);
+    expect(res.status).toBe(409);
+    const body = await res.json();
+    expect(body.ok).toBe(false);
+    expect(body.code).toBe("CSV_SESSION_REUSED");
+    expect(
+      updateCalls,
+      "the clock moved to crypto (sqrt(365)) over stored KPIs computed on " +
+        "sqrt(252), on the strength of an after() enqueue that is not " +
+        "guaranteed to run — and the category_id write promoted the row into " +
+        "discovery, where those numbers are read ungated",
+    ).toEqual([]);
+    expect(
+      enqueuedRpcNames(),
+      "a refusal that writes nothing still scheduled a recompute",
+    ).toEqual([]);
+  });
+
+  it("SYMMETRY: the empty-series arm still refuses the same state — the fix moved the guard UP, never down", async () => {
+    // Non-negotiable direction check. If BL-02 had been "closed" by removing
+    // the empty-series guard so the two arms agreed, this arm would go green
+    // at 200 and the whole clock-safety rule would be gone.
+    arm23505({
+      id: EXISTING_ID,
+      name: "Alpha",
+      status: "pending_review",
+      category_id: null,
+      asset_class: "traditional",
+    });
+    analyticsProbe.row = { ...PROD_FAILED_WITH_KPIS };
+
+    const res = await postTradesWithMetadata({
+      asset_class: "crypto",
+      category_id: CATEGORY_ID,
+    });
+
+    expect(res.status).toBe(409);
+    expect(updateCalls).toEqual([]);
+  });
+
+  it("POSITIVE: a series-bearing fill over MEASURED-ABSENT KPIs still lands the clock and rides the recompute", async () => {
+    // The guard is a measurement, not a blanket refusal. `analyticsProbe.row`
+    // is null — the read HAPPENED and found nothing — so no stored number
+    // carries the old convention and the fill is clock-safe. Without this arm,
+    // "refuse everything" would pass BL-02 while destroying R1's repair.
+    arm23505({
+      id: EXISTING_ID,
+      name: "Alpha",
+      status: "pending_review",
+      category_id: null,
+      asset_class: "traditional",
+    });
+    armCommitted2024();
+
+    const res = await postWithMetadata(SERIES_2024, {
+      asset_class: "crypto",
+      category_id: CATEGORY_ID,
+    });
+    await flushAfter();
+
+    expect(res.status).toBe(200);
+    expect(analyticsProbe.reads).toEqual([EXISTING_ID]);
+    expect(updateCalls).toHaveLength(1);
+    expect(updateCalls[0].payload).toMatchObject({
+      asset_class: "crypto",
+      category_id: CATEGORY_ID,
+    });
+    expect(enqueuedRpcNames()).toContain("enqueue_compute_job");
+  });
+
+  it("a FAILED clock-safety read on the SERIES-BEARING arm fails CLOSED — an unmeasurable clock is never moved", async () => {
+    // The empty-series arm already had this. Symmetry means the series-bearing
+    // arm gets it too: a read we could not make is never read as "nothing is
+    // there", because that reading is exactly the licence to move the clock.
+    arm23505({
+      id: EXISTING_ID,
+      name: "Alpha",
+      status: "pending_review",
+      category_id: null,
+      asset_class: "traditional",
+    });
+    armCommitted2024();
+    analyticsProbe.error = { code: "PGRST301", message: "JWT expired" };
+
+    const res = await postWithMetadata(SERIES_2024, {
+      asset_class: "crypto",
+      category_id: CATEGORY_ID,
+    });
+
+    expect(res.status).toBe(503);
+    const body = await res.json();
+    expect(body.code).toBe("CSV_PERSIST_FAIL");
     expect(updateCalls).toEqual([]);
   });
 });
