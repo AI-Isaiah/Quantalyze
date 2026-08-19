@@ -892,18 +892,34 @@ describe("[146.1-04 / A2] the resolve arm refuses a TERMINAL-STATUS mismatch", (
     // The guard mirrors the name check's `typeof === "string" &&` shape for
     // exactly this reason. A guard that refuses every row whose `status` did
     // not come back would ship green without this case.
+    //
+    // ⚠️ 146.2-01 / A2 RESIDUAL RE-CUT THE OUTCOME, NOT THE RULE. This arm used
+    // to assert `200` + `ok:true`, which pinned the echo that the SAME absence
+    // then reported as `status: existingRow.status ?? "pending_review"` — a
+    // value nobody read. Both halves of A2's discipline are now enforced and
+    // they point at DIFFERENT answers: an absent reading is not an observed
+    // MISMATCH (so: never the 409 refusal this arm guards), and it is not an
+    // observed STATUS either (so: no echo, fail closed). What this arm pins is
+    // the first half, and it still discriminates — an A2 check that dropped its
+    // `typeof` guard would answer 409 / CSV_SESSION_REUSED here, not 503.
     arm23505({ id: EXISTING_ID, name: "Alpha", status: undefined });
     armCommitted2024();
 
     const res = await post(SERIES_2024);
 
+    const body = await res.json();
     expect(
-      res.status,
+      body.code,
       "a row with no readable status was refused as though a mismatch had " +
         "been OBSERVED — absence rendered as a measurement",
-    ).toBe(200);
-    const body = await res.json();
-    expect(body.ok).toBe(true);
+    ).not.toBe("CSV_SESSION_REUSED");
+    expect(
+      sentrySteps(),
+      "the resolve arm reported a REFUSAL for a status it never read",
+    ).not.toContain("finalize-resolve-refused");
+    // The other half: unconfirmable, so nothing is echoed.
+    expect(res.status).toBe(503);
+    expect(body.code).toBe("CSV_PERSIST_FAIL");
   });
 
   it("the STATUS comparison runs BEFORE the name check — the reason names the flow, not the name", async () => {
