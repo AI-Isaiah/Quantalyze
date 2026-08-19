@@ -111,8 +111,8 @@ const DAILY_RETURNS_DATE_REGEX = /^\d{4}-\d{2}-\d{2}$/;
  * ⛔ THIS IS A COPY OF THE FOLD'S OWN LITERAL, and the two must stay equal.
  * `finalize_csv_strategy_with_returns` GUARD 9 refuses `(elem->>'date')::DATE
  * < DATE '1900-01-01'` with SQLSTATE 22023
- * (`20260819151000_csv_finalize_fold_guard1_null_safe.sql:369`, carried
- * unchanged from `20260819130000:350`). See the fence in
+ * (GUARD 9 of `finalize_csv_strategy_with_returns`, carried unchanged from
+ * the definition `20260819130000` re-issued). See the fence in
  * `parseDailyReturnsSeries` for why mirroring it route-side matters: a fold
  * 22023 is answered 500 "safe to try again", which is false for an input that
  * fails identically forever.
@@ -259,8 +259,8 @@ export function parseDailyReturnsSeries(raw: unknown): ParsedDailyReturnsSeries 
     }
     // R7 (146.2-06) — THE DATE LOWER BOUND, MIRRORING THE FOLD.
     //
-    // The fold already refuses this row (GUARD 9,
-    // 20260819151000_csv_finalize_fold_guard1_null_safe.sql:369 —
+    // The fold already refuses this row (GUARD 9 of
+    // `finalize_csv_strategy_with_returns` —
     // `OR (elem->>'date')::DATE < DATE '1900-01-01'`) with SQLSTATE 22023.
     // But a fold 22023 is a CLASS 1 rolled-back failure here, answered 500
     // CSV_FINALIZE_FAIL whose copy says the submission is SAFE TO TRY AGAIN.
@@ -964,7 +964,7 @@ async function finalizeAtomicOrErrorResponse(
 /**
  * 146.2-01 / R1 — the columns the CLOCK-SAFETY GUARD measures on an
  * empty-series echo, MIRRORING `PERCENTILE_ANALYTICS_COLUMNS`
- * (src/lib/queries.ts:126-127) member for member. That constant is the set both
+ * (the constant `getPercentiles` projects in `queries.ts`) member for member. That constant is the set both
  * percentile callers fold into rankings, so this is exactly the set a clock
  * relabel without a recompute would misrepresent. It is duplicated rather than
  * imported deliberately: `queries.ts` is a client-reachable module and the
@@ -1357,8 +1357,8 @@ async function resolveExistingStrategyOrRefuse(
       // RLS fences it) of the strategy's stored KPIs.
       //
       // ⛔ The column set MIRRORS `PERCENTILE_ANALYTICS_COLUMNS`
-      // (src/lib/queries.ts:126-127) — the exact columns both percentile
-      // callers fold into rankings. The guard measures precisely what a
+      // (the constant `getPercentiles` projects in `queries.ts`) — the exact
+      // columns both percentile callers fold into rankings. The guard measures precisely what a
       // clock relabel would misrepresent.
       //
       // ⚠️ A row CAN exist here with KPI values. `writeFailedStrategyAnalyticsPlaceholder`
