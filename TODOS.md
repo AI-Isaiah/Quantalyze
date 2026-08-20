@@ -2496,3 +2496,39 @@ runaway), and every v1.19 requirement is satisfied as written.
   write route is now covered by `limiter-ordering.test.ts:103` alone. Documented, not broken —
   kept here as the worked example of one phase's refactor moving another phase's gate
   boundary (relevant to INT-2's design).
+
+## Phase 158 — recorded deferrals (logged 2026-08-20)
+
+- [ ] **[158-OPS-04] drain execution deferred — the TEST `compute_jobs` backlog is NOT yet
+  drained.** Plan 158-03 landed both halves it could land: the `claimed_at` stamps in the two
+  direct running-flip UPDATEs (`analytics-service/tests/test_compute_jobs_fencing.py:1148`,
+  `:1200`) and the guarded tool `scripts/drain-test-compute-backlog.ts` (five interlocks, all
+  OBSERVED refusing). What did NOT happen is the thing OPS-04 actually closes on: the
+  before/after row counts. The executing worktree had no TEST service-role credentials
+  (`NEXT_PUBLIC_SUPABASE_URL` / `SUPABASE_SERVICE_ROLE_KEY` unset; only `.env.example` present)
+  and was explicitly barred from running the drain against a live database or improvising
+  access. Measured counts were therefore NOT taken, and
+  `.planning/phases/158-ops-ci-a-merge-means-a-deploy/158-OPS04-DRAIN-EVIDENCE.md` carries
+  empty BEFORE/AFTER tables marked NOT MEASURED rather than invented numbers. ⚠️ The stale
+  backlog keeps growing daily until someone runs this. **Fix:** run the 5-step protocol in
+  that evidence file from a checkout with TEST credentials, paste the real tables in, then
+  close OPS-04. ⚠️ Do NOT close it on "the fencing tests are green" — the exactly-10 red was
+  structurally fixed by PR #674 (`c726a250`, 2026-08-12) and would be green either way.
+- [ ] **[158-OPS-04] eligibility flip deferred: MODE 2 never measured (same missing
+  credentials).** `scripts/drain-test-compute-backlog.ts --flip-eligibility` reduces tomorrow's
+  fan-out by narrowing the job's own eligibility predicate on `api_keys` (never by touching the
+  schedule), but neither the eligible-key population nor the proposed flip set was measured, so
+  no key was flipped. Without it, MODE 1 is a decaying fix: the daily fan-out refills `pending`
+  at roughly one row per eligible key. The allowlist is already settled in code (parsed from
+  `scripts/seed-full-app-demo.ts`'s `API_KEY_IDS`, plus `is_example`/`published` strategies'
+  keys, plus a 7-day age cutoff covering the per-run e2e fixtures), so this is a run, not a
+  design. **Fix:** step 4 of the evidence file's protocol, then step 5 if step 4's output reads
+  unambiguous.
+- [ ] **[158-OPS-04] the two stamped fencing tests did not execute locally.** `python3 -m pytest
+  tests/test_compute_jobs_fencing.py -q` from `analytics-service/` reports `16 passed, 28
+  skipped`, and `test_defer_compute_job_token_fence` + `test_defer_compute_job_null_token_backcompat`
+  are among the skips (`test Supabase project not configured (local dev)`). The stamps were
+  verified by region-scoped grep only (falsifiable: the same grep returns 0 against the
+  pre-change revision). CI carries the `TEST_SUPABASE_*` secrets and hard-fails rather than
+  skipping, so the first real execution of the stamped payloads is the phase's CI run — watch
+  it rather than assuming.
