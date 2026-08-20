@@ -1,5 +1,66 @@
 # Changelog
 
+## [0.69.0.0] - 2026-08-21
+
+### fix: a merge means a deploy — v1.20 Phase 158 (OPS-CI)
+
+Main CI can no longer conclude `cancelled` and silently skip the Railway
+analytics deploy, and no CI gate is present-but-ungating (closes #616 on the
+mechanism: GitHub's one-pending-slot concurrency group evicted queued
+main-branch runs when a PR opened mid-run).
+
+**Fixed**
+
+- The three DB-touching CI jobs (`sql-tests`, `python`, `e2e-seeded`) now
+  serialize through a Postgres session advisory lock on the TEST project
+  (key 61616158, cap 3600s < TTL 90min < holder sleep 6000s, fork-PR no-op)
+  instead of the evictable `shared-test-db` concurrency group. Falsified both
+  ways in live CI: a neutered distinct-key probe run overlapped and FAILED;
+  the real same-key run serialized three simultaneous contenders.
+- A `workflow_run` watcher files a dedup'd `main-ci-cancelled` issue whenever
+  main CI concludes `cancelled` — the loud signal replaces a silent skipped
+  deploy; the watcher itself can never red a main-HEAD check (exit-0 doctrine,
+  bounded by `timeout-minutes`).
+- `sql-tests` now gates the `frontend` aggregator (needs + result loop with
+  fork/dispatch tolerance) — the only job executing deployed cron bodies can
+  no longer fail with nothing gating on it.
+- The fencing tests' two direct running-flip UPDATEs stamp `claimed_at`, so
+  the reaper's `claimed_at IS NOT NULL` predicate sees them (OPS-04).
+- e2e admin clients fail closed on TEST-named env (`TEST_SUPABASE_URL` /
+  `TEST_SUPABASE_SERVICE_ROLE_KEY`) — the ambient-env fallback that could aim
+  a local seed run at PROD with the service-role key is gone; `test-safety`
+  prod-URL asserts guard the boundary.
+- Hardcoded e2e credentials scrubbed repo-wide (two live pairs, two prose
+  republications); gitleaks no longer allowlists all of `.planning/`.
+  Rotation of the historical pairs remains a human action (tracked).
+
+**Added**
+
+- `mutex-probe.yml`: a 3-contender falsifiability drill for the mutex
+  (dispatch-only outside `ci-probe/**`; proves serialization, disclaims FIFO).
+- `docs/runbooks/shared-test-db-mutex.md`: TTL/steal semantics, lock census,
+  manual-unlock (`pg_terminate_backend`) runbook.
+- `scripts/drain-test-compute-backlog.ts`: guarded TEST-only backlog drain
+  (4-guard interlock incl. PROD-ref hard-reject, terminalize-never-delete).
+  Measured on TEST: the 2026-08-11 stale backlog is already gone (reaper +
+  worker cycle); drain verified as an honest no-op with evidence recorded.
+- Four orphaned e2e specs repaired to execute real cases (CSRF root cause
+  fixed, seeded contracts) and `e2e/my-strategies.spec.ts` authored (NAV-01
+  surface, both polarities proven); all five wired into CI batches.
+- `MultiKeyConnectStep` order-dependence flake closed on MECHANISM: 0/15
+  reproductions under shuffle x Node-22 sweeps with the instrument proven
+  live on 10 other files; a genuine separate intra-file order defect logged.
+
+**Infrastructure / tests**
+
+- C-0293 pins re-baselined to the mutex mechanism (same-key parity across
+  jobs, no-group regression guard, TTL + sleep + aggregator pins) — 143 tests,
+  each neuter-drilled RED before trust.
+- Analytics deploy-verify staleness threshold re-derived (1800s -> 4800s) for
+  post-mutex queue depth; 24 code-review findings fixed across a 3-iteration
+  review loop ending verdict clean; phase security register 21/21 closed
+  (`158-SECURITY.md`).
+
 ## [0.68.1.1] - 2026-08-20
 
 ### Chore
