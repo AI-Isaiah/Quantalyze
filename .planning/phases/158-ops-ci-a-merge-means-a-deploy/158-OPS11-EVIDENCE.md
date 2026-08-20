@@ -240,4 +240,89 @@ The spec already *is* the pattern OPS-11 would have prescribed. There is no leak
 
 ---
 
-<!-- Closure section appended in task 2 -->
+## 8. Closure — **BRANCH B: closed on MECHANISM**, carried by reproduction-attempt evidence
+
+The sweep did not reproduce. Per the plan's two-branch contract, OPS-11 therefore closes on the
+**identified, in-tree, falsifiable mechanism** that landed *after* the flake was recorded — not on a
+green rerun.
+
+### The mechanism, cited
+
+| # | Mechanism | Location | Covers |
+|---|---|---|---|
+| 1 | `unstubGlobals: true`, `unstubEnvs: true` | `vitest.config.ts:68-69` | globals via `vi.stubGlobal`, env via `vi.stubEnv`. Deliberately **config-level**: it runs BEFORE each test and *cannot be shadowed by a file-local `afterEach`* (`vitest.config.ts:58-60`) |
+| 2 | `process.env` snapshot-restore (`restoreEnv`, two scopes: test→test in `afterEach`, file→file in `afterAll`) | `src/test-setup.ts:88-117` | the 54 files that assign `process.env.X =` **directly** — which `unstubEnvs` does **not** cover |
+| 3 | Falsifiable leak canary, ledger rows **SC-HARNESS-1** / **SC-ENV-1** | `src/test-setup.leak-canary.test.ts` | makes 1 and 2 *visible when removed* — "a row-1 mechanism nobody can see fail is indistinguishable from no mechanism" |
+
+Mechanisms 1 and 2 are **not redundant with each other**, and the canary is what proves it.
+
+### The mechanism, RE-MEASURED at HEAD (not inherited as a dated claim)
+
+The canary's falsifiability is itself a claim from Phase 140.5. This session re-derived it at HEAD
+rather than citing `140.5-VALIDATION.md` — neuter → observe RED → restore, both polarities:
+
+| Ledger row | Neuter applied | Canary result | Which assertion reddened |
+|---|---|---|---|
+| — | *(none — control)* | **GREEN** 2 passed | — |
+| **SC-HARNESS-1** | `vitest.config.ts:68` → `unstubGlobals: false` | **RED** 1 failed \| 1 passed | *"A global stubbed in the previous test survived into this one"* (`leak-canary.test.ts:86`), `expected true to be false` |
+| **SC-ENV-1** | `src/test-setup.ts` → drop `restoreEnv(testBaselineEnv)` from `afterEach` | **RED** 1 failed \| 1 passed | *"An env var assigned directly in the previous test survived into this one"* (`leak-canary.test.ts:95`), `expected 'leaked-env' to be undefined` |
+| — | both restored | **GREEN** 2 passed, `git status --short` empty | — |
+
+Each neuter reddened **exactly one, and a different, assertion** — so the two fences are
+independently live at `35c74149`, and neither is silently carrying the other. Both edits were
+reverted; the working tree was verified clean before the closure commit.
+
+### Why a green rerun alone would NOT have sufficed
+
+A green rerun asserts only *"it passed this time"* — which is precisely the "it passed when we
+reran it" repudiation risk logged as **T-158-15** in this plan's threat register, and is
+indistinguishable from a flake that simply did not fire. This closure is stronger on three counts,
+each measured rather than argued:
+
+1. **The instrument was proven able to find the defect class it was hunting.** The same sweep that
+   cleared the target reddened **10 other files** on exactly this class of state leakage. A sweep
+   that finds nothing anywhere is evidence of a blind instrument; this one is demonstrably not.
+2. **The detector was proven able to report a reproduction.** Falsified in both polarities (§3)
+   *before* the sweep was trusted — the naive grep would have produced false positives on all 15 runs.
+3. **The mechanism was proven live, not asserted.** Both fences reddened the canary on removal at
+   HEAD today (table above), so the standing regression guard is known-falsifiable rather than
+   assumed.
+
+The load-bearing measurement is run 11–13: under **file-order-only** shuffling — the instrument that
+actually models "order/shard-sensitive" and models what CI does — the **entire suite** is green
+across 3 seeds (786 files, 11,983 tests, exit 0). The recorded defect's own mechanism no longer
+produces a failure anywhere in the repo, not merely in the target file.
+
+### Standing regression guard
+
+`src/test-setup.leak-canary.test.ts` runs in every suite run like any other test (it is deliberately
+*not* registered in `CONTRACT_GUARDS`). If either fence is removed or turned off, it reddens. That is
+the guard that keeps OPS-11 closed; no retry, no reordering, and no timeout change was introduced
+anywhere.
+
+### Code changed by this closure
+
+**None.** Branch B ships zero production and zero test code changes — the target spec is already
+hygienic at HEAD (§7) and already uses the DEF-16-1 remedy pattern (`vi.spyOn` + `restoreAllMocks`)
+for its `fetch` interception. The two neuters above were temporary measurements, reverted and
+verified.
+
+### Owed elsewhere (NOT part of this closure)
+
+The Bucket-A intra-file order dependence in **10 files** (§6) is a real, separate hygiene debt that
+this sweep discovered. It is unreachable from CI today (CI never shuffles tests within a file) and is
+out of OPS-11's scope. Logged to `deferred-items.md` in this phase directory and to `.planning/WINDOWS.md`,
+with the identified mechanism and remedy, rather than fixed here as scope creep.
+
+---
+
+## 9. Verdict
+
+> **OPS-11 is CLOSED on MECHANISM.** The 2026-07-30 claim was re-measured at HEAD `35c74149` across
+> 15 runs (13 shuffle seeds, 8 under Node 22, both exact CI shards) and did not reproduce. The
+> closure is the Phase 140.5 fence — `vitest.config.ts:68-69`, the `src/test-setup.ts` env snapshot,
+> and the `SC-HARNESS-1` / `SC-ENV-1` leak canary — each re-verified falsifiable at HEAD this
+> session. `MultiKeyConnectStep` passes under every ordering tested, including orderings strictly
+> more aggressive than any CI performs. Not retried away; nothing was reordered, retried, or
+> timeout-bumped.
+
