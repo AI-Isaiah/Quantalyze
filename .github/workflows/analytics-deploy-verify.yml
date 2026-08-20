@@ -53,6 +53,15 @@ concurrency:
 jobs:
   verify:
     runs-on: ubuntu-latest
+    # 158-REVIEW WR-04 (iter 3): must EXCEED the convergence window below
+    # (4800 s = 80 min) or the job would be killed mid-poll and never reach the
+    # issue-filing step — the loud signal would be lost exactly when it matters.
+    # It must also be EXPLICIT: this workflow shares the watcher's invariant
+    # (every path exits 0 so a check on main HEAD is never red, or Railway skips
+    # the deploy this probe verifies), and GitHub's 360-minute default left a
+    # hung Issues API call able to redden main HEAD six hours later — the same
+    # route WR-03 closed on main-ci-cancelled-watcher.yml.
+    timeout-minutes: 90
     steps:
       # This job doesn't actually need the repo (it curls /health and compares
       # to github.sha), but the C-0293 critical-regressions invariant requires
@@ -79,13 +88,27 @@ jobs:
             exit 0
           fi
           # Convergence window: tolerate a deploy-in-progress (CI + Railway
-          # build) before declaring the deploy skipped. ~30 min covers the
-          # python job queued behind other runs on the shared-test-db advisory
-          # lock (the check-suite Railway waits on) + the Railway build.
+          # build) before declaring the deploy skipped.
           # 158-REVIEW WR-10: the serializer is the Postgres session advisory
           # lock (key 61616158), NOT the deleted `shared-test-db` concurrency
           # group. See docs/runbooks/shared-test-db-mutex.md.
-          deadline=$(( $(date +%s) + 1800 ))
+          #
+          # 158-REVIEW WR-04 (iter 3): ⛔ this number is DERIVED from the mutex
+          # numbers in docs/runbooks/shared-test-db-mutex.md section 2 — re-derive it
+          # whenever the acquire cap changes. The old 1800 s (~30 min) predated
+          # CR-04, which re-sized the acquire cap 2700 -> 3600 s and the job TTL
+          # 60 -> 90 min on the explicit grounds that concurrent runs each hold
+          # the lock ~20 min and that this is a NORMAL condition in this repo.
+          # Railway waits on the whole check-suite, so the worst-case LEGITIMATE
+          # latency is the runbook's own TTL arithmetic — ~2 min setup + up to
+          # the 3600 s (60 min) acquire cap + ~12 min of lock-held work ≈ 74 min
+          # — plus Railway's ~3 min build ≈ 77 min. Against a 30-minute
+          # tolerance, a 6-hourly cron firing shortly after a merge that queued
+          # behind two other runs files a P1 `analytics-deploy-stale` issue for a
+          # deploy that is simply still coming. 4800 s (80 min) covers that worst
+          # case with headroom; detection latency is bounded by the 6 h schedule
+          # regardless, so widening the window costs nothing but a false alarm.
+          deadline=$(( $(date +%s) + 4800 ))
           deployed=""
           while [ "$(date +%s)" -lt "$deadline" ]; do
             body="$(curl -s --max-time 15 "$HEALTH_URL" || true)"

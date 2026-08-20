@@ -96,6 +96,17 @@ batch), and `sql-tests` — so ~20 min of lock-time per run. The phase's success
 criterion is that **three simultaneous runs serialize and all succeed**, which
 is what the 3600 s cap is sized from.
 
+⛔ **A fourth number depends on these three, in another file.**
+`analytics-deploy-verify.yml`'s convergence window (`4800` s) is the tolerance
+before that probe declares the Railway deploy skipped and files a P1
+`analytics-deploy-stale` issue. Railway waits on the whole check-suite, so the
+window must exceed the worst-case *legitimate* CI latency derived from the table
+above — ~2 min setup + the 3600 s acquire cap + ~12 min of lock-held work ≈ 74
+min — plus Railway's ~3 min build ≈ 77 min. **If you change the acquire cap,
+change that window too**, or ordinary cross-run contention starts filing P1s for
+deploys that are simply still coming (158-REVIEW WR-04: the cap moved 2700 →
+3600 s while the window stayed at 1800 s).
+
 A waiter that exhausts the cap fails its job. Because `sql-tests` is now
 blocking the `frontend` aggregator, that means a red required check — and on a
 push to `main`, a check-suite that is not green, so Railway skips the analytics
