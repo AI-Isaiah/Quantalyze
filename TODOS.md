@@ -3060,8 +3060,12 @@ backs ~9 surfaces — the remedy for any of its flows is a NEW named limiter, ne
 ## Phase 146.2 — recorded deferrals (logged 2026-08-19)
 
 *The founder rule: an item ABSORBED into a phase is deleted from this file, but an item the
-phase deliberately does NOT fix must be re-recorded here. Silent drop is forbidden. All four
-below were re-verified against HEAD on 2026-08-19 before being written down.*
+phase deliberately does NOT fix must be re-recorded here. Silent drop is forbidden. The FIRST
+FOUR below were re-verified against HEAD on 2026-08-19 before being written down. The fifth
+(WR-01, the `createAdminClient()` request-path throw) was appended on 2026-08-20 from the
+Phase 146.2 code review and is verified as of that date — it was NOT part of the 2026-08-19
+sweep. Recorded because appending it silently left this preamble asserting "all four", which
+was then false: the same scope-amendment class this file exists to prevent.*
 
 - [ ] **`20260819150000_reconcile_sweep_readmit_attempt_ceiling.sql:283-288` — the performance
   note cites the WRONG index.** It says the scalar subquery runs "over compute_jobs indexed by
@@ -3130,3 +3134,164 @@ below were re-verified against HEAD on 2026-08-19 before being written down.*
   line), so the defect is the **false failure report**, not permanent loss.
   **Fix:** wrap the `createAdminClient()` evaluation in its own try/catch that logs +
   captures and does not rethrow — and close the CLASS, not just this site.
+
+## Phase 146.2 — recorded deferrals, SECOND PASS (logged 2026-08-20)
+
+*Why a second pass: the PR #694 body reported the Phase 146.2 code review as closing with
+"5 INFO (recorded)". That was false — not one of IN-01…IN-05 had ever been written into this
+file — and four further items the phase knowingly did not fix were also missing. A red team
+caught it on 2026-08-20; every entry below was re-measured against HEAD (`181eed3b`) before
+being written down, and route.ts line numbers are paired with symbol anchors because that
+file moves. The founder rule stands, with a sharpened edge: "recorded" is a claim about THIS
+FILE, so grep it before you type it.*
+
+- [ ] **IN-01 — `CsvSubmitStep.tsx:473` and `CsvSubmitStep.test.tsx:305` cite a route function
+  that does not exist.** Both docblocks (under
+  `src/app/(dashboard)/strategies/new/wizard/steps/`) name `resolveExistingCsvStrategy`.
+  Measured 2026-08-20: `grep -rn resolveExistingCsvStrategy src` returns exactly those two
+  COMMENT lines and nothing else — the symbol exists nowhere in the repo as code. The function
+  they mean is `resolveExistingStrategyOrRefuse`
+  (`src/app/api/strategies/csv-finalize/route.ts:1080`, called at `:814`). The SEAMPROSE-01
+  protocol asks client-side prose to carry a symbol-anchored citation back to the server arm it
+  renders; a citation that resolves to NOTHING is worse than none, because the next reader
+  greps, finds zero hits, and cannot tell whether the arm was renamed or deleted. Prose-only,
+  non-blocking per the stopping rule. **Fix:** rename both references to
+  `resolveExistingStrategyOrRefuse` in whatever commit next touches the wizard directory.
+- [ ] **IN-02 — dead conjunct in a c14 assertion.**
+  `src/__tests__/csv-finalize-c14-regression.test.ts:740-743` reads
+  `expect(opts && call![0], "…").toMatchObject({ code: "57014" })`. `opts` is unconditionally
+  truthy at that point, so `opts &&` contributes nothing and the expression is just `call![0]`.
+  The assertion still pins the real property (the fail-closed 503's Sentry capture must carry
+  the READ error's SQLSTATE, so ops can tell a statement timeout from an RLS hide), so nothing
+  is unpinned today — but a dead conjunct in an oracle is exactly the shape that lets a later
+  edit "preserve the assertion" while changing its subject. **Fix:**
+  `expect(call![0], "…").toMatchObject({ code: "57014" })`.
+- [ ] **IN-03 — the re-mint fingerprint omits the classification, so the new
+  classification-conflict REFUSE has no in-wizard escape except a rename.**
+  `csvSubmissionFingerprint(strategyName, csvDailyReturnsSeries)`
+  (`src/lib/wizard/localStorage.ts:702`; called at
+  `src/app/(dashboard)/strategies/new/wizard/WizardClient.tsx:587` and `:635`) hashes the name
+  and the series only — never `metadata.category_id` / `metadata.asset_class`. Phase 146.2's
+  classification-conflict 409 is the ONE refusal whose stated remedy is a classification
+  change, and a classification change cannot move the fingerprint, so no fresh wizard session
+  is minted and the corrected resubmit takes the identical 409. ⚠️ **Not a dead end**: the
+  shipped copy is honest ("Open the strategy you already started, or start a new strategy"),
+  and renaming does reach a fresh session. Recorded because the re-mint fence and the new
+  refusal now disagree about what "a different submission" means — a disagreement that will
+  read as a bug to whoever meets it cold. **Fix:** either widen the fingerprint to cover the
+  classification, or state the deliberate exclusion in `csvSubmissionFingerprint`'s docblock so
+  the next reader does not re-derive this.
+- [ ] **IN-04 — two concurrent same-session resubmits can both take the csv-finalize FILL
+  arm.** Nothing serialises the resolve read (`src/app/api/strategies/csv-finalize/route.ts`,
+  `resolveExistingStrategyOrRefuse`'s projection at `:1138-1144`, FILL discriminator
+  `existingRow.category_id === null` at `:1372`) against another request's metadata UPDATE
+  (`.from("strategies").update(updatePayload)` at `:1902-1903`, payload from
+  `buildMetadataUpdatePayload` at `:543`). Two resubmits arriving together (two tabs, a
+  double-click past the client's `submitting` gate) can both observe `category_id IS NULL` and
+  both run the FILL UPDATE + enqueue. Benign when both carry the same picker values — the
+  writes are idempotent and the two enqueues converge on one job. Divergent only when the tabs
+  carry DIFFERENT classifications, where last-write-wins decides and both recomputes run; the
+  rate limiter and the series-equality check bound the window tightly. **Fix (optional, one
+  line):** scope the FILL UPDATE with `.is("category_id", null)` so the second writer is a
+  no-op — a compare-and-set that makes the arm's own premise enforceable instead of assumed.
+- [ ] **IN-05 — the "verbatim" wire fixtures in the wizard tests remain unverifiable by the
+  suite (self-declared).** `CsvSubmitStep.test.tsx:308` (`ROUTE_ECHO_SENTENCE`), `:319`
+  (`ROUTE_CLASSIFICATION_CONFLICT`), `CsvSubmitStep.upstream-arm.test.tsx:96`
+  (`ROUTE_PERSIST_FAIL`), `:105` (`ROUTE_SESSION_REUSED`) — all under
+  `src/app/(dashboard)/strategies/new/wizard/steps/`. Each constant is BOTH the mocked wire
+  payload and the expected DOM text, so the suite is green for ANY string; the correspondence
+  to `csv-finalize/route.ts` is enforced by a comment, not by code. W1 fixed a real drift and
+  the comment now says this out loud, which is the right disclosure — recorded so the standing
+  risk is tracked rather than re-discovered. ⚠️ All four were hand-verified byte-exact against
+  their route literals on 2026-08-19; **a hand check does not survive the next edit**, which is
+  the whole point of the entry. **Fix (reach for it on the third drift):** the declined static
+  coupling — a build-time assertion that each fixture string is a substring of `route.ts`.
+- [ ] **`supabase/tests/test_csv_finalize_atomic_fold.sql:565-574` — Part 3e's trailing
+  "committed nothing" count block CANNOT FAIL.** The fold call sits inside the probe's own
+  `BEGIN … EXCEPTION WHEN OTHERS` (`:545-553`). A plpgsql exception block is an implicit
+  SUBTRANSACTION, so any rows the fold wrote are rolled back when it raises — BEFORE `n_strat`
+  / `n_sv` / `n_dl` are read at `:565-571`. They are 0/0/0 for a healthy body AND 0/0/0 for the
+  exact defect the RAISE at `:572-574` names ("GUARD 1 ran AFTER a write instead of as the
+  FIRST statement"). ⚠️ **The Part is NOT vacuous as a whole** — its first three assertions
+  (`:555` raised-at-all, `:558` SQLSTATE is 22023, `:561` the message names `p_terminal_status`)
+  each discriminate, and the un-provable placement property is separately pinned by the new
+  Part 1d no-handler check (`:256-267`). This is guard hygiene, not a live break. ⚠️ **The same
+  shape is copied from PRE-EXISTING Part 3d (`:475-481`) — fix both or neither**; removing one
+  and leaving the other tells the next reader the shape was reviewed and blessed. ⭐ The sibling
+  file states these exact semantics as MEASURED fact —
+  `supabase/tests/test_csv_finalize_double_submit.sql:246-253`: a catch-write-and-re-raise
+  handler is "NOT caught, and not catchable by ANY row count" because the subtransaction rolls
+  the handler's own writes back too. Part 3e was written after that note and did not apply the
+  lesson to itself. **Fix:** delete both count blocks and replace them with a comment pointing
+  at Part 1d as the real pin, rather than leaving two assertions that read like coverage.
+- [ ] **Phase 146.2's own close-out made two completeness claims that were false when
+  written.** (a) The PR #694 body reports "5 INFO (recorded)" — the five entries above ARE that
+  record, first written 2026-08-20. (b) `146.2-VERIFICATION.md:176-177` states "all appear in
+  plan `requirements-completed` fields"; measured 2026-08-20, that field exists in five
+  SUMMARYs only (01→R1, 02→R2, 03→R4, 06→R7, 07→R6+W1), while `146.2-04-SUMMARY.md` (R3) and
+  `146.2-05-SUMMARY.md` (R5, W2, W3) carry NO such field — so **R3, R5, W2 and W3 appear in no
+  plan's `requirements-completed` at HEAD even though all four shipped**. ⚠️ Why this is more
+  than tidiness: that frontmatter is what a later milestone audit reads to decide a requirement
+  was delivered, so four silently-absent entries make shipped requirements look dropped — the
+  precise failure the field exists to prevent, and the inverse of the failure this section
+  exists to prevent. **Fix:** add `requirements-completed` to the 04 and 05 summaries, correct
+  the PR body, and treat "recorded" / "all appear" as claims to be grepped before typing.
+- [ ] **The audit-coverage window is stated as 60 lines; the mechanism is brace-balanced with a
+  200-line cap.** `src/app/api/strategies/csv-finalize/route.ts:708-711` warns "⚠️ THE EMISSION
+  MUST STAY WITHIN 60 LINES BELOW THIS CALL. That is the law's own coverage window
+  (audit-coverage.test.ts `isCovered`)". Measured at HEAD: `isCovered`
+  (`src/__tests__/audit-coverage.test.ts:374-424`) walks forward brace-balanced from the
+  mutation and stops at the close-brace of the ENCLOSING FUNCTION, with
+  `AUDIT_WINDOW_MAX_LINES = 200` (`:331`) only as a hard fail-safe. The flat 60-line window is
+  the PRE-P694 behaviour the brace walk deliberately replaced — a flat window let a mutation in
+  `POST()` be "covered" by a `logAuditEvent` inside `PATCH()` in the same file. Three lines of
+  `146.2-06-SUMMARY.md` (`:52`, `:235`, `:538`) repeat the 60. ⚠️ **The SUBSTANCE survives**:
+  the emission sits inside the same function body, 39 lines below the `.rpc(`, so the coverage
+  law does hold and the placement warning is still the right warning — only the integer and the
+  rule it names are wrong. The failure mode of leaving it: someone "safely" moves the emit 80
+  lines down (still same function, still covered) and, believing they broke the law, contorts
+  the code instead. **Fix:** restate the route docblock as "the emission must stay inside the
+  SAME FUNCTION BODY as the `.rpc(` call — brace-balanced walk, 200-line fail-safe" next time
+  that file is touched. Leave the SUMMARY as-is (a shipped artifact is history), but do not
+  re-copy the 60 into new prose.
+- [ ] **FOLLOW-UP PHASE CANDIDATE — make the FILL arm's recompute actually guaranteed instead
+  of refusing when it cannot be.** Phase 146.2 closed the classification gap by REFUSING the
+  fill when a recompute is already in flight. That is honest, but it is a NARROWING, not a
+  repair: those users get a 409 instead of their classification. Root cause, measured at HEAD:
+  `_enqueue_compute_job_internal`
+  (`supabase/migrations/20260420073003_allocator_holdings.sql:330-402`) dedupes onto any job
+  for the same target + kind with `status IN ('pending','running','done_pending_children')`
+  (`:370-376`) and RETURNS the existing id (`:400-402`) — so a fill arriving mid-compute is
+  ABSORBED into the running job, and that job already snapshotted the OLD classification. The
+  worker reads `asset_class` once at job start
+  (`analytics-service/services/analytics_runner.py:1212-1219`, into `_strategy_row` at `:1231`)
+  and consumes it far later at `:1399-1401` via `periods_per_year_for_asset_class`, so the
+  annualization basis for the whole run is fixed before the fill's UPDATE lands. The route's
+  enqueue passes no idempotency key
+  (`src/app/api/strategies/csv-finalize/route.ts:1776-1780` sends `p_strategy_id`, `p_kind`,
+  `p_metadata` only), so it cannot opt out of the dedupe. ⚠️ **Residual sliver even WITH the
+  shipped refusal**: the snapshot at `:1212-1219` runs BEFORE the job marks
+  `computation_status='computing'` (`:1238-1242`), so a guard keyed on 'computing' closes the
+  dominant window but leaves a millisecond gap between the two. **Fix direction:** either force
+  a follow-on job rather than letting the enqueue be absorbed (a distinct idempotency key, or a
+  supersede arm), or have the worker RE-READ `asset_class` at write time and compare-and-set.
+  Both change the job/worker contract and the queue's dedupe invariant ⇒ **own phase, not a
+  point fix.**
+- [ ] **CI went RED mid-Phase-146.2 and no artifact records it — plus the operating rule that
+  prevents the repeat.** The `sql-tests` job failed at commit `44cc4370` in
+  `supabase/tests/test_claim_kind_filter.sql` (the FLIPRETRY-04 double-fan-out DO block,
+  `:183-219`) with `compute_jobs_api_key_id_fkey` violated. ROOT CAUSE, measured — not a code
+  defect, and not one of the four known shared-TEST-DB flake mechanisms: a LOCAL `npm run test`
+  was running against the shared TEST database concurrently with the CI run.
+  `enqueue_derive_broker_dailies_for_allocator_keys()`
+  (`supabase/migrations/20260717233529_allocator_equity_derived_surface.sql:236-240`) fans out
+  over EVERY active, non-revoked, non-disconnected `api_keys` row in the whole shared database
+  — it has no test-seed scoping — so the test's own `PERFORM` (`test_claim_kind_filter.sql:204-205`)
+  enqueued against ANOTHER writer's key that was deleted between the cursor read and the FK
+  check. ⚠️ The fan-out's inner handler catches `unique_violation` ONLY (`:249-250`), so a
+  concurrently-deleted key (23503) propagates out and reds the whole file — worth knowing
+  before "hardening" it, since a blanket `WHEN OTHERS` there would hide real breakage. It
+  re-ran green at `181eed3b` with no code change. ⚠️ **OPERATING RULE: never run the local
+  suite while any CI run is in flight — `gh run list` FIRST.** And note the ordering that makes
+  this entry honest: the mechanism was identified BEFORE the green re-run. A green re-run is
+  never itself proof that the first failure was noise.

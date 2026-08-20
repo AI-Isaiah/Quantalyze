@@ -45,6 +45,35 @@ across 8 plans / 3 waves.
   commit is also **attributable for the first time** (`strategy.csv_finalize` audit action),
   with the audit-coverage law as its standing gate.
 
+**Closed after an adversarial review of the whole branch**
+
+A six-lens red team over all 43 commits found two defects this phase itself
+introduced. Both are fixed here rather than deferred.
+
+- **A retry could land metrics on the wrong annualization clock, permanently.** The
+  clock-safety guard treated "no metrics stored yet" as proof that no stored number carried
+  the old convention. Mid-computation that is exactly what an in-progress row looks like — so
+  the guard permitted the change, while the recompute meant to reconcile it was silently
+  absorbed by the already-running job, which had captured the *old* classification when it
+  started. The strategy ended up labelled crypto with metrics computed on the traditional
+  calendar, marked complete, and the self-healing sweep skips completed rows — so nothing
+  ever fixed it. Sharpe understated by about 1.2×, on a row that had just become visible in
+  discovery and in everyone else's percentile ranks. The guard now tells apart a row with no
+  metrics from a row whose metrics are *being computed right now*, and waits for the latter.
+- **The refusal told you to do something the wizard could not do.** Both new 409 messages said
+  to start a new strategy and upload this file — but re-uploading the same file reuses the
+  spent session, so it produced the identical refusal, forever, with no control anywhere to
+  escape it. The refusal now carries a **Start a new strategy** button that keeps the file you
+  already uploaded. The echo message also links to the strategy it tells you to check, and the
+  Submit button no longer turns into Continue under your cursor mid-click.
+
+⚠️ **API change:** finalizing a CSV with a metadata object that carries other fields but no
+`category_id` now returns **400** instead of 200. The wizard always sends one, so nothing in
+the product changes; a script or integration posting partial metadata will need to include it.
+This is what makes the retry-repair sound — without it a strategy could be committed with no
+category while its metadata write had in fact run, which is the state the repair reads as
+"never classified".
+
 **Also in this release**
 
 - **The FILL arm stopped claiming repairs it had not made.** An echo carrying *no*
