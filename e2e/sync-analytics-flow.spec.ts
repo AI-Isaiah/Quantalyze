@@ -53,6 +53,15 @@ test.describe("Sync & Analytics Flow", () => {
       const contentType = res.headers()["content-type"] ?? "";
       expect(contentType).toContain("application/json");
       expect(res.status()).not.toBe(307);
+
+      // 158-REVIEW WR-07 (sibling of e2e/api-key-flow.spec.ts): a CSRF
+      // rejection is JSON and is not a 307, so without this line the case
+      // passes just as happily when the Origin allowlist wiring breaks and the
+      // request never reaches the auth contract it exists to probe.
+      expect(
+        res.status(),
+        "403 here means the Origin/allowlist wiring broke (CSRF rejected the request before auth), not that the sync contract changed — check NEXT_PUBLIC_ALLOWED_ORIGINS and PLAYWRIGHT_BASE_URL against the served origin",
+      ).not.toBe(403);
     });
 
     test("sync endpoint returns 401 for unauthenticated request", async ({ request }) => {

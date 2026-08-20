@@ -51,6 +51,19 @@ test.describe("API Key Connection Flow", () => {
       expect(contentType).toContain("application/json");
       expect(res.status()).not.toBe(307);
 
+      // 158-REVIEW WR-07: without this line the case is vacuous for its own
+      // stated purpose. A CSRF rejection ({ error: "Origin not allowed" }, 403,
+      // JSON, not 307) satisfies every other assertion here — so if
+      // NEXT_PUBLIC_ALLOWED_ORIGINS is dropped from the job env, or
+      // PLAYWRIGHT_BASE_URL drifts from the origin the server is actually
+      // served on, this test would keep passing while measuring the CSRF arm
+      // instead of the auth contract. That is the EXACT failure mode the
+      // docblock above says this spec was repaired for.
+      expect(
+        res.status(),
+        "403 here means the Origin/allowlist wiring broke (CSRF rejected the request before auth), not that the auth contract changed — check NEXT_PUBLIC_ALLOWED_ORIGINS and PLAYWRIGHT_BASE_URL against the served origin",
+      ).not.toBe(403);
+
       const body = await res.json();
       expect(body).toHaveProperty("error");
     });
