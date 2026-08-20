@@ -20,100 +20,11 @@ Kept (NOT backlog): `.planning/milestones/*` (shipped history), `.planning/codeb
 Items resolved by intervening milestones (v1.10–v1.14) and stale-but-in-prod-without-issue
 items were dropped, not carried. Categories: **Fix now** / **Fix mid-term** / **Don't fix**.
 
+**Purged 2026-08-20 (milestone v1.20 Backlog Burndown):** ~56 verified-open items moved into `.planning/REQUIREMENTS.md` (v1.20 scope — RANK/SHARE/WIZERR/HONEST/OPS/SEC/DEPS) and deleted here; ~28 entries verified STALE at HEAD by a 17-agent triage (solved by earlier milestones) and deleted. Founder-gated and remaining open items below are untouched. Snapshot of the pre-purge file: `git show 2e67c4a0:TODOS.md`.
+
 ---
 
 ## 🔴 FIX NOW — live correctness, trust-boundary security, active go-live
-
-00. **⛔ SHARELINK-01 — "Copy Link" hands out a URL that 404s for every recipient, and reports
-   "Link copied!" while doing it.** Founder-hit on PROD 2026-08-13 while dogfooding: copied the
-   share link for strategy "Umbra" (`status='private'`), sent it, recipient got the app 404.
-
-   **Not a routing bug — the privacy gate working as designed.** `src/app/factsheet/[id]/v2/page.tsx`
-   runs two lanes: Lane A matches `(id, status='published')`, Lane B matches owner-owned rows but
-   only when the request carries a session. A recipient has no session, Lane A finds nothing,
-   `notFound()` fires. The page even logs it: *"no row matched (id, status='published') on the
-   PUBLISHED lane and the request carries no session, so the owner lane was not attempted."*
-
-   **The defect is the affordance.** `FactsheetView.tsx:1565` renders the Share button gated ONLY on
-   `!scenarioMode` — no publish-state check — then flashes **"Link copied!"**, a success message for
-   an action that cannot succeed. The correct rule already exists one screen over at
-   `src/app/(dashboard)/strategies/page.tsx:174`: `{s.status === "published" && <ShareableLink …/>}`.
-   ⛔ Same affordance, same rule, gated in one place and not the other — **fix the CLASS**, both
-   sites, not the one component. The `OwnerUnpublishedNotice` banner (`FactsheetView.tsx:690`) does
-   say "only you can see this", and its own comment predicts the owner will "share the URL anyway",
-   but nothing connects it to the button.
-
-   **⭐ FOUNDER DECISION 2026-08-13: a link produced by "Copy Link" must ALWAYS be viewable by its
-   recipient.** Chosen model = **revocable share token**, explicitly NOT "any strategy readable by
-   its id". Rationale: the id must stay a NON-secret. Ids leak structurally — browser history,
-   `Referer`, analytics, screenshots, support tickets, `/compare?ids=` — so making the id the key
-   would be unrevokable and would retroactively expose the 13 existing non-published rows
-   (4 `private`, 8 `pending_review`, 1 `archived`) to anyone who ever saw an id.
-
-   Shape: unguessable per-strategy token, `?s=<token>`; Copy Link mints-or-reuses; a revoke control
-   regenerates it and kills old links; the bare `/factsheet/<id>` URL stays owner-only.
-
-   ⛔ **THE LANDMINE — do not let a token render poison the public cache.** `page.tsx` caches keyed
-   `factsheet-v2:${id}`, **id-first**, and its entry is served to anonymous readers for the full TTL.
-   The file already carries this warning twice for the OWNER lane ("an owner-built entry would be
-   served to anonymous readers"). A token lane has the identical hazard and must be cached under a
-   key that includes the token, or not cached at all. A token-lane response landing in the id-keyed
-   entry publishes a private strategy to every anonymous visitor — strictly worse than the bug being
-   fixed.
-
-   Second dead end found in the same trace, decide with it: `StrategyActions` branches on `draft` /
-   `pending_review` / `published` / `archived` then `return null`, so **`status='private'` gets zero
-   actions** and a contribution-flow strategy (`finalize-wizard/route.ts:1000` sets
-   `terminalStatus = entryContext === "contribution" ? "private" : "pending_review"`) can never leave
-   `private` from the UI. Open product question: are contribution records meant to be permanently
-   private? If yes, leave it; if no, `private` needs a publish path.
-
-   Size: migration + read lane + UI + revoke + cache-key change ⇒ **plan as a GSD phase**, not a
-   patch. Do NOT start it on `feat/phase-156-connect-refactor` — Phase 156's Migration B is still
-   pending against `strategies`.
-
-0a. **⛔ MT5GW-COPY-01 — the operator-facing "gateway misconfigured" message names the ONE setting
-   that is already correct, and sends the operator to the wrong checkbox.** Founder-hit on PROD
-   2026-08-13 while dogfooding, immediately after the MT5DEAL-01 fix (v0.59.0.2) let the sync reach
-   this stage for the first time.
-
-   `MT5_GATEWAY_MISCONFIGURED_DETAIL` (`services/mt5_probe.py:74-79`) states *"the 'Disable automatic
-   trading through the external Python API' option is in force"*. **MEASURED on the live gateway,
-   it is NOT in force**, and never was:
-
-   | source | reading |
-   |---|---|
-   | `terminal_info().tradeapi_disabled` | `False` — the named option is OFF |
-   | `terminal_info().trade_allowed` | `False` — ⬅ the actual blocker |
-   | `Config/terminal.ini` `[Experts]` (UTF-16) | `Api=0`, **`Enabled=0`**, `Account=1`, `Profile=1` |
-
-   The false premise is written into the code as an assertion, at `services/mt5_probe.py:243-245`:
-   *"under MetaQuotes' default-ON 'Disable automatic trading through the external Python API' — **the
-   very setting that makes trade_allowed false**"*. It is not that setting. `Enabled` (Options →
-   Expert Advisors → **"Allow algorithmic trading"**) is what makes `trade_allowed` false. `Api` is a
-   separate, independent checkbox. The same false equivalence is repeated at
-   `services/mt5_client.py:988`, `services/job_worker.py:645`, `services/ingestion/mt5.py:318`,
-   `routers/exchange.py:854` and `services/mt5_validation.py:174` — ⛔ **fix the CLASS, not the one
-   string**; six sites carry it.
-
-   ⭐ **Why it recurs rather than being a one-time misconfiguration.** `Account=1`/`Profile=1` arm
-   MT5 to set `Enabled=0` **on every account change**, and the worker calls `login()` on every job.
-   So an operator who ticks "Allow algorithmic trading" alone fixes it until the next sync. This is
-   exactly why the 2026-08-12 connect succeeded once (`outcome="read_only"`, 489ms, straight after a
-   VNC visit) and every later attempt did not.
-
-   **Remedy (two parts, both needed):**
-   1. Copy: name `Enabled` / "Allow algorithmic trading" and the `Account`/`Profile` auto-disable
-      flags. ⚠️ The message is constrained — `tests/test_mt5_validate_parity.py::test_mt5_gateway_misconfigured_message_is_curated_and_credential_free`
-      forbids any token from `_WRONG_SERVER_TOKENS`/`_AUTH_TOKENS`, so it may not contain
-      "terminal" or "server". Rewrite within that fence; do not relax the fence.
-   2. Better: **read the distinguishing flags and say which one is set.** Both are already on the
-      `terminal_info()` dict the probe holds (`tradeapi_disabled` vs `trade_allowed`), so the
-      message can be derived instead of guessed — the same "don't hand-write a verdict the data
-      already carries" remedy as WIZFORM-02.
-
-   Same defect class as **FIX NOW #6 (WIZFORM-02)**: a hand-written message asserting a cause the
-   server never established. Here it cost an operator a wrong-checkbox hunt on a live go-live.
 
 0. **⛔ MT5 ARCHITECTURE — the shared gateway cannot safely serve more than ONE user, and the
    read-only guarantee can fail OPEN.** Found 2026-08-08 by the platform research that Phase 134
@@ -181,33 +92,6 @@ items were dropped, not carried. Categories: **Fix now** / **Fix mid-term** / **
      (`initialize()` unbounded at its 60 s vendor default inside a 30 s rpyc bound — D-24), but
      fixing the timeout on a one-account architecture buys a working single user, not a working
      product. Decide the architecture before sizing the budget.
-
-0.3 **🔒⛔ THE PROBE GATE'S ATTESTATION IS NOT SERVER-VALIDATED — candidate for PHASE 154 (raised 2026-08-12, shipped-with-residual in 153.6 / PR #675).**
-   Phase 153.6 closed the *client-INSERT* door on the finalize-wizard scope probe: `attested_venue`
-   is scrubbed to NULL by a `BEFORE INSERT` trigger, NULL means PROBE, and a `CHECK` pins
-   `attested_venue = exchange` so the two cannot diverge. **It did not close the RPC door.**
-   `create_wizard_strategy` and `add_wizard_composite_key` validate nothing, write the
-   caller-supplied `p_exchange` verbatim into `attested_venue`, and still hold
-   `GRANT EXECUTE … TO authenticated` — reachable directly over PostgREST, with the browser
-   already holding the server-minted ciphertext (`/api/keys/validate-and-encrypt` returns it).
-   So a caller can still mint an `mt5`-attested key and skip the ASVS V4 scope probe.
-   ⭐ **Why it is not exploitable today, and why that is not a control:** the RPC derives BOTH
-   `exchange` and `attested_venue` from ONE parameter, so forging the attestation also forges the
-   ingestion label — and `mt5`, the only probe-exempt venue, cannot sync a ccxt key. The attack is
-   self-defeating **by accident of the current venue set**, not by design.
-   ⛔ **The expiry condition is concrete:** the day a **syncable** venue joins
-   `scopeProbeSupported: false` in `src/lib/closed-sets.ts`, the forgery becomes FREE. Phase 153.6
-   RESEARCH names **sFOX** as the plausible next member, and sFOX go-live is already booked
-   (item 3 below). Whoever adds that venue must close this FIRST.
-   **The fix (remedy (a), deferred deliberately in 153.6):** move the `api_keys` INSERT behind a
-   **service-role writer that passes the venue IT validated**, and **withdraw `authenticated`
-   EXECUTE** on both RPCs. This is the "connect-flow refactor" both `20260810120000` and
-   `20260811210000` defer. It is the only option that makes the column's own claim true.
-   Recorded as `threat_flag: deferred-control` in `REQUIREMENTS.md` (PARITY-04), in
-   `20260811210000`'s section 1b, and in the `attested_venue` column comment — so a venue author
-   meets it at the point of change, not in a phase summary.
-   📌 **Suggested as the Phase 154 subject** over the roadmap's queued item, since the residual is
-   live on PROD and its expiry is gated on another already-booked workstream.
 
 0.4 **⛔ PHASE 153.6 — PARITY: the fixes that only landed on one path (✅ SHIPPED 2026-08-12 as PR #675, v0.58.0.0 — residual above).**
    Raised by `/code-review xhigh` over the whole 153→153.5 span (40 agents, 29 verified findings
@@ -304,11 +188,6 @@ items were dropped, not carried. Categories: **Fix now** / **Fix mid-term** / **
    in Vercel + redeploy main (build-time flag); IP-whitelist the 3 worker egress IPs
    {208.77.244.242, 152.55.184.240/.241} with Nautilus (7-day access, email all 3).
    **Founder decision:** sFOX-venue vs Nautilus-manager path; actual vs adjusted NAV.
-4. **Land v1.14 Smoothed-MTM milestone.** Code-complete on `feat/phase-83-smoothed-mtm`,
-   dark behind kill-switch (`SMOOTHED_MTM_ENABLED` + `NEXT_PUBLIC_SMOOTHED_MTM_ENABLED`,
-   both default OFF). Do: version + CHANGELOG bump → PR → merge. Live acceptance (Phoenix
-   key) stays deferred. ⚠️ landing risk documented: a structural smoothed mark-hole fails
-   the WHOLE job — that's why it ships dark.
 5. **v1.15 MT5 — LIVE on quantalyze.xyz 2026-07-25 (flags flipped).** ✅DONE: worker
    `MT5_ENABLED=true` + `MT5_GATEWAY_HOST=mt5-gateway.railway.internal` + `MT5_GATEWAY_PORT=8001`
    (Railway deploy 9d310b40 from main HEAD — also retired the decoupled CLI-snapshot, so the
@@ -357,33 +236,6 @@ items were dropped, not carried. Categories: **Fix now** / **Fix mid-term** / **
   153.3-05). ⛔ **A scale-up is a correctness change, not a capacity knob** — it needs a durable
   cross-process serializer first. **Owner: D-33.**
 
-- [ ] **Module-level `structlog.get_logger(...)` proxies freeze their processor chain — swept in
-  `mt5_client.py` only.** Found 2026-08-09 by plan 153.3-05's full-suite run (invisible to
-  `-k mt5`). `services/logging_config.py:233` configures structlog with
-  `cache_logger_on_first_use=True`, so a module-level lazy proxy binds ONCE at its first use and
-  ignores every later `structlog.configure`. `main.py` configures logging inside the **lifespan**,
-  long after module import, so any module whose proxy binds before that point emits through a
-  chain **without** the `_redact_processor` PII scrub — a silent redaction bypass, not merely a
-  test-visibility problem. Fixed at the root in `services/mt5_client.py` (commit `78b05841`) by
-  binding per call (`_stage_logger()`); **the same exposure was NOT swept across
-  `services/exchange.py`, `services/redact.py`'s callers, `services/audit.py`,
-  `services/rate_limit.py` or any other structlog user.** Cheap check:
-  `grep -rn "^_\?log.* = structlog.get_logger" analytics-service --include="*.py"`.
-  ⭐ **MEASURED by the orchestrator 2026-08-09 — the class is 8 sites** (non-test production):
-  `routers/debug_key_flow.py:41`, `main.py:153` (`_config_log`), `:365` (`_validation_log`),
-  `:458` (`_rate_limit_log`), `:643` (`_auth_log`), `routers/process_key.py:60`,
-  `services/rate_limit.py:136`, `services/ingestion/long_fetch.py:45`.
-  ⚠️ **Triage before fixing all eight — exposure is NOT uniform.** The freeze happens at first
-  *use*, not at creation, so a proxy used only at request time (after the lifespan configures
-  logging) is fine. The genuinely suspicious ones are those that can log during **import or
-  startup, before `configure_logging()`** — `main.py:153 _config_log` is the obvious candidate
-  since config validation runs early. Establish which of the eight can emit pre-configure, then
-  fix those; converting all eight blindly is churn.
-  ⭐ **Prefer a class fix over eight point fixes**: either drop `cache_logger_on_first_use` (it is
-  a micro-optimisation buying little here), or configure logging at import rather than in the
-  lifespan. Either removes the whole class; per-call binding at 8 sites leaves the 9th to be
-  written next week. Same reasoning as D-35's fix-at-the-sink.
-
 - [ ] **GSD `gsd-sdk query state.*` verbs take NAMED flags, not positional args — the executor
   prompt documents positional.** Found 2026-08-09 during plan 153.3-05's state update.
   `state.record-session "" "<stopped-at>" "None"` silently records only `Last Date` and drops the
@@ -394,66 +246,6 @@ items were dropped, not carried. Categories: **Fix now** / **Fix mid-term** / **
   `2026-08-07 -- Phase 152 execution started`, three times in a row). Repaired in place each time.
   Same defect family as the `### Decisions` heading drift already annotated in `STATE.md`.
   ⚠️ `state.record-metric` is also NOT idempotent — running it twice appends a duplicate row.
-
-### Phase 153.7 (WIZFORM-02-CLASS) — recorded deferrals (added 2026-08-14)
-
-Both items below are **deliberate** deferrals from 153.7, not oversights. That phase widened the
-seam-vocabulary coverage law from `analytics-service/services/**` + assignment-shape to
-`analytics-service/**` + the `service_error(...)` call family (17 → 37 codes), dispositioned all
-37, and coded the last three `finalize-wizard` rejections. Neither item below is reachable from
-`wizardErrors.ts`, which is why neither was fixed there: a verdict row for any of these codes
-would read as a fix in the diff, green the coverage law, and **reach no user surface at all**.
-
-- [ ] **The `keys/[id]/permissions` route runs its own private `PROBE_*` substring cascade — a
-  FOURTH classifier, with no coverage law over it.** It never calls `classifyKeyValidationError`
-  (measured: the only two production call sites are `strategies/create-with-key` and
-  `strategies/composite/add-key`; this route mentions it in comments only). Its own docblock
-  records **why** it stays separate: routing its messages through the shared classifier would send
-  **five of its six** to `UNKNOWN`/500. That is a defensible reason to keep the cascade and **not**
-  a reason for it to be uncovered.
-  ⭐ **This is the next instance of the WIZFORM-02 class**, and the LOCKED boundary from 153.7's
-  context — *"every code that can reach a user-facing surface"* — reaches it by its own words.
-  Three analytics-service codes land here and were given `VENUE_WIRE_CODES_WITHOUT_VERDICT` rows at
-  153.7-02 that say so explicitly: `KEY_MISSING_EXCHANGE` (422), `KEY_UNDECRYPTABLE` (500), and
-  `internal.py`'s `KEK_UNAVAILABLE` (500).
-  ⚠️ **`KEY_UNDECRYPTABLE` is the one with a real user cost**, not just a wrong label: its only
-  actionable remedy is to **reconnect the key**, and this route answers it on the arm whose copy
-  reads *"Could not check key scopes. Try again."* — an instruction that cannot work, which is the
-  affordance class the whole 153 span exists to remove.
-  ⭐ **Measured 2026-08-14, and it is why this is NOT an open WIZFORM-02 instance.** The route's
-  one wizard-side consumer is `KeyPermissionBadge`, rendered from `SyncPreviewStep` (and from the
-  strategy edit page). That component does **not** build a `wizardErrors` envelope at all — it
-  renders the route's own `{ code, error }` as `"CODE: message"` text — so nothing on this path
-  renders the `UNKNOWN` card, and WIZFORM-02's criterion ("no wizard failure renders `code: UNKNOWN`
-  when the server DID classify it") is not violated here. What is wrong is the **accuracy of a
-  remedy sentence** in a private vocabulary no coverage law watches. Same class, different
-  criterion — record it as its own item rather than re-opening a closed requirement.
-  Shape when it is picked up: give the private cascade a derived-population law of the same form
-  the venue vocabulary now has (hand-typed roster, both-halves disposition assertion, vacuity
-  floor), rather than deleting the cascade in favour of the shared classifier — deleting it is the
-  change its docblock measured as making things worse.
-
-- [ ] **Five routes answer every upstream 5xx as `code: "UNKNOWN"` through a terminal arm that
-  forwards 4xx faithfully.** ⚠️ **A SECOND, DISTINCT item from the one above** — different
-  mechanism, different routes, and it is recorded separately so neither is closed by fixing the
-  other. Measured per-arm at 153.7-02 while dispositioning the twelve Group-B codes.
-  The shape is one arm repeated: `4xx` is forwarded with `code: err.seamCode` (so the upstream
-  vocabulary survives), and everything `5xx` falls to a terminal `{ code: "UNKNOWN" }` + a Sentry
-  capture — so the *more severe* half of the vocabulary is the half that loses its code. The five
-  codes still rendering `UNKNOWN` on their own surfaces:
-  `ADMIN_CHECK_UNAVAILABLE` (503) and `ROLE_CHECK_UNAVAILABLE` (503) — admin match-recompute, and
-  collapsing the pair hides **which** check went down; `SCORING_FAILED` (500) — same route, and
-  unlike its two 503 siblings it is **permanent**, so every retryable member would offer a Retry
-  that cannot work; `EVAL_FAILED` (500) — admin match-eval, the opposite path out of the same
-  handler whose `EVAL_WINDOW_TOO_LARGE` (400) **does** survive intact through the 4xx arm;
-  `SIMULATION_FAILED` (500) — `/api/simulator`.
-  ⚠️ **Lower user-impact than the item above, and the reason is worth keeping**: four of the five
-  are admin-only surfaces with no key, no draft and no connect step, and the fifth is the portfolio
-  impact panel. They are recorded because the *mechanism* is the same one that produced the
-  WIZFORM-02 defect on the wizard, not because the blast radius is comparable.
-  Cheap first step when picked up: decide whether the 4xx-forward arm should widen to any status
-  carrying a recognised `seamCode`, which is one edit per route and would close all five — versus
-  minting per-code members, which is five copy decisions.
 
 ### Phase 153.7 review + verification — findings routed onward (added 2026-08-14)
 
@@ -482,23 +274,6 @@ listed now only because 153.7 is what made them reachable or re-read them.
   two rosters. They are separate on purpose (`ConnectKeyStep`'s docblock argues it at length — a
   step admits the codes ITS route emits, not the whole vocabulary), and a merged set would pass the
   guard while admitting each route's codes at the other.
-
-- [ ] **`WR-04` (pre-existing) — `MT5_GATEWAY_UNREACHABLE`'s server-advertised `Retry-After` is
-  dropped, so the user gets a Retry control with no interval and hammers a gateway that told us how
-  long to wait.** `analytics-service/routers/exchange.py:626-634` raises it with
-  `retry_after=RETRY_AFTER_SECONDS["mt5-gateway"]`. `AnalyticsUpstreamError` carries `status`,
-  `seamCode` and `dependency` — **no retry-after field** — and both key routes stamp `Retry-After`
-  only for `err instanceof CircuitOpenError`. So `parseRetryAfterSeconds(res.headers)` in
-  `ConnectKeyStep` / `MultiKeyConnectStep` resolves `null` and the envelope renders no wait.
-  ⚠️ **Listed now, not before, because 153.7 is what makes this code render a RECOVERABLE envelope
-  for the first time** (`MT5_GATEWAY_UNREACHABLE` → `SERVICE_UNREACHABLE`, 503). The missing wait
-  is reachable rather than theoretical as of that commit. `src/__tests__/contracts/REGISTRY.md`
-  already records the parent gap as *"coverage-law row 3 and nothing guards its completeness"*.
-  What is blocked: an honest wait on the one venue that publishes one. What unblocks it: a fourth
-  optional constructor argument on `AnalyticsUpstreamError` fed from the nested envelope's
-  `retry_after`, relayed by both key-route catches exactly the way `CircuitOpenError.retryAfterS`
-  already is. ⛔ Not fixed in the 153.7 round: it is a seam-contract change across the Python
-  envelope, the TS error class and two route catches — a plan, not a review fix.
 
 - [ ] **`W-153.7-3` (pre-existing, low) — coverage-law row 1 enumerates exactly THREE Next route
   files, which is narrower than the phase goal's wording.** `ROUTES` in
@@ -580,12 +355,6 @@ the multi-round red-team fan-out, **not** the mutation discipline.
 found most of it"* — the data refutes that (140.2 found 3 criticals; 140.3's planning gate found 3
 blockers before a line was written). The case is *"this particular phase cannot hurt much,"* which is
 true for 146 and half of 142–145, and **false for 141**.
-- **`sql-tests` will be RED on the v1.16 PR until migration `20260726000225` is hand-applied to
-  TEST** (`qmnijlgmdhviwzwfyzlc`), per this repo's standing MCP→TEST-before-merge convention.
-  Failure mode: reviewer sees an *expected* red, merges anyway, and **merging auto-applies the
-  migration to PROD**. The migration itself was validated hard (real PG15, idempotent, abort-safe,
-  20 PROD rows) so the apply risk is low — the risk is normalising red-check merges on a
-  prod-DB event.
 
 ### v1.16 Phase-140.1 review — HOMELESS findings (no owning phase; added 2026-07-26)
 
@@ -600,14 +369,6 @@ true for 146 and half of 142–145, and **false for 141**.
   repo-wide** — the 5 Phase-4-vs-Phase-5 **money-math KPI parity** cases it gates are permanently
   dormant. (c) 4 `tests/test_repro_key_flow.py` cases skip on missing **binance** cassettes
   (`tests/cassettes/` holds only `okx/` and `bybit/`). CI wiring; no owning phase.
-- **A tenth IP-keyed route + the test that conceals it.** `analytics-service/routers/simulator.py:92`
-  returns `f"simulator:ip:{get_remote_address(request)}"`; its module docstring still claims it reads
-  `X-User-Id`, which it does not. `test_simulator_router.py::…::test_route_uses_user_keyed_key_func_not_ip`
-  asserts `key_func is not get_remote_address` — which **passes because the key func *wraps* the IP
-  function** rather than being it. Mechanically quarantined by `IP_KEYED_QUARANTINE` with an
-  *equality* assertion, so the exemption cannot grow and goes red when repaired. **PYAPI-03's
-  reconciliation is 9/9 — do not report 10 closed.** Repairing the route must also repair the test's
-  name and docstring.
 - **Nine test modules mount a bare `FastAPI()`**, so they never see the app-global 422/429 handlers
   and their 422s render in FastAPI's default **leaking** shape. **Negative half: none of them is
   vacuous today — do NOT schedule a "fix the broken tests" sweep.** Positive half: the credential-safe
@@ -660,73 +421,6 @@ true for 146 and half of 142–145, and **false for 141**.
      copy-by-code only.** Do not re-open it as an unfinished half of this item. The wizard renders
      copy keyed on the code and deliberately renders no server-supplied string.
 
-6. **⛔ WIZFORM-02's class is OPEN — the mt5-gateway fault family renders `code: UNKNOWN`.**
-   Found 2026-08-13 by the retroactive Phase 153 SPAN verification
-   (`.planning/phases/153-.../153-VERIFICATION.md`, status `failed`, 5/6 requirements).
-   **THIRD live instance**, hit by the founder on PROD 2026-08-12 while dogfooding MT5.
-
-   The server classified the failure completely — `routers/exchange.py:866` raises
-   `service_error(500, "MT5_GATEWAY_UNCONFIGURED", dependency="mt5-gateway",
-   retryable=False, …)` with operator-directed copy — and the wizard rendered
-   *"We could not classify this failure, so we cannot tell you what happened or whether
-   your last action took effect."*
-
-   ⭐ **The derived-roster remedy was genuinely built and genuinely works** (falsified:
-   mutating an emitted code literal in `finalize-wizard/route.ts` reds two assertions by
-   name). It misses this code for **two structural reasons, either sufficient alone**:
-
-   | Guard | Directory root | Emission shape matched |
-   |---|---|---|
-   | `wizardErrors.invariant.test.ts` | 3 Next route files | `NextResponse.json({code, error}, {status})` |
-   | `seam-venue-vocabulary.invariant.test.ts` | `analytics-service/services/**/*.py` | `error_code =` assignment |
-
-   `routers/exchange.py` is in **neither** — wrong root (`routers/`, not `services/`) **and**
-   wrong shape (a **positional** arg to `service_error(...)`, not an `error_code=` assignment).
-   Relocating the file alone would not make it visible. Measured from HEAD: both
-   `MT5_GATEWAY_UNCONFIGURED` and its retryable sibling `MT5_GATEWAY_UNREACHABLE` classify to
-   `{ code: "UNKNOWN", status: 500 }`, and both are absent from **both halves** of the
-   coverage law — no verdict row *and* no recorded no-verdict — so their absence could never
-   have been loud.
-
-   ⛔ **The fix is NOT "add two rows."** That closes two instances and reproduces the defect a
-   fourth time. The real question is whether the coverage law's boundary
-   (400-family-wizard-route vs 500-family-router) is the right one — the verification says it
-   is not, because the requirement is written about *what the user sees and what the server
-   classified*.
-
-   ⭐ **DECIDED 2026-08-13 (autonomous, founder asleep; reverse it if you disagree).** The boundary
-   becomes **"every code that can reach a user-facing surface"**, not "codes emitted in a
-   particular directory in a particular syntactic shape". Rationale: the current boundary is an
-   artifact of *how the scanners were written*, not of any product rule — no one ever decided that
-   a 500 from `routers/` deserves less honesty than a 400 from a Next route, and the user cannot
-   tell the difference. Both scanners already prove the mechanism works; only their reach is wrong.
-
-   **Scope that follows from the decision** (a phase, not a patch):
-   1. Widen the Python scanner's root from `analytics-service/services/**` to `analytics-service/**`.
-   2. Teach it the **positional** `service_error(<status>, "<CODE>", …)` shape, not just
-      `error_code = "<CODE>"` assignments. ⚠️ These are the two independent misses — fixing either
-      alone still leaves `routers/exchange.py` invisible.
-   3. Re-cut the pinned code tables (the 153.1 `EXPECTED_TABLE_SIZE` family) — **never delete them**;
-      the re-cut is the deliberate act that records the widening.
-   4. Add a coverage assertion that FAILS when a discovered code has neither a verdict row nor a
-      recorded no-verdict. ⭐ Today's absence was silent because the code was missing from **both**
-      halves — that asymmetry is the actual defect, above any individual missing code.
-   5. Falsifiability: add a new `service_error(...)` code in `routers/` with no verdict row and
-      prove the gate reds. A fix that cannot fail this way has not closed the class.
-
-   ⚠️ Do NOT bundle this with the two known codes as a shortcut — landing `MT5_GATEWAY_UNCONFIGURED`
-   and `MT5_GATEWAY_UNREACHABLE` as rows *without* steps 1/2/4 is exactly the fourth instance.
-
-   ⚠️ **Do NOT re-open WIZFORM-05 as part of this.** The 45,169/45,159/45,177 ms figures from
-   the same incident are `_MT5_VALIDATE_INITIALIZE_TIMEOUT_MS = 45000` — the innermost,
-   deliberately-first-firing layer. The verdict arrived at 45 s against a 120 s budget; the
-   30 s inversion is genuinely gone (`worst_case_ms == 105_000 < 120_000`, 67 pytest green).
-   What failed *after* arrival is WIZFORM-02. Lengthening the budget fixes nothing.
-
-   📌 Consequence for bookkeeping: **Phase 153's parent checkbox must stay unticked** — the
-   span did not meet its own goal. 153.1–153.6 all shipped and 153.6 verified
-   `passed_with_concerns`; the parent is the thing that failed.
-
 7. **Doc defects in the 153 records (non-blocking, logged per the founder stopping rule).**
    (a) `REQUIREMENTS.md:1366` claims `ConnectKeyStep`/`MultiKeyConnectStep` "still pass neither"
    `surface` nor `venue`; at HEAD both pass `surface: "connect"` **and** `venue`, and the row
@@ -738,28 +432,6 @@ true for 146 and half of 142–145, and **false for 141**.
 ---
 
 ## 🟡 FIX MID-TERM
-
-### ⚠️ PRE-EXISTING RED on `main`: `AllocationsTabs.scenario-state-preservation` (found 2026-08-10 during /ship)
-`src/app/(dashboard)/allocations/AllocationsTabs.scenario-state-preservation.test.tsx` →
-*"adding + toggling a strategy in Scenario, leaving to Overview, and re-entering preserves the
-draft"* fails with `TestingLibraryElementError: Unable to find an element by:
-[data-testid="kpi-strip-mock"]`, preceded by
-`scenario_list_load_failed { error: 'TypeError: Failed to parse URL from /api/allocator/scenario/saved' }`.
-
-⭐ **Triaged as NOT ours before shipping v0.55.0.0**, and the triage is the part worth keeping:
-- **Deterministic, not a flake** — fails twice in isolation, and in the full suite.
-- **Fails on pristine `origin/main`** — proven in a throwaway detached worktree at `861a4d91`
-  with `node_modules` symlinked, so the branch is not the cause.
-- **Not the Node-version split** either — reproduced under **both** local Node 25 and CI's
-  Node 22 (`PATH=/opt/homebrew/opt/node@22/bin`), so it is not
-  [[reference_ci_node22_vs_local_node25]].
-
-The relative-URL parse failure is the likely root: `fetch('/api/…')` has no base in jsdom, so the
-scenario list load throws, the composer never renders, and the mock strip is never found. It
-presumably passes (or skips) in CI because something supplies a base URL there — **which means a
-green CI on this spec is not evidence the behaviour works.** Worth confirming whether CI runs it
-at all; if CI skips it, the spec is a guard that cannot fail in the only place it is enforced.
-
 
 ### ✅ DECIDED + SHIPPED — should the measure ladder have a px cap at all? (raised 2026-08-09, DECIDED 2026-08-09, closed 2026-08-10)
 Founder report, with screenshots: *"zooming out should allow me to see more of the
@@ -795,42 +467,7 @@ pages (`users`, `users/[id]`, `partner-import`, `for-quants-leads`) keep `max-w-
 They live under the `isWide` `/admin` prefix for navigation reasons, but the ladder
 governs by CONTENT TYPE, and their content is prose/forms — rung 1.
 
-### Dependency pass — the 9 open dependabot PRs (booked 2026-08-05, founder call)
-- **One campaign, NOT piecemeal merges.** All 9 dependabot PRs are red — and NOT only the
-  TEST-DB infra flake: #657 (npm minor-patch group, 25 updates) genuinely fails
-  `frontend-build`/`frontend-lint`/`contracts`/`deps-cache`. The pile hides real majors:
-  typescript 6→7 (#614), jsdom 30 (#646), jest-dom 7 (#645), actions/setup-node+python+checkout
-  majors (#626/#627/#643), supabase/setup-cli 3 (#612), plus grouped pip (#658) and npm (#657).
-  Branches are 1–3 weeks stale vs main.
-- **Order:** rebase + land the two GROUPS first (pip, then npm — bisect the npm group's build
-  break, it may be one member); then majors ONE at a time with a full local suite + typecheck
-  each (CI's python/e2e-seeded jobs can't be trusted as the only gate while the shared-TEST-DB
-  flake persists). actions/* majors need a workflow-syntax review, not just green CI.
-- **When:** after v1.17 phases or in a maintenance window — never mid-phase.
-- None of the 9 touch the banned-packages list (checked 2026-08-05).
-- Related: #606 (nightly npm-audit p1) is a DEV-ONLY chain — all 4 highs via `@lhci/cli` →
-  old `uuid`; not fixed by the minor-patch group; needs an @lhci/cli bump or override in this
-  same pass. #616 (stale analytics deploy) is NOT a deps issue — it's the Phase 144 TEST-DB
-  flake keeping main CI red so Railway skips deploys; currently harmless (no analytics-service
-  changes in the undeployed delta).
-
 ### Money-path correctness (latent / flag-gated / edge cases)
-- **`getPercentiles` folds FAILED-computation KPIs into published rankings** (found 2026-08-19
-  during Phase 146.2 planning; NOT in 146.2 scope — that phase fixes the csv echo FILL guard,
-  not this). `PERCENTILE_ANALYTICS_COLUMNS` (`src/lib/queries.ts:126-127`) is
-  `"cagr, sharpe, sortino, calmar, max_drawdown, volatility, cumulative_return"` — it does not
-  SELECT `computation_status` at all, so a published strategy whose analytics row is
-  `computation_status='failed'` contributes its **stale/partial** KPIs to the percentile
-  distribution **for every other strategy's rank**. `StrategyTable.tsx:1091` likewise renders
-  `formatNumber(s.analytics.sharpe)` ungated (only the status *chip* is gated).
-  ⚠️ **The gating is per-surface, not systemic**: the detail page and factsheet PDFs DO gate on
-  `computation_status`, and nearly every other projection in `queries.ts` selects it — the
-  percentile path is the outlier. Measured on PROD 2026-08-19: 7 csv strategies carry a non-null
-  `sharpe`+`cagr` on a `failed` row.
-  **Fix:** add `computation_status` to `PERCENTILE_ANALYTICS_COLUMNS` and exclude non-`complete`
-  rows from the percentile population; decide separately whether `StrategyTable` should render a
-  failed row's metrics at all. **Test must pin the ECONOMICS** — a failed row must not move
-  another strategy's percentile rank.
 - ~~**Unified-backbone CSV-finalize breaks if flag on**~~ — **CLOSED 2026-08-17 (Phase 145
   SC#1, verdict CANNOT REPRODUCE)**. Of this bullet's own two remedies, **"forward JWT"
   shipped in Phase 19.1** (2026-05-27; verified at HEAD: `route.ts:1324` forwards
@@ -846,23 +483,8 @@ governs by CONTENT TYPE, and their content is prose/forms — rung 1.
   (`portfolio-stats.ts` / `scenario-blend-panels.ts` / `health-score.ts`) and matching
   (`match.py`) compute bespoke annualization/Sharpe. Parity-gated but real divergence risk —
   absorb into the unified backbone.
-- **bybit funding cursor shares the trade `last_sync_at` cursor** → permanent daily funding
-  gaps + pre-adoption history (back to 2026-01-22) never backfilled. Dedicated funding
-  cursor with overlap + one-time backfill. (Diagnosis-only; not yet fixed.)
-- **OKX bills paginator silently truncates** → returns partial `daily_pnl` with only a
-  WARNING, no `partial=true` to caller. Also: OKX branch lacks an inner try, so its failures
-  escape at ERROR while bybit/binance fail at WARNING (skewed alerting).
-- **quantstats price-detection sign-flip** — `_prepare_returns` misreads all-non-negative
-  returns with a >100% day as prices → wrong Sharpe/vol. P114 fixed only the portfolio/verify
-  path; the strategy-analytics path is still exposed.
-- **Blend annualization understates crypto** — an unknown-`asset_class` crypto leg annualizes
-  at √252 not √365 → inflates Sharpe when it's the sole crypto leg. Default unknown→crypto for
-  the RISK basis.
 - **Deribit `correction` residual** — a capital-reason row carrying a trading token and no
   capital word still classifies as trading P&L. Tighten the word-boundary classifier.
-- **Short-window CAGR over-annualization (v1.8 P73)** — a 2-day window annualizes with
-  exponent 365 → CAGR explodes (~5e7), stamped `complete` with no DQ flag. Add
-  `elapsed_days < N` → `complete_with_warnings`/`insufficient_window` WITHOUT changing CAGR.
 - **Worker orphaned-`running` purge: DELETE vs reset** (founder decision at FLIP) — same
   migration; TEST wants DELETE, PROD wants reset (a sustained >4h outage would lose live
   jobs). Window already widened 2h→4h.
@@ -896,23 +518,9 @@ governs by CONTENT TYPE, and their content is prose/forms — rung 1.
   exhaustion vs. an external exhaustion query/alert. ⚠️ Interacts with the 90-day retention wall,
   which DELETES the marker rows that ARE the counter — so the bound is "3 per retention window",
   and a strategy can silently resume cycling after ~90d with no notification at either edge.
-- **csv-finalize is non-transactional** → orphan strategy rows on partial failure. Wrap in one
-  txn or add Sentry alert + orphan-cleanup cron.
-- **`after()` enqueue silent-failure** → strategy has data but no compute job → stuck
-  "computing" forever. Sentry alert + dashboard for pending/null rows > 2h.
-- **Worker-crash `computing` janitor** — SIGKILL mid-job strands the row; wizard polls forever.
-  Cron marking `computing` > 30min as failed. (Also the root of the recurring shared-test-DB
-  fence flake — retention purge re-homed here.)
-- **`complete_with_warnings` laundered to plain `complete`** when a sibling job hits
-  `failed_final` then recovers without re-run.
 - **Phase-19 hourly cron never decommissioned** (PR-D) — soak gate passed, cron still running.
-- **Strategy sync-failure checkpointing** — persist `last_fetched_trade_timestamp` so retries
-  resume instead of re-fetching all trades.
 - **Match-engine cron health check missing** — no `/api/cron/health-check` route; match-engine
   cron failures are invisible (silent data staleness).
-- **Vercel→Railway seam has no resilience** — `analytics-client.ts` has no fetch timeout /
-  retries / circuit breaker; a hung Railway request holds a Vercel lambda open until the
-  platform kills it and cascade-500s `keys/sync` / `verify-strategy` / `admin/match/*`.
 - ~~**Rate limiting only on 6 routes**~~ — **CLOSED 2026-08-18** (Phase 146 / RATE-01):
   stale since at latest audit-2026-05-07. Every route this bullet named
   (`verify-strategy`, `keys/{sync,validate,encrypt}`, `admin/match/recompute`,
@@ -925,6 +533,9 @@ governs by CONTENT TYPE, and their content is prose/forms — rung 1.
   (idempotency row on `(cron_name, year_month)`); founder-LP 85s worst-case > 60s maxDuration;
   Resend webhook svix-id idempotency store; email correlation-id fragmentation (per-email not
   per-batch); email retry false-alarm on UNIQUE(23505).
+- [ ] Circuit-breaker state/ops dashboard (observability depth; from archived v1.16 v2-requirements).
+- [ ] Job-queue depth + age metrics (observability depth; from archived v1.16 v2-requirements).
+- [ ] Adaptive/load-aware rate limiting driven by the breaker signal (from archived v1.16 v2-requirements).
 
 ### Security
 - **npm advisories (2026-07-25).** Shipped highs FIXED at root: `next` 16.2.10→16.2.11
@@ -937,103 +548,16 @@ governs by CONTENT TYPE, and their content is prose/forms — rung 1.
   Left to Dependabot. Follow-up: re-check the `sharp` override once `next` bumps its declared
   `sharp` range past 0.34.5.
 - **CSP uses `unsafe-inline`/`unsafe-eval`** — move to nonce-based CSP.
-- **Signup allows 6-char passwords** — `minLength={6}` client-only; server-side Supabase policy
-  unverified/undocumented.
 - **VCR cassette over-redaction** — misses token/hmac/digest/nonce (and over-matches
   signal/signedAt/pubkey); replace with per-broker allowlist.
-- **ccxt tracebacks not secret-scrubbed** (`exc_info=True`) — an API key could land in Railway
-  logs. Add a `redact_secrets` util.
-- **No Python lock file; ccxt unpinned** — unreproducible prod builds in the money-math path.
-- **`api_keys.exchange` is still CLIENT-SUPPLIED at row CREATION** (residual of review CR-01,
-  logged 2026-08-10). The UPDATE half is closed — migration `20260810120000` revokes table-level
-  UPDATE from `anon`/`authenticated` and a SECURITY INVOKER trigger backstops it, so a key owner
-  can no longer PATCH their own row to a probe-exempt venue, submit with the submit-time
-  scope-broadening probe skipped, and PATCH it back. The INSERT half remains: the browser calls
-  `/api/keys/validate-and-encrypt` and then performs the `api_keys` INSERT **itself**
-  (`ApiKeyManager.tsx:254`, `StrategyForm.tsx:140`, `AllocatorExchangeManager.tsx:591`), so a
-  crafted client can insert a venue that differs from the one the server actually validated.
-  ⛔ **CORRECTED 2026-08-12 (Phase 153.6 D-04 / migration re-audit M2-05). The original "why
-  this is not filed FIX NOW" rested on a claim that is FALSE**, and it is recorded here rather
-  than by editing `20260810120000`, which is already applied. The argument was: the ciphertext is
-  server-minted and only ever minted for a key the server confirmed read-only
-  (`validate-and-encrypt/route.ts:310`), and with UPDATE withdrawn a mislabelled row could never
-  be restored to its true venue — so the forged strategy's sync would fail permanently, no
-  credible listing could result, and the forgery was self-defeating. **It was not.**
-  `20260810120000` touches UPDATE only and deliberately leaves INSERT and DELETE alone (both are
-  live client paths), so the forger never needed to restore the row: DELETE + re-INSERT under a
-  forged `exchange` was the round trip, and `20260723172032` had already widened
-  `api_keys_exchange_check` to admit the probe-exempt venue. The bypass was LIVE from
-  2026-08-10 until `20260811210000`.
-  ✅ **The probe-gate half is now closed** by `20260811210000_api_keys_attested_venue.sql`, which
-  moves the scope-probe gate off this column onto `api_keys.attested_venue` (RPC-written, scrubbed
-  to NULL on every client INSERT). What remains open here is the INSERT path itself — and
-  ⚠️ `exchange` still feeds the `strategies.asset_class` annualization stamp (√365 vs √252), which
-  is a money-math reader and is still forgeable (153.6 OQ-2).
-  **Fix when the connect flow is next opened:** move the INSERT server-side into
-  `validate-and-encrypt` (it already knows the canonical venue it validated) and return the new
-  row id, then `REVOKE INSERT ON api_keys FROM authenticated`. That is a three-component
-  connect-flow refactor and was deliberately out of the CR-01 fix's blast radius.
 
 ### CI / test-infra ratchet
-- 🔁 **RECURS DAILY 05:30 UTC — nothing reaps stale `pending` compute_jobs on the TEST
-  project, and a full claim queue starves every live claim test** (diagnosed 2026-08-03
-  while landing v0.52.0.0; cleaned by hand, NOT fixed).
-  Chain: TEST holds ~1,900 `api_keys` (1,437 older than 7 days — fixture rows no test
-  cleans up) → the `derive-allocator-key-dailies` cron (`30 5 * * *`, jobid 9,
-  `SELECT enqueue_derive_broker_dailies_for_allocator_keys()`) runs on TEST exactly as on
-  prod and fans out ONE `derive_broker_dailies` job per key → 1,884 rows landed at
-  `2026-08-02 05:30:00.236555+00` → nothing on TEST drains them.
-  ⚠️ **The starvation is the part to understand, and it is not a flake.**
-  `claim_compute_jobs_with_priority` ends `ORDER BY <priority rank>, next_attempt_at, id
-  LIMIT p_batch_size`. A test seeding a fresh job gets `next_attempt_at = now()`, so it
-  sorts BEHIND every stale row. `_claim_one` (`test_compute_jobs_fencing.py:692`) claims
-  `p_batch_size=50` and returns only its own `want_job_id`, so with 989 stale rows ahead
-  the seeded job sits at position ~990 and `_claim_one` returns `None` **every time**.
-  10 tests fail identically (7 in `test_compute_jobs_fencing.py`, 3 in
-  `test_drain_semantics.py`). It reddens `python` on ANY branch, including main — main's
-  last green CI ran 05:01 on 2026-08-02, 29 minutes before the cron fired.
-  **Retention coverage gap = the root cause**: `retention_compute_jobs_done` (jobid 4),
-  `retention_compute_jobs_failed` (jobid 8, `failed_final`/`failed_retry`) and
-  `retention_compute_jobs_orphaned_running` (jobid 11) exist — **there is no sweep for
-  stale `pending`**, the one status an undrained enqueue cron produces.
-  ➡️ **OWNER: Phase 144 (JOB — WR-02 orphaned-running DELETE→terminal UPDATE + cadence)**
-  for the retention half. Same table, same cron family (it already edits jobid 11), and two
-  of its success criteria are this problem's shape: SC 1 (orphan → terminal `failed` so a
-  poller sees a real outcome and the row survives for audit) and SC 3 (reconcile the
-  TEST-DELETE / PROD-reset split into ONE behavior — the exact TEST-vs-PROD mechanism gap
-  below).
-  ⚙️ **It is WIRED, not just noted.** GSD never reads `TODOS.md` (zero references anywhere
-  in `~/.claude/get-shit-done/`), and the planner's coverage audit checks only
-  `REQUIREMENTS.md`, `RESEARCH.md`, the ROADMAP **goal** and `CONTEXT.md` decisions — a
-  ROADMAP *Note* is NOT audited. So this was promoted to **`JOB-08`** in
-  `.planning/REQUIREMENTS.md`, added to Phase 144's `Requirements:` line, and given **SC 4**
-  on the phase. The audit iterates the phase's REQ-IDs and flags any not claimed by a plan,
-  so 144 cannot be planned without JOB-08 being answered. Measure-first: "stale `pending`
-  population is zero on prod" is a valid close.
-  ⛔ Sweep it the 144 way — **terminal UPDATE, never DELETE**. A `DELETE` of stale `pending`
-  shipped under `supabase/migrations/**` auto-applies to PRODUCTION on merge and destroys
-  real queued work; transitioning a long-unclaimable row to terminal `failed` loses nothing
-  and makes the failure visible, which is what 144 exists to do. Size the threshold, not the
-  cadence, to protect live jobs (the WORKER-04 2h→4h lesson).
-  Preferred fix (test-side, no prod blast radius, and it encodes the invariant the recorded
-  lesson already asks for — *assert your OWN seed, never global empty-state*): make the
-  live claim tests independent of queue depth rather than assuming an empty queue. Seeding
-  at `priority: 'high'` puts the seed ahead of an all-`normal` backlog and survives any
-  depth. ⚠️ Check first that no test in scope is itself asserting priority ordering or
-  low-priority claim behaviour — `v_high_pending` gates low-priority rows out entirely once
-  any high row is pending, so a blanket change is not safe.
-  Second, independent fix worth doing: TEST `api_keys` grow without bound (1,900 and
-  climbing). Fewer fixture keys = a smaller daily fan-out.
 - **CI speed/flake (founder 2026-08-05, watched python at 20min/12%) — 4TH MECHANISM FOUND: a WEDGED PostgREST pool.** All-day 504s on TEST (every CI cluster: 07:45, ~11:00, 18:0x, 19:2x) were PGRST003 while Postgres sat at 14/60 connections nearly idle and the same DELETE ran instantly via direct SQL — PostgREST's own pool slots were leaked/wedged after the morning's 2,144-job backlog connection storm, and the state persists until PostgREST's connections are recycled. REMEDY (proven 2026-08-05): `select pg_terminate_backend(pid) from pg_stat_activity where application_name='postgrest' and backend_type='client backend'` → PostgREST rebuilds the pool → instant 200s. Contributing causes booked: python + e2e-seeded run CONCURRENTLY (workflow `needs:` sequencing fix); daily backlog (purged 2,144 `derive-dailies-%` pending, cron untouched). Real fix (Phase 144, owner): per-run isolated DB. Also: e2e-seeded's seed should FAIL FAST with a "PostgREST wedged?" hint on PGRST003 rather than burning the run.
-- **Workflow `needs:` sequencing fix** — `python` + `e2e-seeded` run CONCURRENTLY against the one shared TEST DB (a contributing cause booked under the wedged-PostgREST 4th mechanism above); sequence them via `needs:` in `.github/workflows/ci.yml` so the two DB-heavy jobs never overlap.
 - 44 live-DB vitest files + ~112 python tests are green-skipped in CI while migrations
   auto-apply to prod.
-- pytest 80% gate measures only `services/` (routers/ ~7.8k LOC + `main_worker.py` uncovered).
 - Shared test-DB sql/e2e race (fence flake); Railway analytics deploys skip silently on red
   main CI (verify `commitHash` + `/health`); `repro-key-flow.sh` Layer-A leak gate is a CI
   no-op; `cassette-refresh.yml` failed 17/17 with no alerting.
-- 20 of 35 Playwright specs wired to no workflow; migrations auto-apply to prod but not the
-  test project; generated DB types have no regen/drift gate.
 - **`analytics-service/tests/` is entirely untyped — 5,439 `mypy --strict` errors across 182 of
   213 test files** (MEASURED 2026-08-02 from Phase 142; `test_main_worker.py` alone = 59, which
   is typical at ~30/file, NOT an outlier). ⚠️ **This is CONFORMANCE, not drift**: `ci.yml:1130`
@@ -1140,28 +664,6 @@ governs by CONTENT TYPE, and their content is prose/forms — rung 1.
   ⚠️ Note the adjacent risk: an MCP surface is a **new public read boundary**. Every hardening
   lesson already paid for on the public factsheet path applies to it from day one, not later.
 
-- **⚠️ `strategy_analytics (*)` splats EVERY analytics column to anon on two public paths.**
-  Found 2026-08-03 by the migration review of Phase 142.2 plan 01, while checking whether a new
-  column would be publicly readable. It would — but so is everything else, and that is the finding.
-  - `src/lib/queries.ts:218` — `getStrategiesByCategory`, wrapped in `withPublishedOnly` → public
-    discovery/browse by category.
-  - `src/app/(dashboard)/compare/page.tsx:68` — same `withPublishedOnly` shape.
-  Policy `analytics_read` (`20260405061912:35-44`) is `status = 'published' OR user_id = auth.uid()`
-  **with no `TO` clause**, so it applies to `anon`. RLS is row-level and cannot hide a column, so the
-  `(*)` embed hands an anonymous reader every column on the row for any published strategy —
-  including `daily_returns`, `metrics_json` and `data_quality_flags`.
-  **The fix already exists in the same file and is half-applied:** `queries.ts:410` and `:448` use
-  the curated `PUBLIC_ANALYTICS_COLUMNS` (`:284`), and the comment at `:700` explicitly says to
-  replace `select("*, strategy_analytics (*)")` with explicit column lists. These two sites were
-  missed. ⚠️ Not a drop-in edit — consumers are typed (`StrategyWithAnalytics`) and browse/compare
-  must be re-checked against the narrowed projection, so it needs its own change with its own tests.
-  ⛔ **Do NOT "fix" this with a column-level `REVOKE` on `anon`.** PostgREST errors on a `(*)` embed
-  when the role lacks a column, so a REVOKE would take **public browse down** until the splats are
-  narrowed first. Narrow the projection, then consider grants — in that order.
-  Phase 142.2 deliberately did NOT special-case its own new `series_completeness` column here: it is
-  an enum carrying no magnitude, and protecting one column while the splat stands would be machinery
-  that secures nothing.
-
 ### Tech-debt / maintainability (opportunistic, don't force)
 
 - **The two wizard connect surfaces keep TWO hand-maintained `EXCHANGES` rosters (added 2026-08-11,
@@ -1255,7 +757,6 @@ governs by CONTENT TYPE, and their content is prose/forms — rung 1.
 - **149 review IN-02:** `getOwnRowPercentiles` fully computes `publishedMap` only for its key-count; name the future consumer or reduce to a count.
 - God-files: `queries.ts` (3,205 lines), `job_worker.run_sync_trades_job` (688 lines),
   `portfolio.py` (2,423), `exchange.py` (2,777).
-- ~4.6k LOC dead-code sweep (35 files, stale 3,256-line DB-types twin, unused deps); wire knip.
 - Formatter copy-paste drift (20+ local `fmtUsd`/`fmtPct` with diverging null handling) →
   shared util.
 - Dual strategy create/edit (retire legacy `StrategyForm` once wizard proven).
@@ -1434,27 +935,6 @@ governs by CONTENT TYPE, and their content is prose/forms — rung 1.
 > ones deliberately NOT fixed there, each with the reason and the owner. **Every coordinate
 > below was re-derived at HEAD by locating the code text; re-derive again before acting.**
 
-- **→ 140.3 (TypeScript, out of 140.1.2's Python fence).** `internal.py:246`'s throttle now
-  raises `service_error(429, "RATE_LIMITED", …)`, a NESTED envelope, where it used to answer a
-  bare `{"detail": "<scalar str>"}`. Its consumer
-  `src/app/api/keys/[id]/permissions/route.ts:147` does `throw new Error(err.detail ?? …)`, so
-  `new Error(<object>)` gives `message === "[object Object]"` and the operator log at `:275`
-  reads `Error: [object Object]` instead of the human sentence. **Diagnostics only** — the
-  classifier at `route.ts:254-268` keys on message substrings (`INTERNAL_API_TOKEN`,
-  `Upstream 5`, `ECONNREFUSED`, `not configured`, `aborted`, `timeout`) and the OLD sentence
-  matched none of them either, so the reply is `PROBE_FAILED`/502 before and after. Recorded in
-  `docs/STATUS_CONTRACT.md` §2 as joining the object-detail set. Fix it **with** the three
-  `err.detail ?? …` sites already owed there, not separately — they are one edit.
-- **→ 140.3, schedule WITH TS-05 / TS-35 so the ROUTE closes, not a subset.**
-  `routers/exchange.py:538`'s `except ccxt.BaseError` arm on the LIVE `/api/validate-key` route
-  raises at `:544` `service_error(424, "EXCHANGE_PROBE_FAILED", dependency=req.exchange, retryable=True, …)`
-  — a nested envelope, so `analytics-client.ts:179`'s `error.detail ?? …` yields
-  "[object Object]", `classifyKeyValidationError` misses every branch, and a verdict the site
-  itself marks `retryable=True` renders as `UNKNOWN`/500 "our team has been notified" with no
-  retry affordance. **Same user-visible symptom PYAPIFIX2-01 exists to kill, on the same
-  route.** It is NOT an escape 140.1.2 created or hid: the site IS typed at `body.detail.code`,
-  and the render defect is the pre-existing owned obligation TS-05. But closing TS-05/TS-35
-  without this arm leaves the route half-fixed. (140.1.2-VERIFICATION W-01.)
 - **→ backlog, beside the four-vocabulary unification.** The provenance channel
   (`ValidationResult.permanent`) has ONE consumer. `routers/process_key.py`'s `_envelope_error`
   `recoverable` derivation and the sync-arm 424 venue-transient pre-gate both still key on
@@ -1515,7 +995,6 @@ governs by CONTENT TYPE, and their content is prose/forms — rung 1.
 
 Full detail: **`.planning/phases/140.5-seamprose-attribution-copy-harness-fidelity-and-prose-citati/140.5-deferred-items.md`** (tracked; the phase's own carry-forward ledger, ~40 sub-items). All items below are **non-blocking** by the founder bar (guard-hygiene, prose/citation, copy, and deferred breadth do not block); logged here so the canonical backlog owns them. The phase's one user-facing defect (**1d**, `permissions/route.ts` KEK "not configured" misattribution) was **FIXED** post-phase at `a89cedbf` and is NOT carried.
 
-- **User-facing standout — the per-row CSV breakdown DATA half never renders + the `'nan'` leak (QA ISSUE-005).** `_envelope_error` discards `debug_context` before the wire; the client reads a `pandera_errors` key Python never emits; and a user reading a validation failure sees the literal `'nan'` where a column name belongs. Only the *copy* half is done (the false "see per-row breakdown" promise was removed). ⚠️ **Fixing the data half forwards raw cell values — a PII surface**; admit only if closeable WITHOUT echoing untrusted cell contents (three things must move together — see ledger §1a). This is a degraded-message gap, not wrong data.
 - **Copy alignments (non-blocking):** `csv-validate` 503 config-missing arm is a bare heading vs the sibling 502's fuller sentence (§1c); `UNSUPPORTED_EXCHANGE` deserves its own wizard member rather than the honest `UNKNOWN`/500 fallback (§1b).
 - **Coverage-law guard widenings (guard-hygiene, §2a–2f):** `.tsx` log-roster class open (two instances scrubbed, roster doesn't cover `.tsx`); wait-threading completeness unguarded; `composite/members` has no `Retry-After` producer (recorded in the guard docblock); docblock-prose rewrites have no guard; purity-needle + wire-vocabulary guards partial-by-construction. Each names its one-line ratchet.
 - **Citation/prose harness residuals (§3a–3f):** D/E/F self-relative citations (`line 55`, `(:1027)`) need a second file-scoped predicate; string-literal citations invisible to the comment-scoped census — ⚠️ **NARROWED 2026-07-31 (141.1-02):** `seam-retry-registry.ts` was appended to `SEAM_CITATION_SURFACE` (now 35 files) and given a registry-LOCAL guard that scans all 13 evidence strings and reds on any `file.ext:NN` coordinate, so the registry's own string literals are covered; the residual is now the **other 34 files'** string literals, still comment-scoped only; a marked-quotation-exclusion guard is unbuilt; two RESEARCH offset/count figures (§3.8 `+72`, WP-13 "3+1") are mis-shaped — re-read, don't inherit.
@@ -1528,7 +1007,6 @@ Full detail: **`.planning/phases/140.5-seamprose-attribution-copy-harness-fideli
 
 ### v1.16 ship findings (per-phase PR landing, 2026-07-30)
 
-- **Cross-file test-isolation flake (non-blocking; product is correct).** Full-suite tip run (Node 25 local) surfaced **1 failed / 10264 passed**: `MultiKeyConnectStep.test.tsx > [WIZ-02] State B rehydration (back-nav) > …resubmits secretlessly via set-members`. In isolation the file is **44/44 green**, so it's a leaked mock from an earlier-running file (`set-members` throws `TypeError: Cannot read properties of undefined (reading 'apiKeyId')`, so the mock is never called). **Not a product defect.** It's order/shard-sensitive: CI shards passed on PR2/PR4, `frontend-test (1)` reddened on PR3. Fix the leak when it actually reddens a shard (likely a `vi.stubGlobal`/`vi.mock` not restored — use `vi.spyOn` + `restoreAllMocks`, cf. `reference_ci_node22_vs_local_node25`). The polluter is **outside** `src/app/(dashboard)/strategies/new/wizard/` (that dir is 392/392 together).
 - **⚠️ CORRECTED root cause — the `python` red was NOT a straddle; it was a fastapi 0.139 harness incompatibility (FIXED, commit `b3686767`).** `test_validate_key_venue_transient.py` failed all 14 venue-transient cases in CI ("no `/api/validate-key`/`/api/verify-strategy` route on `main.app`") on EVERY cut, and it did NOT self-resolve at the tip — my earlier "23/23 at the tip" was a false read from running the file **in isolation on a local fastapi 0.135.1** (flat routes). Real cause: fastapi **0.139.0** (deps bump #592) made `include_router()` lazy — multi-route sub-routers become a single `_IncludedRouter` placeholder in `app.routes` (routing still works; TestClient reaches every endpoint), so the harness' FLAT `main.app.routes` scan missed the exchange/portfolio routes. Reproduced authoritatively under the exact CI env (Python 3.12.13, fastapi 0.139.0, starlette 0.46.2 via a `uv` venv). Fix descends through `_IncludedRouter.original_router` (correct on both the pre-0.139 flat and 0.139+ lazy shapes). **Consequence to note honestly:** PR2–PR5 were merged on the belief this was a self-resolving straddle — it was not, so `main`'s `python` CI (and thus the Railway worker deploy, which gates on green CI) stayed red from PR2 until this fix. `sql-tests` DID straddle (red 140.1–140.3, green from 140.4).
 - **Genuinely separate, still-open: the `MultiKeyConnectStep` WIZ-02 frontend test-isolation flake** (44/44 in isolation, order/shard-sensitive) — did NOT hit PR6's `frontend-test` shard; left as tracked test-hygiene, fix if it reddens a future shard.
 - **✅ RESOLVED — `e2e-seeded` red on `main` after the v1.16 ship (`discovery-hide-examples-default.spec.ts:122`, DISCO-05).** NOT a product regression: the spec waited for a "No strategies" empty-state row, silently assuming the `crypto-sma` category held zero non-example published rows — false in the shared test DB (`qmnijlgmdhviwzwfyzlc`), which accumulates other specs' seed data. Fixed (PR #654, merge `4f45dcab`) by gating on the "Hide examples" checkbox reaching `checked=true` (bound `checked={!showExamples}`, flips in the same render that applies the `is_example` filter) instead of a global empty-state, then asserting zero `SEED_NAMES` (polled). Verified: e2e-seeded PASSED against the live polluted DB. ⭐Lesson: e2e specs on the shared DB must assert their OWN seed invariant, never a global DB state. See memory `project_e2e_seeded_shared_db_pollution_global_emptystate`.
@@ -1539,8 +1017,6 @@ Both phases SHIPPED to main (PR #651 / #652) with their VERIFICATION marked `gap
 
 - **✅ RESOLVED 2026-07-31 — SEAMUX-03 typed `{code}` envelope.** Closed via gap series G4–G9 (branch `feat/v1.16-141-jobs-rate-retry`). Class-map found **10** bare routes, not the 9 the VERIFICATION named — it missed `admin/strategy-review` (instance-not-class). All 16 seam-importing routes now carry a `code:` on every reachable route-emitted arm (csv-validate was already wire-coded via `csvErrorBody` — audit-only). Opus verifier PASSED: 817/817 tests, RED-on-neuter confirmed on 4 routes, `140.3-VERIFICATION.md` SEAMUX-03 → `resolved`. **Remaining non-blocking residual:** 2 `rateLimitDenyJson` deny bodies stay codeless — `verify-strategy` (route.ts:71) and `scenario/optimize` (route.ts:163) — because SEAMRIM-05 tests pin their exact codeless bodies; it's the rate-limiter boundary (our throttle / Upstash-misconfig, NOT the analytics seam), low blast radius (teaser has no discriminating client; scenario's 429 is a pre-existing no-Retry-After contract). One-line follow-up if ever wanted: give them `throttledBody`/`misconfiguredBody` codes + update the SEAMRIM-05 pins. Also still open (out of this gap's scope): the poll-disjointness pin (test-hygiene) and the SC2 `COMPOSITE_UNSUPPORTED_UNIFIED` residual — 140.3-VERIFICATION.md overall stays `gaps_found` for those two.
 - **✅ RESOLVED (was flagged user-facing) — SEAM_MISCONFIGURED→UNKNOWN on the two wizard clients** (140.4). Re-verified against current code **2026-07-31**: the translate-first hop IS present — `ConnectKeyStep.tsx:496` and `MultiKeyConnectStep.tsx:829` both call `recogniseSeamErrorCode(seamErrorCode(data))` before the `KNOWN_*_CODES` membership check, and the docblocks (`ConnectKeyStep.tsx:220-243`) document `SEAM_MISCONFIGURED` handling via the translation. The 140.4-VERIFICATION.md gap was **stale** (fix landed after it was written). No action owed.
-- **Test-hygiene (non-blocking) — 140.3 poll-disjointness pin is blind to `wizardFetch`.** `src/lib/seam-poll-disjointness.pin.test.ts` detects seam calls via `/\bfetch\s*\(/`, but `SyncPreviewStep.tsx` routes every call through `wizardFetch(` (`src/lib/wizard/wizard-correlation.ts:58`); the pin returns identical predicates on HEAD and on a retry-storm mutant. Owed: widen the pin to the `wizardFetch` wrapper.
-- **Doc-hygiene (non-blocking) — 140.4 `analytics-client` scrub-test ledger row owed.** `140.4-VALIDATION.md:162` asserts "There is no guard to falsify" for the thrown-twin scrub, but dropping `scrubSeamString` at `analytics-client.ts:548` reddens a named test (`analytics-client.test.ts:1959`). Owed: an `Mxx` ledger row recording the observed RED, or an amended entry saying the guard is instance-scoped rather than absent.
 
 ### v1.16 Phase-141 / 141.1 (SEAM / SEAMBACKOFF) — deferred items (added 2026-07-31)
 
@@ -1555,11 +1031,8 @@ Both phases SHIPPED to main (PR #651 / #652) with their VERIFICATION marked `gap
 **Bucket H — recorded, deliberately NOT fixed** (from `141-REVIEW-CONSOLIDATED.md`; each re-verified against HEAD on 2026-07-31 before being written here):
 
 - **H1 — a seam retry double-consumes the PYTHON-side per-tenant limiter, during exactly the incidents it fires in.** The retry is a second HTTP request to the analytics service, so it burns a second token from *that* service's limiter: `/optimize-weights` is `20/minute` per tenant and `/process-key` is `100/hour` tenant / `30/hour` anon under a `500/hour` platform ceiling (values read from the routers, not inherited). The Vercel-side limiter is **not** doubled — it is checked once per user request, before the handler. Net user-visible risk: during upstream degradation a tenant can hit "rate limited" for a fault that is not theirs. Worth a recorded decision (accept, or exempt retries from the Python limiter); not a defect today.
-- **H2 — the retry `continue`s past a counting-status `Response` without `res.body?.cancel()`.** Confirmed: there is no `body.cancel()` anywhere in `resilient-fetch.ts`. undici buffers the abandoned response body until the attempt's signal fires. Bounded by the per-attempt deadline, so it is memory churn rather than a leak.
 - **H3 — `admittedAtMs` is captured ONCE, outside the retry loop.** Confirmed at HEAD (captured well above the `for (let attempt …)` header). Attempt 2's failure is therefore judged against a pre-loop admission instant and cannot re-arm a just-expired lock. **Know it; don't fix it** — the miss is fail-open, which is this module's doctrine per A-25, and the founder's stance on it is explicit.
 - **H4 — `keys/sync` forwards the upstream status verbatim where the legacy contract promised `'syncing'`, and 200 where it promised 202.** Confirmed: the `WIZARD_DUPLICATE` branch emits `status: typeof upstream.status === "string" ? upstream.status : "syncing"`, so a `'draft'` upstream status reaches a caller documented to receive `'syncing'`. Nobody reads it today — no client branches on that field on this route.
-- **H5 — the resync draft pre-check uses `.limit(1)` with no `ORDER BY`.** Confirmed in `process_key.py`. With ≥2 draft rows the row chosen is planner-dependent. Consider `ORDER BY created_at DESC` and bounding the read to the retry window. Note the pre-check's own comment says `.limit(1)` exists to keep `.maybe_single()` from raising on that rare two-draft residual — so this is a determinism nit, not a correctness hole.
-- **H6 — the 10-param `_enqueue_compute_job_internal` still uses `SELECT id INTO STRICT` on the lost-race re-read; the 7-param overload was deliberately de-STRICT-ed (P3).** Confirmed in `20260716090000_retire_compute_analytics_kind_rpc_guard.sql`: all four lost-race branches of the 10-param body are `INTO STRICT`, while the 7-param body carries the P3 comment explaining why STRICT was removed. The header comment calling the 10-param "verbatim" from its ancestor is true of that ancestor and is exactly why it never inherited the fix. **Pre-existing, not 141.**
 - **H7 — `H-0562` (multi-worker durability) had no ledger target.** It is cited as OPEN inside the registry's `match-recompute` NO-verdict evidence, but appeared nowhere in this file, so a reader asked to confirm "still OPEN" had nowhere to look. **This bullet is that target.** Substance: `match.py`'s `_get_recompute_lock` is process-local (an in-memory `dict[str, asyncio.Lock]`), NOT distributed, and there is no unique constraint on `match_batches` — so it bounds the single-process race but does not serialize across worker instances. Unproven ⇒ no-retry, which is why `match-recompute` is a NO.
 
 **Deferred by decision (own phase, own soak):**
@@ -1591,13 +1064,10 @@ disagreed):
 2. **FINDING 8 RESIDUAL — DISPOSITIONED, NOT REMEDIATED. The retry→limiter amplification is STILL LIVE.** A granted retry spends a second token of both `/process-key` limiters, including the platform-wide ceiling that is one shared bucket for every caller; draining it refuses the anonymous teaser and the CSV path, neither of which retries. The breaker structurally cannot contain it — `seamBreakerVerdict` classifies `429` caller-throttled and non-counting — and **no signal covers a ceiling drain at all**, because a 429 is refused above the audit write, so neither the breaker nor the flag-monitor denominator advances. **No limiter code was written and no constant moved.** What changed is exposure, not mechanism: post-D-01/D-03 the retry-eligible population is `onboard`-with-a-key only, and `resync` — just under half of all `/process-key` traffic ever recorded, per the 2026-08-01 production audit history — no longer retries, so the worst case applies to an order of magnitude less traffic. Recorded in the `retriesForFlow` docblock in `seam-retry-registry.ts`. *Re-raise if:* a new YES flow verdict lands, `resync` is re-granted, or `RetrySafeEntry.retries` widens past one. **Supersedes H1 above**, which named the same mechanism before it had been measured.
 3. **D-01 FOLLOW-UP — a CLIENT-MINTED stable idempotency key.** 141.2 made `onboard`'s retry conditional on the key it already had (`retriesForFlow` refuses a retry when `context.wizard_session_id` is falsy, using `Boolean()` to byte-match the Python truthiness gate). The better end state is to make the antecedent unconditionally TRUE rather than conditionally checked — and it is the same key `resync` would need to earn its grant back. Rejected in-phase on blast radius: it changes the cross-seam contract and the `strategy_verifications` uniqueness semantics, which is more than a defect fix should carry. Needs its own decision, not an inference from the registry entry.
 4. **CLASS — unbounded `.select()` on unbounded-growth tables (8 remaining sites).** 141.2 / D-02 closed the one instance the findings named (the flag-monitor denominator, proven truncating in production: `audit_log` held 7350 rows and an unbounded select returned exactly 1000 with HTTP 200 and `error: null`). The class census found 93 unbounded chains, of which these grow without bound: ⚠️ **`api/benchmark/btc` is the highest risk — ASC-ordered over one row per day forever, so past 1000 daily closes the BTC chart silently drops the NEWEST data and the series just ends**; then the two cron enqueue sweeps (`sync-funding`, `reconcile-strategies`, which would silently fund-sync/reconcile only the first 1000 strategies while reporting the truncated number as truth); then `allocator/scenario/commit`'s holdings recompute, the `queries.ts` discovery aggregates, and the marketing page's headline AUM sum. Distinct sub-shape, note only: `cron/cleanup-ack-tokens` caps its DELETE's RETURNING body, so the reported deletion COUNT is wrong, not the deletion. One entry, not eight, deliberately — the fix is the same three-way choice each time (COUNT / `.range()` pagination / an explicit `.limit()` that says so).
-5. **CLASS — error-collapse-to-a-healthy-looking-default.** 141.2 / D-05 closed the flag-monitor instance (a failed denominator read returned literal `0`, which `handleZeroDenominator` then diagnosed as "no traffic OR the audit write is failing" — the wrong diagnosis, sending the operator at the Python audit path when the fault was the query). The strongest surviving sibling is `src/lib/observability.ts`'s `checkStuckNotifications`, which returns `{stuck: 0}` on a failed read: byte-identical failure mode, on a read documented for exactly the cron/admin-dashboard surfaces that would trust it, where `0` means BOTH "nothing is stuck" and "I could not tell". The repo's own rule (stated verbatim in `portfolio-exposure.ts` and `allocations/page.tsx`) is that an empty result and a query error are distinct states. A collapse is acceptable only when it fails in the safe direction AND the code says so AND the error escapes to Sentry — `api/benchmark/btc`'s empty-state degrade satisfies all three and is the precedent, not a defect; `checkStuckNotifications` satisfies none.
-6. **FLAG-MONITOR — a failed denominator read pages NOBODY, and Vercel records the run as a success.** Found by the 141.2 final review round, not by the phase's own plans. `getDenominator`'s terminal arm returns `NextResponse.json({ok:false, reason:"denominator_read_failed"})` at the **default HTTP 200**, before both the streak increment and the streak reset, and sends no email. So a persistent Supabase read failure is now silent on every channel: no page, no streak, and a green cron run in the Vercel dashboard. The pre-141.2 code eventually sent a SEV-2 with the WRONG diagnosis; the remedy replaced a wrong page with no page, which is better for the operator who gets paged and worse for the one who never does. Below the founder bar (operator-facing, not user-facing, not data-integrity) — but the fix is small and has its own blast radius worth deciding deliberately: a non-200 status makes the cron run register as failed, which is the loud signal, at the cost of changing what the Vercel cron history means. *Re-raise if:* the monitor is ever relied on as the primary process-key alerting path.
 7. **DEF-141.2-03-A — stale route coordinates inside a skipped test's comment.** `src/__tests__/audit-coverage.test.ts:962-964` cites three `flag-monitor/route.ts:NN` coordinates, one of them a "feature_flags upsert — kill-switch flip" site Phase 106 (Stage B) retired. Already stale before 141.2 and inside an `it.skip(...)` comment rather than an assertion, so nothing reds and plan 03's edits shifted the numbers further. Comment-only drift, below the bar. Booked here because `deferred-items.md` is a per-phase scratch file and this file is the one backlog.
 8. **`Boolean()` does NOT byte-agree with Python's `bool()` for empty JSON collections — the docblock says it does.** Found by the ship red-team pass. `seam-retry-registry.ts` `retriesForFlow` gates on `Boolean(context?.wizard_session_id)` and its docblock claims "the same truthiness predicate the Python gate uses" (`process_key.py`'s `bool(body.context.get("wizard_session_id"))`). True for `null` / `undefined` / `""` / `0` / `false` — the empty-string case it explicitly names is genuinely correct. **False for `[]` and `{}`**: truthy in JS, falsy in Python. A context carrying `wizard_session_id: []` would grant the retry TS-side while Python falls to `… or str(uuid.uuid4())`, mints a fresh session per attempt, skips the duplicate pre-check, and inserts a second draft `strategy_verifications` row — the exact harm D-03 withdrew resync's grant over. **Unreachable at HEAD**, which is why it is logged and not fixed: `retriesForFlow` short-circuits to 0 for every flow but `onboard`, and `onboard`-through-`postProcessKey` has one producer (`finalize-wizard`), whose context is a hand-listed allowlist of validated scalars plus a `wizardSessionId` read off a uuid DB column. Fix when touched: `typeof context?.wizard_session_id === "string" && context.wizard_session_id.length > 0`. Founder call 2026-08-01: ship as-is, the surface is well tested. *Re-raise if:* a second `onboard` producer appears, or any context field stops being an allowlisted scalar.
 9. **`hasContractualWait`'s docblock contradicts itself on the HTTP-date form.** `resilient-fetch.ts` states "A date-form wait is a contractual wait like any other and fails fast; there is no deliberate gap here to work around" two lines after correctly noting that no `Date` header yields null. `retry-after.ts` returns null when `Date` is absent, so a date-form 503 WITHOUT a `Date` header does not fail fast — it retries. Harmless in practice (HTTP/1.1 origins must send `Date`; our own emitter uses delta-seconds), but the gap is real and the sentence denies it. Prose-only, below the bar.
 10. **The denominator's "attempt over attempt" caveats miss a third class.** `flag-monitor/route.ts` names attempts refused above the audit write (429/401) and lost fire-and-forget writes. A seam attempt failing at the TRANSPORT layer (deadline, refused connection) can produce a Sentry event with no audit row in the window — numerator up, denominator flat. Same safe direction as the lost-write caveat, but unnamed.
-11. **`tests/integration/cron-flag-monitor.test.ts` is not a second falsifier for the denominator rewrite.** It gained a shape-distinguishing double and an `auditLogRows` option, but no test in the file passes `auditLogRows`, and none exercises a read error, `count: null`, or `count: NaN`. Under both denominator mutations the integration file stayed fully green — every failure came from the unit route test. The upgraded double SURVIVES the change rather than CHECKING it.
 
 ### v1.16 SEAM-group close-out — live-ops items still owed (added 2026-08-01)
 
@@ -1738,21 +1208,6 @@ Read it as such.
    semantics **three separate times** (plans 05, 08, and here), always because prose *about* a gate
    sits inside that gate's blast radius. Found by code review, 2026-08-03.
 
-10. **`sql-tests` is in no aggregator's `needs:`, so the reaper's only behavioural gate can vanish
-    silently.** `.github/workflows/ci.yml`'s `frontend` aggregator gates branch protection on the
-    `frontend-*` jobs; `sql-tests` is not among them and self-disables when
-    `vars.E2E_TEST_DB_CONFIGURED` is unset. It is the ONLY gate that `EXECUTE`s the real deployed
-    cron body — the one that caught D-19 after every static gate passed over it. Partial mitigation
-    exists: `e2e-seeded`'s go-live check errors on a skip for trusted events and its message notes
-    that the same variable also disables `sql-tests` — so a missing variable is loud, but a
-    `sql-tests` job that is *present and failing* is not gated on by anything. ⚠️ With branch
-    protection deferred until paying clients, every CI gate here is advisory at merge anyway, so
-    this is about SIGNAL, not enforcement: say "would have caught", never "did stop". Fix: mirror
-    the `e2e-seeded` result check for `sql-tests`, or add it to an aggregator's `needs:`.
-    Found by the /ship coverage audit, 2026-08-03. **Related and already FIXED in 0.52.0.0:** the
-    same job had been made the third member of the one-pending-slot `shared-test-db` concurrency
-    group, which cancelled a pending gate outright; it is now gated behind `python`.
-
 ### v1.16 Phase-142.2 (MT5 on the unified backbone) — deferred items (added 2026-08-04)
 
 Booked at phase close (plan `142.2-08`). ⛔ **Read the boundary first: 142.2 delivered MT5
@@ -1776,22 +1231,6 @@ None of these clears the founder blast-radius bar as blocking. Each names its so
    ⚠️ A *partial* list is worse than none: it invites picking a near-match that then fails
    validation, which is precisely the confusing-rejection class this phase just closed. Re-open
    only with a named, maintainable data source attached.
-2. **`DEF-142.2-02` — `KEY_INVALID_FORMAT` split, the remaining 2 routes (D-06): 9 emitting sites,
-   not 11.** Measured at HEAD by `grep -c 'code: "KEY_INVALID_FORMAT"'`:
-   `src/app/api/keys/validate-and-encrypt/route.ts` → **4**, `src/app/api/verify-strategy/route.ts`
-   → **5**. (The research's "11" and the 142.2-CONTEXT D-06 text counted comment prose; the same
-   two-per-file delta that made the in-scope routes read 14 instead of 12.) **Same defect class** as
-   the 24 sites plan 07 fixed — one code bucketing unrelated causes — but **different callers and
-   different copy contracts**: `validate-and-encrypt` is an internal surface and `verify-strategy`
-   is the public/teaser verification path, so the four new codes' wizard copy is not automatically
-   the right copy there. Deliberately untouched by 142.2: both files are byte-unchanged.
-3. **`DEF-142.2-03` — the destructive remedy on a gate refusal is still live.** `GATE_INSUFFICIENT_TRADES`
-   offers "try another key"; `onTryAnotherKey` (`WizardClient.tsx:911-926`) fires
-   `void handleDeleteDraft()`, which destroys the draft **and cascades away every `strategy_keys`
-   member**. MT5-12 removed the *unwinnable* case for MT5 (a complete daily series can now pass the
-   gate on its own verdict, so an MT5 user is no longer cornered into pressing it), but **the
-   destructive remedy itself is unchanged** and still the offered remedy on every other refusal.
-   Classed DoS (user-inflicted) in the 142.2 RESEARCH security table. Verified still live at HEAD.
 4. **`DEF-142.2-04` — ccxt/perp verdict refinement is blocked on the ingestion truncation bugs,
    deliberately.** `combine_realized_and_funding` stamps `fill_derived_unproven` **always — a
    constant, not a computation**. A data-driven refinement (stamp `ledger_complete` when realized
@@ -1868,26 +1307,6 @@ None of these clears the founder blast-radius bar as blocking. Each names its so
     (`useMemo` missing dep `period`).** Pre-existing, untouched by 142.2, recorded by plans 02, 06
     and 07 as the sole output of `npm run lint` (0 errors, 1 warning). Batch it with the next edit to
     that file.
-12. **`DEF-142.2-12` — the 7-row CSV floor is still not evaluated on the wizard's COMPOSITE arm.**
-    Surfaced by the FIX 3 work (2026-08-04) and **pre-existing** — it predates 142.2 and is *not*
-    the verdict-term divergence FIX 3 closed. The admin path applies `STRATEGY_GATE_MIN_CSV_ROWS`;
-    the composite preview does not, so a composite with fewer than 7 stitched days previews as
-    `passed` and 409s at publish — the same preview/publish disagreement class, one term over.
-    ⚠️ Fixing this makes residual 13 below live: it is the path that would route
-    `INSUFFICIENT_CSV_HISTORY` through the wizard mapper for the first time. **Fix the two together
-    or neither.**
-13. **`DEF-142.2-13` — `INSUFFICIENT_CSV_HISTORY` maps to `UNKNOWN`** in `gateFailureToWizardError`,
-    on the documented premise that it "never flows through the wizard error mapper". That premise is
-    true **only while `DEF-142.2-12` is open**. Closing 12 without this one ships a real gate refusal
-    rendered as the generic unknown-error copy.
-14. **`DEF-142.2-14` — recognised-but-refused verdicts still render `INSUFFICIENT_TRADES` copy.**
-    A gapped perp (`fill_derived_unproven`, 0 trades, 135 rows) is still told *"only 0 trade(s), a
-    minimum of 5 is required"* — the same class of false sentence FIX 1 deleted for the NULL case,
-    left standing for the examined case because the **D-15 acceptance test pins that exact code** and
-    the review scoped FIX 1 to NULL/unrecognised. ⚠️ **The refusal itself is correct** — this is a
-    copy decision, not a safety one, which is why it was not smuggled into a fix commit. The honest
-    remedy is a fourth outcome meaning "your series was examined and found incomplete"; doing it
-    requires re-cutting D-15's oracle deliberately, never incidentally.
 15. **`DEF-142.2-15` — the six code-review findings deferred by founder scope call (2026-08-04).**
     All six cleared the *stopping rule* bar (none user-facing, none data-integrity), which is why
     they were not fixed alongside the four that were. Recorded here so the deferral is a decision
@@ -1904,9 +1323,6 @@ None of these clears the founder blast-radius bar as blocking. Each names its so
       `'composite'` marker, not structural identity.** If that flag is ever cleared or rebuilt
       without the key, a composite recompute stamps `user_supplied` and erases the
       machine-stitched-vs-human-uploaded distinction.
-    - **(d) `strategyGate.ts` — the publish-time TOCTOU re-check still refuses with trade-count
-      wording** when analytics are recomputed between wizard preview and admin approve. Same false-
-      sentence class as `DEF-142.2-14`; fix them together.
     - **(e) `broker_dailies.py:91` — only ONE of the three producer paths validates its stamp
       against `SERIES_COMPLETENESS_VALUES`.** The other two can emit an unregistered string. Drift
       direction is fail-closed (an unrecognised verdict refuses), so this is a missing loud signal
@@ -1936,30 +1352,6 @@ wizard AUTH_FAILED arm renders named+actionable copy with Retry/Diagnostics and 
 carries `human_message` end-to-end and the TS-17 client fix (`human_message` read first) is live.
 New findings, none clearing the founder blast-radius bar as blocking:
 
-1. **Raw Python exception leaks into user-facing `computation_error`.** PROD row: strategy
-   `ec722557` ("Alpha Centauri", owner `helmut@metaworldfund.com`) has
-   `computation_error = "'<' not supported between instances of 'str' and 'NoneType'"`.
-   That is an internal TypeError string in the field the wizard/factsheet renders as failure
-   copy — the exact attribution class 140.x closed on the HTTP seam, still open on the
-   `computation_error` persistence path. Fix shape: map non-contract exceptions to the
-   user-recoverable message at the writer (same pattern the 142 reaper message uses) and keep
-   the raw string in logs/Sentry only. Also worth a one-off: root-cause the `str`-vs-`None`
-   comparison itself (likely a missing-field sort/compare in analytics for that strategy).
-2. **Wizard AUTH_FAILED copy names the wrong venue.** With **Binance** selected, the rejection
-   panel's example text reads "(e.g. Deribit returns invalid_credentials)" and a bullet says
-   "on Deribit the key is the ClientId and the secret is the ClientSecret". The copy block is
-   venue-generic where it should be parameterized by the selected exchange. Cosmetic/prose —
-   batch with the next wizardErrors.ts copy pass.
-3. **Verified factsheet shows FRESH while its return series ended 89 days ago.** Phoenix
-   Protocol (API-verified, "Synced 8h ago", "COMPUTED · FRESH (0d)") has an observation window
-   ending 2026-05-06. Sync succeeds and compute is fresh, but no dailies exist after May 6 —
-   either the account went flat (then the factsheet arguably should say so) or the daily-derive
-   stopped attributing new days (then it's a data-pipeline gap). Needs a look at the dailies for
-   that key before deciding which. Investigate — data-integrity-adjacent.
-4. **Example strategies advertise "Synced 67d ago" on discovery.** All example rows (Hide
-   examples OFF, the default) show a stale sync badge; real strategies show "Synced 8h ago".
-   Allocators can read the stale badge as platform-wide staleness. Consider suppressing the
-   sync badge on example rows. Cosmetic.
 5. **Validation-rejected keys leave no audit trail (observation, decide-only).** A failed wizard
    key validation (AUTH_FAILED) writes no `audit_log` `process_key` row — audit starts only when
    a key enters processing. Consistent with current design; recorded so the 141.2 audit censuses
@@ -1987,18 +1379,6 @@ grep -n "daily_returns\|returns_series" <each consumer>
 None of the three touches `daily_returns` at all — they read the scalar metrics
 (`cagr`/`sharpe`/`max_drawdown`/`sparkline_returns`) via `extractAnalytics`. The bare-reader class
 is closed there. Two adjacent findings were surfaced by the audit and are booked, not fixed:
-
-1. **`DEF-147-A` — `buildEquityCurveSeries` hard-codes `equityCurve: null` behind a comment that is
-   now false.** `src/app/(dashboard)/portfolios/[id]/page.tsx:211-231` returns `null` for every
-   per-strategy equity curve, justified by an inline comment reading *"Returns_series is not
-   selected in the existing query (would balloon the response)"*. That has not been true since
-   `getPortfolioStrategies` began selecting `returns_series` (`src/lib/queries.ts:1305`) — the data
-   is already on the wire and is being thrown away. Not user-facing as a WRONG number (the chart
-   renders the portfolio composite line and simply omits per-strategy lines), which is why it is
-   not fixed here. **Fix shape:** pipe `returns_series` through `resolveDailyReturnSeries` +
-   the existing cumprod transform instead of returning `null`, and delete the stale comment.
-   ⚠️ Confirm the response-size concern the comment cites is still acceptable before wiring it —
-   the reason may be stale but the cost is real.
 
 2. **`DEF-147-B` — two dead `daily_returns?: unknown` type annotations promise a column the query
    never selects.** `src/lib/queries.ts:420` (`getPublicStrategyDetail`) and `:458`
@@ -2083,41 +1463,10 @@ Fix shape if taken: one sweep, both files, plus a check for any third instance
 links, button-styled links, and card links keep their existing hover treatment, so a blanket
 `hover:underline` purge would be wrong.
 
-### Phase 148 review IN-01 — `withPublishedOrOwner` uid interpolation lacks shape validation (added 2026-08-05)
-
-**`DEF-148-C` — `withPublishedOrOwner` (`src/lib/visibility.ts:115-125`) builds the PostgREST
-`.or()` group by raw interpolation: `` `status.eq.published,user_id.eq.${authUserId}` ``.**
-Logged only; deliberately **NOT** fixed in phase 148 (pre-existing phase-110 helper — outside the
-founder blast-radius bar for review blocking).
-
-Not exploitable today: every current caller (including both phase-148 `page.tsx` sites) passes the
-session `user.id`, a GoTrue-minted UUID. But the helper's contract ("`authUserId` MUST come from
-the authenticated session") is enforced only by convention — a future caller passing a
-user-influenced string could inject additional PostgREST filter clauses into the OR group
-(e.g. `x,status.eq.draft`), widening visibility. On the admin-client call path introduced in
-phase 148 the injected predicate is the **ONLY** gate, which is what upgrades this from hygiene
-to a real landmine for future callers.
-
-**Fix shape:** belt-and-suspenders inside the helper, fail-loud —
-`if (!/^[0-9a-f-]{36}$/i.test(authUserId)) throw new Error("withPublishedOrOwner: authUserId is not a uuid")` —
-plus a unit test proving a non-uuid throws (the test must fail if the guard is removed).
-
 ### Phase 149 (NAV-01, `/my-strategies`) — deferred items (added 2026-08-05)
 
 All three were routed out of phase 149 by ruling, not by omission. None is user-blocking: the
 surface ships fully functional with each of them open.
-
-**`DEF-149-A` — "Finish setup →" opens the contribution wizard FRESH, with no key preselected.**
-The Delta-5 placeholder rows (`StrategyTable.tsx`, one per active key with no derived strategy)
-fire `onFinishSetup`, which mounts `ContributionWizardOverlay` on its API-key branch. The overlay's
-interface is `{ isOpen, onClose, onSuccess? }` — there is **no preselect seam**, so the owner
-re-picks the key they just clicked. Pretending a key was already chosen would have been worse than
-asking again (no-invented-state), which is why the founder ruling shipped it this way.
-**Fix shape:** one optional prop threaded from `ContributionWizardOverlay` into `WizardClient` and
-down to the key-selection step (e.g. `preselectApiKeyId?: string`), plus a spec proving the step
-mounts with that key already chosen. Both `/my-strategies` mounts (`MyStrategiesSection.tsx` and
-`MyStrategiesEmptyState.tsx`) would pass it; every other caller keeps today's fresh-open behaviour
-by omitting it.
 
 **`DEF-149-B` — two live surfaces now render an `h1` reading "My Strategies".**
 The manager surface `/strategies` and the allocator surface `/my-strategies` share the title. This
@@ -2198,7 +1547,6 @@ toggle-hide also defers: `StrategyGrid.tsx:79-82` renders `VerifiedBadge` with
 - [ ] **IN-04** Copy-leak test docstring claims broader scope than it checks (`test_allocator_positions_non_ccxt.py:261-288`) — align claim with the (now AST-widened) gate.
 - [ ] **IN-05** `test_timeout_constants_survived_the_move` couples to env var defaults (`test_mt5_concurrency.py:166`) — derive expected from the same source, not a literal.
 - [ ] **IN-06** Composer defensively `?? false`/`?? []` on payload fields the SSR layer declares required — pick one contract (six sites in ScenarioComposer.tsx).
-- [ ] **IN-07** The unregistered-non-ccxt-venue honest-skip arm is unreachable today (both members have fetchers) — kept deliberately as the class safety net; note documents it.
 - [ ] **IN-08** Role-discriminator degradation on a failed `strategy_keys`/`strategies` read re-admits manager keys as book constituents (`queries.ts:3868-3898`) — fail-open vs fail-closed decision; today's blast radius is the founder's own account only.
 - [ ] **IN-09** `key={displayed}` remounts the dollar input on Enter, dropping focus (`ScenarioComposer.tsx:5804`) — keyboard-flow polish.
 - [ ] **WR-08 residual** `MT5_ENABLED=false` does not stop the preflight's RPyC connect — `Mt5Client.__init__` opens the connection before the kill-switch is consulted; a true pre-connect gate changes disabled-path semantics of two job kinds, deferred deliberately.
@@ -2206,7 +1554,6 @@ toggle-hide also defers: `StrategyGrid.tsx:79-82` renders `VerifiedBadge` with
 ### Phase 152 (SCEN composer legibility) — deferred residuals (added 2026-08-07)
 
 - [ ] **Pitfall 6 — a stale persisted draft's factsheet link can 404.** The SCEN-03 row-detail panel emits `href="/factsheet/{id}"` for every added strategy. The link resolves under OWN-02's two-lane access control for the viewer's OWN strategies and for currently-PUBLISHED third-party ones — but a draft persisted weeks ago can still name a third-party strategy that has since been archived or deleted, and that link dead-ends on `notFound()`. Detecting it would require a per-row existence fetch, which Phase 152's CONTEXT explicitly locks out (the panel is an in-memory projection with no loading and no failure state by construction). Acceptance was scoped accordingly. Revisit if/when the composer gains a draft-reconciliation pass — the right fix is to prune or mark unresolvable rows at draft load, not to fetch per row at render.
-- [ ] **WR-02 — the composer row-detail's CAGR/SHARPE never render for drawer-added strategies (their entire population).** `addedStrategyMetadataLookup` sources `cagr`/`sharpe` from ONE place: `strategyById`, built from `payload.strategies`, which is BOOK-ONLY (the portfolio_strategies join). Unlike `asset_class`, `trust_tier` and `is_composite` — each of which has a lazily-fetched fallback (`addedAssetClassById`, `addedProvenanceById`) — the metrics have none, and `/api/strategies/[id]/returns` does not serve them (its select is `daily_returns, returns_series, computation_status, data_quality_flags`). A strategy added from the Browse drawer is by construction one the allocator does not hold, so for that whole population `metricsAbsent` is always true and the SCEN-03 panel is markets + types + provenance + a link. Phase 152's CONTEXT locked "no new fetches", so the fix pass only corrected the honest-copy side (the note now names the composer, and the code comment states the reachability). **The real fix:** widen `/api/strategies/[id]/returns` to co-serve `cagr, sharpe` from `strategy_analytics` — same row, same RLS, no new round-trip — and add an `addedMetricsById` lazy fallback mirroring `addedProvenanceById`. Keep the metric pair either way: it is live for an in-book leg (e.g. a Bridge candidate the allocator holds).
 - [ ] **D-1 residual — same-day own-row duplicates stay indistinguishable in Browse.** The SCEN-05 disambiguation line is `Created {Mon D, YYYY} · {Status}`; the key-count segment was omitted entirely (D-1) because `created_at` alone resolves the founder's real case (two "Alpha Centauri" rows 15 days apart) and a key count costs a second query on the browse path. Two own rows with the same name created on the SAME day therefore render identical lines. Revisit only if the founder treats key count as load-bearing for the choice — the amendment is a wire field plus a segment, not a redesign.
 
 ### Phase 152 (SCEN) — code-review Info findings, logged per stopping rule (added 2026-08-07)
@@ -2214,7 +1561,6 @@ toggle-hide also defers: `StrategyGrid.tsx:79-82` renders `VerifiedBadge` with
 - [ ] **IN-01** `isOwn` breaks the browse wire's snake_case convention (route emits snake_case elsewhere) — cosmetic wire-style inconsistency, rename = coordinated schema+client change, not worth it standalone.
 - [ ] **IN-02** Five elements share `data-testid="scenario-added-header-label"` — fine for the count assertions today; per-label testids would make header tests sharper.
 - [ ] **IN-03** Header labels sit ~8px right of the numbers they label (gap-2 offset accumulation) — visual polish; founder-eyes call.
-- [ ] **IN-04** Stale line citation in a SCEN-04 code comment — comment hygiene.
 - [ ] **IN-05** Dedup date renders in the viewer's local timezone — could show "Aug 3" for a UTC "Aug 4" creation; consider pinning UTC if it ever confuses.
 - [ ] **IN-06** Detail panel repeats the provenance badge and pushes the row's own state notes below its hairline — layout polish for design-review.
 - [ ] **IN-07** Row-wide pointer amplification collapses the panel on incidental clicks (e.g. selecting text in the row) — interaction polish; founder-eyes call.
@@ -2255,14 +1601,10 @@ purpose, not by omission.
 
 **Found at land time (2026-08-08), not by any review:**
 
-- [ ] **⭐ The `shared-test-db` concurrency group can silently skip the Railway analytics deploy on ANY merge.** Observed on the v0.54.0.0 hotfix merge (`861a4d91`, CI run 31273384829 attempt 1). The group now has **three** members — `python` (`ci.yml:~1140`), `sql-tests` (`:934`) and `e2e-seeded` — but GitHub Actions holds only **one pending entry per concurrency group**, so a later arrival evicts the queued one: `python: Canceling since a higher priority waiting request for shared-test-db exists`. It was killed **36s after queueing with zero steps executed** (`steps: []`). ⚠️ `cancel-in-progress: false` does NOT protect against this — it protects *running* jobs, not *queued* ones. Consequences: (1) the run concludes **`cancelled`, not `failure`**, so it renders **grey** and reads as "no result" rather than a red gate; (2) Railway skips the analytics deploy on a non-green check suite, so frontend + migrations land while the Python service stays behind — the exact stale-prod state issue **#616** was filed for. Remedy that day was `gh run rerun <id> --failed` (attempt 2 fully green). ⛔ This is NOT the TEST-DB backlog flake — `compute_jobs` was verified **completely empty** at the time, and no delete was needed. Real fix: serialize the group properly, or return it to two members. `analytics-deploy-verify` bounds detection to ~6h but does not prevent it.
-- [ ] **Close GitHub issue #616** ("Analytics prod is running stale code (deploy skipped?) — 2026-07-15", labels `analytics-service`/`p1`/`analytics-deploy-stale`, last comment 2026-08-05). PROD converged 2026-08-08 — analytics `/health` `git_sha` = `861a4d91`, matching main HEAD, worker ticking. Left open deliberately rather than closed unilaterally. ⚠️ Do not close it as "fixed" without also landing the `shared-test-db` item above — the *recurrence mechanism* is still live.
-
 - [ ] **⭐ Stale `file:line` citations live in SOURCE files too, and one class is invisible to any path-based guard.** Found 2026-08-08 while repairing the ledgers. Confirmed stale in shipped code: `src/lib/process-key-onboard-contract.ts:116` cites `process_key.py:680-690` (emitter is now :717-750); `analytics-service/routers/exchange.py:152` cites `wizardErrors.ts:936-1035` (`classifyKeyValidationError` is now :1927-2110); `analytics-service/docs/STATUS_CONTRACT.md:379` cites `routers/internal.py:442`/`:471` (now :488/:517). ⚠️ **The nastiest one is SELF-RELATIVE:** `analytics-service/services/broker_dailies.py:552`'s docstring cites `combine_native_ledger` **(:174)** when it is at **:268** — a coordinate pointing *inside its own file*, which no path-resolving checker would ever flag because there is no path to resolve. Any citation gate must therefore handle bare `:NNN` and same-file references, not just `path:NNN`.
 - [ ] **`file:line` citations across `.planning/REQUIREMENTS.md` and `ROADMAP.md` rot silently, and nothing catches it.** ✅ **BOTH LEDGERS REPAIRED 2026-08-08** — ROADMAP: 50 audited / 38 renumbered / 8 anchored / 0 undeterminable. REQUIREMENTS: 91 audited / 60 renumbered / 29 anchored / 2 deliberately left (both are quotations of coordinates *inside another document*, pinned to named commits where the drift IS the argument). Verified: 101 requirement IDs + checkbox states byte-identical, headings identical, independent drift audit 0 problems. **The gate itself is still unbuilt** — that is what remains open below. Audited all **109** distinct code citations on 2026-08-08. Cheap tests found little (1 missing file — `extension.py:506` in ROADMAP.md; 0 out-of-range), because an out-of-range check is far too weak: a citation can be *in range* and still point at unrelated code, which is exactly what WIZFORM-02's `:345` did. A symbol-anchored content check found **~13 high-confidence drifts**, several large: `wizardErrors.ts:967 → classifyKeyValidationError` actually at **:1927** (+960), `allocator_positions.py:154 → _fetch_spot_rows` at **:418**, `ScenarioComposer.tsx:2180 → addedStrategyMetadataLookup` at **:2486**, `wizardErrors.ts:1728 → EXCHANGE_PROBE_FAILED` (symbol no longer in that file at all). **Only the WIZFORM-01..05 + MT5-14 citations were repaired** (phase 153 is about to consume them); the rest stand. ⚠️ **A bare filename is itself the bug in one case: `exchange.py` is ambiguous** — `routers/exchange.py` and `services/exchange.py` both exist and only `routers/` holds `_MT5_PROBE_TIMEOUT_S` / `_validate_mt5_key`. Two candidate fixes: (a) a CI gate that resolves every `path:line` in the ledgers and fails on drift — needs symbol anchoring to be meaningful, and generic anchors (`href`, `ValueError`, `UNKNOWN`, `idempotent`) must be excluded or it is pure noise; (b) drop line numbers from the ledgers entirely in favour of symbol names, which do not rot. Cost of leaving it: every planner and executor that trusts a citation walks to the wrong code, and the reader cannot tell a stale pointer from a correct one without re-deriving.
 
 - [ ] **No gate catches an `e2e/` assertion whose copy no longer exists in `src/`.** Phase 150-03 renamed the MetadataStep heading and updated its own component test; two e2e specs kept waiting 15s for the dead string and only one of them reddened (the other is seed-gated and did not run). Ten specialist review passes, a red team, and 10,193 local tests all missed it, because the phase's own grep never left `src/`. A gate is buildable — extract literals from `getByRole(name:)` / `getByText` / `getByLabel` in `e2e/` and fail when one is absent from `src/` — but a naive version has ~6 false positives today (composed date ranges like `"2026-01-05 → 2026-01-09"`, seeded fixture names like `"E2E Test Key"`, and chart headings built at runtime), so it needs an allowlist to be useful rather than noisy. Same family as the v1.10 lesson that e2e grep-gates scan `src/` only.
-- [ ] **The TEST `compute_jobs` backlog has no owner and reappears daily.** Cron jobid 9 fans out one `derive_broker_dailies` job per `api_key` at 05:30 UTC; TEST has no worker, so they accumulate as `pending`, sort ahead of anything a test seeds by `next_attempt_at`, and crowd the `LIMIT 50` claim batch — reddening exactly 10 claim-path tests in `test_compute_jobs_fencing.py` and `test_drain_semantics.py`. Cleared 1313 rows by hand this land (all dated 2026-08-07, all `derive-dailies-*`); it will be back the next morning. **900 orphaned `running` rows are also sitting there** — the separate deferred purge item. Owner is Phase 144 and nothing has been done. ⛔ Never `cron.unschedule(9)`.
 
 ### Phase 153.1-02 — deferred open questions from the venue-capability foundation (added 2026-08-09)
 
@@ -2358,15 +1700,6 @@ data-integrity defects; everything else gets **logged instead**. The 153.4 fix r
 only in `.planning/phases/153.4-*/153.4-REVIEW.md`. The verifier escalated that as F-4. The
 bargain has two halves; this section is the second one. Source: `153.4-REVIEW.md`.
 
-- [ ] **WR-03 — a panel removed mid-validate leaks a credential-carrying POST with no client
-  deadline.** `doRemove` filters the panel out and does nothing else; `anyValidating` then
-  recomputes false, the step's one interval is cleared, and that request keeps only the
-  platform's invocation bound. The `Remove` control is confirmed NOT disabled while
-  validating, so it is UI-reachable. **Non-blocking:** invisible and harmless — the abort
-  buys nothing (neither connect route reads `request.signal`, so it would not stop the key
-  being stored) and `updatePanelById` no-ops for a removed id, so the settled request cannot
-  touch the UI. The interval docblock now states this instead of claiming closure it does not
-  have. Owner: unassigned.
 - [x] ~~WR-04 — `ConnectKeyStep`'s 300 ms mount gate can fire AFTER the request finished~~
   **FIXED 2026-08-11.** The gate was a macrotask cleared only by the timer effect's cleanup,
   which React commits at its own priority, so a sub-300 ms answer could leave a ghost card
@@ -2463,14 +1796,6 @@ Raised by the `/ship` pre-landing + adversarial reviews. The four that met the b
   (`<broker_server>:<login>`, already carried as `passphrase`) closes it. ⚠️ NOT a patch: the column
   is live on PROD, so changing what is stored is a migration decision with a backfill question.
   Not declared anywhere before this review.
-- [ ] **C-1 — an orphaned live key squats the venue-identity slot permanently, behind false copy.**
-  When a live key has no strategy the resolver returns null and the caller answers 409
-  `DRAFT_ALREADY_EXISTS` ("a wizard session with this key is already in progress") — false, and
-  offering no remedy. Reachable because "Try another key" fires `handleDeleteDraft()`
-  fire-and-forget and `draft/[id]/route.ts:213-226` SKIPS the `api_keys` revoke on any RPC error
-  (warn only). The nightly orphan sweep is scoped to keys attached to ≥7-day-old drafts, so an
-  orphan whose strategy is already gone is never a candidate. Pre-154 this simply created a second
-  key row and worked.
 - [ ] **Orphaned `api_keys` rows from a deleted composite draft are never swept.**
   `cleanup_abandoned_wizard_drafts.sql:19-24,41-49` cannot see them (the draft row is gone, and the
   keys were never in `strategy_keys`). Found while fixing the composite-draft misclassification;
@@ -2508,30 +1833,6 @@ Both were raised at planning, decided out of scope there (`156-RESEARCH.md` § "
 4), and are logged here rather than patched in passing. Plan `156-05`'s acceptance asserts BOTH
 named files are unmodified by the phase, so neither was quietly half-done.
 
-- [ ] **`add_wizard_composite_key` is absent from `MUTATING_RPC_NAMES` while its single-key twin
-  `create_wizard_strategy` is present.** `src/__tests__/audit-coverage.test.ts:203-217` — the array
-  that decides which `.rpc(` call sites the audit-coverage gate polices. The composite twin writes
-  the same two tables (`strategies` + `api_keys`) through the same wizard path, so its omission is a
-  real audit-coverage gap, and it **pre-dates Phase 156** — 156 only made it visible by touching
-  both call sites at once. ⛔ **Not fixed here:** adding the name creates an audit-emission
-  obligation on `src/app/api/strategies/composite/add-key/route.ts`, a route this phase is already
-  rewiring onto the service-role client; the correct answer is probably the same `@audit-skip:
-  wizard draft` pragma its twin carries (`create-with-key/route.ts:815`), but "probably" is not a
-  standard to land an audit decision on. Reference: `156-RESEARCH.md` Open Question 4.
-
-- [ ] **The `asset_class` annualization stamp still reads the forgeable `apiKeyExchange` rather than
-  `attestedVenue`.** `src/app/api/strategies/finalize-wizard/route.ts:1288-1299` (the stamp itself at
-  `:1311`; the coordinate moved +13 when `156-10` re-strengthened the prose above it). Phase 153.6-04
-  (PARITY-04) moved the *probe gate* onto the server-attested venue and left this stamp behind
-  deliberately; Phase 156 attests the venue at connect time but does not widen that swap either. The
-  residual is **self-targeted**: a forged venue label here distorts the annualization clock (√365
-  crypto vs √252 traditional) of the forger's OWN strategy, where a forged label on the gate
-  switched off a security control. ⛔ **Not fixed here:** it is a one-identifier change with a
-  two-outcome money-math blast radius, and it needs its own oracle over √365 vs √252 that this phase
-  does not have — see the standing annualization landmine in
-  `project_blend_annualization_unknown_assetclass_optimistic`. Reference: `156-RESEARCH.md` Open
-  Question 3.
-
 - [ ] **`p_venue_account_id` has no in-database oracle — Phase 156 closed its REACHABILITY half and
   RESTATED the rest** (added 2026-08-13 by `156-10`; the plan assumed this was already logged and it
   was not). `src/app/api/strategies/create-with-key/route.ts` at the `p_venue_account_id` argument,
@@ -2567,25 +1868,6 @@ named files are unmodified by the phase, so neither was quietly half-done.
 
 ### v1.17 milestone-audit residuals — logged per the stopping rule (added 2026-08-14)
 
-- [ ] **`E2E-NAV-01` — NAV-01's entire surface has NO e2e coverage.** MEASURED at the v1.17 close:
-  `grep -rn "my-strategies" e2e/` returns **nothing**. Phase 149 shipped 5/5 with a passing
-  VERIFICATION, so this is not a broken feature — it is an unproven one, and the distinction
-  matters because the surface is the allocator's way in from the sidebar.
-  ⚠️ **Wider and worse:** `api-key-flow`, `sync-analytics-flow`, `full-flow` and `csv-upload-flow`
-  specs all EXIST but are wired into **no CI batch** — they never run. `wizard-resume.spec.ts` is
-  the milestone's one real browser proof (`ci.yml:1785`). A spec that exists and never executes is
-  more dangerous than a missing one: it reads as coverage in a file listing.
-  Also uncovered: OWN-02's adversarial anon-404. **What closes it:** wire the four orphaned specs
-  into a CI batch, then add a `my-strategies` spec. Audit warning W6.
-
-- [ ] **`UNKNOWN-DIALOGS-01` — three surfaces Phases 150/151 minted render `code: UNKNOWN`, outside
-  the coverage law's reach.** `AllocateDialog`, `RenameStrategyDialog`, `MarkOwnershipDialog`.
-  ⚠️ **Not a WIZFORM-02 violation as worded** — that law is wizard-scoped and these are dashboard
-  dialogs — but it is the SAME CLASS on surfaces this milestone created, which is exactly how the
-  class regrows after being closed. ⭐ Distinct from the five admin/simulator 5xx-terminal-arm
-  routes already logged above: different mechanism (these mint `UNKNOWN` directly, those lose a
-  code in a forwarding arm), so closing one does not close the other. Audit warning W7.
-
 - [ ] **`PLANNING-PROJECTREF-01` — the PROD and TEST Supabase project refs are written into tracked
   `.planning/` files, against the standing "never record the PROD project ref in `.planning/`"
   rule.** Found 2026-08-14 by a no-allowlist sweep at the v1.17 close (gitleaks itself: **no leaks
@@ -2605,6 +1887,8 @@ Context: 37 stale branches and 9 orphaned agent worktrees accumulated. Every one
 — ⭐ patch-id is USELESS here because squash-merges give shipped work a different id, so merged
 branches read as "62 commits ahead" forever. 33 were verified shipped and deleted. **These four
 were NOT, and all four are now pushed to `origin` so they are no longer local-only:**
+
+> ⚠️ Triage 2026-08-20: all four verified superseded/stale at HEAD — branch deletion is the remaining act, pending founder.
 
 - [ ] **`fix/scenario-empty-daily-returns` — 143 of 164 added lines absent from main.** A real bug
   fix: resolves the lazy-returns series through the analytics column-drift resolver, across
@@ -2691,11 +1975,6 @@ Both have a SAFE failure direction. Recorded so the trade-off is visible, not so
   escapes it. Inherent to text gates: the per-tick bound's only real proof is SQL gate Part 4
   executing the deployed body against LIMIT+1 rows. Do not mistake a green text gate for a bound proof.
 
-- [ ] **`s.status <> 'archived'` guards a value nothing writes at runtime** (red-team F-6, INFO).
-  `'archived'` appears only in the teaser-anchor seed (`20260515095804:88`); there is no archive
-  route and `sanitize_user` preserves status. Harmless and left in place as future-proofing — noted
-  so nobody reads the conjunct as evidence that an archive flow exists.
-
 - [ ] **TEST's migration ledger disagrees with the repo filename for this migration** (logged
   2026-08-17 at land time). Applying via Supabase MCP `apply_migration` stamps `now()`, so TEST
   recorded `supabase_migrations.schema_migrations.version = 20260817092430`, while the repo file —
@@ -2705,45 +1984,6 @@ Both have a SAFE failure direction. Recorded so the trade-off is visible, not so
   `supabase db push` at TEST would re-run it. That re-run is believed benign (`cron.schedule` is
   upsert-by-name and the body is unchanged) but has **not** been exercised. Known trap, previously
   seen as the PR-Y2 rename. Reconcile the TEST ledger row, or leave it and never `db push` TEST.
-
-## Phase 144 — recorded deferrals (logged 2026-08-17)
-
-Three DELIBERATE non-actions from the JOB-05 orphaned-`running` terminalizer
-(`supabase/migrations/20260817120000_retention_orphaned_running_terminalize.sql`). None is a bug in
-that migration; each is a settled plan-time call with its own reason for living outside the phase.
-
-- [ ] **(D-13) TEST's stale-`pending` backlog is CI hygiene and must NEVER be fixed in production
-  code.** Census 2026-08-17: TEST `qmnijlgmdhviwzwfyzlc` holds **2819** `pending` `compute_jobs`
-  rows (2026-08-11 → 08-15); PROD holds **0**. The cause is environmental, not a product defect —
-  TEST has no draining worker and cron jobid 9 (`derive-allocator-key-dailies`) fans out one job per
-  `api_key` daily, so the backlog is manufactured by the test project's own configuration. It is not
-  cosmetic: because `claim_compute_jobs_with_priority` orders by `next_attempt_at` ASC before
-  `LIMIT p_batch_size`, the backlog sits permanently at the head of the claim queue and starves live
-  claim tests — the deterministic 10-failure `python` shard on ANY branch including main. Candidate
-  fixes are a **drain** (a TEST-only worker or a one-shot script) or a **TEST-only cleanup job**.
-  ⛔ NOT a migration: `supabase/migrations/**` auto-applies to PROD, so a sweep written for TEST's
-  condition ships to a project where the condition has never existed. ⛔ NOT `cron.unschedule(9)`:
-  `supabase/tests/test_derive_allocator_keys_fanout.sql` assertion 6 requires that cron registered,
-  so unscheduling reddens the `sql-tests` gate instead. Recorded as the WON'T-FIX half of JOB-08
-  (`.planning/REQUIREMENTS.md`, JOB-08 resolution block).
-
-- [ ] **(D-09) Fixture hygiene: `test_compute_jobs_fencing.py` is the attributed producer of the
-  `running` + `claimed_at IS NULL` orphan class — stamp `claimed_at` in its two direct UPDATEs.**
-  `analytics-service/tests/test_compute_jobs_fencing.py:1138-1152` and `:1191-1205` drive a row to
-  `status='running'` by direct table UPDATE without stamping `claimed_at`, deliberately (the
-  docstring at `:1132-1136` explains the determinism reason on a shared test DB), and clean up in a
-  `finally:` that does not run if the process is killed. It is the **only in-repo producer** of that
-  row shape: there are ZERO Python and ZERO TypeScript writers of `status='running'`, every SQL
-  claim writer stamps `claimed_at = now()` in the same SET list of the same statement (twelve of
-  them, latest `20260719073701:181-184`), and no migration INSERTs `status='running'`. It matches the
-  census on five independent attributes — status, `claimed_at` NULL, `attempts = 1`, kind
-  `poll_positions`, TEST-only by construction — plus the date window (the file's most recent commit
-  is 2026-08-11, inside 2026-08-03 → 08-14). Phase 144 Plan 03 runs the live confirming query.
-  Fix is one line each (stamp `claimed_at` in the direct UPDATE). ⛔ Deliberately NOT done in Phase
-  144 (plan-time settled call): the phase's scope is the janitor, and the file is untouched by it —
-  record and route, do not edit. ⚠️ Do NOT read this as "arm B is therefore unnecessary". Arm B
-  ships as defence in depth against the CLASS (any future direct-UPDATE writer, migration or manual
-  repair); that is a different claim from "the invariant is closed", which nothing here makes.
 
 ## Phase 145 — recorded deferrals (logged 2026-08-17)
 
@@ -2834,10 +2074,6 @@ Items stay open HERE until 146.1 ships; close them here when it does.
   to naming only a code.
   **Where:** `analytics-service/routers/process_key.py` (the tombstone branch beside the
   API-6 envelope); the deliberate non-minting is recorded in the comment there.
-- [ ] **23505 second source**: the ERRCODE map/COMMENT attribute 23505 solely to
-  `strategies_user_wizard_session_source_uniq`, but `csv_daily_returns_strategy_date_key`
-  can also raise it (direct-RPC duplicate dates); the resolve arm keys on SQLSTATE alone —
-  discriminate on constraint name, or document.
 - [x] **Stale-comment batch from the fold re-point — DONE in Phase 146.1-07 (2026-08-18).**
   Every claim was grep-verified at HEAD BEFORE it was touched; the ones the grep CONFIRMED
   were left alone rather than given a fresh date. Ground truth for the batch: migration
@@ -2950,17 +2186,6 @@ under-claim) and must be revised in the same change.
   ⭐ Process note: (a) already documented this exact behaviour **in-repo** before I began
   debugging it. Grep for `_IncludedRouter` / `original_router` before theorising next time.
 
-- [ ] ⚠️ **Local absolute paths (incl. the operator's macOS username) are committed across
-  ~50 historical `.planning/` docs on a PUBLIC repo.** Surfaced 2026-08-19 when
-  `gstack-redact-prepush` flagged a MEDIUM finding on the 146.1 branch. I redacted ONLY the
-  file this PR introduces (`146.1-02-SUMMARY.md`) and deliberately did NOT sweep the other
-  ~50: they are pre-existing, already public, and rewriting historical planning records is
-  not this PR's business. Do it as its own commit — `s|/Users/<user>/claude-projects/quantalyze|<repo-root>|`
-  then `s|/Users/<user>|<home>|` across `.planning/**`, verified with a no-allowlist
-  gitleaks/redact scan (the allowlist is PATH-based over `.planning/`, so the default scan
-  will not see them).
-
-
 - [ ] **`--reporter=basic` is invalid in vitest 4** and appears in the `<verify>` blocks of plans
   146.1-01/03/04/05/06/07. MEASURED: it exits 1 with `Failed to load custom Reporter from basic`.
   ✅ It fails LOUD rather than passing vacuously, so no green in this phase rests on it, and
@@ -3003,19 +2228,6 @@ below was re-read from source that session. Standing caveats: Python slowapi sto
 `memory://` PER REPLICA (values are floors ×N, order-of-magnitude only); `userActionLimiter`
 backs ~9 surfaces — the remedy for any of its flows is a NEW named limiter, never a resize.
 
-- [ ] **Bridge flow 30× mismatch — mint a new named Vercel limiter.** Measured: Vercel
-  `userActionLimiter` 5/min/user = 300/h (`ratelimit.ts:97`; `bridge/route.ts:94`) vs Python
-  `/portfolio-bridge` 10/h/tenant (`portfolio.py:1899-1901`). ~10 clicks exhaust the backend
-  bucket, then the seam 429s requests the front door allowed. Recommendation: mint
-  `bridgeComputeLimiter` ≈10/3600s for this flow (mirrors the Python budget; truthful
-  Retry-After) — do NOT resize `userActionLimiter` (shared ~9 surfaces). Landing it must add
-  the limiter docblock rationale and update any pinned deny-shape tests in the same commit.
-- [ ] **Portfolio-optimizer flow 30× mismatch — same remedy as Bridge (shared new limiter).**
-  Measured: Vercel `userActionLimiter` 5/min/user = 300/h (`ratelimit.ts:97`;
-  `portfolio-optimizer/route.ts:113`) vs Python `/portfolio-optimizer` 10/h/tenant
-  (`portfolio.py:1637-1639`). Recommendation: put this flow on the same new
-  `bridgeComputeLimiter` (~10/3600s) minted for Bridge — one new named bucket, two
-  compute-heavy adopters; docblock + test-roster updates same commit.
 - [ ] **L-9 `/optimize-weights` per-tenant floor out of pattern (post-TS-04 re-look).**
   Measured: Python 20/min/tenant = 1200/h (`optimizer.py:43-45`) vs max legitimate
   Vercel-forwarded 5/min/user = 300/h (`scenario/optimize/route.ts:151`) — 4× headroom where
@@ -3088,17 +2300,6 @@ was then false: the same scope-amendment class this file exists to prevent.*
   estimates normally place the NOT EXISTS semi-joins first." No behavioural impact — the
   candidate set is bounded by `LIMIT 25` downstream and the sweep runs hourly. Prose-only,
   non-blocking; same commit as the citation fix above.
-- [ ] **csv-finalize A2 arm: the 409 refusal sentence does not describe the case it fires on.**
-  The terminal-status-mismatch arm (`csv-finalize/route.ts`, A2 check 0) refuses through
-  `refuse()` with the shipped DEFAULT literal — "This wizard session already created a strategy
-  with **a different track record** …" — but A2 fires when the track record is the SAME and the
-  FLOW differs (a manager resubmit landing on a committed `private` contribution row, or the
-  mirror). Deferred by plan 146.2-01 on purpose: that literal is pinned by name in
-  `CsvSubmitStep.upstream-arm.test.tsx` and in the c14 regression suite, and moving a pinned
-  sentence in a plan whose whole margin of safety was that no sentence moved would have been
-  reckless. **The fix is now two lines**: 146.2-01 gave `refuse()` an optional second
-  `humanMessage` parameter, so this arm needs its own sentence passed and a test arm re-pointed.
-  Copy-only ⇒ non-blocking per the stopping rule.
 - [ ] **`process-key-client.ts` transport catch: a TRAP-1-shaped error could inline BODY
   credentials into a seam-level CONSOLE line.** The catch scrubs via `scrubSeamError(err)` whose
   per-request secret set is DERIVED from the OUTGOING HEADERS
@@ -3112,28 +2313,6 @@ was then false: the same scope-amendment class this file exists to prevent.*
   the next credential added to a `/process-key` body is not added blind. **Fix direction:** widen
   the derived secret set to include body values of known credential-shaped keys, or assert at the
   seam that no credential-shaped key appears in the body.
-
-- [ ] **`csv-finalize/route.ts:733` — `createAdminClient()` is evaluated on the request path,
-  outside the fire-and-forget guard, immediately after an irreversible commit** (found
-  2026-08-19 by the Phase 146.2 code review, WR-01; non-blocking per the stopping rule —
-  it needs a MISCONFIGURED environment to fire, and production is configured).
-  `logAuditEventAsUser(createAdminClient(), …)` evaluates its first argument **before** the
-  call, so it sits outside `logAuditEventAsUser`'s own `try` (`src/lib/audit.ts:922-930`).
-  `createAdminClient` throws synchronously when `NEXT_PUBLIC_SUPABASE_URL` or
-  `SUPABASE_SERVICE_ROLE_KEY` is unset (`src/lib/supabase/admin.ts:14-16`), and `withAuth`
-  has no `try`/`catch` anywhere — so the throw escapes to Next as an opaque 500 with no
-  `code` and no `human_message`, **on the branch where the fold has already committed**.
-  The site's own docblock three lines above (`route.ts:725-728`) states the opposite
-  contract: "a failed emission … must NOT change this response".
-  ⚠️ **Class instance, not a novel pattern**: the call shape matches
-  `preferences/route.ts:221` and `account/deletion-request/route.ts:141`. csv-finalize is
-  the highest-stakes member because the throw lands after a committed track record.
-  The two pre-existing admin usages in this same file are both inside `after()` epilogues
-  wrapped in try/catch (`route.ts:1583-1585`, `:1699-1701`) — this is the first on the
-  request path. Recovery exists (the resubmit takes the 23505 arm, which never reaches this
-  line), so the defect is the **false failure report**, not permanent loss.
-  **Fix:** wrap the `createAdminClient()` evaluation in its own try/catch that logs +
-  captures and does not rethrow — and close the CLASS, not just this site.
 
 ## Phase 146.2 — recorded deferrals, SECOND PASS (logged 2026-08-20)
 
@@ -3166,34 +2345,6 @@ FILE, so grep it before you type it.*
   is unpinned today — but a dead conjunct in an oracle is exactly the shape that lets a later
   edit "preserve the assertion" while changing its subject. **Fix:**
   `expect(call![0], "…").toMatchObject({ code: "57014" })`.
-- [ ] **IN-03 — the re-mint fingerprint omits the classification, so the new
-  classification-conflict REFUSE has no in-wizard escape except a rename.**
-  `csvSubmissionFingerprint(strategyName, csvDailyReturnsSeries)`
-  (`src/lib/wizard/localStorage.ts:702`; called at
-  `src/app/(dashboard)/strategies/new/wizard/WizardClient.tsx:587` and `:635`) hashes the name
-  and the series only — never `metadata.category_id` / `metadata.asset_class`. Phase 146.2's
-  classification-conflict 409 is the ONE refusal whose stated remedy is a classification
-  change, and a classification change cannot move the fingerprint, so no fresh wizard session
-  is minted and the corrected resubmit takes the identical 409. ⚠️ **Not a dead end**: the
-  shipped copy is honest ("Open the strategy you already started, or start a new strategy"),
-  and renaming does reach a fresh session. Recorded because the re-mint fence and the new
-  refusal now disagree about what "a different submission" means — a disagreement that will
-  read as a bug to whoever meets it cold. **Fix:** either widen the fingerprint to cover the
-  classification, or state the deliberate exclusion in `csvSubmissionFingerprint`'s docblock so
-  the next reader does not re-derive this.
-- [ ] **IN-04 — two concurrent same-session resubmits can both take the csv-finalize FILL
-  arm.** Nothing serialises the resolve read (`src/app/api/strategies/csv-finalize/route.ts`,
-  `resolveExistingStrategyOrRefuse`'s projection at `:1138-1144`, FILL discriminator
-  `existingRow.category_id === null` at `:1372`) against another request's metadata UPDATE
-  (`.from("strategies").update(updatePayload)` at `:1902-1903`, payload from
-  `buildMetadataUpdatePayload` at `:543`). Two resubmits arriving together (two tabs, a
-  double-click past the client's `submitting` gate) can both observe `category_id IS NULL` and
-  both run the FILL UPDATE + enqueue. Benign when both carry the same picker values — the
-  writes are idempotent and the two enqueues converge on one job. Divergent only when the tabs
-  carry DIFFERENT classifications, where last-write-wins decides and both recomputes run; the
-  rate limiter and the series-equality check bound the window tightly. **Fix (optional, one
-  line):** scope the FILL UPDATE with `.is("category_id", null)` so the second writer is a
-  no-op — a compare-and-set that makes the arm's own premise enforceable instead of assumed.
 - [ ] **IN-05 — the "verbatim" wire fixtures in the wizard tests remain unverifiable by the
   suite (self-declared).** `CsvSubmitStep.test.tsx:308` (`ROUTE_ECHO_SENTENCE`), `:319`
   (`ROUTE_CLASSIFICATION_CONFLICT`), `CsvSubmitStep.upstream-arm.test.tsx:96`
