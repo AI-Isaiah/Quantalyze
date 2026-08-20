@@ -776,6 +776,24 @@ jobs:
     # NEVER be given an `e2e-seeded`-style fork-only-skip tolerance: it consumes
     # no secret and no repo variable, so it runs identically on a fork PR and a
     # `skipped` result there is always a real fault, never a legitimate gate.
+    #
+    # Phase 158 / OPS-02 (2026-08-20): `sql-tests` is now BLOCKING here, wired
+    # into BOTH places below. It was present-and-failing with NOTHING gating on
+    # it — and it is the only gate that EXECUTEs the real deployed cron bodies
+    # (it caught D-19). Its tolerance arm diverges from `e2e-seeded`'s by one
+    # event: its `if:` requires `github.event_name == 'push'` OR a same-repo PR,
+    # so it legitimately skips on fork PRs AND on `workflow_dispatch` (the
+    # golden-bake route) — a strict arm would redden every manual bake run. A
+    # skip on push/same-repo-PR still fails: that means E2E_TEST_DB_CONFIGURED
+    # was LOST, the same silent-disable the e2e-seeded arm detects.
+    # Wall-clock cost is ACCEPTED: this aggregator now waits on `sql-tests`,
+    # which itself needs `python` (~7m) plus its mutex wait. The alternative is
+    # the present-but-ungating state this requirement exists to kill.
+    # NOTE: this `needs:` entry is NOT one of the ⛔-banned chain edges among the
+    # DB-touching jobs (see the notes on `sql-tests` / `e2e-seeded`). Those are
+    # banned because a skipped `needs:` job SKIPS its dependents; this job
+    # carries `if: always()`, so an upstream skip reaches the loop below as a
+    # RESULT to judge rather than skipping the gate.
     runs-on: ubuntu-latest
     needs:
       - frontend-typecheck
@@ -786,6 +804,7 @@ jobs:
       - frontend-policy
       - frontend-build
       - e2e-seeded
+      - sql-tests
     if: always()
     steps:
       - name: Verify all frontend-* jobs succeeded
@@ -799,7 +818,8 @@ jobs:
             "frontend-seam-redis=${{ needs.frontend-seam-redis.result }}" \
             "frontend-policy=${{ needs.frontend-policy.result }}" \
             "frontend-build=${{ needs.frontend-build.result }}" \
-            "e2e-seeded=${{ needs.e2e-seeded.result }}"; do
+            "e2e-seeded=${{ needs.e2e-seeded.result }}" \
+            "sql-tests=${{ needs.sql-tests.result }}"; do
             name="${r%=*}"; result="${r#*=}"
             echo "$name: $result"
             if [ "$name" = "e2e-seeded" ]; then
@@ -818,6 +838,27 @@ jobs:
                 echo "e2e-seeded skipped (fork PR — no test-DB access); tolerated for this row only."
               else
                 echo "::error::e2e-seeded result=$result on a TRUSTED event (push/same-repo). The go-live badge gate MUST run here — E2E_TEST_DB_CONFIGURED may be unset (this also disables sql-tests). A skip is not tolerated."
+                fail=1
+              fi
+            elif [ "$name" = "sql-tests" ]; then
+              # Phase 158 / OPS-02: sql-tests is BLOCKING — it is the only gate
+              # that EXECUTEs the real deployed cron bodies. Its `if:` requires
+              # `github.event_name == 'push'` OR a same-repo PR, so unlike
+              # e2e-seeded it ALSO skips by design on `workflow_dispatch` (the
+              # golden-bake route); a strict arm would redden every bake run.
+              # Both skip-by-design routes are tolerated FOR THIS ROW ONLY. A
+              # skip on push/same-repo-PR is NOT: it means
+              # E2E_TEST_DB_CONFIGURED was LOST — the same silent-disable the
+              # e2e-seeded arm above detects, and the one that would let a
+              # migrations merge reach PROD with this gate quietly absent.
+              is_fork_pr='${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}'
+              is_dispatch='${{ github.event_name == 'workflow_dispatch' }}'
+              if [ "$result" = "success" ]; then
+                :
+              elif [ "$result" = "skipped" ] && { [ "$is_fork_pr" = "true" ] || [ "$is_dispatch" = "true" ]; }; then
+                echo "sql-tests skipped (fork PR: $is_fork_pr / workflow_dispatch: $is_dispatch — its if: excludes both); tolerated for this row only."
+              else
+                echo "::error::sql-tests result=$result (fork_pr=$is_fork_pr, dispatch=$is_dispatch). Only a 'skipped' on a fork PR or a workflow_dispatch is tolerated. On push/same-repo-PR a skip means E2E_TEST_DB_CONFIGURED was LOST; any failure means the SQL self-tests — the only gate that EXECUTEs the deployed cron bodies — did not pass."
                 fail=1
               fi
             elif [ "$result" != "success" ]; then
