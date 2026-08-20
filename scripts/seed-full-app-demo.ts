@@ -8,7 +8,8 @@
  * What it builds
  * --------------
  *   1 allocator (Atlas Family Office)
- *     └─ logs in via demo-allocator@quantalyze.test / DemoAlpha2026!
+ *     └─ logs in via the credentials you supply in DEMO_SEED_ALLOCATOR_EMAIL /
+ *        DEMO_SEED_ALLOCATOR_PASSWORD (see Usage; no default, by design)
  *   8 managers (institutional + exploratory mix)
  *     └─ each produces 1-3 strategies
  *   15 strategies spanning real crypto-quant archetypes
@@ -27,7 +28,14 @@
  *   SEED_CONFIRM_STAGING=true \
  *   NEXT_PUBLIC_SUPABASE_URL=... \
  *   SUPABASE_SERVICE_ROLE_KEY=... \
+ *   DEMO_SEED_ALLOCATOR_EMAIL=demo-allocator@example.test \
+ *   DEMO_SEED_ALLOCATOR_PASSWORD="$(openssl rand -base64 24)" \
  *   npx tsx scripts/seed-full-app-demo.ts
+ *
+ * The two DEMO_SEED_* vars have NO default and the script refuses without them
+ * (158-REVIEW CR-03). They used to be hardcoded literals in this file — in a
+ * PUBLIC repo, which made them published credentials. Keep the value in the
+ * team password manager; never in a file, a doc, or a commit message.
  *
  * The script is deterministic (mulberry32 PRNG), idempotent (wipes its own
  * UUIDs before re-inserting), and wipes the legacy /demo-page seed (persona
@@ -61,8 +69,40 @@ import { createClient, SupabaseClient } from "@supabase/supabase-js";
 // =========================================================================
 
 const ALLOCATOR_ID = "a11ca111-1111-4111-8111-111111111111";
-const ALLOCATOR_EMAIL = "demo-allocator@quantalyze.test";
-const ALLOCATOR_PASSWORD = "DemoAlpha2026!";
+
+/**
+ * 158-REVIEW CR-03 — the demo allocator's credentials are ENV-DERIVED, never
+ * literals. This repository is PUBLIC: a committed email/password pair is a
+ * published credential for every environment this seeder has ever been pointed
+ * at, and text removal is not remediation (the values remain in git history) —
+ * ROTATION is. These were plaintext here until this change.
+ *
+ * Read lazily via `requireDemoCredential` rather than at module scope so that
+ * `--help`-ish/no-op imports do not explode; `main()` resolves them up front so
+ * a missing var fails BEFORE any network call rather than half-way through a
+ * seed. Fail-loud by design: there is deliberately no default, because a
+ * default would silently recreate the published-credential state this fixes.
+ */
+const DEMO_ALLOCATOR_EMAIL_VAR = "DEMO_SEED_ALLOCATOR_EMAIL";
+const DEMO_ALLOCATOR_PASSWORD_VAR = "DEMO_SEED_ALLOCATOR_PASSWORD";
+
+function requireDemoCredential(varName: string): string {
+  const value = process.env[varName];
+  if (!value) {
+    console.error(
+      `[seed] Refusing to run: ${varName} is not set.\n` +
+        "        The demo allocator's credentials are no longer hardcoded — this repo is\n" +
+        "        PUBLIC, and a committed pair is a published credential (158-REVIEW CR-03).\n" +
+        `        Set both ${DEMO_ALLOCATOR_EMAIL_VAR} and ${DEMO_ALLOCATOR_PASSWORD_VAR}, e.g.\n` +
+        `          ${DEMO_ALLOCATOR_EMAIL_VAR}='demo-allocator@example.test' \\\n` +
+        `          ${DEMO_ALLOCATOR_PASSWORD_VAR}="$(openssl rand -base64 24)" \\\n` +
+        "          SEED_CONFIRM_STAGING=true npx tsx scripts/seed-full-app-demo.ts\n" +
+        "        Record the value in the team password manager, not in a file.",
+    );
+    process.exit(2);
+  }
+  return value;
+}
 
 const MANAGER_IDS = [
   "ba11a9e0-0000-4000-8000-000000000001", // Polaris Capital
@@ -1388,6 +1428,11 @@ async function main() {
     );
     process.exit(2);
   }
+  // CR-03: resolved up front, alongside the other interlocks, so a missing
+  // credential fails BEFORE any network call rather than half-way through a
+  // seed that has already mutated rows.
+  const ALLOCATOR_EMAIL = requireDemoCredential(DEMO_ALLOCATOR_EMAIL_VAR);
+  const ALLOCATOR_PASSWORD = requireDemoCredential(DEMO_ALLOCATOR_PASSWORD_VAR);
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
   const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
   if (!url || !key) {
@@ -1405,8 +1450,9 @@ async function main() {
   // The test/staging project ref is documented in
   // `.planning/intel/` and the GH-secret SUPABASE_PROJECT_REF_TEST.
   // Hardcoding it here is intentional — accidental seed-against-prod is
-  // catastrophic (DemoAlpha2026! creds + DEMO_SEED_PLACEHOLDER_ENCRYPTED
-  // ciphertext would land in the live api_keys table).
+  // catastrophic (the demo allocator's credentials +
+  // DEMO_SEED_PLACEHOLDER_ENCRYPTED ciphertext would land in the live
+  // api_keys table).
   const STAGING_PROJECT_REF_ALLOWLIST = new Set<string>([
     "qmnijlgmdhviwzwfyzlc", // Quantalyze E2E / staging
     ...(process.env.SEED_ALLOW_SUPABASE_PROJECT_REF
@@ -1949,7 +1995,10 @@ async function main() {
   }
 
   console.log("[seed] ✅ Full-app demo seed complete.");
-  console.log(`  - 1 allocator (${ALLOCATOR_EMAIL} / ${ALLOCATOR_PASSWORD})`);
+  // CR-03: print the email (the operator needs to know which account was
+  // seeded) but NEVER the password — this output lands in terminal scrollback,
+  // CI logs and pasted snippets. It is in the env the operator just supplied.
+  console.log(`  - 1 allocator (${ALLOCATOR_EMAIL} / password: as supplied in ${DEMO_ALLOCATOR_PASSWORD_VAR})`);
   console.log(`  - ${MANAGER_IDS.length} managers`);
   console.log(`  - ${ARCHETYPES.length} strategies`);
   console.log(`  - 3 portfolios (1 real + 2 scenarios)`);

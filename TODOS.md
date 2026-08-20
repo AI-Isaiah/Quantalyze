@@ -2499,6 +2499,25 @@ runaway), and every v1.19 requirement is satisfied as written.
 
 ## Phase 158 — recorded deferrals (logged 2026-08-20)
 
+- [ ] **[158-OPS-03/SEC] ⛔ ROTATE the two leaked demo accounts — NOT done, and only a human can
+  do it (158-REVIEW CR-03).** `matratzentester24@gmail.com` / `Test12` and
+  `demo-allocator@quantalyze.test` / `DemoAlpha2026!` were committed in plaintext to a **PUBLIC**
+  repository. Both pairs remain in git history and **must be treated as published**, so removing
+  the text is *not* remediation — **disabling or rotating the accounts on every project they
+  exist in (TEST, preview, and PROD) is the only step that actually remediates this.** No agent
+  can perform it; do not mark this closed on the basis of the scrub commits below.
+  **Done in-pass (text surfaces only):** `scripts/seed-full-app-demo.ts` now reads
+  `DEMO_SEED_ALLOCATOR_EMAIL` / `DEMO_SEED_ALLOCATOR_PASSWORD` and refuses without them;
+  `docs/demos/2026-04-09-full-app-walkthrough.md` and the `CHANGELOG.md` entry are redacted;
+  `.gitleaks.toml` no longer blanket-exempts `.planning/`. Live-surface grep for both pairs
+  outside `.planning/` is now clean **except** `src/__tests__/e2e-match-queue-no-vacuous-admin-gate.test.ts`,
+  where the literals are the needle of an absence-assertion and are retained deliberately (that
+  guard cannot be written without them; see the comment in that file).
+  **Still open beyond rotation:** the `matratzentester24` pair remains quoted in
+  `.planning/milestones/v0.17.0.0-phases/13-*` and `.planning/milestones/v0.16.0.0-phases/11-PATTERNS.md`.
+  Those are historical artifacts and were deliberately left untouched in this pass; the full
+  `.planning/` sweep belongs to **v1.20's SEC-02 requirement**, which owns it end to end.
+
 - [x] **[158-OPS-04] drain execution deferred — the TEST `compute_jobs` backlog is NOT yet
   drained.** CLOSED 2026-08-20: 5-step protocol executed from the credentialed main checkout — measured no-op (BEFORE stale set 0; reaper live on TEST + worker churn had already dissolved the 08-11 backlog; 0 terminalized, residual 0, idempotency zero-delta); measured tables in 158-OPS04-DRAIN-EVIDENCE.md.
   Plan 158-03 landed both halves it could land: the `claimed_at` stamps in the two

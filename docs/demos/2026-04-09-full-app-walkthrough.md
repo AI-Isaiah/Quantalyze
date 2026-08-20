@@ -16,9 +16,17 @@ narrate.
 
 ```
 URL:      https://quantalyze-rho.vercel.app/login
-Email:    demo-allocator@quantalyze.test
-Password: DemoAlpha2026!
+Email:    <DEMO_SEED_ALLOCATOR_EMAIL — see the team password manager>
+Password: <DEMO_SEED_ALLOCATOR_PASSWORD — see the team password manager>
 ```
+
+> ⚠️ **Redacted 2026-08-20 (158-REVIEW CR-03).** This block used to quote a live
+> email/password pair verbatim, in a PUBLIC repository. `scripts/seed-full-app-demo.ts`
+> now reads both from `DEMO_SEED_ALLOCATOR_EMAIL` / `DEMO_SEED_ALLOCATOR_PASSWORD`
+> and refuses to run without them, so whoever seeded the environment chose these
+> values. Note that removing the text here is **not** remediation — the original
+> values remain in this repo's git history and must be treated as published until
+> the account is rotated or disabled.
 
 The profile is `Atlas Family Office`, a single-family office allocating to
 external crypto-quant managers with a ~$50M-$100M book. Preferences are
