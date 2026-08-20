@@ -217,6 +217,15 @@ shared wall-clock barrier and are checked pairwise for non-overlap by the
 > Two of the three would conclude `cancelled`: the exact grey conclusion the
 > assertion below says must never be tolerated.
 
+> ⚠️ **Run the drill when CI is QUIET.** The `contend` job carries
+> `timeout-minutes: 15` and a single CI run holds this lock **~20 min**
+> (§2 above), so a probe dispatched while real CI holds the mutex is *expected*
+> to go red on its own job timeout. That is a scheduling artefact, **not** a
+> broken mutex — check `gh run list --workflow=CI --branch main` first, and
+> re-dispatch once the queue drains rather than escalating to §3's manual
+> unlock. (158-REVIEW WR-06: the workflow header used to promise the probe
+> "simply queues behind" real CI, which is what made this mis-triage likely.)
+
 Run it against a probe branch — **never a bare `gh workflow run`**, whose
 default ref is the default branch (see the ⚠️ below):
 

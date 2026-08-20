@@ -43,9 +43,22 @@ name: Shared-test-db mutex probe
 # not survive) or a contender could not connect at all.
 #
 # Cost: ~3 x 45 s of serialized holding, ~5 min wall clock. It touches NO table
-# and takes no row locks — only the advisory lock — so it is safe to dispatch
-# against the shared TEST project at any time. If real CI is holding the mutex,
-# the probe simply queues behind it (and proves the point).
+# and takes no row locks — only the advisory lock — so it is SAFE to dispatch
+# against the shared TEST project at any time: it can never corrupt or block
+# real CI's data.
+#
+# 158-REVIEW WR-06 (iter 3): safe to dispatch is NOT the same as certain to pass,
+# and this comment used to claim the latter ("the probe simply queues behind it
+# and proves the point") while the CR-01 note twelve lines above states the
+# opposite — that real CI holding the mutex can blow through the probe's
+# `timeout-minutes`. Both cannot be true, and the reassuring one is wrong: the
+# `contend` job below carries `timeout-minutes: 15` and a single CI run
+# holds the lock ~20 min (docs/runbooks/shared-test-db-mutex.md section 2), so a
+# probe dispatched into a BUSY window is EXPECTED to red on its own job timeout.
+# That is a scheduling artefact, not a mutex failure — re-dispatch when CI is
+# quiet rather than triaging it as a broken mutex. (Do not "fix" it by raising
+# `timeout-minutes` past the ~20 min hold: the bound is what stops a probe
+# squatting a runner for the length of a real CI queue.)
 #
 # Secret: TEST_SUPABASE_DB_URL, referenced BY NAME only. The derived session DSN
 # is never echoed, and psql's stderr is redacted before it reaches the log — this
