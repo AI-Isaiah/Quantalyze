@@ -847,10 +847,24 @@ jobs:
               # e2e-seeded it ALSO skips by design on `workflow_dispatch` (the
               # golden-bake route); a strict arm would redden every bake run.
               # Both skip-by-design routes are tolerated FOR THIS ROW ONLY. A
-              # skip on push/same-repo-PR is NOT: it means
-              # E2E_TEST_DB_CONFIGURED was LOST — the same silent-disable the
-              # e2e-seeded arm above detects, and the one that would let a
-              # migrations merge reach PROD with this gate quietly absent.
+              # skip on push/same-repo-PR is NOT tolerated — but it has TWO
+              # possible causes, and this loop cannot tell them apart.
+              #
+              # 158-REVIEW WR-04: the message used to assert only one of them
+              # ("E2E_TEST_DB_CONFIGURED was LOST"), which is FALSE in the more
+              # common case. `sql-tests` carries `needs: [python]`, and a skipped
+              # or failed `needs:` job SKIPS its dependents — so an ordinary
+              # `python` failure lands here as `sql-tests=skipped` and sent the
+              # operator to check a repository variable when the real signal was
+              # a red `python` check on the very same run. The gate reddening was
+              # right; the stated cause was confidently wrong, which this repo's
+              # fail-loud-and-ACCURATE doctrine treats as a real cost.
+              #
+              # `python` is deliberately NOT added to this aggregator's `needs:`
+              # just to read its result: the phase's mutex design forbids new
+              # `needs:` edges among the DB-touching jobs (their `if:`
+              # conditions diverge on `workflow_dispatch`). Naming both causes,
+              # cheapest-to-check first, costs nothing and misleads no one.
               is_fork_pr='${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}'
               is_dispatch='${{ github.event_name == 'workflow_dispatch' }}'
               if [ "$result" = "success" ]; then
@@ -858,7 +872,11 @@ jobs:
               elif [ "$result" = "skipped" ] && { [ "$is_fork_pr" = "true" ] || [ "$is_dispatch" = "true" ]; }; then
                 echo "sql-tests skipped (fork PR: $is_fork_pr / workflow_dispatch: $is_dispatch — its if: excludes both); tolerated for this row only."
               else
-                echo "::error::sql-tests result=$result (fork_pr=$is_fork_pr, dispatch=$is_dispatch). Only a 'skipped' on a fork PR or a workflow_dispatch is tolerated. On push/same-repo-PR a skip means E2E_TEST_DB_CONFIGURED was LOST; any failure means the SQL self-tests — the only gate that EXECUTEs the deployed cron bodies — did not pass."
+                if [ "$result" = "skipped" ]; then
+                  echo "::error::sql-tests result=skipped on a TRUSTED event (fork_pr=$is_fork_pr, dispatch=$is_dispatch — only a skip on one of those is tolerated). TWO causes produce this, check in order: (1) its \`needs: python\` dependency did not succeed — look at the \`python\` check on THIS run first, and if it is red that is your answer and E2E_TEST_DB_CONFIGURED is NOT implicated; (2) otherwise E2E_TEST_DB_CONFIGURED was LOST, the same silent-disable the e2e-seeded arm above detects — the one that would let a migrations merge reach PROD with this gate quietly absent."
+                else
+                  echo "::error::sql-tests result=$result (fork_pr=$is_fork_pr, dispatch=$is_dispatch). The SQL self-tests — the only gate that EXECUTEs the deployed cron bodies (it caught D-19) — did not pass. If this is a mutex acquire timeout, see docs/runbooks/shared-test-db-mutex.md sections 2-3: queue depth and a wedged holder are different faults."
+                fi
                 fail=1
               fi
             elif [ "$result" != "success" ]; then
