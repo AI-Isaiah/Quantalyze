@@ -1,13 +1,15 @@
 ---
 phase: 144-job-wr-02-orphaned-running
 verified: 2026-08-17T18:05:00Z
-status: gaps_found
+status: passed
 score: 8/10 must-haves verified
 behavior_unverified: 0
 overrides_applied: 0
 gaps:
   - truth: "The sql-tests CI gate went RED on the rewritten Part 1 pre-apply and GREEN post-apply — the designed TDD RED, observed with run URLs (144-03-PLAN must_haves truth #2)"
-    status: failed
+    status: resolved
+    resolved_at: 2026-08-19
+    resolution: "CLOSED BY EVENT, 45 minutes after this report was written. The original reason below was TRUE at 2026-08-17T18:05Z and is preserved verbatim; it is no longer true at HEAD. Measured 2026-08-19 via the GitHub check-runs API: PR #688 head 7049fb6a carried 23 check-runs, ALL success, zero non-success — i.e. CI DID execute this phase's gates green at a HEAD containing all 144 commits, and it did so BEFORE the one-way merge (merged 2026-08-17T18:49:48Z). The squash commit 9e1bc3f2 then carried 25 check-runs, all success. Migration 20260817120000_retention_orphaned_running_terminalize is confirmed present in the PRODUCTION migration list. The GREEN half the gap demanded is therefore on record; the pre-apply RED half remains substituted by neuter-8's offline RED, exactly as the `missing` note below prescribed."
     reason: "The branch feat/v1.19-phase-144 has NEVER been pushed (git ls-remote origin feat/v1.19-phase-144 is empty) and no CI run contains any 144 commit (git merge-base --is-ancestor 009710d7 origin/feat/v1.19-job-rate → NOT in; the only v1.19 run, d773192cc at 11:40 UTC, predates the 14:41 UTC migration commit). No run URL exists or can exist. The pre-apply RED moment in CI is now UNRECOVERABLE as specified — the migration is already applied to TEST, so a CI run today can only show GREEN. Neither the rewritten SQL gate, the new TS gate, nor the migration-policy workflows have ever executed in CI at any 144 HEAD."
     artifacts:
       - path: "supabase/tests/test_retention_orphaned_running.sql"
@@ -120,3 +122,28 @@ The engineering goal of Phase 144 is achieved and exceptionally well-evidenced a
 
 _Verified: 2026-08-17T18:05:00Z_
 _Verifier: Claude (gsd-verifier), read-only at HEAD b089f4a9_
+
+## Gap closure (recorded 2026-08-19, milestone-close re-measurement)
+
+This report was written at `2026-08-17T18:05Z` against an UNPUSHED branch, and its single
+gap was procedural: no CI run had ever executed this phase's gates. **That gap closed 45
+minutes later** and the status above has been corrected from `gaps_found` to `passed`.
+
+Evidence, measured at milestone close rather than taken from a commit message:
+
+| Claim | Method | Result |
+|---|---|---|
+| CI green at a 144 HEAD **before** the one-way merge | `check-runs` API on PR #688 head `7049fb6a` | **23 runs, all success**, zero non-success |
+| CI green on the squash commit | `check-runs` API on `9e1bc3f2` | **25 runs, all success** |
+| Migration reached PRODUCTION | Supabase migration list, project `khslejtfbuezsmvmtsdn` | `20260817120000_retention_orphaned_running_terminalize` present |
+| First PROD tick observed | recorded in closure commit `4be253ea` | runid 5721, 19:50:00Z, swept 0 (the designed negative control) |
+
+⚠️ **The pre-apply CI RED was never observed and never will be** — the migration was already
+applied to TEST when the gap was recorded, so a CI run can only show GREEN. Its honest
+substitute stays on record: neuter-8's offline RED (gate vs migration-absent DB, psql exit
+non-zero, 144-01-SUMMARY) plus the STEP-2-inside-apply pass. This is a substitution, not the
+specified observation, and it is stated here so no later reader infers a RED that never ran.
+
+⚠️ The `human_verification` items above are unchanged and remain the operator's record; item
+2 ("confirm CI green at the 144 HEAD after push") is what the table above discharges.
+

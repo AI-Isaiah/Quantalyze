@@ -2,7 +2,7 @@
 -- Canonical current body of this function, replayed from supabase/migrations/**.
 -- Regenerate with `npm run schema:functions`. See tech-debt #2.
 
--- source migration: 20260819130000_csv_finalize_fold_input_guards.sql
+-- source migration: 20260819151000_csv_finalize_fold_guard1_null_safe.sql
 -- ==========================================================================
 -- STEP 1 — the replaced function (CREATE OR REPLACE; the function is NOT
 --          dropped, so its ACLs and its OID survive)
@@ -26,27 +26,61 @@ DECLARE
 BEGIN
   -- GUARD 1 — CONTRIB-02 guard (T-110-02, D-08): restrict the terminal status;
   -- 'published' is unreachable from any finalize caller. FIRST statement so it
-  -- RAISEs before any write (parent: 20260819120000:225-231, verbatim).
+  -- RAISEs before any write (parent: 20260819120000:225-231).
   -- Gated behaviorally by test_csv_finalize_atomic_fold.sql Part 3d.
-  IF p_terminal_status NOT IN ('pending_review', 'private') THEN
+  --
+  -- CHANGED here (146.2 review R5) to be NULL-explicit, in the SAME shape
+  -- GUARD 4 and GUARD 5 already use. p_terminal_status NOT IN (...) evaluates
+  -- to NULL for a NULL argument and plpgsql takes the ELSE branch on a NULL IF
+  -- condition, so a NULL terminal status used to walk past this whitelist
+  -- entirely — and past everything else, because nothing below refuses it
+  -- either. It surfaced as a 23502 NOT NULL violation from strategies.status:
+  -- an error naming a COLUMN rather than the offending input, and one the
+  -- route's classifier has no arm for, while the COMMENT ERRCODE map below
+  -- promised 22023 for an invalid terminal status. The message literal, its
+  -- argument and ERRCODE '22023' are UNCHANGED so no existing gate anchor
+  -- moves; a NULL renders as <NULL> in the "% is not allowed" slot.
+  IF p_terminal_status IS NULL OR p_terminal_status NOT IN ('pending_review', 'private') THEN
     RAISE EXCEPTION 'finalize_csv_strategy_with_returns: p_terminal_status % is not allowed (expected pending_review or private)',
       p_terminal_status
       USING ERRCODE = '22023';
   END IF;
 
-  -- GUARD 2 — Caller-identity guards (parent: 20260819120000:233-251,
-  -- verbatim). The route layer calls with the authenticated user's id; we
-  -- assert it matches the JWT so a SECURITY DEFINER RPC can't be abused via
-  -- service_role to write rows under another user. This pair is also what
-  -- confines finding A1's blast radius to the caller's OWN tenant. The message
-  -- literal below is pinned by supabase/tests/test_csv_finalize_auth_guard.sql
-  -- Part A — change both together or not at all.
+  -- GUARD 2 — Caller-identity guards (parent: 20260819120000:233-251). The
+  -- route layer calls with the authenticated user's id; we assert it matches
+  -- the JWT so a SECURITY DEFINER RPC can't be abused via service_role to
+  -- write rows under another user. This pair is also what confines finding
+  -- A1's blast radius to the caller's OWN tenant. The message literals below
+  -- are pinned by supabase/tests/test_csv_finalize_auth_guard.sql Parts A and
+  -- B — change both together or not at all.
   IF v_auth_uid IS NULL THEN
     RAISE EXCEPTION 'finalize_csv_strategy_with_returns called without an auth session'
       USING ERRCODE = '42501';
   END IF;
 
-  IF v_auth_uid <> p_user_id THEN
+  -- CHANGED here (146.2 review-of-05) to be NULL-safe. This was the SOLE
+  -- remaining violator of the law this same file states at GUARD 8: ⛔ IS
+  -- DISTINCT FROM, never <>. p_user_id is caller-controlled and carries no
+  -- DEFAULT, so an authenticated direct-RPC caller can pass an explicit JSON
+  -- null; `v_auth_uid <> p_user_id` then evaluated to NULL, plpgsql took the
+  -- ELSE branch on a NULL IF condition, and the identity guard SILENTLY
+  -- PASSED. Nothing below refused it either — GUARDS 3-10 touch only
+  -- p_rows / p_fmt / p_strategy_name — so it reached the strategies INSERT
+  -- and surfaced as a 23502 NOT NULL violation from strategies.user_id. That
+  -- is R5's pathology verbatim: an error naming a COLUMN instead of the
+  -- offending input, while this function's own COMMENT ERRCODE map (STEP 3)
+  -- promises 42501 for "no session or identity mismatch" — and a NULL
+  -- p_user_id IS an identity mismatch. The message literal, both its
+  -- arguments and ERRCODE '42501' are UNCHANGED so no existing gate anchor
+  -- moves; a NULL renders as <NULL> in the "p_user_id (%)" slot.
+  -- ⚠️ THE SHAPE RULE, so the two spellings in this file do not read as
+  -- drift: an `x NOT IN (...)` whitelist takes `x IS NULL OR ...`
+  -- (GUARDS 1, 4, 5); a BINARY comparison takes IS DISTINCT FROM
+  -- (GUARDS 2 and 8). Both are NULL-safe; neither is usable at the other's
+  -- site — `IS DISTINCT FROM` cannot express a set membership, and
+  -- `p_user_id IS NULL OR v_auth_uid <> p_user_id` is the same predicate
+  -- spelled with a redundant arm.
+  IF v_auth_uid IS DISTINCT FROM p_user_id THEN
     RAISE EXCEPTION 'finalize_csv_strategy_with_returns: p_user_id (%) does not match auth.uid (%)',
       p_user_id, v_auth_uid
       USING ERRCODE = '42501';

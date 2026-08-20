@@ -587,20 +587,32 @@ export function WizardClient({
     const current = csvSubmissionFingerprint(strategyName, csvDailyReturnsSeries);
     if (current === burned) return;
     // A material change to a burned submission: retire the spent session id.
+    // R4 (v1.19 review of 146.1) — MINT FIRST, INTO A LOCAL. The React setter
+    // and the persisted envelope are fed from this ONE local, so the pair
+    // (session id, burn) cannot de-sync — the same house rule the burn site
+    // below states. Writing the envelope before the swap persisted the RETIRED
+    // id next to the CLEARED burn, and a reload in that window resumed a spent
+    // session id with the fence disarmed: the corrected resubmit then takes the
+    // server's equality refusal with no burn left to re-mint it, and nothing
+    // repairs it (the name autosave is gated on step `csv_upload`; this fires
+    // past it).
+    const nextWizardSessionId = newWizardSessionId();
     failedCsvSubmitSigRef.current = null;
     // RT-3 write-through: clear the PERSISTED burn too, so a legitimately
     // different resubmit is not blocked forever by a burn that outlives the
     // content it described. Explicit `null` — the field is sticky, so omitting
-    // it would carry the stale burn forward.
+    // it would carry the stale burn forward. ONE call carries both halves: the
+    // save queue serializes by CALL order, so a single call cannot be
+    // interleaved — no second save, no flush choreography.
     void saveWizardState({
       strategyId: "",
-      wizardSessionId,
+      wizardSessionId: nextWizardSessionId,
       step,
       source: "csv",
       strategyName,
       failedCsvSubmitSig: null,
     });
-    setWizardSessionId(newWizardSessionId());
+    setWizardSessionId(nextWizardSessionId);
     // The RETIRED session id (the one the failed submit spent) — so an operator
     // can correlate the re-mint with the earlier wizard_error on that session.
     trackForQuantsEventClient("wizard_csv_session_reminted", {
@@ -637,6 +649,59 @@ export function WizardClient({
       failedCsvSubmitSig: fingerprint,
     });
   }, [strategyName, csvDailyReturnsSeries, wizardSessionId, step]);
+
+  /**
+   * ⭐ 146.2-08 / B1 — THE USER-DRIVEN HALF OF THE RE-MINT.
+   *
+   * The effect above re-mints when the CONTENT changes past a burn. There is
+   * one refusal that no content change can clear: the server's 409
+   * `CSV_SESSION_REUSED`. That response burns the session id against the file
+   * the user is submitting, and the user's answer to it is "yes, make this a
+   * separate strategy" — the SAME file, deliberately. The content-keyed effect
+   * cannot see that intent (`current === burned`), so the resubmit replays the
+   * spent id and takes the same 409 forever, and neither reset control reaches
+   * this branch (Start fresh needs `initialDraft`, Delete draft needs
+   * `strategyId`; on the CSV branch both are structurally absent). This is the
+   * escape hatch `CsvSubmitStep` renders as "Start a new strategy".
+   *
+   * ⚠️ MINT FIRST, INTO A LOCAL — the R4 house rule the effect above states at
+   * length. The React setter and the persisted envelope are fed from this ONE
+   * local so the (session id, burn) pair cannot de-sync; writing the envelope
+   * before the swap would persist the RETIRED id beside the CLEARED burn, and a
+   * reload in that window resumes a spent session with the fence disarmed.
+   *
+   * ⚠️ AND IT DELIBERATELY TOUCHES NOTHING ELSE. `csvPreview`,
+   * `csvDailyReturnsSeries`, `csvMetadataDraft`, `strategyName` and `step` are
+   * all left standing: the series is never persisted (too large for
+   * localStorage), so resetting to `csv_upload` here would force a re-upload of
+   * a file this component is already holding — the refusal would have cost the
+   * user their work rather than one click.
+   */
+  const handleCsvStartNewStrategy = useCallback(() => {
+    const nextWizardSessionId = newWizardSessionId();
+    failedCsvSubmitSigRef.current = null;
+    // ONE call carries both halves (the save queue serializes by call order),
+    // and `failedCsvSubmitSig: null` is EXPLICIT because the field is sticky —
+    // omitting it would carry the stale burn forward onto the fresh id.
+    void saveWizardState({
+      strategyId: "",
+      wizardSessionId: nextWizardSessionId,
+      step,
+      source: "csv",
+      strategyName,
+      failedCsvSubmitSig: null,
+    });
+    setWizardSessionId(nextWizardSessionId);
+    // Same event as the content-keyed re-mint: the FACT is identical (a session
+    // id was retired) and operators correlate on the retired id, which is what
+    // is reported here. `step` is what discriminates the two — the automatic
+    // re-mint sends none — so a user-taken escape is countable without adding a
+    // name to the closed `ForQuantsEvent` union.
+    trackForQuantsEventClient("wizard_csv_session_reminted", {
+      wizard_session_id: wizardSessionId,
+      step: "csv_submit_start_new",
+    });
+  }, [step, strategyName, wizardSessionId]);
 
   const persistPointer = useCallback(
     (nextStep: WizardStepKey, id: string | null) => {
@@ -1426,6 +1491,10 @@ export function WizardClient({
                 // CR-01: burn the session id for THIS (name, series) on a
                 // failed submit so a later change re-mints (durable fence).
                 onSubmitFailed={handleCsvSubmitFailed}
+                // 146.2-08 / B1: the escape from the 409 refusal the burn
+                // itself makes permanent. Mints + clears the burn; keeps the
+                // upload.
+                onStartNewStrategy={handleCsvStartNewStrategy}
                 onBack={() => {
                   // Phase 53 / APPLY-02 — Back from csv_submit returns to the
                   // review recap (the step that now precedes csv_submit).

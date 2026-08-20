@@ -1105,6 +1105,12 @@ describe("/api/strategies/csv-finalize — strategy_name validation", () => {
         ],
         metadata: {
           description: "ok",
+          // 146.2 gap closure: required on any non-empty blob. It is a KNOWN
+          // field, so it must survive the projection alongside `description` —
+          // which sharpens this test rather than weakening it: the projection
+          // now has to carry two known fields through while still dropping all
+          // four hostile ones below.
+          category_id: "ccccccc1-1111-4111-8111-111111111111",
           // Hostile / unknown fields — must NOT reach the UPDATE.
           status: "published",
           source: "api",
@@ -1116,7 +1122,10 @@ describe("/api/strategies/csv-finalize — strategy_name validation", () => {
       const res = await POST(req);
       expect(res.status).toBe(200);
       const [, payload] = updateMock.mock.calls[0];
-      expect(payload).toEqual({ description: "ok" });
+      expect(payload).toEqual({
+        description: "ok",
+        category_id: "ccccccc1-1111-4111-8111-111111111111",
+      });
       expect(payload).not.toHaveProperty("status");
       expect(payload).not.toHaveProperty("source");
       expect(payload).not.toHaveProperty("user_id");
@@ -2083,7 +2092,16 @@ describe("[146.1-05 / A3] the fold-failure arm's copy is commit-agnostic where t
         fmt: "daily_returns",
         strategy_name: name,
         daily_returns_series: [{ date: "2024-01-01", daily_return: 0.01 }],
-        metadata: { description: "a3 oracle marker" },
+        // 146.2 gap closure: parseCsvMetadata now requires a `category_id` on any
+        // NON-EMPTY metadata blob, so that a committed NULL category_id is real
+        // proof the UPDATE never ran (the FILL discriminator rests on it). These
+        // A3 arms are about FOLD-FAILURE COPY, not metadata — the fold rejects
+        // before any UPDATE — so the id below is inert scaffolding that keeps the
+        // request past the parse boundary and the arm under test unchanged.
+        metadata: {
+          description: "a3 oracle marker",
+          category_id: "ccccccc1-1111-4111-8111-111111111111",
+        },
       }),
     );
     const json = await res.json();

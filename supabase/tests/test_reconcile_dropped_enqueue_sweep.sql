@@ -10,6 +10,15 @@
 -- 146.1): the SAME job re-registered under the SAME name and cadence with ONE
 -- conjunct changed -- the zero-jobs test now exempts a 'failed_final' row whose
 -- last_error carries Phase 144's fixed orphaned_running_reaped audit literal.
+-- 20260819150000_reconcile_sweep_readmit_attempt_ceiling.sql (R3, Phase 146.2):
+-- the SAME job re-registered again, same name and cadence, with ONE conjunct
+-- ADDED -- a readmit ATTEMPT CEILING. B4 opened a readmission path and named
+-- "an hourly retry loop with no attempt ceiling" three times as the mode it
+-- must not cause, but bounded only the NULL-last_error way in; R3 bounds the
+-- loop itself at 3 marker rows per strategy. The count of those rows IS the
+-- attempt counter (144 terminalizes IN PLACE, the sweep INSERTs anew, so it
+-- rises by exactly one per cycle) -- zero DDL. Arms C5 / C5b are its
+-- behavioural pair and Part 1 carries its text pins.
 -- ⚠️ The jobname is the stable identifier and is unchanged; the JOBID is NOT
 -- (unschedule + schedule assigns a fresh one, 20260817120000:420-426), so every
 -- assertion in this file keys on the name.
@@ -305,9 +314,16 @@ BEGIN
   -- the body names the table, this count and its two siblings (the migration's
   -- STEP 2 self-verify, src/__tests__/reconcile-dropped-enqueue-sweep.test.ts)
   -- move in the SAME commit.
+  -- ⚠️ THE EXPECTED COUNT MOVED FROM 2 TO 3 (R3, Phase 146.2, migration
+  -- 20260819150000). The readmit ATTEMPT CEILING is a NEW scalar subquery over
+  -- the same table, so unlike B4 -- which added a condition INSIDE the existing
+  -- subquery and honestly left this at 2 -- it genuinely adds a third table
+  -- reference. This count and its two siblings (that migration's STEP 2 and
+  -- src/__tests__/reconcile-dropped-enqueue-sweep.test.ts) moved in the SAME
+  -- commit as the migration.
   v_jobs := (length(upper(v_command)) - length(replace(upper(v_command), 'PUBLIC.COMPUTE_JOBS', ''))) / length('PUBLIC.COMPUTE_JOBS');
-  IF v_jobs <> 2 THEN
-    RAISE EXCEPTION 'TEST FAILED (1/JOB-04/D-02): the deployed body names public.compute_jobs % times, expected 2 (the zero-jobs NOT EXISTS conjunct + the INSERT target). One means the zero-jobs conjunct is GONE and the INSERT target alone is satisfying this gate, so every strategy holding a healthy in-flight chain -- a running derive_broker_dailies mid-chain, most of all -- would be re-enqueued on the next tick. Zero means the sweep no longer writes at all.', v_jobs;
+  IF v_jobs <> 3 THEN
+    RAISE EXCEPTION 'TEST FAILED (1/JOB-04/D-02/R3): the deployed body names public.compute_jobs % times, expected 3 (the zero-jobs NOT EXISTS conjunct + the readmit-ceiling subquery + the INSERT target). Two means ONE of the two predicates is gone: without the zero-jobs conjunct every strategy holding a healthy in-flight chain -- a running derive_broker_dailies mid-chain, most of all -- is re-enqueued on the next tick; without the ceiling subquery a strategy whose input reliably kills its worker rides the reap-readmit cycle forever. One means only the INSERT target survives and it is satisfying this gate by itself. Zero means the sweep no longer writes at all.', v_jobs;
   END IF;
 
   -- ----- B4: the terminalizer-marker exemption (20260819130500) ---------
@@ -322,9 +338,32 @@ BEGIN
   -- proves nothing about what pg_cron holds today. The behavioural counterpart
   -- is Part 2 arm C4.
   v_stripped := regexp_replace(v_command, '--[^\n]*', '', 'g');
+  -- ⚠️ EXPECTED COUNT MOVED FROM 1 TO 2 (R3, Phase 146.2, migration
+  -- 20260819150000): the B4 exemption plus the readmit ceiling, both keyed on
+  -- the same fixed audit literal. Its 2-occurrence count in the TERMINALIZER is
+  -- gated at 20260817120000:741, so marker drift REDs upstream before it could
+  -- silently un-key either clause here.
   v_marker := (length(upper(v_stripped)) - length(replace(upper(v_stripped), 'ORPHANED_RUNNING_REAPED', ''))) / length('ORPHANED_RUNNING_REAPED');
-  IF v_marker <> 1 THEN
-    RAISE EXCEPTION 'TEST FAILED (1/JOB-04/B4): the deployed body carries the terminalizer audit marker % times in EXECUTABLE code, expected exactly 1. Zero means Phase 146.1 exemption has been lost from the deployed body, so a chain-mid orphan that 144 terminalized for its audit trail once again excludes its own strategy from this sweep FOREVER -- dailies present, no analytics row, recovered by nobody and with no user surface once the wizard 15-minute amber backstop has passed. More than one means the conjunct was duplicated, or the marker leaked into a second clause nothing else gates.', v_marker;
+  IF v_marker <> 2 THEN
+    RAISE EXCEPTION 'TEST FAILED (1/JOB-04/B4/R3): the deployed body carries the terminalizer audit marker % times in EXECUTABLE code, expected exactly 2 (the B4 readmit exemption + the R3 attempt ceiling). One means one of the pair is gone. Without the exemption, a chain-mid orphan that 144 terminalized for its audit trail once again excludes its own strategy from this sweep FOREVER -- dailies present, no analytics row, recovered by nobody and with no user surface once the wizard 15-minute amber backstop has passed. Without the ceiling, those readmissions are unbounded: worker dies, row is reaped at 4h, sweep readmits, forever. Zero means both are gone. More than two means a clause was duplicated, or the marker leaked into a third clause nothing else gates.', v_marker;
+  END IF;
+  -- ----- R3: the readmit ATTEMPT CEILING (20260819150000) ---------------
+  -- (a) The LITERAL, word-bounded. Same lesson as LIMIT 25 below: a ceiling
+  -- widened to 30 or 300 CONTAINS the digit 3, so a substring gate would accept
+  -- a bound nobody ratified. \m and \M also reject '<= 3', which quietly buys a
+  -- fourth cycle. MEASURED 2026-08-19 on a throwaway postgres:16 against this
+  -- migration's own STEP 2: the '< 30' body REDs, the '< 3' body passes.
+  IF v_stripped !~ '<[[:space:]]*\m3\M' THEN
+    RAISE EXCEPTION 'TEST FAILED (1/JOB-04/R3): the deployed body does not carry a word-bounded readmit ceiling of < 3. Either the bound is gone -- and a strategy whose input reliably kills its worker rides the reap-readmit cycle FOREVER at one worker slot every ~5 hours, which is the unbounded retry loop arms C2/C2b/C3 and B4 own header keep naming -- or it has been widened to a value that merely STARTS with 3, or relaxed to <= 3. Part 2 arms C5 and C5b are the behavioural half of this pin.';
+  END IF;
+  -- (b) The SHAPE, in ORDER. The literal alone would pass a body that counts
+  -- the WRONG thing -- all compute_jobs rows, say, which would exclude every
+  -- healthy strategy carrying three historical jobs. The ceiling is only
+  -- meaningful if it counts the attempt signal itself: the marker rows, the one
+  -- thing that strictly increments once per reap-readmit cycle. '[^;]*' bounds
+  -- the match to the single statement the batch CTE and its INSERT form.
+  IF v_stripped !~* 'count\(\*\)[^;]*orphaned_running_reaped[^;]*<[[:space:]]*\m3\M' THEN
+    RAISE EXCEPTION 'TEST FAILED (1/JOB-04/R3): the deployed body does not compare a COUNT OF TERMINALIZER-MARKED ROWS against the ceiling. A bound that counts something else is not this bound: counting all compute_jobs rows would exclude healthy strategies that merely have history, and comparing a constant to nothing is a bound that cannot bind. The marker count is the attempt counter precisely because 144 terminalizes IN PLACE and this sweep INSERTs anew, so it rises by exactly one per cycle.';
   END IF;
   IF v_stripped NOT ILIKE '%IS TRUE%' THEN
     RAISE EXCEPTION 'TEST FAILED (1/JOB-04/B4): the deployed body carries the terminalizer-marker exemption WITHOUT its IS TRUE wrapper. last_error is NULLABLE and NULL LIKE ''x%%'' is NULL, not FALSE, so the unwrapped form evaluates to NULL for a failed_final row with no error text, that row drops out of the NOT EXISTS subquery, and a GENUINE permanent failure is HEALED -- an hourly retry loop with no attempt ceiling, which is the arm-C2 failure mode this exemption was written not to cause. Part 2 arm C2b is the behavioural half of this pin.';
@@ -427,7 +466,7 @@ BEGIN
     RAISE EXCEPTION 'TEST FAILED (1/JOB-04): the deployed body calls the enqueue RPC. Its race-loss arm RAISEs serialization_failure, and a RAISE inside a pg_cron body aborts the ENTIRE tick -- the healed count is lost, the NOTICE never runs, and every remaining candidate is skipped. A direct INSERT with ON CONFLICT DO NOTHING has no such arm.';
   END IF;
 
-  RAISE NOTICE 'Part 1 OK: reconcile_dropped_enqueue_sweep registered exactly once at 35 * * * *, with the five predicate conjuncts anchored, the four excluded computation_status values present, the terminalizer-marker exemption present exactly once in executable code and carrying its IS TRUE wrapper, the marker keys pinned, LIMIT 25 / SKIP LOCKED / ON CONFLICT DO NOTHING present, 1 MATERIALIZED batch, 2 grace-anchor reads, and no IN-subquery LIMIT, rejected anchor column or enqueue RPC.';
+  RAISE NOTICE 'Part 1 OK: reconcile_dropped_enqueue_sweep registered exactly once at 35 * * * *, with the five predicate conjuncts anchored, the four excluded computation_status values present, the terminalizer audit marker present exactly twice in executable code (the B4 exemption carrying its IS TRUE wrapper + the R3 readmit ceiling), the ceiling word-bounded at 3 and comparing a COUNT of marked rows, 3 public.compute_jobs references, the marker keys pinned, LIMIT 25 / SKIP LOCKED / ON CONFLICT DO NOTHING present, 1 MATERIALIZED batch, 2 grace-anchor reads, and no IN-subquery LIMIT, rejected anchor column or enqueue RPC.';
 END
 $$;
 
@@ -443,6 +482,8 @@ $$;
 --   C2b only a failed_final job with a NULL last_error        -> MUST be untouched
 --   C3  only a done job                                      -> MUST be untouched
 --   C4  only a TERMINALIZER-MARKED failed_final job          -> MUST BE HEALED
+--   C5  THREE terminalizer-marked rows (AT the ceiling)      -> MUST be untouched
+--   C5b TWO   terminalizer-marked rows (one BELOW it)        -> MUST BE HEALED
 --   D1  analytics 'complete'                                 -> MUST be untouched
 --   D2  analytics 'complete_with_warnings'                   -> MUST be untouched
 --   D3  analytics 'failed'                                   -> MUST be untouched
@@ -469,6 +510,32 @@ $$;
 -- orphan, keep excluding a settled permanent failure. ⛔ Do NOT delete, invert
 -- or weaken C1, C2, C2b or C3 to make a wider predicate pass -- that is the
 -- fix-the-test antipattern, and C2's message names the cost in full.
+--
+-- ⭐ C5 AND C5b ARE THE OTHER DISCRIMINATING PAIR (R3, Phase 146.2, migration
+-- 20260819150000), and they exist for exactly the reason C2/C4 do — neither is
+-- evidence alone:
+--   * C5 ALONE would also pass under a body that readmits NOTHING at all,
+--     including the pre-B4 body and a body whose exemption was deleted. So C5
+--     alone cannot tell a CEILING from a closed door.
+--   * C5b ALONE would also pass under the PRE-CEILING body, which readmits
+--     every marked orphan regardless of count. So C5b alone cannot tell a
+--     bounded readmit from an unbounded one.
+-- Together they pin a bound that is PRESENT and NOT OVER-TIGHT: readmission
+-- stops at 3 marker rows and still fires at 2.
+--
+-- WHY THE COUNT IS THE ATTEMPT COUNTER, restated here because the seed shape
+-- only makes sense with it: 144's terminalizer UPDATEs the running row IN
+-- PLACE (20260817120000:618-622, "rows survive as failed_final") and this sweep
+-- INSERTs a NEW row, so one reap-readmit cycle leaves exactly one more marked
+-- row behind. compute_jobs.attempts is NOT usable — the sweep's INSERT names
+-- only (strategy_id, kind, metadata), so every per-job retry field returns to
+-- its default on each readmission.
+--
+-- ⚠️ THESE SEEDS ARE NOT AN INDEPENDENT CLOCK. They assert what the DEPLOYED
+-- body does at 2 and at 3 marked rows. They do NOT prove a real strategy takes
+-- ~4-5 h to accumulate one; that interval is the terminalizer's 4 h claim
+-- window plus this sweep's hourly cadence, and it is argued in the migration
+-- header rather than measured here.
 --
 -- C2b is the THREE-VALUED-LOGIC arm. last_error is NULLABLE, and
 -- `NULL LIKE 'x%'` is NULL, not FALSE. A marker exemption written WITHOUT an
@@ -501,6 +568,8 @@ DECLARE
   v_c2b      uuid;   -- skip: failed_final job with a NULL last_error
   v_c3       uuid;   -- skip: done job
   v_c4       uuid;   -- HEAL: terminalizer-marked failed_final job (B4)
+  v_c5       uuid;   -- skip: THREE marked rows -- AT the readmit ceiling (R3)
+  v_c5b      uuid;   -- HEAL: TWO marked rows -- one BELOW the ceiling (R3)
   v_d1       uuid;   -- skip: analytics complete
   v_d2       uuid;   -- skip: analytics complete_with_warnings
   v_d3       uuid;   -- skip: analytics failed
@@ -549,6 +618,8 @@ BEGIN
   INSERT INTO public.strategies (user_id, name) VALUES (v_user, 'job04-arm-c2b') RETURNING id INTO v_c2b;
   INSERT INTO public.strategies (user_id, name) VALUES (v_user, 'job04-arm-c3') RETURNING id INTO v_c3;
   INSERT INTO public.strategies (user_id, name) VALUES (v_user, 'job04-arm-c4') RETURNING id INTO v_c4;
+  INSERT INTO public.strategies (user_id, name) VALUES (v_user, 'job04-arm-c5') RETURNING id INTO v_c5;
+  INSERT INTO public.strategies (user_id, name) VALUES (v_user, 'job04-arm-c5b') RETURNING id INTO v_c5b;
   INSERT INTO public.strategies (user_id, name) VALUES (v_user, 'job04-arm-d1') RETURNING id INTO v_d1;
   INSERT INTO public.strategies (user_id, name) VALUES (v_user, 'job04-arm-d2') RETURNING id INTO v_d2;
   INSERT INTO public.strategies (user_id, name) VALUES (v_user, 'job04-arm-d3') RETURNING id INTO v_d3;
@@ -557,7 +628,7 @@ BEGIN
   INSERT INTO public.strategies (user_id, name, status)
     VALUES (v_user, 'job04-arm-f', 'archived') RETURNING id INTO v_f;
 
-  v_seeded := ARRAY[v_a, v_a2, v_b, v_c1, v_c2, v_c2b, v_c3, v_c4, v_d1, v_d2, v_d3, v_d4, v_e, v_f];
+  v_seeded := ARRAY[v_a, v_a2, v_b, v_c1, v_c2, v_c2b, v_c3, v_c4, v_c5, v_c5b, v_d1, v_d2, v_d3, v_d4, v_e, v_f];
 
   -- Dailies for every arm. Arm B is stamped FRESH (inside the grace window);
   -- every other arm is stamped a century back so it is past grace by
@@ -574,6 +645,8 @@ BEGIN
     (v_c2b, DATE '2026-01-02', 0.001, v_old),
     (v_c3, DATE '2026-01-02', 0.001, v_old),
     (v_c4, DATE '2026-01-02', 0.001, v_old),
+    (v_c5, DATE '2026-01-02', 0.001, v_old),
+    (v_c5b, DATE '2026-01-02', 0.001, v_old),
     (v_d1, DATE '2026-01-02', 0.001, v_old),
     (v_d2, DATE '2026-01-02', 0.001, v_old),
     (v_d3, DATE '2026-01-02', 0.001, v_old),
@@ -645,6 +718,32 @@ BEGIN
   VALUES
     ('compute_analytics_from_csv', v_c4, 'failed_final', 'normal', 3, now(),
      'orphaned_running_reaped: no worker completed this job within the 4h claim window');
+
+  -- Arms C5 / C5b (R3, migration 20260819150000): the SAME shape as C4, seeded
+  -- at THREE and at TWO marked rows -- i.e. AT the readmit ceiling and one
+  -- BELOW it. Same fixed audit literal as C4, from the terminalizer's arm A
+  -- (20260817120000:622); a variant literal here would test nothing, since the
+  -- ceiling counts rows matching that exact prefix.
+  --
+  -- ⚠️ EVERY ONE OF THESE ROWS IS MARKED, deliberately. If any seed carried a
+  -- non-marker terminal row the arm would be excluded by the B4 exemption
+  -- instead of by the ceiling, and it would pass for the wrong reason -- a
+  -- false green under a body with NO ceiling at all. The arm must reach the
+  -- ceiling conjunct to be evidence about it.
+  --
+  -- ⚠️ attempts is written as 3 on every one of these rows exactly as C4 writes
+  -- it, and that column is NOT what either arm measures. The counter is the
+  -- ROW COUNT. Seeding attempts=3 here is deliberate: an arm that passed
+  -- because a per-job attempts field happened to read 3 would prove nothing
+  -- about the cross-row cycle count, and this shape makes that confusion
+  -- impossible to hide -- C5b carries attempts=3 too and MUST still be healed.
+  INSERT INTO public.compute_jobs
+    (kind, strategy_id, status, priority, attempts, next_attempt_at, last_error)
+  SELECT 'compute_analytics_from_csv', t.sid, 'failed_final', 'normal', 3, now(),
+         'orphaned_running_reaped: no worker completed this job within the 4h claim window'
+    FROM (VALUES (v_c5, 3), (v_c5b, 2)) AS t(sid, n)
+   CROSS JOIN generate_series(1, 3) g
+   WHERE g <= t.n;
 
   -- Arms D1-D4: the four excluded computation_status values.
   INSERT INTO public.strategy_analytics (strategy_id, computation_status)
@@ -748,6 +847,29 @@ BEGIN
     RAISE EXCEPTION 'TEST FAILED (2/arm C4/JOB-04/SC#3/B4): a strategy whose only compute_jobs row is a TERMINALIZER-PRODUCED orphan -- failed_final carrying the fixed orphaned_running_reaped audit literal Phase 144 cron body stamps -- got % sweep-marked jobs, expected exactly 1. Zero means migration 20260819130500 exemption is missing from the deployed body, or was written without its IS TRUE wrapper, and the two mechanisms do not compose: 144 terminalizes a chain-mid orphan for the AUDIT TRAIL, that row then trips this sweep ANY-status conjunct, and the strategy is recovered by NOBODY -- not the worker (the job is terminal), not the sweep (this conjunct), and not the user (no surface at all once the wizard 15-minute amber backstop has passed). A lost-worker row is not a handler verdict. More than one means the bounded batch is inserting duplicates.', v_cnt;
   END IF;
 
+  -- ----- arm C5: THE READMIT CEILING (R3) -------------------------------
+  -- ⚠️ Read C5b directly below before touching this. C5 alone would pass under
+  -- a body that readmits nothing at all; only the pair is evidence.
+  SELECT count(*) INTO v_cnt
+    FROM public.compute_jobs
+   WHERE strategy_id = v_c5 AND metadata->>'source' = 'reconcile-sweep';
+  IF v_cnt <> 0 THEN
+    RAISE EXCEPTION 'TEST FAILED (2/arm C5/JOB-04/R3/SC#3): a strategy already carrying THREE terminalizer-produced marker rows -- i.e. one that has already been reaped and readmitted to exhaustion -- was readmitted AGAIN (% sweep-marked jobs), expected 0. The readmit attempt ceiling is missing from the deployed body. B4 opened this readmission path and named "an hourly retry loop with no attempt ceiling" three times as the mode it must not cause, but bounded only the NULL-last_error way in; without the ceiling the cycle is: sweep readmits, a worker claims it and dies, 144 reaps the row at 4h and stamps the marker, the sweep readmits again -- forever, at one worker slot every ~5 hours, for a strategy whose input reliably kills its worker. Nothing else in the system counts those cycles: compute_jobs.attempts is per-JOB and returns to its default on every sweep INSERT. Restore the ceiling; do NOT relax this arm.', v_cnt;
+  END IF;
+
+  -- ----- arm C5b: THE POSITIVE CONTROL FOR C5 (R3) ----------------------
+  -- ⚠️ WITHOUT THIS ARM, C5 COULD PASS VACUOUSLY. A ceiling of 1 -- or a body
+  -- whose B4 exemption was deleted outright, or the whole pre-B4 body -- also
+  -- produces zero readmissions for C5. This arm is what forces the bound to be
+  -- a CEILING rather than a closed door: at two marker rows, one below the
+  -- ratified 3, readmission must still fire.
+  SELECT count(*) INTO v_cnt
+    FROM public.compute_jobs
+   WHERE strategy_id = v_c5b AND metadata->>'source' = 'reconcile-sweep';
+  IF v_cnt <> 1 THEN
+    RAISE EXCEPTION 'TEST FAILED (2/arm C5b/JOB-04/R3/SC#3): a strategy carrying TWO terminalizer-produced marker rows -- one BELOW the ratified ceiling of 3 -- got % sweep-marked jobs, expected exactly 1. Zero means the ceiling is OVER-TIGHT (tightened below 3, or the B4 exemption was lost so no marked orphan is readmitted at all): a strategy that lost its worker twice to a transient outage is then stranded with dailies, no analytics and nobody to recover it, which is the very hole B4 exists to close -- and it would be stranded SILENTLY, because arm C5 stays green in that state. More than one means the bounded batch is inserting duplicates. C5 and C5b are a MATCHED PAIR; do not relax either alone.', v_cnt;
+  END IF;
+
   -- ----- arm D1: THE MASS-RE-ENQUEUE TRIPWIRE (D-03) -------------------
   SELECT count(*) INTO v_cnt
     FROM public.compute_jobs
@@ -797,20 +919,20 @@ BEGIN
   -- ----- whole-block invariant -----------------------------------------
   -- Identity-scoped, never a global count. This catches an arm being healed that
   -- no individual assertion above happened to name -- e.g. a future arm added
-  -- without its own check. Exactly THREE of this block's fourteen seeds are
-  -- healable (A, A2 and -- since B4 -- C4). ⚠️ This count moved from 2/12 to
-  -- 3/14 in the SAME commit as migration 20260819130500; a whole-block
-  -- invariant left at the old number would RED for the right reason with the
-  -- wrong message, and one left unscoped would stop catching the arm nobody
-  -- named.
+  -- without its own check. Exactly FOUR of this block's sixteen seeds are
+  -- healable (A, A2, C4 and -- since R3 -- C5b). ⚠️ This count moved from 2/12
+  -- to 3/14 in the SAME commit as migration 20260819130500, and from 3/14 to
+  -- 4/16 in the SAME commit as 20260819150000; a whole-block invariant left at
+  -- an old number would RED for the right reason with the wrong message, and
+  -- one left unscoped would stop catching the arm nobody named.
   SELECT count(*) INTO v_cnt
     FROM public.compute_jobs
    WHERE strategy_id = ANY (v_seeded) AND metadata->>'source' = 'reconcile-sweep';
-  IF v_cnt <> 3 THEN
-    RAISE EXCEPTION 'TEST FAILED (2/whole-block/JOB-04): one tick produced % sweep-marked jobs across MY fourteen seeded strategies, expected exactly 3 (arms A, A2 and C4). Every other arm is a documented false-positive guard, so any other number means a guard fell or a heal was lost -- and the per-arm assertions above should name which.', v_cnt;
+  IF v_cnt <> 4 THEN
+    RAISE EXCEPTION 'TEST FAILED (2/whole-block/JOB-04): one tick produced % sweep-marked jobs across MY sixteen seeded strategies, expected exactly 4 (arms A, A2, C4 and C5b). Every other arm is a documented false-positive guard, so any other number means a guard fell or a heal was lost -- and the per-arm assertions above should name which.', v_cnt;
   END IF;
 
-  RAISE NOTICE 'Part 2 OK: the THREE healable arms (A no-analytics, A2 pending-analytics, C4 terminalizer-marked orphan) each got one pending compute_analytics_from_csv job carrying the reconcile-sweep marker and detected_at; the in-grace (B), running-other-kind (C1), genuine-failed_final (C2), NULL-last_error-failed_final (C2b), done (C3), terminal-analytics (D1 complete / D2 complete_with_warnings / D3 failed), computing (D4), composite (E) and archived (F) arms were all left untouched.';
+  RAISE NOTICE 'Part 2 OK: the FOUR healable arms (A no-analytics, A2 pending-analytics, C4 terminalizer-marked orphan, C5b two marked rows -- one below the readmit ceiling) each got one pending compute_analytics_from_csv job carrying the reconcile-sweep marker and detected_at; the in-grace (B), running-other-kind (C1), genuine-failed_final (C2), NULL-last_error-failed_final (C2b), done (C3), at-the-ceiling (C5), terminal-analytics (D1 complete / D2 complete_with_warnings / D3 failed), computing (D4), composite (E) and archived (F) arms were all left untouched.';
 
   -- Teardown, belt-and-suspenders; the ROLLBACK also discards everything.
   DELETE FROM auth.users WHERE id = v_user;

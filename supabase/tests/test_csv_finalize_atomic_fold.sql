@@ -26,7 +26,12 @@
 --            the shared TEST project this part is designed-RED until Plan 06
 --            applies 20260819120000 there, which is this file's free-standing
 --            RED proof): the fold exists as EXACTLY ONE 6-arg overload,
---            SECURITY DEFINER, authenticated holds EXECUTE, anon does not.
+--            SECURITY DEFINER, authenticated holds EXECUTE, anon does not,
+--            service_role does not (1c), and the comment-stripped body carries
+--            NO handler clause (1d — v1.19 review-of-146.1 finding W3). 1c and
+--            1d are STANDING versions of assertions that previously existed
+--            only inside migration self-verify blocks, i.e. only at the one
+--            apply that never runs again.
 --   Part 2 — THE ATOMICITY ORACLE (SC#2): a 10-element payload whose 6th
 --            element carries a malformed date (bypassing the route validator
 --            by calling the RPC directly) raises during the dailies INSERT —
@@ -45,6 +50,13 @@
 --            whitelist's refusal arm shipped ungated, so nothing would have
 --            noticed a direct-RPC caller finalizing straight onto the public
 --            surface without entering the admin review queue.
+--   Part 3e — TERMINAL STATUS, THE NULL ARM (v1.19 review-of-146.1 finding
+--            R5): a p_terminal_status=NULL call raises 22023 naming
+--            p_terminal_status, and commits nothing. 3d cannot cover this —
+--            `NOT IN (...)` is NULL for a NULL argument and plpgsql takes the
+--            ELSE branch, which is the shape GUARD 1 shipped in until
+--            migration 20260819151000. Pre-fix, this call answers 23502 from
+--            strategies.status.
 --   Part 4 — TRADES-EMPTY (RESEARCH Pitfall 2): an EMPTY p_rows array with
 --            fmt='trades' SUCCEEDS with zero dailies — the parents'
 --            empty-array 22023 must NOT have been copied verbatim, or every
@@ -99,12 +111,15 @@
 -- ==========================================================================
 DO $$
 DECLARE
-  v_cnt    INT;
-  v_secdef BOOLEAN;
-  v_nargs  INT;
+  v_cnt       INT;
+  v_secdef    BOOLEAN;
+  v_nargs     INT;
+  v_fn_src    TEXT;
+  v_code      TEXT;
+  v_proconfig TEXT[];
 BEGIN
-  SELECT count(*), bool_and(p.prosecdef), min(p.pronargs)
-    INTO v_cnt, v_secdef, v_nargs
+  SELECT count(*), bool_and(p.prosecdef), min(p.pronargs), min(p.proconfig)
+    INTO v_cnt, v_secdef, v_nargs, v_proconfig
     FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
    WHERE n.nspname = 'public' AND p.proname = 'finalize_csv_strategy_with_returns';
 
@@ -121,6 +136,55 @@ BEGIN
     RAISE EXCEPTION 'TEST FAILED (Part 1): finalize_csv_strategy_with_returns has % args, expected 6 - the route caller passes 6 named arguments and would 42883', v_nargs;
   END IF;
 
+  -- ---- 1b — THE STANDING search_path PIN (146.2 review-of-05 finding 2) ---
+  -- ⭐ WHY THIS LINE EXISTS. This gate already pinned prosecdef, the arity,
+  -- all three ACLs and the no-handler prosrc property — but never proconfig.
+  -- So the search_path pin was asserted ONLY at apply time, by
+  -- 20260819151000's STEP 4(b2), in a file that will never run again. It is
+  -- the MORE dangerous of the two properties the pair guards: prosecdef going
+  -- FALSE breaks every finalize loudly and instantly (the writes start failing
+  -- RLS), whereas the search_path going missing breaks NOTHING visibly — the
+  -- function keeps working for every honest caller while an RLS-exempt
+  -- definer-rights body silently resolves strategies, strategy_verifications
+  -- and csv_daily_returns through the CALLER's search_path. Any authenticated
+  -- caller able to create a schema could then point the finalize writes at
+  -- attacker-owned shadow tables, outside the tenant-scoped originals
+  -- entirely. A CREATE OR REPLACE that drops the SET clause applies green and,
+  -- before this line, no recurring gate would have reddened.
+  --
+  -- ⛔ REGEX, NOT EQUALITY — A DELIBERATE DEPARTURE FROM THE NEAREST IN-REPO
+  -- PRECEDENT, and the reason is MEASURED, not reasoned. The precedent,
+  -- test_cutover_strategy_metrics_keys_atomic.sql Test 1, asserts
+  -- `'search_path=public, pg_temp' = ANY(proconfig)` — an exact string
+  -- compare. Measured on a throwaway PG16 (16.14), an equality test is SAFE
+  -- against re-rendering: `= public,pg_catalog` and `= "public", pg_catalog`
+  -- both normalise to the identical stored entry `search_path=public,
+  -- pg_catalog`, so spacing and quoting do NOT break it (the broader
+  -- "pg_get_functiondef re-renders it" worry does not apply — proconfig is
+  -- not read through pg_get_functiondef at all). What DOES break it is the
+  -- VALUE's content, and both breaking cases are healthy databases:
+  --     SET search_path = pg_catalog, public          -> equality f, regex t
+  --     SET search_path = public, pg_catalog, pg_temp -> equality f, regex t
+  -- A reorder and a hardening addition each leave the property this line
+  -- exists to protect fully intact — the body still resolves through a FIXED
+  -- list rather than the caller's — while an equality test reds. A gate that
+  -- fails on a healthy database is worse than none, because it teaches the
+  -- next author to delete it. This check therefore reuses the regex form the
+  -- migration's own STEP 4(b2) settled on: the entry must BE a search_path
+  -- assignment (anchored ^) and must name both schemas WORD-BOUNDED, which is
+  -- what keeps it from going soft — measured RED on `search_path=public`
+  -- (pg_catalog dropped), on `search_path=public_evil, pg_catalog` (a
+  -- look-alike schema: `\M` refuses to end a word inside `public_evil`), and
+  -- on proconfig NULL entirely.
+  IF NOT EXISTS (
+    SELECT 1 FROM unnest(coalesce(v_proconfig, ARRAY[]::text[])) cfg
+     WHERE cfg ~ '^search_path='
+       AND cfg ~ '\mpublic\M'
+       AND cfg ~ '\mpg_catalog\M'
+  ) THEN
+    RAISE EXCEPTION 'TEST FAILED (Part 1b): finalize_csv_strategy_with_returns has lost its "SET search_path = public, pg_catalog" pin (proconfig=%) - a SECURITY DEFINER body without one resolves strategies/strategy_verifications/csv_daily_returns through the CALLER''s search_path, so any authenticated caller who can create a schema redirects every finalize write to attacker-owned shadow tables while the function still looks healthy. Re-issue the SET clause on the function; never relax this assertion', v_proconfig;
+  END IF;
+
   IF NOT has_function_privilege('authenticated',
         'public.finalize_csv_strategy_with_returns(uuid,uuid,text,text,jsonb,text)', 'EXECUTE') THEN
     RAISE EXCEPTION 'TEST FAILED (Part 1): authenticated holds no EXECUTE on finalize_csv_strategy_with_returns - every legitimate csv-finalize answers 42501 (the 20260522111839:200-208 outage class); re-GRANT to authenticated, never to service_role';
@@ -130,7 +194,79 @@ BEGIN
     RAISE EXCEPTION 'TEST FAILED (Part 1): anon holds EXECUTE on finalize_csv_strategy_with_returns - an unauthenticated browser can POST /rest/v1/rpc/finalize_csv_strategy_with_returns directly; a DROP+CREATE re-granted it via pg_default_acl - re-issue the REVOKE';
   END IF;
 
-  RAISE NOTICE 'Part 1 OK: finalize_csv_strategy_with_returns is live (one 6-arg SECDEF overload; authenticated EXECUTE; anon shut out).';
+  -- ---- 1c — the service_role EXECUTE pin (v1.19 review, carried 146.1
+  --      finding "the REVOKE is asserted only at apply time") --------------
+  -- 20260819130000 REVOKEs service_role and asserts the revocation in its own
+  -- STEP 4 (:531-534), and its COMMENT claims "Grants: authenticated ONLY".
+  -- But a migration's self-verify runs ONCE, at the apply that nobody re-runs.
+  -- Everything that could re-grant service_role afterwards — a later
+  -- DROP+CREATE picking up a pg_default_acl, a hand-run GRANT during an
+  -- incident, a restored dump — lands on a database where NOTHING checks
+  -- again. The anon half of that pair has always been pinned here; the
+  -- service_role half was not. This line is that half.
+  --
+  -- ⚠️ Honest severity, so nobody re-files this as a live hole: a service-role
+  -- call NULLs auth.uid() and is already refused with 42501 by the fold's own
+  -- identity guard before it can write anything. What is at stake is the
+  -- documented grant shape staying TRUE — a COMMENT that claims
+  -- authenticated-only while service_role holds EXECUTE is how the next reader
+  -- reasons from a wrong premise about who can reach this body.
+  IF has_function_privilege('service_role',
+        'public.finalize_csv_strategy_with_returns(uuid,uuid,text,text,jsonb,text)', 'EXECUTE') THEN
+    RAISE EXCEPTION 'TEST FAILED (Part 1c): service_role holds EXECUTE on finalize_csv_strategy_with_returns - the function COMMENT claims "Grants: authenticated ONLY" and 20260819130000 REVOKEd it; something re-granted it (a DROP+CREATE picking up pg_default_acl, a hand-run GRANT, a restored dump) and the documented grant shape is now false - re-issue the REVOKE rather than softening the COMMENT';
+  END IF;
+
+  -- ---- 1d — THE STANDING NO-HANDLER PIN (v1.19 review-of-146.1 finding W3)
+  -- ⭐ WHY THIS LINE EXISTS. "The body carries NO handler clause" is called
+  -- THE MECHANISM of the fold (20260819120000:80-96): an unhandled raise
+  -- aborts the function and rolls all three writes back, which is the whole of
+  -- SC#2. Until now that invariant was asserted ONLY inside the migrations'
+  -- self-verify blocks — i.e. only at apply time, in files that will never run
+  -- again. A future CREATE OR REPLACE that "hardens" this body with
+  -- `EXCEPTION WHEN OTHERS THEN ... RAISE;` would apply completely green and
+  -- no standing gate would notice. This assertion is what makes such an edit
+  -- redden CI on every run.
+  --
+  -- ⚠️ IT ALSO CATCHES WHAT COUNTS CANNOT. A handler that catches, writes, and
+  -- RE-RAISES is invisible to every row-count oracle in this suite and in
+  -- test_csv_finalize_double_submit.sql: a plpgsql EXCEPTION block is an
+  -- implicit subtransaction, so a re-raise rolls the handler's own writes back
+  -- and the counts read clean either way. Structure is the only observable
+  -- that discriminates that variant. test_csv_finalize_double_submit.sql
+  -- Part 3 points here for exactly that reason.
+  --
+  -- ⛔ THE COMMENT-STRIP IS LOAD-BEARING — DO NOT "SIMPLIFY" IT AWAY.
+  -- pg_get_functiondef reconstructs the body from prosrc, which stores the
+  -- source VERBATIM INCLUDING COMMENTS. This body's comments discuss handler
+  -- clauses at length (they explain why there is none), and every future
+  -- author warned off adding one will write the words down again. A raw match
+  -- would therefore red on precisely the healthy body it exists to protect —
+  -- and a self-verify that fails on a healthy database is worse than none,
+  -- because it teaches the next author to delete the check. The mirror-image
+  -- failure is just as real: strip nothing and a DELETED guard whose
+  -- explanatory comment survives still passes. ⚠️ This trap has been hit THREE
+  -- times independently in this repo (migration 20260814120000's post-verify,
+  -- plan 156-08's assertion 5h, and test_wizard_session_idempotency.sql:164-178
+  -- which documents all three). MEASURED for this file on a throwaway PG16:
+  -- with the strip, a body carrying a comment that mentions the handler form
+  -- stays green; without it, the same body reds.
+  --
+  -- Word-bounded and case-insensitive: `\mEXCEPTION\M[[:space:]]+\mWHEN\M`
+  -- matches the handler clause in any casing but is not satisfied by the many
+  -- `RAISE EXCEPTION '...'` statements in the body (the next token there is a
+  -- quote, never WHEN).
+  SELECT pg_get_functiondef(
+           'public.finalize_csv_strategy_with_returns(uuid,uuid,text,text,jsonb,text)'::regprocedure)
+    INTO v_fn_src;
+  IF v_fn_src IS NULL THEN
+    RAISE EXCEPTION 'TEST FAILED (Part 1d): pg_get_functiondef returned NULL for finalize_csv_strategy_with_returns(uuid,uuid,text,text,jsonb,text) - the no-handler pin has nothing to read, so it would pass while asserting nothing';
+  END IF;
+  v_code := regexp_replace(v_fn_src, '--[^\n]*', '', 'g');
+  IF v_code ~* '\mEXCEPTION\M[[:space:]]+\mWHEN\M' THEN
+    RAISE EXCEPTION 'TEST FAILED (Part 1d): finalize_csv_strategy_with_returns contains a handler clause - a swallowed error commits a strategies row without its dailies, which is EXACTLY the orphan class SC#2 dissolves, and a catch-write-and-re-raise handler is invisible to every row-count oracle in this suite because the subtransaction rolls its writes back too. Remove the handler; never "harden" this body with one (the function COMMENT says so, and 20260819120000:80-96 explains why)';
+  END IF;
+
+  RAISE NOTICE 'Part 1 OK: finalize_csv_strategy_with_returns is live (one 6-arg SECDEF overload; search_path pinned to public + pg_catalog; authenticated EXECUTE; anon and service_role both shut out; no handler clause in the comment-stripped body).';
 END $$;
 
 -- ==========================================================================
@@ -346,6 +482,99 @@ BEGIN
 
   PERFORM set_config('request.jwt.claims', NULL, true);
   RAISE NOTICE 'Part 3d OK: p_terminal_status=''published'' raised 22023 (%) and committed nothing.', err_msg;
+END $$;
+
+ROLLBACK;
+
+-- ==========================================================================
+-- Part 3e — TERMINAL STATUS, THE NULL ARM (v1.19 review-of-146.1 finding R5;
+--           migration 20260819151000): p_terminal_status := NULL raises 22023
+--           from GUARD 1 and commits nothing
+-- ==========================================================================
+-- ⭐ WHY 3d IS NOT ENOUGH. Part 3d proves the whitelist refuses a WRONG value.
+-- It cannot prove the whitelist is reachable at all for a NULL one, because
+-- `p_terminal_status NOT IN ('pending_review','private')` evaluates to NULL
+-- for a NULL argument and plpgsql takes the ELSE branch on a NULL IF
+-- condition. That is not hypothetical: it is the shape the guard SHIPPED in,
+-- inside 20260819130000 — the very migration whose job was making the other
+-- guards NULL-explicit. Nothing below GUARD 1 refused the value either, so it
+-- reached the strategies INSERT and failed as a 23502 NOT NULL violation from
+-- strategies.status: an error naming a COLUMN instead of the offending input,
+-- with no arm in the route's classifier, while this function's own COMMENT
+-- ERRCODE map promised 22023 for an invalid terminal status. 20260819151000
+-- gives GUARD 1 the `IS NULL OR` arm that GUARD 4 (fmt) and GUARD 5 (name)
+-- already carried, and this Part is what keeps the promise checkable.
+--
+-- ⚠️ EXACT SQLSTATE, never LIKE '22%' and never "any error" — for the same
+-- reason Part 6 spells its assertions that way. The PRE-fix body DOES fail
+-- this call; it fails it with a table-constraint code. A class-pinned or
+-- any-error assertion would pass on precisely the defect being fenced. The
+-- distinguishing substring is checked alongside the code so a future 22023
+-- raised by some OTHER guard cannot stand in for this one.
+--
+-- ⚠️ REACHABILITY, stated so nobody re-files this as a live user-facing break:
+-- the route CANNOT send NULL here. src/app/api/strategies/csv-finalize/route.ts
+-- validates entry_context and passes string literals for the terminal status.
+-- This is the AUTHENTICATED DIRECT-RPC boundary class — the same class A1
+-- closes — and the fold's own auth.uid() guard confines it to the caller's own
+-- strategy. What R5 repairs is a documented interface (the ERRCODE map) that
+-- the deployed body did not honour.
+BEGIN;
+SET LOCAL lock_timeout = '5s';
+
+DO $$
+DECLARE
+  probe_user    UUID := gen_random_uuid();
+  probe_session UUID := gen_random_uuid();
+  payload       JSONB := '[{"date":"2026-05-01","daily_return":0.0111}]'::jsonb;
+  v_result      UUID;
+  raised        BOOLEAN := FALSE;
+  err_state     TEXT;
+  err_msg       TEXT;
+  n_strat       INT;
+  n_sv          INT;
+  n_dl          INT;
+BEGIN
+  INSERT INTO auth.users (id, instance_id, email, created_at, updated_at)
+  VALUES (probe_user, '00000000-0000-0000-0000-000000000000',
+          'test-fold-nullstatus-' || probe_user || '@quantalyze.test', now(), now());
+
+  PERFORM set_config('request.jwt.claims',
+    json_build_object('sub', probe_user::text, 'role', 'authenticated')::text, true);
+
+  BEGIN
+    v_result := public.finalize_csv_strategy_with_returns(
+      probe_user, probe_session, 'daily_returns', 'fold null-status probe', payload, NULL::text);
+  EXCEPTION WHEN OTHERS THEN
+    raised := TRUE;
+    GET STACKED DIAGNOSTICS
+      err_state = RETURNED_SQLSTATE,
+      err_msg   = MESSAGE_TEXT;
+  END;
+
+  IF NOT raised THEN
+    RAISE EXCEPTION 'TEST FAILED (Part 3e): a p_terminal_status=NULL call SUCCEEDED and returned % - GUARD 1 passed a NULL straight through and so did every guard below it, so a direct-RPC caller just wrote a strategies row with a NULL status (or whatever a later default supplied) without the CONTRIB-02 whitelist ever having an opinion', v_result;
+  END IF;
+  IF err_state <> '22023' THEN
+    RAISE EXCEPTION 'TEST FAILED (Part 3e): the NULL-terminal-status call failed with SQLSTATE % (%) - expected 22023 from GUARD 1, BEFORE any write. A 23502 here is the PRE-146.2 shape: the whitelist is no longer NULL-explicit (`p_terminal_status NOT IN (...)` is NULL for a NULL argument and plpgsql takes the ELSE branch), so the refusal is coming from the strategies.status NOT NULL constraint instead - an error that names a column rather than the input, and one this function''s COMMENT ERRCODE map says should be a 22023', err_state, err_msg;
+  END IF;
+  IF position('p_terminal_status' in err_msg) = 0 THEN
+    RAISE EXCEPTION 'TEST FAILED (Part 3e): the NULL-terminal-status call raised 22023 but its message (%) does not name p_terminal_status - some OTHER guard is answering for this input, so this Part would go on passing after GUARD 1''s NULL arm was deleted', err_msg;
+  END IF;
+
+  SELECT count(*) INTO n_strat FROM public.strategies
+   WHERE user_id = probe_user AND wizard_session_id = probe_session;
+  SELECT count(*) INTO n_sv FROM public.strategy_verifications
+   WHERE wizard_session_id = probe_session;
+  SELECT count(*) INTO n_dl FROM public.csv_daily_returns d
+    JOIN public.strategies s ON s.id = d.strategy_id
+   WHERE s.user_id = probe_user;
+  IF n_strat <> 0 OR n_sv <> 0 OR n_dl <> 0 THEN
+    RAISE EXCEPTION 'TEST FAILED (Part 3e): after the refused NULL-terminal-status call, counts are strategies=%, verifications=%, dailies=% - expected 0/0/0. GUARD 1 ran AFTER a write instead of as the FIRST statement, which is the placement D-08 requires', n_strat, n_sv, n_dl;
+  END IF;
+
+  PERFORM set_config('request.jwt.claims', NULL, true);
+  RAISE NOTICE 'Part 3e OK: p_terminal_status=NULL raised 22023 (%) and committed nothing.', err_msg;
 END $$;
 
 ROLLBACK;

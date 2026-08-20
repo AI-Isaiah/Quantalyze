@@ -209,6 +209,35 @@ async function unifiedVerifyStrategyHandler(
   body: Record<string, unknown>,
 ): Promise<NextResponse> {
   const exchange = (body.exchange as string) ?? "okx";
+
+  /**
+   * 146.2 / R2 (2026-08-19) — THE request-body credentials, enumerated ONCE.
+   *
+   * ⛔ A NEW BODY CREDENTIAL IS ADDED HERE AND NOWHERE ELSE. Both consumers
+   * below derive from this object: the outgoing `teaserContext` (what LEAVES)
+   * and `perRequestSecrets` (what gets SCRUBBED before crossing to Sentry).
+   * Typing a credential directly into either one is the defect this shape
+   * exists to prevent.
+   *
+   * ⚠️ WHY THE STRUCTURE, not just a third literal. 146.1 left
+   * `perRequestSecrets` naming `api_key`/`api_secret` while `teaserContext`
+   * forwarded a `passphrase` as well. On OKX / KuCoin / Coinbase that
+   * passphrase is a first-class exchange credential — key + secret + passphrase
+   * IS the account — and undici inlines the outgoing body into `err.message`
+   * (TRAP-1), so it crossed to a third party in the clear from all four capture
+   * sites below. Two hand-maintained lists over one set drift; one declaration
+   * with two derived readers cannot.
+   *
+   * ⚠️ THIS IS STILL AN ALLOWLIST, so PR-X5 below holds. The keys are literals
+   * written here, never keys taken from the caller's body — the spread cannot
+   * introduce a field an attacker named.
+   */
+  const bodyCredentials = {
+    api_key: body.api_key,
+    api_secret: body.api_secret,
+    passphrase: body.passphrase,
+  };
+
   // PR-X5 (2026-05-15) security fix — DO NOT spread the raw body into
   // context. This endpoint is unauthenticated public input. Spreading
   // would let an attacker pre-supply `strategy_id`, `wizard_session_id`,
@@ -222,12 +251,15 @@ async function unifiedVerifyStrategyHandler(
   const teaserContext: Record<string, unknown> = {
     email: body.email,
     exchange: body.exchange,
-    api_key: body.api_key,
-    api_secret: body.api_secret,
+    // The wire shape is UNCHANGED: a credential the caller omitted is dropped
+    // rather than sent as `undefined` (which `JSON.stringify` in
+    // `process-key-client` would drop anyway). The filter generalises the
+    // old `if (body.passphrase !== undefined)` conditional to every member,
+    // so the omission rule does not have to be re-typed per credential.
+    ...Object.fromEntries(
+      Object.entries(bodyCredentials).filter(([, v]) => v !== undefined),
+    ),
   };
-  if (body.passphrase !== undefined) {
-    teaserContext.passphrase = body.passphrase;
-  }
 
   /**
    * Phase 146.1 / B2 (2026-08-18) — THE FORWARD WAS REMOVED HERE, at BOTH sites.
@@ -270,22 +302,30 @@ async function unifiedVerifyStrategyHandler(
    * capture that forgets one still succeeds, still looks correct in review, and
    * ships the credential to a third party.
    *
-   * ⛔ THIS ARRAY MUST NOT SHRINK TO NOTHING AND MUST NOT BE DELETED. Phase
-   * 146.1 / B2 removed ONE member (`userAccessToken`) because the route stopped
-   * forwarding it, NOT because per-request scrubbing stopped mattering. Both
-   * remaining members are unknowable to any module-level env list:
-   *   · `api_key` / `api_secret` — the caller's RAW exchange credentials, which
-   *     this handler puts in the outgoing request BODY. undici inlines that
-   *     body into `err.message` (TRAP-1) and nothing in
+   * ⛔ THIS ARRAY MUST NOT SHRINK AND MUST NOT BE DELETED, AND IT IS NO LONGER
+   * WRITTEN OUT BY HAND. Phase 146.1 / B2 removed ONE member
+   * (`userAccessToken`) because the route stopped forwarding it, NOT because
+   * per-request scrubbing stopped mattering — and in doing so it left behind an
+   * enumeration that READ complete ("both remaining members") while naming two
+   * of the three credentials actually in flight. 146.2 / R2 replaced the
+   * hand-written array with `Object.values(bodyCredentials)`, the SAME
+   * declaration the outgoing body is built from, so the two can no longer
+   * disagree about what the caller sent.
+   *
+   * All THREE members are unknowable to any module-level env list:
+   *   · `api_key` / `api_secret` / `passphrase` — the caller's RAW exchange
+   *     credentials, which this handler puts in the outgoing request BODY.
+   *     undici inlines that body into `err.message` (TRAP-1) and nothing in
    *     `SEAM_SECRET_ENV_NAMES` can reach a value that arrived in the request.
+   *     On OKX / KuCoin / Coinbase the `passphrase` is not an extra: it is the
+   *     third of three credentials that together ARE the account.
    *
    * ⚠️ `undefined` members are harmless — `scrubSeamString` skips non-strings —
-   * so a body field the caller omitted needs no separate array.
+   * so a body field the caller omitted needs no separate array. That is why the
+   * scrub array takes every member UNCONDITIONALLY while the outgoing body
+   * still omits the absent ones.
    */
-  const perRequestSecrets: readonly unknown[] = [
-    body.api_key,
-    body.api_secret,
-  ];
+  const perRequestSecrets: readonly unknown[] = Object.values(bodyCredentials);
 
   const result = await postProcessKey({
     flow_type: "teaser",

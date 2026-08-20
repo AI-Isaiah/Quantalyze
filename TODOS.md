@@ -815,6 +815,22 @@ governs by CONTENT TYPE, and their content is prose/forms — rung 1.
   changes in the undeployed delta).
 
 ### Money-path correctness (latent / flag-gated / edge cases)
+- **`getPercentiles` folds FAILED-computation KPIs into published rankings** (found 2026-08-19
+  during Phase 146.2 planning; NOT in 146.2 scope — that phase fixes the csv echo FILL guard,
+  not this). `PERCENTILE_ANALYTICS_COLUMNS` (`src/lib/queries.ts:126-127`) is
+  `"cagr, sharpe, sortino, calmar, max_drawdown, volatility, cumulative_return"` — it does not
+  SELECT `computation_status` at all, so a published strategy whose analytics row is
+  `computation_status='failed'` contributes its **stale/partial** KPIs to the percentile
+  distribution **for every other strategy's rank**. `StrategyTable.tsx:1091` likewise renders
+  `formatNumber(s.analytics.sharpe)` ungated (only the status *chip* is gated).
+  ⚠️ **The gating is per-surface, not systemic**: the detail page and factsheet PDFs DO gate on
+  `computation_status`, and nearly every other projection in `queries.ts` selects it — the
+  percentile path is the outlier. Measured on PROD 2026-08-19: 7 csv strategies carry a non-null
+  `sharpe`+`cagr` on a `failed` row.
+  **Fix:** add `computation_status` to `PERCENTILE_ANALYTICS_COLUMNS` and exclude non-`complete`
+  rows from the percentile population; decide separately whether `StrategyTable` should render a
+  failed row's metrics at all. **Test must pin the ECONOMICS** — a failed row must not move
+  another strategy's percentile rank.
 - ~~**Unified-backbone CSV-finalize breaks if flag on**~~ — **CLOSED 2026-08-17 (Phase 145
   SC#1, verdict CANNOT REPRODUCE)**. Of this bullet's own two remedies, **"forward JWT"
   shipped in Phase 19.1** (2026-05-27; verified at HEAD: `route.ts:1324` forwards
@@ -852,6 +868,34 @@ governs by CONTENT TYPE, and their content is prose/forms — rung 1.
   jobs). Window already widened 2h→4h.
 
 ### Reliability / observability
+- **No cron migration in the repo has EVER asserted `cron.job.username`/`database`** (found
+  2026-08-19 by the RLS audit of Phase 146.2's R3 migration; INHERITED gap, not introduced —
+  logged as a CLASS fix, deliberately not point-fixed into `20260819150000`).
+  `cron.job.username` defaults to `current_user` **at `cron.schedule` time**, so re-registration
+  is precisely the operation that re-derives a job's privilege. Every cron self-verify in this
+  repo reads `command` + `schedule` and never `username`/`database`/`active`. Two undetectable
+  drift paths, both requiring a non-`postgres` applier:
+  (a) a different superuser (e.g. `supabase_admin`) → the body silently runs with superuser
+  rights thereafter, and the `count(*) = 1` gate still passes;
+  (b) a non-BYPASSRLS applier → pg_cron's stock `cron.job` RLS (`USING (username = current_user)`)
+  HIDES the postgres-owned row → `IF EXISTS` is false → no unschedule → the unique index on
+  `(jobname, username)` permits a **SECOND** row → the sweep fires twice hourly (per-tick radius
+  25 → 50). ⚠️ **The `v_count <> 1` guard is RLS-BLIND to this and would read 1 and pass green.**
+  **Measured 2026-08-19:** owner is `postgres` on both PROD and TEST, so neither path is currently
+  reachable via the normal merge pipeline — this is hardening, not a live break.
+  **Fix:** add `username = 'postgres'` + `database = current_database()` equality assertions to
+  the STEP-2 self-verify of every cron-registering migration going forward, with a
+  consequence-naming message. Evidence of the ratified owner: `20260816140000:375`.
+- **The readmit ceiling is SILENT at exactly the moment it gives up** (found 2026-08-19 by the
+  RLS audit of Phase 146.2 R3; the fix's own new blind spot). At the ceiling the sweep inserts
+  nothing → no `compute_jobs` row → no `{"source":"reconcile-sweep"}` metadata → the worker-side
+  capture at `analytics-service/main_worker.py:754` never fires. **The alert is keyed on the
+  HEAL**, so the transition from "recovering hourly" to "abandoned for ~90 days" emits NO signal,
+  and the strategy's owner has no user surface for it. Not a leak and not a data-integrity
+  defect — filed against Rule 12 (fail loud). **Founder decision needed:** body-side audit row on
+  exhaustion vs. an external exhaustion query/alert. ⚠️ Interacts with the 90-day retention wall,
+  which DELETES the marker rows that ARE the counter — so the bound is "3 per retention window",
+  and a strategy can silently resume cycling after ~90d with no notification at either edge.
 - **csv-finalize is non-transactional** → orphan strategy rows on partial failure. Wrap in one
   txn or add Sentry alert + orphan-cleanup cron.
 - **`after()` enqueue silent-failure** → strategy has data but no compute job → stuck
@@ -2683,25 +2727,6 @@ that migration; each is a settled plan-time call with its own reason for living 
   so unscheduling reddens the `sql-tests` gate instead. Recorded as the WON'T-FIX half of JOB-08
   (`.planning/REQUIREMENTS.md`, JOB-08 resolution block).
 
-- [ ] **(RESEARCH §6 residual, v1.19+) A terminalized chain-mid orphan is excluded from Phase 143's
-  reconciliation sweep FOREVER — widen the zero-jobs conjunct to "no NON-TERMINAL row".** This is
-  the residual the terminalizer creates by design and it is named rather than hidden: Phase 144
-  makes an orphaned row SURVIVE as `failed_final` instead of vanishing, and Phase 143's sweep
-  requires `NOT EXISTS (… public.compute_jobs cj WHERE cj.strategy_id = s.id)` — **any** row,
-  terminal included (`20260816140000:729-732`). So the surviving row permanently excludes its
-  strategy from reconciliation. It bites a **chain-mid** orphan hardest (e.g. `derive_broker_dailies`
-  orphaned before it enqueues `compute_analytics_from_csv`, `job_worker.py:526`): Phase 142 will
-  terminalize the `strategy_analytics` row so the user is *told*, but nobody re-runs the work.
-  ⚠️ Note the interaction that makes this less visible than it looks — before Phase 144 the row was
-  DELETEd, so the strategy became sweep-eligible; the exclusion is NEW, and it is the price paid for
-  the audit trail. Candidate fix: widen that conjunct to "no NON-TERMINAL `compute_jobs` row". That
-  is a change to a **shipped** predicate and needs its own safety analysis — the header at
-  `20260816140000:72-82` argues the safety is carried by the terminal-`strategy_analytics` conjunct
-  rather than by the zero-jobs one, so the widening may be tractable — plus an explicit look at the
-  31-day retention interaction (`retention_compute_jobs_done` deletes `done` rows at 30 days, so a
-  strategy can re-enter sweep eligibility by retention alone and the two mechanisms must not race).
-  A separate phase, never a rider on the terminalizer.
-
 - [ ] **(D-09) Fixture hygiene: `test_compute_jobs_fencing.py` is the attributed producer of the
   `running` + `claimed_at IS NULL` orphan class — stamp `claimed_at` in its two direct UPDATEs.**
   `analytics-service/tests/test_compute_jobs_fencing.py:1138-1152` and `:1191-1205` drive a row to
@@ -2783,22 +2808,6 @@ whole list up as roster item C4 (with overlaps mapped: fold value guards + fmt-b
 empty-rows → A1, copy honesty → A3, 23505 second source → B3, rpc-test re-point → B5).
 Items stay open HERE until 146.1 ships; close them here when it does.
 
-- [ ] **Re-point `src/__tests__/csv-finalize-rpc.test.ts` at the fold** (deferred-items #5,
-  now verifiable: TEST carries `finalize_csv_strategy_with_returns`). Live-DB-only suite,
-  never in CI; still names the DROPped `finalize_csv_strategy` so every skipIf-live case
-  42883s. Also re-point the stale cover-citation in `strategy-verifications-rls.test.ts:17`.
-- [ ] **Pin the `finalize-resolve-read-fail` capture + the two undriven fail-closed arms**
-  (`route.ts:737` refetchErr, `:749` no-committed-row): two new cases in
-  csv-finalize-cross-submission-merge.test.ts, each observed RED under a step-tag neuter.
-- [ ] **Add a fold gate Part 3d: `p_terminal_status='published'` → 22023 before any write**
-  (the whitelist guard at migration line 225 is currently unpinned by any gate).
-- [ ] **Regenerate `database.types.ts` against TEST (post-fold) + delete the rpc
-  cast-through-unknown in route.ts** so the fold call re-enters the audit-coverage law
-  (deferred-items #3 residual; the current types diff is a hand-edit no DB state produces).
-- [ ] **Copy honesty on the fold-failure arm sub-classes** (`route.ts:627`): "rolled back
-  completely" is unobservable for transport-lost / non-uuid-2xx shapes — branch the copy on
-  SQLSTATE presence. Also consider mapping `error.code === '42501'` to a 401 re-auth
-  envelope instead of the generic 500 (narrow reachability; withAuth ran ms earlier).
 - [x] **Python tombstone envelope — MESSAGE fixed in Phase 146.1-07 (2026-08-18).**
   `flow_type=csv, step=finalize` still answers 422 `MISSING_STRATEGY_ID` (deliberately —
   see the gated option below), but the `human_message` no longer tells the caller to supply
@@ -2825,18 +2834,6 @@ Items stay open HERE until 146.1 ships; close them here when it does.
   to naming only a code.
   **Where:** `analytics-service/routers/process_key.py` (the tombstone branch beside the
   API-6 envelope); the deliberate non-minting is recorded in the comment there.
-- [ ] **service_role default-ACL EXECUTE on the fold** contradicts the migration header's
-  "authenticated ONLY" claim (inert today: auth.uid() guard 42501s it). Either add
-  `REVOKE ... FROM service_role` + STEP 3(b)/Part 1 assertions (re-apply the REVOKE to TEST
-  manually — the file itself must NOT re-run there), or amend the header/COMMENT to document
-  the default-ACL reality (the 20260814120000 post-verify (c) treatment).
-- [ ] **Fold value guards for direct-RPC callers**: `(elem->>'daily_return')::DOUBLE PRECISION`
-  accepts NaN/Infinity/1e300 and far-future dates that the route boundary rejects — add
-  22023 pre-INSERT raises mirroring the route checks (carried over from the dropped parent,
-  not a regression; poisons only the caller's own pending_review/private strategy).
-- [ ] **fmt-blind empty-rows allowance**: direct RPC with `p_fmt='daily_returns'` +
-  `p_rows='[]'` commits a zero-dailies strategy (own-tenant). Scope the empty allowance to
-  fmt='trades' or document the acceptance in the header delta list.
 - [ ] **23505 second source**: the ERRCODE map/COMMENT attribute 23505 solely to
   `strategies_user_wizard_session_source_uniq`, but `csv_daily_returns_strategy_date_key`
   can also raise it (direct-RPC duplicate dates); the resolve arm keys on SQLSTATE alone —
@@ -2868,18 +2865,6 @@ Items stay open HERE until 146.1 ships; close them here when it does.
   occurrences requires per-describe analysis, and a wrong removal would make a token-absence
   arm vacuous rather than merely untidy. Cosmetic; do it as its own pass with the suite run
   between each removal, or split the file.
-- [ ] ⚠️ **Migration-timestamp coordination (self-expiring 2026-08-19 12:00 UTC)**: the fold
-  is stamped `20260819120000` (future-dated at merge). Until that instant, any OTHER
-  migration must carry a timestamp ABOVE it or it trips the backdated-migration guard.
-  Phase 146 planning: if 146 ships a migration before Aug 19 noon UTC, stamp it
-  `2026081913…`+.
-- [ ] **Persist the burned csv-submit content signature across refresh** (red-team RT-3):
-  `WizardClient.tsx` `failedCsvSubmitSigRef` is a useRef while `wizardSessionId` IS persisted —
-  the mint-a-fresh-session-on-content-change fence evaporates on refresh/tab-restore, exactly
-  the resume path where a changed file reaches the server resolve arm. Server-side equality
-  refusal (shipped 2026-08-18) is the operative fence; persisting the signature in the signed
-  saveWizardState envelope makes the client fence defense-in-depth again.
-
 ## v1.19 xhigh milestone review (2026-08-18) → Phase 146.1 owns the residue
 
 15 confirmed findings across `43069db9..4e3effb0` (PRs #687–#690). Full roster with file
@@ -2976,22 +2961,6 @@ under-claim) and must be revised in the same change.
   will not see them).
 
 
-- [ ] ⭐ **CSV finalize emits NO audit event — a real gap, surfaced by 146.1-07 task 1.**
-  Deleting the cast-through-unknown made the fold call visible to the audit-coverage law for
-  the first time, and the law immediately failed it: `csv-finalize/route.ts` calls
-  `logAuditEvent` nowhere. The call now carries an `@audit-skip` whose stated reason is the
-  truth — *there is no audit event on this path* — rather than the sibling's rationale, which
-  does NOT transfer: `create-with-key` skips `create_wizard_strategy` because "the user-visible
-  creation is audited at finalize time", and this call **IS** finalize (it commits a
-  user-visible strategy + verification + dailies in one transaction). Closing it needs an
-  audit-taxonomy decision — event type, payload, actor — per
-  `docs/architecture/adr-0023-audit-event-taxonomy.md`; that is a behaviour change and does not
-  belong in a types-regen commit.
-  ⚠️ Two formatting facts the next editor must not undo: the audit law scans **line by line**
-  for `.rpc("<name>"`, so the RPC name must stay on the same line as `.rpc(`; and the
-  `@audit-skip:` marker must sit **within 8 lines above** the call (a long explanation above it
-  is fine, but the marker itself must be inside the window — a 13-line pragma put the marker
-  out of range and the gate stayed RED).
 - [ ] **`--reporter=basic` is invalid in vitest 4** and appears in the `<verify>` blocks of plans
   146.1-01/03/04/05/06/07. MEASURED: it exits 1 with `Failed to load custom Reporter from basic`.
   ✅ It fails LOUD rather than passing vacuously, so no green in this phase rests on it, and
@@ -3027,22 +2996,6 @@ under-claim) and must be revised in the same change.
   source that does not strip comments is unreliable in BOTH directions — vacuous when it
   should fire, false-positive when it should not. Candidate fix: a shared
   `scripts/grep-code.sh` that strips comments, used by every plan `<verify>`.
-- [ ] **A2 residual — absent `status` column echoes the `?? "pending_review"` fallback**, so a
-  contribution request can be *reported* as `pending_review` even though the arm writes
-  nothing to the DB. Refusing would violate the absence rule F-04-4 pins; the honest fix is
-  omitting the field, which changes the `CsvSubmitStep` contract and needs its own item.
-- [ ] **C1 echo copy is rendered by nothing today.** Plan 04 added `human_message` to the
-  resolve-echo 200 envelope so the honest sentence has somewhere to live, but
-  `CsvSubmitStep` branches on `!res.ok`/`data.ok` and never reads it. Either surface it or
-  record that the honesty is API-level only.
-- [ ] **`csv-finalize-c14-regression.test.ts` lost one discrimination to A2.** Its
-  resolve-echo case used to post the manager flow against a committed `private` row — the
-  exact cross-flow combination A2 now refuses 409. The fixture was re-pointed to
-  `entry_context: "contribution"`, so echoed and requested status are now provably equal on
-  every surviving echo and that case can no longer prove "echoed, not fabricated" on its
-  own. The discrimination moved to the new refusal cases; noted so nobody reads the weaker
-  case as full coverage.
-
 ## Phase 146 — RATE-04 value-parity candidates (logged 2026-08-18, D-146-4: retuning is founder territory)
 
 Source: `.planning/phases/146-rate/146-AUDIT.md` §3 (fresh at HEAD `e912e38b`). Every number
@@ -3103,3 +3056,242 @@ backs ~9 surfaces — the remedy for any of its flows is a NEW named limiter, ne
   newest), or record tests/ as permanently out of strict scope in a mypy config comment so
   the next session doesn't re-derive this. Never widen the gate in the same commit as a
   behavior change.
+
+## Phase 146.2 — recorded deferrals (logged 2026-08-19)
+
+*The founder rule: an item ABSORBED into a phase is deleted from this file, but an item the
+phase deliberately does NOT fix must be re-recorded here. Silent drop is forbidden. The FIRST
+FOUR below were re-verified against HEAD on 2026-08-19 before being written down. The fifth
+(WR-01, the `createAdminClient()` request-path throw) was appended on 2026-08-20 from the
+Phase 146.2 code review and is verified as of that date — it was NOT part of the 2026-08-19
+sweep. Recorded because appending it silently left this preamble asserting "all four", which
+was then false: the same scope-amendment class this file exists to prevent.*
+
+- [ ] **`20260819150000_reconcile_sweep_readmit_attempt_ceiling.sql:283-288` — the performance
+  note cites the WRONG index.** It says the scalar subquery runs "over compute_jobs indexed by
+  strategy_id (20260808120000 and the table's own FK index)". Neither citation holds:
+  `20260808120000` creates `idx_strategies_user_id` on `strategies(user_id)` (`:127`), which is
+  a different table and a different column; and PostgreSQL does **not** auto-create indexes for
+  foreign keys, so there is no "table's own FK index". The index that actually supports the
+  subquery is `compute_jobs_strategy_id ON compute_jobs (strategy_id) WHERE strategy_id IS NOT
+  NULL`, created by `20260412094454_sync_strategy_analytics_status.sql:68-70`.
+  ⚠️ **The SUBSTANCE of the performance claim survives** — a supporting index does exist and no
+  new one is needed; only the provenance is wrong. Prose-only, non-blocking (the stopping rule
+  keeps citation defects off the blocking path). **Fix:** re-point the citation to
+  `20260412094454:68-70` and delete the FK-index phrase, in whatever commit next touches that
+  migration's header. Do NOT edit the migration solely for this — it is already applied.
+- [ ] **`20260819150000_...:283-288` — the same note asserts an execution ORDER the planner does
+  not promise.** It says the subquery runs "only AFTER the three cheaper NOT EXISTS conjuncts
+  have already discarded the corpus". PostgreSQL gives no guarantee about conjunct evaluation
+  order; cost estimates normally place the `NOT EXISTS` semi-joins first, but that is a
+  tendency, not a contract. **Reword to:** "the planner is free to order these conjuncts; cost
+  estimates normally place the NOT EXISTS semi-joins first." No behavioural impact — the
+  candidate set is bounded by `LIMIT 25` downstream and the sweep runs hourly. Prose-only,
+  non-blocking; same commit as the citation fix above.
+- [ ] **csv-finalize A2 arm: the 409 refusal sentence does not describe the case it fires on.**
+  The terminal-status-mismatch arm (`csv-finalize/route.ts`, A2 check 0) refuses through
+  `refuse()` with the shipped DEFAULT literal — "This wizard session already created a strategy
+  with **a different track record** …" — but A2 fires when the track record is the SAME and the
+  FLOW differs (a manager resubmit landing on a committed `private` contribution row, or the
+  mirror). Deferred by plan 146.2-01 on purpose: that literal is pinned by name in
+  `CsvSubmitStep.upstream-arm.test.tsx` and in the c14 regression suite, and moving a pinned
+  sentence in a plan whose whole margin of safety was that no sentence moved would have been
+  reckless. **The fix is now two lines**: 146.2-01 gave `refuse()` an optional second
+  `humanMessage` parameter, so this arm needs its own sentence passed and a test arm re-pointed.
+  Copy-only ⇒ non-blocking per the stopping rule.
+- [ ] **`process-key-client.ts` transport catch: a TRAP-1-shaped error could inline BODY
+  credentials into a seam-level CONSOLE line.** The catch scrubs via `scrubSeamError(err)` whose
+  per-request secret set is DERIVED from the OUTGOING HEADERS
+  (`resilient-fetch.ts` `CREDENTIAL_HEADER_NAMES` → `credentialHeaderValues`, documented at
+  `process-key-client.ts:505-509`). That is a deliberate class fix for header-borne credentials,
+  and it is strictly better than the caller-declared list it replaced — but a credential carried
+  in the request BODY is not in the derived set, so an upstream error message echoing it back
+  would survive the scrub into the console line. **Sentry is unaffected: verified 2026-08-19,
+  the file contains zero `captureToSentry` call sites**, so the exposure is Vercel function logs
+  only. Not a live leak — no known body-borne credential crosses this seam today; recorded so
+  the next credential added to a `/process-key` body is not added blind. **Fix direction:** widen
+  the derived secret set to include body values of known credential-shaped keys, or assert at the
+  seam that no credential-shaped key appears in the body.
+
+- [ ] **`csv-finalize/route.ts:733` — `createAdminClient()` is evaluated on the request path,
+  outside the fire-and-forget guard, immediately after an irreversible commit** (found
+  2026-08-19 by the Phase 146.2 code review, WR-01; non-blocking per the stopping rule —
+  it needs a MISCONFIGURED environment to fire, and production is configured).
+  `logAuditEventAsUser(createAdminClient(), …)` evaluates its first argument **before** the
+  call, so it sits outside `logAuditEventAsUser`'s own `try` (`src/lib/audit.ts:922-930`).
+  `createAdminClient` throws synchronously when `NEXT_PUBLIC_SUPABASE_URL` or
+  `SUPABASE_SERVICE_ROLE_KEY` is unset (`src/lib/supabase/admin.ts:14-16`), and `withAuth`
+  has no `try`/`catch` anywhere — so the throw escapes to Next as an opaque 500 with no
+  `code` and no `human_message`, **on the branch where the fold has already committed**.
+  The site's own docblock three lines above (`route.ts:725-728`) states the opposite
+  contract: "a failed emission … must NOT change this response".
+  ⚠️ **Class instance, not a novel pattern**: the call shape matches
+  `preferences/route.ts:221` and `account/deletion-request/route.ts:141`. csv-finalize is
+  the highest-stakes member because the throw lands after a committed track record.
+  The two pre-existing admin usages in this same file are both inside `after()` epilogues
+  wrapped in try/catch (`route.ts:1583-1585`, `:1699-1701`) — this is the first on the
+  request path. Recovery exists (the resubmit takes the 23505 arm, which never reaches this
+  line), so the defect is the **false failure report**, not permanent loss.
+  **Fix:** wrap the `createAdminClient()` evaluation in its own try/catch that logs +
+  captures and does not rethrow — and close the CLASS, not just this site.
+
+## Phase 146.2 — recorded deferrals, SECOND PASS (logged 2026-08-20)
+
+*Why a second pass: the PR #694 body reported the Phase 146.2 code review as closing with
+"5 INFO (recorded)". That was false — not one of IN-01…IN-05 had ever been written into this
+file — and four further items the phase knowingly did not fix were also missing. A red team
+caught it on 2026-08-20; every entry below was re-measured against HEAD (`181eed3b`) before
+being written down, and route.ts line numbers are paired with symbol anchors because that
+file moves. The founder rule stands, with a sharpened edge: "recorded" is a claim about THIS
+FILE, so grep it before you type it.*
+
+- [ ] **IN-01 — `CsvSubmitStep.tsx:473` and `CsvSubmitStep.test.tsx:305` cite a route function
+  that does not exist.** Both docblocks (under
+  `src/app/(dashboard)/strategies/new/wizard/steps/`) name `resolveExistingCsvStrategy`.
+  Measured 2026-08-20: `grep -rn resolveExistingCsvStrategy src` returns exactly those two
+  COMMENT lines and nothing else — the symbol exists nowhere in the repo as code. The function
+  they mean is `resolveExistingStrategyOrRefuse`
+  (`src/app/api/strategies/csv-finalize/route.ts:1080`, called at `:814`). The SEAMPROSE-01
+  protocol asks client-side prose to carry a symbol-anchored citation back to the server arm it
+  renders; a citation that resolves to NOTHING is worse than none, because the next reader
+  greps, finds zero hits, and cannot tell whether the arm was renamed or deleted. Prose-only,
+  non-blocking per the stopping rule. **Fix:** rename both references to
+  `resolveExistingStrategyOrRefuse` in whatever commit next touches the wizard directory.
+- [ ] **IN-02 — dead conjunct in a c14 assertion.**
+  `src/__tests__/csv-finalize-c14-regression.test.ts:740-743` reads
+  `expect(opts && call![0], "…").toMatchObject({ code: "57014" })`. `opts` is unconditionally
+  truthy at that point, so `opts &&` contributes nothing and the expression is just `call![0]`.
+  The assertion still pins the real property (the fail-closed 503's Sentry capture must carry
+  the READ error's SQLSTATE, so ops can tell a statement timeout from an RLS hide), so nothing
+  is unpinned today — but a dead conjunct in an oracle is exactly the shape that lets a later
+  edit "preserve the assertion" while changing its subject. **Fix:**
+  `expect(call![0], "…").toMatchObject({ code: "57014" })`.
+- [ ] **IN-03 — the re-mint fingerprint omits the classification, so the new
+  classification-conflict REFUSE has no in-wizard escape except a rename.**
+  `csvSubmissionFingerprint(strategyName, csvDailyReturnsSeries)`
+  (`src/lib/wizard/localStorage.ts:702`; called at
+  `src/app/(dashboard)/strategies/new/wizard/WizardClient.tsx:587` and `:635`) hashes the name
+  and the series only — never `metadata.category_id` / `metadata.asset_class`. Phase 146.2's
+  classification-conflict 409 is the ONE refusal whose stated remedy is a classification
+  change, and a classification change cannot move the fingerprint, so no fresh wizard session
+  is minted and the corrected resubmit takes the identical 409. ⚠️ **Not a dead end**: the
+  shipped copy is honest ("Open the strategy you already started, or start a new strategy"),
+  and renaming does reach a fresh session. Recorded because the re-mint fence and the new
+  refusal now disagree about what "a different submission" means — a disagreement that will
+  read as a bug to whoever meets it cold. **Fix:** either widen the fingerprint to cover the
+  classification, or state the deliberate exclusion in `csvSubmissionFingerprint`'s docblock so
+  the next reader does not re-derive this.
+- [ ] **IN-04 — two concurrent same-session resubmits can both take the csv-finalize FILL
+  arm.** Nothing serialises the resolve read (`src/app/api/strategies/csv-finalize/route.ts`,
+  `resolveExistingStrategyOrRefuse`'s projection at `:1138-1144`, FILL discriminator
+  `existingRow.category_id === null` at `:1372`) against another request's metadata UPDATE
+  (`.from("strategies").update(updatePayload)` at `:1902-1903`, payload from
+  `buildMetadataUpdatePayload` at `:543`). Two resubmits arriving together (two tabs, a
+  double-click past the client's `submitting` gate) can both observe `category_id IS NULL` and
+  both run the FILL UPDATE + enqueue. Benign when both carry the same picker values — the
+  writes are idempotent and the two enqueues converge on one job. Divergent only when the tabs
+  carry DIFFERENT classifications, where last-write-wins decides and both recomputes run; the
+  rate limiter and the series-equality check bound the window tightly. **Fix (optional, one
+  line):** scope the FILL UPDATE with `.is("category_id", null)` so the second writer is a
+  no-op — a compare-and-set that makes the arm's own premise enforceable instead of assumed.
+- [ ] **IN-05 — the "verbatim" wire fixtures in the wizard tests remain unverifiable by the
+  suite (self-declared).** `CsvSubmitStep.test.tsx:308` (`ROUTE_ECHO_SENTENCE`), `:319`
+  (`ROUTE_CLASSIFICATION_CONFLICT`), `CsvSubmitStep.upstream-arm.test.tsx:96`
+  (`ROUTE_PERSIST_FAIL`), `:105` (`ROUTE_SESSION_REUSED`) — all under
+  `src/app/(dashboard)/strategies/new/wizard/steps/`. Each constant is BOTH the mocked wire
+  payload and the expected DOM text, so the suite is green for ANY string; the correspondence
+  to `csv-finalize/route.ts` is enforced by a comment, not by code. W1 fixed a real drift and
+  the comment now says this out loud, which is the right disclosure — recorded so the standing
+  risk is tracked rather than re-discovered. ⚠️ All four were hand-verified byte-exact against
+  their route literals on 2026-08-19; **a hand check does not survive the next edit**, which is
+  the whole point of the entry. **Fix (reach for it on the third drift):** the declined static
+  coupling — a build-time assertion that each fixture string is a substring of `route.ts`.
+- [ ] **`supabase/tests/test_csv_finalize_atomic_fold.sql:565-574` — Part 3e's trailing
+  "committed nothing" count block CANNOT FAIL.** The fold call sits inside the probe's own
+  `BEGIN … EXCEPTION WHEN OTHERS` (`:545-553`). A plpgsql exception block is an implicit
+  SUBTRANSACTION, so any rows the fold wrote are rolled back when it raises — BEFORE `n_strat`
+  / `n_sv` / `n_dl` are read at `:565-571`. They are 0/0/0 for a healthy body AND 0/0/0 for the
+  exact defect the RAISE at `:572-574` names ("GUARD 1 ran AFTER a write instead of as the
+  FIRST statement"). ⚠️ **The Part is NOT vacuous as a whole** — its first three assertions
+  (`:555` raised-at-all, `:558` SQLSTATE is 22023, `:561` the message names `p_terminal_status`)
+  each discriminate, and the un-provable placement property is separately pinned by the new
+  Part 1d no-handler check (`:256-267`). This is guard hygiene, not a live break. ⚠️ **The same
+  shape is copied from PRE-EXISTING Part 3d (`:475-481`) — fix both or neither**; removing one
+  and leaving the other tells the next reader the shape was reviewed and blessed. ⭐ The sibling
+  file states these exact semantics as MEASURED fact —
+  `supabase/tests/test_csv_finalize_double_submit.sql:246-253`: a catch-write-and-re-raise
+  handler is "NOT caught, and not catchable by ANY row count" because the subtransaction rolls
+  the handler's own writes back too. Part 3e was written after that note and did not apply the
+  lesson to itself. **Fix:** delete both count blocks and replace them with a comment pointing
+  at Part 1d as the real pin, rather than leaving two assertions that read like coverage.
+- [ ] **Phase 146.2's own close-out made two completeness claims that were false when
+  written.** (a) The PR #694 body reports "5 INFO (recorded)" — the five entries above ARE that
+  record, first written 2026-08-20. (b) `146.2-VERIFICATION.md:176-177` states "all appear in
+  plan `requirements-completed` fields"; measured 2026-08-20, that field exists in five
+  SUMMARYs only (01→R1, 02→R2, 03→R4, 06→R7, 07→R6+W1), while `146.2-04-SUMMARY.md` (R3) and
+  `146.2-05-SUMMARY.md` (R5, W2, W3) carry NO such field — so **R3, R5, W2 and W3 appear in no
+  plan's `requirements-completed` at HEAD even though all four shipped**. ⚠️ Why this is more
+  than tidiness: that frontmatter is what a later milestone audit reads to decide a requirement
+  was delivered, so four silently-absent entries make shipped requirements look dropped — the
+  precise failure the field exists to prevent, and the inverse of the failure this section
+  exists to prevent. **Fix:** add `requirements-completed` to the 04 and 05 summaries, correct
+  the PR body, and treat "recorded" / "all appear" as claims to be grepped before typing.
+- [ ] **The audit-coverage window is stated as 60 lines; the mechanism is brace-balanced with a
+  200-line cap.** `src/app/api/strategies/csv-finalize/route.ts:708-711` warns "⚠️ THE EMISSION
+  MUST STAY WITHIN 60 LINES BELOW THIS CALL. That is the law's own coverage window
+  (audit-coverage.test.ts `isCovered`)". Measured at HEAD: `isCovered`
+  (`src/__tests__/audit-coverage.test.ts:374-424`) walks forward brace-balanced from the
+  mutation and stops at the close-brace of the ENCLOSING FUNCTION, with
+  `AUDIT_WINDOW_MAX_LINES = 200` (`:331`) only as a hard fail-safe. The flat 60-line window is
+  the PRE-P694 behaviour the brace walk deliberately replaced — a flat window let a mutation in
+  `POST()` be "covered" by a `logAuditEvent` inside `PATCH()` in the same file. Three lines of
+  `146.2-06-SUMMARY.md` (`:52`, `:235`, `:538`) repeat the 60. ⚠️ **The SUBSTANCE survives**:
+  the emission sits inside the same function body, 39 lines below the `.rpc(`, so the coverage
+  law does hold and the placement warning is still the right warning — only the integer and the
+  rule it names are wrong. The failure mode of leaving it: someone "safely" moves the emit 80
+  lines down (still same function, still covered) and, believing they broke the law, contorts
+  the code instead. **Fix:** restate the route docblock as "the emission must stay inside the
+  SAME FUNCTION BODY as the `.rpc(` call — brace-balanced walk, 200-line fail-safe" next time
+  that file is touched. Leave the SUMMARY as-is (a shipped artifact is history), but do not
+  re-copy the 60 into new prose.
+- [ ] **FOLLOW-UP PHASE CANDIDATE — make the FILL arm's recompute actually guaranteed instead
+  of refusing when it cannot be.** Phase 146.2 closed the classification gap by REFUSING the
+  fill when a recompute is already in flight. That is honest, but it is a NARROWING, not a
+  repair: those users get a 409 instead of their classification. Root cause, measured at HEAD:
+  `_enqueue_compute_job_internal`
+  (`supabase/migrations/20260420073003_allocator_holdings.sql:330-402`) dedupes onto any job
+  for the same target + kind with `status IN ('pending','running','done_pending_children')`
+  (`:370-376`) and RETURNS the existing id (`:400-402`) — so a fill arriving mid-compute is
+  ABSORBED into the running job, and that job already snapshotted the OLD classification. The
+  worker reads `asset_class` once at job start
+  (`analytics-service/services/analytics_runner.py:1212-1219`, into `_strategy_row` at `:1231`)
+  and consumes it far later at `:1399-1401` via `periods_per_year_for_asset_class`, so the
+  annualization basis for the whole run is fixed before the fill's UPDATE lands. The route's
+  enqueue passes no idempotency key
+  (`src/app/api/strategies/csv-finalize/route.ts:1776-1780` sends `p_strategy_id`, `p_kind`,
+  `p_metadata` only), so it cannot opt out of the dedupe. ⚠️ **Residual sliver even WITH the
+  shipped refusal**: the snapshot at `:1212-1219` runs BEFORE the job marks
+  `computation_status='computing'` (`:1238-1242`), so a guard keyed on 'computing' closes the
+  dominant window but leaves a millisecond gap between the two. **Fix direction:** either force
+  a follow-on job rather than letting the enqueue be absorbed (a distinct idempotency key, or a
+  supersede arm), or have the worker RE-READ `asset_class` at write time and compare-and-set.
+  Both change the job/worker contract and the queue's dedupe invariant ⇒ **own phase, not a
+  point fix.**
+- [ ] **CI went RED mid-Phase-146.2 and no artifact records it — plus the operating rule that
+  prevents the repeat.** The `sql-tests` job failed at commit `44cc4370` in
+  `supabase/tests/test_claim_kind_filter.sql` (the FLIPRETRY-04 double-fan-out DO block,
+  `:183-219`) with `compute_jobs_api_key_id_fkey` violated. ROOT CAUSE, measured — not a code
+  defect, and not one of the four known shared-TEST-DB flake mechanisms: a LOCAL `npm run test`
+  was running against the shared TEST database concurrently with the CI run.
+  `enqueue_derive_broker_dailies_for_allocator_keys()`
+  (`supabase/migrations/20260717233529_allocator_equity_derived_surface.sql:236-240`) fans out
+  over EVERY active, non-revoked, non-disconnected `api_keys` row in the whole shared database
+  — it has no test-seed scoping — so the test's own `PERFORM` (`test_claim_kind_filter.sql:204-205`)
+  enqueued against ANOTHER writer's key that was deleted between the cursor read and the FK
+  check. ⚠️ The fan-out's inner handler catches `unique_violation` ONLY (`:249-250`), so a
+  concurrently-deleted key (23503) propagates out and reds the whole file — worth knowing
+  before "hardening" it, since a blanket `WHEN OTHERS` there would hide real breakage. It
+  re-ran green at `181eed3b` with no code change. ⚠️ **OPERATING RULE: never run the local
+  suite while any CI run is in flight — `gh run list` FIRST.** And note the ordering that makes
+  this entry honest: the mechanism was identified BEFORE the green re-run. A green re-run is
+  never itself proof that the first failure was noise.
