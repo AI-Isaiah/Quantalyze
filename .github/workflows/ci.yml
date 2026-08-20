@@ -877,9 +877,14 @@ jobs:
     # `psql -v ON_ERROR_STOP=1` a failed assertion exits non-zero and
     # fails the job.
     runs-on: ubuntu-latest
+    # TTL for the mutex below (Phase 158 / OPS-01): GitHub kills the job at 60m,
+    # the psql session drops, and Postgres releases the advisory lock. That IS
+    # the steal path — no reaper cron needed. Manual unlock:
+    # docs/runbooks/shared-test-db-mutex.md.
+    timeout-minutes: 60
     if: (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository) && vars.E2E_TEST_DB_CONFIGURED == 'true'
-    # Phase 142.1 (D-05): join the SAME repo-wide `shared-test-db` group the
-    # `python` and `e2e-seeded` jobs carry. These SQL files run against the ONE
+    # Phase 142.1 (D-05): this job must SERIALIZE against the `python` and
+    # `e2e-seeded` jobs. These SQL files run against the ONE
     # shared Supabase test project (`secrets.TEST_SUPABASE_DB_URL`), and
     # test_strategy_analytics_stuck_computing_reaper.sql `EXECUTE`s the REAL
     # deployed cron body — a GLOBAL `ORDER BY computing_started_at ASC LIMIT 25`
@@ -893,35 +898,50 @@ jobs:
     # 5 s lock_timeout turns lock contention into a 55P03 failure on an innocent
     # PR.
     #
-    # ⛔ Do NOT give this job its own private group name — 142-REVIEW.md:286-291
-    # proposed one, and it is the wrong fix: a distinct group serializes this
-    # job only against itself and does nothing about the `python`/`e2e-seeded`
-    # jobs writing the SAME project. The group name must stay identical to
-    # theirs.
+    # HOW it serializes (Phase 158 / OPS-01): the "Acquire shared-test-db mutex"
+    # step below takes a Postgres SESSION advisory lock (key 61616158) on the
+    # TEST project through the session-mode DSN and holds it across this job's
+    # DB-touching span. `python` and `e2e-seeded` take the SAME key. Contenders
+    # BLOCK inside the lock instead of queueing in GitHub's concurrency layer.
+    # Proven from real runners before adoption by .github/workflows/mutex-probe.yml
+    # (three simultaneous contenders, pairwise non-overlapping hold windows).
     #
-    # Costs wall-clock: this job now queues behind `python` (~7m) instead of
-    # overlapping it — the same price `e2e-seeded` already pays below, and for
-    # the same reason.
+    # ⛔ Do NOT give this job its own private lock key — 142-REVIEW.md:286-291
+    # proposed the equivalent (a private concurrency-group name), and it is the
+    # wrong fix: a distinct key serializes this job only against itself and does
+    # nothing about the `python`/`e2e-seeded` jobs writing the SAME project. All
+    # three must take key 61616158.
     #
-    # ⛔ The `needs: [python]` below is NOT an ordering preference — it is what
-    # keeps this group CORRECT, and removing it silently disables a gate.
-    # GitHub Actions holds exactly ONE pending entry per concurrency group:
-    # "Any previously pending job or workflow in the concurrency group will be
-    # canceled." With two members that is stable (one runs, one pends). Adding
-    # this job made THREE, and `python` + `sql-tests` both dispatch at t=0 while
-    # `e2e-seeded` arrives minutes later behind frontend-typecheck — so
-    # `e2e-seeded` evicted whichever of the first two was still pending. The
-    # victim is CANCELLED, which renders as a GREY check, not a red one, and
-    # branch protection is deferred on this repo, so nothing blocks on it. On a
-    # push to main touching supabase/migrations/** that is the merge which
-    # auto-applies migrations to PROD losing either the Python drift gates or
-    # this job — the only gate that EXECUTEs the real deployed cron body, and
+    # Costs wall-clock: this job queues behind `python` (~7m) and then waits on
+    # the mutex rather than overlapping it — the same price `e2e-seeded` pays
+    # below, and for the same reason. With the mutex the wait burns runner time;
+    # under the old concurrency group it burned an entire gate (see below).
+    #
+    # ⛔ Do NOT reintroduce a job-level GitHub concurrency group for the shared
+    # test DB (all three jobs carried one until Phase 158). That layer is what
+    # BROKE, and no reshaping of it is a fix. GitHub Actions holds exactly ONE
+    # pending entry per concurrency group: "Any previously pending job or
+    # workflow in the concurrency group will be canceled." With two members that
+    # was stable (one runs, one pends). Adding this job made THREE, and `python`
+    # + `sql-tests` both dispatch at t=0 while `e2e-seeded` arrives minutes later
+    # behind frontend-typecheck — so `e2e-seeded` EVICTED whichever of the first
+    # two was still pending. The victim is CANCELLED, which renders as a GREY
+    # check, not a red one, and branch protection is deferred on this repo, so
+    # nothing blocked on it — and Railway's "wait for CI" then SKIPPED the
+    # analytics deploy, leaving prod on stale code with no signal (issue #616).
+    # On a push to main touching supabase/migrations/** that is the merge which
+    # auto-applies migrations to PROD while losing either the Python drift gates
+    # or this job — the only gate that EXECUTEs the real deployed cron body, and
     # the one that caught D-19.
-    # Gating THIS job behind `python` fixes it without touching `e2e-seeded`:
-    # `python` and `sql-tests` can then never be queued at the same instant, so
-    # the group holds at most (1 in-progress + 1 pending) and no member is ever
-    # evicted. Cross-run serialization — the reason the group exists — is
-    # unchanged, since all three still share the group name.
+    # ⛔ SHRINKING the shared-test-db concurrency group was never the fix either:
+    # the eviction is CROSS-run, so fewer members only changes which run gets
+    # evicted, not whether one does. The eviction layer had to GO, not shrink.
+    #
+    # `needs: [python]` below is KEPT. Under the group it was load-bearing (it
+    # kept `python` and `sql-tests` from being queued at the same instant, so the
+    # group never held two pending entries). With the group gone it no longer
+    # carries correctness weight, but it costs nothing and keeps one fewer
+    # simultaneous waiter on the mutex — so removing it buys nothing.
     #
     # ⛔ Do NOT "finish the chain" by adding `sql-tests` to `e2e-seeded`'s
     # `needs:`. A skipped `needs:` job skips its dependents, and the two `if:`
@@ -930,12 +950,15 @@ jobs:
     # requires `!= 'pull_request'` (true) — so the chain would disable
     # `e2e-seeded` on every manual run and trip the aggregator's skip check.
     # `python` carries no `if:`, so this job's own dependency is always safe.
-    # Found by the /ship pre-landing review, 2026-08-03.
+    # Found by the /ship pre-landing review, 2026-08-03. The mutex does NOT
+    # change this: it serializes without any `needs:` edge, which is precisely
+    # why no new edge among these three jobs is warranted.
+    # (Phase 158 / OPS-02: this job IS listed in the `frontend` aggregator's
+    # `needs:`. That is not such an edge — `frontend` carries `if: always()`, so
+    # a skip here cannot skip the aggregator; it is read as a RESULT, not
+    # depended on for ordering.)
     needs:
       - python
-    concurrency:
-      group: shared-test-db
-      cancel-in-progress: false
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
         with:
@@ -998,6 +1021,70 @@ jobs:
             exit 1
           fi
           echo "Preflight clean: ${#files[@]} test file(s) free of refused meta-commands."
+      # Phase 158 / OPS-01 — the shared-test-db mutex, IDENTICAL in `sql-tests`,
+      # `python` and `e2e-seeded`. It replaces the GitHub concurrency group those
+      # three jobs used to carry (see the ⛔ note on this job for why that layer
+      # had to go). A BACKGROUND psql session takes a Postgres SESSION advisory
+      # lock on key 61616158 and holds it for the rest of the job: background
+      # processes persist across steps on the same runner, and job teardown drops
+      # the TCP session, at which point Postgres releases the lock — that IS the
+      # steal path, bounded by this job's `timeout-minutes`. Placed immediately
+      # before the first DB-MUTATING step. Proven end-to-end before adoption by
+      # .github/workflows/mutex-probe.yml (three simultaneous contenders,
+      # pairwise non-overlapping hold windows; the distinct-key neuter of that
+      # same assertion was observed RED).
+      - name: Acquire shared-test-db mutex
+        env:
+          TEST_SUPABASE_DB_URL: ${{ secrets.TEST_SUPABASE_DB_URL }}
+        run: |
+          set -euo pipefail
+          if [ -z "${TEST_SUPABASE_DB_URL:-}" ]; then
+            echo "fork PR / secret withheld — mutex skipped (DB work self-skips on forks)"
+            exit 0
+          fi
+          if ! command -v psql >/dev/null 2>&1; then
+            sudo apt-get update -y
+            sudo apt-get install -y --no-install-recommends postgresql-client
+          fi
+          # Session-mode DSN. The documented secret points at the Supavisor
+          # pooler on port 6543 = TRANSACTION mode, where a SESSION advisory lock
+          # does not survive between statements; session mode is served on 5432
+          # of the same host. Derived by parameter expansion and NEVER echoed —
+          # this repository is public and the derived string is not a value
+          # GitHub can mask for us.
+          dsn="${TEST_SUPABASE_DB_URL}"
+          case "${dsn}" in
+            *":6543/"*) dsn="${dsn%%:6543/*}:5432/${dsn#*:6543/}" ;;
+          esac
+          log="${RUNNER_TEMP}/shared-test-db-mutex.log"
+          : > "${log}"
+          PGAPPNAME=ci-shared-test-db-mutex PGCONNECT_TIMEOUT=15 \
+            nohup psql "${dsn}" -X -q -A -t -v ON_ERROR_STOP=1 \
+              -c "SELECT pg_advisory_lock(61616158);" \
+              -c "SELECT 'MUTEX-ACQUIRED';" \
+              -c "SELECT pg_sleep(3300);" \
+              >> "${log}" 2>&1 &
+          holder=$!
+          echo "${holder}" > "${RUNNER_TEMP}/shared-test-db-mutex.pid"
+          waited=0
+          while [ "${waited}" -lt 2700 ]; do
+            if grep -q 'MUTEX-ACQUIRED' "${log}" 2>/dev/null; then
+              echo "Acquired the shared-test-db advisory lock (key 61616158) after ${waited}s."
+              exit 0
+            fi
+            if ! kill -0 "${holder}" 2>/dev/null; then
+              echo "::error::the mutex psql session exited before acquiring the lock (redacted output follows)."
+              sed -E 's#(postgres(ql)?://)[^@]*@#\1***@#g' "${log}" >&2 || true
+              exit 1
+            fi
+            sleep 5
+            waited=$(( waited + 5 ))
+            if [ $(( waited % 60 )) -eq 0 ]; then
+              echo "still waiting on the shared-test-db mutex (${waited}s) — another run holds it."
+            fi
+          done
+          echo "::error::timed out after ${waited}s waiting for the shared-test-db advisory lock (key 61616158) — a holder is wedged. Unlock: docs/runbooks/shared-test-db-mutex.md."
+          exit 1
       - name: Run SQL self-tests against test Supabase project
         env:
           # PG connection string for the test project (qmnijlgmdhviwzwfyzlc).
@@ -1033,6 +1120,26 @@ jobs:
           done
           echo ""
           echo "All ${#files[@]} SQL self-tests passed."
+      # Best-effort EARLY release of the shared-test-db mutex (Phase 158 /
+      # OPS-01), identical in all three DB-touching jobs. Job teardown drops the
+      # psql session anyway; killing it here hands the lock to the next waiter a
+      # little sooner. `if: always()` + never exits non-zero: a failed release
+      # must not redden a job whose real work passed, and the teardown path is
+      # the guarantee.
+      - name: Release shared-test-db mutex (best effort)
+        if: always()
+        run: |
+          pidfile="${RUNNER_TEMP}/shared-test-db-mutex.pid"
+          if [ ! -f "${pidfile}" ]; then
+            echo "No mutex pid recorded (fork PR / acquire skipped) — nothing to release."
+            exit 0
+          fi
+          holder="$(cat "${pidfile}")"
+          if kill "${holder}" 2>/dev/null; then
+            echo "Released the shared-test-db mutex (terminated psql pid ${holder})."
+          else
+            echo "Mutex holder pid ${holder} was already gone — the session drop released the lock."
+          fi
 
   secret-scan:
     # Task 7.6: gitleaks runs against the full commit history for PRs
@@ -1131,18 +1238,28 @@ jobs:
 
   python:
     runs-on: ubuntu-latest
+    # TTL for the shared-test-db mutex (Phase 158 / OPS-01): GitHub kills the job
+    # at 60m, the psql session drops, and Postgres releases the advisory lock.
+    # That IS the steal path. Manual unlock:
+    # docs/runbooks/shared-test-db-mutex.md.
+    timeout-minutes: 60
     # Serialize the python job across ALL runs (every PR + every push) against
     # the SHARED remote Supabase test project. The workflow-level concurrency
     # group (top of file) only isolates per-PR, so two different PRs' python
     # jobs could hit the shared test DB simultaneously and race the
-    # compute_jobs fencing/claim tests (CI flakiness audit F2). A repo-wide
-    # group with cancel-in-progress:false QUEUES contending runs instead of
-    # running them concurrently — and crucially does NOT cancel in-flight runs,
-    # so a push-to-main python job still records its required per-SHA green
-    # check (it just waits its turn).
-    concurrency:
-      group: shared-test-db
-      cancel-in-progress: false
+    # compute_jobs fencing/claim tests (CI flakiness audit F2).
+    #
+    # Phase 158 / OPS-01: this used to be a repo-wide GitHub concurrency group
+    # shared with `sql-tests` and `e2e-seeded`. It is now the "Acquire
+    # shared-test-db mutex" step below — a Postgres SESSION advisory lock on key
+    # 61616158, taken immediately before the first DB-touching step. Same
+    # queue-don't-race guarantee, but contenders BLOCK on the lock instead of
+    # occupying GitHub's single pending slot: with three members that slot made a
+    # third arrival EVICT the queued one, which concluded `cancelled` (a GREY
+    # check) and let Railway silently skip the analytics deploy (issue #616).
+    # ⛔ Do NOT reintroduce that group, in any shape — including a shrunken one.
+    # The eviction is CROSS-run, so fewer members only changes which run gets
+    # evicted. See the ⛔ block on `sql-tests` for the full mechanism.
     defaults:
       run:
         working-directory: analytics-service
@@ -1223,13 +1340,90 @@ jobs:
       # xdist_group infra all LAND (they are correct and the offline decoy pins
       # the scoping); re-enabling `-n auto` needs per-test claim-space isolation
       # first (TODOS: v1.9.1 Phase-97 parallelization deferral). The cross-run
-      # `concurrency: shared-test-db` group above still prevents two runs from
-      # contending. Keep byte-identical with Makefile `test:`.
+      # shared-test-db mutex acquired in the step below still prevents two runs
+      # from contending. Keep byte-identical with Makefile `test:`.
+      #
+      # Phase 158 / OPS-01 — the shared-test-db mutex, byte-identical to the step
+      # in `sql-tests` and `e2e-seeded` (see the long note on `sql-tests` for the
+      # mechanism and the ⛔ constraints). Placed immediately before `pytest`, the
+      # first DB-touching step of this job. This job's `defaults.run.
+      # working-directory: analytics-service` applies here and is harmless — the
+      # step reads no repo file.
+      - name: Acquire shared-test-db mutex
+        env:
+          TEST_SUPABASE_DB_URL: ${{ secrets.TEST_SUPABASE_DB_URL }}
+        run: |
+          set -euo pipefail
+          if [ -z "${TEST_SUPABASE_DB_URL:-}" ]; then
+            echo "fork PR / secret withheld — mutex skipped (DB work self-skips on forks)"
+            exit 0
+          fi
+          if ! command -v psql >/dev/null 2>&1; then
+            sudo apt-get update -y
+            sudo apt-get install -y --no-install-recommends postgresql-client
+          fi
+          # Session-mode DSN. The documented secret points at the Supavisor
+          # pooler on port 6543 = TRANSACTION mode, where a SESSION advisory lock
+          # does not survive between statements; session mode is served on 5432
+          # of the same host. Derived by parameter expansion and NEVER echoed —
+          # this repository is public and the derived string is not a value
+          # GitHub can mask for us.
+          dsn="${TEST_SUPABASE_DB_URL}"
+          case "${dsn}" in
+            *":6543/"*) dsn="${dsn%%:6543/*}:5432/${dsn#*:6543/}" ;;
+          esac
+          log="${RUNNER_TEMP}/shared-test-db-mutex.log"
+          : > "${log}"
+          PGAPPNAME=ci-shared-test-db-mutex PGCONNECT_TIMEOUT=15 \
+            nohup psql "${dsn}" -X -q -A -t -v ON_ERROR_STOP=1 \
+              -c "SELECT pg_advisory_lock(61616158);" \
+              -c "SELECT 'MUTEX-ACQUIRED';" \
+              -c "SELECT pg_sleep(3300);" \
+              >> "${log}" 2>&1 &
+          holder=$!
+          echo "${holder}" > "${RUNNER_TEMP}/shared-test-db-mutex.pid"
+          waited=0
+          while [ "${waited}" -lt 2700 ]; do
+            if grep -q 'MUTEX-ACQUIRED' "${log}" 2>/dev/null; then
+              echo "Acquired the shared-test-db advisory lock (key 61616158) after ${waited}s."
+              exit 0
+            fi
+            if ! kill -0 "${holder}" 2>/dev/null; then
+              echo "::error::the mutex psql session exited before acquiring the lock (redacted output follows)."
+              sed -E 's#(postgres(ql)?://)[^@]*@#\1***@#g' "${log}" >&2 || true
+              exit 1
+            fi
+            sleep 5
+            waited=$(( waited + 5 ))
+            if [ $(( waited % 60 )) -eq 0 ]; then
+              echo "still waiting on the shared-test-db mutex (${waited}s) — another run holds it."
+            fi
+          done
+          echo "::error::timed out after ${waited}s waiting for the shared-test-db advisory lock (key 61616158) — a holder is wedged. Unlock: docs/runbooks/shared-test-db-mutex.md."
+          exit 1
       - run: pytest --cov=services --cov=routers --cov=main_worker --cov-report=term-missing --cov-fail-under=80
         env:
           SUPABASE_TEST_URL: ${{ vars.E2E_TEST_DB_CONFIGURED == 'true' && secrets.TEST_SUPABASE_URL || '' }}
           SUPABASE_TEST_SERVICE_KEY: ${{ vars.E2E_TEST_DB_CONFIGURED == 'true' && secrets.TEST_SUPABASE_SERVICE_ROLE_KEY || '' }}
           CI: ${{ vars.E2E_TEST_DB_CONFIGURED == 'true' && 'true' || '' }}
+      # Best-effort EARLY release of the shared-test-db mutex (Phase 158 /
+      # OPS-01), identical in all three DB-touching jobs. See the note on
+      # `sql-tests`: teardown releases the lock anyway, this just hands it over
+      # sooner and never reddens the job.
+      - name: Release shared-test-db mutex (best effort)
+        if: always()
+        run: |
+          pidfile="${RUNNER_TEMP}/shared-test-db-mutex.pid"
+          if [ ! -f "${pidfile}" ]; then
+            echo "No mutex pid recorded (fork PR / acquire skipped) — nothing to release."
+            exit 0
+          fi
+          holder="$(cat "${pidfile}")"
+          if kill "${holder}" 2>/dev/null; then
+            echo "Released the shared-test-db mutex (terminated psql pid ${holder})."
+          else
+            echo "Mutex holder pid ${holder} was already gone — the session drop released the lock."
+          fi
 
   e2e:
     # Runs the PUBLIC/smoke Playwright suite against a placeholder-env
@@ -1513,12 +1707,17 @@ jobs:
     # also means needs: only typecheck (F2 rationale: don't burn minutes on
     # an already-doomed PR; e2e validity depends on types, not unit tests).
     runs-on: ubuntu-latest
+    # TTL for the shared-test-db mutex (Phase 158 / OPS-01): GitHub kills the job
+    # at 60m, the psql session drops, and Postgres releases the advisory lock.
+    # That IS the steal path. Manual unlock:
+    # docs/runbooks/shared-test-db-mutex.md.
+    timeout-minutes: 60
     # Fork-PR composition (same as sql-tests): repo VARIABLES are readable in
     # fork-PR runs while secrets are withheld, so the vars gate alone would
     # start the job on a fork and die at the seed step with empty secrets.
     if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.E2E_TEST_DB_CONFIGURED == 'true' }}
-    # v1.16 close-out (2026-08-01): join the SAME repo-wide `shared-test-db`
-    # group the `python` job carries. Both jobs drive the ONE shared Supabase
+    # v1.16 close-out (2026-08-01): serialize against the `python` job (and
+    # `sql-tests`). All three drive the ONE shared Supabase
     # test project (`secrets.TEST_SUPABASE_URL`), and `claim_compute_jobs_with_priority`
     # claims a GLOBAL batch of 50 ready rows — it cannot be scoped to a caller.
     # So while this job drives the wizard and enqueues `compute_jobs`, a
@@ -1528,26 +1727,33 @@ jobs:
     # foreign row — reddening 10 fencing/drain tests with `assert None is not None`
     # and `assert 'pending' == 'running'`.
     #
-    # The group already on `python` (see its comment) was added for CROSS-PR
-    # contention and explicitly reasons about "two different PRs' python jobs";
-    # it never covered two jobs INSIDE one run. `e2e` (the smoke batch) does not
-    # need the group — it builds against `https://placeholder.supabase.co` and
+    # The serialization already on `python` (see its comment) was added for
+    # CROSS-PR contention and explicitly reasons about "two different PRs' python
+    # jobs"; it never covered two jobs INSIDE one run. `e2e` (the smoke batch)
+    # does not need it — it builds against `https://placeholder.supabase.co` and
     # never reaches the shared project.
     #
-    # Costs wall-clock: this job now queues behind `python` (~7m) instead of
+    # Costs wall-clock: this job waits behind `python` (~7m) instead of
     # overlapping it. That is the price of the tests being trustworthy; the
     # alternative is a suite that reds on interleaving rather than on defects.
-    concurrency:
-      group: shared-test-db
-      cancel-in-progress: false
-    # ⛔ Do NOT add `sql-tests` to this `needs:` list to serialize the
-    # shared-test-db group. It looks right and it silently disables THIS job on
+    #
+    # Phase 158 / OPS-01: the mechanism used to be a repo-wide GitHub concurrency
+    # group shared with `python` and `sql-tests`. It is now the "Acquire
+    # shared-test-db mutex" step below — a Postgres SESSION advisory lock on key
+    # 61616158. ⛔ Do NOT reintroduce that group in any shape (including a
+    # shrunken one): with three members, a third arrival EVICTED the queued run,
+    # which concluded `cancelled` — a GREY check that Railway read as a failed
+    # check-suite, silently skipping the analytics deploy (issue #616). The
+    # eviction is CROSS-run, so shrinking only changes which run dies. Full
+    # mechanism in the ⛔ block on `sql-tests`.
+    # ⛔ Do NOT add `sql-tests` to this `needs:` list to serialize the shared test
+    # DB. It looks right and it silently disables THIS job on
     # every `workflow_dispatch` run: a skipped `needs:` job skips its dependents,
     # and the two `if:` conditions diverge on manual dispatch — `sql-tests`
     # requires `github.event_name == 'push'` (false) while this job only requires
     # `!= 'pull_request'` (true). The aggregator at the `e2e-seeded result=`
-    # check then errors on the skip. The group is serialized by gating
-    # `sql-tests` behind `python` instead; see the ⛔ note on that job.
+    # check then errors on the skip. Serialization needs no `needs:` edge at all
+    # now — the mutex does it, which is exactly why adding one is still wrong.
     needs:
       - frontend-typecheck
     steps:
@@ -1595,6 +1801,69 @@ jobs:
           else
             npx playwright install --with-deps chromium
           fi
+      # Phase 158 / OPS-01 — the shared-test-db mutex, byte-identical to the step
+      # in `sql-tests` and `python` (see the long note on `sql-tests` for the
+      # mechanism and the ⛔ constraints). Placed immediately before the seed
+      # step, which is this job's first DB-MUTATING step.
+      #
+      # NOTE on hold length: the Next build below runs AFTER the seed, so the
+      # lock is held across it (~1-2m). The build is deliberately NOT reordered
+      # ahead of the seed to shorten the hold: `npm run build` prerenders public
+      # routes against the real test-Supabase env, so building before the demo
+      # rows exist would bake a different (empty) prerender into the bundle the
+      # seeded specs then assert against.
+      - name: Acquire shared-test-db mutex
+        env:
+          TEST_SUPABASE_DB_URL: ${{ secrets.TEST_SUPABASE_DB_URL }}
+        run: |
+          set -euo pipefail
+          if [ -z "${TEST_SUPABASE_DB_URL:-}" ]; then
+            echo "fork PR / secret withheld — mutex skipped (DB work self-skips on forks)"
+            exit 0
+          fi
+          if ! command -v psql >/dev/null 2>&1; then
+            sudo apt-get update -y
+            sudo apt-get install -y --no-install-recommends postgresql-client
+          fi
+          # Session-mode DSN. The documented secret points at the Supavisor
+          # pooler on port 6543 = TRANSACTION mode, where a SESSION advisory lock
+          # does not survive between statements; session mode is served on 5432
+          # of the same host. Derived by parameter expansion and NEVER echoed —
+          # this repository is public and the derived string is not a value
+          # GitHub can mask for us.
+          dsn="${TEST_SUPABASE_DB_URL}"
+          case "${dsn}" in
+            *":6543/"*) dsn="${dsn%%:6543/*}:5432/${dsn#*:6543/}" ;;
+          esac
+          log="${RUNNER_TEMP}/shared-test-db-mutex.log"
+          : > "${log}"
+          PGAPPNAME=ci-shared-test-db-mutex PGCONNECT_TIMEOUT=15 \
+            nohup psql "${dsn}" -X -q -A -t -v ON_ERROR_STOP=1 \
+              -c "SELECT pg_advisory_lock(61616158);" \
+              -c "SELECT 'MUTEX-ACQUIRED';" \
+              -c "SELECT pg_sleep(3300);" \
+              >> "${log}" 2>&1 &
+          holder=$!
+          echo "${holder}" > "${RUNNER_TEMP}/shared-test-db-mutex.pid"
+          waited=0
+          while [ "${waited}" -lt 2700 ]; do
+            if grep -q 'MUTEX-ACQUIRED' "${log}" 2>/dev/null; then
+              echo "Acquired the shared-test-db advisory lock (key 61616158) after ${waited}s."
+              exit 0
+            fi
+            if ! kill -0 "${holder}" 2>/dev/null; then
+              echo "::error::the mutex psql session exited before acquiring the lock (redacted output follows)."
+              sed -E 's#(postgres(ql)?://)[^@]*@#\1***@#g' "${log}" >&2 || true
+              exit 1
+            fi
+            sleep 5
+            waited=$(( waited + 5 ))
+            if [ $(( waited % 60 )) -eq 0 ]; then
+              echo "still waiting on the shared-test-db mutex (${waited}s) — another run holds it."
+            fi
+          done
+          echo "::error::timed out after ${waited}s waiting for the shared-test-db advisory lock (key 61616158) — a holder is wedged. Unlock: docs/runbooks/shared-test-db-mutex.md."
+          exit 1
       - name: Seed demo data into test Supabase
         # Populates the 8-strategy demo set the seed-gated specs require.
         # Defense-in-depth against running this against prod by accident:
@@ -1875,6 +2144,24 @@ jobs:
           path: e2e/svg-chart-parity.spec.ts-snapshots/**/*.png
           if-no-files-found: error
           retention-days: 7
+      # Best-effort EARLY release of the shared-test-db mutex (Phase 158 /
+      # OPS-01), identical in all three DB-touching jobs. See the note on
+      # `sql-tests`: teardown releases the lock anyway, this just hands it over
+      # sooner and never reddens the job.
+      - name: Release shared-test-db mutex (best effort)
+        if: always()
+        run: |
+          pidfile="${RUNNER_TEMP}/shared-test-db-mutex.pid"
+          if [ ! -f "${pidfile}" ]; then
+            echo "No mutex pid recorded (fork PR / acquire skipped) — nothing to release."
+            exit 0
+          fi
+          holder="$(cat "${pidfile}")"
+          if kill "${holder}" 2>/dev/null; then
+            echo "Released the shared-test-db mutex (terminated psql pid ${holder})."
+          else
+            echo "Mutex holder pid ${holder} was already gone — the session drop released the lock."
+          fi
       # retro-PR179-H1 / C-0293(c): NO playwright-report upload from this
       # job, ever. Every spec here runs against the REAL-env build, and
       # Playwright's trace.zip + on-failure screenshots embed
