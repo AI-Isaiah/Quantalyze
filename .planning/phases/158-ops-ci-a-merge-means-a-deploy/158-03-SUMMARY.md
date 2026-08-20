@@ -257,6 +257,14 @@ green independently of any drain.
 - **Blocker carried forward:** the TEST backlog is still growing daily. `status: halted` is
   deliberate — resolve it by running the measurement, not by re-summarizing.
 
+## Self-Check: PASSED
+
+- Files exist on disk: `scripts/drain-test-compute-backlog.ts`,
+  `.planning/phases/158-ops-ci-a-merge-means-a-deploy/158-OPS04-DRAIN-EVIDENCE.md`,
+  `.planning/phases/158-ops-ci-a-merge-means-a-deploy/158-03-SUMMARY.md` — all found.
+- Commits exist: `5ed93964`, `2c747d62`, `dc9b5692`, `8922898a` — all found in `git log`.
+- No shared orchestrator artifact was written: `STATE.md` and `ROADMAP.md` are untouched.
+
 ---
 *Phase: 158-ops-ci-a-merge-means-a-deploy*
 *Completed: 2026-08-20*
