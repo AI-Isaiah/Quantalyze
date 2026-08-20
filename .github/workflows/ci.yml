@@ -1102,7 +1102,7 @@ jobs:
             *":6543/"*) dsn="${dsn%%:6543/*}:5432/${dsn#*:6543/}" ;;
           esac
           log="${RUNNER_TEMP}/shared-test-db-mutex.log"
-          : > "${log}"
+          pidfile="${RUNNER_TEMP}/shared-test-db-mutex.pid"
           # 158-REVIEW WR-01: the idle sleep MUST outlive this job's
           # `timeout-minutes`, or the holder session ends — releasing the lock —
           # while the job is still doing DB work, and another run walks straight
@@ -1114,14 +1114,17 @@ jobs:
           # ⛔ If you lower `timeout-minutes`, this stays valid. If you RAISE it,
           # raise this too — the invariant is sleep > TTL, and nothing else
           # enforces it.
-          PGAPPNAME=ci-shared-test-db-mutex PGCONNECT_TIMEOUT=15 \
-            nohup psql "${dsn}" -X -q -A -t -v ON_ERROR_STOP=1 \
-              -c "SELECT pg_advisory_lock(61616158);" \
-              -c "SELECT 'MUTEX-ACQUIRED';" \
-              -c "SELECT pg_sleep(6000);" \
-              >> "${log}" 2>&1 &
-          holder=$!
-          echo "${holder}" > "${RUNNER_TEMP}/shared-test-db-mutex.pid"
+          start_holder() {
+            : > "${log}"
+            PGAPPNAME=ci-shared-test-db-mutex PGCONNECT_TIMEOUT=15 \
+              nohup psql "${dsn}" -X -q -A -t -v ON_ERROR_STOP=1 \
+                -c "SELECT pg_advisory_lock(61616158);" \
+                -c "SELECT 'MUTEX-ACQUIRED';" \
+                -c "SELECT pg_sleep(6000);" \
+                >> "${log}" 2>&1 &
+            holder=$!
+            echo "${holder}" > "${pidfile}"
+          }
           # 158-REVIEW CR-04: the cap absorbs legitimate cross-run QUEUE DEPTH,
           # not just a wedge. Three simultaneous runs put ~8 other holds ahead of
           # the last waiter (~60m at the measured ~20m of lock-time per run), and
@@ -1129,23 +1132,54 @@ jobs:
           # comparable to the work it had to absorb, so ordinary contention —
           # which this repo's history records as NORMAL — surfaced as a red
           # sql-tests → red `frontend` → skipped Railway deploy.
+          #
+          # 158-REVIEW WR-13: retry a DEAD SESSION, never a full wait. Every
+          # other network op in this file retries by explicit flakiness-audit
+          # decision (`npm ci`, `pip install`, the lychee download, the SRH
+          # readiness poll); this one did not, so a single transient connect
+          # blip inside PGCONNECT_TIMEOUT killed the backgrounded psql and
+          # exited 1 — now a red REQUIRED check, and on main a skipped Railway
+          # deploy. The two failure modes are deliberately kept distinct:
+          # "session died" is retryable (below), "waited past the cap" is NOT
+          # (that is contention, and retrying would just re-queue at the back).
+          # `waited` is CUMULATIVE across attempts, so retries can never extend
+          # the total wait beyond the cap the TTL was sized against.
           waited=0
-          while [ "${waited}" -lt 3600 ]; do
-            if grep -q 'MUTEX-ACQUIRED' "${log}" 2>/dev/null; then
-              echo "Acquired the shared-test-db advisory lock (key 61616158) after ${waited}s."
-              exit 0
+          for attempt in 1 2 3; do
+            start_holder
+            while [ "${waited}" -lt 3600 ]; do
+              if grep -q 'MUTEX-ACQUIRED' "${log}" 2>/dev/null; then
+                echo "Acquired the shared-test-db advisory lock (key 61616158) after ${waited}s (attempt ${attempt}/3)."
+                exit 0
+              fi
+              if ! kill -0 "${holder}" 2>/dev/null; then
+                echo "::warning::mutex acquire attempt ${attempt}/3 lost its psql session after ${waited}s (redacted output follows)."
+                sed -E -e 's#(postgres(ql)?://)[^@]*@#\1***@#g' "${log}" >&2 || true
+                break
+              fi
+              sleep 5
+              waited=$(( waited + 5 ))
+              if [ $(( waited % 60 )) -eq 0 ]; then
+                echo "still waiting on the shared-test-db mutex (${waited}s) — another run holds it."
+              fi
+            done
+            # Cap exhausted => contention, not a transient. Stop retrying and
+            # fall through to the census + timeout diagnostic below.
+            if [ "${waited}" -ge 3600 ]; then
+              break
             fi
-            if ! kill -0 "${holder}" 2>/dev/null; then
-              echo "::error::the mutex psql session exited before acquiring the lock (redacted output follows)."
-              sed -E 's#(postgres(ql)?://)[^@]*@#\1***@#g' "${log}" >&2 || true
-              exit 1
-            fi
-            sleep 5
-            waited=$(( waited + 5 ))
-            if [ $(( waited % 60 )) -eq 0 ]; then
-              echo "still waiting on the shared-test-db mutex (${waited}s) — another run holds it."
-            fi
+            # The session is dead; drop its pid so the release step cannot kill
+            # an unrelated process that inherits the number.
+            rm -f "${pidfile}"
+            backoff=$(( attempt * 5 ))
+            echo "retrying the mutex acquire in ${backoff}s"
+            sleep "${backoff}"
+            waited=$(( waited + backoff ))
           done
+          if [ "${waited}" -lt 3600 ]; then
+            echo "::error::could not establish the shared-test-db mutex session after 3 attempts — psql died before acquiring each time (last output redacted above). This is a CONNECT/session fault, NOT lock contention: check the TEST project's session-mode pooler (port 5432) rather than hunting for a holder."
+            exit 1
+          fi
           # 158-REVIEW CR-04: do NOT assert "a holder is wedged" — measure, then
           # name both causes. From inside this loop a deep waiter queue and a
           # wedged holder are indistinguishable, and the old message confidently
@@ -1470,7 +1504,7 @@ jobs:
             *":6543/"*) dsn="${dsn%%:6543/*}:5432/${dsn#*:6543/}" ;;
           esac
           log="${RUNNER_TEMP}/shared-test-db-mutex.log"
-          : > "${log}"
+          pidfile="${RUNNER_TEMP}/shared-test-db-mutex.pid"
           # 158-REVIEW WR-01: the idle sleep MUST outlive this job's
           # `timeout-minutes`, or the holder session ends — releasing the lock —
           # while the job is still doing DB work, and another run walks straight
@@ -1482,14 +1516,17 @@ jobs:
           # ⛔ If you lower `timeout-minutes`, this stays valid. If you RAISE it,
           # raise this too — the invariant is sleep > TTL, and nothing else
           # enforces it.
-          PGAPPNAME=ci-shared-test-db-mutex PGCONNECT_TIMEOUT=15 \
-            nohup psql "${dsn}" -X -q -A -t -v ON_ERROR_STOP=1 \
-              -c "SELECT pg_advisory_lock(61616158);" \
-              -c "SELECT 'MUTEX-ACQUIRED';" \
-              -c "SELECT pg_sleep(6000);" \
-              >> "${log}" 2>&1 &
-          holder=$!
-          echo "${holder}" > "${RUNNER_TEMP}/shared-test-db-mutex.pid"
+          start_holder() {
+            : > "${log}"
+            PGAPPNAME=ci-shared-test-db-mutex PGCONNECT_TIMEOUT=15 \
+              nohup psql "${dsn}" -X -q -A -t -v ON_ERROR_STOP=1 \
+                -c "SELECT pg_advisory_lock(61616158);" \
+                -c "SELECT 'MUTEX-ACQUIRED';" \
+                -c "SELECT pg_sleep(6000);" \
+                >> "${log}" 2>&1 &
+            holder=$!
+            echo "${holder}" > "${pidfile}"
+          }
           # 158-REVIEW CR-04: the cap absorbs legitimate cross-run QUEUE DEPTH,
           # not just a wedge. Three simultaneous runs put ~8 other holds ahead of
           # the last waiter (~60m at the measured ~20m of lock-time per run), and
@@ -1497,23 +1534,54 @@ jobs:
           # comparable to the work it had to absorb, so ordinary contention —
           # which this repo's history records as NORMAL — surfaced as a red
           # sql-tests → red `frontend` → skipped Railway deploy.
+          #
+          # 158-REVIEW WR-13: retry a DEAD SESSION, never a full wait. Every
+          # other network op in this file retries by explicit flakiness-audit
+          # decision (`npm ci`, `pip install`, the lychee download, the SRH
+          # readiness poll); this one did not, so a single transient connect
+          # blip inside PGCONNECT_TIMEOUT killed the backgrounded psql and
+          # exited 1 — now a red REQUIRED check, and on main a skipped Railway
+          # deploy. The two failure modes are deliberately kept distinct:
+          # "session died" is retryable (below), "waited past the cap" is NOT
+          # (that is contention, and retrying would just re-queue at the back).
+          # `waited` is CUMULATIVE across attempts, so retries can never extend
+          # the total wait beyond the cap the TTL was sized against.
           waited=0
-          while [ "${waited}" -lt 3600 ]; do
-            if grep -q 'MUTEX-ACQUIRED' "${log}" 2>/dev/null; then
-              echo "Acquired the shared-test-db advisory lock (key 61616158) after ${waited}s."
-              exit 0
+          for attempt in 1 2 3; do
+            start_holder
+            while [ "${waited}" -lt 3600 ]; do
+              if grep -q 'MUTEX-ACQUIRED' "${log}" 2>/dev/null; then
+                echo "Acquired the shared-test-db advisory lock (key 61616158) after ${waited}s (attempt ${attempt}/3)."
+                exit 0
+              fi
+              if ! kill -0 "${holder}" 2>/dev/null; then
+                echo "::warning::mutex acquire attempt ${attempt}/3 lost its psql session after ${waited}s (redacted output follows)."
+                sed -E -e 's#(postgres(ql)?://)[^@]*@#\1***@#g' "${log}" >&2 || true
+                break
+              fi
+              sleep 5
+              waited=$(( waited + 5 ))
+              if [ $(( waited % 60 )) -eq 0 ]; then
+                echo "still waiting on the shared-test-db mutex (${waited}s) — another run holds it."
+              fi
+            done
+            # Cap exhausted => contention, not a transient. Stop retrying and
+            # fall through to the census + timeout diagnostic below.
+            if [ "${waited}" -ge 3600 ]; then
+              break
             fi
-            if ! kill -0 "${holder}" 2>/dev/null; then
-              echo "::error::the mutex psql session exited before acquiring the lock (redacted output follows)."
-              sed -E 's#(postgres(ql)?://)[^@]*@#\1***@#g' "${log}" >&2 || true
-              exit 1
-            fi
-            sleep 5
-            waited=$(( waited + 5 ))
-            if [ $(( waited % 60 )) -eq 0 ]; then
-              echo "still waiting on the shared-test-db mutex (${waited}s) — another run holds it."
-            fi
+            # The session is dead; drop its pid so the release step cannot kill
+            # an unrelated process that inherits the number.
+            rm -f "${pidfile}"
+            backoff=$(( attempt * 5 ))
+            echo "retrying the mutex acquire in ${backoff}s"
+            sleep "${backoff}"
+            waited=$(( waited + backoff ))
           done
+          if [ "${waited}" -lt 3600 ]; then
+            echo "::error::could not establish the shared-test-db mutex session after 3 attempts — psql died before acquiring each time (last output redacted above). This is a CONNECT/session fault, NOT lock contention: check the TEST project's session-mode pooler (port 5432) rather than hunting for a holder."
+            exit 1
+          fi
           # 158-REVIEW CR-04: do NOT assert "a holder is wedged" — measure, then
           # name both causes. From inside this loop a deep waiter queue and a
           # wedged holder are indistinguishable, and the old message confidently
@@ -2013,7 +2081,7 @@ jobs:
             *":6543/"*) dsn="${dsn%%:6543/*}:5432/${dsn#*:6543/}" ;;
           esac
           log="${RUNNER_TEMP}/shared-test-db-mutex.log"
-          : > "${log}"
+          pidfile="${RUNNER_TEMP}/shared-test-db-mutex.pid"
           # 158-REVIEW WR-01: the idle sleep MUST outlive this job's
           # `timeout-minutes`, or the holder session ends — releasing the lock —
           # while the job is still doing DB work, and another run walks straight
@@ -2025,14 +2093,17 @@ jobs:
           # ⛔ If you lower `timeout-minutes`, this stays valid. If you RAISE it,
           # raise this too — the invariant is sleep > TTL, and nothing else
           # enforces it.
-          PGAPPNAME=ci-shared-test-db-mutex PGCONNECT_TIMEOUT=15 \
-            nohup psql "${dsn}" -X -q -A -t -v ON_ERROR_STOP=1 \
-              -c "SELECT pg_advisory_lock(61616158);" \
-              -c "SELECT 'MUTEX-ACQUIRED';" \
-              -c "SELECT pg_sleep(6000);" \
-              >> "${log}" 2>&1 &
-          holder=$!
-          echo "${holder}" > "${RUNNER_TEMP}/shared-test-db-mutex.pid"
+          start_holder() {
+            : > "${log}"
+            PGAPPNAME=ci-shared-test-db-mutex PGCONNECT_TIMEOUT=15 \
+              nohup psql "${dsn}" -X -q -A -t -v ON_ERROR_STOP=1 \
+                -c "SELECT pg_advisory_lock(61616158);" \
+                -c "SELECT 'MUTEX-ACQUIRED';" \
+                -c "SELECT pg_sleep(6000);" \
+                >> "${log}" 2>&1 &
+            holder=$!
+            echo "${holder}" > "${pidfile}"
+          }
           # 158-REVIEW CR-04: the cap absorbs legitimate cross-run QUEUE DEPTH,
           # not just a wedge. Three simultaneous runs put ~8 other holds ahead of
           # the last waiter (~60m at the measured ~20m of lock-time per run), and
@@ -2040,23 +2111,54 @@ jobs:
           # comparable to the work it had to absorb, so ordinary contention —
           # which this repo's history records as NORMAL — surfaced as a red
           # sql-tests → red `frontend` → skipped Railway deploy.
+          #
+          # 158-REVIEW WR-13: retry a DEAD SESSION, never a full wait. Every
+          # other network op in this file retries by explicit flakiness-audit
+          # decision (`npm ci`, `pip install`, the lychee download, the SRH
+          # readiness poll); this one did not, so a single transient connect
+          # blip inside PGCONNECT_TIMEOUT killed the backgrounded psql and
+          # exited 1 — now a red REQUIRED check, and on main a skipped Railway
+          # deploy. The two failure modes are deliberately kept distinct:
+          # "session died" is retryable (below), "waited past the cap" is NOT
+          # (that is contention, and retrying would just re-queue at the back).
+          # `waited` is CUMULATIVE across attempts, so retries can never extend
+          # the total wait beyond the cap the TTL was sized against.
           waited=0
-          while [ "${waited}" -lt 3600 ]; do
-            if grep -q 'MUTEX-ACQUIRED' "${log}" 2>/dev/null; then
-              echo "Acquired the shared-test-db advisory lock (key 61616158) after ${waited}s."
-              exit 0
+          for attempt in 1 2 3; do
+            start_holder
+            while [ "${waited}" -lt 3600 ]; do
+              if grep -q 'MUTEX-ACQUIRED' "${log}" 2>/dev/null; then
+                echo "Acquired the shared-test-db advisory lock (key 61616158) after ${waited}s (attempt ${attempt}/3)."
+                exit 0
+              fi
+              if ! kill -0 "${holder}" 2>/dev/null; then
+                echo "::warning::mutex acquire attempt ${attempt}/3 lost its psql session after ${waited}s (redacted output follows)."
+                sed -E -e 's#(postgres(ql)?://)[^@]*@#\1***@#g' "${log}" >&2 || true
+                break
+              fi
+              sleep 5
+              waited=$(( waited + 5 ))
+              if [ $(( waited % 60 )) -eq 0 ]; then
+                echo "still waiting on the shared-test-db mutex (${waited}s) — another run holds it."
+              fi
+            done
+            # Cap exhausted => contention, not a transient. Stop retrying and
+            # fall through to the census + timeout diagnostic below.
+            if [ "${waited}" -ge 3600 ]; then
+              break
             fi
-            if ! kill -0 "${holder}" 2>/dev/null; then
-              echo "::error::the mutex psql session exited before acquiring the lock (redacted output follows)."
-              sed -E 's#(postgres(ql)?://)[^@]*@#\1***@#g' "${log}" >&2 || true
-              exit 1
-            fi
-            sleep 5
-            waited=$(( waited + 5 ))
-            if [ $(( waited % 60 )) -eq 0 ]; then
-              echo "still waiting on the shared-test-db mutex (${waited}s) — another run holds it."
-            fi
+            # The session is dead; drop its pid so the release step cannot kill
+            # an unrelated process that inherits the number.
+            rm -f "${pidfile}"
+            backoff=$(( attempt * 5 ))
+            echo "retrying the mutex acquire in ${backoff}s"
+            sleep "${backoff}"
+            waited=$(( waited + backoff ))
           done
+          if [ "${waited}" -lt 3600 ]; then
+            echo "::error::could not establish the shared-test-db mutex session after 3 attempts — psql died before acquiring each time (last output redacted above). This is a CONNECT/session fault, NOT lock contention: check the TEST project's session-mode pooler (port 5432) rather than hunting for a holder."
+            exit 1
+          fi
           # 158-REVIEW CR-04: do NOT assert "a holder is wedged" — measure, then
           # name both causes. From inside this loop a deep waiter queue and a
           # wedged holder are indistinguishable, and the old message confidently
