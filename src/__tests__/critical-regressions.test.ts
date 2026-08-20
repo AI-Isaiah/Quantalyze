@@ -1147,28 +1147,65 @@ describe("Critical regression guards", () => {
     // tick under a 5 s lock_timeout. Unserialized, a concurrent run's rows land
     // in this run's 25-row budget (LIMIT assertions redden on interleaving, not
     // on a defect) and lock contention surfaces as a 55P03 flake on an innocent
-    // PR. The group MUST be the repo-wide `shared-test-db` that `python` and
-    // `e2e-seeded` already carry — a job-private group name would serialize
-    // this job only against itself and leave the cross-job races open.
-    describe("sql-tests shared-test-db serialization (D-05)", () => {
-      it("ci.yml sql-tests job joins the shared-test-db concurrency group", () => {
-        const src = readText(".github/workflows/ci.yml");
-        // Same job-slicing idiom as the supabase-migrate describes above:
-        // anchor on the start-of-line job key, stop at the next top-level one.
-        const sqlTestsJob = findOrFail(
+    // PR.
+    //
+    // Re-baselined by Phase 158 / OPS-01: the serializer is no longer the
+    // GitHub `shared-test-db` concurrency group. GitHub keeps exactly ONE
+    // pending entry per group, so a THIRD contender EVICTED the queued run as
+    // `cancelled` (grey, not red) and Railway's wait-for-CI silently skipped
+    // the analytics deploy (issue #616). The replacement is a Postgres
+    // SESSION advisory lock: each DB-touching job's "Acquire shared-test-db
+    // mutex" step holds pg_advisory_lock on one shared key for the rest of
+    // the job, so contenders BLOCK inside the lock instead of being evicted.
+    // The D-05 intent is unchanged — `sql-tests` must be serialized against
+    // the shared project by the SAME mechanism `python` and `e2e-seeded` use
+    // — so the pin now asserts (a) all three jobs carry the acquire step,
+    // (b) they share ONE lock key (a diverged key serializes a job only
+    // against itself and re-opens the exact cross-job races above), and
+    // (c) the evictable group never comes back.
+    describe("shared-test-db serialization via the advisory-lock mutex (D-05 / Phase 158)", () => {
+      const DB_JOBS = ["sql-tests", "python", "e2e-seeded"] as const;
+      // Same job-slicing idiom as the supabase-migrate describes above:
+      // anchor on the start-of-line job key, stop at the next top-level one.
+      const jobSlice = (src: string, job: string): string =>
+        findOrFail(
           src,
-          /^ {2}sql-tests:\s*\n([\s\S]*?)(?=\n {2}[a-z])/m,
-          "ci.yml: sql-tests job not found",
+          new RegExp(`^ {2}${job}:\\s*\\n([\\s\\S]*?)(?=\\n {2}[a-z])`, "m"),
+          `ci.yml: ${job} job not found`,
         );
-        expectMatch(
-          sqlTestsJob,
+
+      it("all three DB-touching jobs acquire the mutex on ONE shared advisory-lock key", () => {
+        const src = readText(".github/workflows/ci.yml");
+        const keyByJob = new Map<string, string>();
+        for (const job of DB_JOBS) {
+          const body = jobSlice(src, job);
+          expectMatch(
+            body,
+            /- name: Acquire shared-test-db mutex/,
+            `ci.yml ${job} job lost its \`Acquire shared-test-db mutex\` step — it runs against the SHARED test project unserialized, so the reaper gate's LIMIT-25 assertions can be broken by a concurrent run's rows and its 5 s lock_timeout becomes a 55P03 flake on unrelated PRs (D-05)`,
+          );
+          const keys = [...body.matchAll(/pg_advisory_lock\((\d+)\)/g)].map((m) => m[1]);
+          expect(
+            keys.length,
+            `ci.yml ${job} job: expected exactly ONE pg_advisory_lock(<key>) call (the mutex acquire), found ${keys.length} — the same-key comparison needs an unambiguous key per job`,
+          ).toBe(1);
+          keyByJob.set(job, keys[0]);
+        }
+        const distinctKeys = new Set(keyByJob.values());
+        expect(
+          distinctKeys.size,
+          `ci.yml DB-touching jobs disagree on the advisory-lock key (${[...keyByJob]
+            .map(([job, key]) => `${job}=${key}`)
+            .join(", ")}) — a diverged key serializes each job only against itself, which is exactly the unserialized cross-job state D-05 closed (LIMIT-25 interleaving + 55P03 flakes on the shared test project)`,
+        ).toBe(1);
+      });
+
+      it("the evictable `group: shared-test-db` concurrency group never reappears in ci.yml", () => {
+        const src = readText(".github/workflows/ci.yml");
+        expectNoMatch(
+          src,
           /group:\s*shared-test-db/,
-          "ci.yml sql-tests job lost `group: shared-test-db` — the SQL gates run unserialized against the SHARED test project, so the reaper gate's LIMIT-25 assertions can be broken by a concurrent run's rows and its 5 s lock_timeout becomes a 55P03 flake on unrelated PRs (D-05). A DIFFERENT group name does not fix this: it must be the same group `python` and `e2e-seeded` carry.",
-        );
-        expectMatch(
-          sqlTestsJob,
-          /cancel-in-progress:\s*false/,
-          "ci.yml sql-tests job lost `cancel-in-progress: false` — contending runs would be CANCELLED instead of queued, so a push-to-main sql-tests job could lose its required per-SHA check (D-05)",
+          "ci.yml reintroduced `group: shared-test-db` — GitHub holds exactly ONE pending entry per concurrency group, so a third contender EVICTS the queued run as `cancelled` (grey, not red) and Railway's wait-for-CI silently skips the deploy (issue #616). Serialization lives in the `Acquire shared-test-db mutex` advisory-lock step; do not resurrect the group (D-05 / Phase 158)",
         );
       });
     });
@@ -1283,6 +1320,7 @@ describe("Critical regression guards", () => {
           `${WORKFLOW_DIR}/migration-drift-check.yml`,
           `${WORKFLOW_DIR}/migration-policy-self-test.yml`,
           `${WORKFLOW_DIR}/migration-policy.yml`,
+          `${WORKFLOW_DIR}/mutex-probe.yml`,
           `${WORKFLOW_DIR}/sql-function-snapshot.yml`,
           `${WORKFLOW_DIR}/supabase-migrate.yml`,
         ]);

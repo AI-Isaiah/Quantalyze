@@ -43,6 +43,15 @@ on:
     branches:
       - "ci-probe/**"
 
+# B24 baseline: cross-RUN concurrency only. A superseded push to the same
+# ci-probe/** branch cancels the stale drill — the newest probe result is the
+# only one anyone acts on. Workflow-level concurrency never serializes jobs
+# WITHIN a run, so the three matrix contenders below still start together,
+# which is the simultaneity this probe's proof depends on.
+concurrency:
+  group: mutex-probe-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
