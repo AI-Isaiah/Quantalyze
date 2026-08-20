@@ -1,5 +1,29 @@
 import { test, expect } from "@playwright/test";
 import { createClient } from "@supabase/supabase-js";
+import {
+  assertNotProductionSupabaseUrl,
+  assertSupabaseServiceRoleKey,
+} from "../src/lib/test-safety";
+
+/**
+ * Fail-closed admin-env resolution (158-05 finding, fixed 2026-08-20).
+ * Only explicitly TEST-named env is accepted — the previous fallback to
+ * NEXT_PUBLIC_SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY meant a local run
+ * with ambient production env would seed PROD with the service-role key.
+ * Canonical names first (what ci.yml exports), legacy TEST-named aliases
+ * second; ambient names never.
+ */
+function resolveTestAdminEnv(): { url: string; serviceKey: string } | null {
+  const url =
+    process.env.TEST_SUPABASE_URL ?? process.env.SUPABASE_TEST_URL;
+  const serviceKey =
+    process.env.TEST_SUPABASE_SERVICE_ROLE_KEY ??
+    process.env.SUPABASE_TEST_SERVICE_ROLE_KEY;
+  if (!url || !serviceKey) return null;
+  assertNotProductionSupabaseUrl(url, "csv-upload-flow");
+  assertSupabaseServiceRoleKey(serviceKey, "csv-upload-flow");
+  return { url, serviceKey };
+}
 
 /**
  * E2E coverage for Phase 15 / CSV-01..CSV-03 — the CSV branch of the
@@ -74,18 +98,14 @@ test.describe("/strategies/new/wizard?source=csv (Phase 15 / CSV-01..CSV-03)", (
   // BEFORE any tests run. If creds are missing, leave it null and the
   // afterAll cleanup will warn but not fail.
   test.beforeAll(async () => {
-    const url =
-      process.env.SUPABASE_TEST_URL ?? process.env.NEXT_PUBLIC_SUPABASE_URL;
-    const serviceKey =
-      process.env.SUPABASE_TEST_SERVICE_ROLE_KEY ??
-      process.env.SUPABASE_SERVICE_ROLE_KEY;
-    if (!url || !serviceKey) {
+    const adminEnv = resolveTestAdminEnv();
+    if (!adminEnv) {
       console.warn(
-        "[csv-upload-flow] beforeAll: SUPABASE_TEST_URL / NEXT_PUBLIC_SUPABASE_URL or SUPABASE_TEST_SERVICE_ROLE_KEY / SUPABASE_SERVICE_ROLE_KEY missing; user-id resolution skipped (cleanup will warn).",
+        "[csv-upload-flow] beforeAll: TEST_SUPABASE_URL / TEST_SUPABASE_SERVICE_ROLE_KEY (or SUPABASE_TEST_* aliases) missing; user-id resolution skipped (cleanup will warn). Ambient NEXT_PUBLIC_SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY are deliberately NOT used — they may point at PROD.",
       );
       return;
     }
-    const admin = createClient(url, serviceKey, {
+    const admin = createClient(adminEnv.url, adminEnv.serviceKey, {
       auth: { persistSession: false },
     });
     // auth.admin.listUsers paginates. The test demo user is in page 1
@@ -312,14 +332,10 @@ test.describe("/strategies/new/wizard?source=csv (Phase 15 / CSV-01..CSV-03)", (
   // in the shared test Supabase project. Use the test-runtime-resolved
   // user id (from beforeAll's auth.users SELECT) — NOT from process.env.
   test.afterAll(async () => {
-    const url =
-      process.env.SUPABASE_TEST_URL ?? process.env.NEXT_PUBLIC_SUPABASE_URL;
-    const serviceKey =
-      process.env.SUPABASE_TEST_SERVICE_ROLE_KEY ??
-      process.env.SUPABASE_SERVICE_ROLE_KEY;
-    if (!url || !serviceKey) {
+    const adminEnv = resolveTestAdminEnv();
+    if (!adminEnv) {
       console.warn(
-        "[csv-upload-flow] afterAll: SUPABASE_TEST_URL / NEXT_PUBLIC_SUPABASE_URL or SUPABASE_TEST_SERVICE_ROLE_KEY / SUPABASE_SERVICE_ROLE_KEY missing; cleanup skipped.",
+        "[csv-upload-flow] afterAll: TEST_SUPABASE_URL / TEST_SUPABASE_SERVICE_ROLE_KEY (or SUPABASE_TEST_* aliases) missing; cleanup skipped.",
       );
       return;
     }
@@ -329,7 +345,7 @@ test.describe("/strategies/new/wizard?source=csv (Phase 15 / CSV-01..CSV-03)", (
       );
       return;
     }
-    const admin = createClient(url, serviceKey, {
+    const admin = createClient(adminEnv.url, adminEnv.serviceKey, {
       auth: { persistSession: false },
     });
     // Narrow filter: only csv-source pending_review strategies for the

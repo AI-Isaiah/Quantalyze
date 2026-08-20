@@ -1,6 +1,10 @@
 import { test, expect } from "@playwright/test";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import { randomUUID } from "crypto";
+import {
+  assertNotProductionSupabaseUrl,
+  assertSupabaseServiceRoleKey,
+} from "../src/lib/test-safety";
 
 /**
  * Phase 2 — Mandate Profile Builder E2E spec.
@@ -10,11 +14,18 @@ import { randomUUID } from "crypto";
  * — avoids cross-test contention, matches the Phase 1 isolation fix in 73a3a5b).
  *
  * Requires:
- *   HAS_SEEDED_SUPABASE=1           — seed infrastructure available
- *   NEXT_PUBLIC_SUPABASE_URL        — project URL
- *   SUPABASE_SERVICE_ROLE_KEY       — admin key (creates users + profile rows)
+ *   HAS_SEEDED_SUPABASE=1              — seed infrastructure available
+ *   TEST_SUPABASE_URL                  — TEST project URL
+ *   TEST_SUPABASE_SERVICE_ROLE_KEY     — TEST admin key (creates users + profile rows)
  *
  * Skips cleanly when any of these are absent so CI stays green without them.
+ *
+ * 158-05 (fixed 2026-08-20): only explicitly TEST-named env is accepted. The
+ * previous ambient NEXT_PUBLIC_SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY meant
+ * a local run (where .env.local is PRODUCTION) would create/delete users on
+ * PROD. Belt-and-braces: assertNotProductionSupabaseUrl +
+ * assertSupabaseServiceRoleKey fire before any client is built (same pattern
+ * as e2e/helpers/seed-test-project.ts getAdmin()).
  */
 
 const TEST_PASSWORD = "MandateE2E!-9f2c";
@@ -25,11 +36,21 @@ type AllocatorCtx = {
 };
 
 function makeAdminClient(): SupabaseClient {
-  return createClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.SUPABASE_SERVICE_ROLE_KEY!,
-    { auth: { persistSession: false } },
-  );
+  const url = process.env.TEST_SUPABASE_URL;
+  const serviceKey = process.env.TEST_SUPABASE_SERVICE_ROLE_KEY;
+  if (!url || !serviceKey) {
+    throw new Error(
+      "[mandate-form] TEST_SUPABASE_URL or TEST_SUPABASE_SERVICE_ROLE_KEY missing — " +
+        "the test.skip gate should have skipped this spec. Ambient " +
+        "NEXT_PUBLIC_SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY are deliberately " +
+        "NOT used: locally they point at PROD (158-05).",
+    );
+  }
+  assertNotProductionSupabaseUrl(url, "mandate-form");
+  assertSupabaseServiceRoleKey(serviceKey, "mandate-form");
+  return createClient(url, serviceKey, {
+    auth: { persistSession: false },
+  });
 }
 
 /**
@@ -82,9 +103,9 @@ async function destroyAllocator(admin: SupabaseClient, ctx: AllocatorCtx) {
 test.describe("Phase 2 — Mandate Profile Builder", () => {
   test.skip(
     !process.env.HAS_SEEDED_SUPABASE ||
-      !process.env.NEXT_PUBLIC_SUPABASE_URL ||
-      !process.env.SUPABASE_SERVICE_ROLE_KEY,
-    "requires seeded Supabase + service role key",
+      !process.env.TEST_SUPABASE_URL ||
+      !process.env.TEST_SUPABASE_SERVICE_ROLE_KEY,
+    "requires seeded Supabase + TEST_SUPABASE_URL / TEST_SUPABASE_SERVICE_ROLE_KEY",
   );
 
   test.setTimeout(60_000);
