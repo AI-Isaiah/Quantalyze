@@ -1,0 +1,273 @@
+name: Shared-test-db mutex probe
+
+# Phase 158 / OPS-01 — the FALSIFIABLE proof that a Postgres session advisory
+# lock (key 61616158) actually SERIALIZES three simultaneous CI contenders, and
+# the standing drill referenced by docs/runbooks/shared-test-db-mutex.md.
+#
+# Why it exists: ci.yml's `sql-tests`, `python` and `e2e-seeded` jobs used to
+# serialize through a GitHub `concurrency` group named after the shared test DB.
+# GitHub holds exactly ONE pending entry per group, so a THIRD contender EVICTED
+# the queued one — concluding `cancelled`, which renders as a GREY check rather
+# than a red one, so Railway's "wait for CI" silently SKIPPED the analytics
+# deploy and prod sat on stale code (issue #616). The replacement is an external
+# FIFO mutex: a session-mode psql connection holding pg_advisory_lock(61616158)
+# across each job's DB-touching span. Waiters block inside the lock instead of
+# being evicted. This probe is what proved that mechanism works from real
+# runners BEFORE ci.yml adopted it, and it must keep working afterwards.
+#
+# ⛔ NEVER add `main` — or any branch outside `ci-probe/**` — to the push
+# trigger. This probe CAN fail by design (that is the entire point). A red check
+# on a main-HEAD SHA makes Railway treat that commit's check-suite as red and
+# SKIP the deploy, recreating the exact #616 failure this phase removes. The
+# same trap is documented verbatim at analytics-deploy-verify.yml:17-24.
+#
+# What a GREEN run means: three contenders that started at the SAME wall-clock
+# barrier each held the lock over a window that does not overlap either other
+# window — i.e. mutual exclusion held through the pooler, on the session-mode
+# port. A RED run means either the lock did not serialize (the mechanism is
+# broken or the DSN reached a transaction-mode pooler, where session locks do
+# not survive) or a contender could not connect at all.
+#
+# Cost: ~3 x 45 s of serialized holding, ~5 min wall clock. It touches NO table
+# and takes no row locks — only the advisory lock — so it is safe to dispatch
+# against the shared TEST project at any time. If real CI is holding the mutex,
+# the probe simply queues behind it (and proves the point).
+#
+# Secret: TEST_SUPABASE_DB_URL, referenced BY NAME only. The derived session DSN
+# is never echoed, and psql's stderr is redacted before it reaches the log — this
+# repository is public.
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - "ci-probe/**"
+
+permissions:
+  contents: read
+
+jobs:
+  contend:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      # Every contender must run: a cancelled sibling would leave fewer than
+      # three windows and the assertion below could not distinguish "did not
+      # serialize" from "did not run".
+      fail-fast: false
+      matrix:
+        contender: [1, 2, 3]
+    steps:
+      # C-0293: every workflow checks out with persist-credentials:false, even
+      # when (as here) it needs no repo file — we conform rather than carve out
+      # an exemption to that guard.
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - name: Install psql client
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y --no-install-recommends postgresql-client
+      - name: Contend for the shared-test-db advisory lock
+        env:
+          TEST_SUPABASE_DB_URL: ${{ secrets.TEST_SUPABASE_DB_URL }}
+          CONTENDER: ${{ matrix.contender }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${TEST_SUPABASE_DB_URL}" ]; then
+            # Fork PR / secret withheld / secret deleted. Record INCONCLUSIVE
+            # rather than exiting green-and-silent: the assert job below reports
+            # it loudly and never counts it as a serialization pass.
+            echo "::error::TEST_SUPABASE_DB_URL is empty — this probe is INCONCLUSIVE, not a pass."
+            printf 'contender=%s\nstatus=inconclusive\n' "${CONTENDER}" > "window-${CONTENDER}.txt"
+            exit 0
+          fi
+
+          # Session-mode DSN. The documented secret is the Supavisor pooler on
+          # port 6543 = TRANSACTION mode, where session state (and therefore a
+          # session advisory lock) does not survive between statements. Session
+          # mode is served on 5432 of the same pooler host. If the DSN carries no
+          # ':6543/', it is already a session-mode or direct connection.
+          # Derived by parameter expansion, never echoed.
+          dsn="${TEST_SUPABASE_DB_URL}"
+          case "${dsn}" in
+            *":6543/"*)
+              dsn="${dsn%%:6543/*}:5432/${dsn#*:6543/}"
+              echo "Derived the session-mode DSN (port 6543 -> 5432); value not echoed."
+              ;;
+            *)
+              echo "DSN carries no ':6543/' — using it unchanged; value not echoed."
+              ;;
+          esac
+
+          # Simultaneity barrier. Three matrix jobs start within seconds of each
+          # other but their apt install times vary, and a probe whose contenders
+          # arrive 60 s apart would serialize trivially — a GREEN that proves
+          # nothing. All contenders sleep to a common 120 s wall-clock boundary
+          # (skipping to the next one when less than 20 s away, so a contender
+          # finishing just before the boundary cannot straddle it). The assert
+          # job REQUIRES all three barrier values to be identical; a misaligned
+          # run fails loudly and is re-dispatched rather than believed.
+          now=$(date +%s)
+          target=$(( (now / 120 + 1) * 120 ))
+          if [ $(( target - now )) -lt 20 ]; then
+            target=$(( target + 120 ))
+          fi
+          echo "contender ${CONTENDER}: barrier epoch ${target} (in $(( target - now ))s)"
+          sleep $(( target - $(date +%s) ))
+          arrival=$(date +%s)
+
+          # ONE psql session for the whole critical section: multiple -c commands
+          # share a single connection, so the session advisory lock taken by the
+          # first survives into the rest. Timestamps come from the DATABASE clock
+          # (clock_timestamp()), not three runner clocks, so the windows are
+          # comparable without any cross-runner skew. The RELEASED marker is
+          # taken just BEFORE the session ends, so each recorded window is a
+          # subset of the true hold — the non-overlap assertion is conservative.
+          set +e
+          PGAPPNAME=ci-mutex-probe PGCONNECT_TIMEOUT=15 \
+            psql "${dsn}" -X -q -A -t -v ON_ERROR_STOP=1 \
+              -c "SELECT pg_advisory_lock(61616158);" \
+              -c "SELECT 'ACQUIRED ' || extract(epoch from clock_timestamp())::bigint;" \
+              -c "SELECT pg_sleep(45);" \
+              -c "SELECT 'RELEASED ' || extract(epoch from clock_timestamp())::bigint;" \
+              > psql-out.txt 2> psql-err.txt
+          rc=$?
+          set -e
+          # Redact any userinfo (user:password@) before psql's stderr reaches the
+          # public log. psql does not print passwords, but the DSN we derived is
+          # not a registered secret value and GitHub cannot mask it for us.
+          sed -E 's#(postgres(ql)?://)[^@]*@#\1***@#g' psql-err.txt >&2 || true
+          if [ "${rc}" -ne 0 ]; then
+            echo "::error::contender ${CONTENDER}: psql exited ${rc} — session-mode connect or advisory-lock acquire FAILED. This is the go/no-go signal for the advisory-lock backend."
+            exit 1
+          fi
+
+          acquired=$(awk '/^ACQUIRED /{print $2}' psql-out.txt)
+          released=$(awk '/^RELEASED /{print $2}' psql-out.txt)
+          if [ -z "${acquired}" ] || [ -z "${released}" ]; then
+            echo "::error::contender ${CONTENDER}: psql succeeded but an ACQUIRED/RELEASED marker is missing — refusing to record a window."
+            exit 1
+          fi
+
+          {
+            echo "contender=${CONTENDER}"
+            echo "status=ok"
+            echo "barrier=${target}"
+            echo "arrival=${arrival}"
+            echo "acquired=${acquired}"
+            echo "released=${released}"
+          } > "window-${CONTENDER}.txt"
+          echo "contender ${CONTENDER}: held the lock for $(( released - acquired ))s"
+          cat "window-${CONTENDER}.txt"
+      - name: Upload this contender's lock window
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: window-${{ matrix.contender }}
+          path: window-${{ matrix.contender }}.txt
+          retention-days: 7
+
+  assert-serialization:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: contend
+    # always(): a contender that FAILED must still reach this assertion, which
+    # then reports "fewer than three windows" instead of the job graph quietly
+    # skipping the only check that can fail.
+    if: always()
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - name: Download contender windows
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: window-*
+          path: windows
+          merge-multiple: true
+      - name: Assert the three lock windows do not overlap
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import glob
+          import os
+          import sys
+
+          paths = sorted(glob.glob("windows/window-*.txt"))
+          windows = []
+          for path in paths:
+              rec = {}
+              with open(path, encoding="utf-8") as fh:
+                  for line in fh:
+                      line = line.strip()
+                      if "=" in line:
+                          k, v = line.split("=", 1)
+                          rec[k] = v
+              windows.append(rec)
+
+          if len(windows) != 3:
+              print(f"::error::expected 3 contender windows, found {len(windows)} "
+                    f"({', '.join(os.path.basename(p) for p in paths) or 'none'}). "
+                    "A contender failed to acquire the lock, or its artifact is missing.")
+              sys.exit(1)
+
+          statuses = {w.get("status") for w in windows}
+          if statuses == {"inconclusive"}:
+              print("::warning::all three contenders reported INCONCLUSIVE "
+                    "(TEST_SUPABASE_DB_URL empty). Nothing was proven — this is not a pass.")
+              sys.exit(0)
+          if statuses != {"ok"}:
+              print(f"::error::mixed/unknown contender statuses {sorted(s or '(absent)' for s in statuses)} "
+                    "— refusing to assert serialization on a partial run.")
+              sys.exit(1)
+
+          barriers = {w["barrier"] for w in windows}
+          if len(barriers) != 1:
+              print(f"::error::contenders did not share one simultaneity barrier {sorted(barriers)} "
+                    "— they never contended, so a non-overlap result would prove nothing. Re-dispatch.")
+              sys.exit(1)
+
+          for w in windows:
+              for key in ("arrival", "acquired", "released"):
+                  w[key] = int(w[key])
+
+          print(f"barrier epoch: {barriers.pop()} (all three contenders aligned)")
+          print("")
+          print("contender | arrival | acquired | released | held(s)")
+          for w in sorted(windows, key=lambda w: w["acquired"]):
+              print(f"    {w['contender']}     | {w['arrival']} | {w['acquired']} | "
+                    f"{w['released']} | {w['released'] - w['acquired']}")
+          print("")
+
+          # FIFO observation (RESEARCH assumption A1) — LOGGED, never asserted.
+          # The barrier deliberately makes all three arrive within milliseconds,
+          # so arrival order is not resolvable at 1 s granularity; this line
+          # records what was observed, it does not claim arrival-order fairness.
+          arrival_order = [w["contender"] for w in sorted(windows, key=lambda w: (w["arrival"], w["contender"]))]
+          acquire_order = [w["contender"] for w in sorted(windows, key=lambda w: w["acquired"])]
+          print(f"arrival order (runner clock, 1s granularity): {arrival_order}")
+          print(f"acquisition order (db clock):                 {acquire_order}")
+          print("FIFO note: observational only — the barrier collapses arrival spread below "
+                "the resolution of these timestamps, so this is not an ordering assertion.")
+          print("")
+
+          ordered = sorted(windows, key=lambda w: w["acquired"])
+          overlaps = []
+          for first, second in zip(ordered, ordered[1:]):
+              if first["released"] > second["acquired"]:
+                  overlaps.append(
+                      f"contender {first['contender']} still held the lock at "
+                      f"{first['released']} when contender {second['contender']} acquired it at "
+                      f"{second['acquired']} (overlap {first['released'] - second['acquired']}s)"
+                  )
+
+          if overlaps:
+              for line in overlaps:
+                  print(f"::error::{line}")
+              print("::error::the shared-test-db advisory lock did NOT serialize its contenders.")
+              sys.exit(1)
+
+          print("PASS: three simultaneous contenders held pg_advisory_lock(61616158) "
+                "over pairwise non-overlapping windows — the mutex serializes.")
+          PY
