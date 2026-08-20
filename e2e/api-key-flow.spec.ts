@@ -14,6 +14,22 @@ import { test, expect, type Page } from "@playwright/test";
 // Helpers
 // ---------------------------------------------------------------------------
 
+/**
+ * 158-05 (OPS-03 orphan repair, 2026-08-20): every mutating /api POST passes
+ * through the CSRF origin gate (`assertSameOrigin`, src/lib/csrf.ts, added
+ * 2026-05-17 — AFTER this spec was written) BEFORE auth. Playwright's `request`
+ * fixture sends no Origin header by default, so these contract tests were
+ * observing the CSRF 403 arm instead of the auth contract they assert. Sending
+ * the app's own origin probes past the CSRF layer to the real contract.
+ *
+ * CI note for the batch wiring (plan 158-06): in a production-mode server
+ * (`npm run start`) the localhost auto-allowlist in csrf.ts does NOT fire —
+ * the job env needs `NEXT_PUBLIC_ALLOWED_ORIGINS: http://localhost:3000`
+ * exactly as the seeded job already sets it (ci.yml `e2e-seeded` env, same
+ * rationale comment there). Local `npm run dev` allowlists localhost natively.
+ */
+const ORIGIN = process.env.PLAYWRIGHT_BASE_URL || "http://localhost:3000";
+
 /** Navigate to a strategy edit page. Requires authentication. */
 async function goToStrategyEdit(page: Page, strategyId: string) {
   await page.goto(`/strategies/${strategyId}/edit`);
@@ -27,6 +43,7 @@ test.describe("API Key Connection Flow", () => {
   test.describe("API endpoint contract", () => {
     test("validate-and-encrypt returns JSON, not HTML redirect", async ({ request }) => {
       const res = await request.post("/api/keys/validate-and-encrypt", {
+        headers: { Origin: ORIGIN },
         data: { exchange: "binance", api_key: "test", api_secret: "test" },
       });
 
@@ -40,6 +57,7 @@ test.describe("API Key Connection Flow", () => {
 
     test("validate-and-encrypt returns 401 for unauthenticated request", async ({ request }) => {
       const res = await request.post("/api/keys/validate-and-encrypt", {
+        headers: { Origin: ORIGIN },
         data: {
           exchange: "okx",
           api_key: "fake-key",
@@ -55,6 +73,7 @@ test.describe("API Key Connection Flow", () => {
 
     test("validate-and-encrypt rejects request with missing fields", async ({ request }) => {
       const res = await request.post("/api/keys/validate-and-encrypt", {
+        headers: { Origin: ORIGIN },
         data: { exchange: "binance" },
       });
 
