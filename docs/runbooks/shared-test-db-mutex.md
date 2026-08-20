@@ -21,8 +21,18 @@ deploy — the downstream damage this mutex prevents),
 
 `sql-tests`, `python` and `e2e-seeded` each acquire **session advisory lock key
 `61616158`** (issue #616 / phase 158) before their first DB-touching step, and
-hold it for the rest of the job. Waiters block inside `pg_advisory_lock` in
-arrival order, so contending runs queue instead of racing.
+hold it for the rest of the job. Waiters block inside `pg_advisory_lock`, so
+contending runs queue instead of racing.
+
+> **What is proven, and what is not.** Mutual exclusion IS measured — the probe
+> in section 5 puts three simultaneous contenders on the lock and asserts their
+> hold windows are pairwise non-overlapping on the database clock. Arrival-order
+> (FIFO) fairness is **not** asserted anywhere, and Postgres documents no
+> ordering or anti-starvation guarantee for advisory locks; the probe explicitly
+> logs its arrival-vs-acquisition ordering as *observational only*, because its
+> own barrier collapses the arrival spread below timestamp resolution. Treat a
+> long-queued waiter as possible, not impossible: it can sit until it hits the
+> acquire cap in section 2 and fail its job.
 
 - **Where the lock lives:** the TEST Supabase Postgres, reached over the
   **session-mode** DSN. CI derives it from the `TEST_SUPABASE_DB_URL` secret by
@@ -60,7 +70,8 @@ There is **no lock-reaper cron, and none is needed.**
 - The same release happens on any other job end: success, failure, or
   cancellation. **A cancelled job cannot leak the lock** — cancellation kills the
   runner, which drops the session.
-- The next FIFO waiter is granted the lock the instant it is released.
+- A waiter is granted the lock the instant it is released. *Which* waiter is not
+  specified — see the ordering caveat in section 1.
 
 The only case needing a human is a session that is alive but wedged (the runner
 is gone, yet the backend lingers — e.g. a half-open TCP connection the server
@@ -91,8 +102,18 @@ ORDER BY l.granted DESC, a.backend_start;
 ```
 
 The row with `granted = true` is the holder. Rows with `granted = false` are
-queued jobs waiting their turn — **leave those alone**; killing a waiter just
-fails that job without freeing anything.
+queued jobs — **leave those alone**; killing a waiter just fails that job
+without freeing anything.
+
+**But count the waiters before you conclude "nothing is wrong."** A holder that
+is legitimately working plus a deep `granted = false` queue is the *other*
+failure mode: no session is wedged, yet the waiter at the back can still exhaust
+its acquire cap and redden its job. Postgres promises no arrival-order service
+(section 1), so a waiter's position is not a countdown. If you see a healthy
+holder and several waiters, the answer is capacity/queue depth — re-run the
+failed job once the queue drains, and if it recurs, re-derive the cap and TTL in
+section 2 against the current per-job hold times rather than hunting for a wedge
+that does not exist.
 
 **Step 3 — terminate the holder:**
 
@@ -100,9 +121,9 @@ fails that job without freeing anything.
 SELECT pg_terminate_backend(<pid>);
 ```
 
-The next FIFO waiter proceeds immediately. The job whose session you terminated
-will fail (its `psql` dies) — that is the intended trade, and rerunning it is
-safe.
+A waiter proceeds immediately (which one is unspecified — section 1). The job
+whose session you terminated will fail (its `psql` dies) — that is the intended
+trade, and rerunning it is safe.
 
 > `pg_terminate_backend` is the same primitive already used on TEST to clear a
 > wedged PostgREST connection pool. Terminating a backend is a normal
