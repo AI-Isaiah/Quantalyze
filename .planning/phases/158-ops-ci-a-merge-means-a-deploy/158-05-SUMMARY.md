@@ -2,212 +2,182 @@
 phase: 158-ops-ci-a-merge-means-a-deploy
 plan: 05
 subsystem: testing
-tags: [playwright, e2e, ci, supabase, seed-env]
+tags: [playwright, e2e, ci, supabase, seed-env, csrf]
 
 requires:
   - phase: 158-ops-ci-a-merge-means-a-deploy
     provides: "158-RESEARCH.md §OPS-03 orphan census; 158-PATTERNS.md seeded-spec contract"
 provides:
-  - "HALT RECORD ONLY — no spec files were created or modified"
-  - "Measured precondition census: exactly which env each of the 4 orphan specs needs, and where it does/does not exist"
+  - "Four repaired orphan specs (api-key-flow, sync-analytics-flow, full-flow, csv-upload-flow), each proven to execute >=1 real case locally"
+  - "NEW e2e/my-strategies.spec.ts — the NAV-01 surface, seeded contract, both polarities + neuter drill observed"
+  - "BATCH VERDICTS table (below) — plan 158-06's direct wiring input"
+  - "Measured finding: the csv wizard's server-side validation seam needs an analytics service that NO CI job provisions"
 affects: [158-06, OPS-03]
 
 actuals:
-  tokens: 3600
-  tasks: 0
-  commits: 1
+  tokens: 8500
+  tasks: 2
+  commits: 2
 
 tech-stack:
   added: []
-  patterns: []
+  patterns:
+    - "API-contract e2e POSTs send an explicit Origin header (the CSRF gate postdates the specs)"
+    - "env-as-provisioning-proxy gate for backend seams (HAS_ANALYTICS_SERVICE, mirroring PLAYWRIGHT_TEST_STRATEGY_ID)"
 
 key-files:
   created:
-    - .planning/phases/158-ops-ci-a-merge-means-a-deploy/158-05-SUMMARY.md
-  modified: []
+    - e2e/my-strategies.spec.ts
+  modified:
+    - e2e/api-key-flow.spec.ts
+    - e2e/sync-analytics-flow.spec.ts
+    - e2e/full-flow.spec.ts
+    - e2e/csv-upload-flow.spec.ts
 
 key-decisions:
-  - "HALTED at Task 1 precondition: no runnable local Playwright environment exists in the worktree, and making one requires provisioning production-pulled secrets into a PUBLIC repo worktree — a side-effecting act, not a read-only precondition check."
-  - "HALTED at Task 2 precondition: TEST_SUPABASE_URL / TEST_SUPABASE_SERVICE_ROLE_KEY are GitHub Actions secrets only; they exist nowhere on this machine under those names."
-  - "Refused the tempting shortcut of repairing specs by source-reading alone. Task 1's method is empirical (run -> classify -> repair) and its acceptance criteria demand per-file executed-case reporter evidence. Blind edits would produce a SUMMARY claiming unverifiable repairs, and plan 06 would then wire never-verified specs into a BLOCKING CI batch — the exact failure this plan's objective exists to prevent."
+  - "Re-executed on the MAIN checkout (branch feat/v1.20-phase-158), not a worktree — the original halt was solely for lack of a TEST-pointed environment. Seed env derived via node --env-file=.env.test.local mapping NEXT_PUBLIC_SUPABASE_URL/SUPABASE_SERVICE_ROLE_KEY onto TEST_SUPABASE_* inside a scratchpad wrapper that refuses the PROD ref and requires the TEST ref; no secret ever entered the transcript or the repo."
+  - "csv-upload-flow converted to the seeded-spec contract: its hardcoded demo login does not authenticate against the TEST project (measured via signInWithPassword → 'Invalid login credentials'), and the credentials sat in a PUBLIC repo. The f4e257df fail-closed admin-env contract is preserved by routing all admin access through the seed helpers' getAdmin()."
+  - "csv-upload-flow's two server-side validation cases self-skip on HAS_ANALYTICS_SERVICE: /api/strategies/csv-validate forwards to the Python analytics service, and grep of .github/workflows shows NO job sets ANALYTICS_SERVICE_URL — wiring them un-gated would red the seeded batch deterministically. Booting a local analytics service to green them was deliberately NOT done (out of plan scope; worker-adjacent blast radius)."
+  - "full-flow verdicts into the SEEDED batch environment (it uses no seed helpers, but its anon cases were MEASURED red under the unseeded job's placeholder-Supabase env: the landing→/browse navigation exceeds Playwright's 5s URL budget while SSR hangs on placeholder fetches)."
+  - "E2E_TEST_EMAIL / E2E_TEST_PASSWORD were NOT provisioned (recorded decision honored); full-flow's authed + admin describes carry dated skipped-by-design comments and reasoned skips."
 
-patterns-established: []
+patterns-established:
+  - "Origin-header contract probing: Playwright request-fixture POSTs to mutating /api routes must send the app's own Origin or they test the CSRF arm, not the auth contract"
 
-requirements-completed: []
+requirements-completed: [OPS-03]
 
 coverage:
   - id: D1
-    description: "Repair the four named orphan specs so each executes >=1 real case (Task 1)"
+    description: "Four orphan specs repaired; each executes >=1 passed, non-skipped case locally"
     requirement: "OPS-03"
-    verification: []
-    human_judgment: true
-    rationale: "NOT DELIVERED — halted at precondition. No runnable environment; nothing to verify."
+    verification:
+      - kind: e2e
+        ref: "npx playwright test e2e/api-key-flow.spec.ts e2e/sync-analytics-flow.spec.ts e2e/full-flow.spec.ts e2e/csv-upload-flow.spec.ts --reporter=line → 13 passed, 31 skipped, exit 0 (2026-08-20, TEST-pointed dev server)"
+        status: pass
+    human_judgment: false
   - id: D2
-    description: "Author e2e/my-strategies.spec.ts, the NAV-01 surface (Task 2)"
+    description: "e2e/my-strategies.spec.ts authored (NAV-01); executes seeded, skips visibly unseeded, load-bearing assertion proven able to fail"
     requirement: "OPS-03"
-    verification: []
-    human_judgment: true
-    rationale: "NOT DELIVERED — halted at precondition. Seed env absent, so the executed-arm polarity could never be observed."
+    verification:
+      - kind: e2e
+        ref: "seeded run: 1 passed (15.3s); env-less run: 1 skipped; neuter drill (own-row name corrupted): 1 failed, exit 1 → restored → 1 passed"
+        status: pass
+    human_judgment: false
 
-duration: 9min
+duration: 80min
 completed: 2026-08-20
-status: halted
+status: complete
 ---
 
-# Phase 158 Plan 05: Orphan e2e spec repair — HALTED AT PRECONDITION
+# Phase 158 Plan 05: Orphan e2e spec repair + the NAV-01 spec — COMPLETE
 
-**No spec files were written. Both tasks' `<precondition>` elements evaluated UNMET: this worktree has no runnable Playwright environment, and the seeded-e2e credentials the plan requires are CI-only secrets that exist nowhere locally.**
+**All four named orphan specs now execute real cases against a TEST-pointed server (13 passed / 31 reasoned skips / exit 0 combined), and `/my-strategies` has its first e2e spec — seeded, own-seed-scoped, with both env polarities and a red neuter drill observed.**
 
 ## Performance
 
-- **Duration:** ~9 min (reconnaissance + precondition evaluation only)
-- **Started:** 2026-08-20T15:51:00Z
-- **Completed:** 2026-08-20T16:00:45Z
-- **Tasks:** 0 of 2 completed
-- **Files modified:** 0 (this SUMMARY is the only artifact)
+- **Duration:** ~80 min (recon + run→classify→repair per spec + placeholder-env verdict measurement)
+- **Completed:** 2026-08-20
+- **Tasks:** 2 of 2 completed
+- **Files modified:** 5 (4 repaired + 1 new)
 
-## Why this halted
+## How the halt was resolved
 
-The executor contract requires evaluating each task's `<precondition>` **before** any other task
-work, using read-only checks, and halting rather than self-provisioning when unmet. Both failed.
+The prior run halted because the worktree had no TEST-pointed environment. This run executed on
+the main checkout (`feat/v1.20-phase-158`), where `.env.development.local` targets the TEST
+project. Seed env was derived without any secret display: a scratchpad wrapper invoked via
+`node --env-file=.env.test.local` maps `NEXT_PUBLIC_SUPABASE_URL` / `SUPABASE_SERVICE_ROLE_KEY`
+onto `TEST_SUPABASE_URL` / `TEST_SUPABASE_SERVICE_ROLE_KEY`, refuses any URL carrying the PROD
+ref (`khslejtfbuezsmvmtsdn`), and requires the TEST ref (`qmnijlgmdhviwzwfyzlc`). Functional
+confirmation the server is TEST-pointed: a freshly TEST-minted seeded user authenticates through
+the app's login form (that user exists nowhere else).
 
-### Task 1 precondition — UNMET
+## Per-spec run results (Task 1)
 
-> "A local Playwright run is possible: node_modules installed (npm ci if absent), Playwright
-> browsers installed, and the app server strategy defined by playwright.config.ts is available"
-
-| Leg | Status | Evidence |
-|---|---|---|
-| `node_modules` | Absent, but **satisfiable** | `ls -d node_modules` -> absent. `npm ci` is explicitly sanctioned by the plan and by 158-RESEARCH.md:284. Not the blocker. |
-| Playwright browsers | **Met** | `~/Library/Caches/ms-playwright` holds `chromium-1234` et al. |
-| App server available | **BLOCKER** | `playwright.config.ts:26-33` webServer runs `npm run dev` at :3000. No server is running (`curl` -> 000). The worktree contains **only `.env.example`** — no `.env.local`, no `.env.development.local`. A dev server booted here has no Supabase URL, so every DB-backed page and API route under test fails on missing config. |
-
-Making that leg true requires copying secret-bearing env files from the main checkout into this
-worktree. That is not a read-only check, and it is actively hazardous:
-
-- **`/Users/helios-mammut/claude-projects/quantalyze/.env.local` is a PRODUCTION pull** —
-  `VERCEL_ENV="production"`, `VERCEL_TARGET_ENV="production"`, `NEXT_PUBLIC_APP_URL=https://quantalyze-rho.vercel.app`,
-  and it carries the PROD `SUPABASE_SERVICE_ROLE_KEY`, `CRON_SECRET`, `ANALYTICS_SERVICE_KEY`,
-  and PROD Upstash Redis credentials. It contains **zero** references to the TEST project ref.
-- The phase constraints forbid running specs against PROD.
-- **This repo is PUBLIC and I was about to `git add` in this worktree.** Staging production
-  secrets into a world-readable tree is threat T-158-17 in this plan's own register
-  (Information Disclosure, severity **high**).
-- **`csv-upload-flow.spec.ts` is a live foot-gun under ambient env.** Lines 78-81 and 316-319 read
-  `process.env.SUPABASE_TEST_URL ?? process.env.NEXT_PUBLIC_SUPABASE_URL` and
-  `SUPABASE_TEST_SERVICE_ROLE_KEY ?? SUPABASE_SERVICE_ROLE_KEY`. With no `SUPABASE_TEST_*` set,
-  it silently seeds against **whatever ambient Supabase is configured, with the ambient
-  service-role key**. Run with the main tree's `.env.local` in scope, that is production.
-
-### Task 2 precondition — UNMET
-
-> "Seeded-e2e env available locally: the env vars named by the HAS_SEED_ENV constant in
-> e2e/wizard-resume.spec.ts resolve, pointing at the TEST project (qmnijlgmdhviwzwfyzlc)"
-
-`HAS_SEED_ENV` (wizard-resume.spec.ts:40-42) requires `TEST_SUPABASE_URL` and
-`TEST_SUPABASE_SERVICE_ROLE_KEY`. Measured:
-
-- Neither is set in the executor's environment (`env | grep -c` -> `0` for both).
-- Neither name appears in any local env file. `.env.test.local` holds only
-  `NEXT_PUBLIC_SUPABASE_URL` / `NEXT_PUBLIC_SUPABASE_ANON_KEY` / `SUPABASE_SERVICE_ROLE_KEY`
-  (it *does* point at the TEST project, but not under the names the constant reads).
-- In CI they are **GitHub Actions secrets** — `secrets.TEST_SUPABASE_URL` /
-  `secrets.TEST_SUPABASE_SERVICE_ROLE_KEY` (`ci.yml:1662, 1847-1849`), gated on
-  `vars.E2E_TEST_DB_CONFIGURED`.
-
-Self-provisioning by exporting the service-role key out of `.env.test.local` under the required
-names would fabricate the very precondition the plan asked me to *verify*, while handling a
-service-role credential unsupervised. Unmet preconditions are never auto-approved.
-
-### The shortcut I deliberately refused
-
-I could have hand-edited selectors by reading source and declared the specs "repaired". I did not,
-because Task 1's acceptance criteria demand reporter evidence of `>=1` passed non-skipped case
-**per file**, and Task 2's demand observing **both polarities** (executed under seed env, skipped
-without). Without an environment I can only ever observe the skip arm — which is precisely the
-"a test that cannot fail is worse than none" vacuity this project forbids. Worse, plan 06 consumes
-this SUMMARY's batch verdicts to wire these specs into a **blocking** batch; verdicts invented
-without a run would convert spec-rot into a red `frontend` aggregator on unrelated PRs, which is
-the stated reason this plan exists separately from plan 06 at all.
-
-`status: halted` is set deliberately so plan 06 is machine-reported as **blocked** rather than
-proceeding on fabricated input.
-
-## Reconnaissance gathered (valuable for the resumed run)
-
-This survives the halt and should spare the retry the discovery cost.
-
-### Orphan status confirmed at HEAD
-
-- `grep -rn 'api-key-flow\|sync-analytics-flow\|full-flow\|csv-upload-flow' .github/workflows/ci.yml`
-  -> **no output**. All four are genuinely unwired; the census in 158-RESEARCH.md §OPS-03 holds.
-- `grep -rn 'my-strategies' e2e/` -> **no output**; `e2e/my-strategies.spec.ts` does not exist.
-  Confirms it is a NEW file, as the plan states.
-
-### Per-spec env census (measured, not inferred)
-
-| Spec | Env its gated cases require | Exists in ci.yml? | Consequence once wired |
+| Spec | Before repair | Root cause (classified) | After repair (local, TEST-pointed) |
 |---|---|---|---|
-| `api-key-flow.spec.ts` | `PLAYWRIGHT_TEST_STRATEGY_ID`; `PLAYWRIGHT_TEST_EXCHANGE_KEY` + `_SECRET` | **No** | Its two gated describes self-skip. Only the anon "API endpoint contract" describe (`:27`) can execute. |
-| `sync-analytics-flow.spec.ts` | `PLAYWRIGHT_TEST_STRATEGY_ID`; `PLAYWRIGHT_TEST_SLUG` | **No** | Three gated describes self-skip. The anon "Sync API endpoint contract" (`:33`) and "Discovery pages require authentication" (`:328`) describes are the executable coverage. |
-| `full-flow.spec.ts` | `E2E_TEST_EMAIL`, `E2E_TEST_PASSWORD` | **No** | Matches the planner's recorded skipped-by-design decision. "Public browsing flow" (`:16`) is the executable half. |
-| `csv-upload-flow.spec.ts` | `SUPABASE_TEST_URL` / `SUPABASE_TEST_SERVICE_ROLE_KEY`, **with a fallback to ambient** | Yes, at `ci.yml:1230-1231`, but only when `vars.E2E_TEST_DB_CONFIGURED == 'true'`, else `''` | Seeded batch. Note `'' ?? x` returns `''` (empty string is not nullish), so in CI it gets an empty URL rather than falling through — the fallback only bites **locally**. |
+| `api-key-flow.spec.ts` | 1 passed / 2 FAILED / 9 skipped | Spec rot: the CSRF origin gate (`src/lib/csrf.ts`, added 2026-05-17) 403s Origin-less POSTs BEFORE auth — the contract tests were measuring the wrong arm | **3 passed** / 8 skipped (reasoned env gates, surfaces verified still current) |
+| `sync-analytics-flow.spec.ts` | 2 passed / 2 FAILED / 14 skipped | Same CSRF classification | **4 passed** / 12 skipped (reasoned env gates) |
+| `full-flow.spec.ts` | 3 passed / 1 FAILED / 6 skipped | Global-DB bet: `Verified by Quantalyze` needs COMPLETE analytics on whatever row sorts first in the polluted shared DB (first row measured: a still-computing seed) | **4 passed** / 6 skipped-by-design (authed+admin, dated decision comments) |
+| `csv-upload-flow.spec.ts` | 0 passed / 4 FAILED | Missing identity + missing backend: hardcoded demo user does not exist in TEST (measured: `Invalid login credentials`); csv-validate forwards to an analytics service nothing provisions (measured: the honest "We could not reach our own service" seam alert) | **2 passed** (seeded login + client-side gates) / 2 reasoned skips (`HAS_ANALYTICS_SERVICE`) |
 
-**Provisional batch verdicts** (to be CONFIRMED by an actual run, not adopted as-is): the first
-three look unseeded-batch-safe once their anon cases are repaired; `csv-upload-flow` is
-**seeded**. Plan 06 must not treat this row as settled — the plan requires these verdicts be
-derived from what each repaired spec actually needs, and no spec has been repaired.
+**Combined Task-1 gate:** `set -o pipefail; npx playwright test <4 files> --reporter=line` →
+`13 passed, 31 skipped`, **exit 0** (every skip carries a reason string; zero bare
+`test.skip(true)` remain — grep-verified).
+
+## Task 2 — e2e/my-strategies.spec.ts (NAV-01)
+
+Wizard-resume contract: `HAS_SEED_ENV` self-skip, `seedTestAllocator({role:"both"})` ×2,
+`seedWizardDraft` mints one strategy per user under the `e2e-mystrat-` niche
+(`-own-`/`-other-` sub-prefixes), cleanup-by-prefix in `afterAll`. Navigation scoped
+`a[href="/my-strategies"]` (DEF-149-B: no heading-text selectors — negative grep verified);
+assertions own-seed only (owner row visible by link role+name; other user's mint at count 0;
+row href `=== /factsheet/<seeded id>`).
+
+**Both polarities + neuter drill (reporter evidence):**
+
+- Seeded: `1 passed (15.3s)`, exit 0.
+- Env-less (`env -u TEST_SUPABASE_URL -u TEST_SUPABASE_SERVICE_ROLE_KEY`): `1 skipped`, exit 0 — skipped, not failed.
+- **Neuter drill RED line:** own-row locator name corrupted to `${draftA.name}-NEUTER-DRILL` →
+  `1 failed — [chromium] › e2e/my-strategies.spec.ts:79:7 › Phase 149 — /my-strategies (NAV-01) › owner sees their own row…`, exit 1. Restored → `1 passed (14.4s)`.
+
+## BATCH VERDICTS (plan 158-06 input — do not re-derive)
+
+Measured under BOTH environments where relevant: a TEST-pointed dev server, and a
+placeholder-Supabase dev server mirroring the unseeded job's env discriminator
+(`NEXT_PUBLIC_SUPABASE_URL=https://placeholder.supabase.co` etc.). Caveat: local mirror runs
+`next dev` while CI runs a production `next start` — the ONE behavioral divergence that matters
+is csrf.ts's localhost auto-allowlist (dev-only), handled explicitly below.
+
+| Spec | Batch | Runnable in CI? | Conditions plan 06 must wire | Evidence |
+|---|---|---|---|---|
+| `e2e/api-key-flow.spec.ts` | **unseeded** | yes, conditional | Add `NEXT_PUBLIC_ALLOWED_ORIGINS: http://localhost:3000` to the unseeded job's env (exact precedent + rationale comment already at the seeded job, ci.yml ~:2163-2172) — production mode has an EMPTY csrf allowlist and the repaired contract POSTs send that Origin | 3 passed under placeholder env (2026-08-20); 401-via-placeholder confirmed by measurement (withAuth's user-null arm) |
+| `e2e/sync-analytics-flow.spec.ts` | **unseeded** | yes, conditional | Same allowlist env line (same job) | 4 passed under placeholder env |
+| `e2e/full-flow.spec.ts` | **seeded** (env, not helpers) | yes | List membership only; no seed env is read by the spec — but its anon cases need a REAL Supabase behind SSR | MEASURED red under placeholder: landing→/browse click never commits within the 5s URL budget while SSR hangs on placeholder fetches (`toHaveURL` timeout, error-context on file); 4 passed against the TEST-pointed server |
+| `e2e/csv-upload-flow.spec.ts` | **seeded** | yes | List membership (MA-8 both-places; HAS_SEED_ENV already in-file). The 2 server-side cases stay skipped until something provisions `ANALYTICS_SERVICE_URL` (+ a live service) into the job — recorded gap, NOT a wiring condition | 2 passed / 2 reasoned skips seeded; describe-skips without seed env |
+| `e2e/my-strategies.spec.ts` | **seeded** | yes | List membership (MA-8 both-places; HAS_SEED_ENV in-file) | Both polarities + neuter drill above |
 
 ## Task Commits
 
-No task commits — no task reached execution.
+1. **Task 1: repair the four orphan specs** — `e69c53e1` (test)
+2. **Task 2: author e2e/my-strategies.spec.ts** — `c045b894` (test)
 
-**Halt record:** this SUMMARY (`docs(158-05)`).
+## Decisions Made
+
+See frontmatter `key-decisions`. Notable: no product code was changed — every red traced to
+spec rot, a missing identity, or a missing backend, never to a product bug.
 
 ## Deviations from Plan
 
-None. The plan was not executed; it stopped at its own first gate exactly as the precondition
-mechanism specifies.
+- **csv-upload-flow gained a second visible gate (`HAS_ANALYTICS_SERVICE`)** beyond the planned
+  seeded conversion: the plan anticipated a DB/auth need; measurement surfaced a second,
+  independent backend seam (the analytics service) that no CI job provisions. Skip-with-reason
+  is the honest disposition the plan's own repair rules prescribe for missing-env.
+- **full-flow's batch verdict diverges from the RESEARCH provisional row** ("unseeded-batch-safe"):
+  the placeholder measurement contradicted it. The provisional table explicitly demanded
+  run-derived confirmation; this is that confirmation.
 
 ## Issues Encountered
 
-The plan's preconditions were written as verifiable gates but the environment to satisfy them was
-never provisioned for a worktree agent. 158-RESEARCH.md:284 anticipated the `node_modules` half
-("GSD worktree agents get NO node_modules — the executor must `npm ci` or run from the main
-tree") but no plan or research artifact supplies a recipe for a TEST-pointed dev server plus seed
-credentials inside a worktree. That gap is the halt's root cause, and it will recur for any future
-plan that asks a worktree agent to run seeded e2e specs.
+- The TEST project's `auth.admin.listUsers` 500s past ~page 4 (~200 users) — the old csv spec's
+  cleanup depended on it; the conversion removed the dependency entirely.
+- Shared-DB hygiene verified post-run: `e2e-mystrat-`/`e2e-csvflow-` strategy counts in TEST = 0
+  after afterAll cleanups. Seeded USERS accumulate (helper design, sibling-tolerated).
 
-## User Setup Required
+## Residual gaps (for the phase close-out, not blockers)
 
-To unblock this plan, a human must provide a runnable, TEST-pointed e2e environment. Options,
-cheapest first:
-
-1. **Re-run this plan in the main checkout, not a worktree** (`isolation: none`), where
-   `.env.development.local` already points at the TEST project — then export the two seed vars
-   for the run:
-   `export TEST_SUPABASE_URL=...` / `export TEST_SUPABASE_SERVICE_ROLE_KEY=...`
-   sourced from `.env.test.local` (which holds TEST-project values under different names).
-   Confirm `npm ci` has been run and `npm run dev` serves :3000.
-2. **Provision the two vars into the worktree environment** and copy `.env.development.local`
-   (TEST-pointed) — explicitly **not** `.env.local` (production) — into the worktree, with a
-   `.gitignore` check first. Higher risk; option 1 is preferred.
-
-Before either: confirm no CI run is in flight against the shared TEST project. Project memory
-records that a local suite racing CI reds `sql-tests`, and that concurrent writers to the shared
-TEST DB are this very phase's subject matter.
-
-**Do not** provision `E2E_TEST_EMAIL` / `E2E_TEST_PASSWORD` — the plan's recorded decision is that
-`full-flow`'s authed half stays skipped-by-design with no new CI secrets.
+- The csv wizard's happy path (upload→preview→submit) has NO executing e2e anywhere until an
+  analytics service exists in some CI job's env — the two gated cases document exactly what to
+  provision (`ANALYTICS_SERVICE_URL` + `INTERNAL_API_TOKEN`).
+- api-key-flow/sync-analytics-flow's env-gated UI describes (`PLAYWRIGHT_TEST_STRATEGY_ID`,
+  exchange creds) remain never-run by design; their copy was source-verified current
+  (ApiKeyManager/ApiKeyForm) so the skips are honest, not rot-hiding.
 
 ## Next Phase Readiness
 
-- **Plan 06 is BLOCKED on this plan.** It consumes the per-spec batch verdict table as direct
-  input and must not re-derive or invent it. The provisional table above is reconnaissance, not a
-  verdict.
-- No repository state was changed, so there is nothing to revert. A retry starts clean from the
-  same base.
+- **Plan 158-06 is UNBLOCKED.** The batch verdict table above is its direct input; the one env
+  addition it must carry is the unseeded job's `NEXT_PUBLIC_ALLOWED_ORIGINS` line.
+- All five specs are committed on `feat/v1.20-phase-158` (e69c53e1, c045b894).
 
 ---
 *Phase: 158-ops-ci-a-merge-means-a-deploy*
-*Halted: 2026-08-20*
+*Completed: 2026-08-20*
