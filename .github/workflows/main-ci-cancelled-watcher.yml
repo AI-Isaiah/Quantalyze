@@ -82,12 +82,29 @@ concurrency:
 jobs:
   report-cancelled:
     runs-on: ubuntu-latest
+    # 158-REVIEW WR-03 (iter 3): the invariant in the header is about the JOB
+    # CONCLUSION, not merely about script exit codes. Every `run:` body here
+    # exits 0, but a `workflow_run` check attaches to main HEAD, and without an
+    # explicit bound this job inherits GitHub's 360-MINUTE default — so a hung
+    # Issues API call would redden main HEAD six hours later and make Railway
+    # skip the very deploy this watcher exists to protect, recreating #616
+    # through the watcher itself. mutex-probe.yml bounds all three of its jobs
+    # (5/15/10) for exactly this reason; 10 min is far above the few seconds
+    # this job's two API calls actually need.
+    timeout-minutes: 10
     steps:
       # This job does not need the repo (it only calls the Issues API), but the
       # C-0293 critical-regressions invariant requires every workflow to check
       # out with persist-credentials:false — conform rather than carve out an
       # exemption to that guard.
+      #
+      # WR-03: because this step is ORNAMENTAL here (present only to satisfy
+      # that grep invariant), a checkout failure — network blip, rate limit —
+      # must not be the thing that reddens a main-HEAD check. It is the highest
+      # probability red route in the job and it buys this workflow nothing, so
+      # it is explicitly non-fatal. Nothing downstream reads the working tree.
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        continue-on-error: true
         with:
           persist-credentials: false
 
