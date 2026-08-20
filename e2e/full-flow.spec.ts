@@ -56,6 +56,9 @@ test.describe("Public browsing flow", () => {
     if (hasStrategies) {
       const href = await firstLink.getAttribute("href");
       const strategyId = href?.split("/").pop();
+      // Captured BEFORE navigating — this locator is on the browse page and
+      // goes stale the moment we leave it.
+      const rowName = (await firstLink.textContent())?.trim();
       if (strategyId) {
         const response = await page.goto(`/factsheet/${strategyId}`);
         expect(response?.status()).toBeLessThan(400);
@@ -72,7 +75,27 @@ test.describe("Public browsing flow", () => {
         await expect(
           page.locator("text=Institutional Factsheet").first(),
         ).toBeVisible();
-        await expect(page.locator("h1").first()).not.toBeEmpty();
+
+        // 158-REVIEW WR-12: the masthead check above is fine; the h1 check was
+        // not. `not.toBeEmpty()` passes for ANY non-empty text node — a
+        // skeleton placeholder, an em-dash, a generic page title — so it could
+        // not fail for a realistic regression of "the factsheet resolved the
+        // strategy I clicked", which is the only thing this test establishes.
+        //
+        // Assert that identity instead. It is falsifiable and still free of the
+        // global-DB-state bet the old `Verified by Quantalyze` assertion made:
+        // the browse row's link TEXT is the strategy name verbatim
+        // (StrategyTable renders `{s.name}` as the anchor body) and the
+        // factsheet masthead h1 renders `payload.strategyName`, so the two are
+        // directly comparable for whichever row happened to sort first.
+        expect(
+          rowName,
+          "the browse row link had no text, so the factsheet's identity cannot be asserted — if StrategyTable stopped rendering the strategy name as its anchor body, fix this test's capture rather than dropping the assertion",
+        ).toBeTruthy();
+        await expect(
+          page.locator("h1").first(),
+          `factsheet h1 does not name the strategy this test navigated to ("${rowName}") — the id resolved to a page, but not to THAT strategy`,
+        ).toContainText(rowName!);
       }
     }
   });
