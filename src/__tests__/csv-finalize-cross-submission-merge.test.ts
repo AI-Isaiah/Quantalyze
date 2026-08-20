@@ -314,7 +314,16 @@ function post(series: Array<{ date: string; daily_return: number }>) {
         // Metadata ARMS the economic oracle: a successful outcome applies it
         // (updateCalls grows), a refusal must not. Without a metadata field
         // the "nothing was written" assertions would be vacuously true.
-        metadata: { description: "cr01 oracle marker" },
+        // 146.2-03 / G2 — the `category_id` is not decoration. A metadata blob
+        // that would run an UPDATE without one is now a 400 at the route
+        // boundary, and a 400 never reaches the resolve arm these cases are
+        // about. The committed-row fixtures below leave `category_id` OUT
+        // (an ABSENT reading), so this request-side value changes nothing
+        // about which classification branch runs.
+        metadata: {
+          category_id: CATEGORY_ID,
+          description: "cr01 oracle marker",
+        },
       }),
       headers: {
         "Content-Type": "application/json",
@@ -540,7 +549,16 @@ describe("[140.4-16 / CR-01, re-pointed by 145] the 23505 resolve arm refuses a 
           fmt: "trades",
           strategy_name: "Alpha",
           daily_returns_series: [],
-          metadata: { description: "cr01 oracle marker" },
+          // 146.2-03 / G2 — the `category_id` is not decoration. A metadata blob
+        // that would run an UPDATE without one is now a 400 at the route
+        // boundary, and a 400 never reaches the resolve arm these cases are
+        // about. The committed-row fixtures below leave `category_id` OUT
+        // (an ABSENT reading), so this request-side value changes nothing
+        // about which classification branch runs.
+        metadata: {
+          category_id: CATEGORY_ID,
+          description: "cr01 oracle marker",
+        },
         }),
         headers: {
           "Content-Type": "application/json",
@@ -811,7 +829,16 @@ function postContribution(
         fmt: "daily_returns",
         strategy_name: "Alpha",
         daily_returns_series: series,
-        metadata: { description: "cr01 oracle marker" },
+        // 146.2-03 / G2 — the `category_id` is not decoration. A metadata blob
+        // that would run an UPDATE without one is now a 400 at the route
+        // boundary, and a 400 never reaches the resolve arm these cases are
+        // about. The committed-row fixtures below leave `category_id` OUT
+        // (an ABSENT reading), so this request-side value changes nothing
+        // about which classification branch runs.
+        metadata: {
+          category_id: CATEGORY_ID,
+          description: "cr01 oracle marker",
+        },
         entry_context: "contribution",
       }),
       headers: {
@@ -1189,7 +1216,13 @@ describe("[146.1-05 / A4] the metadata UPDATE belongs to the create, never to it
     // indistinguishable from "never UPDATE at all", and never-updating would
     // silently drop every CSV strategy's category, markets, description AND
     // its annualization clock.
-    const res = await postWithMetadata(SERIES_2024, { asset_class: "crypto" });
+    const res = await postWithMetadata(SERIES_2024, {
+      asset_class: "crypto",
+      // 146.2-03 / G2 — a category-less blob that would run an UPDATE is a 400
+      // at the boundary now, so the classification this case is about would
+      // never reach the resolve arm without it.
+      category_id: CATEGORY_ID,
+    });
 
     expect(res.status).toBe(200);
     expect(
@@ -1248,7 +1281,13 @@ describe("[146.1-05 / A4] the metadata UPDATE belongs to the create, never to it
     arm23505({ id: EXISTING_ID, name: "Alpha", status: "pending_review" });
     armCommitted2024();
 
-    await postWithMetadata(SERIES_2024, { asset_class: "crypto" });
+    await postWithMetadata(SERIES_2024, {
+      asset_class: "crypto",
+      // 146.2-03 / G2 — a category-less blob that would run an UPDATE is a 400
+      // at the boundary now, so the classification this case is about would
+      // never reach the resolve arm without it.
+      category_id: CATEGORY_ID,
+    });
 
     const clockWrites = updateCalls.filter((c) => "asset_class" in c.payload);
     expect(
@@ -1263,7 +1302,13 @@ describe("[146.1-05 / A4] the metadata UPDATE belongs to the create, never to it
   it("the analytics enqueue STILL fires on a FRESH create", async () => {
     // A4 gates ONE side effect. This is the arm that reds if it gated the
     // fan-out wholesale, which would leave the strategy polling forever.
-    await postWithMetadata(SERIES_2024, { asset_class: "crypto" });
+    await postWithMetadata(SERIES_2024, {
+      asset_class: "crypto",
+      // 146.2-03 / G2 — a category-less blob that would run an UPDATE is a 400
+      // at the boundary now, so the classification this case is about would
+      // never reach the resolve arm without it.
+      category_id: CATEGORY_ID,
+    });
     await flushAfter();
 
     expect(enqueuedRpcNames()).toContain("enqueue_compute_job");
@@ -1276,7 +1321,13 @@ describe("[146.1-05 / A4] the metadata UPDATE belongs to the create, never to it
     arm23505({ id: EXISTING_ID, name: "Alpha", status: "pending_review" });
     armCommitted2024();
 
-    await postWithMetadata(SERIES_2024, { asset_class: "crypto" });
+    await postWithMetadata(SERIES_2024, {
+      asset_class: "crypto",
+      // 146.2-03 / G2 — a category-less blob that would run an UPDATE is a 400
+      // at the boundary now, so the classification this case is about would
+      // never reach the resolve arm without it.
+      category_id: CATEGORY_ID,
+    });
     await flushAfter();
 
     expect(
@@ -1406,15 +1457,23 @@ describe("[146.2-01 / R1] an echo FILLS an absent classification and REFUSES a c
     ).toContain("enqueue_compute_job");
   });
 
-  it("RED REFUSE: an echo whose classification CONFLICTS with the committed one is a 409 with zero writes", async () => {
-    // The committed row IS classified, and differently. This is not a dropped
-    // classification to repair — it is a mutation, and the stored KPIs were
-    // computed under the committed clock.
+  // ⚖️ 146.2-03 / G3b (2026-08-20) — THE CONFLICT CASE IS NOW TWO CASES, EACH
+  // VARYING ONE FIELD. It used to vary BOTH `asset_class` AND `category_id` in
+  // a single fixture, and the arm implements them as two SEQUENTIAL `if`
+  // blocks — so deleting either one left the other still answering 409 and the
+  // single case stayed green over half a fence. Each case below moves exactly
+  // one field and holds the other EQUAL, so it reds when its own block goes.
+
+  it("RED REFUSE (asset_class alone): the clock differs, the category matches — 409 with zero writes", async () => {
+    // The committed row IS classified. This is not a dropped classification to
+    // repair — it is a mutation, and the stored KPIs were computed under the
+    // committed clock. `category_id` is held EQUAL so only the asset_class
+    // block can produce this refusal.
     arm23505({
       id: EXISTING_ID,
       name: "Alpha",
       status: "pending_review",
-      category_id: OTHER_CATEGORY_ID,
+      category_id: CATEGORY_ID,
       asset_class: "traditional",
     });
     armCommitted2024();
@@ -1424,7 +1483,12 @@ describe("[146.2-01 / R1] an echo FILLS an absent classification and REFUSES a c
       category_id: CATEGORY_ID,
     });
 
-    expect(res.status).toBe(409);
+    expect(
+      res.status,
+      "a resubmit flipped the committed row's annualization clock — the " +
+        "stored Sharpe/Sortino/CAGR keep sqrt(252) while the label claims " +
+        "sqrt(365), and nothing reconciles them",
+    ).toBe(409);
     const body = await res.json();
     expect(body.ok).toBe(false);
     expect(body.code).toBe("CSV_SESSION_REUSED");
@@ -1443,6 +1507,40 @@ describe("[146.2-01 / R1] an echo FILLS an absent classification and REFUSES a c
         "classification conflict — the user is told the wrong thing about " +
         "their own submission",
     ).toContain("classification");
+  });
+
+  it("RED REFUSE (category_id alone): the category differs, the clock matches — 409 with zero writes", async () => {
+    // The other block, in isolation. `asset_class` is held EQUAL, so a fix
+    // that only guards the clock leaves this case red: re-categorising a
+    // committed strategy from an echo is still a mutation the user did not
+    // ask for on THIS submission, and it moves the row between discovery
+    // listings.
+    arm23505({
+      id: EXISTING_ID,
+      name: "Alpha",
+      status: "pending_review",
+      category_id: OTHER_CATEGORY_ID,
+      asset_class: "crypto",
+    });
+    armCommitted2024();
+
+    const res = await postWithMetadata(SERIES_2024, {
+      asset_class: "crypto",
+      category_id: CATEGORY_ID,
+    });
+
+    expect(
+      res.status,
+      "an echo re-categorised the already-committed strategy — a mutation " +
+        "on a submission the route reports as 'nothing new was written'",
+    ).toBe(409);
+    const body = await res.json();
+    expect(body.ok).toBe(false);
+    expect(body.code).toBe("CSV_SESSION_REUSED");
+    expect(updateCalls).toEqual([]);
+    expect(String(body.human_message).toLowerCase()).toContain(
+      "classification",
+    );
   });
 
   it("RED TRADES FILL (KPIs measured ABSENT): an empty-series echo fills both fields and enqueues nothing", async () => {
@@ -1528,7 +1626,13 @@ describe("[146.2-01 / R1] an echo FILLS an absent classification and REFUSES a c
     arm23505({ id: EXISTING_ID, name: "Alpha" });
     armCommitted2024();
 
-    const res = await postWithMetadata(SERIES_2024, { asset_class: "crypto" });
+    const res = await postWithMetadata(SERIES_2024, {
+      asset_class: "crypto",
+      // 146.2-03 / G2 — a category-less blob that would run an UPDATE is a 400
+      // at the boundary now, so the classification this case is about would
+      // never reach the resolve arm without it.
+      category_id: CATEGORY_ID,
+    });
 
     expect(res.status).toBe(503);
     const body = await res.json();
@@ -1642,7 +1746,13 @@ describe("[146.2-02 / BL-01] a FILL that did not land cannot be reported as appl
       message: "new row violates row-level security policy",
     };
 
-    const res = await postWithMetadata(SERIES_2024, { asset_class: "crypto" });
+    const res = await postWithMetadata(SERIES_2024, {
+      asset_class: "crypto",
+      // 146.2-03 / G2 — a category-less blob that would run an UPDATE is a 400
+      // at the boundary now, so the classification this case is about would
+      // never reach the resolve arm without it.
+      category_id: CATEGORY_ID,
+    });
 
     expect(res.status).toBe(200);
     expect(updateCalls).toHaveLength(1);
@@ -1652,8 +1762,51 @@ describe("[146.2-02 / BL-01] a FILL that did not land cannot be reported as appl
     // `fillClassification` widens the metadata gate. With nothing to fill, that
     // widened gate wrote this request's OTHER metadata onto a row a PRIOR
     // request committed — the mutation-on-an-echo A4 forbids — while the copy
-    // told the user their category and asset class had been applied. Neither
-    // field is in this payload; `description` is, and it must not land.
+    // told the user their category and asset class had been applied.
+    //
+    // ⚖️ 146.2-03 / G2 (2026-08-20) — THE BLOB CHANGED, THE RULE DID NOT. This
+    // case used to send `{description: "…"}`: a real UPDATE payload with no
+    // classification in it. That blob is now refused at the route BOUNDARY
+    // (the case below pins it), because it was also the blob that made the
+    // FILL discriminator's proof false. What remains reachable — and what the
+    // gate must still get right — is an echo whose metadata writes NOTHING:
+    // no fill, no UPDATE, and above all no claim that a repair happened.
+    arm23505({
+      id: EXISTING_ID,
+      name: "Alpha",
+      status: "pending_review",
+      category_id: null,
+      asset_class: "traditional",
+    });
+    armCommitted2024();
+
+    const res = await postWithMetadata(SERIES_2024, {});
+
+    expect(res.status).toBe(200);
+    expect(
+      updateCalls,
+      "an echo with no classification to fill still issued a metadata " +
+        "UPDATE — A4's rule, breached through the fill arm's gate",
+    ).toEqual([]);
+    const body = await res.json();
+    expect(
+      String(body.human_message ?? ""),
+      "the echo claimed a classification repair on a request that carried no " +
+        "classification",
+    ).not.toContain("so we applied them to it now");
+  });
+
+  it("🔴 146.2-03 / G2: the blob that made the FILL discriminator's proof false is refused at the boundary", async () => {
+    // THE ROUTE-LEVEL HALF of the G2 invariant (the pure-function half lives in
+    // csv-finalize-rpc.test.ts). A blob carrying real metadata but NO
+    // `category_id` used to run a genuine UPDATE and leave `category_id` NULL —
+    // so the resolve arm's "a committed NULL proves the UPDATE never ran" was
+    // FALSE, and a later same-session resubmit took the FILL arm and rewrote
+    // description/aum/markets/asset_class the user never resubmitted.
+    //
+    // The oracle is the WRITE VECTOR plus the status: refused before anything
+    // was written, and refused as a CALLER error naming the field, not as a
+    // 500 and not silently.
     arm23505({
       id: EXISTING_ID,
       name: "Alpha",
@@ -1665,20 +1818,25 @@ describe("[146.2-02 / BL-01] a FILL that did not land cannot be reported as appl
 
     const res = await postWithMetadata(SERIES_2024, {
       description: "a mutation the user never asked for",
+      aum: "1000",
     });
 
-    expect(res.status).toBe(200);
+    expect(
+      res.status,
+      "a metadata blob with no category_id ran a real UPDATE and left " +
+        "category_id NULL — the committed NULL no longer proves the UPDATE " +
+        "never ran, and the FILL arm's whole discriminator is unsound",
+    ).toBe(400);
+    const body = await res.json();
+    expect(body.ok).toBe(false);
+    expect(body.code).toBe("CSV_INVALID_FORMAT");
+    expect(body.debug_context?.field).toBe("metadata.category_id");
     expect(
       updateCalls,
-      "an echo with no classification to fill still rewrote the committed " +
-        "row's metadata — A4's rule, breached through the fill arm's gate",
+      "the refused blob still reached the metadata UPDATE",
     ).toEqual([]);
-    const body = await res.json();
-    expect(
-      String(body.human_message ?? ""),
-      "the echo claimed a classification repair on a request that carried no " +
-        "classification",
-    ).not.toContain("so we applied them to it now");
+    // Refused BEFORE any side effect: the fold never ran either.
+    expect(foldCalls()).toEqual([]);
   });
 });
 
@@ -1812,5 +1970,299 @@ describe("[146.2-02 / BL-02] the series-bearing FILL measures the clock safety i
     const body = await res.json();
     expect(body.code).toBe("CSV_PERSIST_FAIL");
     expect(updateCalls).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 146.2-03 / G1 — THE CLOCK-SAFETY GUARD IS A TRUTH TABLE, NOT A PRESENCE TEST
+// ---------------------------------------------------------------------------
+
+/**
+ * BL-02 gave the series-bearing fill a guard. G1 is about the ROW THAT GUARD
+ * CANNOT SEE: an analytics row that EXISTS with every ranked KPI column NULL.
+ * Every fixture in this file before now supplied either `row: null` or a
+ * KPI-BEARING row, so the guard could be degraded all the way down to
+ * `storedKpis !== null` — or left as it shipped — and no case here would move.
+ *
+ * ⭐ THE TRUTH TABLE, and why all-null-KPI is TWO different facts:
+ *
+ *   1. no row at all                          → FILL is safe
+ *   2. any KPI column non-null                → REFUSE
+ *   3. all KPIs null AND status 'computing'   → REFUSE  ← the TOCTOU
+ *   4. all KPIs null AND any other status     → FILL is safe
+ *
+ * CASE 3 IS THE MONEY CASE. Mid-compute every KPI reads NULL, so a presence
+ * test permits the fill — but the recompute the fill leans on is ABSORBED, not
+ * scheduled: `_enqueue_compute_job_internal` dedupes onto the job already
+ * running and returns its id, and this route's enqueue carries no idempotency
+ * key. That job snapshotted `strategies.asset_class` BEFORE the fill and
+ * annualizes on the snapshot, so it writes sqrt(252) numbers onto a row the
+ * fill just relabelled 'crypto', marks it 'complete', and the Phase 143 sweep
+ * excludes 'complete'. Sharpe understated by sqrt(365/252) ≈ 1.204x, forever,
+ * on a row the same fill made discovery-visible and percentile-ranked.
+ *
+ * ⛔ CASE 4 IS THE COUNTERWEIGHT AND IT IS LOAD-BEARING.
+ * `writeFailedStrategyAnalyticsPlaceholder` writes exactly that row — status,
+ * error and flags, NO KPI columns — and it is the PRIMARY population the R1
+ * repair exists for. A guard "fixed" by refusing whenever a row exists passes
+ * case 3 and destroys the repair this phase ships, which is why both arms are
+ * asserted here.
+ *
+ * ⚖️ THE ECONOMIC INVARIANT, stated independently of the implementation: a
+ * strategy's stored KPIs and its `asset_class` label must name the SAME
+ * annualization clock. The route may move that label only when it has
+ * established that nothing stale is left wearing the old one — and "the KPI
+ * columns are empty right now" is not that establishment while a worker is
+ * mid-flight holding the old label in a local variable.
+ */
+
+/** A `strategy_analytics` row that EXISTS with every ranked KPI column NULL. */
+function analyticsRowAllNull(
+  computationStatus: string,
+): Record<string, unknown> {
+  return {
+    cagr: null,
+    sharpe: null,
+    sortino: null,
+    calmar: null,
+    max_drawdown: null,
+    volatility: null,
+    cumulative_return: null,
+    computation_status: computationStatus,
+  };
+}
+
+/** The never-classified committed row every case below resolves onto. */
+function armNeverClassifiedRow() {
+  arm23505({
+    id: EXISTING_ID,
+    name: "Alpha",
+    status: "pending_review",
+    category_id: null,
+    asset_class: "traditional",
+  });
+}
+
+describe("[146.2-03 / G1] an all-null-KPI analytics row is TWO facts, and only one of them is fillable", () => {
+  it("🔴 CASE 3: the row is still 'computing' — the fill is REFUSED, because the recompute is absorbed rather than scheduled", async () => {
+    // The row exists, every ranked KPI is NULL, and the worker is mid-flight
+    // holding the PRE-FILL asset_class in a local. Filling here relabels the
+    // strategy 'crypto' and then lets that worker write sqrt(252) numbers onto
+    // it and mark it 'complete' — a state the Phase 143 sweep skips forever.
+    armNeverClassifiedRow();
+    armCommitted2024();
+    analyticsProbe.row = analyticsRowAllNull("computing");
+
+    const res = await postWithMetadata(SERIES_2024, {
+      asset_class: "crypto",
+      category_id: CATEGORY_ID,
+    });
+    await flushAfter();
+
+    expect(
+      analyticsProbe.reads,
+      "the guard never read strategy_analytics at all",
+    ).toEqual([EXISTING_ID]);
+    expect(
+      res.status,
+      "the clock moved to crypto (sqrt(365)) while a compute job that " +
+        "snapshotted 'traditional' was mid-flight — it will finish, write " +
+        "sqrt(252) numbers onto the relabelled row, mark it 'complete', and " +
+        "the Phase 143 sweep excludes 'complete', so nothing ever heals it. " +
+        "Sharpe understated ~1.204x on a discovery-visible, percentile-" +
+        "ranked row",
+    ).toBe(409);
+    const body = await res.json();
+    expect(body.ok).toBe(false);
+    expect(body.code).toBe("CSV_SESSION_REUSED");
+    expect(
+      updateCalls,
+      "a refusal that reports 'we changed nothing' still wrote the " +
+        "classification",
+    ).toEqual([]);
+    expect(
+      enqueuedRpcNames(),
+      "a refusal that writes nothing still scheduled a recompute",
+    ).toEqual([]);
+    // SEAMUX-04: this refusal is a WAIT, not a dead end — the stuck-'computing'
+    // reaper terminalizes a stranded row — so the copy must offer the
+    // non-destructive retry rather than sending the user to start over.
+    expect(typeof body.human_message).toBe("string");
+    expect(String(body.human_message).toLowerCase()).toContain(
+      "being computed right now",
+    );
+  });
+
+  it("⛔ CASE 4: the SAME all-null row marked 'failed' still FILLS — this is the primary R1 recovery population", async () => {
+    // THE COUNTERWEIGHT. `writeFailedStrategyAnalyticsPlaceholder` writes
+    // exactly this row (status/error/flags, no KPI columns) whenever the
+    // enqueue drops, which is the state the R1 repair exists for. A guard
+    // hardened into "refuse whenever a row exists" would pass the case above
+    // and silently delete this phase's whole reason to exist.
+    armNeverClassifiedRow();
+    armCommitted2024();
+    analyticsProbe.row = analyticsRowAllNull("failed");
+
+    const res = await postWithMetadata(SERIES_2024, {
+      asset_class: "crypto",
+      category_id: CATEGORY_ID,
+    });
+    await flushAfter();
+
+    expect(
+      res.status,
+      "the guard refused a row with NO stored KPI at all — the clock-safety " +
+        "rule became 'never repair', and a crypto track record keeps the " +
+        "sqrt(252) column default with no editor anywhere that could fix it",
+    ).toBe(200);
+    expect(analyticsProbe.reads).toEqual([EXISTING_ID]);
+    expect(updateCalls).toHaveLength(1);
+    expect(updateCalls[0].payload).toMatchObject({
+      asset_class: "crypto",
+      category_id: CATEGORY_ID,
+    });
+    // The economic pair: the clock lands AND the recompute rides it.
+    expect(enqueuedRpcNames()).toContain("enqueue_compute_job");
+  });
+
+  it("⛔ CASE 4, second reading: an all-null row still 'pending' FILLS — the worker has not snapshotted anything yet", async () => {
+    // The discrimination that keeps case 3 keyed on 'computing' rather than on
+    // "not terminal". A 'pending' row means the job has not STARTED, so it has
+    // not read `asset_class` yet and will read the POST-fill value. Refusing
+    // here would strand every user whose worker is merely busy.
+    armNeverClassifiedRow();
+    armCommitted2024();
+    analyticsProbe.row = analyticsRowAllNull("pending");
+
+    const res = await postWithMetadata(SERIES_2024, {
+      asset_class: "crypto",
+      category_id: CATEGORY_ID,
+    });
+    await flushAfter();
+
+    expect(res.status).toBe(200);
+    expect(updateCalls).toHaveLength(1);
+    expect(updateCalls[0].payload).toMatchObject({ asset_class: "crypto" });
+  });
+
+  it("🔴 CASE 3 on the EMPTY-SERIES arm too — one rule, both arms", async () => {
+    // Symmetry, in the direction BL-02 established: a fix applied to one arm
+    // only leaves the other creating the exact state the first refuses.
+    armNeverClassifiedRow();
+    analyticsProbe.row = analyticsRowAllNull("computing");
+
+    const res = await postTradesWithMetadata({
+      asset_class: "crypto",
+      category_id: CATEGORY_ID,
+    });
+    await flushAfter();
+
+    expect(res.status).toBe(409);
+    expect(updateCalls).toEqual([]);
+    expect(analyticsProbe.reads).toEqual([EXISTING_ID]);
+  });
+});
+
+describe("[146.2-03 / G3c] the FILL gate is an OR — a category alone is enough to repair", () => {
+  it("🔴 a request carrying ONLY a category_id still FILLS the never-classified row", async () => {
+    // ⭐ THE GATE UNDER TEST: `requestedCategoryId !== null ||
+    // requestedAssetClass !== null`. Every other fixture in this file sends
+    // BOTH classification fields or NEITHER, so swapping that `||` for `&&`
+    // was invisible — and under `&&` this request would be echoed with the
+    // plain "nothing new was written" copy while the category it carries was
+    // dropped for the second time, leaving the strategy invisible to discovery
+    // with no post-creation editor that could add it.
+    //
+    // Only this direction is reachable: since 146.2-03 / G2 a blob carrying
+    // `asset_class` with no `category_id` is a 400 at the boundary, so the
+    // mirror fixture cannot exist.
+    armNeverClassifiedRow();
+    armCommitted2024();
+
+    const res = await postWithMetadata(SERIES_2024, {
+      category_id: CATEGORY_ID,
+    });
+    await flushAfter();
+
+    expect(res.status).toBe(200);
+    expect(
+      updateCalls,
+      "the echo dropped the category a second time — the strategy stays out " +
+        "of discovery forever, and the user is told nothing happened",
+    ).toHaveLength(1);
+    expect(updateCalls[0].payload).toMatchObject({
+      category_id: CATEGORY_ID,
+    });
+    const body = await res.json();
+    expect(
+      String(body.human_message ?? ""),
+      "the fill landed but the echo reported the plain 'nothing new was " +
+        "written' sentence",
+    ).toContain("so we applied them to it now");
+  });
+});
+
+describe("[146.2-03 / G4] the classification refusals name a control the user can actually take", () => {
+  /**
+   * ⚠️ THE INSTRUCTION USED TO BE UNCARRYABLE. Both sentences said "Start a new
+   * strategy to upload THIS FILE", and both refusals burn the wizard session id
+   * against the content being submitted — while `WizardClient` re-mints only on
+   * a MATERIAL CONTENT CHANGE. So a user who did exactly what the sentence said,
+   * re-uploading the same file, replayed the spent id and took the identical
+   * 409 forever.
+   *
+   * 146.2-08 / B1 adds a clickable escape labelled `START_NEW_STRATEGY_LABEL`
+   * in `CsvSubmitStep.tsx` that mints a fresh id and keeps the uploaded series.
+   * The label is duplicated in the route (it cannot import a "use client"
+   * module), so these assertions are the thing that keeps the two in step: if
+   * either side is renamed alone, the server's instruction points at a control
+   * that does not exist and this reds.
+   */
+  const CONTROL_LABEL = "Start a new strategy";
+
+  it("🔴 the CLASSIFICATION-CONFLICT 409 points at the escape control by its exact label", async () => {
+    arm23505({
+      id: EXISTING_ID,
+      name: "Alpha",
+      status: "pending_review",
+      category_id: OTHER_CATEGORY_ID,
+      asset_class: "crypto",
+    });
+    armCommitted2024();
+
+    const res = await postWithMetadata(SERIES_2024, {
+      asset_class: "crypto",
+      category_id: CATEGORY_ID,
+    });
+    const msg = String((await res.json()).human_message ?? "");
+
+    expect(res.status).toBe(409);
+    expect(
+      msg,
+      "the refusal does not name the escape control, so the user is left " +
+        "with an instruction the wizard cannot carry out",
+    ).toContain(CONTROL_LABEL);
+    expect(
+      msg,
+      "the sentence still tells the user to start a new strategy TO UPLOAD " +
+        "THIS FILE without naming the control that keeps the file — the " +
+        "un-carryable instruction is back",
+    ).not.toContain(`${CONTROL_LABEL} to upload`);
+  });
+
+  it("🔴 the CLOCK-SAFETY 409 (stored KPIs) points at the same control", async () => {
+    armNeverClassifiedRow();
+    armCommitted2024();
+    analyticsProbe.row = { ...PROD_FAILED_WITH_KPIS };
+
+    const res = await postWithMetadata(SERIES_2024, {
+      asset_class: "crypto",
+      category_id: CATEGORY_ID,
+    });
+    const msg = String((await res.json()).human_message ?? "");
+
+    expect(res.status).toBe(409);
+    expect(msg).toContain(CONTROL_LABEL);
+    expect(msg).not.toContain(`${CONTROL_LABEL} to upload`);
   });
 });

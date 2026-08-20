@@ -526,6 +526,48 @@ export function parseCsvMetadata(raw: unknown): ParseCsvMetadataResult {
     out.asset_class = obj.asset_class;
   }
 
+  // ⭐ 146.2-03 / G2 (2026-08-20) — THE INVARIANT THIS FUNCTION NOW ENFORCES,
+  // stated once so the arm that depends on it can cite it:
+  //
+  //     EVERY metadata UPDATE this route issues writes a `category_id`.
+  //
+  // …and therefore a committed `category_id` reading SQL NULL is proof the
+  // metadata UPDATE never ran. That proof is what the 23505 resolve arm's
+  // FILL/REFUSE tri-state is built on, and until this check it was FALSE.
+  //
+  // WHAT WAS ACTUALLY TRUE BEFORE was a claim about the CLIENT — "the wizard
+  // always sends a category_id" — not about this route. A blob that OMITS the
+  // key while carrying any other field (`{asset_class:'crypto'}`,
+  // `{aum:'1000'}`, `{description:'…'}`) ran a REAL UPDATE and left
+  // `category_id` NULL. A later same-session resubmit then read that NULL as
+  // "never classified", took the FILL arm, and `buildMetadataUpdatePayload`
+  // rewrote description/aum/markets/asset_class the user never resubmitted —
+  // the A4 mutation-on-an-echo this phase forbids — and, on `asset_class`,
+  // moved the annualization clock on a row whose committed clock was a real
+  // user choice. Unreachable from the wizard (`MetadataDraft.categoryId` is
+  // `string | null`, never absent, so the key is always on the wire),
+  // reachable at this route's documented contract.
+  //
+  // ⛔ THE METADATA-LESS PATH IS UNTOUCHED, and that is what keeps this honest
+  // rather than merely strict. `metadata` absent or null → the early return at
+  // the top of this function. `metadata: {}`, or a blob whose every field
+  // parses to nothing → an EMPTY payload, which `buildMetadataUpdatePayload`
+  // turns into no UPDATE at all. No UPDATE, nothing to prove. The rejection
+  // fires ONLY where an UPDATE would actually run, which is exactly the set
+  // the invariant quantifies over.
+  //
+  // Same register and same reason as the `category_id === null` rejection
+  // above: a strategy persisted with `category_id` NULL is invisible to
+  // discovery, and this route already refuses to let that happen silently.
+  if (Object.keys(out).length > 0 && out.category_id === undefined) {
+    return {
+      ok: false,
+      field: "metadata.category_id",
+      message:
+        "category_id is required whenever metadata is submitted — select a strategy category before submitting.",
+    };
+  }
+
   return { ok: true, payload: out };
 }
 
@@ -1005,6 +1047,34 @@ const CLOCK_SAFETY_KPI_COLUMNS = [
 ] as const;
 
 /**
+ * ⭐ 146.2-03 / G4 (2026-08-20) — THE WIZARD CONTROL THE CLASSIFICATION
+ * REFUSALS SEND THE USER TO, NAMED BY ITS EXACT LABEL.
+ *
+ * The two sentences below used to instruct "Start a new strategy to upload
+ * THIS FILE", and that instruction was UNCARRYABLE. Both refusals burn the
+ * wizard session id against the content being submitted, and `WizardClient`'s
+ * re-mint effect only mints a fresh id on a MATERIAL CONTENT CHANGE
+ * (`if (current === burned) return;`) — so a user who does exactly what the
+ * sentence says, re-uploading the same file, replays the spent session id and
+ * takes the identical 409 forever. The wizard's other reset controls do not
+ * reach this branch either.
+ *
+ * 146.2-08 / B1 adds a clickable escape in the refusal state that mints a
+ * fresh session id and KEEPS the uploaded series, so the instruction is now
+ * carryable — and these sentences point at it by name rather than describing
+ * an action the user cannot take.
+ *
+ * ⚠️ THE LABEL IS A CONTRACT WITH `START_NEW_STRATEGY_LABEL` in
+ * `CsvSubmitStep.tsx`. It is duplicated rather than imported: that module is a
+ * `"use client"` component and importing it into a route handler would pull a
+ * React tree into the server bundle. Duplicated but GREPPABLE — the two
+ * constants share a name on purpose, so `START_NEW_STRATEGY_LABEL` finds both
+ * sites in one search and a rename cannot silently orphan the server's
+ * instruction.
+ */
+const START_NEW_STRATEGY_LABEL = "Start a new strategy";
+
+/**
  * 146.2-01 / R1 — the classification-conflict refusal sentence. SEAMUX-04
  * register: state the fact, do not editorialise. It exists because the default
  * 409 sentence says "a different track record", and on this arm the track
@@ -1013,8 +1083,10 @@ const CLOCK_SAFETY_KPI_COLUMNS = [
 const CLASSIFICATION_CONFLICT_MESSAGE =
   "This wizard session already created a strategy with a different " +
   "classification, so we refused before writing anything of this submission. " +
-  "Open the strategy you already started, or start a new strategy to upload " +
-  "this file with the classification you want.";
+  'Open the strategy you already started, or use "' +
+  START_NEW_STRATEGY_LABEL +
+  '" — it keeps the file you uploaded and starts over with a new strategy, ' +
+  "so this file can be saved with the classification you want.";
 
 /**
  * ⚠️ CR-01 — THE 23505 RESOLVE ARM. Read this before "simplifying" it away.
@@ -1421,10 +1493,16 @@ async function resolveExistingStrategyOrRefuse(
     // this is a per-row MEASUREMENT and never an assumption. On the
     // series-bearing arm the population is wider still: any row the worker
     // already finished for the FIRST attempt is a completed, KPI-bearing row.
+    //
+    // ⚖️ 146.2-03 / G1 (2026-08-20) — `computation_status` JOINS THE
+    // PROJECTION, and it is NOT a member of `CLOCK_SAFETY_KPI_COLUMNS`: it is
+    // not a ranked KPI, it is the marker that says whether the KPI columns are
+    // final or merely not written YET. Reading the seven without it is what
+    // made the guard a presence test instead of the truth table below.
     const { data: storedAnalytics, error: analyticsErr } = await supabase
       .from("strategy_analytics")
       .select(
-        "cagr, sharpe, sortino, calmar, max_drawdown, volatility, cumulative_return",
+        "cagr, sharpe, sortino, calmar, max_drawdown, volatility, cumulative_return, computation_status",
       )
       .eq("strategy_id", existingRow.id)
       .maybeSingle();
@@ -1444,6 +1522,59 @@ async function resolveExistingStrategyOrRefuse(
       );
     }
     const storedKpis = storedAnalytics as Record<string, unknown> | null;
+    //
+    // ⚖️ 146.2-03 / G1 (2026-08-20) — THE GUARD IS A TRUTH TABLE, NOT A
+    // PRESENCE TEST, and the row it used to get wrong lands PERMANENTLY wrong
+    // KPIs. `storedKpiPresent` conflates two very different all-null-KPI rows:
+    //
+    //   1. NO ROW AT ALL                          → FILL is safe
+    //   2. any KPI column non-null                → REFUSE (the arm below)
+    //   3. all KPIs null AND status 'computing'   → REFUSE (the arm after it)
+    //   4. all KPIs null AND any other status     → FILL is safe
+    //
+    // WHY CASE 3 EXISTS — the TOCTOU. Mid-compute EVERY KPI column reads NULL,
+    // so case 2 does not fire and the fill lands. But the recompute the fill
+    // leans on is ABSORBED rather than scheduled: `_enqueue_compute_job_internal`
+    // (supabase/schema/functions/) DEDUPES onto any job whose status is in
+    // ('pending','running','done_pending_children') and RETURNS THE EXISTING
+    // id, and this route's enqueue passes only p_strategy_id / p_kind /
+    // p_metadata — no idempotency key — so it resolves onto the job already
+    // running. That job snapshotted `strategies.asset_class` into
+    // `_strategy_row` in the strategy-existence probe that opens
+    // `run_csv_strategy_analytics` (analytics_runner.py) and reads the
+    // SNAPSHOT — never the row — when it calls
+    // `periods_per_year_for_asset_class` further down the same function. It
+    // therefore writes sqrt(252) numbers onto a row the fill just relabelled 'crypto',
+    // marks it 'complete', and the Phase 143 sweep excludes 'complete'
+    // (20260819150000:397-402) — so nothing ever heals it. Sharpe understated
+    // by sqrt(365/252) ≈ 1.204x, on a row the same fill made discovery-visible
+    // and percentile-ranked.
+    //
+    // ⛔ WHY CASE 4 MUST STAY A FILL — do NOT "simplify" this into "refuse
+    // whenever a row exists". `writeFailedStrategyAnalyticsPlaceholder` below
+    // writes exactly that row — computation_status / computation_error / flags
+    // and NO KPI columns — and it is the PRIMARY population the R1 repair
+    // exists for. A change that refuses case 4 destroys the repair this phase
+    // ships.
+    //
+    // ⚠️ THE WINDOW IS NARROWED, NOT CLOSED, and this says so because the code
+    // cannot. That `_strategy_row` snapshot happens BEFORE the same function
+    // awaits its `_mark_computing` upsert, so a fill landing between those two
+    // statements is still missed. What case 3 closes is the DOMINANT window —
+    // the whole compute, from the stamp to the terminal write. Closing the
+    // remaining sliver needs the worker to re-read `asset_class` after
+    // stamping, or an idempotency key on the enqueue; neither lives in this
+    // route.
+    //
+    // 'computing' is the marker `_mark_computing` stamps on entry to
+    // `run_csv_strategy_analytics` (analytics_runner.py), and that function's
+    // own docstring states the contract ("Sets computation_status='computing'
+    // on entry; 'complete' or 'failed' on exit"), so this read needs no
+    // migration and no analytics-service change. Nor does it strand the
+    // user: `reap_strategy_analytics_stuck_computing` (migration
+    // 20260802120000) terminalizes a stranded 'computing' row, so case 3 is a
+    // WAIT rather than a dead end — which is what its copy says.
+    //
     // `!== null` and not a truthiness test: a stored 0 (a real cagr of zero)
     // is a KPI. A column that came back `undefined` — schema drift — is an
     // absent reading and counts as PRESENT here on purpose: it is the
@@ -1471,12 +1602,41 @@ async function resolveExistingStrategyOrRefuse(
           "strategy without the classification you chose, and it already " +
           "carries computed metrics. Changing its classification now would " +
           "relabel those metrics without recomputing them, so we changed " +
-          "nothing. Start a new strategy to upload this file with the " +
-          "classification you want.",
+          'nothing. Use "' +
+          START_NEW_STRATEGY_LABEL +
+          '" — it keeps the file you uploaded and starts over with a new ' +
+          "strategy, so this file can be saved with the classification you " +
+          "want.",
       );
     }
-    // The guard MEASURED no stored KPIs, so there is nothing a moved clock
-    // could leave stale on either arm.
+    // 146.2-03 / G1 — CASE 3. The KPI columns are all NULL because they have
+    // not been WRITTEN yet, not because nothing will write them. See the truth
+    // table above for why filling here is the TOCTOU that lands a permanently
+    // sqrt(252)-computed 'crypto' row.
+    //
+    // ⚠️ An ABSENT `computation_status` (`undefined` — the column did not come
+    // back) counts as in-flight, the same conservative direction the KPI test
+    // takes: absence of a measurement never licenses moving the clock. The
+    // column is `NOT NULL DEFAULT 'pending'` (20260405061911:74), so a
+    // MEASURED reading is always a string and case 4 is never reached by
+    // accident.
+    const computeInFlight =
+      storedKpis !== null &&
+      (typeof storedKpis.computation_status !== "string" ||
+        storedKpis.computation_status === "computing");
+    if (computeInFlight) {
+      return refuse(
+        "clock-safety: a compute job is in flight on a never-classified row (computation_status is not a measured terminal value), and its worker already snapshotted the pre-fill asset_class",
+        "An earlier attempt in this wizard session had already saved this " +
+          "strategy, and its metrics are being computed right now. Applying " +
+          "your classification while that runs would leave the metrics on the " +
+          "old annualization convention, so we changed nothing. Submit the " +
+          "same file again in a few minutes — it will not create a second " +
+          "strategy.",
+      );
+    }
+    // The guard MEASURED no stored KPIs and no compute in flight, so there is
+    // nothing a moved clock could leave stale on either arm.
     //
     // ⚖️ 146.2-02 / BL-01 (2026-08-19) — A FILL THIS REQUEST CANNOT SUPPLY IS
     // NOT A FILL. `fillClassification` widens the metadata gate at the call

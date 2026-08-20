@@ -343,7 +343,15 @@ describe("RESOLVE-REFUSED (145-05 B): 23505 + name mismatch → 409 CSV_SESSION_
     // below is what reds.
     const res = await POST(
       makeRequest(
-        validBody({ metadata: { description: "must never be written on a refusal" } }),
+        // 146.2-03 / G2 — the blob carries a `category_id` because a metadata
+        // blob that would run an UPDATE without one is now a 400 at the
+        // boundary, and a 400 would never reach the ordering this case tests.
+        validBody({
+          metadata: {
+            category_id: COMMITTED_CATEGORY_ID,
+            description: "must never be written on a refusal",
+          },
+        }),
       ),
     );
     const body = await res.json();
@@ -704,7 +712,14 @@ describe("RESOLVE-READ-FAIL (146.2-06): both fail-closed resolve arms answer 503
 
     const res = await POST(
       makeRequest(
-        validBody({ metadata: { description: "must never be written on a fail-closed refusal" } }),
+        // 146.2-03 / G2 — see the note on the refusal case above: a
+        // category-less blob now 400s before the fail-closed arm is reached.
+        validBody({
+          metadata: {
+            category_id: COMMITTED_CATEGORY_ID,
+            description: "must never be written on a fail-closed refusal",
+          },
+        }),
       ),
     );
     const body = await res.json();
@@ -1042,12 +1057,21 @@ describe("WR-04 (Phase 53): parseCsvMetadata shared validator (both guard paths)
     expect(result.payload?.category_id).toBe(uuid);
   });
 
-  it("leaves the legitimate metadata-less path (absent key / null raw) untouched", () => {
-    // Absent category_id key → ok, no category_id in payload.
-    const absent = parseCsvMetadata({ description: "x" });
-    expect(absent.ok).toBe(true);
-    if (!absent.ok) throw new Error("expected acceptance");
-    expect(absent.payload?.category_id).toBeUndefined();
+  it("leaves the legitimate metadata-less path (empty blob / null raw) untouched", () => {
+    // ⚖️ 146.2-03 / G2 (2026-08-20) — WHAT "METADATA-LESS" MEANS NARROWED, and
+    // this case narrowed with it. It used to assert that `{description:"x"}` —
+    // an ABSENT category_id key alongside a real field — was accepted, which is
+    // precisely the blob that ran a REAL metadata UPDATE and left `category_id`
+    // NULL, falsifying the proof the 23505 resolve arm's FILL is built on.
+    // That blob is now a 400 (pinned in csv-finalize-rpc.test.ts).
+    //
+    // The path that stays legal is the one that WRITES NOTHING: an empty blob,
+    // or no metadata at all. It runs no UPDATE, so it cannot make a committed
+    // NULL mean anything other than "the UPDATE never ran".
+    const empty = parseCsvMetadata({});
+    expect(empty.ok).toBe(true);
+    if (!empty.ok) throw new Error("expected acceptance");
+    expect(empty.payload?.category_id).toBeUndefined();
     // Entirely absent metadata object → ok, null payload.
     const none = parseCsvMetadata(null);
     expect(none.ok).toBe(true);
@@ -1083,8 +1107,10 @@ describe("NEW-C14-05: over-cap description → 400 instead of silent truncation"
     });
     updateMock.mockResolvedValueOnce({ error: null });
     const desc5000 = "y".repeat(5000);
+    // 146.2-03 / G2 — the blob carries a category_id so the ONLY thing that
+    // could 400 here is the description cap this case is about.
     const res = await POST(makeRequest(validBody({
-      metadata: { description: desc5000 },
+      metadata: { category_id: COMMITTED_CATEGORY_ID, description: desc5000 },
     })));
     expect(res.status).toBe(200);
   });
