@@ -96,6 +96,13 @@ so "is prod running main HEAD?" is not machine-checkable today.
 - **Railway one-off scripts use `SUPABASE_SERVICE_KEY`** (not
   `SUPABASE_SERVICE_ROLE_KEY`). Run prod backfills/one-offs via:
   `railway ssh "cd /app && python -m scripts.<name>"`.
+- **Never point a local analytics-service run at the prod Supabase project.** Both
+  `uvicorn main:app` and `python -m main_worker` start job-claiming worker loops, so a
+  laptop aimed at prod claims real `compute_jobs` and strands them as orphaned `running`
+  rows when you Ctrl-C. Local env loads `analytics-service/.env.qa-local` (TEST) before
+  `.env`, and startup refuses outright when `SUPABASE_URL` names the prod project off
+  Railway. `ALLOW_PROD_WORKER_OFF_PLATFORM=1` is the deliberate escape hatch for a
+  sanctioned emergency run.
 - **Never commit a recorded VCR cassette** that contains a real
   `DEBUG_KEY_FLOW_*` value or a high-entropy literal in a signing-key field —
   `scripts/repro-key-flow.sh` exits non-zero on either, and the secret-scan CI

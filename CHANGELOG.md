@@ -1,5 +1,35 @@
 # Changelog
 
+## [0.68.1.0] - 2026-08-20
+### fix: localhost can no longer become a production worker by accident
+
+Running the analytics service on a laptop used to make it a live PROD worker
+within seconds — `analytics-service/.env` pointed at the production database
+while the frontend's local default was TEST, and `uvicorn main:app` silently
+starts job-claiming worker loops (2026-08-20 incident; zero damage, by luck).
+
+**Fixed**
+
+- Local runs now default to the TEST project: both entrypoints load
+  `analytics-service/.env.qa-local` before `.env`, so the TEST values win
+  locally while Railway's injected env is untouched.
+- A hard startup guard (`assert_worker_not_aimed_at_prod_off_platform`) refuses
+  to start worker loops when `SUPABASE_URL` points at the PROD project off
+  Railway — including when a shell profile exports the prod URL over both env
+  files. Deliberate emergency runs use `ALLOW_PROD_WORKER_OFF_PLATFORM=1`; the
+  refusal message says so.
+
+**Infrastructure / tests**
+
+- 9 regression tests pin the guard's decision table, its wiring into BOTH
+  entrypoints (ordering, before any loop starts, comment-stripped source
+  scans), and the `.env.qa-local`-first load order; each proven able to fail
+  via named neuters.
+- The Sentry bootstrap test stubs the (env-dependent) guard so an inherited
+  prod `SUPABASE_URL` can't fail it for the wrong reason.
+- Records the Phase 146.2 R6 + escape live-flow UAT (both arms PASS on
+  localhost against TEST) in `.planning/`.
+
 ## [0.68.0.0] - 2026-08-20
 ### fix: v1.19 Phase 146.2 — the echo path must not silently drop a strategy's classification (#694)
 

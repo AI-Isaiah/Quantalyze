@@ -109,7 +109,7 @@ before merging.
 | `npm run test:e2e` | Run Playwright E2E tests |
 | `npm run verify:phase18` | Verify Phase 18 artifacts (canonical redactor parity, founder LP cron, migration 100) |
 | `npm run check:founder-lp-readiness` | Pre-flight check for `FOUNDER_LP_STRATEGY_ID` (status=published, has factsheet) before the monthly cron's first tick |
-| `npm run worker:dev` | Run the analytics worker locally against `analytics-service/.env` |
+| `npm run worker:dev` | Run the analytics worker locally. Env loads `analytics-service/.env.qa-local` (TEST) first, then `.env`; startup refuses if `SUPABASE_URL` points at the PROD project off Railway |
 | `npm run schema:functions` | Regenerate the canonical SQL function snapshot in `supabase/schema/functions/` (run after a migration adds/changes/drops a function; the "SQL Function Snapshot — Drift Gate" CI check fails if it is stale) |
 
 ## Analytics Service (Optional)
@@ -129,6 +129,18 @@ export SUPABASE_SERVICE_KEY=your-service-role-key
 
 uvicorn main:app --reload
 ```
+
+**Point local runs at TEST, never prod.** `uvicorn main:app` does not only serve the
+API — its lifespan starts the job-claiming worker loops, so a laptop aimed at the
+production Supabase project becomes a live prod worker within seconds (2026-08-20
+incident). Two things stop that:
+
+- Both entrypoints (`main.py`, `main_worker.py`) load `analytics-service/.env.qa-local`
+  **before** `.env`, so the TEST values you put in `.env.qa-local` win locally. Neither
+  file exists on Railway, so the injected prod env is untouched.
+- If `SUPABASE_URL` still names the prod project and the process is not on Railway,
+  startup raises and no loop ever claims a job. For a deliberate emergency run against
+  prod, set `ALLOW_PROD_WORKER_OFF_PLATFORM=1`.
 
 ## Troubleshooting
 
