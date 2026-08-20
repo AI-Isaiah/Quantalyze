@@ -443,6 +443,37 @@ async function liveAllowlistIds(sb: SupabaseClient): Promise<string[]> {
           .not("api_key_id", "is", null)
           .order("id", { ascending: true }),
     );
+
+    // 158-REVIEW WR-05 (iter 3): the SAME exact-count cross-check `flipEligibility`
+    // already applies to its eligible population — and this read needs it MORE.
+    //
+    // `selectAllPages` terminates on `rows.length < PAGE_SIZE`, and PAGE_SIZE is
+    // 1000 — exactly PostgREST's default `max-rows` on Supabase. That makes the
+    // end-of-set signal INDISTINGUISHABLE from the truncation cap: if the TEST
+    // project's `max-rows` is ever set below 1000, the first `.range(0, 999)`
+    // returns a short page, the loop returns happy, and the guard silently fails
+    // OPEN again — omitting the `api_key_id`s that back `is_example` / `published`
+    // demo strategies, which then become eligible to be flipped
+    // `disconnected_at = now()`. This is the SAFETY read: `flipEligibility`'s
+    // population being wrong makes the evidence wrong, but this one being wrong
+    // destroys durable demo fixtures. Refuse rather than act on a set that may be
+    // short.
+    const { count, error: countErr } = await sb
+      .from("strategies")
+      .select("id", { count: "exact", head: true })
+      .eq(column, value)
+      .not("api_key_id", "is", null);
+    if (countErr) die(`counting the live allowlist (${column}): ${countErr.message}`);
+    if (count !== null && count !== rows.length) {
+      die(
+        `live allowlist (${column}): paged read returned ${rows.length} rows but the ` +
+          `exact count is ${count}. The safety allowlist may be TRUNCATED, which would ` +
+          "make protected demo keys eligible for the flip. Refusing to proceed — " +
+          "re-run when the project is quiet, and check PostgREST's max-rows against " +
+          `PAGE_SIZE (${PAGE_SIZE}).`,
+      );
+    }
+
     for (const row of rows) {
       if (row.api_key_id) ids.add(row.api_key_id.toLowerCase());
     }
