@@ -204,7 +204,21 @@ To exercise the watcher without forcing a cancellation on main, dispatch it
 against a historical cancelled run:
 
 ```bash
-gh workflow run main-ci-cancelled-watcher.yml -f run_id=31273384829
+gh workflow run main-ci-cancelled-watcher.yml -f run_id=31273384829 -f attempt=1
+```
+
+⚠️ **Pin the attempt.** A run's top-level `conclusion` is that of its *latest*
+attempt, so a run that was cancelled and later rerun green now reports
+`success` and the watcher will (correctly) no-op on it. Run 31273384829 is
+exactly that case: attempt 1 was `cancelled`, the run itself now reads
+`success`. Attempt conclusions are immutable, which is what makes them a stable
+test fixture. To test with a bare `run_id` instead, pick a run whose *current*
+conclusion is cancelled:
+
+```bash
+gh run list --workflow=ci.yml --branch main --limit 100 \
+  --json databaseId,conclusion,event \
+  --jq '[.[] | select(.conclusion=="cancelled" and .event=="push")][0]'
 ```
 
 A repeat cancellation on main with the mutex in place means something other than

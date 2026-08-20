@@ -42,8 +42,17 @@ on:
   workflow_dispatch:
     inputs:
       run_id:
-        description: "CI run id to evaluate against the detection predicate (exercises the issue path against a historical cancelled run, e.g. 31273384829, without forcing a cancellation on main)."
+        description: "CI run id to evaluate against the detection predicate — exercises the issue path against a historical cancelled run without forcing a cancellation on main."
         required: true
+      attempt:
+        # A run's top-level `conclusion` is that of its LATEST attempt, so a
+        # cancelled run that was later rerun green reports `success` and would
+        # (correctly) no-op here. Pin an attempt to test against an immutable
+        # historical conclusion: run 31273384829 attempt 1 was `cancelled`,
+        # while the run itself now reports `success`.
+        description: "Optional attempt number. Omit to evaluate the run's latest attempt; set to 1 to test against e.g. run 31273384829 attempt 1 (cancelled)."
+        required: false
+        default: ""
 
 permissions:
   contents: read
@@ -103,26 +112,39 @@ jobs:
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3  # v9.0.0
         env:
           INPUT_RUN_ID: ${{ inputs.run_id }}
+          INPUT_ATTEMPT: ${{ inputs.attempt }}
         with:
           script: |
-            const { INPUT_RUN_ID } = process.env;
+            const { INPUT_RUN_ID, INPUT_ATTEMPT } = process.env;
             const runId = Number(String(INPUT_RUN_ID || "").replace(/[^0-9]/g, ""));
             if (!Number.isSafeInteger(runId) || runId <= 0) {
               core.warning(`run_id input ${JSON.stringify(INPUT_RUN_ID)} is not a positive integer — nothing to evaluate.`);
               core.setOutput("detected", "false");
               return;
             }
+            const attemptRaw = String(INPUT_ATTEMPT || "").replace(/[^0-9]/g, "");
+            const attempt = attemptRaw ? Number(attemptRaw) : null;
             let run;
             try {
-              ({ data: run } = await github.rest.actions.getWorkflowRun({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                run_id: runId,
-              }));
+              // A run's top-level conclusion is its LATEST attempt's. When an
+              // attempt is pinned, read that attempt instead, so a cancelled
+              // attempt that was later rerun green is still exercisable.
+              ({ data: run } = attempt
+                ? await github.rest.actions.getWorkflowRunAttempt({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    run_id: runId,
+                    attempt_number: attempt,
+                  })
+                : await github.rest.actions.getWorkflowRun({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    run_id: runId,
+                  }));
             } catch (err) {
               // Never throw: a dispatch run also reports a check on main HEAD,
               // and a red check there makes Railway skip the deploy (header).
-              core.warning(`Could not fetch run ${runId}: ${err.message}`);
+              core.warning(`Could not fetch run ${runId}${attempt ? ` attempt ${attempt}` : ""}: ${err.message}`);
               core.setOutput("detected", "false");
               return;
             }
@@ -132,7 +154,8 @@ jobs:
               run.head_branch === "main" &&
               run.event === "push";
             core.info(
-              `run ${runId}: conclusion=${run.conclusion} head_branch=${run.head_branch} ` +
+              `run ${runId}${attempt ? ` attempt ${attempt}` : ""}: ` +
+              `conclusion=${run.conclusion} head_branch=${run.head_branch} ` +
               `event=${run.event} -> detected=${detected}`
             );
             core.setOutput("detected", detected ? "true" : "false");
