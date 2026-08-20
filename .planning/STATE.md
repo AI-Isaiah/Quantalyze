@@ -4,12 +4,12 @@ milestone: v1.20
 milestone_name: Backlog Burndown (Phases 158+)
 current_phase: 158
 current_phase_name: OPS-CI — A merge means a deploy
-status: planning
+status: executing
 stopped_at: Completed 146-03-PLAN.md (phase 146 close)
-last_updated: "2026-08-20T15:48:21.987Z"
+last_updated: "2026-08-20T15:52:48.612Z"
 last_activity: 2026-08-20
-last_activity_desc: "v1.20 roadmap created (Phases 158–165). ⛔ Ordering binding: 158"
-state_head: f7c69b37b0e276484ff0dbc73bff8cae333df2d2
+last_activity_desc: Phase 158 execution started
+state_head: 35c74149e215b6c6117d3905297d602491a67dce
 progress:
   total_phases: 8
   completed_phases: 0
@@ -75,10 +75,10 @@ are re-homed into v1.17 (Phases 155 / 153); 142.3 will not run as a v1.16 phase.
 
 ## Current Position
 
-Phase: 158 (OPS-CI — A merge means a deploy) — READY TO EXECUTE
-Plan: —
-Status: v1.20 roadmap created — 8 phases, 50/50 requirements mapped. Next: `/gsd-plan-phase 158`
-Last activity: 2026-08-20 — v1.20 roadmap created (Phases 158–165). ⛔ Ordering binding: 158
+Phase: 158 (OPS-CI — A merge means a deploy) — EXECUTING
+Plan: 1 of 6
+Status: Executing Phase 158
+Last activity: 2026-08-20 — Phase 158 execution started
 OPS-CI first (the shared-test-db eviction / #616 mutex protects every later merge), 165 DEPS
 last (hard-blocked on OPS-01), 160 provenance before 164 SHARE (REVOKE soak), SHARE alone in
 its own PR and never branched from `feat/phase-156-connect-refactor`.
