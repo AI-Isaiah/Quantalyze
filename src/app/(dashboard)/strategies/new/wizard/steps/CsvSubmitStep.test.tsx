@@ -70,6 +70,7 @@ describe("CsvSubmitStep — Phase 19.1 daily_returns_series threading", () => {
         dailyReturnsSeries={SERIES}
         metadata={META}
         onSubmitted={onSubmitted}
+        onStartNewStrategy={() => {}}
         onBack={() => {}}
       />,
     );
@@ -105,6 +106,7 @@ describe("CsvSubmitStep — Phase 19.1 daily_returns_series threading", () => {
         dailyReturnsSeries={SERIES}
         metadata={META}
         onSubmitted={() => {}}
+        onStartNewStrategy={() => {}}
         onBack={() => {}}
       />,
     );
@@ -131,6 +133,7 @@ describe("CsvSubmitStep — Phase 19.1 daily_returns_series threading", () => {
         // "no series" → empty rows → OK for trades fmt).
         metadata={META}
         onSubmitted={() => {}}
+        onStartNewStrategy={() => {}}
         onBack={() => {}}
       />,
     );
@@ -175,6 +178,7 @@ describe("CsvSubmitStep — #597 part 2 asset_class forwarding", () => {
         dailyReturnsSeries={SERIES}
         metadata={{ ...META, assetClass: "crypto" }}
         onSubmitted={() => {}}
+        onStartNewStrategy={() => {}}
         onBack={() => {}}
       />,
     );
@@ -199,6 +203,7 @@ describe("CsvSubmitStep — #597 part 2 asset_class forwarding", () => {
         dailyReturnsSeries={SERIES}
         metadata={{ ...META, assetClass: "traditional" }}
         onSubmitted={() => {}}
+        onStartNewStrategy={() => {}}
         onBack={() => {}}
       />,
     );
@@ -227,6 +232,7 @@ describe("CsvSubmitStep — #597 part 2 asset_class forwarding", () => {
         dailyReturnsSeries={SERIES}
         metadata={META}
         onSubmitted={() => {}}
+        onStartNewStrategy={() => {}}
         onBack={() => {}}
       />,
     );
@@ -252,6 +258,7 @@ describe("CsvSubmitStep — #597 part 2 asset_class forwarding", () => {
         metadata={META}
         entryContext="contribution"
         onSubmitted={() => {}}
+        onStartNewStrategy={() => {}}
         onBack={() => {}}
       />,
     );
@@ -314,13 +321,33 @@ const ROUTE_ECHO_SENTENCE =
 
 /**
  * `csv-finalize/route.ts` — `CLASSIFICATION_CONFLICT_MESSAGE`, the arm-specific
- * 409 sentence 146.2-01 added to the REFUSE arm, verbatim, verified 2026-08-19.
+ * 409 sentence 146.2-01 added to the REFUSE arm, verbatim, RE-TYPED FROM HEAD
+ * and verified 2026-08-20.
+ *
+ * ⚠️ 146.2-08 re-cut it. The pre-08 sentence told the user to "start a new
+ * strategy and upload this file", which was UNCARRYABLE: the 409 burns the
+ * session id against the content being submitted, the re-mint is keyed on a
+ * material content change, and opening a fresh CSV wizard restores both the
+ * spent id and the burn — so the same file took the same 409 forever, with no
+ * control anywhere that could break the loop. The sentence now quotes the
+ * escape B1 added by its exact label, which is why the assertion below checks
+ * that BOTH the sentence and the control named in it are on screen: a sentence
+ * naming a button that does not exist is worse than the old vague one.
  */
 const ROUTE_CLASSIFICATION_CONFLICT =
   "This wizard session already created a strategy with a different " +
   "classification, so we refused before writing anything of this submission. " +
-  "Open the strategy you already started, or start a new strategy to upload " +
-  "this file with the classification you want.";
+  'Open the strategy you already started, or use "Start a new strategy" — it ' +
+  "keeps the file you uploaded and starts over with a new strategy, so this " +
+  "file can be saved with the classification you want.";
+
+/**
+ * `CsvSubmitStep.tsx` — `START_NEW_STRATEGY_LABEL`, and `csv-finalize/route.ts`
+ * declares a constant of the SAME NAME holding the same words. Hand-typed here
+ * for the :44-45 independent-oracle rule; the shared name is what makes the
+ * three sites greppable in one search.
+ */
+const START_NEW_STRATEGY_LABEL = "Start a new strategy";
 
 const ECHOED_ID = "33333333-3333-4333-8333-333333333333";
 
@@ -331,7 +358,10 @@ function jsonResponse(body: unknown, status: number) {
   });
 }
 
-function mountAndSubmit(onSubmitted: (id: string) => void) {
+function mountAndSubmit(
+  onSubmitted: (id: string) => void,
+  onStartNewStrategy: () => void = () => {},
+) {
   render(
     <CsvSubmitStep
       wizardSessionId="22222222-2222-2222-2222-222222222222"
@@ -341,6 +371,7 @@ function mountAndSubmit(onSubmitted: (id: string) => void) {
       dailyReturnsSeries={SERIES}
       metadata={META}
       onSubmitted={onSubmitted}
+      onStartNewStrategy={onStartNewStrategy}
       onBack={() => {}}
     />,
   );
@@ -391,9 +422,16 @@ describe("CsvSubmitStep — 146.2-07 / R6 the echo sentence renders", () => {
     // ANTI-VACUITY: the assertion above passes trivially on a component that
     // stopped submitting at all. Continue must still complete the flow, once,
     // with the ECHOED id (not a fabricated one).
+    //
+    // 146.2-08 / B3 — the click is retried until the CTA arms rather than
+    // waiting a hard-coded interval: `ECHO_CONTINUE_ARM_MS` is deliberately NOT
+    // imported (assertion and implementation must be independent oracles), and
+    // a re-typed number here would be a second place to update.
     expect(fetchSpy).toHaveBeenCalledTimes(1);
-    fireEvent.click(screen.getByTestId("wizard-csv-echo-continue"));
-    expect(onSubmitted).toHaveBeenCalledTimes(1);
+    await waitFor(() => {
+      fireEvent.click(screen.getByTestId("wizard-csv-echo-continue"));
+      expect(onSubmitted).toHaveBeenCalledTimes(1);
+    });
     expect(onSubmitted).toHaveBeenCalledWith(ECHOED_ID);
   });
 
@@ -446,5 +484,250 @@ describe("CsvSubmitStep — 146.2-07 / R6 the echo sentence renders", () => {
     expect(onSubmitted).not.toHaveBeenCalled();
     // A refusal is not a success: the echo notice must NOT appear beside it.
     expect(screen.queryByTestId("wizard-csv-echo-notice")).toBeNull();
+    // 146.2-08 / B1 — and the control the sentence NAMES is on screen. An
+    // instruction quoting a button that does not exist is worse than the vague
+    // sentence it replaced.
+    expect(
+      screen.getByRole("button", { name: START_NEW_STRATEGY_LABEL }),
+    ).toBeInTheDocument();
+  });
+});
+
+/**
+ * ⭐ 146.2-08 / B1 — THE REFUSAL MUST NOT STRAND THE USER.
+ *
+ * A `CSV_SESSION_REUSED` 409 is the one refusal this step cannot retry out of.
+ * The response burns the session id against the content being submitted
+ * (`showCsvEnvelope` → `onSubmitFailed`), and `WizardClient` re-mints only on a
+ * MATERIAL CONTENT CHANGE — so resubmitting the same file replays the spent id
+ * and takes the same 409, forever. Opening a fresh CSV wizard does not help
+ * either: the persisted envelope restores both the spent id AND the burn. The
+ * wizard's two reset controls are structurally unreachable on this branch
+ * ("Start fresh" is gated on `initialDraft`, "Delete draft" on `strategyId`;
+ * neither is ever set on the CSV path), so before this the only exits were
+ * clearing site data or abandoning the upload.
+ *
+ * The founder's standing UAT direction is that a blocked state offers a
+ * CLICKABLE REMEDY rather than a dead end. These cases pin the remedy's three
+ * obligations: it is offered on the refusal, it delegates the session mint (the
+ * parent owns the id), and it does NOT appear on refusals it cannot fix.
+ *
+ * The WIRING half — that the parent's handler actually mints a fresh id, clears
+ * the persisted burn, and keeps the uploaded series — is a different question
+ * about a different component and is pinned in
+ * `WizardClient.csv-burn-persistence.test.tsx`. A callback that fires into a
+ * no-op would pass everything here.
+ */
+describe("CsvSubmitStep — 146.2-08 / B1 the 409 refusal carries a clickable escape", () => {
+  let fetchSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    fetchSpy = vi.spyOn(globalThis, "fetch");
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    cleanup();
+  });
+
+  function refuse409() {
+    return jsonResponse(
+      {
+        ok: false,
+        code: "CSV_SESSION_REUSED",
+        human_message: ROUTE_CLASSIFICATION_CONFLICT,
+        debug_context: { strategy_id: ECHOED_ID },
+        correlation_id: null,
+      },
+      409,
+    );
+  }
+
+  it("⭐ clicking the escape asks the PARENT to mint, retires the refusal, and says what happens next", async () => {
+    fetchSpy.mockResolvedValue(refuse409());
+    const onStartNewStrategy = vi.fn();
+    mountAndSubmit(vi.fn(), onStartNewStrategy);
+
+    await screen.findByTestId("wizard-csv-error");
+    fireEvent.click(screen.getByTestId("wizard-csv-start-new-strategy"));
+
+    // (1) The session half is delegated — this component cannot mint the id.
+    expect(
+      onStartNewStrategy,
+      "the escape rendered but did nothing: without the parent's mint the next " +
+        "submit replays the SAME spent session id and takes the same 409",
+    ).toHaveBeenCalledTimes(1);
+
+    // (2) The refusal is gone. Leaving it up would assert a refusal that is no
+    // longer true of the session the user now has.
+    expect(screen.queryByTestId("wizard-csv-error")).toBeNull();
+
+    // (3) …and something stands in its place. An escape whose only visible
+    // effect is that the error vanished reads as a bug, not a remedy.
+    expect(
+      screen.getByTestId("wizard-csv-session-restarted").textContent,
+    ).toContain("new strategy");
+
+    // (4) The forward action is live — the whole point is that the file already
+    // uploaded can now be submitted without re-uploading it.
+    expect(screen.getByTestId("wizard-csv-submit-cta")).not.toBeDisabled();
+  });
+
+  it("the escape does NOT re-burn the session id it was just handed", async () => {
+    // `showCsvEnvelope(null)` is the clear-before-submit shape and must not
+    // count as a failed attempt. If taking the remedy fired `onSubmitFailed`,
+    // the parent would burn the FRESH id against the same content and the very
+    // next submit would be refused again — the loop, reintroduced by its own fix.
+    fetchSpy.mockResolvedValue(refuse409());
+    const onSubmitFailed = vi.fn();
+    render(
+      <CsvSubmitStep
+        wizardSessionId="22222222-2222-2222-2222-222222222222"
+        fmt="daily_returns"
+        strategyName="refused"
+        preview={PREVIEW}
+        dailyReturnsSeries={SERIES}
+        metadata={META}
+        onSubmitted={vi.fn()}
+        onSubmitFailed={onSubmitFailed}
+        onStartNewStrategy={() => {}}
+        onBack={() => {}}
+      />,
+    );
+
+    fireEvent.click(screen.getByTestId("wizard-csv-submit-cta"));
+    await screen.findByTestId("wizard-csv-error");
+    expect(onSubmitFailed).toHaveBeenCalledTimes(1); // the refusal itself
+
+    fireEvent.click(screen.getByTestId("wizard-csv-start-new-strategy"));
+    expect(onSubmitFailed).toHaveBeenCalledTimes(1); // …and only the refusal
+  });
+
+  it("⛔ NEGATIVE CONTROL: a non-refusal error gets NO escape", async () => {
+    // The remedy mints a new strategy identity. Offering it on, say, a
+    // transient persist failure would invite a SECOND strategy for a submission
+    // whose first attempt is still the right one to retry.
+    fetchSpy.mockResolvedValue(
+      jsonResponse(
+        {
+          ok: false,
+          code: "CSV_INVALID_FORMAT",
+          human_message: "Invalid request body.",
+          debug_context: {},
+          correlation_id: null,
+        },
+        400,
+      ),
+    );
+    mountAndSubmit(vi.fn(), vi.fn());
+
+    await screen.findByTestId("wizard-csv-error");
+    expect(screen.queryByTestId("wizard-csv-start-new-strategy")).toBeNull();
+  });
+});
+
+/**
+ * ⭐ 146.2-08 / B2, B3, B4 — THE ECHO'S HOLD MUST SURVIVE THE USER'S NEXT
+ * KEYSTROKE, AND ITS INSTRUCTION MUST HAVE A DESTINATION.
+ *
+ * 146.2-07 stopped the echo from auto-navigating so the sentence could be read.
+ * Three things then stood between the sentence and the reader:
+ *   B2 the sentence says "open the strategy to check it holds the numbers you
+ *      meant to upload" and rendered as a bare <p> — Continue discards the id
+ *      and lands on /strategies, where a pending_review CSV strategy's numbers
+ *      are not reachable;
+ *   B3 Continue took over the slot the user had just clicked, with no key, no
+ *      delay and no latch, so a double-click or a second Enter navigated before
+ *      the sentence could be read (and double-counted the funnel event);
+ *   B4 the live region was mounted already populated — commonly announced as
+ *      silence — and nothing moved focus, so a screen-reader user sat on a
+ *      control whose accessible name had silently changed to "Continue".
+ */
+describe("CsvSubmitStep — 146.2-08 the echo is readable before it is dismissable", () => {
+  let fetchSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    fetchSpy = vi.spyOn(globalThis, "fetch");
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    cleanup();
+  });
+
+  function echo200() {
+    return jsonResponse(
+      {
+        ok: true,
+        strategy_id: ECHOED_ID,
+        status: "pending_review",
+        human_message: ROUTE_ECHO_SENTENCE,
+        correlation_id: null,
+      },
+      200,
+    );
+  }
+
+  it("⭐ B2: the echo links to the OWNER lane for the strategy it names", async () => {
+    fetchSpy.mockResolvedValue(echo200());
+    mountAndSubmit(vi.fn());
+
+    await screen.findByTestId("wizard-csv-echo-notice");
+    const link = screen.getByTestId("wizard-csv-echo-view-factsheet");
+    // The id off the WIRE, not a fabricated one: linking to the wrong strategy
+    // would send the user to check numbers that are not the ones in question.
+    expect(link).toHaveAttribute("href", `/factsheet/${ECHOED_ID}/v2`);
+    // New tab — the wizard is still holding an un-continued response, and a
+    // same-tab navigation would discard it to go read the sentence's target.
+    expect(link).toHaveAttribute("target", "_blank");
+    expect(link).toHaveAttribute("rel", "noopener noreferrer");
+  });
+
+  it("⭐ B3: a click that lands the instant the echo appears does NOT navigate", async () => {
+    fetchSpy.mockResolvedValue(echo200());
+    const onSubmitted = vi.fn();
+    mountAndSubmit(onSubmitted);
+
+    await screen.findByTestId("wizard-csv-echo-notice");
+    // The queued second half of a double-click on the submit CTA: same slot,
+    // same coordinates, a control the user never chose.
+    fireEvent.click(screen.getByTestId("wizard-csv-echo-continue"));
+    expect(
+      onSubmitted,
+      "the queued second click navigated away on the one response whose copy " +
+        "asks the user to stop and check — the sentence is spoken and never read",
+    ).not.toHaveBeenCalled();
+
+    // ANTI-VACUITY: the CTA must ARM ITSELF with no user action (it is not a
+    // disabled button), and then complete the flow exactly once.
+    await waitFor(() => {
+      fireEvent.click(screen.getByTestId("wizard-csv-echo-continue"));
+      expect(onSubmitted).toHaveBeenCalledTimes(1);
+    });
+    expect(onSubmitted).toHaveBeenCalledWith(ECHOED_ID);
+
+    // B3's second half — the latch. `onSubmitted` runs `clearWizardState()` +
+    // a router push AND fires `wizard_submit_success`, so a second click
+    // double-counts one submission in the funnel.
+    fireEvent.click(screen.getByTestId("wizard-csv-echo-continue"));
+    expect(onSubmitted).toHaveBeenCalledTimes(1);
+  });
+
+  it("⭐ B4: the live region is mounted EMPTY before the submit, and focus lands on the sentence", async () => {
+    fetchSpy.mockResolvedValue(echo200());
+    mountAndSubmit(vi.fn());
+
+    // Mounted from the first paint, and empty. A `role="status"` element that
+    // arrives already populated has no CHANGE for assistive tech to report and
+    // is commonly announced as nothing at all.
+    const live = screen.getByTestId("wizard-csv-status-live");
+    expect(live).toHaveAttribute("aria-live", "polite");
+    expect(live.textContent).toBe("");
+
+    const notice = await screen.findByTestId("wizard-csv-echo-notice");
+    expect(live).toContainElement(notice);
+    // …and focus is handed to the sentence, not left on a reused button node
+    // whose accessible name silently became "Continue".
+    await waitFor(() => expect(notice).toHaveFocus());
   });
 });

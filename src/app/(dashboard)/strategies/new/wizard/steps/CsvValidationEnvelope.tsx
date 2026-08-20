@@ -1,5 +1,6 @@
 "use client";
 
+import { type ReactNode } from "react";
 import {
   CSV_RULE_LABELS,
   WIZARD_ERROR_COPY,
@@ -100,9 +101,25 @@ interface CsvValidationEnvelopeProps {
     };
     correlation_id: string | null;
   };
+  /**
+   * 146.2-08 / B1 — an optional remedy CTA, rendered BELOW the body and ABOVE
+   * the per-rule accordion. That position is DESIGN.md's Error Envelope
+   * contract for the retry CTA, and this panel is the CSV surface's stand-in
+   * for that shell; a caller that rendered its own button underneath the panel
+   * would sit outside the tinted box and read as unrelated to the sentence.
+   *
+   * A slot rather than a `code`-keyed table inside this component: WHICH codes
+   * are recoverable and BY WHAT action is the calling step's knowledge (only
+   * `CsvSubmitStep` can mint a wizard session), and baking a code list in here
+   * would put that decision two files away from the state it mutates.
+   */
+  action?: ReactNode;
 }
 
-export function CsvValidationEnvelope({ envelope }: CsvValidationEnvelopeProps) {
+export function CsvValidationEnvelope({
+  envelope,
+  action,
+}: CsvValidationEnvelopeProps) {
   const errors = envelope.debug_context?.pandera_errors ?? [];
   const byRule = errors.reduce<Record<string, typeof errors>>((acc, e) => {
     (acc[e.rule] ??= []).push(e);
@@ -166,6 +183,11 @@ export function CsvValidationEnvelope({ envelope }: CsvValidationEnvelopeProps) 
       </p>
       {causeText !== null && (
         <p className="mt-1 text-caption text-text-secondary">{causeText}</p>
+      )}
+      {action !== undefined && action !== null && (
+        <div className="mt-3" data-testid="wizard-csv-error-action">
+          {action}
+        </div>
       )}
       {Object.entries(byRule).map(([rule, list]) => (
         <details key={rule} className="mt-2 text-caption">

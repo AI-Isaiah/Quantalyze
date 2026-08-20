@@ -88,19 +88,62 @@ const NOTHING_WAS_SAVED = "Nothing was saved";
  */
 
 /**
- * `csv-finalize/route.ts` — the CSV_PERSIST_FAIL emitter, verbatim. Post-145
- * this code has ONE emitter: the fail-closed 503 in the 23505 resolve arm's
- * `failClosed()` (route.ts:1099 at time of writing). The 500 persist-fail
- * emitter the old fixture quoted died with `persist_csv_daily_returns`.
+ * `csv-finalize/route.ts` — the FIRST of the code's TWO emitters, verbatim: the
+ * fail-closed 503 raised by `failClosed()` inside the 23505 resolve arm, when a
+ * resolve read errors and the route refuses to guess what is already saved.
+ *
+ * ⚠️ 146.2-08 / B5 — THIS DOCBLOCK USED TO SAY "post-145 this code has ONE
+ * emitter", with a bare `route.ts:<line>` coordinate. Both halves were wrong at
+ * HEAD. A SECOND emitter was added three commits later (146.2-01's
+ * classification-FILL refusal, pinned as `ROUTE_PERSIST_FAIL_FILL` below) and
+ * arrived with UNPINNED copy, and the coordinate had drifted past the emitter
+ * it named. That is the same W1 false-provenance class this plan corrected in
+ * the fixtures above — a claim that reads as measurement, is invisible to the
+ * suite (both arms mock the wire, so any string round-trips), and teaches the
+ * next reader to trust it. Anchored on the SYMBOL now, per the seam surface's
+ * no-bare-coordinate rule, which this file's sibling on that surface enforces.
+ *
+ * The 500 persist-fail emitter the pre-146.2-07 fixture quoted is a third,
+ * genuinely dead one: it died with `persist_csv_daily_returns`.
  */
 const ROUTE_PERSIST_FAIL =
   "We could not confirm what is already saved for this strategy, so we " +
   "stopped before writing anything of this submission. Try again shortly.";
 /**
- * `csv-finalize/route.ts` — the DEFAULT 409 refusal literal in `refuse()`
- * (route.ts:1182), verbatim. 146.2-01 gave `refuse()` an optional
+ * `csv-finalize/route.ts` — the SECOND `CSV_PERSIST_FAIL` emitter, verbatim,
+ * re-typed from HEAD and verified 2026-08-20: the 503 the classification-FILL
+ * arm returns when the metadata UPDATE it attempted on an already-committed
+ * strategy did not land (`outcome.fillClassification` with a non-"applied"
+ * `applyCsvMetadataUpdate` result).
+ *
+ * ⭐ ITS SHAPE IS THE OPPOSITE OF ITS TWIN'S, WHICH IS WHY PINNING BOTH MATTERS.
+ * The `failClosed()` sentence says nothing was written and we could not check;
+ * this one says a strategy IS saved, names the write that failed, and asks for
+ * the same file again. Routing either into §4a's "Nothing was saved." would
+ * print a falsehood, but they are false in different directions — a client arm
+ * tested only against the first would not notice the second losing its own
+ * sentence.
+ */
+const ROUTE_PERSIST_FAIL_FILL =
+  "An earlier attempt in this wizard session had already saved this " +
+  "strategy, and we tried to apply the category and asset class you " +
+  "entered to it just now — but that write did not land, so nothing " +
+  "was changed. Submit the same file again shortly; it will not " +
+  "create a second strategy.";
+/**
+ * `csv-finalize/route.ts` — the DEFAULT 409 refusal literal inside `refuse()`,
+ * verbatim, re-verified 2026-08-20. 146.2-01 gave `refuse()` an optional
  * arm-specific sentence; this is the default the name / series / A2 arms still
- * carry, and it is byte-unchanged by that plan.
+ * carry, and it is byte-unchanged by that plan and by 146.2-08.
+ *
+ * (146.2-08 / B5 converted a bare `route.ts:<line>` coordinate here to this
+ * symbol anchor — same reason as the `ROUTE_PERSIST_FAIL` note above, and the
+ * rule the seam-citation guard enforces on the component this file exercises.)
+ *
+ * ⚠️ NOT THE ONLY SENTENCE UNDER THIS CODE. `refuse()` also carries the
+ * classification-conflict sentence (pinned in `CsvSubmitStep.test.tsx`) and the
+ * clock-safety one 146.2-03 added. The client arms are keyed on the CODE, not
+ * on any of the three, which is why one fixture per behaviour suffices.
  */
 const ROUTE_SESSION_REUSED =
   "This wizard session already created a strategy with a different track " +
@@ -163,6 +206,7 @@ function mountAndSubmit(): void {
       dailyReturnsSeries={[{ date: "2024-01-01", daily_return: 0.01 }]}
       metadata={META}
       onSubmitted={() => {}}
+      onStartNewStrategy={() => {}}
       onBack={() => {}}
     />,
   );
@@ -335,6 +379,46 @@ describe("[140.5-05] ⛔ NEGATIVE CONTROLS — csv-finalize's own vocabulary kee
     expect(screen.getByTestId("wizard-csv-submit-cta")).not.toBeDisabled();
   });
 
+  it("⭐ the SECOND CSV_PERSIST_FAIL emitter keeps ITS sentence, and 'Nothing was saved' is ABSENT there too", async () => {
+    // 146.2-08 / B5. The case above pins the `failClosed()` emitter; this pins
+    // the classification-FILL refusal, which 146.2-01 added three commits later
+    // with no fixture of its own while the docblock overhead still claimed the
+    // code had ONE emitter. Both are CSV_PERSIST_FAIL, both are 503, and both
+    // must keep the route's own words — but they are false in OPPOSITE
+    // directions, so the first arm passing says nothing about the second.
+    // Here the route asserts a strategy IS already saved; §4a's "Nothing was
+    // saved." would contradict the sentence directly above it.
+    fetchSpy.mockResolvedValue(
+      jsonResponse(
+        {
+          ok: false,
+          code: "CSV_PERSIST_FAIL",
+          human_message: ROUTE_PERSIST_FAIL_FILL,
+          debug_context: { strategy_id: "abc" },
+          correlation_id: "wizard:12121212-3434-4545-8656-767676767676",
+        },
+        503,
+      ),
+    );
+    mountAndSubmit();
+
+    await screen.findByTestId("wizard-csv-error");
+    expect(screen.getByText(ROUTE_PERSIST_FAIL_FILL)).toBeInTheDocument();
+    expect(
+      panelText(),
+      "the panel printed 'Nothing was saved' underneath a sentence that says a " +
+        "strategy IS saved and only the classification write failed",
+    ).not.toContain(NOTHING_WAS_SAVED);
+    expect(panelText()).not.toContain(FOUNDER_TITLE);
+    // Its copy says "Submit the same file again shortly", so the button that
+    // does that must be live beside the instruction.
+    expect(screen.getByTestId("wizard-csv-submit-cta")).not.toBeDisabled();
+    // …and it is NOT the refusal, so it gets no start-a-new-strategy escape:
+    // a second strategy is the one thing this arm's copy promises will not
+    // happen ("it will not create a second strategy").
+    expect(screen.queryByTestId("wizard-csv-start-new-strategy")).toBeNull();
+  });
+
   it("CSV_SESSION_REUSED keeps the route's own sentence", async () => {
     fetchSpy.mockResolvedValue(
       jsonResponse(
@@ -353,6 +437,13 @@ describe("[140.5-05] ⛔ NEGATIVE CONTROLS — csv-finalize's own vocabulary kee
     await screen.findByTestId("wizard-csv-error");
     expect(screen.getByText(ROUTE_SESSION_REUSED)).toBeInTheDocument();
     expect(panelText()).not.toContain(FOUNDER_TITLE);
+    // 146.2-08 / B1 — the DEFAULT refusal sentence ends "Start a new strategy
+    // to upload a different file." The escape is keyed on the code, so it is
+    // offered here too and the instruction is carryable on all three of this
+    // code's sentences, not just the one 146.2-01 re-worded.
+    expect(
+      screen.getByTestId("wizard-csv-start-new-strategy"),
+    ).toBeInTheDocument();
   });
 
   it("CSV_INVALID_FORMAT (the ×20 emitter family) keeps the route's own sentence", async () => {
@@ -441,6 +532,7 @@ describe("[140.5-05] ⛔ NEGATIVE CONTROLS — csv-finalize's own vocabulary kee
         dailyReturnsSeries={[{ date: "2024-01-01", daily_return: 0.01 }]}
         metadata={META}
         onSubmitted={onSubmitted}
+        onStartNewStrategy={() => {}}
         onBack={() => {}}
       />,
     );

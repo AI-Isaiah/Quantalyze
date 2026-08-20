@@ -151,7 +151,10 @@ vi.mock("./steps/ReviewStep", () => ({
 }));
 
 vi.mock("./steps/CsvSubmitStep", () => ({
-  CsvSubmitStep: (props: { onSubmitFailed?: () => void }) => (
+  CsvSubmitStep: (props: {
+    onSubmitFailed?: () => void;
+    onStartNewStrategy: () => void;
+  }) => (
     <div data-testid="mock-csv-submit">
       <button
         type="button"
@@ -159,6 +162,17 @@ vi.mock("./steps/CsvSubmitStep", () => ({
         onClick={() => props.onSubmitFailed?.()}
       >
         fail
+      </button>
+      {/* 146.2-08 / B1 — stands in for the real "Start a new strategy" control
+          the refusal panel renders. The LABEL and the panel that carries it are
+          `CsvSubmitStep`'s to prove (see its own suite); what only this file can
+          prove is what the PARENT does when it fires. */}
+      <button
+        type="button"
+        data-testid="start-new-strategy"
+        onClick={() => props.onStartNewStrategy()}
+      >
+        start new
       </button>
     </div>
   ),
@@ -461,5 +475,79 @@ describe("WizardClient — RT-3: the burned CSV submission survives a reload", (
       resumed.failedCsvSubmitSig ?? null,
       "…and it must resume with the burn cleared: a fence armed against content the user already corrected locks the resubmit out forever",
     ).toBeNull();
+  });
+});
+
+/**
+ * ⭐ 146.2-08 / B1 — THE ESCAPE THE CONTENT-KEYED FENCE CANNOT PROVIDE.
+ *
+ * Every case above is about a CHANGED submission. The refusal this closes is
+ * the opposite: the server's 409 `CSV_SESSION_REUSED` burns the session id, and
+ * the user's answer is "yes, make this a separate strategy" — the SAME file,
+ * deliberately. The re-mint effect above is keyed on the content signature, so
+ * it sees `current === burned` and does nothing; the resubmit replays the spent
+ * id and takes the same 409, forever. Neither reset control reaches this branch
+ * (Start fresh needs `initialDraft`, Delete draft needs `strategyId`; on the CSV
+ * branch both are structurally absent), and re-opening the wizard restores the
+ * spent id AND the burn from the envelope — so before this the only exits were
+ * clearing site data or abandoning the upload.
+ *
+ * ⭐ THE PAIR IS ASSERTED IN ONE CASE, for the reason the R4 case above gives:
+ * either half alone passes on the defective ordering. A handler that wrote the
+ * envelope before the swap persists the RETIRED id beside the CLEARED burn, and
+ * a reload in that window resumes a spent session with the fence disarmed.
+ *
+ * ⭐ AND THE UPLOAD MUST SURVIVE. The series is deliberately never persisted
+ * (too large for localStorage), so a handler that reset to `csv_upload` would
+ * make the refusal cost the user their file rather than one click. The
+ * observable is that the submit step is still mounted afterwards and the
+ * persisted name is untouched.
+ */
+describe("WizardClient — 146.2-08 / B1: 'Start a new strategy' mints without discarding the upload", () => {
+  it("mints a FRESH session id, clears the burn, persists both together, and keeps the user on csv_submit", async () => {
+    render(<WizardClient initialDraft={null} />);
+    await advanceToSubmit();
+    await failSubmitAndAwaitPersistedBurn();
+
+    const spentSessionId = readPersistedEnvelope().wizardSessionId;
+    expect(spentSessionId).toBeTruthy();
+    const mintsBefore = newWizardSessionIdMock.mock.calls.length;
+
+    // The user takes the remedy the refusal panel offers.
+    fireEvent.click(screen.getByTestId("start-new-strategy"));
+
+    await waitFor(() => {
+      expect(
+        newWizardSessionIdMock.mock.calls.length,
+        "the escape did not mint: the next submit replays the SAME spent id " +
+          "and takes the same 409 — the refusal is permanent",
+      ).toBeGreaterThan(mintsBefore);
+      expect(readPersistedEnvelope().failedCsvSubmitSig ?? null).toBeNull();
+    });
+
+    const mintedSessionId = newWizardSessionIdMock.mock.results.at(-1)?.value as
+      | string
+      | undefined;
+    expect(mintedSessionId).toBeTruthy();
+    expect(mintedSessionId).not.toBe(spentSessionId);
+
+    const resumed = readPersistedEnvelope();
+    expect(
+      resumed.wizardSessionId,
+      "a reload here must resume the FRESH id: persisting the retired one " +
+        "beside the cleared burn resumes a spent session with the fence " +
+        "disarmed — strictly the worst of both states",
+    ).toBe(mintedSessionId);
+    expect(resumed.failedCsvSubmitSig ?? null).toBeNull();
+
+    // …and the upload is still in hand. Landing back on csv_upload would mean
+    // re-uploading a file the wizard is holding, because the series is never
+    // persisted.
+    expect(
+      screen.getByTestId("mock-csv-submit"),
+      "the escape threw the user back to the upload step — the series is not " +
+        "persisted, so that silently costs them the file they just uploaded",
+    ).toBeInTheDocument();
+    expect(screen.queryByTestId("mock-csv-upload")).toBeNull();
   });
 });
