@@ -2500,20 +2500,33 @@ runaway), and every v1.19 requirement is satisfied as written.
 ## Phase 158 — recorded deferrals (logged 2026-08-20)
 
 - [ ] **[158-OPS-03/SEC] ⛔ ROTATE the two leaked demo accounts — NOT done, and only a human can
-  do it (158-REVIEW CR-03).** `matratzentester24@gmail.com` / `Test12` and
-  `demo-allocator@quantalyze.test` / `DemoAlpha2026!` were committed in plaintext to a **PUBLIC**
-  repository. Both pairs remain in git history and **must be treated as published**, so removing
-  the text is *not* remediation — **disabling or rotating the accounts on every project they
-  exist in (TEST, preview, and PROD) is the only step that actually remediates this.** No agent
-  can perform it; do not mark this closed on the basis of the scrub commits below.
+  do it (158-REVIEW CR-03).** ⚠️ **The two email/password pairs are DELIBERATELY NOT QUOTED in
+  this entry.** This file is tracked in a **PUBLIC** repository, so quoting them here would
+  re-publish them on a *more* discoverable surface than the history they already sit in — which
+  is the opposite of what this ticket asks for (158-REVIEW iteration-3 CR-01 caught exactly that
+  regression: the scrub commit pasted both pairs back in while writing this entry). Identify the
+  accounts by ROLE, not by value:
+  - **Pair A — the shared e2e login identity** (a gmail address), formerly hardcoded in
+    `e2e/for-quants-onboarding.spec.ts`, `e2e/discovery-watchlist.spec.ts` and
+    `e2e/match-queue.spec.ts`; see commit `11041327` for the values.
+  - **Pair B — the `seed-full-app-demo` allocator identity**, formerly hardcoded in
+    `scripts/seed-full-app-demo.ts` and quoted in `docs/demos/2026-04-09-full-app-walkthrough.md`
+    + the `CHANGELOG.md` entry; see commit `65e1cc52` for the values.
+
+  Both pairs were committed in plaintext and remain in git history, so they **must be treated as
+  published**: removing the text is *not* remediation — **disabling or rotating the accounts on
+  every project they exist in (TEST, preview, and PROD) is the only step that actually remediates
+  this.** No agent can perform it; do not mark this closed on the basis of the scrub commits below.
   **Done in-pass (text surfaces only):** `scripts/seed-full-app-demo.ts` now reads
   `DEMO_SEED_ALLOCATOR_EMAIL` / `DEMO_SEED_ALLOCATOR_PASSWORD` and refuses without them;
   `docs/demos/2026-04-09-full-app-walkthrough.md` and the `CHANGELOG.md` entry are redacted;
   `.gitleaks.toml` no longer blanket-exempts `.planning/`. Live-surface grep for both pairs
-  outside `.planning/` is now clean **except** `src/__tests__/e2e-match-queue-no-vacuous-admin-gate.test.ts`,
-  where the literals are the needle of an absence-assertion and are retained deliberately (that
-  guard cannot be written without them; see the comment in that file).
-  **Still open beyond rotation:** the `matratzentester24` pair remains quoted in
+  outside `.planning/` now has exactly **one** tracked hit:
+  `src/__tests__/e2e-match-queue-no-vacuous-admin-gate.test.ts:71-72`, where pair A is the needle
+  of an absence-assertion and is retained deliberately (that guard cannot be written without
+  naming what must be absent; see the docblock there). A prose backlog entry needs no needle,
+  which is why that exception does not extend to this file.
+  **Still open beyond rotation:** pair A also remains quoted in
   `.planning/milestones/v0.17.0.0-phases/13-*` and `.planning/milestones/v0.16.0.0-phases/11-PATTERNS.md`.
   Those are historical artifacts and were deliberately left untouched in this pass; the full
   `.planning/` sweep belongs to **v1.20's SEC-02 requirement**, which owns it end to end.
