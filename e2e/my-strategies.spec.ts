@@ -44,7 +44,16 @@ const HAS_SEED_ENV =
  * mints use distinct sub-prefixes (so the two names can never collide in a
  * text match) under ONE cleanup root.
  */
-const NAME_PREFIX = "e2e-mystrat-";
+/**
+ * 158-REVIEW WR-11: scoped PER WORKER, not a fixed literal. Under
+ * `fullyParallel` the `afterAll` below deletes strategies by prefix, so a
+ * shared literal lets one worker's teardown delete rows another worker is
+ * still asserting on. Only this file's single test creates rows under the
+ * prefix today, so the race is latent rather than live — which is exactly when
+ * it is cheap to close. `TEST_PARALLEL_INDEX` is set by Playwright per worker
+ * process and is read at import time, before any test runs.
+ */
+const NAME_PREFIX = `e2e-mystrat-${process.env.TEST_PARALLEL_INDEX ?? 0}-`;
 const OWN_PREFIX = `${NAME_PREFIX}own-`;
 const OTHER_PREFIX = `${NAME_PREFIX}other-`;
 
@@ -70,6 +79,26 @@ test.describe("Phase 149 — /my-strategies (NAV-01)", () => {
       "(set TEST_SUPABASE_URL / TEST_SUPABASE_SERVICE_ROLE_KEY).",
   );
 
+  /**
+   * ⚠️ 158-REVIEW WR-11 — RECORDED DECISION, not an oversight. This cleans the
+   * strategies it minted but NOT the two `auth.users` rows `seedTestAllocator`
+   * creates, so each CI run leaves 2 permanent users on the shared TEST
+   * project — in the same phase whose OPS-04 half exists because TEST
+   * artifacts accumulate without bound.
+   *
+   * Left as-is deliberately, for two reasons. (1) It is the ESTABLISHED
+   * convention, not drift this spec invented: `composer-axe`,
+   * `composite-onboarding` and `axe-app-wide` all seed users the same way and
+   * none deletes them, and no `seed-test-project.ts` helper exports user
+   * teardown at all (verified: the file calls `auth.admin.createUser` in four
+   * places and `deleteUser` in none). Deleting users from THIS spec alone
+   * would fork the convention in one file rather than fix the class.
+   * (2) Doing it properly means adding user teardown to the shared helper and
+   * auditing the FK cascade for every caller — its own reviewed change.
+   *
+   * Tracked in TODOS.md alongside the OPS-04 drain entries so the accumulation
+   * is counted rather than silent. Do not "fix" this here in isolation.
+   */
   test.afterAll(async () => {
     if (HAS_SEED_ENV) {
       await cleanupStrategiesByNamePrefix(NAME_PREFIX);

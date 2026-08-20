@@ -2533,6 +2533,20 @@ runaway), and every v1.19 requirement is satisfied as written.
   pre-change revision). CI carries the `TEST_SUPABASE_*` secrets and hard-fails rather than
   skipping, so the first real execution of the stamped payloads is the phase's CI run — watch
   it rather than assuming.
+- [ ] **[158-OPS-04] e2e specs leak 2 `auth.users` rows per CI run, by convention (158-REVIEW
+  WR-11).** `seedTestAllocator` mints users that nothing ever deletes: `seed-test-project.ts`
+  calls `auth.admin.createUser` in **four** places and `deleteUser` in **none**, and the
+  `cleanup*` helpers it does export delete strategies, not users. Specs affected today:
+  `my-strategies` (new this phase, 2 users/run), plus the pre-existing `composer-axe`,
+  `composite-onboarding` and `axe-app-wide`. This is exactly the unbounded TEST-artifact
+  accumulation OPS-04's drain script exists to mop up, arriving through a second door that the
+  drain does **not** cover (it targets `compute_jobs` and `api_keys`, not `auth.users`).
+  ⚠️ Do **not** point-fix this in a single spec — that forks the convention in one file and
+  leaves the class open. **Fix:** add user teardown to the shared helper (register minted ids,
+  `admin.auth.admin.deleteUser` in a `cleanupSeededUsers`), audit the FK cascade for every
+  caller, then adopt it across all four specs. Its own reviewed change.
+  Counted first: `select count(*) from auth.users where email like '<seed pattern>%'` on TEST,
+  so the close is measured rather than asserted.
 
 ## Phase 158 — OPS-03 orphan e2e spec dispositions (logged 2026-08-20)
 
