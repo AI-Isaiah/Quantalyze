@@ -1,14 +1,19 @@
 ---
 gsd_state_version: 1.0
 milestone: v1.20
-milestone_name: Backlog Burndown
+milestone_name: Backlog Burndown (Phases 158+)
+current_phase: 158
+current_phase_name: OPS-CI — A merge means a deploy
 status: planning
-last_updated: "2026-08-20T13:52:41.000Z"
+stopped_at: Completed 146-03-PLAN.md (phase 146 close)
+last_updated: "2026-08-20T15:48:21.987Z"
 last_activity: 2026-08-20
+last_activity_desc: "v1.20 roadmap created (Phases 158–165). ⛔ Ordering binding: 158"
+state_head: f7c69b37b0e276484ff0dbc73bff8cae333df2d2
 progress:
   total_phases: 8
   completed_phases: 0
-  total_plans: 0
+  total_plans: 6
   completed_plans: 0
   percent: 0
 ---
@@ -70,7 +75,7 @@ are re-homed into v1.17 (Phases 155 / 153); 142.3 will not run as a v1.16 phase.
 
 ## Current Position
 
-Phase: Not started (roadmap complete — Phases 158–165 defined)
+Phase: 158 (OPS-CI — A merge means a deploy) — READY TO EXECUTE
 Plan: —
 Status: v1.20 roadmap created — 8 phases, 50/50 requirements mapped. Next: `/gsd-plan-phase 158`
 Last activity: 2026-08-20 — v1.20 roadmap created (Phases 158–165). ⛔ Ordering binding: 158

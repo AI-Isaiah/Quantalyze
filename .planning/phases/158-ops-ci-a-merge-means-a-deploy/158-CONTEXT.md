@@ -17,11 +17,13 @@ Covers OPS-01 (FIFO mutex + cancelled-conclusion watcher, closes #616), OPS-02 (
 ## Implementation Decisions
 
 ### Claude's Discretion
-All implementation choices are at Claude's discretion — pure infrastructure phase. Bind to the ROADMAP success criteria and the research corrections already folded into REQUIREMENTS.md:
+All implementation choices are at Claude's discretion — pure infrastructure phase; no user-gated decisions were taken. The binding constraints below are requirement text (mirrored in REQUIREMENTS.md OPS-01/OPS-04/OPS-11 and lifted into the plans' must_haves), not discuss-phase decisions.
 
-- **OPS-01 fix shape is binding:** external FIFO mutex for DB-touching jobs + a `cancelled`-conclusion watcher. ⚠️ Shrinking the `shared-test-db` concurrency group is NOT acceptable (eviction is cross-run). ⚠️ Do NOT add more `needs:` edges to "finish the chain" (the `if:` conditions diverge on `workflow_dispatch` and it would disable `e2e-seeded` on every manual run). The mutex needs a TTL/steal path and a documented manual-unlock runbook as part of adoption. Close #616 on the MECHANISM. Verification must simulate THREE concurrent runs, not two.
-- **OPS-04 constraints are hard:** the drain is TEST-only — ⛔ never a migration, ⛔ never `cron.unschedule(9)`.
-- **OPS-11:** fix the unrestored `vi.stubGlobal`/`vi.mock` root cause (`vi.spyOn` + `restoreAllMocks` pattern per prior CI-Node22 findings), not retried away.
+OPS-01 fix shape is binding: external FIFO mutex for DB-touching jobs plus a `cancelled`-conclusion watcher. Shrinking the `shared-test-db` concurrency group is NOT acceptable (eviction is cross-run), and no new `needs:` edges may be added that would disable `e2e-seeded` on `workflow_dispatch`. The mutex needs a TTL/steal path and a documented manual-unlock runbook as part of adoption. Close #616 on the MECHANISM. Verification must simulate THREE concurrent runs, not two.
+
+OPS-04 constraints are hard: the drain is TEST-only — never a migration, never `cron.unschedule(9)`.
+
+OPS-11: fix the unrestored `vi.stubGlobal`/`vi.mock` root cause (`vi.spyOn` + `restoreAllMocks` pattern per prior CI-Node22 findings), not retried away.
 
 </decisions>
 

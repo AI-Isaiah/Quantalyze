@@ -47,21 +47,26 @@ phases below carry the corrections, not the bullets.
   silently-skipped deploy. ⚠️ Research correction is binding: shrinking the group does NOT fix
   this (eviction is cross-run) — the fix is an external FIFO mutex for DB-touching jobs plus a
   `cancelled`-conclusion watcher.
+
 - **Phase 159 (RANK) EARLY** — pure read-path, zero DDL, trivially revertible, observable on
   PROD; it must precede new publications so the percentile population delta is measured against
   a stable cohort, and it front-loads the cheapest owed census (C-M1).
+
 - **RANK → provenance → SHARE arc:** Phase 160's write-path REVOKE needs a full
   deploy-first / revoke-second cycle with soak time, so it cannot be late; Phase 164 (SHARE) is
   the ONLY new anonymous public surface and lands alone, late, in its own PR — ⛔ never branched
   from `feat/phase-156-connect-refactor` (its Migration B is pending against `strategies`; two
   concurrent migrations on one table on an auto-apply-to-PROD path is an ordering surprise
   waiting to happen).
+
 - **Phase 163 (hardening) before Phase 164:** SEC-03's RPC audit-coverage decision must be
   standing when SHARE mints its new mint/revoke RPCs — two REQ groups, one edit
   (`MUTATING_RPC_NAMES`).
+
 - **Phase 165 (DEPS) LAST, strictly after OPS-01.** Dependency churn before the correctness
   work makes every red ambiguous, and #685 is 100% `analytics-service/` — exactly the PR that
   would sit undeployed behind a grey main.
+
 - **Owed measurements and decisions are EARLY TASKS inside their phases, never separate
   phases:** C-M1 + the percentile before/after snapshot in 159; B-M1 + B-D1/B-D2 in 160; A-D1
   (URL shape), A-D2 (private-status revoke home), A-D3 (tearsheet/PDF scope) + the token model
@@ -94,11 +99,16 @@ phases below carry the corrections, not the bullets.
 **Plans**: 6 plans
 
 Plans:
+**Wave 1**
+
 - [ ] 158-01-PLAN.md — Tracer mutex probe (session-mode go/no-go, 3-contender RED→GREEN) + ci.yml advisory-lock adoption + `sql-tests` aggregator gating (OPS-01, OPS-02) [Wave 1]
 - [ ] 158-02-PLAN.md — `cancelled`-conclusion watcher (issue-only, exit-0 doctrine) + shared-test-db mutex runbook (OPS-01) [Wave 1]
 - [ ] 158-03-PLAN.md — `claimed_at` stamps in the two fencing UPDATEs + guarded TEST-only backlog drain closed on measured row counts (OPS-04) [Wave 1]
 - [ ] 158-04-PLAN.md — MultiKeyConnectStep flake: reproduce-first sweep, then leak-source fix or mechanism closure with evidence (OPS-11) [Wave 1]
 - [ ] 158-05-PLAN.md — Repair the 4 named orphan specs + author e2e/my-strategies.spec.ts (NAV-01 surface) (OPS-03) [Wave 1]
+
+**Wave 2** *(blocked on Wave 1 completion)*
+
 - [ ] 158-06-PLAN.md — Batch-list wiring + 15-orphan triage into TODOS + DB-types recorded decision (OPS-03) [Wave 2]
 
 **Research note:** mechanism understood — skip a research phase; the repo already carries the dedup'd-issue pattern to copy (`analytics-deploy-verify.yml`). Verification must simulate THREE concurrent runs, not two.
@@ -533,6 +543,7 @@ Plans:
 **Goal:** A CSV finalize that recovers via the resubmit path A3's own copy instructs lands the user's classification instead of silently defaulting it, and no raw exchange credential reaches Sentry.
 
 **Success criteria:**
+
 1. A resubmission that takes the 23505 echo path applies the submitted `category_id`/`asset_class` when the committed row has none, and REFUSES (409 `CSV_SESSION_REUSED`) when a present classification conflicts — the A2 identity rule extended to the second identity field.
 2. `passphrase` is scrubbed from every Sentry capture site on the verify-strategy route, and the docblock's enumeration matches the array.
 3. The B4 readmit predicate cannot drive an unbounded reaped-orphan retry loop.
