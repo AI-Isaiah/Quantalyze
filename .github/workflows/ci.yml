@@ -1617,6 +1617,17 @@ jobs:
           # describes self-skip without seed env (place 2 = the spec's
           # HAS_SEED_ENV const) and run in the seeded MA-8 list below. Adding a
           # spec? Update BOTH lists or the gate silently never runs (burned >=3x).
+          # Phase 158 / OPS-03: api-key-flow and sync-analytics-flow — two of the
+          # four specs that existed for ~2 years wired into NO batch at all, so
+          # they never ran anywhere — are now in this unseeded list. Plan 158-05
+          # ran and repaired them FIRST (both reds classified as CSRF-origin spec
+          # rot, not product defects) and measured them green under this job's
+          # placeholder-Supabase env. They depend on the
+          # NEXT_PUBLIC_ALLOWED_ORIGINS line in this step's env block below —
+          # without it their repaired contract POSTs 403 before reaching auth and
+          # measure the wrong arm. The other three (full-flow, csv-upload-flow,
+          # and the new my-strategies spec) went to the seeded MA-8 list, which
+          # carries the batch verdicts' reasoning.
           # Capture the test exit code WITHOUT aborting the script (default
           # shell is `bash -e`). The port-3000 cleanup below is a FINALLY so a
           # failing spec never leaves an orphaned next-server bound to :3000
@@ -1636,7 +1647,7 @@ jobs:
               --update-snapshots \
               --timeout 60000
           else
-            npx playwright test e2e/auth.spec.ts e2e/smoke.spec.ts e2e/demo-public.spec.ts e2e/demo-founder-view.spec.ts e2e/onboarding-banner-smoke.spec.ts e2e/demo-screenshot.spec.ts e2e/reflow.spec.ts e2e/target-size.spec.ts e2e/reflow-sweep.spec.ts e2e/no-clip-sweep.spec.ts e2e/axe-app-wide.spec.ts e2e/marketing-shell.spec.ts e2e/route-redirects.spec.ts
+            npx playwright test e2e/auth.spec.ts e2e/smoke.spec.ts e2e/demo-public.spec.ts e2e/demo-founder-view.spec.ts e2e/onboarding-banner-smoke.spec.ts e2e/demo-screenshot.spec.ts e2e/reflow.spec.ts e2e/target-size.spec.ts e2e/reflow-sweep.spec.ts e2e/no-clip-sweep.spec.ts e2e/axe-app-wide.spec.ts e2e/marketing-shell.spec.ts e2e/route-redirects.spec.ts e2e/api-key-flow.spec.ts e2e/sync-analytics-flow.spec.ts
           fi
           PW_EXIT=$?
           set -e
@@ -1702,6 +1713,23 @@ jobs:
           ADMIN_EMAIL: test@example.com
           PLATFORM_NAME: Quantalyze
           PLATFORM_EMAIL: test@quantalyze.com
+          # Phase 158 / OPS-03 — same mechanism as the seeded step's copy of this
+          # line (see the e2e-seeded job's "Run seed-gated specs" env). This job
+          # serves the app with `npm run start`, i.e. production mode, so the
+          # localhost:3000 auto-allowlist in src/lib/csrf.ts (its NODE_ENV !==
+          # "production" branch) never fires and the runtime allowlist is EMPTY.
+          # The api-key-flow and sync-analytics-flow contract tests POST to
+          # mutating /api routes with an explicit Origin header (plan 158-05
+          # added it — the CSRF gate postdates those specs); without an entry
+          # here assertSameOrigin 403s them BEFORE auth runs, so they would
+          # assert the CSRF arm instead of the auth contract they exist to pin.
+          # Read at request time by server code, NOT inlined at build time —
+          # this job consumes a prebuilt artifact it cannot rebuild, and the
+          # seeded job proves the runtime read works (its own build step does
+          # not set this var either). No production exposure: the value is a
+          # literal localhost origin scoped to this step, and prod sets
+          # NEXT_PUBLIC_SITE_URL to the canonical host.
+          NEXT_PUBLIC_ALLOWED_ORIGINS: http://localhost:3000
       # Baseline bake (workflow_dispatch input bake_demo_screenshots): upload
       # ONLY the demo-screenshot snapshot PNGs — page images, no .next bundle /
       # trace.zip / page HTML — so the C-0293(c) secret-in-artifact concern that
@@ -2070,6 +2098,25 @@ jobs:
           # variable set the gate above resolves to true → seeded run.
           # Adding/removing a seed-gated spec? Update both this list and
           # the e2e/<spec>.spec.ts HAS_SEED_ENV constant.
+          # Phase 158 / OPS-03: the last three entries below are newly wired.
+          # csv-upload-flow and my-strategies are seed-gated and satisfy the MA-8
+          # both-halves rule (list entry here + HAS_SEED_ENV in the spec, both
+          # landed by plan 158-05; csv-upload-flow was CONVERTED to the seeded
+          # contract because its old hardcoded demo login does not authenticate
+          # against the TEST project). full-flow is the deliberate exception to
+          # the HAS_SEED_ENV half: it reads NO seed env and mints nothing, so it
+          # is not seed-GATED — it is here for the seeded ENVIRONMENT, because
+          # its anon cases were MEASURED red under the unseeded job's placeholder
+          # Supabase (the landing -> /browse navigation never commits within
+          # Playwright's 5s URL budget while SSR hangs on placeholder fetches).
+          # Do NOT "fix" that asymmetry by bolting a HAS_SEED_ENV gate onto it;
+          # that would self-skip the very cases it is wired here to run.
+          # Known gap, deliberately not papered over: csv-upload-flow's two
+          # server-side validation cases stay SKIPPED here — /api/strategies/
+          # csv-validate forwards to the Python analytics service and NO job in
+          # this workflow provides ANALYTICS_SERVICE_URL. Provision that (plus
+          # INTERNAL_API_TOKEN) to un-skip them; un-gating them without it would
+          # red this batch deterministically.
           if [ "${BAKE_SVG_GOLDENS}" = "true" ]; then
             # One-shot golden bake (workflow_dispatch input bake_svg_goldens).
             # Run ONLY the svg-parity spec with --update-snapshots so no other
@@ -2104,6 +2151,9 @@ jobs:
               e2e/target-size.spec.ts \
               e2e/no-clip-sweep.spec.ts \
               e2e/axe-app-wide.spec.ts \
+              e2e/full-flow.spec.ts \
+              e2e/csv-upload-flow.spec.ts \
+              e2e/my-strategies.spec.ts \
               --timeout 60000
           fi
           # Phase 47-05 / FLOW-01 (place 1 of 2): the fresh
