@@ -46,12 +46,18 @@ merge *is* the apply.
   up talking to an old prod schema (`PGRST204`) while every dashboard stays
   green. A manual `workflow_dispatch` on an unconfigured clone still skips
   tolerantly. See [`docs/runbooks/migration-failure.md`](docs/runbooks/migration-failure.md).
-- **Behavioural SQL gates run in the `sql-tests` CI job**, which shares the
-  repo-wide `shared-test-db` concurrency group with `python` and `e2e-seeded`
-  and is ordered behind `python`. That ordering is not a preference: the group
-  holds exactly one pending slot, so a third simultaneous arrival cancels a
-  pending gate — which renders grey, not red. Do not remove the `needs: python`,
-  and do not give the job its own group name; the ⛔ comments in `ci.yml` say why.
+- **Behavioural SQL gates run in the `sql-tests` CI job**, which serializes
+  with `python` and `e2e-seeded` through a Postgres session advisory lock on
+  the TEST project (key 61616158, the "Acquire shared-test-db mutex" step —
+  Phase 158). The old repo-wide `shared-test-db` **concurrency group is gone**:
+  it held exactly one pending slot, so a PR opening mid-run could evict a
+  queued main-branch run, conclude main CI `cancelled`, and silently skip the
+  Railway deploy (issue #616). `sql-tests` is still ordered behind `python`
+  (`needs: python` is kept) and now gates the `frontend` aggregator. Do not
+  reintroduce a job-level concurrency group for these jobs; the ⛔ comments in
+  `ci.yml` and
+  [`docs/runbooks/shared-test-db-mutex.md`](docs/runbooks/shared-test-db-mutex.md)
+  say why.
 - **⛔ A migration that adds a column the frontend already `SELECT`s must be
   applied to prod BEFORE the deployment that reads it.** The auto-apply and the
   Vercel build both fire on the same merge with **no ordering between them**, so
@@ -75,8 +81,11 @@ merge *is* the apply.
 
 Merging an `analytics-service/**` change does **not** guarantee a Railway
 deploy. Railway **skips** the deploy when the `main` CI check-suite is red
-(`skippedReason="CI check suite failed"`), with no alert. If a fix seems not to
-have shipped:
+(`skippedReason="CI check suite failed"`), with no alert for a red run. When a
+main run concludes **`cancelled`**, the `main-ci-cancelled-watcher` workflow
+(Phase 158) files a dedup'd `main-ci-cancelled` issue — triage via
+[`docs/runbooks/shared-test-db-mutex.md`](docs/runbooks/shared-test-db-mutex.md)
+§6. If a fix seems not to have shipped:
 
 ```bash
 railway deployment list      # check whether the deploy ran
@@ -84,8 +93,11 @@ railway deployment list      # check whether the deploy ran
 railway up                   # force a deploy
 ```
 
-The `/health` endpoint reports worker-tick liveness only (no deployed git SHA),
-so "is prod running main HEAD?" is not machine-checkable today.
+The `/health` endpoint reports worker-tick liveness and the deployed `git_sha`,
+so "is prod running main HEAD?" is machine-checkable:
+`curl .../health | jq -r .git_sha`. The `analytics-deploy-verify` workflow
+checks it on a 6h schedule, with the staleness window sized for post-mutex CI
+queue depth (4800s — Phase 158).
 
 ## Invariants that break CI or prod
 

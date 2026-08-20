@@ -41,7 +41,7 @@ main-branch runs when a PR opened mid-run).
 - `docs/runbooks/shared-test-db-mutex.md`: TTL/steal semantics, lock census,
   manual-unlock (`pg_terminate_backend`) runbook.
 - `scripts/drain-test-compute-backlog.ts`: guarded TEST-only backlog drain
-  (4-guard interlock incl. PROD-ref hard-reject, terminalize-never-delete).
+  (5-guard interlock incl. PROD-ref hard-reject, terminalize-never-delete).
   Measured on TEST: the 2026-08-11 stale backlog is already gone (reaper +
   worker cycle); drain verified as an honest no-op with evidence recorded.
 - Four orphaned e2e specs repaired to execute real cases (CSRF root cause

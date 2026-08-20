@@ -63,7 +63,7 @@ quantalyze/
     docs/             # tracked evidence docs (deribit-ground-truth.md answers template + evidence/)
   supabase/           # Database migrations (timestamp-named; auto-applied to prod on merge — see CONTRIBUTING.md)
   e2e/                # Playwright specs (auth, discovery, match-queue, demo-public, portfolio-pdf-demo, ...)
-  .github/workflows/  # CI + nightly probes (demo PDF cold-start)
+  .github/workflows/  # CI + watchers/probes (main-CI-cancelled watcher, shared-test-db mutex drill, demo PDF cold-start)
   docs/
     architecture/     # ADRs (RLS authz, observability, error handling, secret handling, ...)
     runbooks/         # Operational runbooks (match-engine.md, bridge-outcome-cron.md, ...)
@@ -81,7 +81,7 @@ Merging to `main` deploys to production automatically: Vercel (frontend) on
 every push, Railway (analytics) on green CI, and Supabase migrations under
 `supabase/migrations/**` apply to the prod database on merge. Read
 [CONTRIBUTING.md](CONTRIBUTING.md) for the full deploy semantics and the
-operational gotchas (test-DB lag, Railway skip-on-red-CI, version-bump rules)
+operational gotchas (test-DB lag, Railway skip-on-red-or-cancelled-CI, version-bump rules)
 before merging.
 
 ## Tech Stack
@@ -106,7 +106,7 @@ before merging.
 | `npm run lint` | Run ESLint |
 | `npm run typecheck` | Run TypeScript type checker |
 | `npm test` | Run Vitest tests |
-| `npm run test:e2e` | Run Playwright E2E tests |
+| `npm run test:e2e` | Run Playwright E2E tests. Seeded specs need `TEST_SUPABASE_URL` + `TEST_SUPABASE_SERVICE_ROLE_KEY` (TEST project) and self-skip without them; the ambient `NEXT_PUBLIC_SUPABASE_URL`/`SUPABASE_SERVICE_ROLE_KEY` fallback is deliberately gone — locally those point at PROD (Phase 158) |
 | `npm run verify:phase18` | Verify Phase 18 artifacts (canonical redactor parity, founder LP cron, migration 100) |
 | `npm run check:founder-lp-readiness` | Pre-flight check for `FOUNDER_LP_STRATEGY_ID` (status=published, has factsheet) before the monthly cron's first tick |
 | `npm run worker:dev` | Run the analytics worker locally. Env loads `analytics-service/.env.qa-local` (TEST) first, then `.env`; startup refuses if `SUPABASE_URL` points at the PROD project off Railway |

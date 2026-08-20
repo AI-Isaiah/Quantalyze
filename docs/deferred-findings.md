@@ -124,6 +124,17 @@ distinct** group (e.g. `shared-test-db-e2e`) — never widen `shared-test-db`
 membership. Defer: low real-world impact vs. a documented footgun. Root-cause
 fix remains the ephemeral-CI-DB recipe (PR #316, reverted for image-pull time).
 
+> **Resolved — v0.69.0.0 (Phase 158, 2026-08-21).** The premise changed: the
+> `shared-test-db` concurrency group was **deleted outright** after its
+> one-pending-slot eviction cancelled a queued main run and silently skipped
+> the Railway deploy (issue #616). All three DB-touching jobs (`sql-tests`,
+> `python`, `e2e-seeded`) now serialize through a Postgres session advisory
+> lock (key 61616158) on the TEST project — which is neither of the naive
+> fixes this entry warns against (no group was widened, no second group was
+> added; the jobs queue inside Postgres, not in GitHub's one-slot layer).
+> Mechanism, TTL/steal semantics, and manual unlock:
+> [`docs/runbooks/shared-test-db-mutex.md`](runbooks/shared-test-db-mutex.md).
+
 ### #18 · Auto-apply migrations to the TEST project before PROD · blocked on secrets
 
 Genuine debt (migrations auto-apply to prod on merge but the shared test project
