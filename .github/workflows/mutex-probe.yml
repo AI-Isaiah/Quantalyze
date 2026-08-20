@@ -180,10 +180,17 @@ jobs:
               > psql-out.txt 2> psql-err.txt
           rc=$?
           set -e
-          # Redact any userinfo (user:password@) before psql's stderr reaches the
-          # public log. psql does not print passwords, but the DSN we derived is
-          # not a registered secret value and GitHub cannot mask it for us.
-          sed -E 's#(postgres(ql)?://)[^@]*@#\1***@#g' psql-err.txt >&2 || true
+          # Redact before psql's stderr reaches the public log. The DSN we
+          # derived is not a registered secret value, so GitHub cannot mask it
+          # for us. 158-REVIEW WR-08: the userinfo pattern alone was not enough —
+          # psql does not echo the DSN on failure, it emits its OWN shapes, and
+          # those carry the TEST pooler host, its resolved IP, and the DB
+          # username / project-ref. Redact what psql actually prints:
+          #   connection to server at "<host>" (<ip>), port <n> failed
+          #   FATAL:  password authentication failed for user "<user>"
+          sed -E -e 's#(postgres(ql)?://)[^@]*@#\1***@#g' \
+                 -e 's#(server at )"[^"]*"( \([^)]*\))?#\1"***"#g' \
+                 -e 's#(for user )"[^"]*"#\1"***"#g' psql-err.txt >&2 || true
           if [ "${rc}" -ne 0 ]; then
             echo "::error::contender ${CONTENDER}: psql exited ${rc} — session-mode connect or advisory-lock acquire FAILED. This is the go/no-go signal for the advisory-lock backend."
             exit 1

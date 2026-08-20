@@ -1154,7 +1154,18 @@ jobs:
               fi
               if ! kill -0 "${holder}" 2>/dev/null; then
                 echo "::warning::mutex acquire attempt ${attempt}/3 lost its psql session after ${waited}s (redacted output follows)."
-                sed -E -e 's#(postgres(ql)?://)[^@]*@#\1***@#g' "${log}" >&2 || true
+                # 158-REVIEW WR-08: psql NEVER echoes the DSN on failure, so the
+                # userinfo pattern alone matched nothing and the raw text — the
+                # TEST pooler host, its resolved IP, and the DB username /
+                # project-ref — went straight into a PUBLIC Actions log, against
+                # this mutex's own stated invariant ("never a DSN, host,
+                # username, or password, in any CI log line"). Redact the shapes
+                # psql actually emits:
+                #   connection to server at "<host>" (<ip>), port <n> failed
+                #   FATAL:  password authentication failed for user "<user>"
+                sed -E -e 's#(postgres(ql)?://)[^@]*@#\1***@#g' \
+                       -e 's#(server at )"[^"]*"( \([^)]*\))?#\1"***"#g' \
+                       -e 's#(for user )"[^"]*"#\1"***"#g' "${log}" >&2 || true
                 break
               fi
               sleep 5
@@ -1556,7 +1567,18 @@ jobs:
               fi
               if ! kill -0 "${holder}" 2>/dev/null; then
                 echo "::warning::mutex acquire attempt ${attempt}/3 lost its psql session after ${waited}s (redacted output follows)."
-                sed -E -e 's#(postgres(ql)?://)[^@]*@#\1***@#g' "${log}" >&2 || true
+                # 158-REVIEW WR-08: psql NEVER echoes the DSN on failure, so the
+                # userinfo pattern alone matched nothing and the raw text — the
+                # TEST pooler host, its resolved IP, and the DB username /
+                # project-ref — went straight into a PUBLIC Actions log, against
+                # this mutex's own stated invariant ("never a DSN, host,
+                # username, or password, in any CI log line"). Redact the shapes
+                # psql actually emits:
+                #   connection to server at "<host>" (<ip>), port <n> failed
+                #   FATAL:  password authentication failed for user "<user>"
+                sed -E -e 's#(postgres(ql)?://)[^@]*@#\1***@#g' \
+                       -e 's#(server at )"[^"]*"( \([^)]*\))?#\1"***"#g' \
+                       -e 's#(for user )"[^"]*"#\1"***"#g' "${log}" >&2 || true
                 break
               fi
               sleep 5
@@ -2133,7 +2155,18 @@ jobs:
               fi
               if ! kill -0 "${holder}" 2>/dev/null; then
                 echo "::warning::mutex acquire attempt ${attempt}/3 lost its psql session after ${waited}s (redacted output follows)."
-                sed -E -e 's#(postgres(ql)?://)[^@]*@#\1***@#g' "${log}" >&2 || true
+                # 158-REVIEW WR-08: psql NEVER echoes the DSN on failure, so the
+                # userinfo pattern alone matched nothing and the raw text — the
+                # TEST pooler host, its resolved IP, and the DB username /
+                # project-ref — went straight into a PUBLIC Actions log, against
+                # this mutex's own stated invariant ("never a DSN, host,
+                # username, or password, in any CI log line"). Redact the shapes
+                # psql actually emits:
+                #   connection to server at "<host>" (<ip>), port <n> failed
+                #   FATAL:  password authentication failed for user "<user>"
+                sed -E -e 's#(postgres(ql)?://)[^@]*@#\1***@#g' \
+                       -e 's#(server at )"[^"]*"( \([^)]*\))?#\1"***"#g' \
+                       -e 's#(for user )"[^"]*"#\1"***"#g' "${log}" >&2 || true
                 break
               fi
               sleep 5
