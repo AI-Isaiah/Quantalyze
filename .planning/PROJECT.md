@@ -24,8 +24,10 @@ make them.
 
 ⛔ **Every phase in v1.18 is founder-gated** — Phase 155 (live trading-day parity against the
 terminal's own figures) and Phase 157 (the observations only the founder can make). Blocked on new
-MT5 investor passwords AND the founder at the terminal on a trading day. Agent-deliverable work
-continues on **v1.16 (PARKED, Phases 143–146)**.
+MT5 investor passwords AND the founder at the terminal on a trading day. The former v1.16 carry
+(Phases 143–146) shipped and closed as **v1.19 on 2026-08-20** (audit `tech_debt`, 9/9
+requirements; archive at `.planning/milestones/v1.19-ROADMAP.md`), so **no agent-deliverable
+phase is currently open** — new work starts with a new milestone.
 
 ⭐ **Parity tolerance is settled at 1%, INCLUDING open P&L** (founder call 2026-08-14). The
 measurement window MUST end before the day of the run: `broker_dailies` anchors to today

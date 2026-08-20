@@ -1,20 +1,20 @@
 ---
 gsd_state_version: 1.0
-milestone: v1.19
-milestone_name: JOB/RATE — job-lifecycle reliability and the rate limits that hold
-current_phase: 146.2
-current_phase_name: REVIEW — 146.1 post-merge close-out (echo-path classification, passphrase scrubbing)
-status: ready_to_plan
-stopped_at: v1.19 5/5 phases shipped (143-146 + 146.1, PR #692 a6a2dee8, both migrations LIVE on PROD). Post-merge review of 146.1 returned 1 BLOCKER + 6 findings -> Phase 146.2 INSERTED. Milestone close BLOCKED on it.
-last_updated: "2026-08-19T11:05:00.000Z"
-last_activity: 2026-08-19
-last_activity_desc: "146.1 merged as v0.67.0.0 (PR #692); CHANGELOG backfilled for 0.66.0.1+0.67.0.0 (PR #693). Verification sweep: 143/144/146 passed (144 gaps_found was STALE - closed by event, corrected), 145 human_needed 3/3 SC, 146.1 gaps_found 12/13. Two independent reviewers CONVERGED on one blocker: the csv-finalize echo path drops classification on the recovery A3 instructs, permanently mis-annualizing a crypto track record (PROD population measured ZERO). Phase 146.2 inserted; TODOS swept 134->119 open."
+milestone: v1.18
+milestone_name: MT5-VERIFY & founder confirmations
+current_phase: 155
+current_phase_name: MT5-VERIFY — the numbers are true, live on a trading day
+status: blocked_founder_gated
+stopped_at: "v1.19 CLOSED 2026-08-20: audit tech_debt 9/9 requirements, 6/6 phases passed, archived to milestones/, tag v1.19. INT-1..4 filed to TODOS.md. Current milestone is now v1.18 (Phases 155, 157) — ENTIRELY FOUNDER-GATED: needs new MT5 investor passwords + the founder at the terminal on a TRADING day. No agent-deliverable phase is open."
+last_updated: "2026-08-20T11:50:00.000Z"
+last_activity: 2026-08-20
+last_activity_desc: "v1.19 CLOSED (audit tech_debt 9/9; archive + MILESTONES entry written; tag v1.19). Same day: PR #695 landed+deployed (Railway 00e73aa5 healthy, canary 200); 146.2 SC#5 closed by observed-RED falsification; 145 human items closed by measurement (sql-tests green at HEAD, PROD census 0/0, W1-3 already fixed by 146.2); 146.1 C1 closed by successor; JOB-04 tick closed on PROD measurement."
 progress:
-  total_phases: 6
-  completed_phases: 5
-  total_plans: 24
-  completed_plans: 24
-  percent: 83
+  total_phases: 2
+  completed_phases: 0
+  total_plans: 0
+  completed_plans: 0
+  percent: 0
 ---
 
 # Project State — Quantalyze
@@ -39,7 +39,7 @@ amending scope, `git show --stat` the commit — one file is almost always wrong
 phase in it is founder-gated. Blocked on (1) new MT5 investor passwords — the founder changed them
 ~2026-08-14, so stored credentials are stale and the three PROD keys will flip to `error`, which
 is **EXPECTED, not a regression** — and (2) the founder at the MT5 terminal on a **trading day**.
-Agent-deliverable work therefore continues on **v1.16 (PARKED, Phases 143–146)**.
+Phases 143–146 became **v1.19, CLOSED 2026-08-20** (audit tech_debt, 9/9 requirements — see `.planning/milestones/v1.19-ROADMAP.md`). **No agent-deliverable phase is open**; v1.18 waits on the founder.
 
 **Historical scope statement for v1.17, retained:**
 Founder verbatim (2026-08-04, minutes after MT5-05 was discharged on PROD): *"The goal is that

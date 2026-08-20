@@ -1,6 +1,42 @@
 # Milestones
 
 
+## v1.19 — JOB/RATE: job-lifecycle reliability and the rate limits that hold (CLOSED 2026-08-20, v0.63.0.0 → v0.68.1.0, Phases 143–146 + 146.1, 146.2)
+
+**6 phases, 24 plans, PRs #687–#695, 2026-08-16 → 2026-08-20.** Audit `tech_debt`, 9/9
+requirements (JOB-04/05/06/08, RATE-01..05). Archive: `.planning/milestones/v1.19-ROADMAP.md`.
+
+### Key Accomplishments
+1. **143 / JOB-04** — dropped-enqueue reconciliation sweep: a strategy whose `after()` enqueue
+   never ran is detected by absence, re-enqueued idempotently, and alerts Sentry cross-language
+   (SQL marker → Python de-dupe). LIVE on PROD: jobid 36, hourly, first ticks observed succeeding.
+2. **144 / JOB-05 + JOB-08** — orphaned-`running` jobs transition to terminal `failed_final`
+   (never DELETE — WR-02 resolved, audit trail survives, pollers break out); stale-`pending`
+   decided by committed PROD measurement (WON'T-FIX, population 0).
+3. **145 / JOB-06** — csv-finalize is ONE SECURITY DEFINER transaction with NO handler clause;
+   a mid-fold fault proven (CI-executed, at close) to leave ZERO rows across all three tables.
+   The stale 42501 claim got a committed CANNOT-REPRODUCE verdict (four arms) instead of a fix;
+   the 18 standing PROD orphans terminalized with reasons preserved — close census 0/0.
+4. **146 / RATE-01..05** — fresh route×limiter census; `admin/match/eval` limited keyed on
+   `user.id`; `match.py` slowapi defense-in-depth; limiter VALUES audited against measured cost
+   (5 retune candidates filed, founder territory per D-146-4); Python whole-surface coverage law
+   so a new limiterless route reds CI.
+5. **146.1 + 146.2 review close-outs** — the resolve/echo path lands the user's classification
+   instead of silently defaulting the annualization clock (truth-table guard, neuter-proven);
+   the 409 refusal gained a working "Start a new strategy" escape (live-UAT'd); readmit bounded
+   `< 3`; raw exchange passphrases scrubbed from Sentry; SC#5 discharged by OBSERVED-RED
+   falsification of all four gap-closure oracles.
+6. **Rider (#695)** — local analytics-service defaults to TEST and hard-stops off-platform when
+   aimed at PROD (`ALLOW_PROD_WORKER_OFF_PLATFORM=1` escape hatch): the laptop-becomes-prod-worker
+   incident class is closed in code, 9 tests each proven able to fail.
+
+### Deferred at close
+INT-1..4 (TODOS.md, measured-zero populations): 144→143 readmit unreachable for mid-compute
+orphans (fail-safe); no Next-side whole-surface limiter law; RATE-05 name drift
+(`withRateLimit` → `withAuthLimited`); 145's fold moved csv-finalize out of 146's seam census.
+Plus 5 RATE-04 value-parity candidates awaiting founder retune.
+
+
 ## v1.17 — MT5: ingested, wizardable, surfaced (CLOSED 2026-08-14, v0.53.x → v0.62.0.0, Phases 147–154 + 156)
 
 ⚠️ **Scope amended on close, and the amendment is the headline.** Originally *"MT5 — usable

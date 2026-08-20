@@ -3295,3 +3295,53 @@ FILE, so grep it before you type it.*
   suite while any CI run is in flight — `gh run list` FIRST.** And note the ordering that makes
   this entry honest: the mechanism was identified BEFORE the green re-run. A green re-run is
   never itself proof that the first failure was noise.
+
+## v1.19 milestone audit — integration findings (logged 2026-08-20, audit status: tech_debt; none blocking per the blast-radius bar)
+
+All four were found by the milestone-close integration check at HEAD `00e73aa5`, re-measured by
+the orchestrator (code greps + PROD counts) before filing. None blocks the close: the affected
+populations measured ZERO on PROD, the failure direction is fail-safe (under-healing, not
+runaway), and every v1.19 requirement is satisfied as written.
+
+- [ ] **INT-1 — the 144→143 readmit composition is unreachable for real terminalized orphans
+  (and its SQL gate arms pass for the wrong reason).** The sweep's `strategy_analytics`
+  exclusion (`20260819150000_reconcile_sweep_readmit_attempt_ceiling.sql:397-402`, list
+  includes `'computing'` and `'failed'`) drops any worker-started orphan before the B4 marker
+  exemption (`:387-388`) or the `< 3` ceiling (`:390-396`) ever evaluates:
+  `analytics_runner.py:1275` runs the unconditional `_mark_computing()` upsert on entry, and
+  142's reaper (`20260802120000`) later flips that `computing` → `failed`. Both values are in
+  the exclusion list, so a mid-compute orphan terminalized by 144 is never readmitted — it
+  settles at a visible `failed` with no auto-retry. The only population that DOES reach the
+  ceiling is the claim→mark window (seconds). MEASURED 2026-08-20 on PROD: terminalizer
+  markers = **0** (population has never existed); silent under-healed candidates = **0** (the
+  one census hit is an honest May-2026 enqueue-failure row). ⚠️ The milestone goal ("detected
+  and terminates VISIBLY") is met — readmit was defensive hardening from 146.1-B4, not a
+  requirement. TWO sub-items if this is ever picked up: (a) any widening of the analytics
+  conjunct must respect that it is THE protection against mass re-enqueue of the
+  retention-aged corpus (`test_reconcile_dropped_enqueue_sweep.sql:371-372` gates on exactly
+  this); (b) arms C4/C5/C5b seed NO `strategy_analytics` row
+  (`test_reconcile_dropped_enqueue_sweep.sql:705-746`), so they prove the ceiling's predicate
+  arithmetic, not reachability — seeding analytics at `computing`/`failed` in a NEW arm would
+  make the gap executable (and RED until (a) is decided). Migration-header prose at
+  `20260819150000:15-26` overstates the readmit path's reach; migrations are immutable, so the
+  correction belongs in the successor migration if one is ever written.
+- [ ] **INT-2 — no whole-surface limiter coverage law on the Next side (RATE-05 residue).**
+  `src/lib/api/limiter-ordering.test.ts:232-234` derives its population from routes that
+  ALREADY consume a limiter; `seam-ratelimit-posture.invariant.test.ts:167` derives from seam
+  imports only. A new limiterless non-seam Next route is invisible to both. The Python side
+  has the wanted shape (`analytics-service/tests/test_limiter_route_coverage.py:407-442`:
+  whole-surface derivation ∪ quarantine ∪ `in_neither` anti-vacuity arm) — port that
+  partition to `src/app/api`. Phase 146's verification scoped this honestly (D-146-1); this
+  item is the widening, not a regression.
+- [ ] **INT-3 — RATE-05's requirement text names an artifact that does not exist in source.**
+  `withRateLimit` appears in ~15 `.planning/` files and ZERO source files; the shipped
+  mechanism is `src/lib/api/withAuthLimited.ts` + `withAdminAuth({rateLimitKey})` (locked
+  D-146-1: VERIFIED-EXISTING, no second wrapper). Re-point the REQUIREMENTS.md RATE-05 text
+  (and any future grep-gates) at the real symbols so the ledger stops asserting a
+  ungreppable name.
+- [ ] **INT-4 — note: Phase 145's fold silently shrank Phase 146's seam census by one.**
+  csv-finalize left the seam-import edge when the fold replaced the seam client
+  (`seam-ratelimit-posture.invariant.test.ts:197-200` records it), so the milestone's busiest
+  write route is now covered by `limiter-ordering.test.ts:103` alone. Documented, not broken —
+  kept here as the worked example of one phase's refactor moving another phase's gate
+  boundary (relevant to INT-2's design).
