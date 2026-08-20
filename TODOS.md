@@ -2533,3 +2533,121 @@ runaway), and every v1.19 requirement is satisfied as written.
   pre-change revision). CI carries the `TEST_SUPABASE_*` secrets and hard-fails rather than
   skipping, so the first real execution of the stamped payloads is the phase's CI run — watch
   it rather than assuming.
+
+## Phase 158 — OPS-03 orphan e2e spec dispositions (logged 2026-08-20)
+
+OPS-03 closes as a CLASS, not a partial fix. Census re-derived at HEAD this session (not
+carried forward from the dated research table): **53 spec files in `e2e/`, 20 referenced by no
+workflow batch list.** Plan 158-06 wired 5 of them (`api-key-flow` + `sync-analytics-flow` →
+unseeded batch; `full-flow` + `csv-upload-flow` + `my-strategies` → seeded MA-8 batch), each
+run-and-repaired first by plan 158-05. The remaining 15 get a recorded disposition below, one
+line each, plus a 16th correcting the `portfolio-pdf-demo` row and a 17th for the DB-types
+residual found while recording the decision.
+
+**The class-level finding — read this before wiring any of them.** These specs are not
+orphaned individually by accident. Between them they reach for **four mutually incompatible
+identity mechanisms**, none of which any CI job provisions: `E2E_TEST_EMAIL`/`E2E_TEST_PASSWORD`,
+`QUANTALYZE_E2E_PASSWORD`, `E2E_ADMIN_EMAIL`/`E2E_ADMIN_PASSWORD`, and hardcoded in-file
+credential literals — plus a fifth, `PLAYWRIGHT_TEST_STRATEGY_ID`, for fixture identity. They
+also use **two different seed-gate constant names** (`HAS_SEED_ENV`, which the MA-8 joining rule
+keys on, and `HAS_SEEDED_SUPABASE`, which it does not). The real blocker is therefore ONE
+missing convention, not 15 wirings: the seed-helper identity contract (`seedTestAllocator` /
+`loginViaForm`, the pattern `wizard-resume` and the new `my-strategies` spec use, and the one
+plan 158-05 converted `csv-upload-flow` onto). ⚠️ Wiring any spec below **before** converting it
+produces an all-skip run, which is the SAME false-coverage state as orphanhood — a green batch
+proving nothing. Verify ≥1 executed, non-skipped case per spec before calling it wired.
+
+Dispositions are one of **wire-later** (belongs in a batch; needs a run-and-repair pass first),
+**defer** (blocked on env/identity nobody provisions; tracked, low value until unblocked), or
+**delete-candidate** (surface gone — deletion would need its own reviewed change, not done here).
+No spec below is a delete-candidate: every route they target still exists (verified against
+`src/app/` this session), so deletion would destroy coverage intent rather than dead weight.
+
+- [ ] **[158-OPS-03] `admin-csv-status-axe.spec.ts` — wire-later (seeded list).** Already
+  conforms to the seeded contract (`HAS_SEED_ENV` present, uses the seed helpers) and
+  `/admin/csv-status` still exists, so it is a list-membership change plus one run-and-repair
+  pass; it is a single axe case, so the cost of proving it is small.
+- [ ] **[158-OPS-03] `discovery-sparkline-regression.spec.ts` — wire-later (seeded list).**
+  Seed-contract-conformant and pins a DESIGN.md rule (DIFF-05 single-accent sparklines) that
+  nothing else asserts; its 4 cases read live seeded rows, so it needs the seeded batch and a
+  run against the shared TEST DB before it can gate PRs.
+- [ ] **[158-OPS-03] `discovery-watchlist.spec.ts` — wire-later (seeded list), HIGHEST value of
+  the 15.** 544 lines including two genuine RLS proofs (unauthenticated `PUT /api/watchlist`
+  → 401, and user-B cannot read user-A's favorites) plus an anon `/browse/[slug]` chrome
+  check — security assertions currently running nowhere. Prioritize this one.
+- [ ] **[158-OPS-03] `for-quants-landing.spec.ts` — wire-later (seeded list).**
+  Seed-contract-conformant; most of its 11 cases are anon (`/for-quants`, `/security`,
+  `security.txt`) but one describe is logged-in-gated, so the seeded batch is the right home.
+  ⚠️ When wiring, dedupe against `security-page.spec.ts` below — both assert `/security`.
+- [ ] **[158-OPS-03] `discovery.spec.ts` — wire-later (unseeded list).** 9 lines, one
+  placeholder-safe assertion (unauthenticated `/discovery/crypto-sma` redirects to login) that
+  no wired spec covers — checked `auth`, `smoke` and `route-redirects`, none of which touch
+  discovery. Cheap to prove, cheap to wire; it just has never been run.
+- [ ] **[158-OPS-03] `security-page.spec.ts` — wire-later (unseeded list).** Fully anon
+  (`/security` and `/`), no seed env, no identity — genuinely placeholder-safe, so the unseeded
+  batch fits with no conversion work. ⚠️ Overlaps `for-quants-landing`'s `/security` describe;
+  wire one of them, not both, or the assertion runs twice under different owners.
+- [ ] **[158-OPS-03] `bridge-flow.spec.ts` — wire-later (unseeded list), with one case to
+  tighten first.** 4 of its 5 cases hit the public `/demo` page (placeholder-safe); the 5th
+  (`/allocations`) is written to pass EITHER way — it asserts the login redirect when
+  unauthenticated and the InsightStrip when not. ⚠️ That case cannot fail, so wiring it as-is
+  buys coverage theatre; split it or gate it properly when wiring.
+- [ ] **[158-OPS-03] `simulator-flow.spec.ts` — defer.** Gated on `QUANTALYZE_E2E_PASSWORD`, an
+  identity env name used by this spec alone and set in no workflow, so wiring it today yields
+  an all-skip batch entry. Unblocks by converting to the seed-helper identity contract.
+- [ ] **[158-OPS-03] `strategy-detail-tabs.spec.ts` — defer.** Gated on
+  `E2E_TEST_EMAIL`/`E2E_TEST_PASSWORD`, which this phase recorded a decision NOT to provision
+  (see 158-05); it would self-skip every case in CI. Same unblock: convert to seed helpers,
+  which mint their own users and need no repo secret.
+- [ ] **[158-OPS-03] `match-queue.spec.ts` — defer.** Gated on
+  `E2E_ADMIN_EMAIL`/`E2E_ADMIN_PASSWORD` and targets `/admin/match`, so it needs an ADMIN
+  identity; the seed helpers mint allocator/manager roles only, so this needs an admin-seeding
+  path that does not exist yet — a real piece of work, not a list edit.
+- [ ] **[158-OPS-03] `sync-flow-queue.spec.ts` — defer.** Gated on
+  `PLAYWRIGHT_TEST_STRATEGY_ID`, which no workflow sets, so all 3 cases would skip. This is the
+  same never-run env gate that keeps `api-key-flow`'s and `sync-analytics-flow`'s UI describes
+  dormant even now that those two are wired — a fixture-identity problem, not a spec-rot one.
+- [ ] **[158-OPS-03] `wizard-sync-regression.spec.ts` — defer.** Same
+  `PLAYWRIGHT_TEST_STRATEGY_ID` gate, same all-skip outcome; wire it in the same change that
+  provisions a seeded strategy id, not before.
+- [ ] **[158-OPS-03] `mandate-form.spec.ts` — wire-later (seeded list), after renaming its seed
+  gate.** It IS seed-gated and mints its own user via the service role (the acceptable
+  pattern), but its gate constant is `HAS_SEEDED_SUPABASE`, not `HAS_SEED_ENV`. ⚠️ The MA-8
+  joining rule keys on `HAS_SEED_ENV`, so adding this spec to the list would satisfy the
+  documented contract's list half while the in-spec half silently does not apply. Rename the
+  constant in the same change that wires it.
+- [ ] **[158-OPS-03] `wizard-hydration-probe.spec.ts` — defer, blocked on removing in-file
+  credentials.** Carries a hardcoded demo email + password literal at `:38-39` — the same class
+  plan 158-05 removed from `csv-upload-flow` (whose hardcoded login was additionally MEASURED
+  not to authenticate against the TEST project). Convert to the seed-helper contract and drop
+  the literals; do not wire it with them in place.
+- [ ] **[158-OPS-03] ⚠️ `for-quants-onboarding.spec.ts` — defer, blocked on a PUBLIC-REPO
+  credential scrub (act on this independently of wiring).** `:31-32` hardcode a
+  personal-looking gmail address and a short password literal, committed in a repository that
+  is world-readable. Deliberately not quoted here so this entry does not re-publish them.
+  The credential removal is worth doing on its own schedule — it is not contingent on anyone
+  ever wiring this spec — after which the spec converts to the seed-helper contract like the
+  others. Flagged by plan 158-06 while triaging; NOT fixed there because scrubbing a
+  credential belongs in its own reviewed change, not buried in a CI-wiring commit.
+- [ ] **[158-OPS-03] `portfolio-pdf-demo.spec.ts` — wire-later (unseeded list); the census row
+  for this spec was WRONG and is corrected here.** The research table recorded "non-@nightly
+  cases orphaned", implying a split. Measured at HEAD: BOTH describes carry the `@nightly` tag
+  in their titles (`:99`, `:160`), and `nightly.yml:109` runs the spec with `--grep @nightly`,
+  which matches on the full title — so every one of its 8 cases runs nightly and none is
+  orphaned. ⚠️ The real defect is the opposite of the one recorded: the token-shape describe's
+  own docblock (`:85-97`) states those cases need no `DEMO_PDF_SECRET` and *"MUST run in main CI
+  to keep verifier-branch coverage on every PR"*, and an audit split the describes precisely to
+  restore that — but the split describe still carries `@nightly` in its title, so the intended
+  per-PR coverage never happened. **Fix:** drop `@nightly` from the token-shape describe title
+  and add the spec to the unseeded list, so a regression weakening the hex-regex/indexOf
+  verifier guard is caught per-PR rather than up to 24h later.
+- [ ] **[158-OPS-03] DB-types residual — defer (fix in its own reviewed change):
+  `scenario_shares` lost its hand-patch tripwire comment.** Found while recording
+  `158-DB-TYPES-DECISION.md`. `database.types.ts:2326` is a
+  hand-patched block per its own test docblock (`database.types.test.ts:75-81`, migration
+  `20260622120000`) but carries NO in-file `HAND-PATCHED` warning comment, unlike its two
+  siblings `for_quants_leads` (`:1072`) and `scenarios` (`:2375`). Its type-level pins are
+  intact so the load-bearing control still holds; what is missing is the warning to the next
+  person who regenerates — and `:1080-1081` records that a prior regen stripped exactly such a
+  comment and a human re-applied it by hand. **Fix:** re-apply a tripwire comment above the
+  block. Not done in plan 158-06: it edits a generated file outside that plan's declared scope.
