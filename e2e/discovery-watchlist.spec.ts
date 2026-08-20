@@ -6,7 +6,7 @@
  * PUT /api/watchlist/[strategyId] route.
  *
  * AUDIT-2026-05-07 (cluster C) hardening:
- *  - Replaces the hardcoded `matratzentester24@gmail.com / Test12` shared
+ *  - Replaces the previously committed hardcoded shared demo
  *    account with a per-run seeded allocator via `seedTestAllocator()`.
  *    Spec is `test.skip`'d when `TEST_SUPABASE_*` env is missing (matches
  *    sister `discovery-hide-examples-default.spec.ts`). The shared account

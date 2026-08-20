@@ -2621,7 +2621,10 @@ No spec below is a delete-candidate: every route they target still exists (verif
   plan 158-05 removed from `csv-upload-flow` (whose hardcoded login was additionally MEASURED
   not to authenticate against the TEST project). Convert to the seed-helper contract and drop
   the literals; do not wire it with them in place.
-- [ ] **[158-OPS-03] ⚠️ `for-quants-onboarding.spec.ts` — defer, blocked on a PUBLIC-REPO
+  2026-08-20: credential blocker RESOLVED — the `:38-39` literals are scrubbed to env-sourced
+  `E2E_TEST_EMAIL`/`E2E_TEST_PASSWORD` with a visible `test.skip` (same commit as the
+  `for-quants-onboarding` scrub below). Seed-helper conversion + wiring still open.
+- [x] **[158-OPS-03] ⚠️ `for-quants-onboarding.spec.ts` — defer, blocked on a PUBLIC-REPO
   credential scrub (act on this independently of wiring).** `:31-32` hardcode a
   personal-looking gmail address and a short password literal, committed in a repository that
   is world-readable. Deliberately not quoted here so this entry does not re-publish them.
@@ -2629,6 +2632,10 @@ No spec below is a delete-candidate: every route they target still exists (verif
   ever wiring this spec — after which the spec converts to the seed-helper contract like the
   others. Flagged by plan 158-06 while triaging; NOT fixed there because scrubbing a
   credential belongs in its own reviewed change, not buried in a CI-wiring commit.
+  ✅ 2026-08-20: scrubbed — creds are env-sourced (`E2E_TEST_EMAIL`/`E2E_TEST_PASSWORD`) with a
+  visible `test.skip` on the authed describe; comment-only echoes of the same pair in
+  `match-queue.spec.ts`/`discovery-watchlist.spec.ts` reworded in the same commit. Wiring +
+  seed-helper conversion stay deferred per the entry above.
 - [ ] **[158-OPS-03] `portfolio-pdf-demo.spec.ts` — wire-later (unseeded list); the census row
   for this spec was WRONG and is corrected here.** The research table recorded "non-@nightly
   cases orphaned", implying a split. Measured at HEAD: BOTH describes carry the `@nightly` tag

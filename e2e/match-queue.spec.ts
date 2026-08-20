@@ -12,7 +12,7 @@ import { SELECTORS, type E2EPage } from "./helpers/discovery-selectors";
 // - Migration 011 has been applied
 //
 // H-1050 (red-team CHAIN) test-side remediation:
-//   The prior version hardcoded `matratzentester24@gmail.com / Test12` in
+//   The prior version hardcoded a shared demo email + password literal in
 //   source. A committed plaintext credential is a security finding in its own
 //   right (it lives in git history forever); the CONVENTION for this repo is
 //   to source test creds from the environment (the macOS-Keychain-backed
