@@ -2,7 +2,7 @@
 phase: 145-job-csv-finalize-atomicity
 verified: 2026-08-19T10:47:32Z
 verified_at_head: 47022a6f
-status: human_needed
+status: passed
 score: 3/3 success criteria achieved
 behavior_unverified: 2
 overrides_applied: 0
@@ -314,3 +314,30 @@ fold gate would make it CI-durable.
 
 _Verified: 2026-08-19T10:47:32Z at main `47022a6f`_
 _Verifier: Claude (gsd-verifier) — read-only on source; no DB access; no git writes_
+
+---
+
+## Human-item closure record (2026-08-20, orchestrator session — v1.19 milestone audit)
+
+All three human items CLOSED; status flipped `human_needed` → `passed`.
+
+1. **`sql-tests` at HEAD** — CLOSED. CI run 32360136832 (PR #695 head, a
+   descendant of 47022a6f; the three suites gained +279 lines since, none
+   weakened) ran `sql-tests` GREEN 2026-08-20 10:57Z and the job log shows all
+   three files executing, including `Part 2 OK: mid-body fault (SQLSTATE 22007,
+   element 6 of 10) left ZERO rows in strategies, strategy_verifications and
+   csv_daily_returns.` — the SC#2 oracle observed on the deployed body.
+2. **PROD orphan census** — CLOSED. Measured 2026-08-20 via Supabase MCP on
+   `khslejtfbuezsmvmtsdn`: census (1) = **0**, census (2) = **0**. Spot-check of
+   3 of the 18 terminalized ids (`5454d0d5…`, `58786362…`, `454a301c…`): all
+   `status='archived'` with `strategy_analytics.computation_status='failed'`
+   and a non-null reason ("csv-finalize orphan reaped by Phase 145 one-time
+   pass (2026-…") preserved.
+3. **W1/W2/W3 disposition** — CLOSED: all three were FIXED in code by Phase
+   146.2, none needs filing. W1 → 146.2-07 re-typed the
+   `CsvSubmitStep.upstream-arm.test.tsx` fixtures from HEAD with symbol anchors
+   (file names the W1 false-provenance class it corrects). W2 → the honesty
+   note now sits at `test_csv_finalize_double_submit.sql` Part 3 header, citing
+   "v1.19 review-of-146.1 finding W2". W3 → the standing no-handler `prosrc`
+   pin is Part 1d of `test_csv_finalize_atomic_fold.sql` (citing finding W3)
+   and executed GREEN in today's `sql-tests` run.

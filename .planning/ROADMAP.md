@@ -64,25 +64,25 @@ accident of sequencing.** Nothing here can be delivered by an agent. The milesto
 
 ---
 
-## Current Milestone: v1.19 JOB/RATE — job-lifecycle reliability and the rate limits that hold (Phases 143–146)
+## Shipped Milestone: v1.19 JOB/RATE — job-lifecycle reliability and the rate limits that hold (Phases 143–146 + 146.1, 146.2) ✅ CLOSED 2026-08-20
 
-**Goal:** A compute job that is dropped, orphaned, or half-written is DETECTED and terminates visibly — and every authed route that reaches the Python service carries the right limit, enforced by something a new route cannot silently bypass.
+**Closed 2026-08-20** at v0.68.1.0 (`00e73aa5`), PRs #687–#695. 6/6 phases passed, 9/9
+requirements satisfied (JOB-04/05/06/08, RATE-01..05). Audit: `.planning/v1.19-MILESTONE-AUDIT.md`
+— `tech_debt`: INT-1..4 filed to TODOS.md (cross-phase readmit reachability + Next-side limiter
+coverage law; measured-ZERO populations on PROD, fail-safe direction, none blocking under the
+stopping rule). Full section + phase detail archived at
+`.planning/milestones/v1.19-ROADMAP.md`; requirements extract at
+`.planning/milestones/v1.19-REQUIREMENTS.md`.
 
-⭐ **Created 2026-08-14 by carrying Phases 143–146 out of v1.16, which closed scoped-down at 15 phases.** The phase NUMBERS are unchanged on purpose: `REQUIREMENTS.md` and `TODOS.md` cite them by number in dozens of places, and renumbering would break every one of those references to buy nothing.
+**What v1.19 earns:** a dropped compute-job enqueue is detected by absence and healed (sweep LIVE
+on PROD, hourly tick observed); an orphaned `running` job terminates VISIBLY (terminal `failed`,
+never DELETE — WR-02 resolved); csv-finalize is ONE SECURITY DEFINER transaction (mid-fold fault
+proven to leave ZERO rows); every authed route that reaches the Python service carries a limiter
+enforced by a coverage law (Python whole-surface; Next seam-scoped — widening filed as INT-2).
+Rider: local analytics-service now defaults to TEST and hard-stops before becoming a PROD worker
+(#695).
 
-⭐ **Why this is a milestone and not a v1.16 resumption:** GSD models ONE current milestone and v1.18 already held that slot while being entirely founder-gated. Working four phases under a header that says PARKED is the ledger-vs-reality drift that produced four blockers in the v1.17 audit. This milestone is also the one that is fully **agent-deliverable** — v1.18 cannot move without the founder at an MT5 terminal.
-
-**Requirements:** JOB-04, JOB-05, JOB-06, JOB-08, RATE-01, RATE-02, RATE-03, RATE-04, RATE-05 (9 total)
-
-⛔ **EXECUTION ORDER IS 143 → 144 → 145 → 146 AND IT IS A DECLARED DEPENDENCY CHAIN, not a preference.** 143 depends on Phase 142 (complete); 144 on 143; 145 on 144. 146 depends on nothing upstream but is sequenced LAST *because its deliverable is a fresh grep* — run earlier it audits a codebase about to change and reads as coverage it does not have. ⚠️ A risk-first reordering (145/146 first, 144 last) was proposed on 2026-08-14 and rejected for inverting 145's dependency.
-
-⚠️ **143 and 144 carry pg_cron MIGRATIONS. Merging `supabase/migrations/**` to `main` AUTO-APPLIES to PROD.** Founder call 2026-08-14: land them unattended. ⛔ **144 is the dangerous one and it runs SECOND, so it gets no long PROD soak** — the sequencing mitigation does not exist here. Its safety comes from the change itself: assert the migration writes a terminal `failed` state and issues NO `DELETE`, prove it on TEST, verify on PROD before 145 begins. A reaper that deletes rows it should have reset is **not revertible**.
-
-⭐ **Two phases are MEASURE-FIRST by design and must not be shortcut:** 144 SC4 requires a committed PROD measurement of the stale-`pending` population BEFORE any sweep is scoped ("zero on prod" is a valid, budget-saving outcome), and 145 SC1 requires a committed reproduction attempt of the 42501 claim BEFORE a fix is scoped ("could not reproduce" likewise).
-
-**Plans**: TBD — none of these four has ever been planned; no phase directory exists for any of them.
-
----
+## v1.19 phase detail, retained (Phases 143–146; 146.1/146.2 under Phase Details below)
 
 ### Phase 143: JOB — Dropped-enqueue reconciliation sweep
 

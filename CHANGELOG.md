@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.68.1.1] - 2026-08-20
+
+### Chore
+
+- **v1.19 milestone CLOSED** (JOB/RATE, Phases 143-146 + 146.1/146.2, PRs #687-#695). Audit
+  `.planning/v1.19-MILESTONE-AUDIT.md`: `tech_debt`, 9/9 requirements, 6/6 phases passed;
+  cross-phase findings INT-1..4 filed to TODOS.md (measured-zero PROD populations, fail-safe).
+  Archives at `.planning/milestones/v1.19-ROADMAP.md` / `v1.19-REQUIREMENTS.md`; MILESTONES.md
+  entry; STATE/PROJECT point at v1.18 (founder-gated) as the only open milestone.
+- **Verification closures by measurement (ledger-only):** 146.2 SC#5 discharged by OBSERVED-RED
+  falsification of all four gap-closure oracles (neuter -> RED with authored message -> restore
+  green, transcripts in 146.2-VERIFICATION.md); Phase 145 human items closed (sql-tests green at
+  HEAD incl. zero-rows fault oracle, PROD orphan census 0/0 w/ 3/3 spot-checks, W1-W3 confirmed
+  already fixed by 146.2); 146.1 C1 closed by successor; JOB-04 tick closed on PROD measurement
+  (sweep jobid 36 active, hourly tick succeeded).
+
 ## [0.68.1.0] - 2026-08-20
 ### fix: localhost can no longer become a production worker by accident
 
