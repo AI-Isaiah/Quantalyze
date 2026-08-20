@@ -135,33 +135,64 @@ mutex stops being sufficient and this section is wrong — re-derive it first.
 ## 5. Probe drill (proving serialization still works)
 
 `.github/workflows/mutex-probe.yml` acquires the same lock, holds it briefly,
-and exits. Run three back-to-back — **three, not two**: eviction needed exactly
-three contenders, so a two-run drill cannot reproduce the bug this mutex fixes.
+and exits. **The drill is ONE run, not three.** The "three, not two" requirement
+— eviction needed exactly three contenders, so a two-contender drill cannot
+reproduce the bug this mutex fixes — is satisfied *inside* a single run by
+`strategy.matrix.contender: [1, 2, 3]`, whose three legs start together at a
+shared wall-clock barrier and are checked pairwise for non-overlap by the
+`assert-serialization` job.
+
+> ⚠️ Do **not** dispatch the probe three times to get three contenders. The
+> workflow declares `concurrency: { group: mutex-probe-${{ github.ref }},
+> cancel-in-progress: true }`, so three dispatches on the same ref land in one
+> group and only the newest survives — run 2 cancels run 1, run 3 cancels run 2.
+> Two of the three would conclude `cancelled`: the exact grey conclusion the
+> assertion below says must never be tolerated.
+
+Run it against a probe branch — **never a bare `gh workflow run`**, whose
+default ref is the default branch (see the ⚠️ below):
 
 ```bash
-gh workflow run mutex-probe.yml
-gh workflow run mutex-probe.yml
-gh workflow run mutex-probe.yml
-gh run list --workflow=mutex-probe.yml --limit 3 --json databaseId,conclusion
+git push origin HEAD:ci-probe/mutex-drill
+# or, if the branch already exists:
+gh workflow run mutex-probe.yml --ref ci-probe/mutex-drill
+
+gh run list --workflow=mutex-probe.yml --branch ci-probe/mutex-drill --limit 1 \
+  --json databaseId,conclusion
 ```
 
-Assertions:
+Assertions, against that **one** run:
 
-1. All three conclude **`success`**. Assert the literal string `success` — never
+1. It concludes **`success`**. Assert the literal string `success` — never
    "not failure". `cancelled` is not a failure, and a "not failure" assertion
-   passes on exactly the grey conclusion this whole mechanism exists to prevent.
-2. The lock windows do not overlap: pull each run's job timings with
-   `gh api repos/{owner}/{repo}/actions/runs/<id>/jobs` and check that the locked
-   sections are disjoint.
+   passes on exactly the grey conclusion this whole mechanism exists to prevent:
+
+   ```bash
+   gh run list --workflow=mutex-probe.yml --branch ci-probe/mutex-drill --limit 1 \
+     --json conclusion --jq '.[0].conclusion == "success"'   # must print: true
+   ```
+
+2. All three `contend` matrix legs ran (a cancelled or skipped leg leaves fewer
+   than three windows, and the assertion cannot then distinguish "did not
+   serialize" from "did not run" — the job fails loudly in that case rather than
+   green-washing).
+3. The three lock windows do not overlap. `assert-serialization` already
+   asserts this from **database**-clock timestamps and prints the window table
+   in its log; read that table rather than re-deriving from job timings, which
+   carry runner-clock skew.
 
 To confirm the drill can actually fail (a check that cannot go red proves
-nothing), run two probes against **different** lock keys and watch the overlap
+nothing), point two contenders at **different** lock keys and watch the overlap
 assertion go RED.
 
-> ⚠️ **Never dispatch a deliberately-failing probe variant on `main`.** A red
-> check on a main-HEAD SHA makes Railway's "wait for CI" skip the analytics
-> deploy — you would cause the outage you are drilling for. Neuter/falsifiability
-> drills belong on a `ci-probe/**` branch only.
+> ⚠️ **The probe must only ever run on a `ci-probe/**` ref.** Both real jobs are
+> hard-gated on `startsWith(github.ref, 'refs/heads/ci-probe/')`; a dispatch on
+> any other ref hits the `dispatch-guard` job, which prints the correct command
+> and exits 0. That gate exists because `gh workflow run` and the Actions UI
+> default `--ref` to the **default branch**, and this probe can fail by design —
+> a red check on a main-HEAD SHA makes Railway's "wait for CI" skip the analytics
+> deploy, i.e. you would cause the very outage you are drilling for. If you ever
+> remove that gate, this section is wrong.
 
 ## 6. Watcher triage (`main-ci-cancelled` issues)
 
