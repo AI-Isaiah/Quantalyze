@@ -39,8 +39,25 @@ railway up              # build & deploy the current working tree
 **Railway only deploys when the main CI check-suite is GREEN.** If ANY check on
 the merge commit is red/cancelled, Railway **silently skips** the deploy
 (`skippedReason="CI check suite failed"`) and prod stays on old code with no
-error. A cancelled `python` job under the `shared-test-db` concurrency group is a
-common trigger.
+error.
+
+Common triggers, current as of phase 158:
+
+- A **red** `python` / `sql-tests` / `e2e-seeded` job from the shared TEST-DB
+  **advisory lock** — the acquire step hitting its wait cap (deep cross-run
+  queue *or* a wedged holder; it prints a `pg_locks` census naming both), or the
+  job blowing its `timeout-minutes`. See
+  [`shared-test-db-mutex.md`](./shared-test-db-mutex.md) sections 2-3.
+- A **cancelled** main-branch run, which
+  `.github/workflows/main-ci-cancelled-watcher.yml` files as a dedup'd
+  `main-ci-cancelled` issue. See that runbook's section 6.
+
+> ⚠️ The `shared-test-db` **concurrency group** was deleted in phase 158 and no
+> longer exists anywhere in the repo. It used to be the common trigger named
+> here: GitHub keeps one pending entry per group and cancels it when a third
+> arrives, so an evicted run concluded `cancelled` (grey, not red) and Railway
+> skipped the deploy — issue #616. The advisory lock replaced it precisely so
+> waiters block instead of being evicted.
 
 Detection is automated: `.github/workflows/analytics-deploy-verify.yml` runs every
 6h, compares prod `/health` `git_sha` to `main` HEAD, and files a dedup'd P1

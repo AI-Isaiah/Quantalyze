@@ -80,8 +80,11 @@ jobs:
           fi
           # Convergence window: tolerate a deploy-in-progress (CI + Railway
           # build) before declaring the deploy skipped. ~30 min covers the
-          # python job queued behind others on the shared-test-db serialization
-          # group (the check-suite Railway waits on) + the Railway build.
+          # python job queued behind other runs on the shared-test-db advisory
+          # lock (the check-suite Railway waits on) + the Railway build.
+          # 158-REVIEW WR-10: the serializer is the Postgres session advisory
+          # lock (key 61616158), NOT the deleted `shared-test-db` concurrency
+          # group. See docs/runbooks/shared-test-db-mutex.md.
           deadline=$(( $(date +%s) + 1800 ))
           deployed=""
           while [ "$(date +%s)" -lt "$deadline" ]; do
@@ -146,7 +149,14 @@ jobs:
               "",
               `Workflow run: ${runUrl}`,
               "",
-              "Most likely the Railway deploy was SKIPPED because the main CI check-suite was red/cancelled (a cancelled `python` job under the `shared-test-db` concurrency group is a known cause). Recover: rerun the main CI for the merge SHA until green, then `railway redeploy` (or `railway up`) the analytics service. Confirm by re-running this workflow.",
+              "Most likely the Railway deploy was SKIPPED because the main CI check-suite for that SHA was not green. Triage the check-suite first — `docs/runbooks/shared-test-db-mutex.md` section 6 is the current guide.",
+              "",
+              "Known causes, current as of phase 158:",
+              "- A **red** `python` / `sql-tests` / `e2e-seeded` job from the shared-test-db **advisory lock** (key 61616158): either the acquire step hit its wait cap (deep cross-run queue OR a wedged holder — the step prints a `pg_locks` census naming both), or the job blew its `timeout-minutes`. Runbook sections 2-3.",
+              "- A **cancelled** main-branch run, which `main-ci-cancelled-watcher.yml` files as a separate `main-ci-cancelled` issue. Check for one.",
+              "- ⚠️ The `shared-test-db` **concurrency group** was DELETED in phase 158 and no longer exists anywhere in the repo. If you were sent here looking for it, that text was stale — the eviction failure mode it caused (issue #616) is what the advisory lock replaced.",
+              "",
+              "Recover: rerun the main CI for the merge SHA until green, then `railway redeploy` (or `railway up`) the analytics service. Confirm by re-running this workflow.",
               "",
               "Auto-filed by .github/workflows/analytics-deploy-verify.yml (tech-debt #9). Deduplicated by the `" + dedupLabel + "` label; subsequent failures comment here until closed.",
             ].join("\n");
