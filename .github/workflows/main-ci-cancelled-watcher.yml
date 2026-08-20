@@ -1,0 +1,216 @@
+name: Main CI cancelled watcher
+
+# OPS-01 (phase 158), detection half — kill the SILENCE mechanism of issue #616.
+#
+# GitHub Actions holds exactly ONE pending entry per concurrency group and
+# CANCELS it when a third request arrives (ci.yml:906-933 states the mechanism
+# verbatim). A cancelled main-branch CI run renders as a GREY check, not a red
+# one — and nobody triages grey. Railway's "wait for CI" then sees a non-green
+# check-suite on that commit and SILENTLY SKIPS the analytics deploy, leaving
+# prod on stale code with no signal at all. The FIFO advisory-lock mutex that
+# ships alongside this workflow removes the eviction; this watcher removes the
+# silence, so the two halves together close #616 on the mechanism.
+#
+# CRITICAL: EVERY code path here exits 0 — including a positive detection. This
+# workflow MUST NOT fail its own check. A `workflow_run`-triggered run attaches
+# its check to the head SHA of the run it observed, i.e. main HEAD, and a red
+# check on a main-HEAD commit makes Railway's "wait for CI" treat that commit's
+# check-suite as red and SKIP the very deploy this watcher exists to protect —
+# the self-defeating deadlock documented verbatim in
+# analytics-deploy-verify.yml:17-24, which left prod stale on 2026-06-21. A red
+# watcher would therefore RECREATE #616 while reporting it. THE LOUD SIGNAL IS
+# THE DEDUP'D ISSUE, NEVER A RED CHECK. Consequently GitHub API failures are
+# downgraded to `::warning::` annotations rather than thrown, and the manual
+# `workflow_dispatch` test arm (which also attaches a check to main HEAD)
+# swallows a bad/unknown run_id the same way.
+#
+# ISSUE-ONLY BY DESIGN (no auto-rerun): an automatic rerun re-enters the exact
+# contention window that produced the cancellation, so this workflow never
+# touches the Actions API and never uplifts a write scope for it — the token
+# stays at `contents: read` + `issues: write`. Rerunning is an operator
+# decision, documented in docs/runbooks/shared-test-db-mutex.md.
+#
+# NOTE: `workflow_run` only fires for a workflow file present on the DEFAULT
+# branch. This watcher is inert until it merges to main; the dispatch arm below
+# is how it is exercised before (and after) that.
+
+on:
+  workflow_run:
+    workflows: ["CI"]        # ci.yml:1 — the name is exactly `CI`
+    types: [completed]       # `cancelled` is a CONCLUSION of the completed activity type
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: "CI run id to evaluate against the detection predicate (exercises the issue path against a historical cancelled run, e.g. 31273384829, without forcing a cancellation on main)."
+        required: true
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: main-ci-cancelled-watcher
+  cancel-in-progress: false
+
+jobs:
+  report-cancelled:
+    runs-on: ubuntu-latest
+    steps:
+      # This job does not need the repo (it only calls the Issues API), but the
+      # C-0293 critical-regressions invariant requires every workflow to check
+      # out with persist-credentials:false — conform rather than carve out an
+      # exemption to that guard.
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          persist-credentials: false
+
+      # Detection gate, workflow_run arm. A conclusion that is not `cancelled`
+      # (or a non-main branch, or a non-push event) never reaches this step's
+      # body, so no Issues API call is made — a clean no-op.
+      - name: Evaluate the workflow_run conclusion
+        id: detect_event
+        if: >-
+          github.event_name == 'workflow_run'
+          && github.event.workflow_run.conclusion == 'cancelled'
+          && github.event.workflow_run.head_branch == 'main'
+          && github.event.workflow_run.event == 'push'
+        env:
+          CANCELLED_RUN_ID: ${{ github.event.workflow_run.id }}
+          CANCELLED_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -uo pipefail
+          # workflow_run payload fields are attacker-influenced strings, so they
+          # arrive via env: — never a GitHub expression inside this body, which
+          # Actions would interpolate before the shell ever sees it — and are
+          # stripped to their character class before touching $GITHUB_OUTPUT: a
+          # newline in a value would otherwise forge additional outputs.
+          run_id="${CANCELLED_RUN_ID//[!0-9]/}"
+          head_sha="${CANCELLED_HEAD_SHA//[!0-9a-fA-F]/}"
+          printf 'detected=true\n' >> "$GITHUB_OUTPUT"
+          printf 'run_id=%s\n' "$run_id" >> "$GITHUB_OUTPUT"
+          printf 'head_sha=%s\n' "$head_sha" >> "$GITHUB_OUTPUT"
+          echo "::warning::Main CI run $run_id concluded 'cancelled' — the Railway analytics deploy for this commit may have been SKIPPED. Filing/updating the dedup'd 'main-ci-cancelled' issue."
+          # Detection is not a failure. Exit 0 (see the header).
+          exit 0
+
+      # Detection gate, workflow_dispatch arm: fetch the run named by the input
+      # and evaluate the SAME predicate against it, so the on-demand test
+      # exercises the real logic rather than a stub.
+      - name: Evaluate the dispatched run against the same predicate
+        id: detect_dispatch
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3  # v9.0.0
+        env:
+          INPUT_RUN_ID: ${{ inputs.run_id }}
+        with:
+          script: |
+            const { INPUT_RUN_ID } = process.env;
+            const runId = Number(String(INPUT_RUN_ID || "").replace(/[^0-9]/g, ""));
+            if (!Number.isSafeInteger(runId) || runId <= 0) {
+              core.warning(`run_id input ${JSON.stringify(INPUT_RUN_ID)} is not a positive integer — nothing to evaluate.`);
+              core.setOutput("detected", "false");
+              return;
+            }
+            let run;
+            try {
+              ({ data: run } = await github.rest.actions.getWorkflowRun({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                run_id: runId,
+              }));
+            } catch (err) {
+              // Never throw: a dispatch run also reports a check on main HEAD,
+              // and a red check there makes Railway skip the deploy (header).
+              core.warning(`Could not fetch run ${runId}: ${err.message}`);
+              core.setOutput("detected", "false");
+              return;
+            }
+            // The SAME predicate the workflow_run arm gates on.
+            const detected =
+              run.conclusion === "cancelled" &&
+              run.head_branch === "main" &&
+              run.event === "push";
+            core.info(
+              `run ${runId}: conclusion=${run.conclusion} head_branch=${run.head_branch} ` +
+              `event=${run.event} -> detected=${detected}`
+            );
+            core.setOutput("detected", detected ? "true" : "false");
+            core.setOutput("run_id", String(runId));
+            core.setOutput("head_sha", String(run.head_sha || "").replace(/[^0-9a-fA-F]/g, ""));
+
+      # Dedup'd-issue block — the third in-repo use of this pattern
+      # (analytics-deploy-verify.yml, nightly.yml, cassette-refresh.yml). Label
+      # `main-ci-cancelled` keeps it from colliding with `analytics-deploy-stale`.
+      - name: Open or update the dedup'd GitHub issue
+        if: steps.detect_event.outputs.detected == 'true' || steps.detect_dispatch.outputs.detected == 'true'
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3  # v9.0.0
+        env:
+          REPO_NAME: ${{ github.repository }}
+          WATCHER_RUN_ID: ${{ github.run_id }}
+          CANCELLED_RUN_ID: ${{ steps.detect_event.outputs.run_id || steps.detect_dispatch.outputs.run_id }}
+          CANCELLED_HEAD_SHA: ${{ steps.detect_event.outputs.head_sha || steps.detect_dispatch.outputs.head_sha }}
+        with:
+          script: |
+            const { REPO_NAME, WATCHER_RUN_ID, CANCELLED_RUN_ID, CANCELLED_HEAD_SHA } = process.env;
+            const today = new Date().toISOString().slice(0, 10);
+            const dedupLabel = "main-ci-cancelled";
+            const cancelledRunUrl = `https://github.com/${REPO_NAME}/actions/runs/${CANCELLED_RUN_ID}`;
+            const watcherRunUrl = `https://github.com/${REPO_NAME}/actions/runs/${WATCHER_RUN_ID}`;
+            const detail = [
+              `Cancelled CI run: ${cancelledRunUrl}`,
+              `Head SHA: \`${CANCELLED_HEAD_SHA || "(absent)"}\``,
+              `Detected by: ${watcherRunUrl}`,
+            ].join("\n");
+            try {
+              const { data: existing } = await github.rest.issues.listForRepo({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                state: "open",
+                labels: dedupLabel,
+                per_page: 1,
+              });
+              if (existing.length > 0) {
+                await github.rest.issues.createComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: existing[0].number,
+                  body: `Another main CI run concluded \`cancelled\` on ${today}.\n\n${detail}`,
+                });
+                core.info(`Commented on existing issue #${existing[0].number}.`);
+                return;
+              }
+              const body = [
+                "A **main-branch CI run concluded `cancelled`**, which renders as a GREY check — not a red one — so nothing else in the repo would have surfaced it.",
+                "",
+                "**Why this matters:** Railway's \"wait for CI\" deploys the analytics service only on a GREEN main check-suite. A cancelled run is not green, so the deploy for this commit was very likely SKIPPED and prod may be running stale code (this is the mechanism behind issue #616).",
+                "",
+                detail,
+                "",
+                "**Triage:** follow the *Watcher triage* section of [`docs/runbooks/shared-test-db-mutex.md`](../blob/main/docs/runbooks/shared-test-db-mutex.md) — compare the analytics `/health` `git_sha` to main HEAD, rerun the cancelled run with `gh run rerun <id>` if the deploy was skipped, then close this issue.",
+                "",
+                "This watcher is deliberately **issue-only**: an automatic rerun would re-enter the same contention window that caused the cancellation.",
+                "",
+                "Auto-filed by `.github/workflows/main-ci-cancelled-watcher.yml` (phase 158, OPS-01). Deduplicated by the `" + dedupLabel + "` label; subsequent detections comment here until this issue is closed.",
+              ].join("\n");
+              const { data: created } = await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title: `Main CI concluded cancelled — deploy may have been skipped — ${today}`,
+                body,
+                labels: ["p1", dedupLabel],
+              });
+              core.info(`Opened issue #${created.number}.`);
+            } catch (err) {
+              // Downgrade API failures to a warning: throwing here would red the
+              // main-HEAD check and make Railway skip the deploy (see header).
+              core.warning(
+                `Could not file/update the '${dedupLabel}' issue: ${err.message}. ` +
+                `A main CI run concluded cancelled — see ${cancelledRunUrl}.`
+              );
+            }
+
+      - name: No cancelled main-branch conclusion to report
+        if: steps.detect_event.outputs.detected != 'true' && steps.detect_dispatch.outputs.detected != 'true'
+        run: |
+          echo "Clean no-op — the observed run was not a cancelled main-branch push conclusion."
