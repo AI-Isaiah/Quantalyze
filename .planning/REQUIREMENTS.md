@@ -105,16 +105,65 @@ Which phases cover which requirements. Updated during roadmap creation.
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| (filled by roadmapper) | | |
+| RANK-01 | Phase 159 | Pending |
+| RANK-02 | Phase 159 | Pending |
+| RANK-03 | Phase 160 | Pending |
+| RANK-04 | Phase 160 | Pending |
+| RANK-05 | Phase 159 | Pending |
+| RANK-06 | Phase 159 | Pending |
+| RANK-07 | Phase 159 | Pending |
+| RANK-08 | Phase 159 | Pending |
+| RANK-09 | Phase 159 | Pending |
+| SHARE-01 | Phase 164 | Pending |
+| SHARE-02 | Phase 164 | Pending |
+| SHARE-03 | Phase 164 | Pending |
+| SHARE-04 | Phase 164 | Pending |
+| WIZERR-01 | Phase 161 | Pending |
+| WIZERR-02 | Phase 161 | Pending |
+| WIZERR-03 | Phase 161 | Pending |
+| WIZERR-04 | Phase 161 | Pending |
+| WIZERR-05 | Phase 161 | Pending |
+| WIZERR-06 | Phase 161 | Pending |
+| WIZERR-07 | Phase 161 | Pending |
+| WIZERR-08 | Phase 161 | Pending |
+| WIZERR-09 | Phase 161 | Pending |
+| WIZERR-10 | Phase 161 | Pending |
+| WIZERR-11 | Phase 161 | Pending |
+| WIZERR-12 | Phase 161 | Pending |
+| WIZERR-13 | Phase 161 | Pending |
+| HONEST-01 | Phase 162 | Pending |
+| HONEST-02 | Phase 162 | Pending |
+| HONEST-03 | Phase 162 | Pending |
+| HONEST-04 | Phase 162 | Pending |
+| HONEST-05 | Phase 162 | Pending |
+| HONEST-06 | Phase 162 | Pending |
+| OPS-01 | Phase 158 | Pending |
+| OPS-02 | Phase 158 | Pending |
+| OPS-03 | Phase 158 | Pending |
+| OPS-04 | Phase 158 | Pending |
+| OPS-05 | Phase 163 | Pending |
+| OPS-06 | Phase 163 | Pending |
+| OPS-07 | Phase 163 | Pending |
+| OPS-08 | Phase 163 | Pending |
+| OPS-09 | Phase 163 | Pending |
+| OPS-10 | Phase 163 | Pending |
+| OPS-11 | Phase 158 | Pending |
+| SEC-01 | Phase 163 | Pending |
+| SEC-02 | Phase 163 | Pending |
+| SEC-03 | Phase 163 | Pending |
+| SEC-04 | Phase 163 | Pending |
+| SEC-05 | Phase 163 | Pending |
+| SEC-06 | Phase 163 | Pending |
+| DEPS-01 | Phase 165 | Pending |
 
 **Coverage:**
 - v1.20 requirements: 50 total
-- Mapped to phases: 0 (pending roadmap)
-- Unmapped: 50 ⚠️ (expected before roadmap)
+- Mapped to phases: 50 (Phases 158–165; roadmap created 2026-08-20)
+- Unmapped: 0 ✓
 
 ---
 *Requirements defined: 2026-08-20*
-*Last updated: 2026-08-20 after scope approval (full scope) — pending roadmap traceability*
+*Last updated: 2026-08-20 after roadmap creation — 50/50 requirements mapped to Phases 158–165*
 
 ## Parked Milestone v1.18 requirements (NOT v1.20 scope — restored verbatim 2026-08-20)
 

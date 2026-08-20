@@ -3,10 +3,10 @@ gsd_state_version: 1.0
 milestone: v1.20
 milestone_name: Backlog Burndown
 status: planning
-last_updated: "2026-08-20T13:05:59.793Z"
+last_updated: "2026-08-20T13:52:41.000Z"
 last_activity: 2026-08-20
 progress:
-  total_phases: 0
+  total_phases: 8
   completed_phases: 0
   total_plans: 0
   completed_plans: 0
@@ -31,11 +31,11 @@ complete — was offered and **declined**, precisely because it would leave ever
 `ROADMAP.md` only; this file went on asserting the refused claim for several hours. If you are
 amending scope, `git show --stat` the commit — one file is almost always wrong.
 
-⭐ **Current milestone: v1.18 — MT5-VERIFY & founder confirmations (Phases 155, 157).** EVERY
+⭐ **PARKED milestone: v1.18 — MT5-VERIFY & founder confirmations (Phases 155, 157).** EVERY
 phase in it is founder-gated. Blocked on (1) new MT5 investor passwords — the founder changed them
 ~2026-08-14, so stored credentials are stale and the three PROD keys will flip to `error`, which
 is **EXPECTED, not a regression** — and (2) the founder at the MT5 terminal on a **trading day**.
-Phases 143–146 became **v1.19, CLOSED 2026-08-20** (audit tech_debt, 9/9 requirements — see `.planning/milestones/v1.19-ROADMAP.md`). **No agent-deliverable phase is open**; v1.18 waits on the founder.
+Phases 143–146 became **v1.19, CLOSED 2026-08-20** (audit tech_debt, 9/9 requirements — see `.planning/milestones/v1.19-ROADMAP.md`). v1.18 waits on the founder; agent-deliverable work is **v1.20 Backlog Burndown (Phases 158–165)** — see ROADMAP.md § Current Milestone.
 
 **Historical scope statement for v1.17, retained:**
 Founder verbatim (2026-08-04, minutes after MT5-05 was discharged on PROD): *"The goal is that
@@ -70,10 +70,13 @@ are re-homed into v1.17 (Phases 155 / 153); 142.3 will not run as a v1.16 phase.
 
 ## Current Position
 
-Phase: Not started (defining requirements)
+Phase: Not started (roadmap complete — Phases 158–165 defined)
 Plan: —
-Status: Defining requirements
-Last activity: 2026-08-20 — Milestone v1.20 started
+Status: v1.20 roadmap created — 8 phases, 50/50 requirements mapped. Next: `/gsd-plan-phase 158`
+Last activity: 2026-08-20 — v1.20 roadmap created (Phases 158–165). ⛔ Ordering binding: 158
+OPS-CI first (the shared-test-db eviction / #616 mutex protects every later merge), 165 DEPS
+last (hard-blocked on OPS-01), 160 provenance before 164 SHARE (REVOKE soak), SHARE alone in
+its own PR and never branched from `feat/phase-156-connect-refactor`.
 
 ### Retained — Phase 156 close-out (COMPLETE 2026-08-13, do NOT lose this)
 
