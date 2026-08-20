@@ -2499,8 +2499,9 @@ runaway), and every v1.19 requirement is satisfied as written.
 
 ## Phase 158 — recorded deferrals (logged 2026-08-20)
 
-- [ ] **[158-OPS-04] drain execution deferred — the TEST `compute_jobs` backlog is NOT yet
-  drained.** Plan 158-03 landed both halves it could land: the `claimed_at` stamps in the two
+- [x] **[158-OPS-04] drain execution deferred — the TEST `compute_jobs` backlog is NOT yet
+  drained.** CLOSED 2026-08-20: 5-step protocol executed from the credentialed main checkout — measured no-op (BEFORE stale set 0; reaper live on TEST + worker churn had already dissolved the 08-11 backlog; 0 terminalized, residual 0, idempotency zero-delta); measured tables in 158-OPS04-DRAIN-EVIDENCE.md.
+  Plan 158-03 landed both halves it could land: the `claimed_at` stamps in the two
   direct running-flip UPDATEs (`analytics-service/tests/test_compute_jobs_fencing.py:1148`,
   `:1200`) and the guarded tool `scripts/drain-test-compute-backlog.ts` (five interlocks, all
   OBSERVED refusing). What did NOT happen is the thing OPS-04 actually closes on: the

@@ -42,8 +42,6 @@ patterns-established:
   - "Interlock-before-import: guards run before the client module is imported; refusals are observable offline"
   - "Non-vacuity control for a guard suite: prove the guards ACCEPT a legitimate target (unresolvable TEST-ref host) as well as refusing bad ones"
 
-requirements-completed: []
-
 coverage:
   - id: D1
     description: "Both direct running-flip UPDATEs in test_compute_jobs_fencing.py stamp claimed_at with a current-time expression, so a row stranded by a dying test is reapable by reset_stalled_compute_jobs"
@@ -74,18 +72,23 @@ coverage:
   - id: D3
     description: "OPS-04 closed on measured before/after row counts on TEST, drain proven idempotent, MODE 2 outcome recorded"
     requirement: OPS-04
-    verification: []
-    human_judgment: true
-    rationale: "NOT DONE. No TEST service-role credentials were available and live-DB execution was barred from this worktree; the evidence tables are marked NOT MEASURED rather than fabricated. A human must run the 5-step protocol in 158-OPS04-DRAIN-EVIDENCE.md from a credentialed checkout."
+    verification:
+      - kind: other
+        ref: "5-step protocol executed 2026-08-20 17:22–17:34 UTC from the credentialed main checkout: BEFORE stale set 0, live run terminalized 0 with residual 0, second run zero-delta, MODE 2 measured (flip deferred with recorded rationale). Full tables + timestamps in 158-OPS04-DRAIN-EVIDENCE.md"
+        status: pass
+    human_judgment: false
+    rationale: "Measured no-op: the 2026-08-11 ledger backlog no longer existed at drain time — the orphaned-running reaper is live on TEST (1983 rows reaped since 08-17) and a worker cycled every pending row on 2026-08-20, so 0 rows matched the >24h-untouched staleness definition. BEFORE=0 is the closure evidence per the plan's own acceptance (measured counts, not test colors)."
+
+requirements-completed: [OPS-04]
 
 duration: 42min
 completed: 2026-08-20
-status: halted
+status: complete
 ---
 
 # Phase 158 Plan 03: OPS-04 drain + `claimed_at` stamps Summary
 
-**The fencing tests can no longer strand unreapable `running` rows, and a five-interlock TEST-only drain tool now exists and was observed refusing every unsafe target — but the drain itself was never run, so OPS-04 stays open on missing measurements rather than closed on invented ones.**
+**The fencing tests can no longer strand unreapable `running` rows, and a five-interlock TEST-only drain tool now exists and was observed refusing every unsafe target. The drain was initially NOT run (no credentials in the worktree — recorded as a halt rather than invented numbers), then executed the same day from the credentialed main checkout: a measured no-op (stale set 0 at BEFORE), which closes OPS-04's MODE 1 on real counts. See "Measurement completed" below.**
 
 ## Performance
 
@@ -264,6 +267,46 @@ green independently of any drain.
   `.planning/phases/158-ops-ci-a-merge-means-a-deploy/158-03-SUMMARY.md` — all found.
 - Commits exist: `5ed93964`, `2c747d62`, `dc9b5692`, `8922898a` — all found in `git log`.
 - No shared orchestrator artifact was written: `STATE.md` and `ROADMAP.md` are untouched.
+
+## Measurement completed (2026-08-20, main checkout) — supersedes Deviations 2–3 and "User Setup Required"
+
+The halted half was executed the same day from the main checkout (the only
+place `.env.test.local` exists), on branch `feat/v1.20-phase-158`. Full tables,
+timestamps and commands: `158-OPS04-DRAIN-EVIDENCE.md`.
+
+- **Quiet window:** `gh run list` in-progress/queued count = **0**, checked
+  before measuring and re-checked before the live run.
+- **Credentials protocol:** TEST creds loaded via `node --env-file` (no secret
+  ever echoed); safety comparison confirmed `.env.local` = PROD ref
+  `khslejtfbuezsmvmtsdn`, `.env.test.local` = TEST ref `qmnijlgmdhviwzwfyzlc`.
+- **BEFORE (17:22:51Z, dry-run):** 4,868 total jobs; `derive_broker_dailies`
+  2,313 pending / 196 running / 2,348 failed_final; **stale target set = 0**.
+- **Live drain (17:29:36Z):** terminalized **0**; AFTER identical to BEFORE;
+  `residual stale rows (must be 0): 0`.
+- **Idempotency (17:31:52Z):** immediate second live run — **0** additional.
+- **MODE 2 (17:33:55Z, measure-only):** eligible keys ≥1000 (PostgREST page-cap
+  floor; true population ≈ 2,313 per the fan-out's own output), allowlist 3,
+  proposed flip 351-of-first-1000. **Flip NOT executed** — deferral recorded
+  with rationale (pagination caveat + no longer a hygiene emergency + outside
+  authorized scope); its `TODOS.md` entry stays open.
+- **Why a no-op is the honest closure:** the 2026-08-11 ledger backlog had
+  already dissolved by drain time — the orphaned-running reaper is live on TEST
+  (jobid 19, hourly :50; 1,983 `orphaned_running_reaped` rows since 08-17), a
+  worker cycled every pending row on 2026-08-20 (all `attempts > 0`, fresh
+  `next_attempt_at`), and 365 rows are real worker verdicts on undecryptable
+  e2e keys. Nothing on TEST now matches "untouched for 24h" — the class the
+  drain exists to remove. Verified by read-only SQL during the session.
+- **Two interlocks re-observed refusing** (exit 3) from this session:
+  missing-confirm-env and TEST-ref-required. The PROD-ref probe was itself
+  refused by the operator harness before the script could run — guard (3)
+  stands observed from the build session.
+
+Prohibitions re-checked at measurement time: no migration created, no cron
+schedule touched (read-only `cron.job` SELECTs only), zero rows deleted
+(terminalize-only tool, and it terminalized zero).
+
+`TODOS.md`: the drain-execution deferral entry is closed with a dated note;
+the eligibility-flip and CI-fencing-run entries remain open on purpose.
 
 ---
 *Phase: 158-ops-ci-a-merge-means-a-deploy*
