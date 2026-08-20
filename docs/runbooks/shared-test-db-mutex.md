@@ -63,10 +63,23 @@ which would silently disable `e2e-seeded` on every manual run.
 
 There is **no lock-reaper cron, and none is needed.**
 
-- All three jobs carry `timeout-minutes: 60`. That is the TTL: it bounds the
+- All three jobs carry a `timeout-minutes`. That is the TTL: it bounds the
   maximum possible hold. When GitHub kills a job at the timeout, the runner dies,
   the background `psql` session's TCP connection drops, and Postgres releases the
   advisory lock automatically.
+- **The TTL only bounds the hold because the holder is built to outlive it.**
+  The holder session is `psql … -c "SELECT pg_sleep(<n>)"`, and when that sleep
+  returns, psql exits and Postgres releases the lock — *whether or not the job
+  has finished*. So the invariant is `pg_sleep > timeout-minutes`, and it is
+  maintained by hand in `ci.yml`: nothing checks it at runtime.
+  Until this was fixed (158-REVIEW WR-01) the sleep was 55min against a 60min
+  TTL — i.e. the hold could end up to 5 minutes BEFORE the job did, silently
+  dropping mutual exclusion for a long job's final steps. If you change either
+  number, change both. Current values are in the acquire step's own comment.
+- A holder that dies early is now reported: the release step emits a
+  `::error::` annotation (never a non-zero exit) when the recorded pid is
+  already gone, because that means DB work ran unserialized. It used to print a
+  reassuring "already gone" line on exactly that path.
 - The same release happens on any other job end: success, failure, or
   cancellation. **A cancelled job cannot leak the lock** — cancellation kills the
   runner, which drops the session.

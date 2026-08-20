@@ -1099,11 +1099,22 @@ jobs:
           esac
           log="${RUNNER_TEMP}/shared-test-db-mutex.log"
           : > "${log}"
+          # 158-REVIEW WR-01: the idle sleep MUST outlive this job's
+          # `timeout-minutes`, or the holder session ends — releasing the lock —
+          # while the job is still doing DB work, and another run walks straight
+          # in. The old value (3300s = 55min) was SHORTER than the then-60min
+          # TTL, so any job that acquired early and ran long silently lost mutual
+          # exclusion for its last ~5 minutes. 6000s = 100min sits above this
+          # job's `timeout-minutes` with headroom, so the JOB always dies first
+          # and teardown is the only thing that ever releases this lock.
+          # ⛔ If you lower `timeout-minutes`, this stays valid. If you RAISE it,
+          # raise this too — the invariant is sleep > TTL, and nothing else
+          # enforces it.
           PGAPPNAME=ci-shared-test-db-mutex PGCONNECT_TIMEOUT=15 \
             nohup psql "${dsn}" -X -q -A -t -v ON_ERROR_STOP=1 \
               -c "SELECT pg_advisory_lock(61616158);" \
               -c "SELECT 'MUTEX-ACQUIRED';" \
-              -c "SELECT pg_sleep(3300);" \
+              -c "SELECT pg_sleep(6000);" \
               >> "${log}" 2>&1 &
           holder=$!
           echo "${holder}" > "${RUNNER_TEMP}/shared-test-db-mutex.pid"
@@ -1179,7 +1190,18 @@ jobs:
           if kill "${holder}" 2>/dev/null; then
             echo "Released the shared-test-db mutex (terminated psql pid ${holder})."
           else
-            echo "Mutex holder pid ${holder} was already gone — the session drop released the lock."
+            # 158-REVIEW WR-01: reaching here is a FAULT, not housekeeping. A
+            # pidfile exists, so the acquire step really did start a holder — and
+            # that holder is now dead while this job was still running. Every DB
+            # step between its death and now ran with the mutex RELEASED, i.e.
+            # potentially concurrently with another run against the shared TEST
+            # project. The previous message ("was already gone — the session drop
+            # released the lock") described this as normal and printed on exactly
+            # the failure path it was supposed to surface.
+            # Annotation only: this step is `if: always()` and must never redden a
+            # job whose real work passed, and `echo ::error::` does not change the
+            # exit status. Job teardown remains the guaranteed release path.
+            echo "::error::mutex holder pid ${holder} died BEFORE this release step — the DB work after its death ran UNSERIALIZED. Do not trust this run's DB assertions; investigate (holder outlives the job by design, see the pg_sleep note in the acquire step)."
           fi
 
   secret-scan:
@@ -1415,11 +1437,22 @@ jobs:
           esac
           log="${RUNNER_TEMP}/shared-test-db-mutex.log"
           : > "${log}"
+          # 158-REVIEW WR-01: the idle sleep MUST outlive this job's
+          # `timeout-minutes`, or the holder session ends — releasing the lock —
+          # while the job is still doing DB work, and another run walks straight
+          # in. The old value (3300s = 55min) was SHORTER than the then-60min
+          # TTL, so any job that acquired early and ran long silently lost mutual
+          # exclusion for its last ~5 minutes. 6000s = 100min sits above this
+          # job's `timeout-minutes` with headroom, so the JOB always dies first
+          # and teardown is the only thing that ever releases this lock.
+          # ⛔ If you lower `timeout-minutes`, this stays valid. If you RAISE it,
+          # raise this too — the invariant is sleep > TTL, and nothing else
+          # enforces it.
           PGAPPNAME=ci-shared-test-db-mutex PGCONNECT_TIMEOUT=15 \
             nohup psql "${dsn}" -X -q -A -t -v ON_ERROR_STOP=1 \
               -c "SELECT pg_advisory_lock(61616158);" \
               -c "SELECT 'MUTEX-ACQUIRED';" \
-              -c "SELECT pg_sleep(3300);" \
+              -c "SELECT pg_sleep(6000);" \
               >> "${log}" 2>&1 &
           holder=$!
           echo "${holder}" > "${RUNNER_TEMP}/shared-test-db-mutex.pid"
@@ -1463,7 +1496,18 @@ jobs:
           if kill "${holder}" 2>/dev/null; then
             echo "Released the shared-test-db mutex (terminated psql pid ${holder})."
           else
-            echo "Mutex holder pid ${holder} was already gone — the session drop released the lock."
+            # 158-REVIEW WR-01: reaching here is a FAULT, not housekeeping. A
+            # pidfile exists, so the acquire step really did start a holder — and
+            # that holder is now dead while this job was still running. Every DB
+            # step between its death and now ran with the mutex RELEASED, i.e.
+            # potentially concurrently with another run against the shared TEST
+            # project. The previous message ("was already gone — the session drop
+            # released the lock") described this as normal and printed on exactly
+            # the failure path it was supposed to surface.
+            # Annotation only: this step is `if: always()` and must never redden a
+            # job whose real work passed, and `echo ::error::` does not change the
+            # exit status. Job teardown remains the guaranteed release path.
+            echo "::error::mutex holder pid ${holder} died BEFORE this release step — the DB work after its death ran UNSERIALIZED. Do not trust this run's DB assertions; investigate (holder outlives the job by design, see the pg_sleep note in the acquire step)."
           fi
 
   e2e:
@@ -1906,11 +1950,22 @@ jobs:
           esac
           log="${RUNNER_TEMP}/shared-test-db-mutex.log"
           : > "${log}"
+          # 158-REVIEW WR-01: the idle sleep MUST outlive this job's
+          # `timeout-minutes`, or the holder session ends — releasing the lock —
+          # while the job is still doing DB work, and another run walks straight
+          # in. The old value (3300s = 55min) was SHORTER than the then-60min
+          # TTL, so any job that acquired early and ran long silently lost mutual
+          # exclusion for its last ~5 minutes. 6000s = 100min sits above this
+          # job's `timeout-minutes` with headroom, so the JOB always dies first
+          # and teardown is the only thing that ever releases this lock.
+          # ⛔ If you lower `timeout-minutes`, this stays valid. If you RAISE it,
+          # raise this too — the invariant is sleep > TTL, and nothing else
+          # enforces it.
           PGAPPNAME=ci-shared-test-db-mutex PGCONNECT_TIMEOUT=15 \
             nohup psql "${dsn}" -X -q -A -t -v ON_ERROR_STOP=1 \
               -c "SELECT pg_advisory_lock(61616158);" \
               -c "SELECT 'MUTEX-ACQUIRED';" \
-              -c "SELECT pg_sleep(3300);" \
+              -c "SELECT pg_sleep(6000);" \
               >> "${log}" 2>&1 &
           holder=$!
           echo "${holder}" > "${RUNNER_TEMP}/shared-test-db-mutex.pid"
@@ -2251,7 +2306,18 @@ jobs:
           if kill "${holder}" 2>/dev/null; then
             echo "Released the shared-test-db mutex (terminated psql pid ${holder})."
           else
-            echo "Mutex holder pid ${holder} was already gone — the session drop released the lock."
+            # 158-REVIEW WR-01: reaching here is a FAULT, not housekeeping. A
+            # pidfile exists, so the acquire step really did start a holder — and
+            # that holder is now dead while this job was still running. Every DB
+            # step between its death and now ran with the mutex RELEASED, i.e.
+            # potentially concurrently with another run against the shared TEST
+            # project. The previous message ("was already gone — the session drop
+            # released the lock") described this as normal and printed on exactly
+            # the failure path it was supposed to surface.
+            # Annotation only: this step is `if: always()` and must never redden a
+            # job whose real work passed, and `echo ::error::` does not change the
+            # exit status. Job teardown remains the guaranteed release path.
+            echo "::error::mutex holder pid ${holder} died BEFORE this release step — the DB work after its death ran UNSERIALIZED. Do not trust this run's DB assertions; investigate (holder outlives the job by design, see the pg_sleep note in the acquire step)."
           fi
       # retro-PR179-H1 / C-0293(c): NO playwright-report upload from this
       # job, ever. Every spec here runs against the REAL-env build, and
