@@ -104,6 +104,64 @@ const PAGE_SIZE = 1000;
 /** Cap so a filter bug can never spin forever against the shared project. */
 const MAX_PAGES = 500;
 
+/**
+ * The shape `selectAllPages` needs from a PostgREST builder. Declared
+ * structurally rather than importing supabase-js's builder generics: a
+ * `string`-typed select defeats the select-literal typing and would force an
+ * unsound cast on the result (the same reasoning the `ELIGIBLE_SYNC_STATUS_OR`
+ * comment below gives for writing its filter out at both call sites).
+ */
+type RangeQuery<T> = {
+  range: (
+    from: number,
+    to: number,
+  ) => PromiseLike<{ data: T[] | null; error: { message: string } | null }>;
+};
+
+/**
+ * 158-REVIEW WR-05 — read EVERY row, or refuse.
+ *
+ * PostgREST applies a server-side max-rows (1000 on Supabase by default) and
+ * truncates **silently**: a plain `.select()` over a larger table returns the
+ * first page with no error and no indication that anything is missing. MODE 1
+ * already paged deliberately at `PAGE_SIZE`; MODE 2's two reads did not, and
+ * both of them are load-bearing in the dangerous direction:
+ *
+ *   - `liveAllowlistIds()` builds the SAFETY allowlist. A truncated allowlist
+ *     omits keys that back durable demo strategies, and those keys then become
+ *     ELIGIBLE to be flipped `disconnected_at = now()`. A protective guard that
+ *     silently fails OPEN is worse than no guard, and the TEST project — the
+ *     polluted, high-row-count environment this script exists for — is exactly
+ *     where truncation bites.
+ *   - `flipEligibility()`'s eligible population feeds both `proposed` and the
+ *     BEFORE number in OPS-04's close criterion, so a truncated read makes the
+ *     evidence wrong as well as the action.
+ *
+ * Hitting MAX_PAGES REFUSES rather than returning what it has: acting on a
+ * knowingly partial set is the failure this function exists to prevent.
+ * `.order()` on a unique column is the caller's responsibility — range paging
+ * without a stable sort can repeat or skip rows across pages.
+ */
+async function selectAllPages<T>(
+  label: string,
+  build: () => RangeQuery<T>,
+): Promise<T[]> {
+  const out: T[] = [];
+  for (let page = 0; page < MAX_PAGES; page++) {
+    const from = page * PAGE_SIZE;
+    const { data, error } = await build().range(from, from + PAGE_SIZE - 1);
+    if (error) die(`${label}: ${error.message}`);
+    const rows = data ?? [];
+    out.push(...rows);
+    // A short page is the only reliable end-of-set signal here.
+    if (rows.length < PAGE_SIZE) return out;
+  }
+  die(
+    `${label}: hit MAX_PAGES (${MAX_PAGES}) at ${PAGE_SIZE} rows/page — refusing ` +
+      "to act on a truncated set. Investigate the filter before re-running.",
+  );
+}
+
 const TARGET_KIND = "derive_broker_dailies";
 const TARGET_STATUSES = ["pending", "running"] as const;
 
@@ -372,13 +430,20 @@ async function liveAllowlistIds(sb: SupabaseClient): Promise<string[]> {
     ["is_example", true],
     ["status", "published"],
   ] as const) {
-    const { data, error } = await sb
-      .from("strategies")
-      .select("api_key_id")
-      .eq(column, value)
-      .not("api_key_id", "is", null);
-    if (error) die(`deriving the live allowlist (${column}): ${error.message}`);
-    for (const row of (data ?? []) as { api_key_id: string | null }[]) {
+    // WR-05: paged. Truncating THIS read drops keys from the safety allowlist,
+    // which makes them eligible to be flipped ineligible — the guard failing
+    // open. `.order("id")` gives the range paging a stable sort.
+    const rows = await selectAllPages<{ api_key_id: string | null }>(
+      `deriving the live allowlist (${column})`,
+      () =>
+        sb
+          .from("strategies")
+          .select("api_key_id")
+          .eq(column, value)
+          .not("api_key_id", "is", null)
+          .order("id", { ascending: true }),
+    );
+    for (const row of rows) {
       if (row.api_key_id) ids.add(row.api_key_id.toLowerCase());
     }
   }
@@ -400,14 +465,46 @@ const ELIGIBLE_SYNC_STATUS_OR = "sync_status.is.null,sync_status.neq.revoked";
 async function flipEligibility(sb: SupabaseClient, confirmed: boolean): Promise<void> {
   const keyCutoff = new Date(Date.now() - STALE_KEY_AGE_DAYS * 86_400_000).toISOString();
 
-  const { data, error } = await sb
+  // WR-05: paged, so `proposed` is computed over the WHOLE eligible population
+  // rather than PostgREST's first 1000 rows. `.order("id")` gives the range
+  // paging a stable sort.
+  const eligible = await selectAllPages<{
+    id: string;
+    user_id: string;
+    created_at: string;
+  }>("measuring eligible api_keys", () =>
+    sb
+      .from("api_keys")
+      .select("id,user_id,created_at")
+      .eq("is_active", true)
+      .is("disconnected_at", null)
+      .or(ELIGIBLE_SYNC_STATUS_OR)
+      .order("id", { ascending: true }),
+  );
+
+  // WR-05: the BEFORE number is an EXACT count taken the same way as the AFTER
+  // count below, so the closing line compares like with like. It used to print
+  // a (possibly truncated) `eligible.length` against an exact count, which made
+  // "eligible BEFORE: 1000 → AFTER: 1400" a printable outcome — and OPS-04's
+  // whole close criterion is those before/after numbers.
+  const { count: before, error: beforeErr } = await sb
     .from("api_keys")
-    .select("id,user_id,created_at")
+    .select("id", { count: "exact", head: true })
     .eq("is_active", true)
     .is("disconnected_at", null)
     .or(ELIGIBLE_SYNC_STATUS_OR);
-  if (error) die(`measuring eligible api_keys: ${error.message}`);
-  const eligible = (data ?? []) as { id: string; user_id: string; created_at: string }[];
+  if (beforeErr) die(`counting eligible api_keys: ${beforeErr.message}`);
+
+  // Fail loud if the paged read and the exact count disagree: that means either
+  // paging lost rows or the table changed underneath us, and either way the
+  // proposal below was computed against a population that no longer holds.
+  if (before !== null && before !== eligible.length) {
+    die(
+      `eligible api_keys: paged read returned ${eligible.length} rows but the exact ` +
+        `count is ${before}. Refusing to propose a flip against an inconsistent ` +
+        "population — re-run when the project is quiet.",
+    );
+  }
 
   const owners = new Set(eligible.map((k) => k.user_id));
   const timestamps = eligible.map((k) => k.created_at).sort();
@@ -458,7 +555,10 @@ async function flipEligibility(sb: SupabaseClient, confirmed: boolean): Promise<
     .is("disconnected_at", null)
     .or(ELIGIBLE_SYNC_STATUS_OR);
   if (afterErr) die(`re-measuring eligible api_keys: ${afterErr.message}`);
-  console.log(`  eligible BEFORE: ${eligible.length} → AFTER: ${after ?? 0} (flipped ${flipped})`);
+  // WR-05: both sides are now exact `head: true` counts over the identical
+  // filter, so this line is a like-for-like measurement rather than a
+  // possibly-truncated array length against an exact count.
+  console.log(`  eligible BEFORE: ${before ?? 0} → AFTER: ${after ?? 0} (flipped ${flipped})`);
 }
 
 // ---------------------------------------------------------------------------
