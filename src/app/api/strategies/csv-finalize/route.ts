@@ -1274,7 +1274,14 @@ async function resolveExistingStrategyOrRefuse(
           code: "CSV_SESSION_REUSED",
           human_message:
             humanMessage ??
-            "This wizard session already created a strategy with a different track record, so we refused before writing anything of this submission. Start a new strategy to upload a different file.",
+            // W-1 (146.2 re-verification): this DEFAULT sentence ships on the
+            // name-, series- and date-mismatch refusals, all user-reachable. It
+            // named the escape control in PROSE while the other two interpolate
+            // the constant — so a rename would have drifted this one while the
+            // two-file invariant stayed green, which is the exact failure that
+            // invariant exists to catch. Interpolated, and the invariant now
+            // asserts the phrase appears in NO other string literal here.
+            `This wizard session already created a strategy with a different track record, so we refused before writing anything of this submission. ${START_NEW_STRATEGY_LABEL} to upload a different file.`,
           debug_context: { strategy_id: existingRow.id },
           correlation_id: opts.correlationId,
         },

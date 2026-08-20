@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { stripCommentsPreserveLines } from "./source-scan";
 
 /**
  * 146.2 gap closure — THE ESCAPE LABEL IS A TWO-FILE CONTRACT.
@@ -81,6 +82,33 @@ describe("146.2 — the escape-control label is one contract across two files", 
         `A user reading the 409 would look for a button that is not on screen, ` +
         `and the refusal becomes the dead end 146.2's gap closure removed.`,
     ).toBe(server);
+  });
+
+  it("no refusal sentence names the control in PROSE instead of the constant", () => {
+    // W-1, found by the 146.2 re-verification: the DEFAULT refuse() sentence
+    // hardcoded "Start a new strategy" as prose while the other two
+    // interpolated the constant. Copy was correct, so nothing was broken — but
+    // a rename would have drifted that one sentence while the equality test
+    // above stayed green, which is the exact failure this file exists to catch.
+    // An invariant with a hole where the drift actually happens is theatre.
+    //
+    // Comments are stripped with the repo's own helper so that PROSE ABOUT the
+    // contract (this file's rationale, the docblocks in route.ts) is not
+    // mistaken for a live copy string.
+    const src = readFileSync(SITES[0].path, "utf8");
+    const code = stripCommentsPreserveLines(src, "ts");
+    const label = readEscapeLabel(SITES[0].path);
+    expect(label).not.toBeNull();
+
+    const occurrences = code.split(label as string).length - 1;
+    expect(
+      occurrences,
+      `"${label}" appears ${occurrences}x in csv-finalize/route.ts CODE (comments ` +
+        `stripped). It must appear exactly ONCE — the START_NEW_STRATEGY_LABEL ` +
+        `declaration. Every sentence naming the escape control has to interpolate ` +
+        `that constant, or a rename drifts the hardcoded one while this file's ` +
+        `equality check stays green.`,
+    ).toBe(1);
   });
 
   it("the refusal copy actually embeds the label (not just declares it)", () => {
