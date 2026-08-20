@@ -1200,10 +1200,23 @@ jobs:
             # The session is dead; drop its pid so the release step cannot kill
             # an unrelated process that inherits the number.
             rm -f "${pidfile}"
-            backoff=$(( attempt * 5 ))
-            echo "retrying the mutex acquire in ${backoff}s"
-            sleep "${backoff}"
-            waited=$(( waited + backoff ))
+            # 158-REVIEW WR-02 (iter 3): back off ONLY when a retry actually
+            # follows. Unguarded, the last iteration printed "retrying the mutex
+            # acquire in 15s" and then slept 15s before falling out of the loop
+            # to the "after 3 attempts" error — telling the operator a fourth
+            # attempt was coming when none was, which this repo's
+            # fail-loud-and-ACCURATE doctrine counts as a real cost. Worse, that
+            # phantom 15s was added to `waited`, and `waited` is the variable the
+            # cap-vs-session-fault branch below is chosen by: a run that
+            # legitimately queued to 3585s and then lost its session could be
+            # pushed over 3600 by backoff bookkeeping alone and misreported as
+            # contention rather than as the session fault it actually was.
+            if [ "${attempt}" -lt 3 ]; then
+              backoff=$(( attempt * 5 ))
+              echo "retrying the mutex acquire in ${backoff}s"
+              sleep "${backoff}"
+              waited=$(( waited + backoff ))
+            fi
           done
           if [ "${waited}" -lt 3600 ]; then
             echo "::error::could not establish the shared-test-db mutex session after 3 attempts — psql died before acquiring each time (last output redacted above). This is a CONNECT/session fault, NOT lock contention: check the TEST project's session-mode pooler (port 5432) rather than hunting for a holder."
@@ -1629,10 +1642,23 @@ jobs:
             # The session is dead; drop its pid so the release step cannot kill
             # an unrelated process that inherits the number.
             rm -f "${pidfile}"
-            backoff=$(( attempt * 5 ))
-            echo "retrying the mutex acquire in ${backoff}s"
-            sleep "${backoff}"
-            waited=$(( waited + backoff ))
+            # 158-REVIEW WR-02 (iter 3): back off ONLY when a retry actually
+            # follows. Unguarded, the last iteration printed "retrying the mutex
+            # acquire in 15s" and then slept 15s before falling out of the loop
+            # to the "after 3 attempts" error — telling the operator a fourth
+            # attempt was coming when none was, which this repo's
+            # fail-loud-and-ACCURATE doctrine counts as a real cost. Worse, that
+            # phantom 15s was added to `waited`, and `waited` is the variable the
+            # cap-vs-session-fault branch below is chosen by: a run that
+            # legitimately queued to 3585s and then lost its session could be
+            # pushed over 3600 by backoff bookkeeping alone and misreported as
+            # contention rather than as the session fault it actually was.
+            if [ "${attempt}" -lt 3 ]; then
+              backoff=$(( attempt * 5 ))
+              echo "retrying the mutex acquire in ${backoff}s"
+              sleep "${backoff}"
+              waited=$(( waited + backoff ))
+            fi
           done
           if [ "${waited}" -lt 3600 ]; then
             echo "::error::could not establish the shared-test-db mutex session after 3 attempts — psql died before acquiring each time (last output redacted above). This is a CONNECT/session fault, NOT lock contention: check the TEST project's session-mode pooler (port 5432) rather than hunting for a holder."
@@ -2252,10 +2278,23 @@ jobs:
             # The session is dead; drop its pid so the release step cannot kill
             # an unrelated process that inherits the number.
             rm -f "${pidfile}"
-            backoff=$(( attempt * 5 ))
-            echo "retrying the mutex acquire in ${backoff}s"
-            sleep "${backoff}"
-            waited=$(( waited + backoff ))
+            # 158-REVIEW WR-02 (iter 3): back off ONLY when a retry actually
+            # follows. Unguarded, the last iteration printed "retrying the mutex
+            # acquire in 15s" and then slept 15s before falling out of the loop
+            # to the "after 3 attempts" error — telling the operator a fourth
+            # attempt was coming when none was, which this repo's
+            # fail-loud-and-ACCURATE doctrine counts as a real cost. Worse, that
+            # phantom 15s was added to `waited`, and `waited` is the variable the
+            # cap-vs-session-fault branch below is chosen by: a run that
+            # legitimately queued to 3585s and then lost its session could be
+            # pushed over 3600 by backoff bookkeeping alone and misreported as
+            # contention rather than as the session fault it actually was.
+            if [ "${attempt}" -lt 3 ]; then
+              backoff=$(( attempt * 5 ))
+              echo "retrying the mutex acquire in ${backoff}s"
+              sleep "${backoff}"
+              waited=$(( waited + backoff ))
+            fi
           done
           if [ "${waited}" -lt 3600 ]; then
             echo "::error::could not establish the shared-test-db mutex session after 3 attempts — psql died before acquiring each time (last output redacted above). This is a CONNECT/session fault, NOT lock contention: check the TEST project's session-mode pooler (port 5432) rather than hunting for a holder."
