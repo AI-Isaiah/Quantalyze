@@ -96,7 +96,7 @@ phases below carry the corrections, not the bullets.
   4. The TEST stale-`pending` `compute_jobs` backlog is drained TEST-only (⛔ never a migration, never `cron.unschedule(9)`) so the deterministic exactly-10 claim-path red is gone, and `test_compute_jobs_fencing.py` stamps `claimed_at` in its two direct UPDATEs.
   5. `MultiKeyConnectStep` passes under any test ordering — the unrestored `vi.stubGlobal`/`vi.mock` root cause is fixed, not retried away.
 
-**Plans**: 5/6 plans executed
+**Plans**: 6/6 plans executed
 
 Plans:
 **Wave 1**
@@ -109,7 +109,7 @@ Plans:
 
 **Wave 2** *(blocked on Wave 1 completion)*
 
-- [ ] 158-06-PLAN.md — Batch-list wiring + 15-orphan triage into TODOS + DB-types recorded decision (OPS-03) [Wave 2]
+- [x] 158-06-PLAN.md — Batch-list wiring + 15-orphan triage into TODOS + DB-types recorded decision (OPS-03) [Wave 2]
 
 **Research note:** mechanism understood — skip a research phase; the repo already carries the dedup'd-issue pattern to copy (`analytics-deploy-verify.yml`). Verification must simulate THREE concurrent runs, not two.
 
