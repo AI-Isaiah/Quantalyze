@@ -1215,9 +1215,25 @@ jobs:
           # named the rarer one, sending the operator hunting for a wedge that
           # may not exist. Counts ONLY: no pids, no host, no DSN, and stderr is
           # discarded outright — this log is public.
-          census="$(PGCONNECT_TIMEOUT=15 psql "${dsn}" -X -q -A -t \
+          #
+          # 158-REVIEW WR-01 (iter 3): the census MUST be bounded. PGCONNECT_TIMEOUT
+          # bounds only the CONNECT; once connected, an unbounded query against a sick
+          # TEST Postgres/pooler blocks until this job's `timeout-minutes` kills the
+          # runner — so the operator gets LESS information than before the census
+          # existed (a bare "exceeded the maximum execution time"), and the job squats
+          # a runner for ~30 more minutes while holding no lock. A sick backend is
+          # precisely the condition under which this timeout fires, and this repo's
+          # history records a wedged TEST backend as a MEASURED event, not a
+          # hypothetical. Both bounds are needed because they cover different faults:
+          # `statement_timeout` is server-side (a slow or lock-blocked query) and
+          # `timeout` is client-side (a black-holed connection the server never hears
+          # about, where a server-side timeout can never fire). A diagnostic must
+          # never outlive the thing it diagnoses. `${census:-unavailable}` below
+          # already handles the empty result, so the message stays honest either way.
+          census="$(PGCONNECT_TIMEOUT=15 timeout 20 psql "${dsn}" -X -q -A -t \
+            -c "SET statement_timeout = '10s';" \
             -c "SELECT count(*) FILTER (WHERE granted) || ' granted, ' || count(*) FILTER (WHERE NOT granted) || ' waiting' FROM pg_locks WHERE locktype = 'advisory' AND objid = 61616158;" \
-            2>/dev/null | tr -d '\r' | head -1)" || true
+            2>/dev/null | tr -d '\r' | tail -1)" || true
           echo "::error::timed out after ${waited}s waiting for the shared-test-db advisory lock (key 61616158). Lock census: ${census:-unavailable}. TWO causes are possible and this step cannot distinguish them: (1) QUEUE DEPTH — concurrent runs each hold the lock ~20m, which is a NORMAL condition in this repo; re-run once the queue drains. (2) A WEDGED holder whose runner is gone. Triage (count the waiters first) and manual unlock: docs/runbooks/shared-test-db-mutex.md sections 2-3."
           exit 1
       - name: Run SQL self-tests against test Supabase project
@@ -1628,9 +1644,25 @@ jobs:
           # named the rarer one, sending the operator hunting for a wedge that
           # may not exist. Counts ONLY: no pids, no host, no DSN, and stderr is
           # discarded outright — this log is public.
-          census="$(PGCONNECT_TIMEOUT=15 psql "${dsn}" -X -q -A -t \
+          #
+          # 158-REVIEW WR-01 (iter 3): the census MUST be bounded. PGCONNECT_TIMEOUT
+          # bounds only the CONNECT; once connected, an unbounded query against a sick
+          # TEST Postgres/pooler blocks until this job's `timeout-minutes` kills the
+          # runner — so the operator gets LESS information than before the census
+          # existed (a bare "exceeded the maximum execution time"), and the job squats
+          # a runner for ~30 more minutes while holding no lock. A sick backend is
+          # precisely the condition under which this timeout fires, and this repo's
+          # history records a wedged TEST backend as a MEASURED event, not a
+          # hypothetical. Both bounds are needed because they cover different faults:
+          # `statement_timeout` is server-side (a slow or lock-blocked query) and
+          # `timeout` is client-side (a black-holed connection the server never hears
+          # about, where a server-side timeout can never fire). A diagnostic must
+          # never outlive the thing it diagnoses. `${census:-unavailable}` below
+          # already handles the empty result, so the message stays honest either way.
+          census="$(PGCONNECT_TIMEOUT=15 timeout 20 psql "${dsn}" -X -q -A -t \
+            -c "SET statement_timeout = '10s';" \
             -c "SELECT count(*) FILTER (WHERE granted) || ' granted, ' || count(*) FILTER (WHERE NOT granted) || ' waiting' FROM pg_locks WHERE locktype = 'advisory' AND objid = 61616158;" \
-            2>/dev/null | tr -d '\r' | head -1)" || true
+            2>/dev/null | tr -d '\r' | tail -1)" || true
           echo "::error::timed out after ${waited}s waiting for the shared-test-db advisory lock (key 61616158). Lock census: ${census:-unavailable}. TWO causes are possible and this step cannot distinguish them: (1) QUEUE DEPTH — concurrent runs each hold the lock ~20m, which is a NORMAL condition in this repo; re-run once the queue drains. (2) A WEDGED holder whose runner is gone. Triage (count the waiters first) and manual unlock: docs/runbooks/shared-test-db-mutex.md sections 2-3."
           exit 1
       - run: pytest --cov=services --cov=routers --cov=main_worker --cov-report=term-missing --cov-fail-under=80
@@ -2235,9 +2267,25 @@ jobs:
           # named the rarer one, sending the operator hunting for a wedge that
           # may not exist. Counts ONLY: no pids, no host, no DSN, and stderr is
           # discarded outright — this log is public.
-          census="$(PGCONNECT_TIMEOUT=15 psql "${dsn}" -X -q -A -t \
+          #
+          # 158-REVIEW WR-01 (iter 3): the census MUST be bounded. PGCONNECT_TIMEOUT
+          # bounds only the CONNECT; once connected, an unbounded query against a sick
+          # TEST Postgres/pooler blocks until this job's `timeout-minutes` kills the
+          # runner — so the operator gets LESS information than before the census
+          # existed (a bare "exceeded the maximum execution time"), and the job squats
+          # a runner for ~30 more minutes while holding no lock. A sick backend is
+          # precisely the condition under which this timeout fires, and this repo's
+          # history records a wedged TEST backend as a MEASURED event, not a
+          # hypothetical. Both bounds are needed because they cover different faults:
+          # `statement_timeout` is server-side (a slow or lock-blocked query) and
+          # `timeout` is client-side (a black-holed connection the server never hears
+          # about, where a server-side timeout can never fire). A diagnostic must
+          # never outlive the thing it diagnoses. `${census:-unavailable}` below
+          # already handles the empty result, so the message stays honest either way.
+          census="$(PGCONNECT_TIMEOUT=15 timeout 20 psql "${dsn}" -X -q -A -t \
+            -c "SET statement_timeout = '10s';" \
             -c "SELECT count(*) FILTER (WHERE granted) || ' granted, ' || count(*) FILTER (WHERE NOT granted) || ' waiting' FROM pg_locks WHERE locktype = 'advisory' AND objid = 61616158;" \
-            2>/dev/null | tr -d '\r' | head -1)" || true
+            2>/dev/null | tr -d '\r' | tail -1)" || true
           echo "::error::timed out after ${waited}s waiting for the shared-test-db advisory lock (key 61616158). Lock census: ${census:-unavailable}. TWO causes are possible and this step cannot distinguish them: (1) QUEUE DEPTH — concurrent runs each hold the lock ~20m, which is a NORMAL condition in this repo; re-run once the queue drains. (2) A WEDGED holder whose runner is gone. Triage (count the waiters first) and manual unlock: docs/runbooks/shared-test-db-mutex.md sections 2-3."
           exit 1
       - name: Seed demo data into test Supabase
