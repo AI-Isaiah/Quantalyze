@@ -58,8 +58,25 @@ permissions:
   contents: read
   issues: write
 
+# 158-REVIEW WR-03: the group is keyed on the OBSERVED RUN, not on the workflow.
+# A single repo-global group carried the exact defect this watcher exists to
+# report — GitHub holds exactly ONE pending entry per concurrency group and
+# CANCELS it when a third request arrives (the header above quotes that
+# semantics verbatim). So a BURST of three cancelled main-CI runs, which is
+# precisely the condition worth detecting, evicted the middle watcher run and
+# lost its detection. And because every path in this workflow exits 0 by design
+# (a red check on main HEAD would itself make Railway skip the deploy), the loss
+# was completely silent.
+#
+# Per-observed-run keying means watcher instances never contend at all: each one
+# is the only member of its group. `github.event.workflow_run.id` is the
+# `workflow_run` arm; `github.run_id` is the `workflow_dispatch` fallback (a
+# manual drill against a historical run). Dedup of the ISSUE itself is a
+# separate, already-correct mechanism further down (list-then-comment-or-create),
+# and a `createComment` race there is benign — so removing cross-run
+# serialization here costs nothing.
 concurrency:
-  group: main-ci-cancelled-watcher
+  group: main-ci-cancelled-watcher-${{ github.event.workflow_run.id || github.run_id }}
   cancel-in-progress: false
 
 jobs:
