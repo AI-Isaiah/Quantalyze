@@ -233,6 +233,11 @@ None. The one repo-level side effect (the `main-ci-cancelled` label) was applied
 - **Blocker (sequencing, not defect):** OPS-01 is only closed when plan 158-01's mutex lands with it. Issue #616 should be closed on the MECHANISM — both the eviction (mutex) and the silence (this watcher) — never on "prod has converged".
 - **Carry-forward:** the `critical-regressions.test.ts:1154` shared-test-db assertion noted above.
 
+## Self-Check: PASSED
+
+All 4 claimed files exist on disk; all 5 claimed commits exist in
+`35c74149..HEAD`. No claimed artifact is missing.
+
 ---
 *Phase: 158-ops-ci-a-merge-means-a-deploy*
 *Completed: 2026-08-20*
