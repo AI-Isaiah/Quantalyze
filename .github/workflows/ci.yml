@@ -1830,6 +1830,25 @@ jobs:
           # measure the wrong arm. The other three (full-flow, csv-upload-flow,
           # and the new my-strategies spec) went to the seeded MA-8 list, which
           # carries the batch verdicts' reasoning.
+          #
+          # ⚠️ 158-REVIEW WR-06 — what this wiring DOES and DOES NOT buy. Stated
+          # in the repo's required form: after this change these two specs WOULD
+          # SURFACE a regression in a run log; they WOULD NOT have stopped it
+          # merging or deploying. Two independent reasons, both still true:
+          #   1. this step carries `continue-on-error: true` (kept deliberately
+          #      for the unfixed placeholder-Supabase DNS flake — see the note on
+          #      the step above), so a failing spec leaves an annotation and the
+          #      step still concludes green; and
+          #   2. the `e2e` job is in NO aggregator's `needs:` — `frontend` gates
+          #      on `e2e-seeded`, not on this job — so even a red job conclusion
+          #      moves no merge gate.
+          # So these two are ADVISORY. The other three went to `e2e-seeded`,
+          # which IS in the `frontend` aggregator's `needs:`; that half is
+          # genuinely blocking. Do not describe the OPS-03 wiring as "now gated".
+          # Promoting these two to a blocking lane is tracked in TODOS.md
+          # (Phase 158 OPS-03 section) and needs a MEASURED run in the target
+          # env first — they are green under THIS job's placeholder env, which
+          # is not evidence about the seeded job's env.
           # Capture the test exit code WITHOUT aborting the script (default
           # shell is `bash -e`). The port-3000 cleanup below is a FINALLY so a
           # failing spec never leaves an orphaned next-server bound to :3000

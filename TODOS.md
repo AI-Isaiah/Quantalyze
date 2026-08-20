@@ -2563,6 +2563,25 @@ Dispositions are one of **wire-later** (belongs in a batch; needs a run-and-repa
 No spec below is a delete-candidate: every route they target still exists (verified against
 `src/app/` this session), so deletion would destroy coverage intent rather than dead weight.
 
+- [ ] **[158-OPS-03] ⚠️ two of the five wired specs are ADVISORY, not gating (158-REVIEW WR-06).**
+  `api-key-flow.spec.ts` and `sync-analytics-flow.spec.ts` went into the **unseeded `e2e` job**,
+  which cannot fail a merge for two independent reasons: its test step carries
+  `continue-on-error: true` (kept deliberately for the unfixed
+  `getaddrinfo ENOTFOUND placeholder.supabase.co` flake), and the `e2e` job is in **no**
+  aggregator's `needs:` — `frontend` gates on `e2e-seeded`, not on `e2e`. In the required form:
+  after 158-06 these two **would surface** a regression in a run log; they **would not** have
+  stopped it merging or deploying. The other three (`full-flow`, `csv-upload-flow`,
+  `my-strategies`) went to `e2e-seeded`, which IS in `frontend`'s `needs:` — that half is
+  genuinely blocking. Do not describe the OPS-03 wiring as "now gated".
+  **To close:** promote the two contract describes into a lane that can fail. They are pure
+  `request.post` contract assertions against localhost and do **not** touch the
+  `placeholder.supabase.co` DNS path that motivated the tolerance, so either a
+  no-`continue-on-error` step in the `e2e` job or the `e2e-seeded` batch would work.
+  ⚠️ Requires a MEASURED run in the target env first — 158-05 measured them green under the
+  unseeded job's placeholder env, which is **not** evidence about the seeded job's env, and
+  promoting an unverified spec into a blocking gate is how a required check reddens on an
+  innocent PR. The ci.yml comment at the unseeded batch list carries the same warning.
+
 - [ ] **[158-OPS-03] `admin-csv-status-axe.spec.ts` — wire-later (seeded list).** Already
   conforms to the seeded contract (`HAS_SEED_ENV` present, uses the seed helpers) and
   `/admin/csv-status` still exists, so it is a list-membership change plus one run-and-repair
