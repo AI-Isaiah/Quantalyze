@@ -21,6 +21,20 @@ name: Shared-test-db mutex probe
 # SKIP the deploy, recreating the exact #616 failure this phase removes. The
 # same trap is documented verbatim at analytics-deploy-verify.yml:17-24.
 #
+# 158-REVIEW CR-01 (2026-08-20): the `push:` restriction alone did NOT close that
+# trap, because `workflow_dispatch` defaults its ref to the DEFAULT BRANCH.
+# `gh workflow run mutex-probe.yml` with no `--ref` — which is exactly what the
+# runbook drill used to prescribe — attaches this workflow's check runs to main
+# HEAD, and the probe has at least three reachable non-zero exits (psql connect
+# failure, a missing ACQUIRED/RELEASED marker, and the overlap assertion itself),
+# plus a 15-minute `timeout-minutes` that real CI holding the mutex can blow
+# through. Any of those would redden main HEAD by a NEW route. So both real jobs
+# below are now hard-gated on a `ci-probe/**` ref, and a dispatch anywhere else
+# lands in the `dispatch-guard` job, which explains the mistake and exits 0. The
+# guard is a JOB rather than a step so the run still concludes `success` (all
+# real jobs `skipped`, which GitHub does not roll up into a failed check-suite)
+# instead of concluding `skipped`.
+#
 # What a GREEN run means: three contenders that started at the SAME wall-clock
 # barrier each held the lock over a window that does not overlap either other
 # window — i.e. mutual exclusion held through the pooler, on the session-mode
@@ -56,9 +70,31 @@ permissions:
   contents: read
 
 jobs:
+  # CR-01 no-op arm. Runs ONLY when the ref is not a probe branch (the common
+  # case: `gh workflow run mutex-probe.yml` with no --ref, which resolves to the
+  # default branch). Exits 0 so the dispatch leaves a green, harmless check
+  # instead of a judgeable red one on main HEAD.
+  dispatch-guard:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    if: ${{ !startsWith(github.ref, 'refs/heads/ci-probe/') }}
+    steps:
+      - name: Explain why nothing ran
+        run: |
+          echo "::notice::mutex-probe did NOT run: ref '${GITHUB_REF}' is not a ci-probe/** branch."
+          echo "This probe CAN fail by design, and a red check on a main-HEAD SHA makes"
+          echo "Railway skip the analytics deploy (issue #616). Dispatch it against a probe"
+          echo "branch instead:"
+          echo "    git push origin HEAD:ci-probe/mutex-drill"
+          echo "    gh workflow run mutex-probe.yml --ref ci-probe/mutex-drill"
+          echo "See docs/runbooks/shared-test-db-mutex.md section 5."
+
   contend:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    # CR-01: hard ref gate. Without it a bare `gh workflow run` (default ref =
+    # default branch) puts this deliberately-failable job's check run on main HEAD.
+    if: ${{ startsWith(github.ref, 'refs/heads/ci-probe/') }}
     strategy:
       # Every contender must run: a cancelled sibling would leave fewer than
       # three windows and the assertion below could not distinguish "did not
@@ -184,7 +220,13 @@ jobs:
     # always(): a contender that FAILED must still reach this assertion, which
     # then reports "fewer than three windows" instead of the job graph quietly
     # skipping the only check that can fail.
-    if: always()
+    #
+    # CR-01: the ref gate is ANDed in and is NOT optional. A bare `always()`
+    # here is strictly worse than no gate at all — on a main dispatch `contend`
+    # would be skipped, `always()` would still run this job, it would download
+    # ZERO window artifacts and take the `expected 3 contender windows, found 0`
+    # exit-1 path, reddening main HEAD every single time.
+    if: ${{ always() && startsWith(github.ref, 'refs/heads/ci-probe/') }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
