@@ -2564,8 +2564,11 @@ class TestMainWorkerSentryBootstrap:
         """Awaiting main() invokes init_sentry exactly once.
 
         Everything main() does BESIDES the bootstrap is stubbed: KEK
-        validation, the three worker loops, the healthz server, and the
-        signal-handler registration. `start_healthz_server` is patched on
+        validation, the prod-guard (env-dependent — an inherited
+        SUPABASE_URL=prod in the invoking shell would make the REAL guard
+        refuse and fail this test for the wrong reason; it has its own suite
+        in test_local_worker_prod_guard.py), the three worker loops, the
+        healthz server, and the signal-handler registration. `start_healthz_server` is patched on
         `main_worker_healthz` because main() imports it inside the function
         body (main_worker.py:975-976), so the module attribute is what resolves
         at call time.
@@ -2581,6 +2584,11 @@ class TestMainWorkerSentryBootstrap:
         init_spy = MagicMock()
 
         with patch.object(main_worker, "init_sentry", init_spy), \
+             patch.object(
+                 main_worker,
+                 "assert_worker_not_aimed_at_prod_off_platform",
+                 MagicMock(),
+             ), \
              patch.object(main_worker, "validate_kek_on_startup", MagicMock()), \
              patch.object(main_worker, "dispatch_loop", new=AsyncMock()), \
              patch.object(main_worker, "watchdog_loop", new=AsyncMock()), \

@@ -4,6 +4,7 @@ import secrets
 import logging
 import time
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any, Final, Sequence, cast
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
@@ -20,6 +21,13 @@ from dotenv import load_dotenv
 import sentry_sdk
 import structlog
 
+# Local dev targets TEST, never PROD (incident 2026-08-20: a laptop
+# `uvicorn main:app` claimed real prod compute jobs within seconds).
+# .env.qa-local (TEST project) loads FIRST so its values win — load_dotenv
+# never overrides keys that are already set. On Railway neither file exists,
+# so both calls are no-ops and the injected env wins. Module-anchored path so
+# the load works regardless of CWD.
+load_dotenv(Path(__file__).parent / ".env.qa-local")
 load_dotenv()
 
 # Root logging config. FastAPI / uvicorn don't configure the root logger,
@@ -246,10 +254,17 @@ async def lifespan(_app: FastAPI):
     from main_worker import (
         SHUTDOWN,
         WORKER_ID,
+        assert_worker_not_aimed_at_prod_off_platform,
         daily_enqueue_loop,
         dispatch_loop,
         watchdog_loop,
     )
+
+    # Merged-worker path of the same hard stop main_worker.main() applies:
+    # this lifespan is about to start job-claiming loops, so a laptop run
+    # aimed at PROD must die HERE, before the first claim (2026-08-20
+    # incident — see the guard's docstring).
+    assert_worker_not_aimed_at_prod_off_platform()
 
     # Bridge the worker's healthz signal into /health: every dispatch_tick
     # writes to main_worker_healthz.LAST_TICK_AT; read it on /health and

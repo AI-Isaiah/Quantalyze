@@ -37,6 +37,7 @@ import os
 import signal
 import socket
 import time
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Final, TypedDict, cast
 
@@ -51,8 +52,12 @@ from dotenv import load_dotenv
 # has no side effects — `init_sentry()` in main() is what configures it.
 import sentry_sdk
 
-# Load analytics-service/.env for local dev. In prod (Railway), env vars are
-# injected directly and no .env file exists, so load_dotenv() is a no-op.
+# Load env for local dev — TEST first (.env.qa-local), then .env, so the TEST
+# project wins locally (load_dotenv never overrides already-set keys). In prod
+# (Railway) env vars are injected directly and neither file exists, so both
+# calls are no-ops. See assert_worker_not_aimed_at_prod_off_platform() below
+# for the hard guard behind this soft default.
+load_dotenv(Path(__file__).parent / ".env.qa-local")
 load_dotenv()
 
 import main_worker_healthz  # top-level module (not in services/); stdlib-only, no cycle
@@ -62,6 +67,51 @@ from services.encryption import validate_kek_on_startup
 from services.job_worker import DispatchOutcome, JobStatus, Priority, dispatch
 
 logger = logging.getLogger("quantalyze.analytics.worker")
+
+
+# ---------------------------------------------------------------------------
+# Local worker must never drive PROD (incident 2026-08-20)
+# ---------------------------------------------------------------------------
+# The PROD Supabase project ref (khslejtfbuezsmvmtsdn.supabase.co). Already
+# public knowledge — it appears in .github/workflows/ — named here so the guard
+# below can refuse to run worker loops against it off-platform.
+_PROD_SUPABASE_REF: Final = "khslejtfbuezsmvmtsdn"
+
+
+def assert_worker_not_aimed_at_prod_off_platform() -> None:
+    """Fail loud instead of silently becoming a prod worker on a laptop.
+
+    2026-08-20: a locally-started ``uvicorn main:app`` claimed real PROD
+    compute jobs within seconds, because analytics-service/.env pointed at the
+    prod Supabase project and main.py's lifespan starts the worker loops. A
+    claimed job whose worker then dies becomes an orphaned ``running`` row —
+    the exact failure class the Phase 143/144 sweeps exist to clean up.
+
+    Railway is the only sanctioned prod runtime; it injects
+    RAILWAY_ENVIRONMENT_NAME, and no local shell does. For a deliberate,
+    sanctioned emergency run against prod, set
+    ALLOW_PROD_WORKER_OFF_PLATFORM=1 — the refusal message says so, so the
+    escape hatch is discoverable exactly when it is needed.
+    """
+    if _PROD_SUPABASE_REF not in os.getenv("SUPABASE_URL", ""):
+        return
+    if os.getenv("RAILWAY_ENVIRONMENT_NAME"):
+        return
+    if os.getenv("ALLOW_PROD_WORKER_OFF_PLATFORM") == "1":
+        logger.warning(
+            "Worker aimed at PROD off-platform — explicitly allowed via "
+            "ALLOW_PROD_WORKER_OFF_PLATFORM=1"
+        )
+        return
+    raise RuntimeError(
+        "Refusing to start worker loops: SUPABASE_URL points at the PROD "
+        f"Supabase project ({_PROD_SUPABASE_REF}) but this process is not "
+        "running on Railway. A local worker claims real prod compute_jobs and "
+        "strands them as orphaned 'running' rows on exit. Point SUPABASE_URL "
+        "at the TEST project — analytics-service/.env.qa-local is auto-loaded "
+        "first when present, so create it (or fix its SUPABASE_URL) — or set "
+        "ALLOW_PROD_WORKER_OFF_PLATFORM=1 for a deliberate emergency run."
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1158,6 +1208,10 @@ async def main() -> None:
     # a KEK failure at boot is itself reportable. No-ops when SENTRY_DSN is
     # unset (sentry_init.py:347-350), which keeps local dev and CI unchanged.
     init_sentry()
+
+    # Hard stop BEFORE any loop can claim a job (see docstring for the
+    # 2026-08-20 incident this guards against).
+    assert_worker_not_aimed_at_prod_off_platform()
 
     logger.info("Worker starting as %s", WORKER_ID)
 
