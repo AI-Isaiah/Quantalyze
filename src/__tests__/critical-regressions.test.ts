@@ -1200,6 +1200,76 @@ describe("Critical regression guards", () => {
         ).toBe(1);
       });
 
+      // 158-REVIEW WR-02: the pin above covers the acquire step, the shared key
+      // and the banished concurrency group — but NOT the two other invariants
+      // Phase 158 introduced, both of which are one-line YAML deletions away
+      // from silently regressing. That is precisely the silent-green class this
+      // phase exists to kill, so they are pinned here too.
+      it("all three DB-touching jobs carry the mutex TTL (timeout-minutes)", () => {
+        const src = readText(".github/workflows/ci.yml");
+        for (const job of DB_JOBS) {
+          expectMatch(
+            jobSlice(src, job),
+            /^ {4}timeout-minutes: 90$/m,
+            `ci.yml ${job} lost (or changed) \`timeout-minutes: 90\` — it is the ONLY TTL on the shared-test-db advisory lock. There is deliberately NO reaper cron: the runbook states none is needed precisely because job death drops the psql session. Delete it and the job inherits GitHub's 360-minute default, so one wedged holder blocks every DB-touching CI job for six hours with no gate noticing. The value is also load-bearing in both directions: it is sized to absorb the 3600s acquire cap (CR-04) and it must stay BELOW the holder's pg_sleep (WR-01)`,
+          );
+        }
+      });
+
+      // WR-01's invariant is a relationship between two numbers in the SAME
+      // step, maintained by hand and checked by nothing at runtime. Pin the
+      // relationship, not either literal: the failure it guards (holder sleep
+      // expiring BEFORE the job dies) silently releases the mutex mid-job and
+      // lets a second run in, which no test downstream could attribute.
+      it("the mutex holder's pg_sleep outlives the job TTL in every DB-touching job", () => {
+        const src = readText(".github/workflows/ci.yml");
+        for (const job of DB_JOBS) {
+          const body = jobSlice(src, job);
+          const ttlMin = Number(
+            findOrFail(
+              body,
+              /^ {4}timeout-minutes: (\d+)$/m,
+              `ci.yml ${job}: no timeout-minutes to compare the mutex hold against`,
+            ).match(/(\d+)/)![1],
+          );
+          const sleepSec = Number(
+            findOrFail(
+              body,
+              /SELECT pg_sleep\((\d+)\);/,
+              `ci.yml ${job}: no pg_sleep in the mutex acquire step`,
+            ).match(/(\d+)/)![1],
+          );
+          expect(
+            sleepSec,
+            `ci.yml ${job}: the mutex holder sleeps ${sleepSec}s but the job TTL is ${ttlMin}m (${ttlMin * 60}s). The holder MUST outlive the job: when pg_sleep returns, psql exits and Postgres releases the advisory lock — while the job is still doing DB work, letting a concurrent run in unserialized. Nothing detects that at runtime (158-REVIEW WR-01)`,
+          ).toBeGreaterThan(ttlMin * 60);
+        }
+      });
+
+      // OPS-02 in full: "present-and-failing with NOTHING gating on it". Wiring
+      // `sql-tests` into ONLY ONE of the two places silently restores exactly
+      // that state — `needs:` alone leaves it advisory, and a result-loop row
+      // for a job that is not in `needs:` reads as the empty string.
+      it("sql-tests gates the frontend aggregator in BOTH needs: and the result loop", () => {
+        const src = readText(".github/workflows/ci.yml");
+        const agg = jobSlice(src, "frontend");
+        const needsBlock = findOrFail(
+          agg,
+          /^ {4}needs:\n(?: {6}- [\w-]+\n)+/m,
+          "ci.yml frontend aggregator: no needs: list found",
+        );
+        expectMatch(
+          needsBlock,
+          /^ {6}- sql-tests$/m,
+          "ci.yml frontend aggregator dropped `- sql-tests` from needs: — OPS-02 regressed to present-but-ungating. sql-tests is the only gate that EXECUTEs the real deployed cron bodies (it caught D-19); without this edge the aggregator does not wait for it and a red sql-tests merges clean",
+        );
+        expectMatch(
+          agg,
+          /"sql-tests=\$\{\{ needs\.sql-tests\.result \}\}"/,
+          "ci.yml frontend aggregator dropped the sql-tests row from its result loop — `needs:` alone only makes the aggregator WAIT for the job, it does not judge its result, so a failing sql-tests would once again gate nothing (OPS-02)",
+        );
+      });
+
       it("the evictable `group: shared-test-db` concurrency group never reappears in ci.yml", () => {
         const src = readText(".github/workflows/ci.yml");
         expectNoMatch(
