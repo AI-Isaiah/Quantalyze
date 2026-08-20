@@ -1,343 +1,396 @@
 # Pitfalls Research
 
-**Domain:** Adding failure handling (SEAM + JOB + RATE) to EXISTING live, money-bearing ingestion plumbing (Vercel Next.js ↔ Railway FastAPI analytics-service ↔ Supabase Postgres compute-jobs queue) — v1.16 Production Resilience & Reliability.
-**Researched:** 2026-07-25
-**Confidence:** HIGH — every pitfall below is grounded in this codebase's actual source (`src/lib/analytics-client.ts`, `src/lib/process-key-client.ts`, `analytics-service/routers/process_key.py`, `analytics-service/main_worker.py`, the `compute_jobs` migrations/runbook) or this project's own prior incidents (WEDGE-01, the 106-janitor revert, the WORKER-04 window-widening). Two findings (see Pitfall 9 and Pitfall 11) are "the backlog document is stale" discoveries made by grepping current source against `TODOS.md` claims — flagged explicitly so the roadmapper doesn't build fixes for already-shipped work.
+**Domain:** Adding five specific changes to a live, continuously-deployed platform — Next.js 16 App Router on Vercel + Supabase Postgres/RLS (migrations auto-apply on merge to `main`) + FastAPI worker on Railway (deploys only on a GREEN main check-suite) + GitHub Actions CI against a SHARED remote TEST Supabase project, with **no branch protection** (every CI gate is advisory at merge).
+**Researched:** 2026-08-20
+**Confidence:** HIGH on the four repo-verified areas (share-token cache, ranking population, dependency majors, structlog); MEDIUM on GitHub Actions concurrency semantics (verified against current community docs + the repo's own measured evidence, but GitHub does not document the pending-eviction rule in its reference page).
 
-> **REQ-group map used below:** **SEAM** = Vercel→Railway resilience (timeout/retry/circuit-breaker on `analytics-client.ts` + `process-key-client.ts`); **JOB** = job-state integrity (stuck-`computing` detection, transactional finalize, worker-crash janitor, orphaned-`running` DELETE-vs-reset); **RATE** = rate limiting on authed routes hitting Python. Phase numbers don't exist yet (roadmap not written); pitfalls are mapped to REQ-group, which the roadmapper turns into phase numbers continuing from 140.
+**Scope note.** This is a TARGETED pitfalls pass for v1.20 (founder call 2026-08-20). It covers only the five riskiest areas named in the milestone brief. It is not an ecosystem sweep, and it re-verifies each claim against the code at HEAD rather than against the ledger's description of the code.
+
+**Method.** Every "measured" claim below was read out of the repo at HEAD during this pass (file + symbol cited). Every external claim carries its source. Where TODOS.md states something this pass found to be wrong or incomplete, that is called out explicitly — see Pitfall 1, which corrects the remedy TODOS.md proposes.
 
 ---
 
 ## Critical Pitfalls
 
-### Pitfall 1: Blind retry on `/process-key` duplicates the teaser lead — `flow_type` determines idempotency, the endpoint doesn't
+### Pitfall 1: "Shrink the concurrency group" does not fix the eviction — the bug is RUN COUNT, not member count
 
 **What goes wrong:**
-`POST /process-key` is called by THREE different flows through the same FastAPI route: `teaser` (public landing-page verify), `resync`/`onboard` (authenticated key sync), and `csv` (wizard finalize). A SEAM retry policy that treats "the endpoint" as the unit of idempotency will retry all three the same way. But `process_key.py` explicitly documents (line ~630): **"teaser submissions are deliberately NOT idempotent (each landing-page [visit mints a new verification])."** A network blip between Vercel and Railway where the upstream write actually succeeded but the response was lost — then a naive SEAM retry re-fires the same POST — mints a SECOND `strategy_verifications` row (and, per `verify-strategy/route.ts`, a second `public_token` + a second lead) for one user action. `resync`/`onboard`, by contrast, IS idempotent: the partial unique index on `compute_jobs` plus the explicit `WIZARD_DUPLICATE` code path (`process_key.py` lines ~736-748, ~905-912) makes a duplicate enqueue attempt a safe no-op that returns the existing row.
+`shared-test-db` is a repo-wide GitHub Actions concurrency group with `cancel-in-progress: false`, carried by three jobs in `ci.yml` (`sql-tests` :936, `python` :1143, `e2e-seeded` :1540). A GitHub concurrency group holds **at most one RUNNING + one PENDING entry, globally across all runs**. When a third request arrives it does not queue — it **evicts** the pending one, which concludes `cancelled` with `steps: []` and the log line `Canceling since a higher priority waiting request for shared-test-db exists`. `cancel-in-progress: false` protects only the *running* job; there is no `cancel-pending: false` option (the feature request, community discussion #12835, is still open).
+
+Two consequences, both already observed on this repo (TODOS.md, v0.54.0.0 hotfix `861a4d91`, CI run 31273384829 attempt 1):
+1. The run concludes **`cancelled`, not `failure`** — it renders **grey**, reading as "no result" rather than a red gate.
+2. Railway waits on the main check-suite and **silently skips the analytics deploy** on a non-green suite (`skippedReason="CI check suite failed"`), so frontend + auto-applied migrations land on PROD while the Python service stays on old code. That is exactly the stale-prod state GitHub issue **#616** was filed for.
 
 **Why it happens:**
-"Retry on timeout" is naturally designed at the HTTP-client layer (one wrapper, one policy), but idempotency here is a property of `flow_type`, not of the path or the HTTP verb. The three flows share one endpoint precisely because of the Phase-19 unification — which makes it easy to reason "one endpoint, one retry rule" when the reality is three different write contracts underneath.
+Three misreadings compound.
+- **`cancel-in-progress: false` reads like "never cancel anything."** It isn't. It is documented as protecting the in-progress run only. The repo's own comment at `ci.yml:1133-1141` reasons correctly about cross-PR contention and then concludes the group "does NOT cancel in-flight runs, so a push-to-main python job still records its required per-SHA green check (it just waits its turn)" — true for the *running* case, false for the *queued* case, which is the one that fired.
+- **⛔ TODOS.md's proposed remedy is insufficient.** It says: *"Real fix: serialize the group properly, or return it to two members."* **Reducing membership does not help.** With a single member and three concurrent runs (main push + two PRs), run A is running, run B is pending, run C arrives and evicts B. Membership count changes only how *fast* you reach three simultaneous requests; it does not change the eviction rule. The 2026-08-03 intra-run chain fix (`sql-tests` gained `needs: python`, `ci.yml:1134-1142`) addressed *intra*-run membership and was correct on its own terms — and the eviction still fired five days later, because the 2026-08-08 event was **cross-run**.
+- **A cancelled run looks like an operator action.** Nobody triages grey.
 
 **How to avoid:**
-- Gate retry eligibility on `flow_type`, not on path: `resync`/`onboard`/`csv` (idempotent-keyed at the DB layer) are safe to retry-with-backoff on transient failures (timeout, 5xx, network error); `teaser` is NOT — a teaser timeout must surface as a clean error to the landing page, never a silent client-side retry.
-- If teaser retry-safety is wanted later, it requires an actual idempotency key (e.g. hash of `email+exchange+api_key fingerprint` within a TTL window) written INTO the SECURITY DEFINER path — a schema/RPC change, not a client-side retry-loop change. Out of scope for a client-timeout-and-retry milestone; call it out as explicitly deferred rather than silently "retrying everything with a shared policy."
-- Add a regression test that asserts calling `postProcessKey({flow_type: "teaser", ...})` twice with identical input produces TWO `strategy_verifications` rows (documents the non-idempotent contract) so a future refactor can't accidentally start retrying it.
+Three layers; treat the first two as required and the third as a costed alternative.
+
+1. **Replace the native group with an external FIFO lock on the DB-touching jobs.** `ben-z/gh-action-mutex` implements a distributed mutex via atomic git-ref pushes to an orphan branch (optionally in a separate repo); `softprops/turnstyle` and `actions-mutex` are equivalent-shaped alternatives. All of them *queue* instead of cancelling. Cost to plan for: a job killed mid-hold leaks the lock, so whichever action is chosen must have a TTL / steal path and a documented manual-unlock runbook. Do not adopt one without that.
+2. **Stop treating `cancelled` as "no result."** Add a `workflow_run`-triggered watcher that fires when a `push`-to-`main` CI run concludes `cancelled` and either auto-`gh run rerun --failed` or opens a dedup'd P1 issue. This closes the #616 *mechanism* independently of whether the lock works, and it is the only layer that also covers cancellation causes nobody has thought of yet. The repo already has the pattern to copy: `analytics-deploy-verify.yml` (dedup'd issue filing, mirroring `nightly.yml` / `cassette-refresh.yml`).
+3. **Structural alternative worth costing:** give PR runs their own ephemeral/branch database so PRs never contend for the shared TEST project at all. Then the group can be scoped to main-only pushes, where serialization is trivially satisfied. Highest cost, permanently removes the whole class — and it also removes the daily stale-`compute_jobs` backlog described in the note at the end of the phase-mapping table.
+
+⛔ **Do NOT "finish the chain"** by adding more `needs:` edges to serialize the group. `ci.yml:1543-1552` and `:1126-1133` both document why: a skipped `needs:` job skips its dependents, and the `if:` conditions diverge on `workflow_dispatch` (`sql-tests` requires `github.event_name == 'push'`; `e2e-seeded` only requires `!= 'pull_request'`), so the chain would disable `e2e-seeded` on every manual run and trip the aggregator's skip check. This trap has already been found once by a `/ship` review (2026-08-03) — it will look like the obvious fix again.
 
 **Warning signs:**
-Duplicate teaser leads with the same email in `strategy_verifications`; a SEAM retry wrapper with no `flow_type` branch; a test suite that asserts idempotency for `/process-key` as a blanket endpoint property instead of per-flow.
+- Any run on `main` with conclusion `cancelled` (grey) rather than `success`/`failure`.
+- A job whose API record shows `steps: []` and a duration under a minute.
+- `Canceling since a higher priority waiting request for shared-test-db exists` in any job log.
+- `analytics /health` `git_sha` != main HEAD for more than ~15 minutes after a merge.
+- ⚠️ Detection today is bounded at **~6h** by `analytics-deploy-verify.yml`'s cron — and that workflow deliberately `exit 0`s even when prod is stale (a red check on HEAD would make Railway skip the very deploy it verifies). So the *loud* signal is a filed issue, not a red check. Do not plan a gate that assumes CI will go red here.
 
-**Maps to:** SEAM (retry-policy design). Verification: fault-injection test per `flow_type` — teaser retry is REFUSED (or absent), resync/onboard/csv retry is proven safe via the existing `WIZARD_DUPLICATE`/unique-index/RPC contract.
+**Phase to address:**
+**OPS — and it must be the FIRST phase of the milestone (≈158).** It is a hard predecessor of **DEPS**: the dependabot campaign is 9 open PRs (verified: #686, #685, #646, #645, #643, #627, #626, #614, #612). Landing them while the group is unfixed means up to 9 concurrent runs contending for one group slot, which *guarantees* main-branch eviction and therefore guarantees at least one silently-skipped analytics deploy.
 
 ---
 
-### Pitfall 2: Two separate outbound-fetch wrappers exist — hardening one and missing the other leaves half the money-path unprotected
+### Pitfall 2: Threading the share token through the factsheet `cacheKey` string is a silent no-op that publishes private strategies
 
 **What goes wrong:**
-There are **two** independent HTTP client wrappers calling the Railway analytics service, each with its own bare `fetch` + `AbortSignal.timeout`, zero retry, zero circuit breaker:
-- `src/lib/analytics-client.ts` (`analyticsRequest`, `DEFAULT_TIMEOUT_MS = 30_000`) — used by `validateKey`, `encryptKey`, `computePortfolioAnalytics`, `runPortfolioOptimizer`, `findReplacementCandidates`, `simulateAddCandidate`, `recomputeMatch`, `evalMatch`.
-- `src/lib/process-key-client.ts` (`postProcessKey`, inline 60s timeout) — used by `verify-strategy`, `keys/sync`, `keys/validate-and-encrypt`, `strategies/finalize-wizard`, `strategies/csv-validate`, `strategies/csv-finalize`.
-A SEAM plan that finds and hardens only the one named in the milestone description ("`analytics-client.ts` gets a bounded fetch timeout + retry-with-backoff + circuit breaker") and stops there leaves the ENTIRE unified-backbone ingestion path (`process-key-client.ts` — the actual money-onboarding surface: key connect, CSV upload, resync) with no resilience at all.
+`src/app/factsheet/[id]/v2/page.tsx` caches the factsheet payload with `unstable_cache`. The wrapper is:
+
+```ts
+function buildFactsheetPayloadCached(cacheKey: string) {
+  const [id] = cacheKey.split("::");
+  return unstable_cache(
+    async () => fetchAndBuildPayload(id, withPublishedOnly),
+    ["factsheet-v2-payload-v6", id],
+    { revalidate: 3600, tags: ["factsheet-v2", `factsheet-v2:${id}`] },
+  )();
+}
+```
+
+Next derives the cache entry from the callback's source text + the `keyParts` array + the (empty) args array. The `cacheKey` **string** the page passes in is split at `"::"` and everything after the id is **discarded**. The file states this explicitly (header comment, "CACHE KEY REALITY (corrected phase 148 — the previous claim here was false)"): *"Appending a suffix yields the SAME entry."*
+
+So the intuitive SHARELINK-01 fix — "make the cache key include the token, e.g. `${id}::${token}`" — compiles, type-checks, passes a unit test that asserts the constructed key string, and **writes a token-lane (private-strategy) payload into the id-keyed entry that is served to every anonymous visitor for the full 3600s TTL.** That is strictly worse than the bug being fixed, and TODOS.md lines 56-62 already name it as THE landmine.
 
 **Why it happens:**
-`process-key-client.ts` was built AFTER `analytics-client.ts` (Phase 19, to centralize the 5 thin adapters) and its own docstring literally says "Centralizing it here gives one place to thread observability, retries, timeouts... without touching each route" — the intent was always there, but the SEAM work is the first milestone to actually act on it. It's easy to grep for "`analytics-client`" in the PROJECT.md description and miss the sibling file.
+The wrapper's signature *invites* the mistake: it takes a `cacheKey: string` that looks composable, and the `"::"` split is a vestige of a previous (documented-as-false) belief that `computed_at` busted the cache. A reviewer reading the call site sees a key being built with a token in it and reasonably concludes the lanes are separated. Only the wrapper body disproves it, and the wrapper body is ~250 lines away.
 
 **How to avoid:**
-- Treat SEAM as "harden every outbound call to the Railway service," enumerated as BOTH files, not "harden `analytics-client.ts`." Grep `ANALYTICS_SERVICE_URL`/`ANALYTICS_URL` usage repo-wide at phase kickoff (this research already did: `debug-key-flow` and `cron/warm-analytics` also fetch directly — decide explicitly whether those need the same treatment or are legitimately out of scope, e.g. debug-key-flow already has its own per-step `AbortSignal.any` + heartbeat design that may not want a generic wrapper).
-- Extract a SHARED resilience layer (timeout/retry/breaker) that both `analyticsRequest` and `postProcessKey` call into, rather than duplicating the policy twice — the current duplication (one has 30s default, the other has 60s inline) is exactly how a shared circuit breaker would end up with two independently-flapping breakers if built ad hoc into each file.
-- Verify the breaker's OPEN state is scoped to the SHARED underlying resource (Railway is down) not per-wrapper — a `process-key-client.ts` breaker and an `analytics-client.ts` breaker that don't share state will each need to independently rediscover the outage.
+- **The token lane MUST bypass `buildFactsheetPayloadCached` entirely** and call `fetchAndBuildPayload(id, <token-scoped predicate>)` directly — the *exact* shape the owner lane already uses (`page.tsx` ~:527-537: *"⛔ The owner arm calls the builder DIRECTLY: no cache read, no cache write."*). Do not invent a new mechanism; extend the proven one to a third lane.
+- Keep `buildFactsheetPayloadCached`'s predicate a **literal** (`withPublishedOnly`) and keep the visibility parameter OFF its signature. `page.tsx` :279-294 documents this as deliberate: *"Keeping the parameter off the signature makes that unrepresentable."* A "small refactor" that parameterizes it to serve three lanes destroys the whole guard.
+- Do not remove `export const dynamic = "force-dynamic"` (`:33`). It is the RESPONSE-level half of the protection (the `unstable_cache` concern is the DATA-level half) and its comment states the failure mode is fail-open.
+- Set an explicit `Cache-Control: private, no-store` on the token lane's response. `force-dynamic` prevents Next's static cache, but any future `revalidate`/`s-maxage` added to this route would make Vercel's shared CDN the *next* poisoning channel, and a `?s=` query param does not by itself create a distinct CDN entry unless the route varies on it.
+- **`generateMetadata` is a second, separate surface.** It runs its own query with `withPublishedOnly` on the request-scoped client. Two rules: (a) never widen it with the token (that would put private titles/descriptions into the metadata path), and (b) expect link unfurlers (Slack, iMessage, Twitter) to fetch the token URL server-side — so whatever metadata the token lane emits ends up in a third party's logs along with the token. Emit generic metadata on the token lane.
 
 **Warning signs:**
-A SEAM PR that touches only `analytics-client.ts`; `verify-strategy`/`keys/sync`/CSV routes still hanging on a Railway outage after the "SEAM" phase ships; two different retry/backoff constants in two files.
+- Any diff that adds a parameter to `buildFactsheetPayloadCached`, or makes its `withPublishedOnly` argument a variable.
+- Any diff that adds a token/session/user value into the `cacheKey` string rather than into `keyParts` — and note that even the *correct-looking* `keyParts` fix (`["factsheet-v2-payload-v6", id, token]`) is the wrong answer here: it works, but it creates an unbounded per-token entry population and puts the secret into the cache-key namespace. Bypass, don't re-key.
+- A test that asserts the *key string* instead of asserting *observable cross-request behavior*.
+- The `v6` shape-version suffix being bumped without a corresponding comment — the file's bump log (v2→v6, each naming the specific field and the specific fail-open it prevents) is the institutional memory here.
 
-**Maps to:** SEAM. Verification: an integration test that kills the Railway mock for BOTH wrapper's call sites and confirms both fail fast with the same class of clean error.
+**Phase to address:**
+**SHARE (SHARELINK-01).** Plan as a full GSD phase (migration + read lane + UI + revoke + cache-key change), per TODOS.md line 71. Its acceptance test must be **adversarial and sequenced**: request the factsheet via the token FIRST, then request the bare `/factsheet/<id>` anonymously and assert it STILL 404s. Extend `src/__tests__/phase-148-owner-lane-cache-isolation.test.ts` with a token-lane row rather than writing a parallel test file — a second file drifts. The test must be demonstrated RED with the bypass neutered (founder rule: a test that cannot fail is worse than none).
+
+⛔ Do not start this on `feat/phase-156-connect-refactor` — Phase 156's Migration B is still pending against `strategies` (TODOS.md lines 72-73).
 
 ---
 
-### Pitfall 3: In-memory circuit breaker / rate limiter is near-useless on Fluid Compute — but this codebase ALREADY has the right pattern, just not for this seam yet
+### Pitfall 3: The share token leaks through channels `Referrer-Policy` does not cover — and the mitigation is not "add a header"
 
 **What goes wrong:**
-Vercel Fluid Compute reuses function instances across concurrent requests rather than one-request-per-instance, but there are still MANY concurrent instances across regions/scale-events — a breaker or limiter implemented as a plain in-memory module-level variable (`let failureCount = 0`) is scoped to ONE instance's process memory. Under real traffic (multiple concurrent instances), each instance independently thinks the breaker is closed while the other N instances are all separately discovering the same Railway outage — the aggregate request volume hitting a dying Railway service is barely reduced, defeating the entire point of a circuit breaker. The failure mode is silent: it "works" in a single-instance local dev/preview test and quietly does nothing under real concurrent prod load.
+The founder decision (2026-08-13) is explicitly motivated by the fact that **ids leak structurally**: browser history, `Referer`, analytics, screenshots, support tickets, `/compare?ids=`. A `?s=<token>` URL inherits **every one of those channels**. The difference is that a token is *revocable* — which only helps if revocation is actually immediate and the leak is actually noticed.
+
+The repo sets `Referrer-Policy: strict-origin-when-cross-origin` (`next.config.ts:79`). Per MDN and PortSwigger, that policy strips the query string on **cross-origin** navigation only. It does nothing about:
+- **Same-origin** navigation and subresource requests, which still carry the full URL including `?s=`.
+- **In-page JavaScript reading `location.href`** — which is what `@sentry/nextjs` does for transaction names, breadcrumbs and (if enabled) session replay. A Sentry event from a token page carries the token in its URL field.
+- **Server / CDN / platform access logs** — Vercel request logs record the full request line.
+- Browser history and history sync.
+- Link unfurlers fetching the URL server-side.
 
 **Why it happens:**
-A circuit breaker is conceptually simple to prototype as a closure with counters, and it "looks correct" in unit tests that instantiate one breaker object and call it repeatedly in-process — the multi-instance failure mode never appears until real concurrent traffic.
+"We set a Referrer-Policy" reads as a complete answer, and the modern default *is* the recommended value — for the one channel it covers. The other channels are invisible in code review because none of them appear in the diff.
 
 **How to avoid:**
-- This codebase ALREADY solved an analogous problem correctly: the exchange-level circuit breaker (`_check_circuit_breaker` in `analytics-service/services/job_worker.py`, `EXCHANGE_COOLDOWNS`) stores its state in Postgres (`api_keys.last_429_at`), not in worker process memory — every worker instance reads the same durable row. The rate limiter (`src/lib/ratelimit.ts`) is ALREADY Upstash-Redis-backed (a shared external store), not in-memory. **Mirror this pattern for the new Vercel→Railway breaker**: persist breaker state (open/half-open/closed + last-failure timestamp) in Upstash Redis (already wired, zero new infra) or a Postgres row, not a module-level variable — even though Fluid Compute instance reuse makes in-memory state live "longer" than classic one-shot Lambda, it is NOT shared across instances and must not be treated as if it were global.
-- If a shared store is deliberately deferred (e.g. "best-effort per-instance breaker is good enough for this milestone"), say so EXPLICITLY in the requirement/ADR — "per-instance, best-effort, does not coordinate across Fluid Compute instances" — rather than implying global protection the design doesn't provide. A silently-inadequate breaker is worse than an honestly-scoped one.
-- Test the breaker's behavior by simulating TWO separate module instances (two separate `vi.resetModules()` contexts) hammering a failing endpoint — a correct shared-store breaker trips consistently across both; an in-memory one trips independently and lets through 2x the "protected" volume.
+- **Copy the `scenario_shares` design wholesale.** `supabase/migrations/20260622120000_scenario_shares_and_read_rpc.sql` already solved this exact problem for scenarios, and its header enumerates the invariants: `token_hash` at rest (**never** the raw token); one `SECURITY DEFINER` read RPC as the *only* anon path; `REVOKE ALL FROM anon` on the table itself; a partial `UNIQUE (scenario_id) WHERE revoked_at IS NULL` so a re-share must revoke first; `revoked_at IS NULL` filtered **inside** the RPC body; and a single TS digest source-of-truth (`src/lib/scenario-share-token.ts`) so the hash is computed in exactly one place. The RPC takes a precomputed sha256 hex because `pgcrypto`/`digest` is not installed — the same constraint applies to a strategy token.
+- ⚠️ **A SECDEF function reachable by `anon` needs an explicit `GRANT EXECUTE TO anon`.** Without it anon gets 42501, SSR swallows it, and the page renders empty with a clean console — a silent failure that reads as "no data" rather than "broken." (This repo has been bitten by it before.)
+- Set `Referrer-Policy: no-referrer` on the factsheet route specifically (a per-route override), not just the global default.
+- Scrub the `s` param in Sentry via `beforeSend` / `beforeBreadcrumb` **before** the token lane ships. Verify by triggering a real error on a token URL and reading the event in Sentry — do not assert it from the config file.
+- **Unknown token and unknown id must produce the byte-identical 404.** Otherwise the token endpoint becomes an oracle for "this id exists but is private," re-creating the enumeration risk the token was meant to remove.
+- Revocation must be provably immediate: assert **0 rows on the very next request** after `revoked_at = now()`. The scenario migration pins exactly this ("revoke immediacy (0 rows after revoked_at = now())") — reuse the assertion. If the token lane is uncached (Pitfall 2), immediacy is free; if anyone later adds caching, revoke silently becomes "revoked in up to an hour."
+- **Cross-REQ coupling to flag now:** the milestone's SEC group includes a `MUTATING_RPC_NAMES` gap. A new mint/revoke RPC must be added to that list or the mutation gate misses it. Two REQ groups, one edit — plan the dependency rather than discovering it at review.
 
 **Warning signs:**
-A breaker implemented as `let state = "closed"` at module scope in `analytics-client.ts`; no Redis/Postgres read in the breaker's check function; a breaker unit test that only ever instantiates one client instance; Railway request volume during an incident not dropping the way the breaker's math predicts.
+- The raw token appearing in any `.select()` projection, log line, Sentry event, or error message.
+- A revoke path implemented as `DELETE` rather than setting `revoked_at` (destroys the audit trail and makes "was this link ever live?" unanswerable).
+- The token compared with `==` against a stored raw value anywhere.
+- A revoke UI that mints a new token without invalidating the old one — the partial unique index is what makes that structurally impossible; omit the index and the invariant is merely a convention.
 
-**Maps to:** SEAM. Verification: breaker state readable from a shared store (Upstash or Postgres) that two independent module contexts both observe; load test showing aggregate request volume actually drops when the breaker trips.
+**Phase to address:**
+**SHARE (SHARELINK-01)**, same phase as Pitfall 2. The migration and the read RPC are the same unit of work.
 
 ---
 
-### Pitfall 4: Reaper threshold shorter than the real Railway compute tail — this project already relearned this lesson once (WORKER-04) and must apply the same math to the NEW janitor
+### Pitfall 4: Adding a `computation_status` filter to public percentiles has THREE distinct failure modes, and the naive filter hits all three
 
 **What goes wrong:**
-A worker-crash `computing`-row janitor (JOB scope) that marks any row `computing` for more than N minutes as `failed` will falsely kill a legitimately slow-but-alive job if N is set from a "typical" case instead of the real worst-case tail. This EXACT mistake already happened once in this codebase: the original `retention_compute_jobs_orphaned_running` purge (migration `20260719120000`) used a 2-hour window justified by "the per-kind watchdog caps a stale row at ~40 min" — but the v1.13 red team (RT-01) proved that reasoning wrong for a BATCH tail: `main_worker.py` claims a batch of 5 jobs at once and dispatches them sequentially, so job #5 of a full batch can legitimately still be `running` up to `5 × 30min (process_key_long timeout) = 2.5 hours` after `claimed_at` — the 2-hour purge could DELETE a live in-flight row. The window was corrected to 4 hours (migration `20260720120000`) using `batch_size × max_per_kind_timeout` as the real basis, not the watchdog's per-kind number.
+`getPercentiles` (`src/lib/queries.ts:141`) projects `PERCENTILE_ANALYTICS_COLUMNS` (`cagr, sharpe, sortino, calmar, max_drawdown, volatility, cumulative_return`) from the embedded `strategy_analytics` for every published strategy, with **no `computation_status` filter at all**. Failed computations therefore rank. This is not hypothetical: `src/app/api/strategies/csv-finalize/route.ts:1493-1500` records the measured population — *"PROD carries 7 zero-dailies csv strategies whose failed rows DO hold a sharpe and a cagr, computed 2026-05-27 under older code."*
+
+The obvious fix — `.eq("computation_status", "complete")` — introduces three new bugs:
+
+1. **It silently drops `complete_with_warnings`.** That value marks a *successful* computation that used a documented fallback (`used_heuristic_capital` / `balance_error` DQ flags), written by `analytics_runner.run_csv_strategy_analytics`, `job_worker.run_stitch_composite_job` and `job_worker.run_poll_allocator_positions_job`. It was added by migration `20260602120000` and took a second migration (`20260707120000`) to stop being laundered back to `'complete'` by `sync_strategy_analytics_status`. Every read gate in the app already shares one predicate, `isComputedAnalytics()` in `src/lib/closed-sets.ts`, precisely so this cannot drift. An exact-match literal in `queries.ts` re-forks it and quietly removes every warnings-path strategy from the public ranking.
+2. **Population cliff.** `getPercentiles` returns `null` at **two** separate floors (`strategies.length < 5`, then `rows.length < 5`), and the SQL cohort RPC `get_verified_cohort_rank` (migration `20260626120000`) suppresses below **min-N = 20**. Removing rows can cross either floor, turning percentile badges into honest-but-alarming absence across Discovery, Browse, the tearsheet, `/my-strategies` and the scenario peer-rank — for every user, at once, with no announcement.
+3. **Filter placement changes join semantics.** Applying the filter on the embed as `strategy_analytics!inner(...)` drops the *strategy row* entirely; applying it after the fetch leaves the strategy present with null analytics. Those two land on **different** early-return gates (`strategies.length < 5` vs `rows.length < 5`). Same intent, different suppression behavior.
 
 **Why it happens:**
-The intuitive threshold ("watchdog resets stale rows at 40 min, so anything past 2x that must be dead") reasons from the PER-JOB timeout, not the PER-BATCH wall-clock, when jobs are claimed and dispatched in batches rather than one-at-a-time. Any new reaper threshold designed the same intuitive way will make the identical mistake unless it explicitly re-derives the batch-tail math.
+The change reads as one line and one-sided. But percentiles are computed over a **live population**, so the moment the filter lands, *every* published factsheet's rank moves — including strategies whose own data did not change. There is no versioning, no audit trail, and no "the market changed" explanation available to a manager who sees their rank drop.
 
 **How to avoid:**
-- Derive the new `computing`-row janitor's threshold from the SAME basis: what's the maximum wall-clock a row can legitimately sit at `computing` on a healthy worker, accounting for batching, queueing ahead of it, and the specific handler's real timeout (see `TIMEOUT_PER_KIND` / `WATCHDOG_PER_KIND_OVERRIDES` in `main_worker.py` — every kind's watchdog threshold is required, CI-enforced, to exceed its handler timeout: `test_every_kind_has_watchdog_headroom`). Reuse or extend that per-kind override map rather than inventing a single flat "30 minutes" constant for all `computing` rows.
-- Add the same self-verifying invariant this project already uses for cron migrations (the DO-block `RAISE EXCEPTION` self-check in the retention migrations) — a janitor threshold hardcoded without a corresponding "must exceed the longest handler timeout" test is exactly how the 2-hour mistake shipped once.
-- If the janitor covers a DIFFERENT table/column than `compute_jobs.status='running'` (see Pitfall 7 — `strategy_analytics.computation_status='computing'` may be a distinct surface), re-derive the batch-tail math for THAT table's actual claim/dispatch pattern; do not assume the 4-hour number transfers.
+- **Use `isComputedAnalytics()` from `closed-sets.ts`.** Never a status literal. If it must become server-side-filterable, derive the SQL `IN` list from `STRATEGY_ANALYTICS_COMPUTATION_STATUSES` rather than typing the values twice.
+- **Move both engines together.** There are two ranking implementations and they claim parity: `percentile-core.ts` (TS — the ONE core `getPercentiles` and `getOwnRowPercentiles` share, per the FOUNDER RULING 2026-08-05) and `get_verified_cohort_rank` (SQL, decile-quantized, min-N 20). The SQL RPC's own comment asserts *"max_dd mirrors getPercentiles' direction exactly … for parity-by-construction"*, and its cohort is `status='published' AND a published strategy_verifications row AND all three rankable metrics non-null` — it **also** does not filter `computation_status`. Filtering only the TS side breaks the stated parity and makes the scenario blend's peer rank disagree with the factsheet's.
+- **Measure the population delta on PROD before merging**, and put the numbers in the plan: count of published strategies with rankable analytics *with* and *without* the filter, plus the resulting `cohort_n` for the SQL RPC. If the filtered cohort lands under 20, the SQL side must be planned as a deliberate suppression, not discovered as an outage.
+- **Snapshot before/after percentiles per published strategy** into the phase artifact. That is the only way the founder can later answer "why did my rank change?"
+- Pin `phase-149-my-strategies-parity.test.ts` as a gate. `getOwnRowPercentiles` promises a draft *"if published, this would rank X"* — a one-sided population change makes the promise and the delivered rank diverge, and that test is the existing detector.
+- Decide filter placement (embed `!inner` vs post-fetch) deliberately, and assert **both** counts in the test so a later refactor cannot flip it silently.
 
 **Warning signs:**
-A flat single threshold (e.g. "30 minutes") applied to every kind of `computing` row regardless of known long-running handlers (`reconstruct_allocator_history` at 30min handler timeout, `process_key_long` at 30min); no test asserting threshold > every handler's real timeout; the janitor shipping without re-deriving the batch-claim math for its specific table.
+- A string literal `"complete"` appearing in a ranking code path.
+- A diff touching `queries.ts` or `percentile-core.ts` with no corresponding change to `get_verified_cohort_rank`.
+- Percentile badges disappearing in local/CI fixtures — that is the min-N floor firing, not a rendering bug.
+- `cohort_n` in the RPC response dropping while the percentiles go NULL.
+- `csv-finalize`'s `CLOCK_SAFETY_KPI_COLUMNS` (`route.ts:1039`) drifting from `PERCENTILE_ANALYTICS_COLUMNS` — it is a deliberate duplicate (*"If that set ever changes, this one must follow — the guard is only as honest as the overlap"*) and the two have no automated link.
 
-**Maps to:** JOB. Verification: a CI-enforced invariant test (mirroring `test_every_kind_has_watchdog_headroom`) that the janitor's threshold exceeds every relevant handler's real (batch-inclusive) worst case.
+**Phase to address:**
+**RANK**, early in the milestone (public-trust correctness). It should land **before** anything that publishes new strategies, so the population delta is measured against a stable cohort.
 
 ---
 
-### Pitfall 5: Client-side SEAM timeout shorter than the real synchronous-flow p99 — 60s and 30s are shorter than what this system's own comments admit is possible
+### Pitfall 5: `structlog`'s two failure modes look identical, and each candidate fix addresses only one — fixing the wrong one produces false closure
 
 **What goes wrong:**
-`process-key-client.ts`'s `postProcessKey` uses a flat 60-second timeout, justified in its own comment as "60s leaves slack for typical synchronous teaser runs (~10-25s)." But the SAME endpoint also serves `csv` finalize and the general synchronous pipeline, which the code elsewhere describes as bounded only by "Vercel's 300s maxDuration ceiling" — i.e., the system's own design assumes synchronous runs CAN legitimately take much longer than 25s (large CSV parse + validation, OKX archive reads, etc.). A SEAM retry-with-backoff built on top of the EXISTING 60s timeout will fire a retry (a second full attempt against Railway) while the FIRST attempt may still be legitimately in-flight past 60s — doubling load on an already-slow Railway instance during exactly the period it's most strained, and risking the Pitfall-1 duplicate-write problem if that flow happens to be non-idempotent.
-`analytics-client.ts`'s `DEFAULT_TIMEOUT_MS = 30_000` has the same shape: most call sites use the 30s default, but a few callers explicitly override to 15s (`findReplacementCandidates`, `simulateAddCandidate`) for latency reasons — the SEAM design needs a per-call-site budget, not one global constant that's either too short for the slow flows or too long for the fast ones.
+`analytics-service/services/logging_config.py:214` defines `configure_logging()` — its own docstring says *"Call BEFORE app = FastAPI()"* — and it configures with `cache_logger_on_first_use=True` (`:233`). `main.py` calls it **inside the lifespan**, i.e. long after module import. The processor chain it installs includes `_redact_processor`, positioned deliberately *after* `dict_tracebacks` so formatted traceback text (which carries `str(exc)` verbatim) is scrubbed — because ccxt exceptions embed HMAC signatures, and MT5 exception text can embed the account password (`mt5_client.py`, T-134-01 / T-153.3-23). **A logger that misses `_redact_processor` is a credential-disclosure surface, not a formatting nit.**
+
+There are **two distinct** failure modes, and the two candidate fixes address different ones:
+
+- **Mode A — a module-scope `.bind()` / `.new()`.** structlog's docs are explicit: `get_logger()` at module scope returns a *lazy proxy*; you must **never call `bind()` or `new()` in module or class scope**, because that resolves the bound logger against structlog's DEFAULT configuration. This holds **regardless of `cache_logger_on_first_use`**. Dropping the cache flag does not fix Mode A.
+- **Mode B — first use before `configure_logging()`.** With `cache_logger_on_first_use=True`, the assembled logger is cached on first use and thereafter **ignores every later `structlog.configure()`**. A module imported before the lifespan that *emits* during import freezes the default chain forever. Dropping the cache flag fixes Mode B; hoisting configuration above router imports also fixes Mode B.
+
+Corollary worth stating plainly, because it inverts the intuition: a module-level proxy that is only ever *called* (never bound) and whose first call happens after the lifespan is **already safe today**. So an audit that flags every module-level `get_logger` will over-report, and a fix that only removes the cache flag will under-fix.
 
 **Why it happens:**
-Timeouts get set once, based on the "typical" observed latency, and then never revisited against the system's own documented worst-case (Vercel's 300s ceiling, or the 15-40 minute async handler timeouts that exist for a REASON — because those operations really can take that long). Adding retry logic on top of an already-too-tight timeout compounds the problem instead of fixing it.
+The two modes produce the same symptom (an unredacted log line), so the first plausible fix gets adopted and the audit closes. `mt5_client.py:158-176` already documents the class correctly and works around it with a per-call `_stage_logger()` — which means the repo has one hand-rolled fix and no systemic one.
 
-**How to avoid:**
-- Before adding retry, audit each call site's REAL worst-case latency (not "typical"): for synchronous flows bounded by Vercel's `maxDuration=300`, the SEAM timeout should budget against that ceiling minus safety margin, not against the mean case. For flows that map to async `compute_jobs` (fire-and-forget enqueue calls), the timeout should be short because the call is JUST an enqueue, not the compute itself — those two categories need different budgets.
-- Never set (client timeout × (1 + retry attempts)) to exceed Vercel's `maxDuration` for the calling route — a retry loop that can run past the platform's own function timeout produces the exact "hung lambda held open until the platform kills it" failure the SEAM work exists to prevent, just with extra steps.
-- Treat the 60s/30s numbers as PER-ATTEMPT budgets to be explicitly re-derived (not inherited unchanged) once retry is added — a retry-with-backoff on an unchanged 60s timeout for a flow whose own code comments admit it can run past 25s "typical" is building resilience math on a stale assumption.
+**How to avoid — pitfalls of each candidate fix:**
+
+**Candidate A — drop `cache_logger_on_first_use=True`:**
+- It is a documented **performance** flag (structlog's `performance.md`). The Railway worker is a hot loop; removing it re-assembles the bound logger on every call. Measure the worker's log-heavy path before/after rather than asserting the cost is negligible.
+- ⛔ **It does not close Mode A.** If any site does a module-scope `.bind()`, the fix ships green and the disclosure survives. This is the false-closure trap.
+- It is a global config change: every test using `structlog.testing.LogCapture` then runs against a different assembly path. Expect at least one test to change color for a reason unrelated to the bug.
+
+**Candidate B — hoist `configure_logging()` above router imports:**
+- **Import-order fixes rot.** A future import reorder, a ruff/isort autofix, or a new module that pulls a router in transitively re-breaks it with **no test failing**. Ruff's `E402` (module-level import not at top of file) will fight the hoist, so you will add `# noqa: E402` per import — exactly the kind of line a later tidy-up deletes.
+- ⚠️ **It changes the worker, not just the API.** `uvicorn main:app` also runs the worker loop in this repo (a local `uvicorn main:app` claims real compute jobs). Moving configuration from lifespan to module import changes logging initialization for **both** entrypoints (`main` and `main_worker`) — verify both.
+- `configure_logging()` is only **partially** idempotent: the `setLogRecordFactory` install is gated by `_REDACT_FACTORY_INSTALLED`, but the `structlog.configure(...)` call is **not**. Calling it twice with the cache flag on leaves already-cached loggers bound to the *first* configuration, so test setup that reconfigures becomes order-dependent.
+- ⚠️ `logging_config.py` also wraps the stdlib `LogRecord` factory as a second, handler-agnostic redaction bridge. Any reasoning about "did the redaction run?" must distinguish the structlog path from the stdlib path — a test can pass on one while the other leaks.
+
+**⭐ Recommended shape: neither alone. Two artifacts.**
+1. **A source-scan gate** (the repo's established pattern) that fails on any module-scope `structlog.get_logger(...).bind(...)` or module-scope bound-logger assignment under `analytics-service/{services,routers}/**`. This closes Mode A structurally and keeps closing it.
+2. **A behavioral test** that imports a router module, THEN calls `configure_logging()`, THEN emits a record containing a synthetic HMAC-shaped string, and asserts it is scrubbed. This closes Mode B by *observation* rather than by import-order reasoning, so it survives a reorder.
+
+Both must be demonstrated **RED with the fix neutered** before being accepted.
 
 **Warning signs:**
-Retry-with-backoff added without any change to the existing timeout constants; a synchronous CSV finalize timing out at 60s×N-retries well under Vercel's 300s ceiling, forcing users to see failures the platform itself would have tolerated; no per-flow-type timeout differentiation.
+- Any `signature=` / `sign=` / `apiKey=` fragment in `compute_jobs.last_error`, a Sentry event, or a Railway log line.
+- **`structlog.testing.LogCapture` capturing ZERO events for a module.** `mt5_client.py`'s docstring notes that per-call binding *"is also what makes the events observable to `structlog.testing`"* — a stale cached logger is **invisible** to LogCapture, so a test asserting log content can pass or fail for entirely the wrong reason. Treat an empty capture as a suspected stale-logger symptom, not a missing log call.
+- A new module copying the `_stage_logger()` per-call pattern — correct locally, but it means the systemic fix still isn't there.
 
-**Maps to:** SEAM. Verification: a documented per-call-site timeout budget table (sync vs enqueue-only vs known-slow) checked against Vercel `maxDuration` for each calling route; a test simulating a slow-but-succeeding Railway response near the OLD timeout boundary to confirm the new budget doesn't false-fail it.
+**Phase to address:**
+**OPS** (the "structlog redaction class" item already booked in the milestone's OPS group). Independent of the concurrency fix; can run in parallel.
+
+⚠️ Run `mypy --strict` before shipping any analytics-service change: the GSD milestone flow runs pytest only, so mypy errors stay latent until PR CI.
 
 ---
 
-### Pitfall 6: The reaper/janitor itself reintroduces WEDGE-01 — a "safe" cleanup job is exactly the kind of thing that quietly grows heavy
+### Pitfall 6: The dependency campaign has one item that lands on the PRODUCTION database and one that is not worth its risk
 
 **What goes wrong:**
-This project has ALREADY hit "heavy work on the shared worker event loop freezes `healthz`, Railway kills the container mid-job" once (WEDGE-01, Eclipse incident 2026-07-19, PR#632) — synchronous pandas assembly in `stitch_composite` blocked the loop long enough that the platform's own health check went stale and the platform restarted the container mid-job, which is precisely the crash scenario the new worker-crash janitor exists to clean up after. A new reaper/janitor is easy to reason about as "just a cheap SQL scan," but if it's implemented as (a) a synchronous, unbounded table scan on the SAME event loop as the interactive dispatch loop, (b) without its own `asyncio.wait_for` bound, or (c) triggered by heavy in-Python row-by-row processing (e.g., re-deriving degraded state per row instead of one batched SQL statement), it can become the NEXT thing that freezes `healthz` and gets killed mid-run — ironically becoming a new instance of the exact failure class it's supposed to clean up after.
+The 9 booked dependabot PRs are not equal-risk, and treating them as a uniform "bump and run the suite" campaign gets the ordering wrong. Verified at HEAD:
+
+| PR | Bump | Real risk |
+|----|------|-----------|
+| #612 | `supabase/setup-cli` 2.1.1 → **3.0.0** | ⛔ **Highest blast radius in the milestone.** Used by `supabase-migrate.yml` (:167, :199) — the workflow that **auto-applies migrations to PROD on merge to main** — plus `migration-policy.yml` (:177) and `migration-drift-check.yml` (:48). All SHA-pinned at v2.1.1 with `version: 2.98.2`. v3 changes the install source from **GitHub releases to npm**, removes the `github-token` input (repo passes none — safe), and now "runs npm from the workspace" honoring caller npm config. |
+| #614 | `typescript` 6.0.3 → **7.0.2** | Compiler rewritten in Go. The legacy Strada API (`import * as ts from "typescript"`) **does not exist** in 7.0 — a replacement is slated for 7.1. Anything wrapping it (typescript-eslint, ts-morph, custom transformers, dts plugins) is not guaranteed to work. TS7 also hard-errors what TS6 deprecated: `@types` packages must be listed explicitly (no implicit global pickup), `.js`/JSDoc handling changed, ES5 emit removed, `module` defaults to `esnext`. |
+| #646 | `jsdom` 29.1.1 → **30.0.0** | Exactly one breaking change: **Node floor `^22.22.2 \|\| ^24.15.0 \|\| >=26.0.0`.** Note the gap — **Node 23 and Node 25 are NOT in range.** Everything else is additive, but `getComputedStyle()` now converts lengths to px and CSS function serialization changed, which can move any assertion comparing computed-style strings. |
+| #645 | `@testing-library/jest-dom` 6.9.1 → **7.0.0** | `@testing-library/dom` is now a **required peer dependency** and is **not declared** in this repo's `package.json` (only `jest-dom`, `react`, `user-event` are). Min Node 22. |
+| #626 / #627 | `actions/setup-node`, `actions/setup-python` → **7.0.0** | Both "migrate to ESM" (runner-runtime change — fine on GitHub-hosted). setup-python 7 **removes the `pip-install` input** (verified: repo does not use it). setup-node 7 removes a dummy `NODE_AUTH_TOKEN` export (repo does not publish to npm). Low risk. |
+| #643 | `actions/checkout` 7.0.0 → 7.0.1 | Patch, in the actions group. Low risk. |
+| #686 | npm-minor-patch group, **29 updates** | Un-bisectable as one PR. |
+| #685 | pip-minor-patch group, 8 updates | Moderate; the analytics-service suite is the gate. |
 
 **Why it happens:**
-"It's just a cleanup cron, how heavy could it be" is the same reasoning that let the original `stitch_composite` pandas assembly go unnoticed until it caused an incident — cleanup/maintenance code paths get less scrutiny than the "real" business logic paths, but they run on the same shared loop.
+Dependabot presents nine equally-shaped PRs. The riskiest one (`setup-cli`, which touches the prod-migration path) is visually the *smallest* diff — a SHA and a comment — so it reads as trivial and tends to get batched with the other actions bumps.
 
 **How to avoid:**
-- Implement the janitor as a single bounded SQL statement (à la the existing `retention_compute_jobs_orphaned_running` cron — one `DELETE ... WHERE ... < now() - interval`) executed via `pg_cron`/`pg_net` OR, if it must run from the Python worker, wrap it in `asyncio.to_thread` + `asyncio.wait_for` exactly like the WEDGE-01 fix applied to `stitch_composite`'s pandas assembly and the sFOX/MT5 crawl bound.
-- If the janitor needs to touch MANY rows with per-row logic (e.g., emitting a distinct audit/Sentry event per stuck job), batch the writes and keep the loop itself cheap — never a per-row synchronous network call inside a tight Python loop on the shared event loop.
-- Add the janitor tick to the FLIPRETRY-04-style heartbeat discipline already used elsewhere in `main_worker.py` (refresh `main_worker_healthz.LAST_TICK_AT` around long-but-alive operations) so a legitimately-longer-than-expected janitor sweep doesn't itself trip a false-stale restart.
-- Regression-test it the same way WEDGE-01 was closed: assert the janitor tick does not block `healthz` past `STALE_THRESHOLD` even when the scan touches a large synthetic backlog.
+- **`supabase/setup-cli@3` lands ALONE, never bundled into an actions-group PR.** Sequence: (1) verify `version: 2.98.2` resolves identically from npm (`npm view supabase@2.98.2`) — the pin's *meaning* changed even though its text didn't; (2) apply to `migration-drift-check.yml` (the dry-run workflow) FIRST and require a `db push` dry-run diff **byte-identical** to the v2 run; (3) only then touch `migration-policy.yml` and `supabase-migrate.yml`. Watch for the workspace-npm behavior picking up the repo's `.npmrc`/registry/proxy or the restored `node_modules` cache.
+- **jsdom 30 — fix `engines` before merging.** `package.json` declares `"node": ">=22"` and `.nvmrc` says `22`; CI pins `node-version: 22` at 12 call sites (resolves to latest 22.x — satisfies `^22.22.2`, but verify the resolved patch). **Local dev is Node v25.8.1, which is outside jsdom 30's range entirely.** This **inverts** the repo's known `CI=Node22 vs local=Node25` trap: this bump is green in CI and unsupported locally. Narrow `engines.node` to jsdom's actual range so `npm install` fails loudly instead of warning, and run the suite under `PATH=/opt/homebrew/opt/node@22/bin` before merging. Separately, grep the test suite for `getComputedStyle` — the px-conversion and serialization changes are the only behavioral risk.
+- **jest-dom 7 — declare the peer explicitly.** Add `@testing-library/dom` as a direct devDependency at the major `@testing-library/react@16` resolves, then assert `npm ls @testing-library/dom` shows **exactly one** copy. Two hoisted copies mean the matchers operate against a different DOM build than the render helper, which fails in ways that read as flakes.
+- **⭐ Defer TypeScript 7.** Recommendation: `@dependabot ignore this major version` on #614 and stay on `typescript@^6`. Rationale: this repo runs `tsc --noEmit`, `eslint` with `@typescript-eslint/*` rules via `eslint-config-next@16.2.10`, `tsx` scripts, and `next build` — a stack with multiple compiler-API consumers, against a 7.0 that has no compiler API. The upside is build speed on a pre-revenue app; the downside is an un-bisectable toolchain break. If the speed is wanted, install `@typescript/native-preview` as a separate binary and leave `typescript` at 6. If it is landed anyway: **alone, last, after everything else is green**, with `npm run typecheck`, `npx next build` and `eslint` all passing.
+  - ⚠️ **`eslint --cache` will lie to you here.** `npm run lint` runs with `--cache --cache-location node_modules/.cache/.eslintcache`; after a compiler swap, a cached run reports green on files it never re-linted. The verification run must use `--no-cache`.
+- **Actions majors:** bump the SHA **and** the version comment together. Every `uses:` in this repo is SHA-pinned with a `# vX.Y.Z` comment, and a comment/SHA mismatch is a silent supply-chain hazard under the C-0293 pinning invariant.
+- **#686 (29 npm updates):** if it reds, do not debug it as one PR — split it.
+- **Campaign sequencing:** the OPS concurrency fix lands first (Pitfall 1); the TEST `compute_jobs` backlog is drained first (see the note under the phase map); PRs open **strictly one at a time**.
 
 **Warning signs:**
-The janitor implemented as a Python loop with a per-row `await supabase.table(...).update(...)` inside a `for` over an unbounded query result; no `wait_for` around the janitor tick; `healthz` latency spikes correlating with the janitor's schedule in staging/load tests.
+- A green-looking CI run whose suite never executed (`steps: []`, conclusion `cancelled`) — see Pitfall 1.
+- `npm install` emitting `EBADENGINE` and being ignored.
+- `npm ls @testing-library/dom` showing two entries.
+- `tsc --noEmit` passing while `eslint` errors with a parser/typescript-version message, or the reverse.
+- Any `supabase db push` output that differs from the v2 baseline in *ordering*, not just formatting.
 
-**Maps to:** JOB. Verification: a WEDGE-01-class regression test — the janitor tick, run against a large synthetic backlog, must not stall `healthz` past `STALE_THRESHOLD`.
-
----
-
-### Pitfall 7: Reusing `updated_at`/`computed_at` as the staleness clock — this project already reverted a janitor for exactly this mistake
-
-**What goes wrong:**
-A prior attempt at a similar janitor (tracked in this project's history as "106 janitor," deferred/reverted) filtered on a column that didn't exist and, more importantly, used `computed_at` as the staleness signal — which is WRONG because `computed_at` (or any generic `updated_at`) gets touched by OTHER writes unrelated to "how long has this row been stuck computing," so the janitor could reap a row mid-compute (a live job whose `computed_at` hadn't been refreshed yet for an unrelated reason) or fail to reap a genuinely stuck row whose `updated_at` was bumped by some other process. The new worker-crash `computing`-row janitor is at real risk of repeating this exact mistake if it's built against whatever timestamp column happens to already exist rather than a purpose-built one.
-
-**Why it happens:**
-Reusing an existing column ("we already have `updated_at`, why add a migration") is the path of least resistance, but a staleness clock needs a WRITER-STAMPED, single-purpose timestamp that means exactly one thing ("this row transitioned INTO the computing state at time T") — an overloaded general-purpose timestamp cannot honestly answer that question.
-
-**How to avoid:**
-- Add a dedicated `computing_started_at` (or equivalently named) column, stamped ONLY by the transition into `computing`, and cleared/left alone on transition OUT — never reused for any other write. This is the exact fix direction this project's own prior-attempt note calls for: "needs a transition-timestamp DDL... `computing_started_at` + writer-stamps."
-- Verify the write path: whichever code sets `computation_status = 'computing'` must, in the SAME statement/transaction, stamp `computing_started_at = now()` — a separate best-effort write that can fail independently reintroduces the same ambiguity.
-- Test the mid-compute-false-positive case explicitly: a row updated (for an unrelated reason) recently but that entered `computing` a long time ago must still be reaped; a row that entered `computing` recently must NOT be reaped even if some unrelated column is stale.
-
-**Warning signs:**
-The janitor's `WHERE` clause references `updated_at` or `computed_at` instead of a dedicated transition timestamp; no migration adding a new column alongside the janitor; the same non-existent-column bug class from the prior 106-janitor attempt.
-
-**Maps to:** JOB. Verification: unit test with a row whose generic `updated_at` is fresh but `computing_started_at` is old (must reap) and vice versa (must not reap).
-
----
-
-### Pitfall 8: "Two birds, one janitor" is a claim to verify, not assume — the fence flake and the worker-crash janitor may live at different layers
-
-**What goes wrong:**
-The v1.16 JOB scope description states the new worker-crash `computing`-row janitor "also removes the recurring shared-test-DB fence flake — two birds." But this project's OWN prior diagnosis of that flake (WORKER-04, v1.13, already shipped) root-caused it to a DIFFERENT layer: `compute_jobs.status = 'running'` rows orphaned on the WORKERLESS TEST project by the `derive-allocator-key-dailies` cron, colliding with fence-test seeds through the claim RPC's partition-dedupe `NOT EXISTS` arms keyed on `status IN ('running','done_pending_children')`. That diagnosis was ALREADY fixed by a daily retention purge cron (`retention_compute_jobs_orphaned_running`, migrations `20260719120000`→`20260720120000`, now a 4-hour window). If the NEW JOB-scope janitor targets `strategy_analytics.computation_status = 'computing'` — a DIFFERENT table and column — building it does not automatically touch the `compute_jobs.status='running'` rows the existing flake diagnosis pointed at. Shipping the new janitor and assuming the flake is now fixed (without re-running CI enough times to confirm) risks closing the JOB requirement while the flake — already once diagnosed and once "fixed" — is still live, or resurfaces because the EXISTING purge's schedule/window interacts with the new janitor in an unverified way.
-
-**Why it happens:**
-"Orphaned running/computing row" sounds like one concept, and the project's own retrospective explicitly said the WORKER-04 fix was itself "re-homed to v1.13" as the flake's root-cause fix — conflating that already-shipped fix with a NEW, differently-scoped v1.16 janitor is an easy shorthand to fall into when writing scope descriptions from memory rather than from the migration history.
-
-**How to avoid:**
-- Before scoping the new janitor, explicitly re-read the `retention_compute_jobs_orphaned_running` migration's own header (it documents the exact mechanism) and confirm: does the new `computing`-row janitor operate on the SAME table/predicate space, or a genuinely separate one? If separate, the "two birds" claim needs its OWN verification against the flake, not inheritance from the already-shipped WORKER-04 fix.
-- Verify by RUNNING CI repeatedly (or checking the flake's historical recurrence cadence) after the new janitor ships, not by inference from the scope description. The project's own retrospective already flagged this exact discipline gap once: "the recurring shared-test-DB fence flake resurfaced... the root-cause retention purge is itself re-homed... it will re-fire until built" — meaning this flake has ALREADY resurfaced once after being declared "root-caused." Don't repeat that pattern a second time by declaring victory on inference.
-- If the new janitor and the existing WORKER-04 purge both touch overlapping tables/predicates, make sure their schedules and windows don't fight each other (e.g., the new janitor firing an aggressive threshold that re-creates the exact race the 4-hour widening was designed to prevent).
-
-**Warning signs:**
-No CI run count/observation window cited as evidence the flake stopped; the new janitor's migration doesn't reference or reconcile with `retention_compute_jobs_orphaned_running`; "fixed" declared based on scope-description inference rather than observed CI behavior over multiple days.
-
-**Maps to:** JOB. Verification: N consecutive green CI runs (not just "should be fixed") post-ship, explicitly checking the specific flake signature (fence-test collision with `derive-allocator-key-dailies` seeded rows) is gone — not just "tests are green" generally.
-
----
-
-### Pitfall 9: Trusting `TODOS.md`'s RATE claim without re-verifying against current source — the backlog document is stale here
-
-**What goes wrong:**
-`TODOS.md` (consolidated 2026-07-23) states: "Rate limiting only on 6 routes — the authed routes that hit the Python service (`verify-strategy`, `keys/{sync,validate,encrypt}`, `admin/match/recompute`, `admin/partner-import`, `trades/upload`, `intro`) are unlimited → arbitrary quota burn." **This research checked all seven named routes against current source and every one of them already calls `checkLimit(...)` with a named Upstash-backed limiter** (`publicIpLimiter` on verify-strategy; `keysSyncUserLimiter`+`userActionLimiter` on keys/sync; `userActionLimiter` on keys/validate-and-encrypt, trades/upload, and intro; `adminActionLimiter` on admin/match/recompute and admin/partner-import). A RATE phase that takes the TODOS bullet at face value and "adds rate limiting to these 6/7 routes" will duplicate already-shipped limiters (harmless but wasted effort) OR, worse, will treat the phase as "done" once those 7 are wired and MISS the actual current gaps this research found: `admin/match/eval` (calls `analytics-client.ts`'s `evalMatch`, no `checkLimit` anywhere in the route) and the two direct-fetch routes (`debug-key-flow` — has its OWN dedicated limiter, so fine; `cron/warm-analytics` — a cron route, different threat model, needs its own judgment call rather than the same user-facing limiter).
-
-**Why it happens:**
-Backlog documents are written from memory/audit-history at a point in time and don't automatically stay in sync with intervening PRs (the audit-2026-05-07 identifiers — P709, B15, F6, C-PR5-01 — visible in the current `ratelimit.ts`/route comments show this rate-limiting work actually landed BEFORE the 2026-07-23 TODOS consolidation date, so the bullet was already stale when it was written down).
-
-**How to avoid:**
-- At RATE phase kickoff, re-grep the actual current gap (`grep -rl "analytics-client\|process-key-client" src/app/api --include=route.ts` then check each for `checkLimit`) rather than copying the TODOS.md route list into the requirement. This research already did that grep — the only genuine gap found among Python-calling routes was `admin/match/eval`.
-- Treat every backlog bullet in TODOS.md the same way for THIS milestone: as a hypothesis to re-verify against current source, not a pre-verified requirement — several of the "FIX MID-TERM / Reliability" bullets this research also checked (see Pitfall 11) show the same staleness pattern.
-- Scope the RATE requirement around the VERIFIED current gap (`admin/match/eval`, plus any newly-added routes since), not the copied list.
-
-**Warning signs:**
-A RATE phase plan that lists the same 7 routes from TODOS.md verbatim without a fresh grep; a PR that adds `checkLimit` calls to routes that already have them (git diff shows no-op or duplicate limiter).
-
-**Maps to:** RATE. Verification: the phase's actual diff touches only routes independently confirmed (via fresh grep, not TODOS.md) to lack a limiter.
-
----
-
-### Pitfall 10: The `42501`/unified-backbone CSV-finalize bug in TODOS.md may already be fixed — verify before re-fixing
-
-**What goes wrong:**
-`TODOS.md`'s "Money-path correctness" section lists: "Unified-backbone CSV-finalize breaks if flag on — service-role client has no `auth.uid()` → 42501 every time when `PROCESS_KEY_UNIFIED_BACKBONE=on`." Current source shows two things that complicate this claim: (1) `analytics-service/routers/process_key.py` (lines 1119-1156, re-verified at HEAD 2026-08-17) ALREADY forwards the end user's access token via `X-User-Access-Token` and calls `finalize_csv_strategy` with a user-scoped Supabase client specifically to avoid the 42501 — with an inline comment describing exactly this bug and its fix; (2) `docs/runbooks/compute-queue.md` states `PROCESS_KEY_UNIFIED_BACKBONE` **is retired** ("read nowhere... there is no runtime rollback switch anymore") as of Phase 106 — the flag this TODOS bullet is conditioned on no longer gates anything, because the unified backbone is now unconditional. Building a JOB-phase fix for "the flag-on 42501 bug" risks either re-fixing an already-fixed bug, or worse, mis-diagnosing a DIFFERENT still-open problem (the actual open item is "csv-finalize is non-transactional → orphan strategy rows on partial failure," a distinct multi-step-atomicity gap, not the auth.uid() issue) as the same thing.
-
-**Why it happens:**
-The TODOS bullet may describe a bug that was true at some point in the Phase-19 rollout and was fixed in a later, uncredited commit, or it may be describing a subtly different remaining case (e.g., some OTHER code path besides `finalize_csv_strategy` that still uses the bare service-role client without the token-forwarding fix). Either way, treating a backlog bullet as a ready-made bug report without re-reading the current code risks solving the wrong problem.
-
-**How to avoid:**
-- Before scoping the JOB requirement around this bullet, re-read `process_key.py`'s CSV-finalize branch (already done in this research — the `X-User-Access-Token` forwarding fix is present and commented) and confirm whether a 42501 is STILL reproducible today, or whether the TODOS bullet is describing already-resolved history.
-- If the 42501 truly is resolved, redirect the JOB-phase "transactional finalize" work at the REAL remaining gap: whether `finalize_csv_strategy`'s SECURITY DEFINER transaction covers the WHOLE finalize sequence (strategy row + `strategy_verifications` row + compute-job enqueue) atomically, or whether there's a step OUTSIDE that RPC (e.g., the compute-job enqueue call) that can still leave an orphaned strategy row if it fails after the RPC commits.
-- Write a regression test that reproduces (or fails to reproduce) the specific 42501 against current `main` before writing any fix — "I could not reproduce this" is a valid, useful research outcome per this project's own honesty discipline, and prevents wasted phase scope.
-
-**Warning signs:**
-A fix PR that re-adds `X-User-Access-Token` forwarding that already exists (git diff shows no functional change) ⛔ **CORRECTED 2026-08-18 — Phase 146.1 / B2.** That warning sign has INVERTED: the forwarding no longer exists anywhere (it was removed from keys/sync and verify-strategy because the only Python reader has zero callers, pinned by `tests/test_process_key.py:2220-2221`). A PR re-adding it today is NOT a no-op diff — it is a new live-credential exposure, and `src/lib/seam-user-jwt-emitters.invariant.test.ts` will red by name. See `140.1-TS-OBLIGATIONS.md` TS-15.; a requirement written directly from the TODOS bullet text without a corresponding "reproduced on commit X" note.
-
-**Maps to:** JOB. Verification: a reproduction test run against current `main` BEFORE the phase starts, documenting pass/fail, so the phase's actual target is the verified-real gap.
-
----
-
-### Pitfall 11: `recomputeMatch` and `computePortfolioAnalytics` retry-safety hasn't been explicitly audited — "it's just a recompute" is an assumption, not a proof
-
-**What goes wrong:**
-`admin/match/recompute` and the portfolio-analytics/optimizer endpoints READ as idempotent ("recompute" implies deterministic re-derivation from current DB state), and unlike the teaser flow there is no explicit "NOT idempotent" comment anywhere near them — but that absence of a comment is not the same as a verified guarantee. `match.py`'s `recompute()` function name and the presence of a per-allocator `asyncio.Lock` (`_get_recompute_lock`) suggests concurrent-recompute protection exists, but a SEAM retry policy that blindly marks "everything under `analytics-client.ts` except the known-mutating ones" as retry-safe is asserting an idempotency property for `recomputeMatch` that was never explicitly checked against side effects (does recompute ever trigger a notification, an audit-log write with a fresh UUID each call, or a partial write followed by a crash mid-recompute that a naive retry would compound?).
-
-**Why it happens:**
-"Read/compute-shaped" function names (`recompute`, `compute*`, `optimize*`) create a strong intuition of purity/idempotency that isn't automatically true just because the name suggests it — the ONLY endpoints in this codebase explicitly documented as non-idempotent (teaser) got that documentation because someone was burned by it; the rest haven't necessarily been asked the question.
-
-**How to avoid:**
-- Before assigning retry-safety to any `analytics-client.ts` function, explicitly trace its Python handler for side effects beyond the primary DB write it's named for: does it write audit-log rows with per-call metadata that would duplicate on retry? Does it ever enqueue a downstream job, send a notification, or touch a rate-limited external API as a SIDE effect of "just recomputing"?
-- For `recomputeMatch` specifically: verify the `_get_recompute_lock` per-allocator lock actually prevents a RETRIED overlapping call from racing the original (a lock held only within the Python process doesn't protect against two SEPARATE Vercel-triggered HTTP calls landing on two different Railway/worker instances if there's more than one).
-- Default to "read-only GETs are safe to retry; anything that writes gets an explicit case-by-case idempotency proof" — not "compute-named functions are probably fine."
-
-**Warning signs:**
-A retry policy classification table that includes `recomputeMatch`/`computePortfolioAnalytics` as "safe to retry" with no supporting trace of the Python handler's actual side effects; the per-allocator lock assumed to be a distributed lock when it may only be process-local.
-
-**Maps to:** SEAM. Verification: an explicit per-endpoint idempotency audit table (function → side effects traced → retry-safe: yes/no/needs-key) reviewed before the retry policy ships, not inferred from function names.
+**Phase to address:**
+**DEPS**, LAST in the milestone, strictly after **OPS**. Suggested intra-phase order: actions-patch (#643) → actions majors (#626, #627) → pip group (#685) → npm-minor-patch group (#686) → jest-dom 7 (#645) → jsdom 30 (#646, with the `engines` change) → `supabase/setup-cli` 3 (#612, alone, drift-check first) → TypeScript 7 (#614) **deferred by recommendation**.
 
 ---
 
 ## Technical Debt Patterns
 
 | Shortcut | Immediate Benefit | Long-term Cost | When Acceptable |
-|----------|-------------------|-----------------|------------------|
-| Blanket retry policy keyed on HTTP path, not `flow_type`/side-effect audit | Less code, one wrapper | Duplicate teaser leads / re-fired non-idempotent writes on transient network blips | Never — must be per-flow |
-| In-memory breaker/limiter state (module-level variable) | Zero new infra, simple to write | Near-useless under concurrent Fluid Compute instances; false confidence | Never for a shared-resource breaker; only acceptable if EXPLICITLY documented as best-effort/per-instance |
-| Reusing `updated_at` as a staleness clock for the new janitor | No migration needed | Repeats the exact 106-janitor revert (mid-compute false reap or missed genuine stalls) | Never — this project already paid this cost once |
-| Copying TODOS.md's route list into the RATE requirement verbatim | Fast requirement-writing | Re-does already-shipped work or misses the real current gap (`admin/match/eval`) | Never — always re-grep first |
-| Flat single reaper threshold for all `computing`/`running` kinds | Simple one-number config | Reaps a legitimately slow kind (mirrors the WORKER-04 2h→4h correction) | Never — derive per-kind from real batch-tail math |
-| Retry-with-backoff added without revisiting the existing timeout constant | Fast to ship | Retries fire while the first attempt is still legitimately in-flight, doubling load during an outage | Never — timeout budget must be re-derived alongside retry count |
+|----------|-------------------|----------------|-----------------|
+| Add the share token to the `cacheKey` string instead of bypassing the cached wrapper | One-line diff, "obviously" scoped | Publishes private strategies to every anon visitor for 3600s; the no-op is invisible in review | **Never** |
+| Cache the token lane "just for the TTL, it's fine" | Faster shared pages | Revocation silently becomes "revoked in up to an hour" — kills the founder's entire rationale for tokens over ids | **Never** |
+| `.eq("computation_status", "complete")` in the ranking query | One line, reads correct | Drops `complete_with_warnings` (a *success* status); re-forks a predicate two migrations were spent unifying | **Never** — use `isComputedAnalytics()` |
+| Filter percentiles on the TS side only, leave `get_verified_cohort_rank` alone | Half the work, half the review | Factsheet rank and scenario peer rank disagree; the RPC's documented "parity by construction" becomes false | **Never** |
+| Shrink the `shared-test-db` group to two members and call it fixed | No new dependency, small diff | Does not address the eviction rule at all (three concurrent *runs* still evict); closes #616 falsely | **Never** — it is the remedy TODOS.md proposes and it is wrong |
+| Drop `cache_logger_on_first_use` and close the structlog audit | One-line diff | Closes Mode B, leaves Mode A (module-scope `.bind()`) open, and the audit is now marked done | Only alongside a Mode-A source-scan gate |
+| Hoist `configure_logging()` with `# noqa: E402` and no behavioral test | Fixes today's ordering | Rots on the next import reorder with no test failing; also silently changes worker-entrypoint logging | Only alongside the behavioral redaction test |
+| Land the dependabot majors as one batched PR | One CI run, one review | Un-bisectable; the prod-migration CLI rides in with test-only bumps | **Never** for #612 or #614; acceptable for #643 + the two actions majors |
+| Verify a bump on a run that concluded `cancelled` | Looks green-ish | The suite never ran; with no branch protection nothing stops the merge | **Never** — assert `conclusion == success`, not "not failure" |
+| Skip `mypy --strict` on analytics-service because pytest is green | Faster loop | GSD's flow runs pytest only; mypy errors surface in PR CI after the branch is stale | Never for `analytics-service/**` |
 
 ## Integration Gotchas
 
 | Integration | Common Mistake | Correct Approach |
-|-------------|-----------------|-------------------|
-| Vercel ↔ Railway (`analytics-client.ts`) | Adding retry/breaker to this file only | Also harden `process-key-client.ts` (separate wrapper, same Railway target); ideally share ONE resilience layer between both |
-| Vercel ↔ Railway (`process-key-client.ts` / `/process-key`) | Treating retry-safety as a property of the endpoint | Gate retry on `flow_type` (`teaser`=non-idempotent by design; `resync`/`onboard`/`csv`=idempotent via unique-index + `WIZARD_DUPLICATE` + RPC) |
-| Upstash Redis rate limiter (`src/lib/ratelimit.ts`) | Building a NEW in-memory limiter/breaker for the SEAM work | Reuse the ALREADY-durable Upstash store this codebase has for rate limiting; extend it (or Postgres) for breaker state too |
-| `compute_jobs` watchdog (`main_worker.py`) | Setting a new janitor's threshold from intuition | Reuse the `WATCHDOG_PER_KIND_OVERRIDES` batch-tail math (`p_batch_size × max_per_kind_timeout`) and its CI-enforced invariant test |
-| `finalize_csv_strategy` RPC | Assuming the whole finalize sequence is one transaction because the RPC is SECURITY DEFINER | Verify what's OUTSIDE the RPC (e.g. the compute-job enqueue call) — that's where a partial-failure orphan can still occur |
+|-------------|----------------|------------------|
+| GitHub Actions `concurrency` | Believing `cancel-in-progress: false` protects queued jobs | It protects the *running* job only. Use an external mutex (`gh-action-mutex` / `turnstyle`) for true FIFO; add a `cancelled`-conclusion watcher |
+| Railway ← main CI | Treating "merged" as "deployed" | Railway skips the deploy on any non-green suite, **including `cancelled`**. Verify `/health` `git_sha` == main HEAD; detection today is bounded at ~6h by `analytics-deploy-verify.yml`, which deliberately exits 0 |
+| Supabase migrations | Bumping the CLI as a routine actions bump | `supabase-migrate.yml` auto-applies to PROD on merge. Any CLI change is a production-database change; validate on `migration-drift-check.yml` first |
+| Supabase SECDEF RPC + anon | Adding the function and the RLS policy but not `GRANT EXECUTE TO anon` | anon gets 42501, SSR returns `[]`, console is clean — a silent empty page. Grant explicitly and assert an anon read in a test |
+| Next.js `unstable_cache` | Assuming the entry key is the string you pass | The entry is derived from callback source + `keyParts` + args. In this repo the passed string is split at `"::"` and the tail is **discarded** |
+| Vercel CDN + `?s=` token | Assuming a query param creates a distinct cache entry | It does not unless the route varies on it. `force-dynamic` + explicit `Cache-Control: private, no-store` on the token lane |
+| Sentry (`@sentry/nextjs`) | Assuming `Referrer-Policy` protects the token | Sentry reads `location.href` in-process. Scrub the `s` param in `beforeSend`/`beforeBreadcrumb`, verified against a real captured event |
+| Link unfurlers (Slack/iMessage) | Not accounting for server-side fetches of the shared URL | The token lands in a third party's logs on first paste. Emit generic metadata; rely on revocability |
+| structlog + FastAPI lifespan | Configuring inside lifespan and assuming import-time modules inherit it | They do not if they emit first. Test the observable redaction, not the import order |
+| `npm` peer deps | Relying on auto-installed transitive peers | jest-dom 7 makes `@testing-library/dom` a required peer; declare it and assert a single hoisted copy |
 
 ## Performance Traps
 
 | Trap | Symptoms | Prevention | When It Breaks |
-|------|----------|------------|-----------------|
-| Retry-with-backoff without a shared circuit breaker | Retry amplifies load on an already-struggling Railway instance (N clients × M retries) | Circuit breaker (shared-store) trips BEFORE retries pile on; retries should back off exponentially and respect the breaker's open state | First real Railway slowdown/outage under concurrent traffic |
-| Reaper/janitor doing per-row synchronous work on the shared event loop | `healthz` latency spikes during the janitor's schedule; Railway restarts correlated with janitor ticks | Single bounded SQL statement or `to_thread`+`wait_for`, per WEDGE-01 fix pattern | First backlog large enough that a per-row loop takes seconds, not milliseconds |
-| Two independent breakers (one per wrapper file) each rediscovering the same outage | Twice the "protected" request volume vs a single shared breaker during an incident | Share breaker state across both `analytics-client.ts` and `process-key-client.ts` | First real Railway outage that spans both code paths simultaneously |
+|------|----------|------------|----------------|
+| Dropping `cache_logger_on_first_use` in the worker's hot loop | Worker throughput dips; log-heavy jobs slow | Measure the log-heavy path before/after; prefer the source-scan + behavioral-test fix over the global flag change | Immediately on a log-dense compute job |
+| Token-keyed cache entries (`keyParts` including the token) | Cache population grows without bound | Bypass the cache on the token lane rather than re-keying it | As soon as links are re-minted; each revoke orphans an entry for its full TTL |
+| `getPercentiles` fetching every published strategy's analytics per request | Discovery/Browse latency grows linearly with the catalog | Out of scope for v1.20, but the `computation_status` filter is the natural moment to push the ranking into SQL | Noticeable in the low hundreds of published strategies |
+| 9 dependabot PRs serializing on one `shared-test-db` lock | Campaign wall-clock in many hours; queue thrash | One PR at a time; the `python` job alone is ~7m and `e2e-seeded` queues behind it by design (`ci.yml:1533-1539`) | Immediately, at 3+ concurrent runs |
 
 ## Security Mistakes
 
 | Mistake | Risk | Prevention |
 |---------|------|------------|
-| Retrying a teaser POST that already succeeded upstream | Duplicate `strategy_verifications` rows / duplicate leads with a fresh `public_token` each time, inflating disclosure surface | Never retry `flow_type: "teaser"` at the client layer |
-| Circuit-breaker "protection" that's actually per-instance and silently inadequate | False sense of DoS/cascading-failure protection while Railway still receives near-full load during an outage | Shared-store breaker (Upstash/Postgres), or explicit documented best-effort scope |
-| Building a NEW janitor without the `computing_started_at` writer-stamp discipline | Reaps a live job (data loss / user-visible failure on a healthy sync) OR fails to reap a genuinely dead one (permanent spinner) | Dedicated transition-timestamp column, stamped atomically with the status write |
+| Token-lane payload written into the id-keyed `unstable_cache` entry | **Private strategies published to every anonymous visitor for 3600s** — strictly worse than the bug being fixed | Bypass `buildFactsheetPayloadCached`; adversarial ordered test (token request first, then anon 404) |
+| Storing the raw share token at rest | A DB read or backup leak becomes a permanent capability grant | `token_hash` only (sha256 hex computed in ONE TS module), mirroring `scenario_shares` |
+| Revoke implemented as `DELETE` | No audit trail; "was this link ever live?" is unanswerable | `revoked_at` timestamp + partial `UNIQUE … WHERE revoked_at IS NULL` |
+| Unknown-token 404 differing from unknown-id 404 | The endpoint becomes an existence oracle, re-creating the enumeration risk tokens were meant to remove | Byte-identical 404 on both paths, asserted |
+| `revoked_at IS NULL` filtered by the caller rather than inside the SECDEF body | RLS does not protect a SECDEF body; a forgotten filter ships green | Filter inside the RPC; test revoke immediacy (0 rows on the next request) |
+| New mint/revoke RPC missing from `MUTATING_RPC_NAMES` | The mutation gate silently does not cover the new surface | Add it in the same phase; the SEC group already tracks this gap |
+| Module-scope structlog logger emitting before `configure_logging()` | HMAC signatures (ccxt) and MT5 passwords reach logs/Sentry **unredacted** | Source-scan gate on module-scope `.bind()` + behavioral redaction test |
+| `Referrer-Policy: strict-origin-when-cross-origin` treated as complete token protection | Same-origin requests, in-page JS, and platform access logs still carry `?s=` | `no-referrer` on the factsheet route + Sentry param scrub + short-lived, revocable tokens |
+| Bumping an action's SHA without its version comment | The pin says one version and runs another — silent supply-chain drift under C-0293 | Update both; review rejects a mismatch |
 
 ## UX Pitfalls
 
 | Pitfall | User Impact | Better Approach |
-|---------|-------------|------------------|
-| SEAM retry silently doubles a teaser lead submission | User sees no error but the platform now has two lead rows for one landing-page visit; support/sales confusion | No client-side retry on teaser; surface a clean, honest "please try again" error instead |
-| Reaper reaps a legitimately slow composite/backfill job | User's real, in-progress sync gets marked `failed` and has to restart from scratch, appearing as "flaky product" | Threshold derived from real batch-tail math (Pitfall 4), not intuition |
-| A too-short client timeout fires mid-way through a real 90-day OKX archive fetch | User sees a spurious failure on an operation that would have succeeded given the platform's own 300s ceiling | Timeout budget matched to Vercel `maxDuration`, not "typical" latency |
+|---------|-------------|-----------------|
+| Percentile badges vanishing catalog-wide when the population crosses min-N | Every manager loses their rank on the same day, with no explanation | Measure the population delta first; if the cohort drops under 20, plan the suppression copy deliberately |
+| A manager's rank moving with no data change of their own | Reads as a bug, or as the platform being arbitrary | Snapshot before/after per strategy so the change is explainable |
+| "Copy Link" producing a link the recipient cannot view | The exact defect SHARELINK-01 exists to fix | Mint-or-reuse on copy; never surface a copy affordance that can produce a dead link |
+| The same affordance gated in one place and not the other | Inconsistent behavior teaches users the product is unreliable | Fix the CLASS — `FactsheetView.tsx` **and** `strategies/page.tsx:174` — not the one component |
+| `status='private'` strategies getting zero actions from `StrategyActions` | A contribution-flow strategy can never leave `private` from the UI | Decide the product question in this milestone: are contribution records permanently private? If not, `private` needs a publish path |
+| Token-page link previews leaking the strategy name | The title appears in Slack/iMessage unfurls alongside the token | Generic metadata on the token lane |
 
 ## "Looks Done But Isn't" Checklist
 
-- [ ] **SEAM retry policy:** Often missing a `flow_type`/side-effect audit — verify each retried call site has an explicit idempotency proof, not an inferred one from its name.
-- [ ] **SEAM coverage:** Often touches only `analytics-client.ts` — verify `process-key-client.ts` (and any other direct-fetch route) got the same treatment or an explicit documented exception.
-- [ ] **Circuit breaker:** Often built as an in-memory module variable — verify it reads/writes a shared store (Upstash/Postgres) observable across separate module instances.
-- [ ] **Reaper/janitor threshold:** Often set from intuition — verify it's derived from real batch-tail math (`batch_size × max_per_kind_timeout`) with a CI-enforced invariant test, mirroring `test_every_kind_has_watchdog_headroom`.
-- [ ] **Reaper/janitor staleness clock:** Often reuses `updated_at`/`computed_at` — verify a dedicated writer-stamped transition timestamp exists.
-- [ ] **Reaper/janitor event-loop safety:** Often a per-row Python loop — verify it's a single bounded SQL statement or wrapped in `to_thread`+`wait_for`, with a WEDGE-01-class regression test.
-- [ ] **"Two birds" fence-flake claim:** Often asserted from scope-description inference — verify against the ACTUAL WORKER-04 diagnosis (table/predicate) and N consecutive green CI runs, not just "should be fixed."
-- [ ] **RATE route list:** Often copied from TODOS.md — verify with a fresh grep against current source before scoping (this research found all 7 named routes already wired; `admin/match/eval` is the real gap).
-- [ ] **42501/transactional-finalize bug:** Often assumed still-open from a backlog bullet — verify reproducibility against current `main` (this research found the `X-User-Access-Token` fix already present) before building a fix.
-- [ ] **DELETE-vs-reset semantics:** Often decided once and forgotten — verify the NEW janitor's terminal action (delete vs mark-failed vs reset-to-pending) matches the founder-decided TEST/PROD split, and is applied consistently if the janitor covers a different table than the existing `compute_jobs` purge.
+- [ ] **Share-token lane:** often missing the *adversarial ordering* — verify a token request followed by an anonymous `/factsheet/<id>` request STILL 404s, in that order, in one test.
+- [ ] **Share-token lane:** often missing the CDN half — verify `Cache-Control` on the token response, not just the absence of `unstable_cache`.
+- [ ] **Share-token lane:** often missing `GRANT EXECUTE TO anon` on the new SECDEF RPC — verify with an actual anon-role read, not a policy inspection.
+- [ ] **Share-token lane:** often missing `MUTATING_RPC_NAMES` registration — grep for the new RPC name in that list.
+- [ ] **Revocation:** often missing immediacy — verify 0 rows on the *next* request after `revoked_at = now()`, not after a cache TTL.
+- [ ] **Percentile filter:** often missing the SQL side — verify `get_verified_cohort_rank`'s cohort moved too, or that leaving it is a recorded decision.
+- [ ] **Percentile filter:** often missing `complete_with_warnings` — verify the predicate is `isComputedAnalytics()`, not a literal.
+- [ ] **Percentile filter:** often missing the population count — verify the PROD before/after row counts are in the plan artifact.
+- [ ] **Concurrency fix:** often missing the cross-run case — verify by simulating **three** concurrent runs, not two.
+- [ ] **Concurrency fix:** often missing the detection layer — verify a `cancelled` main run produces a loud signal (issue or rerun), not silence.
+- [ ] **#616:** often closed as "fixed" when only the symptom converged — verify the *recurrence mechanism* is gone before closing.
+- [ ] **structlog:** often missing Mode A — verify a planted module-scope `.bind()` would fail the gate; neuter and observe RED.
+- [ ] **structlog:** often missing worker coverage — verify `main_worker`'s entrypoint, not just `main:app`.
+- [ ] **jsdom 30:** often missing the `engines` narrowing — verify `npm install` on Node 25 fails loudly rather than warning.
+- [ ] **jest-dom 7:** often missing the explicit peer — verify `npm ls @testing-library/dom` shows exactly one copy.
+- [ ] **setup-cli 3:** often missing the dry-run parity — verify a `db push` dry-run diff byte-identical to the v2 baseline before touching `supabase-migrate.yml`.
+- [ ] **Any bump:** often missing the run-conclusion check — verify `conclusion == "success"`, not merely "not failure" (with no branch protection, a grey run merges).
 
 ## Recovery Strategies
 
 | Pitfall | Recovery Cost | Recovery Steps |
-|---------|----------------|------------------|
-| Duplicate teaser rows from a retried non-idempotent write | LOW | De-dupe `strategy_verifications` by `(email, exchange, fingerprint)` within the retry window; add the missing flow_type gate; no data-loss risk (public teaser only) |
-| Per-instance breaker gave false protection during a real Railway outage | MEDIUM | Migrate breaker state to Upstash/Postgres; replay the incident's request-volume math to confirm the shared-store version would have actually reduced load |
-| New janitor reaped a legitimately slow job | MEDIUM-HIGH | Re-run the affected sync (data is lost only if the job had no checkpoint — see the existing "strategy sync-failure checkpointing" backlog item); widen the threshold using real batch-tail math; add the missing per-kind override |
-| New janitor missed a genuinely dead job (relied on `updated_at`) | MEDIUM | Add the dedicated `computing_started_at` column + writer-stamp; backfill/re-derive the specific stuck strategy manually via `/admin/compute-jobs` |
-| RATE phase duplicated existing limiters | LOW | Revert the no-op diff; redirect effort at the verified real gap (`admin/match/eval`) |
-| JOB phase re-fixed an already-fixed 42501 | LOW | No functional harm (idempotent no-op fix), but redirect remaining phase time at the actual open orphan-row gap (enqueue-step atomicity outside the RPC) |
+|---------|---------------|----------------|
+| Token payload cached into the id-keyed entry | **HIGH** — it is a live disclosure | `revalidateTag("factsheet-v2")` (global) immediately; then per-id tags; revoke all outstanding tokens; assume every id fetched during the window was exposed; then fix and re-verify with the ordered test |
+| Ranking population cliff (badges vanish) | LOW | Revert the filter (single query change, no DDL); re-measure the population; re-land with the suppression copy planned |
+| Ranking moved and a manager asks why | MEDIUM with a snapshot, unrecoverable without | With the before/after snapshot: answer directly. Without it the answer does not exist — which is why the snapshot is a gate, not a nicety |
+| Analytics deploy silently skipped | LOW **if noticed** | `gh run rerun <id> --failed` (this worked on 2026-08-08, attempt 2 fully green); then verify `/health` `git_sha` == main HEAD |
+| External mutex leaked by a killed job | LOW | Documented manual unlock (delete the lock ref/branch); this is why a TTL/steal path is a requirement of adopting the action, not a follow-up |
+| Unredacted credential reached logs/Sentry | **HIGH** | Rotate the affected key immediately; purge the Sentry events; then fix the logger class. Rotation first — the fix does not un-leak |
+| TypeScript 7 breaks the toolchain | LOW if landed alone and last | Revert the single PR; pin `typescript@^6`; `@dependabot ignore this major version` |
+| `supabase/setup-cli@3` changes `db push` behavior against PROD | **HIGHEST** | This is why it validates on `migration-drift-check.yml` first. If it reaches `supabase-migrate.yml` and misbehaves, recovery is manual database remediation — plan to never need it |
 
 ## Pitfall-to-Phase Mapping
 
-| Pitfall | REQ Group | Verification |
-|---------|-----------|---------------|
-| 1. Blind retry duplicates non-idempotent teaser writes | SEAM | Fault-injection test per `flow_type`; teaser retry refused/absent, resync/onboard/csv retry proven safe |
-| 2. Two wrapper files, one hardened | SEAM | Integration test kills Railway mock for both `analytics-client.ts` and `process-key-client.ts` call sites |
-| 3. In-memory breaker/limiter useless across instances | SEAM | Breaker state readable from a shared store across two independent module contexts; load test confirms request-volume drop |
-| 4. Reaper threshold shorter than real batch-tail | JOB | CI-enforced invariant: threshold > every relevant handler's real (batch-inclusive) worst case |
-| 5. Client timeout shorter than real synchronous p99 | SEAM | Per-call-site timeout budget table checked against Vercel `maxDuration`; test near the old timeout boundary |
-| 6. Janitor reintroduces WEDGE-01 | JOB | WEDGE-01-class regression: janitor tick against large synthetic backlog does not stall `healthz` |
-| 7. Janitor reuses `updated_at` as staleness clock | JOB | Unit test: fresh-`updated_at`/old-`computing_started_at` row reaped; old-`updated_at`/fresh-`computing_started_at` row NOT reaped |
-| 8. "Two birds" fence-flake claim unverified | JOB | N consecutive green CI runs post-ship, checking the SPECIFIC fence-collision signature, not general green |
-| 9. RATE route list stale vs current source | RATE | Diff touches only routes independently confirmed (fresh grep) to lack a limiter |
-| 10. 42501 bug possibly already fixed | JOB | Reproduction test against current `main` run BEFORE the phase starts |
-| 11. `recomputeMatch`/compute-named retry-safety unaudited | SEAM | Explicit per-endpoint idempotency audit table (side effects traced), not name-inferred |
+| Pitfall | Prevention Phase | Verification |
+|---------|------------------|--------------|
+| 1 — concurrency eviction / silent deploy skip | **OPS, first phase (≈158)** — hard predecessor of DEPS | Simulate 3 concurrent runs; assert no job concludes `cancelled`; assert a forced `cancelled` main run produces a loud signal |
+| 2 — token render poisons the id-keyed cache | **SHARE (SHARELINK-01)** | Ordered adversarial test in `phase-148-owner-lane-cache-isolation.test.ts`; demonstrated RED with the bypass neutered |
+| 3 — token leakage channels + revocation | **SHARE**, same phase (same migration) | Anon SECDEF read succeeds; revoke → 0 rows next request; token absent from a real Sentry event; unknown-token 404 == unknown-id 404 |
+| 4 — percentile population change | **RANK**, early | `isComputedAnalytics()` used; SQL RPC moved or the decision recorded; PROD before/after counts in the artifact; `phase-149-my-strategies-parity.test.ts` green |
+| 5 — structlog cached/bound logger | **OPS** (parallel with 1) | Source-scan gate fails on a planted module-scope `.bind()`; behavioral test scrubs a synthetic HMAC after a late `configure_logging()`; both shown RED when neutered |
+| 6 — dependency majors | **DEPS, last**, strictly after OPS | One PR at a time; `conclusion == success` asserted per PR; `engines` narrowed for jsdom; single `@testing-library/dom`; setup-cli dry-run parity; TS7 deferred |
+| TEST `compute_jobs` backlog (note below) | **OPS**, before DEPS | Backlog drained and a drain owner assigned before the campaign opens |
+
+> **Note — the deterministic red that will masquerade as dependency breakage.** TODOS.md line 2265 documents that cron jobid 9 fans out one `derive_broker_dailies` job per `api_key` at 05:30 UTC, TEST has no worker, and the accumulated `pending` rows sort ahead of anything a test seeds by `next_attempt_at` — reddening **exactly 10** claim-path tests in `test_compute_jobs_fencing.py` / `test_drain_semantics.py`, deterministically, plus ~900 orphaned `running` rows. Running a 9-PR campaign against that backlog produces reds that look like dependency breakage and are not. Drain it first. ⛔ Never `cron.unschedule(9)`.
 
 ## Sources
 
-- This codebase (HIGH — primary evidence for every pitfall above):
-  - `src/lib/analytics-client.ts` (30s default timeout, zero retry/breaker, per-callsite overrides)
-  - `src/lib/process-key-client.ts` (60s inline timeout, zero retry/breaker, docstring anticipating but not implementing retries)
-  - `analytics-service/routers/process_key.py` (flow_type idempotency contracts: teaser non-idempotent by design ~line 630; `WIZARD_DUPLICATE` idempotent-hit ~lines 736-748, 905-912; CSV-finalize `X-User-Access-Token` 42501 fix lines 1119-1156)
-  - `analytics-service/main_worker.py` (`WATCHDOG_PER_KIND_OVERRIDES`, `TIMEOUT_PER_KIND` invariant, FLIPRETRY-04 heartbeat discipline, `WORKER_CLAIM_ROLE` isolation)
-  - `analytics-service/services/job_worker.py` (`_check_circuit_breaker`/`EXCHANGE_COOLDOWNS` — the existing DB-backed breaker pattern to mirror)
-  - `src/lib/ratelimit.ts` (Upstash-backed shared rate limiter already in place; fail-open/fail-closed production matrix)
-  - `supabase/migrations/20260719120000_retention_orphaned_running_compute_jobs.sql` + `20260720120000_retention_orphaned_running_window_4h.sql` (the WORKER-04/RT-01 batch-tail math correction, 2h→4h)
-  - `docs/runbooks/compute-queue.md` (confirms `PROCESS_KEY_UNIFIED_BACKBONE`/`USE_COMPUTE_JOBS_QUEUE` are retired/permanent-on; watchdog/circuit-breaker/idempotent-retry operational detail)
-  - Fresh grep of `src/app/api/**/route.ts` for `checkLimit` usage (this research; contradicts TODOS.md's "6 unlimited routes" claim — all 7 named routes are wired; real gap is `admin/match/eval`)
-- This project's own incident/retrospective history (HIGH):
-  - WEDGE-01 (Eclipse incident 2026-07-19, PR#632) — event-loop-block class, referenced 25+ times across the codebase's own comments/tests
-  - The 106-janitor revert (`project_106_janitor_deferred_needs_transition_timestamp` — this project's memory) — reaper filtered a nonexistent column, `computed_at` wrong basis, needs `computing_started_at` + writer-stamps
-  - `.planning/RETROSPECTIVE.md` — the fence flake "resurfaced" once already after being declared root-caused
-  - `TODOS.md` — used as a hypothesis source, cross-checked against current source (Pitfalls 9, 10)
+**Repo (HIGH confidence — read at HEAD during this pass):**
+- `src/app/factsheet/[id]/v2/page.tsx` — `unstable_cache` wrapper, the `"::"` split, the id-only `keyParts`, the owner-lane bypass, `force-dynamic`, the v2→v6 shape-bump log
+- `src/app/factsheet/[id]/page.tsx` — re-export, not redirect
+- `src/lib/queries.ts:116-183` — `getPercentiles`, `PERCENTILE_ANALYTICS_COLUMNS`, the two `< 5` floors
+- `src/lib/closed-sets.ts:663-702` — `STRATEGY_ANALYTICS_COMPUTATION_STATUSES`, `isComputedAnalytics()`, the `complete_with_warnings` history
+- `src/app/api/strategies/csv-finalize/route.ts:1029-1500` — `CLOCK_SAFETY_KPI_COLUMNS`, the measured 7-row PROD contamination population
+- `supabase/migrations/20260626120000_get_verified_cohort_rank.sql` — SQL cohort, decile quantization, min-N 20, the parity-by-construction claim
+- `supabase/migrations/20260622120000_scenario_shares_and_read_rpc.sql` — the revocable-token pattern to copy
+- `.github/workflows/ci.yml` :39-41, :936-938, :1126-1145, :1533-1552 — concurrency groups, the 2026-08-03 chain fix and its ⛔ notes
+- `.github/workflows/analytics-deploy-verify.yml` — the deliberate `exit 0`, the ~6h detection bound, the dedup'd-issue pattern
+- `.github/workflows/supabase-migrate.yml`, `migration-policy.yml`, `migration-drift-check.yml` — `supabase/setup-cli@v2.1.1`, `version: 2.98.2`
+- `analytics-service/services/logging_config.py:214-245` — `configure_logging`, `cache_logger_on_first_use=True`, the `_redact_processor` position, the stdlib `LogRecord` bridge
+- `analytics-service/services/mt5_client.py:155-176` — the documented per-call `_stage_logger()` workaround and the LogCapture observation
+- `next.config.ts:79` — `Referrer-Policy: strict-origin-when-cross-origin`
+- `package.json` — `engines.node: ">=22"`, `typescript ^6`, `jsdom ^29.1.1`, `@testing-library/jest-dom ^6.9.1`, **no** `@testing-library/dom`; `lint` uses `eslint --cache`
+- `.nvmrc` (`22`); local `node -v` = **v25.8.1**
+- `TODOS.md` lines 40-73 (SHARELINK-01 founder decision + cache landmine), 2258-2265 (concurrency eviction evidence, #616, TEST backlog)
+- `.planning/PROJECT.md` — v1.20 scope, REQ groups, stack constraints
+
+**Vendor release notes via dependabot PR bodies (HIGH confidence — version-exact):**
+PR #646 (jsdom 30.0.0), #645 (`@testing-library/jest-dom` 7.0.0), #612 (`supabase/setup-cli` 3.0.0), #626 (`actions/setup-node` 7.0.0), #627 (`actions/setup-python` 7.0.0), #643 (`actions/checkout` 7.0.1), #614 (typescript 7.0.2 — dependabot could not fetch notes).
+
+**External (MEDIUM confidence — web search / Context7, cross-checked against the repo's own measured evidence):**
+- [Canceling since a higher priority waiting request exists — Tim Taurit](https://taurit.pl/github-canceling-since-a-higher-priority-waiting-request-exists/)
+- [Feature request: concurrency to queue all jobs waiting on a group — community discussion #12835](https://github.com/orgs/community/discussions/12835)
+- [Workflow sharing concurrency group cancelled instead of pending — community discussion #32376](https://github.com/orgs/community/discussions/32376)
+- [ben-z/gh-action-mutex](https://github.com/ben-z/gh-action-mutex) · [softprops/turnstyle](https://github.com/marketplace/actions/action-turnstyle) · [actions-mutex](https://github.com/marketplace/actions/actions-mutex)
+- [structlog configuration docs — lazy proxy, never bind at module scope](https://github.com/hynek/structlog/blob/main/docs/configuration.md) · [structlog performance docs — `cache_logger_on_first_use`](https://github.com/hynek/structlog/blob/main/docs/performance.md)
+- [Referer header: Privacy and security concerns — MDN](https://developer.mozilla.org/en-US/docs/Web/Privacy/Guides/Referer_header:_privacy_and_security_concerns) · [Cross-domain Referer leakage — PortSwigger](https://portswigger.net/kb/issues/00500400_cross-domain-referer-leakage) · [Token Leakage Via Referer — Cobalt](https://www.cobalt.io/vulnerability-wiki/v4-access-control/token-leakage-referer)
+- [TypeScript 7.0 RC: The Go Rewrite Migration Guide — SitePoint](https://www.sitepoint.com/typescript-70-rc-the-go-rewrite-migration-guide/) · [What Breaks When You Upgrade to TypeScript 7 (tsgo)](https://medium.com/@krunalkanojiya/what-breaks-when-you-upgrade-to-typescript-7-tsgo-614005afbbd0)
 
 ---
-*Pitfalls research for: production resilience hardening (SEAM + JOB + RATE) on live money-bearing plumbing — v1.16*
-*Researched: 2026-07-25*
+*Pitfalls research for: v1.20 Backlog Burndown — SHARE, OPS (concurrency + structlog), RANK, DEPS*
+*Researched: 2026-08-20*

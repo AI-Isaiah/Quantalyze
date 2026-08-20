@@ -1,159 +1,248 @@
-# Stack Research
+# Stack Research — v1.20 DEPS: the 9-PR dependabot campaign
 
-**Domain:** Production resilience hardening for an existing Vercel (Next.js Fluid Compute) → Railway (FastAPI) seam, backed by Supabase Postgres. NOT a new feature — closing failure-handling gaps in live plumbing (SEAM / JOB / RATE, v1.16).
-**Researched:** 2026-07-25
-**Confidence:** HIGH (every recommendation is grounded in a direct read of the current codebase; library versions verified against the npm registry, which matched what's already pinned in `package.json`)
+**Domain:** Dependency-upgrade campaign on an existing production stack (Next.js 16 App Router + TS, vitest 4 two-project jsdom/node split, Playwright, FastAPI/Python 3.12 on Railway, Supabase, GitHub Actions with CI Node 22 / local Node 25). NOT new technology selection.
+**Researched:** 2026-08-20
+**Confidence:** HIGH on everything measured locally or read from a vendor's own release API / the npm+PyPI registries. MEDIUM on the TypeScript 7 ecosystem narrative (one WebSearch pass corroborating a primary-source `exports`-map read).
 
-## Executive framing
-
-This milestone needs **almost no new dependencies**. The codebase already has:
-- `@upstash/ratelimit@2.0.8` + `@upstash/redis@1.38.0` installed and wired (`src/lib/ratelimit.ts`) — a durable, cross-instance, fail-closed-in-prod rate limiter.
-- `AbortSignal.timeout()` already used for the Vercel→Railway fetch deadline in both seam clients (`src/lib/analytics-client.ts:90`, `src/lib/process-key-client.ts:132`).
-- A per-kind Postgres watchdog (`reset_stalled_compute_jobs`, migration `20260412094449_compute_jobs_admin_and_defer.sql`) and a `portfolio_analytics`-scoped sibling (`reset_stalled_portfolio_analytics`, migration `20260516122247_portfolio_analytics_stuck_row_reaper.sql`) that already implement the exact reaper pattern SEAM/JOB needs — just not yet applied to `strategy_analytics`.
-
-The stack work for v1.16 is: (1) a ~40-line hand-rolled retry+circuit-breaker layer built ON TOP of the already-installed Upstash client (SEAM), (2) one new SQL migration that clones the existing `reset_stalled_portfolio_analytics` pattern onto `strategy_analytics` plus a scheduling hookup (JOB), and (3) a verification/closure pass on rate limiting, because **the RATE premise does not hold up against the current code** (see below) — most of it is already done.
-
-## Recommended Stack
-
-### Core Technologies (already installed, zero version changes)
-
-| Technology | Version | Purpose | Why Recommended |
-|------------|---------|---------|-----------------|
-| `AbortSignal.timeout()` | Web platform API (no version) | Per-request fetch deadline on the Vercel→Railway seam | Already the mechanism in both `analytics-client.ts` (30s default) and `process-key-client.ts` (60s). Zero-dependency, works identically in Fluid Compute's Node.js runtime. Nothing to add — SEAM's timeout leg is DONE; only retry + breaker are missing. |
-| `@upstash/redis` | 1.38.0 (current — matches npm registry HEAD) | Shared, cross-instance state store | Vercel KV is discontinued (confirmed); Upstash Redis over REST is the only durable cross-Fluid-Compute-instance store already wired into this codebase. This is the backing store for BOTH the existing rate limiter AND the new circuit breaker — no second store needed. |
-| `@upstash/ratelimit` | 2.0.8 (current) | Sliding-window counters | Already used for the 15 named limiters in `ratelimit.ts`. Its `Ratelimit.slidingWindow()` primitive is ALSO the correct primitive for the circuit breaker's failure-counting (see SEAM design below) — reuse it, don't hand-roll a counter. |
-| Postgres `plpgsql` functions (`SECURITY DEFINER`) | Supabase-managed | Reaper/janitor logic | `reset_stalled_compute_jobs` and `reset_stalled_portfolio_analytics` are the established pattern for this exact class of bug (worker crash / silent enqueue drop leaving a row stuck in a non-terminal state). Clone, don't reinvent. |
-
-### Supporting additions (new code, not new packages)
-
-| Addition | Where | Purpose | When to Use |
-|----------|-------|---------|-------------|
-| `withRetry()` helper | new `src/lib/analytics-client-retry.ts` (or inline in `analytics-client.ts`) | Bounded retry-with-backoff wrapping `analyticsRequest` | ONLY for idempotent GET/read calls (e.g. `evalMatch`, and any future read endpoint). Exponential backoff + full jitter, 2-3 attempts max, retries only on `AnalyticsTimeoutError`, network-throw, and 502/503/504 — never on 4xx or a POST that mutates/enqueues (`recomputeMatch`, `validateKey`/`encryptKey`, `computePortfolioAnalytics` are POST-shaped and side-effecting-adjacent; do not blanket-retry them without an idempotency key). |
-| `AnalyticsCircuitBreaker` class | new `src/lib/analytics-circuit-breaker.ts` | Trip on sustained Railway failure, fail fast without hitting the network | Wraps every `analyticsRequest` call (all seam clients funnel through the one `analyticsRequest` chokepoint in `analytics-client.ts:65` — this is the single integration point). |
-| `strategy_analytics` reaper | new migration cloning `20260516122247_portfolio_analytics_stuck_row_reaper.sql` | Reap `computation_status='computing'` rows with no active `compute_jobs` row | Scheduled call from the existing Railway watchdog loop (`main_worker.py`, already runs `reset_stalled_compute_jobs` on a 60s interval — add the sibling RPC to the same loop) OR from the existing `/api/cron/reconcile-strategies`-style Vercel cron. Either wire is consistent with existing conventions; prefer the worker loop since it already owns this exact responsibility for `compute_jobs` and runs every 60s (much tighter than the 24h-scoped Vercel crons). |
-
-## SEAM — Vercel→Railway resilience
-
-### What already exists (verified by direct read)
-
-`src/lib/analytics-client.ts` (the primary seam, used by `validateKey`, `encryptKey`, `computePortfolioAnalytics`, `runPortfolioOptimizer`, `findReplacementCandidates`, `simulateAddCandidate`, `recomputeMatch`, `evalMatch`) and `src/lib/process-key-client.ts` (used by `verify-strategy`, `keys/sync`, `csv-validate`, `csv-finalize`, `finalize-wizard`) both ALREADY:
-- Set `signal: AbortSignal.timeout(timeoutMs)` per request (30s default / 15s for Bridge+simulator / 60s for `/process-key`).
-- Catch `DOMException name === "TimeoutError"` and translate it to a typed error (`AnalyticsTimeoutError` / a `504 UPSTREAM_TIMEOUT` envelope).
-- Distinguish network-unreachable from timeout from non-2xx.
-
-Neither file has ANY retry or circuit breaker. A hung/slow Railway instance today: (1) times out cleanly per-request (good), but (2) every subsequent request pays the FULL timeout again before failing, holding a Fluid Compute instance/CPU-time budget open on each attempt, and (3) there is no fast-fail signal that stops hammering an already-down Railway during an extended outage.
-
-### Retry-with-backoff — recommendation
-
-Add a single retry wrapper around `analyticsRequest`'s internal `fetch` call (and the equivalent in `process-key-client.ts`), NOT a new dependency:
-
-- **Attempts:** 2 retries max (3 total attempts) — a hung seam should fail fast, not compound latency into a 300s `maxDuration` budget.
-- **Backoff:** exponential with full jitter — `base * 2^attempt * random(0,1)`, base ~200ms. Hand-rolled (10-15 lines); this codebase already has `abortableWait` in `src/lib/retry/wait.ts` for a conceptually identical client-side primitive — the SERVER-side seam wrapper should mirror that shape (a `sleep(ms, signal)` that resolves early on abort) rather than importing the client helper directly (that module is intentionally client-retry-shaped per its own docstring: divergent per-caller state machines, not a generic fetch wrapper).
-- **Idempotency gate:** only retry when the call is a genuine read (`evalMatch` today) OR when the Python side is provably idempotent by construction (e.g. `enqueue_compute_job` is dedup'd by a partial unique index per the `compute_jobs` schema — a retried enqueue is safe). Every other POST (`validateKey`, `encryptKey`, `recomputeMatch`, `computePortfolioAnalytics`) must NOT be blanket-retried without confirming server-side idempotency; default to no-retry-on-POST unless a specific route proves otherwise. This mirrors the "idempotent reads only" instruction in the milestone brief and the existing codebase's own security posture (comments in `keys/sync/route.ts` are explicit about "possible double-submit" being handled by DB uniqueness, not by client retry).
-- **What NOT to add:** `p-retry`, `async-retry`, `cockatiel`'s retry policy, or any npm package. A bounded-attempt exponential-jitter loop is ~15 lines and the codebase's own convention (see `src/lib/retry/`) is to hand-roll these primitives rather than pull in a generic resilience library — stay consistent.
-
-### Circuit breaker — recommendation
-
-**The state MUST be shared across Fluid Compute instances, not per-instance in-memory.** Fluid Compute reuses instances across concurrent/sequential requests (per the platform's current behavior), which gives an in-memory breaker SOME value within one warm instance, but Vercel still runs many concurrent instances under load and cold-starts fresh ones — an in-memory-only breaker would let N different instances all independently rediscover "Railway is down" via N full timeout cycles instead of one shared trip. Given Upstash Redis is ALREADY the durable cross-instance store in this codebase (backing the rate limiter), build the breaker on it directly:
-
-- **Failure counter:** reuse `@upstash/ratelimit`'s `Ratelimit.slidingWindow(N, window)` as the failure-rate detector — e.g. `slidingWindow(5, "30 s")` per upstream target. Call `.limit("breaker:analytics-service")` on every failed seam call (timeout, network-throw, or 5xx); when it denies (5 failures in 30s), the breaker is OPEN.
-- **Open-state lock (fail-fast):** on trip, `redis.set("breaker:analytics-service:open", "1", { ex: cooldownSeconds })` (e.g. 15-30s cooldown) using a plain SET with EX. Every seam call checks this key FIRST (one Redis GET, ~5-15ms over REST) and short-circuits with a clean 503 before ever touching `fetch()` if the key is present.
-- **Half-open probe:** when the key's TTL expires, the next request naturally attempts the real call again (no extra state needed — TTL expiry IS the half-open transition). On success, do nothing further (closed). On failure, `SET ... EX` again to reopen.
-- **Why this and not a library:** `cockatiel@4.0.0` and `opossum@10.0.0` (both current, verified via web search 2026-07-25) are well-maintained Node circuit breakers, but BOTH are in-memory-only — neither ships a distributed backend. Adopting either would still require hand-writing a Redis-backed state adapter to get correct cross-instance semantics, at which point the library adds an abstraction layer over logic you have to write anyway. Building directly on the already-installed `@upstash/redis` + `@upstash/ratelimit` is fewer total lines, one fewer dependency, and reuses infrastructure already proven live (the existing rate limiter's fail-open/fail-closed production behavior in `ratelimit.ts` is the exact template to copy for the breaker's own Redis-unavailable fallback: **fail-open outside prod, fail-open on Redis error even in prod** — unlike the rate limiter, a broken breaker should never itself cause an outage; err toward attempting the real call over false-tripping.
-- **Integration point:** the ONE chokepoint is `analyticsRequest()` in `analytics-client.ts:65` — every public wrapper (`validateKey`, `encryptKey`, `recomputeMatch`, etc.) already funnels through it, so the breaker check/trip logic goes there once. `process-key-client.ts`'s `postProcessKey()` is the second (separate) chokepoint used by the `/process-key` unified-backbone routes — it needs its OWN breaker key (`breaker:process-key`) since Railway may be healthy for one code path and not the other (unlikely but not assumed), OR both can share one `breaker:railway` key if the intent is "one physical Railway service" — recommend ONE shared key since both hit the same Railway deployment; simpler and the failure modes (Railway down) are physically identical.
-
-## JOB — Job-state integrity
-
-### What already exists (verified by direct read)
-
-- `reset_stalled_compute_jobs` (migration `20260412094449_compute_jobs_admin_and_defer.sql`, hardened in `20260516104201_..._residual.sql` with `LIMIT 500 FOR UPDATE SKIP LOCKED`) — a per-kind-threshold watchdog for `compute_jobs` rows stuck in `running`. Called every 60s from `main_worker.py`'s watchdog loop (`main_worker.py:788` `_reset()`).
-- `reset_stalled_portfolio_analytics` (migration `20260516122247_portfolio_analytics_stuck_row_reaper.sql`) — reaps `portfolio_analytics.computation_status='computing'` rows older than a threshold (30 min default), flips to `failed`, never deletes (preserves audit trail). Called from `routers/cron.py:876` inside the recompute cron tick.
-- A retention purge for orphaned `running` `compute_jobs` rows (migrations `20260719120000_retention_orphaned_running_compute_jobs.sql` / `20260720120000_retention_orphaned_running_window_4h.sql`, WORKER-04) — this is DELETE-based in one environment and reset-based in another per the tracked WR-02 tech debt (deferred, TEST wants DELETE / PROD wants reset per the same migration — a known open item, not solved by v1.16's scope per se, but the JOB group's "worker-crash computing-row janitor" language directly references resolving this).
-- A ONE-TIME manual deploy script, `analytics-service/scripts/reset_stuck_computing_rows.py` (plan D.11), that does EXACTLY what a `strategy_analytics` reaper should do on an ongoing basis: find `computation_status='computing'` rows with no active `compute_jobs` row, flip to `failed`. **This script's existence is direct evidence the bug has already happened in production once** — it was hand-run after a platform-upgrade interruption, not a recurring safeguard.
-
-### The concrete gap
-
-**`strategy_analytics` has NO recurring reaper.** `portfolio_analytics` got one (migration 20260516122247); `strategy_analytics` — the table `keys/sync`, `csv-finalize`, `finalize-wizard`, and the unified `/process-key` backbone all write `computation_status` into — did not. This is the exact table the milestone's "stuck computing spinner" risk describes, and the one-time script proves the failure mode is real, not hypothetical.
-
-Additionally, `after()` itself is confirmed (via the canonical fork docs at `node_modules/next/dist/docs/01-app/03-api-reference/04-functions/after.md`) to run "even if the response didn't complete successfully... including when an error is thrown," and is implemented via Vercel's `waitUntil` — but neither the doc nor the underlying primitive guarantees execution across a hard platform-level kill (OOM, deploy-time instance recycle, or a genuinely crashed lambda before `waitUntil`'s promise settles). This is architecturally undetectable from INSIDE the route handler — the enqueue call itself already has try/catch + a `writeFailedStrategyAnalyticsPlaceholder` fallback in `csv-finalize/route.ts` (comment tag W-2/API M-2), which is good defense for "enqueue call ran but errored." It cannot catch "the `after()` callback itself never ran at all." Only an EXTERNAL, periodic reconciliation (cron-based, comparing `strategy_analytics.computation_status='computing'` against the absence of a live `compute_jobs` row — precisely the one-time script's query shape) closes that hole.
-
-### Recommendation
-
-1. **New migration**, clone of `20260516122247_portfolio_analytics_stuck_row_reaper.sql`, targeting `strategy_analytics`: `reset_stalled_strategy_analytics(p_stale_threshold INTERVAL)`. Same semantics — UPDATE not DELETE, terminal `failed` with a `computation_error` tag, partial index on `(strategy_id) WHERE computation_status = 'computing'` for cheap polling.
-2. **Extend the existing NOT-EXISTS-active-job check** from `reset_stuck_computing_rows.py` into the new SQL function body (the one-time script's logic — "computing AND no compute_jobs row in a non-terminal status" — is a STRONGER signal than pure time-based staleness alone, since it also catches the drop-enqueue case specifically, not just a slow/crashed worker). Recommend the SQL function accept both signals: time-threshold-only (mirrors the proven `portfolio_analytics` pattern, simplest) OR the NOT-EXISTS refinement (mirrors the one-time script, more precise). Given `strategy_analytics` computation can legitimately take longer (composite stitches, MT5 backfills) than portfolio recompute, prefer the NOT-EXISTS refinement to avoid false-positive reaping of a genuinely still-running long job — a pure time threshold would need to be set conservatively high (matching the longest `TIMEOUT_PER_KIND` entry, currently `process_key_long` at 40 min) to avoid that.
-3. **Scheduling:** call it from the SAME 60s watchdog loop in `main_worker.py` that already calls `reset_stalled_compute_jobs` (`main_worker.py:788`) — this is a one-line addition to an existing, already-running, already-tested loop, not a new cron entry. This is tighter (60s) than the `portfolio_analytics` reaper's placement inside a cron tick and closes the gap faster.
-4. **csv-finalize transactionality:** the current `enqueueCsvAnalyticsAfter` (csv-finalize/route.ts:688) already has a placeholder-on-enqueue-failure fallback (good), but the underlying multi-step sequence (`finalize_csv_strategy` RPC → `persist_csv_daily_returns` RPC → `after()`-deferred enqueue) is not a single transaction — a request that succeeds through the first two RPCs and then genuinely loses the `after()` callback (not merely errors inside it) is exactly the reaper's job to catch, not a new DB transaction wrapper. No new stack technology needed here; Postgres itself already offers `BEGIN`/`COMMIT` inside a single RPC if the two existing RPCs are ever merged into one SECURITY DEFINER function — that's a code-structure decision for the roadmap/phase level, not a new dependency.
-
-## RATE — Rate limiting
-
-### Premise check — IMPORTANT finding
-
-The milestone brief states verify-strategy, `keys/{sync,validate,encrypt}`, `admin/match/recompute`, `admin/partner-import`, `trades/upload`, and `intro` are "UNLIMITED." **Direct code read shows this is not accurate as of the current `main` branch:**
-
-| Route | File | Limiter already applied | Git evidence |
-|---|---|---|---|
-| `verify-strategy` | `src/app/api/verify-strategy/route.ts:22` | `publicIpLimiter` (10/min/IP), checked before body parse | last touched Phase 122 (`e46de4da`) |
-| `keys/sync` | `src/app/api/keys/sync/route.ts:86,93` | TWO-TIER: `keysSyncUserLimiter` (30/min/user aggregate) + `userActionLimiter` (5/min per user+strategy) | pre-existing, F6 audit-2026-05-07 |
-| `keys/validate-and-encrypt` (covers both "validate" and "encrypt") | `src/app/api/keys/validate-and-encrypt/route.ts:111` | `userActionLimiter` (5/min/user) | last touched Phase 135 (`035c4e42`) |
-| `admin/match/recompute` | `src/app/api/admin/match/recompute/route.ts:37` | `adminActionLimiter` (20/min/user) | audit-2026-05-07 |
-| `admin/partner-import` | `src/app/api/admin/partner-import/route.ts:471` | `adminActionLimiter` (20/min/user) + a 500-row body cap + a 4MB byte cap | audit-2026-05-07 |
-| `trades/upload` | `src/app/api/trades/upload/route.ts:110` | `userActionLimiter` (5/min/user) + a 5,000-row cap | pre-existing |
-| `intro` | `src/app/api/intro/route.ts:117` | `userActionLimiter` (5/min/user) | pre-existing |
-
-Every one of these routes already calls `checkLimit()` against the shared Upstash-Redis-backed limiter set in `src/lib/ratelimit.ts`, in the canonical validate-then-limit order (B15 audit convention). **There is no rate-limiting stack gap on these seven routes today.**
-
-### What this means for the roadmap
-
-Re-scope the RATE requirement group before planning phases around it. The likely real remaining work (none of it requires new technology — all of it reuses `checkLimit` / `makeLimiter` from the existing `ratelimit.ts`):
-- **Verify, don't build**: confirm the above table via a fresh grep/test pass — if this was already true when the milestone was scoped, the RATE group may already be satisfied and should be re-validated as a phase-0 audit rather than new engineering.
-- **If a genuine gap is found elsewhere** (e.g., a route added after this research, or a route this pass missed), close it with the SAME `withAuthLimited` wrapper (`src/lib/api/withAuthLimited.ts`) or the same inline `checkLimit(...)` pattern — never a new library.
-- **Defense-in-depth candidate** (optional, lower priority): the Python `analytics-service` itself has no independent rate limit on `/process-key`, `/validate-key`, etc. — it currently relies entirely on the Next.js edge layer's limiter plus the `X-Service-Key` / `INTERNAL_API_TOKEN` bearer check. If a threat model requires defense against a leaked internal token calling Railway directly (bypassing Vercel), that would need a Python-side limiter — but this is a NEW consideration outside what the milestone brief described, and should be raised as a scope question, not assumed into the plan.
-
-## Installation
-
-```bash
-# Nothing to install — every recommended mechanism reuses already-installed
-# packages (@upstash/ratelimit@2.0.8, @upstash/redis@1.38.0) or Web Platform
-# APIs (AbortSignal.timeout) already present in the codebase.
-```
-
-## Alternatives Considered
-
-| Recommended | Alternative | When to Use Alternative |
-|-------------|-------------|--------------------------|
-| Hand-rolled retry wrapper (~15 lines) over `analyticsRequest` | `p-retry` / `async-retry` (npm) | Only if retry logic needs to grow far more complex (e.g. per-error-type retry policies across many unrelated call sites) — not the case here; one chokepoint, one policy. |
-| Redis-backed circuit breaker on `@upstash/redis` + `@upstash/ratelimit` (reused) | `cockatiel@4.0.0` | If Quantalyze ever runs a persistent long-lived Node process (not Fluid Compute lambdas) where in-memory breaker state is naturally shared — e.g. if the seam client moved server-side into `main_worker.py`'s own outbound calls instead of Vercel's. Not applicable to the Vercel→Railway direction today. |
-| Redis-backed circuit breaker (reused) | `opossum@10.0.0` | Same caveat as cockatiel — in-memory only, requires Node ≥22 (this repo already targets Node ≥22 per `package.json` engines, so version compat isn't the blocker; shared-state is). |
-| Clone `reset_stalled_portfolio_analytics` → `reset_stalled_strategy_analytics` | A generic "any table" reaper function parametrized by table name | Postgres `plpgsql` can't easily parametrize the target table name in a typed, injection-safe way without dynamic SQL (`EXECUTE format(...)`) — the existing codebase's convention (one function per table, copy-pasted with table-specific column knowledge) is simpler and matches `reset_stalled_compute_jobs` / `reset_stalled_portfolio_analytics` precedent. Don't introduce dynamic SQL here for two tables. |
-
-## What NOT to Use
-
-| Avoid | Why | Use Instead |
-|-------|-----|-------------|
-| `cockatiel` / `opossum` / any general resilience library | Both are in-memory-only; Fluid Compute runs multiple concurrent + cold-started instances, so an in-memory breaker gives incomplete protection and you'd still have to hand-write a Redis adapter on top — at which point the library is pure overhead | Hand-rolled breaker on `@upstash/redis` (already installed) |
-| `p-retry`, `async-retry`, `retry` (npm) | One chokepoint (`analyticsRequest`), one retry policy, idempotent-reads-only — a generic configurable retry library adds an abstraction for a problem that's ~15 lines of exponential-jitter backoff | Hand-rolled `withRetry()`, mirroring the existing `src/lib/retry/` module's hand-rolled style |
-| Vercel KV | **Discontinued** — Vercel no longer offers it; also, the codebase never adopted it in the first place (Upstash Redis direct is already the durable store) | `@upstash/redis` (already installed, already the backing store for the existing rate limiter) |
-| A NEW/second Redis instance or Upstash database for the breaker | Unnecessary infra sprawl — the existing Upstash Redis instance backing `ratelimit.ts` has ample headroom for a handful of breaker keys | Reuse the SAME `Redis.fromEnv()` instance already constructed in `ratelimit.ts` (export it, or construct a second lightweight client pointed at the same env vars — either way, same physical database) |
-| Dynamic-SQL "generic reaper" Postgres function | Table-name parametrization via `EXECUTE format(...)` for 2 tables is unnecessary risk/complexity for zero benefit | Copy the existing per-table `reset_stalled_*` pattern verbatim, adjusted for `strategy_analytics`'s actual columns |
-| New rate-limiting engineering on the 7 named "unlimited" routes | They are already rate-limited (see Premise Check above) — building new limiters would be redundant work against a stale problem statement | A verification/audit phase, re-using `checkLimit` if any true gap is found |
-
-## Version Compatibility
-
-| Package A | Compatible With | Notes |
-|-----------|------------------|-------|
-| `@upstash/ratelimit@2.0.8` | `@upstash/redis@1.38.0` | Already the pinned, live-verified pairing in `package.json` and `ratelimit.ts`; both are current per npm registry (checked 2026-07-25) — no version bump needed for either SEAM breaker reuse or RATE work. |
-| `AbortSignal.timeout()` | Node.js ≥22 (repo's `engines.node` floor) | Native since Node 17.3/18.x; no polyfill needed at this Node floor. |
-| Next.js `after()` | Next.js 16.2.11 (pinned) | Stable since v15.1.0 per the canonical fork docs (`node_modules/next/dist/docs/.../after.md`) — this is a HEAVILY-MODIFIED fork per `AGENTS.md`, but the `after()` reference doc present in `node_modules` was read directly and confirms current behavior/guarantees for this exact install. |
-
-## Sources
-
-- Direct code read (HIGH confidence, all file:line citations above): `src/lib/analytics-client.ts`, `src/lib/process-key-client.ts`, `src/lib/ratelimit.ts`, `src/lib/api/withAuthLimited.ts`, `src/lib/retry/{index,rate-limit-gate}.ts`, `src/app/api/{verify-strategy,keys/sync,keys/validate-and-encrypt,admin/match/recompute,admin/partner-import,trades/upload,intro}/route.ts`, `src/app/api/strategies/csv-finalize/route.ts`, `analytics-service/main_worker.py`, `analytics-service/routers/cron.py`, `analytics-service/scripts/reset_stuck_computing_rows.py`, `supabase/migrations/20260516122247_portfolio_analytics_stuck_row_reaper.sql`, `supabase/migrations/20260516104201_compute_jobs_audit_2026_05_07_residual.sql`, `supabase/migrations/2026071{9,20}...retention_orphaned_running...sql`, `package.json`.
-- npm registry version check (HIGH confidence, checked 2026-07-25): `@upstash/ratelimit` → 2.0.8 (matches installed); `@upstash/redis` → 1.38.0 (matches installed).
-- [cockatiel GitHub / npm](https://github.com/connor4312/cockatiel) — MEDIUM confidence (web search, not Context7): current version 4.0.0, in-memory-only resilience library, used to support the "what NOT to use" reasoning.
-- [opossum GitHub / npm](https://www.npmjs.com/package/opossum) — MEDIUM confidence (web search): current version 10.0.0, requires Node ≥22, in-memory-only, same reasoning as above.
-- `node_modules/next/dist/docs/01-app/03-api-reference/04-functions/after.md` — HIGH confidence (this fork's own canonical doc, read directly): confirms `after()`/`waitUntil` semantics and platform-kill edge case that motivates the JOB reaper design.
-- Vercel plugin knowledge-update (system-provided, 2026-02-27 dated): confirms Vercel KV discontinued, Fluid Compute instance-reuse behavior — used to reason about circuit-breaker state sharing.
+> **Supersedes** the stale v1.16 seam/rate-limit STACK.md that occupied this path. Prior content is preserved in `.planning/research/_archive-v1.16/`.
 
 ---
-*Stack research for: Production resilience hardening (SEAM/JOB/RATE), v1.16 Production Resilience & Reliability milestone*
-*Researched: 2026-07-25*
+
+## Executive verdict
+
+**Six of the nine PRs are cheap. One is a trap. One is a silent production downgrade. One must not land at all.**
+
+The campaign as booked at `TODOS.md:798` assumed the npm group "genuinely fails `frontend-build`/`frontend-lint`/`contracts`/`deps-cache`" and would need bisecting across its members. **That is wrong, and it was measured wrong.** Every red job on #686 fails at the *same* step, before any of the repo's code is touched:
+
+```
+npm error code EUSAGE
+npm error `npm ci` can only install packages when your package.json and
+npm error package-lock.json ... are in sync.
+npm error Missing: proxy-agent@8.0.2 from lock file
+npm error Missing: agent-base@9.0.0 from lock file      (+12 more of the same subtree)
+```
+
+That is Dependabot shipping an **incomplete lockfile**, not 29 upstream breakages. `frontend-build`, `frontend-lint`, `frontend-typecheck`, `knip`, `contracts`, `deps-cache`, `frontend-policy`, `frontend-seam-redis` and `python` all start with `npm ci`. **Do not bisect the group. Rebase it and regenerate the lock with a local `npm install`.** The 12-package subtree Dependabot dropped is the one `@puppeteer/browsers@3.2.1` introduces under `puppeteer-core@25.8.0` — a transitive-graph change Dependabot's resolver mis-materialised.
+
+*(Verified: `npm ci --dry-run` on `main` HEAD is clean, so the desync is introduced by the PR, not inherited.)*
+
+The other two headline items:
+
+- **#685 (pip group) would DOWNGRADE production pandas from 3.0.3 to 2.3.3.** Confirmed at the diff level: `analytics-service/requirements.txt` line reads `-pandas==3.0.3` / `+pandas==2.3.3`. Root cause is the `requirements.in` ↔ lock drift booked at `TODOS.md:1277` — commit `83680283` (PR #604) migrated the *lock* to pandas 3.0.3 but never updated `requirements.in`, which still says `pandas==2.2.3`. Dependabot reads the `.in` as the source manifest, computes "2.2.3 → 2.3.3", and rewrites the lock down to match. Railway builds from `requirements.txt`. **This is a silent revert of a shipped migration on the money-math service, hiding inside a routine 8-package minor bump.**
+- **#614 (typescript 6.0.3 → 7.0.2) must NOT land.** TypeScript 7 is the Go native port. The npm package no longer exposes the JS compiler API, and this repo consumes it.
+
+---
+
+## Per-PR verdict table
+
+| PR | Bump | Verdict | Risk | Own verification? |
+|----|------|---------|------|-------------------|
+| **#643** | `actions/checkout` 7.0.0 → 7.0.1 | **LAND FIRST** | Nil — patch, already on v7 | No — rides CI |
+| **#627** | `actions/setup-python` 6.3.0 → 7.0.0 | **LAND** | Nil for this repo | No |
+| **#626** | `actions/setup-node` 6.4.0 → 7.0.0 | **LAND** | Nil for this repo | No |
+| **#612** | `supabase/setup-cli` 2.1.1 → 3.0.0 | **LAND, with a workflow read** | Low — install source changes GitHub→npm | Yes — watch the 4 call sites' `version: 2.98.2` resolve |
+| **#685** | pip group, 8 updates | **LAND ONLY AFTER FIXING THE PANDAS PIN** | **HIGH — silent prod downgrade** | Yes — full pytest + `mypy --strict` |
+| **#686** | npm group, 29 updates | **LAND AFTER REBASE + LOCK REGEN** | Medium — one prod-path member (puppeteer-core) | Yes — full suite + build + e2e |
+| **#645** | `@testing-library/jest-dom` 6.9.1 → 7.0.0 | **LAND — but at 7.0.1** | Low | Yes — full vitest suite |
+| **#646** | `jsdom` 29.1.1 → 30.0.0 | **LAND — but at 30.0.1** | Medium — engines exclude local Node 25 | Yes — full vitest suite |
+| **#614** | `typescript` 6.0.3 → 7.0.2 | ⛔ **CLOSE — DO NOT LAND** | **Blocking — breaks lint + a coverage-law gate** | N/A |
+| *#606* | `@lhci/cli` → old `uuid` audit chain | **CLOSE AS STALE** (see below) | Nil | N/A |
+
+---
+
+## The four landmines, in detail
+
+### L1 — #686 fails for ONE reason, not 29 (measured)
+
+**Claim in TODOS is wrong.** All nine red checks are downstream of a single `npm ci` EUSAGE. Fix:
+
+```bash
+git fetch origin && git checkout dependabot/npm_and_yarn/npm-minor-patch-096ac0e144
+git rebase origin/main          # branch is 3 days stale
+npm install                     # regenerates a COMPLETE lock incl. the proxy-agent subtree
+git add package-lock.json && git commit
+```
+
+Only *after* a green `npm ci` is it meaningful to ask whether any member genuinely breaks. Expect it not to — but two members deserve a named gate (below).
+
+**Members worth naming (26 of 29 are noise):**
+
+| Member | Bump | Why it needs a look |
+|--------|------|---------------------|
+| `puppeteer-core` | 25.3.0 → 25.8.0 | **Production dependency** — the demo-PDF path (`@sparticuz/chromium` + the `demo-pdf-coldstart` nightly canary). New `@puppeteer/browsers@3.2.1` transitive graph. This is the only prod-runtime member with real behavioural surface. |
+| `next` | 16.2.11 → 16.3.1 | Framework minor. `eslint-config-next` moves in lockstep (16.2.10 → 16.3.1), which is good — a split between them is the classic lint break. Engines `>=20.9.0`, satisfied. |
+| `lightweight-charts` | 5.2.0 → 5.2.1 | Patch, but a **rendering behaviour change**: arrow/circle/square markers with `size > 1` are no longer re-clamped to 30px. Vendor states default-size markers render identically. Repo has 3 `toHaveScreenshot()` golden specs; those are green-by-skip today (WR-02), so this is latent rather than blocking — but flag it against any future golden bake. |
+| `recharts` | 3.9.2 → 3.10.1 | 18 charts route through it + the breakpoint-gated `TouchTooltip`. Minor, but chart-DOM assertions are the repo's most snapshot-shaped tests. |
+| `@playwright/test` | 1.61.1 → 1.62.1 | Ships a new browser build → the three golden specs' rendering baseline moves. Same green-by-skip caveat. |
+| `knip` | 6.25.0 → 6.32.2 | Seven minors at once on a **blocking CI gate** (`knip` job). New detections = new unused-export findings. Most likely member to produce a real, legitimate red that is not a regression. |
+
+### L2 — #685 downgrades production pandas (measured at the diff)
+
+The eight members are `mypy 2.2.0→2.3.0`, `aiohttp 3.14.1→3.14.3`, `ccxt 4.5.64→4.5.73`, `fastapi 0.139.0→0.141.1`, `numpy 2.5.1→2.5.2`, `pandas 2.2.3→2.3.3`, `sentry-sdk 2.64.0→2.68.0`, `uvicorn 0.51.0→0.52.3`. Seven are fine. Pandas is not.
+
+**The drift, stated precisely:**
+
+| File | pandas today | What #685 writes |
+|------|--------------|------------------|
+| `analytics-service/requirements.in` (source manifest) | `2.2.3` | `2.3.3` |
+| `analytics-service/requirements.txt` (the lock Railway/Docker/CI install) | **`3.0.3`** | **`2.3.3`** ← downgrade |
+
+`requirements.in` has been lying since PR #604. The `.in` is what Dependabot reads; the lock is what ships. **Fix the `.in` to `3.0.3` FIRST, in its own commit on `main`, before touching #685.** Then let Dependabot rebase, or hand-edit the group PR so pandas is untouched.
+
+Corollaries the planner must carry:
+- pandas 3.0.3 requires Python ≥3.11; 2.3.3 requires ≥3.9. CI/prod is 3.12, so the downgrade would *not* fail loudly at install — it fails quietly at behaviour (pandas 3 changed copy-on-write and string-dtype defaults). **A green pytest run is not proof of safety here; the pin itself is the assertion.**
+- The lock is a `uv pip compile --universal` artifact. Per `.github/dependabot.yml` and `requirements.in`'s own header, Dependabot's edit does **not** match that format — a human must re-run `cd analytics-service && make lock` (compiled against 3.12, never the local venv) and commit the regenerated file. Skipping this is how the format drifts.
+- New transitive `aiohttp-fast-zlib==0.3.0` appears. `aiohttp` lands at 3.14.3, inside the deliberate `aiohttp<3.15` cap. No cap violation.
+- `fastapi 0.139.0 → 0.141.1` is clean: no breaking changes across 0.140.0–0.141.1 (SSE/JSONL `status_code` fixes, `format_sse_event` line splitting, `response_model_*` for `Iterable` returns, `app.frontend(check_dir="auto")`), and PyPI `requires_dist` for `starlette` and `pydantic` is **byte-identical** between 0.139.0 and 0.141.1 (`starlette>=0.46.0`, `pydantic>=2.9.0`). The repo's lock pins `starlette==0.46.2` — still satisfied, no forced bump. ⚠️ The known ≥0.139 deferred-`include_router` behaviour (`app.routes` hides routes; use `iter_route_contexts`) is *unchanged*, not re-broken — but the coverage-law tests that walk routes are the first place a 0.141 regression would show, so run them explicitly.
+- `mypy 2.2.0 → 2.3.0` lives in `requirements-dev.txt` and gates nothing in CI *before* the PR is opened. Per repo convention, run `mypy --strict` locally on `analytics-service/` before shipping — a minor mypy bump routinely surfaces new strict errors, and those must be fixed with `cast()`, never `# type: ignore`.
+
+### L3 — TypeScript 7 is the native port and this repo consumes the compiler API
+
+Measured from the registry (`npm view typescript@7.0.2`):
+
+```
+exports = {
+  '.': './lib/version.cjs',        ← the ONLY root entrypoint
+  './unstable/ast': ..., './unstable/fs': ..., './unstable/sync': ..., ...
+}
+dependencies = { '@typescript/typescript-darwin-arm64': '7.0.2', ...19 more native binaries }
+```
+
+The root export is `version.cjs`. `ts.SyntaxKind`, `ts.isCallExpression`, `ts.isTemplateExpression`, `createSourceFile` — none of them are reachable. A stable programmatic API is slated for **7.1**; Microsoft shipped `@typescript/typescript6` (a `tsc6` binary re-exporting the 6.0 API) as the compatibility shim.
+
+**Two hard blockers in this repo:**
+
+1. `src/lib/seam-log-coverage.test.ts:6` — `import ts from "typescript"` and ~40 `ts.*` AST calls (`ts.SyntaxKind.PlusToken`, `ts.isBinaryExpression`, `ts.isCatchClause`, …). This is the **error-classification coverage law** — the gate that roots the still-open WIZFORM-02 class. Under TS 7 it does not fail informatively; it fails at import.
+2. `eslint.config.mjs` pulls `eslint-config-next/typescript` → `typescript-eslint@8.58.0`, whose peer range is **`typescript: '>=4.8.4 <6.1.0'`**. `7.0.2` is outside it. Type-aware linting requires TypeScript 6 under the hood, by upstream's own statement.
+
+**Verdict: close #614 with a comment.** `typescript@6.0.3` is already the newest 6.x, so there is nothing to bump to. Revisit only when *all three* hold: TS 7.1 ships the stable API, typescript-eslint widens its peer range, and `seam-log-coverage.test.ts` has a migration target. Do not attempt the `@typescript/typescript6` alias shim inside this milestone — it buys a faster `tsc` in exchange for a two-compiler build and a rewritten coverage-law gate, which is a milestone of its own.
+
+### L4 — jsdom 30's engines exclude the local Node, not CI
+
+jsdom 30.0.0's *only* breaking change is `engines: { node: '^22.22.2 || ^24.15.0 || >=26.0.0' }`.
+
+| Environment | Version | Satisfies? |
+|-------------|---------|-----------|
+| CI (`node-version: 22` at 16 workflow sites, `.nvmrc` = `22`) | latest 22.x ≥ 22.22.2 | ✅ |
+| **Local dev** | **v25.8.1** | ❌ — not `^22`, not `^24`, not `>=26` |
+
+This inverts the repo's usual CI-vs-local hazard. `engines` is advisory (`EBADENGINE` warning) unless `engine-strict` is set, so `npm install` still works — but the campaign's own gate is "full local suite each", and the local runtime is formally unsupported by the dependency being landed. **Decide this explicitly** rather than discovering it as a flake: either accept the warning and treat CI Node 22 as the authority for this PR, or run the jsdom-30 verification pass under `PATH=/opt/homebrew/opt/node@22/bin` (the repo's existing CI-repro recipe).
+
+Also: **land 30.0.1, not the 30.0.0 the PR pins.** 30.0.0 regressed `getComputedStyle()` with `calc()` and other CSS functions — thrown exception — and 30.0.1 (2026-07-29) fixes it. This repo's a11y and visual test lanes lean on computed style; landing 30.0.0 verbatim buys a two-day-old known regression for no reason.
+
+**Bonus, in jsdom 30's favour:** it moves `undici` from 7.x to `^8.9.0`, which clears the `undici 7.0.0–7.28.0` high-severity advisory currently entering the dev tree solely via `jsdom@29.1.1`.
+
+---
+
+## Per-PR breaking changes verified against upstream
+
+### #626 `actions/setup-node` 6.4.0 → 7.0.0 (2026-07-14)
+ESM migration; `@actions/cache` → 5.1.0; new `cache-primary-key` / `cache-matched-key` outputs; **removed the dummy `NODE_AUTH_TOKEN` export**; conditional `mirrorToken`. No runner or Node requirement change, no removed inputs.
+**Repo impact: none.** `grep -rn "NODE_AUTH_TOKEN" .github/` → zero hits; no workflow sets `registry-url`. All 16 call sites use only `node-version` + `cache: npm`.
+
+### #627 `actions/setup-python` 6.3.0 → 7.0.0 (2026-07-20)
+ESM migration; `@actions/cache` → 6.2.0; **removed the `pip-install` input**; stderr warnings now annotate as warnings not errors; manifest fetch validated + retried.
+**Repo impact: none.** Two call sites (`ci.yml:1157`, `cassette-refresh.yml:64`); neither uses `pip-install`. `ci.yml` uses `cache: pip`, still supported. The stderr reclassification is a small positive — fewer false red annotations on the python job.
+
+### #612 `supabase/setup-cli` 2.1.1 → 3.0.0 (2026-07-07)
+**Install source changes**: the CLI now comes from the npm `supabase` package instead of GitHub releases. Supports `latest`, `beta`, and fixed npm versions. **Removes the `github-token` input.** Runs npm from the workspace while isolating the action-owned install. Improved musl/Alpine handling.
+**Repo impact: four call sites, all compatible** — `migration-drift-check.yml:48`, `migration-policy.yml:177`, `supabase-migrate.yml:167`, `supabase-migrate.yml:199`. Every one passes `version: 2.98.2` and **none** passes `github-token`, so the removed input is a no-op here. Verified `supabase@2.98.2` exists on npm, so the pin resolves under the new install path.
+⚠️ **Why this one still earns its own verification:** these four workflows are the ones that auto-apply migrations to **production** Supabase on merge to `main`. The deliberate pin exists so `db push --include-all` semantics cannot drift between the plan job and the apply job. A change to *how the binary is obtained* is exactly the kind of thing that silently resolves to a different build. Confirm `supabase --version` prints `2.98.2` in the plan job's log before trusting the apply job.
+
+### #645 `@testing-library/jest-dom` 6.9.1 → 7.0.0 (2026-07-20)
+Breaking: **`@testing-library/dom` becomes a required peer** (`>=10 <11`); **minimum Node is 22**. Adds `toContainAnyBy*` / `toContainOneBy*`. **No matchers removed.**
+**Repo impact: low.** `@testing-library/dom@10.4.1` already resolves at the top level via `@testing-library/react@16.3.2` and `@testing-library/user-event@14.6.1` → peer satisfied without adding a dep. Node 22 satisfied by CI and local. Import shape (`@testing-library/jest-dom/vitest` in `src/test-setup.ts:1` plus 4 files importing it redundantly) is unchanged. New peer on `vitest >= 0.32` — repo has 4.1.10.
+**Land 7.0.1**, not 7.0.0 (7.0.0 was itself flagged upstream as a repaired release).
+
+### #646 `jsdom` 29.1.1 → 30.0.0 — see L4. **Land 30.0.1.**
+
+### #643 `actions/checkout` 7.0.0 → 7.0.1
+Single-member group, patch on a major the repo is already on. Zero-risk warm-up that proves the actions lane is landable.
+
+---
+
+## Landing order, with gates
+
+Ordered by **blast radius ascending**, with one deliberate exception: the pandas fix is a prerequisite commit, not a PR.
+
+| # | Action | Gate before merge |
+|---|--------|-------------------|
+| **0** | **Prerequisite commit on `main`:** set `requirements.in` `pandas==2.2.3` → `3.0.3`; correct the surrounding comment (it currently justifies 2.2.3's pyarrow-free runtime). No lock change. | `npm run lint`-equivalent n/a; verify `git diff` touches exactly one line + its comment, and that `requirements.txt` is untouched |
+| **1** | **#643** checkout 7.0.0→7.0.1 | Green CI. Establishes the actions lane. |
+| **2** | **#627** setup-python 7 · **#626** setup-node 7 (may share one window, different lanes) | Green CI **plus** an eyeball on the `python` and `frontend-*` job logs for install-step drift (ESM migration = new action runtime) |
+| **3** | **#612** supabase/setup-cli 3 | Green CI **plus** `supabase --version` == `2.98.2` in the `migration-policy` / `supabase-migrate` plan job logs. ⛔ Do not merge on a day when a schema migration is also in flight. |
+| **4** | **#685** pip group — rebased onto (0), pandas line dropped from the diff, lock regenerated with `make lock` | `cd analytics-service && python3 -m pytest` (from that dir — repo-root runs miss the VCR cassettes and hit live brokers) **and** `mypy --strict`. Confirm `grep '^pandas' requirements.txt` still reads `3.0.3`. |
+| **5** | **#686** npm group — rebased onto `main`, lock regenerated with `npm install` | `npm ci` clean, then `npm run typecheck` · `npm run lint` · `npm run test` · `npm run build` · `knip`. Watch `knip` (7 minors) and the demo-PDF path (`puppeteer-core`). |
+| **6** | **#645** jest-dom, retargeted 7.0.1 | Full `npm run test`. Single-purpose PR — if red, the cause is unambiguous. |
+| **7** | **#646** jsdom, retargeted 30.0.1 | Full `npm run test` — ideally under Node 22 (see L4). Re-run `npm audit` after: expect the `undici` high to clear. |
+| **8** | **#614** typescript 7 | ⛔ **Close, do not merge.** Leave a comment citing the `exports`-map read and the typescript-eslint peer range so the next Dependabot reopen is answered in advance. |
+
+**Ordering rationale:**
+- Actions PRs first because they change *how CI runs*, and you want that settled before you start trusting CI's verdict on library bumps. They are also the only four with genuinely zero repo-code surface.
+- pip before npm because the two ecosystems are disjoint, the pip group is smaller, and its landmine (pandas) is fully understood — landing it proves the process before the 29-member group.
+- The two test-infra majors (#645, #646) last and separately, because they change *the harness that judges everything else*. Landing them before the groups would make any group red ambiguous ("is this the bump or the harness?").
+- ⚠️ **Never two at a time.** The repo's shared-TEST-DB contention means a red `python` or `e2e-seeded` job is not reliable evidence; with two dep PRs in flight you cannot attribute it. One PR, one window, full local suite as the real gate.
+
+---
+
+## What NOT to touch
+
+| Item | Why |
+|------|-----|
+| `typescript` — stay on **6.0.3** | 6.0.3 is already the newest 6.x. TS 7 has no compiler API (L3). Nothing to gain, a lint config and a coverage-law gate to lose. |
+| `requirements.txt` `pandas==3.0.3` | Shipped deliberately in PR #604. The `.in` is the file that is wrong. Fixing the lock instead of the `.in` would revert a production migration. |
+| `ccxt` beyond the group's 4.5.73 | Load-bearing exact pin — the repo's 4.5.x workarounds in `equity_reconstruction.py` / `exchange.py` target this line, and cassettes are verified against it. In-group patch bump is fine; do not float it. |
+| `rpyc` — stays `==5.2.3`, never 6.x | rpyc 6 is not wire-compatible with the Wine-side mt5linux 5.x server (`ValueError: invalid message type: 18`). Not in any open PR; recorded so nobody "helpfully" bumps it. |
+| `aiohttp` — cap `<3.15` stays | The 3.14 incident (vcrpy stub) is exactly why the cap exists. #685 lands 3.14.3, inside it. Do not widen. |
+| `@lhci/cli` — stays `0.15.1` | **0.15.1 IS the latest published version.** There is nothing to bump to. |
+| `overrides: { fast-uri: "^3.1.4" }` | ⚠️ Actually *insufficient* — the advisory range is `3.0.0 – 3.1.4`, so the current override pins to the last vulnerable version. Bump the override to `^3.1.5` as a one-line fix in the same pass. This is the one override worth touching. |
+| Banned-packages list | Re-checked 2026-08-20: none of the 9 PRs, and none of the 29 + 8 group members, touch `react-native-international-phone-number` or `react-native-country-select`. Clean. |
+
+---
+
+## #606 is stale — close it, don't "fix" it
+
+`TODOS.md:811` books #606 as *"a DEV-ONLY chain — all 4 highs via `@lhci/cli` → old `uuid`; needs an @lhci/cli bump or override in this same pass."* **Three of those four claims are false at HEAD** (measured 2026-08-20):
+
+1. **There are 12 highs, not 4** (`npm audit`: 12 high, 2 moderate, 1 low).
+2. **`uuid` is not one of them.** `uuid@8.3.2` carries GHSA-w5hq-g745-h8pq — **MODERATE**, a missing buffer bounds check in v3/v5/v6 when `buf` is supplied. Not high, and not the lhci chain's severity driver.
+3. **An `@lhci/cli` bump is impossible** (0.15.1 is latest) and an **override cannot fix it either**: the actual high in that chain is `extract-zip` (GHSA-jmr9-qjv8-65gv, symlink path traversal) whose vulnerable range is **`*`** — no fixed version exists. `npm audit fix --force` "resolves" it by *downgrading* `@lhci/cli` to `0.6.1`, a nine-minor regression on a CI perf gate.
+
+The one true claim is that it's dev-only. And the nightly gate **already encodes that**: `nightly.yml` runs `npm audit --omit=dev --audit-level=high`, with a written rationale accepting exactly this class. Issue #606 dates from **2026-07-10**, before that `--omit=dev` narrowing landed.
+
+**Recommendation:** close #606 as stale with the measured evidence, and instead land the two *real*, cheap wins the audit surfaced:
+- bump the `fast-uri` override to `^3.1.5`;
+- expect `undici` (high, via `jsdom@29.1.1` only) to clear for free when #646 lands jsdom 30 → `undici@^8`.
+
+Everything else high in the dev tree (`brace-expansion`, `ip-address`, `js-yaml@3` via lhci, `nanoid`, the `extract-zip` chain) is either already-accepted build-only tooling or fixed incidentally by #686. **Do not add an audit-allowlist file** — the `--omit=dev` scoping already is the policy, and a second mechanism would let a real prod advisory hide behind an entry someone added for lhci.
+
+---
+
+## Adjacent claim worth correcting in the same pass
+
+`TODOS.md:813` says #616 (stale analytics deploy) *"is NOT a deps issue — it's the Phase 144 TEST-DB flake keeping main CI red so Railway skips deploys; currently harmless (no analytics-service changes in the undeployed delta)."* The first half still holds. **The second half stops holding the moment #685 merges** — that PR is 100% `analytics-service/` and would sit undeployed behind a red `main`. The OPS work on #616 is therefore a **hard prerequisite for step 4**, not an independent item. Sequence OPS-#616 before DEPS-#685, or land #685 and verify the Railway deploy actually fired (`commitHash` + `/health`) rather than assuming it.
+
+---
+
+## Sources & confidence
+
+| Finding | Source | Confidence |
+|---------|--------|------------|
+| #686 fails on `npm ci` EUSAGE, missing `proxy-agent` subtree | `gh run view --log-failed` on run 32365605203 | **HIGH** — read from the failing job's own log |
+| `main`'s lock is in sync (desync is PR-introduced) | `npm ci --dry-run` at HEAD | **HIGH** — measured locally |
+| #685 writes `pandas 3.0.3 → 2.3.3` into the lock | `gh pr diff 685` lines 179–180 | **HIGH** — read from the diff |
+| `requirements.in` says 2.2.3, lock says 3.0.3, since `83680283` | `grep` + `git log -S` | **HIGH** — measured |
+| TS 7.0.2 exports map / native binary deps | `npm view typescript@7.0.2 exports dependencies` | **HIGH** — npm registry, primary |
+| TS 7 has no stable programmatic API until 7.1; `@typescript/typescript6` shim | WebSearch (devblogs.microsoft.com announcement, InfoQ, Visual Studio Magazine) | **MEDIUM** — seam classifies `websearch` as LOW; upgraded to MEDIUM because it corroborates the primary `exports`-map read rather than standing alone |
+| `typescript-eslint@8.58.0` peer `typescript >=4.8.4 <6.1.0` | `npm view` | **HIGH** — npm registry |
+| jsdom 30.0.0 breaking = engines only; 30.0.1 fixes `calc()` regression; undici → ^8 | GitHub Releases API (`jsdom/jsdom`), `npm view jsdom@30.0.1` | **HIGH** — vendor's own release notes + registry |
+| jest-dom 7 peer + Node 22 minimum; 7.0.1 latest | GitHub Releases API, `npm view` | **HIGH** |
+| setup-node v7 / setup-python v7 / supabase-setup-cli v3 release notes | GitHub Releases API for each repo | **HIGH** |
+| Repo has no `NODE_AUTH_TOKEN`, no `pip-install`, no `github-token`; `supabase@2.98.2` exists on npm | `grep` over `.github/` + `npm view` | **HIGH** — measured |
+| FastAPI 0.140–0.141 non-breaking; starlette requirement unchanged | fastapi.tiangolo.com release notes + PyPI JSON API `requires_dist` | **HIGH** for the PyPI metadata, MEDIUM for the "no breaking changes" reading (0.140.0's own entry was truncated in the fetched page) |
+| `@lhci/cli` 0.15.1 is latest; `extract-zip` range `*`; `uuid` is moderate | `npm view`, `npm audit --json` | **HIGH** — measured locally |
+
+**Gaps the planner should carry:**
+- I did not execute the campaign — no PR was rebased, no lock regenerated, no suite run. Every "expect green" above is a prediction, not a measurement.
+- FastAPI 0.140.0's own changelog entry was truncated by the fetch; if the python suite reds on #685 after pandas is neutralised, read that entry directly before blaming pandas.
+- `knip` 6.25 → 6.32 spans seven minors; I did not read its changelogs. If #686 reds *after* a clean `npm ci`, `knip` is the highest-prior suspect and its findings may be legitimate rather than regressions.
