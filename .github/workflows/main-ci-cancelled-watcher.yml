@@ -187,7 +187,7 @@ jobs:
                 "",
                 detail,
                 "",
-                "**Triage:** follow the *Watcher triage* section of [`docs/runbooks/shared-test-db-mutex.md`](../blob/main/docs/runbooks/shared-test-db-mutex.md) — compare the analytics `/health` `git_sha` to main HEAD, rerun the cancelled run with `gh run rerun <id>` if the deploy was skipped, then close this issue.",
+                `**Triage:** follow the *Watcher triage* section of the [shared-test-db mutex runbook](https://github.com/${REPO_NAME}/blob/main/docs/runbooks/shared-test-db-mutex.md) — compare the analytics \`/health\` \`git_sha\` to main HEAD, rerun the cancelled run with \`gh run rerun <id>\` if the deploy was skipped, then close this issue.`,
                 "",
                 "This watcher is deliberately **issue-only**: an automatic rerun would re-enter the same contention window that caused the cancellation.",
                 "",
