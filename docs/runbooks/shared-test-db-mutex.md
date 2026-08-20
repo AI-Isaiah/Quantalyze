@@ -80,6 +80,29 @@ There is **no lock-reaper cron, and none is needed.**
   `::error::` annotation (never a non-zero exit) when the recorded pid is
   already gone, because that means DB work ran unserialized. It used to print a
   reassuring "already gone" line on exactly that path.
+
+**The three numbers, and why they are what they are.** They are load-bearing on
+each other; change one and you must re-derive the others.
+
+| Number | Value | Constraint |
+| --- | --- | --- |
+| Acquire wait cap (`ci.yml` acquire loop) | `3600` s | ≥ worst-case legitimate queue: 3 concurrent runs × ~20 min of lock-time each, minus the waiter's own hold ≈ 60 min |
+| Job TTL (`timeout-minutes`) | `90` min | > setup + full acquire cap + the job's own work (~2 + 60 + ~12 ≈ 74 min) |
+| Holder idle sleep (`pg_sleep`) | `6000` s (100 min) | **>** the job TTL, so the job always dies first (WR-01) |
+
+Each CI run takes the lock three times — `python` (~7 min of pytest under the
+lock), `e2e-seeded` (~8-9 min, spanning `npm run build` *and* the Playwright
+batch), and `sql-tests` — so ~20 min of lock-time per run. The phase's success
+criterion is that **three simultaneous runs serialize and all succeed**, which
+is what the 3600 s cap is sized from.
+
+A waiter that exhausts the cap fails its job. Because `sql-tests` is now
+blocking the `frontend` aggregator, that means a red required check — and on a
+push to `main`, a check-suite that is not green, so Railway skips the analytics
+deploy. That is why the cap is sized for queue depth rather than left at a value
+comparable to the work it has to absorb. The timeout message deliberately names
+**both** queue depth and a wedged holder, and prints a `pg_locks` census
+(granted/waiting counts) so triage starts from a measurement.
 - The same release happens on any other job end: success, failure, or
   cancellation. **A cancelled job cannot leak the lock** — cancellation kills the
   runner, which drops the session.

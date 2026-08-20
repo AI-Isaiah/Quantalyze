@@ -918,11 +918,15 @@ jobs:
     # `psql -v ON_ERROR_STOP=1` a failed assertion exits non-zero and
     # fails the job.
     runs-on: ubuntu-latest
-    # TTL for the mutex below (Phase 158 / OPS-01): GitHub kills the job at 60m,
+    # TTL for the mutex below (Phase 158 / OPS-01): GitHub kills the job at 90m,
     # the psql session drops, and Postgres releases the advisory lock. That IS
     # the steal path — no reaper cron needed. Manual unlock:
     # docs/runbooks/shared-test-db-mutex.md.
-    timeout-minutes: 60
+    # 158-REVIEW CR-04: 90m, not 60m — sized so THREE simultaneous runs can all
+    # succeed (setup + the 3600s acquire cap + this job's own work). See the
+    # fuller derivation on the `python` job's identical TTL comment.
+    # ⛔ The holder's `pg_sleep` must stay ABOVE this number (WR-01) — it is 6000s.
+    timeout-minutes: 90
     if: (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository) && vars.E2E_TEST_DB_CONFIGURED == 'true'
     # Phase 142.1 (D-05): this job must SERIALIZE against the `python` and
     # `e2e-seeded` jobs. These SQL files run against the ONE
@@ -1118,8 +1122,15 @@ jobs:
               >> "${log}" 2>&1 &
           holder=$!
           echo "${holder}" > "${RUNNER_TEMP}/shared-test-db-mutex.pid"
+          # 158-REVIEW CR-04: the cap absorbs legitimate cross-run QUEUE DEPTH,
+          # not just a wedge. Three simultaneous runs put ~8 other holds ahead of
+          # the last waiter (~60m at the measured ~20m of lock-time per run), and
+          # the phase's success criterion is that all three still pass. 2700s was
+          # comparable to the work it had to absorb, so ordinary contention —
+          # which this repo's history records as NORMAL — surfaced as a red
+          # sql-tests → red `frontend` → skipped Railway deploy.
           waited=0
-          while [ "${waited}" -lt 2700 ]; do
+          while [ "${waited}" -lt 3600 ]; do
             if grep -q 'MUTEX-ACQUIRED' "${log}" 2>/dev/null; then
               echo "Acquired the shared-test-db advisory lock (key 61616158) after ${waited}s."
               exit 0
@@ -1135,7 +1146,16 @@ jobs:
               echo "still waiting on the shared-test-db mutex (${waited}s) — another run holds it."
             fi
           done
-          echo "::error::timed out after ${waited}s waiting for the shared-test-db advisory lock (key 61616158) — a holder is wedged. Unlock: docs/runbooks/shared-test-db-mutex.md."
+          # 158-REVIEW CR-04: do NOT assert "a holder is wedged" — measure, then
+          # name both causes. From inside this loop a deep waiter queue and a
+          # wedged holder are indistinguishable, and the old message confidently
+          # named the rarer one, sending the operator hunting for a wedge that
+          # may not exist. Counts ONLY: no pids, no host, no DSN, and stderr is
+          # discarded outright — this log is public.
+          census="$(PGCONNECT_TIMEOUT=15 psql "${dsn}" -X -q -A -t \
+            -c "SELECT count(*) FILTER (WHERE granted) || ' granted, ' || count(*) FILTER (WHERE NOT granted) || ' waiting' FROM pg_locks WHERE locktype = 'advisory' AND objid = 61616158;" \
+            2>/dev/null | tr -d '\r' | head -1)" || true
+          echo "::error::timed out after ${waited}s waiting for the shared-test-db advisory lock (key 61616158). Lock census: ${census:-unavailable}. TWO causes are possible and this step cannot distinguish them: (1) QUEUE DEPTH — concurrent runs each hold the lock ~20m, which is a NORMAL condition in this repo; re-run once the queue drains. (2) A WEDGED holder whose runner is gone. Triage (count the waiters first) and manual unlock: docs/runbooks/shared-test-db-mutex.md sections 2-3."
           exit 1
       - name: Run SQL self-tests against test Supabase project
         env:
@@ -1302,10 +1322,24 @@ jobs:
   python:
     runs-on: ubuntu-latest
     # TTL for the shared-test-db mutex (Phase 158 / OPS-01): GitHub kills the job
-    # at 60m, the psql session drops, and Postgres releases the advisory lock.
+    # at 90m, the psql session drops, and Postgres releases the advisory lock.
     # That IS the steal path. Manual unlock:
     # docs/runbooks/shared-test-db-mutex.md.
-    timeout-minutes: 60
+    #
+    # 158-REVIEW CR-04 — why 90 and not 60. Each CI run takes this lock THREE
+    # times (python ~7m, e2e-seeded ~8-9m across build + the Playwright batch,
+    # sql-tests the balance) ≈ 20m of lock-time per run. The phase's own success
+    # criterion is that THREE simultaneous runs serialize and ALL SUCCEED, so the
+    # last job to acquire can legitimately queue behind ~8 other holds ≈ 60m. The
+    # acquire cap is sized to 3600s to absorb exactly that, and this TTL must
+    # then cover setup + that full cap + this job's own work (~2m + 60m + ~12m ≈
+    # 74m) with headroom. At 60m the waiter died of its OWN TTL mid-queue — and
+    # with sql-tests now BLOCKING the `frontend` aggregator that reddens main
+    # HEAD and makes Railway skip the analytics deploy, i.e. #616's damage
+    # through a new door. The trade is a wider worst-case WEDGED hold (90m);
+    # runbook section 3 is the manual override for that.
+    # ⛔ The holder's `pg_sleep` must stay ABOVE this number (WR-01) — it is 6000s.
+    timeout-minutes: 90
     # Serialize the python job across ALL runs (every PR + every push) against
     # the SHARED remote Supabase test project. The workflow-level concurrency
     # group (top of file) only isolates per-PR, so two different PRs' python
@@ -1456,8 +1490,15 @@ jobs:
               >> "${log}" 2>&1 &
           holder=$!
           echo "${holder}" > "${RUNNER_TEMP}/shared-test-db-mutex.pid"
+          # 158-REVIEW CR-04: the cap absorbs legitimate cross-run QUEUE DEPTH,
+          # not just a wedge. Three simultaneous runs put ~8 other holds ahead of
+          # the last waiter (~60m at the measured ~20m of lock-time per run), and
+          # the phase's success criterion is that all three still pass. 2700s was
+          # comparable to the work it had to absorb, so ordinary contention —
+          # which this repo's history records as NORMAL — surfaced as a red
+          # sql-tests → red `frontend` → skipped Railway deploy.
           waited=0
-          while [ "${waited}" -lt 2700 ]; do
+          while [ "${waited}" -lt 3600 ]; do
             if grep -q 'MUTEX-ACQUIRED' "${log}" 2>/dev/null; then
               echo "Acquired the shared-test-db advisory lock (key 61616158) after ${waited}s."
               exit 0
@@ -1473,7 +1514,16 @@ jobs:
               echo "still waiting on the shared-test-db mutex (${waited}s) — another run holds it."
             fi
           done
-          echo "::error::timed out after ${waited}s waiting for the shared-test-db advisory lock (key 61616158) — a holder is wedged. Unlock: docs/runbooks/shared-test-db-mutex.md."
+          # 158-REVIEW CR-04: do NOT assert "a holder is wedged" — measure, then
+          # name both causes. From inside this loop a deep waiter queue and a
+          # wedged holder are indistinguishable, and the old message confidently
+          # named the rarer one, sending the operator hunting for a wedge that
+          # may not exist. Counts ONLY: no pids, no host, no DSN, and stderr is
+          # discarded outright — this log is public.
+          census="$(PGCONNECT_TIMEOUT=15 psql "${dsn}" -X -q -A -t \
+            -c "SELECT count(*) FILTER (WHERE granted) || ' granted, ' || count(*) FILTER (WHERE NOT granted) || ' waiting' FROM pg_locks WHERE locktype = 'advisory' AND objid = 61616158;" \
+            2>/dev/null | tr -d '\r' | head -1)" || true
+          echo "::error::timed out after ${waited}s waiting for the shared-test-db advisory lock (key 61616158). Lock census: ${census:-unavailable}. TWO causes are possible and this step cannot distinguish them: (1) QUEUE DEPTH — concurrent runs each hold the lock ~20m, which is a NORMAL condition in this repo; re-run once the queue drains. (2) A WEDGED holder whose runner is gone. Triage (count the waiters first) and manual unlock: docs/runbooks/shared-test-db-mutex.md sections 2-3."
           exit 1
       - run: pytest --cov=services --cov=routers --cov=main_worker --cov-report=term-missing --cov-fail-under=80
         env:
@@ -1821,10 +1871,24 @@ jobs:
     # an already-doomed PR; e2e validity depends on types, not unit tests).
     runs-on: ubuntu-latest
     # TTL for the shared-test-db mutex (Phase 158 / OPS-01): GitHub kills the job
-    # at 60m, the psql session drops, and Postgres releases the advisory lock.
+    # at 90m, the psql session drops, and Postgres releases the advisory lock.
     # That IS the steal path. Manual unlock:
     # docs/runbooks/shared-test-db-mutex.md.
-    timeout-minutes: 60
+    #
+    # 158-REVIEW CR-04 — why 90 and not 60. Each CI run takes this lock THREE
+    # times (python ~7m, e2e-seeded ~8-9m across build + the Playwright batch,
+    # sql-tests the balance) ≈ 20m of lock-time per run. The phase's own success
+    # criterion is that THREE simultaneous runs serialize and ALL SUCCEED, so the
+    # last job to acquire can legitimately queue behind ~8 other holds ≈ 60m. The
+    # acquire cap is sized to 3600s to absorb exactly that, and this TTL must
+    # then cover setup + that full cap + this job's own work (~2m + 60m + ~12m ≈
+    # 74m) with headroom. At 60m the waiter died of its OWN TTL mid-queue — and
+    # with sql-tests now BLOCKING the `frontend` aggregator that reddens main
+    # HEAD and makes Railway skip the analytics deploy, i.e. #616's damage
+    # through a new door. The trade is a wider worst-case WEDGED hold (90m);
+    # runbook section 3 is the manual override for that.
+    # ⛔ The holder's `pg_sleep` must stay ABOVE this number (WR-01) — it is 6000s.
+    timeout-minutes: 90
     # Fork-PR composition (same as sql-tests): repo VARIABLES are readable in
     # fork-PR runs while secrets are withheld, so the vars gate alone would
     # start the job on a fork and die at the seed step with empty secrets.
@@ -1969,8 +2033,15 @@ jobs:
               >> "${log}" 2>&1 &
           holder=$!
           echo "${holder}" > "${RUNNER_TEMP}/shared-test-db-mutex.pid"
+          # 158-REVIEW CR-04: the cap absorbs legitimate cross-run QUEUE DEPTH,
+          # not just a wedge. Three simultaneous runs put ~8 other holds ahead of
+          # the last waiter (~60m at the measured ~20m of lock-time per run), and
+          # the phase's success criterion is that all three still pass. 2700s was
+          # comparable to the work it had to absorb, so ordinary contention —
+          # which this repo's history records as NORMAL — surfaced as a red
+          # sql-tests → red `frontend` → skipped Railway deploy.
           waited=0
-          while [ "${waited}" -lt 2700 ]; do
+          while [ "${waited}" -lt 3600 ]; do
             if grep -q 'MUTEX-ACQUIRED' "${log}" 2>/dev/null; then
               echo "Acquired the shared-test-db advisory lock (key 61616158) after ${waited}s."
               exit 0
@@ -1986,7 +2057,16 @@ jobs:
               echo "still waiting on the shared-test-db mutex (${waited}s) — another run holds it."
             fi
           done
-          echo "::error::timed out after ${waited}s waiting for the shared-test-db advisory lock (key 61616158) — a holder is wedged. Unlock: docs/runbooks/shared-test-db-mutex.md."
+          # 158-REVIEW CR-04: do NOT assert "a holder is wedged" — measure, then
+          # name both causes. From inside this loop a deep waiter queue and a
+          # wedged holder are indistinguishable, and the old message confidently
+          # named the rarer one, sending the operator hunting for a wedge that
+          # may not exist. Counts ONLY: no pids, no host, no DSN, and stderr is
+          # discarded outright — this log is public.
+          census="$(PGCONNECT_TIMEOUT=15 psql "${dsn}" -X -q -A -t \
+            -c "SELECT count(*) FILTER (WHERE granted) || ' granted, ' || count(*) FILTER (WHERE NOT granted) || ' waiting' FROM pg_locks WHERE locktype = 'advisory' AND objid = 61616158;" \
+            2>/dev/null | tr -d '\r' | head -1)" || true
+          echo "::error::timed out after ${waited}s waiting for the shared-test-db advisory lock (key 61616158). Lock census: ${census:-unavailable}. TWO causes are possible and this step cannot distinguish them: (1) QUEUE DEPTH — concurrent runs each hold the lock ~20m, which is a NORMAL condition in this repo; re-run once the queue drains. (2) A WEDGED holder whose runner is gone. Triage (count the waiters first) and manual unlock: docs/runbooks/shared-test-db-mutex.md sections 2-3."
           exit 1
       - name: Seed demo data into test Supabase
         # Populates the 8-strategy demo set the seed-gated specs require.
