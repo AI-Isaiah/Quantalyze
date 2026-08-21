@@ -129,8 +129,9 @@ and refused to advance a counter against the wrong phase). That refusal was corr
 
 ⚠️ **Corrected 2026-08-13:** this block read `Phase: 153.6 … EXECUTING, Plan: 1 of 6` until now.
 153.6 shipped on `main` (PR #675, commit 54a0d26d) and the position had not been advanced since.
-⚠️ The **Session → Next step** paragraph at the foot of this file is still stale for the same reason
-(it says 153.6 "is booked and NOT yet planned"). Left as found — out of this plan's scope.
+⚠️ The **Session → Next step** paragraph at the foot of this file was stale for the same reason
+(it said 153.6 "is booked and NOT yet planned") until 2026-08-21, when the Phase 158 closure updated
+it to the current position (Phase 159).
 
 ### Phase 142.1 scope (inserted 2026-08-02)
 
@@ -1402,10 +1403,10 @@ Load-bearing sequencing (real dependencies, do not reorder):
 
 ## Session
 
-**Last Date:** 2026-08-18T02:53:00.766Z
+**Last Date:** 2026-08-21T05:06:25.809Z
 **Stopped At:** Phase 158 complete, ready to plan Phase 159
 **Resume File:** None
-**Next step:** Phase 153.6 (PARITY) is booked and NOT yet planned — run `/gsd:plan-phase 153.6`. It carries 9 findings from the `/code-review xhigh` over the whole 153→153.5 span. ⛔ Three of its four root causes are ONE-PATH-ONLY fixes (a correct remedy applied to `routers/exchange.py` while its twin in `services/ingestion/mt5.py` went untouched, with no guard asserting the two agree) — close them as a CLASS, not as N patches. ⭐ The venue-lock bypass (D) is LIVE on PROD (the migration is on `main`, and `supabase/migrations/**` auto-applies on merge) but is a SELF-targeted control bypass, not a tenant leak. ⛔ The budget correction (C) has two halves — the number AND the oracle that pins the wrong column and so cannot red on it. Phases 154 and 155 remain unplanned; 155 is human- and calendar-gated (founder at the MT5 terminal, live funded account, on a trading day).
+**Next step:** Phase 159 (RANK — public ranking integrity) is next and NOT yet planned — run `/gsd-plan-phase 159`. (The former 153.6/154/155 note was v1.17-era; those items live in the archived milestone trackers and TODOS.md.)
 
 ⭐ **Foundation names later waves import by name** (from `153.1-02-SUMMARY.md`, all in
 `src/lib/closed-sets.ts`): `VenueCapabilities` (`:77`), `VENUE_CAPABILITIES` (`:133`),
