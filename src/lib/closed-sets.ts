@@ -739,8 +739,12 @@ export const PERCENTILE_GATE_COLUMN = "computation_status";
 // This is the ONE gate for both TS percentile callers (getPercentiles and
 // getOwnRowPercentiles in queries.ts). It delegates to isComputedAnalytics
 // rather than re-deriving status semantics, so `complete_with_warnings` — a
-// terminal SUCCESS — stays ranked; a local `=== 'complete'` comparison would
-// silently unrank every warned-but-valid strategy.
+// terminal SUCCESS — stays ranked; a local exact-match against the bare
+// `complete` value would silently unrank every warned-but-valid strategy.
+// (Phrased without the literal comparison operator on purpose: the SI-01
+// census in complete-status-scan.test.ts greps raw source, so writing that
+// pattern even in prose would force an allowlist bump and blind the guard to
+// a real one landing in this file later.)
 //
 // The SQL twin is the cohort predicate in get_verified_cohort_rank
 // (supabase/migrations/20260821120000_*): its
