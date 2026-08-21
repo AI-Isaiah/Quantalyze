@@ -161,8 +161,9 @@ items were dropped, not carried. Categories: **Fix now** / **Fix mid-term** / **
    interactive lease wait is smaller than the worker's 40s read + 10s restart hold, so an
    interactive validate can never wait out one in-flight derive.
 
-0b. **[158-MUTEX-01] shared-test-db mutex holder dies at ~120s — serialization guarantee lasts
-   only the first ~2 minutes of each CI job's DB span.** Found 2026-08-21 by the Phase 158
+0b. **✅ RESOLVED 2026-08-21 — [158-MUTEX-01] shared-test-db mutex holder dies at ~120s —
+   serialization guarantee lasts only the first ~2 minutes of each CI job's DB span.**
+   Found 2026-08-21 by the Phase 158
    closure's adversarial ship review; mechanism MEASURED: the TEST project sets server-wide
    `statement_timeout=120000` ("configuration file" source in `pg_settings`; no `postgres`-role
    override), which kills the holder's single-statement `SELECT pg_sleep(6000)` at 120s → psql
@@ -186,6 +187,18 @@ items were dropped, not carried. Categories: **Fix now** / **Fix mid-term** / **
    (waiters block/queue), §3 (waiter-count triage), §5 (~20 min hold / quiet-CI drill
    advice) and CONTRIBUTING.md's unqualified serialization claim all assume a long-lived
    holder — sweep them in the fix PR.
+   **Resolution (branch `fix/158-mutex-statement-timeout`):** `SET statement_timeout = 0`
+   is now the FIRST `-c` statement of the holder psql invocation in all three acquire
+   steps (kept byte-identical; exempts both the contended `pg_advisory_lock` wait and the
+   `pg_sleep`), the retry-loop error no longer asserts a mid-wait kill is "NOT lock
+   contention", and the release-step comment records that a dead holder is now unexpected.
+   Runbook §§1/2/3/5 swept (§2 blockquote → RESOLVED record, WR-01 stated three-legged,
+   numbers table refreshed, §5 notes the 45 s probe cannot witness this class) and
+   CONTRIBUTING.md's serialization claim qualified. New pin in
+   `critical-regressions.test.ts`: exactly 3 exempt holder invocations with the `SET`
+   before `pg_advisory_lock` — proven able to fail (one site neutered 0→120000 → RED on
+   exactly that job, 1 failed | 143 passed; restored → 144 passed).
+   **Completed:** v0.69.0.2 (2026-08-21)
 
 1. **`RESEND_API_KEY` unset in Vercel prod** — founder-LP report cron + all transactional
    email are dead (code soft-skips, only Sentry fires). **Founder action:** set the key in
