@@ -14,6 +14,28 @@ import {
   type HoldingCompareItem,
 } from "./lib/holding-compare-adapter";
 
+/**
+ * Phase 159 (159-03, RANK-02 / decision D-02) — the compare analytics
+ * projection, replacing a wildcard analytics embed.
+ *
+ * Compare is an AUTHED allocator surface, but it is CROSS-TENANT: an allocator
+ * reads other managers' published strategies, which is why the requirement
+ * names this site alongside the anonymous ones. RLS is ROW-level and cannot
+ * hide a column, so an explicit column list is the only control over what
+ * leaves the database — `daily_returns`, the `metrics_json` blob and
+ * `data_quality_flags` are all absent here and none of them was ever read.
+ *
+ * Enumerated from the compare UI at HEAD (enumerate before cutting):
+ *   - the nine `METRICS` rows in CompareTable (:27-37), read by DYNAMIC key
+ *     (`getValue(item.analytics, metric.key)`), so a missing column shows as
+ *     an em-dash rather than a crash — a silent regression, hence the pin in
+ *     page.test.tsx.
+ *   - `returns_series`, read by BOTH CompareEquityOverlay (:40) and
+ *     CompareCorrelationMatrix (:26). Dropping it blanks both charts.
+ */
+const COMPARE_ANALYTICS_COLUMNS =
+  "cumulative_return, cagr, sharpe, sortino, calmar, max_drawdown, max_drawdown_duration_days, volatility, six_month_return, returns_series";
+
 // Phase 51 NAV-02 — the back-path crumb is identical across all three render
 // branches (empty-selection, not-available, results), so it lives in one place.
 const COMPARE_BREADCRUMB = [
@@ -65,7 +87,7 @@ export default async function ComparePage({
       ? withPublishedOnly(
           supabase
             .from("strategies")
-            .select("*, strategy_analytics (*)")
+            .select(`*, strategy_analytics (${COMPARE_ANALYTICS_COLUMNS})`)
             .in("id", strategyIds),
         )
       : Promise.resolve({ data: [], error: null }),
@@ -82,10 +104,24 @@ export default async function ComparePage({
 
   const strategyItems = ((strategiesRes as { data: unknown[] | null }).data ?? []).map((s) => {
     const strat = s as Strategy & { strategy_analytics: unknown };
+    const row = (Array.isArray(strat.strategy_analytics)
+      ? strat.strategy_analytics[0]
+      : strat.strategy_analytics) as Partial<StrategyAnalytics> | null | undefined;
     return {
       kind: "strategy" as const,
       strategy: strat as Strategy,
-      analytics: ((Array.isArray(strat.strategy_analytics) ? strat.strategy_analytics[0] : strat.strategy_analytics) ?? { ...EMPTY_ANALYTICS, strategy_id: strat.id }) as StrategyAnalytics,
+      // Phase 159 (159-03 / RANK-02): the read above is now a PARTIAL
+      // projection, so compose it over EMPTY_ANALYTICS — defaults first,
+      // fetched columns second. Downstream reads are typed `StrategyAnalytics`
+      // and would otherwise see `undefined` (not `null`) for any column the
+      // projection omits. This is the same fallback shape an ABSENT analytics
+      // row already produced; the spread simply also covers the present-row
+      // case. Fetched values always win — no fetched column is defaulted over.
+      analytics: {
+        ...EMPTY_ANALYTICS,
+        strategy_id: strat.id,
+        ...(row ?? {}),
+      } as StrategyAnalytics,
     };
   });
 

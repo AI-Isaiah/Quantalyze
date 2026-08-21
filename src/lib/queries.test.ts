@@ -407,6 +407,94 @@ describe("getStrategiesByCategory — RANK-02 explicit anon projection", () => {
   });
 });
 
+/**
+ * Phase 159 (159-03, RANK-02 / decision D-02) — `getStrategyDetail` splatted
+ * `strategy_analytics (*)`. RESEARCH Open Question 2 framed the tension as
+ * "the anon /strategy/[id] page and the authed discovery detail page share
+ * this function, and only one of them may see data_quality_flags", and the
+ * resolution is CALLER-SCOPED projections rather than one shared list.
+ *
+ * ⚠️ Measured correction (159-03): at HEAD `/strategy/[id]` does NOT call this
+ * function — it calls `getPublicStrategyDetail` (aliased locally through
+ * `cache()`), which already carries an explicit projection. This function's
+ * only production caller is the AUTHED discovery detail page. The `public`
+ * variant is therefore the SAFE DEFAULT for the exported surface, not a live
+ * anon path: any future anon caller gets the minimal projection unless it
+ * explicitly opts into the wider discovery list.
+ */
+describe("getStrategyDetail — RANK-02 caller-scoped analytics projection", () => {
+  const captureEmbed = async (run: () => Promise<unknown>) => {
+    recorders.strategyData = { ...baseStrategy, disclosure_tier: "exploratory" };
+    await run();
+    const cols = recorders.strategySelectCols.at(-1) ?? "";
+    return { cols, embed: /strategy_analytics \(([^)]*)\)/.exec(cols)?.[1] ?? "" };
+  };
+
+  it("public variant (the default) excludes the three columns and keeps computation_status", async () => {
+    const { cols, embed } = await captureEmbed(() => getStrategyDetail("strat_123"));
+    expect(cols).not.toContain("strategy_analytics (*)");
+    expect(embed).not.toBe("*");
+    // computation_status is MANDATORY in every variant — the detail surfaces
+    // derive their still-computing placeholder from it.
+    expect(embed).toContain("computation_status");
+    expect(cols).not.toContain("daily_returns");
+    expect(cols).not.toContain("data_quality_flags");
+    // catches `metrics_json` AND `metrics_json_by_basis`, allows a `->` alias
+    expect(embed).not.toMatch(/metrics_json(?!->)/);
+  });
+
+  it("discovery variant additionally projects every field the authed detail page reads", async () => {
+    const { cols, embed } = await captureEmbed(() =>
+      getStrategyDetail("strat_123", "crypto-sma", "discovery"),
+    );
+    expect(cols).not.toContain("strategy_analytics (*)");
+    // Enumerated from discovery/[slug]/[strategyId]/page.tsx at HEAD:
+    // daily_returns (:66) + returns_series (:69) feed resolveDailyReturnSeries;
+    // data_quality_flags (:85) drives the composite/single-key branch;
+    // metrics_json_by_basis + computation_status feed readSingleKeyBasisOpts;
+    // computed_at drives the FreshnessChip sentinel (:149).
+    for (const column of [
+      "computation_status",
+      "computed_at",
+      "data_quality_flags",
+      "daily_returns",
+      "returns_series",
+      "metrics_json_by_basis",
+    ]) {
+      expect(embed).toContain(column);
+    }
+  });
+
+  /**
+   * The public variant and `getPublicStrategyDetail`'s PUBLIC_ANALYTICS_COLUMNS
+   * describe the SAME thing — what an anonymous reader needs from a strategy
+   * detail row — so they are written as byte-identical member lists. Two
+   * identical literals in one file are a drift hazard (and an edit hazard: a
+   * find-and-replace aimed at one will silently hit the other, which is
+   * exactly how this pin came to be written). This makes the intended lockstep
+   * a CHECKED invariant instead of a hope: widen either list alone and this
+   * reds.
+   */
+  it("public variant stays in lockstep with the anon factsheet projection", async () => {
+    const detail = await captureEmbed(() => getStrategyDetail("strat_123"));
+    const factsheet = await captureEmbed(() => getPublicStrategyDetail("strat_123"));
+    const members = (embed: string) =>
+      embed.split(",").map((c) => c.trim()).sort();
+    expect(members(detail.embed).length).toBeGreaterThan(0);
+    expect(members(detail.embed)).toEqual(members(factsheet.embed));
+  });
+
+  it("the two variants differ — data_quality_flags is the authed-only column", async () => {
+    const pub = await captureEmbed(() => getStrategyDetail("strat_123"));
+    const disc = await captureEmbed(() =>
+      getStrategyDetail("strat_123", undefined, "discovery"),
+    );
+    expect(pub.embed).not.toContain("data_quality_flags");
+    expect(disc.embed).toContain("data_quality_flags");
+    expect(disc.embed).not.toBe(pub.embed);
+  });
+});
+
 describe("getPublicStrategyDetail — disclosure tier redaction", () => {
   it("returns null manager + does NOT query profiles for exploratory strategies", async () => {
     recorders.strategyData = {

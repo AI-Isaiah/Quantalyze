@@ -956,6 +956,61 @@ export async function getFactsheetDetail(strategyId: string): Promise<{
   };
 }
 
+/**
+ * Phase 159 (159-03, RANK-02 / decision D-02) — which caller is asking for a
+ * strategy detail row. RESEARCH Open Question 2 asked whether the anon and
+ * authed detail surfaces should share ONE analytics projection (forcing
+ * `data_quality_flags` — an exclusion-list column — into anon responses) or
+ * whether the function should grow a caller-scoped list. Resolved EXPLICITLY,
+ * per caller, rather than silently in either direction.
+ *
+ * `"public"` is the DEFAULT, so the exported surface is safe by construction:
+ * a caller must opt IN to the wider list. See the constants below.
+ */
+export type StrategyDetailVariant = "public" | "discovery";
+
+/**
+ * The anon-safe detail projection. Excludes all three RANK-02 columns
+ * (`daily_returns`, `metrics_json`, `data_quality_flags`) and RETAINS
+ * `computation_status`, which is mandatory in every variant — the detail
+ * surfaces derive their still-computing placeholder from it, and
+ * `computed_at` drives the freshness sentinel.
+ *
+ * Membership deliberately mirrors `PUBLIC_ANALYTICS_COLUMNS` (the projection
+ * `getPublicStrategyDetail` already uses for the ANON factsheet at
+ * `/strategy/[id]`): that is the measured anon-detail need, and the two lists
+ * describing the same surface should not disagree.
+ *
+ * ⚠️ Measured at HEAD (159-03): `/strategy/[id]` does NOT call
+ * `getStrategyDetail` — it calls `getPublicStrategyDetail`, aliased locally
+ * through `cache()` (page.tsx:18). RESEARCH classified this function as
+ * anon-reachable via that page; that classification was reading the LOCAL
+ * alias, not this export. This function's only production caller today is the
+ * AUTHED discovery detail page, so `public` is the safe default for future
+ * callers rather than a live anon path.
+ */
+const STRATEGY_DETAIL_PUBLIC_ANALYTICS_COLUMNS =
+  "cumulative_return, cagr, volatility, sharpe, sortino, calmar, max_drawdown, max_drawdown_duration_days, six_month_return, sparkline_returns, computation_status, computed_at";
+
+/**
+ * The AUTHED discovery-detail projection: the public list plus exactly the
+ * columns `/discovery/[slug]/[strategyId]` reads off the analytics row.
+ * Enumerated from that page at HEAD (Pitfall 5 — enumerate before cutting):
+ *
+ *   - `data_quality_flags` (:85) — `dqf` picks the composite vs single-key
+ *     branch and feeds `singleKeyDataQuality`. On the exclusion list for ANON
+ *     responses, which is exactly why it lives HERE and not in the public list.
+ *   - `daily_returns` (:66) + `returns_series` (:69) — `resolveDailyReturnSeries`.
+ *     ⚠️ Dropping either renders the "still computing" placeholder instead of
+ *     the factsheet: a silent, total visual regression.
+ *   - `metrics_json_by_basis` — threaded into `readCompositeFactsheet` and
+ *     `readSingleKeyBasisOpts` (the MTM/smoothed basis story).
+ *   - `computation_status` — `readSingleKeyBasisOpts` (the page comment at
+ *     :123 documents this dependency explicitly).
+ */
+const STRATEGY_DETAIL_DISCOVERY_ANALYTICS_COLUMNS =
+  `${STRATEGY_DETAIL_PUBLIC_ANALYTICS_COLUMNS}, data_quality_flags, daily_returns, returns_series, metrics_json_by_basis`;
+
 export async function getStrategyDetail(
   strategyId: string,
   /**
@@ -975,6 +1030,12 @@ export async function getStrategyDetail(
    * other means.
    */
   expectedCategorySlug?: string,
+  /**
+   * Phase 159 (159-03 / RANK-02): which analytics projection to issue.
+   * Defaults to the minimal anon-safe list — a caller needing the wider
+   * discovery columns must ask for them by name.
+   */
+  variant: StrategyDetailVariant = "public",
 ): Promise<{
   strategy: Strategy;
   analytics: StrategyAnalytics;
@@ -1001,9 +1062,17 @@ export async function getStrategyDetail(
   // discovery_categories with `!inner` + an `.eq("discovery_categories.slug",
   // …)` predicate. PostgREST drops the row entirely when the inner-join
   // misses, so a slug-shuffle URL turns into a clean null → not-found UI.
+  // Phase 159 (159-03 / RANK-02, D-02): the analytics embed is an explicit,
+  // caller-scoped column list — never a wildcard. RLS is ROW-level and cannot
+  // hide a column, so the projection is the only control over which analytics
+  // columns leave the database.
+  const analyticsColumns =
+    variant === "discovery"
+      ? STRATEGY_DETAIL_DISCOVERY_ANALYTICS_COLUMNS
+      : STRATEGY_DETAIL_PUBLIC_ANALYTICS_COLUMNS;
   const baseSelect = expectedCategorySlug
-    ? "*, discovery_categories!inner(slug), strategy_analytics (*)"
-    : "*, strategy_analytics (*)";
+    ? `*, discovery_categories!inner(slug), strategy_analytics (${analyticsColumns})`
+    : `*, strategy_analytics (${analyticsColumns})`;
 
   // NEW-C03-03 / NEW-C38-01: add the `status='published'` predicate as
   // defence-in-depth mirror of all sibling fetchers (getPublicStrategyDetail,
