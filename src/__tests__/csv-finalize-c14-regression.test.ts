@@ -112,11 +112,26 @@ vi.mock("@/lib/supabase/server", () => ({
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     rpc: (name: string, args: Record<string, unknown>) => (rpcMock as any)(name, args),
     from: (_table: string) => ({
-      update: (_payload: Record<string, unknown>) => ({
-        eq: (_c1: string, _v1: unknown) => ({
-          eq: (_c2: string, _v2: unknown) => updateMock(),
-        }),
-      }),
+      // 159-06 / RANK-07 — the chain grew a compare-and-set tail:
+      // `.is("category_id", null).select("id")`. SCAFFOLD ONLY. `updateMock`
+      // still decides the outcome and is still called exactly once per UPDATE,
+      // so every `toHaveBeenCalled` / `not.toHaveBeenCalled` assertion in this
+      // file means what it always meant. Non-empty `data` says the CAS matched,
+      // which is the state every case here models.
+      update: (_payload: Record<string, unknown>) => {
+        const tail = async () => {
+          const res = await updateMock();
+          return res.error
+            ? { data: null, error: res.error }
+            : { data: [{ id: "cas-matched" }], error: null };
+        };
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const chain: any = {};
+        chain.eq = () => chain;
+        chain.is = () => chain;
+        chain.select = (_cols: string) => tail();
+        return chain;
+      },
       insert: (_rows: unknown) => insertMock(),
       upsert: (_rows: unknown) => upsertMock(),
       // One flexible chain serves both resolve-arm reads; the two terminal

@@ -144,11 +144,25 @@ vi.mock("@/lib/supabase/server", () => ({
     rpc: (name: string, args: Record<string, unknown>) => rpcMock(name, args),
     from: (table: string) => ({
       update: (payload: Record<string, unknown>) => {
+        // 159-06 / RANK-07 — the metadata UPDATE grew a compare-and-set tail:
+        // `.is("category_id", null).select("id")`. SCAFFOLD ONLY. `updateMock`
+        // is still called exactly once with the same table/payload/eq-filters,
+        // so every assertion in this file is untouched. Non-empty `data` means
+        // the CAS matched — the state every case here models, since these are
+        // fresh creates and the fold's INSERT never writes `category_id`. The
+        // race semantics themselves are pinned in
+        // csv-finalize-cross-submission-merge.test.ts, not here.
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const casTail: any = {
+          is: () => casTail,
+          select: () =>
+            Promise.resolve({ data: [{ id: "cas-matched" }], error: null }),
+        };
         const eqChain = {
           eq: (col1: string, val1: unknown) => ({
             eq: (col2: string, val2: unknown) => {
               updateMock(table, payload, { [col1]: val1, [col2]: val2 });
-              return Promise.resolve({ error: null });
+              return casTail;
             },
           }),
         };
