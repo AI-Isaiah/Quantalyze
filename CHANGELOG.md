@@ -1,5 +1,38 @@
 # Changelog
 
+## [0.69.1.0] - 2026-08-21
+
+### fix: [158-MUTEX-01] — the shared-test-db CI mutex now actually holds for the whole job
+
+The Phase 158 closure's adversarial review found that the CI mutex holder was
+killed ~120 seconds after acquiring: the TEST database sets a server-wide
+`statement_timeout` of 120s, and both the lock wait and the 100-minute idle
+hold ran as single SQL statements. Serialization silently covered only the
+first two minutes of each job's database work (the release step's
+"ran UNSERIALIZED" error fired on every long run).
+
+**Fixed**
+
+- All three CI acquire steps (and the mutex probe's contenders) now open the
+  holder session with `SET statement_timeout = 0`, so neither a contended
+  lock wait nor the idle hold can be reaped by the server default.
+- The holder DSN now carries libpq keepalives (60s idle, 15s×4 probes): the
+  otherwise traffic-less 100-minute hold no longer risks silent NAT-idle
+  zombification, and a genuinely dead path kills psql within ~2 minutes so
+  the release step's dead-holder witness fires instead of wedging the next
+  run at the acquire cap.
+- The acquire retry-loop's triage message no longer inverts post-fix
+  diagnosis: a `canceling statement due to statement timeout` signature now
+  correctly indicates the session-mode path regressed, not lock contention.
+
+**Changed**
+
+- The regression pin now enforces what its message always claimed: the three
+  acquire steps are asserted pairwise byte-identical (any single-site drift
+  reds CI naming the job), alongside the SET-before-lock membership check.
+- Runbook `shared-test-db-mutex.md` §§1-5 and CONTRIBUTING updated to the
+  post-fix mechanism; the §2 defect record is marked resolved.
+
 ## [0.69.0.1] - 2026-08-21
 
 ### chore: close v1.20 Phase 158 by live measurement
