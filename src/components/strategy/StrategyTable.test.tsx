@@ -985,3 +985,98 @@ describe("StrategyTable — renders correctly on the RANK-02 projected row shape
     expect(screen.getByText("-12.00%")).toBeInTheDocument(); // max_drawdown
   });
 });
+
+// --- Phase 159 (159-03 / RANK-02) 3M advanced-filter, BOTH row shapes --------
+//
+// RANK-02 changed the 3M filter to `s.analytics.three_month ?? mj?.three_month`:
+// the aliased JSONB key FIRST (the anon list read projects
+// `three_month:metrics_json->three_month` so the whole blob never reaches an
+// anonymous reader), the `metrics_json` blob as FALLBACK (the owner-scoped
+// `getMyStrategies` keeps its wildcard embed under the D-02 exemption and so
+// carries the blob, not the alias). Two surfaces, one expression, and each half
+// is load-bearing for exactly one of them:
+//   * revert to blob-only  → /browse + /discovery show an EMPTY table whenever
+//     a 3M range is set;
+//   * drop the fallback    → /my-strategies empties instead.
+// Neither half had a test. Both failures are SILENT — `matchesRange` coerces a
+// missing value to 0 (`value ?? 0`), so a broken read does not throw, it just
+// filters the row on a fabricated zero.
+//
+// ⭐ THAT COERCION IS WHY BOTH ARMS BELOW ARE NEEDED, and why the "dropped"
+// arm's range is bounded ABOVE rather than below. Each arm is red under a
+// different failure, and neither is satisfiable by the 0 a broken read yields:
+//   KEEP arm, range 5–15%: the real 9% is inside it, the fabricated 0% is not.
+//   DROP arm, range ≤5%:   the real 9% is outside it, the fabricated 0% is IN.
+// A "dropped by a range above the value" arm would have been vacuous — 0 fails
+// it for the same reason the real value does.
+
+/** Anon/list shape: the aliased key ONLY, `metrics_json` absent (not null). */
+function makeAliasOnlyRow(id: string, name: string): StrategyWithAnalytics {
+  const base = makeStrategy({ id, name });
+  const { metrics_json: _dropped, ...withoutBlob } = base.analytics;
+  return {
+    ...base,
+    analytics: { ...withoutBlob, three_month: 0.09 } as unknown as StrategyAnalytics,
+  };
+}
+
+/** Owner shape: the `metrics_json` blob ONLY, no alias key. */
+function makeBlobOnlyRow(id: string, name: string): StrategyWithAnalytics {
+  const base = makeStrategy({ id, name });
+  return {
+    ...base,
+    analytics: makeAnalytics({
+      strategy_id: id,
+      metrics_json: { three_month: 0.09 },
+    }),
+  };
+}
+
+/** Open "All Filters", type a 3M range, Apply. The filter has no prop seam —
+ *  `advancedFilters` is StrategyTable's own state — so it is driven through the
+ *  real UI, which also pins the StrategyFilters → StrategyTable handoff. */
+async function applyThreeMonthRange(from: string, to: string) {
+  const user = userEvent.setup();
+  await user.click(screen.getByRole("button", { name: /All Filters/i }));
+  // RangeInput renders a bare <span> label, not a <label for>, so scope to the
+  // row by its text and take its two number inputs positionally (from, to).
+  const row = screen.getByText("3M %").parentElement!;
+  const [fromInput, toInput] = within(row).getAllByRole("spinbutton");
+  if (from !== "") fireEvent.change(fromInput!, { target: { value: from } });
+  if (to !== "") fireEvent.change(toInput!, { target: { value: to } });
+  await user.click(screen.getByRole("button", { name: /Apply filters/i }));
+}
+
+describe("StrategyTable — RANK-02 3M filter reads the alias AND the blob", () => {
+  const rows = () => [
+    makeAliasOnlyRow(STRATEGY_ID_A, "Alias Only Row"),
+    makeBlobOnlyRow(STRATEGY_ID_B, "Blob Only Row"),
+  ];
+
+  it("KEEPS both row shapes when the range brackets their real 3M value", async () => {
+    render(<StrategyTable strategies={rows()} categorySlug="crypto-sma" />);
+    await applyThreeMonthRange("5", "15");
+
+    // 0.09 → 9%, inside 5–15. A row whose 3M read broke reads as 0% and is
+    // dropped here, so each expectation names the branch it guards.
+    expect(
+      screen.queryByText("Alias Only Row"),
+      "the aliased three_month key must be read (anon /browse + /discovery)",
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText("Blob Only Row"),
+      "the metrics_json fallback must be read (owner /my-strategies)",
+    ).toBeInTheDocument();
+  });
+
+  it("DROPS both row shapes when the range excludes their real 3M value", async () => {
+    render(<StrategyTable strategies={rows()} categorySlug="crypto-sma" />);
+    await applyThreeMonthRange("", "5");
+
+    // 9% > 5%, so both go. A broken read (0%) would satisfy `to: 5` and SURVIVE
+    // — which is what makes this arm a real detector and not a restatement of
+    // the arm above.
+    expect(screen.queryByText("Alias Only Row")).not.toBeInTheDocument();
+    expect(screen.queryByText("Blob Only Row")).not.toBeInTheDocument();
+  });
+});
