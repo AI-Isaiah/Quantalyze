@@ -1025,14 +1025,19 @@ describe("computeMetricsForDraft — blend-basis annualization (BLEND-01)", () =
     expect(crypto.volatility).not.toBe(ref252.volatility);
   });
 
-  it("an added-only all-null draft is BYTE-IDENTICAL to the plain default-252 engine path (cagr destructured out)", () => {
-    // The default pin: an all-unknown blend derives blendPeriodsPerYear → 252,
-    // the engine's own default, so the helper's output must deep-equal a direct
-    // computeScenario call with NO periodsPerYear arg over the SAME added-only
-    // engine set. Explicit window + weights make the reference deterministic
-    // (no default-window ambiguity). cagr is stripped from BOTH sides (84-06
-    // will move it to the calendar clock; it is out of scope for this default
-    // pin, which asserts the RISK fields are byte-identical).
+  it("an added-only EXPLICITLY-TRADITIONAL draft is BYTE-IDENTICAL to the plain default-252 engine path (cagr destructured out)", () => {
+    // The default pin: a blend whose legs all carry an explicit 'traditional'
+    // class derives blendPeriodsPerYear → 252, the engine's own default, so the
+    // helper's output must deep-equal a direct computeScenario call with NO
+    // periodsPerYear arg over the SAME added-only engine set. Explicit window +
+    // weights make the reference deterministic (no default-window ambiguity).
+    // cagr is stripped from BOTH sides (84-06 moved it to the calendar clock,
+    // where it is basis-invariant; this pin asserts the RISK fields).
+    //
+    // RANK-06 (2026-08-21): this pin previously used all-NULL legs. Null legs
+    // are now the 365 (unknown → crypto) case, so the 252 byte-identity pin
+    // moved to legs that STATE they are traditional — which is the only shape
+    // that ever honestly meant 252. The null case is pinned at 365 below.
     const dates = buildDates("2024-01-02", 80);
     const seriesA = altReturns(dates, 0.01, -0.008);
     const seriesB = altReturns(dates, 0.012, -0.009);
@@ -1043,7 +1048,10 @@ describe("computeMetricsForDraft — blend-basis annualization (BLEND-01)", () =
       weightOverrides: { [SA]: 0.5, [SB]: 0.5 },
       window: win,
     });
-    const inputs = addedInputs({ [SA]: seriesA, [SB]: seriesB }); // both null → 252
+    const inputs = addedInputs(
+      { [SA]: seriesA, [SB]: seriesB },
+      { [SA]: "traditional", [SB]: "traditional" }, // both stated → 252
+    );
 
     const m = computeMetricsForDraft(d, inputs);
 
@@ -1071,6 +1079,100 @@ describe("computeMetricsForDraft — blend-basis annualization (BLEND-01)", () =
     const { cagr: _mCagr, ...mRest } = m;
     const { cagr: _rCagr, ...rRest } = ref;
     expect(mRest).toEqual(rRest);
+  });
+
+  // =======================================================================
+  // RANK-06 — the WIRING pin. The helper fix (closed-sets.ts) is worthless if
+  // a production call site stops consulting it, so these two drive
+  // computeMetricsForDraft (the real compare path, which calls
+  // blendPeriodsPerYear at scenario-compare.ts:349) rather than the helper.
+  //
+  // ORACLE DISCIPLINE (house law: money-math pins ride ECONOMIC invariants):
+  // the expected value is NOT a blendPeriodsPerYear() call inside the test and
+  // NOT the engine re-run at a hand-passed 365. It is the ratio between the two
+  // clocks the SAME fixture series produces through the SAME production path —
+  // √(365/252), a market-structure constant. If the call site regresses to 252
+  // for an unknown leg, the ratio collapses to 1 and this goes RED.
+  // =======================================================================
+  it("RANK-06 wiring: an added-only draft whose sole leg OMITS asset_class annualizes RISK on the 365 clock — vol/sharpe/sortino are exactly √(365/252) / (365/252)× the explicitly-traditional run of the SAME series", () => {
+    const dates = buildDates("2024-01-02", 80);
+    const series = altReturns(dates, 0.01, -0.008);
+    const win = { start: dates[5], end: dates[70] };
+    const d = draft({
+      addedStrategies: [addedStrat(SA, "A")],
+      toggleByScopeRef: { [SA]: true },
+      weightOverrides: { [SA]: 1 },
+      window: win,
+    });
+
+    // The projection-gap shape: the metadata entry carries NO asset_class at
+    // all (not null — ABSENT), exactly what a select list that dropped the
+    // column produces. Built by hand because `addedInputs` always writes the key.
+    const gapInputs: ScenarioCompareInputs = {
+      addedStrategyReturnsLookup: { [SA]: series },
+      addedStrategyMetadataLookup: {
+        [SA]: { disclosure_tier: "public", cagr: null, sharpe: null },
+      } as ScenarioCompareInputs["addedStrategyMetadataLookup"],
+    };
+    // The control: the SAME series, but the leg STATES it is traditional.
+    const statedInputs = addedInputs({ [SA]: series }, { [SA]: "traditional" });
+
+    const gap = computeMetricsForDraft(d, gapInputs);
+    const stated = computeMetricsForDraft(d, statedInputs);
+
+    // Non-vacuous: both runs produced real numbers over the same n.
+    expect(gap.n).toBeGreaterThanOrEqual(10);
+    expect(gap.n).toBe(stated.n);
+    expect(gap.volatility).toBeGreaterThan(0);
+    expect(stated.volatility).toBeGreaterThan(0);
+
+    // ECONOMICS. Annualized vol scales with √periods; Sharpe and Sortino scale
+    // with periods/√periods = √periods too. The engine rounds (vol toFixed(5),
+    // ratios toFixed(3)), so the comparison budget is 1e-3 relative, not exact.
+    const CLOCK_RATIO = Math.sqrt(365 / 252); // ≈ 1.2035
+    expect(gap.volatility! / stated.volatility!).toBeCloseTo(CLOCK_RATIO, 3);
+    expect(gap.sharpe! / stated.sharpe!).toBeCloseTo(CLOCK_RATIO, 3);
+    expect(gap.sortino! / stated.sortino!).toBeCloseTo(CLOCK_RATIO, 3);
+    // The pre-fix state is ratio === 1 — assert the gap is materially open.
+    expect(gap.volatility! / stated.volatility!).toBeGreaterThan(1.2);
+
+    // #597 SCOPE: the fix moves RISK only. RETURN-space outputs ride the
+    // calendar clock and must be BYTE-IDENTICAL across the two clocks.
+    expect(gap.twr).toBe(stated.twr);
+    expect(gap.cagr).toBe(stated.cagr);
+    expect(gap.max_drawdown).toBe(stated.max_drawdown);
+  });
+
+  it("RANK-06 wiring control: a null asset_class behaves identically to an ABSENT one at the call site (both are the same projection gap)", () => {
+    const dates = buildDates("2024-01-02", 80);
+    const series = altReturns(dates, 0.01, -0.008);
+    const win = { start: dates[5], end: dates[70] };
+    const d = draft({
+      addedStrategies: [addedStrat(SA, "A")],
+      toggleByScopeRef: { [SA]: true },
+      weightOverrides: { [SA]: 1 },
+      window: win,
+    });
+
+    // `addedInputs` with no class map writes asset_class: null.
+    const nullClass = computeMetricsForDraft(d, addedInputs({ [SA]: series }));
+    const cryptoClass = computeMetricsForDraft(
+      d,
+      addedInputs({ [SA]: series }, { [SA]: "crypto" }),
+    );
+    const traditional = computeMetricsForDraft(
+      d,
+      addedInputs({ [SA]: series }, { [SA]: "traditional" }),
+    );
+
+    expect(nullClass.n).toBeGreaterThanOrEqual(10); // non-vacuous
+    // A null-class leg now rides the SAME clock as a stated-crypto leg…
+    const { cagr: _nC, ...nullRest } = nullClass;
+    const { cagr: _cC, ...cryptoRest } = cryptoClass;
+    expect(nullRest).toEqual(cryptoRest);
+    // …and is genuinely LOUDER than the traditional clock (basis load-bearing).
+    expect(nullClass.volatility).not.toBe(traditional.volatility);
+    expect(nullClass.volatility!).toBeGreaterThan(traditional.volatility!);
   });
 
   it("a toggled-OFF crypto leg does NOT flip a tradfi selection to √365 (SELECTED-only basis)", () => {
