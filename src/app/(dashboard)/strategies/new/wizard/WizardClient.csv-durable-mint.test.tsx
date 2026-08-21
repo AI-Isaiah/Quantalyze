@@ -29,6 +29,8 @@
  */
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 
 // --- Navigation ---
 const pushMock = vi.fn();
@@ -125,13 +127,27 @@ vi.mock("./steps/CsvPreviewStep", () => ({
   ),
 }));
 
+// RANK-08 (159-07) — the classification the metadata step reports. A
+// module-level knob, exactly like `uploadPayload` above, so ONE stub can hand
+// back DIFFERENT classifications across the two passes a test drives — the
+// shape the real MetadataStep produces when the user edits the category or
+// asset-class picker and re-continues.
+const CAT_A = "11111111-1111-4111-8111-111111111111";
+const CAT_B = "22222222-2222-4222-8222-222222222222";
+const DEFAULT_METADATA = {
+  name: "x",
+  categoryId: CAT_A,
+  assetClass: "traditional",
+};
+let metadataPayload: Record<string, unknown> = { ...DEFAULT_METADATA };
+
 vi.mock("./steps/MetadataStep", () => ({
   MetadataStep: (props: { onComplete: (d: unknown) => void }) => (
     <div data-testid="mock-metadata">
       <button
         type="button"
         data-testid="metadata-complete"
-        onClick={() => props.onComplete({ name: "x", category_id: "c" })}
+        onClick={() => props.onComplete(metadataPayload)}
       >
         complete
       </button>
@@ -154,6 +170,15 @@ vi.mock("./steps/ReviewStep", () => ({
         onClick={() => props.onEdit("csv_upload")}
       >
         edit upload
+      </button>
+      {/* RANK-08 — the route back to the classification step, which is how a
+          user acts on the 146.2 classification-conflict 409's own remedy. */}
+      <button
+        type="button"
+        data-testid="review-edit-metadata"
+        onClick={() => props.onEdit("csv_metadata")}
+      >
+        edit metadata
       </button>
     </div>
   ),
@@ -181,6 +206,7 @@ let WizardClient: typeof import("./WizardClient").WizardClient;
 beforeEach(async () => {
   searchParamsString = "source=csv";
   newWizardSessionIdMock.mockClear();
+  metadataPayload = { ...DEFAULT_METADATA };
   ({ WizardClient } = await import("./WizardClient"));
 });
 
@@ -255,5 +281,130 @@ describe("WizardClient — CR-01 durable CSV session mint", () => {
     // No material change → the idempotent 200 arm must still serve this repeat,
     // so the session id is untouched.
     expect(newWizardSessionIdMock.mock.calls.length).toBe(mintsAfterFailure);
+  });
+});
+
+/**
+ * RANK-08 (Phase 159-07, decision D-05) — THE 409'S REMEDY MUST BE REACHABLE.
+ *
+ * The 146.2 classification-conflict 409 refuses a resubmit whose classification
+ * disagrees with the one already committed against this `wizard_session_id`,
+ * and tells the user to change the classification and resubmit. Before this
+ * phase the re-mint fingerprint covered only (name, series), so acting on that
+ * instruction produced NO material change: the burn was never retired, the
+ * spent session id was replayed, and the same 409 came back forever.
+ *
+ * These drive the change through the component's REAL state flow (the metadata
+ * step's own onComplete), not by calling the fingerprint helper directly — the
+ * fence has to work in the component, not merely in the pure function.
+ */
+describe("WizardClient — RANK-08 classification re-mint", () => {
+  const STABLE_SERIES = [{ date: "2024-01-01", daily_return: 0.01 }];
+
+  /** Submit → FAIL → step back to the classification step. Returns the mint
+   *  count at the moment of the burn. Name and series are held CONSTANT so the
+   *  only thing a test can change afterwards is the classification. */
+  async function failThenReturnToMetadata(): Promise<number> {
+    uploadPayload = {
+      fmt: "daily_returns",
+      preview: PREVIEW,
+      dailyReturnsSeries: STABLE_SERIES,
+      validationPassed: true,
+      strategyName: "Alpha 2024",
+    };
+    render(<WizardClient initialDraft={null} />);
+    await advanceToSubmit();
+    fireEvent.click(screen.getByTestId("submit-fail"));
+    const mintsAfterFailure = newWizardSessionIdMock.mock.calls.length;
+    fireEvent.click(screen.getByTestId("submit-back")); // → csv_review
+    fireEvent.click(await screen.findByTestId("review-edit-metadata")); // → csv_metadata
+    await screen.findByTestId("mock-metadata");
+    return mintsAfterFailure;
+  }
+
+  it("mints a FRESH session id when ONLY the category changes after a failed submit", async () => {
+    const mintsAfterFailure = await failThenReturnToMetadata();
+
+    // The user does exactly what the 409 told them to: re-classify.
+    metadataPayload = { ...metadataPayload, categoryId: CAT_B };
+    fireEvent.click(screen.getByTestId("metadata-complete"));
+
+    await waitFor(() => {
+      expect(newWizardSessionIdMock.mock.calls.length).toBeGreaterThan(
+        mintsAfterFailure,
+      );
+    });
+  });
+
+  it("mints a FRESH session id when ONLY the asset class changes", async () => {
+    // #597 — asset_class drives annualization (√365 crypto / √252 traditional),
+    // so it is a materially different submission, not a cosmetic edit.
+    const mintsAfterFailure = await failThenReturnToMetadata();
+
+    metadataPayload = { ...metadataPayload, assetClass: "crypto" };
+    fireEvent.click(screen.getByTestId("metadata-complete"));
+
+    await waitFor(() => {
+      expect(newWizardSessionIdMock.mock.calls.length).toBeGreaterThan(
+        mintsAfterFailure,
+      );
+    });
+  });
+
+  it("does NOT mint when name, series AND classification are all unchanged", async () => {
+    // The control that keeps the widening honest: a TRUE duplicate must still
+    // fence, so the idempotent 200 arm keeps serving the genuine repeat.
+    const mintsAfterFailure = await failThenReturnToMetadata();
+
+    // Re-continue past the classification step having changed nothing.
+    fireEvent.click(screen.getByTestId("metadata-complete"));
+    await screen.findByTestId("mock-review");
+
+    expect(newWizardSessionIdMock.mock.calls.length).toBe(mintsAfterFailure);
+  });
+});
+
+/**
+ * RANK-08 wiring pin (Pitfall 7). The behavioural tests above pass whenever the
+ * fingerprint FUNCTION is right, because every classification edit reachable in
+ * today's UI also moves `step` (csv_metadata → csv_review) — and `step` is
+ * already a dependency of both hooks, so the effect/callback would refresh even
+ * with the classification deps missing. That accident is not a guarantee: a
+ * future in-place classification control (or any flow that edits metadata
+ * without a step change) would silently resurrect the stale-state failure mode.
+ *
+ * So the deps get their OWN pin. Removing either name from either array turns
+ * this test RED, which is what makes the dep edit non-vacuous.
+ */
+describe("WizardClient — RANK-08 dep-array wiring", () => {
+  it("both csvSubmissionFingerprint hooks list csvCategoryId and csvAssetClass", () => {
+    const src = readFileSync(
+      join(
+        process.cwd(),
+        "src/app/(dashboard)/strategies/new/wizard/WizardClient.tsx",
+      ),
+      "utf8",
+    );
+
+    const callSites = [...src.matchAll(/csvSubmissionFingerprint\(/g)].map(
+      (m) => m.index as number,
+    );
+    // Non-vacuity: if a call site is ever added or removed, this pin must be
+    // revisited rather than silently covering fewer sites than it claims.
+    expect(callSites).toHaveLength(2);
+
+    for (const at of callSites) {
+      const depStart = src.indexOf("}, [", at);
+      const depEnd = src.indexOf("]);", depStart);
+      expect(depStart).toBeGreaterThan(at);
+      const deps = src.slice(depStart, depEnd);
+      // Anchor: we grabbed a dependency array, not an arbitrary slab of file.
+      expect(deps.length).toBeLessThan(400);
+      expect(deps).toContain("strategyName");
+      expect(deps).toContain("csvDailyReturnsSeries");
+      // The RANK-08 additions.
+      expect(deps).toContain("csvCategoryId");
+      expect(deps).toContain("csvAssetClass");
+    }
   });
 });
