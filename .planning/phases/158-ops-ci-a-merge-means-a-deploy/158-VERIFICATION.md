@@ -144,5 +144,5 @@ No gaps. Every in-tree must-have is verified with evidence at HEAD, including li
 
 ---
 
-_Verified: 2026-08-20T23:59Z_
+_Verified: in-tree 2026-08-20T23:59Z; backstops discharged 2026-08-21T05:15Z_
 _Verifier: Claude (gsd-verifier)_
