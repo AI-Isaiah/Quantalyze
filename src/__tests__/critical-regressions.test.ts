@@ -1246,6 +1246,134 @@ describe("Critical regression guards", () => {
         }
       });
 
+      // [158-MUTEX-01]: sleep > TTL (the pin above) is NECESSARY but not
+      // SUFFICIENT. The TEST project sets a server-wide
+      // statement_timeout=120000 ("configuration file" source in pg_settings),
+      // and both the contended pg_advisory_lock wait and the pg_sleep are
+      // single statements — so without a session-level exemption the server
+      // killed the holder ~120s after it acquired (the lock silently released
+      // and every long job's DB work ran UNSERIALIZED; measured on the
+      // 2026-08-20/21 evidence runs, e.g. 32424762495) and killed a contended
+      // waiter at 120s (which the retry loop then mislabelled as a connect
+      // fault, capping real contention tolerance at ~3×120s instead of the
+      // 3600s cap). The exemption must be the FIRST -c statement of the holder
+      // invocation, BEFORE pg_advisory_lock, so it covers the lock wait itself
+      // and not just the idle sleep.
+      // [158-MUTEX-02] widened the chain: the holder now interposes
+      // `SET client_connection_check_interval` and the HOLDER-BACKEND-PID
+      // marker between the statement_timeout exemption and the lock. The
+      // ORDER is load-bearing — both GUCs and the marker must precede
+      // pg_advisory_lock so the lock wait itself is exempt/covered and the
+      // pid is in the log before MUTEX-ACQUIRED can be grepped — so the pin
+      // asserts the whole ordered sequence, not bare membership.
+      it("the mutex holder opens with both session GUCs and the backend-pid marker before pg_advisory_lock in all three acquire steps", () => {
+        const src = readText(".github/workflows/ci.yml");
+        const exemptHolderRe =
+          /-c "SET statement_timeout = 0;" \\\n\s+-c "SET client_connection_check_interval = '30s';" \\\n\s+-c "SELECT 'HOLDER-BACKEND-PID ' \|\| pg_backend_pid\(\);" \\\n\s+-c "SELECT pg_advisory_lock\(61616158\);"/;
+        for (const job of DB_JOBS) {
+          expectMatch(
+            jobSlice(src, job),
+            exemptHolderRe,
+            `ci.yml ${job}: the mutex holder no longer runs \`SET statement_timeout = 0\` → \`SET client_connection_check_interval = '30s'\` → HOLDER-BACKEND-PID → pg_advisory_lock in that order — without the first, TEST's server-wide statement_timeout=120000 kills the holder ~120s after acquiring and kills a contended lock wait at 120s (158-MUTEX-01); without the second BEFORE the lock, an orphaned backend (client killed mid-sleep or mid-wait) keeps the lock with no janitor (158-MUTEX-02); without the marker before MUTEX-ACQUIRED, the release step cannot reap the backend server-side`,
+          );
+        }
+      });
+
+      // 158-MUTEX-01 review (pin upgrade): the fragment regex above proves the
+      // SET is present, but "byte-identical by design" used to be only a CLAIM
+      // in a failure message — the old exactly-3 count could not see a
+      // single-site drift (one job patched, two forgotten), because three
+      // matching fragments say nothing about the ~170 lines around them.
+      // Extracting the WHOLE acquire step from each DB job and asserting
+      // pairwise string equality mechanically enforces byte-identity, subsumes
+      // that count, and names the drifted site on failure.
+      it("the three Acquire shared-test-db mutex steps are byte-identical and carry libpq keepalives", () => {
+        const src = readText(".github/workflows/ci.yml");
+        // From the step's `- name:` line (6-space step indent) to the next
+        // sibling step or comment at that indent — everything inside the step
+        // is indented deeper, so the first such line bounds the step.
+        const acquireStepRe =
+          /^ {6}- name: Acquire shared-test-db mutex\n[\s\S]*?(?=\n {6}[-#])/m;
+        const stepByJob = new Map<string, string>();
+        for (const job of DB_JOBS) {
+          stepByJob.set(
+            job,
+            findOrFail(
+              jobSlice(src, job),
+              acquireStepRe,
+              `ci.yml ${job}: could not extract the "Acquire shared-test-db mutex" step (name line gone, or no following step/comment at step indent to bound it) — the byte-identity pin cannot run`,
+            ),
+          );
+        }
+        const [refJob, ...otherJobs] = DB_JOBS;
+        for (const job of otherJobs) {
+          expect(
+            stepByJob.get(job),
+            `ci.yml ${job}: its "Acquire shared-test-db mutex" step is no longer byte-identical to ${refJob}'s — the three DB-touching jobs' acquire steps are identical BY DESIGN (every mutex invariant is reasoned about once and applied three times), so a single-site drift means one job runs a DIFFERENT mutex protocol than the other two and every per-fragment pin here can still pass (158-MUTEX-01 review)`,
+          ).toBe(stepByJob.get(refJob));
+        }
+        // [158-MUTEX-01 F2]: during the contended pg_advisory_lock wait and
+        // the pg_sleep hold the connection carries ZERO traffic; without libpq
+        // keepalives, runner-side NAT idle expiry zombifies the holder
+        // invisibly — the backend keeps the lock after the job is gone, and
+        // the release step's dead-holder witness never fires. Presence is
+        // asserted once on the reference job; byte-identity above extends it
+        // to all three sites.
+        expectMatch(
+          stepByJob.get(refJob)!,
+          /keepalives=1&keepalives_idle=60&keepalives_interval=15&keepalives_count=4/,
+          `ci.yml ${refJob}: the mutex holder DSN lost its libpq keepalive parameters (keepalives=1&keepalives_idle=60&keepalives_interval=15&keepalives_count=4) — with zero traffic during the lock wait and the idle hold, NAT idle expiry would silently zombify the holder and the lock would outlive the job (158-MUTEX-01 F2)`,
+        );
+      });
+
+      // [158-MUTEX-02] (run 32457330139): killing the psql CLIENT does not
+      // kill its SERVER backend — neither pg_sleep nor a pg_advisory_lock
+      // wait ever reads the client socket — so the release step's client-side
+      // kill orphaned a holder backend that kept the lock for its full 6000s
+      // sleep and starved e2e-seeded past the 3600s acquire cap. Before
+      // 158-MUTEX-01 the server-wide statement_timeout was the ACCIDENTAL
+      // janitor for such orphans; zeroing it made them immortal. The real
+      // janitor is client_connection_check_interval: the backend polls its
+      // client socket during query execution AND lock waits, aborting within
+      // ~30s of the client dying. Every mutex session needs it — the three
+      // ci.yml holders AND the probe's contenders (a probe job timeout kills
+      // a contender mid-wait the same way, leaving a zombie waiter).
+      it("every mutex session sets client_connection_check_interval (all three acquire steps + the probe contender)", () => {
+        const ccciRe = /-c "SET client_connection_check_interval = '30s';"/;
+        const src = readText(".github/workflows/ci.yml");
+        for (const job of DB_JOBS) {
+          expectMatch(
+            jobSlice(src, job),
+            ccciRe,
+            `ci.yml ${job}: the mutex holder no longer sets client_connection_check_interval — an orphaned backend (psql client killed mid-pg_sleep or mid-lock-wait) keeps the advisory lock for its full 6000s sleep with NO janitor left (statement_timeout is zeroed), starving every waiter past the 3600s acquire cap (158-MUTEX-02, run 32457330139)`,
+          );
+        }
+        expectMatch(
+          readText(".github/workflows/mutex-probe.yml"),
+          ccciRe,
+          `mutex-probe.yml: the contender psql no longer sets client_connection_check_interval — a contender killed mid-wait (job timeout) leaves a zombie backend queued on the lock indefinitely (158-MUTEX-02)`,
+        );
+      });
+
+      // [158-MUTEX-02] second layer: ccci reaps an orphan within ~30s; the
+      // release step frees the lock IMMEDIATELY by also terminating the
+      // backend it recorded at acquire time. The pg_locks guard (same key,
+      // same pid) is what makes the terminate safe against pid recycling —
+      // a bare pg_terminate_backend would not be, so the pin asserts the
+      // whole guarded statement.
+      it("all three release steps carry the guarded server-side pg_terminate_backend of the holder backend", () => {
+        const src = readText(".github/workflows/ci.yml");
+        const reapRe =
+          /pg_terminate_backend\(\$\{backend\}\) FROM pg_locks WHERE locktype = 'advisory' AND objid = 61616158 AND pid = \$\{backend\};/;
+        for (const job of DB_JOBS) {
+          expectMatch(
+            jobSlice(src, job),
+            reapRe,
+            `ci.yml ${job}: its release step lost the guarded server-side pg_terminate_backend — killing the psql client alone leaves the server backend holding key 61616158 for its full pg_sleep (158-MUTEX-02, run 32457330139), and the pg_locks guard (advisory key + pid) is what keeps the terminate a no-op on an already-exited or recycled pid, so restore the WHOLE statement, not a bare pg_terminate_backend`,
+          );
+        }
+      });
+
       // OPS-02 in full: "present-and-failing with NOTHING gating on it". Wiring
       // `sql-tests` into ONLY ONE of the two places silently restores exactly
       // that state — `needs:` alone leaves it advisory, and a result-loop row

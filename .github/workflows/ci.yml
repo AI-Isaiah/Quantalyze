@@ -1119,6 +1119,22 @@ jobs:
           case "${dsn}" in
             *":6543/"*) dsn="${dsn%%:6543/*}:5432/${dsn#*:6543/}" ;;
           esac
+          # [158-MUTEX-01 F2] libpq keepalives on the holder path. During the
+          # contended pg_advisory_lock wait and the pg_sleep hold this
+          # connection carries ZERO traffic, and Linux's default first TCP
+          # keepalive fires at 7200s — never, on these timescales — so a
+          # runner-side NAT idle expiry would zombify the holder invisibly:
+          # the backend keeps the lock long after the job is gone. 60s
+          # keepalives keep the NAT mapping fresh AND let the client detect a
+          # dead path in ~2min (15s x 4), so psql dies and the release step's
+          # dead-holder witness fires instead of a silent wedge. The secret's
+          # shape is NOT assumed: append with '&' if the DSN already carries a
+          # query string, '?' otherwise.
+          keepalive_params="keepalives=1&keepalives_idle=60&keepalives_interval=15&keepalives_count=4"
+          case "${dsn}" in
+            *\?*) dsn="${dsn}&${keepalive_params}" ;;
+            *)    dsn="${dsn}?${keepalive_params}" ;;
+          esac
           log="${RUNNER_TEMP}/shared-test-db-mutex.log"
           pidfile="${RUNNER_TEMP}/shared-test-db-mutex.pid"
           # 158-REVIEW WR-01: the idle sleep MUST outlive this job's
@@ -1132,10 +1148,42 @@ jobs:
           # ⛔ If you lower `timeout-minutes`, this stays valid. If you RAISE it,
           # raise this too — the invariant is sleep > TTL, and nothing else
           # enforces it.
+          # [158-MUTEX-01] (holder death at 120s; 2026-08-20/21 runs, e.g.
+          # 32424762495): sleep > TTL is NECESSARY but not SUFFICIENT — the
+          # holder session must ALSO disable the server statement_timeout. The
+          # TEST project sets a server-wide statement_timeout=120000, and both
+          # the contended pg_advisory_lock wait and the pg_sleep are single
+          # statements, so the server killed the holder ~120s after acquiring:
+          # psql exited, the session dropped, the lock silently released, and
+          # the job's remaining DB work ran UNSERIALIZED (the release step's
+          # dead-holder ::error:: fired on every long-job run). That is why the
+          # holder's FIRST -c statement below zeroes statement_timeout, before
+          # pg_advisory_lock — session-level SET is permitted for any role and
+          # overrides the configuration-file default, exempting both the lock
+          # wait and the idle sleep. Third invariant leg, pinned in
+          # critical-regressions.test.ts.
+          # [158-MUTEX-02] (orphaned holder backend; run 32457330139): killing
+          # the psql CLIENT does not kill its SERVER backend — neither pg_sleep
+          # nor a pg_advisory_lock wait ever reads the client socket, so the
+          # release step's client-side kill left a backend holding the lock for
+          # its full 6000s sleep and starved e2e-seeded past the 3600s cap.
+          # Before 158-MUTEX-01 the server statement_timeout was the ACCIDENTAL
+          # janitor for such orphans; client_connection_check_interval is the
+          # real one — the backend polls its client socket during query
+          # execution AND lock waits, aborting within ~30s of the client dying.
+          # Covers both the sleeping holder and a lock-waiting contender whose
+          # client died (a job-timeout kill mid-wait leaves the same zombie).
+          # HOLDER-BACKEND-PID feeds the release step's guarded server-side
+          # pg_terminate_backend, which frees the lock immediately rather than
+          # after the ~30s check interval. Both GUCs and the marker MUST stay
+          # before pg_advisory_lock, so the lock wait itself is covered.
           start_holder() {
             : > "${log}"
             PGAPPNAME=ci-shared-test-db-mutex PGCONNECT_TIMEOUT=15 \
               nohup psql "${dsn}" -X -q -A -t -v ON_ERROR_STOP=1 \
+                -c "SET statement_timeout = 0;" \
+                -c "SET client_connection_check_interval = '30s';" \
+                -c "SELECT 'HOLDER-BACKEND-PID ' || pg_backend_pid();" \
                 -c "SELECT pg_advisory_lock(61616158);" \
                 -c "SELECT 'MUTEX-ACQUIRED';" \
                 -c "SELECT pg_sleep(6000);" \
@@ -1167,6 +1215,11 @@ jobs:
             start_holder
             while [ "${waited}" -lt 3600 ]; do
               if grep -q 'MUTEX-ACQUIRED' "${log}" 2>/dev/null; then
+                # [158-MUTEX-02] best effort: an absent/empty pid file only
+                # forfeits the release step's immediate server-side reap — the
+                # ccci GUC above still bounds an orphaned backend at ~30s.
+                sed -n 's/^HOLDER-BACKEND-PID \([0-9]\{1,\}\)$/\1/p' "${log}" | head -n 1 \
+                  > "${RUNNER_TEMP}/shared-test-db-mutex-backend-pid" || true
                 echo "Acquired the shared-test-db advisory lock (key 61616158) after ${waited}s (attempt ${attempt}/3)."
                 exit 0
               fi
@@ -1219,7 +1272,7 @@ jobs:
             fi
           done
           if [ "${waited}" -lt 3600 ]; then
-            echo "::error::could not establish the shared-test-db mutex session after 3 attempts — psql died before acquiring each time (last output redacted above). This is a CONNECT/session fault, NOT lock contention: check the TEST project's session-mode pooler (port 5432) rather than hunting for a holder."
+            echo "::error::could not establish the shared-test-db mutex session after 3 attempts — psql died before acquiring each time (last output redacted above). Two causes fit: (1) a CONNECT/session fault — check the TEST project's session-mode pooler (port 5432); or (2) something killed the session MID-WAIT while it contended for the lock — before 158-MUTEX-01 the server-wide statement_timeout did exactly that at 120s per attempt (the holder now zeroes statement_timeout as its first statement, so that specific kill should no longer occur). If the redacted output shows 'canceling statement due to statement timeout', that is NOT lock contention: the holder zeroes statement_timeout as its very first statement, so post-158-MUTEX-01 that signature can only mean the SET never stuck to this session's backend — the session-mode DSN rewrite regressed, the secret's shape changed, or a pooler is intercepting SET. Triage it as a pooler/session fault."
             exit 1
           fi
           # 158-REVIEW CR-04: do NOT assert "a holder is wedged" — measure, then
@@ -1292,6 +1345,8 @@ jobs:
       # the guarantee.
       - name: Release shared-test-db mutex (best effort)
         if: always()
+        env:
+          TEST_SUPABASE_DB_URL: ${{ secrets.TEST_SUPABASE_DB_URL }}
         run: |
           pidfile="${RUNNER_TEMP}/shared-test-db-mutex.pid"
           if [ ! -f "${pidfile}" ]; then
@@ -1310,11 +1365,51 @@ jobs:
             # project. The previous message ("was already gone — the session drop
             # released the lock") described this as normal and printed on exactly
             # the failure path it was supposed to surface.
+            # [158-MUTEX-01]: the once-common cause (the server-wide
+            # statement_timeout killing pg_sleep at ~120s) is fixed — the holder
+            # zeroes statement_timeout — so a dead holder here is now UNEXPECTED
+            # and always worth investigating.
             # Annotation only: this step is `if: always()` and must never redden a
             # job whose real work passed, and `echo ::error::` does not change the
             # exit status. Job teardown remains the guaranteed release path.
             echo "::error::mutex holder pid ${holder} died BEFORE this release step — the DB work after its death ran UNSERIALIZED. Do not trust this run's DB assertions; investigate (holder outlives the job by design, see the pg_sleep note in the acquire step)."
           fi
+          # [158-MUTEX-02] (run 32457330139): the kill above reaches only the
+          # psql CLIENT. A backend mid-pg_sleep never reads its client socket,
+          # so it kept the lock and starved the other jobs' acquires for its
+          # full 6000s sleep. Terminate the recorded backend server-side too;
+          # the pg_locks guard (same key, same pid) makes it a no-op if that
+          # backend already exited or the pid was recycled — never a blind
+          # terminate. Best effort like the rest of this step: ccci bounds any
+          # survivor at ~30s, and nothing here may redden the job.
+          backendpidfile="${RUNNER_TEMP}/shared-test-db-mutex-backend-pid"
+          backend="$(cat "${backendpidfile}" 2>/dev/null || true)"
+          case "${backend}" in
+            ''|*[!0-9]*)
+              echo "No server backend pid recorded — leaving any orphan to client_connection_check_interval."
+              ;;
+            *)
+              if [ -z "${TEST_SUPABASE_DB_URL:-}" ]; then
+                echo "TEST_SUPABASE_DB_URL withheld — skipping the server-side backend reap."
+              else
+                # Session-mode DSN, derived exactly as in the acquire step and
+                # never echoed; bounded like the acquire step's census query.
+                dsn="${TEST_SUPABASE_DB_URL}"
+                case "${dsn}" in
+                  *":6543/"*) dsn="${dsn%%:6543/*}:5432/${dsn#*:6543/}" ;;
+                esac
+                reaped="$(PGCONNECT_TIMEOUT=15 timeout 20 psql "${dsn}" -X -q -A -t \
+                  -c "SET statement_timeout = '10s';" \
+                  -c "SELECT pg_terminate_backend(${backend}) FROM pg_locks WHERE locktype = 'advisory' AND objid = 61616158 AND pid = ${backend};" \
+                  2>/dev/null | tr -d '\r' | tail -1)" || true
+                if [ "${reaped}" = "t" ]; then
+                  echo "Server-side reap: backend ${backend} was STILL on key 61616158 — pg_terminate_backend sent (the client kill alone had not freed the lock)."
+                else
+                  echo "Server-side reap: backend ${backend} no longer on key 61616158 (already exited, or the census was unavailable) — nothing to terminate."
+                fi
+              fi
+              ;;
+          esac
 
   secret-scan:
     # Task 7.6: gitleaks runs against the full commit history for PRs
@@ -1561,6 +1656,22 @@ jobs:
           case "${dsn}" in
             *":6543/"*) dsn="${dsn%%:6543/*}:5432/${dsn#*:6543/}" ;;
           esac
+          # [158-MUTEX-01 F2] libpq keepalives on the holder path. During the
+          # contended pg_advisory_lock wait and the pg_sleep hold this
+          # connection carries ZERO traffic, and Linux's default first TCP
+          # keepalive fires at 7200s — never, on these timescales — so a
+          # runner-side NAT idle expiry would zombify the holder invisibly:
+          # the backend keeps the lock long after the job is gone. 60s
+          # keepalives keep the NAT mapping fresh AND let the client detect a
+          # dead path in ~2min (15s x 4), so psql dies and the release step's
+          # dead-holder witness fires instead of a silent wedge. The secret's
+          # shape is NOT assumed: append with '&' if the DSN already carries a
+          # query string, '?' otherwise.
+          keepalive_params="keepalives=1&keepalives_idle=60&keepalives_interval=15&keepalives_count=4"
+          case "${dsn}" in
+            *\?*) dsn="${dsn}&${keepalive_params}" ;;
+            *)    dsn="${dsn}?${keepalive_params}" ;;
+          esac
           log="${RUNNER_TEMP}/shared-test-db-mutex.log"
           pidfile="${RUNNER_TEMP}/shared-test-db-mutex.pid"
           # 158-REVIEW WR-01: the idle sleep MUST outlive this job's
@@ -1574,10 +1685,42 @@ jobs:
           # ⛔ If you lower `timeout-minutes`, this stays valid. If you RAISE it,
           # raise this too — the invariant is sleep > TTL, and nothing else
           # enforces it.
+          # [158-MUTEX-01] (holder death at 120s; 2026-08-20/21 runs, e.g.
+          # 32424762495): sleep > TTL is NECESSARY but not SUFFICIENT — the
+          # holder session must ALSO disable the server statement_timeout. The
+          # TEST project sets a server-wide statement_timeout=120000, and both
+          # the contended pg_advisory_lock wait and the pg_sleep are single
+          # statements, so the server killed the holder ~120s after acquiring:
+          # psql exited, the session dropped, the lock silently released, and
+          # the job's remaining DB work ran UNSERIALIZED (the release step's
+          # dead-holder ::error:: fired on every long-job run). That is why the
+          # holder's FIRST -c statement below zeroes statement_timeout, before
+          # pg_advisory_lock — session-level SET is permitted for any role and
+          # overrides the configuration-file default, exempting both the lock
+          # wait and the idle sleep. Third invariant leg, pinned in
+          # critical-regressions.test.ts.
+          # [158-MUTEX-02] (orphaned holder backend; run 32457330139): killing
+          # the psql CLIENT does not kill its SERVER backend — neither pg_sleep
+          # nor a pg_advisory_lock wait ever reads the client socket, so the
+          # release step's client-side kill left a backend holding the lock for
+          # its full 6000s sleep and starved e2e-seeded past the 3600s cap.
+          # Before 158-MUTEX-01 the server statement_timeout was the ACCIDENTAL
+          # janitor for such orphans; client_connection_check_interval is the
+          # real one — the backend polls its client socket during query
+          # execution AND lock waits, aborting within ~30s of the client dying.
+          # Covers both the sleeping holder and a lock-waiting contender whose
+          # client died (a job-timeout kill mid-wait leaves the same zombie).
+          # HOLDER-BACKEND-PID feeds the release step's guarded server-side
+          # pg_terminate_backend, which frees the lock immediately rather than
+          # after the ~30s check interval. Both GUCs and the marker MUST stay
+          # before pg_advisory_lock, so the lock wait itself is covered.
           start_holder() {
             : > "${log}"
             PGAPPNAME=ci-shared-test-db-mutex PGCONNECT_TIMEOUT=15 \
               nohup psql "${dsn}" -X -q -A -t -v ON_ERROR_STOP=1 \
+                -c "SET statement_timeout = 0;" \
+                -c "SET client_connection_check_interval = '30s';" \
+                -c "SELECT 'HOLDER-BACKEND-PID ' || pg_backend_pid();" \
                 -c "SELECT pg_advisory_lock(61616158);" \
                 -c "SELECT 'MUTEX-ACQUIRED';" \
                 -c "SELECT pg_sleep(6000);" \
@@ -1609,6 +1752,11 @@ jobs:
             start_holder
             while [ "${waited}" -lt 3600 ]; do
               if grep -q 'MUTEX-ACQUIRED' "${log}" 2>/dev/null; then
+                # [158-MUTEX-02] best effort: an absent/empty pid file only
+                # forfeits the release step's immediate server-side reap — the
+                # ccci GUC above still bounds an orphaned backend at ~30s.
+                sed -n 's/^HOLDER-BACKEND-PID \([0-9]\{1,\}\)$/\1/p' "${log}" | head -n 1 \
+                  > "${RUNNER_TEMP}/shared-test-db-mutex-backend-pid" || true
                 echo "Acquired the shared-test-db advisory lock (key 61616158) after ${waited}s (attempt ${attempt}/3)."
                 exit 0
               fi
@@ -1661,7 +1809,7 @@ jobs:
             fi
           done
           if [ "${waited}" -lt 3600 ]; then
-            echo "::error::could not establish the shared-test-db mutex session after 3 attempts — psql died before acquiring each time (last output redacted above). This is a CONNECT/session fault, NOT lock contention: check the TEST project's session-mode pooler (port 5432) rather than hunting for a holder."
+            echo "::error::could not establish the shared-test-db mutex session after 3 attempts — psql died before acquiring each time (last output redacted above). Two causes fit: (1) a CONNECT/session fault — check the TEST project's session-mode pooler (port 5432); or (2) something killed the session MID-WAIT while it contended for the lock — before 158-MUTEX-01 the server-wide statement_timeout did exactly that at 120s per attempt (the holder now zeroes statement_timeout as its first statement, so that specific kill should no longer occur). If the redacted output shows 'canceling statement due to statement timeout', that is NOT lock contention: the holder zeroes statement_timeout as its very first statement, so post-158-MUTEX-01 that signature can only mean the SET never stuck to this session's backend — the session-mode DSN rewrite regressed, the secret's shape changed, or a pooler is intercepting SET. Triage it as a pooler/session fault."
             exit 1
           fi
           # 158-REVIEW CR-04: do NOT assert "a holder is wedged" — measure, then
@@ -1702,6 +1850,8 @@ jobs:
       # sooner and never reddens the job.
       - name: Release shared-test-db mutex (best effort)
         if: always()
+        env:
+          TEST_SUPABASE_DB_URL: ${{ secrets.TEST_SUPABASE_DB_URL }}
         run: |
           pidfile="${RUNNER_TEMP}/shared-test-db-mutex.pid"
           if [ ! -f "${pidfile}" ]; then
@@ -1720,11 +1870,51 @@ jobs:
             # project. The previous message ("was already gone — the session drop
             # released the lock") described this as normal and printed on exactly
             # the failure path it was supposed to surface.
+            # [158-MUTEX-01]: the once-common cause (the server-wide
+            # statement_timeout killing pg_sleep at ~120s) is fixed — the holder
+            # zeroes statement_timeout — so a dead holder here is now UNEXPECTED
+            # and always worth investigating.
             # Annotation only: this step is `if: always()` and must never redden a
             # job whose real work passed, and `echo ::error::` does not change the
             # exit status. Job teardown remains the guaranteed release path.
             echo "::error::mutex holder pid ${holder} died BEFORE this release step — the DB work after its death ran UNSERIALIZED. Do not trust this run's DB assertions; investigate (holder outlives the job by design, see the pg_sleep note in the acquire step)."
           fi
+          # [158-MUTEX-02] (run 32457330139): the kill above reaches only the
+          # psql CLIENT. A backend mid-pg_sleep never reads its client socket,
+          # so it kept the lock and starved the other jobs' acquires for its
+          # full 6000s sleep. Terminate the recorded backend server-side too;
+          # the pg_locks guard (same key, same pid) makes it a no-op if that
+          # backend already exited or the pid was recycled — never a blind
+          # terminate. Best effort like the rest of this step: ccci bounds any
+          # survivor at ~30s, and nothing here may redden the job.
+          backendpidfile="${RUNNER_TEMP}/shared-test-db-mutex-backend-pid"
+          backend="$(cat "${backendpidfile}" 2>/dev/null || true)"
+          case "${backend}" in
+            ''|*[!0-9]*)
+              echo "No server backend pid recorded — leaving any orphan to client_connection_check_interval."
+              ;;
+            *)
+              if [ -z "${TEST_SUPABASE_DB_URL:-}" ]; then
+                echo "TEST_SUPABASE_DB_URL withheld — skipping the server-side backend reap."
+              else
+                # Session-mode DSN, derived exactly as in the acquire step and
+                # never echoed; bounded like the acquire step's census query.
+                dsn="${TEST_SUPABASE_DB_URL}"
+                case "${dsn}" in
+                  *":6543/"*) dsn="${dsn%%:6543/*}:5432/${dsn#*:6543/}" ;;
+                esac
+                reaped="$(PGCONNECT_TIMEOUT=15 timeout 20 psql "${dsn}" -X -q -A -t \
+                  -c "SET statement_timeout = '10s';" \
+                  -c "SELECT pg_terminate_backend(${backend}) FROM pg_locks WHERE locktype = 'advisory' AND objid = 61616158 AND pid = ${backend};" \
+                  2>/dev/null | tr -d '\r' | tail -1)" || true
+                if [ "${reaped}" = "t" ]; then
+                  echo "Server-side reap: backend ${backend} was STILL on key 61616158 — pg_terminate_backend sent (the client kill alone had not freed the lock)."
+                else
+                  echo "Server-side reap: backend ${backend} no longer on key 61616158 (already exited, or the census was unavailable) — nothing to terminate."
+                fi
+              fi
+              ;;
+          esac
 
   e2e:
     # Runs the PUBLIC/smoke Playwright suite against a placeholder-env
@@ -2197,6 +2387,22 @@ jobs:
           case "${dsn}" in
             *":6543/"*) dsn="${dsn%%:6543/*}:5432/${dsn#*:6543/}" ;;
           esac
+          # [158-MUTEX-01 F2] libpq keepalives on the holder path. During the
+          # contended pg_advisory_lock wait and the pg_sleep hold this
+          # connection carries ZERO traffic, and Linux's default first TCP
+          # keepalive fires at 7200s — never, on these timescales — so a
+          # runner-side NAT idle expiry would zombify the holder invisibly:
+          # the backend keeps the lock long after the job is gone. 60s
+          # keepalives keep the NAT mapping fresh AND let the client detect a
+          # dead path in ~2min (15s x 4), so psql dies and the release step's
+          # dead-holder witness fires instead of a silent wedge. The secret's
+          # shape is NOT assumed: append with '&' if the DSN already carries a
+          # query string, '?' otherwise.
+          keepalive_params="keepalives=1&keepalives_idle=60&keepalives_interval=15&keepalives_count=4"
+          case "${dsn}" in
+            *\?*) dsn="${dsn}&${keepalive_params}" ;;
+            *)    dsn="${dsn}?${keepalive_params}" ;;
+          esac
           log="${RUNNER_TEMP}/shared-test-db-mutex.log"
           pidfile="${RUNNER_TEMP}/shared-test-db-mutex.pid"
           # 158-REVIEW WR-01: the idle sleep MUST outlive this job's
@@ -2210,10 +2416,42 @@ jobs:
           # ⛔ If you lower `timeout-minutes`, this stays valid. If you RAISE it,
           # raise this too — the invariant is sleep > TTL, and nothing else
           # enforces it.
+          # [158-MUTEX-01] (holder death at 120s; 2026-08-20/21 runs, e.g.
+          # 32424762495): sleep > TTL is NECESSARY but not SUFFICIENT — the
+          # holder session must ALSO disable the server statement_timeout. The
+          # TEST project sets a server-wide statement_timeout=120000, and both
+          # the contended pg_advisory_lock wait and the pg_sleep are single
+          # statements, so the server killed the holder ~120s after acquiring:
+          # psql exited, the session dropped, the lock silently released, and
+          # the job's remaining DB work ran UNSERIALIZED (the release step's
+          # dead-holder ::error:: fired on every long-job run). That is why the
+          # holder's FIRST -c statement below zeroes statement_timeout, before
+          # pg_advisory_lock — session-level SET is permitted for any role and
+          # overrides the configuration-file default, exempting both the lock
+          # wait and the idle sleep. Third invariant leg, pinned in
+          # critical-regressions.test.ts.
+          # [158-MUTEX-02] (orphaned holder backend; run 32457330139): killing
+          # the psql CLIENT does not kill its SERVER backend — neither pg_sleep
+          # nor a pg_advisory_lock wait ever reads the client socket, so the
+          # release step's client-side kill left a backend holding the lock for
+          # its full 6000s sleep and starved e2e-seeded past the 3600s cap.
+          # Before 158-MUTEX-01 the server statement_timeout was the ACCIDENTAL
+          # janitor for such orphans; client_connection_check_interval is the
+          # real one — the backend polls its client socket during query
+          # execution AND lock waits, aborting within ~30s of the client dying.
+          # Covers both the sleeping holder and a lock-waiting contender whose
+          # client died (a job-timeout kill mid-wait leaves the same zombie).
+          # HOLDER-BACKEND-PID feeds the release step's guarded server-side
+          # pg_terminate_backend, which frees the lock immediately rather than
+          # after the ~30s check interval. Both GUCs and the marker MUST stay
+          # before pg_advisory_lock, so the lock wait itself is covered.
           start_holder() {
             : > "${log}"
             PGAPPNAME=ci-shared-test-db-mutex PGCONNECT_TIMEOUT=15 \
               nohup psql "${dsn}" -X -q -A -t -v ON_ERROR_STOP=1 \
+                -c "SET statement_timeout = 0;" \
+                -c "SET client_connection_check_interval = '30s';" \
+                -c "SELECT 'HOLDER-BACKEND-PID ' || pg_backend_pid();" \
                 -c "SELECT pg_advisory_lock(61616158);" \
                 -c "SELECT 'MUTEX-ACQUIRED';" \
                 -c "SELECT pg_sleep(6000);" \
@@ -2245,6 +2483,11 @@ jobs:
             start_holder
             while [ "${waited}" -lt 3600 ]; do
               if grep -q 'MUTEX-ACQUIRED' "${log}" 2>/dev/null; then
+                # [158-MUTEX-02] best effort: an absent/empty pid file only
+                # forfeits the release step's immediate server-side reap — the
+                # ccci GUC above still bounds an orphaned backend at ~30s.
+                sed -n 's/^HOLDER-BACKEND-PID \([0-9]\{1,\}\)$/\1/p' "${log}" | head -n 1 \
+                  > "${RUNNER_TEMP}/shared-test-db-mutex-backend-pid" || true
                 echo "Acquired the shared-test-db advisory lock (key 61616158) after ${waited}s (attempt ${attempt}/3)."
                 exit 0
               fi
@@ -2297,7 +2540,7 @@ jobs:
             fi
           done
           if [ "${waited}" -lt 3600 ]; then
-            echo "::error::could not establish the shared-test-db mutex session after 3 attempts — psql died before acquiring each time (last output redacted above). This is a CONNECT/session fault, NOT lock contention: check the TEST project's session-mode pooler (port 5432) rather than hunting for a holder."
+            echo "::error::could not establish the shared-test-db mutex session after 3 attempts — psql died before acquiring each time (last output redacted above). Two causes fit: (1) a CONNECT/session fault — check the TEST project's session-mode pooler (port 5432); or (2) something killed the session MID-WAIT while it contended for the lock — before 158-MUTEX-01 the server-wide statement_timeout did exactly that at 120s per attempt (the holder now zeroes statement_timeout as its first statement, so that specific kill should no longer occur). If the redacted output shows 'canceling statement due to statement timeout', that is NOT lock contention: the holder zeroes statement_timeout as its very first statement, so post-158-MUTEX-01 that signature can only mean the SET never stuck to this session's backend — the session-mode DSN rewrite regressed, the secret's shape changed, or a pooler is intercepting SET. Triage it as a pooler/session fault."
             exit 1
           fi
           # 158-REVIEW CR-04: do NOT assert "a holder is wedged" — measure, then
@@ -2635,6 +2878,8 @@ jobs:
       # sooner and never reddens the job.
       - name: Release shared-test-db mutex (best effort)
         if: always()
+        env:
+          TEST_SUPABASE_DB_URL: ${{ secrets.TEST_SUPABASE_DB_URL }}
         run: |
           pidfile="${RUNNER_TEMP}/shared-test-db-mutex.pid"
           if [ ! -f "${pidfile}" ]; then
@@ -2653,11 +2898,51 @@ jobs:
             # project. The previous message ("was already gone — the session drop
             # released the lock") described this as normal and printed on exactly
             # the failure path it was supposed to surface.
+            # [158-MUTEX-01]: the once-common cause (the server-wide
+            # statement_timeout killing pg_sleep at ~120s) is fixed — the holder
+            # zeroes statement_timeout — so a dead holder here is now UNEXPECTED
+            # and always worth investigating.
             # Annotation only: this step is `if: always()` and must never redden a
             # job whose real work passed, and `echo ::error::` does not change the
             # exit status. Job teardown remains the guaranteed release path.
             echo "::error::mutex holder pid ${holder} died BEFORE this release step — the DB work after its death ran UNSERIALIZED. Do not trust this run's DB assertions; investigate (holder outlives the job by design, see the pg_sleep note in the acquire step)."
           fi
+          # [158-MUTEX-02] (run 32457330139): the kill above reaches only the
+          # psql CLIENT. A backend mid-pg_sleep never reads its client socket,
+          # so it kept the lock and starved the other jobs' acquires for its
+          # full 6000s sleep. Terminate the recorded backend server-side too;
+          # the pg_locks guard (same key, same pid) makes it a no-op if that
+          # backend already exited or the pid was recycled — never a blind
+          # terminate. Best effort like the rest of this step: ccci bounds any
+          # survivor at ~30s, and nothing here may redden the job.
+          backendpidfile="${RUNNER_TEMP}/shared-test-db-mutex-backend-pid"
+          backend="$(cat "${backendpidfile}" 2>/dev/null || true)"
+          case "${backend}" in
+            ''|*[!0-9]*)
+              echo "No server backend pid recorded — leaving any orphan to client_connection_check_interval."
+              ;;
+            *)
+              if [ -z "${TEST_SUPABASE_DB_URL:-}" ]; then
+                echo "TEST_SUPABASE_DB_URL withheld — skipping the server-side backend reap."
+              else
+                # Session-mode DSN, derived exactly as in the acquire step and
+                # never echoed; bounded like the acquire step's census query.
+                dsn="${TEST_SUPABASE_DB_URL}"
+                case "${dsn}" in
+                  *":6543/"*) dsn="${dsn%%:6543/*}:5432/${dsn#*:6543/}" ;;
+                esac
+                reaped="$(PGCONNECT_TIMEOUT=15 timeout 20 psql "${dsn}" -X -q -A -t \
+                  -c "SET statement_timeout = '10s';" \
+                  -c "SELECT pg_terminate_backend(${backend}) FROM pg_locks WHERE locktype = 'advisory' AND objid = 61616158 AND pid = ${backend};" \
+                  2>/dev/null | tr -d '\r' | tail -1)" || true
+                if [ "${reaped}" = "t" ]; then
+                  echo "Server-side reap: backend ${backend} was STILL on key 61616158 — pg_terminate_backend sent (the client kill alone had not freed the lock)."
+                else
+                  echo "Server-side reap: backend ${backend} no longer on key 61616158 (already exited, or the census was unavailable) — nothing to terminate."
+                fi
+              fi
+              ;;
+          esac
       # retro-PR179-H1 / C-0293(c): NO playwright-report upload from this
       # job, ever. Every spec here runs against the REAL-env build, and
       # Playwright's trace.zip + on-failure screenshots embed
