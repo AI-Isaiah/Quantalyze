@@ -126,7 +126,24 @@ Plans:
   4. The two money-math defects are closed on the strategy-analytics path: an all-non-negative return series with a >100% day is never re-read as prices (no sign-flipped Sharpe), and a blend leg with unknown `asset_class` is treated as crypto for RISK (a sole crypto leg no longer inflates Sharpe via √252).
   5. Two concurrent same-session resubmits cannot both take the FILL arm (compare-and-set on `category_id IS NULL`); the classification-conflict 409's own remedy can mint a fresh session (the re-mint fingerprint accounts for classification, or the exclusion is documented at the fingerprint); and `withPublishedOrOwner` validates the uid's shape before interpolating it into the PostgREST `.or()` filter.
 
-**Plans**: TBD
+**Plans**: 7 plans
+
+Plans:
+**Wave 1**
+
+- [ ] 159-01-PLAN.md — C-M1 PROD census artifact `159-CENSUS.md` (checkpoint: ORCHESTRATOR runs the read-only SQL against PROD and commits results — the D-01 gate) (RANK-01) [Wave 1]
+- [ ] 159-05-PLAN.md — quantstats price-guess closed across `compute_all_metrics`: kwarg arm + P114 inline mirror for headline sharpe/sortino, benign-parity oracles, golden adjudication (RANK-05) [Wave 1]
+- [ ] 159-06-PLAN.md — FILL-arm CAS `.is("category_id", null)` + observed row count + honest `raced` refusal on the real POST harness (RANK-07) [Wave 1]
+- [ ] 159-07-PLAN.md — Re-mint fingerprint includes classification (both call sites + both dep arrays) + `withPublishedOrOwner` strict-UUID fail-closed validation (RANK-08, RANK-09) [Wave 1]
+
+**Wave 2** *(blocked on the 159-01 census — D-01 hard ordering)*
+
+- [ ] 159-02-PLAN.md — Percentile gate: `PERCENTILE_GATE_COLUMN` + one shared helper for BOTH TS callers, `get_verified_cohort_rank` lockstep re-base migration, first CI SQL gate for the RPC (RANK-01) [Wave 2]
+
+**Wave 3** *(blocked on 159-02 — file overlap on queries.ts / closed-sets.ts)*
+
+- [ ] 159-03-PLAN.md — Splat-class closure: three explicit projections + owner exemption comment + repo-wide class inventory (RANK-02) [Wave 3]
+- [ ] 159-04-PLAN.md — `blendPeriodsPerYear` unknown-leg-as-crypto for RISK + production call-site wiring pin (RANK-06) [Wave 3]
 
 **Research note:** fix locations and predicates read directly from source — skip a research phase; only the cheap C-M1 census remains. `StrategyTable`'s ungated KPI cells are OUT of scope, logged (C-D2).
 
