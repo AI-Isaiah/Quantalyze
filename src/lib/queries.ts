@@ -8,6 +8,8 @@ import {
   blendPeriodsPerYear,
   deriveEmptySeriesState,
   isComputedAnalytics,
+  isRankableAnalyticsRow,
+  PERCENTILE_GATE_COLUMN,
   type SeriesState,
 } from "./closed-sets";
 import { resolveDailyReturnSeries } from "@/lib/factsheet/resolve-series";
@@ -122,6 +124,13 @@ export type { PercentileMap } from "./percentile-core";
 /**
  * The analytics columns BOTH percentile callers project. Hoisted to a module
  * const so the two projections cannot drift.
+ *
+ * ⚠️ BYTE-FROZEN (Phase 159 / RANK-01). This list is the KPI set and nothing
+ * else. The csv-finalize route mirrors it member-for-member in its
+ * CLOCK_SAFETY_KPI_COLUMNS prose, so appending a non-KPI column here would
+ * silently make those comments false. The RANK-01 gate column is therefore a
+ * SEPARATE constant (`PERCENTILE_GATE_COLUMN`, closed-sets.ts) that each
+ * projection site composes alongside this one.
  */
 const PERCENTILE_ANALYTICS_COLUMNS =
   "cagr, sharpe, sortino, calmar, max_drawdown, volatility, cumulative_return";
@@ -141,7 +150,10 @@ const PERCENTILE_ANALYTICS_COLUMNS =
 export async function getPercentiles(categorySlug?: string): Promise<PercentileMap | null> {
   const supabase = await createClient();
 
-  const analyticsColumns = PERCENTILE_ANALYTICS_COLUMNS;
+  // RANK-01: the gate column rides ALONGSIDE the byte-frozen KPI list, never
+  // appended to it. Both select branches below interpolate this one composition,
+  // so the categorized and uncategorized projections cannot disagree.
+  const analyticsColumns = `${PERCENTILE_ANALYTICS_COLUMNS}, ${PERCENTILE_GATE_COLUMN}`;
 
   const query = categorySlug
     ? withPublishedOnly(
@@ -174,6 +186,11 @@ export async function getPercentiles(categorySlug?: string): Promise<PercentileM
   for (const s of strategies) {
     const a = extractAnalytics((s as Record<string, unknown>).strategy_analytics);
     if (!a) continue;
+    // RANK-01: a non-computed row (failed/pending/computing) neither RECEIVES a
+    // published percentile nor JOINS the population others are scored against.
+    // Dropping it here — before `rows` — is what makes the floor below count the
+    // honest denominator, mirroring the RPC's gated min-N cohort.
+    if (!isRankableAnalyticsRow(a)) continue;
     rows.push({ id: s.id, analytics: castRow<Record<string, number | null>>(a, "analytics") });
   }
 
@@ -606,10 +623,13 @@ export type OwnRowPercentiles = {
  * (see percentile-core's header). So a draft is told "if published, this would
  * sit at Pnn" LITERALLY, and it cannot shift any public rank.
  *
- * Both `< 5` thresholds mirror `getPercentiles` exactly, so the page's Pnn
- * presence and its "ranked against N strategies" copy flip together — the page
- * can never show a rank while claiming there is no comparison set, or vice
- * versa.
+ * Both `< 5` thresholds mirror `getPercentiles` exactly — including RANK-01's
+ * gate: the second threshold counts RANKABLE rows (those passing
+ * `isRankableAnalyticsRow`), not every row carrying an analytics embed. So the
+ * page's Pnn presence and its "ranked against N strategies" copy flip together,
+ * and the N it claims is the same honest denominator /discovery ranks against —
+ * the page can never show a rank while claiming there is no comparison set, nor
+ * count a dead `failed` row into the comparison set it names.
  *
  * `getPercentiles` remains the discovery-surface caller; plan 04 calls ONLY
  * this helper.
@@ -619,10 +639,14 @@ export async function getOwnRowPercentiles(
 ): Promise<OwnRowPercentiles | null> {
   const supabase = await createClient();
 
+  // RANK-01: same composition as getPercentiles — the gate column rides
+  // ALONGSIDE the byte-frozen KPI list, never appended to it.
   const { data: strategies, error } = await withPublishedOnly(
     supabase
       .from("strategies")
-      .select(`id, strategy_analytics (${PERCENTILE_ANALYTICS_COLUMNS})`),
+      .select(
+        `id, strategy_analytics (${PERCENTILE_ANALYTICS_COLUMNS}, ${PERCENTILE_GATE_COLUMN})`,
+      ),
   );
 
   if (error) {
@@ -637,6 +661,10 @@ export async function getOwnRowPercentiles(
   for (const s of strategies) {
     const a = extractAnalytics((s as Record<string, unknown>).strategy_analytics);
     if (!a) continue;
+    // RANK-01: the SAME shared gate getPercentiles uses — deliberately the one
+    // helper and not a local predicate, so the owner surface and the public
+    // surface can never disagree about who is in the comparison set.
+    if (!isRankableAnalyticsRow(a)) continue;
     populationRows.push({
       id: s.id,
       analytics: castRow<Record<string, number | null>>(a, "analytics"),
