@@ -2,6 +2,7 @@ import { afterEach, describe, it, expect, beforeEach, vi } from "vitest";
 import {
   computeWizardHmac,
   csvSubmissionFingerprint,
+  csvSubmissionSignature,
   deriveWizardResumeOverrides,
   formatSavedAt,
   loadWizardState,
@@ -839,19 +840,28 @@ describe("csvSubmissionFingerprint — bounded CSV submission fingerprint", () =
     { date: "2024-01-01", daily_return: 0.01 },
     { date: "2024-01-02", daily_return: -0.02 },
   ];
+  // RANK-08 — classification is held CONSTANT across every pair below so each
+  // test still isolates the field it names (name / series / boundedness).
+  const CAT = "11111111-1111-4111-8111-111111111111";
+  const ASSET = "traditional";
 
   it("is stable for an equal-but-new-reference series (a re-upload must not mint)", () => {
-    expect(csvSubmissionFingerprint("Alpha", SERIES_A)).toBe(
-      csvSubmissionFingerprint("Alpha", [
-        { date: "2024-01-01", daily_return: 0.01 },
-        { date: "2024-01-02", daily_return: -0.02 },
-      ]),
+    expect(csvSubmissionFingerprint("Alpha", SERIES_A, CAT, ASSET)).toBe(
+      csvSubmissionFingerprint(
+        "Alpha",
+        [
+          { date: "2024-01-01", daily_return: 0.01 },
+          { date: "2024-01-02", daily_return: -0.02 },
+        ],
+        CAT,
+        ASSET,
+      ),
     );
   });
 
   it("changes when the name changes", () => {
-    expect(csvSubmissionFingerprint("Alpha", SERIES_A)).not.toBe(
-      csvSubmissionFingerprint("Alpha 2025", SERIES_A),
+    expect(csvSubmissionFingerprint("Alpha", SERIES_A, CAT, ASSET)).not.toBe(
+      csvSubmissionFingerprint("Alpha 2025", SERIES_A, CAT, ASSET),
     );
   });
 
@@ -862,25 +872,27 @@ describe("csvSubmissionFingerprint — bounded CSV submission fingerprint", () =
       { date: "2024-01-01", daily_return: 0.01 },
       { date: "2024-01-02", daily_return: -0.03 },
     ];
-    expect(csvSubmissionFingerprint("Alpha", SERIES_A)).not.toBe(
-      csvSubmissionFingerprint("Alpha", interiorEdit),
+    expect(csvSubmissionFingerprint("Alpha", SERIES_A, CAT, ASSET)).not.toBe(
+      csvSubmissionFingerprint("Alpha", interiorEdit, CAT, ASSET),
     );
   });
 
   it("changes when a row is appended", () => {
-    expect(csvSubmissionFingerprint("Alpha", SERIES_A)).not.toBe(
-      csvSubmissionFingerprint("Alpha", [
-        ...SERIES_A,
-        { date: "2024-01-03", daily_return: 0.03 },
-      ]),
+    expect(csvSubmissionFingerprint("Alpha", SERIES_A, CAT, ASSET)).not.toBe(
+      csvSubmissionFingerprint(
+        "Alpha",
+        [...SERIES_A, { date: "2024-01-03", daily_return: 0.03 }],
+        CAT,
+        ASSET,
+      ),
     );
   });
 
   it("distinguishes an undefined series from an empty one only via the raw signature's shape", () => {
     // Both serialise to the same rows string by design (`series ?? []`), so the
     // fingerprint agreeing here is the DOCUMENTED behaviour, not a collision.
-    expect(csvSubmissionFingerprint("Alpha", undefined)).toBe(
-      csvSubmissionFingerprint("Alpha", []),
+    expect(csvSubmissionFingerprint("Alpha", undefined, CAT, ASSET)).toBe(
+      csvSubmissionFingerprint("Alpha", [], CAT, ASSET),
     );
   });
 
@@ -891,11 +903,103 @@ describe("csvSubmissionFingerprint — bounded CSV submission fingerprint", () =
       date: `20${String(10 + Math.floor(i / 365)).padStart(2, "0")}-01-01`,
       daily_return: i / 100000,
     }));
-    const fingerprint = csvSubmissionFingerprint("Alpha", big);
+    const fingerprint = csvSubmissionFingerprint("Alpha", big, CAT, ASSET);
     expect(fingerprint.length).toBeLessThanOrEqual(64);
     // And it is not vacuously constant: a one-row change still moves it.
     const nudged = [...big.slice(0, 4999), { date: "2029-01-01", daily_return: 9.9 }];
-    expect(csvSubmissionFingerprint("Alpha", nudged)).not.toBe(fingerprint);
+    expect(csvSubmissionFingerprint("Alpha", nudged, CAT, ASSET)).not.toBe(
+      fingerprint,
+    );
+  });
+});
+
+/**
+ * RANK-08 (Phase 159-07, decision D-05 default arm) — CLASSIFICATION IS PART OF
+ * THE SUBMISSION'S IDENTITY.
+ *
+ * The 146.2 classification-conflict 409 refuses a resubmit whose classification
+ * disagrees with the one already committed against this `wizard_session_id`.
+ * Its remedy is "change the classification and resubmit" — but a fingerprint
+ * blind to classification reports NO material change, so the burn is never
+ * retired, the spent session id is replayed, and the user takes the same 409
+ * forever. Including `category_id` / `asset_class` in the signature is what
+ * makes that remedy reachable.
+ *
+ * The other half of the invariant is the negative control: a TRUE duplicate
+ * (same name, same series, same classification) must still produce the SAME
+ * fingerprint, so the widening cannot free real duplicates past the fence.
+ */
+describe("csvSubmissionSignature/Fingerprint — classification (RANK-08)", () => {
+  const SERIES = [
+    { date: "2024-01-01", daily_return: 0.01 },
+    { date: "2024-01-02", daily_return: -0.02 },
+  ];
+  const CAT_A = "11111111-1111-4111-8111-111111111111";
+  const CAT_B = "22222222-2222-4222-8222-222222222222";
+
+  it("changes when ONLY the category changes (the 409's remedy re-mints)", () => {
+    expect(
+      csvSubmissionFingerprint("Alpha", SERIES, CAT_A, "traditional"),
+    ).not.toBe(csvSubmissionFingerprint("Alpha", SERIES, CAT_B, "traditional"));
+  });
+
+  it("is IDENTICAL for a true duplicate — same name, series AND classification", () => {
+    // The burn fence still blocks the genuine repeat the idempotent 200 arm
+    // serves: widening the signature must not free real duplicates.
+    expect(csvSubmissionFingerprint("Alpha", SERIES, CAT_A, "crypto")).toBe(
+      csvSubmissionFingerprint(
+        "Alpha",
+        [
+          { date: "2024-01-01", daily_return: 0.01 },
+          { date: "2024-01-02", daily_return: -0.02 },
+        ],
+        CAT_A,
+        "crypto",
+      ),
+    );
+  });
+
+  it("changes when ONLY the asset class changes", () => {
+    // #597 — asset_class drives annualization (√365 crypto / √252 traditional),
+    // so it is a genuinely different submission, not a cosmetic edit.
+    expect(csvSubmissionFingerprint("Alpha", SERIES, CAT_A, "traditional")).not.toBe(
+      csvSubmissionFingerprint("Alpha", SERIES, CAT_A, "crypto"),
+    );
+  });
+
+  it("keeps every field boundary unambiguous across the two NEW fields", () => {
+    // Without the NUL separators these pairs would concatenate identically —
+    // the same guarantee the original name/rows boundary already carries.
+    expect(csvSubmissionSignature("N", [], "a", "bc")).not.toBe(
+      csvSubmissionSignature("N", [], "ab", "c"),
+    );
+    expect(csvSubmissionSignature("N", [], "", "a")).not.toBe(
+      csvSubmissionSignature("N", [], "a", ""),
+    );
+    // ...and a name that ends where the rows field begins still cannot collide.
+    expect(csvSubmissionSignature("N", [], "a", null)).not.toBe(
+      csvSubmissionSignature("N\u0000", [], "a", null),
+    );
+  });
+
+  it("serialises a null classification to a PINNED sentinel, distinct from '' and from 'null'", () => {
+    // The exact serialisation is pinned so a future edit cannot silently swap
+    // the sentinel and invalidate every persisted burn.
+    expect(csvSubmissionSignature("N", [], null, null)).toBe(
+      "N\u0000\u0000\u0001\u0000\u0001",
+    );
+    // Deterministic across calls.
+    expect(csvSubmissionFingerprint("N", [], null, null)).toBe(
+      csvSubmissionFingerprint("N", [], null, null),
+    );
+    // A real value that merely LOOKS empty/null is a DIFFERENT submission —
+    // the sentinel must not be reachable by user input.
+    expect(csvSubmissionFingerprint("N", [], null, null)).not.toBe(
+      csvSubmissionFingerprint("N", [], "", ""),
+    );
+    expect(csvSubmissionFingerprint("N", [], null, null)).not.toBe(
+      csvSubmissionFingerprint("N", [], "null", "null"),
+    );
   });
 });
 

@@ -658,17 +658,47 @@ export function newWizardSessionId(): string {
  * and submits — the strategy name and the daily-return series — so it is
  * insensitive to array identity (a re-upload of the SAME file yields an
  * equal-but-new-reference array, which must NOT count as a change) and
- * sensitive to any real edit of either. `date` and `daily_return` are the only
- * fields that reach `csv-finalize`, so they are the only fields fingerprinted.
+ * sensitive to any real edit of either.
+ *
+ * ⭐ RANK-08 (Phase 159-07, decision D-05) — CLASSIFICATION IS PART OF THE
+ * SUBMISSION. This docblock previously claimed "`date` and `daily_return` are
+ * the only fields that reach `csv-finalize`, so they are the only fields
+ * fingerprinted". That premise was FALSE: `CsvSubmitStep` also posts
+ * `metadata.category_id` and `metadata.asset_class`
+ * (`steps/CsvSubmitStep.tsx:442,459`), and those are precisely what the 146.2
+ * classification-conflict 409 refuses on. A fingerprint blind to them made that
+ * 409's own remedy — "change the classification and resubmit" — unreachable:
+ * the fence read NO material change, never retired the burn, and the user
+ * replayed the spent session id into the same refusal forever. Classification
+ * therefore joins the signature as two further NUL-separated fields.
+ *
+ * A `null` classification serialises to an explicit SOH sentinel — a control
+ * character no category UUID or asset-class picker value can contain — so "not
+ * yet chosen" is a stable, distinguishable state rather than colliding with the
+ * empty string or with the literal text "null".
+ *
+ * Widening only ever makes a pre-change persisted burn DIFFER from a
+ * post-change fingerprint, so stuck sessions re-mint — the SAFE direction. The
+ * server-side series-equality refusal (`csv-finalize/route.ts:820-863`) remains
+ * the operative fence.
  */
+const CLASSIFICATION_ABSENT = "\u0001";
+
 export function csvSubmissionSignature(
   strategyName: string,
   series: readonly { date: string; daily_return: number }[] | undefined,
+  categoryId: string | null,
+  assetClass: string | null,
 ): string {
   const rows = (series ?? []).map((r) => `${r.date}=${r.daily_return}`).join("|");
-  // NUL separates the two fields so no name/series boundary is ambiguous.
+  // NUL separates the four fields so no field boundary is ambiguous.
   // RT-3: callers compare `csvSubmissionFingerprint` (below), not this string.
-  return `${strategyName}\u0000${rows}`;
+  return [
+    strategyName,
+    rows,
+    categoryId ?? CLASSIFICATION_ABSENT,
+    assetClass ?? CLASSIFICATION_ABSENT,
+  ].join("\u0000");
 }
 
 /**
@@ -702,8 +732,19 @@ export function csvSubmissionSignature(
 export function csvSubmissionFingerprint(
   strategyName: string,
   series: readonly { date: string; daily_return: number }[] | undefined,
+  categoryId: string | null,
+  assetClass: string | null,
 ): string {
-  const raw = csvSubmissionSignature(strategyName, series);
+  // RANK-08: classification is passed THROUGH to the signature; the FNV-1a
+  // mechanism and the exact-length prefix below are untouched. This digest is
+  // non-cryptographic BY DESIGN (see above) and the widening does not change
+  // that — it only enlarges what the digest is taken over.
+  const raw = csvSubmissionSignature(
+    strategyName,
+    series,
+    categoryId,
+    assetClass,
+  );
   let h1 = 0x811c9dc5;
   let h2 = 0xc2b2ae35;
   for (let i = 0; i < raw.length; i++) {

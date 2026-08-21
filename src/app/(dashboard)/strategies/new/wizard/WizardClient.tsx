@@ -562,8 +562,20 @@ export function WizardClient({
     return () => clearTimeout(timer);
   }, [source, step, hydrated, strategyName, wizardSessionId]);
 
+  // RANK-08 (159-07) — the CLASSIFICATION half of the CSV submission identity.
+  // Read off `csvMetadataDraft`: that is the draft `CsvSubmitStep` posts as
+  // `metadata.category_id` / `metadata.asset_class`, and therefore the one the
+  // 146.2 classification-conflict 409 refuses on. (The API branch's
+  // `metadataDraft` never reaches csv-finalize and is deliberately NOT read
+  // here.) Narrowed to two primitives so the effect/callback deps below compare
+  // by VALUE — depending on the draft OBJECT would re-run on every unrelated
+  // metadata keystroke.
+  const csvCategoryId = csvMetadataDraft?.categoryId ?? null;
+  const csvAssetClass = csvMetadataDraft?.assetClass ?? null;
+
   // CR-01 (140.4-REVIEW) — the durable double-submit fence. When the CSV
-  // wizard's submission content (name or series) changes AFTER a failed submit,
+  // wizard's submission content (name, series or classification) changes AFTER
+  // a failed submit,
   // mint a fresh wizard_session_id so the changed submission is a NEW one by
   // construction and the server's 23505 idempotency arm can only ever fire for
   // a genuine repeat. Keyed on the CONTENT signature, not array identity: a
@@ -584,7 +596,12 @@ export function WizardClient({
     // series is only ever set (never unset) by a successful upload, so it is
     // always defined by the time a submit can fail.
     if (csvDailyReturnsSeries === undefined) return;
-    const current = csvSubmissionFingerprint(strategyName, csvDailyReturnsSeries);
+    const current = csvSubmissionFingerprint(
+      strategyName,
+      csvDailyReturnsSeries,
+      csvCategoryId,
+      csvAssetClass,
+    );
     if (current === burned) return;
     // A material change to a burned submission: retire the spent session id.
     // R4 (v1.19 review of 146.1) — MINT FIRST, INTO A LOCAL. The React setter
@@ -621,7 +638,23 @@ export function WizardClient({
     // wizardSessionId is read only for telemetry; the mint sets a NEW one, but
     // this effect early-returns on the resulting re-run (ref is now null), so
     // there is no loop.
-  }, [source, strategyName, csvDailyReturnsSeries, wizardSessionId, step]);
+    //
+    // ⚠️ RANK-08 — `csvCategoryId` / `csvAssetClass` MUST STAY IN THIS ARRAY.
+    // A fingerprint widened with classification but read through a dep array
+    // that omits it compares YESTERDAY's classification, reports "no material
+    // change", and the 409's remedy dead-ends exactly as it did before the
+    // widening. Listing them makes the fence correct by construction rather
+    // than by the accident that today every classification edit also moves
+    // `step` (csv_metadata → csv_review).
+  }, [
+    source,
+    strategyName,
+    csvDailyReturnsSeries,
+    csvCategoryId,
+    csvAssetClass,
+    wizardSessionId,
+    step,
+  ]);
 
   // CR-01 — record the content the FAILED submit was made with. The next
   // change past this fingerprint is what the effect above re-mints on. Stable
@@ -635,6 +668,8 @@ export function WizardClient({
     const fingerprint = csvSubmissionFingerprint(
       strategyName,
       csvDailyReturnsSeries,
+      csvCategoryId,
+      csvAssetClass,
     );
     failedCsvSubmitSigRef.current = fingerprint;
     // Fire-and-forget, matching every other save on this branch (P473: the
@@ -648,7 +683,19 @@ export function WizardClient({
       strategyName,
       failedCsvSubmitSig: fingerprint,
     });
-  }, [strategyName, csvDailyReturnsSeries, wizardSessionId, step]);
+    // ⚠️ RANK-08 — same rule as the effect above: the classification values
+    // MUST stay listed here. This callback CAPTURES the values it burns; a
+    // stale dep array would record the burn against a classification the user
+    // has already changed, and the re-mint comparison would then be made
+    // against a fingerprint that never described the failed submit.
+  }, [
+    strategyName,
+    csvDailyReturnsSeries,
+    csvCategoryId,
+    csvAssetClass,
+    wizardSessionId,
+    step,
+  ]);
 
   /**
    * ⭐ 146.2-08 / B1 — THE USER-DRIVEN HALF OF THE RE-MINT.
