@@ -178,6 +178,14 @@ items were dropped, not carried. Categories: **Fix now** / **Fix mid-term** / **
    `src/__tests__/critical-regressions.test.ts` if they assert the psql arg shape. Ship as its
    own reviewed PR immediately after the Phase 158 closure PR lands. Closure record already
    carries the defect (158-VERIFICATION.md Known-open, 158-UAT.md item 1(d) correction).
+   *Scope note (2026-08-21 post-closure doc review):* the waiter side is confirmed broken
+   too — the acquire is one `ON_ERROR_STOP=1` psql, so a contended `pg_advisory_lock` wait
+   dies at 120 s and the 3-attempt loop then reports it as "a CONNECT/session fault, NOT
+   lock contention" (ci.yml:1222/1664/2300); effective tolerance under real contention is
+   ~3×120 s, not the 3600 s cap. Defeated-claim blast radius exceeds runbook §2: runbook §1
+   (waiters block/queue), §3 (waiter-count triage), §5 (~20 min hold / quiet-CI drill
+   advice) and CONTRIBUTING.md's unqualified serialization claim all assume a long-lived
+   holder — sweep them in the fix PR.
 
 1. **`RESEND_API_KEY` unset in Vercel prod** — founder-LP report cron + all transactional
    email are dead (code soft-skips, only Sentry fires). **Founder action:** set the key in

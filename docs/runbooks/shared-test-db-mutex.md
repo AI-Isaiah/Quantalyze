@@ -84,9 +84,10 @@ There is **no lock-reaper cron, and none is needed.**
   > session drops, and the lock releases while the job's DB work continues, so
   > serialization covers only the first ~2 minutes of each job's DB span. The
   > dead-holder `::error::` annotation (next bullet) firing on a long job is
-  > this defect, not an anomaly. The fix (exempt the holder via
-  > `SET statement_timeout = 0`) ships as its own P0 PR and will give the
-  > invariant its third leg here.
+  > this defect, not an anomaly. The same kill hits a contended
+  > `pg_advisory_lock` wait at 120 s. The fix (`SET statement_timeout = 0`,
+  > exempting both the lock wait and the sleep) ships as its own P0 PR and
+  > will give the invariant its third leg here.
 
 - A holder that dies early is now reported: the release step emits a
   `::error::` annotation (never a non-zero exit) when the recorded pid is
