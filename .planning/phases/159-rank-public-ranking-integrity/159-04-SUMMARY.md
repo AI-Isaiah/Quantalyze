@@ -255,6 +255,13 @@ RANK-06 is complete: ROADMAP 159 SC-4's second arm holds. `blendPeriodsPerYear` 
 
 **One thing the phase's verification pass should look at:** this change moves user-visible Sharpe/vol numbers on any already-shared or already-saved scenario whose legs reach the blend without a class — downward on Sharpe, upward on vol. That is the honest direction and the point of the requirement, but it is a visible movement on live surfaces (coverage entry D5), so it belongs in phase UAT alongside the RANK-01 census's expected visible changes rather than shipping silently.
 
+## Self-Check: PASSED
+
+- All 8 `key-files.modified` paths exist on disk (`ls` verified).
+- All 5 claimed commits resolve in `git log --oneline --all`: `399d9998`, `a391332b`, `13585f54`, `b59fa91f`, `6e7db99d`.
+- Working tree clean at close-out; zero file deletions in the plan diff (`git diff --diff-filter=D` empty).
+- No writes to `STATE.md`, `ROADMAP.md`, `REQUIREMENTS.md`, or `WINDOWS.md` (orchestrator-owned).
+
 ---
 *Phase: 159-rank-public-ranking-integrity*
 *Completed: 2026-08-21*
