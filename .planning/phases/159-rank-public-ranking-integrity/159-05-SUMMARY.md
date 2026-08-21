@@ -321,6 +321,15 @@ None — no external service configuration required.
 - **Before `/ship`:** `python3 -m mypy --strict services/metrics.py` must be re-run (house law — the GSD milestone gate runs pytest only). It is green at `aa06e86e`.
 - No blockers. One open residual, enumerated above, sized for a follow-up plan.
 
+## Self-Check: PASSED
+
+- Files on disk: `analytics-service/services/metrics.py` FOUND, `analytics-service/tests/test_metrics.py` FOUND, `.planning/phases/159-rank-public-ranking-integrity/159-05-SUMMARY.md` FOUND. No files were claimed as created (this plan modified two existing files).
+- Commits reachable: `76d3dde0` FOUND, `aa06e86e` FOUND, `2f44e1dd` FOUND.
+- Task 3 claims no commit, and none exists — the gates produced zero failures and zero fixture movement, so there was nothing to change.
+- Working tree clean after the Task 2 anti-vacuity drill (`git checkout HEAD -- services/metrics.py` restored the committed file; `git status --short` empty; suite re-run green at 171 passed).
+- Prohibition checks re-run against the diff, not asserted: no `requirements*.txt`, no `tests/fixtures/**`, no `*golden*` path in `git diff <base>..HEAD --name-only`; no quantstats pin change and no monkeypatching of quantstats internals in the added lines.
+- Known stubs: none. No placeholder, TODO or unwired code path was introduced.
+
 ---
 *Phase: 159-rank-public-ranking-integrity*
 *Completed: 2026-08-21*
