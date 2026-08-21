@@ -49,6 +49,13 @@ const recorders = vi.hoisted(() => {
     // NEW-C03-03 regression: records `.eq(col, val)` calls on the strategies
     // table so we can assert the `status=published` predicate is always sent.
     strategyEqCalls: [] as Array<[string, unknown]>,
+    // Phase 159 (159-03 / RANK-02) — LIST-read recorder. `getStrategiesByCategory`
+    // awaits the builder itself (no `.single()`), so the strategies chain only
+    // becomes a thenable when a test seeds `listRows`. Leaving it null keeps
+    // every pre-existing `.single()`/`.maybeSingle()` test byte-identical — a
+    // permanently-thenable chain would change how those awaits resolve.
+    listRows: null as unknown[] | null,
+    listError: null as unknown,
     // Phase B pr-test-analyzer F1 — captureToSentry call recorder.
     // H-0488 / Phase B follow-up: a regression that drops Sentry capture
     // from the RPC-error or shape-mismatch paths would otherwise be invisible.
@@ -91,6 +98,19 @@ const buildChain = (data: unknown, recordStrategySelect = false) => {
   // implement both so pre-existing tests (which used `.single()`) and the
   // new shared helper (which uses `.maybeSingle()`) both work.
   chain.maybeSingle = () => Promise.resolve({ data, error: null });
+  // Phase 159 (159-03 / RANK-02): the LIST reads (`getStrategiesByCategory`)
+  // await the builder directly. Only become a thenable when the test seeded
+  // rows for that shape — see the `listRows` recorder note above.
+  if (recordStrategySelect && recorders.listRows !== null) {
+    chain.then = <T1, T2>(
+      onFulfilled: (val: { data: unknown; error: unknown }) => T1,
+      onRejected?: (err: unknown) => T2,
+    ) =>
+      Promise.resolve({
+        data: recorders.listRows,
+        error: recorders.listError,
+      }).then(onFulfilled, onRejected);
+  }
   return chain;
 };
 
@@ -168,6 +188,7 @@ vi.mock("@/lib/supabase/admin", () => ({
 }));
 
 import {
+  getStrategiesByCategory,
   getStrategyDetail,
   getPublicStrategyDetail,
   fetchStrategyLazyMetrics,
@@ -215,6 +236,8 @@ beforeEach(() => {
   recorders.favoritesEqCalls = [];
   recorders.strategySelectCols = [];
   recorders.strategyEqCalls = [];
+  recorders.listRows = null;
+  recorders.listError = null;
   recorders.sentryCalls = [];
 });
 
@@ -306,6 +329,169 @@ describe("getStrategyDetail — status=published predicate (NEW-C03-03)", () => 
     recorders.strategyData = null;
     const result = await getStrategyDetail("strat_draft");
     expect(result).toBeNull();
+  });
+});
+
+/**
+ * Phase 159 (159-03, RANK-02 / decision D-02) — the browse + discovery LIST
+ * read is the highest-traffic ANONYMOUS `strategy_analytics` surface
+ * (`/browse/[slug]` has no auth gate). RLS is ROW-level: the `analytics_read`
+ * policy has no `TO` clause and cannot hide a COLUMN, so an explicit
+ * projection is the only lever that keeps `daily_returns`, the whole
+ * `metrics_json` blob and `data_quality_flags` out of an anon response.
+ *
+ * These pins capture the `.select()` STRING the function issues. They are
+ * neuterable in both directions: adding an excluded column to the projection
+ * constant reds the negative arm, and dropping a must-stay column reds the
+ * consumer arm (which is the user-visible failure — blank sparklines and a
+ * permanently-"Syncing" chip).
+ */
+describe("getStrategiesByCategory — RANK-02 explicit anon projection", () => {
+  /**
+   * Seeds an empty LIST result (the select is recorded before the early
+   * return) and hands back both the full select string and the
+   * `strategy_analytics (...)` embed body.
+   */
+  const captureSelect = async () => {
+    recorders.listRows = [];
+    await getStrategiesByCategory("crypto-sma");
+    const cols = recorders.strategySelectCols.at(-1) ?? "";
+    const embed = /strategy_analytics \(([^)]*)\)/.exec(cols)?.[1] ?? "";
+    return { cols, embed };
+  };
+
+  it("issues an explicit analytics column list, never the wildcard embed", async () => {
+    const { cols, embed } = await captureSelect();
+    expect(cols).not.toContain("strategy_analytics (*)");
+    expect(embed).not.toBe("*");
+    expect(embed.length).toBeGreaterThan(0);
+  });
+
+  it("keeps every analytics field the browse list actually renders", async () => {
+    const { embed } = await captureSelect();
+    // Enumerated from StrategyTable at HEAD: sparklines (:1111/:1118), the
+    // chip status (:899), the SyncBadge + `computed_at` sort (:299/:1051),
+    // the rendered metric columns and every advanced range filter (:556-562).
+    for (const column of [
+      "computed_at",
+      "computation_status",
+      "cumulative_return",
+      "cagr",
+      "sharpe",
+      "max_drawdown",
+      "volatility",
+      "six_month_return",
+      "calmar",
+      "sparkline_returns",
+      "sparkline_drawdown",
+    ]) {
+      expect(embed).toContain(column);
+    }
+  });
+
+  it("never projects daily_returns, the metrics_json blob, or data_quality_flags", async () => {
+    const { cols, embed } = await captureSelect();
+    expect(cols).not.toContain("daily_returns");
+    expect(cols).not.toContain("data_quality_flags");
+    // `metrics_json` may appear ONLY as the JSONB-key alias below — never as a
+    // projected column (which would ship the entire blob to an anon reader).
+    expect(embed).not.toMatch(/metrics_json(?!->)/);
+  });
+
+  it("carries the 3M advanced filter as an aliased JSONB key, not the blob", async () => {
+    const { embed } = await captureSelect();
+    // MEASURED against the TEST project 2026-08-21: this embed alias form
+    // returns `{"three_month": 0.0}` (HTTP 200, a real number) — see
+    // 159-03-SUMMARY. The A4 assumption held; the filter does not degrade.
+    expect(embed).toContain("three_month:metrics_json->three_month");
+  });
+});
+
+/**
+ * Phase 159 (159-03, RANK-02 / decision D-02) — `getStrategyDetail` splatted
+ * `strategy_analytics (*)`. RESEARCH Open Question 2 framed the tension as
+ * "the anon /strategy/[id] page and the authed discovery detail page share
+ * this function, and only one of them may see data_quality_flags", and the
+ * resolution is CALLER-SCOPED projections rather than one shared list.
+ *
+ * ⚠️ Measured correction (159-03): at HEAD `/strategy/[id]` does NOT call this
+ * function — it calls `getPublicStrategyDetail` (aliased locally through
+ * `cache()`), which already carries an explicit projection. This function's
+ * only production caller is the AUTHED discovery detail page. The `public`
+ * variant is therefore the SAFE DEFAULT for the exported surface, not a live
+ * anon path: any future anon caller gets the minimal projection unless it
+ * explicitly opts into the wider discovery list.
+ */
+describe("getStrategyDetail — RANK-02 caller-scoped analytics projection", () => {
+  const captureEmbed = async (run: () => Promise<unknown>) => {
+    recorders.strategyData = { ...baseStrategy, disclosure_tier: "exploratory" };
+    await run();
+    const cols = recorders.strategySelectCols.at(-1) ?? "";
+    return { cols, embed: /strategy_analytics \(([^)]*)\)/.exec(cols)?.[1] ?? "" };
+  };
+
+  it("public variant (the default) excludes the three columns and keeps computation_status", async () => {
+    const { cols, embed } = await captureEmbed(() => getStrategyDetail("strat_123"));
+    expect(cols).not.toContain("strategy_analytics (*)");
+    expect(embed).not.toBe("*");
+    // computation_status is MANDATORY in every variant — the detail surfaces
+    // derive their still-computing placeholder from it.
+    expect(embed).toContain("computation_status");
+    expect(cols).not.toContain("daily_returns");
+    expect(cols).not.toContain("data_quality_flags");
+    // catches `metrics_json` AND `metrics_json_by_basis`, allows a `->` alias
+    expect(embed).not.toMatch(/metrics_json(?!->)/);
+  });
+
+  it("discovery variant additionally projects every field the authed detail page reads", async () => {
+    const { cols, embed } = await captureEmbed(() =>
+      getStrategyDetail("strat_123", "crypto-sma", "discovery"),
+    );
+    expect(cols).not.toContain("strategy_analytics (*)");
+    // Enumerated from discovery/[slug]/[strategyId]/page.tsx at HEAD:
+    // daily_returns (:66) + returns_series (:69) feed resolveDailyReturnSeries;
+    // data_quality_flags (:85) drives the composite/single-key branch;
+    // metrics_json_by_basis + computation_status feed readSingleKeyBasisOpts;
+    // computed_at drives the FreshnessChip sentinel (:149).
+    for (const column of [
+      "computation_status",
+      "computed_at",
+      "data_quality_flags",
+      "daily_returns",
+      "returns_series",
+      "metrics_json_by_basis",
+    ]) {
+      expect(embed).toContain(column);
+    }
+  });
+
+  /**
+   * The public variant and `getPublicStrategyDetail`'s PUBLIC_ANALYTICS_COLUMNS
+   * describe the SAME thing — what an anonymous reader needs from a strategy
+   * detail row — so they are written as byte-identical member lists. Two
+   * identical literals in one file are a drift hazard (and an edit hazard: a
+   * find-and-replace aimed at one will silently hit the other, which is
+   * exactly how this pin came to be written). This makes the intended lockstep
+   * a CHECKED invariant instead of a hope: widen either list alone and this
+   * reds.
+   */
+  it("public variant stays in lockstep with the anon factsheet projection", async () => {
+    const detail = await captureEmbed(() => getStrategyDetail("strat_123"));
+    const factsheet = await captureEmbed(() => getPublicStrategyDetail("strat_123"));
+    const members = (embed: string) =>
+      embed.split(",").map((c) => c.trim()).sort();
+    expect(members(detail.embed).length).toBeGreaterThan(0);
+    expect(members(detail.embed)).toEqual(members(factsheet.embed));
+  });
+
+  it("the two variants differ — data_quality_flags is the authed-only column", async () => {
+    const pub = await captureEmbed(() => getStrategyDetail("strat_123"));
+    const disc = await captureEmbed(() =>
+      getStrategyDetail("strat_123", undefined, "discovery"),
+    );
+    expect(pub.embed).not.toContain("data_quality_flags");
+    expect(disc.embed).toContain("data_quality_flags");
+    expect(disc.embed).not.toBe(pub.embed);
   });
 });
 

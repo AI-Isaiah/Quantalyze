@@ -204,6 +204,45 @@ export async function getPercentiles(categorySlug?: string): Promise<PercentileM
 // Both helpers are pure and have no Supabase dependency — they live in utils.
 export { extractAnalytics, EMPTY_ANALYTICS };
 
+/**
+ * Phase 159 (159-03, RANK-02 / decision D-02) — the RANKED-LIST analytics
+ * projection, replacing the wildcard `strategy_analytics (*)` embed.
+ *
+ * `/browse/[slug]` has NO auth gate, so this is the highest-traffic ANONYMOUS
+ * `strategy_analytics` read in the app. RLS is ROW-level — the `analytics_read`
+ * policy (`status='published' OR user_id=auth.uid()`, migration
+ * 20260405061912, no `TO` clause) applies to `anon` and cannot hide a COLUMN.
+ * An explicit projection is therefore the ONLY lever that keeps
+ * `daily_returns`, the whole `metrics_json` blob and `data_quality_flags` out
+ * of an anon response. Same column-explicitness discipline as
+ * `readPublicVerificationSignals` / the `get_published_trust_signals` SECDEF
+ * function, and the same shape as `STRATEGY_V2_ANALYTICS_COLUMNS` below.
+ *
+ * ⚠️ MUST-STAY columns — every one of these is a rendered surface, and
+ * dropping it is a silent VISUAL regression, not a bandwidth win:
+ *   - `sparkline_returns` / `sparkline_drawdown` — StrategyTable's two
+ *     sparkline cells (:1111 / :1118). Dropping them blanks the charts.
+ *   - `computation_status` — the ONE chip-state derivation site (:899 →
+ *     `deriveEmptySeriesState`). Dropping it makes every row read the
+ *     EMPTY_ANALYTICS `"pending"` default and spin "Syncing" forever, which
+ *     is precisely the Phase-147/149 forever-spinner class.
+ *   - `computed_at` — the SyncBadge (:1051) and the `computed_at` sort (:299).
+ * The remaining scalars are the rendered metric columns, the table sorts
+ * (`SortKey`, discovery-types.ts) and the advanced range filters (:556-562);
+ * `calmar` and `six_month_return` are filter/sort-only but still user-visible.
+ *
+ * ⚠️ `three_month:metrics_json->three_month` is a JSONB-KEY ALIAS, not the
+ * blob. StrategyTable's ONLY `metrics_json` use is the 3M advanced filter
+ * (:567-568), so projecting the whole blob to keep one number would ship every
+ * other key (alpha/beta/VaR/CVaR/skew/…) to anonymous readers. MEASURED
+ * against the TEST project on 2026-08-21: this embed-alias form returns
+ * `{"three_month": 0.0}` (HTTP 200, a real number). That measurement CORRECTS
+ * the `getStrategyDetailV2` docblock's claim below that "PostgREST cannot
+ * project a JSONB sub-tree without an RPC" — see the note there.
+ */
+const CATEGORY_RANKING_ANALYTICS_COLUMNS =
+  "computed_at, computation_status, cumulative_return, cagr, sharpe, calmar, max_drawdown, volatility, six_month_return, sparkline_returns, sparkline_drawdown, three_month:metrics_json->three_month";
+
 export async function getStrategiesByCategory(categorySlug: string): Promise<RankedStrategyRow[]> {
   const supabase = await createClient();
 
@@ -224,7 +263,9 @@ export async function getStrategiesByCategory(categorySlug: string): Promise<Ran
   const { data: strategies, error } = await withPublishedOnly(
     supabase
       .from("strategies")
-      .select(`*, discovery_categories!inner(slug), strategy_analytics (*)`)
+      .select(
+        `*, discovery_categories!inner(slug), strategy_analytics (${CATEGORY_RANKING_ANALYTICS_COLUMNS})`,
+      )
       .eq("discovery_categories.slug", categorySlug),
   );
 
@@ -324,6 +365,13 @@ export async function getMyStrategies(
 
   const { data, error } = await supabase
     .from("strategies")
+    // RANK-02 / D-02 EXEMPTION — the wildcard analytics embed stays HERE and
+    // only here: the `.eq("user_id", userId)` on the next line scopes this read
+    // to the session owner's OWN rows, so the columns RANK-02 keeps from
+    // anonymous readers (daily_returns, metrics_json, data_quality_flags) never
+    // leave the owner they belong to. Every other embed in the class is now an
+    // explicit projection; adding a NON-owner-scoped caller to this function
+    // would silently re-open that class.
     .select(`*, strategy_analytics (*)`)
     .eq("user_id", userId)
     .neq("status", "archived");
@@ -915,6 +963,61 @@ export async function getFactsheetDetail(strategyId: string): Promise<{
   };
 }
 
+/**
+ * Phase 159 (159-03, RANK-02 / decision D-02) — which caller is asking for a
+ * strategy detail row. RESEARCH Open Question 2 asked whether the anon and
+ * authed detail surfaces should share ONE analytics projection (forcing
+ * `data_quality_flags` — an exclusion-list column — into anon responses) or
+ * whether the function should grow a caller-scoped list. Resolved EXPLICITLY,
+ * per caller, rather than silently in either direction.
+ *
+ * `"public"` is the DEFAULT, so the exported surface is safe by construction:
+ * a caller must opt IN to the wider list. See the constants below.
+ */
+export type StrategyDetailVariant = "public" | "discovery";
+
+/**
+ * The anon-safe detail projection. Excludes all three RANK-02 columns
+ * (`daily_returns`, `metrics_json`, `data_quality_flags`) and RETAINS
+ * `computation_status`, which is mandatory in every variant — the detail
+ * surfaces derive their still-computing placeholder from it, and
+ * `computed_at` drives the freshness sentinel.
+ *
+ * Membership deliberately mirrors `PUBLIC_ANALYTICS_COLUMNS` (the projection
+ * `getPublicStrategyDetail` already uses for the ANON factsheet at
+ * `/strategy/[id]`): that is the measured anon-detail need, and the two lists
+ * describing the same surface should not disagree.
+ *
+ * ⚠️ Measured at HEAD (159-03): `/strategy/[id]` does NOT call
+ * `getStrategyDetail` — it calls `getPublicStrategyDetail`, aliased locally
+ * through `cache()` (page.tsx:18). RESEARCH classified this function as
+ * anon-reachable via that page; that classification was reading the LOCAL
+ * alias, not this export. This function's only production caller today is the
+ * AUTHED discovery detail page, so `public` is the safe default for future
+ * callers rather than a live anon path.
+ */
+const STRATEGY_DETAIL_PUBLIC_ANALYTICS_COLUMNS =
+  "cumulative_return, cagr, volatility, sharpe, sortino, calmar, max_drawdown, max_drawdown_duration_days, six_month_return, sparkline_returns, computation_status, computed_at";
+
+/**
+ * The AUTHED discovery-detail projection: the public list plus exactly the
+ * columns `/discovery/[slug]/[strategyId]` reads off the analytics row.
+ * Enumerated from that page at HEAD (Pitfall 5 — enumerate before cutting):
+ *
+ *   - `data_quality_flags` (:85) — `dqf` picks the composite vs single-key
+ *     branch and feeds `singleKeyDataQuality`. On the exclusion list for ANON
+ *     responses, which is exactly why it lives HERE and not in the public list.
+ *   - `daily_returns` (:66) + `returns_series` (:69) — `resolveDailyReturnSeries`.
+ *     ⚠️ Dropping either renders the "still computing" placeholder instead of
+ *     the factsheet: a silent, total visual regression.
+ *   - `metrics_json_by_basis` — threaded into `readCompositeFactsheet` and
+ *     `readSingleKeyBasisOpts` (the MTM/smoothed basis story).
+ *   - `computation_status` — `readSingleKeyBasisOpts` (the page comment at
+ *     :123 documents this dependency explicitly).
+ */
+const STRATEGY_DETAIL_DISCOVERY_ANALYTICS_COLUMNS =
+  `${STRATEGY_DETAIL_PUBLIC_ANALYTICS_COLUMNS}, data_quality_flags, daily_returns, returns_series, metrics_json_by_basis`;
+
 export async function getStrategyDetail(
   strategyId: string,
   /**
@@ -934,6 +1037,12 @@ export async function getStrategyDetail(
    * other means.
    */
   expectedCategorySlug?: string,
+  /**
+   * Phase 159 (159-03 / RANK-02): which analytics projection to issue.
+   * Defaults to the minimal anon-safe list — a caller needing the wider
+   * discovery columns must ask for them by name.
+   */
+  variant: StrategyDetailVariant = "public",
 ): Promise<{
   strategy: Strategy;
   analytics: StrategyAnalytics;
@@ -960,9 +1069,17 @@ export async function getStrategyDetail(
   // discovery_categories with `!inner` + an `.eq("discovery_categories.slug",
   // …)` predicate. PostgREST drops the row entirely when the inner-join
   // misses, so a slug-shuffle URL turns into a clean null → not-found UI.
+  // Phase 159 (159-03 / RANK-02, D-02): the analytics embed is an explicit,
+  // caller-scoped column list — never a wildcard. RLS is ROW-level and cannot
+  // hide a column, so the projection is the only control over which analytics
+  // columns leave the database.
+  const analyticsColumns =
+    variant === "discovery"
+      ? STRATEGY_DETAIL_DISCOVERY_ANALYTICS_COLUMNS
+      : STRATEGY_DETAIL_PUBLIC_ANALYTICS_COLUMNS;
   const baseSelect = expectedCategorySlug
-    ? "*, discovery_categories!inner(slug), strategy_analytics (*)"
-    : "*, strategy_analytics (*)";
+    ? `*, discovery_categories!inner(slug), strategy_analytics (${analyticsColumns})`
+    : `*, strategy_analytics (${analyticsColumns})`;
 
   // NEW-C03-03 / NEW-C38-01: add the `status='published'` predicate as
   // defence-in-depth mirror of all sibling fetchers (getPublicStrategyDetail,
@@ -1156,9 +1273,19 @@ export interface StrategyV2Detail {
  * Analytics columns: every field that getStrategyDetailV2 unpacks below.
  * `metrics_json` is intentionally a single blob fetch — its keys
  * (history_days, equity_series_1y, btc_benchmark_returns, benchmark_returns,
- * alpha/beta/IR/Treynor) drive multiple panels and PostgREST cannot project
- * a JSONB sub-tree without an RPC. Trimming the surrounding scalar/array
+ * alpha/beta/IR/Treynor) drive multiple panels, so pulling the blob once beats
+ * enumerating a dozen key aliases. Trimming the surrounding scalar/array
  * columns is the bandwidth win the p95<50ms detail-fetch contract requires.
+ *
+ * ⚠️ CORRECTION (Phase 159 / 159-03). This docblock previously asserted that
+ * "PostgREST cannot project a JSONB sub-tree without an RPC". That is FALSE
+ * and was corrected by measurement, not by argument: against the TEST project
+ * on 2026-08-21, `strategy_analytics(three_month:metrics_json->three_month)`
+ * returned HTTP 200 with `{"three_month": 0.0}` — a real number under the
+ * alias. The blob fetch HERE remains the right call for the reason above (many
+ * keys, one panel-set), but the capability exists and is now used by
+ * CATEGORY_RANKING_ANALYTICS_COLUMNS to keep the whole blob away from
+ * anonymous list readers.
  */
 const STRATEGY_V2_STRATEGY_COLUMNS =
   "id, name, start_date, supported_exchanges, strategy_types, subtypes, markets, leverage_range, avg_daily_turnover";

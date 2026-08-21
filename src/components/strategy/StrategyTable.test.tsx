@@ -910,3 +910,78 @@ describe("StrategyTable — v1.11 sign-restricted color policy", () => {
     expect(cell.className).not.toContain("text-negative");
   });
 });
+
+// --- Phase 159 (159-03 / RANK-02) projection-shape render guard -------------
+//
+// Threat T-159-10: an over-narrow projection is a SILENT visual regression —
+// no crash, no type error, just blank sparklines and a permanently-"Syncing"
+// chip. The other pins for this work assert the `.select()` STRING; this one
+// asserts the CONSEQUENCE, by rendering a row carrying ONLY the columns
+// `getStrategiesByCategory` actually projects.
+//
+// The key list below is not invented: it is the shape MEASURED coming back
+// from the TEST project through the ANONYMOUS key on 2026-08-21 —
+//   cagr, calmar, sharpe, volatility, computed_at, three_month, max_drawdown,
+//   six_month_return, cumulative_return, sparkline_returns,
+//   computation_status, sparkline_drawdown
+// — with `metrics_json`, `daily_returns` and `data_quality_flags` ABSENT
+// (not null: absent). Every other StrategyAnalytics field is deliberately
+// left off so this fixture cannot pass by borrowing a column the projection
+// no longer fetches.
+function makeProjectedRow(id: string, name: string): StrategyWithAnalytics {
+  const base = makeStrategy({ id, name });
+  const projectedAnalytics = {
+    computed_at: "2026-01-01T00:00:00Z",
+    computation_status: "complete",
+    cumulative_return: 0.42,
+    cagr: 0.18,
+    sharpe: 1.5,
+    calmar: 1.1,
+    max_drawdown: -0.12,
+    volatility: 0.22,
+    six_month_return: 0.21,
+    sparkline_returns: [0, 0.05, 0.1],
+    sparkline_drawdown: [0, -0.1, -0.2, -0.05, 0],
+    three_month: 0.09,
+  };
+  return {
+    ...base,
+    // Cast mirrors production: PostgREST returns exactly the projected keys,
+    // and queries.ts hands that partial row through as StrategyAnalytics.
+    analytics: projectedAnalytics as unknown as StrategyAnalytics,
+  };
+}
+
+describe("StrategyTable — renders correctly on the RANK-02 projected row shape", () => {
+  it("still draws BOTH sparklines when metrics_json/daily_returns are absent", () => {
+    render(
+      <StrategyTable
+        strategies={[makeProjectedRow(STRATEGY_ID_A, "Alpha Stellar")]}
+        categorySlug="crypto-sma"
+      />,
+    );
+    // A blank sparkline is the exact failure T-159-10 describes, and it is
+    // invisible to a type checker.
+    expect(getStrokeOnSparkline("sparkline-cell-returns")).toBe(
+      "var(--color-accent)",
+    );
+    expect(getStrokeOnSparkline("sparkline-cell-drawdown")).not.toBeNull();
+  });
+
+  it("renders real metric values, not em-dashes, for every projected KPI", () => {
+    render(
+      <StrategyTable
+        strategies={[makeProjectedRow(STRATEGY_ID_A, "Alpha Stellar")]}
+        categorySlug="crypto-sma"
+      />,
+    );
+    expect(screen.getByText("Alpha Stellar")).toBeInTheDocument();
+    // Each of these is a rendered cell fed by ONE projected column. Drop that
+    // column from the projection and the cell degrades to "—" — the quiet
+    // failure mode, since nothing throws. Asserted by VALUE for that reason.
+    expect(screen.getByText("1.50")).toBeInTheDocument(); // sharpe
+    expect(screen.getByText("+42.00%")).toBeInTheDocument(); // cumulative_return
+    expect(screen.getByText("+18.00%")).toBeInTheDocument(); // cagr
+    expect(screen.getByText("-12.00%")).toBeInTheDocument(); // max_drawdown
+  });
+});
