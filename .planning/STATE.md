@@ -5,11 +5,11 @@ milestone_name: Backlog Burndown (Phases 158+)
 current_phase: 159
 current_phase_name: RANK — Public-ranking integrity
 status: planning
-stopped_at: Phase 158 complete, ready to plan Phase 159
-last_updated: "2026-08-21T05:06:25.809Z"
+stopped_at: Phase 159 context gathered
+last_updated: "2026-08-21T09:51:35.497Z"
 last_activity: 2026-08-21
 last_activity_desc: Phase 158 complete, transitioned to Phase 159
-state_head: c380d347c4396a1859dd8ca04e8a5c3066faf67a
+state_head: 08c169112a5dea1429ae469200c381428ba1637d
 progress:
   total_phases: 8
   completed_phases: 1
@@ -1403,9 +1403,9 @@ Load-bearing sequencing (real dependencies, do not reorder):
 
 ## Session
 
-**Last Date:** 2026-08-21T05:06:25.809Z
-**Stopped At:** Phase 158 complete, ready to plan Phase 159
-**Resume File:** None
+**Last Date:** 2026-08-21T09:51:35.277Z
+**Stopped At:** Phase 159 context gathered
+**Resume File:** .planning/phases/159-rank-public-ranking-integrity/159-CONTEXT.md
 **Next step:** Phase 159 (RANK — public ranking integrity) is next and NOT yet planned — run `/gsd-plan-phase 159`. (The former 153.6/154/155 note was v1.17-era; those items live in the archived milestone trackers and TODOS.md.)
 
 ⭐ **Foundation names later waves import by name** (from `153.1-02-SUMMARY.md`, all in
