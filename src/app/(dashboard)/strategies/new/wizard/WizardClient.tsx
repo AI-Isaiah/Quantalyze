@@ -575,12 +575,12 @@ export function WizardClient({
 
   // CR-01 (140.4-REVIEW) — the durable double-submit fence. When the CSV
   // wizard's submission content (name, series or classification) changes AFTER
-  // a failed submit,
-  // mint a fresh wizard_session_id so the changed submission is a NEW one by
-  // construction and the server's 23505 idempotency arm can only ever fire for
-  // a genuine repeat. Keyed on the CONTENT signature, not array identity: a
-  // re-upload of the same file yields an equal-but-new-reference series and
-  // must NOT mint (that repeat is exactly what the idempotent 200 arm serves).
+  // a failed submit, mint a fresh wizard_session_id so the changed submission
+  // is a NEW one by construction and the server's 23505 idempotency arm can
+  // only ever fire for a genuine repeat. Keyed on the CONTENT signature, not
+  // array identity: a re-upload of the same file yields an equal-but-new-
+  // reference series and must NOT mint (that repeat is exactly what the
+  // idempotent 200 arm serves).
   useEffect(() => {
     if (source !== "csv") return;
     const burned = failedCsvSubmitSigRef.current;
