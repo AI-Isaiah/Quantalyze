@@ -200,6 +200,36 @@ items were dropped, not carried. Categories: **Fix now** / **Fix mid-term** / **
    exactly that job, 1 failed | 143 passed; restored → 144 passed).
    **Completed:** v0.69.1.0 (2026-08-21)
 
+0c. **✅ RESOLVED 2026-08-21 — [158-MUTEX-02] orphaned mutex holder BACKEND outlives its
+   killed psql client — zeroing statement_timeout removed the accidental janitor, so an
+   orphan holds the lock for its full 100-minute sleep and starves every waiter.**
+   Second-order consequence of [158-MUTEX-01], observed live on PR #701's own CI run
+   32457330139: the python job's release step killed the psql CLIENT (pid 2202, 07:15:19)
+   and printed the orderly release line, but a backend executing `pg_sleep(6000)` never
+   reads its client socket, so the SERVER backend (pid 3484961, backend_start 07:09:22)
+   kept `pg_advisory_lock(61616158)`. Before 158-MUTEX-01 the server-wide
+   `statement_timeout=120000` reaped such orphans at ~120s BY ACCIDENT; zeroed, they are
+   immortal. sql-tests and e2e-seeded starved on the lock; e2e-seeded hit the 3600s
+   acquire cap and FAILED (job 96697217891, "Lock census: 1 granted, 2 waiting"). Same
+   mechanism: a waiter whose psql client died (job timeout) lingers as a zombie backend
+   blocked in `pg_advisory_lock()` — a lock wait does not read the client socket either.
+   **Resolution (same branch/PR, `fix/158-mutex-statement-timeout`):** every mutex
+   session (three acquire steps, kept byte-identical, + the probe contender) now also
+   sets `client_connection_check_interval = '30s'` (verified USERSET on TEST PG 17.6) —
+   the backend polls its client socket during query execution AND lock waits, aborting
+   within ~30s of the client dying, covering both the sleeping holder and the zombie
+   waiter. The holder additionally prints `HOLDER-BACKEND-PID <pid>`; the release step
+   reaps that backend server-side via `pg_terminate_backend` guarded by a `pg_locks`
+   check on key 61616158 + pid (no-op if the backend already exited / pid recycled), so
+   the lock frees immediately instead of after ~30s. Runbook §§1/2/3/5 swept ("zeroes
+   statement_timeout" → "sets both GUCs"; live census + cleanup SQL recorded in §3);
+   pins extended in `critical-regressions.test.ts` (ccci membership in all four mutex
+   sessions + guarded release-step reap + holder statement order) — each proven able to
+   fail by neutering one site (ccci removed from python → RED naming python, 3 failed |
+   144 passed; reap removed from python's release → RED naming python, 1 failed | 146
+   passed; restored → 147 passed).
+   **Completed:** v0.69.1.0 (2026-08-21)
+
 1. **`RESEND_API_KEY` unset in Vercel prod** — founder-LP report cron + all transactional
    email are dead (code soft-skips, only Sentry fires). **Founder action:** set the key in
    Vercel prod. Do before the first warned founder month. (Note: portfolio email *alerts*

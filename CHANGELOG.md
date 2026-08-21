@@ -24,6 +24,15 @@ first two minutes of each job's database work (the release step's
 - The acquire retry-loop's triage message no longer inverts post-fix
   diagnosis: a `canceling statement due to statement timeout` signature now
   correctly indicates the session-mode path regressed, not lock contention.
+- [158-MUTEX-02] Second-order orphan, caught live on this PR's own CI run:
+  killing the holder's psql client does not kill its server backend
+  mid-`pg_sleep` — and zeroing `statement_timeout` had removed the accidental
+  ~120s janitor — so an orphaned backend held the lock for its full 100-minute
+  sleep and starved `e2e-seeded` past its 3600s acquire cap. Every mutex
+  session now also sets `client_connection_check_interval = '30s'` (the
+  backend aborts ~30s after its client dies, during lock waits too), and the
+  release step additionally terminates the recorded holder backend
+  server-side, guarded by a `pg_locks` check on the advisory key.
 
 **Changed**
 
