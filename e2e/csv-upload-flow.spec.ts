@@ -1,5 +1,9 @@
 import { test, expect } from "@playwright/test";
-import { createClient } from "@supabase/supabase-js";
+import {
+  seedTestAllocator,
+  cleanupStrategiesByNamePrefix,
+  type SeededAllocator,
+} from "./helpers/seed-test-project";
 
 /**
  * E2E coverage for Phase 15 / CSV-01..CSV-03 — the CSV branch of the
@@ -10,45 +14,80 @@ import { createClient } from "@supabase/supabase-js";
  * demo have no CSV upload surface in Phase 15.
  *
  * SCOPE OF THIS E2E:
- * - Wizard happy path: type strategy name → upload → preview → submit → factsheet
- * - TrustTierLabel renders the locked Phase 15 v0 string (CSV-03 visual gate)
+ * - Wizard happy path: type strategy name → upload → preview → submit →
+ *   the just-submitted strategy renders in the owner's list
  * - The user-typed strategy name lands on strategies.name and renders on the
- *   factsheet H1
+ *   post-submit list (CSV-03)
  *
  * OUT OF SCOPE FOR PHASE 15 (deferred to Phase 18 / FIX-03 per cross-AI
  * revision 2026-04-30):
  * - metrics_snapshot parity between CSV and API paths
  * - fingerprint parity between CSV and API paths
  * - strategy_verifications.metrics_snapshot column population shape
- * Phase 18 / FIX-03 success gate verifies these; Phase 15 ships the wizard
- * + trust-tier wiring only.
  *
- * Cross-AI revision 2026-04-30: the test user id is resolved by SELECTing
- * auth.users.id WHERE email = '<demo email>' at test runtime. The prior
- * iteration depended on a TEST_MANAGER_USER_ID env-var which was a
- * foot-gun (CI could deploy without it set, leading to silent cleanup
- * failure). The env-var dependency is fully removed in this spec.
+ * ── 158-05 seeded-spec conversion (OPS-03 orphan repair, 2026-08-20) ────────
+ * This spec previously logged in as a HARDCODED demo user that does not
+ * exist in the TEST Supabase project — every case failed at login, and the
+ * credentials sat in a PUBLIC repo. Converted to the canonical seeded-spec
+ * contract
+ * (e2e/wizard-resume.spec.ts pattern):
+ *   - HAS_SEED_ENV self-skip (TEST_SUPABASE_URL / TEST_SUPABASE_SERVICE_ROLE_KEY)
+ *   - seedTestAllocator({ role: "both" }) mints a throwaway user per worker
+ *     ("both" clears the manager-gated /strategies/new/wizard route AND the
+ *     universal approval gate — see the seed helper's role docs)
+ *   - NAME_PREFIX niche + cleanupStrategiesByNamePrefix in afterAll (replaces
+ *     the old listUsers-based user-id cleanup, whose pagination 500s on the
+ *     TEST project past ~page 4)
+ * Fail-closed env contract (commit f4e257df) is PRESERVED: all admin access
+ * now routes through the seed helpers' getAdmin(), which accepts only
+ * TEST-named env and runs assertNotProductionSupabaseUrl +
+ * assertSupabaseServiceRoleKey before any client is built. Ambient
+ * NEXT_PUBLIC_SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY are never read.
  *
- * Phase 15 WARNING fix from iteration 1: a test.afterAll block deletes
- * any csv-source strategies the test created so the shared test project
- * does not accumulate rows over time.
+ * BATCH: SEEDED (plan 158-06 wires it into the e2e-seeded list; the MA-8
+ * joining rule's second half is the HAS_SEED_ENV gate below).
  */
 
-const DEMO_EMAIL = "matratzentester24@gmail.com";
-const DEMO_PASSWORD = "Test12";
+const HAS_SEED_ENV =
+  !!process.env.TEST_SUPABASE_URL &&
+  !!process.env.TEST_SUPABASE_SERVICE_ROLE_KEY;
 
-// Cross-AI revision 2026-04-30: resolved at test runtime via auth.users
-// SELECT-by-email. NOT read from process.env. Module-scope variable so
-// beforeAll caches it and afterAll reuses it.
-let resolvedTestManagerUserId: string | null = null;
+/**
+ * 158-05 measured finding (2026-08-20): the wizard's "Validate and continue"
+ * step POSTs /api/strategies/csv-validate, which FORWARDS to the Python
+ * analytics service (ANALYTICS_SERVICE_URL + INTERNAL_API_TOKEN seam). No CI
+ * job boots that service (`grep ANALYTICS_SERVICE_URL .github/workflows` →
+ * nothing) and the default local env has no listener either — the wizard
+ * renders the honest "We could not reach our own service" seam alert and the
+ * flow can never reach Preview. The two cases that need server-side
+ * validation therefore self-skip VISIBLY unless the runner declares a
+ * reachable service by exporting ANALYTICS_SERVICE_URL into the Playwright
+ * process env (the same env-as-provisioning-proxy pattern as
+ * PLAYWRIGHT_TEST_STRATEGY_ID in api-key-flow.spec.ts). The two client-side
+ * cases below (submit-disabled, oversize-file) run everywhere.
+ */
+const HAS_ANALYTICS_SERVICE = !!process.env.ANALYTICS_SERVICE_URL;
+const ANALYTICS_SKIP_REASON =
+  "Requires a reachable analytics service for the csv-validate seam " +
+  "(ANALYTICS_SERVICE_URL + INTERNAL_API_TOKEN); none is provisioned in CI " +
+  "or the default local env — 158/OPS-03 disposition. Export " +
+  "ANALYTICS_SERVICE_URL into the Playwright env (with a live service) to run.";
+
+/** The GC niche this spec owns on the shared test DB. */
+const NAME_PREFIX = "e2e-csvflow-";
+
+// One seeded owner per worker process (beforeAll runs per worker under
+// fullyParallel). Module scope so login() and every test share it.
+let allocator: SeededAllocator | null = null;
 
 async function login(page: import("@playwright/test").Page) {
+  if (!allocator) throw new Error("[csv-upload-flow] login before seed");
   await page.goto("/login");
   await page.fill(
     'input[name="email"], input[placeholder*="email" i]',
-    DEMO_EMAIL,
+    allocator.email,
   );
-  await page.fill('input[type="password"]', DEMO_PASSWORD);
+  await page.fill('input[type="password"]', allocator.password);
   await page.click('button:has-text("Sign in")');
   await page.waitForURL(/\/(discovery|strategies|allocations)/, {
     timeout: 10_000,
@@ -70,51 +109,30 @@ function buildValidCsvBytes(): Buffer {
 }
 
 test.describe("/strategies/new/wizard?source=csv (Phase 15 / CSV-01..CSV-03)", () => {
-  // Cross-AI revision 2026-04-30: resolve the test user id from auth.users
-  // BEFORE any tests run. If creds are missing, leave it null and the
-  // afterAll cleanup will warn but not fail.
+  test.skip(
+    !HAS_SEED_ENV,
+    "csv upload flow: seed-helper env vars not wired " +
+      "(set TEST_SUPABASE_URL / TEST_SUPABASE_SERVICE_ROLE_KEY).",
+  );
+
   test.beforeAll(async () => {
-    const url =
-      process.env.SUPABASE_TEST_URL ?? process.env.NEXT_PUBLIC_SUPABASE_URL;
-    const serviceKey =
-      process.env.SUPABASE_TEST_SERVICE_ROLE_KEY ??
-      process.env.SUPABASE_SERVICE_ROLE_KEY;
-    if (!url || !serviceKey) {
-      console.warn(
-        "[csv-upload-flow] beforeAll: SUPABASE_TEST_URL / NEXT_PUBLIC_SUPABASE_URL or SUPABASE_TEST_SERVICE_ROLE_KEY / SUPABASE_SERVICE_ROLE_KEY missing; user-id resolution skipped (cleanup will warn).",
-      );
-      return;
-    }
-    const admin = createClient(url, serviceKey, {
-      auth: { persistSession: false },
-    });
-    // auth.admin.listUsers paginates. The test demo user is in page 1
-    // because the test project has <100 users; if a future project
-    // grows past page 1 we'll need to filter server-side.
-    const { data, error } = await admin.auth.admin.listUsers();
-    if (error || !data?.users) {
-      console.warn(
-        "[csv-upload-flow] beforeAll: auth.admin.listUsers failed:",
-        error?.message ?? "no users returned",
-      );
-      return;
-    }
-    const match = data.users.find((u) => u.email === DEMO_EMAIL);
-    if (!match) {
-      console.warn(
-        `[csv-upload-flow] beforeAll: no auth.users row for email ${DEMO_EMAIL}; cleanup will warn.`,
-      );
-      return;
-    }
-    resolvedTestManagerUserId = match.id;
-    console.log(
-      `[csv-upload-flow] beforeAll: resolved TEST_MANAGER_USER_ID=${match.id} from auth.users for ${DEMO_EMAIL}.`,
-    );
+    if (!HAS_SEED_ENV) return;
+    // "both" owns the manager wizard route AND the allocator surfaces the
+    // post-submit redirect lands on; statuses are stamped verified by the
+    // helper so the universal approval gate never intercepts.
+    allocator = await seedTestAllocator({ role: "both" });
   });
 
-  test("happy path: type name → upload → preview → submit → factsheet renders TrustTierLabel + user-typed name", async ({
+  test.afterAll(async () => {
+    if (HAS_SEED_ENV) {
+      await cleanupStrategiesByNamePrefix(NAME_PREFIX);
+    }
+  });
+
+  test("happy path: type name → upload → preview → submit → owner list renders user-typed name", async ({
     page,
   }) => {
+    test.skip(!HAS_ANALYTICS_SERVICE, ANALYTICS_SKIP_REASON);
     await login(page);
     await page.goto("/strategies/new/wizard?source=csv");
 
@@ -126,8 +144,9 @@ test.describe("/strategies/new/wizard?source=csv (Phase 15 / CSV-01..CSV-03)", (
       page.getByText(/Name your strategy, pick a format/),
     ).toBeVisible();
 
-    // 2. Cross-AI revision 2026-04-30: type the strategy name.
-    const typedName = `E2E CSV Test — ${new Date().toISOString().slice(0, 19)}`;
+    // 2. Cross-AI revision 2026-04-30: type the strategy name. Prefixed so
+    //    afterAll's cleanup-by-prefix collects the row (own-seed niche).
+    const typedName = `${NAME_PREFIX}${Date.now()}`;
     await page.getByTestId("csv-strategy-name").fill(typedName);
 
     // 3. Default format = daily_returns; verify segmented control.
@@ -205,32 +224,37 @@ test.describe("/strategies/new/wizard?source=csv (Phase 15 / CSV-01..CSV-03)", (
     // 12. Click the final "Submit strategy".
     await page.getByTestId("wizard-csv-submit-cta").click();
 
-    // 11. Redirect to the user's strategies list. The wizard now lands
-    //     on /strategies (plural) because pending_review strategies are
-    //     hidden by /strategy/[id]'s status='published' filter — the old
+    // 13. Redirect to the user's strategies list. The wizard lands on
+    //     /strategies (plural) because pending_review strategies are hidden
+    //     by /strategy/[id]'s status='published' filter — the old
     //     /strategy/{id} target was a 404 for every wizard submission.
-    //     The list shows the just-submitted strategy with its pending badge.
     await page.waitForURL(/\/strategies\?wizard_submitted=1/, {
       timeout: 15_000,
     });
 
-    // 12. CSV-03 verification: the just-submitted strategy appears in the
-    //     "My Strategies" list under the user-typed name.
+    // 14. CSV-03 verification: the just-submitted strategy appears in the
+    //     owner's list under the user-typed name (own-seed assertion — the
+    //     name was minted by THIS test).
+    //
+    //     158-05: the old final assertion here — `expect(h1).toContainText(
+    //     typedName)` — was rot from the era when submit landed on
+    //     /strategy/{id}: on /strategies the h1 is the list PAGE heading
+    //     (DEF-149-B), never a strategy name, so it could not pass. The
+    //     "lands on strategies.name" claim is carried by the typed name
+    //     rendering in the list row below.
     await expect(page.getByText(typedName).first()).toBeVisible();
-
-    // 13. Cross-AI revision 2026-04-30: the user-typed strategy name lands
-    //     on the factsheet (strategies.name was set to the typed value).
-    await expect(page.locator("h1")).toContainText(typedName);
   });
 
   test("validation failure: non-monotonic dates render the validation envelope", async ({
     page,
   }) => {
+    test.skip(!HAS_ANALYTICS_SERVICE, ANALYTICS_SKIP_REASON);
     await login(page);
     await page.goto("/strategies/new/wizard?source=csv");
 
-    // Strategy name + bad CSV.
-    await page.getByTestId("csv-strategy-name").fill("E2E Bad Dates");
+    // Strategy name + bad CSV. (No row is ever created — the prefix keeps
+    // naming discipline uniform anyway.)
+    await page.getByTestId("csv-strategy-name").fill(`${NAME_PREFIX}bad-dates`);
 
     const bad = Buffer.from(
       [
@@ -287,7 +311,7 @@ test.describe("/strategies/new/wizard?source=csv (Phase 15 / CSV-01..CSV-03)", (
     await login(page);
     await page.goto("/strategies/new/wizard?source=csv");
 
-    await page.getByTestId("csv-strategy-name").fill("E2E Big File");
+    await page.getByTestId("csv-strategy-name").fill(`${NAME_PREFIX}big-file`);
 
     const big = Buffer.alloc(11 * 1024 * 1024, "0");
     await page.getByTestId("wizard-csv-file-input").setInputFiles({
@@ -306,50 +330,5 @@ test.describe("/strategies/new/wizard?source=csv (Phase 15 / CSV-01..CSV-03)", (
     await expect(
       page.getByText(/Maximum file size is 10 MB/),
     ).toBeVisible();
-  });
-
-  // Cross-AI revision 2026-04-30: clean up rows the happy-path test created
-  // in the shared test Supabase project. Use the test-runtime-resolved
-  // user id (from beforeAll's auth.users SELECT) — NOT from process.env.
-  test.afterAll(async () => {
-    const url =
-      process.env.SUPABASE_TEST_URL ?? process.env.NEXT_PUBLIC_SUPABASE_URL;
-    const serviceKey =
-      process.env.SUPABASE_TEST_SERVICE_ROLE_KEY ??
-      process.env.SUPABASE_SERVICE_ROLE_KEY;
-    if (!url || !serviceKey) {
-      console.warn(
-        "[csv-upload-flow] afterAll: SUPABASE_TEST_URL / NEXT_PUBLIC_SUPABASE_URL or SUPABASE_TEST_SERVICE_ROLE_KEY / SUPABASE_SERVICE_ROLE_KEY missing; cleanup skipped.",
-      );
-      return;
-    }
-    if (!resolvedTestManagerUserId) {
-      console.warn(
-        "[csv-upload-flow] afterAll: resolvedTestManagerUserId is null (beforeAll lookup failed); cleanup skipped to avoid deleting unrelated rows.",
-      );
-      return;
-    }
-    const admin = createClient(url, serviceKey, {
-      auth: { persistSession: false },
-    });
-    // Narrow filter: only csv-source pending_review strategies for the
-    // resolved test user. Cascade clears strategy_verifications via FK.
-    const { error, count } = await admin
-      .from("strategies")
-      .delete({ count: "exact" })
-      .eq("user_id", resolvedTestManagerUserId)
-      .eq("source", "csv")
-      .eq("status", "pending_review");
-    if (error) {
-      console.error(
-        "[csv-upload-flow] cleanup error:",
-        error.code,
-        error.message,
-      );
-    } else {
-      console.log(
-        `[csv-upload-flow] cleanup deleted ${count ?? 0} csv-source pending_review strategies for user ${resolvedTestManagerUserId}.`,
-      );
-    }
   });
 });

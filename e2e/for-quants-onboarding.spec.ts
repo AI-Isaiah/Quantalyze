@@ -28,16 +28,25 @@ import { test, expect } from "@playwright/test";
  * the mobile gate.
  */
 
-const DEMO_EMAIL = "matratzentester24@gmail.com";
-const DEMO_PASSWORD = "Test12";
+// 158 credential scrub (2026-08-20): this spec previously committed a
+// hardcoded demo login — the same class plan 158-05 scrubbed from
+// csv-upload-flow.spec.ts — in a PUBLIC repo. Creds now come from the
+// environment (the macOS-Keychain-backed E2E_* pair, same convention as
+// full-flow.spec.ts / match-queue.spec.ts), and the authed describe below
+// self-skips VISIBLY when they are absent. The account must be able to
+// reach the manager-gated /strategies/new/wizard route on the target
+// deployment.
+const E2E_EMAIL = process.env.E2E_TEST_EMAIL;
+const E2E_PASSWORD = process.env.E2E_TEST_PASSWORD;
+const HAS_E2E_CREDS = !!E2E_EMAIL && !!E2E_PASSWORD;
 
 async function login(page: import("@playwright/test").Page) {
   await page.goto("/login");
   await page.fill(
     'input[name="email"], input[placeholder*="email" i]',
-    DEMO_EMAIL,
+    E2E_EMAIL!,
   );
-  await page.fill('input[type="password"]', DEMO_PASSWORD);
+  await page.fill('input[type="password"]', E2E_PASSWORD!);
   await page.click('button:has-text("Sign in")');
   await page.waitForURL(/\/(discovery|strategies|allocations)/, {
     timeout: 10_000,
@@ -45,6 +54,13 @@ async function login(page: import("@playwright/test").Page) {
 }
 
 test.describe("/strategies/new/wizard", () => {
+  test.skip(
+    !HAS_E2E_CREDS,
+    "for-quants onboarding: E2E_TEST_EMAIL / E2E_TEST_PASSWORD not set — " +
+      "the authed wizard cases need a real login. Creds come from the " +
+      "environment (quantalyze-test Keychain entries), never the repo.",
+  );
+
   test("/for-quants CTA routes logged-in users to the wizard", async ({
     page,
   }) => {
@@ -150,9 +166,9 @@ test.describe("/strategies/new/wizard", () => {
     await page.goto("/login");
     await page.fill(
       'input[name="email"], input[placeholder*="email" i]',
-      DEMO_EMAIL,
+      E2E_EMAIL!,
     );
-    await page.fill('input[type="password"]', DEMO_PASSWORD);
+    await page.fill('input[type="password"]', E2E_PASSWORD!);
     await page.click('button:has-text("Sign in")');
     await page.waitForURL(/\/(discovery|strategies|allocations)/, {
       timeout: 10_000,

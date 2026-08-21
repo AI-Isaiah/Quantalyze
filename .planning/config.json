@@ -66,6 +66,7 @@
     "gsd-doc-verifier": "opus",
     "gsd-doc-classifier": "opus",
     "gsd-phase-researcher": "fable",
-    "gsd-executor": "opus"
+    "gsd-executor": "opus",
+    "gsd-code-reviewer": "fable"
   }
 }

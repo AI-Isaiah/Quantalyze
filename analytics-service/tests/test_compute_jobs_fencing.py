@@ -1145,10 +1145,19 @@ def test_defer_compute_job_token_fence(admin, strategy_id):
     job_id = job["id"]
     try:
         real_token = str(uuid.uuid4())
+        # OPS-04: stamp claimed_at at CURRENT time. reset_stalled_compute_jobs
+        # only reclaims rows matching `claimed_at IS NOT NULL AND claimed_at <
+        # now() - threshold` (mig 20260516104201), so a running row with a NULL
+        # claimed_at is PERMANENTLY invisible to the watchdog — if this test
+        # dies before its finally-cleanup it strands an unreapable row on the
+        # shared TEST project forever. Current time, NOT backdated: the row must
+        # age into the reaper window only if the test dies; a backdated stamp
+        # would let the reaper race a healthy run and flip the row mid-test.
         admin.table("compute_jobs").update({
             "status": "running",
             "claim_token": real_token,
             "attempts": 1,
+            "claimed_at": datetime.now(timezone.utc).isoformat(),
         }).eq("id", job_id).execute()
 
         # (1) Mismatched token → serialization_failure, running row UNTOUCHED.
@@ -1197,10 +1206,14 @@ def test_defer_compute_job_null_token_backcompat(admin, strategy_id):
     }).execute().data[0]
     job_id = job["id"]
     try:
+        # OPS-04: stamp claimed_at at CURRENT time — see the sibling comment in
+        # test_defer_compute_job_token_fence. Without it, a mid-test death
+        # strands a `running` row the watchdog can never reclaim.
         admin.table("compute_jobs").update({
             "status": "running",
             "claim_token": str(uuid.uuid4()),
             "attempts": 1,
+            "claimed_at": datetime.now(timezone.utc).isoformat(),
         }).eq("id", job_id).execute()
         # NULL token (omit the param) → back-compat match, defers.
         _rpc_retry_timeout(lambda: admin.rpc("defer_compute_job", {

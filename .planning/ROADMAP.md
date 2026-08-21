@@ -24,7 +24,239 @@ v1.15's failure mode: shipped 6/6 green with both open items intact.
 
 ---
 
-## Current Milestone: v1.18 MT5-VERIFY & founder confirmations (Phases 155, 157)
+## Current Milestone: v1.20 Backlog Burndown (Phases 158+)
+
+**Goal:** Close the largest relevancy-ranked, agent-deliverable slice of the verified-open
+backlog — public-trust correctness, money-path honesty, founder-hit error surfaces, CI/deploy
+integrity, small security hardening, and the booked dependabot campaign — and leave TODOS.md
+telling the truth.
+
+**Scope:** 50 requirements — RANK-01..09, SHARE-01..04, WIZERR-01..13, HONEST-01..06,
+OPS-01..11, SEC-01..06, DEPS-01 — per `.planning/REQUIREMENTS.md`. Every one is a verified-open
+TODOS.md item re-measured at HEAD `ca3f0c5c` (17-agent triage, 2026-08-20). Research: TARGETED
+(`.planning/research/SUMMARY.md`) — and in three places TODOS.md's own recorded remedy is
+measured WRONG (#686 "bisect", #606's booked claims, the concurrency "shrink the group"); the
+phases below carry the corrections, not the bullets.
+
+**Ordering rationale (BINDING — measured dependencies, not preferences):**
+
+- **Phase 158 (OPS — CI/deploy integrity) FIRST.** The `shared-test-db` concurrency eviction
+  makes a main-branch run conclude `cancelled` (grey — nobody triages grey) and Railway then
+  silently SKIPS the analytics deploy (issue #616). Every later phase merges PRs through this
+  pipeline, and the 9-PR DEPS campaign against the unfixed group *guarantees* at least one
+  silently-skipped deploy. ⚠️ Research correction is binding: shrinking the group does NOT fix
+  this (eviction is cross-run) — the fix is an external FIFO mutex for DB-touching jobs plus a
+  `cancelled`-conclusion watcher.
+
+- **Phase 159 (RANK) EARLY** — pure read-path, zero DDL, trivially revertible, observable on
+  PROD; it must precede new publications so the percentile population delta is measured against
+  a stable cohort, and it front-loads the cheapest owed census (C-M1).
+
+- **RANK → provenance → SHARE arc:** Phase 160's write-path REVOKE needs a full
+  deploy-first / revoke-second cycle with soak time, so it cannot be late; Phase 164 (SHARE) is
+  the ONLY new anonymous public surface and lands alone, late, in its own PR — ⛔ never branched
+  from `feat/phase-156-connect-refactor` (its Migration B is pending against `strategies`; two
+  concurrent migrations on one table on an auto-apply-to-PROD path is an ordering surprise
+  waiting to happen).
+
+- **Phase 163 (hardening) before Phase 164:** SEC-03's RPC audit-coverage decision must be
+  standing when SHARE mints its new mint/revoke RPCs — two REQ groups, one edit
+  (`MUTATING_RPC_NAMES`).
+
+- **Phase 165 (DEPS) LAST, strictly after OPS-01.** Dependency churn before the correctness
+  work makes every red ambiguous, and #685 is 100% `analytics-service/` — exactly the PR that
+  would sit undeployed behind a grey main.
+
+- **Owed measurements and decisions are EARLY TASKS inside their phases, never separate
+  phases:** C-M1 + the percentile before/after snapshot in 159; B-M1 + B-D1/B-D2 in 160; A-D1
+  (URL shape), A-D2 (private-status revoke home), A-D3 (tearsheet/PDF scope) + the token model
+  in 164.
+
+### Phases (v1.20)
+
+- [ ] **Phase 158: OPS-CI — A merge means a deploy** - External FIFO mutex + `cancelled`-conclusion watcher close the shared-test-db eviction (#616); `sql-tests` gated by an aggregator; orphaned e2e specs run; TEST stale-`pending` drained; MultiKeyConnectStep flake root-caused
+- [ ] **Phase 159: RANK — Public-ranking integrity** - Failed/stale-computation KPIs out of published percentiles on BOTH engines; anon `(*)` splats become explicit projections; quantstats sign-flip + blend-annualization default closed; FILL-arm CAS; uid shape validated
+- [ ] **Phase 160: PROVENANCE — The server's venue is the venue that annualizes** - `api_keys.exchange` server-authoritative at every INSERT; the `asset_class` √365/√252 stamp derives from the attested venue WITH the null-attestation guard; B-M1 PROD census first
+- [ ] **Phase 161: WIZERR — Honest error surfaces** - The recorded WIZFORM-02 class residue: thirteen surfaces stop rendering `UNKNOWN`, false sentences, or unwinnable "try again"
+- [ ] **Phase 162: HONEST — What the user sees is true** - No raw Python exceptions as copy, no FRESH badge on a dead series, real equity curves, metrics on drawer rows, the clicked key preselected
+- [ ] **Phase 163: HARDEN — Fail safe, closed, and loud** - structlog redaction closed at BOTH failure modes, post-commit `createAdminClient` 500 class, flag-monitor honesty, deterministic worker plumbing, password policy, `.planning` username scrub, RPC audit gate, `bridgeComputeLimiter`
+- [ ] **Phase 164: SHARE — Copy Link always works, and never discloses** - Revocable share-token lane on the factsheet; the id-keyed public cache is NEVER poisoned (ordered adversarial acceptance); revoke; the affordance class honest at all three sites
+- [ ] **Phase 165: DEPS — The 9-PR dependabot campaign** - pandas `requirements.in` prerequisite commit FIRST, then one PR at a time in the research-verified order, full suite between each; #614 and #606 CLOSED with reasons
+
+### Phase 158: OPS-CI — A merge means a deploy
+
+**Goal**: A merged PR always produces an honestly-reported CI verdict and a deployed analytics service — main CI can no longer conclude `cancelled` and silently skip the Railway deploy, no gate is present-but-ungating, and the two known deterministic false-reds are gone
+**Depends on**: Nothing (first phase of v1.20; hard prerequisite of Phase 165)
+**Requirements**: OPS-01, OPS-02, OPS-03, OPS-04, OPS-11
+**Success Criteria** (what must be TRUE):
+
+  1. A PR opened mid-run can no longer evict a queued main-branch run: three SIMULTANEOUS DB-touching runs serialize through an external FIFO mutex (with a TTL/steal path and a documented manual-unlock runbook — a requirement of adoption, not a follow-up), and a forced `cancelled` main-run conclusion raises a loud signal (issue or rerun) instead of a silently-skipped Railway deploy — GitHub issue #616 closed on the MECHANISM, not on symptom convergence. ⚠️ Shrinking the concurrency group is NOT an acceptable fix (eviction is cross-run); ⚠️ do NOT "finish the chain" with more `needs:` edges (the `if:` conditions diverge on `workflow_dispatch` and it would disable `e2e-seeded` on every manual run).
+  2. A failing `sql-tests` job blocks an aggregator via `needs:` — the only gate that executes the deployed cron bodies can no longer be present-and-failing with nothing gating on it.
+  3. The orphaned e2e specs (incl. the NAV-01 surface) execute in a CI batch, and DB-types drift has a regeneration gate OR an explicitly recorded decision not to.
+  4. The TEST stale-`pending` `compute_jobs` backlog is drained TEST-only (⛔ never a migration, never `cron.unschedule(9)`) so the deterministic exactly-10 claim-path red is gone, and `test_compute_jobs_fencing.py` stamps `claimed_at` in its two direct UPDATEs.
+  5. `MultiKeyConnectStep` passes under any test ordering — the unrestored `vi.stubGlobal`/`vi.mock` root cause is fixed, not retried away.
+
+**Plans**: 6/6 plans executed
+
+Plans:
+**Wave 1**
+
+- [x] 158-01-PLAN.md — Tracer mutex probe (session-mode go/no-go, 3-contender RED→GREEN) + ci.yml advisory-lock adoption + `sql-tests` aggregator gating (OPS-01, OPS-02) [Wave 1]
+- [x] 158-02-PLAN.md — `cancelled`-conclusion watcher (issue-only, exit-0 doctrine) + shared-test-db mutex runbook (OPS-01) [Wave 1]
+- [x] 158-03-PLAN.md — `claimed_at` stamps in the two fencing UPDATEs + guarded TEST-only backlog drain closed on measured row counts (OPS-04) [Wave 1]
+- [x] 158-04-PLAN.md — MultiKeyConnectStep flake: reproduce-first sweep, then leak-source fix or mechanism closure with evidence (OPS-11) [Wave 1]
+- [x] 158-05-PLAN.md — Repair the 4 named orphan specs + author e2e/my-strategies.spec.ts (NAV-01 surface) (OPS-03) [Wave 1]
+
+**Wave 2** *(blocked on Wave 1 completion)*
+
+- [x] 158-06-PLAN.md — Batch-list wiring + 15-orphan triage into TODOS + DB-types recorded decision (OPS-03) [Wave 2]
+
+**Research note:** mechanism understood — skip a research phase; the repo already carries the dedup'd-issue pattern to copy (`analytics-deploy-verify.yml`). Verification must simulate THREE concurrent runs, not two.
+
+### Phase 159: RANK — Public-ranking integrity
+
+**Goal**: Published percentile ranks and anonymous public reads reflect only computed, honestly-annualized analytics — and a resubmit race cannot corrupt a session's classification
+**Depends on**: Phase 158 (attributable CI reds; a stable cohort measured before anything else moves)
+**Requirements**: RANK-01, RANK-02, RANK-05, RANK-06, RANK-07, RANK-08, RANK-09
+**Success Criteria** (what must be TRUE):
+
+  1. A strategy with a failed/stale computation neither contributes to nor receives a published percentile rank — gated on `isComputedAnalytics` SEMANTICS (⚠️ a literal `complete` filter wrongly drops `complete_with_warnings`, a terminal SUCCESS), implemented as a separate `PERCENTILE_GATE_COLUMN` at the projection site with `PERCENTILE_ANALYTICS_COLUMNS` byte-unchanged (the csv-finalize mirror prose depends on it), ONE shared filter helper for both TS callers, and the `get_verified_cohort_rank` SQL RPC moved in lockstep or its exclusion explicitly recorded (its prose claims parity-by-construction).
+  2. The C-M1 PROD census (per-category published-with-analytics counts before/after the filter, against the <5 badge floor and the RPC's min-N 20) plus a per-strategy percentile before/after snapshot exist as phase artifacts BEFORE the filter lands — a rank that disappears is the HONEST outcome, but it must be a decided one (C-D1), surfaced in UAT, never a surprise; no test may assert "ranks improve" (direction is not uniform).
+  3. Anonymous readers receive explicit column projections at both `strategy_analytics (*)` splat sites (`queries.ts:218`, `compare/page.tsx:68`) — `daily_returns`/`metrics_json`/`data_quality_flags` are absent from anon responses.
+  4. The two money-math defects are closed on the strategy-analytics path: an all-non-negative return series with a >100% day is never re-read as prices (no sign-flipped Sharpe), and a blend leg with unknown `asset_class` is treated as crypto for RISK (a sole crypto leg no longer inflates Sharpe via √252).
+  5. Two concurrent same-session resubmits cannot both take the FILL arm (compare-and-set on `category_id IS NULL`); the classification-conflict 409's own remedy can mint a fresh session (the re-mint fingerprint accounts for classification, or the exclusion is documented at the fingerprint); and `withPublishedOrOwner` validates the uid's shape before interpolating it into the PostgREST `.or()` filter.
+
+**Plans**: TBD
+
+**Research note:** fix locations and predicates read directly from source — skip a research phase; only the cheap C-M1 census remains. `StrategyTable`'s ungated KPI cells are OUT of scope, logged (C-D2).
+
+### Phase 160: PROVENANCE — The server's venue is the venue that annualizes
+
+**Goal**: No client-supplied venue can differ from the venue the server validated, and the √365/√252 annualization stamp derives from the server's attestation — without ever stamping √252 onto a crypto strategy through a NULL attestation
+**Depends on**: Phase 159 (the RANK → provenance → SHARE arc; deliberately NOT late — the REVOKE needs deploy-then-soak time before Phase 164)
+**Requirements**: RANK-03, RANK-04
+**Success Criteria** (what must be TRUE):
+
+  1. The B-M1 PROD census (un-attested `api_keys` rows since 2026-08-11, split by exchange, strategy linkage, and `wizard_session_id` carriage) is measured and committed as an EARLY phase artifact — it gates the stamp swap and decides B-D1 scope (all of B-1..B-4, or B-4-alone-with-null-guard as the minimal correct cut). Copy the count-pinned, abort-on-drift census discipline from `20260811210000`.
+  2. Every INSERT path into `api_keys` writes the server-validated exchange — the Phase-156 service-role-writer pattern extended (`validate-and-encrypt`, which already knows the canonical venue, writes the row and returns `{ api_key_id }`; the client components stop inserting; then REVOKE INSERT) — with deploy-first / revoke-second discipline, ⚠️ never migration-first, and every `.from("api_keys")` mutation grepped before the REVOKE (DELETE is also a live client path).
+  3. The `asset_class` stamp at `finalize-wizard` derives from the attested venue, and the swap MOVES WITH the null-attestation extension of the `skipAssetClassWrite` guard — a NULL attestation SKIPS; it never stamps `traditional`/√252 onto a crypto strategy (⚠️ TODOS.md's "one-identifier change" framing is measured WRONG; `isCryptoExchange(null) === false` is the trap).
+  4. The B-D2 oracle pins the ECONOMICS (a null attestation annualizes on nothing — it skips), never the implementation's own expression; if the census finds affected strategies, their re-annualization gets golden-parity treatment.
+
+**Plans**: TBD
+
+**Research note:** ARCHITECTURE confidence is LOW without B-M1 — the census is this phase's first task, not a nicety.
+
+### Phase 161: WIZERR — Honest error surfaces
+
+**Goal**: Every founder-hit wizard, key, and CSV error surface names the actual blocker in truthful copy — no `code: UNKNOWN`, no false sentence, no "try again" that can never succeed
+**Depends on**: Phase 158 (attributable CI; the curated-message test fence is exercised heavily here)
+**Requirements**: WIZERR-01, WIZERR-02, WIZERR-03, WIZERR-04, WIZERR-05, WIZERR-06, WIZERR-07, WIZERR-08, WIZERR-09, WIZERR-10, WIZERR-11, WIZERR-12, WIZERR-13
+**Success Criteria** (what must be TRUE):
+
+  1. The MT5 "gateway misconfigured" copy names the actual blocker derived from the `terminal_info` flags the probe already holds (`tradeapi_disabled` vs `trade_allowed`), fixed as a CLASS across all six carrier sites, within the curated-message test fence.
+  2. Key-lane remedies are safe and truthful: "Try another key" never destroys the draft or cascades away composite members; an orphaned live key surfaces an honest remedy instead of a false `DRAFT_ALREADY_EXISTS` 409; the `KEY_INVALID_FORMAT` one-code-many-causes split lands on the remaining 2 routes / 9 sites honoring their internal-vs-public copy contracts; wizard `AUTH_FAILED` copy names the venue the user actually selected — never Deribit while Binance is selected.
+  3. The coverage law reaches every surface the class regrew on: the `keys/[id]/permissions` private `PROBE_*` cascade gets a derived-population coverage law (and `KEY_UNDECRYPTABLE`'s remedy says "reconnect the key", not "try again"); `AllocateDialog`, `RenameStrategyDialog`, and `MarkOwnershipDialog` stop minting `code: UNKNOWN`; the five 5xx→`UNKNOWN` terminal arms (admin match/eval, simulator) forward recognized `seamCode`s; `MT5_GATEWAY_UNREACHABLE`'s server-advertised `Retry-After` threads end-to-end through both key-route catches.
+  4. CSV verdicts tell the truth: the 7-row floor is evaluated on the wizard composite arm AND `INSUFFICIENT_CSV_HISTORY` renders its own copy (landed together or not at all); examined-but-refused verdicts render a truthful fourth outcome replacing the false "only 0 trade(s)" sentence (D-15's oracle re-cut deliberately, the TOCTOU re-check wording following); the csv-finalize A2 409 sentence describes the actual case (same track record, different flow); and the per-row CSV breakdown renders its data half without leaking `'nan'` or echoing untrusted cell contents.
+
+**Plans**: TBD
+**UI hint**: yes
+
+### Phase 162: HONEST — What the user sees is true
+
+**Goal**: Every number, badge, and affordance a user sees reflects the data underneath it — no raw exceptions as copy, no freshness claim a dead series contradicts, no missing metric where data exists
+**Depends on**: Phase 158 (attributable CI)
+**Requirements**: HONEST-01, HONEST-02, HONEST-03, HONEST-04, HONEST-05, HONEST-06
+**Success Criteria** (what must be TRUE):
+
+  1. A computation failure renders mapped user copy, never a raw Python exception string — mapped at the WRITER, with the underlying str/None compare root-caused.
+  2. Freshness claims are true: a strategy whose return series ended 89 days ago cannot read FRESH (⚠️ investigated FIRST — flat account vs derive gap — before any fix is chosen), and example strategies advertise no stale "Synced Nd ago" badges on discovery.
+  3. `buildEquityCurveSeries` serves real per-strategy equity curves now that `returns_series` is selected (the hard-coded `equityCurve: null` and its false comment are gone), and drawer-added strategies render CAGR/Sharpe like book rows.
+  4. "Finish setup →" opens the wizard with the clicked key preselected.
+
+**Plans**: TBD
+**UI hint**: yes
+
+### Phase 163: HARDEN — Fail safe, closed, and loud
+
+**Goal**: The backend fails safe, closed, and loud — secrets cannot reach logs, monitors cannot report false health, committed work cannot 500, and every mutating or compute-heavy surface is limited and audited
+**Depends on**: Phase 158 (attributable CI). ⛔ Must complete before Phase 164 — SEC-03's audit-gate decision polices SHARE's new mint/revoke RPCs (two REQ groups, one edit)
+**Requirements**: OPS-05, OPS-06, OPS-07, OPS-08, OPS-09, OPS-10, SEC-01, SEC-02, SEC-03, SEC-04, SEC-05, SEC-06
+**Success Criteria** (what must be TRUE):
+
+  1. The structlog frozen-proxy class is closed at BOTH failure modes — a source-scan gate for module-scope `.bind()` (Mode A) AND a behavioral redaction test for first-use-before-`configure_logging()` (Mode B) — each demonstrated RED when neutered. ⚠️ Fixing one and closing the audit is false closure; the leak class is ccxt HMAC signatures and MT5 passwords.
+  2. Failure paths are honest: `createAdminClient()` cannot throw on the request path after an irreversible commit (the class closed at all three known sites); `checkStuckNotifications` distinguishes "nothing stuck" from "could not tell"; a failed denominator read PAGES instead of logging success; and the integration test actually falsifies both.
+  3. Worker/request plumbing is deterministic and bounded: the 10-param `_enqueue_compute_job_internal` drops `INTO STRICT` on its lost-race branches (parity with the de-STRICT-ed 7-param overload); the resync draft pre-check is deterministic (`ORDER BY created_at DESC` + bounded window); the retry loop cancels abandoned response bodies (`body.cancel()`).
+  4. The security floor is measured, not assumed: the server-side password policy backing client `minLength={6}` is verified, enforced, and documented; the ~50 tracked `.planning/` docs pass a NO-ALLOWLIST scan for the macOS username / local absolute paths (the gitleaks allowlist is path-based and blind here); the tenth IP-keyed route (`simulator.py`) is repaired along with the concealing wrapper-check test (equality assertion, quarantine shrinks to 0); and removing a panel mid-validate aborts the in-flight credential-carrying POST.
+  5. Coverage gates close their gaps: `add_wizard_composite_key` is policed by the audit-coverage gate with the pragma-vs-real-emission decision RECORDED, and the bridge + portfolio-optimizer flows get a named `bridgeComputeLimiter` sized to backend reality (closing the 30× front/back mismatch) ⛔ without resizing the shared `userActionLimiter`.
+
+**Plans**: TBD
+
+### Phase 164: SHARE — Copy Link always works, and never discloses
+
+**Goal**: "Copy Link" on a strategy its owner can view yields a URL its recipient can view — a revocable per-strategy share token — and the token lane can never disclose an unpublished strategy through the id-keyed public cache
+**Depends on**: Phase 160 (provenance REVOKE soaked), Phase 163 (RPC audit gate standing). ⛔ Its own phase, its own PR, shares a PR with NOTHING; ⛔ never branched from `feat/phase-156-connect-refactor`
+**Requirements**: SHARE-01, SHARE-02, SHARE-03, SHARE-04
+**Success Criteria** (what must be TRUE):
+
+  1. The owed decisions are argued and RECORDED as early tasks before implementation: A-D1 URL shape (`?s=<token>` on the id route vs `/factsheet-share/[token]` — the two research files disagree DELIBERATELY; surface to the founder, never defaulted by a planner), the token model (raw-at-rest vs HMAC + stored generation counter — the deviation from `scenario-share-token.ts`'s hash-only discipline argued, and model B's new required Vercel env var named as a prod-only failure mode), A-D2 (where revoke lives for `status='private'`, whose `StrategyActions` falls through to `return null` — ⛔ no publish flow grows inside this phase), and A-D3 (tearsheet/PDF routes in or out, decided explicitly).
+  2. Copy Link on an unpublished strategy yields a URL an anonymous recipient can view, mint-or-REUSE across sessions (⚠️ a verbatim `/scenario-share` port cannot deliver reuse — it stores only the hash and unconditionally revokes on mint, regenerating the original bug in slow motion); the bare `/factsheet/<id>` URL stays owner-only and the id stays a non-secret.
+  3. ORDERED adversarial cache isolation: after a token-lane render of an unpublished strategy, an anonymous request for `/factsheet/<id>` STILL 404s — the token lane calls the payload builder directly with ZERO reads and ZERO writes at the id key (⛔ never a token in `cacheKey`/`keyParts`, never a token-aware `/api/og/factsheet/[id]`), and the acceptance test is demonstrated RED with the bypass neutered.
+  4. Revoke is immediate and convergent: regeneration kills previously-copied links; a revoked/unknown token renders a content-free `410` + `no-store` on the TOKEN lane only (the bare-id lane keeps its uniform 404 or the id becomes an existence oracle); soft-revoke, never DELETE; double-revoke converges; the owner can see whether a live link exists.
+  5. The share affordance is honest as a CLASS: no "Link copied!" for a link that cannot work, ONE predicate across all three affordance sites (`FactsheetView`, strategies page, discovery detail), a token-link RECIPIENT never sees a Copy-Link control that rebuilds the URL without the token, and `OwnerUnpublishedNotice`'s "anyone else sees a 404" sentence is corrected in this same phase.
+
+**Plans**: TBD
+**UI hint**: yes
+
+**Research note:** the payload-builder seam is the one un-measured integration (extracting the build half of `fetchAndBuildPayload` touches the composite arm AND the single-key basis arm — MEDIUM confidence, wider than it looks). Budget a research pass at plan time; don't discover it. Token-leak channels: Sentry `beforeSend` scrub verified against a REAL captured event, `Referrer-Policy: no-referrer` per-route, generic metadata (link-unfurl dullness accepted explicitly — a private link SHOULD be dull in a chat preview).
+
+### Phase 165: DEPS — The 9-PR dependabot campaign
+
+**Goal**: All 9 open dependabot PRs are RESOLVED — landed or deliberately closed — in the research-verified order with the full suite green between each, and production pandas is never downgraded
+**Depends on**: Phase 158 (⛔ HARD: OPS-01 — nine CI runs against the unfixed group guarantees a silently-skipped Railway deploy, and #685 is 100% `analytics-service/`). LAST phase of the milestone — dependency churn lands after the correctness work, never before
+**Requirements**: DEPS-01
+**Success Criteria** (what must be TRUE):
+
+  1. A prerequisite commit on `main` (not a PR) fixes `requirements.in` `pandas==2.2.3` → `3.0.3` with its comment corrected and `requirements.txt` untouched, BEFORE #685 is touched at all; #685 then lands rebased with pandas OUT of its diff and `make lock` re-run — production pandas stays 3.0.3. ⚠️ A green pytest is NOT proof of safety here; the pin itself is the assertion.
+  2. PRs land ONE at a time in the verified order — #643 → (#627, #626) → #612 ALONE (validated on `migration-drift-check.yml` first, `supabase --version` == 2.98.2 confirmed in the plan-job log; it rides the PROD auto-migrate workflows) → #685 → #686 (rebased + `npm install`, ⚠️ never bisected — its nine reds are ONE mis-materialised lockfile) → #645 @ 7.0.1 → #646 @ jsdom 30.0.1 not 30.0.0 (⚠️ jsdom 30's `engines` excludes local Node 25; decide CI-Node-22-as-authority vs `PATH=/opt/homebrew/opt/node@22/bin` explicitly, don't discover it as a flake) — full local suite between each, every merge asserted `conclusion == "success"`, never "not failure" (with no branch protection, a grey run merges).
+  3. #614 (TypeScript 7) and #606 are CLOSED with reasons written on the PRs (the `exports`-map read + the typescript-eslint `<6.1.0` peer range; #606's stale claims) so the next Dependabot reopen is pre-answered; the `fast-uri` override is bumped `^3.1.4` → `^3.1.5`; NO audit-allowlist file is added.
+  4. Zero dependabot PRs remain open at phase close, and no Railway deploy was silently skipped across the campaign (the Phase-158 watcher observed quiet or loud, never grey).
+
+**Plans**: TBD
+
+**Research note:** STACK.md is effectively the plan — every verdict registry- or log-measured. ⚠️ The whole campaign is predicted, not executed: no PR was rebased, no lock regenerated, no suite run. Run `mypy --strict` before shipping any `analytics-service/` change (the GSD flow runs pytest only). If #686 stays red after a clean `npm ci`, `knip` (6.25 → 6.32, seven minors, changelogs unread) is the prime suspect and its findings may be LEGITIMATE, not regressions. Update each action's SHA AND its version comment together (C-0293).
+
+### v1.20 Progress
+
+| Phase | Plans Complete | Status | Completed |
+|-------|----------------|--------|-----------|
+| 158. OPS-CI merge=deploy | 0/? | Not started | - |
+| 159. RANK ranking integrity | 0/? | Not started | - |
+| 160. PROVENANCE venue/annualization | 0/? | Not started | - |
+| 161. WIZERR honest errors | 0/? | Not started | - |
+| 162. HONEST visible truth | 0/? | Not started | - |
+| 163. HARDEN reliability + security | 0/? | Not started | - |
+| 164. SHARE revocable links | 0/? | Not started | - |
+| 165. DEPS dependabot campaign | 0/? | Not started | - |
+
+### Requirement Coverage (v1.20)
+
+| Phase | Requirements |
+|-------|--------------|
+| 158 | OPS-01, OPS-02, OPS-03, OPS-04, OPS-11 |
+| 159 | RANK-01, RANK-02, RANK-05, RANK-06, RANK-07, RANK-08, RANK-09 |
+| 160 | RANK-03, RANK-04 |
+| 161 | WIZERR-01, WIZERR-02, WIZERR-03, WIZERR-04, WIZERR-05, WIZERR-06, WIZERR-07, WIZERR-08, WIZERR-09, WIZERR-10, WIZERR-11, WIZERR-12, WIZERR-13 |
+| 162 | HONEST-01, HONEST-02, HONEST-03, HONEST-04, HONEST-05, HONEST-06 |
+| 163 | OPS-05, OPS-06, OPS-07, OPS-08, OPS-09, OPS-10, SEC-01, SEC-02, SEC-03, SEC-04, SEC-05, SEC-06 |
+| 164 | SHARE-01, SHARE-02, SHARE-03, SHARE-04 |
+| 165 | DEPS-01 |
+
+**50/50 v1.20 requirement IDs mapped, each to exactly one phase. No orphans, no duplicates.**
+(Per-requirement traceability: `.planning/REQUIREMENTS.md` § Traceability.)
+
+---
+
+## Parked Milestone: v1.18 MT5-VERIFY & founder confirmations (Phases 155, 157) — founder-gated
 
 **Goal:** The numbers Quantalyze renders for the live funded MT5 account are proven true against
 the terminal's own figures — and the handful of observations only the founder can make are made.
@@ -311,6 +543,7 @@ Plans:
 **Goal:** A CSV finalize that recovers via the resubmit path A3's own copy instructs lands the user's classification instead of silently defaulting it, and no raw exchange credential reaches Sentry.
 
 **Success criteria:**
+
 1. A resubmission that takes the 23505 echo path applies the submitted `category_id`/`asset_class` when the committed row has none, and REFUSES (409 `CSV_SESSION_REUSED`) when a present classification conflicts — the A2 identity rule extended to the second identity field.
 2. `passphrase` is scrubbed from every Sentry capture site on the verify-strategy route, and the docblock's enumeration matches the array.
 3. The B4 readmit predicate cannot drive an unbounded reaped-orphan retry loop.
@@ -1654,10 +1887,18 @@ Plans:
 
 ## Current position
 
-⭐ **CURRENT: v1.18 MT5-VERIFY & founder confirmations (Phases 155, 157)** — created 2026-08-14.
-⛔ **Every phase is founder-gated**; nothing here is agent-deliverable. Blocked on (1) new MT5
-investor passwords and (2) the founder at the terminal on a trading day. See the milestone header
-at the top of this file.
+⭐ **CURRENT: v1.20 Backlog Burndown (Phases 158–165)** — roadmap created 2026-08-20. Eight
+phases over the 50 verified-open requirements (RANK / SHARE / WIZERR / HONEST / OPS / SEC /
+DEPS). Next: `/gsd-plan-phase 158`. ⛔ **Ordering is load-bearing:** 158 (OPS — CI/deploy
+integrity) FIRST — the shared-test-db eviction silently skips Railway deploys (#616) and every
+later phase merges through that pipeline; 165 (DEPS) LAST, hard-blocked on OPS-01; 160
+(provenance) before 164 (SHARE) so the REVOKE gets deploy-then-soak time; 164 lands ALONE in
+its own PR, ⛔ never branched from `feat/phase-156-connect-refactor`.
+
+⏸️ **v1.18 MT5-VERIFY & founder confirmations (Phases 155, 157)** — PARKED 2026-08-20,
+founder-gated twice over: new MT5 investor passwords AND the founder at the terminal on a
+trading day. Phase numbers 155/157 stay reserved; v1.20 continues from 158. See the parked
+milestone header above.
 
 ✅ **v1.17 MT5 — ingested, wizardable, surfaced** — CLOSED 2026-08-14, 10 phases delivered
 (147–154, 156), shipped through v0.62.0.0. ⚠️ Its original title said *"usable end-to-end, not
@@ -1665,19 +1906,10 @@ merely ingested"*; Phase 155 was carried to v1.18 and the title was amended to m
 actually delivered. ⛔ **MT5 is NOT advertised** — nobody has compared our numbers to the
 terminal's.
 
-➡️ **NEXT AGENT WORK: v1.16, PARKED at 68% (13/19 phases, 119/127 plans).** Resume at Phase 143.
-⚠️ Phase 144 carries the live WR-02 DELETE-vs-reset decision — the orphaned-running purge DELETEs
-rather than resets, which loses PROD jobs; the charter already decides it (terminal `failed`
-UPDATE, never a bare DELETE) and a reaper that deletes rows it should have reset is **not
-revertible**.
-Next: `/gsd:plan-phase 143`. ⛔ **Run 143 → 144 → 145 → 146 in that order — it is a declared
-dependency chain, not a preference:** 143 depends on 142, 144 on 143, 145 on 144, and 146 is
-sequenced last *so its gap list comes from a fresh grep* (running it earlier audits a codebase
-about to change). ⚠️ A risk-first reordering (145/146 before the migrations) was proposed on
-2026-08-14 and **rejected — it inverted 145's dependency on 144.** Note the consequence: 144 is
-SECOND, not last, so it does not get a long PROD-soak behind it. Its safety must come from the
-change itself — assert the migration writes a terminal `failed` state and issues NO `DELETE`,
-prove it on TEST, and verify on PROD before 145 begins.
+✅ **v1.19 JOB/RATE** — CLOSED 2026-08-20 (tag `v1.19`, audit `tech_debt`, 9/9 requirements,
+PRs #687–#695, v0.68.1.0). The "resume v1.16 at Phase 143" pointer that lived here is
+DISCHARGED: Phases 143–146 became v1.19 and shipped; v1.16 proper closed 2026-08-14 at Phases
+140–142.
 
 ---
 

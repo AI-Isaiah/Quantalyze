@@ -23,6 +23,16 @@
  */
 import { test, expect } from "@playwright/test";
 
+// 158 credential scrub (2026-08-20): the login below previously committed
+// a hardcoded demo email + password literal (TODOS 158-OPS-03) in a PUBLIC
+// repo. Creds now come from the environment (same convention as
+// full-flow.spec.ts / for-quants-onboarding.spec.ts); the probe self-skips
+// VISIBLY when they are absent. The seed-helper conversion + CI wiring
+// remain tracked in TODOS.md.
+const E2E_EMAIL = process.env.E2E_TEST_EMAIL;
+const E2E_PASSWORD = process.env.E2E_TEST_PASSWORD;
+const HAS_E2E_CREDS = !!E2E_EMAIL && !!E2E_PASSWORD;
+
 const HYDRATION_PATTERNS = [
   /Hydration failed/i,
   /server rendered HTML didn['']t match the client/i,
@@ -35,13 +45,13 @@ const HYDRATION_PATTERNS = [
 
 async function loginAsAllocator(page: import("@playwright/test").Page) {
   await page.goto("/login");
-  await page.fill('input[name="email"], input[type="email"]', "demo-allocator@quantalyze.test");
-  await page.fill('input[name="password"], input[type="password"]', "DemoAlpha2026!");
+  await page.fill('input[name="email"], input[type="email"]', E2E_EMAIL!);
+  await page.fill('input[name="password"], input[type="password"]', E2E_PASSWORD!);
   await page.click('button[type="submit"]');
 
   // Race the form-error path against the success-redirect path. When 4
-  // Playwright workers all hit `signInWithPassword` with the same demo
-  // creds in parallel, Supabase's per-email rate limiter throttles some
+  // Playwright workers all hit `signInWithPassword` with the same
+  // account in parallel, Supabase's per-email rate limiter throttles some
   // of them; the form re-renders with `text-negative` error copy and
   // we never navigate. Without surfacing that, `waitForURL` times out
   // with a useless "page didn't navigate" message.
@@ -114,7 +124,7 @@ function reportAndAssert(
   ).toEqual([]);
 }
 
-// All scenarios share the demo-allocator credential. Running them in
+// All scenarios share the one env-sourced login. Running them in
 // parallel hammers Supabase's per-email rate limiter and produces
 // non-determinism unrelated to hydration. Serial mode keeps the probe
 // reliable; the run takes ~30s either way because each scenario
@@ -122,6 +132,13 @@ function reportAndAssert(
 test.describe.configure({ mode: "serial" });
 
 test.describe("wizard hydration probe", () => {
+  test.skip(
+    !HAS_E2E_CREDS,
+    "wizard hydration probe: E2E_TEST_EMAIL / E2E_TEST_PASSWORD not set — " +
+      "all four scenarios log in via the form. Creds come from the " +
+      "environment (quantalyze-test Keychain entries), never the repo.",
+  );
+
   test("API branch fresh load", async ({ page }) => {
     const { consoleMessages, pageErrors } = attachConsoleCapture(page);
     await loginAsAllocator(page);

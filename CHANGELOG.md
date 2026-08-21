@@ -1,5 +1,66 @@
 # Changelog
 
+## [0.69.0.0] - 2026-08-21
+
+### fix: a merge means a deploy — v1.20 Phase 158 (OPS-CI)
+
+Main CI can no longer conclude `cancelled` and silently skip the Railway
+analytics deploy, and no CI gate is present-but-ungating (closes #616 on the
+mechanism: GitHub's one-pending-slot concurrency group evicted queued
+main-branch runs when a PR opened mid-run).
+
+**Fixed**
+
+- The three DB-touching CI jobs (`sql-tests`, `python`, `e2e-seeded`) now
+  serialize through a Postgres session advisory lock on the TEST project
+  (key 61616158, cap 3600s < TTL 90min < holder sleep 6000s, fork-PR no-op)
+  instead of the evictable `shared-test-db` concurrency group. Falsified both
+  ways in live CI: a neutered distinct-key probe run overlapped and FAILED;
+  the real same-key run serialized three simultaneous contenders.
+- A `workflow_run` watcher files a dedup'd `main-ci-cancelled` issue whenever
+  main CI concludes `cancelled` — the loud signal replaces a silent skipped
+  deploy; the watcher itself can never red a main-HEAD check (exit-0 doctrine,
+  bounded by `timeout-minutes`).
+- `sql-tests` now gates the `frontend` aggregator (needs + result loop with
+  fork/dispatch tolerance) — the only job executing deployed cron bodies can
+  no longer fail with nothing gating on it.
+- The fencing tests' two direct running-flip UPDATEs stamp `claimed_at`, so
+  the reaper's `claimed_at IS NOT NULL` predicate sees them (OPS-04).
+- e2e admin clients fail closed on TEST-named env (`TEST_SUPABASE_URL` /
+  `TEST_SUPABASE_SERVICE_ROLE_KEY`) — the ambient-env fallback that could aim
+  a local seed run at PROD with the service-role key is gone; `test-safety`
+  prod-URL asserts guard the boundary.
+- Hardcoded e2e credentials scrubbed repo-wide (two live pairs, two prose
+  republications); gitleaks no longer allowlists all of `.planning/`.
+  Rotation of the historical pairs remains a human action (tracked).
+
+**Added**
+
+- `mutex-probe.yml`: a 3-contender falsifiability drill for the mutex
+  (dispatch-only outside `ci-probe/**`; proves serialization, disclaims FIFO).
+- `docs/runbooks/shared-test-db-mutex.md`: TTL/steal semantics, lock census,
+  manual-unlock (`pg_terminate_backend`) runbook.
+- `scripts/drain-test-compute-backlog.ts`: guarded TEST-only backlog drain
+  (5-guard interlock incl. PROD-ref hard-reject, terminalize-never-delete).
+  Measured on TEST: the 2026-08-11 stale backlog is already gone (reaper +
+  worker cycle); drain verified as an honest no-op with evidence recorded.
+- Four orphaned e2e specs repaired to execute real cases (CSRF root cause
+  fixed, seeded contracts) and `e2e/my-strategies.spec.ts` authored (NAV-01
+  surface, both polarities proven); all five wired into CI batches.
+- `MultiKeyConnectStep` order-dependence flake closed on MECHANISM: 0/15
+  reproductions under shuffle x Node-22 sweeps with the instrument proven
+  live on 10 other files; a genuine separate intra-file order defect logged.
+
+**Infrastructure / tests**
+
+- C-0293 pins re-baselined to the mutex mechanism (same-key parity across
+  jobs, no-group regression guard, TTL + sleep + aggregator pins) — 143 tests,
+  each neuter-drilled RED before trust.
+- Analytics deploy-verify staleness threshold re-derived (1800s -> 4800s) for
+  post-mutex queue depth; 24 code-review findings fixed across a 3-iteration
+  review loop ending verdict clean; phase security register 21/21 closed
+  (`158-SECURITY.md`).
+
 ## [0.68.1.1] - 2026-08-20
 
 ### Chore
@@ -11366,7 +11427,7 @@ Round 2 lands the Python worker and the Next.js enqueue path.
 ### Added
 - **Scenario Builder** at `/scenarios` (allocator-only) — interactive toggle-based what-if tool. Pick a subset of the 15 strategies, set per-strategy weight and "include from" date, watch every metric recompute live client-side in ~5-15ms per toggle. Recomputes TWR, CAGR, volatility, Sharpe, Sortino, max drawdown + duration, pairwise Pearson correlation matrix, avg pairwise correlation. Reuses the existing `CorrelationHeatmap`. Custom SVG equity curve. Quick presets: All / None / Equal weight. This is the decision-support tool allocators use to test "should I divest from X" or "should I add Y in month Z" before touching the real book.
 - **Allocator Exchange Manager** at `/exchanges` (allocator-only) — allocator-facing page for uploading read-only exchange API keys to auto-build the Active Allocation portfolio from exchange-derived positions and lifecycle events. Modal with the existing `ApiKeyForm`, posts to `/api/keys/validate-and-encrypt` (validated against exchange, encrypted with per-user KEK before storage, trading/withdrawal keys rejected). Lists connected exchanges with sync status, last-synced relative time, reported balance. "Sync now" per-key refreshes `last_sync_at`. Direct link to the derived Active Allocation portfolio as the canonical output. Plain-English explainer card covering the `source='auto'` allocation_events derivation pattern.
-- **Full-app demo seed** (`scripts/seed-full-app-demo.ts`) — replaces the 3-persona /demo-page seed with a realistic full-dashboard allocator experience. 1 allocator (`demo-allocator@quantalyze.test` / `DemoAlpha2026!`, Atlas Family Office), 8 managers across institutional + exploratory tiers, 15 strategies covering the real crypto-quant archetype universe (cross-exchange arb, basis carry, funding capture, BTC trend, altcoin momentum, L/S pairs, stat arb, short vol, iron condor, mean reversion, DEX MM, on-chain alpha, liquidation fade, risk parity, ML factor). Each strategy has 2-4 years of deterministic daily returns with explicit regime hits for 2022-05 LUNA, 2022-11 FTX, and 2024-04 correction. Complete `strategy_analytics` rows (returns_series, drawdown_series, monthly_returns, daily_returns, rolling 30/90/180d Sharpe, return quantiles, sparklines, all scalar metrics). 3 portfolios (1 real Active Allocation + 2 what-if scenarios) with full `portfolio_analytics` JSONB. 28 `allocation_events` covering the add → top-up → drawdown trim → re-add lifecycle on the real book.
+- **Full-app demo seed** (`scripts/seed-full-app-demo.ts`) — replaces the 3-persona /demo-page seed with a realistic full-dashboard allocator experience. 1 allocator (credentials supplied via `DEMO_SEED_ALLOCATOR_EMAIL` / `DEMO_SEED_ALLOCATOR_PASSWORD`; literals redacted 2026-08-20 per 158-REVIEW CR-03, Atlas Family Office), 8 managers across institutional + exploratory tiers, 15 strategies covering the real crypto-quant archetype universe (cross-exchange arb, basis carry, funding capture, BTC trend, altcoin momentum, L/S pairs, stat arb, short vol, iron condor, mean reversion, DEX MM, on-chain alpha, liquidation fade, risk parity, ML factor). Each strategy has 2-4 years of deterministic daily returns with explicit regime hits for 2022-05 LUNA, 2022-11 FTX, and 2024-04 correction. Complete `strategy_analytics` rows (returns_series, drawdown_series, monthly_returns, daily_returns, rolling 30/90/180d Sharpe, return quantiles, sparklines, all scalar metrics). 3 portfolios (1 real Active Allocation + 2 what-if scenarios) with full `portfolio_analytics` JSONB. 28 `allocation_events` covering the add → top-up → drawdown trim → re-add lifecycle on the real book.
 - **Sidebar navigation** adds "Scenarios" and "Exchanges" under `MY WORKSPACE` for allocators (hidden from managers and from admins who have the Match Queue instead).
 - **Demo walkthrough doc** at `docs/demos/2026-04-09-full-app-walkthrough.md` — click-by-click demo script with login credentials, seed summary, 5-act flow, known limitations, and post-demo housekeeping.
 

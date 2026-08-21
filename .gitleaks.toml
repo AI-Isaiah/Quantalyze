@@ -16,7 +16,13 @@ title = "Quantalyze gitleaks config"
 [extend]
 useDefault = true
 
-[allowlist]
+# NOTE (158-REVIEW CR-03): this is `[[allowlists]]` (array form), not the
+# singular `[allowlist]` it used to be. gitleaks >= 8.30 REFUSES to load a
+# config that mixes the two ("[allowlist] is deprecated, it cannot be used
+# alongside [[allowlists]]"), and the rule-scoped blocks at the bottom of this
+# file require the array form. Behaviour of this block is unchanged: with no
+# `targetRules`, it still applies to every rule.
+[[allowlists]]
 description = "Known test fixtures and placeholder env samples"
 
 # File-path allowlist — fixtures and sample files that contain
@@ -46,12 +52,12 @@ description = "Known test fixtures and placeholder env samples"
 #   Not a real token.
 # - package-lock.json: integrity hashes trip gitleaks generic
 #   high-entropy detection; this is well-known noise to ignore.
-# - .planning/: gstack planning artifacts (plan markdowns, summaries,
-#   review reports). Pure prose with technical terms ("mid-Phase-14b",
-#   migration filenames, RPC names) that the generic-api-key entropy
-#   detector mistakes for secrets. These files ship documentation, not
-#   credentials. The directory is force-added per the project's planning
-#   workflow.
+# - .planning/: MOVED OUT of this blanket path list — see the scoped
+#   [[allowlists]] block at the bottom of this file (158-REVIEW CR-03).
+#   Summary: it is now allowlisted for the ENTROPY rule only, not for
+#   every rule, because a whole-path exemption made the secret-scan gate
+#   structurally incapable of ever flagging a real credential in the
+#   largest cluster of tracked files in the repo.
 # - src/app/api/webhooks/resend/route.test.ts: Phase 16 OBSERV-03 webhook
 #   verification test. Defines a synthetic Svix secret prefixed `whsec_`
 #   (base64("test-secret-phase-16-observ-03")) used by the test signing helper
@@ -81,7 +87,6 @@ paths = [
   '''(^|/)analytics-service/tests/test_encryption\.py$''',
   '''(^|/)analytics-service/tests/test_c19_portfolio_fixes\.py$''',
   '''(^|/)package-lock\.json$''',
-  '''(^|/)\.planning/''',
   '''(^|/)src/app/api/webhooks/resend/route\.test\.ts$''',
   '''(^|/)src/app/api/verify-strategy/route\.seam\.test\.ts$''',
   '''(^|/)analytics-service/tests/cassettes/''',
@@ -150,3 +155,50 @@ paths = [
   # passed; the squash-commit scan on main flagged it).
   '''(^|/)src/app/\(dashboard\)/allocations/components/ScenarioComposer\.test\.tsx$''',
 ]
+
+# ---------------------------------------------------------------------------
+# Rule-SCOPED allowlists (158-REVIEW CR-03)
+# ---------------------------------------------------------------------------
+#
+# The `[allowlist].paths` list above is a BLANKET exemption: a file listed
+# there is invisible to every rule in the ruleset. That is correct for a
+# handful of small fixture files whose entire content is synthetic. It was NOT
+# correct for `.planning/`, which is the largest cluster of tracked files in
+# the repo (~56 MB of plan markdowns, review reports and summaries, all
+# world-readable — this repository is PUBLIC). Exempting that whole tree from
+# every rule meant the secret-scan gate was STRUCTURALLY incapable of flagging
+# a real credential pasted into a plan document. It is a blocking CI gate that
+# could not fail over most of its own repository.
+#
+# The actual problem the exemption solved is narrow: planning prose is full of
+# migration filenames, RPC names and hyphenated identifiers that the
+# generic-api-key ENTROPY detector scores as secrets. So the exemption is now
+# scoped to that one rule. Measured on the working tree at the time of the
+# change: 12 findings under `.planning/` with no exemption at all — 11
+# generic-api-key (entropy noise, suppressed below) and 1 `jwt`.
+[[allowlists]]
+description = "planning artifacts: entropy false-positives only, NOT a blanket exemption"
+targetRules = ["generic-api-key"]
+paths = ['''(^|/)\.planning/''']
+
+# The single non-entropy hit in `.planning/` is the canonical jwt.io tutorial
+# JWT — the same fixture already allowlisted by path for four test files near
+# the top of this file. Suppressed by VALUE rather than by path, so it stays
+# suppressed wherever it is quoted while ANY OTHER JWT appearing in a planning
+# document still trips the gate. That is the distinction a path exemption
+# cannot make, and the reason this block exists rather than a broader one.
+#
+# ⚠️ `condition = "AND"` is load-bearing. gitleaks defaults an allowlist to OR,
+# which would suppress the `jwt` rule for this literal EVERYWHERE it appears —
+# and that breaks the H-0017 meta-test (`src/__tests__/gitleaks-allowlist.test.ts`),
+# which deliberately plants this exact fixture at a NON-allowlisted path and
+# asserts the `jwt` rule fires on it. Observed while making this change: with
+# the default OR, that test failed with `expected 'generic-api-key' to be
+# 'jwt'` — i.e. a broad allowlist had silently degraded a falsifiability guard.
+# AND means "this literal, and only inside .planning/".
+[[allowlists]]
+description = "canonical jwt.io tutorial JWT fixture (HS256, sub=12345) — not a real token"
+targetRules = ["jwt"]
+condition = "AND"
+paths = ['''(^|/)\.planning/''']
+regexes = ['''eyJhbGciOiJIUzI1NiJ9\.eyJzdWIiOiIxMjM0NSJ9\.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c''']

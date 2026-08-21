@@ -776,6 +776,24 @@ jobs:
     # NEVER be given an `e2e-seeded`-style fork-only-skip tolerance: it consumes
     # no secret and no repo variable, so it runs identically on a fork PR and a
     # `skipped` result there is always a real fault, never a legitimate gate.
+    #
+    # Phase 158 / OPS-02 (2026-08-20): `sql-tests` is now BLOCKING here, wired
+    # into BOTH places below. It was present-and-failing with NOTHING gating on
+    # it — and it is the only gate that EXECUTEs the real deployed cron bodies
+    # (it caught D-19). Its tolerance arm diverges from `e2e-seeded`'s by one
+    # event: its `if:` requires `github.event_name == 'push'` OR a same-repo PR,
+    # so it legitimately skips on fork PRs AND on `workflow_dispatch` (the
+    # golden-bake route) — a strict arm would redden every manual bake run. A
+    # skip on push/same-repo-PR still fails: that means E2E_TEST_DB_CONFIGURED
+    # was LOST, the same silent-disable the e2e-seeded arm detects.
+    # Wall-clock cost is ACCEPTED: this aggregator now waits on `sql-tests`,
+    # which itself needs `python` (~7m) plus its mutex wait. The alternative is
+    # the present-but-ungating state this requirement exists to kill.
+    # NOTE: this `needs:` entry is NOT one of the ⛔-banned chain edges among the
+    # DB-touching jobs (see the notes on `sql-tests` / `e2e-seeded`). Those are
+    # banned because a skipped `needs:` job SKIPS its dependents; this job
+    # carries `if: always()`, so an upstream skip reaches the loop below as a
+    # RESULT to judge rather than skipping the gate.
     runs-on: ubuntu-latest
     needs:
       - frontend-typecheck
@@ -786,6 +804,7 @@ jobs:
       - frontend-policy
       - frontend-build
       - e2e-seeded
+      - sql-tests
     if: always()
     steps:
       - name: Verify all frontend-* jobs succeeded
@@ -799,7 +818,8 @@ jobs:
             "frontend-seam-redis=${{ needs.frontend-seam-redis.result }}" \
             "frontend-policy=${{ needs.frontend-policy.result }}" \
             "frontend-build=${{ needs.frontend-build.result }}" \
-            "e2e-seeded=${{ needs.e2e-seeded.result }}"; do
+            "e2e-seeded=${{ needs.e2e-seeded.result }}" \
+            "sql-tests=${{ needs.sql-tests.result }}"; do
             name="${r%=*}"; result="${r#*=}"
             echo "$name: $result"
             if [ "$name" = "e2e-seeded" ]; then
@@ -818,6 +838,45 @@ jobs:
                 echo "e2e-seeded skipped (fork PR — no test-DB access); tolerated for this row only."
               else
                 echo "::error::e2e-seeded result=$result on a TRUSTED event (push/same-repo). The go-live badge gate MUST run here — E2E_TEST_DB_CONFIGURED may be unset (this also disables sql-tests). A skip is not tolerated."
+                fail=1
+              fi
+            elif [ "$name" = "sql-tests" ]; then
+              # Phase 158 / OPS-02: sql-tests is BLOCKING — it is the only gate
+              # that EXECUTEs the real deployed cron bodies. Its `if:` requires
+              # `github.event_name == 'push'` OR a same-repo PR, so unlike
+              # e2e-seeded it ALSO skips by design on `workflow_dispatch` (the
+              # golden-bake route); a strict arm would redden every bake run.
+              # Both skip-by-design routes are tolerated FOR THIS ROW ONLY. A
+              # skip on push/same-repo-PR is NOT tolerated — but it has TWO
+              # possible causes, and this loop cannot tell them apart.
+              #
+              # 158-REVIEW WR-04: the message used to assert only one of them
+              # ("E2E_TEST_DB_CONFIGURED was LOST"), which is FALSE in the more
+              # common case. `sql-tests` carries `needs: [python]`, and a skipped
+              # or failed `needs:` job SKIPS its dependents — so an ordinary
+              # `python` failure lands here as `sql-tests=skipped` and sent the
+              # operator to check a repository variable when the real signal was
+              # a red `python` check on the very same run. The gate reddening was
+              # right; the stated cause was confidently wrong, which this repo's
+              # fail-loud-and-ACCURATE doctrine treats as a real cost.
+              #
+              # `python` is deliberately NOT added to this aggregator's `needs:`
+              # just to read its result: the phase's mutex design forbids new
+              # `needs:` edges among the DB-touching jobs (their `if:`
+              # conditions diverge on `workflow_dispatch`). Naming both causes,
+              # cheapest-to-check first, costs nothing and misleads no one.
+              is_fork_pr='${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}'
+              is_dispatch='${{ github.event_name == 'workflow_dispatch' }}'
+              if [ "$result" = "success" ]; then
+                :
+              elif [ "$result" = "skipped" ] && { [ "$is_fork_pr" = "true" ] || [ "$is_dispatch" = "true" ]; }; then
+                echo "sql-tests skipped (fork PR: $is_fork_pr / workflow_dispatch: $is_dispatch — its if: excludes both); tolerated for this row only."
+              else
+                if [ "$result" = "skipped" ]; then
+                  echo "::error::sql-tests result=skipped on a TRUSTED event (fork_pr=$is_fork_pr, dispatch=$is_dispatch — only a skip on one of those is tolerated). TWO causes produce this, check in order: (1) its \`needs: python\` dependency did not succeed — look at the \`python\` check on THIS run first, and if it is red that is your answer and E2E_TEST_DB_CONFIGURED is NOT implicated; (2) otherwise E2E_TEST_DB_CONFIGURED was LOST, the same silent-disable the e2e-seeded arm above detects — the one that would let a migrations merge reach PROD with this gate quietly absent."
+                else
+                  echo "::error::sql-tests result=$result (fork_pr=$is_fork_pr, dispatch=$is_dispatch). The SQL self-tests — the only gate that EXECUTEs the deployed cron bodies (it caught D-19) — did not pass. If this is a mutex acquire timeout, see docs/runbooks/shared-test-db-mutex.md sections 2-3: queue depth and a wedged holder are different faults."
+                fi
                 fail=1
               fi
             elif [ "$result" != "success" ]; then
@@ -877,9 +936,18 @@ jobs:
     # `psql -v ON_ERROR_STOP=1` a failed assertion exits non-zero and
     # fails the job.
     runs-on: ubuntu-latest
+    # TTL for the mutex below (Phase 158 / OPS-01): GitHub kills the job at 90m,
+    # the psql session drops, and Postgres releases the advisory lock. That IS
+    # the steal path — no reaper cron needed. Manual unlock:
+    # docs/runbooks/shared-test-db-mutex.md.
+    # 158-REVIEW CR-04: 90m, not 60m — sized so THREE simultaneous runs can all
+    # succeed (setup + the 3600s acquire cap + this job's own work). See the
+    # fuller derivation on the `python` job's identical TTL comment.
+    # ⛔ The holder's `pg_sleep` must stay ABOVE this number (WR-01) — it is 6000s.
+    timeout-minutes: 90
     if: (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository) && vars.E2E_TEST_DB_CONFIGURED == 'true'
-    # Phase 142.1 (D-05): join the SAME repo-wide `shared-test-db` group the
-    # `python` and `e2e-seeded` jobs carry. These SQL files run against the ONE
+    # Phase 142.1 (D-05): this job must SERIALIZE against the `python` and
+    # `e2e-seeded` jobs. These SQL files run against the ONE
     # shared Supabase test project (`secrets.TEST_SUPABASE_DB_URL`), and
     # test_strategy_analytics_stuck_computing_reaper.sql `EXECUTE`s the REAL
     # deployed cron body — a GLOBAL `ORDER BY computing_started_at ASC LIMIT 25`
@@ -893,35 +961,50 @@ jobs:
     # 5 s lock_timeout turns lock contention into a 55P03 failure on an innocent
     # PR.
     #
-    # ⛔ Do NOT give this job its own private group name — 142-REVIEW.md:286-291
-    # proposed one, and it is the wrong fix: a distinct group serializes this
-    # job only against itself and does nothing about the `python`/`e2e-seeded`
-    # jobs writing the SAME project. The group name must stay identical to
-    # theirs.
+    # HOW it serializes (Phase 158 / OPS-01): the "Acquire shared-test-db mutex"
+    # step below takes a Postgres SESSION advisory lock (key 61616158) on the
+    # TEST project through the session-mode DSN and holds it across this job's
+    # DB-touching span. `python` and `e2e-seeded` take the SAME key. Contenders
+    # BLOCK inside the lock instead of queueing in GitHub's concurrency layer.
+    # Proven from real runners before adoption by .github/workflows/mutex-probe.yml
+    # (three simultaneous contenders, pairwise non-overlapping hold windows).
     #
-    # Costs wall-clock: this job now queues behind `python` (~7m) instead of
-    # overlapping it — the same price `e2e-seeded` already pays below, and for
-    # the same reason.
+    # ⛔ Do NOT give this job its own private lock key — 142-REVIEW.md:286-291
+    # proposed the equivalent (a private concurrency-group name), and it is the
+    # wrong fix: a distinct key serializes this job only against itself and does
+    # nothing about the `python`/`e2e-seeded` jobs writing the SAME project. All
+    # three must take key 61616158.
     #
-    # ⛔ The `needs: [python]` below is NOT an ordering preference — it is what
-    # keeps this group CORRECT, and removing it silently disables a gate.
-    # GitHub Actions holds exactly ONE pending entry per concurrency group:
-    # "Any previously pending job or workflow in the concurrency group will be
-    # canceled." With two members that is stable (one runs, one pends). Adding
-    # this job made THREE, and `python` + `sql-tests` both dispatch at t=0 while
-    # `e2e-seeded` arrives minutes later behind frontend-typecheck — so
-    # `e2e-seeded` evicted whichever of the first two was still pending. The
-    # victim is CANCELLED, which renders as a GREY check, not a red one, and
-    # branch protection is deferred on this repo, so nothing blocks on it. On a
-    # push to main touching supabase/migrations/** that is the merge which
-    # auto-applies migrations to PROD losing either the Python drift gates or
-    # this job — the only gate that EXECUTEs the real deployed cron body, and
+    # Costs wall-clock: this job queues behind `python` (~7m) and then waits on
+    # the mutex rather than overlapping it — the same price `e2e-seeded` pays
+    # below, and for the same reason. With the mutex the wait burns runner time;
+    # under the old concurrency group it burned an entire gate (see below).
+    #
+    # ⛔ Do NOT reintroduce a job-level GitHub concurrency group for the shared
+    # test DB (all three jobs carried one until Phase 158). That layer is what
+    # BROKE, and no reshaping of it is a fix. GitHub Actions holds exactly ONE
+    # pending entry per concurrency group: "Any previously pending job or
+    # workflow in the concurrency group will be canceled." With two members that
+    # was stable (one runs, one pends). Adding this job made THREE, and `python`
+    # + `sql-tests` both dispatch at t=0 while `e2e-seeded` arrives minutes later
+    # behind frontend-typecheck — so `e2e-seeded` EVICTED whichever of the first
+    # two was still pending. The victim is CANCELLED, which renders as a GREY
+    # check, not a red one, and branch protection is deferred on this repo, so
+    # nothing blocked on it — and Railway's "wait for CI" then SKIPPED the
+    # analytics deploy, leaving prod on stale code with no signal (issue #616).
+    # On a push to main touching supabase/migrations/** that is the merge which
+    # auto-applies migrations to PROD while losing either the Python drift gates
+    # or this job — the only gate that EXECUTEs the real deployed cron body, and
     # the one that caught D-19.
-    # Gating THIS job behind `python` fixes it without touching `e2e-seeded`:
-    # `python` and `sql-tests` can then never be queued at the same instant, so
-    # the group holds at most (1 in-progress + 1 pending) and no member is ever
-    # evicted. Cross-run serialization — the reason the group exists — is
-    # unchanged, since all three still share the group name.
+    # ⛔ SHRINKING the shared-test-db concurrency group was never the fix either:
+    # the eviction is CROSS-run, so fewer members only changes which run gets
+    # evicted, not whether one does. The eviction layer had to GO, not shrink.
+    #
+    # `needs: [python]` below is KEPT. Under the group it was load-bearing (it
+    # kept `python` and `sql-tests` from being queued at the same instant, so the
+    # group never held two pending entries). With the group gone it no longer
+    # carries correctness weight, but it costs nothing and keeps one fewer
+    # simultaneous waiter on the mutex — so removing it buys nothing.
     #
     # ⛔ Do NOT "finish the chain" by adding `sql-tests` to `e2e-seeded`'s
     # `needs:`. A skipped `needs:` job skips its dependents, and the two `if:`
@@ -930,12 +1013,15 @@ jobs:
     # requires `!= 'pull_request'` (true) — so the chain would disable
     # `e2e-seeded` on every manual run and trip the aggregator's skip check.
     # `python` carries no `if:`, so this job's own dependency is always safe.
-    # Found by the /ship pre-landing review, 2026-08-03.
+    # Found by the /ship pre-landing review, 2026-08-03. The mutex does NOT
+    # change this: it serializes without any `needs:` edge, which is precisely
+    # why no new edge among these three jobs is warranted.
+    # (Phase 158 / OPS-02: this job IS listed in the `frontend` aggregator's
+    # `needs:`. That is not such an edge — `frontend` carries `if: always()`, so
+    # a skip here cannot skip the aggregator; it is read as a RESULT, not
+    # depended on for ordering.)
     needs:
       - python
-    concurrency:
-      group: shared-test-db
-      cancel-in-progress: false
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
         with:
@@ -998,6 +1084,171 @@ jobs:
             exit 1
           fi
           echo "Preflight clean: ${#files[@]} test file(s) free of refused meta-commands."
+      # Phase 158 / OPS-01 — the shared-test-db mutex, IDENTICAL in `sql-tests`,
+      # `python` and `e2e-seeded`. It replaces the GitHub concurrency group those
+      # three jobs used to carry (see the ⛔ note on this job for why that layer
+      # had to go). A BACKGROUND psql session takes a Postgres SESSION advisory
+      # lock on key 61616158 and holds it for the rest of the job: background
+      # processes persist across steps on the same runner, and job teardown drops
+      # the TCP session, at which point Postgres releases the lock — that IS the
+      # steal path, bounded by this job's `timeout-minutes`. Placed immediately
+      # before the first DB-MUTATING step. Proven end-to-end before adoption by
+      # .github/workflows/mutex-probe.yml (three simultaneous contenders,
+      # pairwise non-overlapping hold windows; the distinct-key neuter of that
+      # same assertion was observed RED).
+      - name: Acquire shared-test-db mutex
+        env:
+          TEST_SUPABASE_DB_URL: ${{ secrets.TEST_SUPABASE_DB_URL }}
+        run: |
+          set -euo pipefail
+          if [ -z "${TEST_SUPABASE_DB_URL:-}" ]; then
+            echo "fork PR / secret withheld — mutex skipped (DB work self-skips on forks)"
+            exit 0
+          fi
+          if ! command -v psql >/dev/null 2>&1; then
+            sudo apt-get update -y
+            sudo apt-get install -y --no-install-recommends postgresql-client
+          fi
+          # Session-mode DSN. The documented secret points at the Supavisor
+          # pooler on port 6543 = TRANSACTION mode, where a SESSION advisory lock
+          # does not survive between statements; session mode is served on 5432
+          # of the same host. Derived by parameter expansion and NEVER echoed —
+          # this repository is public and the derived string is not a value
+          # GitHub can mask for us.
+          dsn="${TEST_SUPABASE_DB_URL}"
+          case "${dsn}" in
+            *":6543/"*) dsn="${dsn%%:6543/*}:5432/${dsn#*:6543/}" ;;
+          esac
+          log="${RUNNER_TEMP}/shared-test-db-mutex.log"
+          pidfile="${RUNNER_TEMP}/shared-test-db-mutex.pid"
+          # 158-REVIEW WR-01: the idle sleep MUST outlive this job's
+          # `timeout-minutes`, or the holder session ends — releasing the lock —
+          # while the job is still doing DB work, and another run walks straight
+          # in. The old value (3300s = 55min) was SHORTER than the then-60min
+          # TTL, so any job that acquired early and ran long silently lost mutual
+          # exclusion for its last ~5 minutes. 6000s = 100min sits above this
+          # job's `timeout-minutes` with headroom, so the JOB always dies first
+          # and teardown is the only thing that ever releases this lock.
+          # ⛔ If you lower `timeout-minutes`, this stays valid. If you RAISE it,
+          # raise this too — the invariant is sleep > TTL, and nothing else
+          # enforces it.
+          start_holder() {
+            : > "${log}"
+            PGAPPNAME=ci-shared-test-db-mutex PGCONNECT_TIMEOUT=15 \
+              nohup psql "${dsn}" -X -q -A -t -v ON_ERROR_STOP=1 \
+                -c "SELECT pg_advisory_lock(61616158);" \
+                -c "SELECT 'MUTEX-ACQUIRED';" \
+                -c "SELECT pg_sleep(6000);" \
+                >> "${log}" 2>&1 &
+            holder=$!
+            echo "${holder}" > "${pidfile}"
+          }
+          # 158-REVIEW CR-04: the cap absorbs legitimate cross-run QUEUE DEPTH,
+          # not just a wedge. Three simultaneous runs put ~8 other holds ahead of
+          # the last waiter (~60m at the measured ~20m of lock-time per run), and
+          # the phase's success criterion is that all three still pass. 2700s was
+          # comparable to the work it had to absorb, so ordinary contention —
+          # which this repo's history records as NORMAL — surfaced as a red
+          # sql-tests → red `frontend` → skipped Railway deploy.
+          #
+          # 158-REVIEW WR-13: retry a DEAD SESSION, never a full wait. Every
+          # other network op in this file retries by explicit flakiness-audit
+          # decision (`npm ci`, `pip install`, the lychee download, the SRH
+          # readiness poll); this one did not, so a single transient connect
+          # blip inside PGCONNECT_TIMEOUT killed the backgrounded psql and
+          # exited 1 — now a red REQUIRED check, and on main a skipped Railway
+          # deploy. The two failure modes are deliberately kept distinct:
+          # "session died" is retryable (below), "waited past the cap" is NOT
+          # (that is contention, and retrying would just re-queue at the back).
+          # `waited` is CUMULATIVE across attempts, so retries can never extend
+          # the total wait beyond the cap the TTL was sized against.
+          waited=0
+          for attempt in 1 2 3; do
+            start_holder
+            while [ "${waited}" -lt 3600 ]; do
+              if grep -q 'MUTEX-ACQUIRED' "${log}" 2>/dev/null; then
+                echo "Acquired the shared-test-db advisory lock (key 61616158) after ${waited}s (attempt ${attempt}/3)."
+                exit 0
+              fi
+              if ! kill -0 "${holder}" 2>/dev/null; then
+                echo "::warning::mutex acquire attempt ${attempt}/3 lost its psql session after ${waited}s (redacted output follows)."
+                # 158-REVIEW WR-08: psql NEVER echoes the DSN on failure, so the
+                # userinfo pattern alone matched nothing and the raw text — the
+                # TEST pooler host, its resolved IP, and the DB username /
+                # project-ref — went straight into a PUBLIC Actions log, against
+                # this mutex's own stated invariant ("never a DSN, host,
+                # username, or password, in any CI log line"). Redact the shapes
+                # psql actually emits:
+                #   connection to server at "<host>" (<ip>), port <n> failed
+                #   FATAL:  password authentication failed for user "<user>"
+                sed -E -e 's#(postgres(ql)?://)[^@]*@#\1***@#g' \
+                       -e 's#(server at )"[^"]*"( \([^)]*\))?#\1"***"#g' \
+                       -e 's#(for user )"[^"]*"#\1"***"#g' "${log}" >&2 || true
+                break
+              fi
+              sleep 5
+              waited=$(( waited + 5 ))
+              if [ $(( waited % 60 )) -eq 0 ]; then
+                echo "still waiting on the shared-test-db mutex (${waited}s) — another run holds it."
+              fi
+            done
+            # Cap exhausted => contention, not a transient. Stop retrying and
+            # fall through to the census + timeout diagnostic below.
+            if [ "${waited}" -ge 3600 ]; then
+              break
+            fi
+            # The session is dead; drop its pid so the release step cannot kill
+            # an unrelated process that inherits the number.
+            rm -f "${pidfile}"
+            # 158-REVIEW WR-02 (iter 3): back off ONLY when a retry actually
+            # follows. Unguarded, the last iteration printed "retrying the mutex
+            # acquire in 15s" and then slept 15s before falling out of the loop
+            # to the "after 3 attempts" error — telling the operator a fourth
+            # attempt was coming when none was, which this repo's
+            # fail-loud-and-ACCURATE doctrine counts as a real cost. Worse, that
+            # phantom 15s was added to `waited`, and `waited` is the variable the
+            # cap-vs-session-fault branch below is chosen by: a run that
+            # legitimately queued to 3585s and then lost its session could be
+            # pushed over 3600 by backoff bookkeeping alone and misreported as
+            # contention rather than as the session fault it actually was.
+            if [ "${attempt}" -lt 3 ]; then
+              backoff=$(( attempt * 5 ))
+              echo "retrying the mutex acquire in ${backoff}s"
+              sleep "${backoff}"
+              waited=$(( waited + backoff ))
+            fi
+          done
+          if [ "${waited}" -lt 3600 ]; then
+            echo "::error::could not establish the shared-test-db mutex session after 3 attempts — psql died before acquiring each time (last output redacted above). This is a CONNECT/session fault, NOT lock contention: check the TEST project's session-mode pooler (port 5432) rather than hunting for a holder."
+            exit 1
+          fi
+          # 158-REVIEW CR-04: do NOT assert "a holder is wedged" — measure, then
+          # name both causes. From inside this loop a deep waiter queue and a
+          # wedged holder are indistinguishable, and the old message confidently
+          # named the rarer one, sending the operator hunting for a wedge that
+          # may not exist. Counts ONLY: no pids, no host, no DSN, and stderr is
+          # discarded outright — this log is public.
+          #
+          # 158-REVIEW WR-01 (iter 3): the census MUST be bounded. PGCONNECT_TIMEOUT
+          # bounds only the CONNECT; once connected, an unbounded query against a sick
+          # TEST Postgres/pooler blocks until this job's `timeout-minutes` kills the
+          # runner — so the operator gets LESS information than before the census
+          # existed (a bare "exceeded the maximum execution time"), and the job squats
+          # a runner for ~30 more minutes while holding no lock. A sick backend is
+          # precisely the condition under which this timeout fires, and this repo's
+          # history records a wedged TEST backend as a MEASURED event, not a
+          # hypothetical. Both bounds are needed because they cover different faults:
+          # `statement_timeout` is server-side (a slow or lock-blocked query) and
+          # `timeout` is client-side (a black-holed connection the server never hears
+          # about, where a server-side timeout can never fire). A diagnostic must
+          # never outlive the thing it diagnoses. `${census:-unavailable}` below
+          # already handles the empty result, so the message stays honest either way.
+          census="$(PGCONNECT_TIMEOUT=15 timeout 20 psql "${dsn}" -X -q -A -t \
+            -c "SET statement_timeout = '10s';" \
+            -c "SELECT count(*) FILTER (WHERE granted) || ' granted, ' || count(*) FILTER (WHERE NOT granted) || ' waiting' FROM pg_locks WHERE locktype = 'advisory' AND objid = 61616158;" \
+            2>/dev/null | tr -d '\r' | tail -1)" || true
+          echo "::error::timed out after ${waited}s waiting for the shared-test-db advisory lock (key 61616158). Lock census: ${census:-unavailable}. TWO causes are possible and this step cannot distinguish them: (1) QUEUE DEPTH — concurrent runs each hold the lock ~20m, which is a NORMAL condition in this repo; re-run once the queue drains. (2) A WEDGED holder whose runner is gone. Triage (count the waiters first) and manual unlock: docs/runbooks/shared-test-db-mutex.md sections 2-3."
+          exit 1
       - name: Run SQL self-tests against test Supabase project
         env:
           # PG connection string for the test project (qmnijlgmdhviwzwfyzlc).
@@ -1033,6 +1284,37 @@ jobs:
           done
           echo ""
           echo "All ${#files[@]} SQL self-tests passed."
+      # Best-effort EARLY release of the shared-test-db mutex (Phase 158 /
+      # OPS-01), identical in all three DB-touching jobs. Job teardown drops the
+      # psql session anyway; killing it here hands the lock to the next waiter a
+      # little sooner. `if: always()` + never exits non-zero: a failed release
+      # must not redden a job whose real work passed, and the teardown path is
+      # the guarantee.
+      - name: Release shared-test-db mutex (best effort)
+        if: always()
+        run: |
+          pidfile="${RUNNER_TEMP}/shared-test-db-mutex.pid"
+          if [ ! -f "${pidfile}" ]; then
+            echo "No mutex pid recorded (fork PR / acquire skipped) — nothing to release."
+            exit 0
+          fi
+          holder="$(cat "${pidfile}")"
+          if kill "${holder}" 2>/dev/null; then
+            echo "Released the shared-test-db mutex (terminated psql pid ${holder})."
+          else
+            # 158-REVIEW WR-01: reaching here is a FAULT, not housekeeping. A
+            # pidfile exists, so the acquire step really did start a holder — and
+            # that holder is now dead while this job was still running. Every DB
+            # step between its death and now ran with the mutex RELEASED, i.e.
+            # potentially concurrently with another run against the shared TEST
+            # project. The previous message ("was already gone — the session drop
+            # released the lock") described this as normal and printed on exactly
+            # the failure path it was supposed to surface.
+            # Annotation only: this step is `if: always()` and must never redden a
+            # job whose real work passed, and `echo ::error::` does not change the
+            # exit status. Job teardown remains the guaranteed release path.
+            echo "::error::mutex holder pid ${holder} died BEFORE this release step — the DB work after its death ran UNSERIALIZED. Do not trust this run's DB assertions; investigate (holder outlives the job by design, see the pg_sleep note in the acquire step)."
+          fi
 
   secret-scan:
     # Task 7.6: gitleaks runs against the full commit history for PRs
@@ -1131,18 +1413,42 @@ jobs:
 
   python:
     runs-on: ubuntu-latest
+    # TTL for the shared-test-db mutex (Phase 158 / OPS-01): GitHub kills the job
+    # at 90m, the psql session drops, and Postgres releases the advisory lock.
+    # That IS the steal path. Manual unlock:
+    # docs/runbooks/shared-test-db-mutex.md.
+    #
+    # 158-REVIEW CR-04 — why 90 and not 60. Each CI run takes this lock THREE
+    # times (python ~7m, e2e-seeded ~8-9m across build + the Playwright batch,
+    # sql-tests the balance) ≈ 20m of lock-time per run. The phase's own success
+    # criterion is that THREE simultaneous runs serialize and ALL SUCCEED, so the
+    # last job to acquire can legitimately queue behind ~8 other holds ≈ 60m. The
+    # acquire cap is sized to 3600s to absorb exactly that, and this TTL must
+    # then cover setup + that full cap + this job's own work (~2m + 60m + ~12m ≈
+    # 74m) with headroom. At 60m the waiter died of its OWN TTL mid-queue — and
+    # with sql-tests now BLOCKING the `frontend` aggregator that reddens main
+    # HEAD and makes Railway skip the analytics deploy, i.e. #616's damage
+    # through a new door. The trade is a wider worst-case WEDGED hold (90m);
+    # runbook section 3 is the manual override for that.
+    # ⛔ The holder's `pg_sleep` must stay ABOVE this number (WR-01) — it is 6000s.
+    timeout-minutes: 90
     # Serialize the python job across ALL runs (every PR + every push) against
     # the SHARED remote Supabase test project. The workflow-level concurrency
     # group (top of file) only isolates per-PR, so two different PRs' python
     # jobs could hit the shared test DB simultaneously and race the
-    # compute_jobs fencing/claim tests (CI flakiness audit F2). A repo-wide
-    # group with cancel-in-progress:false QUEUES contending runs instead of
-    # running them concurrently — and crucially does NOT cancel in-flight runs,
-    # so a push-to-main python job still records its required per-SHA green
-    # check (it just waits its turn).
-    concurrency:
-      group: shared-test-db
-      cancel-in-progress: false
+    # compute_jobs fencing/claim tests (CI flakiness audit F2).
+    #
+    # Phase 158 / OPS-01: this used to be a repo-wide GitHub concurrency group
+    # shared with `sql-tests` and `e2e-seeded`. It is now the "Acquire
+    # shared-test-db mutex" step below — a Postgres SESSION advisory lock on key
+    # 61616158, taken immediately before the first DB-touching step. Same
+    # queue-don't-race guarantee, but contenders BLOCK on the lock instead of
+    # occupying GitHub's single pending slot: with three members that slot made a
+    # third arrival EVICT the queued one, which concluded `cancelled` (a GREY
+    # check) and let Railway silently skip the analytics deploy (issue #616).
+    # ⛔ Do NOT reintroduce that group, in any shape — including a shrunken one.
+    # The eviction is CROSS-run, so fewer members only changes which run gets
+    # evicted. See the ⛔ block on `sql-tests` for the full mechanism.
     defaults:
       run:
         working-directory: analytics-service
@@ -1223,13 +1529,202 @@ jobs:
       # xdist_group infra all LAND (they are correct and the offline decoy pins
       # the scoping); re-enabling `-n auto` needs per-test claim-space isolation
       # first (TODOS: v1.9.1 Phase-97 parallelization deferral). The cross-run
-      # `concurrency: shared-test-db` group above still prevents two runs from
-      # contending. Keep byte-identical with Makefile `test:`.
+      # shared-test-db mutex acquired in the step below still prevents two runs
+      # from contending. Keep byte-identical with Makefile `test:`.
+      #
+      # Phase 158 / OPS-01 — the shared-test-db mutex, byte-identical to the step
+      # in `sql-tests` and `e2e-seeded` (see the long note on `sql-tests` for the
+      # mechanism and the ⛔ constraints). Placed immediately before `pytest`, the
+      # first DB-touching step of this job. This job's `defaults.run.
+      # working-directory: analytics-service` applies here and is harmless — the
+      # step reads no repo file.
+      - name: Acquire shared-test-db mutex
+        env:
+          TEST_SUPABASE_DB_URL: ${{ secrets.TEST_SUPABASE_DB_URL }}
+        run: |
+          set -euo pipefail
+          if [ -z "${TEST_SUPABASE_DB_URL:-}" ]; then
+            echo "fork PR / secret withheld — mutex skipped (DB work self-skips on forks)"
+            exit 0
+          fi
+          if ! command -v psql >/dev/null 2>&1; then
+            sudo apt-get update -y
+            sudo apt-get install -y --no-install-recommends postgresql-client
+          fi
+          # Session-mode DSN. The documented secret points at the Supavisor
+          # pooler on port 6543 = TRANSACTION mode, where a SESSION advisory lock
+          # does not survive between statements; session mode is served on 5432
+          # of the same host. Derived by parameter expansion and NEVER echoed —
+          # this repository is public and the derived string is not a value
+          # GitHub can mask for us.
+          dsn="${TEST_SUPABASE_DB_URL}"
+          case "${dsn}" in
+            *":6543/"*) dsn="${dsn%%:6543/*}:5432/${dsn#*:6543/}" ;;
+          esac
+          log="${RUNNER_TEMP}/shared-test-db-mutex.log"
+          pidfile="${RUNNER_TEMP}/shared-test-db-mutex.pid"
+          # 158-REVIEW WR-01: the idle sleep MUST outlive this job's
+          # `timeout-minutes`, or the holder session ends — releasing the lock —
+          # while the job is still doing DB work, and another run walks straight
+          # in. The old value (3300s = 55min) was SHORTER than the then-60min
+          # TTL, so any job that acquired early and ran long silently lost mutual
+          # exclusion for its last ~5 minutes. 6000s = 100min sits above this
+          # job's `timeout-minutes` with headroom, so the JOB always dies first
+          # and teardown is the only thing that ever releases this lock.
+          # ⛔ If you lower `timeout-minutes`, this stays valid. If you RAISE it,
+          # raise this too — the invariant is sleep > TTL, and nothing else
+          # enforces it.
+          start_holder() {
+            : > "${log}"
+            PGAPPNAME=ci-shared-test-db-mutex PGCONNECT_TIMEOUT=15 \
+              nohup psql "${dsn}" -X -q -A -t -v ON_ERROR_STOP=1 \
+                -c "SELECT pg_advisory_lock(61616158);" \
+                -c "SELECT 'MUTEX-ACQUIRED';" \
+                -c "SELECT pg_sleep(6000);" \
+                >> "${log}" 2>&1 &
+            holder=$!
+            echo "${holder}" > "${pidfile}"
+          }
+          # 158-REVIEW CR-04: the cap absorbs legitimate cross-run QUEUE DEPTH,
+          # not just a wedge. Three simultaneous runs put ~8 other holds ahead of
+          # the last waiter (~60m at the measured ~20m of lock-time per run), and
+          # the phase's success criterion is that all three still pass. 2700s was
+          # comparable to the work it had to absorb, so ordinary contention —
+          # which this repo's history records as NORMAL — surfaced as a red
+          # sql-tests → red `frontend` → skipped Railway deploy.
+          #
+          # 158-REVIEW WR-13: retry a DEAD SESSION, never a full wait. Every
+          # other network op in this file retries by explicit flakiness-audit
+          # decision (`npm ci`, `pip install`, the lychee download, the SRH
+          # readiness poll); this one did not, so a single transient connect
+          # blip inside PGCONNECT_TIMEOUT killed the backgrounded psql and
+          # exited 1 — now a red REQUIRED check, and on main a skipped Railway
+          # deploy. The two failure modes are deliberately kept distinct:
+          # "session died" is retryable (below), "waited past the cap" is NOT
+          # (that is contention, and retrying would just re-queue at the back).
+          # `waited` is CUMULATIVE across attempts, so retries can never extend
+          # the total wait beyond the cap the TTL was sized against.
+          waited=0
+          for attempt in 1 2 3; do
+            start_holder
+            while [ "${waited}" -lt 3600 ]; do
+              if grep -q 'MUTEX-ACQUIRED' "${log}" 2>/dev/null; then
+                echo "Acquired the shared-test-db advisory lock (key 61616158) after ${waited}s (attempt ${attempt}/3)."
+                exit 0
+              fi
+              if ! kill -0 "${holder}" 2>/dev/null; then
+                echo "::warning::mutex acquire attempt ${attempt}/3 lost its psql session after ${waited}s (redacted output follows)."
+                # 158-REVIEW WR-08: psql NEVER echoes the DSN on failure, so the
+                # userinfo pattern alone matched nothing and the raw text — the
+                # TEST pooler host, its resolved IP, and the DB username /
+                # project-ref — went straight into a PUBLIC Actions log, against
+                # this mutex's own stated invariant ("never a DSN, host,
+                # username, or password, in any CI log line"). Redact the shapes
+                # psql actually emits:
+                #   connection to server at "<host>" (<ip>), port <n> failed
+                #   FATAL:  password authentication failed for user "<user>"
+                sed -E -e 's#(postgres(ql)?://)[^@]*@#\1***@#g' \
+                       -e 's#(server at )"[^"]*"( \([^)]*\))?#\1"***"#g' \
+                       -e 's#(for user )"[^"]*"#\1"***"#g' "${log}" >&2 || true
+                break
+              fi
+              sleep 5
+              waited=$(( waited + 5 ))
+              if [ $(( waited % 60 )) -eq 0 ]; then
+                echo "still waiting on the shared-test-db mutex (${waited}s) — another run holds it."
+              fi
+            done
+            # Cap exhausted => contention, not a transient. Stop retrying and
+            # fall through to the census + timeout diagnostic below.
+            if [ "${waited}" -ge 3600 ]; then
+              break
+            fi
+            # The session is dead; drop its pid so the release step cannot kill
+            # an unrelated process that inherits the number.
+            rm -f "${pidfile}"
+            # 158-REVIEW WR-02 (iter 3): back off ONLY when a retry actually
+            # follows. Unguarded, the last iteration printed "retrying the mutex
+            # acquire in 15s" and then slept 15s before falling out of the loop
+            # to the "after 3 attempts" error — telling the operator a fourth
+            # attempt was coming when none was, which this repo's
+            # fail-loud-and-ACCURATE doctrine counts as a real cost. Worse, that
+            # phantom 15s was added to `waited`, and `waited` is the variable the
+            # cap-vs-session-fault branch below is chosen by: a run that
+            # legitimately queued to 3585s and then lost its session could be
+            # pushed over 3600 by backoff bookkeeping alone and misreported as
+            # contention rather than as the session fault it actually was.
+            if [ "${attempt}" -lt 3 ]; then
+              backoff=$(( attempt * 5 ))
+              echo "retrying the mutex acquire in ${backoff}s"
+              sleep "${backoff}"
+              waited=$(( waited + backoff ))
+            fi
+          done
+          if [ "${waited}" -lt 3600 ]; then
+            echo "::error::could not establish the shared-test-db mutex session after 3 attempts — psql died before acquiring each time (last output redacted above). This is a CONNECT/session fault, NOT lock contention: check the TEST project's session-mode pooler (port 5432) rather than hunting for a holder."
+            exit 1
+          fi
+          # 158-REVIEW CR-04: do NOT assert "a holder is wedged" — measure, then
+          # name both causes. From inside this loop a deep waiter queue and a
+          # wedged holder are indistinguishable, and the old message confidently
+          # named the rarer one, sending the operator hunting for a wedge that
+          # may not exist. Counts ONLY: no pids, no host, no DSN, and stderr is
+          # discarded outright — this log is public.
+          #
+          # 158-REVIEW WR-01 (iter 3): the census MUST be bounded. PGCONNECT_TIMEOUT
+          # bounds only the CONNECT; once connected, an unbounded query against a sick
+          # TEST Postgres/pooler blocks until this job's `timeout-minutes` kills the
+          # runner — so the operator gets LESS information than before the census
+          # existed (a bare "exceeded the maximum execution time"), and the job squats
+          # a runner for ~30 more minutes while holding no lock. A sick backend is
+          # precisely the condition under which this timeout fires, and this repo's
+          # history records a wedged TEST backend as a MEASURED event, not a
+          # hypothetical. Both bounds are needed because they cover different faults:
+          # `statement_timeout` is server-side (a slow or lock-blocked query) and
+          # `timeout` is client-side (a black-holed connection the server never hears
+          # about, where a server-side timeout can never fire). A diagnostic must
+          # never outlive the thing it diagnoses. `${census:-unavailable}` below
+          # already handles the empty result, so the message stays honest either way.
+          census="$(PGCONNECT_TIMEOUT=15 timeout 20 psql "${dsn}" -X -q -A -t \
+            -c "SET statement_timeout = '10s';" \
+            -c "SELECT count(*) FILTER (WHERE granted) || ' granted, ' || count(*) FILTER (WHERE NOT granted) || ' waiting' FROM pg_locks WHERE locktype = 'advisory' AND objid = 61616158;" \
+            2>/dev/null | tr -d '\r' | tail -1)" || true
+          echo "::error::timed out after ${waited}s waiting for the shared-test-db advisory lock (key 61616158). Lock census: ${census:-unavailable}. TWO causes are possible and this step cannot distinguish them: (1) QUEUE DEPTH — concurrent runs each hold the lock ~20m, which is a NORMAL condition in this repo; re-run once the queue drains. (2) A WEDGED holder whose runner is gone. Triage (count the waiters first) and manual unlock: docs/runbooks/shared-test-db-mutex.md sections 2-3."
+          exit 1
       - run: pytest --cov=services --cov=routers --cov=main_worker --cov-report=term-missing --cov-fail-under=80
         env:
           SUPABASE_TEST_URL: ${{ vars.E2E_TEST_DB_CONFIGURED == 'true' && secrets.TEST_SUPABASE_URL || '' }}
           SUPABASE_TEST_SERVICE_KEY: ${{ vars.E2E_TEST_DB_CONFIGURED == 'true' && secrets.TEST_SUPABASE_SERVICE_ROLE_KEY || '' }}
           CI: ${{ vars.E2E_TEST_DB_CONFIGURED == 'true' && 'true' || '' }}
+      # Best-effort EARLY release of the shared-test-db mutex (Phase 158 /
+      # OPS-01), identical in all three DB-touching jobs. See the note on
+      # `sql-tests`: teardown releases the lock anyway, this just hands it over
+      # sooner and never reddens the job.
+      - name: Release shared-test-db mutex (best effort)
+        if: always()
+        run: |
+          pidfile="${RUNNER_TEMP}/shared-test-db-mutex.pid"
+          if [ ! -f "${pidfile}" ]; then
+            echo "No mutex pid recorded (fork PR / acquire skipped) — nothing to release."
+            exit 0
+          fi
+          holder="$(cat "${pidfile}")"
+          if kill "${holder}" 2>/dev/null; then
+            echo "Released the shared-test-db mutex (terminated psql pid ${holder})."
+          else
+            # 158-REVIEW WR-01: reaching here is a FAULT, not housekeeping. A
+            # pidfile exists, so the acquire step really did start a holder — and
+            # that holder is now dead while this job was still running. Every DB
+            # step between its death and now ran with the mutex RELEASED, i.e.
+            # potentially concurrently with another run against the shared TEST
+            # project. The previous message ("was already gone — the session drop
+            # released the lock") described this as normal and printed on exactly
+            # the failure path it was supposed to surface.
+            # Annotation only: this step is `if: always()` and must never redden a
+            # job whose real work passed, and `echo ::error::` does not change the
+            # exit status. Job teardown remains the guaranteed release path.
+            echo "::error::mutex holder pid ${holder} died BEFORE this release step — the DB work after its death ran UNSERIALIZED. Do not trust this run's DB assertions; investigate (holder outlives the job by design, see the pg_sleep note in the acquire step)."
+          fi
 
   e2e:
     # Runs the PUBLIC/smoke Playwright suite against a placeholder-env
@@ -1382,6 +1877,36 @@ jobs:
           # describes self-skip without seed env (place 2 = the spec's
           # HAS_SEED_ENV const) and run in the seeded MA-8 list below. Adding a
           # spec? Update BOTH lists or the gate silently never runs (burned >=3x).
+          # Phase 158 / OPS-03: api-key-flow and sync-analytics-flow — two of the
+          # four specs that existed for ~2 years wired into NO batch at all, so
+          # they never ran anywhere — are now in this unseeded list. Plan 158-05
+          # ran and repaired them FIRST (both reds classified as CSRF-origin spec
+          # rot, not product defects) and measured them green under this job's
+          # placeholder-Supabase env. They depend on the
+          # NEXT_PUBLIC_ALLOWED_ORIGINS line in this step's env block below —
+          # without it their repaired contract POSTs 403 before reaching auth and
+          # measure the wrong arm. The other three (full-flow, csv-upload-flow,
+          # and the new my-strategies spec) went to the seeded MA-8 list, which
+          # carries the batch verdicts' reasoning.
+          #
+          # ⚠️ 158-REVIEW WR-06 — what this wiring DOES and DOES NOT buy. Stated
+          # in the repo's required form: after this change these two specs WOULD
+          # SURFACE a regression in a run log; they WOULD NOT have stopped it
+          # merging or deploying. Two independent reasons, both still true:
+          #   1. this step carries `continue-on-error: true` (kept deliberately
+          #      for the unfixed placeholder-Supabase DNS flake — see the note on
+          #      the step above), so a failing spec leaves an annotation and the
+          #      step still concludes green; and
+          #   2. the `e2e` job is in NO aggregator's `needs:` — `frontend` gates
+          #      on `e2e-seeded`, not on this job — so even a red job conclusion
+          #      moves no merge gate.
+          # So these two are ADVISORY. The other three went to `e2e-seeded`,
+          # which IS in the `frontend` aggregator's `needs:`; that half is
+          # genuinely blocking. Do not describe the OPS-03 wiring as "now gated".
+          # Promoting these two to a blocking lane is tracked in TODOS.md
+          # (Phase 158 OPS-03 section) and needs a MEASURED run in the target
+          # env first — they are green under THIS job's placeholder env, which
+          # is not evidence about the seeded job's env.
           # Capture the test exit code WITHOUT aborting the script (default
           # shell is `bash -e`). The port-3000 cleanup below is a FINALLY so a
           # failing spec never leaves an orphaned next-server bound to :3000
@@ -1401,7 +1926,7 @@ jobs:
               --update-snapshots \
               --timeout 60000
           else
-            npx playwright test e2e/auth.spec.ts e2e/smoke.spec.ts e2e/demo-public.spec.ts e2e/demo-founder-view.spec.ts e2e/onboarding-banner-smoke.spec.ts e2e/demo-screenshot.spec.ts e2e/reflow.spec.ts e2e/target-size.spec.ts e2e/reflow-sweep.spec.ts e2e/no-clip-sweep.spec.ts e2e/axe-app-wide.spec.ts e2e/marketing-shell.spec.ts e2e/route-redirects.spec.ts
+            npx playwright test e2e/auth.spec.ts e2e/smoke.spec.ts e2e/demo-public.spec.ts e2e/demo-founder-view.spec.ts e2e/onboarding-banner-smoke.spec.ts e2e/demo-screenshot.spec.ts e2e/reflow.spec.ts e2e/target-size.spec.ts e2e/reflow-sweep.spec.ts e2e/no-clip-sweep.spec.ts e2e/axe-app-wide.spec.ts e2e/marketing-shell.spec.ts e2e/route-redirects.spec.ts e2e/api-key-flow.spec.ts e2e/sync-analytics-flow.spec.ts
           fi
           PW_EXIT=$?
           set -e
@@ -1467,6 +1992,23 @@ jobs:
           ADMIN_EMAIL: test@example.com
           PLATFORM_NAME: Quantalyze
           PLATFORM_EMAIL: test@quantalyze.com
+          # Phase 158 / OPS-03 — same mechanism as the seeded step's copy of this
+          # line (see the e2e-seeded job's "Run seed-gated specs" env). This job
+          # serves the app with `npm run start`, i.e. production mode, so the
+          # localhost:3000 auto-allowlist in src/lib/csrf.ts (its NODE_ENV !==
+          # "production" branch) never fires and the runtime allowlist is EMPTY.
+          # The api-key-flow and sync-analytics-flow contract tests POST to
+          # mutating /api routes with an explicit Origin header (plan 158-05
+          # added it — the CSRF gate postdates those specs); without an entry
+          # here assertSameOrigin 403s them BEFORE auth runs, so they would
+          # assert the CSRF arm instead of the auth contract they exist to pin.
+          # Read at request time by server code, NOT inlined at build time —
+          # this job consumes a prebuilt artifact it cannot rebuild, and the
+          # seeded job proves the runtime read works (its own build step does
+          # not set this var either). No production exposure: the value is a
+          # literal localhost origin scoped to this step, and prod sets
+          # NEXT_PUBLIC_SITE_URL to the canonical host.
+          NEXT_PUBLIC_ALLOWED_ORIGINS: http://localhost:3000
       # Baseline bake (workflow_dispatch input bake_demo_screenshots): upload
       # ONLY the demo-screenshot snapshot PNGs — page images, no .next bundle /
       # trace.zip / page HTML — so the C-0293(c) secret-in-artifact concern that
@@ -1513,12 +2055,31 @@ jobs:
     # also means needs: only typecheck (F2 rationale: don't burn minutes on
     # an already-doomed PR; e2e validity depends on types, not unit tests).
     runs-on: ubuntu-latest
+    # TTL for the shared-test-db mutex (Phase 158 / OPS-01): GitHub kills the job
+    # at 90m, the psql session drops, and Postgres releases the advisory lock.
+    # That IS the steal path. Manual unlock:
+    # docs/runbooks/shared-test-db-mutex.md.
+    #
+    # 158-REVIEW CR-04 — why 90 and not 60. Each CI run takes this lock THREE
+    # times (python ~7m, e2e-seeded ~8-9m across build + the Playwright batch,
+    # sql-tests the balance) ≈ 20m of lock-time per run. The phase's own success
+    # criterion is that THREE simultaneous runs serialize and ALL SUCCEED, so the
+    # last job to acquire can legitimately queue behind ~8 other holds ≈ 60m. The
+    # acquire cap is sized to 3600s to absorb exactly that, and this TTL must
+    # then cover setup + that full cap + this job's own work (~2m + 60m + ~12m ≈
+    # 74m) with headroom. At 60m the waiter died of its OWN TTL mid-queue — and
+    # with sql-tests now BLOCKING the `frontend` aggregator that reddens main
+    # HEAD and makes Railway skip the analytics deploy, i.e. #616's damage
+    # through a new door. The trade is a wider worst-case WEDGED hold (90m);
+    # runbook section 3 is the manual override for that.
+    # ⛔ The holder's `pg_sleep` must stay ABOVE this number (WR-01) — it is 6000s.
+    timeout-minutes: 90
     # Fork-PR composition (same as sql-tests): repo VARIABLES are readable in
     # fork-PR runs while secrets are withheld, so the vars gate alone would
     # start the job on a fork and die at the seed step with empty secrets.
     if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.E2E_TEST_DB_CONFIGURED == 'true' }}
-    # v1.16 close-out (2026-08-01): join the SAME repo-wide `shared-test-db`
-    # group the `python` job carries. Both jobs drive the ONE shared Supabase
+    # v1.16 close-out (2026-08-01): serialize against the `python` job (and
+    # `sql-tests`). All three drive the ONE shared Supabase
     # test project (`secrets.TEST_SUPABASE_URL`), and `claim_compute_jobs_with_priority`
     # claims a GLOBAL batch of 50 ready rows — it cannot be scoped to a caller.
     # So while this job drives the wizard and enqueues `compute_jobs`, a
@@ -1528,26 +2089,33 @@ jobs:
     # foreign row — reddening 10 fencing/drain tests with `assert None is not None`
     # and `assert 'pending' == 'running'`.
     #
-    # The group already on `python` (see its comment) was added for CROSS-PR
-    # contention and explicitly reasons about "two different PRs' python jobs";
-    # it never covered two jobs INSIDE one run. `e2e` (the smoke batch) does not
-    # need the group — it builds against `https://placeholder.supabase.co` and
+    # The serialization already on `python` (see its comment) was added for
+    # CROSS-PR contention and explicitly reasons about "two different PRs' python
+    # jobs"; it never covered two jobs INSIDE one run. `e2e` (the smoke batch)
+    # does not need it — it builds against `https://placeholder.supabase.co` and
     # never reaches the shared project.
     #
-    # Costs wall-clock: this job now queues behind `python` (~7m) instead of
+    # Costs wall-clock: this job waits behind `python` (~7m) instead of
     # overlapping it. That is the price of the tests being trustworthy; the
     # alternative is a suite that reds on interleaving rather than on defects.
-    concurrency:
-      group: shared-test-db
-      cancel-in-progress: false
-    # ⛔ Do NOT add `sql-tests` to this `needs:` list to serialize the
-    # shared-test-db group. It looks right and it silently disables THIS job on
+    #
+    # Phase 158 / OPS-01: the mechanism used to be a repo-wide GitHub concurrency
+    # group shared with `python` and `sql-tests`. It is now the "Acquire
+    # shared-test-db mutex" step below — a Postgres SESSION advisory lock on key
+    # 61616158. ⛔ Do NOT reintroduce that group in any shape (including a
+    # shrunken one): with three members, a third arrival EVICTED the queued run,
+    # which concluded `cancelled` — a GREY check that Railway read as a failed
+    # check-suite, silently skipping the analytics deploy (issue #616). The
+    # eviction is CROSS-run, so shrinking only changes which run dies. Full
+    # mechanism in the ⛔ block on `sql-tests`.
+    # ⛔ Do NOT add `sql-tests` to this `needs:` list to serialize the shared test
+    # DB. It looks right and it silently disables THIS job on
     # every `workflow_dispatch` run: a skipped `needs:` job skips its dependents,
     # and the two `if:` conditions diverge on manual dispatch — `sql-tests`
     # requires `github.event_name == 'push'` (false) while this job only requires
     # `!= 'pull_request'` (true). The aggregator at the `e2e-seeded result=`
-    # check then errors on the skip. The group is serialized by gating
-    # `sql-tests` behind `python` instead; see the ⛔ note on that job.
+    # check then errors on the skip. Serialization needs no `needs:` edge at all
+    # now — the mutex does it, which is exactly why adding one is still wrong.
     needs:
       - frontend-typecheck
     steps:
@@ -1595,6 +2163,170 @@ jobs:
           else
             npx playwright install --with-deps chromium
           fi
+      # Phase 158 / OPS-01 — the shared-test-db mutex, byte-identical to the step
+      # in `sql-tests` and `python` (see the long note on `sql-tests` for the
+      # mechanism and the ⛔ constraints). Placed immediately before the seed
+      # step, which is this job's first DB-MUTATING step.
+      #
+      # NOTE on hold length: the Next build below runs AFTER the seed, so the
+      # lock is held across it (~1-2m). The build is deliberately NOT reordered
+      # ahead of the seed to shorten the hold: `npm run build` prerenders public
+      # routes against the real test-Supabase env, so building before the demo
+      # rows exist would bake a different (empty) prerender into the bundle the
+      # seeded specs then assert against.
+      - name: Acquire shared-test-db mutex
+        env:
+          TEST_SUPABASE_DB_URL: ${{ secrets.TEST_SUPABASE_DB_URL }}
+        run: |
+          set -euo pipefail
+          if [ -z "${TEST_SUPABASE_DB_URL:-}" ]; then
+            echo "fork PR / secret withheld — mutex skipped (DB work self-skips on forks)"
+            exit 0
+          fi
+          if ! command -v psql >/dev/null 2>&1; then
+            sudo apt-get update -y
+            sudo apt-get install -y --no-install-recommends postgresql-client
+          fi
+          # Session-mode DSN. The documented secret points at the Supavisor
+          # pooler on port 6543 = TRANSACTION mode, where a SESSION advisory lock
+          # does not survive between statements; session mode is served on 5432
+          # of the same host. Derived by parameter expansion and NEVER echoed —
+          # this repository is public and the derived string is not a value
+          # GitHub can mask for us.
+          dsn="${TEST_SUPABASE_DB_URL}"
+          case "${dsn}" in
+            *":6543/"*) dsn="${dsn%%:6543/*}:5432/${dsn#*:6543/}" ;;
+          esac
+          log="${RUNNER_TEMP}/shared-test-db-mutex.log"
+          pidfile="${RUNNER_TEMP}/shared-test-db-mutex.pid"
+          # 158-REVIEW WR-01: the idle sleep MUST outlive this job's
+          # `timeout-minutes`, or the holder session ends — releasing the lock —
+          # while the job is still doing DB work, and another run walks straight
+          # in. The old value (3300s = 55min) was SHORTER than the then-60min
+          # TTL, so any job that acquired early and ran long silently lost mutual
+          # exclusion for its last ~5 minutes. 6000s = 100min sits above this
+          # job's `timeout-minutes` with headroom, so the JOB always dies first
+          # and teardown is the only thing that ever releases this lock.
+          # ⛔ If you lower `timeout-minutes`, this stays valid. If you RAISE it,
+          # raise this too — the invariant is sleep > TTL, and nothing else
+          # enforces it.
+          start_holder() {
+            : > "${log}"
+            PGAPPNAME=ci-shared-test-db-mutex PGCONNECT_TIMEOUT=15 \
+              nohup psql "${dsn}" -X -q -A -t -v ON_ERROR_STOP=1 \
+                -c "SELECT pg_advisory_lock(61616158);" \
+                -c "SELECT 'MUTEX-ACQUIRED';" \
+                -c "SELECT pg_sleep(6000);" \
+                >> "${log}" 2>&1 &
+            holder=$!
+            echo "${holder}" > "${pidfile}"
+          }
+          # 158-REVIEW CR-04: the cap absorbs legitimate cross-run QUEUE DEPTH,
+          # not just a wedge. Three simultaneous runs put ~8 other holds ahead of
+          # the last waiter (~60m at the measured ~20m of lock-time per run), and
+          # the phase's success criterion is that all three still pass. 2700s was
+          # comparable to the work it had to absorb, so ordinary contention —
+          # which this repo's history records as NORMAL — surfaced as a red
+          # sql-tests → red `frontend` → skipped Railway deploy.
+          #
+          # 158-REVIEW WR-13: retry a DEAD SESSION, never a full wait. Every
+          # other network op in this file retries by explicit flakiness-audit
+          # decision (`npm ci`, `pip install`, the lychee download, the SRH
+          # readiness poll); this one did not, so a single transient connect
+          # blip inside PGCONNECT_TIMEOUT killed the backgrounded psql and
+          # exited 1 — now a red REQUIRED check, and on main a skipped Railway
+          # deploy. The two failure modes are deliberately kept distinct:
+          # "session died" is retryable (below), "waited past the cap" is NOT
+          # (that is contention, and retrying would just re-queue at the back).
+          # `waited` is CUMULATIVE across attempts, so retries can never extend
+          # the total wait beyond the cap the TTL was sized against.
+          waited=0
+          for attempt in 1 2 3; do
+            start_holder
+            while [ "${waited}" -lt 3600 ]; do
+              if grep -q 'MUTEX-ACQUIRED' "${log}" 2>/dev/null; then
+                echo "Acquired the shared-test-db advisory lock (key 61616158) after ${waited}s (attempt ${attempt}/3)."
+                exit 0
+              fi
+              if ! kill -0 "${holder}" 2>/dev/null; then
+                echo "::warning::mutex acquire attempt ${attempt}/3 lost its psql session after ${waited}s (redacted output follows)."
+                # 158-REVIEW WR-08: psql NEVER echoes the DSN on failure, so the
+                # userinfo pattern alone matched nothing and the raw text — the
+                # TEST pooler host, its resolved IP, and the DB username /
+                # project-ref — went straight into a PUBLIC Actions log, against
+                # this mutex's own stated invariant ("never a DSN, host,
+                # username, or password, in any CI log line"). Redact the shapes
+                # psql actually emits:
+                #   connection to server at "<host>" (<ip>), port <n> failed
+                #   FATAL:  password authentication failed for user "<user>"
+                sed -E -e 's#(postgres(ql)?://)[^@]*@#\1***@#g' \
+                       -e 's#(server at )"[^"]*"( \([^)]*\))?#\1"***"#g' \
+                       -e 's#(for user )"[^"]*"#\1"***"#g' "${log}" >&2 || true
+                break
+              fi
+              sleep 5
+              waited=$(( waited + 5 ))
+              if [ $(( waited % 60 )) -eq 0 ]; then
+                echo "still waiting on the shared-test-db mutex (${waited}s) — another run holds it."
+              fi
+            done
+            # Cap exhausted => contention, not a transient. Stop retrying and
+            # fall through to the census + timeout diagnostic below.
+            if [ "${waited}" -ge 3600 ]; then
+              break
+            fi
+            # The session is dead; drop its pid so the release step cannot kill
+            # an unrelated process that inherits the number.
+            rm -f "${pidfile}"
+            # 158-REVIEW WR-02 (iter 3): back off ONLY when a retry actually
+            # follows. Unguarded, the last iteration printed "retrying the mutex
+            # acquire in 15s" and then slept 15s before falling out of the loop
+            # to the "after 3 attempts" error — telling the operator a fourth
+            # attempt was coming when none was, which this repo's
+            # fail-loud-and-ACCURATE doctrine counts as a real cost. Worse, that
+            # phantom 15s was added to `waited`, and `waited` is the variable the
+            # cap-vs-session-fault branch below is chosen by: a run that
+            # legitimately queued to 3585s and then lost its session could be
+            # pushed over 3600 by backoff bookkeeping alone and misreported as
+            # contention rather than as the session fault it actually was.
+            if [ "${attempt}" -lt 3 ]; then
+              backoff=$(( attempt * 5 ))
+              echo "retrying the mutex acquire in ${backoff}s"
+              sleep "${backoff}"
+              waited=$(( waited + backoff ))
+            fi
+          done
+          if [ "${waited}" -lt 3600 ]; then
+            echo "::error::could not establish the shared-test-db mutex session after 3 attempts — psql died before acquiring each time (last output redacted above). This is a CONNECT/session fault, NOT lock contention: check the TEST project's session-mode pooler (port 5432) rather than hunting for a holder."
+            exit 1
+          fi
+          # 158-REVIEW CR-04: do NOT assert "a holder is wedged" — measure, then
+          # name both causes. From inside this loop a deep waiter queue and a
+          # wedged holder are indistinguishable, and the old message confidently
+          # named the rarer one, sending the operator hunting for a wedge that
+          # may not exist. Counts ONLY: no pids, no host, no DSN, and stderr is
+          # discarded outright — this log is public.
+          #
+          # 158-REVIEW WR-01 (iter 3): the census MUST be bounded. PGCONNECT_TIMEOUT
+          # bounds only the CONNECT; once connected, an unbounded query against a sick
+          # TEST Postgres/pooler blocks until this job's `timeout-minutes` kills the
+          # runner — so the operator gets LESS information than before the census
+          # existed (a bare "exceeded the maximum execution time"), and the job squats
+          # a runner for ~30 more minutes while holding no lock. A sick backend is
+          # precisely the condition under which this timeout fires, and this repo's
+          # history records a wedged TEST backend as a MEASURED event, not a
+          # hypothetical. Both bounds are needed because they cover different faults:
+          # `statement_timeout` is server-side (a slow or lock-blocked query) and
+          # `timeout` is client-side (a black-holed connection the server never hears
+          # about, where a server-side timeout can never fire). A diagnostic must
+          # never outlive the thing it diagnoses. `${census:-unavailable}` below
+          # already handles the empty result, so the message stays honest either way.
+          census="$(PGCONNECT_TIMEOUT=15 timeout 20 psql "${dsn}" -X -q -A -t \
+            -c "SET statement_timeout = '10s';" \
+            -c "SELECT count(*) FILTER (WHERE granted) || ' granted, ' || count(*) FILTER (WHERE NOT granted) || ' waiting' FROM pg_locks WHERE locktype = 'advisory' AND objid = 61616158;" \
+            2>/dev/null | tr -d '\r' | tail -1)" || true
+          echo "::error::timed out after ${waited}s waiting for the shared-test-db advisory lock (key 61616158). Lock census: ${census:-unavailable}. TWO causes are possible and this step cannot distinguish them: (1) QUEUE DEPTH — concurrent runs each hold the lock ~20m, which is a NORMAL condition in this repo; re-run once the queue drains. (2) A WEDGED holder whose runner is gone. Triage (count the waiters first) and manual unlock: docs/runbooks/shared-test-db-mutex.md sections 2-3."
+          exit 1
       - name: Seed demo data into test Supabase
         # Populates the 8-strategy demo set the seed-gated specs require.
         # Defense-in-depth against running this against prod by accident:
@@ -1760,6 +2492,25 @@ jobs:
           # variable set the gate above resolves to true → seeded run.
           # Adding/removing a seed-gated spec? Update both this list and
           # the e2e/<spec>.spec.ts HAS_SEED_ENV constant.
+          # Phase 158 / OPS-03: the last three entries below are newly wired.
+          # csv-upload-flow and my-strategies are seed-gated and satisfy the MA-8
+          # both-halves rule (list entry here + HAS_SEED_ENV in the spec, both
+          # landed by plan 158-05; csv-upload-flow was CONVERTED to the seeded
+          # contract because its old hardcoded demo login does not authenticate
+          # against the TEST project). full-flow is the deliberate exception to
+          # the HAS_SEED_ENV half: it reads NO seed env and mints nothing, so it
+          # is not seed-GATED — it is here for the seeded ENVIRONMENT, because
+          # its anon cases were MEASURED red under the unseeded job's placeholder
+          # Supabase (the landing -> /browse navigation never commits within
+          # Playwright's 5s URL budget while SSR hangs on placeholder fetches).
+          # Do NOT "fix" that asymmetry by bolting a HAS_SEED_ENV gate onto it;
+          # that would self-skip the very cases it is wired here to run.
+          # Known gap, deliberately not papered over: csv-upload-flow's two
+          # server-side validation cases stay SKIPPED here — /api/strategies/
+          # csv-validate forwards to the Python analytics service and NO job in
+          # this workflow provides ANALYTICS_SERVICE_URL. Provision that (plus
+          # INTERNAL_API_TOKEN) to un-skip them; un-gating them without it would
+          # red this batch deterministically.
           if [ "${BAKE_SVG_GOLDENS}" = "true" ]; then
             # One-shot golden bake (workflow_dispatch input bake_svg_goldens).
             # Run ONLY the svg-parity spec with --update-snapshots so no other
@@ -1794,6 +2545,9 @@ jobs:
               e2e/target-size.spec.ts \
               e2e/no-clip-sweep.spec.ts \
               e2e/axe-app-wide.spec.ts \
+              e2e/full-flow.spec.ts \
+              e2e/csv-upload-flow.spec.ts \
+              e2e/my-strategies.spec.ts \
               --timeout 60000
           fi
           # Phase 47-05 / FLOW-01 (place 1 of 2): the fresh
@@ -1875,6 +2629,35 @@ jobs:
           path: e2e/svg-chart-parity.spec.ts-snapshots/**/*.png
           if-no-files-found: error
           retention-days: 7
+      # Best-effort EARLY release of the shared-test-db mutex (Phase 158 /
+      # OPS-01), identical in all three DB-touching jobs. See the note on
+      # `sql-tests`: teardown releases the lock anyway, this just hands it over
+      # sooner and never reddens the job.
+      - name: Release shared-test-db mutex (best effort)
+        if: always()
+        run: |
+          pidfile="${RUNNER_TEMP}/shared-test-db-mutex.pid"
+          if [ ! -f "${pidfile}" ]; then
+            echo "No mutex pid recorded (fork PR / acquire skipped) — nothing to release."
+            exit 0
+          fi
+          holder="$(cat "${pidfile}")"
+          if kill "${holder}" 2>/dev/null; then
+            echo "Released the shared-test-db mutex (terminated psql pid ${holder})."
+          else
+            # 158-REVIEW WR-01: reaching here is a FAULT, not housekeeping. A
+            # pidfile exists, so the acquire step really did start a holder — and
+            # that holder is now dead while this job was still running. Every DB
+            # step between its death and now ran with the mutex RELEASED, i.e.
+            # potentially concurrently with another run against the shared TEST
+            # project. The previous message ("was already gone — the session drop
+            # released the lock") described this as normal and printed on exactly
+            # the failure path it was supposed to surface.
+            # Annotation only: this step is `if: always()` and must never redden a
+            # job whose real work passed, and `echo ::error::` does not change the
+            # exit status. Job teardown remains the guaranteed release path.
+            echo "::error::mutex holder pid ${holder} died BEFORE this release step — the DB work after its death ran UNSERIALIZED. Do not trust this run's DB assertions; investigate (holder outlives the job by design, see the pg_sleep note in the acquire step)."
+          fi
       # retro-PR179-H1 / C-0293(c): NO playwright-report upload from this
       # job, ever. Every spec here runs against the REAL-env build, and
       # Playwright's trace.zip + on-failure screenshots embed

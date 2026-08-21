@@ -15,6 +15,19 @@ import { test, expect, type Page } from "@playwright/test";
 // Helpers
 // ---------------------------------------------------------------------------
 
+/**
+ * 158-05 (OPS-03 orphan repair, 2026-08-20): mutating /api POSTs pass the CSRF
+ * origin gate (`assertSameOrigin`, src/lib/csrf.ts, added 2026-05-17 — AFTER
+ * this spec was written) BEFORE auth, and Playwright's `request` fixture sends
+ * no Origin header, so these contract tests were observing the CSRF 403 arm.
+ * Sending the app's own origin probes past CSRF to the auth contract asserted.
+ * CI wiring note (plan 158-06): a production-mode server needs
+ * `NEXT_PUBLIC_ALLOWED_ORIGINS: http://localhost:3000` in the job env (the
+ * seeded job's existing precedent in ci.yml); `npm run dev` allowlists
+ * localhost natively.
+ */
+const ORIGIN = process.env.PLAYWRIGHT_BASE_URL || "http://localhost:3000";
+
 /** Navigate to a strategy edit page (where sync controls live). */
 async function goToStrategyEdit(page: Page, strategyId: string) {
   await page.goto(`/strategies/${strategyId}/edit`);
@@ -33,16 +46,27 @@ test.describe("Sync & Analytics Flow", () => {
   test.describe("Sync API endpoint contract", () => {
     test("sync endpoint returns JSON, not redirect", async ({ request }) => {
       const res = await request.post("/api/keys/sync", {
+        headers: { Origin: ORIGIN },
         data: { strategy_id: "00000000-0000-0000-0000-000000000000" },
       });
 
       const contentType = res.headers()["content-type"] ?? "";
       expect(contentType).toContain("application/json");
       expect(res.status()).not.toBe(307);
+
+      // 158-REVIEW WR-07 (sibling of e2e/api-key-flow.spec.ts): a CSRF
+      // rejection is JSON and is not a 307, so without this line the case
+      // passes just as happily when the Origin allowlist wiring breaks and the
+      // request never reaches the auth contract it exists to probe.
+      expect(
+        res.status(),
+        "403 here means the Origin/allowlist wiring broke (CSRF rejected the request before auth), not that the sync contract changed — check NEXT_PUBLIC_ALLOWED_ORIGINS and PLAYWRIGHT_BASE_URL against the served origin",
+      ).not.toBe(403);
     });
 
     test("sync endpoint returns 401 for unauthenticated request", async ({ request }) => {
       const res = await request.post("/api/keys/sync", {
+        headers: { Origin: ORIGIN },
         data: { strategy_id: "00000000-0000-0000-0000-000000000000" },
       });
 
@@ -53,6 +77,7 @@ test.describe("Sync & Analytics Flow", () => {
 
     test("sync endpoint returns 400 when strategy_id is missing", async ({ request }) => {
       const res = await request.post("/api/keys/sync", {
+        headers: { Origin: ORIGIN },
         data: {},
       });
 
