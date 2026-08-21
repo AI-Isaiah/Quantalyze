@@ -705,12 +705,84 @@ def compute_all_metrics(
     # `returns` on the calendar basis (byte-identical), or the nonzero-day series on
     # the active basis. `periods_per_year` sets the annualization clock (crypto 365).
     volatility = _safe_float(qs.stats.volatility(stat_returns, periods=periods_per_year))
-    sharpe = _safe_float(qs.stats.sharpe(stat_returns, periods=periods_per_year))
-    # Audit 2026-05-07 H-0725: pass `rf=MAR` explicitly so the scalar sortino
+    # RANK-05 (Phase 159) — WHY INLINE, NOT quantstats. The pinned quantstats
+    # 0.0.81 routes every stat through `_utils._prepare_returns`, which carries a
+    # PRICE-detection heuristic the platform never asked for:
+    #
+    #     elif data.min() >= 0 and data.max() > 1:
+    #         data = data.pct_change(fill_method=None)
+    #
+    # An all-non-negative daily-RETURNS series whose max > 1 — a young
+    # ALL-WINNING account with one >100% day — is assumed to be a PRICE path and
+    # silently differenced, which FLIPS the sign of Sharpe and Sortino. Measured
+    # on a 60-day all-winning fixture (opening +150% day, decaying positive
+    # gains): pre-fix sharpe = -4.3469, sortino = -4.2254 for a series that never
+    # lost a day. These two scalars are RANKED, publicly-served KPIs, so that is a
+    # money-math lie reaching anonymous readers.
+    #
+    # `sharpe` and `sortino` carry NO `prepare_returns=` kwarg in 0.0.81 (verified
+    # by an in-env `inspect.signature` sweep, 2026-08-21), so the kwarg closure
+    # used at the sites below CANNOT reach them. The only closure is inline pandas
+    # — the same mechanism that already closed this class on the portfolio /
+    # verify_strategy path in `sharpe_vol_status_from_backbone` (see its "WHY
+    # INLINE" docblock below).
+    #
+    # MATH PARITY — reproduces quantstats 0.0.81 exactly, MINUS the price guess
+    # (quantstats/stats.py, `sharpe` and `sortino`):
+    #     sharpe:  divisor = returns.std(ddof=1)
+    #              res = returns.mean() / divisor; return res * sqrt(periods)
+    #     sortino: downside = sqrt((r[r < 0] ** 2).sum() / len(r))
+    #              res = returns.mean() / downside; return res * sqrt(periods)
+    # Both after `_prepare_returns(returns, rf, periods)`, whose only OTHER
+    # effects are the inf->NaN->0 fill (see the NaN note) and, when rf > 0, the
+    # de-annualized excess-return subtraction reproduced verbatim below. The
+    # Sharpe expression is written in the P114 form (annualized mean over
+    # annualized vol); it is algebraically identical to quantstats' mean/std*sqrt
+    # and is pinned against LIVE quantstats on benign series by
+    # `test_rank05_benign_*` in tests/test_metrics.py.
+    #
+    # NaN CONVENTION (deliberate, recorded): pandas' default skipna — an interior
+    # NaN day is DROPPED from the statistic, exactly as the P114 path does.
+    # `_prepare_returns` instead did `fillna(0)`, counting a gap day as a real
+    # 0.00% return (diluting mean and std, and inflating Sortino's denominator N).
+    # "No observation" is not "a flat day"; skipna is the honest reading and keeps
+    # this site coherent with the already-closed path. NaN-free series — every
+    # golden/parity fixture — are unaffected.
+    _stat_std = stat_returns.std()  # pandas default ddof=1 == quantstats' std(ddof=1)
+    sharpe = _safe_float(
+        (stat_returns.mean() * periods_per_year)
+        / (_stat_std * math.sqrt(periods_per_year))
+    )
+    # Audit 2026-05-07 H-0725: MAR is threaded EXPLICITLY so the scalar sortino
     # and `_rolling_sortino` share the SAME minimum acceptable return constant.
-    # Relying on qs.stats.sortino's implicit `rf=0` default silently diverges
-    # the moment MAR is ever tuned away from 0.
-    sortino = _safe_float(qs.stats.sortino(stat_returns, rf=MAR, periods=periods_per_year))
+    # quantstats applied it as `_prepare_returns(returns, rf=MAR, nperiods=periods)`,
+    # which (only when rf > 0) de-annualizes rf via `(1+rf)**(1/nperiods) - 1` and
+    # subtracts it (`_utils.to_excess_returns`). That subtraction is reproduced
+    # verbatim here and is an EXACT no-op at the current MAR = 0.0 (x - 0.0 == x),
+    # so today's values are byte-identical while a future MAR tune still flows
+    # through automatically. Pinned by
+    # `test_scalar_sortino_threads_mar_as_the_downside_floor`.
+    _mar_per_period = (1.0 + MAR) ** (1.0 / periods_per_year) - 1.0
+    _sortino_excess = stat_returns - _mar_per_period
+    _downside_sq_sum = float((_sortino_excess[_sortino_excess < 0.0] ** 2).sum())
+    # quantstats divides by `len(returns)` on its fillna(0) series; under the
+    # skipna convention above the honest denominator is the count of REAL
+    # observations (identical on every NaN-free series).
+    _sortino_n = int(_sortino_excess.count())
+    _downside = (
+        math.sqrt(_downside_sq_sum / _sortino_n) if _sortino_n > 0 else float("nan")
+    )
+    # downside == 0 (no day below MAR) leaves Sortino mathematically UNDEFINED;
+    # quantstats returns NaN there, which `_safe_float` maps to None. Same result,
+    # reached explicitly instead of via a divide-by-zero warning.
+    sortino = (
+        _safe_float(
+            (_sortino_excess.mean() * periods_per_year)
+            / (_downside * math.sqrt(periods_per_year))
+        )
+        if _downside > 0.0
+        else None
+    )
     # TWR-05: calmar = CAGR / |max_drawdown|, computed DIRECTLY so it shares the
     # CAGR basis above (geometric calendar-CAGR, or the simple arithmetic annualized).
     # quantstats' calmar helper is NO LONGER called: it recomputes its own CAGR leg
