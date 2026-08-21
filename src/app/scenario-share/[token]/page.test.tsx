@@ -50,7 +50,10 @@ vi.mock("@/lib/ratelimit", () => ({
 // are sanctioned, both bounded to the RPC's own series ids:
 //   - Phase 84 (BLEND-01): published-only `strategies` (id, asset_class) for the
 //     blend basis. Terminal `.eq()` resolves `strategiesReadMock` (default: no
-//     rows → empty lookup → √252).
+//     rows → empty lookup → every leg projects `asset_class: null`
+//     (share-resolve.ts :237, `?? null`) → an ALL-UNKNOWN blend, which RANK-06
+//     (159-04) resolves to √365 — the conservative RISK clock — NOT √252. Only
+//     a STATED-'traditional' row yields √252.
 //   - Phase 147 (SCEN-01): `strategy_analytics` (strategy_id, returns_series) so
 //     analytics-service-only legs (daily_returns null) still project their real
 //     series. Terminal `.in()` resolves `analyticsReadMock` (default: no rows →
@@ -379,17 +382,57 @@ describe("ScenarioSharePage (SHARE-02 / SHARE-03)", () => {
     expect(html).toContain("basis:365");
   });
 
-  it("BLEND-01 — a failed/empty strategies read degrades to the √252 default, never throws the page", async () => {
-    // The read rejects (a transient DB hiccup). The page must swallow it, fall
-    // back to the empty lookup → √252, and still render — never a thrown page.
+  it("BLEND-01 — a failed/empty strategies read degrades to the CONSERVATIVE √365 all-unknown basis, never throws the page", async () => {
+    // PRIMARY intent, unchanged: the read REJECTS (a transient DB hiccup). The
+    // page must swallow it and still render — a failed basis enrichment never
+    // throws the recipient's page.
+    //
+    // The basis it degrades TO changed at RANK-06 (159-04). A rejected read
+    // leaves the lookup empty, so every leg reaches blendPeriodsPerYear carrying
+    // `asset_class: null` (share-resolve.ts :237, `?? null`) — a NON-empty array
+    // of UNKNOWN-class legs, which is NOT the empty-`legs` case that still keeps
+    // the byte-identical 252 default. `strategies.asset_class` is NOT NULL
+    // DEFAULT 'traditional' in the DB, so a null class here is a caller
+    // PROJECTION GAP, never an honest "traditional": resolving it to 252 would
+    // understate a crypto blend's annualized vol by √(365/252) (~17%) and inflate
+    // its Sharpe (~×1.20) — the silent failure direction is the FLATTERING one.
+    // Unknown therefore fails toward the crypto clock; √252 is now reachable
+    // only via a stated-'traditional' row (the sibling test below).
     strategiesReadMock.mockRejectedValueOnce(new Error("transient db error"));
     rpcMock.mockResolvedValueOnce({ data: [okRow()], error: null });
 
     const html = await renderPage("degrade");
 
     expect(notFoundMock).not.toHaveBeenCalled();
+    expect(html).toContain("My Q3 Blend"); // rendered, not thrown — the point
+    expect(html).toContain("basis:365"); // all-unknown → conservative clock
+  });
+
+  it("BLEND-01 — a STATED-'traditional' leg keeps the √252 basis (RANK-06: the only route to 252 here)", async () => {
+    // The tradfi counterpart to the crypto test above, and this file's ONLY √252
+    // coverage. Before RANK-06 the traditional clock was pinned here only
+    // INCIDENTALLY, as the failed-read test's all-unknown default; now that
+    // unknown resolves to 365, an explicit 'traditional' row is the only thing
+    // proving the 252 branch still exists — without this test a regression that
+    // hard-wired blendPeriodsPerYear to 365 would pass the whole file.
+    //
+    // ⚠️ Note the CAPS in this test's name. Plan 159-04's blast-radius scan used
+    // `vitest -t "blend"`, which is CASE-SENSITIVE: it matched the lowercase
+    // "blend" tests in share-resolve.test.ts and silently skipped every
+    // "BLEND-01" test in this file, which is how the stale √252 expectation above
+    // survived the rule change. Scan blendPeriodsPerYear CALL SITES (grep), never
+    // a lowercase test-name substring.
+    strategiesReadMock.mockResolvedValueOnce({
+      data: [{ id: STRAT_A, asset_class: "traditional" }],
+      error: null,
+    });
+    rpcMock.mockResolvedValueOnce({ data: [okRow()], error: null });
+
+    const html = await renderPage("tradfi-blend");
+
+    expect(notFoundMock).not.toHaveBeenCalled();
     expect(html).toContain("My Q3 Blend");
-    expect(html).toContain("basis:252"); // honest default, no crash
+    expect(html).toContain("basis:252"); // stated tradfi → the √252 clock
   });
 
   it("SCEN-01 — reads returns_series bounded to the RPC series ids, and an analytics-only leg renders the SAME projection as the CSV leg", async () => {
