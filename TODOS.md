@@ -198,7 +198,7 @@ items were dropped, not carried. Categories: **Fix now** / **Fix mid-term** / **
    `critical-regressions.test.ts`: exactly 3 exempt holder invocations with the `SET`
    before `pg_advisory_lock` — proven able to fail (one site neutered 0→120000 → RED on
    exactly that job, 1 failed | 143 passed; restored → 144 passed).
-   **Completed:** v0.69.0.2 (2026-08-21)
+   **Completed:** v0.69.1.0 (2026-08-21)
 
 1. **`RESEND_API_KEY` unset in Vercel prod** — founder-LP report cron + all transactional
    email are dead (code soft-skips, only Sentry fires). **Founder action:** set the key in

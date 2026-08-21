@@ -82,6 +82,13 @@ There is **no lock-reaper cron, and none is needed.**
   `SET statement_timeout = 0` (without it, TEST's server-wide 120 s statement
   kill ends the sleep — and any contended lock wait — long before either
   number matters; [158-MUTEX-01], next blockquote).
+  A fourth, network-layer defense ([158-MUTEX-01] F2): the holder DSN carries
+  libpq keepalives (`keepalives_idle=60`, `keepalives_interval=15`,
+  `keepalives_count=4`), because both the lock wait and the idle hold carry
+  zero application traffic — they keep runner-side NAT mappings fresh, and if
+  the path dies anyway the client notices in ~2 min, so `psql` exits and the
+  release step's dead-holder witness fires instead of the backend silently
+  keeping the lock past the job.
   Until this was fixed (158-REVIEW WR-01) the sleep was 55min against a 60min
   TTL — i.e. the hold could end up to 5 minutes BEFORE the job did, silently
   dropping mutual exclusion for a long job's final steps. If you change either
@@ -103,8 +110,9 @@ There is **no lock-reaper cron, and none is needed.**
   > FIRST statement (session-level `SET` is permitted for any role and
   > overrides the configuration-file default), exempting both the lock wait
   > and the sleep. That is the invariant's third leg above, pinned in
-  > `src/__tests__/critical-regressions.test.ts` (exactly 3 exempt holder
-  > invocations, `SET` before `pg_advisory_lock`).
+  > `src/__tests__/critical-regressions.test.ts` (`SET` before
+  > `pg_advisory_lock` in each of the three jobs, and the three acquire steps
+  > asserted pairwise byte-identical).
 
 - A holder that dies early is now reported: the release step emits a
   `::error::` annotation (never a non-zero exit) when the recorded pid is
@@ -188,9 +196,9 @@ without freeing anything.
 is legitimately working plus a deep `granted = false` queue is the *other*
 failure mode: no session is wedged, yet the waiter at the back can still exhaust
 its acquire cap and redden its job. (A `granted = false` session that has been
-sitting far longer than 120 s is normal, not stuck: every mutex session zeroes
-`statement_timeout` before contending, so the server never reaps a queued wait
-— [158-MUTEX-01].) Postgres promises no arrival-order service
+sitting far longer than 120 s is normal, not stuck: every mutex session — the
+three CI holders *and* the probe's contenders — zeroes `statement_timeout`
+before contending, so the server never reaps a queued wait — [158-MUTEX-01].) Postgres promises no arrival-order service
 (section 1), so a waiter's position is not a countdown. If you see a healthy
 holder and several waiters, the answer is capacity/queue depth — re-run the
 failed job once the queue drains, and if it recurs, re-derive the cap and TTL in
@@ -255,8 +263,10 @@ shared wall-clock barrier and are checked pairwise for non-overlap by the
 > ⚠️ **Run the drill when CI is QUIET.** The `contend` job carries
 > `timeout-minutes: 15` and a single CI run holds this lock **~20 min**
 > (§2 above), so a probe dispatched while real CI holds the mutex is *expected*
-> to go red on its own job timeout. That is a scheduling artefact, **not** a
-> broken mutex — check `gh run list --workflow=CI --branch main` first, and
+> to go red on its own job timeout: each contender zeroes `statement_timeout`
+> like every mutex session, so a contended leg blocks inside `pg_advisory_lock`
+> until `timeout-minutes` kills the job — not until a 120 s statement kill.
+> That is a scheduling artefact, **not** a broken mutex — check `gh run list --workflow=CI --branch main` first, and
 > re-dispatch once the queue drains rather than escalating to §3's manual
 > unlock. (158-REVIEW WR-06: the workflow header used to promise the probe
 > "simply queues behind" real CI, which is what made this mis-triage likely.)
