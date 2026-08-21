@@ -230,6 +230,27 @@ items were dropped, not carried. Categories: **Fix now** / **Fix mid-term** / **
    passed; restored → 147 passed).
    **Completed:** v0.69.1.0 (2026-08-21)
 
+0d. **[159-SEED-01] 15 published `is_example` strategies sit at `computation_status =
+   'failed'` while still carrying KPI values — PROD, since 2026-05-27.** Measured by the
+   phase-159 C-M1 census (`.planning/phases/159-rank-public-ranking-integrity/159-CENSUS.md`,
+   run read-only against PROD 2026-08-21): of 18 published strategies in the only category
+   (`crypto-sma`), 17 fail the `isComputedAnalytics` gate and 15 of those are seeded example
+   rows whose analytics have been `failed` since 2026-05-27 yet still hold `sharpe`/`cagr`.
+   **Consequence once RANK-01 lands:** `crypto-sma` drops from 18 → 1 gate-passing strategy,
+   crossing the `< 5` badge floor, so **every percentile badge on the public discovery
+   surface stops rendering**. The gate is CORRECT — a failed computation must never produce a
+   published rank — so this is not a reason to weaken it (D-01 pre-decided that a
+   disappearing rank is the honest outcome). But the badge loss is driven by demo-data
+   quality, not real user data: only 2 real strategies are gated out and 1 real strategy
+   survives.
+   **This is a data-repair item, not a code item, and was explicitly OUT of phase-159 scope.**
+   Remedy options (pick one, do not leave implicit): (a) recompute analytics for the 15
+   example strategies so they reach a terminal success status; (b) unpublish them if they are
+   no longer wanted as demo content; (c) accept a badge-free discovery surface until real
+   published strategies reach the floor. Whichever is chosen, the discovery page's emptiness
+   after RANK-01 must be a decided state, not a surprise.
+   **Recorded:** 2026-08-21 (phase 159, census C-M1 / C-D1 surfacing)
+
 1. **`RESEND_API_KEY` unset in Vercel prod** — founder-LP report cron + all transactional
    email are dead (code soft-skips, only Sentry fires). **Founder action:** set the key in
    Vercel prod. Do before the first warned founder month. (Note: portfolio email *alerts*
