@@ -4,16 +4,16 @@ milestone: v1.20
 milestone_name: Backlog Burndown (Phases 158+)
 current_phase: 159
 current_phase_name: RANK — Public-ranking integrity
-status: planning
+status: executing
 stopped_at: Phase 159 context gathered
-last_updated: "2026-08-21T09:51:35.497Z"
+last_updated: "2026-08-21T10:53:07.353Z"
 last_activity: 2026-08-21
 last_activity_desc: Phase 158 complete, transitioned to Phase 159
-state_head: 08c169112a5dea1429ae469200c381428ba1637d
+state_head: f6ca8ba3fbf670939bdfbaae6a3c0144119e6427
 progress:
   total_phases: 8
   completed_phases: 1
-  total_plans: 6
+  total_plans: 13
   completed_plans: 6
   percent: 13
 ---
@@ -75,9 +75,9 @@ are re-homed into v1.17 (Phases 155 / 153); 142.3 will not run as a v1.16 phase.
 
 ## Current Position
 
-Phase: 159 — RANK — Public-ranking integrity
+Phase: 159 (RANK — Public-ranking integrity) — READY TO EXECUTE
 Plan: Not started
-Status: Ready to plan
+Status: Ready to execute
 Last activity: 2026-08-21 — Phase 158 complete, transitioned to Phase 159
 OPS-CI first (the shared-test-db eviction / #616 mutex protects every later merge), 165 DEPS
 last (hard-blocked on OPS-01), 160 provenance before 164 SHARE (REVOKE soak), SHARE alone in
