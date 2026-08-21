@@ -8,6 +8,8 @@ import {
   blendPeriodsPerYear,
   deriveEmptySeriesState,
   isComputedAnalytics,
+  isRankableAnalyticsRow,
+  PERCENTILE_GATE_COLUMN,
   type SeriesState,
 } from "./closed-sets";
 import { resolveDailyReturnSeries } from "@/lib/factsheet/resolve-series";
@@ -122,6 +124,13 @@ export type { PercentileMap } from "./percentile-core";
 /**
  * The analytics columns BOTH percentile callers project. Hoisted to a module
  * const so the two projections cannot drift.
+ *
+ * ⚠️ BYTE-FROZEN (Phase 159 / RANK-01). This list is the KPI set and nothing
+ * else. The csv-finalize route mirrors it member-for-member in its
+ * CLOCK_SAFETY_KPI_COLUMNS prose, so appending a non-KPI column here would
+ * silently make those comments false. The RANK-01 gate column is therefore a
+ * SEPARATE constant (`PERCENTILE_GATE_COLUMN`, closed-sets.ts) that each
+ * projection site composes alongside this one.
  */
 const PERCENTILE_ANALYTICS_COLUMNS =
   "cagr, sharpe, sortino, calmar, max_drawdown, volatility, cumulative_return";
@@ -141,7 +150,10 @@ const PERCENTILE_ANALYTICS_COLUMNS =
 export async function getPercentiles(categorySlug?: string): Promise<PercentileMap | null> {
   const supabase = await createClient();
 
-  const analyticsColumns = PERCENTILE_ANALYTICS_COLUMNS;
+  // RANK-01: the gate column rides ALONGSIDE the byte-frozen KPI list, never
+  // appended to it. Both select branches below interpolate this one composition,
+  // so the categorized and uncategorized projections cannot disagree.
+  const analyticsColumns = `${PERCENTILE_ANALYTICS_COLUMNS}, ${PERCENTILE_GATE_COLUMN}`;
 
   const query = categorySlug
     ? withPublishedOnly(
@@ -174,6 +186,11 @@ export async function getPercentiles(categorySlug?: string): Promise<PercentileM
   for (const s of strategies) {
     const a = extractAnalytics((s as Record<string, unknown>).strategy_analytics);
     if (!a) continue;
+    // RANK-01: a non-computed row (failed/pending/computing) neither RECEIVES a
+    // published percentile nor JOINS the population others are scored against.
+    // Dropping it here — before `rows` — is what makes the floor below count the
+    // honest denominator, mirroring the RPC's gated min-N cohort.
+    if (!isRankableAnalyticsRow(a)) continue;
     rows.push({ id: s.id, analytics: castRow<Record<string, number | null>>(a, "analytics") });
   }
 

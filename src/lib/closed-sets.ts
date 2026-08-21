@@ -718,6 +718,41 @@ export function isComputedAnalytics(
   return status === "complete" || status === "complete_with_warnings";
 }
 
+// --- RANK-01: the published-percentile rank gate (Phase 159) ---------------
+// The strategy_analytics column that decides whether a row may participate in a
+// PUBLIC ranking. Kept as its own constant, deliberately NOT appended to
+// queries.ts's PERCENTILE_ANALYTICS_COLUMNS: that list is mirrored member-for-
+// member by the csv-finalize CLOCK_SAFETY_KPI_COLUMNS prose, so growing it
+// would silently falsify three comments. The projection sites compose the two.
+export const PERCENTILE_GATE_COLUMN = "computation_status";
+
+// Whether an embedded strategy_analytics row may take part in a published
+// percentile ranking — as a SUBJECT (it receives a rank) and as a POPULATION
+// member (it shifts everyone else's).
+//
+// WHY A STATUS GATE AND NOT A NULL CHECK: a `failed` computation can still hold
+// KPI values from an earlier attempt. 159-CENSUS.md measured this in PROD — 17
+// of 18 published strategies carried a `failed` analytics row that still held
+// BOTH sharpe and cagr, so every `IS NOT NULL` predicate admitted them and dead
+// numbers were ranking against live ones. Only the status distinguishes them.
+//
+// This is the ONE gate for both TS percentile callers (getPercentiles and
+// getOwnRowPercentiles in queries.ts). It delegates to isComputedAnalytics
+// rather than re-deriving status semantics, so `complete_with_warnings` — a
+// terminal SUCCESS — stays ranked; a local `=== 'complete'` comparison would
+// silently unrank every warned-but-valid strategy.
+//
+// The SQL twin is the cohort predicate in get_verified_cohort_rank
+// (supabase/migrations/20260821120000_*): its
+// `IN ('complete','complete_with_warnings')` list mirrors isComputedAnalytics
+// exactly, which is what makes that migration's parity-by-construction claim a
+// true sentence. Change one, change the other.
+export function isRankableAnalyticsRow(
+  row: { computation_status?: string | null } | null | undefined,
+): boolean {
+  return isComputedAnalytics(row?.computation_status);
+}
+
 // --- Series state (Phase 147 / SCEN-01) ------------------------------------
 // What a read surface may say about a strategy's return series. "available" is
 // decided by the RESOLVED series' own length at the call site; the other two
