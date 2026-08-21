@@ -2,8 +2,8 @@
 
 **Artifact:** `159-CENSUS.md` (D-01 / C-D1 decision gate)
 **Authored:** 2026-08-21 (scaffold, plan 159-01 Task 1)
-**Executed against PROD:** _pending — filled at plan 159-01 Task 2_
-**PROD project ref (confirmed at execution):** _pending — recorded by the orchestrator before any query runs_
+**Executed against PROD:** 2026-08-21 (plan 159-01 Task 2, orchestrator, read-only)
+**PROD project ref (confirmed at execution):** `khslejtfbuezsmvmtsdn` (name `quantalyze`, ACTIVE_HEALTHY) — confirmed against the project list before any query ran; the TEST ref `qmnijlgmdhviwzwfyzlc` (`quantalyze-test`) was NOT used.
 
 ## Purpose
 
@@ -73,7 +73,14 @@ GROUP BY 1 ORDER BY 1;
 
 ### Results
 
-RESULTS: PENDING
+| category | published | with_analytics_row | after_gate | badge_floor_before | badge_floor_after |
+| --- | --- | --- | --- | --- | --- |
+| crypto-sma | 18 | 18 | 1 | true | **false** |
+
+**One category exists in PROD.** All 18 published strategies carry an analytics row; exactly
+**1** passes the two-value computed gate. `badge_floor_before` true -> `badge_floor_after`
+false: this category crosses the `< 5` floor, so its percentile badges stop rendering
+entirely. There is no `(no category)` partition — every published strategy is categorised.
 
 ---
 
@@ -99,7 +106,14 @@ WHERE s.status = 'published'
 
 ### Results
 
-RESULTS: PENDING
+| cohort_before | cohort_after |
+| --- | --- |
+| 3 | 1 |
+
+**The min-N 20 floor was ALREADY unmet before the gate** (3 < 20). `get_verified_cohort_rank`
+therefore returns NULL percentiles with an honest `cohort_n` today, and continues to after
+the gate — the gate changes the cohort size (3 -> 1) but crosses no floor, because the floor
+was never met. This is the one surface where the census proves *no* visible change.
 
 ---
 
@@ -121,7 +135,41 @@ WHERE s.status = 'published'
 
 ### Results
 
-RESULTS: PENDING
+**17 rows** — every one `computation_status = 'failed'` while carrying BOTH `sharpe` and
+`cagr`. This is the entire population the RANK-01 gate exists for.
+
+| id | computation_status | has_sharpe | has_cagr |
+| --- | --- | --- | --- |
+| `51a111ed-0000-4000-8000-000000000001` | failed | true | true |
+| `51a111ed-0000-4000-8000-000000000002` | failed | true | true |
+| `51a111ed-0000-4000-8000-000000000003` | failed | true | true |
+| `51a111ed-0000-4000-8000-000000000004` | failed | true | true |
+| `51a111ed-0000-4000-8000-000000000005` | failed | true | true |
+| `51a111ed-0000-4000-8000-000000000006` | failed | true | true |
+| `51a111ed-0000-4000-8000-000000000007` | failed | true | true |
+| `51a111ed-0000-4000-8000-000000000008` | failed | true | true |
+| `51a111ed-0000-4000-8000-000000000009` | failed | true | true |
+| `51a111ed-0000-4000-8000-000000000010` | failed | true | true |
+| `51a111ed-0000-4000-8000-000000000011` | failed | true | true |
+| `51a111ed-0000-4000-8000-000000000012` | failed | true | true |
+| `51a111ed-0000-4000-8000-000000000013` | failed | true | true |
+| `51a111ed-0000-4000-8000-000000000014` | failed | true | true |
+| `51a111ed-0000-4000-8000-000000000015` | failed | true | true |
+| `8581f739-1a7b-42a4-a209-3acfa327e259` | failed | true | true |
+| `fc1b4014-da41-49d7-8592-138be5a6fa12` | failed | true | true |
+
+**Composition (interpretive query, counts only):**
+
+| is_example | computation_status | n | computed_at | with_sharpe |
+| --- | --- | --- | --- | --- |
+| true | failed | 15 | 2026-05-27 | 15 |
+| false | failed | 2 | 2026-08-21 | 2 |
+| false | complete | 1 | 2026-08-21 | 1 |
+
+**15 of the 17 polluting rows are seeded example strategies** (`is_example = true`, ids
+`51a111ed-…-0000000000NN`), computed once on 2026-05-27 and `failed` ever since while
+retaining KPI values. The remaining 2 are real strategies that failed on 2026-08-21. The
+single gate survivor is a real, `complete` strategy computed 2026-08-21.
 
 ---
 
@@ -210,7 +258,175 @@ ORDER BY b.category, b.kpi, b.strategy_id;
 
 ### Results
 
-RESULTS: PENDING
+All 18 published strategies x 7 KPIs = **126 rows**, category `crypto-sma` throughout.
+`pct_after = NULL` means the strategy was itself gated out (its rank disappears).
+
+**KPI `cagr`**
+
+| strategy_id | pct_before | pct_after |
+| --- | --- | --- |
+| `13f7b07f-b792-41fc-bfef-6854adce2c4f` | 22 | 100 |
+| `51a111ed-0000-4000-8000-000000000001` | 44 | NULL |
+| `51a111ed-0000-4000-8000-000000000002` | 39 | NULL |
+| `51a111ed-0000-4000-8000-000000000003` | 61 | NULL |
+| `51a111ed-0000-4000-8000-000000000004` | 11 | NULL |
+| `51a111ed-0000-4000-8000-000000000005` | 100 | NULL |
+| `51a111ed-0000-4000-8000-000000000006` | 56 | NULL |
+| `51a111ed-0000-4000-8000-000000000007` | 72 | NULL |
+| `51a111ed-0000-4000-8000-000000000008` | 28 | NULL |
+| `51a111ed-0000-4000-8000-000000000009` | 67 | NULL |
+| `51a111ed-0000-4000-8000-000000000010` | 78 | NULL |
+| `51a111ed-0000-4000-8000-000000000011` | 83 | NULL |
+| `51a111ed-0000-4000-8000-000000000012` | 33 | NULL |
+| `51a111ed-0000-4000-8000-000000000013` | 89 | NULL |
+| `51a111ed-0000-4000-8000-000000000014` | 50 | NULL |
+| `51a111ed-0000-4000-8000-000000000015` | 94 | NULL |
+| `8581f739-1a7b-42a4-a209-3acfa327e259` | 17 | NULL |
+| `fc1b4014-da41-49d7-8592-138be5a6fa12` | 6 | NULL |
+
+**KPI `calmar`**
+
+| strategy_id | pct_before | pct_after |
+| --- | --- | --- |
+| `13f7b07f-b792-41fc-bfef-6854adce2c4f` | 33 | 100 |
+| `51a111ed-0000-4000-8000-000000000001` | 89 | NULL |
+| `51a111ed-0000-4000-8000-000000000002` | 67 | NULL |
+| `51a111ed-0000-4000-8000-000000000003` | 100 | NULL |
+| `51a111ed-0000-4000-8000-000000000004` | 11 | NULL |
+| `51a111ed-0000-4000-8000-000000000005` | 61 | NULL |
+| `51a111ed-0000-4000-8000-000000000006` | 50 | NULL |
+| `51a111ed-0000-4000-8000-000000000007` | 83 | NULL |
+| `51a111ed-0000-4000-8000-000000000008` | 22 | NULL |
+| `51a111ed-0000-4000-8000-000000000009` | 56 | NULL |
+| `51a111ed-0000-4000-8000-000000000010` | 78 | NULL |
+| `51a111ed-0000-4000-8000-000000000011` | 72 | NULL |
+| `51a111ed-0000-4000-8000-000000000012` | 22 | NULL |
+| `51a111ed-0000-4000-8000-000000000013` | 44 | NULL |
+| `51a111ed-0000-4000-8000-000000000014` | 39 | NULL |
+| `51a111ed-0000-4000-8000-000000000015` | 94 | NULL |
+| `8581f739-1a7b-42a4-a209-3acfa327e259` | 28 | NULL |
+| `fc1b4014-da41-49d7-8592-138be5a6fa12` | 6 | NULL |
+
+**KPI `cumulative_return`**
+
+| strategy_id | pct_before | pct_after |
+| --- | --- | --- |
+| `13f7b07f-b792-41fc-bfef-6854adce2c4f` | 22 | 100 |
+| `51a111ed-0000-4000-8000-000000000001` | 44 | NULL |
+| `51a111ed-0000-4000-8000-000000000002` | 39 | NULL |
+| `51a111ed-0000-4000-8000-000000000003` | 83 | NULL |
+| `51a111ed-0000-4000-8000-000000000004` | 6 | NULL |
+| `51a111ed-0000-4000-8000-000000000005` | 100 | NULL |
+| `51a111ed-0000-4000-8000-000000000006` | 67 | NULL |
+| `51a111ed-0000-4000-8000-000000000007` | 56 | NULL |
+| `51a111ed-0000-4000-8000-000000000008` | 28 | NULL |
+| `51a111ed-0000-4000-8000-000000000009` | 78 | NULL |
+| `51a111ed-0000-4000-8000-000000000010` | 61 | NULL |
+| `51a111ed-0000-4000-8000-000000000011` | 72 | NULL |
+| `51a111ed-0000-4000-8000-000000000012` | 33 | NULL |
+| `51a111ed-0000-4000-8000-000000000013` | 89 | NULL |
+| `51a111ed-0000-4000-8000-000000000014` | 50 | NULL |
+| `51a111ed-0000-4000-8000-000000000015` | 94 | NULL |
+| `8581f739-1a7b-42a4-a209-3acfa327e259` | 17 | NULL |
+| `fc1b4014-da41-49d7-8592-138be5a6fa12` | 11 | NULL |
+
+**KPI `max_drawdown`**
+
+| strategy_id | pct_before | pct_after |
+| --- | --- | --- |
+| `13f7b07f-b792-41fc-bfef-6854adce2c4f` | 89 | 0 |
+| `51a111ed-0000-4000-8000-000000000001` | 72 | NULL |
+| `51a111ed-0000-4000-8000-000000000002` | 78 | NULL |
+| `51a111ed-0000-4000-8000-000000000003` | 83 | NULL |
+| `51a111ed-0000-4000-8000-000000000004` | 0 | NULL |
+| `51a111ed-0000-4000-8000-000000000005` | 6 | NULL |
+| `51a111ed-0000-4000-8000-000000000006` | 50 | NULL |
+| `51a111ed-0000-4000-8000-000000000007` | 67 | NULL |
+| `51a111ed-0000-4000-8000-000000000008` | 22 | NULL |
+| `51a111ed-0000-4000-8000-000000000009` | 56 | NULL |
+| `51a111ed-0000-4000-8000-000000000010` | 61 | NULL |
+| `51a111ed-0000-4000-8000-000000000011` | 44 | NULL |
+| `51a111ed-0000-4000-8000-000000000012` | 11 | NULL |
+| `51a111ed-0000-4000-8000-000000000013` | 28 | NULL |
+| `51a111ed-0000-4000-8000-000000000014` | 33 | NULL |
+| `51a111ed-0000-4000-8000-000000000015` | 39 | NULL |
+| `8581f739-1a7b-42a4-a209-3acfa327e259` | 94 | NULL |
+| `fc1b4014-da41-49d7-8592-138be5a6fa12` | 17 | NULL |
+
+**KPI `sharpe`**
+
+| strategy_id | pct_before | pct_after |
+| --- | --- | --- |
+| `13f7b07f-b792-41fc-bfef-6854adce2c4f` | 33 | 100 |
+| `51a111ed-0000-4000-8000-000000000001` | 89 | NULL |
+| `51a111ed-0000-4000-8000-000000000002` | 78 | NULL |
+| `51a111ed-0000-4000-8000-000000000003` | 100 | NULL |
+| `51a111ed-0000-4000-8000-000000000004` | 11 | NULL |
+| `51a111ed-0000-4000-8000-000000000005` | 67 | NULL |
+| `51a111ed-0000-4000-8000-000000000006` | 50 | NULL |
+| `51a111ed-0000-4000-8000-000000000007` | 83 | NULL |
+| `51a111ed-0000-4000-8000-000000000008` | 22 | NULL |
+| `51a111ed-0000-4000-8000-000000000009` | 61 | NULL |
+| `51a111ed-0000-4000-8000-000000000010` | 56 | NULL |
+| `51a111ed-0000-4000-8000-000000000011` | 72 | NULL |
+| `51a111ed-0000-4000-8000-000000000012` | 28 | NULL |
+| `51a111ed-0000-4000-8000-000000000013` | 44 | NULL |
+| `51a111ed-0000-4000-8000-000000000014` | 39 | NULL |
+| `51a111ed-0000-4000-8000-000000000015` | 94 | NULL |
+| `8581f739-1a7b-42a4-a209-3acfa327e259` | 17 | NULL |
+| `fc1b4014-da41-49d7-8592-138be5a6fa12` | 6 | NULL |
+
+**KPI `sortino`**
+
+| strategy_id | pct_before | pct_after |
+| --- | --- | --- |
+| `13f7b07f-b792-41fc-bfef-6854adce2c4f` | 33 | 100 |
+| `51a111ed-0000-4000-8000-000000000001` | 89 | NULL |
+| `51a111ed-0000-4000-8000-000000000002` | 78 | NULL |
+| `51a111ed-0000-4000-8000-000000000003` | 94 | NULL |
+| `51a111ed-0000-4000-8000-000000000004` | 11 | NULL |
+| `51a111ed-0000-4000-8000-000000000005` | 67 | NULL |
+| `51a111ed-0000-4000-8000-000000000006` | 50 | NULL |
+| `51a111ed-0000-4000-8000-000000000007` | 83 | NULL |
+| `51a111ed-0000-4000-8000-000000000008` | 22 | NULL |
+| `51a111ed-0000-4000-8000-000000000009` | 56 | NULL |
+| `51a111ed-0000-4000-8000-000000000010` | 61 | NULL |
+| `51a111ed-0000-4000-8000-000000000011` | 72 | NULL |
+| `51a111ed-0000-4000-8000-000000000012` | 28 | NULL |
+| `51a111ed-0000-4000-8000-000000000013` | 44 | NULL |
+| `51a111ed-0000-4000-8000-000000000014` | 39 | NULL |
+| `51a111ed-0000-4000-8000-000000000015` | 100 | NULL |
+| `8581f739-1a7b-42a4-a209-3acfa327e259` | 17 | NULL |
+| `fc1b4014-da41-49d7-8592-138be5a6fa12` | 6 | NULL |
+
+**KPI `volatility`**
+
+| strategy_id | pct_before | pct_after |
+| --- | --- | --- |
+| `13f7b07f-b792-41fc-bfef-6854adce2c4f` | 83 | 0 |
+| `51a111ed-0000-4000-8000-000000000001` | 89 | NULL |
+| `51a111ed-0000-4000-8000-000000000002` | 94 | NULL |
+| `51a111ed-0000-4000-8000-000000000003` | 78 | NULL |
+| `51a111ed-0000-4000-8000-000000000004` | 11 | NULL |
+| `51a111ed-0000-4000-8000-000000000005` | 0 | NULL |
+| `51a111ed-0000-4000-8000-000000000006` | 44 | NULL |
+| `51a111ed-0000-4000-8000-000000000007` | 72 | NULL |
+| `51a111ed-0000-4000-8000-000000000008` | 28 | NULL |
+| `51a111ed-0000-4000-8000-000000000009` | 50 | NULL |
+| `51a111ed-0000-4000-8000-000000000010` | 39 | NULL |
+| `51a111ed-0000-4000-8000-000000000011` | 56 | NULL |
+| `51a111ed-0000-4000-8000-000000000012` | 17 | NULL |
+| `51a111ed-0000-4000-8000-000000000013` | 22 | NULL |
+| `51a111ed-0000-4000-8000-000000000014` | 61 | NULL |
+| `51a111ed-0000-4000-8000-000000000015` | 33 | NULL |
+| `8581f739-1a7b-42a4-a209-3acfa327e259` | 67 | NULL |
+| `fc1b4014-da41-49d7-8592-138be5a6fa12` | 6 | NULL |
+
+**Reading:** 17 of 18 strategies have `pct_after = NULL` on every KPI — gated out. The sole
+survivor `13f7b07f-…` becomes a **single-member cohort**, so `cume_dist` puts it at 100 on
+every higher-is-better KPI and 0 on both lower-is-better KPIs (`max_drawdown`, `volatility`).
+That degenerate self-percentile is exactly what the `< 5` badge floor exists to suppress —
+and it holds: with `after_gate = 1`, no badge renders. The floor is doing its job.
 
 ---
 
@@ -224,7 +440,10 @@ word "none"** — never left blank. These entries are the phase-UAT surfacing in
 From Query 1: every row where `badge_floor_before` is true and `badge_floor_after` is false.
 Those categories lose their percentile badges entirely.
 
-_pending_
+**`crypto-sma`** — the only category in PROD. `badge_floor_before` true (18 rows),
+`badge_floor_after` false (1 row). It crosses the floor, so **every percentile badge on the
+public discovery surface stops rendering** once the gate lands. This is the single largest
+visible change in phase 159 and the headline UAT expectation.
 
 ### (b) Does the RPC cohort cross the min-N 20 floor?
 
@@ -232,7 +451,9 @@ From Query 2: state `cohort_before`, `cohort_after`, and whether `cohort_after <
 does, `get_verified_cohort_rank` begins returning NULL percentiles with an honest
 `cohort_n` for every caller.
 
-_pending_
+`cohort_before` = **3**, `cohort_after` = **1**. `cohort_after < 20` is **true** — but so was
+`cohort_before < 20`. **No crossing occurs**: the RPC already returns NULL percentiles with an
+honest `cohort_n` today and will continue to. The gate is invisible on this surface.
 
 ### (c) Strategies whose percentile visibly moves or disappears
 
@@ -240,7 +461,28 @@ From Query 4: strategy ids whose `pct_after` is NULL (rank disappears — the st
 itself gated out) and ids whose `pct_after` differs materially from `pct_before` (rank moves
 because polluted peers left the cohort). List by id and KPI.
 
-_pending_
+**Rank disappears (pct_after NULL) — 17 strategies, all 7 KPIs each:** the 15 seeded example
+ids `51a111ed-0000-4000-8000-000000000001` … `-000000000015`, plus
+`8581f739-1a7b-42a4-a209-3acfa327e259` and `fc1b4014-da41-49d7-8592-138be5a6fa12`.
+
+**Rank moves — 1 strategy, `13f7b07f-b792-41fc-bfef-6854adce2c4f`** (the sole survivor), on
+all 7 KPIs: `cagr` 22 -> 100, `calmar` 33 -> 100, `cumulative_return` 22 -> 100, `sharpe`
+33 -> 100, `sortino` 33 -> 100, `max_drawdown` 89 -> 0, `volatility` 83 -> 0. Direction is
+**not** uniform — it improves on five KPIs and worsens on two, which is precisely why no test
+may assert "ranks improve" (success criterion 2). None of these values render: the `< 5`
+badge floor suppresses the whole category.
+
+### (d) Root-cause note — the pollution is 88% seeded demo data (recorded, not acted on here)
+
+15 of the 17 gated-out rows are `is_example = true` seed strategies whose analytics have sat
+at `failed` since 2026-05-27 while still carrying KPI values. The gate treats them correctly:
+a failed computation must not produce a published rank. But it means the visible badge loss on
+`crypto-sma` is driven by **demo-data quality**, not by real user data — only 2 real strategies
+are gated out, and 1 real strategy survives.
+
+That is a data-repair question (recompute or unpublish the examples), **not** a code question,
+and it is explicitly OUT of phase-159 scope. Logged to TODOS.md as a follow-up so the badge
+loss has a recorded remedy path rather than becoming permanent by silence.
 
 ### The D-01 decision
 
