@@ -706,10 +706,14 @@ describe("Phase 64 / PRESENT-03 — isMixed (mixed-share caption condition)", ()
 // second argument. ResolvedOk carries the basis actually used (periodsPerYear)
 // so the page threads the IDENTICAL basis into ScenarioBenchmarkSection.
 //
-// twr is basis-invariant (return space); vol/sharpe ride √basis. An
-// all-unknown / empty lookup keeps the √252 default byte-identical to today —
-// the whole existing suite above (which passes NO lookup) is that byte-identity
-// pin, staying green.
+// twr is basis-invariant (return space); vol/sharpe ride √basis.
+//
+// RANK-06 (159-04) REVISED the unknown-leg arm: an all-unknown lookup is a
+// SHARE-PAGE PROJECTION GAP (the published-rows read supplies assetClassById;
+// a leg missing from it arrives null), and a gap now derives the conservative
+// √365 clock rather than silently understating a crypto blend's vol. Only an
+// EXPLICITLY-traditional lookup keeps √252. The suite above passes no lookup
+// and asserts basis-invariant fields, so it is unaffected.
 // ===========================================================================
 describe("resolveSharedScenario — blend-basis threading (BLEND-01)", () => {
   it("a crypto-tagged lookup → the projection annualizes on √365 and ResolvedOk.periodsPerYear === 365", () => {
@@ -721,24 +725,28 @@ describe("resolveSharedScenario — blend-basis threading (BLEND-01)", () => {
     };
 
     const crypto = resolveSharedScenario(row, { [STRAT_A]: "crypto" });
-    const bare = resolveSharedScenario(row); // no lookup → all null → √252
+    const tradfi = resolveSharedScenario(row, {
+      [STRAT_A]: "traditional",
+      [STRAT_B]: "traditional",
+    });
 
     expect(crypto.kind).toBe("ok");
-    expect(bare.kind).toBe("ok");
-    if (crypto.kind !== "ok" || bare.kind !== "ok") throw new Error("expected ok");
+    expect(tradfi.kind).toBe("ok");
+    if (crypto.kind !== "ok" || tradfi.kind !== "ok")
+      throw new Error("expected ok");
 
-    // A SELECTED crypto leg → √365; the bare (unknown) blend stays √252.
+    // A SELECTED crypto leg → √365; an explicitly-traditional blend → √252.
     expect(crypto.periodsPerYear).toBe(365);
-    expect(bare.periodsPerYear).toBe(252);
+    expect(tradfi.periodsPerYear).toBe(252);
 
     // twr is basis-invariant — identical underlying blended series.
-    expect(crypto.metrics.twr).toBe(bare.metrics.twr);
+    expect(crypto.metrics.twr).toBe(tradfi.metrics.twr);
     // …but the RISK-clock metric genuinely differs (the basis reached compute).
-    expect(crypto.metrics.volatility).not.toBe(bare.metrics.volatility);
+    expect(crypto.metrics.volatility).not.toBe(tradfi.metrics.volatility);
     expect(crypto.metrics.volatility).not.toBeNull();
   });
 
-  it("no lookup and an EMPTY lookup are byte-identical, both √252 (default pin)", () => {
+  it("RANK-06: no lookup and an EMPTY lookup are byte-identical, and both are the √365 projection-gap case", () => {
     const row = {
       name: "Unknown blend",
       draft: okDraft(),
@@ -748,16 +756,30 @@ describe("resolveSharedScenario — blend-basis threading (BLEND-01)", () => {
 
     const bare = resolveSharedScenario(row);
     const empty = resolveSharedScenario(row, {});
+    const tradfi = resolveSharedScenario(row, {
+      [STRAT_A]: "traditional",
+      [STRAT_B]: "traditional",
+    });
 
     expect(bare.kind).toBe("ok");
-    if (bare.kind !== "ok") throw new Error("expected ok");
-    // The default basis is √252, byte-identical to today.
-    expect(bare.periodsPerYear).toBe(252);
-    // Supplying an empty lookup changes NOTHING.
+    expect(tradfi.kind).toBe("ok");
+    if (bare.kind !== "ok" || tradfi.kind !== "ok")
+      throw new Error("expected ok");
+    // RANK-06: a share row whose published-rows read supplied no class for a
+    // SELECTED leg is a projection gap, not a tradfi blend → the conservative
+    // √365 clock. This was 252 before 159-04 (a deliberate economics change).
+    expect(bare.periodsPerYear).toBe(365);
+    // Supplying an empty lookup changes NOTHING (both are the same gap).
     expect(empty).toEqual(bare);
+    // Non-vacuous: the stated-traditional blend over the SAME row is genuinely
+    // the other clock, and its RISK metric genuinely differs.
+    expect(tradfi.periodsPerYear).toBe(252);
+    expect(bare.metrics.volatility).not.toBe(tradfi.metrics.volatility);
+    // RETURN space is unmoved by the clock (#597 scope).
+    expect(bare.metrics.twr).toBe(tradfi.metrics.twr);
   });
 
-  it("an added-only draft's asset_class comes from the lookup; a leg absent from the lookup defaults to the √252 leg", () => {
+  it("an added-only draft's asset_class comes from the lookup; ONE crypto leg among stated-traditional legs still flips the blend to √365", () => {
     // Two selected added legs, only ONE tagged crypto → any-crypto rule → √365.
     const row = {
       name: "One crypto leg",
@@ -765,8 +787,13 @@ describe("resolveSharedScenario — blend-basis threading (BLEND-01)", () => {
       schema_version: SCENARIO_SCHEMA_VERSION,
       series: okSeriesRows(),
     };
-    // STRAT_B absent from the lookup → null (√252 leg); STRAT_A crypto → √365.
-    const result = resolveSharedScenario(row, { [STRAT_A]: "crypto" });
+    // STRAT_B is STATED traditional (a 252 leg — RANK-06: leaving it absent
+    // would make it a 365 projection-gap leg and this pin vacuous, since the
+    // blend would ride 365 with or without STRAT_A's crypto tag).
+    const result = resolveSharedScenario(row, {
+      [STRAT_A]: "crypto",
+      [STRAT_B]: "traditional",
+    });
     expect(result.kind).toBe("ok");
     if (result.kind !== "ok") throw new Error("expected ok");
     expect(result.periodsPerYear).toBe(365);

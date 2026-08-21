@@ -180,10 +180,18 @@ describe("closed-sets registry", () => {
       expect(fromExchange(null)).toBe(252); // CSV upload, no exchange
     });
 
-    it("blendPeriodsPerYear: √365 if ANY leg is crypto, else √252 (the locked #597 blend rule)", () => {
+    it("blendPeriodsPerYear: √365 if ANY leg is crypto OR unknown-class, else √252 (#597 blend rule as revised by RANK-06)", () => {
       // A blended daily return series is calendar-daily (7-day) the moment ANY
       // crypto leg is present, so it has ~365 obs/year; a pure-tradfi blend
-      // stays √252. blendPeriodsPerYear(legs) = legs.some(crypto) ? 365 : 252.
+      // stays √252.
+      //
+      // RANK-06 (2026-08-21) DELIBERATELY CHANGES the unknown-leg economics of
+      // this pin: `strategies.asset_class` is NOT NULL in the DB, so a leg whose
+      // `asset_class` is absent/null/undefined is never an honest "traditional"
+      // answer — it is a CALLER PROJECTION GAP. Resolving that gap to 252
+      // understates a crypto blend's vol by ~17% and inflates its Sharpe ~×1.20
+      // on the allocator-facing ranking, so the unknown leg now fails toward the
+      // conservative (crypto) clock.
       expect(
         blendPeriodsPerYear([
           { asset_class: "crypto" },
@@ -197,21 +205,72 @@ describe("closed-sets registry", () => {
         ]),
       ).toBe(252);
       // Empty blend → the conservative pre-#597 252 default (byte-identical).
+      // UNCHANGED by RANK-06: "no legs at all" is not a projection gap, there is
+      // nothing whose class could have been dropped.
       expect(blendPeriodsPerYear([])).toBe(252);
-      // null / undefined / missing asset_class legs → 252 (no crypto leg).
+      // RANK-06 (Test 1 — the defect): a leg object that OMITS asset_class is
+      // the exact shape a lossy caller projection produces → 365, not 252.
+      expect(blendPeriodsPerYear([{}])).toBe(365);
+      // RANK-06 (Test 2): null and undefined are the same projection gap.
+      expect(blendPeriodsPerYear([{ asset_class: null }])).toBe(365);
+      expect(blendPeriodsPerYear([{ asset_class: undefined }])).toBe(365);
       expect(
         blendPeriodsPerYear([
           { asset_class: null },
           { asset_class: undefined },
           {},
         ]),
-      ).toBe(252);
+      ).toBe(365);
+      // A known-traditional leg beside an unknown one still rides 365 — the rule
+      // is ANY-crypto-or-unknown, matching the any-crypto flip below.
+      expect(
+        blendPeriodsPerYear([{ asset_class: "traditional" }, {}]),
+      ).toBe(365);
       // One crypto leg flips the whole blend to 365 even beside null legs.
       expect(
         blendPeriodsPerYear([{ asset_class: null }, { asset_class: "crypto" }]),
       ).toBe(365);
       // Exact-match closed set — DB stores lowercase 'crypto'; no case widening.
+      // A NON-NULL unrecognized string is NOT a projection gap (the caller did
+      // supply a class), so it stays traditional √252: RANK-06 widened nullish,
+      // NOT the string matching.
       expect(blendPeriodsPerYear([{ asset_class: "CRYPTO" }])).toBe(252);
+    });
+
+    it("blendPeriodsPerYear economics (RANK-06): an unknown-class blend annualizes vol at √(365/252) ≈ 1.204× the traditional blend on the SAME series", () => {
+      // ECONOMIC-INVARIANT ORACLE (house testing law): the oracle is the ratio
+      // between two annualization clocks — √(365/252), a market-structure
+      // constant — plus the textbook definition annual_vol = daily_sd × √periods.
+      // Neither is re-derived from blendPeriodsPerYear's own formula, so this pin
+      // fails whenever the helper picks the wrong clock for an unknown leg.
+      const daily = [0.012, -0.008, 0.02, -0.006, 0.014, -0.011, 0.009, 0.004];
+      const mean = daily.reduce((a, b) => a + b, 0) / daily.length;
+      // Sample standard deviation (n-1) — the textbook daily-vol estimator.
+      const dailySd = Math.sqrt(
+        daily.reduce((a, r) => a + (r - mean) ** 2, 0) / (daily.length - 1),
+      );
+      expect(dailySd).toBeGreaterThan(0); // non-vacuous fixture
+
+      // The SAME series, annualized on the clock each leg-set selects.
+      const annualVol = (legs: ReadonlyArray<{ asset_class?: string | null }>) =>
+        dailySd * Math.sqrt(blendPeriodsPerYear(legs));
+
+      const unknownLegVol = annualVol([{}]); // projection gap → crypto clock
+      const traditionalVol = annualVol([{ asset_class: "traditional" }]);
+      const cryptoVol = annualVol([{ asset_class: "crypto" }]);
+
+      // The invariant: the unknown-leg blend rides the SAME clock as an explicit
+      // crypto blend, which is √(365/252) louder than the traditional clock.
+      expect(unknownLegVol / traditionalVol).toBeCloseTo(
+        Math.sqrt(365 / 252),
+        12,
+      );
+      expect(unknownLegVol).toBeCloseTo(cryptoVol, 12);
+      // Non-vacuous magnitude check: the defect this closes was a ~17% vol
+      // UNDERSTATEMENT (equivalently a ~20% Sharpe inflation), not a rounding
+      // nuance — a ratio of 1 (both clocks equal) is the pre-fix state.
+      expect(unknownLegVol / traditionalVol).toBeGreaterThan(1.2);
+      expect(traditionalVol / unknownLegVol).toBeLessThan(0.84);
     });
 
     it("calendarYears: elapsed span on the 365.25-day civil clock (the CAGR clock)", () => {
