@@ -455,11 +455,13 @@ No framework/library movement is relevant; the phase is defect closure against p
 
 ## Open Questions
 
-1. **How does the census executor read PROD?**
+1. **How does the census executor read PROD?** (RESOLVED)
    - What we know: prior milestones ran PROD counts ("close-by-measurement", v1.19); the Supabase MCP in this workspace is linked to the TEST project (`qmnijlgmdhviwzwfyzlc` per the RPC migration header); `.env.local` (PROD env) is off-limits to agents.
    - What's unclear: whether the planner should route the census through the Supabase MCP pointed at PROD, a founder-run SQL snippet, or the authed-prod verification pattern.
    - Recommendation: plan the census as a task that EMITS the exact read-only SQL (above) plus a `checkpoint:human-verify`-style step where the orchestrator/founder executes it against PROD and pastes results into `159-CENSUS.md` — the SQL is deterministic either way, and this keeps PROD credentials out of agent hands.
-2. **`getStrategyDetail` projection split** (anon `/strategy/[id]` vs authed discovery detail needing `data_quality_flags` + `computation_status`): one shared explicit projection retaining both columns, or a caller-scoped parameter? Planner decides after enumerating both pages' analytics-field reads; retaining `computation_status` is mandatory either way, and `data_quality_flags` is on the requirement's exclusion list for anon responses — the tension must be resolved explicitly, not silently.
+   - **RESOLVED → 159-01-PLAN.md (Tasks 1-2):** the recommendation was adopted — Task 1 authors the `159-CENSUS.md` scaffold embedding the read-only SQL verbatim; Task 2 is a `checkpoint:human-action` where the orchestrator/founder executes it against PROD and commits the pasted results. PROD credentials never reach agent hands.
+2. **`getStrategyDetail` projection split** (RESOLVED) (anon `/strategy/[id]` vs authed discovery detail needing `data_quality_flags` + `computation_status`): one shared explicit projection retaining both columns, or a caller-scoped parameter? Planner decides after enumerating both pages' analytics-field reads; retaining `computation_status` is mandatory either way, and `data_quality_flags` is on the requirement's exclusion list for anon responses — the tension must be resolved explicitly, not silently.
+   - **RESOLVED → 159-03-PLAN.md (Task 2):** caller-scoped projections — `getStrategyDetail` gains a variant parameter (`public` default | `discovery`) selecting between `STRATEGY_DETAIL_PUBLIC_ANALYTICS_COLUMNS` (excludes `data_quality_flags`, retains `computation_status`) and `STRATEGY_DETAIL_DISCOVERY_ANALYTICS_COLUMNS` (public list plus `data_quality_flags`). The tension is resolved explicitly, per-caller.
 
 ## Environment Availability
 
