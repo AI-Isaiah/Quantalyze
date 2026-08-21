@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 6
+open_count: 7
 waived_count: 0
 fixed_count: 1
-total_count: 7
-last_updated: 2026-08-21T13:37:00.898Z
+total_count: 8
+last_updated: 2026-08-21T14:29:27.024Z
 ---
 
 # Broken Windows Ledger
@@ -22,6 +22,7 @@ last_updated: 2026-08-21T13:37:00.898Z
 | 5 | 159 | deviation | analytics-service/services/metrics.py |  | RANK-05 residual: the quantstats price-detection heuristic is closed in compute_all_metrics but still live in compute_qstats_scalars (8 scalars), _rolling_alpha_beta's rolling_greeks call, and the greeks benchmark leg. Four of the eight (ulcer_index, ulcer_performance_index, probabilistic_ratio, serenity_index) route TRANSITIVELY through to_drawdown_series/sharpe/sortino/cvar and cannot be closed by prepare_returns=False; they need P114 inline mirrors. See 159-05-SUMMARY.md section 'Residual'. | open |  | 2026-08-21T11:36:18.506Z |  |
 | 6 | 159 | unrun-verify | src/app/(dashboard)/discovery/[slug]/[strategyId]/page.tsx |  | 159-03 narrowed getStrategyDetail to the discovery projection; the composite (dqf.composite===true) render branch was never exercised against real composite data — no dev-server spot-check was possible (worktree has no .env; TEST rows have null sparklines). Render one composite strategy on /discovery/<slug>/<id> before ship. | open |  | 2026-08-21T13:37:00.684Z |  |
 | 7 | 159 | unmet-truth | src/lib/queries.ts |  | RANK-02's literal truth ('metrics_json absent from every anon-reachable response') does NOT hold: STRATEGY_V2_ANALYTICS_COLUMNS (anon /strategy/[id]/v2) and getFactsheetDetail (tearsheet) both project metrics_json, and data_quality_flags in v2's case. Both are load-bearing — removing them is a visual regression. Either scope RANK-02 to the splat class (as D-02 words it) or open a follow-up for an RPC/alias-set design. | open |  | 2026-08-21T13:37:00.898Z |  |
+| 8 | 159 | unrun-verify | supabase/tests/test_get_verified_cohort_rank_gate.sql |  | The two GATE assertions (1: occurrence count; 4a/4b: behavioural + anti-vacuity flip) have never run ARMED: TEST receives migration 20260821120000 only after merge, so on this PR the test takes its state-adaptive SKIP path. Mitigation shipped in 4d04d719 — assertions 2a/2b/3 (SECURITY DEFINER, search_path pin, anon-EXECUTE) were moved ABOVE the skip and DO run on this PR — but the gate arms only on the first post-merge sql-tests run. Say 'would have caught', never 'did catch', until that run is green. | open |  | 2026-08-21T14:29:27.024Z |  |
 
 ````json
 [
@@ -107,6 +108,18 @@ last_updated: 2026-08-21T13:37:00.898Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-08-21T13:37:00.898Z",
+    "resolved_at": null
+  },
+  {
+    "id": 8,
+    "kind": "unrun-verify",
+    "phase": "159",
+    "file": "supabase/tests/test_get_verified_cohort_rank_gate.sql",
+    "line": null,
+    "description": "The two GATE assertions (1: occurrence count; 4a/4b: behavioural + anti-vacuity flip) have never run ARMED: TEST receives migration 20260821120000 only after merge, so on this PR the test takes its state-adaptive SKIP path. Mitigation shipped in 4d04d719 — assertions 2a/2b/3 (SECURITY DEFINER, search_path pin, anon-EXECUTE) were moved ABOVE the skip and DO run on this PR — but the gate arms only on the first post-merge sql-tests run. Say 'would have caught', never 'did catch', until that run is green.",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-08-21T14:29:27.024Z",
     "resolved_at": null
   }
 ]
