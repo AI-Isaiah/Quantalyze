@@ -164,7 +164,7 @@ jobs:
 
           echo "configured=false" >> "$GITHUB_OUTPUT"
           echo "::notice::Supabase Migrate skipped — secrets not configured. Set SUPABASE_PROJECT_REF (var), SUPABASE_ACCESS_TOKEN and SUPABASE_DB_PASSWORD (secrets) to enable auto-migration. (Tolerated for workflow_dispatch only; a push to main fails loud.)"
-      - uses: supabase/setup-cli@3c2f5e2ae34c34e428e8e206e2c4d21fa2d20fbf  # v2.1.1
+      - uses: supabase/setup-cli@46f7f98c7f948ad727d22c1e67fab04c223a0520  # v3.0.0
         if: steps.check.outputs.configured == 'true'
         with:
           # Pinned to match the apply job's CLI version (see comment there).
@@ -196,7 +196,7 @@ jobs:
           # GITHUB_TOKEN cred from .git/config. The apply job uses
           # SUPABASE_ACCESS_TOKEN; no GITHUB_TOKEN-backed git ops.
           persist-credentials: false
-      - uses: supabase/setup-cli@3c2f5e2ae34c34e428e8e206e2c4d21fa2d20fbf  # v2.1.1
+      - uses: supabase/setup-cli@46f7f98c7f948ad727d22c1e67fab04c223a0520  # v3.0.0
         with:
           # Pinned: avoid `latest` so CLI-version drift cannot silently change
           # `db push --include-all` semantics between plan and apply jobs (or
