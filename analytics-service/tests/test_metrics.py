@@ -713,28 +713,35 @@ def test_compute_all_metrics_no_benchmark_rolling_alpha_beta_are_empty_lists(
     assert result.sibling_kinds["rolling_beta"] == []
 
 
-def test_scalar_sortino_passes_mar_as_rf(golden_returns, monkeypatch):
-    """Audit 2026-05-07 H-0725: compute_all_metrics must pass `rf=MAR` to
-    `qs.stats.sortino` explicitly. If the call relies on qs's default `rf=0`,
-    any future tune of MAR away from 0 silently diverges the scalar sortino
-    from `_rolling_sortino` (which IS MAR-floored).
+def test_scalar_sortino_threads_mar_as_the_downside_floor(golden_returns, monkeypatch):
+    """Audit 2026-05-07 H-0725 — MECHANISM UPDATED by Phase 159 / RANK-05.
+
+    The contract is unchanged: the scalar Sortino must be floored at the SAME
+    minimum acceptable return as `_rolling_sortino`, so a future tune of MAR away
+    from 0 cannot silently diverge them.
+
+    What changed is how it is observable. Pre-159 this was pinned by spying on
+    the `rf` kwarg of `qs.stats.sortino`. RANK-05 removed that call entirely —
+    `sortino` carries no `prepare_returns=` kwarg in the pinned quantstats
+    0.0.81, so inline pandas was the only way to disable its price-detection
+    heuristic — and a call-spy on a call that no longer happens is a test that
+    cannot fail. Pin the ECONOMICS instead: raising the minimum acceptable return
+    must LOWER Sortino, because every return is measured against a higher floor
+    (the excess mean falls and more days count as downside). If MAR is ever
+    dropped from the inline math, the two runs coincide and this goes RED.
     """
     import services.metrics as metrics_module
 
-    captured: dict[str, object] = {}
-    real_sortino = metrics_module.qs.stats.sortino
+    baseline = compute_all_metrics(golden_returns)["sortino"]
+    assert baseline is not None, "fixture must produce a defined Sortino"
 
-    def spy_sortino(series, rf=None, **kwargs):
-        captured["rf"] = rf
-        return real_sortino(series, rf=rf, **kwargs) if rf is not None else real_sortino(series, **kwargs)
-
-    monkeypatch.setattr(metrics_module.qs.stats, "sortino", spy_sortino)
-    compute_all_metrics(golden_returns)
-    assert "rf" in captured, "compute_all_metrics did not call qs.stats.sortino"
-    # MAR is currently 0.0 — the contract is that the rf kwarg is forwarded explicitly
-    # (not omitted), so future MAR tunes flow through automatically.
-    assert captured["rf"] == MAR, (
-        f"qs.stats.sortino must be called with rf=MAR ({MAR}); got rf={captured['rf']}"
+    monkeypatch.setattr(metrics_module, "MAR", 0.5)
+    floored = compute_all_metrics(golden_returns)["sortino"]
+    assert floored is not None
+    assert floored < baseline, (
+        f"raising MAR from {MAR} to 0.5 must lower Sortino "
+        f"(got {floored} vs baseline {baseline}) — MAR is not threaded into the "
+        "scalar Sortino"
     )
 
 
@@ -1493,12 +1500,12 @@ def test_qstats_scalars_dispatch_table_per_entry(
     "scalar_key,qs_attr",
     [
         ("var_1d_95", "value_at_risk"),
-        ("cvar", "cvar"),
-        ("omega", "omega"),
-        ("gain_pain", "gain_to_pain_ratio"),
+        # Phase 159 / RANK-05: `cvar` is now an inline wrapper (0.0.81's
+        # `conditional_value_at_risk` drops `prepare_returns` before computing its
+        # VaR threshold), but the wrapper still calls the `value_at_risk`
+        # primitive — so that is where the fault is injected for this row.
+        ("cvar", "value_at_risk"),
         ("tail_ratio", "tail_ratio"),
-        ("smart_sharpe", "smart_sharpe"),
-        ("smart_sortino", "smart_sortino"),
         ("profit_factor", "profit_factor"),
     ],
 )
@@ -1511,6 +1518,14 @@ def test_compute_all_metrics_inline_qstats_scalar_failures_log_warning(
     is still failure-soft (other scalars unaffected) but the failure emits a
     WARNING naming the scalar + returns_len, mirroring the H-0710 /
     H-0713 / H-0723 pattern already used by `_safe_qstats_scalar`.
+
+    Phase 159 / RANK-05 narrowed this table from 8 rows to 4. `omega`,
+    `gain_pain`, `smart_sharpe` and `smart_sortino` no longer route through
+    quantstats at all (their 0.0.81 implementations carry no `prepare_returns=`
+    kwarg and had to be mirrored inline to kill the price heuristic), so
+    detonating `qs.stats.<attr>` for those keys injects a fault that can no
+    longer occur — a row that cannot fail. Their surviving contract is pinned by
+    `test_rank05_inlined_scalars_are_failure_soft_without_quantstats` below.
     """
     import services.metrics as metrics_module
 
@@ -2558,3 +2573,389 @@ class TestInsufficientWindowFlag:
         res_long = compute_all_metrics(r_long)
         assert res_long.insufficient_window is False
         assert "insufficient_window" not in res_long.metrics_json
+
+
+# ---------------------------------------------------------------------------
+# Phase 159 / Plan 05 — RANK-05: quantstats price-detection heuristic closure
+# ---------------------------------------------------------------------------
+# quantstats 0.0.81's `_utils._prepare_returns` carries a PRICE-detection
+# heuristic:
+#
+#     elif data.min() >= 0 and data.max() > 1:
+#         data = data.pct_change(fill_method=None)
+#
+# An all-non-negative daily-RETURNS series with one >100% day is therefore
+# silently re-read as a PRICE path and differenced. `max_drawdown` and
+# `to_drawdown_series` hit the mirror-image guess in `_prepare_prices`
+# (a series that is NOT `min < 0 or max < 1` is passed through AS prices).
+#
+# These tests pin ECONOMICS, never the implementation's own formula:
+#   * an all-winning series cannot have a negative Sharpe/Sortino, a
+#     non-positive gain/loss ratio, or a 99% drawdown;
+#   * order-independent statistics must be invariant under a shuffle of the
+#     daily returns (the bogus `pct_change` re-read is order-DEPENDENT);
+#   * on a series that does NOT trip the heuristic, every closed site must
+#     still equal LIVE quantstats 0.0.81 output (the non-self-referential
+#     correctness anchor).
+
+
+def _rank05_trigger_series() -> pd.Series:
+    """The P114 scenario verbatim: a YOUNG ALL-WINNING account.
+
+    Day 1 is +150%; every later day is a smaller-but-still-positive gain. The
+    series is all-non-negative with max > 1, so it trips BOTH quantstats guesses
+    (`_prepare_returns`' price detection and `_prepare_prices`' pass-through).
+    The decaying tail makes the bogus "price" path a DOWNTREND, which is what
+    flips the sign of the two headline ranked KPIs.
+    """
+    n = 60
+    dates = pd.bdate_range("2024-01-01", periods=n)
+    vals = np.linspace(0.012, 0.004, n)
+    vals[0] = 1.5
+    return pd.Series(vals, index=dates, name="returns").astype("float64")
+
+
+def _rank05_benign_all_positive() -> pd.Series:
+    """Same shape, WITHOUT the >100% day — all-non-negative but max < 1, so the
+    heuristic provably cannot fire. Pre/post-fix values must be identical."""
+    n = 60
+    dates = pd.bdate_range("2024-01-01", periods=n)
+    vals = np.linspace(0.012, 0.004, n)
+    return pd.Series(vals, index=dates, name="returns").astype("float64")
+
+
+def _rank05_benign_mixed() -> pd.Series:
+    """Mixed-sign series — `min() >= 0` is False, so NEITHER guess can ever
+    fire. The parity control: every closed site must match live quantstats."""
+    rng = np.random.default_rng(15905)
+    dates = pd.bdate_range("2024-01-01", periods=250)
+    vals = rng.normal(0.0006, 0.013, 250)
+    vals[40] = -0.09
+    vals[41] = 0.07
+    return pd.Series(vals, index=dates, name="returns").astype("float64")
+
+
+def test_rank05_quantstats_pin_is_still_0_0_81():
+    """D-04 prohibition: the fix must not move the quantstats pin. Every math
+    mirror below cites 0.0.81 source; a version bump silently invalidates them."""
+    assert qs.__version__ == "0.0.81", (
+        f"quantstats pin moved to {qs.__version__}; the RANK-05 inline mirrors "
+        "cite 0.0.81 source and must be re-derived against the new version."
+    )
+
+
+def test_rank05_trigger_fixture_actually_trips_the_heuristic():
+    """Anti-vacuity guard for every trigger-series test below. If a future edit
+    makes the fixture benign, the sign-invariant tests would pass VACUOUSLY."""
+    s = _rank05_trigger_series()
+    assert bool(s.min() >= 0), "fixture must be all-non-negative"
+    assert bool(s.max() > 1), "fixture must contain a >100% day"
+    assert bool((s > 0).all()), "fixture must be ALL-WINNING (no losing day)"
+    # And the benign controls must NOT trip it.
+    assert bool(_rank05_benign_all_positive().max() <= 1)
+    assert bool(_rank05_benign_mixed().min() < 0)
+
+
+def test_rank05_all_winning_series_has_non_negative_sharpe_and_sortino():
+    """ECONOMIC INVARIANT (RANK-05): a series that never lost a day cannot have
+    a negative risk-adjusted return.
+
+    Pre-fix measurement (quantstats 0.0.81, 2026-08-21): sharpe = -4.3469,
+    sortino = -4.2254 on this all-winning fixture — the sign flip that reaches
+    the public ranks.
+
+    Sortino is *undefined* (None) for a series with zero downside, which is the
+    honest reading; what it can never be is NEGATIVE.
+    """
+    result = compute_all_metrics(_rank05_trigger_series())
+    sharpe = result["sharpe"]
+    sortino = result["sortino"]
+    assert sharpe is not None and sharpe > 0, (
+        f"all-winning series reported sharpe={sharpe} — the quantstats price "
+        "heuristic re-read the returns as a price path"
+    )
+    assert sortino is None or sortino > 0, (
+        f"all-winning series reported sortino={sortino}; with zero losing days "
+        "the downside deviation is 0, so Sortino is undefined — never negative"
+    )
+
+
+def test_rank05_headline_sharpe_sortino_do_not_call_quantstats(monkeypatch):
+    """MECHANISM PIN (anti-vacuity). `sharpe`/`sortino` carry NO
+    `prepare_returns=` kwarg in 0.0.81, so the ONLY closure is inline pandas.
+    Detonate the quantstats entry points: if either headline KPI is ever routed
+    back through `qs.stats`, the price heuristic returns with it and this test
+    goes RED at the reintroducing commit.
+    """
+    import services.metrics as metrics_module
+
+    def _detonate(*_args, **_kwargs):
+        raise AssertionError(
+            "compute_all_metrics routed a headline KPI back through quantstats "
+            "— the _prepare_returns price heuristic is live again (RANK-05)"
+        )
+
+    monkeypatch.setattr(metrics_module.qs.stats, "sharpe", _detonate)
+    monkeypatch.setattr(metrics_module.qs.stats, "sortino", _detonate)
+    result = compute_all_metrics(_rank05_benign_mixed())
+    assert result["sharpe"] is not None
+    assert result["sortino"] is not None
+
+
+def test_rank05_benign_all_positive_series_matches_live_quantstats():
+    """BENIGN PARITY (untriggered): a series the heuristic cannot fire on must
+    produce byte-comparable sharpe/sortino against LIVE quantstats 0.0.81.
+    The oracle is quantstats itself — not a restatement of the inline formula.
+    """
+    s = _rank05_benign_all_positive()
+    result = compute_all_metrics(s)
+    assert result["sharpe"] == pytest.approx(
+        float(qs.stats.sharpe(s, periods=252)), rel=1e-9
+    )
+    # Zero losing days -> quantstats' downside deviation is 0 -> NaN -> None.
+    assert _safe_float(qs.stats.sortino(s, rf=MAR, periods=252)) is None
+    assert result["sortino"] is None
+
+
+def test_rank05_benign_mixed_sign_series_matches_live_quantstats():
+    """BENIGN PARITY control: on a mixed-sign series NEITHER quantstats guess
+    can fire, so the inline mirror must reproduce quantstats exactly."""
+    s = _rank05_benign_mixed()
+    result = compute_all_metrics(s)
+    assert result["sharpe"] == pytest.approx(
+        float(qs.stats.sharpe(s, periods=252)), rel=1e-9
+    )
+    assert result["sortino"] == pytest.approx(
+        float(qs.stats.sortino(s, rf=MAR, periods=252)), rel=1e-9
+    )
+
+
+def test_rank05_benign_parity_holds_on_a_non_default_annualization_clock():
+    """The clock threads: crypto's 365 basis must also match live quantstats."""
+    s = _rank05_benign_mixed()
+    result = compute_all_metrics(s, periods_per_year=365)
+    assert result["sharpe"] == pytest.approx(
+        float(qs.stats.sharpe(s, periods=365)), rel=1e-9
+    )
+    assert result["sortino"] == pytest.approx(
+        float(qs.stats.sortino(s, rf=MAR, periods=365)), rel=1e-9
+    )
+
+
+# --- Task 2: the rest of the compute_all_metrics quantstats surface -----------
+
+# Per-site benign-series parity oracles. Each entry is
+# (output key, where the key lives, a callable computing the LIVE quantstats
+# 0.0.81 value for the same input). These are the non-self-referential anchors:
+# the oracle is quantstats itself, invoked at test time, never a restatement of
+# the inline formula. `smart_*` deliberately use quantstats' DEFAULT periods=252
+# because the production call sites do (pre-existing, preserved by RANK-05).
+_RANK05_PARITY_SITES = (
+    ("volatility", "top", lambda s: qs.stats.volatility(s, periods=252)),
+    ("max_drawdown", "top", lambda s: qs.stats.max_drawdown(s)),
+    ("omega", "mj", lambda s: qs.stats.omega(s)),
+    ("gain_pain", "mj", lambda s: qs.stats.gain_to_pain_ratio(s)),
+    ("tail_ratio", "mj", lambda s: qs.stats.tail_ratio(s)),
+    ("profit_factor", "mj", lambda s: qs.stats.profit_factor(s)),
+    ("smart_sharpe", "mj", lambda s: qs.stats.smart_sharpe(s)),
+    ("smart_sortino", "mj", lambda s: qs.stats.smart_sortino(s)),
+    ("var_1d_95", "mj", lambda s: qs.stats.value_at_risk(s, confidence=0.95)),
+    ("cvar", "mj", lambda s: qs.stats.cvar(s)),
+)
+
+
+@pytest.mark.parametrize(
+    "key,where,oracle", _RANK05_PARITY_SITES, ids=[e[0] for e in _RANK05_PARITY_SITES]
+)
+def test_rank05_every_closed_site_matches_live_quantstats_on_a_benign_series(
+    key, where, oracle
+):
+    """BENIGN PARITY, per closed site. On a mixed-sign series NEITHER quantstats
+    guess can fire, so replacing a call with inline math (or disabling
+    `_prepare_returns` via the kwarg) must not move the value by so much as a
+    float ulp beyond the stated tolerance. A drift here means the RANK-05
+    replacement got the math wrong — it is a defect in the fix, never a fixture
+    to regenerate.
+    """
+    s = _rank05_benign_mixed()
+    result = compute_all_metrics(s)
+    actual = result[key] if where == "top" else result["metrics_json"][key]
+    expected = _safe_float(oracle(s))
+    assert expected is not None, f"oracle produced no value for {key} — fixture is unfit"
+    assert actual == pytest.approx(expected, rel=1e-9), (
+        f"{key} drifted from live quantstats 0.0.81 on a benign series"
+    )
+
+
+def test_rank05_drawdown_series_matches_live_quantstats_on_a_benign_series():
+    """The underwater curve feeds dd_duration, drawdown_episodes and the chart.
+    Pin the whole series (not just its minimum) against live quantstats."""
+    s = _rank05_benign_mixed()
+    result = compute_all_metrics(s)
+    emitted = result["drawdown_series"]
+    # `returns_for_chart` == s here: the fixture is NaN-free with every value
+    # above the -100% floor, so fillna(0)/clip are both no-ops.
+    expected = qs.stats.to_drawdown_series(s)
+    assert len(emitted) == len(expected) > 0, "fixture must not be down-sampled away"
+    for point, (date, exp_val) in zip(emitted, expected.items()):
+        assert point["date"] == date.strftime("%Y-%m-%d")
+        assert point["value"] == pytest.approx(exp_val, abs=1e-12)
+
+
+def test_rank05_all_winning_series_has_zero_drawdown():
+    """ECONOMIC INVARIANT: a series with no losing day never goes underwater.
+
+    Pre-fix measurement: max_drawdown = -0.9973 on this fixture, because
+    `_prepare_prices` passed the RETURNS through as a price path and read the
+    decay from the +150% day as a 99.7% crash. max_drawdown is a ranked column.
+    """
+    result = compute_all_metrics(_rank05_trigger_series())
+    assert result["max_drawdown"] == pytest.approx(0.0, abs=1e-12), (
+        f"all-winning series reported max_drawdown={result['max_drawdown']}"
+    )
+
+
+def test_rank05_all_winning_series_has_no_pain():
+    """ECONOMIC INVARIANT: gain/loss ratios for a series with zero losing days
+    are either undefined (no denominator) or positive — never zero or negative.
+
+    Pre-fix measurement: omega = 0.0, gain_pain = -1.0, profit_factor = 0.0,
+    smart_sharpe = -4.1735, smart_sortino = -4.0569.
+    """
+    mj = compute_all_metrics(_rank05_trigger_series())["metrics_json"]
+    for key in ("omega", "gain_pain", "profit_factor", "smart_sharpe", "smart_sortino"):
+        value = mj.get(key)
+        assert value is None or value > 0, (
+            f"all-winning series reported {key}={value}; with zero losing days "
+            "this ratio is undefined, never non-positive"
+        )
+
+
+# Statistics that do NOT depend on the ORDER of the daily returns. quantstats'
+# bogus `pct_change` re-read IS order-dependent, so a shuffle is a sharp,
+# formula-free detector of the heuristic. `max_drawdown` and the `smart_*` pair
+# are excluded on purpose: path depth and autocorrelation are legitimately
+# order-dependent.
+_RANK05_ORDER_INVARIANT = ("sharpe", "volatility")
+_RANK05_ORDER_INVARIANT_MJ = ("tail_ratio", "var_1d_95", "cvar")
+
+
+def test_rank05_order_independent_statistics_survive_a_shuffle():
+    """ECONOMIC INVARIANT: Sharpe, volatility, tail ratio, VaR and CVaR are
+    functions of the DISTRIBUTION of daily returns, not of their sequence.
+    Reordering the same returns must leave them bit-comparable. quantstats'
+    price re-read differences consecutive values, so pre-fix every one of them
+    moved — this test is RED against the unfixed pipeline.
+    """
+    original = _rank05_trigger_series()
+    rng = np.random.default_rng(4242)
+    permuted_values = rng.permutation(original.to_numpy())
+    shuffled = pd.Series(permuted_values, index=original.index, name="returns")
+    # Anti-vacuity: the permutation must actually reorder the series.
+    assert not np.allclose(original.to_numpy(), shuffled.to_numpy())
+    # ...and it must still trip the heuristic (same values, same min/max).
+    assert bool(shuffled.min() >= 0) and bool(shuffled.max() > 1)
+
+    base = compute_all_metrics(original)
+    perm = compute_all_metrics(shuffled)
+    for key in _RANK05_ORDER_INVARIANT:
+        assert base[key] is not None, f"{key} must be defined for this fixture"
+        assert perm[key] == pytest.approx(base[key], rel=1e-12), (
+            f"{key} changed under a pure reordering of the same daily returns"
+        )
+    for key in _RANK05_ORDER_INVARIANT_MJ:
+        expected = base["metrics_json"].get(key)
+        assert expected is not None, f"{key} must be defined for this fixture"
+        assert perm["metrics_json"].get(key) == pytest.approx(expected, rel=1e-12), (
+            f"{key} changed under a pure reordering of the same daily returns"
+        )
+
+
+def test_rank05_inlined_scalars_are_failure_soft_without_quantstats(
+    golden_returns, caplog, monkeypatch
+):
+    """The inlined metrics_json scalars must (a) not reach quantstats at all, and
+    (b) keep the failure-soft + named-WARNING contract for faults that CAN still
+    occur inside the inline math.
+
+    This replaces the four rows removed from
+    `test_compute_all_metrics_inline_qstats_scalar_failures_log_warning`, whose
+    injected fault (a raising `qs.stats.<attr>`) became unreachable once the
+    sites stopped calling quantstats.
+    """
+    import services.metrics as metrics_module
+
+    def boom(*_args, **_kwargs):
+        raise RuntimeError("quantstats must not be reached by an inlined scalar")
+
+    for attr in ("omega", "gain_to_pain_ratio", "smart_sharpe", "smart_sortino"):
+        monkeypatch.setattr(metrics_module.qs.stats, attr, boom)
+    mj = compute_all_metrics(golden_returns)["metrics_json"]
+    for key in ("omega", "gain_pain", "smart_sharpe", "smart_sortino"):
+        assert mj.get(key) is not None, (
+            f"{key} degraded with quantstats detonated — the site still calls it"
+        )
+
+    # A real fault inside the inline smart_* math: the autocorrelation penalty is
+    # the one external primitive those two scalars call.
+    monkeypatch.setattr(metrics_module.np, "corrcoef", boom)
+    with caplog.at_level(logging.WARNING, logger="quantalyze.analytics.metrics"):
+        degraded = compute_all_metrics(golden_returns)["metrics_json"]
+    assert degraded.get("smart_sharpe") is None
+    assert degraded.get("smart_sortino") is None
+    assert [
+        r for r in caplog.records
+        if "smart_sharpe" in r.getMessage() and r.levelno == logging.WARNING
+    ], "a fault inside the inline smart_sharpe math must log a WARNING naming it"
+    # Failure-soft: the sibling inline scalars are untouched.
+    assert degraded.get("omega") is not None
+    assert degraded.get("gain_pain") is not None
+
+
+def test_rank05_drawdown_details_is_heuristic_free():
+    """`qs.stats.drawdown_details` is the ONE quantstats call left in
+    compute_all_metrics without `prepare_returns=False`, and the region gate
+    below excludes it BY NAME. That exclusion is only legitimate while the
+    function (and the helper it calls) provably never routes its input through
+    either preparer — it consumes an already-computed underwater curve, not a
+    return or price series. Scan the INSTALLED source so a future quantstats
+    that changes this goes RED here instead of silently reopening the defect.
+    """
+    import inspect
+
+    for fn in (qs.stats.drawdown_details, qs.stats.remove_outliers):
+        src = inspect.getsource(fn)
+        assert "_prepare_returns" not in src, f"{fn.__name__} now prepares returns"
+        assert "_prepare_prices" not in src, f"{fn.__name__} now prepares prices"
+    # And it still takes the drawdown curve, not returns.
+    assert "drawdown" in inspect.signature(qs.stats.drawdown_details).parameters
+
+
+def test_rank05_no_unclosed_quantstats_call_survives_in_compute_all_metrics():
+    """REGION GATE, executable in CI rather than only in a shell one-liner.
+
+    Every quantstats call inside compute_all_metrics' body must either carry
+    `prepare_returns=False` or be the source-scanned `drawdown_details`
+    exception above. Anything else is a reopened RANK-05 hole. Scanning
+    `inspect.getsource` scopes to the function exactly and is immune to line
+    drift; comment lines are skipped because prose cannot invoke anything.
+    """
+    import inspect
+    import re
+
+    offenders = []
+    for line in inspect.getsource(compute_all_metrics).splitlines():
+        stripped = line.strip()
+        if stripped.startswith("#"):
+            continue
+        if not re.search(r"qs\.stats\.[a-z_]+\(", line):
+            continue
+        if "prepare_returns=False" in line:
+            continue
+        if "qs.stats.drawdown_details(" in line:
+            continue
+        offenders.append(stripped)
+    assert offenders == [], (
+        "quantstats calls in compute_all_metrics without prepare_returns=False "
+        f"(RANK-05 price heuristic reopened): {offenders}"
+    )
