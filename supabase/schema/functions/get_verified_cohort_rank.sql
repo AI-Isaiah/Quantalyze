@@ -2,12 +2,10 @@
 -- Canonical current body of this function, replayed from supabase/migrations/**.
 -- Regenerate with `npm run schema:functions`. See tech-debt #2.
 
--- source migration: 20260626120000_get_verified_cohort_rank.sql
+-- source migration: 20260821120000_get_verified_cohort_rank_computed_gate.sql
 -- ==========================================================================
--- STEP 1: get_verified_cohort_rank SECURITY DEFINER RPC
+-- STEP 1: get_verified_cohort_rank SECURITY DEFINER RPC (full re-base)
 -- ==========================================================================
--- Pattern mirrors finalize_csv_strategy (migration 093 STEP 5): SECURITY
--- DEFINER, SET search_path, manual auth guard, RAISE EXCEPTION with ERRCODE.
 CREATE OR REPLACE FUNCTION public.get_verified_cohort_rank(
   p_sharpe   DOUBLE PRECISION,
   p_sortino  DOUBLE PRECISION,
@@ -39,19 +37,26 @@ BEGIN
   END IF;
 
   -- Cohort size = verified AND published strategies whose three rankable
-  -- metrics are all non-null. The explicit status='published' predicate is
+  -- metrics are all non-null AND whose analytics computation reached a
+  -- terminal success. The explicit status='published' predicate is
   -- defense-in-depth (D-02): the DEFINER fn bypasses RLS, so without it the
   -- caller's own drafts/pending_review rows could pollute the cohort.
   -- "Verified" = a strategy_verifications row at status='published' (terminal
   -- state). NOT `trust_tier IS NOT NULL` — that column is NOT NULL (migration
   -- 093 CHECK) so the IS NOT NULL form is a tautology matching every draft.
-  -- The three `a.<metric> IS NOT NULL` predicates make this denominator equal
-  -- the rank query's numerator population, so min-N counts only rankable rows
-  -- (a NULL-metric row excluded from the FILTER must not inflate v_n).
+  --
+  -- RANK-01 (phase 159): the terminal-success gate below is the SQL twin of
+  -- isRankableAnalyticsRow / isComputedAnalytics in src/lib/closed-sets.ts. It
+  -- MUST appear identically in the rank query further down — this is the
+  -- denominator, that is the numerator, and a gate on only one of them makes
+  -- min-N count rows the percentiles do not. A status gate is required because
+  -- a failed computation can retain KPI values, so the IS NOT NULL predicates
+  -- alone admit dead rows (159-CENSUS.md: 17 of 18 published PROD strategies).
   SELECT count(*) INTO v_n
   FROM strategies s
   JOIN strategy_analytics a ON a.strategy_id = s.id
   WHERE s.status = 'published'
+    AND a.computation_status IN ('complete', 'complete_with_warnings')
     AND a.sharpe IS NOT NULL
     AND a.sortino IS NOT NULL
     AND a.max_drawdown IS NOT NULL
@@ -71,9 +76,8 @@ BEGIN
   -- Rank = % of cohort whose value is <= the blend's, for sharpe/sortino
   -- (higher=better). For max_dd MIRROR getPercentiles EXACTLY: count cohort
   -- strategies whose magnitude is <= the blend's (abs(a.max_drawdown) <=
-  -- p_max_dd) then invert via `100 - that` (queries.ts:175-186 takes Math.abs,
-  -- counts `<=`, then `100 - percentile` for LOWER_IS_BETTER). This is
-  -- parity-by-construction at ties/boundary, unlike a direct `>=` count.
+  -- p_max_dd) then invert via `100 - that`. This is parity-by-construction at
+  -- ties/boundary, unlike a direct `>=` count.
   --
   -- DECILE QUANTIZATION (probe-resistance, auditor HIGH): each raw percentile
   -- is coarsened to the nearest 10 — round(raw_pct / 10) * 10 — applied AFTER
@@ -86,6 +90,10 @@ BEGIN
   -- aggregate (v_n is the count from above; the three columns are
   -- count(*) FILTER ratios). No strategy id / name / returns / metric value
   -- ever appears in the SELECT list or the RETURNS TABLE.
+  --
+  -- RANK-01: this WHERE clause is character-identical to the count query's
+  -- above, INCLUDING the terminal-success gate. They are one cohort definition
+  -- written twice; keep them in lockstep.
   RETURN QUERY
   SELECT
     v_n,
@@ -95,6 +103,7 @@ BEGIN
   FROM strategies s
   JOIN strategy_analytics a ON a.strategy_id = s.id
   WHERE s.status = 'published'
+    AND a.computation_status IN ('complete', 'complete_with_warnings')
     AND a.sharpe IS NOT NULL
     AND a.sortino IS NOT NULL
     AND a.max_drawdown IS NOT NULL
