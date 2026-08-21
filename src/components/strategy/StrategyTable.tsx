@@ -41,7 +41,18 @@ import type { Strategy, StrategyAnalytics } from "@/lib/types";
 import type { PercentileMap } from "@/lib/queries";
 
 type StrategyWithAnalytics = Strategy & {
-  analytics: StrategyAnalytics;
+  analytics: StrategyAnalytics & {
+    /**
+     * Phase 159 (159-03 / RANK-02) — the 3M advanced filter's ONE value,
+     * projected as a JSONB-key ALIAS (`three_month:metrics_json->three_month`)
+     * by `getStrategiesByCategory` so the whole `metrics_json` blob never
+     * reaches an anonymous reader. OPTIONAL because the owner-scoped
+     * `getMyStrategies` read keeps its wildcard embed (D-02 exemption) and so
+     * carries `metrics_json` instead — the filter reads the alias FIRST and
+     * falls back to the blob, which is what keeps both surfaces working.
+     */
+    three_month?: number | null;
+  };
   /**
    * Phase 149 / NAV-01 — set by `shapeRankingRows` in lib/queries.ts. `false`
    * means NO `strategy_analytics` row exists for this strategy (the shaper
@@ -561,11 +572,20 @@ export function StrategyTable({
     result = result.filter((s) => matchesRange(s.analytics.six_month_return, advancedFilters.sixMonth, 100));
     result = result.filter((s) => matchesRangeRaw(s.analytics.calmar, advancedFilters.calmar));
 
-    // 3M: from metrics_json if present
+    // 3M: from the aliased JSONB key when present, else the metrics_json blob.
+    //
+    // Phase 159 (159-03 / RANK-02): the ANON list read
+    // (`getStrategiesByCategory`) no longer ships the whole `metrics_json`
+    // blob — it projects this one key as `three_month:metrics_json->three_month`
+    // (MEASURED against TEST: the embed alias returns a real number). The
+    // OWNER read (`getMyStrategies`) keeps its wildcard embed under the D-02
+    // exemption and still carries the blob. Reading the alias first with a
+    // blob fallback is what keeps the filter identical on BOTH surfaces —
+    // dropping the fallback would silently degrade /my-strategies.
     if (advancedFilters.threeMonth.from !== "" || advancedFilters.threeMonth.to !== "") {
       result = result.filter((s) => {
         const mj = s.analytics.metrics_json as Record<string, number> | null;
-        const val = mj?.three_month ?? null;
+        const val = s.analytics.three_month ?? mj?.three_month ?? null;
         return matchesRange(val, advancedFilters.threeMonth, 100);
       });
     }

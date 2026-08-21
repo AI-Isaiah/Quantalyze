@@ -204,6 +204,45 @@ export async function getPercentiles(categorySlug?: string): Promise<PercentileM
 // Both helpers are pure and have no Supabase dependency — they live in utils.
 export { extractAnalytics, EMPTY_ANALYTICS };
 
+/**
+ * Phase 159 (159-03, RANK-02 / decision D-02) — the RANKED-LIST analytics
+ * projection, replacing the wildcard `strategy_analytics (*)` embed.
+ *
+ * `/browse/[slug]` has NO auth gate, so this is the highest-traffic ANONYMOUS
+ * `strategy_analytics` read in the app. RLS is ROW-level — the `analytics_read`
+ * policy (`status='published' OR user_id=auth.uid()`, migration
+ * 20260405061912, no `TO` clause) applies to `anon` and cannot hide a COLUMN.
+ * An explicit projection is therefore the ONLY lever that keeps
+ * `daily_returns`, the whole `metrics_json` blob and `data_quality_flags` out
+ * of an anon response. Same column-explicitness discipline as
+ * `readPublicVerificationSignals` / the `get_published_trust_signals` SECDEF
+ * function, and the same shape as `STRATEGY_V2_ANALYTICS_COLUMNS` below.
+ *
+ * ⚠️ MUST-STAY columns — every one of these is a rendered surface, and
+ * dropping it is a silent VISUAL regression, not a bandwidth win:
+ *   - `sparkline_returns` / `sparkline_drawdown` — StrategyTable's two
+ *     sparkline cells (:1111 / :1118). Dropping them blanks the charts.
+ *   - `computation_status` — the ONE chip-state derivation site (:899 →
+ *     `deriveEmptySeriesState`). Dropping it makes every row read the
+ *     EMPTY_ANALYTICS `"pending"` default and spin "Syncing" forever, which
+ *     is precisely the Phase-147/149 forever-spinner class.
+ *   - `computed_at` — the SyncBadge (:1051) and the `computed_at` sort (:299).
+ * The remaining scalars are the rendered metric columns, the table sorts
+ * (`SortKey`, discovery-types.ts) and the advanced range filters (:556-562);
+ * `calmar` and `six_month_return` are filter/sort-only but still user-visible.
+ *
+ * ⚠️ `three_month:metrics_json->three_month` is a JSONB-KEY ALIAS, not the
+ * blob. StrategyTable's ONLY `metrics_json` use is the 3M advanced filter
+ * (:567-568), so projecting the whole blob to keep one number would ship every
+ * other key (alpha/beta/VaR/CVaR/skew/…) to anonymous readers. MEASURED
+ * against the TEST project on 2026-08-21: this embed-alias form returns
+ * `{"three_month": 0.0}` (HTTP 200, a real number). That measurement CORRECTS
+ * the `getStrategyDetailV2` docblock's claim below that "PostgREST cannot
+ * project a JSONB sub-tree without an RPC" — see the note there.
+ */
+const CATEGORY_RANKING_ANALYTICS_COLUMNS =
+  "computed_at, computation_status, cumulative_return, cagr, sharpe, calmar, max_drawdown, volatility, six_month_return, sparkline_returns, sparkline_drawdown, three_month:metrics_json->three_month";
+
 export async function getStrategiesByCategory(categorySlug: string): Promise<RankedStrategyRow[]> {
   const supabase = await createClient();
 
@@ -224,7 +263,9 @@ export async function getStrategiesByCategory(categorySlug: string): Promise<Ran
   const { data: strategies, error } = await withPublishedOnly(
     supabase
       .from("strategies")
-      .select(`*, discovery_categories!inner(slug), strategy_analytics (*)`)
+      .select(
+        `*, discovery_categories!inner(slug), strategy_analytics (${CATEGORY_RANKING_ANALYTICS_COLUMNS})`,
+      )
       .eq("discovery_categories.slug", categorySlug),
   );
 
@@ -1156,9 +1197,19 @@ export interface StrategyV2Detail {
  * Analytics columns: every field that getStrategyDetailV2 unpacks below.
  * `metrics_json` is intentionally a single blob fetch — its keys
  * (history_days, equity_series_1y, btc_benchmark_returns, benchmark_returns,
- * alpha/beta/IR/Treynor) drive multiple panels and PostgREST cannot project
- * a JSONB sub-tree without an RPC. Trimming the surrounding scalar/array
+ * alpha/beta/IR/Treynor) drive multiple panels, so pulling the blob once beats
+ * enumerating a dozen key aliases. Trimming the surrounding scalar/array
  * columns is the bandwidth win the p95<50ms detail-fetch contract requires.
+ *
+ * ⚠️ CORRECTION (Phase 159 / 159-03). This docblock previously asserted that
+ * "PostgREST cannot project a JSONB sub-tree without an RPC". That is FALSE
+ * and was corrected by measurement, not by argument: against the TEST project
+ * on 2026-08-21, `strategy_analytics(three_month:metrics_json->three_month)`
+ * returned HTTP 200 with `{"three_month": 0.0}` — a real number under the
+ * alias. The blob fetch HERE remains the right call for the reason above (many
+ * keys, one panel-set), but the capability exists and is now used by
+ * CATEGORY_RANKING_ANALYTICS_COLUMNS to keep the whole blob away from
+ * anonymous list readers.
  */
 const STRATEGY_V2_STRATEGY_COLUMNS =
   "id, name, start_date, supported_exchanges, strategy_types, subtypes, markets, leverage_range, avg_daily_turnover";
