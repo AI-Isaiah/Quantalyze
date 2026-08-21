@@ -9823,7 +9823,9 @@ describe("ScenarioComposer — MEMBER-04 membership stamping + reopen derive + i
 // engine-call spy (the harness the plan says to reuse):
 //   1. ≥1 crypto leg → periodsPerYear = 365 at the computeScenario call site,
 //      and the engine's Sharpe reflects the √365 basis (non-vacuous vs √252).
-//   2. an all-unknown-asset_class added-only blend stays 252 byte-identical.
+//   2. an all-unknown-asset_class added-only blend ALSO derives 365 — RANK-06
+//      (159-04) re-classified the unknown leg as a projection gap that must
+//      fail toward the conservative clock, superseding the original 252 pin.
 // CAGR is deliberately NOT asserted here — 84-06 converts scenario.ts's CAGR
 // clock within this same phase, so pinning it would create a false conflict.
 // ---------------------------------------------------------------------------
@@ -9916,10 +9918,16 @@ describe("ScenarioComposer — Phase 84 BLEND-01 blend basis threading", () => {
     );
   });
 
-  it("an all-unknown-asset_class added-only blend stays periodsPerYear=252 byte-identical (no crypto leg → no √365 flip)", () => {
+  it("RANK-06: an all-unknown-asset_class added-only blend derives periodsPerYear=365 (a lazily-unresolved class is a projection gap, not a tradfi leg)", () => {
     // gate=false → the added-only path. A drawer-added strategy with NO book
-    // entry and no lazily-fetched asset_class (fetch returns [] → null class)
-    // is an unknown leg → blendPeriodsPerYear stays 252.
+    // entry and no lazily-fetched asset_class (the /returns probe's
+    // `.select("id, asset_class")` returned [] → null class) is an UNKNOWN leg.
+    //
+    // RANK-06 (159-04) changed this pin's economics deliberately: resolving
+    // that unknown to 252 understated a crypto strategy's vol ~17% and inflated
+    // its Sharpe ~×1.20 on the allocator-facing surface whenever the probe came
+    // back empty. The unknown leg now fails toward the conservative crypto
+    // clock, so the composer threads 365.
     const payload = makePayload({
       perKeyDailiesGateSatisfied: false,
       perKeyReturnsByApiKeyId: {},
@@ -9942,16 +9950,18 @@ describe("ScenarioComposer — Phase 84 BLEND-01 blend basis threading", () => {
       strategy_types: ["macro"],
     });
 
-    // No selected leg is crypto → the basis stays at the pre-#597 252 default,
-    // byte-identical to passing no 4th arg.
-    expect(latestPeriodsPerYear()).toBe(252);
-    // And every selected engine leg is genuinely unknown-class (non-vacuous —
-    // this is the 252 case precisely because no leg is 'crypto').
+    // The unknown leg drives the conservative crypto clock.
+    expect(latestPeriodsPerYear()).toBe(365);
+    // Non-vacuous: this is the 365 case NOT because a leg says 'crypto' — no
+    // leg says anything. Every selected engine leg is genuinely unknown-class,
+    // which is precisely the projection-gap shape RANK-06 re-classified.
     const assetClasses = Object.values(
       computeScenarioStateArgs[computeScenarioStateArgs.length - 1]
         .assetClassById,
     );
+    expect(assetClasses.length).toBeGreaterThan(0);
     expect(assetClasses.every((c) => c !== "crypto")).toBe(true);
+    expect(assetClasses.every((c) => c == null)).toBe(true);
   });
 });
 

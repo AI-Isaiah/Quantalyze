@@ -358,8 +358,10 @@ export function resolveSharedScenario(
   // Phase 84 (BLEND-01) — the blend annualizes √365 if ANY SELECTED leg is
   // crypto, else √252 (blendPeriodsPerYear). SELECTED-only (the engine's
   // activeStrategies gate) — a toggled-off crypto leg must not flip a tradfi
-  // blend. All-unknown / empty lookup → 252, byte-identical to the pre-84
-  // default (the whole no-lookup suite is that regression pin).
+  // blend. RANK-06 (159-04): a leg missing from `assetClassById` arrives here
+  // with asset_class null (:237, `?? null`) — a PROJECTION GAP of the
+  // published-rows read, not a traditional leg — and now derives √365, the
+  // conservative RISK clock. Only a stated-traditional blend keeps √252.
   const basis = blendPeriodsPerYear(strategies.filter((s) => selected[s.id]));
   const metrics = computeScenario(strategies, state, dateMapCache, basis);
 
