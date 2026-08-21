@@ -1259,15 +1259,22 @@ describe("Critical regression guards", () => {
       // 3600s cap). The exemption must be the FIRST -c statement of the holder
       // invocation, BEFORE pg_advisory_lock, so it covers the lock wait itself
       // and not just the idle sleep.
-      it("the mutex holder zeroes statement_timeout before pg_advisory_lock in all three acquire steps", () => {
+      // [158-MUTEX-02] widened the chain: the holder now interposes
+      // `SET client_connection_check_interval` and the HOLDER-BACKEND-PID
+      // marker between the statement_timeout exemption and the lock. The
+      // ORDER is load-bearing — both GUCs and the marker must precede
+      // pg_advisory_lock so the lock wait itself is exempt/covered and the
+      // pid is in the log before MUTEX-ACQUIRED can be grepped — so the pin
+      // asserts the whole ordered sequence, not bare membership.
+      it("the mutex holder opens with both session GUCs and the backend-pid marker before pg_advisory_lock in all three acquire steps", () => {
         const src = readText(".github/workflows/ci.yml");
         const exemptHolderRe =
-          /-c "SET statement_timeout = 0;" \\\n\s+-c "SELECT pg_advisory_lock\(61616158\);"/;
+          /-c "SET statement_timeout = 0;" \\\n\s+-c "SET client_connection_check_interval = '30s';" \\\n\s+-c "SELECT 'HOLDER-BACKEND-PID ' \|\| pg_backend_pid\(\);" \\\n\s+-c "SELECT pg_advisory_lock\(61616158\);"/;
         for (const job of DB_JOBS) {
           expectMatch(
             jobSlice(src, job),
             exemptHolderRe,
-            `ci.yml ${job}: the mutex holder no longer runs \`SET statement_timeout = 0\` immediately before pg_advisory_lock — TEST's server-wide statement_timeout=120000 will kill the holder ~120s after acquiring (lock silently released, DB work UNSERIALIZED) and kill a contended lock wait at 120s (158-MUTEX-01)`,
+            `ci.yml ${job}: the mutex holder no longer runs \`SET statement_timeout = 0\` → \`SET client_connection_check_interval = '30s'\` → HOLDER-BACKEND-PID → pg_advisory_lock in that order — without the first, TEST's server-wide statement_timeout=120000 kills the holder ~120s after acquiring and kills a contended lock wait at 120s (158-MUTEX-01); without the second BEFORE the lock, an orphaned backend (client killed mid-sleep or mid-wait) keeps the lock with no janitor (158-MUTEX-02); without the marker before MUTEX-ACQUIRED, the release step cannot reap the backend server-side`,
           );
         }
       });
@@ -1317,6 +1324,54 @@ describe("Critical regression guards", () => {
           /keepalives=1&keepalives_idle=60&keepalives_interval=15&keepalives_count=4/,
           `ci.yml ${refJob}: the mutex holder DSN lost its libpq keepalive parameters (keepalives=1&keepalives_idle=60&keepalives_interval=15&keepalives_count=4) — with zero traffic during the lock wait and the idle hold, NAT idle expiry would silently zombify the holder and the lock would outlive the job (158-MUTEX-01 F2)`,
         );
+      });
+
+      // [158-MUTEX-02] (run 32457330139): killing the psql CLIENT does not
+      // kill its SERVER backend — neither pg_sleep nor a pg_advisory_lock
+      // wait ever reads the client socket — so the release step's client-side
+      // kill orphaned a holder backend that kept the lock for its full 6000s
+      // sleep and starved e2e-seeded past the 3600s acquire cap. Before
+      // 158-MUTEX-01 the server-wide statement_timeout was the ACCIDENTAL
+      // janitor for such orphans; zeroing it made them immortal. The real
+      // janitor is client_connection_check_interval: the backend polls its
+      // client socket during query execution AND lock waits, aborting within
+      // ~30s of the client dying. Every mutex session needs it — the three
+      // ci.yml holders AND the probe's contenders (a probe job timeout kills
+      // a contender mid-wait the same way, leaving a zombie waiter).
+      it("every mutex session sets client_connection_check_interval (all three acquire steps + the probe contender)", () => {
+        const ccciRe = /-c "SET client_connection_check_interval = '30s';"/;
+        const src = readText(".github/workflows/ci.yml");
+        for (const job of DB_JOBS) {
+          expectMatch(
+            jobSlice(src, job),
+            ccciRe,
+            `ci.yml ${job}: the mutex holder no longer sets client_connection_check_interval — an orphaned backend (psql client killed mid-pg_sleep or mid-lock-wait) keeps the advisory lock for its full 6000s sleep with NO janitor left (statement_timeout is zeroed), starving every waiter past the 3600s acquire cap (158-MUTEX-02, run 32457330139)`,
+          );
+        }
+        expectMatch(
+          readText(".github/workflows/mutex-probe.yml"),
+          ccciRe,
+          `mutex-probe.yml: the contender psql no longer sets client_connection_check_interval — a contender killed mid-wait (job timeout) leaves a zombie backend queued on the lock indefinitely (158-MUTEX-02)`,
+        );
+      });
+
+      // [158-MUTEX-02] second layer: ccci reaps an orphan within ~30s; the
+      // release step frees the lock IMMEDIATELY by also terminating the
+      // backend it recorded at acquire time. The pg_locks guard (same key,
+      // same pid) is what makes the terminate safe against pid recycling —
+      // a bare pg_terminate_backend would not be, so the pin asserts the
+      // whole guarded statement.
+      it("all three release steps carry the guarded server-side pg_terminate_backend of the holder backend", () => {
+        const src = readText(".github/workflows/ci.yml");
+        const reapRe =
+          /pg_terminate_backend\(\$\{backend\}\) FROM pg_locks WHERE locktype = 'advisory' AND objid = 61616158 AND pid = \$\{backend\};/;
+        for (const job of DB_JOBS) {
+          expectMatch(
+            jobSlice(src, job),
+            reapRe,
+            `ci.yml ${job}: its release step lost the guarded server-side pg_terminate_backend — killing the psql client alone leaves the server backend holding key 61616158 for its full pg_sleep (158-MUTEX-02, run 32457330139), and the pg_locks guard (advisory key + pid) is what keeps the terminate a no-op on an already-exited or recycled pid, so restore the WHOLE statement, not a bare pg_terminate_backend`,
+          );
+        }
       });
 
       // OPS-02 in full: "present-and-failing with NOTHING gating on it". Wiring

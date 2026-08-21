@@ -1162,11 +1162,28 @@ jobs:
           # overrides the configuration-file default, exempting both the lock
           # wait and the idle sleep. Third invariant leg, pinned in
           # critical-regressions.test.ts.
+          # [158-MUTEX-02] (orphaned holder backend; run 32457330139): killing
+          # the psql CLIENT does not kill its SERVER backend — neither pg_sleep
+          # nor a pg_advisory_lock wait ever reads the client socket, so the
+          # release step's client-side kill left a backend holding the lock for
+          # its full 6000s sleep and starved e2e-seeded past the 3600s cap.
+          # Before 158-MUTEX-01 the server statement_timeout was the ACCIDENTAL
+          # janitor for such orphans; client_connection_check_interval is the
+          # real one — the backend polls its client socket during query
+          # execution AND lock waits, aborting within ~30s of the client dying.
+          # Covers both the sleeping holder and a lock-waiting contender whose
+          # client died (a job-timeout kill mid-wait leaves the same zombie).
+          # HOLDER-BACKEND-PID feeds the release step's guarded server-side
+          # pg_terminate_backend, which frees the lock immediately rather than
+          # after the ~30s check interval. Both GUCs and the marker MUST stay
+          # before pg_advisory_lock, so the lock wait itself is covered.
           start_holder() {
             : > "${log}"
             PGAPPNAME=ci-shared-test-db-mutex PGCONNECT_TIMEOUT=15 \
               nohup psql "${dsn}" -X -q -A -t -v ON_ERROR_STOP=1 \
                 -c "SET statement_timeout = 0;" \
+                -c "SET client_connection_check_interval = '30s';" \
+                -c "SELECT 'HOLDER-BACKEND-PID ' || pg_backend_pid();" \
                 -c "SELECT pg_advisory_lock(61616158);" \
                 -c "SELECT 'MUTEX-ACQUIRED';" \
                 -c "SELECT pg_sleep(6000);" \
@@ -1198,6 +1215,11 @@ jobs:
             start_holder
             while [ "${waited}" -lt 3600 ]; do
               if grep -q 'MUTEX-ACQUIRED' "${log}" 2>/dev/null; then
+                # [158-MUTEX-02] best effort: an absent/empty pid file only
+                # forfeits the release step's immediate server-side reap — the
+                # ccci GUC above still bounds an orphaned backend at ~30s.
+                sed -n 's/^HOLDER-BACKEND-PID \([0-9]\{1,\}\)$/\1/p' "${log}" | head -n 1 \
+                  > "${RUNNER_TEMP}/shared-test-db-mutex-backend-pid" || true
                 echo "Acquired the shared-test-db advisory lock (key 61616158) after ${waited}s (attempt ${attempt}/3)."
                 exit 0
               fi
@@ -1323,6 +1345,8 @@ jobs:
       # the guarantee.
       - name: Release shared-test-db mutex (best effort)
         if: always()
+        env:
+          TEST_SUPABASE_DB_URL: ${{ secrets.TEST_SUPABASE_DB_URL }}
         run: |
           pidfile="${RUNNER_TEMP}/shared-test-db-mutex.pid"
           if [ ! -f "${pidfile}" ]; then
@@ -1350,6 +1374,42 @@ jobs:
             # exit status. Job teardown remains the guaranteed release path.
             echo "::error::mutex holder pid ${holder} died BEFORE this release step — the DB work after its death ran UNSERIALIZED. Do not trust this run's DB assertions; investigate (holder outlives the job by design, see the pg_sleep note in the acquire step)."
           fi
+          # [158-MUTEX-02] (run 32457330139): the kill above reaches only the
+          # psql CLIENT. A backend mid-pg_sleep never reads its client socket,
+          # so it kept the lock and starved the other jobs' acquires for its
+          # full 6000s sleep. Terminate the recorded backend server-side too;
+          # the pg_locks guard (same key, same pid) makes it a no-op if that
+          # backend already exited or the pid was recycled — never a blind
+          # terminate. Best effort like the rest of this step: ccci bounds any
+          # survivor at ~30s, and nothing here may redden the job.
+          backendpidfile="${RUNNER_TEMP}/shared-test-db-mutex-backend-pid"
+          backend="$(cat "${backendpidfile}" 2>/dev/null || true)"
+          case "${backend}" in
+            ''|*[!0-9]*)
+              echo "No server backend pid recorded — leaving any orphan to client_connection_check_interval."
+              ;;
+            *)
+              if [ -z "${TEST_SUPABASE_DB_URL:-}" ]; then
+                echo "TEST_SUPABASE_DB_URL withheld — skipping the server-side backend reap."
+              else
+                # Session-mode DSN, derived exactly as in the acquire step and
+                # never echoed; bounded like the acquire step's census query.
+                dsn="${TEST_SUPABASE_DB_URL}"
+                case "${dsn}" in
+                  *":6543/"*) dsn="${dsn%%:6543/*}:5432/${dsn#*:6543/}" ;;
+                esac
+                reaped="$(PGCONNECT_TIMEOUT=15 timeout 20 psql "${dsn}" -X -q -A -t \
+                  -c "SET statement_timeout = '10s';" \
+                  -c "SELECT pg_terminate_backend(${backend}) FROM pg_locks WHERE locktype = 'advisory' AND objid = 61616158 AND pid = ${backend};" \
+                  2>/dev/null | tr -d '\r' | tail -1)" || true
+                if [ "${reaped}" = "t" ]; then
+                  echo "Server-side reap: backend ${backend} was STILL on key 61616158 — pg_terminate_backend sent (the client kill alone had not freed the lock)."
+                else
+                  echo "Server-side reap: backend ${backend} no longer on key 61616158 (already exited, or the census was unavailable) — nothing to terminate."
+                fi
+              fi
+              ;;
+          esac
 
   secret-scan:
     # Task 7.6: gitleaks runs against the full commit history for PRs
@@ -1639,11 +1699,28 @@ jobs:
           # overrides the configuration-file default, exempting both the lock
           # wait and the idle sleep. Third invariant leg, pinned in
           # critical-regressions.test.ts.
+          # [158-MUTEX-02] (orphaned holder backend; run 32457330139): killing
+          # the psql CLIENT does not kill its SERVER backend — neither pg_sleep
+          # nor a pg_advisory_lock wait ever reads the client socket, so the
+          # release step's client-side kill left a backend holding the lock for
+          # its full 6000s sleep and starved e2e-seeded past the 3600s cap.
+          # Before 158-MUTEX-01 the server statement_timeout was the ACCIDENTAL
+          # janitor for such orphans; client_connection_check_interval is the
+          # real one — the backend polls its client socket during query
+          # execution AND lock waits, aborting within ~30s of the client dying.
+          # Covers both the sleeping holder and a lock-waiting contender whose
+          # client died (a job-timeout kill mid-wait leaves the same zombie).
+          # HOLDER-BACKEND-PID feeds the release step's guarded server-side
+          # pg_terminate_backend, which frees the lock immediately rather than
+          # after the ~30s check interval. Both GUCs and the marker MUST stay
+          # before pg_advisory_lock, so the lock wait itself is covered.
           start_holder() {
             : > "${log}"
             PGAPPNAME=ci-shared-test-db-mutex PGCONNECT_TIMEOUT=15 \
               nohup psql "${dsn}" -X -q -A -t -v ON_ERROR_STOP=1 \
                 -c "SET statement_timeout = 0;" \
+                -c "SET client_connection_check_interval = '30s';" \
+                -c "SELECT 'HOLDER-BACKEND-PID ' || pg_backend_pid();" \
                 -c "SELECT pg_advisory_lock(61616158);" \
                 -c "SELECT 'MUTEX-ACQUIRED';" \
                 -c "SELECT pg_sleep(6000);" \
@@ -1675,6 +1752,11 @@ jobs:
             start_holder
             while [ "${waited}" -lt 3600 ]; do
               if grep -q 'MUTEX-ACQUIRED' "${log}" 2>/dev/null; then
+                # [158-MUTEX-02] best effort: an absent/empty pid file only
+                # forfeits the release step's immediate server-side reap — the
+                # ccci GUC above still bounds an orphaned backend at ~30s.
+                sed -n 's/^HOLDER-BACKEND-PID \([0-9]\{1,\}\)$/\1/p' "${log}" | head -n 1 \
+                  > "${RUNNER_TEMP}/shared-test-db-mutex-backend-pid" || true
                 echo "Acquired the shared-test-db advisory lock (key 61616158) after ${waited}s (attempt ${attempt}/3)."
                 exit 0
               fi
@@ -1768,6 +1850,8 @@ jobs:
       # sooner and never reddens the job.
       - name: Release shared-test-db mutex (best effort)
         if: always()
+        env:
+          TEST_SUPABASE_DB_URL: ${{ secrets.TEST_SUPABASE_DB_URL }}
         run: |
           pidfile="${RUNNER_TEMP}/shared-test-db-mutex.pid"
           if [ ! -f "${pidfile}" ]; then
@@ -1795,6 +1879,42 @@ jobs:
             # exit status. Job teardown remains the guaranteed release path.
             echo "::error::mutex holder pid ${holder} died BEFORE this release step — the DB work after its death ran UNSERIALIZED. Do not trust this run's DB assertions; investigate (holder outlives the job by design, see the pg_sleep note in the acquire step)."
           fi
+          # [158-MUTEX-02] (run 32457330139): the kill above reaches only the
+          # psql CLIENT. A backend mid-pg_sleep never reads its client socket,
+          # so it kept the lock and starved the other jobs' acquires for its
+          # full 6000s sleep. Terminate the recorded backend server-side too;
+          # the pg_locks guard (same key, same pid) makes it a no-op if that
+          # backend already exited or the pid was recycled — never a blind
+          # terminate. Best effort like the rest of this step: ccci bounds any
+          # survivor at ~30s, and nothing here may redden the job.
+          backendpidfile="${RUNNER_TEMP}/shared-test-db-mutex-backend-pid"
+          backend="$(cat "${backendpidfile}" 2>/dev/null || true)"
+          case "${backend}" in
+            ''|*[!0-9]*)
+              echo "No server backend pid recorded — leaving any orphan to client_connection_check_interval."
+              ;;
+            *)
+              if [ -z "${TEST_SUPABASE_DB_URL:-}" ]; then
+                echo "TEST_SUPABASE_DB_URL withheld — skipping the server-side backend reap."
+              else
+                # Session-mode DSN, derived exactly as in the acquire step and
+                # never echoed; bounded like the acquire step's census query.
+                dsn="${TEST_SUPABASE_DB_URL}"
+                case "${dsn}" in
+                  *":6543/"*) dsn="${dsn%%:6543/*}:5432/${dsn#*:6543/}" ;;
+                esac
+                reaped="$(PGCONNECT_TIMEOUT=15 timeout 20 psql "${dsn}" -X -q -A -t \
+                  -c "SET statement_timeout = '10s';" \
+                  -c "SELECT pg_terminate_backend(${backend}) FROM pg_locks WHERE locktype = 'advisory' AND objid = 61616158 AND pid = ${backend};" \
+                  2>/dev/null | tr -d '\r' | tail -1)" || true
+                if [ "${reaped}" = "t" ]; then
+                  echo "Server-side reap: backend ${backend} was STILL on key 61616158 — pg_terminate_backend sent (the client kill alone had not freed the lock)."
+                else
+                  echo "Server-side reap: backend ${backend} no longer on key 61616158 (already exited, or the census was unavailable) — nothing to terminate."
+                fi
+              fi
+              ;;
+          esac
 
   e2e:
     # Runs the PUBLIC/smoke Playwright suite against a placeholder-env
@@ -2310,11 +2430,28 @@ jobs:
           # overrides the configuration-file default, exempting both the lock
           # wait and the idle sleep. Third invariant leg, pinned in
           # critical-regressions.test.ts.
+          # [158-MUTEX-02] (orphaned holder backend; run 32457330139): killing
+          # the psql CLIENT does not kill its SERVER backend — neither pg_sleep
+          # nor a pg_advisory_lock wait ever reads the client socket, so the
+          # release step's client-side kill left a backend holding the lock for
+          # its full 6000s sleep and starved e2e-seeded past the 3600s cap.
+          # Before 158-MUTEX-01 the server statement_timeout was the ACCIDENTAL
+          # janitor for such orphans; client_connection_check_interval is the
+          # real one — the backend polls its client socket during query
+          # execution AND lock waits, aborting within ~30s of the client dying.
+          # Covers both the sleeping holder and a lock-waiting contender whose
+          # client died (a job-timeout kill mid-wait leaves the same zombie).
+          # HOLDER-BACKEND-PID feeds the release step's guarded server-side
+          # pg_terminate_backend, which frees the lock immediately rather than
+          # after the ~30s check interval. Both GUCs and the marker MUST stay
+          # before pg_advisory_lock, so the lock wait itself is covered.
           start_holder() {
             : > "${log}"
             PGAPPNAME=ci-shared-test-db-mutex PGCONNECT_TIMEOUT=15 \
               nohup psql "${dsn}" -X -q -A -t -v ON_ERROR_STOP=1 \
                 -c "SET statement_timeout = 0;" \
+                -c "SET client_connection_check_interval = '30s';" \
+                -c "SELECT 'HOLDER-BACKEND-PID ' || pg_backend_pid();" \
                 -c "SELECT pg_advisory_lock(61616158);" \
                 -c "SELECT 'MUTEX-ACQUIRED';" \
                 -c "SELECT pg_sleep(6000);" \
@@ -2346,6 +2483,11 @@ jobs:
             start_holder
             while [ "${waited}" -lt 3600 ]; do
               if grep -q 'MUTEX-ACQUIRED' "${log}" 2>/dev/null; then
+                # [158-MUTEX-02] best effort: an absent/empty pid file only
+                # forfeits the release step's immediate server-side reap — the
+                # ccci GUC above still bounds an orphaned backend at ~30s.
+                sed -n 's/^HOLDER-BACKEND-PID \([0-9]\{1,\}\)$/\1/p' "${log}" | head -n 1 \
+                  > "${RUNNER_TEMP}/shared-test-db-mutex-backend-pid" || true
                 echo "Acquired the shared-test-db advisory lock (key 61616158) after ${waited}s (attempt ${attempt}/3)."
                 exit 0
               fi
@@ -2736,6 +2878,8 @@ jobs:
       # sooner and never reddens the job.
       - name: Release shared-test-db mutex (best effort)
         if: always()
+        env:
+          TEST_SUPABASE_DB_URL: ${{ secrets.TEST_SUPABASE_DB_URL }}
         run: |
           pidfile="${RUNNER_TEMP}/shared-test-db-mutex.pid"
           if [ ! -f "${pidfile}" ]; then
@@ -2763,6 +2907,42 @@ jobs:
             # exit status. Job teardown remains the guaranteed release path.
             echo "::error::mutex holder pid ${holder} died BEFORE this release step — the DB work after its death ran UNSERIALIZED. Do not trust this run's DB assertions; investigate (holder outlives the job by design, see the pg_sleep note in the acquire step)."
           fi
+          # [158-MUTEX-02] (run 32457330139): the kill above reaches only the
+          # psql CLIENT. A backend mid-pg_sleep never reads its client socket,
+          # so it kept the lock and starved the other jobs' acquires for its
+          # full 6000s sleep. Terminate the recorded backend server-side too;
+          # the pg_locks guard (same key, same pid) makes it a no-op if that
+          # backend already exited or the pid was recycled — never a blind
+          # terminate. Best effort like the rest of this step: ccci bounds any
+          # survivor at ~30s, and nothing here may redden the job.
+          backendpidfile="${RUNNER_TEMP}/shared-test-db-mutex-backend-pid"
+          backend="$(cat "${backendpidfile}" 2>/dev/null || true)"
+          case "${backend}" in
+            ''|*[!0-9]*)
+              echo "No server backend pid recorded — leaving any orphan to client_connection_check_interval."
+              ;;
+            *)
+              if [ -z "${TEST_SUPABASE_DB_URL:-}" ]; then
+                echo "TEST_SUPABASE_DB_URL withheld — skipping the server-side backend reap."
+              else
+                # Session-mode DSN, derived exactly as in the acquire step and
+                # never echoed; bounded like the acquire step's census query.
+                dsn="${TEST_SUPABASE_DB_URL}"
+                case "${dsn}" in
+                  *":6543/"*) dsn="${dsn%%:6543/*}:5432/${dsn#*:6543/}" ;;
+                esac
+                reaped="$(PGCONNECT_TIMEOUT=15 timeout 20 psql "${dsn}" -X -q -A -t \
+                  -c "SET statement_timeout = '10s';" \
+                  -c "SELECT pg_terminate_backend(${backend}) FROM pg_locks WHERE locktype = 'advisory' AND objid = 61616158 AND pid = ${backend};" \
+                  2>/dev/null | tr -d '\r' | tail -1)" || true
+                if [ "${reaped}" = "t" ]; then
+                  echo "Server-side reap: backend ${backend} was STILL on key 61616158 — pg_terminate_backend sent (the client kill alone had not freed the lock)."
+                else
+                  echo "Server-side reap: backend ${backend} no longer on key 61616158 (already exited, or the census was unavailable) — nothing to terminate."
+                fi
+              fi
+              ;;
+          esac
       # retro-PR179-H1 / C-0293(c): NO playwright-report upload from this
       # job, ever. Every spec here runs against the REAL-env build, and
       # Playwright's trace.zip + on-failure screenshots embed
