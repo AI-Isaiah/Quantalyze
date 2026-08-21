@@ -159,8 +159,10 @@ export function resolveSharedScenario(
    * Phase 84 (BLEND-01) — strategy id → asset_class, sourced by the SSR caller
    * (page.tsx) from a published-rows-only `strategies` read of the RPC series
    * ids (a zero-DDL sibling read; the phase-29 exit gate forbids widening the
-   * get_shared_scenario RPC/migration). Absent id / undefined lookup → null, the
-   * conservative √252 leg, byte-identical to the pre-84 default.
+   * get_shared_scenario RPC/migration). Absent id / undefined lookup → null,
+   * which RANK-06 (159-04) resolves to the conservative √365 clock: a null class
+   * is a projection gap, not a stated-traditional leg. Only a stated
+   * 'traditional' leg keeps √252.
    */
   assetClassById?: Record<string, string | null>,
   /**
@@ -233,7 +235,9 @@ export function resolveSharedScenario(
       volatility: null,
       max_drawdown: null,
       // Phase 84 (BLEND-01): the leg's asset_class from the caller's published-
-      // only lookup (absent → null, the √252 leg). Feeds the blend basis below.
+      // only lookup. Absent → null, and RANK-06 (159-04) reads that null as a
+      // PROJECTION GAP → the conservative √365 clock, not √252. Feeds the blend
+      // basis below.
       asset_class: assetClassById?.[id] ?? null,
     });
     // An added strategy is "selected" when its ref is toggled on (default true
