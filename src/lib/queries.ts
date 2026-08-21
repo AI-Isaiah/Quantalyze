@@ -365,6 +365,13 @@ export async function getMyStrategies(
 
   const { data, error } = await supabase
     .from("strategies")
+    // RANK-02 / D-02 EXEMPTION — the wildcard analytics embed stays HERE and
+    // only here: the `.eq("user_id", userId)` on the next line scopes this read
+    // to the session owner's OWN rows, so the columns RANK-02 keeps from
+    // anonymous readers (daily_returns, metrics_json, data_quality_flags) never
+    // leave the owner they belong to. Every other embed in the class is now an
+    // explicit projection; adding a NON-owner-scoped caller to this function
+    // would silently re-open that class.
     .select(`*, strategy_analytics (*)`)
     .eq("user_id", userId)
     .neq("status", "archived");
