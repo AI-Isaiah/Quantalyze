@@ -1246,6 +1246,37 @@ describe("Critical regression guards", () => {
         }
       });
 
+      // [158-MUTEX-01]: sleep > TTL (the pin above) is NECESSARY but not
+      // SUFFICIENT. The TEST project sets a server-wide
+      // statement_timeout=120000 ("configuration file" source in pg_settings),
+      // and both the contended pg_advisory_lock wait and the pg_sleep are
+      // single statements — so without a session-level exemption the server
+      // killed the holder ~120s after it acquired (the lock silently released
+      // and every long job's DB work ran UNSERIALIZED; measured on the
+      // 2026-08-20/21 evidence runs, e.g. 32424762495) and killed a contended
+      // waiter at 120s (which the retry loop then mislabelled as a connect
+      // fault, capping real contention tolerance at ~3×120s instead of the
+      // 3600s cap). The exemption must be the FIRST -c statement of the holder
+      // invocation, BEFORE pg_advisory_lock, so it covers the lock wait itself
+      // and not just the idle sleep.
+      it("the mutex holder zeroes statement_timeout before pg_advisory_lock in all three acquire steps", () => {
+        const src = readText(".github/workflows/ci.yml");
+        const exemptHolderRe =
+          /-c "SET statement_timeout = 0;" \\\n\s+-c "SELECT pg_advisory_lock\(61616158\);"/;
+        for (const job of DB_JOBS) {
+          expectMatch(
+            jobSlice(src, job),
+            exemptHolderRe,
+            `ci.yml ${job}: the mutex holder no longer runs \`SET statement_timeout = 0\` immediately before pg_advisory_lock — TEST's server-wide statement_timeout=120000 will kill the holder ~120s after acquiring (lock silently released, DB work UNSERIALIZED) and kill a contended lock wait at 120s (158-MUTEX-01)`,
+          );
+        }
+        const count = [...src.matchAll(new RegExp(exemptHolderRe.source, "g"))].length;
+        expect(
+          count,
+          `ci.yml: expected EXACTLY 3 exempt mutex holder invocations (one per DB-touching job, byte-identical by design), found ${count} (158-MUTEX-01)`,
+        ).toBe(3);
+      });
+
       // OPS-02 in full: "present-and-failing with NOTHING gating on it". Wiring
       // `sql-tests` into ONLY ONE of the two places silently restores exactly
       // that state — `needs:` alone leaves it advisory, and a result-loop row
