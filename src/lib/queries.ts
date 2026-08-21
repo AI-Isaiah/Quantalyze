@@ -623,10 +623,13 @@ export type OwnRowPercentiles = {
  * (see percentile-core's header). So a draft is told "if published, this would
  * sit at Pnn" LITERALLY, and it cannot shift any public rank.
  *
- * Both `< 5` thresholds mirror `getPercentiles` exactly, so the page's Pnn
- * presence and its "ranked against N strategies" copy flip together — the page
- * can never show a rank while claiming there is no comparison set, or vice
- * versa.
+ * Both `< 5` thresholds mirror `getPercentiles` exactly — including RANK-01's
+ * gate: the second threshold counts RANKABLE rows (those passing
+ * `isRankableAnalyticsRow`), not every row carrying an analytics embed. So the
+ * page's Pnn presence and its "ranked against N strategies" copy flip together,
+ * and the N it claims is the same honest denominator /discovery ranks against —
+ * the page can never show a rank while claiming there is no comparison set, nor
+ * count a dead `failed` row into the comparison set it names.
  *
  * `getPercentiles` remains the discovery-surface caller; plan 04 calls ONLY
  * this helper.
@@ -636,10 +639,14 @@ export async function getOwnRowPercentiles(
 ): Promise<OwnRowPercentiles | null> {
   const supabase = await createClient();
 
+  // RANK-01: same composition as getPercentiles — the gate column rides
+  // ALONGSIDE the byte-frozen KPI list, never appended to it.
   const { data: strategies, error } = await withPublishedOnly(
     supabase
       .from("strategies")
-      .select(`id, strategy_analytics (${PERCENTILE_ANALYTICS_COLUMNS})`),
+      .select(
+        `id, strategy_analytics (${PERCENTILE_ANALYTICS_COLUMNS}, ${PERCENTILE_GATE_COLUMN})`,
+      ),
   );
 
   if (error) {
@@ -654,6 +661,10 @@ export async function getOwnRowPercentiles(
   for (const s of strategies) {
     const a = extractAnalytics((s as Record<string, unknown>).strategy_analytics);
     if (!a) continue;
+    // RANK-01: the SAME shared gate getPercentiles uses — deliberately the one
+    // helper and not a local predicate, so the owner surface and the public
+    // surface can never disagree about who is in the comparison set.
+    if (!isRankableAnalyticsRow(a)) continue;
     populationRows.push({
       id: s.id,
       analytics: castRow<Record<string, number | null>>(a, "analytics"),
