@@ -983,10 +983,22 @@ export type StrategyDetailVariant = "public" | "discovery";
  * surfaces derive their still-computing placeholder from it, and
  * `computed_at` drives the freshness sentinel.
  *
- * Membership deliberately mirrors `PUBLIC_ANALYTICS_COLUMNS` (the projection
+ * Membership IS `PUBLIC_ANALYTICS_COLUMNS` (the projection
  * `getPublicStrategyDetail` already uses for the ANON factsheet at
  * `/strategy/[id]`): that is the measured anon-detail need, and the two lists
- * describing the same surface should not disagree.
+ * describing the same surface must not disagree.
+ *
+ * ⭐ It is an ALIAS, not a copy. This was a byte-for-byte duplicate of that
+ * literal, with the mirroring enforced by nothing — two independently-editable
+ * strings both claiming to be "the anon-safe analytics column set". Drift is
+ * asymmetric and security-relevant: widening the copy ships an extra column
+ * under `getStrategyDetail`'s `public` DEFAULT, which is precisely the door
+ * the caller-scoped split exists to keep shut. Binding the name to the
+ * original makes the mirror true by construction. The separate name is kept
+ * because the two lists are separate DECISIONS that merely coincide today —
+ * if the anon detail surface ever needs a column the factsheet does not (or
+ * vice versa), this is the seam to widen, and the lockstep pin in
+ * queries.test.ts is what will notice.
  *
  * ⚠️ Measured at HEAD (159-03): `/strategy/[id]` does NOT call
  * `getStrategyDetail` — it calls `getPublicStrategyDetail`, aliased locally
@@ -996,8 +1008,7 @@ export type StrategyDetailVariant = "public" | "discovery";
  * AUTHED discovery detail page, so `public` is the safe default for future
  * callers rather than a live anon path.
  */
-const STRATEGY_DETAIL_PUBLIC_ANALYTICS_COLUMNS =
-  "cumulative_return, cagr, volatility, sharpe, sortino, calmar, max_drawdown, max_drawdown_duration_days, six_month_return, sparkline_returns, computation_status, computed_at";
+const STRATEGY_DETAIL_PUBLIC_ANALYTICS_COLUMNS = PUBLIC_ANALYTICS_COLUMNS;
 
 /**
  * The AUTHED discovery-detail projection: the public list plus exactly the

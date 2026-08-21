@@ -468,12 +468,17 @@ describe("getStrategyDetail — RANK-02 caller-scoped analytics projection", () 
   /**
    * The public variant and `getPublicStrategyDetail`'s PUBLIC_ANALYTICS_COLUMNS
    * describe the SAME thing — what an anonymous reader needs from a strategy
-   * detail row — so they are written as byte-identical member lists. Two
-   * identical literals in one file are a drift hazard (and an edit hazard: a
-   * find-and-replace aimed at one will silently hit the other, which is
-   * exactly how this pin came to be written). This makes the intended lockstep
-   * a CHECKED invariant instead of a hope: widen either list alone and this
-   * reds.
+   * detail row.
+   *
+   * ⚠️ WHAT THIS PINS CHANGED, and the wording is kept honest about it. It was
+   * written when the two were byte-identical LITERALS, where drift between the
+   * copies was the live hazard. `STRATEGY_DETAIL_PUBLIC_ANALYTICS_COLUMNS` is
+   * now bound to `PUBLIC_ANALYTICS_COLUMNS` (queries.ts), so that particular
+   * drift is impossible by construction and this test can no longer catch it.
+   * What it still catches is the remaining failure mode, one level up: a CALL
+   * SITE that stops routing through the shared constant — an inlined list at
+   * the variant switch, or a widened embed in either fetcher. That is now the
+   * only way these two projections can diverge, and it reds here.
    */
   it("public variant stays in lockstep with the anon factsheet projection", async () => {
     const detail = await captureEmbed(() => getStrategyDetail("strat_123"));
