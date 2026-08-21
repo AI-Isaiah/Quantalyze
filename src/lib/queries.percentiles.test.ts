@@ -44,7 +44,7 @@ vi.mock("@/lib/supabase/admin", () => ({
   createAdminClient: () => ({ from: () => ({}) }),
 }));
 
-import { getPercentiles } from "./queries";
+import { getPercentiles, getOwnRowPercentiles } from "./queries";
 
 beforeEach(() => {
   strategiesResolver.data = null;
@@ -205,6 +205,78 @@ describe("getPercentiles — RANK-01 computed-analytics rank gate", () => {
       { id: "f2", strategy_analytics: analyticsRow("failed", 0.6) },
     ];
 
+    expect(await getPercentiles()).toBeNull();
+  });
+});
+
+/**
+ * Phase 159 / RANK-01 — the owner surface rides the SAME gate.
+ *
+ * `getOwnRowPercentiles` backs /my-strategies and had no behavioural coverage
+ * before this phase (only the structural pins in
+ * src/__tests__/phase-149-my-strategies-parity.test.ts, which scan source text
+ * rather than call it). Its whole documented contract is that both `< 5`
+ * thresholds mirror `getPercentiles`, so if the gate landed on only one of the
+ * two callers the owner's "ranked against N strategies" copy would name a
+ * population that includes dead rows the public surface already dropped.
+ *
+ * `ownRows` is deliberately `[]` here: the gate acts on the PUBLISHED
+ * population, which is what these pins are about.
+ */
+describe("getOwnRowPercentiles — RANK-01 gate parity with getPercentiles", () => {
+  const analyticsRow = (computation_status: string | null, sharpe: number) => ({
+    computation_status,
+    sharpe,
+    cagr: sharpe / 10,
+    sortino: sharpe,
+    calmar: sharpe,
+    max_drawdown: -0.1,
+    volatility: 0.2,
+    cumulative_return: sharpe / 10,
+  });
+
+  it("drops a failed-with-KPIs row from the comparison population it reports", async () => {
+    strategiesResolver.data = [
+      { id: "c1", strategy_analytics: analyticsRow("complete", 0.1) },
+      { id: "c2", strategy_analytics: analyticsRow("complete", 0.2) },
+      { id: "c3", strategy_analytics: analyticsRow("complete_with_warnings", 0.3) },
+      { id: "c4", strategy_analytics: analyticsRow("complete", 0.4) },
+      { id: "c5", strategy_analytics: analyticsRow("complete", 0.5) },
+      { id: "fossil", strategy_analytics: analyticsRow("failed", 0.35) },
+    ];
+
+    const result = await getOwnRowPercentiles([]);
+    expect(result).not.toBeNull();
+
+    // The fossil is neither ranked nor counted. populationSize is the number the
+    // page's "ranked against N strategies" copy prints — it must be the honest
+    // gated denominator, not the raw embed count.
+    expect(Object.keys(result!.publishedMap).sort()).toEqual([
+      "c1",
+      "c2",
+      "c3",
+      "c4",
+      "c5",
+    ]);
+    expect(result!.populationSize).toBe(5);
+  });
+
+  it("applies the gated <5 floor exactly as getPercentiles does", async () => {
+    const population = [
+      { id: "c1", strategy_analytics: analyticsRow("complete", 0.1) },
+      { id: "c2", strategy_analytics: analyticsRow("complete", 0.2) },
+      { id: "c3", strategy_analytics: analyticsRow("complete", 0.3) },
+      { id: "c4", strategy_analytics: analyticsRow("complete_with_warnings", 0.4) },
+      { id: "f1", strategy_analytics: analyticsRow("failed", 0.5) },
+      { id: "f2", strategy_analytics: analyticsRow("failed", 0.6) },
+    ];
+
+    // Same fixture, both callers, same verdict — the mirror contract in
+    // getOwnRowPercentiles' docblock, made observable.
+    strategiesResolver.data = population;
+    expect(await getOwnRowPercentiles([])).toBeNull();
+
+    strategiesResolver.data = population;
     expect(await getPercentiles()).toBeNull();
   });
 });

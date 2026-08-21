@@ -16,6 +16,8 @@ import {
   MAGNITUDE_CAPS,
   STRATEGY_ANALYTICS_COMPUTATION_STATUSES,
   isComputedAnalytics,
+  isRankableAnalyticsRow,
+  PERCENTILE_GATE_COLUMN,
   isCryptoExchange,
   CRYPTO_EXCHANGES,
   VENUE_CAPABILITIES,
@@ -55,6 +57,52 @@ describe("closed-sets registry", () => {
         isComputedAnalytics,
       );
       expect(computed).toEqual(["complete", "complete_with_warnings"]);
+    });
+  });
+
+  describe("isRankableAnalyticsRow (RANK-01 published-percentile gate)", () => {
+    // Phase 159. The ONE gate both TS percentile callers use. It exists because
+    // a `failed` analytics row can still HOLD KPI values from an earlier
+    // attempt — 159-CENSUS.md measured 17 of 18 published PROD strategies in
+    // exactly that state — so no `IS NOT NULL` predicate can exclude them. Only
+    // the status can.
+    it("pins the gate column name (the projection sites compose it)", () => {
+      expect(PERCENTILE_GATE_COLUMN).toBe("computation_status");
+    });
+
+    it("admits BOTH terminal-success statuses", () => {
+      expect(isRankableAnalyticsRow({ computation_status: "complete" })).toBe(true);
+      expect(
+        isRankableAnalyticsRow({ computation_status: "complete_with_warnings" }),
+      ).toBe(true);
+    });
+
+    it("rejects every non-terminal and failed status", () => {
+      for (const s of ["pending", "computing", "failed"]) {
+        expect(isRankableAnalyticsRow({ computation_status: s })).toBe(false);
+      }
+    });
+
+    it("rejects a null/undefined status and a null/undefined row", () => {
+      expect(isRankableAnalyticsRow({ computation_status: null })).toBe(false);
+      expect(isRankableAnalyticsRow({ computation_status: undefined })).toBe(false);
+      expect(isRankableAnalyticsRow({})).toBe(false);
+      expect(isRankableAnalyticsRow(null)).toBe(false);
+      expect(isRankableAnalyticsRow(undefined)).toBe(false);
+    });
+
+    it("agrees with isComputedAnalytics on EVERY member of the status closed set", () => {
+      // Parity-by-construction: the gate DELEGATES rather than re-deriving, so
+      // widening the terminal-success set in one place cannot leave the rank
+      // gate behind. This is also the SQL twin's contract — the
+      // get_verified_cohort_rank cohort predicate lists exactly these members.
+      const rankable = STRATEGY_ANALYTICS_COMPUTATION_STATUSES.filter((s) =>
+        isRankableAnalyticsRow({ computation_status: s }),
+      );
+      expect(rankable).toEqual(
+        STRATEGY_ANALYTICS_COMPUTATION_STATUSES.filter(isComputedAnalytics),
+      );
+      expect(rankable).toEqual(["complete", "complete_with_warnings"]);
     });
   });
 
