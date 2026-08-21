@@ -56,17 +56,17 @@ verified-stale items are excluded by construction.
 
 ### OPS — CI/deploy integrity & reliability
 
-- [ ] **OPS-01** (L2258 + L2259): The `shared-test-db` concurrency group no longer evicts queued main-branch jobs — a PR opened mid-run cannot make main CI conclude `cancelled` and silently skip the Railway analytics deploy; GitHub issue #616 closed on the fix. ⚠️ Research correction is binding: shrinking the group does NOT fix this (eviction is cross-run — one member + three runs still evicts queued main); the fix is an external FIFO mutex for DB-touching jobs plus a `cancelled`-conclusion watcher. ⛔ Hard prerequisite for DEPS-01.
-- [ ] **OPS-02** (L1741): `sql-tests` is in an aggregator's `needs:` — the only gate that executes the deployed cron body cannot be present-and-failing with nothing gating on it.
-- [ ] **OPS-03** (L2570 + L1035): The orphaned e2e specs (incl. the NAV-01 surface) run in a CI batch, and DB-types drift gets a regeneration gate (or an explicit recorded decision not to).
-- [ ] **OPS-04** (L2715 + L2265 + L2730): The TEST stale-`pending` backlog gets a TEST-only drain (⛔ never a migration, never `cron.unschedule(9)`), and `test_compute_jobs_fencing.py` stamps `claimed_at` in its two direct UPDATEs.
+- [x] **OPS-01** (L2258 + L2259): The `shared-test-db` concurrency group no longer evicts queued main-branch jobs — a PR opened mid-run cannot make main CI conclude `cancelled` and silently skip the Railway analytics deploy; GitHub issue #616 closed on the fix. ⚠️ Research correction is binding: shrinking the group does NOT fix this (eviction is cross-run — one member + three runs still evicts queued main); the fix is an external FIFO mutex for DB-touching jobs plus a `cancelled`-conclusion watcher. ⛔ Hard prerequisite for DEPS-01.
+- [x] **OPS-02** (L1741): `sql-tests` is in an aggregator's `needs:` — the only gate that executes the deployed cron body cannot be present-and-failing with nothing gating on it.
+- [x] **OPS-03** (L2570 + L1035): The orphaned e2e specs (incl. the NAV-01 surface) run in a CI batch, and DB-types drift gets a regeneration gate (or an explicit recorded decision not to).
+- [x] **OPS-04** (L2715 + L2265 + L2730): The TEST stale-`pending` backlog gets a TEST-only drain (⛔ never a migration, never `cron.unschedule(9)`), and `test_compute_jobs_fencing.py` stamps `claimed_at` in its two direct UPDATEs.
 - [ ] **OPS-05** (L360): The structlog frozen-proxy class is fixed at the class level (no module-level proxy can bind a pre-`configure_logging` chain that skips `_redact_processor`), with a regression test. ⚠️ Two failure modes, each candidate fix closes only one: dropping `cache_logger_on_first_use` misses module-scope `.bind()` (broken regardless of the cache flag per structlog docs) — needs a source-scan gate for Mode A plus a behavioral redaction test for Mode B.
 - [ ] **OPS-06** (L3116): `createAdminClient()` cannot throw on the request path after an irreversible commit — the class is closed at all three known sites.
 - [ ] **OPS-07** (L1594 + L1595 + L1600): Flag-monitor honesty — `checkStuckNotifications` distinguishes "nothing stuck" from "could not tell"; a failed denominator read pages instead of logging success; the integration test actually falsifies both.
 - [ ] **OPS-08** (L1562): The 10-param `_enqueue_compute_job_internal` no longer uses `INTO STRICT` on its lost-race branches (parity with the deliberately de-STRICT-ed 7-param overload).
 - [ ] **OPS-09** (L1561): The resync draft pre-check is deterministic (`ORDER BY created_at DESC` + bounded window).
 - [ ] **OPS-10** (L1558): The retry loop cancels abandoned response bodies (`body.cancel()`) so undici stops buffering until the attempt signal fires.
-- [ ] **OPS-11** (L1531): The `MultiKeyConnectStep` order-sensitive flake is root-caused (unrestored `vi.stubGlobal`/`vi.mock` class) and fixed, not retried-away.
+- [x] **OPS-11** (L1531): The `MultiKeyConnectStep` order-sensitive flake is root-caused (unrestored `vi.stubGlobal`/`vi.mock` class) and fixed, not retried-away.
 
 ### SEC — Small security hardening
 
@@ -137,17 +137,17 @@ Which phases cover which requirements. Updated during roadmap creation.
 | HONEST-04 | Phase 162 | Pending |
 | HONEST-05 | Phase 162 | Pending |
 | HONEST-06 | Phase 162 | Pending |
-| OPS-01 | Phase 158 | Pending |
-| OPS-02 | Phase 158 | Pending |
-| OPS-03 | Phase 158 | Pending |
-| OPS-04 | Phase 158 | Pending |
+| OPS-01 | Phase 158 | Complete |
+| OPS-02 | Phase 158 | Complete |
+| OPS-03 | Phase 158 | Complete |
+| OPS-04 | Phase 158 | Complete |
 | OPS-05 | Phase 163 | Pending |
 | OPS-06 | Phase 163 | Pending |
 | OPS-07 | Phase 163 | Pending |
 | OPS-08 | Phase 163 | Pending |
 | OPS-09 | Phase 163 | Pending |
 | OPS-10 | Phase 163 | Pending |
-| OPS-11 | Phase 158 | Pending |
+| OPS-11 | Phase 158 | Complete |
 | SEC-01 | Phase 163 | Pending |
 | SEC-02 | Phase 163 | Pending |
 | SEC-03 | Phase 163 | Pending |
@@ -157,6 +157,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | DEPS-01 | Phase 165 | Pending |
 
 **Coverage:**
+
 - v1.20 requirements: 50 total
 - Mapped to phases: 50 (Phases 158–165; roadmap created 2026-08-20)
 - Unmapped: 0 ✓
@@ -202,17 +203,20 @@ milestone or advertise MT5 until 142.3 passes.
   while the daily series is shifted, corrupting Sharpe, max drawdown and every risk metric derived
   from it. Hardcoding the broker's offset is not acceptable — it breaks at the next DST transition
   and is wrong for every other broker.
+
 - [ ] **MT5-07**: Rendered performance is verified against an **external** oracle — the MT5
   terminal's own equity and balance figures, or the broker statement, over a fixed window, matching
   within a stated tolerance. ⛔ Internal consistency (dailies compound to displayed equity, backbone
   agrees with UI) does **not** satisfy this: that is the self-referential oracle shape that let
   three money bugs survive six review passes. `analytics-service/services/broker_dailies.py` already claims `account_info()
   .equity` is authoritative (`combine_mt5_deal_ledger`'s docstring — "``account_info().equity`` is ALWAYS authoritative" :604; `def combine_mt5_deal_ledger(` :545); this tests the claim.
+
 - [ ] **MT5-08**: Verification runs against the **live funded account** on a **trading day** — real
   fills, fees, swap charges and equity, via the read-only investor password. A demo account does
   not satisfy this (synthetic fills/swaps, artificial starting balance exercising different anchor
   logic), nor does reusing the v1.15 soak account (it shipped green with both open items intact, so
   it has already demonstrated it does not catch these). A weekend run proves nothing.
+
 - [ ] **MT5-09**: Every surface that renders strategy performance shows the same, correct MT5
   numbers — strategy detail, public factsheet, scenario composer, portfolio PDF, browse. The
   architecture says these agree by construction (`analytics-service/services/job_worker.py` — the
@@ -228,6 +232,7 @@ milestone or advertise MT5 until 142.3 passes.
   stacks `portfolio-stats.ts` / `scenario-blend-panels.ts` / `health-score.ts` — **re-derive**
   metrics rather than reading them, and are the one place it could be false. One daily series
   checked five ways; a divergence is a finding.
+
 - [ ] **MT5-10** *(uncapped by founder decision)*: Any discrepancy MT5-07/09 surfaces is **fixed
   within this phase**, wherever its root cause lives — including in shared backbone money-math
   affecting every venue. A bounded alternative (split shared-cause fixes into their own phase) was
@@ -304,7 +309,6 @@ milestone or advertise MT5 until 142.3 passes.
   performance against the terminal; this asks why our own pipeline flagged itself.
 
 ---
-
 
 So the phase requirement measured the wizard, and the founder measures the **product**. Both readings
 are defensible; the founder's is the one that decides whether MT5 ships. The gap between them is

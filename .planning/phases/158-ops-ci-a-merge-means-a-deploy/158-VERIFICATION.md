@@ -1,31 +1,35 @@
 ---
 phase: 158-ops-ci-a-merge-means-a-deploy
-verified: 2026-08-20T23:59:00Z
-status: human_needed
-score: 5/9 must-haves verified
+verified: 2026-08-21T05:15:00Z
+status: passed
+score: 9/9 must-haves verified
 behavior_unverified: 0
 overrides_applied: 0
 human_verification:
   - test: "Phase-PR live CI run (one run covers four recorded backstops): (a) plant a temporarily failing supabase/tests assertion → frontend concludes FAILURE with sql-tests=failure in the loop output, revert → green (both polarities); (b) read the e2e + e2e-seeded Playwright per-spec output — each of the five newly wired specs (api-key-flow, sync-analytics-flow, full-flow, csv-upload-flow, my-strategies) reports >=1 executed non-skipped case; (c) the three 'Acquire shared-test-db mutex' steps run in situ (background psql survives step boundaries; release step fires); (d) the unseeded job's NEXT_PUBLIC_ALLOWED_ORIGINS line works in production mode (no 'Origin not allowed' reds); (e) test_defer_compute_job_token_fence / _null_token_backcompat execute for the first time (they skip locally without TEST env)"
     expected: "frontend red on the planted failure and green after revert with sql-tests=skipped tolerated only on fork/dispatch; every wired spec >=1 executed case; acquire steps log ACQUIRED and jobs complete; fencing tests green in CI"
     why_human: "GitHub-side behavior (expression substitution, background-process survival on the runner image, prebuilt-artifact production mode) is only observable on a real CI run of the phase PR — the plans tagged these `verification: backstop` and deferred them to PR time; not runnable from this tree"
+    result: "PASSED 2026-08-21 — see 158-UAT.md item 1. (a) both polarities: PR #697 run 32424762495 all-green; drill PR #698 run 32426772489 sql-tests FAILED on planted assertion and frontend concluded FAILURE with sql-tests=failure in the loop output. (b) CI dot reporter cannot attribute per-spec, so each wired spec was executed individually at HEAD under its batch env: 3/4/4/2/1 executed cases, zero failures. (c) all three acquire steps ran; e2e-seeded waited 75s behind python then acquired (real contention). (d) unseeded job green incl. the repaired specs (403-without-origin arm exercised locally under the exact CI env). (e) fencing tests executed in the python job (~30 cases)."
   - test: "Post-merge mutex drill: `gh workflow run mutex-probe.yml` ×3 back-to-back; poll all three to conclusion (assert the literal string `success`, never 'not failure'); pull per-run job timings via `gh api …/actions/runs/<id>/jobs` and confirm the locked windows do not overlap"
     expected: "All three dispatched runs conclude `success` with pairwise non-overlapping lock windows — THREE runs, not two (the eviction needed exactly three)"
     why_human: "workflow_dispatch only exists for workflows on the default branch — inert until the phase PR merges (recorded backstop truth, 158-01)"
+    result: "PASSED 2026-08-21 — see 158-UAT.md item 2. Three sequential dispatches on ci-probe/mutex-drill (CR-01 ref gate): runs 32448377859/32448628304/32448874335 all literal `success`, plus push-run 32448078841. assert-serialization windows abut exactly (sample: 1787287921–966–011–056, 45s holds, zero overlap). Probe branch deleted."
   - test: "Post-merge watcher drill: `gh workflow run main-ci-cancelled-watcher.yml -f run_id=31273384829 -f attempt=1` twice; then `gh issue list --label main-ci-cancelled --state open`; close the issue afterward (closing re-arms dedup). Do NOT omit `-f attempt=1` — the run's current conclusion is `success`, so a bare run_id is a clean no-op indistinguishable from a broken watcher"
     expected: "First dispatch CREATES one issue labeled main-ci-cancelled; second dispatch COMMENTS on it (no duplicate); both watcher runs conclude the literal `success`"
     why_human: "workflow_run/workflow_dispatch activate only from the default branch (recorded backstop truth, 158-02); the predicate was unit-exercised against real API payloads but the live issues.create → createComment transition has never run"
+    result: "PASSED 2026-08-21 — see 158-UAT.md item 3. Runs 32448117561/32448154607 both literal `success`; first CREATED dedup issue #699, second COMMENTED (no duplicate); #699 closed afterward (dedup re-armed)."
   - test: "FIFO arrival-order observation (RESEARCH A1, low priority): during the post-merge probe drill, compare acquisition order against contender start order in the assert-serialization log"
     expected: "Waiters granted roughly in arrival order — logged observation only; the probe deliberately does NOT hard-assert this"
     why_human: "Recorded backstop truth (158-01) with honestly-unproven status: the GREEN run's arrivals shared one barrier second, so order was unresolvable. Mutual exclusion (the property the design depends on) IS proven; fairness is not. Abstained rather than silently passed"
+    result: "RECORDED 2026-08-21 — see 158-UAT.md item 4. Run 32448377859: arrival [1,2,3] vs acquisition [1,3,2] — NOT arrival-ordered; fairness disclaim confirmed live. Mutual exclusion held (zero overlap). Observation only."
 ---
 
 # Phase 158: OPS-CI — A merge means a deploy — Verification Report
 
 **Phase Goal:** A merged PR always produces an honestly-reported CI verdict and a deployed analytics service — main CI can no longer conclude `cancelled` and silently skip the Railway deploy, no gate is present-but-ungating, and the two known deterministic false-reds are gone
 **Verified:** 2026-08-20T23:59Z at HEAD `4ecd2c01` on `feat/v1.20-phase-158` (merge-base with main: `35c74149`)
-**Status:** human_needed — all in-tree must-haves VERIFIED; 4 plan-recorded `verification: backstop` truths await the phase PR's live CI run / post-merge dispatches and are abstained, never silently passed
-**Re-verification:** No — initial verification
+**Status:** passed — all in-tree must-haves verified 2026-08-20; the 4 `verification: backstop` truths discharged 2026-08-21 by live measurement (PR #697 run + drill PR #698 red-polarity + post-merge probe ×3 + watcher ×2), evidence in 158-UAT.md
+**Re-verification:** Yes — backstop items re-measured live post-merge (2026-08-21); in-tree verification unchanged from 2026-08-20
 
 Verification was performed against the tree at HEAD, which includes the 3-iteration review fix loop (24 findings, final review `status: clean`), the credential scrub, and the e2e fail-closed env fix — NOT against the stale SUMMARY snapshots. Where review fixes superseded plan literals (mutex sizing 60→90 min TTL), the superseding value was verified instead and is noted.
 
