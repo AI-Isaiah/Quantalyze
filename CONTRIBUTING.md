@@ -49,7 +49,10 @@ merge *is* the apply.
 - **Behavioural SQL gates run in the `sql-tests` CI job**, which serializes
   with `python` and `e2e-seeded` through a Postgres session advisory lock on
   the TEST project (key 61616158, the "Acquire shared-test-db mutex" step —
-  Phase 158). The old repo-wide `shared-test-db` **concurrency group is gone**:
+  Phase 158). Serialization lasts only as long as the holder session does —
+  the session must zero `statement_timeout` first, or TEST's server-wide
+  120 s statement kill ends it mid-job ([158-MUTEX-01], runbook §2).
+  The old repo-wide `shared-test-db` **concurrency group is gone**:
   it held exactly one pending slot, so a PR opening mid-run could evict a
   queued main-branch run, conclude main CI `cancelled`, and silently skip the
   Railway deploy (issue #616). `sql-tests` is still ordered behind `python`

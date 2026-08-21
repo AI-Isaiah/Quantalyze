@@ -22,7 +22,11 @@ deploy — the downstream damage this mutex prevents),
 `sql-tests`, `python` and `e2e-seeded` each acquire **session advisory lock key
 `61616158`** (issue #616 / phase 158) before their first DB-touching step, and
 hold it for the rest of the job. Waiters block inside `pg_advisory_lock`, so
-contending runs queue instead of racing.
+contending runs queue instead of racing. Both the wait and the hold survive
+arbitrarily long only because the session's first statement is
+`SET statement_timeout = 0` — the TEST project's server-wide
+`statement_timeout=120000` would otherwise kill a contended lock wait *and*
+the idle hold at 120 s ([158-MUTEX-01], resolved — see §2).
 
 > **What is proven, and what is not.** Mutual exclusion IS measured — the probe
 > in section 5 puts three simultaneous contenders on the lock and asserts their
@@ -41,8 +45,9 @@ contending runs queue instead of racing.
   advisory lock does **not** survive transaction-mode pooling, because the
   pooler hands the backend to another client between statements.
 - **How it is held:** a single background `psql` session runs
-  `SELECT pg_advisory_lock(61616158)` and then idles for the duration of the
-  job. Steps within a job share the runner, so the backgrounded session persists
+  `SET statement_timeout = 0`, then `SELECT pg_advisory_lock(61616158)`, and
+  then idles for the duration of the job. Steps within a job share the runner,
+  so the backgrounded session persists
   across steps. The lock is released when that session's TCP connection drops —
   i.e. when the job ends, for any reason.
 - **How to spot it:** the holder session sets `PGAPPNAME=ci-shared-test-db-mutex`,
@@ -68,40 +73,54 @@ There is **no lock-reaper cron, and none is needed.**
   the background `psql` session's TCP connection drops, and Postgres releases the
   advisory lock automatically.
 - **The TTL only bounds the hold because the holder is built to outlive it.**
-  The holder session is `psql … -c "SELECT pg_sleep(<n>)"`, and when that sleep
-  returns, psql exits and Postgres releases the lock — *whether or not the job
-  has finished*. So the invariant is `pg_sleep > timeout-minutes`, and it is
-  maintained by hand in `ci.yml`: nothing checks it at runtime.
+  The holder session is `psql … -c "SET statement_timeout = 0;" -c "SELECT
+  pg_sleep(<n>)"`, and when that sleep returns, psql exits and Postgres
+  releases the lock — *whether or not the job has finished*. So the invariant
+  (158-REVIEW WR-01) has **three legs**, maintained by hand in `ci.yml` and
+  checked by nothing at runtime: `pg_sleep > timeout-minutes`, the
+  `timeout-minutes` TTL itself, **and** the session-level
+  `SET statement_timeout = 0` (without it, TEST's server-wide 120 s statement
+  kill ends the sleep — and any contended lock wait — long before either
+  number matters; [158-MUTEX-01], next blockquote).
   Until this was fixed (158-REVIEW WR-01) the sleep was 55min against a 60min
   TTL — i.e. the hold could end up to 5 minutes BEFORE the job did, silently
   dropping mutual exclusion for a long job's final steps. If you change either
   number, change both. Current values are in the acquire step's own comment.
 
-  > ⚠️ **Known open defect — [158-MUTEX-01] (TODOS.md, P0, found 2026-08-21):**
-  > this invariant is currently defeated on TEST by a server-side statement
-  > kill. The TEST project sets server-wide `statement_timeout=120000`, which
-  > cancels the holder's `SELECT pg_sleep(6000)` at ~120 s — psql exits, the
-  > session drops, and the lock releases while the job's DB work continues, so
-  > serialization covers only the first ~2 minutes of each job's DB span. The
-  > dead-holder `::error::` annotation (next bullet) firing on a long job is
-  > this defect, not an anomaly. The same kill hits a contended
-  > `pg_advisory_lock` wait at 120 s. The fix (`SET statement_timeout = 0`,
-  > exempting both the lock wait and the sleep) ships as its own P0 PR and
-  > will give the invariant its third leg here.
+  > ✅ **Resolved — [158-MUTEX-01] (P0, found 2026-08-21, fixed 2026-08-21):**
+  > this invariant used to be defeated on TEST by a server-side statement
+  > kill. The TEST project sets server-wide `statement_timeout=120000`
+  > ("configuration file" source in `pg_settings`; no role-level override),
+  > which cancelled the holder's single-statement `SELECT pg_sleep(6000)` at
+  > ~120 s — psql exited, the session dropped, and the lock released while the
+  > job's DB work continued, so serialization covered only the first ~2
+  > minutes of each job's DB span. The dead-holder `::error::` annotation
+  > (next bullet) fired on every long job of the 2026-08-20/21 evidence runs
+  > (e.g. run 32424762495). The same kill hit a contended `pg_advisory_lock`
+  > wait at 120 s, and the acquire retry loop mislabelled that death as a
+  > connect fault — capping real contention tolerance at ~3×120 s instead of
+  > the 3600 s cap. Fixed by making `SET statement_timeout = 0` the session's
+  > FIRST statement (session-level `SET` is permitted for any role and
+  > overrides the configuration-file default), exempting both the lock wait
+  > and the sleep. That is the invariant's third leg above, pinned in
+  > `src/__tests__/critical-regressions.test.ts` (exactly 3 exempt holder
+  > invocations, `SET` before `pg_advisory_lock`).
 
 - A holder that dies early is now reported: the release step emits a
   `::error::` annotation (never a non-zero exit) when the recorded pid is
   already gone, because that means DB work ran unserialized. It used to print a
-  reassuring "already gone" line on exactly that path.
+  reassuring "already gone" line on exactly that path. With [158-MUTEX-01]
+  fixed, this annotation has no known benign-looking cause left: it is
+  unexpected and always worth investigating.
 
 **The three numbers, and why they are what they are.** They are load-bearing on
 each other; change one and you must re-derive the others.
 
 | Number | Value | Constraint |
 | --- | --- | --- |
-| Acquire wait cap (`ci.yml` acquire loop) | `3600` s | ≥ worst-case legitimate queue: 3 concurrent runs × ~20 min of lock-time each, minus the waiter's own hold ≈ 60 min |
+| Acquire wait cap (`ci.yml` acquire loop) | `3600` s | ≥ worst-case legitimate queue: 3 concurrent runs × ~20 min of lock-time each, minus the waiter's own hold ≈ 60 min. Reachable only because the session zeroes `statement_timeout` first — before [158-MUTEX-01] the wait died at 120 s/attempt, so effective tolerance was ~3×120 s, not this cap |
 | Job TTL (`timeout-minutes`) | `90` min | > setup + full acquire cap + the job's own work (~2 + 60 + ~12 ≈ 74 min) |
-| Holder idle sleep (`pg_sleep`) | `6000` s (100 min) | **>** the job TTL, so the job always dies first (WR-01) |
+| Holder idle sleep (`pg_sleep`) | `6000` s (100 min) | **>** the job TTL, so the job always dies first (WR-01) — holds only with the session-level `SET statement_timeout = 0` ([158-MUTEX-01]) |
 
 Each CI run takes the lock three times — `python` (~7 min of pytest under the
 lock), `e2e-seeded` (~8-9 min, spanning `npm run build` *and* the Playwright
@@ -168,7 +187,10 @@ without freeing anything.
 **But count the waiters before you conclude "nothing is wrong."** A holder that
 is legitimately working plus a deep `granted = false` queue is the *other*
 failure mode: no session is wedged, yet the waiter at the back can still exhaust
-its acquire cap and redden its job. Postgres promises no arrival-order service
+its acquire cap and redden its job. (A `granted = false` session that has been
+sitting far longer than 120 s is normal, not stuck: every mutex session zeroes
+`statement_timeout` before contending, so the server never reaps a queued wait
+— [158-MUTEX-01].) Postgres promises no arrival-order service
 (section 1), so a waiter's position is not a countdown. If you see a healthy
 holder and several waiters, the answer is capacity/queue depth — re-run the
 failed job once the queue drains, and if it recurs, re-derive the cap and TTL in
@@ -274,6 +296,13 @@ Assertions, against that **one** run:
 To confirm the drill can actually fail (a check that cannot go red proves
 nothing), point two contenders at **different** lock keys and watch the overlap
 assertion go RED.
+
+> ⚠️ **What the probe cannot see.** Its holds are ~45 s — far below the 120 s
+> server `statement_timeout` — so the probe stayed green throughout the
+> [158-MUTEX-01] incident, in which every *real* long-job holder died at
+> ~120 s. A green drill proves contenders serialize; it does **not** prove a
+> full-length hold survives. For that class, the witness is the release step's
+> dead-holder `::error::` annotation on real CI jobs (§2).
 
 > ⚠️ **The probe must only ever run on a `ci-probe/**` ref.** Both real jobs are
 > hard-gated on `startsWith(github.ref, 'refs/heads/ci-probe/')`; a dispatch on
