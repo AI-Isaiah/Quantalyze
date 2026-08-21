@@ -76,6 +76,19 @@ There is **no lock-reaper cron, and none is needed.**
   TTL — i.e. the hold could end up to 5 minutes BEFORE the job did, silently
   dropping mutual exclusion for a long job's final steps. If you change either
   number, change both. Current values are in the acquire step's own comment.
+
+  > ⚠️ **Known open defect — [158-MUTEX-01] (TODOS.md, P0, found 2026-08-21):**
+  > this invariant is currently defeated on TEST by a server-side statement
+  > kill. The TEST project sets server-wide `statement_timeout=120000`, which
+  > cancels the holder's `SELECT pg_sleep(6000)` at ~120 s — psql exits, the
+  > session drops, and the lock releases while the job's DB work continues, so
+  > serialization covers only the first ~2 minutes of each job's DB span. The
+  > dead-holder `::error::` annotation (next bullet) firing on a long job is
+  > this defect, not an anomaly. The same kill hits a contended
+  > `pg_advisory_lock` wait at 120 s. The fix (`SET statement_timeout = 0`,
+  > exempting both the lock wait and the sleep) ships as its own P0 PR and
+  > will give the invariant its third leg here.
+
 - A holder that dies early is now reported: the release step emits a
   `::error::` annotation (never a non-zero exit) when the recorded pid is
   already gone, because that means DB work ran unserialized. It used to print a

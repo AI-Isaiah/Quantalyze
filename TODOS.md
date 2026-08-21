@@ -161,6 +161,32 @@ items were dropped, not carried. Categories: **Fix now** / **Fix mid-term** / **
    interactive lease wait is smaller than the worker's 40s read + 10s restart hold, so an
    interactive validate can never wait out one in-flight derive.
 
+0b. **[158-MUTEX-01] shared-test-db mutex holder dies at ~120s — serialization guarantee lasts
+   only the first ~2 minutes of each CI job's DB span.** Found 2026-08-21 by the Phase 158
+   closure's adversarial ship review; mechanism MEASURED: the TEST project sets server-wide
+   `statement_timeout=120000` ("configuration file" source in `pg_settings`; no `postgres`-role
+   override), which kills the holder's single-statement `SELECT pg_sleep(6000)` at 120s → psql
+   exits → session drops → `pg_advisory_lock(61616158)` released while the job's DB work
+   continues. ci.yml's release-step detection (`##[error] mutex holder pid … died … ran
+   UNSERIALIZED`) fired on every long-job evidence run (32424762495 ×2, 32426772489 ×2,
+   32447308698 ×1); the mutex-probe never trips it (45s holds). Contended acquires waiting
+   >120s are at risk via the same kill (retry loop masks it). **Fix (one line, three sites):**
+   prepend `-c "SET statement_timeout = 0;"` to the holder psql invocation in all three
+   acquire steps (sql-tests / python / e2e-seeded) so both the lock wait and the sleep are
+   exempt; update `docs/runbooks/shared-test-db-mutex.md` section 2 (WR-01 invariant gains a
+   third leg: sleep > TTL **and** no server-side statement kill) and the B24/mutex pins in
+   `src/__tests__/critical-regressions.test.ts` if they assert the psql arg shape. Ship as its
+   own reviewed PR immediately after the Phase 158 closure PR lands. Closure record already
+   carries the defect (158-VERIFICATION.md Known-open, 158-UAT.md item 1(d) correction).
+   *Scope note (2026-08-21 post-closure doc review):* the waiter side is confirmed broken
+   too — the acquire is one `ON_ERROR_STOP=1` psql, so a contended `pg_advisory_lock` wait
+   dies at 120 s and the 3-attempt loop then reports it as "a CONNECT/session fault, NOT
+   lock contention" (ci.yml:1222/1664/2300); effective tolerance under real contention is
+   ~3×120 s, not the 3600 s cap. Defeated-claim blast radius exceeds runbook §2: runbook §1
+   (waiters block/queue), §3 (waiter-count triage), §5 (~20 min hold / quiet-CI drill
+   advice) and CONTRIBUTING.md's unqualified serialization claim all assume a long-lived
+   holder — sweep them in the fix PR.
+
 1. **`RESEND_API_KEY` unset in Vercel prod** — founder-LP report cron + all transactional
    email are dead (code soft-skips, only Sentry fires). **Founder action:** set the key in
    Vercel prod. Do before the first warned founder month. (Note: portfolio email *alerts*

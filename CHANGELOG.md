@@ -1,5 +1,33 @@
 # Changelog
 
+## [0.69.0.1] - 2026-08-21
+
+### chore: close v1.20 Phase 158 by live measurement
+
+Phase 158's four deferred verification backstops are now discharged with
+recorded evidence instead of standing open: the `frontend` merge gate was
+proven able to fail (a planted `sql-tests` failure on a throwaway drill PR
+redded it) and to pass (the phase PR's all-green run), every newly wired e2e
+spec was shown to execute at least one real case, the cancelled-run watcher
+was exercised live (issue created, deduped, closed), and the mutex probe ran
+three post-merge drills with non-overlapping lock windows.
+
+**Fixed**
+
+- Phase 158 closure records (`.planning/`): UAT 4/4 passed, verification 9/9,
+  roadmap/state advanced to Phase 159; nine doc-consistency defects found by
+  the pre-landing review were corrected in place.
+
+**Added**
+
+- `158-UAT1-PER-SPEC-EVIDENCE.md` — committed per-spec execution evidence for
+  the five newly wired e2e specs (executed/skipped counts per batch env).
+- **[158-MUTEX-01]** recorded: the shared-test-db mutex holder dies ~120s
+  after acquiring because the TEST project sets server-wide
+  `statement_timeout=120000`, so serialization holds only the first ~2 minutes
+  of each job's DB span (detection layer fired as designed on every long-job
+  run). One-line fix queued as a P0 follow-up PR.
+
 ## [0.69.0.0] - 2026-08-21
 
 ### fix: a merge means a deploy — v1.20 Phase 158 (OPS-CI)
