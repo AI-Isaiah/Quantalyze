@@ -1270,11 +1270,53 @@ describe("Critical regression guards", () => {
             `ci.yml ${job}: the mutex holder no longer runs \`SET statement_timeout = 0\` immediately before pg_advisory_lock — TEST's server-wide statement_timeout=120000 will kill the holder ~120s after acquiring (lock silently released, DB work UNSERIALIZED) and kill a contended lock wait at 120s (158-MUTEX-01)`,
           );
         }
-        const count = [...src.matchAll(new RegExp(exemptHolderRe.source, "g"))].length;
-        expect(
-          count,
-          `ci.yml: expected EXACTLY 3 exempt mutex holder invocations (one per DB-touching job, byte-identical by design), found ${count} (158-MUTEX-01)`,
-        ).toBe(3);
+      });
+
+      // 158-MUTEX-01 review (pin upgrade): the fragment regex above proves the
+      // SET is present, but "byte-identical by design" used to be only a CLAIM
+      // in a failure message — the old exactly-3 count could not see a
+      // single-site drift (one job patched, two forgotten), because three
+      // matching fragments say nothing about the ~170 lines around them.
+      // Extracting the WHOLE acquire step from each DB job and asserting
+      // pairwise string equality mechanically enforces byte-identity, subsumes
+      // that count, and names the drifted site on failure.
+      it("the three Acquire shared-test-db mutex steps are byte-identical and carry libpq keepalives", () => {
+        const src = readText(".github/workflows/ci.yml");
+        // From the step's `- name:` line (6-space step indent) to the next
+        // sibling step or comment at that indent — everything inside the step
+        // is indented deeper, so the first such line bounds the step.
+        const acquireStepRe =
+          /^ {6}- name: Acquire shared-test-db mutex\n[\s\S]*?(?=\n {6}[-#])/m;
+        const stepByJob = new Map<string, string>();
+        for (const job of DB_JOBS) {
+          stepByJob.set(
+            job,
+            findOrFail(
+              jobSlice(src, job),
+              acquireStepRe,
+              `ci.yml ${job}: could not extract the "Acquire shared-test-db mutex" step (name line gone, or no following step/comment at step indent to bound it) — the byte-identity pin cannot run`,
+            ),
+          );
+        }
+        const [refJob, ...otherJobs] = DB_JOBS;
+        for (const job of otherJobs) {
+          expect(
+            stepByJob.get(job),
+            `ci.yml ${job}: its "Acquire shared-test-db mutex" step is no longer byte-identical to ${refJob}'s — the three DB-touching jobs' acquire steps are identical BY DESIGN (every mutex invariant is reasoned about once and applied three times), so a single-site drift means one job runs a DIFFERENT mutex protocol than the other two and every per-fragment pin here can still pass (158-MUTEX-01 review)`,
+          ).toBe(stepByJob.get(refJob));
+        }
+        // [158-MUTEX-01 F2]: during the contended pg_advisory_lock wait and
+        // the pg_sleep hold the connection carries ZERO traffic; without libpq
+        // keepalives, runner-side NAT idle expiry zombifies the holder
+        // invisibly — the backend keeps the lock after the job is gone, and
+        // the release step's dead-holder witness never fires. Presence is
+        // asserted once on the reference job; byte-identity above extends it
+        // to all three sites.
+        expectMatch(
+          stepByJob.get(refJob)!,
+          /keepalives=1&keepalives_idle=60&keepalives_interval=15&keepalives_count=4/,
+          `ci.yml ${refJob}: the mutex holder DSN lost its libpq keepalive parameters (keepalives=1&keepalives_idle=60&keepalives_interval=15&keepalives_count=4) — with zero traffic during the lock wait and the idle hold, NAT idle expiry would silently zombify the holder and the lock would outlive the job (158-MUTEX-01 F2)`,
+        );
       });
 
       // OPS-02 in full: "present-and-failing with NOTHING gating on it". Wiring
