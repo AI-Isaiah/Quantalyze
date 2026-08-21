@@ -697,14 +697,77 @@ def compute_all_metrics(
             insufficient_window = True
         else:
             insufficient_window = _elapsed_days < MIN_ANNUALIZATION_DAYS
-        max_dd = _safe_float(qs.stats.max_drawdown(returns))
-        # Drawdown series — chart continuity per F3 (same fillna(0) rationale).
-        dd_series = qs.stats.to_drawdown_series(returns_for_chart)
+        # RANK-05 (Phase 159) — WHY INLINE, NOT quantstats. `max_drawdown` and
+        # `to_drawdown_series` route through `_utils._prepare_prices`, the mirror
+        # image of the `_prepare_returns` price guess documented at the headline
+        # sharpe/sortino site below:
+        #
+        #     elif data.min() < 0 or data.max() < 1:
+        #         data = to_prices(data, base)
+        #
+        # A series is converted returns->prices ONLY when it has a negative day or
+        # stays under 1. An all-non-negative daily-RETURNS series with one >100%
+        # day fails BOTH tests and is therefore consumed AS a price path. Measured
+        # pre-fix on the 60-day ALL-WINNING fixture: max_drawdown = -0.9973 — a
+        # 99.7% drawdown reported for a series that never lost a single day.
+        # Neither function carries a `prepare_returns=` kwarg in the pinned 0.0.81
+        # (in-env signature sweep, 2026-08-21), so inline pandas is the only
+        # closure (D-04 / the P114 pattern).
+        #
+        # MATH PARITY — quantstats 0.0.81 `max_drawdown` / `to_drawdown_series`
+        # minus the guess. `_prepare_prices(r, base=1.0)` calls `to_prices`, which
+        # is `base + base * compsum(r)` == `(1 + r).cumprod()`; both functions then
+        # prepend a phantom inception point at the baseline and take
+        # `price / expanding-max - 1`. Prepending is equivalent to flooring the
+        # running peak at the baseline — the phantom's own ratio is exactly 1.0 and
+        # every other ratio is <= 1, so it can never be the minimum — hence
+        # `cummax().clip(lower=1.0)`.
+        #
+        # ONE DELIBERATE DIVERGENCE, recorded: quantstats' `_get_baseline_value`
+        # GUESSES the inception capital from the first price (>1000 -> 1e5,
+        # >10 -> 100.0, else 1.0). That ladder exists for series that arrive as
+        # real prices. The wealth curve is BUILT here with base 1.0, so inception
+        # capital is known exactly and the ladder can only misfire — it would
+        # fabricate a ~-100% drawdown for an account whose first day gained more
+        # than +900%. Baseline is pinned at 1.0. Benign parity is untouched: the
+        # ladder returns 1.0 for every first price <= 10.
+        #
+        # NaN CONVENTION at this site: fillna(0), UNCHANGED and deliberate. A gap
+        # day must carry the equity curve FORWARD — a cumulative product cannot
+        # skip a NaN without truncating every later point — which is the same
+        # rationale `returns_for_chart` documents at F3 above. This is exactly what
+        # `_prepare_prices` did, so no fixture can move on this account.
+        _wealth = (1.0 + returns.fillna(0)).cumprod()
+        max_dd = _safe_float(
+            float((_wealth / _wealth.cummax().clip(lower=1.0)).min()) - 1.0
+        )
+        # Drawdown series — chart continuity per F3 (same fillna(0) rationale);
+        # `returns_for_chart` is already NaN-free and floored above -100%. The
+        # trailing `replace` mirrors quantstats' own inf/-0 cleanup.
+        _wealth_chart = (1.0 + returns_for_chart).cumprod()
+        dd_series = (
+            _wealth_chart / _wealth_chart.cummax().clip(lower=1.0) - 1.0
+        ).replace([np.inf, -np.inf, -0.0], 0.0)
 
     # Headline annualized RISK on the day-basis series (Fix A): `stat_returns` IS
     # `returns` on the calendar basis (byte-identical), or the nonzero-day series on
     # the active basis. `periods_per_year` sets the annualization clock (crypto 365).
-    volatility = _safe_float(qs.stats.volatility(stat_returns, periods=periods_per_year))
+    # RANK-05 (Phase 159) — KWARG ARM, the first of the sites closed this way.
+    # `volatility` DOES carry `prepare_returns=` in the pinned quantstats 0.0.81
+    # (in-env `inspect.signature` sweep, 2026-08-21), and passing False was
+    # MEASURED to fully neutralize the price guess here — not merely assumed from
+    # the signature. Passing it removes three `_prepare_returns` behaviours:
+    #   (1) the price-detection guess — the entire point (see the block below);
+    #   (2) `fillna(0)` — a NaN gap day is no longer counted as a real 0.00%
+    #       return. This is the SAME skipna convention the headline sharpe/sortino
+    #       math below adopts, so the two stay coherent; NaN-free series (every
+    #       golden/parity fixture) are byte-unaffected;
+    #   (3) the inf->NaN->0 fill — a non-finite input now degrades to None through
+    #       `_safe_float` instead of being silently zero-substituted into a
+    #       finite-looking number. Fail-soft beats fabricated (Rule 12).
+    # Every kwarg site below shares this rationale and cites it rather than
+    # repeating it. Each is pinned by a live-quantstats benign-parity test.
+    volatility = _safe_float(qs.stats.volatility(stat_returns, periods=periods_per_year, prepare_returns=False))
     # RANK-05 (Phase 159) — WHY INLINE, NOT quantstats. The pinned quantstats
     # 0.0.81 routes every stat through `_utils._prepare_returns`, which carries a
     # PRICE-detection heuristic the platform never asked for:
@@ -893,19 +956,44 @@ def compute_all_metrics(
     # var_1d_95 was missing from every factsheet; the sweep WARNINGs then
     # made the permanent failure a Railway noise floor that erodes the
     # signal value of the new fail-loud emissions.
+    # RANK-05 kwarg arm — see the `volatility` site for the shared rationale.
+    # Kept on ONE source line so the region gate can see the kwarg.
     try:
-        metrics_json["var_1d_95"] = _safe_float(
-            qs.stats.value_at_risk(returns, confidence=0.95)
-        )
+        metrics_json["var_1d_95"] = _safe_float(qs.stats.value_at_risk(returns, confidence=0.95, prepare_returns=False))
     except Exception as exc:  # noqa: BLE001
         logger.warning(
             "qstats scalar var_1d_95 failed (returns_len=%s, nonnan_len=%s): %s",
             returns_len_for_log, returns_nonnan_len_for_log, exc,
             exc_info=_should_emit_traceback("var_1d_95", exc),
         )
+    # RANK-05 — MEASURED DIVERGENCE from the research matrix, recorded here
+    # because the signature lies. `cvar` DOES advertise `prepare_returns=`, but
+    # 0.0.81's `conditional_value_at_risk` does NOT forward it to the VaR
+    # threshold it computes internally:
+    #
+    #     var = value_at_risk(returns, sigma, confidence)   # <- kwarg dropped
+    #     c_var = returns[returns < var].values.mean()
+    #
+    # So `cvar(r, prepare_returns=False)` derives the threshold from the
+    # PRICE-GUESSED series while selecting the tail from the raw one — a mixed
+    # basis that is worse than either. Measured on the 60-day all-winning fixture:
+    # `cvar(r, prepare_returns=False)` returned -0.24153, exactly the guessed-VaR
+    # value, versus the honest -0.28406. The kwarg is therefore NOT a closure for
+    # this site; the two-line wrapper is inlined instead, keeping the underlying
+    # `value_at_risk` primitive (which DOES honour the kwarg) as the threshold
+    # source. quantstats' Series branch falls back to the VaR value when no
+    # observation lies below the threshold; reproduced verbatim, minus the
+    # empty-slice RuntimeWarning its `.values.mean()` emits.
     # fail-soft: optional scalar.
     try:
-        metrics_json["cvar"] = _safe_float(qs.stats.cvar(returns))
+        _cvar_threshold = _safe_float(qs.stats.value_at_risk(returns, confidence=0.95, prepare_returns=False))
+        if _cvar_threshold is None:
+            metrics_json["cvar"] = None
+        else:
+            _cvar_tail = returns[returns < _cvar_threshold]
+            metrics_json["cvar"] = _safe_float(
+                float(_cvar_tail.mean()) if len(_cvar_tail) > 0 else _cvar_threshold
+            )
     except Exception as exc:  # noqa: BLE001
         logger.warning(
             "qstats scalar cvar failed (returns_len=%s, nonnan_len=%s): %s",
@@ -951,27 +1039,57 @@ def compute_all_metrics(
     # the noise floor; if/when gini is needed it should be re-introduced
     # as either (a) a manual numpy/pandas implementation, or (b) after a
     # quantstats version bump that re-exposes the attribute.
+    # RANK-05 inline arm — `omega` carries no `prepare_returns=` kwarg in 0.0.81,
+    # so it is mirrored inline. quantstats 0.0.81 `omega`, with this call site's
+    # arguments (rf=0.0, required_return=0.0, periods=252):
+    #     return_threshold = (1 + 0.0) ** (1 / 252) - 1   # == 0.0 exactly
+    #     numer = returns_less_thresh[returns_less_thresh > 0].sum()
+    #     denom = -1.0 * returns_less_thresh[returns_less_thresh < 0].sum()
+    #     return numer / denom if denom > 0 else NaN
+    # With a zero threshold the deviation series IS the return series, so this
+    # reduces to total gains over total losses. NaN convention: IDENTICAL either
+    # way — `fillna(0)` maps a gap day to 0.0, which satisfies neither `> 0` nor
+    # `< 0`, exactly as a skipped NaN does. No fixture can move here.
     # fail-soft: optional scalar.
     try:
-        metrics_json["omega"] = _safe_float(qs.stats.omega(returns))
+        _omega_gain = float(returns[returns > 0.0].sum())
+        _omega_pain = -float(returns[returns < 0.0].sum())
+        metrics_json["omega"] = (
+            _safe_float(_omega_gain / _omega_pain) if _omega_pain > 0.0 else None
+        )
     except Exception as exc:  # noqa: BLE001
         logger.warning(
             "qstats scalar omega failed (returns_len=%s, nonnan_len=%s): %s",
             returns_len_for_log, returns_nonnan_len_for_log, exc,
             exc_info=_should_emit_traceback("omega", exc),
         )
+    # RANK-05 inline arm — `gain_to_pain_ratio` carries no `prepare_returns=`
+    # kwarg in 0.0.81. Mirrored from its source (rf=0, resolution="D"):
+    #     returns = _prepare_returns(returns, rf).resample("D").sum()
+    #     downside = abs(returns[returns < 0].sum())
+    #     return returns.sum() / downside   (NaN when downside == 0)
+    # The daily resample is reproduced because it is load-bearing for an index
+    # with more than one row per calendar day; on a one-row-per-day index it only
+    # inserts 0.0 rows for absent calendar days, which change neither sum. NaN
+    # convention: IDENTICAL either way — `resample().sum()` skips NaN, and
+    # quantstats' `fillna(0)` contributes 0.0 to the same sums.
     # fail-soft: optional scalar.
     try:
-        metrics_json["gain_pain"] = _safe_float(qs.stats.gain_to_pain_ratio(returns))
+        _gp = returns.resample("D").sum()
+        _gp_pain = abs(float(_gp[_gp < 0.0].sum()))
+        metrics_json["gain_pain"] = (
+            _safe_float(float(_gp.sum()) / _gp_pain) if _gp_pain > 0.0 else None
+        )
     except Exception as exc:  # noqa: BLE001
         logger.warning(
             "qstats scalar gain_pain failed (returns_len=%s, nonnan_len=%s): %s",
             returns_len_for_log, returns_nonnan_len_for_log, exc,
             exc_info=_should_emit_traceback("gain_pain", exc),
         )
+    # RANK-05 kwarg arm — see the `volatility` site for the shared rationale.
     # fail-soft: optional scalar.
     try:
-        metrics_json["tail_ratio"] = _safe_float(qs.stats.tail_ratio(returns))
+        metrics_json["tail_ratio"] = _safe_float(qs.stats.tail_ratio(returns, prepare_returns=False))
     except Exception as exc:  # noqa: BLE001
         logger.warning(
             "qstats scalar tail_ratio failed (returns_len=%s, nonnan_len=%s): %s",
@@ -1002,18 +1120,75 @@ def compute_all_metrics(
             returns_len_for_log, returns_nonnan_len_for_log, exc,
             exc_info=_should_emit_traceback("kurtosis", exc),
         )
+    # RANK-05 inline arm — `smart_sharpe` / `smart_sortino` are thin wrappers over
+    # `sharpe` / `sortino` with `smart=True`, and inherit their total lack of a
+    # `prepare_returns=` kwarg in 0.0.81. Mirrored from source:
+    #     autocorr_penalty(r): num = len(r)
+    #         coef = abs(corrcoef(r[:-1], r[1:])[0, 1])
+    #         x = arange(1, num); corr = ((num - x) / num) * (coef ** x)
+    #         return sqrt(1 + 2 * corr.sum())
+    #     smart_sharpe  = mean / (std(ddof=1) * penalty)      * sqrt(periods)
+    #     smart_sortino = mean / (downsideRMS  * penalty)     * sqrt(periods)
+    # PRESERVED EXACTLY (pre-existing, deliberately NOT touched here): both call
+    # sites use quantstats' DEFAULT `periods=252` rather than `periods_per_year`,
+    # and `smart_sortino` uses rf=0 rather than MAR. Changing either would be an
+    # unrelated behaviour change riding a security fix — recorded as a finding
+    # instead.
+    # NaN convention: the autocorrelation penalty needs a dense array (`corrcoef`
+    # propagates NaN), so the penalty and the moments are taken on `dropna()` —
+    # the skipna reading used by the headline sharpe/sortino, in place of
+    # quantstats' `fillna(0)`. Identical on every NaN-free series.
+    # The shared legs are bound BEFORE either try so a failure inside the
+    # smart_sharpe block cannot cascade into smart_sortino as a NameError — the
+    # two scalars degrade independently, which is what the failure-soft contract
+    # promises. A NaN penalty propagates to a non-positive divisor and therefore
+    # to a present-but-None key, exactly as quantstats' NaN did.
+    _smart_r = returns.dropna()
+    _smart_n = len(_smart_r)
+    _smart_penalty = float("nan")
     # fail-soft: optional scalar.
     try:
-        metrics_json["smart_sharpe"] = _safe_float(qs.stats.smart_sharpe(returns))
+        if _smart_n >= 2:
+            _smart_coef = abs(
+                float(np.corrcoef(_smart_r.to_numpy()[:-1], _smart_r.to_numpy()[1:])[0, 1])
+            )
+            _smart_x = np.arange(1, _smart_n)
+            _smart_penalty = float(
+                np.sqrt(
+                    1.0
+                    + 2.0
+                    * float((((_smart_n - _smart_x) / _smart_n) * (_smart_coef**_smart_x)).sum())
+                )
+            )
+        _smart_sharpe_divisor = float(_smart_r.std()) * _smart_penalty
+        metrics_json["smart_sharpe"] = (
+            _safe_float((float(_smart_r.mean()) / _smart_sharpe_divisor) * math.sqrt(252))
+            if _smart_sharpe_divisor > 0.0
+            else None
+        )
     except Exception as exc:  # noqa: BLE001
         logger.warning(
             "qstats scalar smart_sharpe failed (returns_len=%s, nonnan_len=%s): %s",
             returns_len_for_log, returns_nonnan_len_for_log, exc,
             exc_info=_should_emit_traceback("smart_sharpe", exc),
         )
+    # RANK-05 inline arm — see the `smart_sharpe` site above for the full source
+    # mirror. Reuses the SAME `_smart_r` / `_smart_penalty` so the pair stays on
+    # one convention. quantstats' downside leg is an RMS over len(returns), NOT a
+    # pandas std — `sqrt((r[r < 0] ** 2).sum() / len(r))` — mirrored verbatim,
+    # with the skipna count as the denominator per the note above.
     # fail-soft: optional scalar.
     try:
-        metrics_json["smart_sortino"] = _safe_float(qs.stats.smart_sortino(returns))
+        _smart_sortino_downside = (
+            math.sqrt(float((_smart_r[_smart_r < 0.0] ** 2).sum()) / _smart_n)
+            if _smart_n > 0
+            else float("nan")
+        ) * _smart_penalty
+        metrics_json["smart_sortino"] = (
+            _safe_float((float(_smart_r.mean()) / _smart_sortino_downside) * math.sqrt(252))
+            if _smart_sortino_downside > 0.0
+            else None
+        )
     except Exception as exc:  # noqa: BLE001
         logger.warning(
             "qstats scalar smart_sortino failed (returns_len=%s, nonnan_len=%s): %s",
@@ -1033,9 +1208,10 @@ def compute_all_metrics(
         avg_loss_abs = abs(float(losses.mean()))
         if avg_loss_abs > 0:
             metrics_json["payoff_ratio"] = _safe_float(wins.mean() / avg_loss_abs)
+    # RANK-05 kwarg arm — see the `volatility` site for the shared rationale.
     # fail-soft: optional scalar.
     try:
-        metrics_json["profit_factor"] = _safe_float(qs.stats.profit_factor(returns))
+        metrics_json["profit_factor"] = _safe_float(qs.stats.profit_factor(returns, prepare_returns=False))
     except Exception as exc:  # noqa: BLE001
         logger.warning(
             "qstats scalar profit_factor failed (returns_len=%s, nonnan_len=%s): %s",
@@ -1074,6 +1250,16 @@ def compute_all_metrics(
     # (e.g. -12.5 means -12.5%) and start/valley/end are date strings (dtype=object).
     # Ongoing drawdowns are encoded as `end == last date` with dd_series.iloc[-1] < 0
     # (quantstats does NOT use NaN for ongoing episodes).
+    #
+    # RANK-05 — the ONE quantstats call in this function deliberately left without
+    # `prepare_returns=False`, because it is provably outside the defect class:
+    # `drawdown_details` takes the ALREADY-COMPUTED underwater curve, not a return
+    # or price series, and neither it nor the `remove_outliers` helper it calls
+    # touches `_prepare_returns` or `_prepare_prices` in 0.0.81. That is not a
+    # claim on trust — `test_rank05_drawdown_details_is_heuristic_free` scans the
+    # installed source and goes RED if a future quantstats ever routes it through
+    # either preparer. The region gate for this function excludes this call BY
+    # NAME for the same reason.
     try:
         details = qs.stats.drawdown_details(dd_series)
         if details is not None and len(details) > 0:
@@ -1170,9 +1356,16 @@ def compute_all_metrics(
             aligned = returns.align(benchmark_returns, join="inner")
             aligned_returns, aligned_benchmark = aligned[0], aligned[1]
             if len(aligned_returns) > 1:
-                greeks = qs.stats.greeks(
-                    aligned_returns, aligned_benchmark, periods=periods_per_year
-                )
+                # RANK-05 kwarg arm — see the `volatility` site for the shared
+                # rationale; kept on ONE source line so the region gate sees it.
+                # RESIDUAL, recorded rather than silently left: the kwarg closes
+                # the guess on the STRATEGY leg only. quantstats then runs the
+                # benchmark through `_prepare_benchmark`, which calls
+                # `_prepare_returns` on it unconditionally — so an all-non-negative
+                # benchmark with a >100% day would still be re-read as prices.
+                # Closing that requires inlining greeks and is out of this plan's
+                # scope; it is enumerated in the 159-05 SUMMARY as follow-up work.
+                greeks = qs.stats.greeks(aligned_returns, aligned_benchmark, periods=periods_per_year, prepare_returns=False)
                 metrics_json["alpha"] = _safe_float(greeks.get("alpha", 0))
                 metrics_json["beta"] = _safe_float(greeks.get("beta", 0))
                 metrics_json["correlation"] = _safe_float(aligned_returns.corr(aligned_benchmark))
