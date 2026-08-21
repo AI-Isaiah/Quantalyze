@@ -5,7 +5,7 @@ Criterion: each of the 5 specs newly wired into CI batches by Phase 158 reports 
 attribute counts per spec, so each spec was run individually with `--reporter=line --workers=1`
 locally, replicating the plan 158-05 method (`.planning/phases/158-ops-ci-a-merge-means-a-deploy/158-05-SUMMARY.md`).
 
-Branch: `feat/v1.20-phase-158` (main checkout). Raw reporter logs: `uat1-<spec>.log` in this directory.
+Raw per-spec line-reporter logs were retained only in the session scratchpad; their collected/passed/skipped counts and skipped-title lists are reproduced in full below.
 
 ## Environment arrangements (mirroring `.github/workflows/ci.yml`)
 

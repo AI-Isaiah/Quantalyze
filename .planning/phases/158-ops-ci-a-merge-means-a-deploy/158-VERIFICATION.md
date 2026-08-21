@@ -1,6 +1,6 @@
 ---
 phase: 158-ops-ci-a-merge-means-a-deploy
-verified: 2026-08-21T05:15:00Z
+verified: 2026-08-21T05:05:00Z
 status: passed
 score: 9/9 must-haves verified
 behavior_unverified: 0
@@ -27,7 +27,7 @@ human_verification:
 # Phase 158: OPS-CI — A merge means a deploy — Verification Report
 
 **Phase Goal:** A merged PR always produces an honestly-reported CI verdict and a deployed analytics service — main CI can no longer conclude `cancelled` and silently skip the Railway deploy, no gate is present-but-ungating, and the two known deterministic false-reds are gone
-**Verified:** 2026-08-20T23:59Z at HEAD `4ecd2c01` on `feat/v1.20-phase-158` (merge-base with main: `35c74149`)
+**Verified:** in-tree 2026-08-20T23:59Z at HEAD `4ecd2c01`; backstops discharged 2026-08-21T05:05Z on `feat/v1.20-phase-158` (merge-base with main: `35c74149`)
 **Status:** passed — all in-tree must-haves verified 2026-08-20; the 4 `verification: backstop` truths discharged 2026-08-21 by live measurement (PR #697 run + drill PR #698 red-polarity + post-merge probe ×3 + watcher ×2), evidence in 158-UAT.md
 **Re-verification:** Yes — backstop items re-measured live post-merge (2026-08-21); in-tree verification unchanged from 2026-08-20
 
@@ -144,5 +144,5 @@ No gaps. Every in-tree must-have is verified with evidence at HEAD, including li
 
 ---
 
-_Verified: in-tree 2026-08-20T23:59Z; backstops discharged 2026-08-21T05:15Z_
+_Verified: in-tree 2026-08-20T23:59Z; backstops discharged 2026-08-21T05:05Z_
 _Verifier: Claude (gsd-verifier)_
