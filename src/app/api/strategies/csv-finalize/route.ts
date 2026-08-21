@@ -2074,11 +2074,15 @@ async function applyCsvMetadataUpdate(
   }
   const updatePayload = buildMetadataUpdatePayload(parsed.payload);
   if (Object.keys(updatePayload).length === 0) return { kind: "noop" };
-  // @audit-skip: continuation of the csv-wizard strategy creation
-  // flow — finalize_csv_strategy_with_returns created the row milliseconds
-  // ago (SECURITY DEFINER, audit-skipped like create_wizard_strategy +
+  // Continuation of the csv-wizard strategy creation flow —
+  // finalize_csv_strategy_with_returns created the row milliseconds ago
+  // (SECURITY DEFINER, audit-skipped like create_wizard_strategy +
   // finalize-wizard). Matches ADR-0023 wizard-taxonomy gap +
-  // audit-2026-05-07 P692. strategies_update RLS gates the write.
+  // audit-2026-05-07 P692. strategies_update RLS gates the write. The
+  // machine-readable pragma itself sits directly above the mutation chain
+  // below: audit-coverage.test.ts requires it within 8 lines of the chain's
+  // start line, and the RANK-07 commentary between here and there is longer
+  // than that window.
   //
   // ⚖️ 159-06 / RANK-07 (2026-08-21) — THE DISCRIMINATOR IS RE-CHECKED IN SQL,
   // IN THE SAME STATEMENT THAT WRITES. The FILL arm decides "never classified"
@@ -2101,6 +2105,8 @@ async function applyCsvMetadataUpdate(
   // rows a raced-out writer is byte-identical to the winner and would be handed
   // `applied`: the BL-01 false receipt again, reached by a new route. Row count
   // observed, exactly as the deletion-request approve/reject CAS does it.
+  // @audit-skip: see the wizard-continuation rationale above this comment
+  // block — SECURITY DEFINER row created milliseconds ago, ADR-0023.
   const { data: casRows, error: updateError } = await supabase
     .from("strategies")
     .update(updatePayload)
