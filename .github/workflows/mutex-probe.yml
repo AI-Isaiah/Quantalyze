@@ -158,6 +158,15 @@ jobs:
               echo "DSN carries no ':6543/' — using it unchanged; value not echoed."
               ;;
           esac
+          # Same libpq keepalives as ci.yml's acquire steps (158-MUTEX-01 F2):
+          # a contended leg idles inside pg_advisory_lock with zero traffic, so
+          # a NAT idle expiry would zombify it invisibly without these. The
+          # secret's shape is NOT assumed: '&' if a query string exists, else '?'.
+          keepalive_params="keepalives=1&keepalives_idle=60&keepalives_interval=15&keepalives_count=4"
+          case "${dsn}" in
+            *\?*) dsn="${dsn}&${keepalive_params}" ;;
+            *)    dsn="${dsn}?${keepalive_params}" ;;
+          esac
 
           # Simultaneity barrier. Three matrix jobs start within seconds of each
           # other but their apt install times vary, and a probe whose contenders
@@ -184,8 +193,12 @@ jobs:
           # taken just BEFORE the session ends, so each recorded window is a
           # subset of the true hold — the non-overlap assertion is conservative.
           set +e
+          # 158-MUTEX-01: exempt like every mutex session — a contended third leg
+          # waits ~90s+jitter (only ~30s margin under the server's 120s kill), and
+          # any future hold past 120s would otherwise reproduce the bug in the probe.
           PGAPPNAME=ci-mutex-probe PGCONNECT_TIMEOUT=15 \
             psql "${dsn}" -X -q -A -t -v ON_ERROR_STOP=1 \
+              -c "SET statement_timeout = 0;" \
               -c "SELECT pg_advisory_lock(61616158);" \
               -c "SELECT 'ACQUIRED ' || extract(epoch from clock_timestamp())::bigint;" \
               -c "SELECT pg_sleep(45);" \
