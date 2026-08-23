@@ -2164,6 +2164,97 @@ describe("[159-06 / RANK-07] two same-session resubmits race the FILL arm — SQ
       category_id: CATEGORY_ID,
     });
   });
+
+  it("🔴 INVERTED ROLES: the FRESH arm loses the CAS too — a raced-out fresh writer must not get `ok: true`", async () => {
+    // Red-team of RANK-07. The CAS predicate rides BOTH arms, but the refusal
+    // was qualified on `outcome.fillClassification`, so a raced FRESH writer
+    // fell straight through to the 200 success envelope — a false receipt in
+    // exactly the double-submit scenario this phase closes, with the loser's
+    // category_id and asset_class (the annualization clock, #597 part 2)
+    // silently discarded.
+    //
+    // Roles inverted relative to raceTwoFills(): writer B takes the FILL arm
+    // and its CAS lands first; writer A believes it is the fresh writer and
+    // matches zero rows. Driven sequentially on purpose — the hazard is the
+    // committed DB STATE A's UPDATE meets, and sequencing makes which writer
+    // loses deterministic instead of interleaving-dependent.
+    arm23505({
+      id: EXISTING_ID,
+      name: "Alpha",
+      status: "pending_review",
+      category_id: null,
+      asset_class: "traditional",
+    });
+    armCommitted2024();
+    const bRes = await postWithMetadata(SERIES_2024, {
+      asset_class: "crypto",
+      category_id: CATEGORY_ID,
+    });
+    // Load-bearing precondition: B genuinely won the CAS. Without this, A
+    // could be refused for some unrelated reason and this case would prove
+    // nothing.
+    expect(bRes.status).toBe(200);
+    expect(casRow.categoryIdIsNull).toBe(false);
+
+    // Writer A: the fold succeeds for it (no 23505), so the route takes the
+    // FRESH arm — and its CAS still matches zero rows.
+    rpcMock.mockImplementation(async (name: string) => {
+      if (name === "finalize_csv_strategy_with_returns") {
+        return { data: EXISTING_ID, error: null };
+      }
+      return { data: null, error: null };
+    });
+
+    const aRes = await postWithMetadata(SERIES_2024, {
+      asset_class: "traditional",
+      category_id: OTHER_CATEGORY_ID,
+    });
+    await flushAfter();
+
+    expect(updateCalls, "writer A never reached the metadata UPDATE").toHaveLength(2);
+    expect(
+      aRes.status,
+      "the raced-out FRESH writer was told its submission succeeded while its " +
+        "asset_class — the annualization clock — was discarded by the CAS. " +
+        "PostgREST reports no error on a zero-row UPDATE, so nothing else in " +
+        "the response distinguishes this from a real success (BL-01: no false " +
+        "receipts)",
+    ).not.toBe(200);
+    const body = await aRes.json();
+    expect(body.ok).toBe(false);
+    expect(body.code).toBe("CSV_PERSIST_FAIL");
+    // The copy must be HONEST for this arm: the fill arm's "nothing was
+    // changed" is false here — writer A's strategy row is committed.
+    expect(String(body.human_message ?? "")).not.toContain("nothing was changed");
+    expect(String(body.human_message ?? "").toLowerCase()).toContain("saved");
+    // Contention is not an outage: no Sentry page for the lost race (B's
+    // successful write left no capture either).
+    expect(metadataUpdateCaptures()).toEqual([]);
+  });
+
+  it("CONTROL: a fresh writer that wins the CAS is untouched — and a fresh 'noop'/failed metadata write still 200s", async () => {
+    // The anti-overreach pin for the fix: only 'raced' may refuse on the fresh
+    // arm. `update_failed` answering 200 on a fresh create is the deliberate
+    // long-standing call (the strategy row persisted; failing the request over
+    // a metadata write is worse), and dropping the arm qualifier wholesale
+    // would have flipped it.
+    updateOutcome.error = {
+      code: "42501",
+      message: "new row violates row-level security policy",
+    };
+
+    const res = await postWithMetadata(SERIES_2024, {
+      asset_class: "crypto",
+      category_id: CATEGORY_ID,
+    });
+    await flushAfter();
+
+    expect(
+      res.status,
+      "a FAILED metadata write on a FRESH create started rolling the request " +
+        "back — the persisted strategy is not un-persisted by a 503",
+    ).toBe(200);
+  });
 });
 
 describe("[146.2-02 / BL-02] the series-bearing FILL measures the clock safety it used to assume", () => {

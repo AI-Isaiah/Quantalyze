@@ -2694,6 +2694,53 @@ async function unifiedCsvFinalizeHandler(args: {
         { status: 503, headers: NO_STORE_HEADERS },
       );
     }
+    // ⚖️ RANK-07 red-team (2026-08-23) — THE FRESH ARM MUST REFUSE ON 'raced'
+    // TOO, and it needs its OWN branch because it does not share the fill
+    // arm's other two verdicts.
+    //
+    // The CAS predicate rides BOTH arms, so both can lose it. The fresh arm
+    // loses it in exactly the double-submit scenario this phase closes: two
+    // requests of the same wizard session resolve to the SAME strategy row
+    // (23505 echo dedupe), one takes the fill arm and its CAS lands first, and
+    // the other — which believes it is the fresh writer — matches zero rows.
+    // Falling through to `ok: true` there is the BL-01 false receipt with the
+    // worst payload of the three: the loser's `asset_class` is the
+    // ANNUALIZATION CLOCK, silently discarded while the user is told the
+    // submission succeeded.
+    //
+    // WHY NOT JUST DROP THE `outcome.fillClassification &&` QUALIFIER: that
+    // would also flip fresh-arm 'update_failed' and 'noop' to a refusal.
+    // 'update_failed' answering 200 on a fresh create is the long-standing and
+    // deliberate call reasoned about above (the strategy row persisted;
+    // failing the request over a metadata write is worse), and 'noop' means
+    // there was no metadata to write at all. 'raced' is the one verdict whose
+    // cost differs: another writer's value is now committed on this row.
+    //
+    // The copy is fresh-specific because the fill arm's sentence ("nothing was
+    // changed") is FALSE here — the strategy WAS created by this request. The
+    // remedy is the same resubmit, and it is now reachable on the
+    // already-classified arm: 200 if the two submissions agree, 409 naming
+    // both values if they do not.
+    if (outcome.fresh && metaResult.kind === "raced") {
+      console.warn(
+        `${args.logPrefix} fresh-arm classification lost the CAS (raced) — refusing to report it as applied [correlation_id=${args.correlationId}] strategy_id=${outcome.strategyId}`,
+      );
+      return NextResponse.json(
+        {
+          ok: false,
+          code: "CSV_PERSIST_FAIL",
+          human_message:
+            "Your strategy was saved, but the category and asset class you " +
+            "entered were not applied to it: another submission of this same " +
+            "wizard session classified it first. Submit the same file again " +
+            "shortly to confirm the classification; it will not create a " +
+            "second strategy.",
+          debug_context: { strategy_id: outcome.strategyId },
+          correlation_id: args.correlationId,
+        },
+        { status: 503, headers: NO_STORE_HEADERS },
+      );
+    }
   }
 
   // Phase 19.1 / T-19.1-05 / PR #275 + Maintainability W-2: shared
