@@ -1654,8 +1654,10 @@ describe("AllocatorExchangeManager — 160-03 server-side persist + row re-fetch
     await connect("sFOX", "My sFOX key");
 
     const body = validateBody();
-    // Strict boolean — "true"/1 falls through to the legacy arm server-side and
-    // mints ZERO rows while this component would render a row that isn't there.
+    // Strict boolean — a non-boolean "true"/1 is REFUSED server-side with a 409
+    // STALE_CLIENT. This pins that the client sends the discriminator the server
+    // actually requires; without it every connect from this surface fails
+    // outright.
     expect(body.persist).toBe(true);
     // F6 canonicalization survives the conversion: the value that reaches the
     // route is lowercase, never the display casing.
@@ -1732,7 +1734,7 @@ describe("AllocatorExchangeManager — 160-03 server-side persist + row re-fetch
   it("fails LOUDLY when a 2xx carries no api_key_id — no phantom row, no re-fetch", async () => {
     fetchMock.mockImplementation((url: string) => {
       if (url === "/api/keys/validate-and-encrypt") {
-        // The legacy arm's shape (ciphertext, no id): the key was NOT saved.
+        // A stale or misrouted 2xx (ciphertext, no id): the key was NOT saved.
         return Promise.resolve({
           ok: true,
           status: 200,

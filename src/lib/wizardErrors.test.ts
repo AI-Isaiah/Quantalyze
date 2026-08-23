@@ -1863,13 +1863,29 @@ describe("[140.3-10 / TRAP-4] the whole copy table, scanned for destructive-only
    * strategy that may already exist — destroying the record the copy sends the
    * user to go and check.
    *
+   * **80 → 81 at the 160-05 review** (WIZFORM-02-CLASS), which added
+   * `STALE_CLIENT` — the 409 `keys/validate-and-encrypt` answers a tab that
+   * predates RANK-03's `persist` conversion, and the one code that route emits
+   * which was in NEITHER the union NOR the alias table, so it resolved to
+   * `UNKNOWN`. THIS guard's reasoning was re-run over the entry before the
+   * number moved: its `actions` are `leave_and_return` + `expand_log` — NO
+   * `start_fresh`, and neither member of `RECOVERABLE_ACTIONS` — so it sits
+   * outside the scanned population by construction and the destructive class
+   * below is unchanged at four members.
+   *
+   * ⭐ The exclusion is load-bearing rather than incidental, on the same ground
+   * as `DRAFT_STATE_INVALID`: the condition is "this PAGE is out of date", and
+   * `start_fresh` DELETEs a draft. This refusal knows nothing about any draft —
+   * it fires on a key-management surface that may have none — so offering to
+   * destroy one would answer a stale bundle by destroying unrelated work.
+   *
    * ⚠️ THIS NUMBER HAS A TWIN. The same literal is pinned in the
    * `[140.3-12 / SEAMUX-04]` describe below, and moving one without the other
    * is a silent half-fix — the shrink-detection it buys survives in one scan
    * and dies in the other. 153.1-04 added a third guard (at the end of this
    * file) that reads this source and reds when the two literals disagree.
    */
-  const EXPECTED_TABLE_SIZE = 80;
+  const EXPECTED_TABLE_SIZE = 81;
 
   it("the scan actually covers the table — hand-typed size guard", () => {
     expect(
@@ -2237,11 +2253,26 @@ describe("[140.3-12 / SEAMUX-04] no entry in the copy table makes a claim we can
    *     landed; "it went through" would be a guess about a body we could not
    *     parse. The copy states what the 2xx establishes and nothing further.
    *
+   * **80 → 81 at the 160-05 review** (WIZFORM-02-CLASS) — `STALE_CLIENT`, the
+   * 409 `keys/validate-and-encrypt` answers a tab loaded before RANK-03 made
+   * `persist: true` mandatory. It was read against all four FORBIDDEN fragments
+   * by hand before the number moved: it mentions no notification, no trade
+   * fetching and no session field name.
+   *
+   * ⭐ "data is unchanged" is again the fragment needing care, because the entry
+   * DOES make a server-state claim — "Nothing reached your exchange and nothing
+   * was stored". Not the banned string, and OBSERVABLE rather than asserted, on
+   * the same ground `DRAFT_LOOKUP_FAILED` stands on: the refusal returns from
+   * the route before `validateKey`, before `encryptKey` and before the insert,
+   * so no request was issued and no row was written. That is the test
+   * 140.3-15's entry passed and the CSV case failed — not whether the sentence
+   * is comforting, but whether the code path makes it observable.
+   *
    * ⚠️ THIS NUMBER HAS A TWIN in the `[140.3-10 / TRAP-4]` describe above.
    * Moving one without the other is a silent half-fix; the guard added at the
    * end of this file reds when the two literals disagree.
    */
-  const EXPECTED_TABLE_SIZE = 80;
+  const EXPECTED_TABLE_SIZE = 81;
 
   it("the scan actually covers the table — hand-typed size guard", () => {
     expect(

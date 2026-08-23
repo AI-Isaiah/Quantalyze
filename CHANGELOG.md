@@ -26,6 +26,36 @@ shipped credentials to a browser that provably could not use them.
   strict boolean reddens the four truthy probes, and disabling the gate reddens the
   no-live-call assertion.
 
+**From the pre-landing review** (6 specialists incl. `silent-failure-hunter`):
+
+- The refusal now fires **above the rate limiter**. It was below it, so five refused clicks
+  burned the 5-per-60s bucket and the reload the message prescribes answered `429` instead
+  of working — the error's own remedy defeated by the error. It sits with the sfox/mt5
+  gates, which are above the limiter for exactly this reason, and still below `withAuth` so
+  it is never an unauthenticated oracle.
+- The persist INSERT's ciphertext fields go through a **named local contract** typed as a
+  mapped type over `EncryptKeyResponseSchema`, not a bare field pick. The pick was correct
+  but unenforced: `createAdminClient()` is deliberately untyped, so `tsc` could not check
+  the literal, and tests pinned 2 of 6 fields. Dropping `kek_version` would have written a
+  row claiming KEK v1 against ciphertext wrapped under another KEK — insert succeeds, 200
+  returned, key fails to decrypt in a different service days later, with no error, log, or
+  red test. Measured both ways: a 7th schema field now fails `tsc` at the writer, and
+  deleting a field fails both `tsc` and a new `.shape`-driven tripwire.
+- `STALE_CLIENT` is a registered `WizardErrorCode` with its own copy, not an unregistered
+  string resolving to `UNKNOWN`. It was minted as a union member rather than aliased onto
+  an existing one: the alias table is scoped to wire codes from other services, and both
+  reload-adjacent candidates were measured false at the emitter (`SESSION_EXPIRED` claims
+  "you have been signed out" when the gate runs *below* `withAuth`).
+- The refusal emits a server-side log line. Without it, a caller regression (a fourth
+  connect surface, or a refactor dropping the discriminator) would 409 every connect while
+  the user reloaded into the same failure — detectable only by a support email.
+- A self-referential test oracle was replaced: `expect(row.attested_venue).toBe(row.exchange)`
+  passed under the exact forgery it existed to catch, since a poisoned response sets both to
+  the same wrong venue. Both columns now pin to a hand-typed expected venue.
+- Several gate tests asserted "no live probe" on discriminator-less bodies, which the new
+  refusal satisfied vacuously. They now carry `persist: true`, so the gate under test is
+  again the only thing between the request and a credential probe.
+
 ## [0.71.0.0] - 2026-08-23
 
 ### feat: v1.20 Phase 160 — PROVENANCE: the server's venue is the venue that annualizes

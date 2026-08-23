@@ -255,6 +255,54 @@ export type WizardErrorCode =
   | "METADATA_CAPITAL_OWNERSHIP_INVALID"
   // Wizard lifecycle
   | "SESSION_EXPIRED"
+  // 160-05 review / WIZFORM-02-CLASS — THE ONE CODE `keys/validate-and-encrypt`
+  // PUTS IN FRONT OF A USER THAT NEITHER VOCABULARY ANSWERED. RANK-03 turned
+  // that route's `persist` discriminator into a GATE: a body without
+  // `persist: true` is refused 409 with `code: "STALE_CLIENT"`, and the only
+  // thing that sends such a body is a tab loaded before that conversion — the
+  // page we serve today always sends the field. Until this member existed the
+  // code was in NEITHER this union NOR `SEAM_CODE_TO_WIZARD_CODE`, so
+  // `recogniseSeamErrorCode` answered `UNKNOWN` and the one remedy that always
+  // works — reload — collapsed into the terminal that admits knowing nothing.
+  //
+  // ⛔ NOT AN ALIAS IN `SEAM_CODE_TO_WIZARD_CODE`, on `COMPOSITE_UNSUPPORTED_UNIFIED`'s
+  // rule rather than a fresh one: that table translates codes ANOTHER service
+  // put on the wire. This one is minted by our own route, so it is a wizard
+  // member outright.
+  //
+  // ⚠️ AND NO INCUMBENT MEMBER COULD TAKE IT. The two whose copy already names
+  // a reload were read AT THIS EMITTER rather than matched on their names:
+  //   · `DRAFT_STATE_INVALID` — "This draft has moved on since this page
+  //     loaded", and its cause offers "already submitted from another tab".
+  //     This route reads no draft and finalizes nothing, so every clause is
+  //     false here and its remedy sends the user to a draft that has nothing to
+  //     do with the refusal.
+  //   · `SESSION_EXPIRED` — "You have been signed out." The caller is signed
+  //     IN: this refusal sits below `withAuth`, so the session was already
+  //     proven when the body was inspected.
+  // ⛔ AND NEVER A `KEY_*` MEMBER. The refusal fires before `validateKey`,
+  // before `encryptKey` and before the insert, and it turns on ONE missing
+  // field of our own request shape. Blaming the user's key or credentials for
+  // it is the "copy that asserts something false" class this vocabulary exists
+  // to kill, and here it would send them to regenerate a key that is fine.
+  //
+  // NOT recoverable, deliberately: `actions` carries neither member of
+  // `RECOVERABLE_ACTIONS` (src/lib/envelope.ts), so `buildEnvelope` derives
+  // `recoverable: false` and `ErrorEnvelope` renders NO Retry control — the same
+  // mechanism `DRAFT_STATE_INVALID` and `ALLOCATION_NOT_ALLOCATABLE` use.
+  // Pressing Retry from the stale page re-posts the identical body and is
+  // refused identically; only a RELOAD replaces the code that omits the field.
+  //
+  // ⚠️ NOTHING RENDERS IT TODAY, and that is why it is authored now. All THREE
+  // live callers of the route (`AllocatorExchangeManager.tsx`,
+  // `ApiKeyManager.tsx`, `StrategyForm.tsx`) print the route's `error` sentence
+  // verbatim and never read `code`, and they sit OUTSIDE the wizard-steps population
+  // `seam-wire-vocabulary.invariant.test.ts` derives (that file's own DECLARED
+  // BLINDNESS note), so nothing in CI would have caught the gap. The member is
+  // written ahead of its first reader for the reason `SEAM_DEADLINE_EXCEEDED`
+  // was: a code with no copy entry falls through to UNKNOWN exactly as a
+  // missing code does, so the copy must exist before the client that reads it.
+  | "STALE_CLIENT"
   | "SUBMIT_NOTIFY_FAILED"
   // H-0192: finalize-wizard 404 (draft deleted/expired) and 403/409
   // (not in a finalizable state) used to collapse to UNKNOWN at SubmitStep.
@@ -1589,6 +1637,43 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
     ],
     docsHref: "/security#draft-resume",
     actions: ["resume_draft"],
+  },
+
+  // 160-05 review / WIZFORM-02-CLASS. See the union member's docblock for why
+  // this is a member rather than an alias, and for the two near-misses it was
+  // measured against.
+  //
+  // ⚠️ WHAT THIS COPY MAY CLAIM, measured at the arm rather than assumed. The
+  // refusal returns before `validateKey`, before `encryptKey` and before the
+  // insert, so "nothing reached your exchange and nothing was stored" is
+  // knowable in the way 140.3-15 requires — not a comforting negative about a
+  // write that may have landed.
+  //
+  // ⛔ WHAT IT MAY NOT SAY: anything about the key. The user's credentials were
+  // never sent anywhere on this path and are not what was rejected; a sentence
+  // that implies otherwise would send them to regenerate a working key for a
+  // fault that is entirely ours. It also names OUR side as the thing that
+  // changed, because it is.
+  STALE_CLIENT: {
+    title: "This page is out of date.",
+    cause:
+      "This tab has been open since before we changed how keys are added, so it sent us a request we no longer accept. Nothing reached your exchange and nothing was stored. There is nothing wrong with your key or your credentials — the page is simply older than we are.",
+    fix: [
+      "Reload this page. That is the whole fix: a fresh load replaces the out-of-date code this tab is running.",
+      "Add the key again on the reloaded page. Nothing was stored the first time, so there is nothing to undo first.",
+      "If a reload does not clear it, email security@quantalyze.com with the correlation id below — that would mean the page we are serving is the out-of-date one, which is ours to fix.",
+    ],
+    docsHref: "/security",
+    // ⛔ NEITHER member of `RECOVERABLE_ACTIONS` (`clear_and_retry`,
+    // `try_another_key`), so `recoverable` derives FALSE and no Retry control
+    // renders: a retry from this same page re-posts the same body and is
+    // refused identically. `leave_and_return` names the actual remedy, exactly
+    // as it does on `DRAFT_STATE_INVALID`, whose condition is also "this PAGE
+    // is stale".
+    // ⛔ AND NOT `start_fresh`: it DELETES a draft, and this refusal knows
+    // nothing about any draft — which also keeps this entry outside the
+    // destructive-action population the `[140.3-10 / TRAP-4]` scan walks.
+    actions: ["leave_and_return", "expand_log"],
   },
 
   SUBMIT_NOTIFY_FAILED: {

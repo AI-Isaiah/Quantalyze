@@ -552,6 +552,26 @@ true for 146 and half of 142–145, and **false for 141**.
 
 ## 🟡 FIX MID-TERM
 
+### Two guard gaps on `keys/validate-and-encrypt` (raised 2026-08-23, Phase-160 closeout review)
+
+Both surfaced by the pre-landing review of the `STALE_CLIENT` retirement. Neither is a
+live defect; both are **missing tripwires**, so the class can re-open silently.
+
+- **`wizardErrors.invariant.test.ts` is blind to this route.** Its `ROUTES` population covers
+  only `create-with-key`, `composite/add-key` and `finalize-wizard`. Nothing forces
+  `keys/validate-and-encrypt`'s emitted codes into the `WizardErrorCode` union — which is
+  exactly how `STALE_CLIENT` shipped unregistered and resolving to `UNKNOWN` until this
+  review caught it. Closing it means a fourth `ROUTES` row plus a hand-typed, measured site
+  count, and it will likely pull in that route's other emitters — so it is its own change,
+  not a same-pass edit. Related: `seam-wire-vocabulary.invariant.test.ts` carries a
+  DECLARED BLINDNESS note for the same route's clients (they live outside the wizard-steps
+  directory its population is derived from).
+- **`const body = await req.json()` has no `try`/`catch`** (`route.ts`, top of `POST`).
+  Malformed JSON — or a body of literal `null` — throws inside the `withAuth` wrapper, which
+  has no catch either, so the caller gets a Next.js default 500 with no coded envelope. That
+  contradicts the route's own stated invariant, "a machine code on EVERY error arm".
+  Pre-existing, not introduced by Phase 160, and out of that phase's diff.
+
 ### ✅ DECIDED + SHIPPED — should the measure ladder have a px cap at all? (raised 2026-08-09, DECIDED 2026-08-09, closed 2026-08-10)
 Founder report, with screenshots: *"zooming out should allow me to see more of the
 content… it should never produce dead/empty areas."*

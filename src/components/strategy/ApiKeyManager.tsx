@@ -231,9 +231,10 @@ export function ApiKeyManager({ strategyId, currentKeyId, defaultExchange }: Api
           // writes the api_keys row ITSELF, stamping `exchange` AND
           // `attested_venue` from the venue its own validateKey call
           // authenticated against, and returns `{ api_key_id }` with NO
-          // ciphertext. Without it the route keeps its legacy contract for the
-          // stale tabs still running the pre-conversion bundle. The label goes
-          // in the body now because the server composes the row.
+          // ciphertext. It is REQUIRED: a body without `persist: true` is
+          // refused with 409 `STALE_CLIENT`, so no arm of this route returns key
+          // material to a browser. The label goes in the body now because the
+          // server composes the row.
           persist: true,
           label: data.label,
         }),

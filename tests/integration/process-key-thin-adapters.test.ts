@@ -585,10 +585,11 @@ describe("thin adapters — flag=on delegates to /process-key (BACKBONE-10)", ()
     expect(Math.abs(expiresAt - ninetyDaysFromNow)).toBeLessThan(60_000);
   });
 
-  // API-2: validate-and-encrypt is locked to the legacy code path even
-  // when the unified-backbone flag is on, because the unified `/process-key`
-  // validate step does not return the encryption envelope the allocator
-  // client persists. This test documents the locked behavior — it must
+  // API-2: validate-and-encrypt is locked to the legacy validateKey +
+  // encryptKey wrappers even when the unified-backbone flag is on, because the
+  // persist arm needs the ciphertext SERVER-side to write the api_keys row, and
+  // the unified `/process-key` validate step yields no encryption envelope.
+  // This test documents the locked behavior — it must
   // FAIL if a future refactor reintroduces the unified delegation before
   // /process-key gains a real encrypt branch.
   it("keys/validate-and-encrypt flag=on STILL uses legacy path (API-2 lock)", async () => {
