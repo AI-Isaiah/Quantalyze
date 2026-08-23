@@ -116,6 +116,12 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.clearAllMocks();
+  // 160-03: several specs install a `vi.spyOn(globalThis, "fetch")`.
+  // `clearAllMocks` only resets call history — it leaves the spy INSTALLED, so
+  // a later spec inherits the previous one's canned Response. Restoring is what
+  // makes each connect-flow spec assert its own fetch mock rather than a
+  // neighbour's (the project's documented CI-only-vitest-skew class).
+  vi.restoreAllMocks();
 });
 
 function submitEditForm() {
@@ -265,5 +271,135 @@ describe("StrategyForm — F4 legacy insert-site chokepoint + sfox exclusion", (
       expect.arrayContaining(["binance", "okx", "bybit", "deribit"]),
     );
     vi.unstubAllEnvs();
+  });
+});
+
+/**
+ * 160-03 / RANK-03 — StrategyForm is the SECOND of three browser sites that
+ * used to compose the `api_keys` INSERT itself. A browser-composed row can
+ * claim any `exchange`, and the venue is what picks the annualization factor
+ * downstream (√365 crypto vs √252 traditional), so the row is now written
+ * SERVER-side by `/api/keys/validate-and-encrypt` in `persist: true` mode,
+ * which stamps `exchange` AND `attested_venue` from the single venue binding
+ * it actually authenticated against (160-02).
+ *
+ * WHY these tests matter (Rule 9): plan 160-05 REVOKEs the `authenticated`
+ * INSERT grant on `api_keys`. Any client insert chain surviving in this file
+ * becomes a hard 42501 at that merge — the connect flow simply dies. The
+ * negative assertion (`apiKeysInsertArg` stays null) is therefore not
+ * decoration: it is the pre-condition the REVOKE greps for. The supabase mock
+ * deliberately KEEPS its `api_keys.insert` branch so a reintroduced insert is
+ * observable rather than an "unexpected from()" throw.
+ */
+describe("StrategyForm — 160-03 server-side persist (no client api_keys INSERT)", () => {
+  function openConnectModalAndSubmit() {
+    render(<StrategyForm mode="create" />);
+    fireEvent.click(screen.getByRole("button", { name: /connect api key/i }));
+    fireEvent.change(screen.getByPlaceholderText(/your read-only api key/i), {
+      target: { value: "kkkkkkkk" },
+    });
+    fireEvent.change(screen.getByPlaceholderText(/your api secret/i), {
+      target: { value: "ssssssss" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Connect Key" }));
+  }
+
+  function validateBody(fetchSpy: { mock: { calls: unknown[][] } }) {
+    const call = (fetchSpy.mock.calls as [string, RequestInit][]).find(
+      (c) => c[0] === "/api/keys/validate-and-encrypt",
+    );
+    expect(call).toBeTruthy();
+    return JSON.parse(call![1].body as string) as Record<string, unknown>;
+  }
+
+  it("POSTs persist:true with the canonical exchange + default label, and issues NO api_keys insert", async () => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          api_key_id: "aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa",
+          valid: true,
+          read_only: true,
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      ),
+    );
+
+    openConnectModalAndSubmit();
+
+    // The connect succeeded end-to-end — the success copy is the only proof the
+    // component treated the persist response as a completed save.
+    expect(
+      await screen.findByText("Read-only API key verified and connected."),
+    ).toBeInTheDocument();
+
+    const body = validateBody(fetchSpy);
+    // The discriminator is a STRICT boolean server-side: `body.persist === true`.
+    // Sending "true"/1 would silently fall through to the legacy arm and mint
+    // ZERO rows while this component reported success.
+    expect(body.persist).toBe(true);
+    // Default select value is "binance" (lowercase). The label is the
+    // component's pre-existing default template, now carried in the request
+    // body because the SERVER composes the row.
+    expect(body.exchange).toBe("binance");
+    expect(body.label).toBe("binance key");
+
+    // ⭐ The load-bearing negative: zero browser-composed inserts.
+    expect(apiKeysInsertArg).toBeNull();
+  });
+
+  it("fails LOUDLY when a 2xx carries no api_key_id — never reports a key as connected", async () => {
+    // The legacy arm's shape (ciphertext, no id). If a stale/misrouted response
+    // reaches the persist call site, the key was NOT saved: reporting success
+    // would leave the user believing a key exists that will never sync.
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({ valid: true, read_only: true, api_key_encrypted: "ct" }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      ),
+    );
+
+    openConnectModalAndSubmit();
+
+    expect(
+      await screen.findByText(
+        "Your key was verified but not saved. Please try again.",
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText("Read-only API key verified and connected."),
+    ).not.toBeInTheDocument();
+    expect(apiKeysInsertArg).toBeNull();
+  });
+
+  it("surfaces the route's curated persist-failure copy, not raw Postgres text (H-0405 class)", async () => {
+    // The persist arm answers an INSERT fault with a CURATED envelope and
+    // scrubs the raw PostgREST message at both log sinks (160-02, route.ts).
+    // The redaction that used to live in this component moved WITH the writer;
+    // this test pins the client half — the curated sentence is what the banner
+    // shows, and the flow does not fall through to "connected".
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          error: "Your key was verified but couldn't be saved. Please try again.",
+          code: "UNKNOWN",
+        }),
+        { status: 500, headers: { "content-type": "application/json" } },
+      ),
+    );
+
+    openConnectModalAndSubmit();
+
+    expect(
+      await screen.findByText(
+        "Your key was verified but couldn't be saved. Please try again.",
+      ),
+    ).toBeInTheDocument();
+    // No SQLSTATE / constraint / RLS text anywhere in the rendered UI.
+    expect(screen.queryByText(/row-level security/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/42501|23514/)).not.toBeInTheDocument();
+    expect(
+      screen.queryByText("Read-only API key verified and connected."),
+    ).not.toBeInTheDocument();
+    expect(apiKeysInsertArg).toBeNull();
   });
 });
