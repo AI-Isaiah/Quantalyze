@@ -73,6 +73,19 @@ reproduce-first), 146 (RATE). **Resume at Phase 143 after v1.17.** All 29 phase 
 preserved (`phases.clear` skipped by founder call). Phase 142.3's scope (MT5-06..10) and MT5-14
 are re-homed into v1.17 (Phases 155 / 153); 142.3 will not run as a v1.16 phase.
 
+## Deferred Verification
+
+Phases whose code is complete but whose verification is gated on a human action. Autonomous
+re-entry SKIPS these — resume each only through its recorded command, so the gate cannot be
+silently absorbed by a later phase.
+
+| Phase | Status | Blocked on | Resume with |
+|-------|--------|-----------|-------------|
+| 160 | `human_needed` — 31/32 | **PROD persist smoke (Part A).** The `persist: true` arm on `/api/keys/validate-and-encrypt` has never handled a real production connect, and it is the ONLY door into `api_keys` for the three converted non-wizard surfaces. ⛔ The 2026-08-23 OKX connect does NOT close it: prod logs for that write show `/strategies/new/wizard` + `/api/strategies/create-with-key` with **zero** hits on the arm — it rode the Phase-156 RPC path. Needs a connect through `ApiKeyManager` (strategy edit page), `StrategyForm`, or `AllocatorExchangeManager`; expect the `api_keys` census to go 32 → 33 with `attested_venue = exchange`. | `/gsd-verify-work 160` |
+
+Part B of that phase (the PROD `STALE_CLIENT` refusal) is ✅ CLOSED — measured on PROD 2026-08-23
+after #705 deployed. See `160-VERIFICATION.md` § PROD smoke record.
+
 ## Current Position
 
 Phase: 160 (PROVENANCE — The server's venue is the venue that annualizes) — EXECUTING
