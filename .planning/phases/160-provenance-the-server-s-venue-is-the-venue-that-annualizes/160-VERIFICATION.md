@@ -22,11 +22,11 @@ behavior_unverified_items:
     why_human: "The four prod smoke flows in plan 160-05 Task 1 were NOT performed. Zero keys were connected during the 47-minute soak, so the soak measured only the ABSENCE of un-attested inflow. The writer has never handled a real production connect; code+test presence cannot substitute for the first live exercise of the now-ONLY writer of api_keys."
 human_verification:
   - test: "PROD persist smoke (plan 160-07 Task 2 Part A) — one real read-only key connect through a surface that POSTs /api/keys/validate-and-encrypt, DevTools trace + row check"
-    expected: "HTTP 200 with api_key_id/valid/read_only and none of the five ciphertext key names; newest api_keys row has non-NULL attested_venue = exchange = the connected venue; count +1 vs the 31-row post-REVOKE baseline"
+    expected: "HTTP 200 with api_key_id/valid/read_only and none of the five ciphertext key names; newest api_keys row has non-NULL attested_venue = exchange = the connected venue; count +1 vs the CURRENT baseline of 32 rows (the post-REVOKE baseline was 31; a wizard-path connect on 2026-08-23 took it to 32 WITHOUT exercising this arm — see the PROD smoke record). Expect 32 -> 33. ⛔ Must go through ApiKeyManager / StrategyForm / AllocatorExchangeManager — the new-strategy wizard rides the Phase-156 create-with-key RPC and does NOT exercise this arm."
     why_human: "Needs real exchange credentials on the production site plus read-only PROD DB access; carried forward unchanged from the initial verification — code-level evidence cannot substitute"
-  - test: "PENDING-DEPLOY GATE (dated 2026-08-23, plan 160-07 Task 2 Part B): after branch chore/close-phase-160 merges and its Vercel production deployment reads READY, send ONE authed legacy-shaped POST to https://quantalyze.xyz/api/keys/validate-and-encrypt (established magic-link -> setSession -> curl pattern) with body {\"exchange\":\"okx\",\"api_key\":\"smoke-dummy\",\"api_secret\":\"smoke-dummy\"} — dummy credentials are safe: the refusal fires before validateKey, so no live venue probe is spent"
-    expected: "HTTP 409; body code = STALE_CLIENT; error copy names a reload; response body key names include none of api_key_encrypted / api_secret_encrypted / passphrase_encrypted / dek_encrypted / nonce"
-    why_human: "PROD today (post-#704) still serves the legacy ciphertext envelope on absent-discriminator bodies — the retirement exists only on this branch. The refusal is code-verified at HEAD but must be measured on PROD after deploy; until then this gate is OPEN, never silently passed"
+  - test: "✅ CLOSED 2026-08-23 — PROD refusal gate (plan 160-07 Task 2 Part B), measured after PR #705 merged (squash 1cb975c1) and its production deployment read READY"
+    expected: "HTTP 409; code STALE_CLIENT; copy names a reload; no ciphertext key names in the body"
+    result: "PASS — 409, code=STALE_CLIENT, body is exactly {code,error}, Cache-Control private/no-store. Beyond the written gate: persist:\"true\" (string) also refuses 409, and prod logs show the refusal's own signal with no venue probe. Gate is not an unauthenticated oracle (401 without session, 403 without Origin). See the PROD smoke record below."
 ---
 
 # Phase 160: PROVENANCE Verification Report
@@ -34,7 +34,7 @@ human_verification:
 **Phase Goal:** No client-supplied venue can differ from the venue the server validated, and the √365/√252 annualization stamp derives from the server's attestation — without ever stamping √252 onto a crypto strategy through a NULL attestation.
 **Verified:** 2026-08-23 (initial pass at HEAD `36e783de`)
 **Re-verified:** 2026-08-23T19:58Z (independent pass at HEAD `939165aa`, branch `chore/close-phase-160`; retirement commit `2fe28b89` in tree)
-**Status:** human_needed (0 code gaps at HEAD; 2 human items: PROD persist smoke + PROD refusal pending-deploy gate)
+**Status:** human_needed (0 code gaps at HEAD; 1 human item remaining: the PROD persist smoke. The PROD refusal pending-deploy gate is ✅ CLOSED 2026-08-23 — measured on PROD after #705 deployed; see the PROD smoke record.)
 **Re-verification:** Yes — fresh, independent verifier (plan 160-07 Task 1). The fix author did not adjudicate. All claims below marked RE-MEASURED were measured by this pass from the code at `939165aa`; claims marked INHERITED are carried from the initial pass where the underlying files are unchanged since `36e783de` (confirmed per-file via `git log 36e783de..HEAD -- <file>`).
 
 ## Re-verification of the failed must_have (RE-MEASURED at 939165aa)
@@ -174,12 +174,35 @@ new-strategy wizard. Re-connecting the same OKX credential through a strategy's 
 it. Confirm by the DevTools Network entry for that path (or by this same log grouping showing a
 non-zero count for it), then re-run the row check expecting 32 → 33.
 
-### Part B — PROD refusal (pending-deploy gate): OPEN
+### Part B — PROD refusal (pending-deploy gate): ✅ CLOSED, MEASURED ON PROD
 
-Unchanged and correctly still open: the `STALE_CLIENT` retirement exists only on branch
-`chore/close-phase-160`. PROD continues to serve the legacy ciphertext envelope on
-absent-discriminator bodies until that branch merges and its production deployment reads READY.
-Not silently passed.
+PR #705 merged (squash `1cb975c1`) and its production deployment went READY. The gate was then
+measured directly against `https://quantalyze.xyz`, authenticated, with a legacy-shaped body
+carrying no `persist` discriminator and dummy credentials.
+
+| Assertion (from the dated gate above) | Result |
+|---|---|
+| HTTP status | **409** |
+| `code` | **`STALE_CLIENT`** |
+| error copy names a reload | yes — *"This page is out of date and can no longer add keys. Reload the page and try again."* |
+| body key names include none of the five ciphertext fields | body is exactly `{code, error}` — **no ciphertext** |
+| `Cache-Control` | `private, no-store` |
+
+Two checks beyond the written gate, both passing:
+
+- **Strict-boolean discrimination holds in production.** A body with `persist: "true"` (the STRING,
+  not the boolean) also lands on the refusal — `409 / STALE_CLIENT` — so the discriminator is not
+  truthy-coerced on the live path, matching the unit-test pins.
+- **No credential probe is spent.** Production logs for the request window show the refusal's own
+  server-side signal, `[keys/validate-and-encrypt] STALE_CLIENT refusal — caller sent no persist
+  discriminator`, and no venue call. The refusal fires ahead of `validateKey`, as designed.
+
+Also confirmed by measurement while probing: the gate is **not** an unauthenticated oracle. The
+same request without a session returns `401` from `withAuth`, and without an `Origin`/`Referer`
+header returns `403` from the CSRF guard — both ahead of the refusal.
+
+**This closes the pending-deploy gate. "Closed on PROD" may now be claimed for the refusal.**
+Part A remains open and is the only thing between this phase and completion.
 
 ---
 
