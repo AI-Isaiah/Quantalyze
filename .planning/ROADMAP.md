@@ -159,7 +159,29 @@ Plans:
   3. The `asset_class` stamp at `finalize-wizard` derives from the attested venue, and the swap MOVES WITH the null-attestation extension of the `skipAssetClassWrite` guard — a NULL attestation SKIPS; it never stamps `traditional`/√252 onto a crypto strategy (⚠️ TODOS.md's "one-identifier change" framing is measured WRONG; `isCryptoExchange(null) === false` is the trap).
   4. The B-D2 oracle pins the ECONOMICS (a null attestation annualizes on nothing — it skips), never the implementation's own expression; if the census finds affected strategies, their re-annualization gets golden-parity treatment.
 
-**Plans**: TBD
+**Plans**: 6 plans
+
+Plans:
+**Wave 1**
+
+- [ ] 160-01-PLAN.md — B-M1 PROD census artifact `160-CENSUS.md` (checkpoint: ORCHESTRATOR runs the read-only SQL against PROD, fills the mechanical B-D1 decision, commits) (RANK-03, RANK-04) [Wave 1]
+
+**Wave 2** *(blocked on the 160-01 census — it gates everything downstream)*
+
+- [ ] 160-02-PLAN.md — TRACER: `validate-and-encrypt` persist arm (admin INSERT stamps exchange + attested_venue from `exchangeNormalized`, returns `{ api_key_id }`, strict `persist: true` skew discriminator) + ApiKeyManager conversion end-to-end (RANK-03) [Wave 2]
+- [ ] 160-04-PLAN.md — RANK-04 stamp swap + `skipAssetClassWrite` null-attestation extension in ONE change + B-D2 economics oracles observed RED under neuters; create-with-key confirmed unchanged (RANK-04) [Wave 2]
+
+**Wave 3** *(blocked on 160-02 — the persist contract)*
+
+- [ ] 160-03-PLAN.md — StrategyForm + AllocatorExchangeManager conversions (the THIRD insert site) + state-adaptive SQL gate `test_api_keys_insert_not_client_writable.sql` (A1 retention positive armable now) (RANK-03) [Wave 3]
+
+**Wave 4** *(PR-2 — the second landing; blocked on PR-1 merged + deployed + soaked)*
+
+- [ ] 160-05-PLAN.md — Soak checkpoint (prod smoke of wizard + all three converted surfaces, census re-measure addendum) → blocking-human go/no-go → census-guarded `REVOKE INSERT` migration + whole-repo write-surface re-grep + legacy ciphertext arm retired (RANK-03) [Wave 4]
+
+**Wave 5**
+
+- [ ] 160-06-PLAN.md — Golden-parity re-annualization for census-identified strategies (`160-PARITY.md`; RISK ×≈1.203 / RETURN unmoved adjudication) or the recorded no-op (RANK-04) [Wave 5]
 
 **Research note:** ARCHITECTURE confidence is LOW without B-M1 — the census is this phase's first task, not a nicety.
 
