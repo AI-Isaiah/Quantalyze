@@ -632,7 +632,7 @@ describe("POST /api/keys/validate-and-encrypt — sfox api_secret carve-out (SFO
       // below bite: with it, the presence check is the ONLY thing standing
       // between this body and a live credential probe.
       const res = await POST(
-        makeReq({ exchange, api_key: "ccxt-key-123456", persist: true }),
+        makeReq({ exchange, api_key: "ccxt-api-key", persist: true }),
       );
 
       expect(res.status).toBe(400);
@@ -646,7 +646,7 @@ describe("POST /api/keys/validate-and-encrypt — sfox api_secret carve-out (SFO
     const res = await POST(
       makeReq({
         exchange: "binance",
-        api_key: "ccxt-key-123456",
+        api_key: "ccxt-api-key",
         api_secret: "",
         persist: true,
       }),
