@@ -76,10 +76,32 @@ the TEST DB, so it was armed — it would have hard-failed `sql-tests` on main t
 INSERT was withdrawn. Made state-adaptive on the `revoke_api_keys_insert` marker, in the
 same commit as the migration.
 
-The legacy-arm retirement (`STALE_CLIENT`) the plan sketched was **not** performed — the
-legacy ciphertext arm remains in `validate-and-encrypt`. It is now unreachable as a
-row-creating path (the browser holds no INSERT), so it is dead weight rather than a hole.
-Booked below.
+## Task 5 — the legacy-arm retirement (deferred at merge, DONE at closeout)
+
+The `STALE_CLIENT` retirement was **not** in PR-2. It was booked as dead weight rather than
+a hole — the browser holds no INSERT, so the arm could no longer mint a row. Phase
+verification then measured the must_have unmet at HEAD and refused to pass the phase on a
+booking, which was the correct call: "cannot create a row" and "does not hand out key
+material" are different claims, and only the first was true.
+
+Landed at closeout instead (v0.71.1.0):
+
+- POST refuses absent-discriminator bodies with a coded `STALE_CLIENT` **409** naming the
+  remedy (*reload the page*). No arm of the route returns ciphertext to any caller.
+- The refusal fires **before** `validateKey`/`encryptKey` — a request that can never
+  produce a row no longer spends a live credential probe or a KMS round-trip.
+- The handler's `persist` parameter and its legacy branch are deleted; one arm remains.
+- Stale-tab UX improves rather than degrades: previously such a tab got the ciphertext,
+  attempted its own INSERT and hit a bare 42501. Now it gets an actionable message.
+
+Three neuters observed RED and restored from a byte-identical backup: a ciphertext key
+injected into the refusal envelope reddens all seven cases **by name**; relaxing
+`body.persist !== true` to a falsy check reddens the four truthy probes (they reach the
+writer); disabling the gate reddens the no-live-call assertion.
+
+⚠️ The `VALID_BODY` fixture now carries `persist: true`. Without it every case in the file
+would have measured the refusal instead of the arm it names — 25 tests reddened on the
+first run, which is how the coupling was found rather than assumed.
 
 ## Post-apply verification on PROD
 
@@ -91,7 +113,9 @@ OQ-2 sentence gone. Data unchanged: 31 rows, 0 un-attested, 31/31 coherent.
 
 ## Carried forward
 
-- Retire the now-unreachable legacy ciphertext arm in `validate-and-encrypt` (dead path,
-  not a hole).
-- The four prod smoke flows remain unperformed; the writer's first real exercise is the
-  next connect-a-key on PROD.
+- ⚠️ **The four prod smoke flows remain unperformed.** The writer's first real exercise is
+  the next connect-a-key on PROD. After the REVOKE the persist arm is the ONLY door into
+  `api_keys`, so a production-only fault (env, service credential, origin, rate limit)
+  would break connect-a-key for every tenant, and nothing in this phase's evidence would
+  have caught it. This needs a human.
+- (Retired at closeout, no longer carried: the legacy ciphertext arm — see Task 5.)

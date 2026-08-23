@@ -1,5 +1,31 @@
 # Changelog
 
+## [0.71.1.0] - 2026-08-23
+
+### fix: v1.20 Phase 160 — retire the legacy ciphertext arm on `validate-and-encrypt`
+
+Phase 160 verification found one must-have unmet: the route was still serving the legacy
+ciphertext envelope to any request body without the `persist` discriminator. That arm
+existed so a stale browser tab could INSERT the row itself during the soak window between
+PR-1 and PR-2 — and that window is closed. With `REVOKE INSERT` applied, a stale tab's own
+INSERT dies at the table with a bare 42501, so handing it the encrypted key material first
+shipped credentials to a browser that provably could not use them.
+
+- Absent-discriminator bodies now receive a coded `STALE_CLIENT` refusal (409) naming the
+  remedy — *reload the page* — instead of the ciphertext envelope. **No arm of this route
+  returns key material to a caller.** The stale tab's user now sees an actionable message
+  rather than a raw permission error from a doomed INSERT.
+- The refusal fires BEFORE `validateKey`/`encryptKey`, so a request that can never produce
+  a row no longer spends a live credential probe against the exchange or a KMS round-trip.
+  Strictness still discriminates: a stringified `"true"` or a numeric `1` lands on the
+  refusal, never on the writer.
+- The handler's `persist` parameter and its legacy branch are gone — one arm, not two.
+- Regression coverage asserts over the response's KEY NAMES rather than a fixture value, so
+  a renamed ciphertext field cannot slip past it. Verified by neuter: restoring a
+  ciphertext key to the refusal envelope reddens all seven cases by name, relaxing the
+  strict boolean reddens the four truthy probes, and disabling the gate reddens the
+  no-live-call assertion.
+
 ## [0.71.0.0] - 2026-08-23
 
 ### feat: v1.20 Phase 160 — PROVENANCE: the server's venue is the venue that annualizes

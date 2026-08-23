@@ -180,12 +180,23 @@ function makeReq(body: Record<string, unknown> = {}): NextRequest {
   });
 }
 
+/**
+ * 160-05 / RANK-03 — `persist: true` is part of the VALID body now, not an
+ * opt-in. The legacy arm is retired: a body without the discriminator never
+ * reaches the handler at all (it is refused with `STALE_CLIENT`), so a fixture
+ * that omitted it would test the refusal on every case below instead of the
+ * arm it names. The retired-arm suite builds its own discriminator-less body.
+ */
 const VALID_BODY = {
   exchange: "okx",
   api_key: "okx-api-key",
   api_secret: "okx-api-secret",
   passphrase: "pp",
+  persist: true,
 };
+
+/** VALID_BODY as a pre-160-02 client would have sent it: no discriminator. */
+const { persist: _omitPersist, ...LEGACY_BODY } = VALID_BODY;
 
 describe("POST /api/keys/validate-and-encrypt", () => {
   beforeEach(() => {
@@ -419,6 +430,7 @@ describe("POST /api/keys/validate-and-encrypt", () => {
         api_key: shortApiKey,
         api_secret: "okx-api-secret-long-enough",
         passphrase: shortPassphrase,
+        persist: true,
       }),
     );
     expect(res.status).toBe(500);
@@ -449,24 +461,21 @@ describe("POST /api/keys/validate-and-encrypt", () => {
     consoleErr.mockRestore();
   });
 
-  // ── (5) Happy path → 200 with encryptKey payload + valid/read_only ──
-  it("returns the encryptKey payload spread with valid:true, read_only:true on success", async () => {
+  // ── (5) Happy path → 200 with the persist envelope + valid/read_only ──
+  it("returns the persisted row id with valid:true, read_only:true on success — and NO ciphertext", async () => {
     const { POST } = await import("./route");
     const res = await POST(makeReq(VALID_BODY));
 
     expect(res.status).toBe(200);
-    // Block D / P1947: the success body carries the caller's ENCRYPTED
-    // credential ciphertext (dek_encrypted/nonce/api_*_encrypted). It must
-    // never be absorbed by a shared cache and served to another tenant.
+    // Block D / P1947, restated for 160-05: the ciphertext this header was
+    // minted for no longer leaves the server, but the header still earns its
+    // place — the body names a tenant-scoped row id, and the REQUEST that
+    // produced it carried raw exchange credentials. A shared cache must not
+    // hold either end of that exchange.
     expect(res.headers.get("Cache-Control")).toBe("private, no-store");
     const body = await res.json();
     expect(body).toEqual({
-      api_key_encrypted: "ct-blob",
-      api_secret_encrypted: null,
-      passphrase_encrypted: null,
-      dek_encrypted: "dek-ct",
-      nonce: "nonce-b64",
-      kek_version: 3,
+      api_key_id: "persisted-key-id",
       valid: true,
       read_only: true,
     });
@@ -517,7 +526,7 @@ describe("POST /api/keys/validate-and-encrypt — sfox api_secret carve-out (SFO
 
   it("accepts sfox with NO api_secret and calls validateKey/encryptKey with api_secret '' (shared chokepoint)", async () => {
     const { POST } = await import("./route");
-    const res = await POST(makeReq({ exchange: "sfox", api_key: SFOX_TOKEN }));
+    const res = await POST(makeReq({ exchange: "sfox", api_key: SFOX_TOKEN, persist: true }));
 
     expect(res.status).toBe(200);
     // The absent secret is normalized to "" and flows through the SAME funnel the
@@ -531,7 +540,7 @@ describe("POST /api/keys/validate-and-encrypt — sfox api_secret carve-out (SFO
     ["null", null],
     ["empty string", ""],
   ])("normalizes sfox api_secret=%s identically to '' through validateKey", async (_label, secret) => {
-    const body: Record<string, unknown> = { exchange: "sfox", api_key: SFOX_TOKEN };
+    const body: Record<string, unknown> = { exchange: "sfox", api_key: SFOX_TOKEN, persist: true };
     if (secret !== undefined) body.api_secret = secret;
 
     const { POST } = await import("./route");
@@ -546,7 +555,7 @@ describe("POST /api/keys/validate-and-encrypt — sfox api_secret carve-out (SFO
     "accepts mixed-case %s (case-insensitive carve-out) and normalizes the exchange to canonical 'sfox' downstream",
     async (exchange) => {
       const { POST } = await import("./route");
-      const res = await POST(makeReq({ exchange, api_key: SFOX_TOKEN }));
+      const res = await POST(makeReq({ exchange, api_key: SFOX_TOKEN, persist: true }));
 
       expect(res.status).toBe(200);
       // WR-01: the case-sensitive `exchange === "sfox"` used to 400 this input
@@ -561,7 +570,7 @@ describe("POST /api/keys/validate-and-encrypt — sfox api_secret carve-out (SFO
 
   it("rejects sfox with NO api_key — the carve-out relaxes ONLY api_secret, never api_key", async () => {
     const { POST } = await import("./route");
-    const res = await POST(makeReq({ exchange: "sfox" }));
+    const res = await POST(makeReq({ exchange: "sfox", persist: true }));
 
     expect(res.status).toBe(400);
     expect((await res.json()).error).toBe("Missing required fields");
@@ -575,7 +584,7 @@ describe("POST /api/keys/validate-and-encrypt — sfox api_secret carve-out (SFO
     );
 
     const { POST } = await import("./route");
-    const res = await POST(makeReq({ exchange: "sfox", api_key: SFOX_TOKEN }));
+    const res = await POST(makeReq({ exchange: "sfox", api_key: SFOX_TOKEN, persist: true }));
 
     expect(res.status).toBe(400);
     expect((await res.json()).error).toBe(
@@ -686,6 +695,9 @@ const MT5_BODY = {
   api_key: "5001234",
   api_secret: "investor-password-123",
   passphrase: "MetaQuotes-Demo",
+  // 160-05 — see VALID_BODY: without the discriminator these cases would
+  // measure the STALE_CLIENT refusal instead of the mt5 slot mapping.
+  persist: true,
 };
 
 describe("POST /api/keys/validate-and-encrypt — mt5 server gate (MT5_ENABLED off)", () => {
@@ -1190,19 +1202,46 @@ describe("POST /api/keys/validate-and-encrypt — the persist arm (160-02 / RANK
 });
 
 /**
- * 160-02 / RANK-03 — THE SKEW WINDOW (threat T-160-06).
+ * 160-05 / RANK-03 — THE LEGACY ARM IS RETIRED (threat T-160-06).
  *
- * Between this deploy and plan 160-05's `REVOKE INSERT`, a stale browser tab is
- * still running the pre-conversion bundle: it sends the OLD body and then does
- * its OWN client INSERT. If the route wrote a row for that request too, the
- * user would end up with TWO rows for one key — one attested server row and one
- * trigger-scrubbed client row.
+ * The skew window these cases were born in is closed: `REVOKE INSERT` withdrew
+ * `api_keys` INSERT from `anon`/`authenticated`, so the stale tab that sends
+ * the OLD body can no longer write the row it was being handed ciphertext for.
+ * Absent-discriminator bodies now get a coded `STALE_CLIENT` refusal, and the
+ * route has NO arm that returns key material to a caller.
  *
- * These tests are the anti-double-write pins. `PERSIST_STATE.inserts` being
- * EMPTY is the assertion; relax `body.persist === true` to any truthy check and
- * the string / numeric probes below go red.
+ * Two properties are pinned here and they fail differently:
+ *
+ *   1. NO CIPHERTEXT ON THE WIRE. Restore the legacy `return NextResponse.json(
+ *      { ...encrypted, … })` and `expectsNoCipherText` reddens on every case.
+ *      The assertion is over the response's KEY NAMES, not a fixture value, so
+ *      a renamed ciphertext field cannot slip past it.
+ *   2. STRICTNESS still discriminates. Relax `body.persist !== true` to a
+ *      falsy check and the `"true"` / `1` / `"1"` / `{}` probes stop refusing —
+ *      they would reach the WRITER, which is the double-write threat wearing a
+ *      different hat now that the server is the only writer.
+ *
+ * `PERSIST_STATE.inserts` staying EMPTY remains the anti-double-write pin.
  */
-describe("POST /api/keys/validate-and-encrypt — skew window: only a STRICT boolean persists", () => {
+describe("POST /api/keys/validate-and-encrypt — the retired legacy arm refuses, and serves no ciphertext", () => {
+  /** Every ciphertext-shaped key the legacy envelope used to carry. */
+  const CIPHERTEXT_KEYS = [
+    "api_key_encrypted",
+    "api_secret_encrypted",
+    "passphrase_encrypted",
+    "dek_encrypted",
+    "nonce",
+    "kek_version",
+  ];
+
+  function expectsNoCipherText(body: Record<string, unknown>) {
+    expect(
+      Object.keys(body).filter((k) => CIPHERTEXT_KEYS.includes(k)),
+      "the refusal envelope carries a ciphertext-shaped key — the legacy arm " +
+        "is back, or a new arm started echoing encryptKey's result",
+    ).toEqual([]);
+  }
+
   beforeEach(() => {
     vi.clearAllMocks();
     rateLimitResult.success = true;
@@ -1222,25 +1261,29 @@ describe("POST /api/keys/validate-and-encrypt — skew window: only a STRICT boo
     });
   });
 
-  it("a body with NO persist field gets the legacy ciphertext envelope and mints ZERO rows", async () => {
+  it("a body with NO persist field is REFUSED with STALE_CLIENT and mints ZERO rows", async () => {
     const { POST } = await import("./route");
-    const res = await POST(makeReq(VALID_BODY));
+    const res = await POST(makeReq(LEGACY_BODY));
 
-    expect(res.status).toBe(200);
-    // Byte-identical to the pre-160-02 contract. The stale tab reads these
-    // fields and performs its own INSERT; break this and every tab open across
-    // the deploy loses its key-add.
-    expect(await res.json()).toEqual({
-      api_key_encrypted: "ct-blob",
-      api_secret_encrypted: null,
-      passphrase_encrypted: null,
-      dek_encrypted: "dek-ct",
-      nonce: "nonce-b64",
-      kek_version: 3,
-      valid: true,
-      read_only: true,
-    });
+    expect(res.status).toBe(409);
+    const body = await res.json();
+    expect(body.code).toBe("STALE_CLIENT");
+    // The message is what a stale tab actually shows its user, so it has to
+    // name the remedy (reload) rather than blame the key.
+    expect(body.error).toMatch(/reload/i);
+    expectsNoCipherText(body);
     expect(PERSIST_STATE.inserts).toEqual([]);
+  });
+
+  it("the refusal happens BEFORE any live venue call — no validate, no encrypt", async () => {
+    const { POST } = await import("./route");
+    await POST(makeReq(LEGACY_BODY));
+
+    // A doomed request must not spend a credential probe against the exchange
+    // or a KMS round-trip. Move the gate below the handler call and both of
+    // these redden.
+    expect(mockValidateKey).not.toHaveBeenCalled();
+    expect(mockEncryptKey).not.toHaveBeenCalled();
   });
 
   it.each([
@@ -1251,20 +1294,20 @@ describe("POST /api/keys/validate-and-encrypt — skew window: only a STRICT boo
     ["null", null],
     ["false", false],
   ])(
-    "persist as %s is NOT the discriminator — legacy arm, zero server-side inserts",
+    "persist as %s is NOT the discriminator — refused, zero server-side inserts",
     async (_label, persistValue) => {
       const { POST } = await import("./route");
       const res = await POST(
         makeReq({ ...VALID_BODY, persist: persistValue, label: "ignored" }),
       );
 
-      expect(res.status).toBe(200);
+      expect(res.status).toBe(409);
       const body = await res.json();
-      // It got the LEGACY envelope (ciphertext present, no id) …
-      expect(body.api_key_encrypted).toBe("ct-blob");
+      expect(body.code).toBe("STALE_CLIENT");
+      // No id (it never reached the writer) and no key material (the arm that
+      // used to hand that out is gone).
       expect(body.api_key_id).toBeUndefined();
-      // … and, the whole point: no row was written server-side, so a stale tab
-      // that inserts for itself produces exactly one row, not two.
+      expectsNoCipherText(body);
       expect(PERSIST_STATE.inserts).toEqual([]);
     },
   );

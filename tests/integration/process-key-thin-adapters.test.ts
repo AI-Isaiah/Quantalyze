@@ -154,6 +154,14 @@ vi.mock("@/lib/supabase/admin", () => ({
         }),
       }),
       update: () => ({ eq: async () => ({ error: null }) }),
+      // 160-05 — the persist arm is the ONLY arm of keys/validate-and-encrypt
+      // now that the legacy ciphertext arm is retired, so the API-2 lock case
+      // below reaches a real INSERT.
+      insert: () => ({
+        select: () => ({
+          single: async () => ({ data: { id: "persisted-key-id" }, error: null }),
+        }),
+      }),
       upsert: async () => ({ error: null }),
     }),
     rpc: async () => ({ data: null, error: null }),
@@ -604,6 +612,10 @@ describe("thin adapters — flag=on delegates to /process-key (BACKBONE-10)", ()
         exchange: "binance",
         api_key: "k",
         api_secret: "s",
+        // 160-05 — without the discriminator this body is refused with
+        // STALE_CLIENT before the handler runs, and the API-2 lock this case
+        // exists to hold (legacy wrappers, never /process-key) goes unmeasured.
+        persist: true,
       }),
     );
 

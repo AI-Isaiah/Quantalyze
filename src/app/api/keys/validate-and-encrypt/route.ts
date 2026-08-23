@@ -202,19 +202,30 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
   // re-derived inside it) so the tenant identity provably comes from THIS
   // route's withAuth session and cannot drift to a body field.
   //
-  // ── 160-02 / RANK-03 — THE PERSIST DISCRIMINATOR (the deploy-vs-revoke skew
-  // window). `persist === true` is a STRICT boolean comparison, and the
-  // strictness is the whole point: during the soak window between this deploy
-  // and the PR-2 `REVOKE INSERT`, a stale browser tab is still running the
-  // pre-conversion JS. That tab sends the OLD body (no `persist` field at all)
-  // and then performs its own client INSERT. If the server wrote a row for
-  // every call — or for a truthy `"true"` / `1` that some future caller
-  // stringified — the stale tab would mint TWO rows: one attested server row
-  // and one trigger-scrubbed client row. Anything that is not the boolean
-  // `true` therefore falls through to the byte-unchanged legacy arm, which
-  // performs ZERO server-side inserts. (threat T-160-06)
-  const persist = body.persist === true;
-  return await legacyValidateAndEncryptHandler({ exchange: exchangeNormalized, api_key, api_secret: api_secret_normalized, passphrase, userId: user.id, persist, label: body.label });
+  // ── 160-05 / RANK-03 — THE PERSIST DISCRIMINATOR, now a GATE rather than a
+  // fork. `persist === true` is a STRICT boolean comparison and the strictness
+  // is still the whole point, but what the other branch does has changed.
+  //
+  // During the soak window it fell through to a legacy arm that handed the
+  // ciphertext back so a stale tab could INSERT for itself. That window is
+  // CLOSED: `20260823120000_revoke_api_keys_insert` withdrew INSERT on
+  // `api_keys` from `anon` and `authenticated`, so a stale tab's own INSERT now
+  // dies at the table with a bare 42501. Serving it the ciphertext first would
+  // ship encrypted key material to a browser that provably cannot do anything
+  // with it — so the refusal below is both the honest answer and the narrower
+  // blast radius. No arm of this route returns ciphertext to any caller.
+  //
+  // STRICTNESS still earns its keep: a truthy `"true"` / `1` that some future
+  // caller stringified must NOT be read as consent to write a row. It lands
+  // here, on the refusal, not on the writer. (threat T-160-06)
+  if (body.persist !== true) {
+    return NextResponse.json({
+      error:
+        "This page is out of date and can no longer add keys. Reload the page and try again.",
+      code: "STALE_CLIENT",
+    }, { status: 409, headers: NO_STORE_HEADERS });
+  }
+  return await legacyValidateAndEncryptHandler({ exchange: exchangeNormalized, api_key, api_secret: api_secret_normalized, passphrase, userId: user.id, label: body.label });
 });
 
 /**
@@ -322,17 +333,18 @@ async function _unifiedValidateAndEncryptHandler(args: {
  * the unified-handler decision, not to this function which stays around
  * until /process-key gains an encrypt step.
  *
- * ── 160-02 / RANK-03: this function now serves BOTH arms of the route.
- * `persist: false` is the legacy contract, byte-unchanged (ciphertext back to
- * the caller, no row written). `persist: true` writes the `api_keys` row here
- * on the server and returns `{ api_key_id }` instead of the ciphertext.
+ * ── 160-05 / RANK-03: this function serves the PERSIST arm only. It writes
+ * the `api_keys` row here on the server and returns `{ api_key_id }`. The
+ * legacy ciphertext arm it briefly shared a body with is GONE — POST refuses
+ * absent-discriminator bodies with `STALE_CLIENT` before reaching here, so
+ * there is no longer a code path on this route that returns key material to a
+ * caller.
  *
- * The two arms deliberately share ONE body rather than living in two
- * functions: the rate limiter, the sfox/mt5 gates, the presence checks, the
- * breaker arm, the curated-4xx forward, the timeout arm and the scrubbed
- * terminal arm must police the persist arm IDENTICALLY. Duplicating the seam
- * calls into a parallel handler is exactly how one arm silently loses a
- * control (threat T-160-09).
+ * It stays ONE body rather than splitting: the rate limiter, the sfox/mt5
+ * gates, the presence checks, the breaker arm, the curated-4xx forward, the
+ * timeout arm and the scrubbed terminal arm all police this arm. Duplicating
+ * the seam calls into a parallel handler is exactly how one arm silently loses
+ * a control (threat T-160-09).
  */
 // DEPRECATED: remove after unified encrypt branch lands (deferred from PR-D)
 async function legacyValidateAndEncryptHandler(args: {
@@ -347,12 +359,6 @@ async function legacyValidateAndEncryptHandler(args: {
    */
   userId: string;
   /**
-   * 160-02 / RANK-03 — persist mode. Already reduced to a STRICT boolean by
-   * the POST handler's `body.persist === true`; a raw body value never
-   * reaches here.
-   */
-  persist?: boolean;
-  /**
    * 160-02 / RANK-03 — the caller's optional display label, UNVALIDATED. It is
    * typed `unknown` on purpose: it arrives straight off the request body and
    * is normalized (trim + 120-char cap + server default) inside the persist
@@ -360,7 +366,7 @@ async function legacyValidateAndEncryptHandler(args: {
    */
   label?: unknown;
 }): Promise<NextResponse> {
-  const { exchange, api_key, api_secret, passphrase, userId, persist, label } = args;
+  const { exchange, api_key, api_secret, passphrase, userId, label } = args;
   try {
     // Validate and encrypt atomically to prevent TOCTOU race
     const validation = await validateKey(exchange, api_key, api_secret, passphrase, { userId });
@@ -381,13 +387,12 @@ async function legacyValidateAndEncryptHandler(args: {
 
     const encrypted = await encryptKey(exchange, api_key, api_secret, passphrase, { userId });
 
-    // ── LEGACY ARM (no `persist` discriminator) — byte-unchanged. The caller
-    // receives the ciphertext and performs its own INSERT. This arm is retired
-    // by plan 160-05 once the REVOKE lands; until then a stale tab in the soak
-    // window depends on it being EXACTLY what it was.
-    if (!persist) {
-      return NextResponse.json({ ...encrypted, valid: true, read_only: true }, { headers: NO_STORE_HEADERS });
-    }
+    // ⛔ 160-05 — THE LEGACY ARM WAS HERE and is deliberately not coming back.
+    // It returned `{ ...encrypted, valid: true, read_only: true }` so the
+    // browser could INSERT for itself. `REVOKE INSERT` closed that door at the
+    // table; re-adding a ciphertext response would hand out key material no
+    // caller can use. If a future caller needs the envelope, it needs a
+    // service-role writer, not this route's response body.
 
     // ── PERSIST ARM (160-02 / RANK-03) ────────────────────────────────────
     //
