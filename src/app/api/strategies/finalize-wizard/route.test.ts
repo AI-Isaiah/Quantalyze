@@ -1426,6 +1426,12 @@ describe("POST /api/strategies/finalize-wizard — #597 asset_class persistence"
     const fetchSpy = okProbe();
     STATE.strategyRow = { api_key_id: API_KEY_ID }; // single api-keyed draft
     STATE.adminApiKeysExchange = "mt5"; // linked key is an MT5 (forex/CFD) venue
+    // RANK-04 — the stamp's authority moved from the client-writable column to
+    // the server-attested one, so an ordinary post-backfill mt5 row must attest
+    // mt5 too (PROD census: 31/31 rows satisfy attested_venue = exchange). The
+    // MT5RECON-02 economics being pinned here — mt5 ⇒ √252 — are unchanged; only
+    // the fixture gained the binding that now drives them.
+    STATE.adminApiKeysAttestedVenue = "mt5";
     const POST = await importPost();
     const res = await POST(makeReq({ ...VALID_BODY, asset_class: "traditional" }));
     expect(res.status).toBe(200);
@@ -1442,6 +1448,7 @@ describe("POST /api/strategies/finalize-wizard — #597 asset_class persistence"
     const fetchSpy = okProbe();
     STATE.strategyRow = { api_key_id: API_KEY_ID };
     STATE.adminApiKeysExchange = "bybit"; // crypto venue
+    STATE.adminApiKeysAttestedVenue = "bybit"; // …attested as such (RANK-04)
     const POST = await importPost();
     const res = await POST(makeReq({ ...VALID_BODY, asset_class: "traditional" }));
     expect(res.status).toBe(200);
@@ -1474,6 +1481,91 @@ describe("POST /api/strategies/finalize-wizard — #597 asset_class persistence"
       asset_class: "traditional",
     });
     expect(STATE.assetClassUpdates).toHaveLength(0);
+    fetchSpy.mockRestore();
+  });
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // RANK-04 / B-D2 — THE ANNUALIZATION CLOCK DERIVES FROM THE ATTESTED VENUE.
+  //
+  // The worker reads `strategies.asset_class` DIRECTLY as the annualization
+  // clock (√365 crypto / √252 traditional) — it does NOT re-derive from venue.
+  // So whichever column feeds this stamp IS the money math. `api_keys.exchange`
+  // is client-writable at INSERT (the 20260810120000 lock revoked UPDATE only),
+  // making it forgeable; `attested_venue` is written only by the two SECURITY
+  // DEFINER RPCs, from the venue the server itself validated. Annualizing on
+  // the wrong clock is a ~×1.203 (√(365/252)) Sharpe error on the
+  // allocator-facing ranking — inflating a traditional series run on √365,
+  // deflating a crypto series run on √252.
+  //
+  // ⭐ THESE FIXTURES ARE DELIBERATELY BINDING-DIVERGENT (attested ≠ exchange)
+  // and the expectations are LITERAL asset_class values, never a recomputation
+  // of the route's own conditional. An oracle that called `isCryptoExchange`,
+  // or that set both columns to the same venue, could not tell the two bindings
+  // apart and would stay green under the very swap it exists to certify.
+  // ─────────────────────────────────────────────────────────────────────────
+
+  // ECONOMICS: an attested CRYPTO venue annualizes on √365 ⇒ 'crypto', even
+  // though the forgeable column claims the traditional venue mt5. Reverting the
+  // stamp input to the forgeable binding reads 'mt5' → persists 'traditional'
+  // → this reddens.
+  it("B-D2: annualizes on the ATTESTED crypto venue (deribit) when the forgeable column says mt5", async () => {
+    const fetchSpy = okProbe();
+    STATE.strategyRow = { api_key_id: API_KEY_ID };
+    STATE.adminApiKeysExchange = "mt5"; // forgeable label: traditional √252
+    STATE.adminApiKeysAttestedVenue = "deribit"; // server-attested: crypto √365
+    const POST = await importPost();
+    const res = await POST(makeReq({ ...VALID_BODY, asset_class: "traditional" }));
+    expect(res.status).toBe(200);
+    expect(STATE.assetClassUpdates).toContainEqual({ asset_class: "crypto" });
+    expect(STATE.assetClassUpdates).not.toContainEqual({
+      asset_class: "traditional",
+    });
+    fetchSpy.mockRestore();
+  });
+
+  // ECONOMICS: an attested MT5 (forex/CFD) venue annualizes on √252 ⇒
+  // 'traditional', even though the forgeable column claims the crypto venue
+  // binance. Reverting the stamp input reads 'binance' → persists 'crypto'
+  // → this reddens.
+  it("B-D2: annualizes on the ATTESTED mt5 venue when the forgeable column claims binance", async () => {
+    const fetchSpy = okProbe();
+    STATE.strategyRow = { api_key_id: API_KEY_ID };
+    STATE.adminApiKeysExchange = "binance"; // forgeable label: crypto √365
+    STATE.adminApiKeysAttestedVenue = "mt5"; // server-attested: traditional √252
+    const POST = await importPost();
+    const res = await POST(makeReq({ ...VALID_BODY, asset_class: "crypto" }));
+    expect(res.status).toBe(200);
+    expect(STATE.assetClassUpdates).toContainEqual({
+      asset_class: "traditional",
+    });
+    expect(STATE.assetClassUpdates).not.toContainEqual({
+      asset_class: "crypto",
+    });
+    fetchSpy.mockRestore();
+  });
+
+  // ⭐ THE B-D2 ECONOMICS: A NULL ATTESTATION ANNUALIZES ON NOTHING — IT SKIPS.
+  // A legacy pre-backfill row, or a client INSERT the trigger scrubbed, carries
+  // attested_venue NULL while `exchange` still RESOLVES (so this is emphatically
+  // not the lookup-fault arm above). `isCryptoExchange(null)` is false, so a
+  // stamp that ran anyway would write 'traditional'/√252 over what may well be a
+  // crypto strategy — the exact laundering path this guard exists to close. The
+  // write is SKIPPED, leaving create-with-key's server-derived draft stamp
+  // intact, and the finalize still succeeds (200 — the skip is non-fatal).
+  // Reverting the guard to key on the forgeable binding lets this row reach the
+  // stamp arm and mint a 'traditional' update → this reddens.
+  it("B-D2: SKIPS the stamp for a NULL attestation whose forgeable venue still resolves", async () => {
+    const fetchSpy = okProbe();
+    STATE.strategyRow = { api_key_id: API_KEY_ID };
+    STATE.adminApiKeysExchange = "bybit"; // resolves — NOT a lookup fault
+    STATE.adminApiKeysAttestedVenue = null; // legacy / trigger-scrubbed row
+    const POST = await importPost();
+    const res = await POST(makeReq({ ...VALID_BODY, asset_class: "traditional" }));
+    expect(res.status).toBe(200);
+    expect(STATE.assetClassUpdates).toHaveLength(0);
+    expect(STATE.assetClassUpdates).not.toContainEqual({
+      asset_class: "traditional",
+    });
     fetchSpy.mockRestore();
   });
 
