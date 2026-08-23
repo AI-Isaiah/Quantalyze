@@ -42,10 +42,22 @@ vi.mock("next/navigation", () => ({
 // `.from("api_keys").select(...).order(...)` chain resolves to. Each test
 // queues the result(s) the component's loadKeys() effect should observe.
 const selectResultMock = vi.fn();
-// F6 (SFOX-09): capture the api_keys insert payload so a test can assert the
-// exchange reaches the DB canonicalized (lowercase). Returns the queued result
-// for the `.insert(...).select("id").single()` chain.
+// 160-02 / RANK-03: this spy USED to capture the api_keys insert payload the
+// component composed itself. The component no longer inserts — the route's
+// persist arm writes the row server-side, stamping the venue IT validated. The
+// spy is KEPT, and its role is now inverted: it is the NEGATIVE oracle. Any
+// future edit that reintroduces a browser-composed api_keys INSERT (the exact
+// regression this phase exists to remove, and which plan 160-05's `REVOKE
+// INSERT` will turn into a hard 42501) makes it fire, and the assertions below
+// go red. Deleting this mock would delete the alarm.
 const apiKeyInsertMock = vi.fn();
+// Captures `strategies.update({ api_key_id })` payloads, so a test can assert
+// the link is made with the id the ROUTE returned rather than a client-minted
+// one.
+const strategiesUpdateMock = vi.fn();
+// Records which table each chain targeted — an assertion that "the update went
+// to strategies" is worthless if the mock would accept any table name.
+const fromTableMock = vi.fn();
 
 vi.mock("@/lib/supabase/client", () => ({
   createClient: () => ({
@@ -53,28 +65,35 @@ vi.mock("@/lib/supabase/client", () => ({
       getUser: () =>
         Promise.resolve({ data: { user: { id: "user-a" } }, error: null }),
     },
-    from: (_table: string) => ({
-      select: (_cols: string) => ({
-        order: (_col: string, _opts?: unknown) =>
-          Promise.resolve(selectResultMock()),
-      }),
-      // handleAddKey does api_keys.insert({...}).select("id").single().
-      insert: (row: unknown) => {
-        const result = apiKeyInsertMock(row);
-        return {
-          select: (_cols?: string) => ({
-            single: () =>
-              Promise.resolve(
-                result ?? { data: { id: "new-key" }, error: null },
-              ),
-          }),
-        };
-      },
-      // handleLinkKey does strategies.update({api_key_id}).eq('id', ...).
-      update: (_vals: unknown) => ({
-        eq: (_col: string, _val: unknown) => Promise.resolve({ error: null }),
-      }),
-    }),
+    from: (table: string) => {
+      fromTableMock(table);
+      return {
+        select: (_cols: string) => ({
+          order: (_col: string, _opts?: unknown) =>
+            Promise.resolve(selectResultMock()),
+        }),
+        // Retained as the negative oracle — see apiKeyInsertMock above.
+        insert: (row: unknown) => {
+          const result = apiKeyInsertMock(row);
+          return {
+            select: (_cols?: string) => ({
+              single: () =>
+                Promise.resolve(
+                  result ?? { data: { id: "new-key" }, error: null },
+                ),
+            }),
+          };
+        },
+        // handleLinkKey does strategies.update({api_key_id}).eq('id', ...).
+        update: (vals: unknown) => {
+          const queued = strategiesUpdateMock({ table, vals });
+          return {
+            eq: (_col: string, _val: unknown) =>
+              Promise.resolve(queued ?? { error: null }),
+          };
+        },
+      };
+    },
   }),
 }));
 
@@ -489,37 +508,49 @@ describe("ApiKeyManager — complete_with_warnings is terminal (mig 202607071200
   });
 });
 
-// F6 (phase-119 fold-in) — the CLIENT composes the api_keys INSERT directly, so
-// a mixed-case exchange from the form ("sFOX") passes the server validate route
-// (burning a live probe) then 23514s on the DB lowercase-only CHECK. handleAddKey
-// must canonicalize to lowercase and use that value for BOTH the
-// validate-and-encrypt fetch body AND the insert. Tests drive the REAL ApiKeyForm
-// (defaultExchange seeds the exchange state) and assert the wiring at the call
-// site — a helper-only test would not prove the insert receives the canonical
-// value (test-the-wiring rule). Neuter `data.exchange.trim().toLowerCase()` back
-// to `data.exchange` and the sFOX case fails on both the fetch body and insert.
-describe("ApiKeyManager — F6 canonical-lowercase exchange at the add-key insert", () => {
+/**
+ * 160-02 / RANK-03 — THE CONVERSION: this component stops writing api_keys.
+ *
+ * WHAT CHANGED AND WHY IT MATTERS. `api_keys.exchange` decides the
+ * annualization factor a strategy's Sharpe is computed with (√365 crypto vs
+ * √252 traditional, ~1.20× apart). Composing that row in the BROWSER meant the
+ * venue on it was a client assertion. handleAddKey now sends `persist: true`,
+ * the route validates the credentials against the venue and writes the row
+ * itself stamping both venue columns, and this component consumes the
+ * `api_key_id` it gets back.
+ *
+ * F6 (phase-119 fold-in) is FOLDED IN rather than deleted: the canonical
+ * lowercase exchange still has to leave this component, because it is what the
+ * request body carries. What it no longer feeds is a client INSERT.
+ *
+ * Tests drive the REAL ApiKeyForm (defaultExchange seeds the exchange state)
+ * and assert at the call site — a helper-only test would not prove the wiring.
+ * Neuter `data.exchange.trim().toLowerCase()` back to `data.exchange` and the
+ * sFOX case reddens; delete `persist: true` from the body and the discriminator
+ * assertions redden; restore a client `.from("api_keys").insert(...)` and the
+ * negative oracle reddens.
+ */
+describe("ApiKeyManager — 160-02 conversion: server persists, client consumes api_key_id", () => {
   let fetchMock: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
     routerRefreshMock.mockReset();
     selectResultMock.mockReset();
     apiKeyInsertMock.mockReset();
+    strategiesUpdateMock.mockReset();
+    fromTableMock.mockReset();
     // Empty key list on mount so the Add-Key form is the whole surface.
     selectResultMock.mockReturnValue({ data: [], error: null });
-    apiKeyInsertMock.mockReturnValue({ data: { id: "new-key" }, error: null });
     fetchMock = vi.fn().mockImplementation((url: string) => {
       if (url === "/api/keys/validate-and-encrypt") {
+        // The PERSIST-mode envelope: an id, the verdict, and no ciphertext.
         return Promise.resolve({
           ok: true,
           status: 200,
           json: async () => ({
-            api_key_encrypted: "enc",
-            api_secret_encrypted: "sec",
-            passphrase_encrypted: null,
-            dek_encrypted: "dek",
-            nonce: "nonce",
-            kek_version: 1,
+            api_key_id: "server-minted-key-id",
+            valid: true,
+            read_only: true,
           }),
         });
       }
@@ -559,10 +590,35 @@ describe("ApiKeyManager — F6 canonical-lowercase exchange at the add-key inser
       (c) => c[0] === "/api/keys/validate-and-encrypt",
     );
     expect(call).toBeTruthy();
-    return JSON.parse(call![1].body as string) as { exchange: string };
+    return JSON.parse(call![1].body as string) as {
+      exchange: string;
+      persist?: unknown;
+      label?: unknown;
+    };
   }
 
-  it("canonicalizes a mixed-case 'sFOX' to 'sfox' in BOTH the validate body and the insert", async () => {
+  it("sends the persist discriminator as a STRICT boolean, with the label the server will write", async () => {
+    render(
+      <ApiKeyManager
+        strategyId="strat-1"
+        currentKeyId={null}
+        defaultExchange="binance"
+      />,
+    );
+    await submitAddKeyForm();
+
+    await waitFor(() => {
+      expect(validateBody().persist).toBe(true);
+    });
+    // A truthy string would be silently ignored by the route's `=== true`
+    // discriminator, which would leave the key unsaved with no error — so the
+    // TYPE is the assertion, not merely the presence.
+    expect(typeof validateBody().persist).toBe("boolean");
+    // The label moves into the request because the SERVER composes the row now.
+    expect(validateBody().label).toBe("Test Key");
+  });
+
+  it("canonicalizes a mixed-case 'sFOX' to 'sfox' in the validate body (F6, folded in)", async () => {
     render(
       <ApiKeyManager
         strategyId="strat-1"
@@ -572,15 +628,9 @@ describe("ApiKeyManager — F6 canonical-lowercase exchange at the add-key inser
     );
     await submitAddKeyForm();
 
-    // (a) validate-and-encrypt fetch body carries the canonical lowercase value.
     await waitFor(() => {
       expect(validateBody().exchange).toBe("sfox");
     });
-    // (b) the api_keys insert payload carries the canonical lowercase value —
-    // the call-site wiring, not a helper. This is the row that hits the DB CHECK.
-    expect(apiKeyInsertMock).toHaveBeenCalledWith(
-      expect.objectContaining({ exchange: "sfox" }),
-    );
   });
 
   it("leaves an already-lowercase 'binance' byte-identical (no regression)", async () => {
@@ -596,9 +646,111 @@ describe("ApiKeyManager — F6 canonical-lowercase exchange at the add-key inser
     await waitFor(() => {
       expect(validateBody().exchange).toBe("binance");
     });
-    expect(apiKeyInsertMock).toHaveBeenCalledWith(
-      expect.objectContaining({ exchange: "binance" }),
+  });
+
+  // ── THE NEGATIVE ORACLE ───────────────────────────────────────────────────
+  it("performs NO api_keys INSERT from the browser", async () => {
+    render(
+      <ApiKeyManager
+        strategyId="strat-1"
+        currentKeyId={null}
+        defaultExchange="binance"
+      />,
     );
+    await submitAddKeyForm();
+
+    // Wait for the flow to actually reach its end, so this is not a vacuous
+    // "nothing happened yet" pass.
+    await waitFor(() => {
+      expect(strategiesUpdateMock).toHaveBeenCalled();
+    });
+    expect(apiKeyInsertMock).not.toHaveBeenCalled();
+    // …and the api_keys table was touched for READS only (loadKeys' select).
+    // After plan 160-05's REVOKE, a client INSERT here would be a hard 42501.
+    expect(fromTableMock.mock.calls.map((c) => c[0])).toContain("strategies");
+  });
+
+  // ── THE LINK USES THE SERVER'S ID ─────────────────────────────────────────
+  it("links the strategy to the api_key_id the ROUTE returned", async () => {
+    render(
+      <ApiKeyManager
+        strategyId="strat-1"
+        currentKeyId={null}
+        defaultExchange="binance"
+      />,
+    );
+    await submitAddKeyForm();
+
+    await waitFor(() => {
+      expect(strategiesUpdateMock).toHaveBeenCalledWith({
+        table: "strategies",
+        vals: { api_key_id: "server-minted-key-id" },
+      });
+    });
+  });
+
+  it("surfaces the link failure instead of syncing against the wrong key (NEW-C37-03 preserved)", async () => {
+    strategiesUpdateMock.mockReturnValue({
+      error: { message: "permission denied for table strategies" },
+    });
+
+    render(
+      <ApiKeyManager
+        strategyId="strat-1"
+        currentKeyId={null}
+        defaultExchange="binance"
+      />,
+    );
+    await submitAddKeyForm();
+
+    await waitFor(() => {
+      expect(
+        screen.getByText(/Failed to link key to strategy/i),
+      ).toBeInTheDocument();
+    });
+    // The sync must NOT have run: syncing after a failed link would present
+    // the OLD key's data as this key's success.
+    expect(
+      fetchMock.mock.calls.some((c) => c[0] === "/api/keys/sync"),
+    ).toBe(false);
+  });
+
+  // ── A 2xx WITHOUT AN ID IS A FAILURE, NOT A SILENT SUCCESS ────────────────
+  it("fails loud when the route returns 2xx but no api_key_id (no false success)", async () => {
+    fetchMock.mockImplementation((url: string) => {
+      if (url === "/api/keys/validate-and-encrypt") {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: async () => ({ valid: true, read_only: true }),
+        });
+      }
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        headers: { get: () => "application/json" },
+        json: async () => ({ ok: true }),
+      });
+    });
+
+    render(
+      <ApiKeyManager
+        strategyId="strat-1"
+        currentKeyId={null}
+        defaultExchange="binance"
+      />,
+    );
+    await submitAddKeyForm();
+
+    // The user is TOLD. Reporting success here would leave a key that is
+    // unlinked and will never sync, with a UI that says it was added.
+    await waitFor(() => {
+      expect(screen.getByText(/verified but not saved/i)).toBeInTheDocument();
+    });
+    expect(strategiesUpdateMock).not.toHaveBeenCalled();
+    expect(
+      fetchMock.mock.calls.some((c) => c[0] === "/api/keys/sync"),
+    ).toBe(false);
   });
 });
 
@@ -835,13 +987,12 @@ describe("ApiKeyManager — SEAMUX-05: both sync call sites observe the HTTP out
       if (url === "/api/keys/validate-and-encrypt") {
         return Promise.resolve(
           new Response(
+            // 160-02: the PERSIST envelope. The row is written server-side;
+            // the component only needs the id to link and sync.
             JSON.stringify({
-              api_key_encrypted: "enc",
-              api_secret_encrypted: "sec",
-              passphrase_encrypted: null,
-              dek_encrypted: "dek",
-              nonce: "nonce",
-              kek_version: 1,
+              api_key_id: "new-key",
+              valid: true,
+              read_only: true,
             }),
             { status: 200, headers: { "content-type": "application/json" } },
           ),
@@ -914,13 +1065,12 @@ describe("ApiKeyManager — SEAMUX-05: both sync call sites observe the HTTP out
       if (url === "/api/keys/validate-and-encrypt") {
         return Promise.resolve(
           new Response(
+            // 160-02: the PERSIST envelope. The row is written server-side;
+            // the component only needs the id to link and sync.
             JSON.stringify({
-              api_key_encrypted: "enc",
-              api_secret_encrypted: "sec",
-              passphrase_encrypted: null,
-              dek_encrypted: "dek",
-              nonce: "nonce",
-              kek_version: 1,
+              api_key_id: "new-key",
+              valid: true,
+              read_only: true,
             }),
             { status: 200, headers: { "content-type": "application/json" } },
           ),
@@ -977,13 +1127,12 @@ describe("ApiKeyManager — SEAMUX-05: both sync call sites observe the HTTP out
       if (url === "/api/keys/validate-and-encrypt") {
         return Promise.resolve(
           new Response(
+            // 160-02: the PERSIST envelope. The row is written server-side;
+            // the component only needs the id to link and sync.
             JSON.stringify({
-              api_key_encrypted: "enc",
-              api_secret_encrypted: "sec",
-              passphrase_encrypted: null,
-              dek_encrypted: "dek",
-              nonce: "nonce",
-              kek_version: 1,
+              api_key_id: "new-key",
+              valid: true,
+              read_only: true,
             }),
             { status: 200, headers: { "content-type": "application/json" } },
           ),

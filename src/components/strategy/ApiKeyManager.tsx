@@ -18,20 +18,6 @@ interface ApiKeyManagerProps {
 }
 
 /**
- * Strip the non-DB fields (`valid`, `read_only`) that come back from the
- * validate-and-encrypt endpoint. Kept as a standalone helper so both the
- * strategy form and the key manager consume the response identically.
- */
-function stripValidationFields(
-  response: Record<string, unknown>,
-): Record<string, unknown> {
-  const copy = { ...response };
-  delete copy.valid;
-  delete copy.read_only;
-  return copy;
-}
-
-/**
  * 140.3-08 / SEAMUX-04 (C-9) — what the user is told when a sync could not be
  * started and the response carried no reviewed copy of its own.
  *
@@ -50,8 +36,10 @@ function stripValidationFields(
  * inventing a wait would be the fabrication the rule exists to prevent.
  *
  * "Your key is saved" is a fact at BOTH call sites, not reassurance: the
- * background sync runs only inside `if (newKey)` (the insert returned a row),
- * and the explicit sync runs only after `handleLinkKey` resolved without error.
+ * background sync is reached only after the route returned an `api_key_id`
+ * (160-02 — the server wrote the row and told us its id; a response without
+ * one throws before this copy can be shown), and the explicit sync runs only
+ * after `handleLinkKey` resolved without error.
  */
 const SYNC_UNAVAILABLE_COPY =
   "We couldn't start the sync. Your key is saved — retry in a moment, and contact support if it keeps failing.";
@@ -216,12 +204,17 @@ export function ApiKeyManager({ strategyId, currentKeyId, defaultExchange }: Api
     setLoading(true);
     setError(null);
 
-    // F6 (phase-119 fold-in): the server validate route normalizes the exchange
-    // (WR-01), but the CLIENT performs the api_keys INSERT directly — a mixed-case
-    // value ("sFOX") passes validation (burning a live probe) then 23514s on the
-    // DB lowercase-only CHECK. Canonicalize once here and reuse for BOTH the
-    // validate-and-encrypt body AND the insert. Credential fields are untouched
-    // (their .trim() chokepoint lives server-side per the v1.11 dogfood fix).
+    // F6 (phase-119 fold-in): canonicalize the exchange to lowercase before it
+    // leaves this component. The DB CHECK admits lowercase venue codes only, so
+    // a mixed-case value ("sFOX") used to pass validation (burning a live probe)
+    // and then 23514 on the INSERT. Credential fields are untouched (their
+    // .trim() chokepoint lives server-side per the v1.11 dogfood fix).
+    //
+    // 160-02 / RANK-03: the INSERT this canonicalization used to also feed is
+    // GONE — the route writes the row now, and it re-normalizes independently
+    // at its own chokepoint (route.ts, `exchangeNormalized`). This stays because
+    // it is what the request body carries, and a component that sends a
+    // canonical venue is one less place a stray casing can originate.
     const exchange = data.exchange.trim().toLowerCase();
 
     try {
@@ -234,6 +227,15 @@ export function ApiKeyManager({ strategyId, currentKeyId, defaultExchange }: Api
           api_key: data.apiKey,
           api_secret: data.apiSecret,
           passphrase: data.passphrase || null,
+          // 160-02 / RANK-03 — the persist discriminator. With it, the route
+          // writes the api_keys row ITSELF, stamping `exchange` AND
+          // `attested_venue` from the venue its own validateKey call
+          // authenticated against, and returns `{ api_key_id }` with NO
+          // ciphertext. Without it the route keeps its legacy contract for the
+          // stale tabs still running the pre-conversion bundle. The label goes
+          // in the body now because the server composes the row.
+          persist: true,
+          label: data.label,
         }),
       });
 
@@ -242,83 +244,79 @@ export function ApiKeyManager({ strategyId, currentKeyId, defaultExchange }: Api
         throw new Error(err.error || "Key validation failed");
       }
 
-      const encrypted = await res.json();
+      // Step 3: consume the id of the row the SERVER wrote. This component no
+      // longer inserts into api_keys — a browser-composed INSERT could claim
+      // any venue, and the venue is what decides the annualization factor
+      // (√365 crypto vs √252 traditional) downstream. Plan 160-05 revokes the
+      // client's INSERT grant outright once this has soaked on PROD.
+      const { api_key_id: newKeyId } = await res.json();
 
-      // Step 3: Store encrypted key in Supabase (only DB columns, not validation fields).
-      // The response includes `valid` + `read_only` for UI signalling but they
-      // don't belong in the `api_keys` row, so we strip them before insert.
-      const dbFields = stripValidationFields(encrypted);
-      const supabase = createClient();
-      const { data: { user } } = await supabase.auth.getUser();
-      if (!user) throw new Error("Not authenticated");
-      const { data: newKey, error: insertError } = await supabase.from("api_keys").insert({
-        user_id: user.id,
-        exchange,
-        label: data.label,
-        ...dbFields,
-      }).select("id").single();
-
-      if (insertError) throw new Error(insertError.message);
-
-      // Auto-link key to strategy and sync trades
-      if (newKey) {
-        // NEW-C37-03: surface auto-link errors instead of swallowing them.
-        // Pre-fix: the {error} from the strategies.update was discarded; if
-        // RLS denied the update (stale cookie / not owner) the sync would
-        // run against the OLD api_key_id and present wrong data as success.
-        const { error: linkError } = await supabase
-          .from("strategies")
-          .update({ api_key_id: newKey.id })
-          .eq("id", strategyId);
-        if (linkError) {
-          throw new Error(
-            `Failed to link key to strategy: ${linkError.message}`,
-          );
-        }
-
-        // Auto-sync trades in background (don't block the UI).
-        //
-        // 140.3-08 / SEAMUX-05 (B-06) — observe the HTTP OUTCOME, not just a
-        // transport rejection. This was `fetch(…).catch(…)`, and the comment
-        // beside it claimed it handled 401/403/500 errors. It could not:
-        // `.catch()` fires ONLY when the request never completes, so every one
-        // of those — and a breaker 503 — RESOLVED the promise and was invisible.
-        // The user was told the key was added and nothing ever said the sync had
-        // not started.
-        //
-        // Still NOT awaited: "don't block the UI" is a real requirement and the
-        // add-key flow continues below regardless. The outcome is observed
-        // INSIDE the promise chain and routed to the same SyncProgress surface
-        // an explicit sync failure uses, so a failed background sync cannot be
-        // read as a completed one.
-        //
-        // `lastAttemptedKeyId` is set so SyncProgress's Retry button has a
-        // target; without it the retry closure would see null and no-op (the
-        // pre-existing bug the state's own comment above records).
-        setLastAttemptedKeyId(newKey.id);
-        fetch("/api/keys/sync", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ strategy_id: strategyId }),
-        })
-          .then(async (res) => {
-            if (!res.ok) throw new Error(await syncFailureMessage(res));
-            // Same enqueue-evidence requirement as the explicit sync below —
-            // one shape at both members of the class, not two.
-            const body: unknown = await res.json().catch(() => null);
-            if (!isSyncEnqueued(body)) throw new Error(SYNC_UNAVAILABLE_COPY);
-          })
-          .catch((err: unknown) => {
-            // FINDING-10: keep the operator log — it is how a never-synced key
-            // gets diagnosed, and the caught value goes HERE rather than to the
-            // DOM (140.3-07's B-27 discipline).
-            console.warn("[ApiKeyManager] background sync after key add failed:", err);
-            setSyncStatus("error");
-            setSyncError(
-              err instanceof Error ? err.message : SYNC_UNAVAILABLE_COPY,
-            );
-          });
+      if (typeof newKeyId !== "string") {
+        // Rule 12 / fail loud. A 2xx carrying no id means the server did not
+        // persist. Continuing would report the key as added while it is
+        // unlinked and will never sync — precisely the false-success that
+        // NEW-C37-03 and B-06 below exist to prevent.
+        throw new Error("Your key was verified but not saved. Please try again.");
       }
+
+      const supabase = createClient();
+
+      // NEW-C37-03: surface auto-link errors instead of swallowing them.
+      // Pre-fix: the {error} from the strategies.update was discarded; if
+      // RLS denied the update (stale cookie / not owner) the sync would
+      // run against the OLD api_key_id and present wrong data as success.
+      const { error: linkError } = await supabase
+        .from("strategies")
+        .update({ api_key_id: newKeyId })
+        .eq("id", strategyId);
+      if (linkError) {
+        throw new Error(
+          `Failed to link key to strategy: ${linkError.message}`,
+        );
+      }
+
+      // Auto-sync trades in background (don't block the UI).
+      //
+      // 140.3-08 / SEAMUX-05 (B-06) — observe the HTTP OUTCOME, not just a
+      // transport rejection. This was `fetch(…).catch(…)`, and the comment
+      // beside it claimed it handled 401/403/500 errors. It could not:
+      // `.catch()` fires ONLY when the request never completes, so every one
+      // of those — and a breaker 503 — RESOLVED the promise and was invisible.
+      // The user was told the key was added and nothing ever said the sync had
+      // not started.
+      //
+      // Still NOT awaited: "don't block the UI" is a real requirement and the
+      // add-key flow continues below regardless. The outcome is observed
+      // INSIDE the promise chain and routed to the same SyncProgress surface
+      // an explicit sync failure uses, so a failed background sync cannot be
+      // read as a completed one.
+      //
+      // `lastAttemptedKeyId` is set so SyncProgress's Retry button has a
+      // target; without it the retry closure would see null and no-op (the
+      // pre-existing bug the state's own comment above records).
+      setLastAttemptedKeyId(newKeyId);
+      fetch("/api/keys/sync", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ strategy_id: strategyId }),
+      })
+        .then(async (res) => {
+          if (!res.ok) throw new Error(await syncFailureMessage(res));
+          // Same enqueue-evidence requirement as the explicit sync below —
+          // one shape at both members of the class, not two.
+          const body: unknown = await res.json().catch(() => null);
+          if (!isSyncEnqueued(body)) throw new Error(SYNC_UNAVAILABLE_COPY);
+        })
+        .catch((err: unknown) => {
+          // FINDING-10: keep the operator log — it is how a never-synced key
+          // gets diagnosed, and the caught value goes HERE rather than to the
+          // DOM (140.3-07's B-27 discipline).
+          console.warn("[ApiKeyManager] background sync after key add failed:", err);
+          setSyncStatus("error");
+          setSyncError(
+            err instanceof Error ? err.message : SYNC_UNAVAILABLE_COPY,
+          );
+        });
 
       setShowForm(false);
       await loadKeys();
