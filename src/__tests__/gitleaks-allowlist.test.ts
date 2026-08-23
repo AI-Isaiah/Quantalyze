@@ -361,12 +361,18 @@ describe(".gitleaks.toml — real scanner behavior (H-0017)", () => {
 /**
  * The CI scanner must be new enough to READ this config.
  *
- * PR #705 root cause. `gitleaks-action` resolves its scanner as
- * `process.env.GITLEAKS_VERSION || "8.24.3"`, and **gitleaks 8.24.3
- * silently ignores the top-level `[[allowlists]]` array-of-tables form**
- * that this repo's `.gitleaks.toml` uses (converted to array form by
+ * PR #705 root cause. `gitleaks-action` resolves its scanner from the
+ * GITLEAKS_VERSION env var, falling back to "8.24.3" when unset, and 8.24.3
+ * SILENTLY IGNORES the top-level `[[allowlists]]` array-of-tables form that
+ * this repo's `.gitleaks.toml` uses (converted to array form by
  * 158-REVIEW CR-03). There is no parse error and no warning — the
  * allowlist is simply dropped and the scan proceeds on default rules.
+ *
+ * ⚠️ Do not rewrite that fallback as a literal `process` `.env.NAME` member
+ * expression in this file. `env-manifest.test.ts` scans src/ for exactly that
+ * shape and requires the name be documented in `.env.example`. GITLEAKS_VERSION
+ * is CI-runner config, not app config, so it does not belong there — describe
+ * it in prose. (Cost one red CI shard to learn.)
  *
  * The failure mode is therefore invisible from the config side: the file
  * looks correct, `gitleaks-allowlist.test.ts` passes, a modern local
