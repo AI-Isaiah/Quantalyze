@@ -39,11 +39,12 @@ vi.mock("next/navigation", () => ({
 let strategiesUpdateResult: { error: { code?: string; message?: string } | null } = {
   error: null,
 };
-// Controls what `.from("api_keys").insert(...)` resolves to.
-let apiKeysInsertResult: { error: { code?: string; message?: string } | null } = {
-  error: null,
-};
-// Captures the payload passed to `.from("api_keys").insert(...)` (F4).
+// 160-03: captures the payload passed to `.from("api_keys").insert(...)`.
+// The branch is deliberately KEPT (and deliberately resolves as a SUCCESS) even
+// though no production path should reach it any more: a reintroduced browser
+// insert must be observable as a recorded payload, not masked by an
+// "unexpected from(api_keys)" throw that a future test could mistake for an
+// unrelated mock gap. The specs assert this stays null.
 let apiKeysInsertArg: Record<string, unknown> | null = null;
 
 vi.mock("@/lib/supabase/client", () => ({
@@ -71,7 +72,7 @@ vi.mock("@/lib/supabase/client", () => ({
         return {
           insert: (payload: Record<string, unknown>) => {
             apiKeysInsertArg = payload;
-            return Promise.resolve(apiKeysInsertResult);
+            return Promise.resolve({ error: null });
           },
         };
       }
@@ -99,7 +100,6 @@ beforeEach(() => {
   routerPushMock.mockClear();
   routerRefreshMock.mockClear();
   strategiesUpdateResult = { error: null };
-  apiKeysInsertResult = { error: null };
   apiKeysInsertArg = null;
   // jsdom lacks HTMLDialogElement methods the <Modal> uses on mount.
   if (!HTMLDialogElement.prototype.showModal) {
@@ -176,82 +176,35 @@ describe("StrategyForm — H-0405 error redaction", () => {
     ).not.toBeInTheDocument();
   });
 
-  // H-0405 same-class (specialist review): the api_keys insert in the SAME
-  // component must also redact its raw Postgres error from the connect-key
-  // banner — an RLS denial / unique-constraint violation embeds SQLSTATE +
-  // constraint names. Connect-key flow: open modal -> fill key/secret ->
-  // validate-and-encrypt (mocked 200) -> api_keys insert (mocked error).
-  it("redacts a raw api_keys insert error from the connect-key banner", async () => {
-    apiKeysInsertResult = {
-      error: {
-        code: "42501",
-        message:
-          'new row violates row-level security policy for table "api_keys"',
-      },
-    };
-    vi.spyOn(globalThis, "fetch").mockResolvedValue(
-      new Response(JSON.stringify({ valid: true, read_only: true, ciphertext: "x" }), {
-        status: 200,
-        headers: { "content-type": "application/json" },
-      }),
-    );
-
-    render(<StrategyForm mode="create" />);
-    fireEvent.click(screen.getByRole("button", { name: /connect api key/i }));
-    fireEvent.change(screen.getByPlaceholderText(/your read-only api key/i), {
-      target: { value: "kkkkkkkk" },
-    });
-    fireEvent.change(screen.getByPlaceholderText(/your api secret/i), {
-      target: { value: "ssssssss" },
-    });
-    fireEvent.click(screen.getByRole("button", { name: "Connect Key" }));
-
-    expect(
-      await screen.findByText("Couldn't connect this API key. Please try again."),
-    ).toBeInTheDocument();
-    // The raw RLS/SQLSTATE detail must not reach the banner.
-    expect(screen.queryByText(/row-level security/i)).not.toBeInTheDocument();
-    expect(screen.queryByText(/42501/)).not.toBeInTheDocument();
-  });
+  // 160-03 / RANK-03 — the H-0405 same-class connect-key case that used to live
+  // here ("redacts a raw api_keys insert error from the connect-key banner") is
+  // RETIRED, not dropped: it drove `.from("api_keys").insert(...)` to a 42501
+  // and asserted this component redacted it. That writer no longer exists in
+  // the browser. Its coverage moved in two directions and BOTH halves are
+  // pinned:
+  //   - server half: the persist arm scrubs the raw PostgREST message at the
+  //     console AND Sentry sinks and answers a curated envelope —
+  //     `src/app/api/keys/validate-and-encrypt/route.test.ts` (160-02).
+  //   - client half: "surfaces the route's curated persist-failure copy, not
+  //     raw Postgres text" in the 160-03 describe block at the foot of this file.
+  // The `toUserFacingStrategyError` redaction for the strategies insert/update
+  // — the ORIGINAL H-0405 finding — is untouched and still covered above.
 });
 
 /**
- * F4 (Phase 122): the legacy StrategyForm connect-key modal is the THIRD api_keys
- * insert site. It (a) must canonicalize the exchange to lowercase at the insert
- * chokepoint (the DB CHECK + Python intercept key on lowercase), and (b) must NOT
- * auto-offer sfox — the modal renders a hardcoded API Secret field + generic
- * copy, which structurally cannot serve token-only sfox. The wizard ApiKeyForm
- * owns the correct sfox flow; this legacy surface excludes it.
+ * F4 (Phase 122): the legacy StrategyForm connect-key modal must NOT auto-offer
+ * sfox — the modal renders a hardcoded API Secret field + generic copy, which
+ * structurally cannot serve token-only sfox. The wizard ApiKeyForm owns the
+ * correct sfox flow; this legacy surface excludes it.
+ *
+ * 160-03: F4's OTHER half — "the insert must carry the canonical lowercase
+ * exchange + a lowercase-derived label" — no longer has an insert to assert
+ * against. The same chokepoint is now asserted on the REQUEST BODY (which is
+ * what the value actually flows into) by "POSTs persist:true with the canonical
+ * exchange + default label" in the 160-03 describe block below, and enforced a
+ * second time server-side by the route's own `exchangeNormalized` binding.
  */
-describe("StrategyForm — F4 legacy insert-site chokepoint + sfox exclusion", () => {
-  it("inserts the exchange canonicalized to lowercase (chokepoint) on connect", async () => {
-    vi.spyOn(globalThis, "fetch").mockResolvedValue(
-      new Response(
-        JSON.stringify({ valid: true, read_only: true, api_key_encrypted: "ct" }),
-        { status: 200, headers: { "content-type": "application/json" } },
-      ),
-    );
-
-    render(<StrategyForm mode="create" />);
-    fireEvent.click(screen.getByRole("button", { name: /connect api key/i }));
-    fireEvent.change(screen.getByPlaceholderText(/your read-only api key/i), {
-      target: { value: "kkkkkkkk" },
-    });
-    fireEvent.change(screen.getByPlaceholderText(/your api secret/i), {
-      target: { value: "ssssssss" },
-    });
-    fireEvent.click(screen.getByRole("button", { name: "Connect Key" }));
-
-    await waitFor(() => expect(apiKeysInsertArg).not.toBeNull());
-    // Default select value is "binance" (lowercase); the insert must carry the
-    // canonical lowercase code + a lowercase-derived label, never a display case.
-    expect(apiKeysInsertArg?.exchange).toBe("binance");
-    expect(apiKeysInsertArg?.label).toBe("binance key");
-    expect(String(apiKeysInsertArg?.exchange)).toBe(
-      String(apiKeysInsertArg?.exchange).toLowerCase(),
-    );
-  });
-
+describe("StrategyForm — F4 sfox exclusion on the legacy connect surface", () => {
   it("flag ON: the connect-key modal does NOT offer sfox (legacy surface excludes it)", async () => {
     vi.stubEnv("NEXT_PUBLIC_SFOX_ENABLED", "true");
     vi.resetModules();
