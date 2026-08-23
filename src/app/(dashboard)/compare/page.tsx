@@ -1,7 +1,11 @@
 import { createClient } from "@/lib/supabase/server";
 import { requireRolePage } from "@/lib/auth/requireRolePage";
 import { withPublishedOnly } from "@/lib/visibility";
-import { EMPTY_ANALYTICS } from "@/lib/queries";
+import {
+  COMPARE_ANALYTICS_COLUMNS,
+  EMPTY_ANALYTICS,
+  extractAnalytics,
+} from "@/lib/queries";
 import { redirect } from "next/navigation";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { CompareTable } from "@/components/strategy/CompareTable";
@@ -13,28 +17,6 @@ import {
   fetchHoldingCompareItem,
   type HoldingCompareItem,
 } from "./lib/holding-compare-adapter";
-
-/**
- * Phase 159 (159-03, RANK-02 / decision D-02) — the compare analytics
- * projection, replacing a wildcard analytics embed.
- *
- * Compare is an AUTHED allocator surface, but it is CROSS-TENANT: an allocator
- * reads other managers' published strategies, which is why the requirement
- * names this site alongside the anonymous ones. RLS is ROW-level and cannot
- * hide a column, so an explicit column list is the only control over what
- * leaves the database — `daily_returns`, the `metrics_json` blob and
- * `data_quality_flags` are all absent here and none of them was ever read.
- *
- * Enumerated from the compare UI at HEAD (enumerate before cutting):
- *   - the nine `METRICS` rows in CompareTable (:27-37), read by DYNAMIC key
- *     (`getValue(item.analytics, metric.key)`), so a missing column shows as
- *     an em-dash rather than a crash — a silent regression, hence the pin in
- *     page.test.tsx.
- *   - `returns_series`, read by BOTH CompareEquityOverlay (:40) and
- *     CompareCorrelationMatrix (:26). Dropping it blanks both charts.
- */
-const COMPARE_ANALYTICS_COLUMNS =
-  "cumulative_return, cagr, sharpe, sortino, calmar, max_drawdown, max_drawdown_duration_days, volatility, six_month_return, returns_series";
 
 // Phase 51 NAV-02 — the back-path crumb is identical across all three render
 // branches (empty-selection, not-available, results), so it lives in one place.
@@ -104,9 +86,9 @@ export default async function ComparePage({
 
   const strategyItems = ((strategiesRes as { data: unknown[] | null }).data ?? []).map((s) => {
     const strat = s as Strategy & { strategy_analytics: unknown };
-    const row = (Array.isArray(strat.strategy_analytics)
-      ? strat.strategy_analytics[0]
-      : strat.strategy_analytics) as Partial<StrategyAnalytics> | null | undefined;
+    const row = extractAnalytics(strat.strategy_analytics) as
+      | Partial<StrategyAnalytics>
+      | null;
     return {
       kind: "strategy" as const,
       strategy: strat as Strategy,

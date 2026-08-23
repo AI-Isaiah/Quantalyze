@@ -743,10 +743,10 @@ def compute_all_metrics(
         )
         # Drawdown series — chart continuity per F3 (same fillna(0) rationale);
         # `returns_for_chart` is already NaN-free and floored above -100%. The
-        # trailing `replace` mirrors quantstats' own inf/-0 cleanup.
-        _wealth_chart = (1.0 + returns_for_chart).cumprod()
+        # trailing `replace` mirrors quantstats' own inf/-0 cleanup. Reuses the
+        # `cumulative` wealth curve bound above (same operand, same block).
         dd_series = (
-            _wealth_chart / _wealth_chart.cummax().clip(lower=1.0) - 1.0
+            cumulative / cumulative.cummax().clip(lower=1.0) - 1.0
         ).replace([np.inf, -np.inf, -0.0], 0.0)
 
     # Headline annualized RISK on the day-basis series (Fix A): `stat_returns` IS
@@ -958,9 +958,13 @@ def compute_all_metrics(
     # signal value of the new fail-loud emissions.
     # RANK-05 kwarg arm — see the `volatility` site for the shared rationale.
     # Kept on ONE source line so the region gate can see the kwarg.
+    _var_95: float | None = None
+    _var_95_exc: Exception | None = None
     try:
-        metrics_json["var_1d_95"] = _safe_float(qs.stats.value_at_risk(returns, confidence=0.95, prepare_returns=False))
+        _var_95 = _safe_float(qs.stats.value_at_risk(returns, confidence=0.95, prepare_returns=False))
+        metrics_json["var_1d_95"] = _var_95
     except Exception as exc:  # noqa: BLE001
+        _var_95_exc = exc
         logger.warning(
             "qstats scalar var_1d_95 failed (returns_len=%s, nonnan_len=%s): %s",
             returns_len_for_log, returns_nonnan_len_for_log, exc,
@@ -986,7 +990,13 @@ def compute_all_metrics(
     # empty-slice RuntimeWarning its `.values.mean()` emits.
     # fail-soft: optional scalar.
     try:
-        _cvar_threshold = _safe_float(qs.stats.value_at_risk(returns, confidence=0.95, prepare_returns=False))
+        # Threshold reuses the SINGLE VaR evaluation above — "same threshold
+        # source" is now true by construction, not by two calls agreeing. A VaR
+        # failure is re-raised here so cvar keeps its OWN fail-loud warning
+        # (fail-soft for the result, loud for the operator — same as before).
+        if _var_95_exc is not None:
+            raise _var_95_exc
+        _cvar_threshold = _var_95
         if _cvar_threshold is None:
             metrics_json["cvar"] = None
         else:
@@ -1149,8 +1159,9 @@ def compute_all_metrics(
     # fail-soft: optional scalar.
     try:
         if _smart_n >= 2:
+            _smart_arr = _smart_r.to_numpy()
             _smart_coef = abs(
-                float(np.corrcoef(_smart_r.to_numpy()[:-1], _smart_r.to_numpy()[1:])[0, 1])
+                float(np.corrcoef(_smart_arr[:-1], _smart_arr[1:])[0, 1])
             )
             _smart_x = np.arange(1, _smart_n)
             _smart_penalty = float(

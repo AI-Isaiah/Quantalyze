@@ -263,6 +263,23 @@ items were dropped, not carried. Categories: **Fix now** / **Fix mid-term** / **
    cost of never showing a flattering interim number. Not a phase-159 blocker.
    **Recorded:** 2026-08-23 (phase 159 red-team, finding 3)
 
+0f. **[159-SIMPLIFY-DEFER] metrics.py inline qstats math: extract shared primitives when
+   closing the RANK-05 scalars residual.** /simplify pass (2026-08-23, 4-lens Opus review)
+   converged on the same shape from three angles: the inlined sharpe/sortino/smart-*
+   formulas in `compute_all_metrics` are now 2–4 hand-copies of the same math
+   (downside-RMS twice with already-divergent NaN denominators; annualized Sharpe/vol in
+   three spellings incl. `sharpe_vol_status_from_backbone`), and the deferred
+   `compute_qstats_scalars` closure will need a THIRD copy unless the formulas are first
+   extracted as module-level primitives (`_downside_rms`, `_annualized_vol_sharpe`, …).
+   Do the extraction AS PART OF the scalars follow-up (WINDOWS.md RANK-05 residual), not
+   before — parity tests already pin each site. Also queued for that pass: rewrite the
+   line-oriented RANK-05 region gate to AST-walk `qs.stats.*` calls (formatting-immune),
+   and consider deriving `PERCENTILE_ANALYTICS_COLUMNS` + csv-finalize's
+   `CLOCK_SAFETY_KPI_COLUMNS` + the select strings from ONE exported KPI array so the
+   byte-freeze + mirror-prose machinery can be deleted. Skipped same-pass because each
+   reshapes just-red-teamed money-math or test machinery right before ship.
+   **Recorded:** 2026-08-23 (/simplify, phase 159)
+
 1. **`RESEND_API_KEY` unset in Vercel prod** — founder-LP report cron + all transactional
    email are dead (code soft-skips, only Sentry fires). **Founder action:** set the key in
    Vercel prod. Do before the first warned founder month. (Note: portfolio email *alerts*

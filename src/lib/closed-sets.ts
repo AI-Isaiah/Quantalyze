@@ -634,7 +634,7 @@ export function annualizationPeriods(
 export function blendPeriodsPerYear(
   legs: ReadonlyArray<{ asset_class?: string | null }>,
 ): number {
-  if (legs.length === 0) return 252;
+  // EMPTY → 252 falls out of `.some()` on an empty array — no guard needed.
   return legs.some((l) => l.asset_class === "crypto" || l.asset_class == null)
     ? 365
     : 252;

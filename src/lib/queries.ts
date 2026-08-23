@@ -205,6 +205,32 @@ export async function getPercentiles(categorySlug?: string): Promise<PercentileM
 export { extractAnalytics, EMPTY_ANALYTICS };
 
 /**
+ * Phase 159 (159-03, RANK-02 / decision D-02) — the compare analytics
+ * projection, replacing a wildcard analytics embed.
+ *
+ * Compare is an AUTHED allocator surface, but it is CROSS-TENANT: an allocator
+ * reads other managers' published strategies, which is why the requirement
+ * names this site alongside the anonymous ones. RLS is ROW-level and cannot
+ * hide a column, so an explicit column list is the only control over what
+ * leaves the database — `daily_returns`, the `metrics_json` blob and
+ * `data_quality_flags` are all absent here and none of them was ever read.
+ *
+ * Enumerated from the compare UI at HEAD (enumerate before cutting):
+ *   - the nine `METRICS` rows in CompareTable (:27-37), read by DYNAMIC key
+ *     (`getValue(item.analytics, metric.key)`), so a missing column shows as
+ *     an em-dash rather than a crash — a silent regression, hence the pin in
+ *     page.test.tsx.
+ *   - `returns_series`, read by BOTH CompareEquityOverlay (:40) and
+ *     CompareCorrelationMatrix (:26). Dropping it blanks both charts.
+ *
+ * Lives here (not in the page file) so every "which analytics columns may
+ * leave the DB" list is auditable with one grep of this module, alongside
+ * PUBLIC_ANALYTICS_COLUMNS and the STRATEGY_DETAIL_* constants.
+ */
+export const COMPARE_ANALYTICS_COLUMNS =
+  "cumulative_return, cagr, sharpe, sortino, calmar, max_drawdown, max_drawdown_duration_days, volatility, six_month_return, returns_series";
+
+/**
  * Phase 159 (159-03, RANK-02 / decision D-02) — the RANKED-LIST analytics
  * projection, replacing the wildcard `strategy_analytics (*)` embed.
  *
