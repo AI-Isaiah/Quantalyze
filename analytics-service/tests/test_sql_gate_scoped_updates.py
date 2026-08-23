@@ -104,6 +104,7 @@ _SCOPED_RE = re.compile(
 # a key this map does not have and the assertion still fires.
 # ---------------------------------------------------------------------------
 _EXPECTED_MATCH_COUNTS: dict[str, int] = {
+    "test_get_verified_cohort_rank_gate.sql": 1,
     "test_metrics_by_basis_write.sql": 4,
     "test_strategy_analytics_stuck_computing_reaper.sql": 3,
     "test_wizard_composite_members.sql": 2,
