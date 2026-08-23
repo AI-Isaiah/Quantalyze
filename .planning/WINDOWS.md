@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 7
+open_count: 8
 waived_count: 0
 fixed_count: 1
-total_count: 8
-last_updated: 2026-08-21T14:29:27.024Z
+total_count: 9
+last_updated: 2026-08-23T12:41:34.945Z
 ---
 
 # Broken Windows Ledger
@@ -23,6 +23,7 @@ last_updated: 2026-08-21T14:29:27.024Z
 | 6 | 159 | unrun-verify | src/app/(dashboard)/discovery/[slug]/[strategyId]/page.tsx |  | 159-03 narrowed getStrategyDetail to the discovery projection; the composite (dqf.composite===true) render branch was never exercised against real composite data — no dev-server spot-check was possible (worktree has no .env; TEST rows have null sparklines). Render one composite strategy on /discovery/<slug>/<id> before ship. | open |  | 2026-08-21T13:37:00.684Z |  |
 | 7 | 159 | unmet-truth | src/lib/queries.ts |  | RANK-02's literal truth ('metrics_json absent from every anon-reachable response') does NOT hold: STRATEGY_V2_ANALYTICS_COLUMNS (anon /strategy/[id]/v2) and getFactsheetDetail (tearsheet) both project metrics_json, and data_quality_flags in v2's case. Both are load-bearing — removing them is a visual regression. Either scope RANK-02 to the splat class (as D-02 words it) or open a follow-up for an RPC/alias-set design. | open |  | 2026-08-21T13:37:00.898Z |  |
 | 8 | 159 | unrun-verify | supabase/tests/test_get_verified_cohort_rank_gate.sql |  | The two GATE assertions (1: occurrence count; 4a/4b: behavioural + anti-vacuity flip) have never run ARMED: TEST receives migration 20260821120000 only after merge, so on this PR the test takes its state-adaptive SKIP path. Mitigation shipped in 4d04d719 — assertions 2a/2b/3 (SECURITY DEFINER, search_path pin, anon-EXECUTE) were moved ABOVE the skip and DO run on this PR — but the gate arms only on the first post-merge sql-tests run. Say 'would have caught', never 'did catch', until that run is green. | open |  | 2026-08-21T14:29:27.024Z |  |
+| 9 | 159 | deviation | analytics-service/services/metrics.py |  | RANK-05 residual SUPPLEMENT (review specialist re-measurement, 2026-08-23): the open compute_qstats_scalars surface PERSISTS wrong values into the same metrics_json the phase guards — measured on the phase's own trigger fixture: ulcer_index=0.9947, common_sense_ratio=0.0, recovery_factor=2.0737, upi=2.9999, serenity_index=0.3204 for a 60-day all-winning series whose max_drawdown correctly reads 0.0. Signature sweep (in-env): recovery_factor, kelly_criterion, common_sense_ratio, cpc_index, r_squared ACCEPT prepare_returns= (kwarg-closable); ulcer_index/upi/serenity_index reach _prepare_prices transitively via to_drawdown_series (need P114 inline mirrors). Also: the region gate is structurally blind to the getattr(qs.stats, attr) dispatch at metrics.py:1815 — the follow-up must teach the scan that shape and add _rolling_alpha_beta (rolling_greeks lacks prepare_returns=False; feeds rendered chart series). Test stubs in the 2026-08-23 review transcript. | open |  | 2026-08-23T12:41:34.945Z |  |
 
 ````json
 [
@@ -120,6 +121,18 @@ last_updated: 2026-08-21T14:29:27.024Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-08-21T14:29:27.024Z",
+    "resolved_at": null
+  },
+  {
+    "id": 9,
+    "kind": "deviation",
+    "phase": "159",
+    "file": "analytics-service/services/metrics.py",
+    "line": null,
+    "description": "RANK-05 residual SUPPLEMENT (review specialist re-measurement, 2026-08-23): the open compute_qstats_scalars surface PERSISTS wrong values into the same metrics_json the phase guards — measured on the phase's own trigger fixture: ulcer_index=0.9947, common_sense_ratio=0.0, recovery_factor=2.0737, upi=2.9999, serenity_index=0.3204 for a 60-day all-winning series whose max_drawdown correctly reads 0.0. Signature sweep (in-env): recovery_factor, kelly_criterion, common_sense_ratio, cpc_index, r_squared ACCEPT prepare_returns= (kwarg-closable); ulcer_index/upi/serenity_index reach _prepare_prices transitively via to_drawdown_series (need P114 inline mirrors). Also: the region gate is structurally blind to the getattr(qs.stats, attr) dispatch at metrics.py:1815 — the follow-up must teach the scan that shape and add _rolling_alpha_beta (rolling_greeks lacks prepare_returns=False; feeds rendered chart series). Test stubs in the 2026-08-23 review transcript.",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-08-23T12:41:34.945Z",
     "resolved_at": null
   }
 ]
