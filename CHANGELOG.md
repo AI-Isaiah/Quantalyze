@@ -1,5 +1,33 @@
 # Changelog
 
+## [0.71.2.0] - 2026-08-24
+
+### chore: Phase 160 Part B closed by measurement on PROD
+
+The `STALE_CLIENT` refusal was code-verified at HEAD but had never been measured on production.
+It has now been, against `https://quantalyze.xyz` after `1cb975c1` deployed: **409**, `code`
+`STALE_CLIENT`, copy naming a reload, and a body that is exactly `{code, error}` with **none** of
+the five ciphertext field names. `Cache-Control: private, no-store`.
+
+Two things beyond the written gate, both passing:
+
+- **Strict-boolean discrimination holds live.** `persist: "true"` — the string, not the boolean —
+  also lands on the refusal. The discriminator is not truthy-coerced on the production path, which
+  is what the unit pins claim and what stops a stale client from talking its way into the writer.
+- **No credential probe is spent on a refused request.** Production logs show the refusal's own
+  server-side signal and no venue call, confirming the gate sits ahead of `validateKey`. That
+  signal existing at all is why this was checkable — it was added in the same review round.
+
+Also confirmed while probing: the gate is not an unauthenticated oracle. Without a session the
+request is `401` at `withAuth`; without an `Origin`/`Referer` header it is `403` at the CSRF guard.
+Both sit ahead of the refusal, so an anonymous caller learns nothing from it.
+
+Phase 160 stays at **31/32**. The remaining item is Part A — the persist arm has still never handled
+a real production connect, and the 2026-08-23 OKX connect does not count: production logs for that
+write show `/strategies/new/wizard` and `/api/strategies/create-with-key` with **zero** hits on
+`/api/keys/validate-and-encrypt`. It went through the wizard, which rides the Phase-156 RPC path.
+Closing it needs a connect through `ApiKeyManager`, `StrategyForm`, or `AllocatorExchangeManager`.
+
 ## [0.71.1.0] - 2026-08-23
 
 ### fix: v1.20 Phase 160 — retire the legacy ciphertext arm on `validate-and-encrypt`

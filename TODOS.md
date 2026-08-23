@@ -629,6 +629,22 @@ scanner-version-vs-config-form behavior** — the pin guard is a proxy for it, n
 The `npm run secret-scan` script booked above would close both: it puts the pinned binary on PATH, so
 the H-0017 arm runs everywhere and local/CI can no longer drift.
 
+### `gstack-version-bump` writes a 3-digit package.json version this repo's own test rejects (raised 2026-08-24)
+
+**Priority:** P4 — caught every time by a committed guard, so it cannot ship silently.
+
+`gstack-version-bump write` writes the npm-valid 3-digit translation (`0.71.2`) into `package.json`,
+but `critical-regressions.test.ts` `[CRITICAL-02]` requires `package.json` to equal `VERSION`
+**exactly** — and this repo's convention is the full 4-digit form (`0.71.2.0`). Every bump through
+the CLI therefore reddens that test until the value is hand-corrected. Surfaced rather than blended
+per Rule 7: the repo's committed, enforced invariant wins over the tool's general convention.
+
+Two follow-ups: pin the repo's 4-digit choice somewhere the tool can read (a `.gstack/` setting if
+one exists), and note that `package-lock.json`'s root version is **stale at `0.70.0.0`** — it has
+been drifting for several releases with nothing enforcing it. `npm ci` tolerates the root-version
+mismatch today, so this is hygiene rather than breakage; left untouched here to keep the diff
+surgical.
+
 ### Two guard gaps on `keys/validate-and-encrypt` (raised 2026-08-23, Phase-160 closeout review)
 
 Both surfaced by the pre-landing review of the `STALE_CLIENT` retirement. Neither is a
