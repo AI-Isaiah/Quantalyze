@@ -12,7 +12,7 @@
  *     graceful 4xx / 5xx / network-error surfacing via the row-scoped
  *     aria-live helper line.
  *   - AWAITED first-run sync inside handleAddKey (INGEST-07 / D-09 / f4):
- *     after the api_keys INSERT succeeds, the client awaits the POST so
+ *     once the server-written row is read back (160-03), the client awaits the POST so
  *     a 403/500 surfaces in the row's helper line — NOT a silent stuck
  *     "Syncing…" pill. On failure, pill reverts to 'idle' and
  *     helper_override is set to "Sync request failed — click Sync now
@@ -550,16 +550,22 @@ export function AllocatorExchangeManager({ initialKeys, hasHoldings }: Props) {
     setFormError(null);
     setFormLoading(true);
     // F6 (phase-119 fold-in): the server validate route normalizes the exchange
-    // (WR-01), but the CLIENT performs the api_keys INSERT directly — a mixed-case
-    // value ("sFOX") passes validation (burning a live probe) then 23514s on the
-    // DB lowercase-only CHECK. Canonicalize once here and reuse for BOTH the
-    // validate-and-encrypt body AND the insert. Credential fields are untouched
-    // (their .trim() chokepoint lives server-side per the v1.11 dogfood fix).
+    // (WR-01), but a mixed-case value ("sFOX") reaching the wire is still worth
+    // preventing at the source. Canonicalize once here.
+    //
+    // 160-03 / RANK-03: this used to feed BOTH the fetch body and a
+    // browser-composed INSERT. The INSERT is gone — the route writes the row
+    // and re-normalizes independently at its own chokepoint — so the sole
+    // consumer is the request body. Credential fields are untouched (their
+    // .trim() chokepoint lives server-side per the v1.11 dogfood fix).
     const exchange = data.exchange.trim().toLowerCase();
     try {
-      // Call the existing validate-and-encrypt endpoint — same path the
-      // strategy-side flow uses. It validates against the exchange via
-      // the analytics service and returns encrypted ciphertext.
+      // Call the validate-and-encrypt endpoint in PERSIST mode — the same arm
+      // the strategy-side flows use since 160-02. It validates against the
+      // exchange via the analytics service and then writes the api_keys row
+      // ITSELF, stamping `exchange` AND `attested_venue` from the single venue
+      // binding it authenticated against. The response carries the row id and
+      // the verdict only: no ciphertext returns to the browser on this path.
       const response = await fetch("/api/keys/validate-and-encrypt", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -568,6 +574,8 @@ export function AllocatorExchangeManager({ initialKeys, hasHoldings }: Props) {
           api_key: data.apiKey,
           api_secret: data.apiSecret,
           passphrase: data.passphrase,
+          persist: true,
+          label: data.label,
         }),
       });
       const result = await response.json();
@@ -577,35 +585,35 @@ export function AllocatorExchangeManager({ initialKeys, hasHoldings }: Props) {
         return;
       }
 
-      // Store the encrypted key row directly. Insert via supabase client
-      // (RLS-scoped to auth.uid()).
-      const {
-        data: { user },
-      } = await supabase.auth.getUser();
-      if (!user) {
-        setFormError("Not authenticated");
+      const newKeyId = result.api_key_id;
+      if (typeof newKeyId !== "string") {
+        // Rule 12 / fail loud. A 2xx carrying no id means the server did not
+        // persist. Rendering an optimistic row here would put a key on screen
+        // that does not exist and can never sync.
+        setFormError("Your key was verified but not saved. Please try again.");
         setFormLoading(false);
         return;
       }
-      const { data: inserted, error: insertErr } = await supabase
+
+      // The optimistic render needs the FULL row, and the persist response is
+      // deliberately minimal, so read the server-written row back by id. The
+      // projection is the migration-027 SELECT allowlist constant — never a
+      // re-typed column list, because a column drifting off the allowlist
+      // fails as a 42501 in production and nowhere else.
+      const { data: inserted, error: refetchErr } = await supabase
         .from("api_keys")
-        .insert({
-          user_id: user.id,
-          exchange,
-          label: data.label,
-          api_key_encrypted: result.api_key_encrypted,
-          api_secret_encrypted: result.api_secret_encrypted,
-          passphrase_encrypted: result.passphrase_encrypted ?? null,
-          dek_encrypted: result.dek_encrypted ?? null,
-          nonce: result.nonce ?? null,
-          is_active: true,
-          kek_version: result.kek_version ?? 1,
-          sync_status: "idle",
-        })
         .select(API_KEY_USER_COLUMNS)
+        .eq("id", newKeyId)
         .single();
-      if (insertErr || !inserted) {
-        setFormError(insertErr?.message ?? "Failed to save key");
+      if (refetchErr || !inserted) {
+        // Curated, and honest about the split outcome: the key IS saved (the
+        // route returned an id), only this view could not load it. The
+        // pre-conversion code piped `insertErr.message` — a raw PostgREST
+        // string carrying SQLSTATE, relation and column names — straight into
+        // the form banner (H-0405 class).
+        setFormError(
+          "Your key was saved, but we couldn't load it here. Refresh the page to see it.",
+        );
         setFormLoading(false);
         return;
       }
