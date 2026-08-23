@@ -587,6 +587,48 @@ added it.
 **Residual:** the local binary is whatever Homebrew last installed. Expose `npm run secret-scan` that
 runs the *pinned* version so local and CI cannot drift again.
 
+### `secret-scan` is red on `workflow_dispatch` runs — full-history scan, no range (raised 2026-08-23, PR #705 review)
+
+**Priority:** P3 — noisy check, not a merge blocker (dispatch runs are not PR checks).
+
+`ci.yml` triggers on `push`, `pull_request` **and `workflow_dispatch`**, and `secret-scan` has no
+`if:` guard. In the pinned action bundle, `Scan()` appends `--log-opts` only for `push` and
+`pull_request`; `workflow_dispatch` falls through to a bare `gitleaks detect` — i.e. **full history**.
+Measured with the now-correct config: **29 findings** across ~20 non-allowlisted paths
+(`src/lib/seam-redaction.test.ts` ×3, `analytics-service/services/job_worker.py`,
+`scripts/backfill_funding.py`, …).
+
+Not a regression from the version pin — the same full scan under 8.24.3 + the array config produced
+**103**, so the pin improved it 103 → 29. But the workflow has dispatch inputs the team actually uses
+(`bake_svg_goldens`, `bake_demo_screenshots`), so a manual dispatch red-lights the check for reasons
+unrelated to the dispatch. Close it by either scoping `secret-scan` with an `if:` that skips
+`workflow_dispatch`, or triaging the 29 full-history findings and allowlisting the genuine fixtures.
+
+⚠️ Note the scope limit this implies: "the allowlist now works" is true for the two **range-scan**
+paths (push, pull_request). The dispatch path scans differently and has never been clean.
+
+### `FORCE_JAVASCRIPT_ACTIONS_TO_NODE24` on `secret-scan` is now a no-op (raised 2026-08-23, PR #705 review)
+
+**Priority:** P4 — dead config, zero behavioral risk.
+
+The env was added when gitleaks-action's latest release was v2.3.9/node20. The step is now pinned to
+v3.0.0, whose `action.yml` declares `using: "node24"`, so the forcing var does nothing. Comment
+corrected in place; the var itself was left alone to avoid moving two variables in the PR that
+changed the scanner pin. Remove it in a standalone change.
+
+### `gitleaks-allowlist.test.ts`'s real-scanner arm is probably skipped in CI (raised 2026-08-23, PR #705 review)
+
+**Priority:** P3 — a coverage claim that may not hold where it matters.
+
+The H-0017 arm (`suppresses a JWT at an allowlisted path…`) is `skipIf`-gated on the `gitleaks` binary
+being on `PATH`. It passes locally only because Homebrew installed 8.30.1; gitleaks is **not** in the
+`ubuntu-latest` runner image, so the arm is almost certainly skipped in CI. Confirm against a CI log.
+
+Combined with the new version-pin test being a YAML-text assertion, **nothing running in CI exercises
+scanner-version-vs-config-form behavior** — the pin guard is a proxy for it, not a measurement of it.
+The `npm run secret-scan` script booked above would close both: it puts the pinned binary on PATH, so
+the H-0017 arm runs everywhere and local/CI can no longer drift.
+
 ### Two guard gaps on `keys/validate-and-encrypt` (raised 2026-08-23, Phase-160 closeout review)
 
 Both surfaced by the pre-landing review of the `STALE_CLIENT` retirement. Neither is a

@@ -1422,9 +1422,14 @@ jobs:
       # to Node 24 on 2026-06-02 and removes Node 20 on 2026-09-16. The action
       # is a thin wrapper that downloads + runs the gitleaks Go binary, so it
       # runs cleanly on Node 24 — opt in now so the secret-scan job verifies it
-      # ahead of the forced switch (and the deprecation warning clears). The
-      # latest gitleaks-action release is still v2.3.9/node20, so there is no
-      # version bump that fixes this. If a future Node bump ever breaks the
+      # ahead of the forced switch (and the deprecation warning clears).
+      # ⚠️ STALE AS OF 2026-08-23: this said "the latest gitleaks-action release
+      # is still v2.3.9/node20, so there is no version bump that fixes this."
+      # That bump exists and has been taken — the step below is pinned to
+      # v3.0.0, whose action.yml declares `using: "node24"`. So this env var is
+      # now a NO-OP. Left in place rather than removed in the same PR that
+      # changed the scanner pin, to keep one variable moving at a time; booked
+      # in TODOS.md for removal. If a future Node bump ever breaks the
       # action's JS bundle, replace it with the gitleaks binary (the pattern
       # #308 used for lychee: a cached+retried release download + a
       # `gitleaks git . --config .gitleaks.toml --log-opts=<base..head>` range

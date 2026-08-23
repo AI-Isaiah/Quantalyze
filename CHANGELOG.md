@@ -92,6 +92,23 @@ integrity rather than exposure.
   reassuring `no leaks found`. An earlier "default ruleset" run of mine was meaningless for exactly
   that reason.
 
+**The review of that fix found a hole in its own guard.** The first version of the version-pin test
+searched the whole of `ci.yml`, so it stayed GREEN under two mutations that both re-break the gate:
+moving the env line to a different job (where the step would not inherit it), and **deleting the
+gitleaks step outright**. A guard that survives deletion of the thing it guards is not a guard. The
+lookup is now scoped to the `gitleaks/gitleaks-action` step's own YAML block, and a missing step is an
+explicit failure with its own message. Re-verified across six mutations: removed, downgraded,
+commented out, moved to another job, and step-deleted all go RED; a legal trailing comment after the
+version stays GREEN. `MIN_ARRAY_FORM_VERSION` was also promoted from assumption to measurement —
+8.25.0 is where gitleaks' `ViperConfig` gained the top-level `Allowlists` field, 8.24.3 is the last
+8.24.x, so the boundary is exact rather than an untested interval.
+
+Two stale comments corrected while in here, both pre-existing: the test docblock said the gate runs
+`gitleaks-action@v2` (it is v3.0.0), and `ci.yml` claimed "there is no version bump that fixes this"
+about Node 24 — that bump exists and was already taken, which makes
+`FORCE_JAVASCRIPT_ACTIONS_TO_NODE24` a no-op. The var itself is left alone and booked, to avoid moving
+two variables in the PR that changed the scanner pin.
+
 ## [0.71.0.0] - 2026-08-23
 
 ### feat: v1.20 Phase 160 — PROVENANCE: the server's venue is the venue that annualizes

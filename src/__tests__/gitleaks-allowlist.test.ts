@@ -25,7 +25,7 @@
  * What this test does NOT cover
  * -----------------------------
  * Whether a real secret slips past gitleaks — that is gitleaks' own
- * responsibility, exercised by the `gitleaks-action@v2` step in CI
+ * responsibility, exercised by the `gitleaks-action@v3.0.0` step in CI
  * (`.github/workflows/ci.yml`). The runtime behavior is verified by
  * the CI itself; this test guards the config that CI reads.
  */
@@ -384,10 +384,49 @@ describe(".gitleaks.toml — real scanner behavior (H-0017)", () => {
  * predates array-form support, while `.gitleaks.toml` still uses that form.
  */
 describe("CI scanner version can read this config's allowlist form", () => {
-  // First gitleaks release that honors top-level `[[allowlists]]`.
-  // 8.24.3 (the action's built-in default) does not.
+  // MEASURED, not assumed. gitleaks' ViperConfig gained the top-level
+  // `Allowlists []*viperGlobalAllowlist` field in 8.25.0; 8.24.3 has only the
+  // singular `Allowlist`, so a top-level `[[allowlists]]` has nothing to bind
+  // to and is dropped without a parse error. Confirmed against both binaries
+  // over this repo's own config, and 8.24.3 is the last 8.24.x release — so
+  // this is the true release boundary, not an untested interval:
+  //   8.24.3 + [[allowlists]] -> leaks found   (allowlist dropped)
+  //   8.25.0 + [[allowlists]] -> no leaks      (allowlist honored)
   const MIN_ARRAY_FORM_VERSION = [8, 25, 0] as const;
   const CI_YML = join(REPO_ROOT, ".github", "workflows", "ci.yml");
+
+  /**
+   * Slice out ONLY the `gitleaks/gitleaks-action` step's own YAML block.
+   *
+   * Scoping matters more than it looks. A whole-file search for the pin stays
+   * GREEN under two mutations that both re-break the gate: moving the env line
+   * to a different job (where the gitleaks step would not inherit it), and
+   * deleting the gitleaks step outright. A guard that survives deletion of the
+   * thing it guards is not a guard. Returns null when the step is absent, which
+   * the assertions below treat as failure.
+   *
+   * Done by indentation rather than a YAML parser deliberately: `yaml` is a
+   * transitive dependency here, not a declared one, and knip gates undeclared
+   * imports in CI.
+   */
+  function gitleaksStepBlock(ci: string): string | null {
+    const lines = ci.split("\n");
+    const start = lines.findIndex((l) =>
+      /^\s*-\s+uses:\s*gitleaks\/gitleaks-action@/.test(l),
+    );
+    if (start === -1) return null;
+    const stepIndent = /^(\s*)/.exec(lines[start])![1].length;
+    const block = [lines[start]];
+    for (let i = start + 1; i < lines.length; i++) {
+      const line = lines[i];
+      if (line.trim() === "") continue;
+      // Dedent to the step's own level or shallower = next step, or out of
+      // this job entirely. Either way the step's block has ended.
+      if (/^(\s*)/.exec(line)![1].length <= stepIndent) break;
+      block.push(line);
+    }
+    return block.join("\n");
+  }
 
   function parseVersion(v: string): [number, number, number] {
     const m = /^(\d+)\.(\d+)\.(\d+)$/.exec(v.trim());
@@ -402,13 +441,12 @@ describe("CI scanner version can read this config's allowlist form", () => {
     return true;
   }
 
-  it("pins GITLEAKS_VERSION whenever .gitleaks.toml uses the [[allowlists]] array form", () => {
+  it("pins GITLEAKS_VERSION on the gitleaks step whenever .gitleaks.toml uses [[allowlists]]", () => {
     const toml = readFileSync(GITLEAKS_TOML, "utf8");
     const usesArrayForm = /^\s*\[\[allowlists\]\]/m.test(toml);
 
-    // Guard the guard: if the config is ever migrated to the singular
-    // [allowlist] form this test must stop asserting the pin rather than
-    // pass vacuously, so pin the premise explicitly.
+    // Pin the premise. If the config is ever migrated to the singular
+    // [allowlist] form this test must be UPDATED, not silently pass vacuously.
     expect(
       usesArrayForm,
       "Expected .gitleaks.toml to use [[allowlists]]. If it was migrated to " +
@@ -416,22 +454,35 @@ describe("CI scanner version can read this config's allowlist form", () => {
     ).toBe(true);
 
     expect(existsSync(CI_YML), `${CI_YML} must exist`).toBe(true);
-    const ci = readFileSync(CI_YML, "utf8");
+    const block = gitleaksStepBlock(readFileSync(CI_YML, "utf8"));
 
-    const pin = /^\s*GITLEAKS_VERSION:\s*["']?([0-9]+\.[0-9]+\.[0-9]+)["']?\s*$/m.exec(ci);
+    expect(
+      block,
+      "No `uses: gitleaks/gitleaks-action@...` step found in ci.yml. If the " +
+        "secret-scan gate was intentionally removed, delete this test with it; " +
+        "otherwise the gate is gone and nothing is scanning for secrets.",
+    ).not.toBeNull();
+
+    // Trailing comments after the value are legal YAML and must not read as
+    // "no pin found" — that would send the next reader after a phantom deletion.
+    const pin = /^\s*GITLEAKS_VERSION:\s*["']?([0-9]+\.[0-9]+\.[0-9]+)["']?\s*(?:#.*)?$/m.exec(
+      block!,
+    );
     expect(
       pin,
-      "ci.yml does not pin GITLEAKS_VERSION. gitleaks-action defaults to " +
-        "8.24.3, which SILENTLY ignores [[allowlists]] — every allowlist " +
-        "entry in .gitleaks.toml would stop working with no error. See PR #705.",
+      "The gitleaks step does not pin GITLEAKS_VERSION. gitleaks-action " +
+        "defaults to 8.24.3, which SILENTLY ignores [[allowlists]] — every " +
+        "allowlist entry in .gitleaks.toml would stop working, with no error. " +
+        "A pin elsewhere in ci.yml does NOT count: the step only inherits env " +
+        "from its own job. See PR #705.",
     ).not.toBeNull();
 
     const pinned = parseVersion(pin![1]);
     expect(
       gte(pinned, MIN_ARRAY_FORM_VERSION),
-      `ci.yml pins gitleaks ${pin![1]}, which predates ${MIN_ARRAY_FORM_VERSION.join(".")} ` +
+      `The gitleaks step pins ${pin![1]}, which predates ${MIN_ARRAY_FORM_VERSION.join(".")} ` +
         "— the first release honoring top-level [[allowlists]]. The allowlist " +
-        "would be silently dropped.",
+        "would be silently dropped and the gate would scan on default rules.",
     ).toBe(true);
   });
 });
