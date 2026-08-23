@@ -270,5 +270,58 @@ proves nothing, and the population it was protecting is money-math annualization
 
 ---
 
+## Pre-REVOKE re-measure addendum (plan 160-05 Task 1)
+
+**Measured:** 2026-08-23 17:59 UTC, read-only against PROD `khslejtfbuezsmvmtsdn`.
+**Purpose:** the same-day re-measure the PR-2 migration's guard constants are cut from, taken
+AFTER PR-1 deployed and soaked — so the one-way door is guarded by a number that describes
+the database at the moment it is opened, not one from before the writer existed.
+
+### Deploy provenance (the soak this addendum closes)
+
+| Fact | Value |
+| --- | --- |
+| PR-1 | #703, merged as `1911a5d5` (v0.71.0.0) |
+| Vercel deployment | `dpl_2TjqCXPdM4B85fn4wUHZLC9PxP52`, target `production`, state `READY` |
+| Aliases held | `quantalyze.xyz`, `quantalyze-rho.vercel.app` (+ project/branch aliases), `aliasError: null` |
+| Deploy ready at | 2026-08-23 **17:12:02 UTC** |
+| Soak elapsed before this measurement | **47 minutes** |
+
+Alias binding was read from the Vercel deployment API, not inferred from "newest production
+deployment"; the live domain was independently confirmed serving HTTP 200.
+
+### Re-measured population
+
+| Measure | Value | vs original census |
+| --- | --- | --- |
+| Total `api_keys` rows | 31 | unchanged (`c_pin_total` = 31) |
+| **Un-attested, created before the 2026-08-23 cutoff — the ENFORCED pin** | **0** | unchanged (`c_pin_unattested` = 0) |
+| Un-attested in the soak window (REPORTED, never enforced) | 0 | — |
+| Rows created since the deploy went live | 0 | — |
+| PROD signature rows (mt5 on the three pinned dates) | 4 | unchanged (`c_pin_dates`) |
+| Rows satisfying `attested_venue = exchange` | 31 / 31 | unchanged |
+| Newest row | 2026-08-21 | unchanged |
+
+### Decision
+
+> **No re-cut required.** Every guard constant in
+> `supabase/migrations/20260823120000_revoke_api_keys_insert.sql` — `c_pin_unattested = 0`,
+> `c_pin_total = 31`, `c_pin_dates` — still matches PROD exactly. The strict (PROD-signature)
+> branch will engage on apply, and the enforced comparison will pass on the measured value
+> rather than on a softened one.
+
+### ⚠️ Honest limit of this soak
+
+Zero keys were connected on PROD during the soak window, so the window produced **no positive
+evidence that the persist arm works in production** — it produced only the absence of
+un-attested inflow. Those are different claims, and the weaker one is what was actually
+measured. The stale-tab risk this soak targets is correspondingly low (PROD took 2 new keys in
+the preceding 12 days), and the migration's own guards do not depend on this window: the
+enforced pin is bounded to the pre-cutoff population precisely so soak-window rows cannot
+abort it. Recorded here rather than presented as a successful exercise of the new writer.
+
+---
+
 *Phase: 160-provenance-the-server-s-venue-is-the-venue-that-annualizes*
 *Plan: 160-01 (scaffold Task 1; PROD results Task 2 — orchestrator-executed, Supabase MCP is stripped from subagents)*
+*Addendum: plan 160-05 Task 1 (pre-REVOKE re-measure, post-soak)*
