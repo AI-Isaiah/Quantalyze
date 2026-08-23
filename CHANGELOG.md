@@ -1,5 +1,55 @@
 # Changelog
 
+## [0.71.0.0] - 2026-08-23
+
+### feat: v1.20 Phase 160 — PROVENANCE: the server's venue is the venue that annualizes
+
+The venue a strategy is annualized on was client-supplied. A key owner could hand the
+browser's own INSERT a venue the server never validated, and that label fed the √365/√252
+`asset_class` stamp — the Sharpe denominator. This phase makes the server the only writer
+and the attestation the only input, landed as **two PRs** so the replacement writer is live
+before the old door closes.
+
+**PR-1 (this version) — the writer and the stamp**
+
+- RANK-03 — `validate-and-encrypt` gains a persist arm: `persist: true` (strict boolean)
+  writes the `api_keys` row server-side, stamping BOTH `exchange` and `attested_venue` from
+  the single `exchangeNormalized` binding the route already validated, and returns
+  `{ api_key_id }` with **no ciphertext** — key material stops round-tripping through the
+  browser on the new path. All THREE client INSERT sites converted: `ApiKeyManager`,
+  `StrategyForm`, and `AllocatorExchangeManager` (the third was found during research and
+  is not in the original scope note; leaving it would have killed the allocator connect
+  flow at the REVOKE).
+- RANK-04 — the `finalize-wizard` `asset_class` stamp derives from the ATTESTED venue. The
+  guard extension and the stamp swap land in ONE change: `skipAssetClassWrite` keys on
+  `attestedVenue === null`, so a NULL attestation **SKIPS**. Landing the swap alone would
+  have stamped `traditional`/√252 onto crypto strategies through the
+  `isCryptoExchange(null) === false` trap — the exact defect the phase exists to prevent.
+- B-M1 PROD census committed as an early, gating artifact: **0** un-attested `api_keys` rows
+  (31 rows, all satisfying `attested_venue = exchange`), so **0** golden-parity candidates.
+  The zero is measured, not vacuous — an anti-vacuity control pins the population it was
+  measured against. Consequence: plan 160-06 is a recorded no-op.
+
+**PR-2 — withdrawing the grant**
+
+- `REVOKE INSERT ON public.api_keys FROM anon, authenticated` (migration
+  `20260823120000`, auto-applies on merge). One verb: `DELETE` stays a live browser path
+  (disconnect-a-key), and RLS, the scrub trigger and the coupling CHECK are untouched.
+  Guarded by a census re-run pinned to the **pre-cutoff** population, so a stale tab's
+  client INSERT during the soak window is reported rather than aborting a security fix.
+  Discriminator requires positive evidence on both sides — an unidentified database aborts
+  rather than guessing.
+- Assertion 5c of `test_api_keys_exchange_not_user_writable.sql` flips polarity on the same
+  marker, in the same commit: it previously RAISED when a client INSERT was refused, so it
+  would have hard-failed `sql-tests` on main the moment INSERT was withdrawn.
+
+**Known follow-ups (booked, not fixed)** — the `GRANT ALL` residue on `api_keys`
+(TRUNCATE/REFERENCES/TRIGGER, plus `anon` DELETE; a bare TRUNCATE actually fails on the
+table's foreign keys, so sizing it means measuring the cascaded tables' grants), and the
+architecture decision that `api_keys` writes have now left the RLS-enforced plane entirely
+— today's sole writer is correctly gated, but no database-level backstop constrains a
+future admin-client route. Both in `TODOS.md`.
+
 ## [0.70.0.0] - 2026-08-23
 
 ### feat: v1.20 Phase 159 — RANK: public-ranking integrity
