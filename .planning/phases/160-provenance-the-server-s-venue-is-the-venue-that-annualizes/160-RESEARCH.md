@@ -421,14 +421,15 @@ COMMIT;
 | A3 | The B-M1 populations are small (PROD had 29 api_keys rows total on 2026-08-11 per the pinned census) | Census | If large, the golden-parity task grows; does not change the mechanism |
 | A4 | `strategy_keys` linkage uses column `api_key_id` keyed by `owner_id` (observed in `queries.ts:619` projection) — census Q1 composite arm depends on it | Census SQL | Q1's `linked_composite` filter errors loudly (column not found) — self-correcting at census execution |
 
-## Open Questions
+## Open Questions (RESOLVED)
 
 1. **Writer mechanism: direct admin insert vs new SECDEF RPC (B-1).**
+   - **RESOLVED:** direct admin insert — `160-02-PLAN.md` (PR-1 stays migration-free; A1 SQL gate in `160-03-PLAN.md` is the CI-enforced compensator).
    - What we know: both satisfy the locked "Phase-156 service-role-writer pattern"; trigger + CHECK police both identically; the RPC costs a migration in PR-1 and ACL hygiene.
    - Recommendation: direct admin insert (PR-1 stays migration-free), with the A1 SQL gate as compensator. Planner decides; either is compliant.
-2. **Response/skew contract details** (exact request discriminator name, whether the persist arm returns the API_KEY_USER_COLUMNS row or the components re-fetch by id — Allocator needs the row for UI; the SELECT allowlist covers `API_KEY_USER_COLUMNS = "id, user_id, exchange, label, is_active, sync_status, last_sync_at, account_balance_usdt, created_at, sync_error, last_429_at, disconnected_at"` `[VERIFIED: src/lib/constants.ts:170-171]`, so a re-fetch works).
-3. **Whether the census finds ANY affected strategy.** If zero, the golden-parity task is a recorded no-op; if non-zero, the plan needs a re-annualization task (recompute trigger + before/after metric snapshot with each delta explained ≈ ×1.203 on RISK metrics only).
-4. **`label` handling in the persist arm** — clients currently supply it at INSERT (StrategyForm defaults to `` `${exchangeCanonical} key` ``); the route body must accept it (length-capped, since it becomes server-written). `sync_status` needs no handling: `ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS sync_status TEXT DEFAULT 'idle'` `[VERIFIED: supabase/migrations/20260406065011_security_hardening.sql:65]`.
+2. **RESOLVED** (`160-02-PLAN.md` persist arm + `160-03-PLAN.md` Task 2: Allocator re-fetches the row by id via `API_KEY_USER_COLUMNS`). **Response/skew contract details** (exact request discriminator name, whether the persist arm returns the API_KEY_USER_COLUMNS row or the components re-fetch by id — Allocator needs the row for UI; the SELECT allowlist covers `API_KEY_USER_COLUMNS = "id, user_id, exchange, label, is_active, sync_status, last_sync_at, account_balance_usdt, created_at, sync_error, last_429_at, disconnected_at"` `[VERIFIED: src/lib/constants.ts:170-171]`, so a re-fetch works).
+3. **RESOLVED** (`160-06-PLAN.md` handles both branches mechanically off census Q2; a zero result is a recorded no-op artifact). **Whether the census finds ANY affected strategy.** If zero, the golden-parity task is a recorded no-op; if non-zero, the plan needs a re-annualization task (recompute trigger + before/after metric snapshot with each delta explained ≈ ×1.203 on RISK metrics only).
+4. **RESOLVED** (`160-02-PLAN.md`: route accepts `label`, trimmed and 120-char capped, with the server default). **`label` handling in the persist arm** — clients currently supply it at INSERT (StrategyForm defaults to `` `${exchangeCanonical} key` ``); the route body must accept it (length-capped, since it becomes server-written). `sync_status` needs no handling: `ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS sync_status TEXT DEFAULT 'idle'` `[VERIFIED: supabase/migrations/20260406065011_security_hardening.sql:65]`.
 
 ## Environment Availability
 
