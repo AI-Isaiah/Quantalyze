@@ -15,7 +15,8 @@ import { captureToSentry } from "@/lib/sentry-capture";
 import { scrubSeamError } from "@/lib/seam-redaction";
 import { withAuth } from "@/lib/api/withAuth";
 // 160-02 / RANK-03 — the service-role writer for the persist arm. Same factory
-// the sibling connect routes use (`create-with-key/route.ts:28`); it THROWS when
+// the sibling connect routes use (the `createAdminClient` import in
+// `create-with-key/route.ts`); it THROWS when
 // SUPABASE_SERVICE_ROLE_KEY is absent, which the persist arm answers honestly.
 import { createAdminClient } from "@/lib/supabase/admin";
 import { NO_STORE_HEADERS } from "@/lib/api/headers";
@@ -48,7 +49,8 @@ export const maxDuration = 300;
  * bounded by nothing this codebase controlled. In persist mode it becomes
  * SERVER-written text rendered back into the key list, so it gets an explicit
  * length bound (ASVS V5). 120 is one notch above the sibling connect route's
- * 100-char rejection threshold (`create-with-key/route.ts:495`) because this
+ * 100-char `KEY_INPUT_TOO_LONG` label rejection in `create-with-key/route.ts`
+ * because this
  * arm TRUNCATES rather than rejects — see the persist arm for why a cosmetic
  * string must not fail an already-validated connect.
  */
@@ -416,7 +418,8 @@ async function legacyValidateAndEncryptHandler(args: {
     // cap is deliberate — a cosmetic display string must never fail a connect
     // whose credentials already validated against the live venue. An absent or
     // whitespace-only label falls back to the same server default the sibling
-    // connect route uses (`create-with-key/route.ts:582-585`).
+    // connect route uses (its own `labelOrDefault` binding in
+    // `create-with-key/route.ts`).
     const labelTrimmed = typeof label === "string" ? label.trim() : "";
     const labelOrDefault =
       labelTrimmed.length > 0
@@ -427,7 +430,8 @@ async function legacyValidateAndEncryptHandler(args: {
     // Caught HERE rather than left to the terminal arm below, which would
     // answer "Key validation failed" — a sentence that blames the user's key
     // for our own missing credential. Same posture and code as the sibling
-    // connect route (`create-with-key/route.ts:818-823`).
+    // connect route (its `SEAM_MISCONFIGURED` 503 arm in
+    // `create-with-key/route.ts`).
     let admin: ReturnType<typeof createAdminClient>;
     try {
       admin = createAdminClient();
@@ -456,7 +460,9 @@ async function legacyValidateAndEncryptHandler(args: {
     // ApiKeyManager performed unaudited until 160-02, so moving the writer
     // server-side neither adds nor removes a forensic obligation. The
     // api_key.* connect taxonomy is the ADR-0023 follow-up tracked with the
-    // sibling wizard path (`create-with-key/route.ts:830`), not this phase.
+    // sibling wizard path (the `@audit-skip: wizard draft` pragma on the
+    // `create_wizard_strategy` call in `create-with-key/route.ts`), not this
+    // phase.
     const { data: inserted, error: insertError } = await admin
       .from("api_keys")
       .insert({
