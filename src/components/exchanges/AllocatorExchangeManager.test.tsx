@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { render, screen, act, fireEvent, waitFor } from "@testing-library/react";
 import { AllocatorExchangeManager } from "./AllocatorExchangeManager";
+import { API_KEY_USER_COLUMNS } from "@/lib/constants";
 
 /**
  * Phase 06 Plan 04 Task 2 — AllocatorExchangeManager extension tests.
@@ -41,14 +42,28 @@ vi.mock("next/navigation", () => ({
   }),
 }));
 
-// Supabase client mock. Tests override `insertMock` to simulate success vs.
-// error on the `api_keys` table insert. `.select(...).single()` returns the
-// inserted row by default. `rpcMock` + `holdingsCountMock` support the
-// Phase 08 Disconnect flow (allocator_holdings count probe + RPC call).
+// Supabase client mock. `rpcMock` + `holdingsCountMock` support the Phase 08
+// Disconnect flow (allocator_holdings count probe + RPC call).
+//
+// 160-03 / RANK-03: `insertMock` no longer backs any production path — the
+// api_keys row is written SERVER-side by /api/keys/validate-and-encrypt in
+// persist mode. The insert branch is deliberately KEPT so a reintroduced
+// browser insert is OBSERVABLE (a recorded call) rather than masked by an
+// "unexpected from()" throw a future reader could mistake for a mock gap.
+// Specs assert `insertMock` was never called.
+//
+// `apiKeysRefetchMock` backs the replacement: the component re-reads the
+// server-written row by id through the migration-027 SELECT allowlist, which
+// is what feeds the optimistic render.
 const insertMock = vi.fn();
 const getUserMock = vi.fn();
 const rpcMock = vi.fn();
 const holdingsCountMock = vi.fn();
+const apiKeysRefetchMock = vi.fn();
+// Records the projection + filter the api_keys re-fetch actually used, so the
+// spec can pin BOTH (a projection drifting off the allowlist silently 42501s
+// in production; a missing/wrong filter would hand back another tenant's row).
+let apiKeysRefetchCall: { cols: string; col: string; val: string } | null = null;
 
 vi.mock("@/lib/supabase/client", () => ({
   createClient: () => ({
@@ -56,7 +71,7 @@ vi.mock("@/lib/supabase/client", () => ({
       getUser: () => getUserMock(),
     },
     rpc: (name: string, args: unknown) => rpcMock(name, args),
-    from: (_table: string) => ({
+    from: (table: string) => ({
       insert: (row: unknown) => {
         const result = insertMock(row);
         return {
@@ -68,15 +83,33 @@ vi.mock("@/lib/supabase/client", () => ({
           }),
         };
       },
-      // Phase 08 Plan 02 Task 1 — allocator_holdings count probe used by
-      // openDeleteConfirm. Shape matches the call:
-      //   .from("allocator_holdings").select("*", {count:"exact", head:true}).eq("api_key_id", keyId)
-      select: (_cols: string, _opts?: unknown) => ({
-        eq: (_col: string, _val: string) =>
-          Promise.resolve(
-            holdingsCountMock() ?? { count: 0, error: null },
-          ),
-      }),
+      select: (cols: string, _opts?: unknown) => {
+        // 160-03: the api_keys re-fetch —
+        //   .from("api_keys").select(API_KEY_USER_COLUMNS).eq("id", id).single()
+        if (table === "api_keys") {
+          return {
+            eq: (col: string, val: string) => {
+              apiKeysRefetchCall = { cols, col, val };
+              return {
+                single: () =>
+                  Promise.resolve(
+                    apiKeysRefetchMock() ?? {
+                      data: null,
+                      error: { message: "no apiKeysRefetchMock" },
+                    },
+                  ),
+              };
+            },
+          };
+        }
+        // Phase 08 Plan 02 Task 1 — allocator_holdings count probe used by
+        // openDeleteConfirm. Shape matches the call:
+        //   .from("allocator_holdings").select("*", {count:"exact", head:true}).eq("api_key_id", keyId)
+        return {
+          eq: (_col: string, _val: string) =>
+            Promise.resolve(holdingsCountMock() ?? { count: 0, error: null }),
+        };
+      },
     }),
   }),
 }));
@@ -350,6 +383,8 @@ describe("AllocatorExchangeManager — handleAddKey first-run awaited sync (f4)"
     routerRefreshMock.mockReset();
     insertMock.mockReset();
     getUserMock.mockReset();
+    apiKeysRefetchMock.mockReset();
+    apiKeysRefetchCall = null;
     fetchMock = vi.fn();
     vi.stubGlobal("fetch", fetchMock);
 
@@ -386,19 +421,17 @@ describe("AllocatorExchangeManager — handleAddKey first-run awaited sync (f4)"
   }
 
   it("handleAddKey awaits POST and on 200 success leaves new row at sync_status='syncing' with no error helper", async () => {
-    // First fetch: validate-and-encrypt → 200. Second fetch: first-run sync → 200.
+    // First fetch: validate-and-encrypt in persist mode → 200 { api_key_id }.
+    // Second fetch: first-run sync → 200.
     fetchMock.mockImplementation((url: string) => {
       if (url === "/api/keys/validate-and-encrypt") {
         return Promise.resolve({
           ok: true,
           status: 200,
           json: async () => ({
-            api_key_encrypted: "enc",
-            api_secret_encrypted: "sec",
-            passphrase_encrypted: null,
-            dek_encrypted: "dek",
-            nonce: "nonce",
-            kek_version: 1,
+            api_key_id: "new-key",
+            valid: true,
+            read_only: true,
           }),
         });
       }
@@ -411,7 +444,7 @@ describe("AllocatorExchangeManager — handleAddKey first-run awaited sync (f4)"
       }
       throw new Error(`unexpected fetch ${url}`);
     });
-    insertMock.mockReturnValue({
+    apiKeysRefetchMock.mockReturnValue({
       data: makeKey({ id: "new-key", sync_status: "idle" }),
       error: null,
     });
@@ -432,19 +465,17 @@ describe("AllocatorExchangeManager — handleAddKey first-run awaited sync (f4)"
   });
 
   it("handleAddKey_shows_error_when_first_run_sync_fails_with_403", async () => {
-    // First fetch: validate-and-encrypt → 200. Second fetch: first-run sync → 403.
+    // First fetch: validate-and-encrypt in persist mode → 200 { api_key_id }.
+    // Second fetch: first-run sync → 403.
     fetchMock.mockImplementation((url: string) => {
       if (url === "/api/keys/validate-and-encrypt") {
         return Promise.resolve({
           ok: true,
           status: 200,
           json: async () => ({
-            api_key_encrypted: "enc",
-            api_secret_encrypted: "sec",
-            passphrase_encrypted: null,
-            dek_encrypted: "dek",
-            nonce: "nonce",
-            kek_version: 1,
+            api_key_id: "new-key-403",
+            valid: true,
+            read_only: true,
           }),
         });
       }
@@ -459,7 +490,7 @@ describe("AllocatorExchangeManager — handleAddKey first-run awaited sync (f4)"
       }
       throw new Error(`unexpected fetch ${url}`);
     });
-    insertMock.mockReturnValue({
+    apiKeysRefetchMock.mockReturnValue({
       data: makeKey({ id: "new-key-403", sync_status: "idle" }),
       error: null,
     });
@@ -484,138 +515,23 @@ describe("AllocatorExchangeManager — handleAddKey first-run awaited sync (f4)"
     ).toContain("Sync request failed");
   });
 
-  // M-0407 (audit-2026-05-07) — handleAddKey inserts the encryption-critical
-  // fields with `?? `-fallbacks: dek_encrypted/nonce ?? null, kek_version ?? 1.
-  // The existing two handleAddKey tests above only assert downstream UI (pill /
-  // helper text) and happen to mock kek_version:1 — IDENTICAL to the fallback
-  // default — so the source could drop `result.kek_version` entirely and both
-  // still pass (non-discriminating coverage of an at-rest-credential field:
-  // a wrong KEK version = decrypt failure / encrypt under the wrong key). These
-  // three tests assert the row sent to .insert() carries the validate-and-encrypt
-  // RESULT values and exercises each fallback branch, including the nullish-vs-
-  // falsy `?? 1` (kek_version 0 is a valid version that must survive).
-  it("propagates the validate-and-encrypt ciphertext + kek_version into the api_keys insert (M-0407)", async () => {
-    fetchMock.mockImplementation((url: string) => {
-      if (url === "/api/keys/validate-and-encrypt") {
-        return Promise.resolve({
-          ok: true,
-          status: 200,
-          json: async () => ({
-            api_key_encrypted: "CT_KEY",
-            api_secret_encrypted: "CT_SEC",
-            passphrase_encrypted: "CT_PASS",
-            dek_encrypted: "DEK_3",
-            nonce: "N_3",
-            kek_version: 3,
-          }),
-        });
-      }
-      if (url === "/api/allocator/holdings/sync") {
-        return Promise.resolve({
-          ok: true,
-          status: 200,
-          json: async () => ({ ok: true, job_id: "job-1" }),
-        });
-      }
-      throw new Error(`unexpected fetch ${url}`);
-    });
-    insertMock.mockReturnValue({ data: makeKey({ id: "new-key" }), error: null });
-
-    render(<AllocatorExchangeManager hasHoldings={true} initialKeys={[]} />);
-    await submitAddKeyForm();
-
-    await waitFor(() => expect(insertMock).toHaveBeenCalledTimes(1));
-    // Neuter: `kek_version: result.kek_version ?? 1` -> `kek_version: 1` fails
-    // this (expects 3) while the two existing handleAddKey tests still pass.
-    expect(insertMock).toHaveBeenCalledWith(
-      expect.objectContaining({
-        user_id: "user-a",
-        api_key_encrypted: "CT_KEY",
-        api_secret_encrypted: "CT_SEC",
-        passphrase_encrypted: "CT_PASS",
-        dek_encrypted: "DEK_3",
-        nonce: "N_3",
-        kek_version: 3,
-      }),
-    );
-  });
-
-  it("applies the ?? fallbacks when validate-and-encrypt omits kek_version/dek_encrypted/nonce (M-0407)", async () => {
-    fetchMock.mockImplementation((url: string) => {
-      if (url === "/api/keys/validate-and-encrypt") {
-        return Promise.resolve({
-          ok: true,
-          status: 200,
-          // Partial server response: only the two required ciphertexts.
-          json: async () => ({
-            api_key_encrypted: "CT",
-            api_secret_encrypted: "CT2",
-          }),
-        });
-      }
-      if (url === "/api/allocator/holdings/sync") {
-        return Promise.resolve({
-          ok: true,
-          status: 200,
-          json: async () => ({ ok: true, job_id: "job-1" }),
-        });
-      }
-      throw new Error(`unexpected fetch ${url}`);
-    });
-    insertMock.mockReturnValue({ data: makeKey({ id: "new-key-2" }), error: null });
-
-    render(<AllocatorExchangeManager hasHoldings={true} initialKeys={[]} />);
-    await submitAddKeyForm();
-
-    await waitFor(() => expect(insertMock).toHaveBeenCalledTimes(1));
-    // Neuter: `result.dek_encrypted ?? null` -> `result.dek_encrypted` fails
-    // this (null vs undefined); same for nonce/passphrase_encrypted/kek_version.
-    expect(insertMock).toHaveBeenCalledWith(
-      expect.objectContaining({
-        kek_version: 1,
-        dek_encrypted: null,
-        nonce: null,
-        passphrase_encrypted: null,
-      }),
-    );
-  });
-
-  it("preserves kek_version:0 from validate-and-encrypt (nullish ?? 1, not falsy || 1) (M-0407)", async () => {
-    fetchMock.mockImplementation((url: string) => {
-      if (url === "/api/keys/validate-and-encrypt") {
-        return Promise.resolve({
-          ok: true,
-          status: 200,
-          json: async () => ({
-            api_key_encrypted: "CT",
-            api_secret_encrypted: "CT2",
-            dek_encrypted: "d",
-            nonce: "n",
-            kek_version: 0,
-          }),
-        });
-      }
-      if (url === "/api/allocator/holdings/sync") {
-        return Promise.resolve({
-          ok: true,
-          status: 200,
-          json: async () => ({ ok: true, job_id: "job-1" }),
-        });
-      }
-      throw new Error(`unexpected fetch ${url}`);
-    });
-    insertMock.mockReturnValue({ data: makeKey({ id: "new-key-3" }), error: null });
-
-    render(<AllocatorExchangeManager hasHoldings={true} initialKeys={[]} />);
-    await submitAddKeyForm();
-
-    await waitFor(() => expect(insertMock).toHaveBeenCalledTimes(1));
-    // The discriminating case: kek_version 0 is a VALID version that must
-    // survive. Neuter: `?? 1` -> `|| 1` corrupts 0 to 1 (re-encrypt under the
-    // wrong KEK) and fails this assertion.
-    const row = insertMock.mock.calls[0][0] as { kek_version: number };
-    expect(row.kek_version).toBe(0);
-  });
+  // 160-03 / RANK-03 — the three M-0407 (audit-2026-05-07) specs that lived
+  // here are RETIRED. They asserted that handleAddKey's own INSERT carried the
+  // validate-and-encrypt ciphertext and exercised its `?? `-fallback branches
+  // (`dek_encrypted ?? null`, the nullish-vs-falsy `kek_version ?? 1` that
+  // preserved a valid version 0). Every one of those expressions was DELETED
+  // with the browser insert: the route now spreads its own `encrypted` object
+  // into the row it writes, so there is no client-side fallback left to get
+  // wrong, and the ciphertext never reaches the browser to be mishandled.
+  //
+  // Where the surviving obligation is pinned — "the ciphertext the route
+  // encrypted reaches the ROW": `route.test.ts` (160-02) asserts
+  // `row.api_key_encrypted` and `row.dek_encrypted` on the captured INSERT.
+  // ⚠️ HONEST DELTA: `kek_version` is NOT individually asserted on that row.
+  // It arrives by the same single `...encrypted` spread as the two fields that
+  // ARE asserted — there is no per-field expression that could single it out —
+  // so it is covered structurally rather than by name. Recorded in
+  // 160-03-SUMMARY.md rather than silently dropped.
 });
 
 describe("AllocatorExchangeManager — 5s polling (D-11)", () => {
@@ -1546,28 +1462,32 @@ describe("AllocatorExchangeManager — DOGFOOD-2 subtitle gated on holdings", ()
   });
 });
 
-// F6 (phase-119 fold-in) — the CLIENT composes the api_keys INSERT directly, so a
-// mixed-case exchange ("sFOX") passes the server validate route (burning a live
-// probe) then 23514s on the DB lowercase-only CHECK. handleAddKey must
-// canonicalize to lowercase and use that value for BOTH the validate-and-encrypt
-// fetch body AND the insert. These tests drive the REAL handleAddKey (via the
-// captured onSubmit) with the mixed-case vector and assert the wiring at the call
-// site — a helper-only test would not prove the insert receives the canonical
-// value. Neuter `data.exchange.trim().toLowerCase()` back to `data.exchange` and
-// the sFOX case fails on both the fetch body and the insert payload.
-describe("AllocatorExchangeManager — F6 canonical-lowercase exchange at the add-key insert", () => {
+// F6 (phase-119 fold-in) — a mixed-case exchange ("sFOX") used to pass the
+// server validate route (burning a live probe) and then 23514 on the DB
+// lowercase-only CHECK when the CLIENT composed the INSERT. handleAddKey must
+// canonicalize to lowercase before the value leaves the browser.
+//
+// 160-03: the insert half of this assertion is gone with the insert. The
+// canonical value's SOLE consumer is now the validate-and-encrypt request body,
+// which is exactly what these tests pin — and the route re-normalizes
+// independently at its own chokepoint, so the DB CHECK is defended twice.
+// Neuter `data.exchange.trim().toLowerCase()` back to `data.exchange` and the
+// sFOX case fails on the fetch body.
+describe("AllocatorExchangeManager — F6 canonical-lowercase exchange in the add-key request", () => {
   let fetchMock: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
     routerRefreshMock.mockReset();
     insertMock.mockReset();
     getUserMock.mockReset();
+    apiKeysRefetchMock.mockReset();
+    apiKeysRefetchCall = null;
     capturedAddKeyOnSubmit = null;
     getUserMock.mockResolvedValue({
       data: { user: { id: "user-a" } },
       error: null,
     });
-    insertMock.mockReturnValue({
+    apiKeysRefetchMock.mockReturnValue({
       data: makeKey({ id: "new-key", sync_status: "idle" }),
       error: null,
     });
@@ -1577,12 +1497,9 @@ describe("AllocatorExchangeManager — F6 canonical-lowercase exchange at the ad
           ok: true,
           status: 200,
           json: async () => ({
-            api_key_encrypted: "enc",
-            api_secret_encrypted: "sec",
-            passphrase_encrypted: null,
-            dek_encrypted: "dek",
-            nonce: "nonce",
-            kek_version: 1,
+            api_key_id: "new-key",
+            valid: true,
+            read_only: true,
           }),
         });
       }
@@ -1629,25 +1546,216 @@ describe("AllocatorExchangeManager — F6 canonical-lowercase exchange at the ad
     });
   }
 
-  it("canonicalizes a mixed-case 'sFOX' to 'sfox' in BOTH the validate body and the insert", async () => {
+  it("canonicalizes a mixed-case 'sFOX' to 'sfox' in the validate-and-encrypt body", async () => {
     await openFormAndSubmit("sFOX");
 
-    // (a) validate-and-encrypt fetch body carries the canonical lowercase value.
+    // The validate-and-encrypt fetch body carries the canonical lowercase
+    // value — the ONLY place this value now flows, and the string the route
+    // stamps into BOTH `exchange` and `attested_venue`.
     expect(validateBody().exchange).toBe("sfox");
-    // (b) the api_keys insert payload carries the canonical lowercase value —
-    // the row that hits the DB lowercase-only CHECK.
-    expect(insertMock).toHaveBeenCalledWith(
-      expect.objectContaining({ exchange: "sfox" }),
-    );
+    // And no browser-composed row exists to carry a display casing to the DB.
+    expect(insertMock).not.toHaveBeenCalled();
   });
 
   it("leaves an already-lowercase 'binance' byte-identical (no regression)", async () => {
     await openFormAndSubmit("binance");
 
     expect(validateBody().exchange).toBe("binance");
-    expect(insertMock).toHaveBeenCalledWith(
-      expect.objectContaining({ exchange: "binance" }),
+    expect(insertMock).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * 160-03 / RANK-03 — AllocatorExchangeManager is the THIRD browser api_keys
+ * INSERT site. 160-CONTEXT.md listed only two; RESEARCH found this one at
+ * :591. That matters concretely: plan 160-05 REVOKEs the `authenticated`
+ * INSERT grant, so an unconverted site here would not degrade — the allocator
+ * connect flow would simply DIE with a 42501 at that merge.
+ *
+ * The conversion is not a like-for-like swap. The old insert used
+ * `.select(API_KEY_USER_COLUMNS).single()` to get the full row back for the
+ * optimistic render; the persist arm's response is deliberately minimal
+ * (`{ api_key_id, valid, read_only }` — no ciphertext ever returns to the
+ * browser again), so the component re-reads the row by id through the SAME
+ * migration-027 SELECT allowlist. These specs pin all three halves: the
+ * request, the re-fetch (projection AND tenant filter), and the optimistic
+ * render that consumes it.
+ */
+describe("AllocatorExchangeManager — 160-03 server-side persist + row re-fetch", () => {
+  let fetchMock: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    routerRefreshMock.mockReset();
+    insertMock.mockReset();
+    getUserMock.mockReset();
+    apiKeysRefetchMock.mockReset();
+    apiKeysRefetchCall = null;
+    capturedAddKeyOnSubmit = null;
+    fetchMock = vi.fn().mockImplementation((url: string) => {
+      if (url === "/api/keys/validate-and-encrypt") {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          // The persist-arm contract as shipped in 160-02: an id, a verdict,
+          // and NO ciphertext of any name.
+          json: async () => ({
+            api_key_id: "new-key",
+            valid: true,
+            read_only: true,
+          }),
+        });
+      }
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        json: async () => ({ ok: true, job_id: "job-1" }),
+      });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  function validateBody() {
+    const call = fetchMock.mock.calls.find(
+      (c) => c[0] === "/api/keys/validate-and-encrypt",
     );
+    expect(call).toBeTruthy();
+    return JSON.parse(call![1].body as string) as Record<string, unknown>;
+  }
+
+  async function connect(exchange = "binance", label = "Test Key") {
+    render(<AllocatorExchangeManager hasHoldings={true} initialKeys={[]} />);
+    await act(async () => {
+      fireEvent.click(
+        screen.getByRole("button", { name: /\+ Connect exchange/i }),
+      );
+    });
+    expect(capturedAddKeyOnSubmit).not.toBeNull();
+    await act(async () => {
+      await capturedAddKeyOnSubmit!({
+        exchange,
+        label,
+        apiKey: "test-key",
+        apiSecret: "test-secret",
+        passphrase: "",
+      });
+    });
+  }
+
+  it("POSTs persist:true with the canonical exchange + label, issues NO insert, and re-fetches the row by api_key_id", async () => {
+    apiKeysRefetchMock.mockReturnValue({
+      data: makeKey({ id: "new-key", sync_status: "idle" }),
+      error: null,
+    });
+
+    await connect("sFOX", "My sFOX key");
+
+    const body = validateBody();
+    // Strict boolean — "true"/1 falls through to the legacy arm server-side and
+    // mints ZERO rows while this component would render a row that isn't there.
+    expect(body.persist).toBe(true);
+    // F6 canonicalization survives the conversion: the value that reaches the
+    // route is lowercase, never the display casing.
+    expect(body.exchange).toBe("sfox");
+    expect(body.label).toBe("My sFOX key");
+
+    // ⭐ The load-bearing negative: zero browser-composed inserts.
+    expect(insertMock).not.toHaveBeenCalled();
+
+    // The re-fetch reads through the migration-027 SELECT allowlist, filtered
+    // to the id the SERVER returned — not to a client-chosen value.
+    expect(apiKeysRefetchCall).toEqual({
+      cols: API_KEY_USER_COLUMNS,
+      col: "id",
+      val: "new-key",
+    });
+  });
+
+  it("feeds the optimistic render from the RE-FETCHED row (pending_insert stamping unchanged)", async () => {
+    // A row whose fields differ from anything the component could have guessed
+    // — if the optimistic render were fabricated client-side instead of read
+    // back, these values could not appear.
+    apiKeysRefetchMock.mockReturnValue({
+      data: makeKey({
+        id: "new-key",
+        label: "Refetched Label",
+        exchange: "binance",
+        account_balance_usdt: 98_765,
+        sync_status: "idle",
+      }),
+      error: null,
+    });
+
+    await connect();
+
+    // The re-fetched row is what rendered.
+    await waitFor(() => {
+      expect(screen.getByText("Refetched Label")).toBeInTheDocument();
+    });
+    // NEW-C29-02: the new row is stamped syncing (not the re-fetched 'idle'),
+    // which is the pending_insert optimistic overlay behaving exactly as it did
+    // when the INSERT returned the row.
+    expect(screen.getByTestId("allocator-sync-pill").textContent).toContain(
+      "Syncing…",
+    );
+    expect(insertMock).not.toHaveBeenCalled();
+  });
+
+  it("surfaces a failed re-fetch through setFormError with curated copy — no raw Postgres text", async () => {
+    apiKeysRefetchMock.mockReturnValue({
+      data: null,
+      error: {
+        code: "42501",
+        message:
+          'permission denied for column "api_key_encrypted" of relation "api_keys"',
+      },
+    });
+
+    await connect();
+
+    // Curated. The pre-conversion code did `setFormError(insertErr?.message)`,
+    // which piped the raw PostgREST string — SQLSTATE, relation and column
+    // names — straight into the form banner (H-0405 class).
+    expect(
+      await screen.findByText(
+        "Your key was saved, but we couldn't load it here. Refresh the page to see it.",
+      ),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/permission denied/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/api_key_encrypted/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/42501/)).not.toBeInTheDocument();
+  });
+
+  it("fails LOUDLY when a 2xx carries no api_key_id — no phantom row, no re-fetch", async () => {
+    fetchMock.mockImplementation((url: string) => {
+      if (url === "/api/keys/validate-and-encrypt") {
+        // The legacy arm's shape (ciphertext, no id): the key was NOT saved.
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: async () => ({
+            valid: true,
+            read_only: true,
+            api_key_encrypted: "enc",
+          }),
+        });
+      }
+      throw new Error(`unexpected fetch ${url}`);
+    });
+
+    await connect();
+
+    expect(
+      await screen.findByText(
+        "Your key was verified but not saved. Please try again.",
+      ),
+    ).toBeInTheDocument();
+    // No row was optimistically rendered off a non-existent id.
+    expect(apiKeysRefetchCall).toBeNull();
+    expect(insertMock).not.toHaveBeenCalled();
   });
 });
 

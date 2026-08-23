@@ -110,10 +110,16 @@ export function StrategyForm({ strategy, mode }: StrategyFormProps) {
     setApiError(null);
     try {
       // F4 (Phase 122): canonicalize the exchange to lowercase at the ONE point
-      // it enters the validate/insert path — the api_keys DB CHECK and the Python
+      // it enters the validate path — the api_keys DB CHECK and the Python
       // /validate-key intercept both key on lowercase, so a display-cased value
       // must never reach either. The Select value is already lowercase today; this
       // is the explicit chokepoint mirroring the wizard routes' toLowerCase().
+      //
+      // 160-03 / RANK-03: the INSERT this value used to also feed is GONE — the
+      // route writes the row now and re-normalizes independently at its own
+      // chokepoint (`exchangeNormalized`). This stays because it is what the
+      // request body carries, and a component that sends a canonical venue is
+      // one less place a stray casing can originate.
       const exchangeCanonical = apiExchange.trim().toLowerCase();
       const res = await fetch("/api/keys/validate-and-encrypt", {
         method: "POST",
@@ -123,37 +129,33 @@ export function StrategyForm({ strategy, mode }: StrategyFormProps) {
           api_key: apiKey,
           api_secret: apiSecret,
           passphrase: apiPassphrase || null,
+          // 160-03 / RANK-03 — the persist discriminator. With it, the route
+          // writes the api_keys row ITSELF, stamping `exchange` AND
+          // `attested_venue` from the venue its own validateKey call
+          // authenticated against, and returns `{ api_key_id }` with NO
+          // ciphertext. The label moves into the body because the server now
+          // composes the row; the template is this component's pre-existing
+          // default, preserved verbatim.
+          persist: true,
+          label: `${exchangeCanonical} key`,
         }),
       });
       if (!res.ok) {
+        // The route's error bodies are CURATED on every arm — the persist arm
+        // scrubs the raw PostgREST message at both log sinks and never places
+        // it in the response (160-02, route.ts). The H-0405 leak this component
+        // used to guard against was its OWN browser-composed insert error;
+        // that writer, and with it that error, no longer exists here.
         const err = await res.json().catch(() => ({ error: "Validation failed" }));
         throw new Error(err.error || "Key validation failed");
       }
-      const encrypted = await res.json();
-      const dbFields = { ...encrypted };
-      delete dbFields.valid;
-      delete dbFields.read_only;
+      const { api_key_id: newKeyId } = await res.json();
 
-      const supabase = createClient();
-      const { data: { user } } = await supabase.auth.getUser();
-      if (!user) throw new Error("Not authenticated");
-      const { error: insertError } = await supabase.from("api_keys").insert({
-        user_id: user.id,
-        exchange: exchangeCanonical,
-        label: `${exchangeCanonical} key`,
-        ...dbFields,
-      });
-      if (insertError) {
-        // H-0405 (same leak class, same file as the strategies insert/update
-        // redaction): never surface the raw Postgres error — an api_keys RLS
-        // denial (42501) or unique/CHECK violation embeds SQLSTATE + constraint
-        // names. Log the detail, show a static banner.
-        console.error(
-          "[StrategyForm] api_keys insert failed:",
-          insertError.code,
-          insertError.message,
-        );
-        throw new Error("Couldn't connect this API key. Please try again.");
+      if (typeof newKeyId !== "string") {
+        // Rule 12 / fail loud. A 2xx carrying no id means the server did not
+        // persist — reporting the key as connected would leave the user
+        // believing a key exists that will never sync.
+        throw new Error("Your key was verified but not saved. Please try again.");
       }
 
       setApiConnected(true);

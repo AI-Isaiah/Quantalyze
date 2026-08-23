@@ -2,19 +2,19 @@
 gsd_state_version: 1.0
 milestone: v1.20
 milestone_name: Backlog Burndown (Phases 158+)
-current_phase: 159
-current_phase_name: RANK — Public-ranking integrity
+current_phase: 160
+current_phase_name: PROVENANCE — The server's venue is the venue that annualizes
 status: executing
 stopped_at: Phase 159 context gathered
-last_updated: "2026-08-21T10:53:07.353Z"
-last_activity: 2026-08-21
-last_activity_desc: Phase 158 complete, transitioned to Phase 159
-state_head: f6ca8ba3fbf670939bdfbaae6a3c0144119e6427
+last_updated: "2026-08-23T15:21:26.164Z"
+last_activity: 2026-08-23
+last_activity_desc: Phase 160 execution started
+state_head: f6d239e8fbf07f8172a89966255334f8c6c7bc79
 progress:
   total_phases: 8
   completed_phases: 1
-  total_plans: 13
-  completed_plans: 6
+  total_plans: 19
+  completed_plans: 12
   percent: 13
 ---
 
@@ -75,10 +75,10 @@ are re-homed into v1.17 (Phases 155 / 153); 142.3 will not run as a v1.16 phase.
 
 ## Current Position
 
-Phase: 159 (RANK — Public-ranking integrity) — READY TO EXECUTE
-Plan: Not started
-Status: Ready to execute
-Last activity: 2026-08-21 — Phase 158 complete, transitioned to Phase 159
+Phase: 160 (PROVENANCE — The server's venue is the venue that annualizes) — EXECUTING
+Plan: 1 of 6
+Status: Executing Phase 160
+Last activity: 2026-08-23 — Phase 160 execution started
 OPS-CI first (the shared-test-db eviction / #616 mutex protects every later merge), 165 DEPS
 last (hard-blocked on OPS-01), 160 provenance before 164 SHARE (REVOKE soak), SHARE alone in
 its own PR and never branched from `feat/phase-156-connect-refactor`.

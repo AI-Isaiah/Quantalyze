@@ -14,6 +14,11 @@ import { resilientFetch } from "@/lib/resilient-fetch";
 import { captureToSentry } from "@/lib/sentry-capture";
 import { scrubSeamError } from "@/lib/seam-redaction";
 import { withAuth } from "@/lib/api/withAuth";
+// 160-02 / RANK-03 — the service-role writer for the persist arm. Same factory
+// the sibling connect routes use (the `createAdminClient` import in
+// `create-with-key/route.ts`); it THROWS when
+// SUPABASE_SERVICE_ROLE_KEY is absent, which the persist arm answers honestly.
+import { createAdminClient } from "@/lib/supabase/admin";
 import { NO_STORE_HEADERS } from "@/lib/api/headers";
 import { userActionLimiter, checkLimit, rateLimitDenyJson } from "@/lib/ratelimit";
 import type { User } from "@supabase/supabase-js";
@@ -36,6 +41,20 @@ import { isSfoxEnabledServer, isMt5EnabledServer } from "@/lib/closed-sets";
  * a third — still 5× headroom.
  */
 export const maxDuration = 300;
+
+/**
+ * 160-02 / RANK-03 — the cap on a persist-mode `label`.
+ *
+ * Before this phase the label was written by the browser's own INSERT and was
+ * bounded by nothing this codebase controlled. In persist mode it becomes
+ * SERVER-written text rendered back into the key list, so it gets an explicit
+ * length bound (ASVS V5). 120 is one notch above the sibling connect route's
+ * 100-char `KEY_INPUT_TOO_LONG` label rejection in `create-with-key/route.ts`
+ * because this
+ * arm TRUNCATES rather than rejects — see the persist arm for why a cosmetic
+ * string must not fail an already-validated connect.
+ */
+const MAX_KEY_LABEL_LENGTH = 120;
 
 // Phase 140.3 / SEAMUX-01 — the breaker body is NOT declared here. It is the
 // ONE constant in `@/lib/seam-copy`, imported above, which every seam emitter
@@ -182,7 +201,20 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
   // TS-04 / SC7 — `userId` is threaded into the legacy handler (rather than
   // re-derived inside it) so the tenant identity provably comes from THIS
   // route's withAuth session and cannot drift to a body field.
-  return await legacyValidateAndEncryptHandler({ exchange: exchangeNormalized, api_key, api_secret: api_secret_normalized, passphrase, userId: user.id });
+  //
+  // ── 160-02 / RANK-03 — THE PERSIST DISCRIMINATOR (the deploy-vs-revoke skew
+  // window). `persist === true` is a STRICT boolean comparison, and the
+  // strictness is the whole point: during the soak window between this deploy
+  // and the PR-2 `REVOKE INSERT`, a stale browser tab is still running the
+  // pre-conversion JS. That tab sends the OLD body (no `persist` field at all)
+  // and then performs its own client INSERT. If the server wrote a row for
+  // every call — or for a truthy `"true"` / `1` that some future caller
+  // stringified — the stale tab would mint TWO rows: one attested server row
+  // and one trigger-scrubbed client row. Anything that is not the boolean
+  // `true` therefore falls through to the byte-unchanged legacy arm, which
+  // performs ZERO server-side inserts. (threat T-160-06)
+  const persist = body.persist === true;
+  return await legacyValidateAndEncryptHandler({ exchange: exchangeNormalized, api_key, api_secret: api_secret_normalized, passphrase, userId: user.id, persist, label: body.label });
 });
 
 /**
@@ -289,6 +321,18 @@ async function _unifiedValidateAndEncryptHandler(args: {
  * branch (see API-2 comment in POST). The deprecation date below applies to
  * the unified-handler decision, not to this function which stays around
  * until /process-key gains an encrypt step.
+ *
+ * ── 160-02 / RANK-03: this function now serves BOTH arms of the route.
+ * `persist: false` is the legacy contract, byte-unchanged (ciphertext back to
+ * the caller, no row written). `persist: true` writes the `api_keys` row here
+ * on the server and returns `{ api_key_id }` instead of the ciphertext.
+ *
+ * The two arms deliberately share ONE body rather than living in two
+ * functions: the rate limiter, the sfox/mt5 gates, the presence checks, the
+ * breaker arm, the curated-4xx forward, the timeout arm and the scrubbed
+ * terminal arm must police the persist arm IDENTICALLY. Duplicating the seam
+ * calls into a parallel handler is exactly how one arm silently loses a
+ * control (threat T-160-09).
  */
 // DEPRECATED: remove after unified encrypt branch lands (deferred from PR-D)
 async function legacyValidateAndEncryptHandler(args: {
@@ -302,8 +346,21 @@ async function legacyValidateAndEncryptHandler(args: {
    * cannot be the one member of the class that stays on a platform bucket.
    */
   userId: string;
+  /**
+   * 160-02 / RANK-03 — persist mode. Already reduced to a STRICT boolean by
+   * the POST handler's `body.persist === true`; a raw body value never
+   * reaches here.
+   */
+  persist?: boolean;
+  /**
+   * 160-02 / RANK-03 — the caller's optional display label, UNVALIDATED. It is
+   * typed `unknown` on purpose: it arrives straight off the request body and
+   * is normalized (trim + 120-char cap + server default) inside the persist
+   * arm before it can become server-written text.
+   */
+  label?: unknown;
 }): Promise<NextResponse> {
-  const { exchange, api_key, api_secret, passphrase, userId } = args;
+  const { exchange, api_key, api_secret, passphrase, userId, persist, label } = args;
   try {
     // Validate and encrypt atomically to prevent TOCTOU race
     const validation = await validateKey(exchange, api_key, api_secret, passphrase, { userId });
@@ -323,7 +380,135 @@ async function legacyValidateAndEncryptHandler(args: {
     }
 
     const encrypted = await encryptKey(exchange, api_key, api_secret, passphrase, { userId });
-    return NextResponse.json({ ...encrypted, valid: true, read_only: true }, { headers: NO_STORE_HEADERS });
+
+    // ── LEGACY ARM (no `persist` discriminator) — byte-unchanged. The caller
+    // receives the ciphertext and performs its own INSERT. This arm is retired
+    // by plan 160-05 once the REVOKE lands; until then a stale tab in the soak
+    // window depends on it being EXACTLY what it was.
+    if (!persist) {
+      return NextResponse.json({ ...encrypted, valid: true, read_only: true }, { headers: NO_STORE_HEADERS });
+    }
+
+    // ── PERSIST ARM (160-02 / RANK-03) ────────────────────────────────────
+    //
+    // ⭐ THE ONE BINDING. `exchange` here is the value THIS route normalized at
+    // the top of POST (the sfox/mt5 canonicalization), and which `validateKey`
+    // then authenticated against the live venue two statements ago. Both venue
+    // columns below are written from this single local — never two reads of the
+    // body, never the raw client string. A divergent `exchange` /
+    // `attested_venue` pair is therefore impossible AT THE WRITER, and
+    // independently impossible AT THE DB (the CHECK
+    // `api_keys_attested_venue_matches_exchange`, migration 20260811210000).
+    // The BEFORE INSERT scrub trigger NULLs `attested_venue` for
+    // non-privileged writers but admits `service_role` by name, so the value
+    // supplied here survives.
+    //
+    // ⛔ THE CEILING, AND DO NOT EXCEED IT. What this establishes is that the
+    // venue is the one this server observed a successful read-only
+    // authentication at. NEVER write "the venue cannot be forged": any server
+    // route holding `createAdminClient()` can still pass any uid and any venue
+    // string. That is the standing `service_role` trust boundary
+    // (ADR-0001/ADR-0003) and this phase does not change it. What changes is
+    // exactly this: "any browser session can forge an attestation" becomes
+    // "only our own server code can". (threat T-160-07, accepted)
+    const exchangeNormalized = exchange;
+
+    // The label becomes SERVER-WRITTEN text, so it is normalized here rather
+    // than trusted: trim, then CAP (not reject) at MAX_KEY_LABEL_LENGTH. The
+    // cap is deliberate — a cosmetic display string must never fail a connect
+    // whose credentials already validated against the live venue. An absent or
+    // whitespace-only label falls back to the same server default the sibling
+    // connect route uses (its own `labelOrDefault` binding in
+    // `create-with-key/route.ts`).
+    const labelTrimmed = typeof label === "string" ? label.trim() : "";
+    const labelOrDefault =
+      labelTrimmed.length > 0
+        ? labelTrimmed.slice(0, MAX_KEY_LABEL_LENGTH)
+        : `${exchangeNormalized} key`;
+
+    // `createAdminClient()` THROWS when SUPABASE_SERVICE_ROLE_KEY is absent.
+    // Caught HERE rather than left to the terminal arm below, which would
+    // answer "Key validation failed" — a sentence that blames the user's key
+    // for our own missing credential. Same posture and code as the sibling
+    // connect route (its `SEAM_MISCONFIGURED` 503 arm in
+    // `create-with-key/route.ts`).
+    let admin: ReturnType<typeof createAdminClient>;
+    try {
+      admin = createAdminClient();
+    } catch (adminErr) {
+      const perRequestSecrets = [api_key, api_secret, passphrase];
+      console.error(
+        "[keys/validate-and-encrypt] persist arm unavailable — no service credential:",
+        scrubSeamError(adminErr, perRequestSecrets),
+      );
+      captureToSentry(adminErr, {
+        tags: { route: "api/keys/validate-and-encrypt", arm: "persist" },
+        secrets: perRequestSecrets,
+      });
+      return NextResponse.json(
+        { error: "Service credential unavailable", code: "SEAM_MISCONFIGURED" },
+        { status: 503, headers: NO_STORE_HEADERS },
+      );
+    }
+
+    // `user_id` is the withAuth session's id threaded in as `userId` (TS-04 /
+    // SC7). A body-supplied uid can never reach this row: the POST handler
+    // never reads one, and this function only ever sees the session value.
+    // (threat T-160-05)
+    //
+    // @audit-skip: key connect — this INSERT replaces the browser-side INSERT
+    // ApiKeyManager performed unaudited until 160-02, so moving the writer
+    // server-side neither adds nor removes a forensic obligation. The
+    // api_key.* connect taxonomy is the ADR-0023 follow-up tracked with the
+    // sibling wizard path (the `@audit-skip: wizard draft` pragma on the
+    // `create_wizard_strategy` call in `create-with-key/route.ts`), not this
+    // phase.
+    const { data: inserted, error: insertError } = await admin
+      .from("api_keys")
+      .insert({
+        user_id: userId,
+        exchange: exchangeNormalized,
+        attested_venue: exchangeNormalized,
+        label: labelOrDefault,
+        ...encrypted,
+      })
+      .select("id")
+      .single();
+
+    if (insertError || typeof inserted?.id !== "string") {
+      // Rule 12 / Pitfall 3: the fault is surfaced, and the raw PostgREST
+      // message — which can echo SQLSTATE text and the offending values back —
+      // is scrubbed at BOTH sinks and NEVER placed in the response body. The
+      // copy is honest about what did and did not happen: the key validated,
+      // the save did not.
+      const perRequestSecrets = [api_key, api_secret, passphrase];
+      const insertFault =
+        insertError ?? new Error("api_keys insert returned no row");
+      console.error(
+        "[keys/validate-and-encrypt] persist INSERT failed:",
+        scrubSeamError(insertFault, perRequestSecrets),
+      );
+      captureToSentry(insertFault, {
+        tags: { route: "api/keys/validate-and-encrypt", arm: "persist" },
+        secrets: perRequestSecrets,
+      });
+      return NextResponse.json(
+        {
+          error: "Your key was verified but couldn't be saved. Please try again.",
+          code: "UNKNOWN",
+        },
+        { status: 500, headers: NO_STORE_HEADERS },
+      );
+    }
+
+    // ⭐ NO CIPHERTEXT. The persist response carries the row id and the
+    // validation verdict ONLY — key material stops round-tripping through the
+    // browser on this path entirely (threat T-160-08). NO_STORE_HEADERS is
+    // kept regardless: `api_key_id` is per-tenant.
+    return NextResponse.json(
+      { api_key_id: inserted.id, valid: true, read_only: true },
+      { headers: NO_STORE_HEADERS },
+    );
   } catch (err) {
     // Phase 140 / SEAM-04 — the breaker arm, FIRST among the typed arms.
     //
