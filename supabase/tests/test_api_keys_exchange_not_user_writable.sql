@@ -151,6 +151,12 @@ DECLARE
   -- 5h's arming source, and it is deliberately NOT a marker: read from the
   -- function BODY via pg_get_functiondef. See the block that computes it.
   v_revoke_landed boolean;
+  -- Phase 160 / RANK-03. A THIRD marker, on the api_keys.EXCHANGE comment (not
+  -- attested_venue): migration 20260823120000 withdraws client INSERT. It flips
+  -- 5c's polarity — see 5c. Without this gate 5c hard-fails the moment that
+  -- migration lands, because 5c's whole premise is that the client INSERT path
+  -- stays open.
+  v_insert_revoked boolean;
   v_seen       text;
   v_after      text;
   v_attested   text;
@@ -319,6 +325,20 @@ BEGIN
     false
   ) INTO v_revoke_live;
 
+  -- The THIRD marker — Phase 160 / RANK-03, and note it reads a DIFFERENT
+  -- column's comment (exchange, not attested_venue), because that is the column
+  -- migration 20260823120000 re-stamps. It arms ONLY 5c's polarity flip.
+  SELECT COALESCE(
+    col_description(
+      'public.api_keys'::regclass,
+      (SELECT attnum FROM pg_attribute
+        WHERE attrelid = 'public.api_keys'::regclass
+          AND attname = 'exchange'
+          AND NOT attisdropped)
+    ) LIKE '%revoke_api_keys_insert%',
+    false
+  ) INTO v_insert_revoked;
+
   -- ---- 5h's ARMING SOURCE: THE FUNCTION BODY, NOT ANY COMMENT MARKER -------
   -- ⛔ COMPUTED BEFORE THE `IF v_attest_live` BRANCH ON PURPOSE, so BOTH arms
   -- can read it — (5a‴) in the ELSE needs it precisely when the marker gate has
@@ -448,11 +468,85 @@ BEGIN
         'TEST FAILED (5c): authenticated could not DELETE its own api_keys row (% rows) — the round trip cannot be exercised at all.',
         v_deleted;
     END IF;
-    IF v_ins_err IS NOT NULL THEN
-      RAISE EXCEPTION
-        'TEST FAILED (5c): the client re-INSERT was REFUSED (%). 153.6 D-02/D-03 keep this path open on purpose — the fix is the trigger scrubbing the value, not a privilege change. A refusal here means connect-a-key is broken.',
-        v_ins_err;
+    -- ⭐ PHASE 160 / RANK-03 — 5c's POLARITY IS STATE-DEPENDENT, and the two
+    -- states assert OPPOSITE things about the same INSERT:
+    --
+    --   * BEFORE 20260823120000: the re-INSERT must SUCCEED. 153.6 D-02/D-03
+    --     kept the client INSERT path open on purpose — the defense was the
+    --     trigger scrubbing the attestation, not a privilege change — so a
+    --     refusal meant connect-a-key was broken.
+    --   * AFTER it: the re-INSERT must be REFUSED with 42501. Phase 160 moved
+    --     the write server-side (validate-and-encrypt's persist arm) and
+    --     withdrew the grant, so a SUCCESS now means the REVOKE was rolled back
+    --     or re-granted and the browser can mint rows again.
+    --
+    -- ⛔ Gating on the marker rather than deleting the old arm is deliberate:
+    -- the test DB lags main, so during PR-2's window BOTH states are legitimate
+    -- and each must keep real teeth. Neither branch may be a silent skip.
+    IF v_insert_revoked THEN
+      IF v_ins_err IS NULL THEN
+        RAISE EXCEPTION
+          'CR-01/160 REGRESSION (5c): the client re-INSERT SUCCEEDED on a database whose api_keys.exchange comment carries the revoke_api_keys_insert marker. Migration 20260823120000 withdrew INSERT from anon+authenticated (RANK-03); a success here means the grant is back — by a rollback, a re-GRANT, or a restore from a pre-REVOKE dump — and the browser can once again create api_keys rows carrying a venue the server never validated.';
+      END IF;
+      -- ⚠️ 42501 ALONE DOES NOT DISCRIMINATE — MEASURED: a REVOKE and an RLS
+      -- refusal BOTH raise 42501. They differ in the message ('permission denied
+      -- for table api_keys' vs 'new row violates row-level security policy'), so
+      -- match on that. And do not rest the branch's premise on marker prose at
+      -- all: read the ACL directly, so "this database has the REVOKE" is sourced
+      -- from state rather than from a comment somebody could edit.
+      IF v_ins_err NOT LIKE '42501 permission denied for table%' THEN
+        RAISE EXCEPTION
+          'TEST FAILED (5c): the client re-INSERT was refused, but with "%" rather than a 42501 table-permission denial. An RLS refusal also raises 42501 ("new row violates row-level security policy"), as would a CHECK or NOT NULL with its own code — any of which would mean this assertion is passing for a reason unrelated to the withdrawn grant, i.e. vacuously.',
+          v_ins_err;
+      END IF;
+      IF has_table_privilege('authenticated', 'public.api_keys', 'INSERT') THEN
+        RAISE EXCEPTION
+          'TEST FAILED (5c): the api_keys.exchange comment carries the revoke_api_keys_insert marker, but authenticated STILL HOLDS INSERT on api_keys. The marker and the ACL disagree, so this branch was armed by prose rather than by state — the refusal above therefore came from something other than the REVOKE.';
+      END IF;
+      RAISE NOTICE 'Assertion 5c OK (post-REVOKE polarity): the client re-INSERT is refused with a 42501 TABLE-permission denial, and the ACL independently confirms authenticated holds no INSERT.';
+    ELSE
+      IF v_ins_err IS NOT NULL THEN
+        RAISE EXCEPTION
+          'TEST FAILED (5c): the client re-INSERT was REFUSED (%). 153.6 D-02/D-03 keep this path open on purpose — the fix is the trigger scrubbing the value, not a privilege change. A refusal here means connect-a-key is broken. (If migration 20260823120000 HAS applied, this is instead a marker regression: it re-stamps the api_keys.exchange comment and MUST leave the substring revoke_api_keys_insert in it, or this assertion flips to the wrong polarity.)',
+          v_ins_err;
+      END IF;
     END IF;
+
+    -- ⛔ THE SCRUB HALF MUST SURVIVE THE REVOKE, AND SKIPPING IT WAS WRONG.
+    -- These assertions inspect the row the client re-INSERTed. Post-REVOKE that
+    -- INSERT is correctly refused, so no row exists and the naive path would
+    -- fire "the round trip did not happen" on the very state just proved
+    -- correct. An earlier draft skipped the half and claimed assertions 2/3/5e
+    -- still covered the trigger — that claim was FALSE: in THIS file 2 and 3 are
+    -- UPDATE-privilege assertions and 5e is the exchange/attested_venue CHECK.
+    -- None of them fires api_keys_scrub_attested_venue at all, so the skip would
+    -- have left the trigger's NON-PRIVILEGED branch — a client-supplied
+    -- attestation being scrubbed to NULL — covered NOWHERE in the repository.
+    --
+    -- So instead of skipping, restore the door for the length of the probe. The
+    -- whole file runs inside `BEGIN; … ROLLBACK;`, so a GRANT here never
+    -- outlives the test, and it is immediately withdrawn again either way. This
+    -- keeps the trigger under a real client-role INSERT in BOTH states.
+    IF v_insert_revoked THEN
+      EXECUTE 'GRANT INSERT ON public.api_keys TO authenticated';
+      SET LOCAL ROLE authenticated;
+      DELETE FROM public.api_keys WHERE id = v_key5;
+      INSERT INTO public.api_keys (id, user_id, exchange, label, api_key_encrypted, attested_venue)
+      VALUES (v_key5, v_uid, 'mt5', 'cr01-roundtrip', 'x', 'mt5');
+      RESET ROLE;
+      EXECUTE 'REVOKE INSERT ON public.api_keys FROM authenticated';
+
+      -- Anti-vacuity: the temporary grant must actually have been withdrawn
+      -- again, or every later assertion in this file runs against a database
+      -- whose ACL this test itself mutated.
+      IF has_table_privilege('authenticated', 'public.api_keys', 'INSERT') THEN
+        RAISE EXCEPTION
+          'TEST FAILED (5c scrub half): the temporary INSERT grant was not withdrawn after the probe — this test has left the ACL more permissive than it found it.';
+      END IF;
+      RAISE NOTICE 'Assertion 5c scrub half: INSERT briefly re-granted inside the rolled-back transaction so the trigger stays under a real client-role INSERT post-REVOKE; grant withdrawn again and verified.';
+    END IF;
+
+    IF TRUE THEN
 
     SELECT exchange, attested_venue INTO v_after, v_attested
       FROM public.api_keys WHERE id = v_key5;
@@ -467,6 +561,8 @@ BEGIN
         v_attested;
     END IF;
     RAISE NOTICE 'Assertion 5c OK: DELETE + re-INSERT with a forged attested_venue SUCCEEDS and stores NULL — the probe gate''s input is unforgeable from the client.';
+
+    END IF;  -- end of the 5c scrub half (runs in BOTH states — see above)
 
     IF v_revoke_live THEN
       -- ---- (5d) THE OTHER DOOR: the RPC, called directly as `authenticated` ----
