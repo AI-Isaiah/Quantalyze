@@ -8,6 +8,8 @@ import {
   blendPeriodsPerYear,
   deriveEmptySeriesState,
   isComputedAnalytics,
+  isRankableAnalyticsRow,
+  PERCENTILE_GATE_COLUMN,
   type SeriesState,
 } from "./closed-sets";
 import { resolveDailyReturnSeries } from "@/lib/factsheet/resolve-series";
@@ -122,6 +124,13 @@ export type { PercentileMap } from "./percentile-core";
 /**
  * The analytics columns BOTH percentile callers project. Hoisted to a module
  * const so the two projections cannot drift.
+ *
+ * ⚠️ BYTE-FROZEN (Phase 159 / RANK-01). This list is the KPI set and nothing
+ * else. The csv-finalize route mirrors it member-for-member in its
+ * CLOCK_SAFETY_KPI_COLUMNS prose, so appending a non-KPI column here would
+ * silently make those comments false. The RANK-01 gate column is therefore a
+ * SEPARATE constant (`PERCENTILE_GATE_COLUMN`, closed-sets.ts) that each
+ * projection site composes alongside this one.
  */
 const PERCENTILE_ANALYTICS_COLUMNS =
   "cagr, sharpe, sortino, calmar, max_drawdown, volatility, cumulative_return";
@@ -141,7 +150,10 @@ const PERCENTILE_ANALYTICS_COLUMNS =
 export async function getPercentiles(categorySlug?: string): Promise<PercentileMap | null> {
   const supabase = await createClient();
 
-  const analyticsColumns = PERCENTILE_ANALYTICS_COLUMNS;
+  // RANK-01: the gate column rides ALONGSIDE the byte-frozen KPI list, never
+  // appended to it. Both select branches below interpolate this one composition,
+  // so the categorized and uncategorized projections cannot disagree.
+  const analyticsColumns = `${PERCENTILE_ANALYTICS_COLUMNS}, ${PERCENTILE_GATE_COLUMN}`;
 
   const query = categorySlug
     ? withPublishedOnly(
@@ -174,6 +186,11 @@ export async function getPercentiles(categorySlug?: string): Promise<PercentileM
   for (const s of strategies) {
     const a = extractAnalytics((s as Record<string, unknown>).strategy_analytics);
     if (!a) continue;
+    // RANK-01: a non-computed row (failed/pending/computing) neither RECEIVES a
+    // published percentile nor JOINS the population others are scored against.
+    // Dropping it here — before `rows` — is what makes the floor below count the
+    // honest denominator, mirroring the RPC's gated min-N cohort.
+    if (!isRankableAnalyticsRow(a)) continue;
     rows.push({ id: s.id, analytics: castRow<Record<string, number | null>>(a, "analytics") });
   }
 
@@ -186,6 +203,71 @@ export async function getPercentiles(categorySlug?: string): Promise<PercentileM
 // server-side reads don't need a second import line just for these helpers.
 // Both helpers are pure and have no Supabase dependency — they live in utils.
 export { extractAnalytics, EMPTY_ANALYTICS };
+
+/**
+ * Phase 159 (159-03, RANK-02 / decision D-02) — the compare analytics
+ * projection, replacing a wildcard analytics embed.
+ *
+ * Compare is an AUTHED allocator surface, but it is CROSS-TENANT: an allocator
+ * reads other managers' published strategies, which is why the requirement
+ * names this site alongside the anonymous ones. RLS is ROW-level and cannot
+ * hide a column, so an explicit column list is the only control over what
+ * leaves the database — `daily_returns`, the `metrics_json` blob and
+ * `data_quality_flags` are all absent here and none of them was ever read.
+ *
+ * Enumerated from the compare UI at HEAD (enumerate before cutting):
+ *   - the nine `METRICS` rows in CompareTable (:27-37), read by DYNAMIC key
+ *     (`getValue(item.analytics, metric.key)`), so a missing column shows as
+ *     an em-dash rather than a crash — a silent regression, hence the pin in
+ *     page.test.tsx.
+ *   - `returns_series`, read by BOTH CompareEquityOverlay (:40) and
+ *     CompareCorrelationMatrix (:26). Dropping it blanks both charts.
+ *
+ * Lives here (not in the page file) so every "which analytics columns may
+ * leave the DB" list is auditable with one grep of this module, alongside
+ * PUBLIC_ANALYTICS_COLUMNS and the STRATEGY_DETAIL_* constants.
+ */
+export const COMPARE_ANALYTICS_COLUMNS =
+  "cumulative_return, cagr, sharpe, sortino, calmar, max_drawdown, max_drawdown_duration_days, volatility, six_month_return, returns_series";
+
+/**
+ * Phase 159 (159-03, RANK-02 / decision D-02) — the RANKED-LIST analytics
+ * projection, replacing the wildcard `strategy_analytics (*)` embed.
+ *
+ * `/browse/[slug]` has NO auth gate, so this is the highest-traffic ANONYMOUS
+ * `strategy_analytics` read in the app. RLS is ROW-level — the `analytics_read`
+ * policy (`status='published' OR user_id=auth.uid()`, migration
+ * 20260405061912, no `TO` clause) applies to `anon` and cannot hide a COLUMN.
+ * An explicit projection is therefore the ONLY lever that keeps
+ * `daily_returns`, the whole `metrics_json` blob and `data_quality_flags` out
+ * of an anon response. Same column-explicitness discipline as
+ * `readPublicVerificationSignals` / the `get_published_trust_signals` SECDEF
+ * function, and the same shape as `STRATEGY_V2_ANALYTICS_COLUMNS` below.
+ *
+ * ⚠️ MUST-STAY columns — every one of these is a rendered surface, and
+ * dropping it is a silent VISUAL regression, not a bandwidth win:
+ *   - `sparkline_returns` / `sparkline_drawdown` — StrategyTable's two
+ *     sparkline cells (:1111 / :1118). Dropping them blanks the charts.
+ *   - `computation_status` — the ONE chip-state derivation site (:899 →
+ *     `deriveEmptySeriesState`). Dropping it makes every row read the
+ *     EMPTY_ANALYTICS `"pending"` default and spin "Syncing" forever, which
+ *     is precisely the Phase-147/149 forever-spinner class.
+ *   - `computed_at` — the SyncBadge (:1051) and the `computed_at` sort (:299).
+ * The remaining scalars are the rendered metric columns, the table sorts
+ * (`SortKey`, discovery-types.ts) and the advanced range filters (:556-562);
+ * `calmar` and `six_month_return` are filter/sort-only but still user-visible.
+ *
+ * ⚠️ `three_month:metrics_json->three_month` is a JSONB-KEY ALIAS, not the
+ * blob. StrategyTable's ONLY `metrics_json` use is the 3M advanced filter
+ * (:567-568), so projecting the whole blob to keep one number would ship every
+ * other key (alpha/beta/VaR/CVaR/skew/…) to anonymous readers. MEASURED
+ * against the TEST project on 2026-08-21: this embed-alias form returns
+ * `{"three_month": 0.0}` (HTTP 200, a real number). That measurement CORRECTS
+ * the `getStrategyDetailV2` docblock's claim below that "PostgREST cannot
+ * project a JSONB sub-tree without an RPC" — see the note there.
+ */
+const CATEGORY_RANKING_ANALYTICS_COLUMNS =
+  "computed_at, computation_status, cumulative_return, cagr, sharpe, calmar, max_drawdown, volatility, six_month_return, sparkline_returns, sparkline_drawdown, three_month:metrics_json->three_month";
 
 export async function getStrategiesByCategory(categorySlug: string): Promise<RankedStrategyRow[]> {
   const supabase = await createClient();
@@ -207,7 +289,9 @@ export async function getStrategiesByCategory(categorySlug: string): Promise<Ran
   const { data: strategies, error } = await withPublishedOnly(
     supabase
       .from("strategies")
-      .select(`*, discovery_categories!inner(slug), strategy_analytics (*)`)
+      .select(
+        `*, discovery_categories!inner(slug), strategy_analytics (${CATEGORY_RANKING_ANALYTICS_COLUMNS})`,
+      )
       .eq("discovery_categories.slug", categorySlug),
   );
 
@@ -307,6 +391,13 @@ export async function getMyStrategies(
 
   const { data, error } = await supabase
     .from("strategies")
+    // RANK-02 / D-02 EXEMPTION — the wildcard analytics embed stays HERE and
+    // only here: the `.eq("user_id", userId)` on the next line scopes this read
+    // to the session owner's OWN rows, so the columns RANK-02 keeps from
+    // anonymous readers (daily_returns, metrics_json, data_quality_flags) never
+    // leave the owner they belong to. Every other embed in the class is now an
+    // explicit projection; adding a NON-owner-scoped caller to this function
+    // would silently re-open that class.
     .select(`*, strategy_analytics (*)`)
     .eq("user_id", userId)
     .neq("status", "archived");
@@ -606,10 +697,26 @@ export type OwnRowPercentiles = {
  * (see percentile-core's header). So a draft is told "if published, this would
  * sit at Pnn" LITERALLY, and it cannot shift any public rank.
  *
- * Both `< 5` thresholds mirror `getPercentiles` exactly, so the page's Pnn
- * presence and its "ranked against N strategies" copy flip together — the page
- * can never show a rank while claiming there is no comparison set, or vice
- * versa.
+ * Both `< 5` thresholds mirror `getPercentiles` exactly — including RANK-01's
+ * gate: the second threshold counts RANKABLE rows (those passing
+ * `isRankableAnalyticsRow`), not every row carrying an analytics embed. So the
+ * page's Pnn presence and its "ranked against N strategies" copy flip together,
+ * and the N it claims is the same honest denominator /discovery ranks against —
+ * the page can never show a rank while claiming there is no comparison set, nor
+ * count a dead `failed` row into the comparison set it names.
+ *
+ * The gate is applied to the SUBJECTS too, not only to the population: an own
+ * row whose analytics are `failed`/`pending`/`computing` (or absent, which
+ * arrives as EMPTY_ANALYTICS' `"pending"`) gets NO entry in `ownMap`, and the
+ * page renders that as "no rank". A `failed` row can still carry a stale
+ * sharpe/cagr from an earlier successful run, so without this the owner would
+ * be shown a percentile computed from dead numbers — and, being gated out of
+ * the population, scored as a NON-member of it. Hence: failed/stale analytics
+ * can neither contribute to NOR receive a percentile.
+ *
+ * The gate reads `computation_status`, NOT published status — deliberately. A
+ * DRAFT whose analytics are `complete` is still scored, because that is the
+ * whole point of the own-row map: "if published, this would sit at Pnn".
  *
  * `getPercentiles` remains the discovery-surface caller; plan 04 calls ONLY
  * this helper.
@@ -619,10 +726,14 @@ export async function getOwnRowPercentiles(
 ): Promise<OwnRowPercentiles | null> {
   const supabase = await createClient();
 
+  // RANK-01: same composition as getPercentiles — the gate column rides
+  // ALONGSIDE the byte-frozen KPI list, never appended to it.
   const { data: strategies, error } = await withPublishedOnly(
     supabase
       .from("strategies")
-      .select(`id, strategy_analytics (${PERCENTILE_ANALYTICS_COLUMNS})`),
+      .select(
+        `id, strategy_analytics (${PERCENTILE_ANALYTICS_COLUMNS}, ${PERCENTILE_GATE_COLUMN})`,
+      ),
   );
 
   if (error) {
@@ -637,6 +748,10 @@ export async function getOwnRowPercentiles(
   for (const s of strategies) {
     const a = extractAnalytics((s as Record<string, unknown>).strategy_analytics);
     if (!a) continue;
+    // RANK-01: the SAME shared gate getPercentiles uses — deliberately the one
+    // helper and not a local predicate, so the owner surface and the public
+    // surface can never disagree about who is in the comparison set.
+    if (!isRankableAnalyticsRow(a)) continue;
     populationRows.push({
       id: s.id,
       analytics: castRow<Record<string, number | null>>(a, "analytics"),
@@ -651,13 +766,21 @@ export async function getOwnRowPercentiles(
   // denominator and the founder would see one rank on /my-strategies and a
   // different one on /discovery for the same published strategy.
   const populationById = new Map(populationRows.map((r) => [r.id, r]));
-  const ownSubjects = ownRows.map(
-    (r) =>
-      populationById.get(r.id) ?? {
-        id: r.id,
-        analytics: castRow<Record<string, number | null>>(r.analytics, "analytics"),
-      },
-  );
+  const ownSubjects = ownRows
+    // RANK-01, subject side: the SAME gate the population is built with. A row
+    // that may not CONTRIBUTE a rank may not RECEIVE one either — otherwise a
+    // `failed` row's stale KPIs would be scored against a population it was
+    // just excluded from, i.e. as a non-member, and shown to its owner as a
+    // real percentile. Rows dropped here simply have no `ownMap` entry, which
+    // /my-strategies already renders as "no rank".
+    .filter((r) => isRankableAnalyticsRow(r.analytics))
+    .map(
+      (r) =>
+        populationById.get(r.id) ?? {
+          id: r.id,
+          analytics: castRow<Record<string, number | null>>(r.analytics, "analytics"),
+        },
+    );
 
   const publishedMap = scoreAgainstPopulation(populationRows, populationRows);
 
@@ -887,6 +1010,72 @@ export async function getFactsheetDetail(strategyId: string): Promise<{
   };
 }
 
+/**
+ * Phase 159 (159-03, RANK-02 / decision D-02) — which caller is asking for a
+ * strategy detail row. RESEARCH Open Question 2 asked whether the anon and
+ * authed detail surfaces should share ONE analytics projection (forcing
+ * `data_quality_flags` — an exclusion-list column — into anon responses) or
+ * whether the function should grow a caller-scoped list. Resolved EXPLICITLY,
+ * per caller, rather than silently in either direction.
+ *
+ * `"public"` is the DEFAULT, so the exported surface is safe by construction:
+ * a caller must opt IN to the wider list. See the constants below.
+ */
+export type StrategyDetailVariant = "public" | "discovery";
+
+/**
+ * The anon-safe detail projection. Excludes all three RANK-02 columns
+ * (`daily_returns`, `metrics_json`, `data_quality_flags`) and RETAINS
+ * `computation_status`, which is mandatory in every variant — the detail
+ * surfaces derive their still-computing placeholder from it, and
+ * `computed_at` drives the freshness sentinel.
+ *
+ * Membership IS `PUBLIC_ANALYTICS_COLUMNS` (the projection
+ * `getPublicStrategyDetail` already uses for the ANON factsheet at
+ * `/strategy/[id]`): that is the measured anon-detail need, and the two lists
+ * describing the same surface must not disagree.
+ *
+ * ⭐ It is an ALIAS, not a copy. This was a byte-for-byte duplicate of that
+ * literal, with the mirroring enforced by nothing — two independently-editable
+ * strings both claiming to be "the anon-safe analytics column set". Drift is
+ * asymmetric and security-relevant: widening the copy ships an extra column
+ * under `getStrategyDetail`'s `public` DEFAULT, which is precisely the door
+ * the caller-scoped split exists to keep shut. Binding the name to the
+ * original makes the mirror true by construction. The separate name is kept
+ * because the two lists are separate DECISIONS that merely coincide today —
+ * if the anon detail surface ever needs a column the factsheet does not (or
+ * vice versa), this is the seam to widen, and the lockstep pin in
+ * queries.test.ts is what will notice.
+ *
+ * ⚠️ Measured at HEAD (159-03): `/strategy/[id]` does NOT call
+ * `getStrategyDetail` — it calls `getPublicStrategyDetail`, aliased locally
+ * through `cache()` (page.tsx:18). RESEARCH classified this function as
+ * anon-reachable via that page; that classification was reading the LOCAL
+ * alias, not this export. This function's only production caller today is the
+ * AUTHED discovery detail page, so `public` is the safe default for future
+ * callers rather than a live anon path.
+ */
+const STRATEGY_DETAIL_PUBLIC_ANALYTICS_COLUMNS = PUBLIC_ANALYTICS_COLUMNS;
+
+/**
+ * The AUTHED discovery-detail projection: the public list plus exactly the
+ * columns `/discovery/[slug]/[strategyId]` reads off the analytics row.
+ * Enumerated from that page at HEAD (Pitfall 5 — enumerate before cutting):
+ *
+ *   - `data_quality_flags` (:85) — `dqf` picks the composite vs single-key
+ *     branch and feeds `singleKeyDataQuality`. On the exclusion list for ANON
+ *     responses, which is exactly why it lives HERE and not in the public list.
+ *   - `daily_returns` (:66) + `returns_series` (:69) — `resolveDailyReturnSeries`.
+ *     ⚠️ Dropping either renders the "still computing" placeholder instead of
+ *     the factsheet: a silent, total visual regression.
+ *   - `metrics_json_by_basis` — threaded into `readCompositeFactsheet` and
+ *     `readSingleKeyBasisOpts` (the MTM/smoothed basis story).
+ *   - `computation_status` — `readSingleKeyBasisOpts` (the page comment at
+ *     :123 documents this dependency explicitly).
+ */
+const STRATEGY_DETAIL_DISCOVERY_ANALYTICS_COLUMNS =
+  `${STRATEGY_DETAIL_PUBLIC_ANALYTICS_COLUMNS}, data_quality_flags, daily_returns, returns_series, metrics_json_by_basis`;
+
 export async function getStrategyDetail(
   strategyId: string,
   /**
@@ -906,6 +1095,12 @@ export async function getStrategyDetail(
    * other means.
    */
   expectedCategorySlug?: string,
+  /**
+   * Phase 159 (159-03 / RANK-02): which analytics projection to issue.
+   * Defaults to the minimal anon-safe list — a caller needing the wider
+   * discovery columns must ask for them by name.
+   */
+  variant: StrategyDetailVariant = "public",
 ): Promise<{
   strategy: Strategy;
   analytics: StrategyAnalytics;
@@ -932,9 +1127,17 @@ export async function getStrategyDetail(
   // discovery_categories with `!inner` + an `.eq("discovery_categories.slug",
   // …)` predicate. PostgREST drops the row entirely when the inner-join
   // misses, so a slug-shuffle URL turns into a clean null → not-found UI.
+  // Phase 159 (159-03 / RANK-02, D-02): the analytics embed is an explicit,
+  // caller-scoped column list — never a wildcard. RLS is ROW-level and cannot
+  // hide a column, so the projection is the only control over which analytics
+  // columns leave the database.
+  const analyticsColumns =
+    variant === "discovery"
+      ? STRATEGY_DETAIL_DISCOVERY_ANALYTICS_COLUMNS
+      : STRATEGY_DETAIL_PUBLIC_ANALYTICS_COLUMNS;
   const baseSelect = expectedCategorySlug
-    ? "*, discovery_categories!inner(slug), strategy_analytics (*)"
-    : "*, strategy_analytics (*)";
+    ? `*, discovery_categories!inner(slug), strategy_analytics (${analyticsColumns})`
+    : `*, strategy_analytics (${analyticsColumns})`;
 
   // NEW-C03-03 / NEW-C38-01: add the `status='published'` predicate as
   // defence-in-depth mirror of all sibling fetchers (getPublicStrategyDetail,
@@ -1128,9 +1331,19 @@ export interface StrategyV2Detail {
  * Analytics columns: every field that getStrategyDetailV2 unpacks below.
  * `metrics_json` is intentionally a single blob fetch — its keys
  * (history_days, equity_series_1y, btc_benchmark_returns, benchmark_returns,
- * alpha/beta/IR/Treynor) drive multiple panels and PostgREST cannot project
- * a JSONB sub-tree without an RPC. Trimming the surrounding scalar/array
+ * alpha/beta/IR/Treynor) drive multiple panels, so pulling the blob once beats
+ * enumerating a dozen key aliases. Trimming the surrounding scalar/array
  * columns is the bandwidth win the p95<50ms detail-fetch contract requires.
+ *
+ * ⚠️ CORRECTION (Phase 159 / 159-03). This docblock previously asserted that
+ * "PostgREST cannot project a JSONB sub-tree without an RPC". That is FALSE
+ * and was corrected by measurement, not by argument: against the TEST project
+ * on 2026-08-21, `strategy_analytics(three_month:metrics_json->three_month)`
+ * returned HTTP 200 with `{"three_month": 0.0}` — a real number under the
+ * alias. The blob fetch HERE remains the right call for the reason above (many
+ * keys, one panel-set), but the capability exists and is now used by
+ * CATEGORY_RANKING_ANALYTICS_COLUMNS to keep the whole blob away from
+ * anonymous list readers.
  */
 const STRATEGY_V2_STRATEGY_COLUMNS =
   "id, name, start_date, supported_exchanges, strategy_types, subtypes, markets, leverage_range, avg_daily_turnover";

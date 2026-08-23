@@ -1499,8 +1499,13 @@ export function ScenarioComposer({
             throw new Error("returns route body missing a daily_returns array");
           }
           // BLEND-01 — accept asset_class only when it is a string; anything else
-          // (absent from a stale deploy, null, or malformed) collapses to null →
-          // the leg keeps the conservative 252 blend default.
+          // (absent from a stale deploy, null, or malformed) collapses to null.
+          // RANK-06 then treats a NULLISH asset_class as crypto for the blend
+          // clock (`blendPeriodsPerYear`: any nullish or "crypto" leg ⇒ 365), so
+          // an unknown leg annualizes √365 — the CONSERVATIVE direction, since
+          // √252 on a crypto series inflates Sharpe. A non-matching STRING
+          // (e.g. "equities") still reads traditional √252; RANK-06 widened
+          // nullish, not matching.
           const assetClass =
             typeof d.asset_class === "string" ? d.asset_class : null;
           // CONSTIT-02 — accept trust_tier only when a string, is_composite only
@@ -3205,8 +3210,11 @@ export function ScenarioComposer({
   // selected leg is crypto (the blended daily series is then calendar-daily),
   // else √252. Unselected legs do NOT flip it. In book mode the per-key legs
   // carry asset_class 'crypto' (84-01), so every real book blend derives 365; a
-  // pure-CSV-tradfi / all-unknown added-only blend derives 252 (byte-identical
-  // to the pre-#597 default). Deps mirror engineState (the selected set + axis
+  // blend whose selected legs all STATE 'traditional' derives 252 (byte-identical
+  // to the pre-#597 default). RANK-06 (159-04): an added leg whose class never
+  // resolved (the lazy /returns probe returned no row → null) is a PROJECTION
+  // GAP, not a tradfi leg, and derives 365 — the conservative RISK clock.
+  // Deps mirror engineState (the selected set + axis
   // the engine sees). NOTE: this is the DISPLAY basis only — the peer-rank path
   // below stays on the engine's RAW annualized values (see the fence there).
   // KNOWN NUANCE (documented, spec-compliant): the basis reads the SELECTED set,

@@ -4,16 +4,16 @@ milestone: v1.20
 milestone_name: Backlog Burndown (Phases 158+)
 current_phase: 159
 current_phase_name: RANK — Public-ranking integrity
-status: planning
-stopped_at: Phase 158 complete, ready to plan Phase 159
-last_updated: "2026-08-21T05:06:25.809Z"
+status: executing
+stopped_at: Phase 159 context gathered
+last_updated: "2026-08-21T10:53:07.353Z"
 last_activity: 2026-08-21
 last_activity_desc: Phase 158 complete, transitioned to Phase 159
-state_head: c380d347c4396a1859dd8ca04e8a5c3066faf67a
+state_head: f6ca8ba3fbf670939bdfbaae6a3c0144119e6427
 progress:
   total_phases: 8
   completed_phases: 1
-  total_plans: 6
+  total_plans: 13
   completed_plans: 6
   percent: 13
 ---
@@ -75,9 +75,9 @@ are re-homed into v1.17 (Phases 155 / 153); 142.3 will not run as a v1.16 phase.
 
 ## Current Position
 
-Phase: 159 — RANK — Public-ranking integrity
+Phase: 159 (RANK — Public-ranking integrity) — READY TO EXECUTE
 Plan: Not started
-Status: Ready to plan
+Status: Ready to execute
 Last activity: 2026-08-21 — Phase 158 complete, transitioned to Phase 159
 OPS-CI first (the shared-test-db eviction / #616 mutex protects every later merge), 165 DEPS
 last (hard-blocked on OPS-01), 160 provenance before 164 SHARE (REVOKE soak), SHARE alone in
@@ -1403,9 +1403,9 @@ Load-bearing sequencing (real dependencies, do not reorder):
 
 ## Session
 
-**Last Date:** 2026-08-21T05:06:25.809Z
-**Stopped At:** Phase 158 complete, ready to plan Phase 159
-**Resume File:** None
+**Last Date:** 2026-08-21T09:51:35.277Z
+**Stopped At:** Phase 159 context gathered
+**Resume File:** .planning/phases/159-rank-public-ranking-integrity/159-CONTEXT.md
 **Next step:** Phase 159 (RANK — public ranking integrity) is next and NOT yet planned — run `/gsd-plan-phase 159`. (The former 153.6/154/155 note was v1.17-era; those items live in the archived milestone trackers and TODOS.md.)
 
 ⭐ **Foundation names later waves import by name** (from `153.1-02-SUMMARY.md`, all in

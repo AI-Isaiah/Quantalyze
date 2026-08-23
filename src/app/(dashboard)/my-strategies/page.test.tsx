@@ -265,12 +265,22 @@ function dbStrategy(
   };
 }
 
-/** A published-universe row carrying only the percentile projection. */
+/**
+ * A published-universe row carrying only the percentile projection.
+ *
+ * Phase 159 / RANK-01: that projection now includes `computation_status`, and
+ * `getOwnRowPercentiles` drops any row failing `isRankableAnalyticsRow` before
+ * its `< 5` floor. A population row must therefore declare a terminal-success
+ * status to be part of the comparison set — a fixture without one models a
+ * strategy whose analytics never finished computing, which is precisely the
+ * row the gate exists to exclude.
+ */
 function populationRow(id: string, sharpe: number) {
   return {
     id,
     strategy_analytics: [
       {
+        computation_status: "complete",
         cagr: sharpe / 10,
         sharpe,
         sortino: sharpe,

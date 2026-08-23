@@ -60,14 +60,31 @@ type MockSnapshot = {
 let mockStrategyData: unknown[] = [];
 let mockSnapshotData: MockSnapshot[] = [];
 
+/**
+ * Phase 159 (159-03 / RANK-02) — every `.select()` string issued against the
+ * `strategies` table, so the explicit analytics projection can be pinned.
+ */
+const strategySelectCalls: string[] = [];
+
 vi.mock("@/lib/supabase/server", () => ({
   createClient: vi.fn(async () => {
     // Helper: builds a thenable Supabase-style query builder that resolves to { data, error }
-    function makeQueryBuilder(resolveData: () => unknown[]): Record<string, unknown> {
+    function makeQueryBuilder(
+      resolveData: () => unknown[],
+      recordSelect = false,
+    ): Record<string, unknown> {
       const resolve = () =>
         Promise.resolve({ data: resolveData(), error: null });
       const builder: Record<string, unknown> = {
-        select: vi.fn().mockReturnThis(),
+        // Phase 159 (159-03 / RANK-02): records the projection for the
+        // strategies read. Written as an implementation rather than
+        // `.mockReturnThis()` so the argument is observable.
+        select: vi.fn((cols?: string) => {
+          if (recordSelect && typeof cols === "string") {
+            strategySelectCalls.push(cols);
+          }
+          return builder;
+        }),
         in: vi.fn().mockReturnThis(),
         eq: vi.fn().mockReturnThis(),
         order: vi.fn().mockReturnThis(),
@@ -87,7 +104,8 @@ vi.mock("@/lib/supabase/server", () => ({
           resolve().finally(onfinally),
       };
       // self-referential mockReturnThis needs the object already built
-      (builder.select as ReturnType<typeof vi.fn>).mockReturnValue(builder);
+      // (`select` is excluded — it carries a recording implementation above,
+      // and mockReturnValue would discard it).
       (builder.in as ReturnType<typeof vi.fn>).mockReturnValue(builder);
       (builder.eq as ReturnType<typeof vi.fn>).mockReturnValue(builder);
       (builder.order as ReturnType<typeof vi.fn>).mockReturnValue(builder);
@@ -107,7 +125,7 @@ vi.mock("@/lib/supabase/server", () => ({
           return makeQueryBuilder(() => [{ role: "allocator" }]);
         }
         if (table === "strategies") {
-          return makeQueryBuilder(() => mockStrategyData);
+          return makeQueryBuilder(() => mockStrategyData, true);
         }
         if (table === "allocator_equity_snapshots") {
           return makeQueryBuilder(() => mockSnapshotData);
@@ -304,5 +322,73 @@ describe("ComparePage — finding g4 mixed render (HoldingFactsheet + StrategyFa
     });
     render(Page as React.ReactElement);
     expect(screen.queryByTestId("holding-factsheet")).not.toBeInTheDocument();
+  });
+});
+
+/**
+ * Phase 159 (159-03, RANK-02 / decision D-02) — the compare read was the
+ * fourth `strategy_analytics` wildcard embed. It is an AUTHED allocator
+ * surface (`requireRolePage(…, "allocator")`), but it is CROSS-TENANT: an
+ * allocator pulls other managers' published strategies, so the requirement
+ * names this site explicitly alongside the anonymous ones.
+ *
+ * These pins capture the projection string the page issues. Neuterable:
+ * putting an excluded column back into the list reds the negative arm;
+ * dropping `returns_series` reds the consumer arm (the equity overlay and
+ * correlation matrix both read it, so that omission is a blank-chart bug).
+ */
+describe("ComparePage — RANK-02 explicit analytics projection", () => {
+  beforeEach(() => {
+    strategySelectCalls.length = 0;
+    mockStrategyData = [
+      makeSampleStrategy("11111111-2222-4333-8444-555555555555", "Strategy Alpha"),
+      makeSampleStrategy("22222222-3333-4444-8555-666666666666", "Strategy Beta"),
+    ];
+    mockSnapshotData = [];
+  });
+
+  const capture = async () => {
+    const ComparePage = await getComparePage();
+    await ComparePage({
+      searchParams: Promise.resolve({
+        ids: "11111111-2222-4333-8444-555555555555,22222222-3333-4444-8555-666666666666",
+      }),
+    });
+    const cols = strategySelectCalls.find((c) => c.includes("strategy_analytics")) ?? "";
+    return { cols, embed: /strategy_analytics \(([^)]*)\)/.exec(cols)?.[1] ?? "" };
+  };
+
+  it("issues an explicit analytics column list, never the wildcard embed", async () => {
+    const { cols, embed } = await capture();
+    expect(cols).not.toContain("strategy_analytics (*)");
+    expect(embed).not.toBe("*");
+    expect(embed.length).toBeGreaterThan(0);
+  });
+
+  it("keeps every analytics field the compare UI consumes", async () => {
+    const { embed } = await capture();
+    // CompareTable METRICS rows (CompareTable.tsx :27-37) + the returns_series
+    // both CompareEquityOverlay (:40) and CompareCorrelationMatrix (:26) read.
+    for (const column of [
+      "cumulative_return",
+      "cagr",
+      "sharpe",
+      "sortino",
+      "calmar",
+      "max_drawdown",
+      "max_drawdown_duration_days",
+      "volatility",
+      "six_month_return",
+      "returns_series",
+    ]) {
+      expect(embed).toContain(column);
+    }
+  });
+
+  it("never projects daily_returns, metrics_json, or data_quality_flags", async () => {
+    const { cols, embed } = await capture();
+    expect(cols).not.toContain("daily_returns");
+    expect(cols).not.toContain("data_quality_flags");
+    expect(embed).not.toMatch(/metrics_json(?!->)/);
   });
 });

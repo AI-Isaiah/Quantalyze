@@ -12,15 +12,15 @@ verified-stale items are excluded by construction.
 
 ### RANK — Public-trust & provenance correctness
 
-- [ ] **RANK-01** (L818): Published percentile rankings never fold failed/stale-computation KPIs into any strategy's rank. ⚠️ Research corrections are binding: gate on `isComputedAnalytics` semantics (a literal `complete` filter would wrongly drop `complete_with_warnings`); use a separate gate constant, NOT a `computation_status` append to `PERCENTILE_ANALYTICS_COLUMNS` (that falsifies the csv-finalize mirror prose at three sites); fix BOTH the TS side and the `get_verified_cohort_rank` SQL RPC (documented parity-by-construction); measure per-category population counts first (C-M1 — the <5/<20 floors mean a filter can blank a whole category's badges).
-- [ ] **RANK-02** (L1143): Anonymous readers receive only the columns the public surface needs — the `strategy_analytics (*)` splats (`queries.ts:218`, `compare/page.tsx:68`) become explicit projections excluding `daily_returns`/`metrics_json`/`data_quality_flags`.
+- [x] **RANK-01** (L818): Published percentile rankings never fold failed/stale-computation KPIs into any strategy's rank. ⚠️ Research corrections are binding: gate on `isComputedAnalytics` semantics (a literal `complete` filter would wrongly drop `complete_with_warnings`); use a separate gate constant, NOT a `computation_status` append to `PERCENTILE_ANALYTICS_COLUMNS` (that falsifies the csv-finalize mirror prose at three sites); fix BOTH the TS side and the `get_verified_cohort_rank` SQL RPC (documented parity-by-construction); measure per-category population counts first (C-M1 — the <5/<20 floors mean a filter can blank a whole category's badges).
+- [x] **RANK-02** (L1143): Anonymous readers receive only the columns the public surface needs — the `strategy_analytics (*)` splats (`queries.ts:218`, `compare/page.tsx:68`) become explicit projections excluding `daily_returns`/`metrics_json`/`data_quality_flags`.
 - [ ] **RANK-03** (L947): `api_keys.exchange` is server-authoritative at every INSERT path — no client-supplied venue can differ from the venue the server validated (extends the Phase-156 service-role-writer pattern).
 - [ ] **RANK-04** (L2522): The `asset_class` annualization stamp (√365 vs √252) derives from the server-validated venue, never from client-supplied `apiKeyExchange` (`finalize-wizard/route.ts:1288-1311`). ⚠️ NOT the "one-identifier change" TODOS claimed: `attested_venue` is NULL for trigger-scrubbed and pre-backfill rows and `isCryptoExchange(null) === false`, so a naive swap stamps `traditional`/√252 onto crypto strategies — the swap moves together with a null-attestation extension of the `skipAssetClassWrite` guard, gated on the B-M1 PROD census.
-- [ ] **RANK-05** (L855): The quantstats price-detection sign-flip is closed on the strategy-analytics path (all-non-negative returns with a >100% day must not be re-read as prices).
-- [ ] **RANK-06** (L858): Blend annualization treats unknown-`asset_class` legs as crypto for RISK, so a sole crypto leg no longer inflates Sharpe via √252.
-- [ ] **RANK-07** (L3184): Two concurrent same-session resubmits cannot both take the FILL arm — the FILL UPDATE is compare-and-set (`.is("category_id", null)`).
-- [ ] **RANK-08** (L3169): The re-mint fingerprint accounts for classification, so the classification-conflict 409's own remedy can mint a fresh session (or the exclusion is documented at the fingerprint).
-- [ ] **RANK-09** (L2088): `withPublishedOrOwner` validates the uid's shape before interpolating it into the PostgREST `.or()` filter.
+- [x] **RANK-05** (L855): The quantstats price-detection sign-flip is closed on the strategy-analytics path (all-non-negative returns with a >100% day must not be re-read as prices).
+- [x] **RANK-06** (L858): Blend annualization treats unknown-`asset_class` legs as crypto for RISK, so a sole crypto leg no longer inflates Sharpe via √252.
+- [x] **RANK-07** (L3184): Two concurrent same-session resubmits cannot both take the FILL arm — the FILL UPDATE is compare-and-set (`.is("category_id", null)`).
+- [x] **RANK-08** (L3169): The re-mint fingerprint accounts for classification, so the classification-conflict 409's own remedy can mint a fresh session (or the exclusion is documented at the fingerprint).
+- [x] **RANK-09** (L2088): `withPublishedOrOwner` validates the uid's shape before interpolating it into the PostgREST `.or()` filter.
 
 ### SHARE — SHARELINK-01 revocable share links (founder-decided model)
 
@@ -105,15 +105,15 @@ Which phases cover which requirements. Updated during roadmap creation.
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| RANK-01 | Phase 159 | Pending |
-| RANK-02 | Phase 159 | Pending |
+| RANK-01 | Phase 159 | Complete |
+| RANK-02 | Phase 159 | Complete |
 | RANK-03 | Phase 160 | Pending |
 | RANK-04 | Phase 160 | Pending |
-| RANK-05 | Phase 159 | Pending |
-| RANK-06 | Phase 159 | Pending |
-| RANK-07 | Phase 159 | Pending |
-| RANK-08 | Phase 159 | Pending |
-| RANK-09 | Phase 159 | Pending |
+| RANK-05 | Phase 159 | Complete |
+| RANK-06 | Phase 159 | Complete |
+| RANK-07 | Phase 159 | Complete |
+| RANK-08 | Phase 159 | Complete |
+| RANK-09 | Phase 159 | Complete |
 | SHARE-01 | Phase 164 | Pending |
 | SHARE-02 | Phase 164 | Pending |
 | SHARE-03 | Phase 164 | Pending |

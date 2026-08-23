@@ -1442,6 +1442,13 @@ async function resolveExistingStrategyOrRefuse(
   // On the FILL arm the committed `asset_class` WILL read 'traditional'; that
   // is a default, not a conflict, and must not block the fill.
   //
+  // ⚠️ 159-06 / RANK-07 — THIS READ DOES NOT DECIDE THE FILL ON ITS OWN. It is
+  // a read taken a whole request before the write, so it establishes only that
+  // the fill was safe THEN. `applyCsvMetadataUpdate` re-checks the very same
+  // predicate inside its UPDATE (`.is("category_id", null)`) and observes the
+  // row count, so a concurrent resubmit that classified the row in between
+  // loses in SQL and is refused rather than silently overwriting the winner.
+  //
   // ⚠️ ABSENT ≠ NULL. `undefined` means the column did not come back — an
   // absent reading, not a measurement — and licenses neither a fill nor a
   // refusal. Same discipline as A2's `typeof === "string" &&` guard above.
@@ -2016,7 +2023,7 @@ function enqueueCsvAnalyticsAfter(
  * This function now only REPORTS; nothing about which outcome is fatal is
  * decided inside it.
  *
- *   'applied'       → the UPDATE ran and PostgREST returned no error.
+ *   'applied'       → the UPDATE ran and MATCHED THE ROW (row count observed).
  *   'noop'          → there was nothing to write, so no UPDATE was issued.
  *   'invalid'       → parseCsvMetadata signalled a present-but-invalid field
  *                     (NEW-C14-03 / NEW-C14-05) — unreachable in practice
@@ -2024,12 +2031,19 @@ function enqueueCsvAnalyticsAfter(
  *                     the 400 the caller must return.
  *   'update_failed' → the UPDATE was issued and PostgREST returned an error
  *                     (RLS/22P02). Logged + captured to Sentry here, as before.
+ *   'raced'         → the UPDATE was issued, PostgREST returned NO error, and it
+ *                     matched ZERO rows: the compare-and-set predicate below
+ *                     lost. Someone else classified this strategy between this
+ *                     request's discriminator read and its write. NOT an
+ *                     infrastructure fault — no log-and-capture, because the
+ *                     system is working exactly as designed. (159-06 / RANK-07.)
  */
 type CsvMetadataUpdateResult =
   | { kind: "applied" }
   | { kind: "noop" }
   | { kind: "invalid"; response: NextResponse }
-  | { kind: "update_failed" };
+  | { kind: "update_failed" }
+  | { kind: "raced" };
 
 async function applyCsvMetadataUpdate(
   supabase: SupabaseClient,
@@ -2060,16 +2074,46 @@ async function applyCsvMetadataUpdate(
   }
   const updatePayload = buildMetadataUpdatePayload(parsed.payload);
   if (Object.keys(updatePayload).length === 0) return { kind: "noop" };
-  // @audit-skip: continuation of the csv-wizard strategy creation
-  // flow — finalize_csv_strategy_with_returns created the row milliseconds
-  // ago (SECURITY DEFINER, audit-skipped like create_wizard_strategy +
+  // Continuation of the csv-wizard strategy creation flow —
+  // finalize_csv_strategy_with_returns created the row milliseconds ago
+  // (SECURITY DEFINER, audit-skipped like create_wizard_strategy +
   // finalize-wizard). Matches ADR-0023 wizard-taxonomy gap +
-  // audit-2026-05-07 P692. strategies_update RLS gates the write.
-  const { error: updateError } = await supabase
+  // audit-2026-05-07 P692. strategies_update RLS gates the write. The
+  // machine-readable pragma itself sits directly above the mutation chain
+  // below: audit-coverage.test.ts requires it within 8 lines of the chain's
+  // start line, and the RANK-07 commentary between here and there is longer
+  // than that window.
+  //
+  // ⚖️ 159-06 / RANK-07 (2026-08-21) — THE DISCRIMINATOR IS RE-CHECKED IN SQL,
+  // IN THE SAME STATEMENT THAT WRITES. The FILL arm decides "never classified"
+  // from a read (`category_id IS NULL`) taken a whole request earlier — two more
+  // reads, the clock-safety guard and the metadata parse all sit in between. Two
+  // resubmits of the same wizard session (a double-clicked submit, a retry fired
+  // while the first still hung) therefore both read NULL, both conclude the fill
+  // is safe, and both write; the second silently overwrites the first, and on
+  // `asset_class` that is the ANNUALIZATION CLOCK being overwritten. Appending
+  // the predicate to the UPDATE makes the check and the set one statement, so
+  // SQL — not the interleaving — picks the winner.
+  //
+  // SAFE ON THE FRESH ARM TOO: a fresh row's `category_id` is also NULL (the
+  // fold's INSERT never writes it, see the discriminator anchor above), so this
+  // predicate matches there by construction and no legitimate first write is
+  // refused.
+  //
+  // `.select("id")` IS NOT DECORATION — IT IS THE ONLY WAY TO KNOW. PostgREST
+  // returns NO error when an UPDATE matches zero rows, so without the returned
+  // rows a raced-out writer is byte-identical to the winner and would be handed
+  // `applied`: the BL-01 false receipt again, reached by a new route. Row count
+  // observed, exactly as the deletion-request approve/reject CAS does it.
+  // @audit-skip: see the wizard-continuation rationale above this comment
+  // block — SECURITY DEFINER row created milliseconds ago, ADR-0023.
+  const { data: casRows, error: updateError } = await supabase
     .from("strategies")
     .update(updatePayload)
     .eq("id", strategyId)
-    .eq("user_id", userId);
+    .eq("user_id", userId)
+    .is("category_id", null)
+    .select("id");
   if (updateError) {
     // NEW-C14-04: pair console.error with captureToSentry so a metadata
     // UPDATE failure is alertable and traceable. Pre-fix: only console.error
@@ -2091,6 +2135,11 @@ async function applyCsvMetadataUpdate(
     // `null` a success returns.
     return { kind: "update_failed" };
   }
+  // 159-06 / RANK-07 — zero rows with no error is the CAS losing, which is a
+  // DIFFERENT fact from the UPDATE failing and must not borrow its diagnosis:
+  // no console.error, no Sentry capture (contention is not an outage, and
+  // paging on it trains the alert away). The caller decides what it costs.
+  if ((casRows ?? []).length === 0) return { kind: "raced" };
   return { kind: "applied" };
 }
 
@@ -2592,12 +2641,30 @@ async function unifiedCsvFinalizeHandler(args: {
   //
   // REFUSING COSTS NOTHING HERE, which is why this arm can afford the truth:
   // the strategy is already committed, this request wrote nothing, and the
-  // resubmit is idempotent — the fill discriminator (`category_id IS NULL`)
-  // still reads NULL, so the next attempt takes the same arm and repairs it.
+  // resubmit is idempotent — on 'update_failed' the fill discriminator
+  // (`category_id IS NULL`) still reads NULL, so the next attempt takes the
+  // same arm and repairs it. (159-06: on 'raced' the resubmit is equally
+  // reachable but lands on a DIFFERENT arm — see the RANK-07 note below.)
   //
   // `!== "applied"` and not `=== "update_failed"`: 'noop' means no UPDATE was
   // issued at all, which is equally not a repair. The fill arm now answers 200
   // only when an UPDATE actually ran and actually succeeded.
+  //
+  // ⚖️ 159-06 / RANK-07 (2026-08-21) — 'raced' RIDES THIS SAME REFUSAL, and the
+  // `!== "applied"` shape is why no new branch was needed. A raced-out writer
+  // lost the compare-and-set: its own write did not land, which is precisely
+  // what the copy below says, and its remedy is the same resubmit. What the
+  // resubmit does differs, and that is the point — the discriminator now reads
+  // a NON-NULL `category_id`, so the next attempt takes the ALREADY-CLASSIFIED
+  // arm instead: 200 when the two submissions agree (the double-click case),
+  // 409 naming BOTH values when they do not. Divergence is adjudicated out
+  // loud, where last-writer-wins used to bury it.
+  //
+  // The two not-applied causes stay distinguishable where it matters: the warn
+  // line below interpolates the kind, and only 'update_failed' logs and pages
+  // Sentry from inside the helper. An operator can tell contention from an RLS
+  // fault; the user, who can act on neither distinction, gets one clear
+  // sentence and one working next step.
   if (outcome.fresh || outcome.fillClassification) {
     const metaResult = await applyCsvMetadataUpdate(
       supabase,
@@ -2621,6 +2688,53 @@ async function unifiedCsvFinalizeHandler(args: {
             "entered to it just now — but that write did not land, so nothing " +
             "was changed. Submit the same file again shortly; it will not " +
             "create a second strategy.",
+          debug_context: { strategy_id: outcome.strategyId },
+          correlation_id: args.correlationId,
+        },
+        { status: 503, headers: NO_STORE_HEADERS },
+      );
+    }
+    // ⚖️ RANK-07 red-team (2026-08-23) — THE FRESH ARM MUST REFUSE ON 'raced'
+    // TOO, and it needs its OWN branch because it does not share the fill
+    // arm's other two verdicts.
+    //
+    // The CAS predicate rides BOTH arms, so both can lose it. The fresh arm
+    // loses it in exactly the double-submit scenario this phase closes: two
+    // requests of the same wizard session resolve to the SAME strategy row
+    // (23505 echo dedupe), one takes the fill arm and its CAS lands first, and
+    // the other — which believes it is the fresh writer — matches zero rows.
+    // Falling through to `ok: true` there is the BL-01 false receipt with the
+    // worst payload of the three: the loser's `asset_class` is the
+    // ANNUALIZATION CLOCK, silently discarded while the user is told the
+    // submission succeeded.
+    //
+    // WHY NOT JUST DROP THE `outcome.fillClassification &&` QUALIFIER: that
+    // would also flip fresh-arm 'update_failed' and 'noop' to a refusal.
+    // 'update_failed' answering 200 on a fresh create is the long-standing and
+    // deliberate call reasoned about above (the strategy row persisted;
+    // failing the request over a metadata write is worse), and 'noop' means
+    // there was no metadata to write at all. 'raced' is the one verdict whose
+    // cost differs: another writer's value is now committed on this row.
+    //
+    // The copy is fresh-specific because the fill arm's sentence ("nothing was
+    // changed") is FALSE here — the strategy WAS created by this request. The
+    // remedy is the same resubmit, and it is now reachable on the
+    // already-classified arm: 200 if the two submissions agree, 409 naming
+    // both values if they do not.
+    if (outcome.fresh && metaResult.kind === "raced") {
+      console.warn(
+        `${args.logPrefix} fresh-arm classification lost the CAS (raced) — refusing to report it as applied [correlation_id=${args.correlationId}] strategy_id=${outcome.strategyId}`,
+      );
+      return NextResponse.json(
+        {
+          ok: false,
+          code: "CSV_PERSIST_FAIL",
+          human_message:
+            "Your strategy was saved, but the category and asset class you " +
+            "entered were not applied to it: another submission of this same " +
+            "wizard session classified it first. Submit the same file again " +
+            "shortly to confirm the classification; it will not create a " +
+            "second strategy.",
           debug_context: { strategy_id: outcome.strategyId },
           correlation_id: args.correlationId,
         },

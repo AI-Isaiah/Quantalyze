@@ -1,7 +1,11 @@
 import { createClient } from "@/lib/supabase/server";
 import { requireRolePage } from "@/lib/auth/requireRolePage";
 import { withPublishedOnly } from "@/lib/visibility";
-import { EMPTY_ANALYTICS } from "@/lib/queries";
+import {
+  COMPARE_ANALYTICS_COLUMNS,
+  EMPTY_ANALYTICS,
+  extractAnalytics,
+} from "@/lib/queries";
 import { redirect } from "next/navigation";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { CompareTable } from "@/components/strategy/CompareTable";
@@ -65,7 +69,7 @@ export default async function ComparePage({
       ? withPublishedOnly(
           supabase
             .from("strategies")
-            .select("*, strategy_analytics (*)")
+            .select(`*, strategy_analytics (${COMPARE_ANALYTICS_COLUMNS})`)
             .in("id", strategyIds),
         )
       : Promise.resolve({ data: [], error: null }),
@@ -82,10 +86,24 @@ export default async function ComparePage({
 
   const strategyItems = ((strategiesRes as { data: unknown[] | null }).data ?? []).map((s) => {
     const strat = s as Strategy & { strategy_analytics: unknown };
+    const row = extractAnalytics(strat.strategy_analytics) as
+      | Partial<StrategyAnalytics>
+      | null;
     return {
       kind: "strategy" as const,
       strategy: strat as Strategy,
-      analytics: ((Array.isArray(strat.strategy_analytics) ? strat.strategy_analytics[0] : strat.strategy_analytics) ?? { ...EMPTY_ANALYTICS, strategy_id: strat.id }) as StrategyAnalytics,
+      // Phase 159 (159-03 / RANK-02): the read above is now a PARTIAL
+      // projection, so compose it over EMPTY_ANALYTICS — defaults first,
+      // fetched columns second. Downstream reads are typed `StrategyAnalytics`
+      // and would otherwise see `undefined` (not `null`) for any column the
+      // projection omits. This is the same fallback shape an ABSENT analytics
+      // row already produced; the spread simply also covers the present-row
+      // case. Fetched values always win — no fetched column is defaulted over.
+      analytics: {
+        ...EMPTY_ANALYTICS,
+        strategy_id: strat.id,
+        ...(row ?? {}),
+      } as StrategyAnalytics,
     };
   });
 

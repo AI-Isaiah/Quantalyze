@@ -1,5 +1,57 @@
 # Changelog
 
+## [0.70.0.0] - 2026-08-23
+
+### feat: v1.20 Phase 159 — RANK: public-ranking integrity
+
+A public percentile badge must be a claim about a COMPUTED cohort. The phase's
+PROD census measured the gap this closes: 17 of 18 published strategies carried
+a `failed` analytics row that still held stale KPI values, and every one of
+them both received a rank and shifted everyone else's.
+
+**Fixed / hardened**
+
+- RANK-01 — one status gate (`isRankableAnalyticsRow`, delegating to
+  `isComputedAnalytics`; `complete_with_warnings` IS terminal success) applied
+  to BOTH the population and the subject side of both TS percentile callers,
+  and to both predicates of the `get_verified_cohort_rank` RPC (migration
+  `20260821120000`, auto-applies on merge). Expected PROD consequence: public
+  percentile badges disappear until the cohort recomputes (<5 floor) — the
+  honest outcome, remedy tracked as [159-SEED-01].
+- RANK-02 — anon/cross-tenant reads project explicit column lists instead of
+  `strategy_analytics (*)` splats (discovery detail via caller-scoped
+  `getStrategyDetail(id, slug, "discovery")` variant, compare page via
+  `COMPARE_ANALYTICS_COLUMNS`); `daily_returns`/`metrics_json` no longer leave
+  the DB on the anon list read.
+- RANK-05 — quantstats' price-detection guess (all-non-negative series with a
+  >100% day silently re-read as prices, flipping Sharpe sign) killed in
+  `compute_all_metrics`: `prepare_returns=False` where the kwarg is honored,
+  faithful inline mirrors where it is not (incl. the `cvar` wrapper whose
+  advertised kwarg is dropped internally). Residual `compute_qstats_scalars`
+  path mapped in WINDOWS.md.
+- RANK-06 — a blend leg with NULLISH `asset_class` (a caller projection gap)
+  now annualizes on the conservative √365 crypto clock instead of silently
+  flattering Sharpe by ×1.2035.
+- RANK-07 — csv-finalize classification fill is a true CAS
+  (`.is("category_id", null)` + row-count observation); a lost race is a
+  `raced` refusal on BOTH arms, never a false `ok: true` receipt.
+- RANK-08/09 — CSV wizard session fingerprint includes the classification
+  (409 conflict → re-mint remedy), and `isUuid` fails closed before `.or()`
+  interpolation.
+- /review + red team (Opus/high): 9 specialist + 3 red-team findings applied,
+  incl. the owner-surface half of RANK-01 and the fresh-arm `raced` refusal;
+  stale SQL-function snapshot (a CI merge blocker) regenerated.
+- /simplify (4-lens): deduped metrics math (single cumprod/VaR evaluation),
+  compare page reuses `extractAnalytics`, NEW executable TS↔SQL cohort-gate
+  parity test replacing "change one, change the other" comments.
+
+**Verification**
+
+- vitest 12,058 passed (787 files) · pytest 5,215 passed · mypy --strict clean
+  · tsc clean · RED→GREEN drills on every new gate.
+- Post-merge UAT expectations recorded in 159-VERIFICATION.md (badge
+  disappearance, first ARMED sql-tests run, composite render spot-check).
+
 ## [0.69.1.0] - 2026-08-21
 
 ### fix: [158-MUTEX-01] — the shared-test-db CI mutex now actually holds for the whole job

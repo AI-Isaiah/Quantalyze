@@ -343,9 +343,11 @@ export function computeMetricsForDraft(
   // leg is crypto, else √252 (blendPeriodsPerYear). SELECTED legs only — the
   // engine's activeStrategies gate — so a toggled-off crypto leg cannot flip a
   // tradfi blend onto √365. Per-key units carry asset_class 'crypto' (84-01);
-  // added legs carry the lookup's asset_class (null → the conservative 252 leg).
-  // An all-unknown / empty blend derives 252, byte-identical to the pre-84
-  // default (regression-pinned in scenario-compare.test.ts).
+  // added legs carry the lookup's asset_class, which the panel writes as
+  // `?? null` — so an SSR payload that dropped the column arrives here NULL.
+  // RANK-06 (159-04): that null is a PROJECTION GAP, not a traditional leg, and
+  // now derives 365 — the conservative RISK clock. An EMPTY blend still derives
+  // 252 (regression-pinned, with the wiring, in scenario-compare.test.ts).
   const basis = blendPeriodsPerYear(
     adapterOutput.strategies.filter((s) => projectionState.selected[s.id]),
   );

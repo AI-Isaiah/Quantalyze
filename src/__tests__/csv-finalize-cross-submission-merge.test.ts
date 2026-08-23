@@ -115,9 +115,19 @@ const analyticsProbe = vi.hoisted(() => ({
   reads: [] as string[],
 }));
 
-/** Metadata UPDATE recorder — the economic oracle's write vector. */
+/** Metadata UPDATE recorder — the economic oracle's write vector.
+ *
+ * 159-06 / RANK-07 — each entry now also carries the FILTERS the route built the
+ * chain with, split by kind. `isFilters` is what makes the compare-and-set
+ * assertable AT THE ROUTE rather than in the mock: only the route can put
+ * `category_id: null` in there. */
 const updateCalls = vi.hoisted(
-  () => [] as Array<{ payload: Record<string, unknown> }>,
+  () =>
+    [] as Array<{
+      payload: Record<string, unknown>;
+      eqFilters: Record<string, unknown>;
+      isFilters: Record<string, unknown>;
+    }>,
 );
 
 /**
@@ -130,6 +140,75 @@ const updateCalls = vi.hoisted(
 const updateOutcome = vi.hoisted(
   () => ({ error: null as { code?: string; message?: string } | null }),
 );
+
+/**
+ * 159-06 / RANK-07 — the committed row's `category_id` AS THE DATABASE HOLDS IT,
+ * so the mocked UPDATE can arbitrate a race the way SQL does. `isNull` starts
+ * true (the FILL premise every case here arms) and the first CAS-filtered UPDATE
+ * that matches flips it; every later CAS-filtered UPDATE then matches ZERO rows
+ * — which PostgREST answers with `data: []` AND `error: null`, the shape that
+ * makes a raced-out writer indistinguishable from a winner unless the route
+ * counts rows.
+ */
+const casRow = vi.hoisted(() => ({ categoryIdIsNull: true }));
+
+/**
+ * 159-06 / RANK-07 — the metadata UPDATE builder.
+ *
+ * ⚠️ IT ANSWERS BOTH CHAIN SHAPES ON PURPOSE: `.eq().eq()` (pre-CAS, awaited
+ * directly) and `.eq().eq().is().select("id")` (post-CAS). That is not
+ * generosity — it is what makes the race case a HONEST RED against the pre-fix
+ * route and what makes the neuter drill (delete `.is` from the route's chain)
+ * fail on the ASSERTION instead of dying with "is is not a function". A mock
+ * that only understood the new shape would red for the wrong reason and prove
+ * nothing about the route.
+ */
+const makeUpdateChain = vi.hoisted(() => (payload: Record<string, unknown>) => {
+  const eqFilters: Record<string, unknown> = {};
+  const isFilters: Record<string, unknown> = {};
+  let settled = false;
+  const settle = () => {
+    if (settled) return { data: null, error: null };
+    settled = true;
+    updateCalls.push({
+      payload,
+      eqFilters: { ...eqFilters },
+      isFilters: { ...isFilters },
+    });
+    if (updateOutcome.error) return { data: null, error: updateOutcome.error };
+    // The CAS predicate, enforced the way SQL would: a chain carrying
+    // `.is("category_id", null)` matches only while the row still reads NULL.
+    const casFiltered = Object.prototype.hasOwnProperty.call(
+      isFilters,
+      "category_id",
+    );
+    if (casFiltered && !casRow.categoryIdIsNull) {
+      // Raced out. NOTE THE `error: null` — this is the whole hazard.
+      return { data: [], error: null };
+    }
+    // A matched UPDATE that writes the classification is what closes the
+    // window for everyone behind it.
+    if (payload.category_id !== undefined) casRow.categoryIdIsNull = false;
+    return { data: [{ id: EXISTING_ID }], error: null };
+  };
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const chain: any = {};
+  const thenOn = (
+    res: (v: unknown) => unknown,
+    rej?: (e: unknown) => unknown,
+  ) => Promise.resolve(settle()).then(res, rej);
+  chain.eq = (col: string, val: unknown) => {
+    eqFilters[col] = val;
+    return chain;
+  };
+  chain.is = (col: string, val: unknown) => {
+    isFilters[col] = val;
+    return chain;
+  };
+  chain.select = (_cols: string) => ({ then: thenOn });
+  chain.then = thenOn;
+  return chain;
+});
 
 const rpcMock = vi.hoisted(() => vi.fn());
 
@@ -146,14 +225,7 @@ vi.mock("@/lib/supabase/server", () => ({
     from: (table: string) => ({
       // The metadata UPDATE — must run ONLY after a successful create or a
       // successful resolve (Pitfall 6).
-      update: (payload: Record<string, unknown>) => ({
-        eq: () => ({
-          eq: () => {
-            updateCalls.push({ payload });
-            return Promise.resolve({ error: updateOutcome.error });
-          },
-        }),
-      }),
+      update: (payload: Record<string, unknown>) => makeUpdateChain(payload),
       select: (_cols: string) => {
         if (table === "strategies") {
           // The resolve arm's C-08 scoped re-fetch:
@@ -355,6 +427,10 @@ beforeEach(() => {
   analyticsProbe.reads.length = 0;
   updateCalls.length = 0;
   updateOutcome.error = null;
+  // 159-06 / RANK-07 — every case starts from the FILL premise: the committed
+  // row's `category_id` still reads SQL NULL, so the first CAS-filtered UPDATE
+  // matches.
+  casRow.categoryIdIsNull = true;
   afterCallbacks.length = 0;
   // `vi.clearAllMocks()` above strips the implementation, and the enqueue
   // callback destructures the result — restore it every test.
@@ -1837,6 +1913,347 @@ describe("[146.2-02 / BL-01] a FILL that did not land cannot be reported as appl
     ).toEqual([]);
     // Refused BEFORE any side effect: the fold never ran either.
     expect(foldCalls()).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 159-06 / RANK-07 — THE FILL DISCRIMINATOR IS A TOCTOU UNLESS SQL DECIDES IT
+// ---------------------------------------------------------------------------
+
+/**
+ * The FILL arm reads `category_id IS NULL` and then, later, writes. Between
+ * those two moments sits a whole request: two more reads (count + boundaries),
+ * the clock-safety guard's analytics read, and the metadata parse. Two
+ * resubmits of the SAME wizard session — a double-clicked "submit", a retry
+ * fired while the first was still in flight — both read NULL, both conclude
+ * "never classified, safe to fill", and both write.
+ *
+ * WHAT THAT COSTS, stated as economics and not as hygiene. The two requests do
+ * not have to agree: the user can edit the classification between the submit
+ * that hung and the retry. Whichever UPDATE lands SECOND silently overwrites
+ * the first, and `asset_class` is the ANNUALIZATION CLOCK (#597 part 2). The
+ * strategy's stored Sharpe/Sortino/Calmar/CAGR are computed once, from the
+ * dailies the fold committed, under whichever clock the worker read — so the
+ * surviving label and the surviving numbers can name DIFFERENT clocks, with no
+ * post-creation editor anywhere in the product to repair either.
+ *
+ * AND BOTH WRITERS ARE TOLD IT WORKED — the BL-01 class, arrived at from a new
+ * direction. PostgREST reports NO error when an UPDATE matches zero rows, so a
+ * raced-out writer receives byte-identically what a winner receives. BL-01 made
+ * `applyCsvMetadataUpdate` stop answering "applied" to a FAILED update; a
+ * matched-nothing update is the same lie with a different mechanism.
+ *
+ * THE FIX THESE CASES PIN: the check and the set become ONE statement —
+ * `.is("category_id", null)` on the UPDATE chain — and the row count is
+ * OBSERVED via `.select("id")`, because that is the only thing that
+ * distinguishes the two writers. The loser is then refused honestly, and its
+ * remedy is real: resubmitting reads a now-non-NULL `category_id` and takes the
+ * ALREADY-CLASSIFIED arm, which echoes 200 when the two agree and 409 naming
+ * both values when they do not. Divergence resolves LOUDLY instead of
+ * last-writer-wins.
+ */
+
+/** Two same-session resubmits, both arriving on a never-classified row. */
+async function raceTwoFills() {
+  arm23505({
+    id: EXISTING_ID,
+    name: "Alpha",
+    status: "pending_review",
+    category_id: null,
+    asset_class: "traditional",
+  });
+  armCommitted2024();
+
+  const responses = await Promise.all([
+    postWithMetadata(SERIES_2024, {
+      asset_class: "crypto",
+      category_id: CATEGORY_ID,
+    }),
+    postWithMetadata(SERIES_2024, {
+      asset_class: "crypto",
+      category_id: CATEGORY_ID,
+    }),
+  ]);
+  return {
+    responses,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    winners: responses.filter((r: any) => r.status === 200),
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    losers: responses.filter((r: any) => r.status !== 200),
+  };
+}
+
+/** The FILL arm's "did not land" warn lines, so the RESULT KIND is assertable
+ * (the route interpolates it) — that is where `raced` and `update_failed` stay
+ * distinguishable after both funnel into the same refusal. */
+function fillDidNotLandWarnings(): string[] {
+  return vi
+    .mocked(console.warn)
+    .mock.calls.map((c) => String(c[0]))
+    .filter((line) => line.includes("classification FILL did not land"));
+}
+
+/** Sentry captures from the metadata UPDATE step — an INFRASTRUCTURE fault
+ * signal. A lost race is not one. */
+function metadataUpdateCaptures(): unknown[] {
+  return vi
+    .mocked(captureToSentry)
+    .mock.calls.filter(
+      (c) =>
+        (c[1] as { tags?: { step?: string } } | undefined)?.tags?.step ===
+        "metadata-update",
+    );
+}
+
+describe("[159-06 / RANK-07] two same-session resubmits race the FILL arm — SQL decides the winner", () => {
+  it("🔴 THE RACE: two concurrent FILLs on one never-classified row — exactly ONE may report the repair", async () => {
+    const { winners, losers } = await raceTwoFills();
+    await flushAfter();
+
+    // Load-bearing precondition: BOTH requests genuinely reached the write.
+    // Without this the case could pass by one of them refusing earlier for an
+    // unrelated reason, and would prove nothing about the race.
+    expect(
+      updateCalls,
+      "only one request reached the metadata UPDATE — this case is not " +
+        "exercising the race it claims to exercise",
+    ).toHaveLength(2);
+
+    expect(
+      winners.length,
+      "BOTH concurrent resubmits were told their classification was applied. " +
+        "Only one UPDATE survives, so the other user-visible claim is false — " +
+        "and when the two submissions disagree, the loser's asset_class (the " +
+        "annualization clock, #597 part 2) is silently overwritten while its " +
+        "author is told it landed, on a row whose stored Sharpe and CAGR no " +
+        "editor can repair",
+    ).toBe(1);
+    expect(losers).toHaveLength(1);
+  });
+
+  it("🔴 NO FALSE RECEIPT: the raced-out writer gets the refusal, never the FILL's success copy", async () => {
+    const { losers } = await raceTwoFills();
+    await flushAfter();
+
+    const loser = losers[0];
+    expect(
+      loser,
+      "the raced-out writer received a 200 — PostgREST reports no error on a " +
+        "zero-row UPDATE, so without counting rows a loser is byte-identical " +
+        "to a winner (the BL-01 false-receipt class, new mechanism)",
+    ).toBeDefined();
+    expect(loser.status).toBe(503);
+    const body = await loser.json();
+    expect(body.ok).toBe(false);
+    expect(body.code).toBe("CSV_PERSIST_FAIL");
+    expect(
+      String(body.human_message ?? ""),
+      "the raced-out writer was handed the FILL's success sentence — a user " +
+        "told the repair happened does not retry, and the retry is the whole " +
+        "remedy: it reads the now-non-NULL category_id and adjudicates any " +
+        "divergence at the 409",
+    ).not.toContain("so we applied them to it now");
+    expect(String(body.human_message ?? "").toLowerCase()).toContain(
+      "did not land",
+    );
+
+    // THE RESULT KIND, not just the status: a lost race and a broken UPDATE
+    // share the refusal but must not share the diagnosis.
+    expect(
+      fillDidNotLandWarnings().join(" | "),
+      "the lost race was logged as something other than a race — the operator " +
+        "reading this line cannot tell a contention problem from an RLS/SQL " +
+        "fault",
+    ).toContain("raced");
+    expect(
+      metadataUpdateCaptures(),
+      "a lost race paged Sentry as an infrastructure fault — contention is " +
+        "the system working, and alerting on it trains the alert away",
+    ).toEqual([]);
+  });
+
+  it("CONTROL: a genuine UPDATE error is still update_failed — an error is not a race", async () => {
+    // The distinctness pin. Both outcomes end at the same honest 503, so the
+    // only thing keeping them apart is the kind the route names and whether it
+    // treats the event as an infrastructure fault.
+    arm23505({
+      id: EXISTING_ID,
+      name: "Alpha",
+      status: "pending_review",
+      category_id: null,
+      asset_class: "traditional",
+    });
+    armCommitted2024();
+    updateOutcome.error = {
+      code: "42501",
+      message: "new row violates row-level security policy",
+    };
+
+    const res = await postWithMetadata(SERIES_2024, {
+      asset_class: "crypto",
+      category_id: CATEGORY_ID,
+    });
+    await flushAfter();
+
+    expect(res.status).toBe(503);
+    const body = await res.json();
+    expect(body.code).toBe("CSV_PERSIST_FAIL");
+    const warnings = fillDidNotLandWarnings().join(" | ");
+    expect(
+      warnings,
+      "an RLS denial was reported as a lost race — the operator chases " +
+        "contention that does not exist while the policy stays broken",
+    ).toContain("update_failed");
+    expect(warnings).not.toContain("raced");
+    expect(
+      metadataUpdateCaptures(),
+      "a real UPDATE failure stopped reaching Sentry — NEW-C14-04's " +
+        "alertability was collateral damage of the CAS",
+    ).toHaveLength(1);
+  });
+
+  it("WIRING PIN: the FILL's UPDATE carries the CAS predicate the route — not the mock — decided", async () => {
+    // Neuterable by construction: delete `.is("category_id", null)` from the
+    // route's chain and this reds. Only the route can put that filter here.
+    arm23505({
+      id: EXISTING_ID,
+      name: "Alpha",
+      status: "pending_review",
+      category_id: null,
+      asset_class: "traditional",
+    });
+    armCommitted2024();
+
+    const res = await postWithMetadata(SERIES_2024, {
+      asset_class: "crypto",
+      category_id: CATEGORY_ID,
+    });
+    await flushAfter();
+
+    expect(res.status).toBe(200);
+    expect(updateCalls).toHaveLength(1);
+    expect(
+      updateCalls[0].isFilters,
+      "the FILL's UPDATE went out without the compare-and-set premise — the " +
+        "discriminator is re-checked nowhere, so the check and the set are two " +
+        "statements again and any concurrent resubmit can slip between them",
+    ).toEqual({ category_id: null });
+    // The row scope is unchanged: still this strategy, still this user.
+    expect(updateCalls[0].eqFilters).toEqual({
+      id: EXISTING_ID,
+      user_id: USER_ID,
+    });
+  });
+
+  it("ANTI-REGRESSION: the CAS does not refuse a FRESH create — a fresh row's category_id is NULL too", async () => {
+    // T-159-20. The fresh arm reaches the same UPDATE, and the fold's INSERT
+    // never writes `category_id`, so the predicate matches there by
+    // construction. If this reds, the CAS started refusing legitimate first
+    // writes — the strategy persists with no classification at all and the
+    // route says so, which is worse than the race it was closing.
+    const res = await postWithMetadata(SERIES_2024, {
+      asset_class: "crypto",
+      category_id: CATEGORY_ID,
+    });
+    await flushAfter();
+
+    expect(res.status).toBe(200);
+    expect(updateCalls).toHaveLength(1);
+    expect(updateCalls[0].payload).toMatchObject({
+      asset_class: "crypto",
+      category_id: CATEGORY_ID,
+    });
+  });
+
+  it("🔴 INVERTED ROLES: the FRESH arm loses the CAS too — a raced-out fresh writer must not get `ok: true`", async () => {
+    // Red-team of RANK-07. The CAS predicate rides BOTH arms, but the refusal
+    // was qualified on `outcome.fillClassification`, so a raced FRESH writer
+    // fell straight through to the 200 success envelope — a false receipt in
+    // exactly the double-submit scenario this phase closes, with the loser's
+    // category_id and asset_class (the annualization clock, #597 part 2)
+    // silently discarded.
+    //
+    // Roles inverted relative to raceTwoFills(): writer B takes the FILL arm
+    // and its CAS lands first; writer A believes it is the fresh writer and
+    // matches zero rows. Driven sequentially on purpose — the hazard is the
+    // committed DB STATE A's UPDATE meets, and sequencing makes which writer
+    // loses deterministic instead of interleaving-dependent.
+    arm23505({
+      id: EXISTING_ID,
+      name: "Alpha",
+      status: "pending_review",
+      category_id: null,
+      asset_class: "traditional",
+    });
+    armCommitted2024();
+    const bRes = await postWithMetadata(SERIES_2024, {
+      asset_class: "crypto",
+      category_id: CATEGORY_ID,
+    });
+    // Load-bearing precondition: B genuinely won the CAS. Without this, A
+    // could be refused for some unrelated reason and this case would prove
+    // nothing.
+    expect(bRes.status).toBe(200);
+    expect(casRow.categoryIdIsNull).toBe(false);
+
+    // Writer A: the fold succeeds for it (no 23505), so the route takes the
+    // FRESH arm — and its CAS still matches zero rows.
+    rpcMock.mockImplementation(async (name: string) => {
+      if (name === "finalize_csv_strategy_with_returns") {
+        return { data: EXISTING_ID, error: null };
+      }
+      return { data: null, error: null };
+    });
+
+    const aRes = await postWithMetadata(SERIES_2024, {
+      asset_class: "traditional",
+      category_id: OTHER_CATEGORY_ID,
+    });
+    await flushAfter();
+
+    expect(updateCalls, "writer A never reached the metadata UPDATE").toHaveLength(2);
+    expect(
+      aRes.status,
+      "the raced-out FRESH writer was told its submission succeeded while its " +
+        "asset_class — the annualization clock — was discarded by the CAS. " +
+        "PostgREST reports no error on a zero-row UPDATE, so nothing else in " +
+        "the response distinguishes this from a real success (BL-01: no false " +
+        "receipts)",
+    ).not.toBe(200);
+    const body = await aRes.json();
+    expect(body.ok).toBe(false);
+    expect(body.code).toBe("CSV_PERSIST_FAIL");
+    // The copy must be HONEST for this arm: the fill arm's "nothing was
+    // changed" is false here — writer A's strategy row is committed.
+    expect(String(body.human_message ?? "")).not.toContain("nothing was changed");
+    expect(String(body.human_message ?? "").toLowerCase()).toContain("saved");
+    // Contention is not an outage: no Sentry page for the lost race (B's
+    // successful write left no capture either).
+    expect(metadataUpdateCaptures()).toEqual([]);
+  });
+
+  it("CONTROL: a fresh writer that wins the CAS is untouched — and a fresh 'noop'/failed metadata write still 200s", async () => {
+    // The anti-overreach pin for the fix: only 'raced' may refuse on the fresh
+    // arm. `update_failed` answering 200 on a fresh create is the deliberate
+    // long-standing call (the strategy row persisted; failing the request over
+    // a metadata write is worse), and dropping the arm qualifier wholesale
+    // would have flipped it.
+    updateOutcome.error = {
+      code: "42501",
+      message: "new row violates row-level security policy",
+    };
+
+    const res = await postWithMetadata(SERIES_2024, {
+      asset_class: "crypto",
+      category_id: CATEGORY_ID,
+    });
+    await flushAfter();
+
+    expect(
+      res.status,
+      "a FAILED metadata write on a FRESH create started rolling the request " +
+        "back — the persisted strategy is not un-persisted by a 503",
+    ).toBe(200);
   });
 });
 

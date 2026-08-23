@@ -587,16 +587,45 @@ export function annualizationPeriods(
 
 /**
  * Trading periods per year for a BLENDED (multi-strategy) return series, keyed
- * off the constituent legs' `asset_class`. √365 if ANY constituent leg is
- * crypto, else √252. Rationale (locked #597 blend rule): the blended daily
- * return series is calendar-daily the moment a crypto leg is present, so it has
- * ~365 obs/year; a pure-tradfi blend stays √252. An empty or all-unknown blend
- * keeps the 252 pre-#597 default byte-identical.
+ * off the constituent legs' `asset_class`. √365 if ANY constituent leg is crypto
+ * OR of UNKNOWN class, else √252. Rationale (locked #597 blend rule): the
+ * blended daily return series is calendar-daily the moment a crypto leg is
+ * present, so it has ~365 obs/year; a pure-tradfi blend stays √252.
+ *
+ * SCOPE (#597 law — do not widen): this is the RISK basis only. Volatility,
+ * Sharpe and Sortino ride this FREQUENCY clock; RETURN/CAGR ride the CALENDAR
+ * clock (`calendarYears`, 365.25 days) and are asset-class-invariant. A change
+ * here must never move a RETURN number.
+ *
+ * EMPTY vs ALL-UNKNOWN — two different answers, deliberately (RANK-06):
+ * - An EMPTY `legs` array keeps the 252 pre-#597 default byte-identical. With no
+ *   legs there is no leg whose class could have been dropped, so there is no gap
+ *   to fail safe about.
+ * - An ALL-UNKNOWN blend is now 365, NOT 252. `strategies.asset_class` is
+ *   `NOT NULL DEFAULT 'traditional'` in the DB (migration 20260709130000), so a
+ *   leg reaching this helper with `asset_class` absent/null/undefined is never a
+ *   strategy that IS traditional — it is a CALLER PROJECTION GAP (a select list
+ *   that dropped the column; the v1.11 "per-key refs invisible to a naive diff"
+ *   class). Resolving that gap to 252 understates a crypto blend's annualized
+ *   vol by the √(365/252) factor (~17%) and correspondingly INFLATES its Sharpe
+ *   (~×1.20) on the allocator-facing ranking, i.e. the silent failure direction
+ *   is the flattering one. Unknown therefore fails toward the CONSERVATIVE
+ *   (crypto) clock: an over-stated vol is visible and honest, an under-stated
+ *   one is a trust-integrity defect. The Python composite path closed this same
+ *   class earlier via `closed_sets.py::CRYPTO_VENUES`; this is the TS half.
  *
  * The blend sibling of `annualizationPeriods` — the ONE place that maps a set of
  * legs → periods, so every wave-2/3 blend KPI call site derives its basis from
- * here rather than hand-rolling a second rule. Exact-match 'crypto' only (no
- * case/alias widening): the DB stores lowercase 'crypto' | 'traditional'.
+ * here rather than hand-rolling a second rule (MD-01: no call site may grow a
+ * local 365/252 ternary). NOTE the deliberate asymmetry with
+ * `annualizationPeriods`, whose unknown→252 default is unchanged: that helper
+ * keys off a SINGLE strategy's own stored class, where "unknown" cannot arise
+ * from a blend-leg projection gap.
+ *
+ * Exact-match 'crypto' only for NON-NULL values (no case/alias widening): the DB
+ * stores lowercase 'crypto' | 'traditional', and a caller that DID supply a class
+ * string is not a projection gap — so 'CRYPTO' or any unrecognized non-null
+ * string still reads traditional √252. RANK-06 widened NULLISH, not matching.
  *
  * Structural param type (`{ asset_class?: string | null }`) — this module
  * imports ONLY zod (module-header rule); importing StrategyForBuilder would risk
@@ -605,7 +634,10 @@ export function annualizationPeriods(
 export function blendPeriodsPerYear(
   legs: ReadonlyArray<{ asset_class?: string | null }>,
 ): number {
-  return legs.some((l) => l.asset_class === "crypto") ? 365 : 252;
+  // EMPTY → 252 falls out of `.some()` on an empty array — no guard needed.
+  return legs.some((l) => l.asset_class === "crypto" || l.asset_class == null)
+    ? 365
+    : 252;
 }
 
 /**
@@ -716,6 +748,45 @@ export function isComputedAnalytics(
   status: string | null | undefined,
 ): boolean {
   return status === "complete" || status === "complete_with_warnings";
+}
+
+// --- RANK-01: the published-percentile rank gate (Phase 159) ---------------
+// The strategy_analytics column that decides whether a row may participate in a
+// PUBLIC ranking. Kept as its own constant, deliberately NOT appended to
+// queries.ts's PERCENTILE_ANALYTICS_COLUMNS: that list is mirrored member-for-
+// member by the csv-finalize CLOCK_SAFETY_KPI_COLUMNS prose, so growing it
+// would silently falsify three comments. The projection sites compose the two.
+export const PERCENTILE_GATE_COLUMN = "computation_status";
+
+// Whether an embedded strategy_analytics row may take part in a published
+// percentile ranking — as a SUBJECT (it receives a rank) and as a POPULATION
+// member (it shifts everyone else's).
+//
+// WHY A STATUS GATE AND NOT A NULL CHECK: a `failed` computation can still hold
+// KPI values from an earlier attempt. 159-CENSUS.md measured this in PROD — 17
+// of 18 published strategies carried a `failed` analytics row that still held
+// BOTH sharpe and cagr, so every `IS NOT NULL` predicate admitted them and dead
+// numbers were ranking against live ones. Only the status distinguishes them.
+//
+// This is the ONE gate for both TS percentile callers (getPercentiles and
+// getOwnRowPercentiles in queries.ts). It delegates to isComputedAnalytics
+// rather than re-deriving status semantics, so `complete_with_warnings` — a
+// terminal SUCCESS — stays ranked; a local exact-match against the bare
+// `complete` value would silently unrank every warned-but-valid strategy.
+// (Phrased without the literal comparison operator on purpose: the SI-01
+// census in complete-status-scan.test.ts greps raw source, so writing that
+// pattern even in prose would force an allowlist bump and blind the guard to
+// a real one landing in this file later.)
+//
+// The SQL twin is the cohort predicate in get_verified_cohort_rank
+// (supabase/migrations/20260821120000_*): its
+// `IN ('complete','complete_with_warnings')` list mirrors isComputedAnalytics
+// exactly, which is what makes that migration's parity-by-construction claim a
+// true sentence. Change one, change the other.
+export function isRankableAnalyticsRow(
+  row: { computation_status?: string | null } | null | undefined,
+): boolean {
+  return isComputedAnalytics(row?.computation_status);
 }
 
 // --- Series state (Phase 147 / SCEN-01) ------------------------------------

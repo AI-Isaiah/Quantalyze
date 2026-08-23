@@ -231,3 +231,50 @@ describe("discovery page — single-key per-basis series wiring (WR-01 regressio
     expect(readsByKind()).toEqual([]);
   });
 });
+
+/**
+ * Phase 159 (159-03 / RANK-02) — CALL-SITE pin for the analytics-projection
+ * variant, in the same "test the wiring, not just the helper" spirit as the
+ * WR-01 block above.
+ *
+ * `getStrategyDetail(id, slug, "discovery")`'s THIRD argument opts this page
+ * into the wider projection. Its default is `"public"`, which omits
+ * `daily_returns`, `returns_series`, `data_quality_flags` and
+ * `metrics_json_by_basis` — every one of which this page reads. Drop the
+ * argument (a merge conflict, a codemod, a refactor) and NOTHING else in the
+ * suite reddens: the projection pins in `lib/queries.test.ts` exercise the
+ * FUNCTION with the variant passed explicitly, this file mocks `@/lib/queries`
+ * wholesale, and the phase-147 guard greps this page's source for
+ * `resolveDailyReturnSeries(` / `returns_series`, both of which survive the
+ * argument going missing. In production the page would then render the
+ * "still computing" placeholder for EVERY strategy — silent and total.
+ *
+ * Neuter check: delete the `"discovery"` argument in page.tsx → this reddens
+ * on the call-args assertion and nothing else does.
+ */
+describe("discovery page — RANK-02 analytics projection variant (call-site wiring)", () => {
+  it("requests the 'discovery' projection by name, never the 'public' default", async () => {
+    const { admin } = mockAdminSeries({});
+    vi.mocked(createAdminClient).mockReturnValue(admin as never);
+    // The suite does not auto-clear mocks (no `clearMocks` in vitest.config.ts),
+    // so calls accumulate across tests in this file. Clear the CALL LOG only —
+    // `mockClear` leaves the beforeEach `mockResolvedValue` implementation in
+    // place — and this assertion is then order-independent.
+    vi.mocked(getStrategyDetail).mockClear();
+
+    await StrategyDetailPage({
+      params: Promise.resolve({ slug: SLUG, strategyId: STRATEGY_ID }),
+    });
+
+    expect(vi.mocked(getStrategyDetail).mock.calls).toHaveLength(1);
+    // Positional, whole-argument-list equality: asserting only that the third
+    // argument is truthy would survive a codemod that reorders the parameters,
+    // and asserting `toHaveBeenCalledWith(expect.anything(), ...)` would let a
+    // dropped slug through — the slug is the G11.E.7 cross-category guard.
+    expect(vi.mocked(getStrategyDetail).mock.calls[0]).toEqual([
+      STRATEGY_ID,
+      SLUG,
+      "discovery",
+    ]);
+  });
+});

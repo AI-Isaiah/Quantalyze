@@ -35,9 +35,16 @@ import { describe, expect, it } from "vitest";
  *     `factsheet/[id]/v2/page.tsx` carries all three legitimately.
  *
  *     Tolerated by construction, not by exception:
- *       - `strategy_analytics (*)` splats (queries.ts, discovery reads) — the
- *         splat selects BOTH columns, and never names `daily_returns`, so it is
- *         never a candidate in the first place.
+ *       - the `strategy_analytics (*)` splat in `getMyStrategies` (queries.ts)
+ *         — the splat selects BOTH columns, and never names `daily_returns`, so
+ *         it is never a candidate in the first place. Phase 159 (159-03 /
+ *         RANK-02) converted the OTHER splats to explicit projections, and the
+ *         discovery-detail one now NAMES `daily_returns` — it satisfies this
+ *         layer honestly by also naming `returns_series`, which is the rule
+ *         rather than a tolerance. Note this layer scans `.select(...)`
+ *         ARGUMENTS, so a payload built in a named constant and passed as a
+ *         variable is not inspected here; the per-surface Layer B pins below
+ *         are what cover those readers.
  *       - `csv_daily_returns`, `mtm_daily_returns`, `smoothed_mtm_daily_returns`
  *         — different columns. The word-boundary regex excludes them.
  *       - `PUBLIC_ANALYTICS_COLUMNS` — includes `returns_series`, not

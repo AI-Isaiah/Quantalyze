@@ -36,7 +36,12 @@ export default async function StrategyDetailPage({
   // mismatches at the SQL layer (returns null → not-found UI). Without
   // this, /discovery/<wrong-slug>/<strategyId> renders the full chart
   // suite + RSC payload for any published strategy.
-  const result = await getStrategyDetail(strategyId, slug);
+  // Phase 159 (159-03 / RANK-02): "discovery" opts this AUTHED surface into the
+  // wider analytics projection — data_quality_flags, daily_returns,
+  // returns_series and metrics_json_by_basis, every one of which is read below.
+  // The default "public" variant deliberately omits them, so a future ANON
+  // caller of getStrategyDetail cannot inherit this surface's column set.
+  const result = await getStrategyDetail(strategyId, slug, "discovery");
   if (!result) notFound();
 
   const { strategy, analytics, disclosureTier } = result;
@@ -120,8 +125,12 @@ export default async function StrategyDetailPage({
     // surface and the factsheet route cannot diverge — WR-01 was exactly this
     // page keeping an inline 4-arg copy when the smoothed 5th arg landed
     // (Smoothed segment enabled, charts permanently cash). getStrategyDetail
-    // selects `strategy_analytics (*)` (queries.ts) so `computation_status`
-    // arrives on the row; `{}` for every non-options single-key strategy keeps
+    // is called above with the "discovery" variant, whose explicit projection
+    // (queries.ts, Phase 159/RANK-02) names `computation_status` as a MUST-STAY
+    // column precisely so it still arrives on the row — it used to arrive via a
+    // wildcard analytics embed, which no longer exists. Narrowing that constant
+    // without this read in mind is the way to break this line silently.
+    // `{}` for every non-options single-key strategy keeps
     // the payload byte-identical. The series rows live behind deny-all RLS, so
     // the assembly takes the service-role factory as a thunk — the handle is
     // constructed only when a cheap gate holds (hot path stays roundtrip-free).
