@@ -666,6 +666,7 @@ governs by CONTENT TYPE, and their content is prose/forms — rung 1.
   export and breaks `minimatch@3`/eslint — unfixable without replacing the lint toolchain.
   Left to Dependabot. Follow-up: re-check the `sharp` override once `next` bumps its declared
   `sharp` range past 0.34.5.
+- **`anon`/`authenticated` hold TRUNCATE (and REFERENCES, TRIGGER) on `public.api_keys` — TRUNCATE bypasses RLS entirely** (measured on PROD `khslejtfbuezsmvmtsdn`, 2026-08-23, during the Phase-160 B-M1 census via `information_schema.role_table_grants`). RLS filters ROWS; `TRUNCATE` does not consult row policies, so a table-level TRUNCATE grant is not gated by the tenancy policies that protect every other verb. Almost certainly Supabase's default public-schema `GRANT ALL` rather than a deliberate grant — but it is a live trust-boundary grant held by the browser roles. NOT in Phase 160's RANK-03/RANK-04 scope (that phase withdraws INSERT only, per D-05); recorded here rather than widened into it. Next step: audit which public tables carry the same default TRUNCATE grant before deciding a blanket revoke — a one-table fix would be a point-fix of a class.
 - **CSP uses `unsafe-inline`/`unsafe-eval`** — move to nonce-based CSP.
 - **VCR cassette over-redaction** — misses token/hmac/digest/nonce (and over-matches
   signal/signedAt/pubkey); replace with per-broker allowlist.

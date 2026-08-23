@@ -2,8 +2,8 @@
 
 **Artifact:** `160-CENSUS.md` (D-01 / B-D1 decision gate)
 **Authored:** 2026-08-23 (scaffold, plan 160-01 Task 1)
-**Executed against PROD:** _(blank until plan 160-01 Task 2 — orchestrator, read-only)_
-**PROD project ref (confirmed at execution):** _(to be recorded at Task 2)_ — the expected ref is `khslejtfbuezsmvmtsdn` (name `quantalyze`), confirmed against the project list **before any query runs**; the TEST ref `qmnijlgmdhviwzwfyzlc` (`quantalyze-test`) is NOT used. If only TEST is reachable, HALT and surface — never substitute TEST numbers for a census that gates PROD money-math.
+**Executed against PROD:** 2026-08-23 (plan 160-01 Task 2, orchestrator, read-only)
+**PROD project ref (confirmed at execution):** `khslejtfbuezsmvmtsdn` — confirmed ACTIVE_HEALTHY in the project list before the first query ran — the expected ref is `khslejtfbuezsmvmtsdn` (name `quantalyze`), confirmed against the project list **before any query runs**; the TEST ref `qmnijlgmdhviwzwfyzlc` (`quantalyze-test`) is NOT used. If only TEST is reachable, HALT and surface — never substitute TEST numbers for a census that gates PROD money-math.
 
 ## Purpose
 
@@ -73,7 +73,53 @@ GROUP BY 1 ORDER BY 1;
 
 ### Results — Q1
 
-RESULTS: PENDING
+**Q1 returned ZERO ROWS.** There is no un-attested `api_keys` population since the
+2026-08-11 cutoff — the split by exchange × linkage × wizard carriage is empty because the
+filtered set itself is empty.
+
+| exchange | unattested | linked_single | linked_composite | wizard_carriage |
+| --- | --- | --- | --- | --- |
+| _(no rows)_ | 0 | 0 | 0 | 0 |
+
+**Anti-vacuity control (added at Task 2 — an empty result must be a MEASURED zero, not an
+empty table).** A separate read-only control query over the whole table:
+
+| total_rows | attested_null | attested_set | since_cutoff | attested_matches_exchange | oldest_row | newest_row |
+| --- | --- | --- | --- | --- | --- | --- |
+| 31 | 0 | 31 | 2 | 31 | 2026-04-05 | 2026-08-21 |
+
+The table holds 31 rows spanning 2026-04-05 → 2026-08-21; **all 31 carry a non-NULL
+`attested_venue`, and all 31 satisfy `attested_venue = exchange`**. Q1's emptiness is
+therefore a real measurement of a real population, not a query that matched nothing because
+nothing exists.
+
+**The two post-cutoff rows, characterised** (both are attested — the interesting finding):
+
+| api_key_id | exchange | attested_venue | created_on | linked_single | linked_composite | wizard_carriage |
+| --- | --- | --- | --- | --- | --- | --- |
+| fe3057e5-e284-4b8f-92f1-2d1a6a9a7bfc | mt5 | mt5 | 2026-08-13 | true | false | true |
+| 136ad336-c145-4c52-9130-7409e40f1540 | mt5 | mt5 | 2026-08-21 | true | false | true |
+
+Both are MT5 and both arrived attested. ⚠️ **This does NOT mean the hole is closed** — see
+the grant evidence below. It means no key has been minted through the browser-INSERT path
+since the backfill; the MT5 flow derives its venue server-side already
+(`create-with-key:1089`, the explicit non-change). The trigger has had nothing to scrub.
+
+**Grant evidence — the hole is open (read-only `information_schema` probe, added at Task 2).**
+The census would be misread as "nothing to fix" without this:
+
+| grantee | privileges held on `public.api_keys` |
+| --- | --- |
+| anon | DELETE, INSERT, REFERENCES, TRIGGER, TRUNCATE |
+| authenticated | DELETE, INSERT, REFERENCES, TRIGGER, TRUNCATE |
+
+`INSERT` is still held by the browser roles. The phase's writer + REVOKE arc is measuring an
+**open** hole with **zero accumulated contamination** — the best possible time to close it.
+
+> ⚠️ **Out-of-scope adjacency, recorded not acted on:** `anon` and `authenticated` also hold
+> **TRUNCATE**, which bypasses RLS entirely (RLS filters rows; TRUNCATE does not consult it).
+> This is almost certainly Supabase's default public-schema `GRANT ALL` and is NOT part of
+> RANK-03/RANK-04. It is logged to `TODOS.md` rather than widened into this phase.
 
 ---
 
@@ -91,7 +137,12 @@ SELECT count(*) FROM api_keys
 
 ### Results — Q1b
 
-RESULTS: PENDING
+| count |
+| --- |
+| 0 |
+
+Zero, as post-verify (a) of `20260811210000` predicted. The dated backfill boundary still
+describes PROD accurately: nothing older than the cutoff was left un-attested.
 
 ---
 
@@ -128,7 +179,26 @@ ORDER BY k.exchange, s.id;
 
 ### Results — Q2
 
-RESULTS: PENDING
+**Q2 returned ZERO ROWS.** No strategy is linked to an un-attested key, so no strategy
+can carry a stamp that disagrees with its venue-derived expectation.
+
+| strategy_id | api_key_id | exchange | stamped | venue_derived | wizard_carriage | status |
+| --- | --- | --- | --- | --- | --- | --- |
+| _(no rows)_ | | | | | | |
+
+This follows necessarily from the control above: the candidate predicate is
+`attested_venue IS NULL`, and `attested_null = 0` across the entire table — so the JOIN has
+no left side, for any linkage. **There are zero `stamped <> venue_derived` rows because
+there are zero un-attested keys**, not because the comparison was skipped.
+
+Per-exchange shape of the full (fully-attested) population, for reference:
+
+| exchange | rows_total | unattested |
+| --- | --- | --- |
+| bybit | 5 | 0 |
+| deribit | 13 | 0 |
+| mt5 | 4 | 0 |
+| okx | 9 | 0 |
 
 ---
 
@@ -150,9 +220,19 @@ written here, and Task 2 applies it to the numbers it measured.
 
 **The decision (filled at Task 2 — never left blank):**
 
-> _(Task 2 writes either the explicit candidate strategy ids from Q2 where
-> `stamped <> venue_derived`, or the exact sentence "zero candidates — plan 160-06 is a
-> recorded no-op".)_
+> **zero candidates — plan 160-06 is a recorded no-op.**
+>
+> Applied mechanically to the numbers measured above: the candidate list is exactly the Q2
+> rows where `stamped <> venue_derived`; Q2 returned zero rows (necessarily — `attested_null`
+> is 0 across all 31 rows). No strategy needs re-annualization; no blanket backfill is
+> licensed by this result.
+>
+> Per threshold clause (a), **the writer + REVOKE arc (B-1..B-3) proceeds regardless** — and
+> the grant probe above confirms `anon`/`authenticated` still hold `INSERT`, so the hole this
+> phase closes is open right now. Scope is the FULL B-1..B-4 cut, not the minimal
+> B-4-alone-with-null-guard cut: there is no accumulated contamination to constrain it, and
+> the null-attestation guard (D-07) still ships because a NULL attestation remains
+> *reachable* (the scrub trigger is live and the browser grant is open until PR-2 lands).
 
 ---
 
@@ -167,10 +247,10 @@ an abort message that reports the pin it actually used (one declaration, three u
 
 | Pin | Source | Value (hand-typed at Task 2) | Teeth |
 | --- | --- | --- | --- |
-| `c_pin_unattested` — un-attested rows since the 2026-08-11 cutoff | Q1, sum of the `unattested` column | _pending_ | **ENFORCED** — this is the population whose drift changes the B-D1 decision |
-| `c_pin_unattested_pre` — pre-cutoff residual | Q1b | _pending_ | **ENFORCED** — a non-zero residual that moves means the backfill's dated boundary no longer describes PROD |
-| `c_pin_exchanges` — per-exchange split | Q1, one literal per exchange row | _pending_ | **ENFORCED** — re-cut TOGETHER with `c_pin_unattested`; the two must move as one |
-| `c_pin_total` — TOTAL `api_keys` row count | interpretive, counts only | _pending_ | **REPORTED, NEVER ENFORCED** |
+| `c_pin_unattested` — un-attested rows since the 2026-08-11 cutoff | Q1, sum of the `unattested` column | **0** | **ENFORCED** — this is the population whose drift changes the B-D1 decision |
+| `c_pin_unattested_pre` — pre-cutoff residual | Q1b | **0** | **ENFORCED** — a non-zero residual that moves means the backfill's dated boundary no longer describes PROD |
+| `c_pin_exchanges` — per-exchange split | Q1, one literal per exchange row | **(empty set — Q1 returned no rows; the guard asserts the un-attested split is empty, not a list of literals)** | **ENFORCED** — re-cut TOGETHER with `c_pin_unattested`; the two must move as one |
+| `c_pin_total` — TOTAL `api_keys` row count | interpretive, counts only | 31 (2026-08-23) | **REPORTED, NEVER ENFORCED** |
 
 ### Why the total is reported and never enforced
 
