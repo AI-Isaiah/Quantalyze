@@ -552,35 +552,39 @@ true for 146 and half of 142–145, and **false for 141**.
 
 ## 🟡 FIX MID-TERM
 
-### 🔴 `.gitleaks.toml` is NOT taking effect in CI — the secret-scan allowlist is inert (raised 2026-08-23, Phase-160 ship)
+### ✅ FIXED (pending CI confirmation) — `.gitleaks.toml` was not loaded in CI; the allowlist was inert (raised + fixed 2026-08-23, Phase-160 ship)
 
-**Priority:** P2 — CI integrity. Not an exposure (the gate is *stricter* than designed, not leakier),
-but it silently invalidates ~15 allowlist entries and one canary test.
+**Was:** the `secret-scan` gate ran on gitleaks' DEFAULT ruleset with **every allowlist entry in
+`.gitleaks.toml` silently inert**. Not an exposure — the gate was *stricter* than designed, not
+leakier — but it invalidated ~15 allowlist entries and made `gitleaks-allowlist.test.ts` pin a config
+the gate never consulted.
 
-**Evidence.** CI's `secret-scan` job failed on `src/app/api/keys/validate-and-encrypt/route.test.ts`
-lines 635/649, rule `generic-api-key`, reported by exact path. That path is **blanket-allowlisted for
-every rule** in `.gitleaks.toml` (in the `[[allowlists]]` paths list; the entry dates to the v1.12
-CI-green commit). Locally, gitleaks 8.30.1 with `-c .gitleaks.toml` over the identical 6 commits and a
-byte-identical scan surface (both runs report `~137158 bytes`) finds **0**. Run against a probe tree,
-the same fixture value trips `generic-api-key` only at a **non-allowlisted** path. So the rule fires
-identically in both places; what differs is that the allowlist applies locally and does not in CI.
+**How it was proven** (reproduced, not inferred). Over the identical commit range:
 
-**Consequences.**
-- Every allowlisted fixture file (sFOX client tests, Deribit scope-validation tests, the H-0305 and
-  H-0535 redaction regressions, `.env.example`, `package-lock.json`, …) is unshielded in CI. Any PR
-  touching one can fail `secret-scan` for a reason the config says is exempt.
-- `src/__tests__/gitleaks-allowlist.test.ts` asserts allowlist behavior against a config the CI gate
-  does not honor — it cannot fail for the case that matters. (Per the house rule that a test which
-  cannot fail is worse than none, this one needs re-pointing once the config is wired.)
-- Historical allowlist entries were added in response to CI failures, so the wiring may have broken at
-  a specific action upgrade rather than never having worked. `ci.yml` pins
-  `gitleaks/gitleaks-action@v3.0.0` and passes `GITLEAKS_CONFIG: .gitleaks.toml`; v3 may expect a
-  different input name or a different resolution root than v2 did.
+| Run | Result |
+|---|---|
+| CI | 8 commits scanned, **leaks found: 2** |
+| local, `-c <config containing only `[extend] useDefault = true`>` | 8 commits scanned, **leaks found: 2** |
+| local, `-c .gitleaks.toml` | 8 commits scanned, **no leaks found** |
 
-**Closing it:** confirm how v3.0.0 resolves config (its action.yml / README), fix the wiring, and prove
-it by pushing a branch whose only change re-introduces a known-allowlisted fixture — the gate must go
-GREEN. While fixing, pin the scanner version and expose it as a local script (`npm run secret-scan`) so
-the gate becomes reproducible pre-push; today a green local gitleaks is **no evidence** about CI.
+CI's behavior is byte-identical to default-rules-only. ⚠️ Note the trap that hid this: **gitleaks
+auto-discovers `.gitleaks.toml` from the working directory**, so simply omitting `-c` locally does
+NOT test the no-config case — it silently loads the config anyway. A default-only config file is
+required to reproduce.
+
+**Root cause:** `ci.yml` passed `GITLEAKS_CONFIG: .gitleaks.toml`, a **relative** path, which the
+action resolves against its own cwd rather than the checked-out workspace. Now
+`${{ github.workspace }}/.gitleaks.toml`.
+
+**Verification:** this PR is its own canary. It carries the flagged fixture value in commit
+`bca31ba3`'s history, and gitleaks scans the whole PR commit range — so a later rename cannot remove
+it. The finding can therefore be suppressed **only** by the path allowlist. `secret-scan` going green
+on this PR is a positive proof the config is loaded; a red one falsifies the fix. Mark this item
+closed only on that green.
+
+**Residual, still worth doing:** the gate remains unreproducible locally without matching the
+scanner version the action downloads. Pin it and expose `npm run secret-scan` so the gate is runnable
+pre-push. Until then a green local gitleaks is weak evidence about CI.
 
 ### Two guard gaps on `keys/validate-and-encrypt` (raised 2026-08-23, Phase-160 closeout review)
 

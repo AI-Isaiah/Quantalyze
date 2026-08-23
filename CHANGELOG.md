@@ -63,14 +63,24 @@ than allowlisted, and the rename is verified inert: the route applies truthiness
 the `!api_secret` term still reddens all three cases. The new value trips the real scanner at no
 path, allowlisted or not.
 
-⚠️ **The interesting part is what the fix revealed.** `route.test.ts` is already blanket-allowlisted
-for every rule in `.gitleaks.toml` (the paths list, entry added back in the v1.12 CI-green commit).
-CI flagged it anyway, by exact path — and locally, the same config against the same commits produces
-zero findings at that path. The allowlist is therefore **not taking effect in CI**, which means every
-fixture the repo believes is shielded is unshielded there, and `gitleaks-allowlist.test.ts` pins a
-config the gate does not use. The gate is noisier than designed rather than leakier, so this is a
-CI-integrity defect, not an exposure. Booked in TODOS.md; not fixed here, because verifying a CI-only
-config change requires CI round-trips and this PR is not the place to iterate on that.
+⚠️ **The interesting part is what the fix revealed, and it is now also fixed.** `route.test.ts` is
+blanket-allowlisted for every rule in `.gitleaks.toml` (entry dates to the v1.12 CI-green commit),
+yet CI flagged it by exact path. Reproduced rather than guessed: over the identical commit range, CI
+and a local run using **only** `[extend] useDefault = true` both report `8 commits scanned / leaks
+found: 2`, while the same range with `-c .gitleaks.toml` reports none. The gate was running on the
+default ruleset with every allowlist entry inert — stricter than designed rather than leakier, so CI
+integrity rather than exposure.
+
+Cause: `ci.yml` passed `GITLEAKS_CONFIG` as a **relative** path, which the action resolves against its
+own cwd, not the workspace. Now absolute via `${{ github.workspace }}`. The trap that hid this for so
+long is worth remembering — **gitleaks auto-discovers `.gitleaks.toml` from the working directory**,
+so omitting `-c` locally does not test the no-config case; it silently loads the config and prints a
+reassuring "no leaks found".
+
+This PR verifies its own fix: it still carries the offending value in commit `bca31ba3`'s history,
+and gitleaks scans the entire PR commit range, so a later rename cannot remove it. Only the path
+allowlist can suppress that finding — so a green `secret-scan` here is positive proof the config is
+now loaded.
 
 ## [0.71.0.0] - 2026-08-23
 

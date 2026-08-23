@@ -1455,7 +1455,17 @@ jobs:
       - uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e  # v3.0.0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GITLEAKS_CONFIG: .gitleaks.toml
+          # ABSOLUTE path, deliberately. A bare `.gitleaks.toml` was silently
+          # NOT loaded: the action resolves it against its own cwd, not the
+          # checked-out workspace, so the gate ran on the DEFAULT ruleset with
+          # every allowlist entry in this file inert. Measured on PR #705 —
+          # `gitleaks git --log-opts=<base..head> -c <default-rules-only>`
+          # reproduces CI exactly (8 commits, 2 leaks) while the same range
+          # with `-c .gitleaks.toml` reports none. Symptom was a finding on
+          # src/app/api/keys/validate-and-encrypt/route.test.ts, a path this
+          # file has blanket-allowlisted since the v1.12 CI-green commit.
+          # Do not "simplify" this back to a relative path.
+          GITLEAKS_CONFIG: ${{ github.workspace }}/.gitleaks.toml
 
   docs-link-check:
     # Task 7.4: link-check hook on docs/runbooks/soc2-readiness.md (and
