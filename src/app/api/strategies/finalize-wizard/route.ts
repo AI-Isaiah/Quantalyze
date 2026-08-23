@@ -1199,14 +1199,16 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
   // MT5RECON-02 — resolve the single key's venue so the apiKeyId arm below can
   // stamp 'traditional' for mt5 (forex/CFD) vs 'crypto' for a crypto venue. Owner
   // scope is already enforced (the apiKeyId came off the owner-scoped strategies
-  // row above); this admin read only fetches the venue string. On a lookup fault
-  // apiKeyExchange stays null — and in that case the update below is SKIPPED
-  // (RED-TEAM): create-with-key already stamped a venue-aware asset_class on the
-  // draft, and the worker reads strategies.asset_class DIRECTLY as the
-  // annualization clock (it does NOT re-derive from venue — see job_worker
+  // row above); this admin read only fetches the venue strings. RANK-04: the arm
+  // below stamps off the ATTESTED venue, so this binding no longer feeds the
+  // money math — on a lookup fault it stays null alongside the attestation, and
+  // the update below is SKIPPED (RED-TEAM): create-with-key already stamped a
+  // venue-aware asset_class on the draft, and the worker reads
+  // strategies.asset_class DIRECTLY as the annualization clock (it does NOT
+  // re-derive from venue — see job_worker
   // periods_per_year_for_asset_class(strategies.asset_class)). Defaulting to
   // 'traditional' on a blip would silently mis-annualize a crypto strategy (√252
-  // not √365 → inflated Sharpe), so we leave the correct draft stamp untouched.
+  // not √365 → deflated Sharpe), so we leave the correct draft stamp untouched.
   let apiKeyExchange: string | null = null;
   // 153.6-04 / PARITY-04 — the venue no client INSERT can set, and the ONLY
   // input the scope-broadening probe gate below is allowed to read.
@@ -1282,31 +1284,43 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
         : null;
   }
   //
-  // RED-TEAM: for a single-key strategy whose venue we FAILED to resolve
-  // (apiKeyExchange null after a lookup fault), SKIP the write entirely. The
-  // draft already carries create-with-key's venue-aware stamp, and the worker
-  // treats strategies.asset_class as the authoritative annualization clock — an
-  // overwrite to 'traditional' here would silently mis-annualize a crypto
-  // strategy. Only write when we have a confident value (venue resolved, or a
-  // composite/CSV path where apiKeyId is absent).
-  const skipAssetClassWrite = Boolean(apiKeyId) && apiKeyExchange === null;
+  // RED-TEAM (RANK-04): for a single-key strategy the server has ATTESTED no
+  // venue for, SKIP the write entirely. The gate is ONE binding — the attested
+  // one — and it is a strict SUPERSET of the old lookup-fault guard it replaces:
+  // a faulted read attests nothing (both bindings end null) so it still skips,
+  // and a row whose forgeable label resolves but whose attestation is NULL — a
+  // legacy pre-backfill row, or a client INSERT the trigger scrubbed — now skips
+  // too. Those last rows are the whole point: `isCryptoExchange(null)` is false,
+  // so stamping them anyway would write 'traditional'/√252 over what may well be
+  // a crypto strategy. The worker reads strategies.asset_class DIRECTLY as the
+  // annualization clock, so that write would silently mis-annualize it (~×1.203,
+  // √(365/252)) with no error anywhere. Skipping leaves create-with-key's
+  // server-derived draft stamp intact, which is why skipping is SAFE rather than
+  // merely cautious. Only write when the server itself vouched for the venue (or
+  // on the composite/CSV paths, where apiKeyId is absent).
+  const skipAssetClassWrite = Boolean(apiKeyId) && attestedVenue === null;
   if (skipAssetClassWrite) {
     console.warn(
-      "[strategies/finalize-wizard] asset_class venue unresolved for a single-key " +
-        "strategy — leaving the draft's venue-aware stamp intact (no √252 overwrite)",
+      `[strategies/finalize-wizard] asset_class venue unattested for a single-key ` +
+        `strategy (unverified label: ${apiKeyExchange ?? "unresolved"}) — leaving ` +
+        `the draft's venue-aware stamp intact (no √252 overwrite)`,
     );
   } else {
-    // ⚠️ 153.6-04 / OQ-2 — THIS STAMP DELIBERATELY STILL READS `apiKeyExchange`,
-    // the forgeable column, and that is a scoped decision rather than an
-    // oversight. PARITY-04's charter is the probe gate; widening it to the
-    // money-math stamp is the natural follow-on and is now a ONE-IDENTIFIER
-    // change (`apiKeyExchange` → `attestedVenue`) because the attestation
-    // mechanism already exists on the read above. It is left for a follow-on
-    // because the residual is self-targeted: a forged label here distorts the
-    // annualization clock (√365 vs √252) of the forger's OWN strategy, where a
-    // forged label on the gate switched off a security control. ⛔ Do not
-    // "fix" this in passing — the swap needs its own oracle over the two
-    // annualization outcomes, which is not in this plan's tests.
+    // ⭐ RANK-04 — THE VENUE THE SERVER ATTESTED IS THE VENUE THAT ANNUALIZES.
+    // This stamp reads the attestation, never the forgeable column. It is the
+    // money math: the worker consumes strategies.asset_class DIRECTLY as the
+    // annualization clock (√365 crypto / √252 traditional), so whatever feeds
+    // this branch sets a strategy's Sharpe denominator. Sourcing it from a
+    // client-writable label let a forged venue move the forger's own clock by
+    // ~×1.203 on the allocator-facing ranking — self-targeted, which is why it
+    // outlived the probe-gate fix, but a trust-integrity defect all the same.
+    //
+    // ⛔ THE GUARD ABOVE IS PART OF THIS CHANGE, NOT AN ADJACENT TIDY-UP. Reading
+    // the attestation here is only safe because a NULL attestation never reaches
+    // this branch: `isCryptoExchange(null)` returns false, so an unattested row
+    // that got this far would be stamped 'traditional'/√252 — the exact silent
+    // mis-annualization of a crypto strategy the swap exists to prevent. Land the
+    // two together or not at all.
     //
     // ⛔ THE PRAGMA BELOW MUST STAY WITHIN 8 LINES OF THE MUTATION —
     // `audit-coverage.test.ts` scans that window, so prose inserted BETWEEN them
@@ -1320,7 +1334,7 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
       .from("strategies")
       .update({
         asset_class: apiKeyId
-          ? isCryptoExchange(apiKeyExchange)
+          ? isCryptoExchange(attestedVenue)
             ? "crypto"
             : "traditional"
           : isCompositeForAssetClass
