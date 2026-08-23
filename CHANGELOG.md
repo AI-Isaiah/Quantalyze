@@ -63,24 +63,34 @@ than allowlisted, and the rename is verified inert: the route applies truthiness
 the `!api_secret` term still reddens all three cases. The new value trips the real scanner at no
 path, allowlisted or not.
 
-⚠️ **The interesting part is what the fix revealed, and it is now also fixed.** `route.test.ts` is
-blanket-allowlisted for every rule in `.gitleaks.toml` (entry dates to the v1.12 CI-green commit),
-yet CI flagged it by exact path. Reproduced rather than guessed: over the identical commit range, CI
-and a local run using **only** `[extend] useDefault = true` both report `8 commits scanned / leaks
-found: 2`, while the same range with `-c .gitleaks.toml` reports none. The gate was running on the
-default ruleset with every allowlist entry inert — stricter than designed rather than leakier, so CI
+⚠️ **The interesting part is what the red gate revealed, and that is now fixed too.** The rename
+alone did not clear CI: gitleaks scans the whole PR commit range, so the finding stayed attributed to
+the commit that first added the value. Chasing that turned up the real defect — `route.test.ts` is
+blanket-allowlisted for every rule in `.gitleaks.toml`, yet CI flagged it by exact path.
+
+Isolated by measurement rather than guessed, 2×2 over the same commit range:
+
+| gitleaks | `[allowlist]` (singular) | `[[allowlists]]` (array) |
+|---|---|---|
+| 8.24.3 — the action's built-in default | no leaks | **leaks found: 2** ← what CI reported |
+| 8.30.1 — Homebrew current | no leaks | no leaks |
+
+`gitleaks-action` resolves its scanner as `process.env.GITLEAKS_VERSION || "8.24.3"`, and 8.24.3
+**silently ignores** the top-level `[[allowlists]]` array form this config uses (converted to array
+form by 158-REVIEW CR-03). No parse error, no warning — the allowlist is dropped and the scan runs on
+default rules. So the gate has been running with ~15 exempted fixture files unshielded, red-lighting
+PRs over fixtures it was configured to ignore. Stricter than designed rather than leakier, so CI
 integrity rather than exposure.
 
-Cause: `ci.yml` passed `GITLEAKS_CONFIG` as a **relative** path, which the action resolves against its
-own cwd, not the workspace. Now absolute via `${{ github.workspace }}`. The trap that hid this for so
-long is worth remembering — **gitleaks auto-discovers `.gitleaks.toml` from the working directory**,
-so omitting `-c` locally does not test the no-config case; it silently loads the config and prints a
-reassuring "no leaks found".
-
-This PR verifies its own fix: it still carries the offending value in commit `bca31ba3`'s history,
-and gitleaks scans the entire PR commit range, so a later rename cannot remove it. Only the path
-allowlist can suppress that finding — so a green `secret-scan` here is positive proof the config is
-now loaded.
+- **Fixed** by pinning `GITLEAKS_VERSION: 8.30.1` rather than downgrading the config, which also makes
+  the gate reproducible locally since Homebrew ships 8.30.x.
+- **Guarded** by `gitleaks-allowlist.test.ts`, which now fails if the pin is dropped or set below
+  8.25.0 while the config still uses array form. Verified by neutering both ways and watching it go
+  red with the intended message, then restoring byte-identical.
+- Worth remembering: `gitleaks` auto-discovers `.gitleaks.toml` from the working directory, so
+  omitting `-c` does **not** test the no-config case — it loads the config anyway and prints a
+  reassuring `no leaks found`. An earlier "default ruleset" run of mine was meaningless for exactly
+  that reason.
 
 ## [0.71.0.0] - 2026-08-23
 

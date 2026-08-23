@@ -357,3 +357,81 @@ describe(".gitleaks.toml — real scanner behavior (H-0017)", () => {
     },
   );
 });
+
+/**
+ * The CI scanner must be new enough to READ this config.
+ *
+ * PR #705 root cause. `gitleaks-action` resolves its scanner as
+ * `process.env.GITLEAKS_VERSION || "8.24.3"`, and **gitleaks 8.24.3
+ * silently ignores the top-level `[[allowlists]]` array-of-tables form**
+ * that this repo's `.gitleaks.toml` uses (converted to array form by
+ * 158-REVIEW CR-03). There is no parse error and no warning — the
+ * allowlist is simply dropped and the scan proceeds on default rules.
+ *
+ * The failure mode is therefore invisible from the config side: the file
+ * looks correct, `gitleaks-allowlist.test.ts` passes, a modern local
+ * gitleaks reports "no leaks found", and CI red-lights PRs over fixtures
+ * this file has exempted since the v1.12 CI-green commit.
+ *
+ * Measured on PR #705 (same config, same commit range):
+ *   8.24.3 + [[allowlists]]  -> leaks found: 2   (== what CI reported)
+ *   8.24.3 + [allowlist]     -> no leaks found
+ *   8.30.1 + [[allowlists]]  -> no leaks found
+ *
+ * So the pin is load-bearing, not hygiene: drop it and every allowlist
+ * entry in this repo stops working, silently. This test fails if someone
+ * removes `GITLEAKS_VERSION` from ci.yml, downgrades it to a version that
+ * predates array-form support, while `.gitleaks.toml` still uses that form.
+ */
+describe("CI scanner version can read this config's allowlist form", () => {
+  // First gitleaks release that honors top-level `[[allowlists]]`.
+  // 8.24.3 (the action's built-in default) does not.
+  const MIN_ARRAY_FORM_VERSION = [8, 25, 0] as const;
+  const CI_YML = join(REPO_ROOT, ".github", "workflows", "ci.yml");
+
+  function parseVersion(v: string): [number, number, number] {
+    const m = /^(\d+)\.(\d+)\.(\d+)$/.exec(v.trim());
+    if (!m) throw new Error(`unparseable gitleaks version: ${JSON.stringify(v)}`);
+    return [Number(m[1]), Number(m[2]), Number(m[3])];
+  }
+
+  function gte(a: readonly number[], b: readonly number[]): boolean {
+    for (let i = 0; i < 3; i++) {
+      if (a[i] !== b[i]) return a[i] > b[i];
+    }
+    return true;
+  }
+
+  it("pins GITLEAKS_VERSION whenever .gitleaks.toml uses the [[allowlists]] array form", () => {
+    const toml = readFileSync(GITLEAKS_TOML, "utf8");
+    const usesArrayForm = /^\s*\[\[allowlists\]\]/m.test(toml);
+
+    // Guard the guard: if the config is ever migrated to the singular
+    // [allowlist] form this test must stop asserting the pin rather than
+    // pass vacuously, so pin the premise explicitly.
+    expect(
+      usesArrayForm,
+      "Expected .gitleaks.toml to use [[allowlists]]. If it was migrated to " +
+        "the singular [allowlist] form, update this test — do not delete it.",
+    ).toBe(true);
+
+    expect(existsSync(CI_YML), `${CI_YML} must exist`).toBe(true);
+    const ci = readFileSync(CI_YML, "utf8");
+
+    const pin = /^\s*GITLEAKS_VERSION:\s*["']?([0-9]+\.[0-9]+\.[0-9]+)["']?\s*$/m.exec(ci);
+    expect(
+      pin,
+      "ci.yml does not pin GITLEAKS_VERSION. gitleaks-action defaults to " +
+        "8.24.3, which SILENTLY ignores [[allowlists]] — every allowlist " +
+        "entry in .gitleaks.toml would stop working with no error. See PR #705.",
+    ).not.toBeNull();
+
+    const pinned = parseVersion(pin![1]);
+    expect(
+      gte(pinned, MIN_ARRAY_FORM_VERSION),
+      `ci.yml pins gitleaks ${pin![1]}, which predates ${MIN_ARRAY_FORM_VERSION.join(".")} ` +
+        "— the first release honoring top-level [[allowlists]]. The allowlist " +
+        "would be silently dropped.",
+    ).toBe(true);
+  });
+});

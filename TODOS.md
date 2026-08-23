@@ -552,39 +552,40 @@ true for 146 and half of 142–145, and **false for 141**.
 
 ## 🟡 FIX MID-TERM
 
-### ✅ FIXED (pending CI confirmation) — `.gitleaks.toml` was not loaded in CI; the allowlist was inert (raised + fixed 2026-08-23, Phase-160 ship)
+### ✅ FIXED (pending CI confirmation) — CI's gitleaks was too old to read our allowlist (raised + fixed 2026-08-23, Phase-160 ship)
 
-**Was:** the `secret-scan` gate ran on gitleaks' DEFAULT ruleset with **every allowlist entry in
-`.gitleaks.toml` silently inert**. Not an exposure — the gate was *stricter* than designed, not
-leakier — but it invalidated ~15 allowlist entries and made `gitleaks-allowlist.test.ts` pin a config
-the gate never consulted.
+**Was:** the `secret-scan` gate ran with **every allowlist entry in `.gitleaks.toml` silently
+dropped**, so ~15 exempted fixture files were unshielded and PRs red-lighted on files the config
+had exempted since the v1.12 CI-green commit. Not an exposure — the gate was *stricter* than
+designed, not leakier.
 
-**How it was proven** (reproduced, not inferred). Over the identical commit range:
+**Root cause (isolated by measurement, 2×2 over the same commit range):**
 
-| Run | Result |
-|---|---|
-| CI | 8 commits scanned, **leaks found: 2** |
-| local, `-c <config containing only `[extend] useDefault = true`>` | 8 commits scanned, **leaks found: 2** |
-| local, `-c .gitleaks.toml` | 8 commits scanned, **no leaks found** |
+| gitleaks | `[allowlist]` (singular) | `[[allowlists]]` (array) |
+|---|---|---|
+| **8.24.3** — the action's built-in default | no leaks | **leaks found: 2** ← what CI reported |
+| **8.30.1** — Homebrew current | no leaks | no leaks |
 
-CI's behavior is byte-identical to default-rules-only. ⚠️ Note the trap that hid this: **gitleaks
-auto-discovers `.gitleaks.toml` from the working directory**, so simply omitting `-c` locally does
-NOT test the no-config case — it silently loads the config anyway. A default-only config file is
-required to reproduce.
+`gitleaks-action` resolves its scanner as `process.env.GITLEAKS_VERSION || "8.24.3"`, and **8.24.3
+silently ignores the top-level `[[allowlists]]` array-of-tables form** this config uses (converted to
+array form by 158-REVIEW CR-03). No parse error, no warning — the allowlist is dropped and the scan
+proceeds on default rules. That conversion is what broke it.
 
-**Root cause:** `ci.yml` passed `GITLEAKS_CONFIG: .gitleaks.toml`, a **relative** path, which the
-action resolves against its own cwd rather than the checked-out workspace. Now
-`${{ github.workspace }}/.gitleaks.toml`.
+**Fix:** pin `GITLEAKS_VERSION: 8.30.1` in `ci.yml`, rather than downgrading the config to the
+singular form. Pinning also makes the gate reproducible locally, since Homebrew ships 8.30.x.
 
-**Verification:** this PR is its own canary. It carries the flagged fixture value in commit
-`bca31ba3`'s history, and gitleaks scans the whole PR commit range — so a later rename cannot remove
-it. The finding can therefore be suppressed **only** by the path allowlist. `secret-scan` going green
-on this PR is a positive proof the config is loaded; a red one falsifies the fix. Mark this item
-closed only on that green.
+**Guard:** `gitleaks-allowlist.test.ts` now fails if the pin is removed *or* set below 8.25.0 while
+the config still uses array form. Verified by neuter both ways — RED with the intended message each
+time, restored byte-identical.
 
-**Residual, still worth doing:** the gate remains unreproducible locally without matching the
-scanner version the action downloads. Pin it and expose `npm run secret-scan` so the gate is runnable
-pre-push. Until then a green local gitleaks is weak evidence about CI.
+⚠️ **Two traps worth remembering.** (1) `gitleaks` auto-discovers `.gitleaks.toml` from the working
+directory, so omitting `-c` does NOT test the no-config case — it loads the config anyway and prints
+a reassuring `no leaks found`. (2) gitleaks scans the **whole PR commit range**, so renaming an
+offending value in a later commit does not clear it; the finding stays attributed to the commit that
+added it.
+
+**Residual:** the local binary is whatever Homebrew last installed. Expose `npm run secret-scan` that
+runs the *pinned* version so local and CI cannot drift again.
 
 ### Two guard gaps on `keys/validate-and-encrypt` (raised 2026-08-23, Phase-160 closeout review)
 

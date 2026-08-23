@@ -1455,17 +1455,26 @@ jobs:
       - uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e  # v3.0.0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # ABSOLUTE path, deliberately. A bare `.gitleaks.toml` was silently
-          # NOT loaded: the action resolves it against its own cwd, not the
-          # checked-out workspace, so the gate ran on the DEFAULT ruleset with
-          # every allowlist entry in this file inert. Measured on PR #705 —
-          # `gitleaks git --log-opts=<base..head> -c <default-rules-only>`
-          # reproduces CI exactly (8 commits, 2 leaks) while the same range
-          # with `-c .gitleaks.toml` reports none. Symptom was a finding on
-          # src/app/api/keys/validate-and-encrypt/route.test.ts, a path this
-          # file has blanket-allowlisted since the v1.12 CI-green commit.
-          # Do not "simplify" this back to a relative path.
-          GITLEAKS_CONFIG: ${{ github.workspace }}/.gitleaks.toml
+          GITLEAKS_CONFIG: .gitleaks.toml
+          # PIN REQUIRED — do not drop. gitleaks-action defaults to gitleaks
+          # 8.24.3 (`process.env.GITLEAKS_VERSION || "8.24.3"` in its bundle),
+          # and 8.24.3 SILENTLY IGNORES the top-level `[[allowlists]]` array
+          # form that .gitleaks.toml uses (converted to array form by
+          # 158-REVIEW CR-03). No parse error — it drops the allowlist and
+          # scans with default rules, so every allowlisted fixture in this repo
+          # was unshielded and the gate failed on files it had exempted since
+          # the v1.12 CI-green commit.
+          #
+          # Measured on PR #705, same repo config + same commit range:
+          #   8.24.3 + [[allowlists]]  -> leaks found: 2   (== what CI reported)
+          #   8.24.3 + [allowlist]     -> no leaks found
+          #   8.30.1 + [[allowlists]]  -> no leaks found
+          #   8.30.1 + [allowlist]     -> no leaks found
+          #
+          # Pinning the scanner (rather than downgrading the config to the
+          # singular form) also makes the gate reproducible locally, since
+          # Homebrew ships 8.30.x. Guarded by gitleaks-allowlist.test.ts.
+          GITLEAKS_VERSION: 8.30.1
 
   docs-link-check:
     # Task 7.4: link-check hook on docs/runbooks/soc2-readiness.md (and
