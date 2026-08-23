@@ -280,3 +280,80 @@ describe("getOwnRowPercentiles — RANK-01 gate parity with getPercentiles", () 
     expect(await getPercentiles()).toBeNull();
   });
 });
+
+/**
+ * Phase 159 red-team / RANK-01, SUBJECT side.
+ *
+ * The gate above proves a dead row cannot ENTER the comparison set. This one
+ * proves it cannot RECEIVE a score from it either. Pre-fix, the gate ran only
+ * while building `populationRows`; `ownSubjects` was built from the caller's
+ * rows unfiltered, so a `failed` row still carrying stale KPIs — the census
+ * counted 17 of them in PROD — was scored against a population it had just
+ * been excluded from and shown a percentile on /my-strategies, while
+ * /discovery already refused to rank it.
+ *
+ * The DRAFT case pins the deliberate design point the fix must NOT break: the
+ * gate is on `computation_status`, not on published status, so an unpublished
+ * strategy with `complete` analytics still gets its "if published, this would
+ * sit at Pnn" preview.
+ */
+describe("getOwnRowPercentiles — RANK-01 gate on the SUBJECTS, not just the population", () => {
+  const analyticsRow = (computation_status: string | null, sharpe: number) => ({
+    computation_status,
+    sharpe,
+    cagr: sharpe / 10,
+    sortino: sharpe,
+    calmar: sharpe,
+    max_drawdown: -0.1,
+    volatility: 0.2,
+    cumulative_return: sharpe / 10,
+  });
+
+  const publishedPopulation = () => [
+    { id: "c1", strategy_analytics: analyticsRow("complete", 0.1) },
+    { id: "c2", strategy_analytics: analyticsRow("complete", 0.2) },
+    { id: "c3", strategy_analytics: analyticsRow("complete", 0.3) },
+    { id: "c4", strategy_analytics: analyticsRow("complete", 0.4) },
+    { id: "c5", strategy_analytics: analyticsRow("complete", 0.5) },
+  ];
+
+  // The own rows the page hands over: whatever getMyStrategies returned, i.e.
+  // every non-archived strategy regardless of computation_status.
+  const ownRow = (id: string, status: string, sharpe: number) => ({
+    id,
+    analytics: analyticsRow(status, sharpe) as never,
+  });
+
+  it("gives a failed own row with stale KPIs NO percentile, while its terminal-success siblings keep theirs", async () => {
+    strategiesResolver.data = publishedPopulation();
+
+    const result = await getOwnRowPercentiles([
+      ownRow("own-failed", "failed", 0.45),
+      ownRow("own-warned", "complete_with_warnings", 0.45),
+      ownRow("own-draft", "complete", 0.45),
+    ]);
+
+    expect(result).not.toBeNull();
+    // The dead row is absent entirely — not present-with-nulls, absent. The
+    // page reads presence, so an entry of ANY shape is a rendered rank.
+    expect(result!.ownMap["own-failed"]).toBeUndefined();
+    // Terminal success stays ranked: `complete_with_warnings` is a SUCCESS
+    // status, and a DRAFT with complete analytics keeps its preview rank.
+    expect(result!.ownMap["own-warned"]?.sharpe).toBeTypeOf("number");
+    expect(result!.ownMap["own-draft"]?.sharpe).toBeTypeOf("number");
+  });
+
+  it("drops pending/computing own rows too, and never shrinks the published denominator", async () => {
+    strategiesResolver.data = publishedPopulation();
+
+    const result = await getOwnRowPercentiles([
+      ownRow("own-pending", "pending", 0.45),
+      ownRow("own-computing", "computing", 0.45),
+    ]);
+
+    expect(result).not.toBeNull();
+    expect(Object.keys(result!.ownMap)).toEqual([]);
+    // Subject-side gating must not touch the population the copy names.
+    expect(result!.populationSize).toBe(5);
+  });
+});

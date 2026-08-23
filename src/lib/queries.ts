@@ -679,6 +679,19 @@ export type OwnRowPercentiles = {
  * the page can never show a rank while claiming there is no comparison set, nor
  * count a dead `failed` row into the comparison set it names.
  *
+ * The gate is applied to the SUBJECTS too, not only to the population: an own
+ * row whose analytics are `failed`/`pending`/`computing` (or absent, which
+ * arrives as EMPTY_ANALYTICS' `"pending"`) gets NO entry in `ownMap`, and the
+ * page renders that as "no rank". A `failed` row can still carry a stale
+ * sharpe/cagr from an earlier successful run, so without this the owner would
+ * be shown a percentile computed from dead numbers — and, being gated out of
+ * the population, scored as a NON-member of it. Hence: failed/stale analytics
+ * can neither contribute to NOR receive a percentile.
+ *
+ * The gate reads `computation_status`, NOT published status — deliberately. A
+ * DRAFT whose analytics are `complete` is still scored, because that is the
+ * whole point of the own-row map: "if published, this would sit at Pnn".
+ *
  * `getPercentiles` remains the discovery-surface caller; plan 04 calls ONLY
  * this helper.
  */
@@ -727,13 +740,21 @@ export async function getOwnRowPercentiles(
   // denominator and the founder would see one rank on /my-strategies and a
   // different one on /discovery for the same published strategy.
   const populationById = new Map(populationRows.map((r) => [r.id, r]));
-  const ownSubjects = ownRows.map(
-    (r) =>
-      populationById.get(r.id) ?? {
-        id: r.id,
-        analytics: castRow<Record<string, number | null>>(r.analytics, "analytics"),
-      },
-  );
+  const ownSubjects = ownRows
+    // RANK-01, subject side: the SAME gate the population is built with. A row
+    // that may not CONTRIBUTE a rank may not RECEIVE one either — otherwise a
+    // `failed` row's stale KPIs would be scored against a population it was
+    // just excluded from, i.e. as a non-member, and shown to its owner as a
+    // real percentile. Rows dropped here simply have no `ownMap` entry, which
+    // /my-strategies already renders as "no rank".
+    .filter((r) => isRankableAnalyticsRow(r.analytics))
+    .map(
+      (r) =>
+        populationById.get(r.id) ?? {
+          id: r.id,
+          analytics: castRow<Record<string, number | null>>(r.analytics, "analytics"),
+        },
+    );
 
   const publishedMap = scoreAgainstPopulation(populationRows, populationRows);
 
