@@ -131,6 +131,56 @@ The initial pass failed this truth at `36e783de` (STALE_CLIENT absent; route.ts:
 
 No code gaps remain at HEAD. The phase goal is achieved in the code and, for the DB-side claims, measured on PROD. Two human items stand between here and closure: (1) the production writer's first real exercise (persist smoke — Task 2 Part A), and (2) the PROD measurement of the STALE_CLIENT refusal after this branch deploys (Task 2 Part B pending-deploy gate, dated 2026-08-23). Neither may be closed on the absence of evidence; both are enumerated in `human_verification` and must be transcribed under the `## PROD smoke record (gap closure 160-07)` heading by Task 3.
 
+## PROD smoke record (gap closure 160-07)
+
+**Task 3 transcription. Status after this entry: Part A OPEN, Part B OPEN. `behavior_unverified`
+stays 1; phase status stays `human_needed`. Nothing below closes a gate.**
+
+### Part A — PROD persist smoke: ATTEMPTED, DID NOT EXERCISE THE ARM
+
+On 2026-08-23 a real OKX key was connected on PROD by the founder, and the `api_keys` census
+moved 31 → 32 exactly as Part A predicts. **The row does not answer for the persist arm.**
+
+Measured (read-only, PROD):
+
+| Check | Result |
+|---|---|
+| `count(*)` on `api_keys` | 32 (baseline 31, +1) |
+| `count(attested_venue)` | 32 — no NULLs |
+| rows where `attested_venue IS DISTINCT FROM exchange` | 0 |
+| newest row | `exchange = 'okx'`, `attested_venue = 'okx'`, `kek_version = 1`, created 2026-08-23T21:39:03Z |
+
+**Why this is not Part A.** Vercel production runtime logs for the window containing the write
+(21:30Z–21:45Z) group by `requestPath` as: `/strategies/new/wizard` (6), `/api/strategies/create-with-key`
+(4), `/api/strategies/wizard-draft` (3) — and **`/api/keys/validate-and-encrypt` does not appear at
+all**. The key was added through the new-strategy wizard, which rides the Phase-156 `create-with-key`
+RPC path. This verification document already anticipated exactly this substitution: *"the wizard-proper
+rides the Phase-156 RPC path and does NOT answer for this arm."*
+
+What the measurement **does** establish, and is worth keeping: the Phase-156 wizard RPC path stamps
+`attested_venue` correctly on a real production write, and the 32-row census carries zero venue
+mismatches. That is a genuine PROVENANCE result for a different writer — not evidence about the
+persist arm.
+
+What remains unmeasured, unchanged from the initial pass: the `persist: true` arm on
+`/api/keys/validate-and-encrypt` has still never handled a real production connect. It is the ONLY
+door into `api_keys` for the three converted non-wizard surfaces, so a production-only fault (env,
+service credential, origin, rate limit) would break connect-a-key for every tenant on those surfaces
+with nothing in this phase's evidence catching it.
+
+**To close Part A**, the connect must go through a surface that POSTs `/api/keys/validate-and-encrypt`
+— `ApiKeyManager` (strategy edit page), `StrategyForm`, or `AllocatorExchangeManager` — **not** the
+new-strategy wizard. Re-connecting the same OKX credential through a strategy's edit page satisfies
+it. Confirm by the DevTools Network entry for that path (or by this same log grouping showing a
+non-zero count for it), then re-run the row check expecting 32 → 33.
+
+### Part B — PROD refusal (pending-deploy gate): OPEN
+
+Unchanged and correctly still open: the `STALE_CLIENT` retirement exists only on branch
+`chore/close-phase-160`. PROD continues to serve the legacy ciphertext envelope on
+absent-discriminator bodies until that branch merges and its production deployment reads READY.
+Not silently passed.
+
 ---
 
 _Verified: 2026-08-23 (initial, at 36e783de)_

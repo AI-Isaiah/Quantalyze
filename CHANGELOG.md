@@ -56,6 +56,22 @@ shipped credentials to a browser that provably could not use them.
   refusal satisfied vacuously. They now carry `persist: true`, so the gate under test is
   again the only thing between the request and a credential probe.
 
+**From CI:** the `secret-scan` gate (gitleaks) flagged two test fixtures in `route.test.ts` as
+`generic-api-key` — a false positive on a fake value that was never a credential. Renamed rather
+than allowlisted, and the rename is verified inert: the route applies truthiness only to `api_key`
+(no length, format or prefix check on the ccxt path), the value is never asserted on, and neutering
+the `!api_secret` term still reddens all three cases. The new value trips the real scanner at no
+path, allowlisted or not.
+
+⚠️ **The interesting part is what the fix revealed.** `route.test.ts` is already blanket-allowlisted
+for every rule in `.gitleaks.toml` (the paths list, entry added back in the v1.12 CI-green commit).
+CI flagged it anyway, by exact path — and locally, the same config against the same commits produces
+zero findings at that path. The allowlist is therefore **not taking effect in CI**, which means every
+fixture the repo believes is shielded is unshielded there, and `gitleaks-allowlist.test.ts` pins a
+config the gate does not use. The gate is noisier than designed rather than leakier, so this is a
+CI-integrity defect, not an exposure. Booked in TODOS.md; not fixed here, because verifying a CI-only
+config change requires CI round-trips and this PR is not the place to iterate on that.
+
 ## [0.71.0.0] - 2026-08-23
 
 ### feat: v1.20 Phase 160 — PROVENANCE: the server's venue is the venue that annualizes

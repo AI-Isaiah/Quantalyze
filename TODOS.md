@@ -552,6 +552,36 @@ true for 146 and half of 142–145, and **false for 141**.
 
 ## 🟡 FIX MID-TERM
 
+### 🔴 `.gitleaks.toml` is NOT taking effect in CI — the secret-scan allowlist is inert (raised 2026-08-23, Phase-160 ship)
+
+**Priority:** P2 — CI integrity. Not an exposure (the gate is *stricter* than designed, not leakier),
+but it silently invalidates ~15 allowlist entries and one canary test.
+
+**Evidence.** CI's `secret-scan` job failed on `src/app/api/keys/validate-and-encrypt/route.test.ts`
+lines 635/649, rule `generic-api-key`, reported by exact path. That path is **blanket-allowlisted for
+every rule** in `.gitleaks.toml` (in the `[[allowlists]]` paths list; the entry dates to the v1.12
+CI-green commit). Locally, gitleaks 8.30.1 with `-c .gitleaks.toml` over the identical 6 commits and a
+byte-identical scan surface (both runs report `~137158 bytes`) finds **0**. Run against a probe tree,
+the same fixture value trips `generic-api-key` only at a **non-allowlisted** path. So the rule fires
+identically in both places; what differs is that the allowlist applies locally and does not in CI.
+
+**Consequences.**
+- Every allowlisted fixture file (sFOX client tests, Deribit scope-validation tests, the H-0305 and
+  H-0535 redaction regressions, `.env.example`, `package-lock.json`, …) is unshielded in CI. Any PR
+  touching one can fail `secret-scan` for a reason the config says is exempt.
+- `src/__tests__/gitleaks-allowlist.test.ts` asserts allowlist behavior against a config the CI gate
+  does not honor — it cannot fail for the case that matters. (Per the house rule that a test which
+  cannot fail is worse than none, this one needs re-pointing once the config is wired.)
+- Historical allowlist entries were added in response to CI failures, so the wiring may have broken at
+  a specific action upgrade rather than never having worked. `ci.yml` pins
+  `gitleaks/gitleaks-action@v3.0.0` and passes `GITLEAKS_CONFIG: .gitleaks.toml`; v3 may expect a
+  different input name or a different resolution root than v2 did.
+
+**Closing it:** confirm how v3.0.0 resolves config (its action.yml / README), fix the wiring, and prove
+it by pushing a branch whose only change re-introduces a known-allowlisted fixture — the gate must go
+GREEN. While fixing, pin the scanner version and expose it as a local script (`npm run secret-scan`) so
+the gate becomes reproducible pre-push; today a green local gitleaks is **no evidence** about CI.
+
 ### Two guard gaps on `keys/validate-and-encrypt` (raised 2026-08-23, Phase-160 closeout review)
 
 Both surfaced by the pre-landing review of the `STALE_CLIENT` retirement. Neither is a
