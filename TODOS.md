@@ -251,6 +251,18 @@ items were dropped, not carried. Categories: **Fix now** / **Fix mid-term** / **
    after RANK-01 must be a decided state, not a surprise.
    **Recorded:** 2026-08-21 (phase 159, census C-M1 / C-D1 surfacing)
 
+0e. **[159-BASIS-FLIP] ScenarioComposer: blend basis flips 365→252 mid-render while a
+   drawer-added leg's `/returns` probe is in flight.** Red-team finding (2026-08-23,
+   INVESTIGATE): a drawer-added leg has no `addedAssetClassById` entry until its probe
+   settles (`ScenarioComposer.tsx` ~:1465), so RANK-06 resolves the in-flight null to the
+   conservative √365 clock and the settled `'traditional'` to √252 — a pure-tradfi blend's
+   displayed vol/Sharpe/Sortino visibly change with no user action, as a function of
+   network timing. The steady-state values are honest in both states; only the transition
+   is jarring. **Product decision needed:** suppress the basis-dependent metrics (or hold
+   the panel) until every selected leg's class has resolved, or accept the flicker as the
+   cost of never showing a flattering interim number. Not a phase-159 blocker.
+   **Recorded:** 2026-08-23 (phase 159 red-team, finding 3)
+
 1. **`RESEND_API_KEY` unset in Vercel prod** — founder-LP report cron + all transactional
    email are dead (code soft-skips, only Sentry fires). **Founder action:** set the key in
    Vercel prod. Do before the first warned founder month. (Note: portfolio email *alerts*
