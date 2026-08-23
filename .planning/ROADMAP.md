@@ -159,7 +159,7 @@ Plans:
   3. The `asset_class` stamp at `finalize-wizard` derives from the attested venue, and the swap MOVES WITH the null-attestation extension of the `skipAssetClassWrite` guard — a NULL attestation SKIPS; it never stamps `traditional`/√252 onto a crypto strategy (⚠️ TODOS.md's "one-identifier change" framing is measured WRONG; `isCryptoExchange(null) === false` is the trap).
   4. The B-D2 oracle pins the ECONOMICS (a null attestation annualizes on nothing — it skips), never the implementation's own expression; if the census finds affected strategies, their re-annualization gets golden-parity treatment.
 
-**Plans**: 6 plans
+**Plans**: 7 plans (6 executed + 1 gap closure)
 
 Plans:
 **Wave 1**
@@ -182,6 +182,10 @@ Plans:
 **Wave 5**
 
 - [ ] 160-06-PLAN.md — Golden-parity re-annualization for census-identified strategies (`160-PARITY.md`; RISK ×≈1.203 / RETURN unmoved adjudication) or the recorded no-op (RANK-04) [Wave 5]
+
+**Wave 6** *(gap closure, 2026-08-23 — from 160-VERIFICATION.md; the STALE_CLIENT retirement itself already landed at `2fe28b89`)*
+
+- [ ] 160-07-PLAN.md — Gap closure: independent gsd-verifier re-adjudication of the retired-legacy-arm must_have at HEAD + human PROD smoke of the persist arm (the writer's first real exercise) + honest record and TODOS hygiene (RANK-03) [Wave 6]
 
 **Research note:** ARCHITECTURE confidence is LOW without B-M1 — the census is this phase's first task, not a nicety.
 
