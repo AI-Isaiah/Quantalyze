@@ -12,7 +12,7 @@
  *     graceful 4xx / 5xx / network-error surfacing via the row-scoped
  *     aria-live helper line.
  *   - AWAITED first-run sync inside handleAddKey (INGEST-07 / D-09 / f4):
- *     after the api_keys INSERT succeeds, the client awaits the POST so
+ *     once the server-written row is read back (160-03), the client awaits the POST so
  *     a 403/500 surfaces in the row's helper line — NOT a silent stuck
  *     "Syncing…" pill. On failure, pill reverts to 'idle' and
  *     helper_override is set to "Sync request failed — click Sync now
