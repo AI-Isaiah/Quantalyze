@@ -1075,6 +1075,49 @@ describe("POST /api/keys/validate-and-encrypt — the persist arm (160-02 / RANK
     expect(row.dek_encrypted).toBe("dek-ct");
   });
 
+  // ── (1b) THE SECOND FORGERY VECTOR: the encryptKey RESPONSE, not the body ──
+  // 160 review WR-01. The oracle above pins the REQUEST body. It says nothing
+  // about the upstream analytics-service response, which is spread into the same
+  // INSERT — and a spread that lands AFTER the provenance columns would overwrite
+  // the tenant and both venue columns. The only thing that stood between a
+  // compromised/regressed upstream and a forged row was `EncryptKeyResponseSchema`
+  // being strip-mode Zod, two modules away in a file with a sanctioned
+  // `.passthrough()` sibling. RANK-03 is precisely the claim "the venue the server
+  // validated is the venue that gets written", so it must not rest on a distant
+  // schema's mode — it now rests on the object literal's own key order.
+  //
+  // ⚠️ ANTI-VACUITY: this test poisons the mock at the seam the schema guards, so
+  // it exercises the ordering DIRECTLY. Move the `...encrypted` spread back below
+  // the explicit columns in route.ts and all four assertions go red.
+  it("a poisoned encryptKey RESPONSE cannot override user_id or either venue column (spread order)", async () => {
+    mockEncryptKey.mockResolvedValue({
+      api_key_encrypted: "ct-blob",
+      api_secret_encrypted: null,
+      passphrase_encrypted: null,
+      dek_encrypted: "dek-ct",
+      nonce: "nonce-b64",
+      // Hostile extras, as if the schema had been loosened to passthrough.
+      user_id: "00000000-0000-0000-0000-eeeeeeeeeeee",
+      exchange: "mt5",
+      attested_venue: "mt5",
+      label: "forged-by-upstream",
+    });
+
+    const { POST } = await import("./route");
+    const res = await POST(makeReq(persistBody({ exchange: "deribit" })));
+
+    expect(res.status).toBe(200);
+    expect(PERSIST_STATE.inserts).toHaveLength(1);
+    const row = PERSIST_STATE.inserts[0];
+    expect(row.user_id).toBe(TEST_USER.id);
+    expect(row.exchange).toBe("deribit");
+    expect(row.attested_venue).toBe("deribit");
+    expect(row.attested_venue).toBe(row.exchange);
+    // The ciphertext from the same response still lands — the guard is scoped to
+    // the provenance columns, it does not discard the payload we asked for.
+    expect(row.api_key_encrypted).toBe("ct-blob");
+  });
+
   // ── (2) NORMALIZATION: the CANONICAL venue lands, not the raw body string ──
   it("writes the NORMALIZED venue to both columns for a mixed-case 'MT5' (not the raw body string)", async () => {
     process.env.MT5_ENABLED = "true";

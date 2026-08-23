@@ -465,12 +465,22 @@ async function legacyValidateAndEncryptHandler(args: {
     // phase.
     const { data: inserted, error: insertError } = await admin
       .from("api_keys")
+      // ⛔ ORDER IS LOAD-BEARING (160 review WR-01). The ciphertext spread goes
+      // FIRST so the provenance columns are written LAST and always win. With
+      // the spread last, the only thing stopping an `encryptKey` response field
+      // from overriding `user_id` (the tenant) or either venue column was
+      // `EncryptKeyResponseSchema` being strip-mode Zod — a guarantee living two
+      // modules away, in a file that has a sanctioned `.passthrough()` sibling.
+      // RANK-03 is exactly the claim "the server's venue is the one written", so
+      // it should not rest on a distant schema's mode. Now it rests on the
+      // object literal itself: whatever `encrypted` carries, these four keys are
+      // assigned after it.
       .insert({
+        ...encrypted,
         user_id: userId,
         exchange: exchangeNormalized,
         attested_venue: exchangeNormalized,
         label: labelOrDefault,
-        ...encrypted,
       })
       .select("id")
       .single();
