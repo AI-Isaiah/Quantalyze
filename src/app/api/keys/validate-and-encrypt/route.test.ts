@@ -42,6 +42,7 @@ const {
   mockValidateKey,
   mockEncryptKey,
   rateLimitResult,
+  PERSIST_STATE,
 } = vi.hoisted(() => ({
   TEST_USER: { id: "00000000-0000-0000-0000-aaaaaaaaaaaa" },
   mockValidateKey: vi.fn(),
@@ -53,6 +54,23 @@ const {
     success: true as boolean,
     retryAfter: 0,
     reason: undefined as "ratelimit_misconfigured" | undefined,
+  },
+  /**
+   * 160-02 / RANK-03 — STATE capture for the persist arm's admin-client write,
+   * mirroring the finalize-wizard test harness idiom.
+   *
+   * `inserts` is the whole point: the route's INSERT payload is recorded here
+   * so a test can assert what the SERVER decided to write (both venue columns,
+   * the tenant id) rather than what the caller asked for. An EMPTY `inserts`
+   * array is itself an oracle — it is how the legacy-arm tests prove that a
+   * body without the strict boolean discriminator mints no row at all.
+   */
+  PERSIST_STATE: {
+    inserts: [] as Record<string, unknown>[],
+    /** The `{ data, error }` the `.single()` terminal resolves to. */
+    insertResult: null as { data: unknown; error: unknown } | null,
+    /** When set, `createAdminClient()` THROWS this — the missing-service-key arm. */
+    adminFactoryError: null as Error | null,
   },
 }));
 
@@ -66,6 +84,39 @@ vi.mock("@/lib/supabase/server", () => ({
       getUser: async () => ({ data: { user: TEST_USER }, error: null }),
     },
   }),
+}));
+
+/**
+ * 160-02 / RANK-03 — the service-role writer the persist arm uses.
+ *
+ * The chain is modelled exactly as the route calls it —
+ * `.from(table).insert(payload).select(cols).single()` — and the payload is
+ * pushed into PERSIST_STATE.inserts BEFORE the terminal resolves, so a test can
+ * read what was written even on the arms where the insert then fails.
+ *
+ * `from` records the table too: the assertion "the row went into api_keys" is
+ * worth nothing if the mock would have accepted any table name.
+ */
+vi.mock("@/lib/supabase/admin", () => ({
+  createAdminClient: () => {
+    if (PERSIST_STATE.adminFactoryError) throw PERSIST_STATE.adminFactoryError;
+    return {
+      from: (table: string) => ({
+        insert: (payload: Record<string, unknown>) => {
+          PERSIST_STATE.inserts.push({ ...payload, __table: table });
+          return {
+            select: (_cols?: string) => ({
+              single: async () =>
+                PERSIST_STATE.insertResult ?? {
+                  data: { id: "persisted-key-id" },
+                  error: null,
+                },
+            }),
+          };
+        },
+      }),
+    };
+  },
 }));
 
 // ⚠️ EXTENDED, NOT REPLACED (140.4-13 / SEAMRIM-05). See the note in
@@ -936,4 +987,242 @@ describe("[140.3-G4 / SEAMUX-03] POST /api/keys/validate-and-encrypt — a machi
     expect(body.error).toBe("Key validation failed. Please try again.");
     expect(body.code).toBe("UNKNOWN");
   });
+});
+
+/**
+ * ═══════════════════════════════════════════════════════════════════════════
+ * 160-02 / RANK-03 — THE PERSIST ARM
+ * ═══════════════════════════════════════════════════════════════════════════
+ *
+ * WHY THIS EXISTS, IN ECONOMIC TERMS. `api_keys.exchange` decides how a
+ * strategy is annualized downstream: a crypto venue annualizes on √365, a
+ * traditional venue on √252. Those differ by ~1.20×, and the number they
+ * inflate is the Sharpe ratio a prospective allocator reads on a public
+ * factsheet. Until this phase the row was composed by the BROWSER, so the
+ * venue on it was whatever the client said — a value the server had no reason
+ * to believe and every reason not to. The persist arm moves the write to the
+ * server and stamps both venue columns from the venue THIS ROUTE authenticated
+ * against.
+ *
+ * WHAT WOULD REDDEN EACH ORACLE is named per-test. The load-bearing ones:
+ * change `attested_venue: exchangeNormalized` to read the body's raw
+ * `exchange`, and the normalization test goes red. Relax `body.persist ===
+ * true` to a truthy check, and the string-"true" skew test goes red. Spread
+ * `...encrypted` into the persist response, and the no-ciphertext invariant
+ * goes red.
+ */
+describe("POST /api/keys/validate-and-encrypt — the persist arm (160-02 / RANK-03)", () => {
+  /** Every ciphertext-shaped key name the encrypt payload can carry. */
+  const CIPHERTEXT_KEY_PATTERN = /encrypt|cipher|secret|nonce|dek|kek/i;
+
+  function persistBody(overrides: Record<string, unknown> = {}) {
+    return { ...VALID_BODY, persist: true, label: "My OKX key", ...overrides };
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    rateLimitResult.success = true;
+    rateLimitResult.retryAfter = 0;
+    rateLimitResult.reason = undefined;
+    PERSIST_STATE.inserts.length = 0;
+    PERSIST_STATE.insertResult = null;
+    PERSIST_STATE.adminFactoryError = null;
+    mockValidateKey.mockResolvedValue({ valid: true, read_only: true });
+    mockEncryptKey.mockResolvedValue({
+      api_key_encrypted: "ct-blob",
+      api_secret_encrypted: null,
+      passphrase_encrypted: null,
+      dek_encrypted: "dek-ct",
+      nonce: "nonce-b64",
+      kek_version: 3,
+    });
+  });
+
+  afterEach(() => {
+    delete process.env.MT5_ENABLED;
+  });
+
+  // ── (1) THE RANK-03 ORACLE: both venue columns, server-decided ────────────
+  it("stamps exchange AND attested_venue from the SERVER-validated venue, and takes user_id from the session — never the body", async () => {
+    const { POST } = await import("./route");
+    const res = await POST(
+      makeReq({
+        ...persistBody({ exchange: "deribit" }),
+        // A hostile caller naming a DIFFERENT tenant. The route must never read
+        // it: `userId` reaches the INSERT only from the withAuth session
+        // (threat T-160-05). Neuter that threading and this line goes red.
+        user_id: "00000000-0000-0000-0000-ffffffffffff",
+        // …and naming a DIFFERENT venue than the one it submitted credentials
+        // for. `attested_venue` must follow the validated venue, not this.
+        attested_venue: "mt5",
+      }),
+    );
+
+    expect(res.status).toBe(200);
+    expect(PERSIST_STATE.inserts).toHaveLength(1);
+    const row = PERSIST_STATE.inserts[0];
+    expect(row.__table).toBe("api_keys");
+    expect(row.exchange).toBe("deribit");
+    expect(row.attested_venue).toBe("deribit");
+    // The coupling the DB CHECK also enforces, asserted at the writer so a
+    // divergence is caught in CI rather than as a 23514 in production.
+    expect(row.attested_venue).toBe(row.exchange);
+    expect(row.user_id).toBe(TEST_USER.id);
+    expect(row.user_id).not.toBe("00000000-0000-0000-0000-ffffffffffff");
+    // The ciphertext still reaches the ROW (it has to — that is the key), it
+    // simply stops reaching the browser. See the response oracle below.
+    expect(row.api_key_encrypted).toBe("ct-blob");
+    expect(row.dek_encrypted).toBe("dek-ct");
+  });
+
+  // ── (2) NORMALIZATION: the CANONICAL venue lands, not the raw body string ──
+  it("writes the NORMALIZED venue to both columns for a mixed-case 'MT5' (not the raw body string)", async () => {
+    process.env.MT5_ENABLED = "true";
+    const { POST } = await import("./route");
+    const res = await POST(
+      makeReq({ ...MT5_BODY, exchange: "MT5", persist: true, label: "Broker" }),
+    );
+
+    expect(res.status).toBe(200);
+    expect(PERSIST_STATE.inserts).toHaveLength(1);
+    // The api_keys CHECK admits lowercase venue codes only. If either column
+    // were written from `body.exchange` instead of the route's own
+    // `exchangeNormalized`, this row would carry "MT5" and 23514 in production.
+    expect(PERSIST_STATE.inserts[0].exchange).toBe("mt5");
+    expect(PERSIST_STATE.inserts[0].attested_venue).toBe("mt5");
+  });
+
+  // ── (3) NO CIPHERTEXT LEAVES THE SERVER ON THE PERSIST PATH ───────────────
+  it("returns api_key_id and NO ciphertext-named field of any kind", async () => {
+    const { POST } = await import("./route");
+    const res = await POST(makeReq(persistBody()));
+
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body).toEqual({
+      api_key_id: "persisted-key-id",
+      valid: true,
+      read_only: true,
+    });
+    // The exact-match above already pins this, but the pattern assertion is
+    // what survives a future field being ADDED to the response: whoever adds
+    // one has to justify a name that is not ciphertext-shaped.
+    expect(Object.keys(body).filter((k) => CIPHERTEXT_KEY_PATTERN.test(k))).toEqual([]);
+    // Ciphertext is per-tenant even in its absence — the id is too.
+    expect(res.headers.get("Cache-Control")).toBe("private, no-store");
+  });
+
+  // ── (4) THE LABEL becomes server-written text ─────────────────────────────
+  it("falls back to the server default label when none is supplied", async () => {
+    const { POST } = await import("./route");
+    const res = await POST(makeReq(persistBody({ label: undefined })));
+
+    expect(res.status).toBe(200);
+    expect(PERSIST_STATE.inserts[0].label).toBe("okx key");
+  });
+
+  it("falls back to the server default when the label is whitespace-only", async () => {
+    const { POST } = await import("./route");
+    await POST(makeReq(persistBody({ label: "   " })));
+
+    expect(PERSIST_STATE.inserts[0].label).toBe("okx key");
+  });
+
+  it("CAPS an over-long label at 120 chars rather than failing an already-validated connect", async () => {
+    const { POST } = await import("./route");
+    const res = await POST(makeReq(persistBody({ label: "L".repeat(500) })));
+
+    // The connect SUCCEEDS — a cosmetic display string must not cost the user
+    // a live venue round-trip they already passed.
+    expect(res.status).toBe(200);
+    expect(PERSIST_STATE.inserts[0].label).toBe("L".repeat(120));
+  });
+
+  it("ignores a non-string label (server default), never coercing it into the row", async () => {
+    const { POST } = await import("./route");
+    await POST(makeReq(persistBody({ label: { evil: true } })));
+
+    expect(PERSIST_STATE.inserts[0].label).toBe("okx key");
+  });
+});
+
+/**
+ * 160-02 / RANK-03 — THE SKEW WINDOW (threat T-160-06).
+ *
+ * Between this deploy and plan 160-05's `REVOKE INSERT`, a stale browser tab is
+ * still running the pre-conversion bundle: it sends the OLD body and then does
+ * its OWN client INSERT. If the route wrote a row for that request too, the
+ * user would end up with TWO rows for one key — one attested server row and one
+ * trigger-scrubbed client row.
+ *
+ * These tests are the anti-double-write pins. `PERSIST_STATE.inserts` being
+ * EMPTY is the assertion; relax `body.persist === true` to any truthy check and
+ * the string / numeric probes below go red.
+ */
+describe("POST /api/keys/validate-and-encrypt — skew window: only a STRICT boolean persists", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    rateLimitResult.success = true;
+    rateLimitResult.retryAfter = 0;
+    rateLimitResult.reason = undefined;
+    PERSIST_STATE.inserts.length = 0;
+    PERSIST_STATE.insertResult = null;
+    PERSIST_STATE.adminFactoryError = null;
+    mockValidateKey.mockResolvedValue({ valid: true, read_only: true });
+    mockEncryptKey.mockResolvedValue({
+      api_key_encrypted: "ct-blob",
+      api_secret_encrypted: null,
+      passphrase_encrypted: null,
+      dek_encrypted: "dek-ct",
+      nonce: "nonce-b64",
+      kek_version: 3,
+    });
+  });
+
+  it("a body with NO persist field gets the legacy ciphertext envelope and mints ZERO rows", async () => {
+    const { POST } = await import("./route");
+    const res = await POST(makeReq(VALID_BODY));
+
+    expect(res.status).toBe(200);
+    // Byte-identical to the pre-160-02 contract. The stale tab reads these
+    // fields and performs its own INSERT; break this and every tab open across
+    // the deploy loses its key-add.
+    expect(await res.json()).toEqual({
+      api_key_encrypted: "ct-blob",
+      api_secret_encrypted: null,
+      passphrase_encrypted: null,
+      dek_encrypted: "dek-ct",
+      nonce: "nonce-b64",
+      kek_version: 3,
+      valid: true,
+      read_only: true,
+    });
+    expect(PERSIST_STATE.inserts).toEqual([]);
+  });
+
+  it.each([
+    ["the STRING \"true\"", "true"],
+    ["the number 1", 1],
+    ["the string \"1\"", "1"],
+    ["an object", {}],
+    ["null", null],
+    ["false", false],
+  ])(
+    "persist as %s is NOT the discriminator — legacy arm, zero server-side inserts",
+    async (_label, persistValue) => {
+      const { POST } = await import("./route");
+      const res = await POST(
+        makeReq({ ...VALID_BODY, persist: persistValue, label: "ignored" }),
+      );
+
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      // It got the LEGACY envelope (ciphertext present, no id) …
+      expect(body.api_key_encrypted).toBe("ct-blob");
+      expect(body.api_key_id).toBeUndefined();
+      // … and, the whole point: no row was written server-side, so a stale tab
+      // that inserts for itself produces exactly one row, not two.
+      expect(PERSIST_STATE.inserts).toEqual([]);
+    },
+  );
 });
