@@ -10,6 +10,11 @@ import { NextRequest } from "next/server";
 // mocks the leaf, and this file never calls vi.resetModules(), so a static
 // import here is the same class object the route narrows against.
 import { CircuitOpenError } from "@/lib/seam-errors";
+// 160 review F1 — the encrypt contract, read as DATA (`.shape`) so the persist
+// tracer can assert the INSERT writes every field it declares rather than the
+// two this file happened to hand-pick. Not mocked anywhere in this file, so
+// this is the same object the route projects its `encryptedColumns` from.
+import { EncryptKeyResponseSchema } from "@/lib/analytics-schemas";
 
 /**
  * H-0281 — real route coverage for POST /api/keys/validate-and-encrypt.
@@ -180,12 +185,38 @@ function makeReq(body: Record<string, unknown> = {}): NextRequest {
   });
 }
 
+/**
+ * 160-05 / RANK-03 — `persist: true` is part of the VALID body now, not an
+ * opt-in. The legacy arm is retired: a body without the discriminator is
+ * refused with `STALE_CLIENT`, so a fixture that omitted it would measure that
+ * refusal instead of the arm it names — on every case that REACHES the
+ * handler, i.e. past the sfox/mt5 venue gates and the presence check, which
+ * all sit ABOVE the discriminator gate and short-circuit before it.
+ *
+ * ⭐ WHY THE GATE CASES BELOW CARRY IT TOO (160-05 review F1). A gate test's
+ * load-bearing oracle is `expect(mockValidateKey).not.toHaveBeenCalled()` — "no
+ * live credential probe was spent". That oracle is only falsifiable when the
+ * gate under test is the LAST thing between the request and the probe. Send a
+ * discriminator-less body and the `STALE_CLIENT` gate catches it further down
+ * regardless, so the pin passes whether or not the gate under test still
+ * exists. MEASURED: with the sfox gate deleted from route.ts, the
+ * discriminator-less cases failed only on `expected 409 to be 400` and
+ * `validateKey` was still never called. With `persist: true` they fail on
+ * `expected 200 to be 400` with `validateKey` CALLED — the gate's absence is
+ * what reddens them.
+ *
+ * The retired-arm suite builds its own discriminator-less body.
+ */
 const VALID_BODY = {
   exchange: "okx",
   api_key: "okx-api-key",
   api_secret: "okx-api-secret",
   passphrase: "pp",
+  persist: true,
 };
+
+/** VALID_BODY as a pre-160-02 client would have sent it: no discriminator. */
+const { persist: _omitPersist, ...LEGACY_BODY } = VALID_BODY;
 
 describe("POST /api/keys/validate-and-encrypt", () => {
   beforeEach(() => {
@@ -253,7 +284,12 @@ describe("POST /api/keys/validate-and-encrypt", () => {
   // ── (2) Missing required fields → 400 ───────────────────────────────
   it("returns 400 when exchange is missing", async () => {
     const { POST } = await import("./route");
-    const res = await POST(makeReq({ api_key: "k12345678", api_secret: "s12345678" }));
+    // `persist: true` — see VALID_BODY. Without it the STALE_CLIENT gate would
+    // refuse this body further down and the not-called pin below would hold
+    // even with the presence check deleted.
+    const res = await POST(
+      makeReq({ api_key: "k12345678", api_secret: "s12345678", persist: true }),
+    );
     expect(res.status).toBe(400);
     const body = await res.json();
     expect(body.error).toBe("Missing required fields");
@@ -262,14 +298,18 @@ describe("POST /api/keys/validate-and-encrypt", () => {
 
   it("returns 400 when api_key is missing", async () => {
     const { POST } = await import("./route");
-    const res = await POST(makeReq({ exchange: "okx", api_secret: "s12345678" }));
+    const res = await POST(
+      makeReq({ exchange: "okx", api_secret: "s12345678", persist: true }),
+    );
     expect(res.status).toBe(400);
     expect((await res.json()).error).toBe("Missing required fields");
   });
 
   it("returns 400 when api_secret is missing", async () => {
     const { POST } = await import("./route");
-    const res = await POST(makeReq({ exchange: "okx", api_key: "k12345678" }));
+    const res = await POST(
+      makeReq({ exchange: "okx", api_key: "k12345678", persist: true }),
+    );
     expect(res.status).toBe(400);
     expect((await res.json()).error).toBe("Missing required fields");
   });
@@ -419,6 +459,7 @@ describe("POST /api/keys/validate-and-encrypt", () => {
         api_key: shortApiKey,
         api_secret: "okx-api-secret-long-enough",
         passphrase: shortPassphrase,
+        persist: true,
       }),
     );
     expect(res.status).toBe(500);
@@ -449,24 +490,21 @@ describe("POST /api/keys/validate-and-encrypt", () => {
     consoleErr.mockRestore();
   });
 
-  // ── (5) Happy path → 200 with encryptKey payload + valid/read_only ──
-  it("returns the encryptKey payload spread with valid:true, read_only:true on success", async () => {
+  // ── (5) Happy path → 200 with the persist envelope + valid/read_only ──
+  it("returns the persisted row id with valid:true, read_only:true on success — and NO ciphertext", async () => {
     const { POST } = await import("./route");
     const res = await POST(makeReq(VALID_BODY));
 
     expect(res.status).toBe(200);
-    // Block D / P1947: the success body carries the caller's ENCRYPTED
-    // credential ciphertext (dek_encrypted/nonce/api_*_encrypted). It must
-    // never be absorbed by a shared cache and served to another tenant.
+    // Block D / P1947, restated for 160-05: the ciphertext this header was
+    // minted for no longer leaves the server, but the header still earns its
+    // place — the body names a tenant-scoped row id, and the REQUEST that
+    // produced it carried raw exchange credentials. A shared cache must not
+    // hold either end of that exchange.
     expect(res.headers.get("Cache-Control")).toBe("private, no-store");
     const body = await res.json();
     expect(body).toEqual({
-      api_key_encrypted: "ct-blob",
-      api_secret_encrypted: null,
-      passphrase_encrypted: null,
-      dek_encrypted: "dek-ct",
-      nonce: "nonce-b64",
-      kek_version: 3,
+      api_key_id: "persisted-key-id",
       valid: true,
       read_only: true,
     });
@@ -517,7 +555,7 @@ describe("POST /api/keys/validate-and-encrypt — sfox api_secret carve-out (SFO
 
   it("accepts sfox with NO api_secret and calls validateKey/encryptKey with api_secret '' (shared chokepoint)", async () => {
     const { POST } = await import("./route");
-    const res = await POST(makeReq({ exchange: "sfox", api_key: SFOX_TOKEN }));
+    const res = await POST(makeReq({ exchange: "sfox", api_key: SFOX_TOKEN, persist: true }));
 
     expect(res.status).toBe(200);
     // The absent secret is normalized to "" and flows through the SAME funnel the
@@ -531,7 +569,7 @@ describe("POST /api/keys/validate-and-encrypt — sfox api_secret carve-out (SFO
     ["null", null],
     ["empty string", ""],
   ])("normalizes sfox api_secret=%s identically to '' through validateKey", async (_label, secret) => {
-    const body: Record<string, unknown> = { exchange: "sfox", api_key: SFOX_TOKEN };
+    const body: Record<string, unknown> = { exchange: "sfox", api_key: SFOX_TOKEN, persist: true };
     if (secret !== undefined) body.api_secret = secret;
 
     const { POST } = await import("./route");
@@ -546,7 +584,7 @@ describe("POST /api/keys/validate-and-encrypt — sfox api_secret carve-out (SFO
     "accepts mixed-case %s (case-insensitive carve-out) and normalizes the exchange to canonical 'sfox' downstream",
     async (exchange) => {
       const { POST } = await import("./route");
-      const res = await POST(makeReq({ exchange, api_key: SFOX_TOKEN }));
+      const res = await POST(makeReq({ exchange, api_key: SFOX_TOKEN, persist: true }));
 
       expect(res.status).toBe(200);
       // WR-01: the case-sensitive `exchange === "sfox"` used to 400 this input
@@ -561,7 +599,7 @@ describe("POST /api/keys/validate-and-encrypt — sfox api_secret carve-out (SFO
 
   it("rejects sfox with NO api_key — the carve-out relaxes ONLY api_secret, never api_key", async () => {
     const { POST } = await import("./route");
-    const res = await POST(makeReq({ exchange: "sfox" }));
+    const res = await POST(makeReq({ exchange: "sfox", persist: true }));
 
     expect(res.status).toBe(400);
     expect((await res.json()).error).toBe("Missing required fields");
@@ -575,7 +613,7 @@ describe("POST /api/keys/validate-and-encrypt — sfox api_secret carve-out (SFO
     );
 
     const { POST } = await import("./route");
-    const res = await POST(makeReq({ exchange: "sfox", api_key: SFOX_TOKEN }));
+    const res = await POST(makeReq({ exchange: "sfox", api_key: SFOX_TOKEN, persist: true }));
 
     expect(res.status).toBe(400);
     expect((await res.json()).error).toBe(
@@ -590,7 +628,12 @@ describe("POST /api/keys/validate-and-encrypt — sfox api_secret carve-out (SFO
     "STILL rejects %s with NO api_secret — byte-identical 400 'Missing required fields'",
     async (exchange) => {
       const { POST } = await import("./route");
-      const res = await POST(makeReq({ exchange, api_key: "ccxt-key-123456" }));
+      // `persist: true` — see VALID_BODY. It is what makes the not-called pin
+      // below bite: with it, the presence check is the ONLY thing standing
+      // between this body and a live credential probe.
+      const res = await POST(
+        makeReq({ exchange, api_key: "ccxt-api-key", persist: true }),
+      );
 
       expect(res.status).toBe(400);
       expect((await res.json()).error).toBe("Missing required fields");
@@ -601,7 +644,12 @@ describe("POST /api/keys/validate-and-encrypt — sfox api_secret carve-out (SFO
   it("STILL rejects binance with an EMPTY api_secret (carve-out is sfox-only)", async () => {
     const { POST } = await import("./route");
     const res = await POST(
-      makeReq({ exchange: "binance", api_key: "ccxt-key-123456", api_secret: "" }),
+      makeReq({
+        exchange: "binance",
+        api_key: "ccxt-api-key",
+        api_secret: "",
+        persist: true,
+      }),
     );
 
     expect(res.status).toBe(400);
@@ -632,8 +680,13 @@ describe("POST /api/keys/validate-and-encrypt — sfox server gate (F2, SFOX_ENA
     "fails closed for %s with no live probe when SFOX_ENABLED is unset",
     async (exchange) => {
       const { POST } = await import("./route");
+      // `persist: true` — see VALID_BODY (review F1). MEASURED: without it, a
+      // deleted sfox gate left this body refused by the STALE_CLIENT gate
+      // (`expected 409 to be 400`) with `validateKey` still never called, so
+      // the two not-called pins below held regardless of the gate's existence.
+      // With it, the sfox gate is the LAST thing before the live probe.
       const res = await POST(
-        makeReq({ exchange, api_key: "sfox-bearer-token-value" }),
+        makeReq({ exchange, api_key: "sfox-bearer-token-value", persist: true }),
       );
 
       expect(res.status).toBe(400);
@@ -650,7 +703,11 @@ describe("POST /api/keys/validate-and-encrypt — sfox server gate (F2, SFOX_ENA
       process.env.SFOX_ENABLED = flag;
       const { POST } = await import("./route");
       const res = await POST(
-        makeReq({ exchange: "sfox", api_key: "sfox-bearer-token-value" }),
+        makeReq({
+          exchange: "sfox",
+          api_key: "sfox-bearer-token-value",
+          persist: true,
+        }),
       );
 
       expect(res.status).toBe(400);
@@ -686,6 +743,12 @@ const MT5_BODY = {
   api_key: "5001234",
   api_secret: "investor-password-123",
   passphrase: "MetaQuotes-Demo",
+  // 160-05 — see VALID_BODY: for every case that REACHES the handler (past the
+  // mt5 venue gate and the presence check, both of which sit above the
+  // discriminator gate), a body without `persist: true` would measure the
+  // STALE_CLIENT refusal instead of the arm it names — and, on the gate cases,
+  // would neuter their `not.toHaveBeenCalled()` pins.
+  persist: true,
 };
 
 describe("POST /api/keys/validate-and-encrypt — mt5 server gate (MT5_ENABLED off)", () => {
@@ -768,7 +831,10 @@ describe("POST /api/keys/validate-and-encrypt — mt5 three-credential defense (
     "rejects mt5 with %s BEFORE any worker call (three-cred defense, mirror of sfox relaxation)",
     async (_label, partial) => {
       const { POST } = await import("./route");
-      const res = await POST(makeReq({ exchange: "mt5", ...partial }));
+      // `persist: true` — see MT5_BODY / VALID_BODY (review F1). The
+      // three-credential gate must be the LAST thing before the live probe, or
+      // the two not-called pins below pass on the STALE_CLIENT refusal instead.
+      const res = await POST(makeReq({ exchange: "mt5", ...partial, persist: true }));
 
       expect(res.status).toBe(400);
       expect((await res.json()).error).toBe("Missing required fields");
@@ -1062,17 +1128,95 @@ describe("POST /api/keys/validate-and-encrypt — the persist arm (160-02 / RANK
     expect(PERSIST_STATE.inserts).toHaveLength(1);
     const row = PERSIST_STATE.inserts[0];
     expect(row.__table).toBe("api_keys");
+    // BOTH columns against the SAME hand-typed venue. That is also what pins
+    // the coupling the DB CHECK enforces (a divergence caught in CI rather than
+    // as a 23514 in production) — and it pins it INDEPENDENTLY. A bare
+    // `expect(row.attested_venue).toBe(row.exchange)` stood here and could not
+    // fail once these two passed; worse, on its own it is satisfied by a row
+    // whose columns were BOTH forged to the same wrong venue (review F3).
     expect(row.exchange).toBe("deribit");
     expect(row.attested_venue).toBe("deribit");
-    // The coupling the DB CHECK also enforces, asserted at the writer so a
-    // divergence is caught in CI rather than as a 23514 in production.
-    expect(row.attested_venue).toBe(row.exchange);
     expect(row.user_id).toBe(TEST_USER.id);
     expect(row.user_id).not.toBe("00000000-0000-0000-0000-ffffffffffff");
     // The ciphertext still reaches the ROW (it has to — that is the key), it
     // simply stops reaching the browser. See the response oracle below.
     expect(row.api_key_encrypted).toBe("ct-blob");
     expect(row.dek_encrypted).toBe("dek-ct");
+    // ⭐ 160 review F1 — TOTALITY, not a sample. The two assertions above pin
+    // 2 of the 6 fields the encrypt contract declares; `nonce`, `kek_version`,
+    // `api_secret_encrypted` and `passphrase_encrypted` were asserted NOWHERE,
+    // so deleting any of them from the route's projection was invisible to this
+    // suite. That is not a cosmetic gap: `kek_version` is INTEGER NOT NULL
+    // DEFAULT 1, so its omission INSERTs successfully and mislabels the KEK the
+    // blob is wrapped under — the row decrypts nowhere, in another service,
+    // days later, with no error anywhere. Driven off `.shape` rather than a
+    // second hand-written list so it grows with the contract: a seventh schema
+    // field the route forgets to write reddens HERE as well as at `tsc`.
+    for (const field of Object.keys(EncryptKeyResponseSchema.shape)) {
+      expect(row, `the insert projection dropped ${field}`).toHaveProperty(field);
+    }
+  });
+
+  // ── (1b) THE SECOND FORGERY VECTOR: the encryptKey RESPONSE, not the body ──
+  // 160 review WR-01. The oracle above pins the REQUEST body. It says nothing
+  // about the upstream analytics-service response, which is spread into the same
+  // INSERT — and a spread that lands AFTER the provenance columns would overwrite
+  // the tenant and both venue columns. The only thing that stood between a
+  // compromised/regressed upstream and a forged row was `EncryptKeyResponseSchema`
+  // being strip-mode Zod, two modules away in a file with a sanctioned
+  // `.passthrough()` sibling. RANK-03 is precisely the claim "the venue the server
+  // validated is the venue that gets written", so it must not rest on a distant
+  // schema's mode — it now rests on the object literal's own key order.
+  //
+  // ⚠️ ANTI-VACUITY, AND THE RECEIPT IS MEASURED (160-05 review F3). This test
+  // poisons the mock at the seam the schema guards, so it exercises the ordering
+  // DIRECTLY. Move the `...encrypted` spread back below the explicit columns in
+  // route.ts and the poisoned `user_id` lands in the row: the
+  // `expect(row.user_id).toBe(TEST_USER.id)` assertion reddens FIRST and vitest
+  // aborts the test there. Both venue assertions would redden too if reached,
+  // because each is pinned to the hand-typed EXPECTED_VENUE — the poisoned
+  // "mt5" cannot satisfy either. The `api_key_encrypted` assertion is the
+  // preserve side and stays green under that neuter by design.
+  //
+  // ⛔ The previous fourth assertion was `expect(row.attested_venue).toBe(
+  // row.exchange)` — two fields of the SAME row compared to each other. Under
+  // the exact regression this test exists to catch, the poisoned response sets
+  // BOTH to "mt5", so that oracle PASSED. Self-referential oracles are not
+  // oracles; both columns are now compared to an independent expectation.
+  it("a poisoned encryptKey RESPONSE cannot override user_id or either venue column (spread order)", async () => {
+    // Hand-typed, and deliberately NOT read back off the row: this is the venue
+    // the caller submitted credentials for and the one the server validated.
+    const EXPECTED_VENUE = "deribit";
+    mockEncryptKey.mockResolvedValue({
+      api_key_encrypted: "ct-blob",
+      api_secret_encrypted: null,
+      passphrase_encrypted: null,
+      dek_encrypted: "dek-ct",
+      nonce: "nonce-b64",
+      // Hostile extras, as if the schema had been loosened to passthrough.
+      user_id: "00000000-0000-0000-0000-eeeeeeeeeeee",
+      exchange: "mt5",
+      attested_venue: "mt5",
+      label: "forged-by-upstream",
+    });
+
+    const { POST } = await import("./route");
+    const res = await POST(makeReq(persistBody({ exchange: EXPECTED_VENUE })));
+
+    expect(res.status).toBe(200);
+    expect(PERSIST_STATE.inserts).toHaveLength(1);
+    const row = PERSIST_STATE.inserts[0];
+    expect(row.user_id).toBe(TEST_USER.id);
+    // BOTH venue columns against the SAME independent expectation — never
+    // against each other. The DB CHECK's equality is a CONSEQUENCE of each
+    // column carrying the venue this server authenticated against; asserting
+    // only the equality would be satisfied by a row where BOTH were forged to
+    // the poisoned "mt5" above.
+    expect(row.exchange).toBe(EXPECTED_VENUE);
+    expect(row.attested_venue).toBe(EXPECTED_VENUE);
+    // The ciphertext from the same response still lands — the guard is scoped to
+    // the provenance columns, it does not discard the payload we asked for.
+    expect(row.api_key_encrypted).toBe("ct-blob");
   });
 
   // ── (2) NORMALIZATION: the CANONICAL venue lands, not the raw body string ──
@@ -1147,19 +1291,69 @@ describe("POST /api/keys/validate-and-encrypt — the persist arm (160-02 / RANK
 });
 
 /**
- * 160-02 / RANK-03 — THE SKEW WINDOW (threat T-160-06).
+ * 160-05 / RANK-03 — THE LEGACY ARM IS RETIRED (threat T-160-06).
  *
- * Between this deploy and plan 160-05's `REVOKE INSERT`, a stale browser tab is
- * still running the pre-conversion bundle: it sends the OLD body and then does
- * its OWN client INSERT. If the route wrote a row for that request too, the
- * user would end up with TWO rows for one key — one attested server row and one
- * trigger-scrubbed client row.
+ * The skew window these cases were born in is closed: `REVOKE INSERT` withdrew
+ * `api_keys` INSERT from `anon`/`authenticated`, so the stale tab that sends
+ * the OLD body can no longer write the row it was being handed ciphertext for.
+ * Absent-discriminator bodies now get a coded `STALE_CLIENT` refusal, and the
+ * route has NO arm that returns key material to a caller.
  *
- * These tests are the anti-double-write pins. `PERSIST_STATE.inserts` being
- * EMPTY is the assertion; relax `body.persist === true` to any truthy check and
- * the string / numeric probes below go red.
+ * Two properties are pinned here and they fail differently:
+ *
+ *   1. NO CIPHERTEXT ON THE WIRE — the SECOND line of defence, not the first.
+ *      Restore the legacy `return NextResponse.json({ ...encrypted, … })` and
+ *      the refusal becomes a 200 carrying key material.
+ *
+ *      ⚠️ 160-05 review F2 — THE REDDEN PATH, CORRECTED. This docblock used to
+ *      claim `expectsNoCipherText` reddens on every case under that neuter. It
+ *      did not, and could not: with a HARD `expect(res.status).toBe(409)` the
+ *      restored arm threw `expected 200 to be 409` two lines earlier and vitest
+ *      aborted the test, so the helper never ran. Its only reachable failure was
+ *      the literal `{ error, code: "STALE_CLIENT" }` object growing a
+ *      ciphertext-named key — something this route cannot produce, since
+ *      `encrypted` is not even in scope at the gate. So the helper was a false
+ *      receipt.
+ *
+ *      It is now genuinely falsifiable, by two deliberate choices below: the
+ *      status pin is `expect.soft` (the test still FAILS on a wrong status — it
+ *      just fails after the remaining oracles have run), and
+ *      `expectsNoCipherText` is the FIRST body assertion, ahead of anything that
+ *      could throw and abort. A restored legacy arm therefore reaches the helper
+ *      with the ciphertext body in hand. The helper asserts over KEY NAMES, not
+ *      fixture values, so a renamed ciphertext field cannot slip past it.
+ *
+ *      The 200 persist path is NOT policed here — it has its own primary
+ *      oracles: the persist arm's "returns api_key_id and NO ciphertext-named
+ *      field of any kind" case, and the "NO persist-mode response — success or
+ *      any error arm — carries a ciphertext-named field" sweep. This suite owns
+ *      the REFUSAL path only, and does not duplicate them.
+ *   2. STRICTNESS still discriminates. Relax `body.persist !== true` to a
+ *      falsy check and the `"true"` / `1` / `"1"` / `{}` probes stop refusing —
+ *      they would reach the WRITER, which is the double-write threat wearing a
+ *      different hat now that the server is the only writer.
+ *
+ * `PERSIST_STATE.inserts` staying EMPTY remains the anti-double-write pin.
  */
-describe("POST /api/keys/validate-and-encrypt — skew window: only a STRICT boolean persists", () => {
+describe("POST /api/keys/validate-and-encrypt — the retired legacy arm refuses, and serves no ciphertext", () => {
+  /** Every ciphertext-shaped key the legacy envelope used to carry. */
+  const CIPHERTEXT_KEYS = [
+    "api_key_encrypted",
+    "api_secret_encrypted",
+    "passphrase_encrypted",
+    "dek_encrypted",
+    "nonce",
+    "kek_version",
+  ];
+
+  function expectsNoCipherText(body: Record<string, unknown>) {
+    expect(
+      Object.keys(body).filter((k) => CIPHERTEXT_KEYS.includes(k)),
+      "the refusal envelope carries a ciphertext-shaped key — the legacy arm " +
+        "is back, or a new arm started echoing encryptKey's result",
+    ).toEqual([]);
+  }
+
   beforeEach(() => {
     vi.clearAllMocks();
     rateLimitResult.success = true;
@@ -1179,25 +1373,41 @@ describe("POST /api/keys/validate-and-encrypt — skew window: only a STRICT boo
     });
   });
 
-  it("a body with NO persist field gets the legacy ciphertext envelope and mints ZERO rows", async () => {
+  it("a body with NO persist field is REFUSED with STALE_CLIENT and mints ZERO rows", async () => {
     const { POST } = await import("./route");
-    const res = await POST(makeReq(VALID_BODY));
+    const res = await POST(makeReq(LEGACY_BODY));
 
-    expect(res.status).toBe(200);
-    // Byte-identical to the pre-160-02 contract. The stale tab reads these
-    // fields and performs its own INSERT; break this and every tab open across
-    // the deploy loses its key-add.
-    expect(await res.json()).toEqual({
-      api_key_encrypted: "ct-blob",
-      api_secret_encrypted: null,
-      passphrase_encrypted: null,
-      dek_encrypted: "dek-ct",
-      nonce: "nonce-b64",
-      kek_version: 3,
-      valid: true,
-      read_only: true,
-    });
+    // SOFT ON PURPOSE (review F2 — see the suite docblock): a restored legacy
+    // arm answers 200 with ciphertext, and a hard status assertion would abort
+    // the test before the ciphertext oracle could look at the body. Soft still
+    // fails this test on a wrong status; it just fails it last.
+    expect.soft(res.status).toBe(409);
+    const body = await res.json();
+    // FIRST among the body assertions, ahead of anything that could throw: this
+    // is the oracle a restored legacy arm has to trip.
+    expectsNoCipherText(body);
+    expect(body.code).toBe("STALE_CLIENT");
+    // The message is what a stale tab actually shows its user, so it has to
+    // name the remedy (reload) rather than blame the key.
+    expect(body.error).toMatch(/reload/i);
+    // Review F4 — the 409 is the one coded arm on this route with no
+    // behavioural header pin. `src/__tests__/no-store-coverage.test.ts` is a
+    // TOTAL-REMOVAL tripwire only, so deleting `headers: NO_STORE_HEADERS` from
+    // THIS arm reddened nothing. The refusal names a tenant's client state and
+    // the request that produced it carried raw exchange credentials.
+    expect(res.headers.get("Cache-Control")).toBe("private, no-store");
     expect(PERSIST_STATE.inserts).toEqual([]);
+  });
+
+  it("the refusal happens BEFORE any live venue call — no validate, no encrypt", async () => {
+    const { POST } = await import("./route");
+    await POST(makeReq(LEGACY_BODY));
+
+    // A doomed request must not spend a credential probe against the exchange
+    // or a KMS round-trip. Move the gate below the handler call and both of
+    // these redden.
+    expect(mockValidateKey).not.toHaveBeenCalled();
+    expect(mockEncryptKey).not.toHaveBeenCalled();
   });
 
   it.each([
@@ -1208,20 +1418,21 @@ describe("POST /api/keys/validate-and-encrypt — skew window: only a STRICT boo
     ["null", null],
     ["false", false],
   ])(
-    "persist as %s is NOT the discriminator — legacy arm, zero server-side inserts",
+    "persist as %s is NOT the discriminator — refused, zero server-side inserts",
     async (_label, persistValue) => {
       const { POST } = await import("./route");
       const res = await POST(
         makeReq({ ...VALID_BODY, persist: persistValue, label: "ignored" }),
       );
 
-      expect(res.status).toBe(200);
+      // Soft + oracle-first, same reason as the case above (review F2).
+      expect.soft(res.status).toBe(409);
       const body = await res.json();
-      // It got the LEGACY envelope (ciphertext present, no id) …
-      expect(body.api_key_encrypted).toBe("ct-blob");
+      // No key material (the arm that used to hand that out is gone) …
+      expectsNoCipherText(body);
+      expect(body.code).toBe("STALE_CLIENT");
+      // … and no id, because it never reached the writer.
       expect(body.api_key_id).toBeUndefined();
-      // … and, the whole point: no row was written server-side, so a stale tab
-      // that inserts for itself produces exactly one row, not two.
       expect(PERSIST_STATE.inserts).toEqual([]);
     },
   );

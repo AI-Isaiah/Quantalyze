@@ -19,6 +19,11 @@ import { withAuth } from "@/lib/api/withAuth";
 // `create-with-key/route.ts`); it THROWS when
 // SUPABASE_SERVICE_ROLE_KEY is absent, which the persist arm answers honestly.
 import { createAdminClient } from "@/lib/supabase/admin";
+// 160 review F1 — the encrypt contract is imported HERE, as a TYPE SOURCE, so
+// the persist INSERT's ciphertext columns are a compile-time-total projection of
+// it rather than a hand-maintained list. See `EncryptedColumns` at the writer.
+import { EncryptKeyResponseSchema } from "@/lib/analytics-schemas";
+import type { z } from "zod";
 import { NO_STORE_HEADERS } from "@/lib/api/headers";
 import { userActionLimiter, checkLimit, rateLimitDenyJson } from "@/lib/ratelimit";
 import type { User } from "@supabase/supabase-js";
@@ -159,6 +164,81 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
     return NextResponse.json({ error: "Missing required fields", code: "KEY_INVALID_FORMAT" }, { status: 400, headers: NO_STORE_HEADERS });
   }
 
+  // ── 160-05 / RANK-03 — THE PERSIST DISCRIMINATOR, now a GATE rather than a
+  // fork. `persist === true` is a STRICT boolean comparison and the strictness
+  // is still the whole point, but what the other branch does has changed.
+  //
+  // During the soak window it fell through to a legacy arm that handed the
+  // ciphertext back so a stale tab could INSERT for itself. That window is
+  // CLOSED: `20260823120000_revoke_api_keys_insert` withdrew INSERT on
+  // `api_keys` from `anon` and `authenticated`, so a stale tab's own INSERT now
+  // dies at the table with a bare 42501. Serving it the ciphertext first would
+  // ship encrypted key material to a browser that provably cannot do anything
+  // with it — so the refusal below is both the honest answer and the narrower
+  // blast radius. No LIVE arm of this route returns ciphertext to any caller.
+  // (The dormant `_unifiedValidateAndEncryptHandler` below still blind-forwards
+  // its upstream bodies; see the note at its forwarding site. It has zero
+  // callers, so it is not a live exposure — but the invariant is "live path",
+  // not "route".)
+  //
+  // STRICTNESS still earns its keep: a truthy `"true"` / `1` that some future
+  // caller stringified must NOT be read as consent to write a row. It lands
+  // here, on the refusal, not on the writer. (threat T-160-06)
+  //
+  // ⛔ PLACEMENT IS LOAD-BEARING — ABOVE the rate limiter, BELOW `withAuth`.
+  // It sits here with the sfox/mt5 structural gates, for the reason they
+  // already state in prose: a request this route will do no work for gets a
+  // clean, honest 4xx BEFORE the rate limit and the live round-trip. Below the
+  // limiter this error DEFEATED ITS OWN REMEDY: `userActionLimiter` is
+  // 5-per-60s, so a stale tab that clicks Connect five times burned the whole
+  // bucket on requests that did nothing, and then the reload this very sentence
+  // PRESCRIBES came back 429 "Too many requests". (160 review F1)
+  // ⚠️ It must stay BELOW `withAuth`: the answer reveals which contract version
+  // this deployment is running, and an unauthenticated caller must never be
+  // able to read deploy skew off it.
+  //
+  // ⛔ 409, NOT 400 — deliberate, do not re-litigate. This phase's own
+  // `160-REVIEW.md` recommended 400, and 400 is defensible (the body IS
+  // malformed against the current contract). 409 was chosen because the fact
+  // being reported is a CONFLICT between the client's contract version and this
+  // deployment's — deploy skew, not a typo — and 409 is already what this
+  // codebase spends on "your view of the world and mine disagree"
+  // (`create-with-key` and `composite/add-key` on an already-connected key;
+  // `CsvSubmitStep` reads `409 && ok === true` as idempotent success). Because
+  // 409 is that loaded here, `code` — not the status — is the discriminator
+  // clients are expected to branch on: STALE_CLIENT is the stable token.
+  if (body.persist !== true) {
+    // 160 review F2 — ONE server-side signal, because the copy below prescribes
+    // a remedy only the USER can perform and therefore reports nothing to us
+    // when the remedy cannot work. If the cause is a genuinely stale tab, the
+    // reload fixes it and this line is a harmless deploy-skew tick. If the cause
+    // is OURS — a fourth connect surface added without the discriminator, or a
+    // refactor dropping `persist: true` from one of the three live call sites —
+    // then every connect from that surface 409s, the user reloads as instructed,
+    // gets the same bundle and fails identically, and until this line existed
+    // the ONLY detection channel was a user emailing support (see
+    // `STALE_CLIENT.fix[2]` in `wizardErrors.ts`). In aggregate this makes a
+    // caller regression visible.
+    //
+    // ⛔ DELIBERATELY NOT A SENTRY CAPTURE, do not "upgrade" it. A real deploy
+    // skew is a shared, self-healing state that fires once per stale tab for the
+    // whole soak window — capturing it would bury the signal in noise, the same
+    // stance the breaker / 4xx-forward / 504 arms below take.
+    //
+    // ⚠️ No secrets are in scope at this point: this gate runs BEFORE any
+    // credential is forwarded anywhere, and `user.id` is already what the rate
+    // limiter keys on two statements down.
+    console.error(
+      "[keys/validate-and-encrypt] STALE_CLIENT refusal — caller sent no persist discriminator",
+      { userId: user.id },
+    );
+    return NextResponse.json({
+      error:
+        "This page is out of date and can no longer add keys. Reload the page and try again.",
+      code: "STALE_CLIENT",
+    }, { status: 409, headers: NO_STORE_HEADERS });
+  }
+
   const rl = await checkLimit(userActionLimiter, `keys-validate-encrypt:${user.id}`);
   if (!rl.success) {
     // 140.4-13 / SEAMRIM-05 — deny through the chokepoint so a limiter
@@ -184,37 +264,34 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
   // Phase 19 / API-2 — DO NOT delegate to /process-key for validate-and-encrypt.
   //
   // Why this route is locked to the legacy path even when the unified-backbone
-  // flag is on:
-  // The allocator client (src/components/exchanges/AllocatorExchangeManager.tsx)
-  // reads `result.api_key_encrypted` / `result.api_secret_encrypted` /
-  // `result.passphrase_encrypted` / `result.dek_encrypted` / `result.nonce` /
-  // `result.kek_version` from the response and persists them to api_keys.
-  // The unified `/process-key` validate step returns
-  // `{ ok, valid, read_only, correlation_id, step }` — there is NO encryption
-  // payload. Delegating here would silently drop those fields and the
-  // allocator would write all-NULL ciphertext to api_keys.
+  // flag is on — stated as it is TRUE AT HEAD, which is no longer the Phase-19
+  // reason: this route is now its own PERSISTER. It needs the ciphertext
+  // SERVER-side, because it performs the `api_keys` INSERT itself (the persist
+  // arm in `legacyValidateAndEncryptHandler` below). The unified `/process-key`
+  // validate step returns `{ ok, valid, read_only, correlation_id, step }` —
+  // there is NO encryption payload in it at all. Delegating would leave the
+  // persist arm holding a verdict and nothing to write.
   //
-  // TODO(phase-19+): once /process-key gains an encrypt branch (or a separate
-  // /process-key/encrypt endpoint that returns the same envelope shape as
-  // legacy encryptKey), restore the flag-gated unified handler below and
-  // route through it. Tracked under the unified-encrypt deferred work item.
+  // ⚠️ The superseded rationale (kept here only so it is not resurrected)
+  // claimed the allocator client read `result.api_key_encrypted` /
+  // `result.dek_encrypted` / `result.kek_version` off THIS route's response and
+  // persisted them from the browser. That has been false since 160-05: the
+  // allocator sends `persist: true` and reads `result.api_key_id` only, and no
+  // live arm here returns ciphertext to any caller. Do not restore that
+  // reading — it is the exact shape this phase closed.
+  //
+  // TODO(phase-19+): once /process-key gains an encrypt branch THE SERVER can
+  // consume — one that hands the envelope back to THIS route, which still does
+  // its own INSERT — the flag-gated unified handler below can be restored and
+  // routed through. Never phrase the unblocking condition as "returns the same
+  // envelope shape as legacy encryptKey" TO A CALLER: that is a description of
+  // the ciphertext round-trip 160-05 deleted, and a future editor following it
+  // would rebuild it. Tracked under the unified-encrypt deferred work item.
+  //
   // TS-04 / SC7 — `userId` is threaded into the legacy handler (rather than
   // re-derived inside it) so the tenant identity provably comes from THIS
   // route's withAuth session and cannot drift to a body field.
-  //
-  // ── 160-02 / RANK-03 — THE PERSIST DISCRIMINATOR (the deploy-vs-revoke skew
-  // window). `persist === true` is a STRICT boolean comparison, and the
-  // strictness is the whole point: during the soak window between this deploy
-  // and the PR-2 `REVOKE INSERT`, a stale browser tab is still running the
-  // pre-conversion JS. That tab sends the OLD body (no `persist` field at all)
-  // and then performs its own client INSERT. If the server wrote a row for
-  // every call — or for a truthy `"true"` / `1` that some future caller
-  // stringified — the stale tab would mint TWO rows: one attested server row
-  // and one trigger-scrubbed client row. Anything that is not the boolean
-  // `true` therefore falls through to the byte-unchanged legacy arm, which
-  // performs ZERO server-side inserts. (threat T-160-06)
-  const persist = body.persist === true;
-  return await legacyValidateAndEncryptHandler({ exchange: exchangeNormalized, api_key, api_secret: api_secret_normalized, passphrase, userId: user.id, persist, label: body.label });
+  return await legacyValidateAndEncryptHandler({ exchange: exchangeNormalized, api_key, api_secret: api_secret_normalized, passphrase, userId: user.id, label: body.label });
 });
 
 /**
@@ -295,6 +372,18 @@ async function _unifiedValidateAndEncryptHandler(args: {
     // TOP-LEVEL code: preserve the upstream's own (`body.code`, else
     // `seamErrorCode(body)`), falling back to UNKNOWN only when it genuinely
     // carried none. NEVER overwrite an upstream-carried code. (Dormant handler.)
+    //
+    // ⛔ TO WHOEVER REVIVES THIS HANDLER (160 review F5): this arm — and the
+    // success arm below it — BLIND-FORWARD the entire upstream body into this
+    // route's response. That is why the no-ciphertext invariant stated in POST
+    // and in `legacyValidateAndEncryptHandler`'s docblock is scoped to the LIVE
+    // path: it is an accurate description of what ships, not of this dormant
+    // code. On the one route whose whole stated invariant is that key material
+    // stops round-tripping to a browser, a revival must PROJECT the upstream
+    // payload onto a NAMED contract (as the persist INSERT's `encryptedColumns`
+    // does — a local typed from the response schema, so the projection is
+    // compile-time TOTAL rather than a hand-maintained list) rather than spread
+    // whatever /process-key happened to return.
     const forwardBody =
       typeof err === "object" && err !== null
         ? (err as Record<string, unknown>)
@@ -314,7 +403,12 @@ async function _unifiedValidateAndEncryptHandler(args: {
 }
 
 /**
- * Legacy path preserved verbatim from the pre-Phase-19 implementation.
+ * The LEGACY path in the legacy-vs-unified-/process-key sense ONLY (see NOTE
+ * (M-9) below, which fixes that meaning) — it is NO LONGER "preserved verbatim
+ * from the pre-Phase-19 implementation", as this line used to claim. Two
+ * landings changed the body: 160-02 added the server-side `api_keys` writer,
+ * and 160-05 removed the ciphertext response arm. It now validates, encrypts,
+ * INSERTs via a service-role client, and answers `{ api_key_id }`.
  *
  * NOTE (M-9): this branch is the ONLY active code path on this route — the
  * unified handler is intentionally dormant pending the deferred encrypt
@@ -322,17 +416,21 @@ async function _unifiedValidateAndEncryptHandler(args: {
  * the unified-handler decision, not to this function which stays around
  * until /process-key gains an encrypt step.
  *
- * ── 160-02 / RANK-03: this function now serves BOTH arms of the route.
- * `persist: false` is the legacy contract, byte-unchanged (ciphertext back to
- * the caller, no row written). `persist: true` writes the `api_keys` row here
- * on the server and returns `{ api_key_id }` instead of the ciphertext.
+ * ── 160-05 / RANK-03: this function serves the PERSIST arm only. It writes
+ * the `api_keys` row here on the server and returns `{ api_key_id }`. The
+ * legacy ciphertext arm it briefly shared a body with is GONE — POST refuses
+ * absent-discriminator bodies with `STALE_CLIENT` before reaching here, so
+ * there is no longer a LIVE code path on this route that returns key material
+ * to a caller. ("Live" is the honest scope, not a hedge: the dormant,
+ * zero-caller `_unifiedValidateAndEncryptHandler` above still forwards upstream
+ * bodies verbatim, and carries a note at its forwarding site telling a reviver
+ * to project onto a named contract instead.)
  *
- * The two arms deliberately share ONE body rather than living in two
- * functions: the rate limiter, the sfox/mt5 gates, the presence checks, the
- * breaker arm, the curated-4xx forward, the timeout arm and the scrubbed
- * terminal arm must police the persist arm IDENTICALLY. Duplicating the seam
- * calls into a parallel handler is exactly how one arm silently loses a
- * control (threat T-160-09).
+ * It stays ONE body rather than splitting: the rate limiter, the sfox/mt5
+ * gates, the presence checks, the breaker arm, the curated-4xx forward, the
+ * timeout arm and the scrubbed terminal arm all police this arm. Duplicating
+ * the seam calls into a parallel handler is exactly how one arm silently loses
+ * a control (threat T-160-09).
  */
 // DEPRECATED: remove after unified encrypt branch lands (deferred from PR-D)
 async function legacyValidateAndEncryptHandler(args: {
@@ -347,12 +445,6 @@ async function legacyValidateAndEncryptHandler(args: {
    */
   userId: string;
   /**
-   * 160-02 / RANK-03 — persist mode. Already reduced to a STRICT boolean by
-   * the POST handler's `body.persist === true`; a raw body value never
-   * reaches here.
-   */
-  persist?: boolean;
-  /**
    * 160-02 / RANK-03 — the caller's optional display label, UNVALIDATED. It is
    * typed `unknown` on purpose: it arrives straight off the request body and
    * is normalized (trim + 120-char cap + server default) inside the persist
@@ -360,7 +452,7 @@ async function legacyValidateAndEncryptHandler(args: {
    */
   label?: unknown;
 }): Promise<NextResponse> {
-  const { exchange, api_key, api_secret, passphrase, userId, persist, label } = args;
+  const { exchange, api_key, api_secret, passphrase, userId, label } = args;
   try {
     // Validate and encrypt atomically to prevent TOCTOU race
     const validation = await validateKey(exchange, api_key, api_secret, passphrase, { userId });
@@ -381,13 +473,12 @@ async function legacyValidateAndEncryptHandler(args: {
 
     const encrypted = await encryptKey(exchange, api_key, api_secret, passphrase, { userId });
 
-    // ── LEGACY ARM (no `persist` discriminator) — byte-unchanged. The caller
-    // receives the ciphertext and performs its own INSERT. This arm is retired
-    // by plan 160-05 once the REVOKE lands; until then a stale tab in the soak
-    // window depends on it being EXACTLY what it was.
-    if (!persist) {
-      return NextResponse.json({ ...encrypted, valid: true, read_only: true }, { headers: NO_STORE_HEADERS });
-    }
+    // ⛔ 160-05 — THE LEGACY ARM WAS HERE and is deliberately not coming back.
+    // It returned `{ ...encrypted, valid: true, read_only: true }` so the
+    // browser could INSERT for itself. `REVOKE INSERT` closed that door at the
+    // table; re-adding a ciphertext response would hand out key material no
+    // caller can use. If a future caller needs the envelope, it needs a
+    // service-role writer, not this route's response body.
 
     // ── PERSIST ARM (160-02 / RANK-03) ────────────────────────────────────
     //
@@ -456,21 +547,81 @@ async function legacyValidateAndEncryptHandler(args: {
     // never reads one, and this function only ever sees the session value.
     // (threat T-160-05)
     //
-    // @audit-skip: key connect — this INSERT replaces the browser-side INSERT
+    // The skip rationale (the PRAGMA ITSELF is immediately above the `.insert()`
+    // chain below, NOT here — see the ⚠️ at the end of this block):
+    // this INSERT replaces the browser-side INSERT
     // ApiKeyManager performed unaudited until 160-02, so moving the writer
     // server-side neither adds nor removes a forensic obligation. The
     // api_key.* connect taxonomy is the ADR-0023 follow-up tracked with the
     // sibling wizard path (the `@audit-skip: wizard draft` pragma on the
     // `create_wizard_strategy` call in `create-with-key/route.ts`), not this
     // phase.
+    //
+    // ⚠️ `audit-coverage.test.ts` looks back only 8 lines from the mutation
+    // chain start (the P694 tightening), so the pragma cannot live up here with
+    // its rationale — `encryptedColumns` sits between them. Keep the pragma
+    // adjacent to `.insert()` or the coverage gate goes red.
+    //
+    // ⛔ NO SPREAD OF THE UPSTREAM RESPONSE (160 review WR-01, completed by 160
+    // review F3). Ordering `...encrypted` first hardened only the four columns
+    // re-assigned after it; every OTHER `api_keys` column (`id`, `is_active`,
+    // `last_sync_at`, `created_at`, `disconnected_at`, `sync_status`) stayed
+    // fully writable by whatever the upstream returned, so the row still rested
+    // on `EncryptKeyResponseSchema` being strip-mode Zod — a guarantee living
+    // two modules away, in a file with a sanctioned `.passthrough()` sibling,
+    // which is precisely the distant dependency the design must not rest on.
+    // Naming the columns makes the claim true of the WHOLE ROW: an upstream
+    // field this route did not name cannot reach ANY column, whatever that
+    // schema's mode becomes.
+    //
+    // ⭐ BUT A BARE PICK TRADED ONE SILENT FAILURE FOR ANOTHER (160 review F1),
+    // and `encryptedColumns` is what pays that back. The spread was at least
+    // STRUCTURALLY TOTAL over the contract; a hand-written list of six is total
+    // only until someone edits it, and NOTHING here was checking. The seventh
+    // field the encrypt service grows — or the six-field list one line-delete
+    // away from five — is unenforced at every gate this repo owns:
+    // `createAdminClient()` returns a DELIBERATELY UNTYPED client (see the
+    // comment in `@/lib/supabase/admin`), so this `.insert()` literal is never
+    // checked against `api_keys.Insert` and not even a NOT-NULL column breaks
+    // `tsc`. Drop `kek_version` and the INSERT SUCCEEDS: the row claims KEK v1
+    // (`INTEGER NOT NULL DEFAULT 1`) while the blob is wrapped under whatever
+    // KEK the encrypt service actually used, `insertError` is null, the caller
+    // gets 200 and "connected", and the key fails to decrypt in a DIFFERENT
+    // service, days later, forever — no error, no log, no Sentry.
+    //
+    // So the projection is declared against a NAMED LOCAL CONTRACT whose type is
+    // the encrypt schema itself. The mapped type is homomorphic over
+    // `keyof EncryptedColumns`, so it requires EVERY member: a seventh field
+    // added to `EncryptKeyResponseSchema`, or a member deleted from the literal
+    // below, is a compile error HERE — at the writer, in this repo, in CI. That
+    // is exactly the totality the spread provided and the bare pick gave up,
+    // recovered WITHOUT re-acquiring the dependency on the schema's strip mode
+    // (the type says which fields; the literal still says which values, so an
+    // upstream extra still cannot reach a column). It is also the discipline
+    // the dormant handler's reviver note above already prescribes.
+    //
+    // The provenance columns are still assigned explicitly and still win — the
+    // spread below is safe precisely because `encryptedColumns` is a local this
+    // route constructed, not an upstream response object.
+    type EncryptedColumns = z.infer<typeof EncryptKeyResponseSchema>;
+    const encryptedColumns: { [K in keyof EncryptedColumns]: EncryptedColumns[K] } = {
+      api_key_encrypted: encrypted.api_key_encrypted,
+      api_secret_encrypted: encrypted.api_secret_encrypted,
+      passphrase_encrypted: encrypted.passphrase_encrypted,
+      dek_encrypted: encrypted.dek_encrypted,
+      nonce: encrypted.nonce,
+      kek_version: encrypted.kek_version,
+    };
+
+    // @audit-skip: key connect — rationale in the block above `encryptedColumns`.
     const { data: inserted, error: insertError } = await admin
       .from("api_keys")
       .insert({
+        ...encryptedColumns,
         user_id: userId,
         exchange: exchangeNormalized,
         attested_venue: exchangeNormalized,
         label: labelOrDefault,
-        ...encrypted,
       })
       .select("id")
       .single();

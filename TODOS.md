@@ -552,6 +552,103 @@ true for 146 and half of 142–145, and **false for 141**.
 
 ## 🟡 FIX MID-TERM
 
+### ✅ FIXED (pending CI confirmation) — CI's gitleaks was too old to read our allowlist (raised + fixed 2026-08-23, Phase-160 ship)
+
+**Was:** the `secret-scan` gate ran with **every allowlist entry in `.gitleaks.toml` silently
+dropped**, so ~15 exempted fixture files were unshielded and PRs red-lighted on files the config
+had exempted since the v1.12 CI-green commit. Not an exposure — the gate was *stricter* than
+designed, not leakier.
+
+**Root cause (isolated by measurement, 2×2 over the same commit range):**
+
+| gitleaks | `[allowlist]` (singular) | `[[allowlists]]` (array) |
+|---|---|---|
+| **8.24.3** — the action's built-in default | no leaks | **leaks found: 2** ← what CI reported |
+| **8.30.1** — Homebrew current | no leaks | no leaks |
+
+`gitleaks-action` resolves its scanner as `process.env.GITLEAKS_VERSION || "8.24.3"`, and **8.24.3
+silently ignores the top-level `[[allowlists]]` array-of-tables form** this config uses (converted to
+array form by 158-REVIEW CR-03). No parse error, no warning — the allowlist is dropped and the scan
+proceeds on default rules. That conversion is what broke it.
+
+**Fix:** pin `GITLEAKS_VERSION: 8.30.1` in `ci.yml`, rather than downgrading the config to the
+singular form. Pinning also makes the gate reproducible locally, since Homebrew ships 8.30.x.
+
+**Guard:** `gitleaks-allowlist.test.ts` now fails if the pin is removed *or* set below 8.25.0 while
+the config still uses array form. Verified by neuter both ways — RED with the intended message each
+time, restored byte-identical.
+
+⚠️ **Two traps worth remembering.** (1) `gitleaks` auto-discovers `.gitleaks.toml` from the working
+directory, so omitting `-c` does NOT test the no-config case — it loads the config anyway and prints
+a reassuring `no leaks found`. (2) gitleaks scans the **whole PR commit range**, so renaming an
+offending value in a later commit does not clear it; the finding stays attributed to the commit that
+added it.
+
+**Residual:** the local binary is whatever Homebrew last installed. Expose `npm run secret-scan` that
+runs the *pinned* version so local and CI cannot drift again.
+
+### `secret-scan` is red on `workflow_dispatch` runs — full-history scan, no range (raised 2026-08-23, PR #705 review)
+
+**Priority:** P3 — noisy check, not a merge blocker (dispatch runs are not PR checks).
+
+`ci.yml` triggers on `push`, `pull_request` **and `workflow_dispatch`**, and `secret-scan` has no
+`if:` guard. In the pinned action bundle, `Scan()` appends `--log-opts` only for `push` and
+`pull_request`; `workflow_dispatch` falls through to a bare `gitleaks detect` — i.e. **full history**.
+Measured with the now-correct config: **29 findings** across ~20 non-allowlisted paths
+(`src/lib/seam-redaction.test.ts` ×3, `analytics-service/services/job_worker.py`,
+`scripts/backfill_funding.py`, …).
+
+Not a regression from the version pin — the same full scan under 8.24.3 + the array config produced
+**103**, so the pin improved it 103 → 29. But the workflow has dispatch inputs the team actually uses
+(`bake_svg_goldens`, `bake_demo_screenshots`), so a manual dispatch red-lights the check for reasons
+unrelated to the dispatch. Close it by either scoping `secret-scan` with an `if:` that skips
+`workflow_dispatch`, or triaging the 29 full-history findings and allowlisting the genuine fixtures.
+
+⚠️ Note the scope limit this implies: "the allowlist now works" is true for the two **range-scan**
+paths (push, pull_request). The dispatch path scans differently and has never been clean.
+
+### `FORCE_JAVASCRIPT_ACTIONS_TO_NODE24` on `secret-scan` is now a no-op (raised 2026-08-23, PR #705 review)
+
+**Priority:** P4 — dead config, zero behavioral risk.
+
+The env was added when gitleaks-action's latest release was v2.3.9/node20. The step is now pinned to
+v3.0.0, whose `action.yml` declares `using: "node24"`, so the forcing var does nothing. Comment
+corrected in place; the var itself was left alone to avoid moving two variables in the PR that
+changed the scanner pin. Remove it in a standalone change.
+
+### `gitleaks-allowlist.test.ts`'s real-scanner arm is probably skipped in CI (raised 2026-08-23, PR #705 review)
+
+**Priority:** P3 — a coverage claim that may not hold where it matters.
+
+The H-0017 arm (`suppresses a JWT at an allowlisted path…`) is `skipIf`-gated on the `gitleaks` binary
+being on `PATH`. It passes locally only because Homebrew installed 8.30.1; gitleaks is **not** in the
+`ubuntu-latest` runner image, so the arm is almost certainly skipped in CI. Confirm against a CI log.
+
+Combined with the new version-pin test being a YAML-text assertion, **nothing running in CI exercises
+scanner-version-vs-config-form behavior** — the pin guard is a proxy for it, not a measurement of it.
+The `npm run secret-scan` script booked above would close both: it puts the pinned binary on PATH, so
+the H-0017 arm runs everywhere and local/CI can no longer drift.
+
+### Two guard gaps on `keys/validate-and-encrypt` (raised 2026-08-23, Phase-160 closeout review)
+
+Both surfaced by the pre-landing review of the `STALE_CLIENT` retirement. Neither is a
+live defect; both are **missing tripwires**, so the class can re-open silently.
+
+- **`wizardErrors.invariant.test.ts` is blind to this route.** Its `ROUTES` population covers
+  only `create-with-key`, `composite/add-key` and `finalize-wizard`. Nothing forces
+  `keys/validate-and-encrypt`'s emitted codes into the `WizardErrorCode` union — which is
+  exactly how `STALE_CLIENT` shipped unregistered and resolving to `UNKNOWN` until this
+  review caught it. Closing it means a fourth `ROUTES` row plus a hand-typed, measured site
+  count, and it will likely pull in that route's other emitters — so it is its own change,
+  not a same-pass edit. Related: `seam-wire-vocabulary.invariant.test.ts` carries a
+  DECLARED BLINDNESS note for the same route's clients (they live outside the wizard-steps
+  directory its population is derived from).
+- **`const body = await req.json()` has no `try`/`catch`** (`route.ts`, top of `POST`).
+  Malformed JSON — or a body of literal `null` — throws inside the `withAuth` wrapper, which
+  has no catch either, so the caller gets a Next.js default 500 with no coded envelope. That
+  contradicts the route's own stated invariant, "a machine code on EVERY error arm".
+  Pre-existing, not introduced by Phase 160, and out of that phase's diff.
+
 ### ✅ DECIDED + SHIPPED — should the measure ladder have a px cap at all? (raised 2026-08-09, DECIDED 2026-08-09, closed 2026-08-10)
 Founder report, with screenshots: *"zooming out should allow me to see more of the
 content… it should never produce dead/empty areas."*

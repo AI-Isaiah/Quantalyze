@@ -1422,9 +1422,14 @@ jobs:
       # to Node 24 on 2026-06-02 and removes Node 20 on 2026-09-16. The action
       # is a thin wrapper that downloads + runs the gitleaks Go binary, so it
       # runs cleanly on Node 24 — opt in now so the secret-scan job verifies it
-      # ahead of the forced switch (and the deprecation warning clears). The
-      # latest gitleaks-action release is still v2.3.9/node20, so there is no
-      # version bump that fixes this. If a future Node bump ever breaks the
+      # ahead of the forced switch (and the deprecation warning clears).
+      # ⚠️ STALE AS OF 2026-08-23: this said "the latest gitleaks-action release
+      # is still v2.3.9/node20, so there is no version bump that fixes this."
+      # That bump exists and has been taken — the step below is pinned to
+      # v3.0.0, whose action.yml declares `using: "node24"`. So this env var is
+      # now a NO-OP. Left in place rather than removed in the same PR that
+      # changed the scanner pin, to keep one variable moving at a time; booked
+      # in TODOS.md for removal. If a future Node bump ever breaks the
       # action's JS bundle, replace it with the gitleaks binary (the pattern
       # #308 used for lychee: a cached+retried release download + a
       # `gitleaks git . --config .gitleaks.toml --log-opts=<base..head>` range
@@ -1456,6 +1461,25 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITLEAKS_CONFIG: .gitleaks.toml
+          # PIN REQUIRED — do not drop. gitleaks-action defaults to gitleaks
+          # 8.24.3 (`process.env.GITLEAKS_VERSION || "8.24.3"` in its bundle),
+          # and 8.24.3 SILENTLY IGNORES the top-level `[[allowlists]]` array
+          # form that .gitleaks.toml uses (converted to array form by
+          # 158-REVIEW CR-03). No parse error — it drops the allowlist and
+          # scans with default rules, so every allowlisted fixture in this repo
+          # was unshielded and the gate failed on files it had exempted since
+          # the v1.12 CI-green commit.
+          #
+          # Measured on PR #705, same repo config + same commit range:
+          #   8.24.3 + [[allowlists]]  -> leaks found: 2   (== what CI reported)
+          #   8.24.3 + [allowlist]     -> no leaks found
+          #   8.30.1 + [[allowlists]]  -> no leaks found
+          #   8.30.1 + [allowlist]     -> no leaks found
+          #
+          # Pinning the scanner (rather than downgrading the config to the
+          # singular form) also makes the gate reproducible locally, since
+          # Homebrew ships 8.30.x. Guarded by gitleaks-allowlist.test.ts.
+          GITLEAKS_VERSION: 8.30.1
 
   docs-link-check:
     # Task 7.4: link-check hook on docs/runbooks/soc2-readiness.md (and

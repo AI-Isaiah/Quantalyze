@@ -287,8 +287,9 @@ describe("StrategyForm — 160-03 server-side persist (no client api_keys INSERT
 
     const body = validateBody(fetchSpy);
     // The discriminator is a STRICT boolean server-side: `body.persist === true`.
-    // Sending "true"/1 would silently fall through to the legacy arm and mint
-    // ZERO rows while this component reported success.
+    // Sending "true"/1 is REFUSED with a 409 STALE_CLIENT, so this pins that the
+    // client sends the discriminator the server actually requires — otherwise
+    // every connect from this surface fails outright.
     expect(body.persist).toBe(true);
     // Default select value is "binance" (lowercase). The label is the
     // component's pre-existing default template, now carried in the request
@@ -301,7 +302,7 @@ describe("StrategyForm — 160-03 server-side persist (no client api_keys INSERT
   });
 
   it("fails LOUDLY when a 2xx carries no api_key_id — never reports a key as connected", async () => {
-    // The legacy arm's shape (ciphertext, no id). If a stale/misrouted response
+    // A stale or misrouted 2xx (ciphertext, no id). If such a response
     // reaches the persist call site, the key was NOT saved: reporting success
     // would leave the user believing a key exists that will never sync.
     vi.spyOn(globalThis, "fetch").mockResolvedValue(

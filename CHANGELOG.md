@@ -1,5 +1,114 @@
 # Changelog
 
+## [0.71.1.0] - 2026-08-23
+
+### fix: v1.20 Phase 160 — retire the legacy ciphertext arm on `validate-and-encrypt`
+
+Phase 160 verification found one must-have unmet: the route was still serving the legacy
+ciphertext envelope to any request body without the `persist` discriminator. That arm
+existed so a stale browser tab could INSERT the row itself during the soak window between
+PR-1 and PR-2 — and that window is closed. With `REVOKE INSERT` applied, a stale tab's own
+INSERT dies at the table with a bare 42501, so handing it the encrypted key material first
+shipped credentials to a browser that provably could not use them.
+
+- Absent-discriminator bodies now receive a coded `STALE_CLIENT` refusal (409) naming the
+  remedy — *reload the page* — instead of the ciphertext envelope. **No arm of this route
+  returns key material to a caller.** The stale tab's user now sees an actionable message
+  rather than a raw permission error from a doomed INSERT.
+- The refusal fires BEFORE `validateKey`/`encryptKey`, so a request that can never produce
+  a row no longer spends a live credential probe against the exchange or a KMS round-trip.
+  Strictness still discriminates: a stringified `"true"` or a numeric `1` lands on the
+  refusal, never on the writer.
+- The handler's `persist` parameter and its legacy branch are gone — one arm, not two.
+- Regression coverage asserts over the response's KEY NAMES rather than a fixture value, so
+  a renamed ciphertext field cannot slip past it. Verified by neuter: restoring a
+  ciphertext key to the refusal envelope reddens all seven cases by name, relaxing the
+  strict boolean reddens the four truthy probes, and disabling the gate reddens the
+  no-live-call assertion.
+
+**From the pre-landing review** (6 specialists incl. `silent-failure-hunter`):
+
+- The refusal now fires **above the rate limiter**. It was below it, so five refused clicks
+  burned the 5-per-60s bucket and the reload the message prescribes answered `429` instead
+  of working — the error's own remedy defeated by the error. It sits with the sfox/mt5
+  gates, which are above the limiter for exactly this reason, and still below `withAuth` so
+  it is never an unauthenticated oracle.
+- The persist INSERT's ciphertext fields go through a **named local contract** typed as a
+  mapped type over `EncryptKeyResponseSchema`, not a bare field pick. The pick was correct
+  but unenforced: `createAdminClient()` is deliberately untyped, so `tsc` could not check
+  the literal, and tests pinned 2 of 6 fields. Dropping `kek_version` would have written a
+  row claiming KEK v1 against ciphertext wrapped under another KEK — insert succeeds, 200
+  returned, key fails to decrypt in a different service days later, with no error, log, or
+  red test. Measured both ways: a 7th schema field now fails `tsc` at the writer, and
+  deleting a field fails both `tsc` and a new `.shape`-driven tripwire.
+- `STALE_CLIENT` is a registered `WizardErrorCode` with its own copy, not an unregistered
+  string resolving to `UNKNOWN`. It was minted as a union member rather than aliased onto
+  an existing one: the alias table is scoped to wire codes from other services, and both
+  reload-adjacent candidates were measured false at the emitter (`SESSION_EXPIRED` claims
+  "you have been signed out" when the gate runs *below* `withAuth`).
+- The refusal emits a server-side log line. Without it, a caller regression (a fourth
+  connect surface, or a refactor dropping the discriminator) would 409 every connect while
+  the user reloaded into the same failure — detectable only by a support email.
+- A self-referential test oracle was replaced: `expect(row.attested_venue).toBe(row.exchange)`
+  passed under the exact forgery it existed to catch, since a poisoned response sets both to
+  the same wrong venue. Both columns now pin to a hand-typed expected venue.
+- Several gate tests asserted "no live probe" on discriminator-less bodies, which the new
+  refusal satisfied vacuously. They now carry `persist: true`, so the gate under test is
+  again the only thing between the request and a credential probe.
+
+**From CI:** the `secret-scan` gate (gitleaks) flagged two test fixtures in `route.test.ts` as
+`generic-api-key` — a false positive on a fake value that was never a credential. Renamed rather
+than allowlisted, and the rename is verified inert: the route applies truthiness only to `api_key`
+(no length, format or prefix check on the ccxt path), the value is never asserted on, and neutering
+the `!api_secret` term still reddens all three cases. The new value trips the real scanner at no
+path, allowlisted or not.
+
+⚠️ **The interesting part is what the red gate revealed, and that is now fixed too.** The rename
+alone did not clear CI: gitleaks scans the whole PR commit range, so the finding stayed attributed to
+the commit that first added the value. Chasing that turned up the real defect — `route.test.ts` is
+blanket-allowlisted for every rule in `.gitleaks.toml`, yet CI flagged it by exact path.
+
+Isolated by measurement rather than guessed, 2×2 over the same commit range:
+
+| gitleaks | `[allowlist]` (singular) | `[[allowlists]]` (array) |
+|---|---|---|
+| 8.24.3 — the action's built-in default | no leaks | **leaks found: 2** ← what CI reported |
+| 8.30.1 — Homebrew current | no leaks | no leaks |
+
+`gitleaks-action` resolves its scanner as `process.env.GITLEAKS_VERSION || "8.24.3"`, and 8.24.3
+**silently ignores** the top-level `[[allowlists]]` array form this config uses (converted to array
+form by 158-REVIEW CR-03). No parse error, no warning — the allowlist is dropped and the scan runs on
+default rules. So the gate has been running with ~15 exempted fixture files unshielded, red-lighting
+PRs over fixtures it was configured to ignore. Stricter than designed rather than leakier, so CI
+integrity rather than exposure.
+
+- **Fixed** by pinning `GITLEAKS_VERSION: 8.30.1` rather than downgrading the config, which also makes
+  the gate reproducible locally since Homebrew ships 8.30.x.
+- **Guarded** by `gitleaks-allowlist.test.ts`, which now fails if the pin is dropped or set below
+  8.25.0 while the config still uses array form. Verified by neutering both ways and watching it go
+  red with the intended message, then restoring byte-identical.
+- Worth remembering: `gitleaks` auto-discovers `.gitleaks.toml` from the working directory, so
+  omitting `-c` does **not** test the no-config case — it loads the config anyway and prints a
+  reassuring `no leaks found`. An earlier "default ruleset" run of mine was meaningless for exactly
+  that reason.
+
+**The review of that fix found a hole in its own guard.** The first version of the version-pin test
+searched the whole of `ci.yml`, so it stayed GREEN under two mutations that both re-break the gate:
+moving the env line to a different job (where the step would not inherit it), and **deleting the
+gitleaks step outright**. A guard that survives deletion of the thing it guards is not a guard. The
+lookup is now scoped to the `gitleaks/gitleaks-action` step's own YAML block, and a missing step is an
+explicit failure with its own message. Re-verified across six mutations: removed, downgraded,
+commented out, moved to another job, and step-deleted all go RED; a legal trailing comment after the
+version stays GREEN. `MIN_ARRAY_FORM_VERSION` was also promoted from assumption to measurement —
+8.25.0 is where gitleaks' `ViperConfig` gained the top-level `Allowlists` field, 8.24.3 is the last
+8.24.x, so the boundary is exact rather than an untested interval.
+
+Two stale comments corrected while in here, both pre-existing: the test docblock said the gate runs
+`gitleaks-action@v2` (it is v3.0.0), and `ci.yml` claimed "there is no version bump that fixes this"
+about Node 24 — that bump exists and was already taken, which makes
+`FORCE_JAVASCRIPT_ACTIONS_TO_NODE24` a no-op. The var itself is left alone and booked, to avoid moving
+two variables in the PR that changed the scanner pin.
+
 ## [0.71.0.0] - 2026-08-23
 
 ### feat: v1.20 Phase 160 — PROVENANCE: the server's venue is the venue that annualizes
