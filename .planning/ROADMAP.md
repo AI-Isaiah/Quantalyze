@@ -201,12 +201,12 @@ Plans:
   3. The coverage law reaches every surface the class regrew on: the `keys/[id]/permissions` private `PROBE_*` cascade gets a derived-population coverage law (and `KEY_UNDECRYPTABLE`'s remedy says "reconnect the key", not "try again"); `AllocateDialog`, `RenameStrategyDialog`, and `MarkOwnershipDialog` stop minting `code: UNKNOWN`; the five 5xx→`UNKNOWN` terminal arms (admin match/eval, simulator) forward recognized `seamCode`s; `MT5_GATEWAY_UNREACHABLE`'s server-advertised `Retry-After` threads end-to-end through both key-route catches.
   4. CSV verdicts tell the truth: the 7-row floor is evaluated on the wizard composite arm AND `INSUFFICIENT_CSV_HISTORY` renders its own copy (landed together or not at all); examined-but-refused verdicts render a truthful fourth outcome replacing the false "only 0 trade(s)" sentence (D-15's oracle re-cut deliberately, the TOCTOU re-check wording following); the csv-finalize A2 409 sentence describes the actual case (same track record, different flow); and the per-row CSV breakdown renders its data half without leaking `'nan'` or echoing untrusted cell contents.
 
-**Plans**: 10 plans
+**Plans**: 1/10 plans executed
 **UI hint**: yes
 
 Plans:
 
-- [ ] 161-01-PLAN.md — WIZERR-04: KEY_UNDECRYPTABLE honest remedy + derived-population PROBE_* coverage law (wave 1, tracer)
+- [x] 161-01-PLAN.md — WIZERR-04: KEY_UNDECRYPTABLE honest remedy + derived-population PROBE_* coverage law (wave 1, tracer)
 - [ ] 161-02-PLAN.md — WIZERR-01: MT5 flag→cause builder across both raise sites, inside the curated fence (wave 1)
 - [ ] 161-03-PLAN.md — WIZERR-12/-13: csv-finalize A2 sentence + per-row breakdown nan-guard and no cell echo (wave 1)
 - [ ] 161-04-PLAN.md — WIZERR-02: "Try another key" becomes a pure, non-destructive step transition (wave 1)
@@ -239,11 +239,14 @@ between 2026-08-04 and 2026-08-21, versus okx at 2h old.
 
   1. A recurring enqueuer exists that reaches `strategy_analytics` for every ledger-backed venue,
      via the strategy-keyed `process_key_long` chain — never the ccxt fill path.
+
   2. It ships DORMANT: the schedule is NOT registered, activation is a documented founder-executed
      live op, matching the SFOX_ENABLED / WORKER-03 pattern. Merging changes no prod behavior.
+
   3. The staleness is observable before it is user-visible: a check that fails on
      `strategy_analytics.computed_at` age, NOT on `last_sync_at` (which is advanced daily by
      key-scoped jobs and is what hid this bug).
+
   4. A regression pin fails if any ledger venue is dropped from the refresh set — proven
      falsifiable by neutering and observing RED.
 
@@ -252,6 +255,7 @@ between 2026-08-04 and 2026-08-21, versus okx at 2h old.
   - **Do NOT add mt5 to `RECONCILABLE_EXCHANGES`.** `run_reconcile_strategy_job` calls
     `fetch_raw_trades` (ccxt). mt5 is in `_LEDGER_BACKED_SOURCES`; this is the BYB-02 corruption
     class that "crashed EVERY onboard in prod" when sfox fell into it.
+
   - **Do NOT re-register the `derive-allocator-key-dailies` cron.** It is key-mode and never
     stamps `strategy_analytics`; it was DELIBERATELY unscheduled at the v1.11 recovery; and
     `docs/runbooks/flipretry-derived-equity-go-live.md:171` forbids scheduling it from a migration
