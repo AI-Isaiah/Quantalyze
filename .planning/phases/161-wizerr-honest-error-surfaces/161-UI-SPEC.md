@@ -1,7 +1,8 @@
 ---
 phase: 161
 slug: wizerr-honest-error-surfaces
-status: draft
+status: approved
+reviewed_at: 2026-08-24
 shadcn_initialized: false
 preset: none
 created: 2026-08-24
@@ -364,17 +365,46 @@ Render/data rule, not a sentence rewrite:
 
 ## UI Considerations
 
-Applicable state considerations resolved: 5 covered, 1 backstop, 1 unresolved.
+Shape-rooted state coverage, produced by `ui-consideration-probe` over the 9 surfaces this phase
+touches. **52 applicable considerations: 34 resolved (explicit), 17 resolved (backstop), 1
+unresolved.** Error/empty-state COPY itself lives in § Copywriting Contract — these rows cover
+STATE coverage and reference that section rather than restating it.
 
-| Category | Element(s) | Status | Resolution / Reason |
-|----------|------------|--------|---------------------|
-| error | all 13 WIZERR surfaces | ✅ covered | Every error arm renders a coded envelope with the truthful copy in § Copy Spec; no `code: UNKNOWN` where the server classified; recoverability derived from `actions`, never declared |
-| partial | Retry-After rendering | ✅ covered | Wait sentence renders ONLY when a wait was advertised; absent header ⇒ header omitted and no wait rendered (TRAP-3 — never a default, never zero) |
-| zero-one-many | CSV per-row breakdown rows | ✅ covered | 0 rows ⇒ breakdown section absent (existing behavior); 1..N rows render `{rule, row, message}` only, nan-guarded column clause |
-| empty | — | ✅ covered | No new empty states introduced; existing empty states untouched |
-| loading | retry-in-flight states | ✅ covered | Unchanged — the 9-state matrix cells for loading/retry-in-flight are not edited by this phase |
-| long-text | CSV breakdown message cells, envelope `cause` strings | 🧪 backstop | Untrusted cell contents never reach copy (component test asserts no `failure_case` echo); long rule names wrap within the existing envelope body without truncating the row index |
-| overflow | dialogs (Allocate/Rename/MarkOwnership) error region | ⚠ unresolved | Dialogs keep their existing envelope mount; planner should confirm a multi-bullet `fix[]` list does not overflow the dialog's fixed height (assumption: it scrolls as today) |
+> **Kind-confirmation note (why this section supersedes a prose pass).** The prose classifier is
+> lossy. On the first probe run `E3` and `E8` tripped zero cues (→ `unclassified`) and `E6` tripped
+> only `static-content`, which would have raised *overflow* and *long-text* for the CSV verdict
+> surface and silently dropped **error, empty, loading, and partial** — on the very surface carrying
+> this phase's most consequential copy fix (the false "only 0 trade(s)" sentence, WIZERR-10). An
+> authored `elements` union override fixed all three; applicable coverage went 39 → 52 with zero
+> unclassified rows.
+
+### Element legend
+
+| id | Surface | Requirements |
+|----|---------|--------------|
+| E1 | MT5 gateway-misconfigured envelope (wizard connect step) | WIZERR-01 |
+| E2 | Wizard key-connect envelope + "Try another key" action | WIZERR-02, -05, -08, -11 |
+| E3 | Orphaned live key refusal (replaces the false 409) | WIZERR-03 |
+| E4 | `keys/[id]/permissions` `PROBE_*` cascade | WIZERR-04 |
+| E5 | Dashboard dialogs — Allocate / Rename / MarkOwnership | WIZERR-07 |
+| E6 | CSV upload verdict surface (4 mutually exclusive outcomes) | WIZERR-09, -10 |
+| E7 | CSV per-row validation breakdown list | WIZERR-13 |
+| E8 | csv-finalize 409 conflict surface | WIZERR-12 |
+| E9 | Terminal 5xx arms — admin match/eval, simulator | WIZERR-06 |
+
+### Resolutions
+
+| Category | Elements | Status | Resolution |
+|----------|----------|--------|------------|
+| error | E1–E9 (9) | ✅ explicit | Every arm renders a coded envelope whose sentence names the actual blocker and whose remedy **can succeed**. Acceptance: the derived coverage law asserts every member of each code union has copy; no arm mints `code: UNKNOWN` where the server classified a `seamCode`; every REMEDY string satisfies the remedy-can-succeed property recorded per requirement in § Copy Spec. |
+| loading | E1–E9 (9) | ✅ explicit | Unchanged — this phase edits error arms only. No loading / in-flight branch is touched. Acceptance: the diff contains no edit to a loading branch on any of the 9 surfaces. |
+| empty | E2, E4, E5, E6, E7 (5) | ✅ explicit | No new empty states are introduced and no existing one is edited. The CSV "no rows" case (E7) stays an *absent* breakdown section, not a rendered empty shell. |
+| partial | E2, E4, E5, E6, E7 (5) | ✅ explicit | Partial data renders only what was actually advertised. Binding case: `Retry-After` (TRAP-3) — the wait sentence renders **only** when the server advertised a wait; an absent header means the header is omitted and no wait is rendered. Never a default, never zero. |
+| populated | E4, E5, E7 (3) | ✅ explicit | Happy-path rendering at typical volume is untouched by this phase — the probe cascade list, the dialog bodies, and the breakdown list keep their current populated appearance. Acceptance: no diff to a success branch. |
+| zero-one-many | E4, E5, E7 (3) | ✅ explicit | E7 is the binding case: 0 rows ⇒ breakdown section absent; 1..N rows each render `{rule, row, message}` under the nan-guard. E4/E5 unchanged. |
+| long-text | E1–E9 (9) | 🧪 backstop | Long cause strings, rule names, and multi-bullet `fix[]` lists wrap within the existing envelope body without truncating the row index. **Backstop:** component test asserts the row index survives and that untrusted cell contents are never echoed (E7 / WIZERR-13). |
+| overflow | E1–E4, E6–E9 (8) | 🧪 backstop | Envelope bodies grow downward inside their existing mounts; no fixed-height clipping on these eight. **Backstop:** the existing envelope render tests cover the tallest curated cause + remedy pair. |
+| overflow | **E5** (1) | ⚠ **unresolved** | The three dialogs mount the envelope in a **fixed-height** body. A multi-bullet `fix[]` list may overflow. Assumption carried into planning: *it scrolls as today*. **The planner must make this an explicit check** — if it clips instead of scrolling, WIZERR-07's honest copy would be honest but unreadable, which is the same defect wearing a different hat. |
 
 ---
 
@@ -408,11 +438,17 @@ Verified first-hand this session at HEAD: Fence 1 token lists + parity test
 
 ## Checker Sign-Off
 
-- [ ] Dimension 1 Copywriting: PASS
-- [ ] Dimension 2 Visuals: PASS
-- [ ] Dimension 3 Color: PASS
-- [ ] Dimension 4 Typography: PASS
-- [ ] Dimension 5 Spacing: PASS
-- [ ] Dimension 6 Registry Safety: PASS
+- [x] Dimension 1 Copywriting: PASS
+- [x] Dimension 2 Visuals: PASS
+- [x] Dimension 3 Color: PASS
+- [x] Dimension 4 Typography: PASS
+- [x] Dimension 5 Spacing: PASS
+- [x] Dimension 6 Registry Safety: PASS
 
-**Approval:** pending
+**Approval:** APPROVED 2026-08-24 by `gsd-ui-checker` — 6/6 dimensions PASS.
+Both fences were re-verified first-hand by the checker (not taken from this spec):
+Fence 1 token lists at `analytics-service/services/mt5_validation.py:79-96` + the parity test
+at `analytics-service/tests/test_mt5_validate_parity.py:380-403` (which scans ONLY the Python
+constant, confirming "Reconnect the key" is legal in TS copy despite containing `connect`);
+Fence 2 at `src/app/api/simulator/route.ts:202-234`. Both proposed WIZERR-01 constants were
+spot-checked case-insensitively against all 14 denylist tokens and are clean.
