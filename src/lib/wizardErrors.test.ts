@@ -1885,7 +1885,7 @@ describe("[140.3-10 / TRAP-4] the whole copy table, scanned for destructive-only
    * and dies in the other. 153.1-04 added a third guard (at the end of this
    * file) that reads this source and reds when the two literals disagree.
    */
-  const EXPECTED_TABLE_SIZE = 81;
+  const EXPECTED_TABLE_SIZE = 82;
 
   it("the scan actually covers the table — hand-typed size guard", () => {
     expect(
@@ -2272,7 +2272,7 @@ describe("[140.3-12 / SEAMUX-04] no entry in the copy table makes a claim we can
    * Moving one without the other is a silent half-fix; the guard added at the
    * end of this file reds when the two literals disagree.
    */
-  const EXPECTED_TABLE_SIZE = 81;
+  const EXPECTED_TABLE_SIZE = 82;
 
   it("the scan actually covers the table — hand-typed size guard", () => {
     expect(
@@ -3980,5 +3980,109 @@ describe("[154.1 / WIZCONT-02] VENUE_ALREADY_CONNECTED — the honest refusal", 
       formatKeyError("DRAFT_ALREADY_EXISTS", { strategyName: "Helios Momentum" })
         .cause,
     ).toBe(WIZARD_ERROR_COPY.DRAFT_ALREADY_EXISTS.cause);
+  });
+});
+
+/**
+ * [161-05 / WIZERR-03] KEY_ORPHANED — THE REFUSAL, AND THE ONE PROPERTY THAT
+ * MAKES IT AN IMPROVEMENT RATHER THAN A RENAME.
+ *
+ * The code it replaces (`DRAFT_ALREADY_EXISTS`, reached at `create-with-key`'s
+ * 23505 fallthrough) was false on both halves: it named a wizard session that
+ * does not exist, and it offered `resume_draft` / `start_fresh` for a draft that
+ * is gone. Minting a truer sentence is only half the fix — a truer sentence
+ * attached to a remedy that still cannot succeed is the same defect in better
+ * prose. So this block pins the REMEDY, not the wording.
+ *
+ * ⭐ THE ORACLE IS `buildEnvelope`'s DERIVATION, never the `actions` array —
+ * the convention `[153.6-06 / PARITY-05]` above states. Asserting `actions`
+ * alone would restate the table against itself and stay green if the derivation
+ * rule ever changed.
+ */
+describe("[161-05 / WIZERR-03] KEY_ORPHANED offers a remedy that can succeed", () => {
+  it("derives recoverable — and derives it from try_another_key, not clear_and_retry", () => {
+    expect(
+      buildEnvelope("KEY_ORPHANED", "corr-orphan-1").recoverable,
+      "The Retry control on ConnectKeyStep is `onRetry={() => setErrorCode(null)}`: " +
+        "it clears the banner and returns the user to the form so a DIFFERENT " +
+        "key can be typed. Losing recoverability here strands a user whose only " +
+        "route forward is that control.",
+    ).toBe(true);
+
+    expect(
+      WIZARD_ERROR_COPY.KEY_ORPHANED.actions,
+      "⛔ `clear_and_retry` means 'send the same thing again'. The same account " +
+        "is refused by the same partial UNIQUE every time, so that member would " +
+        "make `recoverable` true for a reason that is false. Recoverability on " +
+        "this arm must rest on try_another_key alone.",
+    ).not.toContain("clear_and_retry");
+  });
+
+  it("offers neither to resume a draft nor to delete one — there is no draft", () => {
+    // The two controls the false incumbent offered. `start_fresh` is the
+    // destructive one (140.3-10 / TRAP-4), and offering it on an arm whose whole
+    // premise is that no draft exists is the worst available combination: a
+    // destructive control aimed at nothing.
+    for (const forbidden of ["resume_draft", "start_fresh"] as const) {
+      expect(
+        WIZARD_ERROR_COPY.KEY_ORPHANED.actions,
+        `KEY_ORPHANED offers ${forbidden}, but this code is emitted only after ` +
+          "the resolver established that NO strategy — draft or otherwise — " +
+          "hangs off the key.",
+      ).not.toContain(forbidden);
+    }
+  });
+
+  it("names no key-management surface this arm cannot reach (the measured 161-05 divergence)", () => {
+    // MEASURED at HEAD, 2026-08-24. The user standing in this wizard is a
+    // manager, and every surface that can remove an `api_keys` row is out of
+    // their reach on this arm:
+    //   · `components/strategy/ApiKeyManager.tsx` (which does carry a delete) is
+    //     mounted at `strategies/[id]/edit/page.tsx` and nowhere else — a
+    //     per-STRATEGY surface, and this code exists because NO strategy holds
+    //     the key;
+    //   · `AllocatorExchangeManager` (profile → Exchanges), the only other list
+    //     with a Disconnect control, sits behind `allocatorOnly` in
+    //     `ProfileTabs.tsx`;
+    //   · `my-strategies` renders the orphan as a "No strategy yet" row whose
+    //     only control is "Finish setup →", which reopens this same wizard.
+    // 161-UI-SPEC's draft bullet ("Disconnect the unused key under Manage keys,
+    // then connect it here again") named the first of those. It was replaced,
+    // not reworded, and this case is what stops it coming back.
+    //
+    // Hand-typed and lower-cased: a PHRASE CLASS, not a pinned sentence, so an
+    // honest reword stays green and a re-introduction reds.
+    const UNREACHABLE_SURFACES = ["manage keys", "manage your keys"] as const;
+
+    const phrasesIn = (haystack: string): string[] =>
+      UNREACHABLE_SURFACES.filter((p) => haystack.toLowerCase().includes(p));
+
+    // POSITIVE CONTROL FIRST — the predicate is live, and the phrase list is not
+    // a list of strings nobody would write. ⛔ Never delete this: with an empty
+    // phrase list the assertion below passes while checking nothing.
+    expect(
+      phrasesIn("Disconnect the unused key under Manage keys, then connect it here again."),
+      "The unreachable-surface predicate matched NOTHING in the exact sentence " +
+        "161-UI-SPEC proposed, so it has gone blind and the assertion below is " +
+        "passing for the wrong reason. ⛔ Fix the phrase list, never delete this " +
+        "control.",
+    ).not.toEqual([]);
+
+    const copy = WIZARD_ERROR_COPY.KEY_ORPHANED;
+    const surface = [copy.title, copy.cause, ...copy.fix].join(" | ");
+    // Guards the `"anything".includes("")` shape from the other direction: an
+    // emptied haystack would satisfy the `toEqual([])` below while asserting
+    // nothing about any sentence we ship.
+    expect(
+      surface.length,
+      "the copy under test collapsed to nothing, so the scan below is vacuous",
+    ).toBeGreaterThan(80);
+    expect(
+      phrasesIn(surface),
+      "KEY_ORPHANED points the user at a key-management surface this arm cannot " +
+        "reach: no strategy holds the key, so there is no strategy edit page, " +
+        "and profile → Exchanges is allocator-only. A remedy the user cannot " +
+        "perform is the D-17 class this requirement exists to remove.",
+    ).toEqual([]);
   });
 });

@@ -216,6 +216,54 @@ export type WizardErrorCode =
   // fail again. Same reading `COMPOSITE_TOO_MANY_MEMBERS` and `SEAM_MISCONFIGURED`
   // are authored under.
   | "VENUE_ALREADY_CONNECTED"
+  // 161-05 / WIZERR-03 — THE THIRD ANSWER THE VENUE FENCE OWED, and the one
+  // `create-with-key` explicitly DECLINED to mint. Its 23505 race arm carried
+  // the rationale it was declined under: minting a member "would move the
+  // copy-table pins (EXPECTED_TABLE_SIZE) for a state the user cannot act on
+  // differently anyway".
+  //
+  // ⛔ THAT SECOND HALF IS NOW FALSE, AND ITS FALSENESS IS WHY THIS MINTS.
+  // WIZERR-03 establishes that a remedy DOES exist — connect a different
+  // account — so the user CAN act differently. What the fallthrough actually
+  // bought was a cheaper pin move, paid for with a false sentence.
+  //
+  // WHAT RENDERED BEFORE: the byte-pinned `DRAFT_ALREADY_EXISTS` 409, false on
+  // BOTH halves here. "A wizard session with this key is already in progress" —
+  // there is no session, and that is MEASURED at the resolver rather than
+  // assumed: this arm is reached precisely because no `source='wizard'` /
+  // `status='draft'` row survives, so `resolveByVenueIdentity` never returns
+  // `kind:"draft"` on it. And the remedies that entry offers (`resume_draft`,
+  // `start_fresh`) send the user to a draft that does not exist and then offer
+  // to delete it.
+  //
+  // ⛔ NOT AN ALIAS IN `SEAM_CODE_TO_WIZARD_CODE`, on `STALE_CLIENT`'s rule
+  // above: that table translates codes ANOTHER service put on the wire. This
+  // one is minted by our own route, so it is a wizard member outright.
+  //
+  // ⚠️ AND NO INCUMBENT COULD TAKE IT. The two nearest were read AT THE EMITTER
+  // rather than matched on their names:
+  //   · `DRAFT_ALREADY_EXISTS` — see above; no draft exists on this arm.
+  //   · `VENUE_ALREADY_CONNECTED` — "already backs a strategy of yours". Here
+  //     NOTHING backs it: the emitter is reached only after the owner read came
+  //     back EMPTY, so that sentence asserts a strategy the server has just
+  //     measured is absent, and its first remedy ("open the strategy that
+  //     already uses this account") is unwinnable by construction.
+  //
+  // RECOVERABLE — DERIVED, NOT DECLARED. `actions` carries `try_another_key`, a
+  // member of `RECOVERABLE_ACTIONS` (src/lib/envelope.ts), so `buildEnvelope`
+  // derives `recoverable: true` and a Retry control renders. That is honest
+  // only because of two MEASURED facts, and it stops being honest if either
+  // changes:
+  //   · 161-04 made "Try another key" a pure step transition — it no longer
+  //     deletes the draft, so the one remedy offered here cannot destroy the
+  //     work it was offered to save;
+  //   · on ConnectKeyStep the Retry control is `onRetry={() => setErrorCode(null)}`
+  //     — it clears the banner and returns the user to the form. It does NOT
+  //     resubmit.
+  // ⛔ WHICH IS WHY `clear_and_retry` IS ABSENT. Its whole meaning is "send the
+  // same thing again", and the same key is refused identically — the DB index
+  // is what refused it, and nothing about the second attempt differs.
+  | "KEY_ORPHANED"
   // Sync + gate (SyncPreviewStep) — these wrap strategyGate.ts codes
   | "SYNC_TIMEOUT"
   | "SYNC_FAILED"
@@ -1349,6 +1397,77 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
     // cause. Its absence also keeps this entry outside the destructive-action
     // population the `[140.3-10 / TRAP-4]` scan walks.
     actions: ["request_call", "expand_log"],
+  },
+
+  // 161-05 / WIZERR-03 — THE THIRD ENTRY OF THE VENUE-FENCE FAMILY, adjacent to
+  // the two it splits from for the same reason they are adjacent to each other:
+  // the three differ by ONE fact — what, if anything, hangs off the live key —
+  // and that fact decides which remedy is real.
+  //   · a surviving wizard draft ⇒ resume it       (DRAFT_ALREADY_EXISTS)
+  //   · a strategy past draft    ⇒ open it         (VENUE_ALREADY_CONNECTED)
+  //   · nothing at all           ⇒ neither exists  (here)
+  //
+  // ⚠️ `cause` CLAIMS THE STATE DOES NOT AGE OUT, AND THAT CLAIM WAS MEASURED
+  // (161-05 plan assumption A2, re-read at HEAD rather than inherited).
+  // `cleanup_abandoned_wizard_drafts()` builds `v_candidate_keys` from the
+  // drafts THAT RUN is deleting (`created_at < now() - interval '7 days'`) and
+  // sweeps only those ids; a key that was ALREADY orphaned before the run is
+  // never a candidate again. So the leftover key genuinely persists, which is
+  // why no bullet below tells the user to wait for it to clear.
+  //
+  // ⚠️ AND THE SECOND HALF IS MEASURED TOO: an orphaned key on this path was
+  // ALWAYS created alongside a wizard draft. `api_keys.venue_account_id` — the
+  // column whose partial UNIQUE produced this refusal — is written by exactly
+  // ONE writer, `create_wizard_strategy`, in the same INSERT that mints the
+  // draft strategy (every other writer's value is removed by the
+  // `api_keys_scrub_venue_account_id` trigger). So "saved in an earlier session
+  // whose draft was deleted" is the only way to reach this state, not a guess
+  // at the likeliest one.
+  //
+  // ⛔ THE `fix` BULLETS DIVERGE FROM 161-UI-SPEC § WIZERR-03, DELIBERATELY,
+  // AND THE DIVERGENCE IS A MEASUREMENT RATHER THAN A PREFERENCE. The spec's
+  // first bullet was "Disconnect the unused key under Manage keys, then connect
+  // it here again." Checked at HEAD:
+  //   · the string "Manage keys" occurs NOWHERE in `src`;
+  //   · the key-management component (`components/strategy/ApiKeyManager.tsx`,
+  //     which does carry a delete) is mounted at `strategies/[id]/edit/page.tsx`
+  //     and nowhere else — a per-STRATEGY surface. This code exists precisely
+  //     because NO strategy holds the key, so there is no edit page to reach;
+  //   · the only other list with a Disconnect control
+  //     (`AllocatorExchangeManager`, profile → Exchanges) sits behind
+  //     `allocatorOnly` in `ProfileTabs.tsx`, and the user standing in this
+  //     wizard is a manager;
+  //   · `my-strategies` DOES surface the orphan, as a "No strategy yet" row —
+  //     but its only control is "Finish setup →", which reopens this same
+  //     wizard and lands on this same refusal.
+  // Shipping that bullet verbatim would have shipped an UNWINNABLE remedy: the
+  // D-17 class, and a direct breach of the principle (161-UI-SPEC § Copy
+  // Principles 2) this very requirement exists to enforce. The bullets below
+  // name only remedies that were measured to be reachable.
+  //
+  // ⚠️ THE UNDERLYING GAP IS REAL AND IS NOT CLOSED HERE: a manager cannot
+  // release their own orphaned key from any surface we ship. That is why the
+  // second bullet routes to us instead of pretending otherwise, and it is
+  // recorded in the phase's deferred items rather than left in the copy.
+  KEY_ORPHANED: {
+    title: "This key is already stored, but nothing uses it.",
+    cause:
+      "These credentials were saved in an earlier session whose draft was deleted, leaving the key attached to nothing. A new strategy cannot be created over the leftover key, and it does not clear on its own.",
+    fix: [
+      "Connect this strategy with a different account — one whose key is not already stored here.",
+      "To reuse this exact account, email security@quantalyze.com with the correlation id below: releasing the stored key is not something you can do from this page.",
+    ],
+    docsHref: "/security",
+    // ⛔ `try_another_key` AND NOT `clear_and_retry`. Both are members of
+    // `RECOVERABLE_ACTIONS`, so either would derive `recoverable: true` — but
+    // `clear_and_retry` means "send the same thing again", and the same account
+    // is refused by the same index every time. Only a DIFFERENT key can succeed,
+    // which is exactly what the surviving member names.
+    // ⛔ AND NEITHER `resume_draft` NOR `start_fresh`: there is no draft to
+    // resume, and `start_fresh` deletes one. Their absence also keeps this entry
+    // outside the destructive-action population the `[140.3-10 / TRAP-4]` scan
+    // walks.
+    actions: ["try_another_key", "expand_log"],
   },
 
   SYNC_TIMEOUT: {
