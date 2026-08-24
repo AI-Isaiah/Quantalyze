@@ -703,4 +703,92 @@ describe("[140.3-G5 / SEAMUX-03] POST /api/simulator — a machine code on every
     expect(res.status).toBe(500);
     expect((await res.json()).code).toBe("UNKNOWN");
   });
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // 161-08 / WIZERR-06 — the terminal arm forwards the CODE and still refuses
+  // the MESSAGE. Same four cases, same shape, as the sister /api/bridge route.
+  //
+  // ⚠️ ORACLE INDEPENDENCE. The static sentence is HAND-TRANSCRIBED, never
+  // imported from the route.
+  // ───────────────────────────────────────────────────────────────────────────
+
+  /** Transcribed by hand from the route's terminal arm. Do NOT import it. */
+  const SIMULATOR_TERMINAL_SENTENCE = "Portfolio impact simulation failed.";
+
+  /**
+   * Shaped like what M-0959/M-0963 keeps off the wire: the `parseResponse()`
+   * contract-violation string with Python schema field names, and a base URL.
+   */
+  const LEAKY_5XX_MESSAGE =
+    "ContractViolation: candidates.0.sharpe_ratio Required from portfolio_simulator at simulator.py:441 — base http://analytics.invalid:8000";
+
+  it("WIZERR-06 (a) — a 5xx seam error carrying a code forwards THAT code, sentence unchanged", async () => {
+    STATE.simulateImpl = async () => {
+      const { AnalyticsUpstreamError } = await import("@/lib/analytics-client");
+      // The real 500 `portfolio_simulator` emits in simulator.py.
+      throw new AnalyticsUpstreamError(
+        "Portfolio impact simulation failed",
+        500,
+        "SIMULATION_FAILED",
+      );
+    };
+    const { POST } = await import("./route");
+    const res = await POST(req());
+    expect(res.status).toBe(500);
+    const body = await res.json();
+    expect(body.code).toBe("SIMULATION_FAILED");
+    expect(body.error).toBe(SIMULATOR_TERMINAL_SENTENCE);
+  });
+
+  it("WIZERR-06 (b) — a 5xx seam error with a NULL code still answers UNKNOWN, sentence unchanged", async () => {
+    STATE.simulateImpl = async () => {
+      const { AnalyticsUpstreamError } = await import("@/lib/analytics-client");
+      throw new AnalyticsUpstreamError("upstream traceback", 503);
+    };
+    const { POST } = await import("./route");
+    const res = await POST(req());
+    expect(res.status).toBe(500);
+    const body = await res.json();
+    expect(body.code).toBe("UNKNOWN");
+    expect(body.error).toBe(SIMULATOR_TERMINAL_SENTENCE);
+  });
+
+  it("WIZERR-06 (c) — a NON-SEAM throwable answers UNKNOWN, sentence unchanged", async () => {
+    STATE.simulateImpl = async () => {
+      throw new Error("ENOTFOUND analytics");
+    };
+    const { POST } = await import("./route");
+    const res = await POST(req());
+    expect(res.status).toBe(500);
+    const body = await res.json();
+    expect(body.code).toBe("UNKNOWN");
+    expect(body.error).toBe(SIMULATOR_TERMINAL_SENTENCE);
+  });
+
+  it("WIZERR-06 (d) — NEGATIVE CONTROL: no substring of the thrown message reaches the body", async () => {
+    STATE.simulateImpl = async () => {
+      const { AnalyticsUpstreamError } = await import("@/lib/analytics-client");
+      throw new AnalyticsUpstreamError(LEAKY_5XX_MESSAGE, 500, "SIMULATION_FAILED");
+    };
+    const { POST } = await import("./route");
+    const res = await POST(req());
+    const serialized = JSON.stringify(await res.json());
+
+    // ⚠️ VACUITY GUARD, FIRST — `"anything".includes("")` is `true`.
+    expect(LEAKY_5XX_MESSAGE.trim().length).toBeGreaterThan(40);
+    const tokens = LEAKY_5XX_MESSAGE.split(/\s+/).filter((t) => t.length >= 4);
+    expect(
+      tokens.length,
+      "the leak corpus produced too few usable tokens to be a real control",
+    ).toBeGreaterThan(5);
+
+    for (const token of tokens) {
+      expect(
+        serialized,
+        `the 5xx body leaked "${token}" out of err.message`,
+      ).not.toContain(token);
+    }
+    expect(serialized).not.toContain(LEAKY_5XX_MESSAGE);
+    expect(serialized).toContain("SIMULATION_FAILED");
+  });
 });

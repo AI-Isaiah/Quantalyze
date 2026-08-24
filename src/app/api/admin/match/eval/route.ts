@@ -251,6 +251,12 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     // exists to keep off the wire (T-140-11). A 5xx keeps falling through to
     // the static arm below.
     //
+    // ⚠️ 161-08 / WIZERR-06 — "only 4xx forwards" is about the MESSAGE, and
+    // only the message. Since WIZERR-06 the terminal arm below forwards the
+    // upstream's `seamCode` too, so `code` now crosses on BOTH sides of 500
+    // while `error` still crosses on the 4xx side alone. `EVAL_WINDOW_TOO_LARGE`
+    // (400) and `EVAL_FAILED` (500) are the sibling pair this made honest.
+    //
     // The status only. No header rides along: `AnalyticsUpstreamError` carries
     // none, so a forwarded upstream 429 reaches the client WITHOUT its
     // `Retry-After`, and inventing one would name a wait no upstream stated.
@@ -311,8 +317,31 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
       "[api/admin/match/eval] upstream error:",
       scrubSeamError(err),
     );
+    // 161-08 / WIZERR-06 — THE CODE CROSSES; THE MESSAGE STILL DOES NOT.
+    //
+    // `GENERIC_COPY` is untouched: the STATIC-bodies docblock above still
+    // governs `error`, and a 5xx `message` still carries FastAPI detail, the
+    // `parseResponse()` contract-drift string and this service's base URL.
+    // ONLY `code` moves.
+    //
+    // ⭐ THIS ROUTE IS THE CLEAREST CASE IN THE FIVE. `eval_metrics` emits a
+    // sibling pair: `EVAL_WINDOW_TOO_LARGE` at 400, which the 4xx arm above
+    // already forwards INTACT, and `EVAL_FAILED` at 500 — the producer's own
+    // declared residue — which misses that arm and lands here. Until this edit
+    // the pair arrived as one code and one mystery, purely because of which
+    // side of 500 they fell on.
+    //
+    // ⛔ `typeof`, NOT `instanceof AnalyticsUpstreamError`: this arm is also
+    // reached by transport failures and untyped throws, and a route suite that
+    // mocks `@/lib/analytics-client` wholesale makes the class `undefined`,
+    // where `x instanceof undefined` throws from inside this very catch. The
+    // empty string is excluded because `"" ?? "UNKNOWN"` is `""`.
+    const rawSeamCode = (err as { seamCode?: unknown } | null | undefined)
+      ?.seamCode;
+    const seamCode =
+      typeof rawSeamCode === "string" && rawSeamCode !== "" ? rawSeamCode : null;
     return NextResponse.json(
-      { error: GENERIC_COPY, code: "UNKNOWN" },
+      { error: GENERIC_COPY, code: seamCode ?? "UNKNOWN" },
       { status: 500, headers: NO_STORE_HEADERS },
     );
   }

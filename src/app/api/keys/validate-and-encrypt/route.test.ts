@@ -1073,6 +1073,115 @@ describe("[140.3-G4 / SEAMUX-03] POST /api/keys/validate-and-encrypt — a machi
     expect(body.error).toBe("Key validation failed. Please try again.");
     expect(body.code).toBe("UNKNOWN");
   });
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // 161-08 / WIZERR-06 — the terminal arm forwards the CODE and still refuses
+  // the MESSAGE.
+  //
+  // ⚠️ ORACLE INDEPENDENCE. The static sentence is HAND-TRANSCRIBED below,
+  // never imported from the route.
+  //
+  // ⭐ THIS IS THE CREDENTIAL-BEARING ROUTE. Case (a) additionally re-pins that
+  // the edited arm is still wrapped by the per-request secret list at the
+  // Sentry sink — the widening moved `code` and nothing else, and the raw
+  // `api_key` / `api_secret` / `passphrase` this request body carries must
+  // still be handed to the sink so it can redact them.
+  // ─────────────────────────────────────────────────────────────────────────
+
+  /** Transcribed by hand from the route's terminal arm. Do NOT import it. */
+  const VALIDATE_TERMINAL_SENTENCE = "Key validation failed. Please try again.";
+
+  /**
+   * Shaped like what F5b keeps off the wire: a crypto internal, a Python
+   * source location and a service base URL.
+   *
+   * ⚠️ Every token here is deliberately DISJOINT from the static sentence and
+   * from the forwarded code. "failed" and "unavailable" were both rejected as
+   * corpus words for exactly that reason — a token the honest body legitimately
+   * contains would make case (d) fail against a correct tree, which is the
+   * mirror-image error of a test that cannot fail.
+   */
+  const LEAKY_5XX_MESSAGE =
+    "RuntimeError: KEK derivation aborted inside crypto_kek.py:77 — upstream base http://analytics.invalid:8000";
+
+  it("WIZERR-06 (a) — a 5xx seam error carrying a code forwards THAT code, sentence unchanged, secrets still scrubbed", async () => {
+    const { AnalyticsUpstreamError } = await import("@/lib/analytics-client");
+    // `encrypt_key`'s first statement is `get_kek()`; its RuntimeError is a
+    // real 500 with `retryable=False`.
+    mockValidateKey.mockRejectedValue(
+      new AnalyticsUpstreamError("KEK unavailable", 500, "KEK_UNAVAILABLE"),
+    );
+    const { POST } = await import("./route");
+    const res = await POST(makeReq(VALID_BODY));
+
+    expect(res.status).toBe(500);
+    const body = await res.json();
+    expect(body.code).toBe("KEK_UNAVAILABLE");
+    expect(body.error).toBe(VALIDATE_TERMINAL_SENTENCE);
+
+    // The per-request secret list still reaches the Sentry sink from THIS arm.
+    // Same obligation, same shape, as the ECONNREFUSED case above: the route
+    // hands the values over so the sink can redact them.
+    expect(captureSpy).toHaveBeenCalled();
+    const sentrySecrets = captureSpy.mock.calls[0][1].secrets;
+    expect(sentrySecrets).toContain(VALID_BODY.api_key);
+    expect(sentrySecrets).toContain(VALID_BODY.api_secret);
+    expect(sentrySecrets).toContain(VALID_BODY.passphrase);
+  });
+
+  it("WIZERR-06 (b) — a 5xx seam error with a NULL code still answers UNKNOWN, sentence unchanged", async () => {
+    const { AnalyticsUpstreamError } = await import("@/lib/analytics-client");
+    mockValidateKey.mockRejectedValue(
+      new AnalyticsUpstreamError("upstream traceback", 502),
+    );
+    const { POST } = await import("./route");
+    const res = await POST(makeReq(VALID_BODY));
+    expect(res.status).toBe(500);
+    const body = await res.json();
+    expect(body.code).toBe("UNKNOWN");
+    expect(body.error).toBe(VALIDATE_TERMINAL_SENTENCE);
+  });
+
+  it("WIZERR-06 (c) — a NON-SEAM throwable answers UNKNOWN, sentence unchanged", async () => {
+    mockValidateKey.mockRejectedValue(new Error("ECONNREFUSED"));
+    const { POST } = await import("./route");
+    const res = await POST(makeReq(VALID_BODY));
+    expect(res.status).toBe(500);
+    const body = await res.json();
+    expect(body.code).toBe("UNKNOWN");
+    expect(body.error).toBe(VALIDATE_TERMINAL_SENTENCE);
+  });
+
+  it("WIZERR-06 (d) — NEGATIVE CONTROL: no substring of the thrown message reaches the body", async () => {
+    const { AnalyticsUpstreamError } = await import("@/lib/analytics-client");
+    mockValidateKey.mockRejectedValue(
+      new AnalyticsUpstreamError(LEAKY_5XX_MESSAGE, 500, "KEK_UNAVAILABLE"),
+    );
+    const { POST } = await import("./route");
+    const res = await POST(makeReq(VALID_BODY));
+    const serialized = JSON.stringify(await res.json());
+
+    // ⚠️ VACUITY GUARD, FIRST — `"anything".includes("")` is `true`.
+    expect(LEAKY_5XX_MESSAGE.trim().length).toBeGreaterThan(40);
+    const tokens = LEAKY_5XX_MESSAGE.split(/\s+/).filter((t) => t.length >= 4);
+    expect(
+      tokens.length,
+      "the leak corpus produced too few usable tokens to be a real control",
+    ).toBeGreaterThan(5);
+
+    for (const token of tokens) {
+      expect(
+        serialized,
+        `the 5xx body leaked "${token}" out of err.message`,
+      ).not.toContain(token);
+    }
+    expect(serialized).not.toContain(LEAKY_5XX_MESSAGE);
+    expect(serialized).toContain("KEK_UNAVAILABLE");
+
+    // ...and no raw credential from the request body crossed either.
+    expect(serialized).not.toContain(VALID_BODY.api_key);
+    expect(serialized).not.toContain(VALID_BODY.api_secret);
+  });
 });
 
 /**

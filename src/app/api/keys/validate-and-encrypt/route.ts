@@ -745,8 +745,44 @@ async function legacyValidateAndEncryptHandler(args: {
     });
     // 140.3-G4 / SEAMUX-03 — UNKNOWN, the repo's terminal/unclassified fallback
     // (create-with-key's terminal precedent).
+    //
+    // 161-08 / WIZERR-06 — THE CODE CROSSES; THE MESSAGE STILL DOES NOT.
+    //
+    // F5b above is UNCHANGED and still governs `error`: a 4xx `detail` from the
+    // Python validator is curated copy and forwards; a 5xx `message` can carry a
+    // raw traceback, a crypto internal or a contract-violation string and must
+    // NOT. What moves is only `code` — a machine token from the seam's own
+    // closed vocabulary, already forwarded by the 4xx arm above. A classified
+    // 500 (`KEK_UNAVAILABLE`, `EGRESS_PROXY_MISCONFIGURED`) used to arrive here
+    // indistinguishable from a failure nobody could name.
+    //
+    // ⭐ THE SCRUBBING ABOVE IS UNTOUCHED AND STILL WRAPS THIS ARM. This route's
+    // request body carries the RAW `api_key` / `api_secret` / `passphrase`, so
+    // `perRequestSecrets` is named explicitly at BOTH sinks two statements up
+    // and neither call is edited here. `seamCode` is a closed-vocabulary machine
+    // token — never request material — so nothing new can reach the body.
+    //
+    // ⛔ THE `persist: true` ARM IS NOT TOUCHED by this edit, deliberately. The
+    // persist-INSERT failure earlier in this file answers `code: "UNKNOWN"` with
+    // its own copy ("verified but couldn't be saved"), and its fault is a
+    // PostgREST error that carries no seam code at all. Its first real PROD
+    // connect is an owed verification; changing it here would make a smoke
+    // failure unattributable.
+    //
+    // ⛔ `typeof`, NOT `instanceof AnalyticsUpstreamError`: this arm is also
+    // reached by transport failures and untyped throws, and a route suite that
+    // mocks `@/lib/analytics-client` wholesale makes the class `undefined`,
+    // where `x instanceof undefined` throws from inside this very catch. The
+    // empty string is excluded because `"" ?? "UNKNOWN"` is `""`.
+    const rawSeamCode = (err as { seamCode?: unknown } | null | undefined)
+      ?.seamCode;
+    const seamCode =
+      typeof rawSeamCode === "string" && rawSeamCode !== "" ? rawSeamCode : null;
     return NextResponse.json(
-      { error: "Key validation failed. Please try again.", code: "UNKNOWN" },
+      {
+        error: "Key validation failed. Please try again.",
+        code: seamCode ?? "UNKNOWN",
+      },
       { status: 500, headers: NO_STORE_HEADERS },
     );
   }

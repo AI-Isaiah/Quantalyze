@@ -670,6 +670,94 @@ describe("[140.3-G8 / SEAMUX-03] GET /api/admin/match/eval — machine code per 
     expect(res.status).toBe(500);
     expect((await res.json()).code).toBe("UNKNOWN");
   });
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // 161-08 / WIZERR-06 — the terminal arm forwards the CODE and still refuses
+  // the MESSAGE.
+  //
+  // ⭐ THIS ROUTE IS THE CLEAREST CASE OF THE FIVE, and case (a) below is why.
+  // `eval_metrics` emits a SIBLING PAIR: `EVAL_WINDOW_TOO_LARGE` at 400, which
+  // the 4xx arm already forwards intact, and `EVAL_FAILED` at 500, which misses
+  // that arm and lands on the terminal. Until this plan the pair arrived as one
+  // code and one mystery purely because of which side of 500 they fell on.
+  //
+  // ⚠️ The static sentence is the file-level `GENERIC_COPY` constant declared at
+  // the top of THIS test file — hand-typed there, imported from nothing.
+  // ───────────────────────────────────────────────────────────────────────────
+
+  /**
+   * Shaped like what T-140-11 keeps off the wire: FastAPI detail, the
+   * `parseResponse()` contract-drift string and a service base URL.
+   */
+  const LEAKY_5XX_MESSAGE =
+    "InternalError: eval_metrics raised at match.py:1204 — upstream base http://analytics.invalid:8000";
+
+  it("WIZERR-06 (a) — a 5xx seam error carrying a code forwards THAT code, sentence unchanged", async () => {
+    const { AnalyticsUpstreamError } = await import("@/lib/analytics-client");
+    // `eval_metrics`'s own declared 500 residue — the sibling of the 400 the
+    // 4xx arm above already forwards verbatim.
+    evalState.throwValue = new AnalyticsUpstreamError(
+      "Eval failed on our side. This has been logged.",
+      500,
+      "EVAL_FAILED",
+    );
+    const { GET } = await import("./route");
+    const res = await GET(makeReq());
+    expect(res.status).toBe(500);
+    const body = await res.json();
+    expect(body.code).toBe("EVAL_FAILED");
+    expect(body.error).toBe(GENERIC_COPY);
+  });
+
+  it("WIZERR-06 (b) — a 5xx seam error with a NULL code still answers UNKNOWN, sentence unchanged", async () => {
+    const { AnalyticsUpstreamError } = await import("@/lib/analytics-client");
+    evalState.throwValue = new AnalyticsUpstreamError("upstream exploded", 502);
+    const { GET } = await import("./route");
+    const res = await GET(makeReq());
+    expect(res.status).toBe(500);
+    const body = await res.json();
+    expect(body.code).toBe("UNKNOWN");
+    expect(body.error).toBe(GENERIC_COPY);
+  });
+
+  it("WIZERR-06 (c) — a NON-SEAM throwable answers UNKNOWN, sentence unchanged", async () => {
+    evalState.throwValue = new Error("ECONNRESET");
+    const { GET } = await import("./route");
+    const res = await GET(makeReq());
+    expect(res.status).toBe(500);
+    const body = await res.json();
+    expect(body.code).toBe("UNKNOWN");
+    expect(body.error).toBe(GENERIC_COPY);
+  });
+
+  it("WIZERR-06 (d) — NEGATIVE CONTROL: no substring of the thrown message reaches the body", async () => {
+    const { AnalyticsUpstreamError } = await import("@/lib/analytics-client");
+    evalState.throwValue = new AnalyticsUpstreamError(
+      LEAKY_5XX_MESSAGE,
+      500,
+      "EVAL_FAILED",
+    );
+    const { GET } = await import("./route");
+    const res = await GET(makeReq());
+    const serialized = JSON.stringify(await res.json());
+
+    // ⚠️ VACUITY GUARD, FIRST — `"anything".includes("")` is `true`.
+    expect(LEAKY_5XX_MESSAGE.trim().length).toBeGreaterThan(40);
+    const tokens = LEAKY_5XX_MESSAGE.split(/\s+/).filter((t) => t.length >= 4);
+    expect(
+      tokens.length,
+      "the leak corpus produced too few usable tokens to be a real control",
+    ).toBeGreaterThan(5);
+
+    for (const token of tokens) {
+      expect(
+        serialized,
+        `the 5xx body leaked "${token}" out of err.message`,
+      ).not.toContain(token);
+    }
+    expect(serialized).not.toContain(LEAKY_5XX_MESSAGE);
+    expect(serialized).toContain("EVAL_FAILED");
+  });
 });
 
 /**
