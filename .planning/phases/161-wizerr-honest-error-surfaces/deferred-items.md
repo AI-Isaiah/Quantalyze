@@ -82,3 +82,59 @@ parallel load.
 number to nudge mid-phase. Suggested: give the B25 case an explicit per-test timeout so a
 loaded machine cannot redden a green tree. Recorded so the next full-suite red on this name is
 recognised as this, and not silently re-diagnosed.
+
+---
+
+## D-161-05-A — no manager-facing surface can release an ORPHANED api_key
+
+**Found during:** 161-05 Task 1, while checking that `KEY_ORPHANED`'s remedy can succeed.
+
+161-UI-SPEC § WIZERR-03's first fix bullet was *"Disconnect the unused key under Manage keys,
+then connect it here again."* Measured at HEAD, that remedy is **unwinnable for the user who
+sees this code**:
+
+- the literal string `Manage keys` occurs **nowhere** in `src`;
+- `src/components/strategy/ApiKeyManager.tsx` (the component that does carry a key delete) is
+  mounted at `src/app/(dashboard)/strategies/[id]/edit/page.tsx` and nowhere else — a
+  **per-strategy** surface. `KEY_ORPHANED` exists precisely because no strategy holds the key,
+  so there is no edit page to reach;
+- the only other list with a Disconnect control (`AllocatorExchangeManager`, profile →
+  Exchanges, which calls `disconnect_allocator_api_key` and would work) sits behind
+  `allocatorOnly` in `src/components/auth/ProfileTabs.tsx`. The user in the strategy wizard is
+  a manager;
+- `my-strategies` **does** surface the orphan (`getStrategylessActiveKeys` → the "No strategy
+  yet" placeholder row in `StrategyTable.tsx`), but its only control is **"Finish setup →"**,
+  which reopens the same wizard and lands on the same refusal.
+
+**What 161-05 shipped instead:** the copy names only remedies that were measured to be
+reachable — connect a different account, or email us to release the stored key. That keeps the
+requirement's own remedy-can-succeed property true, and the divergence from the UI-SPEC bullet
+is argued at the copy entry and pinned by a test (`names no key-management surface this arm
+cannot reach`).
+
+**Why not fixed here:** giving managers a key-release affordance is a new surface — a UI-SPEC
+amendment plus a route, not a copy edit — and well outside this plan's declared file scope.
+Until it exists, `KEY_ORPHANED`'s second bullet routes to us on purpose.
+
+---
+
+## D-161-05-B — an orphaned MT5 connect waits out the full 120 s validate before the refusal
+
+**Found during:** 161-05 Task 2.
+
+`resolveByVenueIdentity` now answers `orphaned` at the **pre-RPC** fence too, but that arm
+deliberately does **not** short-circuit — unlike `draft` and `connected`, which return before
+the charged seam calls. The reason is ordering honesty: the credentials in the request are
+still unauthenticated at that point, so if the secret is wrong the user's real first problem is
+the secret, and refusing early would hand them the orphan to chase while a bad credential sat
+unmentioned. The refusal is made in the 23505 arm instead, after `validateKey`.
+
+**The cost is real:** this fence only runs when `venueAccountId` is non-null, which today is
+**mt5 only**, and MT5's validate budget is 120 000 ms. So an orphaned MT5 user can wait out a
+full validation to be told something the server knew from rows it had already read.
+
+**Why not fixed here:** the two orderings trade one honesty property against a latency one, and
+picking the other side is a product call, not an executor call. The decision and its cost are
+recorded at the fence in `create-with-key/route.ts` and pinned by the test
+`the PRE-RPC fence lets the orphan through to validate — the credentials speak first`, so
+reversing it is a deliberate act with a failing test attached.
