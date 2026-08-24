@@ -24,6 +24,9 @@ import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { RenameStrategyDialog } from "./RenameStrategyDialog";
+// The copy table, read as the SOURCE side of the comparison. The DOM is the
+// other side; a case comparing the DOM with itself could not fail.
+import { WIZARD_ERROR_COPY } from "@/lib/wizardErrors";
 import { installFetchMock, restoreFetchMock, type FetchMock } from "@/test/helpers/fetch";
 
 const mockRefresh = vi.fn();
@@ -388,6 +391,70 @@ describe("[161-10 / WIZERR-07] correlation id: present on the terminal arm, abse
     // is a property of a rendered dialog rather than of an empty one.
     expect(await screen.findByText(ERR_TOO_LONG)).toBeInTheDocument();
     expect(document.body.textContent).not.toContain(CORRELATION_LABEL);
+  });
+});
+
+/**
+ * [161-10 / E5] EVERY `fix[]` BULLET REACHES THE DOM — THE AUTOMATABLE HALF.
+ *
+ * 161-UI-SPEC § UI Considerations carries exactly ONE ⚠ unresolved row and it
+ * belongs to WIZERR-07. Its ORIGINAL premise — that these dialogs mount the
+ * envelope in a FIXED-HEIGHT body — was measured wrong and formally retracted:
+ * `Modal.tsx` has no `max-h`, no `overflow` and no height (re-measured at HEAD
+ * and pinned in `dialog-envelope.invariant.test.ts`).
+ *
+ * ⛔ WHAT THIS CASE DOES AND DOES NOT SETTLE. It proves the DATA layer loses
+ * nothing: every remedy the copy table declares is present in the rendered
+ * list, so no bullet is dropped between `buildEnvelope` and the DOM. It does
+ * NOT settle the layout question. Whether an overflowing native `<dialog>`
+ * SCROLLS or CLIPS on a short viewport is a UA-resolved rendered property that
+ * jsdom does not compute at all — that half is verified BY HAND and recorded as
+ * MANUAL. Do not read a green here as the ⚠ row being closed.
+ *
+ * THE ORACLE is the DOM list measured against the copy table — two different
+ * artefacts, not one compared with itself. A renderer that dropped the tail of
+ * the list, or a data path that truncated it, moves one side and not the other.
+ */
+describe("[161-10 / E5] the row of remedies is not truncated at the data layer", () => {
+  it("renders EVERY bullet of the reached entry — none dropped", async () => {
+    // `DASHBOARD_ROW_STALE` is the richest remedy list this dialog's route can
+    // actually reach. ⚠️ It carries TWO bullets, not three: 161-10-PLAN asked
+    // for a ≥3-bullet case on all three dialogs, and on THIS surface no
+    // rostered code has three. Padding the copy to reach the number would be
+    // writing the product to fit the oracle, which is the inverse of the rule,
+    // so the case asserts the REAL maximum and derives it from the table — a
+    // third bullet added later is covered with no test edit. The genuine
+    // ≥3-bullet case lives on `AllocateDialog`, whose route really does emit
+    // a three-remedy code.
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse(404, {
+        code: "DASHBOARD_ROW_STALE",
+        error: "strategy not found",
+      }),
+    );
+    renderDialog();
+    fireEvent.change(nameInput(), { target: { value: "Helios alpha sleeve" } });
+    fireEvent.click(saveButton());
+
+    const envelope = await screen.findByTestId("error-envelope");
+    const expected = WIZARD_ERROR_COPY.DASHBOARD_ROW_STALE.fix;
+
+    // NON-VACUITY FLOOR: an empty expected list would make the loop below pass
+    // trivially, and `"anything".includes("")` would make a blank bullet pass.
+    expect(expected.length).toBeGreaterThanOrEqual(2);
+
+    const rendered = Array.from(envelope.querySelectorAll("li")).map((li) =>
+      String(li.textContent),
+    );
+    expect(
+      rendered.length,
+      "the rendered remedy list is shorter than the copy declares — a bullet " +
+        "was lost between the table and the DOM",
+    ).toBe(expected.length);
+    for (const bullet of expected) {
+      expect(bullet.length).toBeGreaterThan(10);
+      expect(rendered).toContain(bullet);
+    }
   });
 });
 

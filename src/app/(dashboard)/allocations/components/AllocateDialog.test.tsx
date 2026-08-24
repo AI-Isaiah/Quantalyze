@@ -29,6 +29,9 @@ import type { ComponentProps } from "react";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { AllocateDialog } from "./AllocateDialog";
+// The copy table, read as the SOURCE side of the comparison. The DOM is the
+// other side; a case comparing the DOM with itself could not fail.
+import { WIZARD_ERROR_COPY } from "@/lib/wizardErrors";
 
 /**
  * 151 red-team K2 — THE FOCUS-RING SWEEP'S CARVE-OUT, MADE UN-INHERITABLE.
@@ -916,6 +919,70 @@ describe("[161-10 / WIZERR-07] the allocation route's other arms reach their own
     // repo-wide lint error and would also silently accept a malformed header.
     expect(CODE).toContain("parseRetryAfterSeconds");
     expect(CODE).not.toMatch(/Number\(\s*res\.headers/);
+  });
+});
+
+/**
+ * [161-10 / E5] EVERY `fix[]` BULLET REACHES THE DOM — THE AUTOMATABLE HALF.
+ *
+ * 161-UI-SPEC § UI Considerations carries exactly ONE ⚠ unresolved row and it
+ * belongs to WIZERR-07. Its ORIGINAL premise — that these dialogs mount the
+ * envelope in a FIXED-HEIGHT body — was measured wrong and formally retracted:
+ * `Modal.tsx` has no `max-h`, no `overflow` and no height (re-measured at HEAD
+ * and pinned in `dialog-envelope.invariant.test.ts`).
+ *
+ * ⛔ WHAT THIS CASE DOES AND DOES NOT SETTLE. It proves the DATA layer loses
+ * nothing: every remedy the copy table declares is present in the rendered
+ * list, so no bullet is dropped between `buildEnvelope` and the DOM. It does
+ * NOT settle the layout question. Whether an overflowing native `<dialog>`
+ * SCROLLS or CLIPS on a short viewport is a UA-resolved rendered property that
+ * jsdom does not compute at all — that half is verified BY HAND and recorded as
+ * MANUAL. Do not read a green here as the ⚠ row being closed.
+ *
+ * THE ORACLE is the DOM list measured against the copy table — two different
+ * artefacts, not one compared with itself. A renderer that dropped the tail of
+ * the list, or a data path that truncated it, moves one side and not the other.
+ */
+describe("[161-10 / E5] the row of remedies is not truncated at the data layer", () => {
+  it("a THREE-bullet remedy list reaches the DOM complete", async () => {
+    // ⭐ THE GENUINE ≥3 CASE. `ALLOCATION_NOT_ALLOCATABLE` is the only code any
+    // of the three dashboard routes emits whose copy carries three remedies,
+    // which makes this the one surface where the plan's ≥3 requirement can be
+    // met without inventing a bullet to meet it.
+    fetchSpy.mockResolvedValue(
+      failResponse(409, {
+        code: "ALLOCATION_NOT_ALLOCATABLE",
+        error: "not_allocatable",
+      }),
+    );
+    renderAllocate();
+    fireEvent.change(amountInput(), { target: { value: "1000" } });
+    fireEvent.click(screen.getByRole("button", { name: "Allocate" }));
+
+    const envelope = await screen.findByTestId("error-envelope");
+    const expected = WIZARD_ERROR_COPY.ALLOCATION_NOT_ALLOCATABLE.fix;
+
+    // NON-VACUITY, and the ≥3 claim itself: if this entry ever loses a bullet
+    // the phase's one measurable E5 case quietly stops being a multi-bullet
+    // case at all, so the floor is asserted rather than assumed.
+    expect(
+      expected.length,
+      "this is the only reachable three-remedy entry; if it shrank, E5's " +
+        "automatable half no longer exercises a multi-bullet list anywhere",
+    ).toBeGreaterThanOrEqual(3);
+
+    const rendered = Array.from(envelope.querySelectorAll("li")).map((li) =>
+      String(li.textContent),
+    );
+    expect(
+      rendered.length,
+      "the rendered remedy list is shorter than the copy declares — a bullet " +
+        "was lost between the table and the DOM",
+    ).toBe(expected.length);
+    for (const bullet of expected) {
+      expect(bullet.length).toBeGreaterThan(10);
+      expect(rendered).toContain(bullet);
+    }
   });
 });
 

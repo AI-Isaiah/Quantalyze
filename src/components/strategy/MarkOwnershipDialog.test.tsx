@@ -27,6 +27,9 @@ import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { MarkOwnershipDialog } from "./MarkOwnershipDialog";
+// The copy table, read as the SOURCE side of the comparison. The DOM is the
+// other side; a case comparing the DOM with itself could not fail.
+import { WIZARD_ERROR_COPY } from "@/lib/wizardErrors";
 import {
   installFetchMock,
   restoreFetchMock,
@@ -463,6 +466,61 @@ describe("[161-10 / WIZERR-07] correlation id: present on the terminal arm, abse
     expect(await screen.findByText(CONFIRM_HEADING)).toBeInTheDocument();
     expect(screen.getByText(CONFIRM_BODY_120K)).toBeInTheDocument();
     expect(document.body.textContent).not.toContain(CORRELATION_LABEL);
+  });
+});
+
+/**
+ * [161-10 / E5] EVERY `fix[]` BULLET REACHES THE DOM — THE AUTOMATABLE HALF.
+ *
+ * 161-UI-SPEC § UI Considerations carries exactly ONE ⚠ unresolved row and it
+ * belongs to WIZERR-07. Its ORIGINAL premise — that these dialogs mount the
+ * envelope in a FIXED-HEIGHT body — was measured wrong and formally retracted:
+ * `Modal.tsx` has no `max-h`, no `overflow` and no height (re-measured at HEAD
+ * and pinned in `dialog-envelope.invariant.test.ts`).
+ *
+ * ⛔ WHAT THIS CASE DOES AND DOES NOT SETTLE. It proves the DATA layer loses
+ * nothing: every remedy the copy table declares is present in the rendered
+ * list, so no bullet is dropped between `buildEnvelope` and the DOM. It does
+ * NOT settle the layout question. Whether an overflowing native `<dialog>`
+ * SCROLLS or CLIPS on a short viewport is a UA-resolved rendered property that
+ * jsdom does not compute at all — that half is verified BY HAND and recorded as
+ * MANUAL. Do not read a green here as the ⚠ row being closed.
+ *
+ * THE ORACLE is the DOM list measured against the copy table — two different
+ * artefacts, not one compared with itself. A renderer that dropped the tail of
+ * the list, or a data path that truncated it, moves one side and not the other.
+ */
+describe("[161-10 / E5] the row of remedies is not truncated at the data layer", () => {
+  it("renders EVERY bullet of the reached entry — none dropped", async () => {
+    // ⚠️ TWO bullets, not three, for the reason recorded in the sibling case in
+    // `RenameStrategyDialog.test.tsx`: no code this route emits carries three,
+    // and padding the copy to reach a number would be writing the product to
+    // fit the oracle. Derived from the table, so a third is covered for free.
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse(404, {
+        code: "DASHBOARD_ROW_STALE",
+        error: "strategy not found",
+      }),
+    );
+    renderDialog();
+    fireEvent.click(screen.getByRole("button", { name: CTA_SAVE }));
+
+    const envelope = await screen.findByTestId("error-envelope");
+    const expected = WIZARD_ERROR_COPY.DASHBOARD_ROW_STALE.fix;
+    expect(expected.length).toBeGreaterThanOrEqual(2);
+
+    const rendered = Array.from(envelope.querySelectorAll("li")).map((li) =>
+      String(li.textContent),
+    );
+    expect(
+      rendered.length,
+      "the rendered remedy list is shorter than the copy declares — a bullet " +
+        "was lost between the table and the DOM",
+    ).toBe(expected.length);
+    for (const bullet of expected) {
+      expect(bullet.length).toBeGreaterThan(10);
+      expect(rendered).toContain(bullet);
+    }
   });
 });
 
