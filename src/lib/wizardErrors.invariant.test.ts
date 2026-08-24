@@ -365,6 +365,43 @@ const ROUTES: readonly RouteUnderTest[] = [
     // looks one short is never to relax the literal class: that class is what
     // keeps a lowercase or interpolated code VISIBLE as a defect.
     //
+    // ⚠️⚠️ 161-REVIEW / IN-04 — DO NOT READ `rosterFloor: 4` OR
+    // `KNOWN_VALIDATE_AND_ENCRYPT_CODES`' SIX MEMBERS AS THIS ROUTE'S
+    // EMITTABLE SET. They are its DECLARED vocabulary — the literal-coded arms
+    // this row can see — and the gap between that and what the route can
+    // actually put on the wire is large, deliberate, and easy to misread as
+    // completeness.
+    //
+    // The twelfth arm excluded above is not merely one more code: it is an
+    // OPEN CHANNEL. 161-08 widened it to forward the upstream's own `seamCode`
+    // verbatim (`route.ts`: `code: seamCode ?? "UNKNOWN"`), so its vocabulary
+    // is the analytics service's ≥500 wire vocabulary, not ours. 161-08's W1
+    // inventory enumerates it, and it was RE-MEASURED at HEAD for this note:
+    // FIFTEEN service-emitted ≥500 codes can now cross — `ADAPTER_INIT_FAILED`,
+    // `ADMIN_CHECK_UNAVAILABLE`, `ANALYTICS_ROW_NOT_CREATED`,
+    // `EGRESS_PROXY_MISCONFIGURED`, `EVAL_FAILED`, `INTERNAL`,
+    // `KEK_UNAVAILABLE`, `KEY_UNDECRYPTABLE`, `MT5_GATEWAY_UNCONFIGURED`,
+    // `MT5_GATEWAY_UNREACHABLE`, `PORTFOLIO_ANALYTICS_FAILED`,
+    // `ROLE_CHECK_UNAVAILABLE`, `SCORING_FAILED`, `SIMULATION_FAILED`,
+    // `SERVICE_KEY_UNCONFIGURED`. So the honest arithmetic is 6 declared + ~15
+    // forwarded ≈ 21 emittable, not 6.
+    //
+    // ⭐ WHY THAT IS ACCEPTED RATHER THAN ROSTERED, so the gap is a recorded
+    // decision and not an omission: re-measured at HEAD, NONE of the fifteen is
+    // a member of `SEAM_CODE_TO_WIZARD_CODE`, so every one resolves through
+    // `recogniseSeamErrorCode`'s `?? "UNKNOWN"` to UNKNOWN copy — the
+    // legitimate RENDERING fallback, not a false sentence. Adding them to the
+    // roster would mean minting copy-union members for an UPSTREAM's private
+    // vocabulary, which is the identity-admission trap `keys/[id]/permissions`
+    // argues against at its own `KEY_UNDECRYPTABLE` arm.
+    //
+    // ⛔ WHAT WOULD MAKE THIS STOP BEING SAFE, named so it can be checked: a
+    // row added to `SEAM_CODE_TO_WIZARD_CODE` for any of the fifteen. At that
+    // moment a wizard remedy authored for a 4xx starts rendering against a 5xx
+    // outage — the false-sentence class this phase exists to close. 161-08's
+    // own SUMMARY records that neither W1 gate is PINNED by a test; that
+    // remains open debt, and this note is its signpost, not its guard.
+    //
     // Measured 2026-08-24 under the predicate in this file's header:
     // 11 emitters over 8 distinct codes (KEY_VENUE_NOT_ENABLED ×2,
     // KEY_MISSING_REQUIRED_FIELD ×2, SEAM_MISCONFIGURED ×2, STALE_CLIENT,

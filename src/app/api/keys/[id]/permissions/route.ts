@@ -560,6 +560,35 @@ export const GET = withAuth(
       // user-actionable state, not an incident to page on. No `Retry-After` is
       // stamped, because no wait was advertised and absence must never become a
       // fabricated zero (TRAP-3).
+      //
+      // ⭐ 161-REVIEW / WR-03 — `code:` FIRST, AND THE KEY ORDER IS LOAD-BEARING
+      // EVEN THOUGH JSON HAS NO ORDER.
+      //
+      // Every coverage law in this repo derives its population with a
+      // `code:`-FIRST predicate — `wizardErrors.invariant.test.ts`'s
+      // `emitterRe`, `dialog-envelope.invariant.test.ts`'s
+      // `deriveEmittedCodes`, and both of them say in their own docblocks that
+      // relaxing the key order to "cover more" would legalise the defect
+      // instead of finding it. So an arm written `{ error, code }` is invisible
+      // to ALL of them: measured three times this phase, most starkly on
+      // `keys/validate-and-encrypt`, where twelve coded rejections derived to a
+      // population of ZERO until 161-09 transposed them.
+      //
+      // This arm survives today only because
+      // `probe-vocabulary.invariant.test.ts` happens to bring an order-agnostic
+      // `\bcode:\s*"…"` scanner of its own. That is luck, not coverage: the day
+      // this route joins the `ROUTES` table or a repo-wide
+      // `NextResponse.json({ code:` contract scan lands, an `{ error, code }`
+      // arm goes dark while continuing to work. Zero behaviour change here —
+      // only visibility.
+      //
+      // ⚠️ RECORDED RESIDUE, so its absence is a decision rather than an
+      // omission: THREE other coded arms in this file are still `error:`-first
+      // — `CIRCUIT_OPEN` (~:443), `PROBE_RATE_LIMITED` (~:509) and the terminal
+      // 502 (~:665, whose `code` is computed and is excluded by the literal
+      // class regardless of order). None was minted by 161-01, so none is in
+      // this phase's scope; all three remain invisible to a `code:`-first
+      // predicate and are booked for the same transposition.
       // ─────────────────────────────────────────────────────────────────────
       if (seamFailure?.code === "KEY_UNDECRYPTABLE") {
         console.error(
@@ -569,9 +598,9 @@ export const GET = withAuth(
         );
         return NextResponse.json(
           {
+            code: "KEY_UNDECRYPTABLE",
             error:
               "This stored key can no longer be decrypted. Reconnect the key — retrying will not help.",
-            code: "KEY_UNDECRYPTABLE",
           },
           { status: 500, headers: NO_STORE_HEADERS },
         );

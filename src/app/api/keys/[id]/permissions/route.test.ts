@@ -1,5 +1,12 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { NextRequest } from "next/server";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+// 161-REVIEW / WR-03 — the ONE key-order pin below is a SOURCE-SHAPE
+// assertion, because JSON has no key order and no behavioural test in this file
+// can see the property. Comment-stripped for the same reason every scanner in
+// this repo is: a `code:`-first mention inside a docblock is prose, not an arm.
+import { stripCommentsPreserveLines } from "@/lib/source-scan";
 
 /**
  * Tests for GET /api/keys/[id]/permissions — the Task 7.1a `api_key.decrypt`
@@ -1381,6 +1388,59 @@ describe("[161-01 / WIZERR-04] the permissions proxy answers KEY_UNDECRYPTABLE w
         "remedy to codes we never measured.",
     ).toBe("PROBE_FAILED");
     expect(body.error).toBe(PROBE_FAILED_SENTENCE);
+  });
+
+  it("[161-REVIEW / WR-03] the arm is `code:`-FIRST, so a coverage law can see it", () => {
+    // ── WHY A SOURCE-SHAPE PIN AND NOT A BEHAVIOURAL ONE ────────────────────
+    //
+    // JSON objects have no key order, so NO behavioural assertion in this file
+    // can distinguish `{ code, error }` from `{ error, code }` — every case
+    // above stays byte-identically green either way. That is precisely the
+    // problem: the property is real, load-bearing, and invisible to the only
+    // kind of test this suite otherwise writes.
+    //
+    // The property: every coverage law in this repo derives its population with
+    // a `code:`-FIRST predicate (`wizardErrors.invariant.test.ts`'s `emitterRe`
+    // and `dialog-envelope.invariant.test.ts`'s `deriveEmittedCodes`), and both
+    // refuse to relax the key order because relaxing it would legalise the
+    // defect rather than find it. So an `{ error, code }` arm is INVISIBLE to
+    // all of them — measured three times this phase, most starkly on
+    // `keys/validate-and-encrypt`, whose twelve coded rejections derived to a
+    // population of ZERO until 161-09 transposed them.
+    //
+    // ⛔ THIS PIN FAILS WITHOUT THE FIX. Transpose the two keys at the
+    // KEY_UNDECRYPTABLE arm and the derivation below loses its only member and
+    // reds — verified by mutation, not asserted.
+    const src = stripCommentsPreserveLines(
+      readFileSync(join(process.cwd(), "src/app/api/keys/[id]/permissions/route.ts"), "utf-8"),
+      "ts",
+    );
+
+    // The SAME predicate the coverage laws use, re-stated here rather than
+    // imported from a test file: `NextResponse.json({ code: "LITERAL", error: …`
+    const codeFirst = [
+      ...src.matchAll(
+        /NextResponse\.json\(\s*\{\s*code:\s*"([A-Z][A-Z0-9_]*)"\s*,\s*error:/g,
+      ),
+    ].map((m) => m[1]);
+
+    // NON-VACUITY. A scanner that matched nothing — a renamed file, a
+    // reformat — would satisfy `toContain` on nothing at all, so the floor is
+    // asserted before the membership.
+    expect(
+      codeFirst.length,
+      "the `code:`-first scanner found NO coded rejection in this route — " +
+        "every assertion below is vacuous until this is non-zero",
+    ).toBeGreaterThan(0);
+
+    expect(
+      codeFirst,
+      "The 161-01 KEY_UNDECRYPTABLE arm must be written `{ code, error }`. " +
+        "Written `{ error, code }` it works perfectly and is invisible to " +
+        "every coverage law in the repo — it survives today only because " +
+        "`probe-vocabulary.invariant.test.ts` happens to bring an " +
+        "order-agnostic scanner of its own.",
+    ).toContain("KEY_UNDECRYPTABLE");
   });
 });
 

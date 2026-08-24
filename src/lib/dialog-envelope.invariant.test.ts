@@ -64,10 +64,15 @@ import type { DashboardDialogRoute, WizardErrorCode } from "./wizardErrors";
  * ─────────────────────────────────────────────────────────────────────────────
  * WHAT THIS LAW ASSERTS, in three parts:
  *
- *   A. ARRIVAL — every code a dialog's ROUTE emits is either recognised by that
- *      dialog's roster, or is an EXPLICITLY LISTED disposition with a reason.
- *      An omission is indistinguishable from the defect, so omissions are not
- *      permitted: a code that is neither rostered nor dispositioned reds.
+ *   A. ARRIVAL — every code a dialog's ROUTE emits, DERIVED FROM THE ROUTE
+ *      SOURCE at HEAD, is either recognised by that dialog's roster, or is an
+ *      EXPLICITLY LISTED disposition with a reason. An omission is
+ *      indistinguishable from the defect, so omissions are not permitted: a
+ *      code that is neither rostered nor dispositioned reds.
+ *      ⭐ DERIVED SINCE 161-REVIEW / WR-02. Until then the codes were a
+ *      hand-typed array here while only the FILES were derived, so the one
+ *      regrowth vector this case exists to close — a new arm carrying a code
+ *      nobody rosters — could not red it. See `ROUTE_PATHS` below.
  *   B. COPY — every code a roster claims to recognise has a real copy entry.
  *      A rostered code with no entry type-checks and renders nothing useful.
  *   C. NON-VACUITY — the population is non-empty and equals a HAND-TYPED count.
@@ -146,12 +151,122 @@ function derivePopulation(): string[] {
 const EXPECTED_DIALOG_COUNT = 3;
 
 /**
+ * ⭐ 161-REVIEW / WR-02 — THE ARRIVAL POPULATION IS READ FROM THE ROUTE.
+ *
+ * ── WHAT WAS WRONG UNTIL THIS COMMIT ────────────────────────────────────────
+ *
+ * The ARRIVAL case below is named "every code a route emits is rostered OR an
+ * explicit disposition", and its population of FILES was derived from disk —
+ * but its population of CODES was a hand-typed array in this file, read from
+ * the route once by a human and never again. So the exact regrowth vector the
+ * law exists to close — a FOURTH arm added to one of these routes carrying a
+ * code nobody rosters — produced no RED. The law could not fail for the thing
+ * it was written to catch.
+ *
+ * It was also already WRONG at HEAD, which is the receipt: the rename
+ * dialog's hand-typed list carried `DASHBOARD_WRITE_FAILED`, and the name
+ * route stopped emitting it when 161-REVIEW / CR-01 split the 500 population.
+ * A hand-typed population drifts silently; a derived one reds.
+ *
+ * ── THE EMITTER PREDICATE, IN FULL PROSE, so every count below is
+ * reproducible without reading the regex ────────────────────────────────────
+ *
+ *   Take the route's source and strip comments with
+ *   `stripCommentsPreserveLines(src, "ts")`. A CODED REJECTION SITE is a call
+ *   to `NextResponse.json(` — or to a route-local `json(` wrapper around it —
+ *   whose FIRST argument is an object literal opening with
+ *   `code: "<UPPER_SNAKE_LITERAL>"` immediately followed by an `error:` key,
+ *   and which passes a SECOND argument (the status / options). The emitted
+ *   code is that string literal.
+ *
+ * ⚠️ THE STATUS IS NOT PART OF THE PREDICATE HERE, and that is a measured
+ * departure from the sibling law in `wizardErrors.invariant.test.ts`, not an
+ * oversight. Two of these three routes answer through `NextResponse.json(body,
+ * { status })`; `portfolio-strategies/allocation` answers through its own
+ * `json(body, status)` helper, which passes the status POSITIONALLY. A
+ * `status:`-bearing predicate derives ZERO emitters on that route — the empty
+ * population this file's own header forbids. The `error:` key does the work
+ * the status did: every success body on these three routes is `{ ok: true, … }`
+ * and carries no `error:`, so the rejection/success split is exact. Verified by
+ * the SELF-TESTs below, which exercise both call shapes and a success body.
+ *
+ * ⛔ TWO THINGS THAT MUST NOT BE RELAXED TO MAKE A COUNT COME OUT RIGHT: the
+ * `code:`-FIRST key order and the `[A-Z][A-Z0-9_]*` literal class. Those are
+ * the levers that keep a `{ error, code }` arm (161-09's central finding — a
+ * shape invisible to every coverage law in this repo) and a lowercase or
+ * interpolated code VISIBLE as defects rather than legalised.
+ */
+const ROUTE_PATHS: Readonly<Record<DashboardDialogRoute, string>> = {
+  "strategies/[id]/name": join(
+    REPO,
+    "src/app/api/strategies/[id]/name/route.ts",
+  ),
+  "strategies/[id]/ownership": join(
+    REPO,
+    "src/app/api/strategies/[id]/ownership/route.ts",
+  ),
+  "portfolio-strategies/allocation": join(
+    REPO,
+    "src/app/api/portfolio-strategies/allocation/route.ts",
+  ),
+};
+
+/**
+ * The lazy run's character cap, and an HONEST statement of what it does and
+ * does not buy — measured 2026-08-25 on the comment-stripped sources of all
+ * three routes.
+ *
+ *   · longest real `error:` … `}` body: **107** characters
+ *     (`DASHBOARD_REQUEST_INVALID`'s interpolated amount cap on
+ *     `portfolio-strategies/allocation`). name = 22, ownership = 81.
+ *   · shortest distance from ONE emitter's `error:` to the NEXT emitter's
+ *     `code:`: **77** characters (allocation; 150 on the other two).
+ *
+ * ⚠️ 77 < 107, so — UNLIKE the sibling law in
+ * `wizardErrors.invariant.test.ts`, whose 160 sits between a 90-char longest
+ * body and a 202-char nearest neighbour — NO cap on these routes can both
+ * clear every real body and make a cross-emitter reach arithmetically
+ * impossible. Writing 160 here and repeating the sibling's argument would be a
+ * false claim in a comment, which is the defect class this phase exists to
+ * close. So the cap is stated for what it is: a BOUND ON BACKTRACKING at
+ * ~1.7× the longest real body, not an impossibility proof.
+ *
+ * What actually keeps the scan on the right emitter is the LAZY quantifier:
+ * it stops at the FIRST `}` followed by `,`, and on all three routes that is
+ * the emitter's own object close. The one shape that defeats it is an emitter
+ * with no SECOND argument (`json({ code, error })`), whose close is followed by
+ * `)` rather than `,` — the run then reaches the NEXT emitter's close and
+ * SWALLOWS it. That failure is LOUD, not silent: it drops the derived site
+ * count and `expectedEmitterSites` reds. Pinned by a SELF-TEST below.
+ */
+const EMITTER_BODY_MAX_CHARS = 180;
+
+/**
+ * Every coded-rejection code literal a route emits, in source order, WITH
+ * repeats. `(?:NextResponse\.)?json\(` admits both call shapes above.
+ */
+function deriveEmittedCodes(source: string): string[] {
+  const re = new RegExp(
+    `(?:NextResponse\\.)?json\\(\\s*\\{\\s*code:\\s*"([A-Z][A-Z0-9_]*)"\\s*,\\s*` +
+      `error:[\\s\\S]{0,${EMITTER_BODY_MAX_CHARS}}?\\}\\s*,`,
+    "g",
+  );
+  const out: string[] = [];
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(source)) !== null) out.push(m[1]);
+  return out;
+}
+
+/**
  * One row per dialog: where it lives, which route it writes through, and the
  * codes that route emits.
  *
  * ⛔ `emittedCodes` IS HAND-TYPED FROM THE ROUTE, read at HEAD — never derived
- * from the roster it is checked against. Deriving it would compare the roster
- * with itself and could not fail.
+ * from the roster it is checked against, and (since 161-REVIEW / WR-02) never
+ * the thing the ARRIVAL loop actually iterates either. It is now the
+ * INDEPENDENT DRIFT ORACLE the derived set is compared against: two artefacts,
+ * neither derived from the other, so a route arm that changes reds against the
+ * list and a list edit that has no arm behind it reds against the route.
  */
 interface DialogUnderTest {
   /** Human name used in failure messages. */
@@ -160,8 +275,20 @@ interface DialogUnderTest {
   readonly file: string;
   /** The roster key in `DASHBOARD_DIALOG_ROUTE_CODES`. */
   readonly route: DashboardDialogRoute;
-  /** Every code the route puts on the wire, hand-typed from its arms. */
+  /** Every DISTINCT code the route puts on the wire, hand-typed from its arms. */
   readonly emittedCodes: readonly string[];
+  /**
+   * HAND-TYPED count of coded-rejection SITES on this route, WITH repeats,
+   * measured under the predicate above.
+   *
+   * ⛔ NEVER `derived.length`. A size compared against its own derivation
+   * cannot fail: delete every guard in the route and both sides go to zero
+   * together. This is the second oracle — `emittedCodes` pins WHICH codes, this
+   * pins HOW MANY ARMS, and an arm deleted without its code disappearing (the
+   * common case on these routes, where several arms share a code) reds here and
+   * nowhere else.
+   */
+  readonly expectedEmitterSites: number;
   /**
    * Codes this dialog deliberately does NOT route to an envelope, each with the
    * reason. ⛔ A code that is neither rostered nor listed here REDS — that is
@@ -175,16 +302,31 @@ const DIALOGS: readonly DialogUnderTest[] = [
     label: "RenameStrategyDialog",
     file: "src/components/strategy/RenameStrategyDialog.tsx",
     route: "strategies/[id]/name",
+    // ⛔ `DASHBOARD_WRITE_FAILED` WAS HERE AND IS GONE, and its removal is the
+    // receipt for WR-02. This route has exactly one 500 arm — the UPDATE
+    // failure — and 161-REVIEW / CR-01 moved it to
+    // `DASHBOARD_WRITE_INDETERMINATE`. The hand-typed list kept the old code
+    // for a write the route can no longer report, and nothing reddened,
+    // because nothing read the route. The derivation reds.
+    //
+    // It stays a ROSTER member in `DASHBOARD_DIALOG_ROUTE_CODES` on purpose:
+    // ARRIVAL is one-directional (route → roster). A roster admitting a code
+    // its route does not currently emit costs nothing; a route emitting a code
+    // its roster does not admit renders UNKNOWN.
     emittedCodes: [
       "DASHBOARD_SIGNED_OUT",
       "DASHBOARD_REQUEST_INVALID",
       "NAME_REQUIRED",
       "NAME_TOO_LONG",
       "RATE_LIMITED",
-      "DASHBOARD_WRITE_FAILED",
       "DASHBOARD_WRITE_INDETERMINATE",
       "DASHBOARD_ROW_STALE",
     ],
+    // 9 sites, counted by hand off the route at HEAD: signed-out ×1,
+    // request-invalid ×2 (bad uuid, unparseable json), NAME_REQUIRED ×2
+    // (non-string, empty-after-trim), NAME_TOO_LONG ×1, rate-limited ×1,
+    // indeterminate ×1, row-stale ×1.
+    expectedEmitterSites: 9,
     deliberatelyNotEnvelope: {
       NAME_REQUIRED:
         "FIELD-LEVEL. Lands inline at the Name input, where the user is " +
@@ -209,6 +351,13 @@ const DIALOGS: readonly DialogUnderTest[] = [
       "LIVE_ALLOCATION",
       "DASHBOARD_ROW_STALE",
     ],
+    // 14 sites, counted by hand off the route at HEAD: signed-out ×1,
+    // request-invalid ×4 (bad uuid, unparseable json, unknown mark,
+    // non-boolean confirm flag), rate-limited ×1, write-failed ×2 (both READ
+    // failures — the portfolio lookup and the position lookup), LIVE_ALLOCATION
+    // ×1, indeterminate ×3 (the flip RPC error, the flip RPC's no-row answer,
+    // the plain UPDATE error), row-stale ×2.
+    expectedEmitterSites: 14,
     deliberatelyNotEnvelope: {
       LIVE_ALLOCATION:
         "A QUESTION, not a refusal to read and leave. The dialog answers it " +
@@ -231,6 +380,13 @@ const DIALOGS: readonly DialogUnderTest[] = [
       "DASHBOARD_ROW_STALE",
       "ALLOCATION_NOT_ALLOCATABLE",
     ],
+    // 23 sites across BOTH verbs — this is the only one of the three routes
+    // with two of them, and the dialog reaches both (POST allocates, DELETE
+    // removes). Counted by hand off the route at HEAD: signed-out ×2,
+    // request-invalid ×5, rate-limited ×2, write-failed ×3 (all READ failures),
+    // row-stale ×3, ALLOCATION_NOT_ALLOCATABLE ×2 (the pre-check and the
+    // D-03-A trigger arm), indeterminate ×6. 2+5+2+3+3+2+6 = 23.
+    expectedEmitterSites: 23,
     deliberatelyNotEnvelope: {},
   },
 ];
@@ -341,7 +497,7 @@ describe("[161-10 / WIZERR-07] the dashboard-dialog envelope population", () => 
     expect(isDashboardEnvelopeDialog(notADialog)).toBe(false);
   });
 
-  it("A. ARRIVAL: every code a route emits is rostered OR an explicit disposition", () => {
+  it("A. ARRIVAL: every code the ROUTE emits is rostered OR an explicit disposition", () => {
     const offenders: string[] = [];
 
     for (const dialog of DIALOGS) {
@@ -352,14 +508,26 @@ describe("[161-10 / WIZERR-07] the dashboard-dialog envelope population", () => 
           "answer UNKNOWN for every code this route sends",
       ).toBeDefined();
 
-      // NON-VACUITY: a dialog whose route emits nothing would pass the loop
-      // below without asserting anything at all.
+      // ⭐ 161-REVIEW / WR-02 — READ FROM THE ROUTE, not from the array in this
+      // file. This is the line that makes a NEW arm on any of these three
+      // routes red here without a test edit. Iterating `dialog.emittedCodes`
+      // (as this loop did until now) could only ever check codes a human had
+      // already noticed, which is the one population that needs no checking.
+      const derived = deriveEmittedCodes(stripped(ROUTE_PATHS[dialog.route]));
+
+      // NON-VACUITY: a derivation that parsed to `[]` — a renamed route file, a
+      // reordered `{ error, code }` literal, a scanner blinded by a reformat —
+      // satisfies the loop below without asserting anything at all. This floor
+      // is what stands between this law and the 153.1-01 born-blind defect.
       expect(
-        dialog.emittedCodes.length,
-        `${dialog.label}'s route emits no codes — nothing is being checked`,
+        derived.length,
+        `the scanner found NO coded rejections in ${dialog.route} — every ` +
+          `ARRIVAL assertion for ${dialog.label} is vacuous until this is ` +
+          "non-zero. Check the route still answers `code:`-FIRST; a " +
+          "`{ error, code }` literal is invisible to this predicate by design.",
       ).toBeGreaterThan(0);
 
-      for (const code of dialog.emittedCodes) {
+      for (const code of new Set(derived)) {
         const rostered = roster?.has(code as WizardErrorCode) ?? false;
         const dispositioned = Object.prototype.hasOwnProperty.call(
           dialog.deliberatelyNotEnvelope,
@@ -383,6 +551,114 @@ describe("[161-10 / WIZERR-07] the dashboard-dialog envelope population", () => 
     }
 
     expect(offenders, offenders.join("\n")).toEqual([]);
+  });
+
+  it("A. DRIFT: the derived emitter set matches BOTH hand-typed oracles", () => {
+    // Two independent oracles against one derivation, neither taken from the
+    // other. `emittedCodes` pins WHICH codes; `expectedEmitterSites` pins HOW
+    // MANY ARMS — and on these routes several arms share a code, so an arm
+    // deleted or added without changing the vocabulary reds ONLY on the count.
+    //
+    // ⛔ NEITHER SIDE MAY BECOME `derived.length` OR `[...new Set(derived)]`.
+    // A size compared against its own derivation cannot fail: delete every
+    // guard in the route and both sides go to zero together.
+    for (const dialog of DIALOGS) {
+      const derived = deriveEmittedCodes(stripped(ROUTE_PATHS[dialog.route]));
+
+      expect(
+        derived.length,
+        `${dialog.label}: ${dialog.route} now has ${derived.length} coded ` +
+          `rejection sites, not ${dialog.expectedEmitterSites}. If an arm was ` +
+          "ADDED, roster its code (or disposition it) and bump this literal in " +
+          "the SAME commit. If the count DROPPED unexpectedly, check for an " +
+          "emitter with no second argument — its lazy run swallows the next " +
+          "one (see EMITTER_BODY_MAX_CHARS).",
+      ).toBe(dialog.expectedEmitterSites);
+
+      expect(
+        [...new Set(derived)].sort(),
+        `${dialog.label}: the codes ${dialog.route} actually emits no longer ` +
+          "match the hand-typed list on its DIALOGS row. Correct the LIST " +
+          "from the route — never the route to suit the list.",
+      ).toEqual([...dialog.emittedCodes].sort());
+    }
+  });
+
+  it("SELF-TEST (positive): the emitter scanner sees BOTH call shapes", () => {
+    // `NextResponse.json(body, { status })` — name and ownership — and the
+    // route-local `json(body, status)` wrapper that `allocation` answers
+    // through. A scanner that saw only the first would derive ZERO on
+    // allocation and take a third of this law dark.
+    const src = [
+      "return NextResponse.json(",
+      '  { code: "ALPHA_ONE", error: "a" },',
+      "  { status: 500, headers: NO_STORE_HEADERS },",
+      ");",
+      'return json({ code: "BETA_TWO", error: "b" }, 409);',
+    ].join("\n");
+    expect(deriveEmittedCodes(src)).toEqual(["ALPHA_ONE", "BETA_TWO"]);
+  });
+
+  it("SELF-TEST (negative): `{ error, code }`, a success body and a computed code are NOT counted", () => {
+    // ⚠️ THE FIRST ONE IS A KNOWN, DELIBERATE BLINDNESS, recorded rather than
+    // papered over: 161-09's central finding is that EVERY coverage law in this
+    // repo derives with a `code:`-first predicate, so an `{ error, code }` arm
+    // is invisible to all of them. Relaxing the key order here to "cover more"
+    // would legalise the defect instead of finding it — it is why 161-REVIEW /
+    // WR-03 reordered the `keys/[id]/permissions` literal rather than widening
+    // a scanner.
+    expect(
+      deriveEmittedCodes(
+        'return NextResponse.json({ error: "e", code: "GAMMA" }, { status: 500 });',
+      ),
+    ).toEqual([]);
+    // A success body carries no `error:` — this is the clause doing the work
+    // the sibling law's `status:` fragment does.
+    expect(
+      deriveEmittedCodes(
+        "return NextResponse.json({ ok: true, mark }, { headers: NO_STORE_HEADERS });",
+      ),
+    ).toEqual([]);
+    // A lowercase code and an interpolated one stay VISIBLE as defects by
+    // being EXCLUDED — the literal class is not negotiable for a count.
+    expect(
+      deriveEmittedCodes('return json({ code: "lower_case", error: "e" }, 400);'),
+    ).toEqual([]);
+    expect(
+      deriveEmittedCodes(
+        'return json({ code: seamCode ?? "UNKNOWN", error: "e" }, 500);',
+      ),
+    ).toEqual([]);
+  });
+
+  it("SELF-TEST (negative): a COMMENTED-OUT emitter is not counted", () => {
+    const commented = [
+      '// return json({ code: "ALPHA_ONE", error: "a" }, 400);',
+      '/** and in a docblock: json({ code: "BETA_TWO", error: "b" }, 400); */',
+      'return json({ code: "GAMMA_THREE", error: "c" }, 400);',
+    ].join("\n");
+    expect(
+      deriveEmittedCodes(stripCommentsPreserveLines(commented, "ts")),
+    ).toEqual(["GAMMA_THREE"]);
+  });
+
+  it("SELF-TEST: an emitter with NO second argument swallows the next one — and the site count is what catches it", () => {
+    // The one shape the lazy quantifier cannot terminate on, pinned so the
+    // claim in EMITTER_BODY_MAX_CHARS' docblock is a measured fact rather than
+    // an argument. ALPHA's close is followed by `)`, not `,`, so its run
+    // reaches BETA's close and consumes it.
+    const swallowing = [
+      'json({ code: "ALPHA_ONE", error: "a" });',
+      'json({ code: "BETA_TWO", error: "b" }, 400);',
+    ].join("\n");
+    expect(deriveEmittedCodes(swallowing)).toEqual(["ALPHA_ONE"]);
+    // The SAME pair with ALPHA's second argument restored derives both — so
+    // the difference really is the missing argument and not the fixture.
+    const healthy = [
+      'json({ code: "ALPHA_ONE", error: "a" }, 400);',
+      'json({ code: "BETA_TWO", error: "b" }, 400);',
+    ].join("\n");
+    expect(deriveEmittedCodes(healthy)).toEqual(["ALPHA_ONE", "BETA_TWO"]);
   });
 
   it("A. every deliberate non-envelope disposition carries a REASON, not a blank", () => {
