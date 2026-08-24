@@ -35,7 +35,7 @@ verified-stale items are excluded by construction.
 - [x] **WIZERR-02** (L1788): "Try another key" never destroys the draft or cascades away composite members.
 - [x] **WIZERR-03** (L2466): An orphaned live key (no strategy) surfaces an honest remedy instead of a false `DRAFT_ALREADY_EXISTS` 409.
 - [x] **WIZERR-04** (L410): The `keys/[id]/permissions` private `PROBE_*` cascade gets a derived-population coverage law, and `KEY_UNDECRYPTABLE`'s remedy sentence says "reconnect the key", not "try again".
-- [ ] **WIZERR-05** (L486): `MT5_GATEWAY_UNREACHABLE`'s server-advertised `Retry-After` threads end-to-end (a fourth optional `AnalyticsUpstreamError` field, relayed by both key-route catches).
+- [x] **WIZERR-05** (L486): `MT5_GATEWAY_UNREACHABLE`'s server-advertised `Retry-After` threads end-to-end (a fourth optional `AnalyticsUpstreamError` field, relayed by both key-route catches).
 - [ ] **WIZERR-06** (L436): The five 5xx→`UNKNOWN` terminal arms (admin match/eval, simulator) forward recognized `seamCode`s instead of collapsing the severe half of the vocabulary.
 - [ ] **WIZERR-07** (L2581): `AllocateDialog`, `RenameStrategyDialog`, and `MarkOwnershipDialog` stop minting `code: UNKNOWN` — the coverage law reaches the dashboard dialogs this class regrew on.
 - [ ] **WIZERR-08** (L1779): The `KEY_INVALID_FORMAT` one-code-many-causes split lands on the remaining 2 routes / 9 sites, honoring their internal-vs-public copy contracts.
@@ -122,7 +122,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | WIZERR-02 | Phase 161 | Complete |
 | WIZERR-03 | Phase 161 | Complete |
 | WIZERR-04 | Phase 161 | Complete |
-| WIZERR-05 | Phase 161 | Pending |
+| WIZERR-05 | Phase 161 | Complete |
 | WIZERR-06 | Phase 161 | Pending |
 | WIZERR-07 | Phase 161 | Pending |
 | WIZERR-08 | Phase 161 | Pending |

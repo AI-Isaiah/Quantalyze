@@ -4,17 +4,17 @@ milestone: v1.20
 milestone_name: Backlog Burndown (Phases 158+)
 current_phase: 160
 current_phase_name: PROVENANCE — The server's venue is the venue that annualizes
-status: executing
-stopped_at: Completed 161-05-PLAN.md
-last_updated: "2026-08-24T11:54:02.607Z"
+status: verifying
+stopped_at: Completed 161-06-PLAN.md (WIZERR-05)
+last_updated: "2026-08-24T12:23:07.508Z"
 last_activity: 2026-08-23
 last_activity_desc: Phase 160 execution started
-state_head: fc2fe14cfabaf614802ed24e931c6616606df090
+state_head: 0d46ca189939ed626b01e7b8aa8d19595d059709
 progress:
   total_phases: 9
   completed_phases: 1
   total_plans: 30
-  completed_plans: 23
+  completed_plans: 24
   percent: 11
 ---
 
@@ -115,7 +115,7 @@ zero unclassified) and `161-VALIDATION.md` (Nyquist strategy, 4 Wave-0 gaps, ant
 
 Phase: 160 (PROVENANCE — The server's venue is the venue that annualizes) — EXECUTING
 Plan: 6 of 6
-Status: Ready to execute
+Status: Phase complete — ready for verification
 Last activity: 2026-08-23 — Phase 160 execution started
 OPS-CI first (the shared-test-db eviction / #616 mutex protects every later merge), 165 DEPS
 last (hard-blocked on OPS-01), 160 provenance before 164 SHARE (REVOKE soak), SHARE alone in
@@ -625,6 +625,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 | Phase 161 P03 | 50m | 3 tasks | 10 files |
 | Phase 161 P04 | ~55 min | 2 tasks | 3 files |
 | Phase 161-wizerr-honest-error-surfaces P05 | 75m | 3 tasks | 8 files |
+| Phase 161 P06 | 75m | 3 tasks | 13 files |
 
 ## Accumulated Context
 
@@ -757,6 +758,9 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - [Phase 160]: 161-05: A2 CONFIRMED by re-reading the sweep SQL at HEAD — cleanup_abandoned_wizard_drafts never re-collects an already-orphaned key, so KEY_ORPHANED's copy claims permanence rather than a time-bound
 - [Phase 160]: 161-05: 161-UI-SPEC's WIZERR-03 'Manage keys' remedy was replaced — measured unreachable for a manager holding an orphaned key (D-161-05-A)
 - [Phase 160]: 161-05: composite/add-key does NOT mirror KEY_ORPHANED — the venue-identity constraint is unreachable there and mirroring would delete a premise-changed alarm
+- [Phase 160]: D-161-06-A: the Retry-After wait's ONLY wire source is the response HEADER — service_error_body emits no retry_after leaf (measured); a body fallback would be the second extraction path process-key-client.ts already refused
+- [Phase 160]: D-161-06-B: both key-route catches share keyRouteFailureHeaders() — one conditional, documented precedence (breaker wins); this also absorbed the pre-existing duplicated CircuitOpenError ternary
+- [Phase 160]: D-161-06-C: AnalyticsUpstreamError is at FIVE positional params — the recorded ceiling; a sixth optional field or a second number|null one makes the trailing-options-object refactor mandatory
 
 ### Decisions (execution-time, Phase 140.2)
 
@@ -1459,8 +1463,8 @@ Load-bearing sequencing (real dependencies, do not reorder):
 
 ## Session
 
-**Last Date:** 2026-08-24T11:53:49.937Z
-**Stopped At:** Completed 161-05-PLAN.md
+**Last Date:** 2026-08-24T12:23:07.171Z
+**Stopped At:** Completed 161-06-PLAN.md (WIZERR-05)
 **Resume File:** None
 **Next step:** Phase 161 (WIZERR — honest error surfaces) is next and NOT yet planned — run `/gsd-plan-phase 161`. Phase 161.1 (LEDGER-REFRESH) was inserted after it on 2026-08-24 for the founder-reported MT5 staleness; it is URGENT and production-facing, so it may be pulled ahead of 161 if you prefer the live data-integrity fix first.
 

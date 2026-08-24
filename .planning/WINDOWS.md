@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 11
+open_count: 12
 waived_count: 0
 fixed_count: 1
-total_count: 12
-last_updated: 2026-08-24T11:53:39.722Z
+total_count: 13
+last_updated: 2026-08-24T12:23:07.786Z
 ---
 
 # Broken Windows Ledger
@@ -27,6 +27,7 @@ last_updated: 2026-08-24T11:53:39.722Z
 | 10 | 160 | deviation | src/components/strategy/ApiKeyManager.tsx |  | 160-02: if (newKey) silent-skip replaced with a loud throw on a 2xx carrying no api_key_id; link+sync blocks dedented (content byte-preserved) | open |  | 2026-08-23T15:59:31.524Z |  |
 | 11 | 161 | deviation | src/lib/wizardErrors.ts |  | 161-05: KEY_ORPHANED's UI-SPEC remedy bullet was replaced — no manager-facing surface can release an orphaned api_key (D-161-05-A) | open |  | 2026-08-24T11:53:32.055Z |  |
 | 12 | 161 | deviation | src/app/api/strategies/create-with-key/route.ts |  | 161-05: orphaned MT5 connect waits out the full 120s validate before the KEY_ORPHANED refusal (D-161-05-B) | open |  | 2026-08-24T11:53:39.722Z |  |
+| 13 | 161 | unrun-verify | .planning/phases/161-wizerr-honest-error-surfaces/161-06-PLAN.md |  | 161-06 backstop truth unverified: the rendered wait sentence's wrap/no-clipping on the E2 key-connect envelope — no renderer touched this plan | open |  | 2026-08-24T12:23:07.786Z |  |
 
 ````json
 [
@@ -172,6 +173,18 @@ last_updated: 2026-08-24T11:53:39.722Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-08-24T11:53:39.722Z",
+    "resolved_at": null
+  },
+  {
+    "id": 13,
+    "kind": "unrun-verify",
+    "phase": "161",
+    "file": ".planning/phases/161-wizerr-honest-error-surfaces/161-06-PLAN.md",
+    "line": null,
+    "description": "161-06 backstop truth unverified: the rendered wait sentence's wrap/no-clipping on the E2 key-connect envelope — no renderer touched this plan",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-08-24T12:23:07.786Z",
     "resolved_at": null
   }
 ]
