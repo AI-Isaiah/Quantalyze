@@ -1922,7 +1922,12 @@ describe("[154-06 / WIZCONT-02] create-with-key — the venue-identity fence", (
             'duplicate key value violates unique constraint "api_keys_user_exchange_venue_account_uniq"',
         },
       });
-      // Nothing resolvable on the re-read (orphan / dark fence).
+      // Nothing resolvable on the re-read: NO LIVE KEY AT ALL, i.e. the dark
+      // fence. ⚠️ 161-05 — this comment used to read "(orphan / dark fence)",
+      // and it named an arm this fixture does not exercise: with
+      // `venueKeyLookupMock` empty the resolver returns at `!liveKeyId` and
+      // never reaches the orphan discrimination. The orphan has its own
+      // describe below, seeded with a key that IS found.
       venueKeyLookupMock.mockResolvedValue({ data: null, error: null });
 
       const POST = await importPost();
@@ -1996,6 +2001,154 @@ describe("[154-06 / WIZCONT-02] create-with-key — the venue-identity fence", (
       expect(capture?.options.extra?.constraint).toBe(
         "api_keys_some_future_uniq",
       );
+    });
+  });
+
+  /**
+   * [161-05 / WIZERR-03] THE ORPHAN — a live key with NOTHING behind it.
+   *
+   * Until this plan the 23505 arm answered it with the byte-pinned
+   * `DRAFT_ALREADY_EXISTS` 409, a sentence the resolver had already disproved
+   * two reads earlier: it reaches this state only because the
+   * `source='wizard'` / `status='draft'` read came back EMPTY. So the user was
+   * sent to find a wizard session that provably does not exist, and offered
+   * `resume_draft` / `start_fresh` to act on it.
+   *
+   * ⭐ THE FIXTURE IS THE WHOLE ARGUMENT, AND IT IS DELIBERATELY NOT THE ONE
+   * THE `UNRESOLVABLE` CASE ABOVE USES. That case leaves `venueKeyLookupMock`
+   * empty, so the resolver returns at `!liveKeyId` and the orphan branch is
+   * never reached — a pin written on that fixture would have gone green against
+   * BOTH the old and the new route and proved nothing. Here the key IS found
+   * and both strategy reads succeed EMPTY, which is the only shape that
+   * produces `kind:"orphaned"`.
+   *
+   * ⛔ AND THE NEGATIVE CONTROLS ARE THE LOAD-BEARING HALF. The risk this change
+   * introduces is not "the orphan keeps the old code" — it is the opposite:
+   * collapsing "we could not tell" into "nothing holds it". A read that FAULTED
+   * has observed nothing, and answering `KEY_ORPHANED` from it would be the same
+   * unearned claim in the other direction. Both fault directions are pinned.
+   */
+  describe("[161-05 / WIZERR-03] the orphan answers KEY_ORPHANED, and only the orphan does", () => {
+    beforeEach(() => {
+      vi.spyOn(console, "error").mockImplementation(() => {});
+      rpcMock.mockResolvedValue({
+        data: null,
+        error: {
+          code: "23505",
+          message:
+            'duplicate key value violates unique constraint "api_keys_user_exchange_venue_account_uniq"',
+        },
+      });
+    });
+
+    /**
+     * A LIVE key for this login, and NOTHING hanging off it — the state a
+     * deleted draft leaves behind. Both `strategies` reads keep the describe's
+     * default (empty) and succeed; only the `api_keys` read is seeded.
+     */
+    function seedOrphanedKey() {
+      venueKeyLookupMock.mockResolvedValue({
+        data: { id: EXISTING_KEY_ID },
+        error: null,
+      });
+    }
+
+    it("a live key with no strategy behind it answers 409 KEY_ORPHANED — never the false fence sentence", async () => {
+      seedOrphanedKey();
+
+      const POST = await importPost();
+      const res = await POST(makeReq(MT5_RECONNECT_BODY));
+
+      expect(res.status).toBe(409);
+      // Byte-wise, and `code` FIRST: `toEqual` on parsed JSON does not compare
+      // key order, and the key order is what the invariant scanner reads.
+      expect(await res.text()).toBe(
+        '{"code":"KEY_ORPHANED","error":"This key is already stored, but nothing uses it."}',
+      );
+      expect(res.headers.get("Cache-Control")).toBe("private, no-store");
+    });
+
+    it("NEGATIVE CONTROL — the OWNER read faulting keeps the fence 409 byte-identical", async () => {
+      // "We could not tell" is not "nothing holds it". This is the read whose
+      // emptiness the orphan answer is DERIVED from, so a fault here must fall
+      // back to the incumbent behaviour rather than assert the conclusion the
+      // failed read did not support.
+      seedOrphanedKey();
+      venueOwnerLookupMock.mockResolvedValue({
+        data: null,
+        error: { code: "PGRST301", message: "owner read failed" },
+      });
+
+      const POST = await importPost();
+      const res = await POST(makeReq(MT5_RECONNECT_BODY));
+
+      expect(res.status).toBe(409);
+      expect(await res.text()).toBe(
+        '{"code":"DRAFT_ALREADY_EXISTS","error":"A wizard session with this key is already in progress."}',
+      );
+    });
+
+    it("NEGATIVE CONTROL — the DRAFT read faulting keeps the fence 409 byte-identical", async () => {
+      // The earlier of the two reads. A fault here returns `unresolved` before
+      // the owner read is ever issued, so the orphan branch must stay unreached.
+      seedOrphanedKey();
+      venueStrategyLookupMock.mockResolvedValue({
+        data: null,
+        error: { code: "PGRST301", message: "draft read failed" },
+      });
+
+      const POST = await importPost();
+      const res = await POST(makeReq(MT5_RECONNECT_BODY));
+
+      expect(res.status).toBe(409);
+      expect(await res.text()).toBe(
+        '{"code":"DRAFT_ALREADY_EXISTS","error":"A wizard session with this key is already in progress."}',
+      );
+      // And the owner read was never reached — the fault short-circuits.
+      expect(venueOwnerLookupMock).not.toHaveBeenCalled();
+    });
+
+    it("NEGATIVE CONTROL — the wizard-session constraint still answers the fence 409, orphan state or not", async () => {
+      // ⭐ THE DISCRIMINATION KEYS ON THE CONSTRAINT, NOT ON THE DATABASE.
+      // Distinct from the byte-identical pin in the block above: that one runs
+      // with an EMPTY venue fixture, so it would stay green even if the new
+      // branch had been written to fire on DB state. This one seeds the exact
+      // orphan shape and still demands the fence sentence, because the
+      // constraint Postgres named is the wizard-session one.
+      seedOrphanedKey();
+      rpcMock.mockResolvedValue({
+        data: null,
+        error: {
+          code: "23505",
+          message:
+            'duplicate key value violates unique constraint "strategies_user_wizard_session_source_uniq"',
+        },
+      });
+
+      const POST = await importPost();
+      const res = await POST(makeReq(MT5_RECONNECT_BODY));
+
+      expect(res.status).toBe(409);
+      expect(await res.text()).toBe(
+        '{"code":"DRAFT_ALREADY_EXISTS","error":"A wizard session with this key is already in progress."}',
+      );
+    });
+
+    it("the PRE-RPC fence lets the orphan through to validate — the credentials speak first", async () => {
+      // 161-05 recorded this ordering as a decision at the fence, so it is
+      // pinned rather than left to be re-derived. The two other refusable
+      // resolutions (`draft`, `connected`) short-circuit before the charged seam
+      // calls; the orphan does NOT, because the credentials in THIS request are
+      // still unauthenticated and a wrong secret is the user's real first
+      // problem. Refusing early would hand them the orphan to chase while a bad
+      // secret sat unmentioned.
+      seedOrphanedKey();
+
+      const POST = await importPost();
+      await POST(makeReq(MT5_RECONNECT_BODY));
+
+      expect(validateKeyMock).toHaveBeenCalled();
+      expect(rpcMock).toHaveBeenCalled();
     });
   });
 });

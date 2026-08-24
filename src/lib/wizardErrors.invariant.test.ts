@@ -1757,3 +1757,107 @@ describe("[153.7 review W-153.7-1] every CLASSIFIER-returned code is admitted by
     }
   });
 });
+
+/**
+ * [161-05 / WIZERR-03] THE 409 EMITTERS THE COVERAGE LAW ABOVE CANNOT SEE.
+ *
+ * ── THE BLIND SPOT, STATED PLAINLY ──────────────────────────────────────────
+ *
+ * `ROUTES` pins the two key-validation routes with a `statusRe` fragment of
+ * `"400"`, and that narrowness is deliberate and must not be relaxed (see
+ * `statusRe`'s docblock: widening them moves their pinned site count 12 → 16 and
+ * changes `EXPECTED_SPLIT_CODES` — a population change dressed as a scanner
+ * improvement). The consequence is that every 409 refusal `create-with-key`
+ * makes is OUTSIDE the derived population, so for `DRAFT_ALREADY_EXISTS`,
+ * `VENUE_ALREADY_CONNECTED` and now `KEY_ORPHANED` the roster row in
+ * `ConnectKeyStep.tsx` is owed BY HAND and nothing reds if it is forgotten. The
+ * code then misses the membership check, falls through to `UNKNOWN` — whose copy
+ * IS recoverable — and the user gets "Try the last action again." with a Retry
+ * control for a submit the DB index refuses identically, while the honest
+ * refusal ships invisible. That is the exact trap `ConnectKeyStep`'s own roster
+ * docblock records, and until now the only guard against it on this arm was a
+ * route test remembering to exist.
+ *
+ * ⛔ THIS IS AN ADDITIONAL POPULATION, NOT A WIDENING. `ROUTES` is untouched,
+ * both incumbents keep their pinned 12, and `EXPECTED_SPLIT_CODES` is unmoved —
+ * the same shape 153.1-06 used when it gave `finalize-wizard` its own entry
+ * rather than stretching the incumbents to fit.
+ *
+ * ⚠️ SCOPED TO `create-with-key` ON PURPOSE. Its sibling `composite/add-key`
+ * answers 409 with the wizard-session fence only: the venue-identity constraint
+ * is unreachable there (`add_wizard_composite_key` writes no `venue_account_id`)
+ * and is deliberately routed to a loud UNKNOWN 500 alarm instead, so it mints no
+ * `KEY_ORPHANED` and its roster deliberately does not carry one. Running this
+ * over both would demand a member that must not exist.
+ */
+describe("[161-05 / WIZERR-03] create-with-key's 409 refusals clear ConnectKeyStep's roster too", () => {
+  const unionSource = stripped(UNION_SOURCE);
+  const union = new Set(deriveUnionMembers(unionSource));
+  const alias = new Map(deriveAliasPairs(unionSource));
+  const route = ROUTES.find((r) => r.label === "create-with-key")!;
+  const codes = deriveEmittedCodes(stripped(route.route), "409");
+  const roster = new Set(deriveRoster(stripped(route.rosterFile), route.rosterName));
+
+  /**
+   * HAND-TYPED, measured under `emitterRe("409")` on the comment-stripped
+   * source — never `codes.length`, and never a `grep -c` (two of these three
+   * names also appear in prose in that file, which is the 14-vs-12 lesson).
+   *
+   * 2 → 3 (161-05 / WIZERR-03): `KEY_ORPHANED` joins in the same commit the
+   * route starts emitting it and the same commit its roster row lands.
+   */
+  const EXPECTED_409_CODES = [
+    "DRAFT_ALREADY_EXISTS",
+    "KEY_ORPHANED",
+    "VENUE_ALREADY_CONNECTED",
+  ] as const;
+
+  it("the derivation is NOT VACUOUS — the 409 population has a floor", () => {
+    // Without this the two assertions below are satisfied by an empty scan: a
+    // regex that matched nothing would report "no uncovered codes" forever.
+    expect(
+      codes.length,
+      "emitterRe('409') derived NOTHING from create-with-key. The scanner has " +
+        "gone blind on this status — check the `code:`-first key order and " +
+        `EMITTER_BODY_MAX_CHARS (${EMITTER_BODY_MAX_CHARS}) before touching the ` +
+        "expectations below.",
+    ).toBeGreaterThanOrEqual(EXPECTED_409_CODES.length);
+  });
+
+  it("the 409 vocabulary is the hand-typed set — no more, no less", () => {
+    expect(
+      [...new Set(codes)].sort(),
+      "The set of codes create-with-key answers 409 with changed. If one was " +
+        "ADDED it needs a copy entry AND a hand-typed row in " +
+        `${route.rosterName} (this status is invisible to the coverage law ` +
+        "above, so nothing else will tell you). If one VANISHED, a refusal " +
+        "silently merged back into another.",
+    ).toEqual([...EXPECTED_409_CODES].sort());
+  });
+
+  it("every 409 code is a union member AND admitted by ConnectKeyStep's roster", () => {
+    const missingFromUnion = [...new Set(codes)]
+      .filter((c) => {
+        if (union.has(c)) return false;
+        const t = alias.get(c);
+        return t === undefined || !union.has(t);
+      })
+      .sort();
+    expect(
+      missingFromUnion,
+      "A 409 code with no WizardErrorCode member has no copy entry, so " +
+        "formatKeyError falls through to UNKNOWN.",
+    ).toEqual([]);
+
+    const missingFromRoster = [...new Set(codes)]
+      .filter((c) => alias.get(c) === undefined && !roster.has(c))
+      .sort();
+    expect(
+      missingFromRoster,
+      `${route.rosterName} does not admit these 409 codes, so ConnectKeyStep ` +
+        "rejects them as unrecognised and renders UNKNOWN — with a Retry " +
+        "control, for refusals a retry cannot clear. Add each one to the " +
+        "roster; ⛔ do not relax this test to match the roster.",
+    ).toEqual([]);
+  });
+});

@@ -160,18 +160,37 @@ function pickPlaceholderCodename(): string {
  *                    the pair back and mark the response `deduped`.
  *   · `connected`  — the live key exists and a strategy hangs off it, but that
  *                    strategy has left `draft`. Refusable, with an honest code.
- *   · `unresolved` — genuinely nothing to say: no live key, no strategy at all,
- *                    a read fault, or no service-role credential. Fall through.
+ *   · `orphaned`   — 161-05 / WIZERR-03. The live key exists and NOTHING hangs
+ *                    off it: both strategy reads succeeded and both came back
+ *                    empty. Refusable, with its own honest code.
+ *   · `unresolved` — genuinely nothing to say: no live key, a read fault, or no
+ *                    service-role credential. Fall through.
  *
- * ⛔ `strategyName` is the ONLY thing `connected` carries out. Not the id, not
- * the status, and above all not the venue account id (T-154-06-C).
+ * ⛔ `orphaned` AND `unresolved` USED TO BE ONE ANSWER, and collapsing them was
+ * the SECOND instance of the defect this type was created to make
+ * unrepresentable — the first being `draft` vs `connected`. "Nothing holds this
+ * key" is a MEASUREMENT (two successful reads, both empty); "we could not tell"
+ * is the absence of one. The old shared answer fell through to the byte-pinned
+ * `DRAFT_ALREADY_EXISTS` 409, whose sentence promises a wizard session that the
+ * empty draft read has just proven is not there. ⚠️ The read-fault returns above
+ * MUST stay `unresolved`: a failed read has observed nothing, and answering
+ * `orphaned` from it would assert the same unearned claim in the other
+ * direction (the rule the `connected` docblock states for itself).
+ *
+ * ⛔ `orphaned` CARRIES NOTHING. There is nothing to carry — no strategy, no
+ * name — and the key id is deliberately not surfaced (T-154-06-C's rule applied
+ * to a new member: non-secret is not the same as published).
  */
 type VenueIdentityResolution =
   | { kind: "unresolved" }
   | { kind: "draft"; strategy_id: string; api_key_id: string }
-  | { kind: "connected"; strategyName: string | null };
+  | { kind: "connected"; strategyName: string | null }
+  | { kind: "orphaned" };
 
 const UNRESOLVED: VenueIdentityResolution = { kind: "unresolved" };
+
+/** 161-05 / WIZERR-03 — the payload-free orphan answer, held once like UNRESOLVED. */
+const ORPHANED: VenueIdentityResolution = { kind: "orphaned" };
 
 async function resolveByVenueIdentity(
   supabase: Awaited<ReturnType<typeof createClient>>,
@@ -272,8 +291,10 @@ async function resolveByVenueIdentity(
   // ⭐ NO DRAFT IS NOT YET AN ANSWER. Two very different situations reach this
   // line and the caller must be able to tell them apart:
   //   · nothing hangs off the key at all (an orphan, e.g. its draft was
-  //     deleted) — fall through, let the RPC's INSERT trip the index and let the
-  //     23505 arm answer;
+  //     deleted) — 161-05 / WIZERR-03 now gives this its OWN answer. It used to
+  //     read "fall through, let the RPC's INSERT trip the index and let the
+  //     23505 arm answer", and that arm answered `DRAFT_ALREADY_EXISTS` — a
+  //     sentence the empty draft read directly above has just DISPROVED;
   //   · a strategy DOES hold this account and has simply left `draft` — the case
   //     the filters above just started excluding, and the one that must be
   //     refused with a sentence that is true.
@@ -303,7 +324,12 @@ async function resolveByVenueIdentity(
     return UNRESOLVED;
   }
 
-  if (!ownerRow?.id) return UNRESOLVED;
+  // 161-05 / WIZERR-03 — BOTH READS SUCCEEDED AND BOTH CAME BACK EMPTY, so this
+  // is a MEASUREMENT and not an absence of one: a live key with no draft and no
+  // strategy of any status behind it. ⛔ Reached only past the two `ownerRowErr`
+  // / `draftRowErr` returns above, which is what keeps `orphaned` an observation
+  // rather than a guess.
+  if (!ownerRow?.id) return ORPHANED;
 
   return {
     kind: "connected",
@@ -665,6 +691,22 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
       // must not first burn a Railway probe and the venue's validate quota.
       return venueAlreadyConnectedResponse(venueMatch.strategyName);
     }
+    // 161-05 / WIZERR-03 — `orphaned` DELIBERATELY DOES NOT SHORT-CIRCUIT HERE,
+    // unlike the two arms above, and the asymmetry is a decision rather than an
+    // oversight. Both of those answer a fact about the user's OWN existing
+    // strategy, which no amount of credential-checking can change. The orphan
+    // does not: the credentials in this request have not been authenticated
+    // yet, and if they are wrong the user's real first problem is the
+    // credentials. Refusing here would hand them the orphan to chase while a
+    // bad secret sat unmentioned — the "sends them looking for a different
+    // problem" class this phase exists to remove. Falling through lets
+    // `validateKey` speak first, and the RPC's INSERT then trips the index and
+    // reaches the orphan arm in the 23505 block below.
+    // ⚠️ THE COST IS LATENCY, AND IT IS REAL: this fence only runs for MT5
+    // (`venueAccountId` is non-null for mt5 alone), whose validate budget is
+    // 120 s, so an orphaned MT5 user waits out a full validation before the
+    // refusal. Recorded in the phase's deferred items rather than traded away
+    // here for the ordering above.
   }
 
   // validate + encrypt are TOCTOU-safe back-to-back on the server side.
@@ -956,16 +998,55 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
             // than on the pre-RPC one.
             return venueAlreadyConnectedResponse(venueMatch.strategyName);
           }
-          // Unresolvable: the colliding key exists but no strategy hangs off it
-          // (an orphan), or the resolver is dark. Fall through to the 409 below
-          // — honest enough for a race, and deliberately NOT a new
-          // WizardErrorCode: minting one would move the copy-table pins
-          // (EXPECTED_TABLE_SIZE) for a state the user cannot act on
-          // differently anyway.
-          // (154.1: the code minted for the `connected` arm above deliberately
-          // does NOT extend to this one. Here we could not establish that a
-          // strategy holds the account at all, and asserting it would be the
-          // same class of unearned claim in the opposite direction.)
+          if (venueMatch.kind === "orphaned") {
+            // 161-05 / WIZERR-03 — THE ORPHAN, DISCRIMINATED BEFORE THE PINNED
+            // FENCE RATHER THAN BY EDITING IT. This arm used to fall through to
+            // the `DRAFT_ALREADY_EXISTS` 409 at the bottom of this block, under
+            // a rationale recorded here in 154.1: minting a code "would move the
+            // copy-table pins (EXPECTED_TABLE_SIZE) for a state the user cannot
+            // act on differently anyway".
+            //
+            // ⛔ THE SECOND HALF OF THAT WAS WRONG, and it is what WIZERR-03
+            // corrects. The user CAN act differently — connect a different
+            // account — so the fallthrough was buying a cheaper pin move with a
+            // sentence the resolver had just disproved: `orphaned` is returned
+            // only after the `source='wizard'` / `status='draft'` read came back
+            // EMPTY, so "a wizard session with this key is already in progress"
+            // is false at the moment we would say it.
+            //
+            // ⭐ THE FENCE 409 BELOW IS UNTOUCHED FOR ITS OWN CASE. This is a
+            // new branch above it, not an edit to it (RESEARCH Pitfall 5): the
+            // wizard-session constraint and the no-parseable-name case still
+            // reach it byte-identical, which the negative control in
+            // `route.test.ts` pins.
+            //
+            // ⭐ `code` FIRST, as a LITERAL — the shape
+            // `wizardErrors.invariant.test.ts`'s scanner requires. It answers
+            // 409, and that route's `statusRe` fragment is "400", so this
+            // emitter is deliberately OUTSIDE the derived population (the same
+            // as `DRAFT_ALREADY_EXISTS` and `VENUE_ALREADY_CONNECTED` beside
+            // it). The shape is written correctly anyway so that widening the
+            // fragment later reports this arm rather than silently missing it.
+            //
+            // ⚠️ AND THE ROSTER ROW IS OWED BY HAND FOR THE SAME REASON: the
+            // coverage law cannot see a 409, so `KNOWN_CREATE_WITH_KEY_CODES`
+            // gaining `KEY_ORPHANED` in this commit is what stops ConnectKeyStep
+            // rejecting it as unrecognised and rendering UNKNOWN.
+            return NextResponse.json(
+              {
+                code: "KEY_ORPHANED",
+                error: "This key is already stored, but nothing uses it.",
+              },
+              { status: 409, headers: NO_STORE_HEADERS },
+            );
+          }
+          // Unresolvable: the resolver is dark — a read faulted, or the
+          // service-role credential is missing — so we could not establish
+          // anything about what holds this key. Fall through to the 409 below.
+          // ⛔ THE ORPHAN IS NO LONGER IN THIS BUCKET (161-05). What is left
+          // here is the absence of a measurement, and the 154.1 rule still
+          // governs it: we could not establish that a strategy holds the account
+          // NOR that none does, so claiming either would be an unearned claim.
         } else if (
           constraint !== null &&
           !WIZARD_SESSION_CONSTRAINTS.has(constraint)

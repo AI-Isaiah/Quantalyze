@@ -519,6 +519,21 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
          * resolve-toward-the-existing-row arm: that arm's whole justification
          * is a fence this route does not have, and inventing a dedup here
          * against an unreachable constraint would be shape without a reason.
+         *
+         * ⛔ 161-05 / WIZERR-03 — AND FOR THE SAME REASON THIS ROUTE DOES NOT
+         * MINT `KEY_ORPHANED`, THOUGH ITS PLAN ASKED FOR THE MIRROR. The orphan
+         * refusal is reachable only from the venue-identity constraint, which
+         * the paragraph above measures as unreachable HERE. Mirroring would have
+         * meant building a resolver this route has no fence for, pointing it at
+         * a constraint that cannot fire, and — the part that actually costs
+         * something — converting THIS deliberate premise-changed alarm into a
+         * silent 409, deleting the one signal that would tell us the premise
+         * moved. `KNOWN_ADD_KEY_CODES` in `MultiKeyConnectStep.tsx` is left
+         * without the member to match: a roster row for a code this route cannot
+         * put on the wire is the same kind of false claim in the client's
+         * vocabulary. ⚠️ IF `add_wizard_composite_key` EVER STARTS WRITING
+         * `venue_account_id`, the mirror becomes both reachable and owed — and
+         * the alarm below is what will tell you that day has come.
          */
         const constraint = pgConstraintName(error);
 
