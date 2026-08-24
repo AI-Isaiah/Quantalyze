@@ -201,7 +201,7 @@ Plans:
   3. The coverage law reaches every surface the class regrew on: the `keys/[id]/permissions` private `PROBE_*` cascade gets a derived-population coverage law (and `KEY_UNDECRYPTABLE`'s remedy says "reconnect the key", not "try again"); `AllocateDialog`, `RenameStrategyDialog`, and `MarkOwnershipDialog` stop minting `code: UNKNOWN`; the five 5xx→`UNKNOWN` terminal arms (admin match/eval, simulator) forward recognized `seamCode`s; `MT5_GATEWAY_UNREACHABLE`'s server-advertised `Retry-After` threads end-to-end through both key-route catches.
   4. CSV verdicts tell the truth: the 7-row floor is evaluated on the wizard composite arm AND `INSUFFICIENT_CSV_HISTORY` renders its own copy (landed together or not at all); examined-but-refused verdicts render a truthful fourth outcome replacing the false "only 0 trade(s)" sentence (D-15's oracle re-cut deliberately, the TOCTOU re-check wording following); the csv-finalize A2 409 sentence describes the actual case (same track record, different flow); and the per-row CSV breakdown renders its data half without leaking `'nan'` or echoing untrusted cell contents.
 
-**Plans**: 7/10 plans executed
+**Plans**: 8/10 plans executed
 **UI hint**: yes
 
 Plans:
@@ -213,7 +213,7 @@ Plans:
 - [x] 161-05-PLAN.md — WIZERR-03/-11: KEY_ORPHANED honest refusal + venue-parameterized AUTH copy (wave 2)
 - [x] 161-06-PLAN.md — WIZERR-05: Retry-After threads end-to-end + parity law over the five local error doubles (wave 3)
 - [x] 161-07-PLAN.md — WIZERR-09/-10: 7-row composite floor with its copy (atomic) + truthful fourth CSV verdict (wave 3)
-- [ ] 161-08-PLAN.md — WIZERR-06: five 5xx terminal arms forward the recognized code + shape law (wave 4)
+- [x] 161-08-PLAN.md — WIZERR-06: five 5xx terminal arms forward the recognized code + shape law (wave 4)
 - [ ] 161-09-PLAN.md — WIZERR-08: KEY_INVALID_FORMAT split on 2 routes / 9 sites + 4th ROUTES row (wave 5)
 - [ ] 161-10-PLAN.md — WIZERR-07: three dashboard dialogs stop minting UNKNOWN + first dashboard coverage law (wave 4)
 
