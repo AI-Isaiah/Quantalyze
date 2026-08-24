@@ -26,6 +26,27 @@ items were dropped, not carried. Categories: **Fix now** / **Fix mid-term** / **
 
 ## 🔴 FIX NOW — live correctness, trust-boundary security, active go-live
 
+0.05. **⚠️ MT5 generic fallback names a cause it has NOT proven — a false sentence in the arm that
+   exists for "cause unknown".** Found 2026-08-24 during Phase 161 (WIZERR-01) execution; the plan
+   deliberately did not touch it, and `161-UI-SPEC.md` holds arm 3 unchanged, so this is a scoped
+   follow-up, not a regression.
+   - `MT5_GATEWAY_MISCONFIGURED_DETAIL` (`analytics-service/services/mt5_probe.py`) reads:
+     *"MT5 gateway refuses automated trading (the 'Disable automatic trading through the external
+     Python API' option is in force), so read-only capability cannot be proven…"*
+   - That parenthetical is **arm 2's specific claim** (`MT5_GATEWAY_EXTERNAL_API_BLOCKED_DETAIL`
+     asserts the same option, legitimately, because arm 2 *is* that case). Arm 3 is the fallback
+     used when **no cause is provable** — the A1 absent-key path and `classify_exception`'s
+     allow-list degradation target. Asserting a specific option there is exactly the
+     names-a-blocker-it-cannot-establish defect WIZERR-01 exists to eliminate.
+   - **Currently low-urgency:** structurally unreachable from both raise sites (they enter the
+     operator arm only via `terminal_trade_permission_off`, which forces arm 1 or 2). It survives as
+     `Mt5GatewayMisconfigured()`'s default argument and as the allow-list's degradation target — so
+     it CAN still surface.
+   - **Fix shape:** amend `161-UI-SPEC.md` arm 3 to a cause-free sentence, re-run the 14-token fence
+     check, change the constant, and re-run `test_mt5_validate_parity.py` (the default-argument pin
+     `str(Mt5GatewayMisconfigured()) == MT5_GATEWAY_MISCONFIGURED_DETAIL` binds it). Founder call on
+     the wording, since the UI-SPEC copy contract is an approved artifact.
+
 0. **⛔ MT5 ARCHITECTURE — the shared gateway cannot safely serve more than ONE user, and the
    read-only guarantee can fail OPEN.** Found 2026-08-08 by the platform research that Phase 134
    specified but never executed (`153-EVIDENCE-mt5-platform.md`, `153-EVIDENCE-mt5-latency.md`).
