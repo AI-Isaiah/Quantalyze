@@ -150,8 +150,8 @@ from services.mt5_concurrency import (
 # `services/mt5_probe.py` imports only mt5_client + mt5_validation and can never
 # import back into this module.
 from services.mt5_probe import (
-    MT5_GATEWAY_MISCONFIGURED_DETAIL,
     Mt5GatewayMisconfigured,
+    curated_gateway_detail,
 )
 from services.sfox_factory import make_sfox_client
 from services.sfox_read import sfox_transactions_crawl_wallclock_budget_s
@@ -651,11 +651,17 @@ def classify_exception(exc: Exception) -> tuple[ErrorKind, str]:
     # the ONE shared terminal on every attempt, queueing ahead of every other
     # user's validate, for a fault that can never clear.
     #
-    # Ships a FIXED message for the same reason the InvalidToken arm above does:
-    # str(exc) is not safe to render here. `mt5linux` f-string-interpolates the
-    # password into the source it evaluates remotely (T-134-01 / T-153.3-23), so
-    # any text originating upstream is a credential-disclosure surface — and the
-    # pre-fix copy named investor and master passwords to the user outright.
+    # Ships a message read through an ALLOW-LIST (`curated_gateway_detail`), never
+    # a bare str(exc), for the same reason the InvalidToken arm above ships a
+    # fixed one: `mt5linux` f-string-interpolates the password into the source it
+    # evaluates remotely (T-134-01 / T-153.3-23), so any text originating upstream
+    # is a credential-disclosure surface — and the pre-fix copy named investor and
+    # master passwords to the user outright. 161-02 widened this from ONE fixed
+    # constant to the curated FAMILY: returning the generic constant
+    # unconditionally discarded the cause the raise site had just derived from the
+    # terminal flags, so the operator surface kept naming an option that was
+    # measured NOT to be in force. Anything outside the family still degrades to
+    # the generic constant, so raw remote text can never ride out.
     #
     # ⛔ Placed ABOVE the ccxt hierarchy and the fall-through, per this function's
     # most-specific-first contract. THIS ARM IS THE ONE DISPOSITION (D-17/OQ-4),
@@ -666,7 +672,7 @@ def classify_exception(exc: Exception) -> tuple[ErrorKind, str]:
     # of the sibling conventions — two dispositions for one fault is the drift
     # this phase exists to remove.
     if isinstance(exc, Mt5GatewayMisconfigured):
-        return ("permanent", MT5_GATEWAY_MISCONFIGURED_DETAIL)
+        return ("permanent", curated_gateway_detail(exc))
 
     # FastAPI HTTPException — analytics_runner raises 400 for "Insufficient
     # trade history" and similar pre-condition failures that no amount of

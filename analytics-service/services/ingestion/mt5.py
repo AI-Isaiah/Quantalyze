@@ -68,8 +68,8 @@ from services.mt5_concurrency import mt5_terminal_lease
 # direction is worker → services leaf, which is the direction D-07 requires: the
 # adapter must NEVER import `routers.*`.
 from services.mt5_probe import (
-    MT5_GATEWAY_MISCONFIGURED_DETAIL,
     Mt5GatewayMisconfigured,
+    mt5_gateway_misconfigured_detail,
     run_probe,
 )
 from services.mt5_validation import (
@@ -341,7 +341,7 @@ class Mt5Adapter:
                             "permission off) — refusing rather than stamping read-only"
                         )
                         raise Mt5GatewayMisconfigured(
-                            MT5_GATEWAY_MISCONFIGURED_DETAIL
+                            mt5_gateway_misconfigured_detail(terminal)
                         )
                     if not operator_fault:
                         # Terminal unreadable or detached — our bridge blipping,

@@ -45,6 +45,7 @@ their call sites and moving them would delete the rationale.
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
 from typing import Any, Final
 
 from services.mt5_client import (
@@ -53,7 +54,11 @@ from services.mt5_client import (
     Mt5ClientError,
     Mt5SessionAbandoned,
 )
-from services.mt5_validation import classify_trade_capability, mt5_probe_request
+from services.mt5_validation import (
+    classify_trade_capability,
+    mt5_probe_request,
+    terminal_trade_permission_off,
+)
 
 logger = logging.getLogger("quantalyze.analytics")
 
@@ -64,7 +69,7 @@ logger = logging.getLogger("quantalyze.analytics")
 #: rendered to a human (``job_worker.classify_exception`` persists it as
 #: ``sanitized_message`` and the admin UI shows it), so it is held to two
 #: negative rules, both pinned by
-#: ``tests/test_mt5_validate_parity.py::test_mt5_gateway_misconfigured_message_is_curated_and_credential_free``:
+#: ``tests/test_mt5_validate_parity.py::test_every_builder_emittable_constant_is_curated_and_credential_free``:
 #:
 #:   1. it names NO credential — no "password", "investor", "master", "secret";
 #:   2. it carries NO token from ``mt5_validation._WRONG_SERVER_TOKENS`` or
@@ -77,6 +82,52 @@ MT5_GATEWAY_MISCONFIGURED_DETAIL: Final[str] = (
     "through the external Python API' option is in force), so read-only "
     "capability cannot be proven. This needs an operator, not a retry — see "
     "docs/runbooks/mt5-go-live.md."
+)
+
+#: 161-02 / WIZERR-01 arm 1 — the FOUNDER-MEASURED live cause (2026-08-13).
+#:
+#: The gateway's Expert-Advisors *"Allow algorithmic trading"* setting
+#: (``Enabled`` in the ``[Experts]`` block) is what governs the
+#: ``trade_allowed`` flag we read. The gateway re-sets it OFF on every account
+#: change (``Account=1`` / ``Profile=1``) and the worker logs in on every job,
+#: which is why this fault RECURS rather than staying fixed once an operator
+#: clears it. The external-Python-API option is an INDEPENDENT checkbox, read
+#: through ``tradeapi_disabled`` — see the arm below.
+#:
+#: Held to the same two negative rules as the constant above, and pinned over
+#: the WHOLE family by
+#: ``tests/test_mt5_validate_parity.py::test_every_builder_emittable_constant_is_curated_and_credential_free``.
+MT5_GATEWAY_TRADE_PERMISSION_OFF_DETAIL: Final[str] = (
+    "The MT5 gateway has 'Allow algorithmic trading' switched off, so read-only "
+    "capability cannot be proven. The gateway switches it off again whenever it "
+    "changes users, so turning it back on needs an operator, not a retry — see "
+    "docs/runbooks/mt5-go-live.md."
+)
+
+#: 161-02 / WIZERR-01 arm 2 — the case the constant at the top of this block
+#: actually describes: the named external-API option IS in force, reported by
+#: ``terminal_info()['tradeapi_disabled']``.
+#:
+#: ⚠️ A1 (UNVERIFIED): that key was founder-measured ONCE (2026-08-13) with zero
+#: production readers. The builder below therefore reads it defensively and an
+#: ABSENT key can never select this arm — it falls through to the generic
+#: constant rather than asserting a cause we did not measure.
+MT5_GATEWAY_EXTERNAL_API_BLOCKED_DETAIL: Final[str] = (
+    "The MT5 gateway blocks outside automated access (the 'Disable automatic "
+    "trading through the external Python API' option is in force), so read-only "
+    "capability cannot be proven. This needs an operator, not a retry — see "
+    "docs/runbooks/mt5-go-live.md."
+)
+
+#: EVERY constant :func:`mt5_gateway_misconfigured_detail` can emit, and the ONLY
+#: strings :func:`curated_gateway_detail` will let out of the worker's classify
+#: sink. It exists so the curated-message fence can be parametrized over the
+#: whole family at ONE seam: a new cause arm that forgets to join this tuple is
+#: unreachable through the allow-list, and one that joins it is fence-checked.
+MT5_GATEWAY_MISCONFIGURED_DETAILS: Final[tuple[str, ...]] = (
+    MT5_GATEWAY_MISCONFIGURED_DETAIL,
+    MT5_GATEWAY_TRADE_PERMISSION_OFF_DETAIL,
+    MT5_GATEWAY_EXTERNAL_API_BLOCKED_DETAIL,
 )
 
 
@@ -103,6 +154,65 @@ class Mt5GatewayMisconfigured(Exception):
 
     def __init__(self, message: str = MT5_GATEWAY_MISCONFIGURED_DETAIL) -> None:
         super().__init__(message)
+
+
+def mt5_gateway_misconfigured_detail(terminal_info: dict[str, Any] | None) -> str:
+    """The ONE flag->cause seam: pick the curated sentence that names the ACTUAL
+    blocker, from the ``terminal_info`` dict both raise sites already hold.
+
+    Lives HERE rather than in ``mt5_validation`` for one measured reason: the
+    curated constants and the ``Mt5GatewayMisconfigured`` default-argument
+    property live here, ``mt5_probe`` already imports ``mt5_validation``, and the
+    reverse import would be a cycle. It does NOT re-derive the four-condition
+    shape test — it CALLS ``terminal_trade_permission_off``, the single seam that
+    owns it (a shape test copied twice drifts, silently).
+
+    PRECEDENCE, deterministic and deliberate: when BOTH flags indicate blockage
+    the NAMED option wins. ``tradeapi_disabled`` describes a specific, named
+    checkbox and it SUBSUMES the terminal-level permission (branch 5 of
+    ``classify_trade_capability`` records the same subsumption), so naming it is
+    strictly more informative than naming the setting it already forces off.
+
+    ⚠️ A1 QUARANTINE. ``tradeapi_disabled`` was founder-measured ONCE (2026-08-13)
+    against the live gateway and has had zero production readers since, so this
+    function must be safe whether or not the key exists. Every read is a
+    ``.get()``; a terminal that is ``None``, not a mapping, or simply missing the
+    key can neither raise nor mis-select an arm — it falls through to the generic
+    constant, which asserts no cause we did not measure. A ``KeyError`` here would
+    fail the whole job PERMANENTLY (T-161-05).
+
+    ⛔ Flag NAMES never reach the returned sentence: the user gets the cause, never
+    the sensor reading.
+    """
+    if not isinstance(terminal_info, Mapping):
+        return MT5_GATEWAY_MISCONFIGURED_DETAIL
+    if terminal_info.get("tradeapi_disabled"):
+        return MT5_GATEWAY_EXTERNAL_API_BLOCKED_DETAIL
+    if terminal_trade_permission_off(terminal_info):
+        return MT5_GATEWAY_TRADE_PERMISSION_OFF_DETAIL
+    return MT5_GATEWAY_MISCONFIGURED_DETAIL
+
+
+def curated_gateway_detail(exc: Mt5GatewayMisconfigured) -> str:
+    """The message an ``Mt5GatewayMisconfigured`` may render to a human — read
+    through an ALLOW-LIST, never trusted because it arrived on an exception.
+
+    Why not simply ``str(exc)``: ``mt5linux`` f-string-interpolates the password
+    into the source it evaluates remotely (T-134-01 / T-153.3-23), so ANY text
+    that originates upstream is a credential-disclosure surface, and this string
+    is persisted as ``sanitized_message`` and rendered (T-161-04). Why not simply
+    the generic constant, which is what ``job_worker.classify_exception`` used to
+    return unconditionally: that discarded the cause the raise site had just
+    derived, so the worker surface kept telling the operator about an option that
+    was measured NOT to be in force.
+
+    The allow-list gives both: a curated cause rides out intact, and anything else
+    — including raw remote text — degrades to the generic curated constant.
+    """
+    message = str(exc)
+    if message in MT5_GATEWAY_MISCONFIGURED_DETAILS:
+        return message
+    return MT5_GATEWAY_MISCONFIGURED_DETAIL
 
 
 def assert_expected_login(info: dict[str, Any], *, login: int) -> None:

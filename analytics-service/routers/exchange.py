@@ -51,7 +51,7 @@ from services.mt5_validation import (
 # Importing it is the whole remedy: there is now one body, so a fix cannot land
 # on one path only. `services/mt5_probe.py` is a LEAF over mt5_client +
 # mt5_validation and must never import back into `routers.*` (D-07).
-from services.mt5_probe import run_probe
+from services.mt5_probe import mt5_gateway_misconfigured_detail, run_probe
 from services.db import get_supabase, db_execute, one, rows
 # PYAPI-05 — the status-attributability contract. Every deliberate 5xx/424 in
 # this file goes through service_error so the four classes cannot drift apart
@@ -868,7 +868,13 @@ async def _validate_mt5_key_probe(
                             "MT5_GATEWAY_UNCONFIGURED",
                             dependency="mt5-gateway",
                             retryable=False,
-                            detail="The MetaTrader gateway is not configured. This needs an operator, not a retry.",
+                            # 161-02 / WIZERR-01 — the CAUSE, from the SAME
+                            # terminal dict the verdict was taken from, through
+                            # the ONE builder the worker's raise site also uses.
+                            # The env-gap arms above keep their own sentence:
+                            # they hold no terminal dict, so they have no cause
+                            # to name and saying one would be a guess.
+                            detail=mt5_gateway_misconfigured_detail(terminal),
                         )
                     if not operator_fault:
                         # Terminal unreadable or detached from the trade server — our
