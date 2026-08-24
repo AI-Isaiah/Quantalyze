@@ -1275,10 +1275,47 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
     // copy. `retryAfterS` is the breaker cooldown TTL — the only dynamic value
     // CircuitOpenError exposes, and the same class of information
     // `rateLimitDenyJson` already returns.
+    //
+    // ⭐ 161-06 / WIZERR-05 — THE SECOND SOURCE OF A WAIT, AND THE PRECEDENCE
+    // BETWEEN THEM, WRITTEN DOWN.
+    //
+    // Two different failures can now advertise a duration and they are NOT
+    // interchangeable: the breaker's value is OUR cooldown (we declined to
+    // send), while `retryAfterSeconds` is the UPSTREAM's own advice carried
+    // across the seam from `RETRY_AFTER_SECONDS` (we sent, and the service
+    // answered 503 with a wait). PRECEDENCE: the breaker wins. When it is open
+    // no request leaves this process at all, so its cooldown is the only wait
+    // that describes what will actually happen next; a stale upstream wait from
+    // the error that tripped it would under-advertise by design.
+    //
+    // ⚠️ ONE CONDITIONAL EXPRESSION SELECTING ONE HEADERS OBJECT — deliberately
+    // NOT two successive spreads. Two spreads let the later silently overwrite
+    // the earlier, which is exactly how a response ends up advertising a wait
+    // belonging to the other failure mode. Written this way, "at most one
+    // Retry-After, and we know whose" is a property of the SHAPE.
+    //
+    // ⛔ `typeof`, NOT `instanceof AnalyticsUpstreamError`. Every route test
+    // that mocks the seam client wholesale does `vi.mock("@/lib/analytics-client")`,
+    // so the class is `undefined` inside those suites and an `instanceof` here
+    // would throw from inside a catch block — the same reasoning
+    // `wizardErrors.ts` records for `seamCode`, and the same read.
+    //
+    // ⛔ TRAP-3 — `> 0`, not merely "is a number". Absence stays absence: no
+    // header at all, never `0`. Zero is not "no wait"; it is an instruction to
+    // retry immediately, a duration nobody advertised. Our own seam cannot
+    // produce it (`parseRetryAfterSeconds` returns strictly positive or null),
+    // but this catch cannot verify that about a value it was merely handed.
+    const advertisedWait = (
+      err as { retryAfterSeconds?: unknown } | null | undefined
+    )?.retryAfterSeconds;
     const headers =
       err instanceof CircuitOpenError
         ? { ...NO_STORE_HEADERS, "Retry-After": String(err.retryAfterS) }
-        : NO_STORE_HEADERS;
+        : typeof advertisedWait === "number" &&
+            Number.isFinite(advertisedWait) &&
+            advertisedWait > 0
+          ? { ...NO_STORE_HEADERS, "Retry-After": String(advertisedWait) }
+          : NO_STORE_HEADERS;
     return NextResponse.json({ code }, { status, headers });
   }
 });

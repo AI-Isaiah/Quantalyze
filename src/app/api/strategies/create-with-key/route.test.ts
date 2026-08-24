@@ -3165,3 +3165,136 @@ describe("[142.2-07 / MT5-04] create-with-key — all 12 rejection sites, honest
     ]);
   });
 });
+
+/**
+ * ⭐ 161-06 / WIZERR-05 — THE KEY ROUTE RELAYS THE SERVER'S OWN WAIT.
+ *
+ * The wait is born in `RETRY_AFTER_SECONDS` on the Python side, rides a
+ * `Retry-After` header to the seam, and — since 161-06 — survives it on
+ * `AnalyticsUpstreamError.retryAfterSeconds`. This catch is the last hop before
+ * the browser. Until this plan it dropped the value on the floor: the ternary
+ * below stamped a header for a `CircuitOpenError` and for nothing else, so a
+ * gateway restart that told us exactly how long to wait reached the user as a
+ * bare "try again shortly" with no duration and no machine-readable wait.
+ *
+ * ⚠️ DUCK-TYPED ON PURPOSE, AND THE TESTS MUST MATCH. Every route test that
+ * mocks the seam client wholesale does `vi.mock("@/lib/analytics-client", …)`
+ * with a factory exporting only `validateKey`/`encryptKey`, so
+ * `AnalyticsUpstreamError` is `undefined` inside this suite and an `instanceof`
+ * in the route would THROW from inside a catch block. `wizardErrors.ts` records
+ * that reasoning for `seamCode` at length; `retryAfterSeconds` is read the same
+ * way, with `typeof`, and these mocks reproduce the real thrown shape.
+ *
+ * ⛔ TRAP-3, PINNED THREE WAYS. Absence must reach the browser as ABSENCE. The
+ * `null` case asserts the header is not merely empty but MISSING, and the `0`
+ * case exists because zero is the specific lie: it is not "no wait", it is an
+ * instruction to retry immediately — a duration nobody advertised and the
+ * thundering-herd shape B20 exists to stop.
+ *
+ * Each title names its route. The requirement says BOTH key-route catches, and
+ * `composite/add-key` carries the mirror image of this block; an aggregate
+ * assertion over the pair would let either one regress in silence.
+ */
+describe("[161-06 / WIZERR-05] create-with-key — the Retry-After relay", () => {
+  beforeEach(() => {
+    validateKeyMock.mockReset();
+    encryptKeyMock.mockReset();
+    rpcMock.mockReset();
+    assetClassUpdateMock.mockClear();
+
+    validateKeyMock.mockResolvedValue({
+      valid: true,
+      read_only: true,
+      permissions: ["read"],
+    });
+    encryptKeyMock.mockResolvedValue({
+      api_key_encrypted: "encrypted-blob-base64",
+      api_secret_encrypted: null,
+      passphrase_encrypted: null,
+      dek_encrypted: null,
+      nonce: null,
+      kek_version: 1,
+    });
+    rpcMock.mockResolvedValue({
+      data: [{ strategy_id: STRATEGY_ID, api_key_id: API_KEY_ID }],
+      error: null,
+    });
+  });
+
+  /** The real MT5 503 as the seam now throws it, wait included. */
+  function seamUnreachable(retryAfterSeconds: number | null) {
+    return Object.assign(
+      new Error("The MetaTrader gateway is not responding. Try again shortly."),
+      {
+        name: "AnalyticsUpstreamError",
+        status: 503,
+        seamCode: "MT5_GATEWAY_UNREACHABLE",
+        dependency: "mt5-gateway",
+        retryAfterSeconds,
+      },
+    );
+  }
+
+  it("[create-with-key] a seam 503 carrying a wait relays that exact value", async () => {
+    validateKeyMock.mockRejectedValue(seamUnreachable(30));
+    const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+
+    // ⚠️ ARM PROOF FIRST. Asserting the header without this would go green
+    // against a fixture that never reached the catch at all.
+    expect(res.status).toBe(503);
+    expect((await res.json()).code).toBe("SERVICE_UNREACHABLE");
+
+    expect(
+      res.headers.get("Retry-After"),
+      "The server told us how long to wait and this route is the last hop " +
+        "that can pass it on. 30 is RETRY_AFTER_SECONDS['mt5-gateway'] — not " +
+        "a number this route may choose, round, or clamp.",
+    ).toBe("30");
+    consoleErr.mockRestore();
+  });
+
+  it("[create-with-key] a seam 503 with NO advertised wait sends NO header (TRAP-3)", async () => {
+    validateKeyMock.mockRejectedValue(seamUnreachable(null));
+    const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+
+    // Same arm, same verdict — the ONLY difference between this case and the
+    // one above is what the upstream advertised.
+    expect(res.status).toBe(503);
+    expect((await res.json()).code).toBe("SERVICE_UNREACHABLE");
+
+    expect(
+      res.headers.get("Retry-After"),
+      "ABSENT, not empty and not zero. `Headers.get` answers null only when " +
+        "the header was never set; an empty-string stamp would satisfy a " +
+        "falsy check and still put a header on the wire the upstream never " +
+        "authorised.",
+    ).toBeNull();
+    expect(res.headers.get("Retry-After")).not.toBe("0");
+    expect(res.headers.get("Retry-After")).not.toBe("");
+    consoleErr.mockRestore();
+  });
+
+  it("[create-with-key] a zero wait is not a wait — it is omitted, never stamped", async () => {
+    // Zero cannot reach here from our own seam (`parseRetryAfterSeconds`
+    // returns strictly positive or null, and `error_contract._validate` rejects
+    // a non-positive `retry_after` at the raise site). The guard is against the
+    // OTHER producers of this shape — a future caller, a test double, a
+    // rewritten header from an intervening proxy — because "cannot happen" is
+    // not a property this catch can verify about the value it was handed.
+    validateKeyMock.mockRejectedValue(seamUnreachable(0));
+    const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+
+    expect(res.status).toBe(503);
+    expect(res.headers.get("Retry-After")).toBeNull();
+    consoleErr.mockRestore();
+  });
+});
