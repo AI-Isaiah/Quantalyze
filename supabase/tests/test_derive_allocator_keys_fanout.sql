@@ -40,6 +40,7 @@ DO $$
 DECLARE
   uid          UUID := gen_random_uuid();
   key_elig     UUID;
+  key_mt5      UUID;
   key_revoked  UUID;
   key_disc     UUID;
   key_inact    UUID;
@@ -67,6 +68,12 @@ BEGIN
   -- eligible: active, sync_status NULL, not disconnected
   INSERT INTO api_keys (user_id, exchange, label, api_key_encrypted, is_active)
   VALUES (uid, 'binance', 'aed eligible', 'x', TRUE) RETURNING id INTO key_elig;
+  -- eligible, LEDGER-BACKED venue. Every other fixture key here is 'binance',
+  -- so before this row the whole test stayed GREEN under an exchange filter that
+  -- dropped mt5 — the same shape of drift that gates /api/cron/reconcile-strategies
+  -- (RECONCILABLE_EXCHANGES = FUNDING_EXCHANGES = binance/okx/bybit). See assertion 7.
+  INSERT INTO api_keys (user_id, exchange, label, api_key_encrypted, is_active)
+  VALUES (uid, 'mt5', 'aed eligible mt5', 'x', TRUE) RETURNING id INTO key_mt5;
   -- revoked
   INSERT INTO api_keys (user_id, exchange, label, api_key_encrypted, is_active, sync_status)
   VALUES (uid, 'binance', 'aed revoked', 'x', TRUE, 'revoked') RETURNING id INTO key_revoked;
@@ -77,7 +84,7 @@ BEGIN
   INSERT INTO api_keys (user_id, exchange, label, api_key_encrypted, is_active)
   VALUES (uid, 'binance', 'aed inactive', 'x', FALSE) RETURNING id INTO key_inact;
 
-  RAISE NOTICE 'Seed OK: uid=% elig=% revoked=% disc=% inact=%', uid, key_elig, key_revoked, key_disc, key_inact;
+  RAISE NOTICE 'Seed OK: uid=% elig=% mt5=% revoked=% disc=% inact=%', uid, key_elig, key_mt5, key_revoked, key_disc, key_inact;
 
   -- ----- ASSERTION 1: fan-out reaches EXACTLY the eligible key ------------
   PERFORM enqueue_derive_broker_dailies_for_allocator_keys();
@@ -162,7 +169,25 @@ BEGIN
     RAISE NOTICE 'pg_cron not present — skipping cron assertion (local dev)';
   END IF;
 
-  RAISE NOTICE 'All derive_broker_dailies fan-out + derive_allocator_equity coherence + re-base regression assertions passed.';
+  -- ----- ASSERTION 7: fan-out reaches LEDGER-BACKED venues (mt5) ----------
+  -- mt5 is ledger-backed (_LEDGER_BACKED_SOURCES in services/ingestion/long_fetch.py):
+  -- its returns come from derive_broker_dailies, NEVER the ccxt fill path. So every
+  -- ccxt-shaped exchange gate is wrong for it, and this fan-out must stay
+  -- exchange-agnostic.
+  --
+  -- SCOPE — do not overread this pin. This fan-out is deliberately UNSCHEDULED on
+  -- prod (v1.11 recovery; see docs/runbooks/flipretry-derived-equity-go-live.md),
+  -- so it is NOT currently any venue's daily refresh. This assertion guards the
+  -- function against acquiring a venue filter before it is ever re-enabled; it does
+  -- NOT prove any venue is being refreshed. Assertions 1-6 cannot catch a venue
+  -- filter at all: every other fixture key is 'binance'.
+  SELECT count(*) INTO row_cnt FROM compute_jobs
+   WHERE api_key_id = key_mt5 AND kind = 'derive_broker_dailies' AND status = 'pending';
+  IF row_cnt <> 1 THEN
+    RAISE EXCEPTION 'TEST FAILED (7): eligible LEDGER-BACKED (mt5) key got % pending derive_broker_dailies jobs, expected 1 — this fan-out must stay exchange-agnostic; a venue filter here would strand every ledger-backed venue (mt5/sfox/deribit) whenever the fan-out is re-enabled', row_cnt;
+  END IF;
+
+  RAISE NOTICE 'All derive_broker_dailies fan-out + derive_allocator_equity coherence + re-base regression + ledger-backed venue assertions passed.';
 
   -- ----- TEARDOWN (belt-and-suspenders; the outer ROLLBACK also discards) -
   DELETE FROM auth.users WHERE id = uid;
