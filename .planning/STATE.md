@@ -5,15 +5,15 @@ milestone_name: Backlog Burndown (Phases 158+)
 current_phase: 160
 current_phase_name: PROVENANCE — The server's venue is the venue that annualizes
 status: executing
-stopped_at: Phase 160 landed (v0.71.2.1); Phase 161.1 inserted
-last_updated: "2026-08-24T07:20:30.940Z"
+stopped_at: Phase 161 BLOCKED — planning incomplete (7/13 requirements); gsd-planner hit a Fable 5 quota limit
+last_updated: "2026-08-24T08:25:32.692Z"
 last_activity: 2026-08-23
 last_activity_desc: Phase 160 execution started
-state_head: 2ab8365cf97fd97856461ac6bcab719376dc253a
+state_head: 40cc9383a2828aa45b7c8f34850b2c6c3286a18a
 progress:
   total_phases: 9
   completed_phases: 1
-  total_plans: 20
+  total_plans: 25
   completed_plans: 18
   percent: 11
 ---
@@ -85,6 +85,31 @@ silently absorbed by a later phase.
 
 Part B of that phase (the PROD `STALE_CLIENT` refusal) is ✅ CLOSED — measured on PROD 2026-08-23
 after #705 deployed. See `160-VERIFICATION.md` § PROD smoke record.
+
+## Needs Human
+
+| Phase | State | Resume with |
+|-------|-------|-------------|
+| 161 | `needs_human` — **planning incomplete, 7 of 13 requirements** | resolve the model-quota blocker below, then `/gsd-plan-phase 161` (it will see `has_plans: true` — the six uncovered requirements must be planned explicitly) |
+
+**Blocker (2026-08-24): the `gsd-planner` subagent terminated on a Fable 5 quota limit** after 288k
+tokens / 33 tool uses. This is a resource limit, not a planning failure — the five plans it finished
+are complete and well-formed.
+
+Planned: WIZERR-01, -02, -03, -04, -11, -12, -13 (commit `40cc9383`).
+**NOT planned — no plan file exists:** WIZERR-05, -06, -07, -08, -09, -10.
+
+⛔ **Do NOT run `/gsd-execute-phase 161` against this state.** `has_plans` reads `true`, so execution
+would silently deliver 7 of 13 requirements and seal the phase.
+
+⚠️ The whole remaining pipeline is Fable-assigned under the 2026-08-18 model policy — `gsd-planner`,
+`gsd-plan-checker`, AND `gsd-verifier` are all `fable`. Finishing Phase 161 therefore needs either
+Fable quota to reset, or a founder decision to run those three roles on Opus for this phase. That is
+a cost decision against a different quota, so it was not taken autonomously.
+
+Completed and committed before the blocker: `161-UI-SPEC.md` (checker-approved 6/6, both curated-message
+fences re-verified first-hand, `## UI Considerations` rebuilt from the state probe — 52 considerations,
+zero unclassified) and `161-VALIDATION.md` (Nyquist strategy, 4 Wave-0 gaps, anti-vacuity clause).
 
 ## Current Position
 
@@ -1417,9 +1442,9 @@ Load-bearing sequencing (real dependencies, do not reorder):
 
 ## Session
 
-**Last Date:** 2026-08-21T09:51:35.277Z
-**Stopped At:** Phase 160 landed (v0.71.2.1); Phase 161.1 inserted
-**Resume File:** .planning/phases/159-rank-public-ranking-integrity/159-CONTEXT.md
+**Last Date:** 2026-08-24T08:25:32.298Z
+**Stopped At:** Phase 161 BLOCKED — planning incomplete (7/13 requirements); gsd-planner hit a Fable 5 quota limit
+**Resume File:** .planning/STATE.md
 **Next step:** Phase 161 (WIZERR — honest error surfaces) is next and NOT yet planned — run `/gsd-plan-phase 161`. Phase 161.1 (LEDGER-REFRESH) was inserted after it on 2026-08-24 for the founder-reported MT5 staleness; it is URGENT and production-facing, so it may be pulled ahead of 161 if you prefer the live data-integrity fix first.
 
 ⭐ **Foundation names later waves import by name** (from `153.1-02-SUMMARY.md`, all in
