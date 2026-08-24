@@ -5,17 +5,17 @@ milestone_name: Backlog Burndown (Phases 158+)
 current_phase: 160
 current_phase_name: PROVENANCE — The server's venue is the venue that annualizes
 status: executing
-stopped_at: Phase 159 context gathered
-last_updated: "2026-08-23T15:21:26.164Z"
+stopped_at: Phase 160 landed (v0.71.2.1); Phase 161.1 inserted
+last_updated: "2026-08-24T07:20:30.940Z"
 last_activity: 2026-08-23
 last_activity_desc: Phase 160 execution started
-state_head: f6d239e8fbf07f8172a89966255334f8c6c7bc79
+state_head: 2ab8365cf97fd97856461ac6bcab719376dc253a
 progress:
-  total_phases: 8
+  total_phases: 9
   completed_phases: 1
-  total_plans: 19
-  completed_plans: 12
-  percent: 13
+  total_plans: 20
+  completed_plans: 18
+  percent: 11
 ---
 
 # Project State — Quantalyze
@@ -598,6 +598,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - v1.17 roadmap created 2026-08-04 (Phases 147–153); v1.16 PARKED at 68% (13/19 phases, 119/127 plans; resume at Phase 143). Phase 142.3's scope (MT5-06..10) re-homed to Phase 153, MT5-14 to Phase 151. Ordering locked: SCEN-01 first, OWN-02 before NAV-01/OWN-04/SCEN-03, AUM after SCEN-01, MT5 numeric verification last
 - v1.17 roadmap REVISED 2026-08-04 (Phases 147–155): the approved Phase 148 (OWN-02/03/04 + NAV-01) split into 148 OWN-02/04 (owner factsheet, adversarial cache acceptance), 149 NAV-01 (my-strategies ranking at DISCOVERY PARITY — founder sharpened the ask from 'an overview' to ranking parity over every uploaded key incl. private/draft), 150 OWN-03 (own-capital-vs-verifying wizard question, money-path review isolated); later phases renumbered +2 (AUM→151, SCEN→152, WIZFORM+MT5-14→153, WIZCONT/STALE→154, MT5-VERIFY→155). All ordering constraints unchanged and now structural (149 cannot start before 148)
 - Phase 153.6 inserted after Phase 153: PARITY — nine findings from the /code-review xhigh over the 153->153.5 span; three of four root causes are one-path-only fixes (URGENT)
+- Phase 161.1 inserted after Phase 161: LEDGER-REFRESH — recurring strategy refresh for ledger-backed venues (mt5/sfox/deribit). Founder-reported 2026-08-23, root-caused by PROD measurement 2026-08-24: process_key_long is the ONLY path reaching strategy_analytics for a ledger venue and is enqueued solely at strategy creation; both daily strategy crons gate on ccxt-only exchange sets. Ship the mechanism DORMANT (schedule unregistered, founder-gated live op) per the SFOX_ENABLED / WORKER-03 pattern. (URGENT)
 
 ### Decisions
 
@@ -1404,9 +1405,9 @@ Load-bearing sequencing (real dependencies, do not reorder):
 ## Session
 
 **Last Date:** 2026-08-21T09:51:35.277Z
-**Stopped At:** Phase 159 context gathered
+**Stopped At:** Phase 160 landed (v0.71.2.1); Phase 161.1 inserted
 **Resume File:** .planning/phases/159-rank-public-ranking-integrity/159-CONTEXT.md
-**Next step:** Phase 159 (RANK — public ranking integrity) is next and NOT yet planned — run `/gsd-plan-phase 159`. (The former 153.6/154/155 note was v1.17-era; those items live in the archived milestone trackers and TODOS.md.)
+**Next step:** Phase 161 (WIZERR — honest error surfaces) is next and NOT yet planned — run `/gsd-plan-phase 161`. Phase 161.1 (LEDGER-REFRESH) was inserted after it on 2026-08-24 for the founder-reported MT5 staleness; it is URGENT and production-facing, so it may be pulled ahead of 161 if you prefer the live data-integrity fix first.
 
 ⭐ **Foundation names later waves import by name** (from `153.1-02-SUMMARY.md`, all in
 `src/lib/closed-sets.ts`): `VenueCapabilities` (`:77`), `VENUE_CAPABILITIES` (`:133`),
