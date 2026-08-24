@@ -1066,11 +1066,16 @@ export function WizardClient({
    * `handleDeleteDraft` on a CONFIRMED delete instead, so the banner's
    * lifetime tracks the draft's.
    *
-   * NOT touched, deliberately: the two paths whose comments state that a
-   * delete IS intended — `onTryAnotherKey`'s fire-and-forget
-   * `void handleDeleteDraft()` (discarding a draft holding a REJECTED key,
-   * with the idempotency token regenerated first) and the confirm dialog's own
-   * danger button.
+   * 161-04 / WIZERR-02 — this paragraph used to close by naming TWO paths
+   * "not touched, deliberately: the two paths whose comments state that a
+   * delete IS intended" — `onTryAnotherKey`'s fire-and-forget
+   * `void handleDeleteDraft()` and the confirm dialog's own danger button.
+   * The first of those is gone: a remedy offered on a refusal is not a place a
+   * delete may be "intended", which is the same argument this docblock already
+   * makes about `start_fresh` one paragraph up. ONE deliberate delete now
+   * remains — the confirm dialog's danger button — and BOTH entrances to it
+   * (this handler and the chrome's Delete-draft control) go through the
+   * confirmation. `handleDeleteDraft` has exactly one caller as a result.
    */
   const handleStartFresh = useCallback(() => {
     setConfirmDelete(true);
@@ -1228,29 +1233,69 @@ export function WizardClient({
                 onComplete={handleSyncComplete}
                 onReviewKeys={() => {
                   // WIZ-03: composite "Review your keys" is NON-destructive —
-                  // it is a pure step transition back to connect_key. Unlike
-                  // onTryAnotherKey it does NOT handleDeleteDraft (which would
-                  // cascade away every strategy_keys member) and does NOT
-                  // regenerate wizardSessionId (the F6 duplicate-submit fence is
-                  // only re-armed on the destructive discard-the-key path). The
-                  // draft + its members + the session all survive; the
-                  // MultiKeyConnectStep rehydrates the stored keys via WIZ-02.
+                  // it is a pure step transition back to connect_key. It does
+                  // NOT handleDeleteDraft (which would cascade away every
+                  // strategy_keys member) and does NOT regenerate
+                  // wizardSessionId. The draft + its members + the session all
+                  // survive; the MultiKeyConnectStep rehydrates the stored keys
+                  // via WIZ-02.
+                  //
+                  // 161-04 / WIZERR-02: `onTryAnotherKey` below is now the SAME
+                  // shape. This comment used to read "unlike onTryAnotherKey,
+                  // which deletes" — that sentence has been false since the
+                  // remedy stopped destroying anything, and a comment describing
+                  // behavior that no longer exists is a false sentence in
+                  // exactly the class this phase closes.
                   setStep("connect_key");
                   persistPointer("connect_key", strategyId);
                 }}
                 onTryAnotherKey={() => {
+                  // 161-04 / WIZERR-02 — A REMEDY MAY NOT DESTROY ANYTHING.
+                  //
+                  // This used to setWizardSessionId(newWizardSessionId()) and
+                  // then `void handleDeleteDraft()`: one click on a control
+                  // offered by an ERROR STATE deleted the draft and every
+                  // strategy_keys member under it, fire-and-forget, with no
+                  // confirmation and no way back. The recorded class is
+                  // user-inflicted data loss, and it was offered on EVERY
+                  // refusal. It is now the pure step transition its neighbour
+                  // `onReviewKeys` already models, one prop above.
+                  //
+                  // DECISION — keep-and-resume (RESEARCH Open Question 3). The
+                  // draft deliberately SURVIVES. A user who wants a clean slate
+                  // still has the two deliberate delete paths, both of which
+                  // keep their existing confirmation: the chrome's Delete-draft
+                  // button and `start_fresh`, which share one confirm dialog.
+                  //
+                  // LOW-2 RE-ANSWER (the red-team finding the deleted lines were
+                  // written to close, re-answered for the new shape rather than
+                  // dropped with them). LOW-2's threat was a FAILED background
+                  // DELETE leaving the old draft alive while a REGENERATED
+                  // session id made the client believe it had a clean slate —
+                  // the SILENT DIVERGENCE between client belief and server state
+                  // was the bug, not the delete itself. With no delete attempted
+                  // and no id regenerated, client belief and server state agree
+                  // by construction:
+                  //   · SAME key resubmitted ⇒ `resolveByVenueIdentity` finds
+                  //     the live key and its surviving `source='wizard'` /
+                  //     `status='draft'` row and returns kind:"draft", so
+                  //     create-with-key answers ok+deduped and the wizard
+                  //     RESUMES that draft [MEASURED at HEAD:
+                  //     create-with-key/route.ts:269 + :634-649]. That is
+                  //     honest: the draft IS current state, and the neutral
+                  //     dedup strip (WIZCONT-02) says so on screen.
+                  //   · DIFFERENT key ⇒ the normal create path runs. The old
+                  //     draft ages into the existing ≥7-day nightly sweep or the
+                  //     user's own explicit delete.
+                  // There is no silent divergence left to exploit, so there is
+                  // nothing for an optimistic re-mint to close.
+                  //
+                  // `persistPointer` mirrors onReviewKeys for the same reason it
+                  // exists there: now that the draft survives the click, a
+                  // resume pointer still naming `sync_preview` would be its own
+                  // small version of the divergence above.
                   setStep("connect_key");
-                  // Regenerate the idempotency token OPTIMISTICALLY (before the
-                  // fire-and-forget delete) so the next create-with-key always
-                  // carries a FRESH session and mints a new draft for the new
-                  // key. handleDeleteDraft also regenerates it, but only on a
-                  // confirmed 2xx/404 (NEW-C14-08) — if the DELETE fails, the old
-                  // session id would otherwise persist and the F6 fence would
-                  // silently replay the OLD draft + OLD key on resubmit
-                  // (red-team LOW-2). Regenerating here closes that window; the
-                  // orphaned old draft is reaped by the cleanup-wizard-drafts cron.
-                  setWizardSessionId(newWizardSessionId());
-                  void handleDeleteDraft();
+                  persistPointer("connect_key", strategyId);
                   trackForQuantsEventClient("wizard_try_different_key", {
                     wizard_session_id: wizardSessionId,
                   });
