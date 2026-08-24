@@ -1,5 +1,36 @@
 # Changelog
 
+## [0.71.2.1] - 2026-08-24
+
+### fix: root-cause MT5 factsheet staleness, and pin the fan-out against venue filters
+
+MT5 strategies stopped refreshing and nobody could see it. Measured on production: the four live
+MT5 strategies carry analytics computed between **2026-08-04** and **2026-08-21**, while the same
+query for okx returns work from two hours ago.
+
+The cause is that `process_key_long` — the only path that reaches `strategy_analytics` for a
+ledger-backed venue — is enqueued in exactly one place, strategy creation. Nothing re-runs it. Both
+daily strategy crons gate on ccxt-only exchange sets that exclude mt5, and the 15-minute sync defers
+any venue outside its ccxt class list. After onboarding, an MT5 strategy is never recomputed.
+
+What hid it: the two key-scoped jobs that *do* cover mt5 run cleanly every day and advance
+`last_sync_at`, but neither writes `strategy_analytics`. The card reads "synced 20h ago" over a
+factsheet that is weeks old, with no failed job and no error anywhere to notice.
+
+The repair is a recurring refresh for ledger-backed venues and is **not** in this release — it
+changes production data flow and carries the worker-wedge risk shape that took the derived-equity
+path down once already, so it is being built and reviewed on its own. Two fixes that look obvious
+were investigated and rejected: routing mt5 through the reconcile cron would feed a ledger venue
+into the ccxt fill path, and re-registering the dormant key-mode fan-out would neither write
+`strategy_analytics` nor respect the runbook that forbids scheduling it from a migration.
+
+### Added
+
+- A regression assertion proving the key-mode derive fan-out stays exchange-agnostic. Every other
+  fixture key in that test was `binance`, so a venue filter excluding ledger-backed venues would
+  have passed all six existing assertions unnoticed. Verified by neutering the function, observing
+  the new assertion fail alone, and restoring.
+
 ## [0.71.2.0] - 2026-08-24
 
 ### chore: Phase 160 Part B closed by measurement on PROD
