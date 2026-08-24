@@ -138,3 +138,41 @@ picking the other side is a product call, not an executor call. The decision and
 recorded at the fence in `create-with-key/route.ts` and pinned by the test
 `the PRE-RPC fence lets the orphan through to validate — the credentials speak first`, so
 reversing it is a deliberate act with a failing test attached.
+
+---
+
+## D-161-07-A — the wizard COMPOSITE arm still renders the provenance sentence for an EXAMINED verdict
+
+**Found during:** 161-07 Task 1 (measured while reading the FIX-3 arm).
+
+The composite arm decides admissibility with `isDailyReturnsSourced` and, when it refuses,
+hardcodes `GATE_SERIES_PROVENANCE_UNVERIFIED` — for **every** inadmissible verdict, including
+the two in the examined-but-refused map. After Task 2, the admin path and the wizard SINGLE-KEY
+arm answer `sampled_gapped` with "The return series is built from sampled balance snapshots
+with interior gaps…", while the composite arm still answers it with "…nothing on our side
+recorded how that series was built."
+
+**That sentence is FALSE on that arm for that verdict.** Something did record it: the stitch job
+downgrades a composite to `sampled_gapped` when any member carried a measured coverage hole
+(142.2 FIX 2), so the composite arm's own dedicated test
+(`REFUSES a composite carrying a verdict the gate does not trust`) pins the false rendering.
+
+**Reachability:** real, not theoretical — that FIX-2 downgrade is the documented path.
+`fill_derived_unproven` is NOT reachable on this arm (the stitch deliberately does not inherit
+member unprovenness), so the exposure is the `sampled_gapped` composite only.
+
+**Why not fixed here:** 161-07's Task 1 behaviour list explicitly holds this arm at
+`GATE_SERIES_PROVENANCE_UNVERIFIED` for inadmissible verdicts, and Task 2's declared file scope
+excludes `SyncPreviewStep.tsx`. Closing it means re-cutting an existing 142.2 oracle — the kind
+of deliberate act this phase performs with a plan behind it (cf. the D-15 re-cut), not as an
+executor's aside. The fix is small: route the composite arm's refusal through the same
+examined/unexamined split rather than a literal, then re-point that one pinned expectation.
+
+## D-161-07-B — `vercel-functions` validator flags line 601 of `admin/strategy-review/route.test.ts`
+
+**Found during:** 161-07 Task 3 (tooling hook fired on an unrelated region of the file I edited).
+
+The plugin reports "Long-running or polling logic detected in a serverless handler" at
+`route.test.ts:601`. That line is inside a **vitest mock**, not a handler, and predates this
+plan. Recorded rather than acted on: out of scope per the executor's scope boundary, and acting
+on it would mean editing test code this plan has no reason to touch.
