@@ -332,9 +332,14 @@ export interface SyncPreviewStepProps {
   /**
    * WIZ-03 (non-destructive composite review). Composite "Review your keys"
    * navigates back to `connect_key` WITHOUT deleting the draft or minting a
-   * fresh session (the destructive `onTryAnotherKey` path is single-key only).
-   * When absent, the composite buttons fall back to `onTryAnotherKey` so a
-   * missing wiring degrades to the prior behaviour rather than a dead click.
+   * fresh session. When absent, the composite buttons fall back to
+   * `onTryAnotherKey` so a missing wiring degrades rather than dead-clicking —
+   * and since 161-04 that fallback is SAFE: `onTryAnotherKey` is itself a pure
+   * step transition now, so the degraded path destroys nothing either.
+   * (This sentence previously read "the destructive `onTryAnotherKey` path is
+   * single-key only". That became false when 161-04 landed; 188369db's message
+   * claimed the stale comments were "corrected in both files" but `git show
+   * --stat` shows it opened only WizardClient.tsx and its test. Corrected here.)
    */
   onReviewKeys?: () => void;
   /**
@@ -2009,9 +2014,13 @@ export function SyncPreviewStep({
    *   2. `compositeReviewIsAvailable` — the composite route destroys nothing
    *      (`onReviewKeys` is a pure step transition, WIZ-03), so it is offered
    *      unconditionally. It requires the prop to be PRESENT: without it the
-   *      button falls back to `onTryAnotherKey`, i.e. it is destructive while
-   *      wearing the non-destructive label, and gating on `isComposite` alone
-   *      would ship exactly that.
+   *      button falls back to `onTryAnotherKey`, which loses the composite
+   *      review semantics (it returns to `connect_key` rather than the key
+   *      list), so gating on `isComposite` alone would ship the wrong
+   *      destination. It is NOT a destructiveness hazard: since 161-04
+   *      `onTryAnotherKey` is a pure step transition and deletes nothing.
+   *      (This previously read "it is destructive while wearing the
+   *      non-destructive label" — false at HEAD.)
    *   3. The non-destructive `<Link>` renders ALWAYS, not as an else-branch.
    *      An either/or leaves `GATE_INSUFFICIENT_TRADES` and
    *      `GATE_INSUFFICIENT_DAYS` — which legitimately EARN key replacement and

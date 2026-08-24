@@ -2014,7 +2014,14 @@ describe("[161-05 / WIZERR-03] create-with-key's 409 refusals clear ConnectKeySt
         "gone blind on this status — check the `code:`-first key order and " +
         `EMITTER_BODY_MAX_CHARS (${EMITTER_BODY_MAX_CHARS}) before touching the ` +
         "expectations below.",
-    ).toBeGreaterThanOrEqual(EXPECTED_409_CODES.length);
+      // HAND-TYPED, deliberately not `EXPECTED_409_CODES.length` (verifier
+      // finding, 2026-08-25). Sizing a vacuity floor from the very array the
+      // assertion below compares against makes the floor self-referential: empty
+      // the array and the floor becomes `>= 0`, which nothing can fail. Every
+      // sibling law in this repo pins a hand-typed integer for exactly this
+      // reason. Re-measure at HEAD when the 409 vocabulary changes — the sibling
+      // assertion below will tell you the new set.
+    ).toBeGreaterThanOrEqual(3);
   });
 
   it("the 409 vocabulary is the hand-typed set — no more, no less", () => {
