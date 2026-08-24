@@ -360,7 +360,16 @@ describe("[B25] eslint-plugin-quantalyze wiring integrity", () => {
           `stopped matching would red-CI the core itself.`,
       ).toBe(true);
     }
-  });
+    // Timeout raised from the 5000ms vitest default (Phase 161 wave-1 gate,
+    // 2026-08-24). This case performs dozens of real
+    // `ESLint.calculateConfigForFile` resolutions — genuine filesystem + flat-
+    // config work, ~2.1s of test time standalone. Under a loaded full-suite run
+    // (807 files in parallel) it intermittently exceeded 5000ms and reddened an
+    // otherwise-green suite; measured non-deterministic across two identical
+    // trees. The default margin was simply too thin for the work this case does.
+    // It is NOT a slow-test smell to paper over: the assertions are cheap, the
+    // config resolution is not.
+  }, 30_000);
 
   it("contracts.yml exists and runs the contracts + lint", () => {
     const wf = join(ROOT, ".github/workflows/contracts.yml");
