@@ -26,6 +26,8 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import type { ComponentProps } from "react";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { AllocateDialog } from "./AllocateDialog";
 
 /**
@@ -782,6 +784,138 @@ describe("<AllocateDialog> — remove allocation (edit mode only)", () => {
     );
     expect(onClose).not.toHaveBeenCalled();
     expect(screen.getByRole("button", { name: "Remove" })).toBeInTheDocument();
+  });
+});
+
+
+/**
+ * [161-10 / WIZERR-07] THE FALLTHROUGH STOPS MINTING UNKNOWN.
+ *
+ * `envelopeForResponse` named exactly TWO of the allocation route's
+ * twenty-three error arms: the 429, and the 409 it recognised by matching
+ * `body.error === "not_allocatable"` — PROSE. Everything else rendered
+ * `buildEnvelope("UNKNOWN", …)`: "Something went wrong. We could not classify
+ * this failure", for a signed-out session, a request our own page built wrong,
+ * nine internal faults and three 404s that the route classifies precisely.
+ *
+ * ⛔ THE Button/Modal vi.mock CARVE-OUT AT THE TOP OF THIS FILE IS UNTOUCHED BY
+ * THIS BLOCK, and must stay that way. Those wrappers stamp
+ * `data-ui-primitive` / `data-consumer-scope` for repo-wide ring/surface gates
+ * that a file-scoped run cannot show you. Every case below works with them in
+ * place; none re-declares, unwraps or moves them.
+ *
+ * ORACLE INDEPENDENCE: the assertions read `data-error-code` and hand-typed
+ * phrases. Nothing is imported from `wizardErrors.ts`.
+ */
+describe("[161-10 / WIZERR-07] the allocation route's other arms reach their own copy", () => {
+  async function submitAndFail(status: number, body: unknown) {
+    fetchSpy.mockResolvedValue(failResponse(status, body));
+    renderAllocate();
+    fireEvent.change(amountInput(), { target: { value: "1000" } });
+    fireEvent.click(screen.getByRole("button", { name: "Allocate" }));
+    return screen.findByTestId("error-envelope");
+  }
+
+  it.each([
+    ["a signed-out session", 401, "DASHBOARD_SIGNED_OUT"],
+    ["a request our own page built wrong", 400, "DASHBOARD_REQUEST_INVALID"],
+    ["an internal fault", 500, "DASHBOARD_WRITE_FAILED"],
+    ["a row that is no longer there", 404, "DASHBOARD_ROW_STALE"],
+  ])("%s renders its own envelope code", async (_label, status, code) => {
+    const envelope = await submitAndFail(status, { code, error: "x" });
+    expect(envelope).toHaveAttribute("data-error-code", code);
+    // NON-VACUITY: copy really rendered, so the negative below means something.
+    expect(String(envelope.textContent).length).toBeGreaterThan(80);
+    expect(envelope.textContent).not.toContain("Something went wrong.");
+  });
+
+  it("an UNRECOGNISED code still falls to UNKNOWN — recognition is a roster, not a cast", async () => {
+    // Pitfall 4. A `body.code as WizardErrorCode` would ride this string onto
+    // the envelope and serve UNKNOWN's copy under a code nobody defined.
+    const envelope = await submitAndFail(500, {
+      code: "TOTALLY_MADE_UP",
+      error: "x",
+    });
+    expect(envelope).toHaveAttribute("data-error-code", "UNKNOWN");
+  });
+
+  it("a code belonging to ANOTHER dashboard route is refused by this one", async () => {
+    // `NAME_TOO_LONG` is the rename route's field-level token. The roster is
+    // per-route precisely so it cannot leak across surfaces.
+    const envelope = await submitAndFail(400, {
+      code: "NAME_TOO_LONG",
+      error: "name too long",
+    });
+    expect(envelope).toHaveAttribute("data-error-code", "UNKNOWN");
+  });
+
+  it("the transport catch is STILL a terminal UNKNOWN — no status, no verdict", async () => {
+    // The request never reached a status, so nothing classified anything. This
+    // is the one arm on this surface where UNKNOWN is the honest answer, and it
+    // must not be "completed" by the code channel.
+    fetchSpy.mockRejectedValue(new TypeError("Failed to fetch"));
+    renderAllocate();
+    fireEvent.change(amountInput(), { target: { value: "1000" } });
+    fireEvent.click(screen.getByRole("button", { name: "Allocate" }));
+
+    const envelope = await screen.findByTestId("error-envelope");
+    expect(envelope).toHaveAttribute("data-error-code", "UNKNOWN");
+  });
+
+  /**
+   * The incumbent 409 read is kept AHEAD of the code channel for rolling
+   * deploys (see `envelopeForResponse`'s docblock). Keeping it is only safe
+   * because the two AGREE, and agreement is asserted here rather than narrated:
+   * the two cases below are the two halves of that claim, and the third — a
+   * body carrying ONLY the prose, which the incumbent read still answers — is
+   * the pre-existing `[E5]` case above, left untouched with no fixture edit.
+   */
+  it("AGREEMENT 1/2: a body carrying BOTH discriminators names the mark remedy", async () => {
+    const envelope = await submitAndFail(409, {
+      code: "ALLOCATION_NOT_ALLOCATABLE",
+      error: "not_allocatable",
+    });
+    expect(envelope).toHaveAttribute(
+      "data-error-code",
+      "ALLOCATION_NOT_ALLOCATABLE",
+    );
+    expect(envelope.textContent).toMatch(/own capital/i);
+  });
+
+  it("AGREEMENT 2/2: a body carrying ONLY the code resolves identically", async () => {
+    const envelope = await submitAndFail(409, {
+      code: "ALLOCATION_NOT_ALLOCATABLE",
+    });
+    expect(envelope).toHaveAttribute(
+      "data-error-code",
+      "ALLOCATION_NOT_ALLOCATABLE",
+    );
+    expect(envelope.textContent).toMatch(/own capital/i);
+  });
+
+  it("SOURCE PIN: no local wire-code lookup table — translation lives once, shared", () => {
+    // Comment-stripped: this file's own docblocks name the retired shapes.
+    const RAW = readFileSync(
+      join(
+        process.cwd(),
+        "src/app/(dashboard)/allocations/components/AllocateDialog.tsx",
+      ),
+      "utf8",
+    );
+    const CODE = RAW.replace(/\/\*[\s\S]*?\*\//g, "").replace(
+      /^\s*\/\/.*$/gm,
+      "",
+    );
+    expect(RAW).toContain("/**");
+    expect(CODE).not.toContain("/**");
+    expect(CODE).toContain("envelopeForResponse");
+
+    expect(CODE).not.toMatch(/Record<\s*string\s*,/);
+    expect(CODE).toContain("recogniseDashboardDialogCode");
+    // The wait still rides the ONE parser — a raw `Number(header)` is a
+    // repo-wide lint error and would also silently accept a malformed header.
+    expect(CODE).toContain("parseRetryAfterSeconds");
+    expect(CODE).not.toMatch(/Number\(\s*res\.headers/);
   });
 });
 

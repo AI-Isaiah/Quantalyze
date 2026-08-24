@@ -37,6 +37,10 @@ import {
   type ErrorEnvelope as ErrorEnvelopeType,
 } from "@/lib/envelope";
 import { parseRetryAfterSeconds } from "@/lib/retry/retry-after";
+import {
+  recogniseDashboardDialogCode,
+  type DashboardDialogRoute,
+} from "@/lib/wizardErrors";
 import { newCorrelationId } from "@/lib/correlation-id-client";
 import { MAGNITUDE_CAPS } from "@/lib/closed-sets";
 
@@ -118,6 +122,15 @@ function parseAmount(raw: string): ParsedAmount {
 const NOT_ALLOCATABLE_CODE = "not_allocatable";
 
 /**
+ * 161-10 / WIZERR-07 — THE ROUTE THIS DIALOG WRITES THROUGH, as a roster key.
+ *
+ * The literal matches `ALLOCATION_ROUTE`'s path and is the key in
+ * `DASHBOARD_DIALOG_ROUTE_CODES` (src/lib/wizardErrors.ts), so this dialog
+ * admits the codes THIS route emits and not the whole vocabulary.
+ */
+const ROUTE: DashboardDialogRoute = "portfolio-strategies/allocation";
+
+/**
  * Map a failed response to a CANONICAL wizardErrors entry — no new error
  * strings are minted on this surface (150-UI-SPEC Error state).
  *
@@ -135,8 +148,23 @@ const NOT_ALLOCATABLE_CODE = "not_allocatable";
  * told nothing about. Its entry is deliberately NON-recoverable, which is what
  * removes the Retry CTA the server would refuse identically forever (E6).
  *
- * Everything else still routes to `UNKNOWN`, which remains correct for a
- * failure we genuinely cannot classify.
+ * 161-10 / WIZERR-07 — THE FALLTHROUGH IS NO LONGER A BLANKET `UNKNOWN`. The
+ * allocation route now puts a machine code on every error arm, so the arms this
+ * function could not name — a signed-out session, a request our own page built
+ * wrong, nine distinct internal faults, and three 404s — reach their own copy
+ * instead of "we could not classify this failure". `UNKNOWN` survives only
+ * where it is true: an unreadable body, an unrostered code, or a request that
+ * never reached a status at all.
+ *
+ * ⛔ THE TWO INCUMBENT READS ARE KEPT AHEAD OF THE CODE CHANNEL, DELIBERATELY.
+ * They are not a second discriminator competing with it — they AGREE with it
+ * (the route answers the same 409 with `code: "ALLOCATION_NOT_ALLOCATABLE"`),
+ * and agreement is the property that matters here, not disjointness — the same
+ * standard `ConnectKeyStep.tsx` records for its own two-hop lookup. What
+ * keeping them buys is a rolling deploy: a browser running THIS bundle against
+ * a route instance older than this commit still gets the mark remedy rather
+ * than the vague terminal. Delete them once no pre-161-10 instance can serve
+ * this route, and not before.
  */
 function envelopeForResponse(
   res: Response,
@@ -148,15 +176,17 @@ function envelopeForResponse(
       retryAfterSeconds: parseRetryAfterSeconds(res.headers) ?? undefined,
     });
   }
-  if (
-    res.status === 409 &&
-    typeof body === "object" &&
-    body !== null &&
-    (body as { error?: unknown }).error === NOT_ALLOCATABLE_CODE
-  ) {
+  const parsed =
+    typeof body === "object" && body !== null
+      ? (body as { error?: unknown; code?: unknown })
+      : null;
+  if (res.status === 409 && parsed?.error === NOT_ALLOCATABLE_CODE) {
     return buildEnvelope("ALLOCATION_NOT_ALLOCATABLE", correlationId);
   }
-  return buildEnvelope("UNKNOWN", correlationId);
+  return buildEnvelope(
+    recogniseDashboardDialogCode(ROUTE, parsed?.code),
+    correlationId,
+  );
 }
 
 // ────────────────────────────────────────────────────────────────── component

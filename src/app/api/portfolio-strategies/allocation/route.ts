@@ -59,6 +59,18 @@ import { isUuid } from "@/lib/utils";
  *   5. Explicit `strategies.user_id` ownership pre-check → clean 404.
  *   6. Count-checked write: `.select()` on the upsert/delete, so zero rows is
  *      a deterministic status, never a silent-success oracle (G8.B.6).
+ *
+ * 161-10 / WIZERR-07 — EVERY ERROR ARM ALSO CARRIES A MACHINE `code`, written
+ * FIRST in its object literal. Purely ADDITIVE: not one `error` sentence,
+ * status or header changed, so `AllocateDialog`'s two incumbent reads (429 →
+ * RATE_LIMITED, and the 409 `not_allocatable` body) keep answering exactly as
+ * they did — pinned per arm in `route.test.ts`.
+ *
+ * ⛔ THE CODES GO THROUGH `json(...)`, NEVER AROUND IT. Every arm below is the
+ * helper's first argument; there is no second response path beside it. A
+ * parallel raw `NextResponse.json(...)` here would be the divergence shape this
+ * phase keeps closing — the helper is what stamps NO_STORE_HEADERS, so an arm
+ * that bypassed it would lose the header silently while looking correct.
  */
 
 /**
@@ -150,26 +162,34 @@ export async function POST(req: NextRequest) {
   const {
     data: { user },
   } = await supabase.auth.getUser();
-  if (!user) return json({ error: "unauthorized" }, 401);
+  if (!user)
+    return json({ code: "DASHBOARD_SIGNED_OUT", error: "unauthorized" }, 401);
 
   let body: AllocationBody;
   try {
     body = (await req.json()) as AllocationBody;
   } catch (err) {
     logBodyParseFailure(err, user.id);
-    return json({ error: "invalid json" }, 400);
+    return json(
+      { code: "DASHBOARD_REQUEST_INVALID", error: "invalid json" },
+      400,
+    );
   }
 
   const strategyId =
     typeof body.strategy_id === "string" ? body.strategy_id.trim() : "";
   if (!isUuid(strategyId)) {
-    return json({ error: "strategy_id is required" }, 400);
+    return json(
+      { code: "DASHBOARD_REQUEST_INVALID", error: "strategy_id is required" },
+      400,
+    );
   }
 
   const allocatedAmount = parseAmount(body.allocated_amount);
   if (allocatedAmount === null) {
     return json(
       {
+        code: "DASHBOARD_REQUEST_INVALID",
         error: `allocated_amount must be a positive number no greater than ${MAGNITUDE_CAPS.MAX_TICKET_SIZE_USD}`,
       },
       400,
@@ -180,7 +200,7 @@ export async function POST(req: NextRequest) {
   // the caller's own tokens.
   const rl = await checkLimit(mandateAutoSaveLimiter, `allocation:${user.id}`);
   if (!rl.success) {
-    return json({ error: "Too many requests" }, 429, {
+    return json({ code: "RATE_LIMITED", error: "Too many requests" }, 429, {
       "Retry-After": String(rl.retryAfter),
     });
   }
@@ -201,15 +221,25 @@ export async function POST(req: NextRequest) {
       "[api/portfolio-strategies/allocation] strategy lookup failed:",
       stratErr.message,
     );
-    return json({ error: "internal error" }, 500);
+    return json(
+      { code: "DASHBOARD_WRITE_FAILED", error: "internal error" },
+      500,
+    );
   }
-  if (!strategy) return json({ error: "strategy not found" }, 404);
+  if (!strategy)
+    return json(
+      { code: "DASHBOARD_ROW_STALE", error: "strategy not found" },
+      404,
+    );
 
   // UX pre-check for a clean, actionable error. The BEFORE INSERT trigger
   // (Plan 150-01) is the ENFORCEMENT — this arm exists so the client renders
   // "mark it own-capital first" instead of a raw 23514.
   if (strategy.capital_ownership !== OWN_CAPITAL) {
-    return json({ error: "not_allocatable" }, 409);
+    return json(
+      { code: "ALLOCATION_NOT_ALLOCATABLE", error: "not_allocatable" },
+      409,
+    );
   }
 
   // ── Resolve-or-provision the caller's real book (rev-4, D-03-B) ─────────
@@ -217,7 +247,11 @@ export async function POST(req: NextRequest) {
   // the explicit Allocate action and an amount, so SC 3 (no auto-add) is
   // untouched: minting an empty book adds no strategy to it.
   const resolved = await resolveRealPortfolio(supabase, user.id);
-  if (resolved.kind === "error") return json({ error: "internal error" }, 500);
+  if (resolved.kind === "error")
+    return json(
+      { code: "DASHBOARD_WRITE_FAILED", error: "internal error" },
+      500,
+    );
 
   let portfolioId = resolved.id;
   let provisioned = false;
@@ -256,7 +290,10 @@ export async function POST(req: NextRequest) {
             "[api/portfolio-strategies/allocation] 23505 race re-select found no real portfolio:",
             { userId: user.id },
           );
-          return json({ error: "internal error" }, 500);
+          return json(
+            { code: "DASHBOARD_WRITE_FAILED", error: "internal error" },
+            500,
+          );
         }
         portfolioId = race.id;
       } else {
@@ -264,13 +301,19 @@ export async function POST(req: NextRequest) {
           "[api/portfolio-strategies/allocation] real-portfolio provisioning failed:",
           insErr.message,
         );
-        return json({ error: "internal error" }, 500);
+        return json(
+          { code: "DASHBOARD_WRITE_FAILED", error: "internal error" },
+          500,
+        );
       }
     } else if (!created) {
       console.error(
         "[api/portfolio-strategies/allocation] provisioning returned no row",
       );
-      return json({ error: "internal error" }, 500);
+      return json(
+        { code: "DASHBOARD_WRITE_FAILED", error: "internal error" },
+        500,
+      );
     } else {
       portfolioId = created.id;
       provisioned = true;
@@ -312,13 +355,19 @@ export async function POST(req: NextRequest) {
         "[api/portfolio-strategies/allocation] mark flipped between pre-check and insert:",
         { userId: user.id, strategyId },
       );
-      return json({ error: "not_allocatable" }, 409);
+      return json(
+        { code: "ALLOCATION_NOT_ALLOCATABLE", error: "not_allocatable" },
+        409,
+      );
     }
     console.error(
       "[api/portfolio-strategies/allocation] upsert failed:",
       writeErr.message,
     );
-    return json({ error: "internal error" }, 500);
+    return json(
+      { code: "DASHBOARD_WRITE_FAILED", error: "internal error" },
+      500,
+    );
   }
   if (!written || written.length === 0) {
     // An upsert that returns nothing is an anomaly (RLS ate the row, or the
@@ -327,7 +376,10 @@ export async function POST(req: NextRequest) {
       "[api/portfolio-strategies/allocation] upsert returned zero rows:",
       { portfolioId, strategyId },
     );
-    return json({ error: "internal error" }, 500);
+    return json(
+      { code: "DASHBOARD_WRITE_FAILED", error: "internal error" },
+      500,
+    );
   }
 
   logAuditEvent(supabase, {
@@ -354,25 +406,32 @@ export async function DELETE(req: NextRequest) {
   const {
     data: { user },
   } = await supabase.auth.getUser();
-  if (!user) return json({ error: "unauthorized" }, 401);
+  if (!user)
+    return json({ code: "DASHBOARD_SIGNED_OUT", error: "unauthorized" }, 401);
 
   let body: AllocationBody;
   try {
     body = (await req.json()) as AllocationBody;
   } catch (err) {
     logBodyParseFailure(err, user.id);
-    return json({ error: "invalid json" }, 400);
+    return json(
+      { code: "DASHBOARD_REQUEST_INVALID", error: "invalid json" },
+      400,
+    );
   }
 
   const strategyId =
     typeof body.strategy_id === "string" ? body.strategy_id.trim() : "";
   if (!isUuid(strategyId)) {
-    return json({ error: "strategy_id is required" }, 400);
+    return json(
+      { code: "DASHBOARD_REQUEST_INVALID", error: "strategy_id is required" },
+      400,
+    );
   }
 
   const rl = await checkLimit(mandateAutoSaveLimiter, `allocation:${user.id}`);
   if (!rl.success) {
-    return json({ error: "Too many requests" }, 429, {
+    return json({ code: "RATE_LIMITED", error: "Too many requests" }, 429, {
       "Retry-After": String(rl.retryAfter),
     });
   }
@@ -380,8 +439,16 @@ export async function DELETE(req: NextRequest) {
   // DELETE NEVER PROVISIONS. A removal that mints a container would be absurd,
   // and it would burn the caller's one-real-portfolio slot on a no-op.
   const resolved = await resolveRealPortfolio(supabase, user.id);
-  if (resolved.kind === "error") return json({ error: "internal error" }, 500);
-  if (resolved.id === null) return json({ error: "portfolio not found" }, 404);
+  if (resolved.kind === "error")
+    return json(
+      { code: "DASHBOARD_WRITE_FAILED", error: "internal error" },
+      500,
+    );
+  if (resolved.id === null)
+    return json(
+      { code: "DASHBOARD_ROW_STALE", error: "portfolio not found" },
+      404,
+    );
 
   const { data: removed, error: delErr } = await supabase
     .from("portfolio_strategies")
@@ -395,12 +462,18 @@ export async function DELETE(req: NextRequest) {
       "[api/portfolio-strategies/allocation] delete failed:",
       delErr.message,
     );
-    return json({ error: "internal error" }, 500);
+    return json(
+      { code: "DASHBOARD_WRITE_FAILED", error: "internal error" },
+      500,
+    );
   }
   if (!removed || removed.length === 0) {
     // Count-checked (G8.B.6): a delete that touched nothing is a 404, not a
     // silent `{ok:true}`.
-    return json({ error: "investment row not found" }, 404);
+    return json(
+      { code: "DASHBOARD_ROW_STALE", error: "investment row not found" },
+      404,
+    );
   }
 
   logAuditEvent(supabase, {

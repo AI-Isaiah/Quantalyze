@@ -25,6 +25,28 @@ import {
  *          team_review would strand the caller's own live positions and the
  *          caller has not confirmed the removal.
  *
+ * 161-10 / WIZERR-07 — EVERY ERROR ARM ALSO CARRIES A MACHINE `code`, written
+ * FIRST in its object literal, so `MarkOwnershipDialog` discriminates the fault
+ * on a stable token instead of matching prose. Purely ADDITIVE: not one `error`
+ * sentence, status or header changed — pinned per arm in `route.test.ts`. This
+ * dialog previously read `refusal.error === "live_allocation"` and rendered
+ * `code: "UNKNOWN"` for all thirteen other arms, every one classified here.
+ *
+ * ⭐ THE FIVE `internal error` ARMS SHARE ONE CODE, and that is a decision, not
+ * an oversight. They differ by WHICH internal query failed — the portfolio
+ * lookup, the position lookup, the flip RPC erroring, the flip RPC returning no
+ * row, the plain UPDATE. That distinction is one the user cannot act on and must
+ * not be asked to: their situation ("we could not save that change") and their
+ * remedy ("nothing was saved — try again, and tell us if it repeats") are
+ * identical at all five. Each site already logs its own distinct server-side
+ * line, which is where the distinction belongs. A code per call site would put
+ * our internal call graph in front of a person trying to mark a strategy.
+ *
+ * ⛔ `LIVE_ALLOCATION` is deliberately NOT a `WizardErrorCode` and is absent
+ * from `DASHBOARD_DIALOG_ROUTE_CODES`. That 409 is a QUESTION, not a refusal to
+ * read and leave: the dialog answers it by swapping in its confirmation body
+ * with the amount at risk. It never reaches `buildEnvelope`.
+ *
  * Defences (the alias route's six-defence stack, copied in order — see
  * src/app/api/portfolio-strategies/alias/route.ts:20-30):
  *   1. assertSameOrigin (CSRF).
@@ -114,7 +136,7 @@ export async function PATCH(
   } = await supabase.auth.getUser();
   if (!user) {
     return NextResponse.json(
-      { error: "unauthorized" },
+      { code: "DASHBOARD_SIGNED_OUT", error: "unauthorized" },
       { status: 401, headers: NO_STORE_HEADERS },
     );
   }
@@ -122,7 +144,7 @@ export async function PATCH(
   const { id } = await params;
   if (!isUuid(id)) {
     return NextResponse.json(
-      { error: "id must be a UUID" },
+      { code: "DASHBOARD_REQUEST_INVALID", error: "id must be a UUID" },
       { status: 400, headers: NO_STORE_HEADERS },
     );
   }
@@ -138,7 +160,7 @@ export async function PATCH(
       userId: user.id,
     });
     return NextResponse.json(
-      { error: "invalid json" },
+      { code: "DASHBOARD_REQUEST_INVALID", error: "invalid json" },
       { status: 400, headers: NO_STORE_HEADERS },
     );
   }
@@ -149,7 +171,10 @@ export async function PATCH(
   const mark = ALLOWED_MARKS.find((m) => m === body.mark);
   if (!mark) {
     return NextResponse.json(
-      { error: "mark must be one of: " + ALLOWED_MARKS.join(", ") },
+      {
+        code: "DASHBOARD_REQUEST_INVALID",
+        error: "mark must be one of: " + ALLOWED_MARKS.join(", "),
+      },
       { status: 400, headers: NO_STORE_HEADERS },
     );
   }
@@ -161,7 +186,10 @@ export async function PATCH(
     typeof body.confirm_remove_allocation !== "boolean"
   ) {
     return NextResponse.json(
-      { error: "confirm_remove_allocation must be a boolean" },
+      {
+        code: "DASHBOARD_REQUEST_INVALID",
+        error: "confirm_remove_allocation must be a boolean",
+      },
       { status: 400, headers: NO_STORE_HEADERS },
     );
   }
@@ -172,7 +200,7 @@ export async function PATCH(
   const rl = await checkLimit(mandateAutoSaveLimiter, `ownership:${user.id}`);
   if (!rl.success) {
     return NextResponse.json(
-      { error: "Too many requests" },
+      { code: "RATE_LIMITED", error: "Too many requests" },
       {
         status: 429,
         headers: { ...NO_STORE_HEADERS, "Retry-After": String(rl.retryAfter) },
@@ -198,7 +226,7 @@ export async function PATCH(
         pfErr.message,
       );
       return NextResponse.json(
-        { error: "internal error" },
+        { code: "DASHBOARD_WRITE_FAILED", error: "internal error" },
         { status: 500, headers: NO_STORE_HEADERS },
       );
     }
@@ -224,7 +252,7 @@ export async function PATCH(
           posErr.message,
         );
         return NextResponse.json(
-          { error: "internal error" },
+          { code: "DASHBOARD_WRITE_FAILED", error: "internal error" },
           { status: 500, headers: NO_STORE_HEADERS },
         );
       }
@@ -240,7 +268,11 @@ export async function PATCH(
             0,
           );
           return NextResponse.json(
-            { error: "live_allocation", allocated_amount: allocatedAmount },
+            {
+              code: "LIVE_ALLOCATION",
+              error: "live_allocation",
+              allocated_amount: allocatedAmount,
+            },
             { status: 409, headers: NO_STORE_HEADERS },
           );
         }
@@ -268,7 +300,7 @@ export async function PATCH(
             flipErr.message,
           );
           return NextResponse.json(
-            { error: "internal error" },
+            { code: "DASHBOARD_WRITE_FAILED", error: "internal error" },
             { status: 500, headers: NO_STORE_HEADERS },
           );
         }
@@ -283,7 +315,7 @@ export async function PATCH(
             { strategyId: id, userId: user.id },
           );
           return NextResponse.json(
-            { error: "internal error" },
+            { code: "DASHBOARD_WRITE_FAILED", error: "internal error" },
             { status: 500, headers: NO_STORE_HEADERS },
           );
         }
@@ -293,7 +325,7 @@ export async function PATCH(
           // having removed nothing, is a total no-op. That reads as 404, not
           // as a successful flip (T-150-13).
           return NextResponse.json(
-            { error: "strategy not found" },
+            { code: "DASHBOARD_ROW_STALE", error: "strategy not found" },
             { status: 404, headers: NO_STORE_HEADERS },
           );
         }
@@ -307,7 +339,10 @@ export async function PATCH(
           metadata: { mark, removed_positions: removedPositions },
         });
 
-        return NextResponse.json({ ok: true, mark }, { headers: NO_STORE_HEADERS });
+        return NextResponse.json(
+          { ok: true, mark },
+          { headers: NO_STORE_HEADERS },
+        );
       }
     }
   }
@@ -328,14 +363,14 @@ export async function PATCH(
       updateErr.message,
     );
     return NextResponse.json(
-      { error: "internal error" },
+      { code: "DASHBOARD_WRITE_FAILED", error: "internal error" },
       { status: 500, headers: NO_STORE_HEADERS },
     );
   }
   if (!updatedRows || updatedRows.length === 0) {
     // Wrong owner or unknown id — one honest arm. NOT ok-on-zero-rows.
     return NextResponse.json(
-      { error: "strategy not found" },
+      { code: "DASHBOARD_ROW_STALE", error: "strategy not found" },
       { status: 404, headers: NO_STORE_HEADERS },
     );
   }

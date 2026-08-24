@@ -27,7 +27,11 @@ import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { MarkOwnershipDialog } from "./MarkOwnershipDialog";
-import { installFetchMock, restoreFetchMock, type FetchMock } from "@/test/helpers/fetch";
+import {
+  installFetchMock,
+  restoreFetchMock,
+  type FetchMock,
+} from "@/test/helpers/fetch";
 
 const mockRefresh = vi.fn();
 vi.mock("next/navigation", () => ({
@@ -104,7 +108,9 @@ function bodyOfCall(n: number): Record<string, unknown> {
 beforeEach(() => {
   mockRefresh.mockReset();
   fetchMock = installFetchMock();
-  fetchMock.mockResolvedValue(jsonResponse(200, { ok: true, mark: "own_capital" }));
+  fetchMock.mockResolvedValue(
+    jsonResponse(200, { ok: true, mark: "own_capital" }),
+  );
 });
 
 afterEach(() => {
@@ -182,7 +188,11 @@ describe("MarkOwnershipDialog — the plain write", () => {
 describe("MarkOwnershipDialog — the 409 -> confirm -> re-submit arc (D-03 / T-150-30)", () => {
   it("409 live_allocation swaps the body to the inline confirm with the amount, and writes NOTHING more", async () => {
     fetchMock.mockResolvedValueOnce(
-      jsonResponse(409, { error: "live_allocation", allocated_amount: 120000 }),
+      jsonResponse(409, {
+        code: "LIVE_ALLOCATION",
+        error: "live_allocation",
+        allocated_amount: 120000,
+      }),
     );
     const { onClose } = renderDialog({ currentMark: "own_capital" });
 
@@ -208,7 +218,11 @@ describe("MarkOwnershipDialog — the 409 -> confirm -> re-submit arc (D-03 / T-
   it("the confirm primary re-submits ONCE with confirm_remove_allocation: true, then closes", async () => {
     fetchMock
       .mockResolvedValueOnce(
-        jsonResponse(409, { error: "live_allocation", allocated_amount: 120000 }),
+        jsonResponse(409, {
+          code: "LIVE_ALLOCATION",
+          error: "live_allocation",
+          allocated_amount: 120000,
+        }),
       )
       .mockResolvedValueOnce(
         jsonResponse(200, { ok: true, mark: "team_review" }),
@@ -217,7 +231,9 @@ describe("MarkOwnershipDialog — the 409 -> confirm -> re-submit arc (D-03 / T-
 
     fireEvent.click(screen.getByTestId("capital-ownership-team_review"));
     fireEvent.click(screen.getByRole("button", { name: CTA_SAVE }));
-    fireEvent.click(await screen.findByRole("button", { name: CONFIRM_PRIMARY }));
+    fireEvent.click(
+      await screen.findByRole("button", { name: CONFIRM_PRIMARY }),
+    );
 
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
 
@@ -235,7 +251,11 @@ describe("MarkOwnershipDialog — the 409 -> confirm -> re-submit arc (D-03 / T-
 
   it("`Keep own capital` dismisses the confirm — no write, mark unchanged, dialog open", async () => {
     fetchMock.mockResolvedValueOnce(
-      jsonResponse(409, { error: "live_allocation", allocated_amount: 120000 }),
+      jsonResponse(409, {
+        code: "LIVE_ALLOCATION",
+        error: "live_allocation",
+        allocated_amount: 120000,
+      }),
     );
     const { onClose } = renderDialog({ currentMark: "own_capital" });
 
@@ -245,9 +265,7 @@ describe("MarkOwnershipDialog — the 409 -> confirm -> re-submit arc (D-03 / T-
       await screen.findByRole("button", { name: CONFIRM_SECONDARY }),
     );
 
-    await waitFor(() =>
-      expect(screen.queryByText(CONFIRM_HEADING)).toBeNull(),
-    );
+    await waitFor(() => expect(screen.queryByText(CONFIRM_HEADING)).toBeNull());
     // Back on the question, still exactly one request, nothing closed.
     expect(screen.getByText(GROUP_LABEL)).toBeInTheDocument();
     expect(fetchMock).toHaveBeenCalledTimes(1);
@@ -257,7 +275,11 @@ describe("MarkOwnershipDialog — the 409 -> confirm -> re-submit arc (D-03 / T-
 
   it("renders the amount through the shared formatter — a null amount never becomes $0", async () => {
     fetchMock.mockResolvedValueOnce(
-      jsonResponse(409, { error: "live_allocation", allocated_amount: 0 }),
+      jsonResponse(409, {
+        code: "LIVE_ALLOCATION",
+        error: "live_allocation",
+        allocated_amount: 0,
+      }),
     );
     renderDialog({ currentMark: "own_capital" });
 
@@ -277,7 +299,9 @@ describe("MarkOwnershipDialog — the 409 -> confirm -> re-submit arc (D-03 / T-
 
 describe("MarkOwnershipDialog — write failure renders the canonical envelope", () => {
   it("a non-409 failure renders ErrorEnvelope in the body, keeps the dialog open and preserves the selection", async () => {
-    fetchMock.mockResolvedValueOnce(jsonResponse(500, { error: "internal error" }));
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse(500, { error: "internal error" }),
+    );
     const { onClose } = renderDialog({ currentMark: null });
 
     fireEvent.click(screen.getByTestId("capital-ownership-own_capital"));
@@ -303,6 +327,145 @@ describe("MarkOwnershipDialog — write failure renders the canonical envelope",
   });
 });
 
+/**
+ * [161-10 / WIZERR-07] THE DIALOG READS THE ROUTE'S CODE.
+ *
+ * Before this, the component recognised exactly ONE of the ownership route's
+ * fourteen error arms, and it recognised it by matching `refusal.error ===
+ * "live_allocation"` — PROSE. The other thirteen, all classified by the route,
+ * rendered `buildEnvelope("UNKNOWN", …)`: "Something went wrong. We could not
+ * classify this failure." That sentence was false about a signed-out session, a
+ * rate limit, five distinct internal faults and two 404s alike.
+ *
+ * ORACLE INDEPENDENCE: the assertions read the envelope's `data-error-code`
+ * attribute and hand-typed phrases. Nothing is imported from `wizardErrors.ts`.
+ */
+describe("[161-10 / WIZERR-07] classified failures render their own copy, not UNKNOWN", () => {
+  async function submitAndFail(body: unknown, status: number) {
+    fetchMock.mockResolvedValueOnce(jsonResponse(status, body));
+    renderDialog();
+    fireEvent.click(screen.getByRole("button", { name: CTA_SAVE }));
+    return screen.findByTestId("error-envelope");
+  }
+
+  it.each([
+    ["a signed-out session", 401, "DASHBOARD_SIGNED_OUT"],
+    ["a mark outside the closed set", 400, "DASHBOARD_REQUEST_INVALID"],
+    ["the rate limiter", 429, "RATE_LIMITED"],
+    ["an internal fault", 500, "DASHBOARD_WRITE_FAILED"],
+    ["a row that is no longer markable", 404, "DASHBOARD_ROW_STALE"],
+  ])("%s renders its own envelope code", async (_label, status, code) => {
+    const envelope = await submitAndFail({ code, error: "x" }, status);
+    expect(envelope).toHaveAttribute("data-error-code", code);
+    // NON-VACUITY: the envelope really rendered copy, so the negative below is
+    // not passing against an empty node.
+    expect(String(envelope.textContent).length).toBeGreaterThan(80);
+    expect(envelope.textContent).not.toContain("Something went wrong.");
+  });
+
+  it("an UNRECOGNISED code still falls to UNKNOWN — recognition is a roster, not a cast", async () => {
+    // Pitfall 4. A `body.code as WizardErrorCode` would ride this arbitrary
+    // string onto the envelope and serve UNKNOWN's copy under it.
+    const envelope = await submitAndFail(
+      { code: "TOTALLY_MADE_UP", error: "x" },
+      500,
+    );
+    expect(envelope).toHaveAttribute("data-error-code", "UNKNOWN");
+  });
+
+  it("a code belonging to ANOTHER dashboard route is refused by this one", async () => {
+    const envelope = await submitAndFail(
+      { code: "ALLOCATION_NOT_ALLOCATABLE", error: "not_allocatable" },
+      409,
+    );
+    expect(envelope).toHaveAttribute("data-error-code", "UNKNOWN");
+  });
+
+  it("a 409 whose body cannot be READ is an envelope, not an unhandled throw", async () => {
+    // Behaviour change worth naming: the previous shape called `res.json()`
+    // un-guarded inside the 409 branch, so an unreadable body threw into the
+    // transport `catch`. The envelope is the same either way, but the route
+    // there was an exception path.
+    fetchMock.mockResolvedValueOnce({
+      ok: false,
+      status: 409,
+      json: async () => {
+        throw new SyntaxError("Unexpected token < in JSON at position 0");
+      },
+    } as unknown as Response);
+    renderDialog();
+    fireEvent.click(screen.getByRole("button", { name: CTA_SAVE }));
+
+    const envelope = await screen.findByTestId("error-envelope");
+    expect(envelope).toHaveAttribute("data-error-code", "UNKNOWN");
+  });
+
+  it("PROSE ALONE no longer opens the confirm — the retired match cannot come back", async () => {
+    // The receipt that the `error === "live_allocation"` read is really gone: a
+    // 409 carrying the old sentence and NO code renders an envelope instead of
+    // swapping in the destructive confirmation body. That direction matters
+    // more than the usual one — the confirm arm is the ONLY client path to
+    // `confirm_remove_allocation: true`, so opening it on prose alone would be
+    // a destructive affordance minted from an unauthenticated string.
+    const envelope = await submitAndFail(
+      { error: "live_allocation", allocated_amount: 120000 },
+      409,
+    );
+    expect(envelope).toHaveAttribute("data-error-code", "UNKNOWN");
+    expect(screen.queryByText(CONFIRM_HEADING)).toBeNull();
+  });
+});
+
+/**
+ * [161-10 / WIZERR-07] THE CORRELATION ID IS GATED TO TERMINAL ARMS.
+ *
+ * 161-UI-SPEC Copy Principle 4. THE MECHANISM: `ErrorEnvelope` prints the id
+ * whenever it renders at all, so what decides whether the user sees one is
+ * WHICH ARMS RENDER AN ENVELOPE. On this dialog the actionable arm is the
+ * `LIVE_ALLOCATION` 409, which renders the confirmation body and no envelope.
+ */
+describe("[161-10 / WIZERR-07] correlation id: present on the terminal arm, absent on the actionable one", () => {
+  const CORRELATION_LABEL = "correlation_id:";
+
+  it("the TERMINAL arm shows a correlation id, and it is the one that was SENT", async () => {
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse(500, {
+        code: "DASHBOARD_WRITE_FAILED",
+        error: "internal error",
+      }),
+    );
+    renderDialog();
+    fireEvent.click(screen.getByRole("button", { name: CTA_SAVE }));
+
+    const envelope = await screen.findByTestId("error-envelope");
+    expect(envelope.textContent).toContain(CORRELATION_LABEL);
+
+    // …and it JOINS to the server's log line for THIS attempt.
+    const init = fetchMock.mock.calls[0][1] as RequestInit;
+    const sent = new Headers(init.headers).get("X-Correlation-Id");
+    expect(sent, "no correlation id was sent on the request").toBeTruthy();
+    expect(envelope.textContent).toContain(String(sent));
+  });
+
+  it("the ACTIONABLE live-allocation arm shows NO correlation id anywhere on screen", async () => {
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse(409, {
+        code: "LIVE_ALLOCATION",
+        error: "live_allocation",
+        allocated_amount: 120000,
+      }),
+    );
+    renderDialog();
+    fireEvent.click(screen.getByRole("button", { name: CTA_SAVE }));
+
+    // NON-VACUITY: the arm really did render its question with the amount, so
+    // the absence below is a property of a rendered dialog, not an empty one.
+    expect(await screen.findByText(CONFIRM_HEADING)).toBeInTheDocument();
+    expect(screen.getByText(CONFIRM_BODY_120K)).toBeInTheDocument();
+    expect(document.body.textContent).not.toContain(CORRELATION_LABEL);
+  });
+});
+
 describe("MarkOwnershipDialog — source pins", () => {
   const SRC = readFileSync(
     join(process.cwd(), "src/components/strategy/MarkOwnershipDialog.tsx"),
@@ -321,5 +484,23 @@ describe("MarkOwnershipDialog — source pins", () => {
 
   it("mounts the shared question component rather than re-spelling the options (UI-SPEC invariant 5)", () => {
     expect(SRC).toContain("CapitalOwnershipRadioGroup");
+  });
+
+  it("[161-10] carries NO local wire-code lookup table — translation lives once, shared", () => {
+    // Comment-stripped: this component's docblock NAMES the retired prose match
+    // so the next reader knows what was removed, and a raw-text pin would match
+    // that prose (the 140.2-08 / 150-02 self-matching-comment lesson).
+    const CODE = SRC.replace(/\/\*[\s\S]*?\*\//g, "").replace(
+      /^\s*\/\/.*$/gm,
+      "",
+    );
+    expect(SRC).toContain("/**");
+    expect(CODE).not.toContain("/**");
+    expect(CODE).toContain("submit");
+
+    // No keyed lookup of any kind in this component…
+    expect(CODE).not.toMatch(/Record<\s*string\s*,/);
+    // …and the ONE shared recogniser is what decides the envelope code.
+    expect(CODE).toContain("recogniseDashboardDialogCode");
   });
 });
