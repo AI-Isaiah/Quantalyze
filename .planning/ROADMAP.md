@@ -204,6 +204,54 @@ Plans:
 **Plans**: TBD
 **UI hint**: yes
 
+### Phase 161.1: LEDGER-REFRESH — Recurring strategy refresh for ledger-backed venues, shipped dormant behind a founder-gated schedule (INSERTED)
+
+**Goal**: Every ledger-backed venue (mt5/sfox/deribit) has a recurring path that refreshes
+`strategy_analytics` after onboarding — shipped DORMANT, with activation a founder-gated live op.
+**Depends on:** nothing. Independent of Phase 161 (that phase is error copy; this is data flow).
+Inserted after 161 for roadmap ordering only — it MAY be pulled ahead, and it is the more urgent
+of the two because it is a live, founder-reported data-integrity defect.
+**Requirements**: LEDGER-01..LEDGER-04 (TBD at plan time)
+**Plans:** 0 plans
+
+**Root cause (measured on PROD 2026-08-24, not inferred):** `process_key_long` is the ONLY path
+reaching `strategy_analytics` for a ledger-backed venue and is enqueued in exactly one place —
+strategy creation (`api/strategies/finalize-wizard`). No recurring enqueuer exists. Both daily
+strategy crons gate on ccxt-only closed sets excluding mt5 (`reconcile-strategies` 03:30 →
+`RECONCILABLE_EXCHANGES`; `sync-funding` 04:00), and the 15-min `cron_sync` defers anything outside
+`EXCHANGE_CLASSES` (`routers/cron.py:182`). Measured: 4 MT5 strategies with `strategy_analytics`
+between 2026-08-04 and 2026-08-21, versus okx at 2h old.
+
+**Success Criteria** (what must be TRUE):
+
+  1. A recurring enqueuer exists that reaches `strategy_analytics` for every ledger-backed venue,
+     via the strategy-keyed `process_key_long` chain — never the ccxt fill path.
+  2. It ships DORMANT: the schedule is NOT registered, activation is a documented founder-executed
+     live op, matching the SFOX_ENABLED / WORKER-03 pattern. Merging changes no prod behavior.
+  3. The staleness is observable before it is user-visible: a check that fails on
+     `strategy_analytics.computed_at` age, NOT on `last_sync_at` (which is advanced daily by
+     key-scoped jobs and is what hid this bug).
+  4. A regression pin fails if any ledger venue is dropped from the refresh set — proven
+     falsifiable by neutering and observing RED.
+
+**⛔ SCOPE FENCES — two approaches already investigated and REJECTED. Do not re-enter:**
+
+  - **Do NOT add mt5 to `RECONCILABLE_EXCHANGES`.** `run_reconcile_strategy_job` calls
+    `fetch_raw_trades` (ccxt). mt5 is in `_LEDGER_BACKED_SOURCES`; this is the BYB-02 corruption
+    class that "crashed EVERY onboard in prod" when sfox fell into it.
+  - **Do NOT re-register the `derive-allocator-key-dailies` cron.** It is key-mode and never
+    stamps `strategy_analytics`; it was DELIBERATELY unscheduled at the v1.11 recovery; and
+    `docs/runbooks/flipretry-derived-equity-go-live.md:171` forbids scheduling it from a migration
+    (auto-apply + a silently-skipped worker deploy recreates the v1.11 wedge verbatim). A migration
+    doing exactly this was written and deleted unmerged on 2026-08-24.
+
+**⚠️ Risk shape:** fanning jobs at a fixed hour carries the v1.11 worker-wedge shape — MT5
+serializes on ONE shared terminal (`services/mt5_concurrency.py`) at a 15-min timeout per key.
+
+Plans:
+
+- [ ] TBD (run /gsd-plan-phase 161.1 to break down)
+
 ### Phase 162: HONEST — What the user sees is true
 
 **Goal**: Every number, badge, and affordance a user sees reflects the data underneath it — no raw exceptions as copy, no freshness claim a dead series contradicts, no missing metric where data exists

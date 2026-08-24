@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.71.2.2] - 2026-08-24
+
+### docs: track the ledger-venue refresh as a real phase
+
+The MT5 staleness diagnosis shipped in 0.71.2.1 had no owner. It does now: Phase 161.1
+(LEDGER-REFRESH) is on the roadmap, carrying the measured root cause, four success criteria, and
+the risk shape that makes activation founder-gated rather than automatic.
+
+The entry records two approaches that were investigated and rejected, so the next person to pick
+this up does not spend a cycle rediscovering them: routing mt5 through the ccxt reconcile cron
+(the fill-path corruption class), and re-registering the dormant key-mode fan-out (which never
+writes the table in question, and which the go-live runbook forbids scheduling from a migration).
+
+The phase is marked as depending on nothing. It sits after Phase 161 for ordering only and can be
+pulled ahead — it is a live data-integrity defect, where 161 is error copy.
+
 ## [0.71.2.1] - 2026-08-24
 
 ### fix: root-cause MT5 factsheet staleness, and pin the fan-out against venue filters
