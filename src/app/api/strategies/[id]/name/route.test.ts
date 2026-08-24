@@ -547,9 +547,17 @@ describe("[161-10 / WIZERR-07] the name route classifies every arm it refuses", 
       },
     },
     {
+      // ⛔ 161-REVIEW / CR-01 — RE-POINTED, and the reason is recorded rather
+      // than the literal quietly swapped. The UPDATE was SENT before this arm
+      // returned. `supabase-js` reports a PostgREST rejection (rolled back) and
+      // a transport failure (may have committed, answer lost) through the same
+      // `{ data, error }` shape, and this arm does not discriminate them — so
+      // it cannot VERIFY that the rename did not land, and
+      // `DASHBOARD_WRITE_FAILED`'s "Nothing was saved" was an assertion.
+      // The SENTENCE and STATUS are byte-identical; only the code moved.
       label: "the UPDATE itself errored",
       status: 500,
-      code: "DASHBOARD_WRITE_FAILED",
+      code: "DASHBOARD_WRITE_INDETERMINATE",
       sentence: "internal error",
       run: () => {
         recorders.results["strategies:update"] = {

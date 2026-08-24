@@ -203,9 +203,19 @@ export async function PATCH(
     .select("id");
 
   if (updateErr) {
+    // ⛔ 161-REVIEW / CR-01 — INDETERMINATE, NOT "nothing was saved". The UPDATE
+    // was SENT. `supabase-js` reports a PostgREST rejection (statement rolled
+    // back) and a transport failure (the statement may have committed and the
+    // answer was lost) through the same `{ data, error }` shape, and this arm
+    // does not discriminate them — so it cannot verify that the rename did not
+    // land. See the "'NOTHING WAS SAVED' IS VERIFIED, NOT ASSERTED" rule at
+    // the `CSV_UPSTREAM_FAIL` entry in `wizardErrors.ts`. The code that says
+    // only what this arm established is
+    // `DASHBOARD_WRITE_INDETERMINATE`; `DASHBOARD_WRITE_FAILED` is now reserved
+    // for arms that fail on a READ, before anything is sent.
     console.error("[api/strategies/[id]/name] update failed:", updateErr.message);
     return NextResponse.json(
-      { code: "DASHBOARD_WRITE_FAILED", error: "internal error" },
+      { code: "DASHBOARD_WRITE_INDETERMINATE", error: "internal error" },
       { status: 500, headers: NO_STORE_HEADERS },
     );
   }

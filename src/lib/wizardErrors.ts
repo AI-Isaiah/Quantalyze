@@ -846,9 +846,11 @@ export type WizardErrorCode =
   // identically — the same reasoning `VALIDATION_FAILED` records at its own
   // `actions`.
   | "DASHBOARD_REQUEST_INVALID"
-  // Our own service failed while performing the write. Covers every `internal
-  // error` 500 on all three routes — a failed lookup, a failed update, an RPC
-  // that errored or returned no row.
+  // Our own service failed BEFORE it sent anything that could change data.
+  // Covers the `internal error` 500s whose failing statement is a READ:
+  // `ownership` 500-a (the portfolio lookup) and 500-b (the position lookup),
+  // `allocation` POST's strategy lookup and its `resolveRealPortfolio` fault,
+  // and `allocation` DELETE's `resolveRealPortfolio` fault.
   //
   // ⭐ ONE MEMBER FOR ALL OF THEM, DELIBERATELY. Those sites differ by which
   // internal query failed, which is a distinction the user cannot act on and
@@ -857,6 +859,28 @@ export type WizardErrorCode =
   // are identical at every one. Each site already logs its own distinct
   // server-side line, which is where the distinction belongs. Minting a code
   // per call site would put an internal call graph in front of a user.
+  //
+  // ⛔ 161-REVIEW / CR-01 — THE POPULATION NARROWED, AND THAT IS THE FIX.
+  // 161-10 pointed this member at EVERY `internal error` 500 on all three
+  // routes, including arms whose own comments say the outcome is unknown. Its
+  // sentence says "Nothing was saved — the strategy is as it was before you
+  // pressed save", which on those arms is a claim the code never established.
+  // Read `:2470` in this file ("'NOTHING WAS SAVED' IS VERIFIED, NOT
+  // ASSERTED") and `SEAM_RESPONSE_UNREADABLE`'s member note above, which
+  // records the same rule from the other side: a code whose outcome is
+  // unknowable may not say "Nothing was saved" — nor "it went through" — in
+  // either direction. Those arms now answer
+  // `DASHBOARD_WRITE_INDETERMINATE` below. THE SENTENCE HERE IS UNCHANGED,
+  // byte for byte: what moved is which arms are entitled to it.
+  //
+  // ⭐ THE MEMBERSHIP RULE, so the next arm is classified rather than guessed:
+  // an arm belongs HERE iff no statement that could alter the user's data has
+  // been sent when it returns. Every member above fails on a SELECT. (The
+  // allocation route's container-provisioning arms are the one place worth
+  // reading twice — an INSERT into `portfolios` has been sent there, so they
+  // are INDETERMINATE, even though the money write itself has not been
+  // reached. "Probably only an empty container" is a guess, and the whole
+  // point of the split is that we stop making those.)
   //
   // ⚠️ NOT `SEAM_INTERNAL_FAULT`, whose title is "Something failed on our side
   // while we checked this key" and whose cause promises "no key was stored".
@@ -867,12 +891,80 @@ export type WizardErrorCode =
   //
   // Recoverable: YES — `clear_and_retry` is a member of `RECOVERABLE_ACTIONS`,
   // so a Retry control renders. That is correct here and nowhere else in this
-  // family: a 500 is the one dashboard failure whose second attempt genuinely
-  // may succeed, because the fault is transient by construction (a query that
-  // errored once can succeed next time). The write is idempotent in effect —
-  // it sets a name, a mark or an amount to a stated value — so a retry cannot
-  // double anything.
+  // family: a failed READ is the one dashboard failure whose second attempt
+  // genuinely may succeed (a query that errored once can succeed next time),
+  // and because nothing was sent, a retry starts from the state the sentence
+  // describes. The write it then performs is idempotent in effect — it sets a
+  // name, a mark or an amount to a stated value — so a retry cannot double
+  // anything.
   | "DASHBOARD_WRITE_FAILED"
+  // ⭐ 161-REVIEW / CR-01 — Our own service failed AFTER a data-modifying
+  // statement had already been sent, and we cannot tell what it did.
+  //
+  // Covers the `internal error` 500s on the three dashboard write routes whose
+  // failing operation is a WRITE:
+  //
+  //   · `strategies/[id]/name` — the `strategies` UPDATE errored.
+  //   · `strategies/[id]/ownership` — the flip RPC errored; the flip RPC
+  //     returned no row; the plain `strategies` UPDATE errored.
+  //   · `portfolio-strategies/allocation` — the three container-provisioning
+  //     arms (an INSERT into `portfolios` was sent), the
+  //     `portfolio_strategies` upsert errored, the upsert returned zero rows,
+  //     and the DELETE errored.
+  //
+  // ── WHY "IT ERRORED" IS NOT "IT DID NOT HAPPEN" ─────────────────────────────
+  //
+  // Two distinct mechanisms, both readable from the routes' own code:
+  //
+  //   1. AN ERRORED WRITE IS NOT A VERIFIED ROLLBACK. `supabase-js` collapses a
+  //      PostgREST error (statement rejected — rolled back, nothing saved) and a
+  //      TRANSPORT failure (the statement may have committed and the answer was
+  //      lost) into the SAME `{ data, error }` shape. None of these arms
+  //      discriminates them, so none of them can verify which happened.
+  //   2. A WRITE THAT RETURNS NO ROW IS NOT A WRITE THAT DID NOTHING. The
+  //      allocation route says so itself at the arm — "RLS ate the row, or the
+  //      conflict target drifted" — and "RLS ate the row" means the upsert
+  //      SUCCEEDED and only the returning row was suppressed. The ownership
+  //      route's flip arm says the same: "a RETURNS TABLE function that yields
+  //      no row leaves the counts unknown."
+  //
+  // ⛔ WHY THIS IS A MONEY-PATH CORRECTNESS FIX AND NOT A COPY PREFERENCE. Two
+  // of these arms sit behind operations that remove things:
+  // `flip_capital_ownership_to_team_review` DELETES the caller's live positions
+  // and sets the mark in one transaction, and the allocation upsert is the
+  // money write itself. Telling a user "Nothing was saved" there can hand them
+  // a screen that says their book is untouched while their positions are gone.
+  //
+  // ── WHAT THE COPY MAY NOT SAY, IN EITHER DIRECTION ──────────────────────────
+  //
+  // This is the "'NOTHING WAS SAVED' IS VERIFIED, NOT ASSERTED" rule recorded
+  // at the `CSV_UPSTREAM_FAIL` entry below, applied where it bites. That entry
+  // earns the clause
+  // with three measured layers of no-write; nothing of the sort is available
+  // here. And the obvious correction is a second false claim pointed the other
+  // way — "your change went through" is a guess about a statement we never got
+  // an answer to. `SEAM_RESPONSE_UNREADABLE` (above) is the house precedent for
+  // exactly this shape and its copy is the model: claim only what IS
+  // established (the attempt was made), then send the user to the one place
+  // that settles it.
+  //
+  // ⛔ NOT recoverable, and the absence is load-bearing. `actions` carries
+  // neither member of `RECOVERABLE_ACTIONS`, so `buildEnvelope` derives
+  // `recoverable: false` and NO Retry control renders. The reason is NOT that a
+  // retry is futile — it is that a retry is UNPREDICTABLE and, on the flip arm,
+  // potentially destructive: a one-click Retry against a possibly-applied money
+  // write is the unwinnable-remedy defect this phase exists to remove, wearing a
+  // new hat. `leave_and_return` carries the first step of the ordered remedy —
+  // re-read current state — the same control `SEAM_RESPONSE_UNREADABLE` and
+  // `WIZARD_DUPLICATE` use to send a user to the record rather than at the
+  // button again.
+  //
+  // ⚠️ NOT `DASHBOARD_WRITE_FAILED` (above): its sentence is the precise claim
+  // this arm cannot make. ⚠️ NOT `SEAM_RESPONSE_UNREADABLE`: every clause of it
+  // is about a submission crossing to the analytics service and that service
+  // answering unreadably; these failures never left our own request handler and
+  // there is no submission or strategies list to send the user to.
+  | "DASHBOARD_WRITE_INDETERMINATE"
   // The row this dialog points at is not there in the form the action needs.
   // Covers every 404 on the three routes: `strategy not found` (wrong owner,
   // unknown id, or — on the name route — a PUBLISHED row refused by the D-17
@@ -3144,7 +3236,47 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
     // is deliberate: a query that errored once can succeed on the next attempt,
     // and these writes set a stated value rather than accumulating one, so a
     // retry cannot double anything.
+    //
+    // ⛔ 161-REVIEW / CR-01 — THE SENTENCE ABOVE IS BYTE-IDENTICAL TO WHAT
+    // 161-10 SHIPPED, and the Retry is deliberately kept. What changed is the
+    // set of arms allowed to reach it: only those where no data-modifying
+    // statement had been sent, so "Nothing was saved" is established by the
+    // control flow rather than asserted. Every other arm now answers
+    // `DASHBOARD_WRITE_INDETERMINATE` below. Do not widen this entry back.
     actions: ["clear_and_retry", "request_call"],
+  },
+
+  // 161-REVIEW / CR-01 — the honest half of the split. The union member carries
+  // the full reasoning: which arms, why an errored write is not a verified
+  // rollback, and why a Retry is withheld from a possibly-applied money write.
+  //
+  // ⛔ EVERY CLAUSE BELOW IS A THING THE ROUTE ESTABLISHED. It says the attempt
+  // was made (true — the statement was sent), that we cannot tell what it did
+  // (true — no arm discriminates a rejected statement from a lost answer), and
+  // that the reloaded page is the current state (true — the dialogs' lists
+  // re-fetch on close). It says NOTHING about whether anything persisted, in
+  // either direction, which is the "'NOTHING WAS SAVED' IS VERIFIED, NOT
+  // ASSERTED" rule recorded at the `CSV_UPSTREAM_FAIL` entry, applied at the one
+  // place in this family where it bites.
+  DASHBOARD_WRITE_INDETERMINATE: {
+    title: "We could not confirm whether that change was saved.",
+    cause:
+      "Our own service failed part-way through the change, and by then the request to save it had already been sent. We cannot tell from here whether it took effect, and we would rather say that than guess in either direction. The fault is on our side, not in what you entered.",
+    fix: [
+      "Close this dialog and reload the page. What the reloaded page shows is the current state.",
+      "If the change is not there, make it again. If it is there, nothing needs undoing.",
+      "If this keeps happening, email security@quantalyze.com with the correlation id below.",
+    ],
+    docsHref: "/security",
+    // ⛔ NEITHER member of `RECOVERABLE_ACTIONS`, so `buildEnvelope` derives
+    // `recoverable: false` and no Retry control renders — and the reason is NOT
+    // the usual one. Retrying is not futile here, it is UNPREDICTABLE: nobody,
+    // including us, knows what the first attempt did. On the ownership flip
+    // that first attempt may have removed live positions. A one-click Retry
+    // whose effect the person pressing it cannot foresee is the unwinnable
+    // remedy this phase removes; the remedy is ORDERED instead, and
+    // `leave_and_return` carries its first step.
+    actions: ["leave_and_return", "expand_log"],
   },
 
   DASHBOARD_ROW_STALE: {
@@ -4425,6 +4557,10 @@ const DASHBOARD_DIALOG_ROUTE_CODES: ReadonlyMap<
       "DASHBOARD_REQUEST_INVALID",
       "RATE_LIMITED",
       "DASHBOARD_WRITE_FAILED",
+      // 161-REVIEW / CR-01 — the indeterminate half of the 500 population.
+      // Every one of these three routes has at least one arm that fails AFTER
+      // a data-modifying statement was sent, so every roster gains it.
+      "DASHBOARD_WRITE_INDETERMINATE",
       "DASHBOARD_ROW_STALE",
     ]),
   ],
@@ -4435,6 +4571,10 @@ const DASHBOARD_DIALOG_ROUTE_CODES: ReadonlyMap<
       "DASHBOARD_REQUEST_INVALID",
       "RATE_LIMITED",
       "DASHBOARD_WRITE_FAILED",
+      // 161-REVIEW / CR-01 — the indeterminate half of the 500 population.
+      // Every one of these three routes has at least one arm that fails AFTER
+      // a data-modifying statement was sent, so every roster gains it.
+      "DASHBOARD_WRITE_INDETERMINATE",
       "DASHBOARD_ROW_STALE",
     ]),
   ],
@@ -4445,6 +4585,10 @@ const DASHBOARD_DIALOG_ROUTE_CODES: ReadonlyMap<
       "DASHBOARD_REQUEST_INVALID",
       "RATE_LIMITED",
       "DASHBOARD_WRITE_FAILED",
+      // 161-REVIEW / CR-01 — the indeterminate half of the 500 population.
+      // Every one of these three routes has at least one arm that fails AFTER
+      // a data-modifying statement was sent, so every roster gains it.
+      "DASHBOARD_WRITE_INDETERMINATE",
       "DASHBOARD_ROW_STALE",
       // The allocate surface's one actionable refusal, emitted by both the
       // pre-check and the D-03-A trigger arm.

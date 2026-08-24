@@ -355,7 +355,16 @@ describe("[161-10 / WIZERR-07] classified failures render their own copy, not UN
     ["a signed-out session", 401, "DASHBOARD_SIGNED_OUT"],
     ["a mark outside the closed set", 400, "DASHBOARD_REQUEST_INVALID"],
     ["the rate limiter", 429, "RATE_LIMITED"],
-    ["an internal fault", 500, "DASHBOARD_WRITE_FAILED"],
+    ["an internal fault before anything was sent", 500, "DASHBOARD_WRITE_FAILED"],
+    // 161-REVIEW / CR-01 — the flip RPC erroring, or returning no row. The
+    // route classifies these separately because the RPC that DELETES live
+    // positions had already been sent; this asserts the dialog RENDERS the
+    // distinction rather than collapsing it to UNKNOWN.
+    [
+      "an internal fault after the flip was issued",
+      500,
+      "DASHBOARD_WRITE_INDETERMINATE",
+    ],
     ["a row that is no longer markable", 404, "DASHBOARD_ROW_STALE"],
   ])("%s renders its own envelope code", async (_label, status, code) => {
     const envelope = await submitAndFail({ code, error: "x" }, status);
@@ -365,6 +374,65 @@ describe("[161-10 / WIZERR-07] classified failures render their own copy, not UN
     expect(String(envelope.textContent).length).toBeGreaterThan(80);
     expect(envelope.textContent).not.toContain("Something went wrong.");
   });
+
+  /**
+   * ⭐ 161-REVIEW / CR-01 — WHAT THE USER ACTUALLY READS ON THE FLIP ARM.
+   *
+   * The copy-table cases in `wizardErrors.test.ts` pin the sentence; this pins
+   * that the sentence REACHES the screen, on the surface where being wrong
+   * costs the most. `flip_capital_ownership_to_team_review` deletes the
+   * caller's live positions and sets the mark in one transaction, so a screen
+   * saying "Nothing was saved" here can tell someone their book is untouched
+   * while their positions are gone.
+   */
+  it("[161-CR-01] the indeterminate arm renders no zero-write claim, and names the action that settles it", async () => {
+    const envelope = await submitAndFail(
+      { code: "DASHBOARD_WRITE_INDETERMINATE", error: "internal error" },
+      500,
+    );
+    const text = String(envelope.textContent);
+    expect(text.length).toBeGreaterThan(140); // the haystack is real
+
+    expect(
+      text,
+      "the flip arm told the user nothing was saved about a transaction that " +
+        "removes live positions and whose outcome we could not read",
+    ).not.toMatch(/nothing was saved/i);
+    // The remedy that CAN settle an unknown outcome.
+    expect(text).toMatch(/reload/i);
+    expect(text).toMatch(/current state/i);
+  });
+
+  it("[161-CR-01] NEGATIVE CONTROL: the verified-zero-write arm keeps its sentence", async () => {
+    // Without this, "no zero-write claim on the indeterminate arm" is satisfied
+    // by copy that stopped making the claim anywhere — including on the two
+    // arms that genuinely establish it and where it is the reassurance the user
+    // most needs.
+    const envelope = await submitAndFail(
+      { code: "DASHBOARD_WRITE_FAILED", error: "internal error" },
+      500,
+    );
+    expect(String(envelope.textContent)).toMatch(/nothing was saved/i);
+  });
+
+  /**
+   * ⚠️ MEASURED, AND DELIBERATELY NOT ASSERTED HERE: the Retry CONTROL.
+   *
+   * The first draft of the two cases above also asserted that no Retry button
+   * renders on the indeterminate arm, with the verified-zero arm as the
+   * counterpart. The counterpart went RED, and the reason is worth recording
+   * rather than working around: `ErrorEnvelope` gates the control on
+   * `recoverable && Boolean(onRetry)`, and THIS DIALOG PASSES NO `onRetry` at
+   * all (`grep -c onRetry` is 0 here and in `RenameStrategyDialog`; only
+   * `AllocateDialog` wires one). So no Retry renders on this surface for ANY
+   * code, and a `queryByRole(... /retry/i) === null` assertion here would have
+   * been green against every possible implementation — the vacuous-pin trap.
+   *
+   * The behavioural half of CR-01 is therefore pinned where it is real:
+   * `AllocateDialog.test.tsx` for the rendered control, and
+   * `wizardErrors.test.ts` for the `buildEnvelope(...).recoverable` derivation
+   * both dialogs would read if they ever wired one.
+   */
 
   it("an UNRECOGNISED code still falls to UNKNOWN — recognition is a roster, not a cast", async () => {
     // Pitfall 4. A `body.code as WizardErrorCode` would ride this arbitrary

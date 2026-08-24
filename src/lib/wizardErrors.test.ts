@@ -1972,8 +1972,28 @@ describe("[140.3-10 / TRAP-4] the whole copy table, scanned for destructive-only
    * only), so all four sit OUTSIDE the scanned population and the destructive
    * class below is still four members. The baseline was re-measured at HEAD
    * before it moved — 161-05 took it 81 → 82 and 161-07 took it 82 → 84.
+   *
+   * ⚠️ 88 → 89 (161-REVIEW / CR-01). ONE entry —
+   * `DASHBOARD_WRITE_INDETERMINATE` — split out of `DASHBOARD_WRITE_FAILED`,
+   * whose sentence ("Nothing was saved — the strategy is as it was before you
+   * pressed save") was being emitted by arms that had already SENT a
+   * data-modifying statement and could not read what it did. THIS guard's
+   * reasoning was re-run over the new entry before the number moved: its
+   * `actions` are `["leave_and_return", "expand_log"]`, neither of which is a
+   * member of `DESTRUCTIVE_ACTIONS`, so it sits OUTSIDE the scanned population
+   * and the destructive class below is still four members. The baseline was
+   * re-measured at HEAD before it moved — 161-10 took it 84 → 88 and nothing
+   * has moved it since (161-09 minted no members).
+   *
+   * ⛔ AND THE ABSENCE OF `clear_and_retry` ON THE NEW ENTRY IS LOAD-BEARING,
+   * for a reason this guard's sibling class is the closest thing to: a Retry
+   * offered against a write that MAY HAVE APPLIED is not merely futile, it is a
+   * control whose effect the person pressing it cannot foresee — and on the
+   * ownership flip the write in question deletes live positions. That is the
+   * TRAP-4 shape one step removed, which is why the split had to move the
+   * ACTIONS and not only the sentence.
    */
-  const EXPECTED_TABLE_SIZE = 88;
+  const EXPECTED_TABLE_SIZE = 89;
 
   it("the scan actually covers the table — hand-typed size guard", () => {
     expect(
@@ -2417,8 +2437,29 @@ describe("[140.3-12 / SEAMUX-04] no entry in the copy table makes a claim we can
    * moved: none predicts permanence, none promises a notification, none names
    * an internal cause the user cannot act on. The baseline was re-measured at
    * HEAD before it moved (161-05: 81 → 82; 161-07: 82 → 84).
+   *
+   * ⚠️ 88 → 89 (161-REVIEW / CR-01) — `DASHBOARD_WRITE_INDETERMINATE`. Read
+   * against all four FORBIDDEN fragments by hand before the number moved: it
+   * mentions no notification, no trade fetching and no session field name.
+   *
+   * ⛔ "data is unchanged" is the fragment needing care, and this entry is the
+   * one place in the table where the CARE IS THE POINT rather than a formality.
+   * It makes NO claim about a write in EITHER direction: not "nothing was
+   * saved", not "your change went through". Its cause says the request to save
+   * had already been sent, that we cannot tell whether it took effect, and that
+   * we would rather say so than guess. That is `:2470`'s rule
+   * ("'NOTHING WAS SAVED' IS VERIFIED, NOT ASSERTED") applied at the one arm in
+   * this family where the verification is unavailable, and it is the same shape
+   * `SEAM_RESPONSE_UNREADABLE` already carries for an unconfirmed submit.
+   *
+   * ⚠️ THE CLAUSE TO RE-READ if this entry is ever edited is the one it does
+   * NOT contain. A future edit reaching for the more reassuring "nothing was
+   * saved" is re-opening the exact defect the entry was minted to close, and
+   * `DASHBOARD_WRITE_FAILED` still carries that sentence for the arms that
+   * genuinely establish it — so the tempting "unify them again" is a
+   * re-introduction, not a simplification.
    */
-  const EXPECTED_TABLE_SIZE = 88;
+  const EXPECTED_TABLE_SIZE = 89;
 
   it("the scan actually covers the table — hand-typed size guard", () => {
     expect(
@@ -4623,6 +4664,8 @@ describe("[161-10 / WIZERR-07] the dashboard-dialog entries say only what is tru
     "DASHBOARD_SIGNED_OUT",
     "DASHBOARD_REQUEST_INVALID",
     "DASHBOARD_WRITE_FAILED",
+    // 161-REVIEW / CR-01 — the fifth member, split out of the fourth.
+    "DASHBOARD_WRITE_INDETERMINATE",
     "DASHBOARD_ROW_STALE",
   ];
 
@@ -4642,7 +4685,8 @@ describe("[161-10 / WIZERR-07] the dashboard-dialog entries say only what is tru
 
   it("the population is non-empty and all four members carry real copy", () => {
     // A family loop over an empty list passes trivially. Hand-typed count.
-    expect(FAMILY.length).toBe(4);
+    // 4 -> 5 at 161-REVIEW / CR-01 (`DASHBOARD_WRITE_INDETERMINATE`).
+    expect(FAMILY.length).toBe(5);
     for (const code of FAMILY) {
       expect(surface(code).length).toBeGreaterThan(140);
       // Never the generic terminal: the whole point is that these failures WERE
@@ -4651,7 +4695,7 @@ describe("[161-10 / WIZERR-07] the dashboard-dialog entries say only what is tru
     }
   });
 
-  it("NOT ONE of the four mentions a draft, an API key, an exchange or a secret", () => {
+  it("NOT ONE of the family mentions a draft, an API key, an exchange or a secret", () => {
     // The exact false-specificity this family exists to avoid. Every rejected
     // near-neighbour (`SESSION_EXPIRED`, `VALIDATION_FAILED`,
     // `SEAM_INTERNAL_FAULT`, `GATE_DRAFT_GONE`, `DRAFT_STATE_INVALID`) trips at
@@ -4734,6 +4778,148 @@ describe("[161-10 / WIZERR-07] the dashboard-dialog entries say only what is tru
       );
     }
   });
+
+  /**
+   * ⭐ 161-REVIEW / CR-01 — THE INDETERMINATE MEMBER, AND WHAT IT MAY NOT SAY.
+   *
+   * `DASHBOARD_WRITE_FAILED` covered every `internal error` 500 on all three
+   * routes, including arms whose own comments record that the outcome is
+   * unknown — the ownership flip RPC (which DELETES live positions and sets the
+   * mark in one transaction) and the allocation upsert (whose zero-rows arm
+   * names "RLS ate the row", i.e. the write LANDED and only the returning row
+   * was suppressed). Its sentence asserts "Nothing was saved", and it offered
+   * `clear_and_retry` on top of it.
+   *
+   * These cases pin the split from the COPY side, in both directions: what the
+   * new entry must not claim, and that the old entry's sentence and Retry are
+   * untouched for the arms that genuinely establish them.
+   */
+  it("INDETERMINATE claims persistence in NEITHER direction", () => {
+    const s = surface("DASHBOARD_WRITE_INDETERMINATE");
+
+    // ⛔ THE NEGATIVE HALF. `wizardErrors.ts:2470` — "'NOTHING WAS SAVED' IS
+    // VERIFIED, NOT ASSERTED". No arm reaching this code can verify it.
+    expect(
+      s,
+      "the indeterminate entry asserts a zero write. No arm that reaches it " +
+        "established one: an errored write is not a verified rollback, and " +
+        "the zero-rows arm's own comment says RLS may have eaten a row the " +
+        "upsert really wrote.",
+    ).not.toMatch(/nothing was saved/i);
+    expect(s).not.toMatch(/nothing was changed/i);
+    expect(s).not.toMatch(/as it was before/i);
+
+    // ⛔ AND THE OTHER DIRECTION, which is the correction a future edit is most
+    // likely to reach for once "nothing was saved" is forbidden. This is a
+    // STRUCTURAL rule rather than a needle list, because the honest copy has to
+    // be free to USE the word "saved" — its title is "We could not confirm
+    // whether that change was saved". What it may not do is state persistence
+    // WITHOUT a hedge. So: every sentence that mentions an outcome must also
+    // carry an epistemic qualifier.
+    const OUTCOME = /\bsaved\b|took effect|went through|\bapplied\b|succeeded/i;
+    const HEDGE =
+      /\bcannot\b|could not\b|\bwhether\b|\bif\b|\bnot there\b|\bnothing needs\b|\bmay\b/i;
+    const copy = WIZARD_ERROR_COPY.DASHBOARD_WRITE_INDETERMINATE;
+    const sentences = [copy.title, copy.cause, ...copy.fix]
+      .join(" ")
+      .split(/(?<=[.!?])\s+/)
+      .map((x) => x.trim())
+      .filter((x) => x.length > 0);
+
+    // NON-VACUITY, both ends: the split has to produce real sentences, and at
+    // least one of them has to mention an outcome — otherwise the loop below
+    // iterates over nothing that could ever fail.
+    expect(sentences.length).toBeGreaterThan(4);
+    const outcomeSentences = sentences.filter((x) => OUTCOME.test(x));
+    expect(
+      outcomeSentences.length,
+      "no sentence in this entry mentions an outcome at all, so the hedge " +
+        "rule below is checking nothing. The entry is supposed to be ABOUT an " +
+        "outcome it cannot confirm.",
+    ).toBeGreaterThan(0);
+
+    for (const sentence of outcomeSentences) {
+      expect(
+        HEDGE.test(sentence),
+        "this entry states an outcome with no qualifier: " +
+          JSON.stringify(sentence) +
+          " — a guess about a statement we never got an answer to, and the " +
+          "mirror image of the defect the entry was minted to close.",
+      ).toBe(true);
+    }
+
+    // ⭐ THE POSITIVE HALF, so "say nothing" is not a passing strategy. The
+    // entry must still name the actual state (Copy Principle 1) and carry a
+    // remedy that can succeed (Principle 2) — re-read current state, which is
+    // the ONE action that settles an unknown outcome.
+    expect(s, "the entry does not admit that we cannot tell").toMatch(
+      /cannot tell|could not confirm/i,
+    );
+    expect(s, "the entry does not send the user to re-read current state").toMatch(
+      /reload/i,
+    );
+    expect(s).toMatch(/current state/i);
+  });
+
+  it("INDETERMINATE offers NO Retry — a blind retry against a possibly-applied money write", () => {
+    const actions = WIZARD_ERROR_COPY.DASHBOARD_WRITE_INDETERMINATE
+      .actions as readonly string[];
+    expect(actions.length).toBeGreaterThan(0);
+    expect(
+      actions,
+      "`clear_and_retry` on an arm whose write may already have applied is a " +
+        "control whose effect the person pressing it cannot foresee. On the " +
+        "ownership flip that write removes live positions.",
+    ).not.toContain("clear_and_retry");
+    expect(actions).not.toContain("try_another_key");
+
+    // THE DERIVATION, not a restatement of the table: `buildEnvelope` reads
+    // `actions` against `RECOVERABLE_ACTIONS`, and `ErrorEnvelope`'s
+    // `showRetry` reads `recoverable`. Asserting the array alone would go
+    // green if the derivation rule ever changed.
+    expect(
+      buildEnvelope("DASHBOARD_WRITE_INDETERMINATE", "corr-dash-500-ind")
+        .recoverable,
+    ).toBe(false);
+
+    // ANTI-CONTROL: the split did not achieve "no Retry here" by removing the
+    // Retry everywhere. The verified-zero-write half keeps it.
+    expect(
+      buildEnvelope("DASHBOARD_WRITE_FAILED", "corr-dash-500-ver").recoverable,
+    ).toBe(true);
+  });
+
+  it("WRITE_FAILED's sentence and Retry survive the split byte-identical", () => {
+    // ⛔ The orchestrator's binding requirement for CR-01: the verified-zero
+    // arms keep TODAY's sentence, byte for byte. Hand-typed here, never
+    // imported from the table — an oracle that reads its expectation out of
+    // the thing it tests asserts copy(X) === copy(X) and cannot fail.
+    const copy = WIZARD_ERROR_COPY.DASHBOARD_WRITE_FAILED;
+    expect(copy.title).toBe("We could not save that change.");
+    expect(copy.cause).toBe(
+      "Our own service failed part-way through the change and stopped. " +
+        "Nothing was saved — the strategy is as it was before you pressed " +
+        "save. This is a fault on our side, not in your data.",
+    );
+    expect(copy.fix).toEqual([
+      "Try the same change again. This kind of fault is often momentary.",
+      "If it keeps failing, email security@quantalyze.com with the correlation id below.",
+    ]);
+    expect(copy.actions as readonly string[]).toContain("clear_and_retry");
+  });
+
+  it("the two write entries are DISTINCT copy, not one sentence twice", () => {
+    // A split that produced two members rendering the same words would satisfy
+    // every assertion above while changing nothing a user reads.
+    const failed = surface("DASHBOARD_WRITE_FAILED");
+    const indeterminate = surface("DASHBOARD_WRITE_INDETERMINATE");
+    expect(failed.length).toBeGreaterThan(140);
+    expect(indeterminate.length).toBeGreaterThan(140);
+    expect(indeterminate).not.toBe(failed);
+    expect(formatKeyError("DASHBOARD_WRITE_INDETERMINATE").title).not.toBe(
+      formatKeyError("DASHBOARD_WRITE_FAILED").title,
+    );
+  });
 });
 
 /**
@@ -4744,6 +4930,24 @@ describe("[161-10 / WIZERR-07] the dashboard-dialog entries say only what is tru
  * cast happens, so this is where the guard is pinned.
  */
 describe("[161-10 / WIZERR-07] the dashboard recogniser admits only rostered codes", () => {
+  it("161-CR-01: all three routes admit DASHBOARD_WRITE_INDETERMINATE", () => {
+    // Every one of the three routes has at least one arm that fails AFTER a
+    // data-modifying statement was sent, so every roster gains it. A roster
+    // that missed it would render "we could not classify this failure" for a
+    // failure the route classified precisely — the WIZERR-07 defect, on the
+    // arm where the user most needs to be told to go and look.
+    for (const route of [
+      "strategies/[id]/name",
+      "strategies/[id]/ownership",
+      "portfolio-strategies/allocation",
+    ] as const) {
+      expect(
+        recogniseDashboardDialogCode(route, "DASHBOARD_WRITE_INDETERMINATE"),
+        `${route} does not admit the indeterminate code`,
+      ).toBe("DASHBOARD_WRITE_INDETERMINATE");
+    }
+  });
+
   it("admits a code the route really emits, per route", () => {
     expect(
       recogniseDashboardDialogCode("strategies/[id]/name", "DASHBOARD_ROW_STALE"),

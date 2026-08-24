@@ -822,7 +822,14 @@ describe("[161-10 / WIZERR-07] the allocation route's other arms reach their own
   it.each([
     ["a signed-out session", 401, "DASHBOARD_SIGNED_OUT"],
     ["a request our own page built wrong", 400, "DASHBOARD_REQUEST_INVALID"],
-    ["an internal fault", 500, "DASHBOARD_WRITE_FAILED"],
+    ["an internal fault before anything was sent", 500, "DASHBOARD_WRITE_FAILED"],
+    // 161-REVIEW / CR-01 — the upsert erroring, or returning zero rows. The
+    // money write was already sent, so the route classifies it separately.
+    [
+      "an internal fault after the money write was sent",
+      500,
+      "DASHBOARD_WRITE_INDETERMINATE",
+    ],
     ["a row that is no longer there", 404, "DASHBOARD_ROW_STALE"],
   ])("%s renders its own envelope code", async (_label, status, code) => {
     const envelope = await submitAndFail(status, { code, error: "x" });
@@ -830,6 +837,63 @@ describe("[161-10 / WIZERR-07] the allocation route's other arms reach their own
     // NON-VACUITY: copy really rendered, so the negative below means something.
     expect(String(envelope.textContent).length).toBeGreaterThan(80);
     expect(envelope.textContent).not.toContain("Something went wrong.");
+  });
+
+  /**
+   * ⭐ 161-REVIEW / CR-01 — THE RETRY CONTROL, PINNED ON THE ONLY DASHBOARD
+   * DIALOG THAT CAN RENDER ONE.
+   *
+   * Measured: `AllocateDialog` is the only one of the three that passes
+   * `onRetry` (the other two pass none, so `ErrorEnvelope`'s
+   * `recoverable && Boolean(onRetry)` is false there for every code and a
+   * "no Retry" assertion on those surfaces would be vacuous). This is also the
+   * MONEY dialog, which is where offering a blind second attempt against a
+   * possibly-applied write actually costs something.
+   *
+   * The 151-E6 precedent in `AllocateDialog.tsx` is the same argument one code
+   * earlier: a retry handler is only wired for a failure retrying can clear.
+   * CR-01 adds the case where retrying is not futile but UNPREDICTABLE.
+   */
+  it("[161-CR-01] the indeterminate arm renders NO Retry — a blind retry against a possibly-live allocation", async () => {
+    const envelope = await submitAndFail(500, {
+      code: "DASHBOARD_WRITE_INDETERMINATE",
+      error: "internal error",
+    });
+    const text = String(envelope.textContent);
+    expect(text.length).toBeGreaterThan(140); // the haystack is real
+    expect(text).not.toMatch(/nothing was saved/i);
+
+    expect(
+      // The control's accessible name is its `aria-label`, measured at
+      // `ErrorEnvelope.tsx`: `aria-label="Retry"`. Matched exactly rather than
+      // by a loose pattern, so a renamed control reds here instead of
+      // silently satisfying a `queryByRole(...) === null`.
+      screen.queryByRole("button", { name: "Retry" }),
+      "a Retry rendered for a write whose outcome we could not read. The " +
+        "upsert may have landed and the allocation may be live; pressing it " +
+        "is an action whose effect the person pressing it cannot foresee.",
+    ).toBeNull();
+  });
+
+  it("[161-CR-01] NEGATIVE CONTROL: the verified-zero-write arm still renders its Retry", async () => {
+    // The matched pair. Without it, the case above is satisfied by a dialog
+    // that lost the Retry control outright — which would be the over-eager
+    // class fix, and would strip a control that is correct on an arm where
+    // nothing was sent.
+    const envelope = await submitAndFail(500, {
+      code: "DASHBOARD_WRITE_FAILED",
+      error: "internal error",
+    });
+    expect(String(envelope.textContent)).toMatch(/nothing was saved/i);
+    expect(
+      // The control's accessible name is its `aria-label`, measured at
+      // `ErrorEnvelope.tsx`: `aria-label="Retry"`. Matched exactly rather than
+      // by a loose pattern, so a renamed control reds here instead of
+      // silently satisfying a `queryByRole(...) === null`.
+      screen.queryByRole("button", { name: "Retry" }),
+      "the split was achieved by removing the Retry everywhere rather than " +
+        "removing it where it is unsafe",
+    ).not.toBeNull();
   });
 
   it("an UNRECOGNISED code still falls to UNKNOWN — recognition is a roster, not a cast", async () => {

@@ -182,6 +182,7 @@ const DIALOGS: readonly DialogUnderTest[] = [
       "NAME_TOO_LONG",
       "RATE_LIMITED",
       "DASHBOARD_WRITE_FAILED",
+      "DASHBOARD_WRITE_INDETERMINATE",
       "DASHBOARD_ROW_STALE",
     ],
     deliberatelyNotEnvelope: {
@@ -204,6 +205,7 @@ const DIALOGS: readonly DialogUnderTest[] = [
       "DASHBOARD_REQUEST_INVALID",
       "RATE_LIMITED",
       "DASHBOARD_WRITE_FAILED",
+      "DASHBOARD_WRITE_INDETERMINATE",
       "LIVE_ALLOCATION",
       "DASHBOARD_ROW_STALE",
     ],
@@ -225,6 +227,7 @@ const DIALOGS: readonly DialogUnderTest[] = [
       "DASHBOARD_REQUEST_INVALID",
       "RATE_LIMITED",
       "DASHBOARD_WRITE_FAILED",
+      "DASHBOARD_WRITE_INDETERMINATE",
       "DASHBOARD_ROW_STALE",
       "ALLOCATION_NOT_ALLOCATABLE",
     ],
@@ -443,8 +446,11 @@ describe("[161-10 / WIZERR-07] the dashboard-dialog envelope population", () => 
     }
 
     expect(offenders, offenders.join("\n")).toEqual([]);
-    // NON-VACUITY: 5 + 5 + 6 across the three rosters, hand-counted at HEAD.
-    expect(checked).toBe(16);
+    // NON-VACUITY: 6 + 6 + 7 across the three rosters, hand-counted at HEAD.
+    // 16 -> 19 at 161-REVIEW / CR-01: `DASHBOARD_WRITE_INDETERMINATE` joined
+    // all three rosters, because all three routes have at least one arm that
+    // fails AFTER a data-modifying statement was sent.
+    expect(checked).toBe(19);
   });
 
   it("B. no rostered code is the generic terminal — that would defeat the roster", () => {

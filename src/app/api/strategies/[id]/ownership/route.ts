@@ -32,15 +32,31 @@ import {
  * dialog previously read `refusal.error === "live_allocation"` and rendered
  * `code: "UNKNOWN"` for all thirteen other arms, every one classified here.
  *
- * ⭐ THE FIVE `internal error` ARMS SHARE ONE CODE, and that is a decision, not
- * an oversight. They differ by WHICH internal query failed — the portfolio
- * lookup, the position lookup, the flip RPC erroring, the flip RPC returning no
- * row, the plain UPDATE. That distinction is one the user cannot act on and must
- * not be asked to: their situation ("we could not save that change") and their
- * remedy ("nothing was saved — try again, and tell us if it repeats") are
- * identical at all five. Each site already logs its own distinct server-side
- * line, which is where the distinction belongs. A code per call site would put
- * our internal call graph in front of a person trying to mark a strategy.
+ * ⭐ THE FIVE `internal error` ARMS SPLIT 2 / 3 ON ONE QUESTION — WAS ANYTHING
+ * SENT? — and that is a decision, not an oversight. They still do NOT split by
+ * which internal query failed: that distinction is one the user cannot act on
+ * and must not be asked to, each site already logs its own distinct server-side
+ * line, and a code per call site would put our internal call graph in front of a
+ * person trying to mark a strategy.
+ *
+ *   · `DASHBOARD_WRITE_FAILED` — the portfolio lookup and the position lookup.
+ *     Both fail on a SELECT, with no data-modifying statement sent, so the
+ *     copy's "Nothing was saved — the strategy is as it was before you pressed
+ *     save" is established by the control flow. Both keep `clear_and_retry`.
+ *   · `DASHBOARD_WRITE_INDETERMINATE` — the flip RPC erroring, the flip RPC
+ *     returning no row, and the plain UPDATE erroring. On all three a statement
+ *     that CHANGES data was already sent and no arm can read what it did.
+ *
+ * ⛔ 161-REVIEW / CR-01 — 161-10 GAVE ALL FIVE THE FIRST CODE, so three arms
+ * shipped a sentence they had not established. Worst of them is the flip:
+ * `flip_capital_ownership_to_team_review` DELETES the caller's live positions
+ * and sets the mark in one transaction, so "Nothing was saved" there can tell a
+ * user their book is untouched while their positions are gone — and the
+ * accompanying `clear_and_retry` invites a blind second attempt against it. The
+ * split's copy claims persistence in neither direction and sends the user to
+ * re-read current state instead. See the "'NOTHING WAS SAVED' IS VERIFIED, NOT
+ * ASSERTED" rule at the `CSV_UPSTREAM_FAIL` entry in `wizardErrors.ts`, and the
+ * `DASHBOARD_WRITE_FAILED` / `DASHBOARD_WRITE_INDETERMINATE` union members.
  *
  * ⛔ `LIVE_ALLOCATION` is deliberately NOT a `WizardErrorCode` and is absent
  * from `DASHBOARD_DIALOG_ROUTE_CODES`. That 409 is a QUESTION, not a refusal to
@@ -295,12 +311,20 @@ export async function PATCH(
         )("flip_capital_ownership_to_team_review", { p_strategy_id: id });
 
         if (flipErr) {
+          // ⛔ 161-REVIEW / CR-01 — INDETERMINATE. The RPC was SENT, and the
+          // RPC is the transaction that DELETES the caller's live positions and
+          // sets the mark. `supabase-js` reports a PostgREST rejection and a
+          // transport failure through one `{ data, error }` shape and this arm
+          // does not discriminate them, so it cannot verify the flip did not
+          // land. Telling the user "Nothing was saved" here can put a screen in
+          // front of them that says their book is untouched while their
+          // positions are gone.
           console.error(
             "[api/strategies/[id]/ownership] flip rpc failed:",
             flipErr.message,
           );
           return NextResponse.json(
-            { code: "DASHBOARD_WRITE_FAILED", error: "internal error" },
+            { code: "DASHBOARD_WRITE_INDETERMINATE", error: "internal error" },
             { status: 500, headers: NO_STORE_HEADERS },
           );
         }
@@ -310,12 +334,19 @@ export async function PATCH(
           // A RETURNS TABLE function that yields no row leaves the counts
           // unknown. Reporting success here would claim a flip that may not
           // have happened.
+          //
+          // ⛔ 161-REVIEW / CR-01 — AND NEITHER MAY IT REPORT ZERO. "the counts
+          // unknown" is exactly the state `DASHBOARD_WRITE_INDETERMINATE`
+          // exists for: the code that used to answer here says "Nothing was
+          // saved", which is the mirror-image guess. Unknown means unknown, in
+          // both directions — the "'NOTHING WAS SAVED' IS VERIFIED, NOT
+          // ASSERTED" rule at `CSV_UPSTREAM_FAIL` in `wizardErrors.ts`.
           console.error(
             "[api/strategies/[id]/ownership] flip rpc returned no row",
             { strategyId: id, userId: user.id },
           );
           return NextResponse.json(
-            { code: "DASHBOARD_WRITE_FAILED", error: "internal error" },
+            { code: "DASHBOARD_WRITE_INDETERMINATE", error: "internal error" },
             { status: 500, headers: NO_STORE_HEADERS },
           );
         }
@@ -358,12 +389,15 @@ export async function PATCH(
     .select("id");
 
   if (updateErr) {
+    // ⛔ 161-REVIEW / CR-01 — INDETERMINATE. Same reasoning as the two arms
+    // above and as the name route's UPDATE: the statement was sent and this arm
+    // cannot tell a rejection from a lost answer.
     console.error(
       "[api/strategies/[id]/ownership] update failed:",
       updateErr.message,
     );
     return NextResponse.json(
-      { code: "DASHBOARD_WRITE_FAILED", error: "internal error" },
+      { code: "DASHBOARD_WRITE_INDETERMINATE", error: "internal error" },
       { status: 500, headers: NO_STORE_HEADERS },
     );
   }

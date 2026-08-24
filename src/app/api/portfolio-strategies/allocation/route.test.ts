@@ -541,6 +541,105 @@ describe("POST — the money write (SC 2) and the SC-4 duplicate-add oracle", ()
   });
 
   /**
+   * ⭐ 161-REVIEW / CR-01 — THE MONEY WRITE'S 500s SAY ONLY WHAT THEY KNOW.
+   *
+   * 161-10 gave every `internal error` 500 on this route
+   * `DASHBOARD_WRITE_FAILED`, whose copy reads "Nothing was saved — the
+   * strategy is as it was before you pressed save" and which offers a Retry.
+   * Two of the arms it covered cannot support that:
+   *
+   *   · the upsert ERRORING — `supabase-js` reports a PostgREST rejection
+   *     (rolled back) and a transport failure (may have committed, answer lost)
+   *     through the same `{ data, error }` shape, and this route does not
+   *     discriminate them;
+   *   · the upsert returning ZERO ROWS — the route's own comment names "RLS ate
+   *     the row" as a cause, and that means the write SUCCEEDED and only the
+   *     returning row was suppressed. The allocation may be LIVE.
+   *
+   * These cases pin the arms by their measured code, with a negative control on
+   * a READ-failure arm so "re-code everything" is not a passing strategy.
+   */
+  it("[161-CR-01] the upsert returning ZERO ROWS is INDETERMINATE — the write may have landed", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    setup({ ps: { upsertRows: 0 } });
+    const { POST } = await import("./route");
+    const res = await POST(
+      post({ strategy_id: STRATEGY_ID, allocated_amount: 120_000 }),
+    );
+
+    // ⚠️ ARM PROOF FIRST — the code assertion below is satisfiable by a fixture
+    // that never reached the upsert at all.
+    expect(res.status).toBe(500);
+    const body = (await res.json()) as { code?: unknown; error?: unknown };
+
+    // The SENTENCE is byte-identical: `code` is the only thing that moved.
+    expect(body.error).toBe("internal error");
+    expect(
+      body.code,
+      "'RLS ate the row' means the upsert SUCCEEDED and the returning row was " +
+        "suppressed. Answering DASHBOARD_WRITE_FAILED here tells an allocator " +
+        "nothing was saved about a position that may be live, and invites a " +
+        "one-click Retry on top of it.",
+    ).toBe("DASHBOARD_WRITE_INDETERMINATE");
+    errorSpy.mockRestore();
+  });
+
+  it("[161-CR-01] a non-23514 upsert ERROR is INDETERMINATE — an errored write is not a verified rollback", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    setup({
+      ps: {
+        upsertError: {
+          code: "42501",
+          message: "permission denied for table portfolio_strategies",
+        },
+      },
+    });
+    const { POST } = await import("./route");
+    const res = await POST(
+      post({ strategy_id: STRATEGY_ID, allocated_amount: 120_000 }),
+    );
+
+    expect(res.status).toBe(500);
+    const body = (await res.json()) as { code?: unknown; error?: unknown };
+    expect(body.error).toBe("internal error");
+    expect(body.code).toBe("DASHBOARD_WRITE_INDETERMINATE");
+    errorSpy.mockRestore();
+  });
+
+  it("[161-CR-01] NEGATIVE CONTROL: a failed strategy LOOKUP stays DASHBOARD_WRITE_FAILED", async () => {
+    // The matched pair. Without this, the two cases above are satisfied by a
+    // route that answers INDETERMINATE everywhere — which would replace one
+    // false sentence with a vaguer one on arms that genuinely establish a zero
+    // write, and would strip a Retry that is correct there.
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const fx = setup({
+      strategy: null,
+      strategyError: { message: "connection reset" },
+    });
+    const { POST } = await import("./route");
+    const res = await POST(
+      post({ strategy_id: STRATEGY_ID, allocated_amount: 120_000 }),
+    );
+
+    expect(res.status).toBe(500);
+    // ⭐ THE PROPERTY THAT EARNS THE SENTENCE, asserted rather than assumed:
+    // nothing was sent. Zero upserts is what makes "Nothing was saved" a fact
+    // about the control flow instead of a claim about a statement's outcome.
+    expect(fx.ps.upsertCalls).toHaveLength(0);
+    expect(fx.portfolios.insertPayloads).toHaveLength(0);
+
+    const body = (await res.json()) as { code?: unknown; error?: unknown };
+    expect(body.error).toBe("internal error");
+    expect(
+      body.code,
+      "this arm fails on a SELECT with nothing sent, so it is entitled to the " +
+        "'Nothing was saved' sentence and to its Retry. Widening the " +
+        "indeterminate code to cover it would be over-correction.",
+    ).toBe("DASHBOARD_WRITE_FAILED");
+    errorSpy.mockRestore();
+  });
+
+  /**
    * 151 review E4 — THE GATE FIRING IS NOT A SERVER FAULT.
    *
    * This route's own docblock states the design: the 409 pre-check is UX, the
@@ -896,6 +995,46 @@ describe("DELETE /api/portfolio-strategies/allocation — remove a position", ()
     const { DELETE } = await import("./route");
     const res = await DELETE(del({ strategy_id: STRATEGY_ID }));
     expect(res.status).toBe(500);
+    errorSpy.mockRestore();
+  });
+
+  /**
+   * ⭐ 161-REVIEW / CR-01 — the DELETE verb's own matched pair.
+   *
+   * Both of this verb's 500s were `DASHBOARD_WRITE_FAILED`, and they are on
+   * opposite sides of the split: the book lookup fails on a SELECT with nothing
+   * sent, while the DELETE itself is a statement whose outcome this route
+   * cannot read. Telling a user "Nothing was saved" after a removal we could
+   * not confirm is the worst direction to be wrong in — it says their position
+   * is still there.
+   */
+  it("[161-CR-01] a failed DELETE is INDETERMINATE — the removal may have landed", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    setup({ ps: { deleteError: { message: "boom" } } });
+    const { DELETE } = await import("./route");
+    const res = await DELETE(del({ strategy_id: STRATEGY_ID }));
+
+    expect(res.status).toBe(500);
+    const body = (await res.json()) as { code?: unknown; error?: unknown };
+    expect(body.error).toBe("internal error"); // sentence byte-identical
+    expect(body.code).toBe("DASHBOARD_WRITE_INDETERMINATE");
+    errorSpy.mockRestore();
+  });
+
+  it("[161-CR-01] NEGATIVE CONTROL: a failed BOOK LOOKUP stays DASHBOARD_WRITE_FAILED", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const fx = setup({
+      portfolios: { resolve: [], resolveError: { message: "connection reset" } },
+    });
+    const { DELETE } = await import("./route");
+    const res = await DELETE(del({ strategy_id: STRATEGY_ID }));
+
+    expect(res.status).toBe(500);
+    // The property that earns the sentence: no delete was issued.
+    expect(fx.ps.deleteEqCalls).toHaveLength(0);
+    const body = (await res.json()) as { code?: unknown; error?: unknown };
+    expect(body.error).toBe("internal error");
+    expect(body.code).toBe("DASHBOARD_WRITE_FAILED");
     errorSpy.mockRestore();
   });
 });

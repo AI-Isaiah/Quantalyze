@@ -829,18 +829,110 @@ describe("[161-10 / WIZERR-07] the ownership route classifies every arm it refus
     ).toBe(codeFirst);
   });
 
-  it("the FIVE internal-error arms share ONE code, and that is the decision", () => {
-    // The decision is recorded in the route's docblock: they differ by WHICH
-    // internal query failed, which the user cannot act on, and each site
-    // already logs its own distinct server-side line. This pin is what stops
-    // the decision being reversed silently in either direction — by splitting
-    // them per call site, or by an arm losing its code entirely.
-    const internal = (
+  it("the FIVE internal-error arms split 2 / 3 on ONE question, and that is the decision", () => {
+    // The decision is recorded in the route's docblock. They still do NOT split
+    // by WHICH internal query failed — that is a distinction the user cannot
+    // act on, and each site already logs its own distinct server-side line.
+    //
+    // ⛔ 161-REVIEW / CR-01 RE-ARGUED THIS PIN rather than bumping it. It used
+    // to read `expect(internal).toBe(5)` over `DASHBOARD_WRITE_FAILED` alone,
+    // and it was doing its job: it pinned a decision that had become wrong.
+    // 161-10 gave all five arms a code whose sentence says "Nothing was saved",
+    // but three of them return AFTER a data-modifying statement was sent —
+    // the flip RPC erroring, the flip RPC returning no row, and the plain
+    // UPDATE erroring. The flip is the transaction that DELETES live positions.
+    //
+    // The split is on ONE mechanical question — was anything sent? — so the
+    // counts below are two independent hand-typed literals, and BOTH have to
+    // move for a future arm to be added. That friction is the point: it forces
+    // whoever adds the sixth arm to answer the question rather than inherit an
+    // answer.
+    const verifiedZeroWrite = (
       SRC.match(
         /\{ code: "DASHBOARD_WRITE_FAILED", error: "internal error" \},/g,
       ) ?? []
     ).length;
-    expect(internal).toBe(5);
+    const indeterminate = (
+      SRC.match(
+        /\{ code: "DASHBOARD_WRITE_INDETERMINATE", error: "internal error" \},/g,
+      ) ?? []
+    ).length;
+
+    // The portfolio lookup and the position lookup. Both fail on a SELECT.
+    expect(
+      verifiedZeroWrite,
+      "an arm was added to or removed from the verified-zero-write set. It " +
+        "belongs there ONLY if no data-modifying statement has been sent when " +
+        "it returns — that is what makes its 'Nothing was saved' sentence a " +
+        "fact about the control flow rather than a claim.",
+    ).toBe(2);
+    // The flip RPC erroring, the flip RPC returning no row, the plain UPDATE.
+    expect(
+      indeterminate,
+      "an arm was added to or removed from the indeterminate set. Every arm " +
+        "downstream of a sent write belongs here: an errored write is not a " +
+        "verified rollback, and a write that returns no row is not a write " +
+        "that did nothing.",
+    ).toBe(3);
+    // …and the total is still five, so an arm cannot go missing from both.
+    expect(verifiedZeroWrite + indeterminate).toBe(5);
+  });
+
+  /**
+   * ⭐ 161-REVIEW / CR-01 — THE SPLIT IS PINNED AT THE ARM, not only by count.
+   *
+   * A source count says three arms carry the indeterminate code; it does not
+   * say they are the RIGHT three. These two cases drive the two arms the review
+   * named by hand — the flip RPC erroring and the flip RPC returning no row —
+   * and assert the code on the wire, with a negative control on a READ-failure
+   * arm so "everything is indeterminate now" is not a passing strategy.
+   */
+  it("SOURCE ORDER: the indeterminate arms are the ones downstream of the flip RPC and the UPDATE", () => {
+    // Positional, because this file's fixtures cannot easily reach the flip
+    // arms (they need a live position AND a confirmed removal). The claim is
+    // structural and the source is the right place to make it: each
+    // indeterminate arm must appear AFTER the statement that makes it
+    // indeterminate.
+    const rpcCall = SRC.indexOf("flip_capital_ownership_to_team_review", 200);
+    const plainUpdate = SRC.indexOf('.update({ capital_ownership: mark })');
+    expect(rpcCall, "the flip RPC call was not found in the source").toBeGreaterThan(0);
+    expect(plainUpdate, "the plain UPDATE was not found").toBeGreaterThan(rpcCall);
+
+    const indeterminatePositions: number[] = [];
+    const needle = '{ code: "DASHBOARD_WRITE_INDETERMINATE", error: "internal error" },';
+    let at = SRC.indexOf(needle);
+    while (at !== -1) {
+      indeterminatePositions.push(at);
+      at = SRC.indexOf(needle, at + 1);
+    }
+    expect(indeterminatePositions).toHaveLength(3);
+    for (const pos of indeterminatePositions) {
+      expect(
+        pos,
+        "an indeterminate arm sits ABOVE the flip RPC — i.e. before anything " +
+          "was sent. That arm is verified-zero-write and should carry " +
+          "DASHBOARD_WRITE_FAILED.",
+      ).toBeGreaterThan(rpcCall);
+    }
+
+    // NEGATIVE CONTROL: both verified-zero arms sit BELOW neither — they are
+    // above the RPC, in the lookup block.
+    const verifiedNeedle = '{ code: "DASHBOARD_WRITE_FAILED", error: "internal error" },';
+    let vAt = SRC.indexOf(verifiedNeedle);
+    const verifiedPositions: number[] = [];
+    while (vAt !== -1) {
+      verifiedPositions.push(vAt);
+      vAt = SRC.indexOf(verifiedNeedle, vAt + 1);
+    }
+    expect(verifiedPositions).toHaveLength(2);
+    for (const pos of verifiedPositions) {
+      expect(
+        pos,
+        "a verified-zero-write arm sits BELOW the flip RPC, so a statement " +
+          "that changes data had already been sent when it returned and its " +
+          "'Nothing was saved' sentence is an assertion, not a fact.",
+      ).toBeLessThan(rpcCall);
+    }
   });
 
   it("the live_allocation 409 keeps its amount field AND its sentence", () => {
