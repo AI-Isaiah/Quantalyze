@@ -26,6 +26,26 @@ items were dropped, not carried. Categories: **Fix now** / **Fix mid-term** / **
 
 ## 🔴 FIX NOW — live correctness, trust-boundary security, active go-live
 
+0.06. **⚠️ A manager cannot release their own orphaned API key — no surface exists.** Found
+   2026-08-24 during Phase 161 (WIZERR-03) execution, when the approved `161-UI-SPEC.md` remedy
+   bullet turned out to be **unwinnable at HEAD** and had to be replaced rather than shipped.
+   - The UI-SPEC said: *"Disconnect the unused key under Manage keys, then connect it here again."*
+     Measured: the string `"Manage keys"` occurs **nowhere** in `src`. `ApiKeyManager` is mounted
+     only on the per-strategy edit page (`strategies/[id]/edit/page.tsx`) — and an orphaned key by
+     definition has no strategy. Profile → Exchanges is `allocatorOnly`, and the wizard user in this
+     flow is a manager. `my-strategies` displays the orphan but its only control reopens the wizard
+     that just refused.
+   - So the honest refusal now shipping (`KEY_ORPHANED`) correctly tells the user their key is
+     stranded — **and there is no place in the product where they can un-strand it.** The orphan is
+     permanent: `cleanup_abandoned_wizard_drafts()` builds its candidate set only from drafts that
+     same run is deleting, so a key with no draft is never a candidate again (re-measured at HEAD).
+   - Shipping the original bullet would have breached the exact principle WIZERR-03 enforces — a
+     remedy that cannot succeed. Filed by the executor as D-161-05-A; recorded here because it is a
+     **product gap**, not a phase artifact.
+   - **Fix shape:** give managers a key-release surface reachable without a strategy (extend the
+     profile Exchanges panel past `allocatorOnly`, or add a control on `my-strategies`), then point
+     the `KEY_ORPHANED` remedy at it.
+
 0.05. **⚠️ MT5 generic fallback names a cause it has NOT proven — a false sentence in the arm that
    exists for "cause unknown".** Found 2026-08-24 during Phase 161 (WIZERR-01) execution; the plan
    deliberately did not touch it, and `161-UI-SPEC.md` holds arm 3 unchanged, so this is a scoped
