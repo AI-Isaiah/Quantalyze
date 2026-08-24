@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 12
+open_count: 13
 waived_count: 0
 fixed_count: 1
-total_count: 13
-last_updated: 2026-08-24T12:23:07.786Z
+total_count: 14
+last_updated: 2026-08-24T21:01:39.389Z
 ---
 
 # Broken Windows Ledger
@@ -28,6 +28,7 @@ last_updated: 2026-08-24T12:23:07.786Z
 | 11 | 161 | deviation | src/lib/wizardErrors.ts |  | 161-05: KEY_ORPHANED's UI-SPEC remedy bullet was replaced — no manager-facing surface can release an orphaned api_key (D-161-05-A) | open |  | 2026-08-24T11:53:32.055Z |  |
 | 12 | 161 | deviation | src/app/api/strategies/create-with-key/route.ts |  | 161-05: orphaned MT5 connect waits out the full 120s validate before the KEY_ORPHANED refusal (D-161-05-B) | open |  | 2026-08-24T11:53:39.722Z |  |
 | 13 | 161 | unrun-verify | .planning/phases/161-wizerr-honest-error-surfaces/161-06-PLAN.md |  | 161-06 backstop truth unverified: the rendered wait sentence's wrap/no-clipping on the E2 key-connect envelope — no renderer touched this plan | open |  | 2026-08-24T12:23:07.786Z |  |
+| 14 | 161 | unrun-verify | src/app/(dashboard)/allocations/components/AllocateDialog.tsx |  | E5 residue: founder eyes-on pass on the real Allocate dialog in Safari is unverified; layout measured only in Chromium on reproduced Modal/ErrorEnvelope markup (result: scrolls, does not clip) | open |  | 2026-08-24T21:01:39.389Z |  |
 
 ````json
 [
@@ -185,6 +186,18 @@ last_updated: 2026-08-24T12:23:07.786Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-08-24T12:23:07.786Z",
+    "resolved_at": null
+  },
+  {
+    "id": 14,
+    "kind": "unrun-verify",
+    "phase": "161",
+    "file": "src/app/(dashboard)/allocations/components/AllocateDialog.tsx",
+    "line": null,
+    "description": "E5 residue: founder eyes-on pass on the real Allocate dialog in Safari is unverified; layout measured only in Chromium on reproduced Modal/ErrorEnvelope markup (result: scrolls, does not clip)",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-08-24T21:01:39.389Z",
     "resolved_at": null
   }
 ]

@@ -5,16 +5,16 @@ milestone_name: Backlog Burndown (Phases 158+)
 current_phase: 161
 current_phase_name: WIZERR — Honest error surfaces
 status: verifying
-stopped_at: Completed 161-08-PLAN.md
-last_updated: "2026-08-24T20:11:50.870Z"
+stopped_at: Completed 161-10-PLAN.md
+last_updated: "2026-08-24T21:01:29.453Z"
 last_activity: 2026-08-24
 last_activity_desc: Phase 161 execution — waves 1-3 landed
-state_head: 1cc8a91e22f959d2861e41f8b6b5b4e008054f39
+state_head: 0aa731d78a5fce45e84b08cb0b817de319c184ed
 progress:
   total_phases: 9
   completed_phases: 1
   total_plans: 30
-  completed_plans: 26
+  completed_plans: 27
   percent: 11
 ---
 
@@ -114,7 +114,7 @@ zero unclassified) and `161-VALIDATION.md` (Nyquist strategy, 4 Wave-0 gaps, ant
 ## Current Position
 
 Phase: 161 (WIZERR — Honest error surfaces) — EXECUTING
-Plan: 8 of 10
+Plan: 9 of 10
 Status: Waves 1-3 landing; 161-07..161-10 pending
 Last activity: 2026-08-24 — Phase 161 waves 1-3
 
@@ -631,6 +631,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 | Phase 161 P06 | 75m | 3 tasks | 13 files |
 | Phase 161 P07 | 85 min | 3 tasks | 8 files |
 | Phase 161 P08 | 35m | 3 tasks | 11 files |
+| Phase 161 P10 | 2h40m | 3 tasks | 15 files |
 
 ## Accumulated Context
 
@@ -769,6 +770,8 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - [Phase 161]: 161-07: the examined-refused verdict Set became a Map whose VALUE is the user-visible sentence — a verdict cannot join the class without bringing its own copy
 - [Phase 161]: 161-07: BOTH 161-UI-SPEC WIZERR-10 clauses corrected against broker_dailies.py (no size threshold; no per-series examination), and its WIZERR-09 'upload a CSV' remedy replaced — a fifth measured UI-SPEC copy defect
 - [Phase 161]: 161-08: widen the terminal 5xx code channel on five seam routes; the shape law's membership requires a 4xx range split, which excludes scenario/optimize whose bare terminal UNKNOWN is correct by construction
+- [Phase 161]: 161-10: dashboard routes emit code-first literals; dialogs recognise through ONE shared per-route roster (DASHBOARD_DIALOG_ROUTE_CODES) holding the only guarded cast
+- [Phase 161]: 161-10: 4 DASHBOARD_* members minted (pins 84 -> 88) because each near-neighbour's SENTENCE is false on a dashboard dialog
 
 ### Decisions (execution-time, Phase 140.2)
 
@@ -1471,8 +1474,8 @@ Load-bearing sequencing (real dependencies, do not reorder):
 
 ## Session
 
-**Last Date:** 2026-08-24T20:11:39.915Z
-**Stopped At:** Completed 161-08-PLAN.md
+**Last Date:** 2026-08-24T21:01:17.879Z
+**Stopped At:** Completed 161-10-PLAN.md
 **Resume File:** None
 **Next step:** Phase 161 (WIZERR — honest error surfaces) is next and NOT yet planned — run `/gsd-plan-phase 161`. Phase 161.1 (LEDGER-REFRESH) was inserted after it on 2026-08-24 for the founder-reported MT5 staleness; it is URGENT and production-facing, so it may be pulled ahead of 161 if you prefer the live data-integrity fix first.
 
