@@ -50,18 +50,44 @@
  * reviewer's attention.
  *
  * ─────────────────────────────────────────────────────────────────────────────
- * ⛔ TRAP-3 — ABSENCE STAYS ABSENCE
+ * ⛔ TRAP-3 — ABSENCE STAYS ABSENCE, AND BOTH BRANCHES ENFORCE IT
  *
- * When neither source advertised a wait, NO header is attached. Never `"0"`,
- * never `""`, never a default. Zero is not "no wait": it is an instruction to
- * retry immediately — a duration nobody sent, and the ~0 ms hot-retry that
- * B20's parser exists to make unreachable. The exemplar this copies is the
- * `keys/[id]/permissions` throttle arm's undefined-check ternary.
+ * When neither source advertised a usable wait, NO header is attached. Never
+ * `"0"`, never `""`, never a default. Zero is not "no wait": it is an
+ * instruction to retry immediately — a duration nobody sent, and the ~0 ms
+ * hot-retry that B20's parser exists to make unreachable. The exemplar this
+ * copies is the `keys/[id]/permissions` throttle arm's undefined-check ternary.
  *
- * Our own seam cannot produce a non-positive value (`parseRetryAfterSeconds`
- * returns strictly positive or `null`, and `error_contract._validate` rejects a
- * non-positive `retry_after` at the raise site), but this function cannot
- * verify that about a value it was merely handed, so it checks.
+ * ⚠️ 161-REVIEW / WR-01 — THIS SECTION USED TO DESCRIBE A PROPERTY THE CODE DID
+ * NOT ENFORCE, in two different ways, and both are now closed at the guard
+ * rather than in prose:
+ *
+ *   1. The SEAM branch checked `Number.isFinite`, which admits a FRACTION.
+ *      `parseRetryAfterSeconds` (`src/lib/retry/retry-after.ts`) returns
+ *      `Number(raw)` for the delta-seconds form, so an intervening proxy or CDN
+ *      answering `Retry-After: 0.5` crossed the seam as `0.5` and was relayed
+ *      onto OUR OWN response verbatim — not a valid RFC-9110 `delta-seconds`,
+ *      and rendered to the user as "Try again in 0.5s". `Number.isInteger` is
+ *      the correct predicate and subsumes `Number.isFinite` (it rejects `NaN`,
+ *      `±Infinity` and every fractional value), so it REPLACES it rather than
+ *      joining it.
+ *   2. The BREAKER branch stamped `String(err.retryAfterS)` unconditionally,
+ *      INHERITING the rule from `CircuitOpenError`'s constructor instead of
+ *      applying it. That constructor accepts a non-negative integer — so `0` is
+ *      legal there and would have arrived here as `Retry-After: 0`, the exact
+ *      value this section forbids.
+ *
+ * `CircuitOpenError` (`src/lib/seam-errors.ts`) carries the `Number.isInteger`
+ * guard at its own constructor for precisely this reason, quoted there: the
+ * value "is forwarded as a `Retry-After` HEADER by both seam clients". 161-06
+ * created a SECOND value forwarded onto the same wire and did not inherit the
+ * guard; it does now, on both branches.
+ *
+ * ⭐ WHY CHECK AT ALL when both producers are believed well-behaved: this
+ * function cannot verify anything about a value it was merely handed — and the
+ * seam value's provenance is an *upstream response header*, which is to say a
+ * value any hop on the path can write. A guard here is the last one before our
+ * own bytes.
  *
  * ─────────────────────────────────────────────────────────────────────────────
  * ⛔ `typeof`, NOT `instanceof AnalyticsUpstreamError`
@@ -90,8 +116,13 @@ import { NO_STORE_HEADERS } from "@/lib/api/headers";
 
 /**
  * The response headers for a key-route failure: `NO_STORE_HEADERS`, plus a
- * `Retry-After` iff exactly one of the two sources above advertised a positive
- * wait.
+ * `Retry-After` iff exactly one of the two sources above advertised a wait that
+ * is a POSITIVE INTEGER number of seconds — RFC-9110 `delta-seconds`, the only
+ * shape this header may carry.
+ *
+ * `typeof advertisedWait === "number"` is retained ahead of `Number.isInteger`
+ * for the type narrowing, not for the check: `Number.isInteger` is not a TS type
+ * guard, so without it `String(advertisedWait)` is an `unknown` read.
  */
 export function keyRouteFailureHeaders(err: unknown): Record<string, string> {
   const advertisedWait = (
@@ -99,9 +130,11 @@ export function keyRouteFailureHeaders(err: unknown): Record<string, string> {
   )?.retryAfterSeconds;
 
   return err instanceof CircuitOpenError
-    ? { ...NO_STORE_HEADERS, "Retry-After": String(err.retryAfterS) }
+    ? Number.isInteger(err.retryAfterS) && err.retryAfterS > 0
+      ? { ...NO_STORE_HEADERS, "Retry-After": String(err.retryAfterS) }
+      : NO_STORE_HEADERS
     : typeof advertisedWait === "number" &&
-        Number.isFinite(advertisedWait) &&
+        Number.isInteger(advertisedWait) &&
         advertisedWait > 0
       ? { ...NO_STORE_HEADERS, "Retry-After": String(advertisedWait) }
       : NO_STORE_HEADERS;

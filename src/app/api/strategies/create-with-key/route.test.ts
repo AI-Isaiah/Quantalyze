@@ -3297,4 +3297,96 @@ describe("[161-06 / WIZERR-05] create-with-key — the Retry-After relay", () =>
     expect(res.headers.get("Retry-After")).toBeNull();
     consoleErr.mockRestore();
   });
+
+  /**
+   * ⭐ 161-REVIEW / WR-01 — A FRACTION IS NOT A `delta-seconds`.
+   *
+   * `parseRetryAfterSeconds` returns `Number(raw)` for the delta-seconds form,
+   * so a `Retry-After: 0.5` written by ANY hop on the path — a proxy, a CDN, a
+   * misconfigured gateway — crossed the seam as `0.5` and was relayed verbatim
+   * onto OUR OWN response. `Number.isFinite` admits it; RFC-9110 does not, and
+   * the wizard rendered it as "Try again in 0.5s".
+   *
+   * ⚠️ THE VALUE'S PROVENANCE IS THE ARGUMENT. This is not a defensive check
+   * against our own service: it is a check on an UPSTREAM RESPONSE HEADER,
+   * which is a value we do not author. `CircuitOpenError` has carried
+   * `Number.isInteger` at its constructor since 140.2-11 for exactly this
+   * reason — "it is forwarded as a `Retry-After` HEADER by both seam clients" —
+   * and 161-06 created the second wire-forwarded value without inheriting it.
+   */
+  it("[create-with-key] a FRACTIONAL wait is not a delta-seconds — it is omitted, never relayed", async () => {
+    validateKeyMock.mockRejectedValue(seamUnreachable(0.5));
+    const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+
+    // ⚠️ ARM PROOF FIRST — otherwise a fixture that returned before the catch
+    // would satisfy the null assertion below while proving nothing.
+    expect(res.status).toBe(503);
+    expect((await res.json()).code).toBe("SERVICE_UNREACHABLE");
+
+    expect(
+      res.headers.get("Retry-After"),
+      "0.5 is not an RFC-9110 delta-seconds. Relaying it puts a malformed " +
+        "header on our own wire and renders to the user as 'Try again in " +
+        "0.5s' — a duration we invented by forwarding one nobody may send.",
+    ).toBeNull();
+    // …and specifically NOT the two shapes a partial fix would produce: the
+    // raw fraction, or a silent round to a number the upstream never sent.
+    expect(res.headers.get("Retry-After")).not.toBe("0.5");
+    expect(res.headers.get("Retry-After")).not.toBe("1");
+    consoleErr.mockRestore();
+  });
+
+  /**
+   * ⭐ 161-REVIEW / WR-01, the BREAKER half. TRAP-3's absence rule is stated for
+   * BOTH sources, and until this the breaker branch stamped
+   * `String(err.retryAfterS)` unconditionally — INHERITING the rule from
+   * `CircuitOpenError`'s constructor rather than applying it. That constructor
+   * rejects `retryAfterS < 0` and therefore ACCEPTS `0`, so a zero cooldown
+   * reached the wire as `Retry-After: 0` — "retry immediately", the ~0 ms
+   * hot-retry B20's parser exists to make unreachable.
+   */
+  it("[create-with-key] a ZERO breaker cooldown sends NO header — the absence rule binds both branches", async () => {
+    const { CircuitOpenError } = await import("@/lib/seam-errors");
+    // Constructed, not hand-shaped: `new CircuitOpenError(0)` is a value the
+    // class genuinely permits, which is what makes this a reachable state
+    // rather than a test-only fiction.
+    const tripped = new CircuitOpenError(0);
+    expect(tripped.retryAfterS).toBe(0);
+
+    validateKeyMock.mockRejectedValue(tripped);
+    const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+
+    expect((await res.json()).code).toBe("SERVICE_UNAVAILABLE_RETRY");
+    expect(
+      res.headers.get("Retry-After"),
+      "The breaker branch must ENFORCE TRAP-3, not inherit it. `0` is not a " +
+        "wait — it is an instruction to retry immediately.",
+    ).toBeNull();
+    expect(res.headers.get("Retry-After")).not.toBe("0");
+    consoleErr.mockRestore();
+  });
+
+  it("[create-with-key] ANTI-CONTROL: a real positive breaker cooldown still stamps", async () => {
+    // Without this, "the breaker branch omits zero" is satisfied by a branch
+    // that never stamps at all — which would delete the relay the cases above
+    // exist to protect. The pre-existing breaker cases in this file assert the
+    // same property from their own arms; this one sits beside the new guard so
+    // the pair is readable as a matched set.
+    const { CircuitOpenError } = await import("@/lib/seam-errors");
+    validateKeyMock.mockRejectedValue(new CircuitOpenError(42));
+    const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+
+    expect((await res.json()).code).toBe("SERVICE_UNAVAILABLE_RETRY");
+    expect(res.headers.get("Retry-After")).toBe("42");
+    consoleErr.mockRestore();
+  });
 });

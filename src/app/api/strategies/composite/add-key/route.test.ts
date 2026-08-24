@@ -1936,4 +1936,36 @@ describe("[161-06 / WIZERR-05] composite/add-key — the Retry-After relay", () 
     expect(res.headers.get("Retry-After")).not.toBe("15");
     consoleErr.mockRestore();
   });
+
+  /**
+   * ⭐ 161-REVIEW / WR-01 — the fractional guard, ON THIS ROUTE TOO.
+   *
+   * This describe's own docblock says why this is not a duplicate: a law about
+   * the shared helper cannot see a route that stopped calling it, and "fix one
+   * of the pair" is this milestone's most repeated mistake. The fraction here
+   * (1.5) deliberately differs from the sibling's (0.5), following this file's
+   * standing rule that a cross-wired fixture must not be able to pass both.
+   */
+  it("[composite/add-key] a FRACTIONAL wait is not a delta-seconds — it is omitted, never relayed", async () => {
+    validateKeyMock.mockRejectedValue(seamUnreachable(1.5));
+    const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+
+    // ⚠️ ARM PROOF FIRST — the null assertion below is satisfiable by a
+    // fixture that never reached the catch.
+    expect(res.status).toBe(503);
+    expect((await res.json()).code).toBe("SERVICE_UNREACHABLE");
+
+    expect(
+      res.headers.get("Retry-After"),
+      "`parseRetryAfterSeconds` returns `Number(raw)`, so an intervening " +
+        "proxy answering `Retry-After: 1.5` crossed the seam intact and was " +
+        "relayed onto our own wire. RFC-9110 delta-seconds is an integer.",
+    ).toBeNull();
+    expect(res.headers.get("Retry-After")).not.toBe("1.5");
+    expect(res.headers.get("Retry-After")).not.toBe("2");
+    consoleErr.mockRestore();
+  });
 });
