@@ -201,7 +201,7 @@ Plans:
   3. The coverage law reaches every surface the class regrew on: the `keys/[id]/permissions` private `PROBE_*` cascade gets a derived-population coverage law (and `KEY_UNDECRYPTABLE`'s remedy says "reconnect the key", not "try again"); `AllocateDialog`, `RenameStrategyDialog`, and `MarkOwnershipDialog` stop minting `code: UNKNOWN`; the five 5xx→`UNKNOWN` terminal arms (admin match/eval, simulator) forward recognized `seamCode`s; `MT5_GATEWAY_UNREACHABLE`'s server-advertised `Retry-After` threads end-to-end through both key-route catches.
   4. CSV verdicts tell the truth: the 7-row floor is evaluated on the wizard composite arm AND `INSUFFICIENT_CSV_HISTORY` renders its own copy (landed together or not at all); examined-but-refused verdicts render a truthful fourth outcome replacing the false "only 0 trade(s)" sentence (D-15's oracle re-cut deliberately, the TOCTOU re-check wording following); the csv-finalize A2 409 sentence describes the actual case (same track record, different flow); and the per-row CSV breakdown renders its data half without leaking `'nan'` or echoing untrusted cell contents.
 
-**Plans**: 4/10 plans executed
+**Plans**: 5/10 plans executed
 **UI hint**: yes
 
 Plans:
@@ -210,7 +210,7 @@ Plans:
 - [x] 161-02-PLAN.md — WIZERR-01: MT5 flag→cause builder across both raise sites, inside the curated fence (wave 1)
 - [x] 161-03-PLAN.md — WIZERR-12/-13: csv-finalize A2 sentence + per-row breakdown nan-guard and no cell echo (wave 1)
 - [x] 161-04-PLAN.md — WIZERR-02: "Try another key" becomes a pure, non-destructive step transition (wave 1)
-- [ ] 161-05-PLAN.md — WIZERR-03/-11: KEY_ORPHANED honest refusal + venue-parameterized AUTH copy (wave 2)
+- [x] 161-05-PLAN.md — WIZERR-03/-11: KEY_ORPHANED honest refusal + venue-parameterized AUTH copy (wave 2)
 - [ ] 161-06-PLAN.md — WIZERR-05: Retry-After threads end-to-end + parity law over the five local error doubles (wave 3)
 - [ ] 161-07-PLAN.md — WIZERR-09/-10: 7-row composite floor with its copy (atomic) + truthful fourth CSV verdict (wave 3)
 - [ ] 161-08-PLAN.md — WIZERR-06: five 5xx terminal arms forward the recognized code + shape law (wave 4)

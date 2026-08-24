@@ -33,7 +33,7 @@ verified-stale items are excluded by construction.
 
 - [x] **WIZERR-01** (L75): The MT5 "gateway misconfigured" copy names the actual blocker, derived from the `terminal_info` flags the probe already holds (`tradeapi_disabled` vs `trade_allowed`) — fixed as a class across all six carrier sites, within the curated-message test fence.
 - [x] **WIZERR-02** (L1788): "Try another key" never destroys the draft or cascades away composite members.
-- [ ] **WIZERR-03** (L2466): An orphaned live key (no strategy) surfaces an honest remedy instead of a false `DRAFT_ALREADY_EXISTS` 409.
+- [x] **WIZERR-03** (L2466): An orphaned live key (no strategy) surfaces an honest remedy instead of a false `DRAFT_ALREADY_EXISTS` 409.
 - [x] **WIZERR-04** (L410): The `keys/[id]/permissions` private `PROBE_*` cascade gets a derived-population coverage law, and `KEY_UNDECRYPTABLE`'s remedy sentence says "reconnect the key", not "try again".
 - [ ] **WIZERR-05** (L486): `MT5_GATEWAY_UNREACHABLE`'s server-advertised `Retry-After` threads end-to-end (a fourth optional `AnalyticsUpstreamError` field, relayed by both key-route catches).
 - [ ] **WIZERR-06** (L436): The five 5xx→`UNKNOWN` terminal arms (admin match/eval, simulator) forward recognized `seamCode`s instead of collapsing the severe half of the vocabulary.
@@ -41,7 +41,7 @@ verified-stale items are excluded by construction.
 - [ ] **WIZERR-08** (L1779): The `KEY_INVALID_FORMAT` one-code-many-causes split lands on the remaining 2 routes / 9 sites, honoring their internal-vs-public copy contracts.
 - [ ] **WIZERR-09** (L1871 + L1879): The 7-row CSV floor is evaluated on the wizard composite arm, and `INSUFFICIENT_CSV_HISTORY` renders its own copy instead of UNKNOWN — landed together or not at all.
 - [ ] **WIZERR-10** (L1883 + L1907): Examined-but-refused verdicts render truthful copy (a fourth outcome replaces the false "only 0 trade(s)" sentence; the publish-time TOCTOU re-check wording follows), with D-15's oracle re-cut deliberately.
-- [ ] **WIZERR-11** (L1948): Wizard `AUTH_FAILED` copy is parameterized by the selected venue — never names Deribit while Binance is selected.
+- [x] **WIZERR-11** (L1948): Wizard `AUTH_FAILED` copy is parameterized by the selected venue — never names Deribit while Binance is selected.
 - [x] **WIZERR-12** (L3091): The csv-finalize A2 409 sentence describes the actual case (same track record, different flow).
 - [x] **WIZERR-13** (L1518): The per-row CSV breakdown renders its data half without leaking `'nan'` or echoing untrusted cell contents.
 
@@ -120,7 +120,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | SHARE-04 | Phase 164 | Pending |
 | WIZERR-01 | Phase 161 | Complete |
 | WIZERR-02 | Phase 161 | Complete |
-| WIZERR-03 | Phase 161 | Pending |
+| WIZERR-03 | Phase 161 | Complete |
 | WIZERR-04 | Phase 161 | Complete |
 | WIZERR-05 | Phase 161 | Pending |
 | WIZERR-06 | Phase 161 | Pending |
@@ -128,7 +128,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | WIZERR-08 | Phase 161 | Pending |
 | WIZERR-09 | Phase 161 | Pending |
 | WIZERR-10 | Phase 161 | Pending |
-| WIZERR-11 | Phase 161 | Pending |
+| WIZERR-11 | Phase 161 | Complete |
 | WIZERR-12 | Phase 161 | Complete |
 | WIZERR-13 | Phase 161 | Complete |
 | HONEST-01 | Phase 162 | Pending |
