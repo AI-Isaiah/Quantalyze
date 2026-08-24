@@ -4,6 +4,7 @@ import { join, resolve } from "path";
 import {
   formatKeyError,
   gateFailureToWizardError,
+  recogniseDashboardDialogCode,
   classifyKeyValidationError,
   recogniseSeamErrorCode,
   WIZARD_ERROR_COPY,
@@ -1914,8 +1915,20 @@ describe("[140.3-10 / TRAP-4] the whole copy table, scanned for destructive-only
    * is a silent half-fix — the shrink-detection it buys survives in one scan
    * and dies in the other. 153.1-04 added a third guard (at the end of this
    * file) that reads this source and reds when the two literals disagree.
+   *
+   * ⚠️ 84 → 88 (161-10 / WIZERR-07). FOUR entries were minted in one
+   * commit — `DASHBOARD_SIGNED_OUT`, `DASHBOARD_REQUEST_INVALID`,
+   * `DASHBOARD_WRITE_FAILED` and `DASHBOARD_ROW_STALE` — for the three
+   * dashboard write dialogs, whose routes classified their failures precisely
+   * while the dialogs rendered `code: "UNKNOWN"` for every one of them. THIS
+   * guard's reasoning was re-run over all four before the number moved: none
+   * carries a member of `DESTRUCTIVE_ACTIONS` (their `actions` are drawn from
+   * `leave_and_return` / `expand_log` / `clear_and_retry` / `request_call`
+   * only), so all four sit OUTSIDE the scanned population and the destructive
+   * class below is still four members. The baseline was re-measured at HEAD
+   * before it moved — 161-05 took it 81 → 82 and 161-07 took it 82 → 84.
    */
-  const EXPECTED_TABLE_SIZE = 84;
+  const EXPECTED_TABLE_SIZE = 88;
 
   it("the scan actually covers the table — hand-typed size guard", () => {
     expect(
@@ -2352,8 +2365,15 @@ describe("[140.3-12 / SEAMUX-04] no entry in the copy table makes a claim we can
    * ⚠️ THIS NUMBER HAS A TWIN in the `[140.3-10 / TRAP-4]` describe above.
    * Moving one without the other is a silent half-fix; the guard added at the
    * end of this file reds when the two literals disagree.
+   *
+   * ⚠️ 84 → 88 (161-10 / WIZERR-07). The same four dashboard-dialog
+   * entries as the twin above. THIS guard's reasoning — no banned claim in any
+   * title, cause or fix line — was re-run over all four before the number
+   * moved: none predicts permanence, none promises a notification, none names
+   * an internal cause the user cannot act on. The baseline was re-measured at
+   * HEAD before it moved (161-05: 81 → 82; 161-07: 82 → 84).
    */
-  const EXPECTED_TABLE_SIZE = 84;
+  const EXPECTED_TABLE_SIZE = 88;
 
   it("the scan actually covers the table — hand-typed size guard", () => {
     expect(
@@ -4528,5 +4548,206 @@ describe("[161-07 / WIZERR-10] SERIES_EXAMINED_REFUSED renders a truthful fourth
     // The DERIVATION, not a restatement: `buildEnvelope` reads `actions`
     // against `RECOVERABLE_ACTIONS`, and `try_another_key` is a member.
     expect(buildEnvelope(CODE, "corr-examined-refused-1").recoverable).toBe(true);
+  });
+});
+
+/**
+ * [161-10 / WIZERR-07] THE FOUR DASHBOARD-DIALOG ENTRIES, FROM THE COPY SIDE.
+ *
+ * Three client components — `AllocateDialog`, `RenameStrategyDialog`,
+ * `MarkOwnershipDialog` — built `buildEnvelope("UNKNOWN", …)` for every
+ * failure their routes classified. The routes now put a machine code on the
+ * wire and the dialogs read it; these four members are the copy that code
+ * selects.
+ *
+ * ⭐ THE HARD PART IS NOT COVERAGE, IT IS TRUTHFULNESS. Each of the four has a
+ * near-neighbour already in the table whose SUBJECT matches and whose SENTENCE
+ * does not, because the incumbent vocabulary was written for a surface that has
+ * a wizard draft, an exchange key and a paste-the-secret step. Landing a
+ * dashboard failure on one of those would swap "we could not classify this
+ * failure" for a sentence that is specific and FALSE — a worse trade than the
+ * one this phase exists to make. The cases below pin what each entry must NOT
+ * say, per rejected neighbour, at least as hard as what it must.
+ *
+ * ORACLE INDEPENDENCE: every needle is hand-typed here. Nothing is imported
+ * from `wizardErrors.ts` except the table and the derivation helpers, and no
+ * assertion compares a string to itself.
+ */
+describe("[161-10 / WIZERR-07] the dashboard-dialog entries say only what is true of a dashboard", () => {
+  const FAMILY: readonly WizardErrorCode[] = [
+    "DASHBOARD_SIGNED_OUT",
+    "DASHBOARD_REQUEST_INVALID",
+    "DASHBOARD_WRITE_FAILED",
+    "DASHBOARD_ROW_STALE",
+  ];
+
+  /** Every user-visible string on one entry, joined — never just the title. */
+  const surface = (code: WizardErrorCode): string => {
+    const copy = formatKeyError(code);
+    const joined = [copy.title, copy.cause, ...copy.fix].join("   ");
+    // NON-VACUITY FLOOR, and not a formality: `"anything".includes("")` is
+    // `true`, so every `not.toMatch` below would pass against an empty render.
+    expect(
+      joined.length,
+      `${code} renders an empty or near-empty surface, which makes every ` +
+        "negative assertion below vacuously green.",
+    ).toBeGreaterThan(140);
+    return joined;
+  };
+
+  it("the population is non-empty and all four members carry real copy", () => {
+    // A family loop over an empty list passes trivially. Hand-typed count.
+    expect(FAMILY.length).toBe(4);
+    for (const code of FAMILY) {
+      expect(surface(code).length).toBeGreaterThan(140);
+      // Never the generic terminal: the whole point is that these failures WERE
+      // classified.
+      expect(formatKeyError(code).title).not.toBe("Something went wrong.");
+    }
+  });
+
+  it("NOT ONE of the four mentions a draft, an API key, an exchange or a secret", () => {
+    // The exact false-specificity this family exists to avoid. Every rejected
+    // near-neighbour (`SESSION_EXPIRED`, `VALIDATION_FAILED`,
+    // `SEAM_INTERNAL_FAULT`, `GATE_DRAFT_GONE`, `DRAFT_STATE_INVALID`) trips at
+    // least one of these needles, which is why each was rejected.
+    for (const code of FAMILY) {
+      const s = surface(code);
+      expect(s, `${code} names a wizard draft`).not.toMatch(/\bdraft\b/i);
+      expect(s, `${code} names an API key`).not.toMatch(/\bapi key\b/i);
+      expect(s, `${code} names a key at all`).not.toMatch(/\byour key\b/i);
+      expect(s, `${code} names an exchange`).not.toMatch(/\bexchange\b/i);
+      expect(s, `${code} names a pasted secret`).not.toMatch(/\bsecret\b/i);
+    }
+  });
+
+  it("SIGNED_OUT names the session and offers signing in — not a retry that cannot work", () => {
+    const s = surface("DASHBOARD_SIGNED_OUT");
+    expect(s).toMatch(/signed out/i);
+    // The state-safety claim the user needs: the refused write changed nothing.
+    expect(s).toMatch(/nothing was saved/i);
+    expect(s).toMatch(/sign in again/i);
+    // THE DERIVATION, not a restatement of the table: `buildEnvelope` reads
+    // `actions` against `RECOVERABLE_ACTIONS`. A Retry from a signed-out
+    // session is refused identically, so no control may render.
+    expect(buildEnvelope("DASHBOARD_SIGNED_OUT", "corr-dash-401").recoverable).toBe(
+      false,
+    );
+  });
+
+  it("REQUEST_INVALID blames our software, never what the user typed", () => {
+    const s = surface("DASHBOARD_REQUEST_INVALID");
+    expect(s).toMatch(/our (own )?s(oftware|ervice)/i);
+    // ⛔ The clause that disqualified `VALIDATION_FAILED` for this surface:
+    // it instructs the user to quote a draft ID they do not have, which is a
+    // remedy that cannot be carried out (Principle 2).
+    expect(s.toLowerCase()).not.toContain("draft id");
+    expect(buildEnvelope("DASHBOARD_REQUEST_INVALID", "corr-dash-400").recoverable).toBe(
+      false,
+    );
+  });
+
+  it("WRITE_FAILED is the ONE recoverable member, and says nothing was saved", () => {
+    const s = surface("DASHBOARD_WRITE_FAILED");
+    expect(s).toMatch(/nothing was saved/i);
+    // A 500 is the one dashboard failure whose second attempt genuinely may
+    // succeed, so this is the only member of the family that earns a Retry.
+    expect(buildEnvelope("DASHBOARD_WRITE_FAILED", "corr-dash-500").recoverable).toBe(
+      true,
+    );
+    // ANTI-CONTROL: "make them all recoverable" must not satisfy the line
+    // above. The other three are pinned false in their own cases; asserting the
+    // contrast here is what makes this one a decision rather than a default.
+    expect(buildEnvelope("DASHBOARD_ROW_STALE", "corr-dash-404").recoverable).toBe(
+      false,
+    );
+  });
+
+  it("ROW_STALE points at the LIST, and names no cause the 404 cannot establish", () => {
+    const s = surface("DASHBOARD_ROW_STALE");
+    // The remedy that actually settles it: reload the list.
+    expect(s).toMatch(/reload/i);
+    // ⛔ The three routes merge several causes into one 404 on purpose (naming
+    // one would leak row existence to a caller probing ids), so the copy may
+    // not pick a cause. These are the guesses a future edit would reach for.
+    expect(s).not.toMatch(/you do not (have|own)/i);
+    expect(s).not.toMatch(/not yours/i);
+    expect(s).not.toMatch(/(was|has been) deleted\b/i);
+    expect(buildEnvelope("DASHBOARD_ROW_STALE", "corr-dash-404b").recoverable).toBe(
+      false,
+    );
+  });
+
+  it("no member of the family carries a destructive action", () => {
+    // These entries render on surfaces holding REAL MONEY positions. A remedy
+    // that removes something is never the answer to "we could not save that".
+    for (const code of FAMILY) {
+      const actions = WIZARD_ERROR_COPY[code].actions as readonly string[];
+      expect(actions.length, `${code} offers no action at all`).toBeGreaterThan(0);
+      expect(actions, `${code} offers a draft-destroying action`).not.toContain(
+        "start_fresh",
+      );
+    }
+  });
+});
+
+/**
+ * [161-10 / WIZERR-07] `recogniseDashboardDialogCode` — THE ONE GUARDED CAST.
+ *
+ * Pitfall 4: a recognised code must be an explicit roster member, never a
+ * `code as WizardErrorCode` written at a consumer. This is the only place the
+ * cast happens, so this is where the guard is pinned.
+ */
+describe("[161-10 / WIZERR-07] the dashboard recogniser admits only rostered codes", () => {
+  it("admits a code the route really emits, per route", () => {
+    expect(
+      recogniseDashboardDialogCode("strategies/[id]/name", "DASHBOARD_ROW_STALE"),
+    ).toBe("DASHBOARD_ROW_STALE");
+    expect(
+      recogniseDashboardDialogCode(
+        "portfolio-strategies/allocation",
+        "ALLOCATION_NOT_ALLOCATABLE",
+      ),
+    ).toBe("ALLOCATION_NOT_ALLOCATABLE");
+  });
+
+  it("REFUSES a real member of the union that THIS route does not emit", () => {
+    // The per-route split is the point (`ConnectKeyStep`'s roster docblock).
+    // A flat set would go green here while the rename dialog silently admitted
+    // an allocation-only code.
+    expect(
+      recogniseDashboardDialogCode(
+        "strategies/[id]/name",
+        "ALLOCATION_NOT_ALLOCATABLE",
+      ),
+    ).toBe("UNKNOWN");
+  });
+
+  it("REFUSES an arbitrary string, an empty string and a non-string", () => {
+    // An identity rule (`code as WizardErrorCode`) would admit all of these.
+    expect(
+      recogniseDashboardDialogCode("strategies/[id]/name", "TOTALLY_MADE_UP"),
+    ).toBe("UNKNOWN");
+    expect(recogniseDashboardDialogCode("strategies/[id]/name", "")).toBe("UNKNOWN");
+    expect(recogniseDashboardDialogCode("strategies/[id]/name", undefined)).toBe(
+      "UNKNOWN",
+    );
+    expect(recogniseDashboardDialogCode("strategies/[id]/name", null)).toBe("UNKNOWN");
+    expect(recogniseDashboardDialogCode("strategies/[id]/name", 42)).toBe("UNKNOWN");
+  });
+
+  it("REFUSES the three wire codes that are deliberately NOT envelope codes", () => {
+    // `NAME_REQUIRED` / `NAME_TOO_LONG` land inline at the Name field;
+    // `LIVE_ALLOCATION` swaps in a confirmation body. None reaches
+    // `buildEnvelope`, so none may be admitted here — admitting one would
+    // demand a copy entry for a string the user never sees as an error.
+    for (const wire of ["NAME_REQUIRED", "NAME_TOO_LONG"]) {
+      expect(recogniseDashboardDialogCode("strategies/[id]/name", wire)).toBe(
+        "UNKNOWN",
+      );
+    }
+    expect(
+      recogniseDashboardDialogCode("strategies/[id]/ownership", "LIVE_ALLOCATION"),
+    ).toBe("UNKNOWN");
   });
 });

@@ -785,6 +785,115 @@ export type WizardErrorCode =
   //   · UNKNOWN — "we could not classify this failure". We classified it
   //     precisely, which is the whole point.
   | "ALLOCATION_NOT_ALLOCATABLE"
+  // ─────────────────────────────────────────────────────────────────────────
+  // 161-10 / WIZERR-07 — the DASHBOARD DIALOG family.
+  //
+  // Four members minted together for one population: the three dashboard write
+  // dialogs (`AllocateDialog`, `RenameStrategyDialog`, `MarkOwnershipDialog`)
+  // and the three routes behind them (`strategies/[id]/name`,
+  // `strategies/[id]/ownership`, `portfolio-strategies/allocation`).
+  //
+  // ⭐ WHY A NEW FAMILY RATHER THAN REUSE. Every one of these four has a
+  // near-neighbour in this union whose SUBJECT matches and whose SENTENCE does
+  // not. The wizard members were written for a surface that has a draft, an
+  // exchange key and a paste-the-secret step; a rename dialog has none of the
+  // three. Reusing them would swap "we could not classify this failure" for a
+  // sentence that is specific and FALSE, which is a worse trade than the one
+  // this phase exists to make. The rejected near-neighbour is named at each
+  // member below, read at that member's EMITTER, not guessed from its name.
+  //
+  // ⛔ NONE of the four is an alias in `SEAM_CODE_TO_WIZARD_CODE`. That table
+  // translates codes ANOTHER service put on the wire; these are minted by our
+  // own routes, so aliasing them there is the "vocabulary starts lying" failure
+  // that table's docblock warns about. Recognition runs through
+  // `DASHBOARD_DIALOG_ROUTE_CODES` — see its docblock for why the roster is
+  // per-route and why it lives here rather than at each dialog.
+  //
+  // The caller is signed out. All three routes answer 401 `unauthorized` after
+  // `supabase.auth.getUser()` returns no user, BEFORE any write is attempted.
+  //
+  // ⚠️ NOT `SESSION_EXPIRED`, and the rejection was read at that entry rather
+  // than inferred from its name. Its cause says "Your wizard draft is saved on
+  // our side — your form answers and preview are still there" and its fix says
+  // "you will need to paste the secret once more before continuing". There is
+  // no draft, no form answers, no preview and no secret on a dashboard dialog:
+  // both sentences would be false, and the second is an instruction the user
+  // cannot follow (Principle 2 — the remedy must be able to succeed).
+  //
+  // Recoverable: NO. `actions` carries neither member of `RECOVERABLE_ACTIONS`
+  // (src/lib/envelope.ts), so `buildEnvelope` derives `recoverable: false` and
+  // no Retry control renders. Re-issuing the identical request from a signed-out
+  // session is refused identically until the user signs in, so a Retry here is
+  // the false affordance `ALLOCATION_NOT_ALLOCATABLE` above removed for the
+  // same reason.
+  | "DASHBOARD_SIGNED_OUT"
+  // The route refused the REQUEST SHAPE: a non-UUID id in the path, a body that
+  // is not JSON, a mark outside the allowed set, a non-boolean confirmation
+  // flag, a missing `strategy_id`, an amount outside the ticket bound. Every
+  // one of these is a body THIS APPLICATION built — the user types a name or an
+  // amount, never the envelope around it — so a shape refusal is our defect,
+  // and the copy says so rather than implying the user mistyped something.
+  //
+  // ⚠️ NOT `VALIDATION_FAILED`, which is the closest member in this union and
+  // whose title and cause are almost exactly right ("We could not read that
+  // request… The fault is in our software"). Its FIX is what disqualifies it:
+  // "Contact security@quantalyze.com with your draft ID". A dashboard dialog
+  // has no draft and therefore no draft ID, so the one instruction it offers
+  // cannot be carried out. Copying that entry and dropping the clause would
+  // change what every wizard surface says; minting is the surgical move.
+  //
+  // Recoverable: NO. A malformed request re-sent unchanged is refused
+  // identically — the same reasoning `VALIDATION_FAILED` records at its own
+  // `actions`.
+  | "DASHBOARD_REQUEST_INVALID"
+  // Our own service failed while performing the write. Covers every `internal
+  // error` 500 on all three routes — a failed lookup, a failed update, an RPC
+  // that errored or returned no row.
+  //
+  // ⭐ ONE MEMBER FOR ALL OF THEM, DELIBERATELY. Those sites differ by which
+  // internal query failed, which is a distinction the user cannot act on and
+  // must not be asked to: the situation ("we could not complete your change")
+  // and the remedy ("nothing was saved — try again, and tell us if it repeats")
+  // are identical at every one. Each site already logs its own distinct
+  // server-side line, which is where the distinction belongs. Minting a code
+  // per call site would put an internal call graph in front of a user.
+  //
+  // ⚠️ NOT `SEAM_INTERNAL_FAULT`, whose title is "Something failed on our side
+  // while we checked this key" and whose cause promises "no key was stored".
+  // No key is checked or stored on any of these three routes. ⚠️ And NOT
+  // `SERVICE_UNAVAILABLE_RETRY` / `SERVICE_UNREACHABLE`, which both describe
+  // the ANALYTICS SEAM being unavailable; these failures are inside our own
+  // request handler and never crossed a service boundary.
+  //
+  // Recoverable: YES — `clear_and_retry` is a member of `RECOVERABLE_ACTIONS`,
+  // so a Retry control renders. That is correct here and nowhere else in this
+  // family: a 500 is the one dashboard failure whose second attempt genuinely
+  // may succeed, because the fault is transient by construction (a query that
+  // errored once can succeed next time). The write is idempotent in effect —
+  // it sets a name, a mark or an amount to a stated value — so a retry cannot
+  // double anything.
+  | "DASHBOARD_WRITE_FAILED"
+  // The row this dialog points at is not there in the form the action needs.
+  // Covers every 404 on the three routes: `strategy not found` (wrong owner,
+  // unknown id, or — on the name route — a PUBLISHED row refused by the D-17
+  // status gate), `portfolio not found`, and `investment row not found`.
+  //
+  // ⭐ THE SENTENCE IS DELIBERATELY ABOUT THE LIST, NOT THE ROW. The routes
+  // merge several causes into one 404 on purpose (distinguishing them would
+  // leak row existence to a caller probing ids), so any copy naming a specific
+  // cause would be a guess. What IS true of every one of them is that the page
+  // the user is looking at describes a state the server no longer agrees with,
+  // and that reloading the list is the action that settles it.
+  //
+  // ⚠️ NOT `GATE_DRAFT_GONE` ("This draft is no longer available") — there is
+  // no draft. ⚠️ NOT `DRAFT_STATE_INVALID`, whose subject is also staleness but
+  // whose every sentence is about a wizard draft. ⚠️ NOT `GUARD_BLOCKED`, which
+  // asserts a permissions verdict this arm cannot establish.
+  //
+  // Recoverable: NO. The server answers 404 to the identical request until the
+  // page is reloaded, so a Retry control would promise that pressing it changes
+  // the outcome. `leave_and_return` names the action that does.
+  | "DASHBOARD_ROW_STALE"
   // Fallback
   | "UNKNOWN";
 
@@ -2983,6 +3092,76 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
     actions: ["leave_and_return", "expand_log"],
   },
 
+  // 161-10 / WIZERR-07 — the four DASHBOARD DIALOG entries. The union members
+  // above carry the full reasoning for each: what rendered before it, which
+  // near-neighbour was rejected and why (read at that neighbour's emitter), and
+  // how `recoverable` derives. The copy below is held to Principle 1 (name the
+  // actual blocker), Principle 2 (the remedy must be able to succeed) and
+  // Principle 4 (no correlation id on an actionable arm — three of the four are
+  // terminal, so `expand_log` is present on those and the id is what the user
+  // is asked to quote).
+  DASHBOARD_SIGNED_OUT: {
+    title: "You are signed out.",
+    cause:
+      "We could not confirm your session, so we refused the change before making it. Nothing was saved — your strategy, its name and its allocation are exactly as they were.",
+    fix: [
+      "Sign in again, then make the change from the reloaded page.",
+      "Nothing needs undoing first. The refused change never reached your data.",
+    ],
+    docsHref: "/security",
+    // ⛔ Neither member of `RECOVERABLE_ACTIONS`, so `recoverable` derives false
+    // and no Retry renders: the same request from the same signed-out session
+    // is refused identically. `leave_and_return` names the action that works.
+    actions: ["leave_and_return", "expand_log"],
+  },
+
+  DASHBOARD_REQUEST_INVALID: {
+    title: "We could not send that change.",
+    cause:
+      "The request this page built was refused by our own service before any work started. Nothing was saved and nothing was changed. The fault is in our software, not in what you typed.",
+    fix: [
+      "Reload the page and make the change again — a fresh page may build the request correctly.",
+      "If it happens again, email security@quantalyze.com with the correlation id below. A request our own page built wrong is ours to fix.",
+    ],
+    docsHref: "/security",
+    // ⛔ Neither member of `RECOVERABLE_ACTIONS`. Re-sending the identical
+    // malformed request is refused identically, so the Retry control would
+    // promise an outcome it cannot deliver.
+    actions: ["leave_and_return", "expand_log"],
+  },
+
+  DASHBOARD_WRITE_FAILED: {
+    title: "We could not save that change.",
+    cause:
+      "Our own service failed part-way through the change and stopped. Nothing was saved — the strategy is as it was before you pressed save. This is a fault on our side, not in your data.",
+    fix: [
+      "Try the same change again. This kind of fault is often momentary.",
+      "If it keeps failing, email security@quantalyze.com with the correlation id below.",
+    ],
+    docsHref: "/security",
+    // ⚠️ `clear_and_retry` IS a member of `RECOVERABLE_ACTIONS`, so this is the
+    // ONE recoverable entry in this family and the Retry control renders. That
+    // is deliberate: a query that errored once can succeed on the next attempt,
+    // and these writes set a stated value rather than accumulating one, so a
+    // retry cannot double anything.
+    actions: ["clear_and_retry", "request_call"],
+  },
+
+  DASHBOARD_ROW_STALE: {
+    title: "This page is out of date.",
+    cause:
+      "What this dialog points at is not there in the form this change needs — it may have been renamed, removed, or moved to a state this action does not apply to since the page loaded. Nothing was saved.",
+    fix: [
+      "Close this dialog. The list reloads and shows the strategies as they stand now.",
+      "If the row is still listed after the reload and the change still fails, email security@quantalyze.com with the correlation id below.",
+    ],
+    docsHref: "/security",
+    // ⛔ Neither member of `RECOVERABLE_ACTIONS`. The server answers the
+    // identical request 404 until the page is reloaded, so a Retry would
+    // promise that pressing it changes the outcome.
+    actions: ["leave_and_return", "expand_log"],
+  },
+
   UNKNOWN: {
     title: "Something went wrong.",
     cause:
@@ -4174,6 +4353,135 @@ export function recogniseSeamErrorCode(
 ): WizardErrorCode {
   if (typeof seamCode !== "string") return "UNKNOWN";
   return SEAM_CODE_TO_WIZARD_CODE.get(seamCode) ?? "UNKNOWN";
+}
+
+/**
+ * 161-10 / WIZERR-07 — the three DASHBOARD WRITE ROUTES, named as a closed set.
+ *
+ * These are the routes behind `AllocateDialog`, `RenameStrategyDialog` and
+ * `MarkOwnershipDialog`. The strings are the route's directory path under
+ * `src/app/api/`, so a reader can go from a roster row to the emitter without
+ * a lookup table in between.
+ */
+export type DashboardDialogRoute =
+  | "strategies/[id]/name"
+  | "strategies/[id]/ownership"
+  | "portfolio-strategies/allocation";
+
+/**
+ * The `WizardErrorCode`s each dashboard write route can put on the wire.
+ *
+ * ── WHY THIS LIVES HERE AND NOT AT EACH DIALOG ──────────────────────────────
+ *
+ * The wizard steps each hold their own `KNOWN_*_CODES` roster in the component
+ * file, and that shape is not copied here on purpose. WIZERR-07's finding was
+ * that the dashboard dialogs are where this class REGREW after Phase 153 —
+ * three client components minting `code: "UNKNOWN"` for failures their routes
+ * had already classified — and the wizard coverage law could not see them
+ * because it declares itself blind to everything outside the wizard-steps
+ * directory. Putting the rosters in ONE shared module is what lets
+ * `dialog-envelope.invariant.test.ts` import the live map instead of re-parsing
+ * three component files, so a new roster row joins that law with no test edit.
+ *
+ * It also keeps the ONE guarded cast in one audited place (see the recogniser
+ * below) rather than once per consumer.
+ *
+ * ── WHY IT IS PER-ROUTE AND NOT ONE FLAT SET ────────────────────────────────
+ *
+ * `ConnectKeyStep.tsx`'s roster docblock argues at length that a surface should
+ * admit the codes ITS route emits and not the whole vocabulary, and that
+ * argument is not weaker here. A flat set would go green while the rename
+ * dialog silently admitted an allocation-only code, which is precisely the
+ * failure a merged check cannot distinguish from correctness.
+ *
+ * ── WHAT IS DELIBERATELY ABSENT ─────────────────────────────────────────────
+ *
+ * Three wire codes these routes emit are NOT `WizardErrorCode`s and must not be
+ * added here or minted as members. They never reach `buildEnvelope`:
+ *
+ *   · `NAME_REQUIRED` / `NAME_TOO_LONG` — the name route's two field-level
+ *     refusals. `RenameStrategyDialog` lands them INLINE at the Name field,
+ *     which is where the user is looking and where the remedy is; routing them
+ *     through an envelope would re-introduce the terminal-envelope class for a
+ *     field-level problem, and would show a correlation id on an ACTIONABLE arm
+ *     (Principle 4).
+ *   · `LIVE_ALLOCATION` — the ownership route's 409. `MarkOwnershipDialog`
+ *     answers it by swapping in its confirmation body with the amount at risk,
+ *     not by rendering an error at all. It is a QUESTION, not a refusal the
+ *     user must read and leave.
+ *
+ * Each of the three is asserted as an explicit disposition by the coverage law,
+ * so its absence is a recorded decision rather than an omission — an omission
+ * being indistinguishable from the defect.
+ */
+const DASHBOARD_DIALOG_ROUTE_CODES: ReadonlyMap<
+  DashboardDialogRoute,
+  ReadonlySet<WizardErrorCode>
+> = new Map<DashboardDialogRoute, ReadonlySet<WizardErrorCode>>([
+  [
+    "strategies/[id]/name",
+    new Set<WizardErrorCode>([
+      "DASHBOARD_SIGNED_OUT",
+      "DASHBOARD_REQUEST_INVALID",
+      "RATE_LIMITED",
+      "DASHBOARD_WRITE_FAILED",
+      "DASHBOARD_ROW_STALE",
+    ]),
+  ],
+  [
+    "strategies/[id]/ownership",
+    new Set<WizardErrorCode>([
+      "DASHBOARD_SIGNED_OUT",
+      "DASHBOARD_REQUEST_INVALID",
+      "RATE_LIMITED",
+      "DASHBOARD_WRITE_FAILED",
+      "DASHBOARD_ROW_STALE",
+    ]),
+  ],
+  [
+    "portfolio-strategies/allocation",
+    new Set<WizardErrorCode>([
+      "DASHBOARD_SIGNED_OUT",
+      "DASHBOARD_REQUEST_INVALID",
+      "RATE_LIMITED",
+      "DASHBOARD_WRITE_FAILED",
+      "DASHBOARD_ROW_STALE",
+      // The allocate surface's one actionable refusal, emitted by both the
+      // pre-check and the D-03-A trigger arm.
+      "ALLOCATION_NOT_ALLOCATABLE",
+    ]),
+  ],
+]);
+
+/** Read-only view for the coverage law, which imports the LIVE map. */
+export { DASHBOARD_DIALOG_ROUTE_CODES };
+
+/**
+ * Translate a dashboard write route's wire `code` into a `WizardErrorCode`.
+ *
+ * ⛔ THE CAST IS GUARDED AND THIS IS THE ONLY PLACE IT HAPPENS (Pitfall 4).
+ * `code as WizardErrorCode` written at a consumer would silently admit every
+ * string a route — or an attacker-influenced upstream — put in that field, and
+ * `formatKeyError` would then fall through to UNKNOWN's copy while the envelope
+ * advertised the unrecognised code in its `data-error-code` attribute. Here the
+ * cast happens only after the value has been proven a member of THIS route's
+ * roster, so an unrecognised code answers `UNKNOWN` by design rather than by
+ * accident.
+ *
+ * A non-string (absent field, `null`, a number) answers `UNKNOWN` for the same
+ * reason `recogniseSeamErrorCode` does: a response we could not read supports
+ * no verdict.
+ */
+export function recogniseDashboardDialogCode(
+  route: DashboardDialogRoute,
+  wireCode: unknown,
+): WizardErrorCode {
+  if (typeof wireCode !== "string" || wireCode.length === 0) return "UNKNOWN";
+  const roster = DASHBOARD_DIALOG_ROUTE_CODES.get(route);
+  if (!roster) return "UNKNOWN";
+  return roster.has(wireCode as WizardErrorCode)
+    ? (wireCode as WizardErrorCode)
+    : "UNKNOWN";
 }
 
 /**

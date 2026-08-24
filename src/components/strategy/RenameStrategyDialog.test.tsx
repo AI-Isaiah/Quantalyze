@@ -210,7 +210,14 @@ describe("RenameStrategyDialog — the write", () => {
   it("the route's own 400 arms surface INLINE at the field, not as a terminal envelope", async () => {
     // Client and server validation can disagree on exotic whitespace, so the
     // server's two documented 400s must still land where the user is looking.
-    fetchMock.mockResolvedValueOnce(jsonResponse(400, { error: "name too long" }));
+    //
+    // 161-10 — the fixture now carries the route's `code`, because the dialog
+    // discriminates on THAT and no longer on the `error` prose. The sentence is
+    // still here, byte-identical, precisely so this fixture keeps describing a
+    // real response rather than a convenient one.
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse(400, { code: "NAME_TOO_LONG", error: "name too long" }),
+    );
     renderDialog();
 
     fireEvent.change(nameInput(), { target: { value: "Helios alpha sleeve" } });
@@ -218,6 +225,169 @@ describe("RenameStrategyDialog — the write", () => {
 
     expect(await screen.findByText(ERR_TOO_LONG)).toBeInTheDocument();
     expect(screen.queryByTestId("error-envelope")).toBeNull();
+  });
+});
+
+/**
+ * [161-10 / WIZERR-07] THE DIALOG READS THE ROUTE'S CODE.
+ *
+ * Before this, the component recognised exactly TWO of the name route's nine
+ * error arms — and it recognised them by matching `body.error` PROSE through a
+ * local `ROUTE_FIELD_ERRORS` table. Every other arm, all of them classified by
+ * the route, rendered `buildEnvelope("UNKNOWN", …)`: "Something went wrong. We
+ * could not classify this failure." That sentence was false about a rate limit,
+ * a signed-out session, a 500 and a 404 alike.
+ *
+ * ORACLE INDEPENDENCE: the assertions read the envelope's `data-error-code`
+ * attribute and hand-typed phrases from the copy. Nothing is imported from
+ * `wizardErrors.ts`, so an edit that put the vague sentence back reddens here.
+ */
+describe("[161-10 / WIZERR-07] classified failures render their own copy, not UNKNOWN", () => {
+  async function submitAndFail(body: unknown, status: number) {
+    fetchMock.mockResolvedValueOnce(jsonResponse(status, body));
+    renderDialog();
+    fireEvent.change(nameInput(), { target: { value: "Helios alpha sleeve" } });
+    fireEvent.click(saveButton());
+    return screen.findByTestId("error-envelope");
+  }
+
+  it.each([
+    ["a signed-out session", 401, "DASHBOARD_SIGNED_OUT"],
+    ["a request our own page built wrong", 400, "DASHBOARD_REQUEST_INVALID"],
+    ["the rate limiter", 429, "RATE_LIMITED"],
+    ["a failed write", 500, "DASHBOARD_WRITE_FAILED"],
+    ["a row that is no longer renameable", 404, "DASHBOARD_ROW_STALE"],
+  ])("%s renders its own envelope code", async (_label, status, code) => {
+    const envelope = await submitAndFail({ code, error: "x" }, status);
+    expect(envelope).toHaveAttribute("data-error-code", code);
+    // NON-VACUITY: the envelope really rendered copy, so the negative below is
+    // not passing against an empty node.
+    expect(String(envelope.textContent).length).toBeGreaterThan(80);
+    // …and it is NOT the sentence that admits knowing nothing.
+    expect(envelope.textContent).not.toContain("Something went wrong.");
+  });
+
+  it("an UNRECOGNISED code still falls to UNKNOWN — recognition is a roster, not a cast", () => {
+    // Pitfall 4. If the component ever wrote `body.code as WizardErrorCode`,
+    // this arbitrary string would ride onto the envelope as its own code and
+    // `formatKeyError` would silently serve UNKNOWN's copy under it.
+    return submitAndFail({ code: "TOTALLY_MADE_UP", error: "x" }, 418).then(
+      (envelope) => {
+        expect(envelope).toHaveAttribute("data-error-code", "UNKNOWN");
+      },
+    );
+  });
+
+  it("a code belonging to ANOTHER dashboard route is refused by this one", async () => {
+    // The roster is per-route on purpose. A flat set would admit this.
+    const envelope = await submitAndFail(
+      { code: "ALLOCATION_NOT_ALLOCATABLE", error: "not_allocatable" },
+      409,
+    );
+    expect(envelope).toHaveAttribute("data-error-code", "UNKNOWN");
+  });
+
+  it("an unreadable body falls to UNKNOWN rather than claiming a verdict", async () => {
+    fetchMock.mockResolvedValueOnce({
+      ok: false,
+      status: 500,
+      json: async () => {
+        throw new SyntaxError("Unexpected token < in JSON at position 0");
+      },
+    } as unknown as Response);
+    renderDialog();
+    fireEvent.change(nameInput(), { target: { value: "Helios alpha sleeve" } });
+    fireEvent.click(saveButton());
+
+    const envelope = await screen.findByTestId("error-envelope");
+    expect(envelope).toHaveAttribute("data-error-code", "UNKNOWN");
+  });
+
+  it("both FIELD-LEVEL codes land inline at the Name field, never in an envelope", async () => {
+    for (const [code, message] of [
+      ["NAME_REQUIRED", ERR_EMPTY],
+      ["NAME_TOO_LONG", ERR_TOO_LONG],
+    ] as const) {
+      fetchMock.mockResolvedValueOnce(jsonResponse(400, { code, error: "x" }));
+      const { unmount } = renderDialog();
+      fireEvent.change(nameInput(), {
+        target: { value: "Helios alpha sleeve" },
+      });
+      fireEvent.click(saveButton());
+
+      expect(await screen.findByText(message)).toBeInTheDocument();
+      expect(screen.queryByTestId("error-envelope")).toBeNull();
+      unmount();
+    }
+  });
+
+  it("PROSE ALONE no longer classifies — the retired lookup cannot come back", async () => {
+    // The receipt that `ROUTE_FIELD_ERRORS` is really gone rather than merely
+    // renamed: a 400 carrying the old sentence and NO code is not recognised as
+    // a field problem any more. This is the deliberate cost of retiring the
+    // prose key, and it is asserted rather than discovered.
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse(400, { error: "name too long" }),
+    );
+    renderDialog();
+    fireEvent.change(nameInput(), { target: { value: "Helios alpha sleeve" } });
+    fireEvent.click(saveButton());
+
+    const envelope = await screen.findByTestId("error-envelope");
+    expect(envelope).toHaveAttribute("data-error-code", "UNKNOWN");
+    expect(screen.queryByText(ERR_TOO_LONG)).toBeNull();
+  });
+});
+
+/**
+ * [161-10 / WIZERR-07] THE CORRELATION ID IS GATED TO TERMINAL ARMS.
+ *
+ * 161-UI-SPEC Copy Principle 4: "Correlation id only on terminal /
+ * non-actionable arms. On an actionable error it is noise competing with the
+ * remedy."
+ *
+ * THE MECHANISM, stated so the assertions are not mistaken for a renderer
+ * feature: `ErrorEnvelope` prints the id in its diagnostics block whenever it
+ * renders at all. What decides whether the user sees one is therefore WHICH
+ * ARMS RENDER AN ENVELOPE — and the field-level arms deliberately do not. That
+ * is the whole gate, and it is a property of this component, not of the shared
+ * renderer (which this plan does not touch).
+ */
+describe("[161-10 / WIZERR-07] correlation id: present on the terminal arm, absent on the actionable one", () => {
+  const CORRELATION_LABEL = "correlation_id:";
+
+  it("the TERMINAL arm shows a correlation id, and it is the one that was SENT", async () => {
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse(500, { code: "DASHBOARD_WRITE_FAILED", error: "internal error" }),
+    );
+    renderDialog();
+    fireEvent.change(nameInput(), { target: { value: "Helios alpha sleeve" } });
+    fireEvent.click(saveButton());
+
+    const envelope = await screen.findByTestId("error-envelope");
+    expect(envelope.textContent).toContain(CORRELATION_LABEL);
+
+    // …and it JOINS to the server's log line for THIS attempt: the id on screen
+    // is the id that rode the request header. An id minted only on the failure
+    // path would satisfy the line above and join to nothing.
+    const init = fetchMock.mock.calls[0][1] as RequestInit;
+    const sent = new Headers(init.headers).get("X-Correlation-Id");
+    expect(sent, "no correlation id was sent on the request").toBeTruthy();
+    expect(envelope.textContent).toContain(String(sent));
+  });
+
+  it("the ACTIONABLE field arm shows NO correlation id anywhere on screen", async () => {
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse(400, { code: "NAME_TOO_LONG", error: "name too long" }),
+    );
+    renderDialog();
+    fireEvent.change(nameInput(), { target: { value: "Helios alpha sleeve" } });
+    fireEvent.click(saveButton());
+
+    // NON-VACUITY: the arm really did render its remedy, so the absence below
+    // is a property of a rendered dialog rather than of an empty one.
+    expect(await screen.findByText(ERR_TOO_LONG)).toBeInTheDocument();
+    expect(document.body.textContent).not.toContain(CORRELATION_LABEL);
   });
 });
 
@@ -238,5 +408,28 @@ describe("RenameStrategyDialog — source pins", () => {
 
   it("uses the shared Field primitive so the error is wired to the control", () => {
     expect(SRC).toContain("Field");
+  });
+
+  it("[161-10] carries NO local wire-code lookup table — translation lives once, shared", () => {
+    // ⚠️ COMMENT-STRIPPED, and that is not a convenience. The component's
+    // docblock NAMES the retired table so the next reader knows what was
+    // removed and why; a raw-text pin would match that prose and make the file
+    // its own offender (the 140.2-08 / 150-02 self-matching-comment lesson).
+    const CODE = SRC.replace(/\/\*[\s\S]*?\*\//g, "").replace(
+      /^\s*\/\/.*$/gm,
+      "",
+    );
+    // Anti-vacuity: the stripper really stripped and the source really loaded.
+    expect(SRC).toContain("/**");
+    expect(CODE).not.toContain("/**");
+    expect(CODE).toContain("handleSave");
+
+    // The retired one by name, so a revert is loud…
+    expect(CODE).not.toContain("ROUTE_FIELD_ERRORS");
+    // …and the SHAPE, so it cannot come back under a new name: no
+    // `Record<string, …>` keyed lookup of any kind in this component.
+    expect(CODE).not.toMatch(/Record<\s*string\s*,/);
+    // What must be here instead: the ONE shared recogniser.
+    expect(CODE).toContain("recogniseDashboardDialogCode");
   });
 });
