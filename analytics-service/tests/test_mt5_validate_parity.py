@@ -603,6 +603,65 @@ def test_worker_sink_lets_a_curated_cause_through_but_never_raw_remote_text():
     assert "s3cr3t-pw" not in message
 
 
+def test_the_exception_docstring_names_the_sink_the_worker_actually_calls():
+    """161-REVIEW / WR-06 — the class docstring is a claim about `job_worker`.
+
+    It said ``classify_exception`` maps this type onto
+    ``("permanent", MT5_GATEWAY_MISCONFIGURED_DETAIL)``. 161-02 changed that arm
+    to ``curated_gateway_detail(exc)`` — an allow-list read — and left this
+    carrier behind, in the very file the new builder lives in. A comment
+    describing behaviour that no longer exists is this phase's own defect class,
+    so the correction gets a pin rather than a promise.
+
+    ⛔ THE ORACLE IS ANCHORED, not free-floating: the positive needle is checked
+    against the LIVE sink in the same case, so the docstring cannot be "fixed"
+    into naming a function the worker does not call.
+    """
+    import re
+
+    from services.mt5_probe import Mt5GatewayMisconfigured
+
+    doc = Mt5GatewayMisconfigured.__doc__
+    assert isinstance(doc, str) and len(doc) > 400, (
+        "the class lost its docstring — every needle below would match nothing "
+        "and this case would assert about an empty string"
+    )
+    # RST wraps across source lines; compare on collapsed whitespace so the
+    # needles are about the CLAIM, not about where the line happens to break.
+    flat = re.sub(r"\s+", " ", doc)
+
+    superseded = '``("permanent", MT5_GATEWAY_MISCONFIGURED_DETAIL)``'
+    current = '``("permanent", curated_gateway_detail(exc))``'
+    # `"" in anything` is True in Python — pin both needles as real strings
+    # before relying on either direction.
+    assert len(superseded) > 20 and len(current) > 20
+
+    assert current in flat, (
+        "the docstring does not name the sink 161-02 actually wired: "
+        f"{flat[:400]!r}"
+    )
+    assert superseded not in flat, (
+        "the docstring still claims the classify arm returns the generic "
+        "constant unconditionally. It reads through curated_gateway_detail's "
+        "allow-list, and the generic constant is the DEGRADATION TARGET."
+    )
+
+    # ANCHOR: the sentence above is true of the running code, not just of the
+    # prose. A curated cause survives the sink intact — which is the whole
+    # difference between the two mappings the needles discriminate.
+    from services.job_worker import classify_exception
+
+    probe_cause = MT5_GATEWAY_MISCONFIGURED_DETAILS[1]
+    assert probe_cause != _EXPECTED_GENERIC, (
+        "the anchor sampled the generic constant, so it cannot tell the two "
+        "mappings apart"
+    )
+    assert classify_exception(Mt5GatewayMisconfigured(probe_cause)) == (
+        "permanent",
+        probe_cause,
+    )
+
+
 # ---------------------------------------------------------------------------
 # The THREE parity cases — each driven through BOTH callers
 # ---------------------------------------------------------------------------

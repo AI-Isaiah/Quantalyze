@@ -159,10 +159,22 @@ class Mt5GatewayMisconfigured(Exception):
     PERMANENT — a retry can NEVER clear it. That is the whole point of the type.
     Raised by ``services/ingestion/mt5.py`` where a bare ``RuntimeError`` used to
     be, so ``job_worker.classify_exception`` can map it onto ``("permanent",
-    MT5_GATEWAY_MISCONFIGURED_DETAIL)`` instead of falling through to
+    curated_gateway_detail(exc))`` instead of falling through to
     ``("unknown", str(exc))`` — under which the worker re-ran the whole serialized
     probe against the ONE shared terminal on every retry, queueing ahead of every
     other user's validate, for a condition no retry can clear.
+
+    ⚠️ 161-02 MOVED THAT SINK, and this paragraph used to name the one it
+    replaced. The arm returned ``MT5_GATEWAY_MISCONFIGURED_DETAIL``
+    unconditionally, which threw away the cause
+    ``mt5_gateway_misconfigured_detail`` had just derived from the terminal flags
+    — so the operator surface kept naming the option the founder measured NOT to
+    be in force. ``job_worker.py`` now reads the message through
+    ``curated_gateway_detail``'s allow-list: a member of
+    ``MT5_GATEWAY_MISCONFIGURED_DETAILS`` rides out intact, and anything else —
+    including raw remote text — degrades to the generic constant. That constant
+    is now the DEGRADATION TARGET, not the return value, and a comment saying
+    otherwise is the false-sentence class this phase exists to close.
 
     ⛔ The message defaults to the curated constant so no call site can raise this
     carrying raw remote text by omission. Do not interpolate an upstream
