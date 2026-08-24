@@ -13,6 +13,7 @@ import { KeyPermissionBadge } from "@/components/connect/KeyPermissionBadge";
 import {
   checkStrategyGate,
   isDailyReturnsSourced,
+  STRATEGY_GATE_MIN_CSV_ROWS,
   type StrategyGateResult,
 } from "@/lib/strategyGate";
 import {
@@ -1284,11 +1285,12 @@ export function SyncPreviewStep({
             // guaranteed by the repoll guard directly above, so the predicate's
             // row-count term cannot be what refuses here; only the verdict can.
             //
-            // NOT ADDRESSED, deliberately: the admin path also applies a 7-row
-            // CSV floor that this arm still does not. That divergence is
-            // PRE-EXISTING — it predates this phase and is not what FIX 3 is
-            // about — so closing it here would be scope the review did not ask
-            // for. Recorded in 142.2-FIXES.md rather than silently fixed.
+            // 161-07 / WIZERR-09 CLOSES THE DIVERGENCE THIS COMMENT RECORDED.
+            // What stood here said the admin path "also applies a 7-row CSV
+            // floor that this arm still does not", booked to 142.2-FIXES.md
+            // rather than silently fixed. The floor is applied below now, so
+            // the note is replaced rather than left standing as a description
+            // of behaviour that no longer exists.
             const compositeAdmissible = isDailyReturnsSourced({
               // Zero BY CONSTRUCTION for a composite; this arm never queries
               // `trades` and must not start.
@@ -1307,6 +1309,50 @@ export function SyncPreviewStep({
                 wizard_session_id: wizardSessionId,
                 step: "sync_preview",
                 code: "GATE_SERIES_PROVENANCE_UNVERIFIED",
+                trade_count: 0,
+              });
+              return "done";
+            }
+
+            // ── 161-07 / WIZERR-09: THE 7-DAY FLOOR, ON THIS ARM AT LAST ────
+            //
+            // EVALUATION ORDER IS THE ADMIN PATH'S ORDER, AND IT IS LOAD-BEARING.
+            // `checkStrategyGate` evaluates the floor INSIDE the admitted branch
+            // (`if (dailyReturnsSourced) { if (csvRowCount < …) }`), so an
+            // inadmissible verdict is answered by the verdict arm and never by
+            // the row count. That is why this check sits BELOW the admissibility
+            // return above rather than in front of it: reversing the two would
+            // tell a composite whose stitch never stamped a verdict that it is
+            // "short of history", which is a different — and unwinnable — claim.
+            //
+            // THE THRESHOLD IS IMPORTED, NEVER RE-TYPED. `STRATEGY_GATE_MIN_CSV_ROWS`
+            // is the one declaration; only the comparison is restated here, and
+            // its direction is pinned on BOTH sides (`strategyGate.test.ts`'s
+            // exactly-7 case; this arm's 6/7 pair in
+            // `SyncPreviewStep.composite.render.test.tsx`).
+            //
+            // ⚠️ WHY NOT `checkStrategyGate` WHOLESALE, given `strategyGate.ts`'s
+            // own "a shared function, not a comment" lesson: that function also
+            // owns the four `computationStatus` arms, and THIS arm has already
+            // decided that question through its own poll state machine (the
+            // `failed` branch above renders the failing member by name). Feeding
+            // it a second time could answer `ANALYTICS_MISSING` / `_PENDING` /
+            // `_COMPUTING`, all three of which `gateFailureToWizardError` maps to
+            // UNKNOWN by design — a generic sentence on a screen that already
+            // knows the real state. It also owns `StrategyGateUnevaluableError`,
+            // a THROW that this arm's catch would book as a heavy-fetch fault.
+            // Both are trade/status logic that is zero by construction for a
+            // composite, which is the case the task's own action text names.
+            //
+            // `series.length >= 1` is guaranteed by the R2-5 repoll guard above,
+            // so the reachable failing range here is 1..6 — never 0.
+            if (series.length < STRATEGY_GATE_MIN_CSV_ROWS) {
+              setErrorCode("GATE_INSUFFICIENT_CSV_HISTORY");
+              setPhase("gate_failed");
+              trackForQuantsEventClient("wizard_error", {
+                wizard_session_id: wizardSessionId,
+                step: "sync_preview",
+                code: "GATE_INSUFFICIENT_CSV_HISTORY",
                 trade_count: 0,
               });
               return "done";

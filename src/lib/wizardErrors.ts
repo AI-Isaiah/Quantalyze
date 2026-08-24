@@ -280,6 +280,43 @@ export type WizardErrorCode =
   // strategy is not short of trades, it is short of PROVENANCE, and its remedy
   // is a re-sync rather than a different key.
   | "GATE_SERIES_PROVENANCE_UNVERIFIED"
+  // 161-07 / WIZERR-09 — the 7-day floor on a DAILY-RETURN series, which the
+  // wizard could not render until this commit.
+  //
+  // WHAT RENDERED BEFORE: `UNKNOWN`. `gateFailureToWizardError` answered
+  // `INSUFFICIENT_CSV_HISTORY` with the generic unknown-error sentence under a
+  // comment asserting the code "never flows through the wizard error mapper" —
+  // true only for as long as the wizard's composite arm declined to evaluate
+  // the floor at all (`SyncPreviewStep.tsx`, "NOT ADDRESSED, deliberately").
+  // This member and that arm's floor land in ONE commit precisely so no build
+  // exists in which the wizard can refuse on row count and then explain the
+  // refusal with "something went wrong".
+  //
+  // ⛔ NOT AN ALIAS. `SEAM_CODE_TO_WIZARD_CODE` translates codes ANOTHER
+  // service put on the wire; this one is minted by our own `strategyGate.ts`
+  // and reaches the mapper through `gateFailureToWizardError`. A union member
+  // outright, per the ⛔ block above.
+  //
+  // ⚠️ WHY EACH NEAR NEIGHBOUR WAS REJECTED, read at the gate's own arms:
+  //   · `GATE_INSUFFICIENT_DAYS` measures CALENDAR SPAN between the earliest
+  //     and latest TRADE (`strategyGate.ts` `computeSpanDays`), and is
+  //     unreachable on the daily-returns branch — a strategy here has zero
+  //     trades by construction, so it has no trade span to be short of.
+  //   · `GATE_INSUFFICIENT_TRADES` is the sentence this whole phase exists to
+  //     stop showing to strategies that have a return series and no fills.
+  //   · `GATE_SERIES_PROVENANCE_UNVERIFIED` answers a DIFFERENT question. This
+  //     series HAS an admitted completeness verdict — the floor is evaluated
+  //     only inside the admitted branch. It is short of DAYS, not of
+  //     provenance.
+  //
+  // RECOVERABLE — DERIVED, NOT DECLARED. `actions` carries `clear_and_retry`, a
+  // member of `RECOVERABLE_ACTIONS` (src/lib/envelope.ts), so `buildEnvelope`
+  // derives `recoverable: true` and a Retry renders. Honest here because on
+  // SyncPreviewStep `clear_and_retry` is what `kickoffRetryCanChangeTheOutcome`
+  // keys off: the Retry is wired to `handleKickoffRetry`, which RE-RUNS THE
+  // SYNC rather than resubmitting the same payload. A re-derive that reaches
+  // further history is exactly the thing that clears this floor.
+  | "GATE_INSUFFICIENT_CSV_HISTORY"
   // Metadata step (MetadataStep) — Phase 53 / APPLY-02 inline per-field
   // validation. Copy lives here (the canonical wizard-copy home) so the
   // component never carries an invented inline string (copy-drift guard).
@@ -1672,6 +1709,42 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
     ],
     docsHref: "/security#sync-timing",
     actions: ["clear_and_retry", "request_call"],
+  },
+
+  // 161-07 / WIZERR-09 — the copy that lands in the SAME commit the wizard's
+  // composite arm starts evaluating the 7-day floor.
+  //
+  // ⚠️ THE UI-SPEC'S PROPOSED COPY WAS CORRECTED HERE, and the correction is
+  // the point rather than a preference. It read "Not enough CSV history…" and
+  // "Upload a CSV covering at least 7 daily returns, then submit again."
+  // MEASURED at every emitter this member can reach, that remedy is false:
+  //   · the wizard COMPOSITE arm counts the STITCHED composite series
+  //     (`series.length`), which no user uploaded;
+  //   · the wizard SINGLE-KEY arm reaches this code only on the daily-returns
+  //     branch — a KEYED account (deribit / mt5 / sfox stamp `ledger_complete`)
+  //     whose dailies were DERIVED from the venue's ledger, not uploaded.
+  // The keyless CSV upload path never reaches `SyncPreviewStep` at all (it
+  // validates through `csv-finalize`). So a bullet telling this user to upload
+  // a CSV names a remedy their surface does not offer — the unwinnable-remedy
+  // class this phase exists to close. The copy talks about the SERIES instead,
+  // which is true on all three emitters including the admin one.
+  //
+  // ⚠️ THE NUMBER IS SPELLED OUT because it exists and is fixed
+  // (`STRATEGY_GATE_MIN_CSV_ROWS = 7`) — DESIGN.md: no adjective where a number
+  // exists. The user's OWN row count is deliberately NOT interpolated: this
+  // entry has no `formatKeyError` arm and no context field, so there is no path
+  // by which an absent count could render as a placeholder or a zero (TRAP-3).
+  // The gate's `reason` string, which the admin surface renders raw, does carry
+  // both numbers — that is a different channel with a different audience.
+  GATE_INSUFFICIENT_CSV_HISTORY: {
+    title: "This strategy needs at least 7 days of return history.",
+    cause:
+      "This strategy's daily-return series covers fewer than 7 days. We hold a daily-return series to the same 7-day floor we hold trade history to: below that, volatility and drawdown estimates are unstable, so we will not compute a verified factsheet from it yet. Nothing is wrong with the data we have — there is not yet enough of it.",
+    fix: [
+      "Come back once the series covers at least 7 days and retry the sync from this page — a completed re-derive rebuilds the series from whatever history the venue holds by then.",
+    ],
+    docsHref: "/security#thresholds",
+    actions: ["clear_and_retry"],
   },
 
   METADATA_DESCRIPTION_REQUIRED: {
@@ -3206,11 +3279,23 @@ export function gateFailureToWizardError(code: GateFailureCode): WizardErrorCode
       // if they do reach this path so we catch the misuse.
       return "UNKNOWN";
     case "INSUFFICIENT_CSV_HISTORY":
-      // Admin-approval-only gate code. The wizard's SyncPreviewStep is the
-      // exchange-key path (never CSV-sourced), and the CSV upload branch
-      // validates via csv-finalize — so this code never flows through the
-      // wizard error mapper. UNKNOWN flags the misuse if it ever does.
-      return "UNKNOWN";
+      // 161-07 / WIZERR-09. THIS ARM'S PREVIOUS COMMENT IS DELETED RATHER THAN
+      // AMENDED, because its premise stopped being true in this commit. It
+      // said: "Admin-approval-only gate code… so this code never flows through
+      // the wizard error mapper. UNKNOWN flags the misuse if it ever does."
+      //
+      // Two of its three clauses were already wrong when written, and the third
+      // is wrong now:
+      //   · the wizard's SINGLE-KEY arm has passed `csvRowCount` to
+      //     `checkStrategyGate` since MT5-11/12, and a KEYED account on the
+      //     daily-returns branch (deribit / mt5 / sfox → `ledger_complete`) with
+      //     fewer than 7 derived days lands here, no CSV involved;
+      //   · "never CSV-sourced" conflates the STORAGE (`csv_daily_returns`,
+      //     which every daily-returns strategy writes) with the SOURCE;
+      //   · the wizard COMPOSITE arm now evaluates the floor too, in this same
+      //     commit — which is the whole reason the pair is atomic.
+      // Terminal AND wizard-reachable ⇒ real copy, never UNKNOWN.
+      return "GATE_INSUFFICIENT_CSV_HISTORY";
   }
 }
 

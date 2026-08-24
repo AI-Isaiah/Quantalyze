@@ -1879,13 +1879,28 @@ describe("[140.3-10 / TRAP-4] the whole copy table, scanned for destructive-only
    * it fires on a key-management surface that may have none — so offering to
    * destroy one would answer a stale bundle by destroying unrelated work.
    *
+   * **82 → 83 at 161-07** (WIZERR-09) — `GATE_INSUFFICIENT_CSV_HISTORY`, the
+   * 7-day floor on a DAILY-RETURN series, minted in the same commit the
+   * wizard's composite arm starts evaluating that floor. (82 was
+   * `KEY_ORPHANED` at 161-05; its copy is pinned by the `[161-05 / WIZERR-03]`
+   * describe.) THIS guard's reasoning was re-run over the entry before the
+   * number moved: its `actions` are `clear_and_retry` ALONE — not a member of
+   * `DESTRUCTIVE_ACTIONS` — so it sits outside the scanned population by
+   * construction and the destructive class below is unchanged at four members.
+   *
+   * ⛔ The exclusion is load-bearing rather than incidental. `start_fresh`
+   * DELETEs a draft, and the condition here is "the series is not long enough
+   * YET" — a strategy whose data is fine and whose remedy is time. Answering a
+   * shortage of days with a control that destroys the days already accumulated
+   * is the TRAP-4 shape exactly.
+   *
    * ⚠️ THIS NUMBER HAS A TWIN. The same literal is pinned in the
    * `[140.3-12 / SEAMUX-04]` describe below, and moving one without the other
    * is a silent half-fix — the shrink-detection it buys survives in one scan
    * and dies in the other. 153.1-04 added a third guard (at the end of this
    * file) that reads this source and reds when the two literals disagree.
    */
-  const EXPECTED_TABLE_SIZE = 82;
+  const EXPECTED_TABLE_SIZE = 83;
 
   it("the scan actually covers the table — hand-typed size guard", () => {
     expect(
@@ -2268,11 +2283,35 @@ describe("[140.3-12 / SEAMUX-04] no entry in the copy table makes a claim we can
    * 140.3-15's entry passed and the CSV case failed — not whether the sentence
    * is comforting, but whether the code path makes it observable.
    *
+   * **82 → 83 at 161-07** (WIZERR-09) — `GATE_INSUFFICIENT_CSV_HISTORY`. Read
+   * against all four FORBIDDEN fragments by hand before the number moved: it
+   * mentions no notification, no trade fetching and no session field name.
+   *
+   * ⛔ "data is unchanged" is again the fragment needing care, and this entry
+   * makes NO claim about a write at all. It says "Nothing is wrong with the
+   * data we have — there is not yet enough of it", which restates the very
+   * measurement that fired the refusal (the gate counted the series and found
+   * it under the floor) rather than asserting a negative about a request whose
+   * outcome we never learned. That is the test 140.3-15's entry passed and the
+   * CSV case failed.
+   *
+   * ⚠️ TWO CLAUSES ARE WORTH RE-READING if this entry is ever edited:
+   *   · the fix bullet says a completed re-derive "rebuilds the series from
+   *     whatever history the venue holds by then". That states the MECHANISM a
+   *     retry runs, deliberately without promising the venue holds more — the
+   *     copy nowhere claims the missing history exists.
+   *   · the UI-SPEC's proposed bullet ("Upload a CSV covering at least 7 daily
+   *     returns") was DELETED rather than reworded, because it named a remedy
+   *     no emitter of this code can reach: the composite arm counts a STITCHED
+   *     series, the single-key arm counts a venue-DERIVED one, and the keyless
+   *     CSV upload path never reaches this surface at all. The measurement is
+   *     argued in full at the entry itself.
+   *
    * ⚠️ THIS NUMBER HAS A TWIN in the `[140.3-10 / TRAP-4]` describe above.
    * Moving one without the other is a silent half-fix; the guard added at the
    * end of this file reds when the two literals disagree.
    */
-  const EXPECTED_TABLE_SIZE = 82;
+  const EXPECTED_TABLE_SIZE = 83;
 
   it("the scan actually covers the table — hand-typed size guard", () => {
     expect(
@@ -4248,5 +4287,102 @@ describe("[161-05 / WIZERR-11] KEY_AUTH_FAILED names a venue only to that venue'
     ).not.toContain(probe);
     // An unknown venue is not deribit, so it is suppressed like an absent one.
     expect(surface.toLowerCase()).not.toContain(VENUE_TOKEN);
+  });
+});
+
+/**
+ * [161-07 / WIZERR-09] THE ATOMIC PAIR, FROM THE COPY SIDE.
+ *
+ * `gateFailureToWizardError` answered `INSUFFICIENT_CSV_HISTORY` with
+ * `UNKNOWN` under a comment asserting the code "never flows through the wizard
+ * error mapper". The wizard's composite arm started evaluating the 7-day floor
+ * in the SAME commit as this describe, which makes that premise false — and a
+ * floor landing without its copy would have shipped a real gate refusal
+ * explained by the generic unknown-error sentence, which is strictly worse than
+ * the un-floored arm: the user is stopped AND told nothing.
+ *
+ * The exhaustive `switch` in `gateFailureToWizardError` enforces half of the
+ * atomicity for free (a union member with no arm, or an arm with no member,
+ * fails `tsc`). What it cannot enforce is that the arm returns a member with
+ * REAL COPY rather than `UNKNOWN`, which is what the first case here pins.
+ */
+describe("[161-07 / WIZERR-09] INSUFFICIENT_CSV_HISTORY renders copy of its own, never UNKNOWN", () => {
+  const CODE: WizardErrorCode = "GATE_INSUFFICIENT_CSV_HISTORY";
+
+  /** Every user-visible string on the entry, joined — never just the title. */
+  const surface = (): string => {
+    const copy = formatKeyError(CODE);
+    const joined = [copy.title, copy.cause, ...copy.fix].join("   ");
+    // NON-VACUITY GUARD, and not a formality: `"anything".includes("")` is
+    // `true`, so every negative assertion below would pass against an empty
+    // render. This is the floor that makes them mean something.
+    expect(
+      joined.length,
+      "The rendered surface is empty or near-empty, which makes every " +
+        "not.toMatch below vacuously green.",
+    ).toBeGreaterThan(120);
+    return joined;
+  };
+
+  it("the gate code maps to a real member — the UNKNOWN fallthrough is gone", () => {
+    expect(gateFailureToWizardError("INSUFFICIENT_CSV_HISTORY")).toBe(CODE);
+  });
+
+  it("ANTI-CONTROL: the three transient analytics codes still answer UNKNOWN", () => {
+    // Without this, "map every gate code to something" satisfies the case
+    // above. The three below are POLL states, not terminal errors: rendering
+    // an error card for them would be the misuse UNKNOWN exists to flag, and
+    // the flip must be surgical rather than wholesale.
+    const transient: GateFailureCode[] = [
+      "ANALYTICS_MISSING",
+      "ANALYTICS_PENDING",
+      "ANALYTICS_COMPUTING",
+    ];
+    for (const code of transient) {
+      expect(gateFailureToWizardError(code), `${code} must stay UNKNOWN`).toBe(
+        "UNKNOWN",
+      );
+    }
+  });
+
+  it("names the threshold as the NUMBER 7 and invents no other number", () => {
+    // Hand-typed needle. ⛔ NEVER `${STRATEGY_GATE_MIN_CSV_ROWS}` — an oracle
+    // built from the constant it is asserting about follows a rename silently
+    // and can never fail.
+    expect(surface()).toMatch(/at least 7 days/i);
+
+    // TRAP-3 — the user's OWN row count is deliberately absent. The entry has
+    // no `formatKeyError` interpolation arm and no context field, so there is
+    // no path by which an unsupplied count could render as a zero or a
+    // placeholder. "only 0 trade(s)" is the sentence this phase is deleting;
+    // it must not be replaced with "only 0 day(s)".
+    expect(surface()).not.toMatch(/\b0 (day|days|row|rows)\b/i);
+  });
+
+  it("offers no remedy this code's emitters cannot reach", () => {
+    // MEASURED, per emitter, before this assertion was written:
+    //   · wizard COMPOSITE arm — counts the STITCHED series, no upload exists;
+    //   · wizard SINGLE-KEY arm — reachable only on the daily-returns branch,
+    //     i.e. a KEYED account whose dailies were DERIVED from the venue;
+    //   · admin approve — renders `gate.reason` raw, not this copy at all.
+    // The keyless CSV upload path never reaches `SyncPreviewStep`; it
+    // validates through `csv-finalize`. So the UI-SPEC's proposed bullet
+    // ("Upload a CSV covering at least 7 daily returns, then submit again")
+    // named a control no reader of this copy has.
+    expect(surface().toLowerCase()).not.toContain("upload a csv");
+    expect(surface().toLowerCase()).not.toContain("submit again");
+  });
+
+  it("RECOVERABLE is DERIVED, and the control it earns is the non-destructive one", () => {
+    // The derivation, not a restatement of the table: `buildEnvelope` reads
+    // `actions` against `RECOVERABLE_ACTIONS`.
+    expect(buildEnvelope(CODE, "corr-csv-history-1").recoverable).toBe(true);
+
+    // …and the action that earns it is `clear_and_retry`, which on
+    // SyncPreviewStep is wired to `handleKickoffRetry` (a re-SYNC), never to a
+    // resubmit of the same payload and never to a draft delete. TRAP-4.
+    const actions = WIZARD_ERROR_COPY[CODE].actions as readonly string[];
+    expect(actions).toContain("clear_and_retry");
+    expect(actions).not.toContain("start_fresh");
   });
 });
