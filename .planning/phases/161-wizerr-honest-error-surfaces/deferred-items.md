@@ -58,3 +58,27 @@ as `0` (its existing sentinel). The 161-UI-SPEC's approved copy for this case is
 states this sentence explicitly. Changing it is a UI-SPEC amendment, and improvising against
 an approved contract is the failure mode this phase's discipline exists to prevent. Raised
 for the phase owner.
+
+---
+
+## D-161-04 — `contracts-registry` B25 times out under full-suite load (flake, not a regression)
+
+**Found during:** 161-04 wave gate.
+
+`src/__tests__/contracts/contracts-registry.test.ts > [B25] eslint-plugin-quantalyze wiring
+integrity > resolves every quantalyze rule to "error" for a representative src file` failed
+`Error: Test timed out in 5000ms` on the first full-suite run of this plan, and PASSED on an
+immediate second full-suite run of the identical tree (788 passed / 0 failed). Standalone it
+runs in 3.72s — i.e. inside a 5s budget with ~1.2s of headroom, while the full suite reports
+51s transform / 351s setup across workers.
+
+**Why it is not 161-04's:** the test resolves ESLint rule severities for a representative src
+file; this plan changed one component callback, its comments, and one test file, and added no
+lint config. The failure mode is a hard 5s `testTimeout` on a test that boots ESLint, under
+parallel load.
+
+**Why not fixed here:** raising a timeout in a contract file is out of this plan's scope
+(executor SCOPE BOUNDARY) and the honest fix is a decision about that file's budget, not a
+number to nudge mid-phase. Suggested: give the B25 case an explicit per-test timeout so a
+loaded machine cannot redden a green tree. Recorded so the next full-suite red on this name is
+recognised as this, and not silently re-diagnosed.

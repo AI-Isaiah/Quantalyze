@@ -5,16 +5,16 @@ milestone_name: Backlog Burndown (Phases 158+)
 current_phase: 160
 current_phase_name: PROVENANCE — The server's venue is the venue that annualizes
 status: executing
-stopped_at: Completed 161-03-PLAN.md
-last_updated: "2026-08-24T10:34:56.445Z"
+stopped_at: Completed 161-04-PLAN.md
+last_updated: "2026-08-24T11:09:09.924Z"
 last_activity: 2026-08-23
 last_activity_desc: Phase 160 execution started
-state_head: 251ddcc77819d1c687411bba5b51e8cbbb45a5a9
+state_head: a790cfc09051bb057ee20329fe266a0fb5770e6a
 progress:
   total_phases: 9
   completed_phases: 1
   total_plans: 30
-  completed_plans: 21
+  completed_plans: 22
   percent: 11
 ---
 
@@ -114,7 +114,7 @@ zero unclassified) and `161-VALIDATION.md` (Nyquist strategy, 4 Wave-0 gaps, ant
 ## Current Position
 
 Phase: 160 (PROVENANCE — The server's venue is the venue that annualizes) — EXECUTING
-Plan: 4 of 6
+Plan: 5 of 6
 Status: Ready to execute
 Last activity: 2026-08-23 — Phase 160 execution started
 OPS-CI first (the shared-test-db eviction / #616 mutex protects every later merge), 165 DEPS
@@ -623,6 +623,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 | Phase 161 P01 | 24min | 2 tasks | 3 files |
 | Phase 161 P02 | 41min | 2 tasks | 9 files |
 | Phase 161 P03 | 50m | 3 tasks | 10 files |
+| Phase 161 P04 | ~55 min | 2 tasks | 3 files |
 
 ## Accumulated Context
 
@@ -750,6 +751,8 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - [Phase 160]: 161-02: when both MT5 blockage flags are set the NAMED external-API option wins (documented precedence, pinned by test); absent/unreadable flags render the generic constant, never a guessed cause (A1 quarantine)
 - [Phase 160]: 161-03: the csv-finalize A2 409 sentence was ADJUSTED from the UI-SPEC's proposal — 'this track record' and 'a different flow' are both unestablished at that arm (it runs before the name and series checks, and admin/strategy-review moves a same-flow row to published)
 - [Phase 160]: 161-03: the CSV per-row forward is a PROJECTION naming {rule,row,message}, never a passthrough — the producer's no-echo discipline stops being a promise held in another file
+- [Phase 160]: 161-04 / WIZERR-02: keep-and-resume — 'Try another key' is a pure step transition; the draft survives and a same-key resubmit resolves kind:'draft' and RESUMES (measured at create-with-key/route.ts:269 + :634-649).
+- [Phase 160]: 161-04: deletion now has exactly ONE caller (the confirm dialog's danger button), reachable from two confirmed entrances; a remedy-labeled control is non-destructive by construction.
 
 ### Decisions (execution-time, Phase 140.2)
 
@@ -1452,8 +1455,8 @@ Load-bearing sequencing (real dependencies, do not reorder):
 
 ## Session
 
-**Last Date:** 2026-08-24T10:34:45.015Z
-**Stopped At:** Completed 161-03-PLAN.md
+**Last Date:** 2026-08-24T11:08:54.113Z
+**Stopped At:** Completed 161-04-PLAN.md
 **Resume File:** None
 **Next step:** Phase 161 (WIZERR — honest error surfaces) is next and NOT yet planned — run `/gsd-plan-phase 161`. Phase 161.1 (LEDGER-REFRESH) was inserted after it on 2026-08-24 for the founder-reported MT5 staleness; it is URGENT and production-facing, so it may be pulled ahead of 161 if you prefer the live data-integrity fix first.
 
