@@ -777,12 +777,35 @@ def validate_csv(raw_bytes: bytes, fmt: str) -> dict[str, Any]:
             # untrusted CSV content that can carry PII, and this envelope is
             # persisted into strategy_verifications metadata. Mirror the
             # no-row-data discipline (above) on the response channel too.
+            #
+            # 161-03 / WIZERR-13 — AND DO NOT NAME A COLUMN THAT DOES NOT
+            # EXIST. `column` is NaN for a DATAFRAME-level check (the schema
+            # itself failed, not a cell in a column), and pandera reports that
+            # as a float, so the pre-fix f-string rendered its `str()`:
+            #
+            #     Column 'nan' failed rule 'column_in_dataframe' at row 0.
+            #
+            # measured verbatim against a daily_returns upload whose value
+            # column is misnamed. The wizard prints that sentence unchanged.
+            # With no column to name, the clause is OMITTED rather than filled
+            # with a fabricated name.
+            #
+            # ⛔ The guard is `pd.isna`, NEVER a string match on "nan": a CSV
+            # is free to have a column literally named `nan`, and for that file
+            # the column clause is CORRECT. Only the absent reading is absent.
+            column_raw = row.get("column")
+            has_column = column_raw is not None and not pd.isna(column_raw)
+            column_name = str(column_raw).strip() if has_column else ""
             all_errors.append({
                 "rule": rule_name,
                 "row": row_idx,
                 "message": (
-                    f"Column '{row.get('column')}' failed rule "
-                    f"'{rule_name}' at row {row_idx}."
+                    (
+                        f"Column '{column_name}' failed rule "
+                        f"'{rule_name}' at row {row_idx}."
+                    )
+                    if column_name
+                    else f"Failed rule '{rule_name}' at row {row_idx}."
                 ),
             })
         df_validated = df

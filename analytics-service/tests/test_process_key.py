@@ -4629,3 +4629,232 @@ def test_sync_pipeline_abandoned_session_is_a_coded_transient_never_a_500(client
     from services import exchange as exchange_svc
 
     assert body["code"] not in exchange_svc.PERMANENT_VALIDATION_ERROR_CODES
+
+
+# ---------------------------------------------------------------------------
+# 161-03 / WIZERR-13 — the SUBMIT path forwards the per-row DATA half.
+#
+# The wizard's CSV panel (`CsvValidationEnvelope.tsx`) has always read
+# `debug_context.pandera_errors`, and on this route that key never existed:
+# `_envelope_error` rebuilt `debug_context` from the verification id alone and
+# never looked at `val.debug_context`, where the CSV adapter puts its per-row
+# list under `violations`. The panel therefore rendered a headline with no
+# breakdown beneath it on every submit-path validation failure.
+#
+# ⛔ THE FORWARD IS A PROJECTION, NOT A PASSTHROUGH. Only {rule, row, message}
+# crosses. `failure_case` — the raw failing cell, untrusted CSV content that
+# can carry PII, and this envelope is persisted into strategy_verifications
+# metadata — must be unable to reach the wire even if an upstream producer
+# started including it. T-161-07 / T-161-08.
+# ---------------------------------------------------------------------------
+
+_PII_MARKER = "ZZ-PII-acct-4411-Jane-Doe"
+
+
+def _csv_validation_result(violations, debug_extra=None):
+    """A CSV `ValidationResult` shaped exactly like csv_adapter.validate()'s
+    rejection return: error_code from the first rule, the full list under
+    `debug_context["violations"]`."""
+    from services.ingestion.adapter import ValidationResult
+
+    debug_context = {"violations": violations}
+    if debug_extra:
+        debug_context.update(debug_extra)
+    return ValidationResult(
+        valid=False,
+        read_only=None,
+        error_code="COLUMN_IN_DATAFRAME",
+        human_message="Failed rule 'column_in_dataframe' at row 0.",
+        debug_context=debug_context,
+    )
+
+
+def _post_validate_only(client, fake, adapter):
+    with patch(
+        "routers.process_key.get_supabase",
+        return_value=fake,
+    ), patch(
+        "routers.process_key.get_adapter",
+        return_value=adapter,
+    ):
+        return client.post(
+            "/process-key",
+            json={
+                "flow_type": "csv",
+                "source": "csv",
+                "context": {
+                    "wizard_session_id": "wiz-csv-rows",
+                    "user_id": "u1",
+                    "fmt": "daily_returns",
+                    "raw_bytes_base64": "Y29sMSxjb2wyCjEsMg==",
+                    "step": "validate",
+                },
+            },
+            headers=_auth_headers(),
+        )
+
+
+def test_validate_only_forwards_the_per_row_breakdown(client):
+    """WIZERR-13 — the rows the panel reads actually arrive."""
+    fake = _build_supabase_mock(existing_row=None)
+    adapter = MagicMock()
+    adapter.validate = AsyncMock(
+        return_value=_csv_validation_result([
+            {
+                "rule": "column_in_dataframe",
+                "row": 0,
+                "message": "Failed rule 'column_in_dataframe' at row 0.",
+            },
+            {
+                "rule": "daily_return_lower_bound",
+                "row": 4,
+                "message": (
+                    "Column 'daily_return' failed rule "
+                    "'daily_return_lower_bound' at row 4."
+                ),
+            },
+        ])
+    )
+
+    r = _post_validate_only(client, fake, adapter)
+
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["ok"] is False
+    rows = body["debug_context"]["pandera_errors"]
+    assert rows == [
+        {
+            "rule": "column_in_dataframe",
+            "row": 0,
+            "message": "Failed rule 'column_in_dataframe' at row 0.",
+        },
+        {
+            "rule": "daily_return_lower_bound",
+            "row": 4,
+            "message": (
+                "Column 'daily_return' failed rule "
+                "'daily_return_lower_bound' at row 4."
+            ),
+        },
+    ], rows
+
+
+def test_forwarded_rows_carry_no_key_beyond_rule_row_message(client):
+    """T-161-07 — an upstream row that grew a `failure_case` key must not be
+    able to carry it onto the wire, or into strategy_verifications metadata."""
+    fake = _build_supabase_mock(existing_row=None)
+    adapter = MagicMock()
+    adapter.validate = AsyncMock(
+        return_value=_csv_validation_result(
+            [
+                {
+                    "rule": "currency_usd_or_blank",
+                    "row": 3,
+                    "message": (
+                        "Column 'currency' failed rule "
+                        "'currency_usd_or_blank' at row 3."
+                    ),
+                    # The key this route must never learn to forward.
+                    "failure_case": _PII_MARKER,
+                }
+            ],
+            # …and a sibling debug key that is not the breakdown.
+            debug_extra={"raw_sample": _PII_MARKER},
+        )
+    )
+
+    r = _post_validate_only(client, fake, adapter)
+
+    body = r.json()
+    rows = body["debug_context"]["pandera_errors"]
+    assert len(rows) == 1
+    assert set(rows[0].keys()) == {"rule", "row", "message"}, sorted(rows[0])
+    # The needle is real, not blank — a blanked marker would make the
+    # `not in` below pass while checking nothing.
+    assert len(_PII_MARKER) > 10
+    assert _PII_MARKER not in r.text, r.text
+
+
+def test_no_violations_means_the_key_is_absent_not_an_empty_list(client):
+    """Mirror what the panel treats as absent: `pandera_errors ?? []`. An empty
+    list would be indistinguishable in the client but would tell a reader of
+    the persisted envelope that a breakdown was produced and was empty."""
+    fake = _build_supabase_mock(existing_row=None)
+    from services.ingestion.adapter import ValidationResult
+
+    adapter = MagicMock()
+    adapter.validate = AsyncMock(
+        return_value=ValidationResult(
+            valid=False,
+            read_only=None,
+            error_code="AUTH_FAILED",
+            human_message="Invalid credentials",
+            debug_context={},
+        )
+    )
+
+    r = _post_validate_only(client, fake, adapter)
+
+    body = r.json()
+    assert body["code"] == "AUTH_FAILED"
+    assert "pandera_errors" not in body["debug_context"], body["debug_context"]
+
+
+def test_sync_pipeline_rejection_also_forwards_the_breakdown(client):
+    """THE SECOND SITE. `_run_validate_only` is not the only arm a CSV
+    rejection can leave by — the synchronous pipeline's unified rejection gate
+    is the other, and a fix at one site only would leave the panel empty on
+    whichever arm the caller happens to hit."""
+    fake = _build_supabase_mock(existing_row=None, insert_id="ver-csv-rows")
+    adapter = MagicMock()
+    adapter.validate = AsyncMock(
+        return_value=_csv_validation_result([
+            {
+                "rule": "monotonic_dates",
+                "row": 5,
+                "message": (
+                    "Column 'date' failed rule 'monotonic_dates' at row 5."
+                ),
+                "failure_case": _PII_MARKER,
+            }
+        ])
+    )
+
+    with patch(
+        "routers.process_key.get_supabase",
+        return_value=fake,
+    ), patch(
+        "routers.process_key.get_adapter",
+        return_value=adapter,
+    ):
+        r = client.post(
+            "/process-key",
+            json={
+                "flow_type": "csv",
+                "source": "csv",
+                "context": {
+                    "strategy_id": "s1",
+                    "user_id": "u1",
+                    "wizard_session_id": "wiz-csv-sync-rows",
+                    "fmt": "daily_returns",
+                    "raw_bytes_base64": "Y29sMSxjb2wyCjEsMg==",
+                },
+            },
+            headers=_auth_headers(),
+        )
+
+    assert r.status_code in (403, 424), r.text
+    body = r.json()
+    assert body["ok"] is False
+    rows = body["debug_context"]["pandera_errors"]
+    assert rows == [
+        {
+            "rule": "monotonic_dates",
+            "row": 5,
+            "message": "Column 'date' failed rule 'monotonic_dates' at row 5.",
+        }
+    ], rows
+    # The verification id keeps its slot — the forward is additive.
+    assert body["debug_context"]["verification_id"] == "ver-csv-rows"
+    assert len(_PII_MARKER) > 10
+    assert _PII_MARKER not in r.text, r.text

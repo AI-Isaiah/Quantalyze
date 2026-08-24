@@ -492,3 +492,124 @@ def test_validate_envelope_daily_returns_series_stringifies_dates():
         assert re.match(r"^\d{4}-\d{2}-\d{2}$", row["date"]), (
             f"date {row['date']!r} not in YYYY-MM-DD form"
         )
+
+
+# ---------------------------------------------------------------------------
+# 161-03 / WIZERR-13 — the per-row breakdown's DATA half must not leak the
+# literal not-a-number string, and must not echo untrusted cell contents.
+#
+# ⚠️ MEASURED FIRST, NOT REASONED. Driving a daily_returns upload that is
+# missing its `daily_return` column through `validate_csv` at pre-fix HEAD
+# produced, verbatim:
+#
+#     Column 'nan' failed rule 'column_in_dataframe' at row 0.
+#
+# `column_in_dataframe` is a DATAFRAME-level pandera check: there is no column
+# to name, so `failure_cases.column` comes back as a float NaN and the
+# f-string rendered its `str()`. The wizard prints that sentence unchanged —
+# `formatColumnInDataframeMessage`'s narrow regex expects "Column 'x' failed:
+# y" (a shape this producer has never emitted) and falls through to the raw
+# message. So the user is told a column called `nan` failed.
+#
+# The fix omits the column clause when there is no column, rather than
+# inventing a name for it.
+# ---------------------------------------------------------------------------
+
+def _daily_returns_df_missing_the_return_column() -> pd.DataFrame:
+    """A well-formed daily_returns file whose value column is misnamed.
+
+    Drives the DATAFRAME-level `column_in_dataframe` check — the real loop,
+    not a hand-built failure_cases frame, so what is tested is the wiring.
+    """
+    return pd.DataFrame({
+        "date": pd.date_range("2024-01-02", periods=3, freq="D").strftime("%Y-%m-%d"),
+        # The schema wants `daily_return`; this file calls it something else.
+        "return_pct": [0.001, 0.002, 0.003],
+    })
+
+
+def test_dataframe_level_failure_never_renders_the_literal_nan():
+    """WIZERR-13 — the not-a-number literal must not reach user copy."""
+    result = validate_csv(
+        _csv_bytes(_daily_returns_df_missing_the_return_column()), "daily_returns"
+    )
+    assert result["ok"] is False
+    errors = result["errors"]
+    assert errors, "the fixture produced no errors — it is not exercising the loop"
+    for err in errors:
+        message = err["message"]
+        # GUARD BEFORE THE SUBSTRING ASSERTION. `"" in anything` is True in
+        # Python, so a blanked message would satisfy `not in` vacuously and a
+        # blanked needle would satisfy `in` vacuously. Pin both ends.
+        assert isinstance(message, str) and len(message) > 20, (
+            f"message is too short to be a sentence: {message!r}"
+        )
+        assert "nan" not in message.lower(), (
+            "the per-row breakdown named a column called 'nan' — the float "
+            f"NaN pandera reports for a dataframe-level check: {message!r}"
+        )
+
+
+def test_dataframe_level_failure_omits_the_column_clause_entirely():
+    """WIZERR-13 — no column, no column clause (and no dangling separator)."""
+    result = validate_csv(
+        _csv_bytes(_daily_returns_df_missing_the_return_column()), "daily_returns"
+    )
+    dataframe_level = [
+        e for e in result["errors"] if e["rule"] == "column_in_dataframe"
+    ]
+    assert dataframe_level, (
+        "the fixture did not drive a dataframe-level check — rules seen: "
+        f"{sorted({e['rule'] for e in result['errors']})}"
+    )
+    # Hand-typed oracle: the SENTENCE, not the producer's own f-string.
+    assert (
+        dataframe_level[0]["message"]
+        == "Failed rule 'column_in_dataframe' at row 0."
+    ), dataframe_level[0]["message"]
+
+
+def test_a_real_column_still_gets_its_column_clause():
+    """POSITIVE COUNTERPART — without this, "omit the clause" is satisfied by
+    dropping it for every error, which would delete the panel's most useful
+    field on every column-level rule."""
+    df = _daily_returns_df(n=5)
+    df.loc[1, "daily_return"] = -150.0  # daily_return_lower_bound, row 2
+    result = validate_csv(_csv_bytes(df), "daily_returns")
+    bounded = [
+        e for e in result["errors"] if e["rule"] == "daily_return_lower_bound"
+    ]
+    assert bounded, "fixture did not fire daily_return_lower_bound"
+    assert (
+        bounded[0]["message"]
+        == "Column 'daily_return' failed rule 'daily_return_lower_bound' at row 2."
+    ), bounded[0]["message"]
+
+
+def test_no_produced_error_carries_the_raw_failing_cell():
+    """T-161-07 — the wire shape is exactly {rule, row, message}.
+
+    `failure_case` is untrusted CSV content (it can carry PII) and this
+    envelope is persisted into strategy_verifications metadata. A row that
+    grew a fourth key would carry it there silently.
+    """
+    df = _trades_df(n=5)
+    df.loc[3, "currency"] = "EUR"
+    result = validate_csv(_csv_bytes(df), "trades")
+    assert result["errors"], "fixture produced no errors"
+    for err in result["errors"]:
+        assert set(err.keys()) == {"rule", "row", "message"}, sorted(err.keys())
+
+
+def test_the_failing_cell_value_is_not_echoed_into_the_message():
+    """T-161-07, the value half of the same discipline — a distinctive cell
+    value must not appear anywhere in the produced copy."""
+    # A currency token that could not be produced by the templated sentence.
+    marker = "ZZPIILEAK"
+    df = _trades_df(n=5)
+    df.loc[3, "currency"] = marker
+    result = validate_csv(_csv_bytes(df), "trades")
+    assert result["errors"], "fixture produced no errors"
+    for err in result["errors"]:
+        assert len(marker) > 4  # the needle is real, not blank
+        assert marker not in err["message"], err["message"]

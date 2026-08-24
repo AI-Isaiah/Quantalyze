@@ -379,6 +379,60 @@ _ROUTE_TERMINAL_ERROR_CODES = frozenset(
     }
 )
 
+# 161-03 / WIZERR-13 — THE PER-ROW BREAKDOWN'S DATA HALF, AND THE PROJECTION
+# THAT KEEPS IT SAFE.
+#
+# `CsvValidationEnvelope.tsx` has always read `debug_context.pandera_errors`
+# and this route never wrote the key: `_envelope_error` rebuilt `debug_context`
+# from the verification id alone, so every submit-path CSV rejection rendered a
+# headline with nothing beneath it. The upload path never had the problem —
+# `routers/csv.py` returns `validate_csv`'s envelope whole and `CsvUploadStep`
+# maps its `errors` onto `pandera_errors` client-side. This closes the gap at
+# the producer so BOTH paths render identically with zero client edits.
+#
+# ⛔ A PROJECTION, NEVER A PASSTHROUGH, AND THAT IS THE SECURITY PROPERTY.
+# `csv_validator` emits exactly {rule, row, message} today and takes deliberate
+# care never to include `failure_case` (the raw failing cell — untrusted CSV
+# content that can carry PII). Forwarding `val.debug_context["violations"]` by
+# reference would make that discipline a promise held in ANOTHER file: the day
+# a producer adds a fourth key, it crosses the wire and lands in
+# strategy_verifications metadata silently. Naming the three keys here means an
+# added key is dropped by construction rather than by remembering.
+_FORWARDED_ROW_KEYS = ("rule", "row", "message")
+
+
+def _forwarded_pandera_rows(source_debug_context: Any) -> list[dict[str, Any]]:
+    """Project an adapter's per-row CSV errors into the wizard's wire shape.
+
+    Reads `debug_context["violations"]` — where `services/ingestion/
+    csv_adapter.py` puts `validate_csv`'s `errors` list — and returns
+    `{rule, row, message}` rows. Defensive about every reading: an adapter with
+    no debug context, a non-list `violations`, or a non-dict member yields an
+    empty list rather than raising, because a malformed upstream payload must
+    not turn a 403 verdict into a 500.
+    """
+    if not isinstance(source_debug_context, dict):
+        return []
+    raw = source_debug_context.get("violations")
+    if not isinstance(raw, list):
+        return []
+    rows: list[dict[str, Any]] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        row_raw = item.get("row")
+        rows.append(
+            {
+                "rule": str(item.get("rule", "unknown")),
+                # A row index that did not come back is reported as 0 — the
+                # same "no row" sentinel `csv_validator` already uses for a
+                # dataframe-level failure. Never invented, never omitted.
+                "row": row_raw if isinstance(row_raw, int) and not isinstance(row_raw, bool) else 0,
+                "message": str(item.get("message", "")),
+            }
+        )
+    return rows
+
 
 def _envelope_error(
     code: str | None,
@@ -386,8 +440,17 @@ def _envelope_error(
     cid: str,
     vid: str | None,
     recoverable: bool | None = None,
+    source_debug_context: Any = None,
 ) -> dict[str, Any]:
     """Phase 17 DESIGN-05 envelope. ok=False renders as wizard error UI.
+
+    ``source_debug_context`` (161-03 / WIZERR-13): the rejecting
+    ``ValidationResult``'s own ``debug_context``. Pass it at every arm that has
+    a ``val`` in scope; its ``violations`` are PROJECTED onto
+    ``debug_context.pandera_errors`` (see ``_forwarded_pandera_rows``). No
+    rows ⇒ the key is ABSENT, mirroring what the panel treats as absent
+    (``pandera_errors ?? []``); an empty list would tell a reader of the
+    persisted envelope that a breakdown was produced and was empty.
 
     ``recoverable`` (PYAPIFIX-02): pass an explicit bool to STATE the verdict.
     Left as ``None`` it is DERIVED from ``code`` — a probe code that is in
@@ -404,11 +467,15 @@ def _envelope_error(
     codes makes the forgetful case retryable instead.
     """
     _code = code or "UNKNOWN"
+    debug_context: dict[str, Any] = {"verification_id": vid} if vid else {}
+    forwarded_rows = _forwarded_pandera_rows(source_debug_context)
+    if forwarded_rows:
+        debug_context["pandera_errors"] = forwarded_rows
     return {
         "ok": False,
         "code": _code,
         "human_message": msg or "Unknown error",
-        "debug_context": {"verification_id": vid} if vid else {},
+        "debug_context": debug_context,
         "correlation_id": cid,
         "recoverable": (
             recoverable
@@ -849,8 +916,15 @@ async def _run_validate_only(
             error_code=val.error_code,
             duration_ms=duration_ms,
         )
+        # 161-03 / WIZERR-13 — `val.debug_context` is threaded so the CSV
+        # adapter's per-row `violations` reach the panel that has always read
+        # them. Projected, not passed through.
         return _envelope_error(
-            val.error_code, val.human_message, correlation_id, None
+            val.error_code,
+            val.human_message,
+            correlation_id,
+            None,
+            source_debug_context=val.debug_context,
         )
     log.info("process_key.validate_only_ok", duration_ms=duration_ms)
     envelope: dict[str, Any] = {
@@ -1608,6 +1682,7 @@ async def process_key(
                     correlation_id,
                     verification_id,
                     recoverable=True,
+                    source_debug_context=val.debug_context,
                 ),
             )
 
@@ -1631,7 +1706,11 @@ async def process_key(
         return JSONResponse(
             status_code=403,
             content=_envelope_error(
-                _reject_code, val.human_message, correlation_id, verification_id
+                _reject_code,
+                val.human_message,
+                correlation_id,
+                verification_id,
+                source_debug_context=val.debug_context,
             ),
         )
 
