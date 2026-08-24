@@ -4086,3 +4086,167 @@ describe("[161-05 / WIZERR-03] KEY_ORPHANED offers a remedy that can succeed", (
     ).toEqual([]);
   });
 });
+
+/**
+ * [161-05 / WIZERR-11] KEY_AUTH_FAILED STOPS NAMING DERIBIT AT EVERYONE ELSE.
+ *
+ * This code is returned by the SHARED `classifyKeyValidationError`, so every
+ * venue reaches it. Until this plan its `cause` carried "(e.g. Deribit returns
+ * invalid_credentials)" and its second bullet ended "— on Deribit the key is the
+ * ClientId and the secret is the ClientSecret", which meant a Binance user whose
+ * secret was mistyped was told to go and check a "ClientId" that does not exist
+ * in their console. A specific, checkable claim about a venue the reader is not
+ * on is a worse failure than vagueness: it sends them to a different problem.
+ *
+ * ⭐ THE ASSERTIONS ARE OVER THE FULL FORMATTED OUTPUT — title, cause and EVERY
+ * bullet joined — not over the one bullet that was gated. A test that watched
+ * only the gated bullet would have stayed green through the `cause` half of this
+ * defect, which is the half that shipped for longer.
+ *
+ * ⭐ AND THE NEGATIVE SWEEP RUNS OVER THE WHOLE VENUE REGISTRY, not over the two
+ * venues this plan happened to think of. `SUPPORTED_EXCHANGES` is an independent
+ * source (`closed-sets.ts`), so a seventh venue is covered on the day it is
+ * added rather than on the day someone remembers this file.
+ */
+describe("[161-05 / WIZERR-11] KEY_AUTH_FAILED names a venue only to that venue's own users", () => {
+  /** The full user-visible surface of the card, as one string. */
+  const rendered = (context?: Parameters<typeof formatKeyError>[1]): string => {
+    const copy = formatKeyError("KEY_AUTH_FAILED", context);
+    return [copy.title, copy.cause, ...copy.fix].join(" | ");
+  };
+
+  /**
+   * HAND-TYPED. The venue token that must not escape its own venue. Lower-cased
+   * comparison so a re-cased reintroduction ("DERIBIT", "deribit") still reds.
+   */
+  const VENUE_TOKEN = "deribit";
+
+  it("POSITIVE CONTROL — the token IS present for a Deribit user, so the sweeps below are live", () => {
+    // ⛔ Never delete this. Every assertion in this block is a "does not
+    // contain", and a copy entry that lost the bullet entirely — or a predicate
+    // that suppressed it for everyone — would satisfy all of them while the
+    // Deribit user silently lost real information.
+    const forDeribit = rendered({ venue: "deribit" }).toLowerCase();
+    expect(
+      forDeribit.includes(VENUE_TOKEN),
+      "The Deribit-specific bullet did not render for venue 'deribit'. The " +
+        "requirement suppressed it everywhere, which is a silent copy deletion " +
+        "rather than a gate — and it makes every negative assertion below pass " +
+        "for the wrong reason.",
+    ).toBe(true);
+    // And it is the NAMING bullet specifically, not an incidental match.
+    expect(
+      formatKeyError("KEY_AUTH_FAILED", { venue: "deribit" }).fix,
+    ).toContain(
+      "On Deribit the key is the ClientId and the secret is the ClientSecret.",
+    );
+  });
+
+  it("the CAUSE is venue-neutral for every venue — including Deribit's own users", () => {
+    // The `cause` was the half that could not be gated, because it was an
+    // ILLUSTRATION rather than a remedy: "(e.g. Deribit returns
+    // invalid_credentials)". Deleting it is the fix, so the sentence must carry
+    // no venue on ANY path — a gate here would have been the wrong tool.
+    for (const venue of [...SUPPORTED_EXCHANGES, undefined]) {
+      const copy = formatKeyError(
+        "KEY_AUTH_FAILED",
+        venue === undefined ? undefined : { venue },
+      );
+      expect(
+        copy.cause.toLowerCase(),
+        `the cause named a venue for ${venue ?? "an unnamed venue"}. ` +
+          "The cause explains a general authentication failure; naming one " +
+          "exchange in it is a claim about a reader we cannot identify.",
+      ).not.toContain(VENUE_TOKEN);
+    }
+  });
+
+  it("a BINANCE user sees the token NOWHERE in the whole card — and still gets a complete remedy", () => {
+    const forBinance = rendered({ venue: "binance" });
+    expect(
+      forBinance.length,
+      "the rendered card collapsed to nothing, so the scan below is vacuous",
+    ).toBeGreaterThan(120);
+    expect(
+      forBinance.toLowerCase(),
+      "A Binance user was told about Deribit's ClientId/ClientSecret. There is " +
+        "no such pair in their console, so the remedy sends them to look for a " +
+        "different problem — the false-sentence class WIZERR-11 removes.",
+    ).not.toContain(VENUE_TOKEN);
+    // ⛔ THE OTHER HALF, AND THE ONE A CARELESS FIX BREAKS: suppressing the
+    // venue-specific bullet must not cost the user the instruction it carried.
+    expect(
+      formatKeyError("KEY_AUTH_FAILED", { venue: "binance" }).fix,
+      "The generic re-copy instruction vanished along with the Deribit bullet. " +
+        "That is not a gate, it is a copy deletion: the unconditional bullet " +
+        "exists precisely so every venue keeps an actionable remedy.",
+    ).toContain("Re-copy both values with no leading or trailing spaces.");
+  });
+
+  it("an ABSENT venue sees the token NOWHERE — the STRICT rule, diverging from the capability default", () => {
+    // ⚠️ THE DIVERGENCE UNDER TEST. `venueCapability` requirements are
+    // default-PERMISSIVE: with no venue in context `venueIsSubstitutable`
+    // answers true and the incumbent bullet survives, so callers predating the
+    // field are byte-unchanged. This kind is the opposite, and it must be: a
+    // bullet that names ONE venue, rendered when the venue is unknown, is a
+    // specific claim about a user we cannot identify. `SyncPreviewStep` calls
+    // `formatKeyError(errorCode)` with no context at all, so this path is live.
+    const withNoContext = rendered();
+    expect(
+      withNoContext.length,
+      "the rendered card collapsed to nothing, so the scan below is vacuous",
+    ).toBeGreaterThan(120);
+    expect(
+      withNoContext.toLowerCase(),
+      "With no venue in context the Deribit bullet still rendered. Absence is " +
+        "not permission: unify this with the venueCapability default and every " +
+        "context-less caller starts naming Deribit again.",
+    ).not.toContain(VENUE_TOKEN);
+    expect(
+      formatKeyError("KEY_AUTH_FAILED").fix,
+      "and the venue-less caller must still get the generic instruction",
+    ).toContain("Re-copy both values with no leading or trailing spaces.");
+  });
+
+  it("SWEEP: no venue in the registry OTHER than deribit ever sees the token", () => {
+    // The class, not the two instances above. Driven off the independent venue
+    // registry so a seventh venue is covered the day it lands.
+    const others = SUPPORTED_EXCHANGES.filter((v) => v !== "deribit");
+    expect(
+      others.length,
+      "SUPPORTED_EXCHANGES yielded no non-deribit venue, so this sweep asserts " +
+        "nothing.",
+    ).toBeGreaterThanOrEqual(4);
+
+    const offenders: string[] = [];
+    for (const venue of others) {
+      const surface = rendered({ venue });
+      if (surface.toLowerCase().includes(VENUE_TOKEN)) {
+        offenders.push(`${venue}: "${surface}"`);
+      }
+    }
+    expect(
+      offenders,
+      "KEY_AUTH_FAILED named Deribit at users of another venue. ⛔ The remedy " +
+        "is a FixRequirement slot in the copy table, never a per-code branch " +
+        "inside formatKeyError. Offenders:",
+    ).toEqual([]);
+  });
+
+  it("the venue is a LOOKUP/COMPARISON KEY ONLY — no caller string round-trips into the card (D-17)", () => {
+    // T-161-13. The context field is typed `string`, so a caller CAN pass
+    // something that is not a supported venue. Whatever they pass, none of it
+    // may appear in the rendered output: the requirement compares it, it never
+    // renders it.
+    const probe = "zz-injected-venue-probe";
+    const surface = rendered({ venue: probe });
+    expect(
+      surface,
+      "A caller-supplied venue string reached the rendered card. The venue is " +
+        "read as a comparison key against a closed-set member and must never " +
+        "be interpolated into a sentence (D-17).",
+    ).not.toContain(probe);
+    // An unknown venue is not deribit, so it is suppressed like an absent one.
+    expect(surface.toLowerCase()).not.toContain(VENUE_TOKEN);
+  });
+});

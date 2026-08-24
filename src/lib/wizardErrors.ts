@@ -53,7 +53,11 @@ import { CircuitOpenError } from "@/lib/seam-errors";
 // constant the server arm and the field guards read; a bound typed as a literal
 // into a sentence is how the client came to promise a rule the server did not
 // enforce (the three-failed-submit incident).
-import { MAGNITUDE_CAPS, venueIsSubstitutable } from "./closed-sets";
+import {
+  MAGNITUDE_CAPS,
+  venueIsSubstitutable,
+  type SupportedExchange,
+} from "./closed-sets";
 
 export type WizardErrorCode =
   // Key validation (ConnectKeyStep)
@@ -832,7 +836,38 @@ export type FixRequirement =
       /** The answer the predicate must give for the bullet to render. */
       readonly is: boolean;
     }
-  | { readonly kind: "surface"; readonly surface: WizardSurface };
+  | { readonly kind: "surface"; readonly surface: WizardSurface }
+  /**
+   * 161-05 / WIZERR-11 — "render only ON this venue". The THIRD kind the union
+   * docblock above pre-authorised: one member here plus one arm in
+   * `requirementMet`, and no new call site.
+   *
+   * ⚠️ NOT A CAPABILITY, AND THE DISTINCTION IS THE REASON THIS EXISTS.
+   * `venueCapability` answers "is this venue the KIND of venue where X holds",
+   * which is what makes one row cover a venue that behaves like MT5. The claim
+   * this gates is not of that shape: "the key is the ClientId and the secret is
+   * the ClientSecret" is a fact about Deribit's own naming, true of Deribit and
+   * of nothing else by definition. Inventing a capability
+   * (`clientIdCredentialNaming`) to express "is deribit" would be a capability
+   * with exactly one possible member forever — the record's generality bought
+   * back at the price of a name that lies about what it measures.
+   *
+   * ⛔ `venue` IS TYPED `SupportedExchange`, so a typo is a COMPILE error at the
+   * table rather than a bullet that silently never renders — the same guarantee
+   * `WizardSurface` gives the `surface` kind, and the reason neither carries a
+   * bare `string`. It is a CLOSED-SET member compared for equality; it is never
+   * interpolated into a sentence, a log line, a URL or a breaker key (D-17).
+   *
+   * ⚠️ ABSENT VENUE ⇒ SUPPRESSED. That is the OPPOSITE of the `venueCapability`
+   * kind directly above, whose predicates are default-permissive so that a
+   * caller predating `WizardErrorContext.venue` keeps its incumbent copy. The
+   * divergence is deliberate and is the whole requirement: a bullet that names
+   * ONE venue is, rendered with the venue unknown, a specific claim about a
+   * user we cannot identify — the false sentence WIZERR-11 exists to remove.
+   * The absence rule here matches `surface`'s ("fail toward saying less"), not
+   * `venueCapability`'s, and the two must not be unified.
+   */
+  | { readonly kind: "venueIs"; readonly venue: SupportedExchange };
 
 /**
  * "Render only when the venue CAN be substituted" — the incumbent bullets.
@@ -882,6 +917,17 @@ const REQUIRES_CONNECT_SURFACE: FixRequirement = {
   kind: "surface",
   surface: "connect",
 };
+
+/**
+ * "Render only on Deribit" — 161-05 / WIZERR-11's one user.
+ *
+ * ⚠️ ITS ONE BULLET IS A NAMING CLARIFICATION AND NOTHING ELSE. The generic
+ * "re-copy both values" instruction stays UNCONDITIONAL one slot above it, so a
+ * user on any venue — or on none we were told about — still gets a complete,
+ * actionable remedy. Suppressing this bullet removes a Deribit-specific label,
+ * never the instruction, which is what makes the strict absence rule safe here.
+ */
+const REQUIRES_DERIBIT: FixRequirement = { kind: "venueIs", venue: "deribit" };
 
 export interface WizardErrorCopy {
   title: string;
@@ -1051,15 +1097,55 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
     actions: ["clear_and_retry", "request_call"],
   },
 
+  // 161-05 / WIZERR-11 — THIS ENTRY NAMED DERIBIT AT USERS OF EVERY OTHER
+  // VENUE, TWICE.
+  //
+  // The `cause` carried "(e.g. Deribit returns invalid_credentials)" and the
+  // second bullet ended "— on Deribit the key is the ClientId and the secret is
+  // the ClientSecret". This code is returned by the SHARED
+  // `classifyKeyValidationError`, so both sentences reached binance, okx, bybit,
+  // sfox and mt5 users alike: a specific, checkable claim about a venue they are
+  // not on, on the one card whose whole job is to tell them which of two values
+  // is wrong. A user hunting for a "ClientId" in their Binance console is
+  // looking for a different problem — the class this phase exists to remove.
+  //
+  // TWO DIFFERENT FIXES, because the two sentences failed differently:
+  //   · the `cause`'s parenthetical was an ILLUSTRATION of a general fact and is
+  //     simply DELETED. The sentence is complete and true without it, on every
+  //     venue including Deribit, so there is nothing to gate;
+  //   · the bullet carries REAL information for Deribit users, so it is SPLIT.
+  //     The generic re-copy instruction stays unconditional (every venue keeps a
+  //     complete remedy) and the venue-specific NAMING becomes its own bullet,
+  //     gated on `REQUIRES_DERIBIT`.
+  //
+  // ⚠️ THE SPLIT BULLET IS THE UI-SPEC SENTENCE MINUS ITS TRAILING CLAUSE.
+  // 161-UI-SPEC proposed "On Deribit the key is the ClientId and the secret is
+  // the ClientSecret — re-copy both with no leading or trailing spaces." Kept
+  // verbatim it would render DIRECTLY BELOW the unconditional bullet that now
+  // says exactly that, so a Deribit user would read the same instruction twice
+  // in adjacent bullets. The clause is dropped, not reworded: what is left is
+  // the only part of the sentence that is venue-specific.
+  //
+  // ⛔ NO PER-CODE ARM WAS ADDED TO `formatKeyError` FOR THIS. The gate is one
+  // `FixRequirement` constant and one index in `fixRequires`, filtered by the
+  // single `applyFixRequirements` call — the mechanism `FixRequirement`'s own
+  // docblock demands, and the reason a fourth venue-specific bullet costs a
+  // declaration rather than a branch.
   KEY_AUTH_FAILED: {
     title: "The exchange rejected these credentials.",
     cause:
-      "The exchange could not authenticate this key and secret (e.g. Deribit returns invalid_credentials). The exchange never accepted the pair, so the key or the secret is wrong, was regenerated, or was copied with extra whitespace.",
+      "The exchange could not authenticate this key and secret. The exchange never accepted the pair, so the key or the secret is wrong, was regenerated, or was copied with extra whitespace.",
     fix: [
       "Open your exchange API Management page and confirm this key still exists and is enabled.",
-      "Re-copy BOTH values with no leading or trailing spaces — on Deribit the key is the ClientId and the secret is the ClientSecret.",
+      "Re-copy both values with no leading or trailing spaces.",
+      "On Deribit the key is the ClientId and the secret is the ClientSecret.",
       "If the secret was only shown once at creation, create a fresh read-only key and paste both values here.",
     ],
+    // Index-aligned to `fix`. Slot 2 is the only gated bullet; ⛔ slot 1 stays
+    // `null` deliberately — gating the generic instruction to "not deribit"
+    // would leave a venue-less caller with no re-copy instruction at all, which
+    // is a silent copy deletion rather than a gate.
+    fixRequires: [null, null, REQUIRES_DERIBIT, null],
     docsHref: "/security#regenerate-key",
     actions: ["clear_and_retry", "request_call"],
   },
@@ -2898,6 +2984,20 @@ function requirementMet(
     case "surface":
       // An ABSENT surface can never equal a named one ⇒ suppressed (Gate B).
       return context?.surface === req.surface;
+    case "venueIs":
+      // 161-05 / WIZERR-11 — EXACT EQUALITY AGAINST A CLOSED-SET MEMBER, and
+      // deliberately NOT routed through `venueCapabilities`' lookup:
+      //   · no `.toLowerCase()` on the caller's value. Both connect steps type
+      //     their context venue as `SupportedExchange` (ConnectKeyStep's
+      //     `attemptExchange ?? exchange`, MultiKeyConnectStep's `attemptVenue`),
+      //     so it arrives lowercase by construction — MEASURED at both call
+      //     sites, not assumed. Case-folding an inbound string before comparing
+      //     it would widen what can satisfy a venue-specific claim for no
+      //     caller that exists;
+      //   · no default. An ABSENT venue is not "deribit", so it is suppressed —
+      //     the opposite of the `venueCapability` arm above, argued at the
+      //     union member.
+      return context?.venue === req.venue;
   }
 }
 
