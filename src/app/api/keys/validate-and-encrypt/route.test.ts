@@ -15,6 +15,10 @@ import { CircuitOpenError } from "@/lib/seam-errors";
 // two this file happened to hand-pick. Not mocked anywhere in this file, so
 // this is the same object the route projects its `encryptedColumns` from.
 import { EncryptKeyResponseSchema } from "@/lib/analytics-schemas";
+// 161-09 / WIZERR-08 — the SAME comment-stripper every coverage law in this
+// repo uses, so a source pin here and a population there cannot disagree about
+// what is code and what is prose.
+import { stripCommentsPreserveLines } from "@/lib/source-scan";
 
 /**
  * H-0281 — real route coverage for POST /api/keys/validate-and-encrypt.
@@ -979,11 +983,16 @@ describe("[140.3-G4 / SEAMUX-03] POST /api/keys/validate-and-encrypt — a machi
   });
 
   // ── the input 400 arm ──
-  it("400 missing required fields → code KEY_INVALID_FORMAT", async () => {
+  // 161-09 / WIZERR-08: was KEY_INVALID_FORMAT. A blank required slot is not a
+  // format failure — nothing here examined the shape of any value. The full
+  // per-arm code+sentence inventory is the WIZERR-08 suite at the foot of this
+  // file; this line stays because this describe's job is "a code on EVERY arm"
+  // and it is the arm-presence pin for this one.
+  it("400 missing required fields → code KEY_MISSING_REQUIRED_FIELD", async () => {
     const { POST } = await import("./route");
     const res = await POST(makeReq({ exchange: "okx", api_key: "k" }));
     expect(res.status).toBe(400);
-    expect((await res.json()).code).toBe("KEY_INVALID_FORMAT");
+    expect((await res.json()).code).toBe("KEY_MISSING_REQUIRED_FIELD");
   });
 
   // ── the deny arm: two bodies, two tokens ──
@@ -1844,5 +1853,218 @@ describe("POST /api/keys/validate-and-encrypt — persist-arm failure surface (1
       ).toEqual([]);
     }
     consoleErr.mockRestore();
+  });
+});
+
+/**
+ * ⭐ 161-09 / WIZERR-08 — THE FOUR REQUEST-SHAPE ARMS ANSWER FOUR TRUE FACTS.
+ *
+ * Until this plan all four of this route's request-shape rejections answered
+ * `KEY_INVALID_FORMAT`, whose copy reads "This does not look like a valid API
+ * key for the selected exchange … Binance secrets are 64 hex characters". Two
+ * of the four are VENUE gates (we support the venue, it is not switched on
+ * here) and two are PRESENCE guards (a required slot arrived blank). On none
+ * of the four did anything examine the format of any value, so a founder who
+ * submitted a complete MT5 form while MT5 was dark was told their key format
+ * was wrong. 142.2 split the vocabulary at the two wizard connect routes; this
+ * route was the third carrier and kept saying the collapsed thing.
+ *
+ * ⛔ THE SENTENCES DO NOT MOVE. Each case below asserts the code AND the
+ * byte-identical sentence, and every sentence here is HAND-TYPED from the
+ * pre-161-09 source read at `git show HEAD:…` — never imported and never
+ * copied out of the current file. An oracle that imports the string it is
+ * asserting about cannot fail when the string changes; that is the
+ * self-referential shape three money bugs survived six review passes behind.
+ *
+ * ⛔ AND THE STATUS AND HEADERS DO NOT MOVE EITHER. These are structural gates
+ * (ASVS V5): a refusal that starts answering 200, or that loses NO_STORE_HEADERS
+ * on a per-tenant body, is a weakened gate wearing an honest code. Pinned per
+ * arm rather than inherited.
+ */
+describe("[161-09 / WIZERR-08] the four request-shape arms carry codes true of their own facts", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    rateLimitResult.success = true;
+    rateLimitResult.retryAfter = 0;
+    rateLimitResult.reason = undefined;
+    delete process.env.SFOX_ENABLED;
+    delete process.env.MT5_ENABLED;
+    mockValidateKey.mockResolvedValue({ valid: true, read_only: true });
+    mockEncryptKey.mockResolvedValue({ api_key_encrypted: "ct-blob" });
+    vi.spyOn(console, "error").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    delete process.env.SFOX_ENABLED;
+    delete process.env.MT5_ENABLED;
+  });
+
+  /**
+   * HAND-TYPED. One row per arm: how to reach it, the code it must now answer,
+   * and the sentence that must NOT have moved.
+   *
+   * ⚠️ `no-store` is asserted as a lowercased HEADER READ, not against an
+   * imported constant, for the same oracle-independence reason as the
+   * sentences: `NO_STORE_HEADERS` changing would move both sides together.
+   */
+  const ARMS: readonly {
+    label: string;
+    body: Record<string, unknown>;
+    code: string;
+    sentence: string;
+  }[] = [
+    {
+      label: "sfox is a venue we support that is not switched on here",
+      body: { exchange: "sfox", api_key: "sfox-bearer-token-value", persist: true },
+      code: "KEY_VENUE_NOT_ENABLED",
+      sentence: "sFOX integration is not yet available.",
+    },
+    {
+      label: "mt5 is a venue we support that is not switched on here",
+      body: {
+        exchange: "mt5",
+        api_key: "5001234",
+        api_secret: "investor-password-123",
+        passphrase: "MetaQuotes-Demo",
+        persist: true,
+      },
+      code: "KEY_VENUE_NOT_ENABLED",
+      sentence: "MT5 integration is not yet available.",
+    },
+    {
+      label: "the mt5 three-credential guard: the broker server slot arrived blank",
+      body: {
+        exchange: "mt5",
+        api_key: "5001234",
+        api_secret: "investor-password-123",
+        passphrase: "   ",
+        persist: true,
+      },
+      code: "KEY_MISSING_REQUIRED_FIELD",
+      sentence: "Missing required fields",
+    },
+    {
+      label: "the generic presence check: api_secret absent on a ccxt venue",
+      body: { exchange: "okx", api_key: "okx-api-key", persist: true },
+      code: "KEY_MISSING_REQUIRED_FIELD",
+      sentence: "Missing required fields",
+    },
+  ];
+
+  // Positive control FIRST. A table that shrank to nothing would report no
+  // failures and pass this suite for the worst possible reason.
+  it("the arm table is the four MEASURED arms, not however many survived an edit", () => {
+    expect(ARMS.length).toBe(4);
+  });
+
+  it.each(ARMS.map((a) => [a.label, a] as const))(
+    "%s → its own code, with the sentence, status and no-store header byte-identical",
+    async (_label, arm) => {
+      // The mt5 three-credential guard lives BEHIND the mt5 venue gate, so it
+      // is only reachable with the server flag on. The two venue-gate arms need
+      // it off. Set per arm rather than globally: a single global setting would
+      // make one pair of arms unreachable and they would pass by never running.
+      if (arm.code === "KEY_MISSING_REQUIRED_FIELD" && arm.body.exchange === "mt5") {
+        process.env.MT5_ENABLED = "true";
+      }
+      const { POST } = await import("./route");
+      const res = await POST(makeReq(arm.body));
+      const body = await res.json();
+
+      expect(res.status).toBe(400);
+      expect(body.code).toBe(arm.code);
+      expect(body.error).toBe(arm.sentence);
+      expect(res.headers.get("cache-control")?.toLowerCase()).toContain("no-store");
+      // No live credential probe is spent on any of the four.
+      expect(mockValidateKey).not.toHaveBeenCalled();
+      expect(mockEncryptKey).not.toHaveBeenCalled();
+    },
+  );
+
+  it("KEY_INVALID_FORMAT has NO emitter left on this route — the split is complete, not partial", () => {
+    // ⛔ SOURCE-DERIVED, COMMENT-STRIPPED. The route's own docblock DESCRIBES
+    // the retired code by name, so a raw `grep -c` would report the class open
+    // forever. Only the emitters count: a `code: "KEY_INVALID_FORMAT"` literal.
+    // Same discipline as `KEY_INVALID_FORMAT`'s own copy docblock.
+    const src = stripCommentsPreserveLines(
+      readFileSync(join(process.cwd(), "src/app/api/keys/validate-and-encrypt/route.ts"), "utf-8"),
+      "ts",
+    );
+    // Positive control on the SCANNER before the negative claim: a stripper
+    // that blanked the whole file would report zero emitters of everything.
+    expect(
+      src.match(/code:\s*"KEY_VENUE_NOT_ENABLED"/g)?.length,
+      "the comment-stripper blanked real code — every negative claim below is vacuous",
+    ).toBe(2);
+    expect(src.match(/code:\s*"KEY_MISSING_REQUIRED_FIELD"/g)?.length).toBe(2);
+    expect(
+      src.match(/code:\s*"KEY_INVALID_FORMAT"/g),
+      "an arm answers KEY_INVALID_FORMAT again. This route runs NO format check " +
+        "of its own — the `api_secret.length < 8` ccxt guard that makes that " +
+        "code's copy true lives on create-with-key and composite/add-key. " +
+        "⛔ The remedy is a code true of the arm's own fact, never this one back.",
+    ).toBeNull();
+  });
+
+  /**
+   * ⛔ PITFALL 6 — THE PERSIST ARM IS NOT TOUCHED, AND THAT IS ENFORCED HERE
+   * RATHER THAN ASSERTED IN A COMMENT.
+   *
+   * `persist: true`'s first real PROD connect is an owed deferred verification
+   * from Phase 160. If this plan had changed anything on that path, a failure
+   * observed at that smoke could no longer be attributed to 160 rather than to
+   * 161. All four re-coded sites sit UPSTREAM of the `body.persist !== true`
+   * discriminator — verified at HEAD by the ordering pin below and by this
+   * behavioural case.
+   */
+  it("PITFALL 6: a persist request still reaches the writer and still returns the row id, unchanged", async () => {
+    PERSIST_STATE.inserts.length = 0;
+    PERSIST_STATE.insertResult = null;
+    PERSIST_STATE.adminFactoryError = null;
+    mockEncryptKey.mockResolvedValue({
+      api_key_encrypted: "ct-blob",
+      api_secret_encrypted: null,
+      passphrase_encrypted: null,
+      dek_encrypted: "dek-ct",
+      nonce: "nonce-b64",
+      kek_version: 3,
+    });
+    const { POST } = await import("./route");
+    const res = await POST(
+      makeReq({ ...VALID_BODY, persist: true, label: "My OKX key" }),
+    );
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(body).toEqual({ api_key_id: expect.any(String), valid: true, read_only: true });
+    // The writer really ran — a 200 with no INSERT would satisfy the shape
+    // assertion above while proving the persist path was skipped entirely.
+    expect(PERSIST_STATE.inserts.length).toBe(1);
+  });
+
+  it("PITFALL 6: all four re-coded arms sit UPSTREAM of the persist discriminator, in source order", () => {
+    const src = stripCommentsPreserveLines(
+      readFileSync(join(process.cwd(), "src/app/api/keys/validate-and-encrypt/route.ts"), "utf-8"),
+      "ts",
+    );
+    const discriminator = src.indexOf("body.persist !== true");
+    expect(
+      discriminator,
+      "the persist discriminator moved or was renamed — this ordering pin is measuring nothing",
+    ).toBeGreaterThan(0);
+    for (const marker of [
+      'code: "KEY_VENUE_NOT_ENABLED", error: "sFOX integration is not yet available."',
+      'code: "KEY_VENUE_NOT_ENABLED", error: "MT5 integration is not yet available."',
+    ]) {
+      const at = src.indexOf(marker);
+      expect(at, `arm not found in source: ${marker}`).toBeGreaterThan(0);
+      expect(at).toBeLessThan(discriminator);
+    }
+    // Both presence guards are the same two-line literal, so index them by
+    // LAST occurrence: if either one drifted below the discriminator this reds.
+    const lastMissing = src.lastIndexOf('code: "KEY_MISSING_REQUIRED_FIELD"');
+    expect(lastMissing).toBeGreaterThan(0);
+    expect(lastMissing).toBeLessThan(discriminator);
   });
 });
