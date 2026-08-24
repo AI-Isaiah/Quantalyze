@@ -280,6 +280,45 @@ items were dropped, not carried. Categories: **Fix now** / **Fix mid-term** / **
    reshapes just-red-teamed money-math or test machinery right before ship.
    **Recorded:** 2026-08-23 (/simplify, phase 159)
 
+0.1. **⛔ LEDGER-BACKED VENUES HAVE NO RECURRING STRATEGY REFRESH — MT5 factsheets go stale
+   silently, forever.** Founder-reported 2026-08-23 ("MT5 strategies are not being read out every
+   day, and data gets stale"); root-caused by measurement against PROD 2026-08-24.
+   - **Measured on PROD.** `strategy_analytics` for the 4 live MT5 strategies: newest
+     `2026-08-21 13:51`, oldest `2026-08-04 14:20` (17–20 days). Same query for okx:
+     `2026-08-23 21:44` (~2h). MT5 `api_keys.last_sync_at` is FRESH (`2026-08-23 04:09`).
+   - **Root cause.** `process_key_long` is the ONLY path that reaches `strategy_analytics` for a
+     ledger-backed venue, and it is enqueued in exactly one place: strategy creation
+     (`api/strategies/finalize-wizard`). There is **no recurring enqueuer for it anywhere.** The two
+     daily strategy-keyed crons both gate on ccxt-only closed sets that exclude mt5:
+     `/api/cron/reconcile-strategies` (03:30) on `RECONCILABLE_EXCHANGES = FUNDING_EXCHANGES`
+     = binance/okx/bybit, and `/api/cron/sync-funding` (04:00) on the same set. The 15-min
+     `cron_sync` defers anything outside `EXCHANGE_CLASSES` (binance/okx/bybit/deribit) at
+     `routers/cron.py:182`. So after onboarding, an MT5 strategy is never recomputed again.
+   - **Why it stayed invisible.** The two pg_cron KEY-scoped jobs that DO cover mt5 —
+     `poll_allocator_positions` (04:00) and `refresh_allocator_equity_daily` (05:00) — run clean
+     every day and advance `last_sync_at`. Key-mode `derive_broker_dailies` explicitly does NOT
+     stamp `strategy_analytics` (`job_worker.py:2366` docstring: the per-key series is "dark").
+     Net effect: the UI reads "synced 20h ago" on a factsheet that is weeks old. Zero errors,
+     zero failed jobs — 14-day `compute_jobs` census shows no MT5 failures at all.
+   - **⛔ Two fixes that look right and are NOT.** (a) Adding mt5 to `RECONCILABLE_EXCHANGES`:
+     `run_reconcile_strategy_job` calls `fetch_raw_trades` (ccxt) — mt5 is in
+     `_LEDGER_BACKED_SOURCES`, so this is the BYB-02 ccxt-fill class. (b) Re-registering the
+     `derive-allocator-key-dailies` cron: it is key-mode (never stamps `strategy_analytics`), it
+     was DELIBERATELY unscheduled at the v1.11 recovery, and
+     `docs/runbooks/flipretry-derived-equity-go-live.md:171` forbids re-registering it via a
+     migration — an auto-applying migration paired with a silently-skipped worker deploy recreates
+     the v1.11 wedge verbatim. A migration doing exactly this was written and DELETED unmerged
+     on 2026-08-24 after `migration-reviewer` caught it.
+   - **Shape of the real fix.** A recurring strategy-keyed enqueuer of `process_key_long` for
+     ledger-backed venues (mt5/sfox/deribit), which chains → `derive_broker_dailies` (strategy-mode)
+     → `compute_analytics_from_csv` → `strategy_analytics`. ⚠️ Carries the v1.11 worker-wedge risk
+     shape: MT5 serializes on ONE shared terminal (`services/mt5_concurrency.py`) at a 15-min
+     timeout per key. Founder-gated activation (schedule left unregistered, SFOX_ENABLED pattern)
+     is the safe landing. NOT yet built.
+   - **Adjacent, separate:** the `bybit` key has been failing since 2026-08-14 with
+     `retCode 33004 "Your api key has expired."` — last good sync `2026-08-06`. Needs replacing;
+     nothing surfaced it.
+
 1. **`RESEND_API_KEY` unset in Vercel prod** — founder-LP report cron + all transactional
    email are dead (code soft-skips, only Sentry fires). **Founder action:** set the key in
    Vercel prod. Do before the first warned founder month. (Note: portfolio email *alerts*
