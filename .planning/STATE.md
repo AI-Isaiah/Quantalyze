@@ -2,13 +2,13 @@
 gsd_state_version: 1.0
 milestone: v1.20
 milestone_name: Backlog Burndown (Phases 158+)
-current_phase: 160
-current_phase_name: PROVENANCE — The server's venue is the venue that annualizes
+current_phase: 161
+current_phase_name: WIZERR — Honest error surfaces
 status: verifying
 stopped_at: Completed 161-06-PLAN.md (WIZERR-05)
 last_updated: "2026-08-24T12:23:07.508Z"
-last_activity: 2026-08-23
-last_activity_desc: Phase 160 execution started
+last_activity: 2026-08-24
+last_activity_desc: Phase 161 execution — waves 1-3 landed
 state_head: 0d46ca189939ed626b01e7b8aa8d19595d059709
 progress:
   total_phases: 9
@@ -113,10 +113,13 @@ zero unclassified) and `161-VALIDATION.md` (Nyquist strategy, 4 Wave-0 gaps, ant
 
 ## Current Position
 
-Phase: 160 (PROVENANCE — The server's venue is the venue that annualizes) — EXECUTING
-Plan: 6 of 6
-Status: Phase complete — ready for verification
-Last activity: 2026-08-23 — Phase 160 execution started
+Phase: 161 (WIZERR — Honest error surfaces) — EXECUTING
+Plan: 6 of 10
+Status: Waves 1-3 landing; 161-07..161-10 pending
+Last activity: 2026-08-24 — Phase 161 waves 1-3
+
+⚠️ Phase 160 remains OPEN on its human gate — see `## Deferred Verification`. Advancing this
+pointer to 161 does NOT close it; resume it only via `/gsd-verify-work 160`.
 OPS-CI first (the shared-test-db eviction / #616 mutex protects every later merge), 165 DEPS
 last (hard-blocked on OPS-01), 160 provenance before 164 SHARE (REVOKE soak), SHARE alone in
 its own PR and never branched from `feat/phase-156-connect-refactor`.
