@@ -5000,3 +5000,213 @@ describe("[161-10 / WIZERR-07] the dashboard recogniser admits only rostered cod
     ).toBe("UNKNOWN");
   });
 });
+
+/**
+ * ⭐ 161-REVIEW / IN-03 — THE EXAMINED-REFUSED REMEDY MUST NAME A VENUE THE
+ * READER CAN RESOLVE.
+ *
+ * The first `fix` bullet used to read "Connect a key from a venue we can read
+ * end to end — one that gives us a complete transaction ledger rather than a
+ * fill feed." Nothing on the user's screen says which venue that is, so the
+ * remedy was "guess which of the ones on offer qualifies". Short of unwinnable,
+ * short of actionable.
+ *
+ * ⛔ THE ORACLE IS NOT THE COPY TABLE. The venue→verdict mapping lives in
+ * `analytics-service/services/broker_dailies.py` and cannot be imported into
+ * TypeScript, so this case READS THAT FILE and asserts the two facts the
+ * sentence rests on. A hand-typed venue list checked against the sentence would
+ * only restate the sentence; reading the producer makes the pin red when the
+ * producer moves, which is the drift that would make the copy false.
+ */
+describe("[161-REVIEW / IN-03] GATE_SERIES_EXAMINED_REFUSED names a resolvable venue", () => {
+  const BROKER_DAILIES = readFileSync(
+    resolve(process.cwd(), "analytics-service/services/broker_dailies.py"),
+    "utf-8",
+  );
+
+  /**
+   * The venues whose producer stamps a verdict that REACHES this code. Derived
+   * from the producer's own registry docstring, asserted below rather than
+   * assumed: `combine_realized_and_funding` (binance / bybit / okx) stamps
+   * `fill_derived_unproven`, `combine_sfox_balance_history` stamps
+   * `sampled_gapped` on any interior hole. None of them can be the remedy.
+   */
+  const VENUES_THAT_REACH_THIS_CODE = ["Binance", "Bybit", "OKX", "sFOX"] as const;
+
+  it("the producer still maps deribit → ledger_complete and the ccxt venues → fill_derived_unproven", () => {
+    // Anti-vacuity: a moved/renamed file would read as an empty string and make
+    // every `toContain` below fail loudly rather than silently — but a TRUNCATED
+    // read would not, so fence the size first.
+    expect(BROKER_DAILIES.length).toBeGreaterThan(5000);
+
+    // The registry docstring's "Who stamps what" block — the truth source the
+    // copy's docblock cites.
+    expect(BROKER_DAILIES).toContain("``combine_native_ledger`` (deribit");
+    expect(BROKER_DAILIES).toContain(
+      "``combine_realized_and_funding`` (binance / bybit /",
+    );
+    expect(BROKER_DAILIES).toContain("fill_derived_unproven");
+
+    // Deribit's stamp is UNCONDITIONAL on both return paths — that is what makes
+    // it a remedy that cannot put the user back on this screen. Two literal
+    // assignment sites, not one.
+    const deribitStamps = BROKER_DAILIES.match(
+      /out_(?:ac_)?meta\["series_completeness"\] = "ledger_complete"/g,
+    );
+    expect(
+      deribitStamps?.length ?? 0,
+      "the unconditional `ledger_complete` stamp sites moved. The first fix " +
+        "bullet of GATE_SERIES_EXAMINED_REFUSED names Deribit on the basis " +
+        "that its producer stamps ledger_complete unconditionally — re-measure " +
+        "before trusting that sentence.",
+    ).toBeGreaterThanOrEqual(2);
+  });
+
+  it("the first remedy names Deribit, and never a venue that can reach this code", () => {
+    const bullet = WIZARD_ERROR_COPY.GATE_SERIES_EXAMINED_REFUSED.fix[0];
+
+    // `"anything".includes("")` is true, so establish the subject is a real
+    // sentence before asserting anything about its contents.
+    expect(typeof bullet).toBe("string");
+    expect(bullet.trim().length).toBeGreaterThan(40);
+
+    expect(
+      bullet,
+      "the examined-refused remedy no longer names a venue the reader can act " +
+        "on (161-REVIEW / IN-03). Naming the qualifying venue is the whole " +
+        "point of the bullet.",
+    ).toContain("Deribit");
+
+    for (const venue of VENUES_THAT_REACH_THIS_CODE) {
+      expect(
+        bullet.toLowerCase().includes(venue.toLowerCase()),
+        `the remedy names ${venue}, which is a venue whose producer stamps a ` +
+          "verdict that LANDS the user on this very screen — that is an " +
+          "unwinnable remedy, the defect class this phase exists to close.",
+      ).toBe(false);
+    }
+  });
+
+  it("the remedy names no FLAG-GATED venue (the WIZERR-08 / F3 disclosure class)", () => {
+    const bullet = WIZARD_ERROR_COPY.GATE_SERIES_EXAMINED_REFUSED.fix[0];
+    // MT5 also stamps `ledger_complete` unconditionally, so it would be a TRUE
+    // remedy — but its wizard presence rides `MT5_UI_ENABLED`, so a static
+    // sentence naming it would name a venue the surface may not be offering.
+    expect(BROKER_DAILIES).toContain("``combine_mt5_deal_ledger``");
+    for (const gated of ["MT5", "MetaTrader"]) {
+      expect(
+        bullet.toLowerCase().includes(gated.toLowerCase()),
+        `the remedy names ${gated}, whose wizard offer is behind a build flag ` +
+          "(MT5_UI_ENABLED). Static copy must not name a venue the surface " +
+          "may not be presenting.",
+      ).toBe(false);
+    }
+  });
+});
+
+/**
+ * ⭐ 161-REVIEW / IN-02 — PRINCIPLE 4 IS AN AUTHORING RULE, AND THE DOCBLOCKS
+ * MAY NOT CLAIM `expand_log` ENFORCES IT.
+ *
+ * The DASHBOARD roster note used to argue that "no correlation id on an
+ * actionable arm" HOLDS because `expand_log` is present only on terminal
+ * members. Two independent measurements say `expand_log` cannot carry that
+ * argument, and this case pins BOTH so the prose cannot quietly regrow:
+ *
+ *   1. `expand_log` does not imply the arm is non-actionable — `KEY_ORPHANED`
+ *      carries `try_another_key` (so `buildEnvelope` derives
+ *      `recoverable: true`) alongside it. Derived below, never hand-asserted.
+ *   2. `expand_log` does not decide what the renderer shows. That is
+ *      `ErrorEnvelope`'s call, and no entry in this table can assert it — so no
+ *      docblock here may state the property as established.
+ *
+ * ⛔ The recoverability half is DERIVED through `buildEnvelope`, matching this
+ * file's standing rule: asserting `actions` directly would restate what the
+ * table says about itself and would go green if the derivation rule changed.
+ */
+describe("[161-REVIEW / IN-02] `expand_log` is a declaration, not a Principle-4 mechanism", () => {
+  const source = readFileSync(join(__dirname, "wizardErrors.ts"), "utf-8");
+
+  it("at least one entry is RECOVERABLE and carries `expand_log` — so presence cannot mean 'terminal'", () => {
+    const codes = Object.keys(WIZARD_ERROR_COPY) as WizardErrorCode[];
+    // Population fence: an empty table would make the search below vacuous.
+    expect(codes.length).toBeGreaterThan(50);
+
+    const recoverableWithExpandLog = codes.filter(
+      (code) =>
+        buildEnvelope(code, "cid-in02").recoverable &&
+        WIZARD_ERROR_COPY[code].actions.includes("expand_log"),
+    );
+
+    expect(
+      recoverableWithExpandLog.length,
+      "no entry is both recoverable and carries `expand_log` any more. That " +
+        "would make `expand_log` presence coincide with 'terminal' again — " +
+        "which is the reading the IN-02 docblocks were corrected AWAY from. " +
+        "Do not simply delete this case: re-decide whether Principle 4 is now " +
+        "mechanically enforceable, and say so at the docblocks.",
+    ).toBeGreaterThan(0);
+  });
+
+  it("no docblock claims `expand_log`'s presence establishes Principle 4", () => {
+    // Control: the file was read, and the corrected note is the one present.
+    expect(source.length).toBeGreaterThan(100_000);
+    expect(source).toContain("PRINCIPLE 4 IS AN AUTHORING RULE");
+
+    // ⛔ NORMALISED, not raw. A raw substring pin is defeated by re-wrapping the
+    // comment — the same sentence at a different line width would slip through
+    // while reading identically to a human. Strip comment markers, collapse
+    // whitespace, then search. The corrected note QUOTES claim A verbatim (that
+    // is how the reader learns what was superseded), so the test is not "absent"
+    // but "appears once, and that once is inside the correction".
+    const normalise = (s: string) =>
+      s
+        .replace(/^\s*(?:\/\/|\*|\/\*\*?)\s?/gm, "")
+        .replace(/\s+/g, " ")
+        .trim();
+    const flat = normalise(source);
+    const count = (hay: string, needle: string) => hay.split(needle).length - 1;
+
+    // Claim A — the DASHBOARD roster note's original wording.
+    const CLAIM_A =
+      "Principle 4 (no correlation id on an actionable arm — three of the four " +
+      "are terminal, so `expand_log` is present on those and the id is what the " +
+      "user is asked to quote)";
+    // Claim B — the DASHBOARD_DIALOG_ROUTE_CODES docblock's original wording.
+    const CLAIM_B = "would show a correlation id on an ACTIONABLE arm (Principle 4)";
+
+    // Blank-needle fence — `"anything".includes("")` is true — and a normaliser
+    // control: if `normalise` blanked the file, every count below reads 0 and
+    // the whole case goes vacuously green.
+    for (const claim of [CLAIM_A, CLAIM_B]) {
+      expect(claim.trim().length).toBeGreaterThan(50);
+    }
+    expect(flat.length).toBeGreaterThan(50_000);
+    expect(flat).toContain("PRINCIPLE 4 IS AN AUTHORING RULE, NOT A PROPERTY");
+
+    // Claim A survives EXACTLY ONCE, as the quoted-and-rejected text.
+    expect(
+      count(flat, CLAIM_A),
+      "the superseded Principle-4 claim appears somewhere other than (or " +
+        "instead of) the IN-02 correction that quotes it. `expand_log` neither " +
+        "implies the arm is terminal (see the sibling case) nor decides what " +
+        "ErrorEnvelope renders — state it as an authoring rule, never as an " +
+        "established property.",
+    ).toBe(1);
+
+    // And that single occurrence is inside the correction, not standing alone.
+    const at = flat.indexOf(CLAIM_A);
+    expect(
+      flat.slice(Math.max(0, at - 200), at),
+      "the superseded claim is present without the note marking it superseded",
+    ).toContain("superseded");
+
+    // Claim B is gone outright — the correction paraphrases it rather than
+    // quoting the "(Principle 4)" tail, so any occurrence is a reintroduction.
+    expect(
+      count(flat, CLAIM_B),
+      "wizardErrors.ts has reintroduced: " + CLAIM_B + ". Nothing in this file " +
+        "decides what ErrorEnvelope renders.",
+    ).toBe(0);
+  });
+});

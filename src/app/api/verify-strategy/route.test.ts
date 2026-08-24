@@ -19,6 +19,8 @@
 // @vitest-environment node
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { readdirSync, readFileSync } from "fs";
+import { join } from "path";
 import { NextRequest } from "next/server";
 // 161-09 / WIZERR-08 (F3) — the disclosure oracles, imported LIVE rather than
 // hand-listed. A hand-typed venue list in a test is itself a stale disclosure
@@ -1328,5 +1330,162 @@ describe("[161-09 / WIZERR-08] the anonymous route: honest codes under an unchan
           `allowlist but NOT in the public offer (F3)`,
       ).not.toContain(venue.toLowerCase());
     }
+  });
+});
+
+/**
+ * ⭐ 161-REVIEW / WR-04 — THE PREMISE PIN.
+ *
+ * The route's sfox arm ships `KEY_VENUE_NOT_ENABLED`, whose `WIZARD_ERROR_COPY`
+ * entry reads "This exchange is not open on Quantalyze yet." — the coming-soon
+ * wording `161-UI-SPEC § WIZERR-08` (F3) bans on THIS anonymous surface. The
+ * arm keeps that code deliberately, because it is the one code that is TRUE of
+ * the fact (we support sfox; it is not switched on), and the choice rests on
+ * TWO premises. Only one of them was asserted before this pin.
+ *
+ *   1. ORDERING — the offered-set gate runs first, so the arm cannot fire for a
+ *      venue the landing form was not already offering. Asserted by the
+ *      "F3 ORDERING" case above.
+ *   2. NO CODE CHANNEL — no anonymous surface translates this route's `code`
+ *      into wizard copy, so the banned sentence is never rendered. This was
+ *      MEASURED and then written into a comment, which is not a mechanism. The
+ *      day a landing component starts reading `code`, the deferral silently
+ *      stops holding and nothing goes red. That is what this case fixes.
+ *
+ * ⛔ THE POPULATION IS DERIVED FROM DISK, never hand-listed: a hand-typed file
+ * list would keep passing the day somebody adds a NEW landing component that
+ * reads the channel — which is precisely the regrowth vector.
+ *
+ * ⛔ THIS PIN DOES NOT FORBID THE WIRING. It forbids INHERITING the F3
+ * deferral through it. If an anonymous surface should render wizard copy, make
+ * that change AND re-decide what this arm's code may say on a public surface,
+ * in the same commit. A red here is "re-decide", not "revert".
+ */
+describe("[161-REVIEW / WR-04] the F3 deferral's premise: no anonymous surface translates this route's `code`", () => {
+  const LANDING_DIR = join(process.cwd(), "src", "components", "landing");
+  // The positive control's directory: the AUTHENTICATED wizard, which does
+  // translate codes into copy. Used only to prove the scanner can detect.
+  const WIZARD_STEPS_DIR = join(
+    process.cwd(),
+    "src",
+    "app",
+    "(dashboard)",
+    "strategies",
+    "new",
+    "wizard",
+    "steps",
+  );
+
+  /**
+   * Hand-typed needles, and hand-typed ON PURPOSE: importing the symbols would
+   * make the oracle the thing under test. Each is a code→copy translation entry
+   * point in `@/lib/wizardErrors`.
+   */
+  const CODE_TO_COPY_NEEDLES = [
+    "WIZARD_ERROR_COPY",
+    "recogniseSeamErrorCode",
+    "recogniseDashboardDialogCode",
+    "formatKeyError",
+    "@/lib/wizardErrors",
+  ] as const;
+
+  function productionSourcesUnder(dir: string): string[] {
+    const out: string[] = [];
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const full = join(dir, entry.name);
+      if (entry.isDirectory()) {
+        if (entry.name === "__tests__" || entry.name === "__mocks__") continue;
+        out.push(...productionSourcesUnder(full));
+        continue;
+      }
+      if (!/\.tsx?$/.test(entry.name)) continue;
+      if (/\.(test|spec)\.tsx?$/.test(entry.name)) continue;
+      out.push(full);
+    }
+    return out;
+  }
+
+  it("the scanner is not vacuous: needles are real, and the same scan FINDS the wiring where it exists", () => {
+    // `"anything".includes("")` is true, so a blank needle would satisfy every
+    // negative below while measuring nothing.
+    for (const needle of CODE_TO_COPY_NEEDLES) {
+      expect(needle.trim().length).toBeGreaterThan(8);
+    }
+
+    // POSITIVE CONTROL — the authenticated wizard steps DO translate codes into
+    // copy. If this half ever goes green-by-emptiness, the negative half below
+    // proves nothing.
+    const wizardFiles = productionSourcesUnder(WIZARD_STEPS_DIR);
+    expect(wizardFiles.length).toBeGreaterThan(0);
+    const wizardHits = wizardFiles.filter((f) => {
+      const src = readFileSync(f, "utf-8");
+      return CODE_TO_COPY_NEEDLES.some((n) => src.includes(n));
+    });
+    expect(
+      wizardHits.length,
+      "the code→copy scanner found NO translation in the authenticated wizard " +
+        "steps, where it demonstrably exists — the needles or the walker are " +
+        "broken, and the landing-dir assertion below is measuring nothing",
+    ).toBeGreaterThan(0);
+  });
+
+  it("the landing surface is a real, non-empty population that CONSUMES this route", () => {
+    const files = productionSourcesUnder(LANDING_DIR);
+    expect(files.length).toBeGreaterThan(0);
+
+    // Independent hand-typed oracle for the derived population: the component
+    // that actually posts to this route must be in it. If it moves, this pin's
+    // scope moved with it and must be re-derived deliberately.
+    const named = files.filter((f) => f.endsWith("VerificationForm.tsx"));
+    expect(
+      named.length,
+      "VerificationForm.tsx is not under src/components/landing/ any more — " +
+        "the anonymous consumer of /api/verify-strategy moved, so re-derive " +
+        "this pin's directory rather than deleting the case",
+    ).toBe(1);
+
+    // The CONSUMPTION link: the premise is about surfaces that call THIS route.
+    const consumers = files.filter((f) =>
+      readFileSync(f, "utf-8").includes("/api/verify-strategy"),
+    );
+    expect(
+      consumers.length,
+      "no file under src/components/landing/ posts to /api/verify-strategy — " +
+        "this pin is guarding a surface that no longer consumes the route",
+    ).toBeGreaterThan(0);
+  });
+
+  it("NO production file under src/components/landing/ translates a wire code into wizard copy", () => {
+    for (const file of productionSourcesUnder(LANDING_DIR)) {
+      const src = readFileSync(file, "utf-8");
+      for (const needle of CODE_TO_COPY_NEEDLES) {
+        expect(
+          src.includes(needle),
+          `${file} references ${needle}. An ANONYMOUS surface has begun ` +
+            "translating wire codes into WIZARD_ERROR_COPY, so the sfox arm " +
+            "in verify-strategy/route.ts can now render " +
+            '"This exchange is not open on Quantalyze yet." to a logged-out ' +
+            "visitor — the wording 161-UI-SPEC § WIZERR-08 (F3) bans on this " +
+            "surface. Re-decide F3 for that arm IN THIS COMMIT; do not just " +
+            "widen this pin.",
+        ).toBe(false);
+      }
+    }
+  });
+
+  it("VerificationForm's error path reads the SENTENCE channel, never `code`", () => {
+    const src = readFileSync(join(LANDING_DIR, "VerificationForm.tsx"), "utf-8");
+
+    // Controls first: the two readers that DO exist must be present, or a
+    // renamed/blanked file would make the negative below vacuously true.
+    expect(src).toContain("data.human_message");
+    expect(src).toContain("data.error");
+
+    expect(
+      /\bdata\.code\b/.test(src),
+      "VerificationForm now reads `data.code` from /api/verify-strategy. The " +
+        "F3 deferral at the sfox arm assumed this channel was never read; it " +
+        "is read now, so decide what that arm may say to an anonymous caller.",
+    ).toBe(false);
   });
 });

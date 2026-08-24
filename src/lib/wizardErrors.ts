@@ -2010,12 +2010,42 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
   //   · No gap magnitude and no row count appears (T-73-02 leak discipline, and
   //     TRAP-3: this entry has no interpolation arm, so no absent number can
   //     surface as a zero).
+  //
+  // ⭐ 161-REVIEW / IN-03 — THE FIRST REMEDY NAMES A VENUE, and the name was
+  // MEASURED at the producer rather than inferred. It used to read "Connect a
+  // key from a venue we can read end to end — one that gives us a complete
+  // transaction ledger rather than a fill feed", which gestured at a set the
+  // reader cannot resolve: nothing on the user's screen says which of the
+  // venues on offer keeps a ledger, so the remedy was "guess". Truth source,
+  // read first-hand: `analytics-service/services/broker_dailies.py`'s producer
+  // registry docstring ("Who stamps what") plus the three stamp sites.
+  //
+  //   · `combine_native_ledger` (DERIBIT) stamps `ledger_complete` on BOTH
+  //     return paths, unconditionally — an incomplete crawl raises
+  //     `LedgerCompletenessError` / `LedgerTruncatedError` and fails the whole
+  //     job permanently, so no partial deribit series can exist to land here.
+  //     Deribit is therefore a remedy that CANNOT put the user back on this
+  //     screen, and it is in `UI_EXCHANGE_CODES_BASE` — offered unconditionally,
+  //     behind no flag.
+  //   · `combine_realized_and_funding` (BINANCE / BYBIT / OKX) stamps
+  //     `fill_derived_unproven` always, and `combine_sfox_balance_history`
+  //     stamps `sampled_gapped` on any interior hole. Those four are exactly the
+  //     venues that can REACH this code, so none of them is a remedy.
+  //
+  // ⛔ `combine_mt5_deal_ledger` ALSO stamps `ledger_complete` unconditionally,
+  // and MT5 is deliberately NOT named. Its wizard presence rides
+  // `MT5_UI_ENABLED` (`closed-sets.ts`), so a static sentence naming it would
+  // name a venue the surface may not be offering — the same disclosure defect
+  // WIZERR-08/F3 exists to prevent, in a different costume. The sentence names
+  // ONE venue and claims no exhaustiveness for exactly that reason: it stays
+  // true when a flag-gated venue is dark AND when it is live. If a second
+  // ALWAYS-OFFERED venue starts stamping `ledger_complete`, name it here too.
   GATE_SERIES_EXAMINED_REFUSED: {
     title: "We can't verify this strategy's returns from the venue's own data.",
     cause:
       "Our pipeline records how every daily-return series was built, and for this one the record does not establish a complete track record. There are two ways a series lands here: it was sampled from balance snapshots that have interior gaps, or it was derived from individual fills — a method that produces a plausible series whether or not the venue returned every fill, with no residual to check it against. Either way, publishing it would mean standing behind a number we cannot show is complete. This is a limit on what the venue's data can prove, not a judgement about your trading.",
     fix: [
-      "Connect a key from a venue we can read end to end — one that gives us a complete transaction ledger rather than a fill feed.",
+      "Connect a Deribit key instead — Deribit gives us the venue's full transaction ledger rather than a fill feed, so the record behind the series is whole.",
       "Or create this strategy from a CSV upload instead: a track record you supply yourself carries its own completeness record, which we do accept.",
     ],
     docsHref: "/security#thresholds",
@@ -3188,10 +3218,31 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
   // above carry the full reasoning for each: what rendered before it, which
   // near-neighbour was rejected and why (read at that neighbour's emitter), and
   // how `recoverable` derives. The copy below is held to Principle 1 (name the
-  // actual blocker), Principle 2 (the remedy must be able to succeed) and
-  // Principle 4 (no correlation id on an actionable arm — three of the four are
-  // terminal, so `expand_log` is present on those and the id is what the user
-  // is asked to quote).
+  // actual blocker) and Principle 2 (the remedy must be able to succeed).
+  //
+  // ⚠️ 161-REVIEW / IN-02 — PRINCIPLE 4 IS AN AUTHORING RULE, NOT A PROPERTY
+  // THIS TABLE ESTABLISHES. The superseded version of this note claimed
+  // otherwise — "Principle 4 (no correlation id on an actionable arm — three of
+  // the four are terminal, so `expand_log` is present on those and the id is
+  // what the user is asked to quote)" — which reads `expand_log`'s presence as
+  // the enforcing mechanism. It is not one, on two independent measured
+  // grounds:
+  //
+  //   · `expand_log` does not decide what renders. Whether the envelope's
+  //     `<details> Diagnostics` block — the one that carries `code` and
+  //     `correlation_id` — is shown is `ErrorEnvelope`'s decision, taken from
+  //     its own props. Read it THERE before relying on the id being present or
+  //     absent on any arm; no entry in this table can assert it.
+  //   · `expand_log` does not even imply the arm is terminal. `KEY_ORPHANED`
+  //     carries `try_another_key` — a member of `RECOVERABLE_ACTIONS`, so
+  //     `buildEnvelope` derives `recoverable: true` — ALONGSIDE `expand_log`.
+  //     One counterexample is enough: `expand_log` present cannot establish
+  //     "this arm is non-actionable" for any entry, this table's or another's.
+  //
+  // So `expand_log` on three of the four below records the AUTHOR'S judgement
+  // that the diagnostics disclosure is the right escalation for a terminal arm,
+  // and the fix line asking the user to quote the id is what makes it useful.
+  // It is a declaration, never a claim about the rendered DOM.
   DASHBOARD_SIGNED_OUT: {
     title: "You are signed out.",
     cause:
@@ -4535,8 +4586,11 @@ export type DashboardDialogRoute =
  *     refusals. `RenameStrategyDialog` lands them INLINE at the Name field,
  *     which is where the user is looking and where the remedy is; routing them
  *     through an envelope would re-introduce the terminal-envelope class for a
- *     field-level problem, and would show a correlation id on an ACTIONABLE arm
- *     (Principle 4).
+ *     field-level problem: the remedy is AT the Name field, and a terminal panel
+ *     beside it is noise competing with that remedy (Principle 4). ⚠️ 161-REVIEW
+ *     / IN-02 — this used to read "would show a correlation id on an ACTIONABLE
+ *     arm", which asserted what `ErrorEnvelope` renders. Nothing in this file
+ *     decides that; see the IN-02 note at the DASHBOARD copy entries.
  *   · `LIVE_ALLOCATION` — the ownership route's 409. `MarkOwnershipDialog`
  *     answers it by swapping in its confirmation body with the amount at risk,
  *     not by rendering an error at all. It is a QUESTION, not a refusal the
@@ -4652,6 +4706,22 @@ export { DASHBOARD_DIALOG_ROUTE_CODES };
  * a `ReadonlySet<WizardErrorCode>` would not compile — and would be wrong if it
  * did, on `MultiKeyConnectStep`'s coverage-law rule 1: the ONE alias table is
  * consulted first, never a member here.
+ *
+ * ── WHAT THIS ROSTER DOES *NOT* COVER (measured 2026-08-25, IN-04) ──────────
+ *
+ * Six DECLARED members, but the route can emit roughly **21** codes: the other
+ * ~15 arrive on the computed channel, forwarded from the analytics service's
+ * own `>=500` vocabulary rather than minted here. They are deliberately not
+ * rostered, and the basis for accepting that gap is a measurement, not a
+ * preference: none of the fifteen is a `SEAM_CODE_TO_WIZARD_CODE` member at
+ * HEAD, so every one of them resolves to UNKNOWN copy — the accepted
+ * unrecognized case, not a false sentence.
+ *
+ * ⚠️ The condition that makes this unsafe: **adding a
+ * `SEAM_CODE_TO_WIZARD_CODE` row for any of those fifteen.** The moment one
+ * gains wizard copy, it becomes a recognized code arriving on a 5xx carrying a
+ * remedy that was authored for a 4xx arm — the WIZERR-06 W1 hazard. If you add
+ * such a row, re-run that inventory and roster the code here.
  */
 export const KNOWN_VALIDATE_AND_ENCRYPT_CODES: ReadonlySet<WizardErrorCode> =
   new Set<WizardErrorCode>([

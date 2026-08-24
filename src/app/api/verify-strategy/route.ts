@@ -198,13 +198,27 @@ export async function POST(req: NextRequest) {
     // inherited: reversing the two gates reddens it.
     //
     // ⚠️⚠️ LATENT HAZARD, RECORDED SO A FUTURE CONSUMER MUST RE-DECIDE RATHER
-    // THAN INHERIT. `KEY_VENUE_NOT_ENABLED`'s copy entry reads "This exchange is
-    // not open on Quantalyze yet." No anonymous surface maps this route's codes
-    // to wizard copy today (measured: VerificationForm never reads `code`), so
-    // nothing renders it. The DAY any anonymous surface starts translating
-    // these codes into `WIZARD_ERROR_COPY`, that sentence WOULD leak a
-    // coming-soon signal about an unlaunched venue, and F3 must be re-decided
-    // AT THAT MOMENT — not assumed settled because this line already existed.
+    // THAN INHERIT — and, since 161-REVIEW / WR-04, PINNED rather than merely
+    // recorded. `KEY_VENUE_NOT_ENABLED`'s copy entry reads "This exchange is not
+    // open on Quantalyze yet."
+    //
+    // ⛔ STATE THE HAZARD AT ITS REAL SIZE. An earlier version of this note said
+    // that sentence "WOULD leak a coming-soon signal about an unlaunched venue",
+    // which contradicts the ordering argument two paragraphs above and overstates
+    // what can happen. The UI_EXCHANGE_CODES gate runs FIRST, so this arm cannot
+    // fire for a venue the landing form was not already offering. The residual
+    // hazard is narrower and still real: the coming-soon WORDING would be
+    // rendered for a venue we are presenting as available, which is the copy
+    // WIZERR-08/F3 bans on this surface — not a disclosure of something hidden.
+    //
+    // THE PREMISE THIS DEFERRAL RESTS ON IS NOW ASSERTED, NOT ASSUMED. Measured:
+    // `VerificationForm` reads `data.human_message` then `data.error` and never
+    // `data.code`, and no file under `src/components/landing/` translates a code
+    // through `WIZARD_ERROR_COPY` / `recogniseSeamErrorCode` / `formatKeyError`.
+    // `route.test.ts`'s "[161-REVIEW / WR-04] premise pin" derives that
+    // population from disk and reddens the day it stops holding, so F3 gets
+    // re-decided AT THAT MOMENT rather than assumed settled because this line
+    // already existed.
     return NextResponse.json(
       { error: "sFOX integration is not yet available.", code: "KEY_VENUE_NOT_ENABLED" },
       { status: 400 },
