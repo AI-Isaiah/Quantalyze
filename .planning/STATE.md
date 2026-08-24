@@ -5,16 +5,16 @@ milestone_name: Backlog Burndown (Phases 158+)
 current_phase: 160
 current_phase_name: PROVENANCE — The server's venue is the venue that annualizes
 status: executing
-stopped_at: Completed 161-01-PLAN.md
-last_updated: "2026-08-24T09:34:17.003Z"
+stopped_at: Completed 161-02-PLAN.md
+last_updated: "2026-08-24T09:57:03.623Z"
 last_activity: 2026-08-23
 last_activity_desc: Phase 160 execution started
-state_head: 9b15377cdc0d0108aa656a70ef287c546de68a67
+state_head: 8549e9927fcb4475416102d4bf1d30679efaa3ee
 progress:
   total_phases: 9
   completed_phases: 1
   total_plans: 30
-  completed_plans: 19
+  completed_plans: 20
   percent: 11
 ---
 
@@ -114,7 +114,7 @@ zero unclassified) and `161-VALIDATION.md` (Nyquist strategy, 4 Wave-0 gaps, ant
 ## Current Position
 
 Phase: 160 (PROVENANCE — The server's venue is the venue that annualizes) — EXECUTING
-Plan: 2 of 6
+Plan: 3 of 6
 Status: Ready to execute
 Last activity: 2026-08-23 — Phase 160 execution started
 OPS-CI first (the shared-test-db eviction / #616 mutex protects every later merge), 165 DEPS
@@ -621,6 +621,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 | Phase 146-rate P01 | 11m | 3 tasks | 6 files |
 | Phase 146 P03 | ~25m | 2 tasks | 4 files |
 | Phase 161 P01 | 24min | 2 tasks | 3 files |
+| Phase 161 P02 | 41min | 2 tasks | 9 files |
 
 ## Accumulated Context
 
@@ -743,6 +744,9 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - [Phase ?]: 146-01: RATE-05 closed VERIFIED-EXISTING per D-146-1 (no withRateLimit symbol minted; reversal = ship gate); eval limiter reuses adminActionLimiter 20/min per D-146-4
 - [Phase 160]: 161-01: KEY_UNDECRYPTABLE arm keyed on ONE code with === (never a blanket seam-code forward) — the cascade stays authoritative so an upstream cannot name our private vocabulary
 - [Phase 160]: 161-01: the PROBE_* law brings its OWN two-shape scanner; the incumbent wizardErrors emitterRe is code-first and would see neither of this route's real emitter shapes
+- [Phase 160]: 161-02: the MT5 flag->cause builder lives in mt5_probe.py (mt5_validation cannot import it back — cycle) and CALLS terminal_trade_permission_off rather than re-deriving its shape test
+- [Phase 160]: 161-02: job_worker.classify_exception reads the Mt5GatewayMisconfigured message through an ALLOW-LIST — a curated cause survives the sink, raw remote text degrades to the generic constant (T-134-01 + honesty at once)
+- [Phase 160]: 161-02: when both MT5 blockage flags are set the NAMED external-API option wins (documented precedence, pinned by test); absent/unreadable flags render the generic constant, never a guessed cause (A1 quarantine)
 
 ### Decisions (execution-time, Phase 140.2)
 
@@ -1445,8 +1449,8 @@ Load-bearing sequencing (real dependencies, do not reorder):
 
 ## Session
 
-**Last Date:** 2026-08-24T09:34:16.714Z
-**Stopped At:** Completed 161-01-PLAN.md
+**Last Date:** 2026-08-24T09:57:03.285Z
+**Stopped At:** Completed 161-02-PLAN.md
 **Resume File:** None
 **Next step:** Phase 161 (WIZERR — honest error surfaces) is next and NOT yet planned — run `/gsd-plan-phase 161`. Phase 161.1 (LEDGER-REFRESH) was inserted after it on 2026-08-24 for the founder-reported MT5 staleness; it is URGENT and production-facing, so it may be pulled ahead of 161 if you prefer the live data-integrity fix first.
 
