@@ -979,3 +979,114 @@ describe("[161-07 / WIZERR-10] examined-but-refused verdicts get their own truth
     expect(a.reason).not.toBe(b.reason);
   });
 });
+
+/**
+ * [161 REVIEW / WR-05] THE SHORT-HISTORY REFUSAL MAY NOT NAME A CSV.
+ *
+ * `INSUFFICIENT_CSV_HISTORY`'s reason is rendered VERBATIM to the operator —
+ * `admin/strategy-review` answers `Cannot approve: ${gate.reason}` with no copy
+ * hop — and it used to read "CSV history has only N day(s) of returns."
+ *
+ * Reaching this arm requires `isDailyReturnsSourced`, i.e. a verdict in the
+ * production allow-list. The roster below is HAND-TYPED from
+ * `analytics-service/services/broker_dailies.py`'s producer registry ("Who
+ * stamps what"), read first-hand — NOT imported from `strategyGate.ts`, so a
+ * widened allow-list must be followed here by hand rather than silently. Only
+ * ONE of the three members involves a CSV, so the old sentence quoted a
+ * day-count from a file two thirds of the population never sent.
+ *
+ * This is the operator-facing half of the same correction 161-07 applied to the
+ * wizard copy on identical evidence.
+ */
+describe("[161 REVIEW / WR-05] the short-history refusal names no source the strategy may not have", () => {
+  const ADMITTED_VERDICTS = [
+    // `combine_native_ledger` (deribit, both return paths),
+    // `combine_mt5_deal_ledger` (mt5), `combine_sfox_balance_history` (sfox,
+    // zero interior holes). KEYED accounts — the user uploaded nothing.
+    "ledger_complete",
+    // `run_stitch_composite_job` — a stitch of member series. The composite has
+    // no upload of its own.
+    "composite_stitched",
+    // The keyless-CSV path (`analytics_runner`). The ONLY member for which the
+    // word "CSV" is true.
+    "user_supplied",
+  ] as const;
+
+  /** Below the 7-row floor, on the daily-returns branch, analytics complete. */
+  const shortSeries = (verdict: string): StrategyGateInput => ({
+    ...BASE,
+    apiKeyId: "key-1",
+    tradeCount: 0,
+    earliestTradeAt: null,
+    latestTradeAt: null,
+    computationStatus: "complete" as const,
+    csvRowCount: 3,
+    seriesCompleteness: verdict,
+  });
+
+  it("REACHABILITY FENCE: all three admitted verdicts land on this arm", () => {
+    // ⚠️ Asserted FIRST and separately. Three plans this phase wrote a pin
+    // against a fixture that returned early and never reached the branch under
+    // test — a green that proved nothing. If any verdict here stops selecting
+    // `INSUFFICIENT_CSV_HISTORY`, every sentence assertion below is testing a
+    // different arm and must be re-derived rather than re-pointed.
+    for (const verdict of ADMITTED_VERDICTS) {
+      const result = checkStrategyGate(shortSeries(verdict));
+      expect(result.passed, verdict).toBe(false);
+      expect(result.code, verdict).toBe("INSUFFICIENT_CSV_HISTORY");
+      expect(result.detail, verdict).toEqual({ rows: 3, min: 7 });
+    }
+  });
+
+  it("the sentence names NO CSV and NO upload, for any of the three producers", () => {
+    for (const verdict of ADMITTED_VERDICTS) {
+      const reason = checkStrategyGate(shortSeries(verdict)).reason;
+
+      // NON-VACUITY FLOOR: `"anything".includes("")` is true and
+      // `expect(null).not.toMatch(...)` would throw rather than pass, so pin the
+      // shape before pinning the absences. Without this a null/empty reason
+      // would satisfy every negative below.
+      expect(typeof reason, `${verdict}: reason must be a string`).toBe(
+        "string",
+      );
+      expect((reason ?? "").length, verdict).toBeGreaterThan(40);
+
+      // ⛔ THE ACTUAL DEFECT. A keyed deribit / mt5 / sfox account and a
+      // composite have no CSV; naming one quotes a source the user never used.
+      expect(reason, verdict).not.toMatch(/csv/i);
+      expect(reason, verdict).not.toMatch(/upload/i);
+      expect(reason, verdict).not.toMatch(/\bfile\b/i);
+    }
+  });
+
+  it("the sentence is EXACTLY this, hand-typed — and identical across producers", () => {
+    // ORACLE INDEPENDENCE: the expected string is typed out here, not built
+    // from `STRATEGY_GATE_MIN_CSV_ROWS` or from the module's own template. A
+    // test that interpolated the production constant would follow a changed
+    // floor silently, which is the one thing an operator-visible copy pin must
+    // not do.
+    const EXPECTED =
+      "The return series covers only 3 day(s). A minimum of 7 days is required.";
+
+    for (const verdict of ADMITTED_VERDICTS) {
+      expect(checkStrategyGate(shortSeries(verdict)).reason, verdict).toBe(
+        EXPECTED,
+      );
+    }
+
+    // The threshold stays ATTACHED to its number: a refusal that states the
+    // shortfall without stating the bar is unwinnable copy.
+    expect(EXPECTED).toContain("7 days is required");
+  });
+
+  it("reads as a complete sentence after the admin prefix", () => {
+    // `admin/strategy-review` answers `Cannot approve: ${gate.reason}` RAW, so
+    // a fragment or a lowercase start reads as a broken sentence there. Same
+    // obligation the two SERIES_EXAMINED_BUT_REFUSED sentences carry.
+    const rendered = `Cannot approve: ${
+      checkStrategyGate(shortSeries("ledger_complete")).reason ?? ""
+    }`;
+    expect(rendered).toMatch(/^Cannot approve: [A-Z]/);
+    expect(rendered).toMatch(/\.$/);
+  });
+});

@@ -346,7 +346,48 @@ export function checkStrategyGate(input: StrategyGateInput): StrategyGateResult 
       return {
         passed: false,
         code: "INSUFFICIENT_CSV_HISTORY",
-        reason: `CSV history has only ${csvRowCount} day(s) of returns. A minimum of ${STRATEGY_GATE_MIN_CSV_ROWS} days is required.`,
+        // ── 161 REVIEW / WR-05: THE REASON MAY NOT NAME A CSV ────────────────
+        //
+        // ⚠️ OPERATOR-VISIBLE VERBATIM. `admin/strategy-review` answers
+        // `Cannot approve: ${gate.reason}` with no copy hop, exactly as it does
+        // for the two SERIES_EXAMINED_BUT_REFUSED sentences above.
+        //
+        // This sentence used to read "CSV history has only N day(s) of
+        // returns." It named a source that MOST of the strategies reaching this
+        // branch do not have. Reaching here requires `isDailyReturnsSourced`,
+        // i.e. a verdict in `SERIES_TRUSTED_FOR_DAILY_BRANCH` — and only ONE of
+        // its three members involves a CSV at all. Measured first-hand against
+        // the producer registry in
+        // `analytics-service/services/broker_dailies.py` ("Who stamps what"):
+        //
+        //   · `ledger_complete`     — `combine_native_ledger` (deribit, both
+        //                             return paths), `combine_mt5_deal_ledger`
+        //                             (mt5), and `combine_sfox_balance_history`
+        //                             (sfox) when the observed NAV span has zero
+        //                             interior holes. All KEYED accounts whose
+        //                             dailies are folded from a venue ledger.
+        //                             The user uploaded nothing.
+        //   · `composite_stitched`  — `run_stitch_composite_job`. A stitch of
+        //                             member series; the composite has no upload
+        //                             of its own.
+        //   · `user_supplied`       — the keyless-CSV path (`analytics_runner`).
+        //                             The ONLY member for which "CSV" is true.
+        //
+        // So two of the three populations were being refused with a sentence
+        // that quotes a day-count from a file they never sent. That is the same
+        // false-sentence class 161-07 deleted from the wizard copy on this
+        // identical evidence; this is the operator-facing surface it left
+        // behind. "The return series" is the vocabulary the two
+        // SERIES_EXAMINED_BUT_REFUSED sentences already use for the same
+        // artefact, and it is true of all three producers.
+        //
+        // ⛔ THE CODE STILL SAYS CSV, ON PURPOSE. `INSUFFICIENT_CSV_HISTORY` is
+        // a stable identifier consumed by `gateFailureToWizardError` and by the
+        // wizard's `GATE_INSUFFICIENT_CSV_HISTORY` copy key; renaming it is a
+        // cross-file change with no honesty gain, because the code never
+        // reaches the operator's sentence (the admin route pins that it does
+        // not). Only the SENTENCE was wrong, and only the sentence moved.
+        reason: `The return series covers only ${csvRowCount} day(s). A minimum of ${STRATEGY_GATE_MIN_CSV_ROWS} days is required.`,
         detail: { rows: csvRowCount, min: STRATEGY_GATE_MIN_CSV_ROWS },
       };
     }

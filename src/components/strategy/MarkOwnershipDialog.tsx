@@ -50,9 +50,11 @@ import { CapitalOwnershipRadioGroup } from "./CapitalOwnershipRadioGroup";
 /**
  * The 409 refusal body. `allocated_amount` is the sum the route computed.
  *
- * 161-10 / WIZERR-07 — `code` is the discriminator; `error` is kept on the type
- * only because the route still sends it (byte-identical), not because anything
- * here reads it.
+ * 161-10 / WIZERR-07 — `code` is the discriminator. The route also still sends
+ * the legacy `error: "live_allocation"` key (byte-identical, route.ts:289), but
+ * it is deliberately NOT a field on this type: a shape nothing reads has no
+ * business being declared, and declaring it would invite the next reader to
+ * branch on it again.
  */
 interface LiveAllocationRefusal {
   code?: unknown;

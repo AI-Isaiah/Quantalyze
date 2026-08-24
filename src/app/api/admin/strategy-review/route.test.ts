@@ -1520,7 +1520,7 @@ describe("POST /api/admin/strategy-review — M-0285 gate.reason error shape", (
     expect(res.status).toBe(400);
     const body = await res.json();
     expect(body.error).toBe(
-      "Cannot approve: CSV history has only 3 day(s) of returns. " +
+      "Cannot approve: The return series covers only 3 day(s). " +
         "A minimum of 7 days is required.",
     );
     expect(body.error).not.toContain("INSUFFICIENT_CSV_HISTORY");
