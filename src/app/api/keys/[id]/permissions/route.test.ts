@@ -728,9 +728,18 @@ describe("[140.3-01 / TS-05] the permissions proxy reads the seam error body thr
     const { GET } = await import("./route");
     const res = await GET(makeRequest(KEY_ID));
 
-    // Unchanged by design — TS-34 owns the status, not this plan.
-    expect(res.status).toBe(502);
-    expect((await res.json()).code).toBe("PROBE_FAILED");
+    // ⚠️ 161-01 / WIZERR-04 — THESE TWO LINES MOVED, AND THE MOVE IS THE POINT.
+    // They read `502` / `PROBE_FAILED` with the comment "unchanged by design —
+    // TS-34 owns the status, not this plan", because no plan owned this
+    // response shape at the time. 161-01 owns it: the route now consults the
+    // `KEY_UNDECRYPTABLE` code this very fixture proves rides on the `cause`,
+    // and answers a remedy that can actually succeed. The FIXTURE is untouched
+    // — the same real, executed raise site, byte-identical — so what this case
+    // certifies (the nested read through `seamHumanMessage`, asserted below) is
+    // unchanged; only the observable it was deliberately not yet asserting has
+    // moved off the wrong answer.
+    expect(res.status).toBe(500);
+    expect((await res.json()).code).toBe("KEY_UNDECRYPTABLE");
 
     const logged = consoleErr.mock.calls
       .map((call) => call.map((arg) => String(arg)).join(" "))
@@ -1204,6 +1213,174 @@ describe("[140.3-01 / TS-05] the permissions proxy reads the seam error body thr
     expect(logged).toContain("Upstream 503");
     expect(res.status).toBe(502);
     expect(body.code).toBe("PROBE_BACKEND_UNAVAILABLE");
+  });
+});
+
+/**
+ * [161-01 / WIZERR-04] The remedy the route can already prove, and had been
+ * throwing away.
+ *
+ * THE DEFECT. `routers/internal.py` answers a permanent 500 with
+ * `code: "KEY_UNDECRYPTABLE"` when the stored ciphertext can no longer be read.
+ * This route has carried that code on the thrown error's `cause` since 140.3-01
+ * (the sibling CONTRACT A case above asserts it reaches the operator log), and
+ * has read that same cause for its 429 arm since 140.3-09. The terminal arm
+ * never consulted it, so the fault fell through the substring cascade — whose
+ * six needles its sentence matches none of — and answered `PROBE_FAILED`:
+ * "Could not check key scopes. Try again."
+ *
+ * WHY THAT SENTENCE IS THE BUG AND NOT MERELY IMPRECISE. A retry cannot
+ * succeed. The ciphertext stays unreadable until the key is reconnected, so
+ * "Try again" is an instruction that is FALSE about the user's situation — it
+ * routes them into an unbounded loop against a fault only a reconnect clears,
+ * and hides the one action that works. This is the phase's whole motif: a
+ * server-classified code the client discards, replaced by a remedy that can
+ * actually succeed.
+ *
+ * ORACLE INDEPENDENCE (project rule). Every sentence below is a HAND-TYPED
+ * transcription of the approved copy contract (`161-UI-SPEC.md` § Copy Spec
+ * WIZERR-04). None is imported from the route. Importing the constant under
+ * assertion yields `copy(X) === copy(X)`, which cannot fail — the exact vacuity
+ * mechanism the anti-vacuity rule exists to stop.
+ */
+describe("[161-01 / WIZERR-04] the permissions proxy answers KEY_UNDECRYPTABLE with a remedy that can succeed", () => {
+  // Hand-typed transcriptions of the UI-SPEC Copy Spec. NOT imports.
+  const UNDECRYPTABLE_SENTENCE =
+    "This stored key can no longer be decrypted. Reconnect the key — retrying will not help.";
+  const PROBE_FAILED_SENTENCE = "Could not check key scopes. Try again.";
+
+  it("POSITIVE — a seam failure carrying code KEY_UNDECRYPTABLE renders the reconnect remedy, not the retry sentence", async () => {
+    // The real, executed raise site behind this route's own upstream
+    // (`routers/internal.py`'s permanent 500 for an undecryptable key). Same
+    // fixture the CONTRACT A case above uses, deliberately: that case proves
+    // the code reaches the `cause`, this one proves the response consults it.
+    //
+    // Re-runnable oracle for the upstream literals:
+    //   cd analytics-service && python3 -c "from services.error_contract import \
+    //     service_error; print(service_error(500,'KEY_UNDECRYPTABLE', \
+    //     dependency='kek', retryable=False, detail='This stored key could not \
+    //     be decrypted. It must be reconnected.').detail)"
+    STATE.upstreamStatus = 500;
+    STATE.upstreamPayload = {
+      detail: {
+        code: "KEY_UNDECRYPTABLE",
+        dependency: "kek",
+        retryable: false,
+        detail: "This stored key could not be decrypted. It must be reconnected.",
+      },
+    };
+
+    const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { GET } = await import("./route");
+    const res = await GET(makeRequest(KEY_ID));
+    const body = await res.json();
+    const logged = consoleErr.mock.calls
+      .map((call) => call.map((arg) => String(arg)).join(" "))
+      .join("\n");
+    consoleErr.mockRestore();
+
+    expect(
+      body.code,
+      "The server already classified this fault. Falling back to PROBE_FAILED " +
+        "discards a code the route is holding in its hand.",
+    ).toBe("KEY_UNDECRYPTABLE");
+    expect(
+      body.error,
+      "The remedy must name the action that can actually succeed. 'Try again' " +
+        "is false here — the ciphertext stays unreadable until the key is " +
+        "reconnected.",
+    ).toBe(UNDECRYPTABLE_SENTENCE);
+    expect(
+      body.error,
+      "No retry framing may survive on an arm where retrying cannot work.",
+    ).not.toContain("Try again");
+    expect(res.status).toBe(500);
+
+    // T-161-01 — the body is STATIC. The upstream's own sentence reaches the
+    // OPERATOR (scrubbed) and never the client. If the raw message were
+    // forwarded, this route would start leaking whatever prose an upstream
+    // chose to put in `detail` (H-1062 / F5b).
+    expect(
+      body.error,
+      "The upstream's raw sentence must never reach the response body.",
+    ).not.toContain("It must be reconnected.");
+    expect(
+      logged,
+      "The operator must still see WHY, scrubbed — this arm RETURNS, so it " +
+        "never reaches the terminal arm's log line.",
+    ).toContain("This stored key could not be decrypted. It must be reconnected.");
+
+    // TRAP-3 — no wait was advertised, so none may be invented. Absence means
+    // "no wait was advertised", never "zero".
+    expect(
+      res.headers.get("Retry-After"),
+      "No upstream advertised a wait here. Stamping one — even '0' — would " +
+        "turn a vague error into a specific lie.",
+    ).toBeNull();
+    expect(res.headers.get("Cache-Control")).toContain("no-store");
+  });
+
+  it("NEGATIVE CONTROL — a genuinely unclassified failure still answers PROBE_FAILED, byte-identical", async () => {
+    // This is the half that makes the positive case mean something. If the arm
+    // had been written as a blanket forward of every seam code (the
+    // identity-admission trap), the cascade below it would be silently retired
+    // and an upstream would get to name our private vocabulary. A code the
+    // route does NOT recognise must still fall through to the cascade.
+    STATE.upstreamStatus = 500;
+    STATE.upstreamPayload = {
+      detail: {
+        code: "SOME_UNRECOGNISED_UPSTREAM_CODE",
+        dependency: "kek",
+        retryable: false,
+        detail: "An upstream fault this route has no curated remedy for.",
+      },
+    };
+
+    const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { GET } = await import("./route");
+    const res = await GET(makeRequest(KEY_ID));
+    const body = await res.json();
+    consoleErr.mockRestore();
+
+    expect(
+      body.code,
+      "Only KEY_UNDECRYPTABLE was admitted. Every other code stays the " +
+        "cascade's business — the route's vocabulary is ours, not the " +
+        "upstream's to name.",
+    ).toBe("PROBE_FAILED");
+    expect(
+      body.error,
+      "The PROBE_FAILED sentence must stay byte-identical: on THIS arm a retry " +
+        "genuinely can work, so 'Try again' is true copy.",
+    ).toBe(PROBE_FAILED_SENTENCE);
+    expect(res.status).toBe(502);
+  });
+
+  it("NEGATIVE CONTROL — the code is matched exactly, never by substring", async () => {
+    // A near-miss code must not be absorbed. `includes`-style matching here
+    // would let any upstream code CONTAINING our token claim our remedy.
+    STATE.upstreamStatus = 500;
+    STATE.upstreamPayload = {
+      detail: {
+        code: "KEY_UNDECRYPTABLE_PENDING_ROTATION",
+        dependency: "kek",
+        retryable: false,
+        detail: "A different fault whose code merely starts with ours.",
+      },
+    };
+
+    const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { GET } = await import("./route");
+    const res = await GET(makeRequest(KEY_ID));
+    const body = await res.json();
+    consoleErr.mockRestore();
+
+    expect(
+      body.code,
+      "The arm compares with ===. A substring match would hand our curated " +
+        "remedy to codes we never measured.",
+    ).toBe("PROBE_FAILED");
+    expect(body.error).toBe(PROBE_FAILED_SENTENCE);
   });
 });
 

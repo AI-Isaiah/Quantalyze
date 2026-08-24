@@ -520,6 +520,63 @@ export const GET = withAuth(
         );
       }
 
+      // ─────────────────────────────────────────────────────────────────────
+      // 161-01 / WIZERR-04 — THE UNDECRYPTABLE-KEY ARM.
+      //
+      // Position is load-bearing for the same reason the throttle arm above
+      // states: BELOW the `CircuitOpenError` type check (a breaker verdict must
+      // never be decided by anything an upstream can set) and ABOVE the
+      // substring cascade below (the cascade greps prose and this fault's real
+      // sentence — "This stored key could not be decrypted. It must be
+      // reconnected." — matches none of its six needles).
+      //
+      // WHAT WAS WRONG. `routers/internal.py`'s permanent 500 for a key it
+      // cannot decrypt already ships `code: "KEY_UNDECRYPTABLE"`, and this
+      // route already carries that code on the thrown error's `cause` (built at
+      // `buildSeamFailureCause` above, read for the 429 arm above). The
+      // terminal arm simply never consulted it, so a permanently orphaned key
+      // fell through to `PROBE_FAILED` — "Could not check key scopes. Try
+      // again." A retry CANNOT work here: the ciphertext is unreadable until
+      // the key is reconnected, so that sentence sent the user into an
+      // unbounded retry loop against a fault only a reconnect clears. The
+      // route's own test suite pinned the wrong answer as "unchanged by design"
+      // (140.3-01 CONTRACT A) precisely because no plan owned the response
+      // shape until this one.
+      //
+      // KEYED ON THIS ONE CODE, EXPLICITLY. This arm does NOT blanket-forward
+      // every seam code through the terminal arm: an identity admission
+      // ("whatever the upstream called it is what we call it") would hand an
+      // upstream the power to name our private vocabulary and would silently
+      // retire the cascade below, which stays authoritative for everything
+      // else. One code, one measured remedy.
+      //
+      // THE BODY IS STATIC. The upstream's own sentence never reaches the
+      // response — only this curated one does (H-1062 / F5b: on a 5xx the
+      // `error` message stays static and only the recognized CODE is
+      // forwarded). The upstream sentence still reaches the OPERATOR, scrubbed,
+      // on the line below; this arm RETURNS, so it never reaches the terminal
+      // arm's log. No `captureToSentry` here: the terminal arm remains the only
+      // capture in this route (140.3-13a / SEAMUX-08), and an orphaned key is a
+      // user-actionable state, not an incident to page on. No `Retry-After` is
+      // stamped, because no wait was advertised and absence must never become a
+      // fabricated zero (TRAP-3).
+      // ─────────────────────────────────────────────────────────────────────
+      if (seamFailure?.code === "KEY_UNDECRYPTABLE") {
+        console.error(
+          `[keys/permissions] stored key ${keyId} can no longer be decrypted ` +
+            `(code=${seamFailure.code}, upstream_status=${seamFailure.status}):`,
+          scrubSeamError(err),
+        );
+        return NextResponse.json(
+          {
+            error:
+              "This stored key can no longer be decrypted. Reconnect the key — retrying will not help.",
+            code: "KEY_UNDECRYPTABLE",
+          },
+          { status: 500, headers: NO_STORE_HEADERS },
+        );
+      }
+
       // The raw Error.message used to bubble straight into the response
       // body (e.g. "INTERNAL_API_TOKEN is not configured on the Next
       // layer."). That leaks infra detail to any authenticated client
