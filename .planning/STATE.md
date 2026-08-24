@@ -5,16 +5,16 @@ milestone_name: Backlog Burndown (Phases 158+)
 current_phase: 161
 current_phase_name: WIZERR — Honest error surfaces
 status: verifying
-stopped_at: Completed 161-06-PLAN.md (WIZERR-05)
-last_updated: "2026-08-24T12:23:07.508Z"
+stopped_at: Completed 161-07-PLAN.md
+last_updated: "2026-08-24T13:13:37.718Z"
 last_activity: 2026-08-24
 last_activity_desc: Phase 161 execution — waves 1-3 landed
-state_head: 0d46ca189939ed626b01e7b8aa8d19595d059709
+state_head: cb8b6ab043109ca68e63a6b7f14d0e23498d0d6a
 progress:
   total_phases: 9
   completed_phases: 1
   total_plans: 30
-  completed_plans: 24
+  completed_plans: 25
   percent: 11
 ---
 
@@ -114,7 +114,7 @@ zero unclassified) and `161-VALIDATION.md` (Nyquist strategy, 4 Wave-0 gaps, ant
 ## Current Position
 
 Phase: 161 (WIZERR — Honest error surfaces) — EXECUTING
-Plan: 6 of 10
+Plan: 7 of 10
 Status: Waves 1-3 landing; 161-07..161-10 pending
 Last activity: 2026-08-24 — Phase 161 waves 1-3
 
@@ -629,6 +629,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 | Phase 161 P04 | ~55 min | 2 tasks | 3 files |
 | Phase 161-wizerr-honest-error-surfaces P05 | 75m | 3 tasks | 8 files |
 | Phase 161 P06 | 75m | 3 tasks | 13 files |
+| Phase 161 P07 | 85 min | 3 tasks | 8 files |
 
 ## Accumulated Context
 
@@ -764,6 +765,8 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - [Phase 160]: D-161-06-A: the Retry-After wait's ONLY wire source is the response HEADER — service_error_body emits no retry_after leaf (measured); a body fallback would be the second extraction path process-key-client.ts already refused
 - [Phase 160]: D-161-06-B: both key-route catches share keyRouteFailureHeaders() — one conditional, documented precedence (breaker wins); this also absorbed the pre-existing duplicated CircuitOpenError ternary
 - [Phase 160]: D-161-06-C: AnalyticsUpstreamError is at FIVE positional params — the recorded ceiling; a sixth optional field or a second number|null one makes the trailing-options-object refactor mandatory
+- [Phase 161]: 161-07: the examined-refused verdict Set became a Map whose VALUE is the user-visible sentence — a verdict cannot join the class without bringing its own copy
+- [Phase 161]: 161-07: BOTH 161-UI-SPEC WIZERR-10 clauses corrected against broker_dailies.py (no size threshold; no per-series examination), and its WIZERR-09 'upload a CSV' remedy replaced — a fifth measured UI-SPEC copy defect
 
 ### Decisions (execution-time, Phase 140.2)
 
@@ -1466,8 +1469,8 @@ Load-bearing sequencing (real dependencies, do not reorder):
 
 ## Session
 
-**Last Date:** 2026-08-24T12:23:07.171Z
-**Stopped At:** Completed 161-06-PLAN.md (WIZERR-05)
+**Last Date:** 2026-08-24T13:12:54.924Z
+**Stopped At:** Completed 161-07-PLAN.md
 **Resume File:** None
 **Next step:** Phase 161 (WIZERR — honest error surfaces) is next and NOT yet planned — run `/gsd-plan-phase 161`. Phase 161.1 (LEDGER-REFRESH) was inserted after it on 2026-08-24 for the founder-reported MT5 staleness; it is URGENT and production-facing, so it may be pulled ahead of 161 if you prefer the live data-integrity fix first.
 
@@ -1513,3 +1516,4 @@ pre-merge `e0493913`. Fix is PR #669. Supabase migrations and the Vercel fronten
 ### Blockers
 
 - ~~143-01 leaves SC#1's alert MUTE until SENTRY_DSN is verified on the WORKER Railway service~~ — ⛔ PREMISE FALSE, RESOLVED 2026-08-17 (Plan 04). There is NO separate worker service and has not been since April: the loops were merged into the FastAPI process (main.py:80-86, after the 2026-04-20 'jobs queued but never processed' incident), dispatch_loop runs in the app lifespan (main.py:271), that process calls init_sentry() at import (main.py:69, since Phase 16), and SENTRY_DSN IS set on its Railway service. SC#1's alert half is TRUE in production. 143-01's init_sentry() covers the STANDALONE path only.
+- 161-07 D-161-07-A: the wizard COMPOSITE arm still renders GATE_SERIES_PROVENANCE_UNVERIFIED for sampled_gapped — a false sentence on a reachable path (the 142.2 FIX-2 downgrade). Fix = route that arm through the examined/unexamined split; requires re-cutting one 142.2 oracle.
