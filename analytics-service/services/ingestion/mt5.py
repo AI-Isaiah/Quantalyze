@@ -314,12 +314,20 @@ class Mt5Adapter:
                     # produced the verdict (never a re-probe).
                     operator_fault = terminal_trade_permission_off(terminal)
                     if operator_fault:
-                        # A setting in OUR gateway terminal ("Disable automatic
-                        # trading through the external Python API", MetaQuotes'
-                        # default-ON). No retry can clear it; the remedy is an
-                        # operator turning the option off (docs/runbooks/
-                        # mt5-go-live.md). A server-side condition, NEVER the user's
-                        # credentials.
+                        # A setting in OUR gateway terminal. No retry can clear it;
+                        # the remedy is an operator changing that setting
+                        # (docs/runbooks/mt5-go-live.md). A server-side condition,
+                        # NEVER the user's credentials.
+                        #
+                        # ⚠️ 161-02: WHICH setting is derived, not assumed. The
+                        # founder-measured live cause is the Expert-Advisors
+                        # "Allow algorithmic trading" option (`Enabled` in
+                        # [Experts]) — re-set off on every account change, and this
+                        # worker logs in on every job, which is exactly why the
+                        # fault recurs. MetaQuotes' separate default-ON "Disable
+                        # automatic trading through the external Python API"
+                        # (`Api`, reported as `tradeapi_disabled`) was measured OFF
+                        # at the same time, and the old copy named it anyway.
                         #
                         # ⭐ 153.6 / A3 — A DEDICATED TYPE, not a bare RuntimeError.
                         # This raise escapes `Mt5Adapter.validate` into
@@ -330,12 +338,15 @@ class Mt5Adapter:
                         # queueing ahead of every other user's validate — and rendered
                         # raw internal copy that named investor/master passwords.
                         # `Mt5GatewayMisconfigured` has its own `classify_exception`
-                        # arm returning ("permanent", MT5_GATEWAY_MISCONFIGURED_DETAIL).
+                        # arm, which classifies it ("permanent", <curated cause>).
                         #
-                        # ⛔ Raised with the module's CURATED constant (its default),
-                        # never with interpolated upstream text: `mt5linux`
-                        # f-string-interpolates the password into remotely-eval'd
-                        # source (T-134-01), and the message is rendered to a human.
+                        # ⛔ Raised with a CURATED constant chosen by the ONE
+                        # flag->cause builder from the SAME terminal dict the
+                        # verdict came from — never with interpolated upstream
+                        # text: `mt5linux` f-string-interpolates the password into
+                        # remotely-eval'd source (T-134-01), and the message is
+                        # rendered to a human. The builder guards defensively, so
+                        # an absent/unreadable flag yields the generic constant.
                         logger.warning(
                             "mt5.validate: capability undetermined (terminal trade "
                             "permission off) — refusing rather than stamping read-only"

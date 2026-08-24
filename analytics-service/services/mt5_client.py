@@ -1017,13 +1017,22 @@ class Mt5Client:
             "Trade permission" lists "no connection to the trade server" as a
             SIBLING cause of ``account_info().trade_allowed`` being false, so a
             detached terminal makes the account-level negative unattributable.
-          * ``trade_allowed`` — the terminal-level AutoTrading permission. It
-            subsumes the terminal option *"Disable automatic trading through the
-            external Python API"*, which MetaQuotes ships **ON by default, "for
-            security reasons"**. With that option in force ``order_check`` is
-            refused from Python REGARDLESS of investor vs master, so a MASTER
-            password produces exactly the two negatives an investor password
-            produces.
+          * ``trade_allowed`` — the terminal-level AutoTrading permission,
+            i.e. the Expert-Advisors *"Allow algorithmic trading"* option
+            (``Enabled`` in ``Config/terminal.ini`` ``[Experts]``). With it off,
+            ``order_check`` is refused REGARDLESS of investor vs master, so a
+            MASTER password produces exactly the two negatives an investor
+            password produces.
+
+            ⚠️ 161-02 CORRECTION: this flag does NOT subsume the separate
+            *"Disable automatic trading through the external Python API"* option
+            (``Api`` in the same block), which MetaQuotes ships **ON by default,
+            "for security reasons"** and which the terminal reports on its own
+            key, ``tradeapi_disabled``. Founder-measured on the live gateway
+            2026-08-13: ``tradeapi_disabled`` was False while ``trade_allowed``
+            was false — two independent switches, each sufficient on its own.
+            The gateway re-sets ``Enabled`` off on every account change
+            (``Account=1``/``Profile=1``), which is why the fault recurs.
 
         That is why this method exists: a false ``trade_allowed`` here makes the
         account-level negatives UNINFORMATIVE, and a rule that concluded

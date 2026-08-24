@@ -850,10 +850,19 @@ async def _validate_mt5_key_probe(
                     # that already exist — 153.1 owns the user-facing code table.
                     operator_fault = terminal_trade_permission_off(terminal)
                     if operator_fault:
-                        # A setting in OUR gateway terminal ("Disable automatic trading
-                        # through the external Python API", MetaQuotes' default). No
-                        # retry can clear it; the remedy is an operator turning it off
+                        # A setting in OUR gateway terminal. No retry can clear it;
+                        # the remedy is an operator changing that setting
                         # (docs/runbooks/mt5-go-live.md). PERMANENT operator fault.
+                        #
+                        # ⚠️ 161-02: WHICH setting is derived from the terminal
+                        # flags, not assumed. Founder-measured live 2026-08-13, the
+                        # cause is the Expert-Advisors "Allow algorithmic trading"
+                        # option (`Enabled` in [Experts]), which the gateway re-sets
+                        # off on every account change; MetaQuotes' separate
+                        # default-ON "Disable automatic trading through the external
+                        # Python API" (`Api`, reported as `tradeapi_disabled`) was
+                        # measured OFF at the same moment, and the old copy named it
+                        # to the operator regardless.
                         logger.warning(
                             "validate_key: MT5 capability undetermined (terminal trade "
                             "permission off) — refusing rather than stamping read-only"

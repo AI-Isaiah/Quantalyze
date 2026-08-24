@@ -63,7 +63,18 @@ from services.mt5_validation import (
 logger = logging.getLogger("quantalyze.analytics")
 
 
-#: The CURATED operator-facing copy for :class:`Mt5GatewayMisconfigured`.
+#: The GENERIC curated copy for :class:`Mt5GatewayMisconfigured` — arm 3 of
+#: :func:`mt5_gateway_misconfigured_detail`, and the default-argument value that
+#: keeps raw remote text out of the exception by omission.
+#:
+#: ⚠️ 161-02 RESIDUAL, stated honestly. This sentence names a SPECIFIC option, so
+#: it is only truthful where a cause is genuinely unknown — which is why the
+#: builder reaches it ONLY when the terminal names no cause at all, and why both
+#: raise sites (which reach the operator arm only via
+#: ``terminal_trade_permission_off``) can no longer emit it. 161-UI-SPEC
+#: § Copy Spec WIZERR-01 arm 3 holds this constant unchanged; re-wording it to a
+#: cause-free fallback is a copy decision for the phase owner, not an executor
+#: improvisation, and is recorded in 161-02-SUMMARY.
 #:
 #: ⛔ HAND-WRITTEN, and deliberately NOT derived from any exception text. It is
 #: rendered to a human (``job_worker.classify_exception`` persists it as
@@ -132,10 +143,18 @@ MT5_GATEWAY_MISCONFIGURED_DETAILS: Final[tuple[str, ...]] = (
 
 
 class Mt5GatewayMisconfigured(Exception):
-    """Operator fault: the gateway refuses automated trading (MetaQuotes' default-ON
-    *"Disable automatic trading through the external Python API"* option), so an
-    investor password cannot be distinguished from a master password and no
-    read-only verdict is available.
+    """Operator fault: the gateway refuses automated trading, so an investor
+    password cannot be distinguished from a master password and no read-only
+    verdict is available.
+
+    ⚠️ 161-02 CORRECTION: TWO independent gateway settings produce this, and this
+    type no longer presumes which. The measured live cause is the Expert-Advisors
+    *"Allow algorithmic trading"* option (``Enabled`` in ``[Experts]``), which the
+    gateway re-sets off on every account change while the worker logs in on every
+    job — hence the recurrence. MetaQuotes' default-ON *"Disable automatic
+    trading through the external Python API"* (``Api``, reported as
+    ``tradeapi_disabled``) is the OTHER one. ``mt5_gateway_misconfigured_detail``
+    picks the sentence the flags actually support.
 
     PERMANENT — a retry can NEVER clear it. That is the whole point of the type.
     Raised by ``services/ingestion/mt5.py`` where a bare ``RuntimeError`` used to
@@ -349,9 +368,11 @@ def run_probe(
     # "undetermined" whenever the terminal signal alone forces a refusal —
     # unreadable, malformed, detached, or trade permission off. Running
     # order_check after that cannot improve the verdict, and it can DESTROY it:
-    # under MetaQuotes' default-ON "Disable automatic trading through the
-    # external Python API" — the very setting that makes trade_allowed false, and
-    # the case D-31 was written for — the probe is refused, and its
+    # with the gateway's algorithmic-trading permission off — the case D-31 was
+    # written for, whether that is the Expert-Advisors "Allow algorithmic
+    # trading" option (`Enabled`, the founder-measured live cause) or MetaQuotes'
+    # separate default-ON "Disable automatic trading through the external Python
+    # API" checkbox (`Api`) — the probe is refused, and its
     # Mt5ClientError leaves by a different door. classify_mt5_login_error's
     # _WRONG_SERVER_TOKENS carry "terminal", so that refusal came out as a 400
     # telling the user their BROKER SERVER is wrong: an accusation against the

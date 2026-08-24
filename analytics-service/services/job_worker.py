@@ -641,11 +641,20 @@ def classify_exception(exc: Exception) -> tuple[ErrorKind, str]:
             "Credentials could not be decrypted — key may have rotated",
         )
 
-    # 153.6 / A3. The MT5 gateway terminal refuses automated trading (MetaQuotes'
-    # default-ON "Disable automatic trading through the external Python API"), so
-    # an investor login cannot be distinguished from a master one and no read-only
+    # 153.6 / A3. The MT5 gateway terminal refuses automated trading, so an
+    # investor login cannot be distinguished from a master one and no read-only
     # verdict is available. PERMANENT: it is a setting in OUR gateway and no retry
-    # can clear it. Before this arm the adapter raised a bare RuntimeError, which
+    # can clear it.
+    #
+    # ⚠️ 161-02: TWO independent settings do this. Founder-measured live
+    # 2026-08-13, the actual blocker was the Expert-Advisors "Allow algorithmic
+    # trading" option (`Enabled` in [Experts]) — which the gateway re-sets off on
+    # every account change while THIS worker logs in on every job, so the fault
+    # recurs after every operator fix. MetaQuotes' default-ON "Disable automatic
+    # trading through the external Python API" (`Api`, reported as
+    # `tradeapi_disabled`) was measured OFF at the same time, yet the message this
+    # arm returned named it — a sentence that was false about the operator's own
+    # gateway, on the surface they triage from. Before this arm the adapter raised a bare RuntimeError, which
     # fell through to the ("unknown", str(exc)) catch-all at the bottom — and
     # `unknown` RETRIES, so the worker re-ran the whole SERIALIZED probe against
     # the ONE shared terminal on every attempt, queueing ahead of every other

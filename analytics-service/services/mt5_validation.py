@@ -21,10 +21,19 @@ The capability rule (``classify_trade_capability``) is TRI-state, not boolean:
     ACCOUNT rather than to our terminal's own settings.
   * ``"undetermined"`` — a REFUSAL, never a fallback to read-only. It means the
     two negative signals prove nothing (D-31 / EVIDENCE §C12 Correction C-5:
-    MetaQuotes ships *"Disable automatic trading through the external Python
-    API"* ON by default, and under it a MASTER password produces exactly the
-    negatives an investor password produces). Refusing a legitimate investor key
-    is the correct trade against storing a master key stamped read-only.
+    whenever the terminal's own trade permission is off, a MASTER password
+    produces exactly the negatives an investor password produces). Refusing a
+    legitimate investor key is the correct trade against storing a master key
+    stamped read-only.
+
+    ⚠️ 161-02: TWO independent settings can put it off — the Expert-Advisors
+    *"Allow algorithmic trading"* option (``Enabled`` in ``[Experts]``, which is
+    what ``trade_allowed`` actually reports and which the gateway re-sets off on
+    every account change) and MetaQuotes' separate *"Disable automatic trading
+    through the external Python API"* checkbox (``Api``, reported as
+    ``tradeapi_disabled``). The VERDICT is the same either way; only the operator
+    copy differs, which is why the cause is chosen at ONE seam
+    (``mt5_probe.mt5_gateway_misconfigured_detail``) rather than assumed.
 
 NEVER references the forbidden trade method by its call form — the grep gate
 scans for the call token (the trade method name followed by an open paren), so
@@ -182,10 +191,20 @@ def classify_trade_capability(
     Replaces the two-signal ``is_trade_capable`` boolean, which concluded
     "investor / read-only" from two NEGATIVE signals and therefore failed OPEN:
     per EVIDENCE §C12 / Correction C-5 both signals are ALSO negative for a
-    **MASTER** password whenever the terminal's own trade permission is off —
-    including MetaQuotes' **default-ON** *"Disable automatic trading through the
-    external Python API"*. A trade-capable password then passed the investor
-    probe and was persisted stamped ``read_only`` (D-31).
+    **MASTER** password whenever the terminal's own trade permission is off. A
+    trade-capable password then passed the investor probe and was persisted
+    stamped ``read_only`` (D-31).
+
+    ⚠️ 161-02 CORRECTION — TWO INDEPENDENT SETTINGS, not one. ``trade_allowed``
+    is governed by the Expert-Advisors *"Allow algorithmic trading"* option
+    (``Enabled`` in ``Config/terminal.ini`` ``[Experts]``). MetaQuotes'
+    *"Disable automatic trading through the external Python API"* (``Api`` in the
+    same block) is a SEPARATE checkbox, reported separately as
+    ``tradeapi_disabled``, and it can be OFF while ``trade_allowed`` is still
+    false. Founder-measured on the live gateway 2026-08-13: ``Api=0, Enabled=0``.
+    Either one produces the identical two negatives, so the refusal is correct
+    under both — but naming the wrong one to an operator sends them to a setting
+    that is already right.
 
     The terminal signal is a REQUIRED argument, not an optional one: a callable
     two-signal form that can conclude ``read_only`` is exactly the defect, so no
@@ -225,11 +244,17 @@ def classify_trade_capability(
     #    mode.
     if not terminal_info.get("connected"):
         return "undetermined"
-    # 5. ⭐ THE FIX (D-31). Terminal-level trade permission is OFF — which
-    #    subsumes [DOC] "Disable automatic trading through the external Python
-    #    API", MetaQuotes' DEFAULT-ON setting. Under it a MASTER password
-    #    produces the identical two negatives an investor password produces, so
-    #    NO read-only conclusion is available and we must refuse.
+    # 5. ⭐ THE FIX (D-31). Terminal-level trade permission is OFF. Under it a
+    #    MASTER password produces the identical two negatives an investor
+    #    password produces, so NO read-only conclusion is available and we must
+    #    refuse.
+    #
+    #    ⚠️ 161-02: this flag reports the Expert-Advisors "Allow algorithmic
+    #    trading" option (`Enabled` in [Experts]) — NOT MetaQuotes' separate
+    #    "Disable automatic trading through the external Python API" checkbox
+    #    (`Api`, surfaced as `tradeapi_disabled`), which was founder-measured OFF
+    #    on the live gateway while this flag was still false. Either one forces
+    #    the refusal; the CAUSE is chosen for the operator elsewhere, once.
     if not terminal_info.get("trade_allowed"):
         return "undetermined"
     # 6. The terminal itself WOULD permit trading and the account still says no,
@@ -253,8 +278,14 @@ def terminal_trade_permission_off(terminal_info: dict[str, Any] | None) -> bool:
     trade-disabled one until an operator is paged for a network blip).
 
       * ``True``  -> a setting in OUR gateway terminal. No retry can clear it;
-        the remedy is an operator turning the option off (see the go-live
-        runbook). Route to the PERMANENT operator-fault arm.
+        the remedy is an operator changing that setting (see the go-live
+        runbook). Route to the PERMANENT operator-fault arm. ⚠️ 161-02: WHICH
+        setting is not decided here — this predicate answers "is it ours?", and
+        ``mt5_probe.mt5_gateway_misconfigured_detail`` answers "which one?" from
+        the same dict. The measured default cause is the Expert-Advisors "Allow
+        algorithmic trading" option, which the gateway re-sets off on every
+        account change (``Account=1``/``Profile=1``) while the worker logs in on
+        every job — which is why this fault RECURS after an operator clears it.
       * ``False`` -> the terminal was unreadable, malformed, or detached from the
         trade server. That is our bridge blipping and it clears on retry. Route
         to the TRANSIENT arm.
