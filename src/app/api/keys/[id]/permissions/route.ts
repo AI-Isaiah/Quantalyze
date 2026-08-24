@@ -440,7 +440,7 @@ export const GET = withAuth(
           `[keys/permissions] short-circuited for ${keyId} — the analytics circuit is open (retry_after_s=${err.retryAfterS})`,
         );
         return NextResponse.json(
-          { error: CIRCUIT_OPEN_COPY, code: "CIRCUIT_OPEN" },
+          { code: "CIRCUIT_OPEN", error: CIRCUIT_OPEN_COPY },
           {
             status: 503,
             headers: {
@@ -506,7 +506,7 @@ export const GET = withAuth(
           // The private `PROBE_*` code is what distinguishes an upstream
           // throttle from this route's own limiter arm above, which returns the
           // same sentence with no code.
-          { error: "Too many requests", code: "PROBE_RATE_LIMITED" },
+          { code: "PROBE_RATE_LIMITED", error: "Too many requests" },
           {
             status: 429,
             headers:
@@ -582,13 +582,19 @@ export const GET = withAuth(
       // arm goes dark while continuing to work. Zero behaviour change here —
       // only visibility.
       //
-      // ⚠️ RECORDED RESIDUE, so its absence is a decision rather than an
-      // omission: THREE other coded arms in this file are still `error:`-first
-      // — `CIRCUIT_OPEN` (~:443), `PROBE_RATE_LIMITED` (~:509) and the terminal
-      // 502 (~:665, whose `code` is computed and is excluded by the literal
-      // class regardless of order). None was minted by 161-01, so none is in
-      // this phase's scope; all three remain invisible to a `code:`-first
-      // predicate and are booked for the same transposition.
+      // ⚠️ RESIDUE, now CLOSED for the two literal arms (2026-08-25): every
+      // `code:`-first-visible literal rejection in this file is transposed —
+      // `CIRCUIT_OPEN` (~:443) and `PROBE_RATE_LIMITED` (~:509) joined the
+      // KEY_UNDECRYPTABLE arm above. They were not minted by 161-01, but the
+      // transposition is zero-behaviour and leaving them dark would have kept
+      // two thirds of this route's literal vocabulary invisible to every
+      // `code:`-first predicate in the repo.
+      //
+      // The ONE remaining exclusion is the terminal 502 (~:665), and it is
+      // excluded for a different reason that no transposition can fix: its
+      // `code` is a COMPUTED expression, not a literal, so the literal class
+      // cannot see it whatever the key order. That is a property of the arm,
+      // not an omission.
       // ─────────────────────────────────────────────────────────────────────
       if (seamFailure?.code === "KEY_UNDECRYPTABLE") {
         console.error(
