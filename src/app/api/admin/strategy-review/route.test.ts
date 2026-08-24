@@ -1418,6 +1418,115 @@ describe("POST /api/admin/strategy-review — M-0285 gate.reason error shape", (
     expect(body.error).toContain("Analytics computation failed");
     expect(body.error).not.toContain("ANALYTICS_FAILED");
   });
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // [161-07 / WIZERR-10 + -09] THE PUBLISH-TIME TOCTOU RE-CHECK RENDERS THE
+  // NEW REASONS — BY MEASUREMENT, NOT BY INHERITANCE.
+  //
+  // The requirement's second half ("the publish-time TOCTOU re-check wording
+  // follows") is true only because BOTH surfaces call the ONE shared
+  // `checkStrategyGate` — the arrangement `strategyGate.ts` adopted after a
+  // hand-copied re-check "diverged anyway" under a comment saying it must not.
+  // That reachability was an ASSUMPTION (A5) at plan time. These cases make it
+  // enforced: they run the REAL gate (the describe `vi.doUnmock`s it) and
+  // assert the FULL rendered string including the route's own prefix, so a
+  // reason that reads wrong after "Cannot approve: " — a fragment, a lowercase
+  // start — fails here rather than on a founder's screen.
+  //
+  // ⚠️ The admin surface's own `code` stays GUARD_BLOCKED. The gate code is
+  // carried in the SENTENCE, never swapped into the code channel: AdminTabs
+  // discriminates on `code`, and a fourth value appearing there would be a wire
+  // change nobody asked for.
+  // ══════════════════════════════════════════════════════════════════════════
+
+  it("[161-07] an examined-but-refused series renders its own sentence, not 'only 0 trade(s)'", async () => {
+    // The D-15 economic case at the PUBLISH gate: a keyed perp on a
+    // fill-derived venue, 135 daily rows, zero fills by construction, every job
+    // green. Before 161-07 the founder read "Cannot approve: Strategy has only
+    // 0 trade(s). A minimum of 5 trades is required." about a strategy with 135
+    // days of returns.
+    const tracker = mockGateAdminClient({
+      apiKeyId: "key-1",
+      tradeCount: 0,
+      csvRowCount: 135,
+      seriesCompleteness: "fill_derived_unproven",
+      earliest: "2026-01-01T00:00:00Z",
+      latest: "2026-03-01T00:00:00Z",
+      computationStatus: "complete",
+      computationError: null,
+    });
+    const res = await postApprove();
+    expect(res.status).toBe(400);
+    const body = await res.json();
+
+    // THE FULL RENDERED STRING, hand-typed — prefix included. This is the
+    // assertion that makes the reason's sentence-shape a contract rather than
+    // an intention.
+    expect(body.error).toBe(
+      "Cannot approve: The return series is derived from individual fills, " +
+        "which cannot establish that the record is complete.",
+    );
+
+    // The false sentence is named as the thing that must be absent.
+    expect(body.error).not.toMatch(/only 0 trade/i);
+    expect(body.error).not.toMatch(/minimum of 5 trades/i);
+    // The machine code lives alongside the prose, never in place of it.
+    expect(body.error).not.toContain("SERIES_EXAMINED_REFUSED");
+    expect(body.code).toBe("GUARD_BLOCKED");
+    // A refusal, still: no publish write was issued.
+    expect(tracker.publishUpdateIssued).toBe(false);
+  });
+
+  it("[161-07] a gapped sampled series renders ITS sentence — the two verdicts do not share one", async () => {
+    // The anti-collapse half at this surface. A single generic string would
+    // satisfy the case above while telling an sFOX manager about fills.
+    mockGateAdminClient({
+      apiKeyId: "key-1",
+      tradeCount: 0,
+      csvRowCount: 135,
+      seriesCompleteness: "sampled_gapped",
+      earliest: "2026-01-01T00:00:00Z",
+      latest: "2026-03-01T00:00:00Z",
+      computationStatus: "complete",
+      computationError: null,
+    });
+    const res = await postApprove();
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.error).toBe(
+      "Cannot approve: The return series is built from sampled balance " +
+        "snapshots with interior gaps, so it is not a complete record.",
+    );
+    expect(body.code).toBe("GUARD_BLOCKED");
+  });
+
+  it("[161-07] the 7-day floor still fires here, with its threshold-attached sentence", async () => {
+    // UNCHANGED BEHAVIOUR ON THIS PATH, pinned deliberately. The admin route
+    // has always applied the floor; what 161-07 changed is that the WIZARD's
+    // composite arm applies it too. This case is what proves that work did not
+    // disturb the surface it was copying — and it is also the boundary the
+    // wizard arm is now expected to agree with.
+    const tracker = mockGateAdminClient({
+      apiKeyId: null,
+      tradeCount: 0,
+      csvRowCount: 3,
+      seriesCompleteness: "composite_stitched",
+      earliest: "2026-01-01T00:00:00Z",
+      latest: "2026-03-01T00:00:00Z",
+      computationStatus: "complete",
+      computationError: null,
+    });
+    const res = await postApprove();
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.error).toBe(
+      "Cannot approve: CSV history has only 3 day(s) of returns. " +
+        "A minimum of 7 days is required.",
+    );
+    expect(body.error).not.toContain("INSUFFICIENT_CSV_HISTORY");
+    expect(body.code).toBe("GUARD_BLOCKED");
+    expect(tracker.publishUpdateIssued).toBe(false);
+  });
 });
 
 /**
