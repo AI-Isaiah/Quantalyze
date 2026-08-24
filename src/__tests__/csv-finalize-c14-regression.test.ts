@@ -1293,3 +1293,128 @@ describe("NEW-C14-12: trimmed strategy_name length check", () => {
     expect(body.code).toBe("CSV_INVALID_FORMAT");
   });
 });
+
+// ══════════════════════════════════════════════════════════════════════════
+
+/**
+ * 161-03 / WIZERR-12 — THE A2 REFUSAL SAYS WHAT ACTUALLY HAPPENED.
+ *
+ * The A2 terminal-status arm went through `refuse()` with no `humanMessage`,
+ * so it shipped the DEFAULT sentence — "already created a strategy with a
+ * DIFFERENT TRACK RECORD". A2 fires ahead of the name check and ahead of the
+ * series check, so at that point nothing is known about the track record at
+ * all; the sibling suite's own case arms the committed row with name
+ * "Renamed" precisely because the names may differ too. The default sentence
+ * was therefore a claim the arm cannot make.
+ *
+ * ⚠️ ORACLE INDEPENDENCE. The expected sentence below is HAND-TYPED, never
+ * imported from the route. An imported constant makes the assertion and the
+ * implementation one oracle, and the case would pass on a route whose copy had
+ * silently changed. `START_NEW_STRATEGY_LABEL` is spelled out here for the
+ * same reason — the route interpolates the constant, this file types the
+ * words, and the two are held equal by hand (IN-05).
+ */
+const ROUTE_A2_STATUS_MISMATCH =
+  "This wizard session already committed a strategy that is not in the " +
+  "state this submission asked for, so we refused before writing anything " +
+  "of this submission. Start a new strategy to make a separate submission.";
+
+/** The DEFAULT sentence, re-typed, so the discrimination is assertable. */
+const ROUTE_DEFAULT_TRACK_RECORD_MISMATCH =
+  "This wizard session already created a strategy with a different track " +
+  "record, so we refused before writing anything of this submission. Start " +
+  "a new strategy to upload a different file.";
+
+describe("[161-03 / WIZERR-12] the A2 terminal-status refusal names its own case", () => {
+  let warnSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    checkLimitMock.mockResolvedValue({ success: true, retryAfter: 0 });
+    warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    warnSpy.mockRestore();
+  });
+
+  it("🔴 a manager resubmit onto a committed 'private' row does NOT claim a different track record", async () => {
+    rpcMock.mockResolvedValueOnce({
+      data: null,
+      error: {
+        code: "23505",
+        message:
+          'duplicate key value violates unique constraint "strategies_user_wizard_session_source_uniq"',
+      },
+    });
+    // Same NAME on purpose: the track record is not what differs here, and the
+    // default sentence would say it is. Only `status` differs — 'private' (a
+    // CONTRIB-02 contribution) against this manager submission's
+    // 'pending_review'.
+    strategiesMaybeSingleMock.mockResolvedValueOnce({
+      data: {
+        id: EXISTING_ID,
+        name: "Test Strategy",
+        status: "private",
+        category_id: COMMITTED_CATEGORY_ID,
+        asset_class: "traditional",
+      },
+      error: null,
+    });
+
+    const res = await POST(makeRequest(validBody()));
+    const body = await res.json();
+
+    expect(res.status).toBe(409);
+    expect(body.code).toBe("CSV_SESSION_REUSED");
+    expect(body.human_message).toBe(ROUTE_A2_STATUS_MISMATCH);
+    // The needle is real, not blank — a blanked constant would make the
+    // `not.toContain` below pass while checking nothing.
+    expect(ROUTE_DEFAULT_TRACK_RECORD_MISMATCH.length).toBeGreaterThan(60);
+    expect(
+      body.human_message,
+      "the refusal told the user their track record differs, on the one arm " +
+        "that runs BEFORE anything about the track record has been read",
+    ).not.toContain("a different track record");
+    // Everything else about the arm is unchanged: still 409, still the shared
+    // code, still no-store, still one alert, still zero writes.
+    expect(res.headers.get("cache-control")).toContain("no-store");
+    expect(body.debug_context?.strategy_id).toBe(EXISTING_ID);
+    expect(findCapture("finalize-resolve-refused")).toBeDefined();
+    expect(updateMock).not.toHaveBeenCalled();
+    expect(insertMock).not.toHaveBeenCalled();
+    expect(upsertMock).not.toHaveBeenCalled();
+  });
+
+  it("ANTI-CONTROL: the NAME-mismatch refusal keeps the default sentence byte-identical", async () => {
+    // Without this, "give A2 its own sentence" is satisfiable by replacing the
+    // default for every arm — and the default is TRUE where it was authored:
+    // a changed name IS a different track record.
+    rpcMock.mockResolvedValueOnce({
+      data: null,
+      error: {
+        code: "23505",
+        message:
+          'duplicate key value violates unique constraint "strategies_user_wizard_session_source_uniq"',
+      },
+    });
+    // Status MATCHES this manager submission, so A2 passes and the name check
+    // speaks.
+    strategiesMaybeSingleMock.mockResolvedValueOnce({
+      data: {
+        id: EXISTING_ID,
+        name: "A Different Strategy",
+        status: "pending_review",
+        category_id: COMMITTED_CATEGORY_ID,
+        asset_class: "traditional",
+      },
+      error: null,
+    });
+
+    const res = await POST(makeRequest(validBody()));
+    const body = await res.json();
+
+    expect(res.status).toBe(409);
+    expect(body.human_message).toBe(ROUTE_DEFAULT_TRACK_RECORD_MISMATCH);
+  });
+});
