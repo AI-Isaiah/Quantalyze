@@ -551,7 +551,16 @@ def test_dataframe_level_failure_never_renders_the_literal_nan():
 
 
 def test_dataframe_level_failure_omits_the_column_clause_entirely():
-    """WIZERR-13 — no column, no column clause (and no dangling separator)."""
+    """WIZERR-13 — no column, no column clause (and no dangling separator).
+
+    ⚠️ 161-REVIEW / CR-02 RE-POINTED THIS ORACLE, and the reason is recorded
+    rather than the number quietly bumped. It used to expect
+    ``Failed rule 'column_in_dataframe' at row 0.`` — i.e. it PINNED the
+    fabricated row number 161-03 left behind while removing the fabricated
+    column name. A dataframe-level check has no row for exactly the reason it
+    has no column (pandera reports ``index`` as NaN alongside ``column``), and
+    rows in this sentence are 1-based, so there is no row 0 to name.
+    """
     result = validate_csv(
         _csv_bytes(_daily_returns_df_missing_the_return_column()), "daily_returns"
     )
@@ -564,9 +573,49 @@ def test_dataframe_level_failure_omits_the_column_clause_entirely():
     )
     # Hand-typed oracle: the SENTENCE, not the producer's own f-string.
     assert (
-        dataframe_level[0]["message"]
-        == "Failed rule 'column_in_dataframe' at row 0."
+        dataframe_level[0]["message"] == "Failed rule 'column_in_dataframe'."
     ), dataframe_level[0]["message"]
+
+
+def test_dataframe_level_failure_names_no_row_number_at_all():
+    """161-REVIEW / CR-02 — the SENTENCE carries no row, in any wording.
+
+    The equality above is the exact oracle; this is the CLASS pin, so a future
+    rewording cannot re-introduce a fabricated index under a different phrase
+    ("on row 0", "line 0", "at index 0"). Every needle is checked against a
+    haystack that is asserted to be a real sentence first — ``"" in anything``
+    is ``True`` in Python, so an emptied message would satisfy every ``not in``
+    below while asserting nothing.
+    """
+    result = validate_csv(
+        _csv_bytes(_daily_returns_df_missing_the_return_column()), "daily_returns"
+    )
+    dataframe_level = [
+        e for e in result["errors"] if e["rule"] == "column_in_dataframe"
+    ]
+    assert dataframe_level, "the fixture did not drive a dataframe-level check"
+    err = dataframe_level[0]
+    message = err["message"]
+    assert isinstance(message, str) and len(message) > 20, (
+        f"message is too short to be a sentence: {message!r}"
+    )
+    # No digit anywhere in the sentence — the strongest available form of "this
+    # copy names no number", and true of this arm because neither the rule name
+    # nor the template carries one.
+    assert not any(ch.isdigit() for ch in message), (
+        "the per-row breakdown printed a number for a failure that has no row: "
+        f"{message!r}"
+    )
+    for phrase in ("at row", "row 0", "line 0", "index 0"):
+        assert len(phrase) > 4
+        assert phrase not in message.lower(), (
+            f"the sentence names a row it does not have ({phrase!r}): {message!r}"
+        )
+    # ⭐ AND THE WIRE SENTINEL SURVIVES. `0` stays on the `row` field — the
+    # typed shape is an int and `_forwarded_pandera_rows` projects it — so the
+    # fix is "do not INTERPOLATE the sentinel", never "drop the field". The
+    # renderer is what reads it and suppresses its own `Row N:` prefix.
+    assert err["row"] == 0, err
 
 
 def test_a_real_column_still_gets_its_column_clause():

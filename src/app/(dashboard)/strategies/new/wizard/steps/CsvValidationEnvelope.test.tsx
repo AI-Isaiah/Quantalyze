@@ -278,11 +278,17 @@ describe("[161-03 / WIZERR-13] CsvValidationEnvelope — the per-row data half",
   });
 
   it("🔴 the COLUMN-LESS producer shape renders cleanly — no 'nan', no dangling clause", () => {
-    // What `csv_validator.py` now emits for a DATAFRAME-level check: the
-    // column clause is omitted entirely rather than filled with the float NaN
-    // pandera reports. Pre-fix this arrived as "Column 'nan' failed rule …",
-    // and `formatColumnInDataframeMessage`'s narrow regex does not match this
-    // producer's wording, so whatever the server sends is what the user reads.
+    // What `csv_validator.py` emits for a DATAFRAME-level check: the column
+    // clause is omitted entirely rather than filled with the float NaN pandera
+    // reports. Pre-161-03 this arrived as "Column 'nan' failed rule …".
+    //
+    // ⚠️ 161-REVIEW / CR-02 RE-POINTED THE FIXTURE. It used to carry
+    // "Failed rule 'column_in_dataframe' at row 0." and assert that exact
+    // string — i.e. it pinned the fabricated ROW number 161-03 left behind
+    // after removing the fabricated COLUMN name. Both halves moved: the
+    // producer stopped interpolating the absent-row sentinel, and this panel
+    // stopped prefixing "Row 0:" onto it. The row-clause pin now lives in the
+    // dedicated case below.
     renderWire({
       code: "CSV_VALIDATION_FAILED",
       human_message: "Your file did not pass validation.",
@@ -291,7 +297,7 @@ describe("[161-03 / WIZERR-13] CsvValidationEnvelope — the per-row data half",
           {
             rule: "column_in_dataframe",
             row: 0,
-            message: "Failed rule 'column_in_dataframe' at row 0.",
+            message: "Failed rule 'column_in_dataframe'.",
           },
         ],
       },
@@ -300,7 +306,7 @@ describe("[161-03 / WIZERR-13] CsvValidationEnvelope — the per-row data half",
 
     const text = panelText();
     expect(text.length).toBeGreaterThan(20); // the haystack is real
-    expect(text).toContain("Failed rule 'column_in_dataframe' at row 0.");
+    expect(text).toContain("Failed rule 'column_in_dataframe'.");
     expect(
       text.toLowerCase(),
       "the panel named a column called 'nan' — the float NaN pandera reports " +
@@ -314,6 +320,79 @@ describe("[161-03 / WIZERR-13] CsvValidationEnvelope — the per-row data half",
     // The rule still gets its human label, which is where the actionable
     // information now lives for this rule.
     expect(text).toContain("Your CSV is missing a required column");
+  });
+
+  /**
+   * ⭐ 161-REVIEW / CR-02 — THE RENDERED `<li>` NAMES NO ROW IT DOES NOT HAVE.
+   *
+   * This is the LAST line before a human reads it, and it is a second,
+   * independent producer of the same defect: even with the server's sentence
+   * corrected, the panel's own `Row ${e.row}: ` prefix would have printed
+   * "Row 0:" — `0` is the absent-row sentinel and rows here are 1-based.
+   *
+   * The fixture deliberately carries the CORRECTED server sentence, so this
+   * case can only be satisfied by the RENDERER's guard. A fixture still
+   * carrying "at row 0" would let the producer fix alone turn it green and this
+   * pin would be measuring the wrong layer.
+   */
+  it("🔴 a row-less breakdown row renders NO 'Row N:' prefix — 0 is the absent-row sentinel", () => {
+    renderWire({
+      code: "CSV_VALIDATION_FAILED",
+      human_message: "Your file did not pass validation.",
+      debug_context: {
+        pandera_errors: [
+          {
+            rule: "column_in_dataframe",
+            row: 0,
+            message: "Failed rule 'column_in_dataframe'.",
+          },
+        ],
+      },
+      correlation_id: null,
+    });
+
+    const text = panelText();
+    expect(text.length).toBeGreaterThan(20); // the haystack is real
+    // The message itself still renders — "suppress the prefix" must not be
+    // satisfied by dropping the row.
+    expect(text).toContain("Failed rule 'column_in_dataframe'.");
+    expect(
+      text,
+      "the panel prefixed a row number onto a failure that has no row — the " +
+        "invented-number class this phase exists to close, one layer out from " +
+        "the invented column name 161-03 removed",
+    ).not.toContain("Row 0:");
+    expect(text).not.toContain("Row undefined:");
+    expect(text).not.toContain("at row 0");
+  });
+
+  it("POSITIVE COUNTERPART: a REAL row still gets its 'Row N:' prefix", () => {
+    // Without this, "suppress the prefix for row 0" is satisfied by suppressing
+    // it for every row — which would delete the panel's row index outright, the
+    // single most useful field on a per-row breakdown. The `each row renders
+    // its rule, its row index and its message` case above asserts the same
+    // property from its own fixture; this one sits beside the negative so the
+    // pair reads as the matched set it is.
+    renderWire({
+      code: "CSV_VALIDATION_FAILED",
+      human_message: "Your file did not pass validation.",
+      debug_context: {
+        pandera_errors: [
+          {
+            rule: "daily_return_lower_bound",
+            row: 1,
+            message:
+              "Column 'daily_return' failed rule 'daily_return_lower_bound' at row 1.",
+          },
+        ],
+      },
+      correlation_id: null,
+    });
+
+    const text = panelText();
+    // Row 1 is the FIRST real row and the value adjacent to the sentinel — an
+    // off-by-one guard that used `> 0` on a 0-based index would drop it.
+    expect(text).toContain("Row 1:");
   });
 
   it("🔴 NO-ECHO: an untrusted cell value smuggled onto a row never reaches the DOM", () => {

@@ -767,7 +767,14 @@ def validate_csv(raw_bytes: bytes, fmt: str) -> dict[str, Any]:
             # — that's the raw cell value. Log only the row index + rule.
             rule_name = str(row.get("check", "unknown"))
             row_idx_raw = row.get("index")
-            row_idx = int(row_idx_raw) + 1 if row_idx_raw is not None and pd.notna(row_idx_raw) else 0
+            # 161-REVIEW / CR-02 — `0` IS THE ABSENT-ROW SENTINEL ON THE WIRE.
+            # Real rows are 1-BASED here (`int(...) + 1`), so `row: 0` can only
+            # ever mean "this failure has no row". The sentinel STAYS on the
+            # wire — `_forwarded_pandera_rows` and the wizard's typed shape both
+            # expect an int — but it may never be INTERPOLATED into a sentence a
+            # human reads. See the message builder below.
+            has_row = row_idx_raw is not None and pd.notna(row_idx_raw)
+            row_idx = int(row_idx_raw) + 1 if has_row else 0
             logger.warning(
                 "[csv-validator] rule violation row=%d rule=%s",
                 row_idx, rule_name,
@@ -793,20 +800,42 @@ def validate_csv(raw_bytes: bytes, fmt: str) -> dict[str, Any]:
             # ⛔ The guard is `pd.isna`, NEVER a string match on "nan": a CSV
             # is free to have a column literally named `nan`, and for that file
             # the column clause is CORRECT. Only the absent reading is absent.
+            #
+            # ⛔ 161-REVIEW / CR-02 — AND DO NOT NAME A ROW THAT DOES NOT EXIST.
+            # 161-03 removed the invented COLUMN name and left the invented ROW
+            # number standing, so the founder-measured specimen still read:
+            #
+            #     Failed rule 'column_in_dataframe' at row 0.
+            #
+            # A dataframe-level check has no row either — pandera reports
+            # `index` as NaN for the same reason it reports `column` as NaN —
+            # and there is no row 0 in a 1-based sentence. The row clause is now
+            # OMITTED on exactly the same terms as the column clause: absent
+            # means absent, never a fabricated number (161-UI-SPEC Copy
+            # Principle 5).
+            #
+            # ⚠️ MEASURED, not reasoned. Driving a `daily_returns` upload whose
+            # value column is misnamed through `validate_csv` produces
+            # `has_column` False AND `has_row` False on the same failure_cases
+            # row, so this is the arm the requirement's own specimen reaches.
             column_raw = row.get("column")
             has_column = column_raw is not None and not pd.isna(column_raw)
             column_name = str(column_raw).strip() if has_column else ""
+            if column_name and has_row:
+                message = (
+                    f"Column '{column_name}' failed rule "
+                    f"'{rule_name}' at row {row_idx}."
+                )
+            elif column_name:
+                message = f"Column '{column_name}' failed rule '{rule_name}'."
+            elif has_row:
+                message = f"Failed rule '{rule_name}' at row {row_idx}."
+            else:
+                message = f"Failed rule '{rule_name}'."
             all_errors.append({
                 "rule": rule_name,
                 "row": row_idx,
-                "message": (
-                    (
-                        f"Column '{column_name}' failed rule "
-                        f"'{rule_name}' at row {row_idx}."
-                    )
-                    if column_name
-                    else f"Failed rule '{rule_name}' at row {row_idx}."
-                ),
+                "message": message,
             })
         df_validated = df
 

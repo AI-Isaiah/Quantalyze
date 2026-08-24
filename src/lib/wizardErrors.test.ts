@@ -13,7 +13,6 @@ import {
   CSV_PREVIEW_STEP_HEADINGS,
   CSV_SUBMIT_STEP_HEADINGS,
   formatCsvRuleCauseSingle,
-  formatColumnInDataframeMessage,
   type WizardErrorCode,
 } from "./wizardErrors";
 import type { GateFailureCode } from "./strategyGate";
@@ -416,14 +415,40 @@ describe("wizardErrors", () => {
     });
   });
 
-  // Regression: /qa CSV report 2026-05-21 ISSUE-012. Before this fix the
+  // Regression: /qa CSV report 2026-05-21 ISSUE-012. Before that fix the
   // CSV validation envelope leaked panderas's raw rule-name text:
   //   Top-line: "1 row failed validation"
   //   Cause:    "Rule violated: column_in_dataframe"
   //   Detail:   "Row 0: Column 'None' failed: daily_return"
-  // None of those tell the user what to actually do. The fix routes the
-  // raw rule name through CSV_RULE_LABELS for the cause line + rewrites
-  // the per-row message via formatColumnInDataframeMessage.
+  // The fix had two halves: route the raw rule name through CSV_RULE_LABELS for
+  // the cause line, and rewrite the per-row message via a formatter.
+  //
+  // ⚰️ 161-REVIEW / CR-02 — THE SECOND HALF NEVER RAN, and its three cases are
+  // re-argued here rather than quietly deleted.
+  // `formatColumnInDataframeMessage` matched on a literal `failed:`. MEASURED
+  // at HEAD by driving a misnamed-column daily_returns upload through
+  // `validate_csv`, the producer emits only:
+  //
+  //     Failed rule 'column_in_dataframe'.
+  //     Column 'daily_return' failed rule 'daily_return_lower_bound' at row 2.
+  //
+  // The three deleted cases fed the formatter PANDERA's own text
+  // ("Column 'None' failed: daily_return") — a string `csv_validator.py` builds
+  // its own sentence instead of forwarding — so they proved the function worked
+  // on an input it never receives. That is the mirror image of a test that
+  // cannot fail: a test that passes about a code path no user reaches. The
+  // actionable remedy it promised ("Rename a column to X") has therefore never
+  // rendered to anyone.
+  //
+  // It is also UNREPAIRABLE by pattern: it was called only for
+  // `rule === "column_in_dataframe"`, and for that DATAFRAME-level check
+  // pandera reports `column` as NaN — which is why 161-03 had to strip the
+  // literal `nan` from the sentence. The expected column name is not on the
+  // wire, so a fixed regex would have nothing to extract. Restoring the remedy
+  // needs a first-class producer field (D-161-02).
+  //
+  // What survives is the half that DID run (the label) plus a pin that the dead
+  // formatter is really gone from BOTH the module and its one caller.
   describe("ISSUE-012 — column_in_dataframe envelope rewrite", () => {
     it("CSV_RULE_LABELS includes a human label for column_in_dataframe", () => {
       expect(CSV_RULE_LABELS.column_in_dataframe).toBe(
@@ -431,33 +456,53 @@ describe("wizardErrors", () => {
       );
     });
 
-    it("rewrites the panderas Column 'None' failed message into an actionable sentence", () => {
-      const raw = "Column 'None' failed: daily_return";
-      const rewritten = formatColumnInDataframeMessage(raw);
-      expect(rewritten).toContain("daily_return");
-      expect(rewritten).toContain("missing from your file");
-      // Tells the user what to do, not just what failed.
-      expect(rewritten).toMatch(/rename|switch/i);
-      // Never leaks the rule-name 'Column \'None\'' bookkeeping back to the user.
-      expect(rewritten).not.toContain("Column 'None'");
-    });
+    it("⚰️ TOMBSTONE: the dead per-row formatter is gone from the module AND from its one caller", () => {
+      // Comment-stripped on BOTH files: the deletion is recorded in prose at
+      // each site (a tombstone naming what was removed and why), so a raw scan
+      // would match those records and this case could never pass.
+      const strip = (src: string) =>
+        src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
 
-    it("returns the original message unchanged when the format does not match", () => {
-      // Defensive: if panderas changes its message shape we surface the
-      // original text rather than dropping information.
-      expect(formatColumnInDataframeMessage("something else entirely")).toBe(
-        "something else entirely",
+      const wizardErrorsSrc = strip(
+        readFileSync(join(__dirname, "wizardErrors.ts"), "utf-8"),
       );
-    });
+      const callerSrc = strip(
+        readFileSync(
+          resolve(
+            __dirname,
+            "../app/(dashboard)/strategies/new/wizard/steps/CsvValidationEnvelope.tsx",
+          ),
+          "utf-8",
+        ),
+      );
 
-    it("handles missing required column for trade-list format", () => {
-      // The same pandera rule fires on any required column. Make sure
-      // the rewrite pulls out the actual column name (not hardcoded to
-      // daily_return).
-      const raw = "Column 'None' failed: trade_qty";
-      const rewritten = formatColumnInDataframeMessage(raw);
-      expect(rewritten).toContain("trade_qty");
-      expect(rewritten).not.toContain("daily_return");
+      // ⭐ ANTI-VACUITY FIRST. A stripper that blanked either file would satisfy
+      // both negatives below while checking nothing, and the failure would look
+      // exactly like success. The controls are the deleted symbol's surviving
+      // neighbour in each file.
+      expect(wizardErrorsSrc.length).toBeGreaterThan(2000);
+      expect(callerSrc.length).toBeGreaterThan(1000);
+      expect(wizardErrorsSrc, "the stripper blanked wizardErrors.ts").toContain(
+        "export function formatCsvRuleCauseSingle",
+      );
+      expect(callerSrc, "the stripper blanked the envelope component").toContain(
+        "formatCsvRuleCauseSingle",
+      );
+
+      const dead = "formatColumnInDataframeMessage";
+      expect(dead.length).toBeGreaterThan(10); // the needle is real, not blank
+      expect(
+        wizardErrorsSrc,
+        "the formatter was restored in wizardErrors.ts. It cannot fire: this " +
+          "producer's messages read \"failed rule '<name>'\" and its regex " +
+          "requires \"failed:\". Restoring it needs D-161-02's producer field.",
+      ).not.toContain(dead);
+      expect(
+        callerSrc,
+        "CsvValidationEnvelope calls a formatter that cannot match this " +
+          "producer's messages, so the <li> renders the raw sentence while the " +
+          "call site claims it is being rewritten.",
+      ).not.toContain(dead);
     });
   });
 });

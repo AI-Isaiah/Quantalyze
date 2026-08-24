@@ -4635,8 +4635,18 @@ export const CSV_RULE_LABELS: Readonly<Record<string, string>> = {
   // QA report 2026-05-21 ISSUE-012: the underlying pandera rule key was
   // `column_in_dataframe` and the envelope's per-rule label fell through
   // to the raw key (e.g. "Rule violated: column_in_dataframe"). A
-  // user-friendly label here resolves the cause line; the per-row
-  // message is rewritten by `formatColumnInDataframeMessage()` below.
+  // user-friendly label here resolves the cause line.
+  //
+  // ⚠️ 161-REVIEW / CR-02 — THIS LABEL IS NOW THE WHOLE OF ISSUE-012's FIX.
+  // The other half was `formatColumnInDataframeMessage()`, which claimed to
+  // rewrite the per-row message into "The required column `X` is missing…".
+  // Measured against the producer: its regex required a literal `failed:` and
+  // `csv_validator.py` has only ever emitted `… failed rule '…'`, so it never
+  // fired — and for THIS rule the producer reports `column` as NaN, so there is
+  // no `X` on the wire for any regex to extract. It was deleted rather than
+  // repaired. Restoring an actionable per-row remedy needs the expected column
+  // name as a first-class producer field (D-161-02); until then this label is
+  // the only place the user is told what class of problem it is.
   column_in_dataframe: "Your CSV is missing a required column",
   // QA report 2026-05-21 ISSUE-008: the daily_return column carried raw
   // dollar PnL (median |x| > 0.5) instead of decimal returns. The
@@ -4657,20 +4667,38 @@ export function formatCsvRuleCauseSingle(humanLabel: string): string {
   return `Rule violated: ${humanLabel}. Expand below for the row-level breakdown.`;
 }
 
-/**
- * Rewrite a pandera `column_in_dataframe` per-row message to be
- * actionable. The raw message is shaped like "Column 'None' failed:
- * daily_return" — referencing the missing column by its rule name,
- * not by anything the user can use. Pull out the expected column
- * name and surface "The required column `daily_return` is missing
- * from your file." instead. (QA report 2026-05-21 ISSUE-012.)
+/*
+ * ⚰️ REMOVED 161-REVIEW / CR-02 — `formatColumnInDataframeMessage(raw)`.
  *
- * The match is intentionally narrow — anything we cannot parse falls
- * through to the original message so we don't drop information.
+ * It existed to rewrite a `column_in_dataframe` per-row message into an
+ * actionable sentence: "The required column `daily_return` is missing from your
+ * file. Rename a column to `daily_return` …". It pulled the column name out of
+ * `raw` with a regex requiring a literal "failed:" and fell through to the
+ * original message on a miss.
+ *
+ * ⛔ IT ALWAYS MISSED. MEASURED against the producer
+ * (`analytics-service/services/csv_validator.py`, driven through `validate_csv`
+ * at HEAD), every message it has ever built reads "… failed rule '…'":
+ *
+ *     Failed rule 'column_in_dataframe'.
+ *     Column 'daily_return' failed rule 'daily_return_lower_bound' at row 2.
+ *
+ * The "Column 'None' failed: daily_return" shape the old docblock quoted is
+ * PANDERA's own error text, which this producer does not forward — it builds
+ * its own sentence. So the actionable remedy never reached a user, on any
+ * message, ever, and `CsvValidationEnvelope` rendered `raw` unchanged.
+ *
+ * ⛔ AND IT IS UNREPAIRABLE AS A REGEX. It was only ever called for
+ * `rule === "column_in_dataframe"`, and for that DATAFRAME-level check pandera
+ * reports `column` as NaN — which is why 161-03 had to strip the literal `nan`
+ * from the sentence. The expected column name is simply not on the wire. A
+ * fixed pattern would have nothing to extract. Restoring the remedy needs the
+ * expected column carried as a first-class producer field, which is D-161-02's
+ * scope and is deliberately not smuggled in here.
+ *
+ * Deleting beats leaving a formatter that cannot fire: a function whose
+ * docblock promises a remedy no code path can deliver is the same false claim
+ * this phase removes from copy, wearing a different hat.
+ * `CSV_RULE_LABELS.column_in_dataframe` ("Your CSV is missing a required
+ * column") survives and is now the whole of ISSUE-012's fix.
  */
-export function formatColumnInDataframeMessage(raw: string): string {
-  const m = raw.match(/Column\s+'[^']*'\s+failed:\s+(\S+)/);
-  if (!m) return raw;
-  const missingColumn = m[1];
-  return `The required column \`${missingColumn}\` is missing from your file. Rename a column to \`${missingColumn}\` or switch formats on the upload step.`;
-}
