@@ -71,10 +71,30 @@ vi.mock("@/lib/analytics-client", () => {
   // narrowing resolves against the same constructor identity (F5b R8).
   class AnalyticsUpstreamError extends Error {
     readonly status: number;
-    constructor(message: string, status: number) {
+    // 161-06 / WIZERR-05 — this double had drifted FURTHEST: it never picked up
+    // `seamCode` (140.3-01) or `dependency` (140.3-11) either, so it is brought
+    // to the real class's full shape in one go. All three are additive and
+    // optional; every pre-existing 2-arg construction in this file keeps
+    // defaulting and keeps passing.
+    // ⚠️ ORDER IS THE POINT, not just presence — a positional argument must
+    // land in the same field here as it does at the seam.
+    // `analytics-upstream-error.parity.invariant.test.ts` now enforces it.
+    readonly seamCode: string | null;
+    readonly dependency: string | null;
+    readonly retryAfterSeconds: number | null;
+    constructor(
+      message: string,
+      status: number,
+      seamCode: string | null = null,
+      dependency: string | null = null,
+      retryAfterSeconds: number | null = null,
+    ) {
       super(message);
       this.name = "AnalyticsUpstreamError";
       this.status = status;
+      this.seamCode = seamCode;
+      this.dependency = dependency;
+      this.retryAfterSeconds = retryAfterSeconds;
     }
   }
   class AnalyticsTimeoutError extends Error {

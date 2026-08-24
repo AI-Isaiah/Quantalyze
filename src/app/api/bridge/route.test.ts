@@ -128,11 +128,31 @@ vi.mock("@/lib/analytics-client", async () => {
     // construction here passes two args and keeps `null`, so the route's
     // `code: err.seamCode ?? "UNKNOWN"` forward can be driven both ways.
     readonly seamCode: string | null;
-    constructor(message: string, status: number, seamCode: string | null = null) {
+    // 161-06 / WIZERR-05 — the 4th and 5th, mirroring the real class
+    // (`analytics-client.ts`) parameter-for-parameter. `dependency` was added
+    // there by 140.3-11 and this double never picked it up; `retryAfterSeconds`
+    // is 161-06's. Both are additive and optional, so every pre-existing
+    // construction in this file keeps passing fewer args and keeps defaulting.
+    // ⚠️ ORDER IS THE POINT, not just presence: with `dependency` missing, a
+    // 4th positional argument would be the WAIT here and the DEPENDENCY NAME in
+    // production. `analytics-upstream-error.parity.invariant.test.ts` is what
+    // makes that a failure instead of a convention — it is why this block can
+    // no longer drift in silence.
+    readonly dependency: string | null;
+    readonly retryAfterSeconds: number | null;
+    constructor(
+      message: string,
+      status: number,
+      seamCode: string | null = null,
+      dependency: string | null = null,
+      retryAfterSeconds: number | null = null,
+    ) {
       super(message);
       this.name = "AnalyticsUpstreamError";
       this.status = status;
       this.seamCode = seamCode;
+      this.dependency = dependency;
+      this.retryAfterSeconds = retryAfterSeconds;
     }
   }
   class AnalyticsTimeoutError extends Error {
