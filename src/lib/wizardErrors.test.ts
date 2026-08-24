@@ -1894,13 +1894,28 @@ describe("[140.3-10 / TRAP-4] the whole copy table, scanned for destructive-only
    * shortage of days with a control that destroys the days already accumulated
    * is the TRAP-4 shape exactly.
    *
+   * **83 → 84 at 161-07** (WIZERR-10) — `GATE_SERIES_EXAMINED_REFUSED`, the
+   * truthful fourth CSV-verdict outcome, replacing "Strategy has only 0
+   * trade(s)" for a strategy with a full daily-return series and no fills.
+   * THIS guard's reasoning was re-run over the entry before the number moved:
+   * its `actions` are `try_another_key` ALONE — not a member of
+   * `DESTRUCTIVE_ACTIONS` — so it too sits outside the scanned population and
+   * the destructive class below is still four members.
+   *
+   * ⚠️ IT WAS NOT ALWAYS OUTSIDE. `try_another_key` fired
+   * `handleDeleteDraft()` until 161-04 / WIZERR-02 made it a pure step
+   * transition. Had this entry been written before that commit, it would have
+   * answered "the venue's data cannot prove a complete record" with a control
+   * that destroys the draft — which is why the two requirements were sequenced
+   * into different waves rather than merely written down in the same phase.
+   *
    * ⚠️ THIS NUMBER HAS A TWIN. The same literal is pinned in the
    * `[140.3-12 / SEAMUX-04]` describe below, and moving one without the other
    * is a silent half-fix — the shrink-detection it buys survives in one scan
    * and dies in the other. 153.1-04 added a third guard (at the end of this
    * file) that reads this source and reds when the two literals disagree.
    */
-  const EXPECTED_TABLE_SIZE = 83;
+  const EXPECTED_TABLE_SIZE = 84;
 
   it("the scan actually covers the table — hand-typed size guard", () => {
     expect(
@@ -2307,11 +2322,38 @@ describe("[140.3-12 / SEAMUX-04] no entry in the copy table makes a claim we can
    *     CSV upload path never reaches this surface at all. The measurement is
    *     argued in full at the entry itself.
    *
+   * **83 → 84 at 161-07** (WIZERR-10) — `GATE_SERIES_EXAMINED_REFUSED`. Read
+   * against all four FORBIDDEN fragments by hand before the number moved: it
+   * mentions no notification, no trade fetching and no session field name.
+   *
+   * ⛔ "data is unchanged" is again the fragment needing care, and this entry
+   * makes NO claim about a write. Its server-state claim is of a different kind
+   * — "Our pipeline records how every daily-return series was built, and for
+   * this one the record does not establish a complete track record" — which
+   * restates the persisted value the gate just read
+   * (`strategy_analytics.series_completeness`) and is the sole reason the
+   * refusal fired. Same ground `GATE_SERIES_PROVENANCE_UNVERIFIED` stands on at
+   * 62, and the mirror image of it: that entry reports the value's ABSENCE,
+   * this one reports what the value SAYS.
+   *
+   * ⚠️ THE CLAUSE TO RE-READ if this entry is ever edited is the one the
+   * UI-SPEC proposed and this entry does NOT contain: "examined and refused" /
+   * "the data was found wanting". Both assert that something looked at THIS
+   * series and judged it. Measured at the producer
+   * (`analytics-service/services/broker_dailies.py`, "Who stamps what"):
+   * `fill_derived_unproven` is stamped for binance / bybit / okx ALWAYS and
+   * unconditionally — the producer's own words are "a CONSTANT, not a
+   * data-driven refinement" — so no per-series finding exists to report. The
+   * shipped cause describes the two METHODS instead, which is true of every
+   * series that can reach it. A future edit that reaches for the more
+   * satisfying "we examined it" wording is re-opening this exact defect, and
+   * the same wording would be false in the same way.
+   *
    * ⚠️ THIS NUMBER HAS A TWIN in the `[140.3-10 / TRAP-4]` describe above.
    * Moving one without the other is a silent half-fix; the guard added at the
    * end of this file reds when the two literals disagree.
    */
-  const EXPECTED_TABLE_SIZE = 83;
+  const EXPECTED_TABLE_SIZE = 84;
 
   it("the scan actually covers the table — hand-typed size guard", () => {
     expect(
@@ -4384,5 +4426,107 @@ describe("[161-07 / WIZERR-09] INSUFFICIENT_CSV_HISTORY renders copy of its own,
     const actions = WIZARD_ERROR_COPY[CODE].actions as readonly string[];
     expect(actions).toContain("clear_and_retry");
     expect(actions).not.toContain("start_fresh");
+  });
+});
+
+/**
+ * [161-07 / WIZERR-10] THE FOURTH OUTCOME'S COPY, AND THE REMEDY IT MAY OFFER.
+ *
+ * This code replaces `GATE_INSUFFICIENT_TRADES` for a strategy whose daily
+ * series carries a completeness record that does not earn admission. The
+ * sentence it replaces — "This account does not have enough trade history yet"
+ * over "Strategy has only 0 trade(s)" — was false about the strategy AND
+ * unwinnable for the user, so both halves are pinned: the copy must not talk
+ * about trade counts, and the remedy must be one that can actually succeed.
+ */
+describe("[161-07 / WIZERR-10] SERIES_EXAMINED_REFUSED renders a truthful fourth outcome", () => {
+  const CODE: WizardErrorCode = "GATE_SERIES_EXAMINED_REFUSED";
+
+  const surface = (): string => {
+    const copy = formatKeyError(CODE);
+    const joined = [copy.title, copy.cause, ...copy.fix].join("   ");
+    // NON-VACUITY GUARD — `"anything".includes("")` is `true`, so an empty
+    // render would satisfy every negative assertion below.
+    expect(joined.length).toBeGreaterThan(200);
+    return joined;
+  };
+
+  it("the gate code maps to a real member — never UNKNOWN, never back to the trade code", () => {
+    expect(gateFailureToWizardError("SERIES_EXAMINED_REFUSED")).toBe(CODE);
+    // The regression stated as the CODE IT MUST NOT BE. A refactor that
+    // "simplifies" the split by folding this arm back into the trade branch
+    // reds here rather than silently restoring the false sentence.
+    expect(gateFailureToWizardError("SERIES_EXAMINED_REFUSED")).not.toBe(
+      "GATE_INSUFFICIENT_TRADES",
+    );
+  });
+
+  it("the two provenance outcomes stay DISTINCT members with distinct copy", () => {
+    // "Nobody looked" and "somebody looked and the record is not enough" are
+    // different facts with different remedies (a re-sync vs a different
+    // source). Collapsing them would put a re-sync button on a permanent
+    // refusal, which is the placebo-remedy class this phase closes.
+    expect(gateFailureToWizardError("SERIES_PROVENANCE_UNVERIFIED")).not.toBe(
+      CODE,
+    );
+    expect(WIZARD_ERROR_COPY[CODE].cause).not.toBe(
+      WIZARD_ERROR_COPY.GATE_SERIES_PROVENANCE_UNVERIFIED.cause,
+    );
+  });
+
+  it("says nothing about trade counts — the sentence it replaces cannot come back", () => {
+    const s = surface();
+    expect(s).not.toMatch(/only 0 trade/i);
+    expect(s).not.toMatch(/minimum of 5 trades/i);
+    expect(s).not.toMatch(/filled trades/i);
+    // TRAP-3 — no invented figure of any kind. The entry has no interpolation
+    // arm, so there is no context field whose absence could render as a zero.
+    expect(s).not.toMatch(/\b0 (trade|trades|day|days|fill|fills)\b/i);
+  });
+
+  it("does not claim a per-series examination the producer does not perform", () => {
+    // ⭐ THE TRUTH OBLIGATION, carried onto the copy surface.
+    // `fill_derived_unproven` is stamped for its venues ALWAYS and
+    // unconditionally ("a CONSTANT, not a data-driven refinement" —
+    // `broker_dailies.py`), so no finding about THIS series exists to report.
+    // 161-UI-SPEC proposed exactly these words and they were corrected.
+    const s = surface();
+    expect(s).not.toMatch(/examined and refused/i);
+    expect(s).not.toMatch(/found wanting/i);
+    // …and no size threshold either: `sampled_gapped` fires at ANY interior
+    // hole (`nav_gap_days > 0`), so "gaps too large" would be a threshold we
+    // do not apply.
+    expect(s).not.toMatch(/too large/i);
+
+    // What it DOES say: the two methods, stated as methods.
+    expect(s).toMatch(/sampled from balance snapshots/i);
+    expect(s).toMatch(/derived from individual fills/i);
+  });
+
+  it("offers a remedy that can succeed, and NO retry that cannot", () => {
+    const actions = WIZARD_ERROR_COPY[CODE].actions as readonly string[];
+
+    // `try_another_key` is a genuine remedy: a venue whose producer folds a
+    // complete ledger stamps a verdict the gate admits.
+    expect(actions).toContain("try_another_key");
+
+    // ⛔ `clear_and_retry` IS THE ONE THAT MUST BE ABSENT. On SyncPreviewStep
+    // it is the ONLY action that passes `handleKickoffRetry` as `onRetry`, so
+    // its presence is what makes a Retry control render. A re-sync re-derives
+    // the same series by the same method and earns the same verdict — the
+    // button would promise an outcome that cannot change.
+    expect(
+      actions,
+      "A Retry on this state is a placebo: re-running the sync cannot change a " +
+        "verdict that is a property of the derivation method.",
+    ).not.toContain("clear_and_retry");
+
+    // …and nothing destructive, which is only true because 161-04 made
+    // the try-another-key handler a pure step transition.
+    expect(actions).not.toContain("start_fresh");
+
+    // The DERIVATION, not a restatement: `buildEnvelope` reads `actions`
+    // against `RECOVERABLE_ACTIONS`, and `try_another_key` is a member.
+    expect(buildEnvelope(CODE, "corr-examined-refused-1").recoverable).toBe(true);
   });
 });

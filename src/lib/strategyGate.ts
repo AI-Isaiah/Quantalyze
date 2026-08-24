@@ -18,6 +18,13 @@ export type GateFailureCode =
   | "INSUFFICIENT_DAYS"
   | "INSUFFICIENT_CSV_HISTORY"
   | "SERIES_PROVENANCE_UNVERIFIED"
+  // 161-07 / WIZERR-10 — a producer DID record how this series was built, and
+  // what it recorded does not earn admission. Distinct from
+  // SERIES_PROVENANCE_UNVERIFIED (which answers "nobody looked") and from
+  // INSUFFICIENT_TRADES (which this case used to fall through to, and which
+  // said "only 0 trade(s)" about a strategy with a full daily-return series and
+  // no fills BY CONSTRUCTION).
+  | "SERIES_EXAMINED_REFUSED"
   | "ANALYTICS_MISSING"
   | "ANALYTICS_PENDING"
   | "ANALYTICS_COMPUTING"
@@ -141,10 +148,56 @@ const SERIES_TRUSTED_FOR_DAILY_BRANCH: ReadonlySet<string> = new Set([
  * (unchanged, fail-closed); absent from here, so it renders the
  * provenance-unverified copy and offers a re-sync. A slightly imprecise sentence
  * on a refusal — never an admission.
+ *
+ * ── 161-07 / WIZERR-10: A SET BECAME A MAP, AND THE VALUE IS THE SENTENCE ──
+ *
+ * Each verdict now carries its OWN reason, because 161-07 stopped routing this
+ * arm to the trade floor and a refusal that says nothing specific is only half
+ * an improvement. A Map rather than a Set + a parallel lookup ON PURPOSE: with
+ * two structures, a sixth verdict added to one and forgotten in the other
+ * refuses with `undefined` as its sentence. Here membership IS the sentence's
+ * existence, so that state is unrepresentable.
+ *
+ * ⭐ BOTH SENTENCES WERE VALIDATED AGAINST THE PRODUCER before shipping, and
+ * BOTH of 161-UI-SPEC's proposed clauses were CORRECTED rather than adopted.
+ * The truth source is `analytics-service/services/broker_dailies.py`'s producer
+ * registry docstring ("Who stamps what"), read first-hand:
+ *
+ *   · `sampled_gapped` — stamped by `combine_sfox_balance_history` when
+ *     `nav_gap_days > 0`. That is ANY interior hole, not a big one. The UI-SPEC
+ *     proposed "its sampling has gaps too large to verify", which asserts a
+ *     magnitude test the producer does not perform and would be false of a
+ *     one-day hole. The sentence below names the sampling and the holes and
+ *     claims no threshold. (It also carries no COUNT: T-73-02 leak discipline
+ *     keeps gap magnitude off this channel, and the producer's own comment says
+ *     `nav_gap_days` "decides the branch, it never rides INTO the verdict".)
+ *
+ *   · `fill_derived_unproven` — stamped by `combine_realized_and_funding`
+ *     (binance / bybit / okx) ALWAYS and UNCONDITIONALLY; the producer calls it
+ *     "a CONSTANT, not a data-driven refinement". The UI-SPEC proposed "The
+ *     return series was examined and refused: it is derived from fills that
+ *     could not be proven complete", whose "examined and refused" implies a
+ *     per-series finding. Nothing examined THIS series. What is true is a
+ *     property of the METHOD: two independent streams are summed with no
+ *     residual and no reconciliation, so nothing in the output distinguishes
+ *     "no fills that day" from "the fills fetch silently truncated". The
+ *     sentence below states the method's limit, not a verdict about the data.
+ *
+ * ⚠️ THESE STRINGS ARE OPERATOR-VISIBLE VERBATIM. `admin/strategy-review`
+ * answers `Cannot approve: ${gate.reason}`, raw, with no copy hop — so each one
+ * must read as a complete sentence after that prefix. The wizard's own copy is
+ * a SEPARATE surface (`gateFailureToWizardError` → `WIZARD_ERROR_COPY`); these
+ * are not user-facing wizard copy and must not be edited to sound like it.
  */
-const SERIES_EXAMINED_BUT_REFUSED: ReadonlySet<string> = new Set([
-  "fill_derived_unproven",
-  "sampled_gapped",
+const SERIES_EXAMINED_BUT_REFUSED: ReadonlyMap<string, string> = new Map([
+  [
+    "fill_derived_unproven",
+    "The return series is derived from individual fills, which cannot establish that the record is complete.",
+  ],
+  [
+    "sampled_gapped",
+    "The return series is built from sampled balance snapshots with interior gaps, so it is not a complete record.",
+  ],
 ]);
 
 /**
@@ -309,17 +362,32 @@ export function checkStrategyGate(input: StrategyGateInput): StrategyGateResult 
     // was opened to delete.
     //
     // Split by WHETHER A PRODUCER LOOKED, not by whether we like what it found:
-    //   · it looked and found the series wanting (`fill_derived_unproven`,
-    //     `sampled_gapped`) → keep the existing trade-branch routing. The
-    //     D-15 acceptance test pins that case and it is unchanged here.
     //   · nobody looked (NULL — every pre-existing row, since the migration is
     //     additive with no backfill — or a verdict this module has not been
     //     taught) → say THAT, and offer the remedy that makes a producer look.
+    //   · a producer DID record how the series was built, and the record does
+    //     not earn admission → say what the record says. 161-07 / WIZERR-10.
     //
-    // Both arms REFUSE. This changes no admission decision anywhere; it changes
-    // which true sentence the user is shown. `?? ""` matches the coercion on
-    // `isDailyReturnsSourced` — the empty string is in neither set, so an absent
-    // verdict lands on the honest "nobody looked" arm rather than the trade one.
+    // ⚠️ THE SECOND ARM IS NEW AND THIS COMMENT'S PREVIOUS TEXT IS DELETED, not
+    // amended. It said the examined case would "keep the existing trade-branch
+    // routing. The D-15 acceptance test pins that case and it is unchanged
+    // here." That fallthrough was deliberate at 142.2 and it is what produced
+    // "Strategy has only 0 trade(s). A minimum of 5 trades is required." for a
+    // gapped or fill-derived strategy with a full daily-return series and zero
+    // fills BY CONSTRUCTION — false, unwinnable, and the same sentence the
+    // NULL arm was written to stop showing. Only the diagnosis moved: D-15's
+    // acceptance oracle still pins this input as REFUSED, and was re-cut in the
+    // same commit to pin the code that now carries the refusal.
+    //
+    // ALL THREE ARMS REFUSE. This changes no admission decision anywhere; it
+    // changes which true sentence the user reads. `?? ""` matches the coercion
+    // on `isDailyReturnsSourced` — the empty string is in neither structure, so
+    // an absent verdict lands on the honest "nobody looked" arm.
+    //
+    // MUTUAL EXCLUSIVITY is structural rather than incidental: the two arms
+    // below test `has(v)` and `!has(v)` on the SAME map with the SAME coercion,
+    // so exactly one is reachable for any input that gets this far, and neither
+    // can fall through to the trade floor while `csvRowCount > 0`.
     if (
       input.tradeCount === 0 &&
       csvRowCount > 0 &&
@@ -334,6 +402,32 @@ export function checkStrategyGate(input: StrategyGateInput): StrategyGateResult 
           `whose provenance was never established. Re-sync this strategy to re-derive it.`,
         detail: { rows: csvRowCount },
       };
+    }
+
+    // 161-07 / WIZERR-10 — the examined-but-refused arm, evaluated BEFORE the
+    // trade floor because a strategy with a daily-return series is not a
+    // strategy with too few trades.
+    //
+    // The per-verdict sentence is READ FROM THE MAP, never rebuilt here: the
+    // membership test above and the lookup below are the one structure, so a
+    // future sixth verdict cannot join the class without bringing a sentence
+    // (see the map's docblock for how each was validated against its producer).
+    if (input.tradeCount === 0 && csvRowCount > 0) {
+      const examinedReason = SERIES_EXAMINED_BUT_REFUSED.get(
+        input.seriesCompleteness ?? "",
+      );
+      if (examinedReason !== undefined) {
+        return {
+          passed: false,
+          code: "SERIES_EXAMINED_REFUSED",
+          reason: examinedReason,
+          // ⚠️ ENUM-DERIVED SENTENCE + ROW COUNT ONLY. The verdict string itself
+          // never rides on `detail` and neither does any gap magnitude
+          // (T-73-02): `rows` is a count this module's own caller supplied,
+          // matching the arm above.
+          detail: { rows: csvRowCount },
+        };
+      }
     }
 
     if (input.tradeCount < STRATEGY_GATE_MIN_TRADES) {

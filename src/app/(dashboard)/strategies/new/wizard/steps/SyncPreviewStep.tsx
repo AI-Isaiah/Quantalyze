@@ -2034,10 +2034,25 @@ export function SyncPreviewStep({
    */
   const compositeReviewIsAvailable = isComposite && Boolean(onReviewKeys);
   /**
-   * `onTryAnotherKey` fires `handleDeleteDraft()` in WizardClient: it DESTROYS
-   * the draft and every `strategy_keys` member under it. Correct for a REJECTED
-   * key — which is what "this account has too little history, bring a different
-   * one" means — and wrong everywhere else.
+   * ⚠️ CORRECTED AT 161-07. This block used to read: "`onTryAnotherKey` fires
+   * `handleDeleteDraft()` in WizardClient: it DESTROYS the draft and every
+   * `strategy_keys` member under it." That was true when written and 161-04 /
+   * WIZERR-02 made it FALSE — the handler is now a pure step transition
+   * (`setStep("connect_key")` + `persistPointer`, MEASURED at HEAD in
+   * `WizardClient.tsx`, whose only production render of this step it is). The
+   * sentence is replaced rather than left standing, because a comment claiming
+   * this control is destructive is exactly what would make the next editor
+   * strip `try_another_key` from a code that legitimately earns it — which is
+   * how 161-07's own `GATE_SERIES_EXAMINED_REFUSED` would lose the only remedy
+   * that can succeed for it.
+   *
+   * WHAT THE EARNING STILL MEANS, unchanged: `try_another_key` is the action
+   * that means *replace the key*, so it is what puts a key-replacement control
+   * on screen. A code whose actions are `start_fresh` / `request_call` /
+   * `clear_and_retry` has not asked for one. Conditions 1–3 above are all still
+   * live; only the destructiveness of condition 2's FALLBACK has changed, and
+   * that fallback's label-vs-behaviour argument survives on its own terms (a
+   * button reading "Review your keys" must not run the single-key path).
    */
   const keyReplacementIsEarned = errorActions.includes("try_another_key");
   const showKeyControl = compositeReviewIsAvailable || keyReplacementIsEarned;

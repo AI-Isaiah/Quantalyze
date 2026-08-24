@@ -317,6 +317,47 @@ export type WizardErrorCode =
   // SYNC rather than resubmitting the same payload. A re-derive that reaches
   // further history is exactly the thing that clears this floor.
   | "GATE_INSUFFICIENT_CSV_HISTORY"
+  // 161-07 / WIZERR-10 — a producer DID record how the daily series was built,
+  // and the record does not establish a complete track record.
+  //
+  // WHAT RENDERED BEFORE: `GATE_INSUFFICIENT_TRADES`, i.e. "This account does
+  // not have enough trade history yet" over the gate sentence "Strategy has
+  // only 0 trade(s). A minimum of 5 trades is required." — about a strategy
+  // carrying a full daily-return series and zero fills BY CONSTRUCTION. False,
+  // unwinnable, and (until 161-04) offering a remedy that deleted the draft.
+  //
+  // ⛔ NOT AN ALIAS — minted by our own `strategyGate.ts`, same ground as the
+  // member above.
+  //
+  // ⚠️ WHY EACH NEAR NEIGHBOUR WAS REJECTED, read at the gate arm rather than
+  // matched on the name:
+  //   · `GATE_INSUFFICIENT_TRADES` is the incumbent this replaces, and its own
+  //     copy says why it cannot serve: "We need at least 5 filled trades…
+  //     Sharpe on fewer trades would be noise." Nothing here is about trade
+  //     count.
+  //   · `GATE_SERIES_PROVENANCE_UNVERIFIED` is the OPPOSITE case and its copy
+  //     says so out loud — "nothing on our side recorded how that series was
+  //     built", and its remedy is a re-sync that makes a producer look. Here a
+  //     producer DID look and its record is the reason for the refusal, so a
+  //     re-sync re-derives the same verdict and changes nothing.
+  //   · `GATE_INSUFFICIENT_DAYS` measures a trade span that does not exist on
+  //     this branch.
+  //
+  // RECOVERABLE — DERIVED, NOT DECLARED, AND `clear_and_retry` IS DELIBERATELY
+  // ABSENT. `try_another_key` alone is in `actions`, so `buildEnvelope` derives
+  // `recoverable: true` and a Retry does NOT render on SyncPreviewStep (that
+  // step passes `onRetry` only when the code asks for `clear_and_retry`). That
+  // is the honest arrangement: re-running the sync re-derives the SAME series
+  // by the SAME method and earns the SAME verdict — `fill_derived_unproven` is
+  // stamped unconditionally for its venues, and a historical NAV hole does not
+  // heal. Offering Retry here would be a placebo on a permanent refusal.
+  //
+  // ⚠️ `try_another_key` IS SAFE TO OFFER, and that is a MEASURED fact with a
+  // date on it. 161-04 / WIZERR-02 made `onTryAnotherKey` a pure step
+  // transition; before that it fired `handleDeleteDraft()`, and offering it
+  // here would have answered "your venue's data cannot prove a complete record"
+  // by destroying the user's draft.
+  | "GATE_SERIES_EXAMINED_REFUSED"
   // Metadata step (MetadataStep) — Phase 53 / APPLY-02 inline per-field
   // validation. Copy lives here (the canonical wizard-copy home) so the
   // component never carries an invented inline string (copy-drift guard).
@@ -1745,6 +1786,39 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
     ],
     docsHref: "/security#thresholds",
     actions: ["clear_and_retry"],
+  },
+
+  // 161-07 / WIZERR-10 — the truthful fourth outcome, replacing "Strategy has
+  // only 0 trade(s)" for a strategy that has a full return series and no fills.
+  //
+  // ⭐ EVERY CLAUSE BELOW WAS VALIDATED AGAINST THE PRODUCER, and 161-UI-SPEC's
+  // proposed title and cause were CORRECTED rather than shipped. Truth source:
+  // `analytics-service/services/broker_dailies.py`'s producer registry
+  // docstring, read first-hand.
+  //   · The UI-SPEC's title "This data source was examined and refused." and
+  //     its cause "We examined the venue's return series and could not verify
+  //     it — the data was found wanting" both assert a PER-SERIES examination.
+  //     `fill_derived_unproven` is stamped for binance / bybit / okx ALWAYS and
+  //     unconditionally — "a CONSTANT, not a data-driven refinement". Nothing
+  //     looked at this particular series and found it wanting; a METHOD was
+  //     used that cannot establish completeness for any series.
+  //   · The cause therefore describes the two METHODS, and the enumeration is
+  //     exhaustive by construction: the gate's examined-refused map has exactly
+  //     these two members. ⚠️ A third verdict joining that map makes this
+  //     sentence incomplete — the obligation is written at the map itself.
+  //   · No gap magnitude and no row count appears (T-73-02 leak discipline, and
+  //     TRAP-3: this entry has no interpolation arm, so no absent number can
+  //     surface as a zero).
+  GATE_SERIES_EXAMINED_REFUSED: {
+    title: "We can't verify this strategy's returns from the venue's own data.",
+    cause:
+      "Our pipeline records how every daily-return series was built, and for this one the record does not establish a complete track record. There are two ways a series lands here: it was sampled from balance snapshots that have interior gaps, or it was derived from individual fills — a method that produces a plausible series whether or not the venue returned every fill, with no residual to check it against. Either way, publishing it would mean standing behind a number we cannot show is complete. This is a limit on what the venue's data can prove, not a judgement about your trading.",
+    fix: [
+      "Connect a key from a venue we can read end to end — one that gives us a complete transaction ledger rather than a fill feed.",
+      "Or create this strategy from a CSV upload instead: a track record you supply yourself carries its own completeness record, which we do accept.",
+    ],
+    docsHref: "/security#thresholds",
+    actions: ["try_another_key"],
   },
 
   METADATA_DESCRIPTION_REQUIRED: {
@@ -3271,6 +3345,14 @@ export function gateFailureToWizardError(code: GateFailureCode): WizardErrorCode
       // strategy on an unstamped row) and the composite arm (FIX 3) can land
       // here.
       return "GATE_SERIES_PROVENANCE_UNVERIFIED";
+    case "SERIES_EXAMINED_REFUSED":
+      // 161-07 / WIZERR-10. The other half of the "did a producer look?" split:
+      // one looked, and what it recorded does not establish a complete record.
+      // Terminal and wizard-reachable from the single-key arm (a keyed perp on
+      // binance / bybit / okx arrives with 0 trades and a fill-derived series),
+      // so it maps to real copy — never UNKNOWN, and never back to
+      // GATE_INSUFFICIENT_TRADES, which is the false sentence it replaces.
+      return "GATE_SERIES_EXAMINED_REFUSED";
     case "ANALYTICS_MISSING":
     case "ANALYTICS_PENDING":
     case "ANALYTICS_COMPUTING":
