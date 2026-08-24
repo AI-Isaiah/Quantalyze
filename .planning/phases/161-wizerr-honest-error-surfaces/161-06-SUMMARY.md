@@ -574,3 +574,22 @@ opens that surface (161-07 / wave 4). It is a `backstop` in the plan's own front
 - Commit `400dad0f` — FOUND.
 - Commit `79cde37c` — FOUND.
 - Commit `d5f18d64` — FOUND.
+
+---
+
+## ⚠️ Surfaced, NOT fixed: `STATE.md` still reads `current_phase: 160`
+
+`.planning/STATE.md:5` reads `current_phase: 160` while this phase is 161. Consequences
+observed this run, all cosmetic but all misleading:
+
+- `state.advance-plan` answered `{"advanced": false, "reason": "last_plan", "current_plan": 6}`
+  — it was reasoning about phase 160's plan count, not 161's.
+- The three decisions recorded above were filed under the label **`[Phase 160]`**.
+- `roadmap.update-plan-progress 161` was passed the phase explicitly and IS correct
+  (`plan_count: 10, summary_count: 6`), as is `requirements.mark-complete WIZERR-05`.
+
+**Deliberately not repaired here.** The phase pointer is the orchestrator's, and four sibling
+plans (161-07 … 161-10) are still unexecuted; an executor rewriting it mid-phase could disturb
+their sequencing. This is also a recurring class in this file — STATE's own note at `:165`
+records a previous `current_phase: 153.7` sitting next to a Phase-143 `stopped_at`. Whoever
+runs the next wave should set it, and re-label the three `D-161-06-*` decisions.
