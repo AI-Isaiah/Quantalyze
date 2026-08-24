@@ -26,6 +26,20 @@ items were dropped, not carried. Categories: **Fix now** / **Fix mid-term** / **
 
 ## 🔴 FIX NOW — live correctness, trust-boundary security, active go-live
 
+0.07. **⚠️ The composite arm tells a `sampled_gapped` series a false provenance sentence.** Found and
+   deliberately left live by Phase 161 (`161-07`, D-161-07-A) — it fell outside that task's declared
+   file scope, so it was booked rather than silently widened into.
+   - `SyncPreviewStep.tsx:1306` / `:1311` hardcode `GATE_SERIES_PROVENANCE_UNVERIFIED` for **every**
+     inadmissible composite verdict. A `sampled_gapped` composite is therefore told *"nothing on our
+     side recorded how that series was built"* — which is false: the series' provenance IS recorded;
+     it simply has a gap (`nav_gap_days > 0`). Reachable via the FIX-2 downgrade, and currently
+     pinned by a 142.2 test.
+   - Same defect class Phase 161 exists to eliminate — a sentence that names a blocker other than the
+     real one — so this is unfinished business of that phase, not new scope.
+   - **Fix shape:** branch the composite arm's code on the actual verdict instead of hardcoding one,
+     mapping `sampled_gapped` to its own reason. One-line fix recorded in
+     `.planning/phases/161-wizerr-honest-error-surfaces/deferred-items.md`; the 142.2 pin moves with it.
+
 0.06. **⚠️ A manager cannot release their own orphaned API key — no surface exists.** Found
    2026-08-24 during Phase 161 (WIZERR-03) execution, when the approved `161-UI-SPEC.md` remedy
    bullet turned out to be **unwinnable at HEAD** and had to be replaced rather than shipped.
