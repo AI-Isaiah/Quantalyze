@@ -4457,6 +4457,85 @@ const DASHBOARD_DIALOG_ROUTE_CODES: ReadonlyMap<
 export { DASHBOARD_DIALOG_ROUTE_CODES };
 
 /**
+ * ⭐ 161-09 / WIZERR-08 — THE VOCABULARY `keys/validate-and-encrypt` EMITS.
+ *
+ * ── WHY IT IS HERE AND NOT AT A CONSUMER ────────────────────────────────────
+ *
+ * Three components POST to that route (`ApiKeyManager`, `StrategyForm`,
+ * `AllocatorExchangeManager` — measured by grep over `src/`, 2026-08-24), so a
+ * roster living inside any one of them would be a fourth hand-typed registry
+ * that the other two silently disagree with. Same call 161-10 made for
+ * `DASHBOARD_DIALOG_ROUTE_CODES` directly above: one shared table, in the module
+ * that already owns the union and the copy, so the coverage law reads ONE
+ * declaration rather than re-parsing three component files.
+ *
+ * ── ⚠️ WHAT THIS ROSTER DOES AND DOES NOT PROVE — READ THIS BEFORE TRUSTING IT
+ *
+ * The wizard-step rosters (`KNOWN_CREATE_WITH_KEY_CODES` and friends) are read
+ * at runtime by the step that renders the error, so "the roster admits it"
+ * really does mean "a client can render it". THIS ROSTER IS WEAKER, and saying
+ * so is the point of this paragraph.
+ *
+ * MEASURED at HEAD, 2026-08-24: **none of the three consumers reads this
+ * route's `code` field at all.** All three read `err.error` — the prose
+ * sentence — and throw or render that. So there is no runtime reader to bind
+ * this roster to, and a docblock claiming "a client can render it" would be
+ * exactly the kind of false sentence this phase exists to delete.
+ *
+ * What the 4th `ROUTES` row in `wizardErrors.invariant.test.ts` DOES enforce
+ * with this table, and it is not nothing:
+ *
+ *   1. every code the route emits is a `WizardErrorCode` (or is translated into
+ *      one by `SEAM_CODE_TO_WIZARD_CODE`), so `WIZARD_ERROR_COPY` has a real
+ *      entry for it and the first consumer to read the code channel gets copy
+ *      rather than the UNKNOWN card;
+ *   2. every member listed here has that copy entry;
+ *   3. the route's emitter count cannot drift silently — which is how
+ *      `STALE_CLIENT` shipped here in Phase 160 with nothing watching it.
+ *
+ * What it does NOT enforce: that anything renders it today. ⛔ THE FOLLOW-ON IS
+ * NAMED DEBT, not an implied fix: wiring those three consumers onto the code
+ * channel (the way 161-10 wired the three dashboard dialogs) is what would make
+ * this roster's first half real. Until then, treat "rostered" as "typed and
+ * has copy", never as "the user will see it".
+ *
+ * ── MEMBERSHIP, and the two codes deliberately ABSENT ───────────────────────
+ *
+ * Six members, measured from the emitters at HEAD. `CIRCUIT_OPEN` and
+ * `UPSTREAM_TIMEOUT` are NOT here and must not be added: both are WIRE codes
+ * that `SEAM_CODE_TO_WIZARD_CODE` translates (→ `SERVICE_UNAVAILABLE_RETRY`,
+ * `SERVICE_UNREACHABLE`), neither is a `WizardErrorCode`, and adding either to
+ * a `ReadonlySet<WizardErrorCode>` would not compile — and would be wrong if it
+ * did, on `MultiKeyConnectStep`'s coverage-law rule 1: the ONE alias table is
+ * consulted first, never a member here.
+ */
+export const KNOWN_VALIDATE_AND_ENCRYPT_CODES: ReadonlySet<WizardErrorCode> =
+  new Set<WizardErrorCode>([
+    // the two request-shape families 161-09 split off KEY_INVALID_FORMAT
+    "KEY_MISSING_REQUIRED_FIELD",
+    "KEY_VENUE_NOT_ENABLED",
+    // the read-only verdict (400) and the deploy-skew refusal (409)
+    "KEY_NOT_READ_ONLY",
+    "STALE_CLIENT",
+    // our own configuration faults (503, two sites) and the persist-INSERT
+    // failure (500), which is deliberately terminal-unclassified: the user's
+    // key WAS verified and the row was not written, and no more specific member
+    // states that without naming an internal writer.
+    //
+    // ⚠️ `SEAM_MISCONFIGURED` IS LISTED BUT IS NOT LOAD-BEARING FOR THE
+    // COVERAGE HALF, and that is measured rather than assumed: 161-09 removed
+    // it and re-ran the law, which stayed GREEN (49 passed). The reason is
+    // `SEAM_CODE_TO_WIZARD_CODE`, which maps it to ITSELF, and the law consults
+    // the alias table before the roster — so the row is redundant there. It is
+    // kept because this table's job is to state the route's vocabulary
+    // completely, and a vocabulary with a hole in it that happens to be covered
+    // by an alias is a worse artefact to inherit than a complete one. ⛔ Do not
+    // read its presence as evidence that the law is checking it.
+    "SEAM_MISCONFIGURED",
+    "UNKNOWN",
+  ]);
+
+/**
  * Translate a dashboard write route's wire `code` into a `WizardErrorCode`.
  *
  * ⛔ THE CAST IS GUARDED AND THIS IS THE ONLY PLACE IT HAPPENS (Pitfall 4).

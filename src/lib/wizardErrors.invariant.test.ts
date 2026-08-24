@@ -205,7 +205,37 @@ interface RouteUnderTest {
    * fiction and demand two emitters nobody can write.
    */
   readonly expectedSites: number;
+  /**
+   * The VACUITY FLOOR for THIS route's roster (161-09). Optional; the two
+   * incumbents and finalize-wizard take the module default of 10 and their
+   * guard is byte-identical to what it was.
+   *
+   * ⚠️ PER-ROUTE FOR THE SAME REASON `expectedSites` IS. The 10 was written
+   * for the two 24-member key rosters and clears KNOWN_FINALIZE_CODES' 21 with
+   * room. `KNOWN_VALIDATE_AND_ENCRYPT_CODES` has SIX members — measured, and
+   * six is simply how many codes that route emits, not a roster that parsed
+   * short. A shared 10 would fail on a correct roster, and the two ways to keep
+   * one literal (lower it for everyone, or drop the assertion) both weaken the
+   * guard on three routes to admit a fourth.
+   *
+   * ⛔ THIS IS NOT A LICENCE TO LOWER A FLOOR SO A ROUTE FITS. The guard's own
+   * docblock states its job: catch a roster that parsed as `[]` or nearly so —
+   * the real 153.1-01 defect — NOT re-pin each roster's size, which is a fact
+   * about the roster rather than about the scanner. A floor sized at ~60% of
+   * the measured membership (the same ratio DERIVED_FLOOR uses) still catches
+   * `[]`, 1, and 2 while leaving room for the roster to grow by an honest code.
+   */
+  readonly rosterFloor?: number;
 }
+
+/**
+ * The roster vacuity floor for a route that does not declare its own.
+ *
+ * Extracted from the inline literal so the incumbents keep the exact number
+ * they were guarded at while a fourth route can state its own — see
+ * `RouteUnderTest.rosterFloor`.
+ */
+const DEFAULT_ROSTER_FLOOR = 10;
 
 const ROUTES: readonly RouteUnderTest[] = [
   {
@@ -291,6 +321,73 @@ const ROUTES: readonly RouteUnderTest[] = [
     // three rows land in the SAME commit the route starts emitting them
     // (verified at source, not assumed).
     expectedSites: 32,
+  },
+  {
+    // ⭐ 161-09 / WIZERR-08 — THE FOURTH ENTRY, and the blindness it closes is
+    // the one this file could not see at all.
+    //
+    // ── WHAT WAS TRUE UNTIL THIS COMMIT ────────────────────────────────────
+    //
+    // `keys/validate-and-encrypt` is the THIRD wizard-family key route — it
+    // answers twelve rejections, eleven of them with a hand-written code — and
+    // NOT ONE of them was visible to this scanner. All twelve were written
+    // `{ error, code }`, and the predicate in this file's header requires
+    // `code:` FIRST. MEASURED by running the derivation over the route at HEAD
+    // before the fix: **zero** emitters, for BOTH `statusRe` fragments.
+    //
+    // So a row added here before 161-09 would have been the exact failure the
+    // finalize-wizard entry above records: an assertion over an empty
+    // population, green forever, indistinguishable from a route with no
+    // defects. 161-09 reordered the eleven literal-coded arms to `code:`-first
+    // — 153.1-05's own move on finalize-wizard — and the row lands in the same
+    // wave the route becomes visible.
+    //
+    // ⭐ THE REGROWTH VECTOR THIS ROW CLOSES, named: `STALE_CLIENT` shipped on
+    // this route in Phase 160 with NOTHING checking that it was a union member,
+    // that it had copy, or that any client could recognise it. It happened to
+    // be all three. The next one need not be, and nothing would have reddened.
+    //
+    // ⚠️ `statusRe` IS THE WIDE FRAGMENT, and it is not a preference. This
+    // route answers its coded arms at 400/409/500/503/504. A `"400"` row would
+    // see five of the eleven and — decisively — would NOT see `STALE_CLIENT`,
+    // which is a 409. A row blind to the one code that motivated it would be
+    // decoration. Same justification finalize-wizard's docblock gives for its
+    // own widening; the two incumbents keep "400" because widening THEM would
+    // move their pinned counts, which is a population change dressed as a
+    // scanner improvement.
+    //
+    // ⚠️ ELEVEN, NOT TWELVE, and the twelfth is excluded for a reason this file
+    // already has a precedent for. The terminal 500 arm is written
+    // `{ code: seamCode ?? "UNKNOWN", error: … }` — a COMPUTED value, no string
+    // literal — so the `[A-Z][A-Z0-9_]*` literal class excludes it, exactly as
+    // it excludes the incumbents' shorthand `{ code }` read-only refusal (the
+    // reason their count is 12 and not 13). ⛔ The remedy for a count that
+    // looks one short is never to relax the literal class: that class is what
+    // keeps a lowercase or interpolated code VISIBLE as a defect.
+    //
+    // Measured 2026-08-24 under the predicate in this file's header:
+    // 11 emitters over 8 distinct codes (KEY_VENUE_NOT_ENABLED ×2,
+    // KEY_MISSING_REQUIRED_FIELD ×2, SEAM_MISCONFIGURED ×2, STALE_CLIENT,
+    // KEY_NOT_READ_ONLY, UNKNOWN, CIRCUIT_OPEN, UPSTREAM_TIMEOUT). The last two
+    // are wire codes the alias table translates and are deliberately NOT roster
+    // members — see the roster's own docblock.
+    //
+    // ⚠️⚠️ AND READ THE ROSTER'S DOCBLOCK BEFORE READING THIS ROW AS PROOF THAT
+    // A USER SEES ANY OF IT. Measured at HEAD: none of the route's three
+    // consumers reads its `code` field — all three render the prose sentence.
+    // This row enforces "typed, and has copy"; it does NOT enforce "a client
+    // renders it", which is what the wizard-step rows enforce. That gap is
+    // recorded as named debt at the roster, not papered over here.
+    label: "keys/validate-and-encrypt",
+    route: join(REPO, "src/app/api/keys/validate-and-encrypt/route.ts"),
+    rosterFile: join(REPO, "src", "lib", "wizardErrors.ts"),
+    rosterName: "KNOWN_VALIDATE_AND_ENCRYPT_CODES",
+    statusRe: "[45]\\d\\d",
+    expectedSites: 11,
+    // 6 measured members; ~60% is 3.6, so 4 — the same ratio DERIVED_FLOOR is
+    // sized at. Catches [], 1 and 2 (the parsed-short defect) without re-pinning
+    // a size that is a fact about the route's vocabulary.
+    rosterFloor: 4,
   },
 ];
 
@@ -690,8 +787,30 @@ const EXPECTED_FORMAT_EMITTERS_PER_ROUTE = 1;
  * Two of those four cases are caught ONLY by the per-route literals, which is
  * why deleting them in favour of "the floor already covers it" would re-open
  * the blindness this sub-phase spent five waves closing.
+ *
+ * ⚠️ 161-09 — RESIZED AGAIN, 29 → 36, for the reason the 14 → 29 resize above
+ * gives verbatim: a floor sized against an old total gets CARRIED by the routes
+ * it was not raised to cover. The measured total is now **60** (12 + 12 + 32 +
+ * 11), and ~60% of 60 is 36.
+ *
+ * ⛔ AND THE RESIZE IS NOT A RATCHET FOR ITS OWN SAKE — the four cases are
+ * re-worked at 60, because a floor whose prose no longer matches what it can
+ * catch is this file's own Pitfall 1:
+ *
+ *   · ONE SITE goes blind → 59, clears 36. Floor SILENT; that route's literal
+ *     reds. (Correct: this is the per-route literals' job.)
+ *   · AN INCUMBENT collapses (12 → 0) → 48, clears 36. Floor SILENT; its
+ *     literal reds.
+ *   · `keys/validate-and-encrypt` collapses (11 → 0) → 49, clears 36. Floor
+ *     SILENT; its literal reds. ⚠️ This is the case worth naming: all eleven of
+ *     its arms go blind together the moment someone reorders them back to
+ *     `{ error, code }`, and the floor CANNOT see that. The row's hand-typed
+ *     11 is the only thing that reds. Deleting per-route literals in favour of
+ *     the floor would re-open exactly the blindness 161-09 just closed.
+ *   · finalize-wizard collapses (32 → 0) → 28, does NOT clear 36. Both red.
+ *   · THE SCANNER breaks outright → 0. Floor reds, and so does everything else.
  */
-const DERIVED_FLOOR = 29;
+const DERIVED_FLOOR = 36;
 
 /**
  * HAND-TYPED. The four codes 142.2-07 minted, and the one it left in place.
@@ -734,14 +853,15 @@ describe("[142.2-07 / MT5-04] every emitted wizard code clears the union AND its
     const total = derived.reduce((n, d) => n + d.codes.length, 0);
     expect(
       total,
-      `Derived only ${total} rejection-emitting sites across the THREE wizard ` +
-        `routes (floor ${DERIVED_FLOOR}, measured total 49). PREDICATE: ` +
+      `Derived only ${total} rejection-emitting sites across the FOUR wizard ` +
+        `routes (floor ${DERIVED_FLOOR}, measured total 60). PREDICATE: ` +
         `comment-stripped via stripCommentsPreserveLines(src,"ts"), then every ` +
         `NextResponse.json( call whose first argument is ` +
         `{ code: "<LITERAL>", error: … } and whose second carries a status ` +
         `matching THAT ROUTE'S OWN fragment — status 400 for the two ` +
-        `key-validation routes, any 4xx/5xx for finalize-wizard, which answers ` +
-        `its coded arms at 400/403/404/409/502/503. A number this low means ` +
+        `wizard-step key routes, any 4xx/5xx for finalize-wizard (which answers ` +
+        `its coded arms at 400/403/404/409/502/503) and for ` +
+        `keys/validate-and-encrypt (400/409/500/503/504). A number this low means ` +
         `the SCANNER broke, not that the routes stopped validating input — and ` +
         `a broken scanner makes every assertion below pass vacuously.`,
     ).toBeGreaterThanOrEqual(DERIVED_FLOOR);
@@ -758,7 +878,9 @@ describe("[142.2-07 / MT5-04] every emitted wizard code clears the union AND its
     // 153.1-01 defect), not to re-pin each roster's size, which is a fact about
     // the roster rather than about the scanner.
     for (const d of derived) {
-      expect(d.roster.size, `${d.rosterName} parsed as empty`).toBeGreaterThan(10);
+      expect(d.roster.size, `${d.rosterName} parsed as empty`).toBeGreaterThan(
+        d.rosterFloor ?? DEFAULT_ROSTER_FLOOR,
+      );
     }
     // The alias table is the THIRD vocabulary a comparison above depends on,
     // and an empty one makes the widened admission a silent no-op. Its own
@@ -768,6 +890,40 @@ describe("[142.2-07 / MT5-04] every emitted wizard code clears the union AND its
       3,
     );
   });
+
+  /**
+   * ⭐ 161-09 — THE NON-EMPTY ASSERTION, STATED PER ROUTE AND OUTRIGHT.
+   *
+   * The module floor above is a SUM: at 36 over a measured 60, any ONE route
+   * can derive to zero and the floor still clears. That is deliberate (see its
+   * docblock's division-of-labour section) — but it means the property "no row
+   * in this table is watching an empty population" is asserted NOWHERE by the
+   * sum, and the per-route `toBe` literals below state it only as a side effect
+   * of their exact equality.
+   *
+   * It is worth its own case because it is the failure mode the finalize-wizard
+   * entry's docblock names as the reason that row could not land earlier, and
+   * the one 161-09's route was in until this wave: a row over an empty
+   * derivation is green forever and indistinguishable from a route with no
+   * defects. A `> 0` cannot be satisfied by a broken scanner, and unlike the
+   * exact literals it says WHY in its own name.
+   */
+  it.each(ROUTES.map((r) => r.label))(
+    "%s: the derived population is NON-EMPTY — no row watches nothing",
+    (label) => {
+      const d = derived.find((x) => x.label === label)!;
+      expect(
+        d.codes.length,
+        `${label} derived ZERO rejection-emitting sites, so every assertion ` +
+          `about this route below passes VACUOUSLY. ⛔ THE REMEDY IS NEVER TO ` +
+          `DELETE THE ROW: a row over an empty population is exactly what a ` +
+          `route with no defects looks like. The two ways a whole route goes to ` +
+          `zero are (a) every arm reordered to \`{ error, code }\` — the state ` +
+          `keys/validate-and-encrypt was in until 161-09, measured — and (b) the ` +
+          `route file moved or renamed, in which case fix the path here.`,
+      ).toBeGreaterThan(0);
+    },
+  );
 
   it.each(ROUTES.map((r) => r.label))(
     "%s: the site count is THIS ROUTE's hand-typed literal — not its own length",
