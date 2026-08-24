@@ -42,8 +42,8 @@ verified-stale items are excluded by construction.
 - [ ] **WIZERR-09** (L1871 + L1879): The 7-row CSV floor is evaluated on the wizard composite arm, and `INSUFFICIENT_CSV_HISTORY` renders its own copy instead of UNKNOWN — landed together or not at all.
 - [ ] **WIZERR-10** (L1883 + L1907): Examined-but-refused verdicts render truthful copy (a fourth outcome replaces the false "only 0 trade(s)" sentence; the publish-time TOCTOU re-check wording follows), with D-15's oracle re-cut deliberately.
 - [ ] **WIZERR-11** (L1948): Wizard `AUTH_FAILED` copy is parameterized by the selected venue — never names Deribit while Binance is selected.
-- [ ] **WIZERR-12** (L3091): The csv-finalize A2 409 sentence describes the actual case (same track record, different flow).
-- [ ] **WIZERR-13** (L1518): The per-row CSV breakdown renders its data half without leaking `'nan'` or echoing untrusted cell contents.
+- [x] **WIZERR-12** (L3091): The csv-finalize A2 409 sentence describes the actual case (same track record, different flow).
+- [x] **WIZERR-13** (L1518): The per-row CSV breakdown renders its data half without leaking `'nan'` or echoing untrusted cell contents.
 
 ### HONEST — User-visible data honesty
 
@@ -129,8 +129,8 @@ Which phases cover which requirements. Updated during roadmap creation.
 | WIZERR-09 | Phase 161 | Pending |
 | WIZERR-10 | Phase 161 | Pending |
 | WIZERR-11 | Phase 161 | Pending |
-| WIZERR-12 | Phase 161 | Pending |
-| WIZERR-13 | Phase 161 | Pending |
+| WIZERR-12 | Phase 161 | Complete |
+| WIZERR-13 | Phase 161 | Complete |
 | HONEST-01 | Phase 162 | Pending |
 | HONEST-02 | Phase 162 | Pending |
 | HONEST-03 | Phase 162 | Pending |
