@@ -2,6 +2,10 @@
 
 **Gathered:** 2026-08-24
 **Status:** Ready for planning
+**Revised:** 2026-08-24 — four `<code_context>` claims CORRECTED after the pattern-mapper
+measured them and I re-verified each independently. The errors were mine (a name-grep that matched
+mentions, not definitions). Corrections are marked ⚠️ inline; the `<decisions>` section is unaffected.
+
 **Mode:** Smart discuss (autonomous). Recommendations AUTO-ACCEPTED — founder was afk and
 asked for autonomous execution. Every decision below is a default I chose, not one the
 founder stated. All are cheap to reverse at plan time; none is a one-way door.
@@ -99,22 +103,34 @@ OUT: new error-handling architecture, retry/backoff redesign, i18n.
   Mapped-type-backed, so a new member without copy fails `tsc`.
 - `recogniseSeamErrorCode` + the `SEAM_CODE_TO_WIZARD_CODE` wire table — the recognition seam
   whose `UNKNOWN` fallback IS the WIZFORM-02 class.
-- `src/lib/routing/route-contract-manifest.ts` — the curated-message fence's manifest.
+- ⚠️ CORRECTED: `src/lib/routing/route-contract-manifest.ts` is **NOT** the curated-message
+  fence — it is a page-routing class manifest. The real 4xx-curated / 5xx-static rule lives at
+  `src/app/api/simulator/route.ts:202-214`. Plan against that.
 - `.planning/codebase/` maps exist (ARCHITECTURE, CONVENTIONS, CONCERNS, INTEGRATIONS, STACK).
 
 ### Established Patterns
 - Wizard steps consume `recogniseSeamErrorCode`: `ConnectKeyStep`, `MultiKeyConnectStep`,
-  `SyncPreviewStep`, `CsvSubmitStep`, `CsvUploadStep` (each with an `.upstream-arm.test.tsx`
-  sibling — the upstream-vs-user-fault distinction is already an established test shape).
+  `SyncPreviewStep`, `CsvSubmitStep`, `CsvUploadStep`. ⚠️ CORRECTED: only **2**
+  `.upstream-arm.test.tsx` siblings exist (both CSV steps), not one per step. The
+  upstream-vs-user-fault test shape is established but NOT yet applied across the roster.
 - Server routes mint `code: "UNKNOWN"` directly at ~10 sites incl. `bridge`, `wizard-draft`,
   `composite/set-members`, `composite/members`.
 - Anti-vacuity neuter-and-restore is the house verification method.
 
 ### Integration Points
-- The three dialogs in SC-3 do not live where their names suggest — confirm before planning:
-  `AllocateDialog` → `strategies/new/wizard/ValidateWaitCard.tsx`;
-  `RenameStrategyDialog` → `factsheet/[id]/v2/FactsheetView.tsx`;
-  `MarkOwnershipDialog` → `my-strategies/MyStrategiesSection.tsx`.
+- ⚠️ CORRECTED (measured at the `export function` definition, 2026-08-24). My first pass
+  recorded these from a grep that matched the first file MENTIONING each name rather than
+  defining it — all three were wrong. Real locations:
+  `AllocateDialog` → `src/app/(dashboard)/allocations/components/AllocateDialog.tsx:175`;
+  `RenameStrategyDialog` → `src/components/strategy/RenameStrategyDialog.tsx:66`;
+  `MarkOwnershipDialog` → `src/components/strategy/MarkOwnershipDialog.tsx:52`.
+  ⭐ All three match on `body.error`, **not** on `code` — so "stop minting `code: UNKNOWN`"
+  understates the work: they do not consume the code channel at all today.
+- ⛔ **SC-1 has an unconfirmed premise.** `tradeapi_disabled` / `trade_allowed` have **ZERO**
+  occurrences anywhere in `src/` — the sensor is Python
+  (`analytics-service/services/mt5_validation.py`). The flags do not currently reach the TS copy
+  layer, so "six carrier sites" cannot be taken at face value. Confirm the wire shape (what the
+  gateway actually returns to Next) BEFORE planning SC-1, and correct the count by measurement.
 - `keys/[id]/permissions` route — the private `PROBE_*` cascade needing a derived-population law.
 
 </code_context>
