@@ -1805,3 +1805,135 @@ describe("[156 / CONNECT-02 + CONNECT-03] composite/add-key — the service-role
     consoleErr.mockRestore();
   });
 });
+
+/**
+ * ⭐ 161-06 / WIZERR-05 — THE TWIN RELAY. The mirror image of the
+ * `[161-06 / WIZERR-05]` describe in `create-with-key/route.test.ts`.
+ *
+ * ⚠️ ASSERTED PER ROUTE, ON PURPOSE. WIZERR-05 says "BOTH key-route catches",
+ * and the two catches are the single most repeated one-route half-fix in this
+ * milestone. An aggregate assertion over the pair — or a test that only
+ * exercised the shared helper — would let either route drop its call and stay
+ * green. So each case names its route in its title, and the numbers here
+ * (15, from `RETRY_AFTER_SECONDS["supabase"]`) deliberately differ from the
+ * sibling's (30, mt5-gateway): a cross-wired fixture cannot pass both.
+ *
+ * `retryAfterSeconds` is duck-typed off the caught value with `typeof`, never
+ * `instanceof` — the `@/lib/analytics-client` mock at the top of this file is a
+ * bare factory, so the class is `undefined` here and an `instanceof` in the
+ * route would throw from inside the catch. These mocks reproduce the real shape
+ * the seam now throws.
+ */
+describe("[161-06 / WIZERR-05] composite/add-key — the Retry-After relay", () => {
+  beforeEach(resetHappyMocks);
+
+  /** The seam's 503 as it now arrives, wait included. */
+  function seamUnreachable(retryAfterSeconds: number | null) {
+    return Object.assign(
+      new Error("The MetaTrader gateway is not responding. Try again shortly."),
+      {
+        name: "AnalyticsUpstreamError",
+        status: 503,
+        seamCode: "MT5_GATEWAY_UNREACHABLE",
+        dependency: "mt5-gateway",
+        retryAfterSeconds,
+      },
+    );
+  }
+
+  it("[composite/add-key] a seam 503 carrying a wait relays that exact value", async () => {
+    validateKeyMock.mockRejectedValue(seamUnreachable(15));
+    const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+
+    // ⚠️ ARM PROOF FIRST — without this the header assertion would go green
+    // against a fixture that returned before ever reaching the catch.
+    expect(res.status).toBe(503);
+    expect((await res.json()).code).toBe("SERVICE_UNREACHABLE");
+
+    expect(
+      res.headers.get("Retry-After"),
+      "The '+ Add another key' path must relay the upstream's wait exactly as " +
+        "the single-key path does. Fixing one route of this pair and not the " +
+        "other is the failure this case exists to name.",
+    ).toBe("15");
+    consoleErr.mockRestore();
+  });
+
+  it("[composite/add-key] a seam 503 with NO advertised wait sends NO header (TRAP-3)", async () => {
+    validateKeyMock.mockRejectedValue(seamUnreachable(null));
+    const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+
+    expect(res.status).toBe(503);
+    expect((await res.json()).code).toBe("SERVICE_UNREACHABLE");
+
+    expect(
+      res.headers.get("Retry-After"),
+      "ABSENT, not empty and not zero — the upstream advertised nothing, so " +
+        "this response advertises nothing.",
+    ).toBeNull();
+    expect(res.headers.get("Retry-After")).not.toBe("0");
+    consoleErr.mockRestore();
+  });
+
+  it("[composite/add-key] STALENESS: a wait never outlives the response that carried it", async () => {
+    // ⭐ THE IDEMPOTENCY/CONCURRENCY QUESTION, MADE CONCRETE. If the relayed
+    // value were held anywhere outside the caught error — a module-level
+    // binding, a closure, a memo — the SECOND call would re-advertise the
+    // FIRST call's wait. That is a false sentence about how long to wait, and
+    // it is worse than no sentence: the user waits on a number that describes
+    // an attempt that is already over.
+    const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+    const POST = await importPost();
+
+    validateKeyMock.mockRejectedValue(seamUnreachable(15));
+    const first = await POST(makeReq(VALID_BODY));
+    expect(first.headers.get("Retry-After")).toBe("15");
+
+    // Same handler, same process, same module instance — only the upstream's
+    // answer changed.
+    validateKeyMock.mockRejectedValue(seamUnreachable(null));
+    const second = await POST(makeReq(VALID_BODY));
+
+    expect(second.status).toBe(503);
+    expect(
+      second.headers.get("Retry-After"),
+      "The second attempt's upstream advertised nothing. A '15' here would be " +
+        "the first attempt's wait riding along on a response it does not " +
+        "describe — carried by state this relay must not have.",
+    ).toBeNull();
+    consoleErr.mockRestore();
+  });
+
+  it("[composite/add-key] PRECEDENCE: a breaker trip stamps the breaker's own wait, and exactly one value", async () => {
+    // Two failure modes can now advertise a duration and they mean different
+    // things: the breaker's cooldown is OURS (nothing was sent), the seam's
+    // wait is the UPSTREAM's (something was sent and answered). When the
+    // breaker is open no request leaves this process, so its cooldown is the
+    // only wait that describes what happens next.
+    const { CircuitOpenError } = await import("@/lib/seam-errors");
+    const tripped = Object.assign(new CircuitOpenError(42), {
+      // A wait from a previous, unrelated upstream failure, deliberately
+      // attached to the breaker error to prove the branch cannot double-stamp.
+      retryAfterSeconds: 15,
+    });
+    validateKeyMock.mockRejectedValue(tripped);
+    const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+
+    expect((await res.json()).code).toBe("SERVICE_UNAVAILABLE_RETRY");
+    expect(res.headers.get("Retry-After")).toBe("42");
+    // `Headers.get` comma-joins repeated values, so a comma here IS the
+    // double-stamp this shape is built to make impossible.
+    expect(res.headers.get("Retry-After")).not.toContain(",");
+    expect(res.headers.get("Retry-After")).not.toBe("15");
+    consoleErr.mockRestore();
+  });
+});

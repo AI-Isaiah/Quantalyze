@@ -43,10 +43,14 @@ import { scrubSeamError } from "@/lib/seam-redaction";
 // env-derived token still redacts, so the obvious assertion stays GREEN while
 // the raw exchange credential ships verbatim.
 import { captureToSentry } from "@/lib/sentry-capture";
-// The dependency-free leaf. `analytics-client` re-exports the class, but this
-// route must not depend on that re-export: it is wholesale-mocked by the route
-// test files, where `instanceof` against an undefined binding throws.
-import { CircuitOpenError } from "@/lib/seam-errors";
+// 161-06 / WIZERR-05 — the ONE decision about whether this failure response may
+// advertise a wait, and whose it is. SHARED with this route's twin so the pair
+// cannot diverge on it. `CircuitOpenError` moved in there with the branch that
+// reads it, and the reason it must be imported from the dependency-free leaf
+// rather than through `analytics-client`'s re-export moved with it: the route
+// test files mock that module wholesale, where `instanceof` against an
+// undefined binding throws.
+import { keyRouteFailureHeaders } from "@/lib/api/seam-retry-after";
 import type { User } from "@supabase/supabase-js";
 
 /**
@@ -716,12 +720,21 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
     }
 
     // Mirror the `Retry-After` the resilience core already publishes on its own
-    // 503 envelope. `retryAfterS` is the breaker cooldown TTL — the only dynamic
-    // value CircuitOpenError exposes.
-    const headers =
-      err instanceof CircuitOpenError
-        ? { ...NO_STORE_HEADERS, "Retry-After": String(err.retryAfterS) }
-        : NO_STORE_HEADERS;
+    // 503 envelope — AND, since 161-06 / WIZERR-05, relay the wait the UPSTREAM
+    // itself advertised when it was the upstream and not the breaker that
+    // failed. WIZERR-05 says BOTH key-route catches, and this is the one that
+    // gets forgotten: `create-with-key` is where a new arm is written and this
+    // twin is where it is not mirrored.
+    //
+    // ⭐ ONE SHARED FUNCTION, NOT A SECOND HAND-COPIED TERNARY. Both halves,
+    // their precedence (the breaker wins — nothing left this process) and
+    // TRAP-3's absence rule live in `keyRouteFailureHeaders`' docblock. The two
+    // catches previously carried the same ternary twice, kept in step by a
+    // comment in each file pointing at the other — the arrangement
+    // `strategyGate.ts` records diverging anyway.
+    //
+    // ⚠️ Placement unchanged: AFTER the classify call, BEFORE the return.
+    const headers = keyRouteFailureHeaders(err);
     return NextResponse.json({ code }, { status, headers });
   }
 });

@@ -44,10 +44,14 @@ import { createAdminClient } from "@/lib/supabase/admin";
 // chokepoint (SEAMCORE-06), and pre-scrubbing here would hand Sentry a string,
 // destroying grouping and the stack.
 import { captureToSentry } from "@/lib/sentry-capture";
-// The dependency-free leaf. `analytics-client` re-exports the class, but this
-// route must not depend on that re-export: it is wholesale-mocked by the route
-// test files, where `instanceof` against an undefined binding throws.
-import { CircuitOpenError } from "@/lib/seam-errors";
+// 161-06 / WIZERR-05 — the ONE decision about whether this failure response may
+// advertise a wait, and whose it is. SHARED with this route's twin so the pair
+// cannot diverge on it. `CircuitOpenError` moved in there with the branch that
+// reads it, and the reason it must be imported from the dependency-free leaf
+// rather than through `analytics-client`'s re-export moved with it: the route
+// test files mock that module wholesale, where `instanceof` against an
+// undefined binding throws.
+import { keyRouteFailureHeaders } from "@/lib/api/seam-retry-after";
 import type { User } from "@supabase/supabase-js";
 
 /**
@@ -1272,50 +1276,22 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
 
     // Mirror the `Retry-After` the resilience core already publishes on its own
     // 503 envelope, so a breaker trip is retryable by contract and not just by
-    // copy. `retryAfterS` is the breaker cooldown TTL — the only dynamic value
-    // CircuitOpenError exposes, and the same class of information
-    // `rateLimitDenyJson` already returns.
+    // copy — AND, since 161-06 / WIZERR-05, relay the wait the UPSTREAM itself
+    // advertised when it was the upstream and not the breaker that failed.
     //
-    // ⭐ 161-06 / WIZERR-05 — THE SECOND SOURCE OF A WAIT, AND THE PRECEDENCE
-    // BETWEEN THEM, WRITTEN DOWN.
+    // ⭐ THE WHOLE DECISION LIVES IN `keyRouteFailureHeaders`, NOT HERE. Both
+    // halves — the breaker cooldown and the seam's own wait — plus the
+    // precedence between them and TRAP-3's absence rule are that function's
+    // docblock. It is SHARED with `composite/add-key`, whose catch is this
+    // one's twin: the two previously carried a hand-duplicated ternary kept in
+    // step by comments in both files, which is exactly the arrangement
+    // `strategyGate.ts` records diverging anyway.
     //
-    // Two different failures can now advertise a duration and they are NOT
-    // interchangeable: the breaker's value is OUR cooldown (we declined to
-    // send), while `retryAfterSeconds` is the UPSTREAM's own advice carried
-    // across the seam from `RETRY_AFTER_SECONDS` (we sent, and the service
-    // answered 503 with a wait). PRECEDENCE: the breaker wins. When it is open
-    // no request leaves this process at all, so its cooldown is the only wait
-    // that describes what will actually happen next; a stale upstream wait from
-    // the error that tripped it would under-advertise by design.
-    //
-    // ⚠️ ONE CONDITIONAL EXPRESSION SELECTING ONE HEADERS OBJECT — deliberately
-    // NOT two successive spreads. Two spreads let the later silently overwrite
-    // the earlier, which is exactly how a response ends up advertising a wait
-    // belonging to the other failure mode. Written this way, "at most one
-    // Retry-After, and we know whose" is a property of the SHAPE.
-    //
-    // ⛔ `typeof`, NOT `instanceof AnalyticsUpstreamError`. Every route test
-    // that mocks the seam client wholesale does `vi.mock("@/lib/analytics-client")`,
-    // so the class is `undefined` inside those suites and an `instanceof` here
-    // would throw from inside a catch block — the same reasoning
-    // `wizardErrors.ts` records for `seamCode`, and the same read.
-    //
-    // ⛔ TRAP-3 — `> 0`, not merely "is a number". Absence stays absence: no
-    // header at all, never `0`. Zero is not "no wait"; it is an instruction to
-    // retry immediately, a duration nobody advertised. Our own seam cannot
-    // produce it (`parseRetryAfterSeconds` returns strictly positive or null),
-    // but this catch cannot verify that about a value it was merely handed.
-    const advertisedWait = (
-      err as { retryAfterSeconds?: unknown } | null | undefined
-    )?.retryAfterSeconds;
-    const headers =
-      err instanceof CircuitOpenError
-        ? { ...NO_STORE_HEADERS, "Retry-After": String(err.retryAfterS) }
-        : typeof advertisedWait === "number" &&
-            Number.isFinite(advertisedWait) &&
-            advertisedWait > 0
-          ? { ...NO_STORE_HEADERS, "Retry-After": String(advertisedWait) }
-          : NO_STORE_HEADERS;
+    // ⚠️ Placement is unchanged and still deliberate: AFTER the classify call
+    // and BEFORE the return, so this route's breaker cell is left exactly as it
+    // was — the caught VALUE still reaches the shared classifier unmodified and
+    // the status is still the classifier's.
+    const headers = keyRouteFailureHeaders(err);
     return NextResponse.json({ code }, { status, headers });
   }
 });
