@@ -154,8 +154,35 @@ const SCAN_EXCLUSIONS: readonly ScanExclusion[] = [
     // inherited assumption. The code list does NOT move: that file's literals
     // are EXCHANGE_UNAVAILABLE / NETWORK_UNAVAILABLE / RATE_LIMITED, all three
     // already in the population from real emitters.
-    removesSites: 57,
+    //
+    // 57 → 59 (2026-08-24, Phase 161-03 / WIZERR-13). ⛔ NOTHING WAS EXCLUDED
+    // — the SUBTREE grew, and the argument is different from the two above, so
+    // read it rather than inheriting them. `test_process_key.py` gained the
+    // forwarding cases for the per-row CSV breakdown; two of their fixture
+    // `ValidationResult`s carry an `error_code` literal (COLUMN_IN_DATAFRAME
+    // and AUTH_FAILED), which is two new sites and one new code.
+    //
+    // ⚠️ AND COLUMN_IN_DATAFRAME IS NOT A FICTION, UNLIKE THE OTHER THREE.
+    // `services/ingestion/csv_adapter.py` sets `error_code=first_rule.upper()`
+    // on a CSV rejection, so every pandera rule name is a REAL wire code and
+    // `column_in_dataframe` is a real rule (measured firing this session on a
+    // daily_returns upload whose value column is misnamed). The fixture is a
+    // faithful mirror of production, not an invented one.
+    //
+    // That does NOT make the exclusion wrong, and it is worth being exact
+    // about why: this pin guards "does the tests subtree contain an emitter a
+    // USER can reach", and a test file emits nothing to anyone. What the
+    // finding actually exposes is a hole the scanner has always had and this
+    // subtree merely reflects — a computed `first_rule.upper()` code is
+    // invisible to a literal scan, so the whole `first_rule` family is absent
+    // from the derived population and has no TypeScript disposition. That is
+    // the wizardErrors.ts CSV_VALIDATION_FAILED docblock's third measured
+    // reason ("THE CODE IS A RULE NAME"), it predates this change, and it is
+    // booked in .planning/phases/161-wizerr-honest-error-surfaces/
+    // deferred-items.md rather than absorbed here.
+    removesSites: 59,
     removesCodes: [
+      "COLUMN_IN_DATAFRAME",
       "CSV_PARSE_FAILED",
       "SOME_FUTURE_CODE",
       "SOME_FUTURE_UNLISTABLE_CODE",
