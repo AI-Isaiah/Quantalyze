@@ -181,7 +181,35 @@
 --     LOUD.
 --
 -- Any disagreement between the two ends therefore resolves TOWARD the loud
--- path. There is no input that resolves toward suppression.
+-- path.
+--
+-- ⛔ THIS USED TO END "There is no input that resolves toward suppression."
+--    That absolute was FALSE, and it was falsified by MEASUREMENT during this
+--    phase's red-team round, not by argument. The bullets above all reason about
+--    who WRITES the marker. There is a third case: nobody writes it, because
+--    `_enqueue_compute_job_internal` dedupes on (target, kind) and, on a hit,
+--    `RETURN v_existing_id` -- DISCARDING p_metadata. A user's resync tail whose
+--    (strategy, kind) collides with a live fan-out job is handed the MARKED row,
+--    and inherits protection it never asked for.
+--
+--    Measured: the reused row kept `source = 'ledger-refresh'`, the caller's
+--    correlation_id was gone, and on a `complete_with_warnings` row branch (a)
+--    preserved the status, so the Python guard armed and the wizard poller --
+--    which treats that status as terminal -- stopped over a stale factsheet. On
+--    a plain `complete` row branch (a) writes 'computing' and everything stays
+--    loud. The production ledger cohort was complete 0 / cwW 5, so the case that
+--    ARMS was the whole live estate and the case that fails safe was none of it.
+--
+--    CLOSED IN PYTHON, not here: the resync tail reads back the job the RPC
+--    actually handed it and RETRACTS the marker (a write to `source`, the exact
+--    expression both this bridge and the Python guard read), and the two sites
+--    that honour the marker re-ask the row rather than trusting claim-time
+--    metadata. The durable closure is a metadata MERGE arm in
+--    enqueue_compute_job -- filed, deliberately not attempted same-day, because
+--    that RPC is on every enqueue path in the system.
+--
+--    Keep the qualified sentence. Do NOT restore the absolute: the property
+--    holds because reuse is retracted, not because reuse cannot happen.
 --
 -- ⛔ THAT LAST BULLET USED TO END "The wizard's SyncPreviewStep poller keeps its
 -- terminal gate." It was FALSE, and the correction is worth more than the
