@@ -26,8 +26,58 @@ items were dropped, not carried. Categories: **Fix now** / **Fix mid-term** / **
 
 ## 🔴 FIX NOW — live correctness, trust-boundary security, active go-live
 
-0.05. **🚨 LIVE PROD OUTAGE — Vercel's `ANALYTICS_SERVICE_KEY` no longer matches Railway's
-   `SERVICE_KEY`.** Every guarded analytics route returns 401. Found 2026-08-25 by a live prod
+0.04. **⚠️ PYAPI-06 cannot detect the outage it was built to detect — the client's silent
+   header-omission and the server's noise filter compose into a blind spot.** Found while
+   root-causing 0.05, which PYAPI-06 sat through in total silence.
+   - `src/lib/analytics-client.ts:466` — `...(SERVICE_KEY && { "X-Service-Key": SERVICE_KEY })`
+     OMITS the header entirely when the key is falsy. No throw, no log, no startup failure: an
+     unconfigured platform secret silently degrades into an ANONYMOUS request.
+   - `analytics-service/main.py:802` — PYAPI-06 site 5 captures the mismatch only `if provided:`.
+     An absent header is deliberately treated as "internet background noise" from a prober, and
+     that reasoning is CORRECT in isolation — an unauthenticated prober must not page anyone.
+   - **Composed, they cancel out.** The one caller that can legitimately send an absent header is
+     OUR OWN service with an empty key, and that is precisely the case the server discards. So the
+     complete-outage variant is the ONE variant with no signal, while the milder stale-value
+     variant (which at least still authenticates as *someone*) is loudly captured. The safeguard is
+     inverted with respect to severity.
+   - **MEASURED, not theorised:** five consecutive `POST /api/validate-key 401` in Railway logs
+     (2026-08-25 20:52 → 21:27) with ZERO `service_key.mismatch` lines. Meanwhile `/health` stayed
+     green, `/process-key` and `/internal/*` kept working (both exempt from the gate), and the 4xx
+     never tripped the 140.2 breaker. Every alarm the system has was, by design, looking elsewhere.
+   - **Blast radius while blind:** all exchange key-connects on every non-wizard surface, key-scope
+     verification, AND the scheduled `/api/match/cron-recompute` job — silently, for an unknown
+     duration. `api_keys` had been frozen at 32 rows since 2026-08-23.
+   - ⭐ **FIX (founder: goes in PHASE 164.1, the guards phase):**
+     1. Client — an empty `ANALYTICS_SERVICE_KEY` must FAIL LOUD at startup, not omit a header.
+        Mirror `mintTenantClaim`'s existing refusal discipline (`analytics-client.ts:415-422`
+        already argues exactly this for the tenant claim, and the same argument was never applied
+        one line down to the service key).
+     2. Server — distinguish "absent header from a caller that reached a guarded route" from a
+        prober, OR make the client's loud failure the guarantee that absence really is noise.
+        Do NOT simply dedent the capture out of `if provided:` — the comment there is right that
+        doing so buries the signal under internet scan traffic.
+     3. Acceptance is a RED-witnessed test, per project rule: set the key empty, assert the seam
+        REFUSES rather than sending an anonymous request. Neuter the guard, observe the failure
+        first-hand, restore byte-identically.
+   - **Also route to HONEST-01 (Phase 162):** a forwarded upstream `Unauthorized` rendered on a
+     credential form as user-facing copy. It reads as "your key was rejected" when the truth is
+     "our service auth is broken" — the founder reasonably concluded their own key was bad. Exactly
+     the class 162 exists to close, and a real instance of it costing real debugging time.
+
+
+0.05. **✅ RESOLVED 2026-08-25 22:29 SAST — was a LIVE PROD OUTAGE: Vercel's `ANALYTICS_SERVICE_KEY` did not match Railway's `SERVICE_KEY`.**
+   - **Fix:** founder re-copied Railway's `SERVICE_KEY` into Vercel (Production, Sensitive) and
+     redeployed. Verified by probe: the boundary now returns `424 AUTH_FAILED` ("Authentication failed. Check your API key and secret.") for FAKE credentials, where it
+     previously returned `401 {"error":"Unauthorized","code":"UNKNOWN"}` for every key. The
+     424 proves the call is authenticated and reached the exchange.
+   - ⚠️ **ROOT CAUSE CORRECTION (supersedes the 'stale value' wording below).** Vercel was
+     sending NO `X-Service-Key` header at all, not a wrong one. Proof: `service_key.mismatch`
+     never appeared in Railway logs across five 401s, and that line only fires when the header
+     is non-empty. A stale value would have logged; an absent one did not.
+   - ⚠️ **A redeploy takes ~1 minute to cut over.** The first post-redeploy probe still hit the
+     OLD deployment id and returned the old 401 — nearly read as "the fix did not work".
+     Always confirm the serving `dep=` id changed before judging a config fix.
+   - ORIGINAL DIAGNOSIS FOLLOWS (kept for the evidence trail): Every guarded analytics route returns 401. Found 2026-08-25 by a live prod
    connect attempt, confirmed at BOTH ends with matching timestamps.
    - **Evidence (Railway deploy log, prod):** `POST /api/validate-key 401 Unauthorized` at
      20:52:40, 21:00:11, 21:12:59 (three real founder attempts) and 21:16:29 (a deliberate
