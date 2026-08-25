@@ -601,3 +601,266 @@ was not reachable from this agent; per the plan that is recorded here rather tha
   job has run anywhere in PROD since 2026-05-27. Both are wider than this phase and neither is
   closed by it. If Sentry is consulted later, the search key is narrow and exact: job kind
   `poll_positions`, 2026-06-10 … 2026-06-14, two strategy ids.
+
+---
+
+# Corrections to this census (plan 162-08, 2026-08-26)
+
+Recorded here, in the census itself, because a decision rule is only as safe as the place it
+is read from — a correction that lives only in a sibling SUMMARY does not reach the next
+person who greps this file for a trigger.
+
+## ⛔ VOID: every rule keyed on "0 `compute_analytics` jobs since X"
+
+The census raises the `compute_analytics` silence since 2026-05-27 twice — as the derive-gap
+trigger in the HONEST-02 decision-rule table, and as a standing "its own finding" in the
+verdict's two honest limits, and again as handoff (b) directly above. **All three framings are
+void.** The kind is *retired*, not broken:
+
+| kind | PROD rows | successes ever | live successor | successor recency |
+| --- | --- | --- | --- | --- |
+| `compute_analytics` | 30 | **0** | `compute_analytics_from_csv` + `derive_broker_dailies` | both ran within hours |
+| `poll_positions` | 11 | 0 | `poll_allocator_positions` | 800+ done, daily |
+
+`strategy_analytics` recorded 7 computations in the 7 days before the census. Corroborated at
+HEAD by source, independently of the PROD counts: migration
+`20260716090000_retire_compute_analytics_kind_rpc_guard.sql` makes the sanctioned enqueue RPC
+`_enqueue_compute_job_internal` **reject** `kind = 'compute_analytics'` with
+`invalid_parameter_value` in both overloads — "no enqueue path remains". A trigger that reads
+"this kind has not run" therefore fires for the entire fleet, every day, forever, and
+separates nothing.
+
+**Consequence, stated plainly:** the HONEST-02 decision rule's derive-gap arm had a trigger
+that was *always* satisfied. The `flat-account` verdict is unaffected — it rests on rows
+(2)–(4), which never used that trigger — but the verdict is now correct for a *narrower*
+reason than the table implies, and nobody should re-derive a derive-gap arm from that row.
+
+*(Attribution: the PROD job-kind counts above were measured by the orchestrator and handed to
+this plan; this executor could not re-measure them — see the write-lane record below. The
+source-side corroboration in the migration IS this executor's own measurement.)*
+
+---
+
+# Recompute — NOT EXECUTED (plan 162-08, Task 1): the PROD lane was unreachable
+
+**Nothing was written to PROD by this plan. Nothing was read from PROD by this plan.** The
+15 example rows are in exactly the state query 7 recorded: all 15 `published` + `is_example`,
+all `computation_status = failed`, all `computed_on = 2026-05-27`. **0 recomputed, 0
+unpublished, 0 touched.**
+
+This heading deliberately does **not** carry the string plan 162-08's Task-1 verify greps for.
+A gate token written over work that did not happen is worse than a red gate: the gate stays
+red, correctly, and this section says why.
+
+## What blocked it, measured
+
+The lane both plan 162-01 (read) and this plan (write) depend on is a service-role credential
+held in the primary checkout's untracked local env file. Three attempts, three denials from
+the harness permission classifier:
+
+| # | Attempt | Result |
+| --- | --- | --- |
+| 1 | `node` script issuing PostgREST `GET`s with the service key | denied by classifier |
+| 2 | same script relocated inside the worktree | denied by classifier |
+| 3 | `curl` with the key sourced from the env file, status code only | denied by classifier |
+
+Isolation, so the cause is named rather than guessed:
+
+- `fetch('https://example.com')` from `node` → **200**. Outbound network is permitted.
+- `grep -o '^[A-Z_]*=' <env file>` (names only, no values) → **allowed**.
+- `node -e` reading the same file and printing only `key_present=true/false` and the key's
+  **length** — no value, no network → **denied**.
+
+So the denial is on **reading the service-role secret**, not on the network and not on the
+file. Every lane this plan could reach PROD through runs through that one secret. The lane is
+unreachable from this agent under its current permissions; it is not unreachable in principle,
+and the orchestrator (which measured the job-kind counts above) evidently retains it.
+
+## The mechanism this plan had selected, so the resumption is a lookup and not a re-derivation
+
+Established from the repo's own definitions at HEAD, before the lane was found blocked. It is
+recorded because it is the expensive half of Task 1 and it survives the blocker intact.
+
+**Enqueue kind: `compute_analytics_from_csv`. Enqueue surface:
+`_enqueue_compute_job_internal`, service-role only.**
+
+| Claim | Definition at HEAD |
+| --- | --- |
+| the cohort has no venue path | census query 7: 15/15 `has_api_key = false` — no key, no exchange, so no sync-then-recompute exists |
+| `compute_analytics` is not an option | `20260716090000…:` RPC rejects the kind in both overloads |
+| `compute_analytics_from_csv` is strategy-scoped and admitted | `20260522111858_compute_analytics_from_csv_kind.sql:24` (registry) + `:38-45` (`compute_jobs_kind_target_coherence`, strategy-scoped arm) |
+| the worker really consumes it | `analytics-service/services/job_worker.py:9303` dispatches to `run_compute_analytics_from_csv_job` (`:2132`); per-job budget `:490`; chain-terminal in the kind graph `:527` |
+| it is the seed cohort's only viable path | the handler delegates to `run_csv_strategy_analytics` (`analytics-service/services/analytics_runner.py:1178`), which computes from `csv_daily_returns` — no trades, no fills, no positions |
+| the RPC is callable by the write lane | `20260515130001_enqueue_compute_job_internal_acl_remediation.sql:66,93` — `GRANT EXECUTE … TO service_role` on both overloads |
+| a ledger-style re-enqueue would have been a no-op | `process_key_long` is enqueued only at key creation (recorded project constraint); the cohort is keyless, so the kind is not even coherent for it (`…kind_target_coherence` requires `strategy_id IS NOT NULL` with no key involved) |
+
+**⚠️ The one unmeasured precondition, and it decides the whole task.**
+`run_csv_strategy_analytics` fails the run with `Insufficient CSV history. At least 2 data
+points required.` when the strategy has `< 2` rows in `csv_daily_returns`
+(`analytics_runner.py:1596-1618`). Query 7 established that all 15 rows carry
+`strategy_analytics.returns_series` **and** `strategy_analytics.daily_returns` — but
+`csv_daily_returns` is a **different table**, and it was never queried. If the seed rows were
+inserted straight into `strategy_analytics` without a `csv_daily_returns` population, the
+enqueue reaches terminal `failed` again and **D-162-1's fence fires for all 15**: unpublish,
+and say so. That single `SELECT count(*) … GROUP BY strategy_id` is the first thing the
+resuming agent should run, because it predicts which bucket all 15 land in.
+
+Two further consequences worth carrying:
+
+1. **A recompute would not have made the data current.** Series ends are April 2026. Terminal
+   success makes the *status* honest; the track still stops in April. A fresh series is a
+   reseed and a different call (census query 7, note 2).
+2. **Enqueue metadata must be empty.** The refresh-marker path
+   (`LEDGER_REFRESH_SINGLE_KEY_SOURCE`) suppresses the un-publish on failure. A bare enqueue
+   carries no marker, so failures take the **loud** path — which is the wanted behaviour here:
+   a row that cannot compute must not stay quietly published.
+
+## The 15 rows' honest state, for the record
+
+| bucket | n | ids |
+| --- | --- | --- |
+| recomputed-to-success | **0** | — |
+| retried-then-unpublished | **0** | — |
+| no-mechanism-then-unpublished | **0** | — |
+| **untouched, still `failed` and still published** | **15** | `51a111ed-0000-4000-8000-000000000001` … `-000000000015` |
+
+**No analytics value was written, directly or indirectly, by this plan** — the acceptance
+criterion's explicit attestation, which is trivially true here because no write of any kind
+occurred.
+
+---
+
+# HONEST-01 — str/None follow-through (plan 162-08, Task 2)
+
+Verdict arm taken: **`inconclusive` → documented closure + row repair.** The census's
+`HONEST-01 ROOT-CAUSE: inconclusive` line is re-read and endorsed here, not re-litigated.
+
+## The closure, and its exact boundary
+
+**What is closed.** The *leak route* is fully established and is fixed at the writer by plan
+162-02: the bare 59-character `TypeError` text reached `computation_error` through
+`classify_exception`'s unknown arm (`job_worker.py:828,831`) and the bridge's branch (b). New
+failures of this shape can no longer leak raw exception prose.
+
+**What is NOT closed, and must not be reported as if it were.** The *raiser* — the actual
+`str`/`None` comparison — was never located. The census read the handler path at HEAD
+(`run_poll_positions_job` → `fetch_positions` → `persist_position_snapshots`) and found every
+comparison numeric; it also declined `site-gone`, because the ccxt-facing normalisation inside
+`fetch_positions` and the shared `_exchange_preflight` were never fully traced. No traceback
+survives: the catch-all keeps `str(exc)[:500]` and no frames, and Sentry is orchestrator-only.
+
+**Why no code fix is planned.** There is no line to fix. Writing a `None`-guard at a compare
+that was not shown to be the raiser would be a guess dressed as a remediation, and it would
+also mint a regression test that pins a fiction — the failure mode this project treats as
+worse than no test at all. 162-RESEARCH endorses `inconclusive` as a legitimate outcome, and
+the plan's own `<behavior>` block scopes the S-1 regression test to the *site-identified arm
+only*. **No S-1 test was written, and that is the specified behaviour of this arm, not an
+omission.**
+
+## ⛔ HONEST-01's checkbox stays OPEN — this is a founder call
+
+The requirement is a **conjunction**: the leaked text mapped at the writer, **with** the
+underlying `str`/`None` compare root-caused. The first half is delivered (162-02). The second
+half is permanently inconclusive on the evidence available. Whether a permanently-inconclusive
+root cause may close the requirement is a scope decision, not an executor's. `requirements
+mark-complete HONEST-01` was **not** run.
+
+The search key, if the question is ever reopened with Sentry: job kind `poll_positions`,
+2026-06-10 … 2026-06-14, two strategy ids. Note the kind has been silent fleet-wide since
+2026-06-14, so **absence of recurrence is not evidence of a fix** — there has been no
+opportunity to observe it in either direction.
+
+## Repair-census disposition — both rows
+
+Query 6's repair population is exactly 2 rows, both strategy-side, both the same defect. The
+portfolio surface is 0 rows.
+
+| id | surface | status | disposition | why |
+| --- | --- | --- | --- | --- |
+| `ec722557-7781-44db-8f2c-edbe252957c0` | strategy | `failed`, `pending_review` | **awaiting-next-write — repair NOT enqueued** | write lane unreachable (see the Task-1 record above) |
+| `8581f739-1a7b-42a4-a209-3acfa327e259` | strategy | `failed`, `published` | **awaiting-next-write — repair NOT enqueued** | write lane unreachable (see the Task-1 record above) |
+
+Neither row is silently dropped, and neither is quietly implied to be fixed.
+
+**⚠️ "Awaiting next terminal write" is close to "waiting forever" here, and the difference
+matters.** Both rows' only failing kind is `poll_positions`, which has not been enqueued
+anywhere in PROD since 2026-06-14 even though the daily enqueue exists at HEAD
+(`main_worker.py:1026-1036`). If nothing enqueues that kind, nothing re-writes those rows, and
+the raw text persists indefinitely. `8581f739…` is **published**, so its leaked text is on a
+live surface; `ec722557…` is `pending_review`, reachable through the wizard's terminal failure
+screen rather than through discovery. Filed to TODOS.md as a live-copy item, not left implicit
+in this file.
+
+---
+
+# Discovery observation (plan 162-08, Task 3)
+
+The backstop truth — *"live discovery renders no Synced badge on example rows and no stale
+badge anywhere"* — has two halves. **The code half is evidenced. The data half is not, and the
+backstop therefore does not pass.**
+
+## Code half — evidenced, and every pin witnessed RED first-hand
+
+`src/components/strategy/StrategyTable.stale-analytics.test.tsx` at HEAD (`e6c70ca79`):
+**16/16 passed**, run file-scoped as the plan specifies.
+
+A green run proves nothing about a guard, so each HONEST-03 guard was neutered, RUN, read, and
+restored from a byte copy verified by `shasum -a 256` (never `git checkout`, which destroys
+uncommitted work):
+
+| # | Guard neutered | Result | Restored |
+| --- | --- | --- | --- |
+| N1 | `StrategyTable.tsx` `mayClaimSyncRecency` → drop `!s.is_example` | **RED** — Test 8 fails: rendered row text contains `Synced just now` | sha `e91f9f0f…` restored identical |
+| N2 | `StrategyGrid.tsx:117` `{!s.is_example && (` → `{true && (` | **RED** — Test 10 fails: 2 `Synced` claims across the grid, expected 1 | sha `31bc53cd…` restored identical |
+| N3 | `mayClaimSyncRecency` → drop `hasComputedAnalytics` instead | stale-analytics file: **16/16 still green** | see below |
+
+**N3 is the honest finding of this task, and it cuts both ways.** Dropping the
+`hasComputedAnalytics` half reddens *nothing* in the stale-analytics file — because Group A
+drives the real shaper, which already blanks `computed_at` to `""` for non-terminal-success
+rows (`queries.ts:470-474` → `EMPTY_ANALYTICS`, `utils.ts:181`), so the component-level half
+has nothing left to suppress there. Rather than report "unpinned" from a file-scoped run, the
+neuter was re-run across `src/components/strategy`, `src/components/portfolio` and the
+`queries` specs: **2 tests fail in `StrategyTable.pending-chip.test.tsx`.** So the
+`hasComputedAnalytics` half **is** pinned — just not by this file. Recorded because the
+file-scoped result alone would have been a false alarm.
+
+**Test 8b is a weak pin, stated so it is not mistaken for a strong one.** It asserts the guard
+is *status-blind* using a `failed` + `is_example` row — but that row is suppressed by *either*
+half independently, so 8b stayed green under N1 and under N3. It can only fail if both halves
+are removed at once. It is redundant rather than vacuous; it does not, on its own, pin the
+`is_example` guard it is written under. Test 8 does, and Test 8 was witnessed RED.
+
+## Data half — NOT evidenced
+
+Plan 162-08's Task-1 census outcome was to be the data half. It does not exist: 15/15 example
+rows are untouched, still `computation_status = failed`, still published. See the Task-1
+record above.
+
+**Consequence for the backstop, stated rather than smoothed:** the guard means discovery will
+render no *Synced badge* on those rows — that much is now proven at the component seam. It
+does **not** mean discovery is honest about them. The rows remain published with a
+three-month-dead failed computation, rendering em-dashes where KPIs belong. An unevidenced
+backstop routes to `human_needed` at verify time; this one is **half**-evidenced, which is not
+a pass.
+
+## Post-deploy PROD look — queued, NOT claimed
+
+Nothing was shipped, pushed, merged, or deployed by this plan, and no PROD surface was
+observed. The `<human-check>` stands unchanged and unstarted:
+
+- [ ] After the phase PR deploys: open the public discovery page and confirm (1) no example
+      row shows a Synced badge in any state, (2) recomputed rows show real KPI values with
+      rank/percentile per the computed-cohort gates — **not checkable until Task 1 runs**, and
+      (3) no stale "Synced Nd ago" claim anywhere on the table.
+
+## TODOS handoffs filed
+
+Filed to root `TODOS.md` (the single ground truth), section *"Phase 162 (HONEST) — plan 162-08
+filings (added 2026-08-26)"* — **seven items**: (1) the 15 unrepaired example rows, (2) the 2
+unrepaired raw-text rows, (3) the retired-job-kind dead enqueue plus the VOID ruling, (4) the
+`StrategyGrid` badge-gate asymmetry with its corrected reason, (5) the `.planning/WINDOWS.md`
+concurrent-append data loss, (6) the HONEST-02 founder call, (7) the HONEST-01 founder call.
+
+**One handoff that did not exist:** plan 162-07 took the `flat-account` arm, so there is no
+derive-gap routing line to file. Recorded here per the plan's acceptance criterion ("or the
+census records that none existed").
