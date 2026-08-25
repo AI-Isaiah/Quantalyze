@@ -499,9 +499,18 @@ REVOKE ALL ON FUNCTION public.enqueue_ledger_refresh_for_strategies()
 -- covered by supabase/tests/test_ledger_refresh_fanout.sql.
 DO $verify$
 DECLARE
-  v_secdef  BOOLEAN;
-  v_config  TEXT[];
-  v_nargs   SMALLINT;
+  v_secdef     BOOLEAN;
+  v_config     TEXT[];
+  v_nargs      SMALLINT;
+  -- ⛔ v_kind / v_coherence are used by check 5. plpgsql compiles a DO block
+  --    WHOLE: omitting a DECLARE does not merely break the check that uses it,
+  --    it raises 42601 and NONE of the checks in this block run. Measured
+  --    2026-08-25 by applying to TEST — the first revision of check 5 was
+  --    mirrored from 20260825140000 without these two lines, and the migration
+  --    could not apply at all. Since migrations AUTO-APPLY to PROD on merge,
+  --    that would have failed the production apply.
+  v_kind       TEXT;
+  v_coherence  TEXT;
 BEGIN
   -- 1. the function landed, and it takes ZERO arguments (T-161.1-06)
   SELECT p.prosecdef, p.proconfig, p.pronargs
