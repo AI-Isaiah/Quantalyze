@@ -14,6 +14,7 @@ import {
   CSV_SUBMIT_STEP_HEADINGS,
   formatCsvRuleCauseSingle,
   type WizardErrorCode,
+  type WizardErrorContext,
 } from "./wizardErrors";
 import type { GateFailureCode } from "./strategyGate";
 // 153.1-04 / WIZFORM-02 — the DERIVATION, not a restatement of it. The claim
@@ -171,18 +172,33 @@ describe("wizardErrors", () => {
       expect(result.cause).toContain("calendar day");
     });
 
-    it("appends computationError into GATE_ANALYTICS_FAILED cause", () => {
+    // ⚠️ INVERTED 2026-08-26 (Phase 162 / HONEST-01, UI-SPEC C-2). These two
+    // used to assert that `computationError` was APPENDED into the cause —
+    // i.e. they pinned the defect. `strategy_analytics.computation_error` is a
+    // SERVER column, and until migration 20260826120000 it held raw
+    // `classify_exception` output, so the `Details: …` appendix rendered Python
+    // exception strings inside the wizard's failure envelope. The column is
+    // curated at its write boundary now, and the appendix is still wrong:
+    // appending curated copy to curated copy double-renders the same claim.
+    //
+    // The context object is cast because `computationError` is no longer a
+    // field on `WizardErrorContext` — that removal is half the fix, and the
+    // cast is what lets this test assert the OTHER half: even handed the key
+    // anyway, nothing in the formatter renders it.
+    it("does NOT append computationError into GATE_ANALYTICS_FAILED cause", () => {
       const result = formatKeyError("GATE_ANALYTICS_FAILED", {
         computationError: "Railway timed out",
-      });
-      expect(result.cause).toContain("Railway timed out");
+      } as unknown as WizardErrorContext);
+      expect(result.cause).not.toContain("Railway timed out");
+      expect(result.cause).not.toContain("Details:");
     });
 
-    it("appends computationError into SYNC_FAILED cause", () => {
+    it("does NOT append computationError into SYNC_FAILED cause", () => {
       const result = formatKeyError("SYNC_FAILED", {
         computationError: "connection refused",
-      });
-      expect(result.cause).toContain("connection refused");
+      } as unknown as WizardErrorContext);
+      expect(result.cause).not.toContain("connection refused");
+      expect(result.cause).not.toContain("Details:");
     });
 
     it("does not mutate the original table", () => {

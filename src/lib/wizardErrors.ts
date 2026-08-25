@@ -3369,8 +3369,22 @@ export interface WizardErrorContext {
   days?: number;
   /** Current draft id for support references. */
   draftId?: string;
-  /** Raw computation error to include under SYNC_FAILED / GATE_ANALYTICS_FAILED. */
-  computationError?: string | null;
+  // ⛔ REMOVED 2026-08-26 — `computationError?: string | null`, "raw computation
+  // error to include under SYNC_FAILED / GATE_ANALYTICS_FAILED". Phase 162 /
+  // HONEST-01, UI-SPEC C-2. That field carried
+  // `strategy_analytics.computation_error` — a SERVER column — into the wizard
+  // envelope body as a `Details: …` appendix, and until migration 20260826120000
+  // that column held raw `classify_exception` output, so the envelope rendered
+  // Python exception strings to users. The column is curated at its write
+  // boundary now, and the appendix is STILL wrong: appending curated copy to
+  // curated copy double-renders the same claim, which is the duplication C-2
+  // removes. This file is the canonical source of human copy (DESIGN-05);
+  // operator context belongs in the diagnostics accordion, which carries the
+  // code and the correlation id and is PII-scrubbed.
+  //
+  // The absence is deliberate and TYPED: re-adding a server-detail field here is
+  // the one edit that reopens the render path, so it has to be a decision rather
+  // than a convenience.
   /** File size in MB, formatted as a string with 1 decimal (for CSV_FILE_TOO_LARGE). */
   sizeMb?: string;
   /** Count of blocking cross-key window issues (for MULTI_KEY_WINDOWS_INVALID). */
@@ -3612,16 +3626,12 @@ export function formatKeyError(
     };
   }
 
-  if (
-    (code === "GATE_ANALYTICS_FAILED" || code === "SYNC_FAILED") &&
-    context?.computationError
-  ) {
-    return {
-      ...base,
-      cause: `${base.cause} Details: ${context.computationError}.`,
-    };
-  }
-
+  // ⛔ DELETED 2026-08-26 (Phase 162 / HONEST-01, UI-SPEC C-2) — the arm that
+  // read `context.computationError` and returned
+  // `${base.cause} Details: ${context.computationError}.` for
+  // GATE_ANALYTICS_FAILED and SYNC_FAILED. See the removed field on
+  // WizardErrorContext above for why. Nothing replaces it: the cause sentence
+  // in the table stands alone, which is what it was written to do.
   if (code === "CSV_FILE_TOO_LARGE" && context?.sizeMb !== undefined) {
     return {
       ...base,

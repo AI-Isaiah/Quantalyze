@@ -1932,7 +1932,11 @@ export function SyncPreviewStep({
     ? buildEnvelope(errorCode, upstreamCorrelationId ?? correlationId, {
         trades: gateResult?.detail?.trades as number | undefined,
         days: gateResult?.detail?.days as number | undefined,
-        computationError: computationError,
+        // ⛔ `computationError` is NOT threaded here any more (Phase 162 /
+        // HONEST-01, UI-SPEC C-2). The state is still tracked — the gate reads
+        // it (`checkStrategyGate`, above) to decide WHICH code we are in — but
+        // its text has no path into the envelope body. The field is gone from
+        // WizardErrorContext too, so this is a typed absence, not a habit.
         // 140.3-10 — `?? undefined` because ABSENCE IS NOT ZERO. `null` would
         // be carried into the envelope slot and a `0` there is a wait we were
         // never told about.
@@ -2100,10 +2104,16 @@ export function SyncPreviewStep({
             : "We could not verify this strategy"}
         </h2>
         <div className="mt-4">
-          {/* The envelope names the offending member: computation_error is
-              server-scrubbed and already threaded via buildEnvelope → the
-              GATE_ANALYTICS_FAILED cause gains "Details: {computation_error}."
-              (zero new plumbing). */}
+          {/* ⚠️ The comment that stood here said the envelope names the
+              offending member because "computation_error is server-scrubbed and
+              already threaded via buildEnvelope → the GATE_ANALYTICS_FAILED
+              cause gains 'Details: {computation_error}.' (zero new plumbing)".
+              Both halves are now false, and the FIRST half was the mistake:
+              scrubbing removes secrets, it does not turn an internal into user
+              copy, and the column was carrying raw Python exception text.
+              Phase 162 / HONEST-01 curates that column at its write boundary
+              (migration 20260826120000) AND removes the appendix (UI-SPEC C-2),
+              so the envelope's body is wizardErrors copy and nothing else. */}
           <WizardErrorEnvelope
             envelope={errorEnvelope}
             onRetry={

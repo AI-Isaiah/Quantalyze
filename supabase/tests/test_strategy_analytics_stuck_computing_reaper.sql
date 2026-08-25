@@ -410,7 +410,7 @@ BEGIN
     RAISE EXCEPTION 'TEST FAILED (2/arm A/SI-02): the reap did not clear computation_warned (got %). The status bridge will launder this failure into complete_with_warnings on its next call -- a FALSE SUCCESS on a money surface.', v_warned;
   END IF;
   IF v_error IS DISTINCT FROM 'Analytics was interrupted before it could finish and did not recover. Retry the sync.' THEN
-    RAISE EXCEPTION 'TEST FAILED (2/arm A/JOB-02): computation_error is not the shipped reaper message (got %). It renders as a Details line under GATE_ANALYTICS_FAILED and must not re-attribute fault or claim how much work completed.', v_error;
+    RAISE EXCEPTION 'TEST FAILED (2/arm A/JOB-02): computation_error is not the shipped reaper message (got %). It renders to the USER — the portfolio-side and strategy-side surfaces read this column directly — so it must not re-attribute fault or claim how much work completed. (It no longer renders as a Details line under GATE_ANALYTICS_FAILED: Phase 162 / UI-SPEC C-2 removed that appendix from the wizard envelope. The copy requirement is unchanged; only the surface named here was stale.)', v_error;
   END IF;
   IF v_stamp IS NOT NULL THEN
     RAISE EXCEPTION 'TEST FAILED (2/arm A/JOB-01): the reap left computing_started_at set (got %). The reaper is itself an exit transition and must obey the clear-on-exit rule, or a stale stamp can re-trigger it.', v_stamp;
