@@ -2,6 +2,7 @@ import { ImageResponse } from "next/og";
 import { createClient } from "@/lib/supabase/server";
 import { withPublishedOnly } from "@/lib/visibility";
 import { computeOgHeadline } from "@/lib/factsheet/og-metrics";
+import { isComputedAnalytics } from "@/lib/closed-sets";
 // Phase 147 / SCEN-01 — the LEAF import. `resolveDailyReturnSeries` lives in
 // its own module precisely so this route (and the public share page) can share
 // the ONE series-resolution mechanism without dragging in the factsheet
@@ -19,8 +20,13 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 /** The `strategy_analytics` embed shape this card reads (PostgREST returns an
- *  object for a to-one embed and an array for a to-many one — both handled). */
-type AnalyticsEmbed = { daily_returns?: unknown; returns_series?: unknown };
+ *  object for a to-one embed and an array for a to-many one — both handled).
+ *  STALE-01 widened it by `computation_status` — see the gate at the compute. */
+type AnalyticsEmbed = {
+  daily_returns?: unknown;
+  returns_series?: unknown;
+  computation_status?: unknown;
+};
 
 export async function GET(
   _req: Request,
@@ -49,7 +55,13 @@ export async function GET(
           // is unchanged: withPublishedOnly below still gates the read, so the
           // column is only ever read for a published row, and the raw series
           // never leaves the server (the response is an image).
-          "id, name, codename, description, asset_class, strategy_analytics ( daily_returns, returns_series )",
+          // STALE-01: `computation_status` joins the embed. It is the ONLY
+          // column that distinguishes a series belonging to a run that
+          // FINISHED from one left behind by a run that failed — every
+          // `IS NOT NULL` test passes on both. Read-only widening of a
+          // published row's projection; nothing new leaves the server (this
+          // response is a PNG).
+          "id, name, codename, description, asset_class, strategy_analytics ( daily_returns, returns_series, computation_status )",
         )
         .eq("id", id),
     )
@@ -91,10 +103,33 @@ export async function GET(
       analytics?.daily_returns,
       analytics?.returns_series,
     );
+    // STALE-01 — the SERIES is a job output too, so a run that did not finish
+    // leaves the previous run's track sitting in these columns and nothing
+    // about the array says which run wrote it. This card recomputes Sharpe /
+    // CAGR / Max DD from that array IN-ROUTE, so the ranked-list shaper never
+    // sees it; the gate has to live here.
+    //
+    // ⚠️ It matters more here than anywhere else in this fix, for two reasons.
+    // The response carries `s-maxage=86400, stale-while-revalidate=604800`, so
+    // one render of a dead figure is served from CDN for a day and revalidated
+    // against for a week — long after the row is fixed. And its readers are
+    // Slack / LinkedIn / Twitter unfurl caches, which keep their own copy and
+    // show it to people who never open the page and never see a correction.
+    //
+    // Not computing is ALREADY this card's designed answer to "analytics
+    // aren't ready" — the docblock says so and `fmtNum`/`fmtPct` render the
+    // NaN sentinel as "—". A non-terminal row is the same answer to the same
+    // question, so it reuses the same path: name + description + three
+    // em-dashes. No new layout, no error card, and the route still cannot 500.
+    const analyticsComputed = isComputedAnalytics(
+      typeof analytics?.computation_status === "string"
+        ? analytics.computation_status
+        : null,
+    );
     // Two points is the floor for any of the three metrics to mean anything
     // (computeOgHeadline enforces its own stricter gates above that and returns
     // NaN — the "—" sentinel — when they are not met).
-    if (rows.length >= 2) {
+    if (analyticsComputed && rows.length >= 2) {
       ({ sharpe, cagr, maxDd } = computeOgHeadline(rows, data?.asset_class));
     }
   } catch (err) {
