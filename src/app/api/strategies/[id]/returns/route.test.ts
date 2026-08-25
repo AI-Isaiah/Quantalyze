@@ -451,7 +451,13 @@ describe("GET /api/strategies/[id]/returns", () => {
       { date: "2022-01-10", value: -0.007462 },
       { date: "2022-01-11", value: 0.0031 },
     ];
-    STATE.analyticsRow = { daily_returns: series };
+    // STALE-01: the row carries a TERMINAL-SUCCESS status. The column is
+    // projected by this route and is NOT NULL in the schema, so a status-less
+    // analytics row was never a shape the DB could return; since the route
+    // withholds the series of a run that did not finish, the fixture has to say
+    // which run wrote it. The series-resolution contract under test is
+    // unchanged.
+    STATE.analyticsRow = { daily_returns: series, computation_status: "complete" };
     const { GET } = await import("./route");
     const res = await GET(makeRequest(PUBLISHED_ID), ctx(PUBLISHED_ID));
     expect(res.status).toBe(200);
@@ -472,6 +478,8 @@ describe("GET /api/strategies/[id]/returns", () => {
       daily_returns: {
         "2022": { "01-11": 0.0031, "01-10": -0.007462 },
       },
+      // STALE-01: terminal-success status — see the note on R4's fixture.
+      computation_status: "complete",
     };
     const { GET } = await import("./route");
     const res = await GET(makeRequest(PUBLISHED_ID), ctx(PUBLISHED_ID));
@@ -678,7 +686,13 @@ describe("GET /api/strategies/[id]/returns", () => {
       { date: "2026-07-10", value: 0.0012 },
       { date: "2026-07-11", value: -0.0004 },
     ];
-    STATE.analyticsRow = { daily_returns: series };
+    // STALE-01: the row carries a TERMINAL-SUCCESS status. The column is
+    // projected by this route and is NOT NULL in the schema, so a status-less
+    // analytics row was never a shape the DB could return; since the route
+    // withholds the series of a run that did not finish, the fixture has to say
+    // which run wrote it. The series-resolution contract under test is
+    // unchanged.
+    STATE.analyticsRow = { daily_returns: series, computation_status: "complete" };
     const { GET } = await import("./route");
     const res = await GET(makeRequest(PUBLISHED_ID), ctx(PUBLISHED_ID));
     expect(res.status).toBe(200);
@@ -917,4 +931,109 @@ describe("GET /api/strategies/[id]/returns", () => {
     // The lazy age read never fires on the happy path (zero added cost).
     expect(STATE.observedFilters.strategiesCreatedAtSelect).toBeNull();
   });
+
+  /**
+   * STALE-01 — a NON-EMPTY series belonging to a run that did not finish.
+   *
+   * R15/R16 above pin what the route says about a series that is ALREADY empty.
+   * They could never catch this: `computation_status` was read only inside the
+   * `daily_returns.length === 0` branch, so the discriminator ran on every case
+   * EXCEPT the one that needed it. A `failed` row keeps the PREVIOUS run's
+   * `daily_returns` / `returns_series` untouched — the analytics writer stamps
+   * the status and the error, not the data — so the series arrived full, the
+   * length gate was false, and the route answered `series_state: "available"`:
+   * a positive claim that this is the strategy's current track, contradicted by
+   * the status column sitting in the same row.
+   *
+   * Re-LABELLING would not have been enough. The consumer is arithmetic — the
+   * ScenarioComposer BLENDS this array into a portfolio projection — so a
+   * "computing"/"empty" label beside a usable array is ignored by the maths and
+   * the dead track still moves the blend. The series itself has to be withheld,
+   * which routes the row into the SAME shared `deriveEmptySeriesState` ladder
+   * and the chips the composer already renders.
+   *
+   * The `complete` control below carries the IDENTICAL series and asserts it
+   * flows, so neither direction can pass on an unusable fixture.
+   */
+  it("R19 — STALE-01: a NON-EMPTY series on a `failed` row is withheld, not served as 'available'", async () => {
+    const series = [
+      { date: "2026-01-02", value: 0.021 },
+      { date: "2026-01-03", value: -0.014 },
+      { date: "2026-01-04", value: 0.033 },
+    ];
+    STATE.analyticsRow = {
+      daily_returns: series,
+      returns_series: null,
+      computation_status: "failed",
+    };
+    const { GET } = await import("./route");
+    const res = await GET(makeRequest(PUBLISHED_ID), ctx(PUBLISHED_ID));
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.daily_returns).toEqual([]);
+    // `failed` is terminal absence, deliberately NOT an error envelope and NOT
+    // a red state (UI-SPEC §3) — the composer renders its muted "no series".
+    expect(body.series_state).toBe("empty");
+  });
+
+  it("R19b — STALE-01: a live `computing` run withholds its series and says so", async () => {
+    STATE.analyticsRow = {
+      daily_returns: [
+        { date: "2026-01-02", value: 0.021 },
+        { date: "2026-01-03", value: -0.014 },
+        { date: "2026-01-04", value: 0.033 },
+      ],
+      returns_series: null,
+      computation_status: "computing",
+    };
+    const { GET } = await import("./route");
+    const res = await GET(makeRequest(PUBLISHED_ID), ctx(PUBLISHED_ID));
+    const body = await res.json();
+    expect(body.daily_returns).toEqual([]);
+    expect(body.series_state).toBe("computing");
+  });
+
+  it("R19c — STALE-01: the derived `returns_series` path is gated too, not just the direct column", async () => {
+    // A service-computed strategy leaves `daily_returns` NULL and writes the
+    // cumprod wealth index. Gating only the direct column would leave the
+    // fallback arm serving a dead track — the SAME defect one branch over.
+    STATE.analyticsRow = {
+      daily_returns: null,
+      returns_series: WEALTH_INDEX_STALE,
+      computation_status: "failed",
+    };
+    const { GET } = await import("./route");
+    const res = await GET(makeRequest(PUBLISHED_ID), ctx(PUBLISHED_ID));
+    const body = await res.json();
+    expect(body.daily_returns).toEqual([]);
+    expect(body.series_state).toBe("empty");
+  });
+
+  it("R19d — CONTROL: the identical series on a `complete` row still flows as 'available'", async () => {
+    const series = [
+      { date: "2026-01-02", value: 0.021 },
+      { date: "2026-01-03", value: -0.014 },
+      { date: "2026-01-04", value: 0.033 },
+    ];
+    for (const status of ["complete", "complete_with_warnings"]) {
+      STATE.analyticsRow = {
+        daily_returns: series,
+        returns_series: null,
+        computation_status: status,
+      };
+      const { GET } = await import("./route");
+      const res = await GET(makeRequest(PUBLISHED_ID), ctx(PUBLISHED_ID));
+      const body = await res.json();
+      // Non-empty here is what proves R19/R19b/R19c are not vacuous.
+      expect(body.daily_returns, `status ${status} lost its series`).toEqual(series);
+      expect(body.series_state).toBe("available");
+    }
+  });
 });
+
+/** The cumprod wealth index used by R19c — a real, differenceable curve. */
+const WEALTH_INDEX_STALE = {
+  "2026-01-02": 1.0,
+  "2026-01-03": 1.021,
+  "2026-01-04": 1.0067,
+};

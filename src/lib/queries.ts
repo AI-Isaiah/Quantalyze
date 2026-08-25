@@ -415,8 +415,29 @@ async function shapeRankingRows(
  * its numbers are unknown. Existence is a fact we have; the metrics are not.
  * `aum`, `start_date`, name, types and trust tier all live on the `strategies`
  * row, are NOT products of the analytics job, and are untouched here.
+ *
+ * ── STALE-01 part 2: this is now the shaper for the DETAIL fetchers too ──
+ * `getPublicStrategyDetail`, `getFactsheetDetail` and `getStrategyDetail` read
+ * the SAME `strategy_analytics` columns for a SINGLE strategy and rendered them
+ * with the same ungated confidence the ranked list did — /browse/[slug]/[id]'s
+ * hero grid, /factsheet/[id]/tearsheet's whole metric grid + monthly heatmap,
+ * /strategy/[id]'s `generateMetadata` (the KPI triple goes into `<meta
+ * description>`, OpenGraph and Twitter, where it outlives the page in every
+ * unfurl cache), and /discovery/[slug]/[id]'s factsheet payload.
+ *
+ * They reuse THIS function rather than each growing a local status check, for
+ * the reason the ranked path already gave: the row that is denied a percentile,
+ * the row that is denied its list cells and the row that is denied its DETAIL
+ * cells must be the SAME row, decided once. A per-page copy is the drift.
+ *
+ * ⚠️ The detail callers pass a NON-NULL `a` only. Their absent-row behaviour is
+ * NOT this function's `a === null` arm and must not be routed through it — two
+ * of the three answer a missing analytics row with `null` (which their pages
+ * render as "Strategy not found"), and turning that into EMPTY_ANALYTICS would
+ * resurrect a page for a strategy that never had one. Only the substitution
+ * matters here, never the fallback.
  */
-function shapeRowAnalytics(
+export function shapeRowAnalytics(
   a: StrategyAnalytics | null,
   strategyId: string,
 ): StrategyAnalytics {
@@ -1070,9 +1091,22 @@ export async function getPublicStrategyDetail(strategyId: string): Promise<{
   const disclosureTier = readDisclosureTier(strategyWithTier);
   const manager = await loadManagerIdentity(strategyWithTier, disclosureTier);
 
+  // STALE-01 — shape BEFORE returning, never at the render sites. This
+  // function feeds two public surfaces (/browse/[slug]/[id] and /strategy/[id],
+  // the latter through a React.cache alias that serves BOTH the page body and
+  // `generateMetadata`), so a dead row's figures must not leave the server at
+  // all; gating per-consumer would have to be repeated in four places, one of
+  // which is a metadata builder whose output is cached by third parties.
+  //
+  // The `?? null` arm is UNCHANGED: no analytics row still means `null` here,
+  // which both callers render as their existing not-found / placeholder state.
+  const publicAnalytics = extractAnalytics(strategy.strategy_analytics);
+
   return {
     strategy: strategyWithTier,
-    analytics: extractAnalytics(strategy.strategy_analytics),
+    analytics: publicAnalytics
+      ? shapeRowAnalytics(publicAnalytics, strategyId)
+      : publicAnalytics,
     manager,
     disclosureTier,
   };
@@ -1101,12 +1135,26 @@ export async function getFactsheetDetail(strategyId: string): Promise<{
   const analytics = extractAnalytics(strategy.strategy_analytics);
   if (!analytics) return null;
 
+  // STALE-01 — the tearsheet is the widest single-strategy metric surface in
+  // the app (hero grid, detail grid, the `metrics_json` VaR/CVaR/best/worst
+  // block and the monthly-returns heatmap) and it is PUBLIC: /factsheet/[id]/
+  // tearsheet sits in PUBLIC_ROUTES so a cap-intro recipient can open it
+  // without a login. Its PDF wrapper already refuses a non-computed strategy
+  // with a 400, but the wrapper only guards the door it owns — the HTML page it
+  // screenshots is directly reachable and had no gate at all, so the numbers
+  // the PDF withheld were served in full to anyone with the URL. Shaping here
+  // closes the page and the wrapper's side door with one predicate. Nulling
+  // `metrics_json` and `monthly_returns` (EMPTY_ANALYTICS holds both as null)
+  // is what empties the heatmap and the VaR block; the surrounding sections
+  // already hide themselves on a null.
+  const shapedAnalytics = shapeRowAnalytics(analytics, strategyId);
+
   const disclosureTier = readDisclosureTier(strategy);
   const manager = await loadManagerIdentity(strategy, disclosureTier);
 
   return {
     strategy,
-    analytics,
+    analytics: shapedAnalytics,
     manager,
     disclosureTier,
   };
@@ -1296,9 +1344,25 @@ export async function getStrategyDetail(
   const disclosureTier = readDisclosureTier(strategyWithTier);
   const manager = await loadManagerIdentity(strategyWithTier, disclosureTier);
 
+  // STALE-01 — /discovery/[slug]/[strategyId] is AUTHED but CROSS-TENANT: every
+  // allocator reads other managers' published rows through it, and it builds
+  // the SAME `FactsheetView` the public factsheet does, off `daily_returns` /
+  // `returns_series` / `metrics_json_by_basis` on this row. Shaping nulls those
+  // series, `buildFactsheetPayload` returns null on an empty one, and the page
+  // falls to the still-computing placeholder it ALREADY renders for a strategy
+  // with no ingested series — the existing state, reached by one more input,
+  // never a new one. `shapeRowAnalytics` is the same call the ranked list and
+  // the two public detail fetchers make.
+  //
+  // The `?? EMPTY_ANALYTICS` fallback below is UNCHANGED and still the
+  // absent-row arm; only a PRESENT-but-not-computed row is substituted.
+  const detailAnalytics = extractAnalytics((strategy as unknown as { strategy_analytics?: unknown }).strategy_analytics);
+
   return {
     strategy: strategyWithTier,
-    analytics: extractAnalytics((strategy as unknown as { strategy_analytics?: unknown }).strategy_analytics) ?? { ...EMPTY_ANALYTICS, strategy_id: strategyId },
+    analytics: detailAnalytics
+      ? shapeRowAnalytics(detailAnalytics, strategyId)
+      : { ...EMPTY_ANALYTICS, strategy_id: strategyId },
     manager,
     disclosureTier,
   };

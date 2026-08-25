@@ -37,6 +37,7 @@ function strat(
     sharpe?: number | null;
     max_drawdown?: number | null;
     computed_at?: string | null;
+    computation_status?: string | null;
   } | null,
 ): StrategyInput {
   return {
@@ -45,7 +46,16 @@ function strat(
     strategies: {
       id,
       name,
-      strategy_analytics: analytics,
+      // STALE-01: default the row to a TERMINAL SUCCESS. `computation_status`
+      // is projected by `getPortfolioStrategies` and is non-null in the schema,
+      // so a status-less analytics row was never a shape the DB could return.
+      // Now that the table withholds a non-terminal row's figures and freshness
+      // badge, the fixture has to say which run wrote them; every case here is
+      // about a COMPUTED constituent's rendering. The dedicated non-terminal
+      // cases live in StrategyBreakdownTable.stale-analytics.test.tsx.
+      strategy_analytics: analytics
+        ? { computation_status: "complete", ...analytics }
+        : analytics,
     },
   };
 }

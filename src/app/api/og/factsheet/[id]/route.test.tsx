@@ -202,7 +202,15 @@ beforeEach(() => {
     codename: null,
     description: "A test strategy",
     asset_class: "crypto",
-    strategy_analytics: [{ daily_returns: null, returns_series: null }],
+    // STALE-01: every fixture in this file models a TERMINAL-SUCCESS analytics
+    // row. `computation_status` is projected by this route and is non-null in
+    // the schema, so a status-less row was never a shape the DB could return;
+    // now that the card refuses to recompute a non-terminal run's series, the
+    // fixture has to say which run wrote it. The non-terminal cases live in
+    // route.stale-analytics.test.tsx.
+    strategy_analytics: [
+      { daily_returns: null, returns_series: null, computation_status: "complete" },
+    ],
   };
   STATE.readError = null;
   STATE.clientThrows = false;
@@ -218,7 +226,7 @@ afterEach(() => {
 describe("GET /api/og/factsheet/[id]", () => {
   it("O1 — SC1-OG: a returns_series-ONLY embed reaches computeOgHeadline as the DIFFERENCED series", async () => {
     STATE.strategyRow!.strategy_analytics = [
-      { daily_returns: null, returns_series: WEALTH_INDEX },
+      { daily_returns: null, returns_series: WEALTH_INDEX , computation_status: "complete" },
     ];
     const { GET } = await import("./route");
     await GET(makeRequest(), ctx(PUBLISHED_ID));
@@ -246,7 +254,7 @@ describe("GET /api/og/factsheet/[id]", () => {
     // actually delivers: N stored points → N−1 returns, day one absent.
     const PROD_WEALTH_INDEX = WEALTH_INDEX.slice(1); // head 1.05 = (1 + 0.05)
     STATE.strategyRow!.strategy_analytics = [
-      { daily_returns: null, returns_series: PROD_WEALTH_INDEX },
+      { daily_returns: null, returns_series: PROD_WEALTH_INDEX , computation_status: "complete" },
     ];
     const { GET } = await import("./route");
     await GET(makeRequest(), ctx(PUBLISHED_ID));
@@ -262,7 +270,7 @@ describe("GET /api/og/factsheet/[id]", () => {
 
   it("O1b — SC1-OG outcome: a real-length returns_series-ONLY track renders FINITE headline metrics, not the blank card", async () => {
     STATE.strategyRow!.strategy_analytics = [
-      { daily_returns: null, returns_series: LONG_WEALTH_INDEX },
+      { daily_returns: null, returns_series: LONG_WEALTH_INDEX , computation_status: "complete" },
     ];
     const { GET } = await import("./route");
     await GET(makeRequest(), ctx(PUBLISHED_ID));
@@ -290,7 +298,7 @@ describe("GET /api/og/factsheet/[id]", () => {
       { date: "2026-01-04", value: 0.003 },
     ];
     STATE.strategyRow!.strategy_analytics = [
-      { daily_returns: csvSeries, returns_series: WEALTH_INDEX },
+      { daily_returns: csvSeries, returns_series: WEALTH_INDEX , computation_status: "complete" },
     ];
     const { GET } = await import("./route");
     await GET(makeRequest(), ctx(PUBLISHED_ID));
@@ -303,7 +311,7 @@ describe("GET /api/og/factsheet/[id]", () => {
 
   it("O3 — both columns null → the fallback card, no throw, headline never computed", async () => {
     STATE.strategyRow!.strategy_analytics = [
-      { daily_returns: null, returns_series: null },
+      { daily_returns: null, returns_series: null , computation_status: "complete" },
     ];
     const { GET } = await import("./route");
     await expect(

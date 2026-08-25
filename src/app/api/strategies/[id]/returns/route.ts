@@ -58,7 +58,11 @@ import {
 import { isUuid } from "@/lib/utils";
 import type { DailyPoint } from "@/lib/portfolio-math-utils";
 import { resolveDailyReturnSeries } from "@/lib/factsheet/resolve-series";
-import { deriveEmptySeriesState, type SeriesState } from "@/lib/closed-sets";
+import {
+  deriveEmptySeriesState,
+  isComputedAnalytics,
+  type SeriesState,
+} from "@/lib/closed-sets";
 import { readPublicVerificationSignals } from "@/lib/queries";
 
 // AGENTS.md: default to the Node.js runtime explicitly. The route touches the
@@ -296,10 +300,38 @@ export async function GET(
         returns_series?: unknown;
         computation_status?: unknown;
       } | null;
-      const daily_returns: DailyPoint[] = resolveDailyReturnSeries(
-        analyticsRow?.daily_returns,
-        analyticsRow?.returns_series,
-      );
+      const status =
+        typeof analyticsRow?.computation_status === "string"
+          ? analyticsRow.computation_status
+          : null;
+      // STALE-01 — `computation_status` was already read on this route, but it
+      // only ever LABELLED a series that was already empty. A row at `failed`
+      // still holds the previous run's `daily_returns` / `returns_series`, so
+      // the resolver returned a full track, `daily_returns.length === 0` was
+      // false, and the route answered `series_state: "available"` — a positive
+      // claim that this series is the strategy's current one — while the status
+      // column sitting in the same row said the run did not finish. The
+      // discriminator ran on every case except the one that needed it.
+      //
+      // Withholding the SERIES (not just re-labelling it) is what makes the
+      // answer honest, because the consumer is an arithmetic one: the
+      // ScenarioComposer BLENDS this array into a portfolio projection. A
+      // "computing"/"empty" label beside a usable array would be ignored by the
+      // maths and the dead track would still move the blend.
+      //
+      // Emptying it routes the row into `deriveEmptySeriesState` — the SAME
+      // shared ladder, no second status table (UI-SPEC §3 / SC2) — which the
+      // composer already renders as its "syncing" or "no-series" chip and
+      // warm-up-gates out of the blend. Existing vocabulary, existing chips: a
+      // `failed` row resolves to "empty" (deliberately NOT a red error state),
+      // a live job to "computing".
+      const analyticsComputed = isComputedAnalytics(status);
+      const daily_returns: DailyPoint[] = analyticsComputed
+        ? resolveDailyReturnSeries(
+            analyticsRow?.daily_returns,
+            analyticsRow?.returns_series,
+          )
+        : [];
 
       // SCEN-01 / UI-SPEC §3 — say what an EMPTY series MEANS, server-side. A
       // non-empty resolved series is self-evidently `available`; only the empty
@@ -307,10 +339,6 @@ export async function GET(
       // inlined status ladder).
       let series_state: SeriesState = "available";
       if (daily_returns.length === 0) {
-        const status =
-          typeof analyticsRow?.computation_status === "string"
-            ? analyticsRow.computation_status
-            : null;
         // The strategy's age is needed ONLY to bound the missing-analytics-row
         // arm (P5: no trigger creates that row on INSERT and no cron backstops
         // a MISSING one, so an un-enqueued strategy would otherwise spin

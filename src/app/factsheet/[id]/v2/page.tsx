@@ -8,6 +8,7 @@ import { captureToSentry } from "@/lib/sentry-capture";
 import { displayStrategyName } from "@/lib/strategy-display";
 import type { DisclosureTier } from "@/lib/types";
 import { readPublicVerificationSignals } from "@/lib/queries";
+import { isComputedAnalytics } from "@/lib/closed-sets";
 import {
   isCapitalOwnership,
   type CapitalOwnership,
@@ -110,6 +111,40 @@ async function fetchAndBuildPayload(
   const analytics = Array.isArray(strategy.strategy_analytics)
     ? strategy.strategy_analytics[0]
     : strategy.strategy_analytics;
+
+  // STALE-01 — THE SIDE DOOR. `computation_status` was already on this embed
+  // (:95) and already read here, but only as an argument to
+  // `readSingleKeyBasisOpts`; nothing gated the RENDER on it. The render gate
+  // was `dailyReturns.length === 0`, and a failed run leaves the previous run's
+  // series in `daily_returns` / `returns_series` untouched — the analytics
+  // writer stamps the status and the error, not the data. So every panel on the
+  // widest metric surface in the product was built from a track no finished run
+  // vouches for.
+  //
+  // ⚠️ This page is what BOTH PDF wrappers screenshot. `/api/factsheet/[id]/pdf`
+  // refuses a non-computed strategy with a 400 "Analytics not computed" and
+  // then `page.goto()`s `/factsheet/[id]` — which re-exports THIS module — while
+  // `/api/factsheet/[id]/tearsheet.pdf` does the same for the tearsheet. Those
+  // 400s were guarding a front door beside an open side door: both target pages
+  // are directly reachable URLs and neither refused anything. The wrappers are
+  // unchanged; the pages now hold the same line, which is what makes the
+  // wrappers' refusal mean something.
+  //
+  // The answer is the EXISTING one: return null, which the caller already
+  // renders as the "still computing" placeholder it shows for any strategy
+  // whose series has not been ingested. No new state, no new copy, nothing red
+  // — and the owner lane inherits it, so an owner previewing their own draft
+  // sees the same honest placeholder rather than a factsheet built on a dead
+  // run. `computing` is included for the reason `shapeRowAnalytics` gives:
+  // there is no honest date to show the previous run's numbers under.
+  if (!isComputedAnalytics(analytics?.computation_status)) {
+    console.warn(
+      "[factsheet] fetchAndBuildPayload — analytics row is not a terminal success; withholding the payload",
+      { id, computationStatus: analytics?.computation_status ?? null },
+    );
+    return null;
+  }
+
   const dailyRaw = analytics?.daily_returns;
   // resolveDailyReturnSeries handles two real-world realities at once:
   //   (a) `daily_returns` may be in one of three shapes (array of
