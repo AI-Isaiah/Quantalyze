@@ -5,16 +5,16 @@ milestone_name: Backlog Burndown (Phases 158+)
 current_phase: 161
 current_phase_name: WIZERR — Honest error surfaces
 status: verifying
-stopped_at: 161.1-04-PLAN.md tasks 1-2 complete; PAUSED at task 3 (blocking founder LIVE op — the composite PROD tracer)
-last_updated: "2026-08-25T13:45:00.000Z"
+stopped_at: context exhaustion at 75% (2026-08-25)
+last_updated: "2026-08-25T14:59:09.172Z"
 last_activity: 2026-08-25
 last_activity_desc: Phase 161.1 wave 4 — composite arm landed DORMANT; composite PROD tracer still owed
-state_head: 00da96750e9bb4d25c7f46cbcec3761f88c7e673
+state_head: 8e0f675f411298e4a98f18fc7faa1db923bd945a
 progress:
   total_phases: 9
   completed_phases: 1
   total_plans: 35
-  completed_plans: 31
+  completed_plans: 33
   percent: 11
 ---
 
@@ -1486,8 +1486,8 @@ Load-bearing sequencing (real dependencies, do not reorder):
 
 ## Session
 
-**Last Date:** 2026-08-25T13:45:00.000Z
-**Stopped At:** 161.1-04-PLAN.md tasks 1-2 complete; PAUSED at task 3 (blocking founder LIVE op — the composite PROD tracer). Plan 04's SUMMARY is written and marked `status: awaiting-checkpoint`, NOT `complete`.
+**Last Date:** 2026-08-25T14:59:08.407Z
+**Stopped At:** context exhaustion at 75% (2026-08-25)
 **Resume File:** `.planning/phases/161.1-ledger-refresh-recurring-strategy-refresh-for-ledger-backed/161.1-04-PLAN.md` (task 3)
 **Next step:** Phase 161 (WIZERR — honest error surfaces) is next and NOT yet planned — run `/gsd-plan-phase 161`. Phase 161.1 (LEDGER-REFRESH) was inserted after it on 2026-08-24 for the founder-reported MT5 staleness; it is URGENT and production-facing, so it may be pulled ahead of 161 if you prefer the live data-integrity fix first.
 
