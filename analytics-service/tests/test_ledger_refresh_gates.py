@@ -1,0 +1,2020 @@
+"""Phase 161.1 / LEDGER-02, LEDGER-04 — the STATIC gates for the ledger refresh.
+
+Why this file exists
+--------------------
+Four properties of this phase cannot be reached by any behavioural test:
+
+  1. the SQL venue set cannot drift from its Python authority
+     (``_LEDGER_BACKED_SOURCES``);
+  2. no migration in this repo registers a recurring database job for the
+     fan-out — activation is a founder LIVE op (WORKER-03), and
+     ``supabase/migrations/**`` AUTO-APPLIES to PROD on merge to main, so a
+     schedule reaching a migration reaches production with no deploy step;
+  3. the two bound integers are still the ones D-09 derived, and still
+     discriminate from each other;
+  4. the two cross-language literals introduced by plan 02 — the job metadata
+     source marker and the terminal-success status set — cannot drift apart.
+
+Every assertion here is either an ABSENCE or an EQUALITY against a region
+extracted from a file. **Both are green over an empty derivation.** A positive
+and a negative assertion evaluated against the same empty string agree by luck,
+not by construction. The anti-vacuity floor is therefore not decoration in this
+file — it is the majority of the work, and it is applied to EVERY extracted
+region independently:
+
+    region                    floor      sentinel
+    ------------------------  ---------  --------------------------------
+    VIEW BODY                 1200 ch    the closing join predicate
+    IS_STALE EXPRESSION        300 ch    the verdict's reason alias
+    DECLARATION PRELUDE         80 ch    the language clause
+    FUNCTION BODY             2500 ch    the enqueue call
+    GUARD REGION              1500 ch    the awaited series heal
+    COMPOSITE PRELUDE           80 ch    the language clause
+    COMPOSITE BODY            2500 ch    the enqueue call
+    COMPOSITE GUARD REGION    1500 ch    the merged-flags payload
+
+⛔ EVERY ONE OF THOSE SENTINELS OCCURS NO EARLIER THAN ITS OWN FLOOR, and that
+is a mechanically enforced rule rather than a habit — see
+``test_every_sentinel_lies_beyond_its_own_floor`` and the block of reasoning
+above ``_VIEW_BODY_SENTINEL``. A sentinel drawn from a region's HEAD is normally
+the locator's own text, which every successful extraction contains by
+construction, so it cannot fail. Five of these eight were exactly that until it
+was measured and corrected. The offsets themselves are deliberately NOT recorded
+here: they move whenever the guarded files are edited, and a stale number in a
+docstring is a claim nothing checks.
+
+The IS_STALE EXPRESSION is a separately-extracted region with its OWN floor and
+its OWN sentinel. It is deliberately not allowed to ride on the VIEW BODY's
+floor: gate 6's negative assertions run against it, and a broken sub-extraction
+inside a healthy parent is exactly the shape that makes negatives vacuous.
+
+Grep-gate hygiene (the repo rule: *prose must neither satisfy nor trip a
+mechanical gate*)
+-------------------------------------------------------------------------------
+Positive assertions and every value extraction run against a COMMENT-STRIPPED
+copy of the region, so a sentence can never SATISFY a gate. Negative assertions
+run against the RAW region text, so a venue name or a schedule call cannot hide
+inside a comment — which is legitimate here only because both regions were
+engineered for it: migration 20260825120000 delimits its verdict with
+``LEDGER_REFRESH_VERDICT_BEGIN``/``END`` markers precisely so the two rejected
+timestamps can stay as documented informational columns OUTSIDE the region, and
+migration 20260825130000 keeps its whole D-01/D-05/D-09 narrative in the file
+HEADER, outside the dollar-quoted body, for the same reason.
+
+Runs from ``analytics-service/`` under pytest. Reads files. Starts no service,
+opens no socket, touches no database.
+
+GATE 10 (plan 04, wave 4) extends every one of the above to the COMPOSITE arm
+(migration 20260825140000), reusing the same extractors, the same floor helper
+and the same runtime-concatenated search tokens. It is an EXTENSION of this
+file, deliberately — a second gate file would have had to re-derive
+``_scan_sql``, ``_assert_region`` and the self-exclusion trick, and a re-derived
+copy is a second thing that can drift.
+"""
+from __future__ import annotations
+
+import pathlib
+import re
+from collections.abc import Callable
+from typing import Final
+
+# ---------------------------------------------------------------------------
+# Pointers — POINTER HYGIENE
+# ---------------------------------------------------------------------------
+# ⛔ These names and their migrations move together IN THE SAME COMMIT. A stale
+# pointer keeps this whole file green while it guards a body nothing runs, which
+# is the failure mode the reaper drift gate in tests/test_main_worker.py records
+# from experience. Renaming or superseding either migration means editing the
+# constant here in the same commit as the rename.
+_STALENESS_VIEW_MIGRATION_NAME: Final[str] = (
+    "20260825120000_ledger_refresh_staleness_view.sql"
+)
+_FANOUT_MIGRATION_NAME: Final[str] = (
+    "20260825130000_ledger_refresh_fanout_dormant.sql"
+)
+# Plan 04 / LEDGER-01 — the COMPOSITE arm. Same pointer-hygiene rule as the two
+# above: this constant and its migration move together IN THE SAME COMMIT. A
+# stale pointer here keeps every gate-10 test green while it guards a body
+# nothing runs.
+_COMPOSITE_MIGRATION_NAME: Final[str] = (
+    "20260825140000_ledger_refresh_composite_arm.sql"
+)
+# Plan 05 / the SQL status bridge. ⛔ THIS FILE IS THE REASON THE OLD NAME GLOB
+# WAS RETIRED (F17): `*ledger_refresh*.sql` matched the other three migrations
+# and MISSED this one, so the only scan standing between a pg_cron registration
+# and PROD auto-apply did not cover the phase's own fourth migration. Same
+# pointer-hygiene rule as the three above: this constant and its migration move
+# together IN THE SAME COMMIT.
+_SYNC_STATUS_MIGRATION_NAME: Final[str] = (
+    "20260825150000_sync_status_protect_marked_refresh.sql"
+)
+
+# ---------------------------------------------------------------------------
+# Search tokens — ASSEMBLED AT RUNTIME, DELIBERATELY
+# ---------------------------------------------------------------------------
+# ⛔ KEEP THE CONCATENATION. Do NOT "clean this up" into plain string literals.
+#
+# Gate 3 asserts that certain tokens appear NOWHERE in a set of scanned files.
+# If those tokens were spelled as whole literals here, this gate file would
+# itself contain them — and any future scan that widens from
+# `supabase/migrations/` to the repo (or any reviewer grepping for "is there a
+# schedule anywhere?") would get a hit on the very file whose job is to prove
+# there is none. Splitting each token across a `+` means the assembled value
+# exists only at run time and the source file never matches itself.
+#
+# The same applies to the fan-out's function name: gate 3b COUNTS the files
+# containing it, and a self-match would be indistinguishable from a real second
+# definition.
+_PG_CRON_SCHEMA: Final[str] = "cr" + "on"
+_SCHEDULE_VERB: Final[str] = _PG_CRON_SCHEMA + "." + "sched" + "ule"
+_UNSCHEDULE_VERB: Final[str] = _PG_CRON_SCHEMA + "." + "unsched" + "ule"
+_FANOUT_FUNCTION_NAME: Final[str] = "enqueue_ledger_refresh" + "_for_strategies"
+# ⛔ Concatenated for the SAME reason, not by imitation: gate 10c counts the
+# migrations containing this name, exactly as gate 3b does for the fan-out. A
+# self-match would be indistinguishable from a real second definition.
+_COMPOSITE_FUNCTION_NAME: Final[str] = "enqueue_ledger_composite" + "_refresh"
+
+# The activation setting (plan 02, D-08 lock B). Not a scan-collision risk, but
+# kept beside the others because it is the third cross-file literal.
+_ACTIVATION_SETTING: Final[str] = "app.ledger_refresh_enabled"
+
+# ---------------------------------------------------------------------------
+# The dormancy scan's SELECTION — ⛔ NOT BY NAME (F17)
+# ---------------------------------------------------------------------------
+# Until 2026-08-25 gate 3a selected its files with the glob `*ledger_refresh*.sql`
+# and floored the result at the integer 3. MEASURED at that commit: the glob
+# matched 20260825120000, 130000 and 140000 and did NOT match
+# 20260825150000_sync_status_protect_marked_refresh.sql — the phase's own fourth
+# migration, the one carrying the SQL status bridge. The floor of 3 was
+# SATISFIED BY THE THREE THAT HAPPENED TO BE NAMED RIGHT, so a naming convention
+# was doing security work with nothing asserting the convention held, and the
+# fourth file sat outside the only scan standing between a `cron.schedule` and
+# PROD auto-apply.
+#
+# The selection is therefore the migration TIMESTAMP WINDOW, which a descriptive
+# rename cannot move a file out of. The window is CLOSED, not open-ended: this
+# repo has ten-plus migrations that legitimately register pg_cron jobs (retention,
+# the reaper, the reconcile sweep), all of them older than the floor. An
+# open-ended floor would forbid every FUTURE migration from ever scheduling
+# anything, which is a claim this phase has no standing to make and which the
+# next author would simply widen.
+_PHASE_MIGRATION_WINDOW_START: Final[str] = "20260825000000"
+_PHASE_MIGRATION_WINDOW_END: Final[str] = "20260826000000"
+
+# ⛔ THE FLOOR IS A SET, NOT A COUNT. `len(paths) >= 4` is satisfiable by any
+# four files that happen to land in the window; this names the exact migrations
+# that MUST be inside the scan, so the check fails loudly when a pointer goes
+# stale or a file is redated out of the window instead of going quiet.
+_PHASE_MIGRATION_NAMES: Final[frozenset[str]] = frozenset({
+    _STALENESS_VIEW_MIGRATION_NAME,
+    _FANOUT_MIGRATION_NAME,
+    _COMPOSITE_MIGRATION_NAME,
+    _SYNC_STATUS_MIGRATION_NAME,
+})
+
+# ⛔ THE ESCAPE CHECK'S TOKENS. A window is still a selection, so something has
+# to fail when a migration belonging to this surface lands OUTSIDE it (dated
+# 20260826, say). These are content, not filename: any migration naming this
+# phase's enqueue surface must be inside the scanned set or gate 3a says so.
+#
+# ⚠️ These are spelled as plain literals ON PURPOSE, unlike the pg_cron and
+# function-name tokens above. Those are concatenated because they are scanned
+# for repo-wide and would otherwise match THIS file; these are scanned for only
+# under `supabase/migrations/`, which this file is not in, so there is no
+# self-match to exclude and a fake concatenation would only imply one.
+_PHASE_IDENTIFIER_TOKENS: Final[tuple[str, ...]] = (
+    _FANOUT_FUNCTION_NAME,
+    _COMPOSITE_FUNCTION_NAME,
+    _ACTIVATION_SETTING,
+    "ledger_refresh_staleness",
+)
+
+# ⛔ THE NORMALISERS gate 4 / gate 10d reject around the activation read (F16).
+# The activation comparison was asserted with an UNANCHORED
+# `re.search(r"(?:<>|!=|=)\s*'true'")`, which `lower(v_enabled) <> 'true'` and
+# `btrim(v_enabled) <> 'true'` both satisfy — and each of those OPENS the flag on
+# exactly the values the assertion's own message calls forbidden ('TRUE',
+# 'true '). Any of these wrapped around the value being compared, or applied on
+# the read itself, is the drift.
+_ACTIVATION_NORMALISERS: Final[tuple[str, ...]] = (
+    "lower",
+    "upper",
+    "initcap",
+    "btrim",
+    "trim",
+    "ltrim",
+    "rtrim",
+    "normalize",
+    "regexp_replace",
+    "replace",
+    "translate",
+)
+
+# Region floors. Hand-typed, and deliberately well under the measured sizes
+# (4246 / 1105 / 190 / 10500 / 7685 characters at the commit that introduced
+# them) so ordinary editing cannot trip them while a broken extraction — which
+# returns nothing, or a few characters — cannot slip past.
+_VIEW_BODY_MIN_CHARS: Final[int] = 1200
+_IS_STALE_MIN_CHARS: Final[int] = 300
+_PRELUDE_MIN_CHARS: Final[int] = 80
+_FUNCTION_BODY_MIN_CHARS: Final[int] = 2500
+_GUARD_REGION_MIN_CHARS: Final[int] = 1500
+# Plan 04's two regions. Measured at the commit that introduced them: 170 and
+# 11527 characters. Floored at roughly a half / a fifth, on the same reasoning.
+_COMPOSITE_PRELUDE_MIN_CHARS: Final[int] = 80
+_COMPOSITE_BODY_MIN_CHARS: Final[int] = 2500
+# The composite handler's own terminal-stamp closure. Measured at 7708
+# characters at the commit that introduced its guard.
+_COMPOSITE_GUARD_REGION_MIN_CHARS: Final[int] = 1500
+
+# ---------------------------------------------------------------------------
+# Region sentinels — ⛔ EACH ONE MUST LIE BEYOND ITS OWN FLOOR
+# ---------------------------------------------------------------------------
+# A sentinel exists to catch the region that is LONG ENOUGH and still the wrong
+# text. It can only do that if the LOCATOR CANNOT SUPPLY IT.
+#
+# Reviewed 2026-08-25 (WR-04): five of the eight sentinels here were their own
+# locator's text — the view's name, the two function names, the two closure
+# names — sitting at offsets 14, 30, 34, 34 and 18 of their regions. Every
+# successful extraction contains the text that found it, so all five were
+# assertions that could not fail, and the ABSENCE assertions they were meant to
+# protect could then pass over the wrong region by construction. That is the
+# exact disease this file exists to detect, found inside the detector.
+#
+# ⛔ THE RULE, mechanically enforced below by
+# `TestAntiVacuityFloor::test_every_sentinel_lies_beyond_its_own_floor`:
+#
+#     a sentinel must occur NO EARLIER THAN its region's floor.
+#
+# That is what makes it independent of the length check rather than implied by
+# it: an extraction truncated to exactly the floor's allowance still cannot
+# contain the sentinel, so the two halves of `_assert_region` fail for
+# distinguishable reasons instead of agreeing by luck.
+#
+# ⚠️ "Not a substring of the locator" is NOT sufficient, and the difference is
+# concrete. `AS $fanout$` reads as independent — it is nowhere in the pattern
+# source, which spells it `AS\s+\$fanout\$` — but the prelude regex TERMINATES
+# on it, so every successful match ends with it and it can no more fail than the
+# function name could. The prelude sentinel is therefore `LANGUAGE plpgsql`,
+# which the locator neither names nor forces.
+#
+# ⛔ A sentinel must ALSO NOT be a token that a GATE scoped to the same region
+# asserts. If it is, deleting the thing the gate protects fires the FLOOR's
+# message — "the extraction landed on the wrong text" — instead of the gate's,
+# and a correctly-detected regression is reported as a broken test. That is why
+# both prelude sentinels sit BEFORE `SECURITY DEFINER` / `SET search_path`
+# (gates 7 and 10f own those), and why the verdict's sentinel is no longer
+# `last_return_date` (gate 6 owns that).
+
+# The view's closing join predicate, INCLUDING its terminating semicolon. The
+# region is defined as "the CREATE VIEW statement up to its own `;`", so a
+# sentinel carrying that `;` is the one token that proves `_scan_sql` stopped at
+# the RIGHT terminator — which is the failure this floor was built for: the
+# in-body prose contains "catches single-key strategies;", and an earlier
+# regression truncated the extraction there while leaving >1200 characters of
+# header behind.
+_VIEW_BODY_SENTINEL: Final[str] = "WHERE sv.exchanges && lv.venues;"
+# The verdict's `stale_reason` alias — the LAST thing inside the BEGIN/END
+# markers. Not `last_return_date`: that is gate 6's own positive assertion (so
+# the floor would preempt it with a wrong diagnosis) and it first occurs at
+# offset 537, inside a 1105-character region, so a spurious END marker anywhere
+# past it left the sentinel intact.
+_IS_STALE_SENTINEL: Final[str] = "stale_reason"
+# The declaration's language clause. Sits after the header (73 ch) and after
+# `RETURNS INTEGER` (89 ch) — i.e. just past the 80-character floor, which is
+# precisely the gap the floor alone cannot close.
+_PRELUDE_SENTINEL: Final[str] = "LANGUAGE plpgsql"
+_FUNCTION_BODY_SENTINEL: Final[str] = "enqueue_compute_job("
+# The awaited series heal — the closure's LAST statement, and the destructive
+# act D-15 exists to withhold. Prefixed with `await ` deliberately: the bare
+# name also appears at offset 5480 in the closure's own reasoning, and the
+# prefixed call form occurs exactly once, at the tail.
+_GUARD_REGION_SENTINEL: Final[str] = "await _heal_delete_basis_series()"
+_COMPOSITE_PRELUDE_SENTINEL: Final[str] = "LANGUAGE plpgsql"
+_COMPOSITE_BODY_SENTINEL: Final[str] = "enqueue_compute_job("
+# The composite closure's merged-flags payload. Chosen over `on_conflict=` and
+# `await db_execute(_upsert)` — both of which sit deeper — because those two
+# also appear in the SIBLING closure (region 5), so they could not tell a
+# mis-landing on it from a correct extraction. `merged_flags` is M-2's
+# read-modify-write and exists only here; the derive closure writes a literal
+# `{"csv_source": True}`.
+_COMPOSITE_GUARD_REGION_SENTINEL: Final[str] = '"data_quality_flags": merged_flags'
+
+# The rejected freshness keys (plan 01, D-03). `computed_at` covers both
+# `strategy_analytics.computed_at` and the view's `analytics_computed_at` alias;
+# `series_written_at` is included because the verdict region's own marker
+# comment states the rule as "no write timestamp of ANY kind may appear below",
+# and keying the verdict on a write timestamp is the Phase-106 janitor bug
+# whichever of the three it is.
+_REJECTED_FRESHNESS_TOKENS: Final[tuple[str, ...]] = (
+    "computed_at",
+    "last_sync_at",
+    "series_written_at",
+)
+
+_DOLLAR_TAG_RE: Final[re.Pattern[str]] = re.compile(
+    r"\$[A-Za-z_][A-Za-z0-9_]*\$|\$\$"
+)
+
+
+# ---------------------------------------------------------------------------
+# Paths
+# ---------------------------------------------------------------------------
+def _repo_root() -> pathlib.Path:
+    """``parents[2]`` from ``analytics-service/tests/`` is the repo root.
+
+    Same resolution as tests/test_main_worker.py's reaper drift gate and
+    tests/test_migration_132.py.
+    """
+    return pathlib.Path(__file__).resolve().parents[2]
+
+
+def _migrations_dir() -> pathlib.Path:
+    return _repo_root() / "supabase" / "migrations"
+
+
+def _view_migration_path() -> pathlib.Path:
+    return _migrations_dir() / _STALENESS_VIEW_MIGRATION_NAME
+
+
+def _fanout_migration_path() -> pathlib.Path:
+    return _migrations_dir() / _FANOUT_MIGRATION_NAME
+
+
+def _composite_migration_path() -> pathlib.Path:
+    return _migrations_dir() / _COMPOSITE_MIGRATION_NAME
+
+
+_MIGRATION_TIMESTAMP_RE: Final[re.Pattern[str]] = re.compile(r"^(\d{14})_")
+
+
+def _phase_migration_paths() -> list[pathlib.Path]:
+    """Every migration inside this phase's timestamp window.
+
+    ⛔ Selection is the 14-digit filename TIMESTAMP, never a descriptive-name
+    glob. See _PHASE_MIGRATION_WINDOW_START for the measurement that retired the
+    glob: it missed this phase's own fourth migration while its count floor
+    stayed green on the three that happened to be named right (F17).
+    """
+    out: list[pathlib.Path] = []
+    for path in sorted(_migrations_dir().glob("*.sql")):
+        stamp = _MIGRATION_TIMESTAMP_RE.match(path.name)
+        if stamp is None:
+            continue
+        if (
+            _PHASE_MIGRATION_WINDOW_START
+            <= stamp.group(1)
+            < _PHASE_MIGRATION_WINDOW_END
+        ):
+            out.append(path)
+    return out
+
+
+_SQL_CONCAT_RE: Final[re.Pattern[str]] = re.compile(
+    r"'((?:[^']|'')*)'\s*\|\|\s*'((?:[^']|'')*)'", re.DOTALL
+)
+
+
+def _fold_sql_string_concatenations(text: str) -> str:
+    """Collapse ``'a' || 'b'`` into ``'ab'``, repeatedly.
+
+    Closes the INDIRECT-SCHEDULE hole gate 3a's literal-token scan would
+    otherwise leave open: `EXECUTE 'cr' || 'on.sch' || 'edule(...)'` contains
+    neither search token as a literal, so scanning the raw text alone proves
+    nothing about a migration that assembles the call. Folding first makes the
+    assembled value visible to the same scan.
+
+    ⚠️ RESIDUAL, RECORDED not closed: a call assembled through a VARIABLE across
+    statements, or read out of a table, is invisible to any static scan of the
+    file. That is bounded by gates 3b / 10c, which require each function name to
+    appear in EXACTLY ONE migration, and ultimately by the runbook rule that
+    activation is a founder LIVE op.
+    """
+    folded = text
+    for _ in range(32):
+        collapsed = _SQL_CONCAT_RE.sub(lambda m: "'" + m.group(1) + m.group(2) + "'", folded)
+        if collapsed == folded:
+            break
+        folded = collapsed
+    return folded
+
+
+def _job_worker_path() -> pathlib.Path:
+    """``parents[1]`` is ``analytics-service/``."""
+    return pathlib.Path(__file__).resolve().parents[1] / "services" / "job_worker.py"
+
+
+def _read(path: pathlib.Path, pointer_constant: str) -> str:
+    assert path.is_file(), (
+        f"{path} is missing. This file's {pointer_constant} pointer names it; if "
+        "the migration was renamed or superseded, move the pointer IN THE SAME "
+        "COMMIT. A stale pointer keeps every gate below green while it guards a "
+        "body nothing runs."
+    )
+    return path.read_text(encoding="utf-8")
+
+
+# ---------------------------------------------------------------------------
+# SQL scanning
+# ---------------------------------------------------------------------------
+def _scan_sql(text: str, *, stop_at_semicolon: bool) -> tuple[str, int]:
+    """Walk SQL, returning ``(code-only text, index just past the terminator)``.
+
+    Comment-awareness is load-bearing in BOTH directions:
+
+      * finding a statement's end by ``text.find(";")`` is wrong — the view
+        migration's in-body prose contains "catches single-key strategies;",
+        which truncates the extraction to a few hundred characters of comment
+        and would make every negative assertion below vacuous (measured while
+        writing this file);
+      * comment-stripping is what stops a SENTENCE satisfying a positive
+        assertion.
+
+    Single-quoted literals (with ``''`` escapes) and dollar-quoted blocks are
+    passed through untouched, so a ``--`` or ``;`` inside one cannot be
+    mistaken for a comment or a terminator.
+    """
+    out: list[str] = []
+    i = 0
+    n = len(text)
+    while i < n:
+        if text.startswith("--", i):
+            j = text.find("\n", i)
+            if j < 0:
+                i = n
+            else:
+                out.append("\n")
+                i = j + 1
+            continue
+        if text.startswith("/*", i):
+            j = text.find("*/", i + 2)
+            i = n if j < 0 else j + 2
+            out.append(" ")
+            continue
+        ch = text[i]
+        if ch == "'":
+            j = i + 1
+            while j < n:
+                if text[j] == "'":
+                    if text.startswith("''", j):
+                        j += 2
+                        continue
+                    j += 1
+                    break
+                j += 1
+            out.append(text[i:j])
+            i = j
+            continue
+        tag_match = _DOLLAR_TAG_RE.match(text, i)
+        if tag_match is not None:
+            tag = tag_match.group(0)
+            j = text.find(tag, i + len(tag))
+            j = n if j < 0 else j + len(tag)
+            out.append(text[i:j])
+            i = j
+            continue
+        if ch == ";" and stop_at_semicolon:
+            out.append(";")
+            return "".join(out), i + 1
+        out.append(ch)
+        i += 1
+    return "".join(out), n
+
+
+def _strip_sql_comments(fragment: str) -> str:
+    code, _ = _scan_sql(fragment, stop_at_semicolon=False)
+    return code
+
+
+def _sql_statement(src: str, header: re.Pattern[str], what: str) -> str:
+    """The RAW text of the statement whose header matches, up to its own ``;``."""
+    match = header.search(src)
+    assert match is not None, (
+        f"could not locate the {what} statement — the extraction is broken, so "
+        "every assertion scoped to it proves nothing. If the statement was "
+        "renamed or restructured, fix this pattern rather than deleting the gate."
+    )
+    _, end = _scan_sql(src[match.start() :], stop_at_semicolon=True)
+    return src[match.start() : match.start() + end]
+
+
+def _assert_region(label: str, text: str, min_chars: int, sentinel: str) -> str:
+    """THE ANTI-VACUITY FLOOR. Applied to every extracted region, separately.
+
+    A region that comes back empty (or nearly so) makes every ABSENCE assertion
+    scoped to it pass by default, and this file is mostly absence assertions.
+    Length alone is not enough — a region could be long and still be the wrong
+    text — so each region also carries a hand-typed sentinel proving the
+    extraction landed where it was aimed.
+
+    ⛔ The sentinel only carries that proof while the LOCATOR CANNOT SUPPLY IT.
+    A sentinel taken from the head of the region is normally the very text the
+    extractor searched for, and every successful extraction contains that by
+    construction — so the assertion below cannot fail, and the length check is
+    silently the only thing left. See the rule block above `_VIEW_BODY_SENTINEL`
+    and `test_every_sentinel_lies_beyond_its_own_floor`, which enforces it.
+    """
+    assert len(text) >= min_chars, (
+        f"ANTI-VACUITY FLOOR: the extracted {label} is {len(text)} characters, "
+        f"below the {min_chars}-character floor. The extraction is broken. Do "
+        "NOT lower the floor to make this pass — every negative assertion "
+        f"scoped to this region is vacuously green right now. Region was: "
+        f"{text[:200]!r}"
+    )
+    assert sentinel in text, (
+        f"ANTI-VACUITY FLOOR: the extracted {label} does not contain its "
+        f"sentinel {sentinel!r}, so the extraction landed on the wrong text and "
+        "the assertions scoped to it prove nothing. Region began: "
+        f"{text[:200]!r}"
+    )
+    return text
+
+
+# ---------------------------------------------------------------------------
+# The five regions
+# ---------------------------------------------------------------------------
+_VIEW_HEADER_RE: Final[re.Pattern[str]] = re.compile(
+    r"CREATE\s+OR\s+REPLACE\s+VIEW\s+public\.ledger_refresh_staleness",
+    re.IGNORECASE,
+)
+
+
+def view_body() -> str:
+    """REGION 1 — the CREATE VIEW statement only, up to its terminating ``;``."""
+    src = _read(_view_migration_path(), "_STALENESS_VIEW_MIGRATION_NAME")
+    body = _sql_statement(src, _VIEW_HEADER_RE, "CREATE VIEW ledger_refresh_staleness")
+    return _assert_region(
+        "VIEW BODY", body, _VIEW_BODY_MIN_CHARS, _VIEW_BODY_SENTINEL
+    )
+
+
+def is_stale_expression() -> str:
+    """REGION 2 — the freshness VERDICT, between plan 01's explicit markers.
+
+    Scoped rather than whole-file, and that is not an over-complication: the
+    view LEGITIMATELY exposes both rejected timestamps as documented
+    informational columns with explanatory ``COMMENT ON COLUMN`` prose (plan 01,
+    D-03), so a whole-body negative grep for them would be tripped by the view's
+    own documentation. Plan 01 delimited this region for exactly this reason.
+
+    Its floor and sentinel are its OWN. It does not inherit the VIEW BODY's.
+    """
+    body = view_body()
+    match = re.search(
+        r"LEDGER_REFRESH_VERDICT_BEGIN(.*?)LEDGER_REFRESH_VERDICT_END",
+        body,
+        re.DOTALL,
+    )
+    assert match is not None, (
+        "the view body carries no LEDGER_REFRESH_VERDICT_BEGIN/END markers. "
+        "Plan 01 placed them so gate 6's negative assertions could be scoped to "
+        "the verdict instead of the whole file. Without them the extraction is "
+        "empty and gate 6 would pass over nothing — restore the markers rather "
+        "than widening the gate."
+    )
+    return _assert_region(
+        "IS_STALE EXPRESSION",
+        match.group(1),
+        _IS_STALE_MIN_CHARS,
+        _IS_STALE_SENTINEL,
+    )
+
+
+def function_declaration_prelude() -> str:
+    """REGION 3 — ``CREATE … FUNCTION …`` through ``AS $fanout$``.
+
+    ⚠️ This region exists because plan 05's own text defined the FUNCTION BODY
+    as "the text between the dollar-quote delimiters" and then asked gate 7 to
+    assert that body pins ``search_path`` — which it cannot, because
+    ``SET search_path`` is part of the CREATE FUNCTION DECLARATION and sits
+    OUTSIDE the delimiters, as it does in every SECDEF function in this repo.
+    Plan 02's executor measured that and left the correction in its SUMMARY
+    ("Notes owed to plan 05", item 1). Gate 7 therefore reads THIS region, and
+    was proven to redden when ``SET search_path`` is actually removed.
+    """
+    src = _read(_fanout_migration_path(), "_FANOUT_MIGRATION_NAME")
+    match = re.search(
+        r"CREATE\s+OR\s+REPLACE\s+FUNCTION\s+public\."
+        + re.escape(_FANOUT_FUNCTION_NAME)
+        + r"\s*\(\s*\).*?AS\s+\$fanout\$",
+        src,
+        re.DOTALL | re.IGNORECASE,
+    )
+    assert match is not None, (
+        "could not locate the fan-out's CREATE FUNCTION declaration prelude "
+        "(header through `AS $fanout$`). The extraction is broken and gate 7 "
+        "would prove nothing."
+    )
+    return _assert_region(
+        "DECLARATION PRELUDE",
+        match.group(0),
+        _PRELUDE_MIN_CHARS,
+        _PRELUDE_SENTINEL,
+    )
+
+
+def function_body() -> str:
+    """REGION 4 — the text between the fan-out's ``$fanout$`` delimiters."""
+    src = _read(_fanout_migration_path(), "_FANOUT_MIGRATION_NAME")
+    match = re.search(r"\$fanout\$(.*?)\$fanout\$", src, re.DOTALL)
+    assert match is not None, (
+        "the fan-out migration has no $fanout$...$fanout$ block. The function "
+        "body must stay dollar-quoted with that tag; if the tag changed, change "
+        "it here in the same commit."
+    )
+    return _assert_region(
+        "FUNCTION BODY",
+        match.group(1),
+        _FUNCTION_BODY_MIN_CHARS,
+        _FUNCTION_BODY_SENTINEL,
+    )
+
+
+def guard_region() -> str:
+    """REGION 5 — the ``_stamp_strategy_analytics_failed`` closure in Python.
+
+    The closure is nested inside ``run_derive_broker_dailies_job`` at eight
+    spaces of indentation. Its body is every subsequent line indented FURTHER
+    than that, so the region ends at the first following non-blank line whose
+    indentation is less than or equal to the ``async def``'s. That rule is
+    exact — it does not depend on what kind of statement happens to follow the
+    closure, which in this file is a plain annotated assignment rather than
+    another ``def``.
+    """
+    src = _read(_job_worker_path(), "services/job_worker.py")
+    lines = src.splitlines()
+    start: int | None = None
+    for index, line in enumerate(lines):
+        if line.strip().startswith("async def _stamp_strategy_analytics_failed"):
+            start = index
+            break
+    assert start is not None, (
+        "services/job_worker.py no longer defines "
+        "`_stamp_strategy_analytics_failed`. Gates 8 and 9 read that closure; if "
+        "the D-15 guard moved, move this extractor with it — do not delete the "
+        "gate, it is the only thing pinning the SQL marker to the Python one."
+    )
+    indent = len(lines[start]) - len(lines[start].lstrip())
+    end = len(lines)
+    for index in range(start + 1, len(lines)):
+        line = lines[index]
+        if not line.strip():
+            continue
+        if len(line) - len(line.lstrip()) <= indent:
+            end = index
+            break
+    return _assert_region(
+        "GUARD REGION",
+        "\n".join(lines[start:end]),
+        _GUARD_REGION_MIN_CHARS,
+        _GUARD_REGION_SENTINEL,
+    )
+
+
+def composite_declaration_prelude() -> str:
+    """REGION 6 — ``CREATE … FUNCTION …`` through ``AS $composite$``.
+
+    Exists for the SAME reason region 3 does: ``SET search_path`` is part of the
+    CREATE FUNCTION declaration and sits OUTSIDE the dollar-quote delimiters, so
+    a hygiene gate scoped to the body alone would be RED against a correct file.
+    """
+    src = _read(_composite_migration_path(), "_COMPOSITE_MIGRATION_NAME")
+    match = re.search(
+        r"CREATE\s+OR\s+REPLACE\s+FUNCTION\s+public\."
+        + re.escape(_COMPOSITE_FUNCTION_NAME)
+        + r"\s*\(\s*\).*?AS\s+\$composite\$",
+        src,
+        re.DOTALL | re.IGNORECASE,
+    )
+    assert match is not None, (
+        "could not locate the composite arm's CREATE FUNCTION declaration "
+        "prelude (header through `AS $composite$`). The extraction is broken and "
+        "gate 10e would prove nothing."
+    )
+    return _assert_region(
+        "COMPOSITE PRELUDE",
+        match.group(0),
+        _COMPOSITE_PRELUDE_MIN_CHARS,
+        _COMPOSITE_PRELUDE_SENTINEL,
+    )
+
+
+def composite_body() -> str:
+    """REGION 7 — the text between the composite arm's ``$composite$`` tags."""
+    src = _read(_composite_migration_path(), "_COMPOSITE_MIGRATION_NAME")
+    match = re.search(r"\$composite\$(.*?)\$composite\$", src, re.DOTALL)
+    assert match is not None, (
+        "the composite migration has no $composite$...$composite$ block. The "
+        "function body must stay dollar-quoted with that tag; if the tag "
+        "changed, change it here in the same commit."
+    )
+    return _assert_region(
+        "COMPOSITE BODY",
+        match.group(1),
+        _COMPOSITE_BODY_MIN_CHARS,
+        _COMPOSITE_BODY_SENTINEL,
+    )
+
+
+def composite_guard_region() -> str:
+    """REGION 8 — the ``_stamp_failed`` closure inside the composite handler.
+
+    The composite handler has a terminal stamp of its OWN, distinct from
+    ``_stamp_strategy_analytics_failed`` (region 5), and plan 04 extended the
+    D-15 non-destructive guard onto it. Same indentation rule as region 5: the
+    closure sits inside ``run_stitch_composite_job``, so its body is every
+    subsequent line indented FURTHER than the ``async def``, and the region ends
+    at the first following non-blank line indented ``<=`` it. What follows here
+    is a comment at the enclosing function's level, not a ``def`` — which is
+    exactly why the rule is written on indentation rather than on statement kind.
+    """
+    src = _read(_job_worker_path(), "services/job_worker.py")
+    lines = src.splitlines()
+    start: int | None = None
+    for index, line in enumerate(lines):
+        if line.strip().startswith("async def _stamp_failed"):
+            start = index
+            break
+    assert start is not None, (
+        "services/job_worker.py no longer defines the `_stamp_failed` closure "
+        "inside run_stitch_composite_job. Gate 11 reads that closure; if the "
+        "composite non-destructive guard moved, move this extractor with it — do "
+        "not delete the gate, it is the only thing pinning the composite arm's "
+        "SQL marker to the Python one."
+    )
+    indent = len(lines[start]) - len(lines[start].lstrip())
+    end = len(lines)
+    for index in range(start + 1, len(lines)):
+        line = lines[index]
+        if not line.strip():
+            continue
+        if len(line) - len(line.lstrip()) <= indent:
+            end = index
+            break
+    return _assert_region(
+        "COMPOSITE GUARD REGION",
+        "\n".join(lines[start:end]),
+        _COMPOSITE_GUARD_REGION_MIN_CHARS,
+        _COMPOSITE_GUARD_REGION_SENTINEL,
+    )
+
+
+def _sql_string_list(literal_list: str) -> set[str]:
+    """``"'a', 'b'"`` -> ``{"a", "b"}``."""
+    return {value for value in re.findall(r"'([^']*)'", literal_list)}
+
+
+def _banned_venue_names() -> set[str]:
+    """Every venue literal, ledger and ccxt alike.
+
+    The ledger three come from the Python authority, so adding a fourth ledger
+    venue extends this ban automatically rather than leaving a hole.
+    """
+    from services.ingestion.long_fetch import _LEDGER_BACKED_SOURCES
+
+    return set(_LEDGER_BACKED_SOURCES) | {"binance", "okx", "bybit"}
+
+
+# ---------------------------------------------------------------------------
+# The region contract table — floor and sentinel, one row per region
+# ---------------------------------------------------------------------------
+# ⛔ EVERY region belongs here. This table is what
+# `test_every_sentinel_lies_beyond_its_own_floor` iterates, and a region
+# extractor added without a row would be the one whose sentinel nobody checks.
+# The count assertion in that test is the floor for THIS table, on the same
+# reasoning gate 3a's match count uses: a loop over an empty (or shortened)
+# sequence reports "no offenders" in language indistinguishable from success.
+_REGION_CONTRACTS: Final[tuple[tuple[str, Callable[[], str], int, str], ...]] = (
+    ("VIEW BODY", view_body, _VIEW_BODY_MIN_CHARS, _VIEW_BODY_SENTINEL),
+    (
+        "IS_STALE EXPRESSION",
+        is_stale_expression,
+        _IS_STALE_MIN_CHARS,
+        _IS_STALE_SENTINEL,
+    ),
+    (
+        "DECLARATION PRELUDE",
+        function_declaration_prelude,
+        _PRELUDE_MIN_CHARS,
+        _PRELUDE_SENTINEL,
+    ),
+    ("FUNCTION BODY", function_body, _FUNCTION_BODY_MIN_CHARS, _FUNCTION_BODY_SENTINEL),
+    ("GUARD REGION", guard_region, _GUARD_REGION_MIN_CHARS, _GUARD_REGION_SENTINEL),
+    (
+        "COMPOSITE PRELUDE",
+        composite_declaration_prelude,
+        _COMPOSITE_PRELUDE_MIN_CHARS,
+        _COMPOSITE_PRELUDE_SENTINEL,
+    ),
+    (
+        "COMPOSITE BODY",
+        composite_body,
+        _COMPOSITE_BODY_MIN_CHARS,
+        _COMPOSITE_BODY_SENTINEL,
+    ),
+    (
+        "COMPOSITE GUARD REGION",
+        composite_guard_region,
+        _COMPOSITE_GUARD_REGION_MIN_CHARS,
+        _COMPOSITE_GUARD_REGION_SENTINEL,
+    ),
+)
+
+_KNOWN_REGIONS: Final[int] = 8
+
+
+# ---------------------------------------------------------------------------
+# THE ANTI-VACUITY FLOOR, as tests in its own right
+# ---------------------------------------------------------------------------
+class TestAntiVacuityFloor:
+    """Every region below is extracted before it is asserted over, and a broken
+    extraction makes ABSENCE assertions pass by default. These tests make the
+    floor visible as its own failure rather than as a mysteriously-green
+    gate 2 / gate 6. Each extractor also re-runs the floor internally, so the
+    floor fires whichever entry point reaches the broken region first.
+
+    The last test in the class is the floor ON THE FLOOR: it checks that every
+    sentinel is capable of failing at all."""
+
+    def test_every_sentinel_lies_beyond_its_own_floor(self) -> None:
+        """⛔ THE GATE ON THE GATES. A sentinel drawn from a region's head is
+        almost always the locator's own text, and every successful extraction
+        contains the text that found it — so the assertion cannot fail and the
+        length check is silently the only thing left standing.
+
+        That is not hypothetical: reviewed 2026-08-25 (WR-04), FIVE of these
+        eight sentinels were exactly that, sitting at offsets 14-34. This test
+        is what stops the sixth from being written, because the review that
+        caught the five was a human reading a table.
+
+        The invariant is `region.find(sentinel) >= floor`: an extraction
+        truncated to exactly the floor's allowance must still lose the sentinel.
+        A sentinel inside the floor's own allowance adds nothing the length
+        check did not already say."""
+        assert len(_REGION_CONTRACTS) == _KNOWN_REGIONS, (
+            f"_REGION_CONTRACTS has {len(_REGION_CONTRACTS)} row(s), not "
+            f"{_KNOWN_REGIONS}. The loop below reports 'no offenders' over a "
+            "short table in language indistinguishable from success. If a region "
+            "was genuinely added or removed, move this integer IN THE SAME "
+            "COMMIT — do not delete the count."
+        )
+        offenders: list[str] = []
+        for label, extractor, floor, sentinel in _REGION_CONTRACTS:
+            offset = extractor().find(sentinel)
+            if offset < floor:
+                offenders.append(
+                    f"{label}: sentinel {sentinel!r} first occurs at offset "
+                    f"{offset}, inside its own {floor}-character floor"
+                )
+        assert not offenders, (
+            "TAUTOLOGICAL SENTINEL — one or more region sentinels cannot fail:\n"
+            + "\n".join(f"  * {entry}" for entry in offenders)
+            + "\n⛔ A sentinel that sits inside the floor's own allowance proves "
+            "nothing the length check did not already prove, and one taken from "
+            "the region's head is the LOCATOR'S OWN TEXT, which every successful "
+            "extraction contains by construction. The ABSENCE assertions scoped "
+            "to that region are then protected by length alone, and a long-but-"
+            "wrong extraction passes them all.\n"
+            "Do NOT fix this by lowering the floor. Pick a token from the "
+            "region's TAIL that the locator neither names nor forces to be "
+            "present — and check it is not a token some GATE scoped to the same "
+            "region asserts, or a real regression will be reported as a broken "
+            "extraction. The reasoning block above `_VIEW_BODY_SENTINEL` has the "
+            "worked examples."
+        )
+
+    def test_view_body_region_is_real(self) -> None:
+        assert len(view_body()) >= _VIEW_BODY_MIN_CHARS
+
+    def test_is_stale_expression_region_is_real(self) -> None:
+        """⛔ Separately floored ON PURPOSE. This region is a sub-slice of the
+        view body, and a sub-extraction can break while its parent stays
+        healthy. Gate 6's negatives run here; without an independent floor and
+        an independent sentinel they would be green over an empty string, and a
+        positive assertion over that same empty string would be red — agreement
+        by luck rather than by construction.
+
+        ⚠️ The sentinel asserted here is NOT `last_return_date`, which gate 6
+        already owns as its positive assertion. Re-using it would mean a verdict
+        genuinely re-keyed off the returns series failed HERE, reported as a
+        broken extraction, instead of in gate 6 with the reason."""
+        region = is_stale_expression()
+        assert len(region) >= _IS_STALE_MIN_CHARS
+        assert _IS_STALE_SENTINEL in region
+
+    def test_declaration_prelude_region_is_real(self) -> None:
+        assert len(function_declaration_prelude()) >= _PRELUDE_MIN_CHARS
+
+    def test_function_body_region_is_real(self) -> None:
+        assert len(function_body()) >= _FUNCTION_BODY_MIN_CHARS
+
+    def test_guard_region_is_real(self) -> None:
+        assert len(guard_region()) >= _GUARD_REGION_MIN_CHARS
+
+    def test_composite_prelude_region_is_real(self) -> None:
+        assert len(composite_declaration_prelude()) >= _COMPOSITE_PRELUDE_MIN_CHARS
+
+    def test_composite_guard_region_is_real(self) -> None:
+        assert len(composite_guard_region()) >= _COMPOSITE_GUARD_REGION_MIN_CHARS
+
+    def test_composite_body_region_is_real(self) -> None:
+        """⛔ Gate 10b's venue scan is an ABSENCE assertion over this region, and
+        an absence assertion over an empty string is green. Floored and
+        sentinelled separately from the fan-out's body for that reason."""
+        region = composite_body()
+        assert len(region) >= _COMPOSITE_BODY_MIN_CHARS
+        assert _COMPOSITE_BODY_SENTINEL in region
+
+
+# ---------------------------------------------------------------------------
+# GATE 1 — LEDGER-04 venue drift
+# ---------------------------------------------------------------------------
+class TestGate1VenueDrift:
+    """The SQL venue array and the Python authority are one set or the phase is
+    broken. This is a DRIFT gate, so importing the constant it pins is correct:
+    the property under test is SQL == Python, not the value's correctness."""
+
+    def test_view_venue_array_equals_python_authority(self) -> None:
+        from services.ingestion.long_fetch import _LEDGER_BACKED_SOURCES
+
+        code = _strip_sql_comments(view_body())
+        matches: list[str] = re.findall(
+            r"ARRAY\[([^\]]*)\]::TEXT\[\]\s+AS\s+venues", code
+        )
+        assert len(matches) == 1, (
+            "expected exactly ONE `ARRAY[...]::TEXT[] AS venues` declaration in "
+            f"the view body, found {len(matches)}. Migration "
+            f"{_STALENESS_VIEW_MIGRATION_NAME} is the SINGLE SQL home of the "
+            "ledger venue set (D-05); a second declaration is a second drift "
+            "surface."
+        )
+        sql_venues = _sql_string_list(matches[0])
+        assert len(sql_venues) == 3, (
+            f"the extracted SQL venue set has {len(sql_venues)} member(s): "
+            f"{sorted(sql_venues)}. Three are expected. An extraction that "
+            "returned one venue must not be able to pass this gate by matching a "
+            "Python set that was edited down to one at the same time."
+        )
+        assert sql_venues == set(_LEDGER_BACKED_SOURCES), (
+            "LEDGER-04 VENUE DRIFT: the ledger venue set in "
+            f"{_STALENESS_VIEW_MIGRATION_NAME} is {sorted(sql_venues)} but "
+            "`_LEDGER_BACKED_SOURCES` (analytics-service/services/ingestion/"
+            f"long_fetch.py) is {sorted(_LEDGER_BACKED_SOURCES)}.\n"
+            "⛔ ORDER OF OPERATIONS: change the PYTHON constant FIRST, then this "
+            "migration. Python is the sole authority (ROADMAP fence); the SQL "
+            "array is a mirror that exists only because the cohort query has to "
+            "run in the database."
+        )
+
+    def test_deferred_venue_set_is_a_subset_of_the_ledger_set(self) -> None:
+        """WR-02's deferred-venue drift gate, AT PULL-REQUEST TIME.
+
+        The migration asserts this itself, in its STEP 3 self-verify block. That
+        half runs at APPLY time — and `supabase/migrations/**` AUTO-APPLIES to
+        PROD on merge to main, so it fires against production and blocks the
+        DEPLOY, not the pull request. This is the same relation asserted against
+        the file, where a reviewer can still act on it.
+
+        Why the relation matters: `has_mt5_member` is what
+        20260825140000's composite exclusion keys on, and it is computed as
+        `sv.exchanges && lv.deferred_venues`. If the deferred name ever stops
+        being one of the ledger venues — a rename, a re-spelling, a venue
+        dropped from the authority — the intersection is empty for every row,
+        `has_mt5_member` reads FALSE everywhere, and the exclusion silently
+        stops excluding. Nothing raises; the composite arm just starts enqueuing
+        crawls that serialise on the single shared terminal registry.
+
+        ⚠️ KNOWN LIMITATION, recorded and accepted (founder call): a SIBLING
+        SPELLING defeats this. If the deferred venue stays and a second one is
+        added to the authority, the subset relation still holds while the new
+        sibling is not deferred. Whether a venue serialises on that shared
+        registry is a decision, not something a gate can infer from the names.
+        Do not "fix" this by hard-coding the deferred venue here — that is the
+        hand-typed literal WR-02 removed.
+        """
+        code = _strip_sql_comments(view_body())
+        ledger_matches: list[str] = re.findall(
+            r"ARRAY\[([^\]]*)\]::TEXT\[\]\s+AS\s+venues", code
+        )
+        deferred_matches: list[str] = re.findall(
+            r"ARRAY\[([^\]]*)\]::TEXT\[\]\s+AS\s+deferred_venues", code
+        )
+        assert len(ledger_matches) == 1 and len(deferred_matches) == 1, (
+            "expected exactly ONE `AS venues` and ONE `AS deferred_venues` array "
+            f"declaration in the view body; found venues={len(ledger_matches)} "
+            f"deferred={len(deferred_matches)}. Both live in the SAME "
+            "`ledger_venue_set` CTE precisely so the relation below can be read "
+            "off one place (WR-02); a second declaration of either is a second "
+            "drift surface."
+        )
+        sql_venues = _sql_string_list(ledger_matches[0])
+        deferred_venues = _sql_string_list(deferred_matches[0])
+        # ⛔ ANTI-VACUITY. `set() <= anything` is TRUE, so an extraction that
+        # returned no deferred member would make the subset assertion below
+        # green over nothing — the exact defect WR-04 found in this file's own
+        # sentinels. Both sides are floored before they are compared.
+        assert sql_venues and deferred_venues, (
+            "ANTI-VACUITY FLOOR: the extracted arrays are "
+            f"venues={sorted(sql_venues)} deferred={sorted(deferred_venues)}. An "
+            "EMPTY deferred set satisfies the subset assertion below by "
+            "definition, so the extraction must be proven non-empty first or the "
+            "gate proves nothing. Fix the extraction — do not drop the check."
+        )
+        assert deferred_venues <= sql_venues, (
+            "DEFERRED-VENUE DRIFT (WR-02): the deferred venue set "
+            f"{sorted(deferred_venues)} is not contained in the ledger venue set "
+            f"{sorted(sql_venues)} in {_STALENESS_VIEW_MIGRATION_NAME}.\n"
+            "⛔ THE FAILURE IS SILENT. `has_mt5_member` is "
+            "`sv.exchanges && lv.deferred_venues`; a deferred name that is not a "
+            "real ledger venue intersects nothing, so the flag reads FALSE for "
+            "EVERY row and 20260825140000's `has_mt5_member = FALSE` conjunct "
+            "excludes nobody. The composite arm would then enqueue crawls that "
+            "serialise on one shared terminal registry.\n"
+            "ORDER OF OPERATIONS: change `_LEDGER_BACKED_SOURCES` "
+            "(analytics-service/services/ingestion/long_fetch.py) FIRST — it is "
+            "the sole authority — then both arrays here, in the same commit."
+        )
+        # The relation above guards a value the view must actually USE. If
+        # `has_mt5_member` went back to a venue literal of its own, both arrays
+        # could stay perfectly consistent while the flag ignored them.
+        flag_expressions: list[str] = re.findall(
+            r"([^\n]*)\s+AS\s+has_mt5_member", code
+        )
+        assert len(flag_expressions) == 1, (
+            "expected exactly ONE `… AS has_mt5_member` expression in the view "
+            f"body, found {len(flag_expressions)}: {flag_expressions}."
+        )
+        flag_expression = flag_expressions[0]
+        assert "deferred_venues" in flag_expression, (
+            f"`has_mt5_member` is computed as `{flag_expression.strip()}`, which "
+            "does not read `deferred_venues`. The subset assertion above would "
+            "then be guarding an array the view does not use — a green gate over "
+            "a dead value."
+        )
+        literals = sorted(
+            venue
+            for venue in _banned_venue_names()
+            if re.search(r"\b" + re.escape(venue) + r"\b", flag_expression)
+        )
+        assert not literals, (
+            f"`has_mt5_member` names {literals} directly. That hand-typed venue "
+            "name is what WR-02 removed: it compared against nothing, so a "
+            "rename of the venue token left the flag FALSE for every row and "
+            "turned the composite exclusion into a no-op. The flag must be "
+            "derived from `lv.deferred_venues`."
+        )
+
+
+# ---------------------------------------------------------------------------
+# GATE 2 — single source (plan 01 D-05 / plan 02 D-16)
+# ---------------------------------------------------------------------------
+class TestGate2SingleSource:
+    """The fan-out declares NO venue of its own — not in code and not in prose.
+
+    Prose is included deliberately: plan 02 moved its entire D-01/D-09 narrative
+    into the file HEADER, outside the dollar quotes, precisely so this gate
+    could scan the raw body. A venue name reappearing in a body comment is the
+    first step back toward a second declaration."""
+
+    def test_function_body_declares_no_venue_literal(self) -> None:
+        body = function_body()
+        found = sorted(venue for venue in _banned_venue_names() if venue in body)
+        assert not found, (
+            "SINGLE SOURCE VIOLATION: the fan-out's function body names "
+            f"{found}. The cohort must come entirely from "
+            "public.ledger_refresh_staleness, which is the single SQL home of "
+            "the venue set.\n"
+            "Why this is a hard rule, on claims that are TRUE:\n"
+            "  (1) the ROADMAP fence — `_LEDGER_BACKED_SOURCES` "
+            "(analytics-service/services/ingestion/long_fetch.py) is the SOLE "
+            "authority for which venues are ledger-backed, and a mirrored "
+            "implementation (a Vercel-cron/TS one in particular) is ruled out "
+            "unless a drift gate is explicitly accepted;\n"
+            "  (2) the measured incident — a hand-copied mirror drifted to ONE "
+            "venue while Python held THREE, and cost a funded MT5 account its "
+            "publish path.\n"
+            "⚠️ This gate does NOT rest on any claim that "
+            "src/lib/strategyGate.invariant.test.ts bans venue literals across "
+            "TS: measured at HEAD, its BANNED_VENUE_LITERALS is scoped to "
+            "src/lib/strategyGate.ts alone (:64). If you were told otherwise, "
+            "that claim is false and is not the reason for this rule.\n"
+            "If a venue genuinely must be named here, the correct move is to "
+            "add a column to the view — not a literal to this body."
+        )
+
+
+# ---------------------------------------------------------------------------
+# GATE 3 — LEDGER-02 dormancy (D-18: glob + symbol count, never enumeration)
+# ---------------------------------------------------------------------------
+class TestGate3Dormancy:
+    """No migration registers a recurring job for this fan-out.
+
+    ``supabase/migrations/**`` AUTO-APPLIES to PROD on merge to main. Activation
+    is a founder LIVE op owned by docs/runbooks/ledger-refresh-go-live.md
+    (WORKER-03 precedent), because auto-apply plus a silently-skipped worker
+    deploy recreates the v1.11 wedge verbatim.
+
+    ⛔ NOT by enumerating filenames, and — since F17 — ⛔ NOT by matching them
+    either. Selection is the migration TIMESTAMP WINDOW. The old
+    `*ledger_refresh*.sql` glob missed this phase's own fourth migration while
+    its integer count floor stayed green on the three that happened to be named
+    right; see _PHASE_MIGRATION_WINDOW_START."""
+
+    def test_3a_no_schedule_in_any_phase_migration(self) -> None:
+        paths = _phase_migration_paths()
+        scanned = {path.name for path in paths}
+
+        # ⛔ FLOOR 1 — MEMBERSHIP, NOT A COUNT. An empty or short selection makes
+        # the loop below iterate over nothing, and "no file contained the token"
+        # reads exactly like success. A count floor is satisfied by ANY files
+        # that land in the window; naming the four that MUST be there is not.
+        missing = sorted(_PHASE_MIGRATION_NAMES - scanned)
+        assert not missing, (
+            f"{missing} are not inside the dormancy scan. The scan selects "
+            f"migrations under {_migrations_dir()} whose 14-digit timestamp is "
+            f"in [{_PHASE_MIGRATION_WINDOW_START}, {_PHASE_MIGRATION_WINDOW_END}) "
+            f"and matched {sorted(scanned)}. Either a pointer constant went "
+            "stale (rename the constant IN THE SAME COMMIT as the file) or a "
+            "migration was redated out of the window — in which case widen the "
+            "window in the same commit. Until then the scan below is VACUOUS "
+            "for those files, and gate 3a is the ONLY thing standing between a "
+            "pg_cron registration and PROD auto-apply."
+        )
+
+        # ⛔ FLOOR 2 — THE TOKENS THEMSELVES RESOLVE. Floor 3 below is a
+        # "no offenders" assertion, which a mistyped token list satisfies by
+        # matching nothing at all. Each token must be present in at least one
+        # SCANNED migration before its absence elsewhere means anything.
+        scanned_text = {path.name: path.read_text(encoding="utf-8") for path in paths}
+        unresolved = sorted(
+            token
+            for token in _PHASE_IDENTIFIER_TOKENS
+            if not any(token in body for body in scanned_text.values())
+        )
+        assert not unresolved, (
+            f"{unresolved} appear in NONE of the scanned phase migrations "
+            f"({sorted(scanned)}). These tokens are how floor 3 recognises a "
+            "migration belonging to this enqueue surface; a token that resolves "
+            "nowhere makes floor 3 pass by matching nothing, which is exactly "
+            "the vacuity this file exists to detect. Fix the token, do not "
+            "delete the check."
+        )
+
+        # ⛔ FLOOR 3 — NOTHING BELONGING TO THIS SURFACE ESCAPED THE WINDOW. A
+        # window is still a selection: a migration for this phase dated
+        # 20260826 would sit outside it and be scanned by nothing. This is the
+        # assertion the old glob had no equivalent of, and it is CONTENT-based,
+        # so no naming convention can satisfy it.
+        escaped = sorted(
+            path.name
+            for path in _migrations_dir().glob("*.sql")
+            if path.name not in scanned
+            and any(
+                token in path.read_text(encoding="utf-8")
+                for token in _PHASE_IDENTIFIER_TOKENS
+            )
+        )
+        assert not escaped, (
+            f"{escaped} name this phase's enqueue surface "
+            f"({list(_PHASE_IDENTIFIER_TOKENS)}) but fall OUTSIDE the dormancy "
+            f"window [{_PHASE_MIGRATION_WINDOW_START}, "
+            f"{_PHASE_MIGRATION_WINDOW_END}), so no scan covers them. Migrations "
+            "AUTO-APPLY to PROD on merge to main. Extend the window IN THE SAME "
+            "COMMIT as the migration that needed it."
+        )
+
+        offenders: list[str] = []
+        for path in paths:
+            # RAW text, comments INCLUDED: a commented-out schedule call is one
+            # uncomment away from a production schedule, and the runbook's rule
+            # is that the statement does not live in a migration at all.
+            raw = scanned_text[path.name]
+            if _SCHEDULE_VERB in raw or _UNSCHEDULE_VERB in raw:
+                offenders.append(path.name)
+            elif (
+                _SCHEDULE_VERB in _fold_sql_string_concatenations(raw)
+                or _UNSCHEDULE_VERB in _fold_sql_string_concatenations(raw)
+            ):
+                # An indirect registration: the token is not in the file as a
+                # literal, it is assembled out of `'cr' || 'on.sch' || ...` and
+                # handed to a dynamic EXECUTE. Same effect on PROD, so same
+                # verdict — reported distinguishably so nobody hunts for a
+                # literal that is not there.
+                offenders.append(f"{path.name} (ASSEMBLED by || concatenation)")
+        assert not offenders, (
+            f"LEDGER-02 DORMANCY VIOLATION: {offenders} contain a pg_cron "
+            "registration call. Migrations AUTO-APPLY to PROD on merge to main, "
+            "so a schedule here goes live with no deploy step and no founder "
+            "action. Activation is a two-step founder LIVE op owned by "
+            "docs/runbooks/ledger-refresh-go-live.md (the WORKER-03 rule: the "
+            "switch is flipped live, never by merging). Move the statement into "
+            "that runbook."
+        )
+
+    def test_3b_fanout_function_name_appears_in_exactly_one_migration(self) -> None:
+        """Closes the hole 3a still leaves: a migration whose FILENAME lacks the
+        phase token could register a schedule for this function and never enter
+        3a's glob."""
+        hits = sorted(
+            path.name
+            for path in _migrations_dir().glob("*.sql")
+            if _FANOUT_FUNCTION_NAME in path.read_text(encoding="utf-8")
+        )
+        # EXACTLY one, not "at most one". Zero means the search is broken, and
+        # reporting a broken search as success is the failure mode this entire
+        # file exists to prevent.
+        assert len(hits) == 1, (
+            f"expected the fan-out function name to appear in EXACTLY 1 "
+            f"migration (the one that defines it, {_FANOUT_MIGRATION_NAME}); "
+            f"found {len(hits)}: {hits}.\n"
+            "  0 hits ⇒ the search is broken (or the migration was renamed "
+            "without moving _FANOUT_MIGRATION_NAME) — this gate is proving "
+            "nothing, fix it rather than relaxing it.\n"
+            "  2+ hits ⇒ a second migration either REGISTERS A SCHEDULE for the "
+            "fan-out or CALLS it. This phase forbids both from a migration: "
+            "migrations auto-apply to PROD, and activation belongs to "
+            "docs/runbooks/ledger-refresh-go-live.md (WORKER-03)."
+        )
+
+
+# ---------------------------------------------------------------------------
+# GATE 4 — LEDGER-02 lock B, the fail-closed activation switch
+# ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# The activation assertion — ANCHORED TO THE READ (F16)
+# ---------------------------------------------------------------------------
+# ⛔ DO NOT go back to `re.search(r"(?:<>|!=|=)\s*'true'", code)`. That regex
+# was UNANCHORED to the activation read, so it matched any comparison against the
+# literal 'true' anywhere in the body. MEASURED: both
+# `IF lower(v_enabled) <> 'true'` and `IF btrim(v_enabled) <> 'true'` satisfied
+# it — and each of those OPENS the flag on exactly the values the assertion's own
+# message cites as forbidden ('TRUE' for lower, 'true ' for btrim). The gate
+# could not fail for either defect it named.
+#
+# The assertion below is anchored in four steps, each failing for a
+# distinguishable reason:
+#   1. locate the ONE assignment whose right-hand side reads the setting;
+#   2. that right-hand side must not NORMALISE (a `lower(...)` there would make
+#      the comparison exact and still accept 'TRUE');
+#   3. the comparison must name the assigned variable BARE — no normaliser
+#      wrapped around it — and every literal it is compared against must be
+#      exactly 'true';
+#   4. no boolean cast anywhere in the body.
+_ACTIVATION_READ_RE: Final[re.Pattern[str]] = re.compile(
+    r"([A-Za-z_][A-Za-z_0-9]*)\s*:=\s*([^;]*?current_setting\s*\(\s*'"
+    + re.escape(_ACTIVATION_SETTING)
+    + r"'[^;]*?)\s*;",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def _assert_activation_is_exact_lowercase_true(code: str, *, arm: str) -> None:
+    """Assert ``arm``'s body opens ONLY on the exact lowercase string 'true'."""
+    reads = _ACTIVATION_READ_RE.findall(code)
+    # EXACTLY one, not "at least one": zero means the anchor is broken and every
+    # check below would be skipped, two means one of them could be the live one
+    # while the other is the one this gate inspects.
+    assert len(reads) == 1, (
+        f"expected the {arm} to assign current_setting("
+        f"'{_ACTIVATION_SETTING}', ...) to a variable EXACTLY once; found "
+        f"{len(reads)}: {reads}.\n"
+        "  0 => the anchor is broken (the read was inlined into the IF, or the "
+        "setting was renamed). EVERY check below is then skipped and this gate "
+        "proves nothing — re-anchor it, do not relax it.\n"
+        "  2+ => two reads of the kill switch, and the checks below can pass on "
+        "one while the other is the one that actually gates the fan-out."
+    )
+    variable, read_expression = reads[0]
+
+    # 1. the READ must not normalise. `v := lower(COALESCE(current_setting(...)))`
+    #    leaves the comparison below exact and still opens the flag on 'TRUE'.
+    normalised_read = sorted(
+        name
+        for name in _ACTIVATION_NORMALISERS
+        if re.search(rf"\b{name}\s*\(", read_expression, flags=re.IGNORECASE)
+    )
+    assert not normalised_read, (
+        f"LEDGER-02 LOCK B: the {arm} NORMALISES the activation setting as it "
+        f"reads it ({normalised_read} in {read_expression.strip()!r}). The "
+        "comparison further down would still be exact string equality against "
+        "'true' and the flag would STILL open on 'TRUE' / 'true ' / ' TRUE ', "
+        "which is the whole point of comparing exactly. COALESCE is the only "
+        "wrapper this read is allowed — it supplies the unset default, it does "
+        "not change a value that is set."
+    )
+
+    # 2. the COMPARISON must name the variable BARE.
+    wrapped = sorted(
+        name
+        for name in _ACTIVATION_NORMALISERS
+        if re.search(
+            rf"\b{name}\s*\(\s*{re.escape(variable)}\b", code, flags=re.IGNORECASE
+        )
+    )
+    assert not wrapped, (
+        f"LEDGER-02 LOCK B: the {arm} wraps the activation value in {wrapped} "
+        f"before comparing it. That is still 'exact equality against the "
+        "lowercase string true' as an unanchored regex reads it, and it is "
+        "precisely how the flag comes to open on 'TRUE' (lower/upper/initcap) or "
+        "on 'true ' with a trailing space (btrim/trim/ltrim/rtrim) — the values "
+        f"this gate exists to keep dormant. Compare {variable} bare."
+    )
+
+    # 3. every literal the variable is compared against must be exactly 'true'.
+    compared = re.findall(
+        rf"\b{re.escape(variable)}\s*(?:<>|!=|(?<![:<>!=])=(?!=))\s*'([^']*)'",
+        code,
+    )
+    assert compared, (
+        f"LEDGER-02 LOCK B: the {arm} never compares {variable} directly "
+        "against a string literal. Lock B is the fail-closed switch that makes "
+        "merging the migration behaviour-neutral and the incident-pressure kill "
+        "switch (rollback level 1 in the runbook); a truthiness test, a cast or "
+        "an indirection through another expression is not it."
+    )
+    wrong = sorted({literal for literal in compared if literal != "true"})
+    assert not wrong, (
+        f"LEDGER-02 LOCK B: the {arm} compares {variable} against {wrong}, not "
+        "only against the lowercase 'true'. The flag must open on that one exact "
+        "string and nothing else — '1', 'on', 'TRUE' and 'true ' with a trailing "
+        "space are four ways to activate a cross-tenant PROD fan-out by accident."
+    )
+
+    # 4. and no boolean cast anywhere: `::bool` accepts '1', 'on', 'yes', 't'.
+    casts = sorted(
+        set(re.findall(r"::\s*(bool(?:ean)?)\b", code, flags=re.IGNORECASE))
+    )
+    assert not casts, (
+        f"LEDGER-02 LOCK B: the {arm} casts to {casts}. The activation "
+        "comparison must be exact string equality against 'true' — a boolean "
+        "cast accepts '1', 'on', 'yes' and 't', so the flag would open on values "
+        "nobody intended as activation."
+    )
+
+
+class TestGate4ActivationLock:
+    def test_activation_is_exact_lowercase_string_equality(self) -> None:
+        code = _strip_sql_comments(function_body())
+        assert f"current_setting('{_ACTIVATION_SETTING}'" in code, (
+            "LEDGER-02 LOCK B: the fan-out body does not read "
+            f"current_setting('{_ACTIVATION_SETTING}', …). Lock B is the "
+            "fail-closed switch that makes merging this migration "
+            "behaviour-neutral, and it is also the incident-pressure kill "
+            "switch (rollback level 1 in the runbook)."
+        )
+        _assert_activation_is_exact_lowercase_true(code, arm="fan-out body")
+
+
+# ---------------------------------------------------------------------------
+# GATE 5 — LEDGER-04 bounds (D-09, CORRECTED derivation)
+# ---------------------------------------------------------------------------
+_D09_DERIVATION: Final[str] = (
+    "D-09 (CORRECTED — do NOT re-derive from the retracted one-hop arithmetic):\n"
+    "  * ONE refreshed strategy costs up to 1500 s of worker time, NOT 900 s: "
+    "derive_broker_dailies (900 s) AUTO-CHAINS to compute_analytics_from_csv "
+    "(600 s) on the same sequentially-dispatching worker "
+    "(job_worker.py:488-504, :526).\n"
+    "  * The BINDING CONSTRAINT IS THE 20-HOUR ATTEMPT COOLDOWN, not this LIMIT. "
+    "The cooldown plus the in-flight conjunct cap the outstanding backlog at the "
+    "COHORT SIZE whatever the tick rate; the fan-out only enqueues and the "
+    "worker drains asynchronously.\n"
+    "  * This LIMIT is a BURST / SMOOTHING CAP only.\n"
+    "  * 'n x 900 s < 3600 s => n = 4' is RETRACTED on both the cost and the "
+    "model. A future editor raising this number must re-derive it, and must not "
+    "re-derive it from that sentence."
+)
+
+
+class TestGate5Bounds:
+    def test_per_tick_limit_is_bounded(self) -> None:
+        code = _strip_sql_comments(function_body())
+        limits: list[str] = re.findall(r"\bLIMIT\s+(\d+)", code)
+        assert len(limits) == 1, (
+            f"expected exactly ONE per-tick LIMIT in the fan-out body, found "
+            f"{len(limits)}: {limits}. Two bounds in one query means the "
+            "effective bound is whichever is smaller, and neither is the one "
+            "anybody derived.\n" + _D09_DERIVATION
+        )
+        assert int(limits[0]) <= 4, (
+            f"LEDGER-04: the per-tick LIMIT is {limits[0]}, above the derived 4. "
+            "Do NOT copy the reconcile sweep's LIMIT 25 (20260819150000) — that "
+            "sweep's follow-on is pure-DB, this one's is a 1500 s worker chain.\n"
+            + _D09_DERIVATION
+        )
+
+    def test_per_venue_cap_is_bounded_and_partitioned(self) -> None:
+        code = _strip_sql_comments(function_body())
+        caps: list[str] = re.findall(r"venue_rank\s*<=\s*(\d+)", code)
+        assert len(caps) == 1, (
+            f"expected exactly ONE `venue_rank <= N` per-venue cap in the "
+            f"fan-out body, found {len(caps)}: {caps}."
+        )
+        assert int(caps[0]) <= 2, (
+            f"LEDGER-04: the per-venue rank cap is {caps[0]}, above the derived "
+            "2. The cap exists because one ledger venue serialises every job on "
+            "a SINGLE shared terminal registry "
+            "(analytics-service/services/mt5_concurrency.py); without it a book "
+            "weighted toward that venue spends every tick on it and starves the "
+            "others.\n" + _D09_DERIVATION
+        )
+        assert re.search(
+            r"row_number\s*\(\s*\)\s*OVER\s*\(\s*PARTITION\s+BY", code, re.IGNORECASE
+        ) is not None, (
+            "LEDGER-04: the per-venue cap has no `row_number() OVER (PARTITION "
+            "BY …)` window behind it. Without the partition, `venue_rank` ranks "
+            "the whole tick globally and the cap silently becomes a second, "
+            "smaller global limit — starving exactly the venues it exists to "
+            "protect."
+        )
+
+    def test_limit_is_strictly_greater_than_the_cap(self) -> None:
+        """⛔ Not `>=`. At LIMIT == cap, plan 02's behavioural arm G stops
+        discriminating "the per-venue cap bound this tick" from "the global
+        limit bound this tick", and DELETING THE CAP leaves that arm GREEN. The
+        bound would then be pinned only by a test that cannot fail."""
+        code = _strip_sql_comments(function_body())
+        limits: list[str] = re.findall(r"\bLIMIT\s+(\d+)", code)
+        caps: list[str] = re.findall(r"venue_rank\s*<=\s*(\d+)", code)
+        assert len(limits) == 1 and len(caps) == 1, (
+            "cannot compare the LIMIT to the cap — one of them was not extracted "
+            f"exactly once (limits={limits}, caps={caps})."
+        )
+        assert int(limits[0]) > int(caps[0]), (
+            f"LEDGER-04: the per-tick LIMIT ({limits[0]}) must be STRICTLY "
+            f"GREATER than the per-venue cap ({caps[0]}). At LIMIT == cap the "
+            "behavioural gate's arm G can no longer tell the two bounds apart, "
+            "so the cap's own neutering goes green and the cap becomes "
+            "unfalsifiable. Lowering the LIMIT to meet a re-derived n <= cap "
+            "would make this migration's anti-vacuity proof vacuous.\n"
+            + _D09_DERIVATION
+        )
+
+
+# ---------------------------------------------------------------------------
+# GATE 6 — criterion 3: the verdict keys on DATA, and admits both successes
+# ---------------------------------------------------------------------------
+class TestGate6StalenessVerdict:
+    def test_verdict_keys_on_the_returns_series_column(self) -> None:
+        code = _strip_sql_comments(is_stale_expression())
+        assert "last_return_date" in code, (
+            "the freshness verdict no longer references `last_return_date` — the "
+            "max date inside strategy_analytics.returns_series, which is the one "
+            "signal in this system that no job status transition can advance "
+            "(plan 01, D-03)."
+        )
+
+    def test_verdict_rejects_every_write_timestamp(self) -> None:
+        region = is_stale_expression()
+        found = sorted(
+            token for token in _REJECTED_FRESHNESS_TOKENS if token in region
+        )
+        assert not found, (
+            f"the freshness verdict region references {found}. Every one of "
+            "those is a WRITE timestamp and keying staleness on one is the "
+            "Phase-106 janitor bug:\n"
+            "  * `strategy_analytics.computed_at` (aliased "
+            "`analytics_computed_at`) — `sync_strategy_analytics_status` "
+            "re-stamps it to now() in EVERY arm INCLUDING the failed arm "
+            "(migration 20260802120000, lines 342/398/421), and that migration "
+            "names the bug itself at its lines 82 and 230.\n"
+            "  * `api_keys.last_sync_at` — advanced daily by key-scoped jobs even "
+            "when zero trades landed. This is the liar that hid the defect for "
+            "weeks.\n"
+            "  * `series_written_at` — no status transition moves it, but it "
+            "still advances when a run COMPLETES having produced no new day.\n"
+            "All three remain legal OUTSIDE this region, as documented "
+            "informational columns; that is why plan 01 delimited the verdict "
+            "with markers instead of accepting a whole-file grep."
+        )
+
+    def test_status_predicate_admits_both_success_values(self) -> None:
+        code = _strip_sql_comments(is_stale_expression())
+        assert "complete_with_warnings" in code, (
+            "the verdict's status predicate does not admit "
+            "'complete_with_warnings'. ALL FIVE live ledger rows in the PROD "
+            "census are `complete_with_warnings` (plan 01, D-04), so a predicate "
+            "written as status = 'complete' marks every healthy ledger strategy "
+            "broken — and the reaper migration 20260802120000 carries the same "
+            "warning about its own status handling."
+        )
+
+
+# ---------------------------------------------------------------------------
+# GATE 7 — SECURITY DEFINER hygiene
+# ---------------------------------------------------------------------------
+class TestGate7SecurityDefinerHygiene:
+    def test_declaration_pins_search_path(self) -> None:
+        """⚠️ Reads the DECLARATION PRELUDE, not the dollar-quoted body.
+
+        `SET search_path` is part of the CREATE FUNCTION declaration and sits
+        OUTSIDE the `$fanout$` delimiters. A gate scoped to the body alone would
+        be RED against a perfectly correct file — measured by plan 02's executor
+        and recorded in its SUMMARY before this file was written."""
+        prelude = _strip_sql_comments(function_declaration_prelude())
+        assert re.search(r"SET\s+search_path\s*=", prelude, re.IGNORECASE) is not None, (
+            "the fan-out is SECURITY DEFINER without a pinned `search_path`. An "
+            "unpinned search_path on a SECDEF function lets any caller who can "
+            "create objects in an earlier schema shadow the tables this body "
+            "reads and writes, and it executes as the definer. The hygiene "
+            "triple is: zero parameters, SET search_path, REVOKE from the "
+            "browser-reachable roles."
+        )
+        assert re.search(r"SECURITY\s+DEFINER", prelude, re.IGNORECASE) is not None, (
+            "the fan-out is no longer SECURITY DEFINER. If that is deliberate "
+            "the REVOKEs and the search_path pin need revisiting together — do "
+            "not change one of the three alone."
+        )
+
+    def test_execute_is_revoked_from_the_browser_reachable_roles(self) -> None:
+        src = _strip_sql_comments(
+            _read(_fanout_migration_path(), "_FANOUT_MIGRATION_NAME")
+        )
+        match = re.search(
+            r"REVOKE\s+ALL\s+ON\s+FUNCTION\s+public\."
+            + re.escape(_FANOUT_FUNCTION_NAME)
+            + r"\s*\(\s*\)\s*FROM\s+([^;]*);",
+            src,
+            re.DOTALL | re.IGNORECASE,
+        )
+        assert match is not None, (
+            "the fan-out migration contains no `REVOKE ALL ON FUNCTION "
+            f"public.{_FANOUT_FUNCTION_NAME}() FROM …` statement. The public "
+            "schema in this project carries default privileges granting EXECUTE "
+            "to anon and authenticated, so without the REVOKE this cross-tenant "
+            "enqueue is reachable from the browser."
+        )
+        revoked = {name.strip().lower() for name in match.group(1).split(",")}
+        for role in ("public", "anon", "authenticated"):
+            assert role in revoked, (
+                f"EXECUTE is not revoked from `{role}` (revoked from: "
+                f"{sorted(revoked)}). pg_cron runs as superuser and needs no "
+                "GRANT, so there is no caller this REVOKE can break — but a "
+                "browser-reachable role that can EXECUTE it can fan out compute "
+                "jobs across every tenant."
+            )
+
+
+# ---------------------------------------------------------------------------
+# GATE 8 — the refresh marker, a cross-language contract with no compiler
+# ---------------------------------------------------------------------------
+class TestGate8MarkerDrift:
+    def test_sql_marker_equals_python_marker(self) -> None:
+        sql_markers: list[str] = re.findall(
+            r"'source'\s*,\s*'([^']*)'", _strip_sql_comments(function_body())
+        )
+        assert len(sql_markers) == 1, (
+            "expected exactly ONE `'source', '<marker>'` pair in the fan-out's "
+            f"jsonb_build_object, found {len(sql_markers)}: {sql_markers}."
+        )
+        python_markers: list[str] = re.findall(
+            r'job_source\s*==\s*"([^"]*)"', guard_region()
+        )
+        assert len(python_markers) == 1, (
+            "expected exactly ONE `job_source == \"<marker>\"` comparison in "
+            f"`_stamp_strategy_analytics_failed`, found {len(python_markers)}: "
+            f"{python_markers}. The marker is spelled INLINE at both ends on "
+            "purpose, so this gate has two literals to compare."
+        )
+        assert sql_markers[0] == python_markers[0], (
+            "MARKER DRIFT (D-15): the fan-out writes "
+            f"metadata->>'source' = {sql_markers[0]!r} "
+            f"({_FANOUT_MIGRATION_NAME}) but the non-destructive failure guard "
+            f"in services/job_worker.py compares against {python_markers[0]!r}.\n"
+            "⛔ These are the two ends of a cross-language contract WITH NO "
+            "COMPILER BETWEEN THEM. If they drift, the fan-out still enqueues "
+            "and the guard still compiles — there is no error anywhere. THE ONLY "
+            "SYMPTOM IS THAT THE NEXT FAILED REFRESH SILENTLY UN-PUBLISHES A "
+            "FUNDED ACCOUNT (status flipped to 'failed', and both persisted "
+            "basis-series rows deleted by the heal).\n"
+            "⚠️ Note the A7 tracer used the DIFFERENT string 'ledger-refresh-"
+            "tracer' deliberately; do not reconcile these two by copying that "
+            "one."
+        )
+
+    def test_guard_uses_the_single_sourced_success_set(self) -> None:
+        """The guard must compare against the shared frozenset, not an inline
+        list of its own — a third spelling of the success set would drift from
+        both the view and the constant, and gate 9 could not see it."""
+        region = guard_region()
+        assert "STRATEGY_ANALYTICS_TERMINAL_SUCCESS_STATUSES" in region, (
+            "`_stamp_strategy_analytics_failed` no longer references "
+            "STRATEGY_ANALYTICS_TERMINAL_SUCCESS_STATUSES. That constant is the "
+            "single source gate 9 pins against the SQL view; a locally-inlined "
+            "status list inside the guard would be a THIRD spelling that neither "
+            "gate 9 nor the view's own predicate can see."
+        )
+
+
+# ---------------------------------------------------------------------------
+# GATE 9 — the terminal-success status set
+# ---------------------------------------------------------------------------
+class TestGate9SuccessSetDrift:
+    def test_view_status_set_equals_python_frozenset(self) -> None:
+        from services.job_worker import STRATEGY_ANALYTICS_TERMINAL_SUCCESS_STATUSES
+
+        code = _strip_sql_comments(view_body())
+        raw_sets: list[str] = re.findall(
+            r"computation_status\s+NOT\s+IN\s*\(([^)]*)\)", code, re.IGNORECASE
+        )
+        assert raw_sets, (
+            "found no `computation_status NOT IN (…)` predicate in the view "
+            "body. The extraction is broken, or the success set moved — either "
+            "way this gate is proving nothing."
+        )
+        parsed = [_sql_string_list(raw) for raw in raw_sets]
+        assert all(candidate == parsed[0] for candidate in parsed), (
+            "the view spells its status success set more than one way: "
+            f"{[sorted(candidate) for candidate in parsed]}. `is_stale` and "
+            "`stale_reason` must agree, or a row can read fresh while reporting "
+            "a staleness reason (or the reverse)."
+        )
+        sql_statuses = parsed[0]
+        assert len(sql_statuses) == 2, (
+            f"the view's status success set has {len(sql_statuses)} member(s): "
+            f"{sorted(sql_statuses)}. It is a PAIR."
+        )
+        assert len(STRATEGY_ANALYTICS_TERMINAL_SUCCESS_STATUSES) == 2, (
+            "STRATEGY_ANALYTICS_TERMINAL_SUCCESS_STATUSES has "
+            f"{len(STRATEGY_ANALYTICS_TERMINAL_SUCCESS_STATUSES)} member(s): "
+            f"{sorted(STRATEGY_ANALYTICS_TERMINAL_SUCCESS_STATUSES)}. It is a "
+            "PAIR — asserting equality alone would let both ends be narrowed to "
+            "{'complete'} together and still agree."
+        )
+        assert sql_statuses == set(STRATEGY_ANALYTICS_TERMINAL_SUCCESS_STATUSES), (
+            "SUCCESS-SET DRIFT (D-04 / D-15): the view "
+            f"({_STALENESS_VIEW_MIGRATION_NAME}) treats "
+            f"{sorted(sql_statuses)} as terminal-success, but "
+            "STRATEGY_ANALYTICS_TERMINAL_SUCCESS_STATUSES in "
+            "services/job_worker.py is "
+            f"{sorted(STRATEGY_ANALYTICS_TERMINAL_SUCCESS_STATUSES)}.\n"
+            "⛔ The PROD census of the live ledger cohort reads: `complete` 0, "
+            "`complete_with_warnings` 5. A set narrowed to {'complete'} protects "
+            "NONE of the accounts the D-15 guard exists for while still looking "
+            "like a guard in review, and simultaneously marks every healthy "
+            "ledger strategy stale in the view."
+        )
+
+
+# ---------------------------------------------------------------------------
+# GATE 10 — LEDGER-01, the COMPOSITE arm (plan 04)
+# ---------------------------------------------------------------------------
+# The composite arm (migration 20260825140000) is a SECOND cross-tenant enqueue
+# surface, on a SECOND kind, with its own schedule. Every static property gates
+# 2/3/4/5/7 pin on the single-key arm has to hold for it too, and none of them
+# reach it automatically: four of those five read a region extracted from the
+# fan-out migration BY NAME.
+#
+# Gate 3a is the one exception — its timestamp window DOES cover this migration,
+# and _PHASE_MIGRATION_NAMES names it explicitly, so a redating or a stale
+# pointer fails there loudly. Gate 10a re-states the membership on its own so
+# "the composite migration is inside the dormancy scan" also fails for a reason
+# that names THIS arm rather than the phase set as a whole.
+_COMPOSITE_BURST_CAP_MAX: Final[int] = 2
+
+_COMPOSITE_CAP_DERIVATION: Final[str] = (
+    "THE COMPOSITE BURST CAP (plan 04). Derived as BLAST RADIUS, not as "
+    "throughput:\n"
+    "  * stitch_composite is CHAIN-TERMINAL "
+    "(JOB_CHAIN_FOLLOW_ON['stitch_composite'] == (), job_worker.py:528), so one "
+    "enqueue costs exactly ONE 1200 s handler ceiling "
+    "(TIMEOUT_PER_KIND['stitch_composite'] == 20 * 60, :502) and no follow-on "
+    "hop.\n"
+    "  * ⛔ Do NOT re-derive this as 'n x 1200 s fits inside an hourly tick'. "
+    "That assumes this arm OWNS the tick — it does not, the same sequential "
+    "worker is simultaneously draining the single-key arm's 1500 s chains — and "
+    "at n = 3 it lands on 3600 s, an EQUALITY with the tick, which is not a "
+    "bound.\n"
+    "  * ⛔ THE BINDING CONSTRAINT IS THE 20-HOUR ATTEMPT COOLDOWN. This integer "
+    "is a BURST CAP: it bounds what ONE tick adds to a SHARED queue. Overhang "
+    "past the tick is EXPECTED and is absorbed by the cooldown and the "
+    "non-terminal in-flight guard. A reader who believes this integer is the "
+    "safety mechanism will raise it.\n"
+    "  * The measured live composite cohort is 1 (161.1-CONTEXT.md census). The "
+    "cap is set strictly above that so it never binds today, and low enough that "
+    "a grown cohort adds at most 2400 s to one tick. If the cohort exceeds it, "
+    "RE-DERIVE against a re-measured census — do not raise it reflexively."
+)
+
+
+class TestGate10CompositeArm:
+    """Everything gates 2-7 pin on the single-key fan-out, pinned on the
+    composite arm as well."""
+
+    def test_10a_composite_migration_is_inside_the_dormancy_scan(self) -> None:
+        """Gate 3a selects by TIMESTAMP WINDOW, never by filename enumeration
+        and — since F17 — never by name matching either, so it picks this
+        migration up for free while the migration's timestamp stays in range.
+        Assert the membership rather than assume it: a redating outside the
+        window would silently drop this file out of the ONLY gate standing
+        between a schedule and PROD."""
+        paths = {path.name for path in _phase_migration_paths()}
+        assert _COMPOSITE_MIGRATION_NAME in paths, (
+            f"{_COMPOSITE_MIGRATION_NAME} is outside the dormancy window "
+            f"[{_PHASE_MIGRATION_WINDOW_START}, {_PHASE_MIGRATION_WINDOW_END}) "
+            f"(scanned: {sorted(paths)}). Gate 3a is the scan that keeps a "
+            "pg_cron registration out of a migration, and migrations AUTO-APPLY "
+            "to PROD on merge to main. A composite migration outside that window "
+            "could register its own schedule and reach production with no deploy "
+            "step and no founder action. Redate it back into the window, or "
+            "widen the window in the same commit."
+        )
+
+    def test_10b_composite_body_declares_no_venue_literal(self) -> None:
+        """The composite arm declares NO venue of its own — not in code and not
+        in prose. Its cohort comes entirely from public.ledger_refresh_staleness,
+        the single SQL home of the venue set (D-05).
+
+        ⚠️ WORD-BOUNDARY, not substring, and the difference is FORCED rather
+        than chosen. This body MUST reference the staleness view's
+        `has_mt5_member` column — that is the D-01/D-13 membership conjunct, and
+        there is no other way to express it. Measured: a substring scan finds one
+        `mt5` hit inside that identifier and would therefore be RED against a
+        perfectly correct file, which is exactly the defect plan 05 caught in its
+        own gate 7 before shipping it.
+
+        The word-boundary form is still falsifiable in the direction that
+        matters: a venue written as a SQL literal is `'mt5'`, and a quote is a
+        non-word character, so both boundaries are present and the scan fires. An
+        identifier like `has_mt5_member` has word characters on both sides of the
+        token and does not. Proven by neutering — a real venue literal added to
+        this body reddens this test.
+
+        ⛔ Gate 2's substring scan over the FAN-OUT body is deliberately left
+        alone. Relaxing an existing anti-vacuity pin to share code with a new one
+        is how a gate quietly gets weaker.
+        """
+        body = composite_body()
+        found = sorted(
+            venue
+            for venue in _banned_venue_names()
+            if re.search(r"\b" + re.escape(venue) + r"\b", body)
+        )
+        assert not found, (
+            "SINGLE SOURCE VIOLATION: the composite arm's function body names "
+            f"{found}. The cohort must come entirely from "
+            "public.ledger_refresh_staleness, which is the single SQL home of "
+            "the venue set.\n"
+            "The authority is (1) the ROADMAP fence — `_LEDGER_BACKED_SOURCES` "
+            "(analytics-service/services/ingestion/long_fetch.py) is the SOLE "
+            "authority for which venues are ledger-backed — and (2) the measured "
+            "incident: a hand-copied mirror drifted to ONE venue while Python "
+            "held THREE, and cost a funded MT5 account its publish path.\n"
+            "If a venue genuinely must be distinguished here, the correct move "
+            "is to add a COLUMN to the view — which is exactly what the "
+            "has-member flag this body already reads is — not a literal to this "
+            "body."
+        )
+
+    def test_10b2_deferred_venue_conjunct_is_present(self) -> None:
+        """The D-01/D-13 membership exclusion, pinned STATICALLY as well as
+        behaviourally.
+
+        Two jobs in one assertion, and the second is why it is not redundant with
+        the SQL gate's arm E:
+
+          1. CONTEXT D-01 requires that a future composite on the deferred venue
+             be a VISIBLE, NAMED skip rather than silent mishandling. The count
+             of such composites is ZERO today, so the behavioural arm proves the
+             conjunct works on a fixture; this proves the conjunct is still
+             THERE.
+          2. It is the standing justification for gate 10b's word-boundary form.
+             If this column reference ever left the body, the exemption that
+             form buys would be unused, and the next reader would 'simplify' the
+             scan back to a substring test — which would then be RED the moment
+             the conjunct came back.
+        """
+        code = _strip_sql_comments(composite_body())
+        assert re.search(
+            r"has_mt5_member\s*=\s*FALSE", code, re.IGNORECASE
+        ) is not None, (
+            "the composite arm's body no longer excludes composites with a "
+            "member on the deferred venue by an explicit "
+            "`has_mt5_member = FALSE` conjunct.\n"
+            "⛔ CONTEXT D-01 records this as a CURRENT FACT, not a structural "
+            "invariant: the count is zero today and the founder explicitly "
+            "expects such composites may exist later. The conjunct must be "
+            "present and commented so that a future one is SKIPPED DELIBERATELY "
+            "— never silently dragged into a composite crawl that would "
+            "serialise on that venue's single shared terminal registry.\n"
+            "Do not delete it on the grounds that nothing matches it."
+        )
+
+    def test_10c_composite_function_name_appears_in_exactly_one_migration(
+        self,
+    ) -> None:
+        """Gate 3b's twin. 3a's glob cannot see a migration whose FILENAME lacks
+        the phase token, so a differently-named migration could register a
+        schedule for THIS function and never enter that scan."""
+        hits = sorted(
+            path.name
+            for path in _migrations_dir().glob("*.sql")
+            if _COMPOSITE_FUNCTION_NAME in path.read_text(encoding="utf-8")
+        )
+        assert len(hits) == 1, (
+            "expected the composite arm's function name to appear in EXACTLY 1 "
+            f"migration (the one that defines it, {_COMPOSITE_MIGRATION_NAME}); "
+            f"found {len(hits)}: {hits}.\n"
+            "  0 hits ⇒ the search is broken (or the migration was renamed "
+            "without moving _COMPOSITE_MIGRATION_NAME) — this gate is proving "
+            "nothing, fix it rather than relaxing it.\n"
+            "  2+ hits ⇒ a second migration either REGISTERS A SCHEDULE for the "
+            "composite arm or CALLS it. Both are forbidden from a migration: "
+            "migrations auto-apply to PROD, and activation belongs to "
+            "docs/runbooks/ledger-refresh-go-live.md (WORKER-03)."
+        )
+
+    def test_10d_activation_is_exact_lowercase_string_equality(self) -> None:
+        """Gate 4, on the composite body.
+
+        ⚠️ The composite arm reads the SAME setting as the single-key arm, and
+        that is the design: one reset kills BOTH arms on the next tick, while the
+        two SCHEDULES stay independently unschedulable. Asserting the name here
+        is therefore also asserting that the shared kill switch is still shared —
+        a composite arm on a setting of its own would leave a founder resetting
+        one flag under incident pressure while the other arm kept ticking.
+        """
+        code = _strip_sql_comments(composite_body())
+        assert f"current_setting('{_ACTIVATION_SETTING}'" in code, (
+            "the composite arm's body does not read "
+            f"current_setting('{_ACTIVATION_SETTING}', …). That setting is the "
+            "SHARED fail-closed switch: it is what makes merging this migration "
+            "behaviour-neutral, and it is the incident-pressure kill switch for "
+            "BOTH arms at once (rollback level 1 in the runbook). A composite "
+            "arm reading a different setting would survive the kill switch."
+        )
+        _assert_activation_is_exact_lowercase_true(code, arm="composite arm")
+
+    def test_10e_burst_cap_is_bounded(self) -> None:
+        """Gate 5's analogue, with the composite arm's OWN derivation.
+
+        ⛔ The integer is NOT copied from the single-key arm, and neither is the
+        reasoning: the two kinds have different CHAIN SHAPES, not merely
+        different ceilings. This gate pins the INTEGER, not the prose around it —
+        if the derivation in migration 20260825140000 ever moves, move this bound
+        with it and say so in the SUMMARY.
+        """
+        code = _strip_sql_comments(composite_body())
+        limits: list[str] = re.findall(r"\bLIMIT\s+(\d+)", code)
+        assert len(limits) == 1, (
+            "expected exactly ONE per-tick LIMIT in the composite arm's body, "
+            f"found {len(limits)}: {limits}. Two bounds in one query means the "
+            "effective bound is whichever is smaller, and neither is the one "
+            "anybody derived.\n" + _COMPOSITE_CAP_DERIVATION
+        )
+        assert int(limits[0]) <= _COMPOSITE_BURST_CAP_MAX, (
+            f"LEDGER-01: the composite per-tick burst cap is {limits[0]}, above "
+            f"the derived {_COMPOSITE_BURST_CAP_MAX}.\n"
+            + _COMPOSITE_CAP_DERIVATION
+        )
+
+    def test_10f_declaration_pins_search_path_and_definer(self) -> None:
+        """Gate 7's first half, on the composite arm's DECLARATION PRELUDE.
+
+        Reads the prelude and not the body for the reason plan 05 measured and
+        recorded: `SET search_path` is part of the CREATE FUNCTION declaration
+        and sits OUTSIDE the dollar-quote delimiters, so a body-scoped gate would
+        be RED against a correct file."""
+        prelude = _strip_sql_comments(composite_declaration_prelude())
+        assert re.search(
+            r"SET\s+search_path\s*=", prelude, re.IGNORECASE
+        ) is not None, (
+            "the composite arm is SECURITY DEFINER without a pinned "
+            "`search_path`. An unpinned search_path on a SECDEF function lets "
+            "any caller who can create objects in an earlier schema shadow the "
+            "tables this body reads and writes, and it executes as the definer. "
+            "The hygiene triple is: zero parameters, SET search_path, REVOKE "
+            "from the browser-reachable roles."
+        )
+        assert re.search(
+            r"SECURITY\s+DEFINER", prelude, re.IGNORECASE
+        ) is not None, (
+            "the composite arm is no longer SECURITY DEFINER. If that is "
+            "deliberate the REVOKEs and the search_path pin need revisiting "
+            "together — do not change one of the three alone."
+        )
+
+    def test_10g_execute_is_revoked_from_the_browser_reachable_roles(self) -> None:
+        """Gate 7's second half, on the composite arm."""
+        src = _strip_sql_comments(
+            _read(_composite_migration_path(), "_COMPOSITE_MIGRATION_NAME")
+        )
+        match = re.search(
+            r"REVOKE\s+ALL\s+ON\s+FUNCTION\s+public\."
+            + re.escape(_COMPOSITE_FUNCTION_NAME)
+            + r"\s*\(\s*\)\s*FROM\s+([^;]*);",
+            src,
+            re.DOTALL | re.IGNORECASE,
+        )
+        assert match is not None, (
+            "the composite migration contains no `REVOKE ALL ON FUNCTION "
+            f"public.{_COMPOSITE_FUNCTION_NAME}() FROM …` statement. The public "
+            "schema in this project carries default privileges granting EXECUTE "
+            "to anon and authenticated, so without the REVOKE this cross-tenant "
+            "enqueue is reachable from the browser."
+        )
+        revoked = {name.strip().lower() for name in match.group(1).split(",")}
+        for role in ("public", "anon", "authenticated"):
+            assert role in revoked, (
+                f"EXECUTE is not revoked from `{role}` (revoked from: "
+                f"{sorted(revoked)}). pg_cron runs as superuser and needs no "
+                "GRANT, so there is no caller this REVOKE can break — but a "
+                "browser-reachable role that can EXECUTE it can fan out compute "
+                "jobs across every tenant."
+            )
+
+    def test_10h_the_two_arms_write_distinguishable_markers(self) -> None:
+        """The two fan-outs must not write the SAME metadata source token.
+
+        Two independent things break if they collide, and neither raises:
+
+          1. the queue stops distinguishing the two mechanisms, so a founder
+             reading `compute_jobs` at activation cannot tell which arm produced
+             a row — and the runbook's rollback story is per-arm;
+          2. the two non-destructive failure guards key on these strings, and a
+             shared token would make either guard fire on the other arm's jobs.
+        """
+        sql_markers: list[str] = re.findall(
+            r"'source'\s*,\s*'([^']*)'", _strip_sql_comments(function_body())
+        )
+        composite_markers: list[str] = re.findall(
+            r"'source'\s*,\s*'([^']*)'", _strip_sql_comments(composite_body())
+        )
+        assert len(sql_markers) == 1 and len(composite_markers) == 1, (
+            "expected exactly ONE `'source', '<marker>'` pair in EACH arm's "
+            f"jsonb_build_object; found single-key={sql_markers} "
+            f"composite={composite_markers}."
+        )
+        assert sql_markers[0] != composite_markers[0], (
+            "the composite arm and the single-key arm write the SAME job "
+            f"metadata source token ({composite_markers[0]!r}). They must "
+            "differ: the token is how the two mechanisms are told apart in the "
+            "queue, and it is the key each arm's non-destructive failure guard "
+            "compares against before it declines to un-publish a live row."
+        )
+
+
+# ---------------------------------------------------------------------------
+# GATE 11 — the COMPOSITE refresh marker, a second cross-language contract
+# ---------------------------------------------------------------------------
+class TestGate11CompositeMarkerDrift:
+    """Gate 8's twin, for the composite arm's own marker.
+
+    Plan 04 added a SECOND non-destructive guard, on the ``_stamp_failed``
+    closure inside ``run_stitch_composite_job``, keyed on a SECOND metadata
+    source token. That is a second cross-language contract with no compiler
+    between its ends, so it needs its own drift gate — gate 8 pins the
+    single-key pair and cannot see this one.
+    """
+
+    def test_composite_sql_marker_equals_composite_python_marker(self) -> None:
+        sql_markers: list[str] = re.findall(
+            r"'source'\s*,\s*'([^']*)'", _strip_sql_comments(composite_body())
+        )
+        assert len(sql_markers) == 1, (
+            "expected exactly ONE `'source', '<marker>'` pair in the composite "
+            f"arm's jsonb_build_object, found {len(sql_markers)}: {sql_markers}."
+        )
+        python_markers: list[str] = re.findall(
+            r'_job_source\s*==\s*"([^"]*)"', composite_guard_region()
+        )
+        assert len(python_markers) == 1, (
+            'expected exactly ONE `_job_source == "<marker>"` comparison in the '
+            "composite handler's `_stamp_failed` closure, found "
+            f"{len(python_markers)}: {python_markers}. The marker is spelled "
+            "INLINE at both ends on purpose, so this gate has two literals to "
+            "compare."
+        )
+        assert sql_markers[0] == python_markers[0], (
+            "COMPOSITE MARKER DRIFT: the composite arm writes "
+            f"metadata->>'source' = {sql_markers[0]!r} "
+            f"({_COMPOSITE_MIGRATION_NAME}) but the non-destructive failure "
+            "guard in run_stitch_composite_job compares against "
+            f"{python_markers[0]!r}.\n"
+            "⛔ These are the two ends of a cross-language contract WITH NO "
+            "COMPILER BETWEEN THEM. If they drift, the arm still enqueues and "
+            "the guard still compiles — there is no error anywhere. THE ONLY "
+            "SYMPTOM IS THAT THE NEXT FAILED COMPOSITE REFRESH SILENTLY TAKES A "
+            "FUNDED ACCOUNT'S FACTSHEET DARK (computation_status flipped to "
+            "'failed', which src/lib/strategyGate.ts reads as "
+            "ANALYTICS_FAILED).\n"
+            "⚠️ The venue whose ONLY live strategy is a composite is the venue "
+            "this whole arm exists for, so this contract has a cohort of one and "
+            "no redundancy."
+        )
+
+    def test_composite_guard_uses_the_single_sourced_success_set(self) -> None:
+        """The composite guard must compare against the shared frozenset, not an
+        inline status list of its own — a third spelling of the success set
+        would drift from both the view and the constant, and gate 9 could not
+        see it."""
+        region = composite_guard_region()
+        assert "STRATEGY_ANALYTICS_TERMINAL_SUCCESS_STATUSES" in region, (
+            "the composite handler's `_stamp_failed` no longer references "
+            "STRATEGY_ANALYTICS_TERMINAL_SUCCESS_STATUSES. That constant is the "
+            "single source gate 9 pins against the SQL view; a locally-inlined "
+            "status list inside this guard would be a spelling that neither gate "
+            "9 nor the view's own predicate can see.\n"
+            "⛔ The PROD census reads `complete` 0 / `complete_with_warnings` 5, "
+            "so a guard narrowed to {'complete'} would protect NONE of the live "
+            "ledger accounts while still looking like a guard in review."
+        )

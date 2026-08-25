@@ -558,6 +558,66 @@ JOB_CHAIN_FOLLOW_ON: Final[dict[str, tuple[str, ...]]] = {
 #     re-deriving the invariant.
 STRATEGY_ANALYTICS_REAP_THRESHOLD: Final[str] = "16 hours"
 
+# Phase 161.1 / D-15: the terminal-SUCCESS statuses of a `strategy_analytics`
+# row — i.e. the states in which a strategy is PUBLISHED and rendering a
+# factsheet, and from which a recurring maintenance refresh may therefore not
+# downgrade it.
+#
+# ⛔ It is a PAIR, and that is measured rather than defensive. The production
+# census of the ledger-backed cohort reads: `complete` 0, `complete_with_warnings`
+# 5. A set written as just {"complete"} would protect exactly NONE of the
+# accounts this guard exists for, while still looking like a guard in review —
+# the same one-value mistake the staleness view's SQL success set fences on
+# (migration 20260825120000, D-04).
+#
+# Single-sourced here so `_stamp_strategy_analytics_failed`'s non-destructive
+# branch and the SQL view cannot drift; plan 05 gate 9 asserts set-equality
+# between this frozenset and the view's status predicate.
+STRATEGY_ANALYTICS_TERMINAL_SUCCESS_STATUSES: Final[frozenset[str]] = frozenset(
+    {"complete", "complete_with_warnings"}
+)
+
+# Phase 161.1 / CR-03: the two `compute_jobs.metadata->>'source'` values that
+# mark a job as part of a RECURRING background maintenance refresh — the only
+# jobs the D-15 non-destructive guards may protect.
+#
+# ⛔ This is a CONSUMER-SIDE set, not the contract. The contract is spelled
+# INLINE at four places with no compiler between them: the two
+# `jsonb_build_object('source', …)` calls in the fan-out migrations
+# (20260825130000, 20260825140000), the two inline marker comparisons in
+# the guards below, and the branch (b) partition in migration 20260825150000.
+# Gates 8 and 11 pin the migrations against the guards;
+# tests/test_ledger_refresh_publish_guard.py pins THIS set against both guards
+# and against the bridge migration, so a fifth spelling cannot appear silently.
+#
+# ⛔ WHAT IT IS FOR, AND WHAT IT IS NOT. It is the CENSUS of every marker this
+# phase mints — the handle the drift gates enumerate, so a fifth spelling cannot
+# appear silently at any of the four ends. It is NOT a dispatch predicate, and
+# no runtime decision may be taken on membership in it.
+#
+# F5 (161.1 re-review): the last such decision is gone. Two sites used to ask
+# "is this job part of A refresh?" against the union while the guard they feed
+# protects exactly ONE arm's marker — safe only by accident of today's fan-outs,
+# and re-opened the moment a future arm minted the other marker on the other
+# kind. Both now name the arm they belong to
+# (`LEDGER_REFRESH_SINGLE_KEY_SOURCE`), because a hop reachable from exactly one
+# arm must say WHICH arm rather than be right by coincidence. The two markers
+# are deliberately DIFFERENT strings so the two arms' guards cannot cross-fire;
+# a union test erases exactly that distinction.
+#
+# Fail-safe direction, as everywhere else in D-15: a source an arm does not
+# recognise is passed as None, i.e. the LOUD path — an unrecognised job
+# un-publishes loudly rather than failing silently.
+#
+# The inline guard comparisons stay inline: they are the contract ends the SQL
+# gates pin, and a constant on that side would leave those gates with one
+# literal instead of two.
+LEDGER_REFRESH_SINGLE_KEY_SOURCE: Final[str] = "ledger-refresh"
+LEDGER_REFRESH_COMPOSITE_SOURCE: Final[str] = "ledger-refresh-composite"
+LEDGER_REFRESH_JOB_SOURCES: Final[frozenset[str]] = frozenset(
+    {LEDGER_REFRESH_SINGLE_KEY_SOURCE, LEDGER_REFRESH_COMPOSITE_SOURCE}
+)
+
 # Fallback derive budget (seconds) used when TIMEOUT_PER_KIND lacks
 # "derive_broker_dailies". Single-sourced so the MTM second pass and the smoothed
 # third pass can never drift; TIMEOUT_PER_KIND stays the real source of truth.
@@ -2090,7 +2150,47 @@ async def run_compute_analytics_from_csv_job(job: dict[str, Any]) -> DispatchRes
     # Lazy import to keep import-time cycles isolated.
     from services.analytics_runner import run_csv_strategy_analytics
 
-    await run_csv_strategy_analytics(strategy_id)
+    # CR-03 (161.1-REVIEW): hand hop 2 the refresh marker its enqueue now
+    # carries. `run_csv_strategy_analytics` writes a terminal 'failed' at five
+    # sites of its own; without this the D-15 contract stops at the chain edge
+    # and a funded account is un-published by the hop that compiles its
+    # factsheet. Recognised markers only — anything else is None, which is the
+    # runner's unchanged (LOUD) behaviour.
+    #
+    # ⛔ F5: RECOGNISED means the SINGLE-KEY marker, not the union — the same
+    # question the enqueue site now answers with the same marker. The union form
+    # was safe only by accident of today's fan-outs: migration 20260825140000
+    # marks `stitch_composite` (chain-terminal) with the composite marker, so no
+    # composite-marked job reaches this kind. If one ever did, granting hop 2 a
+    # protection hop 1 declined means the destructive stamp has ALREADY fired
+    # upstream and hop 2 would then decline to record the follow-on failure —
+    # the worst of both directions. Narrow it here, where the consumer is.
+    _metadata = job.get("metadata")
+    _source = _metadata.get("source") if isinstance(_metadata, dict) else None
+    _is_marked_refresh = _source == LEDGER_REFRESH_SINGLE_KEY_SOURCE
+
+    # F1: the pre-refresh publish state, MINTED BY HOP 1 and carried here on this
+    # job's metadata. It is deliberately NOT re-derived from the row: the SQL
+    # status bridge has already rewritten `computation_status` to 'computing' by
+    # the time this job is claimed (see `_enqueue_csv_analytics`). The runner
+    # validates the value against the single-sourced terminal-success pair, so an
+    # absent, unknown or non-published value lands as no protection at all.
+    _publish_status = (
+        _metadata.get("publish_status")
+        if _is_marked_refresh and isinstance(_metadata, dict)
+        else None
+    )
+    _publish_warned = (
+        _metadata.get("publish_warned")
+        if _is_marked_refresh and isinstance(_metadata, dict)
+        else None
+    )
+    await run_csv_strategy_analytics(
+        strategy_id,
+        refresh_source=_source if _is_marked_refresh else None,
+        refresh_publish_status=_publish_status if isinstance(_publish_status, str) else None,
+        refresh_publish_warned=bool(_publish_warned),
+    )
     return DispatchResult(outcome=DispatchOutcome.DONE)
 
 
@@ -2365,6 +2465,92 @@ async def _resolve_ccxt_flow_price_index(
     return price_index
 
 
+# ---------------------------------------------------------------------------
+# Phase 161.1 / REUSE-01 — PROTECTION IS NOT INHERITABLE ACROSS A DEDUP COLLISION
+# ---------------------------------------------------------------------------
+# ⛔ THE DEFECT THIS CLOSES. The D-15 marker is a property of a JOB ROW, and a job
+# row can be REUSED by a caller who never asked for it.
+# `_enqueue_compute_job_internal` (mig 20260716090000:229-262) dedupes on
+# (target, kind) over ('pending','running','done_pending_children') and RETURNS
+# the existing id — `p_metadata` is DISCARDED, there is no merge arm. MEASURED
+# against that exact function body on a throwaway Postgres: a user's resync tail
+# enqueuing `derive_broker_dailies` while a MARKED refresh of the same strategy
+# is in flight gets the fan-out's job id back, its own `correlation_id` is
+# dropped, and the row keeps the marker. The user's resync is then served by a
+# job carrying a protection that exists for work NOBODY IS WATCHING.
+#
+# The harm is production-specific and it is 5/5 of the live cohort. MEASURED by
+# driving the real `sync_strategy_analytics_status` body: with the reused job
+# pending, branch (a) rewrites a plain `complete` row to `computing` (loud — the
+# poller keeps polling) but PRESERVES `complete_with_warnings`. The production
+# ledger cohort is `complete` 0 / `complete_with_warnings` 5, so on every live
+# strategy the entry read below sees a terminal-success status, the protection
+# arms, every later failure is suppressed at BOTH hops, and
+# `useStrategySyncPoller` (src/hooks/useStrategySyncPoller.ts:285) — whose
+# terminal test is `nextStatus === 'failed' || isComputedAnalytics(nextStatus)` —
+# reads TERMINAL on its first poll and stops. SyncPreviewStep then renders the
+# PRE-RESYNC factsheet over a silently-failed resync.
+#
+# ⛔ THE RULE, and it is symmetric: a dedup collision never transfers protection,
+# in EITHER direction. The resync path RETRACTS the marker from the row it
+# discovers it has inherited (`_retract_refresh_marker_on_reuse` in
+# services/ingestion/long_fetch.py); the refresh path never LAUNDERS its marker
+# onto a foreign row it collided with (the mirror check at the chain edge below).
+# Both resolve toward the LOUD path, which is the fail-safe direction this whole
+# phase is built on.
+#
+# ⛔ WHY THIS RE-READ EXISTS AT ALL, i.e. why the retraction alone is not the fix.
+# The handler reads its metadata ONCE, at claim time, from the row the claim RPC
+# returned. A retraction that lands AFTER the claim is invisible to that
+# in-memory copy — and that is the window where the defect actually bites, since
+# a marked refresh is claimed the moment the fan-out enqueues it and the user's
+# resync attaches minutes later. So every site about to HONOUR the marker
+# re-asks the ROW, which is the only place the retraction can be seen.
+#
+# ⚠️ Deliberately NOT the same question as the entry publish-state read below.
+# That one must be a SNAPSHOT, because the SQL status bridge overwrites the
+# column it reads. This one must be LIVE, because nothing but the retraction ever
+# writes it — a snapshot here would answer with the pre-retraction value, which
+# is precisely the green-against-the-bug shape.
+#
+# ⛔ FAIL-SAFE DIRECTION, non-negotiable and identical to every other D-15
+# decision: a missing id, an unreadable row, no row, a non-dict metadata and any
+# raised exception all answer FALSE — no protection, LOUD path. Never fail
+# toward suppression.
+async def _refresh_marker_still_on_row(
+    supabase: Any, job_id: Any, expected: str
+) -> bool:
+    """True only if ``compute_jobs.metadata->>'source'`` for ``job_id`` STILL
+    equals ``expected``. See the block comment above for why a live re-read and
+    not the claim-time snapshot."""
+    if not job_id:
+        return False
+
+    def _read_live_source() -> Any:
+        res = (
+            supabase.table("compute_jobs")
+            .select("metadata")
+            .eq("id", job_id)
+            .maybe_single()
+            .execute()
+        )
+        row = getattr(res, "data", None)
+        metadata = row.get("metadata") if isinstance(row, dict) else None
+        return metadata.get("source") if isinstance(metadata, dict) else None
+
+    try:
+        live_source = await db_execute(_read_live_source)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "ledger-refresh: could not re-read the refresh marker on compute_job "
+            "%s (%s) — treating the marker as RETRACTED, which takes the LOUD "
+            "terminal-failure path.",
+            job_id, exc,
+        )
+        return False
+    return bool(live_source == expected)
+
+
 async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
     """Broker key full-history → daily-return series → csv_daily_returns.
 
@@ -2419,6 +2605,84 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
         funding_label = strategy_id
     venue = ctx.key_row["exchange"]
 
+    # ---- Phase 161.1 / F1+F2: the refresh's publish ORACLE, read ONCE --------
+    # ⛔ THE GUARD'S ORACLE MAY NOT BE A COLUMN THE THING IT GUARDS WRITES, and
+    # until this read existed it was exactly that. The D-15 question is "was this
+    # strategy PUBLISHED before this refresh started?", and both guards used to
+    # answer it by reading `strategy_analytics.computation_status` LIVE at the
+    # moment they needed it. That column is written by the SQL status bridge
+    # (sync_strategy_analytics_status, migration 20260825150000), which
+    # mark_compute_job_done / mark_compute_job_failed PERFORM in-RPC on EVERY job
+    # transition for the strategy — and whose branch (a) rewrites the row to
+    # 'computing' whenever ANY job for it is non-terminal. Branch (a) preserves
+    # 'complete_with_warnings'; it does NOT preserve plain 'complete'.
+    #
+    # Two consequences, both measured:
+    #   * HOP 2 (F1), DETERMINISTIC. This handler enqueues the chained
+    #     compute_analytics_from_csv job and THEN returns DONE, so
+    #     mark_compute_job_done runs the bridge with that follow-on already
+    #     `pending`. A plain-'complete' row is therefore ALWAYS at 'computing'
+    #     before hop 2 starts, and hop 2's own live read could never see a
+    #     terminal-success status. Its guard was inert for every clean-recompute
+    #     row — which the bridge migration's header calls "what every clean
+    #     recompute leaves behind".
+    #   * HOP 1 (F2), PROBABILISTIC. Any sibling job (poll_positions,
+    #     sync_funding) reaching mark_compute_job_done while THIS derive is in
+    #     flight runs the same bridge; on a plain-'complete' row the stamp-time
+    #     read then answered 'computing' and declined to protect.
+    #
+    # One read, here, before the venue crawl, carried forward to both: the local
+    # below is hop 1's oracle, and it rides the chain edge on the follow-on job's
+    # metadata to become hop 2's. Neither is a column the bridge can write.
+    #
+    # ⛔ FAIL-SAFE DIRECTION, unchanged: an unreadable row, no row, or a row that
+    # is not terminal-success all leave this None, and None takes the LOUD
+    # destructive path everywhere it is consulted. Never fail toward suppression.
+    #
+    # ⚠️ RESIDUAL WINDOW, stated rather than hidden: the fan-out enqueues this
+    # job in SQL, so the earliest oracle Python can take is here — a sibling
+    # transition between that enqueue and this line still bounces a plain-
+    # 'complete' row to 'computing' and this read then sees it. Closing that last
+    # gap means stamping the status into the job metadata at MINT time, in the
+    # fan-out migration. The direction of the residual is loud-not-silent.
+    #
+    # Gated on the marker so an ordinary derive costs no extra round trip and is
+    # byte-unchanged.
+    _refresh_publish_status: str | None = None
+    _refresh_publish_warned = False
+    if not is_key_mode:
+        _entry_metadata = job.get("metadata")
+        _entry_source = (
+            _entry_metadata.get("source") if isinstance(_entry_metadata, dict) else None
+        )
+        if _entry_source == LEDGER_REFRESH_SINGLE_KEY_SOURCE:
+
+            def _read_entry_publish_state() -> dict[str, Any]:
+                res = (
+                    ctx.supabase.table("strategy_analytics")
+                    .select("computation_status, computation_warned")
+                    .eq("strategy_id", strategy_id)
+                    .maybe_single()
+                    .execute()
+                )
+                row = getattr(res, "data", None) or {}
+                return dict(row) if isinstance(row, dict) else {}
+
+            try:
+                _entry_row = await db_execute(_read_entry_publish_state)
+            except Exception as _entry_exc:  # noqa: BLE001
+                logger.warning(
+                    "derive_broker_dailies: could not read the pre-refresh publish "
+                    "state for strategy %s (%s) — this refresh takes the LOUD "
+                    "terminal-failure path at BOTH hops.",
+                    strategy_id, _entry_exc,
+                )
+                _entry_row = {}
+            _entry_status = _entry_row.get("computation_status")
+            if isinstance(_entry_status, str):
+                _refresh_publish_status = _entry_status
+                _refresh_publish_warned = bool(_entry_row.get("computation_warned"))
+
     from services.broker_dailies import combine_realized_and_funding
     from services.nav_twr import (
         NavReconstructionError,
@@ -2467,28 +2731,21 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
         from services.redact import scrub_freeform_string
 
         scrubbed = str(scrub_freeform_string(str(exc)))
-        if not is_key_mode:
-            def _stamp_nav_failed() -> None:
-                ctx.supabase.table("strategy_analytics").upsert(
-                    {
-                        "strategy_id": strategy_id,
-                        "computation_status": "failed",
-                        # SI-02 (MEDIUM-2): clear the runner-owned warned marker.
-                        "computation_warned": False,
-                        # JOB-01: clear on exit so a stale stamp can never re-trigger the reaper.
-                        "computing_started_at": None,
-                        "computation_error": stamp_detail + scrubbed,
-                        "data_quality_flags": {"csv_source": True},
-                        # F-4 (Fable): authoritative-clear the by-basis column on a
-                        # terminal failure so a prior successful derive's object
-                        # (composite-era or single-key MTM) can't render as a
-                        # live-looking money number on a now-FAILED row.
-                        "metrics_json_by_basis": None,
-                    },
-                    on_conflict="strategy_id",
-                ).execute()
-
-            await db_execute(_stamp_nav_failed)
+        # CR-02 (161.1-REVIEW): this stamp used to be spelled out here, with its
+        # own byte-identical copy of the destructive payload and NO D-15 guard.
+        # It now routes through the ONE choke point, which owns the key-mode
+        # short-circuit and the D-15 non-destructive branch. See the CR-02 note
+        # above `_stamp_strategy_analytics_failed` for why four independent copies
+        # of a publish-state downgrade was the defect rather than an
+        # implementation detail.
+        #
+        # ⛔ F4: `heal_series=False` — this disposition NEVER deleted the basis
+        # series before the collapse, and a NAV-reconstruction refusal is not a
+        # reason to destroy a live factsheet's persisted series. The stamp itself
+        # is the fail-loud signal; the DELETE would be a fresh injury on top of it.
+        await _stamp_strategy_analytics_failed(
+            stamp_detail + scrubbed, heal_series=False
+        )
         return DispatchResult(
             outcome=DispatchOutcome.FAILED,
             error_message=result_detail + scrubbed,
@@ -2579,10 +2836,161 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
         # TERMINAL 'failed' gate instead of an infinitely-pending 'complete'. Strategy-
         # mode only: key-mode has no per-key strategy_analytics row (per-key reads land
         # in Phase 36).
-        async def _stamp_strategy_analytics_failed(message: str) -> None:
+        #
+        # ⛔ CR-02 (161.1-REVIEW): THIS IS THE ONLY PLACE IN THIS HANDLER THAT MAY
+        # WRITE computation_status = 'failed'. It was not, and that was the defect.
+        # Plan 02 added the D-15 non-destructive guard below to this helper, but
+        # `run_derive_broker_dailies_job` had FOUR terminal-failure stamp sites,
+        # each with its own byte-identical copy of the destructive payload:
+        # `_dispose_broker_nav_error` (the NavReconstructionError disposition),
+        # `_mark_insufficient` (<2 daily-return days — which ALSO deleted both
+        # persisted basis-series rows) and `_stamp_verdict_failed` (the MT5-12
+        # completeness refusal) never consulted `job['metadata']['source']`. A
+        # guard on one of four is not a guard; it is one guarded copy.
+        #
+        # All three now route here. Keeping them collapsed is the invariant, not
+        # a tidiness preference: a fifth stamp site added later with its own
+        # payload would silently reopen CR-02, so
+        # tests/test_ledger_refresh_publish_guard.py scans this function's source
+        # region and fails if a terminal publish-state downgrade is spelled
+        # anywhere outside this closure.
+        #
+        # ⚠️ WORDING NOTE, deliberate — the same rule the composite guard's
+        # comment already carries: that gate matches on the literal payload key
+        # and value, so naming them here in prose would trip it. Measured: an
+        # earlier draft of this paragraph quoted the pair and turned the gate
+        # RED against a CORRECT file. Prose must never satisfy or trip a
+        # mechanical gate.
+        # ⛔ ONE LINE, deliberately, at the cost of the line budget. The
+        # anti-vacuity region extractors in tests/test_ledger_refresh_gates.py and
+        # tests/test_ledger_refresh_publish_guard.py bound this closure by
+        # INDENTATION: they open at this `async def` and close at the next line
+        # indented no deeper. A wrapped signature closes the region on its own
+        # `) -> None:` line, collapsing it to ~100 characters — at which point
+        # every ABSENCE assertion scoped to the region passes vacuously. Measured:
+        # the wrapped form turned four gates RED against a correct file, which is
+        # the good failure mode; a laxer extractor would have turned them
+        # vacuously GREEN, which is the one this repo keeps getting bitten by.
+        async def _stamp_strategy_analytics_failed(message: str, *, heal_series: bool = True) -> None:
             if is_key_mode:
                 return
             scrubbed = str(scrub_freeform_string(message))
+
+            # ---- Phase 161.1 / D-15: a maintenance refresh may NOT un-publish --
+            # The stamp below is an AUTHORITATIVE clear — status 'failed', warned
+            # flag cleared, by-basis metrics NULLed, and (via the heal) both
+            # persisted basis-series rows DELETEd. That is correct for a FIRST
+            # compute that failed: the wizard poller must reach a terminal gate
+            # instead of spinning forever, which is the entire reason this helper
+            # exists (see the P72 comment above).
+            #
+            # It is wrong for the RECURRING ledger refresh. Every live
+            # ledger-backed strategy in production is terminal-SUCCESS — healthy,
+            # published, funded — and the venue gateway is on record wedging into
+            # IPC timeouts three times in one day, while a disabled venue flag
+            # fails the whole cohort at once. So the first refresh tick after
+            # activation, landing on a wedged gateway, would downgrade every one of
+            # those accounts. Founder direction: it may not.
+            #
+            # ⚠️ This RE-ROUTES the failure, it does not hide it. The failure is
+            # still recorded everywhere operators look and nowhere subscribers
+            # look: the `compute_jobs` row still records it honestly (which is what
+            # the fan-out's ATTEMPT-based cooldown reads, so a permanently failing
+            # strategy is still throttled), `computation_error` is still written,
+            # the log line below is emitted, and `ledger_refresh_staleness` keys
+            # freshness on the max date inside `returns_series` — which a FAILED
+            # refresh does not advance — so the strategy keeps surfacing as STALE
+            # rather than looking healthy.
+            #
+            # ⛔ FAIL-SAFE DIRECTION, non-negotiable: anything unrecognised falls
+            # through to the destructive stamp below. No metadata, a non-dict
+            # metadata, a different source, an unreadable status, no prior row, a
+            # prior row that is not terminal-success — all of them take the LOUD
+            # path. Never fail toward suppression: a wrongly-suppressed failure
+            # hangs the wizard poller on an infinite spinner.
+            #
+            # (Read-modify-write preservation on a live row is not a new idea
+            # here — `run_stitch_composite_job`'s `_stamp_failed` already merges
+            # rather than overwrites `data_quality_flags` for exactly this reason.
+            # D-15 extends that reasoning from one column to the publish state.)
+            job_metadata = job.get("metadata") or {}
+            job_source = (
+                job_metadata.get("source") if isinstance(job_metadata, dict) else None
+            )
+            # ⛔ The marker is spelled INLINE, and it is a CONTRACT rather than a
+            # label: the other end is `jsonb_build_object('source', …)` in
+            # supabase/migrations/20260825130000_ledger_refresh_fanout_dormant.sql.
+            # There is no compiler between the two — if they drift, the fan-out
+            # still enqueues and this still compiles, and the only symptom is that
+            # the next failed refresh silently un-publishes a funded account. Plan
+            # 05 gate 8 asserts the two literals are equal.
+            if job_source == "ledger-refresh":
+                # ⛔ F2: the ENTRY snapshot, never a re-read here. This closure can
+                # run minutes into the venue crawl, and any sibling job that
+                # reached mark_compute_job_done in that window put the row through
+                # the bridge's branch (a) — which rewrites a plain 'complete' to
+                # 'computing'. A read at THIS point therefore answers the bridge,
+                # not the question. See the entry read at the top of this handler.
+                existing_status: str | None = _refresh_publish_status
+
+                # ⛔ REUSE-01: the snapshot answers "was this strategy published
+                # before the refresh started?". It does NOT answer "is this still
+                # a refresh nobody is watching?" — and after a dedup collision it
+                # is not. The enqueue RPC hands a user's resync THIS job row and
+                # discards the resync's own metadata, so the marker on it can
+                # describe a request someone is staring at. The retraction that
+                # records that is a WRITE TO THE ROW, and this closure's copy of
+                # the metadata is the claim-time snapshot, so the row is re-asked
+                # here — the one place a post-claim retraction is visible.
+                #
+                # ⚠️ It can only NARROW. The condition below is unchanged; this
+                # gate runs only when the protection would otherwise have been
+                # GRANTED, so an ordinary marked refresh pays one read on a path
+                # it was about to suppress anyway, and an unmarked derive pays
+                # nothing at all.
+                if existing_status in STRATEGY_ANALYTICS_TERMINAL_SUCCESS_STATUSES and not await _refresh_marker_still_on_row(
+                    ctx.supabase, job.get("id"), LEDGER_REFRESH_SINGLE_KEY_SOURCE
+                ):
+                    logger.warning(
+                        "derive_broker_dailies: the refresh marker on compute_job "
+                        "%s has been RETRACTED — a user-initiated request was "
+                        "served by this job through the enqueue dedup, so nobody "
+                        "unwatched owns this failure. Taking the LOUD terminal "
+                        "path for strategy %s.",
+                        job.get("id"), strategy_id,
+                    )
+                    existing_status = None
+
+                if existing_status in STRATEGY_ANALYTICS_TERMINAL_SUCCESS_STATUSES:
+
+                    def _upsert_error_only() -> None:
+                        ctx.supabase.table("strategy_analytics").upsert(
+                            {
+                                "strategy_id": strategy_id,
+                                # JOB-01 still applies: clear the reaper anchor on
+                                # exit. It carries no publish meaning.
+                                "computing_started_at": None,
+                                "computation_error": scrubbed,
+                            },
+                            on_conflict="strategy_id",
+                        ).execute()
+
+                    await db_execute(_upsert_error_only)
+                    # ⛔ And NO _heal_delete_basis_series(). This is the half that
+                    # is easy to miss: that helper DELETEs both the cash_settlement
+                    # and mark_to_market series rows, so leaving it in place would
+                    # strip a live factsheet's series even though the status
+                    # survived.
+                    logger.warning(
+                        "derive_broker_dailies: a MARKED ledger refresh failed for "
+                        "strategy %s; recorded computation_error and left the "
+                        "publish state and both basis series intact (D-15). The "
+                        "failure is still visible in compute_jobs, in "
+                        "computation_error, in this line, and in the staleness view.",
+                        strategy_id,
+                    )
+                    return
+            # ---- end D-15; everything below is BYTE-UNCHANGED -----------------
 
             def _upsert() -> None:
                 ctx.supabase.table("strategy_analytics").upsert(
@@ -2606,7 +3014,28 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
             # D3 SECONDARY: single choke point — every terminal-failure stamp that flows
             # through this helper (parse-malformed + the deribit arm's ledger/scope/
             # valuation failures) heals both series rows.
-            await _heal_delete_basis_series()
+            #
+            # ⛔ F4 (161.1 silent-failure audit): the heal is OPT-OUT, and the two
+            # opt-outs are not tidiness. The CR-02 collapse routed FOUR stamp sites
+            # through this closure, but only TWO of them ever healed:
+            # `_mark_insufficient` (the <2-day arm) and the deribit arm's own
+            # failures, which already called this helper. `_dispose_broker_nav_error`
+            # and `_stamp_verdict_failed` spelled the payload themselves and did NOT
+            # delete the series — so routing them here HANDED THEM A DESTRUCTIVE
+            # DELETE THEY NEVER HAD. That matters because the runbook's repair marker
+            # `ledger-refresh-repair` is deliberately UNPROTECTED (a repair must be
+            # able to fail loudly), and the runbook promises "a failed repair … is not
+            # a fresh injury". With an unconditional heal that promise was false: a
+            # failed repair on an MT5 strategy hitting the MT5-12 verdict refusal
+            # destroyed BOTH basis-series rows, and MT5 is 4 of the 5 live
+            # ledger-backed strategies.
+            #
+            # The default stays True so the collapse's guarantee is unchanged for
+            # every site that DID heal — an opt-in default would have silently
+            # dropped the heal from the deribit arm, which is CR-02 with the sign
+            # flipped.
+            if heal_series:
+                await _heal_delete_basis_series()
 
         # Per-strategy returns-denominator override (Zavara-only allocated capital).
         # ABSENT on every normal strategy (and in key-mode) → None → the unchanged NAV
@@ -4544,34 +4973,65 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
             strategy_id, len(realized), len(funding),
         )
 
-        def _mark_insufficient() -> None:
-            ctx.supabase.table("strategy_analytics").upsert(
-                {
-                    "strategy_id": strategy_id,
-                    "computation_status": "failed",
-                    # SI-02 (MEDIUM-2): clear the runner-owned warned marker.
-                    "computation_warned": False,
-                    # JOB-01: clear on exit so a stale stamp can never re-trigger the reaper.
-                    "computing_started_at": None,
-                    "computation_error": (
-                        "Insufficient broker history. At least 2 days of "
-                        "activity required."
-                    ),
-                    "data_quality_flags": {"csv_source": True},
-                    # F-4 (Fable): authoritative-clear the by-basis column so a
-                    # prior object can't render on a now-FAILED (insufficient) row.
-                    "metrics_json_by_basis": None,
-                },
-                on_conflict="strategy_id",
-            ).execute()
-
-        await db_execute(_mark_insufficient)
-        # D3 SECONDARY (Phase 105): this terminal insufficient-history arm exits BEFORE
-        # the cash/MTM series persists below, so a stale series row from a prior
-        # (longer-history) derive would outlive the now-authoritative 'failed'. Heal both
-        # rows (defense-in-depth; the Plan-02 read gate is the guarantee).
-        await _heal_delete_basis_series()
-        return DispatchResult(outcome=DispatchOutcome.DONE)
+        # CR-02 (161.1-REVIEW): THE most dangerous of the three unguarded sibling
+        # stamps, and the reason CR-02 was rated critical rather than cosmetic.
+        # This arm fires whenever the crawl returns fewer than two INTERPRETABLE
+        # daily-return days — which is exactly what an MT5 terminal that has lost
+        # its login returns (the -10004 state in this repo's operational history:
+        # a successful crawl of an EMPTY deal history). It then wrote the
+        # authoritative-clear payload AND called `_heal_delete_basis_series()`,
+        # deleting BOTH persisted basis-series rows. On a live funded strategy
+        # with years of history, one refresh tick against a logged-out gateway
+        # destroyed the series — the half the D-15 comment calls "easy to miss".
+        #
+        # Routed through the ONE choke point instead. `_mark_insufficient` is the
+        # ONE of the four collapsed sites for which that is exactly equivalent on
+        # the unguarded path: `_stamp_strategy_analytics_failed` writes the same
+        # seven keys and then calls the same `_heal_delete_basis_series()` this
+        # line used to call itself. (F4 corrects the earlier wording here, which
+        # claimed the equivalence for the collapse as a whole — measured, it does
+        # NOT hold for `_dispose_broker_nav_error` or `_stamp_verdict_failed`,
+        # neither of which ever healed. Those two now pass `heal_series=False`.)
+        # The message is a constant, so the helper's scrub is a no-op on it.
+        await _stamp_strategy_analytics_failed(
+            "Insufficient broker history. At least 2 days of activity required."
+        )
+        # ⛔ F1 (161.1 silent-failure audit): FAILED, not DONE. This return is the
+        # tail of the chain that develops the origin defect's exact shape, and the
+        # stamp above is only half a fix without it.
+        #
+        # `main_worker` maps DONE → `mark_compute_job_done`, whose in-RPC
+        # `sync_strategy_analytics_status` then finds every job row terminal-done
+        # and takes branch (c): `computation_error = NULL`, `computed_at = now()`.
+        # So the arm that just recorded a failure had that failure ERASED one RPC
+        # later — on BOTH paths:
+        #   * MARKED refresh — the D-15 guard preserves the publish state and
+        #     writes `computation_error`; branch (c) NULLs it and stamps a fresh
+        #     `computed_at`. Every channel D-15 promises is gone except a log line,
+        #     and `computed_at` is not inert: it feeds the factsheet's FreshnessChip
+        #     and the portfolio PDF's "Data as of" vintage, so a month-stale funded
+        #     account renders GREEN and prints TODAY as its data date. That is the
+        #     class the FINDING-5 comment on the vintage line already names: never
+        #     fall back to "now" for a missing computed_at.
+        #   * UNMARKED first compute — the authoritative 'failed' stamp is
+        #     overwritten to 'complete' with a NULL error, so the wizard poller is
+        #     handed a success for a strategy that has no factsheet.
+        # FAILED routes to `mark_compute_job_failed` instead, and the bridge takes
+        # branch (b) (loud) or (b-prime) (protected, error preserved, computed_at
+        # untouched) — which is what both stamps above already assume.
+        #
+        # PERMANENT: a brand-new/idle account with <2 interpretable days does not
+        # grow history by being retried in a backoff loop (T-74-02 DoS). The next
+        # sync enqueues a fresh derive whose `done` SUPERSEDES this failed_final
+        # per-kind, so the strategy un-poisons the moment real history arrives.
+        return DispatchResult(
+            outcome=DispatchOutcome.FAILED,
+            error_message=(
+                "derive_broker_dailies: <2 interpretable daily-return days for "
+                f"strategy {strategy_id} — insufficient broker history."
+            ),
+            error_kind="permanent",
+        )
 
     # ── MT5-12: the series-completeness VERDICT seam (D-15 / D-16) ──────────────
     # THE fail-loud chokepoint for producer 1 (`run_derive_broker_dailies_job`).
@@ -4622,31 +5082,23 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
             "venue=%s) — %s",
             is_key_mode, funding_label, venue, _detail,
         )
-        if not is_key_mode:
-            # Key-mode (allocator) has NO per-key strategy_analytics row (per-key
-            # reads are Phase 36) — a stamp there would write a phantom row, so
-            # key-mode gets the refusal without the stamp, exactly like the <2-day
-            # branch and `_dispose_broker_nav_error`.
-            def _stamp_verdict_failed(detail: str = _detail) -> None:
-                ctx.supabase.table("strategy_analytics").upsert(
-                    {
-                        "strategy_id": strategy_id,
-                        "computation_status": "failed",
-                        # SI-02: clear the runner-owned warned marker so the status
-                        # bridge cannot resurrect complete_with_warnings over this.
-                        "computation_warned": False,
-                        # JOB-01: clear on exit or the reaper re-fires on a stale stamp.
-                        "computing_started_at": None,
-                        "computation_error": detail,
-                        "data_quality_flags": {"csv_source": True},
-                        # F-4: authoritative-clear the by-basis column so a prior
-                        # derive's object can't render on a now-FAILED row.
-                        "metrics_json_by_basis": None,
-                    },
-                    on_conflict="strategy_id",
-                ).execute()
-
-            await db_execute(_stamp_verdict_failed)
+        # CR-02 (161.1-REVIEW): routed through the ONE choke point. Key-mode
+        # (allocator) has NO per-key strategy_analytics row (per-key reads are
+        # Phase 36) — a stamp there would write a phantom row — and the choke
+        # point owns that short-circuit, so the `if not is_key_mode:` wrapper
+        # this replaced is now redundant rather than duplicated.
+        #
+        # ⚠️ This seam is MT5-specific (the MT5-12 series-completeness refusal)
+        # and MT5 is 4 of the 5 live ledger-backed strategies, so it is the
+        # highest-frequency route by which a recurring refresh could have
+        # downgraded a funded account.
+        #
+        # ⛔ F4: `heal_series=False`. This is THE path the runbook's repair marker
+        # rides — `ledger-refresh-repair` is deliberately unprotected, and MT5-12
+        # is the refusal an MT5 repair most often trips. Before the CR-02 collapse
+        # `_stamp_verdict_failed` did not delete the series; restoring that is what
+        # keeps the runbook's "a failed repair is not a fresh injury" true.
+        await _stamp_strategy_analytics_failed(_detail, heal_series=False)
         # PERMANENT: a combiner that does not stamp will not start stamping on
         # retry (T-74-02 DoS — never retry a structural defect forever).
         return DispatchResult(
@@ -5217,13 +5669,130 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
     # the reaper-threshold oracle and this enqueue can never disagree.
     _csv_analytics_kind = JOB_CHAIN_FOLLOW_ON["derive_broker_dailies"][0]
 
-    def _enqueue_csv_analytics() -> None:
-        ctx.supabase.rpc(
-            "enqueue_compute_job",
-            {"p_strategy_id": strategy_id, "p_kind": _csv_analytics_kind},
-        ).execute()
+    # CR-03 (161.1-REVIEW): PROPAGATE THE REFRESH MARKER ACROSS THE CHAIN EDGE.
+    # A refresh is a TWO-HOP chain — the fan-out's own D-09 budget is derived
+    # from that (20260825130000:144-150) and its 20-hour attempt cooldown counts
+    # BOTH kinds. Until now the follow-on job carried no metadata at all, so
+    # `metadata->>'source'` was NULL on hop 2 and every D-15-shaped guard —
+    # today's, and the SQL bridge's partition in 20260825150000 — was
+    # STRUCTURALLY BLIND to it. Hop 2 is where the factsheet is compiled, so:
+    # derive succeeds, analytics hop fails, funded account un-published, with
+    # every hop-1 guard reading green. The phase reasoned about hop 2 as part of
+    # the refresh everywhere except the guard.
+    #
+    # ⛔ Only a RECOGNISED marker is forwarded. An unknown source is dropped, so
+    # hop 2 takes the loud path — the same fail-safe direction as every other
+    # D-15 decision. `chained_from` is provenance for operators reading
+    # compute_jobs; nothing keys on it.
+    #
+    # ⛔ F7: RECOGNISED here means the SINGLE-KEY marker, not the union. This
+    # handler's own D-15 guard protects exactly one marker (spelled inline in
+    # `_stamp_strategy_analytics_failed`), and the composite arm's guard is
+    # deliberately a DIFFERENT string so the two cannot cross-fire. Forwarding
+    # the union while guarding one was safe only by accident of the fan-outs:
+    # migration 20260825130000 enqueues `derive_broker_dailies` under the
+    # single-key marker and 20260825140000 enqueues `stitch_composite` under the
+    # composite one, so today no composite-marked job reaches this line. If one
+    # ever did, the union form would hand hop 2 a protection hop 1 had already
+    # declined it — i.e. the destructive stamp would ALREADY have fired here,
+    # and hop 2 would then decline to record the follow-on failure. The two
+    # sites now answer the same question with the same marker.
+    #
+    # ⚠️ Cooldown accounting is UNCHANGED by this. The cooldown counts
+    # `kind IN (derive_broker_dailies, compute_analytics_from_csv)` by
+    # `created_at`, ignoring status and metadata, and the fan-out's `v_existing`
+    # pre-count filters on `kind = 'derive_broker_dailies'` alone. Adding
+    # metadata to hop 2 moves neither integer.
+    _job_metadata_out = job.get("metadata")
+    _refresh_source_out = (
+        _job_metadata_out.get("source")
+        if isinstance(_job_metadata_out, dict)
+        else None
+    )
 
-    await db_execute(_enqueue_csv_analytics)
+    # ⛔ REUSE-01, FORWARD DIRECTION. Same reconciliation as the stamp closure and
+    # for the same reason: this metadata is the CLAIM-TIME snapshot, and a resync
+    # that inherited this job through the enqueue dedup retracts the marker on the
+    # ROW afterwards. Forwarding a retracted marker down the chain edge would hand
+    # hop 2 — the hop that COMPILES THE FACTSHEET — a protection that no longer
+    # describes anything, and hop 2 has no other way to learn the truth: it reads
+    # this metadata and nothing else.
+    if _refresh_source_out == LEDGER_REFRESH_SINGLE_KEY_SOURCE and not await _refresh_marker_still_on_row(
+        ctx.supabase, job.get("id"), LEDGER_REFRESH_SINGLE_KEY_SOURCE
+    ):
+        logger.warning(
+            "derive_broker_dailies: the refresh marker on compute_job %s has been "
+            "RETRACTED (a user-initiated request inherited this job through the "
+            "enqueue dedup) — the chain edge to %s carries NO marker and no "
+            "publish state, so hop 2 fails LOUDLY for strategy %s.",
+            job.get("id"), _csv_analytics_kind, strategy_id,
+        )
+        _refresh_source_out = None
+
+    def _enqueue_csv_analytics() -> Any:
+        _payload: dict[str, Any] = {
+            "p_strategy_id": strategy_id,
+            "p_kind": _csv_analytics_kind,
+        }
+        if _refresh_source_out == LEDGER_REFRESH_SINGLE_KEY_SOURCE:
+            _metadata_out: dict[str, Any] = {
+                "source": _refresh_source_out,
+                "chained_from": "derive_broker_dailies",
+            }
+            # ⛔ F1: THE PRE-REFRESH PUBLISH STATE RIDES THE CHAIN EDGE, and it is
+            # the only way hop 2 can ever learn it. Hop 2 cannot re-read it: this
+            # handler returns DONE immediately after this enqueue, and
+            # mark_compute_job_done PERFORMs the SQL status bridge in the SAME
+            # transaction with the job just enqueued here already `pending`. That
+            # is a non-terminal job, so branch (a) fires and rewrites a plain
+            # 'complete' row to 'computing' BEFORE hop 2 is ever claimed. A hop-2
+            # guard reading the column would therefore answer 'computing' every
+            # single time and protect nothing — deterministically, for exactly the
+            # rows a clean recompute leaves behind.
+            #
+            # ⛔ Forwarded ONLY when the entry snapshot was terminal-success,
+            # against the SAME single-sourced frozenset both guards use. A row
+            # that was not published has nothing to protect and hop 2 must be told
+            # so — the fail-safe direction is loud, never a green state invented
+            # here for hop 2 to restore.
+            if _refresh_publish_status in STRATEGY_ANALYTICS_TERMINAL_SUCCESS_STATUSES:
+                _metadata_out["publish_status"] = _refresh_publish_status
+                _metadata_out["publish_warned"] = _refresh_publish_warned
+            _payload["p_metadata"] = _metadata_out
+        return ctx.supabase.rpc("enqueue_compute_job", _payload).execute().data
+
+    _tail_job_id = await db_execute(_enqueue_csv_analytics)
+
+    # ⛔ REUSE-01, MIRROR DIRECTION — protection LOST, not laundered.
+    # The same dedup that hands a resync a marked job hands THIS enqueue an
+    # UNMARKED `compute_analytics_from_csv` when one is already in flight for the
+    # strategy, and discards the marker + publish state we just built. Hop 2 then
+    # runs with no protection at all.
+    #
+    # ⛔ THAT IS THE OUTCOME, AND IT IS DELIBERATE. The alternative — writing our
+    # marker onto the row we collided with — is the forward defect wearing the
+    # other hat: it would grant a protection to a job THIS refresh did not create
+    # and whose caller may well be watching it, and a suppressed failure under a
+    # watcher is a poller that stops on a terminal-success and a stale factsheet
+    # rendered over a failed run. Protection is never inherited across a dedup
+    # collision, in either direction; both resolve toward the LOUD path.
+    #
+    # ⚠️ So what this closes is VISIBILITY, not the loss. The loss of a safety
+    # property must never be silent — that silence is the whole reason REUSE-01
+    # survived review. Pinned by
+    # tests/test_ledger_refresh_reuse_collision.py::TestMirrorDirection.
+    if _refresh_source_out == LEDGER_REFRESH_SINGLE_KEY_SOURCE and not await _refresh_marker_still_on_row(
+        ctx.supabase, _tail_job_id, LEDGER_REFRESH_SINGLE_KEY_SOURCE
+    ):
+        logger.warning(
+            "derive_broker_dailies: the %s chain edge for strategy %s DEDUPED onto "
+            "an already-in-flight unmarked job (%s) — the refresh marker and "
+            "publish state were DISCARDED by enqueue_compute_job, so hop 2 runs "
+            "UNPROTECTED and a failure there un-publishes this strategy. The "
+            "protection is deliberately not laundered onto a job this refresh did "
+            "not create.",
+            _csv_analytics_kind, strategy_id, _tail_job_id,
+        )
     return DispatchResult(outcome=DispatchOutcome.DONE)
 
 
@@ -5449,21 +6018,109 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
         {csv_source, composite} — current behavior, byte-unchanged."""
         scrubbed = str(scrub_freeform_string(message))
 
-        def _read_existing_failed_flags() -> dict[str, Any]:
+        # ONE select, BOTH columns: the flags for M-2's merge above, and the
+        # CURRENT status for the non-destructive guard below.
+        def _read_existing_failed_row() -> dict[str, Any]:
             res = (
                 supabase.table("strategy_analytics")
-                .select("data_quality_flags")
+                .select("data_quality_flags, computation_status")
                 .eq("strategy_id", strategy_id)
                 .maybe_single()
                 .execute()
             )
             row = getattr(res, "data", None) or {}
-            return dict(row.get("data_quality_flags") or {})
+            return dict(row) if isinstance(row, dict) else {}
 
-        existing_flags = await db_execute(_read_existing_failed_flags)
+        existing_row = await db_execute(_read_existing_failed_row)
+        existing_flags = dict(existing_row.get("data_quality_flags") or {})
+        _existing_status = existing_row.get("computation_status")
+        existing_status: str | None = (
+            _existing_status if isinstance(_existing_status, str) else None
+        )
         merged_flags: dict[str, Any] = dict(existing_flags)
         merged_flags["csv_source"] = True
         merged_flags["composite"] = True
+
+        # ---- D-15, extended to the COMPOSITE arm (Phase 161.1 / plan 04) -----
+        # The stamp below is an authoritative downgrade: `failed` +
+        # `computation_warned = False`. That is exactly RIGHT for the case this
+        # closure was written for — a user-initiated stitch, whose wizard poller
+        # must reach a terminal gate instead of spinning forever (see this
+        # closure's docstring) — and exactly WRONG for a background maintenance
+        # refresh, which no poller is watching and whose only cost is a LIVE
+        # factsheet going dark: src/lib/strategyGate.ts returns ANALYTICS_FAILED
+        # for a `failed` row, and every live ledger row in the PROD census is
+        # `complete_with_warnings`.
+        #
+        # ⚠️ WORDING NOTE, deliberate: the M-3 source-scan gate
+        # (tests/test_stitch_composite_job.py) bans the literal that names the
+        # advanced lifecycle state from this function's ENTIRE source, comments
+        # included, because this job must never advance it. Measured — an earlier
+        # draft of this comment used that word descriptively and turned the gate
+        # RED. Prose must never trip a mechanical gate; say "live" here.
+        #
+        # ⚠️ WHY THIS IS NEEDED HERE AND NOT COVERED BY PLAN 02's GUARD. That
+        # guard lives in `_stamp_strategy_analytics_failed`, on the single-key
+        # derive path, and never runs for this kind. Until plan 04 this stamp was
+        # only reachable from a user action or an owner resync; the composite
+        # refresh arm (migration 20260825140000) makes it reachable RECURRINGLY,
+        # on the one venue whose only live strategy IS a composite.
+        #
+        # ⛔ FAIL-SAFE DIRECTION, non-negotiable and identical to D-15's: anything
+        # unrecognised falls through to the destructive stamp below. No metadata,
+        # a non-dict metadata, a DIFFERENT source (including the single-key arm's
+        # marker), no prior row, or a prior row that is not terminal-success — all
+        # of them take the LOUD path. Never fail toward suppression.
+        #
+        # The failure is RE-ROUTED, not hidden: computation_error and the cleared
+        # reaper anchor still land, the compute_jobs row (which the arm's ATTEMPT
+        # cooldown reads) still records the attempt, and the freshness verdict in
+        # public.ledger_refresh_staleness cannot be advanced by a failed stitch —
+        # so a persistently failing composite keeps reading STALE, loudly, rather
+        # than healthy.
+        _job_metadata = job.get("metadata") or {}
+        _job_source = (
+            _job_metadata.get("source") if isinstance(_job_metadata, dict) else None
+        )
+        # ⛔ The marker is spelled INLINE, and it is a CONTRACT rather than a
+        # label: the other end is `jsonb_build_object('source', …)` in
+        # supabase/migrations/20260825140000_ledger_refresh_composite_arm.sql.
+        # There is no compiler between the two — if they drift, the arm still
+        # enqueues and this still compiles, and the only symptom is that the next
+        # failed refresh silently un-publishes a funded account. It is
+        # deliberately a DIFFERENT string from the single-key arm's, so the two
+        # guards cannot cross-fire.
+        if (
+            _job_source == "ledger-refresh-composite"
+            and existing_status in STRATEGY_ANALYTICS_TERMINAL_SUCCESS_STATUSES
+        ):
+
+            def _upsert_error_only() -> None:
+                supabase.table("strategy_analytics").upsert(
+                    {
+                        "strategy_id": strategy_id,
+                        # JOB-01 still applies: clear the reaper anchor on exit.
+                        # It carries no publish meaning.
+                        "computing_started_at": None,
+                        "computation_error": scrubbed,
+                        # M-2's read-modify-write is PRESERVED, not bypassed. The
+                        # coverage mask must survive a failed refresh or real gap
+                        # days render with no missing-segment annotation.
+                        "data_quality_flags": merged_flags,
+                    },
+                    on_conflict="strategy_id",
+                ).execute()
+
+            await db_execute(_upsert_error_only)
+            logger.warning(
+                "stitch_composite: a MARKED maintenance refresh failed for "
+                "strategy %s whose analytics row is %s — recording the error "
+                "WITHOUT downgrading publish state (Phase 161.1 D-15). The "
+                "strategy stays stale in ledger_refresh_staleness until a stitch "
+                "succeeds.",
+                strategy_id, existing_status,
+            )
+            return
 
         def _upsert() -> None:
             supabase.table("strategy_analytics").upsert(

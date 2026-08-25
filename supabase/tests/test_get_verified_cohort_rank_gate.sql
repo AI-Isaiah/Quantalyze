@@ -38,37 +38,54 @@
 -- status the only possible cause of its exclusion. Without that second arm the
 -- assertion would be a coincidence dressed as a control.
 --
--- STATE-ADAPTIVE (Phase 156 precedent) — BUT AS NARROWLY AS POSSIBLE. The shared
--- TEST database receives this migration only AFTER the PR merges, but this test
--- runs on the PR. So on a pre-migration database the test RAISE NOTICEs and
--- skips the two assertions that genuinely need the gate deployed: (1) the
--- occurrence count, which reads the gate out of the body, and (4) the
--- behavioural delta, which needs the gate to change the cohort.
---   ⭐ THE SKIP IS KEYED ON supabase_migrations.schema_migrations — an
---   applied-ness oracle INDEPENDENT of the function's text — never on the gate
---   predicate itself. Keying it on the predicate would key the skip on the very
---   thing assertion 1 asserts: a whitespace-only re-base would disarm 1 and 4
---   forever (CI stays green — psql does not fail on a NOTICE), and this file's
---   own #1 threat, a CREATE OR REPLACE that DROPS the gate, would take that same
---   skip and exit GREEN. Under the ledger key both of those fall THROUGH to
---   assertion 1 and RAISE. The full both-or-neither state table, and why the
---   ledger-missing/gate-present state is armed rather than skipped, are at the
---   skip block itself.
--- NOTHING ELSE is skipped:
---   * A MISSING FUNCTION is a hard failure (the RPC has existed since
---     20260626120000) — only the un-applied GATE is skippable.
---   * Assertions 2a / 2b / 3 (SECURITY DEFINER, pinned search_path, anon lacks
---     EXECUTE) run ABOVE the skip, unconditionally. 20260626120000 already
---     shipped all three (SECURITY DEFINER and SET search_path = public,
---     pg_catalog on the function, REVOKE ALL ... FROM PUBLIC, anon after it),
---     so they are TRUE on a pre-migration database and are ARMED on the very
---     first CI run of this PR. Keeping them above the skip is belt-and-braces:
---     they are independent of the gate, so nothing about the skip's key —
---     ledger row, predicate text, or a future third form — can reach them.
---   ⚠️ Consequence, stated honestly: until the first CI run AFTER this migration
---   reaches TEST, assertions 1 and 4 have never been observed ARMED and green.
---   For those two the correct phrasing is "would have caught", never "did
---   catch". Assertions 2a/2b/3 carry no such caveat — they execute every run.
+-- ⛔ AN UNDEPLOYED GATE IS A HARD FAILURE, NEVER A SKIP (F8, 2026-08-25)
+-- ----------------------------------------------------------------------
+-- This file used to be STATE-ADAPTIVE. On a database where migration
+-- 20260821120000 had no ledger row AND the deployed body carried no gate, it
+-- printed a RAISE NOTICE and RETURNed, withholding assertion 1 (the gate
+-- occurrence count) and assertion 4 (the behavioural delta) — that is, BOTH
+-- assertions the file was written to make. That bail-out is removed. MEASURED,
+-- not assumed:
+--   * It exited 0. The CI step (.github/workflows/ci.yml, `sql-tests`) reads
+--     psql's exit code, so a run that proved nothing about the RANK-01 gate was
+--     byte-identical to one that proved it, in the only channel anything
+--     mechanical reads.
+--   * Its notice read '... are SKIPPED:', NOT the `SKIP:` label. The anti-skip
+--     grep in that same step is `grep -aE 'NOTICE: +SKIP:'`, which does NOT
+--     match that string; neither does the narrow-partial-skip pattern beside
+--     it. The one mechanism built to catch this exact shape was blind to it.
+--   * The file declared no 'ALL N ARMS EXECUTED' sentinel, so CI's sentinel
+--     loop passed over it entirely. An operator reading "no whole-file skips,
+--     N completion sentinel(s) verified" concluded the ranking gate was
+--     enforced. It was not, and had never once run.
+--   * The skip could not re-arm itself. The `sql-tests` job has NO
+--     migration-apply step, and supabase-migrate.yml applies migrations to the
+--     PRODUCTION project only. Nothing puts supabase/migrations/** on the TEST
+--     project, so "the assertions arm once TEST catches up" named a mechanism
+--     that DOES NOT EXIST.
+-- The consequence is deliberate and IS the forcing function: this file is RED
+-- until 20260821120000 is applied to the TEST project. get_verified_cohort_rank
+-- is a SECURITY DEFINER cross-tenant read over the entire published universe,
+-- and assertions 1 and 4 are its only recurring executed coverage.
+--
+-- NOTHING is skipped now. All six assertions (1, 2a, 2b, 3, 4a, 4b) execute on
+-- every run, and the file ends in an 'ALL 6 ARMS EXECUTED (1, 2a, 2b, 3, 4a, 4b)'
+-- sentinel so that an arm neutered in place — deleted, renumbered or
+-- short-circuited — cannot exit 0 unnoticed. Keep the roster in that notice: as
+-- of 2026-08-25 `sql-tests` in .github/workflows/ci.yml counts its entries and
+-- fails the job when they disagree with N, so dropping an assertion costs two
+-- edits in one string rather than one silent decrement. (The three 0/0b/0c
+-- precondition assertions are deliberately NOT arms and are not in the roster —
+-- they establish that the arms below can be evaluated at all.)
+--   * A MISSING FUNCTION is a hard failure (assertion 0): the RPC has existed
+--     since 20260626120000.
+--   * An UNDEPLOYED GATE is a hard failure (assertion 0c), which is where the
+--     skip used to be. The migration ledger is still read there, but only to
+--     name the likelier cause in the failure message.
+--   ⚠️ Honest phrasing: until the first CI run AFTER 20260821120000 reaches
+--   TEST, assertions 1 and 4 have never been observed ARMED and green. For
+--   those two say "would have caught", never "did catch". Assertions 2a/2b/3
+--   carry no such caveat — they execute every run.
 --
 -- SHARED-TEST DISCIPLINE. Every write is scoped to rows this file itself seeds
 -- under a unique email, and the whole run is wrapped in a transaction that ends
@@ -142,21 +159,19 @@ BEGIN
 
   -- ================== UNCONDITIONAL ASSERTIONS (2a, 2b, 3) =================
   -- These three run on EVERY execution, pre-migration database included, and
-  -- are deliberately ABOVE the state-adaptive skip:
+  -- are deliberately FIRST, above the applied-ness assertion (0c):
   --   * They do not depend on the RANK-01 gate. Migration 20260626120000 — the
   --     ONLY prior definition of this function — already declared SECURITY
   --     DEFINER and SET search_path = public, pg_catalog, and REVOKEd ALL from
   --     PUBLIC, anon; its own DO block asserted the SECDEF flag and the anon
   --     revoke at apply time. So all three invariants hold on a database that
   --     has not yet received 20260821120000.
-  --   * Anything placed BELOW the skip stops asserting whenever the skip fires,
-  --     and a skip is only ever as honest as its key. These three do not depend
-  --     on that key at all, so they are placed where no future change to it —
-  --     the original predicate-text form, today's migration-ledger form, or
-  --     whatever replaces it — can silently take them out of service.
-  -- The assertion NUMBERS are kept as-is (2a, 2b and 3 now execute before 1 and
-  -- 4): the number is part of each failure message's identity, which CI logs
-  -- carry and reviewers grep for. Execution order changed; the labels did not.
+  --   * Ordering them first means they are evaluated even on the runs where 0c
+  --     RAISEs, and no future change to 0c's applied-ness key can move them out
+  --     of service.
+  -- The assertion NUMBERS are kept as-is (2a, 2b and 3 execute before 1 and 4):
+  -- the number is part of each failure message's identity, which CI logs carry
+  -- and reviewers grep for. Execution order changed; the labels did not.
 
   -- (2) SECURITY DEFINER + pinned search_path are intact
   SELECT prosecdef, proconfig INTO v_secdef, v_config
@@ -176,46 +191,28 @@ BEGIN
 
   v_def := pg_get_functiondef(v_fn_oid);
 
-  -- ----- STATE ADAPTATION: pre-migration database → skip, by design ---------
-  -- Only assertions 1 and 4 sit below this line, and both genuinely require the
-  -- migration to be deployed: 1 reads the gate out of the deployed body, 4
-  -- needs the gate to be what changes the cohort.
+  -- ----- (0c) APPLIED-NESS: AN UNDEPLOYED GATE IS A FAILURE, NOT A SKIP ---
+  -- Assertions 1 and 4 below genuinely need the RANK-01 gate deployed: 1 reads
+  -- it out of the deployed body, 4 needs it to be what changes the cohort. When
+  -- it is absent this file RAISEs. It does NOT skip — see the ⛔ block in the
+  -- header for the measurement behind that.
   --
-  -- ⭐ THE SKIP IS KEYED ON THE MIGRATION LEDGER, NOT ON THE GATE PREDICATE.
-  -- Keying it on `position(v_gate_pred IN v_def) = 0` — the obvious form, and
-  -- the one this file shipped first — keys the skip on THE VERY THING
-  -- ASSERTION 1 ASSERTS, and self-disarms in both directions:
-  --   (a) a whitespace-only re-base (`IN ('complete','complete_with_warnings')`
-  --       without the space, or the predicate wrapped across lines) makes the
-  --       byte match fail on a database that HAS the gate → assertions 1 and 4
-  --       skip forever, silently, and psql does not fail on a NOTICE;
-  --   (b) THE FILE'S OWN #1 THREAT — a future CREATE OR REPLACE that DROPS the
-  --       gate — is byte-indistinguishable from (a) and would exit GREEN
-  --       through this same skip, which is the exact regression this file
-  --       exists to catch.
-  -- `supabase_migrations.schema_migrations` is independent of the function's
-  -- text: it records that 20260821120000 was APPLIED, whatever its body now
-  -- says. A database that HAS the migration but whose body LACKS the predicate
-  -- therefore falls THROUGH to assertion 1 and RAISEs, in both (a) and (b).
-  --
-  -- BOTH OR NEITHER (the sibling coherence-check pattern —
-  -- test_wizard_session_idempotency.sql §3f, test_api_keys_venue_identity_uniq.sql):
-  -- the gate's PRESENCE is still read, but only to NARROW the skip, never to
-  -- cause one. The four states:
+  -- The migration ledger is still read, as an applied-ness oracle INDEPENDENT of
+  -- the function's text, but ONLY so the failure message can name the likelier
+  -- cause. It never decides whether the assertions run. The four states:
   --     ledger ✓ / body ✓ → ARMED (the post-merge steady state)
-  --     ledger ✓ / body ✗ → ARMED → assertion 1 RAISEs. The fix, cases (a)+(b).
-  --     ledger ✗ / body ✗ → SKIP. The ONLY skippable state: the coherent
-  --                          pre-migration database this PR's CI runs against.
-  --     ledger ✗ / body ✓ → ARMED, deliberately NOT a skip and NOT an
-  --                          exception. The gate is demonstrably deployed, so
-  --                          both assertions are meaningful and are run; only
-  --                          the ledger ROW is missing, which is what an
-  --                          MCP `apply_migration` (it stamps now(), not the
-  --                          filename prefix) leaves behind. Skipping there
-  --                          would be a silent green; RAISEing there would red
-  --                          CI for a database that is functionally correct.
+  --     ledger ✓ / body ✗ → ARMED → assertion 1 RAISEs. Either the gate was
+  --                          dropped, or the predicate was reformatted and this
+  --                          file's v_gate_pred constant is stale.
+  --     ledger ✗ / body ✗ → RAISEs HERE, at 0c. This is the state that used to
+  --                          print a notice and RETURN, withholding BOTH gate
+  --                          assertions while exiting 0.
+  --     ledger ✗ / body ✓ → ARMED, and NOT a failure. The gate is demonstrably
+  --                          deployed; only the ledger ROW is missing, which is
+  --                          exactly what an MCP `apply_migration` (it stamps
+  --                          now(), not the filename prefix) leaves behind.
   IF to_regclass('supabase_migrations.schema_migrations') IS NULL THEN
-    RAISE EXCEPTION 'TEST FAILED (0b): supabase_migrations.schema_migrations does not exist, so this file cannot tell a pre-migration database from one whose gate was dropped. That ledger is the skip''s independent applied-ness oracle; without it the only remaining key would be the gate predicate itself, which is what assertion 1 asserts. Run this file against the Supabase-managed TEST project (TEST_SUPABASE_DB_URL), never a bare Postgres.';
+    RAISE EXCEPTION 'TEST FAILED (0b): supabase_migrations.schema_migrations does not exist, so this file cannot tell a database that never received migration % from one whose gate was dropped after it applied. That ledger is 0c''s independent applied-ness oracle, and it is what lets the failure below name a cause; without it the only remaining signal is the gate predicate itself, which is what assertion 1 asserts. Run this file against the Supabase-managed TEST project (TEST_SUPABASE_DB_URL), never a bare Postgres.', v_migration;
   END IF;
   v_applied := EXISTS (
     SELECT 1 FROM supabase_migrations.schema_migrations WHERE version = v_migration
@@ -223,8 +220,7 @@ BEGIN
   v_gate_seen := position(v_gate_pred IN v_def) > 0;
 
   IF NOT v_applied AND NOT v_gate_seen THEN
-    RAISE NOTICE 'test_get_verified_cohort_rank_gate: PARTIAL — assertions 2a/2b/3 (SECURITY DEFINER, pinned search_path, anon lacks EXECUTE) ran ARMED and passed. Assertions 1 (gate occurrence count) and 4 (behavioural) are SKIPPED: migration % has no row in supabase_migrations.schema_migrations AND the deployed get_verified_cohort_rank does not carry the RANK-01 computed-analytics gate — the coherent pre-migration state, which is where the shared TEST project sits until this PR merges. This is NOT a full pass: neither gate assertion has been evaluated. Note the polarity — a database that HAS the migration but LOST the gate does NOT reach here; it falls through and assertion 1 fails.', v_migration;
-    RETURN;
+    RAISE EXCEPTION 'TEST FAILED (0c): the RANK-01 computed-analytics cohort gate (%) is ABSENT from the deployed body of public.get_verified_cohort_rank, and migration % has no row in supabase_migrations.schema_migrations. Assertions 1 (gate occurrence count) and 4 (behavioural delta) therefore could not be evaluated — the two assertions this file exists to make. THIS IS A FAILURE, NOT A SKIP. TWO causes fit and this assertion cannot distinguish them, so check both: (i) the TEST project has not received migration % — apply the phase''s migrations to it and re-run; expect this exactly once, on the PR that introduces the migration, because NO workflow applies migrations to TEST (the sql-tests job has no apply step, and supabase-migrate.yml targets the PRODUCTION project only); (ii) the migration IS deployed but the deployed predicate no longer matches this file''s v_gate_pred constant byte-for-byte — either a re-base merely REFORMATTED it (a removed space, a line wrap), in which case re-cut v_gate_pred to the new text IN THE SAME COMMIT, or a CREATE OR REPLACE DROPPED the gate, which is a live public-ranking-integrity regression in which the min-N denominator diverges from the rank population and dead KPIs rank against live ones. ⛔ Do NOT "fix" this by restoring the RAISE NOTICE/RETURN skip that used to sit here: it exited 0 having asserted nothing about the gate, its notice was not labelled SKIP: so CI''s anti-skip grep could not see it, and nothing applies migrations to TEST so it could never re-arm itself.', v_gate_pred, v_migration, v_migration;
   END IF;
 
   -- ============ ARMED FROM HERE (gate-dependent assertions) ===============
@@ -233,7 +229,7 @@ BEGIN
   v_gate_hits := (length(v_def) - length(replace(v_def, v_gate_pred, '')))
                  / length(v_gate_pred);
   IF v_gate_hits < 2 THEN
-    RAISE EXCEPTION 'TEST FAILED (1): the RANK-01 gate appears % time(s) in get_verified_cohort_rank, expected at least 2 (the count query AND the rank query). Gating only one predicate makes the min-N denominator diverge from the rank population — the defect class this gate exists to prevent. TWO causes produce a count of ZERO here and this assertion cannot distinguish them, so check both: (i) a CREATE OR REPLACE dropped the gate — the real regression; (ii) a re-base only REFORMATTED the predicate (a removed space, a line wrap), in which case the deployed body is correct and this file''s v_gate_pred constant must be re-cut to the new byte text IN THE SAME COMMIT. Before the skip was re-keyed on the migration ledger, BOTH of these silently skipped instead of failing.', v_gate_hits;
+    RAISE EXCEPTION 'TEST FAILED (1): the RANK-01 gate appears % time(s) in get_verified_cohort_rank, expected at least 2 (the count query AND the rank query). Gating only one predicate makes the min-N denominator diverge from the rank population — the defect class this gate exists to prevent. TWO causes produce a count of ZERO here and this assertion cannot distinguish them, so check both: (i) a CREATE OR REPLACE dropped the gate — the real regression; (ii) a re-base only REFORMATTED the predicate (a removed space, a line wrap), in which case the deployed body is correct and this file''s v_gate_pred constant must be re-cut to the new byte text IN THE SAME COMMIT. Until F8 this file could take a whole-file skip on the gate-absent state and exit 0 without evaluating this assertion at all; it no longer can — the gate-absent-and-unapplied state RAISEs at 0c, and every other state reaches here.', v_gate_hits;
   END IF;
 
   -- ----- (4) BEHAVIOURAL: seed a synthetic cohort --------------------------
@@ -301,7 +297,7 @@ BEGIN
     RAISE EXCEPTION 'TEST FAILED (4b): after flipping ONLY computation_status failed -> complete on the fossil row, cohort_n is % (expected % = baseline + 2). The row is therefore excluded by something OTHER than its computation status, which means assertion 4a proved nothing about the gate.', n_unfossiled, n_before + 2;
   END IF;
 
-  RAISE NOTICE 'test_get_verified_cohort_rank_gate: ALL PASS (ARMED) — gate present in % cohort predicates, SECURITY DEFINER + search_path pinned, anon lacks EXECUTE, complete_with_warnings joins the cohort and a failed-with-KPIs row does not (proven causal by the status flip).', v_gate_hits;
+  RAISE NOTICE 'ALL 6 ARMS EXECUTED (1, 2a, 2b, 3, 4a, 4b) and passed — the RANK-01 gate appears in % cohort predicates, SECURITY DEFINER + search_path pinned, anon lacks EXECUTE, complete_with_warnings joins the cohort and a failed-with-KPIs row does not (proven causal by the status flip).', v_gate_hits;
 END
 $$;
 

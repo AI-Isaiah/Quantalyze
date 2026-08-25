@@ -104,6 +104,7 @@ async def _run_seam(
     benchmark_raises: bool = False,
     returns: pd.Series | None = None,
     mtm_series: pd.Series | None = None,
+    expected_outcome: DispatchOutcome = DispatchOutcome.DONE,
 ) -> dict:
     """Run the strategy-mode Deribit broker-derive once against fully mocked I/O and
     return the supabase op capture. ``has_option_activity`` selects the two-pass
@@ -138,7 +139,12 @@ async def _run_seam(
         patches.append(_cash_noop_patch())
     with _apply(patches):
         result = await run_derive_broker_dailies_job({"strategy_id": _STRATEGY_ID})
-    assert result.outcome == DispatchOutcome.DONE
+    # F1 (161.1): the <2-interpretable-days arm terminates FAILED, not DONE —
+    # a DONE routed it to mark_compute_job_done, whose status bridge then
+    # resolved the stamp this file asserts back to 'complete'. Callers that
+    # drive that arm pass expected_outcome explicitly so the outcome stays
+    # asserted rather than widened to "whatever came back".
+    assert result.outcome == expected_outcome
     return capture
 
 
@@ -472,7 +478,12 @@ async def test_insufficient_history_arm_heals_both_series() -> None:
         [0.01], index=pd.DatetimeIndex(["2024-05-01"]), dtype="float64",
     )
     cap = await _run_seam(
-        {"asset_class": "crypto"}, has_option_activity=False, returns=one_day,
+        {"asset_class": "crypto"},
+        has_option_activity=False,
+        returns=one_day,
+        # F1: this arm's outcome is FAILED/permanent — the stamp and the dispatch
+        # outcome must agree or the status bridge overwrites the stamp.
+        expected_outcome=DispatchOutcome.FAILED,
     )
     assert len(_series_deletes(cap, _CASH_KIND)) == 1, (
         f"the <2 arm must heal-delete the cash series; got {cap['deletes']!r}"

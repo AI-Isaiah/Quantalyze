@@ -342,13 +342,26 @@ items were dropped, not carried. Categories: **Fix now** / **Fix mid-term** / **
      `2026-08-21 13:51`, oldest `2026-08-04 14:20` (17–20 days). Same query for okx:
      `2026-08-23 21:44` (~2h). MT5 `api_keys.last_sync_at` is FRESH (`2026-08-23 04:09`).
    - **Root cause.** `process_key_long` is the ONLY path that reaches `strategy_analytics` for a
-     ledger-backed venue, and it is enqueued in exactly one place: strategy creation
-     (`api/strategies/finalize-wizard`). There is **no recurring enqueuer for it anywhere.** The two
+     ledger-backed venue. There is **no recurring enqueuer for it anywhere.** The two
      daily strategy-keyed crons both gate on ccxt-only closed sets that exclude mt5:
      `/api/cron/reconcile-strategies` (03:30) on `RECONCILABLE_EXCHANGES = FUNDING_EXCHANGES`
      = binance/okx/bybit, and `/api/cron/sync-funding` (04:00) on the same set. The 15-min
      `cron_sync` defers anything outside `EXCHANGE_CLASSES` (binance/okx/bybit/deribit) at
      `routers/cron.py:182`. So after onboarding, an MT5 strategy is never recomputed again.
+   - ⚠️ **CORRECTED 2026-08-25 (re-measured at HEAD `57a407ea`).** Two refinements this entry
+     originally got wrong or left implicit:
+     1. **`process_key_long` is not enqueued from `api/strategies/finalize-wizard`** — that route's
+        own test asserts the opposite (`route.test.ts:1630`). At HEAD it is enqueued at two Python
+        sites: `analytics-service/routers/process_key.py:1517` and `:765`.
+     2. **The three ledger venues are ASYMMETRIC.** Only mt5 and sfox hit the `:182` deferral;
+        deribit is IN `EXCHANGE_CLASSES` (as this entry already notes) and instead falls to the
+        `stored > 0` fill-count filter at `routers/cron.py:471-472`, which is structurally wrong
+        for a settlement-ledger venue. Any fix scoped as "venues absent from `EXCHANGE_CLASSES`"
+        silently drops deribit — scope off `_LEDGER_BACKED_SOURCES` instead.
+     3. **Re-enqueuing `process_key_long` is a provable no-op**, so the naive fix ships green and
+        does nothing: `long_fetch.py:154` returns `DONE` on `published`, `:193` on the whole
+        `advanced_statuses` set, and every onboarded strategy is `published`.
+     Full detail in `.planning/phases/161.1-.../161.1-RESEARCH.md`.
    - **Why it stayed invisible.** The two pg_cron KEY-scoped jobs that DO cover mt5 —
      `poll_allocator_positions` (04:00) and `refresh_allocator_equity_daily` (05:00) — run clean
      every day and advance `last_sync_at`. Key-mode `derive_broker_dailies` explicitly does NOT
@@ -370,9 +383,88 @@ items were dropped, not carried. Categories: **Fix now** / **Fix mid-term** / **
      shape: MT5 serializes on ONE shared terminal (`services/mt5_concurrency.py`) at a 15-min
      timeout per key. Founder-gated activation (schedule left unregistered, SFOX_ENABLED pattern)
      is the safe landing. NOT yet built.
+   - ⚠️ **PROGRESS 2026-08-25 (Phase 161.1) — built, DORMANT, and this entry stays OPEN.**
+     Shipped: `supabase/migrations/20260825120000_ledger_refresh_staleness_view.sql` (the
+     read-only freshness surface, keyed on the max date inside `returns_series` — a signal no
+     status transition can advance); `supabase/migrations/20260825130000_ledger_refresh_fanout_dormant.sql`
+     (`enqueue_ledger_refresh_for_strategies()`, a staleness-gated, bounded fan-out on the chain
+     TAIL, fail-closed behind the `app.ledger_refresh_enabled` database setting); the D-15
+     non-destructive failure guard in `job_worker.py`; and the founder-gated activation runbook
+     `docs/runbooks/ledger-refresh-go-live.md`.
+     - **The A7 unknown is closed.** The recurring mt5 `derive_broker_dailies` →
+       `strategy_analytics` path had never run end-to-end. Executed on PROD 2026-08-25: PASS —
+       `last_return_date` 2026-08-21 → 2026-08-25 (+4 real bars), status held
+       `complete_with_warnings`, whole chain 44 s.
+     - ⛔ **NOT CLOSED, and not closable by merging.** The mechanism ships DORMANT by design: no
+       schedule is registered anywhere in the repo, and the fan-out returns 0 until a founder
+       executes the runbook's two LIVE ops. **A merged-but-dormant fix is not a fixed defect.**
+       Recording this closed at merge would put a green badge over strategies that are still going
+       stale — which is precisely the failure mode this phase exists to eliminate, committed by
+       the ledger that is supposed to track it. Close it only after the runbook has been executed
+       and the staleness view's stale count is observed to drain.
    - **Adjacent, separate:** the `bybit` key has been failing since 2026-08-14 with
      `retCode 33004 "Your api key has expired."` — last good sync `2026-08-06`. Needs replacing;
      nothing surfaced it.
+
+0.2. **⚠️ SIBLING DEFECT — a ccxt strategy with no new fills also never recomputes.** Raised as
+   OQ-5 by Phase 161.1's research and **deliberately left out of scope** there: different venue
+   class, different mechanism. Filed here so it is not lost in a phase directory.
+   - **Measured at HEAD.** `analytics-service/routers/cron.py:471-472` builds the recompute list as
+     `[sid for sid, stored in per_strategy_stored.items() if stored > 0]`. The recurring recompute
+     is therefore gated on a **positive stored-fill count**, so a strategy that traded nothing on a
+     given day is dropped from the list and is not recomputed at all. A flat trading day produces
+     no recompute — the same "nothing happened, so nothing was refreshed" shape as the ledger
+     defect above, arrived at by a different route.
+   - **Adjacent, same file, same family:** the comment at `:466-469` records that a *failed* enqueue
+     is never re-driven either, because `last_sync_at` has already advanced — so the next tick
+     fetches no new trades and recomputes nothing. Recovery relies on the daily/portfolio cascade
+     or a user-triggered recompute. Another instance of `last_sync_at` advancing while the
+     analytics behind it do not.
+   - **Why it is less visible than the ledger case:** ccxt venues currently sit at 0 days stale
+     (okx, bybit), because those strategies do trade. The gap opens on a quiet strategy, not on a
+     broken one — so it will surface as one stale factsheet, not an outage.
+   - **This is cheap to detect now.** The staleness view Phase 161.1 shipped
+     (`public.ledger_refresh_staleness`) surfaces the ccxt cohort **for free** if the venue filter
+     is dropped from the view's row restriction (`… WHERE sv.exchanges && lv.venues`). The
+     freshness verdict itself is venue-agnostic.
+   - **Fix shape:** a staleness-gated fan-out generalises to this directly — the 161.1 fan-out's
+     predicate is "stale AND live AND not in-flight AND outside the cooldown", none of which is
+     ledger-specific. What changes is the cohort and the enqueued kind.
+   - **Also out of scope, recorded for whoever picks this up:** per the 161.1 PROD census
+     (2026-08-25), **34 of the 37 `failed`-status rows are the CSV cohort**, not the ledger venues
+     and not ccxt. That is a third, separate population needing its own diagnosis — do not fold it
+     into either fix.
+
+0.3. **📋 DISPOSITION (D-COMP / D-01, decided 2026-08-25) — composite ledger strategies, and the
+   coverage gap the decision leaves open until the composite arm lands.**
+   - **Resolved: option (a) — MT5-only composite deferral.** Founder's words were *"on mt5 no
+     composites"*, so the deferral is scoped to MT5 and never to deribit. Option (b) ("exclude all
+     composites") was rejected because deribit's **only** live PROD strategy IS a composite, so (b)
+     would have left the venue the whole ledger pipeline was built for sitting in the refresh set
+     with nothing to refresh.
+   - **How it was implemented, which is not quite how it reads.** The single-key fan-out
+     (`20260825130000`) excludes **all** composites by an explicit `is_composite = FALSE` conjunct —
+     kept and commented deliberately, so a future MT5 composite is *skipped by name* rather than
+     silently mishandled. Deribit's coverage was moved to a **separate composite arm on
+     `stitch_composite`** rather than being carved out inside that one predicate.
+   - ⛔ **The honest consequence, and the reason this entry exists.** Until that composite arm
+     lands, **deribit is in the refresh set with nothing refreshing it** — the single-key fan-out
+     skips its one strategy, and the composite arm is not yet built. A venue-coverage check that
+     asserts set membership passes green over exactly that state. This is the interim shape option
+     (b) was rejected *for*, so it must not be allowed to become permanent by inattention.
+   - **UPDATE 2026-08-25 (phase 161.1 plan 04) — half of the close condition is met.** The
+     composite arm now EXISTS: `enqueue_ledger_composite_refresh`
+     (`supabase/migrations/20260825140000_ledger_refresh_composite_arm.sql`), shipped **DORMANT and
+     UNSCHEDULED** behind the same fail-closed `app.ledger_refresh_enabled` setting as the
+     single-key arm, with an 8-arm matched-pair SQL gate and static gates 10–11.
+     ⛔ **The second half is NOT met and this entry stays OPEN.** No deribit composite has been
+     observed to refresh. The `stitch_composite` path has never run recurrently, so plan 04's task 3
+     requires ONE manual PROD enqueue observed to completion — `last_return_date` advancing in the
+     staleness view — **before** the composite schedule is documented as activatable. Until that
+     tracer passes, deribit's coverage is a mechanism that has never been exercised end-to-end,
+     which is a *different* state from the one above but is **not** the close condition.
+   - **Close condition:** the composite arm exists and a deribit composite is observed to refresh —
+     `last_return_date` advancing in the staleness view, not a job going green.
 
 1. **`RESEND_API_KEY` unset in Vercel prod** — founder-LP report cron + all transactional
    email are dead (code soft-skips, only Sentry fires). **Founder action:** set the key in
@@ -3056,3 +3148,237 @@ No spec below is a delete-candidate: every route they target still exists (verif
   person who regenerates — and `:1080-1081` records that a prior regen stripped exactly such a
   comment and a human re-applied it by hand. **Fix:** re-apply a tripwire comment above the
   block. Not done in plan 158-06: it edits a generated file outside that plan's declared scope.
+
+---
+
+## Phase 161.1 — recorded deferrals (logged 2026-08-25)
+
+Filed from the phase's own review rounds (migration-reviewer r3, rls-policy-auditor r2,
+`/code-review high`). Everything **blocking** from those rounds was fixed in-phase; what
+follows is what was deliberately left, with the reason.
+
+161.1-D1. **⛔ HIGHEST VALUE — the bridge's read window is fail-SAFE, not CLOSED. The real
+  closure is a per-strategy advisory lock in the two mark RPCs.**
+  - `sync_strategy_analytics_status` derives its verdict from two `compute_jobs` reads. Phase
+    161.1 reordered them so a job crossing the boundary mid-derivation lands on the *inclusive*
+    read (non-terminal first, permanent-failure last), which makes the race's OUTCOME safe: the
+    worst case parks a published row at `computing`, which the 16-hour reaper heals, instead of
+    publishing a clean `complete` over a live `failed_final`.
+  - **That is not the same as closing the window.** Under READ COMMITTED every `SELECT` takes a
+    fresh snapshot, and `mark_compute_job_done` / `mark_compute_job_failed` take `FOR UPDATE` on
+    the **job** row only — neither takes a per-strategy lock before `PERFORM
+    sync_strategy_analytics_status`. Bridge calls for the same strategy are therefore not
+    serialized at all.
+  - The codebase already has the right pattern twice: `positions_atomic_rebuild` and `sync_trades`
+    both take `pg_advisory_xact_lock(hashtext(p_strategy_id::text))`.
+  - **Fix shape:** take the same advisory lock in `mark_compute_job_done` (`20260603120000`) and
+    `mark_compute_job_failed` (`20260529180000`) before the bridge call.
+  - **Not done in 161.1:** both files are outside the phase's declared scope, and a half-applied
+    lock discipline (one RPC locking, the other not) is worse than a documented window — it reads
+    as protection while providing none. Wants its own phase and its own concurrency test.
+
+161.1-D2. **⚠️ A systematic enqueue failure in either fan-out is indistinguishable from "nothing
+  was stale".** Both `enqueue_ledger_refresh_for_strategies` and `enqueue_ledger_composite_refresh`
+  wrap the per-candidate enqueue in `EXCEPTION WHEN OTHERS THEN RAISE WARNING ... continuing`. A
+  *systematic* failure — e.g. `enqueue_compute_job`'s exactly-one-of `22023` if strategy-mode
+  targeting is ever narrowed — degrades every row to a `WARNING` and the function returns `0`,
+  byte-identical to a healthy fully-fresh estate. This is the same lying-instrument shape the
+  phase exists to remove, left open on a different axis. Not user-facing and not data-integrity,
+  so it did not block. **Fix shape:** have the go-live runbook assert a NON-ZERO enqueue on first
+  activation, and/or count swallowed warnings and fail the tick when they equal the candidate count.
+
+161.1-D3. **⚠️ `test_weight_snapshot_seed_secdef.sql:202-214` carries both defects 161.1 just fixed
+  one file over.** It pins `NOT r.rolbypassrls` with no `rolsuper` alternative (false-reddens for a
+  superuser owner — the flag is only the *explicitly granted* attribute; superuser RLS bypass is
+  implicit), and its `IF EXISTS (...)` shape **passes vacuously when the function is absent** —
+  measured on a throwaway cluster during this phase, not inferred. Its `OR p.proowner <> v_owner`
+  escape makes a false fire less likely but does not close the vacuity. Not in the findings and not
+  in scope; the two 161.1 arms deliberately did NOT copy that shape.
+
+161.1-D5. **⛔ `run_stitch_composite_job._stamp_failed` carries the IDENTICAL defect the phase just
+  fixed twice.** `analytics-service/services/job_worker.py` (~:5760) reads `computation_status`
+  LIVE at stamp time, in the same "ONE select, BOTH columns" as the M-2 flags merge — i.e. its
+  guard's oracle is a column the SQL bridge writes, which is exactly the root cause closed on
+  hop 1 and hop 2 this phase.
+  - **Why it is narrower:** the composite stamp is chain-terminal, so there is no hop-2
+    amplification. Its exposure is the F2 shape only — a sibling job's bridge call moving
+    `computation_status` mid-crawl and disarming the guard.
+  - **Not fixed in 161.1:** it was outside the five findings' file scope, and splitting the read
+    touches gate-10/gate-11 territory that a concurrently-edited migration also pins. Fixing it
+    blind, in parallel, was the higher risk.
+  - **Fix shape:** take the publish snapshot at handler entry and carry it forward, mirroring
+    `run_csv_strategy_analytics`'s `refresh_publish_status` / `refresh_publish_warned` keywords.
+
+161.1-D6. **Residual window on the hop-1 oracle — closing it needs the fan-out migration.** The
+  fan-out enqueues the derive in SQL, so the earliest oracle Python can take is at handler entry.
+  A sibling transition landing between the SQL enqueue and that read still bounces a plain
+  `complete` row to `computing`, and the entry read sees it. **The residual fails LOUD, not
+  silent** — which is why it did not block. Full closure means minting `publish_status` into the
+  job metadata inside `20260825130000` at enqueue time. Documented in-code at the read site.
+
+161.1-D7. **`HealthScore` on grid cards scores a failed row's stale metrics.** `computeHealthScore`
+  always returns a number; before the stale-analytics gating a failed row carrying a stale sharpe
+  scored ≈93 (green). With the metric cells withheld it now scores ≈33 (muted) — substantially
+  better without the component being touched. The residual question is a public-surface UI
+  decision: should the badge hide entirely when nothing is computed, rather than score the
+  absence? Founder call, not a defect.
+
+161.1-D8. **⚠️ NOT caused by this phase — found during it. `gdpr-export.test.ts`'s binary-search
+  trimmer test has a 2.6x timeout margin and WILL redden CI on a loaded runner.**
+  - `src/__tests__/gdpr-export.test.ts:257` — "binary-search trimmer packs optimally (I3)".
+    **Measured 2026-08-25:** 1902 ms unloaded on an M-series Mac, against vitest's default
+    5000 ms `testTimeout`. Under four concurrent agents it exceeded 5000 ms and failed in
+    **two consecutive full runs** at a byte-identical tree, then passed in isolation (57/58).
+  - It is CPU-bound (a binary search over payload packing), so it scales with runner speed.
+    GitHub's shared runners are routinely slower than the machine that measured 1902 ms.
+  - **Why this is more than a slow test in this repo:** a red `main` CI makes the Railway
+    analytics deploy **SKIP**. So a load-sensitive timeout is a path from "busy runner" to
+    "production analytics silently not deployed" — the exact class Phase 158 exists to close,
+    reached through test fragility instead of workflow logic.
+  - **Fix shape:** give this test an explicit generous `testTimeout` (it is a correctness
+    assertion about packing optimality, not a performance assertion — the 5 s default is
+    incidental, not intentional), or shrink the fixture so the search is cheap. Do NOT "fix"
+    it by retrying.
+  - Verified NOT related to Phase 161.1: the file and every module it exercises are absent
+    from `git diff --name-only main...HEAD`.
+
+161.1-D9. **⚖️ FOUNDER CALL — D-15 publishes a MIXED-VINTAGE factsheet that did not exist before
+  this phase.** Raised by the red team (reasoned, not executed); the mechanism is a direct read.
+  - `run_derive_broker_dailies_job` is **not** read-only before it hands off. Before
+    `_enqueue_csv_analytics` it has already COMMITTED, for the NEW crawl: `csv_daily_returns`
+    rewritten, `persist_basis_series` for all three bases, and `_prestamp_payload` upserted with
+    `data_quality_flags` **wholesale-replaced** and `metrics_json_by_basis` authoritative.
+  - Hop 2 owns `metrics_json` / `returns_series` / `daily_returns` — the cash headline and the
+    chart the factsheet actually reads.
+  - So under D-15, a hop-2 failure now leaves a PUBLISHED row holding **new** dq flags + **new**
+    by-basis scalars + **new** persisted series, beside **old** `metrics_json` / `returns_series`.
+    The guard's `payload.pop("data_quality_flags")` reasons "the live row's flags are still the
+    truth" — but hop 1 already replaced them, so the flags describe data the headline does not
+    reflect. `computed_at` is correctly not advanced, so the freshness chip advertises the OLD
+    vintage over partly-NEW content.
+  - **Before this phase that state was never published** — hop 2's failure wrote `failed` and the
+    factsheet went dark. **The phase trades "dark" for "showing numbers it cannot justify".** Both
+    are top-severity classes here; the trade is nowhere acknowledged.
+  - The nearest existing comment calls the fresh-series/stale-scalar direction "benign … the next
+    re-derive lands the matching scalar and heals it" — reasoning that ASSUMED the analytics hop
+    would follow, which is exactly what D-15 removes. With a ~20h cooldown and a chronically
+    failing hop 2, the mismatch is durable, not transient.
+  - **This is a founder decision, not a defect:** D-15 was chosen deliberately. The options are
+    (a) accept mixed-vintage as better than dark, and say so in the header; (b) have hop 1 defer
+    its committed writes until hop 2 succeeds; (c) widen the guard to restore hop 1's writes too.
+
+161.1-D10. **The `v_protect_hold` scoping is narrower than its own comments claim — it misses the
+  resync path's first and longest hop.** Arm I3 seeds the resync as a `derive_broker_dailies` job.
+  A real resync does not start there: `_is_long_fetch` sends `flow_type in {onboard,resync}` to
+  `enqueue_compute_job(p_kind='process_key_long')`. `has_live_successor` requires
+  `r.kind = f.kind`, so for the WHOLE duration of the `process_key_long` hop — the slowest in the
+  system — the protected failure has no successor, the hold stays TRUE, branch (a) stands down,
+  and the row keeps advertising its pre-resync terminal status. The hold releases only when the
+  TAIL derive is enqueued, i.e. at the end of hop 1 of 3.
+  - The migration's residual note frames what is still suppressed as "an in-flight job of some
+    OTHER kind", illustrated with a cron poll. It does not say the user's own resync spends most
+    of its wall clock in exactly that state. **Correct the note.**
+  - Severity capped: for `complete_with_warnings` rows (the entire live cohort) branch (a) never
+    advertised `computing` anyway, so the incremental harm is on plain-`complete` rows.
+
+161.1-D11. **⛔ THE REAL CLOSURE for the reuse-collision class: `enqueue_compute_job` needs a
+  metadata MERGE arm.** `_enqueue_compute_job_internal` dedupes on `(target, kind)` and on a hit does
+  `RETURN v_existing_id`, **discarding `p_metadata` entirely**. Phase 161.1 closed the consequence in
+  Python (the resync tail retracts an inherited refresh marker; both honour-sites re-ask the row),
+  but the RPC still silently drops every caller's metadata on every collision, system-wide.
+  - **Not attempted same-day, deliberately:** that RPC is on every enqueue path in the system. A
+    merge arm changes what every caller's metadata means on collision and needs its own review and
+    its own blast-radius check — not a ride-along on a phase fix.
+  - A merge arm would also remove the read-modify-write in the retraction helper (see D12).
+
+161.1-D12. **Read-modify-write residual in the marker retraction, measured harmless.** The retraction
+  reads then writes `compute_jobs.metadata`; a claim committing inside that window loses
+  `unified_backbone_at_claim`. Measured harmless — nothing re-reads that key from the row (the drain
+  check takes it from the claim's own returned metadata). Recorded because "measured harmless today"
+  is a dated claim: re-check if any reader of that key from the ROW is ever added. Disappears
+  entirely once D11 lands.
+
+161.1-D13. **⚠️ THE COMPOSITE TWIN OF THE REUSE COLLISION IS STILL OPEN.** `stitch_composite` carries
+  the `ledger-refresh-composite` marker and has **user-initiated** enqueues at
+  `src/app/api/keys/sync/route.ts` and `src/app/api/strategies/finalize-wizard/route.ts` — the same
+  `(target, kind)` collision, the same root cause, the same silent inheritance of D-15 protection.
+  - **Half-closed already:** the Python retraction helper handles the composite marker (it tests the
+    union of both markers), so the *honouring* side is covered. **What is missing is the retraction
+    call at the two TypeScript enqueue sites** — they were outside the Python fixer's file scope.
+  - Until then a user-initiated composite resync colliding with a live composite fan-out job inherits
+    protection, and its failure is suppressed exactly as the single-key case was.
+  - ⚠️ The composite fan-out ships DORMANT, so this is not reachable on production until the
+    schedule is registered — but it must be closed BEFORE that founder-gated go-live op, not after.
+
+161.1-D14. **The redact pre-push guard cries wolf on migration timestamps — INVESTIGATED, nothing
+  to fix, do not re-investigate.** `gstack-redact` flags 14-digit migration timestamps as
+  `pii.cc` (Luhn-valid credit-card numbers). Verified 2026-08-25: every flagged token in the SQL
+  function snapshots maps to a real file under `supabase/migrations/`. Zero PII, zero secrets.
+  - Two further findings appear when scanning `git show` output rather than file content: the git
+    `Author:` line and the `Claude-Session:` trailer. Both are commit metadata present in every
+    commit in the repo, not content this or any phase introduced.
+  - **Cannot be suppressed:** `--allowlist` does not suppress Luhn matches (measured: 1 finding
+    with and without), and the managed pre-push wrapper accepts no flags — it reads git ref lines
+    on stdin only.
+  - **Why this matters rather than being a shrug:** the repo is *made of* migration timestamps, so
+    this guard fires on nearly every SQL-touching commit. A guard that is wrong that often gets
+    tuned out, and then misses a real one. That is the same failure mode this phase spent its
+    entire review budget fixing, one tool over.
+  - **Fix shape (upstream, not here):** narrow the `pii.cc` rule so a Luhn match inside a
+    `YYYYMMDDHHMMSS` shape, or adjacent to a `.sql` filename, is not reported.
+
+161.1-DEC (founder decisions, 2026-08-25). Four open items resolved. Recorded here because each
+  reverses or confirms a default that would otherwise be re-derived blind.
+
+  **DEC-1 — Retire frozen-spine gates 1 and 2, KEEP gate 3.** `src/__tests__/phase-29-frozen-spine-guards.test.ts`
+  was a Phase 29 exit gate for milestone v1.2 (shipped ~v0.20, May) but carries NO phase scoping —
+  it diffs against `origin/main` on any branch, forever. At v0.73 it is a scope fence for finished
+  work, and it is what blocks a proper `scenario-share` fix.
+  - RETIRE gate 1 (no new scenarios/share migration) and gate 2 (`scenario.ts` frozen vs baseline).
+    Both fenced v1.2's scope only.
+  - **KEEP gate 3** — the `scenarios`/`scenario_shares` RLS honesty tests staying byte-unchanged is
+    the SOLE proof the `get_shared_scenario` SECURITY DEFINER read path was never loosened. Reword
+    it as a standing RLS invariant rather than a phase gate, so it stops reading as expired.
+  - Unblocks a real `scenario-share` fix (stale legs in a shared blend). Decide that behaviour
+    separately once the fence is down.
+  - ⭐ **PLACEMENT (founder, confirmed): this lands in PHASE 164.1, not in 161.1's PR.** Retiring a
+    guard is a security-adjacent edit to a guard file; burying it in a 55-file feature PR is how a
+    considered gate gets removed for an unrelated reason and takes its real protection with it. It
+    belongs next to the `scenario-share` decision it unblocks, in a diff where a reviewer can see
+    that removing gates 1+2 and keeping gate 3 was the actual intent.
+  - **Acceptance for the 164.1 task:** gate 3 must still FAIL when the `scenarios`/`scenario_shares`
+    RLS honesty tests are edited (neuter it, observe RED, restore byte-identically) — otherwise the
+    retirement of 1+2 has quietly taken 3 with it, which is the whole risk this placement exists to
+    avoid.
+
+  **DEC-2 — D9: WIDEN THE GUARD to restore hop 1's writes.** Founder chose the widen path over
+  making the refresh atomic. ⚠️ Recorded honestly: I recommended atomicity (stage hop 1, promote on
+  hop 2 success) and was overruled. The reasoning against widen still stands and must be designed
+  around, not ignored:
+  - The guard does NOT currently hold hop 1's pre-values — hop 1 overwrites `data_quality_flags`,
+    the by-basis scalars and the persisted basis series before hop 2 runs. So widening needs BOTH
+    (a) a NEW snapshot at hop-1 entry of everything hop 1 will touch, and (b) a restore of all of
+    it on the hop-2 failure path.
+  - (b) adds bulk to the least-exercised code in the system. F3, F4 and this phase's CRITICAL all
+    lived on failure paths precisely because they only run when something already went wrong.
+  - ⭐ Design note for whoever implements it: once (a) exists, staging is strictly simpler than
+    write-then-unwrite. If the snapshot turns out large or awkward, revisit atomicity before
+    growing the failure path.
+
+  **DEC-3 — D13 closes in 164.1, BEFORE any go-live.** Confirms the filed plan. The composite
+  reuse collision is unreachable while dormant, which is exactly why the ordering constraint must
+  stay explicit: closing it is a prerequisite of the activation op, not a follow-up to it.
+
+  **DEC-4 — D1 advisory lock gets its OWN phase, with a real concurrency test.** Not folded into
+  164.1. It touches two RPCs that run on every job transition for every strategy, and a
+  half-applied lock discipline reads as protection while providing none. 164.1 is otherwise guards
+  and observability (low blast radius); this would dominate its risk profile. Needs a test that
+  genuinely exercises concurrent bridge calls, not a unit test.
+
+161.1-D4. **Prose/derivation nits, non-blocking.**
+  - `analytics-service/tests/test_computing_started_at_stamp.py:649` — census docstring
+    self-contradicts: says "the 7 in analytics_runner.py are unchanged in COUNT" and "7 of those 11"
+    while asserting 8 and 12.
+  - `supabase/tests/test_ledger_refresh_composite_arm.sql:82` — "having executed ZERO of arms A-I"
+    left as-is deliberately: it is a dated record of a measurement taken when the file had arms A–I.
+    Editing it to A–J would misstate what was measured.

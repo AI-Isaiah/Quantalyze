@@ -1,5 +1,56 @@
 # Changelog
 
+## [0.73.0.0] - 2026-08-25
+
+### feat: v1.20 Phase 161.1 — LEDGER-REFRESH, recurring refresh for ledger-backed venues (shipped dormant)
+
+MT5, Deribit and sFOX strategies never recomputed after onboarding. `process_key_long` is
+enqueued only at creation, and both daily strategy crons gate on ccxt-only exchange sets, so a
+ledger-backed strategy's factsheet silently aged from the day it was connected. Key-scoped jobs
+kept touching `last_sync_at`, which is why nothing looked wrong.
+
+This phase ships the mechanism to fix that, **dormant**: the staleness view, both fan-out
+enqueuers and their gates land, but no schedule is registered. Activation is a founder-gated
+live op, matching the pattern used for other unreleased subsystems. On this database the
+dormancy switch reads NULL, verified after apply — both fan-outs return 0 on every tick until
+someone deliberately turns them on.
+
+**Staleness is now keyed on something that cannot lie.** The new `ledger_refresh_staleness` view
+derives its verdict from the returns-series date, not from `last_sync_at` and not from
+`computed_at` — both of which advance on paths that compute nothing.
+
+**A failed refresh no longer darkens a funded account.** The status bridge previously
+un-published a strategy whenever any of its jobs failed permanently. An unattended background
+refresh failing at 3am would take a live factsheet dark with nobody watching. Failures carrying
+the refresh marker now preserve the published state while keeping the error visible.
+
+Getting that right took more correcting than building, and the corrections are the substance of
+this release:
+
+- **The guard's oracle was a column the thing it guards writes.** The publish-state check read
+  `computation_status`, which the SQL bridge rewrites mid-chain — so on a two-hop refresh the
+  guard was deterministically inert for any strategy at plain `complete`. The oracle now travels
+  on the chained job's metadata, where the bridge cannot reach it.
+- **A queue dedup collision handed refresh protection to user-initiated work.** `enqueue_compute_job`
+  returns an existing job id on collision and discards the caller's metadata, so a user's resync
+  could be served by a marked refresh job and inherit suppression it never asked for — measured
+  as reachable on every strategy in the live cohort. The resync tail now retracts an inherited
+  marker, and both sites that honour it re-read the row rather than trusting claim-time metadata.
+- **Thirteen apply-time assertions could not fail.** `pg_get_functiondef` returns comments, so an
+  assertion grepping the function body for a bare identifier was satisfied by the function's own
+  prose. Every anchor across the three migrations was re-anchored on statements and expressions,
+  then verified by reverting each fix and confirming the check goes red — 55 mutation cases, 13
+  vacuous before, 0 after.
+- **A CI floor claimed more than it delivered.** The anti-vacuity floors were two files and
+  nineteen arms below actual, their recorded derivation matched no real set of files, and a
+  single padding file could have retired them permanently. Floors re-measured against the gate's
+  own extraction, arm rosters made mandatory rather than opt-in, and the claim in the comment
+  narrowed to what the gate can actually keep.
+
+Also in this release: the SQL self-test gate no longer loses skip markers containing glob
+metacharacters, and the definer-exemption checks accept `rolsuper` as well as `rolbypassrls`
+(the flag is only the explicitly granted attribute; superuser bypass is implicit).
+
 ## [0.72.1.0] - 2026-08-25
 
 ### fix: two live surfaces were asserting things the data did not support

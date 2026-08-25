@@ -175,8 +175,16 @@ class _FakeQuery:
         if self.table == "strategies":
             return SimpleNamespace(data=dict(self.fake.strategy_row))
         if self.table == "strategy_analytics":
+            # `computation_status` is served alongside the flags because
+            # `_stamp_failed` reads both columns in ONE select. It defaults to
+            # None, which is NOT in the terminal-success set, so every
+            # pre-existing test keeps taking the loud destructive branch exactly
+            # as before — see tests/test_ledger_refresh_composite_nondestructive.py.
             return SimpleNamespace(
-                data={"data_quality_flags": dict(self.fake.existing_flags)}
+                data={
+                    "data_quality_flags": dict(self.fake.existing_flags),
+                    "computation_status": self.fake.existing_status,
+                }
             )
         return SimpleNamespace(data=None)
 
@@ -188,9 +196,15 @@ class _FakeSupabase:
         members: list[dict[str, Any]],
         strategy_row: dict[str, Any] | None = None,
         existing_flags: dict[str, Any] | None = None,
+        existing_status: str | None = None,
         raise_on_rpc: str | None = None,
     ) -> None:
         self.members = members
+        # The strategy_analytics row's CURRENT computation_status, as
+        # `_stamp_failed`'s non-destructive guard reads it. Defaults to None —
+        # i.e. no prior row — which routes to the LOUD destructive stamp, so
+        # every test written before that guard existed is unaffected.
+        self.existing_status = existing_status
         self.strategy_row = strategy_row if strategy_row is not None else {
             "id": _STRATEGY_ID, "asset_class": "crypto",
             "returns_denominator_config": _TEST_CONFIG,

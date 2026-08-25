@@ -1357,7 +1357,13 @@ class TestDeriveBrokerDailies:
         ):
             result = await run_derive_broker_dailies_job(job)
 
-        assert result.outcome == DispatchOutcome.DONE
+        # F1 (161.1): the stamp below and the dispatch outcome must AGREE. A
+        # DONE here routed the job to mark_compute_job_done, whose
+        # sync_strategy_analytics_status then took the all-done success branch
+        # and rewrote this very 'failed' stamp to 'complete' with a NULL error
+        # and a fresh computed_at.
+        assert result.outcome == DispatchOutcome.FAILED
+        assert result.error_kind == "permanent"
         assert len(analytics_upserts) == 1, (
             f"expected one strategy_analytics upsert; got {analytics_upserts}"
         )
@@ -1696,8 +1702,19 @@ class TestDeriveBrokerDailies:
         with stack:
             result = await run_derive_broker_dailies_job(job)
 
-        assert result.outcome == DispatchOutcome.DONE, (
-            f"Pass-2-priced flow must complete, not fail; got {result!r}"
+        # The subject here is the PRICE INDEX, and the assertions below are the
+        # subject's. This fixture's single deposit yields one interpretable day,
+        # so the handler lands on the insufficient-history arm — which since F1
+        # (161.1) terminates FAILED rather than DONE. Pin the REASON, not just
+        # the outcome: an unpriced-flow fail-loud (the failure this assertion was
+        # written to exclude) carries a different message, so the discrimination
+        # this line always meant to provide survives the outcome change.
+        assert result.outcome == DispatchOutcome.FAILED, (
+            f"Pass-2-priced flow must reach the series arms; got {result!r}"
+        )
+        assert "insufficient broker history" in (result.error_message or ""), (
+            "the Pass-2 flow FAILED for a pricing reason rather than the "
+            f"expected short-history short-circuit; got {result!r}"
         )
         flows = captured["external_flows"]
         assert len(flows) == 1, f"expected one collapsed daily flow, got {flows}"
@@ -2193,7 +2210,12 @@ class TestDeriveBrokerDailies:
         with stack:
             result = await run_derive_broker_dailies_job(job)
 
-        assert result.outcome == DispatchOutcome.DONE
+        # F1 (161.1): a fully-segmented series leaves <2 interpretable days, so
+        # this lands on the insufficient-history arm — which now terminates
+        # FAILED/permanent instead of laundering itself through the status
+        # bridge's all-done success branch.
+        assert result.outcome == DispatchOutcome.FAILED
+        assert "insufficient broker history" in (result.error_message or "")
         # No interpretable rows were written.
         assert captured["csv_rows"] == [], (
             f"a fully-segmented series must write no csv rows; got {captured['csv_rows']!r}"

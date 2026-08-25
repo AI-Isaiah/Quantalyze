@@ -224,16 +224,53 @@ Plans:
 **Depends on:** nothing. Independent of Phase 161 (that phase is error copy; this is data flow).
 Inserted after 161 for roadmap ordering only — it MAY be pulled ahead, and it is the more urgent
 of the two because it is a live, founder-reported data-integrity defect.
-**Requirements**: LEDGER-01..LEDGER-04 (TBD at plan time)
-**Plans:** 0 plans
+**Requirements**: LEDGER-01, LEDGER-02, LEDGER-03, LEDGER-04
+**Plans:** 3/5 plans executed
 
-**Root cause (measured on PROD 2026-08-24, not inferred):** `process_key_long` is the ONLY path
-reaching `strategy_analytics` for a ledger-backed venue and is enqueued in exactly one place —
-strategy creation (`api/strategies/finalize-wizard`). No recurring enqueuer exists. Both daily
-strategy crons gate on ccxt-only closed sets excluding mt5 (`reconcile-strategies` 03:30 →
-`RECONCILABLE_EXCHANGES`; `sync-funding` 04:00), and the 15-min `cron_sync` defers anything outside
-`EXCHANGE_CLASSES` (`routers/cron.py:182`). Measured: 4 MT5 strategies with `strategy_analytics`
-between 2026-08-04 and 2026-08-21, versus okx at 2h old.
+**Root cause (measured on PROD 2026-08-24; ⚠️ CORRECTED 2026-08-25 by re-measurement at HEAD
+`57a407ea` — two claims below were false as originally written):**
+
+No recurring enqueuer reaches `strategy_analytics` for a ledger-backed venue. Both daily strategy
+crons gate on ccxt-only closed sets excluding mt5 (`reconcile-strategies` 03:30 →
+`RECONCILABLE_EXCHANGES`; `sync-funding` 04:00). Measured: 4 MT5 strategies with
+`strategy_analytics` between 2026-08-04 and 2026-08-21, versus okx at 2h old.
+
+⚠️ **CORRECTION 1 — the three ledger venues are ASYMMETRIC, not uniform.** The original text said
+`cron_sync` "defers anything outside `EXCHANGE_CLASSES`", implying all three are deferred.
+`deribit` IS in `EXCHANGE_CLASSES` (`analytics-service/services/exchange.py:812`). Only **mt5** and
+**sfox** hit the `routers/cron.py:182` deferral. Deribit takes the ccxt branch and is then filtered
+by `stored > 0` (`routers/cron.py:471-472`) — a fill-count predicate that is structurally wrong for
+a settlement-ledger venue. **A fix scoped as "venues absent from `EXCHANGE_CLASSES`" silently drops
+deribit.** Scope the cohort off `_LEDGER_BACKED_SOURCES` (`long_fetch.py:63`), not off absence.
+
+⚠️ **CORRECTION 2 — `process_key_long` is the wrong recurring unit, and re-enqueuing it is a
+provable no-op.** The original text said it is "enqueued in exactly one place — strategy creation
+(`api/strategies/finalize-wizard`)". At HEAD it is enqueued at two Python sites
+(`routers/process_key.py:1517`, `:765`), not from that route. More importantly
+`long_fetch.py:154` returns `DONE` on `status == "published"` and `:193` returns `DONE` on the whole
+`advanced_statuses` set — every onboarded strategy is `published`. A recurring enqueue against the
+existing `verification_id` therefore yields a GREEN job, a new `compute_jobs` row, and
+`strategy_analytics` UNTOUCHED. The recurring unit must be the chain **tail** —
+`derive_broker_dailies` strategy-mode, which is `JOB_CHAIN_FOLLOW_ON["process_key_long"][0]` — or a
+newly minted verification row, the way the user-triggered resync does it.
+
+⛔ **A7 — LOAD-BEARING UNKNOWN.** The recurring mt5 `derive_broker_dailies` → `strategy_analytics`
+path **has never actually run end-to-end**. The plan's FIRST verification must be one manual enqueue
+for one MT5 strategy, observed to completion, BEFORE anything is scheduled. Do not schedule an
+unproven path.
+
+⛔ **No TS mirror of the venue set.** `_LEDGER_BACKED_SOURCES` (`long_fetch.py:63`) is the sole
+authority. A hand-copied mirror previously drifted (TS at 1 venue, Python at 3) and cost a funded
+MT5 account its publish path. This rules out a Vercel-cron / TS-route implementation unless a drift
+gate is explicitly accepted. **This fence is the authority for the rule.**
+
+⚠️ **Corrected 2026-08-25 — do not restore the earlier justification.** This entry previously said
+`src/lib/strategyGate.invariant.test.ts` "BANS venue literals in TS". Measured: `:64` scopes
+`BANNED_VENUE_LITERALS` to `GATE_PATH = src/lib/strategyGate.ts` **only** — a venue set added to
+`src/lib/closed-sets.ts` would NOT trip it. The rule stands on this fence and the measured drift
+incident, NOT on a repo-wide mechanical gate that does not exist. Never cite that test as the
+enforcement mechanism: a stated reason that is falsifiable-and-false teaches the next reader a rule
+they will correctly discover is untrue, and then discard along with the real constraint.
 
 **Success Criteria** (what must be TRUE):
 
@@ -243,9 +280,23 @@ between 2026-08-04 and 2026-08-21, versus okx at 2h old.
   2. It ships DORMANT: the schedule is NOT registered, activation is a documented founder-executed
      live op, matching the SFOX_ENABLED / WORKER-03 pattern. Merging changes no prod behavior.
 
-  3. The staleness is observable before it is user-visible: a check that fails on
-     `strategy_analytics.computed_at` age, NOT on `last_sync_at` (which is advanced daily by
-     key-scoped jobs and is what hid this bug).
+  3. The staleness is observable before it is user-visible: a check that fails on a timestamp
+     that advances ONLY when new analytics data actually lands — never on `last_sync_at` (advanced
+     daily by key-scoped jobs; this is what hid the bug), and never on `strategy_analytics.computed_at`.
+
+     ⚠️ **This criterion's original wording named `computed_at` and was WRONG — corrected 2026-08-25
+     by measurement at HEAD.** The SQL status bridge re-stamps `computed_at = now()` on EVERY job
+     transition (`20260802120000_strategy_analytics_stuck_computing_reaper.sql:342,398,421`), so it
+     reproduces the `last_sync_at` lie one column over. That migration says so itself at `:82` and
+     `:230`, and RAISES at `:678` if the reaper body so much as references `computed_at` — it names
+     this "the Phase 106 janitor bug". This same ROADMAP already warns against the identical mistake
+     at line ~1811 ("never the 106-janitor-revert `updated_at`/`computed_at` mistake").
+
+     The planner MUST pick the column, and MUST prove the choice by writing a test that advances the
+     rejected timestamps WITHOUT new data and shows the check still fails. Recommended starting
+     candidate: the latest date present in `strategy_analytics_series` (a status transition cannot
+     move it). `computing_started_at` is NOT the answer either — it is the stuck-row reap anchor,
+     not a freshness signal.
 
   4. A regression pin fails if any ledger venue is dropped from the refresh set — proven
      falsifiable by neutering and observing RED.
@@ -267,7 +318,11 @@ serializes on ONE shared terminal (`services/mt5_concurrency.py`) at a 15-min ti
 
 Plans:
 
-- [ ] TBD (run /gsd-plan-phase 161.1 to break down)
+- [x] 161.1-01-PLAN.md — LEDGER-03 tracer: staleness view keyed on the returns-series date (not `computed_at`, not `last_sync_at`) + the A7 PROD tracer + the D-COMP founder decision (wave 1)
+- [x] 161.1-02-PLAN.md — LEDGER-01/-02/-04: the dormant, staleness-gated, bounded single-key fan-out on the chain tail + matched-pair SQL gate + venue-drift/no-schedule static gates (wave 2)
+- [x] 161.1-03-PLAN.md — LEDGER-02: the founder go-live runbook (two ordered LIVE ops, two rollback levels incl. detect/repair/verify remediation for rows a failed tick downgraded) + TODOS filings (wave 3)
+- [x] 161.1-05-PLAN.md — LEDGER-02/-04: the static drift / dormancy / bound gates, sliced out of plan 02 (wave 3)
+- [ ] 161.1-04-PLAN.md — LEDGER-01: the composite arm on `stitch_composite` so deribit has real coverage — CONDITIONAL on D-01 (wave 4)
 
 ### Phase 162: HONEST — What the user sees is true
 
