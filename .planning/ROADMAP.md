@@ -243,9 +243,23 @@ between 2026-08-04 and 2026-08-21, versus okx at 2h old.
   2. It ships DORMANT: the schedule is NOT registered, activation is a documented founder-executed
      live op, matching the SFOX_ENABLED / WORKER-03 pattern. Merging changes no prod behavior.
 
-  3. The staleness is observable before it is user-visible: a check that fails on
-     `strategy_analytics.computed_at` age, NOT on `last_sync_at` (which is advanced daily by
-     key-scoped jobs and is what hid this bug).
+  3. The staleness is observable before it is user-visible: a check that fails on a timestamp
+     that advances ONLY when new analytics data actually lands — never on `last_sync_at` (advanced
+     daily by key-scoped jobs; this is what hid the bug), and never on `strategy_analytics.computed_at`.
+
+     ⚠️ **This criterion's original wording named `computed_at` and was WRONG — corrected 2026-08-25
+     by measurement at HEAD.** The SQL status bridge re-stamps `computed_at = now()` on EVERY job
+     transition (`20260802120000_strategy_analytics_stuck_computing_reaper.sql:342,398,421`), so it
+     reproduces the `last_sync_at` lie one column over. That migration says so itself at `:82` and
+     `:230`, and RAISES at `:678` if the reaper body so much as references `computed_at` — it names
+     this "the Phase 106 janitor bug". This same ROADMAP already warns against the identical mistake
+     at line ~1811 ("never the 106-janitor-revert `updated_at`/`computed_at` mistake").
+
+     The planner MUST pick the column, and MUST prove the choice by writing a test that advances the
+     rejected timestamps WITHOUT new data and shows the check still fails. Recommended starting
+     candidate: the latest date present in `strategy_analytics_series` (a status transition cannot
+     move it). `computing_started_at` is NOT the answer either — it is the stuck-row reap anchor,
+     not a freshness signal.
 
   4. A regression pin fails if any ledger venue is dropped from the refresh set — proven
      falsifiable by neutering and observing RED.
