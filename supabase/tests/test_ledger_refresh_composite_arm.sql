@@ -1,0 +1,512 @@
+-- Test: public.enqueue_ledger_composite_refresh — the LEDGER-01 COMPOSITE refresh
+-- arm. Guards migration 20260825140000_ledger_refresh_composite_arm.sql
+-- (Phase 161.1 / D-01, D-11, D-12, D-13).
+--
+-- What makes this gate worth having: MATCHED PAIRS
+-- ------------------------------------------------
+-- A bound is only proven by two arms pulling in opposite directions. Without the
+-- POSITIVE arm, a body that enqueues NOTHING passes every negative arm here — and
+-- five of the eight arms below ARE negatives. Without the NEGATIVE arms, a body
+-- that enqueues EVERY composite passes the positive one. Only the pair pins a
+-- predicate that both exists and is not over-tight.
+--
+-- ⛔ THE ARM THIS FILE EXISTS FOR IS ARM D. `is_composite = TRUE` is the SOLE
+-- conjunct partitioning this arm's cohort from the single-key arm's
+-- (20260825130000), and arm D is the only thing that pins it. It is meaningful
+-- ONLY if the single-key fixture it seeds clears EVERY OTHER conjunct — so arm D
+-- asserts those facts about its own fixture BEFORE it asserts the exclusion. An
+-- arm that is green because the row was stale-but-lifecycle-dead proves nothing,
+-- and the mandated is-composite neutering would not fire against it.
+--
+-- Arms:
+--   A  DORMANCY (LEDGER-02)    — activation setting unset ⇒ returns 0, inserts 0.
+--                                The arm that says merging changes no production
+--                                behaviour.
+--   B  POSITIVE (LEDGER-01)    — setting on ⇒ exactly one strategy-scoped
+--                                stitch_composite job, every other target NULL,
+--                                metadata source EQUAL to the composite marker,
+--                                return value 1.
+--   C  NEGATIVE CONTROL        — a FRESH composite is NOT enqueued. Without this
+--                                arm a body that enqueues every composite passes B.
+--   D  SINGLE-KEY EXCLUSION    — a stale single-key strategy that clears every
+--                                OTHER conjunct is NOT enqueued. With arm D of
+--                                test_ledger_refresh_fanout.sql this pins that the
+--                                two functions PARTITION the cohort rather than
+--                                overlapping it.
+--   E  MEMBER-VENUE EXCLUSION  — D-01/D-13, two sub-cases: a MIXED composite (one
+--                                member on the deferred venue, one not) and an
+--                                ALL-deferred composite. Both are the founder's
+--                                deferral made testable.
+--   F  DEDUPE                  — a second tick adds nothing while a job is in flight.
+--   G  COOLDOWN                — an attempt 2 h ago blocks; aged past 20 h, unblocks.
+--                                Both edges, so the interval cannot drift silently.
+--   H  BURST CAP               — 5 stale eligible composites, one tick, bounded.
+--
+-- ⚠️ sfox is deliberately UNEXERCISED here, as everywhere in this phase: it has
+-- ZERO strategies in PROD, so its arm ships unexercised by construction. It stays
+-- in the refresh set because criterion 4 pins the venue SET, and no arm in this
+-- file may assert that it produces work.
+--
+-- ⚠️ Venue literals appear in the FIXTURES only. The function under test declares
+-- none — it reads its cohort from public.ledger_refresh_staleness, the single SQL
+-- home of the set (D-05). A fixture naming a venue is a fixture; a production
+-- predicate naming one is a second drift surface.
+--
+-- SERIAL execution: the function takes a SESSION advisory lock, so a concurrent
+-- holder would make it skip and redden the positive arms for the wrong reason. The
+-- repo already runs supabase/tests/*.sql one file at a time; keep it that way.
+--
+-- Session-scoped activation: the function reads its activation setting per
+-- session, so this ONE file can exercise BOTH the dormant and the active arms —
+-- arm A first with the setting untouched, then set_config(..., is_local => true)
+-- for the rest, which unwinds with the transaction.
+--
+-- pgTAP is NOT installed (CLAUDE.md). Plain PL/pgSQL DO block, RAISE EXCEPTION on
+-- failure. No psql meta-commands. Under psql -v ON_ERROR_STOP=1 a failed assertion
+-- exits non-zero. The whole test rolls back.
+--
+-- ⚠️ The presence gate below RETURNs with a NOTICE when the function is absent,
+-- for test-DB lag. A skipped gate is a VACUOUSLY GREEN gate. The final
+-- 'ALL 8 ARMS EXECUTED' notice is what distinguishes a real pass from a skip —
+-- read it in the run output, do not infer it from the exit code.
+--
+-- Usage:
+--   psql "$TEST_SUPABASE_DB_URL" -v ON_ERROR_STOP=1 -f \
+--     supabase/tests/test_ledger_refresh_composite_arm.sql
+
+BEGIN;
+
+DO $$
+DECLARE
+  uid          UUID := gen_random_uuid();
+  k_led        UUID;  -- eligible key, ledger venue that is NOT the deferred one
+  k_led_b      UUID;  -- second key on the same venue (composites need >= 2 members)
+  k_defer      UUID;  -- eligible key on the DEFERRED venue (arm E)
+  k_defer_b    UUID;
+  k_revoked    UUID;  -- ineligible member key (arm B's partial-disconnect probe)
+  s_b          UUID;  -- arms A / B / F: maximally stale, eligible COMPOSITE
+  s_c          UUID;  -- arm C: FRESH composite
+  s_d          UUID;  -- arm D: stale SINGLE-KEY, clears every conjunct but is_composite
+  s_e_mixed    UUID;  -- arm E1: one deferred-venue member + one not
+  s_e_all      UUID;  -- arm E2: every member on the deferred venue
+  s_g          UUID;  -- arm G: stale composite attempted 2 h ago
+  h_set        UUID[];-- arm H: 5 stale eligible composites
+  v_ret        INTEGER;
+  v_cnt        INTEGER;
+  v_strat      UUID;
+  v_port       UUID;
+  v_alloc      UUID;
+  v_api        UUID;
+  v_source     TEXT;
+  v_foreign    INTEGER;
+  v_stale      BOOLEAN;
+  v_comp       BOOLEAN;
+  v_defer      BOOLEAN;
+  v_status     TEXT;
+  sid          UUID;
+BEGIN
+  -- ----- presence gate (test-DB lag) -------------------------------------
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+     WHERE n.nspname = 'public'
+       AND p.proname = 'enqueue_ledger_composite_refresh'
+  ) THEN
+    RAISE NOTICE 'SKIP: migration 20260825140000 not yet applied here (composite fn absent). Assertions enforce once the test DB catches up.';
+    RETURN;
+  END IF;
+
+  -- ----- anti-vacuity precondition on arm A -------------------------------
+  -- Arm A is meaningless if this session already has the activation setting on.
+  -- Detect that rather than paper over it: silently forcing the setting off here
+  -- would turn "the flag is fail-closed" into "the test set it to off", which
+  -- proves nothing about the unset case.
+  IF COALESCE(current_setting('app.ledger_refresh_enabled', TRUE), '') = 'true' THEN
+    RAISE EXCEPTION 'TEST ABORTED: the activation setting is already true in this session, so arm A cannot test the DORMANT case. Run this file in a clean session.';
+  END IF;
+
+  -- ----- FOREIGN-CANDIDATE PRECONDITION (read-only) -----------------------
+  -- Arm H measures a GLOBAL bound — the per-tick burst cap is global — so a
+  -- pre-existing eligible COMPOSITE on this database would compete for those slots
+  -- and make the count wrong.
+  --
+  -- ⛔ It is NOT acceptable to solve that by parking those rows. supabase/tests run
+  -- against ONE SHARED test project concurrently with other PRs, and an UPDATE
+  -- touching rows this block did not seed writes across another PR's live fixture
+  -- mid-run: the surrounding ROLLBACK hides that from the WRITER, not from a
+  -- concurrent READER, and the failure then surfaces in a completely different
+  -- file. That is the D-05 hazard
+  -- (analytics-service/tests/test_sql_gate_scoped_updates.py) and this file will
+  -- not create a second instance of it on a neighbouring table.
+  --
+  -- So: measure, and fail LOUD. A concurrent PR's fixtures are uncommitted and
+  -- therefore invisible here, so a non-zero count means the test project carries
+  -- COMMITTED ledger-backed composites that are stale and live — a standing
+  -- property of the project that a human should look at.
+  SELECT count(*) INTO v_foreign
+    FROM public.ledger_refresh_staleness lrs
+    JOIN public.strategies s ON s.id = lrs.strategy_id
+   WHERE lrs.is_stale
+     AND lrs.is_composite
+     AND NOT lrs.has_mt5_member
+     AND s.status IN ('published', 'pending_review');
+  IF v_foreign <> 0 THEN
+    RAISE EXCEPTION 'TEST PRECONDITION FAILED: % committed composite(s) on this database are already stale, live and ledger-backed. They would compete with this file''s fixtures for the global per-tick burst cap and make arm H measure the wrong thing. Park or clean them in the test project — do NOT make this file update rows it did not seed (D-05: shared project, concurrent PRs).', v_foreign;
+  END IF;
+
+  -- ----- SEED --------------------------------------------------------------
+  INSERT INTO auth.users (id, instance_id, email, created_at, updated_at)
+  VALUES (uid, '00000000-0000-0000-0000-000000000000',
+          'lrc-' || uid::text || '@quantalyze.test', now(), now());
+  INSERT INTO profiles (id, display_name, email, role)
+  VALUES (uid, 'lrc', 'lrc-' || uid::text || '@quantalyze.test', 'manager')
+  ON CONFLICT (id) DO UPDATE SET role = EXCLUDED.role;
+
+  INSERT INTO api_keys (user_id, exchange, label, api_key_encrypted, is_active)
+  VALUES (uid, 'deribit', 'lrc a', 'x', TRUE) RETURNING id INTO k_led;
+  INSERT INTO api_keys (user_id, exchange, label, api_key_encrypted, is_active)
+  VALUES (uid, 'deribit', 'lrc b', 'x', TRUE) RETURNING id INTO k_led_b;
+  INSERT INTO api_keys (user_id, exchange, label, api_key_encrypted, is_active)
+  VALUES (uid, 'mt5', 'lrc deferred a', 'x', TRUE) RETURNING id INTO k_defer;
+  INSERT INTO api_keys (user_id, exchange, label, api_key_encrypted, is_active)
+  VALUES (uid, 'mt5', 'lrc deferred b', 'x', TRUE) RETURNING id INTO k_defer_b;
+  -- A REVOKED member key. Used only inside arm B's composite, to prove the
+  -- member-health conjunct requires ANY eligible member rather than ALL of them —
+  -- see the assertion at the end of arm B.
+  INSERT INTO api_keys (user_id, exchange, label, api_key_encrypted, is_active, sync_status)
+  VALUES (uid, 'deribit', 'lrc revoked', 'x', TRUE, 'revoked') RETURNING id INTO k_revoked;
+
+  -- Every fixture is seeded PARKED ('draft'), and each arm un-parks exactly the
+  -- fixtures it is about. Lifecycle is the parking lever precisely because no arm
+  -- here tests it, so parking cannot mask the conjunct any arm is measuring.
+  --
+  -- ⚠️ A COMPOSITE has api_key_id NULL and reaches its venue only through
+  -- strategy_keys — the two links are mutually exclusive
+  -- (finalize-wizard/route.ts:1177, 1388-1392). A composite fixture written with
+  -- api_key_id set would not be a composite.
+  INSERT INTO strategies (user_id, api_key_id, name, status) VALUES (uid, NULL, 'lrc B', 'draft') RETURNING id INTO s_b;
+  INSERT INTO strategies (user_id, api_key_id, name, status) VALUES (uid, NULL, 'lrc C', 'draft') RETURNING id INTO s_c;
+  INSERT INTO strategies (user_id, api_key_id, name, status) VALUES (uid, NULL, 'lrc E1', 'draft') RETURNING id INTO s_e_mixed;
+  INSERT INTO strategies (user_id, api_key_id, name, status) VALUES (uid, NULL, 'lrc E2', 'draft') RETURNING id INTO s_e_all;
+  INSERT INTO strategies (user_id, api_key_id, name, status) VALUES (uid, NULL, 'lrc G', 'draft') RETURNING id INTO s_g;
+
+  -- ⛔ Arm D's fixture: a SINGLE-KEY strategy — api_key_id SET, and ZERO
+  -- strategy_keys rows. It is seeded on the same NON-deferred ledger venue and
+  -- given the same century-old series as every other fixture, so it clears the
+  -- staleness, member-venue, lifecycle, cooldown and in-flight conjuncts and
+  -- passes the member-health conjunct VACUOUSLY (that conjunct's first half is
+  -- true for a member-less row, by design). `is_composite` is the only thing
+  -- standing between it and the enqueue. Arm D re-measures those facts before it
+  -- asserts anything.
+  INSERT INTO strategies (user_id, api_key_id, name, status) VALUES (uid, k_led, 'lrc D', 'draft') RETURNING id INTO s_d;
+
+  -- Arm B's composite: TWO members, one eligible and one REVOKED. That mix is
+  -- deliberate — see arm B's closing assertion.
+  INSERT INTO strategy_keys (strategy_id, api_key_id, owner_id, window_start, seq)
+  VALUES (s_b, k_led,     uid, CURRENT_DATE - 400, 0);
+  INSERT INTO strategy_keys (strategy_id, api_key_id, owner_id, window_start, seq)
+  VALUES (s_b, k_revoked, uid, CURRENT_DATE - 200, 1);
+
+  INSERT INTO strategy_keys (strategy_id, api_key_id, owner_id, window_start, seq)
+  VALUES (s_c, k_led,   uid, CURRENT_DATE - 400, 0);
+  INSERT INTO strategy_keys (strategy_id, api_key_id, owner_id, window_start, seq)
+  VALUES (s_c, k_led_b, uid, CURRENT_DATE - 200, 1);
+
+  -- Arm E1 — MIXED: one member on the deferred venue, one not. The composite is
+  -- otherwise fully eligible, so only the membership conjunct can exclude it.
+  INSERT INTO strategy_keys (strategy_id, api_key_id, owner_id, window_start, seq)
+  VALUES (s_e_mixed, k_led,   uid, CURRENT_DATE - 400, 0);
+  INSERT INTO strategy_keys (strategy_id, api_key_id, owner_id, window_start, seq)
+  VALUES (s_e_mixed, k_defer, uid, CURRENT_DATE - 200, 1);
+
+  -- Arm E2 — ALL members on the deferred venue.
+  INSERT INTO strategy_keys (strategy_id, api_key_id, owner_id, window_start, seq)
+  VALUES (s_e_all, k_defer,   uid, CURRENT_DATE - 400, 0);
+  INSERT INTO strategy_keys (strategy_id, api_key_id, owner_id, window_start, seq)
+  VALUES (s_e_all, k_defer_b, uid, CURRENT_DATE - 200, 1);
+
+  INSERT INTO strategy_keys (strategy_id, api_key_id, owner_id, window_start, seq)
+  VALUES (s_g, k_led,   uid, CURRENT_DATE - 400, 0);
+  INSERT INTO strategy_keys (strategy_id, api_key_id, owner_id, window_start, seq)
+  VALUES (s_g, k_led_b, uid, CURRENT_DATE - 200, 1);
+
+  -- Arm H: 5 stale eligible composites, each with one eligible member.
+  WITH ins AS (
+    INSERT INTO strategies (user_id, api_key_id, name, status)
+    SELECT uid, NULL, 'lrc H ' || g, 'draft' FROM generate_series(1, 5) g
+    RETURNING id
+  ) SELECT array_agg(id) INTO h_set FROM ins;
+  FOREACH sid IN ARRAY h_set LOOP
+    INSERT INTO strategy_keys (strategy_id, api_key_id, owner_id, window_start, seq)
+    VALUES (sid, k_led, uid, CURRENT_DATE - 400, 0);
+  END LOOP;
+
+  -- Analytics rows. STALE = a returns_series whose newest date is far past the
+  -- 4-day threshold; FRESH = yesterday. Both use the success status the whole live
+  -- ledger cohort actually carries (D-04) — a fixture written as 'complete' would
+  -- test a status no live ledger row has.
+  --
+  -- ISOLATION BY CONSTRUCTION, belt to the precondition's braces: the stale
+  -- fixtures are dated a CENTURY back, so they outrank any plausible foreign row
+  -- under the function's ORDER BY last_return_date ASC and take the bounded slots
+  -- first. Same idiom, and the same reason, as the reaper gate's century-old seeds
+  -- (Phase 142.1 / D-05).
+  INSERT INTO strategy_analytics (strategy_id, computation_status, computed_at, returns_series)
+  SELECT s, 'complete_with_warnings', now(),
+         jsonb_build_array(jsonb_build_object('date', to_char(CURRENT_DATE - 36500, 'YYYY-MM-DD'), 'value', 0.001))
+    FROM unnest(ARRAY[s_b, s_d, s_e_mixed, s_e_all, s_g] || h_set) AS s;
+
+  -- Arm C's negative control: genuinely fresh, so is_stale is FALSE.
+  INSERT INTO strategy_analytics (strategy_id, computation_status, computed_at, returns_series)
+  VALUES (s_c, 'complete_with_warnings', now(),
+          jsonb_build_array(jsonb_build_object('date', to_char(CURRENT_DATE - 1, 'YYYY-MM-DD'), 'value', 0.004)));
+
+  -- Arm G's prior ATTEMPT: terminal (so the in-flight conjunct is not what is being
+  -- measured), created 2 hours ago (so the 20-hour cooldown is).
+  INSERT INTO compute_jobs (strategy_id, kind, status, created_at)
+  VALUES (s_g, 'stitch_composite', 'done', now() - INTERVAL '2 hours');
+
+  RAISE NOTICE 'Seed OK.';
+
+  -- ======================================================================
+  -- ARM A — DORMANCY (LEDGER-02). The activation setting is untouched, so it is
+  -- unset. A maximally stale, fully eligible composite is on the table and the
+  -- function must still do NOTHING. This is the arm that says "merging this
+  -- migration changes no production behaviour".
+  -- ======================================================================
+  UPDATE strategies SET status = 'published' WHERE id = s_b;
+
+  v_ret := public.enqueue_ledger_composite_refresh();
+  IF v_ret <> 0 THEN
+    RAISE EXCEPTION 'TEST FAILED (A): the composite arm returned % with the activation setting UNSET, expected 0 — the dormancy lock is open and merging this migration would change production behaviour', v_ret;
+  END IF;
+  SELECT count(*) INTO v_cnt FROM compute_jobs WHERE strategy_id = s_b;
+  IF v_cnt <> 0 THEN
+    RAISE EXCEPTION 'TEST FAILED (A): the composite arm inserted % job(s) with the activation setting UNSET, expected 0', v_cnt;
+  END IF;
+
+  -- Everything below runs with the switch ON. is_local => true, so it unwinds with
+  -- the transaction and cannot leak into a later file on this session.
+  PERFORM set_config('app.ledger_refresh_enabled', 'true', TRUE);
+
+  -- ======================================================================
+  -- ARM B — POSITIVE (LEDGER-01). Same seed, switch on.
+  -- ======================================================================
+  v_ret := public.enqueue_ledger_composite_refresh();
+  IF v_ret <> 1 THEN
+    RAISE EXCEPTION 'TEST FAILED (B): the composite arm returned % for one eligible stale composite, expected 1 — this integer is the INSERTION count the go-live runbook has the founder read back, so a wrong value there is a wrong answer at activation', v_ret;
+  END IF;
+
+  SELECT count(*) INTO v_cnt FROM compute_jobs
+   WHERE strategy_id = s_b AND kind = 'stitch_composite';
+  IF v_cnt <> 1 THEN
+    RAISE EXCEPTION 'TEST FAILED (B): the eligible stale composite got % stitch_composite job(s), expected exactly 1', v_cnt;
+  END IF;
+
+  -- Strategy-scoped, and ONLY strategy-scoped. enqueue_compute_job enforces
+  -- exactly-one-of {strategy, allocator, api_key} and raises 22023 otherwise
+  -- (measured on PROD during the A7 tracer), and compute_jobs_kind_target_coherence
+  -- (20260710130000) admits this kind only with strategy_id NOT NULL and every
+  -- other target NULL. A fan-out that also passed a key would not enqueue at all —
+  -- this shape assertion is what names that failure.
+  SELECT strategy_id, portfolio_id, allocator_id, api_key_id, metadata ->> 'source'
+    INTO v_strat, v_port, v_alloc, v_api, v_source
+    FROM compute_jobs
+   WHERE strategy_id = s_b AND kind = 'stitch_composite'
+   LIMIT 1;
+  IF v_strat IS DISTINCT FROM s_b OR v_port IS NOT NULL OR v_alloc IS NOT NULL OR v_api IS NOT NULL THEN
+    RAISE EXCEPTION 'TEST FAILED (B): job target shape wrong (strategy set=% portfolio=% allocator=% api_key=%) — expected strategy-only', (v_strat IS NOT NULL), v_port, v_alloc, v_api;
+  END IF;
+
+  -- EXACT equality, never IS NOT NULL and never LIKE. Two separate contracts ride
+  -- on this string: the non-destructive failure guard in
+  -- analytics-service/services/job_worker.py compares it byte-for-byte before it
+  -- declines to un-publish a live composite, and it must NOT collide with the
+  -- single-key arm's marker or the two mechanisms stop being distinguishable in
+  -- the queue. A typo must be RED here, not in production.
+  IF v_source IS DISTINCT FROM 'ledger-refresh-composite' THEN
+    RAISE EXCEPTION 'TEST FAILED (B): job metadata source is %, expected the exact composite refresh marker — the non-destructive failure guard keys on this string', COALESCE(v_source, '<null>');
+  END IF;
+  IF v_source = 'ledger-refresh' THEN
+    RAISE EXCEPTION 'TEST FAILED (B): the composite arm writes the SINGLE-KEY arm''s marker. The two must differ, or neither the queue nor the failure guard can tell the mechanisms apart';
+  END IF;
+
+  -- ⚠️ ARM B ALSO PINS THE "ANY ELIGIBLE MEMBER" RULE. s_b's two members are one
+  -- eligible key and one REVOKED key. A member-health conjunct written as "ALL
+  -- members eligible" would have produced 0 here, silently dropping a live
+  -- composite the day one member is revoked. That this arm returned 1 with a
+  -- revoked member present IS the measurement.
+  SELECT count(*) INTO v_cnt
+    FROM strategy_keys sk JOIN api_keys ak ON ak.id = sk.api_key_id
+   WHERE sk.strategy_id = s_b AND ak.sync_status = 'revoked';
+  IF v_cnt <> 1 THEN
+    RAISE EXCEPTION 'TEST FAILED (B): the positive fixture was expected to carry exactly 1 REVOKED member so the ANY-eligible-member rule is what arm B measured; it carries %. Without that member this arm no longer distinguishes ANY from ALL', v_cnt;
+  END IF;
+
+  -- ======================================================================
+  -- ARM F — DEDUPE. A second tick while the job is in flight adds nothing.
+  -- ======================================================================
+  v_ret := public.enqueue_ledger_composite_refresh();
+  IF v_ret <> 0 THEN
+    RAISE EXCEPTION 'TEST FAILED (F): the second consecutive tick returned %, expected 0 (the in-flight conjunct plus the RPC dedupe)', v_ret;
+  END IF;
+  SELECT count(*) INTO v_cnt FROM compute_jobs
+   WHERE strategy_id = s_b AND kind = 'stitch_composite';
+  IF v_cnt <> 1 THEN
+    RAISE EXCEPTION 'TEST FAILED (F): after a second tick the composite has % stitch_composite jobs, expected 1', v_cnt;
+  END IF;
+
+  UPDATE strategies SET status = 'draft' WHERE id = s_b;
+
+  -- ======================================================================
+  -- ARM C — NEGATIVE CONTROL. A FRESH composite is not enqueued. Without this arm
+  -- a body that enqueues every composite passes arm B.
+  -- ======================================================================
+  UPDATE strategies SET status = 'published' WHERE id = s_c;
+  v_ret := public.enqueue_ledger_composite_refresh();
+  IF v_ret <> 0 THEN
+    RAISE EXCEPTION 'TEST FAILED (C): a FRESH composite produced % enqueue(s), expected 0 — the staleness gate is not bounding the cohort and every composite would be stitched on every tick', v_ret;
+  END IF;
+  SELECT count(*) INTO v_cnt FROM compute_jobs WHERE strategy_id = s_c;
+  IF v_cnt <> 0 THEN
+    RAISE EXCEPTION 'TEST FAILED (C): a FRESH composite got % job(s), expected 0', v_cnt;
+  END IF;
+  UPDATE strategies SET status = 'draft' WHERE id = s_c;
+
+  -- ======================================================================
+  -- ARM D — SINGLE-KEY EXCLUSION. ⛔ THE ARM THIS FILE EXISTS FOR.
+  --
+  -- `is_composite = TRUE` is the SOLE conjunct partitioning this function's cohort
+  -- from the single-key arm's (20260825130000). This arm is the only thing that
+  -- pins it, and it can only do that if its fixture clears EVERY OTHER conjunct —
+  -- otherwise a green here means "something else excluded it", the mandated
+  -- is-composite neutering does not redden, and the partition is pinned by nothing.
+  --
+  -- So the fixture's eligibility is MEASURED FIRST, from the view and from the
+  -- tables, not assumed from the seed. These are the predicate's INPUTS, not a
+  -- re-implementation of the predicate.
+  -- ======================================================================
+  UPDATE strategies SET status = 'published' WHERE id = s_d;
+
+  SELECT lrs.is_stale, lrs.is_composite, lrs.has_mt5_member
+    INTO v_stale, v_comp, v_defer
+    FROM public.ledger_refresh_staleness lrs
+   WHERE lrs.strategy_id = s_d;
+  SELECT s.status INTO v_status FROM strategies s WHERE s.id = s_d;
+
+  IF v_stale IS NOT TRUE THEN
+    RAISE EXCEPTION 'TEST FAILED (D/precondition): the single-key fixture reads is_stale=%, expected true. A green exclusion below would then be the STALENESS gate talking, not is_composite, and the mandated neutering could not fire', COALESCE(v_stale::text, '<null>');
+  END IF;
+  IF v_comp IS NOT FALSE THEN
+    RAISE EXCEPTION 'TEST FAILED (D/precondition): the single-key fixture reads is_composite=%, expected false — it was seeded with api_key_id set and ZERO strategy_keys rows, so if this is true the view or the seed changed', COALESCE(v_comp::text, '<null>');
+  END IF;
+  IF v_defer IS NOT FALSE THEN
+    RAISE EXCEPTION 'TEST FAILED (D/precondition): the single-key fixture reads has_mt5_member=%, expected false. A green exclusion below would then be the MEMBER-VENUE conjunct talking, not is_composite', COALESCE(v_defer::text, '<null>');
+  END IF;
+  IF v_status NOT IN ('published', 'pending_review') THEN
+    RAISE EXCEPTION 'TEST FAILED (D/precondition): the single-key fixture is status=%, so a green exclusion below would be the LIFECYCLE conjunct talking, not is_composite', v_status;
+  END IF;
+  SELECT count(*) INTO v_cnt FROM strategy_keys WHERE strategy_id = s_d;
+  IF v_cnt <> 0 THEN
+    RAISE EXCEPTION 'TEST FAILED (D/precondition): the single-key fixture has % strategy_keys row(s), expected 0. The member-health conjunct must pass VACUOUSLY on it (that is why it is written NOT EXISTS(...) OR EXISTS(...)); with members present a green exclusion could be member health talking', v_cnt;
+  END IF;
+  SELECT count(*) INTO v_cnt FROM compute_jobs WHERE strategy_id = s_d;
+  IF v_cnt <> 0 THEN
+    RAISE EXCEPTION 'TEST FAILED (D/precondition): the single-key fixture already has % compute_jobs row(s), so a green exclusion below could be the COOLDOWN or the IN-FLIGHT conjunct talking, not is_composite', v_cnt;
+  END IF;
+
+  -- Every other conjunct measured clear. Now the exclusion itself.
+  v_ret := public.enqueue_ledger_composite_refresh();
+  IF v_ret <> 0 THEN
+    RAISE EXCEPTION 'TEST FAILED (D): a stale SINGLE-KEY strategy produced % enqueue(s) from the COMPOSITE arm, expected 0 — the two functions must PARTITION the cohort. A single-key strategy belongs to 20260825130000, which enqueues derive_broker_dailies; stitching it here would run a composite handler over a strategy with no members', v_ret;
+  END IF;
+  SELECT count(*) INTO v_cnt FROM compute_jobs
+   WHERE strategy_id = s_d AND kind = 'stitch_composite';
+  IF v_cnt <> 0 THEN
+    RAISE EXCEPTION 'TEST FAILED (D): a stale SINGLE-KEY strategy got % stitch_composite job(s), expected 0', v_cnt;
+  END IF;
+  UPDATE strategies SET status = 'draft' WHERE id = s_d;
+
+  -- ======================================================================
+  -- ARM E — MEMBER-VENUE EXCLUSION (D-01 / D-13). The founder's deferral, made
+  -- testable. It is scoped to MEMBERSHIP, not to a headline venue: a composite
+  -- with ANY member on the deferred venue is skipped, because a mixed composite
+  -- would drag that venue's single shared terminal registry into the composite
+  -- crawl.
+  --
+  -- ⚠️ The count of such composites in PROD is ZERO today. That is exactly why
+  -- these two arms exist: CONTEXT D-01 records the founder expecting them later,
+  -- and requires that a future one be a VISIBLE, NAMED skip rather than silent
+  -- mishandling. An untested conjunct guarding a case that does not exist yet is
+  -- an untested conjunct on the day the case arrives.
+  -- ======================================================================
+  UPDATE strategies SET status = 'published' WHERE id IN (s_e_mixed, s_e_all);
+
+  -- E-precondition: both fixtures must be otherwise eligible, or the exclusion
+  -- below is being performed by something else.
+  SELECT lrs.is_stale, lrs.is_composite, lrs.has_mt5_member
+    INTO v_stale, v_comp, v_defer
+    FROM public.ledger_refresh_staleness lrs
+   WHERE lrs.strategy_id = s_e_mixed;
+  IF v_stale IS NOT TRUE OR v_comp IS NOT TRUE OR v_defer IS NOT TRUE THEN
+    RAISE EXCEPTION 'TEST FAILED (E1/precondition): the MIXED fixture reads is_stale=% is_composite=% has_mt5_member=%, expected true/true/true. Anything else and the exclusion below is not the membership conjunct', COALESCE(v_stale::text, '<null>'), COALESCE(v_comp::text, '<null>'), COALESCE(v_defer::text, '<null>');
+  END IF;
+
+  v_ret := public.enqueue_ledger_composite_refresh();
+  IF v_ret <> 0 THEN
+    RAISE EXCEPTION 'TEST FAILED (E): composites with a member on the DEFERRED venue produced % enqueue(s), expected 0 — the founder deferral is scoped to that venue''s path and a mixed composite would drag its single shared terminal registry into the composite crawl (D-01 / D-13)', v_ret;
+  END IF;
+  SELECT count(*) INTO v_cnt FROM compute_jobs WHERE strategy_id = s_e_mixed;
+  IF v_cnt <> 0 THEN
+    RAISE EXCEPTION 'TEST FAILED (E1/mixed): a composite with ONE member on the deferred venue got % job(s), expected 0. Membership, not headline venue, is the rule', v_cnt;
+  END IF;
+  SELECT count(*) INTO v_cnt FROM compute_jobs WHERE strategy_id = s_e_all;
+  IF v_cnt <> 0 THEN
+    RAISE EXCEPTION 'TEST FAILED (E2/all): a composite whose members are ALL on the deferred venue got % job(s), expected 0', v_cnt;
+  END IF;
+  UPDATE strategies SET status = 'draft' WHERE id IN (s_e_mixed, s_e_all);
+
+  -- ======================================================================
+  -- ARM G — ATTEMPT COOLDOWN. This is the BINDING bound: it is what stops a
+  -- permanently-failing composite being hammered every tick, and it is what caps
+  -- the outstanding backlog at the cohort size regardless of tick rate. Both
+  -- edges, so the interval cannot drift silently.
+  -- ======================================================================
+  UPDATE strategies SET status = 'published' WHERE id = s_g;
+  v_ret := public.enqueue_ledger_composite_refresh();
+  IF v_ret <> 0 THEN
+    RAISE EXCEPTION 'TEST FAILED (G): a composite attempted 2 hours ago produced % enqueue(s), expected 0 — without the cooldown a permanently-failing composite gets a 20-minute job every tick', v_ret;
+  END IF;
+
+  UPDATE compute_jobs SET created_at = now() - INTERVAL '21 hours'
+   WHERE strategy_id = s_g AND kind = 'stitch_composite';
+
+  v_ret := public.enqueue_ledger_composite_refresh();
+  IF v_ret <> 1 THEN
+    RAISE EXCEPTION 'TEST FAILED (G): a composite whose last attempt is 21 hours old produced % enqueue(s), expected 1 — the cooldown has been widened past its derivation and stale composites would never be refreshed', v_ret;
+  END IF;
+  UPDATE strategies SET status = 'draft' WHERE id = s_g;
+
+  -- ======================================================================
+  -- ARM H — THE BURST CAP. Five stale eligible composites, one tick.
+  --
+  -- ⚠️ Counts, never a duration or a rate. This arm pins the SHAPE of the bound.
+  -- The safety argument is arm G's cooldown, NOT this cap — the cap bounds what
+  -- ONE tick adds to a SHARED queue, and overhang past the tick is expected.
+  -- Reading this arm as a throughput claim is what leads a future editor to raise
+  -- the integer.
+  -- ======================================================================
+  UPDATE strategies SET status = 'published' WHERE id = ANY(h_set);
+  v_ret := public.enqueue_ledger_composite_refresh();
+  IF v_ret <> 2 THEN
+    RAISE EXCEPTION 'TEST FAILED (H): 5 stale eligible composites produced % enqueue(s) in one tick, expected exactly 2 — the per-tick burst cap. A result of 5 means the cap is gone and one tick can add 6000 s of composite work to a queue a second arm is already filling', v_ret;
+  END IF;
+  SELECT count(*) INTO v_cnt FROM compute_jobs
+   WHERE strategy_id = ANY(h_set) AND kind = 'stitch_composite';
+  IF v_cnt <> 2 THEN
+    RAISE EXCEPTION 'TEST FAILED (H): % stitch_composite rows landed for the 5-composite cohort, expected exactly 2', v_cnt;
+  END IF;
+
+  RAISE NOTICE 'ALL 8 ARMS EXECUTED (A-H) and passed — the composite refresh arm is dormant, partitioned from the single-key arm, bounded, and its exclusions are falsifiable.';
+END $$;
+
+ROLLBACK;

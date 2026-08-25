@@ -29,6 +29,8 @@ region independently:
     DECLARATION PRELUDE         80 ch    the fan-out function's own name
     FUNCTION BODY             2500 ch    the enqueue call
     GUARD REGION              1500 ch    the helper's own name
+    COMPOSITE PRELUDE           80 ch    the composite function's own name
+    COMPOSITE BODY            2500 ch    the enqueue call
 
 The IS_STALE EXPRESSION is a separately-extracted region with its OWN floor and
 its OWN sentinel. It is deliberately not allowed to ride on the VIEW BODY's
@@ -51,9 +53,12 @@ HEADER, outside the dollar-quoted body, for the same reason.
 Runs from ``analytics-service/`` under pytest. Reads files. Starts no service,
 opens no socket, touches no database.
 
-⚠️ Plan 04 (wave 4) APPENDS a tenth gate (the composite ``stitch_composite``
-arm) to this file. The pointers, the region extractors and ``_assert_region``
-below are factored so that gate can be added without re-deriving any of them.
+GATE 10 (plan 04, wave 4) extends every one of the above to the COMPOSITE arm
+(migration 20260825140000), reusing the same extractors, the same floor helper
+and the same runtime-concatenated search tokens. It is an EXTENSION of this
+file, deliberately — a second gate file would have had to re-derive
+``_scan_sql``, ``_assert_region`` and the self-exclusion trick, and a re-derived
+copy is a second thing that can drift.
 """
 from __future__ import annotations
 
@@ -74,6 +79,13 @@ _STALENESS_VIEW_MIGRATION_NAME: Final[str] = (
 )
 _FANOUT_MIGRATION_NAME: Final[str] = (
     "20260825130000_ledger_refresh_fanout_dormant.sql"
+)
+# Plan 04 / LEDGER-01 — the COMPOSITE arm. Same pointer-hygiene rule as the two
+# above: this constant and its migration move together IN THE SAME COMMIT. A
+# stale pointer here keeps every gate-10 test green while it guards a body
+# nothing runs.
+_COMPOSITE_MIGRATION_NAME: Final[str] = (
+    "20260825140000_ledger_refresh_composite_arm.sql"
 )
 
 # ---------------------------------------------------------------------------
@@ -96,6 +108,10 @@ _PG_CRON_SCHEMA: Final[str] = "cr" + "on"
 _SCHEDULE_VERB: Final[str] = _PG_CRON_SCHEMA + "." + "sched" + "ule"
 _UNSCHEDULE_VERB: Final[str] = _PG_CRON_SCHEMA + "." + "unsched" + "ule"
 _FANOUT_FUNCTION_NAME: Final[str] = "enqueue_ledger_refresh" + "_for_strategies"
+# ⛔ Concatenated for the SAME reason, not by imitation: gate 10c counts the
+# migrations containing this name, exactly as gate 3b does for the fan-out. A
+# self-match would be indistinguishable from a real second definition.
+_COMPOSITE_FUNCTION_NAME: Final[str] = "enqueue_ledger_composite" + "_refresh"
 
 # The activation setting (plan 02, D-08 lock B). Not a scan-collision risk, but
 # kept beside the others because it is the third cross-file literal.
@@ -105,7 +121,14 @@ _ACTIVATION_SETTING: Final[str] = "app.ledger_refresh_enabled"
 # migration added by anyone — including this phase's own plan 04 — is picked up
 # automatically. Enumerating the two known filenames would not have been.
 _LEDGER_REFRESH_MIGRATION_GLOB: Final[str] = "*ledger_refresh*.sql"
-_KNOWN_LEDGER_REFRESH_MIGRATIONS: Final[int] = 2
+# ⛔ RAISED 2 -> 3 by plan 04, IN THE SAME COMMIT as the composite migration it
+# counts. This integer is gate 3a's anti-vacuity floor, and it is the ONLY thing
+# that makes "the composite migration is inside gate 3a's dormancy scan" a
+# measured fact rather than an assumption: leaving it at 2 would have kept 3a
+# green even if the composite migration were renamed out of the glob entirely.
+# Gate 10a asserts the membership directly as well, so the two checks fail for
+# distinguishable reasons.
+_KNOWN_LEDGER_REFRESH_MIGRATIONS: Final[int] = 3
 
 # Region floors. Hand-typed, and deliberately well under the measured sizes
 # (4246 / 1105 / 190 / 10500 / 7685 characters at the commit that introduced
@@ -116,6 +139,13 @@ _IS_STALE_MIN_CHARS: Final[int] = 300
 _PRELUDE_MIN_CHARS: Final[int] = 80
 _FUNCTION_BODY_MIN_CHARS: Final[int] = 2500
 _GUARD_REGION_MIN_CHARS: Final[int] = 1500
+# Plan 04's two regions. Measured at the commit that introduced them: 170 and
+# 11527 characters. Floored at roughly a half / a fifth, on the same reasoning.
+_COMPOSITE_PRELUDE_MIN_CHARS: Final[int] = 80
+_COMPOSITE_BODY_MIN_CHARS: Final[int] = 2500
+# The composite handler's own terminal-stamp closure. Measured at 7708
+# characters at the commit that introduced its guard.
+_COMPOSITE_GUARD_REGION_MIN_CHARS: Final[int] = 1500
 
 # The rejected freshness keys (plan 01, D-03). `computed_at` covers both
 # `strategy_analytics.computed_at` and the view's `analytics_computed_at` alias;
@@ -156,6 +186,10 @@ def _view_migration_path() -> pathlib.Path:
 
 def _fanout_migration_path() -> pathlib.Path:
     return _migrations_dir() / _FANOUT_MIGRATION_NAME
+
+
+def _composite_migration_path() -> pathlib.Path:
+    return _migrations_dir() / _COMPOSITE_MIGRATION_NAME
 
 
 def _job_worker_path() -> pathlib.Path:
@@ -423,6 +457,94 @@ def guard_region() -> str:
     )
 
 
+def composite_declaration_prelude() -> str:
+    """REGION 6 — ``CREATE … FUNCTION …`` through ``AS $composite$``.
+
+    Exists for the SAME reason region 3 does: ``SET search_path`` is part of the
+    CREATE FUNCTION declaration and sits OUTSIDE the dollar-quote delimiters, so
+    a hygiene gate scoped to the body alone would be RED against a correct file.
+    """
+    src = _read(_composite_migration_path(), "_COMPOSITE_MIGRATION_NAME")
+    match = re.search(
+        r"CREATE\s+OR\s+REPLACE\s+FUNCTION\s+public\."
+        + re.escape(_COMPOSITE_FUNCTION_NAME)
+        + r"\s*\(\s*\).*?AS\s+\$composite\$",
+        src,
+        re.DOTALL | re.IGNORECASE,
+    )
+    assert match is not None, (
+        "could not locate the composite arm's CREATE FUNCTION declaration "
+        "prelude (header through `AS $composite$`). The extraction is broken and "
+        "gate 10e would prove nothing."
+    )
+    return _assert_region(
+        "COMPOSITE PRELUDE",
+        match.group(0),
+        _COMPOSITE_PRELUDE_MIN_CHARS,
+        _COMPOSITE_FUNCTION_NAME,
+    )
+
+
+def composite_body() -> str:
+    """REGION 7 — the text between the composite arm's ``$composite$`` tags."""
+    src = _read(_composite_migration_path(), "_COMPOSITE_MIGRATION_NAME")
+    match = re.search(r"\$composite\$(.*?)\$composite\$", src, re.DOTALL)
+    assert match is not None, (
+        "the composite migration has no $composite$...$composite$ block. The "
+        "function body must stay dollar-quoted with that tag; if the tag "
+        "changed, change it here in the same commit."
+    )
+    return _assert_region(
+        "COMPOSITE BODY",
+        match.group(1),
+        _COMPOSITE_BODY_MIN_CHARS,
+        "enqueue_compute_job(",
+    )
+
+
+def composite_guard_region() -> str:
+    """REGION 8 — the ``_stamp_failed`` closure inside the composite handler.
+
+    The composite handler has a terminal stamp of its OWN, distinct from
+    ``_stamp_strategy_analytics_failed`` (region 5), and plan 04 extended the
+    D-15 non-destructive guard onto it. Same indentation rule as region 5: the
+    closure sits inside ``run_stitch_composite_job``, so its body is every
+    subsequent line indented FURTHER than the ``async def``, and the region ends
+    at the first following non-blank line indented ``<=`` it. What follows here
+    is a comment at the enclosing function's level, not a ``def`` — which is
+    exactly why the rule is written on indentation rather than on statement kind.
+    """
+    src = _read(_job_worker_path(), "services/job_worker.py")
+    lines = src.splitlines()
+    start: int | None = None
+    for index, line in enumerate(lines):
+        if line.strip().startswith("async def _stamp_failed"):
+            start = index
+            break
+    assert start is not None, (
+        "services/job_worker.py no longer defines the `_stamp_failed` closure "
+        "inside run_stitch_composite_job. Gate 11 reads that closure; if the "
+        "composite non-destructive guard moved, move this extractor with it — do "
+        "not delete the gate, it is the only thing pinning the composite arm's "
+        "SQL marker to the Python one."
+    )
+    indent = len(lines[start]) - len(lines[start].lstrip())
+    end = len(lines)
+    for index in range(start + 1, len(lines)):
+        line = lines[index]
+        if not line.strip():
+            continue
+        if len(line) - len(line.lstrip()) <= indent:
+            end = index
+            break
+    return _assert_region(
+        "COMPOSITE GUARD REGION",
+        "\n".join(lines[start:end]),
+        _COMPOSITE_GUARD_REGION_MIN_CHARS,
+        "_stamp_failed",
+    )
+
+
 def _sql_string_list(literal_list: str) -> set[str]:
     """``"'a', 'b'"`` -> ``{"a", "b"}``."""
     return {value for value in re.findall(r"'([^']*)'", literal_list)}
@@ -471,6 +593,20 @@ class TestAntiVacuityFloor:
 
     def test_guard_region_is_real(self) -> None:
         assert len(guard_region()) >= _GUARD_REGION_MIN_CHARS
+
+    def test_composite_prelude_region_is_real(self) -> None:
+        assert len(composite_declaration_prelude()) >= _COMPOSITE_PRELUDE_MIN_CHARS
+
+    def test_composite_guard_region_is_real(self) -> None:
+        assert len(composite_guard_region()) >= _COMPOSITE_GUARD_REGION_MIN_CHARS
+
+    def test_composite_body_region_is_real(self) -> None:
+        """⛔ Gate 10b's venue scan is an ABSENCE assertion over this region, and
+        an absence assertion over an empty string is green. Floored and
+        sentinelled separately from the fan-out's body for that reason."""
+        region = composite_body()
+        assert len(region) >= _COMPOSITE_BODY_MIN_CHARS
+        assert "enqueue_compute_job(" in region
 
 
 # ---------------------------------------------------------------------------
@@ -943,4 +1079,384 @@ class TestGate9SuccessSetDrift:
             "NONE of the accounts the D-15 guard exists for while still looking "
             "like a guard in review, and simultaneously marks every healthy "
             "ledger strategy stale in the view."
+        )
+
+
+# ---------------------------------------------------------------------------
+# GATE 10 — LEDGER-01, the COMPOSITE arm (plan 04)
+# ---------------------------------------------------------------------------
+# The composite arm (migration 20260825140000) is a SECOND cross-tenant enqueue
+# surface, on a SECOND kind, with its own schedule. Every static property gates
+# 2/3/4/5/7 pin on the single-key arm has to hold for it too, and none of them
+# reach it automatically: four of those five read a region extracted from the
+# fan-out migration BY NAME.
+#
+# Gate 3a is the one exception — its glob DOES match this migration — and that
+# is precisely why _KNOWN_LEDGER_REFRESH_MIGRATIONS was raised to 3 in the same
+# commit as the file it counts. Gate 10a re-states the membership directly, so
+# "the composite migration is inside the dormancy scan" fails loudly and for a
+# distinguishable reason rather than by the floor going quiet.
+_COMPOSITE_BURST_CAP_MAX: Final[int] = 2
+
+_COMPOSITE_CAP_DERIVATION: Final[str] = (
+    "THE COMPOSITE BURST CAP (plan 04). Derived as BLAST RADIUS, not as "
+    "throughput:\n"
+    "  * stitch_composite is CHAIN-TERMINAL "
+    "(JOB_CHAIN_FOLLOW_ON['stitch_composite'] == (), job_worker.py:528), so one "
+    "enqueue costs exactly ONE 1200 s handler ceiling "
+    "(TIMEOUT_PER_KIND['stitch_composite'] == 20 * 60, :502) and no follow-on "
+    "hop.\n"
+    "  * ⛔ Do NOT re-derive this as 'n x 1200 s fits inside an hourly tick'. "
+    "That assumes this arm OWNS the tick — it does not, the same sequential "
+    "worker is simultaneously draining the single-key arm's 1500 s chains — and "
+    "at n = 3 it lands on 3600 s, an EQUALITY with the tick, which is not a "
+    "bound.\n"
+    "  * ⛔ THE BINDING CONSTRAINT IS THE 20-HOUR ATTEMPT COOLDOWN. This integer "
+    "is a BURST CAP: it bounds what ONE tick adds to a SHARED queue. Overhang "
+    "past the tick is EXPECTED and is absorbed by the cooldown and the "
+    "non-terminal in-flight guard. A reader who believes this integer is the "
+    "safety mechanism will raise it.\n"
+    "  * The measured live composite cohort is 1 (161.1-CONTEXT.md census). The "
+    "cap is set strictly above that so it never binds today, and low enough that "
+    "a grown cohort adds at most 2400 s to one tick. If the cohort exceeds it, "
+    "RE-DERIVE against a re-measured census — do not raise it reflexively."
+)
+
+
+class TestGate10CompositeArm:
+    """Everything gates 2-7 pin on the single-key fan-out, pinned on the
+    composite arm as well."""
+
+    def test_10a_composite_migration_is_inside_the_dormancy_scan(self) -> None:
+        """Gate 3a scans by GLOB, never by filename enumeration (D-18), so it
+        picks this migration up for free — but only while the migration's name
+        actually matches the glob. Assert the membership rather than assume it:
+        a rename to something outside `*ledger_refresh*` would silently drop
+        this file out of the ONLY gate standing between a schedule and PROD."""
+        paths = {path.name for path in _migrations_dir().glob(
+            _LEDGER_REFRESH_MIGRATION_GLOB
+        )}
+        assert _COMPOSITE_MIGRATION_NAME in paths, (
+            f"{_COMPOSITE_MIGRATION_NAME} is not matched by the dormancy glob "
+            f"{_LEDGER_REFRESH_MIGRATION_GLOB!r} (matched: {sorted(paths)}). "
+            "Gate 3a is the scan that keeps a pg_cron registration out of a "
+            "migration, and migrations AUTO-APPLY to PROD on merge to main. A "
+            "composite migration outside that glob could register its own "
+            "schedule and reach production with no deploy step and no founder "
+            "action. Rename it back into the glob, or widen the glob in the same "
+            "commit."
+        )
+
+    def test_10b_composite_body_declares_no_venue_literal(self) -> None:
+        """The composite arm declares NO venue of its own — not in code and not
+        in prose. Its cohort comes entirely from public.ledger_refresh_staleness,
+        the single SQL home of the venue set (D-05).
+
+        ⚠️ WORD-BOUNDARY, not substring, and the difference is FORCED rather
+        than chosen. This body MUST reference the staleness view's
+        `has_mt5_member` column — that is the D-01/D-13 membership conjunct, and
+        there is no other way to express it. Measured: a substring scan finds one
+        `mt5` hit inside that identifier and would therefore be RED against a
+        perfectly correct file, which is exactly the defect plan 05 caught in its
+        own gate 7 before shipping it.
+
+        The word-boundary form is still falsifiable in the direction that
+        matters: a venue written as a SQL literal is `'mt5'`, and a quote is a
+        non-word character, so both boundaries are present and the scan fires. An
+        identifier like `has_mt5_member` has word characters on both sides of the
+        token and does not. Proven by neutering — a real venue literal added to
+        this body reddens this test.
+
+        ⛔ Gate 2's substring scan over the FAN-OUT body is deliberately left
+        alone. Relaxing an existing anti-vacuity pin to share code with a new one
+        is how a gate quietly gets weaker.
+        """
+        body = composite_body()
+        found = sorted(
+            venue
+            for venue in _banned_venue_names()
+            if re.search(r"\b" + re.escape(venue) + r"\b", body)
+        )
+        assert not found, (
+            "SINGLE SOURCE VIOLATION: the composite arm's function body names "
+            f"{found}. The cohort must come entirely from "
+            "public.ledger_refresh_staleness, which is the single SQL home of "
+            "the venue set.\n"
+            "The authority is (1) the ROADMAP fence — `_LEDGER_BACKED_SOURCES` "
+            "(analytics-service/services/ingestion/long_fetch.py) is the SOLE "
+            "authority for which venues are ledger-backed — and (2) the measured "
+            "incident: a hand-copied mirror drifted to ONE venue while Python "
+            "held THREE, and cost a funded MT5 account its publish path.\n"
+            "If a venue genuinely must be distinguished here, the correct move "
+            "is to add a COLUMN to the view — which is exactly what the "
+            "has-member flag this body already reads is — not a literal to this "
+            "body."
+        )
+
+    def test_10b2_deferred_venue_conjunct_is_present(self) -> None:
+        """The D-01/D-13 membership exclusion, pinned STATICALLY as well as
+        behaviourally.
+
+        Two jobs in one assertion, and the second is why it is not redundant with
+        the SQL gate's arm E:
+
+          1. CONTEXT D-01 requires that a future composite on the deferred venue
+             be a VISIBLE, NAMED skip rather than silent mishandling. The count
+             of such composites is ZERO today, so the behavioural arm proves the
+             conjunct works on a fixture; this proves the conjunct is still
+             THERE.
+          2. It is the standing justification for gate 10b's word-boundary form.
+             If this column reference ever left the body, the exemption that
+             form buys would be unused, and the next reader would 'simplify' the
+             scan back to a substring test — which would then be RED the moment
+             the conjunct came back.
+        """
+        code = _strip_sql_comments(composite_body())
+        assert re.search(
+            r"has_mt5_member\s*=\s*FALSE", code, re.IGNORECASE
+        ) is not None, (
+            "the composite arm's body no longer excludes composites with a "
+            "member on the deferred venue by an explicit "
+            "`has_mt5_member = FALSE` conjunct.\n"
+            "⛔ CONTEXT D-01 records this as a CURRENT FACT, not a structural "
+            "invariant: the count is zero today and the founder explicitly "
+            "expects such composites may exist later. The conjunct must be "
+            "present and commented so that a future one is SKIPPED DELIBERATELY "
+            "— never silently dragged into a composite crawl that would "
+            "serialise on that venue's single shared terminal registry.\n"
+            "Do not delete it on the grounds that nothing matches it."
+        )
+
+    def test_10c_composite_function_name_appears_in_exactly_one_migration(
+        self,
+    ) -> None:
+        """Gate 3b's twin. 3a's glob cannot see a migration whose FILENAME lacks
+        the phase token, so a differently-named migration could register a
+        schedule for THIS function and never enter that scan."""
+        hits = sorted(
+            path.name
+            for path in _migrations_dir().glob("*.sql")
+            if _COMPOSITE_FUNCTION_NAME in path.read_text(encoding="utf-8")
+        )
+        assert len(hits) == 1, (
+            "expected the composite arm's function name to appear in EXACTLY 1 "
+            f"migration (the one that defines it, {_COMPOSITE_MIGRATION_NAME}); "
+            f"found {len(hits)}: {hits}.\n"
+            "  0 hits ⇒ the search is broken (or the migration was renamed "
+            "without moving _COMPOSITE_MIGRATION_NAME) — this gate is proving "
+            "nothing, fix it rather than relaxing it.\n"
+            "  2+ hits ⇒ a second migration either REGISTERS A SCHEDULE for the "
+            "composite arm or CALLS it. Both are forbidden from a migration: "
+            "migrations auto-apply to PROD, and activation belongs to "
+            "docs/runbooks/ledger-refresh-go-live.md (WORKER-03)."
+        )
+
+    def test_10d_activation_is_exact_lowercase_string_equality(self) -> None:
+        """Gate 4, on the composite body.
+
+        ⚠️ The composite arm reads the SAME setting as the single-key arm, and
+        that is the design: one reset kills BOTH arms on the next tick, while the
+        two SCHEDULES stay independently unschedulable. Asserting the name here
+        is therefore also asserting that the shared kill switch is still shared —
+        a composite arm on a setting of its own would leave a founder resetting
+        one flag under incident pressure while the other arm kept ticking.
+        """
+        code = _strip_sql_comments(composite_body())
+        assert f"current_setting('{_ACTIVATION_SETTING}'" in code, (
+            "the composite arm's body does not read "
+            f"current_setting('{_ACTIVATION_SETTING}', …). That setting is the "
+            "SHARED fail-closed switch: it is what makes merging this migration "
+            "behaviour-neutral, and it is the incident-pressure kill switch for "
+            "BOTH arms at once (rollback level 1 in the runbook). A composite "
+            "arm reading a different setting would survive the kill switch."
+        )
+        assert re.search(r"(?:<>|!=|=)\s*'true'", code) is not None, (
+            "LEDGER-02 LOCK B: the composite arm does not compare the activation "
+            "setting by EXACT equality against the lowercase string 'true'. A "
+            "truthiness test — or a cast — would open the flag on '1', on 'on', "
+            "on 'TRUE' and on 'true ' with a trailing space, which is four ways "
+            "to activate a cross-tenant PROD fan-out by accident."
+        )
+        casts = sorted(
+            set(re.findall(r"::\s*(bool(?:ean)?)\b", code, flags=re.IGNORECASE))
+        )
+        assert not casts, (
+            f"LEDGER-02 LOCK B: the composite arm's body casts to {casts}. The "
+            "activation comparison must be exact string equality against 'true' "
+            "— a boolean cast accepts '1', 'on', 'yes' and 't'."
+        )
+
+    def test_10e_burst_cap_is_bounded(self) -> None:
+        """Gate 5's analogue, with the composite arm's OWN derivation.
+
+        ⛔ The integer is NOT copied from the single-key arm, and neither is the
+        reasoning: the two kinds have different CHAIN SHAPES, not merely
+        different ceilings. This gate pins the INTEGER, not the prose around it —
+        if the derivation in migration 20260825140000 ever moves, move this bound
+        with it and say so in the SUMMARY.
+        """
+        code = _strip_sql_comments(composite_body())
+        limits: list[str] = re.findall(r"\bLIMIT\s+(\d+)", code)
+        assert len(limits) == 1, (
+            "expected exactly ONE per-tick LIMIT in the composite arm's body, "
+            f"found {len(limits)}: {limits}. Two bounds in one query means the "
+            "effective bound is whichever is smaller, and neither is the one "
+            "anybody derived.\n" + _COMPOSITE_CAP_DERIVATION
+        )
+        assert int(limits[0]) <= _COMPOSITE_BURST_CAP_MAX, (
+            f"LEDGER-01: the composite per-tick burst cap is {limits[0]}, above "
+            f"the derived {_COMPOSITE_BURST_CAP_MAX}.\n"
+            + _COMPOSITE_CAP_DERIVATION
+        )
+
+    def test_10f_declaration_pins_search_path_and_definer(self) -> None:
+        """Gate 7's first half, on the composite arm's DECLARATION PRELUDE.
+
+        Reads the prelude and not the body for the reason plan 05 measured and
+        recorded: `SET search_path` is part of the CREATE FUNCTION declaration
+        and sits OUTSIDE the dollar-quote delimiters, so a body-scoped gate would
+        be RED against a correct file."""
+        prelude = _strip_sql_comments(composite_declaration_prelude())
+        assert re.search(
+            r"SET\s+search_path\s*=", prelude, re.IGNORECASE
+        ) is not None, (
+            "the composite arm is SECURITY DEFINER without a pinned "
+            "`search_path`. An unpinned search_path on a SECDEF function lets "
+            "any caller who can create objects in an earlier schema shadow the "
+            "tables this body reads and writes, and it executes as the definer. "
+            "The hygiene triple is: zero parameters, SET search_path, REVOKE "
+            "from the browser-reachable roles."
+        )
+        assert re.search(
+            r"SECURITY\s+DEFINER", prelude, re.IGNORECASE
+        ) is not None, (
+            "the composite arm is no longer SECURITY DEFINER. If that is "
+            "deliberate the REVOKEs and the search_path pin need revisiting "
+            "together — do not change one of the three alone."
+        )
+
+    def test_10g_execute_is_revoked_from_the_browser_reachable_roles(self) -> None:
+        """Gate 7's second half, on the composite arm."""
+        src = _strip_sql_comments(
+            _read(_composite_migration_path(), "_COMPOSITE_MIGRATION_NAME")
+        )
+        match = re.search(
+            r"REVOKE\s+ALL\s+ON\s+FUNCTION\s+public\."
+            + re.escape(_COMPOSITE_FUNCTION_NAME)
+            + r"\s*\(\s*\)\s*FROM\s+([^;]*);",
+            src,
+            re.DOTALL | re.IGNORECASE,
+        )
+        assert match is not None, (
+            "the composite migration contains no `REVOKE ALL ON FUNCTION "
+            f"public.{_COMPOSITE_FUNCTION_NAME}() FROM …` statement. The public "
+            "schema in this project carries default privileges granting EXECUTE "
+            "to anon and authenticated, so without the REVOKE this cross-tenant "
+            "enqueue is reachable from the browser."
+        )
+        revoked = {name.strip().lower() for name in match.group(1).split(",")}
+        for role in ("public", "anon", "authenticated"):
+            assert role in revoked, (
+                f"EXECUTE is not revoked from `{role}` (revoked from: "
+                f"{sorted(revoked)}). pg_cron runs as superuser and needs no "
+                "GRANT, so there is no caller this REVOKE can break — but a "
+                "browser-reachable role that can EXECUTE it can fan out compute "
+                "jobs across every tenant."
+            )
+
+    def test_10h_the_two_arms_write_distinguishable_markers(self) -> None:
+        """The two fan-outs must not write the SAME metadata source token.
+
+        Two independent things break if they collide, and neither raises:
+
+          1. the queue stops distinguishing the two mechanisms, so a founder
+             reading `compute_jobs` at activation cannot tell which arm produced
+             a row — and the runbook's rollback story is per-arm;
+          2. the two non-destructive failure guards key on these strings, and a
+             shared token would make either guard fire on the other arm's jobs.
+        """
+        sql_markers: list[str] = re.findall(
+            r"'source'\s*,\s*'([^']*)'", _strip_sql_comments(function_body())
+        )
+        composite_markers: list[str] = re.findall(
+            r"'source'\s*,\s*'([^']*)'", _strip_sql_comments(composite_body())
+        )
+        assert len(sql_markers) == 1 and len(composite_markers) == 1, (
+            "expected exactly ONE `'source', '<marker>'` pair in EACH arm's "
+            f"jsonb_build_object; found single-key={sql_markers} "
+            f"composite={composite_markers}."
+        )
+        assert sql_markers[0] != composite_markers[0], (
+            "the composite arm and the single-key arm write the SAME job "
+            f"metadata source token ({composite_markers[0]!r}). They must "
+            "differ: the token is how the two mechanisms are told apart in the "
+            "queue, and it is the key each arm's non-destructive failure guard "
+            "compares against before it declines to un-publish a live row."
+        )
+
+
+# ---------------------------------------------------------------------------
+# GATE 11 — the COMPOSITE refresh marker, a second cross-language contract
+# ---------------------------------------------------------------------------
+class TestGate11CompositeMarkerDrift:
+    """Gate 8's twin, for the composite arm's own marker.
+
+    Plan 04 added a SECOND non-destructive guard, on the ``_stamp_failed``
+    closure inside ``run_stitch_composite_job``, keyed on a SECOND metadata
+    source token. That is a second cross-language contract with no compiler
+    between its ends, so it needs its own drift gate — gate 8 pins the
+    single-key pair and cannot see this one.
+    """
+
+    def test_composite_sql_marker_equals_composite_python_marker(self) -> None:
+        sql_markers: list[str] = re.findall(
+            r"'source'\s*,\s*'([^']*)'", _strip_sql_comments(composite_body())
+        )
+        assert len(sql_markers) == 1, (
+            "expected exactly ONE `'source', '<marker>'` pair in the composite "
+            f"arm's jsonb_build_object, found {len(sql_markers)}: {sql_markers}."
+        )
+        python_markers: list[str] = re.findall(
+            r'_job_source\s*==\s*"([^"]*)"', composite_guard_region()
+        )
+        assert len(python_markers) == 1, (
+            'expected exactly ONE `_job_source == "<marker>"` comparison in the '
+            "composite handler's `_stamp_failed` closure, found "
+            f"{len(python_markers)}: {python_markers}. The marker is spelled "
+            "INLINE at both ends on purpose, so this gate has two literals to "
+            "compare."
+        )
+        assert sql_markers[0] == python_markers[0], (
+            "COMPOSITE MARKER DRIFT: the composite arm writes "
+            f"metadata->>'source' = {sql_markers[0]!r} "
+            f"({_COMPOSITE_MIGRATION_NAME}) but the non-destructive failure "
+            "guard in run_stitch_composite_job compares against "
+            f"{python_markers[0]!r}.\n"
+            "⛔ These are the two ends of a cross-language contract WITH NO "
+            "COMPILER BETWEEN THEM. If they drift, the arm still enqueues and "
+            "the guard still compiles — there is no error anywhere. THE ONLY "
+            "SYMPTOM IS THAT THE NEXT FAILED COMPOSITE REFRESH SILENTLY TAKES A "
+            "FUNDED ACCOUNT'S FACTSHEET DARK (computation_status flipped to "
+            "'failed', which src/lib/strategyGate.ts reads as "
+            "ANALYTICS_FAILED).\n"
+            "⚠️ The venue whose ONLY live strategy is a composite is the venue "
+            "this whole arm exists for, so this contract has a cohort of one and "
+            "no redundancy."
+        )
+
+    def test_composite_guard_uses_the_single_sourced_success_set(self) -> None:
+        """The composite guard must compare against the shared frozenset, not an
+        inline status list of its own — a third spelling of the success set
+        would drift from both the view and the constant, and gate 9 could not
+        see it."""
+        region = composite_guard_region()
+        assert "STRATEGY_ANALYTICS_TERMINAL_SUCCESS_STATUSES" in region, (
+            "the composite handler's `_stamp_failed` no longer references "
+            "STRATEGY_ANALYTICS_TERMINAL_SUCCESS_STATUSES. That constant is the "
+            "single source gate 9 pins against the SQL view; a locally-inlined "
+            "status list inside this guard would be a spelling that neither gate "
+            "9 nor the view's own predicate can see.\n"
+            "⛔ The PROD census reads `complete` 0 / `complete_with_warnings` 5, "
+            "so a guard narrowed to {'complete'} would protect NONE of the live "
+            "ledger accounts while still looking like a guard in review."
         )

@@ -5573,21 +5573,109 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
         {csv_source, composite} — current behavior, byte-unchanged."""
         scrubbed = str(scrub_freeform_string(message))
 
-        def _read_existing_failed_flags() -> dict[str, Any]:
+        # ONE select, BOTH columns: the flags for M-2's merge above, and the
+        # CURRENT status for the non-destructive guard below.
+        def _read_existing_failed_row() -> dict[str, Any]:
             res = (
                 supabase.table("strategy_analytics")
-                .select("data_quality_flags")
+                .select("data_quality_flags, computation_status")
                 .eq("strategy_id", strategy_id)
                 .maybe_single()
                 .execute()
             )
             row = getattr(res, "data", None) or {}
-            return dict(row.get("data_quality_flags") or {})
+            return dict(row) if isinstance(row, dict) else {}
 
-        existing_flags = await db_execute(_read_existing_failed_flags)
+        existing_row = await db_execute(_read_existing_failed_row)
+        existing_flags = dict(existing_row.get("data_quality_flags") or {})
+        _existing_status = existing_row.get("computation_status")
+        existing_status: str | None = (
+            _existing_status if isinstance(_existing_status, str) else None
+        )
         merged_flags: dict[str, Any] = dict(existing_flags)
         merged_flags["csv_source"] = True
         merged_flags["composite"] = True
+
+        # ---- D-15, extended to the COMPOSITE arm (Phase 161.1 / plan 04) -----
+        # The stamp below is an authoritative downgrade: `failed` +
+        # `computation_warned = False`. That is exactly RIGHT for the case this
+        # closure was written for — a user-initiated stitch, whose wizard poller
+        # must reach a terminal gate instead of spinning forever (see this
+        # closure's docstring) — and exactly WRONG for a background maintenance
+        # refresh, which no poller is watching and whose only cost is a LIVE
+        # factsheet going dark: src/lib/strategyGate.ts returns ANALYTICS_FAILED
+        # for a `failed` row, and every live ledger row in the PROD census is
+        # `complete_with_warnings`.
+        #
+        # ⚠️ WORDING NOTE, deliberate: the M-3 source-scan gate
+        # (tests/test_stitch_composite_job.py) bans the literal that names the
+        # advanced lifecycle state from this function's ENTIRE source, comments
+        # included, because this job must never advance it. Measured — an earlier
+        # draft of this comment used that word descriptively and turned the gate
+        # RED. Prose must never trip a mechanical gate; say "live" here.
+        #
+        # ⚠️ WHY THIS IS NEEDED HERE AND NOT COVERED BY PLAN 02's GUARD. That
+        # guard lives in `_stamp_strategy_analytics_failed`, on the single-key
+        # derive path, and never runs for this kind. Until plan 04 this stamp was
+        # only reachable from a user action or an owner resync; the composite
+        # refresh arm (migration 20260825140000) makes it reachable RECURRINGLY,
+        # on the one venue whose only live strategy IS a composite.
+        #
+        # ⛔ FAIL-SAFE DIRECTION, non-negotiable and identical to D-15's: anything
+        # unrecognised falls through to the destructive stamp below. No metadata,
+        # a non-dict metadata, a DIFFERENT source (including the single-key arm's
+        # marker), no prior row, or a prior row that is not terminal-success — all
+        # of them take the LOUD path. Never fail toward suppression.
+        #
+        # The failure is RE-ROUTED, not hidden: computation_error and the cleared
+        # reaper anchor still land, the compute_jobs row (which the arm's ATTEMPT
+        # cooldown reads) still records the attempt, and the freshness verdict in
+        # public.ledger_refresh_staleness cannot be advanced by a failed stitch —
+        # so a persistently failing composite keeps reading STALE, loudly, rather
+        # than healthy.
+        _job_metadata = job.get("metadata") or {}
+        _job_source = (
+            _job_metadata.get("source") if isinstance(_job_metadata, dict) else None
+        )
+        # ⛔ The marker is spelled INLINE, and it is a CONTRACT rather than a
+        # label: the other end is `jsonb_build_object('source', …)` in
+        # supabase/migrations/20260825140000_ledger_refresh_composite_arm.sql.
+        # There is no compiler between the two — if they drift, the arm still
+        # enqueues and this still compiles, and the only symptom is that the next
+        # failed refresh silently un-publishes a funded account. It is
+        # deliberately a DIFFERENT string from the single-key arm's, so the two
+        # guards cannot cross-fire.
+        if (
+            _job_source == "ledger-refresh-composite"
+            and existing_status in STRATEGY_ANALYTICS_TERMINAL_SUCCESS_STATUSES
+        ):
+
+            def _upsert_error_only() -> None:
+                supabase.table("strategy_analytics").upsert(
+                    {
+                        "strategy_id": strategy_id,
+                        # JOB-01 still applies: clear the reaper anchor on exit.
+                        # It carries no publish meaning.
+                        "computing_started_at": None,
+                        "computation_error": scrubbed,
+                        # M-2's read-modify-write is PRESERVED, not bypassed. The
+                        # coverage mask must survive a failed refresh or real gap
+                        # days render with no missing-segment annotation.
+                        "data_quality_flags": merged_flags,
+                    },
+                    on_conflict="strategy_id",
+                ).execute()
+
+            await db_execute(_upsert_error_only)
+            logger.warning(
+                "stitch_composite: a MARKED maintenance refresh failed for "
+                "strategy %s whose analytics row is %s — recording the error "
+                "WITHOUT downgrading publish state (Phase 161.1 D-15). The "
+                "strategy stays stale in ledger_refresh_staleness until a stitch "
+                "succeeds.",
+                strategy_id, existing_status,
+            )
+            return
 
         def _upsert() -> None:
             supabase.table("strategy_analytics").upsert(
