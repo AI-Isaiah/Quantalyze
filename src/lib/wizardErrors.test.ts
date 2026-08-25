@@ -4306,6 +4306,101 @@ describe("[161-05 / WIZERR-03] KEY_ORPHANED offers a remedy that can succeed", (
         "perform is the D-17 class this requirement exists to remove.",
     ).toEqual([]);
   });
+
+  /**
+   * [162-06 / HONEST-06 / D-162-3] THE REMEDY THAT BECAME REAL — AND THE
+   * SENTENCE THAT DENIED IT, WHICH HAD TO GO IN THE SAME COMMIT.
+   *
+   * Until 162-06, "Finish setup →" on a stored-but-unused key reopened this
+   * wizard onto its credential form, so the owner re-POSTed credentials for a
+   * key we already held and landed back on THIS refusal. The copy said so:
+   * `fix[1]` read "To reuse this exact account, email security@quantalyze.com …
+   * releasing the stored key is not something you can do from this page." That
+   * was true then and became FALSE the moment the client threaded the owner's
+   * own key id — for exactly the users this phase is about.
+   *
+   * ⚠️ TWO PROPERTIES, NOT A WORDING. (1) The self-serve route is NAMED, so
+   * deleting it reds. (2) The retired claim cannot come back. Neither asserts a
+   * sentence: an honest reword of either keeps both green.
+   *
+   * ⚠️ AND THE NAMING IS CONDITIONAL BY CONTRACT, not by taste. `/my-strategies`
+   * guards on `requireRolePage(…, "allocator")`; a `role: "manager"` profile is
+   * redirected off it, and the manager wizard is a place this refusal renders.
+   * A FLAT assertion of that page would re-open the same D-17 class the case
+   * above exists to keep closed — for the other population.
+   */
+  it("names the self-serve reuse route 162-06 made real, and names it conditionally", () => {
+    const copy = WIZARD_ERROR_COPY.KEY_ORPHANED;
+    const bullets = copy.fix.map((f) => f.toLowerCase());
+
+    // VACUITY FENCE — the copy under test exists at all.
+    expect(
+      bullets.join("").length,
+      "the fix bullets collapsed to nothing, so every assertion below is vacuous",
+    ).toBeGreaterThan(80);
+
+    const reuseBullet = bullets.find(
+      (b) => b.includes("my strategies") && b.includes("finish setup"),
+    );
+    expect(
+      reuseBullet,
+      "No bullet names the route an owner can actually take: My Strategies " +
+        "lists a stored key with no strategy as a 'No strategy yet' row, and " +
+        "162-06 made its 'Finish setup' control REUSE that key instead of " +
+        "reopening this wizard's credential form. A refusal that withholds the " +
+        "one remedy that now works is the D-17 class in a new costume.",
+    ).toBeDefined();
+
+    expect(
+      reuseBullet,
+      "The My Strategies bullet asserts that page FLATLY. It is guarded by " +
+        "requireRolePage(…, 'allocator'), and this refusal also renders in the " +
+        "manager wizard, where that page redirects away — so an unconditional " +
+        "sentence names an unreachable surface for the manager population. It " +
+        "is also not guaranteed to LIST the key: the listing filters on " +
+        "is_active / sync_status, while the fence that emits this code filters " +
+        "only on disconnected_at.",
+    ).toMatch(/\bif\b/);
+  });
+
+  it("no longer tells the owner that reusing this exact account means emailing us", () => {
+    // A PHRASE CLASS, lower-cased and hand-typed — an honest reword stays
+    // green, a restoration of the retired claim reds. ⛔ The neighbouring
+    // clause about RELEASING the key is NOT banned and must not be: nothing we
+    // ship releases a stored key for any role, so that sentence is still true
+    // and still shipped in the last bullet.
+    const RETIRED_CLAIMS = [
+      "to reuse this exact account, email",
+      "reuse this exact account, email",
+    ] as const;
+
+    const claimsIn = (haystack: string): string[] =>
+      RETIRED_CLAIMS.filter((p) => haystack.toLowerCase().includes(p));
+
+    // POSITIVE CONTROL FIRST — the predicate is live against the exact sentence
+    // that shipped before 162-06. ⛔ Never delete this: with a phrase list that
+    // matches nothing, the assertion below passes while checking nothing.
+    expect(
+      claimsIn(
+        "To reuse this exact account, email security@quantalyze.com with the " +
+          "correlation id below: releasing the stored key is not something you " +
+          "can do from this page.",
+      ),
+      "The retired-claim predicate matched NOTHING in the exact sentence 162-06 " +
+        "replaced, so it has gone blind. ⛔ Fix the phrase list, never delete " +
+        "this control.",
+    ).not.toEqual([]);
+
+    const copy = WIZARD_ERROR_COPY.KEY_ORPHANED;
+    const surface = [copy.title, copy.cause, ...copy.fix].join(" | ");
+    expect(
+      claimsIn(surface),
+      "KEY_ORPHANED tells the owner that reusing this exact account means " +
+        "emailing us. Since 162-06 an owner who can reach My Strategies reuses " +
+        "the stored key themselves through 'Finish setup', so that sentence " +
+        "lies to the population this phase exists for.",
+    ).toEqual([]);
+  });
 });
 
 /**

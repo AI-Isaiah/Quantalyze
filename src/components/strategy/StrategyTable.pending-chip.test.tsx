@@ -672,6 +672,94 @@ describe("StrategyTable Delta 5 — unranked placeholder rows for bare keys", ()
     expect(onFinishSetup).toHaveBeenCalledTimes(1);
   });
 
+  /**
+   * 162-06 / HONEST-06 / D-162-3 — T-1. THE CALLBACK CARRIES **THIS** ROW'S KEY.
+   *
+   * Before 162-06 the handler was passed bare (`onClick={onFinishSetup}`), so
+   * every row said the same thing — "open the wizard" — and the host had no way
+   * to tell which key had been clicked. The wizard then opened on a blank
+   * credential form, the owner pasted the credentials of a key we already held,
+   * and the venue-identity index refused them: the KEY_ORPHANED loop.
+   *
+   * The count assertion above cannot see that: it is satisfied by a callback
+   * that ignores its argument entirely.
+   */
+  it("162-06: each row fires onFinishSetup with ITS OWN key id (the wrong-key falsifier)", () => {
+    const onFinishSetup = vi.fn();
+    render(
+      <StrategyTable
+        strategies={[privateRow()]}
+        categorySlug="chip-spec"
+        visibility="owner-all-statuses"
+        placeholderKeys={PLACEHOLDER_KEYS}
+        onFinishSetup={onFinishSetup}
+      />,
+    );
+
+    // Locate each button through the ROW that names the key, so the mapping
+    // under test is row → id and never index → id.
+    for (const key of PLACEHOLDER_KEYS) {
+      const row = placeholderRows().find((r) =>
+        (r.textContent ?? "").includes(key.keyLabel),
+      );
+      expect(row, `no placeholder row rendered for ${key.keyLabel}`).toBeDefined();
+      onFinishSetup.mockClear();
+      fireEvent.click(within(row!).getByRole("button", { name: /Finish setup/ }));
+      expect(
+        onFinishSetup.mock.calls,
+        `Clicking the "${key.keyLabel}" row did not report that row's key id. ` +
+          "A handler that reports the first key, the last key, or nothing at " +
+          "all passes the count assertion above and still reopens the wizard " +
+          "on the wrong key — or on none.",
+      ).toEqual([[key.id]]);
+    }
+  });
+
+  /**
+   * 162-06 — O-7. POPULATION (c): A KEY MID-SYNC NEVER OFFERS "Finish setup →".
+   *
+   * 162-UI-SPEC § C-5 lists three populations for the preselect. (a) and (b)
+   * are stored keys with nothing (or only a draft) behind them, and both ride
+   * the reuse path. (c) is a key whose strategy is syncing — and it needs no
+   * preselect state at all, because a key with a live strategy behind it is
+   * COVERED: it is not a bare key, so no placeholder row is minted for it and
+   * the control that starts a preselect is never rendered.
+   *
+   * That is the property pinned here, from both directions: the syncing row
+   * offers no Finish setup, and the rows that DO offer it carry no Syncing
+   * chip. It reds if the control is ever added to ranked rows — which would
+   * hand the wizard a key id whose strategy already exists, and the reuse arm
+   * refuses exactly that (VENUE_ALREADY_CONNECTED) after the click.
+   */
+  it("162-06 O-7: a mid-sync row keeps its Syncing chip and offers no Finish setup", () => {
+    render(
+      <StrategyTable
+        strategies={[jobRunningRow()]}
+        categorySlug="chip-spec"
+        visibility="owner-all-statuses"
+        placeholderKeys={PLACEHOLDER_KEYS}
+        onFinishSetup={() => {}}
+      />,
+    );
+
+    const syncing = rowFor(NAME_SUBJECT);
+    // Vacuity fence: the fixture really is in the mid-sync state, so the
+    // absence asserted next is about THAT state and not about an empty table.
+    expect(chipIn(syncing, "Syncing")).not.toBeNull();
+    expect(
+      within(syncing).queryByRole("button", { name: /Finish setup/ }),
+    ).toBeNull();
+
+    // …and the mirror: the rows that DO offer it are the bare keys, none of
+    // which claims to be syncing anything.
+    const offering = screen.getAllByRole("button", { name: /Finish setup/ });
+    expect(offering).toHaveLength(PLACEHOLDER_KEYS.length);
+    for (const p of placeholderRows()) {
+      expect(chipIn(p, "Syncing")).toBeNull();
+      expect(within(p).getByRole("button", { name: /Finish setup/ })).toBeInTheDocument();
+    }
+  });
+
   it("public invariance: with placeholderKeys omitted, zero subordinate rows render", () => {
     render(
       <StrategyTable strategies={[publishedRow()]} categorySlug="chip-spec" />,

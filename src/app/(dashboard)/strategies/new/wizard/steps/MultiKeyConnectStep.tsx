@@ -13,6 +13,7 @@ import {
   ConnectKeyStep,
   type ConnectKeySuccess,
   type ConnectKeyDraft,
+  type PreselectedKey,
 } from "./ConnectKeyStep";
 import {
   recogniseSeamErrorCode,
@@ -623,6 +624,22 @@ export interface MultiKeyConnectStepProps {
    * dropped). Optional — the standalone/legacy single-key wizard omits it.
    */
   onDirtyChange?: (dirty: boolean) => void;
+  /**
+   * 162-06 / HONEST-06 — PASS-THROUGH to State A's `ConnectKeyStep`, which owns
+   * the saved-key summary. This component adds nothing to it and reads nothing
+   * from it.
+   *
+   * ⚠️ STATE B IGNORES IT, and that is correct rather than an oversight: a
+   * preselect is one stored key, while State B is the composite panel list. The
+   * two cannot co-occur on the /my-strategies path that mints a preselect — a
+   * key that is a composite member is LINKED, so it is not a bare key and never
+   * renders the "Finish setup →" row that starts this. If one ever did arrive
+   * together with a rehydrated membership, the panels win and the preselect
+   * simply does not render; nothing false is shown either way.
+   */
+  preselectKey?: PreselectedKey | null;
+  /** 162-06 — the summary's "Use a different key"; owned by the overlay. */
+  onUseDifferentKey?: () => void;
 }
 
 /**
@@ -669,6 +686,8 @@ export function MultiKeyConnectStep({
   onSuccess,
   draftStrategyId,
   onDirtyChange,
+  preselectKey = null,
+  onUseDifferentKey,
 }: MultiKeyConnectStepProps) {
   const [mode, setMode] = useState<"single" | "multi">("single");
   const [panels, setPanels] = useState<PanelState[]>([]);
@@ -1612,6 +1631,8 @@ export function MultiKeyConnectStep({
           wizardSessionId={wizardSessionId}
           onSuccess={onSuccess}
           onDraftChange={onSingleDraftChange}
+          preselectKey={preselectKey}
+          onUseDifferentKey={onUseDifferentKey}
           footerSlot={
             <Button
               type="button"

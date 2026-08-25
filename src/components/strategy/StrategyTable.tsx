@@ -297,10 +297,19 @@ interface StrategyTableProps {
    * precisely why the wizard is NOT imported here — importing it would drag the
    * overlay into the shared public discovery bundle.
    *
-   * The wizard opens FRESH: that overlay has no preselect seam
-   * today, and inventing one is out of this phase's scope (tracked in TODOS.md).
+   * Phase 162 / HONEST-06 — IT CARRIES THE CLICKED ROW'S KEY ID. The paragraph
+   * that stood here said the wizard "opens FRESH" because the overlay had no
+   * preselect seam (founder ruling 2026-08-05). D-162-3 supersedes that: an
+   * owner who clicks a placeholder row is telling us WHICH stored key they mean,
+   * and dropping that id on the floor is what sent them back into the wizard's
+   * credential form and, for an already-stored key, onto the `KEY_ORPHANED`
+   * refusal. The id is selection intent only — the server re-proves ownership on
+   * the reuse arm of `create-with-key`.
+   *
+   * This component still knows nothing about the wizard: it hands the host the
+   * id off the row it rendered and the host owns everything downstream.
    */
-  onFinishSetup?: () => void;
+  onFinishSetup?: (keyId: string) => void;
   /**
    * Phase 150 / OWN-03 — opens the Mark-ownership dialog for a row (the retro
    * path, D-09/D-11). Client→client function props, minted in
@@ -1390,7 +1399,13 @@ export function StrategyTable({
                         <td className="px-4 py-3 text-right">
                           <button
                             type="button"
-                            onClick={onFinishSetup}
+                            // 162-06 / HONEST-06 — THIS row's key id, read off
+                            // the row being rendered. The bare `onClick=
+                            // {onFinishSetup}` this replaces handed the click
+                            // event to a zero-arg callback, so every row said
+                            // the same thing: "open the wizard", with no way to
+                            // tell which key was clicked.
+                            onClick={() => onFinishSetup?.(p.id)}
                             className="text-small text-accent underline underline-offset-2"
                           >
                             Finish setup →
