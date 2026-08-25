@@ -26,6 +26,35 @@ items were dropped, not carried. Categories: **Fix now** / **Fix mid-term** / **
 
 ## 🔴 FIX NOW — live correctness, trust-boundary security, active go-live
 
+0.03. **⚠️ Exchange credentials are never whitespace-trimmed, so a paste with a trailing newline
+   fails as "Authentication failed. Check your API key and secret."** Found 2026-08-25 while a
+   founder with a known-good OKX key could not connect it.
+   - `src/app/api/keys/validate-and-encrypt/route.ts` uses `trim()` ONLY inside emptiness guards
+     (`:182-186`, `api_key.trim().length === 0`). The value forwarded to `validateKey` (`:502`) and
+     to the legacy handler (`:338`) is the RAW string. `api_secret_normalized` (`:103`) is an
+     sFOX-only non-string coercion, not a strip.
+   - Python repeats the shape: `analytics-service/routers/exchange.py:216` calls `.strip()` only to
+     TEST for emptiness, then passes the raw value to `create_exchange`.
+   - So an invisible trailing space or newline reaches OKX's HMAC. The signature is computed over a
+     byte-different secret and OKX answers `50113 Invalid Sign` — MEASURED in Railway logs at
+     21:30:12. (A fake key returns a DIFFERENT code, `50111 Invalid OK-ACCESS-KEY`, at 21:29:11 —
+     the two codes discriminate "key not recognised" from "key recognised, signature wrong".)
+   - **Fix:** trim `api_key`, `api_secret` and `passphrase` at the ONE chokepoint before use, on the
+     TS side, so the trimmed value is what gets validated AND what gets encrypted. Trimming on only
+     one of those two paths is worse than neither: the key would validate and then be stored in a
+     form that never authenticates again.
+   - ⚠️ **Do NOT trim inside the emptiness guard and call it done** — that is the existing shape and
+     it is precisely what fails. The guard already trims; the payload does not.
+   - **Regression test (must be witnessed RED):** submit a secret with a trailing `\n`, assert the
+     value that reaches the venue client is byte-identical to the trimmed secret. Neuter the trim,
+     observe the failure first-hand, restore byte-identically.
+   - **HONEST-01 class (Phase 162):** the user-facing copy says "Check your API key and secret",
+     which reads as "your credential is wrong" when the credential is RIGHT and our handling is
+     wrong. It also collapses OKX's `50111` and `50113` into one sentence, discarding the
+     information that would tell a user WHICH field to look at. Both belong with 162's error-copy
+     work: map the venue code to a specific, true sentence.
+
+
 0.04. **⚠️ PYAPI-06 cannot detect the outage it was built to detect — the client's silent
    header-omission and the server's noise filter compose into a blind spot.** Found while
    root-causing 0.05, which PYAPI-06 sat through in total silence.
