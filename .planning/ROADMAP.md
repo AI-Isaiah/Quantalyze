@@ -348,7 +348,7 @@ Plans:
 - [ ] 162-06-PLAN.md — HONEST-06 client preselect thread + C-5 saved-key summary, all three key populations pinned (wave 2)
 - [ ] 162-07-PLAN.md — HONEST-02 verdict fix: D-162-2 "Track record through {date}" recency line (flat arm) or recorded pipeline routing (gap arm) (wave 2)
 - [ ] 162-08-PLAN.md — HONEST-03 D-162-1 recompute of the 15 example rows (unpublish fallback, never synthesize) + HONEST-01 follow-throughs + TODOS filings (wave 2)
-- [ ] 162-09-PLAN.md — KeyPermissionBadge: scope chips/caption gated on probe_error — a failed probe can no longer render scope facts (PROD QA finding 2026-08-25, phase-goal class) (wave 1)
+- [x] 162-09-PLAN.md — KeyPermissionBadge: scope chips/caption gated on probe_error — a failed probe can no longer render scope facts (PROD QA finding 2026-08-25, phase-goal class) (wave 1)
 
 **UI hint**: yes
 
