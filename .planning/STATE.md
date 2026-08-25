@@ -6,16 +6,16 @@ current_phase: 161
 current_phase_name: WIZERR — Honest error surfaces
 status: verifying
 stopped_at: context exhaustion at 75% (2026-08-25)
-last_updated: "2026-08-25T14:59:09.172Z"
+last_updated: "2026-08-25T21:57:11.731Z"
 last_activity: 2026-08-25
 last_activity_desc: Phase 161.1 wave 4 — composite arm landed DORMANT; composite PROD tracer still owed
-state_head: 8e0f675f411298e4a98f18fc7faa1db923bd945a
+state_head: 9cbf7358b44bc4fba8b31f1c5f4bafcdf1edbf1d
 progress:
-  total_phases: 9
+  total_phases: 10
   completed_phases: 1
-  total_plans: 35
+  total_plans: 45
   completed_plans: 33
-  percent: 11
+  percent: 10
 ---
 
 # Project State — Quantalyze
@@ -653,6 +653,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - v1.17 roadmap REVISED 2026-08-04 (Phases 147–155): the approved Phase 148 (OWN-02/03/04 + NAV-01) split into 148 OWN-02/04 (owner factsheet, adversarial cache acceptance), 149 NAV-01 (my-strategies ranking at DISCOVERY PARITY — founder sharpened the ask from 'an overview' to ranking parity over every uploaded key incl. private/draft), 150 OWN-03 (own-capital-vs-verifying wizard question, money-path review isolated); later phases renumbered +2 (AUM→151, SCEN→152, WIZFORM+MT5-14→153, WIZCONT/STALE→154, MT5-VERIFY→155). All ordering constraints unchanged and now structural (149 cannot start before 148)
 - Phase 153.6 inserted after Phase 153: PARITY — nine findings from the /code-review xhigh over the 153->153.5 span; three of four root causes are one-path-only fixes (URGENT)
 - Phase 161.1 inserted after Phase 161: LEDGER-REFRESH — recurring strategy refresh for ledger-backed venues (mt5/sfox/deribit). Founder-reported 2026-08-23, root-caused by PROD measurement 2026-08-24: process_key_long is the ONLY path reaching strategy_analytics for a ledger venue and is enqueued solely at strategy creation; both daily strategy crons gate on ccxt-only exchange sets. Ship the mechanism DORMANT (schedule unregistered, founder-gated live op) per the SFOX_ENABLED / WORKER-03 pattern. (URGENT)
+- Phase 164.1 inserted after Phase 164: HARDEN-GUARDS. Scope collected in TODOS 0.01: DEC-1/3/4 (spine gates, composite twin, advisory lock), the PYAPI-06 detection gap found in the 2026-08-25 prod outage, phase 161's deferred error-surface items D-161-01..07-B, and WIZFORM-02 (code:UNKNOWN) with a live 2026-08-25 reproduction. Ordering is load-bearing: MUST follow 164, because DEC-1 retires guards over scenarios/scenario_shares and 164 is the phase that touches them. NOTE: Current Phase pointer deliberately NOT moved to 164.1 — work is in flight on 162 and this phase is scheduled, not urgent-next.
 
 ### Decisions
 

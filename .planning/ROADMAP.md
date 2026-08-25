@@ -339,6 +339,7 @@ Plans:
 **Plans**: 9 plans (2 waves)
 
 Plans:
+
 - [ ] 162-01-PLAN.md — Diagnostics census: HONEST-02 flat-vs-derive-gap verdict + HONEST-01 str/None root cause, read-only vs PROD (wave 1)
 - [ ] 162-02-PLAN.md — HONEST-01 curated copy at every writer (classify_exception arms, 18-site stamp choke point, portfolio _fail) + wizard Details-appendix removal, D-162-4 strict (wave 1)
 - [ ] 162-03-PLAN.md — HONEST-04 gated real equity curves + C-3 coverage caption + HONEST-03 is_example SyncBadge class guard (wave 1)
@@ -383,6 +384,17 @@ Plans:
 **UI hint**: yes
 
 **Research note:** the payload-builder seam is the one un-measured integration (extracting the build half of `fetchAndBuildPayload` touches the composite arm AND the single-key basis arm — MEDIUM confidence, wider than it looks). Budget a research pass at plan time; don't discover it. Token-leak channels: Sentry `beforeSend` scrub verified against a REAL captured event, `Referrer-Policy: no-referrer` per-route, generic metadata (link-unfurl dullness accepted explicitly — a private link SHOULD be dull in a chat preview).
+
+### Phase 164.1: HARDEN-GUARDS — retire the frozen-spine gates that no longer bite, close the composite-stamp twin, put the advisory lock behind a real concurrency test, fix the PYAPI-06 blind spot that let a production service-key mismatch run silently, and close phase 161's deferred error-surface items including WIZFORM-02's code:UNKNOWN class (INSERTED)
+
+**Goal:** [Urgent work - to be planned]
+**Requirements**: TBD
+**Depends on:** Phase 164
+**Plans:** 0 plans
+
+Plans:
+
+- [ ] TBD (run /gsd-plan-phase 164.1 to break down)
 
 ### Phase 165: DEPS — The 9-PR dependabot campaign
 
