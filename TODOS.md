@@ -3148,3 +3148,57 @@ No spec below is a delete-candidate: every route they target still exists (verif
   person who regenerates — and `:1080-1081` records that a prior regen stripped exactly such a
   comment and a human re-applied it by hand. **Fix:** re-apply a tripwire comment above the
   block. Not done in plan 158-06: it edits a generated file outside that plan's declared scope.
+
+---
+
+## Phase 161.1 — recorded deferrals (logged 2026-08-25)
+
+Filed from the phase's own review rounds (migration-reviewer r3, rls-policy-auditor r2,
+`/code-review high`). Everything **blocking** from those rounds was fixed in-phase; what
+follows is what was deliberately left, with the reason.
+
+161.1-D1. **⛔ HIGHEST VALUE — the bridge's read window is fail-SAFE, not CLOSED. The real
+  closure is a per-strategy advisory lock in the two mark RPCs.**
+  - `sync_strategy_analytics_status` derives its verdict from two `compute_jobs` reads. Phase
+    161.1 reordered them so a job crossing the boundary mid-derivation lands on the *inclusive*
+    read (non-terminal first, permanent-failure last), which makes the race's OUTCOME safe: the
+    worst case parks a published row at `computing`, which the 16-hour reaper heals, instead of
+    publishing a clean `complete` over a live `failed_final`.
+  - **That is not the same as closing the window.** Under READ COMMITTED every `SELECT` takes a
+    fresh snapshot, and `mark_compute_job_done` / `mark_compute_job_failed` take `FOR UPDATE` on
+    the **job** row only — neither takes a per-strategy lock before `PERFORM
+    sync_strategy_analytics_status`. Bridge calls for the same strategy are therefore not
+    serialized at all.
+  - The codebase already has the right pattern twice: `positions_atomic_rebuild` and `sync_trades`
+    both take `pg_advisory_xact_lock(hashtext(p_strategy_id::text))`.
+  - **Fix shape:** take the same advisory lock in `mark_compute_job_done` (`20260603120000`) and
+    `mark_compute_job_failed` (`20260529180000`) before the bridge call.
+  - **Not done in 161.1:** both files are outside the phase's declared scope, and a half-applied
+    lock discipline (one RPC locking, the other not) is worse than a documented window — it reads
+    as protection while providing none. Wants its own phase and its own concurrency test.
+
+161.1-D2. **⚠️ A systematic enqueue failure in either fan-out is indistinguishable from "nothing
+  was stale".** Both `enqueue_ledger_refresh_for_strategies` and `enqueue_ledger_composite_refresh`
+  wrap the per-candidate enqueue in `EXCEPTION WHEN OTHERS THEN RAISE WARNING ... continuing`. A
+  *systematic* failure — e.g. `enqueue_compute_job`'s exactly-one-of `22023` if strategy-mode
+  targeting is ever narrowed — degrades every row to a `WARNING` and the function returns `0`,
+  byte-identical to a healthy fully-fresh estate. This is the same lying-instrument shape the
+  phase exists to remove, left open on a different axis. Not user-facing and not data-integrity,
+  so it did not block. **Fix shape:** have the go-live runbook assert a NON-ZERO enqueue on first
+  activation, and/or count swallowed warnings and fail the tick when they equal the candidate count.
+
+161.1-D3. **⚠️ `test_weight_snapshot_seed_secdef.sql:202-214` carries both defects 161.1 just fixed
+  one file over.** It pins `NOT r.rolbypassrls` with no `rolsuper` alternative (false-reddens for a
+  superuser owner — the flag is only the *explicitly granted* attribute; superuser RLS bypass is
+  implicit), and its `IF EXISTS (...)` shape **passes vacuously when the function is absent** —
+  measured on a throwaway cluster during this phase, not inferred. Its `OR p.proowner <> v_owner`
+  escape makes a false fire less likely but does not close the vacuity. Not in the findings and not
+  in scope; the two 161.1 arms deliberately did NOT copy that shape.
+
+161.1-D4. **Prose/derivation nits, non-blocking.**
+  - `analytics-service/tests/test_computing_started_at_stamp.py:649` — census docstring
+    self-contradicts: says "the 7 in analytics_runner.py are unchanged in COUNT" and "7 of those 11"
+    while asserting 8 and 12.
+  - `supabase/tests/test_ledger_refresh_composite_arm.sql:82` — "having executed ZERO of arms A-I"
+    left as-is deliberately: it is a dated record of a measurement taken when the file had arms A–I.
+    Editing it to A–J would misstate what was measured.
