@@ -452,6 +452,17 @@ items were dropped, not carried. Categories: **Fix now** / **Fix mid-term** / **
      skips its one strategy, and the composite arm is not yet built. A venue-coverage check that
      asserts set membership passes green over exactly that state. This is the interim shape option
      (b) was rejected *for*, so it must not be allowed to become permanent by inattention.
+   - **UPDATE 2026-08-25 (phase 161.1 plan 04) — half of the close condition is met.** The
+     composite arm now EXISTS: `enqueue_ledger_composite_refresh`
+     (`supabase/migrations/20260825140000_ledger_refresh_composite_arm.sql`), shipped **DORMANT and
+     UNSCHEDULED** behind the same fail-closed `app.ledger_refresh_enabled` setting as the
+     single-key arm, with an 8-arm matched-pair SQL gate and static gates 10–11.
+     ⛔ **The second half is NOT met and this entry stays OPEN.** No deribit composite has been
+     observed to refresh. The `stitch_composite` path has never run recurrently, so plan 04's task 3
+     requires ONE manual PROD enqueue observed to completion — `last_return_date` advancing in the
+     staleness view — **before** the composite schedule is documented as activatable. Until that
+     tracer passes, deribit's coverage is a mechanism that has never been exercised end-to-end,
+     which is a *different* state from the one above but is **not** the close condition.
    - **Close condition:** the composite arm exists and a deribit composite is observed to refresh —
      `last_return_date` advancing in the staleness view, not a job going green.
 
