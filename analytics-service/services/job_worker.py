@@ -590,18 +590,28 @@ STRATEGY_ANALYTICS_TERMINAL_SUCCESS_STATUSES: Final[frozenset[str]] = frozenset(
 # tests/test_ledger_refresh_publish_guard.py pins THIS set against both guards
 # and against the bridge migration, so a fifth spelling cannot appear silently.
 #
-# What it is FOR: deciding whether the chained `compute_analytics_from_csv` hop
-# — hop 2 of every refresh, where the factsheet is actually compiled — should
-# be told it is part of a refresh. A source this set does not recognise is
-# passed as None, i.e. the LOUD path. Fail-safe direction, as everywhere else in
-# D-15: an unrecognised job un-publishes loudly rather than failing silently.
-# F7 (161.1 silent-failure audit): the two markers are NAMED, one per arm, and
-# the set is built from the names. This adds no spelling — it moves the two the
-# set already carried onto handles a per-arm site can reference, so a hop that
-# is reachable from exactly ONE arm can say WHICH arm instead of reaching for
-# the union and being right only by accident. The inline guard comparisons stay
-# inline: they are the contract ends the SQL gates pin, and a constant on that
-# side would leave those gates with one literal instead of two.
+# ⛔ WHAT IT IS FOR, AND WHAT IT IS NOT. It is the CENSUS of every marker this
+# phase mints — the handle the drift gates enumerate, so a fifth spelling cannot
+# appear silently at any of the four ends. It is NOT a dispatch predicate, and
+# no runtime decision may be taken on membership in it.
+#
+# F5 (161.1 re-review): the last such decision is gone. Two sites used to ask
+# "is this job part of A refresh?" against the union while the guard they feed
+# protects exactly ONE arm's marker — safe only by accident of today's fan-outs,
+# and re-opened the moment a future arm minted the other marker on the other
+# kind. Both now name the arm they belong to
+# (`LEDGER_REFRESH_SINGLE_KEY_SOURCE`), because a hop reachable from exactly one
+# arm must say WHICH arm rather than be right by coincidence. The two markers
+# are deliberately DIFFERENT strings so the two arms' guards cannot cross-fire;
+# a union test erases exactly that distinction.
+#
+# Fail-safe direction, as everywhere else in D-15: a source an arm does not
+# recognise is passed as None, i.e. the LOUD path — an unrecognised job
+# un-publishes loudly rather than failing silently.
+#
+# The inline guard comparisons stay inline: they are the contract ends the SQL
+# gates pin, and a constant on that side would leave those gates with one
+# literal instead of two.
 LEDGER_REFRESH_SINGLE_KEY_SOURCE: Final[str] = "ledger-refresh"
 LEDGER_REFRESH_COMPOSITE_SOURCE: Final[str] = "ledger-refresh-composite"
 LEDGER_REFRESH_JOB_SOURCES: Final[frozenset[str]] = frozenset(
@@ -2146,11 +2156,40 @@ async def run_compute_analytics_from_csv_job(job: dict[str, Any]) -> DispatchRes
     # and a funded account is un-published by the hop that compiles its
     # factsheet. Recognised markers only — anything else is None, which is the
     # runner's unchanged (LOUD) behaviour.
+    #
+    # ⛔ F5: RECOGNISED means the SINGLE-KEY marker, not the union — the same
+    # question the enqueue site now answers with the same marker. The union form
+    # was safe only by accident of today's fan-outs: migration 20260825140000
+    # marks `stitch_composite` (chain-terminal) with the composite marker, so no
+    # composite-marked job reaches this kind. If one ever did, granting hop 2 a
+    # protection hop 1 declined means the destructive stamp has ALREADY fired
+    # upstream and hop 2 would then decline to record the follow-on failure —
+    # the worst of both directions. Narrow it here, where the consumer is.
     _metadata = job.get("metadata")
     _source = _metadata.get("source") if isinstance(_metadata, dict) else None
+    _is_marked_refresh = _source == LEDGER_REFRESH_SINGLE_KEY_SOURCE
+
+    # F1: the pre-refresh publish state, MINTED BY HOP 1 and carried here on this
+    # job's metadata. It is deliberately NOT re-derived from the row: the SQL
+    # status bridge has already rewritten `computation_status` to 'computing' by
+    # the time this job is claimed (see `_enqueue_csv_analytics`). The runner
+    # validates the value against the single-sourced terminal-success pair, so an
+    # absent, unknown or non-published value lands as no protection at all.
+    _publish_status = (
+        _metadata.get("publish_status")
+        if _is_marked_refresh and isinstance(_metadata, dict)
+        else None
+    )
+    _publish_warned = (
+        _metadata.get("publish_warned")
+        if _is_marked_refresh and isinstance(_metadata, dict)
+        else None
+    )
     await run_csv_strategy_analytics(
         strategy_id,
-        refresh_source=_source if _source in LEDGER_REFRESH_JOB_SOURCES else None,
+        refresh_source=_source if _is_marked_refresh else None,
+        refresh_publish_status=_publish_status if isinstance(_publish_status, str) else None,
+        refresh_publish_warned=bool(_publish_warned),
     )
     return DispatchResult(outcome=DispatchOutcome.DONE)
 
@@ -2480,6 +2519,84 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
         funding_label = strategy_id
     venue = ctx.key_row["exchange"]
 
+    # ---- Phase 161.1 / F1+F2: the refresh's publish ORACLE, read ONCE --------
+    # ⛔ THE GUARD'S ORACLE MAY NOT BE A COLUMN THE THING IT GUARDS WRITES, and
+    # until this read existed it was exactly that. The D-15 question is "was this
+    # strategy PUBLISHED before this refresh started?", and both guards used to
+    # answer it by reading `strategy_analytics.computation_status` LIVE at the
+    # moment they needed it. That column is written by the SQL status bridge
+    # (sync_strategy_analytics_status, migration 20260825150000), which
+    # mark_compute_job_done / mark_compute_job_failed PERFORM in-RPC on EVERY job
+    # transition for the strategy — and whose branch (a) rewrites the row to
+    # 'computing' whenever ANY job for it is non-terminal. Branch (a) preserves
+    # 'complete_with_warnings'; it does NOT preserve plain 'complete'.
+    #
+    # Two consequences, both measured:
+    #   * HOP 2 (F1), DETERMINISTIC. This handler enqueues the chained
+    #     compute_analytics_from_csv job and THEN returns DONE, so
+    #     mark_compute_job_done runs the bridge with that follow-on already
+    #     `pending`. A plain-'complete' row is therefore ALWAYS at 'computing'
+    #     before hop 2 starts, and hop 2's own live read could never see a
+    #     terminal-success status. Its guard was inert for every clean-recompute
+    #     row — which the bridge migration's header calls "what every clean
+    #     recompute leaves behind".
+    #   * HOP 1 (F2), PROBABILISTIC. Any sibling job (poll_positions,
+    #     sync_funding) reaching mark_compute_job_done while THIS derive is in
+    #     flight runs the same bridge; on a plain-'complete' row the stamp-time
+    #     read then answered 'computing' and declined to protect.
+    #
+    # One read, here, before the venue crawl, carried forward to both: the local
+    # below is hop 1's oracle, and it rides the chain edge on the follow-on job's
+    # metadata to become hop 2's. Neither is a column the bridge can write.
+    #
+    # ⛔ FAIL-SAFE DIRECTION, unchanged: an unreadable row, no row, or a row that
+    # is not terminal-success all leave this None, and None takes the LOUD
+    # destructive path everywhere it is consulted. Never fail toward suppression.
+    #
+    # ⚠️ RESIDUAL WINDOW, stated rather than hidden: the fan-out enqueues this
+    # job in SQL, so the earliest oracle Python can take is here — a sibling
+    # transition between that enqueue and this line still bounces a plain-
+    # 'complete' row to 'computing' and this read then sees it. Closing that last
+    # gap means stamping the status into the job metadata at MINT time, in the
+    # fan-out migration. The direction of the residual is loud-not-silent.
+    #
+    # Gated on the marker so an ordinary derive costs no extra round trip and is
+    # byte-unchanged.
+    _refresh_publish_status: str | None = None
+    _refresh_publish_warned = False
+    if not is_key_mode:
+        _entry_metadata = job.get("metadata")
+        _entry_source = (
+            _entry_metadata.get("source") if isinstance(_entry_metadata, dict) else None
+        )
+        if _entry_source == LEDGER_REFRESH_SINGLE_KEY_SOURCE:
+
+            def _read_entry_publish_state() -> dict[str, Any]:
+                res = (
+                    ctx.supabase.table("strategy_analytics")
+                    .select("computation_status, computation_warned")
+                    .eq("strategy_id", strategy_id)
+                    .maybe_single()
+                    .execute()
+                )
+                row = getattr(res, "data", None) or {}
+                return dict(row) if isinstance(row, dict) else {}
+
+            try:
+                _entry_row = await db_execute(_read_entry_publish_state)
+            except Exception as _entry_exc:  # noqa: BLE001
+                logger.warning(
+                    "derive_broker_dailies: could not read the pre-refresh publish "
+                    "state for strategy %s (%s) — this refresh takes the LOUD "
+                    "terminal-failure path at BOTH hops.",
+                    strategy_id, _entry_exc,
+                )
+                _entry_row = {}
+            _entry_status = _entry_row.get("computation_status")
+            if isinstance(_entry_status, str):
+                _refresh_publish_status = _entry_status
+                _refresh_publish_warned = bool(_entry_row.get("computation_warned"))
+
     from services.broker_dailies import combine_realized_and_funding
     from services.nav_twr import (
         NavReconstructionError,
@@ -2722,30 +2839,13 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
             # the next failed refresh silently un-publishes a funded account. Plan
             # 05 gate 8 asserts the two literals are equal.
             if job_source == "ledger-refresh":
-
-                def _read_existing_status() -> str | None:
-                    res = (
-                        ctx.supabase.table("strategy_analytics")
-                        .select("computation_status")
-                        .eq("strategy_id", strategy_id)
-                        .maybe_single()
-                        .execute()
-                    )
-                    row = getattr(res, "data", None) or {}
-                    value = row.get("computation_status")
-                    return value if isinstance(value, str) else None
-
-                existing_status: str | None
-                try:
-                    existing_status = await db_execute(_read_existing_status)
-                except Exception as _status_exc:  # noqa: BLE001
-                    logger.warning(
-                        "derive_broker_dailies: could not read the existing "
-                        "computation_status for strategy %s (%s) — taking the LOUD "
-                        "terminal-failure path.",
-                        strategy_id, _status_exc,
-                    )
-                    existing_status = None
+                # ⛔ F2: the ENTRY snapshot, never a re-read here. This closure can
+                # run minutes into the venue crawl, and any sibling job that
+                # reached mark_compute_job_done in that window put the row through
+                # the bridge's branch (a) — which rewrites a plain 'complete' to
+                # 'computing'. A read at THIS point therefore answers the bridge,
+                # not the question. See the entry read at the top of this handler.
+                existing_status: str | None = _refresh_publish_status
 
                 if existing_status in STRATEGY_ANALYTICS_TERMINAL_SUCCESS_STATUSES:
 
@@ -5502,10 +5602,30 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
             "p_kind": _csv_analytics_kind,
         }
         if _refresh_source_out == LEDGER_REFRESH_SINGLE_KEY_SOURCE:
-            _payload["p_metadata"] = {
+            _metadata_out: dict[str, Any] = {
                 "source": _refresh_source_out,
                 "chained_from": "derive_broker_dailies",
             }
+            # ⛔ F1: THE PRE-REFRESH PUBLISH STATE RIDES THE CHAIN EDGE, and it is
+            # the only way hop 2 can ever learn it. Hop 2 cannot re-read it: this
+            # handler returns DONE immediately after this enqueue, and
+            # mark_compute_job_done PERFORMs the SQL status bridge in the SAME
+            # transaction with the job just enqueued here already `pending`. That
+            # is a non-terminal job, so branch (a) fires and rewrites a plain
+            # 'complete' row to 'computing' BEFORE hop 2 is ever claimed. A hop-2
+            # guard reading the column would therefore answer 'computing' every
+            # single time and protect nothing — deterministically, for exactly the
+            # rows a clean recompute leaves behind.
+            #
+            # ⛔ Forwarded ONLY when the entry snapshot was terminal-success,
+            # against the SAME single-sourced frozenset both guards use. A row
+            # that was not published has nothing to protect and hop 2 must be told
+            # so — the fail-safe direction is loud, never a green state invented
+            # here for hop 2 to restore.
+            if _refresh_publish_status in STRATEGY_ANALYTICS_TERMINAL_SUCCESS_STATUSES:
+                _metadata_out["publish_status"] = _refresh_publish_status
+                _metadata_out["publish_warned"] = _refresh_publish_warned
+            _payload["p_metadata"] = _metadata_out
         ctx.supabase.rpc("enqueue_compute_job", _payload).execute()
 
     await db_execute(_enqueue_csv_analytics)

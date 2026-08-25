@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+import threading
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -571,11 +572,94 @@ class TestCR03HandlerThreadsTheMarker:
 
         with patch("services.analytics_runner.run_csv_strategy_analytics", new=_fake):
             result = await run_compute_analytics_from_csv_job(
-                {"strategy_id": "s1", "metadata": {"source": _COMPOSITE_MARKER}}
+                {"strategy_id": "s1", "metadata": {"source": _MARKER}}
             )
 
         assert result.outcome == DispatchOutcome.DONE
-        assert seen["kw"].get("refresh_source") == _COMPOSITE_MARKER
+        assert seen["kw"].get("refresh_source") == _MARKER
+
+    @pytest.mark.asyncio
+    async def test_composite_marker_on_this_kind_threads_none(self) -> None:
+        """F5 — the CONSUMER end of the same narrowing the chain edge already
+        does (tests/test_derive_silent_failure_f1_f4_f7.py owns the producer
+        end). This handler's protections are the SINGLE-KEY arm's; granting them
+        to a composite-marked job means hop 1's composite guard has already made
+        its own decision and this hop would then answer a different question.
+
+        Neuter to redden: widen the check back to ``in
+        LEDGER_REFRESH_JOB_SOURCES``.
+        """
+        seen: dict[str, Any] = {}
+
+        async def _fake(strategy_id: str, **kw: Any) -> dict[str, Any]:
+            seen["kw"] = kw
+            return {"status": "complete"}
+
+        with patch("services.analytics_runner.run_csv_strategy_analytics", new=_fake):
+            await run_compute_analytics_from_csv_job(
+                {"strategy_id": "s1", "metadata": {"source": _COMPOSITE_MARKER}}
+            )
+        assert seen["kw"].get("refresh_source") is None, (
+            "a composite-marked compute_analytics_from_csv job inherited the "
+            "single-key arm's hop-2 protection. The forward and the consume must "
+            "answer the same question with the same marker."
+        )
+
+    @pytest.mark.asyncio
+    async def test_publish_state_rides_the_job_metadata_into_the_runner(self) -> None:
+        """F1 wiring: hop 2's oracle arrives on the JOB, and the handler must
+        actually hand it to the runner. Proving the runner's guard works is not
+        the same as proving the handler feeds it — the gap this repo keeps
+        getting bitten by.
+
+        Neuter to redden: drop the ``refresh_publish_status=`` kwarg.
+        """
+        seen: dict[str, Any] = {}
+
+        async def _fake(strategy_id: str, **kw: Any) -> dict[str, Any]:
+            seen["kw"] = kw
+            return {"status": "complete"}
+
+        with patch("services.analytics_runner.run_csv_strategy_analytics", new=_fake):
+            await run_compute_analytics_from_csv_job(
+                {
+                    "strategy_id": "s1",
+                    "metadata": {
+                        "source": _MARKER,
+                        "publish_status": "complete",
+                        "publish_warned": False,
+                    },
+                }
+            )
+        assert seen["kw"].get("refresh_publish_status") == "complete"
+        assert seen["kw"].get("refresh_publish_warned") is False
+
+    @pytest.mark.asyncio
+    async def test_unmarked_job_never_inherits_a_publish_state(self) -> None:
+        """FAIL-SAFE DIRECTION at the wiring seam. Metadata is operator-writable
+        and other producers set ``source``; a publish state on a job this handler
+        does not recognise as a refresh must not be honoured, or any job could
+        buy itself immunity from the terminal stamp."""
+        seen: dict[str, Any] = {}
+
+        async def _fake(strategy_id: str, **kw: Any) -> dict[str, Any]:
+            seen["kw"] = kw
+            return {"status": "complete"}
+
+        with patch("services.analytics_runner.run_csv_strategy_analytics", new=_fake):
+            await run_compute_analytics_from_csv_job(
+                {
+                    "strategy_id": "s1",
+                    "metadata": {
+                        "source": "wizard",
+                        "publish_status": "complete_with_warnings",
+                        "publish_warned": True,
+                    },
+                }
+            )
+        assert seen["kw"].get("refresh_publish_status") is None, (
+            "an UNMARKED job's metadata bought it a publish-state protection."
+        )
 
     @pytest.mark.asyncio
     async def test_unmarked_job_threads_none(self) -> None:
@@ -598,23 +682,20 @@ class TestCR03HandlerThreadsTheMarker:
 def _runner_supabase(
     rows: list[dict[str, Any]], *, existing_status: str | None
 ) -> MagicMock:
-    """A supabase mock that distinguishes the runner's THREE maybe_single reads
-    by the columns they select, so the publish snapshot is a real read rather
-    than a MagicMock that can never match a status string.
+    """A supabase mock that distinguishes the runner's maybe_single reads by the
+    columns they select, and whose ``strategy_analytics`` row is STATEFUL: what
+    the runner writes is what the next read returns.
 
     ⛔ STATEFUL, AND THAT IS THE POINT (F15). The first version of this fake
     answered every ``computation_status`` read with the canned ``existing_status``
-    no matter what the runner had already WRITTEN. A fake like that cannot
-    observe an ordering bug: move the publish-snapshot read below
-    ``_mark_computing`` — the single regression that makes the whole hop-2 guard
-    permanently inert — and it keeps handing back 'complete_with_warnings', so
-    every behavioural test in this class stays green while production is broken.
-    A ``strategy_analytics`` write now UPDATES what the next read returns, which
-    is what makes ``test_marked_insufficient_history_preserves_publish_state``
-    (and its siblings) able to fail on that regression at all: after
-    ``_mark_computing`` the row really does read 'computing', the snapshot really
-    does come back None, and the marked cases really do go destructive. Measured
-    RED that way.
+    no matter what the runner had already WRITTEN, so it could not observe an
+    ordering bug at all.
+
+    ⚠️ ``existing_status`` is now the row's SEED only — the runner no longer
+    reads its publish oracle from this table (Phase 161.1 / F1: the SQL bridge
+    has already rewritten the column by the time hop 2 is claimed, so the oracle
+    is handed in on the job instead). It is still seeded, and still updated by
+    writes, because the tests assert the row's END STATE.
     """
     sb = MagicMock()
     table_mock = MagicMock()
@@ -679,24 +760,19 @@ def _runner_supabase(
 
 
 class TestCR03RunnerGuard:
-    """Neuter to redden: make ``_guarded_failure_payload`` the identity
-    function, or move the publish snapshot BELOW ``_mark_computing``.
+    """Neuter to redden: make ``_guard_failure_payload_inplace`` a no-op.
 
-    ⛔ That second neutering is the one worth understanding. ``_mark_computing``
-    writes ``computation_status='computing'`` unconditionally, so a snapshot
-    taken after it can never read a terminal-success status and the guard is
-    permanently, invisibly inert — a guard that looks right in review and
-    protects nothing.
-
-    ⚠️ This docstring used to claim ``test_snapshot_is_taken_before_mark_
-    computing`` was "the only thing standing between this file and that". It was
-    not standing between anything (F15): it compared the two ``def`` offsets,
-    which the regression does not move, and the ``_runner_supabase`` fake
-    answered every status read with a canned value regardless of what had been
-    written — so neither the structural gate nor any behavioural test could see
-    it. TWO independent detectors now do: that gate compares the two
-    ``db_execute(...)`` CALL sites, and the fake is stateful, so the marked
-    cases below genuinely go destructive once the snapshot is read too late.
+    ⚠️ THE ORACLE MOVED (Phase 161.1 / F1) and the neutering that used to be
+    listed here — "move the publish snapshot BELOW ``_mark_computing``" — no
+    longer exists to perform, because there is no snapshot READ in this function
+    at all. It was deleted, not relocated: the SQL status bridge rewrites
+    ``computation_status`` to 'computing' before this hop is ever claimed (hop 1's
+    own DONE transition runs it with this job already pending), so a read here
+    could never answer terminal-success for a plain-'complete' row no matter
+    where it sat. The pre-refresh state is now HANDED IN by the caller.
+    ``tests/test_ledger_refresh_hop2_oracle.py`` drives that end to end, and
+    ``test_runner_never_reads_the_publish_status_column`` below is the structural
+    gate that replaced the old ordering one.
     """
 
     @staticmethod
@@ -739,7 +815,12 @@ class TestCR03RunnerGuard:
         )
         with patch("services.analytics_runner.get_supabase", return_value=sb):
             with pytest.raises(HTTPException):
-                await run_csv_strategy_analytics("s1", refresh_source=_MARKER)
+                await run_csv_strategy_analytics(
+                    "s1",
+                    refresh_source=_MARKER,
+                    refresh_publish_status="complete_with_warnings",
+                    refresh_publish_warned=True,
+                )
 
         payload = self._terminal(sb)
         assert payload["computation_status"] == "complete_with_warnings", (
@@ -759,17 +840,22 @@ class TestCR03RunnerGuard:
         assert payload.get("computation_error"), "the failure must stay visible"
 
     @pytest.mark.asyncio
-    async def test_marked_over_unpublished_row_is_still_loud(self) -> None:
-        """FAIL-SAFE DIRECTION on hop 2.
+    @pytest.mark.parametrize("handed_in", [None, "computing"])
+    async def test_marked_over_unpublished_row_is_still_loud(
+        self, handed_in: str | None
+    ) -> None:
+        """FAIL-SAFE DIRECTION on hop 2, at BOTH shapes the caller can produce:
+        hop 1 forwarded nothing, or hop 1 forwarded a value that is not in the
+        terminal-success pair.
 
-        ⚠️ The seed status is 'computing', NOT 'failed', and that was MEASURED.
+        ⚠️ The non-None case is 'computing', NOT 'failed', and that was MEASURED.
         With 'failed', "the guard refused to protect" and "the guard protected
         and restored the snapshot" produce the SAME final status, so this
         assertion passed under a neutering that made the snapshot accept ANY
         status at all — the one green in an otherwise all-red falsifiability
         sweep. A fail-safe test whose two outcomes are indistinguishable is not
         a test. 'computing' is also the realistic shape: it is what
-        ``_mark_computing`` leaves on a strategy that was never published.
+        ``_mark_computing`` (and the SQL bridge's branch (a)) leaves behind.
         """
         from services.analytics_runner import run_csv_strategy_analytics
         from fastapi import HTTPException
@@ -780,12 +866,14 @@ class TestCR03RunnerGuard:
         )
         with patch("services.analytics_runner.get_supabase", return_value=sb):
             with pytest.raises(HTTPException):
-                await run_csv_strategy_analytics("s1", refresh_source=_MARKER)
+                await run_csv_strategy_analytics(
+                    "s1", refresh_source=_MARKER, refresh_publish_status=handed_in
+                )
 
         payload = self._terminal(sb)
         assert payload["computation_status"] == "failed", (
-            "a marked refresh protected a row that was NOT published (it read "
-            f"'computing'); the terminal stamp wrote "
+            "a marked refresh protected a row that was NOT published (hop 1 "
+            f"handed in {handed_in!r}); the terminal stamp wrote "
             f"{payload['computation_status']!r}. The snapshot has stopped "
             "gating on the terminal-success pair, so a FIRST compute that fails "
             "now leaves the wizard poller spinning forever."
@@ -813,7 +901,14 @@ class TestCR03RunnerGuard:
                  patch("services.basis_series.derive_basis_series",
                        side_effect=RuntimeError("metrics blew up")):
                 with pytest.raises(HTTPException):
-                    await run_csv_strategy_analytics("s1", refresh_source=marker)
+                    await run_csv_strategy_analytics(
+                        "s1",
+                        refresh_source=marker,
+                        refresh_publish_status=(
+                            "complete_with_warnings" if marker else None
+                        ),
+                        refresh_publish_warned=marker is not None,
+                    )
             return sb
 
         unmarked = await _run(None)
@@ -828,44 +923,62 @@ class TestCR03RunnerGuard:
             "catch-all path."
         )
 
-    def test_snapshot_is_taken_before_mark_computing(self) -> None:
-        """ORDERING IS THE MECHANISM — see this class's docstring."""
-        # ⛔ CALL SITES, NOT DEFINITIONS — this is F15, and the version of this
-        # gate that compared `_read_publish_snapshot` (which resolves to its
-        # `def`) against `def _mark_computing()` could not fail. Both closures
-        # are DEFINED adjacently and then INVOKED further down; the hazard is
-        # moving the snapshot's `await db_execute(...)` below the mark's. That
-        # leaves both `def` offsets exactly where they were, so the old gate
-        # stayed GREEN while in production `_mark_computing` had already written
-        # 'computing', every snapshot read returned None, and the entire hop-2
-        # guard was permanently, invisibly inert. Measured RED against the moved
-        # CALL after this change; the old comparison was measured GREEN against
-        # the same mutation.
-        #
-        # Comment-stripped, per this file's rule: a comment naming either call
-        # must not be able to move — or hold up — this gate.
-        src = _strip_py_comments(
-            (_REPO_ROOT / "analytics-service" / "services" / "analytics_runner.py")
-            .read_text()
+    def test_runner_never_reads_the_publish_status_column(self) -> None:
+        """F1 — THE RE-POINTED ORDERING GATE. Its predecessor asserted the
+        snapshot's ``db_execute`` call site sat above ``_mark_computing``'s; that
+        ordering is no longer the mechanism, because there is no snapshot read
+        left to order. It is re-pointed here rather than deleted, per its own
+        instruction.
+
+        The invariant that replaced it is stronger and states the root cause
+        directly: **this module must never source its publish oracle from the
+        column the SQL status bridge writes.** ``_mark_computing`` is not the
+        only writer that beats a read here — the bridge rewrote a plain
+        'complete' row to 'computing' before hop 2 was ever claimed, so a read
+        placed ANYWHERE in this function is wrong, not merely a read placed too
+        late. A future author "restoring" a convenient local read would silently
+        re-open the whole defect; this reddens on it.
+
+        Neuter to redden: add a ``.select("computation_status")`` back to
+        ``analytics_runner.py``.
+        """
+        # Comment-stripped, per this file's rule: prose naming the column must
+        # neither trip nor satisfy a mechanical gate.
+        src = _strip_py_comments(_ANALYTICS_RUNNER.read_text())
+        assert "computation_status" in src, (
+            "analytics_runner.py no longer WRITES computation_status at all. The "
+            "scan below is then aimed at nothing — re-point this gate "
+            "deliberately rather than letting it pass vacuously."
         )
-        snapshot_call = "db_execute(_read_publish_snapshot)"
-        mark_call = "db_execute(_mark_computing)"
-        for needle in (snapshot_call, mark_call):
-            assert src.count(needle) == 1, (
-                f"expected exactly ONE `{needle}` call site in "
-                f"analytics_runner.py; found {src.count(needle)}. With zero the "
-                "ordering assertion below is aimed at nothing; with more than "
-                "one it is ambiguous about which pair it ordered. Re-point this "
-                "gate deliberately — do not delete it."
-            )
-        snapshot = src.index(snapshot_call)
-        mark_computing = src.index(mark_call)
-        assert snapshot < mark_computing, (
-            "the publish snapshot is READ at or after _mark_computing is CALLED, "
-            "and _mark_computing writes computation_status='computing' "
-            "unconditionally. Every subsequent read answers 'computing', never a "
-            "terminal-success status, so the hop-2 guard can never fire — while "
-            "still looking like a guard in review."
+        reads = [
+            fragment
+            for fragment in re.findall(r"\.select\(\s*[\"']([^\"']*)[\"']", src)
+            if "computation_status" in fragment
+        ]
+        assert reads == [], (
+            "analytics_runner.py SELECTs computation_status "
+            f"({reads!r}). Hop 2's publish oracle must be the value hop 1 handed "
+            "in on the job's metadata, never this column: the SQL status bridge "
+            "(migration 20260825150000) rewrites it to 'computing' on hop 1's own "
+            "DONE transition, with this job already pending, so a read here "
+            "answers 'computing' for every plain-'complete' row and the guard "
+            "protects nothing while still looking like a guard in review."
+        )
+
+    def test_runner_guard_uses_the_single_sourced_success_set(self) -> None:
+        """The handed-in status is still VALIDATED, and against the ONE shared
+        frozenset — not an inline pair of its own, which would be a spelling
+        neither gate 9 nor the staleness view could see.
+
+        Neuter to redden: inline the two status literals here instead.
+        """
+        src = _strip_py_comments(_ANALYTICS_RUNNER.read_text())
+        assert "STRATEGY_ANALYTICS_TERMINAL_SUCCESS_STATUSES" in src, (
+            "analytics_runner.py no longer references "
+            "STRATEGY_ANALYTICS_TERMINAL_SUCCESS_STATUSES, so the value it is "
+            "handed is either unvalidated — any string from job metadata would "
+            "buy a protection — or validated against a third spelling of the "
+            "success pair."
         )
 
 
@@ -912,7 +1025,31 @@ class TestF3BudgetTimeoutLeavesNoParkedFactsheet:
              patch("services.analytics_runner.get_benchmark_returns", new=_hang):
             with pytest.raises(asyncio.TimeoutError):
                 await asyncio.wait_for(
-                    run_csv_strategy_analytics("s1", refresh_source=marker),
+                    run_csv_strategy_analytics(
+                        "s1",
+                        refresh_source=marker,
+                        refresh_publish_status=(
+                            "complete_with_warnings" if marker else None
+                        ),
+                        refresh_publish_warned=marker is not None,
+                    ),
+                    timeout=0.1,
+                )
+
+    @staticmethod
+    async def _cancel_unpublished(sb: MagicMock) -> None:
+        """A MARKED run whose hop 1 forwarded no publish state — i.e. the row was
+        not published when the refresh started."""
+        from services.analytics_runner import run_csv_strategy_analytics
+
+        async def _hang(*_a: object, **_kw: object) -> Any:
+            await asyncio.sleep(30)
+
+        with patch("services.analytics_runner.get_supabase", return_value=sb), \
+             patch("services.analytics_runner.get_benchmark_returns", new=_hang):
+            with pytest.raises(asyncio.TimeoutError):
+                await asyncio.wait_for(
+                    run_csv_strategy_analytics("s1", refresh_source=_MARKER),
                     timeout=0.1,
                 )
 
@@ -983,7 +1120,7 @@ class TestF3BudgetTimeoutLeavesNoParkedFactsheet:
         terminal decision to the bridge.
         """
         sb = _runner_supabase(self._ROWS, existing_status="computing")
-        await self._cancel_mid_run(sb, _MARKER)
+        await self._cancel_unpublished(sb)
 
         assert sb.row == {"computation_status": "computing", "computation_warned": False}
         assert not [u for u in sb.upserts if u.get("computation_error")], (
@@ -991,6 +1128,252 @@ class TestF3BudgetTimeoutLeavesNoParkedFactsheet:
             "The snapshot must have been None, so nothing may be written here — "
             "suppressing the bridge's loud 'failed' would hang the wizard poller "
             "on an infinite spinner."
+        )
+
+
+class TestF4AbortArmsCoverTheWholeHandler:
+    """F4 — the two paths on which the abort arms did NOT fire, and the F3
+    comment said they did.
+
+    Both are the same structural fact: ``except`` clauses are SIBLINGS. Python
+    does not re-enter a sibling clause when an exception escapes one of them, and
+    a statement placed BEFORE the ``try`` is not covered by it at all. So:
+
+    * a ``CancelledError`` delivered on the ``await db_execute(...)`` INSIDE
+      ``_mark_truncated`` / ``_mark_config_failed`` / the unrecoverable arm
+      propagated straight out past the ``CancelledError`` and ``BaseException``
+      arms that sat beside them; and
+    * ``await db_execute(_mark_computing)`` sat outside the ``try`` entirely.
+
+    Both left the row at ``'computing'`` — the exact state F3 exists to prevent,
+    and on precisely the runs most likely to hit it (a budget expires because the
+    DB is slow; the terminal stamp is another DB round trip on that same slow DB).
+
+    ⛔ EACH CASE MODELS THE DISPATCH OUTCOME UNDER WHICH ITS HOLE ACTUALLY BITES,
+    and getting that wrong makes the test vacuous — measured, on this very file.
+    ``db_execute`` is ``loop.run_in_executor`` over a BOUNDED pool, so a
+    cancellation resolves one of two ways:
+
+    * the work item already started on a thread — cancelling the await does not
+      interrupt it, so the write LANDS and only the await is abandoned; or
+    * the work item is still QUEUED — ``concurrent.futures.Future.cancel()``
+      succeeds and the write NEVER HAPPENS. That is the ordinary case under the
+      saturation ``db_execute``'s own docstring warns about, which is exactly the
+      state a worker full of timed-out handlers is in.
+
+    For ``_mark_computing`` the harm needs the FIRST outcome (the row really moved
+    to 'computing'), so that fake performs the write and then hangs. For the
+    terminal stamp inside the catch-all the harm needs the SECOND (the guarded
+    payload never landed, so nothing has put the publish state back), so that fake
+    hangs WITHOUT writing. The first draft used "perform then hang" for both, and
+    the catch-all case passed against the unfixed tree because
+    ``_guard_failure_payload_inplace`` had already restored the row — a green that
+    proved nothing.
+
+    Neuter to redden: move the abort arms back onto the inner ``try`` (i.e. make
+    them siblings of the failure arms again).
+    """
+
+    _ROWS = [
+        {"date": "2024-01-01", "daily_return": 0.005},
+        {"date": "2024-01-02", "daily_return": -0.003},
+        {"date": "2024-01-03", "daily_return": 0.008},
+    ]
+
+    @staticmethod
+    def _db_execute_hanging_on(
+        target: str, reached: asyncio.Event, *, perform: bool
+    ) -> Any:
+        """A ``db_execute`` stand-in that runs every call through the REAL one
+        except ``target``, which it announces and then stalls on — having first
+        performed the write, or not, per ``perform``. See this class's docstring
+        for why that choice is per-case and load-bearing."""
+        from services.db import db_execute as _real
+
+        async def _fake(fn: Any) -> Any:
+            if getattr(fn, "__name__", "") == target:
+                result = fn() if perform else None
+                reached.set()
+                await asyncio.sleep(30)
+                return result
+            return await _real(fn)
+
+        return _fake
+
+    async def _cancel_at(
+        self, sb: MagicMock, target: str, *, marked: bool = True, perform: bool = True
+    ) -> None:
+        """Deliver the cancellation EXACTLY where this test wants it.
+
+        ⛔ RENDEZVOUS, NOT A STOPWATCH. The first version raced a wall-clock
+        ``asyncio.wait_for(..., 0.2)`` against the handler reaching ``target``;
+        it passed in isolation and FAILED under the full suite, where the
+        preamble (module imports, the thread-pool round trips) is slower than the
+        budget. A cancellation that lands somewhere other than the intended await
+        proves nothing about the arm under test, so the run announces when it has
+        arrived and is cancelled only then. ``task.cancel()`` is the same
+        delivery mechanism the worker's ``asyncio.wait_for`` budget uses.
+        """
+        from services.analytics_runner import run_csv_strategy_analytics
+
+        reached = asyncio.Event()
+        kwargs: dict[str, Any] = (
+            {
+                "refresh_source": _MARKER,
+                "refresh_publish_status": "complete_with_warnings",
+                "refresh_publish_warned": True,
+            }
+            if marked
+            else {}
+        )
+        with patch("services.analytics_runner.get_supabase", return_value=sb), \
+             patch("services.analytics_runner.get_benchmark_returns",
+                   new=AsyncMock(return_value=(None, True))), \
+             patch("services.analytics_runner.db_execute",
+                   new=self._db_execute_hanging_on(target, reached, perform=perform)):
+            task = asyncio.ensure_future(
+                run_csv_strategy_analytics("s1", **kwargs)
+            )
+            try:
+                await asyncio.wait_for(reached.wait(), timeout=30)
+            except asyncio.TimeoutError:  # pragma: no cover - diagnostic only
+                task.cancel()
+                raise AssertionError(
+                    f"the run never reached {target!r}, so the cancellation this "
+                    f"test aims at was never delivered there. upserts={sb.upserts!r}"
+                )
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+    @pytest.mark.asyncio
+    async def test_cancellation_inside_a_failure_arm_still_restores(self) -> None:
+        """The budget expires while execution is already inside the catch-all's
+        terminal stamp."""
+        sb = _runner_supabase(self._ROWS, existing_status="complete_with_warnings")
+        with patch("services.basis_series.derive_basis_series",
+                   side_effect=RuntimeError("metrics blew up")):
+            await self._cancel_at(sb, "_mark_unrecoverable", perform=False)
+
+        assert sb.upserts and sb.upserts[0].get("computation_status") == "computing", (
+            "the run never reached _mark_computing, so it was never inside the "
+            "catch-all arm either and the cancellation this test aims at was not "
+            f"delivered there. upserts={sb.upserts!r}"
+        )
+        assert sb.row is not None
+        assert sb.row["computation_status"] == "complete_with_warnings", (
+            "a MARKED refresh was cancelled INSIDE an `except Exception` arm and "
+            f"left the row at {sb.row['computation_status']!r}. Python does not "
+            "re-enter sibling except clauses, so the CancelledError escaped past "
+            "the abort arms; the SQL bridge then reads a non-published status, "
+            "refuses to protect the row and writes 'failed'."
+        )
+
+    @pytest.mark.asyncio
+    async def test_cancellation_on_the_mark_computing_round_trip_still_restores(
+        self,
+    ) -> None:
+        """The budget expires on the entry write itself."""
+        sb = _runner_supabase(self._ROWS, existing_status="complete_with_warnings")
+        await self._cancel_at(sb, "_mark_computing")
+
+        assert any(u.get("computation_status") == "computing" for u in sb.upserts), (
+            "the entry write never landed, so this test is aimed at nothing — the "
+            "row would have been left published for reasons unrelated to the fix. "
+            f"upserts={sb.upserts!r}"
+        )
+        assert sb.row is not None
+        assert sb.row["computation_status"] == "complete_with_warnings", (
+            "a MARKED refresh was cancelled on `_mark_computing`'s own round trip "
+            f"and left the row at {sb.row['computation_status']!r}. That statement "
+            "sat OUTSIDE the try whose arms perform the restore, so the hole F3 "
+            "claims to close was open on the very write that opens it."
+        )
+
+    @pytest.mark.asyncio
+    async def test_unmarked_run_is_still_left_alone_on_both_paths(self) -> None:
+        """CONTROL for both cases above. An UNMARKED compute is ATTENDED — the
+        wizard poller and the 16-hour reaper own it, and the runbook forbids a
+        third mechanism racing them. Without this the assertions above would pass
+        against a restore that fires unconditionally."""
+        sb = _runner_supabase(self._ROWS, existing_status="complete_with_warnings")
+        await self._cancel_at(sb, "_mark_computing", marked=False)
+
+        assert sb.row == {"computation_status": "computing", "computation_warned": True}, (
+            f"an UNMARKED cancellation touched the publish state; row={sb.row!r}"
+        )
+
+
+class TestF3RestoreDoesNotBlockTheWorkerLoop:
+    """F3 (161.1 re-review) — WEDGE-01's shape, on the abort path.
+
+    ``_restore_publish_state_on_abort`` used to call ``supabase.table(...)
+    .upsert(...).execute()`` RAW, on the event loop, inside the ``CancelledError``
+    handler. ``asyncio.wait_for`` awaits the cancellation it delivered, so the
+    ENTIRE worker loop — every other in-flight job and ``/healthz`` — stalled for
+    that HTTP round trip, on exactly the runs where the DB is already slow enough
+    to have blown a job budget. This repo has a production incident of that
+    shape: heavy work on the shared loop froze ``/healthz``.
+
+    ⛔ ASSERTED BY THREAD IDENTITY, not by timing. A "did the loop keep ticking
+    during the abort?" test is a stopwatch and would flake; the invariant is
+    exact and structural — this write must happen OFF the loop thread, like every
+    other ``strategy_analytics`` write in the module. ``db_execute`` offloads to a
+    ``ThreadPoolExecutor``, so a compliant restore can never report the loop's
+    own thread id.
+
+    Neuter to redden: call the upsert directly instead of through
+    ``db_execute``.
+    """
+
+    @pytest.mark.asyncio
+    async def test_restore_upsert_runs_off_the_event_loop_thread(self) -> None:
+        from services.analytics_runner import run_csv_strategy_analytics
+
+        rows = [
+            {"date": "2024-01-01", "daily_return": 0.005},
+            {"date": "2024-01-02", "daily_return": -0.003},
+            {"date": "2024-01-03", "daily_return": 0.008},
+        ]
+        sb = _runner_supabase(rows, existing_status="complete_with_warnings")
+        loop_thread = threading.get_ident()
+        upsert_threads: list[int] = []
+        inner = sb.table.return_value.upsert.side_effect
+
+        def _record(payload: dict[str, Any], **kw: object) -> Any:
+            upsert_threads.append(threading.get_ident())
+            return inner(payload, **kw)
+
+        sb.table.return_value.upsert.side_effect = _record
+
+        async def _hang(*_a: object, **_kw: object) -> Any:
+            await asyncio.sleep(30)
+
+        with patch("services.analytics_runner.get_supabase", return_value=sb), \
+             patch("services.analytics_runner.get_benchmark_returns", new=_hang):
+            with pytest.raises(asyncio.TimeoutError):
+                await asyncio.wait_for(
+                    run_csv_strategy_analytics(
+                        "s1",
+                        refresh_source=_MARKER,
+                        refresh_publish_status="complete_with_warnings",
+                        refresh_publish_warned=True,
+                    ),
+                    timeout=0.1,
+                )
+
+        assert sb.row is not None
+        assert sb.row["computation_status"] == "complete_with_warnings", (
+            "the restore did not fire at all, so the thread assertion below would "
+            f"be aimed at nothing. row={sb.row!r} upserts={sb.upserts!r}"
+        )
+        assert loop_thread not in upsert_threads, (
+            "a strategy_analytics upsert ran ON the event loop thread. On the "
+            "abort path that is WEDGE-01 reintroduced: asyncio.wait_for awaits the "
+            "cancellation it delivered, so the whole worker loop — every other "
+            "in-flight job and /healthz — blocks for that HTTP round trip, on "
+            "exactly the runs where the DB is already slow. Route it through "
+            f"db_execute. loop={loop_thread} upserts_on={upsert_threads!r}"
         )
 
 
@@ -1097,6 +1480,46 @@ class TestMarkerContractHasNoFifthSpelling:
             "forwarded to hop 2; the guards decide what is protected. If they "
             "disagree, a refresh is marked at hop 1 and unprotected at hop 2 — "
             "and nothing anywhere errors."
+        )
+
+    def test_the_consumer_set_is_never_a_dispatch_predicate(self) -> None:
+        """F5, as the CLASS rather than the two sites that had it.
+
+        ``LEDGER_REFRESH_JOB_SOURCES`` is a CENSUS — the handle the drift gates
+        in this class enumerate. Deciding anything at runtime on membership in it
+        asks "is this part of A refresh?" when every guard it feeds protects
+        exactly ONE arm's marker, and the two markers are deliberately different
+        strings so the arms cannot cross-fire. That was safe only by accident of
+        today's fan-outs (each mints its marker on a kind the other arm never
+        sees) and re-opens the day a future arm mints the other pairing.
+
+        A behavioural test can only cover the sites that exist today; this covers
+        the shape. Neuter to redden: restore ``in LEDGER_REFRESH_JOB_SOURCES`` at
+        either the chain edge or the hop-2 handler.
+        """
+        src = "\n".join(
+            ln for ln in _JOB_WORKER.read_text().splitlines()
+            if not ln.lstrip().startswith("#")
+        )
+        assert "LEDGER_REFRESH_JOB_SOURCES" in _JOB_WORKER.read_text(), (
+            "LEDGER_REFRESH_JOB_SOURCES is gone from services/job_worker.py, so "
+            "the drift gates in this class have nothing to enumerate and the "
+            "scan below is aimed at nothing."
+        )
+        uses = [
+            ln.strip() for ln in src.splitlines()
+            if "LEDGER_REFRESH_JOB_SOURCES" in ln
+            and not ln.lstrip().startswith("LEDGER_REFRESH_JOB_SOURCES")
+        ]
+        assert uses == [], (
+            "services/job_worker.py takes a runtime decision on membership in "
+            f"LEDGER_REFRESH_JOB_SOURCES: {uses!r}. Name the ARM the site belongs "
+            "to (LEDGER_REFRESH_SINGLE_KEY_SOURCE / "
+            "LEDGER_REFRESH_COMPOSITE_SOURCE) instead. Forwarding or consuming "
+            "the union while guarding one marker hands a hop a protection the "
+            "other hop already declined — the destructive stamp has already "
+            "fired upstream, and the protected hop then declines to record the "
+            "follow-on failure."
         )
 
     def test_no_marker_literal_anywhere_in_the_runner(self) -> None:
