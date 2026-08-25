@@ -2168,6 +2168,99 @@ href under the owner mode. Note the grid carries a second owner-surface problem 
 toggle-hide also defers: `StrategyGrid.tsx:79-82` renders `VerifiedBadge` with
 `trustTier={s.trust_tier}`, which is null by construction for an unpublished row.
 
+### Phase 162 (HONEST) — plan 162-08 filings (added 2026-08-26)
+
+Five items. Two are live data left unrepaired because plan 162-08 could not reach the PROD
+write lane; one is a founder scope call; two are hygiene. Evidence for all five:
+`.planning/phases/162-honest-what-the-user-sees-is-true/162-CENSUS.md` (§Recompute — NOT
+EXECUTED, §str/None follow-through, §Discovery observation).
+
+- [ ] **`D-162-1` NOT EXECUTED — all 15 published example rows are still `failed` and still
+      published.** `51a111ed-0000-4000-8000-0000000000{01..15}`, `computation_status = failed`
+      since **2026-05-27**, series ending April 2026. **0 recomputed, 0 unpublished, 0
+      touched.** Plan 162-08's Task 1 could not run: the service-role credential read is denied
+      by the harness permission classifier (outbound network and plain file reads are *not*
+      denied — the block is specifically on reading the secret; three lanes tried, all denied,
+      isolation recorded in the census). ⚠️ **The badge fix does not cover this.** 162-03's
+      guard means those rows render no *Synced* badge; the rows themselves remain published
+      advertising a three-month-dead computation with em-dashes where KPIs belong. **Resuming
+      is a lookup, not a re-derivation** — the census records the selected mechanism
+      (`compute_analytics_from_csv` via `_enqueue_compute_job_internal`, service-role, with
+      every claim cited to its definition at HEAD) plus the ONE unmeasured precondition that
+      decides the outcome: whether those 15 strategies have ≥ 2 rows each in
+      `csv_daily_returns` (a *different* table from the `strategy_analytics.daily_returns` the
+      census confirmed). If they do not, `run_csv_strategy_analytics` fails with "Insufficient
+      CSV history" and D-162-1's fence fires for all 15 → unpublish, and say so.
+- [ ] **Two `strategy_analytics` rows still render raw exception prose, and their only
+      re-write path is a dead job kind.** `ec722557-7781-44db-8f2c-edbe252957c0`
+      (`pending_review`) and `8581f739-1a7b-42a4-a209-3acfa327e259` (**published**) each carry
+      the bare 59-character `str`/`None` `TypeError` text in `computation_error`. Plan 162-02
+      fixed the *writer*, so no NEW row can leak this shape — but it cannot rewrite these two,
+      and plan 162-08's repair enqueue was blocked by the same credential denial above.
+      Disposition recorded as *awaiting-next-write*, with the caveat that makes it nearly
+      permanent: their only failing kind, `poll_positions`, has not been enqueued anywhere in
+      PROD since **2026-06-14**, so there may be no next write. The published one is a live
+      surface.
+- [ ] **Retired job kinds still carry a live daily enqueue that has fired nothing since
+      2026-06-14 — dead code, low priority.** `enqueue_poll_positions_for_all_strategies`
+      exists at HEAD (`analytics-service/main_worker.py:1026-1036`) but no `poll_positions` job
+      has been created in PROD since 2026-06-14. Same family: `compute_analytics` is *retired*
+      (30 PROD rows, 100% `failed_final`, **zero successes ever**), superseded by
+      `compute_analytics_from_csv` + `derive_broker_dailies`; its enqueue RPC actively rejects
+      the kind (`20260716090000_retire_compute_analytics_kind_rpc_guard.sql`). ⛔ **File this
+      as dead code, NEVER as an outage.** ⚠️ Load-bearing consequence, already actioned in the
+      census: any decision rule keyed on "0 `compute_analytics` jobs since X" is **VOID** — it
+      fires for the entire fleet, every day. One such rule shipped as the derive-gap trigger in
+      the HONEST-02 decision table; the correction is now recorded in 162-CENSUS.md itself, not
+      only in a sibling SUMMARY.
+- [ ] **`StrategyGrid`'s sync-badge gate is one half short of the table's — guard hygiene, NOT
+      user-facing.** Table: `mayClaimSyncRecency = hasComputedAnalytics && !s.is_example`
+      (`StrategyTable.tsx:982-983`). Grid: `{!s.is_example && (`
+      (`StrategyGrid.tsx:117`) — it has the `is_example` half and lacks the
+      `hasComputedAnalytics` half. ⚠️ **Two earlier framings of this item are wrong and should
+      not be carried forward.** (a) A WINDOWS.md deferral called the grid badge
+      "consumer-less" — **false**: `StrategyTable.tsx:1421` renders `StrategyGrid`, and by
+      founder ruling (`StrategyTable.tsx:387-398`) grid is **discovery-only**, i.e. exactly the
+      public surface HONEST-03 names. (b) A later handoff said the grid badge is *ungated* —
+      also false at HEAD: 162-03 landed the `is_example` half. Re-measured 2026-08-26 on the
+      assembled phase branch. **Why it is nonetheless not user-visible, which is what sets the
+      severity:** discovery rows pass `shapeRowAnalytics` (`queries.ts:470-474`), whose
+      non-terminal-success branch returns `{...EMPTY_ANALYTICS, computation_status}` with
+      `computed_at: ""` (`utils.ts:181`), so a failed/pending/computing row reaches the grid
+      badge with a falsy date and renders nothing. **Guard-hygiene / defence-in-depth asymmetry
+      → mid-term, not blocking**, per the founder stopping rule. ⛔ It is *not* dead code and
+      *not* unreachable — deleting it on either premise would be wrong. The table's own comment
+      (`StrategyTable.tsx:1149-1156`) states the client guard is kept "as well as, not instead
+      of" the server blanking, because the component is mounted by three pages, one anonymous,
+      "and it must not be capable of printing a sync date it cannot justify no matter who hands
+      it rows." The grid is one row-source change away from printing one. **Fix shape:** extend
+      the grid gate to `hasComputedAnalytics && !s.is_example` (or lift the single predicate
+      into a shared helper both render paths import) and add a grid case for a `failed` row
+      carrying a fresh `computed_at` — no such case exists today, so the missing half is
+      currently unpinned on the grid side.
+- [ ] **FOUNDER CALL — is `HONEST-02` satisfied by an adjacent honest line, or must the badge
+      itself stop reading FRESH?** Requirement: *"the factsheet freshness **badge** reflects
+      series recency — a strategy whose return series ended 89 days ago cannot read FRESH."*
+      Plan 162-07 shipped D-162-2's recency line ("Track record through {date}", keyed on the
+      series' last point). D-162-2 **deliberately** left `FreshnessChip` computing from
+      `computed_at`, so after this phase the surface states the series end while the badge
+      beside it can still read FRESH over a 111-day-dead track. The badge still makes a false
+      claim in isolation — user-facing by the stopping rule — but D-162-2 was a founder
+      decision, so the scope call is the founder's. **The checkbox stays OPEN; do not tick
+      HONEST-02 at phase close without a ruling.**
+- [ ] **FOUNDER CALL — may a permanently-inconclusive root cause close `HONEST-01`?** The
+      requirement is a conjunction: the leaked text mapped at the writer, **with** the
+      underlying `str`/`None` compare root-caused. First half delivered (162-02). Second half
+      is `inconclusive` **as a decided verdict, not as unfinished work**: stage
+      (`poll_positions`), window (2026-06-10 … 06-14) and population (exactly 2 strategies, one
+      shared 59-char message) are pinned, but no `str`/`None` compare exists on the handler
+      path at HEAD, no traceback survives (`str(exc)[:500]`, no frames), and Sentry is
+      orchestrator-only. No code fix is planned — guarding a compare not shown to be the raiser
+      would mint a regression test pinning a fiction. **The checkbox stays OPEN.** If reopened
+      with Sentry, the search key is exact: kind `poll_positions`, 2026-06-10 … 2026-06-14, two
+      strategy ids. ⚠️ The kind has been silent fleet-wide since 2026-06-14, so absence of
+      recurrence is **not** evidence of a fix.
+
 ---
 
 ## ⚪ DON'T FIX — cosmetic, stale, superseded, speculative, or unsound
