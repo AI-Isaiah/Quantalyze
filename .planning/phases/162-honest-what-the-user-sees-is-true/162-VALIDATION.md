@@ -1,8 +1,8 @@
 ---
 phase: 162
 slug: honest-what-the-user-sees-is-true
-status: draft
-nyquist_compliant: false
+status: validated
+nyquist_compliant: true
 wave_0_complete: false
 created: 2026-08-25
 ---
@@ -107,4 +107,4 @@ traps apply here:
 - [ ] Every new regression test witnessed RED, then restored byte-identically
 - [ ] `nyquist_compliant: true` set in frontmatter
 
-**Approval:** pending
+**Approval:** approved 2026-08-25 by gsd-plan-checker - every Wave-0 gap has a creating task (162-02 pytest module, 162-03 equity spec, 162-06 preselect spec).

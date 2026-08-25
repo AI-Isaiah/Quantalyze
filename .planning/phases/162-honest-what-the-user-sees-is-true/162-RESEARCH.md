@@ -413,6 +413,15 @@ No missing blocking dependencies.
 
 ## Open Questions
 
+> **DISPOSITIONED 2026-08-25 (plan-checker warning 2).** All three are answered or
+> deliberately routed to a measuring task; none is an open blocker at execute time.
+> **Q1** -> 162-01 census. It CANNOT be resolved pre-execution by design: success
+> criterion 2 mandates investigating before a fix is chosen.
+> **Q2** -> answered by UI-SPEC C-2, which removes the envelope's "Details:" appendix.
+> **Q3** -> answered by founder decision D-162-4 (strict reading).
+> Left in place as the record of what was genuinely open at research time.
+
+
 1. **Which venue backs the HONEST-02 subject strategy?** Determines whether the derive-gap hypothesis routes to the ledger mechanism (dormant 161.1 fan-out + runbook) or the ccxt `stored > 0` filter (TODOS 0.2, unfixed by design there). Resolved by census query #1.
 2. **Does the wizard envelope's "Details: {computation_error}" survive HONEST-01?** Once the column holds curated copy, the Details line becomes redundant with the cause sentence — a UI-SPEC call, not a research one.
 3. **Scope of OD-4 (prefixed-scrubbed suffixes)** — 3 writers vs ~15 call sites; blast radius vs strictness. Founder call.
