@@ -96,6 +96,16 @@ _SCOPED_RE = re.compile(
 #   * plan 142.1-08's Part 6 (the G1 trigger sentinel) added three scoped driver
 #     UPDATEs — 6a never-advance, 6b clock-start closure, 6c exit-clear — each
 #     bound to a strategy_id that block seeded    -> reaper 0 -> 3 (DONE)
+#   * Phase 161.1 plan 01 added supabase/tests/test_ledger_refresh_staleness.sql
+#     with two scoped driver UPDATEs: arm A advances `computed_at` on its own
+#     seeded strategy to prove the freshness verdict does NOT follow it, and arm
+#     C flips `computation_status` on a second seeded strategy to prove a
+#     fresh-but-failed row reads stale. Both are `WHERE strategy_id = <seeded
+#     identifier>`, so the D-05 rule itself is satisfied; only this pin needed
+#     the new key                                 -> (absent) -> 2
+#     ⚠️ Recorded one wave late. The map belongs in the SAME commit as the SQL
+#     edit — plan 01 shipped the file without it, and the pin did exactly what it
+#     is for by going red until someone looked.
 #
 # ⚠️ A count of ZERO is expressed by ABSENCE, not by an explicit `: 0` entry.
 # `actual` below is built with a truthiness filter, so a file with no matches
@@ -105,6 +115,7 @@ _SCOPED_RE = re.compile(
 # ---------------------------------------------------------------------------
 _EXPECTED_MATCH_COUNTS: dict[str, int] = {
     "test_get_verified_cohort_rank_gate.sql": 1,
+    "test_ledger_refresh_staleness.sql": 2,
     "test_metrics_by_basis_write.sql": 4,
     "test_strategy_analytics_stuck_computing_reaper.sql": 3,
     "test_wizard_composite_members.sql": 2,
