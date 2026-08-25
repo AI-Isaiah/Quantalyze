@@ -27,6 +27,22 @@ import { MarkOwnershipDialog } from "@/components/strategy/MarkOwnershipDialog";
 import { RenameStrategyDialog } from "@/components/strategy/RenameStrategyDialog";
 import type { CapitalOwnership } from "@/lib/capital-ownership";
 import type { PercentileMap, RankedStrategyRow } from "@/lib/queries";
+import type { SupportedExchange } from "@/lib/utils";
+import type { PreselectedKey } from "@/app/(dashboard)/strategies/new/wizard/steps/ConnectKeyStep";
+
+/**
+ * 162-06 / HONEST-06 — the placeholder row AS THIS SURFACE KNOWS IT.
+ *
+ * `PlaceholderKeyRow` is the shared table's contract (what a row RENDERS: the
+ * id, the formatted exchange label, the nickname). The owner surface knows one
+ * more fact about the same key — its venue ID — because the wizard it hands the
+ * click to needs the id, not the display string. Widening here rather than in
+ * `StrategyTable` keeps the public discovery surfaces' prop contract byte-
+ * identical: the table neither reads nor renders `exchange`.
+ */
+export type OwnerPlaceholderKeyRow = PlaceholderKeyRow & {
+  exchange: SupportedExchange;
+};
 
 interface MyStrategiesSectionProps {
   /**
@@ -40,7 +56,7 @@ interface MyStrategiesSectionProps {
    */
   strategies: RankedStrategyRow[];
   /** Server-formatted (EXCHANGE_DISPLAY already applied) bare-key rows. */
-  placeholderKeys: PlaceholderKeyRow[];
+  placeholderKeys: OwnerPlaceholderKeyRow[];
   portfolioId: string | null;
   /**
    * The OWN-scored map from `getOwnRowPercentiles().ownMap` — never the
@@ -58,6 +74,11 @@ export function MyStrategiesSection({
   percentiles,
 }: MyStrategiesSectionProps) {
   const [wizardOpen, setWizardOpen] = useState(false);
+  // 162-06 / HONEST-06 — WHICH key the owner clicked, or null for every other
+  // way into this overlay. Held as the resolved triple rather than a bare id so
+  // the overlay (and the summary the wizard renders from it) never has to
+  // re-derive the exchange label the SERVER formatted for the row.
+  const [preselectKey, setPreselectKey] = useState<PreselectedKey | null>(null);
   // Phase 150 / OWN-03 + OWN-05 — the two dialogs' targets. Same client-boundary
   // rule as `onFinishSetup` above (see the header comment): the RSC page cannot
   // hand StrategyTable a function prop, so the callbacks are minted here.
@@ -89,7 +110,25 @@ export function MyStrategiesSection({
         percentiles={percentiles ?? undefined}
         visibility="owner-all-statuses"
         placeholderKeys={placeholderKeys}
-        onFinishSetup={() => setWizardOpen(true)}
+        // 162-06 / HONEST-06 — resolve the clicked id against the SAME array
+        // that rendered the row, so the summary can only ever show labels this
+        // page actually displayed. A miss (an id from a row that is no longer
+        // in this array) opens the wizard with NO preselect: the fresh
+        // credential form is the honest fallback, never a guessed key.
+        onFinishSetup={(keyId) => {
+          const clicked = placeholderKeys.find((k) => k.id === keyId);
+          setPreselectKey(
+            clicked
+              ? {
+                  id: clicked.id,
+                  exchange: clicked.exchange,
+                  exchangeLabel: clicked.exchangeLabel,
+                  keyLabel: clicked.keyLabel,
+                }
+              : null,
+          );
+          setWizardOpen(true);
+        }}
         onMarkOwnership={(s) =>
           setMarkTarget({
             id: s.id,
@@ -121,16 +160,26 @@ export function MyStrategiesSection({
           currentName={renameTarget.name}
         />
       )}
-      {/* Opens FRESH — there is no preselect seam on this overlay today
-          (founder ruling 2026-08-05; the follow-up is logged in TODOS.md), so
-          "Finish setup" starts the wizard on its API-key branch rather than
-          pretending a key is already chosen. router.refresh() re-runs the RSC
-          page so a newly created strategy replaces its placeholder row. */}
+      {/* 162-06 / D-162-3 — "Finish setup" opens the wizard ON the key that was
+          clicked. (The comment that stood here recorded the 2026-08-05 founder
+          ruling that the overlay had no preselect seam and opened fresh; D-162-3
+          supersedes it, and this is that seam.) `preselectKey` is null for every
+          other entry point, which is byte-identically the old behavior.
+          router.refresh() re-runs the RSC page so a newly created strategy
+          replaces its placeholder row. */}
       <ContributionWizardOverlay
         isOpen={wizardOpen}
-        onClose={() => setWizardOpen(false)}
+        preselectKey={preselectKey}
+        onClose={() => {
+          setWizardOpen(false);
+          // Cleared WITH the close, not left standing: the next open may come
+          // from a different row — or from no row at all — and a preselect that
+          // outlives its click is a claim about a key the user did not choose.
+          setPreselectKey(null);
+        }}
         onSuccess={() => {
           setWizardOpen(false);
+          setPreselectKey(null);
           router.refresh();
         }}
       />

@@ -424,6 +424,37 @@ export interface ConnectKeySuccess {
 }
 
 /**
+ * 162-06 / HONEST-06 / D-162-3 — a key the owner ALREADY has, chosen before the
+ * wizard opened.
+ *
+ * Minted by the /my-strategies host from the placeholder row the owner clicked
+ * ("Finish setup →"), threaded through `ContributionWizardOverlay` and
+ * `WizardClient`, and rendered by this step as the saved-key summary
+ * (162-UI-SPEC § C-5) INSTEAD of the credential form.
+ *
+ * ⛔ IT CARRIES NO CREDENTIAL AND NEVER WILL. Preselect means REUSE of the
+ * stored `api_keys` row — the row's secret is not readable by the web tier at
+ * all. A "prefilled" credential form was the measured unwinnable loop: it still
+ * re-POSTs credentials, still collides on the venue-identity index, and still
+ * lands on the same refusal the click was trying to escape.
+ *
+ * ⚠️ `exchange` is the venue ID (the closed `SupportedExchange` union), and
+ * `exchangeLabel` is the SERVER-formatted display string for the same fact. Both
+ * travel because they answer different questions: the label is what the row the
+ * owner clicked showed them (so the summary shows the same words), while the id
+ * is what the funnel event and the error envelope's venue-capability lookup
+ * need. Neither is derived from the other on the client — deriving the display
+ * name here is exactly the "client owns exchange naming" drift the server-side
+ * formatting in the my-strategies page exists to prevent.
+ */
+export interface PreselectedKey {
+  id: string;
+  exchange: ExchangeId;
+  exchangeLabel: string;
+  keyLabel: string;
+}
+
+/**
  * The unvalidated credential draft the user has typed so far. Reported to the
  * parent via `onDraftChange` so a transition OUT of this component (multi-key
  * mode) can carry the in-progress key over instead of discarding it (UAT/F-4:
