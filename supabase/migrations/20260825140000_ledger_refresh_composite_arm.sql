@@ -458,6 +458,7 @@ DECLARE
   v_coherence  TEXT;
   v_owner      TEXT;
   v_bypassrls  BOOLEAN;
+  v_super      BOOLEAN;
 BEGIN
   -- 1. the function landed, and it takes ZERO arguments (T-161.1-15)
   SELECT p.prosecdef, p.proconfig, p.pronargs
@@ -490,8 +491,8 @@ BEGIN
   --     may call it. proowner is therefore the single attribute the entire
   --     bounding story rests on, and checks 1-3 above never looked at it.
   --
-  --     ⚠️ The degraded mode is fail-CLOSED, not fail-open. Without BYPASSRLS the
-  --     owner-scoped RLS on api_keys / strategy_keys makes ledger_refresh_staleness
+  --     ⚠️ The degraded mode is fail-CLOSED, not fail-open. Without an RLS-exempt
+  --     owner the RLS on api_keys / strategy_keys makes ledger_refresh_staleness
   --     resolve `exchanges` to {} under cron, the terminal && conjunct drops every
   --     row, and the cohort comes back empty. Nothing is over-enqueued. But a
   --     silently-zero fan-out is BYTE-IDENTICAL to "nothing was stale" — which is
@@ -500,8 +501,8 @@ BEGIN
   --     built to fix, so this is an OBSERVABILITY hole rather than a security one,
   --     and it is worth failing the apply over.
   --     Assertion shape follows 20260806130000 (JOIN pg_roles r ON r.oid = p.proowner).
-  SELECT r.rolname, r.rolbypassrls
-    INTO v_owner, v_bypassrls
+  SELECT r.rolname, r.rolbypassrls, r.rolsuper
+    INTO v_owner, v_bypassrls, v_super
     FROM pg_proc p
     JOIN pg_namespace n ON n.oid = p.pronamespace
     JOIN pg_roles r ON r.oid = p.proowner
@@ -510,8 +511,28 @@ BEGIN
   IF v_owner IS NULL THEN
     RAISE EXCEPTION 'Migration 20260825140000: could not resolve the owner of enqueue_ledger_composite_refresh — pg_proc.proowner has no matching pg_roles row';
   END IF;
-  IF v_bypassrls IS NOT TRUE THEN
-    RAISE EXCEPTION 'Migration 20260825140000: enqueue_ledger_composite_refresh is owned by role "%", which lacks BYPASSRLS. As SECURITY DEFINER it reads ledger_refresh_staleness as that role, so api_keys/strategy_keys RLS collapses `exchanges` to the empty array, the venue conjunct drops every row and the fan-out returns 0 on every tick — indistinguishable from a healthy, fully-fresh estate', v_owner;
+  --
+  --     ⚠️ rolbypassrls ALONE IS THE WRONG PREDICATE, and getting it wrong here is
+  --     expensive in one direction only. pg_roles.rolbypassrls reflects nothing but
+  --     the EXPLICITLY granted attribute: a SUPERUSER bypasses row security
+  --     implicitly and still reads rolbypassrls = FALSE unless someone also granted
+  --     it the flag. `v_bypassrls IS NOT TRUE` therefore aborts a perfectly correct
+  --     apply whenever the owner is a superuser — and this migration is on the
+  --     auto-apply-to-production route, where an abort mid-chain has no rollback
+  --     path. The exemption is what the assertion MEANS; BYPASSRLS is only one of
+  --     the two ways of holding it, so test the meaning.
+  --
+  --     MEASURED, not assumed — read-only SELECT on pg_roles, 2026-08-25:
+  --       postgres        rolsuper=false  rolbypassrls=true
+  --       supabase_admin  rolsuper=true   rolbypassrls=true
+  --       service_role    rolsuper=false  rolbypassrls=true
+  --     So the false negative cannot fire on that catalogue TODAY: the migrating
+  --     role carries the flag outright, and the one superuser carries it too. This
+  --     widening changes NO behaviour there — it removes a latent false abort, and
+  --     it is worth doing precisely because "no superuser owner lacks the flag" is
+  --     a fact about today's roles that nothing enforces, not an invariant.
+  IF NOT (COALESCE(v_bypassrls, FALSE) OR COALESCE(v_super, FALSE)) THEN
+    RAISE EXCEPTION 'Migration 20260825140000: enqueue_ledger_composite_refresh is owned by role "%", which is exempt from row security by neither route (rolbypassrls=%, rolsuper=%). As SECURITY DEFINER it reads ledger_refresh_staleness as that role, so api_keys/strategy_keys RLS collapses `exchanges` to the empty array, the venue conjunct drops every row and the fan-out returns 0 on every tick — indistinguishable from a healthy, fully-fresh estate', v_owner, v_bypassrls, v_super;
   END IF;
 
   -- 3. no EXECUTE for the browser-reachable roles. has_function_privilege resolves

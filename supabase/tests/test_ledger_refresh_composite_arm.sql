@@ -46,6 +46,11 @@
 --                             once and can be silently undone afterwards. That
 --                             REVOKE is the SOLE bound: under `authenticated`
 --                             both NOT EXISTS guards go vacuously TRUE.
+--   J  OWNER durability (F-2) — the SECURITY DEFINER owner is still exempt from
+--                             row security. Same run-once weakness as I, one
+--                             property over: ownership drift makes every tick
+--                             enqueue ZERO, which no other arm can see because
+--                             each of them seeds its own fixtures.
 --
 -- ⚠️ sfox is deliberately UNEXERCISED here, as everywhere in this phase: it has
 -- ZERO strategies in PROD, so its arm ships unexercised by construction. It stays
@@ -106,7 +111,7 @@
 --
 -- ✅ MECHANICALLY CLOSED (161.1-REVIEW WR-03 option (b), landed in
 -- .github/workflows/ci.yml): the `sql-tests` step now captures each file's output,
--- fails on a printed 'SKIP:', and reads the 'ALL 9 ARMS EXECUTED' sentinel back off
+-- fails on a printed 'SKIP:', and reads the 'ALL 10 ARMS EXECUTED' sentinel back off
 -- THIS file's RAISE NOTICE line and requires the run to have printed it. So an
 -- edit that neuters an arm in place — deleting the assertion, short-circuiting
 -- early — fails CI even though psql exits 0. ⚠️ The count in that notice is read
@@ -146,6 +151,9 @@ DECLARE
   v_comp       BOOLEAN;
   v_defer      BOOLEAN;
   v_status     TEXT;
+  v_own_role   TEXT;     -- arm J: proowner of the fan-out …
+  v_own_bypass BOOLEAN;  -- arm J: … and the two independent routes by which
+  v_own_super  BOOLEAN;  -- arm J: … that role may be exempt from row security
   sid          UUID;
 BEGIN
   -- ----- applied-ness gate: ABSENCE IS A FAILURE, NOT A SKIP (WR-03) ------
@@ -155,7 +163,7 @@ BEGIN
      WHERE n.nspname = 'public'
        AND p.proname = 'enqueue_ledger_composite_refresh'
   ) THEN
-    RAISE EXCEPTION 'TEST FAILED (0): public.enqueue_ledger_composite_refresh is not registered on this database, so NONE of arms A-I ran — including arms D and E, the only executed proof of the single-key partition and the deferred-venue exclusion (D-01/D-13). This is a FAILURE, not a skip. TWO causes fit and this assertion cannot distinguish them, so check both: (i) the TEST project has not received migration 20260825140000 — apply the phase''s migrations to it and re-run; expect this exactly once, on the PR that introduces them, because NO workflow applies migrations to TEST; (ii) the function was DROPPED or RENAMED after being applied, which is a real regression in a SECURITY DEFINER cross-tenant enqueue path. ⛔ Do NOT "fix" this by restoring the old RAISE NOTICE/RETURN skip: that made this file exit 0 having asserted nothing, on exactly the run where this function first reaches PROD.';
+    RAISE EXCEPTION 'TEST FAILED (0): public.enqueue_ledger_composite_refresh is not registered on this database, so NONE of arms A-J ran — including arms D and E, the only executed proof of the single-key partition and the deferred-venue exclusion (D-01/D-13). This is a FAILURE, not a skip. TWO causes fit and this assertion cannot distinguish them, so check both: (i) the TEST project has not received migration 20260825140000 — apply the phase''s migrations to it and re-run; expect this exactly once, on the PR that introduces them, because NO workflow applies migrations to TEST; (ii) the function was DROPPED or RENAMED after being applied, which is a real regression in a SECURITY DEFINER cross-tenant enqueue path. ⛔ Do NOT "fix" this by restoring the old RAISE NOTICE/RETURN skip: that made this file exit 0 having asserted nothing, on exactly the run where this function first reaches PROD.';
   END IF;
 
   -- ----- anti-vacuity precondition on arm A -------------------------------
@@ -578,7 +586,65 @@ BEGIN
     RAISE EXCEPTION 'TEST FAILED (I): role authenticated can EXECUTE enqueue_ledger_composite_refresh. Both NOT EXISTS guards in its body go vacuously TRUE for that role (strategies_read grants it its own rows; compute_jobs FORCE-RLS grants it none), so this is unbounded self-scoped enqueue every tick — the REVOKE at 20260825140000 is the only thing closing it';
   END IF;
 
-  RAISE NOTICE 'ALL 9 ARMS EXECUTED (A-I) and passed — the composite refresh arm is dormant, partitioned from the single-key arm, bounded, and its exclusions are falsifiable.';
+  -- ======================================================================
+  -- ARM J — THE DEFINER'S RLS EXEMPTION, RE-ASSERTED ON EVERY RUN
+  --         (161.1-AUDIT F-2 durability).
+  --
+  -- Migration 20260825140000's DO block pins proowner's exemption — ONCE, at
+  -- apply. That is the identical run-once weakness arm I exists to close, one
+  -- property over, and ownership drifts by routes as ordinary as the ACL's:
+  -- REASSIGN OWNED, a restore-from-dump performed by a different role, an
+  -- `ALTER FUNCTION … OWNER TO` in a later migration.
+  --
+  -- ⛔ WHY A ZERO FAN-OUT IS THE WORST SHAPE THIS ARM COULD FAIL IN. The function
+  -- is SECURITY DEFINER, so every read in its body runs as the OWNER, and its
+  -- cohort comes from public.ledger_refresh_staleness — a `security_invoker`
+  -- view (20260825120000), which is exactly what makes the owner's own row
+  -- security apply to it. An owner with no exemption reads api_keys /
+  -- strategy_keys under RLS, `exchanges` collapses to the empty array, the
+  -- terminal && venue conjunct drops every row, and every tick enqueues nothing.
+  -- Fail-CLOSED — nothing leaks, nothing is over-enqueued — and THAT is the
+  -- problem: a silently-zero fan-out is byte-identical to "the whole estate is
+  -- fresh". No other arm here can see it, because every one of them proves its
+  -- claim against fixtures it seeded itself inside this transaction.
+  --
+  -- ⚠️ PINNING rolbypassrls ALONE WOULD CONTRADICT THE MIGRATION. A superuser
+  -- bypasses row security implicitly and does NOT thereby carry rolbypassrls, so
+  -- the single-flag form is a false negative against a superuser owner. This arm
+  -- asserts the SAME disjunction 20260825140000 asserts, so no estate can be red
+  -- in one place and green in the other.
+  --
+  -- ⚠️ ABSENCE MUST BE RED — AND THE IDIOMATIC SHAPE FOR THIS CHECK IS NOT.
+  -- Arm I gets absence-safety for free: has_function_privilege raises 42883 on a
+  -- missing function. Nothing here does. The shape this repo already uses for the
+  -- same property — `IF EXISTS (SELECT … JOIN pg_roles … AND NOT r.rolbypassrls)`
+  -- in supabase/tests/test_weight_snapshot_seed_secdef.sql arm 4 — matches ZERO
+  -- ROWS when the function is gone, so EXISTS is FALSE and the arm passes having
+  -- verified nothing. MEASURED on a throwaway PG16 cluster 2026-08-25: that form
+  -- exits 0 against a DROPped function. This arm therefore borrows the reference's
+  -- join (JOIN pg_roles r ON r.oid = p.proowner) but not its EXISTS framing.
+  -- The COALESCE predicate below does raise on all-NULL targets, so absence is red
+  -- either way — but it would name the owner as "<NULL>" and blame ownership drift
+  -- for what is really an unapplied migration. The explicit NULL-owner guard is
+  -- what makes the failure say the true thing. The applied-ness gate at the top of
+  -- this file also reddens on absence; this guard exists so the arm does not lean
+  -- on a check 400 lines away that a later edit could relax.
+  -- ======================================================================
+  SELECT r.rolname, r.rolbypassrls, r.rolsuper
+    INTO v_own_role, v_own_bypass, v_own_super
+    FROM pg_proc p
+    JOIN pg_namespace n ON n.oid = p.pronamespace
+    JOIN pg_roles r ON r.oid = p.proowner
+   WHERE n.nspname = 'public'
+     AND p.proname = 'enqueue_ledger_composite_refresh';
+  IF v_own_role IS NULL THEN
+    RAISE EXCEPTION 'TEST FAILED (J): could not resolve the owner of public.enqueue_ledger_composite_refresh from pg_proc/pg_roles. Zero rows here is NOT "nothing wrong found" — it is the function being absent (or its proowner carrying no pg_roles row), and a NULL-tolerant exemption check would have read that as a pass';
+  END IF;
+  IF NOT (COALESCE(v_own_bypass, FALSE) OR COALESCE(v_own_super, FALSE)) THEN
+    RAISE EXCEPTION 'TEST FAILED (J): public.enqueue_ledger_composite_refresh is owned by role "%", which is exempt from row security by neither route (rolbypassrls=%, rolsuper=%). As SECURITY DEFINER it reads the security_invoker view ledger_refresh_staleness as that role, so api_keys/strategy_keys RLS empties `exchanges`, the venue conjunct drops every row, and the fan-out returns 0 on every tick — indistinguishable from a healthy, fully-fresh estate. Migration 20260825140000 asserts this at apply time; ownership can drift afterwards and this arm is what notices', v_own_role, v_own_bypass, v_own_super;
+  END IF;
+
+  RAISE NOTICE 'ALL 10 ARMS EXECUTED (A-J) and passed — the composite refresh arm is dormant, partitioned from the single-key arm, bounded, its exclusions are falsifiable, and its EXECUTE ACL and DEFINER exemption both still hold.';
 END $$;
 
 ROLLBACK;
