@@ -50,15 +50,47 @@
 --   H2 per-kind scope        — a later done of a DIFFERENT kind must NOT mask a
 --                               real failure. H alone cannot see `d.kind = f.kind`;
 --                               this arm is what makes that conjunct falsifiable.
+--   I  IDEMPOTENT across      — the CR-01 regression (161.1 migration re-review,
+--      bridge calls              MEDIUM). Protection is granted on a PLAIN
+--                               'complete' row; branch (a) then bounces that row
+--                               to 'computing' on a sibling job; the NEXT bridge
+--                               call re-derives health from that bounced status
+--                               and poisons the row it had already protected.
+--                               Three bridge calls, one still-live marked job,
+--                               and the row must survive all three.
+--   I2 branch (a) still works — the discriminator for arm I. A published row with
+--                               a non-terminal job and NO protected failure MUST
+--                               still read 'computing'. Without this arm, deleting
+--                               branch (a) outright passes arm I.
+--   J  kind-scoped marker     — the marker is read out of `metadata->>'source'`, a
+--                               namespace shared with request-derived venue tokens
+--                               (routers/process_key.py writes `body.source` into
+--                               a 'process_key_long' enqueue). A marked job of a
+--                               kind NO refresh arm can enqueue must stay LOUD.
+--   J2 chain-hop kind kept    — the retention half of J: 'compute_analytics_from_csv'
+--                               is the propagated hop (JOB_CHAIN_FOLLOW_ON) and
+--                               MUST stay protected. Goes RED if the kind list is
+--                               narrowed to the two fan-out kinds.
 --
 -- pgTAP is NOT installed (CLAUDE.md). Plain PL/pgSQL DO block, RAISE EXCEPTION
 -- on failure. No psql meta-commands. Under psql -v ON_ERROR_STOP=1 a failed
 -- assertion exits non-zero. The whole test rolls back.
 --
--- ⚠️ The presence gate below RETURNs with a NOTICE when migration 20260825150000
--- has not been applied here. A skipped gate is a VACUOUSLY GREEN gate. The final
--- 'ALL 9 ARMS EXECUTED' notice is what distinguishes a real pass from a skip —
--- read it in the run output, do not infer it from the exit code.
+-- ⛔ THE APPLIED-NESS GATE RAISES. IT DOES NOT SKIP (WR-03, corrected 2026-08-25).
+-- It used to `RAISE NOTICE 'SKIP: …'; RETURN;` when migration 20260825150000 was
+-- absent. Measured, that meant: run this file the way the Usage line below
+-- documents, against a database that has not received the migration, and it
+-- executes 0 of the arms and exits 0 — a SILENT PASS on the gate for CR-01,
+-- precisely on the runs where the protection is new and least proven. Inside
+-- CI's `sql-tests` step a printed `NOTICE: SKIP:` is fatal, so it failed there —
+-- but by accident of that grep, not because this file asserted anything, and a
+-- fifth skip shape found live on main printed `… are SKIPPED:` and slipped the
+-- grep entirely. Absence is now a FAILURE that names the object and both causes.
+--
+-- The gate stays CONDITIONAL, which is what separates it from a blanket abort:
+-- with the migration applied it falls through and the arms decide the verdict.
+-- The final 'ALL 13 ARMS EXECUTED' notice is the sentinel CI's loop reads the
+-- arm count off — if you add or remove an arm, update N on that line too.
 --
 -- Usage:
 --   psql "$TEST_SUPABASE_DB_URL" -v ON_ERROR_STOP=1 -f \
@@ -78,7 +110,12 @@ DECLARE
   s_f        UUID;  -- Arm F: protected + unprotected together
   s_h        UUID;  -- Arm H: protected failure, superseded
   s_h2       UUID;  -- Arm H2: cross-kind supersession must NOT mask
+  s_i        UUID;  -- Arm I: protection must survive a branch-(a) bounce
+  s_i2       UUID;  -- Arm I2: branch (a) must still fire without a protection
+  s_j        UUID;  -- Arm J: marked, but a kind no refresh arm enqueues
+  s_j2       UUID;  -- Arm J2: the propagated chain-hop kind stays protected
   j          UUID;
+  j_sib      UUID;
   tok        UUID;
   v_status   TEXT;
   v_error    TEXT;
@@ -104,12 +141,20 @@ BEGIN
   -- presence gate must be independent of the thing under test. The comment is
   -- written by the same migration but is not part of any branch, so neutering
   -- the body leaves it intact and the arms actually run.
+  --
+  -- ----- applied-ness gate: ABSENCE IS A FAILURE, NOT A SKIP (WR-03) ------
+  -- This file previously did `RAISE NOTICE 'SKIP: …'; RETURN;` here. Run the way
+  -- the Usage line above documents, that exits 0 having executed 0 of the arms
+  -- below — a silent pass on the gate for CR-01, on exactly the runs where the
+  -- migration is new. The three sibling ledger gates were converted for this
+  -- reason; this fourth one was missed. It is now a FAILURE, and it is still
+  -- CONDITIONAL: a deployed function carrying the comment falls straight
+  -- through to the arms.
   IF COALESCE(
        obj_description('sync_strategy_analytics_status(uuid)'::regprocedure, 'pg_proc'),
        ''
      ) !~ '20260825150000' THEN
-    RAISE NOTICE 'SKIP: migration 20260825150000 not yet applied here (sync_strategy_analytics_status does not carry its comment). Assertions enforce once the test DB catches up.';
-    RETURN;
+    RAISE EXCEPTION 'TEST FAILED (0): public.sync_strategy_analytics_status(uuid) does not carry the migration 20260825150000 comment on this database, so NONE of arms A-J2 ran. This is a FAILURE, not a skip. TWO causes fit and this assertion cannot distinguish them, so check both: (i) the TEST project has not received migration 20260825150000_sync_status_protect_marked_refresh.sql — apply it and re-run; expect this exactly once, on the PR that introduces or re-applies it, because NO workflow applies migrations to TEST; (ii) the function was REDEFINED by a later migration that dropped this comment, which silently reverts the CR-01 protection and un-publishes a funded account on its next failed maintenance refresh. ⛔ Do NOT "fix" this by restoring the old RAISE NOTICE/RETURN skip, and do NOT reword it to any phrasing CI''s SKIP grep cannot see: that is what made this file assert nothing while reading green.';
   END IF;
 
   -- ----- SEED ------------------------------------------------------------
@@ -131,6 +176,10 @@ BEGIN
   INSERT INTO strategies (user_id, api_key_id, name) VALUES (uid, k_mt5, 'ssr F') RETURNING id INTO s_f;
   INSERT INTO strategies (user_id, api_key_id, name) VALUES (uid, k_mt5, 'ssr H') RETURNING id INTO s_h;
   INSERT INTO strategies (user_id, api_key_id, name) VALUES (uid, k_mt5, 'ssr H2') RETURNING id INTO s_h2;
+  INSERT INTO strategies (user_id, api_key_id, name) VALUES (uid, k_mt5, 'ssr I') RETURNING id INTO s_i;
+  INSERT INTO strategies (user_id, api_key_id, name) VALUES (uid, k_mt5, 'ssr I2') RETURNING id INTO s_i2;
+  INSERT INTO strategies (user_id, api_key_id, name) VALUES (uid, k_mt5, 'ssr J') RETURNING id INTO s_j;
+  INSERT INTO strategies (user_id, api_key_id, name) VALUES (uid, k_mt5, 'ssr J2') RETURNING id INTO s_j2;
 
   -- The four PUBLISHED rows are seeded identically on purpose: arms A, B, C and
   -- D differ ONLY in the job's metadata. Anything else that differed would be a
@@ -144,9 +193,26 @@ BEGIN
          (s_f, 'complete_with_warnings', TRUE, v_before),
          (s_h, 'complete_with_warnings', TRUE, v_before),
          (s_h2, 'complete_with_warnings', TRUE, v_before),
+         -- Arms J / J2 keep that identical seed on purpose: they differ from arm
+         -- A ONLY in the job's `kind`, so a divergent outcome has exactly one
+         -- explanation.
+         (s_j, 'complete_with_warnings', TRUE, v_before),
+         (s_j2, 'complete_with_warnings', TRUE, v_before),
          -- Arm E: marked, but NOT published. The worker-side guard would have
          -- declined here too; the bridge must agree with it.
          (s_e, 'computing', TRUE, v_before);
+
+  -- ⛔ Arms I / I2 seed a PLAIN 'complete' with computation_warned = FALSE, and
+  -- that is the whole point of the arm rather than an incidental difference.
+  -- Branch (a) PRESERVES 'complete_with_warnings' (and any warned row), so the
+  -- seven rows above are structurally immune to the bounce arm I drives. Only a
+  -- cleanly recomputed row — plain 'complete', warning cleared — can be bounced
+  -- to 'computing', and that is the shape every successful refresh leaves
+  -- behind. Seed these two as complete_with_warnings and arm I passes against
+  -- the unfixed bridge.
+  INSERT INTO strategy_analytics (strategy_id, computation_status, computation_warned, computed_at)
+  VALUES (s_i,  'complete', FALSE, v_before),
+         (s_i2, 'complete', FALSE, v_before);
 
   -- ===== ARM A — protected single-key refresh ============================
   tok := gen_random_uuid();
@@ -303,7 +369,138 @@ BEGIN
     RAISE EXCEPTION 'ARM H2 FAILED (F-3/PUB-02): a later done of a DIFFERENT kind masked a real permanent failure; the row reads %. The re-base dropped `d.kind = f.kind` from the supersession subquery.', v_status;
   END IF;
 
-  RAISE NOTICE 'ALL 9 ARMS EXECUTED: sync_strategy_analytics_status protects a MARKED ledger refresh (A single-key, B composite, G no branch-(c) fall-through) and stays LOUD everywhere else (C unmarked, D foreign source, E unpublished row, F unprotected sibling, H/H2 supersession, same-kind and cross-kind).';
+  -- ===== ARM I — the protection must be IDEMPOTENT across bridge calls =====
+  -- The regression the 161.1 migration re-review found (MEDIUM). b-prime grants
+  -- protection by LEAVING the published status alone — and the health conjunct
+  -- is then re-derived from that same status on the NEXT call. Branch (a)
+  -- transiently overwrites it with 'computing' whenever any sibling job is in
+  -- flight, so the second call reads the row as unhealthy and the SAME
+  -- still-live protected job routes to the loud branch, poisoning the row it
+  -- had already protected. The bridge is called THREE times here against ONE
+  -- marked failure; the row must survive all three.
+  tok := gen_random_uuid();
+  INSERT INTO compute_jobs (strategy_id, kind, status, claim_token, attempts, max_attempts, metadata)
+  VALUES (s_i, 'derive_broker_dailies', 'running', tok, 1, 3,
+          jsonb_build_object('source', 'ledger-refresh', 'enqueued_at', now()))
+  RETURNING id INTO j;
+
+  -- call 1 — grants the protection.
+  PERFORM mark_compute_job_failed(j, 'mt5 gateway IPC timeout (-10005)', 'permanent', tok);
+
+  SELECT computation_status INTO v_status FROM strategy_analytics WHERE strategy_id = s_i;
+  IF v_status IS DISTINCT FROM 'complete' THEN
+    RAISE EXCEPTION 'ARM I SETUP BROKEN: call 1 left the row at % rather than the protected ''complete''. The idempotence assertions below would be measuring a protection that was never granted.', v_status;
+  END IF;
+
+  -- call 2 — a SIBLING job of another kind goes non-terminal, so branch (a)
+  -- fires. Kind is deliberately different from the failed job's, so it can never
+  -- supersede it: the marked failure stays live for call 3.
+  INSERT INTO compute_jobs (strategy_id, kind, status, attempts, max_attempts)
+  VALUES (s_i, 'sync_trades', 'pending', 0, 3)
+  RETURNING id INTO j_sib;
+
+  SELECT status INTO v_jobstat FROM compute_jobs WHERE id = j_sib;
+  IF v_jobstat NOT IN ('pending', 'running', 'done_pending_children', 'failed_retry') THEN
+    RAISE EXCEPTION 'ARM I SETUP BROKEN: the sibling job is %, which branch (a) does not count as non-terminal, so branch (a) is never reached and this arm proves nothing.', v_jobstat;
+  END IF;
+
+  PERFORM sync_strategy_analytics_status(s_i);
+
+  -- ⛔ No assertion on the row here, deliberately. Whether the bounce is
+  -- suppressed at branch (a) or absorbed elsewhere is an implementation choice;
+  -- pinning the intermediate status would pin ONE remedy and go RED against the
+  -- other. The seed check above is what makes the arm non-vacuous — it proves
+  -- branch (a)'s precondition was actually met. Arm I2 proves branch (a) is
+  -- still alive.
+
+  -- call 3 — the sibling terminalizes (a DIFFERENT kind, so F-3/PUB-02
+  -- supersession does not clear the marked failure) and the bridge re-derives
+  -- with the same still-live protected job.
+  UPDATE compute_jobs SET status = 'done' WHERE id = j_sib;
+  PERFORM sync_strategy_analytics_status(s_i);
+
+  SELECT status INTO v_jobstat FROM compute_jobs WHERE id = j;
+  IF v_jobstat IS DISTINCT FROM 'failed_final' THEN
+    RAISE EXCEPTION 'ARM I SETUP BROKEN: the marked job is % at call 3, not failed_final — nothing was still being asked of the protection.', v_jobstat;
+  END IF;
+
+  SELECT computation_status, computation_error, computed_at, computing_started_at
+    INTO v_status, v_error, v_computed, v_anchor
+    FROM strategy_analytics WHERE strategy_id = s_i;
+
+  IF v_status IS DISTINCT FROM 'complete' THEN
+    RAISE EXCEPTION 'ARM I FAILED (CR-01 idempotence): the row reads % after a third bridge call over ONE still-live protected failure. The protection is re-derived from a status branch (a) transiently overwrites, so a sibling job is all it takes to un-publish the funded account the first call protected.', v_status;
+  END IF;
+  IF v_error IS DISTINCT FROM 'mt5 gateway IPC timeout (-10005)' THEN
+    RAISE EXCEPTION 'ARM I FAILED: computation_error is % after the bounce — the protected failure stopped being VISIBLE, which is half of what b-prime promises.', COALESCE(v_error, 'NULL');
+  END IF;
+  IF v_computed IS DISTINCT FROM v_before THEN
+    RAISE EXCEPTION 'ARM I FAILED: computed_at moved from % to % across the bounce. A FAILED refresh must never read as freshly computed, whichever branch does the writing.', v_before, v_computed;
+  END IF;
+  IF v_anchor IS NOT NULL THEN
+    RAISE EXCEPTION 'ARM I FAILED (JOB-01): computing_started_at survived; the row is not computing, so the reaper key must be clear.';
+  END IF;
+
+  -- ===== ARM I2 — branch (a) still fires when nothing is protected ==========
+  -- THE DISCRIMINATOR for arm I. Arm I is passed trivially by a bridge that
+  -- deleted branch (a) altogether, or that never writes 'computing' on any row.
+  -- Identical seed to arm I (plain 'complete', warned FALSE) and an identical
+  -- non-terminal job — the ONLY difference is that no protected failure exists.
+  INSERT INTO compute_jobs (strategy_id, kind, status, attempts, max_attempts)
+  VALUES (s_i2, 'sync_trades', 'pending', 0, 3);
+  PERFORM sync_strategy_analytics_status(s_i2);
+
+  SELECT computation_status, computing_started_at INTO v_status, v_anchor
+    FROM strategy_analytics WHERE strategy_id = s_i2;
+  IF v_status IS DISTINCT FROM 'computing' THEN
+    RAISE EXCEPTION 'ARM I2 FAILED: a published row with an in-flight job and NO protected failure reads % instead of ''computing''. Branch (a) has been disabled rather than exempted, so every in-flight job is now invisible to the wizard poller.', v_status;
+  END IF;
+  IF v_anchor IS NULL THEN
+    RAISE EXCEPTION 'ARM I2 FAILED (JOB-01): the transition INTO computing did not stamp computing_started_at, so the stuck-computing reaper can never fire on this row.';
+  END IF;
+
+  -- ===== ARM J — the marker is KIND-SCOPED =================================
+  -- `metadata->>'source'` is not a private namespace. The one request-derived
+  -- writer of compute_jobs.metadata is routers/process_key.py, which puts
+  -- `body.source` (a Pydantic venue Literal) into a 'process_key_long' enqueue.
+  -- Today those values cannot collide with the refresh markers, so this arm is
+  -- NOT a live exploit — it pins the second, structural half of the containment,
+  -- the half that survives someone widening that Literal. Differs from arm A
+  -- ONLY in `kind`.
+  tok := gen_random_uuid();
+  INSERT INTO compute_jobs (strategy_id, kind, status, claim_token, attempts, max_attempts, metadata)
+  VALUES (s_j, 'process_key_long', 'running', tok, 1, 3,
+          jsonb_build_object('source', 'ledger-refresh', 'enqueued_at', now()))
+  RETURNING id INTO j;
+
+  PERFORM mark_compute_job_failed(j, 'long fetch failed', 'permanent', tok);
+
+  SELECT computation_status INTO v_status FROM strategy_analytics WHERE strategy_id = s_j;
+  IF v_status IS DISTINCT FROM 'failed' THEN
+    RAISE EXCEPTION 'ARM J FAILED: a ''process_key_long'' job carrying a refresh marker was PROTECTED (row reads %). No refresh arm enqueues that kind — the fan-outs enqueue derive_broker_dailies and stitch_composite, and the chain hop propagates only into compute_analytics_from_csv — so the predicate is trusting a metadata key it shares with request-derived venue tokens.', v_status;
+  END IF;
+
+  -- ===== ARM J2 — the propagated chain-hop kind stays protected ============
+  -- The retention half of J. 'compute_analytics_from_csv' is not enqueued by
+  -- either fan-out: it is the JOB_CHAIN_FOLLOW_ON hop out of
+  -- derive_broker_dailies, and services/job_worker.py forwards the marker onto
+  -- it. It compiles the factsheet, so it is precisely the hop whose failure
+  -- would un-publish. Narrow the kind list to the two fan-out kinds and this
+  -- arm goes RED.
+  tok := gen_random_uuid();
+  INSERT INTO compute_jobs (strategy_id, kind, status, claim_token, attempts, max_attempts, metadata)
+  VALUES (s_j2, 'compute_analytics_from_csv', 'running', tok, 1, 3,
+          jsonb_build_object('source', 'ledger-refresh', 'chained_from', 'derive_broker_dailies'))
+  RETURNING id INTO j;
+
+  PERFORM mark_compute_job_failed(j, 'factsheet compile failed', 'permanent', tok);
+
+  SELECT computation_status INTO v_status FROM strategy_analytics WHERE strategy_id = s_j2;
+  IF v_status IS DISTINCT FROM 'complete_with_warnings' THEN
+    RAISE EXCEPTION 'ARM J2 FAILED: the chained ''compute_analytics_from_csv'' hop is NOT protected (row reads %). The marker is forwarded onto that hop by services/job_worker.py, and it is the hop that compiles the factsheet — dropping it from the kind scope re-opens CR-01 on the single-key arm one hop later.', v_status;
+  END IF;
+
+  RAISE NOTICE 'ALL 13 ARMS EXECUTED: sync_strategy_analytics_status protects a MARKED ledger refresh (A single-key, B composite, G no branch-(c) fall-through) IDEMPOTENT across a branch-(a) bounce (I, discriminated by I2) and KIND-SCOPED (J2 keeps the chain hop) — and stays LOUD everywhere else (C unmarked, D foreign source, E unpublished row, F unprotected sibling, H/H2 supersession same-kind and cross-kind, J foreign kind).';
 END $$;
 
 ROLLBACK;
