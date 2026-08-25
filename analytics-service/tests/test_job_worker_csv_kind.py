@@ -82,7 +82,13 @@ async def test_handler_delegates_to_runner_when_strategy_id_present() -> None:
     ) as mock_runner:
         result = await run_compute_analytics_from_csv_job(job)
     assert result.outcome == DispatchOutcome.DONE
-    mock_runner.assert_called_once_with("abc-123")
+    # Phase 161.1 / CR-03: the handler now threads the recurring-refresh marker
+    # into the runner. This job carries no metadata, so the marker is None —
+    # the LOUD path, byte-equivalent to the pre-CR-03 behaviour. Asserted
+    # EXPLICITLY rather than loosened to `assert_called_once()`: the fail-safe
+    # direction is that an unmarked job is never protected, and a call-shape
+    # assertion that stopped naming the value would stop proving it.
+    mock_runner.assert_called_once_with("abc-123", refresh_source=None)
 
 
 # ---------------------------------------------------------------------------

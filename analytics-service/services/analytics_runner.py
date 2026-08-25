@@ -1174,8 +1174,22 @@ def _is_trade_mix_approximate(positions: list[dict[str, Any]]) -> bool:
     )
 
 
-async def run_csv_strategy_analytics(strategy_id: str) -> dict[str, Any]:
+async def run_csv_strategy_analytics(
+    strategy_id: str,
+    *,
+    refresh_source: str | None = None,
+) -> dict[str, Any]:
     """Phase 19.1 / CSV → analytics pipeline Plan 02 Task 2.
+
+    ``refresh_source`` (Phase 161.1 / CR-03) is the recurring-refresh marker
+    carried by the ``compute_analytics_from_csv`` job, forwarded across the
+    chain edge by ``run_derive_broker_dailies_job``. It is KEYWORD-ONLY and
+    defaults to None, so every other caller — the CSV-first wizard route, the
+    composite finalizer, the tests — is byte-unchanged and takes the LOUD
+    terminal-failure path exactly as before. Non-None means "this run is hop 2
+    of a background maintenance refresh that no poller is watching", which is
+    the only condition under which the D-15 non-destructive branch applies.
+    The caller is responsible for passing ONLY a recognised marker.
 
     Analytics pipeline for source='csv' strategies. Loads
     csv_daily_returns, builds a pd.Series, and calls compute_all_metrics
@@ -1233,6 +1247,107 @@ async def run_csv_strategy_analytics(strategy_id: str) -> dict[str, Any]:
     _is_broker_sourced = bool(
         isinstance(_strategy_row, dict) and _strategy_row.get("api_key_id")
     )
+
+    # ---- Phase 161.1 / CR-03: the D-15 guard for HOP 2 ---------------------
+    # ⛔ THE SNAPSHOT MUST BE TAKEN HERE, ABOVE `_mark_computing`, AND THAT
+    # ORDERING IS THE WHOLE MECHANISM. The single-key derive path can read the
+    # published status lazily at stamp time because nothing has moved it. This
+    # runner cannot: `_mark_computing` below writes computation_status =
+    # 'computing' unconditionally, so by the time any of the five terminal-
+    # failure stamps runs, a "is the row terminal-success?" read would ALWAYS
+    # answer 'computing' — never terminal-success — and a guard built on it
+    # would be permanently, invisibly inert. It would look exactly like a guard
+    # in review and protect nothing. The pre-refresh publish state is only
+    # observable before this line.
+    #
+    # ⛔ FAIL-SAFE DIRECTION, non-negotiable and identical to D-15's on the
+    # derive path: anything unrecognised leaves the snapshot None, and a None
+    # snapshot takes the LOUD destructive path. No marker, an unreadable row, no
+    # prior row, or a prior row that is not terminal-success — all of them
+    # un-publish loudly. Never fail toward suppression: a wrongly-suppressed
+    # failure hangs the wizard poller on an infinite spinner.
+    #
+    # Restoring (rather than merely omitting) the two publish columns is also
+    # load-bearing. `_mark_computing` has already downgraded the row to
+    # 'computing' by then, so omitting them would leave a live factsheet parked
+    # at 'computing' with nothing left to move it — and the SQL bridge's
+    # protection predicate (migration 20260825150000) keys on a PUBLISHED
+    # status, so the row would not be protected there either. Writing the
+    # snapshot back puts the row where it was and keeps both ends coherent.
+    _publish_snapshot: dict[str, Any] | None = None
+    if refresh_source is not None:
+        # Function-local (the file's idiom) AND single-sourced: the same
+        # frozenset the derive-path guard and the staleness view are pinned
+        # against, never a third spelling of the pair. Only reached on the
+        # refresh path, so the normal route keeps its import graph unchanged.
+        from services.job_worker import STRATEGY_ANALYTICS_TERMINAL_SUCCESS_STATUSES
+
+        def _read_publish_snapshot() -> dict[str, Any] | None:
+            res = (
+                supabase.table("strategy_analytics")
+                .select("computation_status, computation_warned")
+                .eq("strategy_id", strategy_id)
+                .maybe_single()
+                .execute()
+            )
+            row = getattr(res, "data", None) or {}
+            status = row.get("computation_status")
+            if status not in STRATEGY_ANALYTICS_TERMINAL_SUCCESS_STATUSES:
+                return None
+            return {
+                "computation_status": status,
+                "computation_warned": bool(row.get("computation_warned")),
+            }
+
+        try:
+            _publish_snapshot = await db_execute(_read_publish_snapshot)
+        except Exception as _snapshot_exc:  # noqa: BLE001
+            logger.warning(
+                "csv analytics: could not read the pre-refresh publish state for "
+                "strategy %s (%s) — taking the LOUD terminal-failure path on any "
+                "failure this run.",
+                strategy_id, _snapshot_exc,
+            )
+            _publish_snapshot = None
+
+    def _guard_failure_payload_inplace(payload: dict[str, Any]) -> None:
+        """D-15 for hop 2: rewrite a terminal-failure upsert payload IN PLACE so
+        it records the error WITHOUT un-publishing a funded account.
+
+        No-op when unprotected — every existing caller and every existing test
+        sees the byte-unchanged payload.
+
+        ⛔ IN-PLACE, AND THAT IS NOT A STYLE CHOICE. `tests/
+        test_computing_started_at_stamp.py` is a JOB-01 census that walks the AST
+        of every `strategy_analytics` write and can only read a payload that is a
+        dict LITERAL (or a name bound to one); a payload produced by a helper
+        CALL is recorded as unreadable and stepped over (its D-07 resolution
+        policy). The first draft of this guard was a pure function wrapping each
+        literal, which made all five terminal writers in this file invisible to
+        that census — measured: its exempt count fell from 1 to 0 and the gate
+        went RED. Mutating a literal the call site still owns keeps every write
+        readable there. Do not "clean this up" into a return value.
+        """
+        if _publish_snapshot is None:
+            return
+        # Put the publish state back where the refresh found it. RESTORE rather
+        # than omit: `_mark_computing` has already written 'computing'.
+        payload["computation_status"] = _publish_snapshot["computation_status"]
+        payload["computation_warned"] = _publish_snapshot["computation_warned"]
+        # ⛔ And DROP the data_quality_flags rebuild. Three of the five stamp
+        # sites write `{"csv_source": True}` WHOLESALE, which on a live row
+        # destroys the NAV_TWR_GUARD_KEYS the derive pre-stamped — the exact
+        # laundering class migration 20260707120000 closed. On a protected
+        # refresh the live row's flags are still the truth, so leave them.
+        payload.pop("data_quality_flags", None)
+        logger.warning(
+            "csv analytics: a MARKED ledger refresh (source=%s) failed for "
+            "strategy %s; recorded computation_error and left the publish state "
+            "(%s) intact (Phase 161.1 D-15/CR-03). The failure is still visible "
+            "in compute_jobs, in computation_error, in this line, and in the "
+            "staleness view.",
+            refresh_source, strategy_id, _publish_snapshot["computation_status"],
+        )
 
     # Mark computing.
     def _mark_computing() -> None:
@@ -1310,8 +1425,7 @@ async def run_csv_strategy_analytics(strategy_id: str) -> dict[str, Any]:
             # data" copy. Downstream consumers gate the chip on
             # data_quality_flags?.csv_source (src/lib/types.ts:335).
             def _mark_failed() -> None:
-                supabase.table("strategy_analytics").upsert(
-                    {
+                _insufficient_payload: dict[str, Any] = {
                         "strategy_id": strategy_id,
                         "computation_status": "failed",
                         # SI-02 (MEDIUM-2): clear the runner-owned warned marker.
@@ -1320,7 +1434,10 @@ async def run_csv_strategy_analytics(strategy_id: str) -> dict[str, Any]:
                         "computing_started_at": None,
                         "computation_error": "Insufficient CSV history. At least 2 data points required.",
                         "data_quality_flags": {"csv_source": True},
-                    },
+                }
+                _guard_failure_payload_inplace(_insufficient_payload)
+                supabase.table("strategy_analytics").upsert(
+                    _insufficient_payload,
                     on_conflict="strategy_id",
                 ).execute()
             await db_execute(_mark_failed)
@@ -1676,8 +1793,7 @@ async def run_csv_strategy_analytics(strategy_id: str) -> dict[str, Any]:
         )
 
         def _mark_truncated() -> None:
-            supabase.table("strategy_analytics").upsert(
-                {
+            _truncated_payload: dict[str, Any] = {
                     "strategy_id": strategy_id,
                     "computation_status": "failed",
                     # SI-02 (MEDIUM-2): clear the runner-owned warned marker.
@@ -1691,7 +1807,10 @@ async def run_csv_strategy_analytics(strategy_id: str) -> dict[str, Any]:
                         "intervention required."
                     ),
                     "data_quality_flags": {"csv_source": True},
-                },
+            }
+            _guard_failure_payload_inplace(_truncated_payload)
+            supabase.table("strategy_analytics").upsert(
+                _truncated_payload,
                 on_conflict="strategy_id",
             ).execute()
         try:
@@ -1719,8 +1838,7 @@ async def run_csv_strategy_analytics(strategy_id: str) -> dict[str, Any]:
         )
 
         def _mark_config_failed() -> None:
-            supabase.table("strategy_analytics").upsert(
-                {
+            _config_failed_payload: dict[str, Any] = {
                     "strategy_id": strategy_id,
                     "computation_status": "failed",
                     "computation_warned": False,
@@ -1731,7 +1849,10 @@ async def run_csv_strategy_analytics(strategy_id: str) -> dict[str, Any]:
                         "operator intervention required."
                     ),
                     "data_quality_flags": {"csv_source": True},
-                },
+            }
+            _guard_failure_payload_inplace(_config_failed_payload)
+            supabase.table("strategy_analytics").upsert(
+                _config_failed_payload,
                 on_conflict="strategy_id",
             ).execute()
         try:
@@ -1772,8 +1893,7 @@ async def run_csv_strategy_analytics(strategy_id: str) -> dict[str, Any]:
             )
             prior_flags["csv_source"] = True
             try:
-                supabase.table("strategy_analytics").upsert(
-                    {
+                _unrecoverable_payload: dict[str, Any] = {
                         "strategy_id": strategy_id,
                         "computation_status": "failed",
                         # SI-02 (MEDIUM-2): clear the runner-owned warned marker.
@@ -1782,7 +1902,10 @@ async def run_csv_strategy_analytics(strategy_id: str) -> dict[str, Any]:
                         "computing_started_at": None,
                         "computation_error": "CSV analytics computation failed.",
                         "data_quality_flags": prior_flags,
-                    },
+                }
+                _guard_failure_payload_inplace(_unrecoverable_payload)
+                supabase.table("strategy_analytics").upsert(
+                    _unrecoverable_payload,
                     on_conflict="strategy_id",
                 ).execute()
             except APIError as api_exc:
@@ -1808,14 +1931,16 @@ async def run_csv_strategy_analytics(strategy_id: str) -> dict[str, Any]:
                     _PGRST_SCHEMA_CACHE_MISS,
                     strategy_id,
                 )
-                supabase.table("strategy_analytics").upsert(
-                    {
+                _unrecoverable_reissue_payload: dict[str, Any] = {
                         "strategy_id": strategy_id,
                         "computation_status": "failed",
                         "computation_warned": False,
                         "computation_error": "CSV analytics computation failed.",
                         "data_quality_flags": prior_flags,
-                    },
+                }
+                _guard_failure_payload_inplace(_unrecoverable_reissue_payload)
+                supabase.table("strategy_analytics").upsert(
+                    _unrecoverable_reissue_payload,
                     on_conflict="strategy_id",
                 ).execute()
 
@@ -1838,18 +1963,27 @@ async def run_csv_strategy_analytics(strategy_id: str) -> dict[str, Any]:
         # 'failed' stamp. DEFENSE-IN-DEPTH — the Plan-02 read gate is the primary
         # guarantee. A heal failure must NEVER mask the terminal stamp that invoked it:
         # swallow + warn (mirrors job_worker._heal_delete_basis_series).
+        #
+        # ⛔ CR-03 (161.1-REVIEW): SKIPPED on a protected refresh. This is the
+        # half that is easy to miss on this path too — the payload transform
+        # above preserves the publish state, but this DELETE would still strip a
+        # live factsheet's cash_settlement series, and no bridge branch and no
+        # later run can put it back. `_publish_snapshot is not None` means the
+        # row was terminal-SUCCESS when this refresh started, so the persisted
+        # series it is rendering is current, not stale.
         def _heal_delete_cash_series() -> None:
             persist_basis_series(
                 supabase, strategy_id, basis="cash_settlement", result=None,
             )
-        try:
-            await db_execute(_heal_delete_cash_series)
-        except Exception as heal_exc:  # noqa: BLE001
-            logger.warning(
-                "csv analytics: cash series heal-delete failed for %s "
-                "(terminal stamp already applied): %s",
-                strategy_id,
-                heal_exc,
-            )
+        if _publish_snapshot is None:
+            try:
+                await db_execute(_heal_delete_cash_series)
+            except Exception as heal_exc:  # noqa: BLE001
+                logger.warning(
+                    "csv analytics: cash series heal-delete failed for %s "
+                    "(terminal stamp already applied): %s",
+                    strategy_id,
+                    heal_exc,
+                )
 
         raise HTTPException(status_code=500, detail="CSV analytics computation failed")
