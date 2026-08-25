@@ -5,16 +5,16 @@ milestone_name: Backlog Burndown (Phases 158+)
 current_phase: 161
 current_phase_name: WIZERR — Honest error surfaces
 status: verifying
-stopped_at: context exhaustion at 75% (2026-08-25)
-last_updated: "2026-08-25T21:57:11.731Z"
+stopped_at: Completed 162-01-PLAN.md
+last_updated: "2026-08-25T22:16:36.374Z"
 last_activity: 2026-08-25
 last_activity_desc: Phase 161.1 wave 4 — composite arm landed DORMANT; composite PROD tracer still owed
-state_head: 9cbf7358b44bc4fba8b31f1c5f4bafcdf1edbf1d
+state_head: 595233decf9e4701cb1cf918108f7b9e85dad76e
 progress:
   total_phases: 10
   completed_phases: 1
-  total_plans: 45
-  completed_plans: 33
+  total_plans: 44
+  completed_plans: 34
   percent: 10
 ---
 
@@ -495,7 +495,7 @@ Prior-phase 141.1 close-out detail (retained; NOT about 142.1):
         2 WARNING gaps, no BLOCKER. See `140.1-VERIFICATION.md`. Not transitioned (`--no-transition`).
 Last activity: 2026-08-02 -- Phase 142 execution started
 
-Progress: [█░░░░░░░░░] 11%
+Progress: [█░░░░░░░░░] 10%
 
 ### Phase 140.1 close-out — open items (do NOT lose these)
 
@@ -636,6 +636,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 | Phase 161.1 P02 | 96min | 3 tasks | 5 files |
 | Phase 161.1 P05 | 82min | 1 tasks | 1 files |
 | Phase 161.1 P03 | 71min | 2 tasks | 2 files |
+| Phase 162 P01 | ~35m | 2 tasks | 1 files |
 
 ## Accumulated Context
 
@@ -785,6 +786,8 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - [Phase 161]: 161.1-03: the plan's blast-radius claim (a flag-off tick downgrades the MT5 cohort) is FALSE at HEAD — the MT5 kill-switch returns before any stamp and a -10005 wedge classifies transient; runbook states the measured model instead
 - [Phase 161]: 161.1-03: the remediation detect query keys on damage + the BEFORE census diff, NOT the fan-out marker — the marked path is the D-15-guarded one, so a marker-only filter returns zero rows on the very incident it investigates
 - [Phase 161]: 161.1-03: both gates this plan mandated were VACUOUS — ';'-separated greps under bash -c always print OK (measured), and both task-2 tokens ('stored' 14x, '471-472' 1x) already existed pre-edit. Gate tokens must be counted against the PRE-EDIT artifact
+- [Phase 162]: HONEST-02 verdict flat-account: decided on the key-side sync witness (last_fetched_trade_timestamp frozen 111d while the poller succeeds daily), not on the empty trades count
+- [Phase 162]: HONEST-01 root cause recorded inconclusive: stage/window/population pinned (poll_positions, 2026-06-10..06-14, 2 strategies) but no str/None site at HEAD and no traceback survives
 
 ### Decisions (execution-time, Phase 140.2)
 
@@ -1487,9 +1490,9 @@ Load-bearing sequencing (real dependencies, do not reorder):
 
 ## Session
 
-**Last Date:** 2026-08-25T14:59:08.407Z
-**Stopped At:** context exhaustion at 75% (2026-08-25)
-**Resume File:** `.planning/phases/161.1-ledger-refresh-recurring-strategy-refresh-for-ledger-backed/161.1-04-PLAN.md` (task 3)
+**Last Date:** 2026-08-25T22:16:35.932Z
+**Stopped At:** Completed 162-01-PLAN.md
+**Resume File:** None
 **Next step:** Phase 161 (WIZERR — honest error surfaces) is next and NOT yet planned — run `/gsd-plan-phase 161`. Phase 161.1 (LEDGER-REFRESH) was inserted after it on 2026-08-24 for the founder-reported MT5 staleness; it is URGENT and production-facing, so it may be pulled ahead of 161 if you prefer the live data-integrity fix first.
 
 ⭐ **Foundation names later waves import by name** (from `153.1-02-SUMMARY.md`, all in
