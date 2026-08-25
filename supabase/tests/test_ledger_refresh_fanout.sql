@@ -95,7 +95,7 @@ DECLARE
   v_alloc      UUID;
   v_api        UUID;
   v_source     TEXT;
-  v_quarantine INTEGER;
+  v_foreign    INTEGER;
 BEGIN
   -- ----- presence gate (test-DB lag) -------------------------------------
   IF NOT EXISTS (
@@ -116,21 +116,33 @@ BEGIN
     RAISE EXCEPTION 'TEST ABORTED: the activation setting is already true in this session, so arm A cannot test the DORMANT case. Run this file in a clean session.';
   END IF;
 
-  -- ----- quarantine any PRE-EXISTING candidate ----------------------------
-  -- Arms G1/G2 assert exact GLOBAL counts, because the LIMIT and the per-venue
-  -- cap are global. Any pre-existing eligible strategy on this database would
-  -- compete for those slots and make the counts non-deterministic — which would
-  -- show up as a flaky gate, i.e. a gate nobody trusts. Park them on the one
-  -- lifecycle value no arm in this file exercises. This UPDATE is inside the
-  -- transaction and unwinds at the ROLLBACK below; it mutates nothing durably.
-  UPDATE public.strategies
-     SET status = 'draft'
-   WHERE status IN ('published', 'pending_review')
-     AND id IN (SELECT lrs.strategy_id
-                  FROM public.ledger_refresh_staleness lrs
-                 WHERE lrs.is_stale);
-  GET DIAGNOSTICS v_quarantine = ROW_COUNT;
-  RAISE NOTICE 'Quarantined % pre-existing stale ledger strategies for the duration of this transaction.', v_quarantine;
+  -- ----- FOREIGN-CANDIDATE PRECONDITION (read-only) -----------------------
+  -- Arms G1/G2 measure a GLOBAL bound — the per-tick LIMIT and the per-venue cap
+  -- are global — so a pre-existing eligible strategy on this database would
+  -- compete for those slots and make the counts wrong.
+  --
+  -- ⛔ It is NOT acceptable to solve that by parking those rows. supabase/tests
+  -- run against ONE SHARED test project concurrently with other PRs, and an
+  -- UPDATE touching rows this block did not seed writes across another PR's live
+  -- fixture mid-run: the surrounding ROLLBACK hides that from the WRITER, not
+  -- from a concurrent READER, and the failure then surfaces in a completely
+  -- different file. That is the D-05 hazard
+  -- (analytics-service/tests/test_sql_gate_scoped_updates.py) and this file will
+  -- not create a second instance of it on a neighbouring table.
+  --
+  -- So: measure, and fail LOUD. A concurrent PR's fixtures are uncommitted and
+  -- therefore invisible here, so a non-zero count means the test project carries
+  -- COMMITTED ledger-backed strategies that are stale and live — a standing
+  -- property of the project, not a race, and one a human should look at rather
+  -- than one this file should silently paper over.
+  SELECT count(*) INTO v_foreign
+    FROM public.ledger_refresh_staleness lrs
+    JOIN public.strategies s ON s.id = lrs.strategy_id
+   WHERE lrs.is_stale
+     AND s.status IN ('published', 'pending_review');
+  IF v_foreign <> 0 THEN
+    RAISE EXCEPTION 'TEST PRECONDITION FAILED: % committed strategy/strategies on this database are already stale, live and ledger-backed. They would compete with this file''s fixtures for the global per-tick LIMIT and make arms G1/G2 measure the wrong thing. Park or clean them in the test project — do NOT make this file update rows it did not seed (D-05: shared project, concurrent PRs).', v_foreign;
+  END IF;
 
   -- ----- SEED --------------------------------------------------------------
   INSERT INTO auth.users (id, instance_id, email, created_at, updated_at)
@@ -195,11 +207,26 @@ BEGIN
   -- 4-day threshold; FRESH = yesterday. Both use the success status the whole
   -- live ledger cohort actually carries (D-04) — a fixture written as 'complete'
   -- would test a status no live ledger row has.
+  --
+  -- ISOLATION BY CONSTRUCTION, belt to the precondition's braces: the stale
+  -- fixtures are dated a CENTURY back, so they outrank any plausible foreign row
+  -- under the fan-out's `ORDER BY last_return_date ASC` and take the bounded
+  -- slots first. Same idiom, and the same reason, as the reaper gate's
+  -- century-old seeds (Phase 142.1 / D-05).
+  --
+  -- ⚠️ g2_v1 is dated a further century back than g2_v2, and that stagger is
+  -- LOAD-BEARING: with the per-venue cap deleted, arm G2's four slots then fill
+  -- entirely from one venue (4/0) instead of splitting by luck, so the cap's
+  -- neutering reddens G2 deterministically rather than tie-break-dependently.
   INSERT INTO strategy_analytics (strategy_id, computation_status, computed_at, returns_series)
   SELECT sid, 'complete_with_warnings', now(),
-         jsonb_build_array(jsonb_build_object('date', to_char(CURRENT_DATE - 30, 'YYYY-MM-DD'), 'value', 0.001))
+         jsonb_build_array(jsonb_build_object('date', to_char(CURRENT_DATE - 36500, 'YYYY-MM-DD'), 'value', 0.001))
     FROM unnest(ARRAY[s_a, s_d, s_f, s_h_inact, s_h_revoked, s_h_disc]
-                || g1_v1 || g2_v1 || g2_v2) AS sid;
+                || g1_v1 || g2_v2) AS sid;
+  INSERT INTO strategy_analytics (strategy_id, computation_status, computed_at, returns_series)
+  SELECT sid, 'complete_with_warnings', now(),
+         jsonb_build_array(jsonb_build_object('date', to_char(CURRENT_DATE - 73000, 'YYYY-MM-DD'), 'value', 0.001))
+    FROM unnest(g2_v1) AS sid;
 
   -- Arm C's negative control: genuinely fresh, so is_stale is FALSE.
   INSERT INTO strategy_analytics (strategy_id, computation_status, computed_at, returns_series)
@@ -376,14 +403,24 @@ BEGIN
   UPDATE strategies SET status = 'draft' WHERE id = ANY(g1_v1);
 
   -- ======================================================================
-  -- ARM G2 — the PER-TICK LIMIT (D-09). Six stale on each of TWO venues. The
-  -- tick spreads across venues rather than exhausting one (2 + 2), and the
-  -- global LIMIT is what stops it at 4 rather than 6+.
+  -- ARM G2 — the SPREAD, and the LIMIT's lower edge (D-09). Six stale on each
+  -- of TWO venues: the tick spreads across venues (2 + 2) instead of exhausting
+  -- the oldest one, and it stops at 4.
+  --
+  -- ⚠️ Stated precisely, because overclaiming here would be the same species of
+  -- error as a wrong derivation. With two venues and a cap of 2, four is ALSO
+  -- the ceiling the cap alone imposes, so this arm does not by itself prove the
+  -- LIMIT is exactly 4. What it does pin: the 2/2 SPREAD (delete the cap and the
+  -- older venue takes all four — the date stagger in the seed makes that
+  -- deterministic), and the LIMIT's LOWER edge (drop it below 4 and this arm
+  -- reddens). The UPPER edge is plan 05 gate 5, which asserts statically that the
+  -- LIMIT is at most 4 and strictly greater than the cap. Neither half is
+  -- sufficient alone; together they pin the integer.
   -- ======================================================================
   UPDATE strategies SET status = 'published' WHERE id = ANY(g2_v1) OR id = ANY(g2_v2);
   v_ret := public.enqueue_ledger_refresh_for_strategies();
   IF v_ret <> 4 THEN
-    RAISE EXCEPTION 'TEST FAILED (G2): 6 stale strategies on each of two venues produced % enqueue(s), expected exactly 4 — the per-tick burst LIMIT', v_ret;
+    RAISE EXCEPTION 'TEST FAILED (G2): 6 stale strategies on each of two venues produced % enqueue(s), expected exactly 4 — the per-tick burst LIMIT has been lowered below its derivation', v_ret;
   END IF;
   SELECT count(*) INTO v_cnt FROM compute_jobs
    WHERE strategy_id = ANY(g2_v1) AND kind = 'derive_broker_dailies';
