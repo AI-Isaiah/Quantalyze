@@ -26,7 +26,8 @@ items were dropped, not carried. Categories: **Fix now** / **Fix mid-term** / **
 
 ## 🔴 FIX NOW — live correctness, trust-boundary security, active go-live
 
-0.02. **⚠️ OKX is hardcoded to ccxt's default (global) entity — a key issued on any other OKX
+0.02. **⏸️ NOT PURSUED — founder call 2026-08-25: "forget OKX entity".** A different OKX key connected successfully at 21:38:12Z, so the immediate need is met and the entity theory was never confirmed (the founder's OKX domain was never read back). Kept as a RECORD, not a task: the underlying limitation below is real and measured, so if a future user reports a key that cannot connect while another key on the same account can, start here rather than re-deriving it. Do NOT schedule work on it without a fresh confirmation.
+   ORIGINAL FILING: **OKX is hardcoded to ccxt's default (global) entity — a key issued on any other OKX
    entity can NEVER connect, and the UI blames the user's credentials.** Surfaced 2026-08-25 when
    a founder key issued AFTER an OKX re-KYC failed while an older key on the same account passed.
    - `analytics-service/services/exchange.py:817-830` — `create_exchange` sets only `apiKey`,
