@@ -2356,3 +2356,201 @@ describe("Phase 153.4-02 / WIZFORM-05 — budgetKeyFor selects the validate budg
     ).toBe("validate-key");
   });
 });
+
+/**
+ * ⭐ 161-06 / WIZERR-05 — THE SERVER'S ADVERTISED WAIT SURVIVES THE SEAM.
+ *
+ * WHAT DIED HERE, AND AT WHICH LINE. `analytics-client.ts`'s contract-envelope
+ * construction site passed FOUR arguments — message, status, seamCode,
+ * dependency — and the `Retry-After` the upstream advertised was not among
+ * them. The route handlers downstream see only the thrown error, so a wait not
+ * read at that line is unreachable to every consumer: the wizard's renderer
+ * (`WizardErrorContext.retryAfterSeconds` → the envelope's
+ * `retry_after_seconds`) already existed and had nothing to render. The
+ * alternative — the client picking a plausible-looking number — is a false
+ * sentence in the exact family this phase exists to kill (TRAP-3).
+ *
+ * ⚠️ MEASURED AT HEAD, AND IT CORRECTS THE PLAN. `service_error_body`'s key set
+ * is exactly `{code, dependency, retryable, detail}` (+ `correlation_id`): the
+ * NESTED envelope carries NO `retry_after` leaf. For a 503 the wait exists on
+ * the wire in exactly ONE place — the `Retry-After` HEADER that
+ * `_retry_after_headers` attaches. So the field is fed from the header and from
+ * nothing else, which is also what `process-key-client.ts`'s relay docblock
+ * already decided in prose: "two extraction paths for one fact is the
+ * substring-cascade shape this milestone exists to remove."
+ *
+ * ORACLE DISCIPLINE. The seconds are hand-typed per case and differ from the
+ * table value where possible, so a test cannot pass by the implementation
+ * reading `RETRY_AFTER_SECONDS` back out of anything. The HTTP-date case is the
+ * load-bearing one: `Number("Wed, 21 Oct 2026 07:28:00 GMT")` is `NaN`, so it
+ * can only go green through `parseRetryAfterSeconds` — it is what makes "the
+ * ONE parser" an assertion rather than a convention.
+ */
+describe("[161-06 / WIZERR-05] the advertised wait crosses the seam", () => {
+  beforeEach(() => {
+    vi.resetModules();
+    process.env.INTERNAL_API_TOKEN = INTERNAL_TOKEN_FOR_TESTS;
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  /** The real MT5 503, byte-identical to `routers/exchange.py`'s raise site. */
+  const MT5_UNREACHABLE_ENVELOPE = {
+    detail: {
+      code: "MT5_GATEWAY_UNREACHABLE",
+      dependency: "mt5-gateway",
+      retryable: true,
+      detail: "The MetaTrader gateway is not responding. Try again shortly.",
+    },
+  };
+
+  async function caught(fetchMock: ReturnType<typeof vi.fn>) {
+    vi.spyOn(globalThis, "fetch").mockImplementation(
+      fetchMock as unknown as typeof globalThis.fetch,
+    );
+    const mod = await import("./analytics-client");
+    type Internal = {
+      __INTERNAL_analyticsRequest: (
+        path: string,
+        body: Record<string, unknown> | null,
+        options: { budgetKey: string; tenantId: string },
+      ) => Promise<unknown>;
+    };
+    let err: unknown;
+    try {
+      await (mod as unknown as Internal).__INTERNAL_analyticsRequest(
+        "/test",
+        { ping: 1 },
+        { budgetKey: "validate-key", tenantId: TENANT.userId },
+      );
+    } catch (e) {
+      err = e;
+    }
+    return { mod, err: err as Error & { retryAfterSeconds?: unknown } };
+  }
+
+  it("a 503 that advertises a wait arrives carrying it, in SECONDS", async () => {
+    const fetchMock = vi.fn().mockImplementation(
+      () =>
+        new Response(JSON.stringify(MT5_UNREACHABLE_ENVELOPE), {
+          status: 503,
+          headers: {
+            "content-type": "application/json",
+            "Retry-After": "30",
+          },
+        }),
+    );
+
+    const { mod, err } = await caught(fetchMock);
+
+    expect(err).toBeInstanceOf(mod.AnalyticsUpstreamError);
+    expect(
+      err.retryAfterSeconds,
+      "The wait died at this construction site. 30 is the value " +
+        "RETRY_AFTER_SECONDS['mt5-gateway'] puts on the wire; if this reads " +
+        "null the field is not fed and every downstream hop is rendering " +
+        "nothing or, worse, inventing a number.",
+    ).toBe(30);
+    // H-1062 / F5b — the wait travels as a header and a typed field. The 5xx
+    // SENTENCE stays exactly what the emitter wrote; widening what a message is
+    // allowed to say is the other, worse way to ship a duration.
+    expect(err.message).toBe(
+      "The MetaTrader gateway is not responding. Try again shortly.",
+    );
+    expect(err.message).not.toContain("30");
+  });
+
+  it("a 503 that advertises NO wait arrives with null — never zero (TRAP-3)", async () => {
+    // A fresh Response per call: without a `Retry-After` the resilience core
+    // does NOT fail fast, so it retries once and a single already-read body
+    // would throw instead of reaching the construction site.
+    const fetchMock = vi.fn().mockImplementation(
+      () =>
+        new Response(JSON.stringify(MT5_UNREACHABLE_ENVELOPE), {
+          status: 503,
+          headers: { "content-type": "application/json" },
+        }),
+    );
+
+    const { mod, err } = await caught(fetchMock);
+
+    expect(err).toBeInstanceOf(mod.AnalyticsUpstreamError);
+    expect(
+      err.retryAfterSeconds,
+      "Absence must stay absence all the way down. `0` is not 'no wait' — it " +
+        "is an instruction to retry immediately, which is a number nobody " +
+        "advertised and the thundering-herd shape B20 exists to stop.",
+    ).toBeNull();
+    expect(err.retryAfterSeconds).not.toBe(0);
+  });
+
+  it("an HTTP-date wait resolves against the response's OWN Date header (the ONE parser, proven)", async () => {
+    // RFC 9110 §10.2.3 permits the absolute form and an intervening proxy may
+    // legitimately rewrite delta-seconds into it. `Number(...)` of this string
+    // is NaN, so this case can ONLY go green through parseRetryAfterSeconds —
+    // which is what makes the "never Number(header)" prohibition falsifiable
+    // here rather than merely stated.
+    const fetchMock = vi.fn().mockImplementation(
+      () =>
+        new Response(JSON.stringify(MT5_UNREACHABLE_ENVELOPE), {
+          status: 503,
+          headers: {
+            "content-type": "application/json",
+            Date: "Wed, 21 Oct 2026 07:28:00 GMT",
+            "Retry-After": "Wed, 21 Oct 2026 07:28:45 GMT",
+          },
+        }),
+    );
+
+    const { err } = await caught(fetchMock);
+
+    expect(
+      err.retryAfterSeconds,
+      "45 seconds is the delta between the two hand-typed timestamps above, " +
+        "resolved against the SERVER's clock. A raw Number() of the header " +
+        "gives NaN; a client-clock resolution gives whatever today is.",
+    ).toBe(45);
+  });
+
+  it("a non-JSON 5xx that advertises a wait carries it too", async () => {
+    // The text/plain arm is a real upstream error carrying the response's own
+    // headers, exactly like the contract-envelope arm. Leaving it unfed would
+    // make the field's docblock ("null means no wait was advertised") a false
+    // sentence at one of the two arms that can reach it.
+    const fetchMock = vi.fn().mockImplementation(
+      () =>
+        new Response("upstream is restarting", {
+          status: 503,
+          headers: { "content-type": "text/plain", "Retry-After": "17" },
+        }),
+    );
+
+    const { err } = await caught(fetchMock);
+
+    expect(err.retryAfterSeconds).toBe(17);
+    expect(err.message).toBe("upstream is restarting");
+  });
+
+  it("a pre-existing 2- and 3-argument construction still yields null (additive, not breaking)", async () => {
+    const mod = await import("./analytics-client");
+    expect(new mod.AnalyticsUpstreamError("m", 500).retryAfterSeconds).toBeNull();
+    expect(
+      new mod.AnalyticsUpstreamError("m", 500, "SEAM_CODE").retryAfterSeconds,
+    ).toBeNull();
+    expect(
+      new mod.AnalyticsUpstreamError("m", 503, "SEAM_CODE", "mt5-gateway")
+        .retryAfterSeconds,
+      "Four positional arguments is the shape every production site and every " +
+        "local test double used before this plan. If the 4th argument were " +
+        "read as the wait, every one of them would start advertising a " +
+        "dependency NAME as a duration.",
+    ).toBeNull();
+    expect(
+      new mod.AnalyticsUpstreamError("m", 503, "SEAM_CODE", "mt5-gateway", 30)
+        .retryAfterSeconds,
+    ).toBe(30);
+  });
+});

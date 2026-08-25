@@ -1922,7 +1922,12 @@ describe("[154-06 / WIZCONT-02] create-with-key — the venue-identity fence", (
             'duplicate key value violates unique constraint "api_keys_user_exchange_venue_account_uniq"',
         },
       });
-      // Nothing resolvable on the re-read (orphan / dark fence).
+      // Nothing resolvable on the re-read: NO LIVE KEY AT ALL, i.e. the dark
+      // fence. ⚠️ 161-05 — this comment used to read "(orphan / dark fence)",
+      // and it named an arm this fixture does not exercise: with
+      // `venueKeyLookupMock` empty the resolver returns at `!liveKeyId` and
+      // never reaches the orphan discrimination. The orphan has its own
+      // describe below, seeded with a key that IS found.
       venueKeyLookupMock.mockResolvedValue({ data: null, error: null });
 
       const POST = await importPost();
@@ -1996,6 +2001,154 @@ describe("[154-06 / WIZCONT-02] create-with-key — the venue-identity fence", (
       expect(capture?.options.extra?.constraint).toBe(
         "api_keys_some_future_uniq",
       );
+    });
+  });
+
+  /**
+   * [161-05 / WIZERR-03] THE ORPHAN — a live key with NOTHING behind it.
+   *
+   * Until this plan the 23505 arm answered it with the byte-pinned
+   * `DRAFT_ALREADY_EXISTS` 409, a sentence the resolver had already disproved
+   * two reads earlier: it reaches this state only because the
+   * `source='wizard'` / `status='draft'` read came back EMPTY. So the user was
+   * sent to find a wizard session that provably does not exist, and offered
+   * `resume_draft` / `start_fresh` to act on it.
+   *
+   * ⭐ THE FIXTURE IS THE WHOLE ARGUMENT, AND IT IS DELIBERATELY NOT THE ONE
+   * THE `UNRESOLVABLE` CASE ABOVE USES. That case leaves `venueKeyLookupMock`
+   * empty, so the resolver returns at `!liveKeyId` and the orphan branch is
+   * never reached — a pin written on that fixture would have gone green against
+   * BOTH the old and the new route and proved nothing. Here the key IS found
+   * and both strategy reads succeed EMPTY, which is the only shape that
+   * produces `kind:"orphaned"`.
+   *
+   * ⛔ AND THE NEGATIVE CONTROLS ARE THE LOAD-BEARING HALF. The risk this change
+   * introduces is not "the orphan keeps the old code" — it is the opposite:
+   * collapsing "we could not tell" into "nothing holds it". A read that FAULTED
+   * has observed nothing, and answering `KEY_ORPHANED` from it would be the same
+   * unearned claim in the other direction. Both fault directions are pinned.
+   */
+  describe("[161-05 / WIZERR-03] the orphan answers KEY_ORPHANED, and only the orphan does", () => {
+    beforeEach(() => {
+      vi.spyOn(console, "error").mockImplementation(() => {});
+      rpcMock.mockResolvedValue({
+        data: null,
+        error: {
+          code: "23505",
+          message:
+            'duplicate key value violates unique constraint "api_keys_user_exchange_venue_account_uniq"',
+        },
+      });
+    });
+
+    /**
+     * A LIVE key for this login, and NOTHING hanging off it — the state a
+     * deleted draft leaves behind. Both `strategies` reads keep the describe's
+     * default (empty) and succeed; only the `api_keys` read is seeded.
+     */
+    function seedOrphanedKey() {
+      venueKeyLookupMock.mockResolvedValue({
+        data: { id: EXISTING_KEY_ID },
+        error: null,
+      });
+    }
+
+    it("a live key with no strategy behind it answers 409 KEY_ORPHANED — never the false fence sentence", async () => {
+      seedOrphanedKey();
+
+      const POST = await importPost();
+      const res = await POST(makeReq(MT5_RECONNECT_BODY));
+
+      expect(res.status).toBe(409);
+      // Byte-wise, and `code` FIRST: `toEqual` on parsed JSON does not compare
+      // key order, and the key order is what the invariant scanner reads.
+      expect(await res.text()).toBe(
+        '{"code":"KEY_ORPHANED","error":"This key is already stored, but nothing uses it."}',
+      );
+      expect(res.headers.get("Cache-Control")).toBe("private, no-store");
+    });
+
+    it("NEGATIVE CONTROL — the OWNER read faulting keeps the fence 409 byte-identical", async () => {
+      // "We could not tell" is not "nothing holds it". This is the read whose
+      // emptiness the orphan answer is DERIVED from, so a fault here must fall
+      // back to the incumbent behaviour rather than assert the conclusion the
+      // failed read did not support.
+      seedOrphanedKey();
+      venueOwnerLookupMock.mockResolvedValue({
+        data: null,
+        error: { code: "PGRST301", message: "owner read failed" },
+      });
+
+      const POST = await importPost();
+      const res = await POST(makeReq(MT5_RECONNECT_BODY));
+
+      expect(res.status).toBe(409);
+      expect(await res.text()).toBe(
+        '{"code":"DRAFT_ALREADY_EXISTS","error":"A wizard session with this key is already in progress."}',
+      );
+    });
+
+    it("NEGATIVE CONTROL — the DRAFT read faulting keeps the fence 409 byte-identical", async () => {
+      // The earlier of the two reads. A fault here returns `unresolved` before
+      // the owner read is ever issued, so the orphan branch must stay unreached.
+      seedOrphanedKey();
+      venueStrategyLookupMock.mockResolvedValue({
+        data: null,
+        error: { code: "PGRST301", message: "draft read failed" },
+      });
+
+      const POST = await importPost();
+      const res = await POST(makeReq(MT5_RECONNECT_BODY));
+
+      expect(res.status).toBe(409);
+      expect(await res.text()).toBe(
+        '{"code":"DRAFT_ALREADY_EXISTS","error":"A wizard session with this key is already in progress."}',
+      );
+      // And the owner read was never reached — the fault short-circuits.
+      expect(venueOwnerLookupMock).not.toHaveBeenCalled();
+    });
+
+    it("NEGATIVE CONTROL — the wizard-session constraint still answers the fence 409, orphan state or not", async () => {
+      // ⭐ THE DISCRIMINATION KEYS ON THE CONSTRAINT, NOT ON THE DATABASE.
+      // Distinct from the byte-identical pin in the block above: that one runs
+      // with an EMPTY venue fixture, so it would stay green even if the new
+      // branch had been written to fire on DB state. This one seeds the exact
+      // orphan shape and still demands the fence sentence, because the
+      // constraint Postgres named is the wizard-session one.
+      seedOrphanedKey();
+      rpcMock.mockResolvedValue({
+        data: null,
+        error: {
+          code: "23505",
+          message:
+            'duplicate key value violates unique constraint "strategies_user_wizard_session_source_uniq"',
+        },
+      });
+
+      const POST = await importPost();
+      const res = await POST(makeReq(MT5_RECONNECT_BODY));
+
+      expect(res.status).toBe(409);
+      expect(await res.text()).toBe(
+        '{"code":"DRAFT_ALREADY_EXISTS","error":"A wizard session with this key is already in progress."}',
+      );
+    });
+
+    it("the PRE-RPC fence lets the orphan through to validate — the credentials speak first", async () => {
+      // 161-05 recorded this ordering as a decision at the fence, so it is
+      // pinned rather than left to be re-derived. The two other refusable
+      // resolutions (`draft`, `connected`) short-circuit before the charged seam
+      // calls; the orphan does NOT, because the credentials in THIS request are
+      // still unauthenticated and a wrong secret is the user's real first
+      // problem. Refusing early would hand them the orphan to chase while a bad
+      // secret sat unmentioned.
+      seedOrphanedKey();
+
+      const POST = await importPost();
+      await POST(makeReq(MT5_RECONNECT_BODY));
+
+      expect(validateKeyMock).toHaveBeenCalled();
+      expect(rpcMock).toHaveBeenCalled();
     });
   });
 });
@@ -3010,5 +3163,230 @@ describe("[142.2-07 / MT5-04] create-with-key — all 12 rejection sites, honest
       "KEY_UNSUPPORTED_VENUE",
       "KEY_VENUE_NOT_ENABLED",
     ]);
+  });
+});
+
+/**
+ * ⭐ 161-06 / WIZERR-05 — THE KEY ROUTE RELAYS THE SERVER'S OWN WAIT.
+ *
+ * The wait is born in `RETRY_AFTER_SECONDS` on the Python side, rides a
+ * `Retry-After` header to the seam, and — since 161-06 — survives it on
+ * `AnalyticsUpstreamError.retryAfterSeconds`. This catch is the last hop before
+ * the browser. Until this plan it dropped the value on the floor: the ternary
+ * below stamped a header for a `CircuitOpenError` and for nothing else, so a
+ * gateway restart that told us exactly how long to wait reached the user as a
+ * bare "try again shortly" with no duration and no machine-readable wait.
+ *
+ * ⚠️ DUCK-TYPED ON PURPOSE, AND THE TESTS MUST MATCH. Every route test that
+ * mocks the seam client wholesale does `vi.mock("@/lib/analytics-client", …)`
+ * with a factory exporting only `validateKey`/`encryptKey`, so
+ * `AnalyticsUpstreamError` is `undefined` inside this suite and an `instanceof`
+ * in the route would THROW from inside a catch block. `wizardErrors.ts` records
+ * that reasoning for `seamCode` at length; `retryAfterSeconds` is read the same
+ * way, with `typeof`, and these mocks reproduce the real thrown shape.
+ *
+ * ⛔ TRAP-3, PINNED THREE WAYS. Absence must reach the browser as ABSENCE. The
+ * `null` case asserts the header is not merely empty but MISSING, and the `0`
+ * case exists because zero is the specific lie: it is not "no wait", it is an
+ * instruction to retry immediately — a duration nobody advertised and the
+ * thundering-herd shape B20 exists to stop.
+ *
+ * Each title names its route. The requirement says BOTH key-route catches, and
+ * `composite/add-key` carries the mirror image of this block; an aggregate
+ * assertion over the pair would let either one regress in silence.
+ */
+describe("[161-06 / WIZERR-05] create-with-key — the Retry-After relay", () => {
+  beforeEach(() => {
+    validateKeyMock.mockReset();
+    encryptKeyMock.mockReset();
+    rpcMock.mockReset();
+    assetClassUpdateMock.mockClear();
+
+    validateKeyMock.mockResolvedValue({
+      valid: true,
+      read_only: true,
+      permissions: ["read"],
+    });
+    encryptKeyMock.mockResolvedValue({
+      api_key_encrypted: "encrypted-blob-base64",
+      api_secret_encrypted: null,
+      passphrase_encrypted: null,
+      dek_encrypted: null,
+      nonce: null,
+      kek_version: 1,
+    });
+    rpcMock.mockResolvedValue({
+      data: [{ strategy_id: STRATEGY_ID, api_key_id: API_KEY_ID }],
+      error: null,
+    });
+  });
+
+  /** The real MT5 503 as the seam now throws it, wait included. */
+  function seamUnreachable(retryAfterSeconds: number | null) {
+    return Object.assign(
+      new Error("The MetaTrader gateway is not responding. Try again shortly."),
+      {
+        name: "AnalyticsUpstreamError",
+        status: 503,
+        seamCode: "MT5_GATEWAY_UNREACHABLE",
+        dependency: "mt5-gateway",
+        retryAfterSeconds,
+      },
+    );
+  }
+
+  it("[create-with-key] a seam 503 carrying a wait relays that exact value", async () => {
+    validateKeyMock.mockRejectedValue(seamUnreachable(30));
+    const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+
+    // ⚠️ ARM PROOF FIRST. Asserting the header without this would go green
+    // against a fixture that never reached the catch at all.
+    expect(res.status).toBe(503);
+    expect((await res.json()).code).toBe("SERVICE_UNREACHABLE");
+
+    expect(
+      res.headers.get("Retry-After"),
+      "The server told us how long to wait and this route is the last hop " +
+        "that can pass it on. 30 is RETRY_AFTER_SECONDS['mt5-gateway'] — not " +
+        "a number this route may choose, round, or clamp.",
+    ).toBe("30");
+    consoleErr.mockRestore();
+  });
+
+  it("[create-with-key] a seam 503 with NO advertised wait sends NO header (TRAP-3)", async () => {
+    validateKeyMock.mockRejectedValue(seamUnreachable(null));
+    const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+
+    // Same arm, same verdict — the ONLY difference between this case and the
+    // one above is what the upstream advertised.
+    expect(res.status).toBe(503);
+    expect((await res.json()).code).toBe("SERVICE_UNREACHABLE");
+
+    expect(
+      res.headers.get("Retry-After"),
+      "ABSENT, not empty and not zero. `Headers.get` answers null only when " +
+        "the header was never set; an empty-string stamp would satisfy a " +
+        "falsy check and still put a header on the wire the upstream never " +
+        "authorised.",
+    ).toBeNull();
+    expect(res.headers.get("Retry-After")).not.toBe("0");
+    expect(res.headers.get("Retry-After")).not.toBe("");
+    consoleErr.mockRestore();
+  });
+
+  it("[create-with-key] a zero wait is not a wait — it is omitted, never stamped", async () => {
+    // Zero cannot reach here from our own seam (`parseRetryAfterSeconds`
+    // returns strictly positive or null, and `error_contract._validate` rejects
+    // a non-positive `retry_after` at the raise site). The guard is against the
+    // OTHER producers of this shape — a future caller, a test double, a
+    // rewritten header from an intervening proxy — because "cannot happen" is
+    // not a property this catch can verify about the value it was handed.
+    validateKeyMock.mockRejectedValue(seamUnreachable(0));
+    const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+
+    expect(res.status).toBe(503);
+    expect(res.headers.get("Retry-After")).toBeNull();
+    consoleErr.mockRestore();
+  });
+
+  /**
+   * ⭐ 161-REVIEW / WR-01 — A FRACTION IS NOT A `delta-seconds`.
+   *
+   * `parseRetryAfterSeconds` returns `Number(raw)` for the delta-seconds form,
+   * so a `Retry-After: 0.5` written by ANY hop on the path — a proxy, a CDN, a
+   * misconfigured gateway — crossed the seam as `0.5` and was relayed verbatim
+   * onto OUR OWN response. `Number.isFinite` admits it; RFC-9110 does not, and
+   * the wizard rendered it as "Try again in 0.5s".
+   *
+   * ⚠️ THE VALUE'S PROVENANCE IS THE ARGUMENT. This is not a defensive check
+   * against our own service: it is a check on an UPSTREAM RESPONSE HEADER,
+   * which is a value we do not author. `CircuitOpenError` has carried
+   * `Number.isInteger` at its constructor since 140.2-11 for exactly this
+   * reason — "it is forwarded as a `Retry-After` HEADER by both seam clients" —
+   * and 161-06 created the second wire-forwarded value without inheriting it.
+   */
+  it("[create-with-key] a FRACTIONAL wait is not a delta-seconds — it is omitted, never relayed", async () => {
+    validateKeyMock.mockRejectedValue(seamUnreachable(0.5));
+    const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+
+    // ⚠️ ARM PROOF FIRST — otherwise a fixture that returned before the catch
+    // would satisfy the null assertion below while proving nothing.
+    expect(res.status).toBe(503);
+    expect((await res.json()).code).toBe("SERVICE_UNREACHABLE");
+
+    expect(
+      res.headers.get("Retry-After"),
+      "0.5 is not an RFC-9110 delta-seconds. Relaying it puts a malformed " +
+        "header on our own wire and renders to the user as 'Try again in " +
+        "0.5s' — a duration we invented by forwarding one nobody may send.",
+    ).toBeNull();
+    // …and specifically NOT the two shapes a partial fix would produce: the
+    // raw fraction, or a silent round to a number the upstream never sent.
+    expect(res.headers.get("Retry-After")).not.toBe("0.5");
+    expect(res.headers.get("Retry-After")).not.toBe("1");
+    consoleErr.mockRestore();
+  });
+
+  /**
+   * ⭐ 161-REVIEW / WR-01, the BREAKER half. TRAP-3's absence rule is stated for
+   * BOTH sources, and until this the breaker branch stamped
+   * `String(err.retryAfterS)` unconditionally — INHERITING the rule from
+   * `CircuitOpenError`'s constructor rather than applying it. That constructor
+   * rejects `retryAfterS < 0` and therefore ACCEPTS `0`, so a zero cooldown
+   * reached the wire as `Retry-After: 0` — "retry immediately", the ~0 ms
+   * hot-retry B20's parser exists to make unreachable.
+   */
+  it("[create-with-key] a ZERO breaker cooldown sends NO header — the absence rule binds both branches", async () => {
+    const { CircuitOpenError } = await import("@/lib/seam-errors");
+    // Constructed, not hand-shaped: `new CircuitOpenError(0)` is a value the
+    // class genuinely permits, which is what makes this a reachable state
+    // rather than a test-only fiction.
+    const tripped = new CircuitOpenError(0);
+    expect(tripped.retryAfterS).toBe(0);
+
+    validateKeyMock.mockRejectedValue(tripped);
+    const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+
+    expect((await res.json()).code).toBe("SERVICE_UNAVAILABLE_RETRY");
+    expect(
+      res.headers.get("Retry-After"),
+      "The breaker branch must ENFORCE TRAP-3, not inherit it. `0` is not a " +
+        "wait — it is an instruction to retry immediately.",
+    ).toBeNull();
+    expect(res.headers.get("Retry-After")).not.toBe("0");
+    consoleErr.mockRestore();
+  });
+
+  it("[create-with-key] ANTI-CONTROL: a real positive breaker cooldown still stamps", async () => {
+    // Without this, "the breaker branch omits zero" is satisfied by a branch
+    // that never stamps at all — which would delete the relay the cases above
+    // exist to protect. The pre-existing breaker cases in this file assert the
+    // same property from their own arms; this one sits beside the new guard so
+    // the pair is readable as a matched set.
+    const { CircuitOpenError } = await import("@/lib/seam-errors");
+    validateKeyMock.mockRejectedValue(new CircuitOpenError(42));
+    const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+
+    expect((await res.json()).code).toBe("SERVICE_UNAVAILABLE_RETRY");
+    expect(res.headers.get("Retry-After")).toBe("42");
+    consoleErr.mockRestore();
   });
 });

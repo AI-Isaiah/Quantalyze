@@ -19,7 +19,17 @@
 // @vitest-environment node
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { readdirSync, readFileSync } from "fs";
+import { join } from "path";
 import { NextRequest } from "next/server";
+// 161-09 / WIZERR-08 (F3) — the disclosure oracles, imported LIVE rather than
+// hand-listed. A hand-typed venue list in a test is itself a stale disclosure
+// claim the day the offer changes: it keeps passing while the route discloses
+// something it no longer describes. These are STATIC imports, so the two cases
+// that `vi.doMock("@/lib/utils")` to reach the sfox half-state do not perturb
+// them — those cases assert on their own arms, not on these bounds.
+import { UI_EXCHANGE_CODES } from "@/lib/utils";
+import { SUPPORTED_EXCHANGES } from "@/lib/closed-sets";
 
 const verifyStrategyMock = vi.fn();
 // Daily-cap count returned by the admin verification_requests head/count
@@ -71,10 +81,30 @@ vi.mock("@/lib/analytics-client", () => {
   // narrowing resolves against the same constructor identity (F5b R8).
   class AnalyticsUpstreamError extends Error {
     readonly status: number;
-    constructor(message: string, status: number) {
+    // 161-06 / WIZERR-05 — this double had drifted FURTHEST: it never picked up
+    // `seamCode` (140.3-01) or `dependency` (140.3-11) either, so it is brought
+    // to the real class's full shape in one go. All three are additive and
+    // optional; every pre-existing 2-arg construction in this file keeps
+    // defaulting and keeps passing.
+    // ⚠️ ORDER IS THE POINT, not just presence — a positional argument must
+    // land in the same field here as it does at the seam.
+    // `analytics-upstream-error.parity.invariant.test.ts` now enforces it.
+    readonly seamCode: string | null;
+    readonly dependency: string | null;
+    readonly retryAfterSeconds: number | null;
+    constructor(
+      message: string,
+      status: number,
+      seamCode: string | null = null,
+      dependency: string | null = null,
+      retryAfterSeconds: number | null = null,
+    ) {
       super(message);
       this.name = "AnalyticsUpstreamError";
       this.status = status;
+      this.seamCode = seamCode;
+      this.dependency = dependency;
+      this.retryAfterSeconds = retryAfterSeconds;
     }
   }
   class AnalyticsTimeoutError extends Error {
@@ -940,9 +970,14 @@ describe("[140.3-G4 / SEAMUX-03] POST /api/verify-strategy — a machine code on
     vi.resetModules();
   });
 
-  // ── the 400 input arms: KEY_INVALID_FORMAT (create-with-key's own token) ──
+  // ── the 400 input arms ──
+  // 161-09 / WIZERR-08: four of the five moved off KEY_INVALID_FORMAT onto codes
+  // true of their own facts. The email arm KEEPS it — a present value whose
+  // shape is wrong IS a format failure. The full per-arm inventory with the
+  // byte-identical sentences, and the two disclosure pins, are the WIZERR-08
+  // suite at the foot of this file.
 
-  it("400 invalid JSON carries the EXACT { error, code: KEY_INVALID_FORMAT } pair", async () => {
+  it("400 invalid JSON carries the EXACT { error, code } pair", async () => {
     vi.resetModules();
     const { POST } = await import("./route");
     const res = await POST(postReq("{not json", true));
@@ -950,21 +985,21 @@ describe("[140.3-G4 / SEAMUX-03] POST /api/verify-strategy — a machine code on
     // The exact-pair case: a dropped code reddens here, not just a changed value.
     expect(await res.json()).toEqual({
       error: "Invalid JSON body",
-      code: "KEY_INVALID_FORMAT",
+      code: "KEY_MISSING_REQUIRED_FIELD",
     });
   });
 
-  it("400 missing required fields → code KEY_INVALID_FORMAT", async () => {
+  it("400 missing required fields → code KEY_MISSING_REQUIRED_FIELD", async () => {
     vi.resetModules();
     const { POST } = await import("./route");
     const res = await POST(
       postReq({ email: "test@example.com", exchange: "okx", api_key: "k" }),
     );
     expect(res.status).toBe(400);
-    expect((await res.json()).code).toBe("KEY_INVALID_FORMAT");
+    expect((await res.json()).code).toBe("KEY_MISSING_REQUIRED_FIELD");
   });
 
-  it("400 invalid email → code KEY_INVALID_FORMAT", async () => {
+  it("400 invalid email → code KEY_INVALID_FORMAT (RETAINED — the one real format failure here)", async () => {
     vi.resetModules();
     const { POST } = await import("./route");
     const res = await POST(postReq({ ...VALID_BODY, email: "not-an-email" }));
@@ -972,15 +1007,15 @@ describe("[140.3-G4 / SEAMUX-03] POST /api/verify-strategy — a machine code on
     expect((await res.json()).code).toBe("KEY_INVALID_FORMAT");
   });
 
-  it("400 unsupported exchange → code KEY_INVALID_FORMAT", async () => {
+  it("400 unsupported exchange → code KEY_UNSUPPORTED_VENUE", async () => {
     vi.resetModules();
     const { POST } = await import("./route");
     const res = await POST(postReq({ ...VALID_BODY, exchange: "kraken" }));
     expect(res.status).toBe(400);
-    expect((await res.json()).code).toBe("KEY_INVALID_FORMAT");
+    expect((await res.json()).code).toBe("KEY_UNSUPPORTED_VENUE");
   });
 
-  it("400 sfox-disabled (half-state) → code KEY_INVALID_FORMAT", async () => {
+  it("400 sfox-disabled (half-state) → code KEY_VENUE_NOT_ENABLED", async () => {
     vi.resetModules();
     vi.doMock("@/lib/utils", async () => {
       const actual = (await vi.importActual("@/lib/utils")) as Record<string, unknown>;
@@ -997,7 +1032,7 @@ describe("[140.3-G4 / SEAMUX-03] POST /api/verify-strategy — a machine code on
       expect(res.status).toBe(400);
       const body = await res.json();
       expect(body.error).toContain("not yet available");
-      expect(body.code).toBe("KEY_INVALID_FORMAT");
+      expect(body.code).toBe("KEY_VENUE_NOT_ENABLED");
     } finally {
       vi.doUnmock("@/lib/utils");
       vi.doUnmock("@/lib/closed-sets");
@@ -1082,5 +1117,375 @@ describe("[140.3-G4 / SEAMUX-03] POST /api/verify-strategy — a machine code on
     expect(body.error).toBe("Failed to finalize verification");
     // Same fact ⇒ same token on both arms (the keys/sync two-throttle-arms doctrine).
     expect(body.code).toBe("VERIFY_PERSIST_FAILED");
+  });
+});
+
+/**
+ * ⭐ 161-09 / WIZERR-08 — THE PUBLIC ROUTE: TRUE CODES, ZERO DISCLOSURE MOVEMENT.
+ *
+ * ── WHY THE SENTENCES ARE THE THING PINNED, AND NOT THE CODES ───────────────
+ *
+ * MEASURED at HEAD (2026-08-24), not assumed: the only consumer of this route,
+ * `src/components/landing/VerificationForm.tsx`, renders
+ * `safeHumanMessage(data.human_message) ?? safeHumanMessage(data.error) ??
+ * "Verification failed"` and NEVER reads `data.code`. The two occurrences of
+ * the word "code" in that file are both inside comments. So on this route the
+ * code channel is machine-only and the SENTENCE is the sole public disclosure
+ * surface — re-coding an arm cannot widen what an anonymous caller learns, and
+ * moving a sentence would. That is the whole F3 argument, and it is why every
+ * case below asserts the sentence as a HAND-TYPED literal transcribed from the
+ * pre-161-09 source (`git show HEAD~1:…`), never imported.
+ *
+ * ⛔ IF A FUTURE CONSUMER STARTS READING `code` ON THIS ROUTE, the premise
+ * above stops holding and F3 must be RE-DECIDED — see the latent-hazard note at
+ * the sfox arm in `route.ts`. This suite does not detect that; nothing can
+ * detect a consumer that does not exist yet. It is recorded, not covered.
+ */
+describe("[161-09 / WIZERR-08] the anonymous route: honest codes under an unchanged disclosure boundary", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    verificationCount = 0;
+    vi.spyOn(console, "error").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.resetModules();
+  });
+
+  /**
+   * HAND-TYPED. Four of the five arms — the fifth (sfox) needs a two-module
+   * re-mock to reach its half-state and gets its own case below.
+   *
+   * ⚠️ `sentence` is compared with `toBe`, never `toContain`. A `toContain`
+   * against a shortened sentence passes; `"anything".includes("")` is `true`,
+   * and a blanked expectation would pass against every arm at once.
+   */
+  const PUBLIC_ARMS: readonly {
+    label: string;
+    body: unknown;
+    raw?: boolean;
+    code: string;
+    sentence: string;
+  }[] = [
+    {
+      label: "the body was not a readable object",
+      body: "{not json",
+      raw: true,
+      code: "KEY_MISSING_REQUIRED_FIELD",
+      sentence: "Invalid JSON body",
+    },
+    {
+      label: "a field the form requires arrived absent",
+      body: { email: "test@example.com", exchange: "okx", api_key: "k" },
+      code: "KEY_MISSING_REQUIRED_FIELD",
+      sentence: "Missing required fields: email, exchange, api_key, api_secret",
+    },
+    {
+      label: "a present value is malformed (the ONE genuine format failure)",
+      body: { ...VALID_BODY, email: "not-an-email" },
+      code: "KEY_INVALID_FORMAT",
+      sentence: "Invalid email address",
+    },
+    {
+      label: "the venue is outside the offered set",
+      body: { ...VALID_BODY, exchange: "kraken" },
+      code: "KEY_UNSUPPORTED_VENUE",
+      sentence: `Unsupported exchange. Supported: ${UI_EXCHANGE_CODES.join(", ")}`,
+    },
+  ];
+
+  // Positive control FIRST: a table that shrank reports no failures.
+  it("the arm table is the four MEASURED non-sfox arms", () => {
+    expect(PUBLIC_ARMS.length).toBe(4);
+    // And every hand-typed sentence is a real sentence. A blank or near-blank
+    // expectation would satisfy a `toContain` everywhere and a `toBe` nowhere
+    // useful; this makes the guard explicit rather than relying on the operator.
+    for (const a of PUBLIC_ARMS) expect(a.sentence.trim().length).toBeGreaterThan(10);
+  });
+
+  it.each(PUBLIC_ARMS.map((a) => [a.label, a] as const))(
+    "%s → its own code, sentence byte-identical, still 400",
+    async (_label, arm) => {
+      vi.resetModules();
+      const { POST } = await import("./route");
+      const res = await POST(postReq(arm.body, arm.raw ?? false));
+      const body = await res.json();
+
+      expect(res.status).toBe(400);
+      expect(body.code).toBe(arm.code);
+      expect(body.error).toBe(arm.sentence);
+      // Nothing was forwarded to the teaser pipeline on any refusal.
+      expect(verifyStrategyMock).not.toHaveBeenCalled();
+    },
+  );
+
+  it("the venue-not-enabled arm → KEY_VENUE_NOT_ENABLED, sentence byte-identical", async () => {
+    vi.resetModules();
+    vi.doMock("@/lib/utils", async () => {
+      const actual = (await vi.importActual("@/lib/utils")) as Record<string, unknown>;
+      const codes = actual.UI_EXCHANGE_CODES as string[];
+      return { ...actual, UI_EXCHANGE_CODES: [...codes, "sfox"] }; // offer ON
+    });
+    vi.doMock("@/lib/closed-sets", async () => {
+      const actual = (await vi.importActual("@/lib/closed-sets")) as Record<string, unknown>;
+      return { ...actual, isSfoxEnabledServer: () => false }; // server flag OFF
+    });
+    try {
+      const { POST } = await import("./route");
+      const res = await POST(postReq({ ...VALID_BODY, exchange: "sfox" }));
+      const body = await res.json();
+      expect(res.status).toBe(400);
+      expect(body.code).toBe("KEY_VENUE_NOT_ENABLED");
+      expect(body.error).toBe("sFOX integration is not yet available.");
+      expect(verifyStrategyMock).not.toHaveBeenCalled();
+    } finally {
+      vi.doUnmock("@/lib/utils");
+      vi.doUnmock("@/lib/closed-sets");
+      vi.resetModules();
+    }
+  });
+
+  /**
+   * ⭐ THE ORDERING PIN — this is what BOUNDS the disclosure, so it is asserted
+   * rather than inherited from a comment.
+   *
+   * The offered-set gate must run BEFORE the venue-disabled gate. With that
+   * ordering, the venue-disabled arm is reachable ONLY for a venue the landing
+   * form is already offering, so it cannot name an unlaunched venue. Reverse
+   * the two and a venue outside the offer would be answered "sFOX integration
+   * is not yet available." — a coming-soon signal about something we never
+   * offered. (Threat T-161-27.)
+   */
+  it("F3 ORDERING: a venue OUTSIDE the offered set is refused by the offered-set gate, never by the venue-disabled gate", async () => {
+    vi.resetModules();
+    // The offer is at its real value (sfox NOT in it) while the server flag is
+    // OFF — the exact configuration in which a reversed ordering would leak.
+    vi.doMock("@/lib/closed-sets", async () => {
+      const actual = (await vi.importActual("@/lib/closed-sets")) as Record<string, unknown>;
+      return { ...actual, isSfoxEnabledServer: () => false };
+    });
+    try {
+      const { POST } = await import("./route");
+      const res = await POST(postReq({ ...VALID_BODY, exchange: "sfox" }));
+      const body = await res.json();
+      expect(res.status).toBe(400);
+      expect(body.code).toBe("KEY_UNSUPPORTED_VENUE");
+      expect(body.error).toBe(
+        `Unsupported exchange. Supported: ${UI_EXCHANGE_CODES.join(", ")}`,
+      );
+      // The venue-disabled sentence must NOT be what an unoffered venue is told.
+      expect(body.error).not.toContain("not yet available");
+    } finally {
+      vi.doUnmock("@/lib/closed-sets");
+      vi.resetModules();
+    }
+  });
+
+  /**
+   * ⭐ THE ENUMERATION BOUND — what the public "Supported: …" list may name.
+   *
+   * ⛔ THE EXPECTATION IS DERIVED FROM `UI_EXCHANGE_CODES`, NEVER HAND-LISTED.
+   * A hand-typed venue list in a test IS ITSELF a stale disclosure claim the
+   * day the offer changes: it would keep passing while the route disclosed
+   * something the list no longer described. The offered set is the disclosure
+   * boundary, so the offered set is the oracle.
+   *
+   * The complement is the half that matters: every venue in the WIDER key-save
+   * allowlist that is NOT offered must be absent from the disclosed string.
+   */
+  it("F3 ENUMERATION: the disclosed list is EXACTLY the offered set, and names nothing wider", async () => {
+    vi.resetModules();
+    const { POST } = await import("./route");
+    const res = await POST(postReq({ ...VALID_BODY, exchange: "kraken" }));
+    const body = await res.json();
+    expect(res.status).toBe(400);
+
+    // Both oracles must be non-empty before either claim below means anything:
+    // an empty offered set makes the "names nothing wider" half vacuous, and
+    // `"anything".includes("")` is true.
+    expect(UI_EXCHANGE_CODES.length).toBeGreaterThan(1);
+    expect(SUPPORTED_EXCHANGES.length).toBeGreaterThanOrEqual(UI_EXCHANGE_CODES.length);
+
+    expect(body.error).toBe(
+      `Unsupported exchange. Supported: ${UI_EXCHANGE_CODES.join(", ")}`,
+    );
+
+    const notOffered = SUPPORTED_EXCHANGES.filter(
+      (v) => !(UI_EXCHANGE_CODES as readonly string[]).includes(v),
+    );
+    // Non-vacuity: if the two sets ever coincide this half proves nothing, and
+    // a green from an empty filter is indistinguishable from a real pass.
+    expect(
+      notOffered.length,
+      "the key-save allowlist and the public offer coincide, so the " +
+        "'names nothing wider' half is measuring nothing. If a venue was " +
+        "launched, that is fine and this pin should be re-derived; if the " +
+        "allowlist shrank to the offer, say so deliberately.",
+    ).toBeGreaterThan(0);
+    for (const venue of notOffered) {
+      expect(
+        body.error.toLowerCase(),
+        `the anonymous disclosure names ${venue}, which is in the key-save ` +
+          `allowlist but NOT in the public offer (F3)`,
+      ).not.toContain(venue.toLowerCase());
+    }
+  });
+});
+
+/**
+ * ⭐ 161-REVIEW / WR-04 — THE PREMISE PIN.
+ *
+ * The route's sfox arm ships `KEY_VENUE_NOT_ENABLED`, whose `WIZARD_ERROR_COPY`
+ * entry reads "This exchange is not open on Quantalyze yet." — the coming-soon
+ * wording `161-UI-SPEC § WIZERR-08` (F3) bans on THIS anonymous surface. The
+ * arm keeps that code deliberately, because it is the one code that is TRUE of
+ * the fact (we support sfox; it is not switched on), and the choice rests on
+ * TWO premises. Only one of them was asserted before this pin.
+ *
+ *   1. ORDERING — the offered-set gate runs first, so the arm cannot fire for a
+ *      venue the landing form was not already offering. Asserted by the
+ *      "F3 ORDERING" case above.
+ *   2. NO CODE CHANNEL — no anonymous surface translates this route's `code`
+ *      into wizard copy, so the banned sentence is never rendered. This was
+ *      MEASURED and then written into a comment, which is not a mechanism. The
+ *      day a landing component starts reading `code`, the deferral silently
+ *      stops holding and nothing goes red. That is what this case fixes.
+ *
+ * ⛔ THE POPULATION IS DERIVED FROM DISK, never hand-listed: a hand-typed file
+ * list would keep passing the day somebody adds a NEW landing component that
+ * reads the channel — which is precisely the regrowth vector.
+ *
+ * ⛔ THIS PIN DOES NOT FORBID THE WIRING. It forbids INHERITING the F3
+ * deferral through it. If an anonymous surface should render wizard copy, make
+ * that change AND re-decide what this arm's code may say on a public surface,
+ * in the same commit. A red here is "re-decide", not "revert".
+ */
+describe("[161-REVIEW / WR-04] the F3 deferral's premise: no anonymous surface translates this route's `code`", () => {
+  const LANDING_DIR = join(process.cwd(), "src", "components", "landing");
+  // The positive control's directory: the AUTHENTICATED wizard, which does
+  // translate codes into copy. Used only to prove the scanner can detect.
+  const WIZARD_STEPS_DIR = join(
+    process.cwd(),
+    "src",
+    "app",
+    "(dashboard)",
+    "strategies",
+    "new",
+    "wizard",
+    "steps",
+  );
+
+  /**
+   * Hand-typed needles, and hand-typed ON PURPOSE: importing the symbols would
+   * make the oracle the thing under test. Each is a code→copy translation entry
+   * point in `@/lib/wizardErrors`.
+   */
+  const CODE_TO_COPY_NEEDLES = [
+    "WIZARD_ERROR_COPY",
+    "recogniseSeamErrorCode",
+    "recogniseDashboardDialogCode",
+    "formatKeyError",
+    "@/lib/wizardErrors",
+  ] as const;
+
+  function productionSourcesUnder(dir: string): string[] {
+    const out: string[] = [];
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const full = join(dir, entry.name);
+      if (entry.isDirectory()) {
+        if (entry.name === "__tests__" || entry.name === "__mocks__") continue;
+        out.push(...productionSourcesUnder(full));
+        continue;
+      }
+      if (!/\.tsx?$/.test(entry.name)) continue;
+      if (/\.(test|spec)\.tsx?$/.test(entry.name)) continue;
+      out.push(full);
+    }
+    return out;
+  }
+
+  it("the scanner is not vacuous: needles are real, and the same scan FINDS the wiring where it exists", () => {
+    // `"anything".includes("")` is true, so a blank needle would satisfy every
+    // negative below while measuring nothing.
+    for (const needle of CODE_TO_COPY_NEEDLES) {
+      expect(needle.trim().length).toBeGreaterThan(8);
+    }
+
+    // POSITIVE CONTROL — the authenticated wizard steps DO translate codes into
+    // copy. If this half ever goes green-by-emptiness, the negative half below
+    // proves nothing.
+    const wizardFiles = productionSourcesUnder(WIZARD_STEPS_DIR);
+    expect(wizardFiles.length).toBeGreaterThan(0);
+    const wizardHits = wizardFiles.filter((f) => {
+      const src = readFileSync(f, "utf-8");
+      return CODE_TO_COPY_NEEDLES.some((n) => src.includes(n));
+    });
+    expect(
+      wizardHits.length,
+      "the code→copy scanner found NO translation in the authenticated wizard " +
+        "steps, where it demonstrably exists — the needles or the walker are " +
+        "broken, and the landing-dir assertion below is measuring nothing",
+    ).toBeGreaterThan(0);
+  });
+
+  it("the landing surface is a real, non-empty population that CONSUMES this route", () => {
+    const files = productionSourcesUnder(LANDING_DIR);
+    expect(files.length).toBeGreaterThan(0);
+
+    // Independent hand-typed oracle for the derived population: the component
+    // that actually posts to this route must be in it. If it moves, this pin's
+    // scope moved with it and must be re-derived deliberately.
+    const named = files.filter((f) => f.endsWith("VerificationForm.tsx"));
+    expect(
+      named.length,
+      "VerificationForm.tsx is not under src/components/landing/ any more — " +
+        "the anonymous consumer of /api/verify-strategy moved, so re-derive " +
+        "this pin's directory rather than deleting the case",
+    ).toBe(1);
+
+    // The CONSUMPTION link: the premise is about surfaces that call THIS route.
+    const consumers = files.filter((f) =>
+      readFileSync(f, "utf-8").includes("/api/verify-strategy"),
+    );
+    expect(
+      consumers.length,
+      "no file under src/components/landing/ posts to /api/verify-strategy — " +
+        "this pin is guarding a surface that no longer consumes the route",
+    ).toBeGreaterThan(0);
+  });
+
+  it("NO production file under src/components/landing/ translates a wire code into wizard copy", () => {
+    for (const file of productionSourcesUnder(LANDING_DIR)) {
+      const src = readFileSync(file, "utf-8");
+      for (const needle of CODE_TO_COPY_NEEDLES) {
+        expect(
+          src.includes(needle),
+          `${file} references ${needle}. An ANONYMOUS surface has begun ` +
+            "translating wire codes into WIZARD_ERROR_COPY, so the sfox arm " +
+            "in verify-strategy/route.ts can now render " +
+            '"This exchange is not open on Quantalyze yet." to a logged-out ' +
+            "visitor — the wording 161-UI-SPEC § WIZERR-08 (F3) bans on this " +
+            "surface. Re-decide F3 for that arm IN THIS COMMIT; do not just " +
+            "widen this pin.",
+        ).toBe(false);
+      }
+    }
+  });
+
+  it("VerificationForm's error path reads the SENTENCE channel, never `code`", () => {
+    const src = readFileSync(join(LANDING_DIR, "VerificationForm.tsx"), "utf-8");
+
+    // Controls first: the two readers that DO exist must be present, or a
+    // renamed/blanked file would make the negative below vacuously true.
+    expect(src).toContain("data.human_message");
+    expect(src).toContain("data.error");
+
+    expect(
+      /\bdata\.code\b/.test(src),
+      "VerificationForm now reads `data.code` from /api/verify-strategy. The " +
+        "F3 deferral at the sfox arm assumed this channel was never read; it " +
+        "is read now, so decide what that arm may say to an anonymous caller.",
+    ).toBe(false);
   });
 });

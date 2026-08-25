@@ -1323,8 +1323,30 @@ async function resolveExistingStrategyOrRefuse(
     typeof existingRow.status === "string" &&
     existingRow.status !== args.terminalStatus
   ) {
+    // 161-03 / WIZERR-12 — AND IT GETS ITS OWN SENTENCE, because the default
+    // one is FALSE here. The default says the committed strategy holds "a
+    // different track record"; this check runs BEFORE the name check and
+    // BEFORE the series check, so at this point nothing about the track record
+    // has been read. The sibling refusal suite arms this very case with a
+    // committed name of "Renamed" on purpose — the names may differ too, or
+    // not, and this arm cannot tell.
+    //
+    // ⚠️ WHAT THE SENTENCE MAY CLAIM, AND WHY IT IS NOT "a different flow".
+    // The docblock above names the manager-vs-contribution collision, and that
+    // IS the case this arm was built for. It is not the only one it can fire
+    // on: `existingRow.status` is the row's CURRENT status, read live, and
+    // `admin/strategy-review` moves a committed 'pending_review' row to
+    // 'published'. A manager resubmit onto an already-published row of the
+    // SAME flow reaches here too. So the sentence states only what the arm has
+    // actually established — a strategy is committed under this session, and
+    // it is not in the state this submission asked for.
+    //
+    // ⛔ The internal `reason` (which names both statuses, for the operator
+    // reading Sentry) is unchanged, and the DEFAULT sentence stays
+    // byte-identical for the name / series / date arms where it is true.
     return refuse(
       `terminal status mismatch (committed '${existingRow.status}', this submission asked for '${args.terminalStatus}')`,
+      `This wizard session already committed a strategy that is not in the state this submission asked for, so we refused before writing anything of this submission. ${START_NEW_STRATEGY_LABEL} to make a separate submission.`,
     );
   }
 

@@ -67,6 +67,13 @@ from services.closed_sets import MT5_WRONG_SERVER_DETAIL
 from services.exchange import AUTH_FAILED_DETAIL
 from services.ingestion.adapter import KeySubmissionRequest
 from services.ingestion.mt5 import Mt5Adapter
+
+# 161-02 / WIZERR-01 — imported at MODULE level (the rest of this file imports
+# mt5_probe inside test bodies) for one reason: `@pytest.mark.parametrize`
+# evaluates at COLLECTION time, and parametrizing the fence over the whole
+# emittable family is what makes a newly-added cause arm fence-checked
+# automatically instead of only when somebody remembers to add a case.
+from services.mt5_probe import MT5_GATEWAY_MISCONFIGURED_DETAILS
 from tests.limiter_stub import evict_module, patch_shared_limiter
 
 
@@ -377,30 +384,282 @@ def test_run_probe_short_circuits_order_check_on_an_undetermined_terminal():
     assert client.calls.count("account_info") == 2, client.calls
 
 
-def test_mt5_gateway_misconfigured_message_is_curated_and_credential_free():
-    """A3's condition half. The operator-fault copy is a FIXED constant that is
-    rendered to a human, so it must name no credential and must carry no token
-    from the live classification tables — a message containing "terminal" or
-    "server" is one `classify_mt5_login_error` call away from being re-read as
-    "the user's broker server is wrong", which is the very accusation A1 removed.
+@pytest.mark.parametrize(
+    "curated", MT5_GATEWAY_MISCONFIGURED_DETAILS, ids=lambda s: s[:32]
+)
+def test_every_builder_emittable_constant_is_curated_and_credential_free(curated):
+    """A3's condition half, widened at 161-02 to EVERY constant the flag->cause
+    builder can emit.
+
+    The operator-fault copy is a curated constant rendered to a human, so it must
+    name no credential and must carry no token from the live classification
+    tables — a message containing "terminal" or "server" is one
+    `classify_mt5_login_error` call away from being re-read as "the user's broker
+    server is wrong", which is the very accusation A1 removed.
+
+    ⭐ Parametrized over the FAMILY, not over a hand-listed pair: 161-02 turned one
+    constant into three, and a fence that scans only the one it was written for
+    would have gone on passing while two unchecked sentences shipped. The tokens
+    are read from the LIVE tables, so a token added to `mt5_validation` reds here.
     """
     from services.mt5_validation import _AUTH_TOKENS, _WRONG_SERVER_TOKENS
-    from services.mt5_probe import (
-        MT5_GATEWAY_MISCONFIGURED_DETAIL,
-        Mt5GatewayMisconfigured,
-    )
 
-    text = MT5_GATEWAY_MISCONFIGURED_DETAIL.lower()
-    assert text, "the curated constant is empty — every assertion below is vacuous"
+    text = curated.lower()
+    # ANTI-VACUITY, both directions. `"" in anything` is True in Python exactly as
+    # `"x".includes("")` is in JS (161-01's Deviation 2), so a BLANKED constant
+    # would satisfy every `not in` below while asserting nothing, and a BLANKED
+    # token would match everything. Both are guarded before the sweep runs.
+    assert len(text) > 40, "the curated constant is too short to be the real copy"
+    assert _WRONG_SERVER_TOKENS and _AUTH_TOKENS, "empty token table proves nothing"
     for token in (*_WRONG_SERVER_TOKENS, *_AUTH_TOKENS):
+        assert token, "a blank token is a substring of everything"
         assert token not in text, f"curated copy carries the classify token {token!r}"
     for word in ("password", "investor", "master", "secret"):
         assert word not in text, f"curated copy names the credential word {word!r}"
 
-    # The exception defaults to the constant, so no call site can raise it with
-    # raw remote text by omission.
+
+def test_the_curated_family_is_the_measured_three_and_they_are_distinct():
+    """The family's SIZE is hand-typed, so a fourth cause arm cannot join the
+    builder without a human deciding it belongs — and the three must be DISTINCT,
+    or the arm-selection cases below would pass without selecting anything.
+    """
+    from services.mt5_probe import (
+        MT5_GATEWAY_EXTERNAL_API_BLOCKED_DETAIL,
+        MT5_GATEWAY_MISCONFIGURED_DETAIL,
+        MT5_GATEWAY_TRADE_PERMISSION_OFF_DETAIL,
+        Mt5GatewayMisconfigured,
+    )
+
+    assert len(MT5_GATEWAY_MISCONFIGURED_DETAILS) == 3
+    assert len(set(MT5_GATEWAY_MISCONFIGURED_DETAILS)) == 3, (
+        "two arms carry the SAME sentence — selecting between them is unobservable"
+    )
+    assert set(MT5_GATEWAY_MISCONFIGURED_DETAILS) == {
+        MT5_GATEWAY_MISCONFIGURED_DETAIL,
+        MT5_GATEWAY_TRADE_PERMISSION_OFF_DETAIL,
+        MT5_GATEWAY_EXTERNAL_API_BLOCKED_DETAIL,
+    }
+
+    # The exception defaults to the GENERIC constant, so no call site can raise it
+    # with raw remote text by omission. Unchanged by 161-02 and load-bearing:
+    # `mt5linux` interpolates the password into remotely-eval'd source (T-134-01).
     assert str(Mt5GatewayMisconfigured()) == MT5_GATEWAY_MISCONFIGURED_DETAIL
     assert isinstance(Mt5GatewayMisconfigured(), Exception)
+
+
+# --- 161-02 / WIZERR-01: the flag->cause builder ----------------------------
+#
+# ⭐ The expected sentences below are HAND-TYPED from 161-UI-SPEC § Copy Spec
+# WIZERR-01, never imported from the module under test. An oracle that reads its
+# expectation out of the thing it is testing asserts `copy(X) == copy(X)` and
+# cannot fail (161-VALIDATION § Anti-Vacuity).
+_EXPECTED_TRADE_PERMISSION_OFF = (
+    "The MT5 gateway has 'Allow algorithmic trading' switched off, so read-only "
+    "capability cannot be proven. The gateway switches it off again whenever it "
+    "changes users, so turning it back on needs an operator, not a retry — see "
+    "docs/runbooks/mt5-go-live.md."
+)
+_EXPECTED_EXTERNAL_API_BLOCKED = (
+    "The MT5 gateway blocks outside automated access (the 'Disable automatic "
+    "trading through the external Python API' option is in force), so read-only "
+    "capability cannot be proven. This needs an operator, not a retry — see "
+    "docs/runbooks/mt5-go-live.md."
+)
+_EXPECTED_GENERIC = (
+    "MT5 gateway refuses automated trading (the 'Disable automatic trading "
+    "through the external Python API' option is in force), so read-only "
+    "capability cannot be proven. This needs an operator, not a retry — see "
+    "docs/runbooks/mt5-go-live.md."
+)
+
+
+@pytest.mark.parametrize(
+    "terminal,expected,why",
+    [
+        (
+            {"connected": True, "trade_allowed": False},
+            _EXPECTED_TRADE_PERMISSION_OFF,
+            "THE FOUNDER-MEASURED LIVE CASE (2026-08-13): trade_allowed false with "
+            "the named option NOT in force. The pre-161-02 copy asserted that "
+            "option WAS in force — a sentence measured to be false about the "
+            "user's situation, on a founder-hit surface.",
+        ),
+        (
+            {"connected": True, "trade_allowed": False, "tradeapi_disabled": False},
+            _EXPECTED_TRADE_PERMISSION_OFF,
+            "the flag is PRESENT and falsy — the option is not in force, so the "
+            "cause is the algorithmic-trading setting, same as above",
+        ),
+        (
+            {"connected": True, "trade_allowed": True, "tradeapi_disabled": True},
+            _EXPECTED_EXTERNAL_API_BLOCKED,
+            "the named option IS in force and is the only blockage reported",
+        ),
+        (
+            {"connected": True, "trade_allowed": False, "tradeapi_disabled": True},
+            _EXPECTED_EXTERNAL_API_BLOCKED,
+            "PRECEDENCE: both flags indicate blockage and the NAMED option wins, "
+            "deterministically — it subsumes the permission it already forces off",
+        ),
+        (
+            {"connected": True, "trade_allowed": True},
+            _EXPECTED_GENERIC,
+            "⭐ THE A1 QUARANTINE: the flag is ABSENT and nothing else indicates a "
+            "cause, so no cause may be asserted. A1 was founder-measured ONCE with "
+            "zero production readers; an absent key must never select an arm.",
+        ),
+        (
+            {},
+            _EXPECTED_GENERIC,
+            "an EMPTY terminal dict names no cause and must not raise KeyError — a "
+            "raise here would fail the whole job permanently (T-161-05)",
+        ),
+        (
+            None,
+            _EXPECTED_GENERIC,
+            "an UNREADABLE terminal (read_terminal fails CLOSED to None) names no "
+            "cause and must not raise AttributeError",
+        ),
+        (
+            {"connected": False, "trade_allowed": False},
+            _EXPECTED_GENERIC,
+            "DETACHED from the trade server: trade_allowed is false but the "
+            "terminal-permission seam refuses to attribute it, so neither cause is "
+            "provable and the honest generic ships",
+        ),
+        (
+            "not-a-mapping",
+            _EXPECTED_GENERIC,
+            "a non-dict-ish terminal (untrusted remote shape) degrades, never raises",
+        ),
+    ],
+)
+def test_builder_selects_the_cause_arm_the_flags_actually_support(
+    terminal, expected, why
+):
+    """⭐ 161-02 / WIZERR-01 — the ONE flag->cause seam both raise sites consume.
+
+    WHY it is load-bearing (Rule 9). The single pre-161-02 constant asserted that
+    the *'Disable automatic trading through the external Python API'* option was
+    in force. On the live gateway the founder measured `tradeapi_disabled` FALSE
+    while `trade_allowed` was FALSE: the real blocker was the Expert-Advisors
+    "Allow algorithmic trading" setting, which the gateway re-sets off on every
+    account change. So the sentence the operator read named the wrong checkbox and
+    sent them to look at a setting that was already correct.
+
+    The rows below pin the CAUSE each flag combination actually supports — and,
+    just as load-bearing, pin that an unsupported combination asserts NO cause.
+    """
+    from services.mt5_probe import mt5_gateway_misconfigured_detail
+
+    assert mt5_gateway_misconfigured_detail(terminal) == expected, why
+
+
+def test_builder_never_names_a_flag_to_the_user():
+    """The surface gets the CAUSE, never the sensor reading. `tradeapi_disabled`
+    and `trade_allowed` are internal field names; leaking them tells the user
+    nothing they can act on and couples our copy to a remote schema.
+    """
+    from services.mt5_probe import mt5_gateway_misconfigured_detail
+
+    terminals = [
+        {"connected": True, "trade_allowed": False},
+        {"connected": True, "trade_allowed": False, "tradeapi_disabled": True},
+        None,
+    ]
+    rendered = [mt5_gateway_misconfigured_detail(t) for t in terminals]
+    assert len(set(rendered)) == 3, (
+        "the sweep below must cover BOTH cause arms AND the generic fallback — if "
+        "two of these collapse to one sentence it is scanning less than it claims"
+    )
+    for text in rendered:
+        low = text.lower()
+        for flag in ("tradeapi_disabled", "trade_allowed", "terminal_info"):
+            assert flag not in low, f"user-facing copy names the flag {flag!r}"
+
+
+def test_worker_sink_lets_a_curated_cause_through_but_never_raw_remote_text():
+    """`classify_exception` reads the message through an ALLOW-LIST.
+
+    Both halves matter and neither implies the other: returning the generic
+    constant unconditionally (the pre-161-02 behaviour) is SAFE but discards the
+    cause the raise site derived, while returning `str(exc)` would deliver the
+    cause and also deliver anything else — and `mt5linux` f-string-interpolates
+    the password into remotely-eval'd source (T-134-01 / T-153.3-23).
+    """
+    from services.job_worker import classify_exception
+    from services.mt5_probe import Mt5GatewayMisconfigured
+
+    for curated in MT5_GATEWAY_MISCONFIGURED_DETAILS:
+        kind, message = classify_exception(Mt5GatewayMisconfigured(curated))
+        assert kind == "permanent"
+        assert message == curated, "a curated cause must reach the operator intact"
+
+    kind, message = classify_exception(
+        Mt5GatewayMisconfigured("raw remote text carrying s3cr3t-pw")
+    )
+    assert kind == "permanent"
+    assert message == _EXPECTED_GENERIC
+    assert "s3cr3t-pw" not in message
+
+
+def test_the_exception_docstring_names_the_sink_the_worker_actually_calls():
+    """161-REVIEW / WR-06 — the class docstring is a claim about `job_worker`.
+
+    It said ``classify_exception`` maps this type onto
+    ``("permanent", MT5_GATEWAY_MISCONFIGURED_DETAIL)``. 161-02 changed that arm
+    to ``curated_gateway_detail(exc)`` — an allow-list read — and left this
+    carrier behind, in the very file the new builder lives in. A comment
+    describing behaviour that no longer exists is this phase's own defect class,
+    so the correction gets a pin rather than a promise.
+
+    ⛔ THE ORACLE IS ANCHORED, not free-floating: the positive needle is checked
+    against the LIVE sink in the same case, so the docstring cannot be "fixed"
+    into naming a function the worker does not call.
+    """
+    import re
+
+    from services.mt5_probe import Mt5GatewayMisconfigured
+
+    doc = Mt5GatewayMisconfigured.__doc__
+    assert isinstance(doc, str) and len(doc) > 400, (
+        "the class lost its docstring — every needle below would match nothing "
+        "and this case would assert about an empty string"
+    )
+    # RST wraps across source lines; compare on collapsed whitespace so the
+    # needles are about the CLAIM, not about where the line happens to break.
+    flat = re.sub(r"\s+", " ", doc)
+
+    superseded = '``("permanent", MT5_GATEWAY_MISCONFIGURED_DETAIL)``'
+    current = '``("permanent", curated_gateway_detail(exc))``'
+    # `"" in anything` is True in Python — pin both needles as real strings
+    # before relying on either direction.
+    assert len(superseded) > 20 and len(current) > 20
+
+    assert current in flat, (
+        "the docstring does not name the sink 161-02 actually wired: "
+        f"{flat[:400]!r}"
+    )
+    assert superseded not in flat, (
+        "the docstring still claims the classify arm returns the generic "
+        "constant unconditionally. It reads through curated_gateway_detail's "
+        "allow-list, and the generic constant is the DEGRADATION TARGET."
+    )
+
+    # ANCHOR: the sentence above is true of the running code, not just of the
+    # prose. A curated cause survives the sink intact — which is the whole
+    # difference between the two mappings the needles discriminate.
+    from services.job_worker import classify_exception
+
+    probe_cause = MT5_GATEWAY_MISCONFIGURED_DETAILS[1]
+    assert probe_cause != _EXPECTED_GENERIC, (
+        "the anchor sampled the generic constant, so it cannot tell the two "
+        "mappings apart"
+    )
+    assert classify_exception(Mt5GatewayMisconfigured(probe_cause)) == (
+        "permanent",
+        probe_cause,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -518,10 +777,7 @@ def test_mt5_gateway_misconfigured_operator_fault_on_both_paths(
     key or their broker server.
     """
     from services.job_worker import classify_exception
-    from services.mt5_probe import (
-        MT5_GATEWAY_MISCONFIGURED_DETAIL,
-        Mt5GatewayMisconfigured,
-    )
+    from services.mt5_probe import Mt5GatewayMisconfigured
 
     def make_client():
         return _FakeProbeClient(
@@ -546,9 +802,19 @@ def test_mt5_gateway_misconfigured_operator_fault_on_both_paths(
     assert isinstance(adapter_outcome, Mt5GatewayMisconfigured)
     kind, message = classify_exception(adapter_outcome)
     assert kind == "permanent"
-    assert message == MT5_GATEWAY_MISCONFIGURED_DETAIL
+    # ⭐ RE-POINTED at 161-02, deliberately. This fixture IS the founder-measured
+    # live case (connected, trade permission off, the named option NOT reported),
+    # so the honest sentence is the algorithmic-trading one — the generic constant
+    # this line used to expect is the very sentence WIZERR-01 measured false here.
+    # Hand-typed above from 161-UI-SPEC, never imported from the module under test.
+    assert message == _EXPECTED_TRADE_PERMISSION_OFF
 
-    # ⭐ THE PARITY CLAIM: both say "an operator must act", neither says "retry",
+    # ⭐ THE PARITY CLAIM, widened at 161-02: both paths name the SAME cause,
+    # because both derive it from ONE builder over the SAME terminal dict. A
+    # second copy of the flag->cause rule on either side would show up HERE.
+    assert router_outcome.detail["detail"] == message
+
+    # ⭐ And both say "an operator must act", neither says "retry",
     # and neither blames the user.
     assert router_outcome.detail["retryable"] is False and kind == "permanent"
     for rendered in (router_outcome.detail["detail"], message):

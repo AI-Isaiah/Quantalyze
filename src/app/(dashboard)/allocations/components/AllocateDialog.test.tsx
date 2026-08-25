@@ -26,7 +26,12 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import type { ComponentProps } from "react";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { AllocateDialog } from "./AllocateDialog";
+// The copy table, read as the SOURCE side of the comparison. The DOM is the
+// other side; a case comparing the DOM with itself could not fail.
+import { WIZARD_ERROR_COPY } from "@/lib/wizardErrors";
 
 /**
  * 151 red-team K2 — THE FOCUS-RING SWEEP'S CARVE-OUT, MADE UN-INHERITABLE.
@@ -782,6 +787,266 @@ describe("<AllocateDialog> — remove allocation (edit mode only)", () => {
     );
     expect(onClose).not.toHaveBeenCalled();
     expect(screen.getByRole("button", { name: "Remove" })).toBeInTheDocument();
+  });
+});
+
+
+/**
+ * [161-10 / WIZERR-07] THE FALLTHROUGH STOPS MINTING UNKNOWN.
+ *
+ * `envelopeForResponse` named exactly TWO of the allocation route's
+ * twenty-three error arms: the 429, and the 409 it recognised by matching
+ * `body.error === "not_allocatable"` — PROSE. Everything else rendered
+ * `buildEnvelope("UNKNOWN", …)`: "Something went wrong. We could not classify
+ * this failure", for a signed-out session, a request our own page built wrong,
+ * nine internal faults and three 404s that the route classifies precisely.
+ *
+ * ⛔ THE Button/Modal vi.mock CARVE-OUT AT THE TOP OF THIS FILE IS UNTOUCHED BY
+ * THIS BLOCK, and must stay that way. Those wrappers stamp
+ * `data-ui-primitive` / `data-consumer-scope` for repo-wide ring/surface gates
+ * that a file-scoped run cannot show you. Every case below works with them in
+ * place; none re-declares, unwraps or moves them.
+ *
+ * ORACLE INDEPENDENCE: the assertions read `data-error-code` and hand-typed
+ * phrases. Nothing is imported from `wizardErrors.ts`.
+ */
+describe("[161-10 / WIZERR-07] the allocation route's other arms reach their own copy", () => {
+  async function submitAndFail(status: number, body: unknown) {
+    fetchSpy.mockResolvedValue(failResponse(status, body));
+    renderAllocate();
+    fireEvent.change(amountInput(), { target: { value: "1000" } });
+    fireEvent.click(screen.getByRole("button", { name: "Allocate" }));
+    return screen.findByTestId("error-envelope");
+  }
+
+  it.each([
+    ["a signed-out session", 401, "DASHBOARD_SIGNED_OUT"],
+    ["a request our own page built wrong", 400, "DASHBOARD_REQUEST_INVALID"],
+    ["an internal fault before anything was sent", 500, "DASHBOARD_WRITE_FAILED"],
+    // 161-REVIEW / CR-01 — the upsert erroring, or returning zero rows. The
+    // money write was already sent, so the route classifies it separately.
+    [
+      "an internal fault after the money write was sent",
+      500,
+      "DASHBOARD_WRITE_INDETERMINATE",
+    ],
+    ["a row that is no longer there", 404, "DASHBOARD_ROW_STALE"],
+  ])("%s renders its own envelope code", async (_label, status, code) => {
+    const envelope = await submitAndFail(status, { code, error: "x" });
+    expect(envelope).toHaveAttribute("data-error-code", code);
+    // NON-VACUITY: copy really rendered, so the negative below means something.
+    expect(String(envelope.textContent).length).toBeGreaterThan(80);
+    expect(envelope.textContent).not.toContain("Something went wrong.");
+  });
+
+  /**
+   * ⭐ 161-REVIEW / CR-01 — THE RETRY CONTROL, PINNED ON THE ONLY DASHBOARD
+   * DIALOG THAT CAN RENDER ONE.
+   *
+   * Measured: `AllocateDialog` is the only one of the three that passes
+   * `onRetry` (the other two pass none, so `ErrorEnvelope`'s
+   * `recoverable && Boolean(onRetry)` is false there for every code and a
+   * "no Retry" assertion on those surfaces would be vacuous). This is also the
+   * MONEY dialog, which is where offering a blind second attempt against a
+   * possibly-applied write actually costs something.
+   *
+   * The 151-E6 precedent in `AllocateDialog.tsx` is the same argument one code
+   * earlier: a retry handler is only wired for a failure retrying can clear.
+   * CR-01 adds the case where retrying is not futile but UNPREDICTABLE.
+   */
+  it("[161-CR-01] the indeterminate arm renders NO Retry — a blind retry against a possibly-live allocation", async () => {
+    const envelope = await submitAndFail(500, {
+      code: "DASHBOARD_WRITE_INDETERMINATE",
+      error: "internal error",
+    });
+    const text = String(envelope.textContent);
+    expect(text.length).toBeGreaterThan(140); // the haystack is real
+    expect(text).not.toMatch(/nothing was saved/i);
+
+    expect(
+      // The control's accessible name is its `aria-label`, measured at
+      // `ErrorEnvelope.tsx`: `aria-label="Retry"`. Matched exactly rather than
+      // by a loose pattern, so a renamed control reds here instead of
+      // silently satisfying a `queryByRole(...) === null`.
+      screen.queryByRole("button", { name: "Retry" }),
+      "a Retry rendered for a write whose outcome we could not read. The " +
+        "upsert may have landed and the allocation may be live; pressing it " +
+        "is an action whose effect the person pressing it cannot foresee.",
+    ).toBeNull();
+  });
+
+  it("[161-CR-01] NEGATIVE CONTROL: the verified-zero-write arm still renders its Retry", async () => {
+    // The matched pair. Without it, the case above is satisfied by a dialog
+    // that lost the Retry control outright — which would be the over-eager
+    // class fix, and would strip a control that is correct on an arm where
+    // nothing was sent.
+    const envelope = await submitAndFail(500, {
+      code: "DASHBOARD_WRITE_FAILED",
+      error: "internal error",
+    });
+    expect(String(envelope.textContent)).toMatch(/nothing was saved/i);
+    expect(
+      // The control's accessible name is its `aria-label`, measured at
+      // `ErrorEnvelope.tsx`: `aria-label="Retry"`. Matched exactly rather than
+      // by a loose pattern, so a renamed control reds here instead of
+      // silently satisfying a `queryByRole(...) === null`.
+      screen.queryByRole("button", { name: "Retry" }),
+      "the split was achieved by removing the Retry everywhere rather than " +
+        "removing it where it is unsafe",
+    ).not.toBeNull();
+  });
+
+  it("an UNRECOGNISED code still falls to UNKNOWN — recognition is a roster, not a cast", async () => {
+    // Pitfall 4. A `body.code as WizardErrorCode` would ride this string onto
+    // the envelope and serve UNKNOWN's copy under a code nobody defined.
+    const envelope = await submitAndFail(500, {
+      code: "TOTALLY_MADE_UP",
+      error: "x",
+    });
+    expect(envelope).toHaveAttribute("data-error-code", "UNKNOWN");
+  });
+
+  it("a code belonging to ANOTHER dashboard route is refused by this one", async () => {
+    // `NAME_TOO_LONG` is the rename route's field-level token. The roster is
+    // per-route precisely so it cannot leak across surfaces.
+    const envelope = await submitAndFail(400, {
+      code: "NAME_TOO_LONG",
+      error: "name too long",
+    });
+    expect(envelope).toHaveAttribute("data-error-code", "UNKNOWN");
+  });
+
+  it("the transport catch is STILL a terminal UNKNOWN — no status, no verdict", async () => {
+    // The request never reached a status, so nothing classified anything. This
+    // is the one arm on this surface where UNKNOWN is the honest answer, and it
+    // must not be "completed" by the code channel.
+    fetchSpy.mockRejectedValue(new TypeError("Failed to fetch"));
+    renderAllocate();
+    fireEvent.change(amountInput(), { target: { value: "1000" } });
+    fireEvent.click(screen.getByRole("button", { name: "Allocate" }));
+
+    const envelope = await screen.findByTestId("error-envelope");
+    expect(envelope).toHaveAttribute("data-error-code", "UNKNOWN");
+  });
+
+  /**
+   * The incumbent 409 read is kept AHEAD of the code channel for rolling
+   * deploys (see `envelopeForResponse`'s docblock). Keeping it is only safe
+   * because the two AGREE, and agreement is asserted here rather than narrated:
+   * the two cases below are the two halves of that claim, and the third — a
+   * body carrying ONLY the prose, which the incumbent read still answers — is
+   * the pre-existing `[E5]` case above, left untouched with no fixture edit.
+   */
+  it("AGREEMENT 1/2: a body carrying BOTH discriminators names the mark remedy", async () => {
+    const envelope = await submitAndFail(409, {
+      code: "ALLOCATION_NOT_ALLOCATABLE",
+      error: "not_allocatable",
+    });
+    expect(envelope).toHaveAttribute(
+      "data-error-code",
+      "ALLOCATION_NOT_ALLOCATABLE",
+    );
+    expect(envelope.textContent).toMatch(/own capital/i);
+  });
+
+  it("AGREEMENT 2/2: a body carrying ONLY the code resolves identically", async () => {
+    const envelope = await submitAndFail(409, {
+      code: "ALLOCATION_NOT_ALLOCATABLE",
+    });
+    expect(envelope).toHaveAttribute(
+      "data-error-code",
+      "ALLOCATION_NOT_ALLOCATABLE",
+    );
+    expect(envelope.textContent).toMatch(/own capital/i);
+  });
+
+  it("SOURCE PIN: no local wire-code lookup table — translation lives once, shared", () => {
+    // Comment-stripped: this file's own docblocks name the retired shapes.
+    const RAW = readFileSync(
+      join(
+        process.cwd(),
+        "src/app/(dashboard)/allocations/components/AllocateDialog.tsx",
+      ),
+      "utf8",
+    );
+    const CODE = RAW.replace(/\/\*[\s\S]*?\*\//g, "").replace(
+      /^\s*\/\/.*$/gm,
+      "",
+    );
+    expect(RAW).toContain("/**");
+    expect(CODE).not.toContain("/**");
+    expect(CODE).toContain("envelopeForResponse");
+
+    expect(CODE).not.toMatch(/Record<\s*string\s*,/);
+    expect(CODE).toContain("recogniseDashboardDialogCode");
+    // The wait still rides the ONE parser — a raw `Number(header)` is a
+    // repo-wide lint error and would also silently accept a malformed header.
+    expect(CODE).toContain("parseRetryAfterSeconds");
+    expect(CODE).not.toMatch(/Number\(\s*res\.headers/);
+  });
+});
+
+/**
+ * [161-10 / E5] EVERY `fix[]` BULLET REACHES THE DOM — THE AUTOMATABLE HALF.
+ *
+ * 161-UI-SPEC § UI Considerations carries exactly ONE ⚠ unresolved row and it
+ * belongs to WIZERR-07. Its ORIGINAL premise — that these dialogs mount the
+ * envelope in a FIXED-HEIGHT body — was measured wrong and formally retracted:
+ * `Modal.tsx` has no `max-h`, no `overflow` and no height (re-measured at HEAD
+ * and pinned in `dialog-envelope.invariant.test.ts`).
+ *
+ * ⛔ WHAT THIS CASE DOES AND DOES NOT SETTLE. It proves the DATA layer loses
+ * nothing: every remedy the copy table declares is present in the rendered
+ * list, so no bullet is dropped between `buildEnvelope` and the DOM. It does
+ * NOT settle the layout question. Whether an overflowing native `<dialog>`
+ * SCROLLS or CLIPS on a short viewport is a UA-resolved rendered property that
+ * jsdom does not compute at all — that half is verified BY HAND and recorded as
+ * MANUAL. Do not read a green here as the ⚠ row being closed.
+ *
+ * THE ORACLE is the DOM list measured against the copy table — two different
+ * artefacts, not one compared with itself. A renderer that dropped the tail of
+ * the list, or a data path that truncated it, moves one side and not the other.
+ */
+describe("[161-10 / E5] the row of remedies is not truncated at the data layer", () => {
+  it("a THREE-bullet remedy list reaches the DOM complete", async () => {
+    // ⭐ THE GENUINE ≥3 CASE. `ALLOCATION_NOT_ALLOCATABLE` is the only code any
+    // of the three dashboard routes emits whose copy carries three remedies,
+    // which makes this the one surface where the plan's ≥3 requirement can be
+    // met without inventing a bullet to meet it.
+    fetchSpy.mockResolvedValue(
+      failResponse(409, {
+        code: "ALLOCATION_NOT_ALLOCATABLE",
+        error: "not_allocatable",
+      }),
+    );
+    renderAllocate();
+    fireEvent.change(amountInput(), { target: { value: "1000" } });
+    fireEvent.click(screen.getByRole("button", { name: "Allocate" }));
+
+    const envelope = await screen.findByTestId("error-envelope");
+    const expected = WIZARD_ERROR_COPY.ALLOCATION_NOT_ALLOCATABLE.fix;
+
+    // NON-VACUITY, and the ≥3 claim itself: if this entry ever loses a bullet
+    // the phase's one measurable E5 case quietly stops being a multi-bullet
+    // case at all, so the floor is asserted rather than assumed.
+    expect(
+      expected.length,
+      "this is the only reachable three-remedy entry; if it shrank, E5's " +
+        "automatable half no longer exercises a multi-bullet list anywhere",
+    ).toBeGreaterThanOrEqual(3);
+
+    const rendered = Array.from(envelope.querySelectorAll("li")).map((li) =>
+      String(li.textContent),
+    );
+    expect(
+      rendered.length,
+      "the rendered remedy list is shorter than the copy declares — a bullet " +
+        "was lost between the table and the DOM",
+    ).toBe(expected.length);
+    for (const bullet of expected) {
+      expect(bullet.length).toBeGreaterThan(10);
+      expect(rendered).toContain(bullet);
+    }
   });
 });
 

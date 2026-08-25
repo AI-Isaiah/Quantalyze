@@ -128,11 +128,31 @@ vi.mock("@/lib/analytics-client", async () => {
     // construction here passes two args and keeps `null`, so the route's
     // `code: err.seamCode ?? "UNKNOWN"` forward can be driven both ways.
     readonly seamCode: string | null;
-    constructor(message: string, status: number, seamCode: string | null = null) {
+    // 161-06 / WIZERR-05 — the 4th and 5th, mirroring the real class
+    // (`analytics-client.ts`) parameter-for-parameter. `dependency` was added
+    // there by 140.3-11 and this double never picked it up; `retryAfterSeconds`
+    // is 161-06's. Both are additive and optional, so every pre-existing
+    // construction in this file keeps passing fewer args and keeps defaulting.
+    // ⚠️ ORDER IS THE POINT, not just presence: with `dependency` missing, a
+    // 4th positional argument would be the WAIT here and the DEPENDENCY NAME in
+    // production. `analytics-upstream-error.parity.invariant.test.ts` is what
+    // makes that a failure instead of a convention — it is why this block can
+    // no longer drift in silence.
+    readonly dependency: string | null;
+    readonly retryAfterSeconds: number | null;
+    constructor(
+      message: string,
+      status: number,
+      seamCode: string | null = null,
+      dependency: string | null = null,
+      retryAfterSeconds: number | null = null,
+    ) {
       super(message);
       this.name = "AnalyticsUpstreamError";
       this.status = status;
       this.seamCode = seamCode;
+      this.dependency = dependency;
+      this.retryAfterSeconds = retryAfterSeconds;
     }
   }
   class AnalyticsTimeoutError extends Error {
@@ -682,5 +702,113 @@ describe("POST /api/bridge", () => {
     const res = await POST(makeRequest(okBody()));
     expect(res.status).toBe(500);
     expect((await res.json()).code).toBe("UNKNOWN");
+  });
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // 161-08 / WIZERR-06 — the terminal arm forwards the CODE and still refuses
+  // the MESSAGE.
+  //
+  // Before this plan the four cases below could not be told apart: every 5xx —
+  // classified or not — answered `UNKNOWN`, so the MORE severe half of the seam
+  // vocabulary was the half the client could not discriminate.
+  //
+  // ⚠️ ORACLE INDEPENDENCE. The static sentence is HAND-TRANSCRIBED here, never
+  // imported from the route. A test that imports the constant it asserts about
+  // re-states the implementation's own formula and cannot fail when the copy
+  // changes.
+  // ───────────────────────────────────────────────────────────────────────────
+
+  /** Transcribed by hand from the route's terminal arm. Do NOT import it. */
+  const BRIDGE_TERMINAL_SENTENCE = "Bridge scoring failed. Please try again.";
+
+  /**
+   * A message shaped like the things H-1062 exists to keep off the wire: a
+   * traceback marker, a `parseResponse()` contract-drift string with a Python
+   * source location, and a service base URL. Deliberately NOT reused from the
+   * route — the point is that none of it crosses.
+   */
+  const LEAKY_5XX_MESSAGE =
+    "Traceback: parseResponse contract drift at simulator_scoring.py:188 — base http://analytics.invalid:8000";
+
+  it("WIZERR-06 (a) — a 5xx seam error carrying a code forwards THAT code, sentence unchanged", async () => {
+    STATE.findReplacementImpl = async () => {
+      const { AnalyticsUpstreamError } = await import("@/lib/analytics-client");
+      // A real 500 from the service's own service-key middleware, which refuses
+      // before `call_next` on every route including /api/portfolio-bridge.
+      throw new AnalyticsUpstreamError(
+        "Service key is not configured",
+        500,
+        "SERVICE_KEY_UNCONFIGURED",
+      );
+    };
+    const { POST } = await import("./route");
+    const res = await POST(makeRequest(okBody()));
+    expect(res.status).toBe(500);
+    const body = await res.json();
+    expect(body.code).toBe("SERVICE_KEY_UNCONFIGURED");
+    expect(body.error).toBe(BRIDGE_TERMINAL_SENTENCE);
+  });
+
+  it("WIZERR-06 (b) — a 5xx seam error with a NULL code still answers UNKNOWN, sentence unchanged", async () => {
+    STATE.findReplacementImpl = async () => {
+      const { AnalyticsUpstreamError } = await import("@/lib/analytics-client");
+      throw new AnalyticsUpstreamError("upstream traceback line 42", 502);
+    };
+    const { POST } = await import("./route");
+    const res = await POST(makeRequest(okBody()));
+    expect(res.status).toBe(500);
+    const body = await res.json();
+    // The fallback stays legitimate: the seam classified nothing, so neither
+    // do we. This is a RENDERING terminal, not a classification failure.
+    expect(body.code).toBe("UNKNOWN");
+    expect(body.error).toBe(BRIDGE_TERMINAL_SENTENCE);
+  });
+
+  it("WIZERR-06 (c) — a NON-SEAM throwable answers UNKNOWN, sentence unchanged", async () => {
+    STATE.findReplacementImpl = async () => {
+      // No `seamCode` own property at all — the duck-typed read must answer
+      // `undefined` rather than throw, and the arm must fall back.
+      throw new Error("ECONNREFUSED 127.0.0.1:8000");
+    };
+    const { POST } = await import("./route");
+    const res = await POST(makeRequest(okBody()));
+    expect(res.status).toBe(500);
+    const body = await res.json();
+    expect(body.code).toBe("UNKNOWN");
+    expect(body.error).toBe(BRIDGE_TERMINAL_SENTENCE);
+  });
+
+  it("WIZERR-06 (d) — NEGATIVE CONTROL: no substring of the thrown message reaches the body (H-1062)", async () => {
+    STATE.findReplacementImpl = async () => {
+      const { AnalyticsUpstreamError } = await import("@/lib/analytics-client");
+      throw new AnalyticsUpstreamError(
+        LEAKY_5XX_MESSAGE,
+        500,
+        "SERVICE_KEY_UNCONFIGURED",
+      );
+    };
+    const { POST } = await import("./route");
+    const res = await POST(makeRequest(okBody()));
+    const serialized = JSON.stringify(await res.json());
+
+    // ⚠️ VACUITY GUARD, FIRST. `"anything".includes("")` is `true`, so a blank
+    // or near-blank corpus would make every assertion below pass without
+    // testing anything. Pin the corpus before using it as one.
+    expect(LEAKY_5XX_MESSAGE.trim().length).toBeGreaterThan(40);
+    const tokens = LEAKY_5XX_MESSAGE.split(/\s+/).filter((t) => t.length >= 4);
+    expect(
+      tokens.length,
+      "the leak corpus produced too few usable tokens to be a real control",
+    ).toBeGreaterThan(5);
+
+    for (const token of tokens) {
+      expect(
+        serialized,
+        `the 5xx body leaked "${token}" out of err.message — H-1062 is re-opened`,
+      ).not.toContain(token);
+    }
+    expect(serialized).not.toContain(LEAKY_5XX_MESSAGE);
+    // ...and the arm still did its job while refusing the message.
+    expect(serialized).toContain("SERVICE_KEY_UNCONFIGURED");
   });
 });

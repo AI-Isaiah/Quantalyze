@@ -190,3 +190,279 @@ describe("[140.4-16 / CR-02] CsvValidationEnvelope — no duplicated sentence", 
     expect(screen.getByText(/Across 2 rule categories/)).toBeInTheDocument();
   });
 });
+
+// ── 161-03 / WIZERR-13 — THE DATA HALF: what the breakdown may and may not say ─
+//
+// The producer half landed in the same plan (`csv_validator.py` nan-guard +
+// `process_key.py` forwarding). These are the RENDER pins for it: the panel is
+// the last place before a human reads the rows, and it is where an untrusted
+// cell value would surface if the wire shape ever grew one.
+//
+// ⚠️ FIXTURES ARE HAND-TYPED WIRE ENVELOPES, never imported constants. An
+// imported shape makes the assertion and the implementation the same oracle and
+// the case passes on a producer that silently changed.
+
+/** Render an envelope typed only as it arrives — as JSON off a fetch. */
+function renderWire(envelope: unknown) {
+  render(
+    <CsvValidationEnvelope
+      envelope={
+        envelope as {
+          code: string;
+          human_message: string;
+          debug_context: {
+            pandera_errors?: { rule: string; row: number; message: string }[];
+          };
+          correlation_id: string | null;
+        }
+      }
+    />,
+  );
+}
+
+const panelText = () =>
+  screen.getByTestId("wizard-csv-error").textContent ?? "";
+
+describe("[161-03 / WIZERR-13] CsvValidationEnvelope — the per-row data half", () => {
+  it("zero rows ⇒ the breakdown section is ABSENT, not an empty shell", () => {
+    // An empty <details> would promise a breakdown and open onto nothing.
+    renderWire({
+      code: "CSV_VALIDATION_FAILED",
+      human_message: "Your file did not pass validation.",
+      debug_context: { pandera_errors: [] },
+      correlation_id: null,
+    });
+
+    expect(
+      screen.getByTestId("wizard-csv-error").querySelectorAll("details"),
+      "a breakdown region rendered with no rows in it",
+    ).toHaveLength(0);
+  });
+
+  it("each row renders its rule, its row index and its message", () => {
+    renderWire({
+      code: "CSV_VALIDATION_FAILED",
+      human_message: "ignored — rows win the heading",
+      debug_context: {
+        pandera_errors: [
+          {
+            rule: "daily_return_lower_bound",
+            row: 4,
+            message:
+              "Column 'daily_return' failed rule 'daily_return_lower_bound' at row 4.",
+          },
+          {
+            rule: "monotonic_dates",
+            row: 9,
+            message: "Column 'date' failed rule 'monotonic_dates' at row 9.",
+          },
+        ],
+      },
+      correlation_id: null,
+    });
+
+    const text = panelText();
+    // The rule — via its human label, which is what the <summary> carries.
+    expect(text).toContain("Daily return cannot be ≤ -100%");
+    expect(text).toContain("Dates must be strictly increasing");
+    // The row index, on the row itself.
+    expect(text).toContain("Row 4:");
+    expect(text).toContain("Row 9:");
+    // The message.
+    expect(text).toContain(
+      "Column 'daily_return' failed rule 'daily_return_lower_bound' at row 4.",
+    );
+    expect(text).toContain(
+      "Column 'date' failed rule 'monotonic_dates' at row 9.",
+    );
+  });
+
+  it("🔴 the COLUMN-LESS producer shape renders cleanly — no 'nan', no dangling clause", () => {
+    // What `csv_validator.py` emits for a DATAFRAME-level check: the column
+    // clause is omitted entirely rather than filled with the float NaN pandera
+    // reports. Pre-161-03 this arrived as "Column 'nan' failed rule …".
+    //
+    // ⚠️ 161-REVIEW / CR-02 RE-POINTED THE FIXTURE. It used to carry
+    // "Failed rule 'column_in_dataframe' at row 0." and assert that exact
+    // string — i.e. it pinned the fabricated ROW number 161-03 left behind
+    // after removing the fabricated COLUMN name. Both halves moved: the
+    // producer stopped interpolating the absent-row sentinel, and this panel
+    // stopped prefixing "Row 0:" onto it. The row-clause pin now lives in the
+    // dedicated case below.
+    renderWire({
+      code: "CSV_VALIDATION_FAILED",
+      human_message: "Your file did not pass validation.",
+      debug_context: {
+        pandera_errors: [
+          {
+            rule: "column_in_dataframe",
+            row: 0,
+            message: "Failed rule 'column_in_dataframe'.",
+          },
+        ],
+      },
+      correlation_id: null,
+    });
+
+    const text = panelText();
+    expect(text.length).toBeGreaterThan(20); // the haystack is real
+    expect(text).toContain("Failed rule 'column_in_dataframe'.");
+    expect(
+      text.toLowerCase(),
+      "the panel named a column called 'nan' — the float NaN pandera reports " +
+        "when there is no column at all",
+    ).not.toContain("'nan'");
+    expect(
+      text,
+      "the column clause was emptied instead of removed, leaving a dangling " +
+        "pair of quotes where a name used to be",
+    ).not.toContain("Column ''");
+    // The rule still gets its human label, which is where the actionable
+    // information now lives for this rule.
+    expect(text).toContain("Your CSV is missing a required column");
+  });
+
+  /**
+   * ⭐ 161-REVIEW / CR-02 — THE RENDERED `<li>` NAMES NO ROW IT DOES NOT HAVE.
+   *
+   * This is the LAST line before a human reads it, and it is a second,
+   * independent producer of the same defect: even with the server's sentence
+   * corrected, the panel's own `Row ${e.row}: ` prefix would have printed
+   * "Row 0:" — `0` is the absent-row sentinel and rows here are 1-based.
+   *
+   * The fixture deliberately carries the CORRECTED server sentence, so this
+   * case can only be satisfied by the RENDERER's guard. A fixture still
+   * carrying "at row 0" would let the producer fix alone turn it green and this
+   * pin would be measuring the wrong layer.
+   */
+  it("🔴 a row-less breakdown row renders NO 'Row N:' prefix — 0 is the absent-row sentinel", () => {
+    renderWire({
+      code: "CSV_VALIDATION_FAILED",
+      human_message: "Your file did not pass validation.",
+      debug_context: {
+        pandera_errors: [
+          {
+            rule: "column_in_dataframe",
+            row: 0,
+            message: "Failed rule 'column_in_dataframe'.",
+          },
+        ],
+      },
+      correlation_id: null,
+    });
+
+    const text = panelText();
+    expect(text.length).toBeGreaterThan(20); // the haystack is real
+    // The message itself still renders — "suppress the prefix" must not be
+    // satisfied by dropping the row.
+    expect(text).toContain("Failed rule 'column_in_dataframe'.");
+    expect(
+      text,
+      "the panel prefixed a row number onto a failure that has no row — the " +
+        "invented-number class this phase exists to close, one layer out from " +
+        "the invented column name 161-03 removed",
+    ).not.toContain("Row 0:");
+    expect(text).not.toContain("Row undefined:");
+    expect(text).not.toContain("at row 0");
+  });
+
+  it("POSITIVE COUNTERPART: a REAL row still gets its 'Row N:' prefix", () => {
+    // Without this, "suppress the prefix for row 0" is satisfied by suppressing
+    // it for every row — which would delete the panel's row index outright, the
+    // single most useful field on a per-row breakdown. The `each row renders
+    // its rule, its row index and its message` case above asserts the same
+    // property from its own fixture; this one sits beside the negative so the
+    // pair reads as the matched set it is.
+    renderWire({
+      code: "CSV_VALIDATION_FAILED",
+      human_message: "Your file did not pass validation.",
+      debug_context: {
+        pandera_errors: [
+          {
+            rule: "daily_return_lower_bound",
+            row: 1,
+            message:
+              "Column 'daily_return' failed rule 'daily_return_lower_bound' at row 1.",
+          },
+        ],
+      },
+      correlation_id: null,
+    });
+
+    const text = panelText();
+    // Row 1 is the FIRST real row and the value adjacent to the sentinel — an
+    // off-by-one guard that used `> 0` on a 0-based index would drop it.
+    expect(text).toContain("Row 1:");
+  });
+
+  it("🔴 NO-ECHO: an untrusted cell value smuggled onto a row never reaches the DOM", () => {
+    // T-161-07. `failure_case` is the raw failing cell — untrusted CSV
+    // content that can carry PII, and this envelope is persisted into
+    // strategy_verifications metadata. The producer projects it away; this
+    // pins the LAST line of defence, so a future wire change that reintroduced
+    // it would be caught where a human would have read it.
+    const CELL = "ZZ-PII-acct-4411-Jane-Doe";
+    renderWire({
+      code: "CSV_VALIDATION_FAILED",
+      human_message: "Your file did not pass validation.",
+      debug_context: {
+        pandera_errors: [
+          {
+            rule: "currency_usd_or_blank",
+            row: 3,
+            message:
+              "Column 'currency' failed rule 'currency_usd_or_blank' at row 3.",
+            // The key the wire shape does not have — present here on purpose.
+            failure_case: CELL,
+          },
+        ],
+      },
+      correlation_id: null,
+    });
+
+    const text = panelText();
+    // Guard both ends before the substring assertion: `"x".includes("")` is
+    // true, so a blanked needle would pass while checking nothing, and an
+    // empty haystack would pass for the wrong reason.
+    expect(CELL.length).toBeGreaterThan(10);
+    expect(text.length).toBeGreaterThan(20);
+    expect(
+      text,
+      "the raw failing cell was rendered — untrusted CSV content on screen " +
+        "and, through this envelope, in strategy_verifications metadata",
+    ).not.toContain(CELL);
+    // …and the row it belongs to DID render, so the pin is not satisfied by
+    // the panel dropping the row wholesale.
+    expect(text).toContain("Row 3:");
+    expect(text).toContain(
+      "Column 'currency' failed rule 'currency_usd_or_blank' at row 3.",
+    );
+  });
+
+  it("LONG-TEXT BACKSTOP: a long rule name and message do not cost the row index", () => {
+    // jsdom cannot measure wrapping, so what is pinned is the thing a truncation
+    // would take first: the row index sits BEFORE the message and is the only
+    // part of the row a user can act on.
+    const LONG_RULE = "an_extremely_long_and_unlabelled_rule_key_".repeat(3);
+    const LONG_MESSAGE =
+      "Column 'daily_return' failed rule 'an_extremely_long_and_unlabelled_rule_key' at row 12 — " +
+      "and the explanation continues at length about exactly which of the many ".repeat(
+        4,
+      );
+    renderWire({
+      code: "CSV_VALIDATION_FAILED",
+      human_message: "Your file did not pass validation.",
+      debug_context: {
+        pandera_errors: [{ rule: LONG_RULE, row: 12, message: LONG_MESSAGE }],
+      },
+      correlation_id: null,
+    });
+
+    const text = panelText();
+    expect(text).toContain("Row 12:");
+    // The unlabelled rule key falls through to itself in the <summary> — the
+    // panel does not silently drop a rule it has no label for.
+    expect(text).toContain(LONG_RULE);
+    expect(text).toContain(LONG_MESSAGE);
+  });
+});

@@ -76,17 +76,55 @@ export async function POST(req: NextRequest) {
 
   // ── Phase 140.3-G4 / SEAMUX-03 — a machine code on EVERY arm this PUBLIC
   // teaser route emits, so a client discriminates the fault on a stable token
-  // instead of sniffing prose. Mirrors 140.3-10's arm-by-arm pass on keys/sync
-  // and the sibling create-with-key, which codes all five of these request-shape
-  // rejections `KEY_INVALID_FORMAT` (incl. the byte-identical sfox sentence).
-  // This is an UNAUTHENTICATED route: every token below is a closed-set clean
-  // token — it never names an env var, hostname, or internal service.
+  // instead of sniffing prose. This is an UNAUTHENTICATED route: every token
+  // below is a closed-set clean token — it never names an env var, hostname, or
+  // internal service.
+  //
+  // ── 161-09 / WIZERR-08 — THE FIVE REQUEST-SHAPE ARMS STOP SHARING ONE CODE.
+  // They all answered `KEY_INVALID_FORMAT`, mirroring create-with-key before
+  // 142.2 split that code into four. Only ONE of the five is a format failure.
+  //
+  //   · unreadable body      → KEY_MISSING_REQUIRED_FIELD. The union comment
+  //     defines that code as covering exactly "a field the form requires
+  //     arrived empty, OR the body was not a readable object".
+  //   · missing fields       → KEY_MISSING_REQUIRED_FIELD.
+  //   · malformed email      → KEY_INVALID_FORMAT, RETAINED. A present value
+  //     whose SHAPE is wrong is a format failure, and none of the four split
+  //     codes is true of it: it is not missing, not a venue property, not a
+  //     length cap. ⚠️ `KEY_INVALID_FORMAT`'s union comment reserves "exactly
+  //     ONE emitter per route" for the two WIZARD connect routes and their
+  //     `api_secret.length < 8` ccxt check. That rule is about those routes;
+  //     this is a different route with different facts, and forcing a FALSE
+  //     code here to satisfy a rule written about other routes would be the
+  //     defect this phase exists to remove, wearing a compliance badge.
+  //   · unsupported exchange → KEY_UNSUPPORTED_VENUE.
+  //   · sfox server gate     → KEY_VENUE_NOT_ENABLED (see the F3 note at the arm).
+  //
+  // ⛔ CODES ONLY ON THIS ROUTE (threat T-161-27). Every SENTENCE below is
+  // byte-identical, and that is not caution — it is the disclosure boundary
+  // itself. MEASURED at HEAD, 2026-08-24: the only consumer,
+  // `src/components/landing/VerificationForm.tsx`, renders
+  // `human_message ?? error ?? "Verification failed"` and NEVER READS `code`.
+  // The two occurrences of the word "code" in that file are both in comments.
+  // So on this route the code channel is machine-only and the sentence is the
+  // sole public disclosure surface: re-coding an arm cannot widen what an
+  // anonymous caller learns, and moving a sentence would.
+  //
+  // ⚠️ KEY ORDER IS DELIBERATELY LEFT AS `{ error, code }` HERE, unlike the
+  // sibling `keys/validate-and-encrypt`, which 161-09 reordered to `code:`-first.
+  // Every coverage law in this repo derives its population with a `code:`-first
+  // predicate, so these nine arms are invisible to all of them — MEASURED at
+  // HEAD: the derivation over this file returns ZERO. That is recorded rather
+  // than fixed because no law watches this route and no consumer reads its
+  // codes, so a reorder here would be churn on a PUBLIC route whose diff the
+  // threat register (T-161-27) requires to stay minimal and auditable. The day
+  // a law or a consumer arrives, the reorder comes with it.
   let body: Record<string, unknown>;
   try {
     body = await req.json();
   } catch {
     return NextResponse.json(
-      { error: "Invalid JSON body", code: "KEY_INVALID_FORMAT" },
+      { error: "Invalid JSON body", code: "KEY_MISSING_REQUIRED_FIELD" },
       { status: 400 },
     );
   }
@@ -102,13 +140,18 @@ export async function POST(req: NextRequest) {
     return NextResponse.json(
       {
         error: "Missing required fields: email, exchange, api_key, api_secret",
-        code: "KEY_INVALID_FORMAT",
+        code: "KEY_MISSING_REQUIRED_FIELD",
       },
       { status: 400 },
     );
   }
 
   if (!isValidEmail(email)) {
+    // 161-09 / WIZERR-08 — `KEY_INVALID_FORMAT` is KEPT here, deliberately, and
+    // this is the split landing CORRECTLY rather than the split failing. A
+    // present value whose shape is wrong is the one fact on this route that IS
+    // a format failure. See the fact→code mapping in the block above for why
+    // the "one emitter per route" rule does not reach this route.
     return NextResponse.json(
       { error: "Invalid email address", code: "KEY_INVALID_FORMAT" },
       { status: 400 },
@@ -128,7 +171,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json(
       {
         error: `Unsupported exchange. Supported: ${UI_EXCHANGE_CODES.join(", ")}`,
-        code: "KEY_INVALID_FORMAT",
+        code: "KEY_UNSUPPORTED_VENUE",
       },
       { status: 400 },
     );
@@ -140,8 +183,44 @@ export async function POST(req: NextRequest) {
   // half-state), UI_EXCHANGE_CODES above would admit sfox; this ensures the
   // public teaser cannot forward a live sfox key-process before go-live either.
   if (exchange.toLowerCase() === "sfox" && !isSfoxEnabledServer()) {
+    // 161-09 / WIZERR-08 + F3 — `KEY_VENUE_NOT_ENABLED`, because it is TRUE of
+    // this fact: we SUPPORT sfox, it is not open here yet. The alternative,
+    // `KEY_UNSUPPORTED_VENUE`, carries the copy "We do not support that
+    // exchange" — false of a venue we do support, and chosen only to guard
+    // against a hypothetical future leak. Trading a present falsehood for a
+    // future one is the wrong trade in a phase about false sentences.
+    //
+    // THE DISCLOSURE IS BOUNDED BY ORDERING, not by the code. The
+    // UI_EXCHANGE_CODES gate above runs FIRST, so this arm is reachable ONLY
+    // when sfox IS in the offered set — the documented NEXT_PUBLIC_SFOX_ENABLED
+    // on / SFOX_ENABLED off half-state. It cannot name a venue the landing form
+    // was not already offering. That ordering is pinned by a test, not
+    // inherited: reversing the two gates reddens it.
+    //
+    // ⚠️⚠️ LATENT HAZARD, RECORDED SO A FUTURE CONSUMER MUST RE-DECIDE RATHER
+    // THAN INHERIT — and, since 161-REVIEW / WR-04, PINNED rather than merely
+    // recorded. `KEY_VENUE_NOT_ENABLED`'s copy entry reads "This exchange is not
+    // open on Quantalyze yet."
+    //
+    // ⛔ STATE THE HAZARD AT ITS REAL SIZE. An earlier version of this note said
+    // that sentence "WOULD leak a coming-soon signal about an unlaunched venue",
+    // which contradicts the ordering argument two paragraphs above and overstates
+    // what can happen. The UI_EXCHANGE_CODES gate runs FIRST, so this arm cannot
+    // fire for a venue the landing form was not already offering. The residual
+    // hazard is narrower and still real: the coming-soon WORDING would be
+    // rendered for a venue we are presenting as available, which is the copy
+    // WIZERR-08/F3 bans on this surface — not a disclosure of something hidden.
+    //
+    // THE PREMISE THIS DEFERRAL RESTS ON IS NOW ASSERTED, NOT ASSUMED. Measured:
+    // `VerificationForm` reads `data.human_message` then `data.error` and never
+    // `data.code`, and no file under `src/components/landing/` translates a code
+    // through `WIZARD_ERROR_COPY` / `recogniseSeamErrorCode` / `formatKeyError`.
+    // `route.test.ts`'s "[161-REVIEW / WR-04] premise pin" derives that
+    // population from disk and reddens the day it stops holding, so F3 gets
+    // re-decided AT THAT MOMENT rather than assumed settled because this line
+    // already existed.
     return NextResponse.json(
-      { error: "sFOX integration is not yet available.", code: "KEY_INVALID_FORMAT" },
+      { error: "sFOX integration is not yet available.", code: "KEY_VENUE_NOT_ENABLED" },
       { status: 400 },
     );
   }

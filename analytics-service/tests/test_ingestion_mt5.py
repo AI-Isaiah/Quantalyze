@@ -51,7 +51,7 @@ from services.ingestion.adapter import KeySubmissionRequest, MetricsSnapshot
 from services.ingestion.mt5 import Mt5Adapter
 from services.mt5_client import Mt5Client, Mt5ClientError
 from services.mt5_probe import (
-    MT5_GATEWAY_MISCONFIGURED_DETAIL,
+    MT5_GATEWAY_MISCONFIGURED_DETAILS,
     Mt5GatewayMisconfigured,
 )
 from services.mt5_validation import classify_mt5_login_error
@@ -322,9 +322,25 @@ def test_validate_terminal_trade_disabled_never_returns_readonly(monkeypatch) ->
     with pytest.raises(Mt5GatewayMisconfigured) as exc:
         asyncio.run(Mt5Adapter().validate(_req()))
 
-    # The CURATED constant, never interpolated upstream text (T-134-01).
+    # A CURATED constant, never interpolated upstream text (T-134-01) — and at
+    # 161-02 specifically the one the flags support. This fixture is the
+    # founder-measured live case (connected, trade permission off, the named
+    # external-API option NOT reported), so the honest sentence names the
+    # algorithmic-trading setting; the constant this line used to expect asserted
+    # the other option was in force, which was measured FALSE here. Hand-typed
+    # from 161-UI-SPEC § Copy Spec WIZERR-01, never imported from the module under
+    # test — an oracle that reads its expectation out of the thing it tests
+    # asserts copy(X) == copy(X) and cannot fail.
     msg = str(exc.value)
-    assert msg == MT5_GATEWAY_MISCONFIGURED_DETAIL
+    assert msg == (
+        "The MT5 gateway has 'Allow algorithmic trading' switched off, so "
+        "read-only capability cannot be proven. The gateway switches it off "
+        "again whenever it changes users, so turning it back on needs an "
+        "operator, not a retry — see docs/runbooks/mt5-go-live.md."
+    )
+    # ...and it is a member of the curated family, so the raise site cannot have
+    # invented a sentence outside the fence.
+    assert msg in MT5_GATEWAY_MISCONFIGURED_DETAILS
     # Names the operator remedy...
     assert "needs an operator" in msg
     assert "mt5-go-live.md" in msg

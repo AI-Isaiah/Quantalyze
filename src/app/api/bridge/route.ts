@@ -214,9 +214,41 @@ export const POST = withAuth(async (req, user) => {
     captureToSentry(err, {
       tags: { route: "api/bridge", op: "findReplacementCandidates" },
     });
+    // 161-08 / WIZERR-06 — THE CODE CROSSES; THE MESSAGE STILL DOES NOT.
+    //
+    // Read this together with the H-1062 note above, because the two say
+    // different things about the same arm and confusing them re-opens the leak:
+    //
+    //   · `error` is STATIC and stays static. `err.message` carries the Python
+    //     contract-drift string, FastAPI 5xx `detail` and this service's base
+    //     URL. H-1062 is UNCHANGED — the restriction was NOT relaxed.
+    //   · `code` is a machine token from the seam's own closed vocabulary,
+    //     already forwarded on the 4xx arm twelve lines up. Collapsing it here
+    //     meant the MORE severe half of the vocabulary was the half the client
+    //     could not discriminate, which is the `?? "UNKNOWN"` half of the
+    //     WIZFORM-02 class.
+    //
+    // ⛔ `typeof`, NOT `instanceof AnalyticsUpstreamError`: this arm is also
+    // reached by transport failures and untyped throws, and route suites that
+    // mock `@/lib/analytics-client` wholesale make the class `undefined`, where
+    // `x instanceof undefined` throws a TypeError from inside this very catch
+    // (the idiom `keyRouteFailureHeaders` records at length). A non-seam
+    // throwable simply has no `seamCode` and still answers UNKNOWN.
+    //
+    // The empty string is excluded deliberately: `"" ?? "UNKNOWN"` is `""`, so
+    // a bodyless code would cross as a blank token rather than as the honest
+    // terminal.
+    const rawSeamCode = (err as { seamCode?: unknown } | null | undefined)
+      ?.seamCode;
+    const seamCode =
+      typeof rawSeamCode === "string" && rawSeamCode !== "" ? rawSeamCode : null;
     return NextResponse.json(
-      // The terminal arm — by construction "we do not know what this is".
-      { error: "Bridge scoring failed. Please try again.", code: "UNKNOWN" },
+      // The terminal arm — "we do not know what this is" is now said ONLY when
+      // it is true, i.e. when the seam named no code.
+      {
+        error: "Bridge scoring failed. Please try again.",
+        code: seamCode ?? "UNKNOWN",
+      },
       { status: 500, headers: NO_STORE_HEADERS },
     );
   }

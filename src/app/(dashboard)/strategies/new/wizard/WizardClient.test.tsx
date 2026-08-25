@@ -70,8 +70,11 @@ const clearWizardStateMock = vi.fn();
 // debounced write of the typed strategy name.
 const saveWizardStateMock = vi.fn(async (..._args: unknown[]) => {});
 // WIZ-03: a spy (not a bare arrow) so a test can assert whether the wizard
-// regenerated its session id. Only the DESTRUCTIVE "Try another key" path calls
-// it after mount; the non-destructive "Review your keys" path must NOT.
+// regenerated its session id.
+// 161-04 / WIZERR-02: this used to read "Only the DESTRUCTIVE 'Try another key'
+// path calls it after mount". Since the remedy stopped deleting, NEITHER review
+// affordance mints a session id — the only post-mount callers are the CONFIRMED
+// delete and the local-only clear inside `handleDeleteDraft`.
 const newWizardSessionIdMock = vi.fn(() => "ssr-session-throwaway");
 vi.mock("@/lib/wizard/localStorage", async (importOriginal) => {
   const actual = (await importOriginal()) as Record<string, unknown>;
@@ -88,10 +91,13 @@ vi.mock("@/lib/wizard/localStorage", async (importOriginal) => {
 // WIZ-03: stub the two step children so this WizardClient-level test drives the
 // step machine + callback wiring directly, not the children's internals.
 // SyncPreviewStep exposes BOTH review affordances as separate buttons so each
-// WizardClient callback (non-destructive onReviewKeys vs destructive
-// onTryAnotherKey) can be exercised in isolation. MultiKeyConnectStep renders a
-// marker so "step is now connect_key" is observable. None of the pre-existing
-// tests assert either child's content, so these stubs are inert for them.
+// WizardClient callback (onReviewKeys, onTryAnotherKey — 161-04 / WIZERR-02:
+// both non-destructive now; this comment used to contrast them as
+// "non-destructive vs destructive") can be exercised in isolation. Keeping them
+// as two buttons still matters: they are two props, and a collapse must be
+// visible. MultiKeyConnectStep renders a marker so "step is now connect_key" is
+// observable. None of the pre-existing tests assert either child's content, so
+// these stubs are inert for them.
 // WIZ-04: a minimal snapshot the sync-complete trigger fires so the stepper
 // tests can drive syncSnapshot != null (⇒ metadata/review become navigable).
 const SYNC_SNAPSHOT = {
@@ -673,28 +679,42 @@ describe("[94-03] WizardClient — non-destructive composite review (WIZ-03)", (
     expect(screen.getByTestId("connect-session").textContent).toBe(sessionBefore);
   });
 
-  // Destructive pin (research Pitfall 3): the split must NOT blanket-remove the
-  // single-key "Try another key" delete. This fails if onTryAnotherKey were
-  // pointed at the non-destructive callback.
-  it("Try another key (single-key destructive path) still issues the draft DELETE", async () => {
-    const fetchSpy = vi
-      .spyOn(globalThis, "fetch")
-      .mockResolvedValue(new Response(null, { status: 200 }));
+  // ⚠️ RE-ARGUED 161-04 / WIZERR-02. This slot held "Try another key
+  // (single-key destructive path) still issues the draft DELETE" — a pin on
+  // research Pitfall 3, that the WIZ-03 split must not blanket-remove the
+  // single-key delete. WIZERR-02 removes that delete DELIBERATELY (a remedy
+  // offered on every refusal may not destroy the user's draft), so the old pin
+  // asserted the defect. It is not deleted quietly: the no-DELETE half moved to
+  // the `[161-04 / WIZERR-02]` describe at the foot of this file, WITH the
+  // negative control proving deletion still works where it is confirmed.
+  //
+  // What survives here is Pitfall 3's actual worry — that the two affordances
+  // are SEPARATE callbacks and must not be collapsed into one. Their bodies are
+  // now the same shape, so the observable that keeps them distinguishable is the
+  // telemetry: the key remedy is counted, the composite review is not. Collapse
+  // `onTryAnotherKey` onto `onReviewKeys` and this goes red.
+  it("the two review affordances stay distinct: only Try another key is counted as a key remedy", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(null, { status: 200 }),
+    );
 
     render(<WizardClient initialDraft={DRAFT} />);
 
+    fireEvent.click(await screen.findByTestId("sync-review-keys"));
+    expect(
+      trackMock.mock.calls.filter((c) => c[0] === "wizard_try_different_key"),
+      "Review your keys is not a key remedy and must not be counted as one.",
+    ).toHaveLength(0);
+
+    // Back to sync_preview to reach the other affordance from the same mount.
+    fireEvent.click(await screen.findByTestId("wizard-step-sync_preview"));
     fireEvent.click(await screen.findByTestId("sync-try-another"));
 
-    await waitFor(() => {
-      const deleteCalls = fetchSpy.mock.calls.filter(
-        (c) =>
-          String(c[0]).includes("/api/strategies/draft/draft-1") &&
-          (c[1] as RequestInit | undefined)?.method === "DELETE",
-      );
-      expect(deleteCalls).toHaveLength(1);
-    });
-    // And the destructive path re-arms the F6 fence by minting a fresh session.
-    expect(newWizardSessionIdMock.mock.calls.length).toBeGreaterThan(1);
+    await waitFor(() =>
+      expect(
+        trackMock.mock.calls.filter((c) => c[0] === "wizard_try_different_key"),
+      ).toHaveLength(1),
+    );
   });
 });
 
@@ -1209,19 +1229,198 @@ describe("[140.3-10 / TRAP-4] Start fresh is confirmed before it destroys anythi
     );
   });
 
-  it("ANTI-REGRESSION — the INTENTIONAL delete path is untouched and still deletes", async () => {
-    // `onTryAnotherKey` discards a draft holding a REJECTED key, and its
-    // in-file comment says so. Routing it through the dialog too would have
-    // been the over-correction; this pins that it was not.
+  // ⚠️ RE-ARGUED 161-04 / WIZERR-02. This slot held "ANTI-REGRESSION — the
+  // INTENTIONAL delete path is untouched and still deletes", which pinned that
+  // TRAP-4 had not over-corrected by routing `onTryAnotherKey` through the
+  // dialog too. Its premise was that a SECOND intentional delete existed,
+  // outside the confirmation. WIZERR-02 retires that premise the stronger way:
+  // not by confirming the remedy's delete, but by removing it. TRAP-4's law —
+  // "an ERROR STATE's own control must not destroy a draft in one click" — is
+  // therefore satisfied by construction on that control.
+  //
+  // The replacement pins what TRAP-4 actually cares about now: the trap surface
+  // is CLOSED (every reachable delete goes through the dialog) AND closing it
+  // did not cost the wizard its ability to delete. Both halves in one mount, in
+  // sequence, because the failure worth catching is an over-eager class fix that
+  // makes the first half true by breaking the second.
+  it("ANTI-REGRESSION — the trap surface is closed, and closing it did not break deletion", async () => {
+    resumeOverrides = { showResumeBanner: true };
     const fetchSpy = vi
       .spyOn(globalThis, "fetch")
       .mockResolvedValue(new Response(null, { status: 200 }));
 
     render(<WizardClient initialDraft={DRAFT} />);
-    fireEvent.click(await screen.findByTestId("sync-try-another"));
 
-    await waitFor(() => expect(draftDeletes(fetchSpy)).toHaveLength(1));
-    // No dialog was interposed on this path.
+    // (1) The remedy formerly known as destructive: no delete, and no dialog
+    // either — there is nothing to confirm.
+    fireEvent.click(await screen.findByTestId("sync-try-another"));
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(
+      draftDeletes(fetchSpy),
+      "An error state's own control must not destroy a draft in one click.",
+    ).toHaveLength(0);
     expect(confirmDialogIsOpen()).toBe(false);
+
+    // (2) The SAME mount can still delete, through the one confirmed path. If a
+    // class fix had merely broken deletion, (1) would pass and this would not.
+    fireEvent.click(screen.getByTestId("wizard-start-fresh"));
+    await waitFor(() => expect(confirmDialogIsOpen()).toBe(true));
+    const dialog = screen
+      .getByText(/Delete this draft\?/i)
+      .closest("dialog") as HTMLDialogElement;
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: "Delete draft" }),
+    );
+    await waitFor(() => expect(draftDeletes(fetchSpy)).toHaveLength(1));
+  });
+});
+
+/**
+ * 161-04 / WIZERR-02 — "Try another key" is a REMEDY, and a remedy may not
+ * destroy anything.
+ *
+ * These two cases are a matched pair and must be read as one. The positive case
+ * alone would be satisfied by a wizard that had simply lost the ability to
+ * delete drafts at all; the NEGATIVE CONTROL is what distinguishes "the remedy
+ * stopped deleting" from "an over-eager class fix broke deletion". Delete one
+ * and the other stops meaning what it says.
+ *
+ * These pin the WIRING — the real `WizardClient` callback reached through the
+ * real `SyncPreviewStep` prop and the real confirm dialog. A test of a
+ * hand-built callback would prove nothing about the call site.
+ */
+describe("[161-04 / WIZERR-02] Try another key destroys nothing; the deliberate delete still deletes", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  function draftDeletes(spy: ReturnType<typeof vi.spyOn>) {
+    return (spy.mock.calls as unknown[][]).filter(
+      (c) =>
+        String(c[0]).includes("/api/strategies/draft/draft-1") &&
+        (c[1] as RequestInit | undefined)?.method === "DELETE",
+    );
+  }
+
+  /**
+   * Tolerant variant of the TRAP-4 helper: this describe asserts the dialog is
+   * ABSENT/CLOSED on a path that never opens it, so a `getByText` that throws
+   * would be the wrong shape.
+   */
+  function confirmDialogIsOpen(): boolean {
+    const heading = screen.queryByText(/Delete this draft\?/i);
+    const dialog = heading?.closest("dialog") as HTMLDialogElement | null;
+    return Boolean(dialog?.hasAttribute("open"));
+  }
+
+  it("clicking Try another key issues NO draft DELETE, and the draft stays bound to the wizard", async () => {
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(new Response(null, { status: 200 }));
+
+    render(<WizardClient initialDraft={DRAFT} />);
+
+    // initialDraft present → the wizard mounts on sync_preview, where the
+    // gate-failure envelope offers the remedy.
+    const tryAnother = await screen.findByTestId("sync-try-another");
+    const sessionBefore = screen.getByTestId("sync-session").textContent;
+    // Guard the identity assertion below: `"x" === ""` is false but
+    // `expect("").toBe("")` passes, so a blank id would make the session-survival
+    // check compare nothing against nothing.
+    expect(sessionBefore, "the mounted session id must be a real string").toBeTruthy();
+    const sessionGensAtMount = newWizardSessionIdMock.mock.calls.length;
+
+    fireEvent.click(tryAnother);
+
+    // (1) A pure step transition back to connect_key.
+    expect(await screen.findByTestId("mock-connect-step")).toBeInTheDocument();
+    expect(screen.queryByTestId("mock-sync-preview")).toBeNull();
+
+    // (2) Nothing was destroyed. `wizardFetch` has no `await` before its
+    // `fetch` call, so a fire-and-forget `void handleDeleteDraft()` puts the
+    // DELETE on the spy inside the click handler's own tick — this assertion is
+    // not racing a pending promise. The microtask flush is belt-and-braces for
+    // a delete deferred by one tick.
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(
+      draftDeletes(fetchSpy),
+      "A remedy-labeled control must not delete the user's draft.",
+    ).toHaveLength(0);
+    expect(clearWizardStateMock).not.toHaveBeenCalled();
+
+    // (3) The draft is still BOUND, not merely un-deleted on the server. The
+    // chrome's delete control is gated on `canDelete={Boolean(strategyId)}`, so
+    // its presence is the observable that `strategyId` survived the transition.
+    expect(
+      screen.getByTestId("wizard-delete-draft"),
+      "strategyId must survive — the wizard still holds the draft it was on.",
+    ).toBeInTheDocument();
+
+    // (4) No session id was minted (the onReviewKeys precedent). Regenerating it
+    // is what made a FAILED background delete replay as a clean slate (LOW-2);
+    // with no delete attempted, client belief and server state agree.
+    expect(newWizardSessionIdMock.mock.calls.length).toBe(sessionGensAtMount);
+    expect(screen.getByTestId("connect-session").textContent).toBe(sessionBefore);
+
+    // (5) And no confirmation was interposed either — there is nothing to
+    // confirm. This is NOT the TRAP-4 shape (destructive-but-confirmed); it is
+    // non-destructive.
+    expect(confirmDialogIsOpen()).toBe(false);
+
+    // (6) The resume pointer FOLLOWS the user to connect_key, as it does on the
+    // onReviewKeys precedent. This is a deliberate addition, not incidental: the
+    // old callback did not persist because it was deleting the draft outright.
+    // Now that the draft survives, a pointer still naming `sync_preview` would
+    // be a small copy of the very divergence LOW-2 was about — the client on one
+    // step, the persisted belief on another.
+    await waitFor(() =>
+      expect(
+        saveWizardStateMock.mock.calls.some(
+          (c) =>
+            (c[0] as { step?: string; strategyId?: string } | undefined)
+              ?.step === "connect_key" &&
+            (c[0] as { strategyId?: string } | undefined)?.strategyId ===
+              "draft-1",
+        ),
+        "the surviving draft's resume pointer must follow the user to connect_key",
+      ).toBe(true),
+    );
+  });
+
+  it("NEGATIVE CONTROL — the confirm-dialog danger button still issues the DELETE", async () => {
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(new Response(null, { status: 200 }));
+
+    render(<WizardClient initialDraft={DRAFT} />);
+
+    // The chrome's own Delete-draft control — the deliberate path, entered the
+    // way a user enters it. (The TRAP-4 describe covers the `start_fresh`
+    // entrance to the same dialog; this covers the chrome entrance.)
+    fireEvent.click(await screen.findByTestId("wizard-delete-draft"));
+    await waitFor(() => expect(confirmDialogIsOpen()).toBe(true));
+
+    // Opening confirms nothing.
+    expect(draftDeletes(fetchSpy)).toHaveLength(0);
+
+    // Scoped to the DIALOG: the chrome trigger carries the same label, and a
+    // bare getByText would silently start clicking the wrong control.
+    const dialog = screen
+      .getByText(/Delete this draft\?/i)
+      .closest("dialog") as HTMLDialogElement;
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: "Delete draft" }),
+    );
+
+    await waitFor(() =>
+      expect(
+        draftDeletes(fetchSpy),
+        "WIZERR-02 removes destruction from the REMEDY, not from the wizard.",
+      ).toHaveLength(1),
+    );
   });
 });

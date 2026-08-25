@@ -5,7 +5,6 @@ import {
   CSV_RULE_LABELS,
   WIZARD_ERROR_COPY,
   formatCsvRuleCauseSingle,
-  formatColumnInDataframeMessage,
 } from "@/lib/wizardErrors";
 
 /**
@@ -195,11 +194,42 @@ export function CsvValidationEnvelope({
             {CSV_RULE_LABELS[rule] ?? rule} ({list.length} rows)
           </summary>
           <ul className="mt-1 list-disc space-y-0.5 pl-5 text-text-muted">
+            {/*
+              ⛔ 161-REVIEW / CR-02 — THE ROW PREFIX IS CONDITIONAL, AND THE
+              `column_in_dataframe` FORMATTER IS GONE.
+
+              Two defects met here and each was hiding the other.
+
+              1. `formatColumnInDataframeMessage` was routed only for
+                 `rule === "column_in_dataframe"`, and its regex
+                 (`/Column\s+'[^']*'\s+failed:\s+(\S+)/`) required a literal
+                 `failed:`. MEASURED against the producer at HEAD, every shape
+                 `csv_validator.py` emits reads `… failed rule '…'` — so the
+                 regex could not match, has never matched, and the actionable
+                 remedy it existed to supply ("Rename a column to `X`") has
+                 never rendered to a user. Worse, it is UNREPAIRABLE as written:
+                 for this rule the producer reports `column` as NaN, so the
+                 expected column name is not on the wire at all and there is no
+                 `X` for a fixed regex to extract. Restoring that remedy needs a
+                 first-class producer field (deferred as D-161-02), not a
+                 better pattern. A formatter that cannot fire is a false claim
+                 in code shape, so it was deleted rather than left standing.
+
+              2. Deleting it exposed the row prefix, which was ALSO fabricating:
+                 `row` is 1-based and `0` is the producer's absent-row sentinel,
+                 so a dataframe-level failure would have rendered
+                 "Row 0: Failed rule 'column_in_dataframe'." — the invented
+                 number this phase exists to kill, one layer out from where
+                 161-03 removed the invented column name.
+
+              The prefix now renders only for a REAL row. A non-numeric or
+              absent `row` on the wire is `false` here too (`undefined >= 1`),
+              so a malformed payload degrades to the bare sentence rather than
+              to "Row undefined:".
+            */}
             {list.map((e, i) => (
               <li key={i}>
-                {rule === "column_in_dataframe"
-                  ? formatColumnInDataframeMessage(e.message)
-                  : `Row ${e.row}: ${e.message}`}
+                {e.row >= 1 ? `Row ${e.row}: ${e.message}` : e.message}
               </li>
             ))}
           </ul>

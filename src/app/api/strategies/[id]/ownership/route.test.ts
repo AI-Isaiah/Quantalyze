@@ -69,7 +69,10 @@ const recorders = vi.hoisted(() => ({
   /** Keyed `${table}:${op}` — the handler's expected result for that chain. */
   results: {} as Record<
     string,
-    { data: Array<Record<string, unknown>> | null; error: PostgrestError | null }
+    {
+      data: Array<Record<string, unknown>> | null;
+      error: PostgrestError | null;
+    }
   >,
   rpcCalls: [] as Array<{ fn: string; args: Record<string, unknown> }>,
   rpcResult: {
@@ -143,8 +146,10 @@ vi.mock("@/lib/supabase/server", () => {
         getUser: async () => ({ data: { user: recorders.user }, error: null }),
       },
       from: (table: string) => ({
-        select: (columns: string) => makeBuilder(table, "select", null).select(columns),
-        update: (payload: Record<string, unknown>) => makeBuilder(table, "update", payload),
+        select: (columns: string) =>
+          makeBuilder(table, "select", null).select(columns),
+        update: (payload: Record<string, unknown>) =>
+          makeBuilder(table, "update", payload),
         // Present ONLY so a route that reached for it would be recorded and
         // fail the source pin loudly rather than throwing an opaque TypeError.
         delete: () => {
@@ -169,7 +174,10 @@ vi.mock("@/lib/ratelimit", () => ({
   checkLimit: async (_limiter: unknown, key: string) => {
     recorders.rateLimitCalls.push(key);
     if (recorders.rateLimitResponse.success) return { success: true };
-    return { success: false, retryAfter: recorders.rateLimitResponse.retryAfter };
+    return {
+      success: false,
+      retryAfter: recorders.rateLimitResponse.retryAfter,
+    };
   },
 }));
 
@@ -220,7 +228,9 @@ function makeReq(body: unknown): NextRequest {
   );
 }
 
-function makeCtx(id: string = STRATEGY_ID): { params: Promise<{ id: string }> } {
+function makeCtx(id: string = STRATEGY_ID): {
+  params: Promise<{ id: string }>;
+} {
   return { params: Promise.resolve({ id }) };
 }
 
@@ -298,7 +308,10 @@ describe("PATCH /api/strategies/[id]/ownership — the six-defence stack", () =>
   });
 
   it("returns 400 on a malformed strategy id without burning a token or touching the DB", async () => {
-    const res = await PATCH(makeReq({ mark: "own_capital" }), makeCtx("not-a-uuid"));
+    const res = await PATCH(
+      makeReq({ mark: "own_capital" }),
+      makeCtx("not-a-uuid"),
+    );
     expect(res.status).toBe(400);
     expect(recorders.rateLimitCalls).toHaveLength(0);
     expect(recorders.queries).toHaveLength(0);
@@ -331,12 +344,15 @@ describe("PATCH /api/strategies/[id]/ownership — mark validation (closed set)"
     ["a non-string", { mark: 42 }],
     ["null", { mark: null }],
     ["an object (JSON-injection shape)", { mark: { own_capital: true } }],
-  ])("rejects %s with 400 before any rate-limit token is consumed", async (_label, body) => {
-    const res = await PATCH(makeReq(body), makeCtx());
-    expect(res.status).toBe(400);
-    expect(recorders.rateLimitCalls).toHaveLength(0);
-    expect(recorders.queries).toHaveLength(0);
-  });
+  ])(
+    "rejects %s with 400 before any rate-limit token is consumed",
+    async (_label, body) => {
+      const res = await PATCH(makeReq(body), makeCtx());
+      expect(res.status).toBe(400);
+      expect(recorders.rateLimitCalls).toHaveLength(0);
+      expect(recorders.queries).toHaveLength(0);
+    },
+  );
 
   it("rejects a non-boolean confirm_remove_allocation with 400", async () => {
     // T-150-17: the flag is read as a strict boolean. A truthy string like
@@ -349,12 +365,15 @@ describe("PATCH /api/strategies/[id]/ownership — mark validation (closed set)"
     expect(recorders.rateLimitCalls).toHaveLength(0);
   });
 
-  it.each(["own_capital", "team_review"])("accepts the closed-set member %s", async (mark) => {
-    seedUpdateHit();
-    const res = await PATCH(makeReq({ mark }), makeCtx());
-    expect(res.status).toBe(200);
-    await expect(res.json()).resolves.toEqual({ ok: true, mark });
-  });
+  it.each(["own_capital", "team_review"])(
+    "accepts the closed-set member %s",
+    async (mark) => {
+      seedUpdateHit();
+      const res = await PATCH(makeReq({ mark }), makeCtx());
+      expect(res.status).toBe(200);
+      await expect(res.json()).resolves.toEqual({ ok: true, mark });
+    },
+  );
 });
 
 describe("PATCH /api/strategies/[id]/ownership — the plain mark write", () => {
@@ -385,7 +404,9 @@ describe("PATCH /api/strategies/[id]/ownership — the plain mark write", () => 
     // retro path for every published legacy row.
     seedUpdateHit();
     await PATCH(makeReq({ mark: "own_capital" }), makeCtx());
-    const statusFilters = updateQueries()[0].filters.filter((f) => f.column === "status");
+    const statusFilters = updateQueries()[0].filters.filter(
+      (f) => f.column === "status",
+    );
     expect(statusFilters).toEqual([]);
   });
 
@@ -419,7 +440,9 @@ describe("PATCH /api/strategies/[id]/ownership — the plain mark write", () => 
       entity_type: "strategy",
       entity_id: STRATEGY_ID,
     });
-    expect(recorders.auditEvents[0].metadata).toMatchObject({ mark: "own_capital" });
+    expect(recorders.auditEvents[0].metadata).toMatchObject({
+      mark: "own_capital",
+    });
   });
 
   it("takes the plain-UPDATE path (no position lookup) when marking own_capital", async () => {
@@ -429,7 +452,9 @@ describe("PATCH /api/strategies/[id]/ownership — the plain mark write", () => 
     seedUpdateHit();
     const res = await PATCH(makeReq({ mark: "own_capital" }), makeCtx());
     expect(res.status).toBe(200);
-    expect(recorders.queries.some((q) => q.table === "portfolio_strategies")).toBe(false);
+    expect(
+      recorders.queries.some((q) => q.table === "portfolio_strategies"),
+    ).toBe(false);
     expect(recorders.rpcCalls).toHaveLength(0);
   });
 });
@@ -441,7 +466,9 @@ describe("PATCH /api/strategies/[id]/ownership — flip safety (T-150-16)", () =
     const res = await PATCH(makeReq({ mark: "team_review" }), makeCtx());
 
     expect(res.status).toBe(409);
+    // 161-10 — the SENTENCE is byte-identical; `code` is purely additive.
     await expect(res.json()).resolves.toEqual({
+      code: "LIVE_ALLOCATION",
       error: "live_allocation",
       allocated_amount: 120_000,
     });
@@ -460,6 +487,7 @@ describe("PATCH /api/strategies/[id]/ownership — flip safety (T-150-16)", () =
     const res = await PATCH(makeReq({ mark: "team_review" }), makeCtx());
     expect(res.status).toBe(409);
     await expect(res.json()).resolves.toEqual({
+      code: "LIVE_ALLOCATION",
       error: "live_allocation",
       allocated_amount: 150_000,
     });
@@ -484,12 +512,16 @@ describe("PATCH /api/strategies/[id]/ownership — flip safety (T-150-16)", () =
     seedLivePosition(120_000);
     await PATCH(makeReq({ mark: "team_review" }), makeCtx());
 
-    const portfolioRead = recorders.queries.find((q) => q.table === "portfolios");
+    const portfolioRead = recorders.queries.find(
+      (q) => q.table === "portfolios",
+    );
     expect(portfolioRead?.filters).toEqual([
       { kind: "eq", column: "user_id", value: VALID_USER.id },
     ]);
 
-    const positionRead = recorders.queries.find((q) => q.table === "portfolio_strategies");
+    const positionRead = recorders.queries.find(
+      (q) => q.table === "portfolio_strategies",
+    );
     expect(positionRead?.filters).toEqual([
       { kind: "eq", column: "strategy_id", value: STRATEGY_ID },
       { kind: "in", column: "portfolio_id", value: [PORTFOLIO_ID] },
@@ -508,7 +540,10 @@ describe("PATCH /api/strategies/[id]/ownership — flip safety (T-150-16)", () =
 
   it("flips through the plain UPDATE when there is no live position", async () => {
     seedOwnedPortfolio();
-    recorders.results["portfolio_strategies:select"] = { data: [], error: null };
+    recorders.results["portfolio_strategies:select"] = {
+      data: [],
+      error: null,
+    };
     seedUpdateHit();
     const res = await PATCH(makeReq({ mark: "team_review" }), makeCtx());
     expect(res.status).toBe(200);
@@ -555,7 +590,10 @@ describe("PATCH /api/strategies/[id]/ownership — the confirmed flip is ONE tra
     );
 
     expect(res.status).toBe(200);
-    await expect(res.json()).resolves.toEqual({ ok: true, mark: "team_review" });
+    await expect(res.json()).resolves.toEqual({
+      ok: true,
+      mark: "team_review",
+    });
     expect(recorders.rpcCalls).toEqual([
       {
         fn: "flip_capital_ownership_to_team_review",
@@ -655,7 +693,10 @@ describe("PATCH /api/strategies/[id]/ownership — source pins", () => {
   );
   /** Comment-stripped body: the negative pins below must not be satisfied (or
    *  defeated) by prose. Block comments first, then whole-line `//`. */
-  const CODE = SOURCE.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+  const CODE = SOURCE.replace(/\/\*[\s\S]*?\*\//g, "").replace(
+    /^\s*\/\/.*$/gm,
+    "",
+  );
 
   it("anti-vacuity: the stripper really strips and the source really loaded", () => {
     expect(SOURCE.length).toBeGreaterThan(500);
@@ -687,5 +728,225 @@ describe("PATCH /api/strategies/[id]/ownership — source pins", () => {
     expect(responses).toBeGreaterThan(0);
     // One import + at least one stamp per locally-constructed response.
     expect(stamps).toBeGreaterThanOrEqual(responses + 1);
+  });
+});
+
+/**
+ * [161-10 / WIZERR-07] EVERY ERROR ARM CARRIES A CODE, AND NO SENTENCE MOVED.
+ *
+ * Two independent claims over the ownership route, and the plan requires BOTH — the
+ * second is what makes the first safe to ship:
+ *
+ *   1. every arm puts a stable machine token on the wire, so the dialog behind
+ *      this route discriminates on a token instead of matching prose;
+ *   2. every `error` SENTENCE is byte-identical to what shipped before, so
+ *      `code` is purely additive and no other consumer changes behaviour.
+ *
+ * ⛔ THE SENTENCES BELOW ARE HAND-TYPED, transcribed from this route as it
+ * stood at the commit BEFORE the codes landed. Deriving them from the current
+ * source would make this suite agree with any rewording — which is precisely
+ * the drift claim (2) exists to refuse.
+ *
+ * ⚠️ SCANNED COMMENT-STRIPPED. This route's docblock discusses its own arms, so
+ * a raw-text scan would count prose as emitters (the receipt for this is the
+ * 14-vs-12 delta `wizardErrors.invariant.test.ts` records).
+ *
+ * ⚠️ The CSRF arm is deliberately absent: it is emitted by the shared
+ * `assertSameOrigin` helper in `src/lib/csrf.ts`, which serves many routes, and
+ * coding it is a cross-cutting change this plan did not scope. It is an
+ * explicit terminal-UNKNOWN disposition in `dialog-envelope.invariant.test.ts`.
+ */
+describe("[161-10 / WIZERR-07] the ownership route classifies every arm it refuses", () => {
+  const RAW = readFileSync(
+    join(process.cwd(), "src/app/api/strategies/[id]/ownership/route.ts"),
+    "utf8",
+  );
+  const SRC = RAW.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+
+  it("anti-vacuity: the source loaded and the stripper really stripped", () => {
+    expect(RAW.length).toBeGreaterThan(2000);
+    expect(RAW).toContain("/**");
+    expect(SRC).not.toContain("/**");
+    expect(SRC).toContain("PATCH");
+  });
+
+  /**
+   * Hand-typed from the pre-code source. A sentence that is reworded, or an arm
+   * that is deleted, reddens here by name.
+   */
+  const SENTENCES: readonly string[] = [
+    "unauthorized",
+    "id must be a UUID",
+    "invalid json",
+    "confirm_remove_allocation must be a boolean",
+    "Too many requests",
+    "internal error",
+    "live_allocation",
+    "strategy not found",
+  ];
+
+  it("every pre-existing sentence is still on the wire, byte-identical", () => {
+    // NON-VACUITY: an empty list would make the loop pass trivially, and
+    // `"anything".includes("")` would make a blank needle pass too.
+    expect(SENTENCES.length).toBe(8);
+    for (const sentence of SENTENCES) {
+      expect(sentence.length).toBeGreaterThan(3);
+      expect(SRC, `the sentence "${sentence}" is gone or reworded`).toContain(
+        `error: "${sentence}"`,
+      );
+    }
+  });
+
+  it("every code literal is written FIRST in its object literal", () => {
+    // The coverage laws derive their populations with a `code:`-first
+    // predicate, so an arm written `{ error, code }` is invisible to them (the
+    // D-34 reorder). Hand-typed count, re-measured at HEAD.
+    const codeFirst = (
+      SRC.match(/code: "[A-Z][A-Z0-9_]*",\s*error: ["`]/g) ?? []
+    ).length;
+    expect(codeFirst).toBe(14);
+    // …and NOT ONE arm is written the other way round.
+    expect(SRC).not.toMatch(/\{\s*error: [^}]*,\s*code:/);
+  });
+
+  it("NO error arm is left code-less — the population has no silent hole", () => {
+    // Two DIFFERENT predicates over the same source. Deleting every arm takes
+    // both sides to zero together, which is why the hand-typed literal in the
+    // case above is what catches a shrink; this catches an arm ADDED without a
+    // code.
+    // The predicate is STRING-VALUED `error:` keys only, so the route's own
+    // `const { data, error: xxErr } = await supabase…` destructurings are not
+    // counted as response arms.
+    const errorKeys = (SRC.match(/error: ["`]/g) ?? []).length;
+    const codeFirst = (
+      SRC.match(/code: "[A-Z][A-Z0-9_]*",\s*error: ["`]/g) ?? []
+    ).length;
+    expect(errorKeys).toBeGreaterThan(0);
+    expect(
+      errorKeys,
+      "an error key exists that no code opens - a client cannot " +
+        "discriminate that arm and it will render the generic terminal",
+    ).toBe(codeFirst);
+  });
+
+  it("the FIVE internal-error arms split 2 / 3 on ONE question, and that is the decision", () => {
+    // The decision is recorded in the route's docblock. They still do NOT split
+    // by WHICH internal query failed — that is a distinction the user cannot
+    // act on, and each site already logs its own distinct server-side line.
+    //
+    // ⛔ 161-REVIEW / CR-01 RE-ARGUED THIS PIN rather than bumping it. It used
+    // to read `expect(internal).toBe(5)` over `DASHBOARD_WRITE_FAILED` alone,
+    // and it was doing its job: it pinned a decision that had become wrong.
+    // 161-10 gave all five arms a code whose sentence says "Nothing was saved",
+    // but three of them return AFTER a data-modifying statement was sent —
+    // the flip RPC erroring, the flip RPC returning no row, and the plain
+    // UPDATE erroring. The flip is the transaction that DELETES live positions.
+    //
+    // The split is on ONE mechanical question — was anything sent? — so the
+    // counts below are two independent hand-typed literals, and BOTH have to
+    // move for a future arm to be added. That friction is the point: it forces
+    // whoever adds the sixth arm to answer the question rather than inherit an
+    // answer.
+    const verifiedZeroWrite = (
+      SRC.match(
+        /\{ code: "DASHBOARD_WRITE_FAILED", error: "internal error" \},/g,
+      ) ?? []
+    ).length;
+    const indeterminate = (
+      SRC.match(
+        /\{ code: "DASHBOARD_WRITE_INDETERMINATE", error: "internal error" \},/g,
+      ) ?? []
+    ).length;
+
+    // The portfolio lookup and the position lookup. Both fail on a SELECT.
+    expect(
+      verifiedZeroWrite,
+      "an arm was added to or removed from the verified-zero-write set. It " +
+        "belongs there ONLY if no data-modifying statement has been sent when " +
+        "it returns — that is what makes its 'Nothing was saved' sentence a " +
+        "fact about the control flow rather than a claim.",
+    ).toBe(2);
+    // The flip RPC erroring, the flip RPC returning no row, the plain UPDATE.
+    expect(
+      indeterminate,
+      "an arm was added to or removed from the indeterminate set. Every arm " +
+        "downstream of a sent write belongs here: an errored write is not a " +
+        "verified rollback, and a write that returns no row is not a write " +
+        "that did nothing.",
+    ).toBe(3);
+    // …and the total is still five, so an arm cannot go missing from both.
+    expect(verifiedZeroWrite + indeterminate).toBe(5);
+  });
+
+  /**
+   * ⭐ 161-REVIEW / CR-01 — THE SPLIT IS PINNED AT THE ARM, not only by count.
+   *
+   * A source count says three arms carry the indeterminate code; it does not
+   * say they are the RIGHT three. These two cases drive the two arms the review
+   * named by hand — the flip RPC erroring and the flip RPC returning no row —
+   * and assert the code on the wire, with a negative control on a READ-failure
+   * arm so "everything is indeterminate now" is not a passing strategy.
+   */
+  it("SOURCE ORDER: the indeterminate arms are the ones downstream of the flip RPC and the UPDATE", () => {
+    // Positional, because this file's fixtures cannot easily reach the flip
+    // arms (they need a live position AND a confirmed removal). The claim is
+    // structural and the source is the right place to make it: each
+    // indeterminate arm must appear AFTER the statement that makes it
+    // indeterminate.
+    const rpcCall = SRC.indexOf("flip_capital_ownership_to_team_review", 200);
+    const plainUpdate = SRC.indexOf('.update({ capital_ownership: mark })');
+    expect(rpcCall, "the flip RPC call was not found in the source").toBeGreaterThan(0);
+    expect(plainUpdate, "the plain UPDATE was not found").toBeGreaterThan(rpcCall);
+
+    const indeterminatePositions: number[] = [];
+    const needle = '{ code: "DASHBOARD_WRITE_INDETERMINATE", error: "internal error" },';
+    let at = SRC.indexOf(needle);
+    while (at !== -1) {
+      indeterminatePositions.push(at);
+      at = SRC.indexOf(needle, at + 1);
+    }
+    expect(indeterminatePositions).toHaveLength(3);
+    for (const pos of indeterminatePositions) {
+      expect(
+        pos,
+        "an indeterminate arm sits ABOVE the flip RPC — i.e. before anything " +
+          "was sent. That arm is verified-zero-write and should carry " +
+          "DASHBOARD_WRITE_FAILED.",
+      ).toBeGreaterThan(rpcCall);
+    }
+
+    // NEGATIVE CONTROL: both verified-zero arms sit BELOW neither — they are
+    // above the RPC, in the lookup block.
+    const verifiedNeedle = '{ code: "DASHBOARD_WRITE_FAILED", error: "internal error" },';
+    let vAt = SRC.indexOf(verifiedNeedle);
+    const verifiedPositions: number[] = [];
+    while (vAt !== -1) {
+      verifiedPositions.push(vAt);
+      vAt = SRC.indexOf(verifiedNeedle, vAt + 1);
+    }
+    expect(verifiedPositions).toHaveLength(2);
+    for (const pos of verifiedPositions) {
+      expect(
+        pos,
+        "a verified-zero-write arm sits BELOW the flip RPC, so a statement " +
+          "that changes data had already been sent when it returned and its " +
+          "'Nothing was saved' sentence is an assertion, not a fact.",
+      ).toBeLessThan(rpcCall);
+    }
+  });
+
+  it("the live_allocation 409 keeps its amount field AND its sentence", () => {
+    // The dialog renders that number as the confirm copy. A code that arrived
+    // without the amount would swap the body in and name $0.
+    expect(SRC).toContain('code: "LIVE_ALLOCATION"');
+    expect(SRC).toContain('error: "live_allocation"');
+    expect(SRC).toContain("allocated_amount: allocatedAmount");
+  });
+  it("the concatenated mark sentence is unchanged and still carries its code", () => {
+    // Built as `"mark must be one of: " + ALLOWED_MARKS.join(", ")`, so the
+    // literal-suffix scan above cannot see it. Pinned on its own terms.
+    expect(SRC).toContain(
+      'error: "mark must be one of: " + ALLOWED_MARKS.join(", ")',
+    );
   });
 });

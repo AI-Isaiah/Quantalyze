@@ -492,3 +492,173 @@ def test_validate_envelope_daily_returns_series_stringifies_dates():
         assert re.match(r"^\d{4}-\d{2}-\d{2}$", row["date"]), (
             f"date {row['date']!r} not in YYYY-MM-DD form"
         )
+
+
+# ---------------------------------------------------------------------------
+# 161-03 / WIZERR-13 — the per-row breakdown's DATA half must not leak the
+# literal not-a-number string, and must not echo untrusted cell contents.
+#
+# ⚠️ MEASURED FIRST, NOT REASONED. Driving a daily_returns upload that is
+# missing its `daily_return` column through `validate_csv` at pre-fix HEAD
+# produced, verbatim:
+#
+#     Column 'nan' failed rule 'column_in_dataframe' at row 0.
+#
+# `column_in_dataframe` is a DATAFRAME-level pandera check: there is no column
+# to name, so `failure_cases.column` comes back as a float NaN and the
+# f-string rendered its `str()`. The wizard prints that sentence unchanged —
+# `formatColumnInDataframeMessage`'s narrow regex expects "Column 'x' failed:
+# y" (a shape this producer has never emitted) and falls through to the raw
+# message. So the user is told a column called `nan` failed.
+#
+# The fix omits the column clause when there is no column, rather than
+# inventing a name for it.
+# ---------------------------------------------------------------------------
+
+def _daily_returns_df_missing_the_return_column() -> pd.DataFrame:
+    """A well-formed daily_returns file whose value column is misnamed.
+
+    Drives the DATAFRAME-level `column_in_dataframe` check — the real loop,
+    not a hand-built failure_cases frame, so what is tested is the wiring.
+    """
+    return pd.DataFrame({
+        "date": pd.date_range("2024-01-02", periods=3, freq="D").strftime("%Y-%m-%d"),
+        # The schema wants `daily_return`; this file calls it something else.
+        "return_pct": [0.001, 0.002, 0.003],
+    })
+
+
+def test_dataframe_level_failure_never_renders_the_literal_nan():
+    """WIZERR-13 — the not-a-number literal must not reach user copy."""
+    result = validate_csv(
+        _csv_bytes(_daily_returns_df_missing_the_return_column()), "daily_returns"
+    )
+    assert result["ok"] is False
+    errors = result["errors"]
+    assert errors, "the fixture produced no errors — it is not exercising the loop"
+    for err in errors:
+        message = err["message"]
+        # GUARD BEFORE THE SUBSTRING ASSERTION. `"" in anything` is True in
+        # Python, so a blanked message would satisfy `not in` vacuously and a
+        # blanked needle would satisfy `in` vacuously. Pin both ends.
+        assert isinstance(message, str) and len(message) > 20, (
+            f"message is too short to be a sentence: {message!r}"
+        )
+        assert "nan" not in message.lower(), (
+            "the per-row breakdown named a column called 'nan' — the float "
+            f"NaN pandera reports for a dataframe-level check: {message!r}"
+        )
+
+
+def test_dataframe_level_failure_omits_the_column_clause_entirely():
+    """WIZERR-13 — no column, no column clause (and no dangling separator).
+
+    ⚠️ 161-REVIEW / CR-02 RE-POINTED THIS ORACLE, and the reason is recorded
+    rather than the number quietly bumped. It used to expect
+    ``Failed rule 'column_in_dataframe' at row 0.`` — i.e. it PINNED the
+    fabricated row number 161-03 left behind while removing the fabricated
+    column name. A dataframe-level check has no row for exactly the reason it
+    has no column (pandera reports ``index`` as NaN alongside ``column``), and
+    rows in this sentence are 1-based, so there is no row 0 to name.
+    """
+    result = validate_csv(
+        _csv_bytes(_daily_returns_df_missing_the_return_column()), "daily_returns"
+    )
+    dataframe_level = [
+        e for e in result["errors"] if e["rule"] == "column_in_dataframe"
+    ]
+    assert dataframe_level, (
+        "the fixture did not drive a dataframe-level check — rules seen: "
+        f"{sorted({e['rule'] for e in result['errors']})}"
+    )
+    # Hand-typed oracle: the SENTENCE, not the producer's own f-string.
+    assert (
+        dataframe_level[0]["message"] == "Failed rule 'column_in_dataframe'."
+    ), dataframe_level[0]["message"]
+
+
+def test_dataframe_level_failure_names_no_row_number_at_all():
+    """161-REVIEW / CR-02 — the SENTENCE carries no row, in any wording.
+
+    The equality above is the exact oracle; this is the CLASS pin, so a future
+    rewording cannot re-introduce a fabricated index under a different phrase
+    ("on row 0", "line 0", "at index 0"). Every needle is checked against a
+    haystack that is asserted to be a real sentence first — ``"" in anything``
+    is ``True`` in Python, so an emptied message would satisfy every ``not in``
+    below while asserting nothing.
+    """
+    result = validate_csv(
+        _csv_bytes(_daily_returns_df_missing_the_return_column()), "daily_returns"
+    )
+    dataframe_level = [
+        e for e in result["errors"] if e["rule"] == "column_in_dataframe"
+    ]
+    assert dataframe_level, "the fixture did not drive a dataframe-level check"
+    err = dataframe_level[0]
+    message = err["message"]
+    assert isinstance(message, str) and len(message) > 20, (
+        f"message is too short to be a sentence: {message!r}"
+    )
+    # No digit anywhere in the sentence — the strongest available form of "this
+    # copy names no number", and true of this arm because neither the rule name
+    # nor the template carries one.
+    assert not any(ch.isdigit() for ch in message), (
+        "the per-row breakdown printed a number for a failure that has no row: "
+        f"{message!r}"
+    )
+    for phrase in ("at row", "row 0", "line 0", "index 0"):
+        assert len(phrase) > 4
+        assert phrase not in message.lower(), (
+            f"the sentence names a row it does not have ({phrase!r}): {message!r}"
+        )
+    # ⭐ AND THE WIRE SENTINEL SURVIVES. `0` stays on the `row` field — the
+    # typed shape is an int and `_forwarded_pandera_rows` projects it — so the
+    # fix is "do not INTERPOLATE the sentinel", never "drop the field". The
+    # renderer is what reads it and suppresses its own `Row N:` prefix.
+    assert err["row"] == 0, err
+
+
+def test_a_real_column_still_gets_its_column_clause():
+    """POSITIVE COUNTERPART — without this, "omit the clause" is satisfied by
+    dropping it for every error, which would delete the panel's most useful
+    field on every column-level rule."""
+    df = _daily_returns_df(n=5)
+    df.loc[1, "daily_return"] = -150.0  # daily_return_lower_bound, row 2
+    result = validate_csv(_csv_bytes(df), "daily_returns")
+    bounded = [
+        e for e in result["errors"] if e["rule"] == "daily_return_lower_bound"
+    ]
+    assert bounded, "fixture did not fire daily_return_lower_bound"
+    assert (
+        bounded[0]["message"]
+        == "Column 'daily_return' failed rule 'daily_return_lower_bound' at row 2."
+    ), bounded[0]["message"]
+
+
+def test_no_produced_error_carries_the_raw_failing_cell():
+    """T-161-07 — the wire shape is exactly {rule, row, message}.
+
+    `failure_case` is untrusted CSV content (it can carry PII) and this
+    envelope is persisted into strategy_verifications metadata. A row that
+    grew a fourth key would carry it there silently.
+    """
+    df = _trades_df(n=5)
+    df.loc[3, "currency"] = "EUR"
+    result = validate_csv(_csv_bytes(df), "trades")
+    assert result["errors"], "fixture produced no errors"
+    for err in result["errors"]:
+        assert set(err.keys()) == {"rule", "row", "message"}, sorted(err.keys())
+
+
+def test_the_failing_cell_value_is_not_echoed_into_the_message():
+    """T-161-07, the value half of the same discipline — a distinctive cell
+    value must not appear anywhere in the produced copy."""
+    # A currency token that could not be produced by the templated sentence.
+    marker = "ZZPIILEAK"
+    df = _trades_df(n=5)
+    df.loc[3, "currency"] = marker
+    result = validate_csv(_csv_bytes(df), "trades")
+    assert result["errors"], "fixture produced no errors"
+    for err in result["errors"]:
+        assert len(marker) > 4  # the needle is real, not blank
+        assert marker not in err["message"], err["message"]

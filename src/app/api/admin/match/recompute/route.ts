@@ -189,6 +189,13 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     // at the top of this file exists to keep off the wire (T-140-11) — so a
     // 5xx keeps falling through to the static arm below.
     //
+    // ⚠️ 161-08 / WIZERR-06 — "only 4xx forwards" is about the MESSAGE, and
+    // only the message. Since WIZERR-06 the terminal arm below forwards the
+    // upstream's `seamCode` too, so `code` now crosses on BOTH sides of 500
+    // while `error` still crosses on the 4xx side alone. Reading this paragraph
+    // as "a 5xx discloses nothing" would be wrong in one direction and reading
+    // it as "the message restriction was relaxed" wrong in the other.
+    //
     // The status only. No header rides along: `AnalyticsUpstreamError` carries
     // none, so a forwarded upstream 429 reaches the client WITHOUT its
     // `Retry-After`. Inventing one here would name a wait no upstream stated.
@@ -244,8 +251,26 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       "[api/admin/match/recompute] error:",
       scrubSeamError(err),
     );
+    // 161-08 / WIZERR-06 — THE CODE CROSSES; THE MESSAGE STILL DOES NOT.
+    //
+    // `GENERIC_COPY` is untouched and stays untouched: on a 5xx the upstream
+    // `message` carries FastAPI detail, the `parseResponse()` contract-drift
+    // string and this service's base URL (the STATIC-bodies rule restated at
+    // the sibling `admin/match/eval` route). ONLY `code` moves — the same
+    // machine token the 4xx arm above already forwards, from the seam's own
+    // closed vocabulary.
+    //
+    // ⛔ `typeof`, NOT `instanceof AnalyticsUpstreamError`: this arm is also
+    // reached by transport failures and untyped throws, and a route suite that
+    // mocks `@/lib/analytics-client` wholesale makes the class `undefined`,
+    // where `x instanceof undefined` throws from inside this very catch. The
+    // empty string is excluded because `"" ?? "UNKNOWN"` is `""`.
+    const rawSeamCode = (err as { seamCode?: unknown } | null | undefined)
+      ?.seamCode;
+    const seamCode =
+      typeof rawSeamCode === "string" && rawSeamCode !== "" ? rawSeamCode : null;
     return NextResponse.json(
-      { error: GENERIC_COPY, code: "UNKNOWN" },
+      { error: GENERIC_COPY, code: seamCode ?? "UNKNOWN" },
       { status: 500, headers: NO_STORE_HEADERS },
     );
   }

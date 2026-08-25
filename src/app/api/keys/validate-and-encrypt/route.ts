@@ -111,13 +111,44 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
   // never a live probe. ccxt exchanges are entirely unaffected (isSfox is false).
   // ── Phase 140.3-G4 / SEAMUX-03 — a machine code on EVERY error arm this
   // route emits, so a client discriminates the fault on a stable token instead
-  // of sniffing prose. The four request-shape rejections all answer
-  // KEY_INVALID_FORMAT (create-with-key's exact token for the same facts, two
-  // of them byte-identical sentences). Response bodies only — this route's
-  // request body carries RAW key material (SEAMCORE-06).
+  // of sniffing prose. Response bodies only — this route's request body carries
+  // RAW key material (SEAMCORE-06).
+  //
+  // ── 161-09 / WIZERR-08 — THE FOUR REQUEST-SHAPE ARMS NO LONGER SHARE ONE
+  // CODE, and the sentence this comment used to carry is the reason. It said
+  // all four "answer KEY_INVALID_FORMAT (create-with-key's exact token for the
+  // same facts)". That was an accurate description of a defect, not a design:
+  // 142.2 had already split `KEY_INVALID_FORMAT` into four codes at the two
+  // wizard connect routes precisely because one code for four facts told a
+  // founder with a COMPLETE form that their key format was wrong. This route
+  // was the third carrier of the collapsed vocabulary and kept saying it.
+  //
+  // WHICH FACT MAPS TO WHICH CODE, so the next reader inherits the split rather
+  // than the collapsed claim:
+  //
+  //   · the two venue gates below (sfox, mt5) → KEY_VENUE_NOT_ENABLED. We
+  //     SUPPORT the venue; it is not switched on here yet. Not
+  //     KEY_UNSUPPORTED_VENUE, whose copy ("We do not support that exchange")
+  //     would be false of a venue we do support and would tell a founder to
+  //     abandon a venue that is coming.
+  //   · the two presence guards below (the mt5 three-credential check, the
+  //     generic check) → KEY_MISSING_REQUIRED_FIELD. A required slot arrived
+  //     blank. Nothing about the value's FORMAT was examined.
+  //
+  // ⛔ `KEY_INVALID_FORMAT` HAS NO EMITTER LEFT ON THIS ROUTE, and that is the
+  // correct end state rather than an omission: this route runs no format check
+  // of its own. The `api_secret.length < 8` ccxt check — the one guard of the
+  // twelve that was ever a format failure, and the reason that code's copy is
+  // true again — lives on `create-with-key` and `composite/add-key`, not here.
+  //
+  // ⚠️ CODE-KEY-FIRST IS LOAD-BEARING ON EVERY ARM IN THIS FILE. See the
+  // key-order note at the STALE_CLIENT arm.
+  //
+  // ⛔ STATUS, HEADERS AND SENTENCE ARE UNCHANGED ON ALL FOUR. These are
+  // structural gates; only what the failure is CALLED moved.
   if (isSfox && !isSfoxEnabledServer()) {
     return NextResponse.json(
-      { error: "sFOX integration is not yet available.", code: "KEY_INVALID_FORMAT" },
+      { code: "KEY_VENUE_NOT_ENABLED", error: "sFOX integration is not yet available." },
       { status: 400, headers: NO_STORE_HEADERS },
     );
   }
@@ -132,7 +163,7 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
   // ccxt/sfox exchanges are unaffected (isMt5 is false).
   if (isMt5 && !isMt5EnabledServer()) {
     return NextResponse.json(
-      { error: "MT5 integration is not yet available.", code: "KEY_INVALID_FORMAT" },
+      { code: "KEY_VENUE_NOT_ENABLED", error: "MT5 integration is not yet available." },
       { status: 400, headers: NO_STORE_HEADERS },
     );
   }
@@ -155,13 +186,13 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
       passphrase.trim().length === 0)
   ) {
     return NextResponse.json(
-      { error: "Missing required fields", code: "KEY_INVALID_FORMAT" },
+      { code: "KEY_MISSING_REQUIRED_FIELD", error: "Missing required fields" },
       { status: 400, headers: NO_STORE_HEADERS },
     );
   }
 
   if (!exchange || !api_key || (!isSfox && !api_secret)) {
-    return NextResponse.json({ error: "Missing required fields", code: "KEY_INVALID_FORMAT" }, { status: 400, headers: NO_STORE_HEADERS });
+    return NextResponse.json({ code: "KEY_MISSING_REQUIRED_FIELD", error: "Missing required fields" }, { status: 400, headers: NO_STORE_HEADERS });
   }
 
   // ── 160-05 / RANK-03 — THE PERSIST DISCRIMINATOR, now a GATE rather than a
@@ -232,10 +263,23 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
       "[keys/validate-and-encrypt] STALE_CLIENT refusal — caller sent no persist discriminator",
       { userId: user.id },
     );
+    // ⭐ 161-09 / WIZERR-08 — KEY ORDER IS LOAD-BEARING, NOT COSMETIC, and this
+    // arm is the receipt. Every coverage law in this repo derives its
+    // population with a `code:`-FIRST predicate (`wizardErrors.invariant.test.ts`
+    // header; `dialog-envelope.invariant.test.ts`). Until 161-09 all twelve of
+    // this route's rejection arms were written `{ error, code }`, so the
+    // derivation over this file returned ZERO — measured, not assumed — and NO
+    // law watched this route at all. `STALE_CLIENT` shipped here in Phase 160
+    // with nothing checking that any client could render it, which is exactly
+    // the regrowth vector the 4th ROUTES row now closes.
+    //
+    // ⛔ AN ARM REORDERED BACK TO `{ error, code }` GOES INVISIBLE SILENTLY —
+    // it keeps working, nothing throws, and the law's hand-typed site count is
+    // the only thing that reddens. Do not reorder to satisfy a formatter.
     return NextResponse.json({
+      code: "STALE_CLIENT",
       error:
         "This page is out of date and can no longer add keys. Reload the page and try again.",
-      code: "STALE_CLIENT",
     }, { status: 409, headers: NO_STORE_HEADERS });
   }
 
@@ -312,7 +356,7 @@ async function _unifiedValidateAndEncryptHandler(args: {
     // 140.3-G4 / SEAMUX-03 — a missing internal token is OUR config fault
     // (SEAM_MISCONFIGURED). This handler is DORMANT (zero callers); coded anyway
     // so a reviver inherits the correct behaviour, not the 2026 codeless one.
-    return NextResponse.json({ error: "Service unavailable", code: "SEAM_MISCONFIGURED" }, { status: 503, headers: NO_STORE_HEADERS });
+    return NextResponse.json({ code: "SEAM_MISCONFIGURED", error: "Service unavailable" }, { status: 503, headers: NO_STORE_HEADERS });
   }
 
   const correlationId = await getCorrelationId();
@@ -466,8 +510,8 @@ async function legacyValidateAndEncryptHandler(args: {
       // 140.3-G4 / SEAMUX-03 — KEY_NOT_READ_ONLY (union member; its docblock
       // describes this exact fact: read-only unconfirmed, no write scope observed).
       return NextResponse.json({
-        error: "This key could not be verified as read-only. Only read-only keys are accepted.",
         code: "KEY_NOT_READ_ONLY",
+        error: "This key could not be verified as read-only. Only read-only keys are accepted.",
       }, { status: 400, headers: NO_STORE_HEADERS });
     }
 
@@ -537,7 +581,7 @@ async function legacyValidateAndEncryptHandler(args: {
         secrets: perRequestSecrets,
       });
       return NextResponse.json(
-        { error: "Service credential unavailable", code: "SEAM_MISCONFIGURED" },
+        { code: "SEAM_MISCONFIGURED", error: "Service credential unavailable" },
         { status: 503, headers: NO_STORE_HEADERS },
       );
     }
@@ -645,8 +689,8 @@ async function legacyValidateAndEncryptHandler(args: {
       });
       return NextResponse.json(
         {
-          error: "Your key was verified but couldn't be saved. Please try again.",
           code: "UNKNOWN",
+          error: "Your key was verified but couldn't be saved. Please try again.",
         },
         { status: 500, headers: NO_STORE_HEADERS },
       );
@@ -690,7 +734,7 @@ async function legacyValidateAndEncryptHandler(args: {
       // emits for this fact and the client-side map already recognises. The
       // CIRCUIT_OPEN_COPY sentence and Retry-After header stay byte-unchanged.
       return NextResponse.json(
-        { error: CIRCUIT_OPEN_COPY, code: "CIRCUIT_OPEN" },
+        { code: "CIRCUIT_OPEN", error: CIRCUIT_OPEN_COPY },
         {
           status: 503,
           headers: {
@@ -724,7 +768,7 @@ async function legacyValidateAndEncryptHandler(args: {
       // hop timing out; NOT KEY_NETWORK_TIMEOUT, which asserts the EXCHANGE was
       // unreachable — a fact not observed here).
       return NextResponse.json(
-        { error: "Key validation timed out. Please try again.", code: "UPSTREAM_TIMEOUT" },
+        { code: "UPSTREAM_TIMEOUT", error: "Key validation timed out. Please try again." },
         { status: 504, headers: NO_STORE_HEADERS },
       );
     }
@@ -745,8 +789,44 @@ async function legacyValidateAndEncryptHandler(args: {
     });
     // 140.3-G4 / SEAMUX-03 — UNKNOWN, the repo's terminal/unclassified fallback
     // (create-with-key's terminal precedent).
+    //
+    // 161-08 / WIZERR-06 — THE CODE CROSSES; THE MESSAGE STILL DOES NOT.
+    //
+    // F5b above is UNCHANGED and still governs `error`: a 4xx `detail` from the
+    // Python validator is curated copy and forwards; a 5xx `message` can carry a
+    // raw traceback, a crypto internal or a contract-violation string and must
+    // NOT. What moves is only `code` — a machine token from the seam's own
+    // closed vocabulary, already forwarded by the 4xx arm above. A classified
+    // 500 (`KEK_UNAVAILABLE`, `EGRESS_PROXY_MISCONFIGURED`) used to arrive here
+    // indistinguishable from a failure nobody could name.
+    //
+    // ⭐ THE SCRUBBING ABOVE IS UNTOUCHED AND STILL WRAPS THIS ARM. This route's
+    // request body carries the RAW `api_key` / `api_secret` / `passphrase`, so
+    // `perRequestSecrets` is named explicitly at BOTH sinks two statements up
+    // and neither call is edited here. `seamCode` is a closed-vocabulary machine
+    // token — never request material — so nothing new can reach the body.
+    //
+    // ⛔ THE `persist: true` ARM IS NOT TOUCHED by this edit, deliberately. The
+    // persist-INSERT failure earlier in this file answers `code: "UNKNOWN"` with
+    // its own copy ("verified but couldn't be saved"), and its fault is a
+    // PostgREST error that carries no seam code at all. Its first real PROD
+    // connect is an owed verification; changing it here would make a smoke
+    // failure unattributable.
+    //
+    // ⛔ `typeof`, NOT `instanceof AnalyticsUpstreamError`: this arm is also
+    // reached by transport failures and untyped throws, and a route suite that
+    // mocks `@/lib/analytics-client` wholesale makes the class `undefined`,
+    // where `x instanceof undefined` throws from inside this very catch. The
+    // empty string is excluded because `"" ?? "UNKNOWN"` is `""`.
+    const rawSeamCode = (err as { seamCode?: unknown } | null | undefined)
+      ?.seamCode;
+    const seamCode =
+      typeof rawSeamCode === "string" && rawSeamCode !== "" ? rawSeamCode : null;
     return NextResponse.json(
-      { error: "Key validation failed. Please try again.", code: "UNKNOWN" },
+      {
+        code: seamCode ?? "UNKNOWN",
+        error: "Key validation failed. Please try again.",
+      },
       { status: 500, headers: NO_STORE_HEADERS },
     );
   }

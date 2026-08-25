@@ -149,6 +149,26 @@ const ROUTE_SESSION_REUSED =
   "This wizard session already created a strategy with a different track " +
   "record, so we refused before writing anything of this submission. Start " +
   "a new strategy to upload a different file.";
+/**
+ * `csv-finalize/route.ts` — the A2 TERMINAL-STATUS refusal's own sentence,
+ * verbatim, re-typed from HEAD and verified 2026-08-24 (161-03 / WIZERR-12).
+ *
+ * ⭐ WHY IT IS A SECOND FIXTURE AND NOT A VARIANT OF THE FIRST. Until 161-03
+ * this arm carried the DEFAULT sentence above, which says the committed
+ * strategy holds a DIFFERENT TRACK RECORD. A2 runs ahead of the name check and
+ * ahead of the series check, so at that point nothing about the track record
+ * has been read — the sibling refusal suite arms this very case with a
+ * committed name of "Renamed" on purpose. The default was a claim the arm
+ * cannot make, and pinning only the default here would let it come back.
+ *
+ * ⛔ Hand-typed, never imported, and the escape label is spelled out rather
+ * than interpolated — the route interpolates `START_NEW_STRATEGY_LABEL` and
+ * this file types the words, with byte-equality held by hand (IN-05).
+ */
+const ROUTE_SESSION_REUSED_STATUS_MISMATCH =
+  "This wizard session already committed a strategy that is not in the " +
+  "state this submission asked for, so we refused before writing anything " +
+  "of this submission. Start a new strategy to make a separate submission.";
 /** `csv-finalize/route.ts` — one of the twenty `CSV_INVALID_FORMAT` messages. */
 const ROUTE_INVALID_FORMAT = "Invalid request body.";
 /** `csv-finalize/route.ts` — the WR-07-shaped corrected misconfigured body. */
@@ -441,6 +461,43 @@ describe("[140.5-05] ⛔ NEGATIVE CONTROLS — csv-finalize's own vocabulary kee
     // to upload a different file." The escape is keyed on the code, so it is
     // offered here too and the instruction is carryable on all three of this
     // code's sentences, not just the one 146.2-01 re-worded.
+    expect(
+      screen.getByTestId("wizard-csv-start-new-strategy"),
+    ).toBeInTheDocument();
+  });
+
+  it("🔴 161-03 / WIZERR-12: CSV_SESSION_REUSED's A2 sentence reaches the panel unaltered", async () => {
+    // The SECOND sentence this code carries. The panel keys its arms on the
+    // CODE, so what this case proves is that the A2 wording is not rewritten,
+    // summarised, or replaced by the copy table's title on the way through —
+    // and that the escape control, which is what makes the sentence's remedy
+    // able to succeed, is still offered on it.
+    fetchSpy.mockResolvedValue(
+      jsonResponse(
+        {
+          ok: false,
+          code: "CSV_SESSION_REUSED",
+          human_message: ROUTE_SESSION_REUSED_STATUS_MISMATCH,
+          debug_context: {},
+          correlation_id: null,
+        },
+        409,
+      ),
+    );
+    mountAndSubmit();
+
+    await screen.findByTestId("wizard-csv-error");
+    expect(
+      screen.getByText(ROUTE_SESSION_REUSED_STATUS_MISMATCH),
+    ).toBeInTheDocument();
+    expect(panelText()).not.toContain(FOUNDER_TITLE);
+    // The claim this arm must NOT make — the needle is real, not blank.
+    expect("a different track record".length).toBeGreaterThan(10);
+    expect(
+      panelText(),
+      "the panel told the user their track record differs, on the one refusal " +
+        "that fires before anything about the track record has been read",
+    ).not.toContain("a different track record");
     expect(
       screen.getByTestId("wizard-csv-start-new-strategy"),
     ).toBeInTheDocument();

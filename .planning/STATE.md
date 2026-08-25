@@ -2,19 +2,19 @@
 gsd_state_version: 1.0
 milestone: v1.20
 milestone_name: Backlog Burndown (Phases 158+)
-current_phase: 160
-current_phase_name: PROVENANCE — The server's venue is the venue that annualizes
-status: executing
-stopped_at: Phase 160 landed (v0.71.2.1); Phase 161.1 inserted
-last_updated: "2026-08-24T07:20:30.940Z"
-last_activity: 2026-08-23
-last_activity_desc: Phase 160 execution started
-state_head: 2ab8365cf97fd97856461ac6bcab719376dc253a
+current_phase: 161
+current_phase_name: WIZERR — Honest error surfaces
+status: verifying
+stopped_at: Completed 161-09-PLAN.md (last plan of Phase 161)
+last_updated: "2026-08-24T21:30:39.384Z"
+last_activity: 2026-08-24
+last_activity_desc: Phase 161 execution — waves 1-3 landed
+state_head: cc2c579ac81356cd73dcb7a539b468637a7b4758
 progress:
   total_phases: 9
   completed_phases: 1
-  total_plans: 20
-  completed_plans: 18
+  total_plans: 30
+  completed_plans: 28
   percent: 11
 ---
 
@@ -73,12 +73,53 @@ reproduce-first), 146 (RATE). **Resume at Phase 143 after v1.17.** All 29 phase 
 preserved (`phases.clear` skipped by founder call). Phase 142.3's scope (MT5-06..10) and MT5-14
 are re-homed into v1.17 (Phases 155 / 153); 142.3 will not run as a v1.16 phase.
 
+## Deferred Verification
+
+Phases whose code is complete but whose verification is gated on a human action. Autonomous
+re-entry SKIPS these — resume each only through its recorded command, so the gate cannot be
+silently absorbed by a later phase.
+
+| Phase | Status | Blocked on | Resume with |
+|-------|--------|-----------|-------------|
+| 160 | `human_needed` — 31/32 | **PROD persist smoke (Part A).** The `persist: true` arm on `/api/keys/validate-and-encrypt` has never handled a real production connect, and it is the ONLY door into `api_keys` for the three converted non-wizard surfaces. ⛔ The 2026-08-23 OKX connect does NOT close it: prod logs for that write show `/strategies/new/wizard` + `/api/strategies/create-with-key` with **zero** hits on the arm — it rode the Phase-156 RPC path. Needs a connect through `ApiKeyManager` (strategy edit page), `StrategyForm`, or `AllocatorExchangeManager`; expect the `api_keys` census to go 32 → 33 with `attested_venue = exchange`. | `/gsd-verify-work 160` |
+
+Part B of that phase (the PROD `STALE_CLIENT` refusal) is ✅ CLOSED — measured on PROD 2026-08-23
+after #705 deployed. See `160-VERIFICATION.md` § PROD smoke record.
+
+## Needs Human
+
+| Phase | State | Resume with |
+|-------|-------|-------------|
+| 161 | `needs_human` — **planning incomplete, 7 of 13 requirements** | resolve the model-quota blocker below, then `/gsd-plan-phase 161` (it will see `has_plans: true` — the six uncovered requirements must be planned explicitly) |
+
+**Blocker (2026-08-24): the `gsd-planner` subagent terminated on a Fable 5 quota limit** after 288k
+tokens / 33 tool uses. This is a resource limit, not a planning failure — the five plans it finished
+are complete and well-formed.
+
+Planned: WIZERR-01, -02, -03, -04, -11, -12, -13 (commit `40cc9383`).
+**NOT planned — no plan file exists:** WIZERR-05, -06, -07, -08, -09, -10.
+
+⛔ **Do NOT run `/gsd-execute-phase 161` against this state.** `has_plans` reads `true`, so execution
+would silently deliver 7 of 13 requirements and seal the phase.
+
+⚠️ The whole remaining pipeline is Fable-assigned under the 2026-08-18 model policy — `gsd-planner`,
+`gsd-plan-checker`, AND `gsd-verifier` are all `fable`. Finishing Phase 161 therefore needs either
+Fable quota to reset, or a founder decision to run those three roles on Opus for this phase. That is
+a cost decision against a different quota, so it was not taken autonomously.
+
+Completed and committed before the blocker: `161-UI-SPEC.md` (checker-approved 6/6, both curated-message
+fences re-verified first-hand, `## UI Considerations` rebuilt from the state probe — 52 considerations,
+zero unclassified) and `161-VALIDATION.md` (Nyquist strategy, 4 Wave-0 gaps, anti-vacuity clause).
+
 ## Current Position
 
-Phase: 160 (PROVENANCE — The server's venue is the venue that annualizes) — EXECUTING
-Plan: 1 of 6
-Status: Executing Phase 160
-Last activity: 2026-08-23 — Phase 160 execution started
+Phase: 161 (WIZERR — Honest error surfaces) — EXECUTING
+Plan: 10 of 10
+Status: Waves 1-3 landing; 161-07..161-10 pending
+Last activity: 2026-08-24 — Phase 161 waves 1-3
+
+⚠️ Phase 160 remains OPEN on its human gate — see `## Deferred Verification`. Advancing this
+pointer to 161 does NOT close it; resume it only via `/gsd-verify-work 160`.
 OPS-CI first (the shared-test-db eviction / #616 mutex protects every later merge), 165 DEPS
 last (hard-blocked on OPS-01), 160 provenance before 164 SHARE (REVOKE soak), SHARE alone in
 its own PR and never branched from `feat/phase-156-connect-refactor`.
@@ -454,7 +495,7 @@ Prior-phase 141.1 close-out detail (retained; NOT about 142.1):
         2 WARNING gaps, no BLOCKER. See `140.1-VERIFICATION.md`. Not transitioned (`--no-transition`).
 Last activity: 2026-08-02 -- Phase 142 execution started
 
-Progress: [██████████] 100%
+Progress: [█░░░░░░░░░] 11%
 
 ### Phase 140.1 close-out — open items (do NOT lose these)
 
@@ -582,6 +623,16 @@ Load-bearing sequencing (real dependencies, do not reorder):
 | Phase 145 P05 | 25m | 2 tasks | 5 files |
 | Phase 146-rate P01 | 11m | 3 tasks | 6 files |
 | Phase 146 P03 | ~25m | 2 tasks | 4 files |
+| Phase 161 P01 | 24min | 2 tasks | 3 files |
+| Phase 161 P02 | 41min | 2 tasks | 9 files |
+| Phase 161 P03 | 50m | 3 tasks | 10 files |
+| Phase 161 P04 | ~55 min | 2 tasks | 3 files |
+| Phase 161-wizerr-honest-error-surfaces P05 | 75m | 3 tasks | 8 files |
+| Phase 161 P06 | 75m | 3 tasks | 13 files |
+| Phase 161 P07 | 85 min | 3 tasks | 8 files |
+| Phase 161 P08 | 35m | 3 tasks | 11 files |
+| Phase 161 P10 | 2h40m | 3 tasks | 15 files |
+| Phase 161 P09 | 1h20m | 3 tasks | 6 files |
 
 ## Accumulated Context
 
@@ -702,6 +753,28 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - [Phase ?]: 145-05: NEW-C14-07 deleted (not unskipped) — its upstream-body-spread arm dissolved with hop 0; TS-13 discipline pinned in route.test.ts
 - [Phase ?]: 145-05: window E's re-rank trigger fired at PROD=1 but attributed to the known composite (143 D-09) — entry filed mid-term with attribution recorded
 - [Phase ?]: 146-01: RATE-05 closed VERIFIED-EXISTING per D-146-1 (no withRateLimit symbol minted; reversal = ship gate); eval limiter reuses adminActionLimiter 20/min per D-146-4
+- [Phase 160]: 161-01: KEY_UNDECRYPTABLE arm keyed on ONE code with === (never a blanket seam-code forward) — the cascade stays authoritative so an upstream cannot name our private vocabulary
+- [Phase 160]: 161-01: the PROBE_* law brings its OWN two-shape scanner; the incumbent wizardErrors emitterRe is code-first and would see neither of this route's real emitter shapes
+- [Phase 160]: 161-02: the MT5 flag->cause builder lives in mt5_probe.py (mt5_validation cannot import it back — cycle) and CALLS terminal_trade_permission_off rather than re-deriving its shape test
+- [Phase 160]: 161-02: job_worker.classify_exception reads the Mt5GatewayMisconfigured message through an ALLOW-LIST — a curated cause survives the sink, raw remote text degrades to the generic constant (T-134-01 + honesty at once)
+- [Phase 160]: 161-02: when both MT5 blockage flags are set the NAMED external-API option wins (documented precedence, pinned by test); absent/unreadable flags render the generic constant, never a guessed cause (A1 quarantine)
+- [Phase 160]: 161-03: the csv-finalize A2 409 sentence was ADJUSTED from the UI-SPEC's proposal — 'this track record' and 'a different flow' are both unestablished at that arm (it runs before the name and series checks, and admin/strategy-review moves a same-flow row to published)
+- [Phase 160]: 161-03: the CSV per-row forward is a PROJECTION naming {rule,row,message}, never a passthrough — the producer's no-echo discipline stops being a promise held in another file
+- [Phase 160]: 161-04 / WIZERR-02: keep-and-resume — 'Try another key' is a pure step transition; the draft survives and a same-key resubmit resolves kind:'draft' and RESUMES (measured at create-with-key/route.ts:269 + :634-649).
+- [Phase 160]: 161-04: deletion now has exactly ONE caller (the confirm dialog's danger button), reachable from two confirmed entrances; a remedy-labeled control is non-destructive by construction.
+- [Phase 160]: 161-05: A2 CONFIRMED by re-reading the sweep SQL at HEAD — cleanup_abandoned_wizard_drafts never re-collects an already-orphaned key, so KEY_ORPHANED's copy claims permanence rather than a time-bound
+- [Phase 160]: 161-05: 161-UI-SPEC's WIZERR-03 'Manage keys' remedy was replaced — measured unreachable for a manager holding an orphaned key (D-161-05-A)
+- [Phase 160]: 161-05: composite/add-key does NOT mirror KEY_ORPHANED — the venue-identity constraint is unreachable there and mirroring would delete a premise-changed alarm
+- [Phase 160]: D-161-06-A: the Retry-After wait's ONLY wire source is the response HEADER — service_error_body emits no retry_after leaf (measured); a body fallback would be the second extraction path process-key-client.ts already refused
+- [Phase 160]: D-161-06-B: both key-route catches share keyRouteFailureHeaders() — one conditional, documented precedence (breaker wins); this also absorbed the pre-existing duplicated CircuitOpenError ternary
+- [Phase 160]: D-161-06-C: AnalyticsUpstreamError is at FIVE positional params — the recorded ceiling; a sixth optional field or a second number|null one makes the trailing-options-object refactor mandatory
+- [Phase 161]: 161-07: the examined-refused verdict Set became a Map whose VALUE is the user-visible sentence — a verdict cannot join the class without bringing its own copy
+- [Phase 161]: 161-07: BOTH 161-UI-SPEC WIZERR-10 clauses corrected against broker_dailies.py (no size threshold; no per-series examination), and its WIZERR-09 'upload a CSV' remedy replaced — a fifth measured UI-SPEC copy defect
+- [Phase 161]: 161-08: widen the terminal 5xx code channel on five seam routes; the shape law's membership requires a 4xx range split, which excludes scenario/optimize whose bare terminal UNKNOWN is correct by construction
+- [Phase 161]: 161-10: dashboard routes emit code-first literals; dialogs recognise through ONE shared per-route roster (DASHBOARD_DIALOG_ROUTE_CODES) holding the only guarded cast
+- [Phase 161]: 161-10: 4 DASHBOARD_* members minted (pins 84 -> 88) because each near-neighbour's SENTENCE is false on a dashboard dialog
+- [Phase 161]: 161-09: keys/validate-and-encrypt derived ZERO under the code:-first coverage predicate — all 11 literal-coded arms reordered so the 4th ROUTES row lands over a real population
+- [Phase 161]: 161-09: KNOWN_VALIDATE_AND_ENCRYPT_CODES enforces typed+has-copy only — measured, none of the route's 3 consumers reads its code field. Named debt, not a claimed contract.
 
 ### Decisions (execution-time, Phase 140.2)
 
@@ -1404,9 +1477,9 @@ Load-bearing sequencing (real dependencies, do not reorder):
 
 ## Session
 
-**Last Date:** 2026-08-21T09:51:35.277Z
-**Stopped At:** Phase 160 landed (v0.71.2.1); Phase 161.1 inserted
-**Resume File:** .planning/phases/159-rank-public-ranking-integrity/159-CONTEXT.md
+**Last Date:** 2026-08-24T21:30:23.952Z
+**Stopped At:** Completed 161-09-PLAN.md (last plan of Phase 161)
+**Resume File:** None
 **Next step:** Phase 161 (WIZERR — honest error surfaces) is next and NOT yet planned — run `/gsd-plan-phase 161`. Phase 161.1 (LEDGER-REFRESH) was inserted after it on 2026-08-24 for the founder-reported MT5 staleness; it is URGENT and production-facing, so it may be pulled ahead of 161 if you prefer the live data-integrity fix first.
 
 ⭐ **Foundation names later waves import by name** (from `153.1-02-SUMMARY.md`, all in
@@ -1451,3 +1524,4 @@ pre-merge `e0493913`. Fix is PR #669. Supabase migrations and the Vercel fronten
 ### Blockers
 
 - ~~143-01 leaves SC#1's alert MUTE until SENTRY_DSN is verified on the WORKER Railway service~~ — ⛔ PREMISE FALSE, RESOLVED 2026-08-17 (Plan 04). There is NO separate worker service and has not been since April: the loops were merged into the FastAPI process (main.py:80-86, after the 2026-04-20 'jobs queued but never processed' incident), dispatch_loop runs in the app lifespan (main.py:271), that process calls init_sentry() at import (main.py:69, since Phase 16), and SENTRY_DSN IS set on its Railway service. SC#1's alert half is TRUE in production. 143-01's init_sentry() covers the STANDALONE path only.
+- 161-07 D-161-07-A: the wizard COMPOSITE arm still renders GATE_SERIES_PROVENANCE_UNVERIFIED for sampled_gapped — a false sentence on a reachable path (the 142.2 FIX-2 downgrade). Fix = route that arm through the examined/unexamined split; requires re-cutting one 142.2 oracle.

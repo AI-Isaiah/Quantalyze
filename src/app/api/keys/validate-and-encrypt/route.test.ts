@@ -15,6 +15,10 @@ import { CircuitOpenError } from "@/lib/seam-errors";
 // two this file happened to hand-pick. Not mocked anywhere in this file, so
 // this is the same object the route projects its `encryptedColumns` from.
 import { EncryptKeyResponseSchema } from "@/lib/analytics-schemas";
+// 161-09 / WIZERR-08 — the SAME comment-stripper every coverage law in this
+// repo uses, so a source pin here and a population there cannot disagree about
+// what is code and what is prose.
+import { stripCommentsPreserveLines } from "@/lib/source-scan";
 
 /**
  * H-0281 — real route coverage for POST /api/keys/validate-and-encrypt.
@@ -147,11 +151,31 @@ vi.mock("@/lib/analytics-client", () => {
     // exactly like the real class (analytics-client.ts:119). The route's
     // 4xx-forward arm reads it (`code: err.seamCode ?? "UNKNOWN"`).
     readonly seamCode: string | null;
-    constructor(message: string, status: number, seamCode: string | null = null) {
+    // 161-06 / WIZERR-05 — the 4th and 5th, mirroring the real class
+    // (`analytics-client.ts`) parameter-for-parameter. `dependency` was added
+    // there by 140.3-11 and this double never picked it up; `retryAfterSeconds`
+    // is 161-06's. Both are additive and optional, so every pre-existing
+    // construction in this file keeps passing fewer args and keeps defaulting.
+    // ⚠️ ORDER IS THE POINT, not just presence: with `dependency` missing, a
+    // 4th positional argument would be the WAIT here and the DEPENDENCY NAME in
+    // production. `analytics-upstream-error.parity.invariant.test.ts` is what
+    // makes that a failure instead of a convention — it is why this block can
+    // no longer drift in silence.
+    readonly dependency: string | null;
+    readonly retryAfterSeconds: number | null;
+    constructor(
+      message: string,
+      status: number,
+      seamCode: string | null = null,
+      dependency: string | null = null,
+      retryAfterSeconds: number | null = null,
+    ) {
       super(message);
       this.name = "AnalyticsUpstreamError";
       this.status = status;
       this.seamCode = seamCode;
+      this.dependency = dependency;
+      this.retryAfterSeconds = retryAfterSeconds;
     }
   }
   class AnalyticsTimeoutError extends Error {
@@ -959,11 +983,16 @@ describe("[140.3-G4 / SEAMUX-03] POST /api/keys/validate-and-encrypt — a machi
   });
 
   // ── the input 400 arm ──
-  it("400 missing required fields → code KEY_INVALID_FORMAT", async () => {
+  // 161-09 / WIZERR-08: was KEY_INVALID_FORMAT. A blank required slot is not a
+  // format failure — nothing here examined the shape of any value. The full
+  // per-arm code+sentence inventory is the WIZERR-08 suite at the foot of this
+  // file; this line stays because this describe's job is "a code on EVERY arm"
+  // and it is the arm-presence pin for this one.
+  it("400 missing required fields → code KEY_MISSING_REQUIRED_FIELD", async () => {
     const { POST } = await import("./route");
     const res = await POST(makeReq({ exchange: "okx", api_key: "k" }));
     expect(res.status).toBe(400);
-    expect((await res.json()).code).toBe("KEY_INVALID_FORMAT");
+    expect((await res.json()).code).toBe("KEY_MISSING_REQUIRED_FIELD");
   });
 
   // ── the deny arm: two bodies, two tokens ──
@@ -1052,6 +1081,115 @@ describe("[140.3-G4 / SEAMUX-03] POST /api/keys/validate-and-encrypt — a machi
     const body = await res.json();
     expect(body.error).toBe("Key validation failed. Please try again.");
     expect(body.code).toBe("UNKNOWN");
+  });
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // 161-08 / WIZERR-06 — the terminal arm forwards the CODE and still refuses
+  // the MESSAGE.
+  //
+  // ⚠️ ORACLE INDEPENDENCE. The static sentence is HAND-TRANSCRIBED below,
+  // never imported from the route.
+  //
+  // ⭐ THIS IS THE CREDENTIAL-BEARING ROUTE. Case (a) additionally re-pins that
+  // the edited arm is still wrapped by the per-request secret list at the
+  // Sentry sink — the widening moved `code` and nothing else, and the raw
+  // `api_key` / `api_secret` / `passphrase` this request body carries must
+  // still be handed to the sink so it can redact them.
+  // ─────────────────────────────────────────────────────────────────────────
+
+  /** Transcribed by hand from the route's terminal arm. Do NOT import it. */
+  const VALIDATE_TERMINAL_SENTENCE = "Key validation failed. Please try again.";
+
+  /**
+   * Shaped like what F5b keeps off the wire: a crypto internal, a Python
+   * source location and a service base URL.
+   *
+   * ⚠️ Every token here is deliberately DISJOINT from the static sentence and
+   * from the forwarded code. "failed" and "unavailable" were both rejected as
+   * corpus words for exactly that reason — a token the honest body legitimately
+   * contains would make case (d) fail against a correct tree, which is the
+   * mirror-image error of a test that cannot fail.
+   */
+  const LEAKY_5XX_MESSAGE =
+    "RuntimeError: KEK derivation aborted inside crypto_kek.py:77 — upstream base http://analytics.invalid:8000";
+
+  it("WIZERR-06 (a) — a 5xx seam error carrying a code forwards THAT code, sentence unchanged, secrets still scrubbed", async () => {
+    const { AnalyticsUpstreamError } = await import("@/lib/analytics-client");
+    // `encrypt_key`'s first statement is `get_kek()`; its RuntimeError is a
+    // real 500 with `retryable=False`.
+    mockValidateKey.mockRejectedValue(
+      new AnalyticsUpstreamError("KEK unavailable", 500, "KEK_UNAVAILABLE"),
+    );
+    const { POST } = await import("./route");
+    const res = await POST(makeReq(VALID_BODY));
+
+    expect(res.status).toBe(500);
+    const body = await res.json();
+    expect(body.code).toBe("KEK_UNAVAILABLE");
+    expect(body.error).toBe(VALIDATE_TERMINAL_SENTENCE);
+
+    // The per-request secret list still reaches the Sentry sink from THIS arm.
+    // Same obligation, same shape, as the ECONNREFUSED case above: the route
+    // hands the values over so the sink can redact them.
+    expect(captureSpy).toHaveBeenCalled();
+    const sentrySecrets = captureSpy.mock.calls[0][1].secrets;
+    expect(sentrySecrets).toContain(VALID_BODY.api_key);
+    expect(sentrySecrets).toContain(VALID_BODY.api_secret);
+    expect(sentrySecrets).toContain(VALID_BODY.passphrase);
+  });
+
+  it("WIZERR-06 (b) — a 5xx seam error with a NULL code still answers UNKNOWN, sentence unchanged", async () => {
+    const { AnalyticsUpstreamError } = await import("@/lib/analytics-client");
+    mockValidateKey.mockRejectedValue(
+      new AnalyticsUpstreamError("upstream traceback", 502),
+    );
+    const { POST } = await import("./route");
+    const res = await POST(makeReq(VALID_BODY));
+    expect(res.status).toBe(500);
+    const body = await res.json();
+    expect(body.code).toBe("UNKNOWN");
+    expect(body.error).toBe(VALIDATE_TERMINAL_SENTENCE);
+  });
+
+  it("WIZERR-06 (c) — a NON-SEAM throwable answers UNKNOWN, sentence unchanged", async () => {
+    mockValidateKey.mockRejectedValue(new Error("ECONNREFUSED"));
+    const { POST } = await import("./route");
+    const res = await POST(makeReq(VALID_BODY));
+    expect(res.status).toBe(500);
+    const body = await res.json();
+    expect(body.code).toBe("UNKNOWN");
+    expect(body.error).toBe(VALIDATE_TERMINAL_SENTENCE);
+  });
+
+  it("WIZERR-06 (d) — NEGATIVE CONTROL: no substring of the thrown message reaches the body", async () => {
+    const { AnalyticsUpstreamError } = await import("@/lib/analytics-client");
+    mockValidateKey.mockRejectedValue(
+      new AnalyticsUpstreamError(LEAKY_5XX_MESSAGE, 500, "KEK_UNAVAILABLE"),
+    );
+    const { POST } = await import("./route");
+    const res = await POST(makeReq(VALID_BODY));
+    const serialized = JSON.stringify(await res.json());
+
+    // ⚠️ VACUITY GUARD, FIRST — `"anything".includes("")` is `true`.
+    expect(LEAKY_5XX_MESSAGE.trim().length).toBeGreaterThan(40);
+    const tokens = LEAKY_5XX_MESSAGE.split(/\s+/).filter((t) => t.length >= 4);
+    expect(
+      tokens.length,
+      "the leak corpus produced too few usable tokens to be a real control",
+    ).toBeGreaterThan(5);
+
+    for (const token of tokens) {
+      expect(
+        serialized,
+        `the 5xx body leaked "${token}" out of err.message`,
+      ).not.toContain(token);
+    }
+    expect(serialized).not.toContain(LEAKY_5XX_MESSAGE);
+    expect(serialized).toContain("KEK_UNAVAILABLE");
+
+    // ...and no raw credential from the request body crossed either.
+    expect(serialized).not.toContain(VALID_BODY.api_key);
+    expect(serialized).not.toContain(VALID_BODY.api_secret);
   });
 });
 
@@ -1715,5 +1853,218 @@ describe("POST /api/keys/validate-and-encrypt — persist-arm failure surface (1
       ).toEqual([]);
     }
     consoleErr.mockRestore();
+  });
+});
+
+/**
+ * ⭐ 161-09 / WIZERR-08 — THE FOUR REQUEST-SHAPE ARMS ANSWER FOUR TRUE FACTS.
+ *
+ * Until this plan all four of this route's request-shape rejections answered
+ * `KEY_INVALID_FORMAT`, whose copy reads "This does not look like a valid API
+ * key for the selected exchange … Binance secrets are 64 hex characters". Two
+ * of the four are VENUE gates (we support the venue, it is not switched on
+ * here) and two are PRESENCE guards (a required slot arrived blank). On none
+ * of the four did anything examine the format of any value, so a founder who
+ * submitted a complete MT5 form while MT5 was dark was told their key format
+ * was wrong. 142.2 split the vocabulary at the two wizard connect routes; this
+ * route was the third carrier and kept saying the collapsed thing.
+ *
+ * ⛔ THE SENTENCES DO NOT MOVE. Each case below asserts the code AND the
+ * byte-identical sentence, and every sentence here is HAND-TYPED from the
+ * pre-161-09 source read at `git show HEAD:…` — never imported and never
+ * copied out of the current file. An oracle that imports the string it is
+ * asserting about cannot fail when the string changes; that is the
+ * self-referential shape three money bugs survived six review passes behind.
+ *
+ * ⛔ AND THE STATUS AND HEADERS DO NOT MOVE EITHER. These are structural gates
+ * (ASVS V5): a refusal that starts answering 200, or that loses NO_STORE_HEADERS
+ * on a per-tenant body, is a weakened gate wearing an honest code. Pinned per
+ * arm rather than inherited.
+ */
+describe("[161-09 / WIZERR-08] the four request-shape arms carry codes true of their own facts", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    rateLimitResult.success = true;
+    rateLimitResult.retryAfter = 0;
+    rateLimitResult.reason = undefined;
+    delete process.env.SFOX_ENABLED;
+    delete process.env.MT5_ENABLED;
+    mockValidateKey.mockResolvedValue({ valid: true, read_only: true });
+    mockEncryptKey.mockResolvedValue({ api_key_encrypted: "ct-blob" });
+    vi.spyOn(console, "error").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    delete process.env.SFOX_ENABLED;
+    delete process.env.MT5_ENABLED;
+  });
+
+  /**
+   * HAND-TYPED. One row per arm: how to reach it, the code it must now answer,
+   * and the sentence that must NOT have moved.
+   *
+   * ⚠️ `no-store` is asserted as a lowercased HEADER READ, not against an
+   * imported constant, for the same oracle-independence reason as the
+   * sentences: `NO_STORE_HEADERS` changing would move both sides together.
+   */
+  const ARMS: readonly {
+    label: string;
+    body: Record<string, unknown>;
+    code: string;
+    sentence: string;
+  }[] = [
+    {
+      label: "sfox is a venue we support that is not switched on here",
+      body: { exchange: "sfox", api_key: "sfox-bearer-token-value", persist: true },
+      code: "KEY_VENUE_NOT_ENABLED",
+      sentence: "sFOX integration is not yet available.",
+    },
+    {
+      label: "mt5 is a venue we support that is not switched on here",
+      body: {
+        exchange: "mt5",
+        api_key: "5001234",
+        api_secret: "investor-password-123",
+        passphrase: "MetaQuotes-Demo",
+        persist: true,
+      },
+      code: "KEY_VENUE_NOT_ENABLED",
+      sentence: "MT5 integration is not yet available.",
+    },
+    {
+      label: "the mt5 three-credential guard: the broker server slot arrived blank",
+      body: {
+        exchange: "mt5",
+        api_key: "5001234",
+        api_secret: "investor-password-123",
+        passphrase: "   ",
+        persist: true,
+      },
+      code: "KEY_MISSING_REQUIRED_FIELD",
+      sentence: "Missing required fields",
+    },
+    {
+      label: "the generic presence check: api_secret absent on a ccxt venue",
+      body: { exchange: "okx", api_key: "okx-api-key", persist: true },
+      code: "KEY_MISSING_REQUIRED_FIELD",
+      sentence: "Missing required fields",
+    },
+  ];
+
+  // Positive control FIRST. A table that shrank to nothing would report no
+  // failures and pass this suite for the worst possible reason.
+  it("the arm table is the four MEASURED arms, not however many survived an edit", () => {
+    expect(ARMS.length).toBe(4);
+  });
+
+  it.each(ARMS.map((a) => [a.label, a] as const))(
+    "%s → its own code, with the sentence, status and no-store header byte-identical",
+    async (_label, arm) => {
+      // The mt5 three-credential guard lives BEHIND the mt5 venue gate, so it
+      // is only reachable with the server flag on. The two venue-gate arms need
+      // it off. Set per arm rather than globally: a single global setting would
+      // make one pair of arms unreachable and they would pass by never running.
+      if (arm.code === "KEY_MISSING_REQUIRED_FIELD" && arm.body.exchange === "mt5") {
+        process.env.MT5_ENABLED = "true";
+      }
+      const { POST } = await import("./route");
+      const res = await POST(makeReq(arm.body));
+      const body = await res.json();
+
+      expect(res.status).toBe(400);
+      expect(body.code).toBe(arm.code);
+      expect(body.error).toBe(arm.sentence);
+      expect(res.headers.get("cache-control")?.toLowerCase()).toContain("no-store");
+      // No live credential probe is spent on any of the four.
+      expect(mockValidateKey).not.toHaveBeenCalled();
+      expect(mockEncryptKey).not.toHaveBeenCalled();
+    },
+  );
+
+  it("KEY_INVALID_FORMAT has NO emitter left on this route — the split is complete, not partial", () => {
+    // ⛔ SOURCE-DERIVED, COMMENT-STRIPPED. The route's own docblock DESCRIBES
+    // the retired code by name, so a raw `grep -c` would report the class open
+    // forever. Only the emitters count: a `code: "KEY_INVALID_FORMAT"` literal.
+    // Same discipline as `KEY_INVALID_FORMAT`'s own copy docblock.
+    const src = stripCommentsPreserveLines(
+      readFileSync(join(process.cwd(), "src/app/api/keys/validate-and-encrypt/route.ts"), "utf-8"),
+      "ts",
+    );
+    // Positive control on the SCANNER before the negative claim: a stripper
+    // that blanked the whole file would report zero emitters of everything.
+    expect(
+      src.match(/code:\s*"KEY_VENUE_NOT_ENABLED"/g)?.length,
+      "the comment-stripper blanked real code — every negative claim below is vacuous",
+    ).toBe(2);
+    expect(src.match(/code:\s*"KEY_MISSING_REQUIRED_FIELD"/g)?.length).toBe(2);
+    expect(
+      src.match(/code:\s*"KEY_INVALID_FORMAT"/g),
+      "an arm answers KEY_INVALID_FORMAT again. This route runs NO format check " +
+        "of its own — the `api_secret.length < 8` ccxt guard that makes that " +
+        "code's copy true lives on create-with-key and composite/add-key. " +
+        "⛔ The remedy is a code true of the arm's own fact, never this one back.",
+    ).toBeNull();
+  });
+
+  /**
+   * ⛔ PITFALL 6 — THE PERSIST ARM IS NOT TOUCHED, AND THAT IS ENFORCED HERE
+   * RATHER THAN ASSERTED IN A COMMENT.
+   *
+   * `persist: true`'s first real PROD connect is an owed deferred verification
+   * from Phase 160. If this plan had changed anything on that path, a failure
+   * observed at that smoke could no longer be attributed to 160 rather than to
+   * 161. All four re-coded sites sit UPSTREAM of the `body.persist !== true`
+   * discriminator — verified at HEAD by the ordering pin below and by this
+   * behavioural case.
+   */
+  it("PITFALL 6: a persist request still reaches the writer and still returns the row id, unchanged", async () => {
+    PERSIST_STATE.inserts.length = 0;
+    PERSIST_STATE.insertResult = null;
+    PERSIST_STATE.adminFactoryError = null;
+    mockEncryptKey.mockResolvedValue({
+      api_key_encrypted: "ct-blob",
+      api_secret_encrypted: null,
+      passphrase_encrypted: null,
+      dek_encrypted: "dek-ct",
+      nonce: "nonce-b64",
+      kek_version: 3,
+    });
+    const { POST } = await import("./route");
+    const res = await POST(
+      makeReq({ ...VALID_BODY, persist: true, label: "My OKX key" }),
+    );
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(body).toEqual({ api_key_id: expect.any(String), valid: true, read_only: true });
+    // The writer really ran — a 200 with no INSERT would satisfy the shape
+    // assertion above while proving the persist path was skipped entirely.
+    expect(PERSIST_STATE.inserts.length).toBe(1);
+  });
+
+  it("PITFALL 6: all four re-coded arms sit UPSTREAM of the persist discriminator, in source order", () => {
+    const src = stripCommentsPreserveLines(
+      readFileSync(join(process.cwd(), "src/app/api/keys/validate-and-encrypt/route.ts"), "utf-8"),
+      "ts",
+    );
+    const discriminator = src.indexOf("body.persist !== true");
+    expect(
+      discriminator,
+      "the persist discriminator moved or was renamed — this ordering pin is measuring nothing",
+    ).toBeGreaterThan(0);
+    for (const marker of [
+      'code: "KEY_VENUE_NOT_ENABLED", error: "sFOX integration is not yet available."',
+      'code: "KEY_VENUE_NOT_ENABLED", error: "MT5 integration is not yet available."',
+    ]) {
+      const at = src.indexOf(marker);
+      expect(at, `arm not found in source: ${marker}`).toBeGreaterThan(0);
+      expect(at).toBeLessThan(discriminator);
+    }
+    // Both presence guards are the same two-line literal, so index them by
+    // LAST occurrence: if either one drifted below the discriminator this reds.
+    const lastMissing = src.lastIndexOf('code: "KEY_MISSING_REQUIRED_FIELD"');
+    expect(lastMissing).toBeGreaterThan(0);
+    expect(lastMissing).toBeLessThan(discriminator);
   });
 });

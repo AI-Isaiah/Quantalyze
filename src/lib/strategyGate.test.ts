@@ -213,7 +213,27 @@ describe("checkStrategyGate", () => {
       seriesCompleteness: "fill_derived_unproven",
     });
     expect(result.passed).toBe(false);
-    expect(result.code).toBe("INSUFFICIENT_TRADES");
+    // ⭐ 161-07 / WIZERR-10 RE-CUT THE CODE ASSERTION, DELIBERATELY, AND LEFT
+    // THE SAFETY PROPERTY ALONE. The line above is what D-15 is about and it is
+    // untouched: this perp is REFUSED, before and after.
+    //
+    // What moved is the DIAGNOSIS. `INSUFFICIENT_TRADES` carried the sentence
+    // "Strategy has only 0 trade(s). A minimum of 5 trades is required." about
+    // a strategy with 135 daily rows and zero fills by construction — false and
+    // unwinnable, and the same class of sentence FIX 1 removed from the NULL
+    // arm one commit earlier while deliberately leaving it here.
+    //
+    // FALSIFIABILITY OF THE RE-CUT ITSELF (the founder's rule applies to a
+    // re-pointed oracle too): the production change was made FIRST and this
+    // oracle was run against it unmodified. Observed:
+    //   AssertionError: expected 'SERIES_EXAMINED_REFUSED' to be
+    //   'INSUFFICIENT_TRADES'
+    // — so the new routing is what this line now reads, not a value it would
+    // have reported either way.
+    expect(result.code).toBe("SERIES_EXAMINED_REFUSED");
+    // …and the sentence it carries is about the SERIES, never the trade count.
+    expect(result.reason).not.toMatch(/minimum of 5 trades/i);
+    expect(result.reason).not.toMatch(/only 0 trade/i);
   });
 
   // ── 142.2 review FIX 1 — THE REFUSAL THAT REINTRODUCED THE PHASE'S OWN BUG ──
@@ -258,9 +278,17 @@ describe("checkStrategyGate", () => {
 
   it("FIX 1: the split is 'did a producer look?', NOT 'do we like the answer?'", () => {
     // The discriminating pair, in one test so the boundary cannot drift by
-    // halves. Both refuse — this is never an admission question — but a verdict
-    // a producer actually stamped keeps the trade-branch routing the D-15
-    // acceptance test pins, while an unexamined one gets the honest answer.
+    // halves. Both refuse — this is never an admission question — but they
+    // refuse with DIFFERENT sentences, because one of them can say what the
+    // record says and the other has no record to report.
+    //
+    // ⭐ 161-07 / WIZERR-10 RE-CUT THE EXAMINED HALF'S CODE, DELIBERATELY. The
+    // `must refuse` assertion below is FIX 1's actual property and is unchanged
+    // on both halves; only the examined half's expected code moved, off the
+    // trade-branch fallthrough this test used to pin. Observed RED when this
+    // oracle was run, unmodified, against the changed production code:
+    //   AssertionError: fill_derived_unproven was EXAMINED and found wanting:
+    //   expected 'SERIES_EXAMINED_REFUSED' to be 'INSUFFICIENT_TRADES'
     const examined = ["fill_derived_unproven", "sampled_gapped"];
     const notExamined = [null, "", "some_verdict_invented_next_year"];
 
@@ -276,7 +304,14 @@ describe("checkStrategyGate", () => {
       });
       expect(result.passed, `${verdict} must refuse`).toBe(false);
       expect(result.code, `${verdict} was EXAMINED and found wanting`).toBe(
-        "INSUFFICIENT_TRADES",
+        "SERIES_EXAMINED_REFUSED",
+      );
+      // The sentence differs PER VERDICT — the two must not collapse to one
+      // generic string, which is what a Set-plus-default lookup would produce.
+      expect(result.reason, `${verdict} must carry its own sentence`).toBe(
+        verdict === "fill_derived_unproven"
+          ? "The return series is derived from individual fills, which cannot establish that the record is complete."
+          : "The return series is built from sampled balance snapshots with interior gaps, so it is not a complete record.",
       );
     }
 
@@ -427,7 +462,16 @@ describe("checkStrategyGate", () => {
     expect(result.reason).not.toMatch(/minimum of 5 trades/i);
   });
 
-  it("sampled_gapped → trade branch → REFUSED (a gapped NAV sample is not a complete series)", () => {
+  it("sampled_gapped → examined-refused → REFUSED (a gapped NAV sample is not a complete series)", () => {
+    // ⭐ A THIRD ORACLE RE-CUT AT 161-07, and it was NOT in the plan's list of
+    // two — the intermediate RED run is what surfaced it. Recorded because
+    // "the plan named two" is exactly the reasoning that leaves a third pinning
+    // deleted behaviour. Observed, unmodified, against the changed production
+    // code: `AssertionError: expected 'SERIES_EXAMINED_REFUSED' to be
+    // 'INSUFFICIENT_TRADES'`.
+    //
+    // The refusal is the property; the title's "trade branch" was a claim about
+    // the ROUTE and is now false, so the title moved with the assertion.
     const result = checkStrategyGate({
       ...BASE,
       apiKeyId: "key-1",
@@ -438,7 +482,7 @@ describe("checkStrategyGate", () => {
       seriesCompleteness: "sampled_gapped",
     });
     expect(result.passed).toBe(false);
-    expect(result.code).toBe("INSUFFICIENT_TRADES");
+    expect(result.code).toBe("SERIES_EXAMINED_REFUSED");
   });
 
   it("an UNRECOGNISED verdict a future producer might invent → REFUSED (allow-list, not deny-list)", () => {
@@ -758,5 +802,291 @@ describe("checkStrategyGate", () => {
     });
     expect(result.passed).toBe(true);
     expect(result.code).toBeNull();
+  });
+});
+
+/**
+ * [161-07 / WIZERR-10] THE FOURTH OUTCOME, AND THE THREE PROPERTIES IT MUST NOT
+ * COST.
+ *
+ * A gapped or fill-derived strategy with a full daily-return series and zero
+ * fills BY CONSTRUCTION used to be told "Strategy has only 0 trade(s). A
+ * minimum of 5 trades is required." That sentence is false about the strategy
+ * and unwinnable for the user, and it is the same defect FIX 1 removed from the
+ * never-examined arm while deliberately leaving it here.
+ *
+ * ⛔ THE THREE THINGS THAT MUST SURVIVE THE CHANGE, each with a case below:
+ *   1. THE REFUSAL. Every input refused before is refused after —
+ *      `passed === false` is asserted on the new arm explicitly, so an edit that
+ *      turns the fourth outcome into an admission reds here rather than
+ *      publishing an unproven track record.
+ *   2. MUTUAL EXCLUSIVITY. Adding a fourth arm must not make two arms reachable
+ *      for one input.
+ *   3. THE GENUINE TRADE SHORTAGE. A strategy that really is short of trades
+ *      still answers INSUFFICIENT_TRADES with its sentence byte-identical.
+ *
+ * ORACLE INDEPENDENCE, restated because this block asserts SENTENCES: every
+ * expected string is hand-typed. Nothing is imported from `strategyGate.ts` —
+ * importing the map under test would let a rewritten sentence certify itself.
+ */
+describe("[161-07 / WIZERR-10] examined-but-refused verdicts get their own truthful outcome", () => {
+  /** The two verdicts `broker_dailies.py` stamps that do not earn admission. */
+  const EXAMINED_REFUSED = ["fill_derived_unproven", "sampled_gapped"] as const;
+
+  const dailyReturnsInput = (verdict: string | null) => ({
+    ...BASE,
+    apiKeyId: "key-1",
+    tradeCount: 0,
+    earliestTradeAt: null,
+    latestTradeAt: null,
+    computationStatus: "complete" as const,
+    csvRowCount: 135,
+    seriesCompleteness: verdict,
+  });
+
+  it("THE REFUSAL PROPERTY: the fourth outcome refuses — it is never an admission", () => {
+    // Asserted separately from the code, and first. A future edit that keeps
+    // the code and flips the decision is the dangerous one: it publishes a
+    // track record whose completeness its own producer declined to establish.
+    for (const verdict of EXAMINED_REFUSED) {
+      const result = checkStrategyGate(dailyReturnsInput(verdict));
+      expect(result.passed, `${verdict} must never be admitted`).toBe(false);
+      expect(result.code).toBe("SERIES_EXAMINED_REFUSED");
+    }
+  });
+
+  it("MUTUAL EXCLUSIVITY: no single input reaches two of the four outcomes", () => {
+    // One input per outcome, each naming the condition that selects it. The
+    // oracle is that the four inputs produce four DISTINCT codes: if adding the
+    // fourth arm had made two reachable for one input, the arm order would
+    // decide the answer and one of these codes would go missing.
+    const cases: { label: string; input: StrategyGateInput; code: string }[] = [
+      {
+        label: "admitted verdict, below the 7-day floor",
+        input: { ...dailyReturnsInput("ledger_complete"), csvRowCount: 3 },
+        code: "INSUFFICIENT_CSV_HISTORY",
+      },
+      {
+        label: "no verdict at all — nobody looked",
+        input: dailyReturnsInput(null),
+        code: "SERIES_PROVENANCE_UNVERIFIED",
+      },
+      {
+        label: "a verdict was recorded and does not earn admission",
+        input: dailyReturnsInput("fill_derived_unproven"),
+        code: "SERIES_EXAMINED_REFUSED",
+      },
+      {
+        label: "no daily series at all — a genuine trade shortage",
+        input: { ...dailyReturnsInput(null), csvRowCount: 0 },
+        code: "INSUFFICIENT_TRADES",
+      },
+    ];
+
+    const seen: string[] = [];
+    for (const c of cases) {
+      const result = checkStrategyGate(c.input);
+      expect(result.passed, `${c.label} must refuse`).toBe(false);
+      expect(result.code, c.label).toBe(c.code);
+      seen.push(result.code as string);
+    }
+    expect(
+      new Set(seen).size,
+      "Two of the four inputs produced the same code — the outcomes are no " +
+        "longer mutually exclusive and arm ORDER is now deciding the answer.",
+    ).toBe(4);
+  });
+
+  it("THE GENUINE TRADE SHORTAGE keeps its sentence, byte-identical", () => {
+    // The anti-over-reach half. Without it, "route everything away from the
+    // trade floor" would satisfy every case above and delete a refusal that is
+    // both true and correctly worded.
+    const result = checkStrategyGate({
+      ...BASE,
+      apiKeyId: "key-1",
+      tradeCount: 2,
+      earliestTradeAt: new Date("2026-04-01T00:00:00Z"),
+      latestTradeAt: new Date("2026-04-10T00:00:00Z"),
+      csvRowCount: 0,
+      seriesCompleteness: null,
+    });
+    expect(result.passed).toBe(false);
+    expect(result.code).toBe("INSUFFICIENT_TRADES");
+    expect(result.reason).toBe(
+      "Strategy has only 2 trade(s). A minimum of 5 trades is required.",
+    );
+  });
+
+  it("each sentence is TRUE OF ITS PRODUCER — no invented threshold, no invented examination", () => {
+    // ⭐ THE TRUTH OBLIGATION, as a test rather than as a promise. Both clauses
+    // 161-UI-SPEC proposed were measured against
+    // `analytics-service/services/broker_dailies.py`'s producer registry and
+    // both were WRONG; these assertions are what stops either coming back.
+    const gapped = checkStrategyGate(dailyReturnsInput("sampled_gapped"));
+    const derived = checkStrategyGate(
+      dailyReturnsInput("fill_derived_unproven"),
+    );
+
+    // NON-VACUITY FLOOR: `"anything".includes("")` is true, so a null or empty
+    // reason would satisfy every negative below.
+    for (const r of [gapped.reason, derived.reason]) {
+      expect(typeof r, "reason must be a string").toBe("string");
+      expect((r ?? "").length).toBeGreaterThan(60);
+    }
+
+    // ⛔ NO SIZE THRESHOLD. `sampled_gapped` is stamped whenever
+    // `nav_gap_days > 0` — ANY interior hole. The UI-SPEC's "gaps too large to
+    // verify" asserts a magnitude test the producer does not perform and is
+    // false of a one-day hole.
+    expect(gapped.reason).not.toMatch(/too large/i);
+    expect(gapped.reason).not.toMatch(/too many/i);
+    expect(gapped.reason).toMatch(/sampled balance snapshots/i);
+
+    // ⛔ NO PER-SERIES EXAMINATION CLAIM. `fill_derived_unproven` is stamped
+    // for binance / bybit / okx ALWAYS and unconditionally — "a CONSTANT, not a
+    // data-driven refinement", in the producer's own words. The UI-SPEC's
+    // "was examined and refused" implies a finding about THIS series.
+    expect(derived.reason).not.toMatch(/examined and refused/i);
+    expect(derived.reason).not.toMatch(/found wanting/i);
+    expect(derived.reason).toMatch(/derived from individual fills/i);
+
+    // ⛔ NO MAGNITUDE ON THIS CHANNEL (T-73-02 / T-74-03 leak discipline — the
+    // producer keeps gap-day counts off the verdict key for the same reason).
+    for (const r of [gapped.reason ?? "", derived.reason ?? ""]) {
+      expect(r).not.toMatch(/\d+ day/i);
+      expect(r).not.toMatch(/\d+ gap/i);
+    }
+  });
+
+  it("each sentence reads as a complete sentence after the admin prefix", () => {
+    // `admin/strategy-review` answers `Cannot approve: ${gate.reason}` RAW,
+    // with no copy hop, so the reason IS the operator-visible string. A
+    // fragment, or a lowercase start, reads as a broken sentence there.
+    for (const verdict of EXAMINED_REFUSED) {
+      const reason = checkStrategyGate(dailyReturnsInput(verdict)).reason ?? "";
+      const rendered = `Cannot approve: ${reason}`;
+      expect(rendered, verdict).toMatch(/^Cannot approve: [A-Z]/);
+      expect(rendered, verdict).toMatch(/\.$/);
+    }
+  });
+
+  it("the two verdicts do NOT share one generic sentence", () => {
+    // The anti-collapse pin. A Set plus a single default string would satisfy
+    // every other case in this describe while telling an sFOX user about fills
+    // and a perp user about balance snapshots.
+    const a = checkStrategyGate(dailyReturnsInput("fill_derived_unproven"));
+    const b = checkStrategyGate(dailyReturnsInput("sampled_gapped"));
+    expect(a.reason).not.toBe(b.reason);
+  });
+});
+
+/**
+ * [161 REVIEW / WR-05] THE SHORT-HISTORY REFUSAL MAY NOT NAME A CSV.
+ *
+ * `INSUFFICIENT_CSV_HISTORY`'s reason is rendered VERBATIM to the operator —
+ * `admin/strategy-review` answers `Cannot approve: ${gate.reason}` with no copy
+ * hop — and it used to read "CSV history has only N day(s) of returns."
+ *
+ * Reaching this arm requires `isDailyReturnsSourced`, i.e. a verdict in the
+ * production allow-list. The roster below is HAND-TYPED from
+ * `analytics-service/services/broker_dailies.py`'s producer registry ("Who
+ * stamps what"), read first-hand — NOT imported from `strategyGate.ts`, so a
+ * widened allow-list must be followed here by hand rather than silently. Only
+ * ONE of the three members involves a CSV, so the old sentence quoted a
+ * day-count from a file two thirds of the population never sent.
+ *
+ * This is the operator-facing half of the same correction 161-07 applied to the
+ * wizard copy on identical evidence.
+ */
+describe("[161 REVIEW / WR-05] the short-history refusal names no source the strategy may not have", () => {
+  const ADMITTED_VERDICTS = [
+    // `combine_native_ledger` (deribit, both return paths),
+    // `combine_mt5_deal_ledger` (mt5), `combine_sfox_balance_history` (sfox,
+    // zero interior holes). KEYED accounts — the user uploaded nothing.
+    "ledger_complete",
+    // `run_stitch_composite_job` — a stitch of member series. The composite has
+    // no upload of its own.
+    "composite_stitched",
+    // The keyless-CSV path (`analytics_runner`). The ONLY member for which the
+    // word "CSV" is true.
+    "user_supplied",
+  ] as const;
+
+  /** Below the 7-row floor, on the daily-returns branch, analytics complete. */
+  const shortSeries = (verdict: string): StrategyGateInput => ({
+    ...BASE,
+    apiKeyId: "key-1",
+    tradeCount: 0,
+    earliestTradeAt: null,
+    latestTradeAt: null,
+    computationStatus: "complete" as const,
+    csvRowCount: 3,
+    seriesCompleteness: verdict,
+  });
+
+  it("REACHABILITY FENCE: all three admitted verdicts land on this arm", () => {
+    // ⚠️ Asserted FIRST and separately. Three plans this phase wrote a pin
+    // against a fixture that returned early and never reached the branch under
+    // test — a green that proved nothing. If any verdict here stops selecting
+    // `INSUFFICIENT_CSV_HISTORY`, every sentence assertion below is testing a
+    // different arm and must be re-derived rather than re-pointed.
+    for (const verdict of ADMITTED_VERDICTS) {
+      const result = checkStrategyGate(shortSeries(verdict));
+      expect(result.passed, verdict).toBe(false);
+      expect(result.code, verdict).toBe("INSUFFICIENT_CSV_HISTORY");
+      expect(result.detail, verdict).toEqual({ rows: 3, min: 7 });
+    }
+  });
+
+  it("the sentence names NO CSV and NO upload, for any of the three producers", () => {
+    for (const verdict of ADMITTED_VERDICTS) {
+      const reason = checkStrategyGate(shortSeries(verdict)).reason;
+
+      // NON-VACUITY FLOOR: `"anything".includes("")` is true and
+      // `expect(null).not.toMatch(...)` would throw rather than pass, so pin the
+      // shape before pinning the absences. Without this a null/empty reason
+      // would satisfy every negative below.
+      expect(typeof reason, `${verdict}: reason must be a string`).toBe(
+        "string",
+      );
+      expect((reason ?? "").length, verdict).toBeGreaterThan(40);
+
+      // ⛔ THE ACTUAL DEFECT. A keyed deribit / mt5 / sfox account and a
+      // composite have no CSV; naming one quotes a source the user never used.
+      expect(reason, verdict).not.toMatch(/csv/i);
+      expect(reason, verdict).not.toMatch(/upload/i);
+      expect(reason, verdict).not.toMatch(/\bfile\b/i);
+    }
+  });
+
+  it("the sentence is EXACTLY this, hand-typed — and identical across producers", () => {
+    // ORACLE INDEPENDENCE: the expected string is typed out here, not built
+    // from `STRATEGY_GATE_MIN_CSV_ROWS` or from the module's own template. A
+    // test that interpolated the production constant would follow a changed
+    // floor silently, which is the one thing an operator-visible copy pin must
+    // not do.
+    const EXPECTED =
+      "The return series covers only 3 day(s). A minimum of 7 days is required.";
+
+    for (const verdict of ADMITTED_VERDICTS) {
+      expect(checkStrategyGate(shortSeries(verdict)).reason, verdict).toBe(
+        EXPECTED,
+      );
+    }
+
+    // The threshold stays ATTACHED to its number: a refusal that states the
+    // shortfall without stating the bar is unwinnable copy.
+    expect(EXPECTED).toContain("7 days is required");
+  });
+
+  it("reads as a complete sentence after the admin prefix", () => {
+    // `admin/strategy-review` answers `Cannot approve: ${gate.reason}` RAW, so
+    // a fragment or a lowercase start reads as a broken sentence there. Same
+    // obligation the two SERIES_EXAMINED_BUT_REFUSED sentences carry.
+    const rendered = `Cannot approve: ${
+      checkStrategyGate(shortSeries("ledger_complete")).reason ?? ""
+    }`;
+    expect(rendered).toMatch(/^Cannot approve: [A-Z]/);
+    expect(rendered).toMatch(/\.$/);
   });
 });

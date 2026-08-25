@@ -296,6 +296,24 @@ const KNOWN_CREATE_WITH_KEY_CODES: ReadonlySet<WizardErrorCode> =
     // records three times over; it is written out again rather than cited
     // because this roster is the one the next author will be editing.
     "VENUE_ALREADY_CONNECTED",
+    // 161-05 / WIZERR-03 — the venue fence's THIRD refusal (a live key with
+    // nothing behind it), admitted HERE IN THE SAME COMMIT the route starts
+    // emitting it, for the reason the line above states.
+    //
+    // ⚠️ AND THIS ROW IS OWED BY HAND, WHICH IS WORTH SAYING OUT LOUD. The
+    // coverage law in `wizardErrors.invariant.test.ts` derives this route's
+    // emitters with a `statusRe` fragment of "400"; `KEY_ORPHANED` answers 409,
+    // so THAT law is structurally blind to it — exactly as it is to
+    // `DRAFT_ALREADY_EXISTS` and `VENUE_ALREADY_CONNECTED` above. Omitting this
+    // line would leave the code missing the membership check below, falling
+    // through to `UNKNOWN` — whose copy IS recoverable — so the user would get
+    // "Try the last action again." with a Retry for a submit the DB index
+    // refuses identically, while the honest refusal shipped invisible.
+    // ⭐ 161-05 CLOSED THAT BLINDNESS rather than relying on the warning: the
+    // `[161-05 / WIZERR-03] create-with-key's 409 refusals clear ConnectKeyStep's
+    // roster too` describe in the same invariant file derives the 409 emitters
+    // as their own population and reds when this row is missing (observed).
+    "KEY_ORPHANED",
     "KEY_RATE_LIMIT",
     "UNKNOWN",
     // Returned by `classifyKeyValidationError` (src/lib/wizardErrors.ts) — the

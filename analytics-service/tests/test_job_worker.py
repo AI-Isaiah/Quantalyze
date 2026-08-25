@@ -39,6 +39,7 @@ from services.job_worker import (
 )
 from services.mt5_probe import (
     MT5_GATEWAY_MISCONFIGURED_DETAIL,
+    MT5_GATEWAY_MISCONFIGURED_DETAILS,
     Mt5GatewayMisconfigured,
 )
 
@@ -146,20 +147,36 @@ class TestClassifyException:
         the ONE shared MT5 terminal on every attempt, queueing ahead of every other
         user's validate, forever. ``permanent`` is what stops that.
 
-        The message is a fixed constant for the same reason ``InvalidToken``'s is:
-        ``sanitized_message`` is persisted and rendered, and the raw text here is a
-        credential-disclosure surface — ``mt5linux`` f-string-interpolates the
-        password into remotely-eval'd source (T-134-01 / T-153.3-23).
+        The message is read through an ALLOW-LIST for the same reason
+        ``InvalidToken``'s is a fixed constant: ``sanitized_message`` is persisted
+        and rendered, and the raw text here is a credential-disclosure surface —
+        ``mt5linux`` f-string-interpolates the password into remotely-eval'd
+        source (T-134-01 / T-153.3-23).
+
+        ⭐ 161-02 widened the arm from ONE fixed constant to the curated FAMILY,
+        so this case now pins BOTH halves. The negative half is unchanged and is
+        the security property; the positive half is the whole point of 161-02 —
+        returning the generic constant unconditionally threw away the cause the
+        raise site had just derived from the terminal flags, which is how the
+        operator kept being told to check a checkbox that was already correct.
         """
         exc = Mt5GatewayMisconfigured(
             "raw operator detail with investor-pw that must not leak"
         )
         kind, msg = classify_exception(exc)
         assert kind == "permanent"
-        # ⛔ NEVER str(exc) — the curated constant, whatever the raise carried.
+        # ⛔ NEVER str(exc) — anything outside the curated family degrades to the
+        # generic curated constant, whatever the raise carried.
         assert msg == MT5_GATEWAY_MISCONFIGURED_DETAIL
         assert "raw operator detail" not in msg
         assert "investor-pw" not in msg
+
+        # ...and EVERY curated arm reaches the operator intact.
+        assert len(MT5_GATEWAY_MISCONFIGURED_DETAILS) == 3, "the family shrank"
+        for curated in MT5_GATEWAY_MISCONFIGURED_DETAILS:
+            kind, msg = classify_exception(Mt5GatewayMisconfigured(curated))
+            assert kind == "permanent"
+            assert msg == curated
 
     def test_mt5_gateway_misconfigured_message_carries_no_classify_vocabulary(
         self,
@@ -172,24 +189,34 @@ class TestClassifyException:
         broker server is wrong*, which is the exact accusation the 153.6 A1 fix
         removed; and the pre-fix copy literally named investor and master
         passwords to the user.
+
+        ⭐ 161-02: swept over EVERY message this arm can now return, not just the
+        default one. A sweep that scans only the constant it was written for would
+        have kept passing while two unchecked sentences shipped through the same
+        sink.
         """
         from services.mt5_validation import _AUTH_TOKENS, _WRONG_SERVER_TOKENS
 
-        _, msg = classify_exception(Mt5GatewayMisconfigured())
-        low = msg.lower()
-
-        # Anti-vacuity: an empty message satisfies every "not in" below.
-        assert len(low) > 40, "the curated message is too short to be the real copy"
+        # The default (no-argument) raise, plus every curated arm the sink admits.
+        _, default_msg = classify_exception(Mt5GatewayMisconfigured())
+        emittable = (default_msg, *MT5_GATEWAY_MISCONFIGURED_DETAILS)
         # ...and the tables must be non-empty, or the sweep proves nothing.
         assert _WRONG_SERVER_TOKENS and _AUTH_TOKENS
 
-        for token in (*_WRONG_SERVER_TOKENS, *_AUTH_TOKENS):
-            assert token not in low, (
-                f"the operator copy carries the classify token {token!r}; if it is "
-                f"ever re-classified it degrades to a user-blaming verdict"
-            )
-        for word in ("password", "investor", "master", "secret"):
-            assert word not in low, f"the operator copy names the credential {word!r}"
+        for msg in emittable:
+            low = msg.lower()
+            # Anti-vacuity: an empty message satisfies every "not in" below.
+            assert len(low) > 40, "the curated message is too short to be real copy"
+            for token in (*_WRONG_SERVER_TOKENS, *_AUTH_TOKENS):
+                assert token, "a blank token is a substring of everything"
+                assert token not in low, (
+                    f"the operator copy carries the classify token {token!r}; if it "
+                    f"is ever re-classified it degrades to a user-blaming verdict"
+                )
+            for word in ("password", "investor", "master", "secret"):
+                assert word not in low, (
+                    f"the operator copy names the credential {word!r}"
+                )
 
     def test_asyncio_timeout_is_transient(self) -> None:
         """asyncio.TimeoutError is the failure mode of asyncio.wait_for.

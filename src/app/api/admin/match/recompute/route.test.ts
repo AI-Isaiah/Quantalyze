@@ -452,6 +452,13 @@ describe("POST /api/admin/match/recompute — SEAM-04 error taxonomy (Phase 140)
  * existing case pins the absence of. The case below re-pins it THROUGH the new
  * arm, so widening the range later reddens a test rather than shipping a leak.
  *
+ * ⚠️ 161-08 / WIZERR-06 AMENDS THE SCOPE OF THAT SENTENCE, and the amendment is
+ * written here rather than left to inference. "Only 4xx forwards" is about the
+ * MESSAGE. The terminal arm now forwards the upstream's `seamCode` as well, so
+ * `code` crosses on both sides of 500 while `error` still crosses on the 4xx
+ * side alone. The four `WIZERR-06` cases in the machine-code block below pin
+ * both halves — the code that must cross, and the message that must not.
+ *
  * Fixtures are hand-typed here. Nothing is imported from the module under test.
  */
 describe("POST /api/admin/match/recompute — upstream status survives (140.3-11 / TS-19)", () => {
@@ -774,5 +781,84 @@ describe("[140.3-G8 / SEAMUX-03] POST /api/admin/match/recompute — machine cod
     const res = await postAsAdmin();
     expect(res.status).toBe(500);
     expect((await res.json()).code).toBe("UNKNOWN");
+  });
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // 161-08 / WIZERR-06 — the terminal arm forwards the CODE and still refuses
+  // the MESSAGE. Same four cases, same shape, as the other four routes carrying
+  // the 4xx-forward / 5xx-terminal pair.
+  //
+  // ⚠️ The static sentence is the file-level `GENERIC_COPY` constant declared at
+  // the top of THIS test file — hand-typed there, imported from nothing. It is
+  // deliberately NOT the route's own constant.
+  // ───────────────────────────────────────────────────────────────────────────
+
+  /**
+   * Shaped like what T-140-11 keeps off the wire: FastAPI detail, the
+   * `parseResponse()` contract-drift string and a service base URL.
+   */
+  const LEAKY_5XX_MESSAGE =
+    "InternalError: recompute_allocator raised at match.py:1801 — upstream base http://analytics.invalid:8000";
+
+  it("WIZERR-06 (a) — a 5xx seam error carrying a code forwards THAT code, sentence unchanged", async () => {
+    const { AnalyticsUpstreamError } = await import("@/lib/analytics-client");
+    // The service's own declared 500 residue, `retryable=False`.
+    recomputeState.throwValue = new AnalyticsUpstreamError(
+      "Internal error",
+      500,
+      "INTERNAL",
+    );
+    const res = await postAsAdmin();
+    expect(res.status).toBe(500);
+    const body = await res.json();
+    expect(body.code).toBe("INTERNAL");
+    expect(body.error).toBe(GENERIC_COPY);
+  });
+
+  it("WIZERR-06 (b) — a 5xx seam error with a NULL code still answers UNKNOWN, sentence unchanged", async () => {
+    const { AnalyticsUpstreamError } = await import("@/lib/analytics-client");
+    recomputeState.throwValue = new AnalyticsUpstreamError("upstream exploded", 502);
+    const res = await postAsAdmin();
+    expect(res.status).toBe(500);
+    const body = await res.json();
+    expect(body.code).toBe("UNKNOWN");
+    expect(body.error).toBe(GENERIC_COPY);
+  });
+
+  it("WIZERR-06 (c) — a NON-SEAM throwable answers UNKNOWN, sentence unchanged", async () => {
+    recomputeState.throwValue = new Error("ECONNRESET");
+    const res = await postAsAdmin();
+    expect(res.status).toBe(500);
+    const body = await res.json();
+    expect(body.code).toBe("UNKNOWN");
+    expect(body.error).toBe(GENERIC_COPY);
+  });
+
+  it("WIZERR-06 (d) — NEGATIVE CONTROL: no substring of the thrown message reaches the body", async () => {
+    const { AnalyticsUpstreamError } = await import("@/lib/analytics-client");
+    recomputeState.throwValue = new AnalyticsUpstreamError(
+      LEAKY_5XX_MESSAGE,
+      500,
+      "INTERNAL",
+    );
+    const res = await postAsAdmin();
+    const serialized = JSON.stringify(await res.json());
+
+    // ⚠️ VACUITY GUARD, FIRST — `"anything".includes("")` is `true`.
+    expect(LEAKY_5XX_MESSAGE.trim().length).toBeGreaterThan(40);
+    const tokens = LEAKY_5XX_MESSAGE.split(/\s+/).filter((t) => t.length >= 4);
+    expect(
+      tokens.length,
+      "the leak corpus produced too few usable tokens to be a real control",
+    ).toBeGreaterThan(5);
+
+    for (const token of tokens) {
+      expect(
+        serialized,
+        `the 5xx body leaked "${token}" out of err.message`,
+      ).not.toContain(token);
+    }
+    expect(serialized).not.toContain(LEAKY_5XX_MESSAGE);
+    expect(serialized).toContain("INTERNAL");
   });
 });

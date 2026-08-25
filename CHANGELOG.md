@@ -1,5 +1,49 @@
 # Changelog
 
+## [0.72.0.0] - 2026-08-25
+
+### feat: v1.20 Phase 161 — WIZERR, honest error surfaces
+
+Thirteen founder-hit error surfaces across the wizard, key, CSV and dashboard-dialog lanes now name
+the actual blocker. The rule the phase enforces: no `code: UNKNOWN` where the server classified one,
+no sentence asserting a cause the code has not established, and no remedy naming an action that
+cannot succeed.
+
+The changes users will actually notice:
+
+- **"Try another key" no longer deletes your draft.** It was a remedy that destroyed the work it was
+  offered to save. It is now a pure step transition; the deliberate delete paths keep their
+  confirmation, byte-identical.
+- **A live key that no strategy uses gets an honest refusal** (`KEY_ORPHANED`) instead of a false
+  `DRAFT_ALREADY_EXISTS` 409. The orphan is permanent — the nightly sweep builds its candidate set
+  only from drafts it is deleting that same run, so a key with no draft is never a candidate again.
+- **`KEY_UNDECRYPTABLE` says "reconnect the key"**, not "try again". Retrying an undecryptable key can
+  never work.
+- **The MT5 gateway names which switch is off** — algorithmic trading vs external Python API — derived
+  from the `terminal_info` flags the probe already holds, and stays inside the curated-message fence.
+- **`AUTH_FAILED` names the venue you actually selected**, never Deribit while Binance is chosen.
+- **CSV verdicts stop inventing numbers.** The false "only 0 trade(s)" sentence is replaced by a
+  truthful fourth outcome for examined-but-refused series; the 7-row floor now fires on the composite
+  arm with its own copy; the per-row breakdown never leaks `'nan'` and never echoes untrusted cell
+  contents back to the page.
+- **A write whose outcome is genuinely unknown now says so.** `DASHBOARD_WRITE_FAILED` used to assert
+  "Nothing was saved" on arms the routes' own comments call indeterminate — including an upsert where
+  RLS may have eaten the row *after* the write landed. Ten of fifteen emitters were reclassified, and
+  the indeterminate ones no longer offer a blind Retry against a possibly-applied money write.
+- **The three dashboard dialogs stop minting `code: UNKNOWN`**, and the five terminal 5xx arms forward
+  the recognized seam code while keeping every static sentence byte-identical.
+- **`Retry-After` threads end to end**, and renders a wait only when the server actually advertised
+  one — never a default, never zero.
+
+Under the surface, four new coverage laws derive their populations from route source rather than a
+hand-maintained list, so a new arm cannot go dark silently. Each asserts a non-empty population,
+because a law over an empty set passes trivially.
+
+**Known and deliberately out of scope**, recorded in `TODOS.md` rather than half-fixed: the MT5
+generic fallback still names a cause it has not proven (items 0.05); a manager has no surface to
+release an orphaned key, so the honest refusal above currently has nowhere to send them (0.06); and
+the composite arm hardcodes one provenance reason for every inadmissible verdict (0.07).
+
 ## [0.71.2.2] - 2026-08-24
 
 ### docs: track the ledger-venue refresh as a real phase

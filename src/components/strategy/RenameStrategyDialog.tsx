@@ -7,6 +7,10 @@ import { Button } from "@/components/ui/Button";
 import { Field } from "@/components/ui/Field";
 import { ErrorEnvelope } from "@/components/error/ErrorEnvelope";
 import { buildEnvelope, type ErrorEnvelope as ErrorEnvelopeShape } from "@/lib/envelope";
+import {
+  recogniseDashboardDialogCode,
+  type DashboardDialogRoute,
+} from "@/lib/wizardErrors";
 import { MAGNITUDE_CAPS } from "@/lib/closed-sets";
 import { newCorrelationId } from "@/lib/correlation-id-client";
 
@@ -38,6 +42,14 @@ import { newCorrelationId } from "@/lib/correlation-id-client";
  * this phase's forms must not re-introduce the terminal-envelope class for
  * those. Every other failure is the canonical envelope.
  *
+ * 161-10 / WIZERR-07 — WHICH ARM IS WHICH IS DECIDED BY THE ROUTE'S `code`,
+ * not by its `error` sentence. The prose-keyed `ROUTE_FIELD_ERRORS` lookup this
+ * file used to carry is retired: it recognised two arms out of nine, minted
+ * `code: "UNKNOWN"` for the rest, and would have broken silently on any
+ * rewording. There is deliberately NO replacement table here — the roster lives
+ * once, in `DASHBOARD_DIALOG_ROUTE_CODES` (src/lib/wizardErrors.ts), so the
+ * coverage law can read it and so the guarded cast happens in one audited spot.
+ *
  * D-17 (private/draft only) is enforced on the SERVER — the route's UPDATE
  * chain filters on status, so a published row answers 404. The render gates on
  * both surfaces are defence in depth, not the gate.
@@ -57,11 +69,14 @@ const MAX_NAME_LENGTH = MAGNITUDE_CAPS.MAX_NAME_CHARS;
 const ERROR_EMPTY = "Enter a name.";
 const ERROR_TOO_LONG = `Keep it under ${MAX_NAME_LENGTH} characters.`;
 
-/** The route's two field-level refusals, mapped to their inline copy. */
-const ROUTE_FIELD_ERRORS: Record<string, string> = {
-  "invalid name": ERROR_EMPTY,
-  "name too long": ERROR_TOO_LONG,
-};
+/**
+ * 161-10 / WIZERR-07 — THE ROUTE THIS DIALOG WRITES THROUGH, named once.
+ *
+ * The literal is the roster key in `DASHBOARD_DIALOG_ROUTE_CODES`
+ * (src/lib/wizardErrors.ts), which is what makes recognition PER-ROUTE: this
+ * dialog admits the codes the name route emits and not the whole vocabulary.
+ */
+const ROUTE: DashboardDialogRoute = "strategies/[id]/name";
 
 export function RenameStrategyDialog({
   open,
@@ -137,19 +152,49 @@ export function RenameStrategyDialog({
       });
 
       if (!res.ok) {
-        if (res.status === 400) {
-          const body = (await res.json()) as { error?: unknown };
-          const inline =
-            typeof body.error === "string"
-              ? ROUTE_FIELD_ERRORS[body.error]
-              : undefined;
-          if (inline) {
-            failField(inline);
-            setStatus("idle");
-            return;
-          }
+        // 161-10 / WIZERR-07 — DISCRIMINATE ON THE CODE, NOT THE PROSE.
+        //
+        // This block used to read `body.error` through a local prose-keyed
+        // `ROUTE_FIELD_ERRORS` table, which recognised exactly two of the
+        // route's nine error arms and rendered `buildEnvelope("UNKNOWN", …)` —
+        // "we could not classify this failure" — for the other seven, every
+        // one of which the route classifies precisely. It also broke silently
+        // the moment a sentence was reworded, which is the anti-pattern
+        // `keys/validate-and-encrypt`'s SEAMUX-03 comment names verbatim.
+        //
+        // A body we cannot read yields `null` and falls through to UNKNOWN,
+        // which is the honest verdict for a response we could not parse.
+        const body = (await res.json().catch(() => null)) as {
+          code?: unknown;
+        } | null;
+        const wireCode = body?.code;
+
+        // FIELD-LEVEL FIRST. These two arms land INLINE at the Name input, not
+        // in the envelope: they are field problems with a field remedy, and
+        // this phase's forms must not re-introduce the terminal-envelope class
+        // for them. It is also what keeps the correlation id OFF an actionable
+        // arm (161-UI-SPEC Copy Principle 4) — an inline message renders no
+        // envelope, so there is no diagnostics block to compete with the fix.
+        //
+        // ⛔ Deliberately NOT `WizardErrorCode`s and NOT members of this
+        // route's roster; see `DASHBOARD_DIALOG_ROUTE_CODES` for that record.
+        if (wireCode === "NAME_REQUIRED" || wireCode === "NAME_TOO_LONG") {
+          failField(
+            wireCode === "NAME_TOO_LONG" ? ERROR_TOO_LONG : ERROR_EMPTY,
+          );
+          setStatus("idle");
+          return;
         }
-        setEnvelope(buildEnvelope("UNKNOWN", correlationId));
+
+        // Everything else is the canonical envelope. The recogniser holds the
+        // ONE guarded cast (Pitfall 4): an unrostered or unreadable code
+        // answers UNKNOWN by design rather than by accident.
+        setEnvelope(
+          buildEnvelope(
+            recogniseDashboardDialogCode(ROUTE, wireCode),
+            correlationId,
+          ),
+        );
         setStatus("idle");
         return;
       }

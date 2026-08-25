@@ -6,6 +6,10 @@ import { Modal } from "@/components/ui/Modal";
 import { Button } from "@/components/ui/Button";
 import { ErrorEnvelope } from "@/components/error/ErrorEnvelope";
 import { buildEnvelope, type ErrorEnvelope as ErrorEnvelopeShape } from "@/lib/envelope";
+import {
+  recogniseDashboardDialogCode,
+  type DashboardDialogRoute,
+} from "@/lib/wizardErrors";
 import { formatUsd } from "@/lib/dollar-validation";
 import { newCorrelationId } from "@/lib/correlation-id-client";
 import { TEAM_REVIEW, type CapitalOwnership } from "@/lib/capital-ownership";
@@ -43,11 +47,35 @@ import { CapitalOwnershipRadioGroup } from "./CapitalOwnershipRadioGroup";
  * lose is named (T-150-30).
  */
 
-/** The 409 refusal body. `allocated_amount` is the sum the route computed. */
+/**
+ * The 409 refusal body. `allocated_amount` is the sum the route computed.
+ *
+ * 161-10 / WIZERR-07 — `code` is the discriminator. The route also still sends
+ * the legacy `error: "live_allocation"` key (byte-identical, route.ts:289), but
+ * it is deliberately NOT a field on this type: a shape nothing reads has no
+ * business being declared, and declaring it would invite the next reader to
+ * branch on it again.
+ */
 interface LiveAllocationRefusal {
-  error?: unknown;
+  code?: unknown;
   allocated_amount?: unknown;
 }
+
+/**
+ * 161-10 / WIZERR-07 — THE ROUTE THIS DIALOG WRITES THROUGH, named once.
+ *
+ * The literal is the roster key in `DASHBOARD_DIALOG_ROUTE_CODES`
+ * (src/lib/wizardErrors.ts): this dialog admits the codes the ownership route
+ * emits and not the whole vocabulary.
+ */
+const ROUTE: DashboardDialogRoute = "strategies/[id]/ownership";
+
+/**
+ * The ownership route's 409 token — a QUESTION, not a refusal to read and
+ * leave, which is why it is deliberately NOT a `WizardErrorCode` and never
+ * reaches `buildEnvelope`. Answering it swaps in the confirmation body below.
+ */
+const LIVE_ALLOCATION_CODE = "LIVE_ALLOCATION";
 
 export function MarkOwnershipDialog({
   open,
@@ -118,9 +146,24 @@ export function MarkOwnershipDialog({
         ),
       });
 
-      if (res.status === 409) {
-        const refusal = (await res.json()) as LiveAllocationRefusal;
-        if (refusal.error === "live_allocation") {
+      if (!res.ok) {
+        // 161-10 / WIZERR-07 — ONE body read, then discriminate on the CODE.
+        //
+        // This used to read `refusal.error === "live_allocation"` — prose — and
+        // build `buildEnvelope("UNKNOWN", …)` for every other arm, i.e. "we
+        // could not classify this failure" for a signed-out session, a rate
+        // limit, five distinct internal faults and two 404s, all of which the
+        // route classifies precisely.
+        //
+        // A body we cannot read yields `null` and falls through to UNKNOWN,
+        // which is the honest verdict for a response we could not parse. That
+        // is also a behaviour change worth naming: the previous code let a
+        // 409 with an unreadable body THROW into the transport `catch` below.
+        const refusal = (await res
+          .json()
+          .catch(() => null)) as LiveAllocationRefusal | null;
+
+        if (res.status === 409 && refusal?.code === LIVE_ALLOCATION_CODE) {
           // The route wrote nothing. Show the consequence with the amount and
           // wait for an explicit confirmation.
           setPendingRemoval({
@@ -133,10 +176,15 @@ export function MarkOwnershipDialog({
           setStatus("idle");
           return;
         }
-      }
 
-      if (!res.ok) {
-        setEnvelope(buildEnvelope("UNKNOWN", correlationId));
+        // The recogniser holds the ONE guarded cast (Pitfall 4): an unrostered
+        // or unreadable code answers UNKNOWN by design rather than by accident.
+        setEnvelope(
+          buildEnvelope(
+            recogniseDashboardDialogCode(ROUTE, refusal?.code),
+            correlationId,
+          ),
+        );
         setStatus("idle");
         return;
       }

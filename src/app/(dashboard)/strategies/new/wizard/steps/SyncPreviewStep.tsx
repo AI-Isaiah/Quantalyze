@@ -13,6 +13,7 @@ import { KeyPermissionBadge } from "@/components/connect/KeyPermissionBadge";
 import {
   checkStrategyGate,
   isDailyReturnsSourced,
+  STRATEGY_GATE_MIN_CSV_ROWS,
   type StrategyGateResult,
 } from "@/lib/strategyGate";
 import {
@@ -331,9 +332,14 @@ export interface SyncPreviewStepProps {
   /**
    * WIZ-03 (non-destructive composite review). Composite "Review your keys"
    * navigates back to `connect_key` WITHOUT deleting the draft or minting a
-   * fresh session (the destructive `onTryAnotherKey` path is single-key only).
-   * When absent, the composite buttons fall back to `onTryAnotherKey` so a
-   * missing wiring degrades to the prior behaviour rather than a dead click.
+   * fresh session. When absent, the composite buttons fall back to
+   * `onTryAnotherKey` so a missing wiring degrades rather than dead-clicking —
+   * and since 161-04 that fallback is SAFE: `onTryAnotherKey` is itself a pure
+   * step transition now, so the degraded path destroys nothing either.
+   * (This sentence previously read "the destructive `onTryAnotherKey` path is
+   * single-key only". That became false when 161-04 landed; 188369db's message
+   * claimed the stale comments were "corrected in both files" but `git show
+   * --stat` shows it opened only WizardClient.tsx and its test. Corrected here.)
    */
   onReviewKeys?: () => void;
   /**
@@ -1284,11 +1290,12 @@ export function SyncPreviewStep({
             // guaranteed by the repoll guard directly above, so the predicate's
             // row-count term cannot be what refuses here; only the verdict can.
             //
-            // NOT ADDRESSED, deliberately: the admin path also applies a 7-row
-            // CSV floor that this arm still does not. That divergence is
-            // PRE-EXISTING — it predates this phase and is not what FIX 3 is
-            // about — so closing it here would be scope the review did not ask
-            // for. Recorded in 142.2-FIXES.md rather than silently fixed.
+            // 161-07 / WIZERR-09 CLOSES THE DIVERGENCE THIS COMMENT RECORDED.
+            // What stood here said the admin path "also applies a 7-row CSV
+            // floor that this arm still does not", booked to 142.2-FIXES.md
+            // rather than silently fixed. The floor is applied below now, so
+            // the note is replaced rather than left standing as a description
+            // of behaviour that no longer exists.
             const compositeAdmissible = isDailyReturnsSourced({
               // Zero BY CONSTRUCTION for a composite; this arm never queries
               // `trades` and must not start.
@@ -1307,6 +1314,50 @@ export function SyncPreviewStep({
                 wizard_session_id: wizardSessionId,
                 step: "sync_preview",
                 code: "GATE_SERIES_PROVENANCE_UNVERIFIED",
+                trade_count: 0,
+              });
+              return "done";
+            }
+
+            // ── 161-07 / WIZERR-09: THE 7-DAY FLOOR, ON THIS ARM AT LAST ────
+            //
+            // EVALUATION ORDER IS THE ADMIN PATH'S ORDER, AND IT IS LOAD-BEARING.
+            // `checkStrategyGate` evaluates the floor INSIDE the admitted branch
+            // (`if (dailyReturnsSourced) { if (csvRowCount < …) }`), so an
+            // inadmissible verdict is answered by the verdict arm and never by
+            // the row count. That is why this check sits BELOW the admissibility
+            // return above rather than in front of it: reversing the two would
+            // tell a composite whose stitch never stamped a verdict that it is
+            // "short of history", which is a different — and unwinnable — claim.
+            //
+            // THE THRESHOLD IS IMPORTED, NEVER RE-TYPED. `STRATEGY_GATE_MIN_CSV_ROWS`
+            // is the one declaration; only the comparison is restated here, and
+            // its direction is pinned on BOTH sides (`strategyGate.test.ts`'s
+            // exactly-7 case; this arm's 6/7 pair in
+            // `SyncPreviewStep.composite.render.test.tsx`).
+            //
+            // ⚠️ WHY NOT `checkStrategyGate` WHOLESALE, given `strategyGate.ts`'s
+            // own "a shared function, not a comment" lesson: that function also
+            // owns the four `computationStatus` arms, and THIS arm has already
+            // decided that question through its own poll state machine (the
+            // `failed` branch above renders the failing member by name). Feeding
+            // it a second time could answer `ANALYTICS_MISSING` / `_PENDING` /
+            // `_COMPUTING`, all three of which `gateFailureToWizardError` maps to
+            // UNKNOWN by design — a generic sentence on a screen that already
+            // knows the real state. It also owns `StrategyGateUnevaluableError`,
+            // a THROW that this arm's catch would book as a heavy-fetch fault.
+            // Both are trade/status logic that is zero by construction for a
+            // composite, which is the case the task's own action text names.
+            //
+            // `series.length >= 1` is guaranteed by the R2-5 repoll guard above,
+            // so the reachable failing range here is 1..6 — never 0.
+            if (series.length < STRATEGY_GATE_MIN_CSV_ROWS) {
+              setErrorCode("GATE_INSUFFICIENT_CSV_HISTORY");
+              setPhase("gate_failed");
+              trackForQuantsEventClient("wizard_error", {
+                wizard_session_id: wizardSessionId,
+                step: "sync_preview",
+                code: "GATE_INSUFFICIENT_CSV_HISTORY",
                 trade_count: 0,
               });
               return "done";
@@ -1963,9 +2014,13 @@ export function SyncPreviewStep({
    *   2. `compositeReviewIsAvailable` — the composite route destroys nothing
    *      (`onReviewKeys` is a pure step transition, WIZ-03), so it is offered
    *      unconditionally. It requires the prop to be PRESENT: without it the
-   *      button falls back to `onTryAnotherKey`, i.e. it is destructive while
-   *      wearing the non-destructive label, and gating on `isComposite` alone
-   *      would ship exactly that.
+   *      button falls back to `onTryAnotherKey`, which loses the composite
+   *      review semantics (it returns to `connect_key` rather than the key
+   *      list), so gating on `isComposite` alone would ship the wrong
+   *      destination. It is NOT a destructiveness hazard: since 161-04
+   *      `onTryAnotherKey` is a pure step transition and deletes nothing.
+   *      (This previously read "it is destructive while wearing the
+   *      non-destructive label" — false at HEAD.)
    *   3. The non-destructive `<Link>` renders ALWAYS, not as an else-branch.
    *      An either/or leaves `GATE_INSUFFICIENT_TRADES` and
    *      `GATE_INSUFFICIENT_DAYS` — which legitimately EARN key replacement and
@@ -1988,10 +2043,25 @@ export function SyncPreviewStep({
    */
   const compositeReviewIsAvailable = isComposite && Boolean(onReviewKeys);
   /**
-   * `onTryAnotherKey` fires `handleDeleteDraft()` in WizardClient: it DESTROYS
-   * the draft and every `strategy_keys` member under it. Correct for a REJECTED
-   * key — which is what "this account has too little history, bring a different
-   * one" means — and wrong everywhere else.
+   * ⚠️ CORRECTED AT 161-07. This block used to read: "`onTryAnotherKey` fires
+   * `handleDeleteDraft()` in WizardClient: it DESTROYS the draft and every
+   * `strategy_keys` member under it." That was true when written and 161-04 /
+   * WIZERR-02 made it FALSE — the handler is now a pure step transition
+   * (`setStep("connect_key")` + `persistPointer`, MEASURED at HEAD in
+   * `WizardClient.tsx`, whose only production render of this step it is). The
+   * sentence is replaced rather than left standing, because a comment claiming
+   * this control is destructive is exactly what would make the next editor
+   * strip `try_another_key` from a code that legitimately earns it — which is
+   * how 161-07's own `GATE_SERIES_EXAMINED_REFUSED` would lose the only remedy
+   * that can succeed for it.
+   *
+   * WHAT THE EARNING STILL MEANS, unchanged: `try_another_key` is the action
+   * that means *replace the key*, so it is what puts a key-replacement control
+   * on screen. A code whose actions are `start_fresh` / `request_call` /
+   * `clear_and_retry` has not asked for one. Conditions 1–3 above are all still
+   * live; only the destructiveness of condition 2's FALLBACK has changed, and
+   * that fallback's label-vs-behaviour argument survives on its own terms (a
+   * button reading "Review your keys" must not run the single-key path).
    */
   const keyReplacementIsEarned = errorActions.includes("try_another_key");
   const showKeyControl = compositeReviewIsAvailable || keyReplacementIsEarned;

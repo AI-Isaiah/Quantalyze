@@ -268,7 +268,11 @@ describe("PATCH /api/strategies/[id]/name — name validation (reject, never tru
   ])("rejects %s with 400 'invalid name' and no token burned", async (_label, name) => {
     const res = await PATCH(makeReq({ name }), makeCtx());
     expect(res.status).toBe(400);
-    await expect(res.json()).resolves.toEqual({ error: "invalid name" });
+    // 161-10 — the SENTENCE is byte-identical; `code` is purely additive.
+    await expect(res.json()).resolves.toEqual({
+      code: "NAME_REQUIRED",
+      error: "invalid name",
+    });
     expect(recorders.rateLimitCalls).toHaveLength(0);
     expect(updateQueries()).toHaveLength(0);
   });
@@ -281,7 +285,10 @@ describe("PATCH /api/strategies/[id]/name — name validation (reject, never tru
   ])("rejects %s with 400 'invalid name'", async (_label, body) => {
     const res = await PATCH(makeReq(body), makeCtx());
     expect(res.status).toBe(400);
-    await expect(res.json()).resolves.toEqual({ error: "invalid name" });
+    await expect(res.json()).resolves.toEqual({
+      code: "NAME_REQUIRED",
+      error: "invalid name",
+    });
     expect(recorders.rateLimitCalls).toHaveLength(0);
   });
 
@@ -299,7 +306,10 @@ describe("PATCH /api/strategies/[id]/name — name validation (reject, never tru
       makeCtx(),
     );
     expect(res.status).toBe(400);
-    await expect(res.json()).resolves.toEqual({ error: "name too long" });
+    await expect(res.json()).resolves.toEqual({
+      code: "NAME_TOO_LONG",
+      error: "name too long",
+    });
     expect(recorders.rateLimitCalls).toHaveLength(0);
     expect(updateQueries()).toHaveLength(0);
   });
@@ -444,5 +454,181 @@ describe("PATCH /api/strategies/[id]/name — source pins", () => {
     const stamps = (CODE.match(/NO_STORE_HEADERS/g) ?? []).length;
     expect(responses).toBeGreaterThan(0);
     expect(stamps).toBeGreaterThanOrEqual(responses + 1);
+  });
+});
+
+/**
+ * [161-10 / WIZERR-07] EVERY ERROR ARM CARRIES A CODE, AND NO SENTENCE MOVED.
+ *
+ * Two independent claims, and the plan requires BOTH — the second is what makes
+ * the first safe to ship:
+ *
+ *   1. every arm this route can answer with now puts a stable machine token on
+ *      the wire, so `RenameStrategyDialog` discriminates on a token instead of
+ *      matching prose (the SEAMUX-03 intent);
+ *   2. the `error` SENTENCE of every arm is byte-identical to what shipped
+ *      before, so `code` is purely additive and no other consumer of this route
+ *      changes behaviour.
+ *
+ * ⛔ THE SENTENCES BELOW ARE HAND-TYPED. Importing them from the route — or
+ * asserting only `typeof body.error === "string"` — would make this suite agree
+ * with any rewording, which is precisely the drift claim (2) exists to refuse.
+ *
+ * ⚠️ The CSRF arm is deliberately absent from this table. It is emitted by the
+ * shared `assertSameOrigin` helper in `src/lib/csrf.ts`, which serves many
+ * routes; coding it is a cross-cutting change this plan did not scope. It is
+ * recorded as an explicit terminal-UNKNOWN disposition in
+ * `src/lib/dialog-envelope.invariant.test.ts` rather than left as an omission.
+ */
+describe("[161-10 / WIZERR-07] the name route classifies every arm it refuses", () => {
+  /**
+   * One row per REACHABLE error arm, in source order. Hand-typed from the
+   * route's arms read at HEAD — never derived from the route, which would make
+   * the count agree with a deletion.
+   */
+  const ARMS: ReadonlyArray<{
+    label: string;
+    status: number;
+    code: string;
+    sentence: string;
+    run: () => Promise<Response>;
+  }> = [
+    {
+      label: "no session",
+      status: 401,
+      code: "DASHBOARD_SIGNED_OUT",
+      sentence: "unauthorized",
+      run: () => {
+        recorders.user = null;
+        return PATCH(makeReq({ name: "Helios" }), makeCtx()) as Promise<Response>;
+      },
+    },
+    {
+      label: "malformed strategy id",
+      status: 400,
+      code: "DASHBOARD_REQUEST_INVALID",
+      sentence: "id must be a UUID",
+      run: () =>
+        PATCH(makeReq({ name: "Helios" }), makeCtx("not-a-uuid")) as Promise<Response>,
+    },
+    {
+      label: "unparseable body",
+      status: 400,
+      code: "DASHBOARD_REQUEST_INVALID",
+      sentence: "invalid json",
+      run: () => PATCH(makeReq("not json {{"), makeCtx()) as Promise<Response>,
+    },
+    {
+      label: "empty after trim (FIELD-LEVEL)",
+      status: 400,
+      code: "NAME_REQUIRED",
+      sentence: "invalid name",
+      run: () => PATCH(makeReq({ name: "   " }), makeCtx()) as Promise<Response>,
+    },
+    {
+      label: "over the cap (FIELD-LEVEL)",
+      status: 400,
+      code: "NAME_TOO_LONG",
+      sentence: "name too long",
+      run: () =>
+        PATCH(
+          makeReq({ name: "a".repeat(MAX_NAME_LENGTH + 1) }),
+          makeCtx(),
+        ) as Promise<Response>,
+    },
+    {
+      label: "limiter exhausted",
+      status: 429,
+      code: "RATE_LIMITED",
+      sentence: "Too many requests",
+      run: () => {
+        recorders.rateLimitResponse = { success: false, retryAfter: 30 };
+        return PATCH(makeReq({ name: "Helios" }), makeCtx()) as Promise<Response>;
+      },
+    },
+    {
+      // ⛔ 161-REVIEW / CR-01 — RE-POINTED, and the reason is recorded rather
+      // than the literal quietly swapped. The UPDATE was SENT before this arm
+      // returned. `supabase-js` reports a PostgREST rejection (rolled back) and
+      // a transport failure (may have committed, answer lost) through the same
+      // `{ data, error }` shape, and this arm does not discriminate them — so
+      // it cannot VERIFY that the rename did not land, and
+      // `DASHBOARD_WRITE_FAILED`'s "Nothing was saved" was an assertion.
+      // The SENTENCE and STATUS are byte-identical; only the code moved.
+      label: "the UPDATE itself errored",
+      status: 500,
+      code: "DASHBOARD_WRITE_INDETERMINATE",
+      sentence: "internal error",
+      run: () => {
+        recorders.results["strategies:update"] = {
+          data: null,
+          error: makePgError("db down"),
+        };
+        return PATCH(makeReq({ name: "Helios" }), makeCtx()) as Promise<Response>;
+      },
+    },
+    {
+      label: "zero rows matched (wrong owner / unknown id / published)",
+      status: 404,
+      code: "DASHBOARD_ROW_STALE",
+      sentence: "strategy not found",
+      run: () => {
+        recorders.results["strategies:update"] = { data: [], error: null };
+        return PATCH(makeReq({ name: "Helios" }), makeCtx()) as Promise<Response>;
+      },
+    },
+  ];
+
+  it("the arm table is non-empty and covers every arm measured at HEAD", () => {
+    // ⛔ NEVER `ARMS.length` compared against itself. 8 is hand-typed from the
+    // route read at HEAD: 401, 400×4 (uuid / json / invalid-name / too-long),
+    // 429, 500, 404. The route's second `invalid name` arm (a non-string
+    // `name`) answers the SAME status, code and sentence as the first, so it is
+    // one row here and is exercised separately by the validation describe above.
+    expect(ARMS.length).toBe(8);
+  });
+
+  it.each(ARMS.map((a) => [a.label, a] as const))(
+    "%s answers its own code with its sentence unchanged",
+    async (_label, arm) => {
+      const res = await arm.run();
+      expect(res.status).toBe(arm.status);
+      const body = (await res.json()) as { code?: unknown; error?: unknown };
+
+      // NON-VACUITY: a blank sentence would make the equality below pass
+      // against a route that answered nothing at all.
+      expect(typeof body.error).toBe("string");
+      expect(String(body.error).length).toBeGreaterThan(0);
+
+      expect(body.error).toBe(arm.sentence);
+      expect(body.code).toBe(arm.code);
+    },
+  );
+
+  it("every arm's code is UPPER_SNAKE and never the generic terminal", () => {
+    for (const arm of ARMS) {
+      expect(arm.code).toMatch(/^[A-Z][A-Z0-9_]*$/);
+      // The whole requirement: an arm the route classified must not reach the
+      // client as "we could not classify this failure".
+      expect(arm.code).not.toBe("UNKNOWN");
+    }
+  });
+
+  it("SOURCE PIN: every code literal is written FIRST in its object literal", () => {
+    // The coverage laws derive their populations with a `code:`-first
+    // predicate, so an arm written `{ error, code }` is invisible to them (the
+    // D-34 reorder). A comment-stripped scan, so prose cannot satisfy it.
+    const src = readFileSync(
+      join(process.cwd(), "src/app/api/strategies/[id]/name/route.ts"),
+      "utf8",
+    )
+      .replace(/\/\*[\s\S]*?\*\//g, "")
+      .replace(/^\s*\/\/.*$/gm, "");
+
+    const codeFirst = (src.match(/\{ code: "[A-Z][A-Z0-9_]*", error:/g) ?? []).length;
+    // 9 emitters in source (the two `invalid name` arms are separate sites).
+    expect(codeFirst).toBe(9);
+    // …and NOT ONE arm is written the other way round.
+    expect(src).not.toMatch(/\{ error: "[^"]*", code:/);
   });
 });

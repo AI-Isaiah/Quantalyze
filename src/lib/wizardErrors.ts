@@ -53,7 +53,11 @@ import { CircuitOpenError } from "@/lib/seam-errors";
 // constant the server arm and the field guards read; a bound typed as a literal
 // into a sentence is how the client came to promise a rule the server did not
 // enforce (the three-failed-submit incident).
-import { MAGNITUDE_CAPS, venueIsSubstitutable } from "./closed-sets";
+import {
+  MAGNITUDE_CAPS,
+  venueIsSubstitutable,
+  type SupportedExchange,
+} from "./closed-sets";
 
 export type WizardErrorCode =
   // Key validation (ConnectKeyStep)
@@ -216,6 +220,54 @@ export type WizardErrorCode =
   // fail again. Same reading `COMPOSITE_TOO_MANY_MEMBERS` and `SEAM_MISCONFIGURED`
   // are authored under.
   | "VENUE_ALREADY_CONNECTED"
+  // 161-05 / WIZERR-03 — THE THIRD ANSWER THE VENUE FENCE OWED, and the one
+  // `create-with-key` explicitly DECLINED to mint. Its 23505 race arm carried
+  // the rationale it was declined under: minting a member "would move the
+  // copy-table pins (EXPECTED_TABLE_SIZE) for a state the user cannot act on
+  // differently anyway".
+  //
+  // ⛔ THAT SECOND HALF IS NOW FALSE, AND ITS FALSENESS IS WHY THIS MINTS.
+  // WIZERR-03 establishes that a remedy DOES exist — connect a different
+  // account — so the user CAN act differently. What the fallthrough actually
+  // bought was a cheaper pin move, paid for with a false sentence.
+  //
+  // WHAT RENDERED BEFORE: the byte-pinned `DRAFT_ALREADY_EXISTS` 409, false on
+  // BOTH halves here. "A wizard session with this key is already in progress" —
+  // there is no session, and that is MEASURED at the resolver rather than
+  // assumed: this arm is reached precisely because no `source='wizard'` /
+  // `status='draft'` row survives, so `resolveByVenueIdentity` never returns
+  // `kind:"draft"` on it. And the remedies that entry offers (`resume_draft`,
+  // `start_fresh`) send the user to a draft that does not exist and then offer
+  // to delete it.
+  //
+  // ⛔ NOT AN ALIAS IN `SEAM_CODE_TO_WIZARD_CODE`, on `STALE_CLIENT`'s rule
+  // above: that table translates codes ANOTHER service put on the wire. This
+  // one is minted by our own route, so it is a wizard member outright.
+  //
+  // ⚠️ AND NO INCUMBENT COULD TAKE IT. The two nearest were read AT THE EMITTER
+  // rather than matched on their names:
+  //   · `DRAFT_ALREADY_EXISTS` — see above; no draft exists on this arm.
+  //   · `VENUE_ALREADY_CONNECTED` — "already backs a strategy of yours". Here
+  //     NOTHING backs it: the emitter is reached only after the owner read came
+  //     back EMPTY, so that sentence asserts a strategy the server has just
+  //     measured is absent, and its first remedy ("open the strategy that
+  //     already uses this account") is unwinnable by construction.
+  //
+  // RECOVERABLE — DERIVED, NOT DECLARED. `actions` carries `try_another_key`, a
+  // member of `RECOVERABLE_ACTIONS` (src/lib/envelope.ts), so `buildEnvelope`
+  // derives `recoverable: true` and a Retry control renders. That is honest
+  // only because of two MEASURED facts, and it stops being honest if either
+  // changes:
+  //   · 161-04 made "Try another key" a pure step transition — it no longer
+  //     deletes the draft, so the one remedy offered here cannot destroy the
+  //     work it was offered to save;
+  //   · on ConnectKeyStep the Retry control is `onRetry={() => setErrorCode(null)}`
+  //     — it clears the banner and returns the user to the form. It does NOT
+  //     resubmit.
+  // ⛔ WHICH IS WHY `clear_and_retry` IS ABSENT. Its whole meaning is "send the
+  // same thing again", and the same key is refused identically — the DB index
+  // is what refused it, and nothing about the second attempt differs.
+  | "KEY_ORPHANED"
   // Sync + gate (SyncPreviewStep) — these wrap strategyGate.ts codes
   | "SYNC_TIMEOUT"
   | "SYNC_FAILED"
@@ -228,6 +280,84 @@ export type WizardErrorCode =
   // strategy is not short of trades, it is short of PROVENANCE, and its remedy
   // is a re-sync rather than a different key.
   | "GATE_SERIES_PROVENANCE_UNVERIFIED"
+  // 161-07 / WIZERR-09 — the 7-day floor on a DAILY-RETURN series, which the
+  // wizard could not render until this commit.
+  //
+  // WHAT RENDERED BEFORE: `UNKNOWN`. `gateFailureToWizardError` answered
+  // `INSUFFICIENT_CSV_HISTORY` with the generic unknown-error sentence under a
+  // comment asserting the code "never flows through the wizard error mapper" —
+  // true only for as long as the wizard's composite arm declined to evaluate
+  // the floor at all (`SyncPreviewStep.tsx`, "NOT ADDRESSED, deliberately").
+  // This member and that arm's floor land in ONE commit precisely so no build
+  // exists in which the wizard can refuse on row count and then explain the
+  // refusal with "something went wrong".
+  //
+  // ⛔ NOT AN ALIAS. `SEAM_CODE_TO_WIZARD_CODE` translates codes ANOTHER
+  // service put on the wire; this one is minted by our own `strategyGate.ts`
+  // and reaches the mapper through `gateFailureToWizardError`. A union member
+  // outright, per the ⛔ block above.
+  //
+  // ⚠️ WHY EACH NEAR NEIGHBOUR WAS REJECTED, read at the gate's own arms:
+  //   · `GATE_INSUFFICIENT_DAYS` measures CALENDAR SPAN between the earliest
+  //     and latest TRADE (`strategyGate.ts` `computeSpanDays`), and is
+  //     unreachable on the daily-returns branch — a strategy here has zero
+  //     trades by construction, so it has no trade span to be short of.
+  //   · `GATE_INSUFFICIENT_TRADES` is the sentence this whole phase exists to
+  //     stop showing to strategies that have a return series and no fills.
+  //   · `GATE_SERIES_PROVENANCE_UNVERIFIED` answers a DIFFERENT question. This
+  //     series HAS an admitted completeness verdict — the floor is evaluated
+  //     only inside the admitted branch. It is short of DAYS, not of
+  //     provenance.
+  //
+  // RECOVERABLE — DERIVED, NOT DECLARED. `actions` carries `clear_and_retry`, a
+  // member of `RECOVERABLE_ACTIONS` (src/lib/envelope.ts), so `buildEnvelope`
+  // derives `recoverable: true` and a Retry renders. Honest here because on
+  // SyncPreviewStep `clear_and_retry` is what `kickoffRetryCanChangeTheOutcome`
+  // keys off: the Retry is wired to `handleKickoffRetry`, which RE-RUNS THE
+  // SYNC rather than resubmitting the same payload. A re-derive that reaches
+  // further history is exactly the thing that clears this floor.
+  | "GATE_INSUFFICIENT_CSV_HISTORY"
+  // 161-07 / WIZERR-10 — a producer DID record how the daily series was built,
+  // and the record does not establish a complete track record.
+  //
+  // WHAT RENDERED BEFORE: `GATE_INSUFFICIENT_TRADES`, i.e. "This account does
+  // not have enough trade history yet" over the gate sentence "Strategy has
+  // only 0 trade(s). A minimum of 5 trades is required." — about a strategy
+  // carrying a full daily-return series and zero fills BY CONSTRUCTION. False,
+  // unwinnable, and (until 161-04) offering a remedy that deleted the draft.
+  //
+  // ⛔ NOT AN ALIAS — minted by our own `strategyGate.ts`, same ground as the
+  // member above.
+  //
+  // ⚠️ WHY EACH NEAR NEIGHBOUR WAS REJECTED, read at the gate arm rather than
+  // matched on the name:
+  //   · `GATE_INSUFFICIENT_TRADES` is the incumbent this replaces, and its own
+  //     copy says why it cannot serve: "We need at least 5 filled trades…
+  //     Sharpe on fewer trades would be noise." Nothing here is about trade
+  //     count.
+  //   · `GATE_SERIES_PROVENANCE_UNVERIFIED` is the OPPOSITE case and its copy
+  //     says so out loud — "nothing on our side recorded how that series was
+  //     built", and its remedy is a re-sync that makes a producer look. Here a
+  //     producer DID look and its record is the reason for the refusal, so a
+  //     re-sync re-derives the same verdict and changes nothing.
+  //   · `GATE_INSUFFICIENT_DAYS` measures a trade span that does not exist on
+  //     this branch.
+  //
+  // RECOVERABLE — DERIVED, NOT DECLARED, AND `clear_and_retry` IS DELIBERATELY
+  // ABSENT. `try_another_key` alone is in `actions`, so `buildEnvelope` derives
+  // `recoverable: true` and a Retry does NOT render on SyncPreviewStep (that
+  // step passes `onRetry` only when the code asks for `clear_and_retry`). That
+  // is the honest arrangement: re-running the sync re-derives the SAME series
+  // by the SAME method and earns the SAME verdict — `fill_derived_unproven` is
+  // stamped unconditionally for its venues, and a historical NAV hole does not
+  // heal. Offering Retry here would be a placebo on a permanent refusal.
+  //
+  // ⚠️ `try_another_key` IS SAFE TO OFFER, and that is a MEASURED fact with a
+  // date on it. 161-04 / WIZERR-02 made `onTryAnotherKey` a pure step
+  // transition; before that it fired `handleDeleteDraft()`, and offering it
+  // here would have answered "your venue's data cannot prove a complete record"
+  // by destroying the user's draft.
+  | "GATE_SERIES_EXAMINED_REFUSED"
   // Metadata step (MetadataStep) — Phase 53 / APPLY-02 inline per-field
   // validation. Copy lives here (the canonical wizard-copy home) so the
   // component never carries an invented inline string (copy-drift guard).
@@ -655,6 +785,207 @@ export type WizardErrorCode =
   //   · UNKNOWN — "we could not classify this failure". We classified it
   //     precisely, which is the whole point.
   | "ALLOCATION_NOT_ALLOCATABLE"
+  // ─────────────────────────────────────────────────────────────────────────
+  // 161-10 / WIZERR-07 — the DASHBOARD DIALOG family.
+  //
+  // Four members minted together for one population: the three dashboard write
+  // dialogs (`AllocateDialog`, `RenameStrategyDialog`, `MarkOwnershipDialog`)
+  // and the three routes behind them (`strategies/[id]/name`,
+  // `strategies/[id]/ownership`, `portfolio-strategies/allocation`).
+  //
+  // ⭐ WHY A NEW FAMILY RATHER THAN REUSE. Every one of these four has a
+  // near-neighbour in this union whose SUBJECT matches and whose SENTENCE does
+  // not. The wizard members were written for a surface that has a draft, an
+  // exchange key and a paste-the-secret step; a rename dialog has none of the
+  // three. Reusing them would swap "we could not classify this failure" for a
+  // sentence that is specific and FALSE, which is a worse trade than the one
+  // this phase exists to make. The rejected near-neighbour is named at each
+  // member below, read at that member's EMITTER, not guessed from its name.
+  //
+  // ⛔ NONE of the four is an alias in `SEAM_CODE_TO_WIZARD_CODE`. That table
+  // translates codes ANOTHER service put on the wire; these are minted by our
+  // own routes, so aliasing them there is the "vocabulary starts lying" failure
+  // that table's docblock warns about. Recognition runs through
+  // `DASHBOARD_DIALOG_ROUTE_CODES` — see its docblock for why the roster is
+  // per-route and why it lives here rather than at each dialog.
+  //
+  // The caller is signed out. All three routes answer 401 `unauthorized` after
+  // `supabase.auth.getUser()` returns no user, BEFORE any write is attempted.
+  //
+  // ⚠️ NOT `SESSION_EXPIRED`, and the rejection was read at that entry rather
+  // than inferred from its name. Its cause says "Your wizard draft is saved on
+  // our side — your form answers and preview are still there" and its fix says
+  // "you will need to paste the secret once more before continuing". There is
+  // no draft, no form answers, no preview and no secret on a dashboard dialog:
+  // both sentences would be false, and the second is an instruction the user
+  // cannot follow (Principle 2 — the remedy must be able to succeed).
+  //
+  // Recoverable: NO. `actions` carries neither member of `RECOVERABLE_ACTIONS`
+  // (src/lib/envelope.ts), so `buildEnvelope` derives `recoverable: false` and
+  // no Retry control renders. Re-issuing the identical request from a signed-out
+  // session is refused identically until the user signs in, so a Retry here is
+  // the false affordance `ALLOCATION_NOT_ALLOCATABLE` above removed for the
+  // same reason.
+  | "DASHBOARD_SIGNED_OUT"
+  // The route refused the REQUEST SHAPE: a non-UUID id in the path, a body that
+  // is not JSON, a mark outside the allowed set, a non-boolean confirmation
+  // flag, a missing `strategy_id`, an amount outside the ticket bound. Every
+  // one of these is a body THIS APPLICATION built — the user types a name or an
+  // amount, never the envelope around it — so a shape refusal is our defect,
+  // and the copy says so rather than implying the user mistyped something.
+  //
+  // ⚠️ NOT `VALIDATION_FAILED`, which is the closest member in this union and
+  // whose title and cause are almost exactly right ("We could not read that
+  // request… The fault is in our software"). Its FIX is what disqualifies it:
+  // "Contact security@quantalyze.com with your draft ID". A dashboard dialog
+  // has no draft and therefore no draft ID, so the one instruction it offers
+  // cannot be carried out. Copying that entry and dropping the clause would
+  // change what every wizard surface says; minting is the surgical move.
+  //
+  // Recoverable: NO. A malformed request re-sent unchanged is refused
+  // identically — the same reasoning `VALIDATION_FAILED` records at its own
+  // `actions`.
+  | "DASHBOARD_REQUEST_INVALID"
+  // Our own service failed BEFORE it sent anything that could change data.
+  // Covers the `internal error` 500s whose failing statement is a READ:
+  // `ownership` 500-a (the portfolio lookup) and 500-b (the position lookup),
+  // `allocation` POST's strategy lookup and its `resolveRealPortfolio` fault,
+  // and `allocation` DELETE's `resolveRealPortfolio` fault.
+  //
+  // ⭐ ONE MEMBER FOR ALL OF THEM, DELIBERATELY. Those sites differ by which
+  // internal query failed, which is a distinction the user cannot act on and
+  // must not be asked to: the situation ("we could not complete your change")
+  // and the remedy ("nothing was saved — try again, and tell us if it repeats")
+  // are identical at every one. Each site already logs its own distinct
+  // server-side line, which is where the distinction belongs. Minting a code
+  // per call site would put an internal call graph in front of a user.
+  //
+  // ⛔ 161-REVIEW / CR-01 — THE POPULATION NARROWED, AND THAT IS THE FIX.
+  // 161-10 pointed this member at EVERY `internal error` 500 on all three
+  // routes, including arms whose own comments say the outcome is unknown. Its
+  // sentence says "Nothing was saved — the strategy is as it was before you
+  // pressed save", which on those arms is a claim the code never established.
+  // Read `:2470` in this file ("'NOTHING WAS SAVED' IS VERIFIED, NOT
+  // ASSERTED") and `SEAM_RESPONSE_UNREADABLE`'s member note above, which
+  // records the same rule from the other side: a code whose outcome is
+  // unknowable may not say "Nothing was saved" — nor "it went through" — in
+  // either direction. Those arms now answer
+  // `DASHBOARD_WRITE_INDETERMINATE` below. THE SENTENCE HERE IS UNCHANGED,
+  // byte for byte: what moved is which arms are entitled to it.
+  //
+  // ⭐ THE MEMBERSHIP RULE, so the next arm is classified rather than guessed:
+  // an arm belongs HERE iff no statement that could alter the user's data has
+  // been sent when it returns. Every member above fails on a SELECT. (The
+  // allocation route's container-provisioning arms are the one place worth
+  // reading twice — an INSERT into `portfolios` has been sent there, so they
+  // are INDETERMINATE, even though the money write itself has not been
+  // reached. "Probably only an empty container" is a guess, and the whole
+  // point of the split is that we stop making those.)
+  //
+  // ⚠️ NOT `SEAM_INTERNAL_FAULT`, whose title is "Something failed on our side
+  // while we checked this key" and whose cause promises "no key was stored".
+  // No key is checked or stored on any of these three routes. ⚠️ And NOT
+  // `SERVICE_UNAVAILABLE_RETRY` / `SERVICE_UNREACHABLE`, which both describe
+  // the ANALYTICS SEAM being unavailable; these failures are inside our own
+  // request handler and never crossed a service boundary.
+  //
+  // Recoverable: YES — `clear_and_retry` is a member of `RECOVERABLE_ACTIONS`,
+  // so a Retry control renders. That is correct here and nowhere else in this
+  // family: a failed READ is the one dashboard failure whose second attempt
+  // genuinely may succeed (a query that errored once can succeed next time),
+  // and because nothing was sent, a retry starts from the state the sentence
+  // describes. The write it then performs is idempotent in effect — it sets a
+  // name, a mark or an amount to a stated value — so a retry cannot double
+  // anything.
+  | "DASHBOARD_WRITE_FAILED"
+  // ⭐ 161-REVIEW / CR-01 — Our own service failed AFTER a data-modifying
+  // statement had already been sent, and we cannot tell what it did.
+  //
+  // Covers the `internal error` 500s on the three dashboard write routes whose
+  // failing operation is a WRITE:
+  //
+  //   · `strategies/[id]/name` — the `strategies` UPDATE errored.
+  //   · `strategies/[id]/ownership` — the flip RPC errored; the flip RPC
+  //     returned no row; the plain `strategies` UPDATE errored.
+  //   · `portfolio-strategies/allocation` — the three container-provisioning
+  //     arms (an INSERT into `portfolios` was sent), the
+  //     `portfolio_strategies` upsert errored, the upsert returned zero rows,
+  //     and the DELETE errored.
+  //
+  // ── WHY "IT ERRORED" IS NOT "IT DID NOT HAPPEN" ─────────────────────────────
+  //
+  // Two distinct mechanisms, both readable from the routes' own code:
+  //
+  //   1. AN ERRORED WRITE IS NOT A VERIFIED ROLLBACK. `supabase-js` collapses a
+  //      PostgREST error (statement rejected — rolled back, nothing saved) and a
+  //      TRANSPORT failure (the statement may have committed and the answer was
+  //      lost) into the SAME `{ data, error }` shape. None of these arms
+  //      discriminates them, so none of them can verify which happened.
+  //   2. A WRITE THAT RETURNS NO ROW IS NOT A WRITE THAT DID NOTHING. The
+  //      allocation route says so itself at the arm — "RLS ate the row, or the
+  //      conflict target drifted" — and "RLS ate the row" means the upsert
+  //      SUCCEEDED and only the returning row was suppressed. The ownership
+  //      route's flip arm says the same: "a RETURNS TABLE function that yields
+  //      no row leaves the counts unknown."
+  //
+  // ⛔ WHY THIS IS A MONEY-PATH CORRECTNESS FIX AND NOT A COPY PREFERENCE. Two
+  // of these arms sit behind operations that remove things:
+  // `flip_capital_ownership_to_team_review` DELETES the caller's live positions
+  // and sets the mark in one transaction, and the allocation upsert is the
+  // money write itself. Telling a user "Nothing was saved" there can hand them
+  // a screen that says their book is untouched while their positions are gone.
+  //
+  // ── WHAT THE COPY MAY NOT SAY, IN EITHER DIRECTION ──────────────────────────
+  //
+  // This is the "'NOTHING WAS SAVED' IS VERIFIED, NOT ASSERTED" rule recorded
+  // at the `CSV_UPSTREAM_FAIL` entry below, applied where it bites. That entry
+  // earns the clause
+  // with three measured layers of no-write; nothing of the sort is available
+  // here. And the obvious correction is a second false claim pointed the other
+  // way — "your change went through" is a guess about a statement we never got
+  // an answer to. `SEAM_RESPONSE_UNREADABLE` (above) is the house precedent for
+  // exactly this shape and its copy is the model: claim only what IS
+  // established (the attempt was made), then send the user to the one place
+  // that settles it.
+  //
+  // ⛔ NOT recoverable, and the absence is load-bearing. `actions` carries
+  // neither member of `RECOVERABLE_ACTIONS`, so `buildEnvelope` derives
+  // `recoverable: false` and NO Retry control renders. The reason is NOT that a
+  // retry is futile — it is that a retry is UNPREDICTABLE and, on the flip arm,
+  // potentially destructive: a one-click Retry against a possibly-applied money
+  // write is the unwinnable-remedy defect this phase exists to remove, wearing a
+  // new hat. `leave_and_return` carries the first step of the ordered remedy —
+  // re-read current state — the same control `SEAM_RESPONSE_UNREADABLE` and
+  // `WIZARD_DUPLICATE` use to send a user to the record rather than at the
+  // button again.
+  //
+  // ⚠️ NOT `DASHBOARD_WRITE_FAILED` (above): its sentence is the precise claim
+  // this arm cannot make. ⚠️ NOT `SEAM_RESPONSE_UNREADABLE`: every clause of it
+  // is about a submission crossing to the analytics service and that service
+  // answering unreadably; these failures never left our own request handler and
+  // there is no submission or strategies list to send the user to.
+  | "DASHBOARD_WRITE_INDETERMINATE"
+  // The row this dialog points at is not there in the form the action needs.
+  // Covers every 404 on the three routes: `strategy not found` (wrong owner,
+  // unknown id, or — on the name route — a PUBLISHED row refused by the D-17
+  // status gate), `portfolio not found`, and `investment row not found`.
+  //
+  // ⭐ THE SENTENCE IS DELIBERATELY ABOUT THE LIST, NOT THE ROW. The routes
+  // merge several causes into one 404 on purpose (distinguishing them would
+  // leak row existence to a caller probing ids), so any copy naming a specific
+  // cause would be a guess. What IS true of every one of them is that the page
+  // the user is looking at describes a state the server no longer agrees with,
+  // and that reloading the list is the action that settles it.
+  //
+  // ⚠️ NOT `GATE_DRAFT_GONE` ("This draft is no longer available") — there is
+  // no draft. ⚠️ NOT `DRAFT_STATE_INVALID`, whose subject is also staleness but
+  // whose every sentence is about a wizard draft. ⚠️ NOT `GUARD_BLOCKED`, which
+  // asserts a permissions verdict this arm cannot establish.
+  //
+  // Recoverable: NO. The server answers 404 to the identical request until the
+  // page is reloaded, so a Retry control would promise that pressing it changes
+  // the outcome. `leave_and_return` names the action that does.
+  | "DASHBOARD_ROW_STALE"
   // Fallback
   | "UNKNOWN";
 
@@ -784,7 +1115,38 @@ export type FixRequirement =
       /** The answer the predicate must give for the bullet to render. */
       readonly is: boolean;
     }
-  | { readonly kind: "surface"; readonly surface: WizardSurface };
+  | { readonly kind: "surface"; readonly surface: WizardSurface }
+  /**
+   * 161-05 / WIZERR-11 — "render only ON this venue". The THIRD kind the union
+   * docblock above pre-authorised: one member here plus one arm in
+   * `requirementMet`, and no new call site.
+   *
+   * ⚠️ NOT A CAPABILITY, AND THE DISTINCTION IS THE REASON THIS EXISTS.
+   * `venueCapability` answers "is this venue the KIND of venue where X holds",
+   * which is what makes one row cover a venue that behaves like MT5. The claim
+   * this gates is not of that shape: "the key is the ClientId and the secret is
+   * the ClientSecret" is a fact about Deribit's own naming, true of Deribit and
+   * of nothing else by definition. Inventing a capability
+   * (`clientIdCredentialNaming`) to express "is deribit" would be a capability
+   * with exactly one possible member forever — the record's generality bought
+   * back at the price of a name that lies about what it measures.
+   *
+   * ⛔ `venue` IS TYPED `SupportedExchange`, so a typo is a COMPILE error at the
+   * table rather than a bullet that silently never renders — the same guarantee
+   * `WizardSurface` gives the `surface` kind, and the reason neither carries a
+   * bare `string`. It is a CLOSED-SET member compared for equality; it is never
+   * interpolated into a sentence, a log line, a URL or a breaker key (D-17).
+   *
+   * ⚠️ ABSENT VENUE ⇒ SUPPRESSED. That is the OPPOSITE of the `venueCapability`
+   * kind directly above, whose predicates are default-permissive so that a
+   * caller predating `WizardErrorContext.venue` keeps its incumbent copy. The
+   * divergence is deliberate and is the whole requirement: a bullet that names
+   * ONE venue is, rendered with the venue unknown, a specific claim about a
+   * user we cannot identify — the false sentence WIZERR-11 exists to remove.
+   * The absence rule here matches `surface`'s ("fail toward saying less"), not
+   * `venueCapability`'s, and the two must not be unified.
+   */
+  | { readonly kind: "venueIs"; readonly venue: SupportedExchange };
 
 /**
  * "Render only when the venue CAN be substituted" — the incumbent bullets.
@@ -834,6 +1196,17 @@ const REQUIRES_CONNECT_SURFACE: FixRequirement = {
   kind: "surface",
   surface: "connect",
 };
+
+/**
+ * "Render only on Deribit" — 161-05 / WIZERR-11's one user.
+ *
+ * ⚠️ ITS ONE BULLET IS A NAMING CLARIFICATION AND NOTHING ELSE. The generic
+ * "re-copy both values" instruction stays UNCONDITIONAL one slot above it, so a
+ * user on any venue — or on none we were told about — still gets a complete,
+ * actionable remedy. Suppressing this bullet removes a Deribit-specific label,
+ * never the instruction, which is what makes the strict absence rule safe here.
+ */
+const REQUIRES_DERIBIT: FixRequirement = { kind: "venueIs", venue: "deribit" };
 
 export interface WizardErrorCopy {
   title: string;
@@ -1003,15 +1376,55 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
     actions: ["clear_and_retry", "request_call"],
   },
 
+  // 161-05 / WIZERR-11 — THIS ENTRY NAMED DERIBIT AT USERS OF EVERY OTHER
+  // VENUE, TWICE.
+  //
+  // The `cause` carried "(e.g. Deribit returns invalid_credentials)" and the
+  // second bullet ended "— on Deribit the key is the ClientId and the secret is
+  // the ClientSecret". This code is returned by the SHARED
+  // `classifyKeyValidationError`, so both sentences reached binance, okx, bybit,
+  // sfox and mt5 users alike: a specific, checkable claim about a venue they are
+  // not on, on the one card whose whole job is to tell them which of two values
+  // is wrong. A user hunting for a "ClientId" in their Binance console is
+  // looking for a different problem — the class this phase exists to remove.
+  //
+  // TWO DIFFERENT FIXES, because the two sentences failed differently:
+  //   · the `cause`'s parenthetical was an ILLUSTRATION of a general fact and is
+  //     simply DELETED. The sentence is complete and true without it, on every
+  //     venue including Deribit, so there is nothing to gate;
+  //   · the bullet carries REAL information for Deribit users, so it is SPLIT.
+  //     The generic re-copy instruction stays unconditional (every venue keeps a
+  //     complete remedy) and the venue-specific NAMING becomes its own bullet,
+  //     gated on `REQUIRES_DERIBIT`.
+  //
+  // ⚠️ THE SPLIT BULLET IS THE UI-SPEC SENTENCE MINUS ITS TRAILING CLAUSE.
+  // 161-UI-SPEC proposed "On Deribit the key is the ClientId and the secret is
+  // the ClientSecret — re-copy both with no leading or trailing spaces." Kept
+  // verbatim it would render DIRECTLY BELOW the unconditional bullet that now
+  // says exactly that, so a Deribit user would read the same instruction twice
+  // in adjacent bullets. The clause is dropped, not reworded: what is left is
+  // the only part of the sentence that is venue-specific.
+  //
+  // ⛔ NO PER-CODE ARM WAS ADDED TO `formatKeyError` FOR THIS. The gate is one
+  // `FixRequirement` constant and one index in `fixRequires`, filtered by the
+  // single `applyFixRequirements` call — the mechanism `FixRequirement`'s own
+  // docblock demands, and the reason a fourth venue-specific bullet costs a
+  // declaration rather than a branch.
   KEY_AUTH_FAILED: {
     title: "The exchange rejected these credentials.",
     cause:
-      "The exchange could not authenticate this key and secret (e.g. Deribit returns invalid_credentials). The exchange never accepted the pair, so the key or the secret is wrong, was regenerated, or was copied with extra whitespace.",
+      "The exchange could not authenticate this key and secret. The exchange never accepted the pair, so the key or the secret is wrong, was regenerated, or was copied with extra whitespace.",
     fix: [
       "Open your exchange API Management page and confirm this key still exists and is enabled.",
-      "Re-copy BOTH values with no leading or trailing spaces — on Deribit the key is the ClientId and the secret is the ClientSecret.",
+      "Re-copy both values with no leading or trailing spaces.",
+      "On Deribit the key is the ClientId and the secret is the ClientSecret.",
       "If the secret was only shown once at creation, create a fresh read-only key and paste both values here.",
     ],
+    // Index-aligned to `fix`. Slot 2 is the only gated bullet; ⛔ slot 1 stays
+    // `null` deliberately — gating the generic instruction to "not deribit"
+    // would leave a venue-less caller with no re-copy instruction at all, which
+    // is a silent copy deletion rather than a gate.
+    fixRequires: [null, null, REQUIRES_DERIBIT, null],
     docsHref: "/security#regenerate-key",
     actions: ["clear_and_retry", "request_call"],
   },
@@ -1351,6 +1764,77 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
     actions: ["request_call", "expand_log"],
   },
 
+  // 161-05 / WIZERR-03 — THE THIRD ENTRY OF THE VENUE-FENCE FAMILY, adjacent to
+  // the two it splits from for the same reason they are adjacent to each other:
+  // the three differ by ONE fact — what, if anything, hangs off the live key —
+  // and that fact decides which remedy is real.
+  //   · a surviving wizard draft ⇒ resume it       (DRAFT_ALREADY_EXISTS)
+  //   · a strategy past draft    ⇒ open it         (VENUE_ALREADY_CONNECTED)
+  //   · nothing at all           ⇒ neither exists  (here)
+  //
+  // ⚠️ `cause` CLAIMS THE STATE DOES NOT AGE OUT, AND THAT CLAIM WAS MEASURED
+  // (161-05 plan assumption A2, re-read at HEAD rather than inherited).
+  // `cleanup_abandoned_wizard_drafts()` builds `v_candidate_keys` from the
+  // drafts THAT RUN is deleting (`created_at < now() - interval '7 days'`) and
+  // sweeps only those ids; a key that was ALREADY orphaned before the run is
+  // never a candidate again. So the leftover key genuinely persists, which is
+  // why no bullet below tells the user to wait for it to clear.
+  //
+  // ⚠️ AND THE SECOND HALF IS MEASURED TOO: an orphaned key on this path was
+  // ALWAYS created alongside a wizard draft. `api_keys.venue_account_id` — the
+  // column whose partial UNIQUE produced this refusal — is written by exactly
+  // ONE writer, `create_wizard_strategy`, in the same INSERT that mints the
+  // draft strategy (every other writer's value is removed by the
+  // `api_keys_scrub_venue_account_id` trigger). So "saved in an earlier session
+  // whose draft was deleted" is the only way to reach this state, not a guess
+  // at the likeliest one.
+  //
+  // ⛔ THE `fix` BULLETS DIVERGE FROM 161-UI-SPEC § WIZERR-03, DELIBERATELY,
+  // AND THE DIVERGENCE IS A MEASUREMENT RATHER THAN A PREFERENCE. The spec's
+  // first bullet was "Disconnect the unused key under Manage keys, then connect
+  // it here again." Checked at HEAD:
+  //   · the string "Manage keys" occurs NOWHERE in `src`;
+  //   · the key-management component (`components/strategy/ApiKeyManager.tsx`,
+  //     which does carry a delete) is mounted at `strategies/[id]/edit/page.tsx`
+  //     and nowhere else — a per-STRATEGY surface. This code exists precisely
+  //     because NO strategy holds the key, so there is no edit page to reach;
+  //   · the only other list with a Disconnect control
+  //     (`AllocatorExchangeManager`, profile → Exchanges) sits behind
+  //     `allocatorOnly` in `ProfileTabs.tsx`, and the user standing in this
+  //     wizard is a manager;
+  //   · `my-strategies` DOES surface the orphan, as a "No strategy yet" row —
+  //     but its only control is "Finish setup →", which reopens this same
+  //     wizard and lands on this same refusal.
+  // Shipping that bullet verbatim would have shipped an UNWINNABLE remedy: the
+  // D-17 class, and a direct breach of the principle (161-UI-SPEC § Copy
+  // Principles 2) this very requirement exists to enforce. The bullets below
+  // name only remedies that were measured to be reachable.
+  //
+  // ⚠️ THE UNDERLYING GAP IS REAL AND IS NOT CLOSED HERE: a manager cannot
+  // release their own orphaned key from any surface we ship. That is why the
+  // second bullet routes to us instead of pretending otherwise, and it is
+  // recorded in the phase's deferred items rather than left in the copy.
+  KEY_ORPHANED: {
+    title: "This key is already stored, but nothing uses it.",
+    cause:
+      "These credentials were saved in an earlier session whose draft was deleted, leaving the key attached to nothing. A new strategy cannot be created over the leftover key, and it does not clear on its own.",
+    fix: [
+      "Connect this strategy with a different account — one whose key is not already stored here.",
+      "To reuse this exact account, email security@quantalyze.com with the correlation id below: releasing the stored key is not something you can do from this page.",
+    ],
+    docsHref: "/security",
+    // ⛔ `try_another_key` AND NOT `clear_and_retry`. Both are members of
+    // `RECOVERABLE_ACTIONS`, so either would derive `recoverable: true` — but
+    // `clear_and_retry` means "send the same thing again", and the same account
+    // is refused by the same index every time. Only a DIFFERENT key can succeed,
+    // which is exactly what the surviving member names.
+    // ⛔ AND NEITHER `resume_draft` NOR `start_fresh`: there is no draft to
+    // resume, and `start_fresh` deletes one. Their absence also keeps this entry
+    // outside the destructive-action population the `[140.3-10 / TRAP-4]` scan
+    // walks.
+    actions: ["try_another_key", "expand_log"],
+  },
+
   SYNC_TIMEOUT: {
     title: "Sync is taking longer than expected.",
     cause:
@@ -1467,6 +1951,105 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
     ],
     docsHref: "/security#sync-timing",
     actions: ["clear_and_retry", "request_call"],
+  },
+
+  // 161-07 / WIZERR-09 — the copy that lands in the SAME commit the wizard's
+  // composite arm starts evaluating the 7-day floor.
+  //
+  // ⚠️ THE UI-SPEC'S PROPOSED COPY WAS CORRECTED HERE, and the correction is
+  // the point rather than a preference. It read "Not enough CSV history…" and
+  // "Upload a CSV covering at least 7 daily returns, then submit again."
+  // MEASURED at every emitter this member can reach, that remedy is false:
+  //   · the wizard COMPOSITE arm counts the STITCHED composite series
+  //     (`series.length`), which no user uploaded;
+  //   · the wizard SINGLE-KEY arm reaches this code only on the daily-returns
+  //     branch — a KEYED account (deribit / mt5 / sfox stamp `ledger_complete`)
+  //     whose dailies were DERIVED from the venue's ledger, not uploaded.
+  // The keyless CSV upload path never reaches `SyncPreviewStep` at all (it
+  // validates through `csv-finalize`). So a bullet telling this user to upload
+  // a CSV names a remedy their surface does not offer — the unwinnable-remedy
+  // class this phase exists to close. The copy talks about the SERIES instead,
+  // which is true on all three emitters including the admin one.
+  //
+  // ⚠️ THE NUMBER IS SPELLED OUT because it exists and is fixed
+  // (`STRATEGY_GATE_MIN_CSV_ROWS = 7`) — DESIGN.md: no adjective where a number
+  // exists. The user's OWN row count is deliberately NOT interpolated: this
+  // entry has no `formatKeyError` arm and no context field, so there is no path
+  // by which an absent count could render as a placeholder or a zero (TRAP-3).
+  // The gate's `reason` string, which the admin surface renders raw, does carry
+  // both numbers — that is a different channel with a different audience.
+  GATE_INSUFFICIENT_CSV_HISTORY: {
+    title: "This strategy needs at least 7 days of return history.",
+    cause:
+      "This strategy's daily-return series covers fewer than 7 days. We hold a daily-return series to the same 7-day floor we hold trade history to: below that, volatility and drawdown estimates are unstable, so we will not compute a verified factsheet from it yet. Nothing is wrong with the data we have — there is not yet enough of it.",
+    fix: [
+      "Come back once the series covers at least 7 days and retry the sync from this page — a completed re-derive rebuilds the series from whatever history the venue holds by then.",
+    ],
+    docsHref: "/security#thresholds",
+    actions: ["clear_and_retry"],
+  },
+
+  // 161-07 / WIZERR-10 — the truthful fourth outcome, replacing "Strategy has
+  // only 0 trade(s)" for a strategy that has a full return series and no fills.
+  //
+  // ⭐ EVERY CLAUSE BELOW WAS VALIDATED AGAINST THE PRODUCER, and 161-UI-SPEC's
+  // proposed title and cause were CORRECTED rather than shipped. Truth source:
+  // `analytics-service/services/broker_dailies.py`'s producer registry
+  // docstring, read first-hand.
+  //   · The UI-SPEC's title "This data source was examined and refused." and
+  //     its cause "We examined the venue's return series and could not verify
+  //     it — the data was found wanting" both assert a PER-SERIES examination.
+  //     `fill_derived_unproven` is stamped for binance / bybit / okx ALWAYS and
+  //     unconditionally — "a CONSTANT, not a data-driven refinement". Nothing
+  //     looked at this particular series and found it wanting; a METHOD was
+  //     used that cannot establish completeness for any series.
+  //   · The cause therefore describes the two METHODS, and the enumeration is
+  //     exhaustive by construction: the gate's examined-refused map has exactly
+  //     these two members. ⚠️ A third verdict joining that map makes this
+  //     sentence incomplete — the obligation is written at the map itself.
+  //   · No gap magnitude and no row count appears (T-73-02 leak discipline, and
+  //     TRAP-3: this entry has no interpolation arm, so no absent number can
+  //     surface as a zero).
+  //
+  // ⭐ 161-REVIEW / IN-03 — THE FIRST REMEDY NAMES A VENUE, and the name was
+  // MEASURED at the producer rather than inferred. It used to read "Connect a
+  // key from a venue we can read end to end — one that gives us a complete
+  // transaction ledger rather than a fill feed", which gestured at a set the
+  // reader cannot resolve: nothing on the user's screen says which of the
+  // venues on offer keeps a ledger, so the remedy was "guess". Truth source,
+  // read first-hand: `analytics-service/services/broker_dailies.py`'s producer
+  // registry docstring ("Who stamps what") plus the three stamp sites.
+  //
+  //   · `combine_native_ledger` (DERIBIT) stamps `ledger_complete` on BOTH
+  //     return paths, unconditionally — an incomplete crawl raises
+  //     `LedgerCompletenessError` / `LedgerTruncatedError` and fails the whole
+  //     job permanently, so no partial deribit series can exist to land here.
+  //     Deribit is therefore a remedy that CANNOT put the user back on this
+  //     screen, and it is in `UI_EXCHANGE_CODES_BASE` — offered unconditionally,
+  //     behind no flag.
+  //   · `combine_realized_and_funding` (BINANCE / BYBIT / OKX) stamps
+  //     `fill_derived_unproven` always, and `combine_sfox_balance_history`
+  //     stamps `sampled_gapped` on any interior hole. Those four are exactly the
+  //     venues that can REACH this code, so none of them is a remedy.
+  //
+  // ⛔ `combine_mt5_deal_ledger` ALSO stamps `ledger_complete` unconditionally,
+  // and MT5 is deliberately NOT named. Its wizard presence rides
+  // `MT5_UI_ENABLED` (`closed-sets.ts`), so a static sentence naming it would
+  // name a venue the surface may not be offering — the same disclosure defect
+  // WIZERR-08/F3 exists to prevent, in a different costume. The sentence names
+  // ONE venue and claims no exhaustiveness for exactly that reason: it stays
+  // true when a flag-gated venue is dark AND when it is live. If a second
+  // ALWAYS-OFFERED venue starts stamping `ledger_complete`, name it here too.
+  GATE_SERIES_EXAMINED_REFUSED: {
+    title: "We can't verify this strategy's returns from the venue's own data.",
+    cause:
+      "Our pipeline records how every daily-return series was built, and for this one the record does not establish a complete track record. There are two ways a series lands here: it was sampled from balance snapshots that have interior gaps, or it was derived from individual fills — a method that produces a plausible series whether or not the venue returned every fill, with no residual to check it against. Either way, publishing it would mean standing behind a number we cannot show is complete. This is a limit on what the venue's data can prove, not a judgement about your trading.",
+    fix: [
+      "Connect a Deribit key instead — Deribit gives us the venue's full transaction ledger rather than a fill feed, so the record behind the series is whole.",
+      "Or create this strategy from a CSV upload instead: a track record you supply yourself carries its own completeness record, which we do accept.",
+    ],
+    docsHref: "/security#thresholds",
+    actions: ["try_another_key"],
   },
 
   METADATA_DESCRIPTION_REQUIRED: {
@@ -2631,6 +3214,137 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
     actions: ["leave_and_return", "expand_log"],
   },
 
+  // 161-10 / WIZERR-07 — the four DASHBOARD DIALOG entries. The union members
+  // above carry the full reasoning for each: what rendered before it, which
+  // near-neighbour was rejected and why (read at that neighbour's emitter), and
+  // how `recoverable` derives. The copy below is held to Principle 1 (name the
+  // actual blocker) and Principle 2 (the remedy must be able to succeed).
+  //
+  // ⚠️ 161-REVIEW / IN-02 — PRINCIPLE 4 IS AN AUTHORING RULE, NOT A PROPERTY
+  // THIS TABLE ESTABLISHES. The superseded version of this note claimed
+  // otherwise — "Principle 4 (no correlation id on an actionable arm — three of
+  // the four are terminal, so `expand_log` is present on those and the id is
+  // what the user is asked to quote)" — which reads `expand_log`'s presence as
+  // the enforcing mechanism. It is not one, on two independent measured
+  // grounds:
+  //
+  //   · `expand_log` does not decide what renders. Whether the envelope's
+  //     `<details> Diagnostics` block — the one that carries `code` and
+  //     `correlation_id` — is shown is `ErrorEnvelope`'s decision, taken from
+  //     its own props. Read it THERE before relying on the id being present or
+  //     absent on any arm; no entry in this table can assert it.
+  //   · `expand_log` does not even imply the arm is terminal. `KEY_ORPHANED`
+  //     carries `try_another_key` — a member of `RECOVERABLE_ACTIONS`, so
+  //     `buildEnvelope` derives `recoverable: true` — ALONGSIDE `expand_log`.
+  //     One counterexample is enough: `expand_log` present cannot establish
+  //     "this arm is non-actionable" for any entry, this table's or another's.
+  //
+  // So `expand_log` on three of the four below records the AUTHOR'S judgement
+  // that the diagnostics disclosure is the right escalation for a terminal arm,
+  // and the fix line asking the user to quote the id is what makes it useful.
+  // It is a declaration, never a claim about the rendered DOM.
+  DASHBOARD_SIGNED_OUT: {
+    title: "You are signed out.",
+    cause:
+      "We could not confirm your session, so we refused the change before making it. Nothing was saved — your strategy, its name and its allocation are exactly as they were.",
+    fix: [
+      "Sign in again, then make the change from the reloaded page.",
+      "Nothing needs undoing first. The refused change never reached your data.",
+    ],
+    docsHref: "/security",
+    // ⛔ Neither member of `RECOVERABLE_ACTIONS`, so `recoverable` derives false
+    // and no Retry renders: the same request from the same signed-out session
+    // is refused identically. `leave_and_return` names the action that works.
+    actions: ["leave_and_return", "expand_log"],
+  },
+
+  DASHBOARD_REQUEST_INVALID: {
+    title: "We could not send that change.",
+    cause:
+      "The request this page built was refused by our own service before any work started. Nothing was saved and nothing was changed. The fault is in our software, not in what you typed.",
+    fix: [
+      "Reload the page and make the change again — a fresh page may build the request correctly.",
+      "If it happens again, email security@quantalyze.com with the correlation id below. A request our own page built wrong is ours to fix.",
+    ],
+    docsHref: "/security",
+    // ⛔ Neither member of `RECOVERABLE_ACTIONS`. Re-sending the identical
+    // malformed request is refused identically, so the Retry control would
+    // promise an outcome it cannot deliver.
+    actions: ["leave_and_return", "expand_log"],
+  },
+
+  DASHBOARD_WRITE_FAILED: {
+    title: "We could not save that change.",
+    cause:
+      "Our own service failed part-way through the change and stopped. Nothing was saved — the strategy is as it was before you pressed save. This is a fault on our side, not in your data.",
+    fix: [
+      "Try the same change again. This kind of fault is often momentary.",
+      "If it keeps failing, email security@quantalyze.com with the correlation id below.",
+    ],
+    docsHref: "/security",
+    // ⚠️ `clear_and_retry` IS a member of `RECOVERABLE_ACTIONS`, so this is the
+    // ONE recoverable entry in this family and the Retry control renders. That
+    // is deliberate: a query that errored once can succeed on the next attempt,
+    // and these writes set a stated value rather than accumulating one, so a
+    // retry cannot double anything.
+    //
+    // ⛔ 161-REVIEW / CR-01 — THE SENTENCE ABOVE IS BYTE-IDENTICAL TO WHAT
+    // 161-10 SHIPPED, and the Retry is deliberately kept. What changed is the
+    // set of arms allowed to reach it: only those where no data-modifying
+    // statement had been sent, so "Nothing was saved" is established by the
+    // control flow rather than asserted. Every other arm now answers
+    // `DASHBOARD_WRITE_INDETERMINATE` below. Do not widen this entry back.
+    actions: ["clear_and_retry", "request_call"],
+  },
+
+  // 161-REVIEW / CR-01 — the honest half of the split. The union member carries
+  // the full reasoning: which arms, why an errored write is not a verified
+  // rollback, and why a Retry is withheld from a possibly-applied money write.
+  //
+  // ⛔ EVERY CLAUSE BELOW IS A THING THE ROUTE ESTABLISHED. It says the attempt
+  // was made (true — the statement was sent), that we cannot tell what it did
+  // (true — no arm discriminates a rejected statement from a lost answer), and
+  // that the reloaded page is the current state (true — the dialogs' lists
+  // re-fetch on close). It says NOTHING about whether anything persisted, in
+  // either direction, which is the "'NOTHING WAS SAVED' IS VERIFIED, NOT
+  // ASSERTED" rule recorded at the `CSV_UPSTREAM_FAIL` entry, applied at the one
+  // place in this family where it bites.
+  DASHBOARD_WRITE_INDETERMINATE: {
+    title: "We could not confirm whether that change was saved.",
+    cause:
+      "Our own service failed part-way through the change, and by then the request to save it had already been sent. We cannot tell from here whether it took effect, and we would rather say that than guess in either direction. The fault is on our side, not in what you entered.",
+    fix: [
+      "Close this dialog and reload the page. What the reloaded page shows is the current state.",
+      "If the change is not there, make it again. If it is there, nothing needs undoing.",
+      "If this keeps happening, email security@quantalyze.com with the correlation id below.",
+    ],
+    docsHref: "/security",
+    // ⛔ NEITHER member of `RECOVERABLE_ACTIONS`, so `buildEnvelope` derives
+    // `recoverable: false` and no Retry control renders — and the reason is NOT
+    // the usual one. Retrying is not futile here, it is UNPREDICTABLE: nobody,
+    // including us, knows what the first attempt did. On the ownership flip
+    // that first attempt may have removed live positions. A one-click Retry
+    // whose effect the person pressing it cannot foresee is the unwinnable
+    // remedy this phase removes; the remedy is ORDERED instead, and
+    // `leave_and_return` carries its first step.
+    actions: ["leave_and_return", "expand_log"],
+  },
+
+  DASHBOARD_ROW_STALE: {
+    title: "This page is out of date.",
+    cause:
+      "What this dialog points at is not there in the form this change needs — it may have been renamed, removed, or moved to a state this action does not apply to since the page loaded. Nothing was saved.",
+    fix: [
+      "Close this dialog. The list reloads and shows the strategies as they stand now.",
+      "If the row is still listed after the reload and the change still fails, email security@quantalyze.com with the correlation id below.",
+    ],
+    docsHref: "/security",
+    // ⛔ Neither member of `RECOVERABLE_ACTIONS`. The server answers the
+    // identical request 404 until the page is reloaded, so a Retry would
+    // promise that pressing it changes the outcome.
+    actions: ["leave_and_return", "expand_log"],
+  },
+
   UNKNOWN: {
     title: "Something went wrong.",
     cause:
@@ -2779,6 +3493,20 @@ function requirementMet(
     case "surface":
       // An ABSENT surface can never equal a named one ⇒ suppressed (Gate B).
       return context?.surface === req.surface;
+    case "venueIs":
+      // 161-05 / WIZERR-11 — EXACT EQUALITY AGAINST A CLOSED-SET MEMBER, and
+      // deliberately NOT routed through `venueCapabilities`' lookup:
+      //   · no `.toLowerCase()` on the caller's value. Both connect steps type
+      //     their context venue as `SupportedExchange` (ConnectKeyStep's
+      //     `attemptExchange ?? exchange`, MultiKeyConnectStep's `attemptVenue`),
+      //     so it arrives lowercase by construction — MEASURED at both call
+      //     sites, not assumed. Case-folding an inbound string before comparing
+      //     it would widen what can satisfy a venue-specific claim for no
+      //     caller that exists;
+      //   · no default. An ABSENT venue is not "deribit", so it is suppressed —
+      //     the opposite of the `venueCapability` arm above, argued at the
+      //     union member.
+      return context?.venue === req.venue;
   }
 }
 
@@ -2979,6 +3707,14 @@ export function gateFailureToWizardError(code: GateFailureCode): WizardErrorCode
       // strategy on an unstamped row) and the composite arm (FIX 3) can land
       // here.
       return "GATE_SERIES_PROVENANCE_UNVERIFIED";
+    case "SERIES_EXAMINED_REFUSED":
+      // 161-07 / WIZERR-10. The other half of the "did a producer look?" split:
+      // one looked, and what it recorded does not establish a complete record.
+      // Terminal and wizard-reachable from the single-key arm (a keyed perp on
+      // binance / bybit / okx arrives with 0 trades and a fill-derived series),
+      // so it maps to real copy — never UNKNOWN, and never back to
+      // GATE_INSUFFICIENT_TRADES, which is the false sentence it replaces.
+      return "GATE_SERIES_EXAMINED_REFUSED";
     case "ANALYTICS_MISSING":
     case "ANALYTICS_PENDING":
     case "ANALYTICS_COMPUTING":
@@ -2987,11 +3723,23 @@ export function gateFailureToWizardError(code: GateFailureCode): WizardErrorCode
       // if they do reach this path so we catch the misuse.
       return "UNKNOWN";
     case "INSUFFICIENT_CSV_HISTORY":
-      // Admin-approval-only gate code. The wizard's SyncPreviewStep is the
-      // exchange-key path (never CSV-sourced), and the CSV upload branch
-      // validates via csv-finalize — so this code never flows through the
-      // wizard error mapper. UNKNOWN flags the misuse if it ever does.
-      return "UNKNOWN";
+      // 161-07 / WIZERR-09. THIS ARM'S PREVIOUS COMMENT IS DELETED RATHER THAN
+      // AMENDED, because its premise stopped being true in this commit. It
+      // said: "Admin-approval-only gate code… so this code never flows through
+      // the wizard error mapper. UNKNOWN flags the misuse if it ever does."
+      //
+      // Two of its three clauses were already wrong when written, and the third
+      // is wrong now:
+      //   · the wizard's SINGLE-KEY arm has passed `csvRowCount` to
+      //     `checkStrategyGate` since MT5-11/12, and a KEYED account on the
+      //     daily-returns branch (deribit / mt5 / sfox → `ledger_complete`) with
+      //     fewer than 7 derived days lands here, no CSV involved;
+      //   · "never CSV-sourced" conflates the STORAGE (`csv_daily_returns`,
+      //     which every daily-returns strategy writes) with the SOURCE;
+      //   · the wizard COMPOSITE arm now evaluates the floor too, in this same
+      //     commit — which is the whole reason the pair is atomic.
+      // Terminal AND wizard-reachable ⇒ real copy, never UNKNOWN.
+      return "GATE_INSUFFICIENT_CSV_HISTORY";
   }
 }
 
@@ -3791,6 +4539,245 @@ export function recogniseSeamErrorCode(
 }
 
 /**
+ * 161-10 / WIZERR-07 — the three DASHBOARD WRITE ROUTES, named as a closed set.
+ *
+ * These are the routes behind `AllocateDialog`, `RenameStrategyDialog` and
+ * `MarkOwnershipDialog`. The strings are the route's directory path under
+ * `src/app/api/`, so a reader can go from a roster row to the emitter without
+ * a lookup table in between.
+ */
+export type DashboardDialogRoute =
+  | "strategies/[id]/name"
+  | "strategies/[id]/ownership"
+  | "portfolio-strategies/allocation";
+
+/**
+ * The `WizardErrorCode`s each dashboard write route can put on the wire.
+ *
+ * ── WHY THIS LIVES HERE AND NOT AT EACH DIALOG ──────────────────────────────
+ *
+ * The wizard steps each hold their own `KNOWN_*_CODES` roster in the component
+ * file, and that shape is not copied here on purpose. WIZERR-07's finding was
+ * that the dashboard dialogs are where this class REGREW after Phase 153 —
+ * three client components minting `code: "UNKNOWN"` for failures their routes
+ * had already classified — and the wizard coverage law could not see them
+ * because it declares itself blind to everything outside the wizard-steps
+ * directory. Putting the rosters in ONE shared module is what lets
+ * `dialog-envelope.invariant.test.ts` import the live map instead of re-parsing
+ * three component files, so a new roster row joins that law with no test edit.
+ *
+ * It also keeps the ONE guarded cast in one audited place (see the recogniser
+ * below) rather than once per consumer.
+ *
+ * ── WHY IT IS PER-ROUTE AND NOT ONE FLAT SET ────────────────────────────────
+ *
+ * `ConnectKeyStep.tsx`'s roster docblock argues at length that a surface should
+ * admit the codes ITS route emits and not the whole vocabulary, and that
+ * argument is not weaker here. A flat set would go green while the rename
+ * dialog silently admitted an allocation-only code, which is precisely the
+ * failure a merged check cannot distinguish from correctness.
+ *
+ * ── WHAT IS DELIBERATELY ABSENT ─────────────────────────────────────────────
+ *
+ * Three wire codes these routes emit are NOT `WizardErrorCode`s and must not be
+ * added here or minted as members. They never reach `buildEnvelope`:
+ *
+ *   · `NAME_REQUIRED` / `NAME_TOO_LONG` — the name route's two field-level
+ *     refusals. `RenameStrategyDialog` lands them INLINE at the Name field,
+ *     which is where the user is looking and where the remedy is; routing them
+ *     through an envelope would re-introduce the terminal-envelope class for a
+ *     field-level problem: the remedy is AT the Name field, and a terminal panel
+ *     beside it is noise competing with that remedy (Principle 4). ⚠️ 161-REVIEW
+ *     / IN-02 — this used to read "would show a correlation id on an ACTIONABLE
+ *     arm", which asserted what `ErrorEnvelope` renders. Nothing in this file
+ *     decides that; see the IN-02 note at the DASHBOARD copy entries.
+ *   · `LIVE_ALLOCATION` — the ownership route's 409. `MarkOwnershipDialog`
+ *     answers it by swapping in its confirmation body with the amount at risk,
+ *     not by rendering an error at all. It is a QUESTION, not a refusal the
+ *     user must read and leave.
+ *
+ * Each of the three is asserted as an explicit disposition by the coverage law,
+ * so its absence is a recorded decision rather than an omission — an omission
+ * being indistinguishable from the defect.
+ */
+const DASHBOARD_DIALOG_ROUTE_CODES: ReadonlyMap<
+  DashboardDialogRoute,
+  ReadonlySet<WizardErrorCode>
+> = new Map<DashboardDialogRoute, ReadonlySet<WizardErrorCode>>([
+  [
+    "strategies/[id]/name",
+    new Set<WizardErrorCode>([
+      "DASHBOARD_SIGNED_OUT",
+      "DASHBOARD_REQUEST_INVALID",
+      "RATE_LIMITED",
+      "DASHBOARD_WRITE_FAILED",
+      // 161-REVIEW / CR-01 — the indeterminate half of the 500 population.
+      // Every one of these three routes has at least one arm that fails AFTER
+      // a data-modifying statement was sent, so every roster gains it.
+      "DASHBOARD_WRITE_INDETERMINATE",
+      "DASHBOARD_ROW_STALE",
+    ]),
+  ],
+  [
+    "strategies/[id]/ownership",
+    new Set<WizardErrorCode>([
+      "DASHBOARD_SIGNED_OUT",
+      "DASHBOARD_REQUEST_INVALID",
+      "RATE_LIMITED",
+      "DASHBOARD_WRITE_FAILED",
+      // 161-REVIEW / CR-01 — the indeterminate half of the 500 population.
+      // Every one of these three routes has at least one arm that fails AFTER
+      // a data-modifying statement was sent, so every roster gains it.
+      "DASHBOARD_WRITE_INDETERMINATE",
+      "DASHBOARD_ROW_STALE",
+    ]),
+  ],
+  [
+    "portfolio-strategies/allocation",
+    new Set<WizardErrorCode>([
+      "DASHBOARD_SIGNED_OUT",
+      "DASHBOARD_REQUEST_INVALID",
+      "RATE_LIMITED",
+      "DASHBOARD_WRITE_FAILED",
+      // 161-REVIEW / CR-01 — the indeterminate half of the 500 population.
+      // Every one of these three routes has at least one arm that fails AFTER
+      // a data-modifying statement was sent, so every roster gains it.
+      "DASHBOARD_WRITE_INDETERMINATE",
+      "DASHBOARD_ROW_STALE",
+      // The allocate surface's one actionable refusal, emitted by both the
+      // pre-check and the D-03-A trigger arm.
+      "ALLOCATION_NOT_ALLOCATABLE",
+    ]),
+  ],
+]);
+
+/** Read-only view for the coverage law, which imports the LIVE map. */
+export { DASHBOARD_DIALOG_ROUTE_CODES };
+
+/**
+ * ⭐ 161-09 / WIZERR-08 — THE VOCABULARY `keys/validate-and-encrypt` EMITS.
+ *
+ * ── WHY IT IS HERE AND NOT AT A CONSUMER ────────────────────────────────────
+ *
+ * Three components POST to that route (`ApiKeyManager`, `StrategyForm`,
+ * `AllocatorExchangeManager` — measured by grep over `src/`, 2026-08-24), so a
+ * roster living inside any one of them would be a fourth hand-typed registry
+ * that the other two silently disagree with. Same call 161-10 made for
+ * `DASHBOARD_DIALOG_ROUTE_CODES` directly above: one shared table, in the module
+ * that already owns the union and the copy, so the coverage law reads ONE
+ * declaration rather than re-parsing three component files.
+ *
+ * ── ⚠️ WHAT THIS ROSTER DOES AND DOES NOT PROVE — READ THIS BEFORE TRUSTING IT
+ *
+ * The wizard-step rosters (`KNOWN_CREATE_WITH_KEY_CODES` and friends) are read
+ * at runtime by the step that renders the error, so "the roster admits it"
+ * really does mean "a client can render it". THIS ROSTER IS WEAKER, and saying
+ * so is the point of this paragraph.
+ *
+ * MEASURED at HEAD, 2026-08-24: **none of the three consumers reads this
+ * route's `code` field at all.** All three read `err.error` — the prose
+ * sentence — and throw or render that. So there is no runtime reader to bind
+ * this roster to, and a docblock claiming "a client can render it" would be
+ * exactly the kind of false sentence this phase exists to delete.
+ *
+ * What the 4th `ROUTES` row in `wizardErrors.invariant.test.ts` DOES enforce
+ * with this table, and it is not nothing:
+ *
+ *   1. every code the route emits is a `WizardErrorCode` (or is translated into
+ *      one by `SEAM_CODE_TO_WIZARD_CODE`), so `WIZARD_ERROR_COPY` has a real
+ *      entry for it and the first consumer to read the code channel gets copy
+ *      rather than the UNKNOWN card;
+ *   2. every member listed here has that copy entry;
+ *   3. the route's emitter count cannot drift silently — which is how
+ *      `STALE_CLIENT` shipped here in Phase 160 with nothing watching it.
+ *
+ * What it does NOT enforce: that anything renders it today. ⛔ THE FOLLOW-ON IS
+ * NAMED DEBT, not an implied fix: wiring those three consumers onto the code
+ * channel (the way 161-10 wired the three dashboard dialogs) is what would make
+ * this roster's first half real. Until then, treat "rostered" as "typed and
+ * has copy", never as "the user will see it".
+ *
+ * ── MEMBERSHIP, and the two codes deliberately ABSENT ───────────────────────
+ *
+ * Six members, measured from the emitters at HEAD. `CIRCUIT_OPEN` and
+ * `UPSTREAM_TIMEOUT` are NOT here and must not be added: both are WIRE codes
+ * that `SEAM_CODE_TO_WIZARD_CODE` translates (→ `SERVICE_UNAVAILABLE_RETRY`,
+ * `SERVICE_UNREACHABLE`), neither is a `WizardErrorCode`, and adding either to
+ * a `ReadonlySet<WizardErrorCode>` would not compile — and would be wrong if it
+ * did, on `MultiKeyConnectStep`'s coverage-law rule 1: the ONE alias table is
+ * consulted first, never a member here.
+ *
+ * ── WHAT THIS ROSTER DOES *NOT* COVER (measured 2026-08-25, IN-04) ──────────
+ *
+ * Six DECLARED members, but the route can emit roughly **21** codes: the other
+ * ~15 arrive on the computed channel, forwarded from the analytics service's
+ * own `>=500` vocabulary rather than minted here. They are deliberately not
+ * rostered, and the basis for accepting that gap is a measurement, not a
+ * preference: none of the fifteen is a `SEAM_CODE_TO_WIZARD_CODE` member at
+ * HEAD, so every one of them resolves to UNKNOWN copy — the accepted
+ * unrecognized case, not a false sentence.
+ *
+ * ⚠️ The condition that makes this unsafe: **adding a
+ * `SEAM_CODE_TO_WIZARD_CODE` row for any of those fifteen.** The moment one
+ * gains wizard copy, it becomes a recognized code arriving on a 5xx carrying a
+ * remedy that was authored for a 4xx arm — the WIZERR-06 W1 hazard. If you add
+ * such a row, re-run that inventory and roster the code here.
+ */
+export const KNOWN_VALIDATE_AND_ENCRYPT_CODES: ReadonlySet<WizardErrorCode> =
+  new Set<WizardErrorCode>([
+    // the two request-shape families 161-09 split off KEY_INVALID_FORMAT
+    "KEY_MISSING_REQUIRED_FIELD",
+    "KEY_VENUE_NOT_ENABLED",
+    // the read-only verdict (400) and the deploy-skew refusal (409)
+    "KEY_NOT_READ_ONLY",
+    "STALE_CLIENT",
+    // our own configuration faults (503, two sites) and the persist-INSERT
+    // failure (500), which is deliberately terminal-unclassified: the user's
+    // key WAS verified and the row was not written, and no more specific member
+    // states that without naming an internal writer.
+    //
+    // ⚠️ `SEAM_MISCONFIGURED` IS LISTED BUT IS NOT LOAD-BEARING FOR THE
+    // COVERAGE HALF, and that is measured rather than assumed: 161-09 removed
+    // it and re-ran the law, which stayed GREEN (49 passed). The reason is
+    // `SEAM_CODE_TO_WIZARD_CODE`, which maps it to ITSELF, and the law consults
+    // the alias table before the roster — so the row is redundant there. It is
+    // kept because this table's job is to state the route's vocabulary
+    // completely, and a vocabulary with a hole in it that happens to be covered
+    // by an alias is a worse artefact to inherit than a complete one. ⛔ Do not
+    // read its presence as evidence that the law is checking it.
+    "SEAM_MISCONFIGURED",
+    "UNKNOWN",
+  ]);
+
+/**
+ * Translate a dashboard write route's wire `code` into a `WizardErrorCode`.
+ *
+ * ⛔ THE CAST IS GUARDED AND THIS IS THE ONLY PLACE IT HAPPENS (Pitfall 4).
+ * `code as WizardErrorCode` written at a consumer would silently admit every
+ * string a route — or an attacker-influenced upstream — put in that field, and
+ * `formatKeyError` would then fall through to UNKNOWN's copy while the envelope
+ * advertised the unrecognised code in its `data-error-code` attribute. Here the
+ * cast happens only after the value has been proven a member of THIS route's
+ * roster, so an unrecognised code answers `UNKNOWN` by design rather than by
+ * accident.
+ *
+ * A non-string (absent field, `null`, a number) answers `UNKNOWN` for the same
+ * reason `recogniseSeamErrorCode` does: a response we could not read supports
+ * no verdict.
+ */
+export function recogniseDashboardDialogCode(
+  route: DashboardDialogRoute,
+  wireCode: unknown,
+): WizardErrorCode {
+  if (typeof wireCode !== "string" || wireCode.length === 0) return "UNKNOWN";
+  const roster = DASHBOARD_DIALOG_ROUTE_CODES.get(route);
+  if (!roster) return "UNKNOWN";
+  return roster.has(wireCode as WizardErrorCode)
+    ? (wireCode as WizardErrorCode)
+    : "UNKNOWN";
+}
+
+/**
  * Export the copy table for unit tests. Not for UI consumption —
  * components should call `formatKeyError` so placeholder interpolation
  * runs through a single code path.
@@ -3862,8 +4849,18 @@ export const CSV_RULE_LABELS: Readonly<Record<string, string>> = {
   // QA report 2026-05-21 ISSUE-012: the underlying pandera rule key was
   // `column_in_dataframe` and the envelope's per-rule label fell through
   // to the raw key (e.g. "Rule violated: column_in_dataframe"). A
-  // user-friendly label here resolves the cause line; the per-row
-  // message is rewritten by `formatColumnInDataframeMessage()` below.
+  // user-friendly label here resolves the cause line.
+  //
+  // ⚠️ 161-REVIEW / CR-02 — THIS LABEL IS NOW THE WHOLE OF ISSUE-012's FIX.
+  // The other half was `formatColumnInDataframeMessage()`, which claimed to
+  // rewrite the per-row message into "The required column `X` is missing…".
+  // Measured against the producer: its regex required a literal `failed:` and
+  // `csv_validator.py` has only ever emitted `… failed rule '…'`, so it never
+  // fired — and for THIS rule the producer reports `column` as NaN, so there is
+  // no `X` on the wire for any regex to extract. It was deleted rather than
+  // repaired. Restoring an actionable per-row remedy needs the expected column
+  // name as a first-class producer field (D-161-02); until then this label is
+  // the only place the user is told what class of problem it is.
   column_in_dataframe: "Your CSV is missing a required column",
   // QA report 2026-05-21 ISSUE-008: the daily_return column carried raw
   // dollar PnL (median |x| > 0.5) instead of decimal returns. The
@@ -3884,20 +4881,38 @@ export function formatCsvRuleCauseSingle(humanLabel: string): string {
   return `Rule violated: ${humanLabel}. Expand below for the row-level breakdown.`;
 }
 
-/**
- * Rewrite a pandera `column_in_dataframe` per-row message to be
- * actionable. The raw message is shaped like "Column 'None' failed:
- * daily_return" — referencing the missing column by its rule name,
- * not by anything the user can use. Pull out the expected column
- * name and surface "The required column `daily_return` is missing
- * from your file." instead. (QA report 2026-05-21 ISSUE-012.)
+/*
+ * ⚰️ REMOVED 161-REVIEW / CR-02 — `formatColumnInDataframeMessage(raw)`.
  *
- * The match is intentionally narrow — anything we cannot parse falls
- * through to the original message so we don't drop information.
+ * It existed to rewrite a `column_in_dataframe` per-row message into an
+ * actionable sentence: "The required column `daily_return` is missing from your
+ * file. Rename a column to `daily_return` …". It pulled the column name out of
+ * `raw` with a regex requiring a literal "failed:" and fell through to the
+ * original message on a miss.
+ *
+ * ⛔ IT ALWAYS MISSED. MEASURED against the producer
+ * (`analytics-service/services/csv_validator.py`, driven through `validate_csv`
+ * at HEAD), every message it has ever built reads "… failed rule '…'":
+ *
+ *     Failed rule 'column_in_dataframe'.
+ *     Column 'daily_return' failed rule 'daily_return_lower_bound' at row 2.
+ *
+ * The "Column 'None' failed: daily_return" shape the old docblock quoted is
+ * PANDERA's own error text, which this producer does not forward — it builds
+ * its own sentence. So the actionable remedy never reached a user, on any
+ * message, ever, and `CsvValidationEnvelope` rendered `raw` unchanged.
+ *
+ * ⛔ AND IT IS UNREPAIRABLE AS A REGEX. It was only ever called for
+ * `rule === "column_in_dataframe"`, and for that DATAFRAME-level check pandera
+ * reports `column` as NaN — which is why 161-03 had to strip the literal `nan`
+ * from the sentence. The expected column name is simply not on the wire. A
+ * fixed pattern would have nothing to extract. Restoring the remedy needs the
+ * expected column carried as a first-class producer field, which is D-161-02's
+ * scope and is deliberately not smuggled in here.
+ *
+ * Deleting beats leaving a formatter that cannot fire: a function whose
+ * docblock promises a remedy no code path can deliver is the same false claim
+ * this phase removes from copy, wearing a different hat.
+ * `CSV_RULE_LABELS.column_in_dataframe` ("Your CSV is missing a required
+ * column") survives and is now the whole of ISSUE-012's fix.
  */
-export function formatColumnInDataframeMessage(raw: string): string {
-  const m = raw.match(/Column\s+'[^']*'\s+failed:\s+(\S+)/);
-  if (!m) return raw;
-  const missingColumn = m[1];
-  return `The required column \`${missingColumn}\` is missing from your file. Rename a column to \`${missingColumn}\` or switch formats on the upload step.`;
-}

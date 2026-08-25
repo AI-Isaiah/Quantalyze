@@ -25,6 +25,44 @@ import {
  *          team_review would strand the caller's own live positions and the
  *          caller has not confirmed the removal.
  *
+ * 161-10 / WIZERR-07 — EVERY ERROR ARM ALSO CARRIES A MACHINE `code`, written
+ * FIRST in its object literal, so `MarkOwnershipDialog` discriminates the fault
+ * on a stable token instead of matching prose. Purely ADDITIVE: not one `error`
+ * sentence, status or header changed — pinned per arm in `route.test.ts`. This
+ * dialog previously read `refusal.error === "live_allocation"` and rendered
+ * `code: "UNKNOWN"` for all thirteen other arms, every one classified here.
+ *
+ * ⭐ THE FIVE `internal error` ARMS SPLIT 2 / 3 ON ONE QUESTION — WAS ANYTHING
+ * SENT? — and that is a decision, not an oversight. They still do NOT split by
+ * which internal query failed: that distinction is one the user cannot act on
+ * and must not be asked to, each site already logs its own distinct server-side
+ * line, and a code per call site would put our internal call graph in front of a
+ * person trying to mark a strategy.
+ *
+ *   · `DASHBOARD_WRITE_FAILED` — the portfolio lookup and the position lookup.
+ *     Both fail on a SELECT, with no data-modifying statement sent, so the
+ *     copy's "Nothing was saved — the strategy is as it was before you pressed
+ *     save" is established by the control flow. Both keep `clear_and_retry`.
+ *   · `DASHBOARD_WRITE_INDETERMINATE` — the flip RPC erroring, the flip RPC
+ *     returning no row, and the plain UPDATE erroring. On all three a statement
+ *     that CHANGES data was already sent and no arm can read what it did.
+ *
+ * ⛔ 161-REVIEW / CR-01 — 161-10 GAVE ALL FIVE THE FIRST CODE, so three arms
+ * shipped a sentence they had not established. Worst of them is the flip:
+ * `flip_capital_ownership_to_team_review` DELETES the caller's live positions
+ * and sets the mark in one transaction, so "Nothing was saved" there can tell a
+ * user their book is untouched while their positions are gone — and the
+ * accompanying `clear_and_retry` invites a blind second attempt against it. The
+ * split's copy claims persistence in neither direction and sends the user to
+ * re-read current state instead. See the "'NOTHING WAS SAVED' IS VERIFIED, NOT
+ * ASSERTED" rule at the `CSV_UPSTREAM_FAIL` entry in `wizardErrors.ts`, and the
+ * `DASHBOARD_WRITE_FAILED` / `DASHBOARD_WRITE_INDETERMINATE` union members.
+ *
+ * ⛔ `LIVE_ALLOCATION` is deliberately NOT a `WizardErrorCode` and is absent
+ * from `DASHBOARD_DIALOG_ROUTE_CODES`. That 409 is a QUESTION, not a refusal to
+ * read and leave: the dialog answers it by swapping in its confirmation body
+ * with the amount at risk. It never reaches `buildEnvelope`.
+ *
  * Defences (the alias route's six-defence stack, copied in order — see
  * src/app/api/portfolio-strategies/alias/route.ts:20-30):
  *   1. assertSameOrigin (CSRF).
@@ -114,7 +152,7 @@ export async function PATCH(
   } = await supabase.auth.getUser();
   if (!user) {
     return NextResponse.json(
-      { error: "unauthorized" },
+      { code: "DASHBOARD_SIGNED_OUT", error: "unauthorized" },
       { status: 401, headers: NO_STORE_HEADERS },
     );
   }
@@ -122,7 +160,7 @@ export async function PATCH(
   const { id } = await params;
   if (!isUuid(id)) {
     return NextResponse.json(
-      { error: "id must be a UUID" },
+      { code: "DASHBOARD_REQUEST_INVALID", error: "id must be a UUID" },
       { status: 400, headers: NO_STORE_HEADERS },
     );
   }
@@ -138,7 +176,7 @@ export async function PATCH(
       userId: user.id,
     });
     return NextResponse.json(
-      { error: "invalid json" },
+      { code: "DASHBOARD_REQUEST_INVALID", error: "invalid json" },
       { status: 400, headers: NO_STORE_HEADERS },
     );
   }
@@ -149,7 +187,10 @@ export async function PATCH(
   const mark = ALLOWED_MARKS.find((m) => m === body.mark);
   if (!mark) {
     return NextResponse.json(
-      { error: "mark must be one of: " + ALLOWED_MARKS.join(", ") },
+      {
+        code: "DASHBOARD_REQUEST_INVALID",
+        error: "mark must be one of: " + ALLOWED_MARKS.join(", "),
+      },
       { status: 400, headers: NO_STORE_HEADERS },
     );
   }
@@ -161,7 +202,10 @@ export async function PATCH(
     typeof body.confirm_remove_allocation !== "boolean"
   ) {
     return NextResponse.json(
-      { error: "confirm_remove_allocation must be a boolean" },
+      {
+        code: "DASHBOARD_REQUEST_INVALID",
+        error: "confirm_remove_allocation must be a boolean",
+      },
       { status: 400, headers: NO_STORE_HEADERS },
     );
   }
@@ -172,7 +216,7 @@ export async function PATCH(
   const rl = await checkLimit(mandateAutoSaveLimiter, `ownership:${user.id}`);
   if (!rl.success) {
     return NextResponse.json(
-      { error: "Too many requests" },
+      { code: "RATE_LIMITED", error: "Too many requests" },
       {
         status: 429,
         headers: { ...NO_STORE_HEADERS, "Retry-After": String(rl.retryAfter) },
@@ -198,7 +242,7 @@ export async function PATCH(
         pfErr.message,
       );
       return NextResponse.json(
-        { error: "internal error" },
+        { code: "DASHBOARD_WRITE_FAILED", error: "internal error" },
         { status: 500, headers: NO_STORE_HEADERS },
       );
     }
@@ -224,7 +268,7 @@ export async function PATCH(
           posErr.message,
         );
         return NextResponse.json(
-          { error: "internal error" },
+          { code: "DASHBOARD_WRITE_FAILED", error: "internal error" },
           { status: 500, headers: NO_STORE_HEADERS },
         );
       }
@@ -240,7 +284,11 @@ export async function PATCH(
             0,
           );
           return NextResponse.json(
-            { error: "live_allocation", allocated_amount: allocatedAmount },
+            {
+              code: "LIVE_ALLOCATION",
+              error: "live_allocation",
+              allocated_amount: allocatedAmount,
+            },
             { status: 409, headers: NO_STORE_HEADERS },
           );
         }
@@ -263,12 +311,20 @@ export async function PATCH(
         )("flip_capital_ownership_to_team_review", { p_strategy_id: id });
 
         if (flipErr) {
+          // ⛔ 161-REVIEW / CR-01 — INDETERMINATE. The RPC was SENT, and the
+          // RPC is the transaction that DELETES the caller's live positions and
+          // sets the mark. `supabase-js` reports a PostgREST rejection and a
+          // transport failure through one `{ data, error }` shape and this arm
+          // does not discriminate them, so it cannot verify the flip did not
+          // land. Telling the user "Nothing was saved" here can put a screen in
+          // front of them that says their book is untouched while their
+          // positions are gone.
           console.error(
             "[api/strategies/[id]/ownership] flip rpc failed:",
             flipErr.message,
           );
           return NextResponse.json(
-            { error: "internal error" },
+            { code: "DASHBOARD_WRITE_INDETERMINATE", error: "internal error" },
             { status: 500, headers: NO_STORE_HEADERS },
           );
         }
@@ -278,12 +334,19 @@ export async function PATCH(
           // A RETURNS TABLE function that yields no row leaves the counts
           // unknown. Reporting success here would claim a flip that may not
           // have happened.
+          //
+          // ⛔ 161-REVIEW / CR-01 — AND NEITHER MAY IT REPORT ZERO. "the counts
+          // unknown" is exactly the state `DASHBOARD_WRITE_INDETERMINATE`
+          // exists for: the code that used to answer here says "Nothing was
+          // saved", which is the mirror-image guess. Unknown means unknown, in
+          // both directions — the "'NOTHING WAS SAVED' IS VERIFIED, NOT
+          // ASSERTED" rule at `CSV_UPSTREAM_FAIL` in `wizardErrors.ts`.
           console.error(
             "[api/strategies/[id]/ownership] flip rpc returned no row",
             { strategyId: id, userId: user.id },
           );
           return NextResponse.json(
-            { error: "internal error" },
+            { code: "DASHBOARD_WRITE_INDETERMINATE", error: "internal error" },
             { status: 500, headers: NO_STORE_HEADERS },
           );
         }
@@ -293,7 +356,7 @@ export async function PATCH(
           // having removed nothing, is a total no-op. That reads as 404, not
           // as a successful flip (T-150-13).
           return NextResponse.json(
-            { error: "strategy not found" },
+            { code: "DASHBOARD_ROW_STALE", error: "strategy not found" },
             { status: 404, headers: NO_STORE_HEADERS },
           );
         }
@@ -307,7 +370,10 @@ export async function PATCH(
           metadata: { mark, removed_positions: removedPositions },
         });
 
-        return NextResponse.json({ ok: true, mark }, { headers: NO_STORE_HEADERS });
+        return NextResponse.json(
+          { ok: true, mark },
+          { headers: NO_STORE_HEADERS },
+        );
       }
     }
   }
@@ -323,19 +389,22 @@ export async function PATCH(
     .select("id");
 
   if (updateErr) {
+    // ⛔ 161-REVIEW / CR-01 — INDETERMINATE. Same reasoning as the two arms
+    // above and as the name route's UPDATE: the statement was sent and this arm
+    // cannot tell a rejection from a lost answer.
     console.error(
       "[api/strategies/[id]/ownership] update failed:",
       updateErr.message,
     );
     return NextResponse.json(
-      { error: "internal error" },
+      { code: "DASHBOARD_WRITE_INDETERMINATE", error: "internal error" },
       { status: 500, headers: NO_STORE_HEADERS },
     );
   }
   if (!updatedRows || updatedRows.length === 0) {
     // Wrong owner or unknown id — one honest arm. NOT ok-on-zero-rows.
     return NextResponse.json(
-      { error: "strategy not found" },
+      { code: "DASHBOARD_ROW_STALE", error: "strategy not found" },
       { status: 404, headers: NO_STORE_HEADERS },
     );
   }

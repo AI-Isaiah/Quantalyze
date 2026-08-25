@@ -19,6 +19,29 @@ import { MAGNITUDE_CAPS } from "@/lib/closed-sets";
  *   400 -> { error: "invalid name" } (empty after trim) | { error: "name too long" }
  *   404 -> wrong owner, unknown id, OR a published row (the D-17 gate)
  *
+ * 161-10 / WIZERR-07 — EVERY ERROR ARM ALSO CARRIES A MACHINE `code`, so a
+ * client discriminates the fault on a stable token instead of sniffing prose
+ * (the SEAMUX-03 intent, stated verbatim at
+ * `keys/validate-and-encrypt/route.ts`). The field is purely ADDITIVE: not one
+ * `error` sentence, status or header changed, so every existing consumer of
+ * this route is behaviourally unaffected — pinned per arm in `route.test.ts`.
+ * Before this, `RenameStrategyDialog` keyed its two inline field messages off
+ * `body.error` PROSE through a local `ROUTE_FIELD_ERRORS` table (retired in the
+ * same commit) and rendered `code: "UNKNOWN"` — "we could not classify this
+ * failure" — for all seven other arms, every one of which is classified here.
+ *
+ * ⛔ `code` IS WRITTEN FIRST IN EACH OBJECT LITERAL, and that is not cosmetic:
+ * the coverage laws derive their populations with a `code:`-first predicate, so
+ * an arm written `{ error, code }` is invisible to them (the D-34 reorder).
+ *
+ * TWO of the codes are deliberately NOT `WizardErrorCode`s. `NAME_REQUIRED` and
+ * `NAME_TOO_LONG` are FIELD-LEVEL refusals that the dialog lands inline at the
+ * Name input, where the user is looking and where the remedy is; routing them
+ * through the error envelope would re-introduce the terminal-envelope class for
+ * a field-level problem and would show a correlation id on an ACTIONABLE arm
+ * (161-UI-SPEC Copy Principle 4). See `DASHBOARD_DIALOG_ROUTE_CODES` in
+ * `src/lib/wizardErrors.ts` for the roster and that decision's full record.
+ *
  * Defences: the alias route's six-defence stack
  * (src/app/api/portfolio-strategies/alias/route.ts:20-30), copied in order.
  * Two deliberate divergences from that analog:
@@ -107,7 +130,7 @@ export async function PATCH(
   } = await supabase.auth.getUser();
   if (!user) {
     return NextResponse.json(
-      { error: "unauthorized" },
+      { code: "DASHBOARD_SIGNED_OUT", error: "unauthorized" },
       { status: 401, headers: NO_STORE_HEADERS },
     );
   }
@@ -115,7 +138,7 @@ export async function PATCH(
   const { id } = await params;
   if (!isUuid(id)) {
     return NextResponse.json(
-      { error: "id must be a UUID" },
+      { code: "DASHBOARD_REQUEST_INVALID", error: "id must be a UUID" },
       { status: 400, headers: NO_STORE_HEADERS },
     );
   }
@@ -129,7 +152,7 @@ export async function PATCH(
       userId: user.id,
     });
     return NextResponse.json(
-      { error: "invalid json" },
+      { code: "DASHBOARD_REQUEST_INVALID", error: "invalid json" },
       { status: 400, headers: NO_STORE_HEADERS },
     );
   }
@@ -138,14 +161,14 @@ export async function PATCH(
   // the route never silently reshapes the owner's chosen name.
   if (typeof body.name !== "string") {
     return NextResponse.json(
-      { error: "invalid name" },
+      { code: "NAME_REQUIRED", error: "invalid name" },
       { status: 400, headers: NO_STORE_HEADERS },
     );
   }
   const name = body.name.trim();
   if (name.length === 0) {
     return NextResponse.json(
-      { error: "invalid name" },
+      { code: "NAME_REQUIRED", error: "invalid name" },
       { status: 400, headers: NO_STORE_HEADERS },
     );
   }
@@ -153,7 +176,7 @@ export async function PATCH(
   // legal name over the cap.
   if (name.length > MAX_NAME_LENGTH) {
     return NextResponse.json(
-      { error: "name too long" },
+      { code: "NAME_TOO_LONG", error: "name too long" },
       { status: 400, headers: NO_STORE_HEADERS },
     );
   }
@@ -163,7 +186,7 @@ export async function PATCH(
   const rl = await checkLimit(mandateAutoSaveLimiter, `rename:${user.id}`);
   if (!rl.success) {
     return NextResponse.json(
-      { error: "Too many requests" },
+      { code: "RATE_LIMITED", error: "Too many requests" },
       {
         status: 429,
         headers: { ...NO_STORE_HEADERS, "Retry-After": String(rl.retryAfter) },
@@ -180,9 +203,19 @@ export async function PATCH(
     .select("id");
 
   if (updateErr) {
+    // ⛔ 161-REVIEW / CR-01 — INDETERMINATE, NOT "nothing was saved". The UPDATE
+    // was SENT. `supabase-js` reports a PostgREST rejection (statement rolled
+    // back) and a transport failure (the statement may have committed and the
+    // answer was lost) through the same `{ data, error }` shape, and this arm
+    // does not discriminate them — so it cannot verify that the rename did not
+    // land. See the "'NOTHING WAS SAVED' IS VERIFIED, NOT ASSERTED" rule at
+    // the `CSV_UPSTREAM_FAIL` entry in `wizardErrors.ts`. The code that says
+    // only what this arm established is
+    // `DASHBOARD_WRITE_INDETERMINATE`; `DASHBOARD_WRITE_FAILED` is now reserved
+    // for arms that fail on a READ, before anything is sent.
     console.error("[api/strategies/[id]/name] update failed:", updateErr.message);
     return NextResponse.json(
-      { error: "internal error" },
+      { code: "DASHBOARD_WRITE_INDETERMINATE", error: "internal error" },
       { status: 500, headers: NO_STORE_HEADERS },
     );
   }
@@ -191,7 +224,7 @@ export async function PATCH(
     // row refused by the D-17 predicate above. Distinguishing them would leak
     // row existence to a caller probing ids.
     return NextResponse.json(
-      { error: "strategy not found" },
+      { code: "DASHBOARD_ROW_STALE", error: "strategy not found" },
       { status: 404, headers: NO_STORE_HEADERS },
     );
   }

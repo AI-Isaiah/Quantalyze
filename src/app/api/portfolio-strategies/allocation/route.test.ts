@@ -58,7 +58,10 @@ const { mockFrom, mockRpc, authResult, checkLimitSpy } = vi.hoisted(() => {
   const userId = "00000000-0000-0000-0000-cccccccccccc";
   return {
     mockFrom: vi.fn(),
-    mockRpc: vi.fn(async (..._args: unknown[]) => ({ data: null, error: null })),
+    mockRpc: vi.fn(async (..._args: unknown[]) => ({
+      data: null,
+      error: null,
+    })),
     authResult: {
       data: { user: { id: userId } as { id: string } | null },
       error: null,
@@ -387,7 +390,9 @@ describe("POST — amount validation ($1B ticket cap, literal oracles)", () => {
     setup({});
     const { POST } = await import("./route");
     for (const bad of [undefined, "", "   ", 42, "not-a-uuid"]) {
-      const res = await POST(post({ strategy_id: bad, allocated_amount: 1000 }));
+      const res = await POST(
+        post({ strategy_id: bad, allocated_amount: 1000 }),
+      );
       expect(res.status).toBe(400);
     }
   });
@@ -532,6 +537,105 @@ describe("POST — the money write (SC 2) and the SC-4 duplicate-add oracle", ()
       post({ strategy_id: STRATEGY_ID, allocated_amount: 120_000 }),
     );
     expect(res.status).toBe(500);
+    errorSpy.mockRestore();
+  });
+
+  /**
+   * ⭐ 161-REVIEW / CR-01 — THE MONEY WRITE'S 500s SAY ONLY WHAT THEY KNOW.
+   *
+   * 161-10 gave every `internal error` 500 on this route
+   * `DASHBOARD_WRITE_FAILED`, whose copy reads "Nothing was saved — the
+   * strategy is as it was before you pressed save" and which offers a Retry.
+   * Two of the arms it covered cannot support that:
+   *
+   *   · the upsert ERRORING — `supabase-js` reports a PostgREST rejection
+   *     (rolled back) and a transport failure (may have committed, answer lost)
+   *     through the same `{ data, error }` shape, and this route does not
+   *     discriminate them;
+   *   · the upsert returning ZERO ROWS — the route's own comment names "RLS ate
+   *     the row" as a cause, and that means the write SUCCEEDED and only the
+   *     returning row was suppressed. The allocation may be LIVE.
+   *
+   * These cases pin the arms by their measured code, with a negative control on
+   * a READ-failure arm so "re-code everything" is not a passing strategy.
+   */
+  it("[161-CR-01] the upsert returning ZERO ROWS is INDETERMINATE — the write may have landed", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    setup({ ps: { upsertRows: 0 } });
+    const { POST } = await import("./route");
+    const res = await POST(
+      post({ strategy_id: STRATEGY_ID, allocated_amount: 120_000 }),
+    );
+
+    // ⚠️ ARM PROOF FIRST — the code assertion below is satisfiable by a fixture
+    // that never reached the upsert at all.
+    expect(res.status).toBe(500);
+    const body = (await res.json()) as { code?: unknown; error?: unknown };
+
+    // The SENTENCE is byte-identical: `code` is the only thing that moved.
+    expect(body.error).toBe("internal error");
+    expect(
+      body.code,
+      "'RLS ate the row' means the upsert SUCCEEDED and the returning row was " +
+        "suppressed. Answering DASHBOARD_WRITE_FAILED here tells an allocator " +
+        "nothing was saved about a position that may be live, and invites a " +
+        "one-click Retry on top of it.",
+    ).toBe("DASHBOARD_WRITE_INDETERMINATE");
+    errorSpy.mockRestore();
+  });
+
+  it("[161-CR-01] a non-23514 upsert ERROR is INDETERMINATE — an errored write is not a verified rollback", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    setup({
+      ps: {
+        upsertError: {
+          code: "42501",
+          message: "permission denied for table portfolio_strategies",
+        },
+      },
+    });
+    const { POST } = await import("./route");
+    const res = await POST(
+      post({ strategy_id: STRATEGY_ID, allocated_amount: 120_000 }),
+    );
+
+    expect(res.status).toBe(500);
+    const body = (await res.json()) as { code?: unknown; error?: unknown };
+    expect(body.error).toBe("internal error");
+    expect(body.code).toBe("DASHBOARD_WRITE_INDETERMINATE");
+    errorSpy.mockRestore();
+  });
+
+  it("[161-CR-01] NEGATIVE CONTROL: a failed strategy LOOKUP stays DASHBOARD_WRITE_FAILED", async () => {
+    // The matched pair. Without this, the two cases above are satisfied by a
+    // route that answers INDETERMINATE everywhere — which would replace one
+    // false sentence with a vaguer one on arms that genuinely establish a zero
+    // write, and would strip a Retry that is correct there.
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const fx = setup({
+      strategy: null,
+      strategyError: { message: "connection reset" },
+    });
+    const { POST } = await import("./route");
+    const res = await POST(
+      post({ strategy_id: STRATEGY_ID, allocated_amount: 120_000 }),
+    );
+
+    expect(res.status).toBe(500);
+    // ⭐ THE PROPERTY THAT EARNS THE SENTENCE, asserted rather than assumed:
+    // nothing was sent. Zero upserts is what makes "Nothing was saved" a fact
+    // about the control flow instead of a claim about a statement's outcome.
+    expect(fx.ps.upsertCalls).toHaveLength(0);
+    expect(fx.portfolios.insertPayloads).toHaveLength(0);
+
+    const body = (await res.json()) as { code?: unknown; error?: unknown };
+    expect(body.error).toBe("internal error");
+    expect(
+      body.code,
+      "this arm fails on a SELECT with nothing sent, so it is entitled to the " +
+        "'Nothing was saved' sentence and to its Retry. Widening the " +
+        "indeterminate code to cover it would be over-correction.",
+    ).toBe("DASHBOARD_WRITE_FAILED");
     errorSpy.mockRestore();
   });
 
@@ -893,6 +997,46 @@ describe("DELETE /api/portfolio-strategies/allocation — remove a position", ()
     expect(res.status).toBe(500);
     errorSpy.mockRestore();
   });
+
+  /**
+   * ⭐ 161-REVIEW / CR-01 — the DELETE verb's own matched pair.
+   *
+   * Both of this verb's 500s were `DASHBOARD_WRITE_FAILED`, and they are on
+   * opposite sides of the split: the book lookup fails on a SELECT with nothing
+   * sent, while the DELETE itself is a statement whose outcome this route
+   * cannot read. Telling a user "Nothing was saved" after a removal we could
+   * not confirm is the worst direction to be wrong in — it says their position
+   * is still there.
+   */
+  it("[161-CR-01] a failed DELETE is INDETERMINATE — the removal may have landed", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    setup({ ps: { deleteError: { message: "boom" } } });
+    const { DELETE } = await import("./route");
+    const res = await DELETE(del({ strategy_id: STRATEGY_ID }));
+
+    expect(res.status).toBe(500);
+    const body = (await res.json()) as { code?: unknown; error?: unknown };
+    expect(body.error).toBe("internal error"); // sentence byte-identical
+    expect(body.code).toBe("DASHBOARD_WRITE_INDETERMINATE");
+    errorSpy.mockRestore();
+  });
+
+  it("[161-CR-01] NEGATIVE CONTROL: a failed BOOK LOOKUP stays DASHBOARD_WRITE_FAILED", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const fx = setup({
+      portfolios: { resolve: [], resolveError: { message: "connection reset" } },
+    });
+    const { DELETE } = await import("./route");
+    const res = await DELETE(del({ strategy_id: STRATEGY_ID }));
+
+    expect(res.status).toBe(500);
+    // The property that earns the sentence: no delete was issued.
+    expect(fx.ps.deleteEqCalls).toHaveLength(0);
+    const body = (await res.json()) as { code?: unknown; error?: unknown };
+    expect(body.error).toBe("internal error");
+    expect(body.code).toBe("DASHBOARD_WRITE_FAILED");
+    errorSpy.mockRestore();
+  });
 });
 
 // ══════════════════════════════════════════════════ no-store on EVERY arm
@@ -1043,10 +1187,7 @@ describe("every arm of both verbs stamps Cache-Control: private, no-store", () =
 
 describe("[T-150-24] the route never touches current_weight", () => {
   it("contains zero non-comment occurrences of current_weight", () => {
-    const src = fs.readFileSync(
-      path.join(__dirname, "route.ts"),
-      "utf8",
-    );
+    const src = fs.readFileSync(path.join(__dirname, "route.ts"), "utf8");
     const code = src
       .split("\n")
       .filter((l) => !/^\s*(\/\/|\*|\/\*)/.test(l))
@@ -1055,5 +1196,127 @@ describe("[T-150-24] the route never touches current_weight", () => {
     // portfolio_returns_series and match scoring (150-RESEARCH § Schema
     // Findings 2 — two analytics consumers default NULL → 1.0 and renormalize).
     expect(code).not.toContain("current_weight");
+  });
+});
+
+/**
+ * [161-10 / WIZERR-07] EVERY ERROR ARM CARRIES A CODE, AND NO SENTENCE MOVED.
+ *
+ * Two independent claims over the allocation route, and the plan requires BOTH — the
+ * second is what makes the first safe to ship:
+ *
+ *   1. every arm puts a stable machine token on the wire, so the dialog behind
+ *      this route discriminates on a token instead of matching prose;
+ *   2. every `error` SENTENCE is byte-identical to what shipped before, so
+ *      `code` is purely additive and no other consumer changes behaviour.
+ *
+ * ⛔ THE SENTENCES BELOW ARE HAND-TYPED, transcribed from this route as it
+ * stood at the commit BEFORE the codes landed. Deriving them from the current
+ * source would make this suite agree with any rewording — which is precisely
+ * the drift claim (2) exists to refuse.
+ *
+ * ⚠️ SCANNED COMMENT-STRIPPED. This route's docblock discusses its own arms, so
+ * a raw-text scan would count prose as emitters (the receipt for this is the
+ * 14-vs-12 delta `wizardErrors.invariant.test.ts` records).
+ *
+ * ⚠️ The CSRF arm is deliberately absent: it is emitted by the shared
+ * `assertSameOrigin` helper in `src/lib/csrf.ts`, which serves many routes, and
+ * coding it is a cross-cutting change this plan did not scope. It is an
+ * explicit terminal-UNKNOWN disposition in `dialog-envelope.invariant.test.ts`.
+ */
+describe("[161-10 / WIZERR-07] the allocation route classifies every arm it refuses", () => {
+  const RAW = fs.readFileSync(
+    path.join(
+      process.cwd(),
+      "src/app/api/portfolio-strategies/allocation/route.ts",
+    ),
+    "utf8",
+  );
+  const SRC = RAW.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+
+  it("anti-vacuity: the source loaded and the stripper really stripped", () => {
+    expect(RAW.length).toBeGreaterThan(2000);
+    expect(RAW).toContain("/**");
+    expect(SRC).not.toContain("/**");
+    expect(SRC).toContain("export async function POST");
+  });
+
+  /**
+   * Hand-typed from the pre-code source. A sentence that is reworded, or an arm
+   * that is deleted, reddens here by name.
+   */
+  const SENTENCES: readonly string[] = [
+    "unauthorized",
+    "invalid json",
+    "strategy_id is required",
+    "Too many requests",
+    "internal error",
+    "strategy not found",
+    "not_allocatable",
+    "portfolio not found",
+    "investment row not found",
+  ];
+
+  it("every pre-existing sentence is still on the wire, byte-identical", () => {
+    // NON-VACUITY: an empty list would make the loop pass trivially, and
+    // `"anything".includes("")` would make a blank needle pass too.
+    expect(SENTENCES.length).toBe(9);
+    for (const sentence of SENTENCES) {
+      expect(sentence.length).toBeGreaterThan(3);
+      expect(SRC, `the sentence "${sentence}" is gone or reworded`).toContain(
+        `error: "${sentence}"`,
+      );
+    }
+  });
+
+  it("every code literal is written FIRST in its object literal", () => {
+    // The coverage laws derive their populations with a `code:`-first
+    // predicate, so an arm written `{ error, code }` is invisible to them (the
+    // D-34 reorder). Hand-typed count, re-measured at HEAD.
+    const codeFirst = (
+      SRC.match(/code: "[A-Z][A-Z0-9_]*",\s*error: ["`]/g) ?? []
+    ).length;
+    expect(codeFirst).toBe(23);
+    // …and NOT ONE arm is written the other way round.
+    expect(SRC).not.toMatch(/\{\s*error: [^}]*,\s*code:/);
+  });
+
+  it("NO error arm is left code-less — the population has no silent hole", () => {
+    // Two DIFFERENT predicates over the same source. Deleting every arm takes
+    // both sides to zero together, which is why the hand-typed literal in the
+    // case above is what catches a shrink; this catches an arm ADDED without a
+    // code.
+    // The predicate is STRING-VALUED `error:` keys only, so the route's own
+    // `const { data, error: xxErr } = await supabase…` destructurings are not
+    // counted as response arms.
+    const errorKeys = (SRC.match(/error: ["`]/g) ?? []).length;
+    const codeFirst = (
+      SRC.match(/code: "[A-Z][A-Z0-9_]*",\s*error: ["`]/g) ?? []
+    ).length;
+    expect(errorKeys).toBeGreaterThan(0);
+    expect(
+      errorKeys,
+      "an error key exists that no code opens - a client cannot " +
+        "discriminate that arm and it will render the generic terminal",
+    ).toBe(codeFirst);
+  });
+
+  it("every code goes THROUGH the json() helper — no parallel response path", () => {
+    // The helper is what stamps NO_STORE_HEADERS. An arm that bypassed it
+    // would lose the header silently while looking correct, which is the
+    // divergence shape this phase keeps closing.
+    const viaHelper = (SRC.match(/json\(\s*\{\s*code: "/g) ?? []).length;
+    expect(viaHelper).toBe(23);
+    // `NextResponse.json(` appears exactly ONCE in this file: inside the
+    // helper's own body. Any second occurrence is a parallel path.
+    expect((SRC.match(/NextResponse\.json\(/g) ?? []).length).toBe(1);
+  });
+
+  it("the interpolated amount sentence is unchanged and carries its code", () => {
+    // Built with a template literal, so the double-quoted scan above cannot
+    // see it. Pinned on its own terms, interpolation included.
+    expect(SRC).toContain(
+      "error: `allocated_amount must be a positive number no greater than ${MAGNITUDE_CAPS.MAX_TICKET_SIZE_USD}`",
+    );
   });
 });

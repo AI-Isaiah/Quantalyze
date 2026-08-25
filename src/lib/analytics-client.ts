@@ -17,6 +17,11 @@ import {
   type SeamBudgetKey,
   type SeamResponse,
 } from "./resilient-fetch";
+// 161-06 / WIZERR-05 — the ONE `Retry-After` parser (B20), enforced repo-wide
+// by the `no-raw-retry-after-parse` lint rule. It is imported HERE for the same
+// reason `seam-discriminator` is: a second extractor for one fact is the drift
+// class this programme exists to close.
+import { parseRetryAfterSeconds } from "./retry/retry-after";
 // 140.3-01 / TS-05 — the ONE seam-envelope discriminator (140.2-06). Never
 // hand-roll a second extractor: a second implementation of this predicate is
 // the drift class this programme exists to close.
@@ -148,11 +153,49 @@ export class AnalyticsUpstreamError extends Error {
    * "no venue failed", and never a name to invent.
    */
   readonly dependency: string | null;
+  /**
+   * 161-06 / WIZERR-05 — the wait the UPSTREAM advertised, in SECONDS, or
+   * `null` when it advertised none.
+   *
+   * Additive and optional, exactly like its two siblings above: every
+   * pre-existing construction site passes two, three or four arguments and
+   * keeps `null`. The new parameter is a `number | null` following two
+   * `string | null`s, so a transposition is a `tsc` error rather than a silent
+   * swap — which is why this is an add-alongside rather than the
+   * trailing-options-object refactor a FIFTH optional field (or a SECOND
+   * `number | null` one) would make mandatory.
+   *
+   * ⚠️ IT IS READ HERE BECAUSE THIS IS THE LAST LINE AT WHICH IT EXISTS. The
+   * route handlers downstream see only the thrown error — the `Response` and
+   * its headers are gone by then. Before this field the value simply died at
+   * the construction sites below: the wizard's renderer
+   * (`WizardErrorContext.retryAfterSeconds` → the envelope's
+   * `retry_after_seconds`) already existed and had nothing to render.
+   *
+   * SECONDS AT EVERY HOP, and it is fed from ONE place: the response's own
+   * `Retry-After` header, through `parseRetryAfterSeconds` — never
+   * `Number(header)` (an HTTP-date form yields `NaN` through `Number`, and B20's
+   * lint rule bans the shape repo-wide). The nested envelope
+   * (`service_error_body`) carries key set `{code, dependency, retryable,
+   * detail}` and NO wait leaf, measured at HEAD, so for a 503 the header is not
+   * merely the preferred source — it is the only one on the wire. Reading a
+   * body field as a second source would be the two-extraction-paths shape
+   * `process-key-client.ts`'s relay docblock already refused in prose.
+   *
+   * `null` means "no wait was advertised". It NEVER means zero: `0` is an
+   * instruction to retry immediately, which is a duration nobody sent, and
+   * fabricating one turns a vague error into a specific lie (TRAP-3). It is
+   * `null` by construction on the two UNUSABLE_RESPONSE_STATUS arms, whose
+   * status this module SYNTHESIZES (502) rather than forwards — attaching the
+   * upstream's advice to a verdict of our own would misattribute it.
+   */
+  readonly retryAfterSeconds: number | null;
   constructor(
     message: string,
     status: number,
     seamCode: string | null = null,
     dependency: string | null = null,
+    retryAfterSeconds: number | null = null,
   ) {
     super(message);
     this.name = "AnalyticsUpstreamError";
@@ -171,6 +214,7 @@ export class AnalyticsUpstreamError extends Error {
     this.status = status;
     this.seamCode = seamCode;
     this.dependency = dependency;
+    this.retryAfterSeconds = retryAfterSeconds;
   }
 }
 
@@ -553,11 +597,18 @@ async function analyticsRequest(
       // the last line at which it exists — the route handlers downstream see
       // only the thrown error. `seamDependencyName` returns null for both flat
       // shapes and for any name inside OUR closed service set.
+      //
+      // 161-06 / WIZERR-05 adds the FOURTH half, and it does NOT come through
+      // the leaf — it comes off the HEADERS, because that is where it is. The
+      // nested envelope's key set is `{code, dependency, retryable, detail}`;
+      // the wait rides on `Retry-After`, which `error_contract` REQUIRES on
+      // every 503 and which dies with the `Response` one line from here.
       throw new AnalyticsUpstreamError(
         seamHumanMessage(error) ?? "Analytics service error",
         res.status,
         seamErrorCode(error),
         seamDependencyName(error),
+        parseRetryAfterSeconds(res.headers),
       );
     }
     // Non-JSON error (FastAPI unhandled exception returns text/plain).
@@ -569,9 +620,18 @@ async function analyticsRequest(
       }
       return res.statusText;
     });
+    // 161-06 / WIZERR-05 — the wait is read on THIS arm too. A `text/plain` 5xx
+    // is a real upstream error forwarding a real upstream status, and its
+    // headers are as authoritative as the JSON arm's. Feeding only the
+    // contract-envelope arm would make the field's own docblock ("null means no
+    // wait was advertised") a false sentence at one of the two arms that can
+    // reach it — the class this phase exists to close.
     throw new AnalyticsUpstreamError(
       text || `Analytics service error (${res.status})`,
       res.status,
+      null,
+      null,
+      parseRetryAfterSeconds(res.headers),
     );
   }
 

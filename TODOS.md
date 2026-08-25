@@ -26,6 +26,61 @@ items were dropped, not carried. Categories: **Fix now** / **Fix mid-term** / **
 
 ## 🔴 FIX NOW — live correctness, trust-boundary security, active go-live
 
+0.07. **⚠️ The composite arm tells a `sampled_gapped` series a false provenance sentence.** Found and
+   deliberately left live by Phase 161 (`161-07`, D-161-07-A) — it fell outside that task's declared
+   file scope, so it was booked rather than silently widened into.
+   - `SyncPreviewStep.tsx:1306` / `:1311` hardcode `GATE_SERIES_PROVENANCE_UNVERIFIED` for **every**
+     inadmissible composite verdict. A `sampled_gapped` composite is therefore told *"nothing on our
+     side recorded how that series was built"* — which is false: the series' provenance IS recorded;
+     it simply has a gap (`nav_gap_days > 0`). Reachable via the FIX-2 downgrade, and currently
+     pinned by a 142.2 test.
+   - Same defect class Phase 161 exists to eliminate — a sentence that names a blocker other than the
+     real one — so this is unfinished business of that phase, not new scope.
+   - **Fix shape:** branch the composite arm's code on the actual verdict instead of hardcoding one,
+     mapping `sampled_gapped` to its own reason. One-line fix recorded in
+     `.planning/phases/161-wizerr-honest-error-surfaces/deferred-items.md`; the 142.2 pin moves with it.
+
+0.06. **⚠️ A manager cannot release their own orphaned API key — no surface exists.** Found
+   2026-08-24 during Phase 161 (WIZERR-03) execution, when the approved `161-UI-SPEC.md` remedy
+   bullet turned out to be **unwinnable at HEAD** and had to be replaced rather than shipped.
+   - The UI-SPEC said: *"Disconnect the unused key under Manage keys, then connect it here again."*
+     Measured: the string `"Manage keys"` occurs **nowhere** in `src`. `ApiKeyManager` is mounted
+     only on the per-strategy edit page (`strategies/[id]/edit/page.tsx`) — and an orphaned key by
+     definition has no strategy. Profile → Exchanges is `allocatorOnly`, and the wizard user in this
+     flow is a manager. `my-strategies` displays the orphan but its only control reopens the wizard
+     that just refused.
+   - So the honest refusal now shipping (`KEY_ORPHANED`) correctly tells the user their key is
+     stranded — **and there is no place in the product where they can un-strand it.** The orphan is
+     permanent: `cleanup_abandoned_wizard_drafts()` builds its candidate set only from drafts that
+     same run is deleting, so a key with no draft is never a candidate again (re-measured at HEAD).
+   - Shipping the original bullet would have breached the exact principle WIZERR-03 enforces — a
+     remedy that cannot succeed. Filed by the executor as D-161-05-A; recorded here because it is a
+     **product gap**, not a phase artifact.
+   - **Fix shape:** give managers a key-release surface reachable without a strategy (extend the
+     profile Exchanges panel past `allocatorOnly`, or add a control on `my-strategies`), then point
+     the `KEY_ORPHANED` remedy at it.
+
+0.05. **⚠️ MT5 generic fallback names a cause it has NOT proven — a false sentence in the arm that
+   exists for "cause unknown".** Found 2026-08-24 during Phase 161 (WIZERR-01) execution; the plan
+   deliberately did not touch it, and `161-UI-SPEC.md` holds arm 3 unchanged, so this is a scoped
+   follow-up, not a regression.
+   - `MT5_GATEWAY_MISCONFIGURED_DETAIL` (`analytics-service/services/mt5_probe.py`) reads:
+     *"MT5 gateway refuses automated trading (the 'Disable automatic trading through the external
+     Python API' option is in force), so read-only capability cannot be proven…"*
+   - That parenthetical is **arm 2's specific claim** (`MT5_GATEWAY_EXTERNAL_API_BLOCKED_DETAIL`
+     asserts the same option, legitimately, because arm 2 *is* that case). Arm 3 is the fallback
+     used when **no cause is provable** — the A1 absent-key path and `classify_exception`'s
+     allow-list degradation target. Asserting a specific option there is exactly the
+     names-a-blocker-it-cannot-establish defect WIZERR-01 exists to eliminate.
+   - **Currently low-urgency:** structurally unreachable from both raise sites (they enter the
+     operator arm only via `terminal_trade_permission_off`, which forces arm 1 or 2). It survives as
+     `Mt5GatewayMisconfigured()`'s default argument and as the allow-list's degradation target — so
+     it CAN still surface.
+   - **Fix shape:** amend `161-UI-SPEC.md` arm 3 to a cause-free sentence, re-run the 14-token fence
+     check, change the constant, and re-run `test_mt5_validate_parity.py` (the default-argument pin
+     `str(Mt5GatewayMisconfigured()) == MT5_GATEWAY_MISCONFIGURED_DETAIL` binds it). Founder call on
+     the wording, since the UI-SPEC copy contract is an approved artifact.
+
 0. **⛔ MT5 ARCHITECTURE — the shared gateway cannot safely serve more than ONE user, and the
    read-only guarantee can fail OPEN.** Found 2026-08-08 by the platform research that Phase 134
    specified but never executed (`153-EVIDENCE-mt5-platform.md`, `153-EVIDENCE-mt5-latency.md`).

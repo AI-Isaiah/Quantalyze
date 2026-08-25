@@ -59,6 +59,43 @@ import { isUuid } from "@/lib/utils";
  *   5. Explicit `strategies.user_id` ownership pre-check → clean 404.
  *   6. Count-checked write: `.select()` on the upsert/delete, so zero rows is
  *      a deterministic status, never a silent-success oracle (G8.B.6).
+ *
+ * 161-10 / WIZERR-07 — EVERY ERROR ARM ALSO CARRIES A MACHINE `code`, written
+ * FIRST in its object literal. Purely ADDITIVE: not one `error` sentence,
+ * status or header changed, so `AllocateDialog`'s two incumbent reads (429 →
+ * RATE_LIMITED, and the 409 `not_allocatable` body) keep answering exactly as
+ * they did — pinned per arm in `route.test.ts`.
+ *
+ * ⛔ THE CODES GO THROUGH `json(...)`, NEVER AROUND IT. Every arm below is the
+ * helper's first argument; there is no second response path beside it. A
+ * parallel raw `NextResponse.json(...)` here would be the divergence shape this
+ * phase keeps closing — the helper is what stamps NO_STORE_HEADERS, so an arm
+ * that bypassed it would lose the header silently while looking correct.
+ *
+ * ⭐ 161-REVIEW / CR-01 — THE NINE `internal error` 500s SPLIT 3 / 6 ON ONE
+ * QUESTION: had a data-modifying statement already been SENT when this arm
+ * returned?
+ *
+ *   · `DASHBOARD_WRITE_FAILED` (3) — POST's strategy lookup, POST's
+ *     `resolveRealPortfolio` fault, DELETE's `resolveRealPortfolio` fault. All
+ *     three fail on a SELECT, so "Nothing was saved" is established by the
+ *     control flow and `clear_and_retry` starts from the state that sentence
+ *     describes.
+ *   · `DASHBOARD_WRITE_INDETERMINATE` (6) — the three container-provisioning
+ *     arms (an INSERT into `portfolios` was sent), the upsert erroring, the
+ *     upsert returning zero rows, and the DELETE erroring.
+ *
+ * TWO INDEPENDENT REASONS THE SECOND SET CANNOT CLAIM A ZERO WRITE, both
+ * readable in this file. (1) `supabase-js` reports a PostgREST rejection
+ * (rolled back) and a TRANSPORT failure (may have committed, answer lost)
+ * through the same `{ data, error }` shape, and no arm here discriminates them.
+ * (2) The zero-rows arm's own comment says "RLS ate the row" — which means the
+ * upsert SUCCEEDED and only the returning row was suppressed. This is the MONEY
+ * WRITE; telling an allocator "Nothing was saved" about a position that may be
+ * live, and offering a one-click Retry on top of it, is the defect the split
+ * removes. See the "'NOTHING WAS SAVED' IS VERIFIED, NOT ASSERTED" rule at the
+ * `CSV_UPSTREAM_FAIL` entry in `wizardErrors.ts`, and the
+ * `DASHBOARD_WRITE_FAILED` / `DASHBOARD_WRITE_INDETERMINATE` union members.
  */
 
 /**
@@ -150,26 +187,34 @@ export async function POST(req: NextRequest) {
   const {
     data: { user },
   } = await supabase.auth.getUser();
-  if (!user) return json({ error: "unauthorized" }, 401);
+  if (!user)
+    return json({ code: "DASHBOARD_SIGNED_OUT", error: "unauthorized" }, 401);
 
   let body: AllocationBody;
   try {
     body = (await req.json()) as AllocationBody;
   } catch (err) {
     logBodyParseFailure(err, user.id);
-    return json({ error: "invalid json" }, 400);
+    return json(
+      { code: "DASHBOARD_REQUEST_INVALID", error: "invalid json" },
+      400,
+    );
   }
 
   const strategyId =
     typeof body.strategy_id === "string" ? body.strategy_id.trim() : "";
   if (!isUuid(strategyId)) {
-    return json({ error: "strategy_id is required" }, 400);
+    return json(
+      { code: "DASHBOARD_REQUEST_INVALID", error: "strategy_id is required" },
+      400,
+    );
   }
 
   const allocatedAmount = parseAmount(body.allocated_amount);
   if (allocatedAmount === null) {
     return json(
       {
+        code: "DASHBOARD_REQUEST_INVALID",
         error: `allocated_amount must be a positive number no greater than ${MAGNITUDE_CAPS.MAX_TICKET_SIZE_USD}`,
       },
       400,
@@ -180,7 +225,7 @@ export async function POST(req: NextRequest) {
   // the caller's own tokens.
   const rl = await checkLimit(mandateAutoSaveLimiter, `allocation:${user.id}`);
   if (!rl.success) {
-    return json({ error: "Too many requests" }, 429, {
+    return json({ code: "RATE_LIMITED", error: "Too many requests" }, 429, {
       "Retry-After": String(rl.retryAfter),
     });
   }
@@ -201,15 +246,25 @@ export async function POST(req: NextRequest) {
       "[api/portfolio-strategies/allocation] strategy lookup failed:",
       stratErr.message,
     );
-    return json({ error: "internal error" }, 500);
+    return json(
+      { code: "DASHBOARD_WRITE_FAILED", error: "internal error" },
+      500,
+    );
   }
-  if (!strategy) return json({ error: "strategy not found" }, 404);
+  if (!strategy)
+    return json(
+      { code: "DASHBOARD_ROW_STALE", error: "strategy not found" },
+      404,
+    );
 
   // UX pre-check for a clean, actionable error. The BEFORE INSERT trigger
   // (Plan 150-01) is the ENFORCEMENT — this arm exists so the client renders
   // "mark it own-capital first" instead of a raw 23514.
   if (strategy.capital_ownership !== OWN_CAPITAL) {
-    return json({ error: "not_allocatable" }, 409);
+    return json(
+      { code: "ALLOCATION_NOT_ALLOCATABLE", error: "not_allocatable" },
+      409,
+    );
   }
 
   // ── Resolve-or-provision the caller's real book (rev-4, D-03-B) ─────────
@@ -217,7 +272,11 @@ export async function POST(req: NextRequest) {
   // the explicit Allocate action and an amount, so SC 3 (no auto-add) is
   // untouched: minting an empty book adds no strategy to it.
   const resolved = await resolveRealPortfolio(supabase, user.id);
-  if (resolved.kind === "error") return json({ error: "internal error" }, 500);
+  if (resolved.kind === "error")
+    return json(
+      { code: "DASHBOARD_WRITE_FAILED", error: "internal error" },
+      500,
+    );
 
   let portfolioId = resolved.id;
   let provisioned = false;
@@ -242,6 +301,14 @@ export async function POST(req: NextRequest) {
       .select("id")
       .single();
 
+    // ⛔ 161-REVIEW / CR-01 — FROM HERE DOWN THE 500s ARE INDETERMINATE. The
+    // INSERT above has been SENT. The money write itself (the upsert below) has
+    // NOT been reached on any of the three arms in this block, so it is
+    // tempting to answer "Nothing was saved" — but that would be a judgement
+    // that an orphaned container does not count, and the whole point of the
+    // 161-CR-01 split is that we stop making judgements about statements we did
+    // not get an answer to. The membership rule is mechanical: a data-modifying
+    // statement was sent ⇒ INDETERMINATE.
     if (insErr) {
       if (insErr.code === "23505") {
         // `portfolios_one_real_per_user` (20260409202756) — a concurrent
@@ -256,7 +323,10 @@ export async function POST(req: NextRequest) {
             "[api/portfolio-strategies/allocation] 23505 race re-select found no real portfolio:",
             { userId: user.id },
           );
-          return json({ error: "internal error" }, 500);
+          return json(
+            { code: "DASHBOARD_WRITE_INDETERMINATE", error: "internal error" },
+            500,
+          );
         }
         portfolioId = race.id;
       } else {
@@ -264,13 +334,19 @@ export async function POST(req: NextRequest) {
           "[api/portfolio-strategies/allocation] real-portfolio provisioning failed:",
           insErr.message,
         );
-        return json({ error: "internal error" }, 500);
+        return json(
+          { code: "DASHBOARD_WRITE_INDETERMINATE", error: "internal error" },
+          500,
+        );
       }
     } else if (!created) {
       console.error(
         "[api/portfolio-strategies/allocation] provisioning returned no row",
       );
-      return json({ error: "internal error" }, 500);
+      return json(
+        { code: "DASHBOARD_WRITE_INDETERMINATE", error: "internal error" },
+        500,
+      );
     } else {
       portfolioId = created.id;
       provisioned = true;
@@ -312,22 +388,43 @@ export async function POST(req: NextRequest) {
         "[api/portfolio-strategies/allocation] mark flipped between pre-check and insert:",
         { userId: user.id, strategyId },
       );
-      return json({ error: "not_allocatable" }, 409);
+      return json(
+        { code: "ALLOCATION_NOT_ALLOCATABLE", error: "not_allocatable" },
+        409,
+      );
     }
     console.error(
       "[api/portfolio-strategies/allocation] upsert failed:",
       writeErr.message,
     );
-    return json({ error: "internal error" }, 500);
+    // ⛔ 161-REVIEW / CR-01 — INDETERMINATE, and this is THE MONEY WRITE. The
+    // upsert was sent; `supabase-js` reports a PostgREST rejection and a
+    // transport failure through one `{ data, error }` shape and this arm does
+    // not discriminate them. "Nothing was saved" about a possibly-live
+    // allocation is the false sentence WIZERR exists to remove.
+    return json(
+      { code: "DASHBOARD_WRITE_INDETERMINATE", error: "internal error" },
+      500,
+    );
   }
   if (!written || written.length === 0) {
     // An upsert that returns nothing is an anomaly (RLS ate the row, or the
     // conflict target drifted) — not a "not found". Fail loud.
+    //
+    // ⛔ 161-REVIEW / CR-01 — "RLS ate the row" MEANS THE WRITE LANDED and only
+    // the returning row was suppressed. So this arm is not merely unable to
+    // prove a zero-write; one of the two causes it names is an arm where the
+    // allocation IS live. It answers `DASHBOARD_WRITE_INDETERMINATE`, whose
+    // copy claims persistence in neither direction and sends the user to
+    // re-read current state instead of offering a blind retry.
     console.error(
       "[api/portfolio-strategies/allocation] upsert returned zero rows:",
       { portfolioId, strategyId },
     );
-    return json({ error: "internal error" }, 500);
+    return json(
+      { code: "DASHBOARD_WRITE_INDETERMINATE", error: "internal error" },
+      500,
+    );
   }
 
   logAuditEvent(supabase, {
@@ -354,25 +451,32 @@ export async function DELETE(req: NextRequest) {
   const {
     data: { user },
   } = await supabase.auth.getUser();
-  if (!user) return json({ error: "unauthorized" }, 401);
+  if (!user)
+    return json({ code: "DASHBOARD_SIGNED_OUT", error: "unauthorized" }, 401);
 
   let body: AllocationBody;
   try {
     body = (await req.json()) as AllocationBody;
   } catch (err) {
     logBodyParseFailure(err, user.id);
-    return json({ error: "invalid json" }, 400);
+    return json(
+      { code: "DASHBOARD_REQUEST_INVALID", error: "invalid json" },
+      400,
+    );
   }
 
   const strategyId =
     typeof body.strategy_id === "string" ? body.strategy_id.trim() : "";
   if (!isUuid(strategyId)) {
-    return json({ error: "strategy_id is required" }, 400);
+    return json(
+      { code: "DASHBOARD_REQUEST_INVALID", error: "strategy_id is required" },
+      400,
+    );
   }
 
   const rl = await checkLimit(mandateAutoSaveLimiter, `allocation:${user.id}`);
   if (!rl.success) {
-    return json({ error: "Too many requests" }, 429, {
+    return json({ code: "RATE_LIMITED", error: "Too many requests" }, 429, {
       "Retry-After": String(rl.retryAfter),
     });
   }
@@ -380,8 +484,16 @@ export async function DELETE(req: NextRequest) {
   // DELETE NEVER PROVISIONS. A removal that mints a container would be absurd,
   // and it would burn the caller's one-real-portfolio slot on a no-op.
   const resolved = await resolveRealPortfolio(supabase, user.id);
-  if (resolved.kind === "error") return json({ error: "internal error" }, 500);
-  if (resolved.id === null) return json({ error: "portfolio not found" }, 404);
+  if (resolved.kind === "error")
+    return json(
+      { code: "DASHBOARD_WRITE_FAILED", error: "internal error" },
+      500,
+    );
+  if (resolved.id === null)
+    return json(
+      { code: "DASHBOARD_ROW_STALE", error: "portfolio not found" },
+      404,
+    );
 
   const { data: removed, error: delErr } = await supabase
     .from("portfolio_strategies")
@@ -395,12 +507,21 @@ export async function DELETE(req: NextRequest) {
       "[api/portfolio-strategies/allocation] delete failed:",
       delErr.message,
     );
-    return json({ error: "internal error" }, 500);
+    // ⛔ 161-REVIEW / CR-01 — INDETERMINATE. The DELETE was sent, and a removal
+    // whose outcome we cannot read is exactly the case where "Nothing was
+    // saved" is worst: it tells the user their position is still there.
+    return json(
+      { code: "DASHBOARD_WRITE_INDETERMINATE", error: "internal error" },
+      500,
+    );
   }
   if (!removed || removed.length === 0) {
     // Count-checked (G8.B.6): a delete that touched nothing is a 404, not a
     // silent `{ok:true}`.
-    return json({ error: "investment row not found" }, 404);
+    return json(
+      { code: "DASHBOARD_ROW_STALE", error: "investment row not found" },
+      404,
+    );
   }
 
   logAuditEvent(supabase, {

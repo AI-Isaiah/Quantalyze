@@ -4,6 +4,7 @@ import { join, resolve } from "path";
 import {
   formatKeyError,
   gateFailureToWizardError,
+  recogniseDashboardDialogCode,
   classifyKeyValidationError,
   recogniseSeamErrorCode,
   WIZARD_ERROR_COPY,
@@ -12,7 +13,6 @@ import {
   CSV_PREVIEW_STEP_HEADINGS,
   CSV_SUBMIT_STEP_HEADINGS,
   formatCsvRuleCauseSingle,
-  formatColumnInDataframeMessage,
   type WizardErrorCode,
 } from "./wizardErrors";
 import type { GateFailureCode } from "./strategyGate";
@@ -415,14 +415,40 @@ describe("wizardErrors", () => {
     });
   });
 
-  // Regression: /qa CSV report 2026-05-21 ISSUE-012. Before this fix the
+  // Regression: /qa CSV report 2026-05-21 ISSUE-012. Before that fix the
   // CSV validation envelope leaked panderas's raw rule-name text:
   //   Top-line: "1 row failed validation"
   //   Cause:    "Rule violated: column_in_dataframe"
   //   Detail:   "Row 0: Column 'None' failed: daily_return"
-  // None of those tell the user what to actually do. The fix routes the
-  // raw rule name through CSV_RULE_LABELS for the cause line + rewrites
-  // the per-row message via formatColumnInDataframeMessage.
+  // The fix had two halves: route the raw rule name through CSV_RULE_LABELS for
+  // the cause line, and rewrite the per-row message via a formatter.
+  //
+  // ⚰️ 161-REVIEW / CR-02 — THE SECOND HALF NEVER RAN, and its three cases are
+  // re-argued here rather than quietly deleted.
+  // `formatColumnInDataframeMessage` matched on a literal `failed:`. MEASURED
+  // at HEAD by driving a misnamed-column daily_returns upload through
+  // `validate_csv`, the producer emits only:
+  //
+  //     Failed rule 'column_in_dataframe'.
+  //     Column 'daily_return' failed rule 'daily_return_lower_bound' at row 2.
+  //
+  // The three deleted cases fed the formatter PANDERA's own text
+  // ("Column 'None' failed: daily_return") — a string `csv_validator.py` builds
+  // its own sentence instead of forwarding — so they proved the function worked
+  // on an input it never receives. That is the mirror image of a test that
+  // cannot fail: a test that passes about a code path no user reaches. The
+  // actionable remedy it promised ("Rename a column to X") has therefore never
+  // rendered to anyone.
+  //
+  // It is also UNREPAIRABLE by pattern: it was called only for
+  // `rule === "column_in_dataframe"`, and for that DATAFRAME-level check
+  // pandera reports `column` as NaN — which is why 161-03 had to strip the
+  // literal `nan` from the sentence. The expected column name is not on the
+  // wire, so a fixed regex would have nothing to extract. Restoring the remedy
+  // needs a first-class producer field (D-161-02).
+  //
+  // What survives is the half that DID run (the label) plus a pin that the dead
+  // formatter is really gone from BOTH the module and its one caller.
   describe("ISSUE-012 — column_in_dataframe envelope rewrite", () => {
     it("CSV_RULE_LABELS includes a human label for column_in_dataframe", () => {
       expect(CSV_RULE_LABELS.column_in_dataframe).toBe(
@@ -430,33 +456,53 @@ describe("wizardErrors", () => {
       );
     });
 
-    it("rewrites the panderas Column 'None' failed message into an actionable sentence", () => {
-      const raw = "Column 'None' failed: daily_return";
-      const rewritten = formatColumnInDataframeMessage(raw);
-      expect(rewritten).toContain("daily_return");
-      expect(rewritten).toContain("missing from your file");
-      // Tells the user what to do, not just what failed.
-      expect(rewritten).toMatch(/rename|switch/i);
-      // Never leaks the rule-name 'Column \'None\'' bookkeeping back to the user.
-      expect(rewritten).not.toContain("Column 'None'");
-    });
+    it("⚰️ TOMBSTONE: the dead per-row formatter is gone from the module AND from its one caller", () => {
+      // Comment-stripped on BOTH files: the deletion is recorded in prose at
+      // each site (a tombstone naming what was removed and why), so a raw scan
+      // would match those records and this case could never pass.
+      const strip = (src: string) =>
+        src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
 
-    it("returns the original message unchanged when the format does not match", () => {
-      // Defensive: if panderas changes its message shape we surface the
-      // original text rather than dropping information.
-      expect(formatColumnInDataframeMessage("something else entirely")).toBe(
-        "something else entirely",
+      const wizardErrorsSrc = strip(
+        readFileSync(join(__dirname, "wizardErrors.ts"), "utf-8"),
       );
-    });
+      const callerSrc = strip(
+        readFileSync(
+          resolve(
+            __dirname,
+            "../app/(dashboard)/strategies/new/wizard/steps/CsvValidationEnvelope.tsx",
+          ),
+          "utf-8",
+        ),
+      );
 
-    it("handles missing required column for trade-list format", () => {
-      // The same pandera rule fires on any required column. Make sure
-      // the rewrite pulls out the actual column name (not hardcoded to
-      // daily_return).
-      const raw = "Column 'None' failed: trade_qty";
-      const rewritten = formatColumnInDataframeMessage(raw);
-      expect(rewritten).toContain("trade_qty");
-      expect(rewritten).not.toContain("daily_return");
+      // ⭐ ANTI-VACUITY FIRST. A stripper that blanked either file would satisfy
+      // both negatives below while checking nothing, and the failure would look
+      // exactly like success. The controls are the deleted symbol's surviving
+      // neighbour in each file.
+      expect(wizardErrorsSrc.length).toBeGreaterThan(2000);
+      expect(callerSrc.length).toBeGreaterThan(1000);
+      expect(wizardErrorsSrc, "the stripper blanked wizardErrors.ts").toContain(
+        "export function formatCsvRuleCauseSingle",
+      );
+      expect(callerSrc, "the stripper blanked the envelope component").toContain(
+        "formatCsvRuleCauseSingle",
+      );
+
+      const dead = "formatColumnInDataframeMessage";
+      expect(dead.length).toBeGreaterThan(10); // the needle is real, not blank
+      expect(
+        wizardErrorsSrc,
+        "the formatter was restored in wizardErrors.ts. It cannot fire: this " +
+          "producer's messages read \"failed rule '<name>'\" and its regex " +
+          "requires \"failed:\". Restoring it needs D-161-02's producer field.",
+      ).not.toContain(dead);
+      expect(
+        callerSrc,
+        "CsvValidationEnvelope calls a formatter that cannot match this " +
+          "producer's messages, so the <li> renders the raw sentence while the " +
+          "call site claims it is being rewritten.",
+      ).not.toContain(dead);
     });
   });
 });
@@ -1879,13 +1925,75 @@ describe("[140.3-10 / TRAP-4] the whole copy table, scanned for destructive-only
    * it fires on a key-management surface that may have none — so offering to
    * destroy one would answer a stale bundle by destroying unrelated work.
    *
+   * **82 → 83 at 161-07** (WIZERR-09) — `GATE_INSUFFICIENT_CSV_HISTORY`, the
+   * 7-day floor on a DAILY-RETURN series, minted in the same commit the
+   * wizard's composite arm starts evaluating that floor. (82 was
+   * `KEY_ORPHANED` at 161-05; its copy is pinned by the `[161-05 / WIZERR-03]`
+   * describe.) THIS guard's reasoning was re-run over the entry before the
+   * number moved: its `actions` are `clear_and_retry` ALONE — not a member of
+   * `DESTRUCTIVE_ACTIONS` — so it sits outside the scanned population by
+   * construction and the destructive class below is unchanged at four members.
+   *
+   * ⛔ The exclusion is load-bearing rather than incidental. `start_fresh`
+   * DELETEs a draft, and the condition here is "the series is not long enough
+   * YET" — a strategy whose data is fine and whose remedy is time. Answering a
+   * shortage of days with a control that destroys the days already accumulated
+   * is the TRAP-4 shape exactly.
+   *
+   * **83 → 84 at 161-07** (WIZERR-10) — `GATE_SERIES_EXAMINED_REFUSED`, the
+   * truthful fourth CSV-verdict outcome, replacing "Strategy has only 0
+   * trade(s)" for a strategy with a full daily-return series and no fills.
+   * THIS guard's reasoning was re-run over the entry before the number moved:
+   * its `actions` are `try_another_key` ALONE — not a member of
+   * `DESTRUCTIVE_ACTIONS` — so it too sits outside the scanned population and
+   * the destructive class below is still four members.
+   *
+   * ⚠️ IT WAS NOT ALWAYS OUTSIDE. `try_another_key` fired
+   * `handleDeleteDraft()` until 161-04 / WIZERR-02 made it a pure step
+   * transition. Had this entry been written before that commit, it would have
+   * answered "the venue's data cannot prove a complete record" with a control
+   * that destroys the draft — which is why the two requirements were sequenced
+   * into different waves rather than merely written down in the same phase.
+   *
    * ⚠️ THIS NUMBER HAS A TWIN. The same literal is pinned in the
    * `[140.3-12 / SEAMUX-04]` describe below, and moving one without the other
    * is a silent half-fix — the shrink-detection it buys survives in one scan
    * and dies in the other. 153.1-04 added a third guard (at the end of this
    * file) that reads this source and reds when the two literals disagree.
+   *
+   * ⚠️ 84 → 88 (161-10 / WIZERR-07). FOUR entries were minted in one
+   * commit — `DASHBOARD_SIGNED_OUT`, `DASHBOARD_REQUEST_INVALID`,
+   * `DASHBOARD_WRITE_FAILED` and `DASHBOARD_ROW_STALE` — for the three
+   * dashboard write dialogs, whose routes classified their failures precisely
+   * while the dialogs rendered `code: "UNKNOWN"` for every one of them. THIS
+   * guard's reasoning was re-run over all four before the number moved: none
+   * carries a member of `DESTRUCTIVE_ACTIONS` (their `actions` are drawn from
+   * `leave_and_return` / `expand_log` / `clear_and_retry` / `request_call`
+   * only), so all four sit OUTSIDE the scanned population and the destructive
+   * class below is still four members. The baseline was re-measured at HEAD
+   * before it moved — 161-05 took it 81 → 82 and 161-07 took it 82 → 84.
+   *
+   * ⚠️ 88 → 89 (161-REVIEW / CR-01). ONE entry —
+   * `DASHBOARD_WRITE_INDETERMINATE` — split out of `DASHBOARD_WRITE_FAILED`,
+   * whose sentence ("Nothing was saved — the strategy is as it was before you
+   * pressed save") was being emitted by arms that had already SENT a
+   * data-modifying statement and could not read what it did. THIS guard's
+   * reasoning was re-run over the new entry before the number moved: its
+   * `actions` are `["leave_and_return", "expand_log"]`, neither of which is a
+   * member of `DESTRUCTIVE_ACTIONS`, so it sits OUTSIDE the scanned population
+   * and the destructive class below is still four members. The baseline was
+   * re-measured at HEAD before it moved — 161-10 took it 84 → 88 and nothing
+   * has moved it since (161-09 minted no members).
+   *
+   * ⛔ AND THE ABSENCE OF `clear_and_retry` ON THE NEW ENTRY IS LOAD-BEARING,
+   * for a reason this guard's sibling class is the closest thing to: a Retry
+   * offered against a write that MAY HAVE APPLIED is not merely futile, it is a
+   * control whose effect the person pressing it cannot foresee — and on the
+   * ownership flip the write in question deletes live positions. That is the
+   * TRAP-4 shape one step removed, which is why the split had to move the
+   * ACTIONS and not only the sentence.
    */
-  const EXPECTED_TABLE_SIZE = 81;
+  const EXPECTED_TABLE_SIZE = 89;
 
   it("the scan actually covers the table — hand-typed size guard", () => {
     expect(
@@ -2268,11 +2376,90 @@ describe("[140.3-12 / SEAMUX-04] no entry in the copy table makes a claim we can
    * 140.3-15's entry passed and the CSV case failed — not whether the sentence
    * is comforting, but whether the code path makes it observable.
    *
+   * **82 → 83 at 161-07** (WIZERR-09) — `GATE_INSUFFICIENT_CSV_HISTORY`. Read
+   * against all four FORBIDDEN fragments by hand before the number moved: it
+   * mentions no notification, no trade fetching and no session field name.
+   *
+   * ⛔ "data is unchanged" is again the fragment needing care, and this entry
+   * makes NO claim about a write at all. It says "Nothing is wrong with the
+   * data we have — there is not yet enough of it", which restates the very
+   * measurement that fired the refusal (the gate counted the series and found
+   * it under the floor) rather than asserting a negative about a request whose
+   * outcome we never learned. That is the test 140.3-15's entry passed and the
+   * CSV case failed.
+   *
+   * ⚠️ TWO CLAUSES ARE WORTH RE-READING if this entry is ever edited:
+   *   · the fix bullet says a completed re-derive "rebuilds the series from
+   *     whatever history the venue holds by then". That states the MECHANISM a
+   *     retry runs, deliberately without promising the venue holds more — the
+   *     copy nowhere claims the missing history exists.
+   *   · the UI-SPEC's proposed bullet ("Upload a CSV covering at least 7 daily
+   *     returns") was DELETED rather than reworded, because it named a remedy
+   *     no emitter of this code can reach: the composite arm counts a STITCHED
+   *     series, the single-key arm counts a venue-DERIVED one, and the keyless
+   *     CSV upload path never reaches this surface at all. The measurement is
+   *     argued in full at the entry itself.
+   *
+   * **83 → 84 at 161-07** (WIZERR-10) — `GATE_SERIES_EXAMINED_REFUSED`. Read
+   * against all four FORBIDDEN fragments by hand before the number moved: it
+   * mentions no notification, no trade fetching and no session field name.
+   *
+   * ⛔ "data is unchanged" is again the fragment needing care, and this entry
+   * makes NO claim about a write. Its server-state claim is of a different kind
+   * — "Our pipeline records how every daily-return series was built, and for
+   * this one the record does not establish a complete track record" — which
+   * restates the persisted value the gate just read
+   * (`strategy_analytics.series_completeness`) and is the sole reason the
+   * refusal fired. Same ground `GATE_SERIES_PROVENANCE_UNVERIFIED` stands on at
+   * 62, and the mirror image of it: that entry reports the value's ABSENCE,
+   * this one reports what the value SAYS.
+   *
+   * ⚠️ THE CLAUSE TO RE-READ if this entry is ever edited is the one the
+   * UI-SPEC proposed and this entry does NOT contain: "examined and refused" /
+   * "the data was found wanting". Both assert that something looked at THIS
+   * series and judged it. Measured at the producer
+   * (`analytics-service/services/broker_dailies.py`, "Who stamps what"):
+   * `fill_derived_unproven` is stamped for binance / bybit / okx ALWAYS and
+   * unconditionally — the producer's own words are "a CONSTANT, not a
+   * data-driven refinement" — so no per-series finding exists to report. The
+   * shipped cause describes the two METHODS instead, which is true of every
+   * series that can reach it. A future edit that reaches for the more
+   * satisfying "we examined it" wording is re-opening this exact defect, and
+   * the same wording would be false in the same way.
+   *
    * ⚠️ THIS NUMBER HAS A TWIN in the `[140.3-10 / TRAP-4]` describe above.
    * Moving one without the other is a silent half-fix; the guard added at the
    * end of this file reds when the two literals disagree.
+   *
+   * ⚠️ 84 → 88 (161-10 / WIZERR-07). The same four dashboard-dialog
+   * entries as the twin above. THIS guard's reasoning — no banned claim in any
+   * title, cause or fix line — was re-run over all four before the number
+   * moved: none predicts permanence, none promises a notification, none names
+   * an internal cause the user cannot act on. The baseline was re-measured at
+   * HEAD before it moved (161-05: 81 → 82; 161-07: 82 → 84).
+   *
+   * ⚠️ 88 → 89 (161-REVIEW / CR-01) — `DASHBOARD_WRITE_INDETERMINATE`. Read
+   * against all four FORBIDDEN fragments by hand before the number moved: it
+   * mentions no notification, no trade fetching and no session field name.
+   *
+   * ⛔ "data is unchanged" is the fragment needing care, and this entry is the
+   * one place in the table where the CARE IS THE POINT rather than a formality.
+   * It makes NO claim about a write in EITHER direction: not "nothing was
+   * saved", not "your change went through". Its cause says the request to save
+   * had already been sent, that we cannot tell whether it took effect, and that
+   * we would rather say so than guess. That is `:2470`'s rule
+   * ("'NOTHING WAS SAVED' IS VERIFIED, NOT ASSERTED") applied at the one arm in
+   * this family where the verification is unavailable, and it is the same shape
+   * `SEAM_RESPONSE_UNREADABLE` already carries for an unconfirmed submit.
+   *
+   * ⚠️ THE CLAUSE TO RE-READ if this entry is ever edited is the one it does
+   * NOT contain. A future edit reaching for the more reassuring "nothing was
+   * saved" is re-opening the exact defect the entry was minted to close, and
+   * `DASHBOARD_WRITE_FAILED` still carries that sentence for the arms that
+   * genuinely establish it — so the tempting "unify them again" is a
+   * re-introduction, not a simplification.
    */
-  const EXPECTED_TABLE_SIZE = 81;
+  const EXPECTED_TABLE_SIZE = 89;
 
   it("the scan actually covers the table — hand-typed size guard", () => {
     expect(
@@ -3980,5 +4167,1046 @@ describe("[154.1 / WIZCONT-02] VENUE_ALREADY_CONNECTED — the honest refusal", 
       formatKeyError("DRAFT_ALREADY_EXISTS", { strategyName: "Helios Momentum" })
         .cause,
     ).toBe(WIZARD_ERROR_COPY.DRAFT_ALREADY_EXISTS.cause);
+  });
+});
+
+/**
+ * [161-05 / WIZERR-03] KEY_ORPHANED — THE REFUSAL, AND THE ONE PROPERTY THAT
+ * MAKES IT AN IMPROVEMENT RATHER THAN A RENAME.
+ *
+ * The code it replaces (`DRAFT_ALREADY_EXISTS`, reached at `create-with-key`'s
+ * 23505 fallthrough) was false on both halves: it named a wizard session that
+ * does not exist, and it offered `resume_draft` / `start_fresh` for a draft that
+ * is gone. Minting a truer sentence is only half the fix — a truer sentence
+ * attached to a remedy that still cannot succeed is the same defect in better
+ * prose. So this block pins the REMEDY, not the wording.
+ *
+ * ⭐ THE ORACLE IS `buildEnvelope`'s DERIVATION, never the `actions` array —
+ * the convention `[153.6-06 / PARITY-05]` above states. Asserting `actions`
+ * alone would restate the table against itself and stay green if the derivation
+ * rule ever changed.
+ */
+describe("[161-05 / WIZERR-03] KEY_ORPHANED offers a remedy that can succeed", () => {
+  it("derives recoverable — and derives it from try_another_key, not clear_and_retry", () => {
+    expect(
+      buildEnvelope("KEY_ORPHANED", "corr-orphan-1").recoverable,
+      "The Retry control on ConnectKeyStep is `onRetry={() => setErrorCode(null)}`: " +
+        "it clears the banner and returns the user to the form so a DIFFERENT " +
+        "key can be typed. Losing recoverability here strands a user whose only " +
+        "route forward is that control.",
+    ).toBe(true);
+
+    expect(
+      WIZARD_ERROR_COPY.KEY_ORPHANED.actions,
+      "⛔ `clear_and_retry` means 'send the same thing again'. The same account " +
+        "is refused by the same partial UNIQUE every time, so that member would " +
+        "make `recoverable` true for a reason that is false. Recoverability on " +
+        "this arm must rest on try_another_key alone.",
+    ).not.toContain("clear_and_retry");
+  });
+
+  it("offers neither to resume a draft nor to delete one — there is no draft", () => {
+    // The two controls the false incumbent offered. `start_fresh` is the
+    // destructive one (140.3-10 / TRAP-4), and offering it on an arm whose whole
+    // premise is that no draft exists is the worst available combination: a
+    // destructive control aimed at nothing.
+    for (const forbidden of ["resume_draft", "start_fresh"] as const) {
+      expect(
+        WIZARD_ERROR_COPY.KEY_ORPHANED.actions,
+        `KEY_ORPHANED offers ${forbidden}, but this code is emitted only after ` +
+          "the resolver established that NO strategy — draft or otherwise — " +
+          "hangs off the key.",
+      ).not.toContain(forbidden);
+    }
+  });
+
+  it("names no key-management surface this arm cannot reach (the measured 161-05 divergence)", () => {
+    // MEASURED at HEAD, 2026-08-24. The user standing in this wizard is a
+    // manager, and every surface that can remove an `api_keys` row is out of
+    // their reach on this arm:
+    //   · `components/strategy/ApiKeyManager.tsx` (which does carry a delete) is
+    //     mounted at `strategies/[id]/edit/page.tsx` and nowhere else — a
+    //     per-STRATEGY surface, and this code exists because NO strategy holds
+    //     the key;
+    //   · `AllocatorExchangeManager` (profile → Exchanges), the only other list
+    //     with a Disconnect control, sits behind `allocatorOnly` in
+    //     `ProfileTabs.tsx`;
+    //   · `my-strategies` renders the orphan as a "No strategy yet" row whose
+    //     only control is "Finish setup →", which reopens this same wizard.
+    // 161-UI-SPEC's draft bullet ("Disconnect the unused key under Manage keys,
+    // then connect it here again") named the first of those. It was replaced,
+    // not reworded, and this case is what stops it coming back.
+    //
+    // Hand-typed and lower-cased: a PHRASE CLASS, not a pinned sentence, so an
+    // honest reword stays green and a re-introduction reds.
+    const UNREACHABLE_SURFACES = ["manage keys", "manage your keys"] as const;
+
+    const phrasesIn = (haystack: string): string[] =>
+      UNREACHABLE_SURFACES.filter((p) => haystack.toLowerCase().includes(p));
+
+    // POSITIVE CONTROL FIRST — the predicate is live, and the phrase list is not
+    // a list of strings nobody would write. ⛔ Never delete this: with an empty
+    // phrase list the assertion below passes while checking nothing.
+    expect(
+      phrasesIn("Disconnect the unused key under Manage keys, then connect it here again."),
+      "The unreachable-surface predicate matched NOTHING in the exact sentence " +
+        "161-UI-SPEC proposed, so it has gone blind and the assertion below is " +
+        "passing for the wrong reason. ⛔ Fix the phrase list, never delete this " +
+        "control.",
+    ).not.toEqual([]);
+
+    const copy = WIZARD_ERROR_COPY.KEY_ORPHANED;
+    const surface = [copy.title, copy.cause, ...copy.fix].join(" | ");
+    // Guards the `"anything".includes("")` shape from the other direction: an
+    // emptied haystack would satisfy the `toEqual([])` below while asserting
+    // nothing about any sentence we ship.
+    expect(
+      surface.length,
+      "the copy under test collapsed to nothing, so the scan below is vacuous",
+    ).toBeGreaterThan(80);
+    expect(
+      phrasesIn(surface),
+      "KEY_ORPHANED points the user at a key-management surface this arm cannot " +
+        "reach: no strategy holds the key, so there is no strategy edit page, " +
+        "and profile → Exchanges is allocator-only. A remedy the user cannot " +
+        "perform is the D-17 class this requirement exists to remove.",
+    ).toEqual([]);
+  });
+});
+
+/**
+ * [161-05 / WIZERR-11] KEY_AUTH_FAILED STOPS NAMING DERIBIT AT EVERYONE ELSE.
+ *
+ * This code is returned by the SHARED `classifyKeyValidationError`, so every
+ * venue reaches it. Until this plan its `cause` carried "(e.g. Deribit returns
+ * invalid_credentials)" and its second bullet ended "— on Deribit the key is the
+ * ClientId and the secret is the ClientSecret", which meant a Binance user whose
+ * secret was mistyped was told to go and check a "ClientId" that does not exist
+ * in their console. A specific, checkable claim about a venue the reader is not
+ * on is a worse failure than vagueness: it sends them to a different problem.
+ *
+ * ⭐ THE ASSERTIONS ARE OVER THE FULL FORMATTED OUTPUT — title, cause and EVERY
+ * bullet joined — not over the one bullet that was gated. A test that watched
+ * only the gated bullet would have stayed green through the `cause` half of this
+ * defect, which is the half that shipped for longer.
+ *
+ * ⭐ AND THE NEGATIVE SWEEP RUNS OVER THE WHOLE VENUE REGISTRY, not over the two
+ * venues this plan happened to think of. `SUPPORTED_EXCHANGES` is an independent
+ * source (`closed-sets.ts`), so a seventh venue is covered on the day it is
+ * added rather than on the day someone remembers this file.
+ */
+describe("[161-05 / WIZERR-11] KEY_AUTH_FAILED names a venue only to that venue's own users", () => {
+  /** The full user-visible surface of the card, as one string. */
+  const rendered = (context?: Parameters<typeof formatKeyError>[1]): string => {
+    const copy = formatKeyError("KEY_AUTH_FAILED", context);
+    return [copy.title, copy.cause, ...copy.fix].join(" | ");
+  };
+
+  /**
+   * HAND-TYPED. The venue token that must not escape its own venue. Lower-cased
+   * comparison so a re-cased reintroduction ("DERIBIT", "deribit") still reds.
+   */
+  const VENUE_TOKEN = "deribit";
+
+  it("POSITIVE CONTROL — the token IS present for a Deribit user, so the sweeps below are live", () => {
+    // ⛔ Never delete this. Every assertion in this block is a "does not
+    // contain", and a copy entry that lost the bullet entirely — or a predicate
+    // that suppressed it for everyone — would satisfy all of them while the
+    // Deribit user silently lost real information.
+    const forDeribit = rendered({ venue: "deribit" }).toLowerCase();
+    expect(
+      forDeribit.includes(VENUE_TOKEN),
+      "The Deribit-specific bullet did not render for venue 'deribit'. The " +
+        "requirement suppressed it everywhere, which is a silent copy deletion " +
+        "rather than a gate — and it makes every negative assertion below pass " +
+        "for the wrong reason.",
+    ).toBe(true);
+    // And it is the NAMING bullet specifically, not an incidental match.
+    expect(
+      formatKeyError("KEY_AUTH_FAILED", { venue: "deribit" }).fix,
+    ).toContain(
+      "On Deribit the key is the ClientId and the secret is the ClientSecret.",
+    );
+  });
+
+  it("the CAUSE is venue-neutral for every venue — including Deribit's own users", () => {
+    // The `cause` was the half that could not be gated, because it was an
+    // ILLUSTRATION rather than a remedy: "(e.g. Deribit returns
+    // invalid_credentials)". Deleting it is the fix, so the sentence must carry
+    // no venue on ANY path — a gate here would have been the wrong tool.
+    for (const venue of [...SUPPORTED_EXCHANGES, undefined]) {
+      const copy = formatKeyError(
+        "KEY_AUTH_FAILED",
+        venue === undefined ? undefined : { venue },
+      );
+      expect(
+        copy.cause.toLowerCase(),
+        `the cause named a venue for ${venue ?? "an unnamed venue"}. ` +
+          "The cause explains a general authentication failure; naming one " +
+          "exchange in it is a claim about a reader we cannot identify.",
+      ).not.toContain(VENUE_TOKEN);
+    }
+  });
+
+  it("a BINANCE user sees the token NOWHERE in the whole card — and still gets a complete remedy", () => {
+    const forBinance = rendered({ venue: "binance" });
+    expect(
+      forBinance.length,
+      "the rendered card collapsed to nothing, so the scan below is vacuous",
+    ).toBeGreaterThan(120);
+    expect(
+      forBinance.toLowerCase(),
+      "A Binance user was told about Deribit's ClientId/ClientSecret. There is " +
+        "no such pair in their console, so the remedy sends them to look for a " +
+        "different problem — the false-sentence class WIZERR-11 removes.",
+    ).not.toContain(VENUE_TOKEN);
+    // ⛔ THE OTHER HALF, AND THE ONE A CARELESS FIX BREAKS: suppressing the
+    // venue-specific bullet must not cost the user the instruction it carried.
+    expect(
+      formatKeyError("KEY_AUTH_FAILED", { venue: "binance" }).fix,
+      "The generic re-copy instruction vanished along with the Deribit bullet. " +
+        "That is not a gate, it is a copy deletion: the unconditional bullet " +
+        "exists precisely so every venue keeps an actionable remedy.",
+    ).toContain("Re-copy both values with no leading or trailing spaces.");
+  });
+
+  it("an ABSENT venue sees the token NOWHERE — the STRICT rule, diverging from the capability default", () => {
+    // ⚠️ THE DIVERGENCE UNDER TEST. `venueCapability` requirements are
+    // default-PERMISSIVE: with no venue in context `venueIsSubstitutable`
+    // answers true and the incumbent bullet survives, so callers predating the
+    // field are byte-unchanged. This kind is the opposite, and it must be: a
+    // bullet that names ONE venue, rendered when the venue is unknown, is a
+    // specific claim about a user we cannot identify. `SyncPreviewStep` calls
+    // `formatKeyError(errorCode)` with no context at all, so this path is live.
+    const withNoContext = rendered();
+    expect(
+      withNoContext.length,
+      "the rendered card collapsed to nothing, so the scan below is vacuous",
+    ).toBeGreaterThan(120);
+    expect(
+      withNoContext.toLowerCase(),
+      "With no venue in context the Deribit bullet still rendered. Absence is " +
+        "not permission: unify this with the venueCapability default and every " +
+        "context-less caller starts naming Deribit again.",
+    ).not.toContain(VENUE_TOKEN);
+    expect(
+      formatKeyError("KEY_AUTH_FAILED").fix,
+      "and the venue-less caller must still get the generic instruction",
+    ).toContain("Re-copy both values with no leading or trailing spaces.");
+  });
+
+  it("SWEEP: no venue in the registry OTHER than deribit ever sees the token", () => {
+    // The class, not the two instances above. Driven off the independent venue
+    // registry so a seventh venue is covered the day it lands.
+    const others = SUPPORTED_EXCHANGES.filter((v) => v !== "deribit");
+    expect(
+      others.length,
+      "SUPPORTED_EXCHANGES yielded no non-deribit venue, so this sweep asserts " +
+        "nothing.",
+    ).toBeGreaterThanOrEqual(4);
+
+    const offenders: string[] = [];
+    for (const venue of others) {
+      const surface = rendered({ venue });
+      if (surface.toLowerCase().includes(VENUE_TOKEN)) {
+        offenders.push(`${venue}: "${surface}"`);
+      }
+    }
+    expect(
+      offenders,
+      "KEY_AUTH_FAILED named Deribit at users of another venue. ⛔ The remedy " +
+        "is a FixRequirement slot in the copy table, never a per-code branch " +
+        "inside formatKeyError. Offenders:",
+    ).toEqual([]);
+  });
+
+  it("the venue is a LOOKUP/COMPARISON KEY ONLY — no caller string round-trips into the card (D-17)", () => {
+    // T-161-13. The context field is typed `string`, so a caller CAN pass
+    // something that is not a supported venue. Whatever they pass, none of it
+    // may appear in the rendered output: the requirement compares it, it never
+    // renders it.
+    const probe = "zz-injected-venue-probe";
+    const surface = rendered({ venue: probe });
+    expect(
+      surface,
+      "A caller-supplied venue string reached the rendered card. The venue is " +
+        "read as a comparison key against a closed-set member and must never " +
+        "be interpolated into a sentence (D-17).",
+    ).not.toContain(probe);
+    // An unknown venue is not deribit, so it is suppressed like an absent one.
+    expect(surface.toLowerCase()).not.toContain(VENUE_TOKEN);
+  });
+});
+
+/**
+ * [161-07 / WIZERR-09] THE ATOMIC PAIR, FROM THE COPY SIDE.
+ *
+ * `gateFailureToWizardError` answered `INSUFFICIENT_CSV_HISTORY` with
+ * `UNKNOWN` under a comment asserting the code "never flows through the wizard
+ * error mapper". The wizard's composite arm started evaluating the 7-day floor
+ * in the SAME commit as this describe, which makes that premise false — and a
+ * floor landing without its copy would have shipped a real gate refusal
+ * explained by the generic unknown-error sentence, which is strictly worse than
+ * the un-floored arm: the user is stopped AND told nothing.
+ *
+ * The exhaustive `switch` in `gateFailureToWizardError` enforces half of the
+ * atomicity for free (a union member with no arm, or an arm with no member,
+ * fails `tsc`). What it cannot enforce is that the arm returns a member with
+ * REAL COPY rather than `UNKNOWN`, which is what the first case here pins.
+ */
+describe("[161-07 / WIZERR-09] INSUFFICIENT_CSV_HISTORY renders copy of its own, never UNKNOWN", () => {
+  const CODE: WizardErrorCode = "GATE_INSUFFICIENT_CSV_HISTORY";
+
+  /** Every user-visible string on the entry, joined — never just the title. */
+  const surface = (): string => {
+    const copy = formatKeyError(CODE);
+    const joined = [copy.title, copy.cause, ...copy.fix].join("   ");
+    // NON-VACUITY GUARD, and not a formality: `"anything".includes("")` is
+    // `true`, so every negative assertion below would pass against an empty
+    // render. This is the floor that makes them mean something.
+    expect(
+      joined.length,
+      "The rendered surface is empty or near-empty, which makes every " +
+        "not.toMatch below vacuously green.",
+    ).toBeGreaterThan(120);
+    return joined;
+  };
+
+  it("the gate code maps to a real member — the UNKNOWN fallthrough is gone", () => {
+    expect(gateFailureToWizardError("INSUFFICIENT_CSV_HISTORY")).toBe(CODE);
+  });
+
+  it("ANTI-CONTROL: the three transient analytics codes still answer UNKNOWN", () => {
+    // Without this, "map every gate code to something" satisfies the case
+    // above. The three below are POLL states, not terminal errors: rendering
+    // an error card for them would be the misuse UNKNOWN exists to flag, and
+    // the flip must be surgical rather than wholesale.
+    const transient: GateFailureCode[] = [
+      "ANALYTICS_MISSING",
+      "ANALYTICS_PENDING",
+      "ANALYTICS_COMPUTING",
+    ];
+    for (const code of transient) {
+      expect(gateFailureToWizardError(code), `${code} must stay UNKNOWN`).toBe(
+        "UNKNOWN",
+      );
+    }
+  });
+
+  it("names the threshold as the NUMBER 7 and invents no other number", () => {
+    // Hand-typed needle. ⛔ NEVER `${STRATEGY_GATE_MIN_CSV_ROWS}` — an oracle
+    // built from the constant it is asserting about follows a rename silently
+    // and can never fail.
+    expect(surface()).toMatch(/at least 7 days/i);
+
+    // TRAP-3 — the user's OWN row count is deliberately absent. The entry has
+    // no `formatKeyError` interpolation arm and no context field, so there is
+    // no path by which an unsupplied count could render as a zero or a
+    // placeholder. "only 0 trade(s)" is the sentence this phase is deleting;
+    // it must not be replaced with "only 0 day(s)".
+    expect(surface()).not.toMatch(/\b0 (day|days|row|rows)\b/i);
+  });
+
+  it("offers no remedy this code's emitters cannot reach", () => {
+    // MEASURED, per emitter, before this assertion was written:
+    //   · wizard COMPOSITE arm — counts the STITCHED series, no upload exists;
+    //   · wizard SINGLE-KEY arm — reachable only on the daily-returns branch,
+    //     i.e. a KEYED account whose dailies were DERIVED from the venue;
+    //   · admin approve — renders `gate.reason` raw, not this copy at all.
+    // The keyless CSV upload path never reaches `SyncPreviewStep`; it
+    // validates through `csv-finalize`. So the UI-SPEC's proposed bullet
+    // ("Upload a CSV covering at least 7 daily returns, then submit again")
+    // named a control no reader of this copy has.
+    expect(surface().toLowerCase()).not.toContain("upload a csv");
+    expect(surface().toLowerCase()).not.toContain("submit again");
+  });
+
+  it("RECOVERABLE is DERIVED, and the control it earns is the non-destructive one", () => {
+    // The derivation, not a restatement of the table: `buildEnvelope` reads
+    // `actions` against `RECOVERABLE_ACTIONS`.
+    expect(buildEnvelope(CODE, "corr-csv-history-1").recoverable).toBe(true);
+
+    // …and the action that earns it is `clear_and_retry`, which on
+    // SyncPreviewStep is wired to `handleKickoffRetry` (a re-SYNC), never to a
+    // resubmit of the same payload and never to a draft delete. TRAP-4.
+    const actions = WIZARD_ERROR_COPY[CODE].actions as readonly string[];
+    expect(actions).toContain("clear_and_retry");
+    expect(actions).not.toContain("start_fresh");
+  });
+});
+
+/**
+ * [161-07 / WIZERR-10] THE FOURTH OUTCOME'S COPY, AND THE REMEDY IT MAY OFFER.
+ *
+ * This code replaces `GATE_INSUFFICIENT_TRADES` for a strategy whose daily
+ * series carries a completeness record that does not earn admission. The
+ * sentence it replaces — "This account does not have enough trade history yet"
+ * over "Strategy has only 0 trade(s)" — was false about the strategy AND
+ * unwinnable for the user, so both halves are pinned: the copy must not talk
+ * about trade counts, and the remedy must be one that can actually succeed.
+ */
+describe("[161-07 / WIZERR-10] SERIES_EXAMINED_REFUSED renders a truthful fourth outcome", () => {
+  const CODE: WizardErrorCode = "GATE_SERIES_EXAMINED_REFUSED";
+
+  const surface = (): string => {
+    const copy = formatKeyError(CODE);
+    const joined = [copy.title, copy.cause, ...copy.fix].join("   ");
+    // NON-VACUITY GUARD — `"anything".includes("")` is `true`, so an empty
+    // render would satisfy every negative assertion below.
+    expect(joined.length).toBeGreaterThan(200);
+    return joined;
+  };
+
+  it("the gate code maps to a real member — never UNKNOWN, never back to the trade code", () => {
+    expect(gateFailureToWizardError("SERIES_EXAMINED_REFUSED")).toBe(CODE);
+    // The regression stated as the CODE IT MUST NOT BE. A refactor that
+    // "simplifies" the split by folding this arm back into the trade branch
+    // reds here rather than silently restoring the false sentence.
+    expect(gateFailureToWizardError("SERIES_EXAMINED_REFUSED")).not.toBe(
+      "GATE_INSUFFICIENT_TRADES",
+    );
+  });
+
+  it("the two provenance outcomes stay DISTINCT members with distinct copy", () => {
+    // "Nobody looked" and "somebody looked and the record is not enough" are
+    // different facts with different remedies (a re-sync vs a different
+    // source). Collapsing them would put a re-sync button on a permanent
+    // refusal, which is the placebo-remedy class this phase closes.
+    expect(gateFailureToWizardError("SERIES_PROVENANCE_UNVERIFIED")).not.toBe(
+      CODE,
+    );
+    expect(WIZARD_ERROR_COPY[CODE].cause).not.toBe(
+      WIZARD_ERROR_COPY.GATE_SERIES_PROVENANCE_UNVERIFIED.cause,
+    );
+  });
+
+  it("says nothing about trade counts — the sentence it replaces cannot come back", () => {
+    const s = surface();
+    expect(s).not.toMatch(/only 0 trade/i);
+    expect(s).not.toMatch(/minimum of 5 trades/i);
+    expect(s).not.toMatch(/filled trades/i);
+    // TRAP-3 — no invented figure of any kind. The entry has no interpolation
+    // arm, so there is no context field whose absence could render as a zero.
+    expect(s).not.toMatch(/\b0 (trade|trades|day|days|fill|fills)\b/i);
+  });
+
+  it("does not claim a per-series examination the producer does not perform", () => {
+    // ⭐ THE TRUTH OBLIGATION, carried onto the copy surface.
+    // `fill_derived_unproven` is stamped for its venues ALWAYS and
+    // unconditionally ("a CONSTANT, not a data-driven refinement" —
+    // `broker_dailies.py`), so no finding about THIS series exists to report.
+    // 161-UI-SPEC proposed exactly these words and they were corrected.
+    const s = surface();
+    expect(s).not.toMatch(/examined and refused/i);
+    expect(s).not.toMatch(/found wanting/i);
+    // …and no size threshold either: `sampled_gapped` fires at ANY interior
+    // hole (`nav_gap_days > 0`), so "gaps too large" would be a threshold we
+    // do not apply.
+    expect(s).not.toMatch(/too large/i);
+
+    // What it DOES say: the two methods, stated as methods.
+    expect(s).toMatch(/sampled from balance snapshots/i);
+    expect(s).toMatch(/derived from individual fills/i);
+  });
+
+  it("offers a remedy that can succeed, and NO retry that cannot", () => {
+    const actions = WIZARD_ERROR_COPY[CODE].actions as readonly string[];
+
+    // `try_another_key` is a genuine remedy: a venue whose producer folds a
+    // complete ledger stamps a verdict the gate admits.
+    expect(actions).toContain("try_another_key");
+
+    // ⛔ `clear_and_retry` IS THE ONE THAT MUST BE ABSENT. On SyncPreviewStep
+    // it is the ONLY action that passes `handleKickoffRetry` as `onRetry`, so
+    // its presence is what makes a Retry control render. A re-sync re-derives
+    // the same series by the same method and earns the same verdict — the
+    // button would promise an outcome that cannot change.
+    expect(
+      actions,
+      "A Retry on this state is a placebo: re-running the sync cannot change a " +
+        "verdict that is a property of the derivation method.",
+    ).not.toContain("clear_and_retry");
+
+    // …and nothing destructive, which is only true because 161-04 made
+    // the try-another-key handler a pure step transition.
+    expect(actions).not.toContain("start_fresh");
+
+    // The DERIVATION, not a restatement: `buildEnvelope` reads `actions`
+    // against `RECOVERABLE_ACTIONS`, and `try_another_key` is a member.
+    expect(buildEnvelope(CODE, "corr-examined-refused-1").recoverable).toBe(true);
+  });
+});
+
+/**
+ * [161-10 / WIZERR-07] THE FOUR DASHBOARD-DIALOG ENTRIES, FROM THE COPY SIDE.
+ *
+ * Three client components — `AllocateDialog`, `RenameStrategyDialog`,
+ * `MarkOwnershipDialog` — built `buildEnvelope("UNKNOWN", …)` for every
+ * failure their routes classified. The routes now put a machine code on the
+ * wire and the dialogs read it; these four members are the copy that code
+ * selects.
+ *
+ * ⭐ THE HARD PART IS NOT COVERAGE, IT IS TRUTHFULNESS. Each of the four has a
+ * near-neighbour already in the table whose SUBJECT matches and whose SENTENCE
+ * does not, because the incumbent vocabulary was written for a surface that has
+ * a wizard draft, an exchange key and a paste-the-secret step. Landing a
+ * dashboard failure on one of those would swap "we could not classify this
+ * failure" for a sentence that is specific and FALSE — a worse trade than the
+ * one this phase exists to make. The cases below pin what each entry must NOT
+ * say, per rejected neighbour, at least as hard as what it must.
+ *
+ * ORACLE INDEPENDENCE: every needle is hand-typed here. Nothing is imported
+ * from `wizardErrors.ts` except the table and the derivation helpers, and no
+ * assertion compares a string to itself.
+ */
+describe("[161-10 / WIZERR-07] the dashboard-dialog entries say only what is true of a dashboard", () => {
+  const FAMILY: readonly WizardErrorCode[] = [
+    "DASHBOARD_SIGNED_OUT",
+    "DASHBOARD_REQUEST_INVALID",
+    "DASHBOARD_WRITE_FAILED",
+    // 161-REVIEW / CR-01 — the fifth member, split out of the fourth.
+    "DASHBOARD_WRITE_INDETERMINATE",
+    "DASHBOARD_ROW_STALE",
+  ];
+
+  /** Every user-visible string on one entry, joined — never just the title. */
+  const surface = (code: WizardErrorCode): string => {
+    const copy = formatKeyError(code);
+    const joined = [copy.title, copy.cause, ...copy.fix].join("   ");
+    // NON-VACUITY FLOOR, and not a formality: `"anything".includes("")` is
+    // `true`, so every `not.toMatch` below would pass against an empty render.
+    expect(
+      joined.length,
+      `${code} renders an empty or near-empty surface, which makes every ` +
+        "negative assertion below vacuously green.",
+    ).toBeGreaterThan(140);
+    return joined;
+  };
+
+  it("the population is non-empty and all four members carry real copy", () => {
+    // A family loop over an empty list passes trivially. Hand-typed count.
+    // 4 -> 5 at 161-REVIEW / CR-01 (`DASHBOARD_WRITE_INDETERMINATE`).
+    expect(FAMILY.length).toBe(5);
+    for (const code of FAMILY) {
+      expect(surface(code).length).toBeGreaterThan(140);
+      // Never the generic terminal: the whole point is that these failures WERE
+      // classified.
+      expect(formatKeyError(code).title).not.toBe("Something went wrong.");
+    }
+  });
+
+  it("NOT ONE of the family mentions a draft, an API key, an exchange or a secret", () => {
+    // The exact false-specificity this family exists to avoid. Every rejected
+    // near-neighbour (`SESSION_EXPIRED`, `VALIDATION_FAILED`,
+    // `SEAM_INTERNAL_FAULT`, `GATE_DRAFT_GONE`, `DRAFT_STATE_INVALID`) trips at
+    // least one of these needles, which is why each was rejected.
+    for (const code of FAMILY) {
+      const s = surface(code);
+      expect(s, `${code} names a wizard draft`).not.toMatch(/\bdraft\b/i);
+      expect(s, `${code} names an API key`).not.toMatch(/\bapi key\b/i);
+      expect(s, `${code} names a key at all`).not.toMatch(/\byour key\b/i);
+      expect(s, `${code} names an exchange`).not.toMatch(/\bexchange\b/i);
+      expect(s, `${code} names a pasted secret`).not.toMatch(/\bsecret\b/i);
+    }
+  });
+
+  it("SIGNED_OUT names the session and offers signing in — not a retry that cannot work", () => {
+    const s = surface("DASHBOARD_SIGNED_OUT");
+    expect(s).toMatch(/signed out/i);
+    // The state-safety claim the user needs: the refused write changed nothing.
+    expect(s).toMatch(/nothing was saved/i);
+    expect(s).toMatch(/sign in again/i);
+    // THE DERIVATION, not a restatement of the table: `buildEnvelope` reads
+    // `actions` against `RECOVERABLE_ACTIONS`. A Retry from a signed-out
+    // session is refused identically, so no control may render.
+    expect(buildEnvelope("DASHBOARD_SIGNED_OUT", "corr-dash-401").recoverable).toBe(
+      false,
+    );
+  });
+
+  it("REQUEST_INVALID blames our software, never what the user typed", () => {
+    const s = surface("DASHBOARD_REQUEST_INVALID");
+    expect(s).toMatch(/our (own )?s(oftware|ervice)/i);
+    // ⛔ The clause that disqualified `VALIDATION_FAILED` for this surface:
+    // it instructs the user to quote a draft ID they do not have, which is a
+    // remedy that cannot be carried out (Principle 2).
+    expect(s.toLowerCase()).not.toContain("draft id");
+    expect(buildEnvelope("DASHBOARD_REQUEST_INVALID", "corr-dash-400").recoverable).toBe(
+      false,
+    );
+  });
+
+  it("WRITE_FAILED is the ONE recoverable member, and says nothing was saved", () => {
+    const s = surface("DASHBOARD_WRITE_FAILED");
+    expect(s).toMatch(/nothing was saved/i);
+    // A 500 is the one dashboard failure whose second attempt genuinely may
+    // succeed, so this is the only member of the family that earns a Retry.
+    expect(buildEnvelope("DASHBOARD_WRITE_FAILED", "corr-dash-500").recoverable).toBe(
+      true,
+    );
+    // ANTI-CONTROL: "make them all recoverable" must not satisfy the line
+    // above. The other three are pinned false in their own cases; asserting the
+    // contrast here is what makes this one a decision rather than a default.
+    expect(buildEnvelope("DASHBOARD_ROW_STALE", "corr-dash-404").recoverable).toBe(
+      false,
+    );
+  });
+
+  it("ROW_STALE points at the LIST, and names no cause the 404 cannot establish", () => {
+    const s = surface("DASHBOARD_ROW_STALE");
+    // The remedy that actually settles it: reload the list.
+    expect(s).toMatch(/reload/i);
+    // ⛔ The three routes merge several causes into one 404 on purpose (naming
+    // one would leak row existence to a caller probing ids), so the copy may
+    // not pick a cause. These are the guesses a future edit would reach for.
+    expect(s).not.toMatch(/you do not (have|own)/i);
+    expect(s).not.toMatch(/not yours/i);
+    expect(s).not.toMatch(/(was|has been) deleted\b/i);
+    expect(buildEnvelope("DASHBOARD_ROW_STALE", "corr-dash-404b").recoverable).toBe(
+      false,
+    );
+  });
+
+  it("no member of the family carries a destructive action", () => {
+    // These entries render on surfaces holding REAL MONEY positions. A remedy
+    // that removes something is never the answer to "we could not save that".
+    for (const code of FAMILY) {
+      const actions = WIZARD_ERROR_COPY[code].actions as readonly string[];
+      expect(actions.length, `${code} offers no action at all`).toBeGreaterThan(0);
+      expect(actions, `${code} offers a draft-destroying action`).not.toContain(
+        "start_fresh",
+      );
+    }
+  });
+
+  /**
+   * ⭐ 161-REVIEW / CR-01 — THE INDETERMINATE MEMBER, AND WHAT IT MAY NOT SAY.
+   *
+   * `DASHBOARD_WRITE_FAILED` covered every `internal error` 500 on all three
+   * routes, including arms whose own comments record that the outcome is
+   * unknown — the ownership flip RPC (which DELETES live positions and sets the
+   * mark in one transaction) and the allocation upsert (whose zero-rows arm
+   * names "RLS ate the row", i.e. the write LANDED and only the returning row
+   * was suppressed). Its sentence asserts "Nothing was saved", and it offered
+   * `clear_and_retry` on top of it.
+   *
+   * These cases pin the split from the COPY side, in both directions: what the
+   * new entry must not claim, and that the old entry's sentence and Retry are
+   * untouched for the arms that genuinely establish them.
+   */
+  it("INDETERMINATE claims persistence in NEITHER direction", () => {
+    const s = surface("DASHBOARD_WRITE_INDETERMINATE");
+
+    // ⛔ THE NEGATIVE HALF. `wizardErrors.ts:2470` — "'NOTHING WAS SAVED' IS
+    // VERIFIED, NOT ASSERTED". No arm reaching this code can verify it.
+    expect(
+      s,
+      "the indeterminate entry asserts a zero write. No arm that reaches it " +
+        "established one: an errored write is not a verified rollback, and " +
+        "the zero-rows arm's own comment says RLS may have eaten a row the " +
+        "upsert really wrote.",
+    ).not.toMatch(/nothing was saved/i);
+    expect(s).not.toMatch(/nothing was changed/i);
+    expect(s).not.toMatch(/as it was before/i);
+
+    // ⛔ AND THE OTHER DIRECTION, which is the correction a future edit is most
+    // likely to reach for once "nothing was saved" is forbidden. This is a
+    // STRUCTURAL rule rather than a needle list, because the honest copy has to
+    // be free to USE the word "saved" — its title is "We could not confirm
+    // whether that change was saved". What it may not do is state persistence
+    // WITHOUT a hedge. So: every sentence that mentions an outcome must also
+    // carry an epistemic qualifier.
+    const OUTCOME = /\bsaved\b|took effect|went through|\bapplied\b|succeeded/i;
+    const HEDGE =
+      /\bcannot\b|could not\b|\bwhether\b|\bif\b|\bnot there\b|\bnothing needs\b|\bmay\b/i;
+    const copy = WIZARD_ERROR_COPY.DASHBOARD_WRITE_INDETERMINATE;
+    const sentences = [copy.title, copy.cause, ...copy.fix]
+      .join(" ")
+      .split(/(?<=[.!?])\s+/)
+      .map((x) => x.trim())
+      .filter((x) => x.length > 0);
+
+    // NON-VACUITY, both ends: the split has to produce real sentences, and at
+    // least one of them has to mention an outcome — otherwise the loop below
+    // iterates over nothing that could ever fail.
+    expect(sentences.length).toBeGreaterThan(4);
+    const outcomeSentences = sentences.filter((x) => OUTCOME.test(x));
+    expect(
+      outcomeSentences.length,
+      "no sentence in this entry mentions an outcome at all, so the hedge " +
+        "rule below is checking nothing. The entry is supposed to be ABOUT an " +
+        "outcome it cannot confirm.",
+    ).toBeGreaterThan(0);
+
+    for (const sentence of outcomeSentences) {
+      expect(
+        HEDGE.test(sentence),
+        "this entry states an outcome with no qualifier: " +
+          JSON.stringify(sentence) +
+          " — a guess about a statement we never got an answer to, and the " +
+          "mirror image of the defect the entry was minted to close.",
+      ).toBe(true);
+    }
+
+    // ⭐ THE POSITIVE HALF, so "say nothing" is not a passing strategy. The
+    // entry must still name the actual state (Copy Principle 1) and carry a
+    // remedy that can succeed (Principle 2) — re-read current state, which is
+    // the ONE action that settles an unknown outcome.
+    expect(s, "the entry does not admit that we cannot tell").toMatch(
+      /cannot tell|could not confirm/i,
+    );
+    expect(s, "the entry does not send the user to re-read current state").toMatch(
+      /reload/i,
+    );
+    expect(s).toMatch(/current state/i);
+  });
+
+  it("INDETERMINATE offers NO Retry — a blind retry against a possibly-applied money write", () => {
+    const actions = WIZARD_ERROR_COPY.DASHBOARD_WRITE_INDETERMINATE
+      .actions as readonly string[];
+    expect(actions.length).toBeGreaterThan(0);
+    expect(
+      actions,
+      "`clear_and_retry` on an arm whose write may already have applied is a " +
+        "control whose effect the person pressing it cannot foresee. On the " +
+        "ownership flip that write removes live positions.",
+    ).not.toContain("clear_and_retry");
+    expect(actions).not.toContain("try_another_key");
+
+    // THE DERIVATION, not a restatement of the table: `buildEnvelope` reads
+    // `actions` against `RECOVERABLE_ACTIONS`, and `ErrorEnvelope`'s
+    // `showRetry` reads `recoverable`. Asserting the array alone would go
+    // green if the derivation rule ever changed.
+    expect(
+      buildEnvelope("DASHBOARD_WRITE_INDETERMINATE", "corr-dash-500-ind")
+        .recoverable,
+    ).toBe(false);
+
+    // ANTI-CONTROL: the split did not achieve "no Retry here" by removing the
+    // Retry everywhere. The verified-zero-write half keeps it.
+    expect(
+      buildEnvelope("DASHBOARD_WRITE_FAILED", "corr-dash-500-ver").recoverable,
+    ).toBe(true);
+  });
+
+  it("WRITE_FAILED's sentence and Retry survive the split byte-identical", () => {
+    // ⛔ The orchestrator's binding requirement for CR-01: the verified-zero
+    // arms keep TODAY's sentence, byte for byte. Hand-typed here, never
+    // imported from the table — an oracle that reads its expectation out of
+    // the thing it tests asserts copy(X) === copy(X) and cannot fail.
+    const copy = WIZARD_ERROR_COPY.DASHBOARD_WRITE_FAILED;
+    expect(copy.title).toBe("We could not save that change.");
+    expect(copy.cause).toBe(
+      "Our own service failed part-way through the change and stopped. " +
+        "Nothing was saved — the strategy is as it was before you pressed " +
+        "save. This is a fault on our side, not in your data.",
+    );
+    expect(copy.fix).toEqual([
+      "Try the same change again. This kind of fault is often momentary.",
+      "If it keeps failing, email security@quantalyze.com with the correlation id below.",
+    ]);
+    expect(copy.actions as readonly string[]).toContain("clear_and_retry");
+  });
+
+  it("the two write entries are DISTINCT copy, not one sentence twice", () => {
+    // A split that produced two members rendering the same words would satisfy
+    // every assertion above while changing nothing a user reads.
+    const failed = surface("DASHBOARD_WRITE_FAILED");
+    const indeterminate = surface("DASHBOARD_WRITE_INDETERMINATE");
+    expect(failed.length).toBeGreaterThan(140);
+    expect(indeterminate.length).toBeGreaterThan(140);
+    expect(indeterminate).not.toBe(failed);
+    expect(formatKeyError("DASHBOARD_WRITE_INDETERMINATE").title).not.toBe(
+      formatKeyError("DASHBOARD_WRITE_FAILED").title,
+    );
+  });
+});
+
+/**
+ * [161-10 / WIZERR-07] `recogniseDashboardDialogCode` — THE ONE GUARDED CAST.
+ *
+ * Pitfall 4: a recognised code must be an explicit roster member, never a
+ * `code as WizardErrorCode` written at a consumer. This is the only place the
+ * cast happens, so this is where the guard is pinned.
+ */
+describe("[161-10 / WIZERR-07] the dashboard recogniser admits only rostered codes", () => {
+  it("161-CR-01: all three routes admit DASHBOARD_WRITE_INDETERMINATE", () => {
+    // Every one of the three routes has at least one arm that fails AFTER a
+    // data-modifying statement was sent, so every roster gains it. A roster
+    // that missed it would render "we could not classify this failure" for a
+    // failure the route classified precisely — the WIZERR-07 defect, on the
+    // arm where the user most needs to be told to go and look.
+    for (const route of [
+      "strategies/[id]/name",
+      "strategies/[id]/ownership",
+      "portfolio-strategies/allocation",
+    ] as const) {
+      expect(
+        recogniseDashboardDialogCode(route, "DASHBOARD_WRITE_INDETERMINATE"),
+        `${route} does not admit the indeterminate code`,
+      ).toBe("DASHBOARD_WRITE_INDETERMINATE");
+    }
+  });
+
+  it("admits a code the route really emits, per route", () => {
+    expect(
+      recogniseDashboardDialogCode("strategies/[id]/name", "DASHBOARD_ROW_STALE"),
+    ).toBe("DASHBOARD_ROW_STALE");
+    expect(
+      recogniseDashboardDialogCode(
+        "portfolio-strategies/allocation",
+        "ALLOCATION_NOT_ALLOCATABLE",
+      ),
+    ).toBe("ALLOCATION_NOT_ALLOCATABLE");
+  });
+
+  it("REFUSES a real member of the union that THIS route does not emit", () => {
+    // The per-route split is the point (`ConnectKeyStep`'s roster docblock).
+    // A flat set would go green here while the rename dialog silently admitted
+    // an allocation-only code.
+    expect(
+      recogniseDashboardDialogCode(
+        "strategies/[id]/name",
+        "ALLOCATION_NOT_ALLOCATABLE",
+      ),
+    ).toBe("UNKNOWN");
+  });
+
+  it("REFUSES an arbitrary string, an empty string and a non-string", () => {
+    // An identity rule (`code as WizardErrorCode`) would admit all of these.
+    expect(
+      recogniseDashboardDialogCode("strategies/[id]/name", "TOTALLY_MADE_UP"),
+    ).toBe("UNKNOWN");
+    expect(recogniseDashboardDialogCode("strategies/[id]/name", "")).toBe("UNKNOWN");
+    expect(recogniseDashboardDialogCode("strategies/[id]/name", undefined)).toBe(
+      "UNKNOWN",
+    );
+    expect(recogniseDashboardDialogCode("strategies/[id]/name", null)).toBe("UNKNOWN");
+    expect(recogniseDashboardDialogCode("strategies/[id]/name", 42)).toBe("UNKNOWN");
+  });
+
+  it("REFUSES the three wire codes that are deliberately NOT envelope codes", () => {
+    // `NAME_REQUIRED` / `NAME_TOO_LONG` land inline at the Name field;
+    // `LIVE_ALLOCATION` swaps in a confirmation body. None reaches
+    // `buildEnvelope`, so none may be admitted here — admitting one would
+    // demand a copy entry for a string the user never sees as an error.
+    for (const wire of ["NAME_REQUIRED", "NAME_TOO_LONG"]) {
+      expect(recogniseDashboardDialogCode("strategies/[id]/name", wire)).toBe(
+        "UNKNOWN",
+      );
+    }
+    expect(
+      recogniseDashboardDialogCode("strategies/[id]/ownership", "LIVE_ALLOCATION"),
+    ).toBe("UNKNOWN");
+  });
+});
+
+/**
+ * ⭐ 161-REVIEW / IN-03 — THE EXAMINED-REFUSED REMEDY MUST NAME A VENUE THE
+ * READER CAN RESOLVE.
+ *
+ * The first `fix` bullet used to read "Connect a key from a venue we can read
+ * end to end — one that gives us a complete transaction ledger rather than a
+ * fill feed." Nothing on the user's screen says which venue that is, so the
+ * remedy was "guess which of the ones on offer qualifies". Short of unwinnable,
+ * short of actionable.
+ *
+ * ⛔ THE ORACLE IS NOT THE COPY TABLE. The venue→verdict mapping lives in
+ * `analytics-service/services/broker_dailies.py` and cannot be imported into
+ * TypeScript, so this case READS THAT FILE and asserts the two facts the
+ * sentence rests on. A hand-typed venue list checked against the sentence would
+ * only restate the sentence; reading the producer makes the pin red when the
+ * producer moves, which is the drift that would make the copy false.
+ */
+describe("[161-REVIEW / IN-03] GATE_SERIES_EXAMINED_REFUSED names a resolvable venue", () => {
+  const BROKER_DAILIES = readFileSync(
+    resolve(process.cwd(), "analytics-service/services/broker_dailies.py"),
+    "utf-8",
+  );
+
+  /**
+   * The venues whose producer stamps a verdict that REACHES this code. Derived
+   * from the producer's own registry docstring, asserted below rather than
+   * assumed: `combine_realized_and_funding` (binance / bybit / okx) stamps
+   * `fill_derived_unproven`, `combine_sfox_balance_history` stamps
+   * `sampled_gapped` on any interior hole. None of them can be the remedy.
+   */
+  const VENUES_THAT_REACH_THIS_CODE = ["Binance", "Bybit", "OKX", "sFOX"] as const;
+
+  it("the producer still maps deribit → ledger_complete and the ccxt venues → fill_derived_unproven", () => {
+    // Anti-vacuity: a moved/renamed file would read as an empty string and make
+    // every `toContain` below fail loudly rather than silently — but a TRUNCATED
+    // read would not, so fence the size first.
+    expect(BROKER_DAILIES.length).toBeGreaterThan(5000);
+
+    // The registry docstring's "Who stamps what" block — the truth source the
+    // copy's docblock cites.
+    expect(BROKER_DAILIES).toContain("``combine_native_ledger`` (deribit");
+    expect(BROKER_DAILIES).toContain(
+      "``combine_realized_and_funding`` (binance / bybit /",
+    );
+    expect(BROKER_DAILIES).toContain("fill_derived_unproven");
+
+    // Deribit's stamp is UNCONDITIONAL on both return paths — that is what makes
+    // it a remedy that cannot put the user back on this screen. Two literal
+    // assignment sites, not one.
+    const deribitStamps = BROKER_DAILIES.match(
+      /out_(?:ac_)?meta\["series_completeness"\] = "ledger_complete"/g,
+    );
+    expect(
+      deribitStamps?.length ?? 0,
+      "the unconditional `ledger_complete` stamp sites moved. The first fix " +
+        "bullet of GATE_SERIES_EXAMINED_REFUSED names Deribit on the basis " +
+        "that its producer stamps ledger_complete unconditionally — re-measure " +
+        "before trusting that sentence.",
+    ).toBeGreaterThanOrEqual(2);
+  });
+
+  it("the first remedy names Deribit, and never a venue that can reach this code", () => {
+    const bullet = WIZARD_ERROR_COPY.GATE_SERIES_EXAMINED_REFUSED.fix[0];
+
+    // `"anything".includes("")` is true, so establish the subject is a real
+    // sentence before asserting anything about its contents.
+    expect(typeof bullet).toBe("string");
+    expect(bullet.trim().length).toBeGreaterThan(40);
+
+    expect(
+      bullet,
+      "the examined-refused remedy no longer names a venue the reader can act " +
+        "on (161-REVIEW / IN-03). Naming the qualifying venue is the whole " +
+        "point of the bullet.",
+    ).toContain("Deribit");
+
+    for (const venue of VENUES_THAT_REACH_THIS_CODE) {
+      expect(
+        bullet.toLowerCase().includes(venue.toLowerCase()),
+        `the remedy names ${venue}, which is a venue whose producer stamps a ` +
+          "verdict that LANDS the user on this very screen — that is an " +
+          "unwinnable remedy, the defect class this phase exists to close.",
+      ).toBe(false);
+    }
+  });
+
+  it("the remedy names no FLAG-GATED venue (the WIZERR-08 / F3 disclosure class)", () => {
+    const bullet = WIZARD_ERROR_COPY.GATE_SERIES_EXAMINED_REFUSED.fix[0];
+    // MT5 also stamps `ledger_complete` unconditionally, so it would be a TRUE
+    // remedy — but its wizard presence rides `MT5_UI_ENABLED`, so a static
+    // sentence naming it would name a venue the surface may not be offering.
+    expect(BROKER_DAILIES).toContain("``combine_mt5_deal_ledger``");
+    for (const gated of ["MT5", "MetaTrader"]) {
+      expect(
+        bullet.toLowerCase().includes(gated.toLowerCase()),
+        `the remedy names ${gated}, whose wizard offer is behind a build flag ` +
+          "(MT5_UI_ENABLED). Static copy must not name a venue the surface " +
+          "may not be presenting.",
+      ).toBe(false);
+    }
+  });
+});
+
+/**
+ * ⭐ 161-REVIEW / IN-02 — PRINCIPLE 4 IS AN AUTHORING RULE, AND THE DOCBLOCKS
+ * MAY NOT CLAIM `expand_log` ENFORCES IT.
+ *
+ * The DASHBOARD roster note used to argue that "no correlation id on an
+ * actionable arm" HOLDS because `expand_log` is present only on terminal
+ * members. Two independent measurements say `expand_log` cannot carry that
+ * argument, and this case pins BOTH so the prose cannot quietly regrow:
+ *
+ *   1. `expand_log` does not imply the arm is non-actionable — `KEY_ORPHANED`
+ *      carries `try_another_key` (so `buildEnvelope` derives
+ *      `recoverable: true`) alongside it. Derived below, never hand-asserted.
+ *   2. `expand_log` does not decide what the renderer shows. That is
+ *      `ErrorEnvelope`'s call, and no entry in this table can assert it — so no
+ *      docblock here may state the property as established.
+ *
+ * ⛔ The recoverability half is DERIVED through `buildEnvelope`, matching this
+ * file's standing rule: asserting `actions` directly would restate what the
+ * table says about itself and would go green if the derivation rule changed.
+ */
+describe("[161-REVIEW / IN-02] `expand_log` is a declaration, not a Principle-4 mechanism", () => {
+  const source = readFileSync(join(__dirname, "wizardErrors.ts"), "utf-8");
+
+  it("at least one entry is RECOVERABLE and carries `expand_log` — so presence cannot mean 'terminal'", () => {
+    const codes = Object.keys(WIZARD_ERROR_COPY) as WizardErrorCode[];
+    // Population fence: an empty table would make the search below vacuous.
+    expect(codes.length).toBeGreaterThan(50);
+
+    const recoverableWithExpandLog = codes.filter(
+      (code) =>
+        buildEnvelope(code, "cid-in02").recoverable &&
+        WIZARD_ERROR_COPY[code].actions.includes("expand_log"),
+    );
+
+    expect(
+      recoverableWithExpandLog.length,
+      "no entry is both recoverable and carries `expand_log` any more. That " +
+        "would make `expand_log` presence coincide with 'terminal' again — " +
+        "which is the reading the IN-02 docblocks were corrected AWAY from. " +
+        "Do not simply delete this case: re-decide whether Principle 4 is now " +
+        "mechanically enforceable, and say so at the docblocks.",
+    ).toBeGreaterThan(0);
+  });
+
+  it("no docblock claims `expand_log`'s presence establishes Principle 4", () => {
+    // Control: the file was read, and the corrected note is the one present.
+    expect(source.length).toBeGreaterThan(100_000);
+    expect(source).toContain("PRINCIPLE 4 IS AN AUTHORING RULE");
+
+    // ⛔ NORMALISED, not raw. A raw substring pin is defeated by re-wrapping the
+    // comment — the same sentence at a different line width would slip through
+    // while reading identically to a human. Strip comment markers, collapse
+    // whitespace, then search. The corrected note QUOTES claim A verbatim (that
+    // is how the reader learns what was superseded), so the test is not "absent"
+    // but "appears once, and that once is inside the correction".
+    const normalise = (s: string) =>
+      s
+        .replace(/^\s*(?:\/\/|\*|\/\*\*?)\s?/gm, "")
+        .replace(/\s+/g, " ")
+        .trim();
+    const flat = normalise(source);
+    const count = (hay: string, needle: string) => hay.split(needle).length - 1;
+
+    // Claim A — the DASHBOARD roster note's original wording.
+    const CLAIM_A =
+      "Principle 4 (no correlation id on an actionable arm — three of the four " +
+      "are terminal, so `expand_log` is present on those and the id is what the " +
+      "user is asked to quote)";
+    // Claim B — the DASHBOARD_DIALOG_ROUTE_CODES docblock's original wording.
+    const CLAIM_B = "would show a correlation id on an ACTIONABLE arm (Principle 4)";
+
+    // Blank-needle fence — `"anything".includes("")` is true — and a normaliser
+    // control: if `normalise` blanked the file, every count below reads 0 and
+    // the whole case goes vacuously green.
+    for (const claim of [CLAIM_A, CLAIM_B]) {
+      expect(claim.trim().length).toBeGreaterThan(50);
+    }
+    expect(flat.length).toBeGreaterThan(50_000);
+    expect(flat).toContain("PRINCIPLE 4 IS AN AUTHORING RULE, NOT A PROPERTY");
+
+    // Claim A survives EXACTLY ONCE, as the quoted-and-rejected text.
+    expect(
+      count(flat, CLAIM_A),
+      "the superseded Principle-4 claim appears somewhere other than (or " +
+        "instead of) the IN-02 correction that quotes it. `expand_log` neither " +
+        "implies the arm is terminal (see the sibling case) nor decides what " +
+        "ErrorEnvelope renders — state it as an authoring rule, never as an " +
+        "established property.",
+    ).toBe(1);
+
+    // And that single occurrence is inside the correction, not standing alone.
+    const at = flat.indexOf(CLAIM_A);
+    expect(
+      flat.slice(Math.max(0, at - 200), at),
+      "the superseded claim is present without the note marking it superseded",
+    ).toContain("superseded");
+
+    // Claim B is gone outright — the correction paraphrases it rather than
+    // quoting the "(Principle 4)" tail, so any occurrence is a reintroduction.
+    expect(
+      count(flat, CLAIM_B),
+      "wizardErrors.ts has reintroduced: " + CLAIM_B + ". Nothing in this file " +
+        "decides what ErrorEnvelope renders.",
+    ).toBe(0);
   });
 });
