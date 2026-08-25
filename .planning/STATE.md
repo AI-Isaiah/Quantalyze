@@ -5,10 +5,10 @@ milestone_name: Backlog Burndown (Phases 158+)
 current_phase: 161
 current_phase_name: WIZERR — Honest error surfaces
 status: verifying
-stopped_at: Completed 161.1-03-PLAN.md and 161.1-05-PLAN.md (wave 3, parallel)
-last_updated: "2026-08-25T10:57:00.020Z"
+stopped_at: 161.1-04-PLAN.md tasks 1-2 complete; PAUSED at task 3 (blocking founder LIVE op — the composite PROD tracer)
+last_updated: "2026-08-25T13:45:00.000Z"
 last_activity: 2026-08-25
-last_activity_desc: Phase 161.1 execution — waves 1-3 landed; A7 tracer PASSED on PROD
+last_activity_desc: Phase 161.1 wave 4 — composite arm landed DORMANT; composite PROD tracer still owed
 state_head: 00da96750e9bb4d25c7f46cbcec3761f88c7e673
 progress:
   total_phases: 9
@@ -1486,9 +1486,9 @@ Load-bearing sequencing (real dependencies, do not reorder):
 
 ## Session
 
-**Last Date:** 2026-08-25T10:56:59.670Z
-**Stopped At:** Completed 161.1-03-PLAN.md and 161.1-05-PLAN.md (wave 3, parallel)
-**Resume File:** None
+**Last Date:** 2026-08-25T13:45:00.000Z
+**Stopped At:** 161.1-04-PLAN.md tasks 1-2 complete; PAUSED at task 3 (blocking founder LIVE op — the composite PROD tracer). Plan 04's SUMMARY is written and marked `status: awaiting-checkpoint`, NOT `complete`.
+**Resume File:** `.planning/phases/161.1-ledger-refresh-recurring-strategy-refresh-for-ledger-backed/161.1-04-PLAN.md` (task 3)
 **Next step:** Phase 161 (WIZERR — honest error surfaces) is next and NOT yet planned — run `/gsd-plan-phase 161`. Phase 161.1 (LEDGER-REFRESH) was inserted after it on 2026-08-24 for the founder-reported MT5 staleness; it is URGENT and production-facing, so it may be pulled ahead of 161 if you prefer the live data-integrity fix first.
 
 ⭐ **Foundation names later waves import by name** (from `153.1-02-SUMMARY.md`, all in
@@ -1535,3 +1535,4 @@ pre-merge `e0493913`. Fix is PR #669. Supabase migrations and the Vercel fronten
 - ~~143-01 leaves SC#1's alert MUTE until SENTRY_DSN is verified on the WORKER Railway service~~ — ⛔ PREMISE FALSE, RESOLVED 2026-08-17 (Plan 04). There is NO separate worker service and has not been since April: the loops were merged into the FastAPI process (main.py:80-86, after the 2026-04-20 'jobs queued but never processed' incident), dispatch_loop runs in the app lifespan (main.py:271), that process calls init_sentry() at import (main.py:69, since Phase 16), and SENTRY_DSN IS set on its Railway service. SC#1's alert half is TRUE in production. 143-01's init_sentry() covers the STANDALONE path only.
 - 161-07 D-161-07-A: the wizard COMPOSITE arm still renders GATE_SERIES_PROVENANCE_UNVERIFIED for sampled_gapped — a false sentence on a reachable path (the 142.2 FIX-2 downgrade). Fix = route that arm through the examined/unexamined split; requires re-cutting one 142.2 oracle.
 - 161.1: OQ-3 still OPEN — closes only when a founder executes the runbook's step 1 and records whether the database-level or role-level app.* GUC form verified. Also: deribit has ZERO live refresh coverage until plan 04's stitch_composite arm lands (TODOS 0.3)
+- 161.1-04 (wave 4, 2026-08-25): the composite arm LANDED DORMANT — `enqueue_ledger_composite_refresh` (migration `20260825140000`), 8-arm SQL gate, static gates 10-11, and the D-15 non-destructive guard EXTENDED to `run_stitch_composite_job._stamp_failed` (a second destructive stamp plan 02's guard never covered; found by measurement, fixed under Rule 2). ⛔ **Task 3 is a BLOCKING founder LIVE op and is NOT done:** one manual `stitch_composite` enqueue for the one live PROD composite must be observed to completion (`last_return_date` advancing in the staleness view, NOT a job going green) before the composite schedule is documented as activatable. The runbook's composite section is deliberately UNWRITTEN until then. TODOS 0.3 stays OPEN — half of its close condition (the arm exists) is met, half (a composite observed to refresh) is not.
