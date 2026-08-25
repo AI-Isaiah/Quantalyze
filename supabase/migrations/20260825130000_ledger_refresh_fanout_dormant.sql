@@ -109,11 +109,33 @@
 -- therefore skipped by a NAMED, COMMENTED rule — CONTEXT D-01's requirement —
 -- and never silently mishandled.
 --
--- ⚠️ The `is_composite = FALSE` conjunct is, under the LEFT join described
--- below, otherwise REDUNDANT: the key-eligibility conjuncts would drop a NULL-key
--- row anyway. It is kept deliberately. It is the named rule D-01 asks for, and
--- deleting it as "dead code" is exactly the tidy-up that would turn a deliberate
--- deferral back into an accident. The behavioural gate
+-- ⛔ The `is_composite = FALSE` conjunct is the ONLY thing excluding composites.
+-- It is NOT redundant. Deleting it admits every composite into the single-key arm.
+--
+-- (An earlier revision of this comment claimed the conjunct was "otherwise
+-- REDUNDANT because the key-eligibility conjuncts would drop a NULL-key row
+-- anyway". That was FALSE, and it contradicted this same file at the
+-- NULL-TOLERANCE note ~20 lines below. Corrected 2026-08-25. Do not restore it:
+-- a comment inviting the deletion of the only load-bearing conjunct is worse
+-- than no comment.)
+--
+-- Evaluate the predicate for a composite, where `ak.*` is all NULL under the
+-- LEFT join — every key-eligibility conjunct is written NULL-TOLERANTLY, so
+-- every one of them returns TRUE:
+--     ak.sync_status IS DISTINCT FROM 'revoked'  ->  NULL IS DISTINCT FROM ...  -> TRUE
+--     ak.disconnected_at IS NULL                 ->  TRUE
+--     COALESCE(ak.is_active, TRUE)               ->  TRUE
+-- A composite therefore reaches `is_composite = FALSE` and is excluded THERE,
+-- and nowhere else.
+--
+-- That NULL-tolerance is deliberate and the two rules depend on each other: a
+-- NULL-INTOLERANT conjunct would quietly become a SECOND exclusion mechanism,
+-- and then deleting `is_composite = FALSE` would still pass its own regression
+-- arm — the unfalsifiable-neutering defect (B-2) the plan-checker caught before
+-- execution. Keep both properties or neither is provable.
+--
+-- It is also the named rule D-01 asks for: a future MT5 composite must be
+-- skipped DELIBERATELY, never silently mishandled. The behavioural gate
 -- (supabase/tests/test_ledger_refresh_fanout.sql, arm D) fails if it is removed.
 --
 --
@@ -287,10 +309,12 @@ BEGIN
         LEFT JOIN public.api_keys ak
           ON ak.id = s.api_key_id
         WHERE lrs.is_stale
-          -- D-01: composites are excluded, DELIBERATELY and by name. The founder
-          -- call, its scope, where the composite arm lives instead, and why this
-          -- conjunct is kept even though the join makes it redundant, are all in
-          -- the "D-01" section of this file's header. Do not tidy it away.
+          -- D-01: composites are excluded, DELIBERATELY and by name. ⛔ This
+          -- conjunct is the ONLY exclusion — it is NOT redundant. Every
+          -- key-eligibility conjunct above is NULL-TOLERANT, so a composite
+          -- (all-NULL `ak.*` under the LEFT join) passes all of them and is
+          -- excluded HERE, nowhere else. Deleting it admits every composite.
+          -- See the "D-01" section of this file's header. Do not tidy it away.
           AND lrs.is_composite = FALSE
           -- Lifecycle: mirrors ALLOWED_STRATEGY_STATUSES (routers/cron.py:148)
           -- MINUS 'draft'. A draft strategy has no factsheet to refresh, so the
