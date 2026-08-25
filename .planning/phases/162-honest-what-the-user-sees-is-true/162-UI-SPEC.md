@@ -1,7 +1,7 @@
 ---
 phase: 162
 slug: honest-what-the-user-sees-is-true
-status: draft
+status: approved
 shadcn_initialized: false
 preset: none
 created: 2026-08-25
@@ -56,6 +56,12 @@ Exceptions: none new. `--space-grid-gap` (10px) is not touched by this phase.
 ---
 
 ## Typography
+
+**Line-height (new elements):** Tailwind default `leading` inherited — no new
+line-height values. The caption/small/micro lines added by this phase are single-line
+in their normal state; if the recency line or the `{n} of {m}` caption wraps at a
+narrow viewport, inherited leading applies. Declared explicitly so a future reader
+cannot mistake silence for an undecided value.
 
 Inherited from DESIGN.md fluid type spine (`--text-*` tokens; raw px is lint-`error`
 repo-wide). Roles this phase's new/changed elements use — exactly 2 weights (400/600):
@@ -125,6 +131,7 @@ Additive: `FreshnessChip` logic, thresholds, tones, and anatomy are byte-untouch
 
 | Property | Contract |
 |----------|----------|
+| Test | ⚠️ The recency line and the chip's date line sit adjacent and must render the date IDENTICALLY. Assert this in a test, not only in prose: two formatters on neighbouring lines is precisely the drift the one-formatter-per-surface-family rule exists to prevent, and a divergence here would itself be a small dishonesty (two dates for one fact). |
 | Copy | `Track record through {date}` — exact string per D-162-2. `{date}` formatted by the factsheet's OWN formatter (`formatIsoDate`, same as the chip's date line — DESIGN.md Numbers Contract: one formatter module per surface family; never inline a new date format). |
 | Data source | max `date` in `strategy_analytics.returns_series` — the D-03-verdict signal ("a column only a real analytics run can advance"). NEVER `computed_at`, NEVER `last_sync_at`. |
 | Placement | Inside the factsheet v2 masthead's existing right-aligned freshness block, as a new line DIRECTLY BELOW the FreshnessChip's date line (`FactsheetView.tsx` ~:843-900 region), `mt-1`, right-aligned like its siblings. Beside-the-chip per D-162-2 = same block, stacked (the block is the chip). |
@@ -179,6 +186,14 @@ lead sentence (it is true and load-bearing). No reader-side mapping (requirement
 the writer; mapping at the reader is the recorded anti-pattern).
 
 ### C-3 — Equity curves: missing must look missing (HONEST-04)
+
+⚠️ **Stale-artefact clause (checker gap, scrutiny 6).** When the curves are wired, the
+hard-coded `equityCurve: null` AND the comment justifying it
+(`src/app/(dashboard)/portfolios/[id]/page.tsx:224-227`) must both be REMOVED or replaced.
+The comment asserts something that becomes false the moment this contract is satisfied.
+A code comment is not a rendered surface, so this sat only in the requirement text — it is
+pinned here so the contract itself, not an upstream document, forbids the false comment
+surviving beside its own fix.
 
 Per-strategy lines on `PortfolioEquityCurve` (component itself unchanged — it already
 skips null/empty curves):
