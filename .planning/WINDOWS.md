@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 14
+open_count: 15
 waived_count: 0
 fixed_count: 1
-total_count: 15
-last_updated: 2026-08-25T10:34:25.695Z
+total_count: 16
+last_updated: 2026-08-25T22:26:27.302Z
 ---
 
 # Broken Windows Ledger
@@ -30,6 +30,7 @@ last_updated: 2026-08-25T10:34:25.695Z
 | 13 | 161 | unrun-verify | .planning/phases/161-wizerr-honest-error-surfaces/161-06-PLAN.md |  | 161-06 backstop truth unverified: the rendered wait sentence's wrap/no-clipping on the E2 key-connect envelope — no renderer touched this plan | open |  | 2026-08-24T12:23:07.786Z |  |
 | 14 | 161 | unrun-verify | src/app/(dashboard)/allocations/components/AllocateDialog.tsx |  | E5 residue: founder eyes-on pass on the real Allocate dialog in Safari is unverified; layout measured only in Chromium on reproduced Modal/ErrorEnvelope markup (result: scrolls, does not clip) | open |  | 2026-08-24T21:01:39.389Z |  |
 | 15 | 161.1 | unrun-verify | supabase/tests/test_ledger_refresh_fanout.sql |  | Both phase SQL gates were run on a local Supabase harness, not against the real TEST project (TEST_SUPABASE_DB_URL is a CI secret, psql absent). Blocking CI sql-tests job covers this on PR. | open |  | 2026-08-25T10:34:25.695Z |  |
+| 16 | 162 | deviation | src/components/strategy/StrategyGrid.tsx | 117 | SyncBadge still ungated on computation_status (is_example guard added; consumer-less component, pre-existing STALE-01 gap) | open |  | 2026-08-25T22:26:27.302Z |  |
 
 ````json
 [
@@ -211,6 +212,18 @@ last_updated: 2026-08-25T10:34:25.695Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-08-25T10:34:25.695Z",
+    "resolved_at": null
+  },
+  {
+    "id": 16,
+    "kind": "deviation",
+    "phase": "162",
+    "file": "src/components/strategy/StrategyGrid.tsx",
+    "line": 117,
+    "description": "SyncBadge still ungated on computation_status (is_example guard added; consumer-less component, pre-existing STALE-01 gap)",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-08-25T22:26:27.302Z",
     "resolved_at": null
   }
 ]
