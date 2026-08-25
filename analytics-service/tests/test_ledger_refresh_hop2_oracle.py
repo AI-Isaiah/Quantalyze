@@ -157,19 +157,28 @@ def _stub_status_read(
     real status string — so EVERY case would route to the destructive branch and
     the protected assertions would pass or fail for reasons unrelated to the
     guard. Same trap tests/test_ledger_refresh_nondestructive.py documents.
+
+    ⛔ TABLE-AWARE (REUSE-01). ``compute_jobs`` gets the LIVE job row, not the
+    analytics row: the guard and the chain edge both re-read
+    ``metadata->>'source'`` off their own job before honouring the marker, because
+    the enqueue dedup can hand a user's resync a job the recurring refresh minted.
+    Answering that read with an analytics row makes the marker look RETRACTED and
+    every protected case here would fail for the wrong reason.
     """
     original = ctx.supabase.table.side_effect
     capture["selects"] = []
+    live_job_row = {"metadata": {"source": _MARKER}}
 
     def _table(name: str) -> MagicMock:
         tbl: MagicMock = original(name)
+        answer = live_job_row if name == "compute_jobs" else row
 
         def _select(columns: str, **_kw: object) -> MagicMock:
             capture["selects"].append({"table": name, "columns": columns})
             chain = MagicMock()
             chain.eq.return_value = chain
             chain.maybe_single.return_value = chain
-            chain.execute.return_value = MagicMock(data=row)
+            chain.execute.return_value = MagicMock(data=answer)
             return chain
 
         tbl.select.side_effect = _select
@@ -503,14 +512,23 @@ class TestHop1StampUsesTheEntrySnapshot:
             },
         }
         original = ctx.supabase.table.side_effect
+        # REUSE-01: the marker is STILL on the row here — this scenario is a
+        # sibling bridge call, not a user attaching to the job — so the guard's
+        # re-read must not be what decides it. `state['reads']` deliberately
+        # counts ONLY the analytics reads it is about.
+        live_job_row = {"metadata": {"source": _MARKER}}
 
         def _table(name: str) -> MagicMock:
             tbl: MagicMock = original(name)
+            is_job_table = name == "compute_jobs"
 
             def _select(columns: str, **_kw: object) -> MagicMock:
                 chain = MagicMock()
                 chain.eq.return_value = chain
                 chain.maybe_single.return_value = chain
+                if is_job_table:
+                    chain.execute.return_value = MagicMock(data=dict(live_job_row))
+                    return chain
                 state["reads"] += 1
                 chain.execute.return_value = MagicMock(data=dict(state["row"]))
                 return chain

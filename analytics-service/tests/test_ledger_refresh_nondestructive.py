@@ -98,11 +98,20 @@ def _stub_status_read(
     """
     original = ctx.supabase.table.side_effect
     capture["selects"] = []
+    # ⛔ REUSE-01: `compute_jobs` is answered SEPARATELY, with a job that still
+    # carries the marker. The guard re-reads its own job row before honouring the
+    # marker (the enqueue dedup can hand a user's resync a job the recurring
+    # refresh minted), so answering that read with an analytics row — or with the
+    # `raises` failure this helper injects into the STATUS read — would make every
+    # case here loud for a reason that is not the one under test. `raises` must
+    # keep meaning "the strategy_analytics status read failed", nothing else.
+    live_job_row = {"metadata": {"source": _MARKER}}
 
     def _table(name: str) -> MagicMock:
         # The harness's factory is an untyped mock attribute, so its return is
         # Any; bind it to the concrete type the caller relies on.
         tbl: MagicMock = original(name)
+        is_job_table = name == "compute_jobs"
 
         def _select(columns: str, **_kw: object) -> MagicMock:
             record: dict[str, Any] = {"table": name, "columns": columns, "filters": {}}
@@ -114,6 +123,8 @@ def _stub_status_read(
                 return chain
 
             def _execute() -> MagicMock:
+                if is_job_table:
+                    return MagicMock(data=dict(live_job_row))
                 if raises:
                     raise RuntimeError("simulated strategy_analytics status read failure")
                 return MagicMock(data=row)

@@ -87,24 +87,39 @@ def _one_day_returns() -> pd.Series:
     return pd.Series([0.01], index=pd.DatetimeIndex(["2024-05-01"]), dtype="float64")
 
 
-def _stub_status_read(ctx: MagicMock, row: dict[str, Any] | None) -> None:
+def _stub_status_read(
+    ctx: MagicMock, row: dict[str, Any] | None, *, job_source: str | None
+) -> None:
     """Give the harness a real ``.select().eq().maybe_single().execute()``.
 
     Without it the bare ``MagicMock`` makes ``row.get('computation_status')``
     another ``MagicMock``, which equals no real status string — so every case
     would route to the destructive branch and the protected assertions would
     pass or fail for reasons unrelated to the guard.
+
+    ⛔ TABLE-AWARE (REUSE-01). ``compute_jobs`` is answered with the LIVE job row,
+    built from THIS case's own ``job_source``. The guard and the chain edge both
+    re-read ``metadata->>'source'`` off their own job before honouring the marker
+    — the enqueue dedup can hand a user's resync a job the recurring refresh
+    minted, and the claim-time metadata then stops describing reality. Answering
+    that read with an analytics row makes the marker look RETRACTED on every
+    marked case, so the protected assertions here would go red for a reason that
+    has nothing to do with F1/F4/F7.
     """
     original = ctx.supabase.table.side_effect
+    live_job_row: dict[str, Any] | None = (
+        {"metadata": {"source": job_source}} if job_source is not None else None
+    )
 
     def _table(name: str) -> MagicMock:
         tbl: MagicMock = original(name)
+        answer = live_job_row if name == "compute_jobs" else row
 
         def _select(_columns: str, **_kw: object) -> MagicMock:
             chain = MagicMock()
             chain.eq.return_value = chain
             chain.maybe_single.return_value = chain
-            chain.execute.return_value = MagicMock(data=row)
+            chain.execute.return_value = MagicMock(data=answer)
             return chain
 
         tbl.select.side_effect = _select
@@ -143,7 +158,9 @@ def _job(*, source: str | None) -> dict[str, Any]:
     return job
 
 
-def _ctx_for(*, published: bool) -> tuple[MagicMock, dict[str, Any]]:
+def _ctx_for(
+    *, published: bool, job_source: str | None = None
+) -> tuple[MagicMock, dict[str, Any]]:
     ctx, capture = _build_ctx(
         key_row={"id": "key-1", "exchange": "binance", "user_id": "user-1"},
         strategy_row={"id": _STRATEGY_ID, "user_id": "user-1"},
@@ -156,6 +173,7 @@ def _ctx_for(*, published: bool) -> tuple[MagicMock, dict[str, Any]]:
         # destructive stamp's OWN output or the guarded and unguarded outcomes
         # coincide and the assertion cannot fail.
         else {"computation_status": "computing"},
+        job_source=job_source,
     )
     return ctx, capture
 
@@ -164,7 +182,7 @@ async def _drive(
     *, combine: MagicMock, source: str | None, published: bool = True
 ) -> tuple[Any, dict[str, Any]]:
     """Handler-only driver."""
-    ctx, capture = _ctx_for(published=published)
+    ctx, capture = _ctx_for(published=published, job_source=source)
     patches = _patches_with_combine(ctx, key_mode=False, combine_mock=combine)
     with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6]:
         result = await run_derive_broker_dailies_job(_job(source=source))
@@ -181,7 +199,7 @@ async def _drive_through_worker(
     Nothing about the outcome mapping is stubbed — patching ``dispatch`` (as the
     older main_worker tests do) would put the very seam under test behind a mock.
     """
-    ctx, capture = _ctx_for(published=published)
+    ctx, capture = _ctx_for(published=published, job_source=source)
     job = _job(source=source)
     worker_rpc: list[tuple[str, dict[str, Any]]] = []
 
