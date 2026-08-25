@@ -5,16 +5,16 @@ milestone_name: Backlog Burndown (Phases 158+)
 current_phase: 161
 current_phase_name: WIZERR — Honest error surfaces
 status: verifying
-stopped_at: Completed 161-09-PLAN.md (last plan of Phase 161)
-last_updated: "2026-08-24T21:30:39.384Z"
+stopped_at: Completed 161.1-02-PLAN.md
+last_updated: "2026-08-25T10:34:09.164Z"
 last_activity: 2026-08-24
 last_activity_desc: Phase 161 execution — waves 1-3 landed
-state_head: cc2c579ac81356cd73dcb7a539b468637a7b4758
+state_head: e18c79e4665e1e64584562711389d637602cae96
 progress:
   total_phases: 9
   completed_phases: 1
-  total_plans: 30
-  completed_plans: 28
+  total_plans: 35
+  completed_plans: 30
   percent: 11
 ---
 
@@ -633,6 +633,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 | Phase 161 P08 | 35m | 3 tasks | 11 files |
 | Phase 161 P10 | 2h40m | 3 tasks | 15 files |
 | Phase 161 P09 | 1h20m | 3 tasks | 6 files |
+| Phase 161.1 P02 | 96min | 3 tasks | 5 files |
 
 ## Accumulated Context
 
@@ -775,6 +776,8 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - [Phase 161]: 161-10: 4 DASHBOARD_* members minted (pins 84 -> 88) because each near-neighbour's SENTENCE is false on a dashboard dialog
 - [Phase 161]: 161-09: keys/validate-and-encrypt derived ZERO under the code:-first coverage predicate — all 11 literal-coded arms reordered so the 4th ROUTES row lands over a real population
 - [Phase 161]: 161-09: KNOWN_VALIDATE_AND_ENCRYPT_CODES enforces typed+has-copy only — measured, none of the route's 3 consumers reads its code field. Named debt, not a claimed contract.
+- [Phase 161]: 161.1-02: the refresh fan-out ships DORMANT behind app.ledger_refresh_enabled (exact-equality, fail-closed); the binding bound is the 20h attempt cooldown, LIMIT 4 is a burst cap only
+- [Phase 161]: 161.1-02 D-15: a refresh-marked failure on an already terminal-success strategy_analytics row records computation_error only — no status flip, no basis-series heal-delete; every unrecognised job falls through to the loud destructive stamp
 
 ### Decisions (execution-time, Phase 140.2)
 
@@ -1477,8 +1480,8 @@ Load-bearing sequencing (real dependencies, do not reorder):
 
 ## Session
 
-**Last Date:** 2026-08-24T21:30:23.952Z
-**Stopped At:** Completed 161-09-PLAN.md (last plan of Phase 161)
+**Last Date:** 2026-08-25T10:34:08.870Z
+**Stopped At:** Completed 161.1-02-PLAN.md
 **Resume File:** None
 **Next step:** Phase 161 (WIZERR — honest error surfaces) is next and NOT yet planned — run `/gsd-plan-phase 161`. Phase 161.1 (LEDGER-REFRESH) was inserted after it on 2026-08-24 for the founder-reported MT5 staleness; it is URGENT and production-facing, so it may be pulled ahead of 161 if you prefer the live data-integrity fix first.
 
