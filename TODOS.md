@@ -3195,6 +3195,34 @@ follows is what was deliberately left, with the reason.
   escape makes a false fire less likely but does not close the vacuity. Not in the findings and not
   in scope; the two 161.1 arms deliberately did NOT copy that shape.
 
+161.1-D5. **⛔ `run_stitch_composite_job._stamp_failed` carries the IDENTICAL defect the phase just
+  fixed twice.** `analytics-service/services/job_worker.py` (~:5760) reads `computation_status`
+  LIVE at stamp time, in the same "ONE select, BOTH columns" as the M-2 flags merge — i.e. its
+  guard's oracle is a column the SQL bridge writes, which is exactly the root cause closed on
+  hop 1 and hop 2 this phase.
+  - **Why it is narrower:** the composite stamp is chain-terminal, so there is no hop-2
+    amplification. Its exposure is the F2 shape only — a sibling job's bridge call moving
+    `computation_status` mid-crawl and disarming the guard.
+  - **Not fixed in 161.1:** it was outside the five findings' file scope, and splitting the read
+    touches gate-10/gate-11 territory that a concurrently-edited migration also pins. Fixing it
+    blind, in parallel, was the higher risk.
+  - **Fix shape:** take the publish snapshot at handler entry and carry it forward, mirroring
+    `run_csv_strategy_analytics`'s `refresh_publish_status` / `refresh_publish_warned` keywords.
+
+161.1-D6. **Residual window on the hop-1 oracle — closing it needs the fan-out migration.** The
+  fan-out enqueues the derive in SQL, so the earliest oracle Python can take is at handler entry.
+  A sibling transition landing between the SQL enqueue and that read still bounces a plain
+  `complete` row to `computing`, and the entry read sees it. **The residual fails LOUD, not
+  silent** — which is why it did not block. Full closure means minting `publish_status` into the
+  job metadata inside `20260825130000` at enqueue time. Documented in-code at the read site.
+
+161.1-D7. **`HealthScore` on grid cards scores a failed row's stale metrics.** `computeHealthScore`
+  always returns a number; before the stale-analytics gating a failed row carrying a stale sharpe
+  scored ≈93 (green). With the metric cells withheld it now scores ≈33 (muted) — substantially
+  better without the component being touched. The residual question is a public-surface UI
+  decision: should the badge hide entirely when nothing is computed, rather than score the
+  absence? Founder call, not a defect.
+
 161.1-D4. **Prose/derivation nits, non-blocking.**
   - `analytics-service/tests/test_computing_started_at_stamp.py:649` — census docstring
     self-contradicts: says "the 7 in analytics_runner.py are unchanged in COUNT" and "7 of those 11"
