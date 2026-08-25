@@ -1850,17 +1850,37 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
   // Principles 2) this very requirement exists to enforce. The bullets below
   // name only remedies that were measured to be reachable.
   //
-  // ⚠️ THE UNDERLYING GAP IS REAL AND IS NOT CLOSED HERE: a manager cannot
-  // release their own orphaned key from any surface we ship. That is why the
-  // second bullet routes to us instead of pretending otherwise, and it is
-  // recorded in the phase's deferred items rather than left in the copy.
+  // ⭐ 162-06 / D-162-3 — THE LAST BULLET OF THAT MEASUREMENT NO LONGER HOLDS,
+  // AND THE COPY MOVED IN THE COMMIT THAT BROKE IT. "Finish setup →" now carries
+  // the clicked row's key id into the wizard, which opens on the saved-key
+  // summary and REUSES the stored `api_keys` row through `create-with-key`'s
+  // reuse arm — it no longer re-POSTs credentials, so it no longer lands here.
+  // The sentence that stood in `fix[1]` ("To reuse this exact account, email
+  // security@quantalyze.com … releasing the stored key is not something you can
+  // do from this page") told exactly the users this phase is about that a remedy
+  // they now HAVE does not exist.
+  //
+  // ⚠️ AND IT IS NAMED CONDITIONALLY, BECAUSE THE PAGE IS ROLE-SCOPED. Same
+  // measurement discipline as the divergence above: `/my-strategies` guards on
+  // `requireRolePage(…, "allocator")`, so a `role: "manager"` profile standing in
+  // the manager wizard is redirected off it. Asserting it flatly would re-open
+  // the D-17 class for that population. The row is also not guaranteed to be
+  // there: `getStrategylessActiveKeys` filters on `is_active` and
+  // `sync_status !== "revoked"` while the venue fence that emits this code
+  // filters only on `disconnected_at`, so a revoked-but-not-disconnected key is
+  // refused here and listed nowhere. Both gaps land in the same bullet.
+  //
+  // ⚠️ THE RELEASE GAP IS STILL REAL AND IS STILL NOT CLOSED: nothing we ship
+  // lets an owner of ANY role release their own stored key. 162-06 closed REUSE,
+  // not release, and the last bullet keeps routing to us for it.
   KEY_ORPHANED: {
     title: "This key is already stored, but nothing uses it.",
     cause:
       "These credentials were saved in an earlier session whose draft was deleted, leaving the key attached to nothing. A new strategy cannot be created over the leftover key, and it does not clear on its own.",
     fix: [
       "Connect this strategy with a different account — one whose key is not already stored here.",
-      "To reuse this exact account, email security@quantalyze.com with the correlation id below: releasing the stored key is not something you can do from this page.",
+      "If your account includes the My Strategies page, look for this account there under “No strategy yet”: “Finish setup” on that row builds the strategy from the key already stored, with no credentials to enter again.",
+      "If that page is not part of your account, or it does not list this key, email security@quantalyze.com with the correlation id below: releasing the stored key is not something you can do from this page.",
     ],
     docsHref: "/security",
     // ⛔ `try_another_key` AND NOT `clear_and_retry`. Both are members of

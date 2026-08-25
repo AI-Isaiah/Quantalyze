@@ -7,7 +7,10 @@ import { Modal } from "@/components/ui/Modal";
 import { Button } from "@/components/ui/Button";
 import { RequestCallModal } from "@/app/(marketing)/for-quants/RequestCallModal";
 import { WizardChrome, WIZARD_STEPS_CSV } from "./WizardChrome";
-import { type ConnectKeySuccess } from "./steps/ConnectKeyStep";
+import {
+  type ConnectKeySuccess,
+  type PreselectedKey,
+} from "./steps/ConnectKeyStep";
 import { MultiKeyConnectStep } from "./steps/MultiKeyConnectStep";
 import { SyncPreviewStep, type SyncPreviewSnapshot } from "./steps/SyncPreviewStep";
 import {
@@ -102,6 +105,26 @@ interface WizardClientProps {
    * finalize). Manager mode ignores this (it navigates to `/strategies`).
    */
   onClose?: () => void;
+  /**
+   * 162-06 / HONEST-06 / D-162-3 — the stored key this wizard was opened ON,
+   * from the /my-strategies placeholder row the owner clicked.
+   *
+   * Two seams here, and the connect step owns the rest: the step initializer
+   * below starts on `connect_key` so the saved-key summary is what the owner
+   * SEES (the whole requirement is that the choice is visible and changeable),
+   * and `apiKeyId` is seeded from it.
+   *
+   * Absent for the manager route and every other overlay mount.
+   */
+  preselectKey?: PreselectedKey | null;
+  /**
+   * 162-06 — "Use a different key". Threaded straight through to the connect
+   * step; the OVERLAY owns the decision because dropping the preselect must
+   * remount this component (its `useState` initializers read the preselect
+   * once, so flipping a flag in place would leave them holding the rejected
+   * key).
+   */
+  onUseDifferentKey?: () => void;
 }
 
 const STEP_INDEX: Record<WizardStepKey, 1 | 2 | 3 | 4 | 5> = {
@@ -162,6 +185,8 @@ export function WizardClient({
   sourceOverride,
   onSuccess,
   onClose,
+  preselectKey = null,
+  onUseDifferentKey,
 }: WizardClientProps) {
   const router = useRouter();
   // Phase 110: the useSearchParams hook keeps running unconditionally (hooks
@@ -229,6 +254,15 @@ export function WizardClient({
     draftKind === "csv" ? "csv_upload" : "sync_preview";
 
   const [step, setStep] = useState<WizardStepKey>(() => {
+    // ⭐ 162-06 — A PRESELECT IS CONSULTED BEFORE THE DRAFT, and the ordering is
+    // the requirement rather than a preference. The owner clicked a specific
+    // stored key; landing them on `sync_preview` (which is where a draft
+    // resumes) would skip the one screen that says WHICH key this is about and
+    // offers to change it. The overlay has already refused to hand us a draft
+    // belonging to a different key, so when both are present they name the same
+    // key — and "Continue with this key" resolves onto that same draft through
+    // the server's own idempotent reuse arm.
+    if (preselectKey) return "connect_key";
     // ⭐ THE DRAFT IS CONSULTED FIRST. Before Phase 154 the `source === "csv"`
     // short-circuit sat above this and returned "csv_upload" without ever
     // looking at `initialDraft` — so a CSV draft could never resume (the
@@ -243,8 +277,13 @@ export function WizardClient({
   const [strategyId, setStrategyId] = useState<string | null>(
     initialDraft?.id ?? null,
   );
+  // 162-06 — the draft's own key wins when there is one (it is the persisted
+  // fact); otherwise the preselected key seeds this, so a step that reads
+  // `apiKeyId` is not looking at a null for a key the owner has already named.
+  // The two cannot disagree: the overlay only offers a draft whose
+  // `api_key_id` IS the preselected key.
   const [apiKeyId, setApiKeyId] = useState<string | null>(
-    initialDraft?.api_key_id ?? null,
+    initialDraft?.api_key_id ?? preselectKey?.id ?? null,
   );
 
   const [showResumeBanner, setShowResumeBanner] = useState<boolean>(false);
@@ -1218,6 +1257,10 @@ export function WizardClient({
                 draftStrategyId={strategyId}
                 // Phase 94.1 / F2 — dirty signal gates forward stepper jumps.
                 onDirtyChange={setConnectKeyDirty}
+                // 162-06 — pass-through to State A's ConnectKeyStep, which owns
+                // the saved-key summary.
+                preselectKey={preselectKey}
+                onUseDifferentKey={onUseDifferentKey}
               />
             )}
 
