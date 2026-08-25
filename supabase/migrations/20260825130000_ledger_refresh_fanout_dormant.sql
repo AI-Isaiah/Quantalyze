@@ -323,11 +323,21 @@ BEGIN
           -- optimistic in-flight lookup and over the partial unique index: this
           -- one also covers a strategy busy with a DIFFERENT kind, which the
           -- per-(strategy,kind) index does not.
+          --
+          -- ⚠️ 'failed_retry' is INCLUDED deliberately, and this set is therefore
+          -- WIDER than the three-status set the RPC's dedupe (20260716090000:259-261)
+          -- and the compute_jobs_one_inflight_per_kind_strategy index both use.
+          -- `CLAIMABLE_STATUSES = ("pending", "failed_retry")` (job_worker.py:200)
+          -- — a failed_retry row is scheduled to be claimed again, so it is
+          -- in-flight in every sense that matters here. Neither the RPC nor the
+          -- index would stop a second derive landing beside it, and two
+          -- concurrent derives for one strategy is exactly what the venue that
+          -- serialises on a single shared terminal registry cannot absorb.
           AND NOT EXISTS (
                 SELECT 1
                   FROM public.compute_jobs cj2
                  WHERE cj2.strategy_id = lrs.strategy_id
-                   AND cj2.status IN ('pending', 'running', 'done_pending_children')
+                   AND cj2.status IN ('pending', 'running', 'done_pending_children', 'failed_retry')
               )
       )
       -- ---- the two integers (D-09, CORRECTED). Derivation, in order: ------
