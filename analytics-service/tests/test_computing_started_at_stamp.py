@@ -611,7 +611,24 @@ def test_python_writer_census_counts() -> None:
     of this census rather than sliding in under a green gate.
 
     Census (re-measured 2026-08-25 against the post-161.1-CR-02 tree):
-      * 11 status-writing dicts — 7 in ``analytics_runner.py`` (1 entry + 5 exits
+      ⬆️ **+1 on 2026-08-25 (Phase 161.1 / F3).** ``analytics_runner`` went from 7
+        to 8 with ``_restore_publish_state_on_abort``. It is a genuine new EXIT
+        writer, not a carve-out: the worker's per-job budget is
+        ``asyncio.wait_for``, whose expiry cancels the handler with
+        ``CancelledError`` — a **BaseException** that none of the five guarded
+        ``except Exception`` stamps can see. Before it, a marked refresh killed by
+        the budget left ``_mark_computing``'s 'computing' standing, the SQL bridge
+        read that non-published status, refused to protect the row and wrote
+        'failed', and the live factsheet went dark on a recurring unattended job.
+        The new arm restores the pre-refresh publish state and, like every exit
+        here, clears ``computing_started_at`` to None. Its status value is bound to
+        a local (``_restored_status``) rather than written as a
+        ``_publish_snapshot[...]`` subscript SPECIFICALLY so this census can
+        classify it — measured: the subscript spelling reddened the value-form arm
+        of :func:`test_python_status_writers_stamp_and_clear`, which is that gate
+        working as designed. It resolves through the direct-literal arm, so
+        ``EXPECTED_KEPT_VIA_N1`` is unchanged.
+      * 12 status-writing dicts — 8 in ``analytics_runner.py`` (1 entry + 6 exits
         + the D-02/R2 schema-cache-miss re-issue in ``_mark_unrecoverable``) and 4
         in ``job_worker.py`` (3 terminal 'failed' + the composite success
         headline).
@@ -689,8 +706,8 @@ def test_python_writer_census_counts() -> None:
     sibling-upsert failure arm — but it is a partial data_quality_flags upsert with
     no status key, so it is not among the 12 and is not counted here.)
     """
-    EXPECTED_STATUS_DICTS = 11
-    EXPECTED_RUNNER_DICTS = 7
+    EXPECTED_STATUS_DICTS = 12
+    EXPECTED_RUNNER_DICTS = 8
     EXPECTED_WORKER_DICTS = 4
     EXPECTED_KEPT_VIA_N1 = 7
     EXPECTED_SITES_VIA_N2 = 1

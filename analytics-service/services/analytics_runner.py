@@ -19,6 +19,7 @@ directly, independent of any runner.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import math
 from collections import defaultdict
@@ -1349,6 +1350,117 @@ async def run_csv_strategy_analytics(
             refresh_source, strategy_id, _publish_snapshot["computation_status"],
         )
 
+    def _restore_publish_state_on_abort(reason: str) -> None:
+        """F3 — put the publish state back when this run dies WITHOUT reaching
+        any of the five terminal stamps.
+
+        ⛔ THE HOLE THIS CLOSES, MEASURED. The worker's per-job budget is
+        ``asyncio.wait_for(handler(job), timeout=...)`` (``services/
+        job_worker.py``). When it expires it cancels this coroutine with
+        ``CancelledError`` — a **BaseException**. Every failure arm below is an
+        ``except Exception``/``except HTTPException``, so NONE of them see it and
+        NONE of the five guarded stamps fire. The run therefore dies with
+        ``_mark_computing``'s unconditional ``computation_status='computing'``
+        still on the row.
+
+        On a MARKED refresh that is an un-publish by omission, and it is worse
+        than it looks: the SQL bridge (migration 20260825150000) then re-decides
+        the state, its protection conjunct reads the row and sees ``'computing'``
+        — not a PUBLISHED status — so the row is not protected there either and
+        branch (b) writes ``'failed'``. ``strategyGate`` reads that as
+        ``ANALYTICS_FAILED`` and the factsheet goes dark, on a recurring,
+        unattended job. The bridge header's claim that a budget timeout leaves
+        the row "untouched-healthy → protected" is false on hop 2: hop 2 always
+        touches it first.
+
+        ⛔ SYNCHRONOUS ON PURPOSE — do not "fix" this into ``await
+        db_execute(...)``. We are already inside a delivered cancellation. An
+        ``await`` here is a fresh suspension point that the very cancellation we
+        are handling can interrupt, which would drop the restore exactly on the
+        runs that need it. A blocking single-row upsert on a job that is already
+        dead is the cheaper failure.
+
+        ⛔ FAIL-SAFE DIRECTION, unchanged from the guard above: this only ever
+        RESTORES a snapshot that was read as terminal-success before
+        ``_mark_computing`` ran. No marker, no prior row, or a prior row that was
+        not terminal-success all leave ``_publish_snapshot`` None, and this is a
+        no-op — the bridge's loud ``'failed'`` stands. Never suppress toward
+        green.
+
+        This is not a third reaper. It writes only the row this job itself
+        moved to ``'computing'`` moments earlier, on this job's own way out, and
+        clears ``computing_started_at`` on exit exactly as every terminal stamp
+        in this function does — so it hands the reaper nothing to race.
+        """
+        if _publish_snapshot is None:
+            if refresh_source is not None:
+                logger.warning(
+                    "csv analytics: a MARKED ledger refresh (source=%s) for "
+                    "strategy %s was aborted by %s with no protectable publish "
+                    "snapshot; taking the LOUD path and leaving the terminal "
+                    "state to the status bridge.",
+                    refresh_source, strategy_id, reason,
+                )
+            return
+        # ⛔ Bound to NAMES, not written inline as `_publish_snapshot[...]`
+        # subscripts. `tests/test_computing_started_at_stamp.py` is a JOB-01
+        # census that walks the AST of every `strategy_analytics` write and
+        # classifies the status value; it recognises a string literal or a Name
+        # (its "variable-status exit writer" arm, which then REQUIRES
+        # computing_started_at=None — which this is). A Subscript is a value form
+        # it cannot classify, and it fails LOUD on one rather than passing it
+        # unclassified. Measured: the subscript spelling reddened that census.
+        # Keep these locals.
+        _restored_status = _publish_snapshot["computation_status"]
+        _restored_warned = _publish_snapshot["computation_warned"]
+        try:
+            supabase.table("strategy_analytics").upsert(
+                {
+                    "strategy_id": strategy_id,
+                    # RESTORE, never omit: _mark_computing already wrote
+                    # 'computing', so an omitted status is the parked-factsheet
+                    # bug rather than a fix for it.
+                    "computation_status": _restored_status,
+                    "computation_warned": _restored_warned,
+                    # JOB-01: clear on exit so a stale stamp cannot re-trigger
+                    # reap_strategy_analytics_stuck_computing.
+                    "computing_started_at": None,
+                    # The abort stays VISIBLE — in compute_jobs, in this column,
+                    # in this log line and in the staleness view. Protected is
+                    # not the same as silent.
+                    "computation_error": (
+                        f"Ledger refresh (source={refresh_source}) aborted by "
+                        f"{reason} before it could finish; the previously "
+                        "published factsheet was left in place."
+                    ),
+                    # ⛔ No data_quality_flags rebuild — same laundering class
+                    # (migration 20260707120000) the guard above avoids.
+                },
+                on_conflict="strategy_id",
+            ).execute()
+        except Exception as _restore_exc:  # noqa: BLE001
+            logger.error(
+                "csv analytics: could not restore the publish state for "
+                # ⛔ The pg_cron reaper is described, never NAMED here. JOB-07
+                # (tests/test_job07_reaper_off_worker_loop.py) forbids a reaper
+                # identifier anywhere on the worker's dispatch surface, string
+                # literals included, so that janitor work can never be moved onto
+                # the shared asyncio loop (WEDGE-01). Measured: spelling the
+                # function name in this message reddened that gate.
+                "strategy %s after %s (%s). The row may be stuck at 'computing' "
+                "until the pg_cron stuck-'computing' reaper next runs.",
+                strategy_id, reason, _restore_exc,
+            )
+        else:
+            logger.warning(
+                "csv analytics: a MARKED ledger refresh (source=%s) for strategy "
+                "%s was aborted by %s; restored the pre-refresh publish state "
+                "(%s) so the live factsheet is neither dark nor parked at "
+                "'computing' (Phase 161.1 F3).",
+                refresh_source, strategy_id, reason,
+                _publish_snapshot["computation_status"],
+            )
+
     # Mark computing.
     def _mark_computing() -> None:
         supabase.table("strategy_analytics").upsert(
@@ -1774,6 +1886,13 @@ async def run_csv_strategy_analytics(
 
         return {"status": "complete", "strategy_id": strategy_id}
 
+    except asyncio.CancelledError:
+        # F3 — FIRST, and it must stay above every other arm to be readable as
+        # what it is: the budget-timeout path. CancelledError is a BaseException,
+        # so the arms below cannot catch it and every terminal stamp is skipped.
+        # See _restore_publish_state_on_abort.
+        _restore_publish_state_on_abort("the worker's per-job budget timeout")
+        raise
     except HTTPException:
         raise
     except PaginatedSelectTruncated as trunc:
@@ -1987,3 +2106,15 @@ async def run_csv_strategy_analytics(
                 )
 
         raise HTTPException(status_code=500, detail="CSV analytics computation failed")
+    except BaseException as _abort_exc:
+        # F3, the CLASS rather than the one instance. CancelledError is the
+        # measured case and has its own arm above; this catches the rest of the
+        # BaseException family (SystemExit / KeyboardInterrupt on a worker being
+        # torn down, a nested CancelledError re-raised by a helper). Every one of
+        # them means the same thing: we are leaving without a terminal stamp,
+        # and _mark_computing's 'computing' is still on the row.
+        #
+        # Re-raised UNCHANGED and immediately — nothing is swallowed, no control
+        # flow is altered, and an unprotected row still takes the loud path.
+        _restore_publish_state_on_abort(type(_abort_exc).__name__)
+        raise
