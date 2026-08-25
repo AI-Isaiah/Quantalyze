@@ -106,7 +106,30 @@ items were dropped, not carried. Categories: **Fix now** / **Fix mid-term** / **
      this actually" as the organising question, not the individual strings.
 
 
-0.03. **⚠️ Exchange credentials are never whitespace-trimmed, so a paste with a trailing newline
+0.03. **❌ RETRACTED 2026-08-25 — THIS FINDING WAS WRONG. Credentials ARE trimmed.**
+   I filed this after grepping only `validate-and-encrypt/route.ts`, seeing `trim()` used just
+   in emptiness guards, and concluding no trimming happened. The chokepoint is ONE LAYER DOWN:
+   `src/lib/analytics-client.ts:716` defines `trimCredential`, applied to `api_key` AND
+   `api_secret` inside BOTH `validateKey` (`:794-795`) and `encryptKey` (`:819-820`) — so
+   validate and encrypt normalise identically, which is exactly the property I claimed was
+   missing. It shipped in `2464594a8` on 2026-07-18 after an identical live incident, and
+   `route.ts:79-81` names the chokepoint in a comment I had already read.
+   - Plan `162-10` was authored on this false premise and has been WITHDRAWN. It would have
+     added a SECOND trim site (violating its own acceptance criterion) and its witnessed-RED
+     test was unachievable: the route suite mocks `@/lib/analytics-client` wholesale, so an
+     assertion at that boundary never observes the real chokepoint. Caught by gsd-plan-checker,
+     which measured HEAD instead of trusting the plan's citations.
+   - ⚠️ **`passphrase` is DELIBERATELY not trimmed** (`analytics-client.ts:714-715`): an OKX
+     passphrase is user-CHOSEN, so whitespace there may be significant. Do not "fix" this
+     without a venue-aware decision — trimming it could corrupt a valid credential.
+   - ⛔ **The 2026-08-25 OKX `50113 Invalid Sign` therefore remains UNEXPLAINED.** Do not carry
+     "untrimmed credentials" forward as its cause. A different key connected successfully at
+     21:38Z so there is no live impact, and the entity thread is NOT PURSUED per founder call
+     (0.02). Remaining untested candidate, recorded not claimed: passphrase whitespace, which
+     the documented decision above deliberately permits.
+   - **Lesson worth more than the finding:** a grep of one file is not a search of the code
+     path. The comment naming the chokepoint was in a file I had already opened.
+   ORIGINAL (WRONG) FILING KEPT BELOW FOR THE TRAIL: **Exchange credentials are never whitespace-trimmed, so a paste with a trailing newline
    fails as "Authentication failed. Check your API key and secret."** Found 2026-08-25 while a
    founder with a known-good OKX key could not connect it.
    - `src/app/api/keys/validate-and-encrypt/route.ts` uses `trim()` ONLY inside emptiness guards
