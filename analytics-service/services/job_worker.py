@@ -595,8 +595,17 @@ STRATEGY_ANALYTICS_TERMINAL_SUCCESS_STATUSES: Final[frozenset[str]] = frozenset(
 # be told it is part of a refresh. A source this set does not recognise is
 # passed as None, i.e. the LOUD path. Fail-safe direction, as everywhere else in
 # D-15: an unrecognised job un-publishes loudly rather than failing silently.
+# F7 (161.1 silent-failure audit): the two markers are NAMED, one per arm, and
+# the set is built from the names. This adds no spelling — it moves the two the
+# set already carried onto handles a per-arm site can reference, so a hop that
+# is reachable from exactly ONE arm can say WHICH arm instead of reaching for
+# the union and being right only by accident. The inline guard comparisons stay
+# inline: they are the contract ends the SQL gates pin, and a constant on that
+# side would leave those gates with one literal instead of two.
+LEDGER_REFRESH_SINGLE_KEY_SOURCE: Final[str] = "ledger-refresh"
+LEDGER_REFRESH_COMPOSITE_SOURCE: Final[str] = "ledger-refresh-composite"
 LEDGER_REFRESH_JOB_SOURCES: Final[frozenset[str]] = frozenset(
-    {"ledger-refresh", "ledger-refresh-composite"}
+    {LEDGER_REFRESH_SINGLE_KEY_SOURCE, LEDGER_REFRESH_COMPOSITE_SOURCE}
 )
 
 # Fallback derive budget (seconds) used when TIMEOUT_PER_KIND lacks
@@ -2522,11 +2531,18 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
         # CR-02 (161.1-REVIEW): this stamp used to be spelled out here, with its
         # own byte-identical copy of the destructive payload and NO D-15 guard.
         # It now routes through the ONE choke point, which owns the key-mode
-        # short-circuit, the D-15 non-destructive branch and the D3-SECONDARY
-        # series heal. See the CR-02 note above `_stamp_strategy_analytics_failed`
-        # for why four independent copies of a publish-state downgrade was the
-        # defect rather than an implementation detail.
-        await _stamp_strategy_analytics_failed(stamp_detail + scrubbed)
+        # short-circuit and the D-15 non-destructive branch. See the CR-02 note
+        # above `_stamp_strategy_analytics_failed` for why four independent copies
+        # of a publish-state downgrade was the defect rather than an
+        # implementation detail.
+        #
+        # ⛔ F4: `heal_series=False` — this disposition NEVER deleted the basis
+        # series before the collapse, and a NAV-reconstruction refusal is not a
+        # reason to destroy a live factsheet's persisted series. The stamp itself
+        # is the fail-loud signal; the DELETE would be a fresh injury on top of it.
+        await _stamp_strategy_analytics_failed(
+            stamp_detail + scrubbed, heal_series=False
+        )
         return DispatchResult(
             outcome=DispatchOutcome.FAILED,
             error_message=result_detail + scrubbed,
@@ -2642,7 +2658,17 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
         # earlier draft of this paragraph quoted the pair and turned the gate
         # RED against a CORRECT file. Prose must never satisfy or trip a
         # mechanical gate.
-        async def _stamp_strategy_analytics_failed(message: str) -> None:
+        # ⛔ ONE LINE, deliberately, at the cost of the line budget. The
+        # anti-vacuity region extractors in tests/test_ledger_refresh_gates.py and
+        # tests/test_ledger_refresh_publish_guard.py bound this closure by
+        # INDENTATION: they open at this `async def` and close at the next line
+        # indented no deeper. A wrapped signature closes the region on its own
+        # `) -> None:` line, collapsing it to ~100 characters — at which point
+        # every ABSENCE assertion scoped to the region passes vacuously. Measured:
+        # the wrapped form turned four gates RED against a correct file, which is
+        # the good failure mode; a laxer extractor would have turned them
+        # vacuously GREEN, which is the one this repo keeps getting bitten by.
+        async def _stamp_strategy_analytics_failed(message: str, *, heal_series: bool = True) -> None:
             if is_key_mode:
                 return
             scrubbed = str(scrub_freeform_string(message))
@@ -2774,7 +2800,28 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
             # D3 SECONDARY: single choke point — every terminal-failure stamp that flows
             # through this helper (parse-malformed + the deribit arm's ledger/scope/
             # valuation failures) heals both series rows.
-            await _heal_delete_basis_series()
+            #
+            # ⛔ F4 (161.1 silent-failure audit): the heal is OPT-OUT, and the two
+            # opt-outs are not tidiness. The CR-02 collapse routed FOUR stamp sites
+            # through this closure, but only TWO of them ever healed:
+            # `_mark_insufficient` (the <2-day arm) and the deribit arm's own
+            # failures, which already called this helper. `_dispose_broker_nav_error`
+            # and `_stamp_verdict_failed` spelled the payload themselves and did NOT
+            # delete the series — so routing them here HANDED THEM A DESTRUCTIVE
+            # DELETE THEY NEVER HAD. That matters because the runbook's repair marker
+            # `ledger-refresh-repair` is deliberately UNPROTECTED (a repair must be
+            # able to fail loudly), and the runbook promises "a failed repair … is not
+            # a fresh injury". With an unconditional heal that promise was false: a
+            # failed repair on an MT5 strategy hitting the MT5-12 verdict refusal
+            # destroyed BOTH basis-series rows, and MT5 is 4 of the 5 live
+            # ledger-backed strategies.
+            #
+            # The default stays True so the collapse's guarantee is unchanged for
+            # every site that DID heal — an opt-in default would have silently
+            # dropped the heal from the deribit arm, which is CR-02 with the sign
+            # flipped.
+            if heal_series:
+                await _heal_delete_basis_series()
 
         # Per-strategy returns-denominator override (Zavara-only allocated capital).
         # ABSENT on every normal strategy (and in key-mode) → None → the unchanged NAV
@@ -4723,15 +4770,54 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
         # with years of history, one refresh tick against a logged-out gateway
         # destroyed the series — the half the D-15 comment calls "easy to miss".
         #
-        # Routed through the ONE choke point instead. That is EXACTLY equivalent
-        # on the unguarded path: `_stamp_strategy_analytics_failed` writes the
-        # same seven keys and then calls the same `_heal_delete_basis_series()`
-        # this line used to call itself. The message is a constant, so the
-        # helper's scrub is a no-op on it.
+        # Routed through the ONE choke point instead. `_mark_insufficient` is the
+        # ONE of the four collapsed sites for which that is exactly equivalent on
+        # the unguarded path: `_stamp_strategy_analytics_failed` writes the same
+        # seven keys and then calls the same `_heal_delete_basis_series()` this
+        # line used to call itself. (F4 corrects the earlier wording here, which
+        # claimed the equivalence for the collapse as a whole — measured, it does
+        # NOT hold for `_dispose_broker_nav_error` or `_stamp_verdict_failed`,
+        # neither of which ever healed. Those two now pass `heal_series=False`.)
+        # The message is a constant, so the helper's scrub is a no-op on it.
         await _stamp_strategy_analytics_failed(
             "Insufficient broker history. At least 2 days of activity required."
         )
-        return DispatchResult(outcome=DispatchOutcome.DONE)
+        # ⛔ F1 (161.1 silent-failure audit): FAILED, not DONE. This return is the
+        # tail of the chain that develops the origin defect's exact shape, and the
+        # stamp above is only half a fix without it.
+        #
+        # `main_worker` maps DONE → `mark_compute_job_done`, whose in-RPC
+        # `sync_strategy_analytics_status` then finds every job row terminal-done
+        # and takes branch (c): `computation_error = NULL`, `computed_at = now()`.
+        # So the arm that just recorded a failure had that failure ERASED one RPC
+        # later — on BOTH paths:
+        #   * MARKED refresh — the D-15 guard preserves the publish state and
+        #     writes `computation_error`; branch (c) NULLs it and stamps a fresh
+        #     `computed_at`. Every channel D-15 promises is gone except a log line,
+        #     and `computed_at` is not inert: it feeds the factsheet's FreshnessChip
+        #     and the portfolio PDF's "Data as of" vintage, so a month-stale funded
+        #     account renders GREEN and prints TODAY as its data date. That is the
+        #     class the FINDING-5 comment on the vintage line already names: never
+        #     fall back to "now" for a missing computed_at.
+        #   * UNMARKED first compute — the authoritative 'failed' stamp is
+        #     overwritten to 'complete' with a NULL error, so the wizard poller is
+        #     handed a success for a strategy that has no factsheet.
+        # FAILED routes to `mark_compute_job_failed` instead, and the bridge takes
+        # branch (b) (loud) or (b-prime) (protected, error preserved, computed_at
+        # untouched) — which is what both stamps above already assume.
+        #
+        # PERMANENT: a brand-new/idle account with <2 interpretable days does not
+        # grow history by being retried in a backoff loop (T-74-02 DoS). The next
+        # sync enqueues a fresh derive whose `done` SUPERSEDES this failed_final
+        # per-kind, so the strategy un-poisons the moment real history arrives.
+        return DispatchResult(
+            outcome=DispatchOutcome.FAILED,
+            error_message=(
+                "derive_broker_dailies: <2 interpretable daily-return days for "
+                f"strategy {strategy_id} — insufficient broker history."
+            ),
+            error_kind="permanent",
+        )
 
     # ── MT5-12: the series-completeness VERDICT seam (D-15 / D-16) ──────────────
     # THE fail-loud chokepoint for producer 1 (`run_derive_broker_dailies_job`).
@@ -4792,7 +4878,13 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
         # and MT5 is 4 of the 5 live ledger-backed strategies, so it is the
         # highest-frequency route by which a recurring refresh could have
         # downgraded a funded account.
-        await _stamp_strategy_analytics_failed(_detail)
+        #
+        # ⛔ F4: `heal_series=False`. This is THE path the runbook's repair marker
+        # rides — `ledger-refresh-repair` is deliberately unprotected, and MT5-12
+        # is the refusal an MT5 repair most often trips. Before the CR-02 collapse
+        # `_stamp_verdict_failed` did not delete the series; restoring that is what
+        # keeps the runbook's "a failed repair is not a fresh injury" true.
+        await _stamp_strategy_analytics_failed(_detail, heal_series=False)
         # PERMANENT: a combiner that does not stamp will not start stamping on
         # retry (T-74-02 DoS — never retry a structural defect forever).
         return DispatchResult(
@@ -5379,6 +5471,19 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
     # D-15 decision. `chained_from` is provenance for operators reading
     # compute_jobs; nothing keys on it.
     #
+    # ⛔ F7: RECOGNISED here means the SINGLE-KEY marker, not the union. This
+    # handler's own D-15 guard protects exactly one marker (spelled inline in
+    # `_stamp_strategy_analytics_failed`), and the composite arm's guard is
+    # deliberately a DIFFERENT string so the two cannot cross-fire. Forwarding
+    # the union while guarding one was safe only by accident of the fan-outs:
+    # migration 20260825130000 enqueues `derive_broker_dailies` under the
+    # single-key marker and 20260825140000 enqueues `stitch_composite` under the
+    # composite one, so today no composite-marked job reaches this line. If one
+    # ever did, the union form would hand hop 2 a protection hop 1 had already
+    # declined it — i.e. the destructive stamp would ALREADY have fired here,
+    # and hop 2 would then decline to record the follow-on failure. The two
+    # sites now answer the same question with the same marker.
+    #
     # ⚠️ Cooldown accounting is UNCHANGED by this. The cooldown counts
     # `kind IN (derive_broker_dailies, compute_analytics_from_csv)` by
     # `created_at`, ignoring status and metadata, and the fan-out's `v_existing`
@@ -5396,7 +5501,7 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
             "p_strategy_id": strategy_id,
             "p_kind": _csv_analytics_kind,
         }
-        if _refresh_source_out in LEDGER_REFRESH_JOB_SOURCES:
+        if _refresh_source_out == LEDGER_REFRESH_SINGLE_KEY_SOURCE:
             _payload["p_metadata"] = {
                 "source": _refresh_source_out,
                 "chained_from": "derive_broker_dailies",

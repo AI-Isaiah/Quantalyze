@@ -366,7 +366,16 @@ class TestStrategyModeNonRegression:
         with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6]:
             result = await run_derive_broker_dailies_job(job)
 
-        assert result.outcome == DispatchOutcome.DONE
+        # F1 (161.1 silent-failure audit): FAILED, not DONE. This arm stamps a
+        # terminal failure, and DONE routed the job to mark_compute_job_done →
+        # sync_strategy_analytics_status branch (c), which NULLs
+        # computation_error and stamps computed_at = now() — overwriting the very
+        # stamp asserted below with a fresh-looking 'complete'. The stamp and the
+        # outcome have to agree or only one of them survives the next RPC. See
+        # tests/test_derive_silent_failure_f1_f4_f7.py for the end-to-end drive
+        # through dispatch_tick.
+        assert result.outcome == DispatchOutcome.FAILED
+        assert result.error_kind == "permanent"
         sa_upserts = [u for u in capture["upserts"] if u[0] == "strategy_analytics"]
         assert len(sa_upserts) == 1, (
             f"strategy-mode <2-day must stamp strategy_analytics; got {capture['upserts']!r}"

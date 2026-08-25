@@ -1196,8 +1196,11 @@ async def test_terminal_failure_clears_stale_by_basis() -> None:
         ctx, key_mode=False, ledger_mock=ledger_mock, combine_mock=combine,
     ) + [_patch_benchmark()]):
         result = await run_derive_broker_dailies_job({"strategy_id": _STRATEGY_ID})
-    # Insufficient-history is a terminal DONE-with-failed-status short circuit.
-    assert result.outcome == DispatchOutcome.DONE
+    # F1 (161.1): insufficient-history is a terminal FAILED short circuit. It
+    # used to be DONE-with-failed-status, which is a contradiction the status
+    # bridge resolved in favour of DONE — rewriting the stamp asserted below to
+    # 'complete' with a NULL error and a fresh computed_at.
+    assert result.outcome == DispatchOutcome.FAILED
     failed = _find_failed_stamp(capture)
     assert failed is not None, "expected a computation_status='failed' stamp"
     assert "metrics_json_by_basis" in failed, (
