@@ -156,6 +156,12 @@ DECLARE
   tok        UUID;
   v_status   TEXT;
   v_error    TEXT;
+  -- Phase 162 / HONEST-01: the OPERATOR-side read. The arms below no longer
+  -- assert that the raw diagnostic reached strategy_analytics.computation_error
+  -- (that WAS the defect); they assert it is absent from there and present
+  -- here. Both halves matter — curating the user surface must not become
+  -- curating every surface, which would blind the engineer instead.
+  v_raw      TEXT;
   v_computed TIMESTAMPTZ;
   v_before   TIMESTAMPTZ;
   v_anchor   TIMESTAMPTZ;
@@ -191,7 +197,21 @@ BEGIN
        obj_description('sync_strategy_analytics_status(uuid)'::regprocedure, 'pg_proc'),
        ''
      ) !~ '20260825150000' THEN
-    RAISE EXCEPTION 'TEST FAILED (0): public.sync_strategy_analytics_status(uuid) does not carry the migration 20260825150000 comment on this database, so NONE of arms A-K ran. This is a FAILURE, not a skip. TWO causes fit and this assertion cannot distinguish them, so check both: (i) the TEST project has not received migration 20260825150000_sync_status_protect_marked_refresh.sql — apply it and re-run; expect this exactly once, on the PR that introduces or re-applies it, because NO workflow applies migrations to TEST; (ii) the function was REDEFINED by a later migration that dropped this comment, which silently reverts the CR-01 protection and un-publishes a funded account on its next failed maintenance refresh. ⛔ Do NOT "fix" this by restoring the old RAISE NOTICE/RETURN skip, and do NOT reword it to any phrasing CI''s SKIP grep cannot see: that is what made this file assert nothing while reading green.';
+    RAISE EXCEPTION 'TEST FAILED (0a): public.sync_strategy_analytics_status(uuid) does not carry the migration 20260825150000 comment on this database, so NONE of arms A-K ran. This is a FAILURE, not a skip. TWO causes fit and this assertion cannot distinguish them, so check both: (i) the TEST project has not received migration 20260825150000_sync_status_protect_marked_refresh.sql — apply it and re-run; expect this exactly once, on the PR that introduces or re-applies it, because NO workflow applies migrations to TEST; (ii) the function was REDEFINED by a later migration that dropped this comment, which silently reverts the CR-01 protection and un-publishes a funded account on its next failed maintenance refresh. ⛔ Do NOT "fix" this by restoring the old RAISE NOTICE/RETURN skip, and do NOT reword it to any phrasing CI''s SKIP grep cannot see: that is what made this file assert nothing while reading green.';
+  END IF;
+
+  -- ----- SECOND applied-ness gate: mig 20260826120000 (Phase 162 / HONEST-01)
+  -- Arms A and I assert the CURATED sentence in computation_error. On a database
+  -- that has 20260825150000 but not 20260826120000 the bridge still copies the
+  -- job's raw diagnostic there, so those arms would fail with a copy MISMATCH —
+  -- a message that reads like "the copy is wrong" when the real cause is "the
+  -- migration is missing". Same shape as the gate above, same COMMENT key, and
+  -- the same rule: absence is a FAILURE that names the cause, never a skip.
+  IF COALESCE(
+       obj_description('sync_strategy_analytics_status(uuid)'::regprocedure, 'pg_proc'),
+       ''
+     ) !~ '20260826120000' THEN
+    RAISE EXCEPTION 'TEST FAILED (0b): public.sync_strategy_analytics_status(uuid) does not carry the migration 20260826120000 comment on this database, so arms A and I would report a copy mismatch for the wrong reason. TWO causes fit: (i) the TEST project has not received 20260826120000_computation_error_curated_copy.sql — apply it and re-run; NO workflow applies migrations to TEST; (ii) the function was REDEFINED by a later migration that dropped this comment, which silently reverts HONEST-01 and puts raw Python exception strings back in front of users in the wizard failure envelope.';
   END IF;
 
   -- ----- SEED ------------------------------------------------------------
@@ -277,8 +297,29 @@ BEGIN
   IF v_status IS DISTINCT FROM 'complete_with_warnings' THEN
     RAISE EXCEPTION 'ARM A FAILED (CR-01): a MARKED ledger refresh failing PERMANENT flipped a published row to %. src/lib/strategyGate.ts maps failed -> ANALYTICS_FAILED, so that is a funded account going dark on a maintenance tick.', v_status;
   END IF;
-  IF v_error IS DISTINCT FROM 'mt5 gateway IPC timeout (-10005)' THEN
-    RAISE EXCEPTION 'ARM A FAILED: computation_error is % — a protected refresh failure must stay VISIBLE, not silent.', COALESCE(v_error, 'NULL');
+  -- ⚠️ REWRITTEN 2026-08-26 (Phase 162 / HONEST-01, mig 20260826120000). This
+  -- used to assert `v_error = 'mt5 gateway IPC timeout (-10005)'` — i.e. it
+  -- pinned the raw operator diagnostic INTO a column that renders verbatim to
+  -- the user, which is the defect that phase closes. The INTENT it was
+  -- protecting ("a protected refresh failure must stay VISIBLE, not silent") is
+  -- unchanged and is asserted below; only the shape of the visible thing moved.
+  -- Three parts, the same three the standing api_keys.sync_error invariant
+  -- holds (analytics-service/tests/test_allocator_positions.py):
+  SELECT last_error INTO v_raw FROM compute_jobs WHERE id = j;
+  --   (1) the raw text is ABSENT from the user-visible column.
+  IF v_error LIKE '%IPC timeout%' OR v_error LIKE '%-10005%' THEN
+    RAISE EXCEPTION 'ARM A FAILED (HONEST-01): raw operator text reached strategy_analytics.computation_error (%). That column renders verbatim in the wizard failure envelope and the portfolio stale warning; branches (b)/(b-prime) must derive their copy from error_kind, never from the job''s own diagnostic.', v_error;
+  END IF;
+  --   (2) what IS there is the copy constant for this failure's kind. Spelled
+  --       LITERALLY on purpose — asserting `= computation_error_copy('permanent')`
+  --       would pass against a copy function that leaks its argument, i.e. it
+  --       would be an assertion that cannot fail for the reason we care about.
+  IF v_error IS DISTINCT FROM 'Analytics could not complete for this strategy, and retrying alone will not resolve it. Contact support if you need this strategy computed.' THEN
+    RAISE EXCEPTION 'ARM A FAILED: computation_error is % — a protected refresh failure must stay VISIBLE (the curated sentence for a permanent failure), not silent and not raw.', COALESCE(v_error, 'NULL');
+  END IF;
+  --   (3) the DIAGNOSIS is not lost — it survives on the operator surface.
+  IF v_raw IS DISTINCT FROM 'mt5 gateway IPC timeout (-10005)' THEN
+    RAISE EXCEPTION 'ARM A FAILED (HONEST-01): compute_jobs.last_error is % — curating the USER surface must not curate the OPERATOR surface too. An engineer reads this column to find out what actually happened; blanking or rewriting it trades one dishonest screen for a blind one.', COALESCE(v_raw, 'NULL');
   END IF;
   IF v_anchor IS NOT NULL THEN
     RAISE EXCEPTION 'ARM A FAILED (JOB-01): computing_started_at survived a terminal transition; the stuck-computing reaper would re-fire on a stale stamp.';
@@ -487,8 +528,18 @@ BEGIN
   IF v_status IS DISTINCT FROM 'complete' THEN
     RAISE EXCEPTION 'ARM I FAILED (CR-01 idempotence): the row reads % after a third bridge call over ONE still-live protected failure. The protection is re-derived from a status branch (a) transiently overwrites, so a sibling job is all it takes to un-publish the funded account the first call protected.', v_status;
   END IF;
-  IF v_error IS DISTINCT FROM 'mt5 gateway IPC timeout (-10005)' THEN
+  -- Same rewrite as arm A (Phase 162 / HONEST-01): visibility is still the
+  -- property under test, but the visible thing is now the curated sentence and
+  -- the raw diagnostic must be on the job row instead.
+  SELECT last_error INTO v_raw FROM compute_jobs WHERE id = j;
+  IF v_error LIKE '%IPC timeout%' OR v_error LIKE '%-10005%' THEN
+    RAISE EXCEPTION 'ARM I FAILED (HONEST-01): raw operator text reached strategy_analytics.computation_error (%) across the bounce.', v_error;
+  END IF;
+  IF v_error IS DISTINCT FROM 'Analytics could not complete for this strategy, and retrying alone will not resolve it. Contact support if you need this strategy computed.' THEN
     RAISE EXCEPTION 'ARM I FAILED: computation_error is % after the bounce — the protected failure stopped being VISIBLE, which is half of what b-prime promises.', COALESCE(v_error, 'NULL');
+  END IF;
+  IF v_raw IS DISTINCT FROM 'mt5 gateway IPC timeout (-10005)' THEN
+    RAISE EXCEPTION 'ARM I FAILED (HONEST-01): compute_jobs.last_error is % after the bounce — the diagnosis must survive on the operator surface.', COALESCE(v_raw, 'NULL');
   END IF;
   IF v_computed IS DISTINCT FROM v_before THEN
     RAISE EXCEPTION 'ARM I FAILED: computed_at moved from % to % across the bounce. A FAILED refresh must never read as freshly computed, whichever branch does the writing.', v_before, v_computed;

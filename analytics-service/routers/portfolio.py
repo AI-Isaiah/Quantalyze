@@ -67,6 +67,32 @@ router = APIRouter(prefix="/api", tags=["portfolio"])
 logger = logging.getLogger("quantalyze.analytics")
 
 
+# ---------------------------------------------------------------------------
+# HONEST-01 / D-162-4 (strict) — the catch-all's user copy.
+# ---------------------------------------------------------------------------
+# `portfolio_analytics.computation_error` is a USER-VISIBLE column: the
+# portfolio dashboard's StaleWarning renders it verbatim
+# (src/app/(dashboard)/portfolios/[id]/page.tsx). Until Phase 162 the catch-all
+# wrote `f"{type(exc).__name__}: {str(exc)[:400]}"` into it, so a KeyError or a
+# numpy broadcast error was shown to the account holder as an error message.
+#
+# The raw class + message are NOT lost — `logger.exception` at the catch-all
+# already carries them with `exc_info=True`, which is the operator surface (log
+# line + Sentry). Curating the user surface must not curate that one too; the
+# standing api_keys.sync_error invariant
+# (analytics-service/tests/test_allocator_positions.py) asserts both halves.
+#
+# ⚠️ Unlike the strategy side there is NO SQL bridge here: nothing downstream
+# re-writes portfolio_analytics.computation_error from a job row, so this
+# writer IS the boundary and a constant here is sufficient. (On the strategy
+# side the equivalent boundary turned out to be the bridge — see migration
+# 20260826120000 and 162-02-DECISION.md.)
+PORTFOLIO_COMPUTE_FAILED_COPY = (
+    "Portfolio analytics could not complete due to an unexpected error. "
+    "Retry the computation."
+)
+
+
 # Audit M-0620 — canonical enums for the literal strings the DB CHECK
 # constraints enforce. The literals used to be hard-coded across the
 # router; a typo like 'completed' instead of 'complete' would only
@@ -690,6 +716,16 @@ async def _compute_portfolio_analytics(portfolio_id: str) -> dict[str, Any]:
     analytics_id = rows(insert_result)[0]["id"]
 
     def _fail(error_msg: str) -> None:
+        """Write a terminal FAILED state onto this portfolio's analytics row.
+
+        ⛔ `error_msg` is USER COPY and nothing else. It lands in
+        `portfolio_analytics.computation_error`, which the portfolio dashboard's
+        StaleWarning renders verbatim. Every call site must pass a fixed
+        sentence (or one interpolating values the user already knows, like their
+        own strategy count) — never `str(exc)`, never a type name, never a
+        scrubbed exception. Scrubbing removes secrets; it does not turn an
+        internal into something worth showing someone. HONEST-01 / D-162-4.
+        """
         # @audit-skip: compute-job failure state.
         # error_msg is bounded to ~500 chars to keep the column readable.
         supabase.table("portfolio_analytics").update(
@@ -1180,15 +1216,27 @@ async def _compute_portfolio_analytics(portfolio_id: str) -> dict[str, Any]:
             str(exc),
             exc_info=True,
         )
-        # Persist the exception class + truncated message so operators
-        # can identify the root cause from the row alone, without having
-        # to cross-reference Sentry by timestamp. Project memory KPI-17
-        # saga (PRs #95-#100) flagged this exact debug-the-DB-row need.
+        # ⚠️ HONEST-01 / D-162-4 (Phase 162). This used to persist
+        # `f"{type(exc).__name__}: {str(exc)[:400]}"`, and the comment that
+        # stood here justified it as an operator convenience — "so operators can
+        # identify the root cause from the row alone, without cross-referencing
+        # Sentry by timestamp" (the KPI-17 saga, PRs #95-#100). The convenience
+        # was real; the surface was wrong. This column is rendered verbatim to
+        # the ACCOUNT HOLDER by the portfolio dashboard's StaleWarning, so the
+        # row was doing double duty as a debug channel and as user copy, and
+        # only one of those two readers can be served by the same string.
+        #
+        # The operator half is intact and is served ABOVE, by the
+        # `logger.exception(..., exc_info=True)` call — class, message and
+        # traceback, in the log line and in Sentry. That is a better debug
+        # channel than a 400-char DB column, and it is the one an engineer
+        # already reaches for.
+        #
         # _fail() itself can raise if Supabase is down — catch and log
         # (review CR-7) so the original computation exception isn't
         # masked by a subsequent infra error.
         try:
-            _fail(f"{type(exc).__name__}: {str(exc)[:400]}")
+            _fail(PORTFOLIO_COMPUTE_FAILED_COPY)
         except Exception as fail_exc:
             logger.exception(
                 "Failed to mark portfolio %s analytics row FAILED (row may "

@@ -4,7 +4,7 @@ open_count: 15
 waived_count: 0
 fixed_count: 1
 total_count: 16
-last_updated: 2026-08-25T22:28:18.784Z
+last_updated: 2026-08-25T23:20:00.011Z
 ---
 
 # Broken Windows Ledger
@@ -32,6 +32,7 @@ last_updated: 2026-08-25T22:28:18.784Z
 | 15 | 161.1 | unrun-verify | supabase/tests/test_ledger_refresh_fanout.sql |  | Both phase SQL gates were run on a local Supabase harness, not against the real TEST project (TEST_SUPABASE_DB_URL is a CI secret, psql absent). Blocking CI sql-tests job covers this on PR. | open |  | 2026-08-25T10:34:25.695Z |  |
 | 16 | 162 | deviation | src/components/strategy/StrategyGrid.tsx | 117 | SyncBadge still ungated on computation_status (is_example guard added; consumer-less component, pre-existing STALE-01 gap) | open |  | 2026-08-25T22:26:27.302Z |  |
 | 16 | 162 | deviation | src/app/(dashboard)/allocations/components/ScenarioComposer.tsx |  | 162-04: metric pair now renders in all five C-4 states (previously hidden when both null); two existing SCEN-03 assertions updated accordingly | open |  | 2026-08-25T22:28:18.784Z |  |
+| 16 | 162 | deviation | src/app/(dashboard)/strategies/new/wizard/steps/SyncPreviewStep.composite.render.test.tsx |  | Composite failure envelope no longer names the failing member; restoring it needs a structured member field, not a free-text column (deferred-items.md D1) | open |  | 2026-08-25T23:20:00.011Z |  |
 
 ````json
 [
@@ -219,12 +220,12 @@ last_updated: 2026-08-25T22:28:18.784Z
     "id": 16,
     "kind": "deviation",
     "phase": "162",
-    "file": "src/app/(dashboard)/allocations/components/ScenarioComposer.tsx",
+    "file": "src/app/(dashboard)/strategies/new/wizard/steps/SyncPreviewStep.composite.render.test.tsx",
     "line": null,
-    "description": "162-04: metric pair now renders in all five C-4 states (previously hidden when both null); two existing SCEN-03 assertions updated accordingly",
+    "description": "Composite failure envelope no longer names the failing member; restoring it needs a structured member field, not a free-text column (deferred-items.md D1)",
     "status": "open",
     "reason": "",
-    "recorded_at": "2026-08-25T22:28:18.784Z",
+    "recorded_at": "2026-08-25T23:20:00.011Z",
     "resolved_at": null
   }
 ]

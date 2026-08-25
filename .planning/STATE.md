@@ -5,11 +5,11 @@ milestone_name: Backlog Burndown (Phases 158+)
 current_phase: 161
 current_phase_name: WIZERR — Honest error surfaces
 status: verifying
-stopped_at: Completed 162-09-PLAN.md
-last_updated: "2026-08-25T22:14:56.212Z"
+stopped_at: Completed 162-02-PLAN.md
+last_updated: "2026-08-25T23:19:36.584Z"
 last_activity: 2026-08-25
 last_activity_desc: Phase 161.1 wave 4 — composite arm landed DORMANT; composite PROD tracer still owed
-state_head: f82cc689e5b2113b94a4047386fe56322b66fb8f
+state_head: fcf8e397a216ceee2bb4ca2ac5b079da1e2283e4
 progress:
   total_phases: 10
   completed_phases: 1
@@ -640,6 +640,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 | Phase 162 P03 | 35m | 3 tasks | 5 files |
 | Phase 162 P04 | 25m | 2 tasks | 4 files |
 | Phase 162 P09 | 25m | 2 tasks | 2 files |
+| Phase 162 P02 | 2h40m | 3 tasks | 11 files |
 
 ## Accumulated Context
 
@@ -796,6 +797,9 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - [Phase 161]: 162-04: one rankability boolean gates BOTH the series and the co-served cagr/sharpe on /returns — the scalar gate is not a second status ladder
 - [Phase 161]: 162-04: composer distinguishes an unanswered metrics fetch (id absent from addedMetricsById) from a settled null pair — only the settled case renders the absence note
 - [Phase 161]: 162-09: failed scope probe renders chips as unknown (em-dash, colorless) and omits the freshness caption — one probe_error gate feeds every claim
+- [Phase 161]: 162-02: computation_error is curated at the SQL bridge from compute_jobs.error_kind, never from last_error; the operator column keeps raw text
+- [Phase 161]: 162-02: classify_exception is NOT curated (rejected option 2 — it would strip diagnosis from compute_jobs.last_error and redden the api_keys.sync_error invariant)
+- [Phase 161]: 162-02: the three compute_jobs error kinds yield TWO honest sentences plus a cautious default — transient and unknown reach failed_final only via attempt exhaustion
 
 ### Decisions (execution-time, Phase 140.2)
 
@@ -1506,6 +1510,8 @@ Load-bearing sequencing (real dependencies, do not reorder):
 **Stopped At:** Completed 162-04-PLAN.md
 **Last Date:** 2026-08-25T22:14:55.798Z
 **Stopped At:** Completed 162-09-PLAN.md
+**Last Date:** 2026-08-25T23:19:36.303Z
+**Stopped At:** Completed 162-02-PLAN.md
 **Resume File:** None
 **Next step:** Phase 161 (WIZERR — honest error surfaces) is next and NOT yet planned — run `/gsd-plan-phase 161`. Phase 161.1 (LEDGER-REFRESH) was inserted after it on 2026-08-24 for the founder-reported MT5 staleness; it is URGENT and production-facing, so it may be pulled ahead of 161 if you prefer the live data-integrity fix first.
 

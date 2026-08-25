@@ -341,7 +341,7 @@ Plans:
 Plans:
 
 - [x] 162-01-PLAN.md — Diagnostics census: HONEST-02 flat-vs-derive-gap verdict + HONEST-01 str/None root cause, read-only vs PROD (wave 1)
-- [ ] 162-02-PLAN.md — HONEST-01 curated copy at every writer (classify_exception arms, 18-site stamp choke point, portfolio _fail) + wizard Details-appendix removal, D-162-4 strict (wave 1)
+- [x] 162-02-PLAN.md — HONEST-01 curated copy at every writer (classify_exception arms, 18-site stamp choke point, portfolio _fail) + wizard Details-appendix removal, D-162-4 strict (wave 1)
 - [x] 162-03-PLAN.md — HONEST-04 gated real equity curves + C-3 coverage caption + HONEST-03 is_example SyncBadge class guard (wave 1)
 - [x] 162-04-PLAN.md — HONEST-05 widened /returns co-serves gated cagr/sharpe + addedMetricsById composer fallback, C-4 five-state contract (wave 1)
 - [x] 162-05-PLAN.md — HONEST-06 server use-existing-key path (D-162-3): decision gate + tracer RPC/route arm + state-adaptive SQL gate — service-role boundary (wave 1, checkpoint)
