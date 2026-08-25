@@ -71,6 +71,12 @@
 --                               is the propagated hop (JOB_CHAIN_FOLLOW_ON) and
 --                               MUST stay protected. Goes RED if the kind list is
 --                               narrowed to the two fan-out kinds.
+--   K  the EXECUTE ACL        — anon and authenticated must not be able to call
+--                               the bridge at all. The migration's REVOKE is
+--                               checked ONCE at apply; this re-asserts it on
+--                               every run, because a later migration, a GRANT
+--                               sweep or a restore-from-dump can undo it and
+--                               nothing else would notice.
 --
 -- pgTAP is NOT installed (CLAUDE.md). Plain PL/pgSQL DO block, RAISE EXCEPTION
 -- on failure. No psql meta-commands. Under psql -v ON_ERROR_STOP=1 a failed
@@ -89,7 +95,7 @@
 --
 -- The gate stays CONDITIONAL, which is what separates it from a blanket abort:
 -- with the migration applied it falls through and the arms decide the verdict.
--- The final 'ALL 13 ARMS EXECUTED' notice is the sentinel CI's loop reads the
+-- The final 'ALL 14 ARMS EXECUTED' notice is the sentinel CI's loop reads the
 -- arm count off — if you add or remove an arm, update N on that line too.
 --
 -- Usage:
@@ -500,7 +506,47 @@ BEGIN
     RAISE EXCEPTION 'ARM J2 FAILED: the chained ''compute_analytics_from_csv'' hop is NOT protected (row reads %). The marker is forwarded onto that hop by services/job_worker.py, and it is the hop that compiles the factsheet — dropping it from the kind scope re-opens CR-01 on the single-key arm one hop later.', v_status;
   END IF;
 
-  RAISE NOTICE 'ALL 13 ARMS EXECUTED: sync_strategy_analytics_status protects a MARKED ledger refresh (A single-key, B composite, G no branch-(c) fall-through) IDEMPOTENT across a branch-(a) bounce (I, discriminated by I2) and KIND-SCOPED (J2 keeps the chain hop) — and stays LOUD everywhere else (C unmarked, D foreign source, E unpublished row, F unprotected sibling, H/H2 supersession same-kind and cross-kind, J foreign kind).';
+  -- ===== ARM K — the EXECUTE ACL, RE-ASSERTED ON EVERY RUN =================
+  -- 161.1 re-review (rls-policy-auditor, HIGH — classified a PIN GAP, not an
+  -- open hole: the REVOKE is correct as written, it was simply the one ACL in
+  -- this phase that nothing checked twice).
+  --
+  -- Migration 20260825150000's DO block now checks this too, but ONCE, at apply.
+  -- A later migration, a GRANT sweep, a role-template change or a
+  -- restore-from-dump can undo it afterwards and nothing would notice —
+  -- 20260515130001_enqueue_compute_job_internal_acl_remediation.sql exists
+  -- precisely because a REVOKE on an enqueue path was lost that way. A
+  -- CREATE OR REPLACE also PRESERVES the existing ACL, so a re-apply carries any
+  -- drift forward silently rather than healing it.
+  --
+  -- ⛔ WHY THIS PARTICULAR REVOKE MATTERS MORE THAN MOST. Every other object in
+  -- this phase is a reader. This one is a cross-tenant SECURITY DEFINER WRITER:
+  -- it upserts strategy_analytics for whatever strategy_id it is handed, with no
+  -- ownership predicate anywhere in its body, because its only legitimate
+  -- callers are service-role RPCs that established authority before calling it.
+  -- Reachable by `authenticated`, it becomes a publish-state write primitive
+  -- over other tenants' funded accounts — park any strategy at 'computing' by
+  -- id, or drive it to 'failed' via branch (b). RLS on strategy_analytics does
+  -- not bound it; SECURITY DEFINER is exactly the thing that bypasses RLS.
+  --
+  -- ⚠️ THE EXISTENCE ASSERTION IS NOT DECORATION. It comes FIRST so that an
+  -- ABSENT function reddens by NAME rather than by a bare 42883 from
+  -- has_function_privilege three lines later — "no grants because there is
+  -- nothing to grant on" must never be spelled the same way as "the REVOKE
+  -- held". (has_function_privilege does raise 42883 rather than returning FALSE
+  -- — MEASURED on PG 16.13, not assumed — so the arm is non-vacuous either way;
+  -- this makes the failure legible instead of merely loud.)
+  IF to_regprocedure('public.sync_strategy_analytics_status(uuid)') IS NULL THEN
+    RAISE EXCEPTION 'ARM K FAILED: public.sync_strategy_analytics_status(uuid) does not exist on this database, so the two ACL assertions below would have reddened on a missing OBJECT rather than on a missing REVOKE. Fix the object first; the ACL verdict for this run is UNKNOWN, not green.';
+  END IF;
+  IF has_function_privilege('anon', 'public.sync_strategy_analytics_status(uuid)', 'EXECUTE') THEN
+    RAISE EXCEPTION 'ARM K FAILED: role anon can EXECUTE sync_strategy_analytics_status. That is a SECURITY DEFINER writer with no ownership check in its body — an unauthenticated caller could drive any tenant''s strategy_analytics publish state by strategy_id. The REVOKE in migration 20260825150000 is the only thing bounding it.';
+  END IF;
+  IF has_function_privilege('authenticated', 'public.sync_strategy_analytics_status(uuid)', 'EXECUTE') THEN
+    RAISE EXCEPTION 'ARM K FAILED: role authenticated can EXECUTE sync_strategy_analytics_status. That is a SECURITY DEFINER writer with no ownership check in its body — any signed-in user could drive ANOTHER tenant''s funded account to ''computing'' or ''failed'' by strategy_id. The REVOKE in migration 20260825150000 is the only thing bounding it.';
+  END IF;
+
+  RAISE NOTICE 'ALL 14 ARMS EXECUTED: sync_strategy_analytics_status protects a MARKED ledger refresh (A single-key, B composite, G no branch-(c) fall-through) IDEMPOTENT across a branch-(a) bounce (I, discriminated by I2) and KIND-SCOPED (J2 keeps the chain hop) — and stays LOUD everywhere else (C unmarked, D foreign source, E unpublished row, F unprotected sibling, H/H2 supersession same-kind and cross-kind, J foreign kind) — and is UNREACHABLE by anon/authenticated (K).';
 END $$;
 
 ROLLBACK;
