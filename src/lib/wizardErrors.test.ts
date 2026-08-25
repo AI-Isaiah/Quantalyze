@@ -4293,6 +4293,114 @@ describe("[161-05 / WIZERR-03] KEY_ORPHANED offers a remedy that can succeed", (
 });
 
 /**
+ * [162-05 / D-162-3] KEY_REUSE_UNAVAILABLE — WHAT IT MAY CLAIM, AND WHAT IT
+ * MAY NOT.
+ *
+ * The use-existing-key arm's refusal, emitted when no LIVE key of the caller's
+ * matches the `reuse_api_key_id` it was handed. Two properties are pinned, and
+ * neither is the wording:
+ *
+ *   · THE REMEDY IS REAL. Unlike `KEY_ORPHANED` — where the same account is
+ *     refused by the same partial UNIQUE every time — the credential form on
+ *     this very step still works, so `try_another_key` names something that can
+ *     actually succeed. The oracle is `buildEnvelope`'s DERIVATION, never the
+ *     `actions` array restated against itself ([153.6-06 / PARITY-05]).
+ *
+ *   · IT SAYS NOTHING ABOUT THE USER'S CREDENTIALS. This arm never receives
+ *     them, never sends them anywhere and never stores them — it returns before
+ *     `validateKey` and `encryptKey` are reachable at all. A sentence implying
+ *     the key or secret was rejected would send the user to regenerate a
+ *     working credential for a state that has nothing to do with it, which is
+ *     the "sends them looking for a different problem" class the phase exists to
+ *     remove.
+ */
+describe("[162-05 / D-162-3] KEY_REUSE_UNAVAILABLE offers a remedy that can succeed", () => {
+  it("derives recoverable — from try_another_key, and not from clear_and_retry", () => {
+    expect(
+      buildEnvelope("KEY_REUSE_UNAVAILABLE", "corr-reuse-1").recoverable,
+      "On ConnectKeyStep the Retry control clears the banner and returns the " +
+        "user to the credential form — which IS the remedy this entry's first " +
+        "fix line names. Losing recoverability strands them on a refusal whose " +
+        "own copy tells them to use the form behind the banner.",
+    ).toBe(true);
+
+    expect(
+      WIZARD_ERROR_COPY.KEY_REUSE_UNAVAILABLE.actions,
+      "⛔ `clear_and_retry` means 'send the same thing again'. Re-posting the " +
+        "same reuse_api_key_id is refused identically, because the key it names " +
+        "still does not exist.",
+    ).not.toContain("clear_and_retry");
+  });
+
+  it("offers neither to resume a draft nor to delete one — no draft was read or written", () => {
+    for (const forbidden of ["resume_draft", "start_fresh"] as const) {
+      expect(
+        WIZARD_ERROR_COPY.KEY_REUSE_UNAVAILABLE.actions,
+        `KEY_REUSE_UNAVAILABLE offers ${forbidden}, but both of its emitters ` +
+          "return before any draft is read or written — and `start_fresh` is " +
+          "the destructive member (140.3-10 / TRAP-4), aimed here at nothing.",
+      ).not.toContain(forbidden);
+    }
+  });
+
+  it("blames nothing about the caller's credentials — they were never received", () => {
+    // Hand-typed PHRASE CLASS, lower-cased: an honest reword stays green, a
+    // credential-blaming sentence reds. ⛔ The positive control below is what
+    // stops an emptied list passing while checking nothing.
+    const CREDENTIAL_BLAME = [
+      "your api key",
+      "your secret",
+      "your passphrase",
+      "regenerate",
+      "invalid credentials",
+      "check your key",
+    ] as const;
+
+    const phrasesIn = (haystack: string): string[] =>
+      CREDENTIAL_BLAME.filter((p) => haystack.toLowerCase().includes(p));
+
+    expect(
+      phrasesIn("Check your key and regenerate your secret on the exchange."),
+      "The credential-blame predicate matched NOTHING in a sentence built to " +
+        "trip it, so it has gone blind and the assertion below passes for the " +
+        "wrong reason. ⛔ Fix the phrase list, never delete this control.",
+    ).not.toEqual([]);
+
+    const copy = WIZARD_ERROR_COPY.KEY_REUSE_UNAVAILABLE;
+    const surface = [copy.title, copy.cause, ...copy.fix].join(" | ");
+    expect(
+      surface.length,
+      "the copy under test collapsed to nothing, so the scan below is vacuous",
+    ).toBeGreaterThan(80);
+    expect(
+      phrasesIn(surface),
+      "KEY_REUSE_UNAVAILABLE blames the caller's credentials. This arm never " +
+        "receives them: it returns before validateKey and encryptKey are " +
+        "reachable, and the refusal turns entirely on which STORED key was " +
+        "named. Sending the user to regenerate a working key is the exact " +
+        "misdirection this phase exists to remove.",
+    ).toEqual([]);
+  });
+
+  it("claims 'nothing was created' — which BOTH emitters can actually establish", () => {
+    // ⚠️ 140.3-15: a comforting negative may only be written where it is
+    // KNOWABLE. It is here, at both sites: the pre-RPC refusal has performed two
+    // reads and no write, and the `no_data_found` raise happens inside the
+    // function BEFORE its strategies INSERT, in a transaction that rolls back.
+    // Pinned as a required clause rather than a banned one, because deleting the
+    // sentence would leave the user with LESS information, not more — the shape
+    // [140.4-16 / CR-01] uses for the CSV resubmit instructions.
+    const copy = WIZARD_ERROR_COPY.KEY_REUSE_UNAVAILABLE;
+    expect(
+      copy.cause.toLowerCase(),
+      "The user has just been refused on a write path. Whether anything was " +
+        "created is the first thing they need to know, and here we can tell " +
+        "them truthfully.",
+    ).toContain("nothing was created");
+  });
+});
+
+/**
  * [161-05 / WIZERR-11] KEY_AUTH_FAILED STOPS NAMING DERIBIT AT EVERYONE ELSE.
  *
  * This code is returned by the SHARED `classifyKeyValidationError`, so every
