@@ -342,13 +342,26 @@ items were dropped, not carried. Categories: **Fix now** / **Fix mid-term** / **
      `2026-08-21 13:51`, oldest `2026-08-04 14:20` (17–20 days). Same query for okx:
      `2026-08-23 21:44` (~2h). MT5 `api_keys.last_sync_at` is FRESH (`2026-08-23 04:09`).
    - **Root cause.** `process_key_long` is the ONLY path that reaches `strategy_analytics` for a
-     ledger-backed venue, and it is enqueued in exactly one place: strategy creation
-     (`api/strategies/finalize-wizard`). There is **no recurring enqueuer for it anywhere.** The two
+     ledger-backed venue. There is **no recurring enqueuer for it anywhere.** The two
      daily strategy-keyed crons both gate on ccxt-only closed sets that exclude mt5:
      `/api/cron/reconcile-strategies` (03:30) on `RECONCILABLE_EXCHANGES = FUNDING_EXCHANGES`
      = binance/okx/bybit, and `/api/cron/sync-funding` (04:00) on the same set. The 15-min
      `cron_sync` defers anything outside `EXCHANGE_CLASSES` (binance/okx/bybit/deribit) at
      `routers/cron.py:182`. So after onboarding, an MT5 strategy is never recomputed again.
+   - ⚠️ **CORRECTED 2026-08-25 (re-measured at HEAD `57a407ea`).** Two refinements this entry
+     originally got wrong or left implicit:
+     1. **`process_key_long` is not enqueued from `api/strategies/finalize-wizard`** — that route's
+        own test asserts the opposite (`route.test.ts:1630`). At HEAD it is enqueued at two Python
+        sites: `analytics-service/routers/process_key.py:1517` and `:765`.
+     2. **The three ledger venues are ASYMMETRIC.** Only mt5 and sfox hit the `:182` deferral;
+        deribit is IN `EXCHANGE_CLASSES` (as this entry already notes) and instead falls to the
+        `stored > 0` fill-count filter at `routers/cron.py:471-472`, which is structurally wrong
+        for a settlement-ledger venue. Any fix scoped as "venues absent from `EXCHANGE_CLASSES`"
+        silently drops deribit — scope off `_LEDGER_BACKED_SOURCES` instead.
+     3. **Re-enqueuing `process_key_long` is a provable no-op**, so the naive fix ships green and
+        does nothing: `long_fetch.py:154` returns `DONE` on `published`, `:193` on the whole
+        `advanced_statuses` set, and every onboarded strategy is `published`.
+     Full detail in `.planning/phases/161.1-.../161.1-RESEARCH.md`.
    - **Why it stayed invisible.** The two pg_cron KEY-scoped jobs that DO cover mt5 —
      `poll_allocator_positions` (04:00) and `refresh_allocator_equity_daily` (05:00) — run clean
      every day and advance `last_sync_at`. Key-mode `derive_broker_dailies` explicitly does NOT

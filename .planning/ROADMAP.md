@@ -227,13 +227,42 @@ of the two because it is a live, founder-reported data-integrity defect.
 **Requirements**: LEDGER-01..LEDGER-04 (TBD at plan time)
 **Plans:** 0 plans
 
-**Root cause (measured on PROD 2026-08-24, not inferred):** `process_key_long` is the ONLY path
-reaching `strategy_analytics` for a ledger-backed venue and is enqueued in exactly one place —
-strategy creation (`api/strategies/finalize-wizard`). No recurring enqueuer exists. Both daily
-strategy crons gate on ccxt-only closed sets excluding mt5 (`reconcile-strategies` 03:30 →
-`RECONCILABLE_EXCHANGES`; `sync-funding` 04:00), and the 15-min `cron_sync` defers anything outside
-`EXCHANGE_CLASSES` (`routers/cron.py:182`). Measured: 4 MT5 strategies with `strategy_analytics`
-between 2026-08-04 and 2026-08-21, versus okx at 2h old.
+**Root cause (measured on PROD 2026-08-24; ⚠️ CORRECTED 2026-08-25 by re-measurement at HEAD
+`57a407ea` — two claims below were false as originally written):**
+
+No recurring enqueuer reaches `strategy_analytics` for a ledger-backed venue. Both daily strategy
+crons gate on ccxt-only closed sets excluding mt5 (`reconcile-strategies` 03:30 →
+`RECONCILABLE_EXCHANGES`; `sync-funding` 04:00). Measured: 4 MT5 strategies with
+`strategy_analytics` between 2026-08-04 and 2026-08-21, versus okx at 2h old.
+
+⚠️ **CORRECTION 1 — the three ledger venues are ASYMMETRIC, not uniform.** The original text said
+`cron_sync` "defers anything outside `EXCHANGE_CLASSES`", implying all three are deferred.
+`deribit` IS in `EXCHANGE_CLASSES` (`analytics-service/services/exchange.py:812`). Only **mt5** and
+**sfox** hit the `routers/cron.py:182` deferral. Deribit takes the ccxt branch and is then filtered
+by `stored > 0` (`routers/cron.py:471-472`) — a fill-count predicate that is structurally wrong for
+a settlement-ledger venue. **A fix scoped as "venues absent from `EXCHANGE_CLASSES`" silently drops
+deribit.** Scope the cohort off `_LEDGER_BACKED_SOURCES` (`long_fetch.py:63`), not off absence.
+
+⚠️ **CORRECTION 2 — `process_key_long` is the wrong recurring unit, and re-enqueuing it is a
+provable no-op.** The original text said it is "enqueued in exactly one place — strategy creation
+(`api/strategies/finalize-wizard`)". At HEAD it is enqueued at two Python sites
+(`routers/process_key.py:1517`, `:765`), not from that route. More importantly
+`long_fetch.py:154` returns `DONE` on `status == "published"` and `:193` returns `DONE` on the whole
+`advanced_statuses` set — every onboarded strategy is `published`. A recurring enqueue against the
+existing `verification_id` therefore yields a GREEN job, a new `compute_jobs` row, and
+`strategy_analytics` UNTOUCHED. The recurring unit must be the chain **tail** —
+`derive_broker_dailies` strategy-mode, which is `JOB_CHAIN_FOLLOW_ON["process_key_long"][0]` — or a
+newly minted verification row, the way the user-triggered resync does it.
+
+⛔ **A7 — LOAD-BEARING UNKNOWN.** The recurring mt5 `derive_broker_dailies` → `strategy_analytics`
+path **has never actually run end-to-end**. The plan's FIRST verification must be one manual enqueue
+for one MT5 strategy, observed to completion, BEFORE anything is scheduled. Do not schedule an
+unproven path.
+
+⛔ **No TS mirror of the venue set.** `_LEDGER_BACKED_SOURCES` is the sole authority and
+`src/lib/strategyGate.invariant.test.ts` BANS venue literals in TS — a hand-copied mirror previously
+drifted (TS at 1 venue, Python at 3) and cost a funded MT5 account its publish path. This rules out
+a Vercel-cron / TS-route implementation unless a drift gate is explicitly accepted.
 
 **Success Criteria** (what must be TRUE):
 
