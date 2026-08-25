@@ -26,6 +26,31 @@ items were dropped, not carried. Categories: **Fix now** / **Fix mid-term** / **
 
 ## 🔴 FIX NOW — live correctness, trust-boundary security, active go-live
 
+0.06. **⚠️ The key-scope panel claims scopes it just said it could not read.** Found in a LIVE prod
+   QA pass (2026-08-25) while attempting the Phase-160 persist-arm smoke, not by a reviewer — the
+   panel rendered both halves of a contradiction on screen at once.
+   - `src/components/connect/KeyPermissionBadge.tsx`: the plain-English summary correctly branches
+     on `perms.probe_error` (`:218` → *"Could not contact the exchange to verify scopes."*), but the
+     three scope chips (`:251-253`, `Read`/`Trade`/`Withdraw`) and the footer caption (`:255-260`,
+     *"Detected {time} from the exchange."*) render **unconditionally** whenever `perms` is present.
+   - Observed on screen simultaneously: *"Could not contact the exchange to verify scopes"* AND
+     *"Read ✓ Trade ✓ Withdraw ✓ · Detected just now from the exchange."* Both cannot be true.
+   - ⛔ Worst arm: the chips asserted **Trade ✓ and Withdraw ✓** directly beneath the form's own copy
+     *"Only read-only keys are accepted. Keys with trading or withdrawal permissions will be
+     rejected."* A user who believes the chips concludes their read-only key carries withdraw rights.
+     A user who believes the copy concludes the app is broken. The panel cannot be trusted either way.
+   - **Fix shape:** when `probe_error` is set there is NO fresh probe result, so the chips and the
+     "Detected … from the exchange" caption must not render as fact. Show them as unknown or omit
+     them; the summary already carries the honest message. ⚠️ Do NOT fix by suppressing only the
+     caption — the chips are the load-bearing false claim.
+   - **Regression test must be witnessed RED:** render with `probe_error: true` plus non-null
+     read/trade/withdraw and assert no scope claim is presented as detected. Neuter the guard,
+     observe the failure first-hand, restore byte-identically.
+   - **Belongs to Phase 162 (HONEST).** This is the phase's exact class — a rendered claim the data
+     underneath contradicts — and it is the same shape as HONEST-02's freshness problem, one surface
+     over. If 162's plan does not already cover it, add it there rather than point-fixing here.
+
+
 0.07. **⚠️ The composite arm tells a `sampled_gapped` series a false provenance sentence.** Found and
    deliberately left live by Phase 161 (`161-07`, D-161-07-A) — it fell outside that task's declared
    file scope, so it was booked rather than silently widened into.
