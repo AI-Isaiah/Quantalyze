@@ -26,6 +26,35 @@ items were dropped, not carried. Categories: **Fix now** / **Fix mid-term** / **
 
 ## 🔴 FIX NOW — live correctness, trust-boundary security, active go-live
 
+0.02. **⚠️ OKX is hardcoded to ccxt's default (global) entity — a key issued on any other OKX
+   entity can NEVER connect, and the UI blames the user's credentials.** Surfaced 2026-08-25 when
+   a founder key issued AFTER an OKX re-KYC failed while an older key on the same account passed.
+   - `analytics-service/services/exchange.py:817-830` — `create_exchange` sets only `apiKey`,
+     `secret`, `password`, `enableRateLimit`. No hostname, region, or entity option is offered for
+     any venue, so OKX resolves to ccxt's default endpoint.
+   - OKX operates separate entities on separate API hosts. A key minted on entity B produces a
+     signature entity A cannot verify, which OKX reports as `50113 Invalid Sign` — indistinguishable
+     at the UI from a mistyped secret.
+   - **MEASURED, same deployment, minutes apart:** the stored pre-KYC key `QA OKX Read-key` probed
+     clean at 21:37:12 (`read:true, trade:false, withdraw:false, probe_error:false`), while the
+     post-KYC key returned `50113` at 21:30:12. Our signing path is NOT broken; the endpoint is
+     simply the wrong one for that key. ⚠️ CONFIRM the entity with the founder before building
+     anything — the correlation is strong but the OKX domain has not yet been read back.
+   - **Why this is worse than a missing feature:** the user is told "Authentication failed. Check
+     your API key and secret." They then re-issue keys, re-paste secrets, and doubt their own
+     account — which is exactly what happened tonight — for a venue we simply do not support the
+     entity of. There is no path by which a correct user action resolves it.
+   - **Fix shape (needs a founder decision — do not default it):**
+     (a) support an entity/host selector for OKX and persist it beside the key, or
+     (b) detect the entity mismatch and say so explicitly in the error copy.
+     (b) alone is honest but still leaves the user unable to connect; (a) alone without (b) leaves
+     the next mis-selected key equally mute. The pair is the complete fix.
+   - **HONEST-01 class (Phase 162):** a venue verdict our own configuration caused, rendered as a
+     statement about the user's credential. Same class as 0.03 and the `Unauthorized` case, and the
+     third instance found in one evening — the error-copy work in 162 should treat "whose fault is
+     this actually" as the organising question, not the individual strings.
+
+
 0.03. **⚠️ Exchange credentials are never whitespace-trimmed, so a paste with a trailing newline
    fails as "Authentication failed. Check your API key and secret."** Found 2026-08-25 while a
    founder with a known-good OKX key could not connect it.
