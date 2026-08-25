@@ -22,23 +22,26 @@ not by construction. The anti-vacuity floor is therefore not decoration in this
 file — it is the majority of the work, and it is applied to EVERY extracted
 region independently:
 
-    region                    floor      sentinel (offset / region size)
+    region                    floor      sentinel
     ------------------------  ---------  --------------------------------
-    VIEW BODY                 1200 ch    the closing join predicate  4214/4246
-    IS_STALE EXPRESSION        300 ch    the verdict's reason alias  1083/1105
-    DECLARATION PRELUDE         80 ch    the language clause           90/172
-    FUNCTION BODY             2500 ch    the enqueue call            9098/10640
-    GUARD REGION              1500 ch    the awaited series heal     7651/7685
-    COMPOSITE PRELUDE           80 ch    the language clause           85/170
-    COMPOSITE BODY            2500 ch    the enqueue call            9960/11527
-    COMPOSITE GUARD REGION    1500 ch    the merged-flags payload    6444/7708
+    VIEW BODY                 1200 ch    the closing join predicate
+    IS_STALE EXPRESSION        300 ch    the verdict's reason alias
+    DECLARATION PRELUDE         80 ch    the language clause
+    FUNCTION BODY             2500 ch    the enqueue call
+    GUARD REGION              1500 ch    the awaited series heal
+    COMPOSITE PRELUDE           80 ch    the language clause
+    COMPOSITE BODY            2500 ch    the enqueue call
+    COMPOSITE GUARD REGION    1500 ch    the merged-flags payload
 
-⛔ EVERY ONE OF THOSE OFFSETS IS >= ITS OWN FLOOR, and that is a mechanically
-enforced rule, not a coincidence — see ``test_every_sentinel_lies_beyond_its_own_floor``
-and the block of reasoning above ``_VIEW_BODY_SENTINEL``. A sentinel drawn from
-the region's HEAD is normally the locator's own text, which every successful
-extraction contains by construction, so it cannot fail. Five of these eight
-were exactly that until it was measured and corrected.
+⛔ EVERY ONE OF THOSE SENTINELS OCCURS NO EARLIER THAN ITS OWN FLOOR, and that
+is a mechanically enforced rule rather than a habit — see
+``test_every_sentinel_lies_beyond_its_own_floor`` and the block of reasoning
+above ``_VIEW_BODY_SENTINEL``. A sentinel drawn from a region's HEAD is normally
+the locator's own text, which every successful extraction contains by
+construction, so it cannot fail. Five of these eight were exactly that until it
+was measured and corrected. The offsets themselves are deliberately NOT recorded
+here: they move whenever the guarded files are edited, and a stale number in a
+docstring is a claim nothing checks.
 
 The IS_STALE EXPRESSION is a separately-extracted region with its OWN floor and
 its OWN sentinel. It is deliberately not allowed to ride on the VIEW BODY's
@@ -839,6 +842,104 @@ class TestGate1VenueDrift:
             "migration. Python is the sole authority (ROADMAP fence); the SQL "
             "array is a mirror that exists only because the cohort query has to "
             "run in the database."
+        )
+
+    def test_deferred_venue_set_is_a_subset_of_the_ledger_set(self) -> None:
+        """WR-02's deferred-venue drift gate, AT PULL-REQUEST TIME.
+
+        The migration asserts this itself, in its STEP 3 self-verify block. That
+        half runs at APPLY time — and `supabase/migrations/**` AUTO-APPLIES to
+        PROD on merge to main, so it fires against production and blocks the
+        DEPLOY, not the pull request. This is the same relation asserted against
+        the file, where a reviewer can still act on it.
+
+        Why the relation matters: `has_mt5_member` is what
+        20260825140000's composite exclusion keys on, and it is computed as
+        `sv.exchanges && lv.deferred_venues`. If the deferred name ever stops
+        being one of the ledger venues — a rename, a re-spelling, a venue
+        dropped from the authority — the intersection is empty for every row,
+        `has_mt5_member` reads FALSE everywhere, and the exclusion silently
+        stops excluding. Nothing raises; the composite arm just starts enqueuing
+        crawls that serialise on the single shared terminal registry.
+
+        ⚠️ KNOWN LIMITATION, recorded and accepted (founder call): a SIBLING
+        SPELLING defeats this. If the deferred venue stays and a second one is
+        added to the authority, the subset relation still holds while the new
+        sibling is not deferred. Whether a venue serialises on that shared
+        registry is a decision, not something a gate can infer from the names.
+        Do not "fix" this by hard-coding the deferred venue here — that is the
+        hand-typed literal WR-02 removed.
+        """
+        code = _strip_sql_comments(view_body())
+        ledger_matches: list[str] = re.findall(
+            r"ARRAY\[([^\]]*)\]::TEXT\[\]\s+AS\s+venues", code
+        )
+        deferred_matches: list[str] = re.findall(
+            r"ARRAY\[([^\]]*)\]::TEXT\[\]\s+AS\s+deferred_venues", code
+        )
+        assert len(ledger_matches) == 1 and len(deferred_matches) == 1, (
+            "expected exactly ONE `AS venues` and ONE `AS deferred_venues` array "
+            f"declaration in the view body; found venues={len(ledger_matches)} "
+            f"deferred={len(deferred_matches)}. Both live in the SAME "
+            "`ledger_venue_set` CTE precisely so the relation below can be read "
+            "off one place (WR-02); a second declaration of either is a second "
+            "drift surface."
+        )
+        sql_venues = _sql_string_list(ledger_matches[0])
+        deferred_venues = _sql_string_list(deferred_matches[0])
+        # ⛔ ANTI-VACUITY. `set() <= anything` is TRUE, so an extraction that
+        # returned no deferred member would make the subset assertion below
+        # green over nothing — the exact defect WR-04 found in this file's own
+        # sentinels. Both sides are floored before they are compared.
+        assert sql_venues and deferred_venues, (
+            "ANTI-VACUITY FLOOR: the extracted arrays are "
+            f"venues={sorted(sql_venues)} deferred={sorted(deferred_venues)}. An "
+            "EMPTY deferred set satisfies the subset assertion below by "
+            "definition, so the extraction must be proven non-empty first or the "
+            "gate proves nothing. Fix the extraction — do not drop the check."
+        )
+        assert deferred_venues <= sql_venues, (
+            "DEFERRED-VENUE DRIFT (WR-02): the deferred venue set "
+            f"{sorted(deferred_venues)} is not contained in the ledger venue set "
+            f"{sorted(sql_venues)} in {_STALENESS_VIEW_MIGRATION_NAME}.\n"
+            "⛔ THE FAILURE IS SILENT. `has_mt5_member` is "
+            "`sv.exchanges && lv.deferred_venues`; a deferred name that is not a "
+            "real ledger venue intersects nothing, so the flag reads FALSE for "
+            "EVERY row and 20260825140000's `has_mt5_member = FALSE` conjunct "
+            "excludes nobody. The composite arm would then enqueue crawls that "
+            "serialise on one shared terminal registry.\n"
+            "ORDER OF OPERATIONS: change `_LEDGER_BACKED_SOURCES` "
+            "(analytics-service/services/ingestion/long_fetch.py) FIRST — it is "
+            "the sole authority — then both arrays here, in the same commit."
+        )
+        # The relation above guards a value the view must actually USE. If
+        # `has_mt5_member` went back to a venue literal of its own, both arrays
+        # could stay perfectly consistent while the flag ignored them.
+        flag_expressions: list[str] = re.findall(
+            r"([^\n]*)\s+AS\s+has_mt5_member", code
+        )
+        assert len(flag_expressions) == 1, (
+            "expected exactly ONE `… AS has_mt5_member` expression in the view "
+            f"body, found {len(flag_expressions)}: {flag_expressions}."
+        )
+        flag_expression = flag_expressions[0]
+        assert "deferred_venues" in flag_expression, (
+            f"`has_mt5_member` is computed as `{flag_expression.strip()}`, which "
+            "does not read `deferred_venues`. The subset assertion above would "
+            "then be guarding an array the view does not use — a green gate over "
+            "a dead value."
+        )
+        literals = sorted(
+            venue
+            for venue in _banned_venue_names()
+            if re.search(r"\b" + re.escape(venue) + r"\b", flag_expression)
+        )
+        assert not literals, (
+            f"`has_mt5_member` names {literals} directly. That hand-typed venue "
+            "name is what WR-02 removed: it compared against nothing, so a "
+            "rename of the venue token left the flag FALSE for every row and "
+            "turned the composite exclusion into a no-op. The flag must be "
+            "derived from `lv.deferred_venues`."
         )
 
 
