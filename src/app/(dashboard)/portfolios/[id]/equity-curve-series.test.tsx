@@ -1,0 +1,184 @@
+/**
+ * Phase 162 / HONEST-04 — per-strategy equity curves on the portfolio dashboard.
+ *
+ * The class this spec exists to keep closed (STALE-01, hotfixed on PROD in
+ * #712): a `failed` analytics row still holds the numbers AND the series of an
+ * earlier attempt. 159-CENSUS measured 17 of 18 published strategies carrying
+ * exactly that corpse, which is why every fixture below that must NOT render
+ * carries a FULL, best-in-class stale payload — a plausible sharpe, a plausible
+ * cagr, and a complete returns_series sitting right there. A null/empty check
+ * passes all of them. Only the status gate refuses them, so if the gate is ever
+ * removed or bypassed these tests fail loudly instead of quietly drawing a dead
+ * run's line beside live ones.
+ */
+import { describe, it, expect, vi } from "vitest";
+
+// page.tsx is an RSC module: `server-only` throws on import outside an RSC
+// render, and the supabase server client must not be constructed for real.
+vi.mock("server-only", () => ({}));
+vi.mock("@/lib/supabase/server", () => ({
+  createClient: vi.fn(async () => ({
+    auth: { getUser: vi.fn(async () => ({ data: { user: null } })) },
+  })),
+}));
+
+const PAGE = "@/app/(dashboard)/portfolios/[id]/page";
+
+/** A complete, plausible wealth curve — the thing a dead run leaves behind. */
+const STALE_SERIES = [
+  { date: "2026-01-01", value: 1 },
+  { date: "2026-01-02", value: 1.4 },
+  { date: "2026-01-03", value: 2.1 },
+];
+
+const LIVE_SERIES = [
+  { date: "2026-02-03", value: 1.06 },
+  { date: "2026-02-01", value: 1 },
+  { date: "2026-02-02", value: 1.02 },
+];
+
+function row(
+  id: string,
+  name: string,
+  analytics: Record<string, unknown> | null,
+) {
+  return {
+    strategy_id: id,
+    current_weight: 0.5,
+    allocated_amount: 1000,
+    strategies: { id, name, strategy_analytics: analytics },
+  };
+}
+
+/** Terminal-success analytics carrying the persisted wealth curve. */
+const liveAnalytics = {
+  computation_status: "complete",
+  computed_at: "2026-02-03T00:00:00Z",
+  cagr: 0.12,
+  sharpe: 1.1,
+  returns_series: LIVE_SERIES,
+  daily_returns: null,
+};
+
+/**
+ * The corpse. Terminal FAILURE — but every value a null-check would look at is
+ * present and attractive.
+ */
+const failedButRichAnalytics = {
+  computation_status: "failed",
+  computed_at: "2026-01-03T00:00:00Z",
+  cagr: 3.4,
+  sharpe: 4.2,
+  max_drawdown: -0.01,
+  returns_series: STALE_SERIES,
+  daily_returns: { "2026": { "01-02": 0.4, "01-03": 0.5 } },
+};
+
+describe("HONEST-04 — buildEquityCurveSeries", () => {
+  it("Test 1: renders a sorted wealth curve for a terminal-success constituent", async () => {
+    const { buildEquityCurveSeries } = await import(PAGE);
+    const out = buildEquityCurveSeries([row("s1", "Live", liveAnalytics)]);
+    expect(out).toHaveLength(1);
+    expect(out[0].equityCurve).toEqual([
+      { date: "2026-02-01", value: 1 },
+      { date: "2026-02-02", value: 1.02 },
+      { date: "2026-02-03", value: 1.06 },
+    ]);
+  });
+
+  it("Test 2: a FAILED constituent holding a full stale series renders NO curve", async () => {
+    const { buildEquityCurveSeries } = await import(PAGE);
+    const out = buildEquityCurveSeries([
+      row("dead", "Dead run", failedButRichAnalytics),
+    ]);
+    expect(out).toHaveLength(1);
+    // Not [] — null. The chart skips null; an empty array would still be a
+    // claim that we looked and found nothing, and the values below prove we
+    // DID find something and refused it on status alone.
+    expect(out[0].equityCurve).toBeNull();
+    // Pin the premise: the corpse really was sitting there. If a future fixture
+    // edit strips these, Test 2 would pass vacuously.
+    expect(failedButRichAnalytics.returns_series).toHaveLength(3);
+    expect(failedButRichAnalytics.sharpe).toBeGreaterThan(0);
+  });
+
+  it("Test 2b: non-terminal (computing/pending) constituents render NO curve either", async () => {
+    const { buildEquityCurveSeries } = await import(PAGE);
+    for (const status of ["computing", "pending"]) {
+      const out = buildEquityCurveSeries([
+        row(status, status, { ...failedButRichAnalytics, computation_status: status }),
+      ]);
+      expect(out[0].equityCurve).toBeNull();
+    }
+  });
+
+  it("Test 2c: complete_with_warnings is a terminal SUCCESS and still renders", async () => {
+    const { buildEquityCurveSeries } = await import(PAGE);
+    const out = buildEquityCurveSeries([
+      row("warn", "Warned", {
+        ...liveAnalytics,
+        computation_status: "complete_with_warnings",
+      }),
+    ]);
+    expect(out[0].equityCurve).toHaveLength(3);
+  });
+
+  it("Test 3: a CSV constituent (daily_returns only) renders the cumprod wealth curve", async () => {
+    const { buildEquityCurveSeries } = await import(PAGE);
+    const out = buildEquityCurveSeries([
+      row("csv", "CSV strategy", {
+        computation_status: "complete",
+        computed_at: "2026-03-03T00:00:00Z",
+        returns_series: null,
+        daily_returns: [
+          { date: "2026-03-01", value: 0.1 },
+          { date: "2026-03-02", value: 0.1 },
+        ],
+      }),
+    ]);
+    const curve = out[0].equityCurve!;
+    expect(curve).toHaveLength(2);
+    expect(curve[0]).toEqual({ date: "2026-03-01", value: 1.1 });
+    expect(curve[1].date).toBe("2026-03-02");
+    // Wealth, not returns: 1.1 * 1.1 — the fold compounds rather than summing.
+    expect(curve[1].value).toBeCloseTo(1.21, 10);
+  });
+
+  it("Test 3b: a rankable row with NO series at all renders null, not a flat line", async () => {
+    const { buildEquityCurveSeries } = await import(PAGE);
+    const out = buildEquityCurveSeries([
+      row("bare", "No series", {
+        computation_status: "complete",
+        computed_at: "2026-03-03T00:00:00Z",
+        cagr: 0.2,
+        sharpe: 1.5,
+        returns_series: null,
+        daily_returns: null,
+      }),
+    ]);
+    expect(out[0].equityCurve).toBeNull();
+  });
+
+  it("Test 4: no raw returns_series / daily_returns crosses the RSC boundary", async () => {
+    const { stripConstituentSeries } = await import(PAGE);
+    const input = [
+      row("s1", "Live", liveAnalytics),
+      row("dead", "Dead run", failedButRichAnalytics),
+      row("embedArray", "Array embed", null),
+    ];
+    // PostgREST hands a one-to-many embed back as an array — cover both shapes.
+    input[2].strategies.strategy_analytics = [
+      liveAnalytics,
+    ] as unknown as Record<string, unknown>;
+
+    const out = stripConstituentSeries(input);
+    const serialized = JSON.stringify(out);
+    expect(serialized).not.toContain("returns_series");
+    expect(serialized).not.toContain("daily_returns");
+    // The strip is a narrowing, not a wipe: scalars survive.
+    expect(serialized).toContain("sharpe");
+    // Non-destructive — the server-side source the curves were built from is
+    // untouched, so the strip cannot retroactively blank the chart.
+    expect(JSON.stringify(input)).toContain("returns_series");
+  });
+});

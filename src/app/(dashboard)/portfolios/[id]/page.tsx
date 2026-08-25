@@ -20,6 +20,10 @@ import {
 import { adaptPortfolioAnalytics } from "@/lib/portfolio-analytics-adapter";
 import { computeFreshness } from "@/lib/freshness";
 import { extractAnalytics } from "@/lib/utils";
+import { isRankableAnalyticsRow } from "@/lib/closed-sets";
+import { resolveDailyReturnSeries } from "@/lib/factsheet/resolve-series";
+import { normalizeDailyReturns } from "@/lib/portfolio-math-utils";
+import type { StrategyAnalytics } from "@/lib/types";
 import Link from "next/link";
 import type {
   PortfolioAnalytics,
@@ -208,26 +212,124 @@ function buildCompositionRows(
     .filter((row): row is NonNullable<typeof row> => row !== null);
 }
 
-function buildEquityCurveSeries(
+/**
+ * HONEST-04 — the constituent's wealth curve, or null when it has none.
+ *
+ * `strategy_analytics.returns_series` is ALREADY the cumprod wealth curve the
+ * analytics-service wrote (base 1 — what `PortfolioEquityCurve`'s
+ * RETURN_FORMATTER expects). CSV-ingested strategies leave that column null and
+ * carry only `daily_returns`, so those fold through `resolveDailyReturnSeries`
+ * plus the cumprod precedent (scenario-blend-adapter) to reach the same shape.
+ *
+ * Returns null — never an empty array, never a synthesized flat line — when
+ * neither column yields points. The chart skips null/empty curves, so the
+ * honest render of "no series" is no line at all.
+ */
+function buildWealthPoints(
+  a: StrategyAnalytics,
+): { date: string; value: number }[] | null {
+  // API rows: the wealth curve is already persisted. normalizeDailyReturns
+  // filters non-finite points and sorts by date; no derivation needed.
+  const persisted = normalizeDailyReturns(a.returns_series);
+  if (persisted.length > 0) {
+    return persisted.map((p) => ({ date: p.date, value: p.value }));
+  }
+  // CSV rows: only daily_returns. Resolve through the shared resolver, then
+  // fold to wealth (the cumprod precedent, scenario-blend-adapter.ts:136-140).
+  const daily = resolveDailyReturnSeries(a.daily_returns, a.returns_series);
+  if (daily.length === 0) return null;
+  let c = 1;
+  return daily.map((p) => {
+    c *= 1 + p.value;
+    return { date: p.date, value: c };
+  });
+}
+
+/**
+ * HONEST-04 — per-strategy equity curves, gated by the STALE-01 predicate.
+ *
+ * `isRankableAnalyticsRow` is MANDATORY on this read path. A `failed` analytics
+ * row still holds the values (and the series) of an earlier attempt — 159-CENSUS
+ * measured 17 of 18 published strategies carrying exactly that corpse — so a
+ * null/empty check would happily draw a dead run's line beside live ones. These
+ * rows do NOT pass through `shapeRowAnalytics`; the gate has to be applied here.
+ */
+export function buildEquityCurveSeries(
   strategies: PortfolioStrategyRow[],
 ): { id: string; name: string; equityCurve: { date: string; value: number }[] | null }[] {
-  // Per-strategy equity curves come from `strategy_analytics.returns_series`
-  // (cumulative-product transform). The wired chart receives an empty curve
-  // when the underlying data is missing — this matches the existing behavior
-  // before the wiring PR.
   return strategies
     .map((ps) => {
       if (!ps.strategies) return null;
+      const a = extractAnalytics(ps.strategies.strategy_analytics);
       return {
         id: ps.strategies.id,
         name: ps.strategies.name,
-        // Returns_series is not selected in the existing query (would balloon
-        // the response). The chart still renders the portfolio composite line
-        // by itself; per-strategy lines remain a future enhancement.
-        equityCurve: null as { date: string; value: number }[] | null,
+        equityCurve:
+          a && isRankableAnalyticsRow(a) ? buildWealthPoints(a) : null,
       };
     })
     .filter((s): s is NonNullable<typeof s> => s !== null);
+}
+
+/**
+ * HONEST-04 / DEF-147-A — the raw series is needed SERVER-SIDE (the curves are
+ * built from it above) but must not be serialized into the RSC flight payload:
+ * `StrategyBreakdownTable` is a client component, so every embedded analytics
+ * field it receives ships to the browser. Only the computed `{date,value}`
+ * points cross the boundary. Extends the `_rs`/`_dr` destructure idiom in
+ * queries.ts:2265-2278.
+ */
+export function stripConstituentSeries<T extends PortfolioStrategyRow>(
+  strategies: T[],
+): T[] {
+  return strategies.map((ps) => {
+    const s = ps.strategies;
+    if (!s || !s.strategy_analytics) return ps;
+    const raw = s.strategy_analytics;
+    const strip = (obj: unknown) => {
+      if (!obj || typeof obj !== "object") return obj;
+      const {
+        returns_series: _rs,
+        daily_returns: _dr,
+        ...analyticsRest
+      } = obj as Record<string, unknown>;
+      return analyticsRest;
+    };
+    return {
+      ...ps,
+      strategies: {
+        ...s,
+        strategy_analytics: Array.isArray(raw) ? raw.map(strip) : strip(raw),
+      },
+    };
+  });
+}
+
+/**
+ * HONEST-04 / UI-SPEC C-3 — the chart discloses its own coverage.
+ *
+ * Counted off the SAME array the curve builder produced (one source of truth —
+ * a second, independently derived count is how the number and the picture drift
+ * apart). Colorless by contract: absence is a neutral fact, not an error and not
+ * a warning (DESIGN.md semantic-color gates). Renders nothing when every
+ * constituent has a curve; still renders when NONE does.
+ */
+export function EquityCurveCoverage({
+  series,
+}: {
+  series: { equityCurve: { date: string; value: number }[] | null }[];
+}) {
+  const total = series.length;
+  const shown = series.filter(
+    (s) => s.equityCurve !== null && s.equityCurve.length > 0,
+  ).length;
+  if (shown === total) return null;
+  const omitted = total - shown;
+  return (
+    <p className="mt-3 text-caption text-text-muted">
+      {`Equity curves shown for ${shown} of ${total} strategies — ${omitted} without computed analytics are omitted.`}
+    </p>
+  );
 }
 
 function DashboardContent({
@@ -258,6 +360,8 @@ function DashboardContent({
 
   const compositionRows = buildCompositionRows(strategies, attribution);
   const equitySeries = buildEquityCurveSeries(strategies);
+  // Curves are built above from the raw series; nothing below forwards it.
+  const clientStrategies = stripConstituentSeries(strategies);
   const strategyNames: Record<string, string> = {};
   for (const ps of strategies) {
     if (ps.strategies) strategyNames[ps.strategy_id] = ps.strategies.name;
@@ -300,6 +404,7 @@ function DashboardContent({
             portfolioEquityCurve={equityCurve}
             strategies={equitySeries}
           />
+          <EquityCurveCoverage series={equitySeries} />
         </Card>
         <Card>
           <h3 className="text-base font-semibold text-text-primary mb-3">
@@ -327,7 +432,7 @@ function DashboardContent({
       <div>
         <h2 className="text-base font-semibold text-text-primary mb-3">Strategy Breakdown</h2>
         <StrategyBreakdownTable
-          strategies={strategies as Parameters<typeof StrategyBreakdownTable>[0]["strategies"]}
+          strategies={clientStrategies as Parameters<typeof StrategyBreakdownTable>[0]["strategies"]}
           attribution={attribution}
           portfolioId={portfolioId}
         />
