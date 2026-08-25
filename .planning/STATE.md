@@ -5,16 +5,16 @@ milestone_name: Backlog Burndown (Phases 158+)
 current_phase: 161
 current_phase_name: WIZERR — Honest error surfaces
 status: verifying
-stopped_at: Completed 161.1-02-PLAN.md
-last_updated: "2026-08-25T10:34:09.164Z"
+stopped_at: Completed 161.1-03-PLAN.md
+last_updated: "2026-08-25T10:57:00.020Z"
 last_activity: 2026-08-24
 last_activity_desc: Phase 161 execution — waves 1-3 landed
-state_head: e18c79e4665e1e64584562711389d637602cae96
+state_head: 00da96750e9bb4d25c7f46cbcec3761f88c7e673
 progress:
   total_phases: 9
   completed_phases: 1
   total_plans: 35
-  completed_plans: 30
+  completed_plans: 31
   percent: 11
 ---
 
@@ -634,6 +634,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 | Phase 161 P10 | 2h40m | 3 tasks | 15 files |
 | Phase 161 P09 | 1h20m | 3 tasks | 6 files |
 | Phase 161.1 P02 | 96min | 3 tasks | 5 files |
+| Phase 161.1 P03 | 71min | 2 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -778,6 +779,9 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - [Phase 161]: 161-09: KNOWN_VALIDATE_AND_ENCRYPT_CODES enforces typed+has-copy only — measured, none of the route's 3 consumers reads its code field. Named debt, not a claimed contract.
 - [Phase 161]: 161.1-02: the refresh fan-out ships DORMANT behind app.ledger_refresh_enabled (exact-equality, fail-closed); the binding bound is the 20h attempt cooldown, LIMIT 4 is a burst cap only
 - [Phase 161]: 161.1-02 D-15: a refresh-marked failure on an already terminal-success strategy_analytics row records computation_error only — no status flip, no basis-series heal-delete; every unrecognised job falls through to the loud destructive stamp
+- [Phase 161]: 161.1-03: the plan's blast-radius claim (a flag-off tick downgrades the MT5 cohort) is FALSE at HEAD — the MT5 kill-switch returns before any stamp and a -10005 wedge classifies transient; runbook states the measured model instead
+- [Phase 161]: 161.1-03: the remediation detect query keys on damage + the BEFORE census diff, NOT the fan-out marker — the marked path is the D-15-guarded one, so a marker-only filter returns zero rows on the very incident it investigates
+- [Phase 161]: 161.1-03: both gates this plan mandated were VACUOUS — ';'-separated greps under bash -c always print OK (measured), and both task-2 tokens ('stored' 14x, '471-472' 1x) already existed pre-edit. Gate tokens must be counted against the PRE-EDIT artifact
 
 ### Decisions (execution-time, Phase 140.2)
 
@@ -1480,8 +1484,8 @@ Load-bearing sequencing (real dependencies, do not reorder):
 
 ## Session
 
-**Last Date:** 2026-08-25T10:34:08.870Z
-**Stopped At:** Completed 161.1-02-PLAN.md
+**Last Date:** 2026-08-25T10:56:59.670Z
+**Stopped At:** Completed 161.1-03-PLAN.md
 **Resume File:** None
 **Next step:** Phase 161 (WIZERR — honest error surfaces) is next and NOT yet planned — run `/gsd-plan-phase 161`. Phase 161.1 (LEDGER-REFRESH) was inserted after it on 2026-08-24 for the founder-reported MT5 staleness; it is URGENT and production-facing, so it may be pulled ahead of 161 if you prefer the live data-integrity fix first.
 
@@ -1528,3 +1532,4 @@ pre-merge `e0493913`. Fix is PR #669. Supabase migrations and the Vercel fronten
 
 - ~~143-01 leaves SC#1's alert MUTE until SENTRY_DSN is verified on the WORKER Railway service~~ — ⛔ PREMISE FALSE, RESOLVED 2026-08-17 (Plan 04). There is NO separate worker service and has not been since April: the loops were merged into the FastAPI process (main.py:80-86, after the 2026-04-20 'jobs queued but never processed' incident), dispatch_loop runs in the app lifespan (main.py:271), that process calls init_sentry() at import (main.py:69, since Phase 16), and SENTRY_DSN IS set on its Railway service. SC#1's alert half is TRUE in production. 143-01's init_sentry() covers the STANDALONE path only.
 - 161-07 D-161-07-A: the wizard COMPOSITE arm still renders GATE_SERIES_PROVENANCE_UNVERIFIED for sampled_gapped — a false sentence on a reachable path (the 142.2 FIX-2 downgrade). Fix = route that arm through the examined/unexamined split; requires re-cutting one 142.2 oracle.
+- 161.1: OQ-3 still OPEN — closes only when a founder executes the runbook's step 1 and records whether the database-level or role-level app.* GUC form verified. Also: deribit has ZERO live refresh coverage until plan 04's stitch_composite arm lands (TODOS 0.3)
