@@ -98,7 +98,13 @@ _BRIDGE_MIGRATION = (
 # ---------------------------------------------------------------------------
 # Shared drivers
 # ---------------------------------------------------------------------------
-def _stub_status_read(ctx: MagicMock, capture: dict[str, Any], row: dict[str, Any] | None) -> None:
+def _stub_status_read(
+    ctx: MagicMock,
+    capture: dict[str, Any],
+    row: dict[str, Any] | None,
+    *,
+    job_row: dict[str, Any] | None = None,
+) -> None:
     """Give the harness a real ``.select().eq().maybe_single().execute()``.
 
     Without this the harness's bare ``MagicMock`` makes
@@ -106,17 +112,29 @@ def _stub_status_read(ctx: MagicMock, capture: dict[str, Any], row: dict[str, An
     real status string — so EVERY case would route to the destructive branch and
     the protected tests would fail for a reason that has nothing to do with the
     guard. Same trap ``test_ledger_refresh_nondestructive.py`` documents.
+
+    ⛔ TABLE-AWARE, and that is REUSE-01 (161.1 red team), not tidiness. This stub
+    used to answer EVERY table with the ``strategy_analytics`` row, including
+    ``compute_jobs``. The guard now re-reads its own job row before honouring the
+    marker — because the enqueue dedup can hand a user's resync a job the
+    recurring refresh minted, after which the claim-time metadata no longer
+    describes reality — and a stub that answers that read with an analytics row
+    makes the marker look RETRACTED on every protected case. ``job_row`` is the
+    LIVE ``compute_jobs`` row; the default is a job that still carries the marker,
+    i.e. the unwatched refresh these tests are about.
     """
     original = ctx.supabase.table.side_effect
+    live_job_row = {"metadata": {"source": _MARKER}} if job_row is None else job_row
 
     def _table(name: str) -> MagicMock:
         tbl: MagicMock = original(name)
+        answer = live_job_row if name == "compute_jobs" else row
 
         def _select(columns: str, **_kw: object) -> MagicMock:
             chain = MagicMock()
             chain.eq.return_value = chain
             chain.maybe_single.return_value = chain
-            chain.execute.return_value = MagicMock(data=row)
+            chain.execute.return_value = MagicMock(data=answer)
             return chain
 
         tbl.select.side_effect = _select

@@ -2465,6 +2465,92 @@ async def _resolve_ccxt_flow_price_index(
     return price_index
 
 
+# ---------------------------------------------------------------------------
+# Phase 161.1 / REUSE-01 — PROTECTION IS NOT INHERITABLE ACROSS A DEDUP COLLISION
+# ---------------------------------------------------------------------------
+# ⛔ THE DEFECT THIS CLOSES. The D-15 marker is a property of a JOB ROW, and a job
+# row can be REUSED by a caller who never asked for it.
+# `_enqueue_compute_job_internal` (mig 20260716090000:229-262) dedupes on
+# (target, kind) over ('pending','running','done_pending_children') and RETURNS
+# the existing id — `p_metadata` is DISCARDED, there is no merge arm. MEASURED
+# against that exact function body on a throwaway Postgres: a user's resync tail
+# enqueuing `derive_broker_dailies` while a MARKED refresh of the same strategy
+# is in flight gets the fan-out's job id back, its own `correlation_id` is
+# dropped, and the row keeps the marker. The user's resync is then served by a
+# job carrying a protection that exists for work NOBODY IS WATCHING.
+#
+# The harm is production-specific and it is 5/5 of the live cohort. MEASURED by
+# driving the real `sync_strategy_analytics_status` body: with the reused job
+# pending, branch (a) rewrites a plain `complete` row to `computing` (loud — the
+# poller keeps polling) but PRESERVES `complete_with_warnings`. The production
+# ledger cohort is `complete` 0 / `complete_with_warnings` 5, so on every live
+# strategy the entry read below sees a terminal-success status, the protection
+# arms, every later failure is suppressed at BOTH hops, and
+# `useStrategySyncPoller` (src/hooks/useStrategySyncPoller.ts:285) — whose
+# terminal test is `nextStatus === 'failed' || isComputedAnalytics(nextStatus)` —
+# reads TERMINAL on its first poll and stops. SyncPreviewStep then renders the
+# PRE-RESYNC factsheet over a silently-failed resync.
+#
+# ⛔ THE RULE, and it is symmetric: a dedup collision never transfers protection,
+# in EITHER direction. The resync path RETRACTS the marker from the row it
+# discovers it has inherited (`_retract_refresh_marker_on_reuse` in
+# services/ingestion/long_fetch.py); the refresh path never LAUNDERS its marker
+# onto a foreign row it collided with (the mirror check at the chain edge below).
+# Both resolve toward the LOUD path, which is the fail-safe direction this whole
+# phase is built on.
+#
+# ⛔ WHY THIS RE-READ EXISTS AT ALL, i.e. why the retraction alone is not the fix.
+# The handler reads its metadata ONCE, at claim time, from the row the claim RPC
+# returned. A retraction that lands AFTER the claim is invisible to that
+# in-memory copy — and that is the window where the defect actually bites, since
+# a marked refresh is claimed the moment the fan-out enqueues it and the user's
+# resync attaches minutes later. So every site about to HONOUR the marker
+# re-asks the ROW, which is the only place the retraction can be seen.
+#
+# ⚠️ Deliberately NOT the same question as the entry publish-state read below.
+# That one must be a SNAPSHOT, because the SQL status bridge overwrites the
+# column it reads. This one must be LIVE, because nothing but the retraction ever
+# writes it — a snapshot here would answer with the pre-retraction value, which
+# is precisely the green-against-the-bug shape.
+#
+# ⛔ FAIL-SAFE DIRECTION, non-negotiable and identical to every other D-15
+# decision: a missing id, an unreadable row, no row, a non-dict metadata and any
+# raised exception all answer FALSE — no protection, LOUD path. Never fail
+# toward suppression.
+async def _refresh_marker_still_on_row(
+    supabase: Any, job_id: Any, expected: str
+) -> bool:
+    """True only if ``compute_jobs.metadata->>'source'`` for ``job_id`` STILL
+    equals ``expected``. See the block comment above for why a live re-read and
+    not the claim-time snapshot."""
+    if not job_id:
+        return False
+
+    def _read_live_source() -> Any:
+        res = (
+            supabase.table("compute_jobs")
+            .select("metadata")
+            .eq("id", job_id)
+            .maybe_single()
+            .execute()
+        )
+        row = getattr(res, "data", None)
+        metadata = row.get("metadata") if isinstance(row, dict) else None
+        return metadata.get("source") if isinstance(metadata, dict) else None
+
+    try:
+        live_source = await db_execute(_read_live_source)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "ledger-refresh: could not re-read the refresh marker on compute_job "
+            "%s (%s) — treating the marker as RETRACTED, which takes the LOUD "
+            "terminal-failure path.",
+            job_id, exc,
+        )
+        return False
+    return bool(live_source == expected)
+
+
 async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
     """Broker key full-history → daily-return series → csv_daily_returns.
 
@@ -2846,6 +2932,34 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                 # 'computing'. A read at THIS point therefore answers the bridge,
                 # not the question. See the entry read at the top of this handler.
                 existing_status: str | None = _refresh_publish_status
+
+                # ⛔ REUSE-01: the snapshot answers "was this strategy published
+                # before the refresh started?". It does NOT answer "is this still
+                # a refresh nobody is watching?" — and after a dedup collision it
+                # is not. The enqueue RPC hands a user's resync THIS job row and
+                # discards the resync's own metadata, so the marker on it can
+                # describe a request someone is staring at. The retraction that
+                # records that is a WRITE TO THE ROW, and this closure's copy of
+                # the metadata is the claim-time snapshot, so the row is re-asked
+                # here — the one place a post-claim retraction is visible.
+                #
+                # ⚠️ It can only NARROW. The condition below is unchanged; this
+                # gate runs only when the protection would otherwise have been
+                # GRANTED, so an ordinary marked refresh pays one read on a path
+                # it was about to suppress anyway, and an unmarked derive pays
+                # nothing at all.
+                if existing_status in STRATEGY_ANALYTICS_TERMINAL_SUCCESS_STATUSES and not await _refresh_marker_still_on_row(
+                    ctx.supabase, job.get("id"), LEDGER_REFRESH_SINGLE_KEY_SOURCE
+                ):
+                    logger.warning(
+                        "derive_broker_dailies: the refresh marker on compute_job "
+                        "%s has been RETRACTED — a user-initiated request was "
+                        "served by this job through the enqueue dedup, so nobody "
+                        "unwatched owns this failure. Taking the LOUD terminal "
+                        "path for strategy %s.",
+                        job.get("id"), strategy_id,
+                    )
+                    existing_status = None
 
                 if existing_status in STRATEGY_ANALYTICS_TERMINAL_SUCCESS_STATUSES:
 
@@ -5596,7 +5710,26 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
         else None
     )
 
-    def _enqueue_csv_analytics() -> None:
+    # ⛔ REUSE-01, FORWARD DIRECTION. Same reconciliation as the stamp closure and
+    # for the same reason: this metadata is the CLAIM-TIME snapshot, and a resync
+    # that inherited this job through the enqueue dedup retracts the marker on the
+    # ROW afterwards. Forwarding a retracted marker down the chain edge would hand
+    # hop 2 — the hop that COMPILES THE FACTSHEET — a protection that no longer
+    # describes anything, and hop 2 has no other way to learn the truth: it reads
+    # this metadata and nothing else.
+    if _refresh_source_out == LEDGER_REFRESH_SINGLE_KEY_SOURCE and not await _refresh_marker_still_on_row(
+        ctx.supabase, job.get("id"), LEDGER_REFRESH_SINGLE_KEY_SOURCE
+    ):
+        logger.warning(
+            "derive_broker_dailies: the refresh marker on compute_job %s has been "
+            "RETRACTED (a user-initiated request inherited this job through the "
+            "enqueue dedup) — the chain edge to %s carries NO marker and no "
+            "publish state, so hop 2 fails LOUDLY for strategy %s.",
+            job.get("id"), _csv_analytics_kind, strategy_id,
+        )
+        _refresh_source_out = None
+
+    def _enqueue_csv_analytics() -> Any:
         _payload: dict[str, Any] = {
             "p_strategy_id": strategy_id,
             "p_kind": _csv_analytics_kind,
@@ -5626,9 +5759,40 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                 _metadata_out["publish_status"] = _refresh_publish_status
                 _metadata_out["publish_warned"] = _refresh_publish_warned
             _payload["p_metadata"] = _metadata_out
-        ctx.supabase.rpc("enqueue_compute_job", _payload).execute()
+        return ctx.supabase.rpc("enqueue_compute_job", _payload).execute().data
 
-    await db_execute(_enqueue_csv_analytics)
+    _tail_job_id = await db_execute(_enqueue_csv_analytics)
+
+    # ⛔ REUSE-01, MIRROR DIRECTION — protection LOST, not laundered.
+    # The same dedup that hands a resync a marked job hands THIS enqueue an
+    # UNMARKED `compute_analytics_from_csv` when one is already in flight for the
+    # strategy, and discards the marker + publish state we just built. Hop 2 then
+    # runs with no protection at all.
+    #
+    # ⛔ THAT IS THE OUTCOME, AND IT IS DELIBERATE. The alternative — writing our
+    # marker onto the row we collided with — is the forward defect wearing the
+    # other hat: it would grant a protection to a job THIS refresh did not create
+    # and whose caller may well be watching it, and a suppressed failure under a
+    # watcher is a poller that stops on a terminal-success and a stale factsheet
+    # rendered over a failed run. Protection is never inherited across a dedup
+    # collision, in either direction; both resolve toward the LOUD path.
+    #
+    # ⚠️ So what this closes is VISIBILITY, not the loss. The loss of a safety
+    # property must never be silent — that silence is the whole reason REUSE-01
+    # survived review. Pinned by
+    # tests/test_ledger_refresh_reuse_collision.py::TestMirrorDirection.
+    if _refresh_source_out == LEDGER_REFRESH_SINGLE_KEY_SOURCE and not await _refresh_marker_still_on_row(
+        ctx.supabase, _tail_job_id, LEDGER_REFRESH_SINGLE_KEY_SOURCE
+    ):
+        logger.warning(
+            "derive_broker_dailies: the %s chain edge for strategy %s DEDUPED onto "
+            "an already-in-flight unmarked job (%s) — the refresh marker and "
+            "publish state were DISCARDED by enqueue_compute_job, so hop 2 runs "
+            "UNPROTECTED and a failure there un-publishes this strategy. The "
+            "protection is deliberately not laundered onto a job this refresh did "
+            "not create.",
+            _csv_analytics_kind, strategy_id, _tail_job_id,
+        )
     return DispatchResult(outcome=DispatchOutcome.DONE)
 
 
