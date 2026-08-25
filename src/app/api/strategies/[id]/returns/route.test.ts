@@ -112,6 +112,10 @@ const STATE = vi.hoisted(() => ({
         returns_series?: unknown;
         computation_status?: unknown;
         data_quality_flags?: unknown;
+        // Phase 162 / HONEST-05: the co-served headline scalars. Absent from a
+        // fixture models a row whose columns are unset → null on the body.
+        cagr?: unknown;
+        sharpe?: unknown;
       }
     | null,
   // Phase 147 / P5 — the strategies.created_at the route's SEPARATE lazy age
@@ -1027,6 +1031,126 @@ describe("GET /api/strategies/[id]/returns", () => {
       // Non-empty here is what proves R19/R19b/R19c are not vacuous.
       expect(body.daily_returns, `status ${status} lost its series`).toEqual(series);
       expect(body.series_state).toBe("available");
+    }
+  });
+
+  /**
+   * HONEST-05 (Phase 162) — the route now CO-SERVES the headline scalars
+   * (`cagr` / `sharpe`) from the same analytics row, so a drawer-added leg can
+   * render the metric pair a book row already shows.
+   *
+   * This is a new door into the surface STALE-01 part 2 just closed. R19–R19d
+   * above pin that the SERIES of an unfinished run is withheld; they say
+   * nothing about scalars, so without R-B a `failed` row's best-in-class
+   * leftover CAGR would ship on a 200 body and render as a live KPI — the exact
+   * class the 11-surface hotfix removed. R-B carries the corpse in the fixture
+   * and pins both scalars null; R-A is its non-vacuity control (identical
+   * values, terminal-success status, both flow).
+   */
+  it("R-A — HONEST-05: a terminal-success row co-serves its cagr + sharpe", async () => {
+    for (const status of ["complete", "complete_with_warnings"]) {
+      STATE.analyticsRow = {
+        daily_returns: [
+          { date: "2026-01-02", value: 0.021 },
+          { date: "2026-01-03", value: -0.014 },
+        ],
+        computation_status: status,
+        cagr: 0.1842,
+        sharpe: 1.63,
+      };
+      const { GET } = await import("./route");
+      const res = await GET(makeRequest(PUBLISHED_ID), ctx(PUBLISHED_ID));
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.cagr, `status ${status} lost its cagr`).toBe(0.1842);
+      expect(body.sharpe, `status ${status} lost its sharpe`).toBe(1.63);
+      // The scalars are read from the SAME projection as the series — proving
+      // the widening is real and not a second query.
+      expect(STATE.observedFilters.analyticsSelect).toContain("cagr");
+      expect(STATE.observedFilters.analyticsSelect).toContain("sharpe");
+    }
+  });
+
+  it("R-B — HONEST-05/STALE-01: a `failed` row's leftover scalars are WITHHELD (null), never served", async () => {
+    // The corpse is deliberately flattering: a run that did not finish still
+    // holds the previous run's best-in-class numbers, because the analytics
+    // writer stamps the status and the error, not the data. Serving these is
+    // the dead-KPI defect, and it looks like success on screen.
+    for (const status of ["failed", "failed_final", "computing", "pending"]) {
+      STATE.analyticsRow = {
+        daily_returns: [
+          { date: "2026-01-02", value: 0.021 },
+          { date: "2026-01-03", value: -0.014 },
+        ],
+        computation_status: status,
+        cagr: 0.9412,
+        sharpe: 3.87,
+      };
+      const { GET } = await import("./route");
+      const res = await GET(makeRequest(PUBLISHED_ID), ctx(PUBLISHED_ID));
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.cagr, `status ${status} leaked a dead cagr`).toBeNull();
+      expect(body.sharpe, `status ${status} leaked a dead sharpe`).toBeNull();
+      // Withheld means ABSENT, never zeroed — a 0 would render as a real
+      // metric (0.0% CAGR / 0.00 Sharpe) rather than an em-dash.
+      expect(body.cagr).not.toBe(0);
+      expect(body.sharpe).not.toBe(0);
+    }
+  });
+
+  it("R-C — HONEST-05: the widening is additive — the existing consumer contract is unchanged", async () => {
+    const series = [
+      { date: "2026-01-02", value: 0.021 },
+      { date: "2026-01-03", value: -0.014 },
+    ];
+    STATE.publishedAssetClass = "crypto";
+    STATE.publishedTrustTier = "api_verified";
+    STATE.analyticsRow = {
+      daily_returns: series,
+      computation_status: "complete",
+      data_quality_flags: { composite: true },
+      cagr: 0.1842,
+      sharpe: 1.63,
+    };
+    const { GET } = await import("./route");
+    const res = await GET(makeRequest(PUBLISHED_ID), ctx(PUBLISHED_ID));
+    const body = await res.json();
+    // Every pre-existing field keeps its pre-existing value under the widening.
+    expect(body.daily_returns).toEqual(series);
+    expect(body.series_state).toBe("available");
+    expect(body.asset_class).toBe("crypto");
+    expect(body.trust_tier).toBe("api_verified");
+    expect(body.is_composite).toBe(true);
+    // ...and the body gained EXACTLY the two new keys, nothing else (a raw
+    // data_quality_flags / computation_status passthrough would show up here).
+    expect(Object.keys(body).sort()).toEqual([
+      "asset_class",
+      "cagr",
+      "daily_returns",
+      "is_composite",
+      "series_state",
+      "sharpe",
+      "trust_tier",
+    ]);
+  });
+
+  it("R-D — HONEST-05: a rankable row with unset/non-finite scalar columns → null, never 0", async () => {
+    // A stale build predating the widened select, a genuinely unset column, or
+    // a NaN that reached the DB. All three are absence, and absence is an
+    // em-dash downstream — synthesising 0 would be an invented metric.
+    for (const value of [undefined, null, "1.5", Number.NaN, Number.POSITIVE_INFINITY]) {
+      STATE.analyticsRow = {
+        daily_returns: [{ date: "2026-01-02", value: 0.021 }],
+        computation_status: "complete",
+        cagr: value,
+        sharpe: value,
+      };
+      const { GET } = await import("./route");
+      const res = await GET(makeRequest(PUBLISHED_ID), ctx(PUBLISHED_ID));
+      const body = await res.json();
+      expect(body.cagr, `cagr for ${String(value)}`).toBeNull();
+      expect(body.sharpe, `sharpe for ${String(value)}`).toBeNull();
     }
   });
 });

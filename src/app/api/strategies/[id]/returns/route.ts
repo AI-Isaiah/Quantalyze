@@ -60,7 +60,7 @@ import type { DailyPoint } from "@/lib/portfolio-math-utils";
 import { resolveDailyReturnSeries } from "@/lib/factsheet/resolve-series";
 import {
   deriveEmptySeriesState,
-  isComputedAnalytics,
+  isRankableAnalyticsRow,
   type SeriesState,
 } from "@/lib/closed-sets";
 import { readPublicVerificationSignals } from "@/lib/queries";
@@ -127,6 +127,27 @@ export interface ReturnsResponse {
    * the same argument as asset_class and trust_tier above.
    */
   series_state: SeriesState;
+  /**
+   * Phase 162 / HONEST-05 — the strategy's headline CAGR, co-served from the
+   * SAME analytics row the series comes from, so a drawer-added leg renders the
+   * metric pair a BOOK row already shows (the book path gets it from the
+   * allocator join; a non-book leg had no source at all and rendered a
+   * permanent em-dash).
+   *
+   * `null` unless `isRankableAnalyticsRow` holds for this row — the SAME
+   * predicate that withholds the series. STALE-01 closed nine surfaces that
+   * served a dead run's scalars as if they were current; widening this route
+   * without carrying the gate through would re-open that class through a fresh
+   * door. Also `null` on a stale build predating the widened select, and on a
+   * row whose column is genuinely unset. NEVER 0 — a missing metric is an
+   * em-dash at every consumer, never a number.
+   */
+  cagr: number | null;
+  /**
+   * Phase 162 / HONEST-05 — the strategy's headline Sharpe ratio. Same source,
+   * same `isRankableAnalyticsRow` gate, same never-zero rule as `cagr` above.
+   */
+  sharpe: number | null;
 }
 
 export async function GET(
@@ -247,15 +268,20 @@ export async function GET(
       // returned [] for EVERY service-computed strategy — the drawer-added
       // strategy then contributed nothing and was warm-up-gated out of the
       // blend. This is the SAME select width the already-correct factsheet v2
-      // read uses (factsheet/[id]/v2/page.tsx:45). Disclosure is unchanged:
-      // `analytics_read` RLS is table-level (published OR owner) — there are no
-      // column grants — and `returns_series` is already served publicly for
-      // published strategies by that factsheet (T-147-03). Neither raw column
-      // is forwarded; only the RESOLVED series and the derived state ship.
+      // read uses (factsheet/[id]/v2/page.tsx:45).
+      // Phase 162 / HONEST-05 — widen it once more for `cagr` and `sharpe`, the
+      // headline scalars a drawer-added leg had no source for. Disclosure is
+      // unchanged for ALL of these columns by the same sentence: `analytics_read`
+      // RLS is table-level (published OR owner) — there are no column grants, so
+      // naming more columns in the projection cannot widen who may read the row —
+      // and `returns_series`, `cagr` and `sharpe` are all already served publicly
+      // for published strategies by that same factsheet (T-147-03 / T-162-04-C).
+      // Neither raw series column is forwarded; only the RESOLVED series, the
+      // derived state, and the GATED scalars ship.
       const { data, error } = await supabase
         .from("strategy_analytics")
         .select(
-          "daily_returns, returns_series, computation_status, data_quality_flags",
+          "daily_returns, returns_series, computation_status, data_quality_flags, cagr, sharpe",
         )
         .eq("strategy_id", id)
         .maybeSingle();
@@ -299,6 +325,8 @@ export async function GET(
         daily_returns?: unknown;
         returns_series?: unknown;
         computation_status?: unknown;
+        cagr?: unknown;
+        sharpe?: unknown;
       } | null;
       const status =
         typeof analyticsRow?.computation_status === "string"
@@ -325,13 +353,35 @@ export async function GET(
       // warm-up-gates out of the blend. Existing vocabulary, existing chips: a
       // `failed` row resolves to "empty" (deliberately NOT a red error state),
       // a live job to "computing".
-      const analyticsComputed = isComputedAnalytics(status);
-      const daily_returns: DailyPoint[] = analyticsComputed
+      //
+      // Phase 162 / HONEST-05 — ONE decision, reused. The widened scalars
+      // (`cagr` / `sharpe`) below are withheld by THIS boolean, not by a second
+      // status ladder of their own: a row whose run did not finish is one row,
+      // and everything it carries is equally dead. Deciding it twice is how the
+      // two answers would eventually drift apart.
+      const analyticsRankable = isRankableAnalyticsRow({
+        computation_status: status,
+      });
+      const daily_returns: DailyPoint[] = analyticsRankable
         ? resolveDailyReturnSeries(
             analyticsRow?.daily_returns,
             analyticsRow?.returns_series,
           )
         : [];
+
+      // HONEST-05 — the co-served scalars, gated at the SAME decision point.
+      // `Number.isFinite` rather than `typeof === "number"` so a NaN/Infinity
+      // that reached the column cannot render as a metric; and `?? null` never
+      // collapses to 0 (a missing metric is an em-dash downstream, never a
+      // number — the hard project rule).
+      const cagr =
+        analyticsRankable && Number.isFinite(analyticsRow?.cagr)
+          ? (analyticsRow?.cagr as number)
+          : null;
+      const sharpe =
+        analyticsRankable && Number.isFinite(analyticsRow?.sharpe)
+          ? (analyticsRow?.sharpe as number)
+          : null;
 
       // SCEN-01 / UI-SPEC §3 — say what an EMPTY series MEANS, server-side. A
       // non-empty resolved series is self-evidently `available`; only the empty
@@ -397,6 +447,8 @@ export async function GET(
         trust_tier,
         is_composite,
         series_state,
+        cagr,
+        sharpe,
       };
       return NextResponse.json(body, { status: 200, headers: NO_STORE_HEADERS });
     },

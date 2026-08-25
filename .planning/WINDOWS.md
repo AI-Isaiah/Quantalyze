@@ -4,7 +4,7 @@ open_count: 15
 waived_count: 0
 fixed_count: 1
 total_count: 16
-last_updated: 2026-08-25T22:26:27.302Z
+last_updated: 2026-08-25T22:28:18.784Z
 ---
 
 # Broken Windows Ledger
@@ -31,6 +31,7 @@ last_updated: 2026-08-25T22:26:27.302Z
 | 14 | 161 | unrun-verify | src/app/(dashboard)/allocations/components/AllocateDialog.tsx |  | E5 residue: founder eyes-on pass on the real Allocate dialog in Safari is unverified; layout measured only in Chromium on reproduced Modal/ErrorEnvelope markup (result: scrolls, does not clip) | open |  | 2026-08-24T21:01:39.389Z |  |
 | 15 | 161.1 | unrun-verify | supabase/tests/test_ledger_refresh_fanout.sql |  | Both phase SQL gates were run on a local Supabase harness, not against the real TEST project (TEST_SUPABASE_DB_URL is a CI secret, psql absent). Blocking CI sql-tests job covers this on PR. | open |  | 2026-08-25T10:34:25.695Z |  |
 | 16 | 162 | deviation | src/components/strategy/StrategyGrid.tsx | 117 | SyncBadge still ungated on computation_status (is_example guard added; consumer-less component, pre-existing STALE-01 gap) | open |  | 2026-08-25T22:26:27.302Z |  |
+| 16 | 162 | deviation | src/app/(dashboard)/allocations/components/ScenarioComposer.tsx |  | 162-04: metric pair now renders in all five C-4 states (previously hidden when both null); two existing SCEN-03 assertions updated accordingly | open |  | 2026-08-25T22:28:18.784Z |  |
 
 ````json
 [
@@ -218,12 +219,12 @@ last_updated: 2026-08-25T22:26:27.302Z
     "id": 16,
     "kind": "deviation",
     "phase": "162",
-    "file": "src/components/strategy/StrategyGrid.tsx",
-    "line": 117,
-    "description": "SyncBadge still ungated on computation_status (is_example guard added; consumer-less component, pre-existing STALE-01 gap)",
+    "file": "src/app/(dashboard)/allocations/components/ScenarioComposer.tsx",
+    "line": null,
+    "description": "162-04: metric pair now renders in all five C-4 states (previously hidden when both null); two existing SCEN-03 assertions updated accordingly",
     "status": "open",
     "reason": "",
-    "recorded_at": "2026-08-25T22:26:27.302Z",
+    "recorded_at": "2026-08-25T22:28:18.784Z",
     "resolved_at": null
   }
 ]

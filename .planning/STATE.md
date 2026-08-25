@@ -5,11 +5,11 @@ milestone_name: Backlog Burndown (Phases 158+)
 current_phase: 161
 current_phase_name: WIZERR — Honest error surfaces
 status: verifying
-stopped_at: Completed 162-03-PLAN.md
-last_updated: "2026-08-25T22:26:02.098Z"
+stopped_at: Completed 162-04-PLAN.md
+last_updated: "2026-08-25T22:28:04.468Z"
 last_activity: 2026-08-25
 last_activity_desc: Phase 161.1 wave 4 — composite arm landed DORMANT; composite PROD tracer still owed
-state_head: 831da5fc7f0004605a23ac33b3b69c51e4880dc2
+state_head: 1ee32d5595dc0ad3d8f04e1e22b9e9dee6413e64
 progress:
   total_phases: 10
   completed_phases: 1
@@ -638,6 +638,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 | Phase 161.1 P03 | 71min | 2 tasks | 2 files |
 | Phase 162 P01 | ~35m | 2 tasks | 1 files |
 | Phase 162 P03 | 35m | 3 tasks | 5 files |
+| Phase 162 P04 | 25m | 2 tasks | 4 files |
 
 ## Accumulated Context
 
@@ -791,6 +792,8 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - [Phase 162]: HONEST-01 root cause recorded inconclusive: stage/window/population pinned (poll_positions, 2026-06-10..06-14, 2 strategies) but no str/None site at HEAD and no traceback survives
 - [Phase 161]: 162-03: RSC series strip lives in portfolios/[id]/page.tsx, not getPortfolioStrategies — the page needs the series server-side to build curves; only forwarded props narrow
 - [Phase 161]: 162-03: mayClaimSyncRecency is a new decided predicate, not a widening of hasComputedAnalytics — that value also gates the rank cell and owner pending chip
+- [Phase 161]: 162-04: one rankability boolean gates BOTH the series and the co-served cagr/sharpe on /returns — the scalar gate is not a second status ladder
+- [Phase 161]: 162-04: composer distinguishes an unanswered metrics fetch (id absent from addedMetricsById) from a settled null pair — only the settled case renders the absence note
 
 ### Decisions (execution-time, Phase 140.2)
 
@@ -1497,6 +1500,8 @@ Load-bearing sequencing (real dependencies, do not reorder):
 **Stopped At:** Completed 162-01-PLAN.md
 **Last Date:** 2026-08-25T22:26:01.687Z
 **Stopped At:** Completed 162-03-PLAN.md
+**Last Date:** 2026-08-25T22:28:04.096Z
+**Stopped At:** Completed 162-04-PLAN.md
 **Resume File:** None
 **Next step:** Phase 161 (WIZERR — honest error surfaces) is next and NOT yet planned — run `/gsd-plan-phase 161`. Phase 161.1 (LEDGER-REFRESH) was inserted after it on 2026-08-24 for the founder-reported MT5 staleness; it is URGENT and production-facing, so it may be pulled ahead of 161 if you prefer the live data-integrity fix first.
 
