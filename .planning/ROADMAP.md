@@ -336,14 +336,14 @@ Plans:
   3. `buildEquityCurveSeries` serves real per-strategy equity curves now that `returns_series` is selected (the hard-coded `equityCurve: null` and its false comment are gone), and drawer-added strategies render CAGR/Sharpe like book rows.
   4. "Finish setup →" opens the wizard with the clicked key preselected.
 
-**Plans**: 9 plans (2 waves)
+**Plans**: 1/9 plans executed (2 waves)
 
 Plans:
 
 - [ ] 162-01-PLAN.md — Diagnostics census: HONEST-02 flat-vs-derive-gap verdict + HONEST-01 str/None root cause, read-only vs PROD (wave 1)
 - [ ] 162-02-PLAN.md — HONEST-01 curated copy at every writer (classify_exception arms, 18-site stamp choke point, portfolio _fail) + wizard Details-appendix removal, D-162-4 strict (wave 1)
 - [ ] 162-03-PLAN.md — HONEST-04 gated real equity curves + C-3 coverage caption + HONEST-03 is_example SyncBadge class guard (wave 1)
-- [ ] 162-04-PLAN.md — HONEST-05 widened /returns co-serves gated cagr/sharpe + addedMetricsById composer fallback, C-4 five-state contract (wave 1)
+- [x] 162-04-PLAN.md — HONEST-05 widened /returns co-serves gated cagr/sharpe + addedMetricsById composer fallback, C-4 five-state contract (wave 1)
 - [ ] 162-05-PLAN.md — HONEST-06 server use-existing-key path (D-162-3): decision gate + tracer RPC/route arm + state-adaptive SQL gate — service-role boundary (wave 1, checkpoint)
 - [ ] 162-06-PLAN.md — HONEST-06 client preselect thread + C-5 saved-key summary, all three key populations pinned (wave 2)
 - [ ] 162-07-PLAN.md — HONEST-02 verdict fix: D-162-2 "Track record through {date}" recency line (flat arm) or recorded pipeline routing (gap arm) (wave 2)

@@ -51,7 +51,7 @@ verified-stale items are excluded by construction.
 - [ ] **HONEST-02** (L1953): The factsheet freshness badge reflects series recency — a strategy whose return series ended 89 days ago cannot read FRESH; investigate (flat account vs derive gap) before fixing.
 - [ ] **HONEST-03** (L1959): Example strategies don't advertise stale "Synced Nd ago" badges on discovery.
 - [ ] **HONEST-04** (L1991): `buildEquityCurveSeries` serves real per-strategy equity curves now that `returns_series` is selected — the hard-coded `equityCurve: null` and its false comment go.
-- [ ] **HONEST-05** (L2209): Drawer-added strategies render CAGR/Sharpe like book rows.
+- [x] **HONEST-05** (L2209): Drawer-added strategies render CAGR/Sharpe like book rows.
 - [ ] **HONEST-06** (L2110): "Finish setup →" opens the wizard with the clicked key preselected.
 
 ### OPS — CI/deploy integrity & reliability
@@ -146,7 +146,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | HONEST-02 | Phase 162 | Pending |
 | HONEST-03 | Phase 162 | Pending |
 | HONEST-04 | Phase 162 | Pending |
-| HONEST-05 | Phase 162 | Pending |
+| HONEST-05 | Phase 162 | Complete |
 | HONEST-06 | Phase 162 | Pending |
 | OPS-01 | Phase 158 | Complete |
 | OPS-02 | Phase 158 | Complete |
