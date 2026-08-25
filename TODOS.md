@@ -3327,6 +3327,45 @@ follows is what was deliberately left, with the reason.
   - **Fix shape (upstream, not here):** narrow the `pii.cc` rule so a Luhn match inside a
     `YYYYMMDDHHMMSS` shape, or adjacent to a `.sql` filename, is not reported.
 
+161.1-DEC (founder decisions, 2026-08-25). Four open items resolved. Recorded here because each
+  reverses or confirms a default that would otherwise be re-derived blind.
+
+  **DEC-1 — Retire frozen-spine gates 1 and 2, KEEP gate 3.** `src/__tests__/phase-29-frozen-spine-guards.test.ts`
+  was a Phase 29 exit gate for milestone v1.2 (shipped ~v0.20, May) but carries NO phase scoping —
+  it diffs against `origin/main` on any branch, forever. At v0.73 it is a scope fence for finished
+  work, and it is what blocks a proper `scenario-share` fix.
+  - RETIRE gate 1 (no new scenarios/share migration) and gate 2 (`scenario.ts` frozen vs baseline).
+    Both fenced v1.2's scope only.
+  - **KEEP gate 3** — the `scenarios`/`scenario_shares` RLS honesty tests staying byte-unchanged is
+    the SOLE proof the `get_shared_scenario` SECURITY DEFINER read path was never loosened. Reword
+    it as a standing RLS invariant rather than a phase gate, so it stops reading as expired.
+  - Unblocks a real `scenario-share` fix (stale legs in a shared blend). Decide that behaviour
+    separately once the fence is down.
+
+  **DEC-2 — D9: WIDEN THE GUARD to restore hop 1's writes.** Founder chose the widen path over
+  making the refresh atomic. ⚠️ Recorded honestly: I recommended atomicity (stage hop 1, promote on
+  hop 2 success) and was overruled. The reasoning against widen still stands and must be designed
+  around, not ignored:
+  - The guard does NOT currently hold hop 1's pre-values — hop 1 overwrites `data_quality_flags`,
+    the by-basis scalars and the persisted basis series before hop 2 runs. So widening needs BOTH
+    (a) a NEW snapshot at hop-1 entry of everything hop 1 will touch, and (b) a restore of all of
+    it on the hop-2 failure path.
+  - (b) adds bulk to the least-exercised code in the system. F3, F4 and this phase's CRITICAL all
+    lived on failure paths precisely because they only run when something already went wrong.
+  - ⭐ Design note for whoever implements it: once (a) exists, staging is strictly simpler than
+    write-then-unwrite. If the snapshot turns out large or awkward, revisit atomicity before
+    growing the failure path.
+
+  **DEC-3 — D13 closes in 164.1, BEFORE any go-live.** Confirms the filed plan. The composite
+  reuse collision is unreachable while dormant, which is exactly why the ordering constraint must
+  stay explicit: closing it is a prerequisite of the activation op, not a follow-up to it.
+
+  **DEC-4 — D1 advisory lock gets its OWN phase, with a real concurrency test.** Not folded into
+  164.1. It touches two RPCs that run on every job transition for every strategy, and a
+  half-applied lock discipline reads as protection while providing none. 164.1 is otherwise guards
+  and observability (low blast radius); this would dominate its risk profile. Needs a test that
+  genuinely exercises concurrent bridge calls, not a unit test.
+
 161.1-D4. **Prose/derivation nits, non-blocking.**
   - `analytics-service/tests/test_computing_started_at_stamp.py:649` — census docstring
     self-contradicts: says "the 7 in analytics_runner.py are unchanged in COUNT" and "7 of those 11"
