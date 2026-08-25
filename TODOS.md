@@ -3281,6 +3281,35 @@ follows is what was deliberately left, with the reason.
   - Severity capped: for `complete_with_warnings` rows (the entire live cohort) branch (a) never
     advertised `computing` anyway, so the incremental harm is on plain-`complete` rows.
 
+161.1-D11. **⛔ THE REAL CLOSURE for the reuse-collision class: `enqueue_compute_job` needs a
+  metadata MERGE arm.** `_enqueue_compute_job_internal` dedupes on `(target, kind)` and on a hit does
+  `RETURN v_existing_id`, **discarding `p_metadata` entirely**. Phase 161.1 closed the consequence in
+  Python (the resync tail retracts an inherited refresh marker; both honour-sites re-ask the row),
+  but the RPC still silently drops every caller's metadata on every collision, system-wide.
+  - **Not attempted same-day, deliberately:** that RPC is on every enqueue path in the system. A
+    merge arm changes what every caller's metadata means on collision and needs its own review and
+    its own blast-radius check — not a ride-along on a phase fix.
+  - A merge arm would also remove the read-modify-write in the retraction helper (see D12).
+
+161.1-D12. **Read-modify-write residual in the marker retraction, measured harmless.** The retraction
+  reads then writes `compute_jobs.metadata`; a claim committing inside that window loses
+  `unified_backbone_at_claim`. Measured harmless — nothing re-reads that key from the row (the drain
+  check takes it from the claim's own returned metadata). Recorded because "measured harmless today"
+  is a dated claim: re-check if any reader of that key from the ROW is ever added. Disappears
+  entirely once D11 lands.
+
+161.1-D13. **⚠️ THE COMPOSITE TWIN OF THE REUSE COLLISION IS STILL OPEN.** `stitch_composite` carries
+  the `ledger-refresh-composite` marker and has **user-initiated** enqueues at
+  `src/app/api/keys/sync/route.ts` and `src/app/api/strategies/finalize-wizard/route.ts` — the same
+  `(target, kind)` collision, the same root cause, the same silent inheritance of D-15 protection.
+  - **Half-closed already:** the Python retraction helper handles the composite marker (it tests the
+    union of both markers), so the *honouring* side is covered. **What is missing is the retraction
+    call at the two TypeScript enqueue sites** — they were outside the Python fixer's file scope.
+  - Until then a user-initiated composite resync colliding with a live composite fan-out job inherits
+    protection, and its failure is suppressed exactly as the single-key case was.
+  - ⚠️ The composite fan-out ships DORMANT, so this is not reachable on production until the
+    schedule is registered — but it must be closed BEFORE that founder-gated go-live op, not after.
+
 161.1-D4. **Prose/derivation nits, non-blocking.**
   - `analytics-service/tests/test_computing_started_at_stamp.py:649` — census docstring
     self-contradicts: says "the 7 in analytics_runner.py are unchanged in COUNT" and "7 of those 11"
