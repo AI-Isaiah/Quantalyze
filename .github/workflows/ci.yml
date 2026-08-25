@@ -1669,14 +1669,20 @@ jobs:
           # is the same self-consistent-and-invisible failure this block exists
           # to catch, one level up. Per-file counts are spelled out so the next
           # reader can re-derive the total instead of trusting it:
+          # Re-measured 2026-08-26 (162-05 / D-162-3): a SEVENTH file joins,
+          # test_create_wizard_strategy_for_key.sql, the recurring gate for the
+          # new use-existing-key SECURITY DEFINER writer. Its nine arms are
+          # counted here in the same diff that adds them, which is the point of
+          # holding the totals outside the .sql files.
+          #   test_create_wizard_strategy_for_key.sql         9
           #   test_get_verified_cohort_rank_gate.sql          6
           #   test_ledger_refresh_composite_arm.sql          10
           #   test_ledger_refresh_fanout.sql                 10
           #   test_ledger_refresh_staleness.sql               8
           #   test_retention_crons_safe.sql                   4
           #   test_sync_status_marked_refresh_protected.sql  16
-          SENTINEL_FLOOR=6   # files declaring a sentinel
-          ARMS_FLOOR=54      # 6 + 10 + 10 + 8 + 4 + 16
+          SENTINEL_FLOOR=7   # files declaring a sentinel
+          ARMS_FLOOR=63      # 9 + 6 + 10 + 10 + 8 + 4 + 16
           # RAISING these as arms are added is expected and cheap — and it is not
           # optional: src/__tests__/contracts/ci-anti-skip-gate.contract.test.ts
           # re-derives the table above from the corpus and goes red when a count,
