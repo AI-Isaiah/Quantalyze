@@ -42,6 +42,11 @@ const PLATFORM_KEYS = new Set([
   "AWS_LAMBDA_FUNCTION_NAME",
   "VITEST",
   "VITEST_WORKER_ID",
+  // Read only by ci-anti-skip-gate.contract.test.ts, which prepends a stub
+  // `psql` directory to PATH before executing the ci.yml sql-tests script. It
+  // is the OS process environment, not app config, so it has no .env.example
+  // plane to belong to.
+  "PATH",
 ]);
 
 // Keys read only by tests / test-helpers (live-DB integration, e2e seeding,

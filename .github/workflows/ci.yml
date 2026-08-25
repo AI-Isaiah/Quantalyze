@@ -449,9 +449,13 @@ jobs:
             sleep $((n*5))
           done
       - name: Preflight - the lane must have a non-empty test corpus
-        # Copied in shape from sql-tests' empty-corpus check. A green job that
-        # ran nothing is the exact silent-green this whole phase exists to
-        # eliminate, so an empty glob is an ERROR, never a quiet pass.
+        # A green job that ran nothing is the exact silent-green this whole
+        # phase exists to eliminate, so an empty glob is an ERROR, never a quiet
+        # pass. (F11: this comment used to say it was "copied in shape from
+        # sql-tests" — that was FALSE at the time it was written. sql-tests' own
+        # empty-corpus check printed a ::warning:: and `exit 0`, i.e. the
+        # opposite shape, so this comment described a check that did not exist
+        # in the file it named. F11 made that one fatal too; the two agree now.)
         run: |
           set -euo pipefail
           shopt -s nullglob
@@ -1322,9 +1326,13 @@ jobs:
           echo "Discovering supabase/tests/test_*.sql files..."
           shopt -s nullglob
           files=(supabase/tests/test_*.sql)
+          # F11 — AN EMPTY GLOB IS AN ERROR, NEVER A QUIET PASS. This used to
+          # print a ::warning:: and `exit 0`, i.e. report SUCCESS from BEFORE the
+          # loop and before every pin below, having executed zero assertions. A
+          # directory rename or a path typo was enough: green job, nothing run.
           if [ ${#files[@]} -eq 0 ]; then
-            echo "::warning::No supabase/tests/test_*.sql files found — Issue 6 invariant drifted."
-            exit 0
+            echo "::error::No supabase/tests/test_*.sql files found. The SQL self-test corpus is EMPTY, so this run executed ZERO assertions and proves NOTHING about the database — it is not a pass. Most likely the tests moved or this glob's path drifted; restore the path, or retire this job deliberately."
+            exit 1
           fi
           echo "Found ${#files[@]} test file(s):"
           printf '  - %s\n' "${files[@]}"
@@ -1361,21 +1369,67 @@ jobs:
           # regex was chosen):
           #   (1) whole-file bail-out — `NOTICE:  SKIP: <reason>` then RETURN.
           #       The file asserts NOTHING. This is the WR-03 defect; it FAILS.
-          #   (2) narrow partial skips — `NOTICE:  SKIP (5d/5f/5g): ...`,
-          #       `NOTICE:  SKIP Part 2: ...`, `NOTICE:  PASS WITH 1 SKIP: ...`,
-          #       and prose such as `NOTICE:  Part 1 OK: ... SKIP LOCKED present`.
-          #       These name the exact assertions withheld, are keyed on a real
-          #       migration-A/B divergence, and are already policed in-file by
-          #       both-or-neither coherence assertions that RAISE EXCEPTION when
-          #       the skip is dishonest. They are ANNOTATED below, never failed:
-          #       reddening them would redden CI for a state this repo
+          #   (2) narrow partial skips — `SKIP (5d/5f/5g): ...`, `SKIP Part 2:
+          #       ...`, `PASS WITH 1 SKIP: ...`, and prose such as `Part 1 OK:
+          #       ... SKIP LOCKED present`. These name assertions withheld on a
+          #       real migration-A/B divergence. They are ANNOTATED below, never
+          #       failed: reddening them would redden CI for a state this repo
           #       deliberately tolerates.
+          #
+          #       ⚠️ F13 — the justification that used to sit here is DELETED, not
+          #       softened, because it was false. It claimed these skips are
+          #       "already policed in-file by both-or-neither coherence
+          #       assertions that RAISE EXCEPTION when the skip is dishonest".
+          #       MEASURED 2026-08-25 across all 67 files: not uniformly true.
+          #       supabase/tests/test_profiles_privileged_columns_locked.sql
+          #       prints `SKIP (2): ...` and then RETURNs — every later assertion
+          #       in that DO block is withheld, and nothing checks the skip was
+          #       honest. The pg_cron `SKIP Part 2/3/4` notices in the
+          #       cron-registration files have the same shape. A COSMETIC label
+          #       (`SKIP (2)` vs `SKIP:`) was doing all the discriminating, and
+          #       it does not correlate with how much coverage is withheld.
+          #       A stated reason that is falsifiable-and-false is worse than
+          #       none: the next reader discards the real constraint along with
+          #       it. So this step no longer VOUCHES for them. It derives, from
+          #       each file's own source, which printed partial skips are
+          #       block-terminating (a `RETURN;` within 4 lines of the notice)
+          #       and reports those as UNPOLICED in the log. Making them fatal is
+          #       the real fix and it belongs in the .sql files — each needs a
+          #       both-or-neither assertion, the way
+          #       test_ledger_refresh_{staleness,fanout,composite_arm}.sql got
+          #       one. Until then this step names them instead of vouching.
           # ⚠️ A bare `grep -F 'SKIP:'` does NOT discriminate — `PASS WITH 1 SKIP:`
           # (test_wizard_session_idempotency.sql, test_wizard_composite_fence.sql)
-          # contains that substring and prints on a PASSING run. Anchoring to the
-          # psql message label is what separates the two. That label is C-locale
-          # text; these runners are C-locale, and a localized server would make
-          # this line go blind rather than noisy.
+          # contains that substring and prints on a PASSING run.
+          #
+          # F14 — the old answer was to anchor on psql's `NOTICE:` label, which is
+          # C-locale server text. Two ways that goes SILENT rather than noisy, both
+          # yielding a FALSE PASS; the second was conceded nowhere:
+          #   (a) a non-C `lc_messages` renders the label in another language, so
+          #       the regex matches nothing;
+          #   (b) `client_min_messages='warning'` (settable per-role/per-database,
+          #       and it outlives any one connection) suppresses NOTICE OUTPUT
+          #       ENTIRELY — every check in this step reads NOTICEs, so all of
+          #       them would match nothing at once, with an empty log to show
+          #       for it.
+          # Both are closed here rather than conceded:
+          #   NET 1 (locale-proof, primary) — whole-file markers are read out of
+          #     the .sql FILE (`RAISE NOTICE 'SKIP: ...`), which is C-locale by
+          #     construction because it is repo text, and matched with grep -aF.
+          #     No server-rendered label is involved. `PASS WITH 1 SKIP:` is
+          #     never a marker: that literal does not START with `SKIP:`.
+          #   NET 2 (kept, second net) — the label-anchored regex, which still
+          #     catches a skip message composed at RUNTIME via format()/variables
+          #     and therefore invisible to NET 1's static extraction.
+          #   CHANNEL — client_min_messages is forced to `notice` via PGOPTIONS
+          #     and PROVEN live by a probe below that fails the step when a known
+          #     NOTICE does not come back. (lc_messages is deliberately NOT set:
+          #     it is superuser-only, so setting it would turn a working
+          #     connection into a connection error on a managed database.)
+          # WHAT REMAINS OPEN is printed in the log too, not just here: a skip
+          # message that is BOTH composed at runtime (invisible to NET 1) AND
+          # rendered by a non-C server (invisible to NET 2) would still pass. No
+          # such message exists in this corpus today.
           #
           # ⛔ This does NOT touch the legitimate JOB-level skip. Fork PRs and
           # workflow_dispatch never reach this step (the job `if:` excludes them),
@@ -1391,29 +1445,95 @@ jobs:
           # grep: a NUL byte anywhere in the captured output would otherwise make
           # GNU grep treat it as binary and report "no match" on bytes it never
           # really read — the same false green this block exists to remove.
+          # F14(b) — force the NOTICE channel ON. client_min_messages is settable
+          # by an ordinary role, so this is not the privilege gamble lc_messages
+          # would be. Forcing is not enough on its own (a database- or role-level
+          # setting can still win), hence the probe.
+          export PGOPTIONS='-c client_min_messages=notice'
           bad=0
           sentinels_declared=0
+          arms_declared=0
           out="${RUNNER_TEMP}/sql-test-output.log"
+          echo ""
+          echo "Probing that server NOTICEs actually reach this log..."
+          probe_status=0
+          psql "$TEST_SUPABASE_DB_URL" -X -v ON_ERROR_STOP=1 \
+            -c "DO \$\$ BEGIN RAISE NOTICE 'ANTISKIP-NOTICE-CHANNEL-OK'; END \$\$;" \
+            > "$out" 2>&1 || probe_status=$?
+          cat "$out"
+          if [ "$probe_status" -ne 0 ]; then
+            echo "::error::the NOTICE-channel probe could not run against the test database (psql exited ${probe_status}). Every skip check below reads server NOTICEs, so this step cannot report a meaningful pass without it."
+            exit 1
+          fi
+          if ! grep -aF 'ANTISKIP-NOTICE-CHANNEL-OK' "$out" >/dev/null 2>&1; then
+            echo "::error::the test database accepted a RAISE NOTICE but the message never reached this log, so NOTICE output is being suppressed (a role- or database-level client_min_messages overriding PGOPTIONS). EVERY skip check in this step reads NOTICEs: with the channel dark they would all match nothing at once and this job would report a clean run having verified NOTHING about skips. Clear the override (ALTER ROLE ... RESET client_min_messages) and re-run."
+            exit 1
+          fi
+          echo "  ↳ NOTICE channel live."
           for f in "${files[@]}"; do
             echo ""
             echo "=== Running: $f ==="
             status=0
-            psql "$TEST_SUPABASE_DB_URL" -v ON_ERROR_STOP=1 -f "$f" > "$out" 2>&1 || status=$?
+            # -X for parity with the mutex/census psql calls in this job: a
+            # ~/.psqlrc on a self-hosted runner could otherwise set
+            # client_min_messages or ECHO and change what this loop reads.
+            psql "$TEST_SUPABASE_DB_URL" -X -v ON_ERROR_STOP=1 -f "$f" > "$out" 2>&1 || status=$?
             cat "$out"
             if [ "$status" -ne 0 ]; then
               echo "::error file=$f::psql exited $status — a RAISE EXCEPTION assertion failed, or the connection did. The captured output above is the whole story for this file."
               exit "$status"
             fi
-            if grep -aE 'NOTICE: +SKIP:' "$out" >/dev/null 2>&1; then
+            # NET 1 (locale-proof): the whole-file markers this FILE defines.
+            skip_hits=""
+            markers="$(grep -aoE "RAISE NOTICE 'SKIP: [^'%]{0,60}" "$f" | sed "s/^.*RAISE NOTICE '//" | sort -u || true)"
+            if [ -n "$markers" ]; then
+              _oifs="$IFS"
+              IFS=$'\n'
+              for m in $markers; do
+                if grep -aF "$m" "$out" >/dev/null 2>&1; then
+                  skip_hits="${skip_hits}      ${m}"$'\n'
+                fi
+              done
+              IFS="$_oifs"
+            fi
+            # NET 2: label-anchored, for a skip message composed at runtime.
+            net2="$(grep -aE 'NOTICE: +SKIP:' "$out" || true)"
+            if [ -n "$skip_hits" ] || [ -n "$net2" ]; then
               echo "::error file=$f::printed a whole-file SKIP notice and exited 0. THAT IS NOT A PASS: the file RETURNed before its assertions, so this run proves nothing about the object it guards — it is indistinguishable from a green run only because exit code was the sole thing read. Nothing applies migrations to the TEST project (this job has no apply step; supabase-migrate.yml targets PRODUCTION only), so the skip cannot re-arm itself on a later run. Fix the file the way supabase/tests/test_ledger_refresh_{staleness,fanout,composite_arm}.sql were fixed: RAISE EXCEPTION on the absent object instead of skipping."
               echo "  ↳ $f printed:"
-              grep -aE 'NOTICE: +SKIP:' "$out" | sed 's/^/      /'
+              if [ -n "$skip_hits" ]; then
+                printf '%s' "$skip_hits"
+              fi
+              if [ -n "$net2" ]; then
+                printf '%s\n' "$net2" | sed 's/^/      /'
+              fi
               bad=1
             fi
             # Narrow, self-policed partial skips — surfaced, never fatal (above).
             partials="$(grep -aoE 'SKIP \([^)]*\)|SKIP Part [0-9]+|PASS WITH [0-9]+ SKIPS?' "$out" | sort -u | tr '\n' ' ' || true)"
             if [ -n "$partials" ]; then
-              echo "::notice file=$f::ran with narrow partial skips — NOT a failure, each names the assertions it withheld and is policed in-file: ${partials}"
+              echo "::notice file=$f::ran with narrow partial skips — NOT a failure. Each names assertions it withheld: ${partials}"
+            fi
+            # F13 — of the partial skips this run PRINTED, which ones end their
+            # DO block? Derived from the source (a RETURN within 4 lines of the
+            # notice), so the claim is computed, not asserted.
+            blockterm="$(awk -v q="'" '/RAISE NOTICE/ && /SKIP/ { msg = substr($0, index($0, "SKIP")); n = index(msg, q); if (n > 0) msg = substr(msg, 1, n - 1); n = index(msg, "%"); if (n > 0) msg = substr(msg, 1, n - 1); msg = substr(msg, 1, 40); buf = ""; for (i = 0; i < 4; i++) { if ((getline nxt) > 0) buf = buf "\n" nxt } if (buf ~ /RETURN[ \t]*;/) print msg }' "$f" | sort -u || true)"
+            bt_hits=""
+            if [ -n "$blockterm" ]; then
+              _oifs="$IFS"
+              IFS=$'\n'
+              for m in $blockterm; do
+                case "$m" in
+                  "SKIP:"*) continue ;;
+                esac
+                if grep -aF "$m" "$out" >/dev/null 2>&1; then
+                  bt_hits="${bt_hits} [${m}]"
+                fi
+              done
+              IFS="$_oifs"
+            fi
+            if [ -n "$bt_hits" ]; then
+              echo "::warning file=$f::UNPOLICED partial skip(s):${bt_hits} — each of those notices is followed by RETURN in the source, so it ENDS ITS DO BLOCK: every later assertion in that block was withheld, not only the ones the label names, and nothing in the file or here verifies the skip was honest. Reported rather than failed because how much was withheld is not mechanically knowable from outside; the fix is a both-or-neither coherence assertion in the .sql file."
             fi
             # 'ALL N ARMS EXECUTED' sentinel. Where a file DECLARES one in a
             # RAISE NOTICE, the run must PRINT it. Without this, an edit that
@@ -1425,6 +1545,21 @@ jobs:
             sentinel="$(grep -aE "RAISE NOTICE '[^']*ALL [0-9]+ ARMS EXECUTED" "$f" | grep -aoE 'ALL [0-9]+ ARMS EXECUTED' | head -1 || true)"
             if [ -n "$sentinel" ]; then
               sentinels_declared=$((sentinels_declared + 1))
+              n_arms="$(printf '%s' "$sentinel" | grep -aoE '[0-9]+' | head -1)"
+              arms_declared=$((arms_declared + n_arms))
+              # F12 — when the notice ALSO names a letter range, the count and the
+              # range must agree. This is what kills the cheapest neutering: delete
+              # arm I, edit `ALL 9` to `ALL 8`, leave `(A-I)` untouched.
+              rng="$(grep -aoE "ALL [0-9]+ ARMS EXECUTED \(A-[A-Z]\)" "$f" | head -1 || true)"
+              if [ -n "$rng" ]; then
+                last="${rng%)}"
+                last="${last##*-}"
+                expect=$(( $(printf '%d' "'$last") - 64 ))
+                if [ "$n_arms" -ne "$expect" ]; then
+                  echo "::error file=$f::the completion sentinel contradicts itself — it declares ${n_arms} arms but names the range (A-${last}), which is ${expect}. One of the two was edited and the other was not, so an arm was almost certainly removed or renumbered. Make the count and the range agree with the arms the file actually executes."
+                  bad=1
+                fi
+              fi
               if grep -aF "$sentinel" "$out" >/dev/null 2>&1; then
                 echo "  ↳ completion sentinel OK: ${sentinel}"
               else
@@ -1438,8 +1573,32 @@ jobs:
           # green forever — deleting every notice must not look the same as
           # having none. supabase/tests/test_ledger_refresh_{staleness,fanout,
           # composite_arm}.sql each carry one.
-          if [ "$sentinels_declared" -eq 0 ]; then
-            echo "::error::no test file declares an 'ALL N ARMS EXECUTED' sentinel, so the sentinel check above verified NOTHING on this run. Either a file was renamed and its notice lost, or the notices were removed; restore one or retire this pin deliberately."
+          # F12 — the sentinel check is OPT-IN by construction: `[ -n "$sentinel" ]`
+          # exempts any file that declares none, and the old `-eq 0` pin only fired
+          # once the LAST one was gone. The count was unpinned too: delete an arm,
+          # edit `9` to `8`, and the run printed `↳ completion sentinel OK`.
+          #
+          # THE TRADE, recorded rather than hidden. That hole cannot be closed from
+          # inside the file being checked — a file is always self-consistent with
+          # its own edited number, so catching a DELETED arm needs an expectation
+          # held OUTSIDE the file. The cheapest honest form of that is not a
+          # per-file manifest but two integers, ratcheted right here:
+          SENTINEL_FLOOR=4   # files declaring a sentinel (measured 2026-08-25)
+          ARMS_FLOOR=35      # arms those files declare in total (9 + 9 + 8 + 9)
+          # RAISING these as arms are added is expected and cheap. Lowering either
+          # is the entire point: it can no longer be done inside a .sql file where
+          # nobody sees it, only by editing this workflow, where it lands in the
+          # diff and has to be argued for. STILL NOT CAUGHT, deliberately: swapping
+          # an arm out of one file and into another leaves both totals intact. A
+          # per-file expected-count manifest would catch that; it was rejected as
+          # too stale-prone to stay honest, and this line is the record of that
+          # choice rather than a claim that the class is closed.
+          if [ "$sentinels_declared" -lt "$SENTINEL_FLOOR" ]; then
+            echo "::error::only ${sentinels_declared} test file(s) declare an 'ALL N ARMS EXECUTED' sentinel, under the recorded floor of ${SENTINEL_FLOOR}. Sentinels are what make a neutered arm visible, so the ones that vanished took their coverage silently with them. Either a file was renamed and its notice lost, or the notices were removed; restore them, or lower SENTINEL_FLOOR in this workflow deliberately."
+            bad=1
+          fi
+          if [ "$arms_declared" -lt "$ARMS_FLOOR" ]; then
+            echo "::error::the sentinel-bearing files declare ${arms_declared} arms in total, under the recorded floor of ${ARMS_FLOOR}. That is the signature of an arm being deleted and its own file's count edited down to match — self-consistent, and therefore invisible to every check that reads only the file. Restore the arm, or lower ARMS_FLOOR in this workflow deliberately, in a diff a reviewer can see."
             bad=1
           fi
           if [ "$bad" = 1 ]; then
@@ -1447,7 +1606,8 @@ jobs:
             exit 1
           fi
           echo ""
-          echo "All ${#files[@]} SQL self-tests passed — no whole-file skips, ${sentinels_declared} completion sentinel(s) verified."
+          echo "All ${#files[@]} SQL self-tests passed — no whole-file skips; ${sentinels_declared} completion sentinel(s) verified, covering ${arms_declared} declared arms."
+          echo "Standing limits of this gate, printed so this log does not overclaim: (1) a skip message composed at RUNTIME on a server whose lc_messages is not C would evade both skip nets — none exists in this corpus today; (2) partial skips reported UNPOLICED above are named, not failed, and the coverage they withhold is NOT verified by anything; (3) branch protection is OFF on this repo, so a failure here does not block a merge — it records what did not happen."
       # Best-effort EARLY release of the shared-test-db mutex (Phase 158 /
       # OPS-01), identical in all three DB-touching jobs. Job teardown drops the
       # psql session anyway; killing it here hands the lock to the next waiter a
