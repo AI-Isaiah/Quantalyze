@@ -809,7 +809,17 @@ function FactsheetHeader({
           )}
         </div>
         <div className="text-left sm:text-right flex flex-row sm:flex-col items-start sm:items-end gap-6 sm:gap-3 flex-wrap">
-          <FreshnessChip computedAt={payload.computedAt} />
+          {/* Phase 162 / HONEST-02 (D-162-2, UI-SPEC C-1) — the recency line
+              stacks DIRECTLY BELOW the chip's date line, so the wrapper (not
+              FreshnessChip) owns the pairing. Putting the line inside the chip
+              would have been the shorter diff and the wrong one: D-162-2 is
+              additive, and the chip's rendered anatomy stays byte-identical
+              whether or not the line is present (pinned by
+              FactsheetView.recency-line.test.tsx F-4). */}
+          <div>
+            <FreshnessChip computedAt={payload.computedAt} />
+            <SeriesRecencyLine seriesDates={payload.dates} />
+          </div>
           {payload.aum != null && (
             <CapacityChip
               aum={payload.aum}
@@ -896,6 +906,48 @@ function FreshnessChip({ computedAt }: { computedAt: string }) {
         {Number.isFinite(days) && days >= 0 && <span className="ml-1 text-text-muted">({Math.round(days)}d)</span>}
       </p>
     </div>
+  );
+}
+
+/**
+ * Series-recency line — Phase 162 / HONEST-02 (D-162-2, UI-SPEC § C-1).
+ *
+ * WHY this line exists. `FreshnessChip` above states when the analytics job
+ * last RAN. That is not the same fact as how current the TRACK RECORD is: an
+ * account whose fills stopped months ago still gets polled and still gets
+ * recomputed, so the chip can honestly read "fresh" over a series that ended
+ * in the spring. The 162 census measured exactly that case — a live, polling,
+ * error-free key whose venue-side watermark had not moved in 111 days. Without
+ * this line an allocator reads a green chip and infers a live track record.
+ *
+ * DATA SOURCE — the whole point. The date is the LAST POINT OF THE RESOLVED
+ * RETURN SERIES (`payload.dates`, built by the read path from
+ * `resolveDailyReturnSeries`, src/lib/factsheet/resolve-series.ts). That is a
+ * value only a real analytics run over real fills can advance. NEVER
+ * `computed_at`, NEVER `last_sync_at` — both advance for an account that has
+ * not traded, which is precisely the dishonesty this line exists to kill.
+ *
+ * ADDITIVE BY CONTRACT (D-162-2): no staleness threshold of its own, no tone,
+ * no effect on the chip's 3d/7d ladder. The repo already carries one known
+ * chip-vs-`computeFreshness` threshold disagreement; a fourth ladder here
+ * would make it worse. Tone stays on the chip, which earns it.
+ */
+function SeriesRecencyLine({ seriesDates }: { seriesDates: string[] }) {
+  const last = seriesDates.length > 0 ? seriesDates[seriesDates.length - 1] : null;
+  if (!last) return null;
+  // The SAME formatter the chip's date line one row above calls. Two
+  // formatters on adjacent lines is the drift the one-formatter-per-surface
+  // rule exists to prevent — two renderings of one date would itself be a
+  // small dishonesty (pinned by F-2, which compares the two RENDERED strings).
+  const formatted = formatIsoDate(last);
+  // `formatIsoDate` returns this em dash when the input does not parse.
+  // UI-SPEC C-1 unknown-date rule: the line then does not render AT ALL — no
+  // "Track record through —", no placeholder. A claim with no date fails the
+  // print test, and the chip's "Computed · not yet" state already covers the
+  // no-analytics case. Absence is the honest render here, not a fallback.
+  if (formatted === "—") return null;
+  return (
+    <p className="mt-1 text-caption text-text-muted">Track record through {formatted}</p>
   );
 }
 
