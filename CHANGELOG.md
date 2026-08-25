@@ -1,5 +1,39 @@
 # Changelog
 
+## [0.72.1.0] - 2026-08-25
+
+### fix: two live surfaces were asserting things the data did not support
+
+Both were found by a silent-failure audit of already-shipped phases, and both were live on
+production when found. Neither is a regression from a recent change — they are older defects that
+a later change made louder.
+
+**A failed computation was presenting as a current one.** A published strategy whose analytics job
+failed kept its previous Sharpe, CAGR and Max Drawdown on screen, carried a "Synced" timestamp, and
+took a ranked position derived by sorting those figures. At the time of the fix, 17 of 18 published
+strategies were in exactly that state.
+
+The "Synced" date was not merely stale. The status bridge re-stamps `computed_at` on the branches it
+writes, including the failure branch — so the timestamp dated the *failure* while the metrics beside
+it dated some earlier success. It printed "Synced just now" at the moment the sync failed.
+
+A failed row now shapes exactly like a never-computed one: no metric values, no freshness badge, no
+ranked ordinal. The row keeps its name, its AUM and its factsheet link — it simply stops asserting
+numbers it cannot justify. This is deliberately the state each surface *already had* for a strategy
+that had never computed, so no new copy, badge or error state was introduced on any public page.
+
+Closed across every surface that spoke for a strategy, not just the two where it was first seen:
+browse and discovery lists and detail pages, the shareable tearsheet, the OG social card, the page
+metadata that feeds link unfurls and search results, the v2 factsheet, the portfolio PDF, the
+recommendations surface, the portfolio breakdown table, and the returns API. The PDF routes already
+refused correctly — the HTML pages they screenshot did not, which is why the gate had to move.
+
+**"API Key Connected" was shown for a key that was never linked.** Connecting a key from the strategy
+edit page created and billed the key, reported success, and never wrote the link — so the strategy
+never synced. It also repeated: the button re-armed on reload from a value that was never written,
+minting another unused key each time. The link is now written before success is reported, and a
+failure to link says so plainly instead of claiming the key is connected.
+
 ## [0.72.0.0] - 2026-08-25
 
 ### feat: v1.20 Phase 161 — WIZERR, honest error surfaces
