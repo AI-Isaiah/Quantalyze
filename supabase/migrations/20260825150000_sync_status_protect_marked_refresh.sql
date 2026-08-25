@@ -186,8 +186,27 @@
 -- `computed_at = now()`. The hoist is inert for every pre-existing path: both
 -- hoisted statements read state no earlier statement in this function has
 -- written (branch (a) was the only possible earlier writer, and it returned),
--- and neither touches compute_jobs. It costs one extra aggregate over this
+-- and neither writes anything itself. It costs one extra aggregate over this
 -- strategy's compute_jobs rows on the non-terminal path.
+--
+-- ⛔ DEVIATION 2 ALSO MOVES THE NON-TERMINAL COUNT, and that half is a
+-- data-integrity fix in its own right (161.1 migration re-review, HIGH). The
+-- first draft of this file hoisted the partition above branch (a) and left the
+-- `v_nonterminal_count` read where it was, immediately before branch (a)'s IF —
+-- which INVERTED the order in which this function reads its two compute_jobs
+-- sets relative to 20260802120000 STEP 4. At READ COMMITTED (this repo sets no
+-- isolation override) each SELECT takes its own snapshot, and the two mark RPCs
+-- do not serialize per strategy, so an inverted pair opens a window in which a
+-- job crossing running → failed_final is seen as RUNNING by the failure read
+-- and as TERMINAL by the count — invisible to both, so branches (a), (b) and
+-- (b-prime) all stand down and branch (c) PUBLISHES over a live permanent
+-- failure. Job status is monotone toward terminal in this schema, so the
+-- inclusive set must be read FIRST and the failure set LAST; then a job
+-- crossing the window is merely double-counted, which resolves to branch (a) or
+-- to the hold and never to a publish. The full argument, including the
+-- enumeration of every write path that could have broken monotonicity, is at
+-- the read itself. TWO SEPARATE ordering assertions pin this: one for the
+-- monotonicity order, one for the hoist. Neither implies the other.
 --
 -- DEVIATION 1: branch (b)'s
 -- two statements (the `count(*)` and the `ORDER BY created_at DESC LIMIT 1`
@@ -246,6 +265,74 @@ BEGIN
     RETURN;
   END IF;
 
+  -- ---- the NON-TERMINAL count — FIRST of this function's two compute_jobs ---
+  -- ---- reads, and the ORDER IS THE CORRECTNESS ------------------------------
+  -- Consumed by branch (a) far below. It is read HERE, and that placement is a
+  -- data-integrity fix (161.1 migration re-review, HIGH), not tidiness.
+  --
+  -- ⛔ WHY THE ORDER OF THE TWO compute_jobs READS IS LOAD-BEARING
+  -- This function reads compute_jobs twice for its verdict: the INCLUSIVE
+  -- non-terminal set (here) and the non-superseded failed_final partition (the
+  -- live_failures CTE below). Nothing runs them atomically. There is no
+  -- isolation override anywhere in this repo, so this executes at READ
+  -- COMMITTED, where every statement takes its OWN fresh snapshot and a
+  -- concurrent transaction can commit a job's status flip BETWEEN them. Nor are
+  -- the callers serialized per strategy: mark_compute_job_failed takes FOR
+  -- UPDATE on the JOB row only, and neither it nor mark_compute_job_done takes
+  -- pg_advisory_xact_lock(hashtext(strategy_id)) before its PERFORM of this
+  -- function -- unlike positions_atomic_rebuild and sync_trades, which do. Two
+  -- sibling jobs of one live-API strategy, claimed in the same batch, therefore
+  -- run this concurrently as a matter of course.
+  --
+  -- The saving property is that a job's status is MONOTONE TOWARD TERMINAL.
+  -- Every write that produces a non-terminal status is itself gated on a
+  -- non-terminal status -- the claim RPCs move pending/failed_retry to running,
+  -- defer_compute_job and reset_stalled_compute_jobs carry WHERE status =
+  -- 'running', the fan-in release carries WHERE status = 'done_pending_children'
+  -- -- and NOTHING in this schema moves a 'done' or 'failed_final' row back out
+  -- of terminal. (The dropped-enqueue sweep of 20260819130500 "readmits" by
+  -- INSERTING a fresh job, never by reviving the terminal one; the orphan
+  -- terminalizer of 20260817120000 only moves running -> failed_final.)
+  --
+  -- Given monotonicity, reading the INCLUSIVE set FIRST and the failure set LAST
+  -- is safe by construction: a job that crosses running -> failed_final between
+  -- the two reads is caught by the LATER read, so the worst case is that it is
+  -- counted twice -- which resolves to branch (a), or to the v_protect_hold
+  -- stand-down, and never to a publish.
+  --
+  -- INVERTED, the same window has NO safe side. The failure read would see the
+  -- job as still 'running' (not yet a failure) and this read would then see it
+  -- as terminal (no longer in flight), so the job is invisible to BOTH counters:
+  -- branch (a) is skipped (count 0), branch (b) is skipped (v_failed_count 0),
+  -- branch (b-prime) is skipped (v_protected_count 0), and branch (c) fires and
+  -- writes computation_status = 'complete', computation_error = NULL and
+  -- computed_at = now() OVER A LIVE NON-SUPERSEDED PERMANENT FAILURE. That is a
+  -- funded account published as healthy on top of a broken one -- the exact
+  -- outcome branch (b-prime)'s own placement note declares must never happen.
+  --
+  -- 20260802120000 STEP 4 -- the definition this file re-bases -- read the two
+  -- sets in this order, which is why it was never exposed. The first draft of
+  -- THIS file inverted them by accident: the idempotence hoist lifted the
+  -- partition above branch (a) and left this read below it. The self-verify
+  -- block at the foot of this migration now PINS the order, so a future re-base
+  -- cannot re-invert it silently.
+  --
+  -- ⚠️ WHAT THIS DOES NOT FIX, stated so the next reader does not over-trust it.
+  -- Ordering makes the window's OUTCOME fail-safe; it does not close the window.
+  -- A concurrent sibling can still leave a published row parked at 'computing'
+  -- (branch (a) firing on a snapshot in which the marked job had not yet
+  -- failed), which the 16-hour reaper of 20260802120000 then resolves. That is
+  -- an unpublish that self-heals and is visible, versus a publish-over-failure
+  -- that does neither. The real closure is a per-strategy
+  -- pg_advisory_xact_lock in the two mark RPCs, matching the one
+  -- positions_atomic_rebuild and sync_trades already take. Those RPCs are
+  -- defined in other migrations, so it is deliberately NOT attempted here — a
+  -- half-applied lock discipline is worse than a documented window.
+  SELECT count(*) INTO v_nonterminal_count
+    FROM compute_jobs
+   WHERE strategy_id = p_strategy_id
+     AND status IN ('pending', 'running', 'done_pending_children', 'failed_retry');
+
   -- ---- Phase 161.1 / CR-01: is the published row still HEALTHY? -------------
   -- Conjunct (ii) of the protection predicate — see this file's header. Read
   -- ONCE, here, so branch (b)'s FILTER and branch (b-prime)'s FILTER cannot
@@ -264,9 +351,17 @@ BEGIN
   -- this function does can change the answer the next call computes.
   --
   -- The hoist is semantically inert for every pre-existing path. Both reads see
-  -- state this function has not yet written (branch (a) was the only writer that
-  -- could precede them, and it returned), and neither touches compute_jobs. The
-  -- ONLY behaviour delta is the v_protect_hold guard on branch (a) below.
+  -- state this function has not yet WRITTEN (branch (a) was the only writer that
+  -- could precede them, and it returned), and neither writes anything itself.
+  -- The ONLY behaviour delta is the v_protect_hold guard on branch (a) below.
+  --
+  -- ⚠️ The hoist constrains this read and the partition to sit above branch
+  -- (a)'s WRITE; it says nothing about where the non-terminal count sits. That
+  -- is a SECOND, independent ordering constraint and it is satisfied above, not
+  -- here: the non-terminal count must precede the PARTITION (monotonicity), and
+  -- the health read must precede branch (a)'s write (idempotence). Both hold in
+  -- the order as written, and the self-verify block pins each one separately —
+  -- one assertion cannot stand in for the other.
   --
   -- ⛔ This is the whole fail-safe. It is a COHERENCE CHECK with the Python
   -- guard, not a second opinion: if the Python guard declined to protect, it
@@ -427,11 +522,13 @@ BEGIN
   -- Preserve it. Only the analytics runner clears the warning, via its own
   -- 'computing' entry-write + clean terminal write when it actually recomputes;
   -- the bridge must never downgrade it.
-  SELECT count(*) INTO v_nonterminal_count
-    FROM compute_jobs
-   WHERE strategy_id = p_strategy_id
-     AND status IN ('pending', 'running', 'done_pending_children', 'failed_retry');
-
+  --
+  -- ⚠️ v_nonterminal_count is deliberately NOT read here. It is read at the TOP
+  -- of this function, BEFORE the failure partition — see the read-order note
+  -- there for why that is correctness and not tidiness. Moving the read back to
+  -- this spot, i.e. AFTER the partition, is the inversion that lets branch (c)
+  -- publish a live permanent failure as a clean success.
+  --
   -- ⛔ `AND NOT v_protect_hold` is the CR-01 idempotence delta and the ONLY
   -- change to this branch; its body below is byte-identical to
   -- 20260802120000. When it stands down, control falls through to branch
@@ -589,6 +686,29 @@ BEGIN
     RAISE EXCEPTION 'CR-01 verification failed: sync_strategy_analytics_status lost its pinned search_path in the re-base';
   END IF;
 
+  -- …and the EXECUTE ACL actually took (161.1 re-review, rls-policy-auditor).
+  -- The REVOKE above was the ONE unasserted ACL in this phase — zero apply-time
+  -- checks and zero durable arms — on the one object in the diff that is a
+  -- cross-tenant SECURITY DEFINER *writer*: it upserts strategy_analytics for an
+  -- arbitrary strategy_id with no ownership predicate anywhere in its body,
+  -- because its only callers are service-role RPCs that have already
+  -- established authority. Reachable by `authenticated`, that becomes a
+  -- cross-tenant publish-state write primitive — set any strategy to
+  -- 'computing' or 'failed' by id.
+  --
+  -- Mirrors check 1b of 20260825120000. `has_function_privilege` is used rather
+  -- than an information_schema lookup for the two reasons recorded there:
+  -- information_schema does not resolve grants held via PUBLIC or inherited
+  -- through role membership, and this one does. A CREATE OR REPLACE preserves
+  -- the pre-existing ACL, so a re-apply over a drifted grant would otherwise
+  -- carry the drift forward silently.
+  IF has_function_privilege('anon', 'public.sync_strategy_analytics_status(uuid)', 'EXECUTE') THEN
+    RAISE EXCEPTION 'CR-01 verification failed: role anon can EXECUTE sync_strategy_analytics_status — the REVOKE above did not take, and this function writes strategy_analytics for ANY strategy_id with no ownership check';
+  END IF;
+  IF has_function_privilege('authenticated', 'public.sync_strategy_analytics_status(uuid)', 'EXECUTE') THEN
+    RAISE EXCEPTION 'CR-01 verification failed: role authenticated can EXECUTE sync_strategy_analytics_status — the REVOKE above did not take, and this function writes strategy_analytics for ANY strategy_id with no ownership check';
+  END IF;
+
   -- THIS migration's fail-without-fix anchors.
   IF v_fn !~ 'metadata\s*->>\s*''source''' THEN
     RAISE EXCEPTION 'CR-01 verification failed: branch (b) does not read compute_jobs.metadata->>''source'' — a marked refresh still un-publishes a funded account through the bridge';
@@ -623,11 +743,48 @@ BEGIN
   IF v_fn !~* 'AND\s+NOT\s+v_protect_hold' THEN
     RAISE EXCEPTION 'CR-01 verification failed: branch (a) does not consult v_protect_hold — a sibling job bounces a protected row to computing and the NEXT bridge call poisons the row this migration already protected';
   END IF;
+  -- ⛔ THE HOIST ANCHOR IS BRANCH (a)'S WRITE, NOT THE NON-TERMINAL COUNT — and
+  -- it had to be re-anchored by the read-order fix below. This assertion used to
+  -- compare the health read against `INTO v_nonterminal_count`, which stood in
+  -- for "above branch (a)" only while that count sat immediately before branch
+  -- (a)'s IF. The count now moves to the top of the function, so that comparison
+  -- would be satisfied by a health read placed ANYWHERE after it — including
+  -- back below branch (a), i.e. by the very regression it exists to catch.
+  -- Anchor on the write itself: `INSERT INTO strategy_analytics` occurs three
+  -- times (branches (a), (b), (c)) and position() returns the FIRST, which is
+  -- branch (a)'s. So this now asserts the health read precedes EVERY write this
+  -- function can perform — which is the fixed-point property stated directly,
+  -- rather than a proxy for it that a later edit can quietly invalidate.
   IF position('INTO v_publish_healthy' IN v_fn) = 0
-     OR position('INTO v_nonterminal_count' IN v_fn) = 0
+     OR position('INSERT INTO strategy_analytics' IN v_fn) = 0
      OR position('INTO v_publish_healthy' IN v_fn)
-        > position('INTO v_nonterminal_count' IN v_fn) THEN
+        > position('INSERT INTO strategy_analytics' IN v_fn) THEN
     RAISE EXCEPTION 'CR-01 verification failed: the published-row health read is not hoisted above branch (a). Read after it, the protection is re-derived from a column this function transiently overwrites, and v_protect_hold would be computed from a status branch (a) had already replaced';
+  END IF;
+
+  -- 161.1 re-review (READ ORDER, HIGH — data integrity). The SECOND, INDEPENDENT
+  -- ordering constraint, and it is NOT implied by the hoist assertion above: the
+  -- inclusive non-terminal count must be read BEFORE the failed_final partition.
+  --
+  -- Both statements read compute_jobs, at READ COMMITTED, with no per-strategy
+  -- lock held by either mark RPC, so a concurrent running → failed_final commit
+  -- can land between them. Job status is monotone toward terminal, which makes
+  -- inclusive-first / failures-last safe (a job crossing the window is caught by
+  -- the later read and merely double-counted). Reversed, the job is seen as
+  -- RUNNING by the partition and TERMINAL by the count — invisible to both, so
+  -- branch (c) publishes 'complete' over a live non-superseded permanent
+  -- failure. The pre-fix draft of this file had exactly that inversion, so this
+  -- assertion is a regression pin, not a hypothetical.
+  --
+  -- Keyed on `INTO v_failed_count` because that is the partition's INTO list; it
+  -- and `INTO v_nonterminal_count` each occur EXACTLY ONCE in the deployed body
+  -- (measured before this fix was written, against pg_get_functiondef, so the
+  -- count is not read off the finished file).
+  IF position('INTO v_nonterminal_count' IN v_fn) = 0
+     OR position('INTO v_failed_count' IN v_fn) = 0
+     OR position('INTO v_nonterminal_count' IN v_fn)
+        > position('INTO v_failed_count' IN v_fn) THEN
+    RAISE EXCEPTION 'CR-01 verification failed: the two compute_jobs reads are in the WRONG ORDER — the failed_final partition is evaluated before the non-terminal count. At READ COMMITTED, with no per-strategy advisory lock in mark_compute_job_done/failed, a job committing running -> failed_final between the two reads is then invisible to BOTH: branch (a) sees no in-flight job, branches (b)/(b-prime) see no failure, and branch (c) publishes computation_status = complete with computed_at = now() over a live non-superseded permanent failure. Read the INCLUSIVE set first and the failure set last; job status is monotone toward terminal, so that ordering makes the same window resolve to branch (a) instead';
   END IF;
 
   IF v_fn !~* 'v_protected_count\s*>\s*0' THEN
