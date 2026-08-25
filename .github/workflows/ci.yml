@@ -1330,13 +1330,124 @@ jobs:
           printf '  - %s\n' "${files[@]}"
           # ON_ERROR_STOP=1 + the test files' RAISE EXCEPTION lines mean
           # a failed assertion exits non-zero and fails this step.
+          #
+          # 161.1-REVIEW WR-03 (systemic half) — A PRINTED SKIP IS NOT A PASS.
+          # ------------------------------------------------------------------
+          # MEASURED 2026-08-25 on a scratch Postgres 16: a file that opens with
+          # `RAISE NOTICE 'SKIP: <object> not applied here'; RETURN;` prints
+          #     psql:<file>:<line>: NOTICE:  SKIP: migration ... not yet applied
+          # and exits EXITCODE=0 having executed ZERO assertions. Three ledger
+          # files ran 0-of-7, 0-of-8 and 0-of-8 arms that way while CI stayed
+          # green, because the loop below used to read ONLY that exit code — so a
+          # skip was byte-identical to a pass in the only channel anything
+          # mechanical looks at.
+          #
+          # Why such a skip can never re-arm itself: this job has NO
+          # migration-apply step (checkout -> psql -> preflight -> mutex ->
+          # `psql -f`), and nothing else applies migrations to the TEST project
+          # either — .github/workflows/supabase-migrate.yml targets the
+          # PRODUCTION project only, and TEST is migrated BY HAND. The old
+          # promise "assertions enforce once the test DB catches up" named a
+          # mechanism that does not exist.
+          #
+          # Three files were fixed individually (they now RAISE EXCEPTION on an
+          # absent object). This block is the mechanical closure for the rest and
+          # the stop for new ones: capture each file's output and fail the step
+          # when the whole-file bail-out marker appears in it.
+          #
+          # WHY THE MARKER IS `NOTICE:  SKIP:` AND NOT THE WORD "SKIP" — it is
+          # derived from what this corpus actually prints, which is two distinct
+          # shapes (all five forms below were reproduced through psql before this
+          # regex was chosen):
+          #   (1) whole-file bail-out — `NOTICE:  SKIP: <reason>` then RETURN.
+          #       The file asserts NOTHING. This is the WR-03 defect; it FAILS.
+          #   (2) narrow partial skips — `NOTICE:  SKIP (5d/5f/5g): ...`,
+          #       `NOTICE:  SKIP Part 2: ...`, `NOTICE:  PASS WITH 1 SKIP: ...`,
+          #       and prose such as `NOTICE:  Part 1 OK: ... SKIP LOCKED present`.
+          #       These name the exact assertions withheld, are keyed on a real
+          #       migration-A/B divergence, and are already policed in-file by
+          #       both-or-neither coherence assertions that RAISE EXCEPTION when
+          #       the skip is dishonest. They are ANNOTATED below, never failed:
+          #       reddening them would redden CI for a state this repo
+          #       deliberately tolerates.
+          # ⚠️ A bare `grep -F 'SKIP:'` does NOT discriminate — `PASS WITH 1 SKIP:`
+          # (test_wizard_session_idempotency.sql, test_wizard_composite_fence.sql)
+          # contains that substring and prints on a PASSING run. Anchoring to the
+          # psql message label is what separates the two. That label is C-locale
+          # text; these runners are C-locale, and a localized server would make
+          # this line go blind rather than noisy.
+          #
+          # ⛔ This does NOT touch the legitimate JOB-level skip. Fork PRs and
+          # workflow_dispatch never reach this step (the job `if:` excludes them),
+          # so nothing here can fire on them; the `frontend` aggregator's
+          # trusted-vs-untrusted `::error::` block remains the sole judge of
+          # whether a skipped JOB is tolerable. What is refused here is narrower:
+          # a file that RAN and printed a whole-file skip.
+          #
+          # Branch protection is OFF on this repo, so this is ADVISORY at merge —
+          # it makes the log state what did not happen; it does not block a merge.
+          #
+          # NOTICEs go to psql's STDERR, hence the 2>&1 capture. `-a` on every
+          # grep: a NUL byte anywhere in the captured output would otherwise make
+          # GNU grep treat it as binary and report "no match" on bytes it never
+          # really read — the same false green this block exists to remove.
+          bad=0
+          sentinels_declared=0
+          out="${RUNNER_TEMP}/sql-test-output.log"
           for f in "${files[@]}"; do
             echo ""
             echo "=== Running: $f ==="
-            psql "$TEST_SUPABASE_DB_URL" -v ON_ERROR_STOP=1 -f "$f"
+            status=0
+            psql "$TEST_SUPABASE_DB_URL" -v ON_ERROR_STOP=1 -f "$f" > "$out" 2>&1 || status=$?
+            cat "$out"
+            if [ "$status" -ne 0 ]; then
+              echo "::error file=$f::psql exited $status — a RAISE EXCEPTION assertion failed, or the connection did. The captured output above is the whole story for this file."
+              exit "$status"
+            fi
+            if grep -aE 'NOTICE: +SKIP:' "$out" >/dev/null 2>&1; then
+              echo "::error file=$f::printed a whole-file SKIP notice and exited 0. THAT IS NOT A PASS: the file RETURNed before its assertions, so this run proves nothing about the object it guards — it is indistinguishable from a green run only because exit code was the sole thing read. Nothing applies migrations to the TEST project (this job has no apply step; supabase-migrate.yml targets PRODUCTION only), so the skip cannot re-arm itself on a later run. Fix the file the way supabase/tests/test_ledger_refresh_{staleness,fanout,composite_arm}.sql were fixed: RAISE EXCEPTION on the absent object instead of skipping."
+              echo "  ↳ $f printed:"
+              grep -aE 'NOTICE: +SKIP:' "$out" | sed 's/^/      /'
+              bad=1
+            fi
+            # Narrow, self-policed partial skips — surfaced, never fatal (above).
+            partials="$(grep -aoE 'SKIP \([^)]*\)|SKIP Part [0-9]+|PASS WITH [0-9]+ SKIPS?' "$out" | sort -u | tr '\n' ' ' || true)"
+            if [ -n "$partials" ]; then
+              echo "::notice file=$f::ran with narrow partial skips — NOT a failure, each names the assertions it withheld and is policed in-file: ${partials}"
+            fi
+            # 'ALL N ARMS EXECUTED' sentinel. Where a file DECLARES one in a
+            # RAISE NOTICE, the run must PRINT it. Without this, an edit that
+            # neuters an arm in place — deleting the assertion, renumbering, or
+            # short-circuiting before the end — leaves the file exiting 0 and is
+            # invisible to CI. Read from the RAISE NOTICE line specifically, not
+            # from anywhere in the file: these files discuss the sentinel in
+            # their header comments too, and a comment cannot be printed.
+            sentinel="$(grep -aE "RAISE NOTICE '[^']*ALL [0-9]+ ARMS EXECUTED" "$f" | grep -aoE 'ALL [0-9]+ ARMS EXECUTED' | head -1 || true)"
+            if [ -n "$sentinel" ]; then
+              sentinels_declared=$((sentinels_declared + 1))
+              if grep -aF "$sentinel" "$out" >/dev/null 2>&1; then
+                echo "  ↳ completion sentinel OK: ${sentinel}"
+              else
+                echo "::error file=$f::declares the completion sentinel '${sentinel}' but this run never printed it, yet psql exited 0. The file stopped short of its own end-of-arms notice, so an arm was neutered, renumbered or short-circuited and the missing coverage is silent. Restore the arm, or change the sentinel to the number of arms the file actually executes — do not delete the notice."
+                bad=1
+              fi
+            fi
           done
+          # Anti-vacuity pin for the sentinel check itself. If NO file declares a
+          # sentinel, the block above verified nothing and would keep reporting
+          # green forever — deleting every notice must not look the same as
+          # having none. supabase/tests/test_ledger_refresh_{staleness,fanout,
+          # composite_arm}.sql each carry one.
+          if [ "$sentinels_declared" -eq 0 ]; then
+            echo "::error::no test file declares an 'ALL N ARMS EXECUTED' sentinel, so the sentinel check above verified NOTHING on this run. Either a file was renamed and its notice lost, or the notices were removed; restore one or retire this pin deliberately."
+            bad=1
+          fi
+          if [ "$bad" = 1 ]; then
+            echo "::error::SQL self-tests did not really run clean — see the per-file errors above. A file that prints a skip, or stops short of its completion sentinel, exits 0 and would otherwise be reported as a pass."
+            exit 1
+          fi
           echo ""
-          echo "All ${#files[@]} SQL self-tests passed."
+          echo "All ${#files[@]} SQL self-tests passed — no whole-file skips, ${sentinels_declared} completion sentinel(s) verified."
       # Best-effort EARLY release of the shared-test-db mutex (Phase 158 /
       # OPS-01), identical in all three DB-touching jobs. Job teardown drops the
       # psql session anyway; killing it here hands the lock to the next waiter a
