@@ -406,7 +406,7 @@ Plans:
 |-------|----------------|--------|-----------|
 | 158. OPS-CI merge=deploy | 6/6 | Complete    | 2026-08-21 |
 | 159. RANK ranking integrity | 0/? | Not started | - |
-| 160. PROVENANCE venue/annualization | 7/7 | ✅ Complete | PROD persist smoke passed 2026-08-25; see 160-UAT.md |
+| 160. PROVENANCE venue/annualization | 7/7 | 🟡 Arm proven, 1/3 surfaces | Persist arm smoked via ApiKeyManager 2026-08-25; StrategyForm un-smoked, AllocatorExchangeManager unmounted |
 | 161. WIZERR honest errors | 0/? | Not started | - |
 | 162. HONEST visible truth | 0/? | Not started | - |
 | 163. HARDEN reliability + security | 0/? | Not started | - |
