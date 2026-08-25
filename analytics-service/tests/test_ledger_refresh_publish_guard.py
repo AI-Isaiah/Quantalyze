@@ -38,6 +38,7 @@ fails first and loudly.
 """
 from __future__ import annotations
 
+import asyncio
 import re
 from pathlib import Path
 from typing import Any
@@ -75,6 +76,16 @@ _PUBLISH_STATE_KEYS = (
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _JOB_WORKER = _REPO_ROOT / "analytics-service" / "services" / "job_worker.py"
+_ANALYTICS_RUNNER = _REPO_ROOT / "analytics-service" / "services" / "analytics_runner.py"
+_MIGRATIONS_DIR = _REPO_ROOT / "supabase" / "migrations"
+
+# Any string literal that OPENS with a ledger-refresh-shaped marker, in Python or
+# SQL. Deliberately looser than the two known spellings: an underscore, a space,
+# or an unknown suffix is precisely the "fifth spelling" this contract exists to
+# catch, and a regex that only matched the correct values could never see one.
+_MARKER_LITERAL_RE = re.compile(
+    r"""["']((?:[Ll]edger[-_ ]?[Rr]efresh)[A-Za-z0-9_-]*)["']"""
+)
 _BRIDGE_MIGRATION = (
     _REPO_ROOT
     / "supabase"
@@ -285,6 +296,29 @@ class TestCR02SiblingStampsAreGuarded:
 # ---------------------------------------------------------------------------
 # CR-02 — the structural invariant that stops a FIFTH site reopening it
 # ---------------------------------------------------------------------------
+def _strip_py_comments(text: str) -> str:
+    """Drop whole-line ``#`` comments, preserving line count.
+
+    This file's rule, stated in the CR-02 gate below and now enforced at every
+    positive assertion in it: **prose must never satisfy a mechanical gate.**
+    Line count is preserved so offsets computed on the stripped text stay
+    comparable line-for-line with the raw source.
+    """
+    return "\n".join(
+        "" if ln.lstrip().startswith("#") else ln for ln in text.splitlines()
+    )
+
+
+# A "tail sentinel" is only a tail sentinel if it is actually in the tail.
+# MEASURED on the region this constant exists for: inside
+# ``_stamp_strategy_analytics_failed`` the prose ``# ⛔ And NO
+# _heal_delete_basis_series().`` sits at fraction 0.713 of the region while the
+# real terminating call sits at 0.996. Without a floor, deleting the closure's
+# terminating heal — the exact regression the sentinel exists to catch — leaves
+# the gate satisfied by a COMMENT.
+_TAIL_SENTINEL_MIN_FRACTION = 0.9
+
+
 def _region(src: str, header: str, label: str, sentinel: str) -> tuple[int, int]:
     """Line span of a nested ``async def`` / top-level ``async def``, by indent.
 
@@ -292,6 +326,15 @@ def _region(src: str, header: str, label: str, sentinel: str) -> tuple[int, int]
     region's TAIL that the header CANNOT supply — a sentinel that is a substring
     of its own locator cannot fail, which is the vacuity WR-01..04 of this
     phase's review caught in five of eight sibling regions.
+
+    The sentinel check is made three ways non-vacuous:
+
+    * it runs COMMENT-STRIPPED, so a mention in prose cannot satisfy it;
+    * it uses the LAST occurrence, so an earlier code mention cannot stand in
+      for the terminating one;
+    * that last occurrence must lie past ``_TAIL_SENTINEL_MIN_FRACTION`` of the
+      region — the offset floor ``_assert_region`` in the sibling file already
+      carries and this extractor did not.
     """
     lines = src.splitlines()
     start = next(
@@ -311,10 +354,25 @@ def _region(src: str, header: str, label: str, sentinel: str) -> tuple[int, int]
             end = i
             break
     body = "\n".join(lines[start:end])
-    assert sentinel in body, (
+    # Structure was read from the RAW source (indentation is structure); the
+    # positive assertion below runs against code only.
+    code = _strip_py_comments(body)
+    assert sentinel in code, (
         f"ANTI-VACUITY: the extracted {label} does not contain its tail sentinel "
-        f"{sentinel!r}, so the extraction landed on the wrong text or stopped "
-        f"short. Region began: {body[:200]!r}"
+        f"{sentinel!r} in CODE (comments stripped), so the extraction landed on "
+        f"the wrong text, stopped short, or the sentinel now survives only as "
+        f"prose. Region began: {body[:200]!r}"
+    )
+    offset = code.rindex(sentinel)
+    floor = int(len(code) * _TAIL_SENTINEL_MIN_FRACTION)
+    assert offset >= floor, (
+        f"ANTI-VACUITY: the last CODE occurrence of tail sentinel {sentinel!r} "
+        f"in {label} is at offset {offset} of {len(code)} (fraction "
+        f"{offset / max(len(code), 1):.3f}), before the required tail floor "
+        f"{floor}. Either the extraction is overrunning the region, or the "
+        f"terminating statement this sentinel pins has been deleted and only an "
+        f"earlier mention is holding the gate up. Do not lower the floor to make "
+        f"this pass — that is the vacuity, not the fix."
     )
     return start, end
 
@@ -341,7 +399,15 @@ class TestCR02OneChokePoint:
             "async def _stamp_strategy_analytics_failed",
             "the _stamp_strategy_analytics_failed choke point",
             # Tail sentinel: the D3-SECONDARY heal call that closes the closure.
-            "_heal_delete_basis_series()",
+            #
+            # ⚠️ `await` is part of the sentinel, and that is F18, measured. The
+            # bare spelling `_heal_delete_basis_series()` also occurs at
+            # fraction 0.713 of this region inside the comment `# ⛔ And NO
+            # _heal_delete_basis_series().`, so deleting the closure's real
+            # terminating call left the gate satisfied by PROSE. The sibling
+            # file's `_assert_region` already pinned the awaited form for this
+            # exact reason; this one did not.
+            "await _heal_delete_basis_series()",
         )
         assert fn_start < guard_start and guard_end <= fn_end, (
             "the choke point is no longer nested inside the handler; the "
@@ -510,10 +576,36 @@ def _runner_supabase(
 ) -> MagicMock:
     """A supabase mock that distinguishes the runner's THREE maybe_single reads
     by the columns they select, so the publish snapshot is a real read rather
-    than a MagicMock that can never match a status string."""
+    than a MagicMock that can never match a status string.
+
+    ⛔ STATEFUL, AND THAT IS THE POINT (F15). The first version of this fake
+    answered every ``computation_status`` read with the canned ``existing_status``
+    no matter what the runner had already WRITTEN. A fake like that cannot
+    observe an ordering bug: move the publish-snapshot read below
+    ``_mark_computing`` — the single regression that makes the whole hop-2 guard
+    permanently inert — and it keeps handing back 'complete_with_warnings', so
+    every behavioural test in this class stays green while production is broken.
+    A ``strategy_analytics`` write now UPDATES what the next read returns, which
+    is what makes ``test_marked_insufficient_history_preserves_publish_state``
+    (and its siblings) able to fail on that regression at all: after
+    ``_mark_computing`` the row really does read 'computing', the snapshot really
+    does come back None, and the marked cases really do go destructive. Measured
+    RED that way.
+    """
     sb = MagicMock()
     table_mock = MagicMock()
     sb.table.return_value = table_mock
+
+    # The row this fake actually holds: `dict[str, Any] | None`, left unannotated
+    # because mypy --strict forbids declaring a type on a non-self attribute.
+    sb.row = (
+        None
+        if existing_status is None
+        else {
+            "computation_status": existing_status,
+            "computation_warned": existing_status == "complete_with_warnings",
+        }
+    )
 
     def _select(columns: str, *_a: object, **_kw: object) -> MagicMock:
         chain = MagicMock()
@@ -523,14 +615,7 @@ def _runner_supabase(
         chain.single.return_value = chain
         chain.maybe_single.return_value = chain
         if "computation_status" in columns:
-            data: Any = (
-                None
-                if existing_status is None
-                else {
-                    "computation_status": existing_status,
-                    "computation_warned": existing_status == "complete_with_warnings",
-                }
-            )
+            data: Any = None if sb.row is None else dict(sb.row)
         elif "data_quality_flags" in columns:
             data = {"data_quality_flags": {"csv_source": True}}
         elif "daily_return" in columns:
@@ -547,6 +632,12 @@ def _runner_supabase(
 
     def _upsert(payload: dict[str, Any], **_kw: object) -> MagicMock:
         sb.upserts.append(dict(payload))
+        # Apply the write, so a later read sees what this run actually did.
+        row = dict(sb.row) if sb.row is not None else {}
+        for column in ("computation_status", "computation_warned"):
+            if column in payload:
+                row[column] = payload[column]
+        sb.row = row or None
         return MagicMock(execute=MagicMock(return_value=MagicMock(data=[])))
 
     def _delete(**_kw: object) -> MagicMock:
@@ -571,8 +662,17 @@ class TestCR03RunnerGuard:
     writes ``computation_status='computing'`` unconditionally, so a snapshot
     taken after it can never read a terminal-success status and the guard is
     permanently, invisibly inert — a guard that looks right in review and
-    protects nothing. ``test_snapshot_is_taken_before_mark_computing`` is the
-    only thing standing between this file and that.
+    protects nothing.
+
+    ⚠️ This docstring used to claim ``test_snapshot_is_taken_before_mark_
+    computing`` was "the only thing standing between this file and that". It was
+    not standing between anything (F15): it compared the two ``def`` offsets,
+    which the regression does not move, and the ``_runner_supabase`` fake
+    answered every status read with a canned value regardless of what had been
+    written — so neither the structural gate nor any behavioural test could see
+    it. TWO independent detectors now do: that gate compares the two
+    ``db_execute(...)`` CALL sites, and the fake is stateful, so the marked
+    cases below genuinely go destructive once the snapshot is read too late.
     """
 
     @staticmethod
@@ -706,18 +806,220 @@ class TestCR03RunnerGuard:
 
     def test_snapshot_is_taken_before_mark_computing(self) -> None:
         """ORDERING IS THE MECHANISM — see this class's docstring."""
-        src = (
-            _REPO_ROOT / "analytics-service" / "services" / "analytics_runner.py"
-        ).read_text()
-        snapshot = src.index("_read_publish_snapshot")
-        mark_computing = src.index("def _mark_computing()")
-        assert snapshot < mark_computing, (
-            "the publish snapshot is taken AT OR AFTER _mark_computing, which "
-            "writes computation_status='computing' unconditionally. Every "
-            "subsequent read answers 'computing', never a terminal-success "
-            "status, so the hop-2 guard can never fire — while still looking "
-            "like a guard in review."
+        # ⛔ CALL SITES, NOT DEFINITIONS — this is F15, and the version of this
+        # gate that compared `_read_publish_snapshot` (which resolves to its
+        # `def`) against `def _mark_computing()` could not fail. Both closures
+        # are DEFINED adjacently and then INVOKED further down; the hazard is
+        # moving the snapshot's `await db_execute(...)` below the mark's. That
+        # leaves both `def` offsets exactly where they were, so the old gate
+        # stayed GREEN while in production `_mark_computing` had already written
+        # 'computing', every snapshot read returned None, and the entire hop-2
+        # guard was permanently, invisibly inert. Measured RED against the moved
+        # CALL after this change; the old comparison was measured GREEN against
+        # the same mutation.
+        #
+        # Comment-stripped, per this file's rule: a comment naming either call
+        # must not be able to move — or hold up — this gate.
+        src = _strip_py_comments(
+            (_REPO_ROOT / "analytics-service" / "services" / "analytics_runner.py")
+            .read_text()
         )
+        snapshot_call = "db_execute(_read_publish_snapshot)"
+        mark_call = "db_execute(_mark_computing)"
+        for needle in (snapshot_call, mark_call):
+            assert src.count(needle) == 1, (
+                f"expected exactly ONE `{needle}` call site in "
+                f"analytics_runner.py; found {src.count(needle)}. With zero the "
+                "ordering assertion below is aimed at nothing; with more than "
+                "one it is ambiguous about which pair it ordered. Re-point this "
+                "gate deliberately — do not delete it."
+            )
+        snapshot = src.index(snapshot_call)
+        mark_computing = src.index(mark_call)
+        assert snapshot < mark_computing, (
+            "the publish snapshot is READ at or after _mark_computing is CALLED, "
+            "and _mark_computing writes computation_status='computing' "
+            "unconditionally. Every subsequent read answers 'computing', never a "
+            "terminal-success status, so the hop-2 guard can never fire — while "
+            "still looking like a guard in review."
+        )
+
+
+class TestF3BudgetTimeoutLeavesNoParkedFactsheet:
+    """F3 — the hole the ``except Exception`` arms cannot see.
+
+    The worker runs every handler under ``asyncio.wait_for(handler(job),
+    timeout=...)``. Expiry cancels the handler with ``CancelledError``, a
+    **BaseException**: none of the runner's five guarded terminal stamps fire, so
+    without an explicit arm the run exits with ``_mark_computing``'s
+    ``'computing'`` still on the row. The SQL bridge then reads that row, sees a
+    non-published status, refuses to protect it and writes ``'failed'`` — the
+    factsheet goes dark on a recurring, unattended refresh.
+
+    These tests drive the REAL mechanism (an actual ``asyncio.wait_for`` expiry
+    against a hanging step) and assert the ROW'S END STATE, not that a handler
+    was entered.
+
+    Neuter to redden: make ``_restore_publish_state_on_abort`` a no-op (measured
+    RED), or delete BOTH abort arms from ``run_csv_strategy_analytics`` — which
+    is the pre-fix baseline and reproduces the audit's finding exactly, the row
+    ending at ``'computing'`` (measured RED). Deleting only the
+    ``except asyncio.CancelledError`` arm does NOT redden it: the
+    ``except BaseException`` arm at the bottom catches the same cancellation.
+    That redundancy is deliberate — the named arm documents the measured case,
+    the broad arm closes the class.
+    """
+
+    _ROWS = [
+        {"date": "2024-01-01", "daily_return": 0.005},
+        {"date": "2024-01-02", "daily_return": -0.003},
+        {"date": "2024-01-03", "daily_return": 0.008},
+    ]
+
+    @staticmethod
+    async def _cancel_mid_run(sb: MagicMock, marker: str | None) -> None:
+        """Run the real handler under a real budget that expires mid-compute."""
+        from services.analytics_runner import run_csv_strategy_analytics
+
+        async def _hang(*_a: object, **_kw: object) -> Any:
+            await asyncio.sleep(30)
+
+        with patch("services.analytics_runner.get_supabase", return_value=sb), \
+             patch("services.analytics_runner.get_benchmark_returns", new=_hang):
+            with pytest.raises(asyncio.TimeoutError):
+                await asyncio.wait_for(
+                    run_csv_strategy_analytics("s1", refresh_source=marker),
+                    timeout=0.1,
+                )
+
+    @pytest.mark.asyncio
+    async def test_unmarked_budget_timeout_still_leaves_the_row_computing(self) -> None:
+        """CONTROL, and a deliberate statement of scope.
+
+        A user-initiated compute that blows its budget is ATTENDED — the wizard
+        poller is watching and the 16-hour reaper owns the stuck row. The runbook
+        is explicit that no third mechanism may race them, so the restore must
+        NOT fire here. This case also proves the marked assertion below is not
+        passing because the driver failed to reach ``_mark_computing``: the row
+        demonstrably moved to 'computing' on this identical path.
+        """
+        sb = _runner_supabase(self._ROWS, existing_status="complete_with_warnings")
+        await self._cancel_mid_run(sb, None)
+
+        assert sb.row == {"computation_status": "computing", "computation_warned": True}, (
+            "the unmarked budget timeout did not even reach _mark_computing "
+            f"(row={sb.row!r}); the marked case below would then be asserting "
+            "against a run that never happened."
+        )
+        assert not [
+            u for u in sb.upserts
+            if u.get("computation_status") == "complete_with_warnings"
+        ], "an UNMARKED cancellation restored a publish state it must not touch"
+
+    @pytest.mark.asyncio
+    async def test_marked_budget_timeout_restores_the_published_state(self) -> None:
+        sb = _runner_supabase(self._ROWS, existing_status="complete_with_warnings")
+        await self._cancel_mid_run(sb, _MARKER)
+
+        assert sb.row is not None
+        assert sb.row["computation_status"] == "complete_with_warnings", (
+            "hop 2 of a MARKED refresh was killed by the worker's per-job budget "
+            f"and left the row at {sb.row['computation_status']!r}. CancelledError "
+            "is a BaseException, so none of the five guarded terminal stamps ran "
+            "and _mark_computing's 'computing' is still standing. The SQL bridge "
+            "(20260825150000) protects only a PUBLISHED status, so it will refuse "
+            "this row and write 'failed' — strategyGate reads that as "
+            "ANALYTICS_FAILED and the live factsheet goes dark."
+        )
+        assert sb.row["computation_warned"] is True
+
+        restore = sb.upserts[-1]
+        assert restore["computing_started_at"] is None, (
+            "the restore left computing_started_at set, which re-arms "
+            "reap_strategy_analytics_stuck_computing against a row that is no "
+            "longer computing."
+        )
+        assert restore.get("computation_error"), (
+            "the abort was made INVISIBLE. Protected is not the same as silent — "
+            "computation_error is one of the four places this failure is supposed "
+            "to remain readable."
+        )
+        assert "data_quality_flags" not in restore, (
+            "the restore rebuilt data_quality_flags, which on a live row destroys "
+            "the NAV_TWR_GUARD_KEYS the derive pre-stamped (the laundering class "
+            "migration 20260707120000 closed)."
+        )
+
+    @pytest.mark.asyncio
+    async def test_marked_budget_timeout_over_unpublished_row_stays_loud(self) -> None:
+        """FAIL-SAFE DIRECTION on the abort path.
+
+        A marked refresh over a row that was never published has nothing to
+        restore. It must NOT invent a green state — it must leave the loud
+        terminal decision to the bridge.
+        """
+        sb = _runner_supabase(self._ROWS, existing_status="computing")
+        await self._cancel_mid_run(sb, _MARKER)
+
+        assert sb.row == {"computation_status": "computing", "computation_warned": False}
+        assert not [u for u in sb.upserts if u.get("computation_error")], (
+            "a marked refresh over an UNPUBLISHED row wrote a restore payload. "
+            "The snapshot must have been None, so nothing may be written here — "
+            "suppressing the bridge's loud 'failed' would hang the wizard poller "
+            "on an infinite spinner."
+        )
+
+
+class TestRegionExtractorRejectsProseSentinels:
+    """F18, as a property of the extractor rather than a fact about one file.
+
+    ⚠️ Proven against SYNTHETIC sources on purpose. The regression this guards
+    is "delete the terminating call from ``job_worker.py``", and that file is
+    owned by another change in flight; mutating a shared file to witness RED is
+    how two agents corrupt each other's work. A synthetic source exercises the
+    identical code path and, unlike a one-off mutation probe, keeps the property
+    asserted forever.
+    """
+
+    _SRC = "\n".join(
+        [
+            "async def _victim() -> None:",
+            "    do_something()",
+            "    # ⛔ And NO _heal_delete_basis_series(). This is the point.",
+            *["    filler()"] * 40,
+            "    await _heal_delete_basis_series()",
+            "",
+            "def _next() -> None:",
+            "    pass",
+        ]
+    )
+
+    def test_real_tail_call_is_accepted(self) -> None:
+        """CONTROL — without this, the two rejections below could be passing "
+        because the extractor rejects everything."""
+        start, end = _region(
+            self._SRC, "async def _victim", "the victim", "await _heal_delete_basis_series()"
+        )
+        body = "\n".join(self._SRC.splitlines()[start:end])
+        assert "await _heal_delete_basis_series()" in body
+        assert "def _next" not in body, "the region overran into the next function"
+
+    def test_prose_only_sentinel_is_rejected(self) -> None:
+        """The F18 regression verbatim: the terminating call is gone, the
+        comment naming it survives."""
+        gutted = self._SRC.replace("    await _heal_delete_basis_series()\n", "")
+        with pytest.raises(AssertionError, match="in CODE"):
+            _region(gutted, "async def _victim", "the victim", "await _heal_delete_basis_series()")
+
+    def test_code_sentinel_outside_the_tail_is_rejected(self) -> None:
+        """The offset floor, independent of comments: an EARLY code mention
+        cannot stand in for the terminating one."""
+        early = self._SRC.replace(
+            "    # ⛔ And NO _heal_delete_basis_series(). This is the point.",
+            "    await _heal_delete_basis_series()",
+        ).replace("    await _heal_delete_basis_series()\n\ndef _next", "\ndef _next")
+        with pytest.raises(AssertionError, match="tail floor"):
+            _region(early, "async def _victim", "the victim", "await _heal_delete_basis_series()")
 
 
 # ---------------------------------------------------------------------------
@@ -771,6 +1073,67 @@ class TestMarkerContractHasNoFifthSpelling:
             "forwarded to hop 2; the guards decide what is protected. If they "
             "disagree, a refresh is marked at hop 1 and unprotected at hop 2 — "
             "and nothing anywhere errors."
+        )
+
+    def test_no_marker_literal_anywhere_in_the_runner(self) -> None:
+        """F20 — the scan above names ``services/job_worker.py`` BY HAND, so a
+        fifth spelling anywhere else was seen by nothing.
+
+        ``analytics_runner`` is hop 2's end of the contract and receives the
+        marker as a parameter; it must never hard-code one. A literal appearing
+        here is either a fifth spelling or a bypass of ``refresh_source``.
+        """
+        src = _strip_py_comments(_ANALYTICS_RUNNER.read_text())
+        literals = set(_MARKER_LITERAL_RE.findall(src))
+        assert literals <= set(LEDGER_REFRESH_JOB_SOURCES), (
+            "MARKER DRIFT: analytics_runner.py hard-codes ledger-refresh marker "
+            f"literal(s) {sorted(literals - set(LEDGER_REFRESH_JOB_SOURCES))} that "
+            "are not in LEDGER_REFRESH_JOB_SOURCES. Hop 2's guard keys on the "
+            "refresh_source it was HANDED; a literal spelled here is a second, "
+            "uncompared end of the contract."
+        )
+
+    def test_every_migration_writing_the_marker_uses_a_known_spelling(self) -> None:
+        """F20 — the ENQUEUE end. Migrations 20260825130000/140000 build the
+        job metadata with ``jsonb_build_object('source', 'ledger-refresh'…)``.
+
+        That is where the marker is MINTED. A typo there is invisible to every
+        gate in this phase: hop 1 enqueues a job the Python set does not
+        recognise, nothing is forwarded to hop 2, no guard anywhere fires, and
+        no error is raised at any end. Scanning the whole migrations directory
+        (not a hand-listed pair) is the point — the next migration to mint a
+        marker is caught the day it lands.
+        """
+        # Every `'source', '<value>'` pair any migration mints, not a hand-listed
+        # pair of files. Scoped to the metadata KEY rather than to bare marker
+        # literals because SQL object names legitimately contain the words
+        # (`ledger_refresh_staleness`, `ledger_refresh_fanout`), and a gate that
+        # tripped on those would be turned off within a week.
+        minted: dict[str, set[str]] = {}
+        for path in sorted(_MIGRATIONS_DIR.glob("*.sql")):
+            body = "\n".join(
+                re.sub(r"--.*$", "", ln) for ln in path.read_text().splitlines()
+            )
+            for value in re.findall(r"'source'\s*,\s*'([^']*)'", body):
+                minted.setdefault(value, set()).add(path.name)
+
+        refresh_like = {
+            value for value in minted
+            if re.match(r"[Ll]edger[-_ ]?[Rr]efresh", value)
+        }
+        # EQUALITY, not containment — and that is what makes a TYPO visible. A
+        # fifth spelling adds a member; a mistyped one both adds a member and
+        # removes the member it was supposed to be. Containment would only ever
+        # have caught the first.
+        assert refresh_like == set(LEDGER_REFRESH_JOB_SOURCES), (
+            "MARKER DRIFT at the ENQUEUE end. The migrations mint ledger-refresh "
+            f"job metadata with source(s) {sorted(refresh_like)} "
+            f"(from {sorted({f for v in refresh_like for f in minted[v]})}), but "
+            f"LEDGER_REFRESH_JOB_SOURCES is "
+            f"{sorted(LEDGER_REFRESH_JOB_SOURCES)}. This is where the marker is "
+            "MINTED: a job enqueued with an unrecognised source is not forwarded "
+            "to hop 2, no guard at any end fires, and nothing anywhere errors. "
+            f"All source values seen across the migrations: {sorted(minted)}."
         )
 
     def test_sql_bridge_partition_matches_the_python_set(self) -> None:
