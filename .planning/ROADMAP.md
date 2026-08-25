@@ -345,7 +345,7 @@ Plans:
 - [x] 162-03-PLAN.md — HONEST-04 gated real equity curves + C-3 coverage caption + HONEST-03 is_example SyncBadge class guard (wave 1)
 - [x] 162-04-PLAN.md — HONEST-05 widened /returns co-serves gated cagr/sharpe + addedMetricsById composer fallback, C-4 five-state contract (wave 1)
 - [x] 162-05-PLAN.md — HONEST-06 server use-existing-key path (D-162-3): decision gate + tracer RPC/route arm + state-adaptive SQL gate — service-role boundary (wave 1, checkpoint)
-- [ ] 162-06-PLAN.md — HONEST-06 client preselect thread + C-5 saved-key summary, all three key populations pinned (wave 2)
+- [x] 162-06-PLAN.md — HONEST-06 client preselect thread + C-5 saved-key summary, all three key populations pinned (wave 2)
 - [x] 162-07-PLAN.md — HONEST-02 verdict fix: D-162-2 "Track record through {date}" recency line (flat arm) or recorded pipeline routing (gap arm) (wave 2)
 - [ ] 162-08-PLAN.md — HONEST-03 D-162-1 recompute of the 15 example rows (unpublish fallback, never synthesize) + HONEST-01 follow-throughs + TODOS filings (wave 2)
 - [x] 162-09-PLAN.md — KeyPermissionBadge: scope chips/caption gated on probe_error — a failed probe can no longer render scope facts (PROD QA finding 2026-08-25, phase-goal class) (wave 1)

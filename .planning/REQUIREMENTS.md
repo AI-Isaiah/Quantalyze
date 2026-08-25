@@ -52,7 +52,7 @@ verified-stale items are excluded by construction.
 - [ ] **HONEST-03** (L1959): Example strategies don't advertise stale "Synced Nd ago" badges on discovery.
 - [x] **HONEST-04** (L1991): `buildEquityCurveSeries` serves real per-strategy equity curves now that `returns_series` is selected — the hard-coded `equityCurve: null` and its false comment go.
 - [x] **HONEST-05** (L2209): Drawer-added strategies render CAGR/Sharpe like book rows.
-- [ ] **HONEST-06** (L2110): "Finish setup →" opens the wizard with the clicked key preselected.
+- [x] **HONEST-06** (L2110): "Finish setup →" opens the wizard with the clicked key preselected.
 
 ### OPS — CI/deploy integrity & reliability
 
@@ -147,7 +147,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | HONEST-03 | Phase 162 | Pending |
 | HONEST-04 | Phase 162 | Complete |
 | HONEST-05 | Phase 162 | Complete |
-| HONEST-06 | Phase 162 | Pending |
+| HONEST-06 | Phase 162 | Complete |
 | OPS-01 | Phase 158 | Complete |
 | OPS-02 | Phase 158 | Complete |
 | OPS-03 | Phase 158 | Complete |
