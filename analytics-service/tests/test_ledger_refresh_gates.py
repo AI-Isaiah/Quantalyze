@@ -143,6 +143,9 @@ _GUARD_REGION_MIN_CHARS: Final[int] = 1500
 # 11527 characters. Floored at roughly a half / a fifth, on the same reasoning.
 _COMPOSITE_PRELUDE_MIN_CHARS: Final[int] = 80
 _COMPOSITE_BODY_MIN_CHARS: Final[int] = 2500
+# The composite handler's own terminal-stamp closure. Measured at 7708
+# characters at the commit that introduced its guard.
+_COMPOSITE_GUARD_REGION_MIN_CHARS: Final[int] = 1500
 
 # The rejected freshness keys (plan 01, D-03). `computed_at` covers both
 # `strategy_analytics.computed_at` and the view's `analytics_computed_at` alias;
@@ -499,6 +502,49 @@ def composite_body() -> str:
     )
 
 
+def composite_guard_region() -> str:
+    """REGION 8 — the ``_stamp_failed`` closure inside the composite handler.
+
+    The composite handler has a terminal stamp of its OWN, distinct from
+    ``_stamp_strategy_analytics_failed`` (region 5), and plan 04 extended the
+    D-15 non-destructive guard onto it. Same indentation rule as region 5: the
+    closure sits inside ``run_stitch_composite_job``, so its body is every
+    subsequent line indented FURTHER than the ``async def``, and the region ends
+    at the first following non-blank line indented ``<=`` it. What follows here
+    is a comment at the enclosing function's level, not a ``def`` — which is
+    exactly why the rule is written on indentation rather than on statement kind.
+    """
+    src = _read(_job_worker_path(), "services/job_worker.py")
+    lines = src.splitlines()
+    start: int | None = None
+    for index, line in enumerate(lines):
+        if line.strip().startswith("async def _stamp_failed"):
+            start = index
+            break
+    assert start is not None, (
+        "services/job_worker.py no longer defines the `_stamp_failed` closure "
+        "inside run_stitch_composite_job. Gate 11 reads that closure; if the "
+        "composite non-destructive guard moved, move this extractor with it — do "
+        "not delete the gate, it is the only thing pinning the composite arm's "
+        "SQL marker to the Python one."
+    )
+    indent = len(lines[start]) - len(lines[start].lstrip())
+    end = len(lines)
+    for index in range(start + 1, len(lines)):
+        line = lines[index]
+        if not line.strip():
+            continue
+        if len(line) - len(line.lstrip()) <= indent:
+            end = index
+            break
+    return _assert_region(
+        "COMPOSITE GUARD REGION",
+        "\n".join(lines[start:end]),
+        _COMPOSITE_GUARD_REGION_MIN_CHARS,
+        "_stamp_failed",
+    )
+
+
 def _sql_string_list(literal_list: str) -> set[str]:
     """``"'a', 'b'"`` -> ``{"a", "b"}``."""
     return {value for value in re.findall(r"'([^']*)'", literal_list)}
@@ -550,6 +596,9 @@ class TestAntiVacuityFloor:
 
     def test_composite_prelude_region_is_real(self) -> None:
         assert len(composite_declaration_prelude()) >= _COMPOSITE_PRELUDE_MIN_CHARS
+
+    def test_composite_guard_region_is_real(self) -> None:
+        assert len(composite_guard_region()) >= _COMPOSITE_GUARD_REGION_MIN_CHARS
 
     def test_composite_body_region_is_real(self) -> None:
         """⛔ Gate 10b's venue scan is an ABSENCE assertion over this region, and
@@ -1343,4 +1392,71 @@ class TestGate10CompositeArm:
             "differ: the token is how the two mechanisms are told apart in the "
             "queue, and it is the key each arm's non-destructive failure guard "
             "compares against before it declines to un-publish a live row."
+        )
+
+
+# ---------------------------------------------------------------------------
+# GATE 11 — the COMPOSITE refresh marker, a second cross-language contract
+# ---------------------------------------------------------------------------
+class TestGate11CompositeMarkerDrift:
+    """Gate 8's twin, for the composite arm's own marker.
+
+    Plan 04 added a SECOND non-destructive guard, on the ``_stamp_failed``
+    closure inside ``run_stitch_composite_job``, keyed on a SECOND metadata
+    source token. That is a second cross-language contract with no compiler
+    between its ends, so it needs its own drift gate — gate 8 pins the
+    single-key pair and cannot see this one.
+    """
+
+    def test_composite_sql_marker_equals_composite_python_marker(self) -> None:
+        sql_markers: list[str] = re.findall(
+            r"'source'\s*,\s*'([^']*)'", _strip_sql_comments(composite_body())
+        )
+        assert len(sql_markers) == 1, (
+            "expected exactly ONE `'source', '<marker>'` pair in the composite "
+            f"arm's jsonb_build_object, found {len(sql_markers)}: {sql_markers}."
+        )
+        python_markers: list[str] = re.findall(
+            r'_job_source\s*==\s*"([^"]*)"', composite_guard_region()
+        )
+        assert len(python_markers) == 1, (
+            'expected exactly ONE `_job_source == "<marker>"` comparison in the '
+            "composite handler's `_stamp_failed` closure, found "
+            f"{len(python_markers)}: {python_markers}. The marker is spelled "
+            "INLINE at both ends on purpose, so this gate has two literals to "
+            "compare."
+        )
+        assert sql_markers[0] == python_markers[0], (
+            "COMPOSITE MARKER DRIFT: the composite arm writes "
+            f"metadata->>'source' = {sql_markers[0]!r} "
+            f"({_COMPOSITE_MIGRATION_NAME}) but the non-destructive failure "
+            "guard in run_stitch_composite_job compares against "
+            f"{python_markers[0]!r}.\n"
+            "⛔ These are the two ends of a cross-language contract WITH NO "
+            "COMPILER BETWEEN THEM. If they drift, the arm still enqueues and "
+            "the guard still compiles — there is no error anywhere. THE ONLY "
+            "SYMPTOM IS THAT THE NEXT FAILED COMPOSITE REFRESH SILENTLY TAKES A "
+            "FUNDED ACCOUNT'S FACTSHEET DARK (computation_status flipped to "
+            "'failed', which src/lib/strategyGate.ts reads as "
+            "ANALYTICS_FAILED).\n"
+            "⚠️ The venue whose ONLY live strategy is a composite is the venue "
+            "this whole arm exists for, so this contract has a cohort of one and "
+            "no redundancy."
+        )
+
+    def test_composite_guard_uses_the_single_sourced_success_set(self) -> None:
+        """The composite guard must compare against the shared frozenset, not an
+        inline status list of its own — a third spelling of the success set
+        would drift from both the view and the constant, and gate 9 could not
+        see it."""
+        region = composite_guard_region()
+        assert "STRATEGY_ANALYTICS_TERMINAL_SUCCESS_STATUSES" in region, (
+            "the composite handler's `_stamp_failed` no longer references "
+            "STRATEGY_ANALYTICS_TERMINAL_SUCCESS_STATUSES. That constant is the "
+            "single source gate 9 pins against the SQL view; a locally-inlined "
+            "status list inside this guard would be a spelling that neither gate "
+            "9 nor the view's own predicate can see.\n"
+            "⛔ The PROD census reads `complete` 0 / `complete_with_warnings` 5, "
+            "so a guard narrowed to {'complete'} would protect NONE of the live "
+            "ledger accounts while still looking like a guard in review."
         )
