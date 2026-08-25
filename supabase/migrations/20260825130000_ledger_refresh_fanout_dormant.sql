@@ -513,6 +513,10 @@ DECLARE
   v_coherence  TEXT;
   v_owner      TEXT;
   v_bypassrls  BOOLEAN;
+  -- ⛔ v_super is used by check 2b, and the SAME 42601 trap the note above
+  --    records applies to it: plpgsql compiles this DO block WHOLE, so a
+  --    missing DECLARE here does not weaken one check, it stops all of them.
+  v_super      BOOLEAN;
 BEGIN
   -- 1. the function landed, and it takes ZERO arguments (T-161.1-06)
   SELECT p.prosecdef, p.proconfig, p.pronargs
@@ -555,8 +559,32 @@ BEGIN
   --     built to fix, so this is an OBSERVABILITY hole rather than a security one,
   --     and it is worth failing the apply over.
   --     Assertion shape follows 20260806130000 (JOIN pg_roles r ON r.oid = p.proowner).
-  SELECT r.rolname, r.rolbypassrls
-    INTO v_owner, v_bypassrls
+  --
+  --     ⚠️ rolbypassrls ALONE IS THE WRONG PREDICATE, and the difference is an
+  --     aborted apply (161.1-REVIEW). pg_roles.rolbypassrls reports only the
+  --     EXPLICITLY GRANTED attribute. A SUPERUSER bypasses RLS unconditionally
+  --     and the flag stays FALSE — the exemption is implicit in the role, not
+  --     recorded as an attribute. So `v_bypassrls IS NOT TRUE` against a
+  --     superuser owner is a FALSE NEGATIVE: it aborts an apply whose DEFINER
+  --     context can in fact see the whole cohort. There is no staging gate on
+  --     this path — merging to main auto-applies to PROD — so that abort lands
+  --     mid-chain, with 20260825120000 applied and 130000/140000/150000 not,
+  --     and no rollback step to undo the half. Hence rolsuper OR rolbypassrls.
+  --
+  --     MEASURED 2026-08-25, read-only SELECT on pg_roles against the live
+  --     estate, so the correction is recorded against reality rather than
+  --     assumed from the manual:
+  --         postgres        rolsuper=false  rolbypassrls=true
+  --         supabase_admin  rolsuper=true   rolbypassrls=true
+  --         service_role    rolsuper=false  rolbypassrls=true
+  --     The false negative therefore CANNOT fire on today's roles — the migrate
+  --     role carries the flag, and the one superuser carries it too. This change
+  --     alters no outcome on the current estate; it removes a latent false abort
+  --     and makes the assertion say what it actually means. If a future owner is
+  --     a superuser WITHOUT the flag (a perfectly valid configuration), the old
+  --     predicate would have blocked the chain for no reason.
+  SELECT r.rolname, r.rolbypassrls, r.rolsuper
+    INTO v_owner, v_bypassrls, v_super
     FROM pg_proc p
     JOIN pg_namespace n ON n.oid = p.pronamespace
     JOIN pg_roles r ON r.oid = p.proowner
@@ -565,8 +593,8 @@ BEGIN
   IF v_owner IS NULL THEN
     RAISE EXCEPTION 'Migration 20260825130000: could not resolve the owner of enqueue_ledger_refresh_for_strategies — pg_proc.proowner has no matching pg_roles row';
   END IF;
-  IF v_bypassrls IS NOT TRUE THEN
-    RAISE EXCEPTION 'Migration 20260825130000: enqueue_ledger_refresh_for_strategies is owned by role "%", which lacks BYPASSRLS. As SECURITY DEFINER it reads ledger_refresh_staleness as that role, so api_keys/strategy_keys RLS collapses `exchanges` to the empty array, the venue conjunct drops every row and the fan-out returns 0 on every tick — indistinguishable from a healthy, fully-fresh estate', v_owner;
+  IF NOT (COALESCE(v_bypassrls, FALSE) OR COALESCE(v_super, FALSE)) THEN
+    RAISE EXCEPTION 'Migration 20260825130000: enqueue_ledger_refresh_for_strategies is owned by role "%" (rolsuper=%, rolbypassrls=%), which is exempt from RLS by neither route. As SECURITY DEFINER it reads ledger_refresh_staleness as that role, so api_keys/strategy_keys RLS collapses `exchanges` to the empty array, the venue conjunct drops every row and the fan-out returns 0 on every tick — indistinguishable from a healthy, fully-fresh estate', v_owner, v_super, v_bypassrls;
   END IF;
 
   -- 3. no EXECUTE for the browser-reachable roles. has_function_privilege

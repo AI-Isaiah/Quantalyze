@@ -35,6 +35,11 @@
 --                             and can be silently undone afterwards. That REVOKE
 --                             is the SOLE bound: under `authenticated` both
 --                             NOT EXISTS guards go vacuously TRUE.
+--   J  OWNER durability      — proowner is exempt from RLS (rolsuper OR
+--                             rolbypassrls). Same apply-time-only weakness as I,
+--                             one property over. Fail-CLOSED, which is why it
+--                             needs an arm: drift makes the fan-out return 0
+--                             forever, indistinguishable from "nothing stale".
 --
 -- ⚠️ NOT IN THIS FILE, and NOT dropped: the D-15 proof that a FAILED refresh
 -- leaves an already-published row intact — status, warned flag, by-basis metrics,
@@ -66,7 +71,7 @@
 -- --------------------------------------------------------------------------
 -- This file used to open with `RAISE NOTICE 'SKIP: …'; RETURN;` when the fan-out
 -- function was absent. MEASURED 2026-08-25 against an empty Postgres 16: that path
--- printed the notice and exited `EXITCODE=0` having executed ZERO of arms A-I. The
+-- printed the notice and exited `EXITCODE=0` having executed ZERO of arms A-J. The
 -- CI step (.github/workflows/ci.yml, `sql-tests` → "Run SQL self-tests against
 -- test Supabase project") reads ONLY that exit code, so the skip was
 -- byte-identical to a pass in the only channel anything mechanical looks at — and
@@ -91,14 +96,14 @@
 -- The consequence is deliberate and IS the forcing function: this file is RED
 -- until the phase's migrations are applied to the TEST project. The fan-out is a
 -- SECURITY DEFINER, cross-tenant enqueue function that auto-applies to PROD on
--- merge, and arms A-I are the ONLY executed coverage of its SELECT predicates —
+-- merge, and arms A-J are the ONLY executed coverage of its SELECT predicates —
 -- every other gate in the phase is a static text scan over the migration source.
 -- Arm A (dormancy) is what proves the merge changes no production behaviour; a
 -- skip meant that proof had never been run anywhere but an executor's laptop.
 --
 -- ✅ MECHANICALLY CLOSED (161.1-REVIEW WR-03 option (b), landed in
 -- .github/workflows/ci.yml): the `sql-tests` step now captures each file's output,
--- fails on a printed 'SKIP:', and reads the 'ALL 9 ARMS EXECUTED' sentinel back off
+-- fails on a printed 'SKIP:', and reads the 'ALL 10 ARMS EXECUTED' sentinel back off
 -- THIS file's RAISE NOTICE line and requires the run to have printed it. So an
 -- edit that neuters an arm in place — deleting the assertion, short-circuiting
 -- early — fails CI even though psql exits 0. ⚠️ The count in that notice is read
@@ -139,6 +144,13 @@ DECLARE
   v_api        UUID;
   v_source     TEXT;
   v_foreign    INTEGER;
+  -- ⛔ Arm J's three. plpgsql compiles this DO block WHOLE: an undeclared
+  --    variable raises 42601 and NONE of arms A-J run — the failure would not
+  --    be "arm J is broken", it would be "the file asserted nothing". Adding an
+  --    arm means adding its DECLAREs here in the same edit.
+  v_owner      TEXT;
+  v_own_super  BOOLEAN;
+  v_own_bypass BOOLEAN;
 BEGIN
   -- ----- applied-ness gate: ABSENCE IS A FAILURE, NOT A SKIP (WR-03) ------
   -- See the ⛔ block in this file's header for the measurement behind this.
@@ -147,7 +159,7 @@ BEGIN
      WHERE n.nspname = 'public'
        AND p.proname = 'enqueue_ledger_refresh_for_strategies'
   ) THEN
-    RAISE EXCEPTION 'TEST FAILED (0): public.enqueue_ledger_refresh_for_strategies is not registered on this database, so NONE of arms A-I ran — including arm A, the dormancy proof that merging this migration changes no production behaviour. This is a FAILURE, not a skip. TWO causes fit and this assertion cannot distinguish them, so check both: (i) the TEST project has not received migration 20260825130000 — apply the phase''s migrations to it and re-run; expect this exactly once, on the PR that introduces them, because NO workflow applies migrations to TEST; (ii) the function was DROPPED or RENAMED after being applied, which is a real regression in a SECURITY DEFINER cross-tenant enqueue path. ⛔ Do NOT "fix" this by restoring the old RAISE NOTICE/RETURN skip: that made this file exit 0 having asserted nothing, on exactly the run where this function first reaches PROD.';
+    RAISE EXCEPTION 'TEST FAILED (0): public.enqueue_ledger_refresh_for_strategies is not registered on this database, so NONE of arms A-J ran — including arm A, the dormancy proof that merging this migration changes no production behaviour. This is a FAILURE, not a skip. TWO causes fit and this assertion cannot distinguish them, so check both: (i) the TEST project has not received migration 20260825130000 — apply the phase''s migrations to it and re-run; expect this exactly once, on the PR that introduces them, because NO workflow applies migrations to TEST; (ii) the function was DROPPED or RENAMED after being applied, which is a real regression in a SECURITY DEFINER cross-tenant enqueue path. ⛔ Do NOT "fix" this by restoring the old RAISE NOTICE/RETURN skip: that made this file exit 0 having asserted nothing, on exactly the run where this function first reaches PROD.';
   END IF;
 
   -- ----- anti-vacuity precondition on arm A -------------------------------
@@ -528,7 +540,58 @@ BEGIN
     RAISE EXCEPTION 'TEST FAILED (I): role authenticated can EXECUTE enqueue_ledger_refresh_for_strategies. Both NOT EXISTS guards in its body go vacuously TRUE for that role (strategies_read grants it its own rows; compute_jobs FORCE-RLS grants it none), so this is unbounded self-scoped enqueue every tick — the REVOKE at 20260825130000 is the only thing closing it';
   END IF;
 
-  RAISE NOTICE 'ALL 9 ARMS EXECUTED (A-I) and passed — the ledger refresh fan-out is dormant, bounded, and its bounds are falsifiable.';
+  -- ======================================================================
+  -- ARM J — THE DEFINER'S RLS EXEMPTION, RE-ASSERTED ON EVERY RUN
+  --         (161.1-REVIEW, RLS audit).
+  --
+  -- Same weakness as arm I, one property over. Migration 20260825130000's DO
+  -- block pins proowner's exemption ONCE, at apply. Ownership drifts for
+  -- reasons that have nothing to do with this function: a restore-from-dump, an
+  -- `ALTER FUNCTION … OWNER TO`, a platform role-template change, a REASSIGN
+  -- OWNED. The ACL arms exist because an apply-time-only pin is not a durable
+  -- pin; this arm says the same thing about ownership.
+  --
+  -- ⛔ WHY THIS IS THE WORST SILENT FAILURE IN THE PHASE. It leaks NOTHING — it
+  -- is fail-CLOSED — and that is exactly what makes it dangerous. This function
+  -- is SECURITY DEFINER, so every read in its body runs as the OWNER, and it
+  -- reads ledger_refresh_staleness, a `security_invoker` view. Drift the owner
+  -- to a role exempt from RLS by neither route and the owner-scoped policies on
+  -- api_keys / strategy_keys resolve `exchanges` to the empty array; the
+  -- terminal `&&` venue conjunct then drops EVERY candidate row and the fan-out
+  -- returns 0 on every tick, forever. Zero enqueued, zero errors, green cron —
+  -- byte-identical to a healthy, fully-fresh estate. Nothing downstream can
+  -- tell the two apart, so if this is not asserted here it is not asserted
+  -- anywhere the drift would actually be caught.
+  --
+  -- ⚠️ rolsuper OR rolbypassrls, matching the migration — NOT rolbypassrls
+  -- alone. pg_roles.rolbypassrls reports only the EXPLICITLY GRANTED attribute;
+  -- a superuser bypasses RLS unconditionally with the flag still FALSE. An arm
+  -- pinning rolbypassrls alone would redden on an owner that can in fact see
+  -- the whole cohort, and would contradict the predicate the migration applies.
+  --
+  -- ⚠️ NOT VACUOUS WHEN THE FUNCTION IS GONE. Unlike arm I, this arm cannot
+  -- lean on has_function_privilege's 42883: a bare SELECT over pg_proc for an
+  -- absent proname returns ZERO ROWS, leaves all three variables NULL, and
+  -- `NOT (COALESCE(NULL,FALSE) OR COALESCE(NULL,FALSE))` would be TRUE — the
+  -- arm would fire with a misleading message about a role called <NULL>. The
+  -- explicit v_owner IS NULL guard below is what turns "nothing to check" into
+  -- its own named failure rather than a passing or mis-diagnosed one.
+  -- ======================================================================
+  SELECT r.rolname, r.rolsuper, r.rolbypassrls
+    INTO v_owner, v_own_super, v_own_bypass
+    FROM pg_proc p
+    JOIN pg_namespace n ON n.oid = p.pronamespace
+    JOIN pg_roles r ON r.oid = p.proowner
+   WHERE n.nspname = 'public'
+     AND p.proname = 'enqueue_ledger_refresh_for_strategies';
+  IF v_owner IS NULL THEN
+    RAISE EXCEPTION 'TEST FAILED (J): could not resolve the owner of enqueue_ledger_refresh_for_strategies — the pg_proc row is absent, or its proowner has no matching pg_roles row. Either way arm J checked NOTHING, which is why this is an exception and not a silent pass';
+  END IF;
+  IF NOT (COALESCE(v_own_bypass, FALSE) OR COALESCE(v_own_super, FALSE)) THEN
+    RAISE EXCEPTION 'TEST FAILED (J): enqueue_ledger_refresh_for_strategies is owned by role "%" (rolsuper=%, rolbypassrls=%), which is exempt from RLS by neither route. As SECURITY DEFINER it reads the security_invoker view ledger_refresh_staleness as that role, so api_keys/strategy_keys RLS collapses `exchanges` to the empty array, the venue conjunct drops every row, and the fan-out returns 0 on every tick — indistinguishable from a healthy, fully-fresh estate. Migration 20260825130000 pins this at apply time only; ownership drift afterwards is what this arm exists to catch', v_owner, v_own_super, v_own_bypass;
+  END IF;
+
+  RAISE NOTICE 'ALL 10 ARMS EXECUTED (A-J) and passed — the ledger refresh fan-out is dormant, bounded, and its bounds are falsifiable.';
 END $$;
 
 ROLLBACK;
