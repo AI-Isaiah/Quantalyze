@@ -225,7 +225,7 @@ Plans:
 Inserted after 161 for roadmap ordering only — it MAY be pulled ahead, and it is the more urgent
 of the two because it is a live, founder-reported data-integrity defect.
 **Requirements**: LEDGER-01, LEDGER-02, LEDGER-03, LEDGER-04
-**Plans:** 5 plans
+**Plans:** 1/5 plans executed
 
 **Root cause (measured on PROD 2026-08-24; ⚠️ CORRECTED 2026-08-25 by re-measurement at HEAD
 `57a407ea` — two claims below were false as originally written):**
@@ -318,7 +318,7 @@ serializes on ONE shared terminal (`services/mt5_concurrency.py`) at a 15-min ti
 
 Plans:
 
-- [ ] 161.1-01-PLAN.md — LEDGER-03 tracer: staleness view keyed on the returns-series date (not `computed_at`, not `last_sync_at`) + the A7 PROD tracer + the D-COMP founder decision (wave 1)
+- [x] 161.1-01-PLAN.md — LEDGER-03 tracer: staleness view keyed on the returns-series date (not `computed_at`, not `last_sync_at`) + the A7 PROD tracer + the D-COMP founder decision (wave 1)
 - [ ] 161.1-02-PLAN.md — LEDGER-01/-02/-04: the dormant, staleness-gated, bounded single-key fan-out on the chain tail + matched-pair SQL gate + venue-drift/no-schedule static gates (wave 2)
 - [ ] 161.1-03-PLAN.md — LEDGER-02: the founder go-live runbook (two ordered LIVE ops, two rollback levels incl. detect/repair/verify remediation for rows a failed tick downgraded) + TODOS filings (wave 3)
 - [ ] 161.1-05-PLAN.md — LEDGER-02/-04: the static drift / dormancy / bound gates, sliced out of plan 02 (wave 3)

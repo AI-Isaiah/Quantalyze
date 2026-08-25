@@ -72,7 +72,7 @@ verified-stale items are excluded by construction.
 
 - [ ] **LEDGER-01**: A recurring enqueuer reaches `strategy_analytics` for every ledger-backed venue via the strategy-keyed chain TAIL (`derive_broker_dailies` strategy-mode = `JOB_CHAIN_FOLLOW_ON["process_key_long"][0]`), never the ccxt fill path and never a re-enqueue of `process_key_long` (provably a no-op: `long_fetch.py:154` returns DONE on `published`, `:193` on the whole advanced-status set). Cohort scoped off `_LEDGER_BACKED_SOURCES`, never off absence from `EXCHANGE_CLASSES` — deribit is in `EXCHANGE_CLASSES`.
 - [ ] **LEDGER-02**: It ships DORMANT behind two locks with real readers — no schedule registered anywhere in the repo (WORKER-03 rule: `supabase/migrations/**` auto-applies to PROD) plus a fail-closed activation setting the fan-out itself reads — and activation is a documented, ordered, reversible founder LIVE op (`docs/runbooks/ledger-refresh-go-live.md`). Merging changes no prod behaviour.
-- [ ] **LEDGER-03**: Staleness is observable on a timestamp that advances ONLY when new analytics data lands — the max date inside `strategy_analytics.returns_series`, conjoined with `computation_status` treating BOTH `complete` and `complete_with_warnings` as success. ⛔ Never `last_sync_at` (advanced daily by key-scoped jobs) and never `strategy_analytics.computed_at` (re-stamped `now()` on EVERY job transition including the `failed` arm), proven by a test that advances both rejected timestamps without new data and shows the check still fails.
+- [x] **LEDGER-03**: Staleness is observable on a timestamp that advances ONLY when new analytics data lands — the max date inside `strategy_analytics.returns_series`, conjoined with `computation_status` treating BOTH `complete` and `complete_with_warnings` as success. ⛔ Never `last_sync_at` (advanced daily by key-scoped jobs) and never `strategy_analytics.computed_at` (re-stamped `now()` on EVERY job transition including the `failed` arm), proven by a test that advances both rejected timestamps without new data and shows the check still fails.
 - [ ] **LEDGER-04**: A regression pin fails if any ledger venue is dropped from the refresh set, behind an anti-vacuity floor, proven RED by neutering. The venue set is written in exactly ONE place in SQL and drift-gated against the Python constant; no TypeScript mirror (`strategyGate.invariant.test.ts` bans venue literals after a mirror drifted).
 
 ### SEC — Small security hardening
@@ -140,7 +140,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | WIZERR-13 | Phase 161 | Complete |
 | LEDGER-01 | Phase 161.1 | Pending |
 | LEDGER-02 | Phase 161.1 | Pending |
-| LEDGER-03 | Phase 161.1 | Pending |
+| LEDGER-03 | Phase 161.1 | Complete |
 | LEDGER-04 | Phase 161.1 | Pending |
 | HONEST-01 | Phase 162 | Pending |
 | HONEST-02 | Phase 162 | Pending |
