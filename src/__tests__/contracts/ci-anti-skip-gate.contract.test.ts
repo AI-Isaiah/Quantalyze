@@ -80,6 +80,9 @@ if [ -n "$c" ]; then
   exit 0
 fi
 b="$(basename "$f")"
+# One arbitrary extra output line, for a scenario that needs a NOTICE the
+# corpus file does not itself dictate (the runtime-composed partial label).
+if [ -n "\${STUB_EXTRA:-}" ]; then echo "\${STUB_EXTRA}"; fi
 if [ "\${STUB_SKIP_BASENAME:-}" = "$b" ]; then
   m="$(grep -aoE "RAISE NOTICE 'SKIP: [^'%]{0,60}" "$f" | sed "s/^.*RAISE NOTICE '//" | head -1)"
   echo "psql:$f:1: \${STUB_LABEL:-NOTICE}:  \${m}"
@@ -119,6 +122,42 @@ function runGate(env: Record<string, string> = {}, cwd: string = ROOT) {
   return { code: res.status, out: `${res.stdout ?? ""}${res.stderr ?? ""}` };
 }
 
+/**
+ * A one-file corpus whose skip labels carry glob metacharacters (F15).
+ *
+ * The gate splits its marker lists with an UNQUOTED expansion under
+ * `shopt -s nullglob`, so before the fix a marker containing `*` matched no
+ * file and was deleted from the word list entirely — the loop body never ran
+ * for it. Returned path is the cwd the gate runs in; caller removes it.
+ */
+function makeGlobMarkerCorpus(): string {
+  const dir = mkdtempSync(join(tmpdir(), "antiskip-glob-"));
+  mkdirSync(join(dir, "supabase/tests"), { recursive: true });
+  writeFileSync(
+    join(dir, "supabase/tests/test_glob_marker.sql"),
+    [
+      "DO $$",
+      "BEGIN",
+      "  IF true THEN",
+      "    RAISE NOTICE 'SKIP: cron job * not scheduled here';",
+      "    RETURN;",
+      "  END IF;",
+      "END $$;",
+      "DO $$",
+      "BEGIN",
+      "  IF true THEN",
+      "    RAISE NOTICE 'SKIP Part 2: cron * absent';",
+      "    RETURN;",
+      "  END IF;",
+      "END $$;",
+      "",
+    ].join("\n"),
+  );
+  return dir;
+}
+
+const GLOB_CORPUS_FILE = "supabase/tests/test_glob_marker.sql";
+
 describe("anti-SKIP CI gate (ci.yml sql-tests) — F10 pin", () => {
   it("passes a run where every file executes and prints its sentinel", () => {
     const { code, out } = runGate();
@@ -144,6 +183,49 @@ describe("anti-SKIP CI gate (ci.yml sql-tests) — F10 pin", () => {
     // Guard the guard: prove the label really was foreign, so this case cannot
     // silently degrade into a duplicate of the test above.
     expect(out).toContain("HINWEIS:");
+  }, 90_000);
+
+  it("still FAILS a whole-file skip whose marker contains a glob metacharacter (F15)", () => {
+    // The marker carries a `*` and the server label is foreign, so NET 2 cannot
+    // rescue this: NET 1 is the only net left, which is precisely the situation
+    // the unquoted-expansion bug turned off. Without `set -f` around the split,
+    // nullglob deletes the marker from the word list and the gate prints NO skip
+    // error at all — a localized server plus one `*` was a silent false pass.
+    //
+    // ⚠️ Exit code is NOT the discriminator here: this synthetic corpus declares
+    // no completion sentinels, so the SENTINEL_FLOOR/ARMS_FLOOR checks fail the
+    // step either way. Asserting on the skip error specifically is what makes
+    // this test able to fail.
+    const dir = makeGlobMarkerCorpus();
+    try {
+      const { out } = runGate(
+        { STUB_SKIP_BASENAME: "test_glob_marker.sql", STUB_LABEL: "HINWEIS" },
+        dir,
+      );
+      expect(out).toContain(`::error file=${GLOB_CORPUS_FILE}::printed a whole-file SKIP`);
+      expect(out).toContain("SKIP: cron job * not scheduled here");
+      // Guard the guard: prove NET 2 really was blind, so this can never decay
+      // into a duplicate of the plain skip test above.
+      expect(out).not.toMatch(/NOTICE: +SKIP:/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 90_000);
+
+  it("still NAMES an UNPOLICED partial skip whose label contains a glob metacharacter (F15)", () => {
+    // Same defect in the sibling loop. Here it costs a warning rather than a
+    // failure, but an unnamed partial skip is exactly the withheld coverage this
+    // block exists to surface, so it must not vanish silently either.
+    const dir = makeGlobMarkerCorpus();
+    try {
+      const { out } = runGate(
+        { STUB_EXTRA: `psql:${GLOB_CORPUS_FILE}:11: HINWEIS:  SKIP Part 2: cron * absent` },
+        dir,
+      );
+      expect(out).toContain("UNPOLICED partial skip(s): [SKIP Part 2: cron * absent]");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   }, 90_000);
 
   it("FAILS when NOTICE output is suppressed, instead of finding nothing and passing (F14)", () => {

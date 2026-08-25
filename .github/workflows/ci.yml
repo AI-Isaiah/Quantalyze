@@ -1487,13 +1487,31 @@ jobs:
             skip_hits=""
             markers="$(grep -aoE "RAISE NOTICE 'SKIP: [^'%]{0,60}" "$f" | sed "s/^.*RAISE NOTICE '//" | sort -u || true)"
             if [ -n "$markers" ]; then
+              # F15 — `$markers` is unquoted ON PURPOSE: IFS=$'\n' is what splits
+              # it one marker per line. But an unquoted expansion also undergoes
+              # PATHNAME expansion, and this step runs under the `shopt -s
+              # nullglob` set above for the file glob. MEASURED in bash 5.3: a
+              # marker containing `*`, `?`, or a CLOSED `[...]` class matches no
+              # file and is then DELETED from the word list outright — the loop
+              # body never executes for it and nothing is printed to say a marker
+              # was dropped. NET 1 would be off for that file, leaving only NET
+              # 2, which F14(a) already records as locale-fragile; a skip on a
+              # localized server would then sail through both nets as a pass.
+              # (An UNTERMINATED `[` survives, because bash treats it literally —
+              # so today's behaviour depends on where a bracket happens to fall.
+              # That is a coin toss, not a policy.) `set -f` turns pathname
+              # expansion off for the split and back on straight after; it does
+              # NOT affect `case` pattern matching, which the sibling loop below
+              # relies on.
               _oifs="$IFS"
               IFS=$'\n'
+              set -f
               for m in $markers; do
                 if grep -aF "$m" "$out" >/dev/null 2>&1; then
                   skip_hits="${skip_hits}      ${m}"$'\n'
                 fi
               done
+              set +f
               IFS="$_oifs"
             fi
             # NET 2: label-anchored, for a skip message composed at runtime.
@@ -1520,8 +1538,17 @@ jobs:
             blockterm="$(awk -v q="'" '/RAISE NOTICE/ && /SKIP/ { msg = substr($0, index($0, "SKIP")); n = index(msg, q); if (n > 0) msg = substr(msg, 1, n - 1); n = index(msg, "%"); if (n > 0) msg = substr(msg, 1, n - 1); msg = substr(msg, 1, 40); buf = ""; for (i = 0; i < 4; i++) { if ((getline nxt) > 0) buf = buf "\n" nxt } if (buf ~ /RETURN[ \t]*;/) print msg }' "$f" | sort -u || true)"
             bt_hits=""
             if [ -n "$blockterm" ]; then
+              # F15, same class as NET 1 above — without `set -f`, nullglob
+              # silently drops any label carrying a glob metacharacter and the
+              # UNPOLICED warning for it is never printed. Here that costs a
+              # warning rather than a failure, but a partial skip that goes
+              # unnamed is exactly the coverage this block exists to surface,
+              # and the awk truncation to 40 chars means WHICH labels vanish
+              # depends on where the cut lands. Fixed in both loops so the two
+              # cannot drift apart.
               _oifs="$IFS"
               IFS=$'\n'
+              set -f
               for m in $blockterm; do
                 case "$m" in
                   "SKIP:"*) continue ;;
@@ -1530,6 +1557,7 @@ jobs:
                   bt_hits="${bt_hits} [${m}]"
                 fi
               done
+              set +f
               IFS="$_oifs"
             fi
             if [ -n "$bt_hits" ]; then
