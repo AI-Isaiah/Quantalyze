@@ -856,9 +856,10 @@ observed. The `<human-check>` stands unchanged and unstarted:
 ## TODOS handoffs filed
 
 Filed to root `TODOS.md` (the single ground truth), section *"Phase 162 (HONEST) — plan 162-08
-filings (added 2026-08-26)"*: the `StrategyGrid` badge-gate asymmetry, the retired-job-kind
-dead enqueue, the HONEST-02 partial delivery, the 15 unrepaired example rows, and the 2
-unrepaired raw-text rows.
+filings (added 2026-08-26)"* — **seven items**: (1) the 15 unrepaired example rows, (2) the 2
+unrepaired raw-text rows, (3) the retired-job-kind dead enqueue plus the VOID ruling, (4) the
+`StrategyGrid` badge-gate asymmetry with its corrected reason, (5) the `.planning/WINDOWS.md`
+concurrent-append data loss, (6) the HONEST-02 founder call, (7) the HONEST-01 founder call.
 
 **One handoff that did not exist:** plan 162-07 took the `flat-account` arm, so there is no
 derive-gap routing line to file. Recorded here per the plan's acceptance criterion ("or the
