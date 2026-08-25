@@ -247,6 +247,16 @@ Confirm the worker is live and consuming (`/health` per `docs/runbooks/railway-w
   44 s chain cost and a 2-job tick the exposure is small, but it is not zero and it is not
   structurally prevented.
 
+⚠️ **This item's two halves differ, and the difference is deliberate — do not treat them alike.**
+
+- **Worker health is BLOCKING.** **Expected:** `status: "ok"`, `worker_last_tick_at` fresh,
+  `git_sha` equal to `main` HEAD. **Abort if:** any of the three fails. A schedule against a dead
+  or stale worker is the v1.11 wedge; and a `git_sha` behind `main` is also how a set-but-never-
+  published `MT5_ENABLED` slips past P3.
+- **The claim-role note is INFORMATIONAL and does not abort.** There is no value of
+  `WORKER_CLAIM_ROLE` that blocks activation. Record what it is so that, if onboarding latency is
+  reported afterwards, you already know whether the queues were shared.
+
 ---
 
 ## Step 1 — the activation setting (LIVE op 1 of 2)
