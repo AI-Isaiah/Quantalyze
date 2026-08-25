@@ -2744,7 +2744,7 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
         # reason to destroy a live factsheet's persisted series. The stamp itself
         # is the fail-loud signal; the DELETE would be a fresh injury on top of it.
         await _stamp_strategy_analytics_failed(
-            stamp_detail + scrubbed, heal_series=False
+            stamp_detail, detail=scrubbed, heal_series=False
         )
         return DispatchResult(
             outcome=DispatchOutcome.FAILED,
@@ -2871,10 +2871,28 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
         # the wrapped form turned four gates RED against a correct file, which is
         # the good failure mode; a laxer extractor would have turned them
         # vacuously GREEN, which is the one this repo keeps getting bitten by.
-        async def _stamp_strategy_analytics_failed(message: str, *, heal_series: bool = True) -> None:
+        async def _stamp_strategy_analytics_failed(message: str, *, detail: str | None = None, heal_series: bool = True) -> None:
             if is_key_mode:
                 return
             scrubbed = str(scrub_freeform_string(message))
+            # ---- HONEST-01 / D-162-4 (strict): the detail/message SPLIT ------
+            # `message` is the CURATED sentence and it is the only thing that
+            # reaches `computation_error`, which renders verbatim in the wizard
+            # failure envelope and on the portfolio dashboard. `detail` is the
+            # scrubbed exception text; it goes HERE and to the caller's
+            # DispatchResult, and nowhere a subscriber can read it. Scrubbing
+            # removes secrets — it does not turn an internal into user copy,
+            # which is the misunderstanding that put `+ scrubbed` suffixes on
+            # fourteen stamp sites. Splitting at THIS choke point rather than
+            # at each call site is the same CR-02 discipline the terminal-stamp
+            # collapse above rests on: a fifteenth site added later has no
+            # concatenation to copy.
+            if detail:
+                logger.warning(
+                    "derive_broker_dailies: terminal analytics stamp for strategy "
+                    "%s — %s | detail: %s",
+                    strategy_id, message, str(scrub_freeform_string(detail)),
+                )
 
             # ---- Phase 161.1 / D-15: a maintenance refresh may NOT un-publish --
             # The stamp below is an AUTHORITATIVE clear — status 'failed', warned
@@ -3674,7 +3692,8 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                 # never a silently-partial track record.
                 await _stamp_strategy_analytics_failed(
                     "Deribit transaction history could not be verified as "
-                    "complete. " + str(scrub_freeform_string(str(exc)))
+                    "complete.",
+                    detail=str(scrub_freeform_string(str(exc))),
                 )
                 return DispatchResult(
                     outcome=DispatchOutcome.FAILED,
@@ -3699,8 +3718,8 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                 scrubbed = str(scrub_freeform_string(str(exc)))
                 await _stamp_strategy_analytics_failed(
                     "Deribit ledger contained a transaction that could not be "
-                    "processed (unvaluable coin cash, undatable, or schema drift). "
-                    + scrubbed
+                    "processed (unvaluable coin cash, undatable, or schema drift).",
+                    detail=scrubbed,
                 )
                 return DispatchResult(
                     outcome=DispatchOutcome.FAILED,
@@ -3727,7 +3746,8 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                 await _stamp_strategy_analytics_failed(
                     "Deribit native NAV reconstruction refused a structural input "
                     "(a value-bearing currency with no USD mark, or the "
-                    "full-history roll did not reconcile to inception). " + scrubbed
+                    "full-history roll did not reconcile to inception).",
+                    detail=scrubbed,
                 )
                 return DispatchResult(
                     outcome=DispatchOutcome.FAILED,
@@ -3838,8 +3858,8 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                 # Permanent FAILED + terminal stamp — retrying cannot help.
                 scrubbed = str(scrub_freeform_string(str(exc)))
                 await _stamp_strategy_analytics_failed(
-                    "sFOX history crawl could not be verified as complete. "
-                    + scrubbed
+                    "sFOX history crawl could not be verified as complete.",
+                    detail=scrubbed,
                 )
                 return DispatchResult(
                     outcome=DispatchOutcome.FAILED,
@@ -3863,7 +3883,8 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                 await _stamp_strategy_analytics_failed(
                     "sFOX ledger contained a value that could not be interpreted "
                     "(a non-USD-family flow, a malformed amount, an unrecognized "
-                    "action, or a non-finite NAV point). " + scrubbed
+                    "action, or a non-finite NAV point).",
+                    detail=scrubbed,
                 )
                 return DispatchResult(
                     outcome=DispatchOutcome.FAILED,
@@ -4254,7 +4275,8 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                     _scrubbed = str(scrub_freeform_string(str(exc)))
                     if _kind == "auth":
                         await _stamp_strategy_analytics_failed(
-                            "MT5 login was rejected (bad credentials). " + _scrubbed
+                            "MT5 login was rejected (bad credentials).",
+                            detail=_scrubbed,
                         )
                         return DispatchResult(
                             outcome=DispatchOutcome.FAILED,
@@ -4336,7 +4358,8 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                 await _stamp_strategy_analytics_failed(
                     "MT5 deal ledger contained a deal type that could not be "
                     "classified (an ambiguous/unknown DEAL_TYPE, or a non-finite "
-                    "money/time field). " + _scrubbed
+                    "money/time field).",
+                    detail=_scrubbed,
                 )
                 return DispatchResult(
                     outcome=DispatchOutcome.FAILED,
@@ -5999,7 +6022,7 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
     # remaining budget.
     _stitch_start = asyncio.get_running_loop().time()
 
-    async def _stamp_failed(message: str) -> None:
+    async def _stamp_failed(message: str, *, detail: str | None = None) -> None:
         """Terminal 'failed' stamp so the wizard poller reaches a gate instead of
         an infinite 'computing' spinner (mirrors the derive path). Scrubbed
         (T-86-10). Never touches verification/publish columns (M-3).
@@ -6015,8 +6038,20 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
         MERGE the two composite markers OVER the existing flags to PRESERVE the
         mask (mirror the SUCCESS path's read-modify-write idiom below). On a
         first-derive failure with no existing row this falls back to
-        {csv_source, composite} — current behavior, byte-unchanged."""
+        {csv_source, composite} — current behavior, byte-unchanged.
+
+        HONEST-01 / D-162-4 (strict): `message` is the CURATED sentence and is
+        the only thing that reaches `computation_error`. `detail` is the
+        scrubbed exception text and rides the log line below plus the caller's
+        DispatchResult — never the user-readable column. Same split, same
+        reason, as the derive path's `_stamp_strategy_analytics_failed`."""
         scrubbed = str(scrub_freeform_string(message))
+        if detail:
+            logger.warning(
+                "run_stitch_composite_job: terminal analytics stamp for strategy "
+                "%s — %s | detail: %s",
+                strategy_id, message, str(scrub_freeform_string(detail)),
+            )
 
         # ONE select, BOTH columns: the flags for M-2's merge above, and the
         # CURRENT status for the non-destructive guard below.
@@ -6195,7 +6230,9 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
         assert_windows_disjoint(windows)
     except CompositeOverlapError as exc:
         scrubbed = str(scrub_freeform_string(str(exc)))
-        await _stamp_failed("Composite member windows overlap. " + scrubbed)
+        await _stamp_failed(
+            "Composite member windows overlap.", detail=scrubbed
+        )
         return DispatchResult(
             outcome=DispatchOutcome.FAILED,
             error_message=(
@@ -6844,7 +6881,8 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
                 scrubbed = str(scrub_freeform_string(str(exc)))
                 await _stamp_failed(
                     "Composite member reconstruction failed structurally "
-                    "(incomplete/unvaluable ledger). " + scrubbed
+                    "(incomplete/unvaluable ledger).",
+                    detail=scrubbed,
                 )
                 return DispatchResult(
                     outcome=DispatchOutcome.FAILED,
@@ -6921,7 +6959,9 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
         stitched_cash = stitch_clipped_series(clipped_cash)
     except CompositeOverlapError as exc:
         scrubbed = str(scrub_freeform_string(str(exc)))
-        await _stamp_failed("Composite member series collide on a calendar day. " + scrubbed)
+        await _stamp_failed(
+            "Composite member series collide on a calendar day.", detail=scrubbed
+        )
         return DispatchResult(
             outcome=DispatchOutcome.FAILED,
             error_message=(
@@ -7089,7 +7129,8 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
         scrubbed = str(scrub_freeform_string(str(exc)))
         await _stamp_failed(
             "Composite metrics compute rejected the stitched series "
-            "(interior chain-break under the arithmetic convention). " + scrubbed
+            "(interior chain-break under the arithmetic convention).",
+            detail=scrubbed,
         )
         return DispatchResult(
             outcome=DispatchOutcome.FAILED,
@@ -7211,7 +7252,8 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
         except CompositeOverlapError as exc:
             scrubbed = str(scrub_freeform_string(str(exc)))
             await _stamp_failed(
-                "Composite MTM member series collide on a calendar day. " + scrubbed
+                "Composite MTM member series collide on a calendar day.",
+                detail=scrubbed,
             )
             return DispatchResult(
                 outcome=DispatchOutcome.FAILED,
@@ -7226,7 +7268,8 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
             scrubbed = str(scrub_freeform_string(str(exc)))
             await _stamp_failed(
                 "Composite MTM metrics compute rejected the stitched series "
-                "(interior chain-break under the arithmetic convention). " + scrubbed
+                "(interior chain-break under the arithmetic convention).",
+                detail=scrubbed,
             )
             return DispatchResult(
                 outcome=DispatchOutcome.FAILED,
