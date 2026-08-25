@@ -24,23 +24,50 @@ const EXCHANGE_OPTIONS = EXCHANGES.filter((e) => e.toLowerCase() !== "sfox").map
 );
 
 /**
+ * KEYLINK-01 — what the user is told when the `api_keys` row EXISTS but could
+ * not be attached to the strategy.
+ *
+ * It is deliberately NOT the generic save-failure sentence, and not the
+ * validation sentence either. The three outcomes demand three different next
+ * actions: a validation failure means the credentials are wrong and should be
+ * re-entered; a 2xx with no id means nothing was written at all; here the
+ * credentials were accepted AND the row is already saved against the user's key
+ * quota, so re-typing them fixes nothing. Naming the half that succeeded is the
+ * only way the user can tell that a key now exists in their account.
+ *
+ * DESIGN.md §Voice: declarative, sentence-case, active voice, no adjective where
+ * a fact will do. No number is quoted because none is knowable here — this
+ * component reads no retry hint, and inventing a wait would be fabrication.
+ */
+const KEY_LINK_FAILED_COPY =
+  "Your key was saved to your account, but we couldn't attach it to this strategy. Reload the page and try again.";
+
+/**
  * H-0405 (audit-2026-05-07): map a raw Postgres/PostgREST error to a safe,
  * user-facing string. Piping `error.message` straight into the banner leaked
  * internal detail — SQLSTATE 42501 (RLS / SECURITY DEFINER trigger RAISE, such
  * as the cross-tenant api_key_id guard from migration 028/029 which embeds two
  * UUIDs + the migration name), constraint text, and column names. Keep all of
  * that server-side; show the user one of two intent-specific messages.
+ *
+ * KEYLINK-01: `intent` picks the fallback sentence. The 42501 arm is shared on
+ * purpose — "You can only link API keys you own." is already the correct
+ * sentence for BOTH a strategy save and a key link, and the redaction itself has
+ * to stay in ONE place: it is the security-relevant half, and a second copy of
+ * it is a second thing to forget when the guard changes.
  */
-function toUserFacingStrategyError(error: {
-  code?: string;
-  message?: string;
-}): string {
+function toUserFacingStrategyError(
+  error: { code?: string; message?: string },
+  intent: "save" | "link" = "save",
+): string {
   const code = error.code ?? "";
   const message = error.message ?? "";
   if (code === "42501" || message.includes("cross-tenant linkage blocked")) {
     return "You can only link API keys you own.";
   }
-  return "Couldn't save your strategy. Please try again.";
+  return intent === "link"
+    ? KEY_LINK_FAILED_COPY
+    : "Couldn't save your strategy. Please try again.";
 }
 
 interface StrategyFormProps {
@@ -99,6 +126,16 @@ export function StrategyForm({ strategy, mode }: StrategyFormProps) {
   const [apiLoading, setApiLoading] = useState(false);
   const [apiError, setApiError] = useState<string | null>(null);
   const [apiConnected, setApiConnected] = useState(!!strategy?.api_key_id);
+  // KEYLINK-01: the id of the `api_keys` row the SERVER minted for this
+  // session's connect. Before this state existed the id was destructured off the
+  // response, type-checked, and then DROPPED — nothing ever carried it to a
+  // `strategies` row. The key was billed against the user's quota,
+  // `strategies.api_key_id` stayed NULL, no sync was ever enqueued, and the
+  // button still flipped to "API Key Connected". It seeds from the strategy so
+  // this and `apiConnected` can never disagree about WHICH key is attached.
+  const [connectedKeyId, setConnectedKeyId] = useState<string | null>(
+    strategy?.api_key_id ?? null,
+  );
   const router = useRouter();
 
   function toggleItem(list: string[], item: string, setter: (v: string[]) => void) {
@@ -158,6 +195,43 @@ export function StrategyForm({ strategy, mode }: StrategyFormProps) {
         throw new Error("Your key was verified but not saved. Please try again.");
       }
 
+      // KEYLINK-01 — PERSIST THE LINK BEFORE CLAIMING IT.
+      //
+      // In edit mode the `strategies` row already exists, so the attach happens
+      // HERE and not at form submit. The button below reads "API Key Connected"
+      // the instant this function resolves; a user who then navigates away — or
+      // simply never presses Save — must not be looking at a claim the database
+      // cannot confirm. Deferring the write to handleSubmit leaves exactly that
+      // window open, which is the same false-success one layer down.
+      //
+      // It also closes the mint loop. `apiConnected` initialises from
+      // `strategy?.api_key_id`; for as long as that column stayed NULL, every
+      // reload re-enabled the button and every retry minted ANOTHER `api_keys`
+      // row against the user's quota.
+      //
+      // Throwing is the point (this mirrors ApiKeyManager's NEW-C37-03 arm): the
+      // catch below leaves `apiConnected` false and puts the reason in
+      // `apiError`, so a link that failed can never render as a connected key.
+      if (mode === "edit") {
+        if (!strategy) {
+          // Rule 12 / fail loud. "edit" with no strategy has no row to attach
+          // to; skipping the write silently is precisely the false-success this
+          // block exists to remove.
+          throw new Error(toUserFacingStrategyError({}, "link"));
+        }
+        const supabase = createClient();
+        const { error: linkError } = await supabase
+          .from("strategies")
+          .update({ api_key_id: newKeyId })
+          .eq("id", strategy.id);
+        if (linkError) {
+          throw new Error(toUserFacingStrategyError(linkError, "link"));
+        }
+      }
+
+      // Create mode has no row to attach to yet, so the id is held here and
+      // rides in on the INSERT that handleSubmit composes (see the payload).
+      setConnectedKeyId(newKeyId);
       setApiConnected(true);
       setDataSource("api");
       setShowApiModal(false);
@@ -199,6 +273,12 @@ export function StrategyForm({ strategy, mode }: StrategyFormProps) {
       leverage_range: leverageRange || null,
       aum: aum ? parseFloat(aum) : null,
       max_capacity: maxCapacity ? parseFloat(maxCapacity) : null,
+      // KEYLINK-01: create mode has no `strategies` row at connect time, so the
+      // id the server minted can only reach the database here. Edit mode is
+      // deliberately EXCLUDED — handleApiKeySubmit already wrote that link and
+      // threw if it could not, and a second writer for the same column is a
+      // second place the two writes can silently disagree.
+      ...(mode === "create" && connectedKeyId ? { api_key_id: connectedKeyId } : {}),
     };
 
     if (mode === "create") {
