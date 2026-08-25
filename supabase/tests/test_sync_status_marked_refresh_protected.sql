@@ -62,6 +62,25 @@
 --                               a non-terminal job and NO protected failure MUST
 --                               still read 'computing'. Without this arm, deleting
 --                               branch (a) outright passes arm I.
+--   I3 the hold is SCOPED     — the CR-01 follow-up review finding. The first cut
+--                               of v_protect_hold was per-STRATEGY: one live
+--                               protected failure stood branch (a) down for EVERY
+--                               later bridge call, so a user-initiated resync
+--                               never advertised 'computing' and
+--                               useStrategySyncPoller read a TERMINAL SUCCESS
+--                               over a job that was still running. With a
+--                               same-kind UNMARKED resync in flight the row must
+--                               read 'computing' again — and when that resync
+--                               SUCCEEDS it must supersede the protected failure
+--                               and resolve through branch (c), clearing the
+--                               error and ADVANCING computed_at.
+--   I4 marked retry still held — the safety half of I3, and its discriminator in
+--                               the other direction. A MARKED same-kind
+--                               successor is the recurring arm re-attempting
+--                               against a still-wedged venue; it must NOT release
+--                               the hold. Drop the marker test from the successor
+--                               predicate and CR-01 reopens through its own
+--                               retry — and I3 alone would not notice.
 --   J  kind-scoped marker     — the marker is read out of `metadata->>'source'`, a
 --                               namespace shared with request-derived venue tokens
 --                               (routers/process_key.py writes `body.source` into
@@ -95,7 +114,7 @@
 --
 -- The gate stays CONDITIONAL, which is what separates it from a blanket abort:
 -- with the migration applied it falls through and the arms decide the verdict.
--- The final 'ALL 14 ARMS EXECUTED' notice is the sentinel CI's loop reads the
+-- The final 'ALL 16 ARMS EXECUTED' notice is the sentinel CI's loop reads the
 -- arm count off — if you add or remove an arm, update N on that line too.
 --
 -- Usage:
@@ -118,6 +137,8 @@ DECLARE
   s_h2       UUID;  -- Arm H2: cross-kind supersession must NOT mask
   s_i        UUID;  -- Arm I: protection must survive a branch-(a) bounce
   s_i2       UUID;  -- Arm I2: branch (a) must still fire without a protection
+  s_i3       UUID;  -- Arm I3: the hold is scoped to the jobs it is about
+  s_i4       UUID;  -- Arm I4: a MARKED successor must NOT release the hold
   s_j        UUID;  -- Arm J: marked, but a kind no refresh arm enqueues
   s_j2       UUID;  -- Arm J2: the propagated chain-hop kind stays protected
   j          UUID;
@@ -160,7 +181,7 @@ BEGIN
        obj_description('sync_strategy_analytics_status(uuid)'::regprocedure, 'pg_proc'),
        ''
      ) !~ '20260825150000' THEN
-    RAISE EXCEPTION 'TEST FAILED (0): public.sync_strategy_analytics_status(uuid) does not carry the migration 20260825150000 comment on this database, so NONE of arms A-J2 ran. This is a FAILURE, not a skip. TWO causes fit and this assertion cannot distinguish them, so check both: (i) the TEST project has not received migration 20260825150000_sync_status_protect_marked_refresh.sql — apply it and re-run; expect this exactly once, on the PR that introduces or re-applies it, because NO workflow applies migrations to TEST; (ii) the function was REDEFINED by a later migration that dropped this comment, which silently reverts the CR-01 protection and un-publishes a funded account on its next failed maintenance refresh. ⛔ Do NOT "fix" this by restoring the old RAISE NOTICE/RETURN skip, and do NOT reword it to any phrasing CI''s SKIP grep cannot see: that is what made this file assert nothing while reading green.';
+    RAISE EXCEPTION 'TEST FAILED (0): public.sync_strategy_analytics_status(uuid) does not carry the migration 20260825150000 comment on this database, so NONE of arms A-K ran. This is a FAILURE, not a skip. TWO causes fit and this assertion cannot distinguish them, so check both: (i) the TEST project has not received migration 20260825150000_sync_status_protect_marked_refresh.sql — apply it and re-run; expect this exactly once, on the PR that introduces or re-applies it, because NO workflow applies migrations to TEST; (ii) the function was REDEFINED by a later migration that dropped this comment, which silently reverts the CR-01 protection and un-publishes a funded account on its next failed maintenance refresh. ⛔ Do NOT "fix" this by restoring the old RAISE NOTICE/RETURN skip, and do NOT reword it to any phrasing CI''s SKIP grep cannot see: that is what made this file assert nothing while reading green.';
   END IF;
 
   -- ----- SEED ------------------------------------------------------------
@@ -184,6 +205,8 @@ BEGIN
   INSERT INTO strategies (user_id, api_key_id, name) VALUES (uid, k_mt5, 'ssr H2') RETURNING id INTO s_h2;
   INSERT INTO strategies (user_id, api_key_id, name) VALUES (uid, k_mt5, 'ssr I') RETURNING id INTO s_i;
   INSERT INTO strategies (user_id, api_key_id, name) VALUES (uid, k_mt5, 'ssr I2') RETURNING id INTO s_i2;
+  INSERT INTO strategies (user_id, api_key_id, name) VALUES (uid, k_mt5, 'ssr I3') RETURNING id INTO s_i3;
+  INSERT INTO strategies (user_id, api_key_id, name) VALUES (uid, k_mt5, 'ssr I4') RETURNING id INTO s_i4;
   INSERT INTO strategies (user_id, api_key_id, name) VALUES (uid, k_mt5, 'ssr J') RETURNING id INTO s_j;
   INSERT INTO strategies (user_id, api_key_id, name) VALUES (uid, k_mt5, 'ssr J2') RETURNING id INTO s_j2;
 
@@ -208,8 +231,9 @@ BEGIN
          -- declined here too; the bridge must agree with it.
          (s_e, 'computing', TRUE, v_before);
 
-  -- ⛔ Arms I / I2 seed a PLAIN 'complete' with computation_warned = FALSE, and
-  -- that is the whole point of the arm rather than an incidental difference.
+  -- ⛔ Arms I / I2 / I3 / I4 seed a PLAIN 'complete' with computation_warned =
+  -- FALSE, and that is the whole point of the arms rather than an incidental
+  -- difference.
   -- Branch (a) PRESERVES 'complete_with_warnings' (and any warned row), so the
   -- seven rows above are structurally immune to the bounce arm I drives. Only a
   -- cleanly recomputed row — plain 'complete', warning cleared — can be bounced
@@ -218,7 +242,9 @@ BEGIN
   -- the unfixed bridge.
   INSERT INTO strategy_analytics (strategy_id, computation_status, computation_warned, computed_at)
   VALUES (s_i,  'complete', FALSE, v_before),
-         (s_i2, 'complete', FALSE, v_before);
+         (s_i2, 'complete', FALSE, v_before),
+         (s_i3, 'complete', FALSE, v_before),
+         (s_i4, 'complete', FALSE, v_before);
 
   -- ===== ARM A — protected single-key refresh ============================
   tok := gen_random_uuid();
@@ -384,10 +410,24 @@ BEGIN
   -- still-live protected job routes to the loud branch, poisoning the row it
   -- had already protected. The bridge is called THREE times here against ONE
   -- marked failure; the row must survive all three.
+  --
+  -- ⛔ THE EXPLICIT EARLIER created_at IS WHAT MAKES THIS ARM DISCRIMINATE, and
+  -- it was added by MEASUREMENT, not symmetry (CR-01 follow-up review). The
+  -- branch-(a) hold is released only for a strictly-LATER, SAME-KIND, UNMARKED
+  -- successor; this arm's sibling is unmarked and later, and differs from the
+  -- failure ONLY in kind, so it is the falsification for the same-kind conjunct.
+  -- Without the offset it is not "later" at all: `now()` is the TRANSACTION
+  -- timestamp, so every row this DO block inserts shares one value and the
+  -- STRICT `r.created_at > f.created_at` alone kept the successor invisible.
+  -- Measured, that made the arm pass with `r.kind = f.kind` DELETED from the
+  -- successor predicate — i.e. it went green over a bridge that lets any
+  -- unrelated poller release the hold, bounce the row and poison it three calls
+  -- later. With the offset, deleting that conjunct turns this arm RED.
   tok := gen_random_uuid();
-  INSERT INTO compute_jobs (strategy_id, kind, status, claim_token, attempts, max_attempts, metadata)
+  INSERT INTO compute_jobs (strategy_id, kind, status, claim_token, attempts, max_attempts, metadata, created_at)
   VALUES (s_i, 'derive_broker_dailies', 'running', tok, 1, 3,
-          jsonb_build_object('source', 'ledger-refresh', 'enqueued_at', now()))
+          jsonb_build_object('source', 'ledger-refresh', 'enqueued_at', now()),
+          now() - INTERVAL '2 hours')
   RETURNING id INTO j;
 
   -- call 1 — grants the protection.
@@ -463,6 +503,115 @@ BEGIN
   END IF;
   IF v_anchor IS NULL THEN
     RAISE EXCEPTION 'ARM I2 FAILED (JOB-01): the transition INTO computing did not stamp computing_started_at, so the stuck-computing reaper can never fire on this row.';
+  END IF;
+
+  -- ===== ARM I3 — the hold is SCOPED to the jobs it is about ================
+  -- The CR-01 follow-up review finding. Arm I pins that the protection SURVIVES
+  -- an unrelated sibling; it says nothing about what that costs. The first cut
+  -- of `v_protect_hold` paid for it per-STRATEGY: one live protected failure
+  -- stood branch (a) down for EVERY later bridge call on that strategy until a
+  -- same-kind 'done' superseded it. MEASURED consequence on a plain-'complete'
+  -- row — a user-initiated resync never advertised 'computing', and
+  -- `useStrategySyncPoller` treats the row as TERMINAL on
+  -- `nextStatus === 'failed' || isComputedAnalytics(nextStatus)`, so the poller
+  -- exited on a stale success while the job it kicked off was still running and
+  -- SyncPreviewStep materialised the PRE-resync factsheet.
+  --
+  -- ⛔ The failure is seeded with an EXPLICIT earlier created_at, and that is
+  -- load-bearing rather than decorative. `now()` is the TRANSACTION timestamp,
+  -- so every row this DO block inserts shares one value; both the successor test
+  -- (`r.created_at > f.created_at`) and F-3/PUB-02 supersession
+  -- (`d.created_at > f.created_at`) are STRICT, so without the offset neither
+  -- fires and the arm would silently measure the un-scoped path instead. Arm H
+  -- carries the same offset for the same reason.
+  tok := gen_random_uuid();
+  INSERT INTO compute_jobs (strategy_id, kind, status, claim_token, attempts, max_attempts, metadata, created_at)
+  VALUES (s_i3, 'derive_broker_dailies', 'running', tok, 1, 3,
+          jsonb_build_object('source', 'ledger-refresh'), now() - INTERVAL '2 hours')
+  RETURNING id INTO j;
+  PERFORM mark_compute_job_failed(j, 'mt5 gateway IPC timeout (-10005)', 'permanent', tok);
+
+  SELECT computation_status INTO v_status FROM strategy_analytics WHERE strategy_id = s_i3;
+  IF v_status IS DISTINCT FROM 'complete' THEN
+    RAISE EXCEPTION 'ARM I3 SETUP BROKEN: the protection was never granted (row reads %), so the scope assertions below would be measuring nothing.', v_status;
+  END IF;
+
+  -- The user resyncs: an UNMARKED job of the FAILURE'S OWN KIND, enqueued after
+  -- it. That is the one shape of in-flight job whose terminal outcome decides
+  -- the protected failure on its own, so branch (a) may safely advertise it.
+  INSERT INTO compute_jobs (strategy_id, kind, status, attempts, max_attempts)
+  VALUES (s_i3, 'derive_broker_dailies', 'running', 1, 3)
+  RETURNING id INTO j_sib;
+  PERFORM sync_strategy_analytics_status(s_i3);
+
+  SELECT computation_status, computing_started_at INTO v_status, v_anchor
+    FROM strategy_analytics WHERE strategy_id = s_i3;
+  IF v_status IS DISTINCT FROM 'computing' THEN
+    RAISE EXCEPTION 'ARM I3 FAILED: a user-initiated resync of the protected failure''s OWN KIND is in flight and the row still reads % rather than ''computing''. The branch-(a) hold is per-STRATEGY again, so src/hooks/useStrategySyncPoller.ts reads a TERMINAL SUCCESS over a running job and SyncPreviewStep hands the user the pre-resync factsheet.', v_status;
+  END IF;
+  IF v_anchor IS NULL THEN
+    RAISE EXCEPTION 'ARM I3 FAILED (JOB-01): the released hold let branch (a) resolve to ''computing'' without stamping computing_started_at, so the stuck-computing reaper can never fire on this row.';
+  END IF;
+
+  -- …and the release is SOUND because that successor's outcome DOMINATES: its
+  -- 'done' is a strictly-later same-kind success, which SUPERSEDES the protected
+  -- failure outright (F-3/PUB-02), so the row resolves through branch (c) even
+  -- though branch (a) has already overwritten the status the health conjunct
+  -- reads. That is the whole argument for why branch (a) may be let loose here,
+  -- and this is where it is exercised end to end: an unsound release lands the
+  -- strategy at 'failed' after a resync that WORKED.
+  --
+  -- ⛔ WHAT THESE THREE ASSERTIONS DO AND DO NOT PIN, measured rather than
+  -- assumed. They pin the LANDING — a clean success, no stale error, no frozen
+  -- vintage — and they redden on an unsound release. They do NOT pin branch (c)
+  -- itself: branch (a) already wrote computation_error = NULL and computed_at =
+  -- now() at call 2, and `now()` is the TRANSACTION timestamp, so inside one
+  -- transaction a later branch-(c) stamp is indistinguishable from branch (a)'s.
+  -- MEASURED: delete `computed_at = now()` from branch (c) and this arm stays
+  -- GREEN. Branch (c)'s own stamp and error-clear are pinned by arm H, which
+  -- reaches (c) without ever passing through (a). Recorded here so the next
+  -- reader does not mistake these three for a second, independent pin on it.
+  UPDATE compute_jobs SET status = 'done' WHERE id = j_sib;
+  PERFORM sync_strategy_analytics_status(s_i3);
+
+  SELECT computation_status, computation_error, computed_at
+    INTO v_status, v_error, v_computed
+    FROM strategy_analytics WHERE strategy_id = s_i3;
+  IF v_status IS DISTINCT FROM 'complete' THEN
+    RAISE EXCEPTION 'ARM I3 FAILED: after the resync SUCCEEDED the row reads % rather than ''complete''. Releasing the hold is only sound because a strictly-later same-kind ''done'' supersedes the protected failure; if it does not, branch (a) has already destroyed the health conjunct and the strategy goes dark on a resync that WORKED.', v_status;
+  END IF;
+  IF v_error IS NOT NULL THEN
+    RAISE EXCEPTION 'ARM I3 FAILED: the row still carries % after a superseding success. A resync that WORKED must not keep advertising the refresh failure it replaced.', v_error;
+  END IF;
+  IF v_computed <= v_before THEN
+    RAISE EXCEPTION 'ARM I3 FAILED: computed_at is still the pre-resync % after a SUCCESSFUL resync. Nothing outside this bridge writes strategy_analytics.computed_at — the analytics runner never touches that column — so a value frozen here renders the factsheet FreshnessChip and the portfolio PDF vintage as permanently stale on a strategy that was just recomputed.', v_before;
+  END IF;
+
+  -- ===== ARM I4 — a MARKED successor must NOT release the hold =============
+  -- The safety half of I3, and its discriminator in the other direction. I3 is
+  -- passed by a successor predicate that admits ANY strictly-later same-kind
+  -- job; this arm is what forces the UNMARKED conjunct. The successor here is
+  -- the recurring arm's OWN next tick against a still-wedged venue — the CR-01
+  -- scenario-1 case. Admit it and the hold is released, branch (a) bounces the
+  -- published row to 'computing', the tick fails again, the health conjunct now
+  -- reads 'computing' and branch (b) writes 'failed': CR-01 reopened by the very
+  -- retry that was supposed to heal it. Differs from I3 ONLY in the successor's
+  -- metadata.
+  tok := gen_random_uuid();
+  INSERT INTO compute_jobs (strategy_id, kind, status, claim_token, attempts, max_attempts, metadata, created_at)
+  VALUES (s_i4, 'derive_broker_dailies', 'running', tok, 1, 3,
+          jsonb_build_object('source', 'ledger-refresh'), now() - INTERVAL '2 hours')
+  RETURNING id INTO j;
+  PERFORM mark_compute_job_failed(j, 'mt5 gateway IPC timeout (-10005)', 'permanent', tok);
+
+  INSERT INTO compute_jobs (strategy_id, kind, status, attempts, max_attempts, metadata)
+  VALUES (s_i4, 'derive_broker_dailies', 'running', 1, 3,
+          jsonb_build_object('source', 'ledger-refresh'));
+  PERFORM sync_strategy_analytics_status(s_i4);
+
+  SELECT computation_status INTO v_status FROM strategy_analytics WHERE strategy_id = s_i4;
+  IF v_status IS DISTINCT FROM 'complete' THEN
+    RAISE EXCEPTION 'ARM I4 FAILED: a MARKED same-kind retry released the branch-(a) hold and the row reads %. That successor is the recurring refresh arm re-attempting against a still-wedged venue — it will fail again, and the health conjunct it just bounced to ''computing'' sends the SAME failure to branch (b). The successor predicate must exclude marked jobs.', v_status;
   END IF;
 
   -- ===== ARM J — the marker is KIND-SCOPED =================================
@@ -546,7 +695,7 @@ BEGIN
     RAISE EXCEPTION 'ARM K FAILED: role authenticated can EXECUTE sync_strategy_analytics_status. That is a SECURITY DEFINER writer with no ownership check in its body — any signed-in user could drive ANOTHER tenant''s funded account to ''computing'' or ''failed'' by strategy_id. The REVOKE in migration 20260825150000 is the only thing bounding it.';
   END IF;
 
-  RAISE NOTICE 'ALL 14 ARMS EXECUTED: sync_strategy_analytics_status protects a MARKED ledger refresh (A single-key, B composite, G no branch-(c) fall-through) IDEMPOTENT across a branch-(a) bounce (I, discriminated by I2) and KIND-SCOPED (J2 keeps the chain hop) — and stays LOUD everywhere else (C unmarked, D foreign source, E unpublished row, F unprotected sibling, H/H2 supersession same-kind and cross-kind, J foreign kind) — and is UNREACHABLE by anon/authenticated (K).';
+  RAISE NOTICE 'ALL 16 ARMS EXECUTED: sync_strategy_analytics_status protects a MARKED ledger refresh (A single-key, B composite, G no branch-(c) fall-through) IDEMPOTENT across a branch-(a) bounce (I, discriminated by I2) with the branch-(a) hold SCOPED to the jobs it is about (I3 releases it for a same-kind unmarked resync and lands that resync on branch (c); I4 refuses to release it for the recurring arm''s own marked retry) and KIND-SCOPED (J2 keeps the chain hop) — and stays LOUD everywhere else (C unmarked, D foreign source, E unpublished row, F unprotected sibling, H/H2 supersession same-kind and cross-kind, J foreign kind) — and is UNREACHABLE by anon/authenticated (K).';
 END $$;
 
 ROLLBACK;
