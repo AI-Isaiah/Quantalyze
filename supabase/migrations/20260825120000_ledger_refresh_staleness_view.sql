@@ -137,7 +137,14 @@ SET lock_timeout = '5s';
 CREATE OR REPLACE FUNCTION public.ledger_refresh_parse_series_date(p_text TEXT)
 RETURNS DATE
 LANGUAGE plpgsql
-IMMUTABLE
+-- STABLE, not IMMUTABLE: `text::date` is DateStyle-dependent, so this is not a
+-- pure function of its input and cannot honestly promise immutability. Today the
+-- sole caller pre-filters with ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ and ISO-8601 parses
+-- YMD regardless of DateStyle, so nothing is broken — but the function is
+-- GRANT EXECUTE-ed to service_role, and a future second caller or an expression
+-- index built on it would inherit an unsound promise. STABLE still permits
+-- everything the current per-row LATERAL does.
+STABLE
 STRICT
 SET search_path = public, pg_catalog
 AS $$

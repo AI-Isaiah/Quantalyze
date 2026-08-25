@@ -502,6 +502,37 @@ BEGIN
     RAISE EXCEPTION 'Migration 20260825130000: public.ledger_refresh_staleness is missing — apply 20260825120000 first';
   END IF;
 
+  -- 5. compute_jobs ADMITS the kind this arm enqueues, strategy-scoped.
+  --
+  --    Mirrors 20260825140000:498-512. Without it, a coherence re-base that
+  --    drops the derive_broker_dailies strategy arm is UNDETECTABLE at apply
+  --    time and produces the exact wedge shape this phase exists to remove:
+  --    every tick raises 23514 per candidate row, the per-row
+  --    `EXCEPTION WHEN OTHERS ... RAISE WARNING ... continue` swallows it, and
+  --    the function returns 0 — byte-identical to "nothing was stale". Green
+  --    cron, green return value, strategy_analytics never advancing.
+  --
+  --    That drift is not hypothetical here: 20260624120100 exists BECAUSE a
+  --    coherence re-base had already dropped this exact arm in one environment,
+  --    and 20260717233529:126 warns in capitals that copying an OLDER coherence
+  --    def would SILENTLY DROP it. This arm covers 4 of the 5 live ledger
+  --    strategies, so it is the one that least tolerates a silent no-op.
+  SELECT pg_get_constraintdef(oid) INTO v_kind
+    FROM pg_constraint
+   WHERE conrelid = 'public.compute_jobs'::regclass
+     AND conname = 'compute_jobs_kind_check';
+  SELECT pg_get_constraintdef(oid) INTO v_coherence
+    FROM pg_constraint
+   WHERE conrelid = 'public.compute_jobs'::regclass
+     AND conname = 'compute_jobs_kind_target_coherence';
+
+  IF v_kind IS NULL OR position('derive_broker_dailies' IN v_kind) = 0 THEN
+    RAISE EXCEPTION 'Migration 20260825130000: derive_broker_dailies is not admitted by compute_jobs_kind_check — this arm would enqueue nothing';
+  END IF;
+  IF v_coherence IS NULL OR position('derive_broker_dailies' IN v_coherence) = 0 THEN
+    RAISE EXCEPTION 'Migration 20260825130000: derive_broker_dailies is not admitted by compute_jobs_kind_target_coherence — this arm would enqueue nothing';
+  END IF;
+
   RAISE NOTICE 'Migration 20260825130000: enqueue_ledger_refresh_for_strategies applied DORMANT (no schedule registered, activation setting fail-closed)';
 END $verify$;
 
