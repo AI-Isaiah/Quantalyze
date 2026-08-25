@@ -393,8 +393,29 @@ BEGIN
         -- never fire, and a naive `counter := counter + 1` per iteration would
         -- report the number of CALLS. The founder reads this integer back at
         -- activation (docs/runbooks/ledger-refresh-go-live.md), so it must mean
-        -- what it says. Pre-count first, then attribute. Same idiom as
-        -- enqueue_poll_positions_for_all_strategies (20260412094449:249-268).
+        -- what it says. Same idiom as enqueue_poll_positions_for_all_strategies
+        -- (20260412094449:249-268).
+        --
+        -- ⚠️ [161.1-REVIEW IN-01] What this pre-count actually is, stated
+        -- honestly so the next reader does not over-trust it: it is a
+        -- RACE-WINDOW BACKSTOP, not the mechanism. The mechanism is the
+        -- in-flight conjunct in the candidate CTE above, which excludes any
+        -- strategy holding a job in ('pending','running','done_pending_children',
+        -- 'failed_retry') for ANY kind — a strict superset of the three statuses
+        -- and the one kind queried here. So on the normal path v_existing is 0
+        -- for every candidate, and this SELECT changes nothing.
+        --
+        -- It is still not dead code. The advisory lock serialises fan-out TICKS,
+        -- not the API: an externally-committed enqueue for this strategy can
+        -- land between the CTE's snapshot and this iteration's fresh READ
+        -- COMMITTED snapshot, and then the RPC returns that row's id rather than
+        -- inserting. Only in that window does v_existing go non-zero. It can
+        -- therefore only UNDERCOUNT, which is the fail-safe direction for a
+        -- number a human reads back as "jobs created".
+        --
+        -- ⛔ No test drives this non-zero deterministically — the window needs a
+        -- concurrent committed writer. Do not read a green suite as evidence
+        -- that this branch has ever fired.
         SELECT count(*) INTO v_existing
           FROM public.compute_jobs
          WHERE strategy_id = v_row.strategy_id

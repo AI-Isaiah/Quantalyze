@@ -75,6 +75,12 @@
 -- on divergence. A hand-copied mirror has drifted before — TS at 1 venue against
 -- Python at 3 — and cost a funded MT5 account its publish path.
 --
+-- The one venue name this file must ALSO carry — the deferred venue whose
+-- composites 20260825140000 skips — is declared in the SAME CTE as a subset
+-- array, never re-typed at its point of use, and the STEP 3 DO block asserts it
+-- is a member of the set above by reading BOTH back out of pg_get_viewdef. That
+-- assertion is why `has_mt5_member` is not a hand-copied literal (WR-02).
+--
 -- ⛔ Scope the set off ledger-backed-ness, NEVER off absence from
 -- `EXCHANGE_CLASSES`: deribit IS in `EXCHANGE_CLASSES`
 -- (analytics-service/services/exchange.py:812), so an absence-scoped cohort
@@ -179,7 +185,19 @@ WITH ledger_venue_set AS (
   -- `_LEDGER_BACKED_SOURCES` at analytics-service/services/ingestion/long_fetch.py:63.
   -- Plan 05's static drift gate fails CI if these diverge. Do NOT re-declare
   -- these venues anywhere else in SQL — plan 02's fan-out reads this view.
-  SELECT ARRAY['deribit', 'sfox', 'mt5']::TEXT[] AS venues
+  --
+  -- WR-02: `deferred_venues` is the SUBSET of that set whose composites the
+  -- 20260825140000 arm must not enqueue (founder: "on mt5 no composites" — one
+  -- shared terminal registry, analytics-service/services/mt5_concurrency.py).
+  -- It is declared HERE, beside the set it has to be drawn FROM, so that
+  -- `has_mt5_member` below spells no venue of its own, and STEP 3 check 6
+  -- asserts the subset relation against the definition Postgres actually
+  -- installed. Before that, this was the one hand-typed venue name in the phase
+  -- that nothing compared against anything: a rename of the venue token would
+  -- have left `has_mt5_member` silently FALSE for every affected row and turned
+  -- the composite exclusion into a no-op.
+  SELECT ARRAY['deribit', 'sfox', 'mt5']::TEXT[] AS venues,
+         ARRAY['mt5']::TEXT[]                    AS deferred_venues
 ),
 strategy_venue AS (
   -- D-06: union BOTH link shapes. `api_key_id` catches single-key strategies;
@@ -210,7 +228,7 @@ SELECT
   sv.strategy_id,
   sv.is_composite,
   sv.exchanges,
-  ('mt5' = ANY (sv.exchanges))            AS has_mt5_member,
+  (sv.exchanges && lv.deferred_venues)    AS has_mt5_member,
   sa.computation_status,
   sa.computed_at                          AS analytics_computed_at,
   sas.computed_at                         AS series_written_at,
@@ -321,9 +339,15 @@ GRANT SELECT ON public.ledger_refresh_staleness TO service_role;
 -- House style: RAISE EXCEPTION, never a silent NOTICE-skip. Mutates nothing.
 DO $$
 DECLARE
-  v_opts   TEXT[];
-  v_grants INTEGER;
-  v_rows   BIGINT;
+  v_opts      TEXT[];
+  v_grants    INTEGER;
+  v_rows      BIGINT;
+  v_def       TEXT;
+  v_venue_lit TEXT;
+  v_defer_lit TEXT;
+  v_flag_expr TEXT;
+  v_venues    TEXT[];
+  v_deferred  TEXT[];
 BEGIN
   -- 1. the parser function landed
   IF NOT EXISTS (
@@ -384,7 +408,68 @@ BEGIN
     RAISE EXCEPTION 'Migration 20260825120000: service_role cannot SELECT ledger_refresh_staleness — the observability surface is unreadable';
   END IF;
 
-  -- 6. the view actually EXECUTES. A broken lateral, a bad cast or a mistyped
+  -- 6. WR-02 — the deferred venue is a MEMBER of the ledger venue set, and the
+  --    flag column is computed from it rather than from a hand-typed name.
+  --
+  --    Gate 1 in analytics-service/tests/test_ledger_refresh_gates.py pins the
+  --    `venues` array against `_LEDGER_BACKED_SOURCES` (the sole authority). It
+  --    does not see the deferred name, so a rename of the venue token — or a
+  --    sibling spelling — would satisfy gate 1 while `has_mt5_member` evaluated
+  --    FALSE for every affected row, and 20260825140000's `has_mt5_member =
+  --    FALSE` conjunct would stop excluding anything. That is a SILENT
+  --    mishandling of the one venue that serialises on a single shared terminal
+  --    registry, which is exactly what D-01 says must never happen.
+  --
+  --    Read back out of pg_get_viewdef, not out of this file's text: the
+  --    property under test is what Postgres INSTALLED, and prose in a migration
+  --    must never be able to satisfy a mechanical check.
+  --
+  --    ⛔ Do NOT satisfy this check by re-declaring the venue set here. There is
+  --    exactly one array (D-05); this reads it back out of the catalogue.
+  v_def := pg_get_viewdef('public.ledger_refresh_staleness'::regclass, true);
+  v_venue_lit := substring(v_def FROM 'ARRAY\[([^\]]*)\] AS venues');
+  v_defer_lit := substring(v_def FROM 'ARRAY\[([^\]]*)\] AS deferred_venues');
+  v_flag_expr := substring(v_def FROM '([^\n]*) AS has_mt5_member');
+
+  -- ANTI-VACUITY FLOOR (a): the extraction landed. A NULL here would make every
+  -- assertion below pass over nothing. Fix the extraction; never drop the check.
+  IF v_venue_lit IS NULL OR v_defer_lit IS NULL OR v_flag_expr IS NULL THEN
+    RAISE EXCEPTION 'Migration 20260825120000: could not read venues=%, deferred_venues=%, has_mt5_member=% back out of pg_get_viewdef — the extraction is broken, so the drift assertions below prove NOTHING',
+      coalesce(v_venue_lit, '<not found>'),
+      coalesce(v_defer_lit, '<not found>'),
+      coalesce(v_flag_expr, '<not found>');
+  END IF;
+
+  SELECT array_agg(m[1]) INTO v_venues
+    FROM regexp_matches(v_venue_lit, '''([^'']*)''', 'g') AS m;
+  SELECT array_agg(m[1]) INTO v_deferred
+    FROM regexp_matches(v_defer_lit, '''([^'']*)''', 'g') AS m;
+
+  -- ANTI-VACUITY FLOOR (b): a parse that came back with ONE venue would let the
+  -- subset test below pass for the wrong reason. Three is the same count gate 1
+  -- pins, and for the same stated reason; if the ledger venue set genuinely
+  -- grows, both move in the same commit.
+  IF coalesce(cardinality(v_venues), 0) <> 3
+     OR coalesce(cardinality(v_deferred), 0) < 1 THEN
+    RAISE EXCEPTION 'Migration 20260825120000: parsed % ledger venue(s) % and % deferred venue(s) % from the installed definition — expected 3 and at least 1. The parse is broken and the subset assertion would be vacuous',
+      coalesce(cardinality(v_venues), 0), v_venues,
+      coalesce(cardinality(v_deferred), 0), v_deferred;
+  END IF;
+
+  IF NOT (v_deferred <@ v_venues) THEN
+    RAISE EXCEPTION 'Migration 20260825120000: DEFERRED-VENUE DRIFT — deferred_venues % is not contained in the ledger venue set %. The deferred name must be one of the ledger venues, or has_mt5_member reads FALSE for every row and the composite exclusion in 20260825140000 silently stops excluding. Change _LEDGER_BACKED_SOURCES (analytics-service/services/ingestion/long_fetch.py) FIRST, then both arrays here',
+      v_deferred, v_venues;
+  END IF;
+
+  -- ...and the flag actually CONSUMES it. Without this, the subset above would
+  -- guard a value nothing reads while has_mt5_member went back to a literal.
+  IF position('deferred_venues' IN v_flag_expr) = 0
+     OR position('''' IN v_flag_expr) > 0 THEN
+    RAISE EXCEPTION 'Migration 20260825120000: has_mt5_member is computed as `%` — it must read lv.deferred_venues and contain no venue literal of its own (WR-02), or the subset assertion above guards a value the view does not use',
+      btrim(v_flag_expr);
+  END IF;
+
+  -- 7. the view actually EXECUTES. A broken lateral, a bad cast or a mistyped
   --    column would otherwise sit latent until the first real read.
   SELECT count(*) INTO v_rows FROM public.ledger_refresh_staleness;
   RAISE NOTICE 'Migration 20260825120000: ledger_refresh_staleness applied; % ledger-backed strategies visible', v_rows;
