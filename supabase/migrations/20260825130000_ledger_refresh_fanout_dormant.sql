@@ -640,11 +640,49 @@ BEGIN
    WHERE conrelid = 'public.compute_jobs'::regclass
      AND conname = 'compute_jobs_kind_target_coherence';
 
+  -- compute_jobs_kind_check is a SINGLE flat `kind = ANY (ARRAY[…])` list with no
+  -- arms and no target columns, so a substring hit there can only have come from
+  -- the one list that admits kinds. A plain position() test is honest for THIS
+  -- constraint — and only for this one; see the next assertion for why the
+  -- coherence CHECK cannot be tested the same way.
   IF v_kind IS NULL OR position('derive_broker_dailies' IN v_kind) = 0 THEN
     RAISE EXCEPTION 'Migration 20260825130000: derive_broker_dailies is not admitted by compute_jobs_kind_check — this arm would enqueue nothing';
   END IF;
-  IF v_coherence IS NULL OR position('derive_broker_dailies' IN v_coherence) = 0 THEN
-    RAISE EXCEPTION 'Migration 20260825130000: derive_broker_dailies is not admitted by compute_jobs_kind_target_coherence — this arm would enqueue nothing';
+
+  -- ⛔ STRUCTURAL, NOT SUBSTRING — and that is a VACUITY FIX (161.1 migration
+  -- review round 4), MEASURED on a throwaway PG16, not suspected.
+  --
+  -- This assertion used to read `position('derive_broker_dailies' IN
+  -- v_coherence) = 0`. compute_jobs_kind_target_coherence is a chain of OR'd
+  -- ARMS, and `derive_broker_dailies` appears in TWO of them: the strategy-scoped
+  -- ARRAY arm this function needs, and a SEPARATE key-scoped arm
+  -- (`api_key_id IS NOT NULL`, added by 20260624120100 and preserved verbatim by
+  -- 20260717233529:171-175 for the allocator per-key fan-out). So the substring
+  -- was satisfied by the KEY-scoped arm alone. MEASURED: delete the kind from the
+  -- strategy-scoped ARRAY arm — the EXACT regression whose incident this check's
+  -- own comment cites 20260624120100 for — and the whole apply stayed GREEN while
+  -- every strategy-mode INSERT would raise 23514. A gate written to prevent a
+  -- recurrence of a documented incident could not detect that incident.
+  --
+  -- Keyed instead on an ARM that carries BOTH the kind and `strategy_id IS NOT
+  -- NULL`, which is the property this fan-out actually depends on (it enqueues
+  -- p_strategy_id ALONE — see the loop above). Same deletion now drops the match
+  -- to zero.
+  --
+  -- ⚠️ TRADE-OFF, deliberately taken. A trial INSERT inside a rolled-back
+  -- sub-block would assert the behaviour rather than the text, and it was
+  -- REJECTED: compute_jobs carries FK, NOT NULL and trigger surface that a probe
+  -- row would also have to satisfy, and this file is on the auto-apply-to-PROD
+  -- route where an abort lands mid-chain with no rollback step. A false abort
+  -- here costs exactly as much as a missed check. The regex accepts BOTH renderings
+  -- of a strategy-scoped arm — the ANY(ARRAY[…]) list form and a single-kind
+  -- `kind = 'x'::text` arm — so a future re-base that splits the kind into its own
+  -- correct arm does NOT abort the apply.
+  IF v_coherence IS NULL THEN
+    RAISE EXCEPTION 'Migration 20260825130000: compute_jobs_kind_target_coherence is missing from compute_jobs entirely — the coherence contract this arm enqueues against does not exist';
+  END IF;
+  IF v_coherence !~ '\((?:kind = ''derive_broker_dailies''::text|kind = ANY \(ARRAY\[[^]]*''derive_broker_dailies''::text[^]]*\]\))\)\s*AND\s*\(strategy_id IS NOT NULL\)' THEN
+    RAISE EXCEPTION 'Migration 20260825130000: compute_jobs_kind_target_coherence has no STRATEGY-SCOPED arm admitting derive_broker_dailies (constraintdef=%). The kind may still appear in the key-scoped arm — that arm serves the allocator per-key fan-out, not this one. This function enqueues p_strategy_id ALONE, so every tick would raise 23514 per candidate, the per-row WARNING handler would swallow it, and the fan-out would return 0 — byte-identical to "nothing was stale"', v_coherence;
   END IF;
 
   RAISE NOTICE 'Migration 20260825130000: enqueue_ledger_refresh_for_strategies applied DORMANT (no schedule registered, activation setting fail-closed)';
