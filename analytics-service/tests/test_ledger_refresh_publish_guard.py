@@ -174,7 +174,20 @@ class TestCR02SiblingStampsAreGuarded:
         )
         result, capture = await _adrive(combine=combine, marked=False)
 
-        assert result.outcome == DispatchOutcome.DONE
+        # ⛔ FAILED, not DONE — F1 (161.1 silent-failure audit). DONE routed to
+        # mark_compute_job_done, whose in-RPC bridge then took branch (c) and
+        # wrote `computation_error = NULL, computed_at = now()`. On THIS unmarked
+        # path that overwrote the authoritative 'failed' stamp asserted two lines
+        # below with a clean 'complete', handing the wizard poller a success for a
+        # strategy that has no factsheet. The stamp and the outcome have to agree;
+        # asserting the stamp while the outcome erases it is half a test.
+        assert result.outcome == DispatchOutcome.FAILED
+        assert result.error_kind == "permanent", (
+            "must be PERMANENT: an account with <2 interpretable days does not "
+            "grow history by being retried in a backoff loop, and a later "
+            "same-kind `done` supersedes this failed_final once real history "
+            "arrives. `transient` would be a retry loop against a fixed fact."
+        )
         payload = _terminal_stamp(_analytics_payloads(capture))
         assert payload["computation_status"] == "failed"
         assert payload["computation_warned"] is False
@@ -199,7 +212,18 @@ class TestCR02SiblingStampsAreGuarded:
         )
         result, capture = await _adrive(combine=combine, marked=True)
 
-        assert result.outcome == DispatchOutcome.DONE
+        # ⛔ FAILED, not DONE — F1, and on the MARKED path it is load-bearing for
+        # this very test. The `computation_error` assertion below is D-15's ONLY
+        # surviving visibility channel once the publish state is preserved. DONE
+        # routed to the bridge's branch (c), which NULLed exactly that column one
+        # RPC later and restamped `computed_at` — so the failure this test asserts
+        # is "still visible" was erased, and `computed_at` is not inert: it drives
+        # the factsheet's FreshnessChip and the PDF's "Data as of" vintage, so a
+        # month-stale funded account rendered a green Fresh badge printing TODAY.
+        # FAILED routes to (b-prime): protected, error preserved, computed_at
+        # untouched — which is what the guard already assumed.
+        assert result.outcome == DispatchOutcome.FAILED
+        assert result.error_kind == "permanent"
         payload = _terminal_stamp(_analytics_payloads(capture))
         for key in _PUBLISH_STATE_KEYS:
             assert key not in payload, (
