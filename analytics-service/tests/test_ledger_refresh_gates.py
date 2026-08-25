@@ -22,15 +22,23 @@ not by construction. The anti-vacuity floor is therefore not decoration in this
 file — it is the majority of the work, and it is applied to EVERY extracted
 region independently:
 
-    region                    floor      sentinel
+    region                    floor      sentinel (offset / region size)
     ------------------------  ---------  --------------------------------
-    VIEW BODY                 1200 ch    the view's own name
-    IS_STALE EXPRESSION        300 ch    the returns-series column name
-    DECLARATION PRELUDE         80 ch    the fan-out function's own name
-    FUNCTION BODY             2500 ch    the enqueue call
-    GUARD REGION              1500 ch    the helper's own name
-    COMPOSITE PRELUDE           80 ch    the composite function's own name
-    COMPOSITE BODY            2500 ch    the enqueue call
+    VIEW BODY                 1200 ch    the closing join predicate  4214/4246
+    IS_STALE EXPRESSION        300 ch    the verdict's reason alias  1083/1105
+    DECLARATION PRELUDE         80 ch    the language clause           90/172
+    FUNCTION BODY             2500 ch    the enqueue call            9098/10640
+    GUARD REGION              1500 ch    the awaited series heal     7651/7685
+    COMPOSITE PRELUDE           80 ch    the language clause           85/170
+    COMPOSITE BODY            2500 ch    the enqueue call            9960/11527
+    COMPOSITE GUARD REGION    1500 ch    the merged-flags payload    6444/7708
+
+⛔ EVERY ONE OF THOSE OFFSETS IS >= ITS OWN FLOOR, and that is a mechanically
+enforced rule, not a coincidence — see ``test_every_sentinel_lies_beyond_its_own_floor``
+and the block of reasoning above ``_VIEW_BODY_SENTINEL``. A sentinel drawn from
+the region's HEAD is normally the locator's own text, which every successful
+extraction contains by construction, so it cannot fail. Five of these eight
+were exactly that until it was measured and corrected.
 
 The IS_STALE EXPRESSION is a separately-extracted region with its OWN floor and
 its OWN sentinel. It is deliberately not allowed to ride on the VIEW BODY's
@@ -64,6 +72,7 @@ from __future__ import annotations
 
 import pathlib
 import re
+from collections.abc import Callable
 from typing import Final
 
 # ---------------------------------------------------------------------------
@@ -146,6 +155,79 @@ _COMPOSITE_BODY_MIN_CHARS: Final[int] = 2500
 # The composite handler's own terminal-stamp closure. Measured at 7708
 # characters at the commit that introduced its guard.
 _COMPOSITE_GUARD_REGION_MIN_CHARS: Final[int] = 1500
+
+# ---------------------------------------------------------------------------
+# Region sentinels — ⛔ EACH ONE MUST LIE BEYOND ITS OWN FLOOR
+# ---------------------------------------------------------------------------
+# A sentinel exists to catch the region that is LONG ENOUGH and still the wrong
+# text. It can only do that if the LOCATOR CANNOT SUPPLY IT.
+#
+# Reviewed 2026-08-25 (WR-04): five of the eight sentinels here were their own
+# locator's text — the view's name, the two function names, the two closure
+# names — sitting at offsets 14, 30, 34, 34 and 18 of their regions. Every
+# successful extraction contains the text that found it, so all five were
+# assertions that could not fail, and the ABSENCE assertions they were meant to
+# protect could then pass over the wrong region by construction. That is the
+# exact disease this file exists to detect, found inside the detector.
+#
+# ⛔ THE RULE, mechanically enforced below by
+# `TestAntiVacuityFloor::test_every_sentinel_lies_beyond_its_own_floor`:
+#
+#     a sentinel must occur NO EARLIER THAN its region's floor.
+#
+# That is what makes it independent of the length check rather than implied by
+# it: an extraction truncated to exactly the floor's allowance still cannot
+# contain the sentinel, so the two halves of `_assert_region` fail for
+# distinguishable reasons instead of agreeing by luck.
+#
+# ⚠️ "Not a substring of the locator" is NOT sufficient, and the difference is
+# concrete. `AS $fanout$` reads as independent — it is nowhere in the pattern
+# source, which spells it `AS\s+\$fanout\$` — but the prelude regex TERMINATES
+# on it, so every successful match ends with it and it can no more fail than the
+# function name could. The prelude sentinel is therefore `LANGUAGE plpgsql`,
+# which the locator neither names nor forces.
+#
+# ⛔ A sentinel must ALSO NOT be a token that a GATE scoped to the same region
+# asserts. If it is, deleting the thing the gate protects fires the FLOOR's
+# message — "the extraction landed on the wrong text" — instead of the gate's,
+# and a correctly-detected regression is reported as a broken test. That is why
+# both prelude sentinels sit BEFORE `SECURITY DEFINER` / `SET search_path`
+# (gates 7 and 10f own those), and why the verdict's sentinel is no longer
+# `last_return_date` (gate 6 owns that).
+
+# The view's closing join predicate, INCLUDING its terminating semicolon. The
+# region is defined as "the CREATE VIEW statement up to its own `;`", so a
+# sentinel carrying that `;` is the one token that proves `_scan_sql` stopped at
+# the RIGHT terminator — which is the failure this floor was built for: the
+# in-body prose contains "catches single-key strategies;", and an earlier
+# regression truncated the extraction there while leaving >1200 characters of
+# header behind.
+_VIEW_BODY_SENTINEL: Final[str] = "WHERE sv.exchanges && lv.venues;"
+# The verdict's `stale_reason` alias — the LAST thing inside the BEGIN/END
+# markers. Not `last_return_date`: that is gate 6's own positive assertion (so
+# the floor would preempt it with a wrong diagnosis) and it first occurs at
+# offset 537, inside a 1105-character region, so a spurious END marker anywhere
+# past it left the sentinel intact.
+_IS_STALE_SENTINEL: Final[str] = "stale_reason"
+# The declaration's language clause. Sits after the header (73 ch) and after
+# `RETURNS INTEGER` (89 ch) — i.e. just past the 80-character floor, which is
+# precisely the gap the floor alone cannot close.
+_PRELUDE_SENTINEL: Final[str] = "LANGUAGE plpgsql"
+_FUNCTION_BODY_SENTINEL: Final[str] = "enqueue_compute_job("
+# The awaited series heal — the closure's LAST statement, and the destructive
+# act D-15 exists to withhold. Prefixed with `await ` deliberately: the bare
+# name also appears at offset 5480 in the closure's own reasoning, and the
+# prefixed call form occurs exactly once, at the tail.
+_GUARD_REGION_SENTINEL: Final[str] = "await _heal_delete_basis_series()"
+_COMPOSITE_PRELUDE_SENTINEL: Final[str] = "LANGUAGE plpgsql"
+_COMPOSITE_BODY_SENTINEL: Final[str] = "enqueue_compute_job("
+# The composite closure's merged-flags payload. Chosen over `on_conflict=` and
+# `await db_execute(_upsert)` — both of which sit deeper — because those two
+# also appear in the SIBLING closure (region 5), so they could not tell a
+# mis-landing on it from a correct extraction. `merged_flags` is M-2's
+# read-modify-write and exists only here; the derive closure writes a literal
+# `{"csv_source": True}`.
+_COMPOSITE_GUARD_REGION_SENTINEL: Final[str] = '"data_quality_flags": merged_flags'
 
 # The rejected freshness keys (plan 01, D-03). `computed_at` covers both
 # `strategy_analytics.computed_at` and the view's `analytics_computed_at` alias;
@@ -299,6 +381,13 @@ def _assert_region(label: str, text: str, min_chars: int, sentinel: str) -> str:
     Length alone is not enough — a region could be long and still be the wrong
     text — so each region also carries a hand-typed sentinel proving the
     extraction landed where it was aimed.
+
+    ⛔ The sentinel only carries that proof while the LOCATOR CANNOT SUPPLY IT.
+    A sentinel taken from the head of the region is normally the very text the
+    extractor searched for, and every successful extraction contains that by
+    construction — so the assertion below cannot fail, and the length check is
+    silently the only thing left. See the rule block above `_VIEW_BODY_SENTINEL`
+    and `test_every_sentinel_lies_beyond_its_own_floor`, which enforces it.
     """
     assert len(text) >= min_chars, (
         f"ANTI-VACUITY FLOOR: the extracted {label} is {len(text)} characters, "
@@ -330,7 +419,7 @@ def view_body() -> str:
     src = _read(_view_migration_path(), "_STALENESS_VIEW_MIGRATION_NAME")
     body = _sql_statement(src, _VIEW_HEADER_RE, "CREATE VIEW ledger_refresh_staleness")
     return _assert_region(
-        "VIEW BODY", body, _VIEW_BODY_MIN_CHARS, "ledger_refresh_staleness"
+        "VIEW BODY", body, _VIEW_BODY_MIN_CHARS, _VIEW_BODY_SENTINEL
     )
 
 
@@ -362,7 +451,7 @@ def is_stale_expression() -> str:
         "IS_STALE EXPRESSION",
         match.group(1),
         _IS_STALE_MIN_CHARS,
-        "last_return_date",
+        _IS_STALE_SENTINEL,
     )
 
 
@@ -395,7 +484,7 @@ def function_declaration_prelude() -> str:
         "DECLARATION PRELUDE",
         match.group(0),
         _PRELUDE_MIN_CHARS,
-        _FANOUT_FUNCTION_NAME,
+        _PRELUDE_SENTINEL,
     )
 
 
@@ -412,7 +501,7 @@ def function_body() -> str:
         "FUNCTION BODY",
         match.group(1),
         _FUNCTION_BODY_MIN_CHARS,
-        "enqueue_compute_job(",
+        _FUNCTION_BODY_SENTINEL,
     )
 
 
@@ -453,7 +542,7 @@ def guard_region() -> str:
         "GUARD REGION",
         "\n".join(lines[start:end]),
         _GUARD_REGION_MIN_CHARS,
-        "_stamp_strategy_analytics_failed",
+        _GUARD_REGION_SENTINEL,
     )
 
 
@@ -481,7 +570,7 @@ def composite_declaration_prelude() -> str:
         "COMPOSITE PRELUDE",
         match.group(0),
         _COMPOSITE_PRELUDE_MIN_CHARS,
-        _COMPOSITE_FUNCTION_NAME,
+        _COMPOSITE_PRELUDE_SENTINEL,
     )
 
 
@@ -498,7 +587,7 @@ def composite_body() -> str:
         "COMPOSITE BODY",
         match.group(1),
         _COMPOSITE_BODY_MIN_CHARS,
-        "enqueue_compute_job(",
+        _COMPOSITE_BODY_SENTINEL,
     )
 
 
@@ -541,7 +630,7 @@ def composite_guard_region() -> str:
         "COMPOSITE GUARD REGION",
         "\n".join(lines[start:end]),
         _COMPOSITE_GUARD_REGION_MIN_CHARS,
-        "_stamp_failed",
+        _COMPOSITE_GUARD_REGION_SENTINEL,
     )
 
 
@@ -562,14 +651,112 @@ def _banned_venue_names() -> set[str]:
 
 
 # ---------------------------------------------------------------------------
+# The region contract table — floor and sentinel, one row per region
+# ---------------------------------------------------------------------------
+# ⛔ EVERY region belongs here. This table is what
+# `test_every_sentinel_lies_beyond_its_own_floor` iterates, and a region
+# extractor added without a row would be the one whose sentinel nobody checks.
+# The count assertion in that test is the floor for THIS table, on the same
+# reasoning gate 3a's match count uses: a loop over an empty (or shortened)
+# sequence reports "no offenders" in language indistinguishable from success.
+_REGION_CONTRACTS: Final[tuple[tuple[str, Callable[[], str], int, str], ...]] = (
+    ("VIEW BODY", view_body, _VIEW_BODY_MIN_CHARS, _VIEW_BODY_SENTINEL),
+    (
+        "IS_STALE EXPRESSION",
+        is_stale_expression,
+        _IS_STALE_MIN_CHARS,
+        _IS_STALE_SENTINEL,
+    ),
+    (
+        "DECLARATION PRELUDE",
+        function_declaration_prelude,
+        _PRELUDE_MIN_CHARS,
+        _PRELUDE_SENTINEL,
+    ),
+    ("FUNCTION BODY", function_body, _FUNCTION_BODY_MIN_CHARS, _FUNCTION_BODY_SENTINEL),
+    ("GUARD REGION", guard_region, _GUARD_REGION_MIN_CHARS, _GUARD_REGION_SENTINEL),
+    (
+        "COMPOSITE PRELUDE",
+        composite_declaration_prelude,
+        _COMPOSITE_PRELUDE_MIN_CHARS,
+        _COMPOSITE_PRELUDE_SENTINEL,
+    ),
+    (
+        "COMPOSITE BODY",
+        composite_body,
+        _COMPOSITE_BODY_MIN_CHARS,
+        _COMPOSITE_BODY_SENTINEL,
+    ),
+    (
+        "COMPOSITE GUARD REGION",
+        composite_guard_region,
+        _COMPOSITE_GUARD_REGION_MIN_CHARS,
+        _COMPOSITE_GUARD_REGION_SENTINEL,
+    ),
+)
+
+_KNOWN_REGIONS: Final[int] = 8
+
+
+# ---------------------------------------------------------------------------
 # THE ANTI-VACUITY FLOOR, as tests in its own right
 # ---------------------------------------------------------------------------
 class TestAntiVacuityFloor:
     """Every region below is extracted before it is asserted over, and a broken
-    extraction makes ABSENCE assertions pass by default. These five tests make
-    the floor visible as its own failure rather than as a mysteriously-green
+    extraction makes ABSENCE assertions pass by default. These tests make the
+    floor visible as its own failure rather than as a mysteriously-green
     gate 2 / gate 6. Each extractor also re-runs the floor internally, so the
-    floor fires whichever entry point reaches the broken region first."""
+    floor fires whichever entry point reaches the broken region first.
+
+    The last test in the class is the floor ON THE FLOOR: it checks that every
+    sentinel is capable of failing at all."""
+
+    def test_every_sentinel_lies_beyond_its_own_floor(self) -> None:
+        """⛔ THE GATE ON THE GATES. A sentinel drawn from a region's head is
+        almost always the locator's own text, and every successful extraction
+        contains the text that found it — so the assertion cannot fail and the
+        length check is silently the only thing left standing.
+
+        That is not hypothetical: reviewed 2026-08-25 (WR-04), FIVE of these
+        eight sentinels were exactly that, sitting at offsets 14-34. This test
+        is what stops the sixth from being written, because the review that
+        caught the five was a human reading a table.
+
+        The invariant is `region.find(sentinel) >= floor`: an extraction
+        truncated to exactly the floor's allowance must still lose the sentinel.
+        A sentinel inside the floor's own allowance adds nothing the length
+        check did not already say."""
+        assert len(_REGION_CONTRACTS) == _KNOWN_REGIONS, (
+            f"_REGION_CONTRACTS has {len(_REGION_CONTRACTS)} row(s), not "
+            f"{_KNOWN_REGIONS}. The loop below reports 'no offenders' over a "
+            "short table in language indistinguishable from success. If a region "
+            "was genuinely added or removed, move this integer IN THE SAME "
+            "COMMIT — do not delete the count."
+        )
+        offenders: list[str] = []
+        for label, extractor, floor, sentinel in _REGION_CONTRACTS:
+            offset = extractor().find(sentinel)
+            if offset < floor:
+                offenders.append(
+                    f"{label}: sentinel {sentinel!r} first occurs at offset "
+                    f"{offset}, inside its own {floor}-character floor"
+                )
+        assert not offenders, (
+            "TAUTOLOGICAL SENTINEL — one or more region sentinels cannot fail:\n"
+            + "\n".join(f"  * {entry}" for entry in offenders)
+            + "\n⛔ A sentinel that sits inside the floor's own allowance proves "
+            "nothing the length check did not already prove, and one taken from "
+            "the region's head is the LOCATOR'S OWN TEXT, which every successful "
+            "extraction contains by construction. The ABSENCE assertions scoped "
+            "to that region are then protected by length alone, and a long-but-"
+            "wrong extraction passes them all.\n"
+            "Do NOT fix this by lowering the floor. Pick a token from the "
+            "region's TAIL that the locator neither names nor forces to be "
+            "present — and check it is not a token some GATE scoped to the same "
+            "region asserts, or a real regression will be reported as a broken "
+            "extraction. The reasoning block above `_VIEW_BODY_SENTINEL` has the "
+            "worked examples."
+        )
 
     def test_view_body_region_is_real(self) -> None:
         assert len(view_body()) >= _VIEW_BODY_MIN_CHARS
@@ -580,10 +767,15 @@ class TestAntiVacuityFloor:
         healthy. Gate 6's negatives run here; without an independent floor and
         an independent sentinel they would be green over an empty string, and a
         positive assertion over that same empty string would be red — agreement
-        by luck rather than by construction."""
+        by luck rather than by construction.
+
+        ⚠️ The sentinel asserted here is NOT `last_return_date`, which gate 6
+        already owns as its positive assertion. Re-using it would mean a verdict
+        genuinely re-keyed off the returns series failed HERE, reported as a
+        broken extraction, instead of in gate 6 with the reason."""
         region = is_stale_expression()
         assert len(region) >= _IS_STALE_MIN_CHARS
-        assert "last_return_date" in region
+        assert _IS_STALE_SENTINEL in region
 
     def test_declaration_prelude_region_is_real(self) -> None:
         assert len(function_declaration_prelude()) >= _PRELUDE_MIN_CHARS
@@ -606,7 +798,7 @@ class TestAntiVacuityFloor:
         sentinelled separately from the fan-out's body for that reason."""
         region = composite_body()
         assert len(region) >= _COMPOSITE_BODY_MIN_CHARS
-        assert "enqueue_compute_job(" in region
+        assert _COMPOSITE_BODY_SENTINEL in region
 
 
 # ---------------------------------------------------------------------------
