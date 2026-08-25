@@ -106,12 +106,21 @@ export function StrategyGrid({
                 className="mb-1"
               />
 
-              {/* Sync freshness */}
-              <SyncBadge
-                computedAt={s.analytics.computed_at}
-                exchange={s.supported_exchanges?.[0]}
-                className="mb-2"
-              />
+              {/* Sync freshness.
+                  Phase 162 / HONEST-03, UI-SPEC C-6 — suppressed on
+                  `is_example` rows, matching StrategyTable's
+                  `mayClaimSyncRecency` gate: the "Example" chip above already
+                  carries a demo seed's identity, and nothing syncs it, so a
+                  "Synced …" date beside it is a claim with no referent. Both
+                  render paths are covered so the class cannot re-open through
+                  whichever one a future page mounts. */}
+              {!s.is_example && (
+                <SyncBadge
+                  computedAt={s.analytics.computed_at}
+                  exchange={s.supported_exchanges?.[0]}
+                  className="mb-2"
+                />
+              )}
 
               {/* AUM / Max Capacity */}
               <div className="flex items-center gap-4 text-xs text-text-muted mb-3 max-[375px]:mb-2 max-[375px]:gap-2">
