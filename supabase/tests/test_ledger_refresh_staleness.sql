@@ -27,6 +27,10 @@
 --   F  threshold edges      — age 4 fresh / age 5 stale, pinning the constant on
 --                             both sides so it cannot drift silently.
 --   G  D-05 cohort scope    — a non-ledger (okx) strategy is ABSENT from the view.
+--   H  ACL durability       — 161.1-AUDIT F-1: anon/authenticated cannot SELECT
+--                             the view or EXECUTE the parser, and security_invoker
+--                             is still on. Mirrors the apply-time DO block, which
+--                             runs once and can be silently undone afterwards.
 --
 -- pgTAP is NOT installed (CLAUDE.md). Plain PL/pgSQL DO block, RAISE EXCEPTION on
 -- failure. No psql meta-commands. Under psql -v ON_ERROR_STOP=1 a failed
@@ -36,7 +40,7 @@
 -- ----------------------------------------------------------------------
 -- This file used to open with `RAISE NOTICE 'SKIP: …'; RETURN;` when the view was
 -- absent. MEASURED 2026-08-25 against an empty Postgres 16: that path printed the
--- notice and exited `EXITCODE=0` having executed ZERO of arms A-G. The CI step
+-- notice and exited `EXITCODE=0` having executed ZERO of arms A-H. The CI step
 -- (.github/workflows/ci.yml, `sql-tests` → "Run SQL self-tests against test
 -- Supabase project") reads ONLY that exit code, so the skip was byte-identical to
 -- a pass in the only channel anything mechanical looks at — and it was GUARANTEED
@@ -61,14 +65,17 @@
 -- The consequence is deliberate and IS the forcing function: this file is RED
 -- until the phase's migrations are applied to the TEST project. These are
 -- SECURITY DEFINER, cross-tenant objects that auto-apply to PROD on merge, and
--- arms A-G are their ONLY executed coverage — every other gate in the phase is a
+-- arms A-H are their ONLY executed coverage — every other gate in the phase is a
 -- static text scan over the migration source.
 --
--- ⚠️ STILL NOT MECHANICALLY CLOSED: nothing checks for the final
--- 'ALL 7 ARMS EXECUTED' notice, so a future edit that neuters an arm in place
--- stays invisible to CI. The standing fix is 161.1-REVIEW WR-03 option (b) —
--- capture each file's output in the `sql-tests` step and fail on a printed
--- 'SKIP:'. That lives in .github/workflows/ci.yml, not here.
+-- ✅ MECHANICALLY CLOSED (161.1-REVIEW WR-03 option (b), landed in
+-- .github/workflows/ci.yml): the `sql-tests` step now captures each file's output,
+-- fails on a printed 'SKIP:', and reads the 'ALL 8 ARMS EXECUTED' sentinel back off
+-- THIS file's RAISE NOTICE line and requires the run to have printed it. So an
+-- edit that neuters an arm in place — deleting the assertion, short-circuiting
+-- early — fails CI even though psql exits 0. ⚠️ The count in that notice is read
+-- from the file, not hard-coded: if you add or remove an arm you MUST update it,
+-- or the pin silently measures the wrong number of arms.
 --
 -- Usage:
 --   psql "$TEST_SUPABASE_DB_URL" -v ON_ERROR_STOP=1 -f \
@@ -104,6 +111,7 @@ DECLARE
   v_last         DATE;
   v_days         INTEGER;
   v_cnt          INTEGER;
+  v_opts         TEXT[];
 BEGIN
   -- ----- applied-ness gate: ABSENCE IS A FAILURE, NOT A SKIP (WR-03) ------
   -- See the ⛔ block in this file's header for the measurement behind this.
@@ -111,7 +119,7 @@ BEGIN
     SELECT 1 FROM information_schema.views
      WHERE table_schema = 'public' AND table_name = 'ledger_refresh_staleness'
   ) THEN
-    RAISE EXCEPTION 'TEST FAILED (0): public.ledger_refresh_staleness does not exist on this database, so NONE of arms A-G ran. This is a FAILURE, not a skip. TWO causes fit and this assertion cannot distinguish them, so check both: (i) the TEST project has not received migration 20260825120000 — apply the phase''s migrations to it and re-run; expect this exactly once, on the PR that introduces them, because NO workflow applies migrations to TEST; (ii) the view was DROPPED or RENAMED after being applied, which is a real regression in the only surface that can observe ledger staleness. ⛔ Do NOT "fix" this by restoring the old RAISE NOTICE/RETURN skip: that made this file exit 0 having asserted nothing, on exactly the run where these SECURITY DEFINER objects first reach PROD.';
+    RAISE EXCEPTION 'TEST FAILED (0): public.ledger_refresh_staleness does not exist on this database, so NONE of arms A-H ran. This is a FAILURE, not a skip. TWO causes fit and this assertion cannot distinguish them, so check both: (i) the TEST project has not received migration 20260825120000 — apply the phase''s migrations to it and re-run; expect this exactly once, on the PR that introduces them, because NO workflow applies migrations to TEST; (ii) the view was DROPPED or RENAMED after being applied, which is a real regression in the only surface that can observe ledger staleness. ⛔ Do NOT "fix" this by restoring the old RAISE NOTICE/RETURN skip: that made this file exit 0 having asserted nothing, on exactly the run where these SECURITY DEFINER objects first reach PROD.';
   END IF;
 
   -- ----- SEED ------------------------------------------------------------
@@ -354,7 +362,55 @@ BEGIN
     RAISE EXCEPTION 'TEST FAILED (G): % of 10 seeded ledger-backed strategies are visible in the view', v_cnt;
   END IF;
 
-  RAISE NOTICE 'ALL 7 ARMS EXECUTED (A-G) and passed — ledger_refresh_staleness verdict is falsifiable.';
+  -- ======================================================================
+  -- ARM H — THE ACL, RE-ASSERTED ON EVERY RUN (161.1-AUDIT F-1).
+  --
+  -- Every fact below is already checked by migration 20260825120000's STEP 3
+  -- DO block. That block runs EXACTLY ONCE, at apply. A later migration, a GRANT
+  -- sweep, a role-template change or a restore-from-dump can undo any of it and
+  -- nothing would notice. That is not theoretical in this repo:
+  -- 20260515130001_enqueue_compute_job_internal_acl_remediation.sql exists
+  -- precisely because a REVOKE was lost. This arm is the durable copy — the one
+  -- that runs on every CI tick rather than on the single apply.
+  --
+  -- ⚠️ NOT VACUOUS WHEN THE OBJECT IS GONE. has_table_privilege /
+  -- has_function_privilege RAISE (42P01 / 42883) on a missing object rather than
+  -- returning FALSE, so "the ACL is clean because there is nothing to grant on"
+  -- reddens here instead of passing. MEASURED, not assumed — see the RED runs
+  -- recorded for this arm.
+  -- ======================================================================
+  IF has_table_privilege('anon', 'public.ledger_refresh_staleness', 'SELECT') THEN
+    RAISE EXCEPTION 'TEST FAILED (H): role anon can SELECT ledger_refresh_staleness. This view joins strategies, api_keys and strategy_analytics across EVERY tenant, so a browser-reachable role holding SELECT is a cross-tenant disclosure (T-161.1-01)';
+  END IF;
+  IF has_table_privilege('authenticated', 'public.ledger_refresh_staleness', 'SELECT') THEN
+    RAISE EXCEPTION 'TEST FAILED (H): role authenticated can SELECT ledger_refresh_staleness (cross-tenant read, T-161.1-01)';
+  END IF;
+
+  -- security_invoker is the SECOND half of the same guarantee, not a separate
+  -- nicety: with it off the view reads its base tables as the OWNER, so any role
+  -- that does hold SELECT sees every tenant's rows regardless of the RLS on
+  -- strategies / api_keys / strategy_analytics.
+  SELECT c.reloptions INTO v_opts
+    FROM pg_class c
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+   WHERE n.nspname = 'public'
+     AND c.relname = 'ledger_refresh_staleness';
+  IF v_opts IS NULL OR NOT ('security_invoker=true' = ANY(v_opts)) THEN
+    RAISE EXCEPTION 'TEST FAILED (H): ledger_refresh_staleness is not security_invoker=true (reloptions=%) — it would resolve its base tables as the view OWNER, bypassing strategies/api_keys/strategy_analytics RLS for every role that can query it', v_opts;
+  END IF;
+
+  -- The parser carries its own EXECUTE ACL (20260825120000:173-175). Same
+  -- once-at-apply problem, same durable copy. It is SECURITY INVOKER and touches
+  -- no table, so this is defence in depth rather than a live hole — but an
+  -- unasserted REVOKE is exactly the one that gets swept away unnoticed.
+  IF has_function_privilege('anon', 'public.ledger_refresh_parse_series_date(text)', 'EXECUTE') THEN
+    RAISE EXCEPTION 'TEST FAILED (H): role anon can EXECUTE ledger_refresh_parse_series_date — the REVOKE at 20260825120000:173 has been undone';
+  END IF;
+  IF has_function_privilege('authenticated', 'public.ledger_refresh_parse_series_date(text)', 'EXECUTE') THEN
+    RAISE EXCEPTION 'TEST FAILED (H): role authenticated can EXECUTE ledger_refresh_parse_series_date — the REVOKE at 20260825120000:173 has been undone';
+  END IF;
+
+  RAISE NOTICE 'ALL 8 ARMS EXECUTED (A-H) and passed — ledger_refresh_staleness verdict is falsifiable.';
 END $$;
 
 ROLLBACK;

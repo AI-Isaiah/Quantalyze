@@ -456,6 +456,8 @@ DECLARE
   v_nargs      SMALLINT;
   v_kind       TEXT;
   v_coherence  TEXT;
+  v_owner      TEXT;
+  v_bypassrls  BOOLEAN;
 BEGIN
   -- 1. the function landed, and it takes ZERO arguments (T-161.1-15)
   SELECT p.prosecdef, p.proconfig, p.pronargs
@@ -480,6 +482,36 @@ BEGIN
     SELECT 1 FROM unnest(v_config) AS c WHERE c LIKE 'search_path=%'
   ) THEN
     RAISE EXCEPTION 'Migration 20260825140000: enqueue_ledger_composite_refresh does not pin search_path (proconfig=%)', v_config;
+  END IF;
+
+  -- 2b. …and the DEFINER role can actually SEE the cohort (161.1-AUDIT F-2).
+  --     This function is SECURITY DEFINER, so the effective role for every read
+  --     in its body is the OWNER — NOT cron.job.username, which only decides who
+  --     may call it. proowner is therefore the single attribute the entire
+  --     bounding story rests on, and checks 1-3 above never looked at it.
+  --
+  --     ⚠️ The degraded mode is fail-CLOSED, not fail-open. Without BYPASSRLS the
+  --     owner-scoped RLS on api_keys / strategy_keys makes ledger_refresh_staleness
+  --     resolve `exchanges` to {} under cron, the terminal && conjunct drops every
+  --     row, and the cohort comes back empty. Nothing is over-enqueued. But a
+  --     silently-zero fan-out is BYTE-IDENTICAL to "nothing was stale" — which is
+  --     precisely the wedge shape this phase exists to remove. A refresh mechanism
+  --     that cannot distinguish "healthy" from "blind" reproduces the defect it was
+  --     built to fix, so this is an OBSERVABILITY hole rather than a security one,
+  --     and it is worth failing the apply over.
+  --     Assertion shape follows 20260806130000 (JOIN pg_roles r ON r.oid = p.proowner).
+  SELECT r.rolname, r.rolbypassrls
+    INTO v_owner, v_bypassrls
+    FROM pg_proc p
+    JOIN pg_namespace n ON n.oid = p.pronamespace
+    JOIN pg_roles r ON r.oid = p.proowner
+   WHERE n.nspname = 'public'
+     AND p.proname = 'enqueue_ledger_composite_refresh';
+  IF v_owner IS NULL THEN
+    RAISE EXCEPTION 'Migration 20260825140000: could not resolve the owner of enqueue_ledger_composite_refresh — pg_proc.proowner has no matching pg_roles row';
+  END IF;
+  IF v_bypassrls IS NOT TRUE THEN
+    RAISE EXCEPTION 'Migration 20260825140000: enqueue_ledger_composite_refresh is owned by role "%", which lacks BYPASSRLS. As SECURITY DEFINER it reads ledger_refresh_staleness as that role, so api_keys/strategy_keys RLS collapses `exchanges` to the empty array, the venue conjunct drops every row and the fan-out returns 0 on every tick — indistinguishable from a healthy, fully-fresh estate', v_owner;
   END IF;
 
   -- 3. no EXECUTE for the browser-reachable roles. has_function_privilege resolves

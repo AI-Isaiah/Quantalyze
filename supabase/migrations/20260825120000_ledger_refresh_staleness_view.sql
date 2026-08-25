@@ -360,6 +360,20 @@ BEGIN
     RAISE EXCEPTION 'Migration 20260825120000: ledger_refresh_parse_series_date missing';
   END IF;
 
+  -- 1b. …and its EXECUTE ACL actually took (161.1-AUDIT F-3). The REVOKE at
+  --     line 173 was previously unasserted, which made this the ONE object in
+  --     the phase whose ACL nothing checked — asymmetric with 20260825130000 and
+  --     20260825140000, which both assert has_function_privilege. Existence
+  --     alone cannot see a REVOKE that silently failed to apply, and
+  --     has_function_privilege (unlike information_schema) resolves grants made
+  --     to PUBLIC and inherited through role membership.
+  IF has_function_privilege('anon', 'public.ledger_refresh_parse_series_date(text)', 'EXECUTE') THEN
+    RAISE EXCEPTION 'Migration 20260825120000: role anon can EXECUTE ledger_refresh_parse_series_date — the REVOKE above did not take';
+  END IF;
+  IF has_function_privilege('authenticated', 'public.ledger_refresh_parse_series_date(text)', 'EXECUTE') THEN
+    RAISE EXCEPTION 'Migration 20260825120000: role authenticated can EXECUTE ledger_refresh_parse_series_date — the REVOKE above did not take';
+  END IF;
+
   -- 2. the view landed
   IF NOT EXISTS (
     SELECT 1

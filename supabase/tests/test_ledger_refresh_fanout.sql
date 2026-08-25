@@ -30,6 +30,11 @@
 --   F  COOLDOWN (D-09)       — an attempt 2 h ago blocks; aged past 20 h, unblocks.
 --   G  BOUNDS (D-09)         — G1 the per-venue cap, G2 the per-tick LIMIT.
 --   H  KEY ELIGIBILITY       — inactive / revoked / disconnected keys are skipped.
+--   I  ACL durability (F-1)  — anon/authenticated cannot EXECUTE the fan-out.
+--                             Mirrors the apply-time DO block, which runs once
+--                             and can be silently undone afterwards. That REVOKE
+--                             is the SOLE bound: under `authenticated` both
+--                             NOT EXISTS guards go vacuously TRUE.
 --
 -- ⚠️ NOT IN THIS FILE, and NOT dropped: the D-15 proof that a FAILED refresh
 -- leaves an already-published row intact — status, warned flag, by-basis metrics,
@@ -61,7 +66,7 @@
 -- --------------------------------------------------------------------------
 -- This file used to open with `RAISE NOTICE 'SKIP: …'; RETURN;` when the fan-out
 -- function was absent. MEASURED 2026-08-25 against an empty Postgres 16: that path
--- printed the notice and exited `EXITCODE=0` having executed ZERO of arms A-H. The
+-- printed the notice and exited `EXITCODE=0` having executed ZERO of arms A-I. The
 -- CI step (.github/workflows/ci.yml, `sql-tests` → "Run SQL self-tests against
 -- test Supabase project") reads ONLY that exit code, so the skip was
 -- byte-identical to a pass in the only channel anything mechanical looks at — and
@@ -86,16 +91,19 @@
 -- The consequence is deliberate and IS the forcing function: this file is RED
 -- until the phase's migrations are applied to the TEST project. The fan-out is a
 -- SECURITY DEFINER, cross-tenant enqueue function that auto-applies to PROD on
--- merge, and arms A-H are the ONLY executed coverage of its SELECT predicates —
+-- merge, and arms A-I are the ONLY executed coverage of its SELECT predicates —
 -- every other gate in the phase is a static text scan over the migration source.
 -- Arm A (dormancy) is what proves the merge changes no production behaviour; a
 -- skip meant that proof had never been run anywhere but an executor's laptop.
 --
--- ⚠️ STILL NOT MECHANICALLY CLOSED: nothing checks for the final
--- 'ALL 8 ARMS EXECUTED' notice, so a future edit that neuters an arm in place
--- stays invisible to CI. The standing fix is 161.1-REVIEW WR-03 option (b) —
--- capture each file's output in the `sql-tests` step and fail on a printed
--- 'SKIP:'. That lives in .github/workflows/ci.yml, not here.
+-- ✅ MECHANICALLY CLOSED (161.1-REVIEW WR-03 option (b), landed in
+-- .github/workflows/ci.yml): the `sql-tests` step now captures each file's output,
+-- fails on a printed 'SKIP:', and reads the 'ALL 9 ARMS EXECUTED' sentinel back off
+-- THIS file's RAISE NOTICE line and requires the run to have printed it. So an
+-- edit that neuters an arm in place — deleting the assertion, short-circuiting
+-- early — fails CI even though psql exits 0. ⚠️ The count in that notice is read
+-- from the file, not hard-coded: if you add or remove an arm you MUST update it,
+-- or the pin silently measures the wrong number of arms.
 --
 -- Usage:
 --   psql "$TEST_SUPABASE_DB_URL" -v ON_ERROR_STOP=1 -f \
@@ -139,7 +147,7 @@ BEGIN
      WHERE n.nspname = 'public'
        AND p.proname = 'enqueue_ledger_refresh_for_strategies'
   ) THEN
-    RAISE EXCEPTION 'TEST FAILED (0): public.enqueue_ledger_refresh_for_strategies is not registered on this database, so NONE of arms A-H ran — including arm A, the dormancy proof that merging this migration changes no production behaviour. This is a FAILURE, not a skip. TWO causes fit and this assertion cannot distinguish them, so check both: (i) the TEST project has not received migration 20260825130000 — apply the phase''s migrations to it and re-run; expect this exactly once, on the PR that introduces them, because NO workflow applies migrations to TEST; (ii) the function was DROPPED or RENAMED after being applied, which is a real regression in a SECURITY DEFINER cross-tenant enqueue path. ⛔ Do NOT "fix" this by restoring the old RAISE NOTICE/RETURN skip: that made this file exit 0 having asserted nothing, on exactly the run where this function first reaches PROD.';
+    RAISE EXCEPTION 'TEST FAILED (0): public.enqueue_ledger_refresh_for_strategies is not registered on this database, so NONE of arms A-I ran — including arm A, the dormancy proof that merging this migration changes no production behaviour. This is a FAILURE, not a skip. TWO causes fit and this assertion cannot distinguish them, so check both: (i) the TEST project has not received migration 20260825130000 — apply the phase''s migrations to it and re-run; expect this exactly once, on the PR that introduces them, because NO workflow applies migrations to TEST; (ii) the function was DROPPED or RENAMED after being applied, which is a real regression in a SECURITY DEFINER cross-tenant enqueue path. ⛔ Do NOT "fix" this by restoring the old RAISE NOTICE/RETURN skip: that made this file exit 0 having asserted nothing, on exactly the run where this function first reaches PROD.';
   END IF;
 
   -- ----- anti-vacuity precondition on arm A -------------------------------
@@ -491,7 +499,36 @@ BEGIN
     RAISE EXCEPTION 'TEST FAILED (H/disconnected): a DISCONNECTED key produced % job(s), expected 0 — a soft-disconnected key also keeps is_active TRUE', v_cnt;
   END IF;
 
-  RAISE NOTICE 'ALL 8 ARMS EXECUTED (A-H) and passed — the ledger refresh fan-out is dormant, bounded, and its bounds are falsifiable.';
+  -- ======================================================================
+  -- ARM I — THE EXECUTE ACL, RE-ASSERTED ON EVERY RUN (161.1-AUDIT F-1).
+  --
+  -- Migration 20260825130000's DO block already checks this — ONCE, at apply. A later
+  -- migration, a GRANT sweep, a role-template change or a restore-from-dump can
+  -- undo it and nothing would notice. Not theoretical here:
+  -- 20260515130001_enqueue_compute_job_internal_acl_remediation.sql exists
+  -- precisely because a REVOKE on an enqueue path was lost.
+  --
+  -- ⛔ WHY THIS ONE REVOKE CARRIES THE WHOLE BOUND. If EXECUTE ever regressed to
+  -- `authenticated`, the two NOT EXISTS guards this function relies on go
+  -- VACUOUSLY TRUE for that caller: `strategies_read` shows an authenticated role
+  -- its own published+owned strategies, while compute_jobs' FORCE-RLS deny-all
+  -- returns it zero rows — so "no job already in flight" and "no recent attempt"
+  -- are both trivially satisfied, every tick, forever. The result is unbounded
+  -- self-scoped enqueue at the per-tick cap. Nothing downstream closes that path;
+  -- the REVOKE is the only thing that does, and this arm is what keeps it closed.
+  --
+  -- ⚠️ NOT VACUOUS WHEN THE FUNCTION IS GONE: has_function_privilege raises 42883
+  -- on a missing function rather than returning FALSE, so "no grants because there
+  -- is nothing to grant on" reddens here instead of passing.
+  -- ======================================================================
+  IF has_function_privilege('anon', 'public.enqueue_ledger_refresh_for_strategies()', 'EXECUTE') THEN
+    RAISE EXCEPTION 'TEST FAILED (I): role anon can EXECUTE enqueue_ledger_refresh_for_strategies. This is a cross-tenant SECURITY DEFINER enqueue path and the REVOKE at 20260825130000 is the only thing bounding it';
+  END IF;
+  IF has_function_privilege('authenticated', 'public.enqueue_ledger_refresh_for_strategies()', 'EXECUTE') THEN
+    RAISE EXCEPTION 'TEST FAILED (I): role authenticated can EXECUTE enqueue_ledger_refresh_for_strategies. Both NOT EXISTS guards in its body go vacuously TRUE for that role (strategies_read grants it its own rows; compute_jobs FORCE-RLS grants it none), so this is unbounded self-scoped enqueue every tick — the REVOKE at 20260825130000 is the only thing closing it';
+  END IF;
+
+  RAISE NOTICE 'ALL 9 ARMS EXECUTED (A-I) and passed — the ledger refresh fan-out is dormant, bounded, and its bounds are falsifiable.';
 END $$;
 
 ROLLBACK;
