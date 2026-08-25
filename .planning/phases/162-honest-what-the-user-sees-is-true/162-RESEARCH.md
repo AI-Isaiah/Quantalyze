@@ -50,7 +50,7 @@ All four self-describe as behaviour-neutral at merge (dormant / guard-scoped), b
 
 ## Working-Tree State (planner must know)
 
-- Current checkout: branch `feat/v1.20-phase-161.1-ledger-refresh` at `5dbafc120` (161.1 docs close-out), tracking its own origin branch. `origin/main` is at `dc7b17d3c` (v0.72.1.0). **Phase 161.1's PR has not merged**; Phase 162 planning should assume it lands first (STATE.md records 161.1 wave 4 landed dormant, composite PROD tracer owed). All citations below were read from this tree, which contains main's v0.72.1.0 merged in (`93f656fd9`).
+- Current checkout: branch `feat/v1.20-phase-161.1-ledger-refresh` at `5dbafc120` (161.1 docs close-out), tracking its own origin branch. `origin/main` was at `dc7b17d3c` (v0.72.1.0) when this research was read. ⚠️ **CORRECTED POST-RUN: Phase 161.1 MERGED as #713 (squash `91fa2aad`, v0.73.0.0) at 2026-08-25T19:53Z — during this research run** — and its four migrations were applied to PROD and verified (`Supabase Migrate` green; all 4 `schema_migrations` rows + all 5 objects present; the new `sync_strategy_analytics_status` body confirmed live via 3 executable-code hits on `v_protect_hold`). The tree read below is byte-identical to the merged main (`git diff HEAD origin/main` empty), so every code citation stands; only this merge-state sentence was stale. Phase 162 planning should treat 161.1 as LANDED, not pending. All citations below were read from this tree, which contains main's v0.72.1.0 merged in (`93f656fd9`).
 - Phase 158 (the declared dependency) is closed (`ecfbb362f`).
 
 ## Architectural Responsibility Map
