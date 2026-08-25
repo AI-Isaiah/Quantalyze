@@ -3242,6 +3242,45 @@ follows is what was deliberately left, with the reason.
   - Verified NOT related to Phase 161.1: the file and every module it exercises are absent
     from `git diff --name-only main...HEAD`.
 
+161.1-D9. **⚖️ FOUNDER CALL — D-15 publishes a MIXED-VINTAGE factsheet that did not exist before
+  this phase.** Raised by the red team (reasoned, not executed); the mechanism is a direct read.
+  - `run_derive_broker_dailies_job` is **not** read-only before it hands off. Before
+    `_enqueue_csv_analytics` it has already COMMITTED, for the NEW crawl: `csv_daily_returns`
+    rewritten, `persist_basis_series` for all three bases, and `_prestamp_payload` upserted with
+    `data_quality_flags` **wholesale-replaced** and `metrics_json_by_basis` authoritative.
+  - Hop 2 owns `metrics_json` / `returns_series` / `daily_returns` — the cash headline and the
+    chart the factsheet actually reads.
+  - So under D-15, a hop-2 failure now leaves a PUBLISHED row holding **new** dq flags + **new**
+    by-basis scalars + **new** persisted series, beside **old** `metrics_json` / `returns_series`.
+    The guard's `payload.pop("data_quality_flags")` reasons "the live row's flags are still the
+    truth" — but hop 1 already replaced them, so the flags describe data the headline does not
+    reflect. `computed_at` is correctly not advanced, so the freshness chip advertises the OLD
+    vintage over partly-NEW content.
+  - **Before this phase that state was never published** — hop 2's failure wrote `failed` and the
+    factsheet went dark. **The phase trades "dark" for "showing numbers it cannot justify".** Both
+    are top-severity classes here; the trade is nowhere acknowledged.
+  - The nearest existing comment calls the fresh-series/stale-scalar direction "benign … the next
+    re-derive lands the matching scalar and heals it" — reasoning that ASSUMED the analytics hop
+    would follow, which is exactly what D-15 removes. With a ~20h cooldown and a chronically
+    failing hop 2, the mismatch is durable, not transient.
+  - **This is a founder decision, not a defect:** D-15 was chosen deliberately. The options are
+    (a) accept mixed-vintage as better than dark, and say so in the header; (b) have hop 1 defer
+    its committed writes until hop 2 succeeds; (c) widen the guard to restore hop 1's writes too.
+
+161.1-D10. **The `v_protect_hold` scoping is narrower than its own comments claim — it misses the
+  resync path's first and longest hop.** Arm I3 seeds the resync as a `derive_broker_dailies` job.
+  A real resync does not start there: `_is_long_fetch` sends `flow_type in {onboard,resync}` to
+  `enqueue_compute_job(p_kind='process_key_long')`. `has_live_successor` requires
+  `r.kind = f.kind`, so for the WHOLE duration of the `process_key_long` hop — the slowest in the
+  system — the protected failure has no successor, the hold stays TRUE, branch (a) stands down,
+  and the row keeps advertising its pre-resync terminal status. The hold releases only when the
+  TAIL derive is enqueued, i.e. at the end of hop 1 of 3.
+  - The migration's residual note frames what is still suppressed as "an in-flight job of some
+    OTHER kind", illustrated with a cron poll. It does not say the user's own resync spends most
+    of its wall clock in exactly that state. **Correct the note.**
+  - Severity capped: for `complete_with_warnings` rows (the entire live cohort) branch (a) never
+    advertised `computing` anyway, so the incremental harm is on plain-`complete` rows.
+
 161.1-D4. **Prose/derivation nits, non-blocking.**
   - `analytics-service/tests/test_computing_started_at_stamp.py:649` — census docstring
     self-contradicts: says "the 7 in analytics_runner.py are unchanged in COUNT" and "7 of those 11"
