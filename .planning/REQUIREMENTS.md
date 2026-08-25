@@ -47,7 +47,7 @@ verified-stale items are excluded by construction.
 
 ### HONEST — User-visible data honesty
 
-- [x] **HONEST-01** (L1939): Raw Python exception strings never render as user-facing `computation_error` copy — mapped at the writer, with the underlying str/None compare root-caused.
+- [ ] **HONEST-01** (L1939): Raw Python exception strings never render as user-facing `computation_error` copy — mapped at the writer, with the underlying str/None compare root-caused.
 - [ ] **HONEST-02** (L1953): The factsheet freshness badge reflects series recency — a strategy whose return series ended 89 days ago cannot read FRESH; investigate (flat account vs derive gap) before fixing.
 - [ ] **HONEST-03** (L1959): Example strategies don't advertise stale "Synced Nd ago" badges on discovery.
 - [x] **HONEST-04** (L1991): `buildEquityCurveSeries` serves real per-strategy equity curves now that `returns_series` is selected — the hard-coded `equityCurve: null` and its false comment go.
@@ -142,7 +142,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | LEDGER-02 | Phase 161.1 | Complete |
 | LEDGER-03 | Phase 161.1 | Complete |
 | LEDGER-04 | Phase 161.1 | Complete |
-| HONEST-01 | Phase 162 | Complete |
+| HONEST-01 | Phase 162 | Pending |
 | HONEST-02 | Phase 162 | Pending |
 | HONEST-03 | Phase 162 | Pending |
 | HONEST-04 | Phase 162 | Complete |
