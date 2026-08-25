@@ -3341,6 +3341,15 @@ follows is what was deliberately left, with the reason.
     it as a standing RLS invariant rather than a phase gate, so it stops reading as expired.
   - Unblocks a real `scenario-share` fix (stale legs in a shared blend). Decide that behaviour
     separately once the fence is down.
+  - ⭐ **PLACEMENT (founder, confirmed): this lands in PHASE 164.1, not in 161.1's PR.** Retiring a
+    guard is a security-adjacent edit to a guard file; burying it in a 55-file feature PR is how a
+    considered gate gets removed for an unrelated reason and takes its real protection with it. It
+    belongs next to the `scenario-share` decision it unblocks, in a diff where a reviewer can see
+    that removing gates 1+2 and keeping gate 3 was the actual intent.
+  - **Acceptance for the 164.1 task:** gate 3 must still FAIL when the `scenarios`/`scenario_shares`
+    RLS honesty tests are edited (neuter it, observe RED, restore byte-identically) — otherwise the
+    retirement of 1+2 has quietly taken 3 with it, which is the whole risk this placement exists to
+    avoid.
 
   **DEC-2 — D9: WIDEN THE GUARD to restore hop 1's writes.** Founder chose the widen path over
   making the refresh atomic. ⚠️ Recorded honestly: I recommended atomicity (stage hop 1, promote on
