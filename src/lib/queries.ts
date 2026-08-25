@@ -345,10 +345,112 @@ async function shapeRankingRows(
     return {
       ...strat,
       trust_tier: (signals.get(strat.id)?.trust_tier ?? null) as Strategy["trust_tier"],
-      analytics: a ?? { ...EMPTY_ANALYTICS, strategy_id: s.id },
+      analytics: shapeRowAnalytics(a, s.id),
       analyticsPresent: a !== null,
     };
   });
+}
+
+/**
+ * STALE-01 — decide what a ranked list row is ALLOWED to say its numbers are.
+ *
+ * WHY THIS EXISTS (measured on the production database, 2026-08-25): of 18
+ * published strategies, exactly 1 carried a terminal-SUCCESS analytics row.
+ * The other 17 sat at `computation_status = 'failed'` while still holding the
+ * sharpe / cagr / max_drawdown values — and a non-null `computed_at` — left
+ * behind by an EARLIER run. Nothing in this read path distinguished "these
+ * numbers are current" from "these numbers are the corpse of a failed run", so
+ * every anonymous visitor to /browse/[slug] and /discovery/[slug] was shown
+ * dead figures stamped "Synced <date>" and ordered `#1`…`#18` by them.
+ *
+ * ⚠️ THE DATE IS NOT MERELY OLD — IT IS THE WRONG EVENT, and this is what
+ * makes the badge a false CLAIM rather than a stale one. The SQL status bridge
+ * `sync_strategy_analytics_status` re-stamps `computed_at = now()` on EVERY
+ * transition it writes, INCLUDING the `failed` branch (migration
+ * 20260710150000_sync_status_supersede_failed_per_kind.sql:179, and the
+ * `computing` branch at :125). So on a failed row `computed_at` dates the
+ * FAILURE while the KPIs beside it date some earlier, unrecorded success. The
+ * SyncBadge then renders that pair as "Synced <failure time>". There is no
+ * timestamp anywhere on the row that honestly describes the numbers it holds —
+ * which is precisely why the numbers cannot be shown.
+ *
+ * Phase 159 / RANK-01 already drew exactly this line ONCE, for the percentile
+ * cohort (`isRankableAnalyticsRow`, closed-sets.ts) — its docblock cites this
+ * same census. What it gated was only who RECEIVES and who JOINS a percentile
+ * population; the row's own rendered cells were never gated, so the suffix
+ * disappeared while the number it hedged stayed. This applies the SAME
+ * predicate — deliberately the shared helper and not a local re-derivation, so
+ * the cohort gate and the cell gate can never disagree — one layer earlier, to
+ * the VALUES themselves.
+ *
+ * THE SHAPE IS BORROWED, NOT INVENTED. The `a === null` branch below already
+ * knew how to say "this row has no computed analytics": substitute
+ * EMPTY_ANALYTICS and let the honest-null formatters render em-dashes
+ * (DESIGN.md's load-bearing `—` rule — "a metric that cannot be computed says
+ * so with a dash", never a fabricated value). A `failed` row is the SAME
+ * epistemic state — we do not know what these numbers describe — so it gets
+ * the same shape. No new UI, no new vocabulary, nothing red: absence, which is
+ * this codebase's established convention and the founder rule (never show a
+ * number the data cannot justify; hide the panel rather than synthesize).
+ *
+ * ⚠️ TWO FIELDS DELIBERATELY SURVIVE the substitution, and both are
+ * load-bearing:
+ *   - `computation_status`, restored from the REAL row. EMPTY_ANALYTICS
+ *     hardcodes `"pending"`, and letting that stand would turn a terminally
+ *     `failed` row into a live job — a permanent "Syncing" chip on
+ *     /my-strategies, the exact forever-spinner class the 16h bound in
+ *     `deriveEmptySeriesState` exists to kill (the B-1 defect above, one layer
+ *     down). It is also what keeps `getOwnRowPercentiles`' subject-side
+ *     `isRankableAnalyticsRow` filter reading the same status it reads today.
+ *   - `analyticsPresent` (set by the caller, NOT here) stays TRUE. The row
+ *     EXISTS; it just failed. Conflating "failed" with "never enqueued" would
+ *     re-route it through the missing-row age window and resurrect the
+ *     spinner from the other direction.
+ *
+ * WHAT THIS DOES **NOT** DO, deliberately: it does not drop the row. The
+ * percentile gate may exclude a dead row from a cohort silently, but deleting
+ * 17 of 18 published strategies from the public category pages would be a
+ * product decision (a manager's published strategy vanishing from discovery),
+ * not an honesty fix. The strategy still exists and is still published — only
+ * its numbers are unknown. Existence is a fact we have; the metrics are not.
+ * `aum`, `start_date`, name, types and trust tier all live on the `strategies`
+ * row, are NOT products of the analytics job, and are untouched here.
+ */
+function shapeRowAnalytics(
+  a: StrategyAnalytics | null,
+  strategyId: string,
+): StrategyAnalytics {
+  // No `strategy_analytics` row at all — the pre-existing crash-free fallback,
+  // byte-identical to what this line has always done.
+  if (a === null) return { ...EMPTY_ANALYTICS, strategy_id: strategyId };
+
+  // Terminal SUCCESS (`complete` / `complete_with_warnings`) — the values
+  // describe a run that finished. Handed through untouched.
+  if (isRankableAnalyticsRow(a)) return a;
+
+  // failed / pending / computing — a run that did not produce these numbers.
+  //
+  // `computing` is included DELIBERATELY, and it is the one arm with a real
+  // cost: a published row under recompute loses its figures for the ~10-15 min
+  // the job runs, rather than showing the previous run's. Three reasons it is
+  // still the right arm, in order of weight:
+  //   1. The bridge stamps `computed_at = now()` on the `computing` branch too
+  //      (migration :125), so keeping the values would render "Synced just
+  //      now" over numbers from the PREVIOUS run — the identical false pairing,
+  //      merely shorter-lived. There is no honest date to show them under.
+  //   2. `isRankableAnalyticsRow` is the ONE gate Phase 159 / RANK-01 already
+  //      drew for this exact question, and it already excludes `computing`
+  //      from every percentile cohort. Splitting the arms here would mean a
+  //      row could hold a rendered figure while being barred from the ranking
+  //      computed off that same figure — two predicates that drift.
+  //   3. Measured rarity: the 20260802120000 reaper's census recorded 0 rows
+  //      at `computing` in BOTH the test and production projects, so the
+  //      window this costs anything in is close to empty in practice.
+  return {
+    ...EMPTY_ANALYTICS,
+    strategy_id: strategyId,
+    computation_status: a.computation_status,
+  };
 }
 
 /**

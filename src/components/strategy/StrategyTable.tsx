@@ -147,6 +147,50 @@ function drawdownColor(value: number | null | undefined): string {
   return value < 0 ? "text-negative" : "text-text-primary";
 }
 
+// Phase 149 Delta 4 — the ONE chip-state status derivation, hoisted to module
+// scope in STALE-01 because the SORT comparator now needs the identical
+// reading and lives outside the row map. Inlining it a second time is exactly
+// the drift this hoist prevents: the row that is denied a `#n` and the row that
+// is denied its metric cells must be the SAME row, always.
+//
+// It closes TWO defects the naive shape carried (checker B-1/B-2):
+//
+// (a) the eventual gate is `isComputedAnalytics` ("this row has no computed
+//     metrics"), NEVER `!computed_at`. A LIVE pending/computing row carries a
+//     `computed_at` DEFAULT, so a `!computed_at` gate never fires for the very
+//     state it was written to catch; and EMPTY_ANALYTICS's `computed_at: ""`
+//     is falsy, so that gate ALSO made every absent row chip-eligible forever.
+//
+// (b) the status is COERCED through `analyticsPresent`, the absent-row signal
+//     shapeRankingRows preserves. Reading `computation_status` raw would read
+//     EMPTY_ANALYTICS's hardcoded "pending" and spin "Syncing" FOREVER for a
+//     strategy whose job was never enqueued. Coercing to null routes it into
+//     the shared 16h MISSING_ROW_COMPUTING_WINDOW_MS bound in closed-sets.ts,
+//     which terminates the spinner at "No data" (the same coercion precedent
+//     as returns/route.ts:310-341).
+//
+// `=== false`, never truthiness: an OMITTED optional field means "no signal —
+// trust the raw status" (W-C); only the explicit absent-row `false` coerces.
+// The owner path always carries it.
+function rowChipStatus(s: StrategyWithAnalytics): string | null {
+  return s.analyticsPresent === false
+    ? null
+    : s.analytics.computation_status ?? null;
+}
+
+// STALE-01 — may this row occupy a POSITION in the ranking, i.e. carry a `#n`?
+//
+// Same predicate, same helper, as the one deciding whether its metric cells
+// hold values (`shapeRowAnalytics` in lib/queries.ts) and whether it enters a
+// percentile cohort (`isRankableAnalyticsRow`, Phase 159 / RANK-01). A row
+// whose figures we may not show cannot be ordered by those figures either —
+// otherwise the ordinal survives as a standalone claim ("this is the 3rd best
+// strategy here") sourced from numbers the page just refused to print, which
+// is the more authoritative half of the lie, not the lesser one.
+function isRankedRow(s: StrategyWithAnalytics): boolean {
+  return isComputedAnalytics(rowChipStatus(s));
+}
+
 // Priority order (50-UI-SPEC §Dense Reshape behavior 2): Strategy > Return% >
 // CAGR > Sharpe > Max DD stay visible at every container width; Volatility,
 // 6 Month, AUM (and the two sparkline columns, handled inline below) collapse
@@ -595,6 +639,32 @@ export function StrategyTable({
     const effectiveSortDir = effectiveViewMode === "table" ? tableSortDir : sortDir;
 
     result.sort((a, b) => {
+      // STALE-01 — the UNRANKED partition, ahead of every column comparison
+      // and DELIBERATELY independent of `effectiveSortDir`.
+      //
+      // A row with no computed analytics has nothing to sort BY: its KPIs
+      // arrive nulled (shapeRowAnalytics, lib/queries.ts) and `getSortValue`
+      // coerces every null to 0, which would file it silently mid-table —
+      // above every strategy with a negative Sharpe — as though 0 were its
+      // measured value. That is a fabricated position, and flipping the sort
+      // direction would march it to the opposite end, making the fabrication
+      // look like data.
+      //
+      // Sinking these rows below every ranked one is ALSO what keeps `#n`
+      // contiguous: `rank` is derived from the paged index (`page * PAGE_SIZE
+      // + i + 1`), so ranked rows may only be numbered while they occupy an
+      // unbroken prefix of the list. Interleave one unranked row and either it
+      // steals an ordinal or, if skipped, leaves a hole in the sequence.
+      //
+      // NOT direction-aware and NOT exempted for the `name` column: a row is
+      // subordinate because of what is KNOWN about it, not because of which
+      // header the visitor last clicked. This is the same subordination rule
+      // the Phase 149 Delta 5 placeholder rows follow — render below the
+      // ranking, never shift it.
+      const aRanked = isRankedRow(a);
+      const bRanked = isRankedRow(b);
+      if (aRanked !== bRanked) return aRanked ? -1 : 1;
+
       const aVal = getSortValue(a, effectiveSortKey);
       const bVal = getSortValue(b, effectiveSortKey);
 
@@ -886,37 +956,12 @@ export function StrategyTable({
                     const volatilityText = formatPercent(s.analytics.volatility);
                     const sixMonthText = formatPercent(s.analytics.six_month_return);
                     const aumText = formatCurrency(s.aum);
-                    // Phase 149 Delta 4 — the ONE chip-state derivation site.
-                    // It closes TWO defects the naive shape carried (checker
-                    // B-1/B-2):
-                    //
-                    // (a) the gate is `isComputedAnalytics` ("this row has no
-                    //     computed metrics"), NEVER `!computed_at`. A LIVE
-                    //     pending/computing row carries a `computed_at`
-                    //     DEFAULT, so a `!computed_at` gate never fires for the
-                    //     very state it was written to catch; and
-                    //     EMPTY_ANALYTICS's `computed_at: ""` is falsy, so that
-                    //     gate ALSO made every absent row chip-eligible forever.
-                    //
-                    // (b) the status is COERCED through `analyticsPresent`, the
-                    //     absent-row signal shapeRankingRows preserves. Reading
-                    //     `computation_status` raw would read EMPTY_ANALYTICS's
-                    //     hardcoded "pending" and spin "Syncing" FOREVER for a
-                    //     strategy whose job was never enqueued. Coercing to
-                    //     null routes it into the shared 16h
-                    //     MISSING_ROW_COMPUTING_WINDOW_MS bound in
-                    //     closed-sets.ts, which terminates the spinner at
-                    //     "No data" (the same coercion precedent as
-                    //     returns/route.ts:310-341).
-                    //
-                    // `=== false`, never truthiness: an OMITTED optional field
-                    // means "no signal — trust the raw status" (W-C); only the
-                    // explicit absent-row `false` coerces. The owner path
-                    // always carries it.
-                    const chipStatus =
-                      s.analyticsPresent === false
-                        ? null
-                        : s.analytics.computation_status ?? null;
+                    // Phase 149 Delta 4 — the chip-state status, from the ONE
+                    // module-scope derivation (`rowChipStatus`, hoisted in
+                    // STALE-01 so the sort comparator reads the identical
+                    // value). See that helper for the two defects the naive
+                    // shape carried.
+                    const chipStatus = rowChipStatus(s);
                     const chipState = deriveEmptySeriesState(
                       chipStatus,
                       s.created_at ?? null,
@@ -981,9 +1026,28 @@ export function StrategyTable({
                       >
                         {/* Sticky rank cell — solid bg-surface (NOT the
                             translucent row hover) so scrolled cells don't bleed
-                            through, matching the sticky identity column. */}
+                            through, matching the sticky identity column.
+
+                            STALE-01 — a row with no computed analytics gets NO
+                            ordinal. `#n` is not decoration; it is the loudest
+                            claim in the row ("3rd best here"), and since Phase
+                            159 / RANK-01 stopped emitting a percentile for
+                            these rows it is now an UNHEDGED one — the bare
+                            ordinal reads as more authoritative than the `#n
+                            Pnn` pair it replaced. Its source is the sort over
+                            KPIs this row does not have.
+
+                            The em-dash is the SAME honest-absence glyph the
+                            metric cells beside it use (DESIGN.md: "a metric
+                            that cannot be computed says so with a dash. Never
+                            0, never blank, never a fabricated value"), in the
+                            cell's existing muted ink — no new token, no new
+                            chip, nothing red. Absence is not an error: the
+                            Phase 149 rule that a public row must never be
+                            shouted at is honoured by saying LESS here, not by
+                            adding a public error state. */}
                         <td className="sticky left-0 z-10 w-14 bg-surface px-2 py-3 text-right align-middle font-mono tabular-nums text-caption text-text-muted">
-                          #{rank}
+                          {hasComputedAnalytics ? `#${rank}` : "—"}
                         </td>
                         {showStarColumn && (
                           <td className="sticky left-14 z-10 w-11 bg-surface px-2 py-3 align-middle">
@@ -1058,16 +1122,39 @@ export function StrategyTable({
                                 <Badge key={t} label={t} />
                               ))}
                             </div>
-                            {/* W-B — the PUBLIC path stays unconditional
-                                (byte-identical to today). On the owner surface
-                                an uncomputed row must never claim "Synced …"
-                                beside a Syncing/No data chip: EMPTY_ANALYTICS's
-                                `computed_at: ""` is falsy so absent rows were
-                                already badge-null, but a LIVE job's computed_at
-                                DEFAULT would render BOTH. The SyncBadge
-                                component itself is untouched. */}
-                            {(visibility !== "owner-all-statuses" ||
-                              hasComputedAnalytics) && (
+                            {/* W-B — an uncomputed row must never claim
+                                "Synced …": EMPTY_ANALYTICS's `computed_at: ""`
+                                is falsy so absent rows were already badge-null,
+                                but a LIVE job's computed_at DEFAULT would
+                                render one. The SyncBadge component itself is
+                                untouched.
+
+                                STALE-01 — the gate is now UNCONDITIONAL. It
+                                previously read `visibility !==
+                                "owner-all-statuses" || hasComputedAnalytics`,
+                                whose left disjunct is true on every PUBLIC
+                                mount — so the badge rendered there always, and
+                                the honesty rule W-B states applied to exactly
+                                the audience least able to check it. Dropping
+                                that disjunct removes a false claim; it does not
+                                add UI. And the claim is false, not merely
+                                stale: the SQL status bridge re-stamps
+                                `computed_at = now()` on the `failed` and
+                                `computing` branches (migration
+                                20260710150000:179 / :125), so on a failed row
+                                that date marks the FAILURE while the figures
+                                beside it come from an earlier run — "Synced
+                                <the moment we failed to sync>".
+
+                                Belt-and-braces with `shapeRowAnalytics`
+                                (lib/queries.ts), which already blanks
+                                `computed_at` for these rows server-side. Kept
+                                as well as, not instead of: this component is
+                                exported and mounted by three pages, one of them
+                                anonymous, and it must not be capable of
+                                printing a sync date it cannot justify no matter
+                                who hands it rows. */}
+                            {hasComputedAnalytics && (
                               <SyncBadge computedAt={s.analytics.computed_at} exchange={s.supported_exchanges?.[0]} />
                             )}
                             {/* Phase 149 Delta 4 — the honest pending chip fills
