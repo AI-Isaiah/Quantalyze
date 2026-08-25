@@ -57,10 +57,45 @@
 -- failure. No psql meta-commands. Under psql -v ON_ERROR_STOP=1 a failed
 -- assertion exits non-zero. The whole test rolls back.
 --
--- ⚠️ The presence gate below RETURNs with a NOTICE when the function is absent,
--- for test-DB lag. A skipped gate is a VACUOUSLY GREEN gate. The final
--- 'ALL 8 ARMS EXECUTED' notice is what distinguishes a real pass from a skip —
--- read it in the run output, do not infer it from the exit code.
+-- ⛔ AN ABSENT FUNCTION IS A HARD FAILURE, NEVER A SKIP (161.1-REVIEW WR-03)
+-- --------------------------------------------------------------------------
+-- This file used to open with `RAISE NOTICE 'SKIP: …'; RETURN;` when the fan-out
+-- function was absent. MEASURED 2026-08-25 against an empty Postgres 16: that path
+-- printed the notice and exited `EXITCODE=0` having executed ZERO of arms A-H. The
+-- CI step (.github/workflows/ci.yml, `sql-tests` → "Run SQL self-tests against
+-- test Supabase project") reads ONLY that exit code, so the skip was
+-- byte-identical to a pass in the only channel anything mechanical looks at — and
+-- it was GUARANTEED to fire on the one run that matters most: the PR that
+-- introduces migration 20260825130000.
+--
+-- Why the skip was removed rather than made louder. MEASURED, not assumed:
+--   * the `sql-tests` job has NO migration-apply step. It checks out, installs
+--     psql, runs the meta-command preflight, takes the shared-test-db mutex, and
+--     `psql -f`s each file. Nothing puts supabase/migrations/** on the TEST
+--     project first.
+--   * .github/workflows/supabase-migrate.yml applies migrations to the PRODUCTION
+--     project only (`vars.SUPABASE_PROJECT_REF`), on push to main. No workflow, npm
+--     script or Makefile target applies them to the TEST project; TODOS.md records
+--     TEST being migrated by hand (Supabase MCP `apply_migration`) instead.
+--   So the old comment's promise — "assertions enforce once the test DB catches
+--   up" — named a mechanism that DOES NOT EXIST. Nothing would ever have armed
+--   this file on its own.
+-- A NOTICE cannot reach CI's only channel; an exception can. The two outcomes are
+-- now distinguishable where they are actually read.
+--
+-- The consequence is deliberate and IS the forcing function: this file is RED
+-- until the phase's migrations are applied to the TEST project. The fan-out is a
+-- SECURITY DEFINER, cross-tenant enqueue function that auto-applies to PROD on
+-- merge, and arms A-H are the ONLY executed coverage of its SELECT predicates —
+-- every other gate in the phase is a static text scan over the migration source.
+-- Arm A (dormancy) is what proves the merge changes no production behaviour; a
+-- skip meant that proof had never been run anywhere but an executor's laptop.
+--
+-- ⚠️ STILL NOT MECHANICALLY CLOSED: nothing checks for the final
+-- 'ALL 8 ARMS EXECUTED' notice, so a future edit that neuters an arm in place
+-- stays invisible to CI. The standing fix is 161.1-REVIEW WR-03 option (b) —
+-- capture each file's output in the `sql-tests` step and fail on a printed
+-- 'SKIP:'. That lives in .github/workflows/ci.yml, not here.
 --
 -- Usage:
 --   psql "$TEST_SUPABASE_DB_URL" -v ON_ERROR_STOP=1 -f \
@@ -97,14 +132,14 @@ DECLARE
   v_source     TEXT;
   v_foreign    INTEGER;
 BEGIN
-  -- ----- presence gate (test-DB lag) -------------------------------------
+  -- ----- applied-ness gate: ABSENCE IS A FAILURE, NOT A SKIP (WR-03) ------
+  -- See the ⛔ block in this file's header for the measurement behind this.
   IF NOT EXISTS (
     SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
      WHERE n.nspname = 'public'
        AND p.proname = 'enqueue_ledger_refresh_for_strategies'
   ) THEN
-    RAISE NOTICE 'SKIP: migration 20260825130000 not yet applied here (fan-out fn absent). Assertions enforce once the test DB catches up.';
-    RETURN;
+    RAISE EXCEPTION 'TEST FAILED (0): public.enqueue_ledger_refresh_for_strategies is not registered on this database, so NONE of arms A-H ran — including arm A, the dormancy proof that merging this migration changes no production behaviour. This is a FAILURE, not a skip. TWO causes fit and this assertion cannot distinguish them, so check both: (i) the TEST project has not received migration 20260825130000 — apply the phase''s migrations to it and re-run; expect this exactly once, on the PR that introduces them, because NO workflow applies migrations to TEST; (ii) the function was DROPPED or RENAMED after being applied, which is a real regression in a SECURITY DEFINER cross-tenant enqueue path. ⛔ Do NOT "fix" this by restoring the old RAISE NOTICE/RETURN skip: that made this file exit 0 having asserted nothing, on exactly the run where this function first reaches PROD.';
   END IF;
 
   -- ----- anti-vacuity precondition on arm A -------------------------------
