@@ -1571,8 +1571,9 @@ jobs:
           # Anti-vacuity pin for the sentinel check itself. If NO file declares a
           # sentinel, the block above verified nothing and would keep reporting
           # green forever — deleting every notice must not look the same as
-          # having none. supabase/tests/test_ledger_refresh_{staleness,fanout,
-          # composite_arm}.sql each carry one.
+          # having none. Six files carry one today; they are enumerated in the
+          # ARMS_FLOOR derivation below rather than here, so there is exactly ONE
+          # place to update when the set changes.
           # F12 — the sentinel check is OPT-IN by construction: `[ -n "$sentinel" ]`
           # exempts any file that declares none, and the old `-eq 0` pin only fired
           # once the LAST one was gone. The count was unpinned too: delete an arm,
@@ -1583,8 +1584,24 @@ jobs:
           # its own edited number, so catching a DELETED arm needs an expectation
           # held OUTSIDE the file. The cheapest honest form of that is not a
           # per-file manifest but two integers, ratcheted right here:
-          SENTINEL_FLOOR=4   # files declaring a sentinel (measured 2026-08-25)
-          ARMS_FLOOR=35      # arms those files declare in total (9 + 9 + 8 + 9)
+          # Re-measured 2026-08-25 at the close of phase 161.1. The previous
+          # pair (4 / 35) shipped SLACK: actual was 6 files / 49 arms, so the
+          # floor tolerated deleting `test_retention_crons_safe.sql` AND
+          # `test_get_verified_cohort_rank_gate.sql` outright and still went
+          # green. Worse, the recorded derivation `(9 + 9 + 8 + 9)` matched no
+          # real set of files — it omitted both of those and used a stale count
+          # for the bridge gate. A floor whose arithmetic cannot be re-derived
+          # is the same self-consistent-and-invisible failure this block exists
+          # to catch, one level up. Per-file counts are spelled out so the next
+          # reader can re-derive the total instead of trusting it:
+          #   test_get_verified_cohort_rank_gate.sql          6
+          #   test_ledger_refresh_composite_arm.sql          10
+          #   test_ledger_refresh_fanout.sql                 10
+          #   test_ledger_refresh_staleness.sql               8
+          #   test_retention_crons_safe.sql                   4
+          #   test_sync_status_marked_refresh_protected.sql  14
+          SENTINEL_FLOOR=6   # files declaring a sentinel
+          ARMS_FLOOR=52      # 6 + 10 + 10 + 8 + 4 + 14
           # RAISING these as arms are added is expected and cheap. Lowering either
           # is the entire point: it can no longer be done inside a .sql file where
           # nobody sees it, only by editing this workflow, where it lands in the
