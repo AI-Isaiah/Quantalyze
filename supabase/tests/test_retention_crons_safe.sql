@@ -23,6 +23,18 @@
 --
 -- Run order: AFTER migrations 120-123 have been applied. Uses
 -- BEGIN/ROLLBACK.
+--
+-- ⛔ AN ABSENT pg_cron IS A HARD FAILURE, NEVER A SKIP (F8, 2026-08-25)
+-- ----------------------------------------------------------------------
+-- Test 3 used to open with `RAISE NOTICE 'Test 3 skipped: pg_cron not
+-- installed'; RETURN;`, which withheld the ONLY assertion that reads the
+-- deployed cron bodies while the file still exited 0. MEASURED: CI's anti-skip
+-- grep is `grep -aE 'NOTICE: +SKIP:'` and does not match the word "skipped", so
+-- nothing saw it; the CI step reads psql's exit code, so the withheld arm was
+-- indistinguishable from a pass. It now RAISEs. Consequence, deliberate: this
+-- file is RED on any database without pg_cron, including a bare local cluster.
+-- The file also declares an 'ALL 4 ARMS EXECUTED' sentinel at its end so an arm
+-- neutered in place cannot exit 0 unnoticed.
 
 BEGIN;
 
@@ -85,7 +97,7 @@ END $$;
 
 -- --------------------------------------------------------------------------
 -- Test 3: every retention cron body filters by created_at.
--- Skip if pg_cron is not installed (local dev).
+-- An absent pg_cron extension is a HARD FAILURE, never a skip (F8).
 -- --------------------------------------------------------------------------
 DO $$
 DECLARE
@@ -100,8 +112,7 @@ DECLARE
   v_command TEXT;
 BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'pg_cron') THEN
-    RAISE NOTICE 'Test 3 skipped: pg_cron not installed';
-    RETURN;
+    RAISE EXCEPTION 'Test 3 failed: the pg_cron extension is not installed on this database, so NONE of the five retention cron bodies (%) were checked. THIS IS A FAILURE, NOT A SKIP. TWO causes fit and this assertion cannot distinguish them, so check both: (i) this run was pointed at a bare Postgres (a local dev cluster) instead of the Supabase-managed TEST project where migration 121 registered these jobs — re-run against TEST_SUPABASE_DB_URL, which is what the sql-tests job in .github/workflows/ci.yml uses; (ii) pg_cron was DROPPED, or the extension was never restored after a project restore, at some point AFTER migration 121 applied — in which case audit_log and audit_log_cold are no longer being pruned at all, the retention guard has nothing left to bound, and this is a live regression: restore the extension and re-apply migration 121. ⛔ Do NOT "fix" this by restoring the RAISE NOTICE/RETURN skip that used to sit here: it exited 0 having checked zero cron bodies, and its notice was not labelled SKIP:, so CI''s anti-skip grep (grep -aE ''NOTICE: +SKIP:'') could not see it either.', array_to_string(expected_jobs, ', ');
   END IF;
 
   FOREACH jobname_probe IN ARRAY expected_jobs LOOP
@@ -159,6 +170,19 @@ BEGIN
   END IF;
 
   RAISE NOTICE 'Test 4 passed: audit_log_retention_guard is AFTER STATEMENT DELETE';
+END $$;
+
+-- --------------------------------------------------------------------------
+-- Completion sentinel. Each test above is its own DO block and every failure
+-- path is a RAISE EXCEPTION, so under `psql -v ON_ERROR_STOP=1` — what
+-- .github/workflows/ci.yml `sql-tests` runs — this notice is printed if and
+-- only if all four arms ran to completion. CI reads it back out of the output
+-- (the 'ALL N ARMS EXECUTED' check) so an arm neutered in place cannot exit 0
+-- unnoticed.
+-- --------------------------------------------------------------------------
+DO $$
+BEGIN
+  RAISE NOTICE 'ALL 4 ARMS EXECUTED (Tests 1-4) and passed — retention delete-guard triggers attached on both audit tables, the guard enforces the 100,000-row ceiling, all 5 retention cron bodies filter by created_at, and audit_log_retention_guard is AFTER STATEMENT DELETE.';
 END $$;
 
 ROLLBACK;
