@@ -5,11 +5,11 @@ milestone_name: Backlog Burndown (Phases 158+)
 current_phase: 161
 current_phase_name: WIZERR — Honest error surfaces
 status: verifying
-stopped_at: Completed 162-01-PLAN.md
-last_updated: "2026-08-25T22:16:36.374Z"
+stopped_at: Completed 162-03-PLAN.md
+last_updated: "2026-08-25T22:26:02.098Z"
 last_activity: 2026-08-25
 last_activity_desc: Phase 161.1 wave 4 — composite arm landed DORMANT; composite PROD tracer still owed
-state_head: 595233decf9e4701cb1cf918108f7b9e85dad76e
+state_head: 831da5fc7f0004605a23ac33b3b69c51e4880dc2
 progress:
   total_phases: 10
   completed_phases: 1
@@ -637,6 +637,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 | Phase 161.1 P05 | 82min | 1 tasks | 1 files |
 | Phase 161.1 P03 | 71min | 2 tasks | 2 files |
 | Phase 162 P01 | ~35m | 2 tasks | 1 files |
+| Phase 162 P03 | 35m | 3 tasks | 5 files |
 
 ## Accumulated Context
 
@@ -788,6 +789,8 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - [Phase 161]: 161.1-03: both gates this plan mandated were VACUOUS — ';'-separated greps under bash -c always print OK (measured), and both task-2 tokens ('stored' 14x, '471-472' 1x) already existed pre-edit. Gate tokens must be counted against the PRE-EDIT artifact
 - [Phase 162]: HONEST-02 verdict flat-account: decided on the key-side sync witness (last_fetched_trade_timestamp frozen 111d while the poller succeeds daily), not on the empty trades count
 - [Phase 162]: HONEST-01 root cause recorded inconclusive: stage/window/population pinned (poll_positions, 2026-06-10..06-14, 2 strategies) but no str/None site at HEAD and no traceback survives
+- [Phase 161]: 162-03: RSC series strip lives in portfolios/[id]/page.tsx, not getPortfolioStrategies — the page needs the series server-side to build curves; only forwarded props narrow
+- [Phase 161]: 162-03: mayClaimSyncRecency is a new decided predicate, not a widening of hasComputedAnalytics — that value also gates the rank cell and owner pending chip
 
 ### Decisions (execution-time, Phase 140.2)
 
@@ -1492,6 +1495,8 @@ Load-bearing sequencing (real dependencies, do not reorder):
 
 **Last Date:** 2026-08-25T22:16:35.932Z
 **Stopped At:** Completed 162-01-PLAN.md
+**Last Date:** 2026-08-25T22:26:01.687Z
+**Stopped At:** Completed 162-03-PLAN.md
 **Resume File:** None
 **Next step:** Phase 161 (WIZERR — honest error surfaces) is next and NOT yet planned — run `/gsd-plan-phase 161`. Phase 161.1 (LEDGER-REFRESH) was inserted after it on 2026-08-24 for the founder-reported MT5 staleness; it is URGENT and production-facing, so it may be pulled ahead of 161 if you prefer the live data-integrity fix first.
 

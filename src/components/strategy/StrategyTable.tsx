@@ -967,6 +967,20 @@ export function StrategyTable({
                       s.created_at ?? null,
                     );
                     const hasComputedAnalytics = isComputedAnalytics(chipStatus);
+                    // Phase 162 / HONEST-03, UI-SPEC C-6 — an `is_example` row
+                    // NEVER claims a sync recency, whatever its status. The
+                    // "Example" chip already carries the row's identity, and a
+                    // "Synced …" date on a demo seed is a freshness claim about
+                    // a thing nobody is syncing — the surface that sat stale for
+                    // three months. Written as ONE decided predicate extending
+                    // `hasComputedAnalytics` rather than an inline `&&` at the
+                    // render site (STALE-01 discipline: one predicate per
+                    // claim). Deliberately NOT folded into
+                    // `hasComputedAnalytics` itself: that value also gates the
+                    // rank cell and the owner pending chip, and an example row
+                    // with real computed analytics still earns both.
+                    const mayClaimSyncRecency =
+                      hasComputedAnalytics && !s.is_example;
                     // Phase 150 / OWN-03 + OWN-05 — the owner row-action
                     // cluster, assembled HERE rather than inline in the action
                     // cell. That placement is deliberate: pin 7 of
@@ -1154,7 +1168,7 @@ export function StrategyTable({
                                 anonymous, and it must not be capable of
                                 printing a sync date it cannot justify no matter
                                 who hands it rows. */}
-                            {hasComputedAnalytics && (
+                            {mayClaimSyncRecency && (
                               <SyncBadge computedAt={s.analytics.computed_at} exchange={s.supported_exchanges?.[0]} />
                             )}
                             {/* Phase 149 Delta 4 — the honest pending chip fills
