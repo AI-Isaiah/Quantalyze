@@ -244,7 +244,15 @@ const ROUTES: readonly RouteUnderTest[] = [
     rosterFile: join(WIZARD_STEPS, "ConnectKeyStep.tsx"),
     rosterName: "KNOWN_CREATE_WITH_KEY_CODES",
     statusRe: "400",
-    expectedSites: 12,
+    // 12 → 13 (162-05 / D-162-3). The use-existing-key arm adds exactly ONE
+    // 400 emitter — the combined `wizard_session_id and reuse_api_key_id must
+    // be uuids` shape guard — and no others: every other refusal on that arm
+    // answers 409, 403, 500 or 503, all of which this route's `statusRe`
+    // deliberately does not derive. ⚠️ ONE guard for the two fields rather than
+    // two guards is a copy decision, not a way of holding this number down:
+    // both fields are OUR request shape, they fail together for the caller, and
+    // splitting them would publish two sentences where one is true.
+    expectedSites: 13,
   },
   {
     label: "composite/add-key",
@@ -1998,10 +2006,18 @@ describe("[161-05 / WIZERR-03] create-with-key's 409 refusals clear ConnectKeySt
    *
    * 2 → 3 (161-05 / WIZERR-03): `KEY_ORPHANED` joins in the same commit the
    * route starts emitting it and the same commit its roster row lands.
+   *
+   * 3 → 4 (162-05 / D-162-3): `KEY_REUSE_UNAVAILABLE` joins on the same terms.
+   * The use-existing-key arm emits it from TWO sites — the pre-RPC ownership
+   * refusal and the RPC's `no_data_found` raise — but this assertion compares
+   * the SET, so two sites of one code stay one member. That arm also re-emits
+   * `DRAFT_ALREADY_EXISTS` and `VENUE_ALREADY_CONNECTED`, both already members
+   * and both through text that was already here.
    */
   const EXPECTED_409_CODES = [
     "DRAFT_ALREADY_EXISTS",
     "KEY_ORPHANED",
+    "KEY_REUSE_UNAVAILABLE",
     "VENUE_ALREADY_CONNECTED",
   ] as const;
 
@@ -2021,7 +2037,9 @@ describe("[161-05 / WIZERR-03] create-with-key's 409 refusals clear ConnectKeySt
       // sibling law in this repo pins a hand-typed integer for exactly this
       // reason. Re-measure at HEAD when the 409 vocabulary changes — the sibling
       // assertion below will tell you the new set.
-    ).toBeGreaterThanOrEqual(3);
+      // 3 → 4 at 162-05 (D-162-3), re-measured under emitterRe("409") on the
+      // comment-stripped source after the use-existing-key arm landed.
+    ).toBeGreaterThanOrEqual(4);
   });
 
   it("the 409 vocabulary is the hand-typed set — no more, no less", () => {

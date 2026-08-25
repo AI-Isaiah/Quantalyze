@@ -268,6 +268,46 @@ export type WizardErrorCode =
   // same thing again", and the same key is refused identically — the DB index
   // is what refused it, and nothing about the second attempt differs.
   | "KEY_ORPHANED"
+  // 162-05 / D-162-3 — the USE-EXISTING-KEY arm's one refusal: the request named
+  // a stored key to reuse, and no LIVE key of the caller's matches it.
+  //
+  // ⛔ ONE CODE FOR THREE STATES ON PURPOSE — "not yours", "no longer exists"
+  // and "soft-disconnected". Splitting them would publish an ownership oracle
+  // for key ids to anyone who can post this route, and the user's remedy is
+  // identical in all three: there is nothing to reuse, so connect the account
+  // with credentials instead. The route emits it from TWO sites (the pre-RPC
+  // ownership refusal and the RPC's own `no_data_found` raise, which is the
+  // TOCTOU window between the two) and both mean exactly this sentence.
+  //
+  // ⚠️ AND NO INCUMBENT COULD TAKE IT, read AT THE EMITTER rather than matched
+  // on names:
+  //   · `KEY_ORPHANED` — "This key is already stored, but nothing uses it."
+  //     Its whole premise is that the key IS stored and IS the caller's. Here we
+  //     have just measured that no live key of theirs matches, so the sentence
+  //     asserts the opposite of what the reads found, and its second remedy
+  //     (email us to release the stored key) points at a key that is not there.
+  //   · `VENUE_ALREADY_CONNECTED` — "already connected to an existing
+  //     strategy". Nothing is connected on this arm; that code IS emitted by
+  //     this same arm for the case where something is, which is precisely why
+  //     it cannot also carry this one.
+  //   · `STALE_CLIENT` — its title ("This page is out of date") is arguably
+  //     true for the reachable population, but its CAUSE names a deploy skew:
+  //     "this tab has been open since before we changed how keys are added, so
+  //     it sent us a request we no longer accept". The request shape here is
+  //     current and accepted; only the key it names is gone. A code whose title
+  //     fits and whose cause lies is not a fit.
+  //   · `DRAFT_ALREADY_EXISTS` / `GATE_DRAFT_GONE` — both speak about a draft.
+  //     This refusal is reached before any draft is read or written.
+  //
+  // RECOVERABLE — DERIVED, NOT DECLARED, on `KEY_ORPHANED`'s own reasoning:
+  // `try_another_key` is a member of `RECOVERABLE_ACTIONS`, and on
+  // ConnectKeyStep the Retry control clears the banner and returns the user to
+  // the credential form. That form is the actual remedy here — unlike on
+  // `KEY_ORPHANED`, where the same account is refused identically every time —
+  // so the control does what the first fix line says.
+  // ⛔ NOT `clear_and_retry`: re-posting the same `reuse_api_key_id` is refused
+  // identically, because the key it names still does not exist.
+  | "KEY_REUSE_UNAVAILABLE"
   // Sync + gate (SyncPreviewStep) — these wrap strategyGate.ts codes
   | "SYNC_TIMEOUT"
   | "SYNC_FAILED"
@@ -1832,6 +1872,35 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
     // resume, and `start_fresh` deletes one. Their absence also keeps this entry
     // outside the destructive-action population the `[140.3-10 / TRAP-4]` scan
     // walks.
+    actions: ["try_another_key", "expand_log"],
+  },
+
+  // 162-05 / D-162-3. See the union member's docblock for why this is a member
+  // rather than an alias, and for the four near-misses it was measured against.
+  //
+  // ⚠️ WHAT THIS COPY MAY CLAIM, measured at the arms rather than assumed. Both
+  // emitters return BEFORE any write: the pre-RPC one has performed two reads
+  // and nothing else, and the `no_data_found` one is raised by the function
+  // before its INSERT, inside a transaction that rolls back. So "nothing was
+  // created" is knowable in the way 140.3-15 requires. ⛔ It says nothing about
+  // the user's credentials, which this arm never receives, never sends anywhere
+  // and never stores — a sentence implying otherwise would send them to
+  // regenerate a working key for a state that has nothing to do with it.
+  KEY_REUSE_UNAVAILABLE: {
+    title: "That stored key is not available to reuse.",
+    cause:
+      "You asked us to finish setting up a strategy using a key already stored on your account, and we could not find a live one matching it. It may have been disconnected or removed since the page you started from was loaded. Nothing was created and none of your stored keys changed.",
+    fix: [
+      "Connect this account here with its API credentials instead — the form on this step still works normally.",
+      "If you arrived from My Strategies, reload that page first: the key list it showed you is what this request is checked against, and it is now out of date.",
+      "If neither clears it, email security@quantalyze.com with the correlation id below.",
+    ],
+    docsHref: "/security",
+    // ⛔ `try_another_key` AND NOT `clear_and_retry` — see the union member's
+    // docblock. ⛔ AND NEITHER `resume_draft` NOR `start_fresh`: no draft was
+    // read or written on this arm, and `start_fresh` DELETES one, which also
+    // keeps this entry outside the destructive-action population the
+    // `[140.3-10 / TRAP-4]` scan walks.
     actions: ["try_another_key", "expand_log"],
   },
 

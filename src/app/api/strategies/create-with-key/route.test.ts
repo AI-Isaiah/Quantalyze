@@ -199,7 +199,140 @@ const venueOwnerLookupMock = vi.fn(async () => ({ data: null, error: null }) as 
 
 /** Every `.eq()`/`.is()` filter the route applied, per builder. */
 type CapturedFilters = Record<string, unknown>;
-const capturedSelects: Array<{ table: string; filters: CapturedFilters }> = [];
+const capturedSelects: Array<{
+  table: string;
+  /** 162-05 — WHICH client issued the read. See `reuseKeyAdminLookupMock`. */
+  client: "admin" | "user-scoped";
+  filters: CapturedFilters;
+}> = [];
+
+/**
+ * 162-05 / D-162-3 — EVERY WRITE ATTEMPT, BY TABLE, ON EITHER CLIENT.
+ *
+ * The one property the use-existing-key arm exists to hold is that it NEVER
+ * writes `api_keys` — re-INSERTing there is what created the orphan in the
+ * first place (T-162-05-B). "The api_keys row count is unchanged" has no
+ * meaning against a doubled client, so the assertion this file CAN make, and
+ * the one that actually pins the property, is that no write verb is ever
+ * dialled against that table. Recording every verb rather than only `insert`
+ * matters because an `update`/`upsert`/`delete` on `api_keys` would be just as
+ * much a violation of "this arm does not touch stored credentials".
+ */
+const writeAttempts: Array<{
+  client: "admin" | "user-scoped";
+  table: string;
+  op: string;
+}> = [];
+
+function recordWrite(
+  client: "admin" | "user-scoped",
+  table: string,
+  op: string,
+) {
+  writeAttempts.push({ client, table, op });
+}
+
+/** Write verbs that must never be reachable on `api_keys` from this route. */
+function makeWriteVerbs(client: "admin" | "user-scoped", table: string) {
+  const thenable = {
+    eq: () => thenable,
+    is: () => thenable,
+    select: () => thenable,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    then: (resolve: any) => resolve({ data: null, error: null }),
+  };
+  return {
+    insert: () => {
+      recordWrite(client, table, "insert");
+      return thenable;
+    },
+    upsert: () => {
+      recordWrite(client, table, "upsert");
+      return thenable;
+    },
+    delete: () => {
+      recordWrite(client, table, "delete");
+      return thenable;
+    },
+  };
+}
+
+/**
+ * 162-05 — THE REUSE ARM'S TWO `api_keys` READS, DOUBLED FAITHFULLY.
+ *
+ * ⭐ THE TWO DOUBLES ARE NOT THE SAME, AND THE DIFFERENCE IS THE WHOLE POINT.
+ *   · `reuseKeyAdminLookupMock` stands in for `createAdminClient()`, which
+ *     BYPASSES RLS. The only thing narrowing that read is the set of filters
+ *     the ROUTE chose to apply, so this double evaluates `filters` and answers
+ *     the seeded row only when they match it. Delete `.eq("user_id", …)` from
+ *     the route and this double stops filtering on ownership — exactly as
+ *     Postgres would. A canned-answer double could not model that at all, and
+ *     every ownership assertion written against one would be vacuous.
+ *   · `reuseKeyUserScopedLookupMock` stands in for the RLS-scoped client, where
+ *     `api_keys_owner` compares `user_id` to `auth.uid()` INSIDE the database.
+ *     It therefore refuses a row belonging to anyone but `MOCK_USER` REGARDLESS
+ *     of which filters the route applied, because that is what RLS does.
+ *
+ * ⚠️ THE CONSEQUENCE, STATED SO NOBODY MISREADS THE RED WITNESS BELOW: with
+ * both layers modelled honestly, neutering the admin `.eq("user_id", …)` alone
+ * does NOT flip the cross-tenant OUTCOME — layer 2 still refuses. That is what
+ * defence in depth means, and it is why the single-line witness for that filter
+ * is the STRUCTURAL assertion (`the admin re-select carries the session uid`)
+ * rather than the outcome one. Both are present, and the outcome test is not
+ * vacuous either: it reds when BOTH layers go. Recorded rather than papered
+ * over, because a reader who expects one neuter to redden every test would
+ * otherwise conclude the outcome test was broken.
+ */
+const reuseKeyRow = {
+  value: null as
+    | { id: string; user_id: string; disconnected_at: string | null }
+    | null,
+};
+
+type KeyReadResult = {
+  data: { id: string } | null;
+  error: { code?: string; message?: string } | null;
+};
+
+const reuseKeyAdminReadFault = { value: null as { code: string } | null };
+const reuseKeyUserScopedReadFault = { value: null as { code: string } | null };
+
+const reuseKeyAdminLookupMock = vi.fn((filters: CapturedFilters): KeyReadResult => {
+  if (reuseKeyAdminReadFault.value) {
+    return { data: null, error: reuseKeyAdminReadFault.value };
+  }
+  const row = reuseKeyRow.value;
+  if (!row) return { data: null, error: null };
+  // Postgres applies exactly the predicates the query carried — no more.
+  if ("id" in filters && filters.id !== row.id) return { data: null, error: null };
+  if ("user_id" in filters && filters.user_id !== row.user_id) {
+    return { data: null, error: null };
+  }
+  if ("disconnected_at" in filters && filters.disconnected_at === null) {
+    if (row.disconnected_at !== null) return { data: null, error: null };
+  }
+  return { data: { id: row.id }, error: null };
+});
+
+const reuseKeyUserScopedLookupMock = vi.fn(
+  (filters: CapturedFilters): KeyReadResult => {
+    if (reuseKeyUserScopedReadFault.value) {
+      return { data: null, error: reuseKeyUserScopedReadFault.value };
+    }
+    const row = reuseKeyRow.value;
+    if (!row) return { data: null, error: null };
+    // ⛔ RLS FIRST, AND IT IS NOT A FILTER THE ROUTE CAN DROP.
+    if (row.user_id !== MOCK_USER.id) return { data: null, error: null };
+    if ("id" in filters && filters.id !== row.id) return { data: null, error: null };
+    if ("user_id" in filters && filters.user_id !== row.user_id) {
+      return { data: null, error: null };
+    }
+    if ("disconnected_at" in filters && filters.disconnected_at === null) {
+      if (row.disconnected_at !== null) return { data: null, error: null };
+    }
+    return { data: { id: row.id }, error: null };
+  },
+);
 
 /**
  * ⭐ THE CLIENT DOUBLE IS TABLE- AND FILTER-AWARE, and it has to be.
@@ -211,9 +344,12 @@ const capturedSelects: Array<{ table: string; filters: CapturedFilters }> = [];
  * wrong-row-resolution defect these tests exist to catch. Routing on the
  * filters the route ACTUALLY applied is what makes the assertions non-vacuous.
  */
-function makeSelectBuilder(table: string) {
+function makeSelectBuilder(
+  table: string,
+  client: "admin" | "user-scoped" = "user-scoped",
+) {
   const filters: CapturedFilters = {};
-  capturedSelects.push({ table, filters });
+  capturedSelects.push({ table, client, filters });
   const node = {
     eq: (col: string, val: unknown) => {
       filters[col] = val;
@@ -226,7 +362,21 @@ function makeSelectBuilder(table: string) {
     order: () => node,
     limit: () => node,
     maybeSingle: () => {
-      if (table === "api_keys") return venueKeyLookupMock();
+      if (table === "api_keys") {
+        // ⭐ 162-05 — `api_keys` IS NOW READ BY TWO DIFFERENT QUESTIONS, and the
+        // `id` filter is what tells them apart. The venue-identity fence asks
+        // "(exchange, venue_account_id)"; the reuse arm asks "this exact id",
+        // twice — once through the admin client and once user-scoped. Routing on
+        // the filter AND on the client is what keeps the two ownership layers
+        // separately observable; collapsing them would make the layer-2
+        // assertions answer layer 1's question.
+        if ("id" in filters) {
+          return client === "admin"
+            ? reuseKeyAdminLookupMock(filters)
+            : reuseKeyUserScopedLookupMock(filters);
+        }
+        return venueKeyLookupMock();
+      }
       // `strategies` is read THREE times: the F6 session fence keys on
       // wizard_session_id, and the venue fence issues two reads on api_key_id.
       //
@@ -255,8 +405,12 @@ vi.mock("@/lib/supabase/server", () => ({
     // the `rpcCallSites` docblock above for why the throw is armed per-case.
     rpc: (...args: unknown[]) => userScopedRpc(...args),
     from: (table: string) => ({
-      select: () => makeSelectBuilder(table),
-      update: (...args: unknown[]) => assetClassUpdateMock(...args),
+      select: () => makeSelectBuilder(table, "user-scoped"),
+      update: (...args: unknown[]) => {
+        recordWrite("user-scoped", table, "update");
+        return assetClassUpdateMock(...args);
+      },
+      ...makeWriteVerbs("user-scoped", table),
     }),
   }),
 }));
@@ -303,7 +457,14 @@ vi.mock("@/lib/supabase/admin", () => ({
     }
     return {
       rpc: (...args: unknown[]) => adminRpc(...args),
-      from: (table: string) => ({ select: () => makeSelectBuilder(table) }),
+      from: (table: string) => ({
+        select: () => makeSelectBuilder(table, "admin"),
+        update: () => {
+          recordWrite("admin", table, "update");
+          return { eq: () => ({ eq: async () => ({ error: null }) }) };
+        },
+        ...makeWriteVerbs("admin", table),
+      }),
     };
   },
 }));
@@ -3388,5 +3549,608 @@ describe("[161-06 / WIZERR-05] create-with-key — the Retry-After relay", () =>
     expect((await res.json()).code).toBe("SERVICE_UNAVAILABLE_RETRY");
     expect(res.headers.get("Retry-After")).toBe("42");
     consoleErr.mockRestore();
+  });
+});
+
+/**
+ * ═════════════════════════════════════════════════════════════════════════════
+ * [162-05 / D-162-3] THE USE-EXISTING-KEY ARM
+ *
+ * WHAT IT CLOSES. `my-strategies` renders an orphaned key as a "No strategy
+ * yet" row whose only control is "Finish setup →", which reopens this wizard
+ * and lands on `KEY_ORPHANED` — a refusal whose own copy has to tell the user
+ * that releasing the stored key is not something any surface we ship lets them
+ * do. That loop is measured (the `KEY_ORPHANED` docblock in wizardErrors.ts)
+ * and this arm is the write that ends it.
+ *
+ * ⭐ THE HIGH-SEVERITY THREAT IS T-162-05-A — cross-tenant reuse of an
+ * `api_keys` row the caller does not own. The route mitigates it in three
+ * layers (session-uid filter on the RLS-bypassing admin re-select, a user-scoped
+ * RLS re-read, and the RPC's own in-body ownership assertion), and the
+ * mitigation is asserted here two ways on purpose:
+ *   · STRUCTURALLY — "the ADMIN re-select carries the session uid". This is the
+ *     single-line witness: delete that one `.eq("user_id", …)` and this test
+ *     reds. It was OBSERVED red against the neutered filter, not assumed.
+ *   · BEHAVIOURALLY — a foreign key id is refused with no write. This one reds
+ *     when the ownership property is lost ACROSS BOTH client layers, because
+ *     the doubles model both honestly (see `reuseKeyAdminLookupMock`). It is
+ *     not vacuous; it is the outcome test for a LAYERED control, and saying so
+ *     is more honest than pretending one neuter should flip it.
+ *
+ * ⛔ AND THE SECOND PROPERTY, T-162-05-B: this arm NEVER writes `api_keys`.
+ * `writeAttempts` records every write verb dialled against either client, and
+ * the cases below assert `api_keys` appears in none of them.
+ * ═════════════════════════════════════════════════════════════════════════════
+ */
+describe("[162-05 / D-162-3] create-with-key — the use-existing-key arm", () => {
+  const REUSE_KEY_ID = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
+  const FOREIGN_USER_ID = "00000000-0000-0000-0000-bbbbbbbbbbbb";
+  const REUSE_STRATEGY_ID = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+
+  /** The request the client sends: selection intent, and NO credentials. */
+  const REUSE_BODY = {
+    wizard_session_id: WIZARD_SESSION_ID,
+    reuse_api_key_id: REUSE_KEY_ID,
+  };
+
+  /** The `api_keys` row as it exists in the database for these cases. */
+  function seedKey(userId: string, disconnectedAt: string | null = null) {
+    reuseKeyRow.value = {
+      id: REUSE_KEY_ID,
+      user_id: userId,
+      disconnected_at: disconnectedAt,
+    };
+  }
+
+  /** Every write verb dialled against `api_keys` during the case. */
+  function apiKeyWrites() {
+    return writeAttempts.filter((w) => w.table === "api_keys");
+  }
+
+  /** The admin client's `api_keys`-by-id read, as the route actually issued it. */
+  function adminKeyRead() {
+    return capturedSelects.find(
+      (s) => s.table === "api_keys" && s.client === "admin" && "id" in s.filters,
+    );
+  }
+
+  function userScopedKeyRead() {
+    return capturedSelects.find(
+      (s) =>
+        s.table === "api_keys" && s.client === "user-scoped" && "id" in s.filters,
+    );
+  }
+
+  let consoleErr: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    // ⚠️ THE SEAMUX-08 BLOCK ABOVE LEAKS, and its own docblock says so: a
+    // `vi.doMock` registration OUTLIVES the `vi.resetModules()` in its afterEach
+    // — reset clears the MODULE registry, not the MOCK registry. Its
+    // `@/lib/supabase/server` double is a stripped-down `eq → eq →
+    // maybeSingle` chain with no `.is()`, written for the F6 session fence
+    // alone. MEASURED, not reasoned: without these re-registrations every case
+    // below died on `…eq(…).eq(…).is is not a function` at the reuse arm's
+    // ownership re-read, i.e. before any assertion it exists to make. Same
+    // failure shape that block records finding as "the first run was 10 × 401",
+    // and the same remedy.
+    vi.resetModules();
+    vi.doMock("@/lib/api/withAuth", () => ({
+      withAuth:
+        (h: (req: NextRequest, user: typeof MOCK_USER) => unknown) =>
+        (req: NextRequest) =>
+          h(req, MOCK_USER),
+    }));
+    vi.doMock("@/lib/supabase/server", () => ({
+      createClient: async () => ({
+        rpc: (...args: unknown[]) => userScopedRpc(...args),
+        from: (table: string) => ({
+          select: () => makeSelectBuilder(table, "user-scoped"),
+          update: (...args: unknown[]) => {
+            recordWrite("user-scoped", table, "update");
+            return assetClassUpdateMock(...args);
+          },
+          ...makeWriteVerbs("user-scoped", table),
+        }),
+      }),
+    }));
+    vi.doMock("@/lib/supabase/admin", () => ({
+      createAdminClient: () => {
+        if (adminClientThrows.value) {
+          throw new Error("Missing SUPABASE_SERVICE_ROLE_KEY for admin operations");
+        }
+        return {
+          rpc: (...args: unknown[]) => adminRpc(...args),
+          from: (table: string) => ({
+            select: () => makeSelectBuilder(table, "admin"),
+            update: () => {
+              recordWrite("admin", table, "update");
+              return { eq: () => ({ eq: async () => ({ error: null }) }) };
+            },
+            ...makeWriteVerbs("admin", table),
+          }),
+        };
+      },
+    }));
+
+    reuseKeyRow.value = null;
+    reuseKeyAdminReadFault.value = null;
+    reuseKeyUserScopedReadFault.value = null;
+    reuseKeyAdminLookupMock.mockClear();
+    reuseKeyUserScopedLookupMock.mockClear();
+    writeAttempts.length = 0;
+    capturedSelects.length = 0;
+    rpcCallSites.length = 0;
+    rpcMock.mockReset();
+    validateKeyMock.mockReset();
+    encryptKeyMock.mockReset();
+    venueStrategyLookupMock.mockResolvedValue({ data: null, error: null });
+    venueOwnerLookupMock.mockResolvedValue({ data: null, error: null });
+    adminClientThrows.value = false;
+    limiter.result = { success: true };
+    consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    consoleErr.mockRestore();
+    reuseKeyRow.value = null;
+    venueStrategyLookupMock.mockResolvedValue({ data: null, error: null });
+    venueOwnerLookupMock.mockResolvedValue({ data: null, error: null });
+    vi.restoreAllMocks();
+  });
+
+  // ───────────────────────────── the happy path ─────────────────────────────
+
+  it("an OWNER'S ORPHANED key becomes a draft — 200 draft envelope, and api_keys is never written", async () => {
+    seedKey(MOCK_USER.id);
+    rpcMock.mockResolvedValue({
+      data: [{ strategy_id: REUSE_STRATEGY_ID, api_key_id: REUSE_KEY_ID }],
+      error: null,
+    });
+
+    const POST = await importPost();
+    const res = await POST(makeReq(REUSE_BODY));
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({
+      ok: true,
+      strategy_id: REUSE_STRATEGY_ID,
+      api_key_id: REUSE_KEY_ID,
+    });
+
+    // ⭐ T-162-05-B. Re-INSERTing api_keys is the defect that CREATED the orphan
+    // population this arm exists to serve.
+    expect(apiKeyWrites()).toEqual([]);
+
+    // The write went through the SERVICE-ROLE client and the NEW function —
+    // never the user-scoped client, never the credential writer.
+    expect(rpcCallSites).toEqual(["admin"]);
+    expect(rpcMock).toHaveBeenCalledTimes(1);
+    expect(rpcMock.mock.calls[0][0]).toBe("create_wizard_strategy_for_key");
+    expect(rpcMock.mock.calls[0][1]).toEqual({
+      p_user_id: MOCK_USER.id,
+      p_api_key_id: REUSE_KEY_ID,
+      p_placeholder_name: expect.any(String),
+      p_wizard_session_id: WIZARD_SESSION_ID,
+    });
+
+    // Nothing reached the exchange and nothing was encrypted.
+    expect(validateKeyMock).not.toHaveBeenCalled();
+    expect(encryptKeyMock).not.toHaveBeenCalled();
+  });
+
+  it("the uid in EVERY filter and in the RPC comes from the SESSION, never from the body", async () => {
+    seedKey(MOCK_USER.id);
+    rpcMock.mockResolvedValue({
+      data: [{ strategy_id: REUSE_STRATEGY_ID, api_key_id: REUSE_KEY_ID }],
+      error: null,
+    });
+
+    const POST = await importPost();
+    const res = await POST(
+      makeReq({ ...REUSE_BODY, user_id: FOREIGN_USER_ID, p_user_id: FOREIGN_USER_ID }),
+    );
+
+    expect(res.status).toBe(200);
+    expect(adminKeyRead()!.filters.user_id).toBe(MOCK_USER.id);
+    expect(userScopedKeyRead()!.filters.user_id).toBe(MOCK_USER.id);
+    expect(rpcMock.mock.calls[0][1].p_user_id).toBe(MOCK_USER.id);
+    expect(JSON.stringify(rpcMock.mock.calls[0][1])).not.toContain(FOREIGN_USER_ID);
+  });
+
+  // ────────────────────── the tenant boundary (T-162-05-A) ──────────────────
+
+  /**
+   * ⭐ THE SINGLE-LINE RED WITNESS. Delete `.eq("user_id", user.id)` from the
+   * route's ADMIN re-select and THIS assertion is the one that reds — observed
+   * on 2026-08-26 by neutering that exact line, running this file, restoring it
+   * from a byte copy verified with `shasum -a 256`, and re-running. The admin
+   * client BYPASSES RLS, so that filter is the tenant boundary on that read and
+   * nothing else is; a test that only checked the refusal OUTCOME stays green on
+   * the neuter because the user-scoped layer still refuses, which is precisely
+   * why this structural assertion has to exist beside the outcome one.
+   */
+  it("the ADMIN re-select carries the session-uid filter — the one line that IS the tenant boundary", async () => {
+    seedKey(MOCK_USER.id);
+    rpcMock.mockResolvedValue({
+      data: [{ strategy_id: REUSE_STRATEGY_ID, api_key_id: REUSE_KEY_ID }],
+      error: null,
+    });
+
+    const POST = await importPost();
+    await POST(makeReq(REUSE_BODY));
+
+    const read = adminKeyRead();
+    expect(
+      read,
+      "The reuse arm did not re-select the key through the ADMIN client at " +
+        "all. Every ownership assertion in this describe is then about a read " +
+        "that no longer happens.",
+    ).toBeDefined();
+    expect(
+      read!.filters.user_id,
+      "The admin client BYPASSES RLS, so tenant scoping on this read IS this " +
+        "filter and nothing else — and its value must come from withAuth's " +
+        "server-side session, never from the request body.",
+    ).toBe(MOCK_USER.id);
+    expect(read!.filters.id).toBe(REUSE_KEY_ID);
+    expect(
+      read!.filters.disconnected_at,
+      "A soft-disconnected key is skipped by every cron dispatcher, so a draft " +
+        "minted over one would silently never sync.",
+    ).toBeNull();
+  });
+
+  it("the USER-SCOPED RLS re-read happens too, and is not a dead read", async () => {
+    seedKey(MOCK_USER.id);
+    rpcMock.mockResolvedValue({
+      data: [{ strategy_id: REUSE_STRATEGY_ID, api_key_id: REUSE_KEY_ID }],
+      error: null,
+    });
+
+    const POST = await importPost();
+    await POST(makeReq(REUSE_BODY));
+
+    const read = userScopedKeyRead();
+    expect(
+      read,
+      "The defence-in-depth layer is claimed in the route's docblock. `id`, " +
+        "`user_id` and `disconnected_at` are ALL on the api_keys column-SELECT " +
+        "allowlist (20260410225608 + 20260422101911), so this read genuinely " +
+        "runs — verified at HEAD. A claimed layer that never issues a query is " +
+        "a dead read dressed as defence in depth.",
+    ).toBeDefined();
+    expect(read!.filters.id).toBe(REUSE_KEY_ID);
+    expect(read!.filters.user_id).toBe(MOCK_USER.id);
+    expect(read!.filters.disconnected_at).toBeNull();
+    expect(reuseKeyUserScopedLookupMock).toHaveBeenCalled();
+  });
+
+  it("a key id the caller does NOT own is refused — no RPC, no write of any kind", async () => {
+    seedKey(FOREIGN_USER_ID);
+
+    const POST = await importPost();
+    const res = await POST(makeReq(REUSE_BODY));
+
+    expect(res.status).toBe(409);
+    expect(await res.clone().text()).toBe(
+      '{"code":"KEY_REUSE_UNAVAILABLE","error":"That stored key is not available to reuse."}',
+    );
+    expect(
+      rpcMock,
+      "Reaching the writer at all on a foreign key id is the IDOR this arm's " +
+        "three layers exist to prevent (T-162-05-A).",
+    ).not.toHaveBeenCalled();
+    expect(writeAttempts).toEqual([]);
+    expect(res.headers.get("Cache-Control")).toBe("private, no-store");
+  });
+
+  it("a DISCONNECTED key of the caller's own is refused — same answer, no write", async () => {
+    seedKey(MOCK_USER.id, "2026-08-01T00:00:00Z");
+
+    const POST = await importPost();
+    const res = await POST(makeReq(REUSE_BODY));
+
+    expect(res.status).toBe(409);
+    expect((await res.json()).code).toBe("KEY_REUSE_UNAVAILABLE");
+    expect(rpcMock).not.toHaveBeenCalled();
+    expect(writeAttempts).toEqual([]);
+  });
+
+  it("a key id that matches NOTHING is refused with the same answer — no ownership oracle", async () => {
+    // ⛔ "not yours", "gone" and "disconnected" must be INDISTINGUISHABLE on the
+    // wire. Three different sentences would let a caller enumerate which key ids
+    // exist and who holds them.
+    reuseKeyRow.value = null;
+
+    const POST = await importPost();
+    const res = await POST(makeReq(REUSE_BODY));
+
+    expect(res.status).toBe(409);
+    expect(await res.clone().text()).toBe(
+      '{"code":"KEY_REUSE_UNAVAILABLE","error":"That stored key is not available to reuse."}',
+    );
+    expect(rpcMock).not.toHaveBeenCalled();
+  });
+
+  // ───────────────────────────── the refusals ───────────────────────────────
+
+  it("a CONNECTED key answers VENUE_ALREADY_CONNECTED with the strategy name — never a new code", async () => {
+    seedKey(MOCK_USER.id);
+    venueStrategyLookupMock.mockResolvedValue({ data: null, error: null });
+    venueOwnerLookupMock.mockResolvedValue({
+      data: { id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", name: "Delta Neutral" },
+      error: null,
+    });
+
+    const POST = await importPost();
+    const res = await POST(makeReq(REUSE_BODY));
+
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual({
+      code: "VENUE_ALREADY_CONNECTED",
+      error: "This account is already connected to an existing strategy.",
+      strategy_name: "Delta Neutral",
+    });
+    expect(rpcMock).not.toHaveBeenCalled();
+    expect(writeAttempts).toEqual([]);
+  });
+
+  it("an EXISTING draft over the key is handed back — deduped, and the writer is never dialled", async () => {
+    seedKey(MOCK_USER.id);
+    venueStrategyLookupMock.mockResolvedValue({
+      data: { id: REUSE_STRATEGY_ID },
+      error: null,
+    });
+
+    const POST = await importPost();
+    const res = await POST(makeReq(REUSE_BODY));
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({
+      ok: true,
+      strategy_id: REUSE_STRATEGY_ID,
+      api_key_id: REUSE_KEY_ID,
+      deduped: true,
+    });
+    expect(rpcMock).not.toHaveBeenCalled();
+  });
+
+  it("IDEMPOTENCY: a repeat POST converges on the SAME draft, by BOTH routes to it", async () => {
+    seedKey(MOCK_USER.id);
+    rpcMock.mockResolvedValue({
+      data: [{ strategy_id: REUSE_STRATEGY_ID, api_key_id: REUSE_KEY_ID }],
+      error: null,
+    });
+
+    const POST = await importPost();
+    const first = await POST(makeReq(REUSE_BODY));
+    expect((await first.json()).strategy_id).toBe(REUSE_STRATEGY_ID);
+
+    // (a) the pre-RPC read now sees the draft the first call minted.
+    venueStrategyLookupMock.mockResolvedValue({
+      data: { id: REUSE_STRATEGY_ID },
+      error: null,
+    });
+    const second = await POST(makeReq(REUSE_BODY));
+    expect(second.status).toBe(200);
+    expect((await second.json()).strategy_id).toBe(REUSE_STRATEGY_ID);
+
+    // (b) and if that read were dark, the FUNCTION's own advisory-lock +
+    // select-existing fence returns the same id rather than minting a second
+    // draft — which is why the RPC carries a fence at all, and why the route's
+    // read is not the only thing between a retry and a duplicate.
+    venueStrategyLookupMock.mockResolvedValue({ data: null, error: null });
+    const third = await POST(makeReq(REUSE_BODY));
+    expect((await third.json()).strategy_id).toBe(REUSE_STRATEGY_ID);
+  });
+
+  // ─────────────────────── request shape / short-circuits ───────────────────
+
+  it("a malformed reuse_api_key_id is refused on OUR request shape — never a verdict about their key", async () => {
+    const POST = await importPost();
+    const res = await POST(
+      makeReq({ ...REUSE_BODY, reuse_api_key_id: "not-a-uuid" }),
+    );
+
+    expect(res.status).toBe(400);
+    expect((await res.json()).code).toBe("KEY_MISSING_REQUIRED_FIELD");
+    expect(
+      reuseKeyAdminLookupMock,
+      'A non-uuid must never reach a `.eq("id", …)` filter — Postgres answers ' +
+        "22P02 and the raw driver error is what would then have to be mapped.",
+    ).not.toHaveBeenCalled();
+    expect(rpcMock).not.toHaveBeenCalled();
+  });
+
+  it("a missing wizard_session_id is refused on the same guard", async () => {
+    const POST = await importPost();
+    const res = await POST(makeReq({ reuse_api_key_id: REUSE_KEY_ID }));
+
+    expect(res.status).toBe(400);
+    expect((await res.json()).code).toBe("KEY_MISSING_REQUIRED_FIELD");
+    expect(rpcMock).not.toHaveBeenCalled();
+  });
+
+  it("CREDENTIAL FIELDS ARE IGNORED — nothing is validated, encrypted, or sent to a venue", async () => {
+    seedKey(MOCK_USER.id);
+    rpcMock.mockResolvedValue({
+      data: [{ strategy_id: REUSE_STRATEGY_ID, api_key_id: REUSE_KEY_ID }],
+      error: null,
+    });
+
+    const POST = await importPost();
+    // Credentials the credential arm would reject outright (unsupported venue,
+    // too-short key). If this arm read them at all the answer would be a 400
+    // about the key rather than a 200 draft.
+    const res = await POST(
+      makeReq({
+        ...REUSE_BODY,
+        exchange: "not-a-venue",
+        api_key: "x",
+        api_secret: "y",
+      }),
+    );
+
+    expect(res.status).toBe(200);
+    expect(validateKeyMock).not.toHaveBeenCalled();
+    expect(encryptKeyMock).not.toHaveBeenCalled();
+    expect(apiKeyWrites()).toEqual([]);
+  });
+
+  it("NEGATIVE CONTROL: without reuse_api_key_id the credential path is untouched", async () => {
+    // The arm is opt-in on the presence of ONE field. This pin says so; every
+    // pre-existing case in this file is the fuller version of it.
+    validateKeyMock.mockResolvedValue({ valid: true, read_only: true });
+    encryptKeyMock.mockResolvedValue({ api_key_encrypted: "enc" });
+    rpcMock.mockResolvedValue({
+      data: [{ strategy_id: STRATEGY_ID, api_key_id: API_KEY_ID }],
+      error: null,
+    });
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+
+    expect(res.status).toBe(200);
+    expect(rpcMock.mock.calls[0][0]).toBe("create_wizard_strategy");
+    expect(reuseKeyAdminLookupMock).not.toHaveBeenCalled();
+  });
+
+  // ──────────────────────── fail-closed / error mapping ─────────────────────
+
+  it("no service-role credential → 503 SEAM_MISCONFIGURED, and NOTHING is written", async () => {
+    seedKey(MOCK_USER.id);
+    adminClientThrows.value = true;
+
+    const POST = await importPost();
+    const res = await POST(makeReq(REUSE_BODY));
+
+    expect(res.status).toBe(503);
+    expect((await res.json()).code).toBe("SEAM_MISCONFIGURED");
+    expect(
+      rpcCallSites,
+      "⛔ Falling back to the user-scoped client is the door Phase 156 closed. " +
+        "There is no backstop for an ownership decision, so the honest answer " +
+        "is a refusal with nothing written.",
+    ).toEqual([]);
+    expect(writeAttempts).toEqual([]);
+  });
+
+  it("the USER-SCOPED ownership read faulting FAILS CLOSED — a layer that cannot run is not silently dropped", async () => {
+    seedKey(MOCK_USER.id);
+    reuseKeyUserScopedReadFault.value = { code: "42501" };
+
+    const POST = await importPost();
+    const res = await POST(makeReq(REUSE_BODY));
+
+    expect(res.status).toBe(500);
+    expect(
+      rpcMock,
+      "If the defence-in-depth layer cannot answer we have TWO layers rather " +
+        "than three and no way to know it. Proceeding would ship that read as " +
+        "decoration.",
+    ).not.toHaveBeenCalled();
+    expect(writeAttempts).toEqual([]);
+  });
+
+  it("a dark strategies read refuses rather than writing on an UNMEASURED orphan claim", async () => {
+    seedKey(MOCK_USER.id);
+    // `orphaned` is honest only when BOTH reads succeeded and both were empty.
+    // A read fault is the absence of a measurement, and this arm is about to
+    // WRITE on it — unlike the venue fence, which may fall through because the
+    // DB index still dedups.
+    venueStrategyLookupMock.mockResolvedValue({
+      data: null,
+      error: { code: "57014", message: "canceling statement" },
+    });
+
+    const POST = await importPost();
+    const res = await POST(makeReq(REUSE_BODY));
+
+    expect(res.status).toBe(500);
+    expect(rpcMock).not.toHaveBeenCalled();
+    expect(writeAttempts).toEqual([]);
+  });
+
+  it("the RPC's own ownership raise (no_data_found) maps to the same refusal — the TOCTOU window", async () => {
+    seedKey(MOCK_USER.id);
+    rpcMock.mockResolvedValue({
+      data: null,
+      error: { code: "P0002", message: "no live api_keys row for this owner" },
+    });
+
+    const POST = await importPost();
+    const res = await POST(makeReq(REUSE_BODY));
+
+    expect(res.status).toBe(409);
+    expect((await res.json()).code).toBe("KEY_REUSE_UNAVAILABLE");
+  });
+
+  it("the RPC's connected raise (object_in_use) maps to VENUE_ALREADY_CONNECTED", async () => {
+    seedKey(MOCK_USER.id);
+    // Reachable two ways: a race, or a COMPOSITE member key — which the route's
+    // two-read resolver structurally cannot see, because a composite links
+    // through `strategy_keys` while `strategies.api_key_id` stays NULL.
+    rpcMock.mockResolvedValue({
+      data: null,
+      error: { code: "55006", message: "already held by a strategy" },
+    });
+
+    const POST = await importPost();
+    const res = await POST(makeReq(REUSE_BODY));
+
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual({
+      code: "VENUE_ALREADY_CONNECTED",
+      error: "This account is already connected to an existing strategy.",
+    });
+  });
+
+  it("an unrecognised RPC fault is a 500 with a STATIC envelope — never a raw driver error", async () => {
+    seedKey(MOCK_USER.id);
+    rpcMock.mockResolvedValue({
+      data: null,
+      error: {
+        code: "XX000",
+        message: 'relation "api_keys" does not exist at character 42',
+        details: "internal detail",
+      },
+    });
+
+    const POST = await importPost();
+    const res = await POST(makeReq(REUSE_BODY));
+
+    expect(res.status).toBe(500);
+    const text = await res.text();
+    expect(text).toBe('{"code":"UNKNOWN","error":"Could not create draft strategy"}');
+    expect(text).not.toContain("at character");
+    expect(text).not.toContain("internal detail");
+  });
+
+  it("a SUCCESSFUL rpc that returns no usable row is a contract violation, not a 200", async () => {
+    seedKey(MOCK_USER.id);
+    rpcMock.mockResolvedValue({ data: [], error: null });
+
+    const POST = await importPost();
+    const res = await POST(makeReq(REUSE_BODY));
+
+    expect(res.status).toBe(500);
+    expect((await res.json()).code).toBe("UNKNOWN");
+  });
+
+  it("the limiter is consumed AFTER shape validation, and a misconfiguration answers 503", async () => {
+    limiter.result = {
+      success: false,
+      retryAfter: 60,
+      reason: "ratelimit_misconfigured",
+    };
+    seedKey(MOCK_USER.id);
+
+    const POST = await importPost();
+    const res = await POST(makeReq(REUSE_BODY));
+
+    expect(res.status).toBe(503);
+    expect((await res.json()).code).toBe("SEAM_MISCONFIGURED");
+    expect(rpcMock).not.toHaveBeenCalled();
   });
 });

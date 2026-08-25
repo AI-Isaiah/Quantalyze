@@ -245,6 +245,38 @@ async function resolveByVenueIdentity(
 
   if (!liveKeyId) return UNRESOLVED;
 
+  return resolveStrategiesForKey(supabase, userId, liveKeyId, secrets, "venue-identity");
+}
+
+/**
+ * 162-05 / D-162-3 — THE TWO-READ ORPHAN DISCIPLINE, EXTRACTED SO THERE IS
+ * EXACTLY ONE OF IT.
+ *
+ * This is `resolveByVenueIdentity`'s entire tail, moved verbatim: same two
+ * reads, same filters, same ordering, same read-fault posture, same order of
+ * evaluation. Nothing about the venue-identity fence's behaviour changes — the
+ * only thing the split adds is a second CALLER, the `reuse_api_key_id` arm,
+ * which already HOLDS the key id and therefore needs the strategies half
+ * without the `api_keys` lookup that finds it.
+ *
+ * ⛔ IT WAS EXTRACTED RATHER THAN COPIED for the reason 153.6 exists: the
+ * discrimination between `draft`, `connected` and `orphaned` is the thing this
+ * plan's refusals turn on, and a second hand-written copy of it is a pair that
+ * drifts. `create_wizard_strategy` stays byte-untouched in SQL for the mirror
+ * of this reason (162-05-DECISION.md); here the cheaper honest move is one
+ * implementation with two callers, because the reads are identical rather than
+ * merely similar.
+ *
+ * `logLabel` names WHICH fence is reporting a dark read, so a persistent fault
+ * on one arm is not attributed to the other.
+ */
+async function resolveStrategiesForKey(
+  supabase: Awaited<ReturnType<typeof createClient>>,
+  userId: string,
+  liveKeyId: string,
+  secrets: readonly unknown[],
+  logLabel: string,
+): Promise<VenueIdentityResolution> {
   // ⭐ BACK ONTO THE USER-SCOPED CLIENT, DELIBERATELY. `strategies` has no
   // column-grant obstacle, so this read does not need the admin client — and
   // routing it through RLS means the row we hand back is provably the caller's
@@ -281,7 +313,13 @@ async function resolveByVenueIdentity(
 
   if (draftRowErr) {
     console.error(
-      "[strategies/create-with-key] venue-identity strategy resolve failed; proceeding to RPC (DB index still dedups):",
+      // ⚠️ THE LABEL IS INTERPOLATED, NOT HARD-CODED, since 162-05 gave this
+      // resolver a SECOND caller. A dark read on the reuse arm logging
+      // "venue-identity" would send the next debugger to the wrong fence — and
+      // the two arms answer an `unresolved` differently (that one falls through
+      // to the RPC, this one refuses), so which fence went dark is the first
+      // thing a reader needs.
+      `[strategies/create-with-key] ${logLabel} strategy resolve failed:`,
       scrubSeamError(draftRowErr, secrets),
       draftRowErr.code,
     );
@@ -321,7 +359,7 @@ async function resolveByVenueIdentity(
     // Same posture as every other read fault here: we cannot tell which of the
     // two situations we are in, so we claim neither (Rule 12).
     console.error(
-      "[strategies/create-with-key] venue-identity owner resolve failed; proceeding to RPC (DB index still dedups):",
+      `[strategies/create-with-key] ${logLabel} owner resolve failed:`,
       scrubSeamError(ownerRowErr, secrets),
       ownerRowErr.code,
     );
@@ -373,6 +411,307 @@ function venueAlreadyConnectedResponse(strategyName: string | null): NextRespons
   );
 }
 
+/**
+ * ── 162-05 / D-162-3 — THE USE-EXISTING-KEY ARM ────────────────────────────
+ *
+ * WHAT IT CLOSES. `my-strategies` renders an orphaned key as a "No strategy
+ * yet" row whose only control is "Finish setup →", which reopens this wizard
+ * and lands on `KEY_ORPHANED` — a refusal whose own copy has to tell the user
+ * that releasing the stored key is not something they can do from any page we
+ * ship. That is an unwinnable loop, measured, and this arm is the write that
+ * ends it: the user's OWN orphaned key becomes a draft strategy with zero
+ * re-entered credentials.
+ *
+ * ⛔ CREDENTIAL FIELDS ARE IGNORED HERE, AND THAT IS THE POINT. Nothing is
+ * validated against a venue, nothing is encrypted, nothing touches `api_keys`.
+ * The request carries SELECTION INTENT (which stored key) and nothing else, so
+ * this arm returns before `validateKey`/`encryptKey` are even reachable and
+ * spends neither seam budget. It is therefore also the one arm in this file
+ * with no secrets to scrub.
+ *
+ * ⭐ THE TENANT BOUNDARY, IN THREE LAYERS — cross-tenant reuse (T-162-05-A,
+ * high) needs all three to fail at once:
+ *   1. `.eq("user_id", user.id)` on the ADMIN re-select. The admin client
+ *      BYPASSES RLS, so tenant scoping there IS this filter and nothing else,
+ *      and the value comes from `withAuth`'s server-side session — NEVER from
+ *      the request body, which carries only the key id. This is the same
+ *      sentence `resolveByVenueIdentity` states about its own filter, and it is
+ *      load-bearing in the same way. `route.test.ts` pins it structurally and
+ *      that pin was witnessed RED against the neutered filter.
+ *   2. The USER-SCOPED re-read of the same row. `id`, `user_id` and
+ *      `disconnected_at` are all on the `api_keys` column-SELECT allowlist
+ *      (20260410225608 + 20260422101911), so unlike the venue-identity read
+ *      this one CAN run — verified at HEAD before the layer was claimed rather
+ *      than assumed. Routed through RLS, it proves the row is the caller's own
+ *      even if layer 1 were weakened.
+ *      ⛔ AND IT FAILS CLOSED. If that read faults we refuse: a security layer
+ *      that cannot run must not be silently dropped, which is the difference
+ *      between defence in depth and a dead read dressed as one.
+ *   3. The in-RPC ownership assertion (`api_keys.user_id = p_user_id AND
+ *      disconnected_at IS NULL`), SQL-gated by
+ *      supabase/tests/test_create_wizard_strategy_for_key.sql.
+ *
+ * ⛔ THE CEILING IS UNCHANGED AND IS NOT CLOSED HERE: any server route holding
+ * `createAdminClient()` can pass any uid. Standing service_role trust boundary
+ * (ADR-0001/ADR-0003), accepted as T-162-05-E and documented in the migration
+ * header. Never read the three layers above as "the uid cannot be forged".
+ *
+ * ⭐ THE SUCCESS ENVELOPE IS THE RESOLVER'S DRAFT ARM, DELIBERATELY —
+ * `{ ok, strategy_id, api_key_id }`, the shape a resumable draft already
+ * answers with. That is the contract plan 162-06's client consumes, and it is
+ * what lets the client reduce the whole orphan population to the draft-resume
+ * path it already implements instead of learning a second one.
+ */
+async function handleReuseExistingKey(
+  user: User,
+  reuseKeyId: unknown,
+  wizardSessionId: unknown,
+): Promise<NextResponse> {
+  // ⛔ ONE GUARD FOR BOTH FIELDS, and it is about OUR REQUEST SHAPE rather than
+  // about the user's key — which is why it may not wear a `KEY_*` verdict that
+  // blames a credential. `wizard_session_id` is required on this arm exactly as
+  // it is on the credential arm: the draft it mints is a wizard draft like any
+  // other, and omitting it would leave the F6 fence and every downstream
+  // session-keyed reader looking at a NULL.
+  if (!isUuid(wizardSessionId) || !isUuid(reuseKeyId)) {
+    return NextResponse.json(
+      { code: "KEY_MISSING_REQUIRED_FIELD", error: "wizard_session_id and reuse_api_key_id must be uuids" },
+      { status: 400, headers: NO_STORE_HEADERS },
+    );
+  }
+
+  // Limiter AFTER shape validation, so a malformed request does not burn one of
+  // the caller's own tokens (B15 ordering: auth → validate → limit), and
+  // through the chokepoint so a limiter misconfiguration answers 503 rather
+  // than the exchange-blaming 429.
+  const rl = await checkLimit(
+    userActionLimiter,
+    `strategies-create-with-key:${user.id}`,
+  );
+  if (!rl.success) {
+    return rateLimitDenyJson(rl, {
+      headers: NO_STORE_HEADERS,
+      throttledBody: { code: "KEY_RATE_LIMIT", error: "Too many requests" },
+      misconfiguredBody: {
+        code: "SEAM_MISCONFIGURED",
+        error: "Rate limiter unavailable",
+      },
+    });
+  }
+
+  const supabase = await createClient();
+
+  // ── LAYER 1: the admin re-select. FAIL-HARD, unlike the venue-identity
+  // fence's read: that one degrades to a dark fence because the DB index is
+  // still a backstop for the duplicate it prevents, and there is no equivalent
+  // backstop for an ownership decision. A missing service-role credential here
+  // means we cannot establish ownership at all, so nothing may be written.
+  let admin: ReturnType<typeof createAdminClient>;
+  try {
+    admin = createAdminClient();
+  } catch (adminErr) {
+    console.error(
+      "[strategies/create-with-key] no service-role credential for the reuse arm; refusing (nothing was written):",
+      scrubSeamError(adminErr),
+    );
+    return NextResponse.json(
+      { code: "SEAM_MISCONFIGURED", error: "Service credential unavailable" },
+      { status: 503, headers: NO_STORE_HEADERS },
+    );
+  }
+
+  const { data: adminKey, error: adminKeyErr } = await admin
+    .from("api_keys")
+    .select("id")
+    .eq("id", reuseKeyId)
+    // ⛔ THE TENANT BOUNDARY. The admin client bypasses RLS; this filter and
+    // nothing else scopes the read, and its value is the withAuth session uid.
+    .eq("user_id", user.id)
+    // Mirrors the venue fence's predicate and the RPC's own assertion: a
+    // soft-disconnected key is skipped by every cron dispatcher, so a draft
+    // minted over one would silently never sync.
+    .is("disconnected_at", null)
+    .maybeSingle();
+
+  if (adminKeyErr) {
+    console.error(
+      "[strategies/create-with-key] reuse arm key re-select failed; refusing (nothing was written):",
+      scrubSeamError(adminKeyErr),
+      adminKeyErr.code,
+    );
+    return NextResponse.json(
+      { code: "UNKNOWN", error: "Could not create draft strategy" },
+      { status: 500, headers: NO_STORE_HEADERS },
+    );
+  }
+
+  // ── LAYER 2: the same row, through RLS. See the docblock — this read is live
+  // (the three columns it references are all granted) and it fails CLOSED.
+  const { data: ownedKey, error: ownedKeyErr } = await supabase
+    .from("api_keys")
+    .select("id")
+    .eq("id", reuseKeyId)
+    .eq("user_id", user.id)
+    .is("disconnected_at", null)
+    .maybeSingle();
+
+  if (ownedKeyErr) {
+    console.error(
+      "[strategies/create-with-key] reuse arm user-scoped ownership re-read failed; refusing (nothing was written):",
+      scrubSeamError(ownedKeyErr),
+      ownedKeyErr.code,
+    );
+    return NextResponse.json(
+      { code: "UNKNOWN", error: "Could not create draft strategy" },
+      { status: 500, headers: NO_STORE_HEADERS },
+    );
+  }
+
+  // ⛔ ONE REFUSAL FOR "not yours", "gone" AND "disconnected". Distinguishing
+  // them would publish an ownership oracle for key ids, and the remedy is the
+  // same in all three cases: the stored key named by this request is not a live
+  // key of the caller's, so there is nothing to reuse.
+  if (!adminKey?.id || !ownedKey?.id) {
+    return NextResponse.json(
+      { code: "KEY_REUSE_UNAVAILABLE", error: "That stored key is not available to reuse." },
+      { status: 409, headers: NO_STORE_HEADERS },
+    );
+  }
+
+  // ── the two-read orphan discipline, through the SAME resolver the venue
+  // fence uses. `orphaned` is a MEASUREMENT (both reads succeeded, both empty),
+  // never the absence of one — which is why a read fault answers `unresolved`
+  // and is refused below rather than being treated as "nothing holds this key".
+  const held = await resolveStrategiesForKey(
+    supabase,
+    user.id,
+    adminKey.id,
+    [],
+    "reuse-existing-key",
+  );
+
+  if (held.kind === "draft") {
+    // Already finished once — the idempotent answer, and the same envelope the
+    // fresh mint below returns. `deduped` marks the arm the user cannot
+    // otherwise explain, exactly as the venue fence uses it.
+    return NextResponse.json(
+      {
+        ok: true,
+        strategy_id: held.strategy_id,
+        api_key_id: held.api_key_id,
+        deduped: true,
+      },
+      { headers: NO_STORE_HEADERS },
+    );
+  }
+  if (held.kind === "connected") {
+    // ⭐ THE INCUMBENT CODE, NOT A NEW ONE. "This account is already connected
+    // to an existing strategy" is true clause for clause here, and its remedy
+    // (open the strategy that already uses it) is reachable — which is exactly
+    // what `KEY_ORPHANED`'s docblock records as the test for reusing it.
+    return venueAlreadyConnectedResponse(held.strategyName);
+  }
+  if (held.kind === "unresolved") {
+    // A read faulted, so we could not establish that nothing holds this key —
+    // and this arm is about to WRITE on that basis. Refuse. (Rule 12: the
+    // venue fence may fall through on a dark read because the DB index still
+    // dedups; there is no index that refuses a second strategy over a key.)
+    return NextResponse.json(
+      { code: "UNKNOWN", error: "Could not create draft strategy" },
+      { status: 500, headers: NO_STORE_HEADERS },
+    );
+  }
+
+  // ── LAYER 3: the writer. Same fail-LOUD posture as the credential arm's
+  // `rpcAdmin`: the write has no fallback, and routing it onto the user-scoped
+  // client is the door Phase 156 closed.
+  // @audit-skip: wizard draft — create_wizard_strategy_for_key writes a draft
+  // strategy that is NOT user-visible until finalize, which is where the
+  // user-visible creation is audited (mirrors the create_wizard_strategy skip
+  // above; audit-2026-05-07 P692 + ADR-0023).
+  const { data, error } = await admin.rpc("create_wizard_strategy_for_key", {
+    p_user_id: user.id,
+    p_api_key_id: adminKey.id,
+    p_placeholder_name: pickPlaceholderCodename(),
+    p_wizard_session_id: wizardSessionId,
+  } as never);
+
+  if (error) {
+    console.error(
+      "[strategies/create-with-key] reuse arm RPC error:",
+      scrubSeamError(error),
+      error.code,
+    );
+    // ⛔ SQLSTATE, NEVER THE MESSAGE. The three refusals the function raises are
+    // discriminated by ERRCODE because a message is prose that a later edit
+    // reformats silently — the same reason `pgConstraintName` exists in this
+    // file rather than a substring match.
+    if (error.code === "P0002") {
+      // no_data_found — the row stopped being a live key of the caller's
+      // between our reads and the write (TOCTOU), or the uid/key pair never
+      // matched. Same answer as the pre-RPC refusal.
+      return NextResponse.json(
+        { code: "KEY_REUSE_UNAVAILABLE", error: "That stored key is not available to reuse." },
+        { status: 409, headers: NO_STORE_HEADERS },
+      );
+    }
+    if (error.code === "55006") {
+      // object_in_use — something acquired the key between our read and the
+      // write, OR it is a composite member, which the two-read resolver cannot
+      // see (it reads `strategies.api_key_id`, and a composite links through
+      // `strategy_keys`). The name is not ours to hand back here, and the code's
+      // copy already omits it when absent.
+      return venueAlreadyConnectedResponse(null);
+    }
+    if (error.code === "23505") {
+      // The wizard-session fence. Byte-identical to the credential arm's
+      // fallthrough: a draft for THIS session already exists.
+      return NextResponse.json(
+        { code: "DRAFT_ALREADY_EXISTS", error: "A wizard session with this key is already in progress." },
+        { status: 409, headers: NO_STORE_HEADERS },
+      );
+    }
+    if (error.code === "42501") {
+      return NextResponse.json(
+        { code: "UNKNOWN", error: "Permission denied. Please sign out and back in." },
+        { status: 403, headers: NO_STORE_HEADERS },
+      );
+    }
+    captureToSentry(error, {
+      tags: { surface: "strategies-create-with-key", step: "reuse-rpc-error" },
+      extra: { pg_code: error.code },
+    });
+    return NextResponse.json(
+      { code: "UNKNOWN", error: "Could not create draft strategy" },
+      { status: 500, headers: NO_STORE_HEADERS },
+    );
+  }
+
+  const row = Array.isArray(data) ? data[0] : data;
+  if (!row?.strategy_id || !row?.api_key_id) {
+    captureToSentry(
+      new Error("create-with-key: create_wizard_strategy_for_key succeeded with no usable row"),
+      {
+        tags: { surface: "strategies-create-with-key", step: "reuse-rpc-contract" },
+        extra: {
+          row_present: row !== null && row !== undefined,
+          has_strategy_id: Boolean(row?.strategy_id),
+          has_api_key_id: Boolean(row?.api_key_id),
+        },
+      },
+    );
+    return NextResponse.json(
+      { code: "UNKNOWN", error: "RPC returned no rows" },
+      { status: 500, headers: NO_STORE_HEADERS },
+    );
+  }
+
+  return NextResponse.json(
+    { ok: true, strategy_id: row.strategy_id, api_key_id: row.api_key_id },
+    { headers: NO_STORE_HEADERS },
+  );
+}
+
 export const POST = withAuth(async (req: NextRequest, user: User) => {
   const body = await req.json().catch(() => null);
   if (!body || typeof body !== "object") {
@@ -389,7 +728,16 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
     passphrase,
     label,
     wizard_session_id,
+    reuse_api_key_id,
   } = body as Record<string, unknown>;
+
+  // 162-05 / D-162-3 — the use-existing-key arm branches HERE, before every
+  // credential-shape guard below it, because it carries no credentials to
+  // shape-check. Presence of the field is the whole discriminator: absent →
+  // the credential path is byte-identical to what it was.
+  if (reuse_api_key_id !== undefined && reuse_api_key_id !== null) {
+    return handleReuseExistingKey(user, reuse_api_key_id, wizard_session_id);
+  }
 
   if (typeof exchange !== "string" || !isSupportedExchange(exchange)) {
     return NextResponse.json(

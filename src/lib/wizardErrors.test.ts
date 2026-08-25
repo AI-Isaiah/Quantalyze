@@ -1992,8 +1992,17 @@ describe("[140.3-10 / TRAP-4] the whole copy table, scanned for destructive-only
    * ownership flip the write in question deletes live positions. That is the
    * TRAP-4 shape one step removed, which is why the split had to move the
    * ACTIONS and not only the sentence.
+   *
+   * ⚠️ 89 → 90 (162-05 / D-162-3). ONE entry — `KEY_REUSE_UNAVAILABLE`, the
+   * use-existing-key arm's refusal when no LIVE key of the caller's matches the
+   * `reuse_api_key_id` it was handed. THIS guard's reasoning was re-run over the
+   * new entry BEFORE the number moved: its `actions` are `["try_another_key",
+   * "expand_log"]`, neither of which is a member of `DESTRUCTIVE_ACTIONS`, so it
+   * sits OUTSIDE the scanned population and the destructive class below is still
+   * four members. The baseline was re-measured at HEAD before it moved — 89 is
+   * what 161-REVIEW left and nothing between it and this plan minted a member.
    */
-  const EXPECTED_TABLE_SIZE = 89;
+  const EXPECTED_TABLE_SIZE = 90;
 
   it("the scan actually covers the table — hand-typed size guard", () => {
     expect(
@@ -2458,8 +2467,17 @@ describe("[140.3-12 / SEAMUX-04] no entry in the copy table makes a claim we can
    * `DASHBOARD_WRITE_FAILED` still carries that sentence for the arms that
    * genuinely establish it — so the tempting "unify them again" is a
    * re-introduction, not a simplification.
+   *
+   * ⚠️ 89 → 90 (162-05 / D-162-3), for `KEY_REUSE_UNAVAILABLE`. THIS guard is
+   * the banned-claims honesty scan, and its reasoning was re-run over the new
+   * entry before the number moved: the entry claims "Nothing was created and
+   * none of your stored keys changed", which BOTH of its emitters can actually
+   * establish — the pre-RPC one has performed two reads and no write, and the
+   * `no_data_found` one is raised inside the function before its INSERT, in a
+   * transaction that rolls back. It carries none of the four FORBIDDEN
+   * fragments.
    */
-  const EXPECTED_TABLE_SIZE = 89;
+  const EXPECTED_TABLE_SIZE = 90;
 
   it("the scan actually covers the table — hand-typed size guard", () => {
     expect(

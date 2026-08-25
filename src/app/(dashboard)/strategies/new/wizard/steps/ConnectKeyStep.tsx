@@ -314,6 +314,15 @@ const KNOWN_CREATE_WITH_KEY_CODES: ReadonlySet<WizardErrorCode> =
     // roster too` describe in the same invariant file derives the 409 emitters
     // as their own population and reds when this row is missing (observed).
     "KEY_ORPHANED",
+    // 162-05 / D-162-3 — the use-existing-key arm's refusal when no LIVE key of
+    // the caller's matches the `reuse_api_key_id` it was sent. Admitted HERE IN
+    // THE SAME COMMIT the route starts emitting it, for the reason the two rows
+    // above state. ⚠️ It answers 409 from both of its emitters, so the coverage
+    // law derived on "400" is structurally blind to it — the guard that DOES see
+    // it is the `[161-05 / WIZERR-03]` 409 describe in
+    // `wizardErrors.invariant.test.ts`, whose hand-typed set gained this member
+    // in the same commit.
+    "KEY_REUSE_UNAVAILABLE",
     "KEY_RATE_LIMIT",
     "UNKNOWN",
     // Returned by `classifyKeyValidationError` (src/lib/wizardErrors.ts) — the
