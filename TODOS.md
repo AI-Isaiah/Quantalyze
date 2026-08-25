@@ -2260,6 +2260,22 @@ EXECUTED, §str/None follow-through, §Discovery observation).
       with Sentry, the search key is exact: kind `poll_positions`, 2026-06-10 … 2026-06-14, two
       strategy ids. ⚠️ The kind has been silent fleet-wide since 2026-06-14, so absence of
       recurrence is **not** evidence of a fix.
+- [ ] **`.planning/WINDOWS.md` loses entries under concurrent appends — measured, with data
+      already lost once.** `gsd-tools windows append` does read-modify-write over the whole
+      file, so parallel wave agents clobber each other. Observed on 2026-08-26: at commit
+      `e6c70ca79` the rendered table carried **three** rows numbered `id 16` while the JSON
+      block — the source of truth the table is regenerated from — carried only **one**. The
+      other two (162-03's `StrategyGrid` entry, 162-04's `ScenarioComposer` entry) had already
+      been dropped from JSON by an earlier race and survived only as orphaned table rows; the
+      next append regenerated the table and erased them entirely. Both were re-added by 162-08
+      as ids 19 and 20, with their original `recorded_at` preserved in the description text —
+      so nothing is lost *now*, but the mechanism is live and will bite again on the next
+      parallel wave. ⚠️ Duplicate ids are the detectable symptom: `grep -o '"id": [0-9]*'
+      .planning/WINDOWS.md | sort -n | uniq -d` should be empty, and the JSON entry count
+      should equal the table row count. **Fix shape:** make the append atomic (lock file, or
+      `O_EXCL` temp + rename with a re-read/retry loop), and derive the next id from the JSON
+      max rather than a cached count. Upstream in the GSD toolchain, not this repo's source —
+      but the corrupted artifact is tracked here.
 
 ---
 
