@@ -69,9 +69,14 @@
 -- and assertions 1 and 4 are its only recurring executed coverage.
 --
 -- NOTHING is skipped now. All six assertions (1, 2a, 2b, 3, 4a, 4b) execute on
--- every run, and the file ends in an 'ALL 6 ARMS EXECUTED' sentinel so that an
--- arm neutered in place — deleted, renumbered or short-circuited — cannot exit
--- 0 unnoticed.
+-- every run, and the file ends in an 'ALL 6 ARMS EXECUTED (1, 2a, 2b, 3, 4a, 4b)'
+-- sentinel so that an arm neutered in place — deleted, renumbered or
+-- short-circuited — cannot exit 0 unnoticed. Keep the roster in that notice: as
+-- of 2026-08-25 `sql-tests` in .github/workflows/ci.yml counts its entries and
+-- fails the job when they disagree with N, so dropping an assertion costs two
+-- edits in one string rather than one silent decrement. (The three 0/0b/0c
+-- precondition assertions are deliberately NOT arms and are not in the roster —
+-- they establish that the arms below can be evaluated at all.)
 --   * A MISSING FUNCTION is a hard failure (assertion 0): the RPC has existed
 --     since 20260626120000.
 --   * An UNDEPLOYED GATE is a hard failure (assertion 0c), which is where the

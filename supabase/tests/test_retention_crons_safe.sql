@@ -33,8 +33,12 @@
 -- nothing saw it; the CI step reads psql's exit code, so the withheld arm was
 -- indistinguishable from a pass. It now RAISEs. Consequence, deliberate: this
 -- file is RED on any database without pg_cron, including a bare local cluster.
--- The file also declares an 'ALL 4 ARMS EXECUTED' sentinel at its end so an arm
--- neutered in place cannot exit 0 unnoticed.
+-- The file also declares an 'ALL 4 ARMS EXECUTED (Test 1, …, Test 4)' sentinel at
+-- its end so an arm neutered in place cannot exit 0 unnoticed. The roster is
+-- load-bearing: `sql-tests` in .github/workflows/ci.yml counts its entries and
+-- fails when they disagree with N. It was `(Tests 1-4)` until 2026-08-25 — prose
+-- that read like a range but was one token, so the check (which understood only
+-- the letter-range form `(A-D)`) did not cover this file at all.
 
 BEGIN;
 
@@ -178,11 +182,12 @@ END $$;
 -- .github/workflows/ci.yml `sql-tests` runs — this notice is printed if and
 -- only if all four arms ran to completion. CI reads it back out of the output
 -- (the 'ALL N ARMS EXECUTED' check) so an arm neutered in place cannot exit 0
--- unnoticed.
+-- unnoticed. Adding or removing a Test means editing N AND the roster beside it;
+-- CI fails the job when the two disagree.
 -- --------------------------------------------------------------------------
 DO $$
 BEGIN
-  RAISE NOTICE 'ALL 4 ARMS EXECUTED (Tests 1-4) and passed — retention delete-guard triggers attached on both audit tables, the guard enforces the 100,000-row ceiling, all 5 retention cron bodies filter by created_at, and audit_log_retention_guard is AFTER STATEMENT DELETE.';
+  RAISE NOTICE 'ALL 4 ARMS EXECUTED (Test 1, Test 2, Test 3, Test 4) and passed — retention delete-guard triggers attached on both audit tables, the guard enforces the 100,000-row ceiling, all 5 retention cron bodies filter by created_at, and audit_log_retention_guard is AFTER STATEMENT DELETE.';
 END $$;
 
 ROLLBACK;
