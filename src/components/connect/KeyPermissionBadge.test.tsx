@@ -464,6 +464,22 @@ describe("KeyPermissionBadge", () => {
    * These assertions therefore query the CHIPS and the CAPTION. The pre-existing
    * probe-error assertion on `key-permission-summary` above passes against the
    * BROKEN behaviour and cannot stand in for them.
+   *
+   * CONSUMER SWEEP (162-09 Task 2) — the class is closed, and it is a class of
+   * ONE. `grep -rna probe_error src analytics-service` returns exactly one
+   * component hit (this one); every other TS hit is a route, a schema, or a
+   * spec. `grep -rna detected_at src --include="*.tsx"` likewise returns only
+   * this component and its spec — no other surface renders a "detected at"
+   * claim about a key probe. `KeyPermissionBadge` itself has two render sites,
+   * `strategies/[id]/edit/page.tsx:84` and `wizard/steps/SyncPreviewStep.tsx:2546`
+   * (the composite branch deliberately omits it), and both inherit the gate
+   * from the component — there is no second, independently-gated copy.
+   * `WithdrawalWarningStrip.tsx` names Trade/Withdraw but states the POLICY
+   * ("keys with Trade or Withdraw permissions are refused"), never a detected
+   * fact — it is the copy these chips were contradicting, not a second
+   * offender. `finalize-wizard/route.ts:946` reads `probe_error` server-side
+   * and already branches on it (→ KEY_NETWORK_TIMEOUT), so the wizard's error
+   * surface asserts no scope either. Scope ENFORCEMENT is untouched throughout.
    */
   describe("[162-09] a failed probe presents no scope as detected", () => {
     // Non-null scope values, deliberately in the dangerous direction: an
