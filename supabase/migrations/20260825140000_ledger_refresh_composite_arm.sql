@@ -570,11 +570,43 @@ BEGIN
    WHERE conrelid = 'public.compute_jobs'::regclass
      AND conname = 'compute_jobs_kind_target_coherence';
 
+  -- compute_jobs_kind_check is a SINGLE flat `kind = ANY (ARRAY[…])` list with no
+  -- arms and no target columns, so a substring hit there can only have come from
+  -- the one list that admits kinds. A plain position() test is honest for THIS
+  -- constraint — and only for this one; see the next assertion.
   IF v_kind IS NULL OR position('stitch_composite' IN v_kind) = 0 THEN
     RAISE EXCEPTION 'Migration 20260825140000: stitch_composite is not admitted by compute_jobs_kind_check — this arm would enqueue nothing';
   END IF;
-  IF v_coherence IS NULL OR position('stitch_composite' IN v_coherence) = 0 THEN
-    RAISE EXCEPTION 'Migration 20260825140000: stitch_composite is not admitted by compute_jobs_kind_target_coherence — this arm would enqueue nothing';
+
+  -- ⛔ STRUCTURAL, NOT SUBSTRING (161.1 migration review round 4). The previous
+  -- spelling was `position('stitch_composite' IN v_coherence) = 0`, and it
+  -- discriminated only BY ACCIDENT: compute_jobs_kind_target_coherence is a chain
+  -- of OR'd ARMS, and today this kind happens to appear in exactly one of them.
+  -- The moment ANY key- or allocator-scoped arm also names it — a perfectly
+  -- ordinary future change, e.g. a per-key composite stitch — the substring goes
+  -- permanently vacuous, and nothing signals that it has. MEASURED on a throwaway
+  -- PG16: move the kind out of the strategy-scoped arm into a key-scoped one and
+  -- the apply stayed GREEN, while every tick of this function would raise 23514.
+  -- The sibling assertion in 20260825130000 had already crossed that line for
+  -- real, because derive_broker_dailies genuinely sits in two arms.
+  --
+  -- Keyed instead on an ARM that carries BOTH the kind and `strategy_id IS NOT
+  -- NULL` — the property this arm actually depends on (it enqueues p_strategy_id
+  -- ALONE, and D-12 records that strategy-only is the only target shape the
+  -- coherence CHECK admits for this kind).
+  --
+  -- ⚠️ TRADE-OFF, same one taken in 20260825130000: a rolled-back trial INSERT
+  -- would assert behaviour rather than text, and it was REJECTED because
+  -- compute_jobs carries FK/NOT NULL/trigger surface a probe row must also
+  -- satisfy, and this file auto-applies to PROD where an abort lands mid-chain
+  -- with no rollback step. The regex accepts BOTH renderings of a strategy-scoped
+  -- arm — the ANY(ARRAY[…]) list form and a single-kind `kind = 'x'::text` arm —
+  -- so a correct future re-base cannot abort the apply.
+  IF v_coherence IS NULL THEN
+    RAISE EXCEPTION 'Migration 20260825140000: compute_jobs_kind_target_coherence is missing from compute_jobs entirely — the coherence contract this arm enqueues against does not exist';
+  END IF;
+  IF v_coherence !~ '\((?:kind = ''stitch_composite''::text|kind = ANY \(ARRAY\[[^]]*''stitch_composite''::text[^]]*\]\))\)\s*AND\s*\(strategy_id IS NOT NULL\)' THEN
+    RAISE EXCEPTION 'Migration 20260825140000: compute_jobs_kind_target_coherence has no STRATEGY-SCOPED arm admitting stitch_composite (constraintdef=%). The kind appearing anywhere else in the constraint does not help: this function enqueues p_strategy_id ALONE, so every tick would raise 23514 per candidate, the per-row WARNING handler would swallow it, and the fan-out would return 0 — byte-identical to "nothing was stale"', v_coherence;
   END IF;
 
   RAISE NOTICE 'Migration 20260825140000: enqueue_ledger_composite_refresh applied DORMANT (no schedule registered, activation setting fail-closed)';
