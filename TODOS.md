@@ -26,6 +26,56 @@ items were dropped, not carried. Categories: **Fix now** / **Fix mid-term** / **
 
 ## 🔴 FIX NOW — live correctness, trust-boundary security, active go-live
 
+0.01. **📋 PHASE 164.1 SCOPE — single source. Collected 2026-08-25; the phase does NOT exist yet.**
+   Create with `/gsd-phase --insert 164` (decimal phases land AFTER their integer, so 164.1 sits
+   between 164 and 165). Build the CONTEXT from THIS list rather than re-deriving it.
+   ⚠️ Ordering is load-bearing: 164.1 must come AFTER 164, because DEC-1 retires guards over
+   `scenarios`/`scenario_shares` and 164 (SHARE) is the phase that touches them. Retiring first
+   would remove the guard immediately before the work it guards.
+
+   **A. Founder decisions already taken (from 161.1's DEC block):**
+   - **DEC-1** — retire frozen-spine gates 1+2, KEEP gate 3.
+     Acceptance: gate 3 must still FAIL when the `scenarios`/`scenario_shares` RLS honesty tests
+     are edited (neuter → observe RED → restore byte-identically), else retiring 1+2 has silently
+     taken 3 with it.
+   - **DEC-3** — D13 composite twin closes here, BEFORE any composite go-live.
+   - **DEC-4** — the advisory lock, in its own phase, with a REAL concurrency test. It touches two
+     RPCs that run on every job transition for every strategy; a half-applied lock discipline reads
+     as protection while providing none.
+
+   **B. Detection gap found during the 2026-08-25 prod outage:**
+   - **0.04 — PYAPI-06 cannot detect the outage it was built for.** The client omits `X-Service-Key`
+     when its value is falsy; the server treats an absent header as prober noise. The only caller
+     that can legitimately send an absent header is our own service with an empty key — exactly the
+     case discarded. Fix is BOTH halves (loud client-side refusal + a server signal that
+     distinguishes a guarded-route caller from a prober). See 0.04 for the full shape and the
+     explicit warning not to simply dedent the capture out of `if provided:`.
+
+   **C. Phase 161's deferred error-surface items** (`.planning/phases/161-wizerr-honest-error-surfaces/deferred-items.md`):
+   - **D-161-01** — the `first_rule.upper()` CSV code family is invisible to the derived vocabulary
+   - **D-161-02** — `formatColumnInDataframeMessage` matches a shape this producer has never emitted
+   - **D-161-03** — the column-less message still renders "at row 0"
+   - **D-161-05-A** — no manager-facing surface can release an ORPHANED api_key
+     ⚠️ OVERLAPS Phase 162's HONEST-06 / D-162-3 (the use-existing-key server path). Check what 162
+     actually shipped BEFORE planning this, or the two phases will fight over the same file.
+   - **D-161-05-B** — an orphaned MT5 connect waits out the full 120 s validate before refusing
+   - **D-161-07-A** — the wizard COMPOSITE arm still renders the provenance sentence for an EXAMINED
+     verdict (also filed here as 0.07)
+   - **D-161-04 / D-161-07-B** — a contracts-registry full-suite timeout flake and a
+     `vercel-functions` validator false-positive. Tooling, not user-facing; include only if cheap.
+
+   **D. WIZFORM-02 — server-classified codes still render `code: UNKNOWN`. RECORDED OPEN**
+   (Phase 153 span verification FAILED 2026-08-13) and it GATES other work (see the entry near the
+   `GATED ON WIZFORM-02 CLOSING` marker — a new code cannot be minted until the coverage-law
+   population is honest).
+   - ⭐ **FRESH EVIDENCE 2026-08-25, measured on PROD, not inherited:** `/api/keys/validate-and-encrypt`
+     returned `{"error":"Unauthorized","code":"UNKNOWN"}` — a server-classified upstream fault
+     reaching the client with NO code, exactly the defect. This is a live reproduction, so plan
+     against it rather than re-verifying whether the gate is still open.
+
+   **Not in scope:** 0.02 (OKX entity) — founder call, NOT PURSUED.
+
+
 0.02. **⏸️ NOT PURSUED — founder call 2026-08-25: "forget OKX entity".** A different OKX key connected successfully at 21:38:12Z, so the immediate need is met and the entity theory was never confirmed (the founder's OKX domain was never read back). Kept as a RECORD, not a task: the underlying limitation below is real and measured, so if a future user reports a key that cannot connect while another key on the same account can, start here rather than re-deriving it. Do NOT schedule work on it without a fresh confirmation.
    ORIGINAL FILING: **OKX is hardcoded to ccxt's default (global) entity — a key issued on any other OKX
    entity can NEVER connect, and the UI blames the user's credentials.** Surfaced 2026-08-25 when
