@@ -558,6 +558,25 @@ JOB_CHAIN_FOLLOW_ON: Final[dict[str, tuple[str, ...]]] = {
 #     re-deriving the invariant.
 STRATEGY_ANALYTICS_REAP_THRESHOLD: Final[str] = "16 hours"
 
+# Phase 161.1 / D-15: the terminal-SUCCESS statuses of a `strategy_analytics`
+# row — i.e. the states in which a strategy is PUBLISHED and rendering a
+# factsheet, and from which a recurring maintenance refresh may therefore not
+# downgrade it.
+#
+# ⛔ It is a PAIR, and that is measured rather than defensive. The production
+# census of the ledger-backed cohort reads: `complete` 0, `complete_with_warnings`
+# 5. A set written as just {"complete"} would protect exactly NONE of the
+# accounts this guard exists for, while still looking like a guard in review —
+# the same one-value mistake the staleness view's SQL success set fences on
+# (migration 20260825120000, D-04).
+#
+# Single-sourced here so `_stamp_strategy_analytics_failed`'s non-destructive
+# branch and the SQL view cannot drift; plan 05 gate 9 asserts set-equality
+# between this frozenset and the view's status predicate.
+STRATEGY_ANALYTICS_TERMINAL_SUCCESS_STATUSES: Final[frozenset[str]] = frozenset(
+    {"complete", "complete_with_warnings"}
+)
+
 # Fallback derive budget (seconds) used when TIMEOUT_PER_KIND lacks
 # "derive_broker_dailies". Single-sourced so the MTM second pass and the smoothed
 # third pass can never drift; TIMEOUT_PER_KIND stays the real source of truth.
@@ -2583,6 +2602,111 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
             if is_key_mode:
                 return
             scrubbed = str(scrub_freeform_string(message))
+
+            # ---- Phase 161.1 / D-15: a maintenance refresh may NOT un-publish --
+            # The stamp below is an AUTHORITATIVE clear — status 'failed', warned
+            # flag cleared, by-basis metrics NULLed, and (via the heal) both
+            # persisted basis-series rows DELETEd. That is correct for a FIRST
+            # compute that failed: the wizard poller must reach a terminal gate
+            # instead of spinning forever, which is the entire reason this helper
+            # exists (see the P72 comment above).
+            #
+            # It is wrong for the RECURRING ledger refresh. Every live
+            # ledger-backed strategy in production is terminal-SUCCESS — healthy,
+            # published, funded — and the venue gateway is on record wedging into
+            # IPC timeouts three times in one day, while a disabled venue flag
+            # fails the whole cohort at once. So the first refresh tick after
+            # activation, landing on a wedged gateway, would downgrade every one of
+            # those accounts. Founder direction: it may not.
+            #
+            # ⚠️ This RE-ROUTES the failure, it does not hide it. The failure is
+            # still recorded everywhere operators look and nowhere subscribers
+            # look: the `compute_jobs` row still records it honestly (which is what
+            # the fan-out's ATTEMPT-based cooldown reads, so a permanently failing
+            # strategy is still throttled), `computation_error` is still written,
+            # the log line below is emitted, and `ledger_refresh_staleness` keys
+            # freshness on the max date inside `returns_series` — which a FAILED
+            # refresh does not advance — so the strategy keeps surfacing as STALE
+            # rather than looking healthy.
+            #
+            # ⛔ FAIL-SAFE DIRECTION, non-negotiable: anything unrecognised falls
+            # through to the destructive stamp below. No metadata, a non-dict
+            # metadata, a different source, an unreadable status, no prior row, a
+            # prior row that is not terminal-success — all of them take the LOUD
+            # path. Never fail toward suppression: a wrongly-suppressed failure
+            # hangs the wizard poller on an infinite spinner.
+            #
+            # (Read-modify-write preservation on a live row is not a new idea
+            # here — `run_stitch_composite_job`'s `_stamp_failed` already merges
+            # rather than overwrites `data_quality_flags` for exactly this reason.
+            # D-15 extends that reasoning from one column to the publish state.)
+            job_metadata = job.get("metadata") or {}
+            job_source = (
+                job_metadata.get("source") if isinstance(job_metadata, dict) else None
+            )
+            # ⛔ The marker is spelled INLINE, and it is a CONTRACT rather than a
+            # label: the other end is `jsonb_build_object('source', …)` in
+            # supabase/migrations/20260825130000_ledger_refresh_fanout_dormant.sql.
+            # There is no compiler between the two — if they drift, the fan-out
+            # still enqueues and this still compiles, and the only symptom is that
+            # the next failed refresh silently un-publishes a funded account. Plan
+            # 05 gate 8 asserts the two literals are equal.
+            if job_source == "ledger-refresh":
+
+                def _read_existing_status() -> str | None:
+                    res = (
+                        ctx.supabase.table("strategy_analytics")
+                        .select("computation_status")
+                        .eq("strategy_id", strategy_id)
+                        .maybe_single()
+                        .execute()
+                    )
+                    row = getattr(res, "data", None) or {}
+                    value = row.get("computation_status")
+                    return value if isinstance(value, str) else None
+
+                existing_status: str | None
+                try:
+                    existing_status = await db_execute(_read_existing_status)
+                except Exception as _status_exc:  # noqa: BLE001
+                    logger.warning(
+                        "derive_broker_dailies: could not read the existing "
+                        "computation_status for strategy %s (%s) — taking the LOUD "
+                        "terminal-failure path.",
+                        strategy_id, _status_exc,
+                    )
+                    existing_status = None
+
+                if existing_status in STRATEGY_ANALYTICS_TERMINAL_SUCCESS_STATUSES:
+
+                    def _upsert_error_only() -> None:
+                        ctx.supabase.table("strategy_analytics").upsert(
+                            {
+                                "strategy_id": strategy_id,
+                                # JOB-01 still applies: clear the reaper anchor on
+                                # exit. It carries no publish meaning.
+                                "computing_started_at": None,
+                                "computation_error": scrubbed,
+                            },
+                            on_conflict="strategy_id",
+                        ).execute()
+
+                    await db_execute(_upsert_error_only)
+                    # ⛔ And NO _heal_delete_basis_series(). This is the half that
+                    # is easy to miss: that helper DELETEs both the cash_settlement
+                    # and mark_to_market series rows, so leaving it in place would
+                    # strip a live factsheet's series even though the status
+                    # survived.
+                    logger.warning(
+                        "derive_broker_dailies: a MARKED ledger refresh failed for "
+                        "strategy %s; recorded computation_error and left the "
+                        "publish state and both basis series intact (D-15). The "
+                        "failure is still visible in compute_jobs, in "
+                        "computation_error, in this line, and in the staleness view.",
+                        strategy_id,
+                    )
+                    return
+            # ---- end D-15; everything below is BYTE-UNCHANGED -----------------
 
             def _upsert() -> None:
                 ctx.supabase.table("strategy_analytics").upsert(
