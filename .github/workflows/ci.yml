@@ -1627,9 +1627,9 @@ jobs:
           #   test_ledger_refresh_fanout.sql                 10
           #   test_ledger_refresh_staleness.sql               8
           #   test_retention_crons_safe.sql                   4
-          #   test_sync_status_marked_refresh_protected.sql  14
+          #   test_sync_status_marked_refresh_protected.sql  16
           SENTINEL_FLOOR=6   # files declaring a sentinel
-          ARMS_FLOOR=52      # 6 + 10 + 10 + 8 + 4 + 14
+          ARMS_FLOOR=54      # 6 + 10 + 10 + 8 + 4 + 16
           # RAISING these as arms are added is expected and cheap. Lowering either
           # is the entire point: it can no longer be done inside a .sql file where
           # nobody sees it, only by editing this workflow, where it lands in the
