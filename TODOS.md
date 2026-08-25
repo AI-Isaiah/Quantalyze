@@ -3223,6 +3223,25 @@ follows is what was deliberately left, with the reason.
   decision: should the badge hide entirely when nothing is computed, rather than score the
   absence? Founder call, not a defect.
 
+161.1-D8. **⚠️ NOT caused by this phase — found during it. `gdpr-export.test.ts`'s binary-search
+  trimmer test has a 2.6x timeout margin and WILL redden CI on a loaded runner.**
+  - `src/__tests__/gdpr-export.test.ts:257` — "binary-search trimmer packs optimally (I3)".
+    **Measured 2026-08-25:** 1902 ms unloaded on an M-series Mac, against vitest's default
+    5000 ms `testTimeout`. Under four concurrent agents it exceeded 5000 ms and failed in
+    **two consecutive full runs** at a byte-identical tree, then passed in isolation (57/58).
+  - It is CPU-bound (a binary search over payload packing), so it scales with runner speed.
+    GitHub's shared runners are routinely slower than the machine that measured 1902 ms.
+  - **Why this is more than a slow test in this repo:** a red `main` CI makes the Railway
+    analytics deploy **SKIP**. So a load-sensitive timeout is a path from "busy runner" to
+    "production analytics silently not deployed" — the exact class Phase 158 exists to close,
+    reached through test fragility instead of workflow logic.
+  - **Fix shape:** give this test an explicit generous `testTimeout` (it is a correctness
+    assertion about packing optimality, not a performance assertion — the 5 s default is
+    incidental, not intentional), or shrink the fixture so the search is cheap. Do NOT "fix"
+    it by retrying.
+  - Verified NOT related to Phase 161.1: the file and every module it exercises are absent
+    from `git diff --name-only main...HEAD`.
+
 161.1-D4. **Prose/derivation nits, non-blocking.**
   - `analytics-service/tests/test_computing_started_at_stamp.py:649` — census docstring
     self-contradicts: says "the 7 in analytics_runner.py are unchanged in COUNT" and "7 of those 11"
