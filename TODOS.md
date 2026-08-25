@@ -26,6 +26,49 @@ items were dropped, not carried. Categories: **Fix now** / **Fix mid-term** / **
 
 ## 🔴 FIX NOW — live correctness, trust-boundary security, active go-live
 
+0.05. **🚨 LIVE PROD OUTAGE — Vercel's `ANALYTICS_SERVICE_KEY` no longer matches Railway's
+   `SERVICE_KEY`.** Every guarded analytics route returns 401. Found 2026-08-25 by a live prod
+   connect attempt, confirmed at BOTH ends with matching timestamps.
+   - **Evidence (Railway deploy log, prod):** `POST /api/validate-key 401 Unauthorized` at
+     20:52:40, 21:00:11, 21:12:59 (three real founder attempts) and 21:16:29 (a deliberate
+     fake-credential probe). A probe with syntactically-valid FAKE credentials returns the
+     IDENTICAL body to a real key — `{"error":"Unauthorized","code":"UNKNOWN"}`, HTTP 401 — which
+     proves the rejection happens at OUR service boundary and is unrelated to any exchange key.
+   - **Not an auth-session bug.** An empty-body POST to the same route returns
+     `400 KEY_MISSING_REQUIRED_FIELD` with the session cookie present, so `withAuth` passes and the
+     handler is reached. Ruled out in order: role gate, expired session, CSRF (403, zero seen),
+     rate limit (429, zero seen), unset env var (it IS set — 135d old).
+   - **Mechanism.** `src/lib/analytics-client.ts:46` reads `ANALYTICS_SERVICE_KEY`, `:466` attaches
+     it as `X-Service-Key`. `analytics-service/main.py:648` compares against `SERVICE_KEY`; mismatch
+     → 401. `validate-and-encrypt` then FORWARDS the upstream body verbatim (route `:748-762`,
+     F5b/SEAMUX-03), so the operator's 401 is rendered to the user as "Unauthorized".
+   - ⛔ **BLAST RADIUS IS WIDER THAN KEY-CONNECT.** The same log shows
+     `POST /api/match/cron-recompute 401` at 21:00:00 — a SCHEDULED PRODUCTION JOB failing silently
+     on the same cause. Whatever else calls a guarded route is also failing. Audit the full route
+     list before declaring this closed; do not assume key-connect is the only casualty.
+   - **Why nothing caught it:** `SERVICE_KEY` skips `/health`, `/internal/*` and `/process-key`, so
+     compute jobs keep running and `/health` stays green. 4xx, so the 140.2 breaker never trips.
+     `main.py:125-128` predicted this exact blind spot in both directions.
+   - **This is why Phase 160's gate could never close.** The persist arm was never broken in the way
+     we assumed; it cannot reach its validator at all. `api_keys` census has been stuck at 32 since
+     2026-08-23.
+   - **FIX (founder-only, needs a secret — an agent must not do this):** copy Railway's
+     `SERVICE_KEY` value into Vercel `ANALYTICS_SERVICE_KEY` (Production), then REDEPLOY Vercel —
+     env changes do not take effect on the running deployment. Copy Railway → Vercel, NOT the
+     reverse: if Railway's was rotated for cause, writing the old value back re-opens whatever the
+     rotation closed. ⚠️ Check for a trailing newline/space on paste; that alone reproduces this.
+   - **Follow-ups this outage earns (do NOT skip once the key is fixed):**
+     1. A startup or first-401 operator signal that NAMES the env var (never its value — the
+        `main.py` comment is explicit that naming the value turns the signal into the leak it
+        exists to detect). PYAPI-06 designed this; verify it actually fires.
+     2. `analytics-client.ts:466` omits `X-Service-Key` entirely when the value is empty
+        (`...(SERVICE_KEY && {...})`). Silent omission should be a loud startup failure — an unset
+        platform secret must not degrade into an anonymous request.
+     3. A forwarded upstream "Unauthorized" must NOT render as user-facing copy on a credential
+        form. It reads as "your key was rejected" when the truth is "our service auth is broken".
+        Same class as HONEST-01; route it there.
+
+
 0.06. **⚠️ The key-scope panel claims scopes it just said it could not read.** Found in a LIVE prod
    QA pass (2026-08-25) while attempting the Phase-160 persist-arm smoke, not by a reviewer — the
    panel rendered both halves of a contradiction on screen at once.
