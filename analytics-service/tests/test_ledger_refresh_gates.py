@@ -99,6 +99,15 @@ _FANOUT_MIGRATION_NAME: Final[str] = (
 _COMPOSITE_MIGRATION_NAME: Final[str] = (
     "20260825140000_ledger_refresh_composite_arm.sql"
 )
+# Plan 05 / the SQL status bridge. ⛔ THIS FILE IS THE REASON THE OLD NAME GLOB
+# WAS RETIRED (F17): `*ledger_refresh*.sql` matched the other three migrations
+# and MISSED this one, so the only scan standing between a pg_cron registration
+# and PROD auto-apply did not cover the phase's own fourth migration. Same
+# pointer-hygiene rule as the three above: this constant and its migration move
+# together IN THE SAME COMMIT.
+_SYNC_STATUS_MIGRATION_NAME: Final[str] = (
+    "20260825150000_sync_status_protect_marked_refresh.sql"
+)
 
 # ---------------------------------------------------------------------------
 # Search tokens — ASSEMBLED AT RUNTIME, DELIBERATELY
@@ -129,18 +138,77 @@ _COMPOSITE_FUNCTION_NAME: Final[str] = "enqueue_ledger_composite" + "_refresh"
 # kept beside the others because it is the third cross-file literal.
 _ACTIVATION_SETTING: Final[str] = "app.ledger_refresh_enabled"
 
-# The glob that replaces filename enumeration (D-18). A third ledger-refresh
-# migration added by anyone — including this phase's own plan 04 — is picked up
-# automatically. Enumerating the two known filenames would not have been.
-_LEDGER_REFRESH_MIGRATION_GLOB: Final[str] = "*ledger_refresh*.sql"
-# ⛔ RAISED 2 -> 3 by plan 04, IN THE SAME COMMIT as the composite migration it
-# counts. This integer is gate 3a's anti-vacuity floor, and it is the ONLY thing
-# that makes "the composite migration is inside gate 3a's dormancy scan" a
-# measured fact rather than an assumption: leaving it at 2 would have kept 3a
-# green even if the composite migration were renamed out of the glob entirely.
-# Gate 10a asserts the membership directly as well, so the two checks fail for
-# distinguishable reasons.
-_KNOWN_LEDGER_REFRESH_MIGRATIONS: Final[int] = 3
+# ---------------------------------------------------------------------------
+# The dormancy scan's SELECTION — ⛔ NOT BY NAME (F17)
+# ---------------------------------------------------------------------------
+# Until 2026-08-25 gate 3a selected its files with the glob `*ledger_refresh*.sql`
+# and floored the result at the integer 3. MEASURED at that commit: the glob
+# matched 20260825120000, 130000 and 140000 and did NOT match
+# 20260825150000_sync_status_protect_marked_refresh.sql — the phase's own fourth
+# migration, the one carrying the SQL status bridge. The floor of 3 was
+# SATISFIED BY THE THREE THAT HAPPENED TO BE NAMED RIGHT, so a naming convention
+# was doing security work with nothing asserting the convention held, and the
+# fourth file sat outside the only scan standing between a `cron.schedule` and
+# PROD auto-apply.
+#
+# The selection is therefore the migration TIMESTAMP WINDOW, which a descriptive
+# rename cannot move a file out of. The window is CLOSED, not open-ended: this
+# repo has ten-plus migrations that legitimately register pg_cron jobs (retention,
+# the reaper, the reconcile sweep), all of them older than the floor. An
+# open-ended floor would forbid every FUTURE migration from ever scheduling
+# anything, which is a claim this phase has no standing to make and which the
+# next author would simply widen.
+_PHASE_MIGRATION_WINDOW_START: Final[str] = "20260825000000"
+_PHASE_MIGRATION_WINDOW_END: Final[str] = "20260826000000"
+
+# ⛔ THE FLOOR IS A SET, NOT A COUNT. `len(paths) >= 4` is satisfiable by any
+# four files that happen to land in the window; this names the exact migrations
+# that MUST be inside the scan, so the check fails loudly when a pointer goes
+# stale or a file is redated out of the window instead of going quiet.
+_PHASE_MIGRATION_NAMES: Final[frozenset[str]] = frozenset({
+    _STALENESS_VIEW_MIGRATION_NAME,
+    _FANOUT_MIGRATION_NAME,
+    _COMPOSITE_MIGRATION_NAME,
+    _SYNC_STATUS_MIGRATION_NAME,
+})
+
+# ⛔ THE ESCAPE CHECK'S TOKENS. A window is still a selection, so something has
+# to fail when a migration belonging to this surface lands OUTSIDE it (dated
+# 20260826, say). These are content, not filename: any migration naming this
+# phase's enqueue surface must be inside the scanned set or gate 3a says so.
+#
+# ⚠️ These are spelled as plain literals ON PURPOSE, unlike the pg_cron and
+# function-name tokens above. Those are concatenated because they are scanned
+# for repo-wide and would otherwise match THIS file; these are scanned for only
+# under `supabase/migrations/`, which this file is not in, so there is no
+# self-match to exclude and a fake concatenation would only imply one.
+_PHASE_IDENTIFIER_TOKENS: Final[tuple[str, ...]] = (
+    _FANOUT_FUNCTION_NAME,
+    _COMPOSITE_FUNCTION_NAME,
+    _ACTIVATION_SETTING,
+    "ledger_refresh_staleness",
+)
+
+# ⛔ THE NORMALISERS gate 4 / gate 10d reject around the activation read (F16).
+# The activation comparison was asserted with an UNANCHORED
+# `re.search(r"(?:<>|!=|=)\s*'true'")`, which `lower(v_enabled) <> 'true'` and
+# `btrim(v_enabled) <> 'true'` both satisfy — and each of those OPENS the flag on
+# exactly the values the assertion's own message calls forbidden ('TRUE',
+# 'true '). Any of these wrapped around the value being compared, or applied on
+# the read itself, is the drift.
+_ACTIVATION_NORMALISERS: Final[tuple[str, ...]] = (
+    "lower",
+    "upper",
+    "initcap",
+    "btrim",
+    "trim",
+    "ltrim",
+    "rtrim",
+    "normalize",
+    "regexp_replace",
+    "replace",
+    "translate",
+)
 
 # Region floors. Hand-typed, and deliberately well under the measured sizes
 # (4246 / 1105 / 190 / 10500 / 7685 characters at the commit that introduced
@@ -275,6 +343,60 @@ def _fanout_migration_path() -> pathlib.Path:
 
 def _composite_migration_path() -> pathlib.Path:
     return _migrations_dir() / _COMPOSITE_MIGRATION_NAME
+
+
+_MIGRATION_TIMESTAMP_RE: Final[re.Pattern[str]] = re.compile(r"^(\d{14})_")
+
+
+def _phase_migration_paths() -> list[pathlib.Path]:
+    """Every migration inside this phase's timestamp window.
+
+    ⛔ Selection is the 14-digit filename TIMESTAMP, never a descriptive-name
+    glob. See _PHASE_MIGRATION_WINDOW_START for the measurement that retired the
+    glob: it missed this phase's own fourth migration while its count floor
+    stayed green on the three that happened to be named right (F17).
+    """
+    out: list[pathlib.Path] = []
+    for path in sorted(_migrations_dir().glob("*.sql")):
+        stamp = _MIGRATION_TIMESTAMP_RE.match(path.name)
+        if stamp is None:
+            continue
+        if (
+            _PHASE_MIGRATION_WINDOW_START
+            <= stamp.group(1)
+            < _PHASE_MIGRATION_WINDOW_END
+        ):
+            out.append(path)
+    return out
+
+
+_SQL_CONCAT_RE: Final[re.Pattern[str]] = re.compile(
+    r"'((?:[^']|'')*)'\s*\|\|\s*'((?:[^']|'')*)'", re.DOTALL
+)
+
+
+def _fold_sql_string_concatenations(text: str) -> str:
+    """Collapse ``'a' || 'b'`` into ``'ab'``, repeatedly.
+
+    Closes the INDIRECT-SCHEDULE hole gate 3a's literal-token scan would
+    otherwise leave open: `EXECUTE 'cr' || 'on.sch' || 'edule(...)'` contains
+    neither search token as a literal, so scanning the raw text alone proves
+    nothing about a migration that assembles the call. Folding first makes the
+    assembled value visible to the same scan.
+
+    ⚠️ RESIDUAL, RECORDED not closed: a call assembled through a VARIABLE across
+    statements, or read out of a table, is invisible to any static scan of the
+    file. That is bounded by gates 3b / 10c, which require each function name to
+    appear in EXACTLY ONE migration, and ultimately by the runbook rule that
+    activation is a founder LIVE op.
+    """
+    folded = text
+    for _ in range(32):
+        collapsed = _SQL_CONCAT_RE.sub(lambda m: "'" + m.group(1) + m.group(2) + "'", folded)
+        if collapsed == folded:
+            break
+        folded = collapsed
+    return folded
 
 
 def _job_worker_path() -> pathlib.Path:
@@ -992,32 +1114,93 @@ class TestGate3Dormancy:
     (WORKER-03 precedent), because auto-apply plus a silently-skipped worker
     deploy recreates the v1.11 wedge verbatim.
 
-    ⛔ NOT by enumerating the two known filenames. A third ledger-refresh
-    migration — added by this phase's own plan 04, or by anyone — would register
-    a schedule straight past a hard-coded list."""
+    ⛔ NOT by enumerating filenames, and — since F17 — ⛔ NOT by matching them
+    either. Selection is the migration TIMESTAMP WINDOW. The old
+    `*ledger_refresh*.sql` glob missed this phase's own fourth migration while
+    its integer count floor stayed green on the three that happened to be named
+    right; see _PHASE_MIGRATION_WINDOW_START."""
 
-    def test_3a_no_schedule_in_any_ledger_refresh_migration(self) -> None:
-        paths = sorted(_migrations_dir().glob(_LEDGER_REFRESH_MIGRATION_GLOB))
-        # ⛔ COUNT FIRST. An empty or short glob makes the loop below iterate
-        # over nothing, and "no file contained the token" reads exactly like
-        # success. This is the anti-vacuity floor for gate 3a.
-        assert len(paths) >= _KNOWN_LEDGER_REFRESH_MIGRATIONS, (
-            f"the glob {_LEDGER_REFRESH_MIGRATION_GLOB!r} under "
-            f"{_migrations_dir()} matched {len(paths)} file(s), fewer than the "
-            f"{_KNOWN_LEDGER_REFRESH_MIGRATIONS} known to exist "
-            f"({_STALENESS_VIEW_MIGRATION_NAME}, {_FANOUT_MIGRATION_NAME}). The "
-            "scan below would be VACUOUS. Either the migrations were renamed out "
-            "of the glob's reach — in which case widen the glob in the same "
-            "commit — or the scan is broken."
+    def test_3a_no_schedule_in_any_phase_migration(self) -> None:
+        paths = _phase_migration_paths()
+        scanned = {path.name for path in paths}
+
+        # ⛔ FLOOR 1 — MEMBERSHIP, NOT A COUNT. An empty or short selection makes
+        # the loop below iterate over nothing, and "no file contained the token"
+        # reads exactly like success. A count floor is satisfied by ANY files
+        # that land in the window; naming the four that MUST be there is not.
+        missing = sorted(_PHASE_MIGRATION_NAMES - scanned)
+        assert not missing, (
+            f"{missing} are not inside the dormancy scan. The scan selects "
+            f"migrations under {_migrations_dir()} whose 14-digit timestamp is "
+            f"in [{_PHASE_MIGRATION_WINDOW_START}, {_PHASE_MIGRATION_WINDOW_END}) "
+            f"and matched {sorted(scanned)}. Either a pointer constant went "
+            "stale (rename the constant IN THE SAME COMMIT as the file) or a "
+            "migration was redated out of the window — in which case widen the "
+            "window in the same commit. Until then the scan below is VACUOUS "
+            "for those files, and gate 3a is the ONLY thing standing between a "
+            "pg_cron registration and PROD auto-apply."
         )
+
+        # ⛔ FLOOR 2 — THE TOKENS THEMSELVES RESOLVE. Floor 3 below is a
+        # "no offenders" assertion, which a mistyped token list satisfies by
+        # matching nothing at all. Each token must be present in at least one
+        # SCANNED migration before its absence elsewhere means anything.
+        scanned_text = {path.name: path.read_text(encoding="utf-8") for path in paths}
+        unresolved = sorted(
+            token
+            for token in _PHASE_IDENTIFIER_TOKENS
+            if not any(token in body for body in scanned_text.values())
+        )
+        assert not unresolved, (
+            f"{unresolved} appear in NONE of the scanned phase migrations "
+            f"({sorted(scanned)}). These tokens are how floor 3 recognises a "
+            "migration belonging to this enqueue surface; a token that resolves "
+            "nowhere makes floor 3 pass by matching nothing, which is exactly "
+            "the vacuity this file exists to detect. Fix the token, do not "
+            "delete the check."
+        )
+
+        # ⛔ FLOOR 3 — NOTHING BELONGING TO THIS SURFACE ESCAPED THE WINDOW. A
+        # window is still a selection: a migration for this phase dated
+        # 20260826 would sit outside it and be scanned by nothing. This is the
+        # assertion the old glob had no equivalent of, and it is CONTENT-based,
+        # so no naming convention can satisfy it.
+        escaped = sorted(
+            path.name
+            for path in _migrations_dir().glob("*.sql")
+            if path.name not in scanned
+            and any(
+                token in path.read_text(encoding="utf-8")
+                for token in _PHASE_IDENTIFIER_TOKENS
+            )
+        )
+        assert not escaped, (
+            f"{escaped} name this phase's enqueue surface "
+            f"({list(_PHASE_IDENTIFIER_TOKENS)}) but fall OUTSIDE the dormancy "
+            f"window [{_PHASE_MIGRATION_WINDOW_START}, "
+            f"{_PHASE_MIGRATION_WINDOW_END}), so no scan covers them. Migrations "
+            "AUTO-APPLY to PROD on merge to main. Extend the window IN THE SAME "
+            "COMMIT as the migration that needed it."
+        )
+
         offenders: list[str] = []
         for path in paths:
             # RAW text, comments INCLUDED: a commented-out schedule call is one
             # uncomment away from a production schedule, and the runbook's rule
             # is that the statement does not live in a migration at all.
-            raw = path.read_text(encoding="utf-8")
+            raw = scanned_text[path.name]
             if _SCHEDULE_VERB in raw or _UNSCHEDULE_VERB in raw:
                 offenders.append(path.name)
+            elif (
+                _SCHEDULE_VERB in _fold_sql_string_concatenations(raw)
+                or _UNSCHEDULE_VERB in _fold_sql_string_concatenations(raw)
+            ):
+                # An indirect registration: the token is not in the file as a
+                # literal, it is assembled out of `'cr' || 'on.sch' || ...` and
+                # handed to a dynamic EXECUTE. Same effect on PROD, so same
+                # verdict — reported distinguishably so nobody hunts for a
+                # literal that is not there.
+                offenders.append(f"{path.name} (ASSEMBLED by || concatenation)")
         assert not offenders, (
             f"LEDGER-02 DORMANCY VIOLATION: {offenders} contain a pg_cron "
             "registration call. Migrations AUTO-APPLY to PROD on merge to main, "
@@ -1057,6 +1240,118 @@ class TestGate3Dormancy:
 # ---------------------------------------------------------------------------
 # GATE 4 — LEDGER-02 lock B, the fail-closed activation switch
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# The activation assertion — ANCHORED TO THE READ (F16)
+# ---------------------------------------------------------------------------
+# ⛔ DO NOT go back to `re.search(r"(?:<>|!=|=)\s*'true'", code)`. That regex
+# was UNANCHORED to the activation read, so it matched any comparison against the
+# literal 'true' anywhere in the body. MEASURED: both
+# `IF lower(v_enabled) <> 'true'` and `IF btrim(v_enabled) <> 'true'` satisfied
+# it — and each of those OPENS the flag on exactly the values the assertion's own
+# message cites as forbidden ('TRUE' for lower, 'true ' for btrim). The gate
+# could not fail for either defect it named.
+#
+# The assertion below is anchored in four steps, each failing for a
+# distinguishable reason:
+#   1. locate the ONE assignment whose right-hand side reads the setting;
+#   2. that right-hand side must not NORMALISE (a `lower(...)` there would make
+#      the comparison exact and still accept 'TRUE');
+#   3. the comparison must name the assigned variable BARE — no normaliser
+#      wrapped around it — and every literal it is compared against must be
+#      exactly 'true';
+#   4. no boolean cast anywhere in the body.
+_ACTIVATION_READ_RE: Final[re.Pattern[str]] = re.compile(
+    r"([A-Za-z_][A-Za-z_0-9]*)\s*:=\s*([^;]*?current_setting\s*\(\s*'"
+    + re.escape(_ACTIVATION_SETTING)
+    + r"'[^;]*?)\s*;",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def _assert_activation_is_exact_lowercase_true(code: str, *, arm: str) -> None:
+    """Assert ``arm``'s body opens ONLY on the exact lowercase string 'true'."""
+    reads = _ACTIVATION_READ_RE.findall(code)
+    # EXACTLY one, not "at least one": zero means the anchor is broken and every
+    # check below would be skipped, two means one of them could be the live one
+    # while the other is the one this gate inspects.
+    assert len(reads) == 1, (
+        f"expected the {arm} to assign current_setting("
+        f"'{_ACTIVATION_SETTING}', ...) to a variable EXACTLY once; found "
+        f"{len(reads)}: {reads}.\n"
+        "  0 => the anchor is broken (the read was inlined into the IF, or the "
+        "setting was renamed). EVERY check below is then skipped and this gate "
+        "proves nothing — re-anchor it, do not relax it.\n"
+        "  2+ => two reads of the kill switch, and the checks below can pass on "
+        "one while the other is the one that actually gates the fan-out."
+    )
+    variable, read_expression = reads[0]
+
+    # 1. the READ must not normalise. `v := lower(COALESCE(current_setting(...)))`
+    #    leaves the comparison below exact and still opens the flag on 'TRUE'.
+    normalised_read = sorted(
+        name
+        for name in _ACTIVATION_NORMALISERS
+        if re.search(rf"\b{name}\s*\(", read_expression, flags=re.IGNORECASE)
+    )
+    assert not normalised_read, (
+        f"LEDGER-02 LOCK B: the {arm} NORMALISES the activation setting as it "
+        f"reads it ({normalised_read} in {read_expression.strip()!r}). The "
+        "comparison further down would still be exact string equality against "
+        "'true' and the flag would STILL open on 'TRUE' / 'true ' / ' TRUE ', "
+        "which is the whole point of comparing exactly. COALESCE is the only "
+        "wrapper this read is allowed — it supplies the unset default, it does "
+        "not change a value that is set."
+    )
+
+    # 2. the COMPARISON must name the variable BARE.
+    wrapped = sorted(
+        name
+        for name in _ACTIVATION_NORMALISERS
+        if re.search(
+            rf"\b{name}\s*\(\s*{re.escape(variable)}\b", code, flags=re.IGNORECASE
+        )
+    )
+    assert not wrapped, (
+        f"LEDGER-02 LOCK B: the {arm} wraps the activation value in {wrapped} "
+        f"before comparing it. That is still 'exact equality against the "
+        "lowercase string true' as an unanchored regex reads it, and it is "
+        "precisely how the flag comes to open on 'TRUE' (lower/upper/initcap) or "
+        "on 'true ' with a trailing space (btrim/trim/ltrim/rtrim) — the values "
+        f"this gate exists to keep dormant. Compare {variable} bare."
+    )
+
+    # 3. every literal the variable is compared against must be exactly 'true'.
+    compared = re.findall(
+        rf"\b{re.escape(variable)}\s*(?:<>|!=|(?<![:<>!=])=(?!=))\s*'([^']*)'",
+        code,
+    )
+    assert compared, (
+        f"LEDGER-02 LOCK B: the {arm} never compares {variable} directly "
+        "against a string literal. Lock B is the fail-closed switch that makes "
+        "merging the migration behaviour-neutral and the incident-pressure kill "
+        "switch (rollback level 1 in the runbook); a truthiness test, a cast or "
+        "an indirection through another expression is not it."
+    )
+    wrong = sorted({literal for literal in compared if literal != "true"})
+    assert not wrong, (
+        f"LEDGER-02 LOCK B: the {arm} compares {variable} against {wrong}, not "
+        "only against the lowercase 'true'. The flag must open on that one exact "
+        "string and nothing else — '1', 'on', 'TRUE' and 'true ' with a trailing "
+        "space are four ways to activate a cross-tenant PROD fan-out by accident."
+    )
+
+    # 4. and no boolean cast anywhere: `::bool` accepts '1', 'on', 'yes', 't'.
+    casts = sorted(
+        set(re.findall(r"::\s*(bool(?:ean)?)\b", code, flags=re.IGNORECASE))
+    )
+    assert not casts, (
+        f"LEDGER-02 LOCK B: the {arm} casts to {casts}. The activation "
+        "comparison must be exact string equality against 'true' — a boolean "
+        "cast accepts '1', 'on', 'yes' and 't', so the flag would open on values "
+        "nobody intended as activation."
+    )
+
+
 class TestGate4ActivationLock:
     def test_activation_is_exact_lowercase_string_equality(self) -> None:
         code = _strip_sql_comments(function_body())
@@ -1067,22 +1362,7 @@ class TestGate4ActivationLock:
             "behaviour-neutral, and it is also the incident-pressure kill "
             "switch (rollback level 1 in the runbook)."
         )
-        assert re.search(r"(?:<>|!=|=)\s*'true'", code) is not None, (
-            "LEDGER-02 LOCK B: the activation setting is not compared by EXACT "
-            "equality against the lowercase string 'true'. A truthiness test — "
-            "or a cast — would open the flag on '1', on 'on', on 'TRUE' and on "
-            "'true ' with a trailing space, which is four ways to activate a "
-            "cross-tenant PROD fan-out by accident."
-        )
-        casts = sorted(
-            set(re.findall(r"::\s*(bool(?:ean)?)\b", code, flags=re.IGNORECASE))
-        )
-        assert not casts, (
-            f"LEDGER-02 LOCK B: the fan-out body casts to {casts}. The "
-            "activation comparison must be exact string equality against 'true' "
-            "— a boolean cast accepts '1', 'on', 'yes' and 't', so the flag "
-            "would open on values nobody intended as activation."
-        )
+        _assert_activation_is_exact_lowercase_true(code, arm="fan-out body")
 
 
 # ---------------------------------------------------------------------------
@@ -1384,11 +1664,11 @@ class TestGate9SuccessSetDrift:
 # reach it automatically: four of those five read a region extracted from the
 # fan-out migration BY NAME.
 #
-# Gate 3a is the one exception — its glob DOES match this migration — and that
-# is precisely why _KNOWN_LEDGER_REFRESH_MIGRATIONS was raised to 3 in the same
-# commit as the file it counts. Gate 10a re-states the membership directly, so
-# "the composite migration is inside the dormancy scan" fails loudly and for a
-# distinguishable reason rather than by the floor going quiet.
+# Gate 3a is the one exception — its timestamp window DOES cover this migration,
+# and _PHASE_MIGRATION_NAMES names it explicitly, so a redating or a stale
+# pointer fails there loudly. Gate 10a re-states the membership on its own so
+# "the composite migration is inside the dormancy scan" also fails for a reason
+# that names THIS arm rather than the phase set as a whole.
 _COMPOSITE_BURST_CAP_MAX: Final[int] = 2
 
 _COMPOSITE_CAP_DERIVATION: Final[str] = (
@@ -1421,23 +1701,22 @@ class TestGate10CompositeArm:
     composite arm as well."""
 
     def test_10a_composite_migration_is_inside_the_dormancy_scan(self) -> None:
-        """Gate 3a scans by GLOB, never by filename enumeration (D-18), so it
-        picks this migration up for free — but only while the migration's name
-        actually matches the glob. Assert the membership rather than assume it:
-        a rename to something outside `*ledger_refresh*` would silently drop
-        this file out of the ONLY gate standing between a schedule and PROD."""
-        paths = {path.name for path in _migrations_dir().glob(
-            _LEDGER_REFRESH_MIGRATION_GLOB
-        )}
+        """Gate 3a selects by TIMESTAMP WINDOW, never by filename enumeration
+        and — since F17 — never by name matching either, so it picks this
+        migration up for free while the migration's timestamp stays in range.
+        Assert the membership rather than assume it: a redating outside the
+        window would silently drop this file out of the ONLY gate standing
+        between a schedule and PROD."""
+        paths = {path.name for path in _phase_migration_paths()}
         assert _COMPOSITE_MIGRATION_NAME in paths, (
-            f"{_COMPOSITE_MIGRATION_NAME} is not matched by the dormancy glob "
-            f"{_LEDGER_REFRESH_MIGRATION_GLOB!r} (matched: {sorted(paths)}). "
-            "Gate 3a is the scan that keeps a pg_cron registration out of a "
-            "migration, and migrations AUTO-APPLY to PROD on merge to main. A "
-            "composite migration outside that glob could register its own "
-            "schedule and reach production with no deploy step and no founder "
-            "action. Rename it back into the glob, or widen the glob in the same "
-            "commit."
+            f"{_COMPOSITE_MIGRATION_NAME} is outside the dormancy window "
+            f"[{_PHASE_MIGRATION_WINDOW_START}, {_PHASE_MIGRATION_WINDOW_END}) "
+            f"(scanned: {sorted(paths)}). Gate 3a is the scan that keeps a "
+            "pg_cron registration out of a migration, and migrations AUTO-APPLY "
+            "to PROD on merge to main. A composite migration outside that window "
+            "could register its own schedule and reach production with no deploy "
+            "step and no founder action. Redate it back into the window, or "
+            "widen the window in the same commit."
         )
 
     def test_10b_composite_body_declares_no_venue_literal(self) -> None:
@@ -1563,21 +1842,7 @@ class TestGate10CompositeArm:
             "BOTH arms at once (rollback level 1 in the runbook). A composite "
             "arm reading a different setting would survive the kill switch."
         )
-        assert re.search(r"(?:<>|!=|=)\s*'true'", code) is not None, (
-            "LEDGER-02 LOCK B: the composite arm does not compare the activation "
-            "setting by EXACT equality against the lowercase string 'true'. A "
-            "truthiness test — or a cast — would open the flag on '1', on 'on', "
-            "on 'TRUE' and on 'true ' with a trailing space, which is four ways "
-            "to activate a cross-tenant PROD fan-out by accident."
-        )
-        casts = sorted(
-            set(re.findall(r"::\s*(bool(?:ean)?)\b", code, flags=re.IGNORECASE))
-        )
-        assert not casts, (
-            f"LEDGER-02 LOCK B: the composite arm's body casts to {casts}. The "
-            "activation comparison must be exact string equality against 'true' "
-            "— a boolean cast accepts '1', 'on', 'yes' and 't'."
-        )
+        _assert_activation_is_exact_lowercase_true(code, arm="composite arm")
 
     def test_10e_burst_cap_is_bounded(self) -> None:
         """Gate 5's analogue, with the composite arm's OWN derivation.
