@@ -12,6 +12,7 @@
  * run's line beside live ones.
  */
 import { describe, it, expect, vi } from "vitest";
+import { render, screen } from "@testing-library/react";
 
 // page.tsx is an RSC module: `server-only` throws on import outside an RSC
 // render, and the supabase server client must not be constructed for real.
@@ -180,5 +181,115 @@ describe("HONEST-04 — buildEquityCurveSeries", () => {
     // Non-destructive — the server-side source the curves were built from is
     // untouched, so the strip cannot retroactively blank the chart.
     expect(JSON.stringify(input)).toContain("returns_series");
+  });
+});
+
+/**
+ * UI-SPEC C-3 disclosure row. The chart's absence-of-a-line is NOT allowed to
+ * be the only signal — a missing curve that says nothing about itself is the
+ * silent half of the same dishonesty. The caption is the accessible disclosure,
+ * and it is colorless: absence is a neutral fact, not an error and not a
+ * warning (DESIGN.md semantic-color gates).
+ */
+describe("HONEST-04 / C-3 — EquityCurveCoverage caption", () => {
+  const withCurve = (id: string) => ({
+    id,
+    name: id,
+    equityCurve: [{ date: "2026-01-01", value: 1 }],
+  });
+  const withoutCurve = (id: string) => ({ id, name: id, equityCurve: null });
+
+  it("Test 5: m=3 / n=2 renders the exact C-3 copy with the numbers attached", async () => {
+    const { EquityCurveCoverage } = await import(PAGE);
+    render(
+      <EquityCurveCoverage
+        series={[withCurve("a"), withCurve("b"), withoutCurve("c")]}
+      />,
+    );
+    const caption = screen.getByText(
+      "Equity curves shown for 2 of 3 strategies — 1 without computed analytics are omitted.",
+    );
+    expect(caption).toBeTruthy();
+    // Exactly ONE caption — a second disclosure line would be a second claim.
+    expect(
+      screen.getAllByText(/Equity curves shown for/),
+    ).toHaveLength(1);
+  });
+
+  it("Test 6a: n === m renders NO caption (nothing to disclose)", async () => {
+    const { EquityCurveCoverage } = await import(PAGE);
+    const { container } = render(
+      <EquityCurveCoverage series={[withCurve("a"), withCurve("b")]} />,
+    );
+    expect(container.textContent).toBe("");
+  });
+
+  it("Test 6b: n === 0 STILL renders the caption (composite line only)", async () => {
+    const { EquityCurveCoverage } = await import(PAGE);
+    render(
+      <EquityCurveCoverage
+        series={[withoutCurve("a"), withoutCurve("b"), withoutCurve("c")]}
+      />,
+    );
+    expect(
+      screen.getByText(
+        "Equity curves shown for 0 of 3 strategies — 3 without computed analytics are omitted.",
+      ),
+    ).toBeTruthy();
+  });
+
+  it("Test 6c: an EMPTY curve array counts as omitted, not as shown", async () => {
+    const { EquityCurveCoverage } = await import(PAGE);
+    render(
+      <EquityCurveCoverage
+        series={[withCurve("a"), { id: "b", name: "b", equityCurve: [] }]}
+      />,
+    );
+    // The chart skips empty arrays exactly as it skips null, so the count the
+    // caption reports has to agree with what the chart actually drew.
+    expect(
+      screen.getByText(
+        "Equity curves shown for 1 of 2 strategies — 1 without computed analytics are omitted.",
+      ),
+    ).toBeTruthy();
+  });
+
+  it("Test 7: the caption is text-caption text-text-muted and colorless", async () => {
+    const { EquityCurveCoverage } = await import(PAGE);
+    const { container } = render(
+      <EquityCurveCoverage series={[withCurve("a"), withoutCurve("b")]} />,
+    );
+    const p = container.querySelector("p");
+    expect(p).toBeTruthy();
+    const cls = p!.className;
+    expect(cls).toContain("text-caption");
+    expect(cls).toContain("text-text-muted");
+    // No semantic tone may attach to absence.
+    for (const banned of [
+      "text-negative",
+      "text-accent",
+      "text-amber",
+      "text-red",
+      "bg-negative",
+      "text-positive",
+    ]) {
+      expect(cls).not.toContain(banned);
+    }
+  });
+
+  it("Test 7b: the caption counts the SAME array the curve builder produced", async () => {
+    const { buildEquityCurveSeries, EquityCurveCoverage } = await import(PAGE);
+    // One live constituent, one corpse — the caption must report 1 of 2 without
+    // re-deriving the count from the raw rows (one source of truth).
+    const series = buildEquityCurveSeries([
+      row("s1", "Live", liveAnalytics),
+      row("dead", "Dead run", failedButRichAnalytics),
+    ]);
+    render(<EquityCurveCoverage series={series} />);
+    expect(
+      screen.getByText(
+        "Equity curves shown for 1 of 2 strategies — 1 without computed analytics are omitted.",
+      ),
+    ).toBeTruthy();
   });
 });
