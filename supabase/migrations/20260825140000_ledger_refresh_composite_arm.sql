@@ -351,6 +351,19 @@ BEGIN
         -- and a naive `counter := counter + 1` per iteration would report the
         -- number of CALLS. The founder reads this integer back at activation
         -- (docs/runbooks/ledger-refresh-go-live.md), so it must mean what it says.
+        -- REACHABILITY (IN-01, ported from 20260825130000): this pre-count is a
+        -- race-window backstop, NOT the in-flight guard. The guard is the
+        -- in-flight conjunct in the candidate CTE above; this re-reads because the
+        -- advisory lock serialises fan-out TICKS, not the API — an externally
+        -- committed enqueue can land between the CTE's snapshot and this loop's
+        -- fresh READ COMMITTED snapshot. It can therefore only UNDERCOUNT, never
+        -- over-report.
+        --
+        -- ⚠️ NO TEST DRIVES THIS NON-ZERO. A green suite is not evidence it fired.
+        -- The one other path that would — the same strategy iterated twice in one
+        -- tick — is ruled out structurally: strategy_analytics.strategy_id is
+        -- UNIQUE and strategy_analytics_series is PRIMARY KEY (strategy_id, kind),
+        -- so the view emits exactly one row per strategy.
         SELECT count(*) INTO v_existing
           FROM public.compute_jobs
          WHERE strategy_id = v_row.strategy_id
