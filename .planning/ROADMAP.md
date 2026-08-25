@@ -320,7 +320,7 @@ Plans:
 
 - [x] 161.1-01-PLAN.md — LEDGER-03 tracer: staleness view keyed on the returns-series date (not `computed_at`, not `last_sync_at`) + the A7 PROD tracer + the D-COMP founder decision (wave 1)
 - [x] 161.1-02-PLAN.md — LEDGER-01/-02/-04: the dormant, staleness-gated, bounded single-key fan-out on the chain tail + matched-pair SQL gate + venue-drift/no-schedule static gates (wave 2)
-- [ ] 161.1-03-PLAN.md — LEDGER-02: the founder go-live runbook (two ordered LIVE ops, two rollback levels incl. detect/repair/verify remediation for rows a failed tick downgraded) + TODOS filings (wave 3)
+- [x] 161.1-03-PLAN.md — LEDGER-02: the founder go-live runbook (two ordered LIVE ops, two rollback levels incl. detect/repair/verify remediation for rows a failed tick downgraded) + TODOS filings (wave 3)
 - [x] 161.1-05-PLAN.md — LEDGER-02/-04: the static drift / dormancy / bound gates, sliced out of plan 02 (wave 3)
 - [ ] 161.1-04-PLAN.md — LEDGER-01: the composite arm on `stitch_composite` so deribit has real coverage — CONDITIONAL on D-01 (wave 4)
 

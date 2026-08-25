@@ -383,9 +383,77 @@ items were dropped, not carried. Categories: **Fix now** / **Fix mid-term** / **
      shape: MT5 serializes on ONE shared terminal (`services/mt5_concurrency.py`) at a 15-min
      timeout per key. Founder-gated activation (schedule left unregistered, SFOX_ENABLED pattern)
      is the safe landing. NOT yet built.
+   - ⚠️ **PROGRESS 2026-08-25 (Phase 161.1) — built, DORMANT, and this entry stays OPEN.**
+     Shipped: `supabase/migrations/20260825120000_ledger_refresh_staleness_view.sql` (the
+     read-only freshness surface, keyed on the max date inside `returns_series` — a signal no
+     status transition can advance); `supabase/migrations/20260825130000_ledger_refresh_fanout_dormant.sql`
+     (`enqueue_ledger_refresh_for_strategies()`, a staleness-gated, bounded fan-out on the chain
+     TAIL, fail-closed behind the `app.ledger_refresh_enabled` database setting); the D-15
+     non-destructive failure guard in `job_worker.py`; and the founder-gated activation runbook
+     `docs/runbooks/ledger-refresh-go-live.md`.
+     - **The A7 unknown is closed.** The recurring mt5 `derive_broker_dailies` →
+       `strategy_analytics` path had never run end-to-end. Executed on PROD 2026-08-25: PASS —
+       `last_return_date` 2026-08-21 → 2026-08-25 (+4 real bars), status held
+       `complete_with_warnings`, whole chain 44 s.
+     - ⛔ **NOT CLOSED, and not closable by merging.** The mechanism ships DORMANT by design: no
+       schedule is registered anywhere in the repo, and the fan-out returns 0 until a founder
+       executes the runbook's two LIVE ops. **A merged-but-dormant fix is not a fixed defect.**
+       Recording this closed at merge would put a green badge over strategies that are still going
+       stale — which is precisely the failure mode this phase exists to eliminate, committed by
+       the ledger that is supposed to track it. Close it only after the runbook has been executed
+       and the staleness view's stale count is observed to drain.
    - **Adjacent, separate:** the `bybit` key has been failing since 2026-08-14 with
      `retCode 33004 "Your api key has expired."` — last good sync `2026-08-06`. Needs replacing;
      nothing surfaced it.
+
+0.2. **⚠️ SIBLING DEFECT — a ccxt strategy with no new fills also never recomputes.** Raised as
+   OQ-5 by Phase 161.1's research and **deliberately left out of scope** there: different venue
+   class, different mechanism. Filed here so it is not lost in a phase directory.
+   - **Measured at HEAD.** `analytics-service/routers/cron.py:471-472` builds the recompute list as
+     `[sid for sid, stored in per_strategy_stored.items() if stored > 0]`. The recurring recompute
+     is therefore gated on a **positive stored-fill count**, so a strategy that traded nothing on a
+     given day is dropped from the list and is not recomputed at all. A flat trading day produces
+     no recompute — the same "nothing happened, so nothing was refreshed" shape as the ledger
+     defect above, arrived at by a different route.
+   - **Adjacent, same file, same family:** the comment at `:466-469` records that a *failed* enqueue
+     is never re-driven either, because `last_sync_at` has already advanced — so the next tick
+     fetches no new trades and recomputes nothing. Recovery relies on the daily/portfolio cascade
+     or a user-triggered recompute. Another instance of `last_sync_at` advancing while the
+     analytics behind it do not.
+   - **Why it is less visible than the ledger case:** ccxt venues currently sit at 0 days stale
+     (okx, bybit), because those strategies do trade. The gap opens on a quiet strategy, not on a
+     broken one — so it will surface as one stale factsheet, not an outage.
+   - **This is cheap to detect now.** The staleness view Phase 161.1 shipped
+     (`public.ledger_refresh_staleness`) surfaces the ccxt cohort **for free** if the venue filter
+     is dropped from the view's row restriction (`… WHERE sv.exchanges && lv.venues`). The
+     freshness verdict itself is venue-agnostic.
+   - **Fix shape:** a staleness-gated fan-out generalises to this directly — the 161.1 fan-out's
+     predicate is "stale AND live AND not in-flight AND outside the cooldown", none of which is
+     ledger-specific. What changes is the cohort and the enqueued kind.
+   - **Also out of scope, recorded for whoever picks this up:** per the 161.1 PROD census
+     (2026-08-25), **34 of the 37 `failed`-status rows are the CSV cohort**, not the ledger venues
+     and not ccxt. That is a third, separate population needing its own diagnosis — do not fold it
+     into either fix.
+
+0.3. **📋 DISPOSITION (D-COMP / D-01, decided 2026-08-25) — composite ledger strategies, and the
+   coverage gap the decision leaves open until the composite arm lands.**
+   - **Resolved: option (a) — MT5-only composite deferral.** Founder's words were *"on mt5 no
+     composites"*, so the deferral is scoped to MT5 and never to deribit. Option (b) ("exclude all
+     composites") was rejected because deribit's **only** live PROD strategy IS a composite, so (b)
+     would have left the venue the whole ledger pipeline was built for sitting in the refresh set
+     with nothing to refresh.
+   - **How it was implemented, which is not quite how it reads.** The single-key fan-out
+     (`20260825130000`) excludes **all** composites by an explicit `is_composite = FALSE` conjunct —
+     kept and commented deliberately, so a future MT5 composite is *skipped by name* rather than
+     silently mishandled. Deribit's coverage was moved to a **separate composite arm on
+     `stitch_composite`** rather than being carved out inside that one predicate.
+   - ⛔ **The honest consequence, and the reason this entry exists.** Until that composite arm
+     lands, **deribit is in the refresh set with nothing refreshing it** — the single-key fan-out
+     skips its one strategy, and the composite arm is not yet built. A venue-coverage check that
+     asserts set membership passes green over exactly that state. This is the interim shape option
+     (b) was rejected *for*, so it must not be allowed to become permanent by inattention.
+   - **Close condition:** the composite arm exists and a deribit composite is observed to refresh —
+     `last_return_date` advancing in the staleness view, not a job going green.
 
 1. **`RESEND_API_KEY` unset in Vercel prod** — founder-LP report cron + all transactional
    email are dead (code soft-skips, only Sentry fires). **Founder action:** set the key in
