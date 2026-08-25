@@ -1,5 +1,13 @@
 import { afterAll, describe, expect, it } from "vitest";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -158,6 +166,28 @@ function makeGlobMarkerCorpus(): string {
 
 const GLOB_CORPUS_FILE = "supabase/tests/test_glob_marker.sql";
 
+/**
+ * A throwaway one-file corpus. Returned path is the cwd the gate runs in.
+ *
+ * Used by the sentinel-annotation cases below. Their subject is a defect in ONE
+ * file's completion notice, and the real corpus deliberately contains no such
+ * file — so the defect has to be constructed rather than borrowed.
+ */
+function makeSentinelCorpus(basename: string, body: string): string {
+  const dir = mkdtempSync(join(tmpdir(), "antiskip-sent-"));
+  mkdirSync(join(dir, "supabase/tests"), { recursive: true });
+  writeFileSync(join(dir, `supabase/tests/${basename}`), body);
+  return dir;
+}
+
+/** N arms' worth of real, reachable assertion sites. */
+function armBodies(n: number): string {
+  return Array.from(
+    { length: n },
+    (_, i) => `DO $$\nBEGIN\n  IF false THEN RAISE EXCEPTION 'arm ${i + 1} failed'; END IF;\nEND $$;`,
+  ).join("\n");
+}
+
 describe("anti-SKIP CI gate (ci.yml sql-tests) — F10 pin", () => {
   it("passes a run where every file executes and prints its sentinel", () => {
     const { code, out } = runGate();
@@ -270,6 +300,169 @@ describe("anti-SKIP CI gate (ci.yml sql-tests) — F10 pin", () => {
     expect(Number(armsFloor![1])).toBeGreaterThanOrEqual(35);
     expect(SCRIPT).toContain('if [ "$sentinels_declared" -lt "$SENTINEL_FLOOR" ]; then');
     expect(SCRIPT).toContain('if [ "$arms_declared" -lt "$ARMS_FLOOR" ]; then');
+  });
+
+  /**
+   * 161.1-RT E2 — the count↔roster coherence check, and its reach.
+   *
+   * A red team reproduced the floors' arithmetic exactly and then walked past
+   * them three ways without editing ci.yml. The reachable half of that was the
+   * coherence check's COVERAGE: it recognised one annotation shape, `(A-J)`,
+   * which only the three ledger files use, so 26 of 54 arms — including every
+   * arm pinning this phase's headline fix — had no expectation on them but
+   * their own file's editable integer. The gate now accepts an explicit roster
+   * too and REQUIRES one. These cases pin both halves.
+   */
+  it("FAILS a sentinel that declares a count but names no arms (E2: opt-in closed)", () => {
+    // Before this, a file could decline the coherence check simply by not
+    // annotating — the same opt-in defect F12 named one level down. `ALL 16 ARMS
+    // EXECUTED:` in test_sync_status_marked_refresh_protected.sql was exactly
+    // this shape, and it carries the whole of the CR-01 coverage.
+    //
+    // ⚠️ Exit code is NOT the discriminator: a one-file corpus is under both
+    // floors regardless, so the step fails either way. Assert the error.
+    const dir = makeSentinelCorpus(
+      "test_bare_count.sql",
+      `${armBodies(3)}\nDO $$\nBEGIN\n  RAISE NOTICE 'ALL 3 ARMS EXECUTED and passed';\nEND $$;\n`,
+    );
+    try {
+      const { out } = runGate({}, dir);
+      expect(out).toContain("::error file=supabase/tests/test_bare_count.sql::");
+      expect(out).toContain("NAMES NONE OF THEM");
+      // Guard the guard: the arm-count/RAISE-EXCEPTION check must NOT be what
+      // fired, or this case would pass while the annotation rule was gone.
+      expect(out).not.toContain("non-comment RAISE EXCEPTION");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 90_000);
+
+  it("FAILS an explicit roster whose entries do not add up to the declared count (E2)", () => {
+    // The roster form is what let the three unannotated files be covered without
+    // relabelling their arms A..P. It has to be counted, not merely present.
+    const dir = makeSentinelCorpus(
+      "test_short_roster.sql",
+      `${armBodies(4)}\nDO $$\nBEGIN\n  RAISE NOTICE 'ALL 4 ARMS EXECUTED (A, B, C) and passed';\nEND $$;\n`,
+    );
+    try {
+      const { out } = runGate({}, dir);
+      expect(out).toContain("declares 4 arms but names (A, B, C), which is 3");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 90_000);
+
+  it("still FAILS a letter range that contradicts the count (F12 regression)", () => {
+    // The range form predates the roster and must not be swallowed by it: read
+    // as a roster, `(A-H)` is ONE token, so a naive generalisation would report
+    // "which is 1" for every ledger file and redden the real corpus. The range
+    // branch is tried first; this case is what proves it still runs.
+    const dir = makeSentinelCorpus(
+      "test_bad_range.sql",
+      `${armBodies(9)}\nDO $$\nBEGIN\n  RAISE NOTICE 'ALL 9 ARMS EXECUTED (A-H) and passed';\nEND $$;\n`,
+    );
+    try {
+      const { out } = runGate({}, dir);
+      expect(out).toContain("declares 9 arms but names (A-H), which is 8");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 90_000);
+
+  it("FAILS a padding file that declares arms it has no way to fail (E3)", () => {
+    // The red team's cheapest evasion: a new supabase/tests file whose entire
+    // content is one `RAISE NOTICE 'ALL 99 ARMS EXECUTED'` lifts arms_declared
+    // past any floor and retires the ratchet, without touching ci.yml. An arm
+    // that cannot RAISE cannot fail, so declaring more arms than there are
+    // assertion sites is refused. The roster here is COMPLETE (99 entries), so
+    // the annotation rule is satisfied and this case cannot pass by accident on
+    // the wrong error.
+    const roster = Array.from({ length: 99 }, (_, i) => String(i + 1)).join(", ");
+    const dir = makeSentinelCorpus(
+      "test_zz_pad.sql",
+      `DO $$\nBEGIN\n  RAISE NOTICE 'ALL 99 ARMS EXECUTED (${roster})';\nEND $$;\n`,
+    );
+    try {
+      const { out } = runGate({}, dir);
+      expect(out).toContain("declares 99 arms but contains only 0 non-comment RAISE EXCEPTION");
+      // Guard the guard: prove the roster really did satisfy the annotation rule.
+      expect(out).not.toContain("NAMES NONE OF THEM");
+      expect(out).not.toContain("which is");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 90_000);
+
+  it("keeps ci.yml's per-file arm derivation re-derivable from the corpus (E1/E3)", () => {
+    // The floors are two integers, and a comment above them spells out which
+    // files contribute which counts so the next reader can re-derive the total
+    // instead of trusting it. That comment is prose: on 2026-08-25 the recorded
+    // derivation `(9 + 9 + 8 + 9)` matched no real set of files and nobody
+    // noticed, which is the same self-consistent-and-invisible failure the
+    // floors exist to catch, one level up. This test is what stops it recurring
+    // — and it is also the only thing in the repo that notices a NEW
+    // sentinel-bearing file, so a padding file cannot be added without the
+    // derivation and the floors moving in the same diff.
+    //
+    // Rejected in ci.yml as a per-file manifest inside the workflow (too
+    // stale-prone to stay honest in a comment); held HERE instead, where a stale
+    // expectation fails loudly on the next run rather than rotting.
+    const table = [...SCRIPT.matchAll(/^#\s+(test_[A-Za-z0-9_]+\.sql)\s+(\d+)\s*$/gm)].map(
+      (m) => [m[1], Number(m[2])] as const,
+    );
+    expect(table.length, "ci.yml's ARMS_FLOOR derivation table is gone or reformatted").toBeGreaterThan(0);
+
+    const testsDir = join(ROOT, "supabase/tests");
+    const actual = new Map<string, number>();
+    for (const name of readdirSync(testsDir)) {
+      if (!name.startsWith("test_") || !name.endsWith(".sql")) continue;
+      const src = readFileSync(join(testsDir, name), "utf8");
+      const line = src
+        .split("\n")
+        .find((l) => /RAISE NOTICE '[^']*ALL \d+ ARMS EXECUTED/.test(l));
+      if (!line) continue;
+      actual.set(name, Number(/ALL (\d+) ARMS EXECUTED/.exec(line)![1]));
+    }
+
+    expect(
+      [...actual.keys()].sort(),
+      "the set of files declaring an 'ALL N ARMS EXECUTED' sentinel no longer matches ci.yml's " +
+        "derivation table. A file gained or lost its sentinel, was renamed, or a new one appeared " +
+        "(which is how the floors get retired by inflation) — update the table AND the floors.",
+    ).toEqual(table.map(([f]) => f).sort());
+
+    for (const [file, declared] of table) {
+      expect(
+        actual.get(file),
+        `ci.yml's derivation credits ${file} with ${declared} arms; the file declares ` +
+          `${actual.get(file) ?? "none"}. A derivation the next reader cannot re-derive is the ` +
+          `exact defect the floors exist to remove, one level up — update the table AND ARMS_FLOOR.`,
+      ).toBe(declared);
+    }
+
+    const sentinelFloor = Number(/SENTINEL_FLOOR=(\d+)/.exec(SCRIPT)![1]);
+    const armsFloor = Number(/ARMS_FLOOR=(\d+)/.exec(SCRIPT)![1]);
+    expect(sentinelFloor, "SENTINEL_FLOOR disagrees with its own derivation table").toBe(table.length);
+    expect(armsFloor, "ARMS_FLOOR disagrees with the sum of its own derivation table").toBe(
+      table.reduce((n, [, c]) => n + c, 0),
+    );
+  });
+
+  it("does not claim the floors stop a .sql-only edit — that sentence was false", () => {
+    // 161.1-RT. The block used to promise that lowering a floor "can no longer be
+    // done inside a .sql file where nobody sees it". Three evasions needed no
+    // ci.yml edit at all, so the promise was false, and an overstated gate is
+    // worse than a modest one: it is what stops the next person building real
+    // coverage. The corrected claim is narrow — the DECLARED TOTAL cannot be
+    // reduced from inside a .sql file — and the residue is enumerated. This pin
+    // is a string check on purpose: the defect being guarded is a WORDING one,
+    // and nothing else in this file can see it.
+    expect(SCRIPT).not.toContain("it can no longer be done inside a .sql file");
+    expect(SCRIPT).toContain("THE DECLARED TOTAL CANNOT BE REDUCED FROM INSIDE A .sql");
+    expect(SCRIPT).toContain("DECLARED IS NOT EXECUTED");
+    // The run log is the protection on this repo (branch protection is OFF), so
+    // the limit has to be printed, not just committed.
+    expect(SCRIPT).toContain("the arm counts summed above are DECLARED, not executed");
   });
 
   it("still runs psql with -X, like the sibling invocations in the same job", () => {

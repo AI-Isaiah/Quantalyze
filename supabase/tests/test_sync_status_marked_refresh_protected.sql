@@ -114,8 +114,18 @@
 --
 -- The gate stays CONDITIONAL, which is what separates it from a blanket abort:
 -- with the migration applied it falls through and the arms decide the verdict.
--- The final 'ALL 16 ARMS EXECUTED' notice is the sentinel CI's loop reads the
--- arm count off — if you add or remove an arm, update N on that line too.
+-- The final 'ALL 16 ARMS EXECUTED (A, B, C, …, K)' notice is the sentinel CI's
+-- loop reads the arm count off — if you add or remove an arm, update BOTH N and
+-- the roster on that line. The roster is not decoration: `sql-tests` in
+-- .github/workflows/ci.yml counts its entries and fails the job when they
+-- disagree with N, which is what makes deleting an arm cost two edits in the
+-- same string instead of one silent decrement. Until 2026-08-25 this file
+-- carried the count WITHOUT a roster, and that check — which recognised only
+-- the letter-range form the ledger tests use — skipped this file entirely: all
+-- 16 arms, the whole of the CR-01 coverage, had no expectation on them beyond
+-- an integer anyone could edit. The roster is spelled out rather than written
+-- `(A-K)` because the sub-arms H2/I2/I3/I4/J2 are real arms that name WHICH
+-- mechanism they discriminate, so this file's arms are 16 across 11 letters.
 --
 -- Usage:
 --   psql "$TEST_SUPABASE_DB_URL" -v ON_ERROR_STOP=1 -f \
@@ -695,7 +705,7 @@ BEGIN
     RAISE EXCEPTION 'ARM K FAILED: role authenticated can EXECUTE sync_strategy_analytics_status. That is a SECURITY DEFINER writer with no ownership check in its body — any signed-in user could drive ANOTHER tenant''s funded account to ''computing'' or ''failed'' by strategy_id. The REVOKE in migration 20260825150000 is the only thing bounding it.';
   END IF;
 
-  RAISE NOTICE 'ALL 16 ARMS EXECUTED: sync_strategy_analytics_status protects a MARKED ledger refresh (A single-key, B composite, G no branch-(c) fall-through) IDEMPOTENT across a branch-(a) bounce (I, discriminated by I2) with the branch-(a) hold SCOPED to the jobs it is about (I3 releases it for a same-kind unmarked resync and lands that resync on branch (c); I4 refuses to release it for the recurring arm''s own marked retry) and KIND-SCOPED (J2 keeps the chain hop) — and stays LOUD everywhere else (C unmarked, D foreign source, E unpublished row, F unprotected sibling, H/H2 supersession same-kind and cross-kind, J foreign kind) — and is UNREACHABLE by anon/authenticated (K).';
+  RAISE NOTICE 'ALL 16 ARMS EXECUTED (A, B, C, D, E, F, G, H, H2, I, I2, I3, I4, J, J2, K): sync_strategy_analytics_status protects a MARKED ledger refresh (A single-key, B composite, G no branch-(c) fall-through) IDEMPOTENT across a branch-(a) bounce (I, discriminated by I2) with the branch-(a) hold SCOPED to the jobs it is about (I3 releases it for a same-kind unmarked resync and lands that resync on branch (c); I4 refuses to release it for the recurring arm''s own marked retry) and KIND-SCOPED (J2 keeps the chain hop) — and stays LOUD everywhere else (C unmarked, D foreign source, E unpublished row, F unprotected sibling, H/H2 supersession same-kind and cross-kind, J foreign kind) — and is UNREACHABLE by anon/authenticated (K).';
 END $$;
 
 ROLLBACK;

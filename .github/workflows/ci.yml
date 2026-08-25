@@ -1575,18 +1575,65 @@ jobs:
               sentinels_declared=$((sentinels_declared + 1))
               n_arms="$(printf '%s' "$sentinel" | grep -aoE '[0-9]+' | head -1)"
               arms_declared=$((arms_declared + n_arms))
-              # F12 — when the notice ALSO names a letter range, the count and the
-              # range must agree. This is what kills the cheapest neutering: delete
-              # arm I, edit `ALL 9` to `ALL 8`, leave `(A-I)` untouched.
-              rng="$(grep -aoE "ALL [0-9]+ ARMS EXECUTED \(A-[A-Z]\)" "$f" | head -1 || true)"
-              if [ -n "$rng" ]; then
-                last="${rng%)}"
-                last="${last##*-}"
-                expect=$(( $(printf '%d' "'$last") - 64 ))
-                if [ "$n_arms" -ne "$expect" ]; then
-                  echo "::error file=$f::the completion sentinel contradicts itself — it declares ${n_arms} arms but names the range (A-${last}), which is ${expect}. One of the two was edited and the other was not, so an arm was almost certainly removed or renumbered. Make the count and the range agree with the arms the file actually executes."
-                  bad=1
-                fi
+              # F12 — the notice must ALSO name the arms, and the count and the
+              # roster must agree. This is what kills the cheapest neutering:
+              # delete arm I, edit `ALL 9` to `ALL 8`, leave `(A-I)` untouched.
+              #
+              # 161.1-RT E2 — MEASURED 2026-08-25, this check covered 3 of the 6
+              # sentinel-bearing files. It recognised exactly ONE annotation shape,
+              # the letter range `(A-J)`, which only the three ledger files use.
+              # The other three label their arms `1, 2a, 2b, …`, `Test 1…4` and
+              # `A…K plus the sub-arms H2/I2/I3/I4/J2` — so 26 of the 54 arms, every
+              # arm pinning this phase's headline fix among them, carried no
+              # expectation at all beyond their own file's editable integer. Two
+              # changes, both here rather than in the .sql files:
+              #   (a) a comma-separated ROSTER `(A, B, H2, I2, …)` is accepted
+              #       alongside the range, and its token count must equal N. The
+              #       range form is tried FIRST, so `(A-J)` still means ten rather
+              #       than being read as a roster of one. Relabelling those three
+              #       files to A…P so the range form would fit was REJECTED: `H2`,
+              #       `I2`… are deliberate sub-arms naming WHICH mechanism they
+              #       discriminate, and rewriting 700 lines of assertion text to
+              #       satisfy a regex is the tail wagging the dog.
+              #   (b) the annotation is now MANDATORY, not opt-in. Opt-in is the
+              #       exact defect F12 named one level down: a check that exempts
+              #       any file declining it protects only the files that
+              #       volunteer, and a NEW sentinel-bearing file inherits no
+              #       coverage whatsoever. A file that declares N arms must say
+              #       which N.
+              annot="$(grep -aE "RAISE NOTICE '[^']*ALL [0-9]+ ARMS EXECUTED" "$f" | grep -aoE "ALL [0-9]+ ARMS EXECUTED \([^)]*\)" | head -1 || true)"
+              annot="${annot#*(}"
+              annot="${annot%)}"
+              expect=0
+              case "$annot" in
+                "") ;;
+                A-[A-Z]) expect=$(( $(printf '%d' "'${annot#A-}") - 64 )) ;;
+                *) expect="$(printf '%s' "$annot" | tr ',' '\n' | grep -ac '[^[:space:]]' || true)" ;;
+              esac
+              if [ -z "$annot" ]; then
+                echo "::error file=$f::the completion sentinel declares ${n_arms} arms but NAMES NONE OF THEM. A bare count is self-consistent with whatever it is edited to, so on its own it pins nothing inside this file — delete an arm, decrement the number, and the file still agrees with itself. Append the roster to the notice, either as a letter range — 'ALL 8 ARMS EXECUTED (A-H)' — or as an explicit list — 'ALL 6 ARMS EXECUTED (1, 2a, 2b, 3, 4a, 4b)' — so that removing an arm has to be written down twice."
+                bad=1
+              elif [ "$n_arms" -ne "$expect" ]; then
+                echo "::error file=$f::the completion sentinel contradicts itself — it declares ${n_arms} arms but names (${annot}), which is ${expect}. One of the two was edited and the other was not, so an arm was almost certainly removed or renumbered. Make the count and the roster agree with the arms the file actually executes."
+                bad=1
+              fi
+              # 161.1-RT E3 (partial) — an arm that cannot RAISE cannot fail, and a
+              # test that cannot fail is worse than none. So a file may not declare
+              # more arms than it has assertion sites. This is a LOWER BOUND and
+              # nothing more: it does not check that arm k is the one that raises,
+              # and N dead `IF false THEN RAISE EXCEPTION` lines would satisfy it.
+              # What it does close is the cheapest way to retire both floors below
+              # — a padding file whose entire content is one
+              # `RAISE NOTICE 'ALL 99 ARMS EXECUTED (…)'`, which lifts
+              # arms_declared past any floor while asserting nothing. Comment lines
+              # are excluded because these files DISCUSS RAISE EXCEPTION at length
+              # in their headers and prose must never count as coverage. Slack on
+              # the real corpus is wide (tightest is 6 arms / 9 sites), so this
+              # cannot fire on an honest file by accident.
+              raises="$(grep -aF 'RAISE EXCEPTION' "$f" | grep -acvE '^[[:space:]]*--' || true)"
+              if [ "$n_arms" -gt "$raises" ]; then
+                echo "::error file=$f::declares ${n_arms} arms but contains only ${raises} non-comment RAISE EXCEPTION line(s). An arm with no way to raise cannot fail, so it is not an arm — and a file declaring more arms than it can fail inflates the corpus-wide floors below while proving nothing. Either these arms assert through something this check cannot see, in which case say so IN THIS WORKFLOW where it is visible, or the count is fiction."
+                bad=1
               fi
               if grep -aF "$sentinel" "$out" >/dev/null 2>&1; then
                 echo "  ↳ completion sentinel OK: ${sentinel}"
@@ -1630,14 +1677,52 @@ jobs:
           #   test_sync_status_marked_refresh_protected.sql  16
           SENTINEL_FLOOR=6   # files declaring a sentinel
           ARMS_FLOOR=54      # 6 + 10 + 10 + 8 + 4 + 16
-          # RAISING these as arms are added is expected and cheap. Lowering either
-          # is the entire point: it can no longer be done inside a .sql file where
-          # nobody sees it, only by editing this workflow, where it lands in the
-          # diff and has to be argued for. STILL NOT CAUGHT, deliberately: swapping
-          # an arm out of one file and into another leaves both totals intact. A
-          # per-file expected-count manifest would catch that; it was rejected as
-          # too stale-prone to stay honest, and this line is the record of that
-          # choice rather than a claim that the class is closed.
+          # RAISING these as arms are added is expected and cheap — and it is not
+          # optional: src/__tests__/contracts/ci-anti-skip-gate.contract.test.ts
+          # re-derives the table above from the corpus and goes red when a count,
+          # the file list, or either floor drifts from what the files declare.
+          #
+          # WHAT THESE TWO INTEGERS GUARANTEE — stated narrowly, because the
+          # sentence that stood here did not. It said lowering a floor "can no
+          # longer be done inside a .sql file where nobody sees it". That was
+          # FALSE and a red team showed it (2026-08-25): these sums read what each
+          # file DECLARES, never what it EXECUTES, and nothing stopped a new file
+          # from declaring arms it does not have. The true claim is smaller and it
+          # is this — THE DECLARED TOTAL CANNOT BE REDUCED FROM INSIDE A .sql
+          # FILE. Delete an arm, edit that file's own count down to match, and the
+          # sum falls below a number held outside every file it sums, so the
+          # correction has to land in THIS diff. That is the whole of it.
+          #
+          # STILL NOT CAUGHT, deliberately — every item below leaves the totals
+          # intact or RAISES them, so no floor can see any of it:
+          #   (1) SWAPPING an arm out of one file and into another. A per-file
+          #       expected-count manifest in this workflow would catch it; it is
+          #       still rejected HERE as too stale-prone to stay honest in a
+          #       comment. It is instead held as a TEST (the contract file named
+          #       above), where a stale expectation fails loudly on the next run
+          #       instead of rotting silently.
+          #   (2) DECLARED IS NOT EXECUTED — and this gate cannot close it. Gut an
+          #       arm's RAISE EXCEPTION, or invert its condition, and leave the
+          #       count and roster alone: the file still runs to its end, still
+          #       prints its sentinel, and every number here is unchanged. Nothing
+          #       readable from a workflow separates an arm that PASSED from an arm
+          #       that COULD NOT HAVE FAILED; that needs mutation testing against a
+          #       live schema (break the guarded object, require the arm to go
+          #       red), which is a per-arm database round trip this job cannot
+          #       afford and does not attempt. The n_arms <= RAISE-EXCEPTION-sites
+          #       check above is a lower bound on it, not a substitute. This is the
+          #       largest open hole in this block and it is recorded, not closed.
+          #   (3) PADDING, in the residue. A file can still declare arms it does
+          #       not meaningfully run — it now needs a roster with N entries AND N
+          #       non-comment RAISE EXCEPTION lines, so the one-line pad the red
+          #       team used is dead, but N lines of `IF false THEN RAISE EXCEPTION`
+          #       would pass here. Note the DIRECTION, which is what makes this the
+          #       least of the three: padding INFLATES the totals, so it can never
+          #       lower a floor or conceal a deleted arm — it retires the floors'
+          #       FUTURE ratchet value by making them unreachably low. In this repo
+          #       the contract test closes even that, because a padding file
+          #       changes the sentinel-bearing file set and fails the derivation
+          #       check.
           if [ "$sentinels_declared" -lt "$SENTINEL_FLOOR" ]; then
             echo "::error::only ${sentinels_declared} test file(s) declare an 'ALL N ARMS EXECUTED' sentinel, under the recorded floor of ${SENTINEL_FLOOR}. Sentinels are what make a neutered arm visible, so the ones that vanished took their coverage silently with them. Either a file was renamed and its notice lost, or the notices were removed; restore them, or lower SENTINEL_FLOOR in this workflow deliberately."
             bad=1
@@ -1652,7 +1737,7 @@ jobs:
           fi
           echo ""
           echo "All ${#files[@]} SQL self-tests passed — no whole-file skips; ${sentinels_declared} completion sentinel(s) verified, covering ${arms_declared} declared arms."
-          echo "Standing limits of this gate, printed so this log does not overclaim: (1) a skip message composed at RUNTIME on a server whose lc_messages is not C would evade both skip nets — none exists in this corpus today; (2) partial skips reported UNPOLICED above are named, not failed, and the coverage they withhold is NOT verified by anything; (3) branch protection is OFF on this repo, so a failure here does not block a merge — it records what did not happen."
+          echo "Standing limits of this gate, printed so this log does not overclaim: (1) a skip message composed at RUNTIME on a server whose lc_messages is not C would evade both skip nets — none exists in this corpus today; (2) partial skips reported UNPOLICED above are named, not failed, and the coverage they withhold is NOT verified by anything; (3) the arm counts summed above are DECLARED, not executed — an arm gutted in place still runs to the end and still prints its file's sentinel, so every number in this line is blind to it; (4) branch protection is OFF on this repo, so a failure here does not block a merge — it records what did not happen."
       # Best-effort EARLY release of the shared-test-db mutex (Phase 158 /
       # OPS-01), identical in all three DB-touching jobs. Job teardown drops the
       # psql session anyway; killing it here hands the lock to the next waiter a
