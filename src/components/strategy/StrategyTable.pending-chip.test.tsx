@@ -463,7 +463,25 @@ describe("StrategyTable Delta 4 — SC-4a honest pending chip", () => {
 
   it("public invariance: the SAME live-job row renders NO chip under the default recipe", () => {
     // /discovery and /browse pass no visibility prop. A published row awaiting
-    // a recompute must render byte-identically to today — no chip, no marker.
+    // a recompute must not be SHOUTED at on a public surface — no chip, no
+    // marker, nothing red (the 149-UI-SPEC States invariant). That half is
+    // unchanged and is what this case still guards.
+    //
+    // ⚠️ CORRECTED IN STALE-01 (2026-08-25). This case used to ALSO assert
+    // `expect(row.textContent).toMatch(/Synced/)` under the comment "the public
+    // SyncBadge render site stays UNCONDITIONAL". That assertion pinned a
+    // FALSE claim, and it is now inverted below.
+    //
+    // Why it was wrong: "no chip" and "a Synced date" are not the same
+    // invariant. 149 ruled that public surfaces must not display an ERROR
+    // about a manager's strategy; it never licensed displaying a sync
+    // timestamp for a computation that has not synced. The SQL status bridge
+    // re-stamps `computed_at = now()` on the `computing` and `failed` branches
+    // (migration 20260710150000_sync_status_supersede_failed_per_kind.sql:125
+    // / :179), so on this fixture the badge printed "Synced just now" for a run
+    // that had produced nothing at all. Suppressing it removes a false claim;
+    // it adds no UI, so the 149 invariant survives intact — the row simply
+    // says LESS, which is the honest direction.
     render(
       <StrategyTable
         strategies={[jobRunningRow({ status: "published" })]}
@@ -474,8 +492,10 @@ describe("StrategyTable Delta 4 — SC-4a honest pending chip", () => {
     const row = rowFor(NAME_SUBJECT);
     expect(chipIn(row, "Syncing")).toBeNull();
     expect(chipIn(row, "No data")).toBeNull();
-    // ...and the public SyncBadge render site stays UNCONDITIONAL.
-    expect(row.textContent).toMatch(/Synced/);
+    // ...and the row makes NO sync claim it cannot support. Anonymous visitors
+    // are the audience least able to check this, so the honesty rule must
+    // apply to them at least as hard as it does to the owner (:348).
+    expect(row.textContent).not.toMatch(/Synced/);
   });
 });
 

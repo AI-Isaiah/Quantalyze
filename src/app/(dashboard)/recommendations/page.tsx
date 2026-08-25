@@ -9,6 +9,7 @@ import { Disclaimer } from "@/components/ui/Disclaimer";
 import { FreshnessBadge } from "@/components/strategy/FreshnessBadge";
 import { AccreditedInvestorGate } from "@/components/legal/AccreditedInvestorGate";
 import { formatPercent, formatNumber } from "@/lib/utils";
+import { isRankableAnalyticsRow } from "@/lib/closed-sets";
 import { DISCOVERY_CATEGORIES } from "@/lib/constants";
 
 // Mirror /discovery/layout.tsx — the attestation gate must NEVER be cached.
@@ -131,6 +132,58 @@ export default async function RecommendationsPage() {
     analytics_computed_at: string | null;
   }
 
+  const recRows = (recsResult.data ?? []) as RecommendationRow[];
+
+  // STALE-01 — the RPC's `LEFT JOIN strategy_analytics` carries NO status
+  // predicate and its RETURNS TABLE does not project `computation_status`, so
+  // `cagr` / `sharpe` / `max_drawdown` arrive here with no way to tell a
+  // finished run's figures from the ones a `failed` run left behind. These are
+  // OTHER managers' published strategies, ranked and captioned "Strong fit for
+  // your current mandate" — the numbers are the evidence for a recommendation.
+  //
+  // WHY THE GATE IS HERE AND NOT IN THE RPC (deliberate, see the fix's report):
+  // widening the RETURNS TABLE means DROP + CREATE (Postgres refuses to change
+  // a function's return type in place), which on a SECURITY DEFINER function
+  // also drops the ACL state that migration 20260409133655 hardened — and
+  // `supabase/migrations/**` AUTO-APPLIES to production on merge, so a hotfix
+  // branch is the worst place to spend that risk. A `CASE WHEN` inside the
+  // function body would preserve the return shape and is the right DURABLE
+  // home; it belongs in a migration-reviewed PR, not this one. Meanwhile every
+  // gate in this fix reads ONE predicate in ONE language, which is what stops
+  // the cohort gate, the cell gate and this one from drifting apart.
+  //
+  // The read is BOUNDED BY CONSTRUCTION to the ids the RPC itself returned
+  // (never an id from params), mirroring the scenario-share sibling-read
+  // pattern, and projects two columns. `analytics_read` is table-level
+  // (published OR owner), so an allocator can read a published strategy's
+  // status on their own client. Fail-CLOSED: a read error leaves the map empty
+  // and every card degrades to em-dashes rather than showing unverified
+  // figures — the safer direction for a number we cannot vouch for.
+  const computedById = new Map<string, boolean>();
+  if (recRows.length > 0) {
+    const { data: statusRows, error: statusError } = await supabase
+      .from("strategy_analytics")
+      .select("strategy_id, computation_status")
+      .in(
+        "strategy_id",
+        recRows.map((r) => r.strategy_id),
+      );
+    if (statusError) {
+      // error-absent ≠ legit-absent (Rule 12): log the breadcrumb so a
+      // schema/RLS fault is debuggable. The empty map already fails closed.
+      console.error(
+        "[recommendations] analytics status read failed:",
+        statusError.message,
+      );
+    }
+    for (const r of (statusRows ?? []) as Array<{
+      strategy_id: string;
+      computation_status: string | null;
+    }>) {
+      computedById.set(r.strategy_id, isRankableAnalyticsRow(r));
+    }
+  }
+
   const candidates: Array<{
     id: string;
     strategy_id: string;
@@ -147,23 +200,30 @@ export default async function RecommendationsPage() {
       max_drawdown: number | null;
       computed_at: string | null;
     };
-  }> = ((recsResult.data ?? []) as RecommendationRow[]).map((row) => ({
-    id: row.id,
-    strategy_id: row.strategy_id,
-    rank: row.rank,
-    score: row.score,
-    reasons: row.reasons ?? [],
-    strategy: {
-      id: row.strategy_id,
-      name: row.strategy_name,
-      description: row.strategy_description ?? null,
-      category_slug: row.discovery_category_slug ?? null,
-      cagr: row.cagr,
-      sharpe: row.sharpe,
-      max_drawdown: row.max_drawdown,
-      computed_at: row.analytics_computed_at ?? null,
-    },
-  }));
+  }> = recRows.map((row) => {
+    const computed = computedById.get(row.strategy_id) === true;
+    return {
+      id: row.id,
+      strategy_id: row.strategy_id,
+      rank: row.rank,
+      score: row.score,
+      reasons: row.reasons ?? [],
+      strategy: {
+        id: row.strategy_id,
+        name: row.strategy_name,
+        description: row.strategy_description ?? null,
+        category_slug: row.discovery_category_slug ?? null,
+        // Nulled, not hidden: `Metric` already renders the shared formatters'
+        // em-dash. The card keeps its rank, name, category and reasons — the
+        // match SCORE is computed by the batch engine and is not a claim about
+        // a current analytics run, so the recommendation itself stands.
+        cagr: computed ? row.cagr : null,
+        sharpe: computed ? row.sharpe : null,
+        max_drawdown: computed ? row.max_drawdown : null,
+        computed_at: computed ? (row.analytics_computed_at ?? null) : null,
+      },
+    };
+  });
 
   return (
     <>

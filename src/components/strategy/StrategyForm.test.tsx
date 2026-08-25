@@ -39,6 +39,19 @@ vi.mock("next/navigation", () => ({
 let strategiesUpdateResult: { error: { code?: string; message?: string } | null } = {
   error: null,
 };
+// Controls what `.from("strategies").insert(...)` resolves to.
+let strategiesInsertResult: { error: { code?: string; message?: string } | null } = {
+  error: null,
+};
+// KEYLINK-01: the PERSISTED payloads, not merely "was a writer invoked". A spec
+// that asserts only that `update` was called passes with the whole bug present —
+// the pre-fix component called it too, from handleSubmit, with a payload that
+// carried no `api_key_id` at all. The id in the recorded payload is the evidence.
+let strategiesUpdateCalls: {
+  payload: Record<string, unknown>;
+  eq: [string, unknown];
+}[] = [];
+let strategiesInsertArg: Record<string, unknown> | null = null;
 // 160-03: captures the payload passed to `.from("api_keys").insert(...)`.
 // The branch is deliberately KEPT (and deliberately resolves as a SUCCESS) even
 // though no production path should reach it any more: a reintroduced browser
@@ -63,9 +76,16 @@ vi.mock("@/lib/supabase/client", () => ({
       }
       if (table === "strategies") {
         return {
-          update: () => ({
-            eq: () => Promise.resolve(strategiesUpdateResult),
+          update: (payload: Record<string, unknown>) => ({
+            eq: (column: string, value: unknown) => {
+              strategiesUpdateCalls.push({ payload, eq: [column, value] });
+              return Promise.resolve(strategiesUpdateResult);
+            },
           }),
+          insert: (payload: Record<string, unknown>) => {
+            strategiesInsertArg = payload;
+            return Promise.resolve(strategiesInsertResult);
+          },
         };
       }
       if (table === "api_keys") {
@@ -100,6 +120,9 @@ beforeEach(() => {
   routerPushMock.mockClear();
   routerRefreshMock.mockClear();
   strategiesUpdateResult = { error: null };
+  strategiesInsertResult = { error: null };
+  strategiesUpdateCalls = [];
+  strategiesInsertArg = null;
   apiKeysInsertArg = null;
   // jsdom lacks HTMLDialogElement methods the <Modal> uses on mount.
   if (!HTMLDialogElement.prototype.showModal) {
@@ -355,5 +378,179 @@ describe("StrategyForm — 160-03 server-side persist (no client api_keys INSERT
       screen.queryByText("Read-only API key verified and connected."),
     ).not.toBeInTheDocument();
     expect(apiKeysInsertArg).toBeNull();
+  });
+});
+
+/**
+ * KEYLINK-01 — a reported "connected" state MUST correspond to a persisted link.
+ *
+ * The defect: `handleApiKeySubmit` destructured `api_key_id` off the
+ * validate-and-encrypt response, type-checked it, and then DROPPED it. Nothing
+ * in this component ever carried that id to a `strategies` row — the submit
+ * payload had no `api_key_id` key, and both the insert branch and the update
+ * branch wrote that payload verbatim. The UI nevertheless set
+ * `apiConnected = true` and the button read "API Key Connected".
+ *
+ * The consequence is not cosmetic. An `api_keys` row is minted and counted
+ * against the user's key quota, `strategies.api_key_id` stays NULL, so no sync
+ * is ever enqueued and the strategy presents as API-verified while carrying no
+ * data. It also LOOPS: `apiConnected` initialises from `strategy?.api_key_id`,
+ * so while that column was never written, every page reload re-enabled the
+ * button and every retry minted another unreferenced key.
+ *
+ * WHY these specs are shaped this way (Rule 9): the invariant is "the claim
+ * matches the database", so each one asserts the PERSISTED PAYLOAD — the
+ * recorded `api_key_id` — not merely that a writer ran. `update` ran before the
+ * fix too (from handleSubmit, with a payload carrying no `api_key_id`), so a
+ * call-count assertion would pass with the bug fully present. The negative specs
+ * assert the mirror image: when the link cannot be persisted the connected copy
+ * must NOT render, because a silent link failure that flips the UI to
+ * "connected" is the same false-success one layer up.
+ */
+describe("StrategyForm — KEYLINK-01 connected state must match a persisted link", () => {
+  const MINTED_KEY_ID = "bbbbbbbb-2222-4222-8222-bbbbbbbbbbbb";
+
+  // EDIT_STRATEGY carries an api_key_id, which starts the form connected and
+  // disables the button. Exercising the connect flow needs a strategy with none.
+  const EDIT_STRATEGY_NO_KEY = {
+    ...(EDIT_STRATEGY as unknown as Record<string, unknown>),
+    api_key_id: null,
+  } as unknown as Strategy;
+
+  function mockMintedKeyResponse() {
+    return vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          api_key_id: MINTED_KEY_ID,
+          valid: true,
+          read_only: true,
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      ),
+    );
+  }
+
+  function connectAKey() {
+    fireEvent.click(screen.getByRole("button", { name: "Connect API Key" }));
+    fireEvent.change(screen.getByPlaceholderText(/your read-only api key/i), {
+      target: { value: "kkkkkkkk" },
+    });
+    fireEvent.change(screen.getByPlaceholderText(/your api secret/i), {
+      target: { value: "ssssssss" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Connect Key" }));
+  }
+
+  it("edit mode: persists api_key_id onto THIS strategy before reporting it connected", async () => {
+    mockMintedKeyResponse();
+    render(<StrategyForm mode="edit" strategy={EDIT_STRATEGY_NO_KEY} />);
+    connectAKey();
+
+    expect(
+      await screen.findByText("Read-only API key verified and connected."),
+    ).toBeInTheDocument();
+
+    // The load-bearing assertion: the id the server minted reached the database,
+    // aimed at the strategy being edited. Without it the "connected" copy above
+    // is a claim about a row that does not exist.
+    const link = strategiesUpdateCalls.find(
+      (c) => c.payload.api_key_id !== undefined,
+    );
+    expect(link).toBeTruthy();
+    expect(link!.payload.api_key_id).toBe(MINTED_KEY_ID);
+    expect(link!.eq).toEqual(["id", EDIT_STRATEGY_NO_KEY.id]);
+    // The api_keys row is written server-side; this surface composes no insert.
+    expect(apiKeysInsertArg).toBeNull();
+  });
+
+  it("edit mode: a 42501 link denial leaves the key UNCONNECTED and shows the owned-keys copy", async () => {
+    mockMintedKeyResponse();
+    // The cross-tenant api_key_id guard (migration 028/029). Its raw text is the
+    // H-0405 leak, so the redaction has to hold on THIS path too.
+    strategiesUpdateResult = {
+      error: {
+        code: "42501",
+        message:
+          "api_key_id 11111111-1111-1111-1111-111111111111 does not belong to user 22222222-2222-2222-2222-222222222222 (cross-tenant linkage blocked by migration 028/029)",
+      },
+    };
+    render(<StrategyForm mode="edit" strategy={EDIT_STRATEGY_NO_KEY} />);
+    connectAKey();
+
+    expect(
+      await screen.findByText("You can only link API keys you own."),
+    ).toBeInTheDocument();
+    // The whole point: the flag must NOT flip. A denied link rendering as
+    // "connected" is the defect relocated, not fixed.
+    expect(
+      screen.queryByText("Read-only API key verified and connected."),
+    ).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Connect API Key" })).toBeEnabled();
+    // H-0405 still holds on the link path — no UUIDs, no migration name.
+    expect(screen.queryByText(/cross-tenant linkage blocked/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/migration 028/)).not.toBeInTheDocument();
+  });
+
+  it("edit mode: any other link failure reports the key as saved-but-unattached, not as connected", async () => {
+    mockMintedKeyResponse();
+    strategiesUpdateResult = {
+      error: { code: "PGRST301", message: "JWT expired" },
+    };
+    render(<StrategyForm mode="edit" strategy={EDIT_STRATEGY_NO_KEY} />);
+    connectAKey();
+
+    // Distinct from the validation copy on purpose: the credentials were
+    // accepted and the api_keys row EXISTS against the user's quota, so
+    // "check your credentials and retry" would aim the user at the wrong
+    // problem. The three failure modes get three sentences.
+    expect(
+      await screen.findByText(
+        "Your key was saved to your account, but we couldn't attach it to this strategy. Reload the page and try again.",
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText("Read-only API key verified and connected."),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByText("Couldn't save your strategy. Please try again."),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByText("Your key was verified but not saved. Please try again."),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByText(/JWT expired/)).not.toBeInTheDocument();
+  });
+
+  it("create mode: the INSERT that creates the strategy carries the minted api_key_id", async () => {
+    // Create mode has no strategies row at connect time, so the id can only
+    // reach the database on the insert. The branch is unreachable in the app
+    // today (the wizard superseded it) and is pinned anyway — a known-broken
+    // branch left behind is how this class comes back.
+    mockMintedKeyResponse();
+    render(<StrategyForm mode="create" />);
+    connectAKey();
+
+    expect(
+      await screen.findByText("Read-only API key verified and connected."),
+    ).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /create strategy/i }));
+    await waitFor(() => expect(routerPushMock).toHaveBeenCalledWith("/strategies"));
+
+    // The persisted payload, not the fact that insert ran.
+    expect(strategiesInsertArg).not.toBeNull();
+    expect(strategiesInsertArg!.api_key_id).toBe(MINTED_KEY_ID);
+    expect(apiKeysInsertArg).toBeNull();
+  });
+
+  it("edit mode with no key connected this session: the save payload leaves api_key_id alone", async () => {
+    // Guards the other direction. A partial update that ALWAYS wrote
+    // `api_key_id` would rewrite the link on every unrelated field edit — one
+    // more writer for the column, and one more place the two can diverge.
+    render(<StrategyForm mode="edit" strategy={EDIT_STRATEGY} />);
+    fireEvent.click(screen.getByRole("button", { name: /save changes/i }));
+
+    await waitFor(() => expect(routerPushMock).toHaveBeenCalledWith("/strategies"));
+    expect(strategiesUpdateCalls).toHaveLength(1);
+    expect(strategiesUpdateCalls[0].payload).not.toHaveProperty("api_key_id");
   });
 });

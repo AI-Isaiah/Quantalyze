@@ -3,6 +3,7 @@
 import { useState, useMemo } from "react";
 import Link from "next/link";
 import { formatPercent, formatNumber, metricColor, extractAnalytics } from "@/lib/utils";
+import { isRankableAnalyticsRow } from "@/lib/closed-sets";
 import { SyncBadge } from "@/components/strategy/SyncBadge";
 import type { StrategyAnalytics, AttributionRow } from "@/lib/types";
 
@@ -81,8 +82,33 @@ export function StrategyBreakdownTable({ strategies, attribution, portfolioId }:
   const rows: StrategyRow[] = useMemo(() => {
     return strategies.map((ps) => {
       const s = ps.strategies;
-      const analytics = s
+      const rawAnalytics = s
         ? (extractAnalytics(s.strategy_analytics) as StrategyAnalytics | null)
+        : null;
+      // STALE-01 — the constituents of an allocator's portfolio are OTHER
+      // managers' published strategies, so this table is a cross-tenant read of
+      // exactly the rows the prod census found dead: 17 of 18 published
+      // strategies at `computation_status = 'failed'`, still holding cagr /
+      // sharpe / max_drawdown and a non-null `computed_at`.
+      //
+      // `getPortfolioStrategies` has ALWAYS projected `computation_status`
+      // (queries.ts) — this component simply never read it. That is the shape
+      // of the whole defect class: the column is selected and then not filtered.
+      //
+      // Gating here nulls the three metric cells (their `formatPercent` /
+      // `formatNumber` already render the em-dash) AND the per-row `computedAt`,
+      // which is what silences SyncBadge — it early-returns on a falsy
+      // timestamp, so no separate render gate is needed. That badge is the
+      // sharper half: B14 added it so a mixed-freshness portfolio could not
+      // present stale per-strategy metrics as current, but `computed_at` on a
+      // failed row is re-stamped to the FAILURE time by the SQL status bridge,
+      // so it was reading "just synced" at the moment the sync failed.
+      //
+      // Weight and contribution survive: neither comes from the strategy's own
+      // analytics job (weight is the portfolio's, contribution is the persisted
+      // portfolio-level attribution).
+      const analytics = isRankableAnalyticsRow(rawAnalytics)
+        ? rawAnalytics
         : null;
       const attr = attribution?.find((a) => a.strategy_id === ps.strategy_id);
 
