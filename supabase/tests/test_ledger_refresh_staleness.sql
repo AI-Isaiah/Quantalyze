@@ -32,10 +32,43 @@
 -- failure. No psql meta-commands. Under psql -v ON_ERROR_STOP=1 a failed
 -- assertion exits non-zero. The whole test rolls back.
 --
--- ⚠️ The presence gate below RETURNs with a NOTICE when the view is absent, for
--- test-DB lag. A skipped gate is a VACUOUSLY GREEN gate. The final
--- 'ALL 7 ARMS EXECUTED' notice is what distinguishes a real pass from a skip —
--- read it in the run output, do not infer it from the exit code.
+-- ⛔ AN ABSENT VIEW IS A HARD FAILURE, NEVER A SKIP (161.1-REVIEW WR-03)
+-- ----------------------------------------------------------------------
+-- This file used to open with `RAISE NOTICE 'SKIP: …'; RETURN;` when the view was
+-- absent. MEASURED 2026-08-25 against an empty Postgres 16: that path printed the
+-- notice and exited `EXITCODE=0` having executed ZERO of arms A-G. The CI step
+-- (.github/workflows/ci.yml, `sql-tests` → "Run SQL self-tests against test
+-- Supabase project") reads ONLY that exit code, so the skip was byte-identical to
+-- a pass in the only channel anything mechanical looks at — and it was GUARANTEED
+-- to fire on the one run that matters most: the PR that introduces migration
+-- 20260825120000.
+--
+-- Why the skip was removed rather than made louder. MEASURED, not assumed:
+--   * the `sql-tests` job has NO migration-apply step. It checks out, installs
+--     psql, runs the meta-command preflight, takes the shared-test-db mutex, and
+--     `psql -f`s each file. Nothing puts supabase/migrations/** on the TEST
+--     project first.
+--   * .github/workflows/supabase-migrate.yml applies migrations to the PRODUCTION
+--     project only (`vars.SUPABASE_PROJECT_REF`), on push to main. No workflow, npm
+--     script or Makefile target applies them to the TEST project; TODOS.md records
+--     TEST being migrated by hand (Supabase MCP `apply_migration`) instead.
+--   So the old comment's promise — "assertions enforce once the test DB catches
+--   up" — named a mechanism that DOES NOT EXIST. Nothing would ever have armed
+--   this file on its own.
+-- A NOTICE cannot reach CI's only channel; an exception can. The two outcomes are
+-- now distinguishable where they are actually read.
+--
+-- The consequence is deliberate and IS the forcing function: this file is RED
+-- until the phase's migrations are applied to the TEST project. These are
+-- SECURITY DEFINER, cross-tenant objects that auto-apply to PROD on merge, and
+-- arms A-G are their ONLY executed coverage — every other gate in the phase is a
+-- static text scan over the migration source.
+--
+-- ⚠️ STILL NOT MECHANICALLY CLOSED: nothing checks for the final
+-- 'ALL 7 ARMS EXECUTED' notice, so a future edit that neuters an arm in place
+-- stays invisible to CI. The standing fix is 161.1-REVIEW WR-03 option (b) —
+-- capture each file's output in the `sql-tests` step and fail on a printed
+-- 'SKIP:'. That lives in .github/workflows/ci.yml, not here.
 --
 -- Usage:
 --   psql "$TEST_SUPABASE_DB_URL" -v ON_ERROR_STOP=1 -f \
@@ -72,13 +105,13 @@ DECLARE
   v_days         INTEGER;
   v_cnt          INTEGER;
 BEGIN
-  -- ----- presence gate (test-DB lag) -------------------------------------
+  -- ----- applied-ness gate: ABSENCE IS A FAILURE, NOT A SKIP (WR-03) ------
+  -- See the ⛔ block in this file's header for the measurement behind this.
   IF NOT EXISTS (
     SELECT 1 FROM information_schema.views
      WHERE table_schema = 'public' AND table_name = 'ledger_refresh_staleness'
   ) THEN
-    RAISE NOTICE 'SKIP: migration 20260825120000 not yet applied here (ledger_refresh_staleness absent). Assertions enforce once the test DB catches up.';
-    RETURN;
+    RAISE EXCEPTION 'TEST FAILED (0): public.ledger_refresh_staleness does not exist on this database, so NONE of arms A-G ran. This is a FAILURE, not a skip. TWO causes fit and this assertion cannot distinguish them, so check both: (i) the TEST project has not received migration 20260825120000 — apply the phase''s migrations to it and re-run; expect this exactly once, on the PR that introduces them, because NO workflow applies migrations to TEST; (ii) the view was DROPPED or RENAMED after being applied, which is a real regression in the only surface that can observe ledger staleness. ⛔ Do NOT "fix" this by restoring the old RAISE NOTICE/RETURN skip: that made this file exit 0 having asserted nothing, on exactly the run where these SECURITY DEFINER objects first reach PROD.';
   END IF;
 
   -- ----- SEED ------------------------------------------------------------
