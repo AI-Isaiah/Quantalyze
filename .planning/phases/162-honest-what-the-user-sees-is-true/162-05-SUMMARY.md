@@ -23,7 +23,7 @@ tech-stack:
     - "negative SQL assertion paired with a positive control against a function known to match"
 key-files:
   created:
-    - supabase/migrations/20260826120000_create_wizard_strategy_for_key.sql
+    - supabase/migrations/20260826130000_create_wizard_strategy_for_key.sql
     - supabase/tests/test_create_wizard_strategy_for_key.sql
   modified:
     - src/app/api/strategies/create-with-key/route.ts
@@ -59,7 +59,7 @@ whose own copy had to tell the user the remedy was unreachable.
 
 ## What shipped
 
-**`supabase/migrations/20260826120000_create_wizard_strategy_for_key.sql`** — a new
+**`supabase/migrations/20260826130000_create_wizard_strategy_for_key.sql`** — a new
 SECURITY DEFINER writer, `create_wizard_strategy_for_key(p_user_id, p_api_key_id,
 p_placeholder_name, p_wizard_session_id)`:
 
@@ -192,7 +192,7 @@ and nothing applies migrations to TEST so a skip can never re-arm itself.
 candidate causes (TEST has not received the migration / a later migration dropped the
 function), on the F8 template.
 **Consequence, surfaced not hidden:** arm A **will fail once** on the PR that introduces
-this migration, until `20260826120000` is applied to the TEST project. That is the
+this migration, until `20260826130000` is applied to the TEST project. That is the
 documented one-time cost of the HEAD posture.
 **Files:** `supabase/tests/test_create_wizard_strategy_for_key.sql`.
 **Commit:** `e3ca0e163`.
@@ -337,7 +337,7 @@ trust-boundary schema change was introduced.
 
 ## Self-Check: PASSED
 
-- `supabase/migrations/20260826120000_create_wizard_strategy_for_key.sql` — FOUND
+- `supabase/migrations/20260826130000_create_wizard_strategy_for_key.sql` — FOUND
 - `supabase/tests/test_create_wizard_strategy_for_key.sql` — FOUND
 - commit `02107e27b` — FOUND
 - commit `e3ca0e163` — FOUND

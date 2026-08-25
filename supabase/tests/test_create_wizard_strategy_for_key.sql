@@ -1,5 +1,5 @@
 -- Recurring CI regression gate for the Phase 162 / D-162-3 use-existing-key
--- writer (migration 20260826120000_create_wizard_strategy_for_key.sql).
+-- writer (migration 20260826130000_create_wizard_strategy_for_key.sql).
 --
 -- Why this file exists
 -- --------------------
@@ -56,12 +56,12 @@
 -- Recorded as a deviation in 162-05-SUMMARY.md rather than taken silently.
 --
 -- ⚠️ EXPECT ARM A TO FAIL EXACTLY ONCE — on the PR that introduces migration
--- 20260826120000, before that migration has been applied to the TEST project.
+-- 20260826130000, before that migration has been applied to the TEST project.
 -- Apply the phase's migrations to TEST and re-run. That is the same one-time
 -- cost F8 records for its own gate, and it is the price of never being able to
 -- report a green run that asserted nothing.
 --
--- Run order: AFTER 20260826120000 has been applied.
+-- Run order: AFTER 20260826130000 has been applied.
 
 BEGIN;
 
@@ -74,7 +74,7 @@ SELECT set_config('request.jwt.claims', '{"role":"service_role"}', true);
 
 DO $gate$
 DECLARE
-  v_migration  TEXT := '20260826120000';
+  v_migration  TEXT := '20260826130000';
   v_fn         TEXT := 'create_wizard_strategy_for_key';
   v_oid        OID;
   v_twin_oid   OID;
@@ -145,7 +145,7 @@ BEGIN
   -- prose-satisfied anchor ships. This arm is what makes them measurements.
   IF position('CANARY_162_05_PROSE_ONLY' IN v_bare) = 0
      AND position('CANARY_162_05_PROSE_ONLY' IN v_def) = 0 THEN
-    RAISE EXCEPTION 'TEST FAILED (D): the prose-only canary CANARY_162_05_PROSE_ONLY is absent from the RAW definition of public.% too, so this arm cannot tell "the stripper worked" from "there was nothing to strip". Restore the canary comment in the function body (migration 20260826120000, header ⛔ (vii)) — without it, arms E, F and G lose the only evidence that they are reading CODE rather than COMMENTARY.', v_fn;
+    RAISE EXCEPTION 'TEST FAILED (D): the prose-only canary CANARY_162_05_PROSE_ONLY is absent from the RAW definition of public.% too, so this arm cannot tell "the stripper worked" from "there was nothing to strip". Restore the canary comment in the function body (migration 20260826130000, header ⛔ (vii)) — without it, arms E, F and G lose the only evidence that they are reading CODE rather than COMMENTARY.', v_fn;
   END IF;
   IF position('CANARY_162_05_PROSE_ONLY' IN v_bare) > 0 THEN
     RAISE EXCEPTION 'TEST FAILED (D): the comment stripper did not strip — the prose-only canary survived into v_bare. pg_get_functiondef returns comments, and this function''s comments discuss every token arms E-G assert, so those three arms are now satisfiable by COMMENTARY with the code deleted. Fix the regexp_replace above; do NOT weaken E-G to compensate.';
