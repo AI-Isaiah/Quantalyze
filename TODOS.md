@@ -3310,6 +3310,23 @@ follows is what was deliberately left, with the reason.
   - ⚠️ The composite fan-out ships DORMANT, so this is not reachable on production until the
     schedule is registered — but it must be closed BEFORE that founder-gated go-live op, not after.
 
+161.1-D14. **The redact pre-push guard cries wolf on migration timestamps — INVESTIGATED, nothing
+  to fix, do not re-investigate.** `gstack-redact` flags 14-digit migration timestamps as
+  `pii.cc` (Luhn-valid credit-card numbers). Verified 2026-08-25: every flagged token in the SQL
+  function snapshots maps to a real file under `supabase/migrations/`. Zero PII, zero secrets.
+  - Two further findings appear when scanning `git show` output rather than file content: the git
+    `Author:` line and the `Claude-Session:` trailer. Both are commit metadata present in every
+    commit in the repo, not content this or any phase introduced.
+  - **Cannot be suppressed:** `--allowlist` does not suppress Luhn matches (measured: 1 finding
+    with and without), and the managed pre-push wrapper accepts no flags — it reads git ref lines
+    on stdin only.
+  - **Why this matters rather than being a shrug:** the repo is *made of* migration timestamps, so
+    this guard fires on nearly every SQL-touching commit. A guard that is wrong that often gets
+    tuned out, and then misses a real one. That is the same failure mode this phase spent its
+    entire review budget fixing, one tool over.
+  - **Fix shape (upstream, not here):** narrow the `pii.cc` rule so a Luhn match inside a
+    `YYYYMMDDHHMMSS` shape, or adjacent to a `.sql` filename, is not reported.
+
 161.1-D4. **Prose/derivation nits, non-blocking.**
   - `analytics-service/tests/test_computing_started_at_stamp.py:649` — census docstring
     self-contradicts: says "the 7 in analytics_runner.py are unchanged in COUNT" and "7 of those 11"
