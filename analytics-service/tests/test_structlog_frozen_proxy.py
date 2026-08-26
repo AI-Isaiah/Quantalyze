@@ -142,7 +142,14 @@ _ANALYTICS_ROOT: Path = Path(__file__).resolve().parents[1]
 
 # A canary that appears in NO source file, so finding it in a captured stream is
 # an unambiguous leak signal rather than an incidental substring match.
-_LEAK_TOKEN = "QZ-OPS05-CANARY-9f2c4b1e7a3d"
+#
+# ⚠️ DELIBERATELY LOW-ENTROPY, and it must stay that way. This was
+# "QZ-OPS05-CANARY-<12 hex chars>" until 2026-08-26, when CI's gitleaks flagged the
+# hex tail as `generic-api-key` (entropy 4.57) and turned main red. The canary's job
+# is to be UNIQUE, not to look like a credential — the hex bought nothing and cost a
+# red gate. Words instead of hex keep uniqueness and drop the entropy below the rule.
+# Do not "improve" this back into something random-looking.
+_LEAK_TOKEN = "QZ-OPS05-CANARY-NOT-A-REAL-SECRET-VALUE"
 
 # The shape services/logging_config.py's LogRecord factory exists to scrub: an
 # HMAC-bearing ccxt request URL interpolated into a stdlib log call.
