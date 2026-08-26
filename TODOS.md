@@ -589,6 +589,21 @@ items were dropped, not carried. Categories: **Fix now** / **Fix mid-term** / **
    reshapes just-red-teamed money-math or test machinery right before ship.
    **Recorded:** 2026-08-23 (/simplify, phase 159)
 
+0.12. **🎨 FreshnessChip's longest label overflows its masthead column — measured in a real browser.**
+   Found 2026-08-26 during the phase-162 browser pass on localhost/TEST (the first time this phase
+   was rendered outside jsdom). Measured on the factsheet v2 masthead at 1485px viewport:
+   - `COMPUTED · FRESH` → 1 line, 204.2px — fits
+   - `TRACK RECORD · OLD` → 1 line, 204.2px — **fits** (this was the badge fixer's flagged worry; DISPROVED)
+   - `TRACK RECORD · FUTURE — CHECK DATA` → **297.9px in a 204.2px container** — overflows
+   The row is `flex … justify-end`, so it pushes left rather than wrapping.
+   **Reachable:** the `future` tone fires on a future-dated input, and the chip names whichever fact
+   carried the verdict — so a future-dated SERIES END produces exactly this string. That is the case
+   `NEW-C20-07` exists to catch, so it is not hypothetical.
+   **Severity: cosmetic.** The sentence is TRUE; only its width is wrong. Not user-deceiving, so
+   non-blocking per the stopping rule.
+   **Fix candidates:** shorten the future label on the series arm (e.g. `TRACK RECORD · FUTURE`), or
+   let the label row wrap at this breakpoint. Re-measure in a browser — jsdom cannot see this class.
+
 0.11. **📋 Expect FOUR red SQL gates on the phase-162 PR, not two — do not read the extra two as regressions.**
    Recorded 2026-08-26 from the phase-162 code review (IN-01). Nothing applies migrations to the
    TEST project (`supabase-migrate.yml` targets PRODUCTION only, and the `sql-tests` job globs
