@@ -634,11 +634,11 @@ return <FactsheetView payload={{ ...payload, trustTier: null }} recipientShare /
 
 Everything else in this document is [VERIFIED] against files read at HEAD `2625a02d1` this session or [CITED] to the repo's own research/CONTEXT artifacts.
 
-## Open Questions
+## Open Questions — ALL THREE RESOLVED (closed 2026-08-26; resolutions verified in-file by the orchestrator)
 
-1. **410 via redirect hop — acceptable to the founder?** The final status is 410 and the copy is exactly as specified, but the URL bar lands on `/factsheet-share/gone`. Recommendation: accept (content-free, stable, honest); flag in the plan's UAT notes rather than asking pre-emptively.
-2. **Mint state-machine home: direct upsert vs INVOKER RPC.** Both compliant; CONTEXT leaves it to discretion behind the three-reviewer gate. RPC centralizes reactivate semantics + gets a body-shape pin; direct upsert is less DDL. Planner picks ONE and records why.
-3. **Bounded-scan ceiling.** O(active shares) per anonymous request is fine at current scale; the plan should record the revisit threshold (e.g., >1k active shares) and the pre-approved-in-principle O(1) alternative (self-locating token) that would need founder sign-off.
+1. **(RESOLVED — CONTEXT.md `#### 410 delivery`, ruled 2026-08-26 = D-08; UAT-flagged in 164-01 and 164-05 as design, not a bug.)** **410 via redirect hop — acceptable to the founder?** The final status is 410 and the copy is exactly as specified, but the URL bar lands on `/factsheet-share/gone`. Recommendation: accept (content-free, stable, honest); flag in the plan's UAT notes rather than asking pre-emptively.
+2. **(RESOLVED — 164-02-PLAN.md chose the SECURITY INVOKER RPC pair `create_strategy_share` / `revoke_strategy_share`, atomicity rationale recorded at :115 and :121.)** **Mint state-machine home: direct upsert vs INVOKER RPC.** Both compliant; CONTEXT leaves it to discretion behind the three-reviewer gate. RPC centralizes reactivate semantics + gets a body-shape pin; direct upsert is less DDL. Planner picks ONE and records why.
+3. **(RESOLVED — 164-01-PLAN.md :200 and :266 record the 1,000-active-rows revisit threshold per D-07; the O(1) self-locating-token alternative stays founder-gated.)** **Bounded-scan ceiling.** O(active shares) per anonymous request is fine at current scale; the plan should record the revisit threshold (e.g., >1k active shares) and the pre-approved-in-principle O(1) alternative (self-locating token) that would need founder sign-off.
 
 ## Sources
 

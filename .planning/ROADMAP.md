@@ -403,10 +403,17 @@ Plans:
   4. Revoke is immediate and convergent: regeneration kills previously-copied links; a revoked/unknown token renders a content-free `410` + `no-store` on the TOKEN lane only (the bare-id lane keeps its uniform 404 or the id becomes an existence oracle); soft-revoke, never DELETE; double-revoke converges; the owner can see whether a live link exists.
   5. The share affordance is honest as a CLASS: no "Link copied!" for a link that cannot work, ONE predicate across all three affordance sites (`FactsheetView`, strategies page, discovery detail), a token-link RECIPIENT never sees a Copy-Link control that rebuilds the URL without the token, and `OwnerUnpublishedNotice`'s "anyone else sees a 404" sentence is corrected in this same phase.
 
-**Plans**: TBD
+**Plans**: 5 plans
 **UI hint**: yes
 
-**Research note:** the payload-builder seam is the one un-measured integration (extracting the build half of `fetchAndBuildPayload` touches the composite arm AND the single-key basis arm — MEDIUM confidence, wider than it looks). Budget a research pass at plan time; don't discover it. Token-leak channels: Sentry `beforeSend` scrub verified against a REAL captured event, `Referrer-Policy: no-referrer` per-route, generic metadata (link-unfurl dullness accepted explicitly — a private link SHOULD be dull in a chat preview).
+Plans:
+- [ ] 164-01-PLAN.md — TRACER: builder seam extracted to `src/lib/factsheet/` + phase-148 guard re-pointed to pin the MODULE; HMAC+generation token module (loud at module load); `/factsheet-share/[token]` recipient route + 410 `gone` sibling + proxy/route-contract wiring + structural recipient mode (wave 1)
+- [ ] 164-02-PLAN.md — phase-29 guard narrowed to the scenario locked set (never a migration rename) + `strategy_shares` migration (generation model, no token at rest, two INVOKER RPCs) + SKIP-01-clean SQL gate; blocking three-reviewer + TEST hand-apply checkpoint (wave 1)
+- [ ] 164-03-PLAN.md — mint-or-reuse + atomic-revoke API routes under the audit law; byte-identical-reuse regression pin; 404-as-convergence (wave 2)
+- [ ] 164-04-PLAN.md — SHARE-04 honesty class: status-aware Copy Link (published lane byte-unchanged), factsheet revoke with inline confirm, OwnerUnpublishedNotice corrected, ONE predicate across three affordance sites (wave 2)
+- [ ] 164-05-PLAN.md — leak-channel closure (Sentry path scrub net-new, per-route no-referrer, Plausible exclusion, recipient analytics suppression) + the ORDERED adversarial cache test, RED-demonstrated (wave 2)
+
+**Research note:** the payload-builder seam is the one un-measured integration (extracting the build half of `fetchAndBuildPayload` touches the composite arm AND the single-key basis arm — MEDIUM confidence, wider than it looks). Budget a research pass at plan time; don't discover it. Token-leak channels: Sentry `beforeSend` scrub verified against a REAL captured event, `Referrer-Policy: no-referrer` per-route, generic metadata (link-unfurl dullness accepted explicitly — a private link SHOULD be dull in a chat preview). *(Planning update 2026-08-26: the seam measurement is now done — the composite/basis arms moved to `src/lib/factsheet/` in July, so the extraction in 164-01 is a one-function verbatim move per the founder's final D-06 ruling.)*
 
 ### Phase 164.1: HARDEN-GUARDS — retire the frozen-spine gates that no longer bite, close the composite-stamp twin, put the advisory lock behind a real concurrency test, fix the PYAPI-06 blind spot that let a production service-key mismatch run silently, and close phase 161's deferred error-surface items including WIZFORM-02's code:UNKNOWN class, plus the Phase 163 carry-overs — headed by SKIP-01 (nothing applies migrations to TEST, so the OPS-08 SQL gate SKIPs permanently and the deployed body is tested nowhere), then OPS-08's un-written TypeScript retry half, the freshness UTC day-granularity residual, the TEST/PROD function-revision drift, the audit-coverage blind spot, and the tracked-PII decision (INSERTED)
 
@@ -414,6 +421,13 @@ Plans:
 **Requirements**: TBD (original scope) + carry-overs SKIP-01, OPS-08-TS, OPS-08-F2, OPS-08-F9, OPS-08-F8, WR-06-UTC, DRIFT-01, H-0001, PII-01, HONEST-08-RESIDUAL
 **Depends on:** Phase 164
 **Plans:** 0 plans
+
+**Cross-phase note from Phase 164 planning (2026-08-26):** the phase-29 frozen-spine migration
+guard's `FORBIDDEN_MIGRATION_RE` is narrowed IN PHASE 164 (plan 164-02, founder ruling) from the
+two-alternative substring to `/scenario/i` — the guard's own locked set (`scenario_shares`,
+`get_shared_scenario`, `create_scenario_share`) all match it, and the second alternative
+false-positived on `strategy_shares`. When 164.1 retires frozen-spine gates, treat that narrowing
+as the already-done 164 slice — do not edit the same guard a second time with a second rationale.
 
 **Carried in from Phase 163 (routed 2026-08-26).** Each item's full statement, measurement, and
 the reason it was NOT fixed in 163 live in root `TODOS.md` — the single source of truth. Do not
@@ -565,7 +579,7 @@ Plans:
 | 161. WIZERR honest errors | 0/? | Not started | - |
 | 162. HONEST visible truth | 0/? | Not started | - |
 | 163. HARDEN reliability + security | 9/9 | Complete | v0.75.0.0 |
-| 164. SHARE revocable links | 0/? | Not started | - |
+| 164. SHARE revocable links | 0/5 | Planned | - |
 | 165. DEPS dependabot campaign | 0/? | Not started | - |
 
 ### Requirement Coverage (v1.20)

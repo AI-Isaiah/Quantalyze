@@ -206,7 +206,7 @@ re-read at HEAD. **Use these, not the research files' numbers.**
 | Owner-lane direct call | `v2/page.tsx:535-538` | **`v2/page.tsx:563-573`** |
 | `OwnerUnpublishedNotice` | — | **`v2/page.tsx:605`** |
 
-### ⭐ `?share=1` ALREADY EXISTS — and A-D1 relocates it
+### ⭐ `?share=1` ALREADY EXISTS — and A-D1 does NOT relocate it (D-09)
 
 `FactsheetView.tsx:1489` builds the copy URL as `${origin}${pathname}?share=1`, commented
 "Strip every query param except `share=1` so recipients don't inherit the sender's transient
@@ -238,6 +238,29 @@ private capability. Do NOT collapse them into one lane, and do NOT delete the `?
 lacks and branch. Published → today's URL, untouched. Unpublished → mint-or-reuse, then the token
 URL. Recipient-chrome suppression must hold on BOTH lanes: `useShareMode()` continues to serve the
 id route, and the token route implies share mode structurally (there is no query param to read).
+
+### Decision register — D-01..D-09 (added 2026-08-26 by the orchestrator)
+
+The five PLAN.md files cite these rulings **85 times** as `D-01`..`D-09`. Those labels were
+assigned by the planner and were never defined here, so every citation pointed at nothing. The
+rulings themselves all existed — under different names. This table is the anchor; it introduces
+**no new decision**. Cite either form; they are the same ruling.
+
+| Label | Ruling | Defined in this file at |
+|---|---|---|
+| **D-01** | URL shape: separate route `/factsheet-share/<token>` | `#### A-D1` |
+| **D-02** | Token model: HMAC + stored generation counter; `SHARE_TOKEN_SECRET` fails LOUD at module load | `#### Token model` |
+| **D-03** | Revoke lives on the factsheet; `StrategyActions` byte-unchanged | `#### A-D2` |
+| **D-04** | Token scope: HTML factsheet ONLY (no tearsheet/PDF/OG) | `#### A-D3` |
+| **D-05** | Phase-29 guard narrowed to the scenario spine, never a migration rename | `### Blocker 1` |
+| **D-06** | `fetchAndBuildPayload` seam: one-function verbatim move to `src/lib/factsheet/` | `### Blocker 2` |
+| **D-07** | Token lookup: bounded constant-time scan, revisit above 1,000 active rows | `#### Token lookup` |
+| **D-08** | 410 delivery: redirect to a sibling route handler (App Router pages cannot emit 410) | `#### 410 delivery` |
+| **D-09** | Published strategies keep `/factsheet/<id>?share=1` byte-unchanged — the withdrawn "must move" draft is NOT the rule | `### ⭐ ?share=1 ALREADY EXISTS` |
+
+⚠️ **D-09 is the one a reader is most likely to get wrong**, because an earlier draft of this file
+asserted the opposite. The corrected rule is the table under that heading. Two share mechanisms is
+the intended end state.
 
 ### Blocker 1 — the Phase-29 guard WILL redden on this phase's migration
 
