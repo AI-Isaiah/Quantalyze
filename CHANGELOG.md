@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.74.1.1] - 2026-08-26
+
+### chore: wire `/gsd-pr-branch` into the ship flow, with a deletion guard
+
+`.planning/` is tracked here because untracked planning silently breaks parallel executor
+worktrees, so PR diffs carry plan and summary noise into review. GSD's tool for that is
+`/gsd-pr-branch` — and **nothing invokes it automatically**: the autonomous workflow has no
+ship step, and the ship workflow never references it. It runs only when typed, which is why
+this repo has never run it once. It is now a documented step in `CLAUDE.md`.
+
+**The guard shipped alongside it is the load-bearing part.** Upstream's cherry-pick loop
+removes transient planning directories from the index without scoping to the cherry-picked
+commit. Because the PR branch is created *from the base*, the index already holds the base's
+phase artifacts, and that removal stages every one of them for deletion — measured here as
+149 of 149 files on `main`. Merging such a branch would delete them. That is the same defect
+that cost 14 files in v0.74.0.0, so the step now requires proving the PR branch deletes
+nothing the base already has, and records the scoped replacement.
+
 ## [0.74.1.0] - 2026-08-26
 
 ### fix: restore artifacts the v0.74.0.0 merge deleted, and re-bake 5 stale e2e goldens
