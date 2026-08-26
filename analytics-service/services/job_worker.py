@@ -5086,12 +5086,36 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
     if _verdict not in SERIES_COMPLETENESS_VALUES:
         from services.redact import scrub_freeform_string
 
-        # T-142.2-14: the message carries the VERDICT repr and nothing else — no
-        # venue data, no magnitudes, no account identifiers. Scrubbed anyway
-        # because `meta` is producer-supplied and a malformed value could in
-        # principle carry anything; bounded so a pathological value cannot
-        # balloon the stamped error column.
+        # T-142.2-14: the operator string carries the VERDICT repr and nothing
+        # else — no venue data, no magnitudes, no account identifiers. Scrubbed
+        # anyway because `meta` is producer-supplied and a malformed value could
+        # in principle carry anything; bounded so a pathological value cannot
+        # balloon the operator column either.
         _verdict_repr = str(scrub_freeform_string(repr(_verdict)))[:120]
+        # ---- HONEST-01 / D-162-4 (strict): the message/detail SPLIT ---------
+        # WR-01 (162-REVIEW). This site reached `computation_error` through a
+        # different mechanism than the fourteen `message + scrubbed` suffixes the
+        # phase converted — INTERPOLATED internals rather than appended exception
+        # text — and so survived that sweep. Same class, same fix.
+        #
+        # `_message` is the CURATED sentence and the ONLY thing that reaches
+        # `computation_error`, which an account holder reads verbatim on the
+        # portfolio dashboard and in the wizard failure envelope. It is FIXED:
+        # neither the producer's verdict value, nor the internal
+        # `series_completeness` key name, nor the MT5-12 rule number varies it.
+        #
+        # `_detail` keeps every one of those internals and rides the OPERATOR
+        # surfaces only — the log line below, the `detail=` log inside the stamp
+        # choke point, and `DispatchResult.error_message` (→
+        # `compute_jobs.last_error`, admin-only), which is byte-unchanged by this
+        # split. Curating the operator string as well would trade a dishonest
+        # screen for a blind operator — the rejected alternative recorded in
+        # 162-02-DECISION.md and pinned by test_allocator_positions.py part (3).
+        _message = (
+            "This strategy's daily return series could not be confirmed complete, "
+            "so its performance figures were not updated. The issue has been "
+            "reported to us and needs nothing from you."
+        )
         _detail = (
             "Series completeness verdict missing or unrecognised "
             f"(series_completeness={_verdict_repr}). MT5-12: every daily-series "
@@ -5121,7 +5145,9 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
         # is the refusal an MT5 repair most often trips. Before the CR-02 collapse
         # `_stamp_verdict_failed` did not delete the series; restoring that is what
         # keeps the runbook's "a failed repair is not a fresh injury" true.
-        await _stamp_strategy_analytics_failed(_detail, heal_series=False)
+        await _stamp_strategy_analytics_failed(
+            _message, detail=_detail, heal_series=False
+        )
         # PERMANENT: a combiner that does not stamp will not start stamping on
         # retry (T-74-02 DoS — never retry a structural defect forever).
         return DispatchResult(
@@ -7029,11 +7055,28 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
         else DEFAULT_PERIODS_PER_YEAR
     )
     if _venue_blend_periods != periods_per_year:
+        # ---- HONEST-01 / D-162-4 (strict): the message/detail SPLIT ---------
+        # WR-01 (162-REVIEW), the composite sibling of the MT5-12 site. The old
+        # single string interpolated the two annualization clocks and closed with
+        # a remedy addressed to an engineer ("Re-derive asset_class …") — into
+        # `computation_error`, which the account holder reads verbatim. `message`
+        # is now a FIXED sentence; the clocks and the remedy go to `detail=`
+        # (log-only) and to the DispatchResult below, which already carried both
+        # numbers for `compute_jobs.last_error` and is byte-unchanged.
+        #
+        # ⚠️ WORDING: the M-3 source-scan gate in tests/test_stitch_composite_job.py
+        # bans the literal naming the advanced lifecycle state from this whole
+        # function's source, prose included. Say "were not updated" here.
         await _stamp_failed(
-            "Composite asset_class annualization clock "
-            f"({periods_per_year}/yr) disagrees with the venue blend "
-            f"({_venue_blend_periods}/yr); the factsheet and #597 surfaces would "
-            "diverge. Re-derive asset_class (crypto for a crypto-venue composite)."
+            "This composite's performance figures were not updated because its "
+            "annualization calendar disagrees with the venues behind it. The "
+            "issue has been reported to us and needs nothing from you.",
+            detail=(
+                f"Composite asset_class annualization clock ({periods_per_year}/yr) "
+                f"disagrees with the venue blend ({_venue_blend_periods}/yr); the "
+                "factsheet and #597 surfaces would diverge. Re-derive asset_class "
+                "(crypto for a crypto-venue composite)."
+            ),
         )
         return DispatchResult(
             outcome=DispatchOutcome.FAILED,

@@ -1432,6 +1432,101 @@ class TestSeriesCompletenessVerdictSeam:
         assert [o for o in capture["ops"] if o[1] == "csv_daily_returns"] == []
 
     @pytest.mark.asyncio
+    async def test_user_column_carries_no_producer_internals(self) -> None:
+        """WR-01 (162-REVIEW) — HONEST-01's message/detail split at THIS site.
+
+        ``strategy_analytics.computation_error`` renders VERBATIM to the account
+        holder (the portfolio dashboard's StaleWarning and the wizard failure
+        envelope). This refusal used to stamp the developer sentence there: a
+        repr of the producer's ``series_completeness`` value, plus "MT5-12: every
+        daily-series producer must state whether the venue inputs it consumed
+        were whole." — a rule number and a producer contract addressed to an
+        engineer, rendered to a subscriber.
+
+        ⭐ The claim pinned here is NOT "some substring vanished" — a reworded
+        developer sentence would satisfy that and still be developer copy. It is
+        that the user-visible sentence is INVARIANT to the producer's internals
+        while the operator string still VARIES with them: drive the identical
+        refusal twice with two DIFFERENT bogus verdicts and the stamped column
+        must come out byte-identical, while ``DispatchResult.error_message``
+        (→ ``compute_jobs.last_error``, admin-only) must still name the verdict
+        it actually saw, each time.
+
+        Part (3) is the same third part ``test_allocator_positions.py`` holds
+        over ``api_keys.sync_error``: curating the write boundary must not become
+        curating every surface, or a dishonest screen is traded for a blind
+        operator.
+
+        Neuter to redden: restore the pre-fix call — pass ``_detail`` back as the
+        stamp's positional ``message`` argument.
+        """
+
+        async def _refuse_with(verdict: str, sid: str) -> tuple[object, str]:
+            ctx, capture = _build_ctx(
+                key_row={
+                    "id": f"key-{sid}",
+                    "exchange": "binance",
+                    "user_id": "user-1",
+                },
+                strategy_row={"id": sid, "user_id": "user-1"},
+            )
+            job = {"id": "j", "kind": "derive_broker_dailies", "strategy_id": sid}
+            patches = _patches_with_combine(
+                ctx,
+                key_mode=False,
+                combine_mock=self._unverdicted_combine(
+                    {"series_completeness": verdict}
+                ),
+            )
+            with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6]:
+                result = await run_derive_broker_dailies_job(job)
+            sa = [u for u in capture["upserts"] if u[0] == "strategy_analytics"]
+            assert len(sa) == 1, (
+                f"the refusal must stamp exactly one terminal row, or nothing "
+                f"below is reading the user column; got {capture['upserts']!r}"
+            )
+            stamped = sa[0][1]["computation_error"]
+            assert isinstance(stamped, str) and stamped, (
+                "the refusal must still write a user-visible sentence — this "
+                f"test is about WHAT it says, not about softening it: {stamped!r}"
+            )
+            return result, stamped
+
+        result_a, copy_a = await _refuse_with("bogus_verdict_alpha", "strat-wr01a")
+        result_b, copy_b = await _refuse_with("bogus_verdict_beta", "strat-wr01b")
+
+        # (1) The user column does not move when only an internal moves.
+        assert copy_a == copy_b, (
+            "computation_error changed when the ONLY thing that changed was the "
+            "producer's verdict value — a developer-audience internal is being "
+            f"interpolated into the sentence the account holder reads: "
+            f"{copy_a!r} vs {copy_b!r}"
+        )
+
+        # (2) And the internals are absent outright, not merely constant.
+        for token in (
+            "bogus_verdict_alpha",
+            "bogus_verdict_beta",
+            "series_completeness",
+            "MT5-12",
+        ):
+            assert token not in copy_a, (
+                f"{token!r} reached strategy_analytics.computation_error, which "
+                f"the account holder reads verbatim: {copy_a!r}"
+            )
+
+        # (3) The DIAGNOSIS survives on the operator surface, per-verdict.
+        assert result_a.error_message and result_b.error_message  # type: ignore[attr-defined]
+        assert "bogus_verdict_alpha" in result_a.error_message  # type: ignore[attr-defined]
+        assert "bogus_verdict_beta" in result_b.error_message  # type: ignore[attr-defined]
+        for msg in (result_a.error_message, result_b.error_message):  # type: ignore[attr-defined]
+            assert "MT5-12" in msg, (
+                "the MT5-12 diagnosis must survive where an engineer reads it — "
+                f"curating the user column must not blind the operator: {msg!r}"
+            )
+            assert "series_completeness" in msg
+
+    @pytest.mark.asyncio
     async def test_key_mode_refuses_without_stamping_a_phantom_row(self) -> None:
         """The assert covers BOTH branches of the shared seam. Key-mode (allocator)
         owns no per-key strategy_analytics row, so it refuses WITHOUT stamping —
