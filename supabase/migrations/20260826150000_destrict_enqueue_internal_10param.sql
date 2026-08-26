@@ -11,19 +11,43 @@
 -- domain-specific message, and the user-facing request surfaces it as an
 -- opaque 500 on what is an ordinary, retry-safe MVCC outcome.
 --
--- THE FIX IS PARITY, NOT INVENTION. The 7-param overload in the SAME source
--- migration (20260716090000:139-176) was fixed this way already (mig 109 P3):
--- a PLAIN re-read, then an explicit `IF v_new_id IS NULL THEN RAISE ... USING
--- ERRCODE = 'serialization_failure'` — the canonical Postgres class for "MVCC
--- race, retry safe", which the app layer can retry instead of 500-ing. This
--- migration replicates exactly that across the 10-param overload's FOUR
--- lost-race arms (strategy / portfolio / allocator / api_key). Measured
--- pre-edit: 4 strict re-reads in the 10-param body, 0 in the 7-param body.
+-- THE FIX FOLLOWS THE 7-PARAM'S LOST-RACE PATH, AND ONLY THAT PATH. The
+-- 7-param overload in the SAME source migration (20260716090000:139-176) was
+-- fixed this way already (mig 109 P3): a PLAIN re-read, then an explicit
+-- `IF v_new_id IS NULL THEN RAISE ... USING ERRCODE = 'serialization_failure'`
+-- — the canonical Postgres class for "MVCC race, retry safe". This migration
+-- replicates that lost-race handling across the 10-param overload's FOUR arms
+-- (strategy / portfolio / allocator / api_key). Measured pre-edit: 4 strict
+-- re-reads in the 10-param body, 0 in the 7-param body.
+--
+-- ⚠️ READ "PARITY" NARROWLY — IT IS THE LOST-RACE PATH, NOT THE TWO BODIES.
+-- They are NOT interchangeable, and a future editor re-basing on the belief
+-- that they are will get it wrong: the 7-param computes `v_initial_status`
+-- ('done_pending_children' when p_parent_job_ids is non-empty) and INSERTs it
+-- explicitly, while the 10-param omits `status` from its INSERT and takes the
+-- column default. That divergence predates this migration, is not introduced
+-- or corrected here, and is deliberately left alone — it is a behavioural
+-- difference in the INSERT, outside OPS-08's scope.
+--
+-- ⛔ WHAT THIS DOES NOT BUY, SAID BEFORE ANYONE RELIES ON IT. It buys a
+-- CORRECT, DISAMBIGUATED SQLSTATE (40001) in the server log and in the error
+-- the caller receives, in place of a bare P0002 that is indistinguishable from
+-- any other empty strict SELECT. That is a PREREQUISITE for retrying a lost
+-- race; it is NOT a retry, and nothing in this repo retries yet. MEASURED AT
+-- HEAD 2026-08-26: `grep -rn "serialization_failure|40001" src/` returns ZERO
+-- non-test hits, and src/app/api/allocator/holdings/sync/route.ts:73-87 still
+-- answers a blanket 500 for every SQLSTATE except 42501. So until a caller
+-- branches on 40001 the USER-VISIBLE outcome of a lost race is UNCHANGED by
+-- this migration — only the operator's diagnosis improves. The TS half is
+-- recorded as owed work in TODOS.md and is out of this migration's scope.
 --
 -- BEHAVIOUR DELTA, stated narrowly. The ONLY paths whose behaviour changes are
 -- the four lost-race re-reads, and only when they find NO row:
 --   before → P0002 NO_DATA_FOUND, no message, opaque 500.
---   after  → 40001 serialization_failure with the four target ids + kind named.
+--   after  → 40001 serialization_failure, short message, no ids. The SQLSTATE
+--             is the signal; see the ⛔ note on the RAISE itself for why the
+--             message deliberately carries neither the function name nor the
+--             id tuple (that text reaches a USER-VISIBLE column).
 -- A re-read that FINDS a row is byte-identical (the strict form's multi-row
 -- arm was already unreachable: every arm carries `LIMIT 1`, so TOO_MANY_ROWS
 -- could never fire, and the strict form's only live effect was the empty-set
@@ -48,12 +72,13 @@
 -- p_kind NULL guard, the Phase 106 retired-kind reject, the optimistic
 -- per-target look-up, and the race-safe INSERT — with exactly TWO changes,
 -- both confined to the lost-race section:
---   (1) the four `SELECT id INTO STRICT` re-reads become plain `SELECT id INTO`
+--   (1) the four strict-form re-reads become plain `SELECT id INTO`
 --       (same query, same LIMIT 1, same status filter);
 --   (2) a single `IF v_new_id IS NULL THEN RAISE ... serialization_failure`
---       follows the IF-chain, copied in structure from the 7-param's
---       20260716090000:163-172. The message names all FOUR targets because
---       this overload has four arms (the 7-param names two).
+--       follows the IF-chain, copied in STRUCTURE from the 7-param's
+--       20260716090000:163-172 but NOT in message text: this one names no
+--       function and no ids, because a message raised here is rendered to the
+--       strategy's owner (see the ⛔ note on the RAISE).
 -- SECURITY DEFINER and `SET search_path = public, pg_catalog` are preserved
 -- exactly. The Phase 106 retired-kind reject is preserved exactly — the
 -- self-verifying DO block below asserts it on BOTH overloads and the deploy
@@ -80,10 +105,14 @@
 -- no '||' concatenation inside a RAISE format slot).
 --
 -- Gate: supabase/tests/test_enqueue_internal_destrict.sql asserts the DEPLOYED
--- body via pg_get_functiondef. It is EXPECTED RED in CI until this migration is
--- hand-applied to the TEST project — nothing applies migrations to TEST
--- automatically (supabase-migrate.yml targets PRODUCTION only). That RED→GREEN
--- flip is the gate's anti-vacuity demonstration; see the test file's header.
+-- body via pg_get_functiondef. Nothing applies migrations to the TEST project
+-- automatically (supabase-migrate.yml targets PRODUCTION only), so that gate is
+-- written to be MEANINGFUL IN BOTH STATES rather than knowingly red in one: it
+-- asserts a both-or-neither coherence property that holds on the pre-fix
+-- definition and on this one, and RAISEs on any mixture. See its header for
+-- why a knowingly-RED file was the wrong shape — it sorts 30th of ~70 in the
+-- sql-tests glob and the runner exits on first failure, so leaving it red
+-- would have suppressed every file sorting after it.
 -- ==========================================================================
 
 SET LOCAL lock_timeout = '3s';
@@ -100,11 +129,14 @@ SET LOCAL lock_timeout = '3s';
 --      re-read" rather than as the statement form. Belt.
 --   2. MECHANISM — the DO block at the end of this file, and the recurring gate
 --      in supabase/tests/, both match against a COMMENT-STRIPPED copy of the
---      definition. Braces, and the only layer that survives an editor who has
---      not read layer 1. It was added because the hole was DEMONSTRATED, not
+--      definition, stripping BOTH plpgsql comment syntaxes (line and block).
+--      Braces, and the only layer that survives an editor who has not read
+--      layer 1. It was added because the hole was DEMONSTRATED, not
 --      hypothesised: on a scratch Postgres 16, a body whose raise had been
 --      changed to `no_data_found` while one comment quoted the old ERRCODE
---      clause passed the presence arms GREEN.
+--      clause passed the presence arms GREEN. The phase-163 review then
+--      demonstrated the SAME hole a second time through the block-comment
+--      syntax, which the first strip did not cover — hence both.
 -- --------------------------------------------------------------------------
 CREATE OR REPLACE FUNCTION _enqueue_compute_job_internal(
   p_strategy_id     UUID,
@@ -246,15 +278,24 @@ BEGIN
   END IF;
 
   IF v_new_id IS NULL THEN
-    -- Winner already advanced past in-flight. Tell the caller this was a race
-    -- loss with a recoverable error code so the app layer can retry the
-    -- enqueue without surfacing a 500. ERRCODE serialization_failure (40001)
-    -- is the canonical Postgres class for "MVCC race, retry safe". All four
-    -- targets are named because this overload has four arms; exactly one of
-    -- them is non-null by the XOR guard above, so the message identifies the
-    -- contended target without the caller having to guess which arm ran.
-    RAISE EXCEPTION '_enqueue_compute_job_internal: enqueue race lost and winner already terminal (target strategy=%, portfolio=%, allocator=%, api_key=%, kind=%)',
-      p_strategy_id, p_portfolio_id, p_allocator_id, p_api_key_id, p_kind
+    -- Winner already advanced past in-flight. Classify the outcome: ERRCODE
+    -- serialization_failure (40001) is the canonical Postgres class for "MVCC
+    -- race, retry safe", and the SQLSTATE is the WHOLE signal. A caller that
+    -- wants to retry branches on the code, never on this string.
+    --
+    -- ⛔ THE MESSAGE IS DELIBERATELY SHORT AND MUST STAY SHORT — it is NOT
+    -- operator-only text. src/app/api/strategies/csv-finalize/route.ts:2012
+    -- interpolates the raw PostgREST message into
+    -- writeFailedStrategyAnalyticsPlaceholder, which lands it VERBATIM in the
+    -- user-visible strategy_analytics.computation_error column, bypassing the
+    -- curated-copy bridge migration 20260826120000 (Phase 162, HONEST-01)
+    -- shipped one day before this file. Naming the internal SECDEF function
+    -- and four internal UUIDs here would therefore show the strategy's own
+    -- owner operator text as their failure copy — precisely the class
+    -- HONEST-01 closed. The caller already knows which target it asked for,
+    -- and the server log's CONTEXT line still names this function for
+    -- operators, so nothing diagnostic is lost by omitting both.
+    RAISE EXCEPTION 'enqueue race lost: the winning job already advanced past the in-flight statuses'
       USING ERRCODE = 'serialization_failure';
   END IF;
 
@@ -322,6 +363,10 @@ COMMENT ON FUNCTION public._enqueue_compute_job_internal(
 --   (a) either overload lost the Phase 106 retired-kind reject;
 --   (b) either overload lost SECURITY DEFINER or SET search_path;
 --   (c) the 10-param body still carries a strict re-read (the OPS-08 fix);
+--  (c2) the 10-param body does NOT carry exactly four plain lost-race re-reads
+--       — (c) is equally satisfied by DELETING the arms, which would return
+--       NULL on every lost race (a silent failure, strictly worse than the
+--       500 being removed);
 --   (d) the 10-param body lost the serialization_failure raise (the other half
 --       of the fix — without it a lost race would return NULL silently, which
 --       is a WORSE failure than the 500 this migration removes);
@@ -330,14 +375,29 @@ COMMENT ON FUNCTION public._enqueue_compute_job_internal(
 --       (regression guard against a "helpful" registry/CHECK drop — 45
 --       historical rows FK-reference it).
 -- Every RAISE format string is a SINGLE literal.
+--
+-- ⚠️ WHAT THESE ARMS ACTUALLY PROVE — stated so the strength is not overstated.
+-- For the 10-PARAM overload, arms (a)-(d) read back a body this same file
+-- CREATE OR REPLACE'd ~150 lines above, inside the SAME implicit transaction.
+-- They are a COPY-CHECK — "the text I just wrote is the text I meant to write,
+-- and the server stored it" — NOT a runtime check, and NOT evidence that a lost
+-- race behaves correctly. They catch a stale re-base, a truncated paste, or a
+-- body edited in this file without its assertion updated; they cannot catch a
+-- logic error that was faithfully transcribed. The arms carrying INDEPENDENT
+-- information are the 7-param ones (a different function, untouched here — a
+-- genuine drift detector), (e) the ACL (server state this file only nudges
+-- toward the intended end state), and (f) the CHECK constraint (a different
+-- object entirely). The recurring gate in supabase/tests/ is where the 10-param
+-- body is read on a run that did not just write it.
 -- --------------------------------------------------------------------------
 DO $$
 DECLARE
   v_fn7          text;   -- raw pg_get_functiondef (header + body + comments)
   v_fn10         text;
-  v_body7        text;   -- ...with `--` line comments stripped. MATCH ON THESE.
+  v_body7        text;   -- ...with BOTH comment syntaxes stripped. MATCH ON THESE.
   v_body10       text;
   v_check_clause text;
+  v_n            int;
   v_oid7         oid := to_regprocedure(
     'public._enqueue_compute_job_internal(uuid, uuid, text, text, uuid[], text, jsonb)'
   );
@@ -345,16 +405,30 @@ DECLARE
     'public._enqueue_compute_job_internal(uuid, uuid, text, text, uuid[], text, jsonb, uuid, uuid, timestamptz)'
   );
   -- ⚠️ Whitespace-tolerant STATEMENT-form patterns, spelled as regexes rather
-  -- than as literal substrings for TWO reasons, both load-bearing:
+  -- than as literal substrings for THREE reasons, all load-bearing:
   --   1. Robustness — plpgsql does not normalise whitespace when it stores a
   --      body, so a re-read reformatted across a line break would evade a
   --      contiguous-substring search while remaining exactly the defect.
-  --   2. Self-exclusion — written this way, THIS FILE contains zero contiguous
-  --      occurrences of the token it hunts for, so a repo-level scan of the
-  --      migration cannot be satisfied by the assertion that polices it.
-  c_strict_re    CONSTANT text := 'INTO[[:space:]]+STRICT[[:space:]]+v_';
+  --   2. Property, NOT CONVENTION. c_strict_re carried a trailing `v_`
+  --      variable-prefix until the phase-163 review caught it. That pinned this
+  --      codebase's NAMING HABIT rather than the dangerous construct: a re-base
+  --      writing the strict form into `winner_id`, or into a record variable,
+  --      is byte-for-byte the defect OPS-08 exists to prevent and would have
+  --      passed GREEN. The property is the keyword pair alone. `\M`
+  --      (end-of-word) is present only so an identifier beginning STRICT... —
+  --      `STRICTLY_ORDERED`, say — cannot match; it admits every variable name.
+  --   3. Self-exclusion — written this way, no line of this file contains a
+  --      contiguous occurrence of the construct c_strict_re hunts for (verified
+  --      at HEAD; the prose above says "strict form", never the two keywords in
+  --      sequence), so a repo-level scan of the migration cannot be satisfied
+  --      by the assertion that polices it. If you reword these comments, keep
+  --      that true.
+  c_strict_re    CONSTANT text := 'INTO[[:space:]]+STRICT\M';
+  c_plain_re     CONSTANT text := 'SELECT[[:space:]]+id[[:space:]]+INTO[[:space:]]+v_new_id';
   c_serfail_re   CONSTANT text :=
     'USING[[:space:]]+ERRCODE[[:space:]]*=[[:space:]]*''serialization_failure''';
+  -- The retired-kind ADMISSION BRANCH, not its message. See arm (a).
+  c_retired_re   CONSTANT text := 'p_kind[[:space:]]*=[[:space:]]*''compute_analytics''';
 BEGIN
   -- Both overloads must resolve.
   IF v_oid7 IS NULL THEN
@@ -367,23 +441,61 @@ BEGIN
   v_fn7  := pg_get_functiondef(v_oid7);
   v_fn10 := pg_get_functiondef(v_oid10);
 
-  -- T-163-16: strip `--` line comments so every arm below reads STATEMENTS, not
-  -- the function's prose about itself. MEASURED on a scratch Postgres 16 while
-  -- this migration was being written: a body whose raise had been changed to
+  -- T-163-16: strip comments so every arm below reads STATEMENTS, not the
+  -- function's prose about itself. MEASURED on a scratch Postgres 16 while this
+  -- migration was being written: a body whose raise had been changed to
   -- `no_data_found`, carrying one comment line quoting the old ERRCODE clause,
   -- passed the presence arms GREEN. Convention alone ("do not spell the token in
-  -- a comment") does not survive the next editor; this does. The 'n' flag is what
-  -- makes `.` newline-INsensitive — without it Postgres' `.` matches newlines and
-  -- the first comment eats the rest of the definition.
-  v_body7  := regexp_replace(v_fn7,  '--.*', '', 'gn');
-  v_body10 := regexp_replace(v_fn10, '--.*', '', 'gn');
+  -- a comment") does not survive the next editor; this does.
+  --
+  -- BOTH plpgsql comment syntaxes are stripped, block first. plpgsql stores
+  -- prosrc VERBATIM, so a BLOCK comment survives pg_get_functiondef exactly as a
+  -- line comment does — stripping only the line form left the identical hole
+  -- open in the other syntax, and the phase-163 review demonstrated it: a body
+  -- raising `no_data_found` while carrying the serialization_failure ERRCODE
+  -- clause inside a slash-star comment passed arm (d) GREEN. `.*?` is
+  -- non-greedy so two block comments are not merged into one span that eats the
+  -- statements between them; the 's' flag lets a span cross newlines; the 'n'
+  -- flag on the line pass is what stops `.` there from eating the rest of the
+  -- definition.
+  --
+  -- ⚠️ THE FAILURE DIRECTION IS NOT UNIFORM ACROSS THE ARMS BELOW, and the
+  -- difference is the whole reason this is spelled out. A string literal that
+  -- contained a comment-opening sequence would have its tail truncated before
+  -- matching. For a PRESENCE arm — (a), (d), and the SECDEF / search_path arms,
+  -- where FINDING the needle is the pass condition — truncation can only cause
+  -- a FALSE FAILURE: fail-closed, and a failed deploy is loud. For an ABSENCE
+  -- arm — (c), where finding NOTHING is the pass condition — truncation is a
+  -- FALSE PASS, which is not tolerable. Verified at HEAD: no literal in either
+  -- body contains either sequence (every em-dash in these messages is U+2014,
+  -- not two hyphens). Keep it that way, and keep (c) in mind if you add one.
+  v_body7  := regexp_replace(regexp_replace(v_fn7,  '/\*.*?\*/', '', 'gs'), '--.*', '', 'gn');
+  v_body10 := regexp_replace(regexp_replace(v_fn10, '/\*.*?\*/', '', 'gs'), '--.*', '', 'gn');
+
+  -- ⛔ NULL FAILS OPEN THROUGH EVERY REGEX ARM BELOW. `NULL !~ 'x'` evaluates to
+  -- NULL, and `IF NULL THEN` does not fire — so a NULL body would sail past (b),
+  -- (c) and (d) and this block would RAISE NOTICE compliance on a definition it
+  -- never read. pg_get_functiondef on a live oid does not return NULL today;
+  -- this costs two comparisons and removes the possibility that a future change
+  -- to how these are fetched silently turns the whole block into a no-op.
+  IF v_body7 IS NULL OR v_body10 IS NULL THEN
+    RAISE EXCEPTION 'destrict-enqueue-10param: a comment-stripped function body came back NULL, so every regex arm below would pass without reading anything. Refusing to report compliance on an unread body.';
+  END IF;
 
   -- (a) both bodies keep the Phase 106 retired-kind reject.
-  IF position('compute_analytics is retired' IN v_body7) = 0 THEN
-    RAISE EXCEPTION 'destrict-enqueue-10param: 7-param overload is missing the retired-kind guard';
+  -- ⚠️ PIN THE BRANCH, NOT THE MESSAGE. This arm matched the RAISE's message
+  -- text ('compute_analytics is retired') until the phase-163 review. That is a
+  -- STRING LITERAL — immune to the comment strip above by construction — and it
+  -- fails in BOTH directions: delete the guard branch while any literal or
+  -- prose elsewhere in the body still carries the phrase and the arm passes,
+  -- while REWORDING the message with the guard perfectly intact FAILS THE PROD
+  -- DEPLOY. `p_kind = 'compute_analytics'` is the admission test itself; both
+  -- overloads spell it that way (20260716090000:83 and :224).
+  IF v_body7 !~ c_retired_re THEN
+    RAISE EXCEPTION 'destrict-enqueue-10param: 7-param overload is missing the retired-kind admission branch (p_kind = compute_analytics)';
   END IF;
-  IF position('compute_analytics is retired' IN v_body10) = 0 THEN
-    RAISE EXCEPTION 'destrict-enqueue-10param: 10-param overload is missing the retired-kind guard (this migration must not regress Phase 106 D3)';
+  IF v_body10 !~ c_retired_re THEN
+    RAISE EXCEPTION 'destrict-enqueue-10param: 10-param overload is missing the retired-kind admission branch (p_kind = compute_analytics) — this migration must not regress Phase 106 D3';
   END IF;
 
   -- (b) both keep the invalid_parameter_value reject code + SECDEF/search_path.
@@ -407,6 +519,18 @@ BEGIN
   END IF;
   IF v_body7 ~ c_strict_re THEN
     RAISE EXCEPTION 'destrict-enqueue-10param: the 7-param body reacquired a strict lost-race re-read (mig 109 P3 regressed)';
+  END IF;
+
+  -- (c2) ...AND IT GOT THERE BY DE-STRICTING, NOT BY DELETING ARMS. This is the
+  -- PROD-side counterpart of the recurring gate's Part 2, and it was missing:
+  -- arm (c) alone is satisfied by removing the lost-race section outright, so a
+  -- re-base that dropped the whole section while keeping the RAISE passed this
+  -- file's own self-verification. Four arms, one per target scope in the 4-way
+  -- XOR (strategy / portfolio / allocator / api_key).
+  SELECT count(*) INTO v_n
+    FROM regexp_matches(v_body10, c_plain_re, 'g');
+  IF v_n <> 4 THEN
+    RAISE EXCEPTION 'destrict-enqueue-10param: the 10-param body carries % plain lost-race re-read(s), expected exactly 4 (one per target scope). Absence of the strict form is ALSO achieved by deleting the arms, which returns NULL on every lost race — a silent failure, worse than the 500 this migration removes.', v_n;
   END IF;
 
   -- (d) and the classified raise is PRESENT in both — the other half of the
