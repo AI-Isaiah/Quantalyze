@@ -254,6 +254,64 @@ describe("POST /api/portfolio-optimizer — audit-2026-05-07 cluster A", () => {
     expect(res.headers.get("Cache-Control")).toBe("private, no-store");
   });
 
+  /**
+   * Phase 163 SEC-04 — the deny arms above, bound to the limiter IDENTITY.
+   *
+   * ⚠️ WHY THESE EXIST WHEN THE 429/503 CASES ALREADY COVER THE SHAPES. Those
+   * drive `STATE.checkLimitResult` directly, so they assert what the route does
+   * GIVEN a denial — identically, whichever bucket produced it. Reverting this
+   * route to the shared `userActionLimiter` leaves them green. The contracts
+   * are therefore not evidence about WHICH budget the caller spends, and
+   * SEC-04 is entirely a claim about which budget.
+   *
+   * ── RED DEMO: neuter -> RED -> restore (performed on the sibling route) ────
+   * Reverting a route to `checkLimit(userActionLimiter, ...)` fails on BOTH
+   * tiers: STRUCTURALLY in `seam-ratelimit-posture.invariant.test.ts` via
+   * EXPECTED_ROUTE_LIMITERS, which names the route and both limiters; and
+   * BEHAVIOURALLY here, because the mock exports ONLY `bridgeComputeLimiter`,
+   * so the revert cannot resolve its import and fails at the module boundary
+   * instead of quietly spending the wrong bucket. Observed on
+   * `src/app/api/bridge/route.ts`, then restored from a byte backup (NOT
+   * `git checkout --`, which would have destroyed uncommitted work) and
+   * verified by shasum.
+   */
+  it("[163 SEC-04] the 429 is spent from bridgeComputeLimiter, BY IDENTITY", async () => {
+    STATE.checkLimitResult = { success: false, retryAfter: 42 };
+    const res = await POST(buildRequest({ portfolio_id: "x" }));
+
+    expect(res.status).toBe(429);
+    expect(await res.json()).toEqual({
+      error: "Too many requests",
+      code: "RATE_LIMITED",
+    });
+    expect(res.headers.get("retry-after")).toBe("42");
+
+    expect(
+      STATE.limitersSeen,
+      "This route must spend the COMPUTE bucket (10/3600s), not the shared " +
+        "userActionLimiter (5/60s = 300/hour). /portfolio-optimizer is capped " +
+        "at 10/hour per tenant on the Python side and fires a ~15s round-trip " +
+        "per call, so the shared bucket advertised 30x a budget the backend " +
+        "will not serve.",
+    ).toEqual([BRIDGE_COMPUTE_LIMITER_SENTINEL]);
+  });
+
+  it("[163 SEC-04] the misconfigured 503 arm is unchanged by the swap", async () => {
+    STATE.checkLimitResult = {
+      success: false,
+      retryAfter: 60,
+      reason: "ratelimit_misconfigured",
+    };
+    const res = await POST(buildRequest({ portfolio_id: "x" }));
+
+    expect(res.status).toBe(503);
+    expect(await res.json()).toEqual({
+      error: "Rate limiter unavailable",
+      code: "SEAM_MISCONFIGURED",
+    });
+    expect(STATE.limitersSeen).toEqual([BRIDGE_COMPUTE_LIMITER_SENTINEL]);
+  });
+
   it("[140.4-13 / SEAMRIM-05] success → the deny arm does not fire", async () => {
     STATE.checkLimitResult = { success: true };
     const res = await POST(buildRequest({ portfolio_id: "x" }));

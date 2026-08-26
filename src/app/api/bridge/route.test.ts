@@ -383,6 +383,90 @@ describe("POST /api/bridge", () => {
     expect(res.status).toBe(503);
   });
 
+  /**
+   * Phase 163 SEC-04 — the deny arms above, bound to the limiter IDENTITY.
+   *
+   * ⚠️ WHY THESE EXIST WHEN TC3/TC3c ALREADY COVER THE SHAPES. TC3 and TC3c
+   * drive `STATE.checkLimitResult` directly, so they assert what the route
+   * does GIVEN a denial — and they pass identically whichever bucket produced
+   * it. Reverting this route to the shared `userActionLimiter` leaves both
+   * green. The 429/503 contracts are therefore not evidence about WHICH budget
+   * the caller is spending, and SEC-04 is entirely a claim about which budget.
+   *
+   * What makes the swap falsifiable at the route level is asserting the
+   * instance handed to `checkLimit`. `STATE.limitersSeen` records it per call.
+   *
+   * ── RED DEMO: neuter -> RED -> restore (performed, not imagined) ───────────
+   * Reverting `route.ts:94` to `checkLimit(userActionLimiter, ...)` fails on
+   * BOTH tiers, which is the point of having both:
+   *   · STRUCTURAL — `seam-ratelimit-posture.invariant.test.ts` fails BY NAME
+   *     via EXPECTED_ROUTE_LIMITERS:
+   *       src/app/api/bridge/route.ts: derived=[userActionLimiter]
+   *                                    pinned=[bridgeComputeLimiter]
+   *   · BEHAVIOURAL — these two cases fail, because the mock deliberately
+   *     exports ONLY `bridgeComputeLimiter`: the revert cannot even resolve its
+   *     import ("No `userActionLimiter` export is defined on the mock"), so it
+   *     fails loudly at the module boundary rather than silently spending the
+   *     wrong bucket.
+   * Both observed, then restored from a byte backup (NOT `git checkout --`,
+   * which would have destroyed the uncommitted work in the tree) and verified
+   * by shasum.
+   */
+  it("[163 SEC-04] the 429 is spent from bridgeComputeLimiter, BY IDENTITY", async () => {
+    STATE.checkLimitResult = { success: false, retryAfter: 30 };
+    const { POST } = await import("./route");
+    const res = await POST(
+      makeRequest({
+        portfolio_id: PORTFOLIO_ID,
+        underperformer_strategy_id: UNDERPERFORMER_ID,
+      }),
+    );
+
+    // The established contract, unchanged by the swap.
+    expect(res.status).toBe(429);
+    const body = await res.json();
+    expect(body.code).toBe("RATE_LIMITED");
+    expect(body.retryAfter).toBe(30);
+    expect(res.headers.get("Retry-After")).toBe("30");
+
+    // The claim the contract above cannot make.
+    expect(
+      STATE.limitersSeen,
+      "This route must spend the COMPUTE bucket (10/3600s), not the shared " +
+        "userActionLimiter (5/60s = 300/hour). The Python endpoint behind it " +
+        "serves 10/hour per tenant, so a 5/60s bucket can only ever emit " +
+        "Retry-After <= 60 for a wait the backend may set at up to 3600s — " +
+        "the caller is told to retry in a minute and burns the difference " +
+        "into a backend 429 this layer never saw.",
+    ).toEqual([BRIDGE_COMPUTE_LIMITER_SENTINEL]);
+  });
+
+  it("[163 SEC-04] the misconfigured 503 arm is unchanged by the swap", async () => {
+    STATE.checkLimitResult = {
+      success: false,
+      retryAfter: 60,
+      reason: "ratelimit_misconfigured",
+    };
+    const { POST } = await import("./route");
+    const res = await POST(
+      makeRequest({
+        portfolio_id: PORTFOLIO_ID,
+        underperformer_strategy_id: UNDERPERFORMER_ID,
+      }),
+    );
+
+    expect(
+      res.status,
+      "Our Upstash store being unreachable is OUR outage, and swapping which " +
+        "bucket we consult does not change that. A 429 here would render the " +
+        "outage as the allocator over-using bridge scoring and hide it from " +
+        "the canary that watches 5xx.",
+    ).toBe(503);
+    expect((await res.json()).code).toBe("SEAM_MISCONFIGURED");
+    expect(res.headers.get("Retry-After")).toBe("60");
+    expect(STATE.limitersSeen).toEqual([BRIDGE_COMPUTE_LIMITER_SENTINEL]);
+  });
+
   it("TC4 — 400 bad JSON", async () => {
     const { POST } = await import("./route");
     const res = await POST(makeRequest(null, { rawBody: "{not json" }));
