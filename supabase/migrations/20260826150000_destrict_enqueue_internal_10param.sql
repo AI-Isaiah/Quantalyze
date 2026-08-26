@@ -33,13 +33,32 @@
 -- CORRECT, DISAMBIGUATED SQLSTATE (40001) in the server log and in the error
 -- the caller receives, in place of a bare P0002 that is indistinguishable from
 -- any other empty strict SELECT. That is a PREREQUISITE for retrying a lost
--- race; it is NOT a retry, and nothing in this repo retries yet. MEASURED AT
--- HEAD 2026-08-26: `grep -rn "serialization_failure|40001" src/` returns ZERO
--- non-test hits, and src/app/api/allocator/holdings/sync/route.ts:73-87 still
--- answers a blanket 500 for every SQLSTATE except 42501. So until a caller
--- branches on 40001 the USER-VISIBLE outcome of a lost race is UNCHANGED by
--- this migration — only the operator's diagnosis improves. The TS half is
--- recorded as owed work in TODOS.md and is out of this migration's scope.
+-- race; it is NOT a retry, and nothing in this repo retries a 40001 raised by
+-- an ENQUEUE. That conclusion stands, but the evidence for it was previously a
+-- `src/`-only grep, which never reached the caller most likely to grow such a
+-- branch. RE-MEASURED ACROSS BOTH HALVES OF THE REPO AT HEAD, 2026-08-26:
+--   * TypeScript — `grep -rn serialization_failure src/` returns TWO hits, both
+--     in test files (src/__tests__/compute-jobs-audit-2026-05-07-g10b.test.ts:18
+--     and src/__tests__/reconcile-dropped-enqueue-sweep.test.ts:496); '40001'
+--     has ZERO non-test hits. src/app/api/allocator/holdings/sync/route.ts:73-87
+--     still answers a blanket 500 for every SQLSTATE except 42501.
+--   * PYTHON — and here the old grep was BLIND. analytics-service DOES classify
+--     40001, in TWO places, and NEITHER is on an enqueue path:
+--       - main_worker.py:392 `_is_serialization_failure` — ONE production call
+--         site, main_worker.py:583, inside `_safe_mark`, which wraps only the
+--         three MARK RPCs (_mark_done :935, _mark_failed :961,
+--         _mark_failed_fallback :1007). It SWALLOWS the 40001 and logs
+--         LATE_MARK_IGNORED; it does not retry.
+--       - services/job_worker.py:880 `_defer_lost_ownership` — ONE call site,
+--         :995, wrapping defer_compute_job. It YIELDS the job as DEFERRED; it
+--         does not retry either.
+--     Both exist because migration 117 fenced the mark/defer RPCs on
+--     claim_token, so a watchdog reclaim surfaces as 40001 there. An enqueue
+--     40001 reaches neither classifier.
+-- So until a caller branches on 40001 the USER-VISIBLE outcome of a lost race is
+-- UNCHANGED by this migration — only the operator's diagnosis improves. The TS
+-- half is recorded as owed work in TODOS.md and is out of this migration's
+-- scope.
 --
 -- ⛔ OWED: WR-07 — THE RAISE MESSAGE REACHES A USER-VISIBLE COLUMN, AND THAT
 -- CANNOT BE CLOSED IN SQL. Recorded here rather than patched, deliberately:
@@ -98,14 +117,27 @@
 --
 -- RE-BASE DISCIPLINE (project rule: re-base SQL fns on the LATEST def — grep
 -- ALL migrations for any newer CREATE OR REPLACE of either overload before
--- editing). RE-VERIFIED AT HEAD, 2026-08-26:
---   `grep -rn "_enqueue_compute_job_internal" supabase/migrations/` → 105 hits
---   across 14 files; only SIX are a CREATE OR REPLACE of either overload, and
---   the newest by timestamp is
---   20260716090000_retire_compute_analytics_kind_rpc_guard.sql (7-param at
---   :49, 10-param at :181). Every later reference (20260816140000,
---   20260825130000/140000/150000) is prose in a comment. 20260515130001 is
---   ACL-only (REVOKE / GRANT / COMMENT), no body.
+-- editing). RE-MEASURED AT HEAD **WITH THIS FILE PRESENT**, 2026-08-26 — the
+-- previous version of this note was stale in exactly the way the rule warns
+-- about, because adding this file changed the answer it recorded:
+--   `grep -rn "_enqueue_compute_job_internal" supabase/migrations/` → 119 hits
+--   across 15 files (14 of the hits are in THIS file). SEVEN of them are a
+--   `CREATE OR REPLACE FUNCTION` of one of the two overloads, spread over six
+--   files: 20260411144407:345, 20260418194206:175, 20260420073003:330,
+--   20260510180226:164, 20260716090000:49 (7-param) and :181 (10-param), and
+--   THIS FILE at :189 — which is now the NEWEST by timestamp, so a future
+--   re-base must take ITS body, not 20260716090000's.
+--   Excluding this file: six CREATE OR REPLACE statements across five files,
+--   newest ancestor 20260716090000_retire_compute_analytics_kind_rpc_guard.sql
+--   (7-param at :49, 10-param at :181) — which is the definition this file's
+--   10-param body is re-based on. 20260515130001 is ACL-only (REVOKE / GRANT /
+--   COMMENT), no body; every other later reference is prose in a comment.
+--   ⚠️ AND THE FAMILY HAS BEEN `DROP FUNCTION`ed TWICE, which a CREATE-OR-
+--   REPLACE-only survey misses: 20260418194206:168 (7-param) and
+--   20260420073003:327 (8-param). A DROP is the FORCED idiom for a parameter
+--   rename or a return-type change, and it destroys the catalog COMMENT — see
+--   the ⛔ note above COMMENT ON FUNCTION below, which now depends on that
+--   comment surviving.
 --   ⛔ 20260716090000 is APPLIED. It is NOT edited here — this is a NEW
 --   forward-only migration, which is the only sanctioned shape.
 --
@@ -172,21 +204,50 @@ SET LOCAL lock_timeout = '3s';
 -- ⚠️ GATE-TOKEN HYGIENE (T-163-16). `pg_get_functiondef` returns the body's
 -- COMMENTS as well as its statements, so a gate grepping for a bare identifier
 -- can be satisfied by prose the function carries about itself. Two layers close
--- that here, and the second is the load-bearing one:
---   1. CONVENTION — the comments inside this body are phrased as "the strict
---      re-read" rather than as the statement form. Belt.
+-- that here — but they do NOT both cover both overloads, and the difference is
+-- the point:
+--   1. CONVENTION — the comments inside the body BELOW are phrased as "the
+--      strict re-read" rather than as the statement form. Belt, and it governs
+--      ONLY the 10-param body, because that is the only body this file writes.
 --   2. MECHANISM — the DO block at the end of this file, and the recurring gate
 --      in supabase/tests/, both match against a COMMENT-STRIPPED copy of the
 --      definition, stripping BOTH plpgsql comment syntaxes (line and block).
---      Braces, and the only layer that survives an editor who has not read
---      layer 1. It was added because the hole was DEMONSTRATED, not
---      hypothesised: on a scratch Postgres 16, a body whose raise had been
---      changed to `no_data_found` while one comment quoted the old ERRCODE
---      clause passed the presence arms GREEN. The phase-163 review then
---      demonstrated the SAME hole a second time through the block-comment
---      syntax, which the first strip did not cover — hence both.
+--      It was added because the hole was DEMONSTRATED, not hypothesised: on a
+--      scratch Postgres 16, a body whose raise had been changed to
+--      `no_data_found` while one comment quoted the old ERRCODE clause passed
+--      the presence arms GREEN. The phase-163 review then demonstrated the SAME
+--      hole a second time through the block-comment syntax, which the first
+--      strip did not cover — hence both.
+--
+-- ⛔ AND FOR THE 7-PARAM OVERLOAD LAYER 2 IS NOT "BRACES" — IT IS THE ONLY
+-- LAYER, AND IT IS LOAD-BEARING ON PROD ALONE. Layer 1 cannot apply there: that
+-- body is 20260716090000's and this file does not write it, and it carries the
+-- construct in a LINE COMMENT at 20260716090000:143 ("the original SELECT INTO
+-- STRICT ..."), which plpgsql stores in prosrc verbatim. MEASURED on the live
+-- projects 2026-08-26 by the phase-163 re-audit: the PROD 7-param body contains
+-- ONE raw occurrence, comment-stripped ZERO; the TEST 7-param body contains
+-- none even before stripping.
+-- The consequence is asymmetric and must not be mistaken for redundancy:
+--   * On PROD the strip is the SOLE reason arm (c)'s 7-param check passes.
+--     Regress the strip — or narrow it to the line syntax only, or let a string
+--     literal truncate it — and arm (c) matches that comment and RAISEs, which
+--     ABORTS THE PROD DEPLOY of whatever migration is being applied.
+--   * On TEST there is nothing to strip in that body, so removing the strip
+--     changes no result the recurring gate reports. CI would stay GREEN.
+-- A change to the strip is therefore INVISIBLE to CI and FATAL at deploy time.
+-- Do not "simplify" it on the evidence of a green CI run.
 -- --------------------------------------------------------------------------
-CREATE OR REPLACE FUNCTION _enqueue_compute_job_internal(
+-- ⚠️ SCHEMA-QUALIFIED DELIBERATELY, unlike 20260716090000:181 and every other
+-- ancestor. Every other statement in this file names public. explicitly; this
+-- one did not, and it is the single statement where that matters. An unqualified
+-- CREATE OR REPLACE resolves against the SESSION search_path, so if a migration
+-- ever runs with a search_path that does not put public first, it does not
+-- "replace" — it CREATES a second function in another schema, leaving the real
+-- one un-fixed. And a create, unlike a replace, arrives with default privileges:
+-- on a Supabase project that is where the default-grant event trigger recorded
+-- in 20260515130001 hands EXECUTE to anon and authenticated, on a function that
+-- is SECURITY DEFINER and performs no ownership check.
+CREATE OR REPLACE FUNCTION public._enqueue_compute_job_internal(
   p_strategy_id     UUID,
   p_portfolio_id    UUID,
   p_kind            TEXT,
@@ -423,10 +484,23 @@ GRANT EXECUTE ON FUNCTION public._enqueue_compute_job_internal(
 -- only thing that differs, because 20260716090000 issues no COMMENT ON FUNCTION
 -- at all and CREATE OR REPLACE does not clear one. Strip the phrase from the
 -- literal below and that gate silently falls back to answering SKIP — exit 0 —
--- on a genuine regression, which is precisely the hole WR-04 closed.
+-- on a genuine regression, which is precisely the hole WR-04 closed. The DO
+-- block at the end of this file now RAISEs if this literal stops carrying the
+-- phrase, so the failure direction for THAT mistake is a loud aborted deploy
+-- rather than a quietly disarmed gate.
 --
--- If a future migration rewrites this comment, it MUST carry the phrase forward
--- (or supersede the gate's marker in the same change, deliberately, and say so).
+-- ⛔ TWO WAYS TO DESTROY THIS MARKER, AND ONLY THE FIRST IS GUARDED.
+--   1. Rewriting this COMMENT without the phrase. A future migration that does
+--      so MUST carry the phrase forward (or supersede the gate's marker in the
+--      same change, deliberately, and say so).
+--   2. `DROP FUNCTION` + re-create. A DROP destroys the catalog comment
+--      outright, and NOTHING in either file can notice: the re-created function
+--      has no comment, so the recurring gate falls back to SKIP. This is not
+--      hypothetical for this family — it has been DROPped twice already
+--      (20260418194206:168, 20260420073003:327) — and a DROP is the FORCED
+--      idiom for a parameter rename or a return-type change, neither of which
+--      CREATE OR REPLACE permits. FAIL DIRECTION: OPEN. If you must DROP this
+--      overload, re-issue this COMMENT in the same migration.
 -- --------------------------------------------------------------------------
 COMMENT ON FUNCTION public._enqueue_compute_job_internal(
   uuid, uuid, text, text, uuid[], text, jsonb,
@@ -458,7 +532,16 @@ COMMENT ON FUNCTION public._enqueue_compute_job_internal(
 --   (e) the 10-param ACL drifted open on a SECURITY DEFINER function;
 --   (f) compute_jobs_kind_check stopped admitting 'compute_analytics'
 --       (regression guard against a "helpful" registry/CHECK drop — 45
---       historical rows FK-reference it).
+--       historical rows FK-reference it);
+--   (g) either overload's pinned search_path stopped being the exact VALUE it
+--       declares. The older arm matched the TOKEN 'search_path' anywhere in the
+--       definition, which passes on `SET search_path = ''` and on any other
+--       hijackable value — it proved the words were there, not that the pin
+--       was safe;
+--   (h) the catalog COMMENT written ~150 lines above stopped carrying the
+--       phrase the recurring gate uses as its revert discriminator. Without
+--       this arm, dropping that phrase disarms the recurring gate SILENTLY —
+--       the note above COMMENT ON FUNCTION says so, and then guarded nothing.
 -- Every RAISE format string is a SINGLE literal.
 --
 -- ⚠️ WHAT THESE ARMS ACTUALLY PROVE — stated so the strength is not overstated.
@@ -471,9 +554,33 @@ COMMENT ON FUNCTION public._enqueue_compute_job_internal(
 -- logic error that was faithfully transcribed. The arms carrying INDEPENDENT
 -- information are the 7-param ones (a different function, untouched here — a
 -- genuine drift detector), (e) the ACL (server state this file only nudges
--- toward the intended end state), and (f) the CHECK constraint (a different
--- object entirely). The recurring gate in supabase/tests/ is where the 10-param
--- body is read on a run that did not just write it.
+-- toward the intended end state), (f) the CHECK constraint (a different object
+-- entirely), and the 7-param half of (g) (pg_proc.proconfig on a function this
+-- file does not write). (h) is a copy-check like (a)-(d) — it reads back the
+-- COMMENT this file issues — and its own note says so rather than implying
+-- otherwise.
+--
+-- ⛔ AND NOTHING ELSE EVER RE-READS THE POST-FIX 10-PARAM BODY. An earlier
+-- version of this note ended "the recurring gate in supabase/tests/ is where the
+-- 10-param body is read on a run that did not just write it." That is FALSE in
+-- the deployed topology, and it is the sentence a reader uses to decide the
+-- copy-check is acceptable, so it must not overstate. MEASURED AT HEAD:
+--   * supabase/tests/ runs in the `sql-tests` CI job, which connects to
+--     `secrets.TEST_SUPABASE_DB_URL` (.github/workflows/ci.yml:1105) — the
+--     shared TEST project, and only that project.
+--   * NOTHING applies migrations to TEST. .github/workflows/supabase-migrate.yml
+--     is the only workflow that runs `supabase db push`, and it links
+--     `vars.SUPABASE_PROJECT_REF` (:184, :243), which is PRODUCTION.
+--   * TEST therefore still runs 20260716090000's 10-param body, so the recurring
+--     gate's Part 1+3 lands on its pre-apply SKIP arm on every automated run and
+--     Part 3 is permanently WITHHELD there.
+-- What the recurring gate DOES contribute on every run is real but is about
+-- OTHER things: the 7-param parity pin, the 10-param ARM COUNT (form-agnostic,
+-- live in both states), the retired-kind / SECDEF / search_path properties on
+-- both bodies, the ACL, and the revert discriminator. The post-fix 10-param body
+-- itself is read exactly once, here, inside the transaction that wrote it —
+-- unless a human hand-applies this migration to TEST, which is what the SKIP
+-- arm's message asks for. Treat that as a real gap, not a formality.
 -- --------------------------------------------------------------------------
 DO $$
 DECLARE
@@ -483,6 +590,9 @@ DECLARE
   v_body10       text;
   v_check_clause text;
   v_n            int;
+  v_cfg7         text[];  -- pg_proc.proconfig — the VALUE of the pin, arm (g)
+  v_cfg10        text[];
+  v_comment10    text;    -- the CATALOG comment, NOT part of pg_get_functiondef
   v_oid7         oid := to_regprocedure(
     'public._enqueue_compute_job_internal(uuid, uuid, text, text, uuid[], text, jsonb)'
   );
@@ -508,12 +618,47 @@ DECLARE
   --      sequence), so a repo-level scan of the migration cannot be satisfied
   --      by the assertion that polices it. If you reword these comments, keep
   --      that true.
+  --      ⛔ AND DO NOT MISREAD REASON 3 AS COVERING THE ARMS. It is a property
+  --      of THIS FILE'S TEXT, and the arms do not read this file's text — they
+  --      read pg_get_functiondef output from the catalog. For the 10-param body
+  --      the two coincide, because this file writes it. For the 7-PARAM body
+  --      they do not: that body is 20260716090000's, this file does not author
+  --      it, and it CARRIES the construct in a line comment at
+  --      20260716090000:143 which plpgsql stores in prosrc verbatim. MEASURED
+  --      on PROD 2026-08-26: one raw occurrence, comment-stripped zero. So for
+  --      the 7-param overload the comment strip is not "braces" behind a
+  --      convention "belt" — it is the ONLY layer, and arm (c) below RAISEs and
+  --      ABORTS THIS DEPLOY the moment that strip stops working. See the ⛔
+  --      note on layers 1 and 2 near the top of this file.
   c_strict_re    CONSTANT text := 'INTO[[:space:]]+STRICT\M';
   c_plain_re     CONSTANT text := 'SELECT[[:space:]]+id[[:space:]]+INTO[[:space:]]+v_new_id';
   c_serfail_re   CONSTANT text :=
     'USING[[:space:]]+ERRCODE[[:space:]]*=[[:space:]]*''serialization_failure''';
   -- The retired-kind ADMISSION BRANCH, not its message. See arm (a).
   c_retired_re   CONSTANT text := 'p_kind[[:space:]]*=[[:space:]]*''compute_analytics''';
+  -- Arm (g): the EXACT pinned search_path VALUE, as Postgres stores it in
+  -- pg_proc.proconfig. Derived from the DECLARATIONS being policed — this
+  -- file's own `SET search_path = public, pg_catalog` above, and its two
+  -- ancestors at 20260716090000:61 (7-param) and :196 (10-param) — not from
+  -- reading a catalog back. The exact stored spelling is this project's
+  -- established idiom for this exact declaration: 20260516170000:212 asserts
+  -- `'search_path=public, pg_catalog' = ANY(p.proconfig)` and is applied, so
+  -- the literal has already survived a real deploy.
+  c_search_path  CONSTANT text := 'search_path=public, pg_catalog';
+  -- Arm (h): the revert-discriminator phrase. ⚠️ THE DIRECTION HERE IS THE
+  -- OPPOSITE OF THE USUAL GATE-TOKEN RULE, on purpose. A token chosen by reading
+  -- the file it polices proves nothing — but this arm does not police this
+  -- file's COMMENT for its own sake. It polices whether this file still
+  -- satisfies its CONSUMER, and the consumer holds the authoritative copy:
+  -- supabase/tests/test_enqueue_internal_destrict.sql declares
+  -- `c_applied_marker CONSTANT text := 'Phase 163 OPS-08'` and reads it via
+  -- obj_description. This constant is that string, copied FROM the gate. If the
+  -- two ever disagree, the recurring gate goes silently back to SKIP; this arm
+  -- turns that into an aborted deploy instead.
+  c_applied_marker CONSTANT text := 'Phase 163 OPS-08';
+  -- The 10-param signature text, for the canonical PUBLIC-EXECUTE probe in (e).
+  c_sig10        CONSTANT text :=
+    'public._enqueue_compute_job_internal(uuid, uuid, text, text, uuid[], text, jsonb, uuid, uuid, timestamptz)';
 BEGIN
   -- Both overloads must resolve.
   IF v_oid7 IS NULL THEN
@@ -594,6 +739,25 @@ BEGIN
     RAISE EXCEPTION 'destrict-enqueue-10param: an overload lost SET search_path';
   END IF;
 
+  -- (g) ...AND THE PIN IS THE VALUE, NOT THE WORD. The arm above matches the
+  -- TOKEN `search_path` anywhere in the definition text. That is a presence
+  -- check on a NAME: it passes on `SET search_path = ''`, on `SET search_path =
+  -- public, pg_temp, evil`, and on a body that merely mentions search_path in a
+  -- string literal. None of those is a safe pin, and the empty one is the
+  -- classic hijack — an unqualified reference inside a SECURITY DEFINER body
+  -- then resolves against the CALLER's path. Read the VALUE from the catalog
+  -- instead, which is also where a GUC set by any other route would show up.
+  -- The token arm above is kept as a cheap pre-check that names the simpler
+  -- failure ("lost SET search_path") before this one names the subtler one.
+  SELECT p.proconfig INTO v_cfg7  FROM pg_proc p WHERE p.oid = v_oid7;
+  SELECT p.proconfig INTO v_cfg10 FROM pg_proc p WHERE p.oid = v_oid10;
+  IF v_cfg7 IS NULL OR NOT (c_search_path = ANY(v_cfg7)) THEN
+    RAISE EXCEPTION 'destrict-enqueue-10param: the 7-param overload does not pin search_path to the exact declared value (pg_proc.proconfig=%). A SECURITY DEFINER function whose pin is missing, empty, or reordered is search-path-hijackable — the word being present in the definition text is not the property.', v_cfg7;
+  END IF;
+  IF v_cfg10 IS NULL OR NOT (c_search_path = ANY(v_cfg10)) THEN
+    RAISE EXCEPTION 'destrict-enqueue-10param: the 10-param overload does not pin search_path to the exact declared value (pg_proc.proconfig=%). A SECURITY DEFINER function whose pin is missing, empty, or reordered is search-path-hijackable — the word being present in the definition text is not the property.', v_cfg10;
+  END IF;
+
   -- (c) THE OPS-08 PROPERTY: no strict re-read survives in EITHER overload.
   -- The 7-param arm is a parity pin, not redundancy: it is already clean
   -- (measured 0 pre-edit), so this arm fails only if some future re-base
@@ -640,9 +804,25 @@ BEGIN
      OR to_regrole('service_role') IS NULL THEN
     RAISE EXCEPTION 'destrict-enqueue-10param: one of the roles anon / authenticated / service_role does not exist on this database, so the ACL arm cannot be evaluated. These are Supabase-standard roles; their absence means this migration is running somewhere it was not written for.';
   END IF;
+  -- ⚠️ THE PUBLIC PROBE RUNS FIRST, AND IT IS ABOUT ATTRIBUTION, NOT DETECTION.
+  -- The named-role checks below already DETECT a PUBLIC leak — anon and
+  -- authenticated are real roles, and has_function_privilege accounts for
+  -- privileges they hold via PUBLIC. What they get WRONG is the diagnosis: they
+  -- would report "anon or authenticated holds EXECUTE ... migration 118 revoked
+  -- it", sending the operator to `REVOKE ... FROM anon, authenticated`, which
+  -- does not remove a grant held by PUBLIC. The operator revokes, re-runs, and
+  -- sees the same failure. public._assert_no_public_execute (installed by
+  -- 20260515205431) reads pg_proc.proacl through aclexplode and matches
+  -- grantee = 0 specifically, so a PUBLIC grant is named as a PUBLIC grant.
+  -- It RAISEs on leak with ERRCODE insufficient_privilege; running it first
+  -- means the more specific message wins. Its absence would abort this deploy
+  -- with undefined_function — loud and fail-closed, which is the right
+  -- direction, and it cannot be absent on a database that has 20260716090000.
+  PERFORM public._assert_no_public_execute(c_sig10);
+
   IF has_function_privilege('anon', v_oid10, 'EXECUTE')
      OR has_function_privilege('authenticated', v_oid10, 'EXECUTE') THEN
-    RAISE EXCEPTION 'destrict-enqueue-10param: anon or authenticated holds EXECUTE on the 10-param SECURITY DEFINER overload — ACL drifted open (migration 118 revoked it)';
+    RAISE EXCEPTION 'destrict-enqueue-10param: anon or authenticated holds EXECUTE on the 10-param SECURITY DEFINER overload — ACL drifted open (migration 118 revoked it). The PUBLIC probe above already passed, so this is a grant held by the named role directly, not one inherited from PUBLIC.';
   END IF;
   IF NOT has_function_privilege('service_role', v_oid10, 'EXECUTE') THEN
     RAISE EXCEPTION 'destrict-enqueue-10param: service_role lost EXECUTE on the 10-param overload — every sanctioned enqueue path would break';
@@ -658,6 +838,31 @@ BEGIN
     RAISE EXCEPTION 'destrict-enqueue-10param: compute_jobs_kind_check no longer admits compute_analytics (registry/CHECK must STAY — 45 historical rows FK-reference it)';
   END IF;
 
-  RAISE NOTICE 'OPS-08: both _enqueue_compute_job_internal overloads re-read the lost race without the strict form and raise serialization_failure; retired-kind reject, SECDEF/search_path, ACL and the historical kind CHECK all intact.';
+  -- (h) THE REVERT DISCRIMINATOR THE RECURRING GATE RESTS ON IS ACTUALLY THERE.
+  -- The note above COMMENT ON FUNCTION states that stripping the phrase makes
+  -- supabase/tests/test_enqueue_internal_destrict.sql "silently fall back to
+  -- answering SKIP — exit 0 — on a genuine regression", and then guarded
+  -- nothing: an editor who reworded that literal broke the recurring gate with
+  -- no signal anywhere. A prose warning is not a mechanism. This arm is.
+  --
+  -- Scope, so the strength is not overstated: like (a)-(d) this is a COPY-CHECK
+  -- of something this same file wrote ~150 lines above, in the same implicit
+  -- transaction. It cannot detect a LATER migration that rewrites or DROPs the
+  -- comment — see the two-ways-to-destroy note above COMMENT ON FUNCTION, where
+  -- the second way is unguarded and fails OPEN. What it does close is the
+  -- mistake that is actually likely: editing the COMMENT literal in THIS file
+  -- while the gate's marker stays as it is.
+  --
+  -- coalesce because obj_description returns NULL for an uncommented function,
+  -- and `strpos(NULL, x) = 0` is NULL, not TRUE — the IF would not fire and this
+  -- arm would pass on a function carrying no comment at all. Here the coalesce
+  -- is load-bearing in the fail-closed direction, unlike the decorative one it
+  -- resembles.
+  v_comment10 := coalesce(obj_description(v_oid10, 'pg_proc'), '');
+  IF strpos(v_comment10, c_applied_marker) = 0 THEN
+    RAISE EXCEPTION 'destrict-enqueue-10param: the 10-param catalog COMMENT this migration just wrote does not contain the revert-discriminator phrase that supabase/tests/test_enqueue_internal_destrict.sql greps for. That gate uses this phrase to tell "never applied" from "applied then reverted by a stale re-base" — two states with a BYTE-IDENTICAL body. Without it the gate answers SKIP and exits 0 on a real regression. Restore the phrase in the COMMENT ON FUNCTION literal above, or supersede the gate marker in the same change. Comment read back: %', v_comment10;
+  END IF;
+
+  RAISE NOTICE 'OPS-08: both _enqueue_compute_job_internal overloads re-read the lost race without the strict form and raise serialization_failure; retired-kind reject, SECDEF, the exact search_path pin, the ACL (PUBLIC + named roles), the revert-discriminator comment and the historical kind CHECK all intact.';
 END
 $$;
