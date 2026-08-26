@@ -4412,10 +4412,19 @@ describe("[161-05 / WIZERR-03] KEY_ORPHANED offers a remedy that can succeed", (
  * neither is the wording:
  *
  *   · THE REMEDY IS REAL. Unlike `KEY_ORPHANED` — where the same account is
- *     refused by the same partial UNIQUE every time — the credential form on
- *     this very step still works, so `try_another_key` names something that can
- *     actually succeed. The oracle is `buildEnvelope`'s DERIVATION, never the
- *     `actions` array restated against itself ([153.6-06 / PARITY-05]).
+ *     refused by the same partial UNIQUE every time — the credential form is
+ *     REACHABLE from the refusing screen, so `try_another_key` names something
+ *     that can actually succeed. The oracle is `buildEnvelope`'s DERIVATION,
+ *     never the `actions` array restated against itself ([153.6-06 /
+ *     PARITY-05]).
+ *
+ *     ⚠️ "REACHABLE FROM", NOT "ON" — CORRECTED BY MEASUREMENT (162-06 review /
+ *     B-2). This docblock used to say "the credential form on this very step
+ *     still works", and 162-06 falsified that in the same branch: the only
+ *     screen that renders this refusal is ConnectKeyStep's PRESELECT sub-state,
+ *     which returns before the form. The form is one control away — "Use a
+ *     different key" — and ConnectKeyStep wires the envelope's Retry to that
+ *     same control.
  *
  *   · IT SAYS NOTHING ABOUT THE USER'S CREDENTIALS. This arm never receives
  *     them, never sends them anywhere and never stores them — it returns before
@@ -4429,10 +4438,11 @@ describe("[162-05 / D-162-3] KEY_REUSE_UNAVAILABLE offers a remedy that can succ
   it("derives recoverable — from try_another_key, and not from clear_and_retry", () => {
     expect(
       buildEnvelope("KEY_REUSE_UNAVAILABLE", "corr-reuse-1").recoverable,
-      "On ConnectKeyStep the Retry control clears the banner and returns the " +
-        "user to the credential form — which IS the remedy this entry's first " +
-        "fix line names. Losing recoverability strands them on a refusal whose " +
-        "own copy tells them to use the form behind the banner.",
+      "On ConnectKeyStep's preselect branch the Retry control is wired to the " +
+        "'Use a different key' escape hatch — which IS the remedy this entry's " +
+        "first fix line names. Losing recoverability hides Retry and strands " +
+        "the reader on a screen whose only other control ('Continue with this " +
+        "key') is refused identically every time.",
     ).toBe(true);
 
     expect(
@@ -4441,6 +4451,67 @@ describe("[162-05 / D-162-3] KEY_REUSE_UNAVAILABLE offers a remedy that can succ
         "same reuse_api_key_id is refused identically, because the key it names " +
         "still does not exist.",
     ).not.toContain("clear_and_retry");
+  });
+
+  /**
+   * [162-06 review / B-2] ⛔ IT MAY NOT CLAIM A CREDENTIAL FORM IS ON THE
+   * SCREEN.
+   *
+   * ⚠️ THIS IS THE TABLE-LEVEL HALF, AND ON ITS OWN IT IS NOT ENOUGH — a
+   * copy-only assertion is precisely what let the defect ship. The load-bearing
+   * oracle is the RENDERED one in
+   * `steps/ConnectKeyStep.test.tsx` ("[162-06 review / B-2] the preselect
+   * refusal points at a control that exists"), which reads the escape hatch's
+   * label off the DOM and requires the envelope to contain it. This case exists
+   * so the banned sentence class is also refused at the source, where the next
+   * copy edit is actually typed.
+   */
+  it("never claims a credential form stands on the refusing screen", () => {
+    // Present-tense "the form is HERE" claims. ⚠️ Deliberately narrow: a
+    // sentence about where a control LEADS ("…to connect this account with its
+    // own API credentials instead") is honest and must stay green.
+    const FORM_IS_ON_THIS_SCREEN = [
+      "the form on this step",
+      "the form on this screen",
+      "the form on this page",
+      "the form below",
+      "the form above",
+      "the form behind",
+      "still works normally",
+      "connect this account here",
+    ] as const;
+
+    const claimsIn = (haystack: string): string[] =>
+      FORM_IS_ON_THIS_SCREEN.filter((p) => haystack.toLowerCase().includes(p));
+
+    // ⛔ POSITIVE CONTROL — the literal sentence that shipped and was measured
+    // false. If the predicate stops matching it, the scan below has gone blind.
+    // Fix the phrase list; never delete this control.
+    expect(
+      claimsIn(
+        "Connect this account here with its API credentials instead — the " +
+          "form on this step still works normally.",
+      ),
+      "the form-claim predicate matched NOTHING in the very sentence B-2 was " +
+        "filed against, so the assertion below passes for the wrong reason.",
+    ).not.toEqual([]);
+
+    const copy = WIZARD_ERROR_COPY.KEY_REUSE_UNAVAILABLE;
+    const surface = [copy.title, copy.cause, ...copy.fix].join(" | ");
+    expect(
+      surface.length,
+      "the copy under test collapsed to nothing, so the scan below is vacuous",
+    ).toBeGreaterThan(80);
+    expect(
+      claimsIn(surface),
+      "KEY_REUSE_UNAVAILABLE names a credential form as if it were on the " +
+        "screen. It is not: the only client emitter is ConnectKeyStep's reuse " +
+        "arm, which lives in the preselect sub-state, and that sub-state " +
+        "returns BEFORE the form. Naming it leaves the reader hunting for a " +
+        "control that is not painted while Retry blanks the banner and " +
+        "'Continue with this key' refuses identically — the unwinnable loop " +
+        "162-06 exists to close, one screen later.",
+    ).toEqual([]);
   });
 
   it("offers neither to resume a draft nor to delete one — no draft was read or written", () => {

@@ -5,6 +5,7 @@ import Link from "next/link";
 import { Input } from "@/components/ui/Input";
 import { Button } from "@/components/ui/Button";
 import {
+  formatKeyError,
   recogniseSeamErrorCode,
   type WizardErrorCode,
 } from "@/lib/wizardErrors";
@@ -465,6 +466,58 @@ function recogniseCreateWithKeyCode(data: { code?: string }): WizardErrorCode {
     : data.code && KNOWN_CREATE_WITH_KEY_CODES.has(data.code as WizardErrorCode)
       ? (data.code as WizardErrorCode)
       : "UNKNOWN";
+}
+
+/**
+ * 162 review / A-6 — the sentinel that tells "the body was `{}`" apart from
+ * "the body was not JSON at all".
+ *
+ * ⚠️ BOTH ARMS USED TO COLLAPSE THE SECOND INTO THE FIRST. `res.json().catch(()
+ * => ({}))` turns a proxy's HTML error page, a truncated body or a gzip fault
+ * into an empty object; `recogniseCreateWithKeyCode({})` then answers `UNKNOWN`
+ * and NOTHING anywhere records that a parse was attempted and failed.
+ * `UNKNOWN` is an honest thing to SHOW — we genuinely do not know the code —
+ * so this is a debuggability loss rather than a false claim, and the fix is
+ * scoped to match: the screen is byte-unchanged, and the console gains the
+ * response's own metadata to correlate against the proxy/CDN logs.
+ *
+ * ⛔ WHAT IS LOGGED IS THE RESPONSE'S OWN METADATA AND NOTHING ELSE — `status`
+ * and `statusText`, never the body. An unparseable body is arbitrary bytes from
+ * an intermediary we did not write; echoing it into the console is how an
+ * internal host or a proxy banner ends up in a user-submitted screenshot. Same
+ * rule the sibling surface states beside its own copy of this shape
+ * (`KeyPermissionBadge.tsx`), and the same reason `scrubSeamError` exists on
+ * the server side of this seam.
+ */
+const PARSE_FAILED = Symbol("parse-failed");
+
+/**
+ * Read a `create-with-key` response body, keeping "unparseable" DISTINGUISHABLE
+ * from "empty". Returns the parsed object, and logs — once, with the HTTP
+ * status the sibling surface formats the same way — when there was no JSON to
+ * parse at all.
+ *
+ * ⚠️ IT STILL RETURNS `{}` ON FAILURE, deliberately. The caller's next move is
+ * `recogniseCreateWithKeyCode`, and `UNKNOWN` is the truthful answer for a body
+ * we could not read. Changing the RENDERED outcome would be inventing a code
+ * from a transport fault; the only thing this adds is the record that it
+ * happened.
+ */
+async function readCreateWithKeyBody<T extends object>(
+  res: Response,
+  arm: "credential" | "reuse",
+): Promise<Partial<T>> {
+  const parsed = (await res.json().catch(() => PARSE_FAILED)) as
+    | Partial<T>
+    | typeof PARSE_FAILED;
+  if (parsed === PARSE_FAILED) {
+    console.error(
+      `[wizard:ConnectKeyStep] ${arm} arm: response body was not JSON — ` +
+        `HTTP ${res.status} (${res.statusText || "no body"})`,
+    );
+    return {};
+  }
+  return parsed;
 }
 
 export interface ConnectKeySuccess {
@@ -1047,7 +1100,9 @@ export function ConnectKeyStep({
         }),
       });
 
-      const data = (await res.json().catch(() => ({}))) as {
+      // 162 review / A-6 — reads the body, and RECORDS a parse failure rather
+      // than laundering it into an empty object. See `readCreateWithKeyBody`.
+      const data = await readCreateWithKeyBody<{
         strategy_id?: string;
         api_key_id?: string;
         // 154-06 / WIZCONT-02 — the venue-identity dedup marker. Read as a
@@ -1061,7 +1116,7 @@ export function ConnectKeyStep({
         strategy_name?: string;
         code?: string;
         error?: string;
-      };
+      }>(res, "credential");
 
       if (!res.ok || !data.strategy_id || !data.api_key_id) {
         // The membership-checked translation, shared with the reuse arm. Its
@@ -1254,13 +1309,16 @@ export function ConnectKeyStep({
         }),
       });
 
-      const data = (await res.json().catch(() => ({}))) as {
+      // 162 review / A-6 — same reader as the credential arm, for the same
+      // reason: a proxy's HTML error page must not read as "the route answered
+      // with an empty body". See `readCreateWithKeyBody`.
+      const data = await readCreateWithKeyBody<{
         strategy_id?: string;
         api_key_id?: string;
         strategy_name?: string;
         code?: string;
         error?: string;
-      };
+      }>(res, "reuse");
 
       if (!res.ok || !data.strategy_id || !data.api_key_id) {
         const code = recogniseCreateWithKeyCode(data);
@@ -1354,6 +1412,25 @@ export function ConnectKeyStep({
       })
     : null;
 
+  /**
+   * 162-06 review / B-2 — "can re-sending THE SAME request succeed?", answered
+   * by the copy table rather than by a list kept here.
+   *
+   * `clear_and_retry` is the table's word for "send the same thing again", and
+   * it is what tells a transient hop failure (`SERVICE_UNREACHABLE`) apart from
+   * a refusal of the stored key itself (`KEY_REUSE_UNAVAILABLE`,
+   * `VENUE_ALREADY_CONNECTED`), which no amount of re-sending changes. The
+   * preselect branch's Retry reads it to decide whether Retry means "again" or
+   * "another key" — see the call site below.
+   *
+   * ⚠️ READ THROUGH `formatKeyError`, NOT off `WIZARD_ERROR_COPY` directly:
+   * that is the one accessor allowed to know about context-gated bullets, and
+   * reading around it is how a surface ends up disagreeing with what it renders.
+   */
+  const retryCanResend =
+    errorCode !== null &&
+    formatKeyError(errorCode).actions.includes("clear_and_retry");
+
   // ── 162-06 / HONEST-06 — the SAVED-KEY SUMMARY (162-UI-SPEC § C-5) ──────────
   //
   // A SUB-STATE of this step, not a new component family: the owner already
@@ -1406,9 +1483,39 @@ export function ConnectKeyStep({
 
         {errorEnvelope && (
           <div className="mt-4">
+            {/* 162-06 review / B-2 — WHERE RETRY GOES, DECIDED FROM THE SAME
+                TABLE THE COPY COMES FROM.
+                ⛔ `() => setErrorCode(null)` ALONE WAS THE UNWINNABLE LOOP ONE
+                SCREEN LATER. This branch returns BEFORE the credential form, so
+                on a refusal OF THIS STORED KEY — `KEY_REUSE_UNAVAILABLE` (the
+                row is gone), `VENUE_ALREADY_CONNECTED` (it is spoken for) —
+                blanking the banner left the identical screen: the same panel,
+                the same "Continue with this key" refused identically, and no
+                form. Those codes carry `try_another_key` and NOT
+                `clear_and_retry`, and `try_another_key` means exactly what it
+                says, so Retry is routed to the control that delivers another
+                key.
+                ⛔ AND IT IS NOT ROUTED FOR EVERY CODE, WHICH IS THE OTHER HALF.
+                `SERVICE_UNREACHABLE` is reachable here too — the reuse arm's
+                catch sets it when OUR OWN hop fails — and it carries
+                `clear_and_retry`: re-sending the same request is precisely its
+                remedy, and its own copy says "try the same action again".
+                Dropping the preselect there would take the key out from under
+                a user whose only problem was a transient network fault. So the
+                branch is `clear_and_retry`-shaped rather than a hand-typed code
+                list: the table already answers "can re-sending this succeed?",
+                and a second answer here is a second thing to drift.
+                ⚠️ The code is cleared FIRST and unconditionally. The real host
+                tears this step down by remount, but a host that only re-renders
+                must not be left showing a banner about a key the user has moved
+                on from — and on the `clear_and_retry` arm the clear IS the
+                whole action, unchanged from pre-B-2. */}
             <WizardErrorEnvelope
               envelope={errorEnvelope}
-              onRetry={() => setErrorCode(null)}
+              onRetry={() => {
+                setErrorCode(null);
+                if (!retryCanResend) onUseDifferentKey?.();
+              }}
             />
           </div>
         )}

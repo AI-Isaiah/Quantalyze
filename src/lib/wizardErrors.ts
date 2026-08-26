@@ -300,11 +300,25 @@ export type WizardErrorCode =
   //     This refusal is reached before any draft is read or written.
   //
   // RECOVERABLE — DERIVED, NOT DECLARED, on `KEY_ORPHANED`'s own reasoning:
-  // `try_another_key` is a member of `RECOVERABLE_ACTIONS`, and on
-  // ConnectKeyStep the Retry control clears the banner and returns the user to
-  // the credential form. That form is the actual remedy here — unlike on
-  // `KEY_ORPHANED`, where the same account is refused identically every time —
-  // so the control does what the first fix line says.
+  // `try_another_key` is a member of `RECOVERABLE_ACTIONS`, and the remedy it
+  // names IS reachable from the one screen that renders this refusal — unlike
+  // on `KEY_ORPHANED`, where the same account is refused identically every
+  // time.
+  //
+  // ⚠️ WHICH SCREEN THAT IS, RE-MEASURED (162-06 review / B-2). This code has
+  // exactly one client emitter — ConnectKeyStep's reuse arm — and that arm
+  // exists only in the PRESELECT sub-state, which RETURNS EARLY, before the
+  // credential form is rendered at all. What stands behind the banner there is
+  // the saved-key panel, "Continue with this key" (refused identically every
+  // time) and a "Use a different key" control. The credential form is therefore
+  // NOT behind the banner on this path: it is ONE CONTROL AWAY, which is why
+  // the first fix line names that control instead of a form the reader cannot
+  // see, and why ConnectKeyStep wires the envelope's Retry to the same control
+  // so both routes land on the form the line promises.
+  // ⛔ DO NOT RESTORE the pre-B-2 sentence ("on ConnectKeyStep the Retry
+  // control clears the banner and returns the user to the credential form"). It
+  // described the form-rendering branch, which this refusal never reaches; as
+  // written it justified recoverability with a screen the user is not on.
   // ⛔ NOT `clear_and_retry`: re-posting the same `reuse_api_key_id` is refused
   // identically, because the key it names still does not exist.
   | "KEY_REUSE_UNAVAILABLE"
@@ -1906,12 +1920,31 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
   // the user's credentials, which this arm never receives, never sends anywhere
   // and never stores — a sentence implying otherwise would send them to
   // regenerate a working key for a state that has nothing to do with it.
+  //
+  // ⚠️ AND IT MAY NOT CLAIM A CREDENTIAL FORM IS ON THE SCREEN (162-06 review /
+  // B-2). The first line used to read "Connect this account here with its API
+  // credentials instead — the form on this step still works normally", and that
+  // was TRUE when 162-05 wrote it: ConnectKeyStep rendered the form on every
+  // path. 162-06 added the PRESELECT sub-state in the same branch, and that
+  // sub-state returns BEFORE the form — so the only screen that can render this
+  // refusal is the one screen with no form on it. Naming the form there left
+  // the reader looking for a control that is not painted, with Retry blanking
+  // the banner and changing nothing: the unwinnable loop 162-06 exists to
+  // close, one screen later. The line now names the CONTROL that reaches the
+  // form — "Use a different key", rendered directly under this envelope — and
+  // ConnectKeyStep's preselect branch wires Retry to the same control.
+  // ⛔ IT STILL CLAIMS NOTHING ABOUT WHERE THE READER CAME FROM. This refusal
+  // also renders in the manager wizard while /my-strategies is allocator-gated,
+  // so a flat "go back to My Strategies" would re-open the D-17 class for
+  // managers. The second line stays CONDITIONAL ("If you arrived from…") for
+  // exactly that reason, and the first line names only what is on the screen —
+  // a claim that holds for both populations without branching.
   KEY_REUSE_UNAVAILABLE: {
     title: "That stored key is not available to reuse.",
     cause:
       "You asked us to finish setting up a strategy using a key already stored on your account, and we could not find a live one matching it. It may have been disconnected or removed since the page you started from was loaded. Nothing was created and none of your stored keys changed.",
     fix: [
-      "Connect this account here with its API credentials instead — the form on this step still works normally.",
+      "Choose “Use a different key” on this screen to connect this account with its own API credentials instead.",
       "If you arrived from My Strategies, reload that page first: the key list it showed you is what this request is checked against, and it is now out of date.",
       "If neither clears it, email security@quantalyze.com with the correlation id below.",
     ],
