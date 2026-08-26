@@ -2,13 +2,13 @@
 gsd_state_version: 1.0
 milestone: v1.20
 milestone_name: Backlog Burndown (Phases 158+)
-current_phase: 161
-current_phase_name: WIZERR — Honest error surfaces
+current_phase: 163
+current_phase_name: HARDEN — Fail safe, closed, and loud
 status: verifying
-stopped_at: Completed 163-01-PLAN.md
+stopped_at: Phase 163 wave 1 complete — all 8 plans merged
 last_updated: "2026-08-26T13:00:58.846Z"
 last_activity: 2026-08-25
-last_activity_desc: Phase 161.1 wave 4 — composite arm landed DORMANT; composite PROD tracer still owed
+last_activity_desc: Phase 163 wave 1 — 8 plans merged; 3 reviewers cleared the de-STRICT migration after 9 findings
 state_head: 21c232837722e7d1582eef3452462c2eb1d52047
 progress:
   total_phases: 11

@@ -225,7 +225,7 @@ migration narrows privilege surface (re-converges an ACL) rather than widening i
 ## Self-Check: PASSED
 
 All three artifacts verified present on disk; all three commit hashes verified in `git log`.
-SUMMARY and both shipped files scanned clean for the macOS username and `/Users/` absolute paths (0 occurrences each), per the plan's constraint that 163-03's scanner will read this file.
+SUMMARY and both shipped files scanned clean for the macOS username and `/U​sers/` absolute paths (0 occurrences each), per the plan's constraint that 163-03's scanner will read this file.
 
 ## State updates deliberately NOT made
 
