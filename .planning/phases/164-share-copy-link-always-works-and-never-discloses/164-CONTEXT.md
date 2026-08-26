@@ -212,10 +212,32 @@ re-read at HEAD. **Use these, not the research files' numbers.**
 "Strip every query param except `share=1` so recipients don't inherit the sender's transient
 camera/comparator state." `useShareMode()` reads it and `:1742` uses it to suppress owner chrome.
 
-So recipient-chrome suppression is TODAY a query-param mechanism on the id route. Under A-D1 it
-must be carried STRUCTURALLY by `/factsheet-share/<token>`, and `:1489` must emit the token URL.
-⚠️ Do not leave a second, parallel `?share=1` path alive on the id route for recipients — that
-would be two share mechanisms with different disclosure properties.
+⛔ **CORRECTED 2026-08-26 — an earlier draft of this file said the `?share=1` mechanism "must
+move" to the token route. That was WRONG and would have deleted a working path. Read this version.**
+
+`?share=1` does TWO things today and only ONE of them changes:
+
+1. **Recipient-chrome suppression** (`useShareMode()` :1470-1481, consumed at :1742). This STAYS on
+   the id route exactly as it is. It is not relocated.
+2. **The URL Copy Link hands out** (`ShareLinkButton` :1482-1489). This is where the defect lives:
+   the component takes only `strategyId`, does NOT know publication status, and builds `?share=1`
+   **unconditionally** — so for an unpublished strategy it hands out a URL that 404s for the
+   recipient. That is the founder-hit bug, stated precisely.
+
+**The end state is TWO share mechanisms, and that is CORRECT, not a smell:**
+
+| Strategy is… | Copy Link yields | Why |
+|---|---|---|
+| **published** | `/factsheet/<id>?share=1` — **UNCHANGED, no token** | The id is already public; a capability token would add revocation theatre over public data. ARCHITECTURE.md `:99` states this for BOTH A-D1 options. |
+| **unpublished / private** | `/factsheet-share/<token>` | The id must stay a non-secret and the payload is private, so access needs a revocable capability. |
+
+They differ in disclosure properties **because their subjects differ** — a public id versus a
+private capability. Do NOT collapse them into one lane, and do NOT delete the `?share=1` path.
+
+**The actual work at `:1482-1489`:** give `ShareLinkButton` the publication status it currently
+lacks and branch. Published → today's URL, untouched. Unpublished → mint-or-reuse, then the token
+URL. Recipient-chrome suppression must hold on BOTH lanes: `useShareMode()` continues to serve the
+id route, and the token route implies share mode structurally (there is no query param to read).
 
 ### Blocker 1 — the Phase-29 guard WILL redden on this phase's migration
 
