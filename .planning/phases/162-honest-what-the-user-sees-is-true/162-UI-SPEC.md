@@ -218,7 +218,7 @@ is widened to co-serve `cagr`/`sharpe` (withheld for non-rankable rows — same
 | Settled, metrics present | Real values, existing formatting: CAGR `formatPercent(…, 1)` signed, Sharpe 2dp `formatNumber` — Numbers Contract, `.font-metric`. Neutral ink (magnitude metrics, sign-only color rule). |
 | Settled, BOTH null (failed row / no analytics — route withheld them) | `—` in both cells + the absence note. **Note copy REVISED (existing copy becomes false):** the current note ("Metrics not available in the composer — open the factsheet for full detail.") and its "PERMANENT metrics statement" comment claim structural unreachability that this phase removes. New note: `No computed metrics for this strategy — open the factsheet for detail.` Same slot, same `text-xs text-text-muted`, same single-note discipline (one sentence naming the state; the factsheet link remains the panel's only accent element per 152-UI-SPEC Contract 2). |
 | Settled, exactly ONE null | `—` beside its live sibling, NO note (existing Phase-152 rule: the note is earned only when BOTH are missing). |
-| Fetch error | Treated as settled-absent (em-dash + note). Never zeros, never stale neighbors, no red — absence is not an error (DESIGN.md gates). Purge-on-remove follows the `addedProvenanceById` discipline. |
+| Fetch error | ⚠️ AMENDED 2026-08-26 — this row was WRONG and is the defect a silent-failure audit caught (B-1). Treating a fetch error as settled-absent makes the panel state "No computed metrics for this strategy", a claim about a strategy the request never reached. A seam fault is a settled absence of an ANSWER, not of metrics. Correct contract: a THIRD state `unavailable` — em-dash + a note that attributes nothing ("We could not load metrics for this strategy right now"). Never zeros, never stale neighbors, no red — absence is not an error (DESIGN.md gates). Purge-on-remove follows the `addedProvenanceById` discipline. |
 
 ### C-5 — "Finish setup →" preselect affordance (HONEST-06, D-162-3)
 
@@ -268,7 +268,7 @@ Applicable state considerations resolved: 14 covered, 2 backstop, 1 unresolved
 | loading | Example rows mid-recompute on public discovery (C-6) | ✅ covered | Byte-identical to failed render: `—` cells, badge-free, no public Syncing chip (149 invariant) |
 | error | Wizard failure envelope (C-2) | ✅ covered | Curated title/cause/fix; `Details:` appendix removed; column value never renders in envelope; anti-double-render rule |
 | error | Portfolio StaleWarning (C-2) | ✅ covered | Reader unchanged; column now holds curated sentence; "Showing last-good data." lead retained |
-| error | Drawer metrics fetch failure (C-4) | ✅ covered | Settled-absent render; no red (absence is not an error, DESIGN.md gates) |
+| error | Drawer metrics fetch failure (C-4) | ✅ covered | `unavailable` render — em-dash + non-attributing note, NOT settled-absent (amended 2026-08-26, see C-4). No red (absence is not an error, DESIGN.md gates) |
 | populated | Recomputed example rows (C-6) | ✅ covered | Real KPIs, sign-only color; SyncBadge suppressed by `is_example` guard; Example chip carries identity |
 | populated | Preselect saved-key summary (C-5) | ✅ covered | Exchange + key label as text; no masked fake credentials; focus to primary CTA |
 | partial | Exactly one of CAGR/Sharpe null (C-4) | ✅ covered | `—` beside live sibling, no note (existing Phase-152 rule preserved) |

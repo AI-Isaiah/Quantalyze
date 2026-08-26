@@ -226,3 +226,11 @@ was introduced.
 - commit `f3bb9851` — FOUND
 - commit `c4f026e9` — FOUND
 - commit `831da5fc` — FOUND
+
+
+> ⚠️ **Superseded copy, 2026-08-26.** This document quotes the equity-curve caption as
+> "…without computed analytics". That wording named a cause the code never tested: a row can
+> also be omitted when `isRankableAnalyticsRow` is TRUE but `buildWealthPoints` returns null
+> (unusable series) — and such a row's CAGR/Sharpe render in the breakdown table on the same
+> page, contradicting the sentence. Live copy is now "…without a usable return series".
+> Found by a silent-failure audit (A-1); the text below is left as the historical record.
