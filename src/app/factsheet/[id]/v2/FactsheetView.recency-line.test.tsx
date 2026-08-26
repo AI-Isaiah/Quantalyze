@@ -44,8 +44,21 @@ import { FactsheetBody } from "./FactsheetView";
  *      shortest implementation (render the line inside FreshnessChip) would
  *      have violated that silently. F-4 makes the violation FAIL: the chip's
  *      own subtree must serialize byte-identically whether the line renders or
- *      not. The two payloads differ ONLY in their series, and the chip consumes
- *      only `computedAt` — so any byte of difference is contamination.
+ *      not.
+ *
+ *      ⚠️ AMENDED 2026-08-26 — the original reason given here is now FALSE and
+ *      the pin means something narrower than it used to. It read: "the two
+ *      payloads differ ONLY in their series, and the chip consumes only
+ *      `computedAt` — so any byte of difference is contamination." The chip now
+ *      ALSO consumes the series end (HONEST-02: a recent job over a dead track
+ *      must not read FRESH), so series difference alone no longer proves
+ *      contamination. F-4 still passes, but for a different reason: both
+ *      fixtures share a `computedAt` stale enough to bind the verdict on BOTH
+ *      sides (series-known-old and series-unknown both resolve to the same
+ *      tone), so the chip's subtree is genuinely invariant here. Read F-4 as a
+ *      STRUCTURAL-independence pin (the line is not rendered inside the chip),
+ *      NOT as data-independence. If you change `COMPUTED_AT` to something
+ *      fresh, this pin stops testing what its name says.
  *
  * Stub block (sentry + localStorage + next/navigation) mirrors
  * FactsheetView.owner-notice.test.tsx verbatim: FactsheetProvider's persistence
@@ -127,7 +140,9 @@ const populatedPayload: FactsheetPayload = {
  * The adapter's supported safe-empty blend (`portfolioDaily: []` → every array
  * empty, `dates: []`) — a real render path, exercised by
  * FactsheetBody.degenerate.test.tsx. Same `computedAt` as the populated
- * payload, so the chip is the CONTROLLED variable in F-4.
+ * payload — see the amended note above: the chip is the controlled variable in
+ * F-4 only because that shared `computedAt` is stale enough to bind the tone on
+ * both sides, not because the chip ignores the series.
  */
 const emptySeriesPayload: FactsheetPayload = {
   ...buildScenarioFactsheetPayload({ portfolioDaily: [], benchmark: null }),
