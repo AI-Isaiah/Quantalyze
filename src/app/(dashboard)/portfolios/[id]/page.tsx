@@ -337,9 +337,18 @@ export function EquityCurveCoverage({
   ).length;
   if (shown === total) return null;
   const omitted = total - shown;
+  // IN-03 (162-REVIEW): the counters are computed, so the sentence around them
+  // has to agree with whatever they come out as. Both nouns are reachable at 1:
+  // `omitted` is 1 whenever exactly one constituent lacks a usable series, and
+  // `total` is 1 for a single-strategy portfolio whose only curve is missing
+  // (`shown === total` returns null above, so total===1 implies shown===0).
   return (
     <p className="mt-3 text-caption text-text-muted">
-      {`Equity curves shown for ${shown} of ${total} strategies — ${omitted} without a usable return series are omitted.`}
+      {`Equity curves shown for ${shown} of ${total} ${
+        total === 1 ? "strategy" : "strategies"
+      } — ${omitted} without a usable return series ${
+        omitted === 1 ? "is" : "are"
+      } omitted.`}
     </p>
   );
 }
