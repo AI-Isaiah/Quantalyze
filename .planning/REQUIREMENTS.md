@@ -96,9 +96,12 @@ verified-stale items are excluded by construction.
   keys still accepts a six-character all-lowercase password, and nothing in this phase raised
   the actual gate — the client constant is UX only, the real gate is hosted GoTrue, and both the
   minimum and leaked-password protection are dashboard-owned with no repo representation.
-  ⭐ Booked as WR-10 in TODOS.md and awaiting a founder decision. It is NOT recorded as an
-  accepted risk, because nobody has accepted it yet — saying so would be the false-closure
-  defect this phase exists to remove.
+  ✅ ACCEPTED RISK — founder decision 2026-08-26 (WR-10 in TODOS.md). The six-character,
+  no-character-class floor stands, knowingly, with the key-material exposure path understood.
+  This entry therefore claims exactly two things and no more: the hosted policy was MEASURED
+  rather than assumed, and the resulting floor was ACCEPTED rather than cleared. It does not
+  claim the floor is adequate. Revisit on paying clients, a custody/compliance requirement, or
+  any evidence of credential stuffing; the remedy in TODOS does not expire.
 
   1. **The reading.** The hosted production project's minimum password length is **6**, with **no character-class requirement**. Both facts are the server's own, not the GoTrue default — which is exactly what RESEARCH assumption A1 assumed and this measurement retires.
   2. **The method, and why it was the only lane.** No management-API token exists on the machine that ran this (`~/.supabase/access-token` absent, `SUPABASE_ACCESS_TOKEN` unset) and the Supabase MCP exposes no auth-config reader, so the policy was read directly off the live signup endpoint with a deliberately-failing 1-character password — rejected at validation, so no account is created. It answered `422 weak_password` ("Password should be at least 6 characters.") with `weak_password.reasons = ["length"]`. The second fact needs no second probe: a 1-character lowercase password violates length AND every character class at once, GoTrue enumerates every violated reason, and a configured character policy would have added `"characters"`. It returned `["length"]` alone.

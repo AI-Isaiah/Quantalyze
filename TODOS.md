@@ -1105,11 +1105,17 @@ already visible on any public repo, so the address is very likely public already
 that decision — they are not evidence of current practice.
 
 
-### 🔴 Phase 163 / WR-10 — the password floor was MEASURED, not RAISED (added 2026-08-26)
+### ✅ ACCEPTED RISK — Phase 163 / WR-10: the password floor was MEASURED, not RAISED (decided 2026-08-26)
 
-⚠️ **This item needs a founder decision. It is booked, NOT accepted.** It fell through the
-gap between "fixed" and "recorded" in the phase-163 fix round — re-verification found it
-dispositioned nowhere, which is why it is written up in full here rather than as a one-liner.
+⭐ **DECIDED 2026-08-26 by the founder: the six-character floor is ACCEPTED.** The risk below
+was presented in full — including the key-material exposure path — and accepted knowingly.
+This is a recorded acceptance, not a deferral and not an oversight: nothing here is waiting on
+anyone. Kept in full rather than deleted so the reasoning is auditable, and so that a future
+reader who rediscovers the weak floor finds the decision instead of re-opening it.
+
+⚠️ What would REVERSE this: paying clients, a custody or compliance requirement, or any
+evidence of credential-stuffing against the platform. At that point the remedy below is still
+the remedy — it does not expire.
 
 SEC-01 closed by MEASURING the hosted password policy and mirroring it in one exported
 constant. The measurement discipline was right and is not in question: the hosted minimum was
@@ -1133,10 +1139,10 @@ account takeover is key-material exposure, not just account access.
   leaked-password protection, THEN move `MIN_PASSWORD_LENGTH` and its recorded reading in the
   same commit. The procedure is already written down in the constant's docblock.
 
-⚠️ **If the decision is to defer, record the deferral in the SEC-01 entry as an ACCEPTED RISK.**
-Do not leave SEC-01 reading as though the floor were validated — it was observed, and
-observing a weak floor is not the same as clearing it. That distinction is the whole point of
-this phase.
+✅ DONE — the SEC-01 entry in `.planning/REQUIREMENTS.md` now records this acceptance
+explicitly. It still does NOT claim the floor was validated: it was observed, accepted, and
+says so. Observing a weak floor and accepting it are both legitimate; claiming it was cleared
+would not be, and that distinction is the whole point of this phase.
 
 
 ### Phase 163 / OPS-08 (de-strict `_enqueue_compute_job_internal`) — routed onward (added 2026-08-26)
