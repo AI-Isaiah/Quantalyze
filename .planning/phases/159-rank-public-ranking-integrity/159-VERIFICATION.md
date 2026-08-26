@@ -29,12 +29,14 @@ human_verification:
   - test: "Product call: is RANK-02's splat-class scoping accepted, or does the anon metrics_json blob on /strategy/[id]/v2 + tearsheet get a follow-up (RPC/alias-set design)?"
     expected: "Explicit decision recorded (accept D-02 scoping, or open a follow-up item)"
     why_human: "WINDOWS #7 unmet-truth. Verifier judgment below says the requirement AS WRITTEN is met; the broader disclosure question is a product/security decision."
+    result: "RULED 2026-08-26: RANK-02 is ACCEPTED as written (D-02 scoping stands, requirement MET); a FOLLOW-UP is booked for the alias set — see [RANK-SPLAT-01] in TODOS.md. Measured at ruling time, which is what made the call decidable: the tearsheet reads `analytics.metrics_json` whole (`tearsheet/page.tsx:151`) and an ANONYMOUS reader of a published strategy receives 45 distinct keys. The objection is not that any single key is sensitive — every one is a derived performance statistic — it is that the set is UNBOUNDED BY CONSTRUCTION: a metric added upstream becomes public with no review step."
   - test: "End-to-end 409 remedy (159-07 D4): after a classification-conflict 409, re-classify and resubmit in the real wizard"
     expected: "A fresh wizard_session_id is minted and a fresh strategy is created"
     why_human: "Client fence and server refusal are pinned separately; the composed flow has not been driven against a live route."
   - test: "159-04 D5: published Sharpe/vol on already-live shared scenarios whose legs arrive class-less will visibly move (honest direction: down)"
     expected: "Confirm the movement is acceptable to ship without a user-facing note"
     why_human: "Product/UAT call; no test can decide acceptability."
+    result: "RULED 2026-08-26: SHIP SILENTLY — no user-facing note. The movement is a CORRECTION, not a regression: a crypto leg annualized on the trad sqrt(252) clock read optimistically, and the new figure is the honest one. A note would invite readers to treat the corrected number as the anomaly. Blast radius measured at ruling time: PROD holds 3 published strategies and 0 live shared scenarios, so no reader is holding a screenshot of the superseded figure."
 ---
 
 # Phase 159: RANK — Public-ranking integrity — Verification Report

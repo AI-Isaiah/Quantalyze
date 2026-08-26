@@ -262,20 +262,63 @@ worse than the one it replaced.
 It is declared at `v2/page.tsx:83` with no `export`. The token lane needs it (A.4 option (a)).
 Phase-148 guard pin #4 walks the repo and asserts no file other than `page.tsx` mentions it.
 
-⭐ **FOUNDER RULING 2026-08-26: EXPORT IT AND AMEND THE GUARD.** Export `fetchAndBuildPayload` and
-widen pin #4 from "only `page.tsx`" to a NAMED ALLOW-LIST of exactly the two lanes
-(`v2/page.tsx` + the `factsheet-share/[token]` route), with the reason written into the guard.
-⛔ Do NOT duplicate the builder: the entire SL-1 argument rests on the token lane producing exactly
-what the owner lane produces, and a divergent second copy is precisely how two surfaces came to
-disagree elsewhere in this codebase. ⛔ Do NOT widen the guard to a wildcard — it must keep biting
-for every file outside the allow-list.
-⚠️ Anti-vacuity: after amending, add a THIRD file mentioning `fetchAndBuildPayload` and observe the
-guard RED, then remove it. An allow-list that admits everything is not a guard.
+⛔ **SUPERSEDED — read the second ruling. The first was taken on a STALE COST ESTIMATE that I
+supplied, and the founder revisited once it was corrected.**
+
+~~First ruling (2026-08-26, withdrawn): export in place and widen pin #4 to a two-lane allow-list.~~
+It rested on ARCHITECTURE.md's warning that extraction "touches the composite arm and the
+single-key basis arm, so its diff is wider than it looks". **That was true on 2026-08-20 and is
+FALSE at HEAD:** those arms were extracted to `src/lib/factsheet/` in July
+(`build-payload.ts`, `composite-read-path.ts`, `allocator-portfolio-payload.ts`), and
+`v2/page.tsx:16-20` already imports them. The build half now delegates to lib functions, so
+extraction is a one-function verbatim move.
+
+⭐ **FOUNDER RULING 2026-08-26 (FINAL): EXTRACT TO `src/lib/factsheet/`.** Move
+`fetchAndBuildPayload` into the lib package beside the functions it already calls. Both lanes
+import it. Then re-point the phase-148 guard to pin the **MODULE** as the canonical home rather
+than allow-listing two callers — a stronger invariant, and it removes the oddity of a Next.js page
+file owning a builder two routes depend on.
+⛔ Still no duplicate builder: the entire SL-1 argument rests on the token lane producing exactly
+what the owner lane produces.
+⚠️ The guard bans TWO tokens, not one — `phase-148-owner-lane-cache-isolation.test.ts:364-372`
+lists both `buildFactsheetPayloadCached` and `fetchAndBuildPayload`. Only the second moves;
+`buildFactsheetPayloadCached` must stay pinned to `v2/page.tsx` exactly as it is.
+⚠️ Anti-vacuity: after re-pointing, add a file that mentions the moved symbol from outside the
+allowed set and observe the guard RED, then remove it.
+
+#### Token lookup — **bounded constant-time scan** (ruled 2026-08-26)
+
+A consequence of HMAC + A-D1 TOGETHER that was not surfaced when either was decided: nothing
+token-derived is stored AND the strategy id is not in the URL, so the server cannot locate the row
+from the token. Ruled: scan active share rows and `timingSafeEqual`-compare, **rate-limited first**.
+`UNIQUE(strategy_id)` caps it at one active row per strategy.
+⚠️ **Record a revisit threshold in the plan** — an explicit number of active shares at which the
+O(1) locator variant gets reconsidered. Do not leave the growth implicit. Today the count is 0
+(3 published strategies exist in total), so the scan is trivially bounded now and will not stay so.
+⛔ The rejected alternative was putting a share-row locator in the URL (`<row_id>.<hmac>`); it is
+O(1) but softens the "no identifier in the URL" property A-D1 chose.
+
+#### 410 delivery — **redirect to a sibling route handler** (ruled 2026-08-26)
+
+App Router pages CANNOT emit 410 (verified against the bundled Next docs: only `notFound`,
+`forbidden`, `unauthorized` exist). Ruled: on a token miss the page `redirect()`s to a sibling
+route handler that returns a genuine **410 + `no-store`** with a content-free body.
+⚠️ The recipient sees one extra hop in the URL bar — call this out in UAT so it is not read as a
+bug. ⛔ Rejected: rendering the dead-link page with HTTP 200, because a status line that says "fine"
+about a dead link is the same dishonesty class this milestone keeps closing.
 
 ### Blocker 3 — the Sentry token scrub is NET-NEW, with no analog
 
 `grep -rn "beforeSend\|beforeBreadcrumb" src/` returns **ZERO** hits (`Sentry.init` is at
-`src/instrumentation.ts:30`). There is no existing scrub to extend. ⚠️ And because A-D1 makes the
+`src/instrumentation.ts:30`). There is no existing scrub to extend.
+
+⭐ **The genuinely NEW leak channel under A-D1 is Plausible, not Sentry.** `layout.tsx:92-96` loads
+`plausible.io/js/script.tagged-events.js` site-wide, and Plausible records PATHNAMES. A path token
+is therefore sent to a third-party analytics host on every recipient view. The query-param analysis
+in PITFALLS.md never had to consider this because Plausible does not record query strings by
+default. Decide the mitigation explicitly (exclude the route, or proxy/strip the segment) — do not
+inherit the query-param conclusion. Sentry is server-only here, with `onRequestError` forwarding the
+raw path (`instrumentation.ts:54-58`), so its scrub must also match on PATH. ⚠️ And because A-D1 makes the
 token a PATH SEGMENT, the scrub must match on path, not on a query param — and
 `Referrer-Policy: strict-origin-when-cross-origin` (`next.config.ts:79`) strips query strings
 cross-origin but NEVER strips the path, so the leak surface is strictly wider than PITFALLS.md

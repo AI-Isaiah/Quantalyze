@@ -1038,6 +1038,32 @@ true for 146 and half of 142–145, and **false for 141**.
 
 ## 🟡 FIX MID-TERM
 
+### RANK-SPLAT-01 — the anon metrics surface is unbounded by construction (booked 2026-08-26)
+
+Booked by founder ruling while closing Phase 159's product call. RANK-02 itself is ACCEPTED as
+written and the requirement is MET — this is the broader disclosure question the verifier deferred.
+
+**Measured on PROD 2026-08-26.** `src/app/factsheet/[id]/tearsheet/page.tsx:151` reads
+`analytics.metrics_json` as a whole object, and `v2/page.tsx:96` likewise projects
+`metrics_json_by_basis` as a whole column. An ANONYMOUS reader of a published strategy therefore
+receives **45 distinct keys**, among them `kelly_criterion`, `risk_of_ruin`, `smart_sharpe`,
+`treynor`, `beta`, `alpha`, `benchmark_returns`, `drawdown_episodes`.
+
+⚠️ **The defect is the mechanism, not the contents.** Every one of the 45 is a derived performance
+statistic — no account, key, or identity data — and a published strategy is public by intent. The
+problem is that the set has no boundary: whatever the analytics stage writes becomes publicly
+readable with no review step. 45 is what it happens to be today, not a decision anyone took.
+
+- **[RANK-SPLAT-01] Replace the whole-column projection with a named alias set (or an RPC that
+  returns one)**, so the anonymous surface is a deliberate list. A metric added upstream should be
+  invisible until someone adds it to the list. ⚠️ Pin it with a test that FAILS when a new key
+  appears in the projection, or the boundary decays the first time the compute stage learns
+  something new.
+
+⛔ Deliberately NOT scoped into Phase 164 (founder call): 164 already carries a migration, a new
+public route, two guard amendments and an adversarial cache test, and this is outside SHARE-01..04.
+
+
 ### Phase 163 / WR-06 residual — a non-UTC reporter reads "ends in the future" ~3h every day (added 2026-08-26)
 
 WR-06 is FIXED for the defect it named (a future series end no longer renders amber beside
