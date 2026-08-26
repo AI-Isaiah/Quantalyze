@@ -1071,6 +1071,40 @@ Honest and self-consistent — no longer a contradiction, and no longer amber �
 degraded render for a perfectly healthy strategy.
 
 
+### ⚠️ PRE-EXISTING — a personal email is published in tracked AI-review payloads (added 2026-08-26)
+
+Surfaced by the pre-push secret guardrail while pushing phase 163. **Not introduced by that
+branch** — verified: the file is byte-present on `main` with the identical two email-shaped
+strings, and phase 163's only change to it was the username scrub. Recording it because a
+finding reviewed and then not written down is a finding that gets re-discovered.
+
+**What is exposed.** `.planning/milestones/v0.17.0.0-phases/13-discovery-v2-polish/13-REVIEWS/`
+holds a 174 KB single-line `grok-request.json` (plus 8 sibling payload/response artifacts,
+376 KB total) containing **5 occurrences of a personal `@gmail.com` address** and one
+`internal.url_private` match. The repo is PUBLIC, so these are world-readable.
+
+⚠️ Three further "email" hits in the same scan are FALSE POSITIVES — markdown file
+references of the form `<word>@DESIGN.md`. Two other MEDIUM hits elsewhere in the diff are
+also false positives worth knowing about, because they will recur on every future scan:
+- `pii.cc` matched a git **index line** (`index 32b20c410..656217189 100644`) — diff
+  metadata, not content.
+- `pii.phone.e164` matched `+20260716090000:283-311` — the diff's `+` marker followed by a
+  migration timestamp, which reads as an E.164 number.
+
+**Marginal risk is genuinely low** and should not be overstated: git commit author emails are
+already visible on any public repo, so the address is very likely public already through
+`git log`. What is new is the address sitting inside AI-vendor request payloads.
+
+- **[PII-01] Decide whether the `13-REVIEWS/` payload artifacts should stay tracked.** They
+  are historical AI-review request/response dumps with no ongoing consumer. Deleting them
+  forward removes them from the working tree but NOT from history (history rewriting was
+  explicitly declined by the founder, so that limit is deliberate and stands). If they are
+  kept, the decision should be recorded rather than left implicit.
+
+⛔ Related standing rule: Grok and Codex are no longer used at all. These artifacts predate
+that decision — they are not evidence of current practice.
+
+
 ### 🔴 Phase 163 / WR-10 — the password floor was MEASURED, not RAISED (added 2026-08-26)
 
 ⚠️ **This item needs a founder decision. It is booked, NOT accepted.** It fell through the
