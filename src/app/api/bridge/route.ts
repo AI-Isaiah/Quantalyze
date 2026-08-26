@@ -15,7 +15,7 @@ import { captureToSentry } from "@/lib/sentry-capture";
 // `console.*` has none, so the log site below wraps the caught value here.
 import { scrubSeamError } from "@/lib/seam-redaction";
 import {
-  userActionLimiter,
+  bridgeComputeLimiter,
   checkLimit,
   isRateLimitMisconfigured,
 } from "@/lib/ratelimit";
@@ -91,7 +91,7 @@ export const POST = withAuth(async (req, user) => {
   // B15 limiter-ordering: consume the rate-limit token only AFTER input
   // validation so a malformed/invalid request rejected with 400 above does
   // not burn one of the caller's own tokens.
-  const rl = await checkLimit(userActionLimiter, `bridge:${user.id}`);
+  const rl = await checkLimit(bridgeComputeLimiter, `bridge:${user.id}`);
   if (!rl.success) {
     // G15-046: surface limiter misconfiguration as 503 so canary alerts
     // catch the outage instead of treating users as throttled.

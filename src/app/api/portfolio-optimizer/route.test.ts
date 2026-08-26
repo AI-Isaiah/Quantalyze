@@ -100,6 +100,21 @@ const STATE = vi.hoisted(() => ({
   // Audit-2026-05-07 red-team R-0002: track refund calls so the
   // symmetric-refund tests can assert the 504/503 paths refund the token.
   refundCalls: [] as string[],
+  // Phase 163 SEC-04 — every limiter instance handed to `checkLimit`, in call
+  // order, so a test can assert WHICH bucket this route spends BY IDENTITY.
+  limitersSeen: [] as unknown[],
+}));
+
+/**
+ * Phase 163 SEC-04 — the limiter instance this route must consume.
+ *
+ * A distinguishable object, not `{}`: the identity assertion compares against
+ * this exact reference, so "the route called checkLimit" and "the route called
+ * checkLimit WITH THE COMPUTE BUCKET" stay different claims.
+ */
+const BRIDGE_COMPUTE_LIMITER_SENTINEL = vi.hoisted(() => ({
+  __id: "bridgeComputeLimiter",
+  __limit: "10/3600s",
 }));
 
 vi.mock("@/lib/supabase/server", () => ({
@@ -117,15 +132,24 @@ vi.mock("@/lib/csrf", () => ({
 // ⚠️ EXTENDED, NOT REPLACED (140.4-13 / SEAMRIM-05). See the note in
 // `src/__tests__/csv-validate-route.test.ts`: the pure helpers come from
 // `importActual` so this mock cannot drift from the real 503-vs-429 decision.
+// Phase 163 SEC-04 — this route consumes `bridgeComputeLimiter` (10/3600s),
+// NOT the shared `userActionLimiter` (5/60s). The mock exposes ONLY the
+// limiter the route is supposed to use, so a revert to the shared bucket
+// fails here rather than passing quietly. The refund spy hangs off the SAME
+// object, which is what pins that a refunded token returns to the bucket the
+// token was taken from.
 vi.mock("@/lib/ratelimit", async (importActual) => {
   const actual = await importActual<typeof import("@/lib/ratelimit")>();
   return {
-    userActionLimiter: {
+    bridgeComputeLimiter: Object.assign(BRIDGE_COMPUTE_LIMITER_SENTINEL, {
       resetUsedTokens: async (key: string) => {
         STATE.refundCalls.push(key);
       },
+    }),
+    checkLimit: async (limiter: unknown) => {
+      STATE.limitersSeen.push(limiter);
+      return STATE.checkLimitResult;
     },
-    checkLimit: async () => STATE.checkLimitResult,
     rateLimitDenyJson: actual.rateLimitDenyJson,
     isRateLimitMisconfigured: actual.isRateLimitMisconfigured,
   };
@@ -171,6 +195,7 @@ beforeEach(() => {
   });
   STATE.optimizerCalls = [];
   STATE.refundCalls = [];
+  STATE.limitersSeen = [];
   sentryState.captured.length = 0;
 });
 

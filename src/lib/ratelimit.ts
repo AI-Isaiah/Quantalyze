@@ -215,6 +215,63 @@ export const csvValidateLimiter = makeLimiter(20, "60 s");
 // from exportLimiter (1/day for the heavier full-account GDPR bundle).
 export const auditLogExportLimiter = makeLimiter(10, "3600 s");
 
+// 10/hour per authenticated user — Phase 163 SEC-04 bridge compute.
+// Backs BOTH compute front doors: POST /api/bridge and
+// POST /api/portfolio-optimizer.
+//
+// (a) REAL CADENCE — MEASURED 2026-08-26, not inherited. Over the widest
+// window the production log API accepts (14 days; 21d and 28d are rejected),
+// server-side filtered by requestPath: /api/bridge = 0 requests,
+// /api/portfolio-optimizer = 0 requests. That zero was validated against a
+// positive control on a path known to be hit, and against a --since 14d
+// --until 13d probe proving the window really reaches 14 days back rather
+// than clamping to a shorter retention — so it is a real zero, not a
+// filter-syntax artifact. These are unused surfaces today, so the budget is
+// set to the backend's own, with no invented headroom on top.
+//
+// The size is the EFFECTIVE backend budget, and "effective" is the whole
+// point. The Python side caps both endpoints at slowapi "10/hour" per TENANT
+// (analytics-service/routers/portfolio.py:1945-1947 and :1684-1686), but that
+// storage is memory:// and therefore PER REPLICA (services/rate_limit.py:117-119
+// — "with N Railway replicas every number above is N x looser"), so the nominal
+// 10 is a floor of unknown multiple until N is known. MEASURED: the production
+// analytics service runs numReplicas = 1 in a single region, with the worker
+// merged into the API process rather than held on a second replica. So
+// N = 1 and 10/hour per tenant is the effective ceiling, not 10 x N.
+//
+//     10 req/hour (slowapi nominal) x 1 replica (measured) = 10 req/hour/tenant
+//
+// This front door is keyed per USER (`bridge:<user.id>` / `optimizer:<user.id>`)
+// while the backend is keyed per TENANT, so the per-user allowance must be
+// <= the per-tenant budget or one user alone can exhaust the whole tenant and
+// take a backend 429 this layer never saw. n = 10 makes the two ceilings meet:
+// above 10 the front door promises budget the backend will not serve, below 10
+// it refuses calls the backend would have served — unjustified against 0
+// measured demand. The bridge handler's extra in-handler per-user window
+// (30/3600s, portfolio.py:227-228) is LOOSER than 10/hour/tenant and so never
+// binds first.
+//
+// (b) WHY NOT PIGGYBACKED ON userActionLimiter. That bucket is 5/60s = 300/hour
+// per user — 30x the 10/hour the backend will actually serve. A front door
+// that advertises 30x the real budget cannot tell the truth when it denies:
+// 5/60s can only ever emit Retry-After <= 60, while the backend's hourly bucket
+// can require up to 3600 seconds, so the caller is handed a wait understated by
+// up to 60x and burns the difference into a backend 429. The shared bucket is
+// also crowded — MEASURED 26 non-test route files consume userActionLimiter,
+// so bridge and optimizer were spending (and exhausting) the same budget as
+// attestation, account deletion, key validation and the wizard's finalize step,
+// with no visible link between the surfaces. Resizing that shared bucket to fit
+// compute is prohibited for exactly that reason: it would move 24 other
+// surfaces to fix 2. A NEW named limiter is the standing remedy.
+//
+// (c) WHAT IT CAPS. Both endpoints fan out into expensive Python work — the
+// optimizer's own route comment records a ~15s round-trip per call. Without a
+// compute-sized cap an authenticated caller can hold the single analytics
+// replica busy far past the backend's own budget, degrading every other tenant
+// on it. 10/hour/user is well above real exploratory use (currently zero) and
+// pins the front door to the backend's real capacity.
+export const bridgeComputeLimiter = makeLimiter(10, "3600 s");
+
 /**
  * Discriminated result of `checkLimit`. The denial branch always
  * carries `retryAfter` (so existing callers that read `rl.retryAfter`
