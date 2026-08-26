@@ -141,3 +141,35 @@ factsheet/wizard surfaces (that was Phase 162), and the curated-copy delivery pr
   part of this phase.
 
 </deferred>
+
+<measured_preconditions>
+## Measured Preconditions (resolved by the orchestrator before Wave 2)
+
+**163-09 Task 1 precondition — RESOLVED 2026-08-26. Do NOT re-open its checkpoint.**
+
+The hosted production project's password policy was READ, not assumed. No management
+API token exists on this machine (`~/.supabase/access-token` absent, `SUPABASE_ACCESS_TOKEN`
+unset) and the Supabase MCP exposes no auth-config reader, so the policy was measured
+directly against the live GoTrue signup endpoint with a deliberately-failing 1-character
+password (rejected at validation, so no account is created):
+
+```
+422 weak_password — "Password should be at least 6 characters."
+      weak_password.reasons = ["length"]
+```
+
+Two facts follow, and both are measurements:
+1. **Minimum length = 6.** The number comes from the server's own message.
+2. **No character-class requirement.** A 1-character lowercase password violates length AND
+   every character class at once. GoTrue enumerates every violated reason; it returned
+   `["length"]` alone. A configured character policy would have added `"characters"`.
+
+⇒ RESEARCH assumption A1 is retired by measurement. The client floor of 6 is BACKED by the
+hosted policy — equal to it, not merely compatible with it. Document the number and the
+method (endpoint probe) in the SEC-01 entry; cite this section as the reading.
+
+⚠️ The reading is a point-in-time measurement of a dashboard-owned setting with no repo
+representation — it can be changed outside git at any time. Record it as "read on
+2026-08-26", never as an invariant.
+
+</measured_preconditions>
