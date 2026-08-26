@@ -90,6 +90,26 @@ hash alone.
   scratch line was removed and the gate returned GREEN; ``git status`` shows
   services/rate_limit.py unmodified.
 
+* **Mode A mutation M5 (WR-05, 2026-08-26)** — the walk itself was the defect:
+  it matched an ASSIGNMENT SHAPE (``tree.body`` + ``Assign``/``AnnAssign`` whose
+  value is directly a ``.bind()`` call), so a bind in a module-scope
+  ``try:``/``if:``/``with:``/``for``, one wrapped in another call, one inside a
+  list literal, and one in a class body were all invisible — measured 0 of 6.
+  The walk now flags any ``.bind()`` evaluated at import time and found 6 of 6
+  on the same probe, while still exempting binds in a ``def`` / ``async def`` /
+  ``lambda`` body. Both walks report 0 on the real tree (111 files), so the
+  broadening admitted no false positive and the gate token did not move.
+  Mutation: reverted ``_import_time_bind_lines`` to the old shape-matching walk.
+  Observed 1 failed / 9 passed —
+  ``TestModeAModuleScopeBind::test_the_walk_detects_the_shapes_it_claims_to``
+  FAILED with ``the walk found import-time binds at [], expected
+  [4, 7, 8, 10, 13, 15]``. Restored from a byte backup, sha256 verified.
+
+  ⚠️ That new test is what keeps the gate honest between hand-mutations: the
+  gate asserts ``violations == []`` over the real tree, which a walk returning
+  nothing for ANY input satisfies just as well. Pointing the same walk at input
+  that DOES violate separates "found nothing" from "cannot find anything".
+
 ⛔ ``structlog.testing.capture_logs`` is deliberately NOT used anywhere in this
 file. It REPLACES the processor chain, so ``_redact_processor`` never runs and a
 redaction assertion written against it cannot fail. Everything below goes through
@@ -102,6 +122,7 @@ import ast
 import json
 import subprocess
 import sys
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -463,11 +484,22 @@ class TestEntrypointOrdering:
 # ---------------------------------------------------------------------------
 
 # PRE-EDIT gate token. Measured 2026-08-26 against this phase's base commit,
-# BEFORE any source edit in this phase, with the same AST walk used below:
+# BEFORE any source edit in this phase, with the AST walk used below:
 #   files_scanned = 111, module_scope_bind_count = 0
-# The gate is therefore PREVENTIVE. Its RED demo is mutation M3 in the module
-# docstring — a deliberate scratch violation — because a preventive gate that has
-# never been observed failing is indistinguishable from one that cannot fail.
+#
+# RE-MEASURED 2026-08-26 after WR-05 broadened the walk from "module-body
+# assignment whose value is a .bind() call" to "any .bind() evaluated at import
+# time". Same tree, both walks: 111 files, 0 violations. Broadening the gate
+# therefore admitted no false positive, and the token did not move for a reason
+# that would have invalidated it.
+#
+# The gate is PREVENTIVE. Its RED demo is mutation M3 in the module docstring —
+# a deliberate scratch violation — because a preventive gate that has never been
+# observed failing is indistinguishable from one that cannot fail.
+# `test_the_walk_detects_the_shapes_it_claims_to` makes that property standing
+# rather than anecdotal: it runs the walk over a probe that DOES violate, so the
+# walk is proven able to fire on every commit, not only on the day someone
+# hand-mutated a source file.
 _MODE_A_EXPECTED_BINDS = 0
 
 # Anti-vacuity floor. 111 non-test modules at measurement; 90 leaves room for
@@ -501,32 +533,104 @@ def _non_test_modules() -> list[Path]:
     ]
 
 
-def _module_scope_binds() -> list[str]:
-    """`relpath:lineno` for every top-level assignment whose value is a `.bind(...)`.
+# A function or lambda BODY runs at CALL time, i.e. after configure_logging().
+# Nothing else about the definition is deferred: decorators, argument defaults
+# and annotations are all evaluated where the `def` appears. A class body is
+# NOT deferred either — it executes at import time like any other statement.
+_DEFERS_ITS_BODY = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)
+
+
+def _child_nodes(value: object) -> Iterator[ast.AST]:
+    if isinstance(value, ast.AST):
+        yield value
+    elif isinstance(value, list):
+        for item in value:
+            if isinstance(item, ast.AST):
+                yield item
+
+
+def _import_time_bind_lines(tree: ast.AST) -> list[int]:
+    """Line numbers of every `.bind(...)` call this module EVALUATES ON IMPORT.
+
+    WR-05 (Phase 163 review). The predecessor walked `tree.body` and matched
+    only `ast.Assign` / `ast.AnnAssign` whose value was directly a `.bind(...)`
+    call, which pins an ASSIGNMENT SHAPE rather than the dangerous construct.
+    The same file's SQL sibling was criticised — correctly — for pinning this
+    codebase's naming habit instead of the property, and this was the same
+    failure in the Python gate.
+
+    MEASURED 2026-08-26 against a probe carrying the six shapes WR-05 lists —
+    a bind in a module-scope `try:`, one wrapped in another call
+    (`wrap(...bind(...))`), one inside a list literal, one in a module-scope
+    `for`, one nested in `if:`/`with:`, and one in a class body. The old walk
+    found 0 of 6. This walk finds 6 of 6, and still exempts the three deferred
+    shapes in the same probe (a bind in a `def` body, in an `async def` body,
+    and in a lambda body). Both walks report 0 on the real tree at that commit,
+    so broadening the gate introduced no false positive — see
+    `test_the_walk_detects_the_shapes_it_claims_to`, which re-runs that probe.
 
     AST, not grep, for the reason tests/test_redact.py gives for its own scan:
     docstring prose mentioning `.bind()` — this file is full of it, and so is
-    services/mt5_client.py — would false-positive a text search. `tree.body`
-    only, because a `.bind()` inside a function runs after configuration.
+    services/mt5_client.py — would false-positive a text search.
     """
+    found: list[int] = []
+
+    def walk(node: ast.AST, deferred: bool) -> None:
+        if (
+            not deferred
+            and isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "bind"
+        ):
+            found.append(node.lineno)
+        defers = isinstance(node, _DEFERS_ITS_BODY)
+        for field, value in ast.iter_fields(node):
+            child_deferred = deferred or (defers and field == "body")
+            for child in _child_nodes(value):
+                walk(child, child_deferred)
+
+    walk(tree, deferred=False)
+    return found
+
+
+def _module_scope_binds() -> list[str]:
+    """`relpath:lineno` for every `.bind(...)` evaluated at import time."""
     violations: list[str] = []
     for path in _non_test_modules():
         rel = path.relative_to(_ANALYTICS_ROOT).as_posix()
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=rel)
-        for node in tree.body:
-            if isinstance(node, ast.Assign):
-                value = node.value
-            elif isinstance(node, ast.AnnAssign) and node.value is not None:
-                value = node.value
-            else:
-                continue
-            if (
-                isinstance(value, ast.Call)
-                and isinstance(value.func, ast.Attribute)
-                and value.func.attr == "bind"
-            ):
-                violations.append(f"{rel}:{node.lineno}")
+        violations.extend(
+            f"{rel}:{lineno}" for lineno in _import_time_bind_lines(tree)
+        )
     return violations
+
+
+# The six import-time shapes WR-05 names, plus the three deferred shapes that
+# must NOT be flagged. Parsed, never executed — `wrap` is undefined on purpose.
+_BIND_SHAPE_PROBE = '''
+import structlog
+try:
+    _a = structlog.get_logger("mt5").bind(component="mt5")
+except Exception:
+    _a = structlog.get_logger("mt5")
+_b = wrap(structlog.get_logger().bind(x=1))
+_C = [structlog.get_logger().bind(y=2)]
+for _i in range(2):
+    _d = structlog.get_logger().bind(z=3)
+if True:
+    with open("/dev/null") as _f:
+        _e = structlog.get_logger().bind(w=4)
+class K:
+    _g = structlog.get_logger().bind(v=5)
+def safe():
+    _h = structlog.get_logger().bind(u=6)
+    return _h
+async def safe_async():
+    return structlog.get_logger().bind(t=7)
+_lam = lambda: structlog.get_logger().bind(s=8)
+'''
+_PROBE_IMPORT_TIME_LINES = [4, 7, 8, 10, 13, 15]
+_PROBE_DEFERRED_LINES = [17, 20, 21]
 
 
 _PROBE_MODE_A = """
@@ -569,6 +673,40 @@ class TestModeAModuleScopeBind:
             "credential-adjacent modules this gate exists for. A high file count "
             "with the wrong files in it is still a vacuous scan."
         )
+
+    def test_the_walk_detects_the_shapes_it_claims_to(self) -> None:
+        """WR-05 — the gate must pin the CONSTRUCT, not an assignment shape.
+
+        The predecessor walked `tree.body` for `Assign`/`AnnAssign` whose value
+        was directly a `.bind(...)` call. Every shape below is still module
+        scope, still frozen at import time, and every one of them was invisible
+        to it — measured 0 of 6. The failure scenario WR-05 gives is a
+        defensive `try:`/`except:` bind at module scope in
+        services/mt5_client.py, the module this phase names as an MT5-password
+        surface: a permanently unredacted BoundLogger, with the gate green.
+
+        This is also the standing anti-vacuity proof for the gate above. That
+        gate asserts `violations == []` over the real tree, which passes just as
+        happily against a walk that returns nothing for ANY input. Here the walk
+        is pointed at input that DOES violate, so "found nothing" and "cannot
+        find anything" stop being the same observation.
+        """
+        tree = ast.parse(_BIND_SHAPE_PROBE)
+        found = _import_time_bind_lines(tree)
+        assert found == _PROBE_IMPORT_TIME_LINES, (
+            f"the walk found import-time binds at {found}, expected "
+            f"{_PROBE_IMPORT_TIME_LINES}. Missing lines are shapes an author "
+            "can write today that this gate would wave through: a bind in a "
+            "module-scope try/if/with/for, one wrapped in another call, one "
+            "inside a list literal, or one in a class body."
+        )
+        for deferred_line in _PROBE_DEFERRED_LINES:
+            assert deferred_line not in found, (
+                f"line {deferred_line} of the probe is inside a function or "
+                "lambda BODY — it runs at call time, after configure_logging(), "
+                "and is the shape the gate's own error message TELLS authors to "
+                "move to. Flagging it would make the fix unreachable."
+            )
 
     def test_no_module_scope_bind_in_non_test_code(self) -> None:
         """THE GATE. A new module-scope `.bind()` reddens here, by file and line.
