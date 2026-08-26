@@ -585,6 +585,20 @@ items were dropped, not carried. Categories: **Fix now** / **Fix mid-term** / **
    reshapes just-red-teamed money-math or test machinery right before ship.
    **Recorded:** 2026-08-23 (/simplify, phase 159)
 
+0.11. **📋 Expect FOUR red SQL gates on the phase-162 PR, not two — do not read the extra two as regressions.**
+   Recorded 2026-08-26 from the phase-162 code review (IN-01). Nothing applies migrations to the
+   TEST project (`supabase-migrate.yml` targets PRODUCTION only, and the `sql-tests` job globs
+   `supabase/tests/test_*.sql` and psql's them with no apply step), so every gate that asserts its
+   migration is present hard-fails until someone applies it by hand.
+   The accepted list named only the two NEW gates. Two AMENDED files fail for the same reason:
+   - `supabase/tests/test_create_wizard_strategy_for_key.sql` (new)
+   - `supabase/tests/test_compute_jobs_error_kind_copy_parity.sql` (new)
+   - `supabase/tests/test_sync_status_marked_refresh_protected.sql:210-214` — gate 0b, needs `20260826120000`
+   - `supabase/tests/test_retention_orphaned_running.sql:261-266` — V-1 canary + F-3 counts, needs `20260826140000`
+   ⭐ These are deliberately fail-loud and must NOT be softened into skips — CI rejects whole-file
+   SKIPs as of 2026-08-25 precisely because a skipping gate reads green while asserting nothing.
+   **Clears when** `20260826120000` and `20260826140000` are applied to TEST, in that order.
+
 0.10. **⚠️ The wizard preselect can render a dismissal control that does nothing.**
    ⚠️ *Id note: this is the zero-padded `0.01`–`0.10` series. Do NOT confuse it with the legacy
    unpadded `0.1` / `0.2` / `0.3` items further down, which are a different, older scheme and are
