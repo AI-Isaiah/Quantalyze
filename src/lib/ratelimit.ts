@@ -274,6 +274,21 @@ export const auditLogExportLimiter = makeLimiter(10, "3600 s");
 // replica busy far past the backend's own budget, degrading every other tenant
 // on it. 10/hour/user is well above real exploratory use (currently zero) and
 // pins the front door to the backend's real capacity.
+//
+// ⛔ (d) NEVER "REFUND" A TOKEN ON THIS BUCKET WITH `resetUsedTokens`. WR-03
+// (163 review) found exactly that on `/api/portfolio-optimizer`, where a 5xx
+// refund was implemented as `bridgeComputeLimiter.resetUsedTokens(key)`.
+// MEASURED: `@upstash/ratelimit` v2.0.8 offers `limit`, `blockUntilReady`,
+// `getRemaining` and `resetUsedTokens` — and `resetUsedTokens` DELETES every
+// store key matching `<prefix>:<identifier>*` (dist/index.js:881-884, calling
+// the algorithm's `resetTokens`). There is NO decrement primitive, so a
+// "refund" of one token is a reset of the whole window. On a 5/60s bucket that
+// is nearly harmless and on the export route's 1/day bucket it is exact; on
+// THIS bucket it returns up to ten tokens and up to an hour, so a caller
+// looping into upstream 5xx never gets denied and clause (c) above is void.
+// A caller who can zero their own window on demand is not rate-limited.
+// If a refund is ever genuinely needed here, it needs a primitive that
+// decrements — not this one.
 export const bridgeComputeLimiter = makeLimiter(10, "3600 s");
 
 /**

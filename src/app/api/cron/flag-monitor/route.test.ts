@@ -616,6 +616,12 @@ describe.each([["GET"], ["POST"]] as const)(
       const body = await res.json();
       expect(body.reason).toBe("sentry_rate_limited");
       expect(body.reason).not.toBe("sentry_unreachable");
+      // WR-02 (163 review): the reason assertions above were the WHOLE of this
+      // case, and they were green while the arm answered 200 — so the suite
+      // could see that a throttle had been CLASSIFIED but not that the run was
+      // reported as a success. The full falsifier table lives in
+      // tests/integration/cron-flag-monitor.test.ts; this is the unit-tier pin.
+      expect(res.status).toBe(503);
     });
 
     it("(3b) 500 with no rate-limit headers → reason sentry_unreachable", async () => {
@@ -627,6 +633,8 @@ describe.each([["GET"], ["POST"]] as const)(
       const res = await handler(authedReq());
       const body = await res.json();
       expect(body.reason).toBe("sentry_unreachable");
+      // WR-02 (163 review) — see the note on (3) above.
+      expect(res.status).toBe(503);
     });
 
     // --- (4) zero-denominator streak boundary ------------------------------
