@@ -52,7 +52,7 @@ merge.
 
 ### Tracked (committed in `c8fc680`)
 
-- `/Users/helios-mammut/claude-projects/quantalyze/scripts/verify-phase18-artifacts.ts` (NEW) — `/ship`
+- `scripts/verify-phase18-artifacts.ts` (NEW) — `/ship`
   pre-flight gate. Reads only via `node:fs`. Five gates: (1) all 3 artefact
   files exist, (2) no `<TODO:` literal remains in any artefact, (3)
   team-status.md has >= 3 rows with `status=published`, (4)
@@ -60,27 +60,27 @@ merge.
   cell is no longer a placeholder, (5) Fernet/base64-shape leak guard
   (threshold 40, single-line + multiline). Exits 0 on pass, 1 on fail with
   per-line diagnostics on stderr.
-- `/Users/helios-mammut/claude-projects/quantalyze/package.json` — added
+- `package.json` — added
   `"verify:phase18": "tsx scripts/verify-phase18-artifacts.ts"` script
   entry.
-- `/Users/helios-mammut/claude-projects/quantalyze/TODOS.md` — added a Phase
+- `TODOS.md` — added a Phase
   18 section at the top linking all three local artefacts.
 
 ### Local-only (gitignored under `.planning/phase-18/`)
 
-- `/Users/helios-mammut/claude-projects/quantalyze/.planning/phase-18/in-flight-traceability.md` (NEW) — FIX-01
+- `.planning/phase-18/in-flight-traceability.md` (NEW) — FIX-01
   record-only. Verbatim commit hashes for PR #116 (`3932842`), Bug #1
   forensic patch (`a48a92e` + `1960f54`), and Bybit quirks PRs #117-#120.
   Regression-test reference `TestSyncTradesEnqueuesComputeAnalytics` at
   `analytics-service/tests/test_job_worker.py:553`. Three callsite refs for
   the correlation_id thread.
-- `/Users/helios-mammut/claude-projects/quantalyze/.planning/phase-18/founder-okx-smoke.md` (NEW) — FIX-02
+- `.planning/phase-18/founder-okx-smoke.md` (NEW) — FIX-02
   template. Required-fields table (correlation_id, strategies.id,
   strategies.status, ciphertext fingerprint, wizard timestamp, environment,
   decrypt round-trip assertion), Strategy Status Transitions table (4
   timestamped rows), Railway shell snippet that prints exactly the
   fingerprint without leaking ciphertext.
-- `/Users/helios-mammut/claude-projects/quantalyze/.planning/phase-18/team-status.md` (NEW) — FIX-03
+- `.planning/phase-18/team-status.md` (NEW) — FIX-03
   10-team tracker. 1 header + 10 team rows. Source distribution: 3 okx, 2
   binance, 2 bybit, 3 csv. Metaworld in row 1 (entry-gate satisfier).
 

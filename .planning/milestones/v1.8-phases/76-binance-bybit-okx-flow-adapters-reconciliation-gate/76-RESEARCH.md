@@ -334,7 +334,7 @@ for t in range(n-1, 0, -1):
 | Coverage gate | `--cov-fail-under=80` (Python suite) `[CITED: CLAUDE.md]` |
 | Quick run command | `<venv312>/bin/python -m pytest analytics-service/tests/test_external_flows.py analytics-service/tests/test_nav_twr.py -x` |
 | Full suite command | `<venv312>/bin/python -m pytest analytics-service/tests -q` (baseline 3036 passed / 92 skipped, STATE.md) |
-| venv | `/private/tmp/claude-501/-Users-helios-mammut-claude-projects-quantalyze/fcce1bd5-15ef-4e42-adb9-85cfc9ad484c/scratchpad/venv312/bin/python` (ccxt 4.5.59 confirmed). **Local Python 3.14 SIGSEGVs on pandas — use the 3.12 venv.** |
+| venv | `/private/tmp/claude-501/<project-scratch>/fcce1bd5-15ef-4e42-adb9-85cfc9ad484c/scratchpad/venv312/bin/python` (ccxt 4.5.59 confirmed). **Local Python 3.14 SIGSEGVs on pandas — use the 3.12 venv.** |
 
 ### Fixtures: vcrpy cassettes (OKX/Bybit) vs in-process stubs (Deribit)
 - Cassettes live in `analytics-service/tests/cassettes/{okx,bybit}/*.yaml`; the singleton

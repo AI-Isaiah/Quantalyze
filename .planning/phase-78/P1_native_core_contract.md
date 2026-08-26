@@ -5,7 +5,7 @@
 accounts is replaced by per-settlement-currency native-unit reconstruction, valued
 daily at `{ccy}_usd` marks. USD-native accounts must be **byte-identical** (SC-4).
 
-All file paths are under `/Users/helios-mammut/claude-projects/quantalyze/analytics-service/`.
+All file paths are under `analytics-service/`.
 
 ---
 

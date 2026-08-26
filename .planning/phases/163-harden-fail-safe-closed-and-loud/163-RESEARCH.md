@@ -12,7 +12,7 @@
 **.planning username scrub (SC-4)**
 - **Scope corrected by measurement: 80 files, not the ~50 the ROADMAP estimated.** Measured
   2026-08-26 on main: 80 tracked `.planning/` files contain the macOS username, 57 contain
-  `/Users/` absolute paths. Plan against 80.
+  `\/Users\/` absolute paths. Plan against 80.
 - **Forward-only redaction, no history rewrite.** The username is already published on a
   public repo — pushed, cloneable, in GitHub's history. Scrubbing forward stops new leakage
   but does NOT unpublish. Founder accepted that limit explicitly rather than force-pushing
@@ -485,7 +485,7 @@ counting-status retry arm [VERIFIED: resilient-fetch.ts:2688-2692]:
 
 **Re-measured at HEAD this session** (CONTEXT figures in parentheses):
 2938 tracked `.planning/` files; **80** contain the macOS username (80 ✓); **59** contain
-`/Users/` absolute paths (57 — drifted +2 since the CONTEXT measurement; re-measure at plan
+`\/Users\/` absolute paths (57 — drifted +2 since the CONTEXT measurement; re-measure at plan
 execution, plan against the live number). ⚠️ Severity is metadata, not credentials — keep
 the requirement's framing.
 
@@ -531,7 +531,7 @@ precedent, and needs no workflow-file change.
 - **The needle problem.** A scan whose source contains the literal username fails its own
   scan (or needs the one allowlist entry the gate forbids). Store the needle encoded
   (base64/char-codes) with a comment saying why, and ALSO match structural patterns
-  (the escaped regex `\/Users\/[^\/\s]+\/` and the dash-mangled `-Users-…` scratchpad form)
+  (the escaped regex `\/Users\/[^\/\s]+\/` and the dash-mangled `\-Users\-…` scratchpad form)
   so a future absolute path with a DIFFERENT username still fails. ⚠️ Spell such patterns in
   ESCAPED form everywhere — including in the gate's own source, plans, and summaries — or
   the artifact self-matches the scan (this file does so deliberately).
@@ -544,7 +544,7 @@ precedent, and needs no workflow-file change.
   those is the gate WORKING — but plans/summaries authored during THIS phase must already
   comply (this RESEARCH.md uses repo-relative paths only).
 - **Pre-edit gate tokens (measured this session, before any scrub):** username-bearing
-  tracked files = 94 total (87 inside `.planning/` — the union of username-bearing and `/Users/`-bearing — PLUS 7 outside it: 5 under `docs/`, 2 applied Supabase migrations). ⚠️ CORRECTED 2026-08-26 by running the scanner: the research recorded "87 total (80 + 7)", conflating the `.planning/`-only union with the tree-wide total. Scrubbing to 87 leaves the 7 non-planning files behind. Always re-measure live.; `/Users/`-bearing `.planning/`
+  tracked files = 94 total (87 inside `.planning/` — the union of username-bearing and `\/Users\/`-bearing — PLUS 7 outside it: 5 under `docs/`, 2 applied Supabase migrations). ⚠️ CORRECTED 2026-08-26 by running the scanner: the research recorded "87 total (80 + 7)", conflating the `.planning/`-only union with the tree-wide total. Scrubbing to 87 leaves the 7 non-planning files behind. Always re-measure live.; `\/Users\/`-bearing `.planning/`
   files = 59. RED demo: after the scrub lands, reintroduce one occurrence in a scratch
   file → gate must fail; remove it.
 
@@ -849,7 +849,7 @@ ASVS mapping of its own deliverables:
 | A2 | Supabase CLI tracks applied migrations by version, not content hash, so a comment-only edit to the two applied migrations is mechanically safe | §4b | If content-hashed, the scrub option 1 breaks `migration list` reconciliation — verify with `supabase migration list` behavior before choosing option 1 |
 | A3 | The worker service on Railway runs `python -m main_worker` per the Dockerfile CMD-override note (the Railway UI/railway.toml override itself is not in-repo) | §1 | If the worker were launched via uvicorn/main.py it would be configured; the fix (configure in `main_worker.py`) is correct and harmless either way |
 | A4 | undici keeps buffering an unconsumed abandoned response body until the attempt signal fires (the OPS-10 premise, inherited from the requirement text) | §3 | If undici already reclaimed it, `body.cancel()` is still correct hygiene; no downside |
-| A5 | The `/Users/`-count drift (57 → 59) is organic new-file growth, not a measurement-method difference | §4b | None — plan against the live re-measured number at execution time |
+| A5 | The `\/Users\/`-count drift (57 → 59) is organic new-file growth, not a measurement-method difference | §4b | None — plan against the live re-measured number at execution time |
 
 ## Open Questions (RESOLVED — all five adopted by a plan; do not re-open)
 

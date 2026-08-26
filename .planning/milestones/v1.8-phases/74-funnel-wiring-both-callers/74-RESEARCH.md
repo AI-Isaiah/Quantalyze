@@ -529,7 +529,7 @@ one Phase 73 did NOT pin.
 
 **Venv (MANDATORY for running analytics tests — local Python 3.14 SIGSEGVs on pandas):**
 ```
-/private/tmp/claude-501/-Users-helios-mammut-claude-projects-quantalyze/fcce1bd5-15ef-4e42-adb9-85cfc9ad484c/scratchpad/venv312/bin/python
+/private/tmp/claude-501/<project-scratch>/fcce1bd5-15ef-4e42-adb9-85cfc9ad484c/scratchpad/venv312/bin/python
 ```
 
 ## Validation Architecture

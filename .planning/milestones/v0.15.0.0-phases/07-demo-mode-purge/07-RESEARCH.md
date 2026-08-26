@@ -845,7 +845,7 @@ CREATE INDEX allocator_equity_snapshots_allocator_asof_desc_idx
 | Property | Value |
 |----------|-------|
 | Framework | Vitest (vitest.config.ts present at project root) |
-| Config file | `/Users/helios-mammut/claude-projects/quantalyze/vitest.config.ts` |
+| Config file | `vitest.config.ts` |
 | Quick run command | `npx vitest run --reporter=verbose` |
 | Full suite command | `npx vitest run` |
 

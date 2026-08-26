@@ -46,7 +46,7 @@ iteration 3 first, since it is the delta against the review you are holding.
 ## Verification
 
 **Where it ran:** the **main checkout**
-(`/Users/helios-mammut/claude-projects/quantalyze`), not an isolated worktree.
+(`<repo-root>`), not an isolated worktree.
 `workflow.use_worktrees` is `true` in config, but the orchestrator explicitly
 directed "main tree, no branch switching", and a hand-rolled GSD worktree has no
 `node_modules` — `npx vitest` exits `MODULE_NOT_FOUND` and `npx tsc` resolves an

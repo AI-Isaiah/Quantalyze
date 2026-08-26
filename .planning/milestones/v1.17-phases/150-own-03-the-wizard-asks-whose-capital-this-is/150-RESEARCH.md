@@ -587,7 +587,7 @@ const strategy =
 | Property | Value |
 |----------|-------|
 | Framework | Vitest 4.x (`vitest.config.ts`), jsdom environment, `@vitejs/plugin-react` |
-| Config file | `/Users/helios-mammut/claude-projects/quantalyze/vitest.config.ts` — `maxWorkers = cpus - 1`, `unstubGlobals: true`, `unstubEnvs: true`, coverage thresholds lines 82 / statements 80 / functions 74 / branches 72 |
+| Config file | `vitest.config.ts` — `maxWorkers = cpus - 1`, `unstubGlobals: true`, `unstubEnvs: true`, coverage thresholds lines 82 / statements 80 / functions 74 / branches 72 |
 | Quick run command | `npx vitest run <path> --no-file-parallelism` |
 | Full suite command | `npm test` (`vitest run`) |
 | Coverage command | `npm run test:coverage` — **blocking CI gate** via the `frontend-coverage` job |

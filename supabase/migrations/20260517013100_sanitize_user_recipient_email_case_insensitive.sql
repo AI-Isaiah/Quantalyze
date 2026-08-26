@@ -1,8 +1,19 @@
 -- PR #182 retroactive audit follow-up (Task #57)
 -- Closes: migration-reviewer MEDIUM #8 (conf 8) — GDPR case-sensitivity gap.
 --
+-- ⚠️ RECORDED EXCEPTION — edited 2026-08-26 under Phase 163 / SEC-02. This file is an
+-- APPLIED migration, which migration-reviewer rule 11 declares inviolate. The edit is a
+-- COMMENT-ONLY scrub of local-path metadata on the "Source artifact" line below (an
+-- absolute home path carrying the macOS username, rewritten repo-relative); ZERO SQL
+-- bytes changed. Safe because the Supabase CLI reconciles applied migrations by VERSION,
+-- not by content hash — verified read-only before the edit: the history table is
+-- `schema_migrations (version text NOT NULL PRIMARY KEY)`, the reconciliation read is
+-- `SELECT version FROM supabase_migrations.schema_migrations ORDER BY version`, the
+-- upsert is `ON CONFLICT (version)`, and upstream `FindPendingMigrations` diffs version
+-- strings parsed from filenames only. The applied SQL body remains inviolate.
+--
 -- Source artifact:
---   /Users/helios-mammut/claude-projects/quantalyze/.review/retro-audit-pr182.migration-reviewer.jsonl  line 8
+--   .review/retro-audit-pr182.migration-reviewer.jsonl  line 8
 -- Source migration (already applied, do NOT edit):
 --   supabase/migrations/20260516160100_sanitize_user_purge_notification_dispatches.sql line 158
 --

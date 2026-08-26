@@ -491,7 +491,7 @@ def deribit_dated_external_flows_usd(
 
 **Test command (CI-3.12 venv):**
 ```bash
-/private/tmp/claude-501/-Users-helios-mammut-claude-projects-quantalyze/fcce1bd5-15ef-4e42-adb9-85cfc9ad484c/scratchpad/venv312/bin/python \
+/private/tmp/claude-501/<project-scratch>/fcce1bd5-15ef-4e42-adb9-85cfc9ad484c/scratchpad/venv312/bin/python \
   -m pytest analytics-service/tests/test_deribit_txn.py analytics-service/tests/test_deribit_ingest.py \
   analytics-service/tests/test_nav_twr.py analytics-service/tests/test_derive_broker_dailies_dualmode.py -x
 ```
