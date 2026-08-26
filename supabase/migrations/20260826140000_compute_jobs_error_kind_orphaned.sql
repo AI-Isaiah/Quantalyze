@@ -82,8 +82,8 @@
 -- claim that turns a real permanent failure into a retry suggestion. The
 -- self-verify block below asserts the RPC still refuses it.
 --
--- THE THREE CHANGES
--- -----------------
+-- THE FOUR CHANGES
+-- ----------------
 --   1. compute_jobs_error_kind_check — DROP + ADD, widened to four values. The
 --      DROP-then-ADD idiom (rather than an inline edit of 20260411144407) is
 --      what makes the named constraint the one the parity contract resolves;
@@ -96,6 +96,10 @@
 --      admin/user job list stops saying "can't retry automatically" about a
 --      worker death. Re-based on 20260516104201 (the LATEST definition; the
 --      later 20260516131500 touches only the COMMENT, which is re-stated here).
+--   4. A ONE-TIME BACKFILL of the already-reaped rows (STEP 4). ⚠️ This is new
+--      in the F-3a revision; the first draft refused to backfill and justified
+--      the refusal with a claim that is FALSE. See "WHY THE HISTORY IS
+--      BACKFILLED" below.
 --
 -- ⚠️ TS SIDE, in the SAME commit: `compute_jobs.error_kind` is a PINNED pair in
 -- src/__tests__/contracts/check-zod-db-check-parity.test.ts, which resolves the
@@ -107,12 +111,48 @@
 -- FIX_TS / FIX_FILENAME constants at THIS file (its own arm 7 fails loud on a
 -- forward-only cron re-registration that leaves the pointer behind).
 --
+-- ⛔ WHY THE HISTORY IS BACKFILLED (Phase 162 review, F-3a)
+-- ---------------------------------------------------------
+-- The first draft of this migration declined to touch the 64 'permanent' rows
+-- the 2026-08-26 PROD census counted, on the grounds that "their provenance is
+-- unrecoverable" and that reaped orphans are "indistinguishable in that census".
+-- ⚠️ BOTH CLAIMS ARE FALSE, and the evidence is in this very file: the reaper
+-- stamps FIXED audit literals — 'orphaned_running_reaped: …', one per arm, which
+-- STEP 2 carries forward verbatim and STEP 5 pins at two occurrences. So
+--
+--   status = 'failed_final' AND last_error LIKE 'orphaned_running_reaped:%'
+--
+-- identifies the reaped population EXACTLY. It is not a heuristic and it is not
+-- new: 20260817120000:500 already documents that same predicate as the way to
+-- count what a reaper tick terminalized.
+--
+-- Leaving those rows at 'permanent' is not a neutral omission. Both user-facing
+-- readers synthesise copy from (status, error_kind) and both render TODAY for
+-- these rows — get_user_compute_jobs.user_message on the job list, and
+-- computation_error_copy via the status bridge whenever the strategy's next
+-- transition re-reads the latest failure. They tell those owners that retrying
+-- will not help, when by this migration's own argument retrying is the ONLY
+-- mechanism that computes them: the 20260819130500 readmit sweep is csv-only and
+-- self-blocks once computation_status reads 'failed'. A one-time UPDATE is the
+-- whole fix, so refusing it left a knowable set of users reading a false
+-- sentence for no reason.
+--
+-- ⚠️ THE ⛔ "MAY NOT BE DERIVED FROM last_error" ANCHOR IS NOT VIOLATED. That
+-- rule (mig 20260826120000) forbids the identifier inside
+-- sync_strategy_analytics_status — it is a RUNTIME copy-derivation ban, and it
+-- exists because deriving user-visible copy from the operator column is how a
+-- raw Python exception string reached a user. A one-time migration UPDATE that
+-- reads a fixed audit literal to CORRECT a structured classification is a
+-- different act: nothing derived from that column is written to a user surface,
+-- and the column itself is left byte-unchanged, so the audit trail that proves
+-- the re-classification stays intact and the UPDATE is exactly reversible by its
+-- own predicate.
+--
 -- NOT CHANGED, on purpose: mark_compute_job_failed's validation list (above);
--- compute_jobs.last_error (operator surface, keeps raw text); the reaper's fixed
--- audit literals, windows and bounds; any existing row (this re-classifies the
--- FUTURE, it does not rewrite the 64 'permanent' rows the 2026-08-26 PROD census
--- counted — their provenance is unrecoverable, which is the cost of the defect
--- having shipped and is not fixable by a backfill).
+-- compute_jobs.last_error (operator surface, keeps raw text — including on the
+-- backfilled rows); the reaper's fixed audit literals, windows and bounds; and
+-- any failed_final row that does NOT carry a reaper literal, whose provenance
+-- genuinely is unrecoverable and which is therefore left alone.
 
 BEGIN;
 SET lock_timeout = '5s';
@@ -181,6 +221,17 @@ BEGIN
     'retention_compute_jobs_orphaned_running',
     '50 * * * *',
     $cron$
+    -- CANARY_162_V1_PROSE_ONLY — a prose-only token. It appears in this comment
+    -- and in NO code, here or anywhere else in this body. Part 1 of
+    -- supabase/tests/test_retention_orphaned_running.sql strips comments out of
+    -- cron.job.command before matching, and asserts this token is present in the
+    -- RAW command and ABSENT from the stripped one — which is the only way to
+    -- tell "the stripper ran" from "there was nothing to strip". ⛔ Do not remove
+    -- it to tidy up: that gate goes RED, on purpose (the F-5 lesson from mig
+    -- 20260826130000, where removing a canary silently DISARMED the check that
+    -- depended on it). ⚠️ Keep this comment free of every token Part 1 counts —
+    -- it deliberately spells none of the quoted kind literals, none of the audit
+    -- reason, and no removal keyword.
     DO $sweep$
     BEGIN
       WITH batch AS MATERIALIZED (
@@ -350,7 +401,54 @@ REVOKE ALL ON FUNCTION get_user_compute_jobs FROM PUBLIC, anon;
 GRANT EXECUTE ON FUNCTION get_user_compute_jobs TO authenticated;
 
 -- --------------------------------------------------------------------------
--- STEP 4: self-verify — apply-time, fail-without-fix
+-- STEP 4: the one-time backfill of already-reaped rows
+-- --------------------------------------------------------------------------
+-- Phase 162 review F-3a. STEPS 1-3 fix the FUTURE; this fixes the rows the
+-- defect already produced. The header section "WHY THE HISTORY IS BACKFILLED"
+-- carries the argument and the refutation of the refusal that stood here.
+--
+-- ⚠️ MUST run after STEP 1: 'orphaned' is not admissible until the widened CHECK
+-- is in place, and this is inside the same transaction as that ALTER.
+--
+-- SCOPE, and why each conjunct is load-bearing:
+--   status = 'failed_final'   — the only status the reaper writes. Without it a
+--                               re-claimed row (claim_compute_jobs NULLs
+--                               error_kind on re-claim, 20260603120000) could be
+--                               matched on a stale literal.
+--   error_kind = 'permanent'  — the only kind the pre-fix reaper wrote. Makes the
+--                               statement IDEMPOTENT (a re-apply matches nothing)
+--                               and keeps it off rows already at 'orphaned'.
+--   last_error LIKE '…'       — the fixed audit literal, which is what makes the
+--                               population identifiable at all.
+--
+-- ⛔ NOT a heuristic on message SHAPE. The prefix is a literal this migration
+-- itself writes at STEP 2 and pins at STEP 5, so the match is exact. Anything
+-- that does not carry it is left alone — see the header's NOT CHANGED list.
+--
+-- Unbounded on purpose: the census bounds this at ~64 rows, three orders of
+-- magnitude under the per-tick LIMIT 100 the reaper runs with, and the
+-- lock_timeout at the top of the file bounds the wait.
+DO $backfill$
+DECLARE
+  v_rows INTEGER;
+BEGIN
+  UPDATE public.compute_jobs
+     SET error_kind = 'orphaned'
+   WHERE status = 'failed_final'
+     AND error_kind = 'permanent'
+     AND last_error LIKE 'orphaned_running_reaped:%';
+
+  GET DIAGNOSTICS v_rows = ROW_COUNT;
+
+  -- Reported, not asserted. ZERO is a legitimate outcome — on a fresh database,
+  -- on TEST, and on any environment where the reaper has never fired — so this
+  -- must not RAISE. The number is the one fact the refusal claimed could not be
+  -- known, so it is stated out loud at apply time on every environment.
+  RAISE NOTICE 'F-3a backfill: re-classified % already-reaped compute_jobs row(s) from error_kind = permanent to orphaned (matched on the reaper''s fixed orphaned_running_reaped audit literal; last_error left byte-unchanged). Those owners stop being told that retrying will not help.', v_rows;
+END $backfill$;
+
+-- --------------------------------------------------------------------------
+-- STEP 5: self-verify — apply-time, fail-without-fix
 -- --------------------------------------------------------------------------
 -- ⚠️ A migration DO block runs ONCE. The RECURRING gates are
 -- supabase/tests/test_retention_orphaned_running.sql (the deployed cron body and
@@ -367,6 +465,7 @@ DECLARE
   v_kind    INTEGER;
   v_perm    INTEGER;
   v_reason  INTEGER;
+  v_residue INTEGER;
   v_ok      BOOLEAN;
 BEGIN
   -- (a) THE CHECK ADMITS ALL FOUR KINDS, asserted BEHAVIOURALLY. A regex over
@@ -499,7 +598,27 @@ BEGIN
     RAISE EXCEPTION 'F-3 verification failed: get_user_compute_jobs has no user_message arm for error_kind = ''orphaned'', so the job list still reports a worker death as "we hit a problem we can''t retry automatically". This is the twin of the computation_error defect and is closed in the same migration precisely so it is not found again later.';
   END IF;
 
-  RAISE NOTICE 'Migration 20260826140000 verified: compute_jobs_error_kind_check admits exactly {transient, permanent, unknown, orphaned}; mark_compute_job_failed still refuses orphaned; the deployed reaper writes orphaned on both arms and permanent on none, with both audit literals intact; and computation_error_copy and get_user_compute_jobs.user_message both distinguish it.';
+  -- (f) THE BACKFILL LANDED (Phase 162 review F-3a). Asserted as a RESIDUE of
+  -- ZERO over the identifiable population, not by re-counting what STEP 4
+  -- reported — a gate that reads the writer's own row count proves only that the
+  -- writer ran, and would stay green over a predicate that matches nothing.
+  --
+  -- ⛔ This is the arm that fails if STEP 4 is deleted or its predicate is
+  -- narrowed, on any database where the reaper has ever fired. It is vacuously
+  -- green where the population is empty (a fresh database, TEST), which is
+  -- unavoidable and is why it is paired with STEP 4's unconditional NOTICE: the
+  -- count is always stated, the residue is always asserted.
+  SELECT count(*)
+    INTO v_residue
+    FROM public.compute_jobs
+   WHERE status = 'failed_final'
+     AND error_kind = 'permanent'
+     AND last_error LIKE 'orphaned_running_reaped:%';
+  IF v_residue <> 0 THEN
+    RAISE EXCEPTION 'F-3a verification failed: % failed_final row(s) still carry error_kind = ''permanent'' while their last_error holds the reaper''s fixed orphaned_running_reaped audit literal. These are worker deaths, and both user-facing readers (get_user_compute_jobs.user_message and computation_error_copy via the status bridge) render for them TODAY and tell their owners that retrying will not help — when retrying is the only mechanism that computes them, the 20260819130500 readmit sweep being csv-only and self-blocking once computation_status reads failed. STEP 4 exists to re-classify exactly this set; it has been removed or its predicate no longer matches.', v_residue;
+  END IF;
+
+  RAISE NOTICE 'Migration 20260826140000 verified: compute_jobs_error_kind_check admits exactly {transient, permanent, unknown, orphaned}; mark_compute_job_failed still refuses orphaned; the deployed reaper writes orphaned on both arms and permanent on none, with both audit literals intact; computation_error_copy and get_user_compute_jobs.user_message both distinguish it; and no already-reaped row is left classified permanent.';
 END $verify$;
 
 COMMIT;
