@@ -9,6 +9,8 @@ import {
   scanFile,
   listTrackedFiles,
   deriveLocalUsername,
+  corroborate,
+  MAX_ENDEMIC_FILES,
 } from "../../scripts/check-planning-hygiene";
 
 /**
@@ -249,6 +251,168 @@ describe("an inactive Rule 1 disables ONLY Rule 1, and says so", () => {
     write("a.md", "clean\n");
     const { usernameRule } = runCheck(fixtureRoot, ["a.md"], SYNTHETIC_USERNAME);
     expect(usernameRule.active).toBe(true);
+  });
+});
+
+describe("corroboration — the gate must not cry wolf on a clean tree", () => {
+  /**
+   * The reviewed defect (phase 163, finding 5). `deriveLocalUsername` accepted
+   * any name that stayed off the denylist and cleared the 6-character floor, so
+   * an ordinary container home directory became a case-insensitive substring
+   * search over every tracked file. MEASURED on this repo immediately before
+   * the fix: `HYGIENE_LOCAL_USERNAME=developer` produced 153 violations across
+   * 102 files on a tree with ZERO real leakage, and — the gate having no path
+   * allowlist by construction — no escape but the variable that caused it.
+   *
+   * ⭐ The fix must hold BOTH ends: no crying wolf, and no lost detection.
+   * Every test below pins one end or the other; none of them exempts a path.
+   */
+  const bare = (n: number): string[] =>
+    Array.from({ length: n }, (_, i) => `doc-${i}.md`);
+
+  function writeBareOccurrences(count: number): string[] {
+    const files = bare(count);
+    for (const f of files) write(f, `the ${SYNTHETIC_USERNAME} pattern\n`);
+    return files;
+  }
+
+  it("stands DOWN when the word is endemic and never home-shaped", () => {
+    const files = writeBareOccurrences(MAX_ENDEMIC_FILES + 1);
+    const { violations, usernameRule } = runCheck(
+      fixtureRoot,
+      files,
+      SYNTHETIC_USERNAME,
+    );
+    expect(violations).toEqual([]);
+    expect(usernameRule.active).toBe(false);
+    expect(usernameRule.reason).toContain(`${MAX_ENDEMIC_FILES + 1} tracked files`);
+  });
+
+  it("still FIRES at exactly the rarity boundary — the leak end of the trade", () => {
+    // Pins `<=` against a drift to `<`. One file fewer than the stand-down
+    // threshold must still be treated as an identity, or a real leak that
+    // happens to touch eight files would pass.
+    const files = writeBareOccurrences(MAX_ENDEMIC_FILES);
+    const { violations, usernameRule } = runCheck(
+      fixtureRoot,
+      files,
+      SYNTHETIC_USERNAME,
+    );
+    expect(violations).toHaveLength(MAX_ENDEMIC_FILES);
+    expect(usernameRule.active).toBe(true);
+  });
+
+  it("FIRES on an endemic word the moment ONE occurrence is home-shaped", () => {
+    // ⛔ The detection end. `/home/<name>` is caught by no structural rule —
+    // rules 2-3 only know the macOS forms — so this is exactly the leak that
+    // Rule 1 exists for, and endemic-ness must not excuse it.
+    const files = writeBareOccurrences(MAX_ENDEMIC_FILES + 1);
+    write("leak.md", `/home/${SYNTHETIC_USERNAME}/quantalyze/notes.md\n`);
+    const { violations, usernameRule } = runCheck(
+      fixtureRoot,
+      [...files, "leak.md"],
+      SYNTHETIC_USERNAME,
+    );
+    expect(usernameRule.active).toBe(true);
+    expect(violations).toHaveLength(MAX_ENDEMIC_FILES + 2);
+    // The home-shaped hit is the actionable one, so it must not be buried
+    // under the bare fallout.
+    expect(violations[0]).toContain("leak.md");
+    expect(violations[0]).toContain("inside a home-directory path");
+  });
+
+  it("treats the dash-mangled and tilde home forms as corroborating too", () => {
+    for (const leak of [
+      `${SCRATCH_PREFIX}${SYNTHETIC_USERNAME}-projects`,
+      `~${SYNTHETIC_USERNAME}/notes`,
+      `-home-${SYNTHETIC_USERNAME}-x`,
+    ]) {
+      const files = writeBareOccurrences(MAX_ENDEMIC_FILES + 1);
+      write("leak.md", `${leak}\n`);
+      const { usernameRule } = runCheck(
+        fixtureRoot,
+        [...files, "leak.md"],
+        SYNTHETIC_USERNAME,
+      );
+      expect(usernameRule.active, `${leak} must corroborate`).toBe(true);
+    }
+  });
+
+  it("a CLEAN tree leaves Rule 1 ACTIVE — zero hits is not endemic", () => {
+    // ⭐ The subtlest failure mode available here: if "no evidence" read as
+    // "not corroborated", the rule would switch itself off precisely when the
+    // tree is clean, and the first leak after a successful scrub would land
+    // unnoticed. That is a gate that cannot fail.
+    write("a.md", "wholly unrelated prose\n");
+    const { violations, usernameRule } = runCheck(
+      fixtureRoot,
+      ["a.md"],
+      SYNTHETIC_USERNAME,
+    );
+    expect(violations).toEqual([]);
+    expect(usernameRule.active).toBe(true);
+  });
+
+  it("corroborates on zero hits and on a lone home-shaped hit", () => {
+    expect(corroborate([]).corroborated).toBe(true);
+    expect(
+      corroborate([{ relPath: "a.md", line: 1, homeShaped: true }]).corroborated,
+    ).toBe(true);
+  });
+
+  it("does NOT send the reader in a circle when the OVERRIDE caused the stand-down", () => {
+    // The advice used to be a fixed "set HYGIENE_LOCAL_USERNAME" line. For a
+    // needle that came FROM that variable, that instruction is circular.
+    const hits = bare(MAX_ENDEMIC_FILES + 1).map((relPath) => ({
+      relPath,
+      line: 1,
+      homeShaped: false,
+    }));
+    const result = corroborate(hits);
+    expect(result.corroborated).toBe(false);
+    if (result.corroborated) return;
+    expect(result.status.advice).not.toContain("HYGIENE_LOCAL_USERNAME");
+    expect(result.status.advice.length).toBeGreaterThan(0);
+  });
+
+  it("never leaks the needle into the stand-down text", () => {
+    const files = writeBareOccurrences(MAX_ENDEMIC_FILES + 1);
+    const { usernameRule } = runCheck(fixtureRoot, files, SYNTHETIC_USERNAME);
+    expect(usernameRule.reason).not.toContain(SYNTHETIC_USERNAME);
+    expect(usernameRule.advice).not.toContain(SYNTHETIC_USERNAME);
+  });
+
+  it("corroboration is a TREE decision, never a per-path exemption", () => {
+    // Once corroborated, the files a path allowlist would have carved out are
+    // flagged like any other — including this test file's own path.
+    const files = [
+      "supabase/migrations/20260517013000_applied.sql",
+      ".planning/phases/163/163-03-SUMMARY.md",
+      "scripts/check-planning-hygiene.ts",
+      "src/__tests__/check-planning-hygiene.test.ts",
+    ];
+    for (const f of files) write(f, `owner ${SYNTHETIC_USERNAME}\n`);
+    const { violations } = runCheck(fixtureRoot, files, SYNTHETIC_USERNAME);
+    expect(violations).toHaveLength(files.length);
+  });
+});
+
+describe("the denylist covers names corroboration cannot", () => {
+  // `deployer` occurs exactly ONCE in this repo (measured 2026-08-26), so the
+  // rarity test would call it an identity and fail a clean tree for anyone
+  // whose container home is /home/deployer. Only the denylist catches it.
+  it.each(["developer", "workspace", "deployer"])(
+    "refuses %s, an ordinary non-personal home-directory name",
+    (name) => {
+      const { username, status } = deriveLocalUsername({ homeDir: `/home/${name}` });
+      expect(username).toBeNull();
+      expect(status.reason).toContain("generic");
+    },
+  );
+
+  it("tells the reader that nothing is broken", () => {
+    const { status } = deriveLocalUsername({ homeDir: "/home/developer" });
+    expect(status.advice).toContain("NOTHING IS WRONG");
   });
 });
 

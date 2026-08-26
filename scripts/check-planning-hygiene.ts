@@ -62,6 +62,64 @@
  *     tracked file. The only self-match escape that is also a real redaction is
  *     not having the value in the tree at all.
  *
+ * A known sharp edge: tracked binaries
+ * ------------------------------------
+ * ⚠️ A tracked BINARY that happens to contain the bytes of a home-path prefix
+ * fails Rules 2-3 with no fix available: the bytes cannot be edited out the way
+ * a line of prose can, and there is no path allowlist to excuse the file. This
+ * is ACCEPTED, not overlooked — measured 2026-08-26, zero of the 5712 tracked
+ * files hit it. If one ever does, the remedy is to stop tracking that binary or
+ * to regenerate it without the embedded path. ⛔ It is NOT to add a path
+ * exemption here: the moment this file grows a path allowlist it is blind in
+ * exactly the way that let 940 occurrences accumulate under gitleaks.
+ *
+ * False positives, and why Rule 1 is CORROBORATION-GATED
+ * ------------------------------------------------------
+ * Rule 1's needle is DERIVED, and a derived needle can be an ordinary word.
+ * `deriveLocalUsername` used to accept anything that stayed off a hand-written
+ * denylist and cleared a 6-character floor, so an ordinary non-personal home
+ * directory — `/home/developer`, `/home/deployer`, a `workspace` container home
+ * — sailed through both tests and became a case-insensitive substring search
+ * over every tracked file. MEASURED on this tree at the commit that introduced
+ * this paragraph: `HYGIENE_LOCAL_USERNAME=developer` produced 153 violations
+ * across 102 files on a tree with ZERO real leakage. Because there is no path
+ * allowlist by construction, that contributor's only escape was the very
+ * variable that caused it, and nothing in the output distinguished a false
+ * positive from a real leak. A gate that cries wolf on a clean tree is switched
+ * off by the third person who hits it, which costs more than the wolf did.
+ *
+ * The remedy is CORROBORATION, never an exemption. Rule 1 searches for a needle
+ * only when the tree agrees the word could be an identity. A needle is
+ * corroborated when EITHER
+ *   - it occurs at least once in a HOME-PATH-SHAPED context — immediately after
+ *     the escaped-spelling `\/Users\/`, `\-Users\-`, `/home/`, `-home-` or `~`.
+ *     That is the leak class this gate exists for, and it is positive evidence
+ *     that the word names a home directory in THIS repo; OR
+ *   - it is RARE: at most `MAX_ENDEMIC_FILES` tracked files contain it. A fresh
+ *     leak is small at the instant it appears — which is precisely what a
+ *     per-commit gate is for — while an ordinary word is endemic from day zero.
+ *     See `MAX_ENDEMIC_FILES` for the measured separation the threshold sits in.
+ *
+ * ⛔ Corroboration is a test on the NEEDLE and on the MATCHED CONTEXT. It is
+ * never a test on a file's path, and it never exempts an individual file: once
+ * a needle is corroborated, every occurrence of it in every tracked file is a
+ * violation, including bare ones in prose and including this file.
+ *
+ * Uncorroborated ⇒ Rule 1 is DISABLED AND SAYS SO, printing the file count that
+ * disabled it — distinguishable and self-explaining, never silently absent.
+ * ⚠️ That is a deliberate fail-open, bounded to Rule 1: Rules 2-3 are
+ * structural, keep running, and still catch every absolute and dash-mangled
+ * home path on any machine. Someone whose real account name happens to be
+ * endemic in this codebase therefore loses Rule 1 loudly and keeps Rules 2-3.
+ * There is deliberately NO force-on override for that case: a switch that can
+ * turn a gate on is the same switch that can turn it off.
+ *
+ * The denylist below stays, and is load-bearing rather than redundant: it names
+ * accounts that are non-personal ON ANY MACHINE AND IN ANY REPO, whereas
+ * corroboration can only measure THIS tree. `runner` is the proof — this file's
+ * own prose documents `/home/runner`, a home-path-shaped occurrence, so
+ * corroboration ALONE would confirm the CI account name and fire 2863 times.
+ *
  * Demonstrated RED (Phase 163 plan 03, recorded in 163-03-SUMMARY.md): with the
  * scrub landed and `npm run lint` green, a scratch tracked file
  * (`.planning/red-demo-scratch.md`) containing one raw structural occurrence was
@@ -156,9 +214,24 @@ const LOCAL_USERNAME_ENV = "HYGIENE_LOCAL_USERNAME";
 const MIN_PLAUSIBLE_USERNAME_LENGTH = 6;
 
 /**
- * Generic build/CI/container account names, all of them >= the length floor
- * above (shorter generics such as `root`, `node`, `ci`, `user` and `app` are
- * already excluded by that floor, so listing them here would be redundant).
+ * Account names that are non-personal ON ANY MACHINE AND IN ANY REPO — build,
+ * CI, container and role accounts. All are >= the length floor above (shorter
+ * generics such as `root`, `node`, `ci`, `user` and `app` are already excluded
+ * by that floor, so listing them here would be redundant).
+ *
+ * This list is checked BEFORE a single file is read, and it is not made
+ * redundant by the corroboration gate that follows it — the two answer
+ * different questions. Corroboration can only measure THIS tree; a name absent
+ * from this repo's prose but obviously non-personal (`azureuser` on a fresh
+ * clone) would pass corroboration's rarity test and fail a clean tree. And
+ * `runner` shows the reverse: this file documents `/home/runner`, a home-shaped
+ * occurrence, so corroboration alone would CONFIRM the CI account name and fire
+ * 2863 times.
+ *
+ * `deployer`, `developer` and `workspace` were added 2026-08-26 from the
+ * phase-163 review: all three are ordinary container/CI home-directory names,
+ * all three cleared the length floor, and `developer` alone produced 153
+ * violations across 102 files on a tree with zero real leakage.
  */
 const GENERIC_ACCOUNTS = new Set([
   "administrator",
@@ -168,7 +241,9 @@ const GENERIC_ACCOUNTS = new Set([
   "circleci",
   "codespace",
   "container",
+  "deployer",
   "devcontainer",
+  "developer",
   "docker",
   "ec2-user",
   "github",
@@ -181,12 +256,80 @@ const GENERIC_ACCOUNTS = new Set([
   "vercel",
   "vscode",
   "worker",
+  "workspace",
 ]);
 
-/** Why Rule 1 is or is not running. Never contains the derived value itself. */
+/**
+ * The home-directory prefixes that CORROBORATE a needle: an occurrence
+ * immediately preceded by one of these is positive evidence that the word names
+ * a home directory rather than being ordinary prose.
+ *
+ * ⛔ This is the mirror image of an allowlist and must stay that way. These
+ * shapes decide whether a needle is SEARCHED AT ALL; they never decide whether
+ * a particular file or occurrence is excused. The macOS forms are spelled as
+ * char codes for the same self-match reason as Rules 2-3 above.
+ *
+ * `~` is deliberately last and deliberately bare: `~name` and `~/name` are both
+ * home references, and the bare form subsumes the slash form.
+ */
+const HOME_SHAPES: readonly string[] = [
+  HOME_PREFIX,
+  SCRATCH_PREFIX,
+  "/home/",
+  "-home-",
+  "~",
+];
+
+/**
+ * The rarity half of corroboration: a needle found in MORE than this many
+ * distinct tracked files, with no home-shaped occurrence anywhere, is treated
+ * as an ordinary word in this codebase rather than an identity.
+ *
+ * Measured separation on this tree 2026-08-26 (distinct files containing the
+ * word): the real local identity 0, `deployer` 1, `ubuntu` 24, `analyst` 30,
+ * `developer` 102, `workspace` 113, `runner` 513. ⚠️ Those counts were taken
+ * BEFORE this file named any of the words, and naming one here necessarily adds
+ * this file to its count — `analyst` reads 31 as of the commit that wrote this
+ * sentence. Re-measure rather than trusting the literals. Eight sits an order of
+ * magnitude below the smallest endemic word measured and well above a fresh
+ * leak, which lands in one or two files per commit.
+ *
+ * ⚠️ The residual risk this accepts, stated plainly: a bare-word leak that
+ * appears in more than eight files SIMULTANEOUSLY, with no accompanying path
+ * form anywhere, would disable Rule 1 instead of failing. Such a leak would
+ * have been caught at the first file if the gate ran per commit, and in
+ * practice the artifacts that carry a username also carry its absolute path,
+ * which Rules 2-3 catch structurally and unconditionally.
+ */
+export const MAX_ENDEMIC_FILES = 8;
+
+/**
+ * Why Rule 1 is or is not running, and what a reader should DO about it.
+ * ⚠️ Never contains the derived value itself — CI logs on a public repo are
+ * public, so a status line that printed the needle would republish it.
+ */
 export interface UsernameRuleStatus {
   active: boolean;
   reason: string;
+  /**
+   * Actionable next step, printed by `main` whenever the rule did not run. This
+   * exists because "rule 1 did not run" is useless on its own: the reader
+   * cannot tell a deliberate stand-down from a broken gate without being told
+   * which it is and whether anything needs fixing.
+   */
+  advice: string;
+}
+
+/**
+ * One Rule 1 candidate occurrence, classified by the CONTEXT it sits in.
+ * Carries a line number rather than the file's text so the corroboration pass
+ * needs no second read of any file.
+ */
+export interface UsernameHit {
+  relPath: string;
+  line: number;
+  /** Immediately preceded by a home-directory prefix — see `HOME_SHAPES`. */
+  homeShaped: boolean;
 }
 
 /** The raw inputs to the derivation, injectable so tests need not mutate the OS. */
@@ -248,6 +391,7 @@ export function deriveLocalUsername(
       status: {
         active: false,
         reason: `no local identity could be derived from the environment (no ${LOCAL_USERNAME_ENV}, no home directory, no OS user record)`,
+        advice: `If this machine has an identity worth protecting, set ${LOCAL_USERNAME_ENV} (in CI, from a repository secret — never commit it).`,
       },
     };
   }
@@ -257,6 +401,8 @@ export function deriveLocalUsername(
       status: {
         active: false,
         reason: `the derived local identity is a known generic CI/build/container account, not a personal identifier — searching for it would flag thousands of ordinary occurrences`,
+        advice:
+          "NOTHING IS WRONG AND NOTHING NEEDS FIXING: a generic account name identifies no one, so Rule 1 has nothing to protect on this machine. Rules 2-3 ran over every file.",
       },
     };
   }
@@ -266,12 +412,14 @@ export function deriveLocalUsername(
       status: {
         active: false,
         reason: `the derived local identity is shorter than ${MIN_PLAUSIBLE_USERNAME_LENGTH} characters, so a bare substring search would collide with ordinary prose and identifiers`,
+        advice:
+          "NOTHING IS WRONG AND NOTHING NEEDS FIXING: a name this short cannot be searched as a substring without flagging ordinary words. Rules 2-3 ran over every file.",
       },
     };
   }
   return {
     username: candidate,
-    status: { active: true, reason: `derived at runtime from ${source}` },
+    status: { active: true, reason: `derived at runtime from ${source}`, advice: "" },
   };
 }
 
@@ -310,19 +458,57 @@ export function scanFile(
   contents: string,
   localUsername: string | null,
 ): string[] {
-  const violations: string[] = [];
+  return [
+    ...findUsernameHits(relPath, contents, localUsername).map(formatUsernameHit),
+    ...findStructuralViolations(relPath, contents),
+  ];
+}
 
-  // Rule 1 — the username itself, case-insensitively. Skipped only when the
-  // needle could not be derived, which `main` announces loudly.
-  if (localUsername) {
-    const lowered = contents.toLowerCase();
-    for (const idx of occurrences(lowered, localUsername.toLowerCase())) {
-      violations.push(
-        // ⚠️ Never interpolate the needle here — CI logs on a public repo are public.
-        `LOCAL-USERNAME: ${relPath}:${lineOf(contents, idx)} — the local machine username appears in a tracked file on a public repo. Replace it with the placeholder ${PLACEHOLDER}.`,
-      );
-    }
-  }
+/** `HOME_SHAPES` folded once, for comparison against lower-cased contents. */
+const LOWERED_HOME_SHAPES: readonly string[] = HOME_SHAPES.map((s) =>
+  s.toLowerCase(),
+);
+
+/**
+ * Rule 1 CANDIDATES in one file, each classified as home-shaped or bare.
+ * Returns candidates rather than violations because whether they count is a
+ * property of the WHOLE tree (see `corroborate`), not of this file.
+ *
+ * ⚠️ Offsets come from the lower-cased copy and are used against the original.
+ * That alignment holds because every file is decoded `latin1`, so each char is
+ * one byte in U+0000..U+00FF, and no character in that range changes length
+ * when lower-cased (the length-changing cases, e.g. U+0130, cannot occur).
+ */
+function findUsernameHits(
+  relPath: string,
+  contents: string,
+  localUsername: string | null,
+): UsernameHit[] {
+  // Skipped only when the needle could not be derived, which `main` announces
+  // loudly rather than letting a reader discover it by reading this source.
+  if (!localUsername) return [];
+  const lowered = contents.toLowerCase();
+  return occurrences(lowered, localUsername.toLowerCase()).map((idx) => ({
+    relPath,
+    line: lineOf(contents, idx),
+    homeShaped: LOWERED_HOME_SHAPES.some(
+      (shape) =>
+        idx >= shape.length && lowered.startsWith(shape, idx - shape.length),
+    ),
+  }));
+}
+
+/** ⚠️ Never interpolates the needle — CI logs on a public repo are public. */
+function formatUsernameHit(hit: UsernameHit): string {
+  const where = hit.homeShaped
+    ? "inside a home-directory path"
+    : "in a tracked file";
+  return `LOCAL-USERNAME: ${hit.relPath}:${hit.line} — the local machine username appears ${where} on a public repo. Replace it with the placeholder ${PLACEHOLDER}.`;
+}
+
+/** Rules 2-3. Structural and username-agnostic, so they run on every machine. */
+function findStructuralViolations(relPath: string, contents: string): string[] {
+  const violations: string[] = [];
 
   // Rules 2 and 3 — the two structural home-path forms, with the Rule 4 value
   // exemption applied to the text that FOLLOWS the prefix.
@@ -354,6 +540,48 @@ export function scanFile(
   }
 
   return violations;
+}
+
+/**
+ * Decide whether the tree CORROBORATES the needle as an identity, given every
+ * Rule 1 candidate found in it. This is the answer to "would failing here be
+ * crying wolf on a clean tree?", and it is the only thing standing between a
+ * derived needle and 153 violations over ordinary prose.
+ *
+ * Corroborated when EITHER
+ *   - some occurrence is home-path-shaped (the word demonstrably names a home
+ *     directory in this repo), OR
+ *   - the word is rare enough to be an identity rather than vocabulary.
+ *
+ * ⛔ Note what this does NOT do. It never exempts a file, never consults a path,
+ * and is not consulted per-occurrence: the answer is one boolean for the whole
+ * tree, and when it is `true` EVERY occurrence is a violation. A per-file or
+ * per-path version of this function would be the allowlist this gate exists to
+ * avoid.
+ *
+ * ⚠️ Zero hits corroborates. A clean tree must leave Rule 1 ACTIVE — otherwise
+ * the rule would switch itself off exactly when it is working, and the first
+ * leak after a successful scrub would land unnoticed.
+ */
+export function corroborate(
+  hits: UsernameHit[],
+):
+  | { corroborated: true }
+  | { corroborated: false; status: UsernameRuleStatus } {
+  if (hits.some((h) => h.homeShaped)) return { corroborated: true };
+
+  const fileCount = new Set(hits.map((h) => h.relPath)).size;
+  if (fileCount <= MAX_ENDEMIC_FILES) return { corroborated: true };
+
+  return {
+    corroborated: false,
+    status: {
+      active: false,
+      reason: `the needle occurs in ${fileCount} tracked files (more than ${MAX_ENDEMIC_FILES}) and never once inside a home-directory path, so it reads as ordinary vocabulary in this codebase rather than a local identity`,
+      advice:
+        "THIS IS WHAT A FALSE POSITIVE LOOKS LIKE FROM THE INSIDE, and nothing needs fixing: a word this common is prose, not leakage, and failing on it would redden a clean tree. Rules 2-3 are structural and still cover every absolute and dash-mangled home path. If you believe it IS a real leak, find the occurrences with `git grep -ai <the word>` — and note that `grep` alone is blind to files containing a NUL byte, so use `-a`.",
+    },
+  };
 }
 
 /**
@@ -399,12 +627,17 @@ export function runCheck(
               localUsername !== null
                 ? "an explicitly supplied needle"
                 : "Rule 1 was explicitly disabled by the caller",
+            advice: "",
           },
         };
 
   const violations: string[] = [];
+  const usernameHits: UsernameHit[] = [];
   let filesScanned = 0;
 
+  // Phase 1 — one read per file. Rules 2-3 are decided here and unconditionally;
+  // Rule 1's candidates are only COLLECTED, because whether they are violations
+  // depends on the whole tree.
   for (const rel of files) {
     let contents: string;
     try {
@@ -418,7 +651,26 @@ export function runCheck(
       continue;
     }
     filesScanned += 1;
-    violations.push(...scanFile(rel, contents, derived.username));
+    violations.push(...findStructuralViolations(rel, contents));
+    usernameHits.push(...findUsernameHits(rel, contents, derived.username));
+  }
+
+  // Phase 2 — corroborate the needle, then emit (or stand down from) Rule 1.
+  let usernameRule = derived.status;
+  if (derived.username !== null) {
+    const corroboration = corroborate(usernameHits);
+    if (corroboration.corroborated) {
+      // Home-shaped hits first: on a tree that has both, the path form is the
+      // real leak and the bare hits are its fallout, so burying the former
+      // under the latter would hide the line the reader needs.
+      const ordered = [
+        ...usernameHits.filter((h) => h.homeShaped),
+        ...usernameHits.filter((h) => !h.homeShaped),
+      ];
+      violations.push(...ordered.map(formatUsernameHit));
+    } else {
+      usernameRule = corroboration.status;
+    }
   }
 
   if (filesScanned === 0) {
@@ -427,7 +679,7 @@ export function runCheck(
     );
   }
 
-  return { violations, filesScanned, usernameRule: derived.status };
+  return { violations, filesScanned, usernameRule };
 }
 
 function main(): void {
@@ -437,10 +689,14 @@ function main(): void {
   // only by reading the source (Phase 163 WR-01 — the success line must not
   // claim more than the scan actually checked).
   if (!usernameRule.active) {
+    // ⚠️ The advice is per-reason and NOT boilerplate. It used to be a fixed
+    // "set HYGIENE_LOCAL_USERNAME" line, which is actively misleading for a
+    // stand-down that the override itself triggered: telling someone to set the
+    // variable that just disabled the rule sends them in a circle.
     console.warn(
       `[check-planning-hygiene] ⚠️ LOCAL-USERNAME (rule 1) DID NOT RUN — ${usernameRule.reason}.\n` +
         `  Rules 2-3 (absolute and dash-mangled home paths) are structural and ran over every file.\n` +
-        `  To enable rule 1 here, set ${LOCAL_USERNAME_ENV} (in CI, from a repository secret — never commit it).`,
+        `  ${usernameRule.advice}`,
     );
   }
 
