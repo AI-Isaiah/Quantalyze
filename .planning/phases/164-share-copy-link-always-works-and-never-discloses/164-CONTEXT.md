@@ -190,6 +190,70 @@ Corollaries, each already bitten once:
 
 </specifics>
 
+<verified_corrections>
+## ⛔ VERIFIED CORRECTIONS + BLOCKERS (measured at HEAD 2026-08-26 by the orchestrator)
+
+The line numbers this file inherited from `research/*` are STALE. Every citation below was
+re-read at HEAD. **Use these, not the research files' numbers.**
+
+### Corrected citations
+
+| Claim | Research said | ACTUAL at HEAD |
+|---|---|---|
+| Copy-Link URL builder | `FactsheetView.tsx:1312` | **`FactsheetView.tsx:1489`** (`:1312` is about observation counts — unrelated) |
+| Share-mode detection | "`?s=` must imply shareMode" | **`useShareMode()` at `FactsheetView.tsx:1470-1481`** |
+| Cached wrapper | `v2/page.tsx:287-294` | **`v2/page.tsx:314`** (`buildFactsheetPayloadCached`) |
+| Owner-lane direct call | `v2/page.tsx:535-538` | **`v2/page.tsx:563-573`** |
+| `OwnerUnpublishedNotice` | — | **`v2/page.tsx:605`** |
+
+### ⭐ `?share=1` ALREADY EXISTS — and A-D1 relocates it
+
+`FactsheetView.tsx:1489` builds the copy URL as `${origin}${pathname}?share=1`, commented
+"Strip every query param except `share=1` so recipients don't inherit the sender's transient
+camera/comparator state." `useShareMode()` reads it and `:1742` uses it to suppress owner chrome.
+
+So recipient-chrome suppression is TODAY a query-param mechanism on the id route. Under A-D1 it
+must be carried STRUCTURALLY by `/factsheet-share/<token>`, and `:1489` must emit the token URL.
+⚠️ Do not leave a second, parallel `?share=1` path alive on the id route for recipients — that
+would be two share mechanisms with different disclosure properties.
+
+### Blocker 1 — the Phase-29 guard WILL redden on this phase's migration
+
+`src/__tests__/phase-29-frozen-spine-guards.test.ts:141` sets
+`FORBIDDEN_MIGRATION_RE = /scenario|share/i` and fails on any CHANGED migration whose FILENAME
+matches, versus the merge-base. A migration named `*_strategy_shares_*.sql` matches `/share/i`
+and trips it. **Verified by reading the file, not inferred.**
+
+Resolve deliberately — do NOT discover this at CI time. Options: (a) amend the guard's scope so it
+targets the scenario spine it was written for rather than the substring; (b) name the migration to
+avoid the substring, which is dodging a gate rather than satisfying it and should be argued if
+chosen. ⚠️ Cross-phase note: Phase 164.1 is literally "retire the frozen-spine gates that no longer
+bite" — coordinate, do not fix the same guard twice in two phases.
+
+### Blocker 2 — `fetchAndBuildPayload` is NOT exported, and a guard pins that
+
+It is declared at `v2/page.tsx:83` with no `export`. The token lane needs it (A.4 option (a)).
+Phase-148 guard pin #4 walks the repo and asserts no file other than `page.tsx` mentions it.
+Exporting it therefore requires a CONSCIOUS co-edit of that guard, with the reason recorded —
+never a silent widening.
+
+### Blocker 3 — the Sentry token scrub is NET-NEW, with no analog
+
+`grep -rn "beforeSend\|beforeBreadcrumb" src/` returns **ZERO** hits (`Sentry.init` is at
+`src/instrumentation.ts:30`). There is no existing scrub to extend. ⚠️ And because A-D1 makes the
+token a PATH SEGMENT, the scrub must match on path, not on a query param — and
+`Referrer-Policy: strict-origin-when-cross-origin` (`next.config.ts:79`) strips query strings
+cross-origin but NEVER strips the path, so the leak surface is strictly wider than PITFALLS.md
+assumed. Verify by triggering a real error on a token URL and reading the event, not from config.
+
+### Blocker 4 — no in-repo precedent returns HTTP 410
+
+App Router pages cannot set a 410 status directly. The 410-on-token-lane requirement needs a
+resolved mechanism (route handler, `notFound()` variant, or middleware) — decide it in the plan,
+do not leave it to the executor.
+
+</verified_corrections>
+
 <deferred>
 ## Deferred Ideas
 
