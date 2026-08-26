@@ -3949,7 +3949,7 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                     exc,
                     stamp_detail=(
                         "sFOX NAV/TWR reconstruction refused a structural input "
-                        "(an orphan/undatable flow or a non-finite NAV/flow amount). "
+                        "(an orphan/undatable flow or a non-finite NAV/flow amount)."
                     ),
                     result_detail=(
                         "derive_broker_dailies: sfox NAV/TWR reconstruction failed "
@@ -4374,7 +4374,7 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                     exc,
                     stamp_detail=(
                         "MT5 NAV/TWR reconstruction refused a structural input "
-                        "(an undatable deal or a non-finite NAV/flow amount). "
+                        "(an undatable deal or a non-finite NAV/flow amount)."
                     ),
                     result_detail=(
                         "derive_broker_dailies: mt5 NAV/TWR reconstruction failed "
@@ -4644,7 +4644,7 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                     stamp_detail=(
                         "Broker flow valuation failed on a structural input (a "
                         "coin flow with no same-UTC-day price, or a schema-drifted"
-                        "/undatable/non-finite flow amount). "
+                        "/undatable/non-finite flow amount)."
                     ),
                     result_detail=(
                         "derive_broker_dailies: ccxt flow valuation failed "
@@ -4715,7 +4715,7 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                 exc,
                 stamp_detail=(
                     "Broker return reconstruction failed on a structural input "
-                    "(schema drift, undatable/orphan flow, or a non-finite amount). "
+                    "(schema drift, undatable/orphan flow, or a non-finite amount)."
                 ),
                 result_detail=(
                     "derive_broker_dailies: broker NAV/TWR reconstruction failed "
