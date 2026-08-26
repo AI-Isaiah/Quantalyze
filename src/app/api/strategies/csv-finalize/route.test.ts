@@ -61,6 +61,11 @@ vi.mock("@/lib/ratelimit", async (importActual) => {
 // finalize_csv_strategy and persist_csv_daily_returns calls succeed" —
 // migration 20260819120000:349-350 DROPped both of those; the fold is one RPC.)
 const NEW_STRATEGY_ID = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+// OPS-06 (Phase 163): one interleaved log of admin-client constructions and
+// fold dispatches. Ordering IS the defect, and an ordering claim needs an
+// ordering oracle — two independent call counts cannot tell "constructed"
+// from "constructed before the commit".
+const callOrder = vi.hoisted(() => [] as string[]);
 const rpcMock = vi.hoisted(() =>
   vi.fn(
     async (
@@ -81,8 +86,11 @@ vi.mock("@/lib/supabase/server", () => ({
         data: { session: { access_token: "test-user-jwt" } },
       }),
     },
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    rpc: (name: string, args: Record<string, unknown>) => (rpcMock as any)(name, args),
+    rpc: (name: string, args: Record<string, unknown>) => {
+      callOrder.push(`rpc:${name}`);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      return (rpcMock as any)(name, args);
+    },
     from: (_table: string) => ({
       update: (_payload: Record<string, unknown>) => ({
         eq: (_c1: string, _v1: unknown) => ({
@@ -105,11 +113,22 @@ vi.mock("@/lib/supabase/server", () => ({
 }));
 
 const adminFromMock = vi.hoisted(() => vi.fn());
-vi.mock("@/lib/supabase/admin", () => ({
-  createAdminClient: () => ({
-    rpc: vi.fn(async () => ({ error: null })),
-    from: (table: string) => adminFromMock(table),
+// OPS-06 (Phase 163): promoted from an inline arrow to a hoisted vi.fn so a
+// test can make the CONSTRUCTOR throw the way the real one does on a missing
+// SUPABASE_SERVICE_ROLE_KEY, and so its invocation ORDER relative to the fold
+// RPC is observable. A double that can only succeed cannot express the fault
+// this route was fixed for.
+const createAdminClientMock = vi.hoisted(() =>
+  vi.fn(() => {
+    callOrder.push("createAdminClient");
+    return {
+      rpc: vi.fn(async () => ({ error: null })),
+      from: (table: string) => adminFromMock(table),
+    };
   }),
+);
+vi.mock("@/lib/supabase/admin", () => ({
+  createAdminClient: createAdminClientMock,
 }));
 
 // 140.3-02 / TS-13 — the upstream body carries `ok: true`, because the real
@@ -201,6 +220,7 @@ function rpcCall(name: string) {
 describe("POST /api/strategies/csv-finalize — CONTRIB-02 private-by-default contribution", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    callOrder.length = 0;
     checkLimitMock.mockResolvedValue({ success: true, retryAfter: 0 });
     rpcMock.mockResolvedValue({ data: NEW_STRATEGY_ID, error: null });
     updateMock.mockResolvedValue({ error: null });
@@ -463,6 +483,7 @@ describe("POST /api/strategies/csv-finalize — CONTRIB-02 private-by-default co
 describe("[140.3-02 / TS-13, re-pointed by 145] POST /api/strategies/csv-finalize — fold success check validates the payload", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    callOrder.length = 0;
     checkLimitMock.mockResolvedValue({ success: true, retryAfter: 0 });
     rpcMock.mockResolvedValue({ data: NEW_STRATEGY_ID, error: null });
     updateMock.mockResolvedValue({ error: null });
@@ -513,4 +534,111 @@ describe("[140.3-02 / TS-13, re-pointed by 145] POST /api/strategies/csv-finaliz
     expect(body.strategy_id).toBe(NEW_STRATEGY_ID);
     expect(body.status).toBe("pending_review");
   });
+});
+
+/**
+ * OPS-06 (Phase 163) — THE ADMIN CLIENT IS CONSTRUCTED BEFORE THE FOLD.
+ *
+ * This is the WR-01 headline site. `createAdminClient()` throws synchronously
+ * when SUPABASE_SERVICE_ROLE_KEY is absent, and a call argument is evaluated
+ * BEFORE the call — so building it inside `logAuditEventAsUser(...)` put the
+ * throw AFTER `finalize_csv_strategy_with_returns` had committed a strategy,
+ * its verification row and its whole daily-returns series in one transaction.
+ * The user was told their upload failed while the track record existed: the
+ * exact inverse of the emit docblock's own promise that "a failed emission …
+ * must NOT change this response".
+ *
+ * ⭐ RED DEMO (run 2026-08-26, restored after):
+ *   Neuter: in route.ts, delete `const admin = createAdminClient()` from above
+ *   the `supabase.rpc("finalize_csv_strategy_with_returns", ...)` call and pass
+ *   `createAdminClient()` inline at the `logAuditEventAsUser(...)` emit site
+ *   again — i.e. move construction back below the commit.
+ *   Observed: "constructs the admin client BEFORE the fold RPC" FAILED —
+ *   callOrder came back ["rpc:finalize_csv_strategy_with_returns",
+ *   "createAdminClient"]; "a missing service-role key never reaches the fold"
+ *   FAILED with the fold recorded as dispatched. Restored: both green.
+ *
+ *   SECOND MUTATION — THE HALF-FIX (run 2026-08-26, restored after):
+ *   Keep the hoist but ALSO write `createAdminClient()` inline at the emit
+ *   site. Every ordering assertion above still passes (a client WAS built
+ *   before the fold) while the original post-commit throw is untouched.
+ *   Observed: "the emit receives the SAME instance that was built pre-commit"
+ *   FAILED — "expected vi.fn() to be called 1 times, but got 2 times".
+ *   That case exists solely to kill this shape.
+ */
+describe("[OPS-06] csv-finalize: a missing service-role key fails LOUD and PRE-COMMIT", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    callOrder.length = 0;
+    checkLimitMock.mockResolvedValue({ success: true, retryAfter: 0 });
+    rpcMock.mockResolvedValue({ data: NEW_STRATEGY_ID, error: null });
+    updateMock.mockResolvedValue({ error: null });
+  });
+
+  it("constructs the admin client BEFORE the fold RPC (order, not count)", async () => {
+    const res = await POST(makeRequest(validBody()));
+    expect(res.status).toBe(200);
+
+    const built = callOrder.indexOf("createAdminClient");
+    const committed = callOrder.indexOf("rpc:finalize_csv_strategy_with_returns");
+    expect(built, "admin client was never constructed").toBeGreaterThanOrEqual(0);
+    expect(committed, "fold RPC was never dispatched").toBeGreaterThanOrEqual(0);
+    expect(
+      built,
+      `expected construction before the commit; got ${JSON.stringify(callOrder)}`,
+    ).toBeLessThan(committed);
+  });
+
+  it("a missing service-role key never reaches the fold — no strategy, no verification row, no dailies", async () => {
+    createAdminClientMock.mockImplementationOnce(() => {
+      throw new Error("Missing SUPABASE_SERVICE_ROLE_KEY for admin operations");
+    });
+
+    // The route deliberately has no try/catch around the constructor, and
+    // `withAuth` has none either: an uncaught throw in a route handler IS the
+    // Next.js 500. The fix changes WHEN it fires, not how loud it is.
+    await expect(POST(makeRequest(validBody()))).rejects.toThrow(
+      /Missing SUPABASE_SERVICE_ROLE_KEY/,
+    );
+
+    // The load-bearing assertion. Pre-fix the fold had already committed when
+    // the constructor threw — a 500 handed to a user whose track record is live.
+    expect(
+      rpcMock.mock.calls.find((c) => c[0] === "finalize_csv_strategy_with_returns"),
+      "the fold committed before the throw — the pre-fix behaviour",
+    ).toBeUndefined();
+    expect(logAuditEventAsUserMock).not.toHaveBeenCalled();
+  });
+
+  it("the emit receives the SAME instance that was built pre-commit — exactly one construction per request", async () => {
+    // Closes the near-miss fix. Hoisting a client and THEN still writing
+    // `createAdminClient()` at the emit site would satisfy every ordering
+    // assertion above while leaving the original throw exactly where it was:
+    // after the fold. Pinning identity plus a call count of one makes that
+    // half-fix impossible to pass.
+    const res = await POST(makeRequest(validBody()));
+    expect(res.status).toBe(200);
+
+    expect(createAdminClientMock).toHaveBeenCalledTimes(1);
+    const built = createAdminClientMock.mock.results[0].value;
+    expect(logAuditEventAsUserMock).toHaveBeenCalledTimes(1);
+    expect(
+      (logAuditEventAsUserMock.mock.calls[0] as unknown[])[0],
+      "the emit built its own client instead of using the pre-commit one",
+    ).toBe(built);
+  });
+
+  // ⚠️ THE "EMISSION FAILURE DOES NOT CHANGE THE RESPONSE" HALF IS NOT TESTED
+  // HERE, AND THAT IS DELIBERATE. This file mocks `@/lib/audit` wholesale (see
+  // the note on logAuditEventAsUserMock — it has to, or afterMock's call count
+  // stops meaning "the enqueue"). A double made to throw would therefore be
+  // asserting against a fault the real function cannot produce:
+  // `logAuditEventAsUser` wraps its `after()` scheduling in try/catch and falls
+  // back to queueMicrotask, and `emitAsUser`'s rejection is swallowed by
+  // `.catch(() => {})` — it is total by construction. Measured while writing
+  // this: a synchronously-throwing double DOES escape the handler, but no
+  // production input can produce one, so pinning it would manufacture a
+  // failure rather than guard a real one. That half is covered where the REAL
+  // audit module runs: preferences route.test.ts TC13, and the deletion-request
+  // OPS-06 case that drives the service-role RPC to throw.
 });

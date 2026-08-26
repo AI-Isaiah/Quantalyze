@@ -752,6 +752,29 @@ async function finalizeAtomicOrErrorResponse(
   // the emit further down — to the enqueue epilogue, say — silently
   // un-instruments this mutation again while every test stays green.
   //
+  // OPS-06 (Phase 163) — THE ADMIN CLIENT IS BUILT HERE, ABOVE THE COMMIT, AND
+  // THE REASON IS SEQUENCING RATHER THAN ERROR HANDLING.
+  //
+  // `createAdminClient()` throws synchronously when SUPABASE_SERVICE_ROLE_KEY
+  // is absent (src/lib/supabase/admin.ts), and a call argument is evaluated
+  // BEFORE the call it is an argument to — so `logAuditEventAsUser(
+  // createAdminClient(), …)` at the emit site below constructed it AFTER the
+  // fold had already committed a strategy, its verification row and its whole
+  // daily-returns series. `logAuditEventAsUser`'s own try/catch wraps only the
+  // `after()` scheduling, and `withAuth` has no catch, so that throw became an
+  // opaque 500 over LANDED work: the user is told their upload failed while the
+  // track record demonstrably exists. That is the exact inverse of the
+  // fire-and-forget contract the emit docblock states 40 lines down.
+  //
+  // Constructed here the SAME throw is still loud — an uncaught throw in a
+  // route handler is a Next.js 500 — but it fires with nothing written.
+  // ⛔ Do NOT wrap this in try/catch, and do NOT reach for a NON-THROWING
+  // variant of it: converting a loud failure into a quiet one is the
+  // anti-pattern this phase exists to close, and the quiet variant would then
+  // need its own rule to stop it spreading across the other 178
+  // `createAdminClient()` call sites. Loud AND pre-commit is the whole fix.
+  const admin = createAdminClient();
+
   // 146.1-07 task 1: this call was invisible to the audit law TWICE over — first
   // behind `supabase.rpc as unknown as (…)`, then behind a line break that put
   // the RPC name off the `.rpc(` line the law scans line-by-line. Keep the name
@@ -795,7 +818,7 @@ async function finalizeAtomicOrErrorResponse(
     // Metadata carries no track-record CONTENT: the row count and the format,
     // which is what a forensic reader needs to tie this event to a submission,
     // plus the correlation id that joins it to the console + Sentry lines.
-    logAuditEventAsUser(createAdminClient(), args.userId, {
+    logAuditEventAsUser(admin, args.userId, {
       action: "strategy.csv_finalize",
       entity_type: "strategy",
       entity_id: newStrategyId,
