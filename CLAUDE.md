@@ -51,3 +51,61 @@ Key routing rules:
 - Code quality, health check → invoke health
 - Tech debt, "what should we refactor", "code health", refactoring priorities, maintenance backlog → invoke engineering:tech-debt
 - Architecture decision, ADR, "how should we architect", evaluate architecture, system design review → invoke engineering:architecture
+
+## PR branches — always filter transient planning artifacts
+
+`.planning/` is TRACKED here (see `.gitignore:53-63` — untracked planning silently
+breaks parallel executor worktrees, which is not a preference but a GSD hard
+requirement, `gsd-core CONFIGURATION.md:670`). The consequence is that PR diffs carry
+PLAN/SUMMARY/CONTEXT/RESEARCH noise into review.
+
+GSD's tool for that is `/gsd-pr-branch`. **Nothing invokes it automatically** —
+`autonomous.md` has no ship step, and `ship.md` contains zero references to it. It runs
+only when a human or agent types it. This section is what makes it run.
+
+### The step
+
+After `/ship` has committed and before opening the PR:
+
+1. Run `/gsd-pr-branch`. It builds `<branch>-pr` from the base, cherry-picking code and
+   structural planning commits (`STATE`, `ROADMAP`, `MILESTONES`, `PROJECT`,
+   `REQUIREMENTS`, `milestones/**`) while dropping transient ones (`phases/`, `quick/`,
+   `research/`, `threads/`, `todos/`, `debug/`, `seeds/`, `codebase/`, `ui-reviews/`).
+2. **Run the deletion guard below. It is not optional.**
+3. Open the PR from `<branch>-pr`, not from the working branch.
+
+### ⛔ Deletion guard — upstream `pr-branch` over-deletes
+
+Its cherry-pick loop runs `git rm -r --cached ".planning/$dir/"`, which is **not scoped
+to the cherry-picked commit**. The PR branch is created from the base, so the index
+already holds the base's phase artifacts, and that `rm` stages every one of them for
+deletion. Measured on this repo 2026-08-26: **149 of 149** `.planning/phases/` files on
+`main` staged for removal. Merging such a branch deletes them from `main`.
+
+This is the same defect that cost 14 Phase 161.1 files in v0.74.0.0 — that was a
+hand-rolled version of the same filter applied to a working branch tip.
+
+Before pushing any `-pr` branch, prove it deletes nothing that exists on the base:
+
+```bash
+BASE=$(git rev-parse --abbrev-ref origin/HEAD | sed 's|origin/||')
+git diff --diff-filter=D --name-only "$BASE".."$(git branch --show-current)" -- .planning/
+```
+
+Any output is a **STOP**. A PR branch must never delete a `.planning/` file that the
+base already has. Re-create it with the `rm` scoped to the commit's own paths:
+
+```bash
+git diff-tree --no-commit-id --name-only -r "$HASH" \
+  | grep -E '^\.planning/(phases|quick|research|threads|todos|debug|seeds|codebase|ui-reviews)/' \
+  | xargs -r git rm -q --cached --ignore-unmatch
+```
+
+### What this does and does not buy
+
+It cleans reviewers' diffs. It does **not** keep artifacts off the public repo — phase
+dirs still reach `main` when `/gsd-complete-milestone` archives them into
+`.planning/milestones/v{X.Y}-phases/`, which is structural and always preserved. That
+archival is the intended destination; excluding artifacts from a PR is presentation, not
+privacy. Upstream's `pr_strict` mode would change that, and it is not in the installed
+version (local gsd-core `1.11.0` — `grep pr_strict` returns nothing).
