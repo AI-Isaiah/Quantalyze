@@ -22,7 +22,7 @@ factsheet/wizard surfaces (that was Phase 162), and the curated-copy delivery pr
 ### .planning username scrub (SC-4)
 - **Scope corrected by measurement: 80 files, not the ~50 the ROADMAP estimated.** Measured
   2026-08-26 on main: 80 tracked `.planning/` files contain the macOS username, 57 contain
-  `/Users/` absolute paths. Plan against 80.
+  `\/Users\/` absolute paths. Plan against 80.
 - **Forward-only redaction, no history rewrite.** The username is already published on a
   public repo — pushed, cloneable, in GitHub's history. Scrubbing forward stops new leakage
   but does NOT unpublish. Founder accepted that limit explicitly rather than force-pushing

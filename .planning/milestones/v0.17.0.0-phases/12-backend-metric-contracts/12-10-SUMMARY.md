@@ -152,7 +152,7 @@ _Note: Task 2 is `checkpoint:human-verify gate="blocking"`. The script-shipping 
 
 1. **Run the deploy orchestrator against production** (operator action):
    ```bash
-   cd /Users/helios-mammut/claude-projects/quantalyze/analytics-service
+   cd analytics-service
    export DATABASE_URL="<production SUPABASE_DB_URL>"
    python -m scripts.phase12_deploy
    ```
@@ -165,7 +165,7 @@ _Note: Task 2 is `checkpoint:human-verify gate="blocking"`. The script-shipping 
 
 2. **Record the 12-minute queue-depth probe in `TODOS.md`** (Phase 12 SC#4):
    ```bash
-   cd /Users/helios-mammut/claude-projects/quantalyze
+   cd <repo-root>
    export SUPABASE_ACCESS_TOKEN="${SUPABASE_ACCESS_TOKEN:?Set this from local env}"
    supabase db remote query "SELECT priority, status, count(*) FROM compute_jobs WHERE kind='compute_analytics' AND status='pending' GROUP BY priority, status ORDER BY priority;"
    ```

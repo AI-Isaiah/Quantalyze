@@ -642,6 +642,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 | Phase 162 P09 | 25m | 2 tasks | 2 files |
 | Phase 162 P02 | 2h40m | 3 tasks | 11 files |
 | Phase 163 P01 | 50min | 2 tasks | 6 files |
+| Phase 163 P03 | 50m | 3 tasks | 98 files |
 
 ## Accumulated Context
 
@@ -804,6 +805,9 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - [Phase 161]: OPS-05: configure_logging() at MODULE scope in main_worker.py (not inside main()) — python -m main_worker runs the module top-down, so an import-time log would emit before any main()-time call
 - [Phase 161]: MEASURED CORRECTION: structlog Mode B is a pre-configure WINDOW, not a permanent freeze (default config has cache_logger_on_first_use=False, so a plain module-scope proxy self-heals). Only a module-scope .bind() RESULT is permanently frozen
 - [Phase 161]: OPS-05 deviation: the stdlib redact bridge was DELETING log lines — scrubbing a %-format template ate conversion specifiers, getMessage() raised, and stdlib logging dropped the record at 3 measured call sites (2 live in PROD). Fix: keep the scrubbed template only if it still formats against record.args
+- [Phase 161]: SEC-02: forward-only redaction — founder declined history rewrite; the scan stops new leakage, it does not unpublish
+- [Phase 161]: SEC-02 gate has ZERO path exclusions — one value-only exemption for the <user> placeholder; a path carve-out is the gitleaks blindness it exists to fix
+- [Phase 161]: Two APPLIED migrations edited comment-only under a RECORDED EXCEPTION — precondition verified read-only first: Supabase CLI reconciles by version, never content hash
 
 ### Decisions (execution-time, Phase 140.2)
 

@@ -24,7 +24,7 @@ created: 2026-07-05
 | **Estimated runtime** | ~30–90s (targeted); full suite minutes |
 
 ⚠️ **Interpreter constraint (from RESEARCH Pitfall 3):** the local `.venv` is Python 3.14 and **SIGSEGVs** at pytest collection in native pandas tslibs (numpy 2.4.6 vs pandas 2.2.3). Run against the CI-matching 3.12/3.13 pinned venv:
-`/private/tmp/claude-501/-Users-helios-mammut-claude-projects-quantalyze/fcce1bd5-15ef-4e42-adb9-85cfc9ad484c/scratchpad/venv312/bin/python`. Coverage gate runs in CI.
+`/private/tmp/claude-501/<project-scratch>/fcce1bd5-15ef-4e42-adb9-85cfc9ad484c/scratchpad/venv312/bin/python`. Coverage gate runs in CI.
 
 ---
 

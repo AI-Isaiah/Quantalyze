@@ -221,7 +221,7 @@ file; the totals below account for every case.
 
 ### Environment honesty
 
-⛔ Executed in the **main checkout** at `/Users/helios-mammut/claude-projects/quantalyze` on
+⛔ Executed in the **main checkout** at `<repo-root>` on
 `feat/phase-156-connect-refactor` — **no worktree was created**, so `node_modules` is real and a
 non-zero exit means a failing assertion rather than `MODULE_NOT_FOUND`. Confirmed by the baseline
 runs, which exited **0 with 183 passing tests** before any edit: a broken environment cannot produce

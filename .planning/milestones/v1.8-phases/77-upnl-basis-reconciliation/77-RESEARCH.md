@@ -263,7 +263,7 @@ Live-exchange reads (Deribit field confirmation A1) require a live read-only key
 | Quick run command | `<CI-3.12-venv>/bin/python -m pytest analytics-service/tests/test_nav_twr.py -x` |
 | Full suite command | `<CI-3.12-venv>/bin/python -m pytest analytics-service/tests -q` |
 
-> `<CI-3.12-venv>` = `/private/tmp/claude-501/-Users-helios-mammut-claude-projects-quantalyze/fcce1bd5-15ef-4e42-adb9-85cfc9ad484c/scratchpad/venv312/bin/python`. Never run under local Python 3.14 (SIGSEGV in pandas tslibs).
+> `<CI-3.12-venv>` = `/private/tmp/claude-501/<project-scratch>/fcce1bd5-15ef-4e42-adb9-85cfc9ad484c/scratchpad/venv312/bin/python`. Never run under local Python 3.14 (SIGSEGV in pandas tslibs).
 
 ### Phase Requirements → Test Map
 | Req | Behavior | Test Type | Automated Command | File Exists? |

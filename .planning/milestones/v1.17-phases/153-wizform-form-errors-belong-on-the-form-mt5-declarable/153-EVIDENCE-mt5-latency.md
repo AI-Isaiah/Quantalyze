@@ -341,7 +341,7 @@ No credential is ever printed (only `type(e).__name__`).
 ### Step 2 — run it inside Railway, on the private network
 
 ```bash
-cd /Users/helios-mammut/claude-projects/quantalyze/analytics-service
+cd analytics-service
 railway link            # project quantalyze-analytics, service quantalyze-analytics, env production
 railway run python -m scripts.mt5_latency_probe
 ```

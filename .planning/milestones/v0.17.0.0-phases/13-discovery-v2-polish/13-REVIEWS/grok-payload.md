@@ -2675,7 +2675,7 @@ After writing, do NOT push yet — Task 2 handles the push under the `autonomous
   </what-built>
   <how-to-verify>
 **Pre-flight:**
-1. Verify you are in the project root: `pwd` ⇒ `/Users/helios-mammut/claude-projects/quantalyze`
+1. Verify you are in the project root: `pwd` ⇒ `<repo-root>`
 2. Verify the migration file exists: `ls supabase/migrations/090_seed_is_example_backfill.sql`
 3. Verify the supabase CLI is installed: `supabase --version`
 4. Verify the project link points at the remote project: `cat supabase/.temp/project-ref 2>/dev/null` ⇒ should be `khslejtfbuezsmvmtsdn` (or use `supabase link --project-ref khslejtfbuezsmvmtsdn` if not linked)

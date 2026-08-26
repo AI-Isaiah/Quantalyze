@@ -1357,7 +1357,7 @@ observed RED before being trusted. Concrete neuterings:
 | `pg_cron` on TEST + PROD | the sweep | ✓ (16 jobs registered across migrations) | — | none; the migration `RAISE`s if absent |
 | `sentry-sdk[fastapi]` in analytics-service | worker emission | ✓ | `2.64.0` (`analytics-service/requirements.txt:222`) | — |
 | `SENTRY_DSN` on the **worker** Railway service | the alert actually reaching Sentry | ✗ **UNVERIFIED** | — | none — without it `init_sentry()` returns early and SC#1 is false in prod |
-| `supabase` CLI locally | applying to TEST | ✓ (`/Users/helios-mammut/.local/bin/supabase`) | not checked | Supabase MCP |
+| `supabase` CLI locally | applying to TEST | ✓ (`<home>/.local/bin/supabase`) | not checked | Supabase MCP |
 | `psql` locally | running the SQL gate locally | ✗ | — | CI `sql-tests` job installs `postgresql-client` (`ci.yml:944-947`) |
 | Supabase MCP (read-only census) | the pre-merge census | ✗ **not available in this agent session** | — | run it in the planner/executor session |
 | `vars.E2E_TEST_DB_CONFIGURED` + `secrets.TEST_SUPABASE_DB_URL` | the `sql-tests` job running at all | assumed ✓ (the 142 gate runs) | — | the job silently no-ops if unset |
