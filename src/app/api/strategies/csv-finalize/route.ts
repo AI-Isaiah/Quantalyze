@@ -1978,6 +1978,38 @@ async function writeFailedStrategyAnalyticsPlaceholder(
   }
 }
 
+/**
+ * WR-07 (Phase 163) — the sentence written to
+ * `strategy_analytics.computation_error` when the analytics enqueue loses an
+ * MVCC race (SQLSTATE 40001, the classification mig 20260826150000 added).
+ *
+ * VERBATIM the ELSE arm of `computation_error_copy(TEXT)` (mig 20260826120000,
+ * Phase 162 HONEST-01). The parity is a GATE, not a convention: route.test.ts
+ * reads that arm out of supabase/schema/functions/computation_error_copy.sql
+ * and asserts byte equality, so a reworded arm turns this file RED instead of
+ * drifting silently.
+ *
+ * ⚖️ WHY A LITERAL AND NOT AN RPC TO THE HELPER — mig 20260826150000's header
+ * proposed calling it, and it IS service_role-EXECUTEable, so the call would
+ * work. But it is a SECOND round-trip on a path whose FIRST round-trip just
+ * lost a race, so it needs a fallback, and the only honest fallback is this
+ * same literal: the RPC buys the duplication AND a new failure mode. The
+ * static gate delivers the single-source-of-truth the RPC was wanted for, at
+ * CI time, with nothing left to fail in production.
+ *
+ * ⛔ IT MUST NOT PROMISE AN AUTOMATIC RETRY. The review that raised WR-07
+ * proposed "…and will retry automatically". MEASURED at HEAD: nothing in this
+ * repo retries a 40001 — the one classifier that recognises the code
+ * (analytics-service/main_worker.py:392) has a single call site, wrapping the
+ * MARK RPCs, never an enqueue. That copy would trade operator jargon for a
+ * false promise, which is the HONEST-01 defect over again one layer down. This
+ * arm claims nothing about automatic retries, and that is precisely what makes
+ * it true here: the enqueue did not happen, no job exists to retry itself, and
+ * re-running the sync is the thing that gets the work done.
+ */
+const ENQUEUE_LOST_RACE_USER_COPY =
+  "Analytics could not complete for this strategy. Retry the sync, or contact support if this persists.";
+
 function enqueueCsvAnalyticsAfter(
   strategyId: string,
   fmt: string,
@@ -1986,6 +2018,13 @@ function enqueueCsvAnalyticsAfter(
   after(async () => {
     let enqueueFailed = false;
     let enqueueErrMessage = "";
+    // WR-07: the SQLSTATE is the WHOLE signal for a lost enqueue race — the
+    // message riding with it is operator text, and mig 20260826150000 says so
+    // at the RAISE itself ("A caller that wants to retry branches on the code,
+    // never on this string"). This is that branch. Before it existed,
+    // `grep -rn "40001" src/` had ZERO non-test hits and every enqueue failure
+    // read identically to the user.
+    let enqueueLostRace = false;
     try {
       const { createAdminClient } = await import("@/lib/supabase/admin");
       const admin = createAdminClient();
@@ -2000,6 +2039,7 @@ function enqueueCsvAnalyticsAfter(
       if (enqueueErr) {
         enqueueFailed = true;
         enqueueErrMessage = enqueueErr.message ?? "(no message)";
+        enqueueLostRace = enqueueErr.code === "40001";
         console.warn(
           `${opts.logPrefix} enqueue_compute_analytics_from_csv failed (non-blocking) [correlation_id=${opts.correlationId}]: ${enqueueErrMessage}`,
         );
@@ -2030,9 +2070,28 @@ function enqueueCsvAnalyticsAfter(
     // 2026-05-22): guarded SELECT-then-UPSERT so we don't stomp a
     // `complete` status the worker may have written concurrently.
     if (enqueueFailed) {
+      // ⛔ WR-07 (Phase 163) — THIS ARGUMENT IS USER COPY, NOT A LOG LINE. It
+      // lands in `strategy_analytics.computation_error`, which renders
+      // VERBATIM to the strategy's OWNER in the wizard failure envelope. The
+      // "compute job enqueue failed:" prefix used to be unconditional, so no
+      // wording SQL could choose ever reached the user unprefixed — which is
+      // why mig 20260826150000 recorded WR-07 as owed HERE instead of
+      // rewording its own RAISE, a change that would have looked like a fix
+      // while changing nothing the user reads.
+      //
+      // ⚠️ ONLY the 40001 arm is re-worded, and the discrimination is the
+      // point: every other enqueue failure keeps the operator-shaped message,
+      // because no curated sentence exists for those shapes and a blanket swap
+      // would delete the only diagnostic this column carries for them.
+      //
+      // Nothing is lost on the operator side on this arm either — the raw
+      // message is on the console.warn above and the whole error object went
+      // to Sentry under the `csv-analytics-enqueue` step tag.
       await writeFailedStrategyAnalyticsPlaceholder(
         strategyId,
-        `compute job enqueue failed: ${enqueueErrMessage}`,
+        enqueueLostRace
+          ? ENQUEUE_LOST_RACE_USER_COPY
+          : `compute job enqueue failed: ${enqueueErrMessage}`,
         { ...opts, subcontext: "enqueue-error" },
       );
     }

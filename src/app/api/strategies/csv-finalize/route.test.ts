@@ -17,7 +17,7 @@
 
 // @vitest-environment node
 
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 vi.mock("server-only", () => ({}));
 
@@ -113,6 +113,21 @@ vi.mock("@/lib/supabase/server", () => ({
 }));
 
 const adminFromMock = vi.hoisted(() => vi.fn());
+// WR-07 (Phase 163): promoted out of the inline `vi.fn(async () => …)` below
+// for the same reason OPS-06 promoted the constructor — a double that can only
+// SUCCEED cannot express the fault. The service-role `enqueue_compute_job`
+// call is the one that raises 40001 when it loses the in-flight race, and a
+// test has to be able to make it do that.
+const adminRpcMock = vi.hoisted(() =>
+  vi.fn(
+    async (
+      _name?: string,
+      _args?: Record<string, unknown>,
+    ): Promise<{ error: { code?: string; message?: string } | null }> => ({
+      error: null,
+    }),
+  ),
+);
 // OPS-06 (Phase 163): promoted from an inline arrow to a hoisted vi.fn so a
 // test can make the CONSTRUCTOR throw the way the real one does on a missing
 // SUPABASE_SERVICE_ROLE_KEY, and so its invocation ORDER relative to the fold
@@ -122,7 +137,7 @@ const createAdminClientMock = vi.hoisted(() =>
   vi.fn(() => {
     callOrder.push("createAdminClient");
     return {
-      rpc: vi.fn(async () => ({ error: null })),
+      rpc: adminRpcMock,
       from: (table: string) => adminFromMock(table),
     };
   }),
@@ -186,6 +201,8 @@ vi.mock("next/server", async () => {
   return { ...actual, after: afterMock };
 });
 
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { NextRequest } from "next/server";
 import { POST } from "@/app/api/strategies/csv-finalize/route";
 import { captureToSentry } from "@/lib/sentry-capture";
@@ -641,4 +658,246 @@ describe("[OPS-06] csv-finalize: a missing service-role key fails LOUD and PRE-C
   // failure rather than guard a real one. That half is covered where the REAL
   // audit module runs: preferences route.test.ts TC13, and the deletion-request
   // OPS-06 case that drives the service-role RPC to throw.
+});
+
+/**
+ * WR-07 (Phase 163) — THE ENQUEUE'S ERROR TEXT IS SOMETHING A USER READS.
+ *
+ * `strategy_analytics.computation_error` is a USER-VISIBLE column — the wizard
+ * failure envelope renders it VERBATIM to the strategy's owner. The enqueue
+ * failure path built `compute job enqueue failed: ${message}` for EVERY
+ * failure shape, unconditionally. So when mig 20260826150000 began
+ * classifying a lost in-flight race as SQLSTATE 40001 carrying an operator
+ * sentence, that sentence reached the owner with operator jargon bolted to the
+ * front of it. Because the prefix was unconditional, NO wording chosen inside
+ * SQL could reach the user unprefixed — which is why that migration recorded
+ * WR-07 as owed HERE rather than rewording its own RAISE.
+ *
+ * ⚠️ WHAT IS ASSERTED, AND WHY IT IS NOT THE IMPLEMENTATION. These cases read
+ * the STRING THAT REACHES THE COLUMN and check it is free of operator jargon
+ * and free of a retry promise. They deliberately do NOT assert "the 40001
+ * branch was taken" or "the constant was read" — an assertion shaped like the
+ * fix survives the defect it is meant to catch. The exact-equality oracle is
+ * INDEPENDENT of route.ts: it is parsed out of
+ * supabase/schema/functions/computation_error_copy.sql, so a route that
+ * invented its own sentence fails here even if that sentence were jargon-free.
+ *
+ * ⛔ AND THE COPY MUST NOT PROMISE AN AUTOMATIC RETRY. The review that raised
+ * WR-07 proposed "…and will retry automatically". Nothing in this repo retries
+ * a 40001 — the one classifier that recognises the code
+ * (analytics-service/main_worker.py:392) has a single call site, wrapping the
+ * MARK RPCs, never an enqueue. That wording would trade operator jargon for a
+ * FALSE PROMISE, which is the same honesty defect one layer along rather than
+ * a fix for it. The /automatic/i assertion exists to keep it out.
+ *
+ * ⭐ RED DEMO — see the per-case notes at the end of this describe.
+ */
+
+/**
+ * The oracle. Parsed from the @generated canonical dump of
+ * `computation_error_copy(TEXT)` (mig 20260826120000, Phase 162 HONEST-01),
+ * whose ELSE arm is the project's cautious default: it claims nothing about
+ * automatic retries, which is exactly what makes it true of a lost enqueue
+ * race. Read at module scope so a parse failure is LOUD (the whole file fails
+ * to load) rather than silently yielding "" and making `toBe("")` vacuous.
+ */
+const CURATED_DEFAULT_COPY: string = (() => {
+  const path = resolve(
+    process.cwd(),
+    "supabase/schema/functions/computation_error_copy.sql",
+  );
+  const sql = readFileSync(path, "utf8");
+  // The arms are `WHEN '<kind>' THEN\n  '<sentence>'`; the last is a bare
+  // `ELSE`. `ELSE` is upper-case in code and the only prose occurrence is
+  // lower-case ("Anything else:"), so this cannot match a comment.
+  const arm = sql.match(/\bELSE\s*\n\s*'([^']+)'/);
+  if (!arm) {
+    throw new Error(
+      `WR-07 oracle: could not parse the ELSE arm out of ${path}. If the dump ` +
+        `format changed, re-point this parse — do NOT delete it, or the route's ` +
+        `literal loses its only tie to the SQL it is a copy of.`,
+    );
+  }
+  return arm[1];
+})();
+
+describe("[WR-07] csv-finalize: a lost enqueue race tells the OWNER something true", () => {
+  const placeholderUpserts: Array<Record<string, unknown>> = [];
+  let warnSpy: ReturnType<typeof vi.spyOn>;
+
+  /** The admin double for the W-2 placeholder write: SELECT-then-UPSERT. */
+  function installStrategyAnalyticsDouble(
+    existing: { computation_status?: string } | null = null,
+  ): void {
+    adminFromMock.mockImplementation((table: string) => {
+      if (table !== "strategy_analytics") {
+        throw new Error(
+          `WR-07 double: unexpected admin table on the enqueue path: ${table}`,
+        );
+      }
+      return {
+        select: (_cols: string) => ({
+          eq: (_col: string, _val: string) => ({
+            maybeSingle: async () => ({ data: existing, error: null }),
+          }),
+        }),
+        upsert: async (
+          payload: Record<string, unknown>,
+          _opts: Record<string, unknown>,
+        ) => {
+          placeholderUpserts.push(payload);
+          return { error: null };
+        },
+      };
+    });
+  }
+
+  /**
+   * The enqueue runs in `after()`, which this file mocks — so the scheduled
+   * work only happens if a test RUNS it. Driving the real callback (rather
+   * than calling the helper directly) keeps the enqueue → classify →
+   * placeholder chain intact, which is where the defect lived.
+   */
+  async function runScheduledEnqueue(): Promise<void> {
+    expect(afterMock, "the analytics enqueue was never scheduled").toHaveBeenCalledTimes(1);
+    const scheduled = (afterMock.mock.calls[0] as unknown[])[0] as () => Promise<void>;
+    await scheduled();
+  }
+
+  /** The single string the strategy's owner ends up reading. */
+  function copyWrittenToUser(): string {
+    expect(
+      placeholderUpserts,
+      "no strategy_analytics placeholder was written — the wizard poller would spin forever (API W-2)",
+    ).toHaveLength(1);
+    const row = placeholderUpserts[0];
+    expect(row.computation_status).toBe("failed");
+    return String(row.computation_error);
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    callOrder.length = 0;
+    placeholderUpserts.length = 0;
+    checkLimitMock.mockResolvedValue({ success: true, retryAfter: 0 });
+    rpcMock.mockResolvedValue({ data: NEW_STRATEGY_ID, error: null });
+    updateMock.mockResolvedValue({ error: null });
+    adminRpcMock.mockResolvedValue({ error: null });
+    installStrategyAnalyticsDouble();
+    warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    warnSpy.mockRestore();
+  });
+
+  it("the oracle is a real sentence, not an empty match", () => {
+    // Anti-vacuity: every exact-equality assertion below is against
+    // CURATED_DEFAULT_COPY, so a regex that matched nothing useful would make
+    // them all trivially agreeable. Pin the shape of the parsed arm itself.
+    expect(CURATED_DEFAULT_COPY.length).toBeGreaterThan(40);
+    expect(CURATED_DEFAULT_COPY).toContain("Retry the sync");
+    expect(CURATED_DEFAULT_COPY).not.toMatch(/automatic/i);
+  });
+
+  it("a 40001 lost race → the owner reads curated copy: no operator jargon, no SQL text, no promise of an automatic retry", async () => {
+    adminRpcMock.mockResolvedValueOnce({
+      error: {
+        code: "40001",
+        // Shaped like the real RAISE in mig 20260826150000: operator text,
+        // deliberately carrying no ids.
+        message: "enqueue lost the in-flight race; the winner already advanced",
+      },
+    });
+
+    const res = await POST(makeRequest(validBody()));
+    expect(res.status).toBe(200);
+    await runScheduledEnqueue();
+
+    const copy = copyWrittenToUser();
+
+    // ── the load-bearing assertions: a property of what the USER READS ──
+    expect(
+      copy,
+      "the operator prefix reached a user-visible column — this is WR-07 itself",
+    ).not.toMatch(/compute job enqueue failed/i);
+    expect(copy, "'enqueue' is a queue-implementation word, not user copy").not.toMatch(
+      /enqueue/i,
+    );
+    expect(
+      copy,
+      "the raw SQL diagnostic (SQLSTATE / MVCC vocabulary) reached the user",
+    ).not.toMatch(/40001|sqlstate|serialization|mvcc|in-flight|rpc|postgres/i);
+    expect(
+      copy,
+      "NOTHING in this repo retries a 40001 — promising one is a FALSE PROMISE, " +
+        "which is the same defect as the jargon, not a fix for it",
+    ).not.toMatch(/automatic/i);
+
+    // ── and it is the project's sentence, not one this route invented ──
+    expect(copy).toBe(CURATED_DEFAULT_COPY);
+  });
+
+  it("CONTROL — a NON-40001 enqueue failure still carries the operator-prefixed diagnostic", async () => {
+    // The discrimination. Without this case, "every message changed" and "the
+    // 40001 message changed" are the same observation — and a blanket swap
+    // would delete the only diagnostic this column carries for failure shapes
+    // that have no curated sentence.
+    adminRpcMock.mockResolvedValueOnce({
+      error: { code: "PGRST301", message: "JWT expired" },
+    });
+
+    const res = await POST(makeRequest(validBody()));
+    expect(res.status).toBe(200);
+    await runScheduledEnqueue();
+
+    expect(
+      copyWrittenToUser(),
+      "the non-40001 arm lost its operator diagnostic — a blanket rewrite, not a branch",
+    ).toBe("compute job enqueue failed: JWT expired");
+  });
+
+  it("CONTROL — a successful enqueue writes no failure placeholder at all", async () => {
+    const res = await POST(makeRequest(validBody()));
+    expect(res.status).toBe(200);
+    await runScheduledEnqueue();
+
+    expect(
+      placeholderUpserts,
+      "a `failed` placeholder was written over a SUCCESSFUL enqueue",
+    ).toHaveLength(0);
+  });
+
+  /**
+   * ⭐ RED DEMO (run 2026-08-26, restored from a byte backup after; the byte
+   * backup, not `git checkout --`, which would have destroyed the uncommitted
+   * fix).
+   *
+   * NEUTER 1 — restore the unconditional prefix. In route.ts, replace the
+   *   ternary at the `writeFailedStrategyAnalyticsPlaceholder` call with the
+   *   pre-fix `` `compute job enqueue failed: ${enqueueErrMessage}` ``.
+   *   Observed — 1 failed | 18 passed, the 40001 case failing on the FIRST
+   *   load-bearing assertion:
+   *     AssertionError: the operator prefix reached a user-visible column —
+   *     this is WR-07 itself: expected 'compute job enqueue failed: enqueue
+   *     l…' not to match /compute job enqueue failed/i
+   *     + Received: "compute job enqueue failed: enqueue lost the in-flight
+   *       race; the winner already advanced"
+   *   Both CONTROL cases stayed GREEN, which is what makes this pair a
+   *   discrimination rather than a blanket claim. Restored: 19 passed.
+   *
+   * NEUTER 2 — the plausible half-fix: keep the branch, but write copy this
+   *   route invented — `"Analytics could not be started. Please try again."`
+   *   That is jargon-free and promises nothing, so EVERY `not.toMatch`
+   *   assertion above still passes.
+   *   Observed — 1 failed | 18 passed, failing only on the independent oracle:
+   *     AssertionError: expected 'Analytics could not be started. Pleas…' to
+   *     be 'Analytics could not complete for this…' // Object.is equality
+   *     Expected: "Analytics could not complete for this strategy. Retry the
+   *       sync, or contact support if this persists."
+   *     Received: "Analytics could not be started. Please try again."
+   *   That is the exact-equality assertion's whole reason to exist: the
+   *   sentence has to be the PROJECT's, parsed from the SQL, not one this file
+   *   agrees with itself about. Restored: 19 passed.
+   */
 });
