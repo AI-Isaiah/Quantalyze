@@ -663,6 +663,31 @@ export function ConnectKeyStep({
    * ladder for a request that has no venue leg to be slow in.
    */
   const [continuing, setContinuing] = useState(false);
+  /**
+   * 162-06 review / B-1 — "the server refused the SHAPE OF THE REQUEST WE
+   * BUILT", derived from the reuse response's STATUS, not from a list of codes.
+   *
+   * ⭐ WHY THE STATUS AND NOT THE CODE. The reuse POST's body is two ids taken
+   * from a prop and from wizard state; the saved-key summary paints no control
+   * that edits either. A 400 on that arm is therefore DETERMINISTIC in inputs
+   * this screen cannot change — pressing a Retry wired to "send the same thing
+   * again" re-sends the identical two ids and is refused identically, forever.
+   * Every other status the arm answers (409 state, 429 throttle, 5xx seam) turns
+   * on something OUTSIDE the request, so re-sending can genuinely win.
+   *
+   * ⚠️ MEASURED, not assumed: `handleReuseExistingKey` has exactly one 400 arm
+   * (`!isUuid(wizardSessionId) || !isUuid(reuseKeyId)`) plus the POST-level
+   * "body is not an object" guard ahead of it, and both are rejections of what
+   * WE sent. A future 400 added to that arm is a rejection of our request by
+   * construction, so the rule covers it without being edited — which is the
+   * whole reason it is not a hand-typed code roster.
+   *
+   * PER-FAILURE state, cleared on every fresh attempt alongside `errorCode`
+   * (TRAP-3): a verdict about attempt 1's body must never suppress attempt 2's
+   * Retry.
+   */
+  const [reuseRequestShapeRefused, setReuseRequestShapeRefused] =
+    useState(false);
   const [errorCode, setErrorCode] = useState<WizardErrorCode | null>(null);
   /**
    * 140.5-03 / SEAMPROSE-02 — the wait the failing response ADVERTISED, in
@@ -1293,6 +1318,7 @@ export function ConnectKeyStep({
     setErrorCode(null);
     setRetryAfterSeconds(null);
     setExistingStrategyName(null);
+    setReuseRequestShapeRefused(false);
     setContinuing(true);
 
     try {
@@ -1323,6 +1349,11 @@ export function ConnectKeyStep({
       if (!res.ok || !data.strategy_id || !data.api_key_id) {
         const code = recogniseCreateWithKeyCode(data);
         setErrorCode(code);
+        // 162-06 review / B-1 — see the state's docblock. A 400 on THIS arm is a
+        // refusal of the body we built out of a prop and wizard state, neither
+        // of which this screen can edit, so "send it again" is not a remedy and
+        // no control may promise that it is.
+        setReuseRequestShapeRefused(res.status === 400);
         setRetryAfterSeconds(parseRetryAfterSeconds(res.headers));
         setExistingStrategyName(
           typeof data.strategy_name === "string" &&
@@ -1394,7 +1425,24 @@ export function ConnectKeyStep({
         // about the credentials they typed is the worst outcome this phase can
         // produce, which is why 153.1-04 bound the obligation to the commit
         // that starts EMITTING the code — this one.
-        surface: "connect",
+        //
+        // ⭐ 162-06 review / B-2 (class) — AND IT NAMES WHICH OF THIS STEP'S TWO
+        // RENDERS IS ON SCREEN. `preselectKey` is the discriminator the branch
+        // at the bottom of this component already returns on, so the surface is
+        // read off the SAME value rather than re-derived — the two cannot say
+        // different things about the same render.
+        //
+        // ⛔ THE DEFECT THIS CLOSES: `"connect"` was true of both renders, so a
+        // remedy naming the credential form was ungateable and shipped onto the
+        // one screen that paints no form. `"preselect"` is what lets the copy
+        // table refuse a bullet on the screen that disproves it (see
+        // `NOT_ON_PRESELECT_SURFACE` / `REQUIRES_PRESELECT_SURFACE` in
+        // `wizardErrors.ts`). Byte-neutral for the credential render, and
+        // `SEAM_DEADLINE_EXCEEDED`'s gated bullet — the only user of
+        // `REQUIRES_CONNECT_SURFACE` — is not reachable on the reuse arm at all
+        // (verified against `handleReuseExistingKey`), so nothing it promises is
+        // withheld by this.
+        surface: preselectKey ? "preselect" : "connect",
         // 153.1-03 / D-17 — the venue, as a lookup key into the closed
         // capability record (never interpolated into copy). Absence renders the
         // substitutable remedy unconditionally, so an MT5 user reads "switch to
@@ -1487,14 +1535,27 @@ export function ConnectKeyStep({
                 TABLE THE COPY COMES FROM.
                 ⛔ `() => setErrorCode(null)` ALONE WAS THE UNWINNABLE LOOP ONE
                 SCREEN LATER. This branch returns BEFORE the credential form, so
-                on a refusal OF THIS STORED KEY — `KEY_REUSE_UNAVAILABLE` (the
-                row is gone), `VENUE_ALREADY_CONNECTED` (it is spoken for) —
-                blanking the banner left the identical screen: the same panel,
-                the same "Continue with this key" refused identically, and no
-                form. Those codes carry `try_another_key` and NOT
-                `clear_and_retry`, and `try_another_key` means exactly what it
-                says, so Retry is routed to the control that delivers another
-                key.
+                on a refusal OF THIS STORED KEY — `KEY_REUSE_UNAVAILABLE`, the
+                row is gone — blanking the banner left the identical screen: the
+                same panel, the same "Continue with this key" refused
+                identically, and no form. That code carries `try_another_key`
+                and NOT `clear_and_retry`, and `try_another_key` means exactly
+                what it says, so Retry is routed to the control that delivers
+                another key.
+                ⚠️ CORRECTION (162-06 review / B-2b). The sentence that stood
+                here named `VENUE_ALREADY_CONNECTED` alongside
+                `KEY_REUSE_UNAVAILABLE` as a code this routing covers, and said
+                both "carry `try_another_key`". Read at HEAD, that entry's
+                `actions` are `["request_call", "expand_log"]` — NEITHER member
+                of `RECOVERABLE_ACTIONS` — so `buildEnvelope` derives
+                `recoverable: false`, `ErrorEnvelope` renders no Retry at all,
+                and this handler is never reached for it. The routing was
+                claiming a code it cannot apply to, which is how a reader
+                concludes that screen is covered when it is not. What that code
+                actually got instead is a preselect-gated bullet naming the
+                painted escape hatch (see `VENUE_ALREADY_CONNECTED` in
+                `wizardErrors.ts`); the remedy is in the copy because there is
+                no control here to route.
                 ⛔ AND IT IS NOT ROUTED FOR EVERY CODE, WHICH IS THE OTHER HALF.
                 `SERVICE_UNREACHABLE` is reachable here too — the reuse arm's
                 catch sets it when OUR OWN hop fails — and it carries
@@ -1505,6 +1566,18 @@ export function ConnectKeyStep({
                 branch is `clear_and_retry`-shaped rather than a hand-typed code
                 list: the table already answers "can re-sending this succeed?",
                 and a second answer here is a second thing to drift.
+                ⛔ AND THE TABLE'S ANSWER IS OVERRIDDEN IN EXACTLY ONE
+                DIRECTION — 162-06 review / B-1. `clear_and_retry` is a property
+                of a CODE; "re-sending can win" is a property of THIS ATTEMPT.
+                They part company when the server refused the shape of the body
+                we built (a 400 on this arm — see `reuseRequestShapeRefused`):
+                the two ids go back out unchanged, so the identical refusal
+                comes back. Withholding `onRetry` there is what suppresses the
+                control (`ErrorEnvelope`: `recoverable && Boolean(onRetry)`) —
+                ⭐ never a copy-table edit, which would take the honest Retry
+                away from the credential form where filling the blank field IS
+                the remedy. The override is one-way BY CONSTRUCTION: it can only
+                remove a Retry, never add one to a non-recoverable code.
                 ⚠️ The code is cleared FIRST and unconditionally. The real host
                 tears this step down by remount, but a host that only re-renders
                 must not be left showing a banner about a key the user has moved
@@ -1512,10 +1585,14 @@ export function ConnectKeyStep({
                 whole action, unchanged from pre-B-2. */}
             <WizardErrorEnvelope
               envelope={errorEnvelope}
-              onRetry={() => {
-                setErrorCode(null);
-                if (!retryCanResend) onUseDifferentKey?.();
-              }}
+              onRetry={
+                reuseRequestShapeRefused && retryCanResend
+                  ? undefined
+                  : () => {
+                      setErrorCode(null);
+                      if (!retryCanResend) onUseDifferentKey?.();
+                    }
+              }
             />
           </div>
         )}

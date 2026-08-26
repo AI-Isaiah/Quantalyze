@@ -3638,6 +3638,94 @@ describe("[153.1-03 / WIZFORM-03] fix[] requirements — the class, not the inst
     ).toBeGreaterThanOrEqual(1);
   });
 
+  /**
+   * SWEEP 2b — 162-06 review / B-2 (class). The `surfaceIsNot` kind, whose
+   * absence rule is the INVERSE of SWEEP 2's and is the entire reason it is a
+   * separate union member.
+   *
+   * ⚠️ SWEEP 2 IS STRUCTURALLY BLIND TO IT (`req.kind !== "surface"` skips it),
+   * so a `surfaceIsNot` bullet that suppressed itself everywhere — the silent
+   * copy deletion SWEEP 2 exists to catch — would have shipped green. The
+   * blindness is closed here in the same commit the kind is minted, rather than
+   * noted in a comment: that is the shape this file's own `KEY_ORPHANED` and
+   * `KEY_REUSE_UNAVAILABLE` rosters record paying for twice.
+   *
+   * Both halves are asserted because each fails differently:
+   *   · with NO surface named the bullet must RENDER — an incumbent remedy may
+   *     not vanish from the ~60 callers that name no surface;
+   *   · on the BARRED surface it must be GONE — otherwise the gate is decorative
+   *     and the false sentence is still on the screen that disproved it.
+   */
+  it("SWEEP 2b: a bullet BARRED from a surface renders everywhere else (the inverse absence rule)", () => {
+    let covered = 0;
+    for (const code of ALL_CODES) {
+      const entry = WIZARD_ERROR_COPY[code];
+      const requires = entry.fixRequires;
+      if (requires === undefined) continue;
+      requires.forEach((req, i) => {
+        if (req === null || req === undefined || req.kind !== "surfaceIsNot") {
+          return;
+        }
+        covered++;
+        const bullet = entry.fix[i];
+        expect(
+          formatKeyError(code).fix,
+          `${code} bullet ${i} is barred from the "${req.surface}" surface but ` +
+            "vanished when NO surface was named. That is a silent copy " +
+            "deletion for every caller that predates the gate — the opposite " +
+            "of what this kind is for. `requirementMet` must answer TRUE on " +
+            "an absent surface here.",
+        ).toContain(bullet);
+        expect(
+          formatKeyError(code, { surface: req.surface }).fix,
+          `${code} bullet ${i} declares itself false on the "${req.surface}" ` +
+            "surface and rendered there anyway, so the gate is decorative and " +
+            "the sentence the surface disproved is still being shown.",
+        ).not.toContain(bullet);
+      });
+    }
+    expect(
+      covered,
+      "No entry declares a `surfaceIsNot` requirement, so this sweep asserts " +
+        "nothing. Either the kind lost its users or it was folded back into " +
+        "`surface` — which would restore the suppress-on-absence rule and " +
+        "delete an incumbent remedy from every untagged caller.",
+    ).toBeGreaterThanOrEqual(2);
+  });
+
+  /**
+   * SWEEP 2c — the PAIRING rule the B-2 class fix depends on.
+   *
+   * A bullet barred from a surface leaves a HOLE on that surface. If nothing is
+   * gated ONTO the surface to fill it, the reader there gets a shorter list and
+   * no remedy at all — "fail toward saying less" taken past the point where it
+   * says nothing. Every entry that bars a bullet from a surface must also carry
+   * at least one bullet gated onto that same surface.
+   */
+  it("SWEEP 2c: barring a bullet from a surface never leaves that surface with no remedy", () => {
+    let covered = 0;
+    for (const code of ALL_CODES) {
+      const requires = WIZARD_ERROR_COPY[code].fixRequires;
+      if (requires === undefined) continue;
+      const barred = new Set(
+        requires
+          .filter((r) => r?.kind === "surfaceIsNot")
+          .map((r) => (r as { surface: string }).surface),
+      );
+      for (const surface of barred) {
+        covered++;
+        expect(
+          formatKeyError(code, { surface: surface as never }).fix.length,
+          `${code} bars a bullet from the "${surface}" surface and puts ` +
+            "nothing in its place, so a reader there is refused with no " +
+            "remedy at all. The UI-SPEC asks for copy that states the truth " +
+            "and invents no remedy — not for silence.",
+        ).toBeGreaterThanOrEqual(1);
+      }
+    }
+    expect(covered).toBeGreaterThanOrEqual(2);
+  });
+
   it("SWEEP 3: every fixRequires array is index-aligned to its fix array", () => {
     const tagged = ALL_CODES.filter(
       (code) => WIZARD_ERROR_COPY[code].fixRequires !== undefined,
