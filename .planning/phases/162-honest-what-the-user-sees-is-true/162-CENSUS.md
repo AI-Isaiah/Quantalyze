@@ -1,5 +1,14 @@
 # Phase 162 — PROD census (HONEST-01 root cause / HONEST-02 flat-vs-gap)
 
+> ⚠️ **CORRECTION 2026-08-26.** The 15 published example rows described above were NOT recomputed
+> and NOT left in place. After this document was written, the founder ruled: unpublish AND delete.
+> Executed and verified on PROD the same day — 15 strategies deleted, 0 examples remain. Cascades
+> took 1470 match_candidates, 29 portfolio memberships, 5 favourites and 3 contact_requests; 28
+> allocation_events and 3 match_decisions were removed first as FK blockers. A full backup is held
+> outside the repo. The statements below that nothing was written remain TRUE OF THIS PLAN's
+> execution — the deletion was performed by the orchestrator afterwards, not by 162-08.
+
+
 **Artifact:** `162-CENSUS.md` (the phase's decision gate — plans 162-07 and 162-08 branch on the verdict lines below)
 **Authored:** 2026-08-26 (scaffold, plan 162-01 Task 1)
 **Executed against PROD:** 2026-08-26 (plan 162-01 Task 2, read-only)

@@ -585,7 +585,10 @@ items were dropped, not carried. Categories: **Fix now** / **Fix mid-term** / **
    reshapes just-red-teamed money-math or test machinery right before ship.
    **Recorded:** 2026-08-23 (/simplify, phase 159)
 
-0.10. **⚠️ The wizard preselect can render a dismissal control that does nothing.** Found by the
+0.10. **⚠️ The wizard preselect can render a dismissal control that does nothing.**
+   ⚠️ *Id note: this is the zero-padded `0.01`–`0.10` series. Do NOT confuse it with the legacy
+   unpadded `0.1` / `0.2` / `0.3` items further down, which are a different, older scheme and are
+   cited by `docs/runbooks/ledger-refresh-go-live.md` and `.planning/STATE.md`.* Found by the
    B-2 fixer while closing the KEY_REUSE_UNAVAILABLE dead end (2026-08-26); recorded, NOT fixed.
    `onUseDifferentKey` is an OPTIONAL prop while `preselectKey` is also optional, so a host can in
    principle render the preselect branch with no dismissal handler. The "Use a different key"

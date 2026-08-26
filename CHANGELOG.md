@@ -125,8 +125,9 @@ hand-maintained list, so a new arm cannot go dark silently. Each asserts a non-e
 because a law over an empty set passes trivially.
 
 **Known and deliberately out of scope**, recorded in `TODOS.md` rather than half-fixed: the MT5
-generic fallback still names a cause it has not proven (items 0.05); a manager has no surface to
-release an orphaned key, so the honest refusal above currently has nowhere to send them (0.06); and
+generic fallback still names a cause it has not proven (item 0.09, renumbered from 0.05); a manager
+has no surface to release an orphaned key, so the honest refusal above currently has nowhere to send
+them (0.08, renumbered from 0.06); and
 the composite arm hardcodes one provenance reason for every inadmissible verdict (0.07).
 
 ## [0.71.2.2] - 2026-08-24
