@@ -1083,6 +1083,43 @@ these four are the deliberate carry-overs, each with the reason it was not fixed
   either run every file and aggregate failures at the end, or make the expected-red state
   a first-class, per-file declaration the runner understands.
 
+### Phase 163 / OPS-08 — TEST runs a COMMENT-STRIPPED build of `_enqueue_compute_job_internal` (added 2026-08-26)
+
+Found while pre-flighting the OPS-08 migration's gate arms against both databases. Three
+reviewers independently worried that one gate arm is "meaningful on PROD and vacuous on
+TEST". Measuring it explains exactly why, and the cause is broader than that one arm.
+
+| | definition length | line-comment markers | carries the `--` comment naming the strict form |
+|---|---|---|---|
+| PROD 7-param | 4622 | 23 | yes |
+| TEST 7-param | 3093 | **0** | no |
+
+**TEST is running a comment-stripped build of the same function.** It is semantically
+identical — every gate arm evaluates the same on both databases, which is why nothing is
+red — but the bodies are not byte-equal and TEST is therefore not a faithful mirror of
+PROD for this function.
+
+**Why it matters, concretely.** The migration's gate strips comments before matching,
+because plpgsql stores `prosrc` verbatim. On PROD that strip is LOAD-BEARING: PROD's
+7-param carries `INTO STRICT` inside a comment, and the 7-param parity arm is an ABSENCE
+arm, so without the strip the arm would fire and **abort the production deploy**. On TEST
+there is nothing to strip, so:
+
+- regressing the comment-strip leaves CI **green on TEST** and **breaks the PROD deploy** —
+  first observation would be a failed auto-apply, since merging `supabase/migrations/**`
+  applies to PROD;
+- removing the block-comment pass (added to close a demonstrated `/* */` evasion) changes
+  **zero** TEST results. CI cannot detect the removal of the mechanism CI depends on.
+
+- **[DRIFT-01] Re-align TEST's `_enqueue_compute_job_internal` with the repo definition**, or
+  record deliberately that TEST is a stripped mirror. Until then, no CI run can exercise the
+  comment-strip, and any change to it must be pre-flighted against PROD by reading
+  `pg_get_functiondef` directly — a green TEST run is not evidence.
+
+⚠️ Root cause of the stripped build is unknown; it predates this phase. The gate arms were
+all measured green on BOTH databases on 2026-08-26, so nothing is broken today.
+
+
 ### Phase 163 / WR-07 — operator jargon reaches a user-visible column; the fix is in TS, not SQL (added 2026-08-26)
 
 The OPS-08 migration's `serialization_failure` sentence lands verbatim in

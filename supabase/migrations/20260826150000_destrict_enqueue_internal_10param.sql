@@ -60,10 +60,12 @@
 -- half is recorded as owed work in TODOS.md and is out of this migration's
 -- scope.
 --
--- ⛔ OWED: WR-07 — THE RAISE MESSAGE REACHES A USER-VISIBLE COLUMN, AND THAT
--- CANNOT BE CLOSED IN SQL. Recorded here rather than patched, deliberately:
--- the honest answer is "not fixable in this file", and a reworded string would
--- have looked like a fix while changing nothing that matters.
+-- ✅ CLOSED: WR-07 — the raise message used to reach a user-visible column.
+-- FIXED IN TYPESCRIPT on 2026-08-26, which is the only place it was fixable.
+-- This block is kept (not deleted) because the ANALYSIS is what stops the
+-- defect being re-derived: it records why SQL could not close it, so a future
+-- editor does not "fix" it here by rewording the string below and change
+-- nothing that matters. The state described in the past tense is history.
 --
 -- THE PATH (measured at HEAD, 2026-08-26):
 --   src/app/api/strategies/csv-finalize/route.ts:2035 builds
@@ -414,9 +416,12 @@ BEGIN
     -- curated user copy would be cosmetic, and it would additionally push user
     -- copy into the operator log line for the allocator / portfolio / api_key
     -- callers, which are not user-facing at all. The fix is a TS change, and
-    -- it is recorded as owed work in this file's header ("⛔ OWED: WR-07").
-    -- Until that lands, this string stays operator-shaped and HONEST rather
-    -- than dressed up as user copy it cannot become.
+    -- The fix is a TS change and it HAS LANDED (2026-08-26): csv-finalize now
+    -- branches on SQLSTATE 40001 and writes curated copy instead of prefixing
+    -- this sentence. So this string stays operator-shaped ON PURPOSE and is
+    -- now correct to do so — the user no longer reads it, and the allocator /
+    -- portfolio / api_key callers, which are not user-facing at all, still get
+    -- the precise operator wording they need.
     --
     -- What the old note got RIGHT, and what therefore stays: naming the
     -- internal SECDEF function and the four internal UUIDs here would make the
