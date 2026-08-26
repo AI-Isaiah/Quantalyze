@@ -1013,6 +1013,52 @@ class TestG15_005_RateLimitIsTenantKeyed:
     A file-scoped run of THAT file cannot see this one — which is exactly how
     these two stale pins survived the rekey until the full suite ran.
 
+    ⚠️ IN-05 (Phase 163 review) IS WRONG, and this is the correction. It reads:
+    *"``tenant_or_platform_key`` only produces a per-tenant bucket when
+    ``X-Tenant-Claim`` is present, and the file's own comment records that
+    ``src/lib/analytics-client.ts`` does not mint it (the open 140.2
+    obligation). So all real traffic lands on the single
+    ``platform:/api/simulator`` bucket … the SEC-05 entry should not be read as
+    'tenant leakage is closed in production' until 140.2 lands."*
+
+    MEASURED at HEAD 2026-08-26, and the premise does not hold:
+
+    * ``src/lib/analytics-client.ts`` mints the claim
+      (``mintTenantClaim({ userId: options.tenantId }, INTERNAL_API_TOKEN)``)
+      and sets ``"X-Tenant-Claim": tenantClaim`` UNCONDITIONALLY in
+      ``analyticsRequest``'s shared header block — not behind a flag, not on a
+      subset of routes.
+    * ``simulateAddCandidate`` calls that same ``analyticsRequest`` with
+      ``"/api/simulator"``, and ``src/app/api/simulator/route.ts`` (the only
+      front door) calls ``simulateAddCandidate``. So the claim IS on the wire
+      for this route in production.
+    * SEC-05 then pointed the decorator at ``tenant_or_platform_key``. The claim
+      arm therefore fires, and the isolation these tests assert is a property
+      production exercises — which is exactly what the analytics-client comment
+      predicted would happen "for free the moment the quarantine lifts".
+
+    The reviewer read three comments that DRIFTED when SEC-05 lifted the
+    quarantine, and all three still say the opposite of the code:
+
+    * ``analytics-service/services/rate_limit.py:400-405`` — *"src/lib/
+      analytics-client.ts mints no X-Tenant-Claim today"*.
+    * ``analytics-service/routers/simulator.py:103-107`` — *"Until src/lib/
+      analytics-client.ts mints X-Tenant-Claim … real traffic still lands on the
+      documented platform:/api/simulator ceiling"*.
+    * ``src/lib/analytics-client.ts:944-946`` — *"the claim is INERT here —
+      /api/simulator is the tenth route and is still IP-keyed (TS-30,
+      quarantined)"*.
+
+    All three are outside this fix pass's file scope and are reported, not
+    edited. ``test_production_actually_sends_the_tenant_claim`` below pins the
+    fact so the next reader gets a RED test rather than a fourth stale comment.
+
+    ⛔ What IN-05 got right and this note does NOT overturn: the in-handler
+    ``_check_simulator_user_rate`` still earns its place, because slowapi's
+    key_func cannot see the parsed body. Do not delete it on the strength of
+    this correction — that inference is the one the router's comment warns
+    against, and it stays valid even though its premise no longer does.
+
     RED DEMONSTRATION (executed 2026-08-26). Neuter: revert
     ``routers/simulator.py`` to the IP form — re-import ``get_remote_address``,
     restore ``_simulator_rate_limit_key`` returning
@@ -1105,6 +1151,66 @@ class TestG15_005_RateLimitIsTenantKeyed:
         # And the bucket must NOT be the old NAT-collapsing address shape.
         assert not bucket_a.startswith("simulator:ip:"), bucket_a
         assert "tenant-sim-spoof" in bucket_a, bucket_a
+
+    def test_production_actually_sends_the_tenant_claim(self):
+        """IN-05 correction, pinned rather than asserted in prose.
+
+        The tenant arm of ``tenant_or_platform_key`` is only worth anything if
+        real traffic carries ``X-Tenant-Claim``. Three separate comments in this
+        repo still say it does not (see the class docstring); the code says it
+        does. A fact that three comments contradict needs a test, or the next
+        reviewer reaches the same wrong conclusion from the same prose.
+
+        Cross-language on purpose: the claim is a property of the SEAM, and no
+        Python-only assertion can see the sender. Uses the repo-root walk from
+        tests/_scan_helpers.py.
+
+        ⚠️ COMMENT-STRIPPED, and that is not hygiene — it is the difference
+        between this test working and not. Measured while proving it could fail:
+        the first draft matched the raw file text, so commenting the header line
+        out (``// "X-Tenant-Claim": tenantClaim,``) left the substring intact and
+        the test PASSED against the neuter. analytics-client.ts also discusses
+        this header in three JSDoc blocks, any one of which would hold the gate
+        green on its own. Same trap tests/test_redact.py names for its `.bind()`
+        scan: prose about a construct is not the construct.
+        """
+        from tests._scan_helpers import _repo_root
+
+        raw = (_repo_root() / "src" / "lib" / "analytics-client.ts").read_text(
+            encoding="utf-8"
+        )
+        client = "\n".join(
+            line
+            for line in raw.splitlines()
+            if not line.lstrip().startswith(("//", "*", "/*"))
+        )
+        # Anti-vacuity: a moved/renamed/emptied file must not read as "clean".
+        assert "async function analyticsRequest(" in client, (
+            "src/lib/analytics-client.ts no longer defines analyticsRequest — "
+            "this gate is reading the wrong file and every assertion below it "
+            "is vacuous. Re-anchor it, do not delete it."
+        )
+        # The header line itself, in the shared block, not behind a condition.
+        assert '"X-Tenant-Claim": tenantClaim,' in client, (
+            "analyticsRequest stopped sending X-Tenant-Claim. Every PYAPI-03 "
+            "route — including /api/simulator — silently falls back to the "
+            "single platform:<path> bucket, i.e. loses per-tenant isolation "
+            "with no error anywhere. If this was deliberate, the rate_limit.py "
+            "and routers/simulator.py comments become true again and this test "
+            "should be inverted, not deleted."
+        )
+        assert "mintTenantClaim(" in client, "the claim is no longer minted"
+        # ...and the simulator route is one of the callers that inherits it.
+        sim_wrapper = client.split("export async function simulateAddCandidate(")
+        assert len(sim_wrapper) == 2, (
+            "simulateAddCandidate is gone or duplicated in analytics-client.ts"
+        )
+        body = sim_wrapper[1].split("\nexport ")[0]
+        assert "analyticsRequest(" in body and '"/api/simulator"' in body, (
+            "simulateAddCandidate no longer routes through analyticsRequest, so "
+            "it no longer inherits the X-Tenant-Claim header: "
+            f"{body[:400]!r}"
+        )
 
     def test_ceiling_matches_next_js_front_door(self):
         """The FastAPI limit MUST match the Next.js front-door ceiling
