@@ -33,6 +33,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { safeCompare } from "@/lib/timing-safe-compare";
+import { captureToSentry } from "@/lib/sentry-capture";
+import { scrubSeamError } from "@/lib/seam-redaction";
 import { Resend } from "resend";
 
 export const dynamic = "force-dynamic";
@@ -86,6 +88,111 @@ function parseSentryCount(payload: unknown): number {
 type SentryFetchResult =
   | { kind: "ok"; errorCount: number }
   | { kind: "terminal"; res: NextResponse };
+
+/**
+ * OPS-07 (Phase 163) — A FAILED READ MUST PAGE, AND THE STATUS CODE IS HOW.
+ *
+ * 141.2 distinguished a failed denominator read from a genuinely empty window
+ * (the arms in `getDenominator`), which was the right split — but BOTH terminal
+ * arms then returned at the default HTTP 200. Vercel's cron history keys "did
+ * this run succeed?" off the status code, so a persistent Supabase read failure
+ * logged a green run every 15 minutes forever, with the console.warn visible
+ * only to someone already looking. That is 141.2's own lesson recurring inside
+ * 141.2's own remedy: THE REMEDY REPLACED A WRONG PAGE WITH NO PAGE.
+ * Distinguishing a state you then report as success is not distinguishing it.
+ *
+ * 503 makes the run register FAILED in Vercel cron history — that IS the page
+ * channel for this route (Architectural Responsibility Map), and a Sentry
+ * capture carries the diagnosis. The cost was priced in when the TODOS entry
+ * was filed: a monitor that cannot complete its read IS broken, so the cron
+ * history going red is the history becoming accurate, not becoming noisy.
+ *
+ * ── WR-02 (163 review) — WHY THIS IS `monitorReadFailed` AND NOT
+ *    `denominatorReadFailed` ─────────────────────────────────────────────────
+ *
+ * ⚠️ THE FIRST VERSION OF THIS HELPER CLOSED ONE OF FOUR ARMS, IN THE FILE THAT
+ * CONTAINED THE OTHER THREE. This cron computes ONE ratio out of TWO reads, and
+ * nothing in the argument above is specific to the denominator — it is about a
+ * read this monitor cannot complete. The NUMERATOR's three terminal arms (a
+ * throwing `fetch`, a non-ok Sentry response, and missing Sentry credentials)
+ * kept answering at the default 200. So a ROTATED OR EXPIRED SENTRY AUTH TOKEN
+ * — materially MORE likely than the Supabase read failure that WAS fixed —
+ * produced a 401 every 15 minutes, a `{ ok: false }` body nobody reads, and an
+ * unbroken run of green in the cron history, while the /process-key error-rate
+ * monitor was dead. OPS-07's criterion is "monitors cannot report false
+ * health": that is a property of the MONITOR, so the helper is keyed on the
+ * monitor rather than on one of its two terms.
+ *
+ * Every terminal arm in this file now routes through here. A new read added to
+ * this cron that answers its own `NextResponse.json({ ok: false, … })` re-opens
+ * the class — route it here instead.
+ *
+ * ⚠️ Email deliberately stays with the existing streak machinery
+ * (`handleZeroDenominator`). A failed read is not a zero window and must not
+ * advance that streak — its email asserts a diagnosis ("no traffic OR the
+ * audit-write is failing") that is FALSE here and would send the operator to
+ * the Python audit path for a fault that lives in this query.
+ */
+
+/** The denominator arms' shared machine reason. Named so the two of them cannot
+ *  drift apart, and so the token that tests and Sentry filters match on has one
+ *  definition. */
+const DENOMINATOR_READ_FAILED = "denominator_read_failed";
+
+/** Vercel cron treats a non-2xx as a failed run. Named so the terminal arms
+ *  cannot drift apart, and so a reader sees it is a signal rather than an
+ *  arbitrary code. */
+const MONITOR_FAILURE_STATUS = 503;
+
+/** Which half of the ratio the monitor could not read. */
+type MonitorTerm = "numerator" | "denominator";
+
+/**
+ * Every terminal arm answers identically: a non-200 so the run registers FAILED
+ * in the cron history, plus a Sentry capture carrying the diagnosis. Awaited by
+ * the caller so the capture is not reaped when the function returns
+ * (SEAMRIM-04).
+ *
+ * The `reason` stays per-arm: making the arms page is orthogonal to keeping
+ * them DISTINGUISHABLE, and collapsing `sentry_rate_limited` into
+ * `sentry_unreachable` would undo I-perf-cron.
+ */
+async function monitorReadFailed(args: {
+  term: MonitorTerm;
+  /** Machine token echoed in the JSON body — one per distinguishable fault. */
+  reason: string;
+  /** Human detail; becomes the Sentry issue title. */
+  detail: string;
+  extra: Record<string, unknown>;
+  /** Arm-specific body fields (the Sentry non-ok arm carries its headers). */
+  body?: Record<string, unknown>;
+}): Promise<{ kind: "terminal"; res: NextResponse }> {
+  await captureToSentry(
+    new Error(`flag-monitor ${args.term} read failed: ${args.detail}`),
+    {
+      tags: {
+        route: "cron.flag-monitor",
+        monitor_read_failed: "true",
+        monitor_term: args.term,
+        // ⚠️ KEPT VERBATIM on the denominator arms. Any Sentry alert rule or
+        // saved search written against the 141.2 / OPS-07 tag keeps matching —
+        // widening this helper must not silently retire an existing filter.
+        ...(args.term === "denominator"
+          ? { denominator_read_failed: "true" }
+          : {}),
+      },
+      extra: { ...args.extra, reason: args.reason },
+      level: "error",
+    },
+  );
+  return {
+    kind: "terminal",
+    res: NextResponse.json(
+      { ok: false, reason: args.reason, ...(args.body ?? {}) },
+      { status: MONITOR_FAILURE_STATUS },
+    ),
+  };
+}
 
 async function getNumerator(args: {
   orgSlug: string;
@@ -141,11 +248,23 @@ async function getNumerator(args: {
       cache: "no-store",
     });
   } catch (err) {
-    console.warn("[cron/flag-monitor] sentry fetch threw:", err);
-    return {
-      kind: "terminal",
-      res: NextResponse.json({ ok: false, reason: "sentry_unreachable" }),
-    };
+    // ⚠️ SCRUBBED (Rule 2 — same class as the ratelimit module's TRAP-1). The
+    // request this rejection describes carries `Authorization: Bearer
+    // ${args.sentryToken}`, and undici inlines the outgoing request into the
+    // error it produces — so logging `err` raw spilled the Sentry auth token
+    // into the function log of the very cron whose token rotation this arm
+    // exists to surface. The syscall detail survives the scrub.
+    console.warn("[cron/flag-monitor] sentry fetch threw:", scrubSeamError(err));
+    // WR-02: 503, not the default 200. See `monitorReadFailed`.
+    return await monitorReadFailed({
+      term: "numerator",
+      reason: "sentry_unreachable",
+      detail: "sentry fetch threw",
+      // Pre-scrubbed for the same reason as the console.warn above: this is a
+      // string `extra`, not the captured value, so the chokepoint's scrub of
+      // the thrown object does not reach it.
+      extra: { error: scrubSeamError(err) },
+    });
   }
 
   if (!sentryRes.ok) {
@@ -169,11 +288,21 @@ async function getNumerator(args: {
     console.warn(
       `[cron/flag-monitor] sentry status=${sentryRes.status} reason=${reason}`,
     );
-    return {
-      kind: "terminal",
-      res: NextResponse.json({
-        ok: false,
-        reason,
+    // WR-02: 503, not the default 200. A 401 from a rotated SENTRY_AUTH_TOKEN
+    // lands here, and it is the single likeliest way this monitor goes blind.
+    // `sentry_rate_limited` pages too: while Sentry is throttling us the
+    // numerator is unread, and the cron runs every 15 minutes so a genuinely
+    // transient throttle clears itself before the history reads as sustained.
+    return await monitorReadFailed({
+      term: "numerator",
+      reason,
+      detail: `sentry status=${sentryRes.status}`,
+      extra: {
+        sentry_status: sentryRes.status,
+        rate_limited: isRateLimited,
+        retry_after: retryAfter,
+      },
+      body: {
         status: sentryRes.status,
         ...(retryAfter ? { retry_after: retryAfter } : {}),
         ...(sentryRateLimitRemaining
@@ -182,8 +311,8 @@ async function getNumerator(args: {
         ...(sentryRateLimitReset
           ? { rate_limit_reset: sentryRateLimitReset }
           : {}),
-      }),
-    };
+      },
+    });
   }
 
   const sentryData = await sentryRes.json().catch(() => ({}));
@@ -225,7 +354,7 @@ async function getNumerator(args: {
  *      distinguishes a full page from a truncated one, so above 1000 the
  *      denominator was silently fabricated — deflating it, inflating errorRate,
  *      and paging the founder for nothing. A COUNT has no row cap at any
- *      volume; `src/lib/observability.ts` is the in-repo shape.
+ *      volume.
  *   2. WIRE CONTROL. It keyed the denominator on `metadata.correlation_id`,
  *      which originates as the inbound `X-Correlation-Id` header.
  *      `/api/verify-strategy` reaches `postProcessKey` UNAUTHENTICATED and
@@ -305,10 +434,16 @@ async function getDenominator(args: {
 
   if (error) {
     console.warn("[cron/flag-monitor] denominator read failed:", error);
-    return {
-      kind: "terminal",
-      res: NextResponse.json({ ok: false, reason: "denominator_read_failed" }),
-    };
+    return await monitorReadFailed({
+      term: "denominator",
+      reason: DENOMINATOR_READ_FAILED,
+      detail: "postgrest error",
+      extra: {
+        error_message: (error as { message?: string }).message ?? String(error),
+        error_code: (error as { code?: string }).code ?? null,
+        window_start: args.windowStart.toISOString(),
+      },
+    });
   }
 
   // A null `error` does not mean a usable count. postgrest-js only sets `count`
@@ -322,10 +457,17 @@ async function getDenominator(args: {
   // that is not a non-negative integer is a read we could not complete.
   if (!Number.isInteger(count) || (count as number) < 0) {
     console.warn("[cron/flag-monitor] denominator count unusable:", count);
-    return {
-      kind: "terminal",
-      res: NextResponse.json({ ok: false, reason: "denominator_read_failed" }),
-    };
+    return await monitorReadFailed({
+      term: "denominator",
+      reason: DENOMINATOR_READ_FAILED,
+      detail: "unusable count",
+      extra: {
+        // Stringified: a raw NaN does not survive JSON serialisation into the
+        // Sentry payload, and NaN-versus-null is the whole diagnosis here.
+        count: String(count),
+        window_start: args.windowStart.toISOString(),
+      },
+    });
   }
 
   return { kind: "ok", total: count as number };
@@ -422,7 +564,23 @@ async function handle(req: NextRequest): Promise<NextResponse> {
     console.warn(
       "[cron/flag-monitor] SENTRY_ORG_SLUG or SENTRY_AUTH_TOKEN missing — skipping",
     );
-    return NextResponse.json({ ok: false, reason: "sentry_not_configured" });
+    // WR-02: 503, not the default 200. This one is not even transient — a
+    // missing env var is a deploy defect that persists until someone acts, so
+    // reporting it as a successful run is the most durable false-health this
+    // route could emit. The capture still works: `captureToSentry` writes
+    // through SENTRY_DSN, a DIFFERENT variable from the two events-API
+    // credentials whose absence is being reported here.
+    const terminal = await monitorReadFailed({
+      term: "numerator",
+      reason: "sentry_not_configured",
+      detail: "SENTRY_ORG_SLUG or SENTRY_AUTH_TOKEN missing",
+      // WHICH one is missing, without echoing either value.
+      extra: {
+        org_slug_present: Boolean(orgSlug),
+        auth_token_present: Boolean(sentryToken),
+      },
+    });
+    return terminal.res;
   }
 
   const admin = createAdminClient();

@@ -305,3 +305,260 @@ def test_redact_processor_scrubs_dict_tracebacks_freeform_leaves():
         f"dict_tracebacks frame vars leaked: {rendered!r}"
     )
     assert "[REDACTED]" in rendered
+
+
+# ---------------------------------------------------------------------------
+# OPS-05 (Phase 163) — the scrub must not DELETE log lines
+# ---------------------------------------------------------------------------
+# HISTORY of this block, because the mechanism changed twice and the test text
+# below only makes sense against it:
+#
+#   1. Originally, `record.msg` was scrubbed AS A %-FORMAT TEMPLATE.
+#      scrub_freeform_string rewrote `claim_token=%s,` to
+#      `claim_token: [REDACTED]`, eating one `%s`; getMessage() then raised
+#      TypeError and stdlib DROPPED the record via handleError, emitting only
+#      "--- Logging error ---" to stderr. Measured 2026-08-26 with an AST scan
+#      of all 111 non-test modules: 3 live templates hit it, all of them
+#      worker/compute diagnostics ops silently never received.
+#   2. That was fixed by REVERTING to the original template when the scrub
+#      broke formatting — which delivered the line but emitted the argument in
+#      plaintext (CR-02).
+#   3. Now the bridge scrubs the RENDERED line instead, which delivers the line
+#      AND redacts the argument. Both properties are asserted below.
+# ---------------------------------------------------------------------------
+
+# Verbatim from main_worker.py's LATE_MARK_IGNORED warning — the fencing
+# diagnostic that says another worker legitimately took a claimed job over. If
+# that template is ever rephrased this constant should follow it, but the
+# contract under test is the shape (`<denylisted-key>=%s` inside a template with
+# other placeholders), not this one call site.
+_LATE_MARK_TEMPLATE = (
+    "LATE_MARK_IGNORED: job %s %s preempted by watchdog reclaim "
+    "(claim_token=%s, worker=%s) — another worker has taken over"
+)
+
+
+def test_scrub_never_drops_a_record_by_eating_a_format_placeholder():
+    """A denylist-shaped literal in a %-template must not delete the log line.
+
+    RED demo M4 (2026-08-26): reverting the guard in
+    services/logging_config.py::_scrub_record_in_place to the unconditional
+    `record.msg = scrub_freeform_string(record.msg)` fails this test at the
+    `logger.warning(...)` call itself, with
+    `TypeError: not all arguments converted during string formatting` raised out
+    of `Handler.handleError` (pytest's LogCaptureHandler re-raises it; a
+    PRODUCTION handler instead swallows it and drops the record, printing only
+    "--- Logging error ---" to stderr). The same mutation independently reddens
+    `tests/test_compute_jobs_fencing.py::TestDispatchTickThreadsClaimToken` —
+    3 failed / 2 passed — which is how this defect was found: it is not a
+    hypothetical, it is what production has been doing at three call sites.
+
+    ⚠️ That sibling module must be run on its OWN to see it. This file's autouse
+    `_reset_factory_state` fixture uninstalls the LogRecord factory on teardown,
+    so a combined run leaves the fencing tests unconfigured and green.
+
+    ⚠️ REVISED for CR-02 (Phase 163 review). This test previously asserted
+    `"tok-abc123" in out` — i.e. it PINNED the credential leak as expected
+    behaviour, on the strength of a docstring claiming the args "are scrubbed
+    on their own path". They are not: `scrub_freeform_string` Pass 1 needs a
+    denylisted key ADJACENT to its value, and a bare value passed as an
+    argument carries no key, so `claim_token=%s` emitted its argument in full.
+    The bridge now scrubs the RENDERED line, where key and value ARE adjacent,
+    so the contract is both properties at once — delivered AND redacted.
+    """
+    configure_logging()
+    buf, handler = _attach_capture_handler()
+    try:
+        logging.getLogger("quantalyze.analytics").warning(
+            _LATE_MARK_TEMPLATE, "job-1", "done", "tok-abc123", "worker-7"
+        )
+    finally:
+        _detach(handler)
+    out = buf.getvalue()
+    assert "LATE_MARK_IGNORED" in out, (
+        "the record was DROPPED. scrub_freeform_string ate a `%s` from the "
+        "format template, getMessage() raised TypeError, and stdlib logging "
+        f"swallowed the line in Handler.handleError. Got: {out!r}"
+    )
+    # The non-sensitive positional args must have landed — a partially
+    # formatted line would mean the placeholder count was preserved but the
+    # mapping shifted.
+    for expected in ("job-1", "done", "worker-7"):
+        assert expected in out, f"arg {expected!r} missing from {out!r}"
+    # CR-02: the value of a denylisted key must NOT survive, even though it
+    # arrived as a bare argument with no key attached to it.
+    assert "tok-abc123" not in out, (
+        "CR-02 regression: the `claim_token=%s` argument was emitted in "
+        f"plaintext. Got: {out!r}"
+    )
+    assert "[REDACTED]" in out, f"expected the redaction marker: {out!r}"
+
+
+def test_scrub_still_redacts_a_template_when_placeholders_survive():
+    """The revert is NARROW: a scrub that leaves the placeholders alone is kept.
+
+    Pins that the fix above did not degrade into "never scrub a template with
+    args". Here the denylisted literal sits away from the placeholder, so the
+    scrubbed template still formats and the secret is redacted.
+    """
+    configure_logging()
+    buf, handler = _attach_capture_handler()
+    try:
+        logging.getLogger("quantalyze.analytics").warning(
+            "venue rejected apisecret=SUPERSECRETVALUE for job %s", "job-9"
+        )
+    finally:
+        _detach(handler)
+    out = buf.getvalue()
+    assert "SUPERSECRETVALUE" not in out, f"template literal leaked: {out!r}"
+    assert "[REDACTED]" in out, f"expected the redaction marker: {out!r}"
+    assert "job-9" in out, f"the record was dropped or mis-formatted: {out!r}"
+
+
+# ---------------------------------------------------------------------------
+# CR-01 (Phase 163 review) — a `%`-arg that is not already a `str`.
+#
+# The args loop scrubs only members satisfying `isinstance(v, str)`. Anything
+# else survives the redaction pass untouched and is stringified LATER, by
+# `record.getMessage()` at handler time. ccxt puts the full signed request URL
+# in its exception text, so `logger.warning("…: %s", exc)` published the HMAC.
+#
+# MEASURED 2026-08-26, pre-fix, on the exact shape at key_permissions.py:133:
+#   Binance permission probe failed: binance GET https://api.binance.com/sapi/
+#   v1/account/apiRestrictions?timestamp=1756180000000&signature=DEADBEEFHMAC…
+# while the SAME exception wrapped in `str(exc)` came out `signature: [REDACTED]`.
+# That differential is the whole defect — the `str()` in the factory docstring's
+# example was silently load-bearing.
+# ---------------------------------------------------------------------------
+
+
+class _FakeCcxtAuthError(Exception):
+    """Stands in for ccxt's AuthenticationError: the signed URL is in the text."""
+
+
+_SIGNED_URL_EXC_TEXT = (
+    "binance GET https://api.binance.com/sapi/v1/account/apiRestrictions"
+    "?timestamp=1756180000000&signature=DEADBEEFHMAC0123456789ABCDEF"
+)
+
+
+def test_non_string_arg_carrying_a_credential_is_scrubbed():
+    """CR-01 headline: `logger.warning("…: %s", exc)` — arg is NOT a str.
+
+    ⛔ This test MUST use a non-`str` arg. Passing `str(exc)` here passes
+    against the pre-fix code too and would prove nothing.
+
+    Ten non-test call sites in this service have this shape, three of them
+    (`services/key_permissions.py:133`, `:165`, `:213`) on SIGNED private ccxt
+    calls whose exceptions embed the request signature.
+    """
+    configure_logging()
+    buf, handler = _attach_capture_handler()
+    try:
+        logging.getLogger("quantalyze.analytics").warning(
+            "Binance permission probe failed: %s", _FakeCcxtAuthError(_SIGNED_URL_EXC_TEXT)
+        )
+    finally:
+        _detach(handler)
+    out = buf.getvalue()
+    assert "DEADBEEFHMAC" not in out, (
+        "CR-01 regression: an exception passed as a bare `%s` arg rendered "
+        "AFTER the redaction pass, publishing the HMAC signature derived from "
+        f"the user's API secret. Got: {out!r}"
+    )
+    assert "[REDACTED]" in out, f"expected the redaction marker: {out!r}"
+    # Fail-loud: closing the leak must not cost us the diagnostic.
+    assert "Binance permission probe failed" in out, (
+        f"the record was dropped instead of redacted: {out!r}"
+    )
+
+
+def test_non_string_arg_leak_is_not_an_artefact_of_stringifying_first():
+    """Differential control for the test above: `str(exc)` was ALREADY safe.
+
+    Pins that the CR-01 test is measuring the non-`str` path specifically. If
+    someone "fixes" CR-01 by making callers wrap in `str()`, this pair still
+    documents which of the two shapes the BRIDGE is responsible for.
+    """
+    configure_logging()
+    buf, handler = _attach_capture_handler()
+    try:
+        logging.getLogger("quantalyze.analytics").warning(
+            "ccxt: %s", str(_FakeCcxtAuthError(_SIGNED_URL_EXC_TEXT))
+        )
+    finally:
+        _detach(handler)
+    out = buf.getvalue()
+    assert "DEADBEEFHMAC" not in out, f"str()-wrapped arg leaked: {out!r}"
+
+
+def test_bare_credential_arg_under_a_denylisted_key_template_is_scrubbed():
+    """CR-02, in the review's own words: the shape that reads as obviously safe.
+
+    `logger.warning("venue rejected api_key=%s for %s", key, strategy_id)` is
+    exactly what the redactor is supposed to catch.
+
+    ⚠️ The fixture value is deliberately NOT credential-SHAPED. It was
+    `AKIA...` until 2026-08-26, when the pre-push secret guardrail correctly flagged
+    it as an AWS access key in the pushed diff — a synthetic fixture that trips a
+    real scanner costs every future pusher a manual triage, and teaches them to
+    bypass the guardrail. The shape is also irrelevant to what this test proves:
+    the redactor catches this case via the DENYLISTED KEY adjacent to the value
+    (`api_key=`), not by recognising the value. A value that had to look like a
+    real credential would mean the arm under test was the shape detector instead. Pre-fix it emitted `key` in
+    full: the template scrub ate the `%s`, the code reverted to the original
+    template, and the bare value matched nothing on its own.
+    """
+    configure_logging()
+    buf, handler = _attach_capture_handler()
+    try:
+        logging.getLogger("quantalyze.analytics").warning(
+            "venue rejected api_key=%s for %s", "synthetic-cr02-value-9f3a", "strat-7"
+        )
+    finally:
+        _detach(handler)
+    out = buf.getvalue()
+    assert "synthetic-cr02-value-9f3a" not in out, (
+        f"CR-02 regression: bare credential arg emitted in plaintext: {out!r}"
+    )
+    assert "[REDACTED]" in out, f"expected the redaction marker: {out!r}"
+    assert "strat-7" in out, f"the record was dropped or mis-formatted: {out!r}"
+
+
+def test_clean_record_keeps_its_template_and_args_unbaked():
+    """The rendered-message scrub must NOT bake every record.
+
+    `_scrub_rendered_in_place` only reassigns when the scrub changed something.
+    That is load-bearing in two directions and neither is cosmetic:
+
+      - Sentry's LoggingIntegration splits `logentry.message` (the template)
+        from `logentry.params` (the args) and groups issues by the template.
+        Collapsing every record to its rendered text would give every distinct
+        argument value its own Sentry issue.
+      - `%d` / `%.2f` conversion semantics stay with stdlib rather than being
+        frozen by us at record-creation time.
+
+    A record that DID carry a secret gives this up — the right trade, and rare.
+    """
+    configure_logging()
+    logger = logging.getLogger("quantalyze.analytics")
+    clean = logger.makeRecord(
+        "quantalyze.analytics", logging.WARNING, __file__, 1,
+        "job %s finished in %.2fs", ("job-9", 1.5), None,
+    )
+    assert clean.msg == "job %s finished in %.2fs", (
+        f"a record with nothing to redact was baked: {clean.msg!r}"
+    )
+    assert clean.args == ("job-9", 1.5), f"args were discarded: {clean.args!r}"
+    assert clean.getMessage() == "job job-9 finished in 1.50s"
+
+    # ...and the converse: a record that DID need scrubbing is baked, with
+    # args cleared so getMessage() cannot re-interpolate the rendered line.
+    dirty = logger.makeRecord(
+        "quantalyze.analytics", logging.WARNING, __file__, 1,
+        "probe failed: %s", (_FakeCcxtAuthError(_SIGNED_URL_EXC_TEXT),), None,
+    )
+    assert dirty.args is None, (
+        f"args must be cleared once the line is interpolated: {dirty.args!r}"
+    )
+    assert "DEADBEEFHMAC" not in dirty.getMessage()

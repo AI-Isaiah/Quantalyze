@@ -42,20 +42,20 @@ Ships LP-03 (founder-fillable dogfood-commitment stub at PENDING with literal `<
 
 ### Tracked (committed in `7437109`)
 
-- `/Users/helios-mammut/claude-projects/quantalyze/.planning/STATE.md` (EDIT)
+- `.planning/STATE.md` (EDIT)
   - Added bullet to `### Roadmap Evolution`: "2026-05-06 — Phase 18 plan-phase records that BACKBONE-06 (open-perp correctness) + BACKBONE-07 (TWR ≠ YTD reconciliation) push from Phase 18 to Phase 19 per `.planning/phases/18-root-cause-fix-founder-lp-skeleton/18-CONTEXT.md` L22-23. Rationale: Phase 19's `IngestionAdapter.reconstruct_positions` + equity-curve refactor absorbs the same call sites; Phase 18 already heavy with FIX-04 redact mirror + LP cron + 10-team verification. Day-2 doc Section 5's 'IN (Phase 18)' rows are now superseded — see `.planning/phase-16/day-2-decision.md` Section 5 REVISED header AND inline row supersede annotations (Adversarial revision 2026-05-06: W6)."
   - Frontmatter and Current Position fields refreshed to reflect Phase 18 planning complete (working-tree changes already present at session start; included in same commit since they consistently reflect actual progression, not regressions).
 
 ### Local-only (gitignored under `.planning/`)
 
-- `/Users/helios-mammut/claude-projects/quantalyze/.planning/phase-18/dogfood-commitment.md` (NEW)
+- `.planning/phase-18/dogfood-commitment.md` (NEW)
   - Frontmatter: `gate: phase-18-exit-dogfood-commitment`, `status: PENDING`, `requirement: LP-03`, `captured_at:` + `captured_by:` both `<TODO: founder fills at /ship time…>`.
   - Body: Required-by quote citing REQUIREMENTS.md LP-03 verbatim + Pitfall 10 warning quote (Claude MUST NOT auto-fill).
   - `## Commitment Text (verbatim)` section contains the literal `<TODO: founder fills in at /ship time>` marker (the canary the gate checker greps for).
   - `## Notes` section also gated with `<TODO:` placeholder.
   - No Claude-authored commitment-shaped text (verified: `! grep -qE "^I (commit|will|promise|agree)" .planning/phase-18/dogfood-commitment.md` returns success).
 
-- `/Users/helios-mammut/claude-projects/quantalyze/.planning/phase-16/day-2-decision.md` (EDIT)
+- `.planning/phase-16/day-2-decision.md` (EDIT)
   - Section 5 heading immediately followed by REVISED blockquote: `> **REVISED 2026-05-06** — BACKBONE-06 + BACKBONE-07 rows below are SUPERSEDED. Per `.planning/phases/18-root-cause-fix-founder-lp-skeleton/18-CONTEXT.md` L22-23, both pushed to Phase 19 (rationale: pairs with `IngestionAdapter.reconstruct_positions` + equity-curve refactor). Section preserved for historical record; canonical phase attribution lives in REQUIREMENTS.md + ROADMAP.md.`
   - Section 4 BACKBONE-06 + BACKBONE-07 rows (the actual `IN (Phase 18)` location): inline-superseded via strikethrough — `~~IN (Phase 18)~~ → SUPERSEDED, see 18-CONTEXT.md L22-23 — pushed to Phase 19`. Trailing rationale column "Independent v1 work, ships ahead of unification." preserved on both rows.
   - Section 5 BACKBONE-06 + BACKBONE-07 rows: equivalent inline supersede on the `READY to plan (independent v1)` text — `~~READY to plan (independent v1)~~ → SUPERSEDED, see 18-CONTEXT.md L22-23 — pushed to Phase 19`.

@@ -18,7 +18,7 @@ The portfolio performance piece already exists. Allocators already see "what tea
 
 **Tech Stack:** Same as the rest of the product. Next.js 16 (App Router), Supabase (Postgres + RLS), Python FastAPI in `analytics-service/`, lightweight-charts where relevant, no new dependencies. The match scoring lives in Python because it needs pandas/numpy for correlation math and sits next to the existing `portfolio_optimizer.py`.
 
-**Spec / Origin doc:** This plan extends the original product design at `~/.gstack/projects/AI-Isaiah-Quantalyze/helios-mammut-main-design-20260405-010321.md` (the office-hours session), specifically Premise 5 ("self-service discovery, founder-routed intros") and the cross-model insight: "this is a preference discovery problem, not a dashboard problem. The real product is a search/filter engine with allocator-defined weighting."
+**Spec / Origin doc:** This plan extends the original product design at `~/.gstack/projects/AI-Isaiah-Quantalyze/<user>-main-design-20260405-010321.md` (the office-hours session), specifically Premise 5 ("self-service discovery, founder-routed intros") and the cross-model insight: "this is a preference discovery problem, not a dashboard problem. The real product is a search/filter engine with allocator-defined weighting."
 
 ---
 
@@ -1731,7 +1731,7 @@ All structural, all safety-critical. Auto-applied per autoplan rules. The plan's
 
 ### Mandatory artifacts
 
-- [x] **Test plan artifact written to disk** at `~/.gstack/projects/AI-Isaiah-Quantalyze/helios-mammut-feat-perfect-match-engine-test-plan-20260407.md`
+- [x] **Test plan artifact written to disk** at `~/.gstack/projects/AI-Isaiah-Quantalyze/<user>-feat-perfect-match-engine-test-plan-20260407.md`
 - [x] **Architecture ASCII diagram** in CEO Section 1 (above)
 - [x] **Failure modes registry** in CEO Section 2 (above)
 - [x] **Test diagram mapping codepaths to coverage** in CEO Section 6 (above)

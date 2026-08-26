@@ -60,6 +60,53 @@ import sentry_sdk
 load_dotenv(Path(__file__).parent / ".env.qa-local")
 load_dotenv()
 
+# ---------------------------------------------------------------------------
+# OPS-05 (Phase 163) — redaction is installed HERE, first, and unconditionally.
+# ---------------------------------------------------------------------------
+# ⚠️ SCOPE — read this BEFORE the leak description below. PRODUCTION DOES NOT
+# RUN THIS ENTRYPOINT. There is no separate worker service and has not been
+# since April 2026; the dispatch/watchdog/enqueue loops were merged into the
+# FastAPI process, which has called configure_logging() since Phase 16. See the
+# JOB-04 note in main() (~line 1224 below) for the 2026-08-17 verification, and
+# main.py:297, which logs "Worker starting as %s (merged into API)" — Plan 02
+# measured that line on PROD. So this change closes the STANDALONE and re-split
+# paths. It is PREVENTIVE there, not corrective, and the "unconditional leak"
+# below is a property of the standalone worker path, NOT of production logs.
+#
+# ⛔ Do not scope a credential-disclosure incident off the paragraph below. It
+# does not say production logs were unredacted before 2026-08-26, because they
+# were not; a key rotation for every connected venue key and a log-drain purge
+# would be scoped on a misreading. This block and the JOB-04 note must keep
+# saying the same thing (WR-08, Phase 163 review — they did not).
+#
+# Until 2026-08-26 this module contained ZERO references to configure_logging or
+# structlog, so a process started via `python -m main_worker` — the standalone
+# form of the one that runs ccxt long-fetch and MT5 sync — emitted every line
+# through structlog's DEFAULT chain and never installed the stdlib
+# `setLogRecordFactory` bridge. That is not a theoretical frozen-proxy risk; on
+# that path it is an unconditional leak of every line the worker writes:
+#
+#   * no `_redact_processor`, so `log.info(..., api_key=...)` renders the value
+#     verbatim (MEASURED 2026-08-26 — see tests/test_structlog_frozen_proxy.py
+#     ::TestModeBLeakMechanism::test_a_line_emitted_before_configure_leaks);
+#   * no LogRecord factory, so the exact leak that factory exists to stop —
+#     `logger.warning("ccxt: %s", str(exc))` carrying the HMAC signature
+#     embedded in a ccxt exception (services/logging_config.py) — was unguarded;
+#   * `mt5linux` f-string-interpolates the MT5 password into remotely-eval'd
+#     source, so MT5 exception TEXT is itself a credential surface
+#     (services/mt5_client.py, T-134-01 / T-153.3-23).
+#
+# Placed at MODULE scope, ABOVE every first-party import below, rather than
+# inside main(): a first-party module that logs at import time would otherwise
+# emit before any main()-time call could run, and `python -m main_worker`
+# executes this module top-down before main() exists. The ordering is a gate —
+# tests/test_structlog_frozen_proxy.py::TestEntrypointOrdering fails if this
+# call ever sinks below the imports again. Idempotent (services/logging_config.py
+# install-state gate), so a later call from a test or a re-entry is harmless.
+from services.logging_config import configure_logging
+
+configure_logging()
+
 import main_worker_healthz  # top-level module (not in services/); stdlib-only, no cycle
 from sentry_init import init_sentry
 from services.db import db_execute, get_supabase

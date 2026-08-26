@@ -19,7 +19,7 @@ import {
 } from "@/lib/queries";
 import { adaptPortfolioAnalytics } from "@/lib/portfolio-analytics-adapter";
 import { computeFreshness } from "@/lib/freshness";
-import { extractAnalytics } from "@/lib/utils";
+import { extractAnalytics, seriesEndOf } from "@/lib/utils";
 import { isRankableAnalyticsRow } from "@/lib/closed-sets";
 import { resolveDailyReturnSeries } from "@/lib/factsheet/resolve-series";
 import { normalizeDailyReturns } from "@/lib/portfolio-math-utils";
@@ -185,7 +185,14 @@ interface PortfolioStrategyRow {
   } | null;
 }
 
-function buildCompositionRows(
+/**
+ * EXPORTED for test only, alongside `buildEquityCurveSeries` and
+ * `stripConstituentSeries` — the file's existing precedent. The one oracle
+ * that would have caught 163-REVIEW finding 1 is "the donut and the breakdown
+ * table report the same freshness for the same source row", and that oracle
+ * cannot be written without both of this page's derivations in the same test.
+ */
+export function buildCompositionRows(
   strategies: PortfolioStrategyRow[],
   attribution: PortfolioAnalytics["attribution_breakdown"],
 ) {
@@ -207,6 +214,12 @@ function buildCompositionRows(
         // analytics are absent; `|| null` collapses absent/empty computed_at to
         // null so SyncBadge renders no badge.
         computedAt: a?.computed_at || null,
+        // HONEST-08 — the slice's other clock. This read already carries
+        // `returns_series` (HONEST-04 builds the constituent wealth curve from
+        // it), so the donut CAN judge the track record and therefore must:
+        // a job that ran an hour ago over a series that ended in May is not a
+        // fresh constituent. `seriesEndOf` is the one shared derivation.
+        seriesEnd: seriesEndOf(a),
       };
     })
     .filter((row): row is NonNullable<typeof row> => row !== null);
@@ -277,7 +290,27 @@ export function buildEquityCurveSeries(
  * `StrategyBreakdownTable` is a client component, so every embedded analytics
  * field it receives ships to the browser. Only the computed `{date,value}`
  * points cross the boundary. Extends the `_rs`/`_dr` destructure idiom in
- * queries.ts:2265-2278.
+ * `getDashboardPayload`'s embed shaper (queries.ts).
+ *
+ * ⛔ IT ALSO PROJECTS `series_end`, AND THAT IS NOT A SECOND CONCERN BOLTED ON
+ * (163-REVIEW, finding 1). Removing `returns_series` DESTROYS the only input
+ * `seriesEndOf` had at the table's call site, and `getPortfolioStrategies`
+ * projects no `series_end` alias — so every constituent row reached
+ * `resolveEffectiveRecency` with BOTH inputs absent, took the `unknown` arm,
+ * and rendered a permanent amber dot beside "Synced 20m ago". Worse, the SAME
+ * page fed `buildCompositionRows` the UN-stripped array, so `CompositionDonut`
+ * painted that same strategy green: two surfaces, one page, one strategy, two
+ * answers — the exact defect class HONEST-08 exists to close, reopened by the
+ * commit that closed it.
+ *
+ * The scalar is derived HERE, at the moment the array is taken away, rather
+ * than in a separate pass the caller must remember to run first. That coupling
+ * is the point: a future edit cannot delete the fallback without also carrying
+ * its replacement, because they are one statement. This is the same shape as
+ * the anonymous ranked read, which replaces the array with a projected
+ * `series_end` scalar in SQL — one derivation (`seriesEndOf`, which takes the
+ * LATEST point rather than the last slot), one field crossing the boundary,
+ * and the array still never reaching the browser.
  */
 export function stripConstituentSeries<T extends PortfolioStrategyRow>(
   strategies: T[],
@@ -293,7 +326,13 @@ export function stripConstituentSeries<T extends PortfolioStrategyRow>(
         daily_returns: _dr,
         ...analyticsRest
       } = obj as Record<string, unknown>;
-      return analyticsRest;
+      return {
+        ...analyticsRest,
+        // Read off `obj` — the row WITH its series — not off the stripped
+        // rest. Deriving from `analyticsRest` would answer `null` for every
+        // row, which is precisely the bug this line repairs.
+        series_end: seriesEndOf(obj as StrategyAnalytics),
+      };
     };
     return {
       ...ps,

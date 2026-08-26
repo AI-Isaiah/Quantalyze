@@ -54,8 +54,8 @@ All four items below were checked against the current branch this execution and 
 ```
 $ ls -la supabase/schema/functions/enforce_strategy_keys_owner_coherence.sql \
           supabase/schema/functions/sync_strategy_analytics_status.sql
--rw-r--r--  1 helios-mammut  staff  2255 Jul 12 06:35  .../enforce_strategy_keys_owner_coherence.sql
--rw-r--r--  1 helios-mammut  staff  6037 Jul 12 06:35  .../sync_strategy_analytics_status.sql
+-rw-r--r--  1 <user>  staff  2255 Jul 12 06:35  .../enforce_strategy_keys_owner_coherence.sql
+-rw-r--r--  1 <user>  staff  6037 Jul 12 06:35  .../sync_strategy_analytics_status.sql
 ```
 → DROP. These were never owed by this branch.
 

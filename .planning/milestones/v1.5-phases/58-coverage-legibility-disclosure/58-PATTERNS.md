@@ -7,7 +7,7 @@
 > Presentation-only. No engine / `scenario.ts` / `scenario-window.ts` / numeric change.
 > Every new surface READS the same membership axis (`coverageEligible` / `scenarioMetrics.member_ids`)
 > that the dev desync guard at `ScenarioComposer.tsx:1813` reconciles — never re-derives it.
-> All paths are absolute-from-repo-root under `/Users/helios-mammut/claude-projects/quantalyze/`.
+> All paths are absolute-from-repo-root under ``.
 
 ---
 

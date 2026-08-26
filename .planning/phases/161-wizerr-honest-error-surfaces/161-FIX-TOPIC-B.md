@@ -90,7 +90,7 @@ file touched):
 
 ```
 FAIL … NO production file under src/components/landing/ translates a wire code into wizard copy
-AssertionError: /Users/.../wizard/steps/ConnectKeyStep.tsx references WIZARD_ERROR_COPY.
+AssertionError: <home>/.../wizard/steps/ConnectKeyStep.tsx references WIZARD_ERROR_COPY.
 An ANONYMOUS surface has begun translating wire codes into WIZARD_ERROR_COPY, so the sfox arm in
 verify-strategy/route.ts can now render "This exchange is not open on Quantalyze yet." to a
 logged-out visitor … : expected true to be false

@@ -6,7 +6,7 @@
 
 > ⚠️ **CODE-STATE WARNING — READ FIRST.** Every grep, census, line number, and file citation in
 > this document was taken at the **Phase-145 branch tip** — worktree
-> `/Users/helios-mammut/claude-projects/quantalyze-145`, branch `feat/v1.19-phase-145`, commit
+> `<repo-root>-145`, branch `feat/v1.19-phase-145`, commit
 > `c96f549b409033a310f7c8f3cd2c61c6b238099d` (which includes a merge of `origin/main`) — because
 > the MAIN checkout is stale for csv-finalize surfaces. That branch is minutes from merging.
 > **Every census here MUST be re-run at plan time and again at execution kickoff, post-merge.**

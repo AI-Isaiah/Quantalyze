@@ -397,12 +397,18 @@ def tenant_or_platform_key(request: Request, scope: str) -> str:
     credential-hash form because there the credential genuinely varies per
     caller class.
 
-    **This becomes per-tenant on its own.** ``src/lib/analytics-client.ts``
-    mints no ``X-Tenant-Claim`` today (a recorded 140.2 obligation). The moment
-    it does, the claim arms above fire and these routes acquire real per-tenant
-    isolation with **no change to this function and no change to any decorator**
-    — that is why the claimless case is a documented fallback rather than a
-    hard-coded platform key.
+    **This IS per-tenant now.** ⚠️ CORRECTED 2026-08-26 (phase 163 review): this
+    paragraph used to say ``src/lib/analytics-client.ts`` mints no
+    ``X-Tenant-Claim``, describing the 140.2 obligation as outstanding. That is
+    FALSE at HEAD — ``analytics-client.ts:468`` sets the header
+    UNCONDITIONALLY in ``analyticsRequest``'s shared header block, so every
+    route reached through that wrapper arrives WITH a claim and the claim arms
+    above fire on real traffic.
+
+    The design point the old wording was making still stands, and is now
+    demonstrated rather than promised: the claimless case remains a documented
+    fallback rather than a hard-coded platform key, which is why the transition
+    needed **no change to this function and no change to any decorator**.
 
     **No WARN on the claimless arm**, deliberately — unlike
     :func:`tenant_rate_limit_key`, where an absent claim means "a caller that

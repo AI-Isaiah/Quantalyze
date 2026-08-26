@@ -383,6 +383,127 @@ describe("[ONB-01] MultiKeyConnectStep — remove", () => {
   });
 });
 
+/**
+ * ── WR-09 (163-REVIEW) — removal must key on IDENTITY, not on a position ────
+ *
+ * `doRemove` resolved the clicked panel from `panelsRef.current[idx]` and then
+ * discarded it, removing by POSITION: `prev.filter((_, i) => i !== idx)`. The
+ * two halves read different snapshots. `panelsRef` is synced in a post-commit
+ * effect, so inside one batched tick it still holds the state the user's DOM
+ * was rendered from, while the `setPanels` updater's `prev` already carries an
+ * earlier update from the same tick. An index that was correct against the
+ * rendered list is therefore applied to a SHIFTED list.
+ *
+ * TWO FAILURES FALL OUT OF THAT, both silent:
+ *
+ *   1. In range but shifted → THE WRONG PANEL IS DELETED. This is the one
+ *      pinned below, because it is the one that destroys a user's work: the
+ *      credentials cleared belong to a key they did not ask to remove.
+ *   2. Out of range → the `if (!p) return` guard swallowed the click entirely.
+ *      No announcement, no removal, no error; the confirm dialog stayed open
+ *      and clicking again did the same nothing. Note the review's suggested
+ *      minimal fix — drop the guard, keep the positional filter — would have
+ *      made this WORSE, announcing "Key N removed" while removing nothing.
+ *      Only identity resolution actually closes it, and when identity cannot
+ *      be resolved the code now throws rather than shrugging.
+ *
+ * A credential-entry surface is the wrong place to be silently wrong, which is
+ * the class this whole phase exists to close.
+ *
+ * ⚠️ THE TWO CLICKS SHARE ONE `act()` DELIBERATELY, and native `.click()` is
+ * used instead of `fireEvent` for the same reason: `fireEvent` flushes after
+ * every call, which commits the effect that re-syncs `panelsRef` and hides the
+ * divergence. One act, two handlers, one commit is what a fast double
+ * interaction actually produces in a browser.
+ *
+ * ⭐ RED DEMONSTRATION (performed 2026-08-26, before the fix). Verbatim:
+ *
+ *     × WR-09: a batched second removal deletes the panel the user clicked
+ *       → AssertionError: the wizard must delete the keys the user clicked,
+ *         not their neighbours: expected 'SECOND' to be 'THIRD'
+ *
+ * Read that survivor carefully — it is worse than "a no-op". The user clicked
+ * Remove on FIRST and on SECOND. The wizard deleted FIRST and THIRD, and left
+ * SECOND standing. The key it destroyed was the one the user never touched,
+ * and nothing anywhere said so.
+ */
+describe("[163-REVIEW / WR-09] MultiKeyConnectStep — removal keys on identity", () => {
+  it("WR-09: a batched second removal deletes the panel the user clicked", () => {
+    render(<MultiKeyConnectStep wizardSessionId={SESSION} onSuccess={vi.fn()} />);
+    fireEvent.click(screen.getByTestId("multi-add-key"));
+    fireEvent.click(screen.getByTestId("multi-add-key"));
+    expect(screen.getAllByTestId(/^key-panel-/)).toHaveLength(3);
+
+    // Nicknames make the panels distinguishable. They are deliberately NOT
+    // credentials: `hasEnteredCreds` ignores the nickname, so each Remove takes
+    // the immediate path and no confirm dialog interposes.
+    const NAMES = ["FIRST", "SECOND", "THIRD"];
+    NAMES.forEach((value, i) => {
+      fireEvent.change(
+        within(screen.getByTestId(`key-panel-${i}`)).getByLabelText(
+          "Key nickname (optional)",
+        ),
+        { target: { value } },
+      );
+    });
+
+    const removeFirst = within(screen.getByTestId("key-panel-0")).getByTestId(
+      "key-0-remove",
+    );
+    const removeSecond = within(screen.getByTestId("key-panel-1")).getByTestId(
+      "key-1-remove",
+    );
+
+    // Both handlers run against the SAME committed render — the one the user is
+    // looking at, in which index 1 is unambiguously the key named SECOND.
+    act(() => {
+      removeFirst.click();
+      removeSecond.click();
+    });
+
+    const survivors = screen.getAllByTestId(/^key-panel-/);
+    expect(survivors).toHaveLength(1);
+    expect(
+      (within(survivors[0]).getByLabelText(
+        "Key nickname (optional)",
+      ) as HTMLInputElement).value,
+      "the wizard must delete the keys the user clicked, not their neighbours",
+    ).toBe("THIRD");
+  });
+
+  it("WR-09 CONTROL: an ordinary one-at-a-time removal is unchanged", () => {
+    // Without this, a 'fix' that removed by identity but broke the normal path
+    // would still pass the case above. This is the flow every user takes.
+    render(<MultiKeyConnectStep wizardSessionId={SESSION} onSuccess={vi.fn()} />);
+    fireEvent.click(screen.getByTestId("multi-add-key"));
+    fireEvent.click(screen.getByTestId("multi-add-key"));
+
+    ["FIRST", "SECOND", "THIRD"].forEach((value, i) => {
+      fireEvent.change(
+        within(screen.getByTestId(`key-panel-${i}`)).getByLabelText(
+          "Key nickname (optional)",
+        ),
+        { target: { value } },
+      );
+    });
+
+    fireEvent.click(
+      within(screen.getByTestId("key-panel-1")).getByTestId("key-1-remove"),
+    );
+
+    const survivors = screen.getAllByTestId(/^key-panel-/);
+    expect(survivors).toHaveLength(2);
+    expect(
+      survivors.map(
+        (panel) =>
+          (within(panel).getByLabelText(
+            "Key nickname (optional)",
+          ) as HTMLInputElement).value,
+      ),
+    ).toEqual(["FIRST", "THIRD"]);
+  });
+});
+
 describe("[ONB-01] MultiKeyConnectStep — loud dual-surface validation", () => {
   async function validatePanel(panelIdx: number, start: string, end: string) {
     const panel = screen.getByTestId(`key-panel-${panelIdx}`);
@@ -2808,6 +2929,162 @@ describe("[153.4-05 / WIZFORM-05] MultiKeyConnectStep — the honest long wait, 
     expect(signals[1]?.aborted).toBe(true);
     // ⛔ And no funnel noise: leaving is a user action, not N seam failures.
     expect(wizardErrorCalls()).toEqual([]);
+  });
+
+  /**
+   * Every `[wizard:MultiKeyConnectStep]` line this render wrote.
+   *
+   * The `SERVICE_UNREACHABLE` arm — the one an abort falls into when its reason
+   * is missing — is the ONLY site in this component that logs under that prefix,
+   * so a non-empty list means the abort was classified as a transport failure.
+   * Filtered rather than asserted on the whole spy: React writes its own
+   * `console.error` warnings and those are not this test's subject.
+   */
+  function stepErrorLogs(spy: { mock: { calls: unknown[][] } }): unknown[][] {
+    return spy.mock.calls.filter((c) =>
+      String(c[0]).includes("[wizard:MultiKeyConnectStep]"),
+    );
+  }
+
+  /** Remove the panel at `index`, clicking through the confirm if one appears. */
+  function removePanel(index: number) {
+    fireEvent.click(within(panelAt(index)).getByTestId(`key-${index}-remove`));
+    const confirm = within(panelAt(index)).queryByTestId(
+      `key-${index}-remove-confirm`,
+    );
+    if (confirm) fireEvent.click(confirm);
+  }
+
+  /**
+   * Phase 163 / SEC-06 — REMOVING A PANEL MID-VALIDATE MUST ABORT ITS POST.
+   *
+   * `doRemove` dropped the panel and left its credential-carrying
+   * `POST /api/strategies/composite/add-key` on the wire — the last reachable
+   * counter-example to the interval docblock's "no request can hold this tab open
+   * forever", since removing the panel also recomputes `anyValidating` to false
+   * and clears the one interval that was bounding it. It was recorded as a
+   * deliberate deferral (153.4 review WR-03); SEC-06 overrides that, and the
+   * comment recording the deferral is rewritten in the same commit.
+   *
+   * ⚠️ THE HONEST BOUND, unchanged and restated because the fix invites the wrong
+   * reading: this aborts the BROWSER's listening, not the server's working.
+   * `composite/add-key` runs validateKey → encryptKey → the add RPC and reads no
+   * `request.signal`, so the key may still be stored. Nothing here claims
+   * otherwise. Server-side cancellation is a recorded non-goal owned elsewhere.
+   *
+   * MUTATIONS, all four RUN on 2026-08-26, none of them caught by another's case:
+   *  1. "no abort" — delete the `controller.abort()` from `doRemove`. Observed:
+   *     case 1 RED (`signals[0]?.aborted` false, expected true) and case 3 RED.
+   *  2. "abort everything" — abort every entry in `abortControllersRef` instead of
+   *     the removed panel's. Observed: case 1's sibling assertion RED.
+   *  3. "reason omitted" — drop the `abortReasonsRef.set(p.id, "user")`, so the
+   *     catch cannot tell a user's choice from an outage. Observed: case 1 RED on
+   *     `wizardErrorCalls()` with a `SERVICE_UNREACHABLE` entry, plus the log
+   *     assertion. This is T-163-22 — one healthy removal landing in the seam
+   *     funnel as a failure.
+   *  4. "eager map cleanup" — ALSO delete both ref-map entries inside `doRemove`,
+   *     as the plan sketched. Observed: identical RED to mutation 3, and for the
+   *     same reason — the reason entry is read by the catch a microtask LATER, so
+   *     deleting it synchronously is indistinguishable from never writing it. The
+   *     validate's own `finally` already deletes both entries on every outcome,
+   *     abort included, so the cleanup was never missing. Recorded as a deviation
+   *     in 163-08-SUMMARY.md. ⚠️ Only the RED is measured here; that the `finally`
+   *     collects the entries is read from that block — a stale map entry has no
+   *     observable behaviour a test could assert on.
+   */
+  it("⭐ [163 / SEC-06] removing a panel mid-validate aborts ITS credential-carrying POST", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { signals } = await twoCcxtPanels();
+    validate(0);
+    validate(1);
+    await advance(TICK_MS);
+    expect(signals).toHaveLength(2);
+    expect(signals[0]?.aborted).toBe(false);
+
+    removePanel(0);
+    await advance(0);
+
+    // ⭐ THE REQUEST ACTUALLY STOPPED. Every other observable here is local state
+    // and looks identical while the POST — carrying api_key, api_secret and
+    // passphrase — runs on for a panel the user has deleted.
+    expect(
+      signals[0]?.aborted,
+      "the removed panel's in-flight request was not aborted. Its POST carries " +
+        "the user's credentials and now has no client bound at all: removing " +
+        "the panel also cleared the one interval that was enforcing a deadline.",
+    ).toBe(true);
+    // ⭐ AND ONLY THAT ONE. Only the negative assertion catches an over-broad
+    // abort, which is what a map keyed by anything but the panel id produces.
+    expect(
+      signals[1]?.aborted,
+      "removing one panel aborted a SIBLING panel's request. That user made no " +
+        "such choice, and their check is gone with no error.",
+    ).toBe(false);
+    // ⭐ AND THE FUNNEL AGREES WITH THE SCREEN. A removal is a USER action, so
+    // the reason must be "user" — not "deadline", and not absent (which falls
+    // into the SERVICE_UNREACHABLE arm). One healthy removal must not read as a
+    // seam failure to whoever is deciding whether the venue is broken.
+    expect(wizardErrorCalls()).toEqual([]);
+    expect(stepErrorLogs(errorSpy)).toEqual([]);
+    // The panel is gone and the survivor is still waiting.
+    expect(screen.getAllByTestId(/^key-panel-/)).toHaveLength(1);
+    expect(cardIn(0)).not.toBeNull();
+  });
+
+  it("⭐ [163 / SEC-06] removing a DIFFERENT panel leaves the validating one on the wire", async () => {
+    // The identity invariant's other half. An abort that fires for the removal of
+    // ANY panel — or one resolved from a stale list — cancels a credential POST
+    // its owner never asked to cancel, which is strictly worse than the gap it
+    // was meant to close.
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { signals } = await twoCcxtPanels();
+    validate(1);
+    await advance(TICK_MS);
+    expect(signals).toHaveLength(1);
+
+    // Panel 0 was filled but never validated, so it still confirms before going.
+    removePanel(0);
+    await advance(0);
+
+    expect(
+      signals[0]?.aborted,
+      "removing an idle panel aborted a DIFFERENT panel's in-flight validate.",
+    ).toBe(false);
+    expect(wizardErrorCalls()).toEqual([]);
+    expect(stepErrorLogs(errorSpy)).toEqual([]);
+    // The survivor moved from index 1 to index 0 and is still waiting there.
+    expect(screen.getAllByTestId(/^key-panel-/)).toHaveLength(1);
+    expect(cardIn(0)).not.toBeNull();
+  });
+
+  it("⭐ [163 / SEC-06] a REORDERED panel's removal aborts the request IT started", async () => {
+    // ⭐ THE CASE THAT CATCHES A POSITION-RESOLVED ABORT. `onMove` reorders
+    // panels, so the index a validate was launched from is not the index its
+    // removal is clicked from. Resolve the panel from a stale list and this
+    // either aborts nothing or aborts the sibling.
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { signals } = await twoCcxtPanels();
+    validate(0);
+    await advance(TICK_MS);
+    expect(signals).toHaveLength(1);
+
+    // Panel 0 becomes panel 1; its card travels with it.
+    fireEvent.click(within(panelAt(0)).getByTestId("key-0-move-down"));
+    await advance(0);
+    expect(cardIn(1)).not.toBeNull();
+    expect(cardIn(0)).toBeNull();
+
+    removePanel(1);
+    await advance(0);
+
+    expect(
+      signals[0]?.aborted,
+      "the moved panel's removal did not abort the request that panel started. " +
+        "A panel resolved by position cannot survive a reorder.",
+    ).toBe(true);
+    expect(wizardErrorCalls()).toEqual([]);
+    expect(stepErrorLogs(errorSpy)).toEqual([]);
+    expect(screen.getAllByTestId(/^key-panel-/)).toHaveLength(1);
   });
 
   it("the FAST path is unchanged: no card, no cancelled line, the panel collapses to its summary", async () => {

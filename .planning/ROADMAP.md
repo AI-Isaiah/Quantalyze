@@ -79,7 +79,7 @@ phases below carry the corrections, not the bullets.
 - [ ] **Phase 160: PROVENANCE — The server's venue is the venue that annualizes** - `api_keys.exchange` server-authoritative at every INSERT; the `asset_class` √365/√252 stamp derives from the attested venue WITH the null-attestation guard; B-M1 PROD census first
 - [ ] **Phase 161: WIZERR — Honest error surfaces** - The recorded WIZFORM-02 class residue: thirteen surfaces stop rendering `UNKNOWN`, false sentences, or unwinnable "try again"
 - [ ] **Phase 162: HONEST — What the user sees is true** - No raw Python exceptions as copy, no FRESH badge on a dead series, real equity curves, metrics on drawer rows, the clicked key preselected
-- [ ] **Phase 163: HARDEN — Fail safe, closed, and loud** - structlog redaction closed at BOTH failure modes, post-commit `createAdminClient` 500 class, flag-monitor honesty, deterministic worker plumbing, password policy, `.planning` username scrub, RPC audit gate, `bridgeComputeLimiter`
+- [x] **Phase 163: HARDEN — Fail safe, closed, and loud** - structlog redaction closed at BOTH failure modes, post-commit `createAdminClient` 500 class, flag-monitor honesty, deterministic worker plumbing, password policy, `.planning` username scrub, RPC audit gate, `bridgeComputeLimiter`
 - [ ] **Phase 164: SHARE — Copy Link always works, and never discloses** - Revocable share-token lane on the factsheet; the id-keyed public cache is NEVER poisoned (ordered adversarial acceptance); revoke; the affordance class honest at all three sites
 - [ ] **Phase 165: DEPS — The 9-PR dependabot campaign** - pandas `requirements.in` prerequisite commit FIRST, then one PR at a time in the research-verified order, full suite between each; #614 and #606 CLOSED with reasons
 
@@ -366,16 +366,29 @@ Plans:
 
 **Goal**: The backend fails safe, closed, and loud — secrets cannot reach logs, monitors cannot report false health, committed work cannot 500, and every mutating or compute-heavy surface is limited and audited
 **Depends on**: Phase 158 (attributable CI). ⛔ Must complete before Phase 164 — SEC-03's audit-gate decision polices SHARE's new mint/revoke RPCs (two REQ groups, one edit)
-**Requirements**: OPS-05, OPS-06, OPS-07, OPS-08, OPS-09, OPS-10, SEC-01, SEC-02, SEC-03, SEC-04, SEC-05, SEC-06
+**Requirements**: OPS-05, OPS-06, OPS-07, OPS-08, OPS-09, OPS-10, SEC-01, SEC-02, SEC-03, SEC-04, SEC-05, SEC-06, HONEST-08
 **Success Criteria** (what must be TRUE):
 
   1. The structlog frozen-proxy class is closed at BOTH failure modes — a source-scan gate for module-scope `.bind()` (Mode A) AND a behavioral redaction test for first-use-before-`configure_logging()` (Mode B) — each demonstrated RED when neutered. ⚠️ Fixing one and closing the audit is false closure; the leak class is ccxt HMAC signatures and MT5 passwords.
   2. Failure paths are honest: `createAdminClient()` cannot throw on the request path after an irreversible commit (the class closed at all three known sites); `checkStuckNotifications` distinguishes "nothing stuck" from "could not tell"; a failed denominator read PAGES instead of logging success; and the integration test actually falsifies both.
   3. Worker/request plumbing is deterministic and bounded: the 10-param `_enqueue_compute_job_internal` drops `INTO STRICT` on its lost-race branches (parity with the de-STRICT-ed 7-param overload); the resync draft pre-check is deterministic (`ORDER BY created_at DESC` + bounded window); the retry loop cancels abandoned response bodies (`body.cancel()`).
-  4. The security floor is measured, not assumed: the server-side password policy backing client `minLength={6}` is verified, enforced, and documented; the ~50 tracked `.planning/` docs pass a NO-ALLOWLIST scan for the macOS username / local absolute paths (the gitleaks allowlist is path-based and blind here); the tenth IP-keyed route (`simulator.py`) is repaired along with the concealing wrapper-check test (equality assertion, quarantine shrinks to 0); and removing a panel mid-validate aborts the in-flight credential-carrying POST.
+  4. The security floor is measured, not assumed: the server-side password policy backing client `minLength={6}` is verified, enforced, and documented; the tracked `.planning/` docs pass a NO-ALLOWLIST scan (MEASURED 2026-08-26: **80** files carry the username, 57 carry `\/Users\/` paths — the "~50" estimate was low) for the macOS username / local absolute paths (the gitleaks allowlist is path-based and blind here); the tenth IP-keyed route (`simulator.py`) is repaired along with the concealing wrapper-check test (equality assertion, quarantine shrinks to 0); and removing a panel mid-validate aborts the in-flight credential-carrying POST.
   5. Coverage gates close their gaps: `add_wizard_composite_key` is policed by the audit-coverage gate with the pragma-vs-real-emission decision RECORDED, and the bridge + portfolio-optimizer flows get a named `bridgeComputeLimiter` sized to backend reality (closing the 30× front/back mismatch) ⛔ without resizing the shared `userActionLimiter`.
+  6. A freshness claim is not surface-local: the public discovery table's "Synced Nd ago" badge buckets on the **staler** of sync- and series-recency, exactly as `FreshnessChip` already does on the factsheet (HONEST-08). ⚠️ MEASURED ON PROD 2026-08-26 — `Phoenix Protocol` advertises "Synced 7h ago" on `/browse/crypto-sma` over a series that ended 2026-05-06, **112 days** earlier, while its own factsheet reads `Track record · old`. The rule HONEST-02 wrote ("a series dead 89 days cannot read FRESH") is violated on the most public surface in the product. ⛔ Do NOT close by deleting the badge, and ⛔ do NOT rely on the `is_example` gate — HONEST-03 scoped that to example rows and all 15 were deleted, so it now guards nothing here. The test must use a REAL published row with a stale series and be demonstrated RED when the staler-of-two logic is neutered.
 
-**Plans**: TBD
+**Plans**: 9/9 plans executed (2 waves)
+
+Plans:
+
+- [x] 163-01-PLAN.md — OPS-05 structlog frozen-proxy closed at BOTH modes; Mode B is LIVE on the worker (`main_worker.py` never configures) — planned first as the phase's highest-risk item (wave 1)
+- [x] 163-02-PLAN.md — SEC-04 `bridgeComputeLimiter` sized from a MEASURED PROD backend number (measurement is an explicit early task); ⛔ `userActionLimiter` untouched; roster pin moves in the same commit (wave 1)
+- [x] 163-03-PLAN.md — SEC-02 username/absolute-path scrub across the measured **94** tracked files (87 `.planning/` + 5 docs/ + 2 applied-migration comment headers, exception recorded — 87 is the `.planning/`-only figure, not the total) + NEW no-allowlist scanner wired into `npm run lint` (wave 1)
+- [x] 163-04-PLAN.md — HONEST-08 discovery "Synced Nd ago" badge buckets on the staler of sync- and series-recency via ONE shared resolver mirroring FreshnessChip; regression test on a real published fixture row, RED under neutering (wave 1)
+- [x] 163-05-PLAN.md — OPS-06 createAdminClient hoisted above the commit at the measured FOUR occurrences in three files + OPS-07 monitor honesty (discriminated union; denominator failure PAGES non-200; integration falsifiers) (wave 1)
+- [x] 163-06-PLAN.md — OPS-08 forward-only migration de-stricting the 10-param enqueue overload's four lost-race branches + pg_get_functiondef SQL gate (expected RED until TEST hand-apply); blocking three-reviewer checkpoint before apply (wave 1)
+- [x] 163-07-PLAN.md — OPS-09 deterministic resync draft pre-check (ordered + bounded, prose debts settled) + SEC-05 simulator tenant-keyed with the concealing quarantine/carve-out removed (equality at 0, class size 10) (wave 1)
+- [x] 163-08-PLAN.md — OPS-10 capability-checked `body.cancel()` on the single abandoning retry arm + SEC-06 panel removal aborts the in-flight credential POST by identity, reason "user" (wave 1)
+- [x] 163-09-PLAN.md — SEC-01 hosted password policy READ, unified `MIN_PASSWORD_LENGTH`, documented + SEC-03 `add_wizard_composite_key` under the audit law with the pragma decision RECORDED (wave 2, serialized on REQUIREMENTS.md after 163-03)
 
 ### Phase 164: SHARE — Copy Link always works, and never discloses
 
@@ -414,6 +427,7 @@ thesis:
 - **(a) The curated sentence survives the write.** A computation failure shows what its writer
   produced — "Insufficient CSV history. At least 2 data points required." — instead of a generic
   per-kind sentence that replaces it seconds later.
+
 - **(b) The wizard's refusals stop misattributing.** Four copy falsehoods enumerated below name a
   cause the code never tested, or blame a party that did not cause the failure.
 
@@ -440,15 +454,18 @@ it lived outside that fixer's files — named, not silently dropped:
    emitter in `src/app/api/strategies/create-with-key/route.ts`, whose own guard comment already
    says that arm "may not wear a `KEY_*` verdict that blames a credential". Minting a new copy
    member moves `EXPECTED_TABLE_SIZE` plus three roster/coverage laws — do it deliberately.
+
 2. **`KEY_RATE_LIMIT` blames the exchange for OUR limiter.** The 429 comes from
    `userActionLimiter`, but the copy says "The exchange asked us to slow down… exchange-side
    throttle", and `fix[1]` "try a different exchange account" cannot clear a per-USER bucket.
    Identical on the credential arm; `route.ts:891` already records it ("our outage, blamed on
    their exchange") and accepted it. This is a misattribution class with an existing owner.
+
 3. **`DRAFT_ALREADY_EXISTS`'s cause says "with the same API key"** — false on the stale-session
    path, where the collision is on `(user_id, wizard_session_id, source)` and not the key. True
    on the TOCTOU path and on the credential arm, so the shared `cause` needs splitting, not
    replacing.
+
 4. **The stale-`wizardSessionId` ROOT CAUSE is still open** (functional, not copy).
    `deriveWizardResumeOverrides` restores `wizardSessionId` from localStorage unconditionally on
    the API branch, so an abandoned draft over key A lends its session id to a preselect for key B
@@ -495,7 +512,7 @@ Plans:
 | 160. PROVENANCE venue/annualization | 7/7 | 🟡 Arm proven, 1/3 surfaces | Persist arm smoked via ApiKeyManager 2026-08-25; StrategyForm un-smoked, AllocatorExchangeManager unmounted |
 | 161. WIZERR honest errors | 0/? | Not started | - |
 | 162. HONEST visible truth | 0/? | Not started | - |
-| 163. HARDEN reliability + security | 0/? | Not started | - |
+| 163. HARDEN reliability + security | 9/9 | Complete | v0.75.0.0 |
 | 164. SHARE revocable links | 0/? | Not started | - |
 | 165. DEPS dependabot campaign | 0/? | Not started | - |
 
@@ -508,7 +525,7 @@ Plans:
 | 160 | RANK-03, RANK-04 |
 | 161 | WIZERR-01, WIZERR-02, WIZERR-03, WIZERR-04, WIZERR-05, WIZERR-06, WIZERR-07, WIZERR-08, WIZERR-09, WIZERR-10, WIZERR-11, WIZERR-12, WIZERR-13 |
 | 162 | HONEST-01, HONEST-02, HONEST-03, HONEST-04, HONEST-05, HONEST-06 |
-| 163 | OPS-05, OPS-06, OPS-07, OPS-08, OPS-09, OPS-10, SEC-01, SEC-02, SEC-03, SEC-04, SEC-05, SEC-06 |
+| 163 | OPS-05, OPS-06, OPS-07, OPS-08, OPS-09, OPS-10, SEC-01, SEC-02, SEC-03, SEC-04, SEC-05, SEC-06, HONEST-08 |
 | 164 | SHARE-01, SHARE-02, SHARE-03, SHARE-04 |
 | 165 | DEPS-01 |
 

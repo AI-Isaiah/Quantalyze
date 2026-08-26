@@ -33,6 +33,7 @@ import os
 import secrets
 import time
 import uuid
+from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Annotated, Any
 
 import structlog
@@ -724,6 +725,45 @@ def _is_long_fetch(body: _ProcessKeyBody) -> bool:
 # verification the user already completed.
 _RESUMABLE_VERIFICATION_STATUSES = frozenset({"draft"})
 
+# OPS-09 (Phase 163) — how far back the resync draft pre-check (the
+# `body.flow_type == "resync"` block in `process_key`) is willing to reach. A
+# draft older than this is treated as ABSENT, not as work in progress.
+#
+# DERIVED, not a round number picked to feel safe.
+#
+# (1) WHICH ENVELOPE APPLIES. A draft `strategy_verifications` row leaves `draft`
+#     INSIDE the `process_key_long` handler — `services/ingestion/long_fetch.py`
+#     advances the state machine and only THEN enqueues the tail job — so the
+#     longest a HEALTHY draft can still be awaiting its work is ONE hop. No
+#     follow-on kind in `JOB_CHAIN_FOLLOW_ON` can hold a row at `draft`, which is
+#     why this is sized off the single-hop envelope and NOT off the 4-hop
+#     chain-inclusive ceiling the strategy_analytics reaper uses.
+#
+# (2) THE SINGLE-HOP CEILING, using the same per-hop formula
+#     `tests/test_main_worker.py::_chain_inclusive_ceiling_seconds` applies:
+#
+#       (P_BATCH_SIZE - 1) x max(TIMEOUT_PER_KIND)  4 x 1800 = 7200s  batch-tail
+#       + TIMEOUT_PER_KIND["process_key_long"] x 3  3 x 1800 = 5400s  retried handler
+#       + RETRY_BACKOFF_TOTAL_S (30 + 120 + 480)               630s  scheduled waits
+#       = 13,230s ~ 3.7h
+#
+#     (13,230s is the "single-hop 13,230s" figure already on the record in that
+#     test's TestReaperThresholdInvariant docstring.)
+#
+# (3) THE SIZING RULE is the house one at `services/job_worker.py:546-551` —
+#     the smallest whole 4-hour multiple >= 1.25x the ceiling. 1.25 x 13,230s =
+#     16,538s = 4.6h -> 8 hours (ratio 2.18x). That sits strictly BELOW
+#     `STRATEGY_ANALYTICS_REAP_THRESHOLD` ("16 hours"), the point at which the
+#     platform itself declares such a chain dead — so this window can never
+#     resume a session the reaper has already written off.
+#
+# ⚠️ THE ERROR DIRECTION IS DELIBERATE. Too TIGHT re-opens the duplicate-submit
+# residual this guard exists to close: every slow-but-healthy resync would mint a
+# second draft row, which is a real regression on a live surface. Too LOOSE only
+# leaves the (low-severity, T-163-19) ancient-orphan revival partly open. Err
+# loose. Do not shrink this without re-deriving (2).
+_RESYNC_DRAFT_RESUME_WINDOW = timedelta(hours=8)
+
 # compute_jobs statuses that mean "already being worked" rather than "waiting".
 # Mirrors the non-terminal set _enqueue_compute_job_internal dedupes over
 # (migrations/20260716090000...sql:181+) minus 'pending'.
@@ -1379,15 +1419,21 @@ async def process_key(
     # compute_jobs dedup's non-terminal restriction: a FINISHED (non-draft)
     # resync verification is a genuinely new sync, not a retry.
     #
-    # TENANT SCOPE (PYAPI-01d): this runs strictly AFTER the :1316 ownership
-    # gate, so `strategy_id` has already passed the strategies id+user_id check
+    # TENANT SCOPE (PYAPI-01d): this runs strictly AFTER the `_caller_owns_strategy`
+    # gate (:1307 — anchored by NAME as well, because the bare line number in this
+    # sentence had drifted ~47 lines before OPS-09 re-measured it), so
+    # `strategy_id` has already passed the strategies id+user_id check
     # (140.1-02). Scoping this read by strategy_id therefore carries the tenant
     # scope — no wizard_session_id / user_id echo of a foreign row is possible.
     #
     # SCOPE BOUND (documented residual, restated 141.2 / D-03): this guard does
     # NOT make a resync replay safe, and the original text here claiming it
     # closed the SEQUENTIAL retry class was the over-claim that kept a retry
-    # grant alive after the evidence for it had been withdrawn. The filter is
+    # grant alive after the evidence for it had been withdrawn. (That correction
+    # IS the discharge of DEF-141.1-02-A — landed 2026-08-01 by 141.2 plan 02,
+    # `71d5b3ab`, and recorded discharged at TODOS.md:1778. Re-verified unchanged
+    # at HEAD by Phase 163 / OPS-09: no sequential-class over-claim survives in
+    # this block. Do not re-open it.) The filter is
     # status='draft', and the compute worker's tick advances the first draft
     # verification OUT of draft — so a second attempt arriving after that
     # transition matches nothing here and inserts a second draft row. What the
@@ -1398,15 +1444,44 @@ async def process_key(
     # residuals are OUT of scope here: no new
     # migration and no new unique index (PATTERNS records the migration path as
     # the scope decision deliberately NOT taken); this is an application-level
-    # SELECT-then-guarded-INSERT. `.limit(1)` keeps `.maybe_single()` from
-    # raising on that rare two-draft residual rather than papering over it.
+    # SELECT-then-guarded-INSERT.
+    #
+    # ORDERED AND BOUNDED (OPS-09, Phase 163). This block used to end: "`.limit(1)`
+    # keeps `.maybe_single()` from raising on that rare two-draft residual rather
+    # than papering over it." That was true and remains true — but it was the whole
+    # story only if you never asked WHICH of the two drafts `.limit(1)` hands back.
+    # With no ORDER BY the answer was whatever PostgREST and the planner happened
+    # to emit first, so the two-tab residual resolved ARBITRARILY: the same pair of
+    # rows could resume either tab's session, run to run, with nothing in the code
+    # expressing a preference. Two clauses close that:
+    #
+    #   .order("created_at", desc=True)  the NEWEST draft always wins — the row the
+    #                                    caller in front of the browser is actually
+    #                                    waiting on, not an arbitrary sibling.
+    #   .gte("created_at", cutoff)       a draft older than
+    #                                    `_RESYNC_DRAFT_RESUME_WINDOW` reads as
+    #                                    ABSENT, so an orphan left behind by a dead
+    #                                    worker is never silently revived into a
+    #                                    live session; it falls through to the
+    #                                    fresh-draft INSERT below instead.
+    #
+    # ⚠️ This makes the residual's RESOLUTION deterministic. It does not stop the
+    # residual OCCURRING — two concurrent tabs can still mint two drafts, and only
+    # the unique index deliberately not taken above would change that.
+    #
+    # Reordering this read is tenant-safe for the reason stated in TENANT SCOPE
+    # above: it runs strictly after the `_caller_owns_strategy` gate, so every row
+    # it can possibly see is already known to belong to the caller.
     if body.flow_type == "resync":
+        resume_cutoff = datetime.now(timezone.utc) - _RESYNC_DRAFT_RESUME_WINDOW
         existing_resync = one(
             supabase.table("strategy_verifications")
             .select("*")
             .eq("strategy_id", strategy_id)
             .eq("flow_type", "resync")
             .eq("status", "draft")
+            .gte("created_at", resume_cutoff.isoformat())
+            .order("created_at", desc=True)
             .limit(1)
             .maybe_single()
             .execute()

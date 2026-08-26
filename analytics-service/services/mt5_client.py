@@ -160,18 +160,44 @@ _STAGE_LOGGER_NAME = "quantalyze.mt5"
 
 
 def _stage_logger() -> Any:
-    """Bind the stage logger PER CALL rather than once at import.
+    """Obtain the stage logger PER CALL rather than once at import.
 
-    ⚠️ Not a style choice. `services/logging_config.py` configures structlog with
-    ``cache_logger_on_first_use=True``, so a module-level
-    ``structlog.get_logger(...)`` proxy freezes the processor chain that happened
-    to be installed at its FIRST use and ignores every later
-    ``structlog.configure``. A module imported before the process configures its
-    logging — which is this one: `main.py` configures inside the lifespan, long
-    after import — would then emit through a stale chain, i.e. WITHOUT the
-    `_redact_processor` PII scrub the configured pipeline installs. Binding here
-    costs a proxy allocation next to a network round-trip and cannot go stale.
-    (It is also what makes the events observable to `structlog.testing`.)
+    ⚠️ Not a style choice, but the reason is narrower than this docstring used to
+    claim, and the claim itself is now false. It read:
+
+        "A module imported before the process configures its logging — which is
+        this one: `main.py` configures inside the lifespan, long after import"
+
+    ⛔ REFUTED, twice over, as of OPS-05 (Phase 163, 2026-08-26):
+
+    1. `main.py` does not configure inside the lifespan and has not for a long
+       time — `configure_logging()` runs at MODULE scope there, and since this
+       phase it runs above every first-party import. `main_worker.py` now does
+       the same at its own module scope. Both entrypoints configure before any
+       first-party module can emit, and
+       `tests/test_structlog_frozen_proxy.py::TestEntrypointOrdering` fails if
+       either ordering regresses.
+    2. The freeze mechanism is not what "``cache_logger_on_first_use=True`` ...
+       freezes at FIRST use" implies for THIS function. MEASURED 2026-08-26:
+       structlog's *default* config (the one in force before
+       `configure_logging()` runs) carries ``cache_logger_on_first_use=False``,
+       so `BoundLoggerLazyProxy.bind` does NOT install its `finalized_bind`
+       closure and a plain module-scope ``structlog.get_logger(...)`` proxy
+       re-reads `_CONFIG` on every use — it self-heals once configure runs. What
+       is permanently frozen is a module-scope ``.bind(...)`` RESULT: that is a
+       concrete BoundLogger holding the default (unredacted) processor list
+       forever. That shape is the one gated by
+       `tests/test_structlog_frozen_proxy.py::TestModeAModuleScopeBind`.
+
+    So the live hazard this function dodges is the pre-configure WINDOW, not a
+    permanent proxy freeze: any line emitted before `configure_logging()` renders
+    through the default chain, i.e. WITHOUT the `_redact_processor` PII scrub —
+    and MT5 lines are exactly the ones that must never do that, since `mt5linux`
+    interpolates the password into remotely-eval'd source (see the module header).
+    Both entrypoints now close that window, so this per-call lookup is
+    belt-and-braces: it costs one proxy allocation next to a network round-trip,
+    it cannot go stale, and it is what keeps the events observable to
+    `structlog.testing`. Keep it.
     """
     return structlog.get_logger(_STAGE_LOGGER_NAME)
 

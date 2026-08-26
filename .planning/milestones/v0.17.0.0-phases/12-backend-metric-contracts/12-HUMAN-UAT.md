@@ -31,7 +31,7 @@ expected: `npx vitest run src/__tests__/metrics-parity.test.ts` exits 0 with 5/5
 result: **PASSED** (live, 2026-04-28)
 evidence:
 ```
- RUN  v4.1.2 /Users/helios-mammut/claude-projects/quantalyze
+ RUN  v4.1.2 <repo-root>
  Test Files  1 passed (1)
       Tests  5 passed (5)
    Start at  16:44:45

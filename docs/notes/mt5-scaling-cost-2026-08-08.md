@@ -17,12 +17,12 @@ shares a single `MetaTrader5` C-extension across all connections, so N concurren
 requires N terminal processes or a managed provider. This is established, not re-derived.
 
 Relevant repo seam (read-only inspection):
-- `/Users/helios-mammut/claude-projects/quantalyze/analytics-service/services/mt5_client.py`
+- `analytics-service/services/mt5_client.py`
   (483 lines) — `Mt5Client` exposes exactly `login`, `account_info`, `history_deals_get`,
   `order_check`, `close`, `restart`, `terminal_key`, plus `Mt5Session` (dataclass, line 457).
-- `/Users/helios-mammut/claude-projects/quantalyze/analytics-service/services/mt5_concurrency.py` (157 lines)
-- `/Users/helios-mammut/claude-projects/quantalyze/deploy/mt5-gateway/railway-gateway.md` — current PRIMARY host template
-- `/Users/helios-mammut/claude-projects/quantalyze/deploy/mt5-gateway/docker-compose.yml` — documented cheap-VPS fallback
+- `analytics-service/services/mt5_concurrency.py` (157 lines)
+- `deploy/mt5-gateway/railway-gateway.md` — current PRIMARY host template
+- `deploy/mt5-gateway/docker-compose.yml` — documented cheap-VPS fallback
 
 **The "managed adapter ≈ one file" claim checks out.** The surface a managed provider must
 satisfy is three read methods (`login` / `account_info` / `history_deals_get`) plus lifecycle.

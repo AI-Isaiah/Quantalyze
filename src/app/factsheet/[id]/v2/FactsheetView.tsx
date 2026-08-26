@@ -4,6 +4,9 @@ import React, { type ReactNode } from "react";
 import dynamic from "next/dynamic";
 import type { FactsheetPayload, RollWindowPick } from "@/lib/factsheet/types";
 import { ROLL_WINDOW_6MO, ROLL_WINDOW_90D } from "@/lib/factsheet/rolling";
+// Phase 163 / HONEST-08 — the SERIES ladder (3d/7d) is shared with the
+// discovery-list badge, which must judge the same fact about the same rows.
+import { SERIES_FRESH_DAYS, SERIES_STALE_DAYS } from "@/lib/freshness";
 import { TrustTierLabel } from "@/components/strategy/TrustTierLabel";
 import { OwnershipTag } from "@/components/strategy/OwnershipTag";
 import { RenameStrategyDialog } from "@/components/strategy/RenameStrategyDialog";
@@ -885,14 +888,21 @@ type FreshnessTone = "fresh" | "unknown" | "stale" | "old" | "future" | "neutral
  * thresholds. HONEST-02 deliberately introduces NO new threshold: UI-SPEC C-1
  * records that `computeFreshness` (12h/48h) and this chip (3d/7d) already
  * disagree, and a fourth ladder for the series would compound it.
+ *
+ * Phase 163 / HONEST-08 — the two numbers now LIVE in lib/freshness.ts and are
+ * imported here. The discovery-list badge had to judge a return series too,
+ * and transcribing 3 and 7 into a second file is how the list and this chip
+ * came to disagree about the same strategy in the first place (a row reading
+ * "Synced 7h ago" beside a factsheet reading `Track record · old`). The
+ * literals moved; the ladder did not change.
  */
 function bucketByAge(days: number): FreshnessTone {
   // A future date (days < 0) means the timestamp is ahead of now — treat as
   // neutral/suspicious, never "fresh". (NEW-C20-07)
   if (!Number.isFinite(days)) return "neutral";
   if (days < 0) return "future";
-  if (days <= 3) return "fresh";
-  if (days <= 7) return "stale";
+  if (days <= SERIES_FRESH_DAYS) return "fresh";
+  if (days <= SERIES_STALE_DAYS) return "stale";
   return "old";
 }
 

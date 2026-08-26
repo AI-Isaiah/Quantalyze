@@ -3,7 +3,7 @@ import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { castRow } from "@/lib/supabase/cast";
 import { loadManagerIdentity as loadManagerIdentityRaw } from "./manager-identity";
-import { extractAnalytics, EMPTY_ANALYTICS } from "./utils";
+import { extractAnalytics, EMPTY_ANALYTICS, seriesEndOf } from "./utils";
 import {
   blendPeriodsPerYear,
   deriveEmptySeriesState,
@@ -265,9 +265,60 @@ export const COMPARE_ANALYTICS_COLUMNS =
  * `{"three_month": 0.0}` (HTTP 200, a real number). That measurement CORRECTS
  * the `getStrategyDetailV2` docblock's claim below that "PostgREST cannot
  * project a JSONB sub-tree without an RPC" — see the note there.
+ *
+ * ⚠️ `series_end:returns_series->-1->>date` is the SAME device applied to the
+ * OTHER blob, added by Phase 163 / HONEST-08. The badge on this surface must
+ * bucket on the staler of sync-recency and SERIES-recency (measured on
+ * production 2026-08-26: a published row rendered "Synced 7h ago" over a
+ * return series that ended 112 days earlier, while its own factsheet chip
+ * correctly read `Track record · old`). Answering "where does the track record
+ * end" needs ONE date, and `returns_series` is a multi-year array of
+ * `{date,value}` points — projecting it to answer a one-date question would
+ * ship the entire series to every anonymous visitor, which is the exact class
+ * this constant exists to prevent.
+ *
+ * MEASURED against the TEST project 2026-08-26, both forms, service role:
+ *   `select=computed_at,series_end:returns_series->-1->>date`
+ *     → HTTP 200, `{"computed_at":"2026-04-30T…","series_end":"2026-04-29"}`
+ *   `select=id,strategy_analytics(computed_at,series_end:returns_series->-1->>date)`
+ *     → HTTP 200, `{"strategy_analytics":{"series_end":"2026-05-29",…}}`
+ * The control `->0->>date` returned the series' FIRST date on the same rows,
+ * which is what proves `-1` resolves to the LAST element and not to a silent
+ * null. `->>` (not `->`) is load-bearing: it yields the bare `"2026-04-29"`
+ * text rather than a quoted JSON scalar.
+ *
+ * The array itself is STILL not projected here, and `queries.test.ts` pins
+ * that with a regex: `returns_series` may appear only in the arrow form.
+ *
+ * ⛔ PRECONDITION, STATED BECAUSE IT IS LOAD-BEARING AND WAS NOT (163-REVIEW).
+ * `->-1` is a POSITIONAL pick: it returns the last ELEMENT, which is the last
+ * DATE only while `returns_series` is stored date-ascending. This projection
+ * therefore depends on an ordering property of a JSONB column, and a
+ * silently-wrong "last point" here is a freshness lie on the most public
+ * surface in the product — the anonymous discovery list.
+ *
+ * THE PRECONDITION HOLDS TODAY, and it holds because a writer ASSERTS it, not
+ * because it happens to be true: `compute_all_metrics` RAISES ValueError when
+ * the returns index is not monotonic-increasing
+ * (analytics-service/services/metrics.py:491-499), and `returns_series` is
+ * built by iterating that index a few hundred lines later (:910-913). So no
+ * run that produced an unsorted series can persist one.
+ *
+ * ⚠️ IT IS NEVERTHELESS A WEAKER FORM THAN THE REST OF THE CODEBASE USES.
+ * `public.ledger_refresh_staleness`
+ * (supabase/migrations/20260825120000_ledger_refresh_staleness_view.sql, D-03)
+ * asks this exact question of this exact column and adopted
+ * `max((e->>'date')::date)` — order-independent by construction. The TS array
+ * arm (`seriesEndOf`, lib/utils.ts) was moved to the same `max` derivation by
+ * 163-REVIEW. This projection cannot follow, because PostgREST's select
+ * grammar can express a positional index but not an aggregate over a JSONB
+ * array; closing the gap needs an RPC or a generated column, which is a schema
+ * change and out of this fix's scope. Recorded rather than left implicit: the
+ * consequence of the assumption breaking is a wrong date, not an error, and an
+ * unstated assumption is how it would go unnoticed.
  */
 const CATEGORY_RANKING_ANALYTICS_COLUMNS =
-  "computed_at, computation_status, cumulative_return, cagr, sharpe, calmar, max_drawdown, volatility, six_month_return, sparkline_returns, sparkline_drawdown, three_month:metrics_json->three_month";
+  "computed_at, computation_status, cumulative_return, cagr, sharpe, calmar, max_drawdown, volatility, six_month_return, sparkline_returns, sparkline_drawdown, three_month:metrics_json->three_month, series_end:returns_series->-1->>date";
 
 export async function getStrategiesByCategory(categorySlug: string): Promise<RankedStrategyRow[]> {
   const supabase = await createClient();
@@ -310,7 +361,21 @@ export async function getStrategiesByCategory(categorySlug: string): Promise<Ran
   // zero rows for non-owner viewers, hiding every list badge for anon (same root
   // cause as the factsheet — see readPublicVerificationSignals). One batched read
   // for the whole list.
-  return shapeRankingRows(strategies);
+  //
+  // ⚠️ Phase 163 / HONEST-08 — the cast is NOT laziness, and it is narrow. It
+  // covers exactly one postgrest-js TYPE-LEVEL limitation: its select parser
+  // cannot read a NEGATIVE JSONB array index, so
+  // `series_end:returns_series->-1->>date` resolves to
+  // `ParserError<"Unable to parse renamed field …">` at compile time. The
+  // SERVER accepts it — measured against the TEST project 2026-08-26, HTTP 200
+  // with a bare ISO date, in this exact embedded form (see the projection
+  // constant's docblock for the queries and the `->0` control). This is the
+  // same shape `getMyStrategies` already casts at its own tail, and the runtime
+  // contract it stands in for is pinned by the projection tests in
+  // queries.test.ts, not by this line.
+  return shapeRankingRows(
+    strategies as unknown as { id: string; strategy_analytics: unknown }[],
+  );
 }
 
 /**
@@ -437,6 +502,39 @@ async function shapeRankingRows(
  * resurrect a page for a strategy that never had one. Only the substitution
  * matters here, never the fallback.
  */
+/**
+ * Phase 163 / HONEST-08 — make `series_end` present on EVERY shaped row, not
+ * just the ones whose read projected the alias.
+ *
+ * Two reads feed `shapeRankingRows` and they carry different columns. The anon
+ * ranked read projects `series_end:returns_series->-1->>date` explicitly (see
+ * CATEGORY_RANKING_ANALYTICS_COLUMNS); `getMyStrategies` keeps the wildcard
+ * embed under the D-02 owner-scoped exemption, so it carries the whole
+ * `returns_series` array and NO alias. Without this the owner surface would
+ * see `series_end === undefined` on every row and the badge would cap at
+ * "unknown" for rows whose series is right there in the payload — a
+ * conservatism with no informational excuse.
+ *
+ * ⚠️ This is a DERIVATION, never a fabrication: a missing/empty/unparseable
+ * series answers `null` (unknown), which the freshness resolver treats as
+ * "cannot support a freshness claim" — never as "fine". And it does not touch
+ * the anon path's payload shape: when the alias ANSWERED, that answer is
+ * authoritative and is left alone.
+ *
+ * ⛔ "ANSWERED" MEANS TRUTHY, NOT MERELY DEFINED (163-REVIEW, finding 3). The
+ * guard was `!== undefined`, which is the same footgun `seriesEndOf` carried:
+ * `EMPTY_ANALYTICS` sets `series_end: null` EXPLICITLY, and the arm above hands
+ * this function rows composed over that constant, so a defined `null` short-
+ * circuited the derivation for a row whose `returns_series` was right there.
+ * A falsy scalar is not an answer — re-deriving it either finds the array (the
+ * repair) or returns `null` again (unchanged). Nothing that genuinely answered
+ * is overwritten.
+ */
+function withResolvedSeriesEnd(a: StrategyAnalytics): StrategyAnalytics {
+  if (a.series_end) return a;
+  return { ...a, series_end: seriesEndOf(a) };
+}
+
 export function shapeRowAnalytics(
   a: StrategyAnalytics | null,
   strategyId: string,
@@ -446,8 +544,9 @@ export function shapeRowAnalytics(
   if (a === null) return { ...EMPTY_ANALYTICS, strategy_id: strategyId };
 
   // Terminal SUCCESS (`complete` / `complete_with_warnings`) — the values
-  // describe a run that finished. Handed through untouched.
-  if (isRankableAnalyticsRow(a)) return a;
+  // describe a run that finished. Handed through with `series_end` resolved
+  // (a no-op on the ranked anon path, which projects the alias already).
+  if (isRankableAnalyticsRow(a)) return withResolvedSeriesEnd(a);
 
   // failed / pending / computing — a run that did not produce these numbers.
   //

@@ -121,8 +121,94 @@ class _StdlibRedactFilter(logging.Filter):
         return True
 
 
+def _scrub_rendered_in_place(record: logging.LogRecord) -> None:
+    """Scrub the RENDERED log line — the pass that actually closes the leak.
+
+    Phase 163 review, CR-01 + CR-02. Scrubbing `record.msg` and `record.args`
+    as separate pieces leaves two holes, both MEASURED 2026-08-26:
+
+      CR-01 (live credential leak). The args loop above only scrubs members
+        satisfying `isinstance(v, str)`. Every other value survives untouched
+        and is stringified LATER, by `record.getMessage()` at handler time —
+        i.e. AFTER redaction has finished. Ten non-test call sites in this
+        service pass a bare exception object (`logger.warning("…: %s", exc)`),
+        including `services/key_permissions.py:133/165/213`, the Binance / OKX
+        / Bybit permission probes, which are SIGNED private ccxt calls. ccxt
+        embeds the whole signed request URL in its exception text, so
+        `&signature=<HMAC>` — derived from the user's API secret — reached the
+        sink verbatim. Measured differential: the same exception logged as
+        `str(exc)` WAS scrubbed, logged as `exc` was NOT. That gap is the bug;
+        `_redact_log_record_factory`'s docstring names this exact leak as its
+        reason to exist, and the `str()` in its example was doing the work.
+
+      CR-02 (leak, previously pinned green by a test). Scrubbing a %-TEMPLATE
+        can eat a conversion specifier — `claim_token=%s` becomes
+        `claim_token: [REDACTED]` — after which `getMessage()` raises
+        TypeError and stdlib drops the record. The previous fix reverted to
+        the original template to keep the diagnostic, justified by "the args
+        are scrubbed independently". That justification was false: Pass 1 of
+        `scrub_freeform_string` needs a denylisted key ADJACENT to its value,
+        and a bare credential passed as an argument carries no key, so it
+        matched nothing. Net effect: any `<denylisted-key>=%s` template
+        emitted its argument in plaintext.
+
+    Rendering FIRST closes both at once. The key and its value are adjacent in
+    the rendered line, so Pass 1 redacts the value; and there is no template
+    left to eat a placeholder from, so the record can no longer be dropped.
+    Non-`str` args are stringified by `getMessage()` — by us, before the scrub,
+    instead of by the handler after it.
+
+    COST TRADED (the old code documented a 100+ records/sec backfill budget):
+      - Records with NO args pay nothing new. `getMessage()` short-circuits to
+        `str(self.msg)`, and `scrub_freeform_string`'s no-`:`/`=`/`.` fast path
+        still skips all four regex passes on prose lines.
+      - Records WITH args pay one extra `%` interpolation: ours here, plus the
+        handler's at emit time. That is the IN-04 double-format, now bounded to
+        args-bearing records and deliberate — see the `record.args = None`
+        note below for why we do not simply bake every record.
+      - Level-filtered records still never reach us: `Logger.isEnabledFor`
+        runs before `makeRecord`, so the DEBUG flood costs nothing. What we do
+        give up is laziness for a record a HANDLER-level filter would drop.
+        Correctness wins: this is the credential path.
+
+    Only reassign when the scrub CHANGED something. An untouched record keeps
+    its original `msg` template and `args`, which preserves (a) `%d` / `%.2f`
+    conversion semantics, and (b) Sentry's `logentry.message` / `logentry.params`
+    split, i.e. issue grouping by template rather than by rendered value. A
+    record that DID carry a secret loses that grouping — the right trade, and
+    rare. `record.args = None` is safe here: no non-test module in this service
+    reads `record.args` (verified by grep), and `getMessage()` returns `msg`
+    verbatim once args is falsy, so the already-interpolated line is not
+    re-formatted.
+
+    Fail-open: a `%`-template that cannot format is stdlib's problem to report
+    through `Handler.handleError`, not ours to mask, so we leave the record
+    exactly as the caller built it.
+    """
+    try:
+        rendered = record.getMessage()
+    except Exception:  # noqa: BLE001 — broken template: leave stdlib to report it
+        return
+    scrubbed = scrub_freeform_string(rendered)
+    if scrubbed != rendered:
+        record.msg = scrubbed
+        record.args = None
+
+
 def _scrub_record_in_place(record: logging.LogRecord) -> None:
     """Mutate `record.msg` and `record.args` through scrub_freeform_string.
+
+    Two passes, in this order (CR-01/CR-02, Phase 163 review):
+
+      Pass A — per-argument, for the `str` members of `record.args`. Retained
+        because `scrub_freeform_string` treats its input as a WHOLE VALUE and
+        so applies the anchored `JWT_SHAPE` detector, which catches a bare
+        3-segment token that the embedded `JWT_SUBSTRING` (10+ chars per
+        segment) would miss once it sits inside a longer rendered line.
+
+      Pass B — on the RENDERED message. This is the pass that actually closes
+        the credential path; see `_scrub_rendered_in_place` for why the split
+        into `msg` + `args` was insufficient on its own.
 
     Fail-open: any exception leaves the record unchanged AND writes a single
     line to stderr so a redaction bug surfaces without recursing through the
@@ -131,8 +217,6 @@ def _scrub_record_in_place(record: logging.LogRecord) -> None:
     pass` made a swallowed scrub bug invisible to ops.
     """
     try:
-        if isinstance(record.msg, str):
-            record.msg = scrub_freeform_string(record.msg)
         args = record.args
         if args:
             # Perf L conf=9: skip the allocation/comprehension entirely when
@@ -161,6 +245,7 @@ def _scrub_record_in_place(record: logging.LogRecord) -> None:
                         scrub_freeform_string(v) if isinstance(v, str) else v
                         for v in args
                     ]
+        _scrub_rendered_in_place(record)
         # Security H conf=9 (2026-05-28 specialist): logger.exception()
         # attaches str(exc) via exc_info; the stdlib Formatter renders that
         # through traceback.format_exception AFTER our msg/args scrub.

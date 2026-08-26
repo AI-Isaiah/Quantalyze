@@ -19,6 +19,24 @@ interface CompositionDonutProps {
      * constituent carried no analytics.
      */
     computedAt?: string | null;
+    /**
+     * Phase 163 / HONEST-08 — the last date of the constituent's return
+     * series. Paired with `computedAt` so the slice badge buckets on the
+     * STALER of the two.
+     *
+     * REQUIRED, deliberately — and it was optional until 163-REVIEW / IN-02.
+     * `SyncBadge.seriesEnd` is required precisely so no mount can reopen the
+     * class by OMISSION; re-optionalising it one layer up handed that back,
+     * because a donut caller could simply leave the field off and the badge
+     * would receive `null` with nobody having decided anything. The
+     * degradation was conservative (amber cap, never a false freshness claim),
+     * so nothing rendered a lie — but the forcing function stopped at the
+     * badge's own boundary instead of reaching the callers that actually hold
+     * the analytics row. Passing an EXPLICIT `null` is still the right answer
+     * for a caller that genuinely cannot resolve a series end. Saying so is
+     * the point.
+     */
+    seriesEnd: string | null;
   }[];
 }
 
@@ -85,8 +103,15 @@ export function CompositionDonut({ strategies }: CompositionDonutProps) {
                   <div className="flex items-center gap-2">
                     <span className="inline-block w-2.5 h-2.5 rounded-sm" style={{ backgroundColor: STRATEGY_PALETTE[i % STRATEGY_PALETTE.length] }} />
                     <span className="text-text-primary">{s.name}</span>
-                    {/* B14: per-slice freshness — renders nothing without a computed_at. */}
-                    <SyncBadge computedAt={s.computedAt ?? null} />
+                    {/* B14: per-slice freshness — renders nothing without a computed_at.
+                        HONEST-08 — the slice's series end when the caller
+                        supplied one, null otherwise. Null is not a shrug: it
+                        caps the dot below "fresh", so a slice whose track
+                        record we cannot see never renders green. */}
+                    <SyncBadge
+                      computedAt={s.computedAt ?? null}
+                      seriesEnd={s.seriesEnd ?? null}
+                    />
                   </div>
                 </td>
                 <td className="py-2 pr-4 text-right font-metric">{formatCurrency(s.amount)}</td>

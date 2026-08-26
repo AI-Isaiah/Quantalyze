@@ -941,9 +941,12 @@ export async function simulateAddCandidate(
       candidate_strategy_id: candidateStrategyId,
       user_id: userId,
     },
-    // TS-04: the claim is INERT here — /api/simulator is the tenth route and is
-    // still IP-keyed (TS-30, quarantined). Sent anyway: harmless, and the route
-    // becomes per-tenant for free the moment the quarantine lifts.
+    // TS-04: the claim is LIVE here. ⚠️ CORRECTED 2026-08-26 (phase 163 review):
+    // this said the claim was INERT because /api/simulator was still IP-keyed
+    // under the TS-30 quarantine. SEC-05 lifted that quarantine and pointed the
+    // decorator at tenant_or_platform_key, so this claim now selects the
+    // per-tenant bucket on real traffic — tenant isolation for this route is a
+    // production property, not a future one.
     { budgetKey: "simulator", tenantId: userId },
   );
   return parseResponse(

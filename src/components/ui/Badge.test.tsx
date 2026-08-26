@@ -6,7 +6,9 @@
  * strategy status — was missing from both maps, so it fell through to
  * `?? statusMap.draft` / `?? label` and rendered as a DRAFT-inked badge reading
  * the raw lowercase string "private". That defect is on two shipping surfaces
- * today: `(dashboard)/strategies/page.tsx:177` and `StrategyHeader.tsx:24`.
+ * today: `(dashboard)/strategies/page.tsx:177`. (`StrategyHeader.tsx:24` also
+ * spells it, but that component is NOT mounted anywhere — see the header at the
+ * top of StrategyHeader.tsx; counting it as a live caller overstates coverage.)
  *
  * DESIGN.md semantic-color gate: a private strategy is not an error and not a
  * success — it is a neutral, owner-chosen state, so it takes the same muted ink

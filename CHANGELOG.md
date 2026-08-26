@@ -1,5 +1,65 @@
 # Changelog
 
+## [0.75.0.0] - 2026-08-26
+
+### v1.20 Phase 163 — HARDEN: fail safe, closed, and loud
+
+Thirteen requirements across logging redaction, admin-client lifecycle, monitor honesty,
+worker determinism, password policy, a repo-wide identity scrub, RPC audit coverage and the
+compute-job enqueue path. Nine plans over two waves, then a review round that produced 19
+findings and a migration re-audit that produced 14 more.
+
+**Two credential-leak blockers, both in the module this phase hardened.** The stdlib
+redaction bridge scrubbed `record.args` only for members that are strings. An exception
+object is not a string, so it passed through untouched and was rendered *after* the
+redaction pass — and ccxt embeds the signed request URL, HMAC signature included, in its
+exception text. That is verbatim the leak the function's own docstring names as its reason
+for existing; the `str()` in its example was silently load-bearing, and eleven call sites
+omitted it. Both are closed by scrubbing the rendered line, verified by swapping the pre-fix
+module back in and watching the HMAC reappear.
+
+**A wizard bug that destroyed the wrong key's credentials.** `doRemove` resolved a panel
+from one state snapshot and removed it by position from another. With three panels and two
+removals batched into a single tick, it deleted keys 1 and 3 — the credentials of a key the
+user never touched. Now keyed on panel identity, with an unresolvable index throwing instead
+of silently removing nothing.
+
+**Honesty fixes.** A future-dated series end no longer renders a red dot beside "just now",
+and the discovery badge now agrees with the factsheet chip on the same interval. The
+series-end derivation no longer assumes `returns_series` is stored date-ascending — an
+undeclared precondition that, when violated, painted a live strategy dead. A lost enqueue
+race now writes curated user copy instead of `compute job enqueue failed: <operator text>`
+into a column strategy owners read.
+
+**Deletions and corrections.** `src/lib/observability.ts` is gone: a monitor with zero
+production callers, from a v1.0.0 diagnostic spike that was never wired, protected by three
+separate guards — an anti-deletion byte gate, an export assertion, and a `knip.json`
+entry-point declaration whose only purpose was to silence the dead-code detector. An
+uncalled monitor is not observability. Nine prose claims that were false at HEAD were
+retired, including one that was load-bearing for a *deletion* decision: a comment argued an
+in-handler rate check must stay because traffic is claimless, which stopped being true —
+the check must still stay, but for a different reason, and correcting the premise without
+noticing would have made deleting it look safe.
+
+**Identity scrub.** The local machine username went from 940 occurrences to **zero**,
+verified across nine encodings with byte-exact reads. The scanner derives its needle at
+runtime rather than storing it, because the first version of this fix left the username in
+the gate that reports on it — 940 to 2, with a success line that was false of the tree it
+had just walked.
+
+**OPS-08 — the compute-job enqueue.** A forward-only migration removes four `INTO STRICT`
+lost-race re-reads from the 10-param overload and raises `serialization_failure` instead of
+an opaque 500. It carries a self-verifying gate hardened over two review rounds: nine fixes
+in the first, fourteen in the second. Four of those closed gates that could not fail, and
+one would have **aborted the production deploy** if anyone reworded a log message.
+
+⚠️ Measured while pre-flighting: the comment-strip in that gate is load-bearing for the
+production deploy specifically. PROD's 7-param body carries `INTO STRICT` inside a comment
+and the parity arm is an *absence* arm, so without the strip the arm matches and the
+auto-apply aborts — while CI stays green, because TEST runs a comment-stripped build of the
+same function and has nothing to strip. A change to that strip is invisible to CI and fatal
+at deploy time.
+
 ## [0.74.1.1] - 2026-08-26
 
 ### chore: wire `/gsd-pr-branch` into the ship flow, with a deletion guard

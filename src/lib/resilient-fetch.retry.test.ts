@@ -499,6 +499,246 @@ describe("[SEAM-06 / SC2] the bounded retry loop", () => {
   });
 });
 
+/**
+ * A bare `{ ok, status }` double CARRYING a `body` member — the one fixture
+ * shape the doubles above cannot express.
+ *
+ * `statusSequenceFetch` answers literals with no `body` at all, which is exactly
+ * the degradation case (below) and therefore cannot also be the positive case.
+ * `bodyStub` is passed through verbatim so a test can hand in a well-behaved
+ * stream stub, a hostile one, or `undefined` for "no body member at all".
+ */
+function bodyStubResponse(status: number, bodyStub: unknown): Response {
+  const res: Record<string, unknown> = { ok: status < 400, status };
+  if (bodyStub !== undefined) res.body = bodyStub;
+  return res as unknown as Response;
+}
+
+/**
+ * Phase 163 / OPS-10 — the ONE retry arm that walks away from a real `Response`.
+ *
+ * `readDependencyBody` peeks through `res.clone()` and only on 503, so on EVERY
+ * counting status the ORIGINAL body is left unconsumed: undici keeps buffering
+ * it until that attempt's `AbortSignal.timeout` fires. The counting-status retry
+ * arm is the only exit in the loop that abandons a real response — the transport
+ * arm follows a THROWN fetch (no `Response` exists to abandon) and the breaker
+ * pre-checks run before `fetch` ever fires. One site, one cancel.
+ *
+ * ⚠️ THREE MUTATIONS ARE KILLED HERE, pointing in opposite directions, and all
+ * three were RUN on 2026-08-26 rather than asserted:
+ *
+ *  1. MUTATION "no cancel" — delete the `cancelAbandonedBody(res);` call above
+ *     the counting-status `continue` in `resilient-fetch.ts`. Observed: 4 RED,
+ *     the first case among them (`cancel` called 0 times, expected 1). The three
+ *     degradation cases stay GREEN, which is why case 1 cannot be dropped.
+ *  2. MUTATION "unguarded cancel" — replace the helper's capability ladder with
+ *     a bare `res.body.cancel();`. Observed: 2 RED — `no body member`
+ *     ("Cannot read properties of undefined (reading 'cancel')") and
+ *     `cancel is not callable` ("res.body.cancel is not a function"), each a
+ *     `TypeError` thrown OUT of `resilientFetch`, past the classification
+ *     window's catch, replacing the real upstream verdict with a bookkeeping
+ *     one. Not hypothetical: the seam's route tests are built from bare
+ *     `{ ok, status }` literals (see SC-C′ at the head of this file).
+ *  3. MUTATION "no swallow" — drop the `.catch(() => {})` inside the helper.
+ *     Observed: the rejecting-cancel case RED with the leaked
+ *     `Error: stream already errored` in `seen`.
+ *
+ * ⚠️ MUTATION 3 FIRST CAME BACK GREEN, and the reason is recorded inside that
+ * case: `vi.fn` attaches its own handler to a returned promise, so the spy
+ * itself was suppressing the rejection the test existed to detect. The case now
+ * uses a plain closure. A spy is not a neutral observer of promise handling.
+ *
+ * No mutation is caught by another's cases. All three directions ship.
+ */
+describe("[SEAM-06 / OPS-10] the abandoned counting-status body is CANCELLED", () => {
+  it("a counting 503 that is RETRIED has its original body cancelled exactly once", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.spyOn(Math, "random").mockReturnValue(0);
+    const cancel = vi.fn(() => Promise.resolve());
+    const fetchMock = installFetchMock();
+    fetchMock
+      .mockResolvedValueOnce(bodyStubResponse(503, { cancel }))
+      .mockResolvedValue(bodyStubResponse(200, undefined));
+    const mod = await import("./resilient-fetch");
+
+    const res = await mod.resilientFetch("bridge", BRIDGE_PATH, {
+      method: "POST",
+      retriesOverride: 1,
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(res.status).toBe(200);
+    // THE oracle for OPS-10. Exactly once — not zero (the body would keep
+    // buffering) and not twice (a double cancel would mean the abandoning site
+    // is not the only one firing).
+    expect(cancel).toHaveBeenCalledTimes(1);
+  });
+
+  it("NEGATIVE — the response the CALLER receives is never cancelled (retry-then-200)", async () => {
+    // The scope half of the requirement: "cancel the abandoned body" must not
+    // become "cancel bodies". A cancel on the returned response would hand every
+    // seam client an unreadable stream — a far worse failure than the buffering
+    // it fixes.
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.spyOn(Math, "random").mockReturnValue(0);
+    const abandonedCancel = vi.fn(() => Promise.resolve());
+    const returnedCancel = vi.fn(() => Promise.resolve());
+    const fetchMock = installFetchMock();
+    fetchMock
+      .mockResolvedValueOnce(bodyStubResponse(503, { cancel: abandonedCancel }))
+      .mockResolvedValue(bodyStubResponse(200, { cancel: returnedCancel }));
+    const mod = await import("./resilient-fetch");
+
+    const res = await mod.resilientFetch("bridge", BRIDGE_PATH, {
+      method: "POST",
+      retriesOverride: 1,
+    });
+
+    expect(res.status).toBe(200);
+    expect(abandonedCancel).toHaveBeenCalledTimes(1);
+    expect(returnedCancel).not.toHaveBeenCalled();
+  });
+
+  it("NEGATIVE — a LAST-ATTEMPT 503 falls through and is RETURNED with its body intact", async () => {
+    // D-01's other exit. Attempt 2 is the last one, so it does NOT `continue` —
+    // it falls through and is returned so the caller still reads the 503 body
+    // its contract reads. Cancelling THAT one would silently empty it.
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.spyOn(Math, "random").mockReturnValue(0);
+    const firstCancel = vi.fn(() => Promise.resolve());
+    const lastCancel = vi.fn(() => Promise.resolve());
+    const fetchMock = installFetchMock();
+    fetchMock
+      .mockResolvedValueOnce(bodyStubResponse(503, { cancel: firstCancel }))
+      .mockResolvedValue(bodyStubResponse(503, { cancel: lastCancel }));
+    const mod = await import("./resilient-fetch");
+
+    const res = await mod.resilientFetch("bridge", BRIDGE_PATH, {
+      method: "POST",
+      retriesOverride: 1,
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(res.status).toBe(503);
+    expect(firstCancel).toHaveBeenCalledTimes(1);
+    expect(lastCancel).not.toHaveBeenCalled();
+  });
+
+  it("DEGRADATION — a bare `{ ok, status }` 503 with NO body member retries without throwing", async () => {
+    // The fixture shape the seam's route tests actually use. An unguarded
+    // `res.body.cancel()` throws a TypeError here, OUT of `resilientFetch`,
+    // past the classification window's catch.
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.spyOn(Math, "random").mockReturnValue(0);
+    const fetchMock = statusSequenceFetch(503, 200);
+    const mod = await import("./resilient-fetch");
+
+    const res = await mod.resilientFetch("bridge", BRIDGE_PATH, {
+      method: "POST",
+      retriesOverride: 1,
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(res.status).toBe(200);
+  });
+
+  it("DEGRADATION — a body whose `cancel` is not callable retries without throwing", async () => {
+    // Belt in front of the braces, exactly as `hasContractualWait` guards a
+    // `headers.get` that is present but not a function. `body?.cancel()` alone
+    // does NOT cover this shape.
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.spyOn(Math, "random").mockReturnValue(0);
+    const fetchMock = installFetchMock();
+    fetchMock
+      .mockResolvedValueOnce(bodyStubResponse(503, { cancel: "not-a-function" }))
+      .mockResolvedValue(bodyStubResponse(200, undefined));
+    const mod = await import("./resilient-fetch");
+
+    const res = await mod.resilientFetch("bridge", BRIDGE_PATH, {
+      method: "POST",
+      retriesOverride: 1,
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(res.status).toBe(200);
+  });
+
+  it("DEGRADATION — a `cancel` that REJECTS is swallowed, with no unhandled rejection", async () => {
+    // Makes the `.catch(() => {})` falsifiable rather than decorative. Dropping
+    // it leaves a rejected promise with no handler; node emits
+    // `unhandledRejection` on a later tick, and the 250ms backoff this test
+    // waits through is long enough for that tick to land.
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.spyOn(Math, "random").mockReturnValue(0);
+    // ⚠️ A PLAIN CLOSURE, NOT `vi.fn`, AND THAT IS THE WHOLE ORACLE. Measured
+    // 2026-08-26: with `vi.fn(() => Promise.reject(…))` this case stayed GREEN
+    // under the `.catch` removal, because vitest's spy attaches its own handler
+    // to a returned promise to power `toHaveResolved`/`toHaveRejected` — the
+    // rejection is therefore never unhandled and the listener below sees
+    // nothing. The spy WAS the reason the test could not fail.
+    let cancelCalls = 0;
+    const cancel = () => {
+      cancelCalls += 1;
+      return Promise.reject(new Error("stream already errored"));
+    };
+    const fetchMock = installFetchMock();
+    fetchMock
+      .mockResolvedValueOnce(bodyStubResponse(503, { cancel }))
+      .mockResolvedValue(bodyStubResponse(200, undefined));
+    const mod = await import("./resilient-fetch");
+
+    const seen: unknown[] = [];
+    const onUnhandled = (reason: unknown) => {
+      seen.push(reason);
+    };
+    process.on("unhandledRejection", onUnhandled);
+    try {
+      const res = await mod.resilientFetch("bridge", BRIDGE_PATH, {
+        method: "POST",
+        retriesOverride: 1,
+      });
+      expect(res.status).toBe(200);
+    } finally {
+      process.off("unhandledRejection", onUnhandled);
+    }
+
+    expect(cancelCalls).toBe(1);
+    expect(seen).toEqual([]);
+  });
+
+  it("a counting 503 that FAILS FAST on its own Retry-After does NOT cancel — it is returned, not abandoned", async () => {
+    // D-01's fail-fast exit shares the `verdict.counts` arm but never abandons:
+    // attempt 1's response IS the answer. The cancel must sit INSIDE the
+    // `!lastAttempt && !hasContractualWait` branch, not above it.
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const randomSpy = vi.spyOn(Math, "random").mockReturnValue(0);
+    const cancel = vi.fn(() => Promise.resolve());
+    const withWait = new Response(JSON.stringify({ dependency: "supabase" }), {
+      status: 503,
+      headers: { "content-type": "application/json", "retry-after": "15" },
+    });
+    Object.defineProperty(withWait, "body", {
+      value: { cancel },
+      configurable: true,
+    });
+    const fetchMock = installFetchMock();
+    fetchMock.mockResolvedValue(withWait);
+    const mod = await import("./resilient-fetch");
+
+    const res = await mod.resilientFetch("bridge", BRIDGE_PATH, {
+      method: "POST",
+      retriesOverride: 1,
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(res.status).toBe(503);
+    expect(cancel).not.toHaveBeenCalled();
+    // No backoff was entered either — `Math.random` is read at exactly one site
+    // in the core (the jitter term).
+    expect(randomSpy).not.toHaveBeenCalled();
+  });
+});
+
 describe("[SEAM-06 / D-01] a 503 that names its own wait FAILS FAST", () => {
   it("SC-C — a 503 carrying Retry-After → exactly ONE fetch, body intact, ONE breaker failure, and no backoff sleep", async () => {
     // The no-sleep oracle. `Math.random` is read at EXACTLY one site in the

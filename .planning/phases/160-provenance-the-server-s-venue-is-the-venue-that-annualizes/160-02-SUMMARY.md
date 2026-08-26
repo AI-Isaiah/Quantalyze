@@ -184,7 +184,7 @@ checkout's `node_modules/.bin`, with the **cwd inside this worktree**. Vitest co
 root it used on every run:
 
 ```
-RUN  v4.1.10 /Users/helios-mammut/claude-projects/quantalyze/.claude/worktrees/agent-a42f5cc19d7fde907
+RUN  v4.1.10 .claude/worktrees/agent-a42f5cc19d7fde907
 ```
 
 Module resolution reaches the parent's `node_modules` because this worktree is nested

@@ -1038,6 +1038,283 @@ true for 146 and half of 142–145, and **false for 141**.
 
 ## 🟡 FIX MID-TERM
 
+### Phase 163 / WR-06 residual — a non-UTC reporter reads "ends in the future" ~3h every day (added 2026-08-26)
+
+WR-06 is FIXED for the defect it named (a future series end no longer renders amber beside
+"just now"; badge and factsheet chip now agree, both muted). The residual below is the
+*stated scenario* that motivated it, and it is NOT closed — recording it so the fix is not
+mistaken for covering more than it does.
+
+**Why the clock-skew grace cannot cover it.** `series_end` is a bare date (`"2026-08-27"`)
+parsed at UTC midnight, so it is **day-granular**. A reporter at UTC+3 has a local calendar
+date ahead of UTC's whenever local time is 00:00–02:59 — the three hours before midnight UTC
+— putting `series_end` up to ~3 hours ahead. `CLOCK_SKEW_TOLERANCE_MINUTES` is 5 minutes. The
+grace is two orders of magnitude too small, and widening it to 3h would be the wrong fix
+anyway: it would start excusing genuine clock problems.
+
+**The correct fix is day-granular comparison** — for a value whose own resolution is one day,
+anything under ~1 day ahead is the field's resolution plus timezone, not evidence of anything.
+
+⛔ **It must be done in ONE coordinated change across BOTH surfaces.** `bucketSeriesAge`
+(`src/lib/freshness.ts`) and `bucketByAge` (`src/app/factsheet/[id]/v2/FactsheetView.tsx`,
+which maps `days < 0` to `future` with no allowance) consume the identical input. Fixing only
+the badge would make it read `fresh` while the chip still reads `future — check data`, which
+manufactures a NEW two-surface contradiction — the exact class this phase exists to close.
+That is why the phase-163 fixer deliberately stopped here rather than half-fixing it.
+
+- **[WR-06-UTC] Give both bucketers a day-granularity allowance for future-dated series ends**,
+  in one commit, with a test that renders both surfaces from one row and asserts they agree.
+
+**Net effect today:** for those ~3 hours a day, a non-UTC reporter's strategy renders a muted
+grey "Track record ends in the future" on both the discovery badge and the factsheet chip.
+Honest and self-consistent — no longer a contradiction, and no longer amber — but still a
+degraded render for a perfectly healthy strategy.
+
+
+### ⚠️ PRE-EXISTING — a personal email is published in tracked AI-review payloads (added 2026-08-26)
+
+Surfaced by the pre-push secret guardrail while pushing phase 163. **Not introduced by that
+branch** — verified: the file is byte-present on `main` with the identical two email-shaped
+strings, and phase 163's only change to it was the username scrub. Recording it because a
+finding reviewed and then not written down is a finding that gets re-discovered.
+
+**What is exposed.** `.planning/milestones/v0.17.0.0-phases/13-discovery-v2-polish/13-REVIEWS/`
+holds a 174 KB single-line `grok-request.json` (plus 8 sibling payload/response artifacts,
+376 KB total) containing **5 occurrences of a personal `@gmail.com` address** and one
+`internal.url_private` match. The repo is PUBLIC, so these are world-readable.
+
+⚠️ Three further "email" hits in the same scan are FALSE POSITIVES — markdown file
+references of the form `<word>@DESIGN.md`. Two other MEDIUM hits elsewhere in the diff are
+also false positives worth knowing about, because they will recur on every future scan:
+- `pii.cc` matched a git **index line** (`index 32b20c410..656217189 100644`) — diff
+  metadata, not content.
+- `pii.phone.e164` matched `+20260716090000:283-311` — the diff's `+` marker followed by a
+  migration timestamp, which reads as an E.164 number.
+
+**Marginal risk is genuinely low** and should not be overstated: git commit author emails are
+already visible on any public repo, so the address is very likely public already through
+`git log`. What is new is the address sitting inside AI-vendor request payloads.
+
+- **[PII-01] Decide whether the `13-REVIEWS/` payload artifacts should stay tracked.** They
+  are historical AI-review request/response dumps with no ongoing consumer. Deleting them
+  forward removes them from the working tree but NOT from history (history rewriting was
+  explicitly declined by the founder, so that limit is deliberate and stands). If they are
+  kept, the decision should be recorded rather than left implicit.
+
+⛔ Related standing rule: Grok and Codex are no longer used at all. These artifacts predate
+that decision — they are not evidence of current practice.
+
+
+### ✅ ACCEPTED RISK — Phase 163 / WR-10: the password floor was MEASURED, not RAISED (decided 2026-08-26)
+
+⭐ **DECIDED 2026-08-26 by the founder: the six-character floor is ACCEPTED.** The risk below
+was presented in full — including the key-material exposure path — and accepted knowingly.
+This is a recorded acceptance, not a deferral and not an oversight: nothing here is waiting on
+anyone. Kept in full rather than deleted so the reasoning is auditable, and so that a future
+reader who rediscovers the weak floor finds the decision instead of re-opening it.
+
+⚠️ What would REVERSE this: paying clients, a custody or compliance requirement, or any
+evidence of credential-stuffing against the platform. At that point the remedy below is still
+the remedy — it does not expire.
+
+SEC-01 closed by MEASURING the hosted password policy and mirroring it in one exported
+constant. The measurement discipline was right and is not in question: the hosted minimum was
+read from the live signup endpoint's own rejection (**6 characters, and `reasons: ["length"]`
+alone, so no character-class requirement**), never assumed from the GoTrue default.
+
+**But measuring a weak floor and faithfully mirroring it is not hardening.** The outcome of a
+requirement in a phase titled *"HARDEN — fail safe, closed, and loud"* is that a platform
+which custodies users' exchange API keys accepts a six-character, all-lowercase password.
+Nothing in the phase raised the actual gate — SEC-01's own docblock says the client constant
+is UX only and the real gate is hosted GoTrue.
+
+**Why this is a security item and not a preference.** 26^6 ≈ 3×10^8 is trivially searchable
+offline and well within online rates, because the observed rate limiting is per-route rather
+than per-account. The connected venue keys are decryptable server-side by the platform, so
+account takeover is key-material exposure, not just account access.
+
+- **[WR-10] RAISE the hosted minimum and enable leaked-password protection.** Both are
+  DASHBOARD-OWNED settings with no repo representation, so a code change alone cannot do it.
+  Sequence: raise the hosted minimum (10–12 is the common floor) and switch on GoTrue's
+  leaked-password protection, THEN move `MIN_PASSWORD_LENGTH` and its recorded reading in the
+  same commit. The procedure is already written down in the constant's docblock.
+
+✅ DONE — the SEC-01 entry in `.planning/REQUIREMENTS.md` now records this acceptance
+explicitly. It still does NOT claim the floor was validated: it was observed, accepted, and
+says so. Observing a weak floor and accepting it are both legitimate; claiming it was cleared
+would not be, and that distinction is the whole point of this phase.
+
+
+### Phase 163 / OPS-08 (de-strict `_enqueue_compute_job_internal`) — routed onward (added 2026-08-26)
+
+Raised by the three-reviewer gate on `supabase/migrations/20260826150000_destrict_enqueue_internal_10param.sql`.
+Everything blocking was fixed in that migration and in `supabase/tests/test_enqueue_internal_destrict.sql`;
+these four are the deliberate carry-overs, each with the reason it was not fixed there.
+
+- **[OPS-08-TS] The TS half of OPS-08 was never written — nothing retries on 40001.**
+  The migration now raises `serialization_failure` (40001) when a lost race's winner has
+  already advanced past the in-flight statuses. **Measured at HEAD 2026-08-26:**
+  `grep -rn 'serialization_failure\|40001' src/` returns ZERO non-test hits, and
+  `src/app/api/allocator/holdings/sync/route.ts:73-87` still answers a blanket 500 for
+  every SQLSTATE except `42501`. So the SQL half buys a correct, disambiguated code in the
+  logs — a *prerequisite* for a retry, not a retry. Until a caller branches on it, the
+  user-visible outcome of a lost race is unchanged. Not done in 163-06 because the plan's
+  declared files are SQL only; the migration's header now states the limitation rather
+  than claiming the capability. Fix: branch on `error.code === '40001'` at the enqueue
+  call sites (allocator holdings sync, csv-finalize) and retry once before falling through
+  to the 500.
+
+- **[OPS-08-F2] Both pg_cron fan-out paths swallow the new error and report success.**
+  `supabase/migrations/20260825130000_ledger_refresh_fanout_dormant.sql:449` and
+  `20260825140000_ledger_refresh_composite_arm.sql:400` catch `WHEN OTHERS` around the
+  enqueue, withhold the `strategy_id`, and continue — so a 40001 (or any other enqueue
+  failure) makes the tick UNDER-COUNT while still reporting success. Pre-existing, not a
+  regression introduced by 20260826150000, which is why it was recorded rather than fixed
+  in that migration. Fix: record the failed target id and surface a non-zero failure count
+  from the tick.
+
+- **[OPS-08-F9] `test_enqueue_internal_destrict.sql` has no `ALL N ARMS EXECUTED` sentinel.**
+  Any arm can be neutered in place and the file still exits 0, the same as the other ~60
+  sentinel-free files in `supabase/tests/`. Declaring one is not free-standing: it requires
+  raising `SENTINEL_FLOOR` 7 -> 8 and `ARMS_FLOOR` 63 -> 68 in `.github/workflows/ci.yml`,
+  plus the per-file derivation entry that
+  `src/__tests__/contracts/ci-anti-skip-gate.contract.test.ts` reads — and ci.yml is
+  outside plan 163-06's declared files and was being edited concurrently by another
+  Phase 163 workstream. Fix: add the sentinel and both integers in one diff.
+
+- **[OPS-08-F8] Follow-through on the sql-tests first-failure blast radius.**
+  163-06 fixed its own instance (the gate is now a both-or-neither coherence assertion that
+  is meaningful pre- and post-apply, instead of knowingly RED). The general problem stands:
+  the `sql-tests` loop exits on first failure, so ANY file that is red for an expected
+  reason silently suppresses every file sorting after it — for this one, ~40 of ~70. Fix:
+  either run every file and aggregate failures at the end, or make the expected-red state
+  a first-class, per-file declaration the runner understands.
+
+### Phase 163 / OPS-08 — TEST runs a COMMENT-STRIPPED build of `_enqueue_compute_job_internal` (added 2026-08-26)
+
+Found while pre-flighting the OPS-08 migration's gate arms against both databases. Three
+reviewers independently worried that one gate arm is "meaningful on PROD and vacuous on
+TEST". Measuring it explains exactly why, and the cause is broader than that one arm.
+
+| | definition length | line-comment markers | carries the `--` comment naming the strict form |
+|---|---|---|---|
+| PROD 7-param | 4622 | 23 | yes |
+| TEST 7-param | 3093 | **0** | no |
+
+**TEST is running a comment-stripped build of the same function.** It is semantically
+identical — every gate arm evaluates the same on both databases, which is why nothing is
+red — but the bodies are not byte-equal and TEST is therefore not a faithful mirror of
+PROD for this function.
+
+**Why it matters, concretely.** The migration's gate strips comments before matching,
+because plpgsql stores `prosrc` verbatim. On PROD that strip is LOAD-BEARING: PROD's
+7-param carries `INTO STRICT` inside a comment, and the 7-param parity arm is an ABSENCE
+arm, so without the strip the arm would fire and **abort the production deploy**. On TEST
+there is nothing to strip, so:
+
+- regressing the comment-strip leaves CI **green on TEST** and **breaks the PROD deploy** —
+  first observation would be a failed auto-apply, since merging `supabase/migrations/**`
+  applies to PROD;
+- removing the block-comment pass (added to close a demonstrated `/* */` evasion) changes
+  **zero** TEST results. CI cannot detect the removal of the mechanism CI depends on.
+
+- **[DRIFT-01] Re-align TEST's `_enqueue_compute_job_internal` with the repo definition**, or
+  record deliberately that TEST is a stripped mirror. Until then, no CI run can exercise the
+  comment-strip, and any change to it must be pre-flighted against PROD by reading
+  `pg_get_functiondef` directly — a green TEST run is not evidence.
+
+⚠️ Root cause of the stripped build is unknown; it predates this phase. The gate arms were
+all measured green on BOTH databases on 2026-08-26, so nothing is broken today.
+
+
+### ✅ CLOSED — Phase 163 / WR-07: operator jargon reached a user-visible column (closed 2026-08-26)
+
+The OPS-08 migration's `serialization_failure` sentence landed verbatim in
+`strategy_analytics.computation_error`, which strategy owners read. It could NOT be fixed in
+SQL: `csv-finalize` prefixed `compute job enqueue failed:` unconditionally with no SQLSTATE
+branch, so no wording chosen in SQL reached the user unprefixed.
+
+**FIXED in TypeScript.** `csv-finalize` now branches on `enqueueErr.code === '40001'` and
+writes the ELSE arm of `computation_error_copy` instead of the operator prefix. The copy is
+pinned to the SQL function by a static parity test, so rewording that arm turns the route RED
+in CI rather than drifting silently.
+
+⚠️ This entry previously recorded the measurement "ZERO quoted `'40001'` in `src/**`" as
+support for the fix. **That measurement was true when written and is FALSE now** — the fix is
+what made it false. Corrected rather than deleted, because a backlog that keeps a stale
+measurement as live evidence is the same defect class this phase closed elsewhere.
+
+⭐ Two corrections to the review's proposed remedy stand, and are worth keeping:
+- the suggested copy *"will retry automatically"* is FALSE at HEAD — nothing retries a 40001
+  (see OPS-08-TS). It would have traded operator jargon for a false promise.
+- *"route it through the HONEST-01 bridge"* is not available: the bridge derives copy from
+  `compute_jobs.error_kind`, and a failed ENQUEUE leaves no job row. The helper
+  `computation_error_copy(TEXT)` is directly callable; the bridge is not the route.
+
+### Phase 163 / WR-01 — hygiene Rule 1 is INACTIVE in CI by design (added 2026-08-26)
+
+Closing WR-01 removed the local username from the tree entirely (940 -> 0 across nine
+encodings). The needle is now DERIVED AT RUNTIME rather than stored, which is what makes
+that possible — but it has a consequence worth stating plainly rather than discovering
+later.
+
+**Rule 1 (bare-username detection) does not run in CI.** The scanner derives the needle
+from the home-directory basename; on GitHub Actions that is `runner`, which the scanner
+deliberately refuses (measured: `/home/runner` occurs 2800 times across 507 tracked files —
+a naive derivation would have turned `frontend-lint` permanently red on a clean tree). When
+Rule 1 cannot run, the gate says so and drops the username clause from its success line,
+rather than claiming a check it did not perform.
+
+**What still runs in CI:** Rules 2 and 3 are structural absolute-path checks that need no
+needle, so every leaked `\/Users\/<anyone>\/` form (spelled escaped, per the scanner's own convention) is caught everywhere. The residual gap is
+narrow: a BARE username occurrence with no path prefix, in a file added by someone who
+never ran `npm run lint` locally.
+
+**DECIDED 2026-08-26 — not closing it, and why.** The remedy is to wire
+`HYGIENE_LOCAL_USERNAME` into the `frontend-lint` job from a repository secret. Declined:
+the username is already present in published git history (rewriting history was explicitly
+declined by the founder as costing more than it buys), so a secret would add config
+coupling and a workflow-run-visible value in order to protect a string that is not
+actually secret. The local gate plus the structural rules is the right cost/benefit here.
+
+- **[WR-01-CI]** If a bare-username leak ever DOES reach main, that changes the calculus —
+  wire `HYGIENE_LOCAL_USERNAME` into `frontend-lint` from a repository secret and delete
+  this note. One env line plus one secret; no scanner change needed, the precedence chain
+  already reads it first.
+
+
+### Phase 163 / SEC-03 — H-0001 census RE-MEASURED, and the debt is bigger than recorded (added 2026-08-26)
+
+Raised while closing SEC-03. The `it.skip("H-0001 (intended behavior)")` block in
+`src/__tests__/audit-coverage.test.ts` carried a census of the mutation sites that
+`findMutations`' line regex misses. The plan treated it as stale *line numbers*. It was
+worse than that — re-measuring changed the **count**, not just the coordinates:
+
+- The "kill-switch flip" upsert the comment named **no longer exists** — Phase 106 Stage B
+  made flag-monitor alert-only. The record was describing a site that had been deleted.
+- **Three sites it never listed do exist and are uncovered:** `keys/sync:496`,
+  `finalize-wizard:2287`, `finalize-wizard:2360`.
+- Net: the uncovered single-line-mutation set is **6, not 4**. The debt grew while the
+  record said otherwise.
+
+The comment in `audit-coverage.test.ts` now carries the re-measured list, the method that
+produced it, and a warning not to trust the numbers past the next refactor.
+
+⚠️ **Those six sites remain UNFIXED and unaudited.** SEC-03 only put
+`add_wizard_composite_key` under the audit law; it did not fix `findMutations`. H-0001
+stays deferred.
+
+- **[H-0001] Fix `findMutations`' single-line `from(...).insert(...)` detection**, then
+  un-skip the intended-behavior test and re-run the census. Until then the audit-coverage
+  gate is blind to the single-line idiom at six known call sites, and a seventh can appear
+  without anything going red.
+
+**Lesson worth keeping:** a census recorded as prose in a comment decays silently and
+asymmetrically — it under-reported by two AND pointed at one site that no longer existed.
+Re-measure such records rather than re-numbering them; re-numbering would have preserved
+both errors.
+
+
 ### ✅ FIXED (pending CI confirmation) — CI's gitleaks was too old to read our allowlist (raised + fixed 2026-08-23, Phase-160 ship)
 
 **Was:** the `secret-scan` gate ran with **every allowlist entry in `.gitleaks.toml` silently
@@ -2379,6 +2656,23 @@ EXECUTED, §str/None follow-through, §Discovery observation).
 - [ ] (/code-review high, lens 3+5) The stale "strategies_update has NO WITH CHECK" claim also lives in src/app/api/strategies/finalize-wizard/route.test.ts:76-77 and :2996-2997, and ownership/name route docblocks — fix together with IN-01 using the migration rev-3 framing (defence-in-depth, cite 20260410225610).
 - [ ] (/code-review high, lens 5) HoldingsTable.tsx D-15 comment cites StrategyTable.tsx:1067-1085; the precedent now lives at :1169-1179 — cite by phrase not line number.
 - [x] ~~(/code-review high, lens 5, low-confidence) strategies-row-adapter.ts Half-2 comment~~ **RESOLVED 2026-08-08**: kept `manager: s.codename ?? null` and reworded the comment. Half 1 resolves `organization_name ?? codename ?? null` and an owner's own strategy has a null org, so half 1 lands on the codename too; dropping half 2 to null would make one strategy render "—" while unallocated and its codename once money sits behind it. Cross-half agreement now pinned by test. says "honest — rather than a fabricated manager" but code sets manager: s.codename ?? null — codename-present path renders own codename in the manager column and is untested; decide intended behavior and pin it.
+
+### Phase 162 (HONEST) — post-deploy QA finding, ASSIGNED to Phase 163 (added 2026-08-26)
+
+- [ ] **`QA-162-01` / `HONEST-08` — the public discovery table advertises "Synced 7h ago" over a
+      112-day-dead series.** Found by the post-deploy QA pass on quantalyze.xyz at v0.74.1.0.
+      `/browse/crypto-sma` row #2 `Phoenix Protocol`: badge says **Synced 7h ago**, return series
+      ends **2026-05-06** (112 days), and its own factsheet chip correctly says `Track record · old`.
+      Row #1 `Momentum Sphinx` is the same shape at 7 days. **Two public surfaces contradict each
+      other about the same strategy, and the lying one needs no login.**
+      HONEST-02 fixed the factsheet chip. HONEST-03 scoped the badge fix to EXAMPLE rows only, so
+      real published strategies were never covered — and with all 15 examples deleted from PROD the
+      `is_example` gate now guards zero rows here.
+      ROADMAP SC-2 states the rule as "a series dead 89 days cannot read FRESH". 112 > 89.
+      **Owner: Phase 163, success criterion 6.** Fix = bucket on the staler of sync- and
+      series-recency in `StrategyTable`/`StrategyGrid`, reusing `FreshnessChip`'s logic rather than
+      reimplementing it. ⛔ Do not close by deleting the badge; ⛔ do not test via `is_example`.
+      **Severity: HIGH** — public, unauthenticated, real (non-example) strategy, honesty claim.
 
 ### Phase 162 (HONEST) — composite failure no longer names the offending member (added 2026-08-26)
 

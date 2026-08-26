@@ -8,7 +8,7 @@
     "dev": "next dev --hostname 0.0.0.0",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint --cache --cache-location node_modules/.cache/.eslintcache src/ && tsx scripts/check-admin-route-manifest.ts && tsx scripts/check-route-contract.ts",
+    "lint": "eslint --cache --cache-location node_modules/.cache/.eslintcache src/ && tsx scripts/check-admin-route-manifest.ts && tsx scripts/check-route-contract.ts && tsx scripts/check-planning-hygiene.ts",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
@@ -19,6 +19,7 @@
     "check:founder-lp-readiness": "tsx scripts/check-founder-lp-readiness.ts",
     "check:admin-route-manifest": "tsx scripts/check-admin-route-manifest.ts",
     "check:route-contract": "tsx scripts/check-route-contract.ts",
+    "check:planning-hygiene": "tsx scripts/check-planning-hygiene.ts",
     "worker:dev": "cd analytics-service && .venv/bin/python main_worker.py",
     "schema:functions": "tsx scripts/dump-sql-functions.ts",
     "schema:functions:check": "tsx scripts/dump-sql-functions.ts --check"
@@ -77,5 +78,5 @@
     "fast-uri": "^3.1.4",
     "postcss": "^8.5.23"
   },
-  "version": "0.74.1.1"
+  "version": "0.75.0.0"
 }

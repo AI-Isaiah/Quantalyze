@@ -49,6 +49,7 @@ verified-stale items are excluded by construction.
 
 - [x] **HONEST-01** (L1939): Raw Python exception strings never render as user-facing `computation_error` copy — curated at the write boundary.
 - [ ] **HONEST-07** (split from HONEST-01, 2026-08-26): Root-cause the `str`/`None` compare behind the 2 damaged rows. Stage (`poll_positions`), window (2026-06-10 … 06-14) and population (2 strategies, one shared 59-char `TypeError`) are pinned; no site exists at HEAD and no traceback survives, and the job kind is retired (0 successes ever, dead since 2026-06-14). May prove unclosable — reassess rather than carry forever.
+- [x] **HONEST-08** (found by post-deploy QA 2026-08-26, assigned to Phase 163): The public discovery table's "Synced Nd ago" badge must not advertise freshness a dead return series contradicts. MEASURED ON PROD: `Phoenix Protocol` renders "Synced 7h ago" on `/browse/crypto-sma` while its series ends 2026-05-06 — **112 days stale**; its own factsheet chip correctly reads `Track record · old`. Two public surfaces, one strategy, contradicting each other. HONEST-02 fixed the factsheet chip; HONEST-03 scoped the badge fix to EXAMPLE rows only, so real published strategies were never covered — and with the 15 examples deleted the `is_example` gate now sees no row that would exercise it. ⛔ Do NOT close by removing the badge: bucket it on the staler of sync- and series-recency, mirroring `FreshnessChip`.
 - [x] **HONEST-02** (L1953): The factsheet freshness badge reflects series recency — a strategy whose return series ended 89 days ago cannot read FRESH; investigate (flat account vs derive gap) before fixing.
 - [x] **HONEST-03** (L1959): Example strategies don't advertise stale "Synced Nd ago" badges on discovery.
 - [x] **HONEST-04** (L1991): `buildEquityCurveSeries` serves real per-strategy equity curves now that `returns_series` is selected — the hard-coded `equityCurve: null` and its false comment go.
@@ -61,12 +62,20 @@ verified-stale items are excluded by construction.
 - [x] **OPS-02** (L1741): `sql-tests` is in an aggregator's `needs:` — the only gate that executes the deployed cron body cannot be present-and-failing with nothing gating on it.
 - [x] **OPS-03** (L2570 + L1035): The orphaned e2e specs (incl. the NAV-01 surface) run in a CI batch, and DB-types drift gets a regeneration gate (or an explicit recorded decision not to).
 - [x] **OPS-04** (L2715 + L2265 + L2730): The TEST stale-`pending` backlog gets a TEST-only drain (⛔ never a migration, never `cron.unschedule(9)`), and `test_compute_jobs_fencing.py` stamps `claimed_at` in its two direct UPDATEs.
-- [ ] **OPS-05** (L360): The structlog frozen-proxy class is fixed at the class level (no module-level proxy can bind a pre-`configure_logging` chain that skips `_redact_processor`), with a regression test. ⚠️ Two failure modes, each candidate fix closes only one: dropping `cache_logger_on_first_use` misses module-scope `.bind()` (broken regardless of the cache flag per structlog docs) — needs a source-scan gate for Mode A plus a behavioral redaction test for Mode B.
-- [ ] **OPS-06** (L3116): `createAdminClient()` cannot throw on the request path after an irreversible commit — the class is closed at all three known sites.
-- [ ] **OPS-07** (L1594 + L1595 + L1600): Flag-monitor honesty — `checkStuckNotifications` distinguishes "nothing stuck" from "could not tell"; a failed denominator read pages instead of logging success; the integration test actually falsifies both.
-- [ ] **OPS-08** (L1562): The 10-param `_enqueue_compute_job_internal` no longer uses `INTO STRICT` on its lost-race branches (parity with the deliberately de-STRICT-ed 7-param overload).
-- [ ] **OPS-09** (L1561): The resync draft pre-check is deterministic (`ORDER BY created_at DESC` + bounded window).
-- [ ] **OPS-10** (L1558): The retry loop cancels abandoned response bodies (`body.cancel()`) so undici stops buffering until the attempt signal fires.
+- [x] **OPS-05** (L360): The structlog frozen-proxy class is fixed at the class level (no module-level proxy can bind a pre-`configure_logging` chain that skips `_redact_processor`), with a regression test. ⚠️ Two failure modes, each candidate fix closes only one: dropping `cache_logger_on_first_use` misses module-scope `.bind()` (broken regardless of the cache flag per structlog docs) — needs a source-scan gate for Mode A plus a behavioral redaction test for Mode B.
+- [x] **OPS-06** (L3116): `createAdminClient()` cannot throw on the request path after an irreversible commit — the class is closed at all three known sites.
+- [x] **OPS-07** (L1594 + L1595 + L1600): Flag-monitor honesty — a failed monitor read PAGES instead of logging success, and the integration test actually falsifies it.
+  ⚠️ AMENDED 2026-08-26. The original wording opened with "`checkStuckNotifications` distinguishes 'nothing stuck' from 'could not tell'". That clause is closed BY DELETION, not by implementation: the phase did rewrite the function to a discriminated union so `0` would stop meaning both — and review WR-11 then found the function had ZERO production callers and never had any. It originated in a v1.0.0 diagnostic spike that was never wired. The whole module is gone (`src/lib/observability.ts`, 68 lines, its test, its byte-gate fixture, and a `knip.json` entry-point declaration that existed solely to silence the dead-code detector on it — three separate guards protecting code nobody called).
+  ⭐ The reason this is a closure and not a regression: an uncalled monitor is not observability. It reads as coverage while providing none, which is the same defect the requirement's own word "honesty" is about. Wiring a caller would have manufactured a monitor no one asked for or consumed.
+  The surviving clauses are MET and strengthened — review WR-02 found the fix had closed one of four blind arms, and the three numerator arms (sentry fetch threw, non-ok response, missing credentials) now return 503 like the denominator arms already did.
+- [~] **OPS-08** (L1562): The 10-param `_enqueue_compute_job_internal` no longer uses `INTO STRICT` on its lost-race branches (parity with the deliberately de-STRICT-ed 7-param overload).
+  ⚠️ MET-AT-MERGE, not pending. The requirement is worded about the DEPLOYED function and no
+  database has the migration; merging is the only automated apply path, so the merge IS the
+  remedy and blocking on it is causally backwards. ⛔ Verified consequence: the gate's
+  `SKIP (Part 3)` marker does not match CI's anti-SKIP net, so the lane stays green and NO CI
+  signal will ever redden to report the unapplied state — only prose tracks it. See DRIFT-01.
+- [x] **OPS-09** (L1561): The resync draft pre-check is deterministic (`ORDER BY created_at DESC` + bounded window).
+- [x] **OPS-10** (L1558): The retry loop cancels abandoned response bodies (`body.cancel()`) so undici stops buffering until the attempt signal fires.
 - [x] **OPS-11** (L1531): The `MultiKeyConnectStep` order-sensitive flake is root-caused (unrestored `vi.stubGlobal`/`vi.mock` class) and fixed, not retried-away.
 
 ### LEDGER — Recurring strategy refresh for ledger-backed venues (Phase 161.1)
@@ -78,12 +87,45 @@ verified-stale items are excluded by construction.
 
 ### SEC — Small security hardening
 
-- [ ] **SEC-01** (L940): The server-side password policy is verified and enforced — client `minLength={6}` is backed by an explicit Supabase-side policy, documented.
-- [ ] **SEC-02** (L2953): The ~50 tracked `.planning/` docs no longer carry local absolute paths / the macOS username; verified by a no-allowlist scan (the gitleaks allowlist is path-based and blind here).
-- [ ] **SEC-03** (L2511): `add_wizard_composite_key` is policed by the audit-coverage gate — the pragma-vs-real-emission decision is made and recorded, not dodged.
-- [ ] **SEC-04** (L3006 + L3013): The bridge and portfolio-optimizer flows get a named `bridgeComputeLimiter` sized to backend reality (closing the 30× front/back mismatch) — ⛔ without resizing the shared `userActionLimiter`.
-- [ ] **SEC-05** (L604): The tenth IP-keyed route (`simulator.py`) is repaired along with the test whose wrapper-check conceals it (equality assertion, quarantine shrinks to 0).
-- [ ] **SEC-06** (L2361): Removing a panel mid-validate aborts the in-flight credential-carrying POST.
+- [x] **SEC-01** (L940): The server-side password policy is verified and enforced — client `minLength={6}` is backed by an explicit Supabase-side policy, documented. ⚠️ MEASURED 2026-08-26 and recorded as a point-in-time READING, never as an invariant.
+  ⚠️ QUALIFIED 2026-08-26 (review WR-10). What was delivered is a MEASUREMENT, not a raised
+  floor: the hosted minimum was READ from the live endpoint's own rejection (6 characters,
+  `reasons: ["length"]` alone ⇒ no character-class rule) and mirrored in one exported constant,
+  retiring the assumption that it was the GoTrue default. That is what "verified" means here.
+  ⛔ It does NOT mean the floor was found adequate. A platform custodying decryptable exchange
+  keys still accepts a six-character all-lowercase password, and nothing in this phase raised
+  the actual gate — the client constant is UX only, the real gate is hosted GoTrue, and both the
+  minimum and leaked-password protection are dashboard-owned with no repo representation.
+  ✅ ACCEPTED RISK — founder decision 2026-08-26 (WR-10 in TODOS.md). The six-character,
+  no-character-class floor stands, knowingly, with the key-material exposure path understood.
+  This entry therefore claims exactly two things and no more: the hosted policy was MEASURED
+  rather than assumed, and the resulting floor was ACCEPTED rather than cleared. It does not
+  claim the floor is adequate. Revisit on paying clients, a custody/compliance requirement, or
+  any evidence of credential stuffing; the remedy in TODOS does not expire.
+
+  1. **The reading.** The hosted production project's minimum password length is **6**, with **no character-class requirement**. Both facts are the server's own, not the GoTrue default — which is exactly what RESEARCH assumption A1 assumed and this measurement retires.
+  2. **The method, and why it was the only lane.** No management-API token exists on the machine that ran this (`~/.supabase/access-token` absent, `SUPABASE_ACCESS_TOKEN` unset) and the Supabase MCP exposes no auth-config reader, so the policy was read directly off the live signup endpoint with a deliberately-failing 1-character password — rejected at validation, so no account is created. It answered `422 weak_password` ("Password should be at least 6 characters.") with `weak_password.reasons = ["length"]`. The second fact needs no second probe: a 1-character lowercase password violates length AND every character class at once, GoTrue enumerates every violated reason, and a configured character policy would have added `"characters"`. It returned `["length"]` alone.
+  3. **"Enforced" cannot mean enforced HERE — and that is not a shortfall.** Signup goes browser → hosted GoTrue directly (`supabase.auth.signUp`); there is no Next.js server hop to enforce anything on, and `minLength` on an input is an HTML affordance devtools bypasses. So the client floor is UX only, and the requirement's "backed by" is the real claim: the hosted minimum is EQUAL to the client floor, not merely compatible with it. The plan's escalation branch (hosted minimum < 6 ⇒ a founder-visible live op to raise it) did not fire.
+  4. **Drift-proofing.** The two independent client constants — a bare `minLength={6}` literal in `SignupForm.tsx` and a private `const MIN_PASSWORD_LENGTH = 6` in `ResetPasswordForm.tsx` — are unified into one exported `MIN_PASSWORD_LENGTH` in `src/lib/auth/password-policy.ts`, whose docblock carries the value, the date and the method. Both forms now derive their `minLength` **and** their user-facing copy from it. ⛔ `supabase/config.toml` (`minimum_password_length`, `password_requirements`) is NOT the hosted policy — it governs only the LOCAL dev stack, and citing it as evidence is the specific mis-citation this entry exists to prevent.
+  5. **The limit of the guarantee, stated rather than papered over.** The setting is dashboard-owned with no repo representation; it can change outside git at any time and no test here can observe that. `src/lib/auth/password-policy.test.ts` therefore pins only what the repo controls — that the constant still equals the recorded reading, and that neither form has re-hardcoded a numeric `minLength`. Proven able to fail in three directions (each neuter observed RED, then restored and hash-verified): re-hardcoding `minLength={6}` in `SignupForm.tsx`, dropping the constant to 5, and reverting `ResetPasswordForm.tsx` to its own private constant.
+- [x] **SEC-02** (L2953): The tracked docs no longer carry local absolute paths / the macOS username; verified by a no-allowlist scan (the gitleaks allowlist is path-based and blind here). ⚠️ MEASURED 2026-08-26 (pre-edit, NUL-safe, tree-wide): **95** tracked files of 5693 carry the token — **88** under `.planning/` and **7** outside it — across ~940 raw occurrences. Earlier figures were undercounts: the ROADMAP's "~50" was low, and both "80" and "87" are `.planning/`-only figures that leave the 7 non-planning files leaking. Always re-measure live; the count drifts as files are added.
+
+  Four decisions are RECORDED here because the requirement, not just the code, has to carry them:
+
+  1. **Founder ruled forward-only redaction; history rewrite declined (2026-08-26).** The username was pushed to a PUBLIC repo, so it is already cloned, forked, and cached. A `filter-repo` over ~700 commits would break every open PR ref, invalidate the `archive/v1.20-phase-162-planning-artifacts` tag, and STILL not unpublish the strings. The scrub therefore stops NEW leakage; it does not undo the old. That limit is accepted, not overlooked.
+  2. **Severity framing: metadata, not credentials — do not inflate it.** The token is a macOS username and local directory layout. It is not a secret, no runtime reads it, and nothing needs rotating (RESEARCH runtime-state inventory: zero stored data, zero service config, zero env vars). This entry exists to stop drip-leakage of local identity on a public repo, and treating it as a credential incident would misprice every future finding of this class.
+  3. **Scope extended beyond `.planning/`, including a COMMENT-ONLY exception on two APPLIED migrations.** A gate scoped to `.planning/` would itself be a path restriction — the very blindness it exists to fix — so the scrub covered the whole tracked tree: 5 files under `docs/` and 2 applied Supabase migrations. Editing an applied migration violates migration-reviewer rule 11, so this is a DELIBERATE, recorded deviation, bounded three ways: only comment lines changed (every changed line begins with `--`, zero SQL bytes), each file carries a `⚠️ RECORDED EXCEPTION` header stating what was edited and why, and the precondition was verified read-only BEFORE the edit — the Supabase CLI reconciles applied migrations by VERSION, never by content hash (history table `schema_migrations (version text NOT NULL PRIMARY KEY)`; reconciliation read `SELECT version FROM supabase_migrations.schema_migrations ORDER BY version`; upsert `ON CONFLICT (version)`; upstream `FindPendingMigrations` diffs version strings parsed from filenames). Had reconciliation been content-hashed, the plan's precondition required a HALT instead. Exception headers: `supabase/migrations/20260517013000_revoke_probe_oracle_assert_strategy_visible_to_allocator.sql` and `supabase/migrations/20260517013100_sanitize_user_recipient_email_case_insensitive.sql`.
+  4. **The gate is no-allowlist BY CONSTRUCTION** (`scripts/check-planning-hygiene.ts`, chained into `npm run lint`, which rides the `frontend-lint` CI job already inside the `frontend` aggregator — ⛔ deliberately NOT the `secret-scan` job, which is outside the aggregator and already red on `workflow_dispatch`). It scans every tracked file with ZERO path exclusions — not its own source, not tests, not `supabase/migrations/`, not fixtures. Its ONE exemption is by VALUE: the placeholder `<user>` immediately following a matched prefix, which is non-identifying wherever it sits. A path carve-out is forbidden — that is precisely how gitleaks went blind. Two blind spots are closed structurally: the needle is stored base64/char-coded so the scanner passes its own scan without needing the carve-out it forbids, and every file is read `latin1` (byte-exact) so a NUL byte cannot hide content the way `git grep -I` does on `src/lib/wizardErrors.test.ts`. Proven able to fail in BOTH directions: a scratch tracked file with one raw occurrence took `npm run lint` green → exit 1 → green, and injecting a `supabase/migrations/` path allowlist into the scanner turned its own no-path-allowlist test RED (restored).
+- [x] **SEC-03** (L2511): `add_wizard_composite_key` is policed by the audit-coverage gate — the pragma-vs-real-emission decision is made and recorded, not dodged.
+
+  1. **The decision: KEEP the pragma; do NOT emit at add-key time.** `add_wizard_composite_key` writes a DRAFT strategy plus an `api_keys` row that is not yet user-visible; the user-visible creation is audited at finalize time in `strategies/finalize-wizard/route.ts`. Its sibling `create_wizard_strategy` — column-for-column the same signature — already follows that draft-then-finalize audit shape, so emitting here would duplicate the finalize event and make the audit log say a strategy was created twice. The pragma's stated reason was already coherent; what was missing was any mechanism that reads it.
+  2. **Why the entry was needed at all — MEASURED, not argued.** The gate's RPC detection is allowlist-driven, and the name's ABSENCE from `MUTATING_RPC_NAMES` is what made the `@audit-skip` pragma at the call site decorative: the gate never saw the call, so it never evaluated the pragma. Control run 2026-08-26 — with the name unlisted, DELETING the pragma entirely left `audit-coverage.test.ts` GREEN (17 passed): an unaudited, unpragma'd mutating RPC sailing through the audit law. That is the escape, observed rather than inferred.
+  3. **The pragma is now live law.** With `"add_wizard_composite_key"` listed, the same deletion turns the gate RED, naming the exact site (`strategies/composite/add-key/route.ts:477`); restoring the pragma returns it to green. Falsifier observed in both directions on 2026-08-26, restore hash-verified.
+  4. **Phase 164 prerequisite.** This allowlist is the ONE edit SHARE's mint/revoke RPCs must land in. They now land in a gate proven to work — SEC-03 standing is what makes that dependency real rather than nominal.
+  5. **Adjacent debt corrected, not inherited (DEF-141.2-03-A).** The `it.skip` H-0001 comment in the same file cited retired coordinates. Its census was re-measured: every line number was stale, the "kill-switch flip" site it named no longer exists (Phase 106 Stage B made flag-monitor alert-only), and three sites it never listed do exist — the uncovered single-line-mutation set is **6**, not 4. The comment now carries the re-measured list, the method that produced it, and a warning not to trust the numbers past the next refactor. ⚠️ Those six remain UNFIXED and out of this requirement's scope; H-0001 is still deferred.
+- [x] **SEC-04** (L3006 + L3013): The bridge and portfolio-optimizer flows get a named `bridgeComputeLimiter` sized to backend reality (closing the 30× front/back mismatch) — ⛔ without resizing the shared `userActionLimiter`.
+- [x] **SEC-05** (L604): The tenth IP-keyed route (`simulator.py`) is repaired along with the test whose wrapper-check conceals it (equality assertion, quarantine shrinks to 0).
+- [x] **SEC-06** (L2361): Removing a panel mid-validate aborts the in-flight credential-carrying POST.
 
 ### DEPS — The booked dependency campaign
 
@@ -145,6 +187,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | LEDGER-04 | Phase 161.1 | Complete |
 | HONEST-01 | Phase 162 | Complete |
 | HONEST-07 | Unassigned | Pending |
+| HONEST-08 | Phase 163 | Complete |
 | HONEST-02 | Phase 162 | Complete |
 | HONEST-03 | Phase 162 | Complete |
 | HONEST-04 | Phase 162 | Complete |
@@ -154,19 +197,19 @@ Which phases cover which requirements. Updated during roadmap creation.
 | OPS-02 | Phase 158 | Complete |
 | OPS-03 | Phase 158 | Complete |
 | OPS-04 | Phase 158 | Complete |
-| OPS-05 | Phase 163 | Pending |
-| OPS-06 | Phase 163 | Pending |
-| OPS-07 | Phase 163 | Pending |
-| OPS-08 | Phase 163 | Pending |
-| OPS-09 | Phase 163 | Pending |
-| OPS-10 | Phase 163 | Pending |
+| OPS-05 | Phase 163 | Complete |
+| OPS-06 | Phase 163 | Complete |
+| OPS-07 | Phase 163 | Complete |
+| OPS-08 | Phase 163 | Code-complete (migration UNAPPLIED — not in effect) |
+| OPS-09 | Phase 163 | Complete |
+| OPS-10 | Phase 163 | Complete |
 | OPS-11 | Phase 158 | Complete |
-| SEC-01 | Phase 163 | Pending |
-| SEC-02 | Phase 163 | Pending |
-| SEC-03 | Phase 163 | Pending |
-| SEC-04 | Phase 163 | Pending |
-| SEC-05 | Phase 163 | Pending |
-| SEC-06 | Phase 163 | Pending |
+| SEC-01 | Phase 163 | Complete |
+| SEC-02 | Phase 163 | Complete |
+| SEC-03 | Phase 163 | Complete |
+| SEC-04 | Phase 163 | Complete |
+| SEC-05 | Phase 163 | Complete |
+| SEC-06 | Phase 163 | Complete |
 | DEPS-01 | Phase 165 | Pending |
 
 **Coverage:**

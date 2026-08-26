@@ -2,20 +2,20 @@
 gsd_state_version: 1.0
 milestone: v1.20
 milestone_name: Backlog Burndown (Phases 158+)
-current_phase: 161
-current_phase_name: WIZERR — Honest error surfaces
-status: verifying
-stopped_at: Completed 162-02-PLAN.md
-last_updated: "2026-08-25T23:19:36.584Z"
-last_activity: 2026-08-25
-last_activity_desc: Phase 161.1 wave 4 — composite arm landed DORMANT; composite PROD tracer still owed
-state_head: fcf8e397a216ceee2bb4ca2ac5b079da1e2283e4
+current_phase: 163
+current_phase_name: HARDEN — Fail safe, closed, and loud
+status: reviewing
+stopped_at: Phase 163 COMPLETE — 9/9 plans merged (both waves); verification gaps_found 12/13, OPS-08 code-complete but UNAPPLIED
+last_updated: "2026-08-26T00:00:00.000Z"
+last_activity: 2026-08-26
+last_activity_desc: Phase 163 wave 2 — SEC-01 measured password floor + SEC-03 audit law; all gates green; ledger corrections from verification
+state_head: 21c232837722e7d1582eef3452462c2eb1d52047
 progress:
-  total_phases: 10
+  total_phases: 11
   completed_phases: 1
-  total_plans: 44
-  completed_plans: 34
-  percent: 10
+  total_plans: 53
+  completed_plans: 43
+  percent: 9
 ---
 
 # Project State — Quantalyze
@@ -495,7 +495,7 @@ Prior-phase 141.1 close-out detail (retained; NOT about 142.1):
         2 WARNING gaps, no BLOCKER. See `140.1-VERIFICATION.md`. Not transitioned (`--no-transition`).
 Last activity: 2026-08-02 -- Phase 142 execution started
 
-Progress: [█░░░░░░░░░] 10%
+Progress: [█░░░░░░░░░] 9%
 
 ### Phase 140.1 close-out — open items (do NOT lose these)
 
@@ -641,6 +641,10 @@ Load-bearing sequencing (real dependencies, do not reorder):
 | Phase 162 P04 | 25m | 2 tasks | 4 files |
 | Phase 162 P09 | 25m | 2 tasks | 2 files |
 | Phase 162 P02 | 2h40m | 3 tasks | 11 files |
+| Phase 163 P01 | 50min | 2 tasks | 6 files |
+| Phase 163 P03 | 50m | 3 tasks | 98 files |
+| Phase 163 P04 | 33min | 3 tasks | 16 files |
+| Phase 163 P08 | 35min | 2 tasks | 4 files |
 
 ## Accumulated Context
 
@@ -800,6 +804,18 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - [Phase 161]: 162-02: computation_error is curated at the SQL bridge from compute_jobs.error_kind, never from last_error; the operator column keeps raw text
 - [Phase 161]: 162-02: classify_exception is NOT curated (rejected option 2 — it would strip diagnosis from compute_jobs.last_error and redden the api_keys.sync_error invariant)
 - [Phase 161]: 162-02: the three compute_jobs error kinds yield TWO honest sentences plus a cautious default — transient and unknown reach failed_final only via attempt exhaustion
+- [Phase 161]: OPS-05: configure_logging() at MODULE scope in main_worker.py (not inside main()) — python -m main_worker runs the module top-down, so an import-time log would emit before any main()-time call
+- [Phase 161]: MEASURED CORRECTION: structlog Mode B is a pre-configure WINDOW, not a permanent freeze (default config has cache_logger_on_first_use=False, so a plain module-scope proxy self-heals). Only a module-scope .bind() RESULT is permanently frozen
+- [Phase 161]: OPS-05 deviation: the stdlib redact bridge was DELETING log lines — scrubbing a %-format template ate conversion specifiers, getMessage() raised, and stdlib logging dropped the record at 3 measured call sites (2 live in PROD). Fix: keep the scrubbed template only if it still formats against record.args
+- [Phase 161]: SEC-02: forward-only redaction — founder declined history rewrite; the scan stops new leakage, it does not unpublish
+- [Phase 161]: SEC-02 gate has ZERO path exclusions — one value-only exemption for the <user> placeholder; a path carve-out is the gitleaks blindness it exists to fix
+- [Phase 161]: Two APPLIED migrations edited comment-only under a RECORDED EXCEPTION — precondition verified read-only first: Supabase CLI reconciles by version, never content hash
+- [Phase 161]: HONEST-08: the staler-of-two comparison is between VERDICTS on per-subject ladders (job 12h/48h, series 3d/7d), not raw dates — a daily series' last point is always older than a fresh job, so older-date-wins would have deleted the sync copy product-wide
+- [Phase 161]: HONEST-08: the 3d/7d series ladder moved from FactsheetView.tsx into lib/freshness.ts and the chip now imports it — one pair of numbers for the list badge and the factsheet chip
+- [Phase 161]: HONEST-08: PostgREST accepts a negative JSONB array index as a projection alias (series_end:returns_series->-1->>date, MEASURED HTTP 200) — but postgrest-js cannot TYPE-parse it, so the call site carries a narrow documented cast
+- [Phase 161]: 163-08: the seam body cancel uses a full capability ladder, not res.body?.cancel().catch() — the sketch throws on a present body whose cancel is missing or not callable, measured RED
+- [Phase 161]: 163-08: doRemove does NOT clean the abort ref maps (plan deviation, measured) — the catch reads the reason a microtask later, so a synchronous delete reds the funnel with SERVICE_UNREACHABLE; validatePanel's finally already cleans both
+- [Phase 161]: 163-08: vi.fn attaches its own handler to a returned promise, suppressing unhandledRejection — a spy is not a neutral observer of promise handling; use a plain closure when the oracle IS the rejection
 
 ### Decisions (execution-time, Phase 140.2)
 
@@ -1502,8 +1518,8 @@ Load-bearing sequencing (real dependencies, do not reorder):
 
 ## Session
 
-**Last Date:** 2026-08-25T22:16:35.932Z
-**Stopped At:** Completed 162-01-PLAN.md
+**Last Date:** 2026-08-26T13:00:58.065Z
+**Stopped At:** Completed 163-01-PLAN.md
 **Last Date:** 2026-08-25T22:26:01.687Z
 **Stopped At:** Completed 162-03-PLAN.md
 **Last Date:** 2026-08-25T22:28:04.096Z
