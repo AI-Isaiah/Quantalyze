@@ -376,13 +376,13 @@ Plans:
   5. Coverage gates close their gaps: `add_wizard_composite_key` is policed by the audit-coverage gate with the pragma-vs-real-emission decision RECORDED, and the bridge + portfolio-optimizer flows get a named `bridgeComputeLimiter` sized to backend reality (closing the 30× front/back mismatch) ⛔ without resizing the shared `userActionLimiter`.
   6. A freshness claim is not surface-local: the public discovery table's "Synced Nd ago" badge buckets on the **staler** of sync- and series-recency, exactly as `FreshnessChip` already does on the factsheet (HONEST-08). ⚠️ MEASURED ON PROD 2026-08-26 — `Phoenix Protocol` advertises "Synced 7h ago" on `/browse/crypto-sma` over a series that ended 2026-05-06, **112 days** earlier, while its own factsheet reads `Track record · old`. The rule HONEST-02 wrote ("a series dead 89 days cannot read FRESH") is violated on the most public surface in the product. ⛔ Do NOT close by deleting the badge, and ⛔ do NOT rely on the `is_example` gate — HONEST-03 scoped that to example rows and all 15 were deleted, so it now guards nothing here. The test must use a REAL published row with a stale series and be demonstrated RED when the staler-of-two logic is neutered.
 
-**Plans**: 9 plans
+**Plans**: 1/9 plans executed
 
 Plans:
 
 - [ ] 163-01-PLAN.md — OPS-05 structlog frozen-proxy closed at BOTH modes; Mode B is LIVE on the worker (`main_worker.py` never configures) — planned first as the phase's highest-risk item (wave 1)
 - [ ] 163-02-PLAN.md — SEC-04 `bridgeComputeLimiter` sized from a MEASURED PROD backend number (measurement is an explicit early task); ⛔ `userActionLimiter` untouched; roster pin moves in the same commit (wave 1)
-- [ ] 163-03-PLAN.md — SEC-02 username/absolute-path scrub across the measured **94** tracked files (87 `.planning/` + 5 docs/ + 2 applied-migration comment headers, exception recorded — 87 is the `.planning/`-only figure, not the total) + NEW no-allowlist scanner wired into `npm run lint` (wave 1)
+- [x] 163-03-PLAN.md — SEC-02 username/absolute-path scrub across the measured **94** tracked files (87 `.planning/` + 5 docs/ + 2 applied-migration comment headers, exception recorded — 87 is the `.planning/`-only figure, not the total) + NEW no-allowlist scanner wired into `npm run lint` (wave 1)
 - [ ] 163-04-PLAN.md — HONEST-08 discovery "Synced Nd ago" badge buckets on the staler of sync- and series-recency via ONE shared resolver mirroring FreshnessChip; regression test on a real published fixture row, RED under neutering (wave 1)
 - [ ] 163-05-PLAN.md — OPS-06 createAdminClient hoisted above the commit at the measured FOUR occurrences in three files + OPS-07 monitor honesty (discriminated union; denominator failure PAGES non-200; integration falsifiers) (wave 1)
 - [ ] 163-06-PLAN.md — OPS-08 forward-only migration de-stricting the 10-param enqueue overload's four lost-race branches + pg_get_functiondef SQL gate (expected RED until TEST hand-apply); blocking three-reviewer checkpoint before apply (wave 1)
@@ -427,6 +427,7 @@ thesis:
 - **(a) The curated sentence survives the write.** A computation failure shows what its writer
   produced — "Insufficient CSV history. At least 2 data points required." — instead of a generic
   per-kind sentence that replaces it seconds later.
+
 - **(b) The wizard's refusals stop misattributing.** Four copy falsehoods enumerated below name a
   cause the code never tested, or blame a party that did not cause the failure.
 
@@ -453,15 +454,18 @@ it lived outside that fixer's files — named, not silently dropped:
    emitter in `src/app/api/strategies/create-with-key/route.ts`, whose own guard comment already
    says that arm "may not wear a `KEY_*` verdict that blames a credential". Minting a new copy
    member moves `EXPECTED_TABLE_SIZE` plus three roster/coverage laws — do it deliberately.
+
 2. **`KEY_RATE_LIMIT` blames the exchange for OUR limiter.** The 429 comes from
    `userActionLimiter`, but the copy says "The exchange asked us to slow down… exchange-side
    throttle", and `fix[1]` "try a different exchange account" cannot clear a per-USER bucket.
    Identical on the credential arm; `route.ts:891` already records it ("our outage, blamed on
    their exchange") and accepted it. This is a misattribution class with an existing owner.
+
 3. **`DRAFT_ALREADY_EXISTS`'s cause says "with the same API key"** — false on the stale-session
    path, where the collision is on `(user_id, wizard_session_id, source)` and not the key. True
    on the TOCTOU path and on the credential arm, so the shared `cause` needs splitting, not
    replacing.
+
 4. **The stale-`wizardSessionId` ROOT CAUSE is still open** (functional, not copy).
    `deriveWizardResumeOverrides` restores `wizardSessionId` from localStorage unconditionally on
    the API branch, so an abandoned draft over key A lends its session id to a preselect for key B
