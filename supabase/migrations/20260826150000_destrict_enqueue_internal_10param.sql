@@ -155,6 +155,12 @@
 -- why a knowingly-RED file was the wrong shape — it sorts 30th of ~70 in the
 -- sql-tests glob and the runner exits on first failure, so leaving it red
 -- would have suppressed every file sorting after it.
+-- ⛔ AND IT NO LONGER TOLERATES THE PRE-FIX PAIR UNCONDITIONALLY (phase-163
+-- review, WR-04): coherence alone could not tell "never applied" from "applied,
+-- then reverted by a stale re-base", because those two produce an IDENTICAL
+-- body. The gate now decides that on the CATALOG COMMENT this migration writes
+-- — see the ⛔ note above the COMMENT ON FUNCTION statement below, which is why
+-- the phrase "Phase 163 OPS-08" in it must not be dropped.
 -- ==========================================================================
 
 SET LOCAL lock_timeout = '3s';
@@ -401,8 +407,26 @@ GRANT EXECUTE ON FUNCTION public._enqueue_compute_job_internal(
 -- 7-param overload a comment that DOCUMENTS its plain re-read + retry code; the
 -- 10-param's comment predates that fix and said nothing about the race-loser
 -- path. Bring it to parity so the catalog description does not contradict the
--- body. Idempotent: COMMENT overwrites. Comments are NOT part of
--- pg_get_functiondef output, so this cannot interact with the gate token.
+-- body. Idempotent: COMMENT overwrites.
+--
+-- ⛔ THIS COMMENT IS LOAD-BEARING NOW — DO NOT DROP THE PHRASE "Phase 163
+-- OPS-08" FROM IT. It is no longer only documentation. Comments are not part of
+-- pg_get_functiondef output, so this text cannot interact with the STATEMENT-
+-- FORM gate token (that much of the old note here was true, and still is) — but
+-- supabase/tests/test_enqueue_internal_destrict.sql reads it separately, via
+-- obj_description(oid, 'pg_proc'), as its REVERT DISCRIMINATOR (phase-163
+-- review, WR-04).
+--
+-- The reason it can serve that purpose: a database that never received this
+-- migration and one that received it and then lost it to a CREATE OR REPLACE
+-- re-based on 20260716090000 have a BYTE-IDENTICAL body. The comment is the
+-- only thing that differs, because 20260716090000 issues no COMMENT ON FUNCTION
+-- at all and CREATE OR REPLACE does not clear one. Strip the phrase from the
+-- literal below and that gate silently falls back to answering SKIP — exit 0 —
+-- on a genuine regression, which is precisely the hole WR-04 closed.
+--
+-- If a future migration rewrites this comment, it MUST carry the phrase forward
+-- (or supersede the gate's marker in the same change, deliberately, and say so).
 -- --------------------------------------------------------------------------
 COMMENT ON FUNCTION public._enqueue_compute_job_internal(
   uuid, uuid, text, text, uuid[], text, jsonb,
