@@ -1038,6 +1038,51 @@ true for 146 and half of 142–145, and **false for 141**.
 
 ## 🟡 FIX MID-TERM
 
+### Phase 163 / OPS-08 (de-strict `_enqueue_compute_job_internal`) — routed onward (added 2026-08-26)
+
+Raised by the three-reviewer gate on `supabase/migrations/20260826150000_destrict_enqueue_internal_10param.sql`.
+Everything blocking was fixed in that migration and in `supabase/tests/test_enqueue_internal_destrict.sql`;
+these four are the deliberate carry-overs, each with the reason it was not fixed there.
+
+- **[OPS-08-TS] The TS half of OPS-08 was never written — nothing retries on 40001.**
+  The migration now raises `serialization_failure` (40001) when a lost race's winner has
+  already advanced past the in-flight statuses. **Measured at HEAD 2026-08-26:**
+  `grep -rn 'serialization_failure\|40001' src/` returns ZERO non-test hits, and
+  `src/app/api/allocator/holdings/sync/route.ts:73-87` still answers a blanket 500 for
+  every SQLSTATE except `42501`. So the SQL half buys a correct, disambiguated code in the
+  logs — a *prerequisite* for a retry, not a retry. Until a caller branches on it, the
+  user-visible outcome of a lost race is unchanged. Not done in 163-06 because the plan's
+  declared files are SQL only; the migration's header now states the limitation rather
+  than claiming the capability. Fix: branch on `error.code === '40001'` at the enqueue
+  call sites (allocator holdings sync, csv-finalize) and retry once before falling through
+  to the 500.
+
+- **[OPS-08-F2] Both pg_cron fan-out paths swallow the new error and report success.**
+  `supabase/migrations/20260825130000_ledger_refresh_fanout_dormant.sql:449` and
+  `20260825140000_ledger_refresh_composite_arm.sql:400` catch `WHEN OTHERS` around the
+  enqueue, withhold the `strategy_id`, and continue — so a 40001 (or any other enqueue
+  failure) makes the tick UNDER-COUNT while still reporting success. Pre-existing, not a
+  regression introduced by 20260826150000, which is why it was recorded rather than fixed
+  in that migration. Fix: record the failed target id and surface a non-zero failure count
+  from the tick.
+
+- **[OPS-08-F9] `test_enqueue_internal_destrict.sql` has no `ALL N ARMS EXECUTED` sentinel.**
+  Any arm can be neutered in place and the file still exits 0, the same as the other ~60
+  sentinel-free files in `supabase/tests/`. Declaring one is not free-standing: it requires
+  raising `SENTINEL_FLOOR` 7 -> 8 and `ARMS_FLOOR` 63 -> 68 in `.github/workflows/ci.yml`,
+  plus the per-file derivation entry that
+  `src/__tests__/contracts/ci-anti-skip-gate.contract.test.ts` reads — and ci.yml is
+  outside plan 163-06's declared files and was being edited concurrently by another
+  Phase 163 workstream. Fix: add the sentinel and both integers in one diff.
+
+- **[OPS-08-F8] Follow-through on the sql-tests first-failure blast radius.**
+  163-06 fixed its own instance (the gate is now a both-or-neither coherence assertion that
+  is meaningful pre- and post-apply, instead of knowingly RED). The general problem stands:
+  the `sql-tests` loop exits on first failure, so ANY file that is red for an expected
+  reason silently suppresses every file sorting after it — for this one, ~40 of ~70. Fix:
+  either run every file and aggregate failures at the end, or make the expected-red state
+  a first-class, per-file declaration the runner understands.
+
 ### ✅ FIXED (pending CI confirmation) — CI's gitleaks was too old to read our allowlist (raised + fixed 2026-08-23, Phase-160 ship)
 
 **Was:** the `secret-scan` gate ran with **every allowlist entry in `.gitleaks.toml` silently
