@@ -135,12 +135,58 @@ BEGIN
 END;
 $$;
 
--- source migration: 20260716090000_retire_compute_analytics_kind_rpc_guard.sql
+-- source migration: 20260826150000_destrict_enqueue_internal_10param.sql
 -- --------------------------------------------------------------------------
--- 10-param overload — verbatim from 20260420073003:330 with ONLY the
--- retired-kind guard inserted after the p_kind NULL guard.
+-- 10-param overload — verbatim from 20260716090000:181 with ONLY the four
+-- lost-race re-reads de-strict-ed and the serialization_failure raise added.
+--
+-- ⚠️ GATE-TOKEN HYGIENE (T-163-16). `pg_get_functiondef` returns the body's
+-- COMMENTS as well as its statements, so a gate grepping for a bare identifier
+-- can be satisfied by prose the function carries about itself. Two layers close
+-- that here — but they do NOT both cover both overloads, and the difference is
+-- the point:
+--   1. CONVENTION — the comments inside the body BELOW are phrased as "the
+--      strict re-read" rather than as the statement form. Belt, and it governs
+--      ONLY the 10-param body, because that is the only body this file writes.
+--   2. MECHANISM — the DO block at the end of this file, and the recurring gate
+--      in supabase/tests/, both match against a COMMENT-STRIPPED copy of the
+--      definition, stripping BOTH plpgsql comment syntaxes (line and block).
+--      It was added because the hole was DEMONSTRATED, not hypothesised: on a
+--      scratch Postgres 16, a body whose raise had been changed to
+--      `no_data_found` while one comment quoted the old ERRCODE clause passed
+--      the presence arms GREEN. The phase-163 review then demonstrated the SAME
+--      hole a second time through the block-comment syntax, which the first
+--      strip did not cover — hence both.
+--
+-- ⛔ AND FOR THE 7-PARAM OVERLOAD LAYER 2 IS NOT "BRACES" — IT IS THE ONLY
+-- LAYER, AND IT IS LOAD-BEARING ON PROD ALONE. Layer 1 cannot apply there: that
+-- body is 20260716090000's and this file does not write it, and it carries the
+-- construct in a LINE COMMENT at 20260716090000:143 ("the original SELECT INTO
+-- STRICT ..."), which plpgsql stores in prosrc verbatim. MEASURED on the live
+-- projects 2026-08-26 by the phase-163 re-audit: the PROD 7-param body contains
+-- ONE raw occurrence, comment-stripped ZERO; the TEST 7-param body contains
+-- none even before stripping.
+-- The consequence is asymmetric and must not be mistaken for redundancy:
+--   * On PROD the strip is the SOLE reason arm (c)'s 7-param check passes.
+--     Regress the strip — or narrow it to the line syntax only, or let a string
+--     literal truncate it — and arm (c) matches that comment and RAISEs, which
+--     ABORTS THE PROD DEPLOY of whatever migration is being applied.
+--   * On TEST there is nothing to strip in that body, so removing the strip
+--     changes no result the recurring gate reports. CI would stay GREEN.
+-- A change to the strip is therefore INVISIBLE to CI and FATAL at deploy time.
+-- Do not "simplify" it on the evidence of a green CI run.
 -- --------------------------------------------------------------------------
-CREATE OR REPLACE FUNCTION _enqueue_compute_job_internal(
+-- ⚠️ SCHEMA-QUALIFIED DELIBERATELY, unlike 20260716090000:181 and every other
+-- ancestor. Every other statement in this file names public. explicitly; this
+-- one did not, and it is the single statement where that matters. An unqualified
+-- CREATE OR REPLACE resolves against the SESSION search_path, so if a migration
+-- ever runs with a search_path that does not put public first, it does not
+-- "replace" — it CREATES a second function in another schema, leaving the real
+-- one un-fixed. And a create, unlike a replace, arrives with default privileges:
+-- on a Supabase project that is where the default-grant event trigger recorded
+-- in 20260515130001 hands EXECUTE to anon and authenticated, on a function that
+-- is SECURITY DEFINER and performs no ownership check.
+CREATE OR REPLACE FUNCTION public._enqueue_compute_job_internal(
   p_strategy_id     UUID,
   p_portfolio_id    UUID,
   p_kind            TEXT,
@@ -242,35 +288,84 @@ BEGIN
     RETURN v_new_id;
   END IF;
 
-  -- Lost the race — re-read the winner's row.
+  -- Lost the race — re-read the winner's row. Plain SELECT INTO, because
+  -- between the conflict and the re-read the winner may have advanced past
+  -- the in-flight statuses (done / failed_*). That is a legitimate race
+  -- outcome, but the strict re-read this replaced raised NO_DATA_FOUND with
+  -- no domain-specific message and surfaced as an opaque 500 to the
+  -- user-facing request. (Phase 163 OPS-08; the 7-param overload got the same
+  -- treatment as mig 109 P3 — this is parity, not a new policy.)
   IF p_strategy_id IS NOT NULL THEN
-    SELECT id INTO STRICT v_new_id
+    SELECT id INTO v_new_id
       FROM compute_jobs
      WHERE strategy_id = p_strategy_id
        AND kind = p_kind
        AND status IN ('pending', 'running', 'done_pending_children')
      LIMIT 1;
   ELSIF p_portfolio_id IS NOT NULL THEN
-    SELECT id INTO STRICT v_new_id
+    SELECT id INTO v_new_id
       FROM compute_jobs
      WHERE portfolio_id = p_portfolio_id
        AND kind = p_kind
        AND status IN ('pending', 'running', 'done_pending_children')
      LIMIT 1;
   ELSIF p_allocator_id IS NOT NULL THEN
-    SELECT id INTO STRICT v_new_id
+    SELECT id INTO v_new_id
       FROM compute_jobs
      WHERE allocator_id = p_allocator_id
        AND kind = p_kind
        AND status IN ('pending', 'running', 'done_pending_children')
      LIMIT 1;
   ELSE
-    SELECT id INTO STRICT v_new_id
+    SELECT id INTO v_new_id
       FROM compute_jobs
      WHERE api_key_id = p_api_key_id
        AND kind = p_kind
        AND status IN ('pending', 'running', 'done_pending_children')
      LIMIT 1;
+  END IF;
+
+  IF v_new_id IS NULL THEN
+    -- Winner already advanced past in-flight. Classify the outcome: ERRCODE
+    -- serialization_failure (40001) is the canonical Postgres class for "MVCC
+    -- race, retry safe", and the SQLSTATE is the WHOLE signal. A caller that
+    -- wants to retry branches on the code, never on this string.
+    --
+    -- ⛔ THIS MESSAGE IS OPERATOR TEXT AND IT STILL REACHES A USER-VISIBLE
+    -- COLUMN. An earlier version of this note said the remedy was to keep the
+    -- message SHORT. That is the WRONG PROPERTY and the phase-163 review
+    -- (WR-07) was right to say so: the property that matters is NOT OPERATOR
+    -- JARGON, and shortness does not deliver it.
+    --
+    -- The path, re-measured at HEAD 2026-08-26 (the old note's :2012 was
+    -- stale):
+    --   src/app/api/strategies/csv-finalize/route.ts:2035 builds
+    --     `compute job enqueue failed: ${enqueueErrMessage}`
+    --   then writeFailedStrategyAnalyticsPlaceholder (:1868) writes it to
+    --   strategy_analytics.computation_error (:1928), which renders VERBATIM
+    --   to the strategy's OWNER in the wizard failure envelope.
+    --
+    -- ⚠️ AND THAT PREFIX IS BUILT ON THE TS SIDE, UNCONDITIONALLY, with no
+    -- SQLSTATE branch in front of it. So NO message this function can raise
+    -- keeps operator jargon out of that column: the user reads "compute job
+    -- enqueue failed: ..." whatever follows the colon. SQL can choose WHICH
+    -- jargon appears; it cannot remove jargon. Rewording this string into
+    -- curated user copy would be cosmetic, and it would additionally push user
+    -- copy into the operator log line for the allocator / portfolio / api_key
+    -- callers, which are not user-facing at all. The fix is a TS change, and it
+    -- HAS LANDED (2026-08-26): csv-finalize now branches on SQLSTATE 40001 and
+    -- writes curated copy instead of prefixing this sentence. So this string
+    -- stays operator-shaped ON PURPOSE and is now correct to do so — the user
+    -- no longer reads it, while the allocator / portfolio / api_key callers
+    -- still get the precise operator wording they need.
+    --
+    -- What the old note got RIGHT, and what therefore stays: naming the
+    -- internal SECDEF function and the four internal UUIDs here would make the
+    -- leak strictly worse, and nothing diagnostic is lost by omitting them —
+    -- the caller already knows which target it asked for, and the server log's
+    -- CONTEXT line still names this function for operators.
+    RAISE EXCEPTION 'enqueue race lost: the winning job already advanced past the in-flight statuses'
+      USING ERRCODE = 'serialization_failure';
   END IF;
 
   RETURN v_new_id;
