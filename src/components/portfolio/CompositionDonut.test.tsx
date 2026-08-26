@@ -86,7 +86,11 @@ describe("<CompositionDonut> — B14 per-slice freshness", () => {
     const { container } = render(
       <CompositionDonut
         strategies={[
-          { id: "a", name: "NoSeries", weight: 1, amount: 1000, twr: 0.2, sharpe: 1.5, computedAt: hoursAgoIso(2) },
+          // IN-02: the null is EXPLICIT. `seriesEnd` became a required prop so
+          // "this caller cannot resolve a track-record end" has to be stated
+          // rather than achieved by leaving the field off — which is how a
+          // future donut caller would have silently reopened HONEST-08.
+          { id: "a", name: "NoSeries", weight: 1, amount: 1000, twr: 0.2, sharpe: 1.5, computedAt: hoursAgoIso(2), seriesEnd: null },
         ]}
       />,
     );
@@ -101,7 +105,7 @@ describe("<CompositionDonut> — B14 per-slice freshness", () => {
     render(
       <CompositionDonut
         strategies={[
-          { id: "a", name: "NoData", weight: 1, amount: 1000, twr: 0.2, sharpe: 1.5, computedAt: null },
+          { id: "a", name: "NoData", weight: 1, amount: 1000, twr: 0.2, sharpe: 1.5, computedAt: null, seriesEnd: null },
         ]}
       />,
     );
@@ -120,8 +124,8 @@ describe("<CompositionDonut> — desktop byte-identity (CHART-01b, PieChart/Cell
     render(
       <CompositionDonut
         strategies={[
-          { id: "a", name: "Fresh", weight: 0.6, amount: 1000, twr: 0.2, sharpe: 1.5, computedAt: null },
-          { id: "b", name: "Other", weight: 0.4, amount: 500, twr: 0.1, sharpe: 1.0, computedAt: null },
+          { id: "a", name: "Fresh", weight: 0.6, amount: 1000, twr: 0.2, sharpe: 1.5, computedAt: null, seriesEnd: null },
+          { id: "b", name: "Other", weight: 0.4, amount: 500, twr: 0.1, sharpe: 1.0, computedAt: null, seriesEnd: null },
         ]}
       />,
     );
