@@ -394,24 +394,21 @@ describe("the live repository", () => {
       }
     }
 
-    // ⛔ A COUNTDOWN, NOT AN ALLOWLIST — and emphatically not a path exemption.
-    // The scanner has none of those by construction, and neither does this test:
-    // the assertion below is EXACT EQUALITY, so it fails in BOTH directions —
-    // if any other tracked file starts encoding the machine identity, and again
-    // (demanding this block's deletion) the moment this last one is redacted.
+    // ⛔ ZERO, AND EXACT — not an allowlist, and emphatically not a path
+    // exemption. The scanner has neither by construction, and neither does this
+    // test. Asserting the empty set means the check fails the moment ANY tracked
+    // file starts encoding the machine identity in ANY of the forms above.
     //
-    // The one entry is a historical planning artifact that quotes the original
-    // base64 needle. It was found by this very test on 2026-08-26 while fixing
-    // WR-01, and is left standing only because it lies outside the file set this
-    // fix pass owns — a parallel fixer holds it, and silently editing another
-    // agent's file is how parallel waves lose work. Redact the base64 literal
-    // there and delete this array; the test will tell you to.
-    const KNOWN_OUTSTANDING = [
-      ".planning/phases/163-harden-fail-safe-closed-and-loud/163-03-PLAN.md",
-    ];
+    // History worth keeping: this assertion was briefly a COUNTDOWN carrying one
+    // entry. The WR-01 review reported two leaking files; this test found a
+    // third — a planning artifact quoting the original base64 needle — which the
+    // fix pass could not touch because it lay outside the file set that pass
+    // owned. The literal has since been replaced with a runtime derivation, so
+    // the countdown reached zero and was deleted, exactly as its own message
+    // instructed. Do not reintroduce an entry here: a leak is a fix, not a note.
     expect(
       [...hits].sort(),
-      "tracked files encode the local machine identity — if this list is now EMPTY, the outstanding occurrence was fixed: delete KNOWN_OUTSTANDING and assert []",
-    ).toEqual(KNOWN_OUTSTANDING);
+      "tracked files encode the local machine identity in a recoverable form — redact the occurrence; do NOT add it to an exemption list",
+    ).toEqual([]);
   });
 });
