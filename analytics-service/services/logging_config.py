@@ -132,7 +132,39 @@ def _scrub_record_in_place(record: logging.LogRecord) -> None:
     """
     try:
         if isinstance(record.msg, str):
-            record.msg = scrub_freeform_string(record.msg)
+            scrubbed_msg = scrub_freeform_string(record.msg)
+            if scrubbed_msg != record.msg and record.args:
+                # OPS-05 (Phase 163) — a `record.msg` that carries args is a
+                # %-FORMAT TEMPLATE, not a message, and scrubbing it can EAT a
+                # conversion specifier. scrub_freeform_string rewrites the
+                # substring `claim_token=%s,` to `claim_token: [REDACTED]`,
+                # which drops one `%s`; `record.getMessage()` then raises
+                # TypeError("not all arguments converted during string
+                # formatting"), stdlib logging catches that in
+                # Handler.handleError, and THE RECORD IS DROPPED — the only
+                # output is a "--- Logging error ---" block on stderr.
+                #
+                # MEASURED 2026-08-26 (AST scan of all 111 non-test modules in
+                # this service): 3 live templates hit this, and all 3 are
+                # diagnostics ops needed and silently never received —
+                # main_worker.py's LATE_MARK_IGNORED fencing warning,
+                # services/equity_reconstruction.py's done-reconstruct lookup
+                # failure, and services/job_worker.py's _emit_audit drop notice.
+                # A redaction pass that deletes log lines is exactly the
+                # fail-quiet class this phase exists to close, so:
+                #
+                # keep the scrubbed template ONLY if it still formats against
+                # these args; otherwise keep the original. Nothing leaks by
+                # doing so — `record.args` (the values, i.e. the only
+                # attacker/venue-controlled part) is scrubbed independently
+                # just below, while a template is developer-authored constant
+                # text. The probe is skipped entirely unless the scrub actually
+                # changed something, so the hot backfill path pays nothing.
+                try:
+                    scrubbed_msg % record.args
+                except Exception:  # noqa: BLE001 — any format failure means revert
+                    scrubbed_msg = record.msg
+            record.msg = scrubbed_msg
         args = record.args
         if args:
             # Perf L conf=9: skip the allocation/comprehension entirely when
