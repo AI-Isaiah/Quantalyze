@@ -1038,6 +1038,39 @@ true for 146 and half of 142–145, and **false for 141**.
 
 ## 🟡 FIX MID-TERM
 
+### Phase 163 / WR-06 residual — a non-UTC reporter reads "ends in the future" ~3h every day (added 2026-08-26)
+
+WR-06 is FIXED for the defect it named (a future series end no longer renders amber beside
+"just now"; badge and factsheet chip now agree, both muted). The residual below is the
+*stated scenario* that motivated it, and it is NOT closed — recording it so the fix is not
+mistaken for covering more than it does.
+
+**Why the clock-skew grace cannot cover it.** `series_end` is a bare date (`"2026-08-27"`)
+parsed at UTC midnight, so it is **day-granular**. A reporter at UTC+3 has a local calendar
+date ahead of UTC's whenever local time is 00:00–02:59 — the three hours before midnight UTC
+— putting `series_end` up to ~3 hours ahead. `CLOCK_SKEW_TOLERANCE_MINUTES` is 5 minutes. The
+grace is two orders of magnitude too small, and widening it to 3h would be the wrong fix
+anyway: it would start excusing genuine clock problems.
+
+**The correct fix is day-granular comparison** — for a value whose own resolution is one day,
+anything under ~1 day ahead is the field's resolution plus timezone, not evidence of anything.
+
+⛔ **It must be done in ONE coordinated change across BOTH surfaces.** `bucketSeriesAge`
+(`src/lib/freshness.ts`) and `bucketByAge` (`src/app/factsheet/[id]/v2/FactsheetView.tsx`,
+which maps `days < 0` to `future` with no allowance) consume the identical input. Fixing only
+the badge would make it read `fresh` while the chip still reads `future — check data`, which
+manufactures a NEW two-surface contradiction — the exact class this phase exists to close.
+That is why the phase-163 fixer deliberately stopped here rather than half-fixing it.
+
+- **[WR-06-UTC] Give both bucketers a day-granularity allowance for future-dated series ends**,
+  in one commit, with a test that renders both surfaces from one row and asserts they agree.
+
+**Net effect today:** for those ~3 hours a day, a non-UTC reporter's strategy renders a muted
+grey "Track record ends in the future" on both the discovery badge and the factsheet chip.
+Honest and self-consistent — no longer a contradiction, and no longer amber — but still a
+degraded render for a perfectly healthy strategy.
+
+
 ### 🔴 Phase 163 / WR-10 — the password floor was MEASURED, not RAISED (added 2026-08-26)
 
 ⚠️ **This item needs a founder decision. It is booked, NOT accepted.** It fell through the
