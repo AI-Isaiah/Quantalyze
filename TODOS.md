@@ -2380,6 +2380,23 @@ EXECUTED, §str/None follow-through, §Discovery observation).
 - [ ] (/code-review high, lens 5) HoldingsTable.tsx D-15 comment cites StrategyTable.tsx:1067-1085; the precedent now lives at :1169-1179 — cite by phrase not line number.
 - [x] ~~(/code-review high, lens 5, low-confidence) strategies-row-adapter.ts Half-2 comment~~ **RESOLVED 2026-08-08**: kept `manager: s.codename ?? null` and reworded the comment. Half 1 resolves `organization_name ?? codename ?? null` and an owner's own strategy has a null org, so half 1 lands on the codename too; dropping half 2 to null would make one strategy render "—" while unallocated and its codename once money sits behind it. Cross-half agreement now pinned by test. says "honest — rather than a fabricated manager" but code sets manager: s.codename ?? null — codename-present path renders own codename in the manager column and is untested; decide intended behavior and pin it.
 
+### Phase 162 (HONEST) — post-deploy QA finding, ASSIGNED to Phase 163 (added 2026-08-26)
+
+- [ ] **`QA-162-01` / `HONEST-08` — the public discovery table advertises "Synced 7h ago" over a
+      112-day-dead series.** Found by the post-deploy QA pass on quantalyze.xyz at v0.74.1.0.
+      `/browse/crypto-sma` row #2 `Phoenix Protocol`: badge says **Synced 7h ago**, return series
+      ends **2026-05-06** (112 days), and its own factsheet chip correctly says `Track record · old`.
+      Row #1 `Momentum Sphinx` is the same shape at 7 days. **Two public surfaces contradict each
+      other about the same strategy, and the lying one needs no login.**
+      HONEST-02 fixed the factsheet chip. HONEST-03 scoped the badge fix to EXAMPLE rows only, so
+      real published strategies were never covered — and with all 15 examples deleted from PROD the
+      `is_example` gate now guards zero rows here.
+      ROADMAP SC-2 states the rule as "a series dead 89 days cannot read FRESH". 112 > 89.
+      **Owner: Phase 163, success criterion 6.** Fix = bucket on the staler of sync- and
+      series-recency in `StrategyTable`/`StrategyGrid`, reusing `FreshnessChip`'s logic rather than
+      reimplementing it. ⛔ Do not close by deleting the badge; ⛔ do not test via `is_example`.
+      **Severity: HIGH** — public, unauthenticated, real (non-example) strategy, honesty claim.
+
 ### Phase 162 (HONEST) — composite failure no longer names the offending member (added 2026-08-26)
 
 - [ ] **On a composite onboarding failure the user is told the composite failed, but not WHICH

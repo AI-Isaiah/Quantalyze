@@ -59,6 +59,28 @@ factsheet/wizard surfaces (that was Phase 162), and the curated-copy delivery pr
   "constructed after an await-commit in the same function" across 182 sites is likely to
   produce false positives. Fix the three sites; revisit the gate only if a fourth appears.
 
+### HONEST-08 — discovery table freshness badge (added post-QA 2026-08-26)
+
+- **Scope amendment.** Added to this phase AFTER the phase-162 production QA pass found it. It is
+  not an OPS/SEC item; it is a user-facing honesty bug that fits this phase's "monitors cannot
+  report false health" clause, applied to a badge instead of a monitor.
+- **Measured on PROD, not inferred.** `/browse/crypto-sma` row #2 `Phoenix Protocol` renders
+  **"Synced 7h ago"**; its return series ends **2026-05-06** = **112 days** stale; its own factsheet
+  chip reads `Track record · old`. Row #1 `Momentum Sphinx`: "Synced 16m ago", series ends
+  2026-08-19 (7 days), chip `old`. Two public surfaces disagree about the same strategy.
+- **Fix shape: mirror `FreshnessChip`.** Bucket on the STALER of sync-recency and series-recency in
+  `StrategyTable` / `StrategyGrid`. The chip's logic already exists and is tested — reuse it rather
+  than writing a second implementation that can drift from the first.
+- ⛔ **Do NOT close by removing the badge.** Sync recency is real information; the defect is that it
+  is presented as the only clock.
+- ⛔ **Do NOT rely on the `is_example` gate.** HONEST-03 scoped the stale-badge fix to example rows;
+  all 15 were deleted from PROD on 2026-08-26, so that gate now guards zero rows on this surface. A
+  test written against it would be vacuous by construction.
+- **Anti-vacuity requirement:** the regression test must use a REAL published row with a stale
+  series (not an example), and must be demonstrated RED by neutering the staler-of-two comparison.
+- Cross-reference: this is the same class HONEST-02 closed on the factsheet. HONEST-02 stays
+  Complete — it was scoped to the chip and the chip is correct on PROD.
+
 ### Claude's Discretion
 - SC-1 (structlog frozen-proxy) is fully prescribed by the success criterion — source-scan
   gate for Mode A, behavioral redaction test for Mode B, each demonstrated RED when neutered.

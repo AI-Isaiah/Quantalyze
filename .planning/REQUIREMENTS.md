@@ -49,6 +49,7 @@ verified-stale items are excluded by construction.
 
 - [x] **HONEST-01** (L1939): Raw Python exception strings never render as user-facing `computation_error` copy — curated at the write boundary.
 - [ ] **HONEST-07** (split from HONEST-01, 2026-08-26): Root-cause the `str`/`None` compare behind the 2 damaged rows. Stage (`poll_positions`), window (2026-06-10 … 06-14) and population (2 strategies, one shared 59-char `TypeError`) are pinned; no site exists at HEAD and no traceback survives, and the job kind is retired (0 successes ever, dead since 2026-06-14). May prove unclosable — reassess rather than carry forever.
+- [ ] **HONEST-08** (found by post-deploy QA 2026-08-26, assigned to Phase 163): The public discovery table's "Synced Nd ago" badge must not advertise freshness a dead return series contradicts. MEASURED ON PROD: `Phoenix Protocol` renders "Synced 7h ago" on `/browse/crypto-sma` while its series ends 2026-05-06 — **112 days stale**; its own factsheet chip correctly reads `Track record · old`. Two public surfaces, one strategy, contradicting each other. HONEST-02 fixed the factsheet chip; HONEST-03 scoped the badge fix to EXAMPLE rows only, so real published strategies were never covered — and with the 15 examples deleted the `is_example` gate now sees no row that would exercise it. ⛔ Do NOT close by removing the badge: bucket it on the staler of sync- and series-recency, mirroring `FreshnessChip`.
 - [x] **HONEST-02** (L1953): The factsheet freshness badge reflects series recency — a strategy whose return series ended 89 days ago cannot read FRESH; investigate (flat account vs derive gap) before fixing.
 - [x] **HONEST-03** (L1959): Example strategies don't advertise stale "Synced Nd ago" badges on discovery.
 - [x] **HONEST-04** (L1991): `buildEquityCurveSeries` serves real per-strategy equity curves now that `returns_series` is selected — the hard-coded `equityCurve: null` and its false comment go.
@@ -79,7 +80,7 @@ verified-stale items are excluded by construction.
 ### SEC — Small security hardening
 
 - [ ] **SEC-01** (L940): The server-side password policy is verified and enforced — client `minLength={6}` is backed by an explicit Supabase-side policy, documented.
-- [ ] **SEC-02** (L2953): The ~50 tracked `.planning/` docs no longer carry local absolute paths / the macOS username; verified by a no-allowlist scan (the gitleaks allowlist is path-based and blind here).
+- [ ] **SEC-02** (L2953): The tracked `.planning/` docs no longer carry local absolute paths / the macOS username; verified by a no-allowlist scan (the gitleaks allowlist is path-based and blind here). ⚠️ MEASURED 2026-08-26: **80** tracked files carry the username and **57** carry `/Users/` paths — the "~50" estimate was low, plan against 80. Founder ruled forward-only redaction (no history rewrite): the strings are already published on a public repo, so the scan stops new leakage but does not unpublish.
 - [ ] **SEC-03** (L2511): `add_wizard_composite_key` is policed by the audit-coverage gate — the pragma-vs-real-emission decision is made and recorded, not dodged.
 - [ ] **SEC-04** (L3006 + L3013): The bridge and portfolio-optimizer flows get a named `bridgeComputeLimiter` sized to backend reality (closing the 30× front/back mismatch) — ⛔ without resizing the shared `userActionLimiter`.
 - [ ] **SEC-05** (L604): The tenth IP-keyed route (`simulator.py`) is repaired along with the test whose wrapper-check conceals it (equality assertion, quarantine shrinks to 0).
@@ -145,6 +146,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | LEDGER-04 | Phase 161.1 | Complete |
 | HONEST-01 | Phase 162 | Complete |
 | HONEST-07 | Unassigned | Pending |
+| HONEST-08 | Phase 163 | Pending |
 | HONEST-02 | Phase 162 | Complete |
 | HONEST-03 | Phase 162 | Complete |
 | HONEST-04 | Phase 162 | Complete |
