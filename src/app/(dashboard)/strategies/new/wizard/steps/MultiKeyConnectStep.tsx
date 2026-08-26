@@ -1095,16 +1095,58 @@ export function MultiKeyConnectStep({
    * recorded non-goal owned by another phase — see the CR-02 paragraph above
    * `handleStopWaiting`, which states the same bound for the same route.
    */
+  /**
+   * ⛔ THE REMOVAL IS KEYED ON IDENTITY, NOT ON THE INDEX (163-REVIEW / WR-09).
+   *
+   * This used to resolve `p` from `panelsRef.current[idx]`, use it only for the
+   * abort, and then remove by POSITION — `prev.filter((_, i) => i !== idx)`.
+   * The two halves read DIFFERENT SNAPSHOTS. `panelsRef` is synced in a
+   * post-commit effect, so within one batched tick it still holds the state the
+   * user's DOM was rendered from, while the updater's `prev` already carries an
+   * earlier update from that same tick. An index that was correct against the
+   * list the user was looking at then got applied to a SHIFTED list.
+   *
+   * MEASURED, not reasoned (the spec is `[163-REVIEW / WR-09]` in this step's
+   * test file). Three panels, the user clicks Remove on key 1 and key 2 in one
+   * tick: the wizard deleted keys 1 and 3 and left key 2 standing. It destroyed
+   * the credentials of the key the user never touched, and said nothing.
+   *
+   * `panelsRef.current[idx]` is the RIGHT place to resolve identity precisely
+   * BECAUSE it lags: the row the user clicked was rendered from that committed
+   * state, so the id it yields is the row they meant. Filtering by that id then
+   * makes the two halves agree by construction. This is the same argument the
+   * `abortControllersRef` docblock above already makes for the abort — WR-09's
+   * point was that it applies just as much to the `filter`.
+   *
+   * ⛔ AND AN UNRESOLVABLE INDEX THROWS RATHER THAN RETURNING. The old
+   * `if (!p) return` turned a mis-index into a SILENT no-op: no announcement,
+   * no removal, no error, and a confirm dialog that stayed open so the user
+   * clicked again to the same nothing — undiagnosable from a bug report. Note
+   * that merely dropping the guard and keeping the positional filter would have
+   * been WORSE, announcing "Key N removed" while removing nothing. `idx` is
+   * always sourced from the current render's `panels.map`, so this branch is
+   * unreachable in normal operation; if it is ever reached the component's
+   * invariants are already broken and a stack trace is the honest outcome.
+   * `requestRemove` below already fails loud on this exact condition (it
+   * dereferences `p.apiKey` unguarded) — this makes the sibling consistent and
+   * names the invariant instead of raising a bare TypeError.
+   */
   const doRemove = useCallback((idx: number) => {
     const p = panelsRef.current[idx];
-    if (!p) return;
+    if (!p) {
+      throw new Error(
+        `MultiKeyConnectStep.doRemove: no panel at index ${idx} (have ` +
+          `${panelsRef.current.length}). Removal is keyed on panel identity; ` +
+          `an index that cannot be resolved to one must not be guessed at.`,
+      );
+    }
     const controller = abortControllersRef.current.get(p.id);
     if (controller) {
       abortReasonsRef.current.set(p.id, "user");
       controller.abort();
     }
     setAnnouncement(`Key ${idx + 1} removed`);
-    setPanels((prev) => prev.filter((_, i) => i !== idx));
+    setPanels((prev) => prev.filter((panel) => panel.id !== p.id));
   }, []);
 
   const requestRemove = useCallback(

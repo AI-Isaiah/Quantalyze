@@ -121,6 +121,143 @@ describe("SyncBadge — buckets on the staler of sync- and series-recency", () =
   });
 });
 
+/**
+ * ── WR-06 (163-REVIEW) — the FUTURE series end ──────────────────────────────
+ *
+ * THE DEFECT this block pins is a badge that CONTRADICTS ITSELF and then
+ * contradicts the other public surface showing the same strategy:
+ *
+ *   - `bucketSeriesAge` mapped `days < 0` to `"stale"`, the WORST bucket, so a
+ *     future point always bound and always painted the dot RED.
+ *   - `timeAgo` computed `Math.floor((Date.now() - date) / 1000)`, which for a
+ *     future date is NEGATIVE and therefore `< 60`, so the copy read
+ *     "just now".
+ *
+ * The rendered pair was a red dot beside "Track record ends just now" — a
+ * badge stating a catastrophe and a triviality about one date, in one span.
+ *
+ * AND IT DISAGREED WITH THE FACTSHEET. `bucketByAge` (the chip, at
+ * app/factsheet/[id]/v2/FactsheetView.tsx:900-904) maps the SAME `days < 0` to
+ * `"future"`, whose `toneColor` falls through to `var(--color-text-muted)` and
+ * whose label is `"future — check data"` (:1004-1010). So the chip said
+ * "neutral, check the data" while the list badge said "dead". Two public
+ * surfaces disagreeing about one strategy's freshness is the exact class
+ * HONEST-08 exists to close — and this was a new instance of it sitting on the
+ * one boundary the "shared ladder" did not actually share.
+ *
+ * REALISTIC TRIGGER, not a contrived one: an MT5 broker on UTC+3 stamps a
+ * daily bar with tomorrow's calendar date near 22:00 UTC.
+ *
+ * ⚠️ THESE ASSERTIONS ARE DELIBERATELY NOT ABOUT `bucketSeriesAge`'s RETURN
+ * VALUE. Asserting the helper against itself would survive the bug — the whole
+ * defect is that the helper's verdict and the rendered COPY described the same
+ * date two incompatible ways. So every expectation below reads the rendered
+ * dot class and the rendered sentence TOGETHER, which is the pairing a user
+ * actually sees and the only place the contradiction is observable.
+ *
+ * ⭐ RED DEMONSTRATION (performed 2026-08-26, before the fix landed). Run
+ * against the unfixed `freshness.ts` + `SyncBadge.tsx`, verbatim:
+ *
+ *     × WR-06: a future series end is never painted as the worst case
+ *       → expected 'h-1.5 w-1.5 rounded-full shrink-0 bg-negative' not to
+ *         contain 'bg-negative'
+ *     × WR-06: the dot and the sentence never describe one date two ways
+ *       → expected 'Track record ends just now' not to match /just now/i
+ *     × WR-06: the badge agrees with the factsheet chip — no freshness claim,
+ *       no staleness claim
+ *       → expected 'h-1.5 w-1.5 rounded-full shrink-0 bg-negative' to contain
+ *         'bg-amber-400'
+ *     × WR-06: the real discovery TABLE row carries the same repaired pair
+ *       → expected '#1Phoenix Protocol Fixture…just now…' not to match
+ *         /just now/i
+ *
+ * The CONTROL below (`a sync timestamp seconds in the future is CLOCK SKEW`)
+ * stayed GREEN under the unfixed code and must stay green under the fix: it is
+ * what stops the repair from degenerating into "any negative delta is a
+ * corruption", which would fire on every client whose clock trails the
+ * server's by a second.
+ */
+describe("WR-06 — a FUTURE series end is suspicious, never 'stale just now'", () => {
+  /** A date `days` in the FUTURE (negative age). */
+  function futureIso(days: number): string {
+    return new Date(Date.now() + days * DAY).toISOString();
+  }
+
+  it("WR-06: a future series end is never painted as the worst case", () => {
+    const { container } = render(
+      <SyncBadge computedAt={agoIso(2 * HOUR)} seriesEnd={futureIso(2)} />,
+    );
+
+    // A date we cannot have observed yet is not evidence of a DEAD strategy.
+    expect(dotClass(container)).not.toContain("bg-negative");
+    // Nor is it evidence of a live one.
+    expect(dotClass(container)).not.toContain("bg-positive");
+  });
+
+  it("WR-06: the dot and the sentence never describe one date two ways", () => {
+    const { container } = render(
+      <SyncBadge computedAt={agoIso(2 * HOUR)} seriesEnd={futureIso(2)} />,
+    );
+
+    // THE SELF-CONTRADICTION, pinned: "just now" is a claim of recency and it
+    // may not appear for a date that has not happened.
+    expect(container.textContent).not.toMatch(/just now/i);
+    expect(container.textContent).toMatch(/in the future/i);
+    // The subject is still NAMED, so the badge says WHICH fact it is unsure
+    // about rather than silently recolouring the sync copy.
+    expect(container.textContent).toMatch(/Track record ends/i);
+  });
+
+  it("WR-06: the badge agrees with the factsheet chip — no freshness claim, no staleness claim", () => {
+    const { container } = render(
+      <SyncBadge computedAt={agoIso(2 * HOUR)} seriesEnd={futureIso(2)} />,
+    );
+
+    // The chip renders `future` MUTED with "check data" — neither of its two
+    // verdict colours. `Freshness` has three buckets, so the badge's
+    // equivalent of "neither claim" is the middle one, which is also exactly
+    // where an UNKNOWN series end already lands (Test 3 above). One rule, two
+    // surfaces, same answer for the same input.
+    expect(dotClass(container)).toContain("bg-amber-400");
+  });
+
+  it("WR-06 CONTROL: a sync timestamp seconds in the future is CLOCK SKEW, not corruption", () => {
+    // `computeFreshness` has tolerated <5min of writer/reader drift as `fresh`
+    // since it was written, because a browser clock trailing the server's by a
+    // second or two is ordinary. The copy must not contradict that verdict by
+    // announcing "in the future" on the same render — that would trade one
+    // self-contradiction for another, and would fire on real users.
+    const { container } = render(
+      <SyncBadge
+        computedAt={new Date(Date.now() + 3_000).toISOString()}
+        seriesEnd={agoIso(1 * DAY)}
+      />,
+    );
+
+    expect(dotClass(container)).toContain("bg-positive");
+    expect(container.textContent).toMatch(/Synced just now/);
+    expect(container.textContent).not.toMatch(/in the future/i);
+  });
+
+  it("WR-06: the real discovery TABLE row carries the same repaired pair", () => {
+    // Through the mount a visitor actually travels, not the bare component.
+    const row = publishedRow("11111111-0000-4000-8000-000000000003", PHOENIX, {
+      computed_at: agoIso(7 * HOUR),
+      // Tomorrow's calendar date — the UTC+3 broker case.
+      series_end: new Date(Date.now() + DAY).toISOString().slice(0, 10),
+    });
+
+    const { container } = render(
+      <StrategyTable strategies={[row]} categorySlug="crypto-sma" />,
+    );
+
+    expect(container.textContent).not.toMatch(/just now/i);
+    expect(container.querySelector(".bg-negative")).toBeNull();
+    expect(container.querySelector(".bg-positive")).toBeNull();
+    expect(container.querySelector(".bg-amber-400")).toBeTruthy();
+  });
+});
+
 // ── The regression proper: the REAL mount paths, a REAL published row ───────
 
 const PHOENIX = "Phoenix Protocol Fixture";

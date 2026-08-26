@@ -17,8 +17,17 @@ export type Freshness = "fresh" | "warm" | "stale";
 export const FRESH_HOURS = 12;
 export const WARM_HOURS = 48;
 
-/** Tolerated clock drift between Postgres and the Next.js server, in minutes. */
-const CLOCK_SKEW_TOLERANCE_MINUTES = 5;
+/**
+ * Tolerated clock drift between Postgres and the Next.js server, in minutes.
+ *
+ * EXPORTED since 163-REVIEW / WR-06 because the COPY has to honour the same
+ * tolerance as the COLOUR. `SyncBadge`'s `timeAgo` renders the sentence beside
+ * the dot this module buckets; if it called anything ahead of "now" a future
+ * date while `computeFreshness` was still calling the same instant `fresh`,
+ * the badge would contradict itself on ordinary browser-clock drift — the very
+ * shape of defect WR-06 reported, merely relocated.
+ */
+export const CLOCK_SKEW_TOLERANCE_MINUTES = 5;
 
 /**
  * Compute the freshness label for a given computation timestamp.
@@ -110,12 +119,35 @@ const FRESHNESS_RANK: Record<Freshness, number> = {
   stale: 2,
 };
 
-/** Classify a series end on the shared 3d/7d series ladder. */
+/**
+ * Classify a series end on the shared 3d/7d series ladder.
+ *
+ * ⚠️ THE FUTURE ARM IS THE CHIP'S, NOT A SECOND RULE (163-REVIEW / WR-06).
+ * This originally mapped `days < 0` to `"stale"` — the WORST bucket, so a
+ * future point always bound and always painted the dot red. `bucketByAge` on
+ * the factsheet chip (app/factsheet/[id]/v2/FactsheetView.tsx:900-904) maps
+ * the SAME input to `"future"`, which renders MUTED and labelled
+ * "future — check data" (:1004-1010). So one strategy with a bar stamped
+ * tomorrow — an MT5 broker on UTC+3 near 22:00 UTC does exactly this — read
+ * DEAD on the discovery list and NEUTRAL on its own factsheet. Two public
+ * surfaces contradicting each other about one strategy is precisely the class
+ * HONEST-08 was created to close, reopened on the one boundary the "shared
+ * ladder" had not actually shared.
+ *
+ * `Freshness` has three buckets and no neutral, so the chip's "neither claim"
+ * maps to the middle one — which is ALSO exactly where an unresolvable series
+ * end already lands in `resolveEffectiveRecency` below, for the same reason:
+ * a date we cannot have observed yet is not evidence of a live strategy, and
+ * it is not evidence of a dead one either. No new threshold, no fourth ladder.
+ *
+ * A future point still BINDS over a fresh job (warm outranks fresh), so it
+ * cannot be laundered into a freshness claim — it just stops being reported as
+ * a catastrophe.
+ */
 function bucketSeriesAge(seriesEndMs: number, now: Date): Freshness {
   const days = (now.getTime() - seriesEndMs) / (1000 * 60 * 60 * 24);
-  // A series point in the FUTURE is a corrupt write, not a fresh track record
-  // — same reasoning as `computeFreshness`'s large-skew arm above.
-  if (!Number.isFinite(days) || days < 0) return "stale";
+  if (!Number.isFinite(days)) return "stale";
+  if (days < 0) return "warm";
   if (days <= SERIES_FRESH_DAYS) return "fresh";
   if (days <= SERIES_STALE_DAYS) return "warm";
   return "stale";

@@ -383,6 +383,127 @@ describe("[ONB-01] MultiKeyConnectStep — remove", () => {
   });
 });
 
+/**
+ * ── WR-09 (163-REVIEW) — removal must key on IDENTITY, not on a position ────
+ *
+ * `doRemove` resolved the clicked panel from `panelsRef.current[idx]` and then
+ * discarded it, removing by POSITION: `prev.filter((_, i) => i !== idx)`. The
+ * two halves read different snapshots. `panelsRef` is synced in a post-commit
+ * effect, so inside one batched tick it still holds the state the user's DOM
+ * was rendered from, while the `setPanels` updater's `prev` already carries an
+ * earlier update from the same tick. An index that was correct against the
+ * rendered list is therefore applied to a SHIFTED list.
+ *
+ * TWO FAILURES FALL OUT OF THAT, both silent:
+ *
+ *   1. In range but shifted → THE WRONG PANEL IS DELETED. This is the one
+ *      pinned below, because it is the one that destroys a user's work: the
+ *      credentials cleared belong to a key they did not ask to remove.
+ *   2. Out of range → the `if (!p) return` guard swallowed the click entirely.
+ *      No announcement, no removal, no error; the confirm dialog stayed open
+ *      and clicking again did the same nothing. Note the review's suggested
+ *      minimal fix — drop the guard, keep the positional filter — would have
+ *      made this WORSE, announcing "Key N removed" while removing nothing.
+ *      Only identity resolution actually closes it, and when identity cannot
+ *      be resolved the code now throws rather than shrugging.
+ *
+ * A credential-entry surface is the wrong place to be silently wrong, which is
+ * the class this whole phase exists to close.
+ *
+ * ⚠️ THE TWO CLICKS SHARE ONE `act()` DELIBERATELY, and native `.click()` is
+ * used instead of `fireEvent` for the same reason: `fireEvent` flushes after
+ * every call, which commits the effect that re-syncs `panelsRef` and hides the
+ * divergence. One act, two handlers, one commit is what a fast double
+ * interaction actually produces in a browser.
+ *
+ * ⭐ RED DEMONSTRATION (performed 2026-08-26, before the fix). Verbatim:
+ *
+ *     × WR-09: a batched second removal deletes the panel the user clicked
+ *       → AssertionError: the wizard must delete the keys the user clicked,
+ *         not their neighbours: expected 'SECOND' to be 'THIRD'
+ *
+ * Read that survivor carefully — it is worse than "a no-op". The user clicked
+ * Remove on FIRST and on SECOND. The wizard deleted FIRST and THIRD, and left
+ * SECOND standing. The key it destroyed was the one the user never touched,
+ * and nothing anywhere said so.
+ */
+describe("[163-REVIEW / WR-09] MultiKeyConnectStep — removal keys on identity", () => {
+  it("WR-09: a batched second removal deletes the panel the user clicked", () => {
+    render(<MultiKeyConnectStep wizardSessionId={SESSION} onSuccess={vi.fn()} />);
+    fireEvent.click(screen.getByTestId("multi-add-key"));
+    fireEvent.click(screen.getByTestId("multi-add-key"));
+    expect(screen.getAllByTestId(/^key-panel-/)).toHaveLength(3);
+
+    // Nicknames make the panels distinguishable. They are deliberately NOT
+    // credentials: `hasEnteredCreds` ignores the nickname, so each Remove takes
+    // the immediate path and no confirm dialog interposes.
+    const NAMES = ["FIRST", "SECOND", "THIRD"];
+    NAMES.forEach((value, i) => {
+      fireEvent.change(
+        within(screen.getByTestId(`key-panel-${i}`)).getByLabelText(
+          "Key nickname (optional)",
+        ),
+        { target: { value } },
+      );
+    });
+
+    const removeFirst = within(screen.getByTestId("key-panel-0")).getByTestId(
+      "key-0-remove",
+    );
+    const removeSecond = within(screen.getByTestId("key-panel-1")).getByTestId(
+      "key-1-remove",
+    );
+
+    // Both handlers run against the SAME committed render — the one the user is
+    // looking at, in which index 1 is unambiguously the key named SECOND.
+    act(() => {
+      removeFirst.click();
+      removeSecond.click();
+    });
+
+    const survivors = screen.getAllByTestId(/^key-panel-/);
+    expect(survivors).toHaveLength(1);
+    expect(
+      (within(survivors[0]).getByLabelText(
+        "Key nickname (optional)",
+      ) as HTMLInputElement).value,
+      "the wizard must delete the keys the user clicked, not their neighbours",
+    ).toBe("THIRD");
+  });
+
+  it("WR-09 CONTROL: an ordinary one-at-a-time removal is unchanged", () => {
+    // Without this, a 'fix' that removed by identity but broke the normal path
+    // would still pass the case above. This is the flow every user takes.
+    render(<MultiKeyConnectStep wizardSessionId={SESSION} onSuccess={vi.fn()} />);
+    fireEvent.click(screen.getByTestId("multi-add-key"));
+    fireEvent.click(screen.getByTestId("multi-add-key"));
+
+    ["FIRST", "SECOND", "THIRD"].forEach((value, i) => {
+      fireEvent.change(
+        within(screen.getByTestId(`key-panel-${i}`)).getByLabelText(
+          "Key nickname (optional)",
+        ),
+        { target: { value } },
+      );
+    });
+
+    fireEvent.click(
+      within(screen.getByTestId("key-panel-1")).getByTestId("key-1-remove"),
+    );
+
+    const survivors = screen.getAllByTestId(/^key-panel-/);
+    expect(survivors).toHaveLength(2);
+    expect(
+      survivors.map(
+        (panel) =>
+          (within(panel).getByLabelText(
+            "Key nickname (optional)",
+          ) as HTMLInputElement).value,
+      ),
+    ).toEqual(["FIRST", "THIRD"]);
+  });
+});
+
 describe("[ONB-01] MultiKeyConnectStep — loud dual-surface validation", () => {
   async function validatePanel(panelIdx: number, start: string, end: string) {
     const panel = screen.getByTestId(`key-panel-${panelIdx}`);

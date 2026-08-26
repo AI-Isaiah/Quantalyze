@@ -1,5 +1,9 @@
 import { cn } from "@/lib/utils";
-import { resolveEffectiveRecency, FRESHNESS_COLORS } from "@/lib/freshness";
+import {
+  resolveEffectiveRecency,
+  FRESHNESS_COLORS,
+  CLOCK_SKEW_TOLERANCE_MINUTES,
+} from "@/lib/freshness";
 
 interface SyncBadgeProps {
   computedAt: string | null;
@@ -18,8 +22,25 @@ interface SyncBadgeProps {
   className?: string;
 }
 
+/**
+ * ⚠️ THE FUTURE ARM IS LOAD-BEARING (163-REVIEW / WR-06). Without it a
+ * negative age falls straight through `seconds < 60` and this function calls a
+ * date that HAS NOT HAPPENED "just now" — so the badge rendered a red dot
+ * beside "Track record ends just now", stating a catastrophe and a triviality
+ * about one date in one span. The colour was fixed in `bucketSeriesAge`; the
+ * SENTENCE has to stop lying too, or the contradiction merely moves.
+ *
+ * ⛔ THE THRESHOLD IS NOT ZERO, DELIBERATELY. `computeFreshness` has always
+ * tolerated up to `CLOCK_SKEW_TOLERANCE_MINUTES` of writer/reader drift as
+ * `fresh`, and a browser clock trailing the server's by a second or two is
+ * ordinary rather than corrupt. Announcing "in the future" on that drift would
+ * fire on real users AND would contradict the green dot rendered from the same
+ * instant — trading WR-06's self-contradiction for a fresh one. The copy and
+ * the colour read ONE tolerance, imported rather than re-typed.
+ */
 function timeAgo(date: Date): string {
   const seconds = Math.floor((Date.now() - date.getTime()) / 1000);
+  if (seconds < -CLOCK_SKEW_TOLERANCE_MINUTES * 60) return "in the future";
   if (seconds < 60) return "just now";
   const minutes = Math.floor(seconds / 60);
   if (minutes < 60) return `${minutes}m ago`;

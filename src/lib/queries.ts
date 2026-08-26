@@ -289,6 +289,33 @@ export const COMPARE_ANALYTICS_COLUMNS =
  *
  * The array itself is STILL not projected here, and `queries.test.ts` pins
  * that with a regex: `returns_series` may appear only in the arrow form.
+ *
+ * ⛔ PRECONDITION, STATED BECAUSE IT IS LOAD-BEARING AND WAS NOT (163-REVIEW).
+ * `->-1` is a POSITIONAL pick: it returns the last ELEMENT, which is the last
+ * DATE only while `returns_series` is stored date-ascending. This projection
+ * therefore depends on an ordering property of a JSONB column, and a
+ * silently-wrong "last point" here is a freshness lie on the most public
+ * surface in the product — the anonymous discovery list.
+ *
+ * THE PRECONDITION HOLDS TODAY, and it holds because a writer ASSERTS it, not
+ * because it happens to be true: `compute_all_metrics` RAISES ValueError when
+ * the returns index is not monotonic-increasing
+ * (analytics-service/services/metrics.py:491-499), and `returns_series` is
+ * built by iterating that index a few hundred lines later (:910-913). So no
+ * run that produced an unsorted series can persist one.
+ *
+ * ⚠️ IT IS NEVERTHELESS A WEAKER FORM THAN THE REST OF THE CODEBASE USES.
+ * `public.ledger_refresh_staleness`
+ * (supabase/migrations/20260825120000_ledger_refresh_staleness_view.sql, D-03)
+ * asks this exact question of this exact column and adopted
+ * `max((e->>'date')::date)` — order-independent by construction. The TS array
+ * arm (`seriesEndOf`, lib/utils.ts) was moved to the same `max` derivation by
+ * 163-REVIEW. This projection cannot follow, because PostgREST's select
+ * grammar can express a positional index but not an aggregate over a JSONB
+ * array; closing the gap needs an RPC or a generated column, which is a schema
+ * change and out of this fix's scope. Recorded rather than left implicit: the
+ * consequence of the assumption breaking is a wrong date, not an error, and an
+ * unstated assumption is how it would go unnoticed.
  */
 const CATEGORY_RANKING_ANALYTICS_COLUMNS =
   "computed_at, computation_status, cumulative_return, cagr, sharpe, calmar, max_drawdown, volatility, six_month_return, sparkline_returns, sparkline_drawdown, three_month:metrics_json->three_month, series_end:returns_series->-1->>date";

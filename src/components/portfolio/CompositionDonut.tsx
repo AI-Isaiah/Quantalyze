@@ -22,11 +22,21 @@ interface CompositionDonutProps {
     /**
      * Phase 163 / HONEST-08 — the last date of the constituent's return
      * series. Paired with `computedAt` so the slice badge buckets on the
-     * STALER of the two. Optional, and an ABSENT value is read as unknown:
-     * the badge is capped below "fresh" rather than making a claim the caller
-     * did not supply evidence for.
+     * STALER of the two.
+     *
+     * REQUIRED, deliberately — and it was optional until 163-REVIEW / IN-02.
+     * `SyncBadge.seriesEnd` is required precisely so no mount can reopen the
+     * class by OMISSION; re-optionalising it one layer up handed that back,
+     * because a donut caller could simply leave the field off and the badge
+     * would receive `null` with nobody having decided anything. The
+     * degradation was conservative (amber cap, never a false freshness claim),
+     * so nothing rendered a lie — but the forcing function stopped at the
+     * badge's own boundary instead of reaching the callers that actually hold
+     * the analytics row. Passing an EXPLICIT `null` is still the right answer
+     * for a caller that genuinely cannot resolve a series end. Saying so is
+     * the point.
      */
-    seriesEnd?: string | null;
+    seriesEnd: string | null;
   }[];
 }
 
