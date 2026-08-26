@@ -110,9 +110,28 @@ export interface EffectiveRecency {
   subject: RecencySubject;
   /** The resolved series end, when there was one. Callers render the date. */
   seriesEndDate: Date | null;
+  /**
+   * The series end is AHEAD of now by more than the shared clock-skew
+   * tolerance, and is therefore the binding fact.
+   *
+   * ⛔ THIS EXISTS BECAUSE `Freshness` CANNOT SAY "NEITHER" (163-REVIEW,
+   * finding 2). `FreshnessChip`'s `bucketByAge` answers a future date with its
+   * own `future` tone, which `toneColor` renders MUTED and labels
+   * "future — check data": explicitly not its green and explicitly not its red.
+   * This module's three buckets are green / amber / red, so mapping `future`
+   * onto `warm` alone bought the RANK but painted AMBER — a colour every other
+   * row uses to mean "getting old". The chip said "check the data", the badge
+   * said "going stale", about one strategy. Callers read this flag for the
+   * DOT COLOUR (`FUTURE_SERIES_DOT`) while `freshness` keeps the ladder
+   * position, so the two surfaces answer the same input the same way.
+   */
+  seriesEndIsFuture: boolean;
 }
 
-/** How pessimistic each bucket is. Mirrors `TONE_RANK` in FactsheetView.tsx. */
+/**
+ * How pessimistic each bucket is. Mirrors `TONE_RANK` in `FreshnessChip`'s
+ * module.
+ */
 const FRESHNESS_RANK: Record<Freshness, number> = {
   fresh: 0,
   warm: 1,
@@ -120,34 +139,78 @@ const FRESHNESS_RANK: Record<Freshness, number> = {
 };
 
 /**
+ * The series verdicts. `future` is NOT a fourth threshold — it is the chip's
+ * `future` tone, carried through so the badge can render the same non-claim.
+ */
+type SeriesVerdict = Freshness | "future";
+
+/**
+ * Rank of each series verdict, on the SAME scale as `FRESHNESS_RANK` so the
+ * two are directly comparable.
+ *
+ * `future` sits at the TOP, which is `TONE_RANK`'s ordering (`future` above
+ * `old`, the chip's red) rather than a new opinion. A date that has not
+ * happened means the input itself is untrustworthy, and "the data is wrong" is
+ * a louder fact than "the job is old" — so it binds over ANY sync verdict, as
+ * it does on the factsheet. The sync age is not discarded when it does: it
+ * moves into the badge's tooltip, exactly as on the `series` arm.
+ */
+const SERIES_RANK: Record<SeriesVerdict, number> = {
+  fresh: 0,
+  warm: 1,
+  stale: 2,
+  future: 3,
+};
+
+/**
+ * The dot colour for a future series end.
+ *
+ * Deliberately the token behind `--color-text-muted` — the SAME custom
+ * property `FreshnessChip`'s `toneColor` falls through to for its `future`
+ * tone. One value, two surfaces, agreement by construction rather than by two
+ * people picking a grey.
+ */
+export const FUTURE_SERIES_DOT = "bg-text-muted";
+
+/**
  * Classify a series end on the shared 3d/7d series ladder.
  *
  * ⚠️ THE FUTURE ARM IS THE CHIP'S, NOT A SECOND RULE (163-REVIEW / WR-06).
  * This originally mapped `days < 0` to `"stale"` — the WORST bucket, so a
- * future point always bound and always painted the dot red. `bucketByAge` on
- * the factsheet chip (app/factsheet/[id]/v2/FactsheetView.tsx:900-904) maps
- * the SAME input to `"future"`, which renders MUTED and labelled
- * "future — check data" (:1004-1010). So one strategy with a bar stamped
- * tomorrow — an MT5 broker on UTC+3 near 22:00 UTC does exactly this — read
- * DEAD on the discovery list and NEUTRAL on its own factsheet. Two public
- * surfaces contradicting each other about one strategy is precisely the class
- * HONEST-08 was created to close, reopened on the one boundary the "shared
- * ladder" had not actually shared.
+ * future point always bound and always painted the dot red. `bucketByAge` in
+ * `FreshnessChip`'s module maps the SAME input to its `future` tone, which
+ * `toneColor` renders MUTED and labels "future — check data". So one strategy
+ * with a bar stamped tomorrow — an MT5 broker on UTC+3 near 22:00 UTC does
+ * exactly this — read DEAD on the discovery list and NEUTRAL on its own
+ * factsheet. Two public surfaces contradicting each other about one strategy
+ * is precisely the class HONEST-08 was created to close, reopened on the one
+ * boundary the "shared ladder" had not actually shared.
  *
- * `Freshness` has three buckets and no neutral, so the chip's "neither claim"
- * maps to the middle one — which is ALSO exactly where an unresolvable series
- * end already lands in `resolveEffectiveRecency` below, for the same reason:
- * a date we cannot have observed yet is not evidence of a live strategy, and
- * it is not evidence of a dead one either. No new threshold, no fourth ladder.
+ * ⛔ NO ZERO BOUNDARY — THE TOLERANCE IS THE SHARED ONE (163-REVIEW, finding
+ * 2). WR-06's repair still split on `days < 0` exactly, so a series end a
+ * SECOND ahead of this server's clock fell into the future arm and BOUND over
+ * a job that had just succeeded. That is not a hypothetical: `computeFreshness`
+ * has tolerated up to `CLOCK_SKEW_TOLERANCE_MINUTES` of writer/reader drift as
+ * `fresh` since it was written, and `SyncBadge`'s `timeAgo` was taught the same
+ * number so the COPY could not contradict the COLOUR. This arm was the third
+ * reader of that instant and the only one still using a bare zero — so on
+ * ordinary drift the badge rendered an amber dot over a strategy every other
+ * reader in the module called fresh. Within tolerance is `fresh`, and it is the
+ * same constant, imported rather than re-typed.
  *
- * A future point still BINDS over a fresh job (warm outranks fresh), so it
- * cannot be laundered into a freshness claim — it just stops being reported as
- * a catastrophe.
+ * Beyond tolerance the answer is `future`: NOT a claim of staleness and NOT a
+ * claim of freshness, which is the same non-committal position an unresolvable
+ * series end already occupies in `resolveEffectiveRecency` below. A date we
+ * cannot have observed yet is not evidence of a live strategy, and it is not
+ * evidence of a dead one either. No new threshold, no fourth ladder.
  */
-function bucketSeriesAge(seriesEndMs: number, now: Date): Freshness {
+function bucketSeriesAge(seriesEndMs: number, now: Date): SeriesVerdict {
   const days = (now.getTime() - seriesEndMs) / (1000 * 60 * 60 * 24);
   if (!Number.isFinite(days)) return "stale";
-  if (days < 0) return "warm";
+  if (days < 0) {
+    const minutesAhead = -days * 24 * 60;
+    return minutesAhead <= CLOCK_SKEW_TOLERANCE_MINUTES ? "fresh" : "future";
+  }
   if (days <= SERIES_FRESH_DAYS) return "fresh";
   if (days <= SERIES_STALE_DAYS) return "warm";
   return "stale";
@@ -188,6 +251,16 @@ function bucketSeriesAge(seriesEndMs: number, now: Date): Freshness {
  *     data soften it would trade a fact for a shrug. So a known-bad sync age
  *     survives this arm untouched.
  *
+ * THE `future` ARM MIRRORS `TONE_RANK` TOO, at its other end: `future` is the
+ * chip's MOST pessimistic tone (above its `old`), because a date that has not
+ * happened impeaches the INPUT rather than merely aging it. So it binds over
+ * every sync verdict, including a known-bad one — the one place this module
+ * deliberately does let a series verdict override a definite sync age, and it
+ * does so because the fact it reports is "this row's data is wrong", not "we
+ * don't know". The sync age is preserved in the badge tooltip, as on the
+ * ordinary `series` arm. The rendered COLOUR is not amber: see
+ * `seriesEndIsFuture`.
+ *
  * An unresolvable `computedAt` keeps the behaviour it already had: it
  * classifies `stale` via `computeFreshness` and the subject stays `sync`. That
  * is already the most cautious render, and a series cannot make it worse.
@@ -208,17 +281,32 @@ export function resolveEffectiveRecency(
       freshness: syncFreshness === "fresh" ? "warm" : syncFreshness,
       subject: "unknown",
       seriesEndDate: null,
+      seriesEndIsFuture: false,
     };
   }
 
-  const seriesFreshness = bucketSeriesAge(seriesEndMs, now);
+  const seriesVerdict = bucketSeriesAge(seriesEndMs, now);
   const seriesBinds =
-    FRESHNESS_RANK[seriesFreshness] > FRESHNESS_RANK[syncFreshness];
+    SERIES_RANK[seriesVerdict] > FRESHNESS_RANK[syncFreshness];
+  // `future` outranks every sync verdict, so this is always the binding arm —
+  // written as a conjunction anyway so the flag can never claim a subject the
+  // copy did not select.
+  const futureBinds = seriesBinds && seriesVerdict === "future";
 
   return {
-    freshness: seriesBinds ? seriesFreshness : syncFreshness,
+    // `future` has no bucket on a green/amber/red ladder, and the honest
+    // ladder POSITION for "neither claim" is the middle one — the same slot
+    // `unknown` takes above. The COLOUR does not follow from it: callers read
+    // `seriesEndIsFuture` and render `FUTURE_SERIES_DOT` instead, which is the
+    // chip's muted grey.
+    freshness: futureBinds
+      ? "warm"
+      : seriesBinds
+        ? (seriesVerdict as Freshness)
+        : syncFreshness,
     subject: seriesBinds ? "series" : "sync",
     seriesEndDate: new Date(seriesEndMs),
+    seriesEndIsFuture: futureBinds,
   };
 }
 

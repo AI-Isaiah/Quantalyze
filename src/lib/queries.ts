@@ -518,11 +518,20 @@ async function shapeRankingRows(
  * ⚠️ This is a DERIVATION, never a fabrication: a missing/empty/unparseable
  * series answers `null` (unknown), which the freshness resolver treats as
  * "cannot support a freshness claim" — never as "fine". And it does not touch
- * the anon path's payload shape: when the alias already answered (including
- * answering `null`), that answer is authoritative and is left alone.
+ * the anon path's payload shape: when the alias ANSWERED, that answer is
+ * authoritative and is left alone.
+ *
+ * ⛔ "ANSWERED" MEANS TRUTHY, NOT MERELY DEFINED (163-REVIEW, finding 3). The
+ * guard was `!== undefined`, which is the same footgun `seriesEndOf` carried:
+ * `EMPTY_ANALYTICS` sets `series_end: null` EXPLICITLY, and the arm above hands
+ * this function rows composed over that constant, so a defined `null` short-
+ * circuited the derivation for a row whose `returns_series` was right there.
+ * A falsy scalar is not an answer — re-deriving it either finds the array (the
+ * repair) or returns `null` again (unchanged). Nothing that genuinely answered
+ * is overwritten.
  */
 function withResolvedSeriesEnd(a: StrategyAnalytics): StrategyAnalytics {
-  if (a.series_end !== undefined) return a;
+  if (a.series_end) return a;
   return { ...a, series_end: seriesEndOf(a) };
 }
 

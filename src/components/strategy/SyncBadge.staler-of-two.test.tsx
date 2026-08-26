@@ -176,6 +176,15 @@ describe("SyncBadge — buckets on the staler of sync- and series-recency", () =
  * what stops the repair from degenerating into "any negative delta is a
  * corruption", which would fire on every client whose clock trails the
  * server's by a second.
+ *
+ * ⚠️ THE TWO COLOUR EXPECTATIONS TRANSCRIBED ABOVE READ `bg-amber-400`, AND
+ * THEY NO LONGER DO. That is a frozen record of the 2026-08-26 run and is left
+ * unedited on purpose. 163-REVIEW finding 2 then established that WR-06's
+ * repair had bought the RANK and not the COLOUR — `future` mapped onto `warm`
+ * paints amber, the age colour, while the chip paints the same input muted —
+ * and that the arm still split on a bare `days < 0` with no clock-skew grace.
+ * Both are addressed below, and the RED for THAT round is transcribed on the
+ * `WR-06 GRACE` spec.
  */
 describe("WR-06 — a FUTURE series end is suspicious, never 'stale just now'", () => {
   /** A date `days` in the FUTURE (negative age). */
@@ -213,12 +222,99 @@ describe("WR-06 — a FUTURE series end is suspicious, never 'stale just now'", 
       <SyncBadge computedAt={agoIso(2 * HOUR)} seriesEnd={futureIso(2)} />,
     );
 
-    // The chip renders `future` MUTED with "check data" — neither of its two
-    // verdict colours. `Freshness` has three buckets, so the badge's
-    // equivalent of "neither claim" is the middle one, which is also exactly
-    // where an UNKNOWN series end already lands (Test 3 above). One rule, two
-    // surfaces, same answer for the same input.
-    expect(dotClass(container)).toContain("bg-amber-400");
+    // ⛔ MUTED, NOT AMBER (163-REVIEW, finding 2). WR-06's first repair mapped
+    // `future` onto `warm` and stopped there, which bought the RANK but painted
+    // the dot amber — the colour this product uses everywhere else to mean
+    // "getting old". The chip renders the identical input in
+    // `--color-text-muted` under "future — check data", making NEITHER claim.
+    // So the badge saying "going stale" while the factsheet said "check the
+    // data" was the same two-surface disagreement WR-06 was opened to close,
+    // one shade further in. `bg-text-muted` resolves to that same custom
+    // property, so the two now answer one input with one colour.
+    expect(dotClass(container)).toContain("bg-text-muted");
+    // And explicitly not the age colour it used to borrow.
+    expect(dotClass(container)).not.toContain("bg-amber-400");
+  });
+
+  /**
+   * ⭐ THE GRACE CONTROL, and it is the assertion that actually fails without
+   * the fix. WR-06's repair split on `days < 0` EXACTLY, so a series end one
+   * second ahead of this server's clock took the future arm and BOUND over a
+   * job that had just succeeded — an amber dot over a strategy that
+   * `computeFreshness` and `timeAgo`, reading the same instant through
+   * `CLOCK_SKEW_TOLERANCE_MINUTES`, both called fresh. Three readers of one
+   * instant, one of them still using a bare zero.
+   */
+  it("WR-06 GRACE: a series end seconds ahead is CLOCK SKEW, not a future date", () => {
+    const { container } = render(
+      <SyncBadge
+        computedAt={agoIso(2 * HOUR)}
+        seriesEnd={new Date(Date.now() + 30_000).toISOString()}
+      />,
+    );
+
+    // Within tolerance the series is a CURRENT bar, so it neither binds nor
+    // recolours: the honest render is the sync-keyed one, in green.
+    expect(dotClass(container)).toContain("bg-positive");
+    expect(dotClass(container)).not.toContain("bg-text-muted");
+    expect(container.textContent).toMatch(/Synced 2h ago/);
+    expect(container.textContent).not.toMatch(/Track record/i);
+  });
+
+  /**
+   * The grace's other edge. Without this, "tolerate skew" could degenerate into
+   * "tolerate any future date", which would launder a corrupt write into a
+   * freshness claim — the failure mode WR-06 itself warned about.
+   */
+  it("WR-06 GRACE CONTROL: beyond the tolerance it is still a future date", () => {
+    const { container } = render(
+      <SyncBadge
+        computedAt={agoIso(2 * HOUR)}
+        // An hour ahead is an order of magnitude past the tolerated drift.
+        seriesEnd={new Date(Date.now() + HOUR).toISOString()}
+      />,
+    );
+
+    expect(dotClass(container)).toContain("bg-text-muted");
+    expect(container.textContent).toMatch(/Track record ends in the future/i);
+  });
+
+  /**
+   * The OTHER control the grace must not break: a genuinely dead track record
+   * is still dead. A repair that softened the whole series arm would pass every
+   * assertion above and quietly delete the requirement.
+   */
+  it("WR-06 STALE CONTROL: a genuinely old series end still buckets stale", () => {
+    const { container } = render(
+      <SyncBadge computedAt={agoIso(2 * HOUR)} seriesEnd={agoIso(112 * DAY)} />,
+    );
+
+    expect(dotClass(container)).toContain("bg-negative");
+    expect(dotClass(container)).not.toContain("bg-text-muted");
+    expect(container.textContent).toMatch(/Track record ends 112d ago/);
+  });
+
+  /**
+   * The one place a series verdict is allowed to override a DEFINITE bad sync
+   * age, and the reason it is allowed: `TONE_RANK` puts the chip's `future`
+   * above its `old`, because a date that has not happened impeaches the INPUT
+   * rather than merely aging it. Ranking it as a mere middle bucket would have
+   * left the badge saying "Synced 5d ago" in red where the factsheet said
+   * "Track record · future — check data" in grey — the two surfaces naming
+   * different subjects for one row.
+   */
+  it("WR-06: a future series end binds even over a known-bad sync age", () => {
+    const { container } = render(
+      <SyncBadge computedAt={agoIso(5 * DAY)} seriesEnd={futureIso(2)} />,
+    );
+
+    expect(dotClass(container)).toContain("bg-text-muted");
+    expect(container.textContent).toMatch(/Track record ends in the future/i);
+    // The sync fact is NOT discarded — it moves into the tooltip, exactly as
+    // on the ordinary series arm.
+    expect(container.querySelector("span")?.getAttribute("title")).toMatch(
+      /Analytics last computed 5d ago/,
+    );
   });
 
   it("WR-06 CONTROL: a sync timestamp seconds in the future is CLOCK SKEW, not corruption", () => {
@@ -254,7 +350,10 @@ describe("WR-06 — a FUTURE series end is suspicious, never 'stale just now'", 
     expect(container.textContent).not.toMatch(/just now/i);
     expect(container.querySelector(".bg-negative")).toBeNull();
     expect(container.querySelector(".bg-positive")).toBeNull();
-    expect(container.querySelector(".bg-amber-400")).toBeTruthy();
+    // The chip's muted grey, through the real table mount — see the colour
+    // note on "the badge agrees with the factsheet chip" above.
+    expect(container.querySelector(".bg-text-muted")).toBeTruthy();
+    expect(container.querySelector(".bg-amber-400")).toBeNull();
   });
 });
 

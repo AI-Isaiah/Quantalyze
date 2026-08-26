@@ -222,7 +222,22 @@ export function seriesEndOf(
   a: StrategyAnalytics | null | undefined,
 ): string | null {
   if (!a) return null;
-  if (a.series_end !== undefined) return a.series_end;
+  // ⛔ THE SCALAR IS AUTHORITATIVE ONLY WHEN IT ANSWERS (163-REVIEW, finding 3).
+  // This read `a.series_end !== undefined`, i.e. it treated DEFINED as
+  // AUTHORITATIVE — and `EMPTY_ANALYTICS` sets `series_end: null` explicitly.
+  // So any caller composing a real row OVER that constant (the
+  // `{...EMPTY_ANALYTICS, ...row}` idiom in `CompareContent` and in
+  // `shapeRowAnalytics`) handed this function a DEFINED `null` sitting beside a
+  // perfectly readable `returns_series`, and the array arm below became
+  // unreachable — permanently capping that surface at the `unknown` arm of
+  // `resolveEffectiveRecency`, i.e. amber, on data we can actually read.
+  //
+  // Truthiness is the right predicate because every falsy value means the same
+  // thing here: `undefined` (column not projected), `null` (projected and
+  // empty, or defaulted by the empty constant) and `""` are all NOT AN ANSWER,
+  // and falling through to the array costs nothing when there is no array —
+  // the function still returns `null`, still unknown, still never a guess.
+  if (a.series_end) return a.series_end;
   const points = a.returns_series;
   if (!Array.isArray(points)) return null;
 
