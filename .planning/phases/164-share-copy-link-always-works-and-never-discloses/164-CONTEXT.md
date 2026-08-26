@@ -246,18 +246,31 @@ id route, and the token route implies share mode structurally (there is no query
 matches, versus the merge-base. A migration named `*_strategy_shares_*.sql` matches `/share/i`
 and trips it. **Verified by reading the file, not inferred.**
 
-Resolve deliberately — do NOT discover this at CI time. Options: (a) amend the guard's scope so it
-targets the scenario spine it was written for rather than the substring; (b) name the migration to
-avoid the substring, which is dodging a gate rather than satisfying it and should be argued if
-chosen. ⚠️ Cross-phase note: Phase 164.1 is literally "retire the frozen-spine gates that no longer
-bite" — coordinate, do not fix the same guard twice in two phases.
+⭐ **FOUNDER RULING 2026-08-26: AMEND THE GUARD'S SCOPE.** Narrow `FORBIDDEN_MIGRATION_RE` from the
+bare substring to the locked set the guard's own comment names — `scenario_shares`,
+`get_shared_scenario`, `create_scenario_share` — so `strategy_shares` passes while the scenario
+spine stays frozen. ⛔ Do NOT rename the migration to dodge the substring: that satisfies CI without
+satisfying the gate and leaves the trap armed for the next table with "share" in its name.
+⚠️ Cross-phase: Phase 164.1 is "retire the frozen-spine gates that no longer bite". This narrowing
+is the 164 slice; record it in 164.1 so the same guard is not edited twice with two rationales.
+⚠️ Anti-vacuity: after narrowing, prove the guard STILL bites — add a scenario-spine filename to the
+changed set and observe RED, then restore. A narrowed guard that no longer fails on anything is
+worse than the one it replaced.
 
 ### Blocker 2 — `fetchAndBuildPayload` is NOT exported, and a guard pins that
 
 It is declared at `v2/page.tsx:83` with no `export`. The token lane needs it (A.4 option (a)).
 Phase-148 guard pin #4 walks the repo and asserts no file other than `page.tsx` mentions it.
-Exporting it therefore requires a CONSCIOUS co-edit of that guard, with the reason recorded —
-never a silent widening.
+
+⭐ **FOUNDER RULING 2026-08-26: EXPORT IT AND AMEND THE GUARD.** Export `fetchAndBuildPayload` and
+widen pin #4 from "only `page.tsx`" to a NAMED ALLOW-LIST of exactly the two lanes
+(`v2/page.tsx` + the `factsheet-share/[token]` route), with the reason written into the guard.
+⛔ Do NOT duplicate the builder: the entire SL-1 argument rests on the token lane producing exactly
+what the owner lane produces, and a divergent second copy is precisely how two surfaces came to
+disagree elsewhere in this codebase. ⛔ Do NOT widen the guard to a wildcard — it must keep biting
+for every file outside the allow-list.
+⚠️ Anti-vacuity: after amending, add a THIRD file mentioning `fetchAndBuildPayload` and observe the
+guard RED, then remove it. An allow-list that admits everything is not a guard.
 
 ### Blocker 3 — the Sentry token scrub is NET-NEW, with no analog
 

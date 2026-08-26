@@ -452,6 +452,12 @@ re-derive them here; read the entry before planning.
 - **[H-0001]** `findMutations`' single-line `from(...).insert(...)` regex is blind at **6** known
   call sites (re-measured 2026-08-26 — the count grew, it was not just stale line numbers). Fix
   the detection, un-skip the intended-behavior test in `audit-coverage.test.ts`, re-run the census.
+- **[161-ERRPREFIX]** (founder ruling 2026-08-26) `KeyPermissionBadge.tsx:140` renders
+  `err.code ? `${err.code}: ${message}` : message`, so a founder with a broken key reads
+  `KEY_UNDECRYPTABLE: This stored key can no longer be decrypted…`. RULED: **split** — prose to the
+  user, structured code to the log and Sentry breadcrumb. ⚠️ CLASS change: the same site emits other
+  codes (PROBE_BACKEND_UNAVAILABLE…), so branch the class, not the one string. The prefix was
+  deliberate (comment at :137-138, support-ticket greppability) — preserve that property in the logs.
 - **[HONEST-08-RESIDUAL]** The shipped staler-of-two badge is verified live on PROD, but both
   visible rows bind to the series arm, so "correct staler-of-two" and "always binds to series"
   are not yet distinguished. `FreshnessChip`'s own comment warns over-binding would delete the
