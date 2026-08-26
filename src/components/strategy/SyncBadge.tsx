@@ -2,6 +2,7 @@ import { cn } from "@/lib/utils";
 import {
   resolveEffectiveRecency,
   FRESHNESS_COLORS,
+  FUTURE_SERIES_DOT,
   CLOCK_SKEW_TOLERANCE_MINUTES,
 } from "@/lib/freshness";
 
@@ -96,7 +97,16 @@ export function SyncBadge({
   // no second opinion about which of the two dates is worse; that duplication
   // is what let this surface and the factsheet chip contradict each other.
   const recency = resolveEffectiveRecency(computedAt, seriesEnd);
-  const dotColor = FRESHNESS_COLORS[recency.freshness].dot;
+  // ⛔ THE FUTURE ARM IS NOT AMBER (163-REVIEW, finding 2). `Freshness` has no
+  // neutral bucket, so a series end ahead of now lands on `warm` for LADDER
+  // purposes — but amber is the colour this product uses for "getting old",
+  // and a date that has not happened is not an age claim at all. The factsheet
+  // chip renders the identical input in `--color-text-muted` under
+  // "future — check data"; `FUTURE_SERIES_DOT` is that same token, so the two
+  // public surfaces answer one input with one colour.
+  const dotColor = recency.seriesEndIsFuture
+    ? FUTURE_SERIES_DOT
+    : FRESHNESS_COLORS[recency.freshness].dot;
   const exchangeLabel = exchange
     ? EXCHANGE_LABELS[exchange.toLowerCase()] ?? exchange
     : null;

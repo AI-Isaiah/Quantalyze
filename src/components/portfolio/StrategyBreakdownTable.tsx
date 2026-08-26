@@ -140,11 +140,19 @@ export function StrategyBreakdownTable({ strategies, attribution, portfolioId }:
         computedAt: analytics?.computed_at || null,
         // HONEST-08 — same gate, same reason: a non-terminal-success row has
         // already been nulled to `analytics = null` above, so it claims no
-        // track-record end either. `?? null` on the success path because the
-        // field is an optional projection alias; `seriesEndOf` falls back to
-        // the last point of the `returns_series` array this read carries.
-        // Absent/empty means unknown, which the freshness resolver caps below
-        // "fresh" rather than trusting.
+        // track-record end either.
+        //
+        // ⚠️ AT THIS CALL SITE THE SCALAR IS THE ONLY INPUT — the array arm of
+        // `seriesEndOf` is NOT a fallback here, and a comment claiming it was
+        // is what let a false-amber regression ship (163-REVIEW, finding 1).
+        // The page's `stripConstituentSeries` removes `returns_series` and
+        // `daily_returns` before this component is mounted (they must not enter
+        // the RSC flight payload), and it PROJECTS `series_end` in the same
+        // statement to replace them. So this row answers from that scalar, and
+        // if the projection were ever dropped the answer would silently become
+        // `null` — unknown — which the freshness resolver caps below "fresh"
+        // rather than trusting. That silence is exactly why the projection and
+        // the strip are one statement rather than two steps.
         seriesEnd: seriesEndOf(analytics),
       };
     });

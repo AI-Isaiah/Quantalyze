@@ -1,7 +1,13 @@
 import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { StrategyBreakdownTable } from "./StrategyBreakdownTable";
-import type { AttributionRow } from "@/lib/types";
+import { CompositionDonut } from "./CompositionDonut";
+import {
+  buildCompositionRows,
+  stripConstituentSeries,
+} from "@/app/(dashboard)/portfolios/[id]/page";
+import { EMPTY_ANALYTICS } from "@/lib/utils";
+import type { AttributionRow, StrategyAnalytics } from "@/lib/types";
 
 /**
  * H-0393 (audit-2026-05-07) — StrategyBreakdownTable had zero tests while the
@@ -22,6 +28,47 @@ vi.mock("next/link", () => ({
   ),
 }));
 
+// The call-site block at the bottom of this file imports the portfolio page
+// module, which is an RSC: `server-only` throws outside an RSC render and the
+// supabase server client must not be constructed for real. Same two mocks the
+// equity-curve spec in that page's own directory already uses.
+vi.mock("server-only", () => ({}));
+vi.mock("@/lib/supabase/server", () => ({
+  createClient: vi.fn(async () => ({
+    auth: { getUser: vi.fn(async () => ({ data: { user: null } })) },
+  })),
+}));
+
+// Recharts gets zero geometry in jsdom, so ResponsiveContainer never mounts its
+// children. `CompositionDonut`'s constituent table — and the SyncBadge in it,
+// which is the whole subject of the agreement oracle below — lives OUTSIDE the
+// chart, so passthrough stand-ins leave it untouched. Copied from
+// CompositionDonut's own spec.
+vi.mock("recharts", () => {
+  const Passthrough = ({ children }: { children?: React.ReactNode }) => (
+    <div>{children}</div>
+  );
+  const NullComponent = () => null;
+  return {
+    ResponsiveContainer: Passthrough,
+    PieChart: Passthrough,
+    Pie: Passthrough,
+    Cell: NullComponent,
+    Tooltip: NullComponent,
+    Legend: NullComponent,
+    XAxis: NullComponent,
+    YAxis: NullComponent,
+    CartesianGrid: NullComponent,
+    Line: NullComponent,
+    LineChart: Passthrough,
+    Area: NullComponent,
+    AreaChart: Passthrough,
+    Bar: NullComponent,
+    BarChart: Passthrough,
+    ReferenceLine: NullComponent,
+  };
+});
+
 type StrategyInput = {
   strategy_id: string;
   current_weight: number | null;
@@ -38,10 +85,21 @@ function strat(
     max_drawdown?: number | null;
     computed_at?: string | null;
     computation_status?: string | null;
-    // Phase 163 / HONEST-08 — `getPortfolioStrategies` carries the array, and
-    // `seriesEndOf` picks its last point. Fixtures supply it so the badge's
-    // second clock is exercised on the real shape this read delivers.
+    // Phase 163 / HONEST-08 — the badge's second clock.
+    //
+    // ⚠️ THIS IS THE RAW READ SHAPE, NOT THE MOUNT SHAPE, and the distinction
+    // is the whole of 163-REVIEW finding 1. `getPortfolioStrategies` carries
+    // the `returns_series` ARRAY, but the page STRIPS it before mounting this
+    // component (it must not enter the RSC flight payload), so the array never
+    // reaches the real table. The specs in this describe block feed the
+    // component directly and therefore pin its COMPONENT contract — what it
+    // does with whatever a caller hands it. The CALL-SITE contract — what the
+    // page actually hands it — is pinned separately at the bottom of this file,
+    // because a spec that only ever exercises a shape the page does not produce
+    // is how a false-amber regression shipped under a green suite.
     returns_series?: { date: string; value: number }[] | null;
+    // The projected scalar the page substitutes for the stripped array.
+    series_end?: string | null;
   } | null,
 ): StrategyInput {
   return {
@@ -395,5 +453,289 @@ describe("<StrategyBreakdownTable> — B14 per-constituent freshness", () => {
     // Not a staleness claim either — the job really did run 2h ago.
     expect(container.querySelectorAll(".bg-negative")).toHaveLength(0);
     expect(screen.getByText(/Synced 2h ago/i)).toBeTruthy();
+  });
+});
+
+/**
+ * ── 163-REVIEW finding 1 — THE REAL CALL SITE ───────────────────────────────
+ *
+ * THE DEFECT, shipped by the very phase that added the honesty requirement.
+ * Every constituent row of every portfolio rendered a FALSE AMBER dot:
+ *
+ *   - `getPortfolioStrategies` selects `returns_series` and projects NO
+ *     `series_end` alias.
+ *   - the page runs `stripConstituentSeries`, which destructures
+ *     `returns_series` and `daily_returns` OUT — deliberately, so a
+ *     potentially multi-year array never enters the RSC flight payload
+ *     (HONEST-04 / DEF-147-A).
+ *   - so at THIS component's mount both inputs to `seriesEndOf` were absent,
+ *     it answered `null`, `resolveEffectiveRecency` took its `unknown` arm, and
+ *     the verdict was capped at `warm` — permanently, on every row.
+ *
+ * A constituent whose analytics ran twenty minutes ago rendered an amber dot
+ * beside "Synced 20m ago". And `CompositionDonut`, on the SAME page, fed the
+ * UN-stripped array by `buildCompositionRows`, painted that same strategy
+ * GREEN. Two surfaces, one page, one strategy, two answers — the exact class
+ * HONEST-08 exists to close.
+ *
+ * ⭐ WHY THESE SPECS GO THROUGH `stripConstituentSeries` AND THE ONES ABOVE DO
+ * NOT. The component-level specs hand the table a hand-built row carrying
+ * `returns_series`. Every one of them passed while production was amber,
+ * because that is not a shape the page ever produces. A regression spec for
+ * this defect has to be fed by the page's own derivations or it proves nothing.
+ *
+ * ⭐ AND THE ORACLE IS AGREEMENT, NOT EITHER COMPONENT'S INTERNALS. The
+ * strongest available statement is "one strategy, one answer on one page", so
+ * the pivotal spec renders BOTH surfaces from ONE source row and asserts their
+ * dots match. That pins the invariant the product actually owes its reader
+ * rather than re-asserting whichever derivation happens to be in front of us —
+ * and unlike a bare equality it cannot be satisfied by breaking both surfaces
+ * the same way, because the fresh and dead controls fix what the shared answer
+ * must BE.
+ *
+ * ⭐ RED DEMONSTRATION (performed 2026-08-26, then restored). Neuter: in
+ * `stripConstituentSeries`, drop the projected scalar so the strip is a pure
+ * removal again — i.e. exactly the code that shipped —
+ *
+ *     -      return { ...analyticsRest, series_end: seriesEndOf(obj as …) };
+ *     +      return analyticsRest;
+ *
+ * Observed, verbatim, `Tests  4 failed | 13 passed (17)`:
+ *
+ *     × the page's own payload keeps a live constituent GREEN
+ *     × the breakdown table and the donut never disagree about one strategy
+ *     × a DEAD constituent still reads dead through the page's payload
+ *     × the array still never crosses the boundary — only the scalar does
+ *
+ * ⚠️ ALL FOUR OF THIS BLOCK FAILED, INCLUDING THE BOUNDARY SPEC, and that is
+ * worth saying plainly rather than claiming a tidier result. The boundary spec
+ * asserts BOTH halves of the swap — that the arrays are gone AND that the
+ * scalar replaced them — so its second half is part of the fix and cannot be a
+ * control for it. Its FIRST half is the control that matters, and that half
+ * held under the neuter (the neutered strip still removed both arrays): it is
+ * what stops the repair from degenerating into "just ship the array to the
+ * client", which would close the badge defect by reopening DEF-147-A. The
+ * genuinely independent control is `a DEAD constituent still reads dead`, which
+ * fails in the OPPOSITE direction from the live specs and so cannot be
+ * satisfied by any blanket recolouring.
+ *
+ * The thirteen specs above stayed GREEN throughout, which is the point made
+ * earlier: they never exercised the shape the page produces.
+ */
+describe("163-REVIEW finding 1 — the portfolio page's own payload", () => {
+  /** A `portfolio_strategies` row shaped as `getPortfolioStrategies` returns it. */
+  function sourceRow(
+    id: string,
+    name: string,
+    analytics: Record<string, unknown>,
+  ) {
+    return {
+      strategy_id: id,
+      current_weight: 0.5,
+      allocated_amount: 1_000_000,
+      strategies: {
+        id,
+        name,
+        strategy_analytics: { computation_status: "complete", ...analytics },
+      },
+    };
+  }
+
+  /** Every freshness dot rendered in a container, in DOM order. */
+  function dotClasses(container: HTMLElement): string[] {
+    return Array.from(container.querySelectorAll("span.rounded-full")).map(
+      (el) => el.className,
+    );
+  }
+
+  function renderTableFromPage(rows: ReturnType<typeof sourceRow>[]) {
+    return render(
+      <StrategyBreakdownTable
+        strategies={
+          stripConstituentSeries(rows) as Parameters<
+            typeof StrategyBreakdownTable
+          >[0]["strategies"]
+        }
+        attribution={null}
+        portfolioId="p-1"
+      />,
+    );
+  }
+
+  /** A live constituent: job ran 20 minutes ago, last bar is yesterday's. */
+  const LIVE = () =>
+    sourceRow("live", "Live", {
+      sharpe: 1.5,
+      cagr: 0.2,
+      computed_at: new Date(Date.now() - 20 * 60 * 1000).toISOString(),
+      returns_series: [
+        { date: isoDaysAgo(3), value: 1.0 },
+        { date: isoDaysAgo(1), value: 1.2 },
+      ],
+    });
+
+  /** The measured production shape: fresh job over a 112-day-dead track. */
+  const DEAD = () =>
+    sourceRow("dead", "Dead", {
+      sharpe: 1.1,
+      cagr: 0.1,
+      computed_at: hoursAgoIso(7),
+      returns_series: [{ date: isoDaysAgo(112), value: 1.4 }],
+    });
+
+  // RED under the neuter, verbatim: `AssertionError: expected  to have a
+  // length of 1 but got +0` on the `.bg-positive` query — the live row was
+  // amber.
+  it("the page's own payload keeps a live constituent GREEN", () => {
+    const { container } = renderTableFromPage([LIVE()]);
+
+    // The badge may not invent doubt about a strategy whose track record ran
+    // through yesterday and whose job succeeded twenty minutes ago.
+    expect(container.querySelectorAll(".bg-positive")).toHaveLength(1);
+    expect(container.querySelectorAll(".bg-amber-400")).toHaveLength(0);
+    expect(screen.getByText(/Synced 20m ago/i)).toBeTruthy();
+  });
+
+  // RED under the neuter, verbatim: `AssertionError: expected [ Array(1) ] to
+  // deeply equal [ Array(1) ]`, whose printed diff is the defect itself —
+  //     - "h-1.5 w-1.5 rounded-full shrink-0 bg-positive"
+  //     + "h-1.5 w-1.5 rounded-full shrink-0 bg-amber-400"
+  // i.e. the donut green and the table amber, for one strategy, on one page.
+  it("the breakdown table and the donut never disagree about one strategy", () => {
+    // ONE source row, both of the page's derivations, both surfaces.
+    const rows = [LIVE()];
+
+    const table = renderTableFromPage(rows);
+    const donut = render(
+      <CompositionDonut strategies={buildCompositionRows(rows, null)} />,
+    );
+
+    // The invariant, stated as the reader experiences it: the same strategy
+    // reports the same freshness wherever this page shows it.
+    expect(dotClasses(table.container)).toEqual(dotClasses(donut.container));
+    // …and pinned to the RIGHT answer, so "both broken identically" cannot
+    // satisfy the spec.
+    expect(dotClasses(table.container)[0]).toContain("bg-positive");
+  });
+
+  // RED under the neuter, verbatim: `AssertionError: expected  to have a
+  // length of 1 but got +0` on `.bg-negative` — the dead row was amber too,
+  // because the strip had erased the distinction between the two rows
+  // entirely. That is the direction of failure that makes this a real control:
+  // it demands red where the specs above demand green.
+  it("a DEAD constituent still reads dead through the page's payload", () => {
+    const { container } = renderTableFromPage([DEAD()]);
+
+    // The control against over-correction: a fix that simply stopped consulting
+    // the series would make the spec above pass and this one fail.
+    expect(container.querySelectorAll(".bg-negative")).toHaveLength(1);
+    expect(screen.getByText(/Track record ends 112d ago/i)).toBeTruthy();
+    expect(screen.queryByText(/Synced/i)).toBeNull();
+  });
+
+  // RED under the neuter, verbatim: `AssertionError: expected
+  // '[{"strategy_id":"live","current_weigh…' to contain 'series_end'` — the
+  // SECOND half only. The two `not.toContain` assertions above it held, which
+  // is the DEF-147-A control this spec carries.
+  it("the array still never crosses the boundary — only the scalar does", () => {
+    const payload = JSON.stringify(stripConstituentSeries([LIVE(), DEAD()]));
+
+    // DEF-147-A is not traded away to fix the badge.
+    expect(payload).not.toContain("returns_series");
+    expect(payload).not.toContain("daily_returns");
+    // What replaced it is one date string, derived server-side.
+    expect(payload).toContain("series_end");
+    expect(payload).toContain(isoDaysAgo(1));
+    expect(payload).toContain(isoDaysAgo(112));
+  });
+});
+
+/**
+ * ── 163-REVIEW finding 3 — DEFINED IS NOT THE SAME AS ANSWERED ──────────────
+ *
+ * `seriesEndOf` returned the moment `series_end !== undefined`, and Phase 163
+ * made `EMPTY_ANALYTICS` set `series_end: null` EXPLICITLY. So the two facts
+ * combined into a trap: any caller composing a real row OVER that constant —
+ * the `{...EMPTY_ANALYTICS, ...row}` idiom used by `CompareContent` and by
+ * `shapeRowAnalytics` — handed the resolver a DEFINED `null` sitting beside a
+ * perfectly readable `returns_series`, and the array arm became unreachable.
+ * The surface was then capped at the resolver's `unknown` arm — amber, forever,
+ * on data it could actually read.
+ *
+ * It was LATENT when reviewed: the compare page composes that shape but mounts
+ * no `SyncBadge`. It is still a defect rather than a style note, because the
+ * trap was created by making the field explicit on the empty constant while the
+ * resolver kept treating "defined" as "authoritative" — the two halves are in
+ * different files and neither is wrong alone.
+ *
+ * ⭐ RED DEMONSTRATION (performed 2026-08-26, then restored). Neuter: restore
+ * the original guard in `seriesEndOf` —
+ *
+ *     -  if (a.series_end) return a.series_end;
+ *     +  if (a.series_end !== undefined) return a.series_end;
+ *
+ * The observed failure is transcribed on the spec. The CONTROL below stayed
+ * GREEN under it and must stay green after: a composed row with genuinely NO
+ * series is still capped below "fresh", so the repair cannot be mistaken for
+ * "stop capping unknown series".
+ */
+describe("163-REVIEW finding 3 — a row composed over EMPTY_ANALYTICS", () => {
+  function composedRow(analytics: Partial<StrategyAnalytics>): StrategyInput {
+    return {
+      strategy_id: "c",
+      current_weight: 1,
+      strategies: {
+        id: "c",
+        name: "Composed",
+        // Defaults FIRST, fetched columns second — the exact idiom, including
+        // the `series_end: null` the constant contributes.
+        strategy_analytics: {
+          ...EMPTY_ANALYTICS,
+          computation_status: "complete",
+          ...analytics,
+        },
+      },
+    };
+  }
+
+  // RED under the neuter, verbatim: `AssertionError: expected  to have a
+  // length of 1 but got +0` on `.bg-positive` — the constant's explicit null
+  // had suppressed the series the row was carrying.
+  it("an explicit series_end: null never suppresses the series the row carries", () => {
+    const { container } = render(
+      <StrategyBreakdownTable
+        strategies={[
+          composedRow({
+            sharpe: 1.5,
+            computed_at: hoursAgoIso(2),
+            returns_series: [{ date: isoDaysAgo(1), value: 1.2 }],
+          }),
+        ]}
+        attribution={null}
+        portfolioId="p-1"
+      />,
+    );
+
+    expect(container.querySelectorAll(".bg-positive")).toHaveLength(1);
+    expect(container.querySelectorAll(".bg-amber-400")).toHaveLength(0);
+    expect(screen.getByText(/Synced 2h ago/i)).toBeTruthy();
+  });
+
+  it("CONTROL: with no series at all the cap below 'fresh' still holds", () => {
+    const { container } = render(
+      <StrategyBreakdownTable
+        strategies={[
+          composedRow({ sharpe: 1.5, computed_at: hoursAgoIso(2) }),
+        ]}
+        attribution={null}
+        portfolioId="p-1"
+      />,
+    );
+
+    // Falling through to the array arm and finding nothing answers `null` —
+    // unknown — which is exactly where it started. A fresh job over an
+    // unreadable track record is still not evidence of a live strategy.
+    expect(container.querySelectorAll(".bg-positive")).toHaveLength(0);
+    expect(container.querySelectorAll(".bg-amber-400")).toHaveLength(1);
   });
 });
