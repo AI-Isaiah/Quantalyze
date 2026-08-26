@@ -535,7 +535,11 @@ items were dropped, not carried. Categories: **Fix now** / **Fix mid-term** / **
    passed; restored → 147 passed).
    **Completed:** v0.69.1.0 (2026-08-21)
 
-0d. **[159-SEED-01] 15 published `is_example` strategies sit at `computation_status =
+0d. **✅ RESOLVED 2026-08-26 — the 15 rows were DELETED from PROD (see `D-162-1` below); 0
+   `is_example` strategies remain, so this census finding no longer describes reality. Kept as
+   the record of why RANK-01's badge floor mattered.** Original text follows.
+
+   **[159-SEED-01] 15 published `is_example` strategies sit at `computation_status =
    'failed'` while still carrying KPI values — PROD, since 2026-05-27.** Measured by the
    phase-159 C-M1 census (`.planning/phases/159-rank-public-ranking-integrity/159-CENSUS.md`,
    run read-only against PROD 2026-08-21): of 18 published strategies in the only category
@@ -2206,7 +2210,19 @@ write lane; one is a founder scope call; two are hygiene. Evidence for all five:
 `.planning/phases/162-honest-what-the-user-sees-is-true/162-CENSUS.md` (§Recompute — NOT
 EXECUTED, §str/None follow-through, §Discovery observation).
 
-- [ ] **`D-162-1` NOT EXECUTED — all 15 published example rows are still `failed` and still
+- [x] **`D-162-1` CLOSED 2026-08-26 BY DELETION — the 15 rows no longer exist.** ⚠️ Everything
+      below this line is the SUPERSEDED record of the state before the deletion; it is kept for
+      the reasoning, not as current fact. Recompute was measured IMPOSSIBLE (`csv_daily_returns`
+      held 0 rows for all 15 while the handler needs >=2), so on founder instruction the rows
+      were unpublished AND deleted from PROD, verified: 0 examples remain. Cascades took 1470
+      match_candidates, 29 portfolio memberships, 5 favourites, 3 contact_requests; 28
+      allocation_events and 3 match_decisions were cleared first as FK blockers. Full backup
+      held outside the repo. Found stale by the phase-162 verifier — this filing still said
+      "still published" after the rows were gone.
+
+  <details><summary>Superseded pre-deletion record</summary>
+
+  **`D-162-1` NOT EXECUTED — all 15 published example rows are still `failed` and still
       published.** `51a111ed-0000-4000-8000-0000000000{01..15}`, `computation_status = failed`
       since **2026-05-27**, series ending April 2026. **0 recomputed, 0 unpublished, 0
       touched.** Plan 162-08's Task 1 could not run: the service-role credential read is denied
