@@ -12,14 +12,19 @@ limiter gate iterates that dict, so its population IS the limited set and an
 omission is *structurally invisible* to it — not "missed", but unreachable by
 construction:
 
-* ``test_limiter_identity.py:568-594`` ``test_rate_limited_route_set_is_a_literal``
-  (the plan cites this as ``:567-594``; the ``def`` sits at 568) builds
-  ``{name for name in rl.limiter._route_limits if name.startswith("routers.")}``
-  and compares it to a literal. A route with no decorator contributes no name.
-* ``test_limiter_identity.py:596-612``
-  ``test_every_registered_router_limit_is_shared_or_quarantined`` iterates the
-  same dict, asserting each REGISTERED limit keys correctly. It says nothing
-  about routes that registered nothing.
+* ``test_limiter_identity.py`` ``test_rate_limited_route_set_is_a_literal``
+  builds ``{name for name in rl.limiter._route_limits if
+  name.startswith("routers.")}`` and compares it to a literal. A route with no
+  decorator contributes no name.
+* ``test_limiter_identity.py`` ``test_every_registered_router_limit_is_shared``
+  iterates the same dict, asserting each REGISTERED limit keys correctly. It says
+  nothing about routes that registered nothing.
+
+  (Both were cited by LINE here — ``:568-594`` and ``:596-612`` — and both line
+  ranges went stale within one phase, as did the second one's NAME: SEC-05 /
+  Phase 163 renamed it from ``…_is_shared_or_quarantined`` when it stopped
+  carrying a carve-out. Cited by name only from now on. The names are unique in
+  that file and survive edits that line numbers do not.)
 
 Both are good gates for what they cover — limiter IDENTITY, i.e. which bucket a
 limited route keys on. Neither covers COVERAGE, i.e. whether a route is limited
@@ -309,8 +314,19 @@ def _limited_keys() -> set[str]:
 #
 # SHRINK INSTRUCTION: if any route below is ever given a real limit, DELETE its
 # entry here IN THE SAME COMMIT. The equality is deliberate precisely so that a
-# repair cannot leave a stale exemption behind
-# (`test_limiter_identity.py:484-486`).
+# repair cannot leave a stale exemption behind (the same instruction on
+# `test_limiter_identity.py`'s `IP_KEYED_QUARANTINE`).
+#
+# ⭐ THAT INSTRUCTION HAS NOW BEEN OBEYED ONCE, WHICH IS THE POINT OF WRITING IT
+# DOWN. SEC-05 (Phase 163) repaired `routers/simulator.py` and shrank the sibling
+# `IP_KEYED_QUARANTINE` from one entry to `frozenset()`. The lesson that came back
+# with it belongs here: that quarantine was only HALF the concealment — a bare
+# `if name == "routers.simulator.portfolio_simulator": continue` inside the
+# sibling's behavioural sweep exempted the same route a second time, and it was
+# invisible to anyone reading the constant to find out what was exempt. ⛔ If you
+# are ever tempted to skip a route inside a loop in THIS file, put it in the
+# roster above with a reason instead. An exemption that cannot be found by
+# grepping the roster is not an exemption, it is a hole.
 # ---------------------------------------------------------------------------
 
 NO_LIMITER_QUARANTINE: frozenset[str] = frozenset(
