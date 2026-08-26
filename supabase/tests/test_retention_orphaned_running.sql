@@ -198,6 +198,7 @@ DECLARE
   v_terminal INTEGER;
   v_next     INTEGER;
   v_reason   INTEGER;
+  v_kindcount INTEGER;
   v_win_a    INTEGER;
   v_win_b    INTEGER;
   v_mat      INTEGER;
@@ -270,10 +271,31 @@ BEGIN
   END IF;
 
   IF v_command NOT ILIKE '%error_kind%' THEN
-    RAISE EXCEPTION 'TEST FAILED (1/JOB-05): the deployed body does not set error_kind. get_user_compute_jobs synthesises its user-facing message from (status, error_kind), so a terminalized row with a NULL error_kind renders the vaguer "tried multiple times without success" arm rather than the accurate permanent-failure one.';
+    RAISE EXCEPTION 'TEST FAILED (1/JOB-05): the deployed body does not set error_kind. Both user-facing readers synthesise their copy from (status, error_kind) -- get_user_compute_jobs.user_message and computation_error_copy, which is what strategy_analytics.computation_error carries -- so a terminalized row with a NULL error_kind renders the cautious default on both instead of the accurate worker-died one.';
   END IF;
-  IF v_command NOT ILIKE '%''permanent''%' THEN
-    RAISE EXCEPTION 'TEST FAILED (1/JOB-05): the deployed body does not classify the failure as permanent. permanent is the documented value for "skip retries, go directly to failed_final" (20260411144407:159-160); anything else misdescribes an orphan as retryable on the one surface that reads the pair.';
+
+  -- ⛔ FLIPPED FROM 'permanent' TO 'orphaned' by mig 20260826140000 (Phase 162
+  -- review F-3), and the COUNT replaces the old presence test. 'permanent' here
+  -- was the DEFECT: these jobs are ones whose WORKER DIED holding the claim, so
+  -- they are retryable by definition, but 'permanent' is the kind that means
+  -- "skip retries" and both readers say so out loud -- computation_error_copy's
+  -- permanent arm tells the user "retrying alone will not resolve it". It does
+  -- not self-heal either: the 20260819130500 readmit sweep is csv-only, and once
+  -- the bridge writes computation_status = 'failed' its NOT EXISTS conjunct
+  -- blocks readmit permanently. So the user retrying is the only mechanism left,
+  -- and the copy talked them out of it.
+  --
+  -- 2 = one per arm, NOT a presence test: a presence test is satisfied by either
+  -- arm surviving, so a half-converted reaper (arm A flipped, arm B still
+  -- 'permanent') would pass unnoticed -- and that is worse than no conversion,
+  -- because the class still mislabelled is now invisible to anyone looking for
+  -- the fix.
+  v_kindcount := (length(v_command) - length(replace(v_command, '''orphaned''', ''))) / length('''orphaned''');
+  IF v_kindcount <> 2 THEN
+    RAISE EXCEPTION 'TEST FAILED (1/F-3): the deployed body classifies as ''orphaned'' % times, expected 2 (one per arm). Arm A reaps claims older than the 4h window, arm B reaps never-claimed running rows older than 48h -- BOTH are worker deaths and both are retryable. A missing conversion leaves that arm''s users reading copy that tells them retrying will not help.', v_kindcount;
+  END IF;
+  IF v_command ILIKE '%''permanent''%' THEN
+    RAISE EXCEPTION 'TEST FAILED (1/F-3): the deployed body still classifies a reaped orphan as ''permanent''. That is the finding F-3 closed: a job whose worker died is not a permanent failure, and labelling it one makes both user-facing surfaces state something false about retryability. If the reaper genuinely needs to write permanent again, the copy arms in computation_error_copy and get_user_compute_jobs must change in the same commit.';
   END IF;
 
   -- 2 = one fixed audit literal per arm.
@@ -514,8 +536,13 @@ BEGIN
   IF v_next <= v_ancient THEN
     RAISE EXCEPTION 'TEST FAILED (2/arm A/JOB-05/B3): the terminalized row next_attempt_at is still at its century-backdated seed value (%), so the janitor did not advance it. retention_compute_jobs_failed deletes failed rows on COALESCE(next_attempt_at, created_at) older than 90 days, so this row is eligible for removal on the very NEXT 03:30 tick -- the audit trail this cron promises would last hours instead of ninety days.', v_next;
   END IF;
-  IF v_kind IS DISTINCT FROM 'permanent' THEN
-    RAISE EXCEPTION 'TEST FAILED (2/arm A/JOB-05): the terminalized row error_kind is % and not permanent. get_user_compute_jobs synthesises its user-facing message from (status, error_kind), so the row renders the vaguer "tried multiple times without success" arm instead of the accurate permanent-failure one.', v_kind;
+  -- ⛔ 'orphaned', not 'permanent' (mig 20260826140000, Phase 162 review F-3).
+  -- This is the END-TO-END half of the Part 1 body assertion: Part 1 proves the
+  -- deployed TEXT says orphaned, this proves a real tick actually WROTE it, so a
+  -- CHECK that silently rejected the value -- which would abort the whole pg_cron
+  -- block and leave the row running -- cannot pass both.
+  IF v_kind IS DISTINCT FROM 'orphaned' THEN
+    RAISE EXCEPTION 'TEST FAILED (2/arm A/F-3): the terminalized row error_kind is % and not orphaned. Both user-facing readers derive their copy from (status, error_kind): at ''permanent'' the user is told retrying will not resolve it, and at anything unmodelled they get the cautious default. This row''s worker DIED holding the claim -- the job never reached a verdict -- so it is retryable, and retrying is the only mechanism that computes it (the 20260819130500 readmit sweep is csv-only and is blocked once computation_status reads failed).', v_kind;
   END IF;
   IF v_err IS NULL THEN
     RAISE EXCEPTION 'TEST FAILED (2/arm A/JOB-05): the terminalized row carries no last_error. That column is the ONLY operator-visible record of WHY the row was terminalized (it is hard-redacted from users at the RPC and zod layers), so without it an operator cannot tell a reaped orphan from a genuine handler failure.';
@@ -559,8 +586,8 @@ BEGIN
   IF v_next <= v_ancient THEN
     RAISE EXCEPTION 'TEST FAILED (2/arm E/JOB-05/B3): the arm-B terminalized row next_attempt_at is still at its century-backdated seed value (%). Same consequence as arm A: retention_compute_jobs_failed collects it on the next nightly tick and the audit trail is voided.', v_next;
   END IF;
-  IF v_kind IS DISTINCT FROM 'permanent' OR v_err IS NULL THEN
-    RAISE EXCEPTION 'TEST FAILED (2/arm E/JOB-05): the arm-B terminalized row carries error_kind % and last_error %, expected permanent and a non-null fixed audit literal. The two arms must terminalize IDENTICALLY apart from the reason text; a divergence here means one arm writes a row an operator or the user_message synthesis cannot read.', v_kind, v_err;
+  IF v_kind IS DISTINCT FROM 'orphaned' OR v_err IS NULL THEN
+    RAISE EXCEPTION 'TEST FAILED (2/arm E/F-3): the arm-B terminalized row carries error_kind % and last_error %, expected orphaned and a non-null fixed audit literal. The two arms must terminalize IDENTICALLY apart from the reason text; a divergence here means one arm writes a row the operator channel or the user-facing copy synthesis cannot read. ⚠️ If this arm says permanent while arm A says orphaned, the conversion is HALF DONE -- never-claimed orphans are still being told that retrying will not help.', v_kind, v_err;
   END IF;
 
   -- ----- (F) arm-B negative: 12h is inside the 48h window ----------------
@@ -582,7 +609,7 @@ BEGIN
     RAISE EXCEPTION 'TEST FAILED (2/whole-block/JOB-05): one tick terminalized % of my six seeded rows, expected exactly 2 (arms A and E). Every other seed is a documented false-positive guard, so any other number means a guard fell or a terminalization was lost -- and the per-arm assertions above should name which.', v_cnt;
   END IF;
 
-  RAISE NOTICE 'Part 2 OK: the 4h-past claimed orphan and the 48h-past NULL-claim orphan were both terminalized to failed_final with next_attempt_at advanced, error_kind permanent, a fixed last_error and claimed_at preserved; the 3h batch-tail, the freshly-claimed row, the aged done row and the 12h NULL-claim row were all left running/done; and all 6 seeded rows survived the tick.';
+  RAISE NOTICE 'Part 2 OK: the 4h-past claimed orphan and the 48h-past NULL-claim orphan were both terminalized to failed_final with next_attempt_at advanced, error_kind orphaned, a fixed last_error and claimed_at preserved; the 3h batch-tail, the freshly-claimed row, the aged done row and the 12h NULL-claim row were all left running/done; and all 6 seeded rows survived the tick.';
 
   -- Teardown, belt-and-suspenders; the ROLLBACK also discards everything.
   DELETE FROM auth.users WHERE id = v_user;

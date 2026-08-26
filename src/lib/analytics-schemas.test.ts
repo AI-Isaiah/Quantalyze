@@ -208,7 +208,7 @@ describe("EncryptKeyResponseSchema (envelope-encryption contract)", () => {
  *  - .strict() rejects unknown fields (added column = schema bump)
  *  - last_error is z.null() (redaction-layer regression trips parse)
  *  - status enum is fixed at 6 values (drift = parse failure)
- *  - error_kind enum is transient/permanent/unknown (or null)
+ *  - error_kind enum is transient/permanent/unknown/orphaned (or null)
  *  - exchange enum is binance/okx/bybit (or null)
  *  - attempts non-negative, max_attempts positive, trade_count non-negative
  */
@@ -325,9 +325,10 @@ describe("GetUserComputeJobsRowSchema", () => {
   });
 
   it("rejects unknown error_kind", () => {
-    // The RPC's error_kind is constrained to transient/permanent/unknown.
-    // A future write path emitting "timeout" would slip past untyped
-    // consumers; the schema flags it.
+    // The RPC's error_kind is constrained to transient/permanent/unknown/
+    // orphaned ('orphaned' added by mig 20260826140000, and pinned against the
+    // SQL CHECK by check-zod-db-check-parity.test.ts). A future write path
+    // emitting "timeout" would slip past untyped consumers; the schema flags it.
     const result = GetUserComputeJobsRowSchema.safeParse({
       ...valid,
       error_kind: "timeout",
