@@ -67,7 +67,7 @@ verified-stale items are excluded by construction.
 - [ ] **OPS-07** (L1594 + L1595 + L1600): Flag-monitor honesty — `checkStuckNotifications` distinguishes "nothing stuck" from "could not tell"; a failed denominator read pages instead of logging success; the integration test actually falsifies both.
 - [ ] **OPS-08** (L1562): The 10-param `_enqueue_compute_job_internal` no longer uses `INTO STRICT` on its lost-race branches (parity with the deliberately de-STRICT-ed 7-param overload).
 - [ ] **OPS-09** (L1561): The resync draft pre-check is deterministic (`ORDER BY created_at DESC` + bounded window).
-- [ ] **OPS-10** (L1558): The retry loop cancels abandoned response bodies (`body.cancel()`) so undici stops buffering until the attempt signal fires.
+- [x] **OPS-10** (L1558): The retry loop cancels abandoned response bodies (`body.cancel()`) so undici stops buffering until the attempt signal fires.
 - [x] **OPS-11** (L1531): The `MultiKeyConnectStep` order-sensitive flake is root-caused (unrestored `vi.stubGlobal`/`vi.mock` class) and fixed, not retried-away.
 
 ### LEDGER — Recurring strategy refresh for ledger-backed venues (Phase 161.1)
@@ -84,7 +84,7 @@ verified-stale items are excluded by construction.
 - [ ] **SEC-03** (L2511): `add_wizard_composite_key` is policed by the audit-coverage gate — the pragma-vs-real-emission decision is made and recorded, not dodged.
 - [ ] **SEC-04** (L3006 + L3013): The bridge and portfolio-optimizer flows get a named `bridgeComputeLimiter` sized to backend reality (closing the 30× front/back mismatch) — ⛔ without resizing the shared `userActionLimiter`.
 - [ ] **SEC-05** (L604): The tenth IP-keyed route (`simulator.py`) is repaired along with the test whose wrapper-check conceals it (equality assertion, quarantine shrinks to 0).
-- [ ] **SEC-06** (L2361): Removing a panel mid-validate aborts the in-flight credential-carrying POST.
+- [x] **SEC-06** (L2361): Removing a panel mid-validate aborts the in-flight credential-carrying POST.
 
 ### DEPS — The booked dependency campaign
 
@@ -161,14 +161,14 @@ Which phases cover which requirements. Updated during roadmap creation.
 | OPS-07 | Phase 163 | Pending |
 | OPS-08 | Phase 163 | Pending |
 | OPS-09 | Phase 163 | Pending |
-| OPS-10 | Phase 163 | Pending |
+| OPS-10 | Phase 163 | Complete |
 | OPS-11 | Phase 158 | Complete |
 | SEC-01 | Phase 163 | Pending |
 | SEC-02 | Phase 163 | Pending |
 | SEC-03 | Phase 163 | Pending |
 | SEC-04 | Phase 163 | Pending |
 | SEC-05 | Phase 163 | Pending |
-| SEC-06 | Phase 163 | Pending |
+| SEC-06 | Phase 163 | Complete |
 | DEPS-01 | Phase 165 | Pending |
 
 **Coverage:**

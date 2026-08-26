@@ -5,17 +5,17 @@ milestone_name: Backlog Burndown (Phases 158+)
 current_phase: 161
 current_phase_name: WIZERR — Honest error surfaces
 status: verifying
-stopped_at: Completed 162-02-PLAN.md
-last_updated: "2026-08-25T23:19:36.584Z"
+stopped_at: Completed 163-08-PLAN.md
+last_updated: "2026-08-26T12:41:11.474Z"
 last_activity: 2026-08-25
 last_activity_desc: Phase 161.1 wave 4 — composite arm landed DORMANT; composite PROD tracer still owed
-state_head: fcf8e397a216ceee2bb4ca2ac5b079da1e2283e4
+state_head: b61545158ea118035db4791134964ce6650bff32
 progress:
-  total_phases: 10
+  total_phases: 11
   completed_phases: 1
-  total_plans: 44
-  completed_plans: 34
-  percent: 10
+  total_plans: 53
+  completed_plans: 42
+  percent: 9
 ---
 
 # Project State — Quantalyze
@@ -495,7 +495,7 @@ Prior-phase 141.1 close-out detail (retained; NOT about 142.1):
         2 WARNING gaps, no BLOCKER. See `140.1-VERIFICATION.md`. Not transitioned (`--no-transition`).
 Last activity: 2026-08-02 -- Phase 142 execution started
 
-Progress: [█░░░░░░░░░] 10%
+Progress: [█░░░░░░░░░] 9%
 
 ### Phase 140.1 close-out — open items (do NOT lose these)
 
@@ -641,6 +641,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 | Phase 162 P04 | 25m | 2 tasks | 4 files |
 | Phase 162 P09 | 25m | 2 tasks | 2 files |
 | Phase 162 P02 | 2h40m | 3 tasks | 11 files |
+| Phase 163 P08 | 35min | 2 tasks | 4 files |
 
 ## Accumulated Context
 
@@ -800,6 +801,9 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - [Phase 161]: 162-02: computation_error is curated at the SQL bridge from compute_jobs.error_kind, never from last_error; the operator column keeps raw text
 - [Phase 161]: 162-02: classify_exception is NOT curated (rejected option 2 — it would strip diagnosis from compute_jobs.last_error and redden the api_keys.sync_error invariant)
 - [Phase 161]: 162-02: the three compute_jobs error kinds yield TWO honest sentences plus a cautious default — transient and unknown reach failed_final only via attempt exhaustion
+- [Phase 161]: 163-08: the seam body cancel uses a full capability ladder, not res.body?.cancel().catch() — the sketch throws on a present body whose cancel is missing or not callable, measured RED
+- [Phase 161]: 163-08: doRemove does NOT clean the abort ref maps (plan deviation, measured) — the catch reads the reason a microtask later, so a synchronous delete reds the funnel with SERVICE_UNREACHABLE; validatePanel's finally already cleans both
+- [Phase 161]: 163-08: vi.fn attaches its own handler to a returned promise, suppressing unhandledRejection — a spy is not a neutral observer of promise handling; use a plain closure when the oracle IS the rejection
 
 ### Decisions (execution-time, Phase 140.2)
 
@@ -1502,8 +1506,8 @@ Load-bearing sequencing (real dependencies, do not reorder):
 
 ## Session
 
-**Last Date:** 2026-08-25T22:16:35.932Z
-**Stopped At:** Completed 162-01-PLAN.md
+**Last Date:** 2026-08-26T12:41:10.589Z
+**Stopped At:** Completed 163-08-PLAN.md
 **Last Date:** 2026-08-25T22:26:01.687Z
 **Stopped At:** Completed 162-03-PLAN.md
 **Last Date:** 2026-08-25T22:28:04.096Z
