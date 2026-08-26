@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 19
+open_count: 20
 waived_count: 0
 fixed_count: 1
-total_count: 20
-last_updated: 2026-08-25T23:45:55.414Z
+total_count: 21
+last_updated: 2026-08-26T12:58:42.034Z
 ---
 
 # Broken Windows Ledger
@@ -35,6 +35,7 @@ last_updated: 2026-08-25T23:45:55.414Z
 | 18 | 162 | unmet-truth | .planning/phases/162-honest-what-the-user-sees-is-true/162-08-PLAN.md |  | 162-08 backstop truth is only HALF evidenced. Code half: proven at the seam (StrategyTable.stale-analytics 16/16, both HONEST-03 guards witnessed RED by neuter+restore). Data half: absent — the 15 example rows are still failed and still published, so discovery renders no Synced badge on them but is still not honest about them. An unevidenced backstop routes to human_needed; this one must not be read as a pass. | open |  | 2026-08-25T23:44:25.891Z |  |
 | 19 | 162 | deviation | src/app/(dashboard)/allocations/components/ScenarioComposer.tsx |  | RESTORED (originally recorded 2026-08-25T22:28:18.784Z by plan 162-04; lost from the ledger JSON by a concurrent-append race and re-added by 162-08). 162-04: metric pair now renders in all five C-4 states (previously hidden when both null); two existing SCEN-03 assertions updated accordingly | open |  | 2026-08-25T23:45:43.649Z |  |
 | 20 | 162 | deviation | src/components/strategy/StrategyGrid.tsx | 117 | RESTORED WITH A CORRECTED REASON (originally recorded 2026-08-25T22:26:27.302Z by plan 162-03; lost from the ledger JSON by a concurrent-append race). Original text said 'SyncBadge still ungated on computation_status (is_example guard added; consumer-less component)'. Re-measured at HEAD 2026-08-26: 'consumer-less' is FALSE (StrategyTable.tsx:1421 renders StrategyGrid, and grid is discovery-only by founder ruling at StrategyTable.tsx:387-398). The real gap is narrower: the grid gate has the is_example half and lacks the hasComputedAnalytics half the table carries (StrategyTable.tsx:982-983). NOT user-visible — shapeRowAnalytics blanks computed_at to empty for non-terminal-success rows — so guard-hygiene, not blocking. Filed with full reasoning in TODOS.md under 'Phase 162 (HONEST) — plan 162-08 filings'. | open |  | 2026-08-25T23:45:55.414Z |  |
+| 21 | 163 | deviation | src/lib/freshness.ts |  | HONEST-08: the plan's stated staler-of-two rule (older date wins) was corrected to a per-subject verdict comparison — see 163-04-SUMMARY deviation 1 | open |  | 2026-08-26T12:58:42.034Z |  |
 
 ````json
 [
@@ -276,6 +277,18 @@ last_updated: 2026-08-25T23:45:55.414Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-08-25T23:45:55.414Z",
+    "resolved_at": null
+  },
+  {
+    "id": 21,
+    "kind": "deviation",
+    "phase": "163",
+    "file": "src/lib/freshness.ts",
+    "line": null,
+    "description": "HONEST-08: the plan's stated staler-of-two rule (older date wins) was corrected to a per-subject verdict comparison — see 163-04-SUMMARY deviation 1",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-08-26T12:58:42.034Z",
     "resolved_at": null
   }
 ]
