@@ -176,17 +176,17 @@ Which phases cover which requirements. Updated during roadmap creation.
 | OPS-03 | Phase 158 | Complete |
 | OPS-04 | Phase 158 | Complete |
 | OPS-05 | Phase 163 | Complete |
-| OPS-06 | Phase 163 | Pending |
-| OPS-07 | Phase 163 | Pending |
-| OPS-08 | Phase 163 | Pending |
-| OPS-09 | Phase 163 | Pending |
+| OPS-06 | Phase 163 | Complete |
+| OPS-07 | Phase 163 | Complete |
+| OPS-08 | Phase 163 | Code-complete (migration UNAPPLIED — not in effect) |
+| OPS-09 | Phase 163 | Complete |
 | OPS-10 | Phase 163 | Complete |
 | OPS-11 | Phase 158 | Complete |
 | SEC-01 | Phase 163 | Complete |
-| SEC-02 | Phase 163 | Pending |
+| SEC-02 | Phase 163 | Complete |
 | SEC-03 | Phase 163 | Complete |
-| SEC-04 | Phase 163 | Pending |
-| SEC-05 | Phase 163 | Pending |
+| SEC-04 | Phase 163 | Complete |
+| SEC-05 | Phase 163 | Complete |
 | SEC-06 | Phase 163 | Complete |
 | DEPS-01 | Phase 165 | Pending |
 

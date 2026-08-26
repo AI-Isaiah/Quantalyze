@@ -4,17 +4,17 @@ milestone: v1.20
 milestone_name: Backlog Burndown (Phases 158+)
 current_phase: 163
 current_phase_name: HARDEN — Fail safe, closed, and loud
-status: verifying
-stopped_at: Phase 163 wave 1 complete — all 8 plans merged
-last_updated: "2026-08-26T13:00:58.846Z"
-last_activity: 2026-08-25
-last_activity_desc: Phase 163 wave 1 — 8 plans merged; 3 reviewers cleared the de-STRICT migration after 9 findings
+status: reviewing
+stopped_at: Phase 163 COMPLETE — 9/9 plans merged (both waves); verification gaps_found 12/13, OPS-08 code-complete but UNAPPLIED
+last_updated: "2026-08-26T00:00:00.000Z"
+last_activity: 2026-08-26
+last_activity_desc: Phase 163 wave 2 — SEC-01 measured password floor + SEC-03 audit law; all gates green; ledger corrections from verification
 state_head: 21c232837722e7d1582eef3452462c2eb1d52047
 progress:
   total_phases: 11
   completed_phases: 1
   total_plans: 53
-  completed_plans: 42
+  completed_plans: 43
   percent: 9
 ---
 
