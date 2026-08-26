@@ -1,5 +1,47 @@
 # Changelog
 
+## [0.75.0.3] - 2026-08-26
+
+### Two silent planning gates found, and the Phase 164 plans closed out
+
+No user-facing change, no source change. This release closes Phase 164's planning and
+records two gates that were not firing — both of the kind whose failure mode is silence,
+where a skipped run and a clean run look identical from outside.
+
+### Added
+
+- **Phase 164 plans** (5 plans, 2 waves) for the share-token work, plus `164-VALIDATION.md`.
+- **A decision register for `D-01`..`D-09`** in the phase CONTEXT. The five plans cite those
+  labels 85 times and the file defined none of them — the planner had assigned a numbering
+  the source document never carried. Every ruling did exist, under a different name
+  (`A-D1`, `A-D2`, `A-D3`, the token model, the 410 delivery ruling); the register maps
+  each label to its section and introduces no new decision.
+- **NYQ-01**, a new finding: `workflow.nyquist_validation` is enabled and each phase's
+  research carries the section that triggers it, yet no `VALIDATION.md` was produced for
+  phases 161.1, 163 or 164 — 163 shipped without one. Nothing reported the gap. Founder
+  ruling: regenerate rather than waive.
+
+### Fixed
+
+- **A phase CONTEXT heading still asserted a withdrawn rule.** The body had been corrected
+  to say that published strategies keep `/factsheet/<id>?share=1` unchanged, but the
+  heading above it still read "and A-D1 relocates it" — so anyone reading headings got the
+  opposite of the ruling. The heading now matches the body, and the register flags this
+  ruling as the one most likely to be misread.
+- **Four plan verify commands piped test output through `tail`**, which returns tail's exit
+  status — a red vitest run would have greened the task gate. Now prefixed with
+  `set -o pipefail` (measured: `false | tail` exits 0; with pipefail, exits 1).
+
+### Changed
+
+- **SKIP-01's remedy confirmed by measurement for this instance.** After the migration was
+  hand-applied to the TEST database, the SQL lane printed `OPS-08 Part 1+3 OK` instead of
+  the skip arm. The green check itself proved nothing — the skip arm also exits green — so
+  the evidence is the notice text read out of the job log. CI-MIGRATE-01 remains the fix
+  for the class.
+- Phase 164's research now marks its three open questions resolved, each with a pointer to
+  where it was settled.
+
 ## [0.75.0.2] - 2026-08-26
 
 ### Planning record corrected by live measurement

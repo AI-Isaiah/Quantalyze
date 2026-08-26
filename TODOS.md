@@ -1094,6 +1094,37 @@ tolerance is permanently silent there.
 migration gate is armed.** Measure the catalog directly (`pg_get_functiondef` / `obj_description`).
 
 
+### NYQ-01 — a config-enabled planning gate stopped firing and nothing noticed (booked 2026-08-26)
+
+⭐ **Founder-ruled 2026-08-26: regenerate, don't waive.** Surfaced while closing Phase 164's
+plan-checker gate.
+
+**The mechanism, measured.** `.planning/config.json` sets `workflow.nyquist_validation: true`.
+`plan-phase` step 5.5 keys on a `## Validation Architecture` section in the phase RESEARCH.md and
+writes `{phase}-VALIDATION.md`. Measured across phases 158–164:
+
+| Phase | RESEARCH has `## Validation Architecture` | VALIDATION.md |
+|---|---|---|
+| 158, 159, 160, 161, 162 | yes | **present** |
+| 161.1, 163, 164 | yes | **absent** |
+
+So the precondition held every time and the artifact simply stopped being written. 163 was planned,
+executed, verified and SHIPPED without it. Nothing in the pipeline reported a missing gate —
+`gsd-plan-checker` only flags it if something invokes the checker, and on 164 the planner had been
+hand-spawned outside the orchestrator, so the checker did not run either until it was invoked by
+hand. **Two independent gates were silent at once, and the run still looked clean.**
+
+- **[NYQ-01] Make a skipped step 5.5 loud.** Writing 164-VALIDATION.md by hand fixes one instance;
+  it does not fix why five phases' worth of the gate produced nothing. Wanted: a check that fails
+  when `nyquist_validation: true` and a phase has `## Validation Architecture` but no VALIDATION.md
+  — the same shape as the `sql-tests` anti-SKIP net.
+- **[NYQ-01b] Backfill or explicitly waive 163 and 161.1.** Both shipped; the artifact is now
+  archival, so a recorded waiver may be the honest close rather than a reconstructed document.
+
+⚠️ Same family as **SKIP-01** and **CI-MIGRATE-01**: a gate whose failure mode is *silence*, where
+the green run and the un-run run are indistinguishable from the outside. The standing lesson holds —
+**absence of a red is not evidence a gate fired.** Check the artifact, not the exit code.
+
 ### Phase 163 / WR-06 residual — a non-UTC reporter reads "ends in the future" ~3h every day (added 2026-08-26)
 
 WR-06 is FIXED for the defect it named (a future series end no longer renders amber beside
@@ -1316,6 +1347,23 @@ today. See **SKIP-01** below: the drift is one symptom of TEST never receiving m
 
 
 ### ⛔ SKIP-01 — nothing applies migrations to TEST, so the OPS-08 gate SKIPs FOREVER (added 2026-08-26)
+
+✅ **REMEDY CONFIRMED BY MEASUREMENT 2026-08-26 (this instance only).** `20260826150000` was
+hand-applied to TEST via MCP (10-param body MD5 `f349af15a256ad00bd31952723ae7b00`, 7674 bytes —
+byte-identical to PROD), and PR #720's `sql-tests` lane then printed the *assertion* arm rather
+than the skip:
+
+```
+test_enqueue_internal_destrict.sql:775: NOTICE:  OPS-08 Part 1+3 OK: the deployed 10-param
+body carries no strict lost-race re-read, does raise serialization_failure on an exhausted
+one, and its catalog COMMENT still carries the revert-discriminator marker.
+```
+
+⚠️ This closes the *instance*, not the class. The green check itself proved nothing — the
+`SKIP (Part 3)` arm exits green too, which is what made this invisible. The evidence is the NOTICE
+text, read out of the job log. **CI-MIGRATE-01 remains the class fix**; until it lands, every new
+migration self-check is born silent on TEST.
+
 
 Found by live measurement after PR #717 merged, while checking whether the recorded "OPS-08
 code-complete, migration unapplied" state was still true. It is true — of the wrong database.
