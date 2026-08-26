@@ -82,7 +82,7 @@
 
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { dirname, resolve } from "node:path";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -241,9 +241,22 @@ function main(): void {
 }
 
 // Only run the CLI when invoked directly (not when imported by tests).
-if (
-  import.meta.url === `file://${process.argv[1]}` ||
-  import.meta.url.endsWith(process.argv[1] ?? "")
-) {
-  main();
+//
+// ⚠️ The `?? ""` fallback this replaced was always-true: EVERY string ends with
+// the empty string, so `argv[1] === undefined` made the guard fire on a plain
+// import and run `main()` — including its `process.exit(1)` path — inside
+// whatever imported it (Phase 163 IN-03). Both the undefined and the
+// empty-string cases are now rejected before `endsWith` is reached.
+const entryPath = process.argv[1];
+if (entryPath !== undefined && entryPath.length > 0) {
+  // `pathToFileURL` is the exact comparison (it handles Windows drive letters,
+  // spaces and percent-encoding that a hand-built `file://` prefix does not).
+  // The `endsWith` arm stays for loaders that hand `import.meta.url` a
+  // specifier that is not byte-identical to the resolved entry path.
+  if (
+    import.meta.url === pathToFileURL(entryPath).href ||
+    import.meta.url.endsWith(entryPath)
+  ) {
+    main();
+  }
 }
