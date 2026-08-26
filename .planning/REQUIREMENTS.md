@@ -50,6 +50,15 @@ verified-stale items are excluded by construction.
 - [x] **HONEST-01** (L1939): Raw Python exception strings never render as user-facing `computation_error` copy — curated at the write boundary.
 - [ ] **HONEST-07** (split from HONEST-01, 2026-08-26): Root-cause the `str`/`None` compare behind the 2 damaged rows. Stage (`poll_positions`), window (2026-06-10 … 06-14) and population (2 strategies, one shared 59-char `TypeError`) are pinned; no site exists at HEAD and no traceback survives, and the job kind is retired (0 successes ever, dead since 2026-06-14). May prove unclosable — reassess rather than carry forever.
 - [x] **HONEST-08** (found by post-deploy QA 2026-08-26, assigned to Phase 163): The public discovery table's "Synced Nd ago" badge must not advertise freshness a dead return series contradicts. MEASURED ON PROD: `Phoenix Protocol` renders "Synced 7h ago" on `/browse/crypto-sma` while its series ends 2026-05-06 — **112 days stale**; its own factsheet chip correctly reads `Track record · old`. Two public surfaces, one strategy, contradicting each other. HONEST-02 fixed the factsheet chip; HONEST-03 scoped the badge fix to EXAMPLE rows only, so real published strategies were never covered — and with the 15 examples deleted the `is_example` gate now sees no row that would exercise it. ⛔ Do NOT close by removing the badge: bucket it on the staler of sync- and series-recency, mirroring `FreshnessChip`.
+  ✅ **VERIFIED LIVE ON PROD 2026-08-26** (real browser, unauthenticated). Both original defect
+  rows now name the staler clock: `Momentum Sphinx` renders "Track record ends 7d ago" (was
+  "Synced 16m ago") and `Phoenix Protocol` renders "Track record ends 112d ago" (was
+  "Synced 7h ago"). The badge changed SUBJECT, not just wording.
+  ⚠️ Limit not cleared: both visible rows legitimately bind to the series arm, so this page
+  cannot distinguish correct staler-of-two from always-binds-to-series — the over-binding
+  failure `FreshnessChip` warns about (it would delete the sync copy everywhere) needs a
+  published row with a FRESH series to prove absent. Newest series end across PROD is 1 day
+  old, so such a row exists but is not on this cohort.
 - [x] **HONEST-02** (L1953): The factsheet freshness badge reflects series recency — a strategy whose return series ended 89 days ago cannot read FRESH; investigate (flat account vs derive gap) before fixing.
 - [x] **HONEST-03** (L1959): Example strategies don't advertise stale "Synced Nd ago" badges on discovery.
 - [x] **HONEST-04** (L1991): `buildEquityCurveSeries` serves real per-strategy equity curves now that `returns_series` is selected — the hard-coded `equityCurve: null` and its false comment go.
@@ -69,9 +78,14 @@ verified-stale items are excluded by construction.
   ⭐ The reason this is a closure and not a regression: an uncalled monitor is not observability. It reads as coverage while providing none, which is the same defect the requirement's own word "honesty" is about. Wiring a caller would have manufactured a monitor no one asked for or consumed.
   The surviving clauses are MET and strengthened — review WR-02 found the fix had closed one of four blind arms, and the three numerator arms (sentry fetch threw, non-ok response, missing credentials) now return 503 like the denominator arms already did.
 - [~] **OPS-08** (L1562): The 10-param `_enqueue_compute_job_internal` no longer uses `INTO STRICT` on its lost-race branches (parity with the deliberately de-STRICT-ed 7-param overload).
-  ⚠️ MET-AT-MERGE, not pending. The requirement is worded about the DEPLOYED function and no
-  database has the migration; merging is the only automated apply path, so the merge IS the
-  remedy and blocking on it is causally backwards. ⛔ Verified consequence: the gate's
+  ✅ MET — MEASURED ON PROD 2026-08-26 after the merge: the 10-param body carries **0**
+  `INTO STRICT` lost-race re-reads, raises `serialization_failure`, and holds the OPS-08 marker
+  comment. Prior note said "no database has the migration"; that is now true only of TEST.
+  ⛔ TEST still runs the PRE-FIX body and nothing applies migrations to it, so the SQL gate's
+  pre-apply SKIP is PERMANENT there and no test executes the deployed body — see SKIP-01.
+  ⚠️ MET-AT-MERGE, not pending. The requirement is worded about the DEPLOYED function and
+  merging was the only automated apply path, so the merge WAS the remedy and blocking on it
+  would have been causally backwards. ⛔ Verified consequence: the gate's
   `SKIP (Part 3)` marker does not match CI's anti-SKIP net, so the lane stays green and NO CI
   signal will ever redden to report the unapplied state — only prose tracks it. See DRIFT-01.
 - [x] **OPS-09** (L1561): The resync draft pre-check is deterministic (`ORDER BY created_at DESC` + bounded window).
@@ -200,7 +214,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | OPS-05 | Phase 163 | Complete |
 | OPS-06 | Phase 163 | Complete |
 | OPS-07 | Phase 163 | Complete |
-| OPS-08 | Phase 163 | Code-complete (migration UNAPPLIED — not in effect) |
+| OPS-08 | Phase 163 | Complete — APPLIED + verified on PROD 2026-08-26. ⛔ NOT on TEST (see SKIP-01) |
 | OPS-09 | Phase 163 | Complete |
 | OPS-10 | Phase 163 | Complete |
 | OPS-11 | Phase 158 | Complete |
