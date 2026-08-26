@@ -230,10 +230,13 @@ export const auditLogExportLimiter = makeLimiter(10, "3600 s");
 // set to the backend's own, with no invented headroom on top.
 //
 // The size is the EFFECTIVE backend budget, and "effective" is the whole
-// point. The Python side caps both endpoints at slowapi "10/hour" per TENANT
-// (analytics-service/routers/portfolio.py:1945-1947 and :1684-1686), but that
-// storage is memory:// and therefore PER REPLICA (services/rate_limit.py:117-119
-// — "with N Railway replicas every number above is N x looser"), so the nominal
+// point. The Python side caps both endpoints at slowapi "10/hour" per TENANT —
+// the `@limiter.limit` decorators on the `portfolio_bridge` and
+// `portfolio_optimizer` handlers in `analytics-service/routers/portfolio.py`,
+// keyed `tenant_or_platform_key` with scopes of the same names. But slowapi's
+// storage is memory:// and therefore PER REPLICA (the ASSUMPTION-3 storage
+// note in the `analytics-service/services/rate_limit.py` module docstring —
+// "with N Railway replicas every number above is N x looser"), so the nominal
 // 10 is a floor of unknown multiple until N is known. MEASURED: the production
 // analytics service runs numReplicas = 1 in a single region, with the worker
 // merged into the API process rather than held on a second replica. So
@@ -248,7 +251,8 @@ export const auditLogExportLimiter = makeLimiter(10, "3600 s");
 // above 10 the front door promises budget the backend will not serve, below 10
 // it refuses calls the backend would have served — unjustified against 0
 // measured demand. The bridge handler's extra in-handler per-user window
-// (30/3600s, portfolio.py:227-228) is LOOSER than 10/hour/tenant and so never
+// (`_BRIDGE_USER_RATE_LIMIT` / `_BRIDGE_USER_RATE_WINDOW_SEC` in that same
+// portfolio router, 30 per 3600s) is LOOSER than 10/hour/tenant and so never
 // binds first.
 //
 // (b) WHY NOT PIGGYBACKED ON userActionLimiter. That bucket is 5/60s = 300/hour
