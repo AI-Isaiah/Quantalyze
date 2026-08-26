@@ -743,6 +743,189 @@ describe("/api/cron/flag-monitor", () => {
   });
 
   // -------------------------------------------------------------------------
+  // WR-02 (163 review) — THE NUMERATOR HALF OF THE SAME CLASS.
+  //
+  // ⚠️ WHY THESE EXIST WHEN THE ARMS THEY COVER WERE ALREADY TESTED. Every one
+  // of the five faults below ALREADY had a case in this file (I-T4a, I-T4b,
+  // "test_sentry_unreachable_returns_warn_response", I-perf-cron) and every one
+  // of them asserted the `reason` string and NOTHING ELSE. The classification
+  // was correct the whole time and paged nobody: all five returned at the
+  // default HTTP 200, so Vercel's cron history — which keys "did this run
+  // succeed?" off the status code, and is this route's page channel — recorded
+  // an unbroken run of green while the monitor was blind. OPS-07 fixed the
+  // denominator's two arms and left these four in the same file, so a suite
+  // that could see a Supabase read failure still could not see a rotated
+  // SENTRY_AUTH_TOKEN, which is the likelier fault of the two.
+  //
+  // These pin the FULL terminal answer, and the status is asserted SEPARATELY
+  // from the reason for exactly the reason above: a reason-only assertion is
+  // green on both sides of the defect.
+  //
+  // ⭐ RED DEMO (performed, then restored from a byte backup — never `git
+  //    checkout --`, which would destroy uncommitted work; see the commit body
+  //    for the verbatim failure output): reverting each arm to its pre-fix
+  //    `return { kind: "terminal", res: NextResponse.json({ ok: false, reason })
+  //    }` fails all five runs on `expected 200 to be 503` — and ONLY on that.
+  //    Every `reason` assertion, old and new, stays green.
+  // -------------------------------------------------------------------------
+  /** The five shapes of "we could not read the numerator". Table-driven so a
+   *  sixth is a one-line addition rather than a sixth copy-pasted block. */
+  const NUMERATOR_FAILURES = [
+    {
+      name: "the Sentry fetch THREW (ECONNRESET)",
+      reason: "sentry_unreachable",
+      setup: () => {
+        fetchSpy.mockImplementation((async (url: string) => {
+          if (typeof url === "string" && url.includes("sentry.io")) {
+            throw new Error("ECONNRESET");
+          }
+          throw new Error(`unexpected fetch: ${url}`);
+        }) as typeof fetch);
+      },
+    },
+    {
+      // THE headline scenario: an expired or rotated Sentry auth token. Every
+      // 15 minutes, forever, until someone happens to look at the body.
+      name: "a ROTATED auth token (Sentry 401)",
+      reason: "sentry_unreachable",
+      setup: () => {
+        fetchSpy.mockImplementation((async (url: string) => {
+          if (typeof url === "string" && url.includes("sentry.io")) {
+            return new Response(JSON.stringify({ detail: "Invalid token" }), {
+              status: 401,
+              headers: { "content-type": "application/json" },
+            });
+          }
+          throw new Error(`unexpected fetch: ${url}`);
+        }) as typeof fetch);
+      },
+    },
+    {
+      name: "a Sentry 5xx",
+      reason: "sentry_unreachable",
+      setup: () => mockSentry(0, 502),
+    },
+    {
+      name: "Sentry THROTTLING us (429 + rate-limit headers)",
+      reason: "sentry_rate_limited",
+      setup: () => {
+        fetchSpy.mockImplementation((async (url: string) => {
+          if (typeof url === "string" && url.includes("sentry.io")) {
+            return new Response("Too Many Requests", {
+              status: 429,
+              headers: {
+                "content-type": "text/plain",
+                "retry-after": "60",
+                "x-sentry-rate-limit-remaining": "0",
+              },
+            });
+          }
+          throw new Error(`unexpected fetch: ${url}`);
+        }) as typeof fetch);
+      },
+    },
+    {
+      // Not transient at all — a deploy defect that persists until someone
+      // acts, which makes reporting it as a successful run the most durable
+      // false-health this route can emit.
+      name: "SENTRY_ORG_SLUG missing (a deploy defect, not a blip)",
+      reason: "sentry_not_configured",
+      setup: () => {
+        delete process.env.SENTRY_ORG_SLUG;
+      },
+    },
+    {
+      name: "SENTRY_AUTH_TOKEN missing",
+      reason: "sentry_not_configured",
+      setup: () => {
+        delete process.env.SENTRY_AUTH_TOKEN;
+      },
+    },
+  ] as const;
+
+  for (const scenario of NUMERATOR_FAILURES) {
+    it(`WR-02: ${scenario.name} ends the run NON-200 with its own reason, and PAGES`, async () => {
+      scenario.setup();
+      const admin = makeAdminMock({ auditLogTotal: 1000 });
+      vi.doMock("@/lib/supabase/admin", () => ({
+        createAdminClient: () => admin,
+      }));
+      const handler = await loadHandler();
+      const res = await handler(
+        makeReq({ authorization: `Bearer ${process.env.CRON_SECRET}` }),
+      );
+      const body = await res.json();
+
+      // The classification — UNCHANGED by this fix, and that is the point:
+      // it was already right, and on its own it never reached an operator.
+      expect(body.ok).toBe(false);
+      expect(body.reason).toBe(scenario.reason);
+
+      // ...and the PAGE. This is the assertion the pre-fix arms failed.
+      expect(
+        res.status,
+        "Vercel's cron history keys 'did this run succeed?' off the status " +
+          "code. A 200 here means a blind monitor logs a GREEN run every 15 " +
+          "minutes and the /process-key error-rate alert is silently dead.",
+      ).toBe(503);
+      expect(res.status).not.toBe(200);
+
+      expect(captureMock).toHaveBeenCalledTimes(1);
+      const captureArgs = (captureMock.mock.calls[0] as unknown[])[1] as {
+        tags: Record<string, string>;
+      };
+      expect(captureArgs.tags).toMatchObject({
+        route: "cron.flag-monitor",
+        monitor_read_failed: "true",
+        monitor_term: "numerator",
+      });
+
+      // A numerator failure is NOT a denominator failure: the denominator was
+      // never read, so tagging it as one would send the operator to Supabase
+      // for a fault that lives in the Sentry query.
+      expect(captureArgs.tags.denominator_read_failed).toBeUndefined();
+
+      // No zero-traffic story, and no email — same reasoning as the
+      // denominator arms above.
+      expect(
+        admin.upsertCalls.filter(
+          (c) => c.row.flag_key === "flag_monitor_zero_denominator_streak",
+        ),
+      ).toHaveLength(0);
+      expect(sendMock).not.toHaveBeenCalled();
+    });
+  }
+
+  it("WR-02: the denominator arms KEEP their own Sentry tag — widening the helper did not retire an existing filter", async () => {
+    // `denominator_read_failed:"true"` is the tag any Sentry alert rule or
+    // saved search written for 141.2 / OPS-07 matches on. Generalising
+    // `denominatorReadFailed` into `monitorReadFailed` must not silently drop
+    // it, or the widening trades one blind spot for another.
+    mockSentry(0);
+    const admin = makeAdminMock({
+      auditLogTotal: 5000,
+      auditLogError: { message: "PGRST301: JWT expired", code: "PGRST301" },
+    });
+    vi.doMock("@/lib/supabase/admin", () => ({
+      createAdminClient: () => admin,
+    }));
+    const handler = await loadHandler();
+    const res = await handler(
+      makeReq({ authorization: `Bearer ${process.env.CRON_SECRET}` }),
+    );
+
+    expect(res.status).toBe(503);
+    const tags = ((captureMock.mock.calls[0] as unknown[])[1] as {
+      tags: Record<string, string>;
+    }).tags;
+    expect(tags).toMatchObject({
+      denominator_read_failed: "true",
+      monitor_read_failed: "true",
+      monitor_term: "denominator",
+    });
+  });
+
+  // -------------------------------------------------------------------------
   // I-T4 — Sentry-not-configured + Sentry-unreachable distinction.
   // -------------------------------------------------------------------------
   it("I-T4a: SENTRY_ORG_SLUG missing returns sentry_not_configured + no kill-switch flip", async () => {
