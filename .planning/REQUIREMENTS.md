@@ -79,7 +79,13 @@ verified-stale items are excluded by construction.
 
 ### SEC — Small security hardening
 
-- [ ] **SEC-01** (L940): The server-side password policy is verified and enforced — client `minLength={6}` is backed by an explicit Supabase-side policy, documented.
+- [x] **SEC-01** (L940): The server-side password policy is verified and enforced — client `minLength={6}` is backed by an explicit Supabase-side policy, documented. ⚠️ MEASURED 2026-08-26 and recorded as a point-in-time READING, never as an invariant.
+
+  1. **The reading.** The hosted production project's minimum password length is **6**, with **no character-class requirement**. Both facts are the server's own, not the GoTrue default — which is exactly what RESEARCH assumption A1 assumed and this measurement retires.
+  2. **The method, and why it was the only lane.** No management-API token exists on the machine that ran this (`~/.supabase/access-token` absent, `SUPABASE_ACCESS_TOKEN` unset) and the Supabase MCP exposes no auth-config reader, so the policy was read directly off the live signup endpoint with a deliberately-failing 1-character password — rejected at validation, so no account is created. It answered `422 weak_password` ("Password should be at least 6 characters.") with `weak_password.reasons = ["length"]`. The second fact needs no second probe: a 1-character lowercase password violates length AND every character class at once, GoTrue enumerates every violated reason, and a configured character policy would have added `"characters"`. It returned `["length"]` alone.
+  3. **"Enforced" cannot mean enforced HERE — and that is not a shortfall.** Signup goes browser → hosted GoTrue directly (`supabase.auth.signUp`); there is no Next.js server hop to enforce anything on, and `minLength` on an input is an HTML affordance devtools bypasses. So the client floor is UX only, and the requirement's "backed by" is the real claim: the hosted minimum is EQUAL to the client floor, not merely compatible with it. The plan's escalation branch (hosted minimum < 6 ⇒ a founder-visible live op to raise it) did not fire.
+  4. **Drift-proofing.** The two independent client constants — a bare `minLength={6}` literal in `SignupForm.tsx` and a private `const MIN_PASSWORD_LENGTH = 6` in `ResetPasswordForm.tsx` — are unified into one exported `MIN_PASSWORD_LENGTH` in `src/lib/auth/password-policy.ts`, whose docblock carries the value, the date and the method. Both forms now derive their `minLength` **and** their user-facing copy from it. ⛔ `supabase/config.toml` (`minimum_password_length`, `password_requirements`) is NOT the hosted policy — it governs only the LOCAL dev stack, and citing it as evidence is the specific mis-citation this entry exists to prevent.
+  5. **The limit of the guarantee, stated rather than papered over.** The setting is dashboard-owned with no repo representation; it can change outside git at any time and no test here can observe that. `src/lib/auth/password-policy.test.ts` therefore pins only what the repo controls — that the constant still equals the recorded reading, and that neither form has re-hardcoded a numeric `minLength`. Proven able to fail in three directions (each neuter observed RED, then restored and hash-verified): re-hardcoding `minLength={6}` in `SignupForm.tsx`, dropping the constant to 5, and reverting `ResetPasswordForm.tsx` to its own private constant.
 - [ ] **SEC-02** (L2953): The tracked docs no longer carry local absolute paths / the macOS username; verified by a no-allowlist scan (the gitleaks allowlist is path-based and blind here). ⚠️ MEASURED 2026-08-26 (pre-edit, NUL-safe, tree-wide): **95** tracked files of 5693 carry the token — **88** under `.planning/` and **7** outside it — across ~940 raw occurrences. Earlier figures were undercounts: the ROADMAP's "~50" was low, and both "80" and "87" are `.planning/`-only figures that leave the 7 non-planning files leaking. Always re-measure live; the count drifts as files are added.
 
   Four decisions are RECORDED here because the requirement, not just the code, has to carry them:
@@ -170,7 +176,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | OPS-09 | Phase 163 | Pending |
 | OPS-10 | Phase 163 | Complete |
 | OPS-11 | Phase 158 | Complete |
-| SEC-01 | Phase 163 | Pending |
+| SEC-01 | Phase 163 | Complete |
 | SEC-02 | Phase 163 | Pending |
 | SEC-03 | Phase 163 | Pending |
 | SEC-04 | Phase 163 | Pending |
