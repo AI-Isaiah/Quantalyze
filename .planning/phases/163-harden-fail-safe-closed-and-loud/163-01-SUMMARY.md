@@ -118,7 +118,12 @@ status: complete
 
 ## Accomplishments
 
-- **Closed the live secret-exposure path on the worker.** `main_worker.py` carried ZERO references to `configure_logging` or `structlog` at the base commit. It now calls `configure_logging()` at module scope, above every first-party import. Under the neuter demo the unfixed worker printed `api_key=QZ-OPS05-CANARY-…` in plaintext AND `ccxt failure: https://…&signature=QZ-OPS05-CANARY-…` — the exact HMAC disclosure the LogRecord factory exists to stop.
+- **Closed the secret-exposure path on the standalone worker entrypoint.**
+  ⚠️ CORRECTED 2026-08-26 (review WR-08): this said "the LIVE ... path on the worker". Production does
+  not run `main_worker.py` as a separate service — the worker is merged into the API process
+  (`main.py:297` logs "merged into API"). The fix is real and preventive, and the standalone path is
+  still reachable, but calling it a live production leak overstated it. The apparent source of the
+  overstatement was a stale Sprint-3 Dockerfile header, now corrected. `main_worker.py` carried ZERO references to `configure_logging` or `structlog` at the base commit. It now calls `configure_logging()` at module scope, above every first-party import. Under the neuter demo the unfixed worker printed `api_key=QZ-OPS05-CANARY-…` in plaintext AND `ccxt failure: https://…&signature=QZ-OPS05-CANARY-…` — the exact HMAC disclosure the LogRecord factory exists to stop.
 - **Removed the API process's reliance on luck.** `main.py` configured logging *below* its `from routers import …` line; it was safe only because no router happened to log at import time. The call is hoisted, and an AST ordering gate now fails if either entrypoint sinks it again.
 - **Shipped the Mode A source-scan gate with no allowlist**, plus a subprocess demo proving a module-scope `.bind()` leaks verbatim even after `configure_logging()` — so the gate is a security control, not a style rule.
 - **Found and fixed a fail-quiet inside the redaction machinery itself** (Rule 1 deviation, detail below): the scrubber was corrupting `%`-format templates and causing stdlib logging to silently DROP records at 3 measured call sites, two of which run in production today.

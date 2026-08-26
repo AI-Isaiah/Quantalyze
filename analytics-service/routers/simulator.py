@@ -100,11 +100,19 @@ logger = logging.getLogger("quantalyze.analytics")
 # body, so a quota keyed on the server-set ``req.user_id`` cannot be expressed in
 # the decorator at all. It is enforced IN-HANDLER instead, mirroring
 # routers/portfolio.py's ``_check_sliding_window_rate``. The decorator is the
-# platform-facing ceiling; this is the per-user quota behind it. ⚠️ Until
-# ``src/lib/analytics-client.ts`` mints ``X-Tenant-Claim`` (the recorded 140.2
-# obligation) real traffic still lands on the documented
-# ``platform:/api/simulator`` ceiling — which is exactly why deleting this
-# in-handler check on the strength of the rekey would be wrong.
+# platform-facing ceiling; this is the per-user quota behind it.
+#
+# ⛔ DO NOT DELETE THIS CHECK — and note the reason CHANGED on 2026-08-26
+# (phase 163 review). The old reason given here was that
+# ``src/lib/analytics-client.ts`` mints no ``X-Tenant-Claim``, so real traffic
+# lands on the platform ceiling. That premise is now FALSE:
+# ``analytics-client.ts:468`` sets the header unconditionally, so the claim arm
+# DOES fire on real traffic.
+#
+# The conclusion survives on a different, durable fact: slowapi's ``key_func``
+# runs before the request body is parsed, so a decorator CANNOT see the
+# per-user identity this check enforces. Correcting the premise without
+# noticing that would make deleting this check look safe. It is not.
 #
 # In-process only (not distributed-safe across workers); the Next.js front-door
 # Upstash limiter remains the cross-worker authority. Bound on distinct users

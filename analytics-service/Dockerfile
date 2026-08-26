@@ -1,11 +1,15 @@
-# CMD-override note (Sprint 3):
-# This image serves BOTH the FastAPI API server (default CMD below) and
-# the durable compute_jobs worker. The Railway worker service overrides
-# CMD to: python -m main_worker
-# which runs the dispatch + watchdog + daily-enqueue asyncio loops.
-# The default CMD remains uvicorn for the API service — no change needed
-# for existing deployments. Only the worker service's railway.toml (or
-# Railway UI) sets the CMD override.
+# CMD note. ⚠️ STALE HEADER CORRECTED 2026-08-26 (phase 163 review, WR-08).
+#
+# This block described a SEPARATE Railway worker service overriding CMD to
+# `python -m main_worker`. That topology is gone — the worker was merged into
+# the API process (see `main.py:297`, which logs "Worker starting as ... (merged
+# into API)"). There is ONE service and it runs the default CMD below.
+#
+# Why this mattered enough to fix: this header was the apparent SOURCE for a
+# claim elsewhere that `main_worker.py` is a live production entrypoint. It
+# made a stale deployment note read as evidence about current production. The
+# standalone `python -m main_worker` path still exists and is still worth
+# configuring correctly, but it is not what production runs.
 
 FROM python:3.12-slim
 
