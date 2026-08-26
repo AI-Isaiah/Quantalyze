@@ -415,13 +415,12 @@ BEGIN
     -- jargon appears; it cannot remove jargon. Rewording this string into
     -- curated user copy would be cosmetic, and it would additionally push user
     -- copy into the operator log line for the allocator / portfolio / api_key
-    -- callers, which are not user-facing at all. The fix is a TS change, and
-    -- The fix is a TS change and it HAS LANDED (2026-08-26): csv-finalize now
-    -- branches on SQLSTATE 40001 and writes curated copy instead of prefixing
-    -- this sentence. So this string stays operator-shaped ON PURPOSE and is
-    -- now correct to do so — the user no longer reads it, and the allocator /
-    -- portfolio / api_key callers, which are not user-facing at all, still get
-    -- the precise operator wording they need.
+    -- callers, which are not user-facing at all. The fix is a TS change, and it
+    -- HAS LANDED (2026-08-26): csv-finalize now branches on SQLSTATE 40001 and
+    -- writes curated copy instead of prefixing this sentence. So this string
+    -- stays operator-shaped ON PURPOSE and is now correct to do so — the user
+    -- no longer reads it, while the allocator / portfolio / api_key callers
+    -- still get the precise operator wording they need.
     --
     -- What the old note got RIGHT, and what therefore stays: naming the
     -- internal SECDEF function and the four internal UUIDs here would make the
