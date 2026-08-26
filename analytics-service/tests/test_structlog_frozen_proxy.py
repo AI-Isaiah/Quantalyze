@@ -1,4 +1,5 @@
-"""OPS-05 (Phase 163) — the redaction chain reaches BOTH entrypoints.
+"""OPS-05 (Phase 163) — the redaction chain reaches BOTH entrypoints, and the
+module-scope-``.bind()`` shape that would permanently escape it is gated.
 
 Why this file exists
 --------------------
@@ -24,9 +25,8 @@ import, and ``TestEntrypointOrdering`` fails if either regresses.
 a CONCRETE ``BoundLogger`` holding whatever processor list was in force at that
 instant. At module scope that instant is import time, i.e. before any entrypoint
 configures, so the object carries the default (unredacted) chain FOREVER — later
-``structlog.configure()`` calls cannot reach it. Mode A is a source-shape problem
-rather than an ordering one, and its source-scan gate lands in this same file
-next; everything below covers Mode B.
+``structlog.configure()`` calls cannot reach it. ``TestModeAModuleScopeBind``
+scans for that shape and pins the mechanism with a live subprocess demo.
 
 ⚠️ MEASURED CORRECTION to the phase research (2026-08-26, this session)
 ----------------------------------------------------------------------
@@ -46,10 +46,12 @@ So Mode B is a WINDOW, not a freeze — but on the worker that window was the wh
 process lifetime, which is strictly worse than the freeze the research described.
 Mode A is the genuinely permanent one. Both statements are demonstrated below
 rather than asserted: ``test_a_line_emitted_before_configure_leaks`` shows the
-window leaking in a fresh, unconfigured interpreter.
+window leaking in a fresh, unconfigured interpreter, and
+``test_a_module_scope_bind_leaks_even_after_configure`` shows a bind surviving a
+subsequent ``configure_logging()``.
 
-Anti-vacuity record — the Mode B gates observed RED
---------------------------------------------------
+Anti-vacuity record — every gate observed RED
+--------------------------------------------
 Every gate here was neutered, observed failing, and restored. Byte backups were
 taken first; each restore was confirmed by grepping for the restored call, not by
 hash alone.
@@ -76,6 +78,17 @@ hash alone.
   ``TestEntrypointOrdering::test_entrypoint_configures_logging_before_any_first_party_import[main.py-routers]``
   FAILED with *"`configure_logging()` is at line 71 but the first-party import
   'routers' at line 67 runs BEFORE it"*. Restored.
+
+* **Mode A mutation M3** — this gate is PREVENTIVE, so a violation had to be
+  introduced on purpose. Pre-edit gate token, measured with this same AST walk at
+  the phase's base commit BEFORE any edit: 111 non-test modules scanned, 0
+  module-scope binds. Mutation: appended
+  ``_frozen_scratch = structlog.get_logger("scratch").bind(component="scratch")``
+  at module scope in ``services/rate_limit.py``. Observed 1 failed / 2 passed —
+  ``TestModeAModuleScopeBind::test_no_module_scope_bind_in_non_test_code`` FAILED
+  with ``module-scope `.bind()` found at ['services/rate_limit.py:140']``. The
+  scratch line was removed and the gate returned GREEN; ``git status`` shows
+  services/rate_limit.py unmodified.
 
 ⛔ ``structlog.testing.capture_logs`` is deliberately NOT used anywhere in this
 file. It REPLACES the processor chain, so ``_redact_processor`` never runs and a
@@ -442,4 +455,164 @@ class TestEntrypointOrdering:
             "imported renders through the unredacted default chain — an "
             "HMAC-bearing ccxt string or an MT5 password in that line reaches "
             "the log sink verbatim. Hoist the call back above the imports."
+        )
+
+
+# ---------------------------------------------------------------------------
+# Mode A — no module-scope `.bind()` anywhere in non-test code
+# ---------------------------------------------------------------------------
+
+# PRE-EDIT gate token. Measured 2026-08-26 against this phase's base commit,
+# BEFORE any source edit in this phase, with the same AST walk used below:
+#   files_scanned = 111, module_scope_bind_count = 0
+# The gate is therefore PREVENTIVE. Its RED demo is mutation M3 in the module
+# docstring — a deliberate scratch violation — because a preventive gate that has
+# never been observed failing is indistinguishable from one that cannot fail.
+_MODE_A_EXPECTED_BINDS = 0
+
+# Anti-vacuity floor. 111 non-test modules at measurement; 90 leaves room for
+# genuine deletions while still catching a walk that collapsed (wrong root, a
+# renamed package, an exclusion rule that swallowed the tree).
+_MIN_NON_TEST_MODULES = 90
+
+# Modules the walk MUST reach. A floor alone does not prove the walk covers the
+# code that actually matters — these are the entrypoints and the logging/credential
+# surfaces this phase is about.
+_ANCHOR_MODULES: frozenset[str] = frozenset(
+    {
+        "main.py",
+        "main_worker.py",
+        "services/logging_config.py",
+        "services/mt5_client.py",
+        "routers/exchange.py",
+    }
+)
+
+_EXCLUDED_DIR_PARTS: frozenset[str] = frozenset(
+    {"tests", "__pycache__", ".venv", "venv", "site-packages", "build", "node_modules"}
+)
+
+
+def _non_test_modules() -> list[Path]:
+    return [
+        path
+        for path in sorted(_ANALYTICS_ROOT.rglob("*.py"))
+        if not (_EXCLUDED_DIR_PARTS & set(path.relative_to(_ANALYTICS_ROOT).parts))
+    ]
+
+
+def _module_scope_binds() -> list[str]:
+    """`relpath:lineno` for every top-level assignment whose value is a `.bind(...)`.
+
+    AST, not grep, for the reason tests/test_redact.py gives for its own scan:
+    docstring prose mentioning `.bind()` — this file is full of it, and so is
+    services/mt5_client.py — would false-positive a text search. `tree.body`
+    only, because a `.bind()` inside a function runs after configuration.
+    """
+    violations: list[str] = []
+    for path in _non_test_modules():
+        rel = path.relative_to(_ANALYTICS_ROOT).as_posix()
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=rel)
+        for node in tree.body:
+            if isinstance(node, ast.Assign):
+                value = node.value
+            elif isinstance(node, ast.AnnAssign) and node.value is not None:
+                value = node.value
+            else:
+                continue
+            if (
+                isinstance(value, ast.Call)
+                and isinstance(value.func, ast.Attribute)
+                and value.func.attr == "bind"
+            ):
+                violations.append(f"{rel}:{node.lineno}")
+    return violations
+
+
+_PROBE_MODE_A = """
+import structlog
+
+# The forbidden shape, at module scope, before anything configures.
+_frozen = structlog.get_logger("mode_a").bind(component="probe")
+
+from services.logging_config import configure_logging
+
+configure_logging()
+
+_frozen.info("mode_a_event", api_key="__TOKEN__")
+""".replace("__TOKEN__", _LEAK_TOKEN)
+
+
+class TestModeAModuleScopeBind:
+    """A module-scope `.bind()` escapes redaction permanently. Nothing may have one."""
+
+    def test_the_walk_is_not_vacuous(self) -> None:
+        """⚠️ ASSERTED FIRST, and it is not a formality.
+
+        The gate below is a statement about a DERIVED population. If the
+        derivation returns nothing — a moved root, an exclusion rule that ate the
+        tree, a renamed package — `violations == []` passes against the empty set.
+        A scan that reads nothing agrees with everything, forever.
+        """
+        modules = _non_test_modules()
+        assert len(modules) >= _MIN_NON_TEST_MODULES, (
+            f"the walk found only {len(modules)} non-test modules under "
+            f"analytics-service/ (expected at least {_MIN_NON_TEST_MODULES}; 111 "
+            "at the 2026-08-26 measurement). The scan root moved or an exclusion "
+            "rule widened, so the gate below is measuring a truncated surface. "
+            "Re-anchor this gate, do not delete it."
+        )
+        scanned = {p.relative_to(_ANALYTICS_ROOT).as_posix() for p in modules}
+        missing = _ANCHOR_MODULES - scanned
+        assert not missing, (
+            f"the walk did not reach {sorted(missing)} — the entrypoints and "
+            "credential-adjacent modules this gate exists for. A high file count "
+            "with the wrong files in it is still a vacuous scan."
+        )
+
+    def test_no_module_scope_bind_in_non_test_code(self) -> None:
+        """THE GATE. A new module-scope `.bind()` reddens here, by file and line.
+
+        RED demo M3 (see module docstring): adding
+        `_frozen_scratch = structlog.get_logger("scratch").bind(component="scratch")`
+        at module scope in services/rate_limit.py failed this test with
+        `module-scope `.bind()` found at ['services/rate_limit.py:140']` — the
+        violation is reported by file AND line, so the failure is actionable
+        without re-running a search. The scratch line was removed afterwards and
+        services/rate_limit.py is unmodified in this phase.
+        """
+        violations = _module_scope_binds()
+        assert len(violations) == _MODE_A_EXPECTED_BINDS, (
+            f"module-scope `.bind()` found at {violations}. `.bind()` returns a "
+            "CONCRETE BoundLogger built from the processor chain in force at that "
+            "instant; at module scope that is import time, before any entrypoint "
+            "configures, so the object carries structlog's default chain — no "
+            "_redact_processor — for the life of the process, and no later "
+            "structlog.configure() can reach it. Move the bind inside the "
+            "function that logs (see services/mt5_client.py::_stage_logger), or "
+            "bind onto a proxy obtained at call time. Do not add an allowlist."
+        )
+
+    def test_a_module_scope_bind_leaks_even_after_configure(self) -> None:
+        """The mechanism the gate guards, demonstrated rather than asserted.
+
+        A module-scope bind, then `configure_logging()`, then an emission
+        carrying a denylisted key: the value comes out VERBATIM. This is what
+        makes the gate above a security control rather than a style rule, and it
+        is why the gate has no allowlist — there is no safe way to hold one of
+        these.
+
+        If a future structlog release makes the bound logger re-read the config,
+        this test goes RED. That is the correct outcome: re-read the gate's
+        rationale before relaxing it, do not silence this.
+        """
+        result = _run_probe(_PROBE_MODE_A)
+        assert result.returncode == 0, (
+            f"Mode A probe failed:\nSTDOUT:\n{result.stdout}\nSTDERR:\n{result.stderr}"
+        )
+        stream = result.stdout + result.stderr
+        assert _LEAK_TOKEN in stream, (
+            "expected the module-scope-bound logger to leak the canary even "
+            "after configure_logging(); it did not. structlog's binding "
+            f"semantics may have changed. Captured:\n{stream}"
         )
