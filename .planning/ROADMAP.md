@@ -408,12 +408,40 @@ Plans:
 
 **Research note:** the payload-builder seam is the one un-measured integration (extracting the build half of `fetchAndBuildPayload` touches the composite arm AND the single-key basis arm — MEDIUM confidence, wider than it looks). Budget a research pass at plan time; don't discover it. Token-leak channels: Sentry `beforeSend` scrub verified against a REAL captured event, `Referrer-Policy: no-referrer` per-route, generic metadata (link-unfurl dullness accepted explicitly — a private link SHOULD be dull in a chat preview).
 
-### Phase 164.1: HARDEN-GUARDS — retire the frozen-spine gates that no longer bite, close the composite-stamp twin, put the advisory lock behind a real concurrency test, fix the PYAPI-06 blind spot that let a production service-key mismatch run silently, and close phase 161's deferred error-surface items including WIZFORM-02's code:UNKNOWN class (INSERTED)
+### Phase 164.1: HARDEN-GUARDS — retire the frozen-spine gates that no longer bite, close the composite-stamp twin, put the advisory lock behind a real concurrency test, fix the PYAPI-06 blind spot that let a production service-key mismatch run silently, and close phase 161's deferred error-surface items including WIZFORM-02's code:UNKNOWN class, plus the five Phase 163 carry-overs — OPS-08's un-written TypeScript retry half, the freshness UTC day-granularity residual, the TEST/PROD function-body drift, the audit-coverage blind spot, and the tracked-PII decision (INSERTED)
 
 **Goal:** [Urgent work - to be planned]
-**Requirements**: TBD
+**Requirements**: TBD (original scope) + carry-overs OPS-08-TS, OPS-08-F2, OPS-08-F9, OPS-08-F8, WR-06-UTC, DRIFT-01, H-0001, PII-01
 **Depends on:** Phase 164
 **Plans:** 0 plans
+
+**Carried in from Phase 163 (routed 2026-08-26).** Each item's full statement, measurement, and
+the reason it was NOT fixed in 163 live in root `TODOS.md` — the single source of truth. Do not
+re-derive them here; read the entry before planning.
+
+- **[OPS-08-TS]** The SQL half of OPS-08 raises `serialization_failure` (40001); nothing in `src/`
+  branches on it. Measured at HEAD 2026-08-26: zero non-test hits. A lost race still answers a
+  blanket 500. Fix: retry once at the enqueue call sites (allocator holdings sync, csv-finalize).
+- **[OPS-08-F2]** Both pg_cron fan-out paths catch `WHEN OTHERS` around the enqueue and report
+  success, so a tick UNDER-COUNTS silently. Pre-existing. Fix: surface a non-zero failure count.
+- **[OPS-08-F9]** `test_enqueue_internal_destrict.sql` has no `ALL N ARMS EXECUTED` sentinel — any
+  arm can be neutered and the file still exits 0. ⚠️ Not free-standing: needs `SENTINEL_FLOOR`
+  7→8 and `ARMS_FLOOR` 63→68 in `ci.yml` plus the derivation entry in
+  `ci-anti-skip-gate.contract.test.ts`, in ONE diff.
+- **[OPS-08-F8]** The `sql-tests` loop exits on first failure, so one expected-red file suppresses
+  ~40 of ~70 others. Fix: aggregate failures, or make expected-red a per-file declaration.
+- **[WR-06-UTC]** `series_end` is day-granular; a UTC+3 reporter reads "ends in the future" ~3h
+  every day. ⛔ Must fix `bucketSeriesAge` (`src/lib/freshness.ts`) and `bucketByAge`
+  (`FactsheetView.tsx`) in ONE commit — half-fixing manufactures a new two-surface contradiction.
+- **[DRIFT-01]** TEST runs a comment-stripped build of `_enqueue_compute_job_internal`, so no CI
+  run exercises the migration gate's comment-strip. Re-align TEST with the repo definition, or
+  record deliberately that TEST is a stripped mirror. Until then a green TEST run is not evidence.
+- **[H-0001]** `findMutations`' single-line `from(...).insert(...)` regex is blind at **6** known
+  call sites (re-measured 2026-08-26 — the count grew, it was not just stale line numbers). Fix
+  the detection, un-skip the intended-behavior test in `audit-coverage.test.ts`, re-run the census.
+- **[PII-01]** Decide whether the `13-REVIEWS/` AI-review payload artifacts stay tracked (5
+  occurrences of a personal address, public repo, no ongoing consumer). Deleting forward does not
+  remove them from history — that limit is deliberate and stands. If kept, record the decision.
 
 Plans:
 
