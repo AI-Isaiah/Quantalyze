@@ -2,7 +2,7 @@
 
 import { useState, useMemo } from "react";
 import Link from "next/link";
-import { formatPercent, formatNumber, metricColor, extractAnalytics } from "@/lib/utils";
+import { formatPercent, formatNumber, metricColor, extractAnalytics, seriesEndOf } from "@/lib/utils";
 import { isRankableAnalyticsRow } from "@/lib/closed-sets";
 import { SyncBadge } from "@/components/strategy/SyncBadge";
 import type { StrategyAnalytics, AttributionRow } from "@/lib/types";
@@ -24,6 +24,14 @@ interface StrategyRow {
    * metrics as current (B14). `null` when the join carried no analytics.
    */
   computedAt: string | null;
+  /**
+   * Phase 163 / HONEST-08 — the last date of the constituent's return series,
+   * or `null` when the read projected none. Paired with `computedAt` so the
+   * badge buckets on the STALER of the two: a job that ran an hour ago over a
+   * track record that ended in May is not a fresh strategy, and this table
+   * makes exactly that claim about strategies its viewer does not own.
+   */
+  seriesEnd: string | null;
 }
 
 const COLUMNS: { key: SortKey; label: string; align?: "right" }[] = [
@@ -130,6 +138,14 @@ export function StrategyBreakdownTable({ strategies, attribution, portfolioId }:
         // computedAt) makes no freshness claim. The `|| null` is load-bearing —
         // do not drop it on the assumption computed_at is always present.
         computedAt: analytics?.computed_at || null,
+        // HONEST-08 — same gate, same reason: a non-terminal-success row has
+        // already been nulled to `analytics = null` above, so it claims no
+        // track-record end either. `?? null` on the success path because the
+        // field is an optional projection alias; `seriesEndOf` falls back to
+        // the last point of the `returns_series` array this read carries.
+        // Absent/empty means unknown, which the freshness resolver caps below
+        // "fresh" rather than trusting.
+        seriesEnd: seriesEndOf(analytics),
       };
     });
   }, [strategies, attribution]);
@@ -188,7 +204,15 @@ export function StrategyBreakdownTable({ strategies, attribution, portfolioId }:
                   {/* B14: per-constituent freshness so a stale strategy's
                       Sharpe/MaxDD isn't read as current. Renders nothing when
                       the row carries no computed_at. */}
-                  <SyncBadge computedAt={row.computedAt} />
+                  {/* HONEST-08 — the row carries whatever series end its read
+                      projected, and null when it projected none. A portfolio's
+                      constituents are OTHER managers' strategies, so this is
+                      the same cross-tenant claim the discovery list makes and
+                      it gets the same rule. */}
+                  <SyncBadge
+                    computedAt={row.computedAt}
+                    seriesEnd={row.seriesEnd}
+                  />
                 </div>
               </td>
               <td className="px-4 py-3 text-right font-metric text-text-secondary">

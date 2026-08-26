@@ -60,6 +60,150 @@ export function computeFreshness(
   return "stale";
 }
 
+/**
+ * ── Phase 163 / HONEST-08: the SERIES ladder ────────────────────────────────
+ *
+ * `FRESH_HOURS` / `WARM_HOURS` above are calibrated for a JOB — a pipeline
+ * that should run many times a day, where 12 hours of silence is already a
+ * question. A return SERIES is a different kind of clock: its points are DAILY
+ * bars, so a perfectly current track record's last point is routinely
+ * yesterday's. Judging a daily series on a 12-hour ladder would mark every
+ * healthy strategy in the product "warm", which is not conservatism — it is
+ * noise that trains readers to ignore the badge.
+ *
+ * These are NOT new thresholds. They are the SAME 3d/7d ladder `FreshnessChip`
+ * (app/factsheet/[id]/v2/FactsheetView.tsx) has applied to the series since
+ * Phase 162 / HONEST-02, hoisted here so the two surfaces read one pair of
+ * numbers instead of two copies that can drift. HONEST-02 explicitly refused
+ * to introduce a third ladder; so does this. What UI-SPEC C-1 records as a
+ * deliberate disagreement is between the JOB ladders (12h/48h here, 3d/7d on
+ * the chip) — the SERIES ladder is shared, because a dead track record is
+ * equally dead on a list row and on a factsheet.
+ */
+export const SERIES_FRESH_DAYS = 3;
+export const SERIES_STALE_DAYS = 7;
+
+/**
+ * Which fact a freshness verdict is actually ABOUT.
+ *
+ *   `"sync"`    — the analytics job's own age is the worst thing known.
+ *   `"series"`  — the track record's age is STRICTLY worse than the job's, so
+ *                 the series is the binding fact and the surface must SAY SO.
+ *   `"unknown"` — the series end could not be resolved. Not a verdict: a
+ *                 missing input. See `resolveEffectiveRecency`.
+ */
+export type RecencySubject = "sync" | "series" | "unknown";
+
+export interface EffectiveRecency {
+  /** The verdict to render: the WORSE of what is known. */
+  freshness: Freshness;
+  /** Which fact carried it there — what the copy must name. */
+  subject: RecencySubject;
+  /** The resolved series end, when there was one. Callers render the date. */
+  seriesEndDate: Date | null;
+}
+
+/** How pessimistic each bucket is. Mirrors `TONE_RANK` in FactsheetView.tsx. */
+const FRESHNESS_RANK: Record<Freshness, number> = {
+  fresh: 0,
+  warm: 1,
+  stale: 2,
+};
+
+/** Classify a series end on the shared 3d/7d series ladder. */
+function bucketSeriesAge(seriesEndMs: number, now: Date): Freshness {
+  const days = (now.getTime() - seriesEndMs) / (1000 * 60 * 60 * 24);
+  // A series point in the FUTURE is a corrupt write, not a fresh track record
+  // — same reasoning as `computeFreshness`'s large-skew arm above.
+  if (!Number.isFinite(days) || days < 0) return "stale";
+  if (days <= SERIES_FRESH_DAYS) return "fresh";
+  if (days <= SERIES_STALE_DAYS) return "warm";
+  return "stale";
+}
+
+/**
+ * Phase 163 / HONEST-08 — decide WHICH FACT a freshness claim is about, and
+ * how bad it is. THE staler-of-two derivation, in one place.
+ *
+ * WHY THIS EXISTS, measured on production 2026-08-26: `/browse/crypto-sma`
+ * row #2 rendered "Synced 7h ago" over a return series that ended 112 days
+ * earlier, while that same strategy's FACTSHEET chip read `Track record ·
+ * old`. Two public, unauthenticated surfaces contradicted each other about one
+ * strategy, and the one a buyer sees first was the one making the false claim.
+ * `FreshnessChip` had already been taught this rule by Phase 162 / HONEST-02;
+ * the list badge had not. The fix is this shared resolver rather than a second
+ * staler-of-two implementation inside the table, because a divergent second
+ * copy is EXACTLY how the two surfaces came to disagree in the first place.
+ *
+ * ⚠️ THE COMPARISON IS BETWEEN VERDICTS, NOT BETWEEN RAW DATES — and that
+ * distinction is load-bearing, not pedantry. A daily return series' last point
+ * is routinely YESTERDAY's on a perfectly healthy strategy, so it is almost
+ * always the older of the two dates. "Older date wins" would therefore flip
+ * every row in the product onto the track-record arm and delete the sync copy
+ * everywhere — closing the bug by removing the badge's information, which is
+ * precisely the fix the founder ruled out. Each subject is judged by the
+ * ladder appropriate to IT (the job by 12h/48h, the series by 3d/7d), and the
+ * series binds only when its verdict is STRICTLY worse. That is the same rule
+ * `FreshnessChip` applies via `TONE_RANK`.
+ *
+ * THE `unknown` ARM MIRRORS `TONE_RANK`, whose ordering matters in BOTH
+ * directions:
+ *   - `unknown` sits ABOVE `fresh` — an unresolvable series end cannot SUPPORT
+ *     a freshness claim, so the verdict is capped at `warm`. A fresh job over
+ *     an unknown track is not evidence of a live strategy.
+ *   - `unknown` sits BELOW `stale` — a definite bad age is evidence we HAVE
+ *     ("this job last ran five days ago"), and letting a mere absence of series
+ *     data soften it would trade a fact for a shrug. So a known-bad sync age
+ *     survives this arm untouched.
+ *
+ * An unresolvable `computedAt` keeps the behaviour it already had: it
+ * classifies `stale` via `computeFreshness` and the subject stays `sync`. That
+ * is already the most cautious render, and a series cannot make it worse.
+ */
+export function resolveEffectiveRecency(
+  computedAt: Date | string | number | null | undefined,
+  seriesEnd: Date | string | number | null | undefined,
+  now: Date = new Date(),
+): EffectiveRecency {
+  const syncFreshness = computeFreshness(computedAt, now);
+  const seriesEndMs = toFiniteMs(seriesEnd);
+
+  if (seriesEndMs === null) {
+    return {
+      // `warm` is the middle bucket of this ladder and therefore the exact
+      // position `unknown` occupies in TONE_RANK: below a freshness claim,
+      // above a staleness one. No new threshold.
+      freshness: syncFreshness === "fresh" ? "warm" : syncFreshness,
+      subject: "unknown",
+      seriesEndDate: null,
+    };
+  }
+
+  const seriesFreshness = bucketSeriesAge(seriesEndMs, now);
+  const seriesBinds =
+    FRESHNESS_RANK[seriesFreshness] > FRESHNESS_RANK[syncFreshness];
+
+  return {
+    freshness: seriesBinds ? seriesFreshness : syncFreshness,
+    subject: seriesBinds ? "series" : "sync",
+    seriesEndDate: new Date(seriesEndMs),
+  };
+}
+
+/** Parse the shapes `computeFreshness` accepts; `null` for anything unusable. */
+function toFiniteMs(
+  value: Date | string | number | null | undefined,
+): number | null {
+  if (value == null) return null;
+  const ms =
+    value instanceof Date
+      ? value.getTime()
+      : typeof value === "number"
+        ? value
+        : Date.parse(value);
+  return Number.isFinite(ms) ? ms : null;
+}
+
 /** Short human-readable label for badges ("Fresh", "Warm", "Stale"). */
 export function freshnessLabel(freshness: Freshness): string {
   switch (freshness) {

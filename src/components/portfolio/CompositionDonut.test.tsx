@@ -38,13 +38,25 @@ function hoursAgoIso(hours: number): string {
   return new Date(Date.now() - hours * 60 * 60 * 1000).toISOString();
 }
 
+/** A series-end date N days back — Phase 163 / HONEST-08. */
+function isoDaysAgo(days: number): string {
+  return new Date(Date.now() - days * 24 * 60 * 60 * 1000)
+    .toISOString()
+    .slice(0, 10);
+}
+
 describe("<CompositionDonut> — B14 per-slice freshness", () => {
   it("renders a freshness badge per slice with a computed_at and distinguishes fresh from stale", () => {
     const { container } = render(
       <CompositionDonut
         strategies={[
-          { id: "a", name: "Fresh", weight: 0.6, amount: 1000, twr: 0.2, sharpe: 1.5, computedAt: hoursAgoIso(2) },
-          { id: "b", name: "Stale", weight: 0.4, amount: 500, twr: 0.1, sharpe: 1.0, computedAt: hoursAgoIso(100) },
+          // Phase 163 / HONEST-08 — each slice carries a LIVE track record as
+          // well as a computed_at, so this spec keeps testing the fresh/stale
+          // split it was written for. Without a series end the badge is capped
+          // below fresh (pinned separately below): a job that ran 2h ago over
+          // a track record we cannot see is not evidence of a live slice.
+          { id: "a", name: "Fresh", weight: 0.6, amount: 1000, twr: 0.2, sharpe: 1.5, computedAt: hoursAgoIso(2), seriesEnd: isoDaysAgo(1) },
+          { id: "b", name: "Stale", weight: 0.4, amount: 500, twr: 0.1, sharpe: 1.0, computedAt: hoursAgoIso(100), seriesEnd: isoDaysAgo(1) },
         ]}
       />,
     );
@@ -53,6 +65,36 @@ describe("<CompositionDonut> — B14 per-slice freshness", () => {
     // 2h ago → fresh (positive); 100h ago → stale (negative).
     expect(container.querySelectorAll(".bg-positive")).toHaveLength(1);
     expect(container.querySelectorAll(".bg-negative")).toHaveLength(1);
+  });
+
+  it("HONEST-08: a fresh job over a 112-day-dead series reads the TRACK RECORD", () => {
+    const { container } = render(
+      <CompositionDonut
+        strategies={[
+          { id: "a", name: "DeadTrack", weight: 1, amount: 1000, twr: 0.2, sharpe: 1.5, computedAt: hoursAgoIso(7), seriesEnd: isoDaysAgo(112) },
+        ]}
+      />,
+    );
+
+    expect(container.querySelectorAll(".bg-positive")).toHaveLength(0);
+    expect(container.querySelectorAll(".bg-negative")).toHaveLength(1);
+    expect(screen.queryByText(/Synced/i)).toBeNull();
+    expect(screen.getByText(/Track record ends/i)).toBeTruthy();
+  });
+
+  it("HONEST-08: an UNKNOWN series end caps the slice dot below fresh", () => {
+    const { container } = render(
+      <CompositionDonut
+        strategies={[
+          { id: "a", name: "NoSeries", weight: 1, amount: 1000, twr: 0.2, sharpe: 1.5, computedAt: hoursAgoIso(2) },
+        ]}
+      />,
+    );
+
+    expect(container.querySelectorAll(".bg-positive")).toHaveLength(0);
+    // …but not a staleness claim either — the job really did run 2h ago.
+    expect(container.querySelectorAll(".bg-negative")).toHaveLength(0);
+    expect(screen.getByText(/Synced 2h ago/i)).toBeTruthy();
   });
 
   it("renders no freshness badge for a slice missing computed_at", () => {

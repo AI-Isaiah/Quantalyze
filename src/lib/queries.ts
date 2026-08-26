@@ -3,7 +3,7 @@ import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { castRow } from "@/lib/supabase/cast";
 import { loadManagerIdentity as loadManagerIdentityRaw } from "./manager-identity";
-import { extractAnalytics, EMPTY_ANALYTICS } from "./utils";
+import { extractAnalytics, EMPTY_ANALYTICS, seriesEndOf } from "./utils";
 import {
   blendPeriodsPerYear,
   deriveEmptySeriesState,
@@ -496,13 +496,7 @@ async function shapeRankingRows(
  */
 function withResolvedSeriesEnd(a: StrategyAnalytics): StrategyAnalytics {
   if (a.series_end !== undefined) return a;
-  const points = a.returns_series;
-  const last =
-    Array.isArray(points) && points.length > 0 ? points[points.length - 1] : null;
-  return {
-    ...a,
-    series_end: typeof last?.date === "string" ? last.date : null,
-  };
+  return { ...a, series_end: seriesEndOf(a) };
 }
 
 export function shapeRowAnalytics(

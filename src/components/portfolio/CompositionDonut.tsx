@@ -19,6 +19,14 @@ interface CompositionDonutProps {
      * constituent carried no analytics.
      */
     computedAt?: string | null;
+    /**
+     * Phase 163 / HONEST-08 — the last date of the constituent's return
+     * series. Paired with `computedAt` so the slice badge buckets on the
+     * STALER of the two. Optional, and an ABSENT value is read as unknown:
+     * the badge is capped below "fresh" rather than making a claim the caller
+     * did not supply evidence for.
+     */
+    seriesEnd?: string | null;
   }[];
 }
 
@@ -85,8 +93,15 @@ export function CompositionDonut({ strategies }: CompositionDonutProps) {
                   <div className="flex items-center gap-2">
                     <span className="inline-block w-2.5 h-2.5 rounded-sm" style={{ backgroundColor: STRATEGY_PALETTE[i % STRATEGY_PALETTE.length] }} />
                     <span className="text-text-primary">{s.name}</span>
-                    {/* B14: per-slice freshness — renders nothing without a computed_at. */}
-                    <SyncBadge computedAt={s.computedAt ?? null} />
+                    {/* B14: per-slice freshness — renders nothing without a computed_at.
+                        HONEST-08 — the slice's series end when the caller
+                        supplied one, null otherwise. Null is not a shrug: it
+                        caps the dot below "fresh", so a slice whose track
+                        record we cannot see never renders green. */}
+                    <SyncBadge
+                      computedAt={s.computedAt ?? null}
+                      seriesEnd={s.seriesEnd ?? null}
+                    />
                   </div>
                 </td>
                 <td className="py-2 pr-4 text-right font-metric">{formatCurrency(s.amount)}</td>

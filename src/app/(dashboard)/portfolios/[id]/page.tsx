@@ -19,7 +19,7 @@ import {
 } from "@/lib/queries";
 import { adaptPortfolioAnalytics } from "@/lib/portfolio-analytics-adapter";
 import { computeFreshness } from "@/lib/freshness";
-import { extractAnalytics } from "@/lib/utils";
+import { extractAnalytics, seriesEndOf } from "@/lib/utils";
 import { isRankableAnalyticsRow } from "@/lib/closed-sets";
 import { resolveDailyReturnSeries } from "@/lib/factsheet/resolve-series";
 import { normalizeDailyReturns } from "@/lib/portfolio-math-utils";
@@ -207,6 +207,12 @@ function buildCompositionRows(
         // analytics are absent; `|| null` collapses absent/empty computed_at to
         // null so SyncBadge renders no badge.
         computedAt: a?.computed_at || null,
+        // HONEST-08 — the slice's other clock. This read already carries
+        // `returns_series` (HONEST-04 builds the constituent wealth curve from
+        // it), so the donut CAN judge the track record and therefore must:
+        // a job that ran an hour ago over a series that ended in May is not a
+        // fresh constituent. `seriesEndOf` is the one shared derivation.
+        seriesEnd: seriesEndOf(a),
       };
     })
     .filter((row): row is NonNullable<typeof row> => row !== null);
