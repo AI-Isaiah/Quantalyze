@@ -382,7 +382,7 @@ Plans:
 
 - [ ] 163-01-PLAN.md — OPS-05 structlog frozen-proxy closed at BOTH modes; Mode B is LIVE on the worker (`main_worker.py` never configures) — planned first as the phase's highest-risk item (wave 1)
 - [ ] 163-02-PLAN.md — SEC-04 `bridgeComputeLimiter` sized from a MEASURED PROD backend number (measurement is an explicit early task); ⛔ `userActionLimiter` untouched; roster pin moves in the same commit (wave 1)
-- [ ] 163-03-PLAN.md — SEC-02 username/absolute-path scrub across the measured 87 tracked files (80 `.planning/` + 5 docs/ + 2 applied-migration comment headers, exception recorded) + NEW no-allowlist scanner wired into `npm run lint` (wave 1)
+- [ ] 163-03-PLAN.md — SEC-02 username/absolute-path scrub across the measured **94** tracked files (87 `.planning/` + 5 docs/ + 2 applied-migration comment headers, exception recorded — 87 is the `.planning/`-only figure, not the total) + NEW no-allowlist scanner wired into `npm run lint` (wave 1)
 - [ ] 163-04-PLAN.md — HONEST-08 discovery "Synced Nd ago" badge buckets on the staler of sync- and series-recency via ONE shared resolver mirroring FreshnessChip; regression test on a real published fixture row, RED under neutering (wave 1)
 - [ ] 163-05-PLAN.md — OPS-06 createAdminClient hoisted above the commit at the measured FOUR occurrences in three files + OPS-07 monitor honesty (discriminated union; denominator failure PAGES non-200; integration falsifiers) (wave 1)
 - [ ] 163-06-PLAN.md — OPS-08 forward-only migration de-stricting the 10-param enqueue overload's four lost-race branches + pg_get_functiondef SQL gate (expected RED until TEST hand-apply); blocking three-reviewer checkpoint before apply (wave 1)

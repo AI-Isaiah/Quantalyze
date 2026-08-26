@@ -544,7 +544,7 @@ precedent, and needs no workflow-file change.
   those is the gate WORKING — but plans/summaries authored during THIS phase must already
   comply (this RESEARCH.md uses repo-relative paths only).
 - **Pre-edit gate tokens (measured this session, before any scrub):** username-bearing
-  tracked files = 87 (80 in `.planning/` + 7 outside); `/Users/`-bearing `.planning/`
+  tracked files = 94 total (87 inside `.planning/` — the union of username-bearing and `/Users/`-bearing — PLUS 7 outside it: 5 under `docs/`, 2 applied Supabase migrations). ⚠️ CORRECTED 2026-08-26 by running the scanner: the research recorded "87 total (80 + 7)", conflating the `.planning/`-only union with the tree-wide total. Scrubbing to 87 leaves the 7 non-planning files behind. Always re-measure live.; `/Users/`-bearing `.planning/`
   files = 59. RED demo: after the scrub lands, reintroduce one occurrence in a scratch
   file → gate must fail; remove it.
 
@@ -851,7 +851,13 @@ ASVS mapping of its own deliverables:
 | A4 | undici keeps buffering an unconsumed abandoned response body until the attempt signal fires (the OPS-10 premise, inherited from the requirement text) | §3 | If undici already reclaimed it, `body.cancel()` is still correct hygiene; no downside |
 | A5 | The `/Users/`-count drift (57 → 59) is organic new-file growth, not a measurement-method difference | §4b | None — plan against the live re-measured number at execution time |
 
-## Open Questions
+## Open Questions (RESOLVED — all five adopted by a plan; do not re-open)
+
+> Q1 denominator page channel → 163-05 (non-200 + Sentry). Q2 limiter number → 163-02 Task 1
+> (measurement, hard input to Task 2). Q3 username-scan scope → 163-03 (option 1 + recorded
+> applied-migration exception, gated on the A2 precondition). Q4 SEC-06 server-signal boundary →
+> 163-08 (boundary restated). Q5 checkStuckNotifications consumer wiring → 163-05 (contract-only).
+
 
 1. **Which page channel for the denominator failure?** Non-200 (cron shows failed) is the
    minimum; whether to ALSO send the SEV email / Sentry capture on the terminal arms is
