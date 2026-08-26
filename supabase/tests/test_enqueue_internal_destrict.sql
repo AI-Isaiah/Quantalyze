@@ -18,6 +18,9 @@
 --            post-fix state (zero strict re-reads AND the classified raise) or
 --            the exact pre-fix state (strict re-reads AND no classified raise).
 --            Any mixture RAISEs — see "WHY THIS IS ONE ARM AND NOT TWO" below.
+--            ⭐ AND THE PRE-FIX STATE IS TOLERATED ONLY ON A DATABASE THAT HAS
+--            NEVER RECEIVED 20260826150000, decided by this overload's CATALOG
+--            COMMENT rather than by its body — see "THE REVERT DISCRIMINATOR".
 --   Part 2 — the de-strict did not come from DELETING arms: the body still
 --            contains EXACTLY FOUR lost-race re-reads into v_new_id, one per
 --            target scope (strategy / portfolio / allocator / api_key). Matched
@@ -57,6 +60,49 @@
 -- halves separately would have made the second arm unfalsifiable once the first
 -- constrained the pair, so they are ONE arm — a test that cannot fail is worse
 -- than no test, and two arms here would have been exactly that.
+--
+-- ⛔ THE REVERT DISCRIMINATOR — WHAT THE COHERENCE SHAPE ALONE COULD NOT SAY
+-- (phase-163 review, WR-04). Tolerating the pre-fix pair bought back the ~40
+-- files this one would otherwise have suppressed, but as first shipped it paid
+-- for that with a hole: "never applied" and "applied, then REVERTED by a stale
+-- re-base" produce a BYTE-IDENTICAL body — four strict re-reads, no classified
+-- raise. Read on the body alone they are the same observation, so the SKIP arm
+-- answered exit 0 to both. The concrete scenario is not hypothetical, it is how
+-- the 10-param body acquired the defect in the first place: someone extends the
+-- function, grabs 20260716090000 as the base (the newest ancestor that carries
+-- a FULL BODY, which is what the project's re-base rule tells them to take),
+-- and lands it. PROD returns to P0002 on every lost race and opaque 500s on the
+-- request path, and this gate prints SKIP and passes. Part 4 does not fire —
+-- the 7-param body was never touched.
+--
+-- The database carries the evidence the body does not. 20260826150000 REWRITES
+-- this overload's catalog COMMENT, and three facts make that a sound one-way
+-- marker (all MEASURED across supabase/migrations/ at HEAD, 2026-08-26):
+--   1. Only THREE files contain a `COMMENT ON FUNCTION
+--      public._enqueue_compute_job_internal` statement — 20260510180226,
+--      20260515130001 and 20260826150000. The pre-apply text is mig 118's
+--      (verbatim from mig 066) and does NOT contain the marker phrase.
+--   2. 20260716090000 — the definition a stale re-base copies — contains NO
+--      `COMMENT ON FUNCTION` statement AT ALL. So re-basing on it replaces the
+--      body and leaves the comment untouched.
+--   3. CREATE OR REPLACE FUNCTION does not clear a comment either.
+-- Therefore the pair (strict re-reads PRESENT, marker PRESENT) is not reachable
+-- by any ordinary route — it means the fix arrived and was then lost. That arm
+-- RAISEs. The SKIP arm now requires the marker to be ABSENT, which is the
+-- property WR-04 asked for: it can only be reached on a database that has never
+-- received 20260826150000.
+--
+-- ⚠️ AND THE RESIDUAL, STATED RATHER THAN GLOSSED — this closes the route that
+-- exists, not every conceivable one. A future migration that re-bases the body
+-- on 20260716090000 AND ALSO issues its own `COMMENT ON FUNCTION` without the
+-- marker phrase would wipe the evidence and fall back to SKIP. Nothing in the
+-- repo does that today (fact 2 above is exactly why the realistic re-base does
+-- not), and a marker in the catalog is the only post-apply signal available
+-- here: the ACL cannot serve, because 20260826150000's REVOKE/GRANT are
+-- byte-identical to mig 118's and are therefore the SAME before and after. The
+-- opposite direction is fail-CLOSED and loud: hand-writing the phrase into the
+-- comment of a never-applied database makes this arm fire, which is the correct
+-- answer to a catalog that claims a fix the body does not carry.
 --
 -- ⭐ THE GATE TOKEN IS THE STATEMENT FORM, AND IT PINS THE PROPERTY, NOT A
 -- NAMING HABIT. `pg_get_functiondef` returns the body's COMMENTS as well as its
@@ -169,6 +215,37 @@
 -- The scratch cluster was destroyed afterwards; nothing was applied anywhere
 -- else, and no fixture reached the shared TEST project.
 --
+-- ⛔ THE REVERT ARM ABOVE IS **NOT** COVERED BY THAT RUN, AND THIS SECTION MUST
+-- NOT BE READ AS IF IT WERE. The arm was added AFTER the scratch cluster was
+-- destroyed, in the WR-04 fix pass, by an agent with no database of any kind
+-- reachable. Nobody has observed it fire. What WAS established is narrower and
+-- is stated exactly:
+--
+--   TEXT-LEVEL DEMONSTRATION ONLY (no database was contacted). The arm's
+--   predicate is `v_strict10 > 0 AND strpos(<catalog comment>, 'Phase 163
+--   OPS-08') > 0`. Both possible values of that comment were reconstructed
+--   from the migration sources by concatenating the adjacent SQL literals, and
+--   the substring test evaluated on each:
+--     A  never-applied     body=20260716090000  comment=mig 118 (279 chars)
+--                          v_strict10=4  marker=FALSE -> falls through to SKIP
+--     B  reverted-after-apply
+--                          body=20260716090000  comment=20260826150000 (633)
+--                          v_strict10=4  marker=TRUE  -> RED, the arm RAISEs
+--     C  post-apply        body=20260826150000  comment=20260826150000
+--                          v_strict10=0  marker=TRUE  -> not this arm; Part 1+3
+--                                                        OK arm
+--   A and B have IDENTICAL bodies. The comment is the ONLY thing that separates
+--   them, which is the whole point of the arm — and the demonstration exhibits
+--   both inputs rather than asserting the difference.
+--
+-- What that does NOT establish, said plainly so nobody mistakes the scope: that
+-- `obj_description` returns what this reasoning assumes on a live catalog, that
+-- the plpgsql parses, or that the arm ordering behaves as intended at runtime.
+-- The FIRST person with a scratch cluster should re-prove this arm the way R2 /
+-- R3 / R4 above were proved — build the reverted body as a REAL function,
+-- leave the post-apply COMMENT in place, and observe the ERROR — and then
+-- replace this block with the verbatim output.
+--
 -- Hygiene: this gate is FIXTURE-FREE — every assertion reads catalog state
 -- (pg_proc via pg_get_functiondef) and writes nothing, so there is no
 -- cross-run collision surface on the shared test project and no defensive
@@ -196,6 +273,8 @@ DECLARE
   v_n         int;
   v_strict10  int;
   v_serfail10 boolean;
+  v_comment10 text;    -- the CATALOG comment, NOT part of pg_get_functiondef
+  v_applied10 boolean; -- ...does it record the OPS-08 fix? (revert discriminator)
   v_pre_apply boolean := false;
   v_oid7  oid := to_regprocedure(
     'public._enqueue_compute_job_internal(uuid, uuid, text, text, uuid[], text, jsonb)'
@@ -222,6 +301,14 @@ DECLARE
   -- with the branch intact and the arm fails. Both overloads spell the branch
   -- this way (20260716090000:83 and :224).
   c_retired_re CONSTANT text := 'p_kind[[:space:]]*=[[:space:]]*''compute_analytics''';
+  -- ⭐ THE REVERT MARKER. Derived FROM THE MIGRATION, not from this file: it is
+  -- the phrase 20260826150000 writes into the 10-param overload's catalog
+  -- COMMENT (that file's COMMENT ON FUNCTION, in the literal '... (Phase 163
+  -- OPS-08, parity with the 7-param overload''s mig 109 P3 fix).'). Choosing a
+  -- token by reading the file it is supposed to police would prove nothing; the
+  -- direction here is the other one, and the pre-apply comment mig 118 leaves
+  -- behind does not contain it. See "THE REVERT DISCRIMINATOR" in the header.
+  c_applied_marker CONSTANT text := 'Phase 163 OPS-08';
   -- One arm per target scope in the 10-param overload's XOR: strategy,
   -- portfolio, allocator, api_key. Spelled as a constant so Part 2's
   -- expectation is a number a reader can re-derive from the signature.
@@ -265,13 +352,26 @@ BEGIN
     FROM regexp_matches(v_body10, c_strict_re, 'g');
   v_serfail10 := v_body10 ~ c_serfail_re;
 
+  -- The revert discriminator (WR-04). Read from the CATALOG, deliberately: a
+  -- comment attached with COMMENT ON FUNCTION is NOT part of pg_get_functiondef
+  -- output, so this is independent of v_body10 and the strip above can neither
+  -- reach it nor truncate it. `strpos` rather than LIKE or `~` because the
+  -- marker is a fixed substring — a plain substring search has no metacharacter
+  -- to mis-escape and no pattern to get subtly wrong. `coalesce` because
+  -- obj_description returns NULL for an uncommented function, and a NULL would
+  -- fail OPEN through the arm below exactly as the NULL guard above describes.
+  v_comment10 := coalesce(obj_description(v_oid10, 'pg_proc'), '');
+  v_applied10 := strpos(v_comment10, c_applied_marker) > 0;
+
   IF v_strict10 > 0 AND v_serfail10 THEN
     RAISE EXCEPTION 'OPS-08 Part 1+3 FAILED: the deployed 10-param body is INCOHERENT — it carries % strict lost-race re-read(s) AND a serialization_failure raise. Those are the two halves of a fix that was only partly made: a lost race still dies on NO_DATA_FOUND inside the strict re-read and never reaches the classified raise. Either finish the de-strict or revert to the pre-fix definition; do not ship the mixture.', v_strict10;
   ELSIF v_strict10 = 0 AND NOT v_serfail10 THEN
     RAISE EXCEPTION 'OPS-08 Part 1+3 FAILED: the deployed 10-param body has NO strict lost-race re-read and NO serialization_failure raise. A lost race whose winner already advanced past the in-flight statuses therefore returns NULL to the caller SILENTLY — strictly worse than the opaque 500 this requirement removes, because nothing surfaces at all. Restore the classified raise after the IF-chain.';
+  ELSIF v_strict10 > 0 AND v_applied10 THEN
+    RAISE EXCEPTION 'OPS-08 Part 1+3 FAILED: this is a REVERT, not a pre-apply database. The deployed 10-param body carries % strict lost-race re-read(s) and no classified raise — the PRE-FIX definition exactly — but this overload''s CATALOG COMMENT records the OPS-08 fix, and only 20260826150000 writes that phrase. A comment is not part of the function body: CREATE OR REPLACE does not clear it, and 20260716090000 (the newest ancestor carrying a full body, hence the one a re-base copies) issues no COMMENT ON FUNCTION at all. So this database RECEIVED the fix and then LOST it, which the coherence arm below would otherwise have reported as a harmless pre-apply SKIP and passed. PROD is back to raising P0002 NO_DATA_FOUND on every lost race and surfacing an opaque 500. Re-base on 20260826150000 or newer and keep BOTH halves: the plain re-read and the serialization_failure raise.', v_strict10;
   ELSIF v_strict10 > 0 THEN
     v_pre_apply := true;
-    RAISE NOTICE 'SKIP (Part 3): this database still runs the pre-fix 20260716090000 definition — % strict lost-race re-read(s) and no classified raise. That pair is COHERENT (it is the old definition exactly, not a half-applied or hand-edited body), so this file does not fail on it: it sorts 30th of ~70 in the sql-tests glob and the runner exits on first failure, so failing here would suppress every file after it. WITHHELD: Part 3, the serialization_failure raise. STILL ASSERTED below: Parts 2, 4 and 5. Hand-apply 20260826150000 to this project to arm Part 3.', v_strict10;
+    RAISE NOTICE 'SKIP (Part 3): this database still runs the pre-fix 20260716090000 definition — % strict lost-race re-read(s) and no classified raise — and this overload''s catalog COMMENT does NOT record the OPS-08 fix, so it has never received 20260826150000 rather than having received it and lost it (that pair RAISEs one arm above). The pre-fix pair is COHERENT, so this file does not fail on it: it sorts 30th of ~70 in the sql-tests glob and the runner exits on first failure, so failing here would suppress every file after it. WITHHELD: Part 3, the serialization_failure raise. STILL ASSERTED below: Parts 2, 4 and 5, and the revert arm above. Hand-apply 20260826150000 to this project to arm Part 3.', v_strict10;
   ELSE
     RAISE NOTICE 'OPS-08 Part 1+3 OK: the deployed 10-param body carries no strict lost-race re-read and does raise serialization_failure on an exhausted one.';
   END IF;
