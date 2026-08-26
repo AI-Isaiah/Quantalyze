@@ -376,7 +376,19 @@ Plans:
   5. Coverage gates close their gaps: `add_wizard_composite_key` is policed by the audit-coverage gate with the pragma-vs-real-emission decision RECORDED, and the bridge + portfolio-optimizer flows get a named `bridgeComputeLimiter` sized to backend reality (closing the 30× front/back mismatch) ⛔ without resizing the shared `userActionLimiter`.
   6. A freshness claim is not surface-local: the public discovery table's "Synced Nd ago" badge buckets on the **staler** of sync- and series-recency, exactly as `FreshnessChip` already does on the factsheet (HONEST-08). ⚠️ MEASURED ON PROD 2026-08-26 — `Phoenix Protocol` advertises "Synced 7h ago" on `/browse/crypto-sma` over a series that ended 2026-05-06, **112 days** earlier, while its own factsheet reads `Track record · old`. The rule HONEST-02 wrote ("a series dead 89 days cannot read FRESH") is violated on the most public surface in the product. ⛔ Do NOT close by deleting the badge, and ⛔ do NOT rely on the `is_example` gate — HONEST-03 scoped that to example rows and all 15 were deleted, so it now guards nothing here. The test must use a REAL published row with a stale series and be demonstrated RED when the staler-of-two logic is neutered.
 
-**Plans**: TBD
+**Plans**: 9 plans
+
+Plans:
+
+- [ ] 163-01-PLAN.md — OPS-05 structlog frozen-proxy closed at BOTH modes; Mode B is LIVE on the worker (`main_worker.py` never configures) — planned first as the phase's highest-risk item (wave 1)
+- [ ] 163-02-PLAN.md — SEC-04 `bridgeComputeLimiter` sized from a MEASURED PROD backend number (measurement is an explicit early task); ⛔ `userActionLimiter` untouched; roster pin moves in the same commit (wave 1)
+- [ ] 163-03-PLAN.md — SEC-02 username/absolute-path scrub across the measured 87 tracked files (80 `.planning/` + 5 docs/ + 2 applied-migration comment headers, exception recorded) + NEW no-allowlist scanner wired into `npm run lint` (wave 1)
+- [ ] 163-04-PLAN.md — HONEST-08 discovery "Synced Nd ago" badge buckets on the staler of sync- and series-recency via ONE shared resolver mirroring FreshnessChip; regression test on a real published fixture row, RED under neutering (wave 1)
+- [ ] 163-05-PLAN.md — OPS-06 createAdminClient hoisted above the commit at the measured FOUR occurrences in three files + OPS-07 monitor honesty (discriminated union; denominator failure PAGES non-200; integration falsifiers) (wave 1)
+- [ ] 163-06-PLAN.md — OPS-08 forward-only migration de-stricting the 10-param enqueue overload's four lost-race branches + pg_get_functiondef SQL gate (expected RED until TEST hand-apply); blocking three-reviewer checkpoint before apply (wave 1)
+- [ ] 163-07-PLAN.md — OPS-09 deterministic resync draft pre-check (ordered + bounded, prose debts settled) + SEC-05 simulator tenant-keyed with the concealing quarantine/carve-out removed (equality at 0, class size 10) (wave 1)
+- [ ] 163-08-PLAN.md — OPS-10 capability-checked `body.cancel()` on the single abandoning retry arm + SEC-06 panel removal aborts the in-flight credential POST by identity, reason "user" (wave 1)
+- [ ] 163-09-PLAN.md — SEC-01 hosted password policy READ, unified `MIN_PASSWORD_LENGTH`, documented + SEC-03 `add_wizard_composite_key` under the audit law with the pragma decision RECORDED (wave 2, serialized on REQUIREMENTS.md after 163-03)
 
 ### Phase 164: SHARE — Copy Link always works, and never discloses
 
