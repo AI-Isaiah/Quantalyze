@@ -196,6 +196,12 @@ export const EMPTY_ANALYTICS: StrategyAnalytics = {
   sparkline_drawdown: null,
   metrics_json: null,
   returns_series: null,
+  // Phase 163 / HONEST-08 — explicit, not merely absent. This constant is the
+  // substitute `shapeRowAnalytics` hands back for a row whose run did not
+  // produce numbers, and a run that produced no numbers cannot claim a track
+  // record END either. `null` = unknown, which the freshness resolver reads as
+  // "cannot support a freshness claim".
+  series_end: null,
   drawdown_series: null,
   monthly_returns: null,
   daily_returns: null,

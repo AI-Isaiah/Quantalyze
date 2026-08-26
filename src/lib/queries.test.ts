@@ -384,18 +384,43 @@ describe("getStrategiesByCategory — RANK-02 explicit anon projection", () => {
       "calmar",
       "sparkline_returns",
       "sparkline_drawdown",
+      // Phase 163 / HONEST-08 — the badge buckets on the staler of sync- and
+      // SERIES-recency, so the series' end date is now a rendered surface too.
+      // Dropping it silently returns every row to "unknown", which caps the
+      // badge below fresh but stops it ever NAMING a dead track record.
+      "series_end",
     ]) {
       expect(embed).toContain(column);
     }
   });
 
-  it("never projects daily_returns, the metrics_json blob, or data_quality_flags", async () => {
+  it("never projects daily_returns, the metrics_json blob, data_quality_flags, or the raw returns_series", async () => {
     const { cols, embed } = await captureSelect();
     expect(cols).not.toContain("daily_returns");
     expect(cols).not.toContain("data_quality_flags");
     // `metrics_json` may appear ONLY as the JSONB-key alias below — never as a
     // projected column (which would ship the entire blob to an anon reader).
     expect(embed).not.toMatch(/metrics_json(?!->)/);
+    // Phase 163 / HONEST-08, threat T-163-09 — same rule, same reason, applied
+    // to the OTHER blob. `returns_series` is a multi-year array of
+    // {date,value} points; HONEST-08 needs exactly ONE date out of it, so it
+    // may appear only in the arrow/alias form. A bare `returns_series` column
+    // here would hand every point to every anonymous visitor to /browse — the
+    // regression this pin exists to catch, mirroring the metrics_json one.
+    expect(embed).not.toMatch(/returns_series(?!->)/);
+  });
+
+  it("carries the series end as an aliased LAST-element JSONB date, not the array", async () => {
+    const { embed } = await captureSelect();
+    // MEASURED against the TEST project 2026-08-26 (service role, both forms):
+    //   select=computed_at,series_end:returns_series->-1->>date
+    //     → HTTP 200, {"computed_at":"2026-04-30T…","series_end":"2026-04-29"}
+    //   select=id,strategy_analytics(computed_at,series_end:returns_series->-1->>date)
+    //     → HTTP 200, {"strategy_analytics":{"series_end":"2026-05-29",…}}
+    // The `->0->>date` control returned the series' FIRST date on the same
+    // rows, which is what proves `-1` resolves to the LAST element rather than
+    // silently yielding null. `->>` (not `->`) yields the bare date text.
+    expect(embed).toContain("series_end:returns_series->-1->>date");
   });
 
   it("carries the 3M advanced filter as an aliased JSONB key, not the blob", async () => {

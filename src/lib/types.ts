@@ -336,6 +336,28 @@ export interface StrategyAnalytics {
    */
   metrics_json: MetricsJson | null;
   returns_series: { date: string; value: number }[] | null;
+  /**
+   * Phase 163 / HONEST-08 — NOT a `strategy_analytics` column. It is the DATE
+   * OF THE LAST POINT of `returns_series`, projected as a JSONB alias
+   * (`series_end:returns_series->-1->>date`) by the ranked-list embed, and
+   * derived in `shapeRowAnalytics` on the owner path where the wildcard embed
+   * carries the array itself. MEASURED against the TEST project 2026-08-26:
+   * the alias returns HTTP 200 with a bare ISO date string, in both the
+   * top-level and the embedded form (`->0` returns the FIRST point, which is
+   * what proves `-1` really is the last).
+   *
+   * WHY A SCALAR AND NOT THE ARRAY: `/browse/[slug]` is anonymous, and the
+   * ranked projection exists precisely to keep bulk analytics payloads away
+   * from unauthenticated readers (see CATEGORY_RANKING_ANALYTICS_COLUMNS'
+   * docblock). One date answers "where does the track record end"; the series
+   * would answer it by shipping every point.
+   *
+   * OPTIONAL, following the `three_month` alias precedent: reads that do not
+   * project it (and every fixture predating it) stay valid, and an ABSENT
+   * value means "unknown", which the freshness resolver treats as
+   * "cannot support a freshness claim" — never as "fine".
+   */
+  series_end?: string | null;
   drawdown_series: { date: string; value: number }[] | null;
   monthly_returns: Record<string, Record<string, number>> | null;
   daily_returns: Record<string, Record<string, number>> | null;
