@@ -146,9 +146,9 @@ export async function POST(req: NextRequest) {
   // MEASURED, because the whole decision turns on it: `@upstash/ratelimit`
   // v2.0.8 exposes exactly four operations on a limiter — `limit`,
   // `blockUntilReady`, `getRemaining` and `resetUsedTokens` — and
-  // `resetUsedTokens` DELETES every store key matching `<prefix>:<identifier>*`
-  // (dist/index.js:881-884, calling the algorithm's `resetTokens`). There is no
-  // decrement. "Give this caller back the ONE token their failed request spent"
+  // `resetUsedTokens` DELETES every store key matching `<prefix>:<identifier>*` —
+  // it delegates to the algorithm's `resetTokens`, which issues that wildcard
+  // delete. There is no decrement. "Give this caller back the ONE token their failed request spent"
   // is not an operation this library can perform.
   //
   // Zeroing the window was survivable while this route spent `userActionLimiter`

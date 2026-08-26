@@ -280,8 +280,9 @@ export const auditLogExportLimiter = makeLimiter(10, "3600 s");
 // refund was implemented as `bridgeComputeLimiter.resetUsedTokens(key)`.
 // MEASURED: `@upstash/ratelimit` v2.0.8 offers `limit`, `blockUntilReady`,
 // `getRemaining` and `resetUsedTokens` — and `resetUsedTokens` DELETES every
-// store key matching `<prefix>:<identifier>*` (dist/index.js:881-884, calling
-// the algorithm's `resetTokens`). There is NO decrement primitive, so a
+// store key matching `<prefix>:<identifier>*` — its implementation delegates to
+// the algorithm's `resetTokens`, which issues the wildcard delete. There is NO
+// decrement primitive anywhere in that surface, so a
 // "refund" of one token is a reset of the whole window. On a 5/60s bucket that
 // is nearly harmless and on the export route's 1/day bucket it is exact; on
 // THIS bucket it returns up to ten tokens and up to an hour, so a caller
