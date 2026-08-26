@@ -182,6 +182,24 @@ export function KeyPermissionBadge({ apiKeyId, className = "" }: KeyPermissionBa
   // Trade ✓ / Withdraw ✓ sits under the connect form's "only read-only keys are
   // accepted", so a user who believes them concludes their read-only key can
   // move funds. Presentation only: server-side scope ENFORCEMENT is unaffected.
+  //
+  // ⚠️ COUPLING, recorded by the 162 silent-failure audit (A-5). `=== true`
+  // means an ABSENT `probe_error` reads as a successful probe — the optimistic
+  // arm. That is correct TODAY only because of a fact that lives in another
+  // language, in another repo directory: `analytics-service/routers/internal.py`
+  // always emits the key (`bool(perms.get("probe_error", False))`), so absence
+  // never occurs on the wire. The wire SCHEMA does not enforce that —
+  // `LivePermissionsSchema` marks the field `.optional()`
+  // (src/lib/analytics-schemas.ts) — so nothing between the emitter and this
+  // line would fail if a future response dropped it. It would simply be read as
+  // "the probe succeeded", and the chips would state scopes nobody verified.
+  //
+  // The audit deliberately left the logic ALONE: the component is otherwise
+  // correct, and flipping to a fail-closed default (`!== false`) would make
+  // every legacy/cached body render the failure copy. If that emitter ever
+  // stops emitting the key unconditionally, this line must become the
+  // pessimistic read — and the schema should stop calling optional what the
+  // producer treats as required.
   const probeFailed = perms?.probe_error === true;
 
   return (
