@@ -218,3 +218,82 @@ class TestFailCallSitesCloseTheClass:
         assert "error" not in copy.split(". ")[1].lower(), (
             f"the second sentence should name the next step, not the error: {copy!r}"
         )
+
+
+class TestBrokerNavStampSentencesAreNotFragments:
+    """IN-02 (162-REVIEW) — the strategy-side sibling of the class above.
+
+    ``_dispose_broker_nav_error`` in ``services/job_worker.py`` is the shared
+    terminal disposition for a structural ``NavReconstructionError``; its
+    ``stamp_detail`` argument is the sentence that reaches
+    ``strategy_analytics.computation_error`` and is rendered VERBATIM to the
+    account holder.
+
+    All four call sites kept the trailing space that used to separate the
+    sentence from a ``+ scrubbed`` exception suffix. D-162-4 removed the suffix;
+    the space stayed, so the user column shipped a fragment that was built to be
+    concatenated with something no longer there.
+
+    Structural, not four equality assertions, for the same reason the class
+    above is: the defect is a leftover of concatenation, and a fifth call site
+    copy-pasted from one of these four inherits both the space AND the temptation
+    to interpolate. The gate covers both — a ``stamp_detail`` that is not a plain
+    string literal is an interpolation (WR-01's class) at the same seam.
+    """
+
+    @staticmethod
+    def _stamp_detail_args() -> list[tuple[int, ast.expr]]:
+        from services import job_worker as job_worker_mod
+
+        tree = ast.parse(inspect.getsource(job_worker_mod))
+        found: list[tuple[int, ast.expr]] = []
+        for node in ast.walk(tree):
+            if not (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id == "_dispose_broker_nav_error"
+            ):
+                continue
+            for kw in node.keywords:
+                if kw.arg == "stamp_detail":
+                    found.append((node.lineno, kw.value))
+        return found
+
+    def test_every_stamp_detail_is_a_plain_literal_with_no_dangling_whitespace(self):
+        args = self._stamp_detail_args()
+
+        # A COUNT, not a presence test — the failure mode this guards against is
+        # the walk finding NOTHING (a rename, a helper moved behind an attribute
+        # call) and reporting clean over four raw writes. If a legitimate new
+        # call site appears, update this integer and say which seam was added.
+        assert len(args) == 4, (
+            f"expected exactly 4 _dispose_broker_nav_error(stamp_detail=...) call "
+            f"sites in services/job_worker.py, found {len(args)}. If that is a "
+            "legitimate change, update the integer here AND check the new site "
+            "passes a whole user-facing sentence, because this test is the only "
+            "thing standing between a copy-pasted fragment and the dashboard."
+        )
+
+        interpolated = [
+            (lineno, ast.unparse(value))
+            for lineno, value in args
+            if not isinstance(value, ast.Constant) or not isinstance(value.value, str)
+        ]
+        assert not interpolated, (
+            "a stamp_detail argument is not a plain string literal — an "
+            "interpolated value at this seam puts developer-audience internals "
+            "into the sentence the account holder reads (WR-01's class): "
+            f"{interpolated!r}"
+        )
+
+        dangling = [
+            (lineno, value.value)  # type: ignore[attr-defined]
+            for lineno, value in args
+            if value.value != value.value.strip()  # type: ignore[attr-defined]
+        ]
+        assert not dangling, (
+            "a curated stamp sentence carries leading/trailing whitespace. It is "
+            "the residue of a `+ scrubbed` suffix that D-162-4 removed, and it "
+            "lands verbatim in strategy_analytics.computation_error: "
+            f"{dangling!r}"
+        )

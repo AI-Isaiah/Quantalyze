@@ -207,13 +207,66 @@ describe("HONEST-04 / C-3 — EquityCurveCoverage caption", () => {
       />,
     );
     const caption = screen.getByText(
-      "Equity curves shown for 2 of 3 strategies — 1 without a usable return series are omitted.",
+      "Equity curves shown for 2 of 3 strategies — 1 without a usable return series is omitted.",
     );
     expect(caption).toBeTruthy();
     // Exactly ONE caption — a second disclosure line would be a second claim.
     expect(
       screen.getAllByText(/Equity curves shown for/),
     ).toHaveLength(1);
+  });
+
+  /**
+   * IN-03 (162-REVIEW) — the counters are computed, so the sentence around them
+   * has to agree with whatever they come out as. The caption read "… — 1
+   * without a usable return series ARE omitted." at every one-omitted
+   * portfolio, and "0 of 1 STRATEGIES" for a single-strategy portfolio whose
+   * only curve is missing.
+   *
+   * ⭐ Pins the CLAIM, not a word: the expectation is derived from the numbers
+   * the sentence itself reports, so it holds for shapes no fixture here
+   * enumerates. Neuter to redden: hardcode either ternary back to its plural
+   * branch.
+   */
+  it("Test 5b: the caption agrees in number with the counters it reports", async () => {
+    const { EquityCurveCoverage } = await import(PAGE);
+    const AGREEMENT =
+      /^Equity curves shown for (\d+) of (\d+) (strategy|strategies) — (\d+) without a usable return series (is|are) omitted\.$/;
+
+    // Every reachable shape: total===1 (only possible with shown===0, because
+    // shown===total returns null), one omitted of several, all omitted, and
+    // several omitted.
+    const shapes = [
+      [withoutCurve("a")],
+      [withCurve("a"), withCurve("b"), withoutCurve("c")],
+      [withoutCurve("a"), withoutCurve("b"), withoutCurve("c")],
+      [withCurve("a"), withoutCurve("b"), withoutCurve("c")],
+    ];
+
+    for (const series of shapes) {
+      const { container, unmount } = render(
+        <EquityCurveCoverage series={series} />,
+      );
+      const text = container.textContent ?? "";
+      const m = AGREEMENT.exec(text);
+      expect(
+        m,
+        `the caption no longer matches the C-3 shape, so nothing below is being checked: ${text}`,
+      ).toBeTruthy();
+      const total = Number(m![2]);
+      const noun = m![3];
+      const omitted = Number(m![4]);
+      const verb = m![5];
+      expect(
+        noun,
+        `"${total} ${noun}" disagrees in number: ${text}`,
+      ).toBe(total === 1 ? "strategy" : "strategies");
+      expect(
+        verb,
+        `"${omitted} … ${verb} omitted" disagrees in number: ${text}`,
+      ).toBe(omitted === 1 ? "is" : "are");
+      unmount();
+    }
   });
 
   it("Test 6a: n === m renders NO caption (nothing to disclose)", async () => {
@@ -249,7 +302,7 @@ describe("HONEST-04 / C-3 — EquityCurveCoverage caption", () => {
     // caption reports has to agree with what the chart actually drew.
     expect(
       screen.getByText(
-        "Equity curves shown for 1 of 2 strategies — 1 without a usable return series are omitted.",
+        "Equity curves shown for 1 of 2 strategies — 1 without a usable return series is omitted.",
       ),
     ).toBeTruthy();
   });
@@ -288,7 +341,7 @@ describe("HONEST-04 / C-3 — EquityCurveCoverage caption", () => {
     render(<EquityCurveCoverage series={series} />);
     expect(
       screen.getByText(
-        "Equity curves shown for 1 of 2 strategies — 1 without a usable return series are omitted.",
+        "Equity curves shown for 1 of 2 strategies — 1 without a usable return series is omitted.",
       ),
     ).toBeTruthy();
   });
@@ -354,7 +407,7 @@ describe("HONEST-04 / C-3 — EquityCurveCoverage caption", () => {
       "the caption blamed 'computed analytics' for a row whose analytics are computed and rendering in the breakdown table",
     ).not.toContain("without computed analytics");
     expect(container.textContent).toBe(
-      "Equity curves shown for 1 of 2 strategies — 1 without a usable return series are omitted.",
+      "Equity curves shown for 1 of 2 strategies — 1 without a usable return series is omitted.",
     );
   });
 });

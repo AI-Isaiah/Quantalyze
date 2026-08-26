@@ -552,6 +552,88 @@ async def test_traditional_asset_class_composite_fails_loud_retained_check() -> 
 
 
 @pytest.mark.asyncio
+async def test_clock_disagreement_user_copy_carries_no_internals() -> None:
+    """WR-01 (162-REVIEW) — HONEST-01's message/detail split at THIS refusal.
+
+    ``strategy_analytics.computation_error`` renders VERBATIM to the account
+    holder. This stamp used to write the developer sentence there: both
+    annualization clocks interpolated as ``(252/yr)`` / ``(365/yr)``, the
+    internal column name ``asset_class``, an issue number, and a remedy —
+    "Re-derive asset_class (crypto for a crypto-venue composite)." — that only an
+    engineer with repo access can act on. An account holder cannot re-derive
+    anything, so the sentence prescribed a step that could not work.
+
+    ⭐ The claim pinned here is the SENTENCE, not a word: the user-visible copy
+    carries NO numeric internal (neither clock), no internal identifier, and no
+    engineer-addressed remedy — while ``DispatchResult.error_message``
+    (→ ``compute_jobs.last_error``, admin-only) still names BOTH clocks, so the
+    operator can still tell which two disagreed. Part (3) of the same invariant
+    ``test_allocator_positions.py`` holds over ``api_keys.sync_error``.
+
+    Neuter to redden: collapse the ``detail=`` argument back into the positional
+    ``message`` (the pre-fix single-string call).
+    """
+    fake = _FakeSupabase(
+        members=[
+            _member(1, "2024-01-01", "2024-02-01"),
+            _member(2, "2024-02-01", None),
+        ],
+        strategy_row={
+            "id": _STRATEGY_ID,
+            "asset_class": "traditional",  # √252 ≠ deribit venue blend √365
+            "returns_denominator_config": _TEST_CONFIG,
+        },
+    )
+    m1 = _returns([("2024-01-01", 0.10), ("2024-01-02", 0.05)])
+    m2 = _returns([("2024-02-01", -0.04), ("2024-02-02", -0.06)])
+    with _apply(_deribit_patches(
+        fake, combine_returns=[(m1, {}), (m2, {})], has_option_activity=True,
+    )):
+        result = await run_stitch_composite_job({"strategy_id": _STRATEGY_ID})
+
+    assert result.outcome == DispatchOutcome.FAILED
+    stamps = [
+        p for t, p, _c in fake.upserts
+        if t == "strategy_analytics"
+        and isinstance(p, dict)
+        and "computation_error" in p
+    ]
+    assert len(stamps) == 1, (
+        "the refusal must stamp exactly one terminal row carrying the user "
+        f"sentence, or nothing below is reading the user column; got {fake.upserts!r}"
+    )
+    copy = stamps[0]["computation_error"]
+    assert isinstance(copy, str) and copy, (
+        "the refusal must still write a user-visible sentence — this test is "
+        f"about WHAT it says, not about softening it: {copy!r}"
+    )
+
+    # (1) No numeric internal. Both annualization clocks used to be interpolated
+    # here; a digit in this sentence can only have come from one of them.
+    assert not any(ch.isdigit() for ch in copy), (
+        "a number reached strategy_analytics.computation_error — the only "
+        "numbers at this site are the two annualization clocks, which mean "
+        f"nothing to the account holder who reads this verbatim: {copy!r}"
+    )
+    # (2) No internal identifier and no remedy addressed to an engineer.
+    for token in ("asset_class", "Re-derive", "venue blend", "#597"):
+        assert token not in copy, (
+            f"{token!r} reached the sentence the account holder reads: {copy!r}"
+        )
+
+    # (3) The DIAGNOSIS survives where an engineer reads it. Hand-typed clock
+    # literals: √252 traditional / √365 crypto (services/metrics.py) — the point
+    # is that the operator can still tell WHICH two clocks disagreed.
+    assert result.error_message is not None
+    for clock in ("252", "365"):
+        assert clock in result.error_message, (
+            "the operator string must still name both annualization clocks — "
+            "curating the user column must not blind the operator: "
+            f"{result.error_message!r}"
+        )
+
+
+@pytest.mark.asyncio
 async def test_zero_members_permanent_failed() -> None:
     """A composite with no strategy_keys members is structurally broken —
     permanent FAILED (never enqueued-forever), and a terminal analytics stamp."""
