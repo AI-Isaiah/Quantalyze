@@ -500,29 +500,47 @@ BEGIN
     UPDATE strategy_analytics
        -- ⛔ ASSIGNED, and the COALESCE-over-the-existing-value that stood here
        -- from 161.1 review round 4 is GONE ON PURPOSE (Phase 162 / HONEST-01).
-       -- That COALESCE guarded exactly one hazard: on the no-Python-stamp paths
-       -- this branch exists for — a preflight refusal, a circuit-break, a wedged
-       -- venue gateway, a budget timeout — the job's diagnostic was NULL, so an
-       -- unconditional assignment ERASED whatever the row already carried and
-       -- left the column NULL over a live permanent failure. `computation_error
-       -- _copy` is TOTAL: NULL in, a sentence out. The hazard cannot occur, and
-       -- a COALESCE whose left arm is provably non-NULL is dead code that
-       -- teaches the next reader that NULL is still reachable here.
+       -- ⚠️ TWO EARLIER DRAFTS OF THIS COMMENT DESCRIBED THAT COALESCE WRONGLY,
+       -- in opposite directions, and both are corrected here by measurement
+       -- (Phase 162 review F-4a/F-4b). What stood here was
+       -- `COALESCE(<the failing job's own free-text diagnostic>, <this column>)`.
+       -- Its LEFT arm is the OPERATOR column, and that column is non-NULL on
+       -- EVERY reachable failed_final row: the file header's writer census shows
+       -- exactly two writers of that status and both stamp it unconditionally
+       -- (the RPC assigns it straight from its argument, whose two callers pass
+       -- `kind or "unknown"`-style non-NULL strings; the reaper writes a fixed
+       -- audit literal). So the left arm ALWAYS won. This branch was writing
+       -- OPERATOR TEXT into a user-visible column on every protected failure,
+       -- and the right arm was unreachable in practice.
        --
-       -- ⚠️ The removal has TWO further effects. One is wanted: a row still
-       -- carrying raw exception text written before this migration is HEALED the
-       -- next time this branch touches it. Under the COALESCE that legacy text
-       -- would have been preserved indefinitely, which is the defect.
+       -- That settles what the removal does and does not cost:
+       --   * It does NOT cost the worker's curated per-failure sentence. An
+       --     earlier draft claimed it did. Measured, that sentence was ALREADY
+       --     being overwritten here — by the raw diagnostic, which is strictly
+       --     worse than the per-kind copy that replaces it. This branch is a
+       --     STRICT IMPROVEMENT over what it replaced, not a regression.
+       --   * It does NOT lose a NULL-erasure guard either, which is what the
+       --     other draft claimed. `computation_error_copy` is TOTAL — NULL in, a
+       --     sentence out — so the hazard round 4 guarded cannot occur, and a
+       --     COALESCE whose left arm is provably non-NULL is dead code that
+       --     teaches the next reader that NULL is reachable here.
+       --   * It DOES heal a row still carrying operator text written by the
+       --     pre-migration form of this very branch, the next time it is touched.
        --
-       -- ⛔ The other is a COST, and it is taken knowingly (Phase 162 review,
-       -- F-4). On the paths where the Python stamp DID run, that COALESCE also
-       -- preserved the worker's curated per-failure sentence — a real loss of
-       -- specificity on a column the portfolio stale warning renders. It is
-       -- accepted because this column records no PROVENANCE: preferring the
-       -- value already present cannot tell this failure's sentence from an
-       -- older unrelated one, and on the no-stamp paths this branch exists for
-       -- it would attribute a stale cause to a fresh failure. The migration
-       -- file header carries the full argument.
+       -- ⛔ WHAT IS STILL LOST HERE, and is NOT closed by this migration: the
+       -- worker writes a CURATED per-failure sentence into this column on this
+       -- exact path moments before the RPC that runs this bridge, and this
+       -- statement then replaces it with the per-KIND sentence. That loss is
+       -- REAL and it is what a user reads on the portfolio stale warning. It
+       -- PRE-DATES this migration (see above: it was previously a loss to the
+       -- raw diagnostic), so it is not something to revert to. Fixing it needs
+       -- PROVENANCE on this column — a writer/generation marker the Python
+       -- writers set and this branch reads — because preferring the value
+       -- already present cannot tell this failure's sentence from an older
+       -- unrelated one, and would also freeze the pre-migration operator text
+       -- this branch now heals. That is an architectural change, out of this
+       -- plan's scope, and the file header records it as owed work rather than
+       -- as an accepted trade.
        SET computation_error   = computation_error_copy(v_protected_kind),
            -- JOB-01: this is still an exit from computing. The publish columns
            -- are untouched on purpose; see the header for the full list of what

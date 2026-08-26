@@ -87,10 +87,18 @@
 -- There is no third writer. So on the paths that reach branch (b), `error_kind`
 -- is non-NULL by construction. The live PROD domain over `failed_final` rows,
 -- measured 2026-08-26 and therefore PRE-20260826140000: permanent 64 /
--- unknown 55 / transient 10. An unknown share of those 64 are reaped orphans;
--- they are indistinguishable in that census precisely because the reaper was
--- writing the same kind as a genuine permanent failure, which is the whole of
--- what 20260826140000 fixes going forward. It does not re-classify history.
+-- unknown 55 / transient 10. Some share of those 64 are reaped orphans, and
+-- ⚠️ THEY ARE IDENTIFIABLE — an earlier draft of this paragraph said they were
+-- not (Phase 162 review, F-3a). The reaper stamps a FIXED audit literal into
+-- the operator column on both arms, so
+-- `last_error LIKE 'orphaned_running_reaped:%'` selects exactly that class;
+-- 20260817120000:500 already documents that predicate as the way to count what
+-- a tick terminalized. Mig 20260826140000 therefore DOES re-classify that
+-- subset, in a one-time bounded backfill, on top of fixing the reaper going
+-- forward. (That predicate is available to a migration because it is a one-off
+-- UPDATE. It remains forbidden INSIDE this function, where the ⛔ anchor below
+-- bans the identifier outright: deriving user copy from the operator column at
+-- RUNTIME is the defect this file closes, and the two are different acts.)
 --
 -- ⛔ THE SECOND WRITER IS WHY THIS SHIPS A FOURTH ARM (Phase 162 review, F-3)
 -- ---------------------------------------------------------------------------
@@ -132,43 +140,60 @@
 -- orphaned / unrecognised) so a later edit cannot quietly collapse it or
 -- inflate it back to a decorative five.
 --
--- Per-exception specificity is LOST by this change, and that is the accepted
--- trade. ⚠️ IT IS NOT FREE ON EVERY PATH, and the earlier draft of this header
--- claimed it was (Phase 162 review, F-4). The honest accounting:
+-- Per-exception specificity is LOST by this change on BOTH write branches, and
+-- that is the accepted trade. ⚠️ TWO EARLIER DRAFTS OF THIS SECTION GOT THE
+-- MECHANISM WRONG, in opposite directions — the first claimed the loss was free
+-- everywhere, the second claimed branch (b-prime) had been preserving curated
+-- copy that this migration destroys (Phase 162 review F-4a/F-4b). Both are
+-- replaced here by the measured account:
 --
---   * BRANCH (b), the loud path — nothing is lost. The Python stamp's typed
---     sentences never survived to a screen here: branch (b) overwrote them one
---     statement later, every time, and on the `failed_retry` path branch (a)
---     writes computation_error = NULL. What the user read on a failed sync was
---     the raw exception string and nothing else.
---   * BRANCH (b-prime), the D-15 protected refresh — SPECIFICITY IS GENUINELY
---     LOST, and this migration is what loses it. `job_worker.py`'s
---     `_stamp_strategy_analytics_failed` → `_upsert_error_only` writes a
---     CURATED sentence to `strategy_analytics.computation_error` on exactly
---     this path (the D-162-4 message/detail split: `message` is curated copy,
---     the scrubbed exception goes to `detail` and never to this column). Under
+--   * BRANCH (b), the loud path — nothing is lost BY THIS MIGRATION. The Python
+--     stamp's typed sentences never survived to a screen here: branch (b)
+--     overwrote them one statement later, every time, and on the `failed_retry`
+--     path branch (a) writes computation_error = NULL. What the user read on a
+--     failed sync was the raw exception string and nothing else.
+--   * BRANCH (b-prime), the D-15 protected refresh — nothing is lost BY THIS
+--     MIGRATION either, and the claim that there was is FALSE. ⛔ MEASURED:
 --     20260825150000's `COALESCE(v_protected_error, strategy_analytics
---     .computation_error)` that curated sentence SURVIVED whenever the job's own
---     diagnostic was NULL — which the b-prime comment below calls the common
---     case on this branch. Retiring the COALESCE replaces a per-failure
---     sentence with a per-KIND one. `computation_error` renders on the portfolio
---     stale warning, so a user sees the difference.
+--     .computation_error)` has `v_protected_error` — the failing job's
+--     OPERATOR-column diagnostic — as its LEFT arm, and that column is non-NULL
+--     on every reachable failed_final row. The writer census above finds exactly
+--     two writers of that status: the RPC assigns the operator column straight
+--     from its argument (its two callers pass `kind or "unknown"`-style non-NULL
+--     strings, so it cannot be NULL), and the reaper writes a fixed audit
+--     literal. The left arm therefore ALWAYS won, the right arm was unreachable
+--     in practice, and pre-migration b-prime wrote RAW OPERATOR TEXT to a
+--     user-visible column on every protected failure. Replacing that with the
+--     per-kind sentence is a STRICT IMPROVEMENT. There is no regression to
+--     revert, and restoring a preference for the existing value would freeze
+--     that operator text on exactly the rows that carry it today.
 --
--- ACCEPTED ANYWAY, and the reason is not tidiness. The COALESCE preserves "the
--- value already in the column", and the column carries NO PROVENANCE: it cannot
--- distinguish (i) the curated sentence this failure just wrote, from (ii) a
--- curated sentence left by an OLDER, unrelated failure, from (iii) raw exception
--- text written before this migration. b-prime exists for the paths where the
--- Python stamp did NOT run — a preflight refusal, a circuit-break, a wedged
--- venue gateway, a budget timeout — and on those the column holds whatever the
--- last event left. Preferring it there attributes a stale cause to a fresh
--- failure, which fails HONEST-01's own premise more severely than being
--- general. A text-shape heuristic to tell curated from legacy is not a fix
--- either: it guesses at provenance the schema does not record. Restoring the
--- specificity properly means giving the column provenance (a writer/generation
--- marker), which is an architectural change and out of this plan's scope.
--- Until then this trades specificity for truthfulness KNOWINGLY, and the
--- COMMENT ON FUNCTION for the bridge says so in the same words.
+-- ⛔ WHAT IS GENUINELY LOST, on both branches, PRE-DATES this migration and is
+-- NOT closed by it. `job_worker.py`'s `_stamp_strategy_analytics_failed` →
+-- `_upsert_error_only` (and the composite handler's twin) writes a CURATED
+-- sentence into `strategy_analytics.computation_error` — the D-162-4
+-- message/detail split, where `message` is curated copy and the scrubbed
+-- exception goes to `detail` and never to this column — and the bridge then
+-- overwrites it, on branch (b) and on branch (b-prime) alike, whenever the same
+-- failure reaches a compute_jobs transition. Before this migration it was
+-- overwritten with the raw diagnostic; after it, with the per-kind sentence.
+-- The user-visible effect is that the worker's per-failure curation does not
+-- reach the portfolio stale warning on those paths.
+--
+-- ⚠️ THAT IS OWED WORK, NOT AN ACCEPTED TRADE, and the distinction matters
+-- because the fix is known and merely out of scope. It cannot be done by
+-- preferring the value already in the column: the column carries NO PROVENANCE,
+-- so that cannot distinguish (i) the curated sentence this failure just wrote,
+-- from (ii) a curated sentence left by an OLDER, unresolved protected failure,
+-- from (iii) operator text written by the pre-migration form of b-prime. It
+-- would also suppress the retry-positive 'orphaned' copy that mig
+-- 20260826140000 exists to deliver, since the reaper stamps no Python sentence
+-- at all. A text-shape heuristic is not a fix either: it guesses at provenance
+-- the schema does not record. Doing it properly means giving the column a
+-- writer/generation marker that the Python writers set and this bridge reads —
+-- an architectural change spanning analytics-service, and out of this plan's
+-- scope. The COMMENT ON FUNCTION for the bridge says the same in the same
+-- terms.
 --
 -- THE DELTA against 20260825150000 (five prior definitions exist; this re-bases
 -- on the LATEST, 20260825150000_sync_status_protect_marked_refresh.sql):
@@ -190,15 +215,19 @@
 --      ERASURE hazard is structurally gone, and a COALESCE whose left arm
 --      cannot be NULL is dead code that teaches the next reader that NULL is
 --      reachable.
---      ⛔ IT DOES NOT ONLY DELETE DEAD CODE, and the earlier draft of this line
---      said it did (Phase 162 review, F-4). The COALESCE also PRESERVED the
---      Python stamp's curated per-failure sentence on this branch, which on
---      b-prime — unlike branch (b) — really did survive to a screen. Removing
---      it costs that specificity. The full accounting, and why the trade is
---      taken rather than worked around, is in the "Per-exception specificity"
---      section above. It also has the wanted effect that rows still holding raw
---      exception text written before this migration are HEALED the next time
---      the bridge touches them, instead of being preserved indefinitely.
+--      ⛔ AND ITS LEFT ARM WAS THE OPERATOR COLUMN, which is why removing it is
+--      an improvement rather than a cost. An earlier draft of this line claimed
+--      the COALESCE had been preserving the Python stamp's curated sentence on
+--      this branch; MEASURED, it was not (Phase 162 review F-4a). That left arm
+--      is non-NULL on every reachable failed_final row, so it always won and
+--      this branch always wrote raw operator text to a user-visible column. See
+--      the "Per-exception specificity" section above for the writer census that
+--      establishes it, for what IS still lost here (the worker's curated
+--      sentence, overwritten on both branches, pre-dating this migration), and
+--      for why preferring the existing value is the wrong repair. Removal also
+--      has the wanted effect that rows still holding operator text written by
+--      the pre-migration form of this branch are HEALED the next time the
+--      bridge touches them, instead of being preserved indefinitely.
 --   5. Nothing else. Every CR-01 / JOB-01 / F-3 / PUB-02 / SI-02 anchor in the
 --      self-verify block is carried forward; the four that were keyed on the
 --      old `v_protected_error` spelling are RE-ANCHORED rather than deleted
@@ -801,29 +830,47 @@ BEGIN
     UPDATE strategy_analytics
        -- ⛔ ASSIGNED, and the COALESCE-over-the-existing-value that stood here
        -- from 161.1 review round 4 is GONE ON PURPOSE (Phase 162 / HONEST-01).
-       -- That COALESCE guarded exactly one hazard: on the no-Python-stamp paths
-       -- this branch exists for — a preflight refusal, a circuit-break, a wedged
-       -- venue gateway, a budget timeout — the job's diagnostic was NULL, so an
-       -- unconditional assignment ERASED whatever the row already carried and
-       -- left the column NULL over a live permanent failure. `computation_error
-       -- _copy` is TOTAL: NULL in, a sentence out. The hazard cannot occur, and
-       -- a COALESCE whose left arm is provably non-NULL is dead code that
-       -- teaches the next reader that NULL is still reachable here.
+       -- ⚠️ TWO EARLIER DRAFTS OF THIS COMMENT DESCRIBED THAT COALESCE WRONGLY,
+       -- in opposite directions, and both are corrected here by measurement
+       -- (Phase 162 review F-4a/F-4b). What stood here was
+       -- `COALESCE(<the failing job's own free-text diagnostic>, <this column>)`.
+       -- Its LEFT arm is the OPERATOR column, and that column is non-NULL on
+       -- EVERY reachable failed_final row: the file header's writer census shows
+       -- exactly two writers of that status and both stamp it unconditionally
+       -- (the RPC assigns it straight from its argument, whose two callers pass
+       -- `kind or "unknown"`-style non-NULL strings; the reaper writes a fixed
+       -- audit literal). So the left arm ALWAYS won. This branch was writing
+       -- OPERATOR TEXT into a user-visible column on every protected failure,
+       -- and the right arm was unreachable in practice.
        --
-       -- ⚠️ The removal has TWO further effects. One is wanted: a row still
-       -- carrying raw exception text written before this migration is HEALED the
-       -- next time this branch touches it. Under the COALESCE that legacy text
-       -- would have been preserved indefinitely, which is the defect.
+       -- That settles what the removal does and does not cost:
+       --   * It does NOT cost the worker's curated per-failure sentence. An
+       --     earlier draft claimed it did. Measured, that sentence was ALREADY
+       --     being overwritten here — by the raw diagnostic, which is strictly
+       --     worse than the per-kind copy that replaces it. This branch is a
+       --     STRICT IMPROVEMENT over what it replaced, not a regression.
+       --   * It does NOT lose a NULL-erasure guard either, which is what the
+       --     other draft claimed. `computation_error_copy` is TOTAL — NULL in, a
+       --     sentence out — so the hazard round 4 guarded cannot occur, and a
+       --     COALESCE whose left arm is provably non-NULL is dead code that
+       --     teaches the next reader that NULL is reachable here.
+       --   * It DOES heal a row still carrying operator text written by the
+       --     pre-migration form of this very branch, the next time it is touched.
        --
-       -- ⛔ The other is a COST, and it is taken knowingly (Phase 162 review,
-       -- F-4). On the paths where the Python stamp DID run, that COALESCE also
-       -- preserved the worker's curated per-failure sentence — a real loss of
-       -- specificity on a column the portfolio stale warning renders. It is
-       -- accepted because this column records no PROVENANCE: preferring the
-       -- value already present cannot tell this failure's sentence from an
-       -- older unrelated one, and on the no-stamp paths this branch exists for
-       -- it would attribute a stale cause to a fresh failure. The migration
-       -- file header carries the full argument.
+       -- ⛔ WHAT IS STILL LOST HERE, and is NOT closed by this migration: the
+       -- worker writes a CURATED per-failure sentence into this column on this
+       -- exact path moments before the RPC that runs this bridge, and this
+       -- statement then replaces it with the per-KIND sentence. That loss is
+       -- REAL and it is what a user reads on the portfolio stale warning. It
+       -- PRE-DATES this migration (see above: it was previously a loss to the
+       -- raw diagnostic), so it is not something to revert to. Fixing it needs
+       -- PROVENANCE on this column — a writer/generation marker the Python
+       -- writers set and this branch reads — because preferring the value
+       -- already present cannot tell this failure's sentence from an older
+       -- unrelated one, and would also freeze the pre-migration operator text
+       -- this branch now heals. That is an architectural change, out of this
+       -- plan's scope, and the file header records it as owed work rather than
+       -- as an accepted trade.
        SET computation_error   = computation_error_copy(v_protected_kind),
            -- JOB-01: this is still an exit from computing. The publish columns
            -- are untouched on purpose; see the header for the full list of what
@@ -857,7 +904,7 @@ END;
 $$;
 
 COMMENT ON FUNCTION sync_strategy_analytics_status IS
-  'Atomic UI status bridge. Derives strategy_analytics.computation_status from the compute_jobs aggregate for the given strategy in a single SQL statement (no read-then-write race). Mapping: any non-terminal row → computing, any NON-SUPERSEDED UNPROTECTED failed_final → failed (with the CURATED sentence for the latest failure''s error_kind — never the job''s own diagnostic text), all done → complete; EXCEPT a row already at complete_with_warnings OR carrying the runner-owned computation_warned marker is preserved as complete_with_warnings in BOTH the non-terminal (a) and all-done (c) branches (a sticky, more-informative terminal success the analytics runner wrote and only the runner clears). SUPERSESSION (mig 20260710150000, F-3/PUB-02): a failed_final poisons the strategy ONLY when NOT superseded by a strictly-later done of the SAME (strategy_id, kind), keyed on the immutable created_at. Fresh-ledger re-onboard of a failed member key = RE-ENQUEUE a fresh compute job (enqueue dedup is in-flight-only, so a resubmit inserts a fresh generation while the stale failed_final is retained for audit); the bridge then ignores the same-kind-superseded failed_final. NEVER retry in place; NEVER delete queue history. Per-kind scoping keeps a real permanent failure poisoning across a later done of a DIFFERENT kind (cross-kind SAFETY). COMPUTING_STARTED_AT (mig 20260802120000, JOB-01): branch (a) maintains strategy_analytics.computing_started_at with a three-arm CASE keyed off the RESOLVED status — stamp now() only on a genuine transition INTO computing, KEEP the existing stamp when the row is already computing, and clear to NULL when the branch resolves to complete_with_warnings; branches (b) and (c) clear it to NULL as exit transitions. PROTECTED MARKED REFRESH (mig 20260825150000, Phase 161.1 CR-01): a non-superseded failed_final whose compute_jobs.metadata->>''source'' is a recurring ledger-refresh marker AND whose kind is one a refresh can reach (derive_broker_dailies, stitch_composite, or the forwarded chain hop compute_analytics_from_csv — the kind scope is the containment that survives a widening of the Pydantic Source Literal that request-derived writers put into the SAME metadata key; the enqueue_compute_job ACL is NOT that containment) AND whose strategy_analytics row still reads terminal-success (computation_status IN (complete, complete_with_warnings) — deliberately NOT widened with computation_warned, which survives both a computing entry-write and a failed bounce) is EXCLUDED from branch (b) and handled by branch (b-prime), which records computation_error (the curated sentence for the protected failure''s error_kind; the former COALESCE over the row''s existing value is RETIRED by mig 20260826120000 — computation_error_copy is total, so the NULL-erasure that COALESCE guarded cannot occur, and legacy raw text is healed rather than preserved. ⚠️ THE RETIREMENT COSTS SPECIFICITY ON THIS BRANCH, knowingly: job_worker.py _upsert_error_only writes a CURATED per-failure sentence to this column on exactly the D-15 protected path, and under the COALESCE that sentence survived whenever the job''s own diagnostic was NULL — the common case here. It is now replaced by the per-KIND sentence. Accepted because computation_error records no PROVENANCE, so preferring the value already present cannot distinguish this failure''s sentence from an older unrelated one, and on the no-stamp paths this branch exists for — preflight refusal, circuit-break, wedged gateway, budget timeout — it would attribute a stale cause to a fresh failure. Restoring per-failure specificity properly requires giving the column a writer/generation marker; until then this is a deliberate trade of specificity for truthfulness, not an oversight) and clears computing_started_at but writes NO computation_status, NO computation_warned and NO computed_at — so a background maintenance refresh can never un-publish a funded account, while every user-initiated job still poisons loudly. The health conjunct is a coherence check with the worker-side D-15 guard: if that guard declined to protect it has already written failed, so this reads false and the loud path is taken. IDEMPOTENCE (same migration): the health read and the failure partition are evaluated BEFORE branch (a), and branch (a) stands down (v_protect_hold) when b-prime is the outcome it would otherwise reach — otherwise branch (a)''s transient computing write would make the next bridge call re-derive the protection as absent and poison the row it had already protected. A row that arrives ALREADY at computing with no protection previously granted is still LOUD. SCOPE OF THAT STAND-DOWN (same migration, CR-01 follow-up review): the hold is NOT per-strategy. It is released once EVERY protected failure already has a strictly-later, same-kind, UNMARKED job in flight — the only shape of job whose terminal outcome decides that failure without the health read (a done supersedes it per F-3/PUB-02; an unmarked failed_final is loud by design) — so an in-flight resync of the failure''s own kind advertises computing again instead of reading as a terminal success to the wizard poller. A MARKED successor is deliberately excluded: the recurring arm retrying against a still-wedged venue would otherwise release the hold, bounce the row to computing and go dark on its own retry. no rows → no-op (preserve existing). CURATED USER COPY (mig 20260826120000, Phase 162 HONEST-01): strategy_analytics.computation_error is a USER-VISIBLE column (wizard failure envelope, portfolio stale warning) and compute_jobs.last_error is an OPERATOR column holding raw classify_exception output, so branches (b) and (b-prime) no longer copy the second into the first — they write computation_error_copy(error_kind), whose range is four fixed literals (permanent / retries-exhausted / orphaned / cautious default — the ''orphaned'' arm is Phase 162 review F-3, read here and WRITTEN by mig 20260826140000, which widens compute_jobs_error_kind_check and re-registers the hourly orphaned-running reaper to stop mislabelling worker deaths as permanent failures). The identifier for the operator column does not appear anywhere in this function body, comments included, and the migration''s self-verify block asserts that on pg_get_functiondef. The raw diagnosis is unchanged on compute_jobs.last_error, which is where an engineer reads what actually happened. Called post-flip by mark_compute_job_done / mark_compute_job_failed (in-RPC PERFORM) and, for the DEFERRED outcome only, by services.job_worker.dispatch. Service-role only. See migrations 038 + 20260707120000 + 20260708120000 + 20260710150000 + 20260802120000 + 20260825150000 + 20260826120000.';
+  'Atomic UI status bridge. Derives strategy_analytics.computation_status from the compute_jobs aggregate for the given strategy in a single SQL statement (no read-then-write race). Mapping: any non-terminal row → computing, any NON-SUPERSEDED UNPROTECTED failed_final → failed (with the CURATED sentence for the latest failure''s error_kind — never the job''s own diagnostic text), all done → complete; EXCEPT a row already at complete_with_warnings OR carrying the runner-owned computation_warned marker is preserved as complete_with_warnings in BOTH the non-terminal (a) and all-done (c) branches (a sticky, more-informative terminal success the analytics runner wrote and only the runner clears). SUPERSESSION (mig 20260710150000, F-3/PUB-02): a failed_final poisons the strategy ONLY when NOT superseded by a strictly-later done of the SAME (strategy_id, kind), keyed on the immutable created_at. Fresh-ledger re-onboard of a failed member key = RE-ENQUEUE a fresh compute job (enqueue dedup is in-flight-only, so a resubmit inserts a fresh generation while the stale failed_final is retained for audit); the bridge then ignores the same-kind-superseded failed_final. NEVER retry in place; NEVER delete queue history. Per-kind scoping keeps a real permanent failure poisoning across a later done of a DIFFERENT kind (cross-kind SAFETY). COMPUTING_STARTED_AT (mig 20260802120000, JOB-01): branch (a) maintains strategy_analytics.computing_started_at with a three-arm CASE keyed off the RESOLVED status — stamp now() only on a genuine transition INTO computing, KEEP the existing stamp when the row is already computing, and clear to NULL when the branch resolves to complete_with_warnings; branches (b) and (c) clear it to NULL as exit transitions. PROTECTED MARKED REFRESH (mig 20260825150000, Phase 161.1 CR-01): a non-superseded failed_final whose compute_jobs.metadata->>''source'' is a recurring ledger-refresh marker AND whose kind is one a refresh can reach (derive_broker_dailies, stitch_composite, or the forwarded chain hop compute_analytics_from_csv — the kind scope is the containment that survives a widening of the Pydantic Source Literal that request-derived writers put into the SAME metadata key; the enqueue_compute_job ACL is NOT that containment) AND whose strategy_analytics row still reads terminal-success (computation_status IN (complete, complete_with_warnings) — deliberately NOT widened with computation_warned, which survives both a computing entry-write and a failed bounce) is EXCLUDED from branch (b) and handled by branch (b-prime), which records computation_error (the curated sentence for the protected failure''s error_kind; the former COALESCE over the row''s existing value is RETIRED by mig 20260826120000 — computation_error_copy is total, so the NULL-erasure that COALESCE guarded cannot occur, and operator text written by the pre-migration form of this branch is healed rather than preserved. ⚠️ THE RETIREMENT IS A STRICT IMPROVEMENT ON THIS BRANCH, and an earlier draft of this comment claimed the opposite (Phase 162 review F-4a). MEASURED: that COALESCE had the failing job''s OPERATOR-column diagnostic as its LEFT arm, and that column is non-NULL on every reachable failed_final row (exactly two writers of that status; the RPC assigns it straight from a non-NULL argument and the reaper writes a fixed audit literal), so the left arm always won and this branch always wrote raw operator text to a user-visible column. What IS lost, on this branch and on (b) alike, PRE-DATES this migration: job_worker.py _upsert_error_only writes a CURATED per-failure sentence to this column on exactly the D-15 protected path and the bridge then overwrites it — previously with the raw diagnostic, now with the per-KIND sentence. That is OWED WORK, not an accepted trade: closing it needs PROVENANCE on the column (a writer/generation marker the Python writers set and this bridge reads), because preferring the value already present cannot distinguish this failure''s sentence from one left by an older unresolved protected failure, would freeze the pre-migration operator text this branch now heals, and would suppress the retry-positive orphaned copy that mig 20260826140000 exists to deliver) and clears computing_started_at but writes NO computation_status, NO computation_warned and NO computed_at — so a background maintenance refresh can never un-publish a funded account, while every user-initiated job still poisons loudly. The health conjunct is a coherence check with the worker-side D-15 guard: if that guard declined to protect it has already written failed, so this reads false and the loud path is taken. IDEMPOTENCE (same migration): the health read and the failure partition are evaluated BEFORE branch (a), and branch (a) stands down (v_protect_hold) when b-prime is the outcome it would otherwise reach — otherwise branch (a)''s transient computing write would make the next bridge call re-derive the protection as absent and poison the row it had already protected. A row that arrives ALREADY at computing with no protection previously granted is still LOUD. SCOPE OF THAT STAND-DOWN (same migration, CR-01 follow-up review): the hold is NOT per-strategy. It is released once EVERY protected failure already has a strictly-later, same-kind, UNMARKED job in flight — the only shape of job whose terminal outcome decides that failure without the health read (a done supersedes it per F-3/PUB-02; an unmarked failed_final is loud by design) — so an in-flight resync of the failure''s own kind advertises computing again instead of reading as a terminal success to the wizard poller. A MARKED successor is deliberately excluded: the recurring arm retrying against a still-wedged venue would otherwise release the hold, bounce the row to computing and go dark on its own retry. no rows → no-op (preserve existing). CURATED USER COPY (mig 20260826120000, Phase 162 HONEST-01): strategy_analytics.computation_error is a USER-VISIBLE column (wizard failure envelope, portfolio stale warning) and compute_jobs.last_error is an OPERATOR column holding raw classify_exception output, so branches (b) and (b-prime) no longer copy the second into the first — they write computation_error_copy(error_kind), whose range is four fixed literals (permanent / retries-exhausted / orphaned / cautious default — the ''orphaned'' arm is Phase 162 review F-3, read here and WRITTEN by mig 20260826140000, which widens compute_jobs_error_kind_check and re-registers the hourly orphaned-running reaper to stop mislabelling worker deaths as permanent failures). The identifier for the operator column does not appear anywhere in this function body, comments included, and the migration''s self-verify block asserts that on pg_get_functiondef. The raw diagnosis is unchanged on compute_jobs.last_error, which is where an engineer reads what actually happened. Called post-flip by mark_compute_job_done / mark_compute_job_failed (in-RPC PERFORM) and, for the DEFERRED outcome only, by services.job_worker.dispatch. Service-role only. See migrations 038 + 20260707120000 + 20260708120000 + 20260710150000 + 20260802120000 + 20260825150000 + 20260826120000.';
 
 REVOKE ALL ON FUNCTION sync_strategy_analytics_status FROM PUBLIC, anon, authenticated;
 
@@ -1265,7 +1312,7 @@ BEGIN
   -- property; without it that branch would blank the column over a live
   -- permanent failure, which is the silent-failure mode 161.1 round 4 fixed.
   IF computation_error_copy(NULL) IS NULL THEN
-    RAISE EXCEPTION 'HONEST-01 verification failed: computation_error_copy(NULL) is NULL. Branch (b-prime) assigns this value unconditionally — it retired its COALESCE precisely because this function is total — so a NULL here silently blanks computation_error over a live protected failure. Either restore the ELSE arm or put b-prime''s COALESCE back; do not leave both gone';
+    RAISE EXCEPTION 'HONEST-01 verification failed: computation_error_copy(NULL) is NULL. Branch (b-prime) assigns this value unconditionally — it retired its COALESCE precisely because this function is total — so a NULL here silently blanks computation_error over a live protected failure. RESTORE THE ELSE ARM. ⛔ Do NOT "fix" this by putting b-prime''s COALESCE back: its left arm was the operator column and always won, so it never guarded this, and preferring the row''s existing value instead would freeze pre-migration operator text and suppress the retry-positive orphaned copy (see the file header, "Per-exception specificity")';
   END IF;
 
   -- (H5) THE ARM CARDINALITY, asserted over the whole live domain plus NULL plus
