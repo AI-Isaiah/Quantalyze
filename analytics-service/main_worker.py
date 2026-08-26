@@ -63,11 +63,28 @@ load_dotenv()
 # ---------------------------------------------------------------------------
 # OPS-05 (Phase 163) — redaction is installed HERE, first, and unconditionally.
 # ---------------------------------------------------------------------------
+# ⚠️ SCOPE — read this BEFORE the leak description below. PRODUCTION DOES NOT
+# RUN THIS ENTRYPOINT. There is no separate worker service and has not been
+# since April 2026; the dispatch/watchdog/enqueue loops were merged into the
+# FastAPI process, which has called configure_logging() since Phase 16. See the
+# JOB-04 note in main() (~line 1224 below) for the 2026-08-17 verification, and
+# main.py:297, which logs "Worker starting as %s (merged into API)" — Plan 02
+# measured that line on PROD. So this change closes the STANDALONE and re-split
+# paths. It is PREVENTIVE there, not corrective, and the "unconditional leak"
+# below is a property of the standalone worker path, NOT of production logs.
+#
+# ⛔ Do not scope a credential-disclosure incident off the paragraph below. It
+# does not say production logs were unredacted before 2026-08-26, because they
+# were not; a key rotation for every connected venue key and a log-drain purge
+# would be scoped on a misreading. This block and the JOB-04 note must keep
+# saying the same thing (WR-08, Phase 163 review — they did not).
+#
 # Until 2026-08-26 this module contained ZERO references to configure_logging or
-# structlog, so THIS process — the one that runs ccxt long-fetch and MT5 sync —
-# emitted every line through structlog's DEFAULT chain and never installed the
-# stdlib `setLogRecordFactory` bridge. That is not a theoretical frozen-proxy
-# risk; it is an unconditional leak of every line the worker writes:
+# structlog, so a process started via `python -m main_worker` — the standalone
+# form of the one that runs ccxt long-fetch and MT5 sync — emitted every line
+# through structlog's DEFAULT chain and never installed the stdlib
+# `setLogRecordFactory` bridge. That is not a theoretical frozen-proxy risk; on
+# that path it is an unconditional leak of every line the worker writes:
 #
 #   * no `_redact_processor`, so `log.info(..., api_key=...)` renders the value
 #     verbatim (MEASURED 2026-08-26 — see tests/test_structlog_frozen_proxy.py

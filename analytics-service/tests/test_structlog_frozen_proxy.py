@@ -12,14 +12,25 @@ has actually run there. Two shapes defeat it:
 
 **Mode B — anything emitted before ``configure_logging()`` runs.** Measured
 2026-08-26 at the phase's base commit: ``main_worker.py`` contained ZERO
-references to ``configure_logging`` or ``structlog``. That is the process that
-runs ccxt long-fetch and MT5 sync (the image's worker service overrides CMD to
-``python -m main_worker``), so it emitted EVERY line through structlog's default
-chain and never installed the stdlib bridge at all — an unconditional leak, not
-a latent risk. ``main.py`` did configure, but BELOW its ``from routers import
-...`` line, so the API process was safe only by the accident that no router
-logged at import time. Both entrypoints now configure above every first-party
-import, and ``TestEntrypointOrdering`` fails if either regresses.
+references to ``configure_logging`` or ``structlog``, so a process started via
+``python -m main_worker`` emitted EVERY line through structlog's default chain
+and never installed the stdlib bridge at all — on that path an unconditional
+leak, not a latent risk. ``main.py`` did configure, but BELOW its ``from routers
+import ...`` line, so the API process was safe only by the accident that no
+router logged at import time. Both entrypoints now configure above every
+first-party import, and ``TestEntrypointOrdering`` fails if either regresses.
+
+⚠️ SCOPE (WR-08, Phase 163 review): PRODUCTION DOES NOT RUN ``main_worker`` as a
+separate process, and has not since April 2026 — the dispatch/watchdog/enqueue
+loops were merged into the FastAPI process, which has configured logging since
+Phase 16. ``main.py:297`` logs *"Worker starting as %s (merged into API)"*, and
+Plan 02 measured that line on PROD. An earlier revision of this docstring cited
+the Dockerfile's Sprint-3 header (*"The Railway worker service overrides CMD
+to: python -m main_worker"*) as evidence that production ran it; that header is
+stale and predates the merge — it is NOT in this phase's scope to fix, but do
+not treat it as current. Mode B was therefore a real leak on the STANDALONE and
+re-split paths and preventive on production. The gates below are worth keeping
+either way; the leak's blast radius is the part that must not be overstated.
 
 **Mode A — a module-scope ``.bind()``.** ``BoundLoggerLazyProxy.bind()`` returns
 a CONCRETE ``BoundLogger`` holding whatever processor list was in force at that
