@@ -61,11 +61,17 @@
 -- FUTURE EDITORS: if you extend either overload, re-base on THIS file (or a
 -- newer one) and KEEP both the retired-kind guard and the plain re-read.
 --
--- GRANTS ARE NOT TOUCHED. CREATE OR REPLACE preserves ACLs; 20260515130001
--- hardened them (no PUBLIC / anon / authenticated EXECUTE; service_role only).
--- The DO block below now ASSERTS that end state rather than assuming it, so an
--- accidental ACL reset on this SECURITY DEFINER queue-internals function fails
--- the deploy instead of shipping silently.
+-- GRANTS ARE RE-CONVERGED, NOT ASSUMED. CREATE OR REPLACE preserves ACLs, but
+-- 20260515130001 (mig 118) records a Supabase default-grant EVENT TRIGGER that
+-- re-opened EXECUTE to anon + authenticated on exactly this function family the
+-- last time it was CREATE OR REPLACE'd. So this migration re-issues mig 118's
+-- REVOKE/GRANT for the 10-param signature (idempotent) and THEN asserts the end
+-- state in the DO block. See the ⛔ note above those statements for why
+-- assert-only would have been the wrong call.
+--
+-- REVERSIBLE: re-run 20260716090000's 10-param body verbatim. There is no
+-- schema change to undo — this migration replaces one function body, refreshes
+-- one COMMENT, and re-issues two grants that were already the intended state.
 --
 -- Transaction style: NO explicit BEGIN/COMMIT — Supabase wraps each migration
 -- in an implicit transaction. SET LOCAL lock_timeout applies to that wrap. This
@@ -257,6 +263,38 @@ END;
 $$;
 
 -- --------------------------------------------------------------------------
+-- ⛔ RE-CONVERGE THE ACL. Do NOT delete this as redundant-because-CREATE-OR-
+-- REPLACE-preserves-grants. It is preserved by the REPLACE itself, but that is
+-- not the only actor: 20260515130001 (mig 118) records, from a real project,
+-- that Supabase carries a default `GRANT EXECUTE ... TO anon, authenticated`
+-- EVENT TRIGGER which fired on mig 109's CREATE and left the 7-param overload
+-- EXECUTE-grantable to anon and authenticated on the test project — an ACL
+-- hardening gap on a SECURITY DEFINER queue-internals function. Every
+-- CREATE OR REPLACE of these overloads is therefore an opportunity for that
+-- trigger to re-open the grant, and this migration is one.
+--
+-- Asserting the end state (DO block arm (e) below) would only turn that into a
+-- FAILED PROD DEPLOY on merge — loud, but it blocks the OPS-08 fix on an
+-- unrelated condition and leaves the security gap open either way. Converging
+-- first and asserting second gives both: the grant is correct whether or not
+-- the trigger fired, and the assertion still fails the deploy if something
+-- ELSE re-opens it afterwards.
+--
+-- Idempotent, and byte-identical to mig 118's statements for the 10-param
+-- signature: REVOKE always converges on "no PUBLIC/anon/authenticated EXECUTE";
+-- the GRANT is additive and redundant when service_role already holds it.
+-- --------------------------------------------------------------------------
+REVOKE ALL ON FUNCTION public._enqueue_compute_job_internal(
+  uuid, uuid, text, text, uuid[], text, jsonb,
+  uuid, uuid, timestamptz
+) FROM PUBLIC, anon, authenticated;
+
+GRANT EXECUTE ON FUNCTION public._enqueue_compute_job_internal(
+  uuid, uuid, text, text, uuid[], text, jsonb,
+  uuid, uuid, timestamptz
+) TO service_role;
+
+-- --------------------------------------------------------------------------
 -- COMMENT refresh for the 10-param overload. 20260515130001 (mig 118) gave the
 -- 7-param overload a comment that DOCUMENTS its plain re-read + retry code; the
 -- 10-param's comment predates that fix and said nothing about the race-loser
@@ -381,10 +419,18 @@ BEGIN
     RAISE EXCEPTION 'destrict-enqueue-10param: the 7-param body lost its serialization_failure raise (mig 109 P3 regressed)';
   END IF;
 
-  -- (e) ACL: CREATE OR REPLACE preserves grants, so this should be a no-op —
-  -- assert it rather than assume it. Expected end state is mig 118's: no
-  -- PUBLIC / anon / authenticated EXECUTE on this SECURITY DEFINER
-  -- queue-internals function; service_role holds it.
+  -- (e) ACL: verify the REVOKE/GRANT above actually converged. Expected end
+  -- state is mig 118's: no PUBLIC / anon / authenticated EXECUTE on this
+  -- SECURITY DEFINER queue-internals function; service_role holds it.
+  -- The role-existence check first is not ceremony: has_function_privilege on
+  -- an absent role raises `role "anon" does not exist`, which on a failed PROD
+  -- deploy reads as a mystery. These three roles are Supabase-standard and
+  -- their absence means this is not a Supabase database — say THAT.
+  IF to_regrole('anon') IS NULL
+     OR to_regrole('authenticated') IS NULL
+     OR to_regrole('service_role') IS NULL THEN
+    RAISE EXCEPTION 'destrict-enqueue-10param: one of the roles anon / authenticated / service_role does not exist on this database, so the ACL arm cannot be evaluated. These are Supabase-standard roles; their absence means this migration is running somewhere it was not written for.';
+  END IF;
   IF has_function_privilege('anon', v_oid10, 'EXECUTE')
      OR has_function_privilege('authenticated', v_oid10, 'EXECUTE') THEN
     RAISE EXCEPTION 'destrict-enqueue-10param: anon or authenticated holds EXECUTE on the 10-param SECURITY DEFINER overload — ACL drifted open (migration 118 revoked it)';
