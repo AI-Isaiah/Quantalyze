@@ -13,8 +13,8 @@
  * it already reads makes that note FALSE, so the note had to change with the
  * fix rather than be left standing beside it.
  *
- * The states matter because absence has two readings that LOOK IDENTICAL in the
- * cells and are not the same claim:
+ * The states matter because absence has THREE readings that LOOK IDENTICAL in
+ * the cells and are not the same claim:
  *
  *   · `addedMetricsById[id]` UNDEFINED — the fetch has not answered. Two
  *     em-dashes ("unknown") and SILENCE. Saying "no computed metrics" here
@@ -24,11 +24,19 @@
  *   · `addedMetricsById[id]` PRESENT with null values — the route answered and
  *     withheld (no analytics row, or a run that did not finish, which the route
  *     gates on `isRankableAnalyticsRow`). Now the note is true and earned.
+ *   · `addedMetricsById[id]` === "unavailable" — the fetch FAILED (non-ok,
+ *     network throw, malformed body). The app learned NOTHING about the
+ *     strategy, so it may report only its own failure. Added by the Phase 162
+ *     silent-failure audit, which found the failure path collapsed into the
+ *     settled one: a wedged PostgREST made the panel tell a viewer that three
+ *     other people's strategies have no computed metrics, each contradicted by
+ *     its own factsheet one click away.
  *
- * So the discriminating fixture in this file is C-A: it asserts the cells and
- * the note SEPARATELY while the fetch is still pending. A "fix" that keyed the
- * note off the null values alone passes every other test here and fails that
- * one.
+ * So the discriminating fixtures in this file are C-A and C-E/C-E2: C-A asserts
+ * the cells and the note SEPARATELY while the fetch is still pending (a "fix"
+ * keyed off the null values alone passes everything else and fails it), and
+ * C-E/C-E2 assert that the strategy-claim sentence has no render path from a
+ * fetch failure at all.
  *
  * Oracle rule (inherited from ScenarioComposer.test.tsx): formatter outputs are
  * pinned as LITERALS ("+18.4%", "1.63", "—"), never re-derived by calling the
@@ -164,6 +172,11 @@ const ADDED_NAME = "Honest Added Leg";
 const ABSENT_NOTE =
   "No computed metrics for this strategy — open the factsheet for detail.";
 
+/** The seam-fault copy. Deliberately attributes NOTHING to the strategy — it
+ *  reports only that the app could not get an answer. Literal, not imported. */
+const UNAVAILABLE_NOTE =
+  "We could not load metrics for this strategy right now.";
+
 /** The copy this phase RETIRED. It claimed the SURFACE could not show metrics;
  *  the widened route makes that false, so it must have no render path left. */
 const RETIRED_NOTE_FRAGMENT = "not available in the composer";
@@ -251,16 +264,17 @@ function returnsBody(extra: Record<string, unknown> = {}) {
  *  is otherwise unobservable. Any other request (e.g. the benign benchmark GET
  *  the composer fires on mount) resolves immediately and inertly. */
 function deferredReturnsFetch() {
-  let release!: (body: unknown) => void;
+  type Resolution = { ok: boolean; status: number; body: unknown };
+  let release!: (r: Resolution) => void;
   let reject!: (err: unknown) => void;
-  const settled = new Promise<unknown>((res, rej) => {
+  const settled = new Promise<Resolution>((res, rej) => {
     release = res;
     reject = rej;
   });
   const fetchMock = vi.fn(async (url: unknown) => {
     if (typeof url === "string" && url.includes("/returns")) {
-      const body = await settled;
-      return { ok: true, status: 200, json: async () => body };
+      const r = await settled;
+      return { ok: r.ok, status: r.status, json: async () => r.body };
     }
     return { ok: true, status: 200, json: async () => ({}) };
   });
@@ -269,7 +283,20 @@ function deferredReturnsFetch() {
     /** Answer the pending `/returns` call with this 200 body. */
     async answer(body: unknown) {
       await act(async () => {
-        release(body);
+        release({ ok: true, status: 200, body });
+        await Promise.resolve();
+      });
+    },
+    /**
+     * Answer the pending `/returns` call with a NON-OK response — the seam
+     * fault the composer cannot see past. 500 is not a hypothetical status
+     * here: `/api/strategies/[id]/returns` returns exactly this from its own
+     * select-error arm (route.ts:289-300), which is what a wedged PostgREST
+     * produces for every leg at once.
+     */
+    async failWithStatus(status: number) {
+      await act(async () => {
+        release({ ok: false, status, body: { error: "internal" } });
         await Promise.resolve();
       });
     },
@@ -326,6 +353,9 @@ function sharpeText(id = ADDED_ID): string | null {
 function noteCount(id = ADDED_ID): number {
   return within(panel(id)).queryAllByText(ABSENT_NOTE).length;
 }
+function unavailableNoteCount(id = ADDED_ID): number {
+  return within(panel(id)).queryAllByText(UNAVAILABLE_NOTE).length;
+}
 
 beforeEach(() => {
   browseOnAdd = null;
@@ -369,6 +399,9 @@ describe("ScenarioComposer — drawer-added metrics (Phase 162 / HONEST-05, UI-S
     // known, so it must not be on screen. This is the assertion that separates
     // a real fix from one keyed on the null values alone.
     expect(noteCount()).toBe(0);
+    // ...and the seam-fault note is not a consolation prize for silence either:
+    // nothing has failed, so nothing is reported.
+    expect(unavailableNoteCount()).toBe(0);
     // ...and nothing invented a zero to fill the gap.
     expect(panel().textContent).not.toMatch(/0\.00/);
     expect(panel().textContent).not.toMatch(/[+-]?0\.0%/);
@@ -412,6 +445,10 @@ describe("ScenarioComposer — drawer-added metrics (Phase 162 / HONEST-05, UI-S
     expect(sharpeText()).toBe("—");
     // Single-note discipline: the panel says it once.
     expect(noteCount()).toBe(1);
+    // Mutual exclusion with the seam-fault note. The route ANSWERED here, so
+    // "we could not load them" would be false — and two notes in one slot would
+    // leave the reader to guess which is the state.
+    expect(unavailableNoteCount()).toBe(0);
     // The copy that became false this phase is gone from the surface.
     expect(panel().textContent).not.toContain(RETIRED_NOTE_FRAGMENT);
     expect(panel().textContent).not.toContain("not available in this view");
@@ -441,7 +478,29 @@ describe("ScenarioComposer — drawer-added metrics (Phase 162 / HONEST-05, UI-S
     expect(noteCount()).toBe(0);
   });
 
-  it("C-E (fetch error): settled-absent — em-dashes + the note, no zeros, no error styling", async () => {
+  // -------------------------------------------------------------------------
+  // C-E — THE SEAM FAULT. A failure to know is not knowledge of an absence.
+  //
+  // ⛔ REGRESSION PIN. These two cases used to assert the OPPOSITE: the `.catch`
+  // wrote `{cagr: null, sharpe: null}`, the panel read that as settled, and the
+  // row printed "No computed metrics for this strategy". Nothing in that path
+  // ever observed the strategy. Three different things land in the catch — a
+  // non-ok response (INCLUDING our own route's 500 select-error arm), a network
+  // throw, and a malformed body — and none of them is evidence.
+  //
+  // The failure this guards is measured, not hypothetical. PostgREST wedges on
+  // this stack (a documented recurring mode); every in-flight `/returns` 500s
+  // at once; an allocator who drags in three strategies is told all three have
+  // no computed metrics, clicks a factsheet, and finds full CAGR and Sharpe. A
+  // false statement about someone else's track record, on a money surface,
+  // minted out of our own outage.
+  //
+  // The discriminating assertion in both cases is `noteCount() === 0` — the
+  // strategy-claim sentence must have NO render path from a fetch failure. A
+  // "fix" that merely reworded the note, or that showed both notes, fails here.
+  // -------------------------------------------------------------------------
+
+  it("C-E (network throw): the strategy-claim note is ABSENT — em-dashes + a note that attributes nothing", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const { fetchMock, fail } = deferredReturnsFetch();
     vi.stubGlobal("fetch", fetchMock);
@@ -451,20 +510,104 @@ describe("ScenarioComposer — drawer-added metrics (Phase 162 / HONEST-05, UI-S
     openDetail();
     await fail();
 
-    // Absence is not an error (DESIGN.md gates). The user is told what is true
-    // — there are no metrics to show — and offered the factsheet.
-    await waitFor(() => expect(noteCount()).toBe(1));
+    // What the app may say: it could not load them. What it may NOT say: that
+    // this strategy has none.
+    await waitFor(() => expect(unavailableNoteCount()).toBe(1));
+    expect(
+      noteCount(),
+      'a fetch failure rendered "No computed metrics for this strategy" — a claim about a strategy the request never reached',
+    ).toBe(0);
+    expect(panel().textContent).not.toContain(ABSENT_NOTE);
+
+    // The cells still say "unknown", which is true in every one of the states.
     expect(cagrText()).toBe("—");
     expect(sharpeText()).toBe("—");
-    // No red anywhere in the metrics arm: the note is the muted note, not a
-    // danger message.
-    const note = within(panel()).getByText(ABSENT_NOTE);
+
+    // Single-note discipline survives: exactly one sentence, not two.
+    expect(within(panel()).queryAllByText(/could not load|No computed/).length).toBe(1);
+
+    // No red anywhere in the metrics arm — a failure to load is still absence,
+    // and absence is not an error (DESIGN.md gates).
+    const note = within(panel()).getByText(UNAVAILABLE_NOTE);
     expect(note.className).toContain("text-text-muted");
     expect(note.className).not.toContain("danger");
     expect(note.className).not.toContain("red");
+
     // Never zeros, never a neighbour's figures.
     expect(panel().textContent).not.toMatch(/0\.00/);
     expect(panel().textContent).not.toMatch(/[+-]?0\.0%/);
+
+    // The remedy is still reachable — the factsheet is where the real answer
+    // lives, and in this state it is very likely to HAVE one.
+    expect(
+      within(panel()).getByRole("link", { name: /view factsheet/i }),
+    ).toHaveAttribute("href", `/factsheet/${ADDED_ID}`);
+    warn.mockRestore();
+  });
+
+  it("C-E2 (our own route's 500): a non-ok response is a seam fault too — the metrics half agrees with the series half", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { fetchMock, failWithStatus } = deferredReturnsFetch();
+    vi.stubGlobal("fetch", fetchMock);
+
+    renderScen();
+    add();
+    openDetail();
+    // Exactly what /api/strategies/[id]/returns emits when its select errors —
+    // the shape a wedged PostgREST produces for every leg simultaneously.
+    await failWithStatus(500);
+
+    await waitFor(() => expect(unavailableNoteCount()).toBe(1));
+    expect(
+      noteCount(),
+      "a 500 from our OWN route rendered a claim about the strategy's analytics",
+    ).toBe(0);
+    expect(cagrText()).toBe("—");
+    expect(sharpeText()).toBe("—");
+    expect(panel().textContent).not.toMatch(/0\.00/);
+    expect(panel().textContent).not.toMatch(/[+-]?0\.0%/);
+
+    // The two halves of ONE response must not disagree about it. The series
+    // half already treats a non-ok as a retryable FAILURE, not a genuine empty
+    // (WR-01: `addedReturnsById[id]` stays undefined). Proof that the metrics
+    // half now reads it the same way: the row is NOT chipped "no-series"
+    // either — a failed fetch settles neither question.
+    expect(addedRow().getAttribute("data-series-state")).toBe("available");
+    warn.mockRestore();
+  });
+
+  it("C-E3 (retry after a seam fault): remove + re-add re-asks, and a real answer replaces the note", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const first = deferredReturnsFetch();
+    vi.stubGlobal("fetch", first.fetchMock);
+
+    renderScen();
+    add();
+    openDetail();
+    await first.failWithStatus(500);
+    await waitFor(() => expect(unavailableNoteCount()).toBe(1));
+
+    // WR-01 — the retry path must survive the new state. "Right now" in the
+    // copy is a promise that a retry exists; if the failed entry poisoned the
+    // map, that promise would be false.
+    fireEvent.click(
+      within(addedRow()).getByRole("button", { name: "Remove from scenario" }),
+    );
+    expect(document.querySelector(`[data-scope-ref="${ADDED_ID}"]`)).toBeNull();
+
+    const second = deferredReturnsFetch();
+    vi.stubGlobal("fetch", second.fetchMock);
+    add();
+    openDetail();
+    // Re-added, fetch outstanding: no stale "unavailable", and still no claim.
+    expect(unavailableNoteCount()).toBe(0);
+    expect(noteCount()).toBe(0);
+
+    await second.answer(returnsBody({ cagr: 0.1842, sharpe: 1.63 }));
+    await waitFor(() => expect(cagrText()).toBe("+18.4%"));
+    expect(sharpeText()).toBe("1.63");
+    expect(unavailableNoteCount()).toBe(0);
+    expect(noteCount()).toBe(0);
     warn.mockRestore();
   });
 

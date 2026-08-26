@@ -313,6 +313,18 @@ export function stripConstituentSeries<T extends PortfolioStrategyRow>(
  * apart). Colorless by contract: absence is a neutral fact, not an error and not
  * a warning (DESIGN.md semantic-color gates). Renders nothing when every
  * constituent has a curve; still renders when NONE does.
+ *
+ * ⭐ The sentence names the predicate this function ACTUALLY evaluates — "no
+ * usable return series" — and deliberately not a cause it never tested. It used
+ * to say "without computed analytics", which is only ONE of the two ways into
+ * the omitted set: `isRankableAnalyticsRow` false (the STALE-01 gate above), OR
+ * true while `buildWealthPoints` still returns null because both
+ * `returns_series` and `daily_returns` were unusable. A
+ * `complete_with_warnings` row whose series write was skipped lands in the
+ * second bucket — and its CAGR and Sharpe are rendering in the Strategy
+ * Breakdown table on this very page, so the old caption stood beside its own
+ * counter-example. Stating an unmeasured cause is the same defect as stating an
+ * unmeasured value; the fix is to claim only what was checked.
  */
 export function EquityCurveCoverage({
   series,
@@ -327,7 +339,7 @@ export function EquityCurveCoverage({
   const omitted = total - shown;
   return (
     <p className="mt-3 text-caption text-text-muted">
-      {`Equity curves shown for ${shown} of ${total} strategies — ${omitted} without computed analytics are omitted.`}
+      {`Equity curves shown for ${shown} of ${total} strategies — ${omitted} without a usable return series are omitted.`}
     </p>
   );
 }

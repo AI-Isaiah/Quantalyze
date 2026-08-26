@@ -207,7 +207,7 @@ describe("HONEST-04 / C-3 — EquityCurveCoverage caption", () => {
       />,
     );
     const caption = screen.getByText(
-      "Equity curves shown for 2 of 3 strategies — 1 without computed analytics are omitted.",
+      "Equity curves shown for 2 of 3 strategies — 1 without a usable return series are omitted.",
     );
     expect(caption).toBeTruthy();
     // Exactly ONE caption — a second disclosure line would be a second claim.
@@ -233,7 +233,7 @@ describe("HONEST-04 / C-3 — EquityCurveCoverage caption", () => {
     );
     expect(
       screen.getByText(
-        "Equity curves shown for 0 of 3 strategies — 3 without computed analytics are omitted.",
+        "Equity curves shown for 0 of 3 strategies — 3 without a usable return series are omitted.",
       ),
     ).toBeTruthy();
   });
@@ -249,7 +249,7 @@ describe("HONEST-04 / C-3 — EquityCurveCoverage caption", () => {
     // caption reports has to agree with what the chart actually drew.
     expect(
       screen.getByText(
-        "Equity curves shown for 1 of 2 strategies — 1 without computed analytics are omitted.",
+        "Equity curves shown for 1 of 2 strategies — 1 without a usable return series are omitted.",
       ),
     ).toBeTruthy();
   });
@@ -288,8 +288,73 @@ describe("HONEST-04 / C-3 — EquityCurveCoverage caption", () => {
     render(<EquityCurveCoverage series={series} />);
     expect(
       screen.getByText(
-        "Equity curves shown for 1 of 2 strategies — 1 without computed analytics are omitted.",
+        "Equity curves shown for 1 of 2 strategies — 1 without a usable return series are omitted.",
       ),
     ).toBeTruthy();
+  });
+
+  /**
+   * Phase 162 silent-failure audit (A-1) — the caption may not name a cause the
+   * code never tested.
+   *
+   * There are TWO ways into the omitted set, and the old copy ("without
+   * computed analytics") described only the first:
+   *
+   *   1. `isRankableAnalyticsRow(a)` false — the STALE-01 status gate. Covered
+   *      by Tests 2 / 2b above.
+   *   2. `isRankableAnalyticsRow(a)` TRUE, but `buildWealthPoints` still
+   *      returns null because neither `returns_series` nor `daily_returns` was
+   *      usable — a terminal-success row whose series write was skipped.
+   *
+   * A bucket-2 row HAS computed analytics: its CAGR and Sharpe are rendering in
+   * the Strategy Breakdown table on the same page. The old caption therefore
+   * stood next to its own counter-example. The fixture below is exactly that
+   * row, and the assertions pin BOTH halves — that it is genuinely rankable
+   * (otherwise this test would be a duplicate of Test 2, passing for the wrong
+   * reason), and that the sentence claims only the predicate that was
+   * evaluated.
+   */
+  it("Test 7c: a RANKABLE row with no usable series is omitted — and the caption does not blame its analytics", async () => {
+    const { buildEquityCurveSeries, EquityCurveCoverage } = await import(PAGE);
+    const { isRankableAnalyticsRow } = await import("@/lib/closed-sets");
+
+    /** Terminal SUCCESS, real headline metrics, and no series to draw. */
+    const rankableButSeriesless = {
+      computation_status: "complete_with_warnings",
+      computed_at: "2026-02-03T00:00:00Z",
+      cagr: 0.12,
+      sharpe: 1.1,
+      returns_series: null,
+      daily_returns: null,
+    };
+
+    // Premise, pinned: this row is on the ALLOWED side of the status gate. If a
+    // future edit made it non-rankable, the test below would still pass while
+    // proving nothing about bucket 2.
+    expect(isRankableAnalyticsRow(rankableButSeriesless)).toBe(true);
+    // ...and it carries the very metrics the breakdown table renders, which is
+    // what made "without computed analytics" false about it.
+    expect(rankableButSeriesless.sharpe).toBeGreaterThan(0);
+
+    const series = buildEquityCurveSeries([
+      row("s1", "Live", liveAnalytics),
+      row("seriesless", "No series", rankableButSeriesless),
+    ]);
+    // It really is in the omitted set — via bucket 2, not the status gate.
+    expect(series[1].equityCurve).toBeNull();
+
+    const { container } = render(<EquityCurveCoverage series={series} />);
+    // FIRST, and on its own: the retired claim has no render path. This is the
+    // assertion the fix owns — the omitted row's analytics ARE computed, so
+    // naming them as the cause is a statement the code did not test and this
+    // row disproves. Ordered ahead of the exact-copy pin deliberately, so a
+    // revert of the copy fails on the LIE rather than on the wording.
+    expect(
+      container.textContent,
+      "the caption blamed 'computed analytics' for a row whose analytics are computed and rendering in the breakdown table",
+    ).not.toContain("without computed analytics");
+    expect(container.textContent).toBe(
+      "Equity curves shown for 1 of 2 strategies — 1 without a usable return series are omitted.",
+    );
   });
 });
