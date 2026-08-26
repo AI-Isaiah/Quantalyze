@@ -26,6 +26,7 @@ from __future__ import annotations
 import os
 import sys
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -3455,6 +3456,7 @@ class _RecordingBuilder:
         self._client = client
         self._op = "select"
         self._filters = {}
+        self._gte = {}
         self._payload = None
 
     def select(self, *_args, **_kwargs):
@@ -3473,6 +3475,19 @@ class _RecordingBuilder:
 
     def eq(self, column, value):
         self._filters[column] = value
+        return self
+
+    def gte(self, column, value):
+        """Recorded SEPARATELY from `.eq()` (OPS-09, Phase 163).
+
+        The resync pre-check gained `.gte("created_at", <cutoff>)`. Folding it
+        into `self._filters` would make it show up in the equality-pinned filter
+        shapes the assertions below compare against inline literals — and those
+        pins exist to catch a filter DISAPPEARING, so widening them to absorb a
+        new one would be the wrong repair. Recorded in its own dict so a future
+        assertion can pin the bound without loosening the equality pins.
+        """
+        self._gte[column] = value
         return self
 
     def maybe_single(self):
@@ -3986,11 +4001,16 @@ def test_seam06_resync_dedups_on_strategy_scoped_draft_key(client):
 
     Phase 140.1's PYAPI-09d asserted resync issued NO strategy_verifications
     read and could NEVER emit WIZARD_DUPLICATE — because idempotency-by-SESSION
-    has no meaning for a server-minted session id. Phase 141 adds a bounded seam
-    retry and allowlists resync for it, which REQUIRES resync's draft SV write to
-    be idempotent for the sequential-retry class. So resync now DOES consult a
-    dedup pre-check — but the security core PYAPI-09d protected is preserved and
-    tightened here: the read is scoped by the strategy-owned draft key
+    has no meaning for a server-minted session id. Phase 141 added a bounded seam
+    retry and allowlisted resync for it on the strength of this pre-check.
+
+    ⚠️ That justification was WITHDRAWN. 141.1 re-derived the claim and found it
+    false; 141.2 / D-03 moved the TypeScript seam registry's resync verdict to NO,
+    so no resync retry is issued and this pre-check is defense-in-depth against a
+    DUPLICATE SUBMIT, not an idempotency key for a retry class. (Corrected here by
+    Phase 163 / OPS-09 — the sentence outlived the withdrawal.) What resync does
+    consult is unchanged, and so is the security core PYAPI-09d protected,
+    preserved and tightened here: the read is scoped by the strategy-owned draft key
     (strategy_id + flow_type='resync' + status='draft'), NEVER by a
     caller-supplied wizard_session_id (which could echo a foreign tenant's row).
 
@@ -4087,6 +4107,13 @@ def _seed_prior_resync_verification(
     seed is an independent oracle. `status` is the ONLY parameter: the two tests
     below differ in nothing else, which is what makes them a controlled
     experiment on `.eq("status", "draft")` alone.
+
+    `created_at` is stamped at NOW (OPS-09, Phase 163) so the row sits well
+    inside `_RESYNC_DRAFT_RESUME_WINDOW` and the experiment stays a
+    single-variable one — an age-dependent seed would confound `status` with the
+    bound. It is present at all because the real column is NOT NULL
+    (`supabase/migrations/20260501055202_strategy_verifications.sql:97`) and the
+    stateful double now fails loud on a row it is asked to compare without one.
     """
     row: dict[str, Any] = {
         "id": f"ver-prior-{status}",
@@ -4097,6 +4124,7 @@ def _seed_prior_resync_verification(
         "flow_type": "resync",
         "source": "binance",
         "correlation_id": "22222222-2222-4222-8222-222222222222",
+        "created_at": datetime.now(timezone.utc).isoformat(),
     }
     sb.store["strategy_verifications"].append(row)
     return row

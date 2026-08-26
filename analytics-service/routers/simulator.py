@@ -12,35 +12,55 @@ Keeping the plan's path would split the convention for one endpoint and make
 the main.py include list inconsistent. Placed in `routers/` to match the
 existing pattern.
 
-Rate limit: 20/hour, user-keyed (matches `simulatorLimiter` on the Next.js
-side). The FastAPI-level limit matches the Next.js front-door ceiling so
-a legitimate user who clears the front door cannot be 429'd by the
-defense-in-depth limiter here. The key function reads `X-User-Id`
-(forwarded by the Next.js handler) and falls back to the remote address
-only when the header is absent (direct-from-elsewhere callers).
+Rate limit: 20/hour, TENANT-keyed — `partial(tenant_or_platform_key,
+scope="simulator")`, the same shared identity the nine PYAPI-03 routes carry
+(pattern: routers/portfolio.py's `scope="portfolio_bridge"`). The value matches
+the Next.js front-door ceiling (`simulatorLimiter`) so a legitimate user who
+clears the front door cannot be 429'd by the defense-in-depth limiter here.
 
-G15-005 (audit-2026-05-07): previously decorated with a 30/hour ceiling
-keyed by `get_remote_address`. Behind Vercel's egress NAT every tenant
-collapsed into one shared bucket — first-mover starvation. Per-user
-keying mirrors routers/process_key.py:_process_key_rate_limit_key.
+⚠️ THE HISTORY, because this route changed its mind twice and the file used to
+narrate only the middle step.
+
+* G15-005 (audit-2026-05-07): the original decorator was 30/hour keyed by
+  `get_remote_address`. Behind Vercel's egress NAT every tenant collapsed into
+  ONE shared bucket — first-mover starvation. It moved to a per-user key read
+  from an `X-User-Id` header.
+* A PR #241 follow-up red team then REVERTED that: `src/lib/analytics-client.ts`
+  never forwarded the header (so the per-user keying was dead code), and a
+  direct-to-FastAPI caller holding the service key could mint a fresh bucket per
+  request by varying it. The key went back to the remote address, and the
+  effective per-tenant quota moved in-handler to `_check_simulator_user_rate`
+  against `req.user_id`. This docstring kept claiming "user-keyed" throughout.
+* SEC-05 (Phase 163) closes it properly. `tenant_or_platform_key` reads the
+  MAC-verified `X-Tenant-Claim`, so it is neither spoofable (unlike `X-User-Id`)
+  nor NAT-collapsing (unlike the address), and a claimless caller falls to the
+  documented `platform:/api/simulator` ceiling rather than to a bucket whose
+  name lies about its width. This was the TENTH and last IP-keyed route; the
+  class enumeration in tests/test_limiter_identity.py is now total at 10 with an
+  EMPTY quarantine.
+
+The in-handler `_check_simulator_user_rate` STAYS. It is the authoritative
+per-tenant quota (slowapi's key_func cannot see the parsed body, and
+`req.user_id` is server-set by Next.js), and the decorator is the coarse
+platform-facing ceiling in front of it. Two mechanisms, two jobs.
 """
 
 import asyncio
 import logging
 import time
+from functools import partial
 from typing import Any
 
 import pandas as pd
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
-from slowapi.util import get_remote_address
 
 from services.audit import log_audit_event
 from services.db import get_supabase, one, rows
 # PYAPI-05 — the shared status contract (analytics-service/docs/STATUS_CONTRACT.md).
 from services.error_contract import service_error
 from services.portfolio_limits import assert_portfolio_within_cap
-from services.rate_limit import limiter
+from services.rate_limit import limiter, tenant_or_platform_key
 from services.simulator_scoring import simulate_add_candidate
 
 router = APIRouter(prefix="/api", tags=["simulator"])
@@ -56,53 +76,35 @@ logger = logging.getLogger("quantalyze.analytics")
 # storage on the shared limiter would have silently skipped this route.
 
 
-def _simulator_rate_limit_key(request: Request) -> str:
-    """Rate-limit key for /api/simulator.
-
-    Keyed on remote IP. The pre-fix shape preferred an `X-User-Id` header
-    forwarded by the Next.js front door for per-user buckets, but a
-    PR #241 follow-up red-team turned up two problems with that path:
-
-      1. `src/lib/analytics-client.ts` never actually forwards the
-         header to FastAPI — so production traffic was already falling
-         through to the IP path. The per-user keying was effectively
-         dead code.
-      2. A direct-to-FastAPI attacker holding the SERVICE_KEY could set
-         `X-User-Id: <random-uuid-per-request>` and allocate a brand-new
-         20/hour bucket on every request, bypassing the limiter entirely.
-
-    The cleanest fix is to drop the header read so the spoof surface
-    disappears. The downside — shared-NAT users still share a window —
-    is a regression to the pre-G15-005 state, but the per-user surface
-    didn't exist in production anyway. A proper per-user bucket would
-    require an internal-signed `X-User-Id` (e.g., signed via
-    INTERNAL_API_TOKEN) so the header is non-spoofable; that's a
-    follow-up. Mirrors the same fix in
-    routers/process_key.py:_process_key_rate_limit_key.
-
-    S1 (red-team MED8) follow-up: this IP-keyed decorator is now only the
-    process-wide CEILING backstop. The EFFECTIVE per-tenant quota is enforced
-    in-handler against ``req.user_id`` (see ``_check_simulator_user_rate`` and
-    its call in ``portfolio_simulator``) — slowapi's key_func cannot see the
-    parsed request body, so per-user keying must live in the handler. ``user_id``
-    is set server-side by Next.js from the authenticated session and only the
-    Next.js front door reaches this route (X-Service-Key trust boundary), so it
-    is non-spoofable here — unlike the rejected ``X-User-Id`` header above.
-    """
-    return f"simulator:ip:{get_remote_address(request)}"
+# SEC-05 (Phase 163): ``_simulator_rate_limit_key`` — the module-private key
+# function that returned ``f"simulator:ip:{get_remote_address(request)}"`` — was
+# DELETED here, not merely unwired. Leaving a correct-looking private key func
+# behind after moving the decorator off it is how L-9 happened on
+# ``routers/optimizer.py``: the helper existed, read well in review, and no
+# decorator called it. A decoy is worse than nothing, because the next reader
+# takes its presence as evidence about what the route does.
 
 
 # S1 (red-team MED8): per-USER sliding-window rate limit for /api/simulator.
 #
-# The @limiter.limit("20/hour") decorator below keys on remote IP, but behind
-# Vercel's egress NAT every tenant collapses into ONE shared bucket — the first
-# few users each hour exhaust the 20/hour ceiling and everyone else 429s
-# (effective platform-wide 20/hour). slowapi's key_func only sees the Request,
-# not the parsed body, so the per-user quota cannot be expressed in the
-# decorator. We enforce it IN-HANDLER against ``req.user_id`` instead, mirroring
-# routers/portfolio.py's ``_check_sliding_window_rate`` pattern. The decorator
-# stays as a coarse per-IP ceiling backstop; the per-user check is the
-# authoritative per-tenant quota.
+# ⚠️ THE PARAGRAPH THAT USED TO BE HERE said: "The @limiter.limit("20/hour")
+# decorator below keys on remote IP, but behind Vercel's egress NAT every tenant
+# collapses into ONE shared bucket — the first few users each hour exhaust the
+# 20/hour ceiling and everyone else 429s (effective platform-wide 20/hour)."
+# That was an accurate description of a defect, and SEC-05 fixed the defect: the
+# decorator now keys on the MAC-verified tenant claim, so two tenants no longer
+# share a counter and the NAT collapse is gone.
+#
+# This check still earns its place, for the reason the paragraph gave next and
+# which is unchanged: slowapi's key_func only sees the Request, not the parsed
+# body, so a quota keyed on the server-set ``req.user_id`` cannot be expressed in
+# the decorator at all. It is enforced IN-HANDLER instead, mirroring
+# routers/portfolio.py's ``_check_sliding_window_rate``. The decorator is the
+# platform-facing ceiling; this is the per-user quota behind it. ⚠️ Until
+# ``src/lib/analytics-client.ts`` mints ``X-Tenant-Claim`` (the recorded 140.2
+# obligation) real traffic still lands on the documented
+# ``platform:/api/simulator`` ceiling — which is exactly why deleting this
+# in-handler check on the strength of the rekey would be wrong.
 #
 # In-process only (not distributed-safe across workers); the Next.js front-door
 # Upstash limiter remains the cross-worker authority. Bound on distinct users
@@ -231,7 +233,7 @@ def _records_to_series(raw: list[Any] | None, name: str = "") -> pd.Series | Non
 
 
 @router.post("/simulator")
-@limiter.limit("20/hour", key_func=_simulator_rate_limit_key)
+@limiter.limit("20/hour", key_func=partial(tenant_or_platform_key, scope="simulator"))
 async def portfolio_simulator(request: Request, req: SimulatorRequest) -> dict[str, Any]:
     """Simulate ADDing a candidate strategy to the user's portfolio.
 
@@ -239,11 +241,11 @@ async def portfolio_simulator(request: Request, req: SimulatorRequest) -> dict[s
     before/after equity-curve overlay series. The response is
     allocator-safe: no profile data, no admin internals.
     """
-    # S1 (red-team MED8): per-USER quota. The @limiter.limit decorator keys on
-    # remote IP, which collapses every tenant behind Vercel's NAT into one
-    # shared 20/hour bucket. Enforce the real per-tenant limit here against the
-    # server-set ``req.user_id`` (the key_func cannot see the parsed body). One
-    # user exhausting their quota must NOT 429 another user on the same IP.
+    # S1 (red-team MED8): per-USER quota. The @limiter.limit decorator is the
+    # platform-facing ceiling (tenant-keyed since SEC-05); this is the quota
+    # keyed on the server-set ``req.user_id``, which the key_func cannot see
+    # because slowapi runs it before the body is parsed. One user exhausting
+    # their quota must NOT 429 another user sharing the same ceiling bucket.
     if not _check_simulator_user_rate(req.user_id):
         # TS-23 (146-02, D-146-3): migrated onto the nested service_error
         # envelope — internal.py's worked example, the ONE winning 429

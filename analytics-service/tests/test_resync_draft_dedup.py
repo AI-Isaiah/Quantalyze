@@ -1,5 +1,14 @@
 """Phase 141 / SEAM-06 — resync's draft strategy_verifications write must be
-idempotent for the SEQUENTIAL retry class.
+deduped against a DUPLICATE SUBMIT.
+
+⚠️ This line used to read "idempotent for the SEQUENTIAL retry class". Phase
+141.1 re-derived that claim and found it false, and 141.2 / D-03 withdrew the
+retry grant it justified (the TypeScript seam registry carries a NO verdict for
+resync, so no resync retry is issued at all). The corrected statement of what
+this file pins lives in `routers/process_key.py`'s SCOPE BOUND comment: the
+guard closes the case where the first attempt's draft is STILL IN `draft` when a
+duplicate submit arrives, and it is not an idempotency key. Corrected here by
+Phase 163 / OPS-09 — the header outlived the correction by one file.
 
 WHY this file exists
 --------------------
@@ -31,6 +40,7 @@ Harness discipline (mirrors `tests/test_process_key_onboard_contract.py`)
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -64,6 +74,8 @@ class _StoreBuilder:
         self._client = client
         self._op = "select"
         self._filters: dict[str, Any] = {}
+        self._gte: dict[str, Any] = {}
+        self._order: list[tuple[str, bool]] = []
         self._payload: Any = None
         self._limit: int | None = None
         self._single = False
@@ -98,7 +110,27 @@ class _StoreBuilder:
         self._limit = n
         return self
 
-    def order(self, *_a: Any, **_k: Any) -> "_StoreBuilder":
+    def gte(self, col: str, val: Any) -> "_StoreBuilder":
+        """A REAL ``>=`` filter (OPS-09, Phase 163).
+
+        Added when `process_key`'s resync pre-check gained its bounded window. A
+        no-op stub here would make the bound untestable: the ancient-orphan case
+        would pass whether or not the production code carried the clause.
+        """
+        self._gte[col] = val
+        return self
+
+    def order(self, col: str, *_a: Any, desc: bool = False, **_k: Any) -> "_StoreBuilder":
+        """A REAL sort (OPS-09, Phase 163).
+
+        ⚠️ This USED to be `return self` — a silent no-op. That is why it is
+        called out: with a no-op `order`, a select's result stayed in insertion
+        order, so a test asserting "the pre-check resumes the NEWEST draft" would
+        have passed with the production `.order(...)` clause deleted. The gate
+        could not fail, which is worse than not having it
+        (`tests/test_limiter_identity.py` module docstring, non-negotiable #3).
+        """
+        self._order.append((col, desc))
         return self
 
     def execute(self) -> Any:
@@ -155,8 +187,23 @@ class _StatefulSupabase:
         return MagicMock(data=None)
 
     @staticmethod
-    def _match(row: dict[str, Any], filters: dict[str, Any]) -> bool:
-        return all(row.get(k) == v for k, v in filters.items())
+    def _match(row: dict[str, Any], b: _StoreBuilder) -> bool:
+        if not all(row.get(k) == v for k, v in b._filters.items()):
+            return False
+        for col, bound in b._gte.items():
+            actual = row.get(col)
+            # FAIL LOUD. A missing column silently compared as "excluded" would
+            # make a bounded query look like it filtered when it merely could not
+            # see the data. Every column this fake is filtered on is NOT NULL in
+            # `supabase/migrations/20260501055202_strategy_verifications.sql`.
+            assert actual is not None, (
+                f"harness: row in {b._table!r} has no {col!r} to compare against "
+                f"the >= bound {bound!r}. The fake's insert path must stamp it "
+                "(the real column is NOT NULL DEFAULT now())."
+            )
+            if actual < bound:
+                return False
+        return True
 
     def _run(self, b: _StoreBuilder) -> Any:
         table = self.store.setdefault(b._table, [])
@@ -168,17 +215,28 @@ class _StatefulSupabase:
                 if not row.get("id"):
                     self._seq += 1
                     row["id"] = f"{b._table[:3]}-{self._seq}"
+                # Simulate `created_at TIMESTAMPTZ NOT NULL DEFAULT now()`
+                # (migration 20260501055202). The route never sends the column, so
+                # without this the DB default is invisible to the fake and any
+                # `.gte("created_at", ...)` read would see None.
+                if not row.get("created_at"):
+                    row["created_at"] = datetime.now(timezone.utc).isoformat()
                 table.append(row)
                 out.append(dict(row))
             return MagicMock(data=out)
         if b._op == "update":
-            matched = [r for r in table if self._match(r, b._filters)]
+            matched = [r for r in table if self._match(r, b)]
             for r in matched:
                 if isinstance(b._payload, dict):
                     r.update(b._payload)
             return MagicMock(data=[dict(r) for r in matched])
         # select
-        matched = [r for r in table if self._match(r, b._filters)]
+        matched = [r for r in table if self._match(r, b)]
+        # ORDER BY before LIMIT — the SQL evaluation order, and the whole point of
+        # the OPS-09 gate. Applied last-key-first so a multi-key `.order()` chain
+        # sorts by the FIRST key primarily (Python sorts are stable).
+        for col, desc in reversed(b._order):
+            matched = sorted(matched, key=lambda r: (r.get(col) is None, r.get(col)), reverse=desc)
         if b._limit is not None:
             matched = matched[: b._limit]
         if b._single:

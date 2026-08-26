@@ -979,75 +979,132 @@ class TestG15_004_LimiterIsCanonicalSingleton:
 # ---------------------------------------------------------------------------
 
 
-class TestG15_005_RateLimitIsUserKeyed:
-    """G15-005 — the simulator route must be rate-limited per-user
-    (forwarded via ``X-User-Id`` header) rather than per-IP via
-    ``get_remote_address``. The IP-keyed path collapsed every tenant
-    behind Vercel's egress NAT into one shared bucket — first-mover
-    starvation. Ceiling must also match the Next.js front-door
-    (``simulatorLimiter`` = 20/hour) so a legitimate user who clears
-    the front door cannot be 429'd by the FastAPI safety net.
+class TestG15_005_RateLimitIsTenantKeyed:
+    """The simulator route's slowapi bucket must key on the MAC-verified tenant
+    claim — never on the request address, never on a client-supplied header.
+
+    ⛔ THIS CLASS WAS RENAMED AND TWO OF ITS TESTS REPLACED (SEC-05, Phase 163).
+    It used to be ``TestG15_005_RateLimitIsUserKeyed`` and its docstring said the
+    route "must be rate-limited per-user (forwarded via ``X-User-Id``)". That
+    sentence had been FALSE since the PR #241 red-team follow-up, which removed
+    the header read and went back to the address — the docstring described the
+    G15-005 intent while the two tests below it pinned the opposite. The pair it
+    carried was::
+
+        def test_route_uses_user_keyed_key_func_not_ip(self):
+            assert hasattr(simulator_router, "_simulator_rate_limit_key")
+            assert key_func is not get_remote_address
+
+        def test_key_function_ignores_spoofable_user_header(self, monkeypatch):
+            ...
+            assert bucket_ip.startswith("simulator:ip:")
+
+    Both PINNED THE DEFECT. The first was the weak check that let L-9 and L-10
+    hide: ``_simulator_rate_limit_key`` was not literally ``get_remote_address``,
+    it merely CALLED it, so the assertion passed while the route was IP-keyed.
+    The second asserted the bucket string starts with ``simulator:ip:`` — i.e. it
+    required the NAT collapse. SEC-05 deleted the helper, so both would now fail
+    for the right reason; they are replaced rather than deleted so the contract
+    they guarded (no spoofable header, ceiling matches the front door) keeps a
+    guard, on the new key.
+
+    ⚠️ These live in the same file as the route's other regressions, but the
+    class-membership gates are in ``tests/test_limiter_identity.py`` (L-10).
+    A file-scoped run of THAT file cannot see this one — which is exactly how
+    these two stale pins survived the rekey until the full suite ran.
+
+    RED DEMONSTRATION (executed 2026-08-26). Neuter: revert
+    ``routers/simulator.py`` to the IP form — re-import ``get_remote_address``,
+    restore ``_simulator_rate_limit_key`` returning
+    ``f"simulator:ip:{get_remote_address(request)}"``, point the decorator at it.
+    Run ``python3 -m pytest tests/test_simulator_router.py -k TestG15_005``
+    from ``analytics-service/``.
+    OBSERVED: 3 failed, 1 passed — all three replacements below went RED
+    together, and only ``test_ceiling_matches_next_js_front_door`` stayed green
+    (correctly: that neuter does not touch the ceiling). Restored immediately
+    after; the restore was verified by grepping for the
+    ``partial(tenant_or_platform_key, scope="simulator")`` call AND by an empty
+    ``git diff`` on the router, not by file hash.
     """
 
-    def test_route_uses_user_keyed_key_func_not_ip(self):
-        """The route's ``@limiter.limit(...)`` decorator overrides
-        ``key_func`` with the simulator-specific user-keyed function,
-        not the default ``get_remote_address``."""
-        from routers import simulator as simulator_router
-        from slowapi.util import get_remote_address
+    def test_the_dead_ip_key_helper_is_gone_not_merely_unwired(self):
+        """``_simulator_rate_limit_key`` must not exist at all.
 
-        # _simulator_rate_limit_key MUST exist (added in G15-005). If a
-        # future refactor deletes it, the regression test fails import.
-        assert hasattr(simulator_router, "_simulator_rate_limit_key")
-        key_func = simulator_router._simulator_rate_limit_key
-        # AND it must NOT be slowapi's default IP-based key_func.
-        assert key_func is not get_remote_address
-
-    def test_key_function_ignores_spoofable_user_header(self, monkeypatch):
-        """PR #241 red-team — the key_func MUST NOT read ``X-User-Id``.
-        That header is unsigned client input; an attacker holding the
-        SERVICE_KEY could set it to a fresh uuid per request and
-        allocate a brand-new 20/hour bucket each time, bypassing the
-        limiter entirely. Production traffic is already IP-keyed
-        because src/lib/analytics-client.ts never forwarded the
-        header, so removing the read closes the spoof surface
-        without regressing the legitimate-traffic shape.
-
-        Two requests from the same remote IP land in the SAME bucket
-        regardless of the X-User-Id value they claim.
-
-        ``get_remote_address`` is stubbed here so the test pins the
-        key_func's BEHAVIOUR (does it consult X-User-Id or not?)
-        without coupling to slowapi's request-shape contract (which
-        differs across CI Python / slowapi versions and reads
-        request.scope vs request.client.host depending on version).
+        Leaving a correct-looking private key func behind after moving the
+        decorator off it is how L-9 happened on ``routers/optimizer.py``: the
+        helper read well in review and no decorator called it. A decoy is worse
+        than nothing — the next reader takes its presence as evidence about what
+        the route does.
         """
         from routers import simulator as simulator_router
 
-        ip_box = {"value": "10.0.0.1"}
-        monkeypatch.setattr(
-            "routers.simulator.get_remote_address",
-            lambda _req: ip_box["value"],
+        assert not hasattr(simulator_router, "_simulator_rate_limit_key"), (
+            "the IP-keyed helper is back; SEC-05 deleted it deliberately"
         )
+
+    def test_route_key_func_is_the_shared_tenant_partial(self):
+        """The decorator keys on ``partial(tenant_or_platform_key,
+        scope="simulator")`` — the identity its nine PYAPI-03 siblings share —
+        and not on slowapi's address default.
+        """
+        import functools
+
+        from slowapi.util import get_remote_address
+
+        import services.rate_limit as rl
+
+        limits = rl.limiter._route_limits["routers.simulator.portfolio_simulator"]
+        assert limits, "the simulator route registered no static limit"
+        for limit in limits:
+            assert limit.key_func is not get_remote_address, "keys on the address"
+            assert isinstance(limit.key_func, functools.partial), limit.key_func
+            assert limit.key_func.func is rl.tenant_or_platform_key
+            assert limit.key_func.keywords == {"scope": "simulator"}
+
+    def test_key_function_ignores_spoofable_user_header(self, monkeypatch):
+        """PR #241 red-team contract, CARRIED FORWARD onto the new key.
+
+        The bucket MUST NOT read ``X-User-Id``: that header is unsigned client
+        input, and a caller holding the service key could set a fresh uuid per
+        request to mint a brand-new 20/hour bucket every time. Two requests
+        bearing the SAME tenant claim but DIFFERENT ``X-User-Id`` values must
+        land in one bucket.
+
+        Stated as a property of the registered key func, so it cannot drift from
+        what the decorator actually uses.
+        """
+        import services.rate_limit as rl
+
+        from tests.test_limiter_identity import _SECRET, _mint_claim
+
+        # The claim is MAC-verified against this secret; without it the key func
+        # fails safe to ``platform:degraded`` and this test would assert nothing
+        # about tenant identity (measured: that is exactly what it returned
+        # before this line existed).
+        monkeypatch.setenv("INTERNAL_API_TOKEN", _SECRET)
+        claim = _mint_claim("tenant-sim-spoof", _SECRET)
 
         class _FakeRequest:
             def __init__(self, user_id=None):
-                self.headers = {"X-User-Id": user_id} if user_id else {}
+                self.headers = {"X-Tenant-Claim": claim}
+                if user_id:
+                    self.headers["X-User-Id"] = user_id
+                self.client = None
+                self.scope = {"headers": [], "client": None}
 
-        key_func = simulator_router._simulator_rate_limit_key
+        key_func = rl.limiter._route_limits[
+            "routers.simulator.portfolio_simulator"
+        ][0].key_func
+
         bucket_a = key_func(_FakeRequest(user_id="user-alice"))
         bucket_b = key_func(_FakeRequest(user_id="user-bob"))
-        # PR #241 red-team contract: same IP → same bucket. The
-        # spoofable header MUST NOT carve out a separate window.
-        assert bucket_a == bucket_b
-        # Sanity: missing header still keys on IP (no user-bucket path
-        # exists any longer).
-        bucket_ip = key_func(_FakeRequest(user_id=None))
-        assert bucket_ip.startswith("simulator:ip:")
-        # Different IP → different bucket.
-        ip_box["value"] = "10.0.0.99"
-        bucket_other_ip = key_func(_FakeRequest(user_id="user-alice"))
-        assert bucket_other_ip != bucket_a
+        assert bucket_a == bucket_b, (
+            "the spoofable X-User-Id header carved out a separate window: "
+            f"{bucket_a!r} != {bucket_b!r}"
+        )
+        # And the bucket must NOT be the old NAT-collapsing address shape.
+        assert not bucket_a.startswith("simulator:ip:"), bucket_a
+        assert "tenant-sim-spoof" in bucket_a, bucket_a
 
     def test_ceiling_matches_next_js_front_door(self):
         """The FastAPI limit MUST match the Next.js front-door ceiling

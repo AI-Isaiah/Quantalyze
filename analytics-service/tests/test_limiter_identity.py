@@ -5,6 +5,16 @@ Phase 140.1 plan 07. The defect: behind Railway's edge proxy
 in fact PLATFORM-WIDE (RESEARCH G-10/G-11). Nine decorated routes had it. Two
 users running Scenario Composer could 429 each other on L-9's 20/minute.
 
+**TEN, as of SEC-05 (Phase 163).** ``routers/simulator.py`` was the tenth by
+behaviour all along — FINDING-10 said so — but it was left in place behind a
+one-entry ``IP_KEYED_QUARANTINE`` AND a bare ``continue`` inside gate 3's
+behavioural sweep. Two concealments for one route, and the second was not
+discoverable from the first. Both are gone: the route keys on
+``partial(tenant_or_platform_key, scope="simulator")``, the quarantine is
+``frozenset()``, the carve-out is deleted, and the class enumeration is total at
+``EXPECTED_CLASS_SIZE = 10``. Gate 5 below drives the repaired route with real
+HTTP and proves two tenant claims do NOT share its counter.
+
 **The class is IP KEYING (behaviour), not "private ``Limiter()``" (syntax).**
 Enumerating by the syntax finds 3 modules / 8 routes and misses
 ``routers/optimizer.py``, which imports the shared limiter correctly and inherits
@@ -17,16 +27,16 @@ limiter and compared to itself (programme non-negotiable #3 — 10 simultaneous
 semantic mutations once produced a byte-identical green because every oracle was
 self-referential).
 
-Four gates:
+Five gates:
 
-1. :class:`TestPerRouteKeyIdentity` — the wiring. For each of L-1..L-9, the
+1. :class:`TestPerRouteKeyIdentity` — the wiring. For each of L-1..L-10, the
    limit REGISTERED on the endpoint carries the shared tenant-or-platform key
    function bound to that route's scope. Asserting the module-level helper is
    the right shape would not prove any decorator invokes it.
 2. :class:`TestBucketBehaviour` — the behaviour. A verified claim buckets to a
    tenant; a claimless caller buckets to the documented platform ceiling.
-3. :class:`TestClassClosure` — the count. No source token ``get_remote_address``
-   survives under ``routers/`` except the quarantined FINDING-10 site, and the
+3. :class:`TestClassClosure` — the count. NO source token ``get_remote_address``
+   survives anywhere under ``routers/`` (no exemptions, since SEC-05), and the
    set of rate-limited routes is a literal.
 4. :class:`TestDefaultKeyBehaviour` — Phase 140.1.1 / PYAPIFIX-05, review
    survivors **#3** and **#4**. Gate 3's
@@ -36,6 +46,15 @@ Four gates:
    per-request-unique value (which gives every caller a private bucket). Gate 4
    drives real HTTP requests through a route that inherits the default key and
    asserts throttling actually happens.
+5. :class:`TestSimulatorTenantBucketBehaviour` — SEC-05 (Phase 163), the
+   BEHAVIOURAL half of the tenth route's repair. Gates 1-3 above are structural:
+   they read what the decorator carries. Every one of them would pass against a
+   ``partial(tenant_or_platform_key, scope="simulator")`` whose counter was
+   nonetheless shared — and, more to the point, a drive-to-429 on its own proves
+   nothing here either, because under ``TestClient`` the OLD IP key returned one
+   constant for every caller and would 429 at exactly the same call. So gate 5
+   asserts the property the rekey actually bought: one tenant claim exhausting
+   ``20/hour`` does NOT throttle a DIFFERENT tenant claim.
 """
 
 from __future__ import annotations
@@ -101,23 +120,43 @@ IP_KEYED_CLASS: list[tuple[str, str, str, str, str]] = [
     ("L-7", "/api/portfolio-bridge", "routers.portfolio.portfolio_bridge", "10 per 1 hour", "portfolio_bridge"),
     ("L-8", "/api/verify-strategy", "routers.portfolio.verify_strategy", "5 per 1 hour", "verify_strategy"),
     ("L-9", "/api/optimize-weights", "routers.optimizer.optimize_weights_endpoint", "20 per 1 minute", "optimize_weights"),
+    # L-10 — SEC-05 (Phase 163). FINDING-10's quarantined route, REPAIRED and
+    # folded into the class it always belonged to by behaviour. It joins here
+    # rather than living on as an exemption because every assertion parametrized
+    # over this table is one that used to skip it.
+    ("L-10", "/api/simulator", "routers.simulator.portfolio_simulator", "20 per 1 hour", "simulator"),
 ]
 
-#: The plan's count, as a literal. If a tenth route joins the class, the
-#: enumeration above is stale and a checker must be told rather than the number
-#: being quietly padded.
-EXPECTED_CLASS_SIZE = 9
+#: The count, as a literal. If an ELEVENTH route joins the class, the enumeration
+#: above is stale and a checker must be told rather than the number being quietly
+#: padded.
+#:
+#: MOVED DELIBERATELY, 9 -> 10 (SEC-05, Phase 163), per this constant's own
+#: instruction: a tenth route joined, so the number moves in the same commit as
+#: the row above and as the behaviour in ``routers/simulator.py``. It is not
+#: padding — the class grew by a repair, not by a discovery.
+EXPECTED_CLASS_SIZE = 10
 
-#: FINDING-10. ``routers/simulator.py:_simulator_rate_limit_key`` returns
+#: EMPTY, and that is the point (SEC-05, Phase 163).
+#:
+#: This used to read ``frozenset({"simulator.py"})``. FINDING-10 recorded that
+#: ``routers/simulator.py:_simulator_rate_limit_key`` returned
 #: ``f"simulator:ip:{get_remote_address(request)}"`` — by BEHAVIOUR a TENTH
-#: IP-keyed route. Plan 140.1-07's do-not-touch list describes it as "correctly
-#: user-keyed", which was true until the PR#241 follow-up reverted it (the
-#: function's own docstring records the revert; the effective per-tenant quota
-#: moved in-handler to ``_check_simulator_user_rate`` against ``req.user_id``).
-#: Left untouched here per the plan's explicit scope fence and QUARANTINED by a
-#: literal one-file allow-list: nothing else under routers/ may key on the
-#: request address, and if simulator is ever repaired this list must shrink.
-IP_KEYED_QUARANTINE: frozenset[str] = frozenset({"simulator.py"})
+#: IP-keyed route — and plan 140.1-07's scope fence left it in place, quarantined
+#: by a literal one-file allow-list with the standing instruction: "if simulator
+#: is ever repaired this list must SHRINK".
+#:
+#: It was repaired. The list shrank to zero. The equality at
+#: :meth:`TestClassClosure.test_no_router_source_references_get_remote_address`
+#: therefore now asserts that NOTHING under ``routers/`` references the request
+#: address — the strongest form this gate can take, and the form it could not
+#: take while it was carrying an exemption.
+#:
+#: ⛔ Do not re-populate this to make a new route pass. An entry here is a
+#: statement that a route is KNOWN to be IP-keyed and is being tolerated; the
+#: only honest way to add one is with the finding that justifies it and a dated
+#: instruction to shrink it again.
+IP_KEYED_QUARANTINE: frozenset[str] = frozenset()
 
 ROUTERS_DIR = pathlib.Path(__file__).resolve().parent.parent / "routers"
 
@@ -301,7 +340,10 @@ class TestPerRouteKeyIdentity:
         )
 
     def test_scopes_are_distinct_so_no_two_routes_share_a_bucket(self) -> None:
-        """Nine routes, nine scopes.
+        """Ten routes, ten scopes.
+
+        (Was "Nine routes, nine scopes" until SEC-05 added L-10; the sentence
+        counted the table and so had to move with it.)
 
         slowapi already namespaces buckets by endpoint (G-2), so a duplicated
         scope would NOT collapse two counters today — it would be a latent trap
@@ -467,23 +509,33 @@ class TestClassClosure:
 
     Counting gates, not spot checks: the standing programme lesson is that
     under-counts come from enumerating by the SYNTAX of a known instance rather
-    than by BEHAVIOUR. A gate that only re-checked the nine known rows would
-    have the same blind spot that missed L-9.
+    than by BEHAVIOUR. A gate that only re-checked the ten known rows would
+    have the same blind spot that missed L-9 — and, later, L-10.
     """
 
-    def test_the_enumerated_class_is_exactly_nine_routes(self) -> None:
+    def test_the_enumerated_class_is_exactly_ten_routes(self) -> None:
         assert len(IP_KEYED_CLASS) == EXPECTED_CLASS_SIZE
         assert len({row[0] for row in IP_KEYED_CLASS}) == EXPECTED_CLASS_SIZE
-        assert {row[0] for row in IP_KEYED_CLASS} == {f"L-{n}" for n in range(1, 10)}
+        assert {row[0] for row in IP_KEYED_CLASS} == {
+            f"L-{n}" for n in range(1, EXPECTED_CLASS_SIZE + 1)
+        }
 
-    def test_no_router_source_references_get_remote_address_except_the_quarantine(self) -> None:
-        """The behavioural gate, by source token.
+    def test_no_router_source_references_get_remote_address(self) -> None:
+        """The behavioural gate, by source token — now with NO exemption.
 
-        ``routers/simulator.py`` is the documented FINDING-10 quarantine — a
-        route the plan's do-not-touch list calls "correctly user-keyed" while
-        its key function returns ``simulator:ip:<address>``. It is reported, not
-        folded in. If it is ever repaired, SHRINK this allow-list; the equality
-        below is deliberate so a repair cannot leave a stale exemption behind.
+        SEC-05 (Phase 163): ``routers/simulator.py`` was the documented FINDING-10
+        quarantine, a route plan 140.1-07's do-not-touch list called "correctly
+        user-keyed" while its key function returned ``simulator:ip:<address>``.
+        It has been repaired, so — following the standing instruction on
+        ``IP_KEYED_QUARANTINE`` — the allow-list shrank to EMPTY and this gate now
+        says the absolute thing: nothing under ``routers/`` references the request
+        address at all.
+
+        ⚠️ The comparison stays an EQUALITY against the (now empty) quarantine
+        rather than becoming ``assert offenders == set()``. Same reason it was an
+        equality before: the constant is where the exemption policy is written
+        down, and routing the assertion through it means re-populating the
+        quarantine cannot silently detach from the gate that enforces it.
         """
         offenders = {
             p.name
@@ -491,9 +543,9 @@ class TestClassClosure:
             if "get_remote_address" in _source_name_tokens(p)
         }
         assert offenders == IP_KEYED_QUARANTINE, (
-            "routers/ get_remote_address references changed. Expected only the "
-            f"FINDING-10 quarantine {sorted(IP_KEYED_QUARANTINE)}, found "
-            f"{sorted(offenders)}."
+            "routers/ get_remote_address references changed. The quarantine is "
+            f"{sorted(IP_KEYED_QUARANTINE) or 'EMPTY'} — no router may key on the "
+            f"request address — but found {sorted(offenders)}."
         )
 
     def test_shared_limiter_module_no_longer_references_get_remote_address(self) -> None:
@@ -573,13 +625,19 @@ class TestClassClosure:
         plan 140.1-06 owns and this file must not re-litigate.
         """
         expected = {row[2] for row in IP_KEYED_CLASS} | {
-            # FINDING-10, quarantined: still IP-keyed, still not this plan's.
-            "routers.simulator.portfolio_simulator",
+            # SEC-05 (Phase 163): `routers.simulator.portfolio_simulator` was
+            # listed HERE, as a hand-added extra, with the note "FINDING-10,
+            # quarantined: still IP-keyed, still not this plan's". It is now an
+            # ordinary L-10 row in IP_KEYED_CLASS, so it arrives through the
+            # comprehension above and the hand-added entry is DELETED. Keeping
+            # both would have made this set silently tolerant of the row being
+            # dropped from the class table.
             # RATE-03 / TS-21 (146-02, D-146-2): the Phase 146 gap CLOSED —
             # both match routes joined the shared tenant-keyed surface
             # (scopes ``match_recompute`` / ``match_eval``, 30/minute). NOT
-            # added to IP_KEYED_CLASS: that table is the enumerated PYAPI-03
-            # defect class with an asserted size of 9, and these routes were
+            # added to IP_KEYED_CLASS: that table is the enumerated IP-keyed
+            # defect class with an asserted size of 10 (9 from PYAPI-03 plus
+            # SEC-05's L-10), and these routes were
             # never IP-keyed — they had no limiter at all.
             "routers.match.recompute",
             "routers.match.eval_metrics",
@@ -593,11 +651,29 @@ class TestClassClosure:
             f"missing={sorted(expected - registered)}"
         )
 
-    def test_every_registered_router_limit_is_shared_or_quarantined(self) -> None:
-        """Behavioural sweep: no registered limit may key on the address.
+    def test_every_registered_router_limit_is_shared(self) -> None:
+        """Behavioural sweep: EVERY registered router limit keys on the shared
+        tenant-or-platform function. No exemptions.
 
         Independent of ``IP_KEYED_CLASS``, so it also covers a route someone
         adds without updating the table above.
+
+        ⛔ WHAT WAS DELETED HERE, AND WHY IT MATTERED (SEC-05, Phase 163). This
+        loop used to carry, between the two assertions below::
+
+            if name == "routers.simulator.portfolio_simulator":
+                continue  # FINDING-10 — reported, not fixed here
+
+        That `continue` sat AFTER the weak `is not get_remote_address` check and
+        BEFORE the two strong ones, so simulator was exempted from the only
+        assertions that could see what it actually keyed on — and it passed the
+        weak one trivially, because its key func was a module-private wrapper
+        that CALLED `get_remote_address` rather than being it. The route was
+        IP-keyed, the sweep named itself a behavioural sweep, and the sweep said
+        nothing. A carve-out inside the loop is strictly worse than an entry in
+        ``IP_KEYED_QUARANTINE``: the constant is greppable and carries a shrink
+        instruction, while a bare `continue` is invisible to anyone reading the
+        constant to find out what is exempt.
         """
         from slowapi.util import get_remote_address
 
@@ -606,8 +682,6 @@ class TestClassClosure:
                 continue
             for limit in limits:
                 assert limit.key_func is not get_remote_address, f"{name} keys on the address"
-                if name == "routers.simulator.portfolio_simulator":
-                    continue  # FINDING-10 — reported, not fixed here
                 assert isinstance(limit.key_func, functools.partial), name
                 assert limit.key_func.func is rl.tenant_or_platform_key, name
 
@@ -864,3 +938,240 @@ class TestDefaultKeyBehaviour:
         assert limits, "the probe route registered no limit at all"
         for limit in limits:
             assert limit.key_func is rl.default_platform_key
+
+
+# ---------------------------------------------------------------------------
+# Gate 5 — SEC-05 (Phase 163): the TENTH route's repair, proved by CONSEQUENCE.
+#
+# ⚠️ WHY A PLAIN DRIVE-TO-429 WOULD BE VACUOUS HERE, stated up front because it
+# is the trap this whole gate is shaped around. Under `TestClient`,
+# `get_remote_address` returns the SAME value ("testclient") for every request,
+# so the OLD IP-keyed decorator also put all callers in one bucket and also
+# answered 429 on the 21st call. A test that only drove one caller to 429 would
+# be byte-for-byte green against the defect it claims to pin.
+#
+# The property the rekey actually bought is ISOLATION: two DIFFERENT verified
+# tenant claims get two different counters. That is what
+# `test_one_tenants_exhausted_bucket_does_not_throttle_another` asserts, and it
+# is the assertion that goes red when the key func is reverted.
+#
+# The `20/hour` drive is still here as the FLOOR half — "the limit is enforced at
+# all" — because isolation between two buckets that never fill would be equally
+# empty evidence. The pair is the oracle; neither half is.
+#
+# RED DEMONSTRATIONS. Both were EXECUTED (2026-08-26) and the counts below are
+# the observed pytest output, not a prediction. Reproduce with, from
+# `analytics-service/`:
+#
+#     python3 -m pytest tests/test_limiter_identity.py
+#
+# whose GREEN baseline for this file is `76 passed`. Each neuter was restored
+# immediately after, and each restore was verified by grepping for the restored
+# `partial(tenant_or_platform_key, scope="simulator")` call and the `20/hour`
+# literal AND by confirming an empty `git diff` against HEAD — never by file
+# hash alone, which cannot distinguish "restored" from "restored to the wrong
+# thing".
+#
+# (a) NEUTER: revert `routers/simulator.py` to the IP form — re-import
+#     `get_remote_address`, restore `_simulator_rate_limit_key` returning
+#     `f"simulator:ip:{get_remote_address(request)}"`, point the decorator at it.
+#     OBSERVED: 6 failed, 70 passed —
+#       * `TestClassClosure::test_no_router_source_references_get_remote_address`
+#         "The quarantine is EMPTY — no router may key on the request address —
+#         but found ['simulator.py']."
+#       * `TestClassClosure::test_every_registered_router_limit_is_shared`
+#         "routers.simulator.portfolio_simulator" (the assertion the deleted
+#         `continue` used to skip)
+#       * `test_route_key_func_is_shared_tenant_or_platform_with_its_scope[L-10]`
+#       * `test_one_tenants_exhausted_bucket_does_not_throttle_another`
+#         "tenant-sim-beta was throttled by tenant-sim-alpha's exhausted budget
+#         (got 429: {"error":"Rate limit exceeded: 20 per 1 hour"})"
+#       * both key-STRING tests
+#
+#     ⭐ AND `test_a_tenant_claimed_caller_is_throttled_at_the_decorator` PASSED.
+#     That is the measured proof of the vacuity warning above: had this gate been
+#     written as the obvious "drive the repaired route to 429", it would have been
+#     GREEN against the exact defect it exists to pin.
+#
+# (b) NEUTER: raise the decorator's ceiling, `20/hour` -> `100000/hour`.
+#     OBSERVED: 3 failed, 73 passed — `test_limit_value_is_unchanged_by_the_rekey
+#     [L-10]` ("registered limit values are ['100000 per 1 hour']"), plus BOTH
+#     behavioural tests ("/api/simulator never answered 429 within 21 calls").
+#     The floor half and the value pin fail independently, so a rekey that also
+#     quietly loosened the ceiling cannot pass.
+#
+# HANDLER SHORT-CIRCUIT: `routers.simulator.get_supabase` is stubbed to raise a
+# deterministic 404, so every budget-spending call is fast and touches no DB.
+# slowapi's check-and-hit runs BEFORE the handler body, so the budget is consumed
+# either way (same rationale as `test_match_recompute_actually_throttles`).
+#
+# ⚠️ EVERY REQUEST CARRIES A FRESH `user_id`. `_check_simulator_user_rate` is an
+# IN-HANDLER 20/hour-per-user quota that would ALSO answer 429 on the 21st
+# identical call — from a different mechanism, with a different body. Varying the
+# id keeps that check permanently under budget so every 429 observed below is
+# unambiguously slowapi's. The assertions additionally reject the in-handler
+# envelope by name.
+# ---------------------------------------------------------------------------
+
+_SIMULATOR_PATH = "/api/simulator"
+_SIMULATOR_REGISTRY_NAME = "routers.simulator.portfolio_simulator"
+
+#: The decorator's literal, restated. `20/hour` -> 21 calls pins the bound.
+_SIMULATOR_LIMIT = 20
+
+
+def _simulator_app() -> FastAPI:
+    """A throwaway app mounting the REAL simulator router.
+
+    Not `main.app`: that carries `verify_service_key`, which is a different
+    trust boundary and not what this gate is about.
+    """
+    import routers.simulator as simulator_mod
+
+    app = FastAPI()
+    app.state.limiter = rl.limiter
+    app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+    app.include_router(simulator_mod.router)
+    return app
+
+
+def _simulator_call(client: TestClient, claim: str) -> Any:
+    """One budget-spending POST under a given `X-Tenant-Claim`."""
+    return client.post(
+        _SIMULATOR_PATH,
+        json={
+            "portfolio_id": str(uuid.uuid4()),
+            "candidate_strategy_id": str(uuid.uuid4()),
+            # Fresh per call — see the in-handler-quota note above.
+            "user_id": str(uuid.uuid4()),
+        },
+        headers={"X-Tenant-Claim": claim},
+    )
+
+
+def _assert_not_the_in_handler_429(resp: Any) -> None:
+    """The 429 under test must be slowapi's, not `_check_simulator_user_rate`'s.
+
+    The in-handler quota answers through `services.error_contract.service_error`
+    with `code: "RATE_LIMITED"` nested under `detail`; slowapi's
+    `_rate_limit_exceeded_handler` answers a flat "Rate limit exceeded" body.
+    Naming the discriminator here means a future change that made the in-handler
+    check fire first would redden rather than quietly re-point this gate at the
+    wrong mechanism.
+    """
+    assert "RATE_LIMITED" not in resp.text, (
+        "the 429 came from the IN-HANDLER per-user quota "
+        f"(`_check_simulator_user_rate`), not from the slowapi decorator: {resp.text[:300]}"
+    )
+
+
+class TestSimulatorTenantBucketBehaviour:
+    """L-10's repair, driven through real HTTP against the real router."""
+
+    @pytest.fixture(autouse=True)
+    def _harness(self, monkeypatch: Any) -> Any:
+        import routers.simulator as simulator_mod
+        from fastapi import HTTPException
+
+        monkeypatch.setenv("INTERNAL_API_TOKEN", _SECRET)
+
+        def _no_db() -> Any:
+            raise HTTPException(status_code=404, detail="harness: no DB in this gate")
+
+        monkeypatch.setattr(simulator_mod, "get_supabase", _no_db)
+        # Module-level per-user state; cleared so a sibling suite's calls cannot
+        # pre-spend the in-handler quota for the ids this gate mints.
+        simulator_mod._simulator_user_attempts.clear()
+        yield
+        simulator_mod._simulator_user_attempts.clear()
+
+    def test_a_tenant_claimed_caller_is_throttled_at_the_decorator(self) -> None:
+        """The FLOOR half: the `20/hour` ceiling is actually enforced.
+
+        BOUNDED-AND-DRIVEN at limit + 1. On its own this is NOT evidence that the
+        route is tenant-keyed (see the gate header) — it is evidence that there
+        is a counter to be isolated in the first place.
+        """
+        claim = _mint_claim("tenant-sim-alpha", _SECRET)
+        throttled = None
+        with TestClient(_simulator_app()) as client:
+            for _ in range(_SIMULATOR_LIMIT + 1):
+                resp = _simulator_call(client, claim)
+                if resp.status_code == 429:
+                    throttled = resp
+                    break
+                assert resp.status_code == 404, (
+                    "harness: a budget-spending call must reach the stubbed "
+                    f"handler. Got {resp.status_code}: {resp.text[:300]}"
+                )
+
+        assert throttled is not None, (
+            f"{_SIMULATOR_PATH} never answered 429 within {_SIMULATOR_LIMIT + 1} "
+            "calls — the slowapi floor on the repaired route is not enforced."
+        )
+        assert throttled.status_code == 429
+        _assert_not_the_in_handler_429(throttled)
+
+    def test_one_tenants_exhausted_bucket_does_not_throttle_another(self) -> None:
+        """⭐ THE DISCRIMINATOR — T-163-17, asserted as a consequence.
+
+        Drive tenant-alpha to 429, then make ONE call as tenant-beta. Beta must
+        be served.
+
+        Under the pre-fix key func every caller shared the single
+        `simulator:ip:testclient` bucket, so beta inherited alpha's spent budget
+        and answered 429. That is the NAT-collapse starvation this repair exists
+        to end, and it is the only assertion in this file that can see it.
+        """
+        alpha = _mint_claim("tenant-sim-alpha", _SECRET)
+        beta = _mint_claim("tenant-sim-beta", _SECRET)
+
+        with TestClient(_simulator_app()) as client:
+            alpha_throttled = None
+            for _ in range(_SIMULATOR_LIMIT + 1):
+                resp = _simulator_call(client, alpha)
+                if resp.status_code == 429:
+                    alpha_throttled = resp
+                    break
+
+            assert alpha_throttled is not None, (
+                "harness: tenant-alpha never reached 429, so there is no "
+                "exhausted bucket for this test to be about."
+            )
+            _assert_not_the_in_handler_429(alpha_throttled)
+
+            beta_resp = _simulator_call(client, beta)
+
+        assert beta_resp.status_code != 429, (
+            "tenant-sim-beta was throttled by tenant-sim-alpha's exhausted "
+            f"budget (got {beta_resp.status_code}: {beta_resp.text[:300]}). The "
+            "two tenants share one counter — the decorator is keyed on something "
+            "that does not distinguish them (the request address is the classic "
+            "one: behind an egress NAT it is identical for every tenant)."
+        )
+        assert beta_resp.status_code == 404, (
+            "harness: beta's call should have reached the stubbed handler; got "
+            f"{beta_resp.status_code}: {beta_resp.text[:300]}"
+        )
+
+    def test_the_registered_simulator_key_buckets_to_its_tenant(self) -> None:
+        """The key STRING, as a literal, read off the REGISTERED limit.
+
+        Gate 1 proves the decorator carries `partial(tenant_or_platform_key,
+        scope="simulator")`; this proves what that produces, written out in full
+        rather than derived by calling the function (which would assert only that
+        it equals itself).
+        """
+        key_func = _registered_limits(_SIMULATOR_REGISTRY_NAME)[0].key_func
+        req = _FakeRequest(
+            _SIMULATOR_PATH, {"X-Tenant-Claim": _mint_claim("tenant-alpha", _SECRET)}
+        )
+        assert key_func(req) == "simulator:t:tenant-alpha"
+
+    def test_the_claimless_simulator_caller_buckets_to_the_platform_ceiling(self) -> None:
+        """Until `analytics-client.ts` mints claims (the 140.2 obligation) this
+        is where every real request lands — the same width it had before, minus
+        the per-client disguise the `simulator:ip:` prefix gave it.
+        """
+        key_func = _registered_limits(_SIMULATOR_REGISTRY_NAME)[0].key_func
+        assert key_func(_FakeRequest(_SIMULATOR_PATH)) == "platform:/api/simulator"
