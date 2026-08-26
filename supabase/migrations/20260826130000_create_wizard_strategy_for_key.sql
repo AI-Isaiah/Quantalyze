@@ -314,6 +314,20 @@ BEGIN
   -- every token being asserted.
   v_bare := regexp_replace(v_def, '--[^\n]*', '', 'g');
 
+  -- ⛔ TWO ARMS, and the FIRST one is what keeps this from silently disarming
+  -- (Phase 162 review, F-5). MEASURED: with only the "did it strip" arm below,
+  -- DELETING the canary comment from the function body applied GREEN — because
+  -- that arm proves the stripper ran only when there was something to strip. It
+  -- cannot tell "the stripper worked" from "there was nothing to strip", so the
+  -- cheapest way to disarm arms (f)-(h) was to remove the canary. The recurring
+  -- gate already had this right at supabase/tests/
+  -- test_create_wizard_strategy_for_key.sql (arm D), which reads the RAW
+  -- definition; this mirrors its shape so the apply-time check is as hard as
+  -- the recurring one rather than a weaker echo of it.
+  IF position('CANARY_162_05_PROSE_ONLY' IN v_bare) = 0
+     AND position('CANARY_162_05_PROSE_ONLY' IN v_def) = 0 THEN
+    RAISE EXCEPTION 'post-verify (e): the prose-only canary CANARY_162_05_PROSE_ONLY is absent from the RAW definition too, so this arm cannot tell "the comment stripper worked" from "there was nothing to strip" — and arms (f), (g) and (h) below lose the only evidence that they read CODE rather than COMMENTARY. Restore the canary comment in the function body (header ⛔ (vii))';
+  END IF;
   IF position('CANARY_162_05_PROSE_ONLY' IN v_bare) > 0 THEN
     RAISE EXCEPTION 'post-verify (e): the comment stripper did not strip — the prose-only canary survived, so every token assertion below is satisfiable by comments';
   END IF;
