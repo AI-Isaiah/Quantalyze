@@ -101,6 +101,26 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     );
   }
 
+  // OPS-06 (Phase 163) — THE ADMIN CLIENT IS BUILT HERE, ABOVE THE INSERT, AND
+  // THE DEFECT IT CLOSES IS SEQUENCING RATHER THAN ERROR HANDLING.
+  //
+  // `createAdminClient()` throws synchronously on a missing
+  // SUPABASE_SERVICE_ROLE_KEY (src/lib/supabase/admin.ts), and a call argument
+  // is evaluated BEFORE the call it belongs to — so
+  // `logAuditEventAsUser(createAdminClient(), …)` at the emit site below
+  // constructed it AFTER the GDPR Art. 17 intake row had landed. The caller
+  // then saw a 500 for a deletion request that IS on file, which is the worst
+  // possible direction of dishonesty on this particular surface: a user told
+  // their erasure request failed will not re-file, and the 30-day SLA clock is
+  // already running on a row nobody is watching.
+  //
+  // Built here the throw is still LOUD (uncaught in a route handler ⇒ Next.js
+  // 500) but fires with no row written, so the 500 and the world agree.
+  // ⛔ No try/catch around the constructor and ⛔ no NON-THROWING variant of
+  // it — a quiet admin client would let this route 200 with no forensic row, breaking the "every 200 implies an audit row exists"
+  // invariant asserted 30 lines below.
+  const admin = createAdminClient();
+
   const { data: inserted, error } = await supabase
     .from("data_deletion_requests")
     .insert({ user_id: user.id })
@@ -138,7 +158,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   // (service-role, JWT-immune) so the GDPR intake audit row cannot be silently
   // lost when the user's JWT expires between response flush and after() settle.
   // `inserted.id` is server-derived so the userId attribution is trusted.
-  logAuditEventAsUser(createAdminClient(), user.id, {
+  logAuditEventAsUser(admin, user.id, {
     action: "deletion.request.create",
     entity_type: "data_deletion_request",
     entity_id: inserted.id,

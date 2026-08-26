@@ -58,11 +58,15 @@ const supabaseState = vi.hoisted(
     insertCalls: number;
     selectCalls: number;
     rpcCalls: Array<{ name: string; args: Record<string, unknown> }>;
+    // OPS-06: when true the service-role audit RPC throws a transient network
+    // error, which `emitAsUser()` swallows — the fire-and-forget contract.
+    auditRpcThrows: boolean;
   } => ({
     rows: [],
     insertCalls: 0,
     selectCalls: 0,
     rpcCalls: [],
+    auditRpcThrows: false,
   }),
 );
 
@@ -151,13 +155,24 @@ vi.mock("@/lib/supabase/server", () => {
 // NEW-C10-01: route now imports createAdminClient for logAuditEventAsUser.
 // Stub it with the same rpc surface as the user client so audit calls
 // (log_audit_event_service) are recorded in supabaseState.rpcCalls.
-vi.mock("@/lib/supabase/admin", () => ({
-  createAdminClient: () => ({
+//
+// OPS-06 (Phase 163): promoted from an inline arrow to a hoisted vi.fn so a
+// test can make the CONSTRUCTOR throw the way the real one does on a missing
+// SUPABASE_SERVICE_ROLE_KEY. An inline double that can only succeed cannot
+// express the fault this route was fixed for.
+const createAdminClientMock = vi.hoisted(() =>
+  vi.fn(() => ({
     rpc: async (name: string, args: Record<string, unknown>) => {
       supabaseState.rpcCalls.push({ name, args });
+      if (name === "log_audit_event_service" && supabaseState.auditRpcThrows) {
+        throw new TypeError("fetch failed");
+      }
       return { data: null, error: null };
     },
-  }),
+  })),
+);
+vi.mock("@/lib/supabase/admin", () => ({
+  createAdminClient: createAdminClientMock,
 }));
 
 // notifyFounderGeneric is fire-and-forget — stub so tests don't try to
@@ -173,6 +188,8 @@ describe("POST /api/account/deletion-request", () => {
     supabaseState.insertCalls = 0;
     supabaseState.selectCalls = 0;
     supabaseState.rpcCalls = [];
+    supabaseState.auditRpcThrows = false;
+    createAdminClientMock.mockClear();
   });
 
   /**
@@ -360,6 +377,87 @@ describe("POST /api/account/deletion-request", () => {
       await drainAuditMicrotasks();
 
       // Still only one audit emission.
+      expect(
+        supabaseState.rpcCalls.filter((c) => c.name === "log_audit_event_service"),
+      ).toHaveLength(1);
+    });
+  });
+
+  /**
+   * OPS-06 (Phase 163) — THE ADMIN CLIENT IS CONSTRUCTED BEFORE THE INSERT.
+   *
+   * `createAdminClient()` throws synchronously when SUPABASE_SERVICE_ROLE_KEY
+   * is absent, and a call argument is evaluated BEFORE the call — so building
+   * it inside `logAuditEventAsUser(...)` at the emit site put the throw AFTER
+   * the GDPR Art. 17 intake row had landed. The caller got a 500 for an erasure
+   * request that is on file and whose 30-day SLA clock is already running.
+   *
+   * ⭐ RED DEMO (run 2026-08-26, restored after):
+   *   Neuter: in route.ts, delete `const admin = createAdminClient()` from
+   *   above the `.from("data_deletion_requests").insert(...)` call and pass
+   *   `createAdminClient()` inline at the `logAuditEventAsUser(...)` emit site
+   *   again — i.e. put the construction back below the commit.
+   *   Observed: "throws BEFORE the intake row is INSERTed" FAILS on
+   *   `expect(supabaseState.insertCalls).toBe(0)` — received 1. The row landed
+   *   and the request still threw, which is the shipped bug reproduced.
+   *   Restored: hoist re-added, case green.
+   */
+  describe("[OPS-06] a missing service-role key fails LOUD and PRE-COMMIT", () => {
+    it("throws BEFORE the intake row is INSERTed — nothing lands, so the 500 is honest", async () => {
+      createAdminClientMock.mockImplementationOnce(() => {
+        throw new Error("Missing SUPABASE_SERVICE_ROLE_KEY for admin operations");
+      });
+
+      const { POST } = await import("./route");
+
+      // The route deliberately has no try/catch around the constructor: an
+      // uncaught throw in a route handler IS the Next.js 500. What the fix
+      // changes is WHEN it fires, not how loud it is.
+      await expect(POST(makeRequest())).rejects.toThrow(
+        /Missing SUPABASE_SERVICE_ROLE_KEY/,
+      );
+
+      // The load-bearing assertion. Pre-fix this was 1: the INSERT had already
+      // committed when the constructor threw.
+      expect(supabaseState.insertCalls).toBe(0);
+      expect(supabaseState.rows).toHaveLength(0);
+      // ...and no audit row either, which is consistent: nothing happened.
+      expect(
+        supabaseState.rpcCalls.filter((c) => c.name === "log_audit_event_service"),
+      ).toHaveLength(0);
+    });
+
+    it("the dedup short-circuit never reaches the constructor (no row to commit, no client to build)", async () => {
+      // Ordering evidence, not decoration: it proves the hoist landed BELOW the
+      // idempotency branch. Had it been lifted to the top of the handler, a
+      // missing key would have started 500ing repeat clicks that used to 200.
+      const { POST } = await import("./route");
+      const first = await POST(makeRequest());
+      expect(first.status).toBe(200);
+      expect(createAdminClientMock).toHaveBeenCalledTimes(1);
+
+      const second = await POST(makeRequest());
+      expect(second.status).toBe(200);
+      expect((await second.json()).idempotent).toBe(true);
+      expect(createAdminClientMock).toHaveBeenCalledTimes(1);
+    });
+
+    it("a FAILING audit emission still returns the same 200 — the response is not hostage to the forensic row", async () => {
+      // The other half of the contract. The hoist must not convert a
+      // fire-and-forget emission failure into a user-visible error: the row is
+      // committed and telling the user otherwise would roll back nothing.
+      supabaseState.auditRpcThrows = true;
+
+      const { POST } = await import("./route");
+      const res = await POST(makeRequest());
+
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body).toMatchObject({ ok: true, request_id: "req-1", idempotent: false });
+      expect(supabaseState.insertCalls).toBe(1);
+
+      await drainAuditMicrotasks();
+      // The emission was ATTEMPTED (and threw inside the swallowing path).
       expect(
         supabaseState.rpcCalls.filter((c) => c.name === "log_audit_event_service"),
       ).toHaveLength(1);

@@ -33,6 +33,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { safeCompare } from "@/lib/timing-safe-compare";
+import { captureToSentry } from "@/lib/sentry-capture";
 import { Resend } from "resend";
 
 export const dynamic = "force-dynamic";
@@ -291,6 +292,58 @@ type DenominatorResult =
   | { kind: "ok"; total: number }
   | { kind: "terminal"; res: NextResponse };
 
+/**
+ * OPS-07 (Phase 163) — THE FAILED READ MUST PAGE, AND THE STATUS CODE IS HOW.
+ *
+ * 141.2 distinguished a failed denominator read from a genuinely empty window
+ * (the arms below), which was the right split — but BOTH terminal arms then
+ * returned at the default HTTP 200. Vercel's cron history keys "did this run
+ * succeed?" off the status code, so a persistent Supabase read failure logged a
+ * green run every 15 minutes forever, with the console.warn visible only to
+ * someone already looking. That is 141.2's own lesson recurring inside 141.2's
+ * own remedy: THE REMEDY REPLACED A WRONG PAGE WITH NO PAGE. Distinguishing a
+ * state you then report as success is not distinguishing it.
+ *
+ * 503 makes the run register FAILED in Vercel cron history — that IS the page
+ * channel for this route (Architectural Responsibility Map), and a Sentry
+ * capture carries the diagnosis. The cost was priced in when the TODOS entry
+ * was filed: a monitor that cannot read its denominator IS broken, so the cron
+ * history going red is the history becoming accurate, not becoming noisy.
+ *
+ * ⚠️ Email deliberately stays with the existing streak machinery
+ * (`handleZeroDenominator`). A failed read is not a zero window and must not
+ * advance that streak — its email asserts a diagnosis ("no traffic OR the
+ * audit-write is failing") that is FALSE here and would send the operator to
+ * the Python audit path for a fault that lives in this query.
+ */
+const DENOMINATOR_READ_FAILED = "denominator_read_failed";
+
+/** Vercel cron treats a non-2xx as a failed run. Named so the two terminal
+ *  arms cannot drift apart, and so a reader sees it is a signal rather than an
+ *  arbitrary code. */
+const DENOMINATOR_FAILURE_STATUS = 503;
+
+/** Both terminal arms answer identically: a non-200 for the cron history plus a
+ *  Sentry capture for the diagnosis. Awaited by the caller so the capture is
+ *  not reaped when the function returns (SEAMRIM-04). */
+async function denominatorReadFailed(
+  detail: string,
+  extra: Record<string, unknown>,
+): Promise<DenominatorResult> {
+  await captureToSentry(new Error(`flag-monitor denominator read failed: ${detail}`), {
+    tags: { route: "cron.flag-monitor", denominator_read_failed: "true" },
+    extra,
+    level: "error",
+  });
+  return {
+    kind: "terminal",
+    res: NextResponse.json(
+      { ok: false, reason: DENOMINATOR_READ_FAILED },
+      { status: DENOMINATOR_FAILURE_STATUS },
+    ),
+  };
+}
+
 async function getDenominator(args: {
   admin: ReturnType<typeof createAdminClient>;
   windowStart: Date;
@@ -305,10 +358,11 @@ async function getDenominator(args: {
 
   if (error) {
     console.warn("[cron/flag-monitor] denominator read failed:", error);
-    return {
-      kind: "terminal",
-      res: NextResponse.json({ ok: false, reason: "denominator_read_failed" }),
-    };
+    return await denominatorReadFailed("postgrest error", {
+      error_message: (error as { message?: string }).message ?? String(error),
+      error_code: (error as { code?: string }).code ?? null,
+      window_start: args.windowStart.toISOString(),
+    });
   }
 
   // A null `error` does not mean a usable count. postgrest-js only sets `count`
@@ -322,10 +376,12 @@ async function getDenominator(args: {
   // that is not a non-negative integer is a read we could not complete.
   if (!Number.isInteger(count) || (count as number) < 0) {
     console.warn("[cron/flag-monitor] denominator count unusable:", count);
-    return {
-      kind: "terminal",
-      res: NextResponse.json({ ok: false, reason: "denominator_read_failed" }),
-    };
+    return await denominatorReadFailed("unusable count", {
+      // Stringified: a raw NaN does not survive JSON serialisation into the
+      // Sentry payload, and NaN-versus-null is the whole diagnosis here.
+      count: String(count),
+      window_start: args.windowStart.toISOString(),
+    });
   }
 
   return { kind: "ok", total: count as number };

@@ -40,6 +40,15 @@ vi.mock("resend", () => ({
   },
 }));
 
+// OPS-07 (Phase 163): the terminal denominator arms now capture to Sentry as
+// well as answering non-200. Mocked (rather than left real) so the capture is
+// ASSERTABLE — the real helper swallows everything by design, so a route that
+// stopped capturing would be indistinguishable from one that still does.
+const captureToSentrySpy = vi.fn(async () => undefined);
+vi.mock("@/lib/sentry-capture", () => ({
+  captureToSentry: (...args: unknown[]) => captureToSentrySpy(...(args as [])),
+}));
+
 // ---------------------------------------------------------------------------
 // Supabase admin mock. The route hits two tables:
 //   feature_flags:
@@ -228,6 +237,7 @@ describe.each([["GET"], ["POST"]] as const)(
       process.env.FOUNDER_LP_REPORT_TO = "founder@example.com";
       process.env.RESEND_API_KEY = "resend-key";
       sendEmailSpy.mockClear();
+      captureToSentrySpy.mockClear();
       vi.resetModules();
       vi.spyOn(console, "warn").mockImplementation(() => {});
       vi.spyOn(console, "error").mockImplementation(() => {});
@@ -334,6 +344,21 @@ describe.each([["GET"], ["POST"]] as const)(
       const body = await res.json();
       expect(body.ok).toBe(false);
       expect(body.reason).toBe("denominator_read_failed");
+      // OPS-07 (Phase 163): ...and the run REGISTERS FAILED. Distinguishing a
+      // state you then report at HTTP 200 is not distinguishing it — Vercel's
+      // cron history keys success off the status code, so the 200 this arm used
+      // to return logged a green run every 15 minutes while the monitor was
+      // blind. 141.2's own lesson, recurring inside 141.2's remedy.
+      expect(res.status).toBe(503);
+      expect(res.status).not.toBe(200);
+      // ...with a Sentry capture carrying the diagnosis, since the cron history
+      // says "failed" without saying why.
+      expect(captureToSentrySpy).toHaveBeenCalledTimes(1);
+      const captureArgs = captureToSentrySpy.mock.calls[0] as unknown[];
+      expect((captureArgs[1] as { tags: Record<string, string> }).tags).toMatchObject({
+        route: "cron.flag-monitor",
+        denominator_read_failed: "true",
+      });
       // The zero-traffic diagnosis must be unreachable from a read failure...
       expect(body.reason).not.toBe("zero_denominator");
       // ...the H-2 streak must NOT advance (a failed read is not a zero
@@ -367,6 +392,11 @@ describe.each([["GET"], ["POST"]] as const)(
       const body = await res.json();
       expect(body.reason).toBe("denominator_read_failed");
       expect(body.reason).not.toBe("zero_denominator");
+      // OPS-07: pages, same as the explicit-error arm. A null count is a read we
+      // could not complete, and the two arms must be indistinguishable to the
+      // cron history — otherwise the narrower path stays silently green.
+      expect(res.status).toBe(503);
+      expect(captureToSentrySpy).toHaveBeenCalledTimes(1);
       expect(
         rec.upserts.filter((u) => u.flag_key === ZERO_DENOM_STREAK_KEY),
       ).toHaveLength(0);
@@ -394,6 +424,18 @@ describe.each([["GET"], ["POST"]] as const)(
       const body = await res.json();
       expect(body.ok).toBe(false);
       expect(body.reason).toBe("denominator_read_failed");
+      // OPS-07: pages. NaN is the arm where a 200 was most dangerous — it is not
+      // `=== 0`, so the streak guard misses it, and `errorCount / NaN` is below
+      // BOTH thresholds, meaning the handler answered ok with alerting silently
+      // disarmed for the window.
+      expect(res.status).toBe(503);
+      expect(captureToSentrySpy).toHaveBeenCalledTimes(1);
+      // NaN does not survive JSON, so the capture stringifies it — the whole
+      // diagnosis on this arm is null-versus-NaN.
+      const nanExtra = (captureToSentrySpy.mock.calls[0] as unknown[])[1] as {
+        extra: Record<string, unknown>;
+      };
+      expect(nanExtra.extra.count).toBe("NaN");
       expect(sendEmailSpy).not.toHaveBeenCalled();
     });
 
@@ -420,6 +462,11 @@ describe.each([["GET"], ["POST"]] as const)(
         (u) => u.flag_key === ZERO_DENOM_STREAK_KEY,
       );
       expect(streakWrites).toHaveLength(1);
+      // OPS-07: and this arm does NOT page. The paging fix must not be bought
+      // by turning every quiet window red — the streak machinery owns the
+      // zero-traffic escalation and reaches its own conclusion over 3 windows.
+      expect(res.status).toBe(200);
+      expect(captureToSentrySpy).not.toHaveBeenCalled();
     });
 
     it("(D3/SC-F) the denominator is a server-side COUNT: 3000 attempt rows count as 3000, not truncated at PostgREST's 1000-row cap", async () => {
