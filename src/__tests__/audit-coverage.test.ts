@@ -206,6 +206,15 @@ const MUTATING_RPC_NAMES: readonly string[] = [
   "sanitize_user",
   "send_intro_with_decision",
   "create_wizard_strategy",
+  // SEC-03 (Phase 163): the composite sibling of create_wizard_strategy —
+  // column-for-column the same signature, called from
+  // strategies/composite/add-key. Its ABSENCE here is what made the
+  // `@audit-skip` pragma at that call site decorative: the gate never saw the
+  // call, so it never evaluated the pragma. MEASURED 2026-08-26 — with the
+  // name unlisted, DELETING the pragma left this suite green (an unaudited,
+  // unpragma'd mutating RPC passing the audit law); with the name listed the
+  // same deletion turns it red. Listing it is what makes the pragma law.
+  "add_wizard_composite_key",
   // Phase 145: the fold replaced finalize_csv_strategy (+ the standalone
   // persist_csv_daily_returns) — migration 20260819120000 DROPped both.
   // The route calls the fold through a cast-through-unknown invocation
@@ -965,21 +974,42 @@ describe("audit-coverage helpers — H-0004/H-0005 audit gap fixtures", () => {
   // The detector SHOULD catch the single-line `.from(...).insert(...)` form.
   // It is skipped rather than enabled because fixing findMutations to detect
   // it turns the live-corpus gate (the final `describe` in this file) RED on
-  // four real, currently-unaudited single-line mutation sites:
-  //   - src/app/api/cron/flag-monitor/route.ts:194  (feature_flags upsert — zero-denominator streak)
-  //   - src/app/api/cron/flag-monitor/route.ts:233  (feature_flags upsert — kill-switch flip)
-  //   - src/app/api/cron/flag-monitor/route.ts:332  (feature_flags upsert — streak reset)
-  //   - src/app/api/admin/partner-import/route.ts:704 (profiles upsert — @audit-skip is 15 lines up, outside the 8-line pragma window)
-  // (trades/upload:116, strategy-review:183, partner-import:761 & :792 ARE
-  // covered today via in-window @audit-skip pragmas.)
+  // real, currently-unaudited single-line mutation sites.
   //
-  // Those four sites mutate the DB with no audit emission and no @audit-skip
+  // ⚠️ CENSUS RE-MEASURED 2026-08-26 (DEF-141.2-03-A). Every coordinate the
+  // previous version of this comment carried was stale, and its count was
+  // wrong in BOTH directions — a listed site no longer exists and three
+  // unlisted ones do. Do not trust these numbers past the next refactor of
+  // the named routes; re-measure. Method: enumerate every line in
+  // src/app/api/**/route.ts carrying `.from(` AND a `.insert|update|delete|
+  // upsert(` that does NOT start the line (the exact form findMutations'
+  // `/^\s*\.(insert|…)\s*\(/` anchor misses), then check for an @audit-skip
+  // in the 8-line window above and a logAuditEvent* inside the SAME enclosing
+  // function (the gate walks FORWARD only, so an emit earlier in the file or
+  // in a sibling function does not count).
+  //
+  // UNCOVERED — would go RED (6):
+  //   - src/app/api/admin/partner-import/route.ts:705      (profiles upsert — @audit-skip is 15 lines up, outside the 8-line window)
+  //   - src/app/api/cron/flag-monitor/route.ts:403         (feature_flags upsert — zero-denominator streak; the file contains no logAuditEvent* at all)
+  //   - src/app/api/cron/flag-monitor/route.ts:518         (feature_flags upsert — streak reset; same)
+  //   - src/app/api/keys/sync/route.ts:496                 (strategy_analytics upsert in stampCompositeFailedUnlessComplete; the file's only emit is at :371, a different function)
+  //   - src/app/api/strategies/finalize-wizard/route.ts:2287 (strategy_analytics upsert in compositeMemberCount; the file's only emit is at :2149, in runLegacyFinalize)
+  //   - src/app/api/strategies/finalize-wizard/route.ts:2360 (strategy_analytics upsert in unifiedFinalizeWizardHandler; no emit in that function)
+  //
+  // The retired "kill-switch flip" site the old list named is GONE, not
+  // moved: Phase 106 Stage B made flag-monitor ALERT-ONLY and it now never
+  // writes the kill-switch row (see the comment at flag-monitor/route.ts:438).
+  //
+  // COVERED today via in-window @audit-skip pragmas (4):
+  //   trades/upload:130, admin/strategy-review:484, partner-import:762 & :793.
+  //
+  // Those six sites mutate the DB with no audit emission and no @audit-skip
   // in scope — exactly the blind spot H-0001 predicted. Fixing them is a
   // production-code change (add pragmas or audit emits to the routes), out of
   // scope for a test-only pass. Enable this test + the findMutations fix +
-  // the four route fixes together.
+  // the six route fixes together.
   // TODO(surfaced): H-0001 — fix findMutations single-line detection, then
-  //   audit-instrument (or pragma) the four flagged routes above, then
+  //   audit-instrument (or pragma) the six flagged routes above, then
   //   un-skip and flip the current-behavior test to expect >= 1.
   it.skip("H-0001 (intended behavior): findMutations DETECTS the single-line `from(...).insert(...)` idiom", () => {
     const src = [
