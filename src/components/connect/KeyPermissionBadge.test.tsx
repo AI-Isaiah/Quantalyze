@@ -444,4 +444,148 @@ describe("KeyPermissionBadge", () => {
       expect(warned).toBe(false);
     });
   });
+
+  /**
+   * [162-09 / HONEST-02] — a failed probe may not present any scope as detected.
+   *
+   * Live PROD QA 2026-08-25 observed, on ONE screen simultaneously:
+   *   "Could not contact the exchange to verify scopes."
+   *   "Read ✓  Trade ✓  Withdraw ✓ — Detected 1m ago from the exchange."
+   * The plain-English summary branched on `probe_error`; the three scope chips
+   * and the "Detected … from the exchange" caption rendered unconditionally.
+   *
+   * The severity is the DIRECTION of the falsehood: Trade ✓ / Withdraw ✓ renders
+   * directly beneath the connect form's own copy "Only read-only keys are
+   * accepted. Keys with trading or withdrawal permissions will be rejected."
+   * A user who believes the chips concludes their read-only key can withdraw
+   * funds; a user who believes the copy concludes the app is broken. No reading
+   * leaves them correctly informed.
+   *
+   * These assertions therefore query the CHIPS and the CAPTION. The pre-existing
+   * probe-error assertion on `key-permission-summary` above passes against the
+   * BROKEN behaviour and cannot stand in for them.
+   *
+   * CONSUMER SWEEP (162-09 Task 2) — the class is closed, and it is a class of
+   * ONE. `grep -rna probe_error src analytics-service` returns exactly one
+   * component hit (this one); every other TS hit is a route, a schema, or a
+   * spec. `grep -rna detected_at src --include="*.tsx"` likewise returns only
+   * this component and its spec — no other surface renders a "detected at"
+   * claim about a key probe. `KeyPermissionBadge` itself has two render sites,
+   * `strategies/[id]/edit/page.tsx:84` and `wizard/steps/SyncPreviewStep.tsx:2546`
+   * (the composite branch deliberately omits it), and both inherit the gate
+   * from the component — there is no second, independently-gated copy.
+   * `WithdrawalWarningStrip.tsx` names Trade/Withdraw but states the POLICY
+   * ("keys with Trade or Withdraw permissions are refused"), never a detected
+   * fact — it is the copy these chips were contradicting, not a second
+   * offender. `finalize-wizard/route.ts:946` reads `probe_error` server-side
+   * and already branches on it (→ KEY_NETWORK_TIMEOUT), so the wizard's error
+   * surface asserts no scope either. Scope ENFORCEMENT is untouched throughout.
+   */
+  describe("[162-09] a failed probe presents no scope as detected", () => {
+    // Non-null scope values, deliberately in the dangerous direction: an
+    // unusable upstream body claiming the key can trade AND withdraw. Under
+    // `probe_error` none of it is knowable, so none of it may be shown.
+    const PROBE_ERROR_WITH_SCOPES = {
+      read: true,
+      trade: true,
+      withdraw: true,
+      probe_error: true,
+      detected_at: new Date().toISOString(),
+    };
+
+    function chips() {
+      return ["read", "trade", "withdraw"].map((scope) =>
+        screen.getByTestId(`key-perm-pill-${scope}`),
+      );
+    }
+
+    it("K-1a: renders no chip as granted or denied — every chip is unknown", async () => {
+      mockFetchOnce(PROBE_ERROR_WITH_SCOPES);
+      render(<KeyPermissionBadge apiKeyId="key-1" />);
+      await screen.findByTestId("key-permission-summary");
+
+      for (const chip of chips()) {
+        expect(chip).toHaveAttribute("data-granted", "unknown");
+        // Neither verdict glyph: ✓ is the false claim and ✗ is the opposite
+        // false claim. A probe that did not answer supports neither.
+        expect(chip.textContent).not.toContain("✓");
+        expect(chip.textContent).not.toContain("✗");
+        // A screen reader must hear the unknown too — status is never carried
+        // by color, and "granted"/"not granted" is the same lie in text.
+        expect(chip.getAttribute("aria-label")).toMatch(/unknown/);
+        expect(chip.getAttribute("aria-label")).not.toMatch(/granted/);
+        // UI-SPEC C-3/C-4: colorless absence. Absence is not an error, so no
+        // red — and no accent either, which would read as "this is fine".
+        expect(chip.className).not.toMatch(/text-negative/);
+        expect(chip.className).not.toMatch(/text-accent/);
+      }
+    });
+
+    it("K-1b: renders no 'Detected … from the exchange' freshness caption", async () => {
+      mockFetchOnce(PROBE_ERROR_WITH_SCOPES);
+      const { container } = render(<KeyPermissionBadge apiKeyId="key-1" />);
+      await screen.findByTestId("key-permission-summary");
+
+      // The freshness claim is the caption's <time> plus its trailing clause.
+      // ("Detected" alone would also match the panel heading "Detected key
+      // scopes", which is a label, not a claim about this probe.)
+      expect(container.querySelector("time")).toBeNull();
+      expect(document.body.textContent).not.toContain("from the exchange");
+    });
+
+    it("K-1c: the contradiction observed in PROD has no render path", async () => {
+      mockFetchOnce(PROBE_ERROR_WITH_SCOPES);
+      render(<KeyPermissionBadge apiKeyId="key-1" />);
+      const summary = await screen.findByTestId("key-permission-summary");
+
+      // The screen says it could not read the scopes …
+      expect(summary.textContent).toContain("Could not contact the exchange");
+      // … so nothing else on that same screen may assert one.
+      const body = document.body.textContent ?? "";
+      expect(body).not.toContain("Read ✓");
+      expect(body).not.toContain("Trade ✓");
+      expect(body).not.toContain("Withdraw ✓");
+    });
+
+    it("K-2: a successful probe still renders the chips AND the caption", async () => {
+      mockFetchOnce({
+        read: true,
+        trade: false,
+        withdraw: false,
+        detected_at: new Date().toISOString(),
+      });
+      const { container } = render(<KeyPermissionBadge apiKeyId="key-1" />);
+      await waitFor(() =>
+        expect(screen.getByTestId("key-perm-pill-read")).toHaveAttribute(
+          "data-granted",
+          "true",
+        ),
+      );
+      expect(screen.getByTestId("key-perm-pill-trade")).toHaveAttribute(
+        "data-granted",
+        "false",
+      );
+      expect(screen.getByTestId("key-perm-pill-read").textContent).toContain(
+        "✓",
+      );
+      // The gate is error-scoped, not a chip deletion: on the path where the
+      // freshness claim is true, it survives untouched.
+      expect(container.querySelector("time")).not.toBeNull();
+      expect(document.body.textContent).toContain("from the exchange");
+    });
+
+    it("K-3: the probe-error summary sentence is unchanged beside the unknown chips", async () => {
+      mockFetchOnce(PROBE_ERROR_WITH_SCOPES);
+      render(<KeyPermissionBadge apiKeyId="key-1" />);
+      const summary = await screen.findByTestId("key-permission-summary");
+      expect(summary).toHaveAttribute("data-state", "probe-error");
+      // Byte-exact: this sentence was already honest and must not drift.
+      expect(summary.textContent).toBe(
+        "Could not contact the exchange to verify scopes. Try the Re-check button in a moment.",
+      );
+      expect(summary).toHaveAttribute("role", "alert");
+      // One honest message, and no second claim standing beside it.
+      expect(chips()).toHaveLength(3);
+    });
+  });
 });

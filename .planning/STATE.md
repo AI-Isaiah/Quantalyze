@@ -5,17 +5,17 @@ milestone_name: Backlog Burndown (Phases 158+)
 current_phase: 161
 current_phase_name: WIZERR — Honest error surfaces
 status: verifying
-stopped_at: context exhaustion at 75% (2026-08-25)
-last_updated: "2026-08-25T14:59:09.172Z"
+stopped_at: Completed 162-02-PLAN.md
+last_updated: "2026-08-25T23:19:36.584Z"
 last_activity: 2026-08-25
 last_activity_desc: Phase 161.1 wave 4 — composite arm landed DORMANT; composite PROD tracer still owed
-state_head: 8e0f675f411298e4a98f18fc7faa1db923bd945a
+state_head: fcf8e397a216ceee2bb4ca2ac5b079da1e2283e4
 progress:
-  total_phases: 9
+  total_phases: 10
   completed_phases: 1
-  total_plans: 35
-  completed_plans: 33
-  percent: 11
+  total_plans: 44
+  completed_plans: 34
+  percent: 10
 ---
 
 # Project State — Quantalyze
@@ -81,7 +81,7 @@ silently absorbed by a later phase.
 
 | Phase | Status | Blocked on | Resume with |
 |-------|--------|-----------|-------------|
-| 160 | `human_needed` — 31/32 | **PROD persist smoke (Part A).** The `persist: true` arm on `/api/keys/validate-and-encrypt` has never handled a real production connect, and it is the ONLY door into `api_keys` for the three converted non-wizard surfaces. ⛔ The 2026-08-23 OKX connect does NOT close it: prod logs for that write show `/strategies/new/wizard` + `/api/strategies/create-with-key` with **zero** hits on the arm — it rode the Phase-156 RPC path. Needs a connect through `ApiKeyManager` (strategy edit page), `StrategyForm`, or `AllocatorExchangeManager`; expect the `api_keys` census to go 32 → 33 with `attested_venue = exchange`. | `/gsd-verify-work 160` |
+| ~~160~~ | 🟡 **PARTIAL 2026-08-25 21:38Z — arm PROVEN, 1 of 3 surfaces smoked** | **PROD persist smoke (Part A) PASSED.** Founder connected a real OKX read-only key through `ApiKeyManager` at `/strategies/<id>/edit` on production. BOTH confirmations hold: `api_keys` census 32 → 33 with the new row's `attested_venue` EQUAL to its `exchange` (`okx`/`okx` — the 160-02/RANK-03 invariant), and prod request logs show `/api/keys/validate-and-encrypt`, so the write went through the persist arm and not the Phase-156 RPC path. ⚠️ The gate was not merely untested — the arm was DEAD: Vercel's `ANALYTICS_SERVICE_KEY` did not match Railway's `SERVICE_KEY`, so every guarded analytics route refused and key-connect was impossible in production (TODOS 0.05, resolved; detection gap 0.04 → Phase 164.1). Evidence in `160-UAT.md`. ⚠️ NOT 32/32: the prescribed test names THREE converted surfaces; only `ApiKeyManager` was smoked. `StrategyForm` is un-smoked (own fetch at `StrategyForm.tsx:161`) and `AllocatorExchangeManager` is un-smoked. ⚠️ CORRECTED 2026-08-26: an earlier note here said it is UNREACHABLE and that no page mounts it. That is FALSE — `profile/page.tsx` populates `exchanges` for allocators, `ProfileTabs` renders `ExchangesTabContent`, and that renders `AllocatorExchangeManager`. The whole branch is `isAllocator`-gated and the 160 QA ran on a MANAGER account, which is almost certainly why it looked unmounted. It is a live surface and 160 can be closed by smoking it with an ALLOCATOR login — it does NOT need mounting, and the component must NOT be deleted. The shared arm is proven, which retires the large risk; per-surface payload risk remains unmeasured. NO LONGER SKIPPED on autonomous re-entry. | `/gsd-verify-work 160` for the remaining surfaces |
 
 Part B of that phase (the PROD `STALE_CLIENT` refusal) is ✅ CLOSED — measured on PROD 2026-08-23
 after #705 deployed. See `160-VERIFICATION.md` § PROD smoke record.
@@ -495,7 +495,7 @@ Prior-phase 141.1 close-out detail (retained; NOT about 142.1):
         2 WARNING gaps, no BLOCKER. See `140.1-VERIFICATION.md`. Not transitioned (`--no-transition`).
 Last activity: 2026-08-02 -- Phase 142 execution started
 
-Progress: [█░░░░░░░░░] 11%
+Progress: [█░░░░░░░░░] 10%
 
 ### Phase 140.1 close-out — open items (do NOT lose these)
 
@@ -636,6 +636,11 @@ Load-bearing sequencing (real dependencies, do not reorder):
 | Phase 161.1 P02 | 96min | 3 tasks | 5 files |
 | Phase 161.1 P05 | 82min | 1 tasks | 1 files |
 | Phase 161.1 P03 | 71min | 2 tasks | 2 files |
+| Phase 162 P01 | ~35m | 2 tasks | 1 files |
+| Phase 162 P03 | 35m | 3 tasks | 5 files |
+| Phase 162 P04 | 25m | 2 tasks | 4 files |
+| Phase 162 P09 | 25m | 2 tasks | 2 files |
+| Phase 162 P02 | 2h40m | 3 tasks | 11 files |
 
 ## Accumulated Context
 
@@ -653,6 +658,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - v1.17 roadmap REVISED 2026-08-04 (Phases 147–155): the approved Phase 148 (OWN-02/03/04 + NAV-01) split into 148 OWN-02/04 (owner factsheet, adversarial cache acceptance), 149 NAV-01 (my-strategies ranking at DISCOVERY PARITY — founder sharpened the ask from 'an overview' to ranking parity over every uploaded key incl. private/draft), 150 OWN-03 (own-capital-vs-verifying wizard question, money-path review isolated); later phases renumbered +2 (AUM→151, SCEN→152, WIZFORM+MT5-14→153, WIZCONT/STALE→154, MT5-VERIFY→155). All ordering constraints unchanged and now structural (149 cannot start before 148)
 - Phase 153.6 inserted after Phase 153: PARITY — nine findings from the /code-review xhigh over the 153->153.5 span; three of four root causes are one-path-only fixes (URGENT)
 - Phase 161.1 inserted after Phase 161: LEDGER-REFRESH — recurring strategy refresh for ledger-backed venues (mt5/sfox/deribit). Founder-reported 2026-08-23, root-caused by PROD measurement 2026-08-24: process_key_long is the ONLY path reaching strategy_analytics for a ledger venue and is enqueued solely at strategy creation; both daily strategy crons gate on ccxt-only exchange sets. Ship the mechanism DORMANT (schedule unregistered, founder-gated live op) per the SFOX_ENABLED / WORKER-03 pattern. (URGENT)
+- Phase 164.1 inserted after Phase 164: HARDEN-GUARDS. Scope collected in TODOS 0.01: DEC-1/3/4 (spine gates, composite twin, advisory lock), the PYAPI-06 detection gap found in the 2026-08-25 prod outage, phase 161's deferred error-surface items D-161-01..07-B, and WIZFORM-02 (code:UNKNOWN) with a live 2026-08-25 reproduction. Ordering is load-bearing: MUST follow 164, because DEC-1 retires guards over scenarios/scenario_shares and 164 is the phase that touches them. NOTE: Current Phase pointer deliberately NOT moved to 164.1 — work is in flight on 162 and this phase is scheduled, not urgent-next.
 
 ### Decisions
 
@@ -784,6 +790,16 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - [Phase 161]: 161.1-03: the plan's blast-radius claim (a flag-off tick downgrades the MT5 cohort) is FALSE at HEAD — the MT5 kill-switch returns before any stamp and a -10005 wedge classifies transient; runbook states the measured model instead
 - [Phase 161]: 161.1-03: the remediation detect query keys on damage + the BEFORE census diff, NOT the fan-out marker — the marked path is the D-15-guarded one, so a marker-only filter returns zero rows on the very incident it investigates
 - [Phase 161]: 161.1-03: both gates this plan mandated were VACUOUS — ';'-separated greps under bash -c always print OK (measured), and both task-2 tokens ('stored' 14x, '471-472' 1x) already existed pre-edit. Gate tokens must be counted against the PRE-EDIT artifact
+- [Phase 162]: HONEST-02 verdict flat-account: decided on the key-side sync witness (last_fetched_trade_timestamp frozen 111d while the poller succeeds daily), not on the empty trades count
+- [Phase 162]: HONEST-01 root cause recorded inconclusive: stage/window/population pinned (poll_positions, 2026-06-10..06-14, 2 strategies) but no str/None site at HEAD and no traceback survives
+- [Phase 161]: 162-03: RSC series strip lives in portfolios/[id]/page.tsx, not getPortfolioStrategies — the page needs the series server-side to build curves; only forwarded props narrow
+- [Phase 161]: 162-03: mayClaimSyncRecency is a new decided predicate, not a widening of hasComputedAnalytics — that value also gates the rank cell and owner pending chip
+- [Phase 161]: 162-04: one rankability boolean gates BOTH the series and the co-served cagr/sharpe on /returns — the scalar gate is not a second status ladder
+- [Phase 161]: 162-04: composer distinguishes an unanswered metrics fetch (id absent from addedMetricsById) from a settled null pair — only the settled case renders the absence note
+- [Phase 161]: 162-09: failed scope probe renders chips as unknown (em-dash, colorless) and omits the freshness caption — one probe_error gate feeds every claim
+- [Phase 161]: 162-02: computation_error is curated at the SQL bridge from compute_jobs.error_kind, never from last_error; the operator column keeps raw text
+- [Phase 161]: 162-02: classify_exception is NOT curated (rejected option 2 — it would strip diagnosis from compute_jobs.last_error and redden the api_keys.sync_error invariant)
+- [Phase 161]: 162-02: the three compute_jobs error kinds yield TWO honest sentences plus a cautious default — transient and unknown reach failed_final only via attempt exhaustion
 
 ### Decisions (execution-time, Phase 140.2)
 
@@ -1486,9 +1502,17 @@ Load-bearing sequencing (real dependencies, do not reorder):
 
 ## Session
 
-**Last Date:** 2026-08-25T14:59:08.407Z
-**Stopped At:** context exhaustion at 75% (2026-08-25)
-**Resume File:** `.planning/phases/161.1-ledger-refresh-recurring-strategy-refresh-for-ledger-backed/161.1-04-PLAN.md` (task 3)
+**Last Date:** 2026-08-25T22:16:35.932Z
+**Stopped At:** Completed 162-01-PLAN.md
+**Last Date:** 2026-08-25T22:26:01.687Z
+**Stopped At:** Completed 162-03-PLAN.md
+**Last Date:** 2026-08-25T22:28:04.096Z
+**Stopped At:** Completed 162-04-PLAN.md
+**Last Date:** 2026-08-25T22:14:55.798Z
+**Stopped At:** Completed 162-09-PLAN.md
+**Last Date:** 2026-08-25T23:19:36.303Z
+**Stopped At:** Completed 162-02-PLAN.md
+**Resume File:** None
 **Next step:** Phase 161 (WIZERR — honest error surfaces) is next and NOT yet planned — run `/gsd-plan-phase 161`. Phase 161.1 (LEDGER-REFRESH) was inserted after it on 2026-08-24 for the founder-reported MT5 staleness; it is URGENT and production-facing, so it may be pulled ahead of 161 if you prefer the live data-integrity fix first.
 
 ⭐ **Foundation names later waves import by name** (from `153.1-02-SUMMARY.md`, all in

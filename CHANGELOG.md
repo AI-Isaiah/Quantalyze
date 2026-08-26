@@ -1,5 +1,65 @@
 # Changelog
 
+## [0.74.0.0] - 2026-08-26
+
+### feat: v1.20 Phase 162 — HONEST, what the user sees is true
+
+Four surfaces were asserting things the data underneath them did not support: a raw Python
+exception rendered as user-facing copy, a freshness badge that read FRESH over a return series
+dead for 89 days, an equity curve hard-coded to `null` behind a comment claiming the data was
+unavailable, and a "Finish setup →" affordance that opened a wizard with nothing preselected.
+This phase closes all four at the writer, not at the reader.
+
+**Failure copy is now curated where it is written.** A new `computation_error_copy()` maps a
+failure to a sentence a human can act on, called from `sync_strategy_analytics_status` so every
+path that marks a strategy failed goes through the same mapping. Raw `TypeError` text can no
+longer reach a factsheet.
+
+**The freshness chip buckets on whichever clock is staler.** It previously read job recency
+only, so a strategy whose job succeeded this morning read "fresh" no matter how long ago its
+return series actually ended. It now takes the staler of job- and series-recency, and the
+masthead carries an explicit "Track record through {date}" line so the underlying date is
+legible rather than inferred.
+
+**The stale example badges were closed by deletion, and the guard is not vacuous.** Recompute
+was measured structurally impossible — all 15 published example strategies held zero
+`csv_daily_returns` rows while the handler needs at least two — so on founder instruction the
+rows were unpublished and deleted, verified at 0 remaining. Because "no stale badge renders"
+would then be true only because nothing renders, both render paths also gained an `is_example`
+gate, witnessed RED by neutering before being accepted green.
+
+**Equity curves and drawer metrics now show what exists.** `buildEquityCurveSeries` serves real
+per-strategy curves now that `returns_series` is selected; the hard-coded `null` and the comment
+that justified it are gone. Drawer-added strategies render CAGR and Sharpe like book rows,
+holding em-dashes while pending rather than rendering zeros.
+
+**"Finish setup →" preselects the key that was clicked.** A new `create_wizard_strategy_for_key`
+writer creates the draft against a specific orphaned key. It is `SECURITY DEFINER` with
+`authenticated` EXECUTE revoked — verified FALSE for both `authenticated` and `anon` against a
+live database, not by inspection — so the wizard reaches it only through the server.
+
+Three corrections are part of this release rather than footnotes to it:
+
+- **A requirement was un-ticked rather than rounded up.** HONEST-01 bundled "curate the copy"
+  with "root-cause the `str`/`None` compare behind the two damaged rows". The copy half shipped;
+  the root-cause half is inconclusive — no such site exists at HEAD, no traceback survives, and
+  the job kind that produced it is retired with zero successes ever. The conjunction was split:
+  the delivered half is ticked, and HONEST-07 carries the unmet half openly with its stage,
+  window and population pinned, flagged as possibly unclosable.
+- **A backfill's blast radius was measured, not estimated.** The curated-copy migration's
+  re-classification touched 4,071 rows on the test database against a header estimate of ~64.
+  The estimate was not wrong about production — production was independently measured at zero
+  matching rows — but the statement is an unbounded `UPDATE`, and the real fan-out is now on
+  the record.
+- **A review finding was refuted by measurement, not by argument.** A red-team pass reported a
+  regression in the protected-error view; querying production showed the column it reads is
+  non-NULL on all 103 rows and no regression existed.
+
+Known-open and deliberately not claimed: HONEST-07 above; the status bridge still overwrites the
+curated sentence on both transition branches, which needs a writer-side marker and is scoped to
+Phase 164.2; and the freshness chip's longest label overflows its container, measured in a real
+browser and filed rather than patched blind.
+
 ## [0.73.0.0] - 2026-08-25
 
 ### feat: v1.20 Phase 161.1 — LEDGER-REFRESH, recurring refresh for ledger-backed venues (shipped dormant)
@@ -125,8 +185,9 @@ hand-maintained list, so a new arm cannot go dark silently. Each asserts a non-e
 because a law over an empty set passes trivially.
 
 **Known and deliberately out of scope**, recorded in `TODOS.md` rather than half-fixed: the MT5
-generic fallback still names a cause it has not proven (items 0.05); a manager has no surface to
-release an orphaned key, so the honest refusal above currently has nowhere to send them (0.06); and
+generic fallback still names a cause it has not proven (item 0.09, renumbered from 0.05); a manager
+has no surface to release an orphaned key, so the honest refusal above currently has nowhere to send
+them (0.08, renumbered from 0.06); and
 the composite arm hardcodes one provenance reason for every inadmissible verdict (0.07).
 
 ## [0.71.2.2] - 2026-08-24

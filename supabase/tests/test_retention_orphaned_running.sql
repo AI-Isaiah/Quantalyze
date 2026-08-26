@@ -191,6 +191,7 @@
 DO $$
 DECLARE
   v_command  TEXT;
+  v_bare     TEXT;
   v_schedule TEXT;
   v_count    INTEGER;
   v_jobs     INTEGER;
@@ -198,6 +199,7 @@ DECLARE
   v_terminal INTEGER;
   v_next     INTEGER;
   v_reason   INTEGER;
+  v_kindcount INTEGER;
   v_win_a    INTEGER;
   v_win_b    INTEGER;
   v_mat      INTEGER;
@@ -228,6 +230,40 @@ BEGIN
     RAISE EXCEPTION 'TEST FAILED (1/JOB-05): the retention_compute_jobs_orphaned_running job row carries a NULL command. pg_cron would fire an empty tick every hour and the run log would look healthy while every orphan stayed running forever.';
   END IF;
 
+  -- ----- COMMENT STRIPPING, and the canary that proves it ran (V-1) ---------
+  -- ⛔ EVERY assertion below this point reads v_bare, NEVER v_command. Part 1
+  -- used to scan the RAW command, which made the whole part COMMENT-SATISFIABLE:
+  -- MEASURED 2026-08-26, a reaper writing error_kind = 'unknown' on BOTH arms
+  -- passed Part 1 unchanged as long as two comments in the body spelled the
+  -- quoted kind literal. That is the precise failure this file's own header
+  -- warns about for Parts 2 and 3, and Part 1 was the one place it was not
+  -- applied. The two sibling gates in this range already do it — the parity
+  -- gate's Part 2 (test_compute_jobs_error_kind_copy_parity.sql) and arm D of
+  -- test_create_wizard_strategy_for_key.sql — and this brings Part 1 to their
+  -- standard.
+  --
+  -- ⚠️ It cuts BOTH ways, which is why the negative checks below move too: the
+  -- 'permanent' ban was equally satisfiable by a mere COMMENT, so a correct
+  -- reaper whose comments explained what 'permanent' used to be would false-RED.
+  -- A gate that can be turned off by a comment and a gate that can be turned on
+  -- by a comment are the same defect.
+  --
+  -- The stripper is the sibling files' exact idiom. It is safe on this body
+  -- because no string literal in it contains a double dash — the two audit
+  -- literals are prose with a colon, and the windows are plain intervals.
+  v_bare := regexp_replace(v_command, '--[^\n]*', '', 'g');
+
+  -- The canary lives in a comment inside the cron body (migration
+  -- 20260826140000, STEP 2) and NOWHERE in its code. Without it, "the stripper
+  -- worked" and "there was nothing to strip" are the same observation, and every
+  -- assertion below would silently lose its only evidence that it reads CODE.
+  IF position('CANARY_162_V1_PROSE_ONLY' IN v_command) = 0 THEN
+    RAISE EXCEPTION 'TEST FAILED (1/V-1): the prose-only canary CANARY_162_V1_PROSE_ONLY is absent from the RAW deployed command, so this part cannot tell "the comment stripper worked" from "there was nothing to strip" — and every count and negative check below loses its evidence that it is reading CODE rather than COMMENTARY. Restore the canary comment in the cron body (migration 20260826140000, STEP 2); do NOT delete the stripper to compensate.';
+  END IF;
+  IF position('CANARY_162_V1_PROSE_ONLY' IN v_bare) > 0 THEN
+    RAISE EXCEPTION 'TEST FAILED (1/V-1): the comment stripper did not strip — the prose-only canary survived into the stripped body. cron.job.command carries the body verbatim INCLUDING its comments, so every token asserted below may now be COMMENTARY with the code deleted. Fix the regexp_replace above; do NOT weaken the assertions to compensate.';
+  END IF;
+
   -- ⚠️ STRING equality on the WHOLE schedule, never an integer cast of one field.
   -- This file used to split the schedule on spaces, take field 2 and cast it to
   -- an integer to check a safe hour band. Under an hourly cadence field 2 is the
@@ -246,64 +282,85 @@ BEGIN
   -- target. A bare presence test could not fail: any ONE surviving reference
   -- satisfies it, so deleting a whole arm would pass unnoticed. That exact defect
   -- was MEASURED in Phase 143 on this very table name.
-  v_jobs := (length(upper(v_command)) - length(replace(upper(v_command), 'PUBLIC.COMPUTE_JOBS', ''))) / length('PUBLIC.COMPUTE_JOBS');
+  v_jobs := (length(upper(v_bare)) - length(replace(upper(v_bare), 'PUBLIC.COMPUTE_JOBS', ''))) / length('PUBLIC.COMPUTE_JOBS');
   IF v_jobs <> 4 THEN
     RAISE EXCEPTION 'TEST FAILED (1/JOB-05/D-08): the deployed body names public.compute_jobs % times, expected 4 (arm A batch + arm A UPDATE target + arm B batch + arm B UPDATE target). Two usually means a WHOLE ARM IS GONE -- if it is arm B, NULL-claim running rows become immortal again exactly as they were for 14 days on TEST; if it is arm A, no claimed orphan is ever terminalized. Zero means the janitor no longer touches the table at all.', v_jobs;
   END IF;
 
   -- 4 = two batch predicates + two compare-and-set fences, all single-spaced.
-  v_running := (length(upper(v_command)) - length(replace(upper(v_command), 'STATUS = ''RUNNING''', ''))) / length('STATUS = ''RUNNING''');
+  v_running := (length(upper(v_bare)) - length(replace(upper(v_bare), 'STATUS = ''RUNNING''', ''))) / length('STATUS = ''RUNNING''');
   IF v_running <> 4 THEN
     RAISE EXCEPTION 'TEST FAILED (1/JOB-05): the deployed body scopes to status = ''running'' % times, expected 4 (one predicate and one compare-and-set fence per arm). Losing a PREDICATE widens the janitor to every status -- it would terminalize done and pending rows. Losing a FENCE removes the protection against a real writer that terminalizes the row between the batch subselect and the UPDATE, so this janitor would overwrite a genuine outcome with a fabricated one.', v_running;
   END IF;
 
   -- 2 = one terminal status per arm.
-  v_terminal := (length(upper(v_command)) - length(replace(upper(v_command), '''FAILED_FINAL''', ''))) / length('''FAILED_FINAL''');
+  v_terminal := (length(upper(v_bare)) - length(replace(upper(v_bare), '''FAILED_FINAL''', ''))) / length('''FAILED_FINAL''');
   IF v_terminal <> 2 THEN
     RAISE EXCEPTION 'TEST FAILED (1/JOB-05): the deployed body writes ''failed_final'' % times, expected 2 (one per arm). failed_final is the ONLY terminal-failure value both outside the claimable set (so the row can never be re-claimed and the CI re-pollution flake cannot return) and outside Phase 142 reaper exclusion set (so terminalizing UNBLOCKS the user-facing analytics message). Any other value moves the row without moving the outcome.', v_terminal;
   END IF;
 
   -- 2 = B3, one per SET list.
-  v_next := (length(upper(v_command)) - length(replace(upper(v_command), 'NEXT_ATTEMPT_AT', ''))) / length('NEXT_ATTEMPT_AT');
+  v_next := (length(upper(v_bare)) - length(replace(upper(v_bare), 'NEXT_ATTEMPT_AT', ''))) / length('NEXT_ATTEMPT_AT');
   IF v_next <> 2 THEN
     RAISE EXCEPTION 'TEST FAILED (1/JOB-05/B3): the deployed body writes next_attempt_at % times, expected 2 (one per SET list). retention_compute_jobs_failed deletes on COALESCE(next_attempt_at, created_at) older than 90 days (20260515210200:255-259) and the claim RPC never advances that column, so a status-only flip lets an old orphan be collected on the very NEXT 03:30 tick -- terminalized at 04:50, gone by 03:30, and the audit trail this cron exists to preserve lasts eleven hours instead of ninety days.', v_next;
   END IF;
 
-  IF v_command NOT ILIKE '%error_kind%' THEN
-    RAISE EXCEPTION 'TEST FAILED (1/JOB-05): the deployed body does not set error_kind. get_user_compute_jobs synthesises its user-facing message from (status, error_kind), so a terminalized row with a NULL error_kind renders the vaguer "tried multiple times without success" arm rather than the accurate permanent-failure one.';
+  IF v_bare NOT ILIKE '%error_kind%' THEN
+    RAISE EXCEPTION 'TEST FAILED (1/JOB-05): the deployed body does not set error_kind. Both user-facing readers synthesise their copy from (status, error_kind) -- get_user_compute_jobs.user_message and computation_error_copy, which is what strategy_analytics.computation_error carries -- so a terminalized row with a NULL error_kind renders the cautious default on both instead of the accurate worker-died one.';
   END IF;
-  IF v_command NOT ILIKE '%''permanent''%' THEN
-    RAISE EXCEPTION 'TEST FAILED (1/JOB-05): the deployed body does not classify the failure as permanent. permanent is the documented value for "skip retries, go directly to failed_final" (20260411144407:159-160); anything else misdescribes an orphan as retryable on the one surface that reads the pair.';
+
+  -- ⛔ FLIPPED FROM 'permanent' TO 'orphaned' by mig 20260826140000 (Phase 162
+  -- review F-3), and the COUNT replaces the old presence test. 'permanent' here
+  -- was the DEFECT: these jobs are ones whose WORKER DIED holding the claim, so
+  -- they are retryable by definition, but 'permanent' is the kind that means
+  -- "skip retries" and both readers say so out loud -- computation_error_copy's
+  -- permanent arm tells the user "retrying alone will not resolve it". It does
+  -- not self-heal either: the 20260819130500 readmit sweep is csv-only, and once
+  -- the bridge writes computation_status = 'failed' its NOT EXISTS conjunct
+  -- blocks readmit permanently. So the user retrying is the only mechanism left,
+  -- and the copy talked them out of it.
+  --
+  -- 2 = one per arm, NOT a presence test: a presence test is satisfied by either
+  -- arm surviving, so a half-converted reaper (arm A flipped, arm B still
+  -- 'permanent') would pass unnoticed -- and that is worse than no conversion,
+  -- because the class still mislabelled is now invisible to anyone looking for
+  -- the fix.
+  v_kindcount := (length(v_bare) - length(replace(v_bare, '''orphaned''', ''))) / length('''orphaned''');
+  IF v_kindcount <> 2 THEN
+    RAISE EXCEPTION 'TEST FAILED (1/F-3): the deployed body classifies as ''orphaned'' % times, expected 2 (one per arm). Arm A reaps claims older than the 4h window, arm B reaps never-claimed running rows older than 48h -- BOTH are worker deaths and both are retryable. A missing conversion leaves that arm''s users reading copy that tells them retrying will not help.', v_kindcount;
+  END IF;
+  IF v_bare ILIKE '%''permanent''%' THEN
+    RAISE EXCEPTION 'TEST FAILED (1/F-3): the deployed body still classifies a reaped orphan as ''permanent''. That is the finding F-3 closed: a job whose worker died is not a permanent failure, and labelling it one makes both user-facing surfaces state something false about retryability. If the reaper genuinely needs to write permanent again, the copy arms in computation_error_copy and get_user_compute_jobs must change in the same commit.';
   END IF;
 
   -- 2 = one fixed audit literal per arm.
-  v_reason := (length(upper(v_command)) - length(replace(upper(v_command), 'ORPHANED_RUNNING_REAPED', ''))) / length('ORPHANED_RUNNING_REAPED');
+  v_reason := (length(upper(v_bare)) - length(replace(upper(v_bare), 'ORPHANED_RUNNING_REAPED', ''))) / length('ORPHANED_RUNNING_REAPED');
   IF v_reason <> 2 THEN
     RAISE EXCEPTION 'TEST FAILED (1/JOB-05): the deployed body stamps the orphaned_running_reaped audit reason % times, expected 2 (one fixed literal per arm). last_error is the ONLY operator-visible record of why a row was terminalized -- it is hard-redacted from users at the RPC and zod layers -- so without it an operator cannot tell a reaped orphan from a genuine handler failure.', v_reason;
   END IF;
 
   -- 1 = arm A only. SC#2: the RT-01 window is UNCHANGED by Phase 144.
-  v_win_a := (length(upper(v_command)) - length(replace(upper(v_command), 'INTERVAL ''4 HOURS''', ''))) / length('INTERVAL ''4 HOURS''');
+  v_win_a := (length(upper(v_bare)) - length(replace(upper(v_bare), 'INTERVAL ''4 HOURS''', ''))) / length('INTERVAL ''4 HOURS''');
   IF v_win_a <> 1 THEN
     RAISE EXCEPTION 'TEST FAILED (1/JOB-05/RT-01): the deployed body carries the 4-hour claim window % times, expected exactly 1 (arm A). Zero means the RT-01-corrected threshold is gone: a full batch of 5 jobs shares one claim stamp and dispatches sequentially at up to 30 min each, so a HEALTHY worker legitimately holds a 2.5h-old claim and a narrower window would terminalize a live in-flight job out from under it. More than one means a second arm has imported a threshold derived for a different mechanism.', v_win_a;
   END IF;
 
   -- 1 = arm B only, and it must NOT be a copy of arm A's number.
-  v_win_b := (length(upper(v_command)) - length(replace(upper(v_command), 'INTERVAL ''48 HOURS''', ''))) / length('INTERVAL ''48 HOURS''');
+  v_win_b := (length(upper(v_bare)) - length(replace(upper(v_bare), 'INTERVAL ''48 HOURS''', ''))) / length('INTERVAL ''48 HOURS''');
   IF v_win_b <> 1 THEN
     RAISE EXCEPTION 'TEST FAILED (1/JOB-05/D-08): the deployed body carries the derived 48-hour NULL-claim window % times, expected exactly 1 (arm B). Zero means arm B is gone or has copied arm A 4-hour figure -- and 4h is a CLAIM-age bound that says nothing about a row that was never claimed. The 48h figure is the 24h enqueue cadence plus 2.5h max batch wall-clock, rounded up to the next whole cadence multiple.', v_win_b;
   END IF;
 
-  IF v_command ILIKE '%interval ''2 hours''%' THEN
+  IF v_bare ILIKE '%interval ''2 hours''%' THEN
     RAISE EXCEPTION 'TEST FAILED (1/JOB-05/RT-01): the deployed body carries the OLD 2-hour window that migration 20260720120000 corrected away. Under it a healthy worker batch-tail job -- legitimately in flight with a 2.5h-old claim stamp -- is terminalized while it is still running, so its side effects land against a row that has left the in-flight set and a duplicate job can be enqueued alongside it.';
   END IF;
 
-  IF v_command NOT ILIKE '%claimed_at IS NULL%' THEN
+  IF v_bare NOT ILIKE '%claimed_at IS NULL%' THEN
     RAISE EXCEPTION 'TEST FAILED (1/JOB-05/D-08): the deployed body has no claimed_at IS NULL arm. Those rows are invisible to a claimed_at threshold in BOTH directions -- the superseded body excluded them by name and NULL < x is never TRUE anyway -- so without this arm the running rows that have been stuck longest are precisely the ones nothing can ever clear. Six such rows sat untouched on TEST for up to 14 days.';
   END IF;
 
   -- 2 = one deterministic ordering per arm.
-  v_order := (length(upper(v_command)) - length(replace(upper(v_command), 'ORDER BY', ''))) / length('ORDER BY');
+  v_order := (length(upper(v_bare)) - length(replace(upper(v_bare), 'ORDER BY', ''))) / length('ORDER BY');
   IF v_order <> 2 THEN
     RAISE EXCEPTION 'TEST FAILED (1/JOB-05): the deployed body orders its bounded batches % times, expected 2 (arm A by claimed_at ASC, arm B by created_at ASC). Without a deterministic ordering the LIMIT selects an ARBITRARY subset each tick, so the oldest orphans can be skipped indefinitely while the batch stays full -- bounded but never progressing.', v_order;
   END IF;
@@ -313,12 +370,12 @@ BEGIN
   -- inline a CTE that locks rows. It is retained because it survives a future edit
   -- that drops FOR UPDATE, at which point the CTE would become inlinable. Part 3
   -- is the bound proof; never let a green here stand in for it.
-  v_mat := (length(upper(v_command)) - length(replace(upper(v_command), 'AS MATERIALIZED', ''))) / length('AS MATERIALIZED');
+  v_mat := (length(upper(v_bare)) - length(replace(upper(v_bare), 'AS MATERIALIZED', ''))) / length('AS MATERIALIZED');
   IF v_mat <> 2 THEN
     RAISE EXCEPTION 'TEST FAILED (1/JOB-05/D-19): the deployed body carries % MATERIALIZED batch CTEs, expected exactly 2 (one per arm). The explicit fence is what keeps each bound safe against a future edit that drops FOR UPDATE and makes the CTE inlinable -- at which point the LIMIT would be re-applied per outer row and the per-tick blast radius would silently become unbounded. This is shape enforcement; Part 3 is the bound proof.', v_mat;
   END IF;
 
-  IF v_command NOT ILIKE '%FOR UPDATE SKIP LOCKED%' THEN
+  IF v_bare NOT ILIKE '%FOR UPDATE SKIP LOCKED%' THEN
     RAISE EXCEPTION 'TEST FAILED (1/JOB-05): the deployed body dropped FOR UPDATE SKIP LOCKED, so a batch would BLOCK on any row a live writer holds instead of skipping it and taking it next tick. Under the 5s lock_timeout that turns a contended tick into a failed tick.';
   END IF;
 
@@ -330,11 +387,11 @@ BEGIN
   -- without the `|$` arm a body ending exactly at the limit would false-RED.
   -- The COUNT is the second half -- the pattern test alone is satisfied by ONE
   -- word-bounded match, so widening only ONE arm would slip past it.
-  IF v_command !~ 'LIMIT[[:space:]]+100([^0-9]|$)' THEN
+  IF v_bare !~ 'LIMIT[[:space:]]+100([^0-9]|$)' THEN
     RAISE EXCEPTION 'TEST FAILED (1/JOB-05/D-19): the deployed body carries no word-bounded LIMIT 100. Either the per-arm bound is gone entirely -- one tick would then terminalize the WHOLE orphan population in a single statement, holding row locks and firing the updated_at trigger across every row at once -- or it has been widened to LIMIT 100<digits>, which multiplies the per-tick blast radius while still containing the literal substring a naive substring gate tests for.';
   END IF;
   SELECT count(*) INTO v_limit
-    FROM regexp_matches(v_command, 'LIMIT[[:space:]]+100([^0-9]|$)', 'g');
+    FROM regexp_matches(v_bare, 'LIMIT[[:space:]]+100([^0-9]|$)', 'g');
   IF v_limit <> 2 THEN
     RAISE EXCEPTION 'TEST FAILED (1/JOB-05/D-19): the deployed body carries % word-bounded LIMIT 100 clauses, expected exactly 2 (one per arm). One means a single arm has been widened or unbounded while the other still satisfies the pattern test -- the per-arm cap is the whole bound, so half a bound is no bound for the arm that lost it.', v_limit;
   END IF;
@@ -345,7 +402,7 @@ BEGIN
   -- behaviourally. This file's superseded version asserted the OPPOSITE (that the
   -- orphan row was gone); that assertion is what would have reddened the moment
   -- the correct migration reached TEST.
-  IF v_command ILIKE '%DELETE%' THEN
+  IF v_bare ILIKE '%DELETE%' THEN
     RAISE EXCEPTION 'TEST FAILED (1/JOB-05/WR-02): the deployed body contains a row-removal statement. This janitor must TERMINALIZE and never remove: a removed row gives the wizard poller no outcome to break out on, destroys the only audit record that a worker was down past its claim window, and on PROD discards a genuine in-flight one-shot job that nothing will re-enqueue.';
   END IF;
   -- ⚠️ The window between SELECT and LIMIT is '[^;]*', not '[^)]*'. MEASURED in
@@ -353,20 +410,20 @@ BEGIN
   -- its LIMIT, so the '[^)]*' form matched nothing and the gate could not fail.
   -- '[^;]*' still bounds the match to a SINGLE statement so it cannot smear across
   -- the two arms and false-RED.
-  IF v_command ~* '\mIN\M[[:space:]]*\([[:space:]]*SELECT[^;]*LIMIT' THEN
+  IF v_bare ~* '\mIN\M[[:space:]]*\([[:space:]]*SELECT[^;]*LIMIT' THEN
     RAISE EXCEPTION 'TEST FAILED (1/JOB-05/D-19): the deployed body binds a bounded batch through an IN (SELECT ... LIMIT ...) subquery. That is the exact un-hashable-subplan shape whose LIMIT is re-applied per outer row, so the per-tick bound silently does not exist -- the defect 20260803130000 was written to fix.';
   END IF;
-  IF v_command ILIKE '%failed_retry%' THEN
+  IF v_bare ILIKE '%failed_retry%' THEN
     RAISE EXCEPTION 'TEST FAILED (1/JOB-05): the deployed body references failed_retry. That value is CLAIMABLE (20260719073701:204), so the orphan would be re-claimed to running on the next worker tick and the daily re-pollution flake this cron exists to kill would return; and it is INSIDE Phase 142 reaper exclusion set (20260803130000:141), so the user-facing analytics message would stay blocked forever.';
   END IF;
-  IF v_command ILIKE '%enqueue_compute_job%' THEN
+  IF v_bare ILIKE '%enqueue_compute_job%' THEN
     RAISE EXCEPTION 'TEST FAILED (1/JOB-05): the deployed body calls the enqueue RPC. This janitor must never create work: for cron-fanned kinds the daily fan-out re-enqueues by itself once terminalization frees the in-flight slot, so a janitor INSERT races it and can collide on the in-flight unique index -- and a RAISE inside a pg_cron body aborts the WHOLE tick, losing the terminalization too. For one-shot kinds a blind re-enqueue turns a poison job that killed the worker into an infinite loop.';
   END IF;
-  IF v_command ILIKE '%claimed_by%' THEN
+  IF v_bare ILIKE '%claimed_by%' THEN
     RAISE EXCEPTION 'TEST FAILED (1/JOB-05): the deployed body references claimed_by. That column must be PRESERVED, not written: it records which worker last held the row and is the forensic starting point for any orphan investigation. Audit M-0779 deliberately stopped mark_compute_job_failed from clearing it (20260516104201:917-928); a janitor that clears it re-opens that finding.';
   END IF;
 
-  RAISE NOTICE 'Part 1 OK: retention_compute_jobs_orphaned_running registered exactly once at 50 * * * *, with 4 public.compute_jobs references, 4 running-status anchors, 2 failed_final writes, 2 next_attempt_at writes, 2 audit reasons, 1x 4-hour + 1x 48-hour window, a claimed_at IS NULL arm, 2 ORDER BY, 2 MATERIALIZED batches, 2 word-bounded LIMIT 100, SKIP LOCKED present, and no removal statement, IN-subquery LIMIT, failed_retry, enqueue RPC or claimed_by write.';
+  RAISE NOTICE 'Part 1 OK (all counts and bans measured on the COMMENT-STRIPPED body, canary-proven): retention_compute_jobs_orphaned_running registered exactly once at 50 * * * *, with 4 public.compute_jobs references, 4 running-status anchors, 2 failed_final writes, 2 next_attempt_at writes, 2 audit reasons, 1x 4-hour + 1x 48-hour window, a claimed_at IS NULL arm, 2 ORDER BY, 2 MATERIALIZED batches, 2 word-bounded LIMIT 100, SKIP LOCKED present, and no removal statement, IN-subquery LIMIT, failed_retry, enqueue RPC or claimed_by write.';
 END
 $$;
 
@@ -514,8 +571,13 @@ BEGIN
   IF v_next <= v_ancient THEN
     RAISE EXCEPTION 'TEST FAILED (2/arm A/JOB-05/B3): the terminalized row next_attempt_at is still at its century-backdated seed value (%), so the janitor did not advance it. retention_compute_jobs_failed deletes failed rows on COALESCE(next_attempt_at, created_at) older than 90 days, so this row is eligible for removal on the very NEXT 03:30 tick -- the audit trail this cron promises would last hours instead of ninety days.', v_next;
   END IF;
-  IF v_kind IS DISTINCT FROM 'permanent' THEN
-    RAISE EXCEPTION 'TEST FAILED (2/arm A/JOB-05): the terminalized row error_kind is % and not permanent. get_user_compute_jobs synthesises its user-facing message from (status, error_kind), so the row renders the vaguer "tried multiple times without success" arm instead of the accurate permanent-failure one.', v_kind;
+  -- ⛔ 'orphaned', not 'permanent' (mig 20260826140000, Phase 162 review F-3).
+  -- This is the END-TO-END half of the Part 1 body assertion: Part 1 proves the
+  -- deployed TEXT says orphaned, this proves a real tick actually WROTE it, so a
+  -- CHECK that silently rejected the value -- which would abort the whole pg_cron
+  -- block and leave the row running -- cannot pass both.
+  IF v_kind IS DISTINCT FROM 'orphaned' THEN
+    RAISE EXCEPTION 'TEST FAILED (2/arm A/F-3): the terminalized row error_kind is % and not orphaned. Both user-facing readers derive their copy from (status, error_kind): at ''permanent'' the user is told retrying will not resolve it, and at anything unmodelled they get the cautious default. This row''s worker DIED holding the claim -- the job never reached a verdict -- so it is retryable, and retrying is the only mechanism that computes it (the 20260819130500 readmit sweep is csv-only and is blocked once computation_status reads failed).', v_kind;
   END IF;
   IF v_err IS NULL THEN
     RAISE EXCEPTION 'TEST FAILED (2/arm A/JOB-05): the terminalized row carries no last_error. That column is the ONLY operator-visible record of WHY the row was terminalized (it is hard-redacted from users at the RPC and zod layers), so without it an operator cannot tell a reaped orphan from a genuine handler failure.';
@@ -559,8 +621,8 @@ BEGIN
   IF v_next <= v_ancient THEN
     RAISE EXCEPTION 'TEST FAILED (2/arm E/JOB-05/B3): the arm-B terminalized row next_attempt_at is still at its century-backdated seed value (%). Same consequence as arm A: retention_compute_jobs_failed collects it on the next nightly tick and the audit trail is voided.', v_next;
   END IF;
-  IF v_kind IS DISTINCT FROM 'permanent' OR v_err IS NULL THEN
-    RAISE EXCEPTION 'TEST FAILED (2/arm E/JOB-05): the arm-B terminalized row carries error_kind % and last_error %, expected permanent and a non-null fixed audit literal. The two arms must terminalize IDENTICALLY apart from the reason text; a divergence here means one arm writes a row an operator or the user_message synthesis cannot read.', v_kind, v_err;
+  IF v_kind IS DISTINCT FROM 'orphaned' OR v_err IS NULL THEN
+    RAISE EXCEPTION 'TEST FAILED (2/arm E/F-3): the arm-B terminalized row carries error_kind % and last_error %, expected orphaned and a non-null fixed audit literal. The two arms must terminalize IDENTICALLY apart from the reason text; a divergence here means one arm writes a row the operator channel or the user-facing copy synthesis cannot read. ⚠️ If this arm says permanent while arm A says orphaned, the conversion is HALF DONE -- never-claimed orphans are still being told that retrying will not help.', v_kind, v_err;
   END IF;
 
   -- ----- (F) arm-B negative: 12h is inside the 48h window ----------------
@@ -582,7 +644,7 @@ BEGIN
     RAISE EXCEPTION 'TEST FAILED (2/whole-block/JOB-05): one tick terminalized % of my six seeded rows, expected exactly 2 (arms A and E). Every other seed is a documented false-positive guard, so any other number means a guard fell or a terminalization was lost -- and the per-arm assertions above should name which.', v_cnt;
   END IF;
 
-  RAISE NOTICE 'Part 2 OK: the 4h-past claimed orphan and the 48h-past NULL-claim orphan were both terminalized to failed_final with next_attempt_at advanced, error_kind permanent, a fixed last_error and claimed_at preserved; the 3h batch-tail, the freshly-claimed row, the aged done row and the 12h NULL-claim row were all left running/done; and all 6 seeded rows survived the tick.';
+  RAISE NOTICE 'Part 2 OK: the 4h-past claimed orphan and the 48h-past NULL-claim orphan were both terminalized to failed_final with next_attempt_at advanced, error_kind orphaned, a fixed last_error and claimed_at preserved; the 3h batch-tail, the freshly-claimed row, the aged done row and the 12h NULL-claim row were all left running/done; and all 6 seeded rows survived the tick.';
 
   -- Teardown, belt-and-suspenders; the ROLLBACK also discards everything.
   DELETE FROM auth.users WHERE id = v_user;

@@ -26,6 +26,256 @@ items were dropped, not carried. Categories: **Fix now** / **Fix mid-term** / **
 
 ## 🔴 FIX NOW — live correctness, trust-boundary security, active go-live
 
+0.01. **📋 PHASE 164.1 SCOPE — single source. Collected 2026-08-25; the phase does NOT exist yet.**
+   Create with `/gsd-phase --insert 164` (decimal phases land AFTER their integer, so 164.1 sits
+   between 164 and 165). Build the CONTEXT from THIS list rather than re-deriving it.
+   ⚠️ Ordering is load-bearing: 164.1 must come AFTER 164, because DEC-1 retires guards over
+   `scenarios`/`scenario_shares` and 164 (SHARE) is the phase that touches them. Retiring first
+   would remove the guard immediately before the work it guards.
+
+   **A. Founder decisions already taken (from 161.1's DEC block):**
+   - **DEC-1** — retire frozen-spine gates 1+2, KEEP gate 3.
+     Acceptance: gate 3 must still FAIL when the `scenarios`/`scenario_shares` RLS honesty tests
+     are edited (neuter → observe RED → restore byte-identically), else retiring 1+2 has silently
+     taken 3 with it.
+   - **DEC-3** — D13 composite twin closes here, BEFORE any composite go-live.
+   - **DEC-4** — the advisory lock, in its own phase, with a REAL concurrency test. It touches two
+     RPCs that run on every job transition for every strategy; a half-applied lock discipline reads
+     as protection while providing none.
+
+   **B. Detection gap found during the 2026-08-25 prod outage:**
+   - **0.04 — PYAPI-06 cannot detect the outage it was built for.** The client omits `X-Service-Key`
+     when its value is falsy; the server treats an absent header as prober noise. The only caller
+     that can legitimately send an absent header is our own service with an empty key — exactly the
+     case discarded. Fix is BOTH halves (loud client-side refusal + a server signal that
+     distinguishes a guarded-route caller from a prober). See 0.04 for the full shape and the
+     explicit warning not to simply dedent the capture out of `if provided:`.
+
+   **C. Phase 161's deferred error-surface items** (`.planning/phases/161-wizerr-honest-error-surfaces/deferred-items.md`):
+   - **D-161-01** — the `first_rule.upper()` CSV code family is invisible to the derived vocabulary
+   - **D-161-02** — `formatColumnInDataframeMessage` matches a shape this producer has never emitted
+   - **D-161-03** — the column-less message still renders "at row 0"
+   - **D-161-05-A** — no manager-facing surface can release an ORPHANED api_key
+     ⚠️ OVERLAPS Phase 162's HONEST-06 / D-162-3 (the use-existing-key server path). Check what 162
+     actually shipped BEFORE planning this, or the two phases will fight over the same file.
+   - **D-161-05-B** — an orphaned MT5 connect waits out the full 120 s validate before refusing
+   - **D-161-07-A** — the wizard COMPOSITE arm still renders the provenance sentence for an EXAMINED
+     verdict (also filed here as 0.07)
+   - **D-161-04 / D-161-07-B** — a contracts-registry full-suite timeout flake and a
+     `vercel-functions` validator false-positive. Tooling, not user-facing; include only if cheap.
+
+   **D. WIZFORM-02 — server-classified codes still render `code: UNKNOWN`. RECORDED OPEN**
+   (Phase 153 span verification FAILED 2026-08-13) and it GATES other work (see the entry near the
+   `GATED ON WIZFORM-02 CLOSING` marker — a new code cannot be minted until the coverage-law
+   population is honest).
+   - ⭐ **FRESH EVIDENCE 2026-08-25, measured on PROD, not inherited:** `/api/keys/validate-and-encrypt`
+     returned `{"error":"Unauthorized","code":"UNKNOWN"}` — a server-classified upstream fault
+     reaching the client with NO code, exactly the defect. This is a live reproduction, so plan
+     against it rather than re-verifying whether the gate is still open.
+
+   **Not in scope:** 0.02 (OKX entity) — founder call, NOT PURSUED.
+
+
+0.02. **⏸️ NOT PURSUED — founder call 2026-08-25: "forget OKX entity".** A different OKX key connected successfully at 21:38:12Z, so the immediate need is met and the entity theory was never confirmed (the founder's OKX domain was never read back). Kept as a RECORD, not a task: the underlying limitation below is real and measured, so if a future user reports a key that cannot connect while another key on the same account can, start here rather than re-deriving it. Do NOT schedule work on it without a fresh confirmation.
+   ORIGINAL FILING: **OKX is hardcoded to ccxt's default (global) entity — a key issued on any other OKX
+   entity can NEVER connect, and the UI blames the user's credentials.** Surfaced 2026-08-25 when
+   a founder key issued AFTER an OKX re-KYC failed while an older key on the same account passed.
+   - `analytics-service/services/exchange.py:817-830` — `create_exchange` sets only `apiKey`,
+     `secret`, `password`, `enableRateLimit`. No hostname, region, or entity option is offered for
+     any venue, so OKX resolves to ccxt's default endpoint.
+   - OKX operates separate entities on separate API hosts. A key minted on entity B produces a
+     signature entity A cannot verify, which OKX reports as `50113 Invalid Sign` — indistinguishable
+     at the UI from a mistyped secret.
+   - **MEASURED, same deployment, minutes apart:** the stored pre-KYC key `QA OKX Read-key` probed
+     clean at 21:37:12 (`read:true, trade:false, withdraw:false, probe_error:false`), while the
+     post-KYC key returned `50113` at 21:30:12. Our signing path is NOT broken; the endpoint is
+     simply the wrong one for that key. ⚠️ CONFIRM the entity with the founder before building
+     anything — the correlation is strong but the OKX domain has not yet been read back.
+   - **Why this is worse than a missing feature:** the user is told "Authentication failed. Check
+     your API key and secret." They then re-issue keys, re-paste secrets, and doubt their own
+     account — which is exactly what happened tonight — for a venue we simply do not support the
+     entity of. There is no path by which a correct user action resolves it.
+   - **Fix shape (needs a founder decision — do not default it):**
+     (a) support an entity/host selector for OKX and persist it beside the key, or
+     (b) detect the entity mismatch and say so explicitly in the error copy.
+     (b) alone is honest but still leaves the user unable to connect; (a) alone without (b) leaves
+     the next mis-selected key equally mute. The pair is the complete fix.
+   - **HONEST-01 class (Phase 162):** a venue verdict our own configuration caused, rendered as a
+     statement about the user's credential. Same class as 0.03 and the `Unauthorized` case, and the
+     third instance found in one evening — the error-copy work in 162 should treat "whose fault is
+     this actually" as the organising question, not the individual strings.
+
+
+0.03. **❌ RETRACTED 2026-08-25 — THIS FINDING WAS WRONG. Credentials ARE trimmed.**
+   I filed this after grepping only `validate-and-encrypt/route.ts`, seeing `trim()` used just
+   in emptiness guards, and concluding no trimming happened. The chokepoint is ONE LAYER DOWN:
+   `src/lib/analytics-client.ts:716` defines `trimCredential`, applied to `api_key` AND
+   `api_secret` inside BOTH `validateKey` (`:794-795`) and `encryptKey` (`:819-820`) — so
+   validate and encrypt normalise identically, which is exactly the property I claimed was
+   missing. It shipped in `2464594a8` on 2026-07-18 after an identical live incident, and
+   `route.ts:79-81` names the chokepoint in a comment I had already read.
+   - Plan `162-10` was authored on this false premise and has been WITHDRAWN. It would have
+     added a SECOND trim site (violating its own acceptance criterion) and its witnessed-RED
+     test was unachievable: the route suite mocks `@/lib/analytics-client` wholesale, so an
+     assertion at that boundary never observes the real chokepoint. Caught by gsd-plan-checker,
+     which measured HEAD instead of trusting the plan's citations.
+   - ⚠️ **`passphrase` is DELIBERATELY not trimmed** (`analytics-client.ts:714-715`): an OKX
+     passphrase is user-CHOSEN, so whitespace there may be significant. Do not "fix" this
+     without a venue-aware decision — trimming it could corrupt a valid credential.
+   - ⛔ **The 2026-08-25 OKX `50113 Invalid Sign` therefore remains UNEXPLAINED.** Do not carry
+     "untrimmed credentials" forward as its cause. A different key connected successfully at
+     21:38Z so there is no live impact, and the entity thread is NOT PURSUED per founder call
+     (0.02). Remaining untested candidate, recorded not claimed: passphrase whitespace, which
+     the documented decision above deliberately permits.
+   - **Lesson worth more than the finding:** a grep of one file is not a search of the code
+     path. The comment naming the chokepoint was in a file I had already opened.
+   ORIGINAL (WRONG) FILING KEPT BELOW FOR THE TRAIL: **Exchange credentials are never whitespace-trimmed, so a paste with a trailing newline
+   fails as "Authentication failed. Check your API key and secret."** Found 2026-08-25 while a
+   founder with a known-good OKX key could not connect it.
+   - `src/app/api/keys/validate-and-encrypt/route.ts` uses `trim()` ONLY inside emptiness guards
+     (`:182-186`, `api_key.trim().length === 0`). The value forwarded to `validateKey` (`:502`) and
+     to the legacy handler (`:338`) is the RAW string. `api_secret_normalized` (`:103`) is an
+     sFOX-only non-string coercion, not a strip.
+   - Python repeats the shape: `analytics-service/routers/exchange.py:216` calls `.strip()` only to
+     TEST for emptiness, then passes the raw value to `create_exchange`.
+   - So an invisible trailing space or newline reaches OKX's HMAC. The signature is computed over a
+     byte-different secret and OKX answers `50113 Invalid Sign` — MEASURED in Railway logs at
+     21:30:12. (A fake key returns a DIFFERENT code, `50111 Invalid OK-ACCESS-KEY`, at 21:29:11 —
+     the two codes discriminate "key not recognised" from "key recognised, signature wrong".)
+   - **Fix:** trim `api_key`, `api_secret` and `passphrase` at the ONE chokepoint before use, on the
+     TS side, so the trimmed value is what gets validated AND what gets encrypted. Trimming on only
+     one of those two paths is worse than neither: the key would validate and then be stored in a
+     form that never authenticates again.
+   - ⚠️ **Do NOT trim inside the emptiness guard and call it done** — that is the existing shape and
+     it is precisely what fails. The guard already trims; the payload does not.
+   - **Regression test (must be witnessed RED):** submit a secret with a trailing `\n`, assert the
+     value that reaches the venue client is byte-identical to the trimmed secret. Neuter the trim,
+     observe the failure first-hand, restore byte-identically.
+   - **HONEST-01 class (Phase 162):** the user-facing copy says "Check your API key and secret",
+     which reads as "your credential is wrong" when the credential is RIGHT and our handling is
+     wrong. It also collapses OKX's `50111` and `50113` into one sentence, discarding the
+     information that would tell a user WHICH field to look at. Both belong with 162's error-copy
+     work: map the venue code to a specific, true sentence.
+
+
+0.04. **⚠️ PYAPI-06 cannot detect the outage it was built to detect — the client's silent
+   header-omission and the server's noise filter compose into a blind spot.** Found while
+   root-causing 0.05, which PYAPI-06 sat through in total silence.
+   - `src/lib/analytics-client.ts:466` — `...(SERVICE_KEY && { "X-Service-Key": SERVICE_KEY })`
+     OMITS the header entirely when the key is falsy. No throw, no log, no startup failure: an
+     unconfigured platform secret silently degrades into an ANONYMOUS request.
+   - `analytics-service/main.py:802` — PYAPI-06 site 5 captures the mismatch only `if provided:`.
+     An absent header is deliberately treated as "internet background noise" from a prober, and
+     that reasoning is CORRECT in isolation — an unauthenticated prober must not page anyone.
+   - **Composed, they cancel out.** The one caller that can legitimately send an absent header is
+     OUR OWN service with an empty key, and that is precisely the case the server discards. So the
+     complete-outage variant is the ONE variant with no signal, while the milder stale-value
+     variant (which at least still authenticates as *someone*) is loudly captured. The safeguard is
+     inverted with respect to severity.
+   - **MEASURED, not theorised:** five consecutive `POST /api/validate-key 401` in Railway logs
+     (2026-08-25 20:52 → 21:27) with ZERO `service_key.mismatch` lines. Meanwhile `/health` stayed
+     green, `/process-key` and `/internal/*` kept working (both exempt from the gate), and the 4xx
+     never tripped the 140.2 breaker. Every alarm the system has was, by design, looking elsewhere.
+   - **Blast radius while blind:** all exchange key-connects on every non-wizard surface, key-scope
+     verification, AND the scheduled `/api/match/cron-recompute` job — silently, for an unknown
+     duration. `api_keys` had been frozen at 32 rows since 2026-08-23.
+   - ⭐ **FIX (founder: goes in PHASE 164.1, the guards phase):**
+     1. Client — an empty `ANALYTICS_SERVICE_KEY` must FAIL LOUD at startup, not omit a header.
+        Mirror `mintTenantClaim`'s existing refusal discipline (`analytics-client.ts:415-422`
+        already argues exactly this for the tenant claim, and the same argument was never applied
+        one line down to the service key).
+     2. Server — distinguish "absent header from a caller that reached a guarded route" from a
+        prober, OR make the client's loud failure the guarantee that absence really is noise.
+        Do NOT simply dedent the capture out of `if provided:` — the comment there is right that
+        doing so buries the signal under internet scan traffic.
+     3. Acceptance is a RED-witnessed test, per project rule: set the key empty, assert the seam
+        REFUSES rather than sending an anonymous request. Neuter the guard, observe the failure
+        first-hand, restore byte-identically.
+   - **Also route to HONEST-01 (Phase 162):** a forwarded upstream `Unauthorized` rendered on a
+     credential form as user-facing copy. It reads as "your key was rejected" when the truth is
+     "our service auth is broken" — the founder reasonably concluded their own key was bad. Exactly
+     the class 162 exists to close, and a real instance of it costing real debugging time.
+
+
+0.05. **✅ RESOLVED 2026-08-25 22:29 SAST — was a LIVE PROD OUTAGE: Vercel's `ANALYTICS_SERVICE_KEY` did not match Railway's `SERVICE_KEY`.**
+   - **Fix:** founder re-copied Railway's `SERVICE_KEY` into Vercel (Production, Sensitive) and
+     redeployed. Verified by probe: the boundary now returns `424 AUTH_FAILED` ("Authentication failed. Check your API key and secret.") for FAKE credentials, where it
+     previously returned `401 {"error":"Unauthorized","code":"UNKNOWN"}` for every key. The
+     424 proves the call is authenticated and reached the exchange.
+   - ⚠️ **ROOT CAUSE CORRECTION (supersedes the 'stale value' wording below).** Vercel was
+     sending NO `X-Service-Key` header at all, not a wrong one. Proof: `service_key.mismatch`
+     never appeared in Railway logs across five 401s, and that line only fires when the header
+     is non-empty. A stale value would have logged; an absent one did not.
+   - ⚠️ **A redeploy takes ~1 minute to cut over.** The first post-redeploy probe still hit the
+     OLD deployment id and returned the old 401 — nearly read as "the fix did not work".
+     Always confirm the serving `dep=` id changed before judging a config fix.
+   - ORIGINAL DIAGNOSIS FOLLOWS (kept for the evidence trail): Every guarded analytics route returns 401. Found 2026-08-25 by a live prod
+   connect attempt, confirmed at BOTH ends with matching timestamps.
+   - **Evidence (Railway deploy log, prod):** `POST /api/validate-key 401 Unauthorized` at
+     20:52:40, 21:00:11, 21:12:59 (three real founder attempts) and 21:16:29 (a deliberate
+     fake-credential probe). A probe with syntactically-valid FAKE credentials returns the
+     IDENTICAL body to a real key — `{"error":"Unauthorized","code":"UNKNOWN"}`, HTTP 401 — which
+     proves the rejection happens at OUR service boundary and is unrelated to any exchange key.
+   - **Not an auth-session bug.** An empty-body POST to the same route returns
+     `400 KEY_MISSING_REQUIRED_FIELD` with the session cookie present, so `withAuth` passes and the
+     handler is reached. Ruled out in order: role gate, expired session, CSRF (403, zero seen),
+     rate limit (429, zero seen), unset env var (it IS set — 135d old).
+   - **Mechanism.** `src/lib/analytics-client.ts:46` reads `ANALYTICS_SERVICE_KEY`, `:466` attaches
+     it as `X-Service-Key`. `analytics-service/main.py:648` compares against `SERVICE_KEY`; mismatch
+     → 401. `validate-and-encrypt` then FORWARDS the upstream body verbatim (route `:748-762`,
+     F5b/SEAMUX-03), so the operator's 401 is rendered to the user as "Unauthorized".
+   - ⛔ **BLAST RADIUS IS WIDER THAN KEY-CONNECT.** The same log shows
+     `POST /api/match/cron-recompute 401` at 21:00:00 — a SCHEDULED PRODUCTION JOB failing silently
+     on the same cause. Whatever else calls a guarded route is also failing. Audit the full route
+     list before declaring this closed; do not assume key-connect is the only casualty.
+   - **Why nothing caught it:** `SERVICE_KEY` skips `/health`, `/internal/*` and `/process-key`, so
+     compute jobs keep running and `/health` stays green. 4xx, so the 140.2 breaker never trips.
+     `main.py:125-128` predicted this exact blind spot in both directions.
+   - **This is why Phase 160's gate could never close.** The persist arm was never broken in the way
+     we assumed; it cannot reach its validator at all. `api_keys` census has been stuck at 32 since
+     2026-08-23.
+   - **FIX (founder-only, needs a secret — an agent must not do this):** copy Railway's
+     `SERVICE_KEY` value into Vercel `ANALYTICS_SERVICE_KEY` (Production), then REDEPLOY Vercel —
+     env changes do not take effect on the running deployment. Copy Railway → Vercel, NOT the
+     reverse: if Railway's was rotated for cause, writing the old value back re-opens whatever the
+     rotation closed. ⚠️ Check for a trailing newline/space on paste; that alone reproduces this.
+   - **Follow-ups this outage earns (do NOT skip once the key is fixed):**
+     1. A startup or first-401 operator signal that NAMES the env var (never its value — the
+        `main.py` comment is explicit that naming the value turns the signal into the leak it
+        exists to detect). PYAPI-06 designed this; verify it actually fires.
+     2. `analytics-client.ts:466` omits `X-Service-Key` entirely when the value is empty
+        (`...(SERVICE_KEY && {...})`). Silent omission should be a loud startup failure — an unset
+        platform secret must not degrade into an anonymous request.
+     3. A forwarded upstream "Unauthorized" must NOT render as user-facing copy on a credential
+        form. It reads as "your key was rejected" when the truth is "our service auth is broken".
+        Same class as HONEST-01; route it there.
+
+
+0.06. **⚠️ The key-scope panel claims scopes it just said it could not read.** Found in a LIVE prod
+   QA pass (2026-08-25) while attempting the Phase-160 persist-arm smoke, not by a reviewer — the
+   panel rendered both halves of a contradiction on screen at once.
+   - `src/components/connect/KeyPermissionBadge.tsx`: the plain-English summary correctly branches
+     on `perms.probe_error` (`:218` → *"Could not contact the exchange to verify scopes."*), but the
+     three scope chips (`:251-253`, `Read`/`Trade`/`Withdraw`) and the footer caption (`:255-260`,
+     *"Detected {time} from the exchange."*) render **unconditionally** whenever `perms` is present.
+   - Observed on screen simultaneously: *"Could not contact the exchange to verify scopes"* AND
+     *"Read ✓ Trade ✓ Withdraw ✓ · Detected just now from the exchange."* Both cannot be true.
+   - ⛔ Worst arm: the chips asserted **Trade ✓ and Withdraw ✓** directly beneath the form's own copy
+     *"Only read-only keys are accepted. Keys with trading or withdrawal permissions will be
+     rejected."* A user who believes the chips concludes their read-only key carries withdraw rights.
+     A user who believes the copy concludes the app is broken. The panel cannot be trusted either way.
+   - **Fix shape:** when `probe_error` is set there is NO fresh probe result, so the chips and the
+     "Detected … from the exchange" caption must not render as fact. Show them as unknown or omit
+     them; the summary already carries the honest message. ⚠️ Do NOT fix by suppressing only the
+     caption — the chips are the load-bearing false claim.
+   - **Regression test must be witnessed RED:** render with `probe_error: true` plus non-null
+     read/trade/withdraw and assert no scope claim is presented as detected. Neuter the guard,
+     observe the failure first-hand, restore byte-identically.
+   - **Belongs to Phase 162 (HONEST).** This is the phase's exact class — a rendered claim the data
+     underneath contradicts — and it is the same shape as HONEST-02's freshness problem, one surface
+     over. If 162's plan does not already cover it, add it there rather than point-fixing here.
+
+
 0.07. **⚠️ The composite arm tells a `sampled_gapped` series a false provenance sentence.** Found and
    deliberately left live by Phase 161 (`161-07`, D-161-07-A) — it fell outside that task's declared
    file scope, so it was booked rather than silently widened into.
@@ -40,7 +290,7 @@ items were dropped, not carried. Categories: **Fix now** / **Fix mid-term** / **
      mapping `sampled_gapped` to its own reason. One-line fix recorded in
      `.planning/phases/161-wizerr-honest-error-surfaces/deferred-items.md`; the 142.2 pin moves with it.
 
-0.06. **⚠️ A manager cannot release their own orphaned API key — no surface exists.** Found
+0.08. **⚠️ A manager cannot release their own orphaned API key — no surface exists.** Found
    2026-08-24 during Phase 161 (WIZERR-03) execution, when the approved `161-UI-SPEC.md` remedy
    bullet turned out to be **unwinnable at HEAD** and had to be replaced rather than shipped.
    - The UI-SPEC said: *"Disconnect the unused key under Manage keys, then connect it here again."*
@@ -60,7 +310,7 @@ items were dropped, not carried. Categories: **Fix now** / **Fix mid-term** / **
      profile Exchanges panel past `allocatorOnly`, or add a control on `my-strategies`), then point
      the `KEY_ORPHANED` remedy at it.
 
-0.05. **⚠️ MT5 generic fallback names a cause it has NOT proven — a false sentence in the arm that
+0.09. **⚠️ MT5 generic fallback names a cause it has NOT proven — a false sentence in the arm that
    exists for "cause unknown".** Found 2026-08-24 during Phase 161 (WIZERR-01) execution; the plan
    deliberately did not touch it, and `161-UI-SPEC.md` holds arm 3 unchanged, so this is a scoped
    follow-up, not a regression.
@@ -285,7 +535,11 @@ items were dropped, not carried. Categories: **Fix now** / **Fix mid-term** / **
    passed; restored → 147 passed).
    **Completed:** v0.69.1.0 (2026-08-21)
 
-0d. **[159-SEED-01] 15 published `is_example` strategies sit at `computation_status =
+0d. **✅ RESOLVED 2026-08-26 — the 15 rows were DELETED from PROD (see `D-162-1` below); 0
+   `is_example` strategies remain, so this census finding no longer describes reality. Kept as
+   the record of why RANK-01's badge floor mattered.** Original text follows.
+
+   **[159-SEED-01] 15 published `is_example` strategies sit at `computation_status =
    'failed'` while still carrying KPI values — PROD, since 2026-05-27.** Measured by the
    phase-159 C-M1 census (`.planning/phases/159-rank-public-ranking-integrity/159-CENSUS.md`,
    run read-only against PROD 2026-08-21): of 18 published strategies in the only category
@@ -334,6 +588,52 @@ items were dropped, not carried. Categories: **Fix now** / **Fix mid-term** / **
    byte-freeze + mirror-prose machinery can be deleted. Skipped same-pass because each
    reshapes just-red-teamed money-math or test machinery right before ship.
    **Recorded:** 2026-08-23 (/simplify, phase 159)
+
+0.12. **🎨 FreshnessChip's longest label overflows its masthead column — measured in a real browser.**
+   Found 2026-08-26 during the phase-162 browser pass on localhost/TEST (the first time this phase
+   was rendered outside jsdom). Measured on the factsheet v2 masthead at 1485px viewport:
+   - `COMPUTED · FRESH` → 1 line, 204.2px — fits
+   - `TRACK RECORD · OLD` → 1 line, 204.2px — **fits** (this was the badge fixer's flagged worry; DISPROVED)
+   - `TRACK RECORD · FUTURE — CHECK DATA` → **297.9px in a 204.2px container** — overflows
+   The row is `flex … justify-end`, so it pushes left rather than wrapping.
+   **Reachable:** the `future` tone fires on a future-dated input, and the chip names whichever fact
+   carried the verdict — so a future-dated SERIES END produces exactly this string. That is the case
+   `NEW-C20-07` exists to catch, so it is not hypothetical.
+   **Severity: cosmetic.** The sentence is TRUE; only its width is wrong. Not user-deceiving, so
+   non-blocking per the stopping rule.
+   **Fix candidates:** shorten the future label on the series arm (e.g. `TRACK RECORD · FUTURE`), or
+   let the label row wrap at this breakpoint. Re-measure in a browser — jsdom cannot see this class.
+
+0.11. **📋 Expect FOUR red SQL gates on the phase-162 PR, not two — do not read the extra two as regressions.**
+   Recorded 2026-08-26 from the phase-162 code review (IN-01). Nothing applies migrations to the
+   TEST project (`supabase-migrate.yml` targets PRODUCTION only, and the `sql-tests` job globs
+   `supabase/tests/test_*.sql` and psql's them with no apply step), so every gate that asserts its
+   migration is present hard-fails until someone applies it by hand.
+   The accepted list named only the two NEW gates. Two AMENDED files fail for the same reason:
+   - `supabase/tests/test_create_wizard_strategy_for_key.sql` (new)
+   - `supabase/tests/test_compute_jobs_error_kind_copy_parity.sql` (new)
+   - `supabase/tests/test_sync_status_marked_refresh_protected.sql:210-214` — gate 0b, needs `20260826120000`
+   - `supabase/tests/test_retention_orphaned_running.sql:261-266` — V-1 canary + F-3 counts, needs `20260826140000`
+   ⭐ These are deliberately fail-loud and must NOT be softened into skips — CI rejects whole-file
+   SKIPs as of 2026-08-25 precisely because a skipping gate reads green while asserting nothing.
+   **Clears when** `20260826120000` and `20260826140000` are applied to TEST, in that order.
+
+0.10. **⚠️ The wizard preselect can render a dismissal control that does nothing.**
+   ⚠️ *Id note: this is the zero-padded `0.01`–`0.10` series. Do NOT confuse it with the legacy
+   unpadded `0.1` / `0.2` / `0.3` items further down, which are a different, older scheme and are
+   cited by `docs/runbooks/ledger-refresh-go-live.md` and `.planning/STATE.md`.* Found by the
+   B-2 fixer while closing the KEY_REUSE_UNAVAILABLE dead end (2026-08-26); recorded, NOT fixed.
+   `onUseDifferentKey` is an OPTIONAL prop while `preselectKey` is also optional, so a host can in
+   principle render the preselect branch with no dismissal handler. The "Use a different key"
+   button would then paint as a no-op — and because `KEY_REUSE_UNAVAILABLE`'s copy now NAMES that
+   control as the remedy, the refusal would point at a dead button. That is the same unwinnable-loop
+   class the fix just closed, one prop away.
+   **Not live today** (measured): `ContributionWizardOverlay:302-303` passes both and
+   `WizardClient:1262-1263` forwards both, so no host omits it. Severity is guard-hygiene, not
+   user-facing — filed per the stopping rule, not blocking.
+   **Fix:** make the two props co-travel in the type (a discriminated union on the preselect
+   branch), so a host that supplies `preselectKey` MUST supply `onUseDifferentKey`. Requires
+   editing `WizardClient.tsx`, which the fixer did not own.
 
 0.1. **⛔ LEDGER-BACKED VENUES HAVE NO RECURRING STRATEGY REFRESH — MT5 factsheets go stale
    silently, forever.** Founder-reported 2026-08-23 ("MT5 strategies are not being read out every
@@ -1918,6 +2218,127 @@ href under the owner mode. Note the grid carries a second owner-surface problem 
 toggle-hide also defers: `StrategyGrid.tsx:79-82` renders `VerifiedBadge` with
 `trustTier={s.trust_tier}`, which is null by construction for an unpublished row.
 
+### Phase 162 (HONEST) — plan 162-08 filings (added 2026-08-26)
+
+Five items. Two are live data left unrepaired because plan 162-08 could not reach the PROD
+write lane; one is a founder scope call; two are hygiene. Evidence for all five:
+`.planning/phases/162-honest-what-the-user-sees-is-true/162-CENSUS.md` (§Recompute — NOT
+EXECUTED, §str/None follow-through, §Discovery observation).
+
+- [x] **`D-162-1` CLOSED 2026-08-26 BY DELETION — the 15 rows no longer exist.** ⚠️ Everything
+      below this line is the SUPERSEDED record of the state before the deletion; it is kept for
+      the reasoning, not as current fact. Recompute was measured IMPOSSIBLE (`csv_daily_returns`
+      held 0 rows for all 15 while the handler needs >=2), so on founder instruction the rows
+      were unpublished AND deleted from PROD, verified: 0 examples remain. Cascades took 1470
+      match_candidates, 29 portfolio memberships, 5 favourites, 3 contact_requests; 28
+      allocation_events and 3 match_decisions were cleared first as FK blockers. Full backup
+      held outside the repo. Found stale by the phase-162 verifier — this filing still said
+      "still published" after the rows were gone.
+
+  <details><summary>Superseded pre-deletion record</summary>
+
+  **`D-162-1` NOT EXECUTED — all 15 published example rows are still `failed` and still
+      published.** `51a111ed-0000-4000-8000-0000000000{01..15}`, `computation_status = failed`
+      since **2026-05-27**, series ending April 2026. **0 recomputed, 0 unpublished, 0
+      touched.** Plan 162-08's Task 1 could not run: the service-role credential read is denied
+      by the harness permission classifier (outbound network and plain file reads are *not*
+      denied — the block is specifically on reading the secret; three lanes tried, all denied,
+      isolation recorded in the census). ⚠️ **The badge fix does not cover this.** 162-03's
+      guard means those rows render no *Synced* badge; the rows themselves remain published
+      advertising a three-month-dead computation with em-dashes where KPIs belong. **Resuming
+      is a lookup, not a re-derivation** — the census records the selected mechanism
+      (`compute_analytics_from_csv` via `_enqueue_compute_job_internal`, service-role, with
+      every claim cited to its definition at HEAD) plus the ONE unmeasured precondition that
+      decides the outcome: whether those 15 strategies have ≥ 2 rows each in
+      `csv_daily_returns` (a *different* table from the `strategy_analytics.daily_returns` the
+      census confirmed). If they do not, `run_csv_strategy_analytics` fails with "Insufficient
+      CSV history" and D-162-1's fence fires for all 15 → unpublish, and say so.
+- [ ] **Two `strategy_analytics` rows still render raw exception prose, and their only
+      re-write path is a dead job kind.** `ec722557-7781-44db-8f2c-edbe252957c0`
+      (`pending_review`) and `8581f739-1a7b-42a4-a209-3acfa327e259` (**published**) each carry
+      the bare 59-character `str`/`None` `TypeError` text in `computation_error`. Plan 162-02
+      fixed the *writer*, so no NEW row can leak this shape — but it cannot rewrite these two,
+      and plan 162-08's repair enqueue was blocked by the same credential denial above.
+      Disposition recorded as *awaiting-next-write*, with the caveat that makes it nearly
+      permanent: their only failing kind, `poll_positions`, has not been enqueued anywhere in
+      PROD since **2026-06-14**, so there may be no next write. The published one is a live
+      surface.
+- [ ] **Retired job kinds still carry a live daily enqueue that has fired nothing since
+      2026-06-14 — dead code, low priority.** `enqueue_poll_positions_for_all_strategies`
+      exists at HEAD (`analytics-service/main_worker.py:1026-1036`) but no `poll_positions` job
+      has been created in PROD since 2026-06-14. Same family: `compute_analytics` is *retired*
+      (30 PROD rows, 100% `failed_final`, **zero successes ever**), superseded by
+      `compute_analytics_from_csv` + `derive_broker_dailies`; its enqueue RPC actively rejects
+      the kind (`20260716090000_retire_compute_analytics_kind_rpc_guard.sql`). ⛔ **File this
+      as dead code, NEVER as an outage.** ⚠️ Load-bearing consequence, already actioned in the
+      census: any decision rule keyed on "0 `compute_analytics` jobs since X" is **VOID** — it
+      fires for the entire fleet, every day. One such rule shipped as the derive-gap trigger in
+      the HONEST-02 decision table; the correction is now recorded in 162-CENSUS.md itself, not
+      only in a sibling SUMMARY.
+- [ ] **`StrategyGrid`'s sync-badge gate is one half short of the table's — guard hygiene, NOT
+      user-facing.** Table: `mayClaimSyncRecency = hasComputedAnalytics && !s.is_example`
+      (`StrategyTable.tsx:982-983`). Grid: `{!s.is_example && (`
+      (`StrategyGrid.tsx:117`) — it has the `is_example` half and lacks the
+      `hasComputedAnalytics` half. ⚠️ **Two earlier framings of this item are wrong and should
+      not be carried forward.** (a) A WINDOWS.md deferral called the grid badge
+      "consumer-less" — **false**: `StrategyTable.tsx:1421` renders `StrategyGrid`, and by
+      founder ruling (`StrategyTable.tsx:387-398`) grid is **discovery-only**, i.e. exactly the
+      public surface HONEST-03 names. (b) A later handoff said the grid badge is *ungated* —
+      also false at HEAD: 162-03 landed the `is_example` half. Re-measured 2026-08-26 on the
+      assembled phase branch. **Why it is nonetheless not user-visible, which is what sets the
+      severity:** discovery rows pass `shapeRowAnalytics` (`queries.ts:470-474`), whose
+      non-terminal-success branch returns `{...EMPTY_ANALYTICS, computation_status}` with
+      `computed_at: ""` (`utils.ts:181`), so a failed/pending/computing row reaches the grid
+      badge with a falsy date and renders nothing. **Guard-hygiene / defence-in-depth asymmetry
+      → mid-term, not blocking**, per the founder stopping rule. ⛔ It is *not* dead code and
+      *not* unreachable — deleting it on either premise would be wrong. The table's own comment
+      (`StrategyTable.tsx:1149-1156`) states the client guard is kept "as well as, not instead
+      of" the server blanking, because the component is mounted by three pages, one anonymous,
+      "and it must not be capable of printing a sync date it cannot justify no matter who hands
+      it rows." The grid is one row-source change away from printing one. **Fix shape:** extend
+      the grid gate to `hasComputedAnalytics && !s.is_example` (or lift the single predicate
+      into a shared helper both render paths import) and add a grid case for a `failed` row
+      carrying a fresh `computed_at` — no such case exists today, so the missing half is
+      currently unpinned on the grid side.
+- [ ] **FOUNDER CALL — is `HONEST-02` satisfied by an adjacent honest line, or must the badge
+      itself stop reading FRESH?** Requirement: *"the factsheet freshness **badge** reflects
+      series recency — a strategy whose return series ended 89 days ago cannot read FRESH."*
+      Plan 162-07 shipped D-162-2's recency line ("Track record through {date}", keyed on the
+      series' last point). D-162-2 **deliberately** left `FreshnessChip` computing from
+      `computed_at`, so after this phase the surface states the series end while the badge
+      beside it can still read FRESH over a 111-day-dead track. The badge still makes a false
+      claim in isolation — user-facing by the stopping rule — but D-162-2 was a founder
+      decision, so the scope call is the founder's. **The checkbox stays OPEN; do not tick
+      HONEST-02 at phase close without a ruling.**
+- [ ] **FOUNDER CALL — may a permanently-inconclusive root cause close `HONEST-01`?** The
+      requirement is a conjunction: the leaked text mapped at the writer, **with** the
+      underlying `str`/`None` compare root-caused. First half delivered (162-02). Second half
+      is `inconclusive` **as a decided verdict, not as unfinished work**: stage
+      (`poll_positions`), window (2026-06-10 … 06-14) and population (exactly 2 strategies, one
+      shared 59-char message) are pinned, but no `str`/`None` compare exists on the handler
+      path at HEAD, no traceback survives (`str(exc)[:500]`, no frames), and Sentry is
+      orchestrator-only. No code fix is planned — guarding a compare not shown to be the raiser
+      would mint a regression test pinning a fiction. **The checkbox stays OPEN.** If reopened
+      with Sentry, the search key is exact: kind `poll_positions`, 2026-06-10 … 2026-06-14, two
+      strategy ids. ⚠️ The kind has been silent fleet-wide since 2026-06-14, so absence of
+      recurrence is **not** evidence of a fix.
+- [ ] **`.planning/WINDOWS.md` loses entries under concurrent appends — measured, with data
+      already lost once.** `gsd-tools windows append` does read-modify-write over the whole
+      file, so parallel wave agents clobber each other. Observed on 2026-08-26: at commit
+      `e6c70ca79` the rendered table carried **three** rows numbered `id 16` while the JSON
+      block — the source of truth the table is regenerated from — carried only **one**. The
+      other two (162-03's `StrategyGrid` entry, 162-04's `ScenarioComposer` entry) had already
+      been dropped from JSON by an earlier race and survived only as orphaned table rows; the
+      next append regenerated the table and erased them entirely. Both were re-added by 162-08
+      as ids 19 and 20, with their original `recorded_at` preserved in the description text —
+      so nothing is lost *now*, but the mechanism is live and will bite again on the next
+      parallel wave. ⚠️ Duplicate ids are the detectable symptom: `grep -o '"id": [0-9]*'
+      .planning/WINDOWS.md | sort -n | uniq -d` should be empty, and the JSON entry count
+      should equal the table row count. **Fix shape:** make the append atomic (lock file, or
+      `O_EXCL` temp + rename with a re-read/retry loop), and derive the next id from the JSON
+      max rather than a cached count. Upstream in the GSD toolchain, not this repo's source —
+      but the corrupted artifact is tracked here.
+
 ---
 
 ## ⚪ DON'T FIX — cosmetic, stale, superseded, speculative, or unsound
@@ -1958,6 +2379,44 @@ toggle-hide also defers: `StrategyGrid.tsx:79-82` renders `VerifiedBadge` with
 - [ ] (/code-review high, lens 3+5) The stale "strategies_update has NO WITH CHECK" claim also lives in src/app/api/strategies/finalize-wizard/route.test.ts:76-77 and :2996-2997, and ownership/name route docblocks — fix together with IN-01 using the migration rev-3 framing (defence-in-depth, cite 20260410225610).
 - [ ] (/code-review high, lens 5) HoldingsTable.tsx D-15 comment cites StrategyTable.tsx:1067-1085; the precedent now lives at :1169-1179 — cite by phrase not line number.
 - [x] ~~(/code-review high, lens 5, low-confidence) strategies-row-adapter.ts Half-2 comment~~ **RESOLVED 2026-08-08**: kept `manager: s.codename ?? null` and reworded the comment. Half 1 resolves `organization_name ?? codename ?? null` and an owner's own strategy has a null org, so half 1 lands on the codename too; dropping half 2 to null would make one strategy render "—" while unallocated and its codename once money sits behind it. Cross-half agreement now pinned by test. says "honest — rather than a fabricated manager" but code sets manager: s.codename ?? null — codename-present path renders own codename in the manager column and is untested; decide intended behavior and pin it.
+
+### Phase 162 (HONEST) — composite failure no longer names the offending member (added 2026-08-26)
+
+- [ ] **On a composite onboarding failure the user is told the composite failed, but not WHICH
+      member key caused it.** HONEST-01 / UI-SPEC C-2 removed the `computation_error` appendix
+      from the wizard error envelope — correctly, because that column carried raw Python
+      exception text and server-SCRUBBING is not curation. But that appendix was also the only
+      thing naming the offending member ("… (deribit) failed to reconstruct: …"). The envelope
+      now renders generic `GATE_ANALYTICS_FAILED` copy, so a user with a 3-key composite learns
+      only that something failed.
+      **This is the reader half of the gap Phase 164.2 already owns.** 164.2 covers the writer
+      half (the status bridge overwrites the runner's curated sentence on both transition
+      branches, so `computation_error_copy`'s output reaches no user). Even once the writer is
+      fixed, THIS path still will not render it — the appendix is gone by design. The real fix
+      is a curated, member-naming field in the envelope, not re-threading the column.
+      **Do NOT close by re-threading `computation_error`** — that is precisely the regression
+      HONEST-01 closed, and `e2e/composite-onboarding.spec.ts` now asserts its absence.
+      **Found:** ship gate for v0.74.0.0 — `e2e-seeded` went red on the stale assertion, which
+      is how the information loss surfaced at all.
+
+### Phase 162 (HONEST) — ship-gate lint finding (added 2026-08-26)
+
+- [ ] **`computationError` is write-only state in `SyncPreviewStep.tsx`, and two comments say
+      otherwise.** Phase 162 / HONEST-01 deliberately stopped threading the raw computation-error
+      text into the error envelope (`:1935` documents this — correct and intended). What was not
+      cleaned up: the `useState` at `:578` is now never READ. `grep` finds four hits — the
+      declaration, the setter at `:1015`, an unrelated same-named object property at `:1713`, and
+      the comment. The gate reads the locally-passed `nextError`, **not** this state, so `:1935`'s
+      "the gate reads it (`checkStrategyGate`, above)" and `:1013`'s "the failure line update[s]
+      each tick" both overstate what is wired. ESLint surfaces it as the only `no-unused-vars`
+      warning in the repo.
+      **Fix:** delete the dead state and its setter, or keep it and correct both comments to say
+      it is retained write-only. Prefer deletion — Rule 6. Check `SyncPreviewStep` tests first;
+      removing the setter drops one re-render per poll tick when only the error text changes.
+      **Not blocking:** nothing user-facing and no data-integrity exposure — the removal of the
+      raw text from the envelope is exactly what HONEST-01 wanted. Filed per the stopping rule.
+      **Found:** ship gate for v0.74.0.0 (`npm run lint`, 0 errors / 3 warnings).
+
 
 ### Phase 151 (AUM) — deferred by ruling from plan 151-04 (added 2026-08-07)
 

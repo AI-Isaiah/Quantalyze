@@ -2,8 +2,8 @@
 phase: 160-provenance-the-server-s-venue-is-the-venue-that-annualizes
 verified: 2026-08-23T00:00:00Z
 re_verified: "2026-08-23T19:58:08Z @ 939165aa2ce13acf900c4667d7494bf54497d9e5"
-status: human_needed
-score: 31/32 must-have truths verified
+status: human_needed_partial
+score: 31.5/32 — the arm's TRUTH is verified; the prescribed 3-surface method is 1/3 executed
 behavior_unverified: 1
 overrides_applied: 0
 re_verification:
@@ -15,6 +15,23 @@ re_verification:
     - "Route serves NO ciphertext to any caller: absent-discriminator bodies receive a coded STALE_CLIENT refusal (substance verified at HEAD by an independent pass; the truth's 'same merge as the migration' ordering clause is ruled VIOLATED — see body)"
   gaps_remaining: []
   regressions: []
+# ── 2026-08-25 PARTIAL CLOSURE (read before trusting the score above) ──
+# The must_have TRUTH — "the production persist arm mints an attested api_keys row on a
+# real connect" — is VERIFIED. Founder connected a real OKX read-only key through
+# ApiKeyManager at /strategies/<id>/edit on PROD, 21:38:12Z: census 32 -> 33, new row's
+# attested_venue == exchange ('okx'/'okx'), and /api/keys/validate-and-encrypt present in
+# prod request logs. Evidence: 160-UAT.md.
+#
+# ⚠️ BUT the prescribed TEST names THREE converted surfaces and only ONE was exercised:
+#   ApiKeyManager           ✅ smoked on PROD 2026-08-25
+#   StrategyForm            ❌ NOT smoked (own fetch at StrategyForm.tsx:161)
+#   AllocatorExchangeManager ❌ NOT smoked and CURRENTLY UNREACHABLE — no page mounts it
+#                              (`grep -rln "<AllocatorExchangeManager" src/app` is empty)
+#
+# Do NOT record this as 32/32. The shared arm is proven, which retires the large risk; what
+# remains is per-surface payload risk, which is smaller but real and not measured. The third
+# surface cannot be smoked at all until something mounts it — that is itself worth a decision
+# (mount it, or drop it from this truth's surface list and say so).
 behavior_unverified_items:
   - truth: "The soak checkpoint confirms PR-1 merged + deployed + prod-smoked (plan 160-05 truth 1, 'prod-smoked' clause) — the production persist arm mints an attested api_keys row on a real connect"
     test: "On PROD (quantalyze.xyz), connect one API key through each converted surface — ApiKeyManager (strategy edit page), StrategyForm, AllocatorExchangeManager — with DevTools Network showing the POST to /api/keys/validate-and-encrypt"

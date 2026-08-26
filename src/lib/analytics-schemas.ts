@@ -193,7 +193,12 @@ export const GetUserComputeJobsRowSchema = z
     // parse failure here means the redaction layer regressed — exactly
     // what we want surfaced.
     last_error: z.null(),
-    error_kind: z.enum(["transient", "permanent", "unknown"]).nullable(),
+    // Pinned against compute_jobs_error_kind_check by
+    // src/__tests__/contracts/check-zod-db-check-parity.test.ts (bidirectional).
+    // 'orphaned' added with mig 20260826140000 (Phase 162 F-3): the reaper used
+    // to classify a job whose WORKER DIED holding the claim as 'permanent', so
+    // the user was told retrying would not help — false, and not self-healing.
+    error_kind: z.enum(["transient", "permanent", "unknown", "orphaned"]).nullable(),
     idempotency_key: z.string().max(128).nullable(),
     exchange: exchangeEnum.nullable(),
     trade_count: z.number().int().nonnegative().nullable(),

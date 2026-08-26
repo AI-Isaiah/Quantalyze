@@ -14,6 +14,7 @@ import {
   CSV_SUBMIT_STEP_HEADINGS,
   formatCsvRuleCauseSingle,
   type WizardErrorCode,
+  type WizardErrorContext,
 } from "./wizardErrors";
 import type { GateFailureCode } from "./strategyGate";
 // 153.1-04 / WIZFORM-02 — the DERIVATION, not a restatement of it. The claim
@@ -171,18 +172,33 @@ describe("wizardErrors", () => {
       expect(result.cause).toContain("calendar day");
     });
 
-    it("appends computationError into GATE_ANALYTICS_FAILED cause", () => {
+    // ⚠️ INVERTED 2026-08-26 (Phase 162 / HONEST-01, UI-SPEC C-2). These two
+    // used to assert that `computationError` was APPENDED into the cause —
+    // i.e. they pinned the defect. `strategy_analytics.computation_error` is a
+    // SERVER column, and until migration 20260826120000 it held raw
+    // `classify_exception` output, so the `Details: …` appendix rendered Python
+    // exception strings inside the wizard's failure envelope. The column is
+    // curated at its write boundary now, and the appendix is still wrong:
+    // appending curated copy to curated copy double-renders the same claim.
+    //
+    // The context object is cast because `computationError` is no longer a
+    // field on `WizardErrorContext` — that removal is half the fix, and the
+    // cast is what lets this test assert the OTHER half: even handed the key
+    // anyway, nothing in the formatter renders it.
+    it("does NOT append computationError into GATE_ANALYTICS_FAILED cause", () => {
       const result = formatKeyError("GATE_ANALYTICS_FAILED", {
         computationError: "Railway timed out",
-      });
-      expect(result.cause).toContain("Railway timed out");
+      } as unknown as WizardErrorContext);
+      expect(result.cause).not.toContain("Railway timed out");
+      expect(result.cause).not.toContain("Details:");
     });
 
-    it("appends computationError into SYNC_FAILED cause", () => {
+    it("does NOT append computationError into SYNC_FAILED cause", () => {
       const result = formatKeyError("SYNC_FAILED", {
         computationError: "connection refused",
-      });
-      expect(result.cause).toContain("connection refused");
+      } as unknown as WizardErrorContext);
+      expect(result.cause).not.toContain("connection refused");
+      expect(result.cause).not.toContain("Details:");
     });
 
     it("does not mutate the original table", () => {
@@ -1992,8 +2008,17 @@ describe("[140.3-10 / TRAP-4] the whole copy table, scanned for destructive-only
    * ownership flip the write in question deletes live positions. That is the
    * TRAP-4 shape one step removed, which is why the split had to move the
    * ACTIONS and not only the sentence.
+   *
+   * ⚠️ 89 → 90 (162-05 / D-162-3). ONE entry — `KEY_REUSE_UNAVAILABLE`, the
+   * use-existing-key arm's refusal when no LIVE key of the caller's matches the
+   * `reuse_api_key_id` it was handed. THIS guard's reasoning was re-run over the
+   * new entry BEFORE the number moved: its `actions` are `["try_another_key",
+   * "expand_log"]`, neither of which is a member of `DESTRUCTIVE_ACTIONS`, so it
+   * sits OUTSIDE the scanned population and the destructive class below is still
+   * four members. The baseline was re-measured at HEAD before it moved — 89 is
+   * what 161-REVIEW left and nothing between it and this plan minted a member.
    */
-  const EXPECTED_TABLE_SIZE = 89;
+  const EXPECTED_TABLE_SIZE = 90;
 
   it("the scan actually covers the table — hand-typed size guard", () => {
     expect(
@@ -2458,8 +2483,17 @@ describe("[140.3-12 / SEAMUX-04] no entry in the copy table makes a claim we can
    * `DASHBOARD_WRITE_FAILED` still carries that sentence for the arms that
    * genuinely establish it — so the tempting "unify them again" is a
    * re-introduction, not a simplification.
+   *
+   * ⚠️ 89 → 90 (162-05 / D-162-3), for `KEY_REUSE_UNAVAILABLE`. THIS guard is
+   * the banned-claims honesty scan, and its reasoning was re-run over the new
+   * entry before the number moved: the entry claims "Nothing was created and
+   * none of your stored keys changed", which BOTH of its emitters can actually
+   * establish — the pre-RPC one has performed two reads and no write, and the
+   * `no_data_found` one is raised inside the function before its INSERT, in a
+   * transaction that rolls back. It carries none of the four FORBIDDEN
+   * fragments.
    */
-  const EXPECTED_TABLE_SIZE = 89;
+  const EXPECTED_TABLE_SIZE = 90;
 
   it("the scan actually covers the table — hand-typed size guard", () => {
     expect(
@@ -3604,6 +3638,94 @@ describe("[153.1-03 / WIZFORM-03] fix[] requirements — the class, not the inst
     ).toBeGreaterThanOrEqual(1);
   });
 
+  /**
+   * SWEEP 2b — 162-06 review / B-2 (class). The `surfaceIsNot` kind, whose
+   * absence rule is the INVERSE of SWEEP 2's and is the entire reason it is a
+   * separate union member.
+   *
+   * ⚠️ SWEEP 2 IS STRUCTURALLY BLIND TO IT (`req.kind !== "surface"` skips it),
+   * so a `surfaceIsNot` bullet that suppressed itself everywhere — the silent
+   * copy deletion SWEEP 2 exists to catch — would have shipped green. The
+   * blindness is closed here in the same commit the kind is minted, rather than
+   * noted in a comment: that is the shape this file's own `KEY_ORPHANED` and
+   * `KEY_REUSE_UNAVAILABLE` rosters record paying for twice.
+   *
+   * Both halves are asserted because each fails differently:
+   *   · with NO surface named the bullet must RENDER — an incumbent remedy may
+   *     not vanish from the ~60 callers that name no surface;
+   *   · on the BARRED surface it must be GONE — otherwise the gate is decorative
+   *     and the false sentence is still on the screen that disproved it.
+   */
+  it("SWEEP 2b: a bullet BARRED from a surface renders everywhere else (the inverse absence rule)", () => {
+    let covered = 0;
+    for (const code of ALL_CODES) {
+      const entry = WIZARD_ERROR_COPY[code];
+      const requires = entry.fixRequires;
+      if (requires === undefined) continue;
+      requires.forEach((req, i) => {
+        if (req === null || req === undefined || req.kind !== "surfaceIsNot") {
+          return;
+        }
+        covered++;
+        const bullet = entry.fix[i];
+        expect(
+          formatKeyError(code).fix,
+          `${code} bullet ${i} is barred from the "${req.surface}" surface but ` +
+            "vanished when NO surface was named. That is a silent copy " +
+            "deletion for every caller that predates the gate — the opposite " +
+            "of what this kind is for. `requirementMet` must answer TRUE on " +
+            "an absent surface here.",
+        ).toContain(bullet);
+        expect(
+          formatKeyError(code, { surface: req.surface }).fix,
+          `${code} bullet ${i} declares itself false on the "${req.surface}" ` +
+            "surface and rendered there anyway, so the gate is decorative and " +
+            "the sentence the surface disproved is still being shown.",
+        ).not.toContain(bullet);
+      });
+    }
+    expect(
+      covered,
+      "No entry declares a `surfaceIsNot` requirement, so this sweep asserts " +
+        "nothing. Either the kind lost its users or it was folded back into " +
+        "`surface` — which would restore the suppress-on-absence rule and " +
+        "delete an incumbent remedy from every untagged caller.",
+    ).toBeGreaterThanOrEqual(2);
+  });
+
+  /**
+   * SWEEP 2c — the PAIRING rule the B-2 class fix depends on.
+   *
+   * A bullet barred from a surface leaves a HOLE on that surface. If nothing is
+   * gated ONTO the surface to fill it, the reader there gets a shorter list and
+   * no remedy at all — "fail toward saying less" taken past the point where it
+   * says nothing. Every entry that bars a bullet from a surface must also carry
+   * at least one bullet gated onto that same surface.
+   */
+  it("SWEEP 2c: barring a bullet from a surface never leaves that surface with no remedy", () => {
+    let covered = 0;
+    for (const code of ALL_CODES) {
+      const requires = WIZARD_ERROR_COPY[code].fixRequires;
+      if (requires === undefined) continue;
+      const barred = new Set(
+        requires
+          .filter((r) => r?.kind === "surfaceIsNot")
+          .map((r) => (r as { surface: string }).surface),
+      );
+      for (const surface of barred) {
+        covered++;
+        expect(
+          formatKeyError(code, { surface: surface as never }).fix.length,
+          `${code} bars a bullet from the "${surface}" surface and puts ` +
+            "nothing in its place, so a reader there is refused with no " +
+            "remedy at all. The UI-SPEC asks for copy that states the truth " +
+            "and invents no remedy — not for silence.",
+        ).toBeGreaterThanOrEqual(1);
+      }
+    }
+    expect(covered).toBeGreaterThanOrEqual(2);
+  });
+
   it("SWEEP 3: every fixRequires array is index-aligned to its fix array", () => {
     const tagged = ALL_CODES.filter(
       (code) => WIZARD_ERROR_COPY[code].fixRequires !== undefined,
@@ -4271,6 +4393,280 @@ describe("[161-05 / WIZERR-03] KEY_ORPHANED offers a remedy that can succeed", (
         "and profile → Exchanges is allocator-only. A remedy the user cannot " +
         "perform is the D-17 class this requirement exists to remove.",
     ).toEqual([]);
+  });
+
+  /**
+   * [162-06 / HONEST-06 / D-162-3] THE REMEDY THAT BECAME REAL — AND THE
+   * SENTENCE THAT DENIED IT, WHICH HAD TO GO IN THE SAME COMMIT.
+   *
+   * Until 162-06, "Finish setup →" on a stored-but-unused key reopened this
+   * wizard onto its credential form, so the owner re-POSTed credentials for a
+   * key we already held and landed back on THIS refusal. The copy said so:
+   * `fix[1]` read "To reuse this exact account, email security@quantalyze.com …
+   * releasing the stored key is not something you can do from this page." That
+   * was true then and became FALSE the moment the client threaded the owner's
+   * own key id — for exactly the users this phase is about.
+   *
+   * ⚠️ TWO PROPERTIES, NOT A WORDING. (1) The self-serve route is NAMED, so
+   * deleting it reds. (2) The retired claim cannot come back. Neither asserts a
+   * sentence: an honest reword of either keeps both green.
+   *
+   * ⚠️ AND THE NAMING IS CONDITIONAL BY CONTRACT, not by taste. `/my-strategies`
+   * guards on `requireRolePage(…, "allocator")`; a `role: "manager"` profile is
+   * redirected off it, and the manager wizard is a place this refusal renders.
+   * A FLAT assertion of that page would re-open the same D-17 class the case
+   * above exists to keep closed — for the other population.
+   */
+  it("names the self-serve reuse route 162-06 made real, and names it conditionally", () => {
+    const copy = WIZARD_ERROR_COPY.KEY_ORPHANED;
+    const bullets = copy.fix.map((f) => f.toLowerCase());
+
+    // VACUITY FENCE — the copy under test exists at all.
+    expect(
+      bullets.join("").length,
+      "the fix bullets collapsed to nothing, so every assertion below is vacuous",
+    ).toBeGreaterThan(80);
+
+    const reuseBullet = bullets.find(
+      (b) => b.includes("my strategies") && b.includes("finish setup"),
+    );
+    expect(
+      reuseBullet,
+      "No bullet names the route an owner can actually take: My Strategies " +
+        "lists a stored key with no strategy as a 'No strategy yet' row, and " +
+        "162-06 made its 'Finish setup' control REUSE that key instead of " +
+        "reopening this wizard's credential form. A refusal that withholds the " +
+        "one remedy that now works is the D-17 class in a new costume.",
+    ).toBeDefined();
+
+    expect(
+      reuseBullet,
+      "The My Strategies bullet asserts that page FLATLY. It is guarded by " +
+        "requireRolePage(…, 'allocator'), and this refusal also renders in the " +
+        "manager wizard, where that page redirects away — so an unconditional " +
+        "sentence names an unreachable surface for the manager population. It " +
+        "is also not guaranteed to LIST the key: the listing filters on " +
+        "is_active / sync_status, while the fence that emits this code filters " +
+        "only on disconnected_at.",
+    ).toMatch(/\bif\b/);
+  });
+
+  it("no longer tells the owner that reusing this exact account means emailing us", () => {
+    // A PHRASE CLASS, lower-cased and hand-typed — an honest reword stays
+    // green, a restoration of the retired claim reds. ⛔ The neighbouring
+    // clause about RELEASING the key is NOT banned and must not be: nothing we
+    // ship releases a stored key for any role, so that sentence is still true
+    // and still shipped in the last bullet.
+    const RETIRED_CLAIMS = [
+      "to reuse this exact account, email",
+      "reuse this exact account, email",
+    ] as const;
+
+    const claimsIn = (haystack: string): string[] =>
+      RETIRED_CLAIMS.filter((p) => haystack.toLowerCase().includes(p));
+
+    // POSITIVE CONTROL FIRST — the predicate is live against the exact sentence
+    // that shipped before 162-06. ⛔ Never delete this: with a phrase list that
+    // matches nothing, the assertion below passes while checking nothing.
+    expect(
+      claimsIn(
+        "To reuse this exact account, email security@quantalyze.com with the " +
+          "correlation id below: releasing the stored key is not something you " +
+          "can do from this page.",
+      ),
+      "The retired-claim predicate matched NOTHING in the exact sentence 162-06 " +
+        "replaced, so it has gone blind. ⛔ Fix the phrase list, never delete " +
+        "this control.",
+    ).not.toEqual([]);
+
+    const copy = WIZARD_ERROR_COPY.KEY_ORPHANED;
+    const surface = [copy.title, copy.cause, ...copy.fix].join(" | ");
+    expect(
+      claimsIn(surface),
+      "KEY_ORPHANED tells the owner that reusing this exact account means " +
+        "emailing us. Since 162-06 an owner who can reach My Strategies reuses " +
+        "the stored key themselves through 'Finish setup', so that sentence " +
+        "lies to the population this phase exists for.",
+    ).toEqual([]);
+  });
+});
+
+/**
+ * [162-05 / D-162-3] KEY_REUSE_UNAVAILABLE — WHAT IT MAY CLAIM, AND WHAT IT
+ * MAY NOT.
+ *
+ * The use-existing-key arm's refusal, emitted when no LIVE key of the caller's
+ * matches the `reuse_api_key_id` it was handed. Two properties are pinned, and
+ * neither is the wording:
+ *
+ *   · THE REMEDY IS REAL. Unlike `KEY_ORPHANED` — where the same account is
+ *     refused by the same partial UNIQUE every time — the credential form is
+ *     REACHABLE from the refusing screen, so `try_another_key` names something
+ *     that can actually succeed. The oracle is `buildEnvelope`'s DERIVATION,
+ *     never the `actions` array restated against itself ([153.6-06 /
+ *     PARITY-05]).
+ *
+ *     ⚠️ "REACHABLE FROM", NOT "ON" — CORRECTED BY MEASUREMENT (162-06 review /
+ *     B-2). This docblock used to say "the credential form on this very step
+ *     still works", and 162-06 falsified that in the same branch: the only
+ *     screen that renders this refusal is ConnectKeyStep's PRESELECT sub-state,
+ *     which returns before the form. The form is one control away — "Use a
+ *     different key" — and ConnectKeyStep wires the envelope's Retry to that
+ *     same control.
+ *
+ *   · IT SAYS NOTHING ABOUT THE USER'S CREDENTIALS. This arm never receives
+ *     them, never sends them anywhere and never stores them — it returns before
+ *     `validateKey` and `encryptKey` are reachable at all. A sentence implying
+ *     the key or secret was rejected would send the user to regenerate a
+ *     working credential for a state that has nothing to do with it, which is
+ *     the "sends them looking for a different problem" class the phase exists to
+ *     remove.
+ */
+describe("[162-05 / D-162-3] KEY_REUSE_UNAVAILABLE offers a remedy that can succeed", () => {
+  it("derives recoverable — from try_another_key, and not from clear_and_retry", () => {
+    expect(
+      buildEnvelope("KEY_REUSE_UNAVAILABLE", "corr-reuse-1").recoverable,
+      "On ConnectKeyStep's preselect branch the Retry control is wired to the " +
+        "'Use a different key' escape hatch — which IS the remedy this entry's " +
+        "first fix line names. Losing recoverability hides Retry and strands " +
+        "the reader on a screen whose only other control ('Continue with this " +
+        "key') is refused identically every time.",
+    ).toBe(true);
+
+    expect(
+      WIZARD_ERROR_COPY.KEY_REUSE_UNAVAILABLE.actions,
+      "⛔ `clear_and_retry` means 'send the same thing again'. Re-posting the " +
+        "same reuse_api_key_id is refused identically, because the key it names " +
+        "still does not exist.",
+    ).not.toContain("clear_and_retry");
+  });
+
+  /**
+   * [162-06 review / B-2] ⛔ IT MAY NOT CLAIM A CREDENTIAL FORM IS ON THE
+   * SCREEN.
+   *
+   * ⚠️ THIS IS THE TABLE-LEVEL HALF, AND ON ITS OWN IT IS NOT ENOUGH — a
+   * copy-only assertion is precisely what let the defect ship. The load-bearing
+   * oracle is the RENDERED one in
+   * `steps/ConnectKeyStep.test.tsx` ("[162-06 review / B-2] the preselect
+   * refusal points at a control that exists"), which reads the escape hatch's
+   * label off the DOM and requires the envelope to contain it. This case exists
+   * so the banned sentence class is also refused at the source, where the next
+   * copy edit is actually typed.
+   */
+  it("never claims a credential form stands on the refusing screen", () => {
+    // Present-tense "the form is HERE" claims. ⚠️ Deliberately narrow: a
+    // sentence about where a control LEADS ("…to connect this account with its
+    // own API credentials instead") is honest and must stay green.
+    const FORM_IS_ON_THIS_SCREEN = [
+      "the form on this step",
+      "the form on this screen",
+      "the form on this page",
+      "the form below",
+      "the form above",
+      "the form behind",
+      "still works normally",
+      "connect this account here",
+    ] as const;
+
+    const claimsIn = (haystack: string): string[] =>
+      FORM_IS_ON_THIS_SCREEN.filter((p) => haystack.toLowerCase().includes(p));
+
+    // ⛔ POSITIVE CONTROL — the literal sentence that shipped and was measured
+    // false. If the predicate stops matching it, the scan below has gone blind.
+    // Fix the phrase list; never delete this control.
+    expect(
+      claimsIn(
+        "Connect this account here with its API credentials instead — the " +
+          "form on this step still works normally.",
+      ),
+      "the form-claim predicate matched NOTHING in the very sentence B-2 was " +
+        "filed against, so the assertion below passes for the wrong reason.",
+    ).not.toEqual([]);
+
+    const copy = WIZARD_ERROR_COPY.KEY_REUSE_UNAVAILABLE;
+    const surface = [copy.title, copy.cause, ...copy.fix].join(" | ");
+    expect(
+      surface.length,
+      "the copy under test collapsed to nothing, so the scan below is vacuous",
+    ).toBeGreaterThan(80);
+    expect(
+      claimsIn(surface),
+      "KEY_REUSE_UNAVAILABLE names a credential form as if it were on the " +
+        "screen. It is not: the only client emitter is ConnectKeyStep's reuse " +
+        "arm, which lives in the preselect sub-state, and that sub-state " +
+        "returns BEFORE the form. Naming it leaves the reader hunting for a " +
+        "control that is not painted while Retry blanks the banner and " +
+        "'Continue with this key' refuses identically — the unwinnable loop " +
+        "162-06 exists to close, one screen later.",
+    ).toEqual([]);
+  });
+
+  it("offers neither to resume a draft nor to delete one — no draft was read or written", () => {
+    for (const forbidden of ["resume_draft", "start_fresh"] as const) {
+      expect(
+        WIZARD_ERROR_COPY.KEY_REUSE_UNAVAILABLE.actions,
+        `KEY_REUSE_UNAVAILABLE offers ${forbidden}, but both of its emitters ` +
+          "return before any draft is read or written — and `start_fresh` is " +
+          "the destructive member (140.3-10 / TRAP-4), aimed here at nothing.",
+      ).not.toContain(forbidden);
+    }
+  });
+
+  it("blames nothing about the caller's credentials — they were never received", () => {
+    // Hand-typed PHRASE CLASS, lower-cased: an honest reword stays green, a
+    // credential-blaming sentence reds. ⛔ The positive control below is what
+    // stops an emptied list passing while checking nothing.
+    const CREDENTIAL_BLAME = [
+      "your api key",
+      "your secret",
+      "your passphrase",
+      "regenerate",
+      "invalid credentials",
+      "check your key",
+    ] as const;
+
+    const phrasesIn = (haystack: string): string[] =>
+      CREDENTIAL_BLAME.filter((p) => haystack.toLowerCase().includes(p));
+
+    expect(
+      phrasesIn("Check your key and regenerate your secret on the exchange."),
+      "The credential-blame predicate matched NOTHING in a sentence built to " +
+        "trip it, so it has gone blind and the assertion below passes for the " +
+        "wrong reason. ⛔ Fix the phrase list, never delete this control.",
+    ).not.toEqual([]);
+
+    const copy = WIZARD_ERROR_COPY.KEY_REUSE_UNAVAILABLE;
+    const surface = [copy.title, copy.cause, ...copy.fix].join(" | ");
+    expect(
+      surface.length,
+      "the copy under test collapsed to nothing, so the scan below is vacuous",
+    ).toBeGreaterThan(80);
+    expect(
+      phrasesIn(surface),
+      "KEY_REUSE_UNAVAILABLE blames the caller's credentials. This arm never " +
+        "receives them: it returns before validateKey and encryptKey are " +
+        "reachable, and the refusal turns entirely on which STORED key was " +
+        "named. Sending the user to regenerate a working key is the exact " +
+        "misdirection this phase exists to remove.",
+    ).toEqual([]);
+  });
+
+  it("claims 'nothing was created' — which BOTH emitters can actually establish", () => {
+    // ⚠️ 140.3-15: a comforting negative may only be written where it is
+    // KNOWABLE. It is here, at both sites: the pre-RPC refusal has performed two
+    // reads and no write, and the `no_data_found` raise happens inside the
+    // function BEFORE its strategies INSERT, in a transaction that rolls back.
+    // Pinned as a required clause rather than a banned one, because deleting the
+    // sentence would leave the user with LESS information, not more — the shape
+    // [140.4-16 / CR-01] uses for the CSV resubmit instructions.
+    const copy = WIZARD_ERROR_COPY.KEY_REUSE_UNAVAILABLE;
+    expect(
+      copy.cause.toLowerCase(),
+      "The user has just been refused on a write path. Whether anything was " +
+        "created is the first thing they need to know, and here we can tell " +
+        "them truthfully.",
+    ).toContain("nothing was created");
   });
 });
 

@@ -8,10 +8,10 @@ behavior_unverified: 0
 overrides_applied: 0
 deferred:
   - truth: "The MT5 generic fallback (arm 3) names a specific option it has not proven"
-    addressed_in: "TODOS.md item 0.05 (🔴 FIX NOW)"
+    addressed_in: "TODOS.md item 0.09 (🔴 FIX NOW)"
     evidence: "Structurally unreachable from BOTH raise sites — verified: each enters the operator arm only via terminal_trade_permission_off(), which requires terminal_info to be a Mapping with a falsy trade_allowed, forcing arm 1 or arm 2. Survives only as Mt5GatewayMisconfigured()'s default argument and curated_gateway_detail()'s degradation target."
   - truth: "A manager can release their own orphaned API key"
-    addressed_in: "TODOS.md item 0.06 (🔴 FIX NOW)"
+    addressed_in: "TODOS.md item 0.08 (🔴 FIX NOW)"
     evidence: "KEY_ORPHANED's shipped fix[] does NOT name a release surface — it names 'connect a different account' and a support address. The unwinnable UI-SPEC bullet was measured and rejected before shipping. Product gap accurately described."
   - truth: "The composite arm names the real provenance reason for a sampled_gapped series"
     addressed_in: "TODOS.md item 0.07 (🔴 FIX NOW)"
@@ -163,13 +163,13 @@ No arm was found naming a remedy that cannot succeed.
 All three are booked in `TODOS.md` under **🔴 FIX NOW**, not silently dropped, and none is silently
 widened:
 
-- **0.05 (MT5 generic fallback).** Claim: "structurally unreachable from both raise sites". **I
+- **0.09 (MT5 generic fallback; renumbered from 0.05 on 2026-08-26).** Claim: "structurally unreachable from both raise sites". **I
   re-derived this and it holds.** Each raise site enters the operator arm only when
   `terminal_trade_permission_off(terminal)` is true, which requires `terminal_info` to be a Mapping
   containing `trade_allowed` with a falsy value — so `mt5_gateway_misconfigured_detail` cannot reach
   arm 3 on either path. It survives only as the exception's default argument and as
   `curated_gateway_detail`'s degradation target, exactly as TODOS states.
-- **0.06 (no manager surface releases an orphaned key).** Accurate. `"Manage keys"` occurs nowhere in
+- **0.08 (no manager surface releases an orphaned key; renumbered from 0.06 on 2026-08-26).** Accurate. `"Manage keys"` occurs nowhere in
   `src`; `ApiKeyManager` mounts only on the per-strategy edit page (and an orphan has no strategy);
   the shipped `KEY_ORPHANED` copy routes to support rather than to a control that does not exist.
 - **0.07 (composite arm hardcodes one provenance reason).** Accurate. `SyncPreviewStep.tsx:1308` sets

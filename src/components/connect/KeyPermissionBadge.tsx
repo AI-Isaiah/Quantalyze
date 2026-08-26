@@ -46,16 +46,30 @@ export interface KeyPermissionBadgeProps {
 
 interface PillProps {
   label: "Read" | "Trade" | "Withdraw";
-  granted: boolean;
+  /**
+   * 162-09 — `null` means the probe did not answer, so this scope is UNKNOWN.
+   * It is a third state, not a synonym for `false`: rendering a failed probe
+   * as "not granted" is as false as rendering it as "granted", and on the
+   * Read chip it would additionally read as "your key is revoked".
+   */
+  granted: boolean | null;
 }
 
 function Pill({ label, granted }: PillProps) {
   // Read+granted is the GOOD state → accent (the institutional teal).
   // Trade/Withdraw + granted is the BAD state → negative (red).
   // Trade/Withdraw + not granted is the NORMAL state → muted + strikethrough.
+  // granted === null is the UNKNOWN state → em-dash, colorless (see below).
   let cls: string;
   let glyph: string;
-  if (label === "Read") {
+  if (granted === null) {
+    // 162-UI-SPEC §C-3/C-4 vocabulary, reused rather than reinvented: an
+    // em-dash for a value that cannot be claimed, muted ink, and no semantic
+    // color in either direction — absence is not an error, so no red, and not
+    // reassurance either, so no accent.
+    cls = "text-text-muted";
+    glyph = "—";
+  } else if (label === "Read") {
     cls = granted ? "text-accent" : "text-negative";
     glyph = granted ? "✓" : "✗";
   } else if (granted) {
@@ -69,8 +83,12 @@ function Pill({ label, granted }: PillProps) {
     <span
       className={`inline-flex items-center gap-1 rounded-sm border border-border px-2 py-0.5 text-fixed-13 ${cls}`}
       data-testid={`key-perm-pill-${label.toLowerCase()}`}
-      data-granted={granted ? "true" : "false"}
-      aria-label={`${label} ${granted ? "granted" : "not granted"}`}
+      data-granted={granted === null ? "unknown" : granted ? "true" : "false"}
+      // The glyph is aria-hidden, so the state has to live in the label:
+      // a screen-reader user must hear "unknown", never a verdict we don't have.
+      aria-label={`${label} ${
+        granted === null ? "scope unknown" : granted ? "granted" : "not granted"
+      }`}
     >
       {label} <span aria-hidden>{glyph}</span>
     </span>
@@ -153,6 +171,36 @@ export function KeyPermissionBadge({ apiKeyId, className = "" }: KeyPermissionBa
       mountedRef.current = false;
     };
   }, [load]);
+
+  // 162-09 / HONEST-02 — ONE fact, decided ONCE, for every claim this panel
+  // makes about the probe result. The plain-English summary below already
+  // branched on `probe_error`; the scope chips and the "Detected … from the
+  // exchange" caption did not. Live PROD QA (2026-08-25) caught the two halves
+  // disagreeing on one screen: "Could not contact the exchange to verify
+  // scopes." directly above "Read ✓ Trade ✓ Withdraw ✓ — Detected 1m ago from
+  // the exchange." The chips are the load-bearing falsehood, not the caption —
+  // Trade ✓ / Withdraw ✓ sits under the connect form's "only read-only keys are
+  // accepted", so a user who believes them concludes their read-only key can
+  // move funds. Presentation only: server-side scope ENFORCEMENT is unaffected.
+  //
+  // ⚠️ COUPLING, recorded by the 162 silent-failure audit (A-5). `=== true`
+  // means an ABSENT `probe_error` reads as a successful probe — the optimistic
+  // arm. That is correct TODAY only because of a fact that lives in another
+  // language, in another repo directory: `analytics-service/routers/internal.py`
+  // always emits the key (`bool(perms.get("probe_error", False))`), so absence
+  // never occurs on the wire. The wire SCHEMA does not enforce that —
+  // `LivePermissionsSchema` marks the field `.optional()`
+  // (src/lib/analytics-schemas.ts) — so nothing between the emitter and this
+  // line would fail if a future response dropped it. It would simply be read as
+  // "the probe succeeded", and the chips would state scopes nobody verified.
+  //
+  // The audit deliberately left the logic ALONE: the component is otherwise
+  // correct, and flipping to a fail-closed default (`!== false`) would make
+  // every legacy/cached body render the failure copy. If that emitter ever
+  // stops emitting the key unconditionally, this line must become the
+  // pessimistic read — and the schema should stop calling optional what the
+  // producer treats as required.
+  const probeFailed = perms?.probe_error === true;
 
   return (
     <div className={`space-y-2 ${className}`} data-testid="key-permission-badge">
@@ -247,18 +295,38 @@ export function KeyPermissionBadge({ apiKeyId, className = "" }: KeyPermissionBa
               </p>
             );
           })()}
+          {/*
+            The chips read from the SAME `probe_error` fact as the summary
+            above. A failed probe still ships read/trade/withdraw booleans on
+            the wire (the _FAIL_CLOSED payload), but none of them is knowable,
+            so each renders as unknown — `—`, colorless — rather than as a
+            verdict in either direction.
+          */}
           <div className="flex flex-wrap gap-2">
-            <Pill label="Read" granted={perms.read} />
-            <Pill label="Trade" granted={perms.trade} />
-            <Pill label="Withdraw" granted={perms.withdraw} />
+            <Pill label="Read" granted={probeFailed ? null : perms.read} />
+            <Pill label="Trade" granted={probeFailed ? null : perms.trade} />
+            <Pill
+              label="Withdraw"
+              granted={probeFailed ? null : perms.withdraw}
+            />
           </div>
-          <p className="text-fixed-12 text-text-muted">
-            Detected{" "}
-            <time dateTime={perms.detected_at} title={perms.detected_at}>
-              {formatRelativeTime(perms.detected_at, Date.now())}
-            </time>
-            {" "}from the exchange.
-          </p>
+          {/*
+            `detected_at` on a failed probe is the timestamp of the FAILURE, so
+            "Detected {t} from the exchange" is false twice over: nothing was
+            detected, and it did not come from the exchange. The summary above
+            already states the limitation plainly, and 162-UI-SPEC §C-4's
+            single-note discipline says one sentence names the state — so this
+            caption is omitted rather than restated.
+          */}
+          {!probeFailed && (
+            <p className="text-fixed-12 text-text-muted">
+              Detected{" "}
+              <time dateTime={perms.detected_at} title={perms.detected_at}>
+                {formatRelativeTime(perms.detected_at, Date.now())}
+              </time>
+              {" "}from the exchange.
+            </p>
+          )}
         </>
       )}
     </div>

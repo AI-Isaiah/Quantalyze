@@ -429,16 +429,41 @@ describe("[89-03] SyncPreviewStep — composite branch", () => {
     ).not.toBeInTheDocument();
   });
 
-  // Pin 2 — FAILED BLOCKS + NAMES MEMBER. A failed status reaches the composite
-  // gate heading, names the offending member from the scrubbed
-  // computation_error, and offers no primary submit CTA.
-  it("blocks submit and names the failing member on computation_status='failed'", async () => {
+  // Pin 2 — FAILED BLOCKS SUBMIT AND ROUTES TO THE COMPOSITE GATE.
+  //
+  // ⚠️ REWRITTEN 2026-08-26 (Phase 162 / HONEST-01, UI-SPEC C-2). This pin used
+  // to be "FAILED BLOCKS + NAMES MEMBER", asserting that the envelope named the
+  // offending member "from the scrubbed computation_error" — which it did, via
+  // the `Details: {computation_error}.` appendix that phase removes.
+  //
+  // ⛔ THE AFFORDANCE IT PINNED WAS LARGELY FICTIONAL, and that is the reason
+  // this rewrite is a correction rather than a loss being waved through. The
+  // fixture supplied `"Key 2 (deribit) failed to reconstruct: geo-blocked"` — a
+  // friendly, member-naming sentence that NO WRITER PRODUCES. Measured at HEAD,
+  // what the composite path actually puts on that column is the operator string
+  // from `DispatchResult.error_message`, e.g.
+  // `run_stitch_composite_job: ccxt member crawl geo-blocked — <scrubbed ccxt
+  // exception>` (analytics-service/services/job_worker.py, the per-member arms).
+  // So the slot this pin protected rendered a function name and an exception
+  // tail to the user, not a member label. An unrepresentative fixture made a
+  // defect read as a feature.
+  //
+  // ⚠️ Naming the failing MEMBER is still worth doing — it is the one thing a
+  // composite failure should say — but it has to come through a structured
+  // channel (a member id the envelope can format), not by piping a free-text
+  // operator column into user copy. Recorded in deferred-items.md.
+  it("blocks submit and routes to the composite gate on computation_status='failed'", async () => {
     const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     installCompositeSupabaseMock({
       pollOutcome: () => ({
         kind: "row",
         status: "failed",
-        error: "Key 2 (deribit) failed to reconstruct: geo-blocked",
+        // The REAL shape of this column's value on the composite failure path,
+        // post-migration-20260826120000: curated copy derived from the job's
+        // error_kind. Not a member label, and not an exception either.
+        error:
+          "Analytics could not complete for this strategy, and retrying alone " +
+          "will not resolve it. Contact support if you need this strategy computed.",
       }),
     });
 
@@ -462,7 +487,15 @@ describe("[89-03] SyncPreviewStep — composite branch", () => {
     expect(
       screen.getByRole("heading", { name: /we could not verify this composite/i }),
     ).toBeInTheDocument();
-    expect(screen.getByText(/Key 2 \(deribit\)/)).toBeInTheDocument();
+    // The envelope is the scripted composite-gate one, and the column value it
+    // was handed does NOT appear in it — the C-2 rule, asserted on the branch
+    // where the appendix was most load-bearing.
+    const envelope = screen.getByTestId("error-envelope");
+    expect(envelope.getAttribute("data-error-code")).toBe("GATE_ANALYTICS_FAILED");
+    expect(envelope.textContent ?? "").not.toContain("Contact support if you need");
+    expect(envelope.textContent ?? "").not.toContain("Details:");
+    // …and it still gives the user its own account of the state.
+    expect(envelope.textContent ?? "").toContain("Analytics computation failed.");
     expect(screen.queryByTestId("wizard-use-this-key")).not.toBeInTheDocument();
 
     const reviewBtn = screen.getByTestId("wizard-try-another-key");

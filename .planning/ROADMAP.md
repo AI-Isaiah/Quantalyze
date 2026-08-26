@@ -336,7 +336,30 @@ Plans:
   3. `buildEquityCurveSeries` serves real per-strategy equity curves now that `returns_series` is selected (the hard-coded `equityCurve: null` and its false comment are gone), and drawer-added strategies render CAGR/Sharpe like book rows.
   4. "Finish setup →" opens the wizard with the clicked key preselected.
 
-**Plans**: TBD
+**Plans**: 9/9 plans executed (2 waves)
+
+> ⚠️ **162-08 Task 1 was SUPERSEDED, not completed as written.** It planned a recompute of the
+> 15 example rows. Measured 2026-08-26: `csv_daily_returns` held **0 rows for all 15** while the
+> handler needs ≥2, so the recompute arm was structurally impossible — an enqueue would have
+> fired the fence 15 times. The executor correctly halted (its PROD credential lane was also
+> blocked by the harness) and touched nothing. Founder ruled: unpublish AND delete. Executed and
+> verified on PROD the same day — 15 strategies deleted, 0 examples remain; cascades took 1470
+> match_candidates, 29 portfolio memberships, 5 favourites and 3 contact_requests; 28
+> allocation_events and 3 match_decisions were cleared first as FK blockers. Full backup retained
+> outside the repo. HONEST-03 therefore closes on measurement rather than on recompute.
+
+Plans:
+
+- [x] 162-01-PLAN.md — Diagnostics census: HONEST-02 flat-vs-derive-gap verdict + HONEST-01 str/None root cause, read-only vs PROD (wave 1)
+- [x] 162-02-PLAN.md — HONEST-01 curated copy at every writer (classify_exception arms, 18-site stamp choke point, portfolio _fail) + wizard Details-appendix removal, D-162-4 strict (wave 1)
+- [x] 162-03-PLAN.md — HONEST-04 gated real equity curves + C-3 coverage caption + HONEST-03 is_example SyncBadge class guard (wave 1)
+- [x] 162-04-PLAN.md — HONEST-05 widened /returns co-serves gated cagr/sharpe + addedMetricsById composer fallback, C-4 five-state contract (wave 1)
+- [x] 162-05-PLAN.md — HONEST-06 server use-existing-key path (D-162-3): decision gate + tracer RPC/route arm + state-adaptive SQL gate — service-role boundary (wave 1, checkpoint)
+- [x] 162-06-PLAN.md — HONEST-06 client preselect thread + C-5 saved-key summary, all three key populations pinned (wave 2)
+- [x] 162-07-PLAN.md — HONEST-02 verdict fix: D-162-2 "Track record through {date}" recency line (flat arm) or recorded pipeline routing (gap arm) (wave 2)
+- [x] 162-08-PLAN.md — HONEST-03 D-162-1 recompute of the 15 example rows (unpublish fallback, never synthesize) + HONEST-01 follow-throughs + TODOS filings (wave 2)
+- [x] 162-09-PLAN.md — KeyPermissionBadge: scope chips/caption gated on probe_error — a failed probe can no longer render scope facts (PROD QA finding 2026-08-25, phase-goal class) (wave 1)
+
 **UI hint**: yes
 
 ### Phase 163: HARDEN — Fail safe, closed, and loud
@@ -372,6 +395,81 @@ Plans:
 
 **Research note:** the payload-builder seam is the one un-measured integration (extracting the build half of `fetchAndBuildPayload` touches the composite arm AND the single-key basis arm — MEDIUM confidence, wider than it looks). Budget a research pass at plan time; don't discover it. Token-leak channels: Sentry `beforeSend` scrub verified against a REAL captured event, `Referrer-Policy: no-referrer` per-route, generic metadata (link-unfurl dullness accepted explicitly — a private link SHOULD be dull in a chat preview).
 
+### Phase 164.1: HARDEN-GUARDS — retire the frozen-spine gates that no longer bite, close the composite-stamp twin, put the advisory lock behind a real concurrency test, fix the PYAPI-06 blind spot that let a production service-key mismatch run silently, and close phase 161's deferred error-surface items including WIZFORM-02's code:UNKNOWN class (INSERTED)
+
+**Goal:** [Urgent work - to be planned]
+**Requirements**: TBD
+**Depends on:** Phase 164
+**Plans:** 0 plans
+
+Plans:
+
+- [ ] TBD (run /gsd-plan-phase 164.1 to break down)
+
+### Phase 164.2: CURATED-COPY — the curated failure sentence must reach the user (INSERTED)
+
+**Goal:** Every failure sentence a user reads is the true, specific one. Two mechanisms, one
+thesis:
+
+- **(a) The curated sentence survives the write.** A computation failure shows what its writer
+  produced — "Insufficient CSV history. At least 2 data points required." — instead of a generic
+  per-kind sentence that replaces it seconds later.
+- **(b) The wizard's refusals stop misattributing.** Four copy falsehoods enumerated below name a
+  cause the code never tested, or blame a party that did not cause the failure.
+
+The status bridge (`sync_strategy_analytics_status`) overwrites `strategy_analytics.computation_error`
+on BOTH branches, so D-162-4's curation reaches no user on any path where a `compute_jobs` row
+transitions. Measured 2026-08-26 while closing Phase 162; it PRE-DATES v1.20 — Phase 162 did not
+introduce it, and the red-team claim that 162 caused a regression here was refuted (the retired
+COALESCE read `last_error`, which is non-NULL on all 103 PROD `failed_final` rows, so its left arm
+always won).
+
+⚠️ NOT soundly fixable inside SQL. The bridge cannot tell a curated sentence from a stale one
+because the column carries no provenance. Needs a writer/generation marker on `computation_error`
+that the Python writers set and the bridge respects. Recorded as owed work in migration
+`20260826120000`'s header — deliberately, as owed, not as an accepted trade.
+
+**Also in scope — four wizard-copy falsehoods surfaced 2026-08-26.** Same thesis (the sentence a
+user reads must be true); different mechanism and different files from the SQL bridge above. Each
+was found by the fixer that closed the preselect-refusal class and deliberately left open because
+it lived outside that fixer's files — named, not silently dropped:
+
+1. **`KEY_MISSING_REQUIRED_FIELD`'s title and cause stay credential-shaped on the preselect
+   screen** ("One of the required fields is empty.") where there are no fields. `fixRequires`
+   gates `fix[]` only, so the surface-split fix could not reach them. The real fix is at the
+   emitter in `src/app/api/strategies/create-with-key/route.ts`, whose own guard comment already
+   says that arm "may not wear a `KEY_*` verdict that blames a credential". Minting a new copy
+   member moves `EXPECTED_TABLE_SIZE` plus three roster/coverage laws — do it deliberately.
+2. **`KEY_RATE_LIMIT` blames the exchange for OUR limiter.** The 429 comes from
+   `userActionLimiter`, but the copy says "The exchange asked us to slow down… exchange-side
+   throttle", and `fix[1]` "try a different exchange account" cannot clear a per-USER bucket.
+   Identical on the credential arm; `route.ts:891` already records it ("our outage, blamed on
+   their exchange") and accepted it. This is a misattribution class with an existing owner.
+3. **`DRAFT_ALREADY_EXISTS`'s cause says "with the same API key"** — false on the stale-session
+   path, where the collision is on `(user_id, wizard_session_id, source)` and not the key. True
+   on the TOCTOU path and on the credential arm, so the shared `cause` needs splitting, not
+   replacing.
+4. **The stale-`wizardSessionId` ROOT CAUSE is still open** (functional, not copy).
+   `deriveWizardResumeOverrides` restores `wizardSessionId` from localStorage unconditionally on
+   the API branch, so an abandoned draft over key A lends its session id to a preselect for key B
+   and 23505s forever — `resolveStrategiesForKey` looks up by `api_key_id` and never finds B.
+   Re-pressing Continue can never win. Fix belongs in `WizardClient`/`localStorage.ts` (mint a
+   fresh session id when a preselect is supplied) or in the route (re-resolve on 23505). Phase 162
+   shipped honest copy describing this dead end; it did not remove the dead end.
+
+⚠️ **Overlap to dedupe at planning time:** Phase 164.1 already claims "phase 161's deferred
+error-surface items including WIZFORM-02's `code: UNKNOWN` class". Items 1–3 above are wizard
+error-surface work and could equally live there. Decide ownership ONCE when the first of the two
+is planned — do not let both phases carry them.
+
+**Requirements**: TBD
+**Depends on:** Phase 164 (ordered AFTER 164.1 — no dependency between them, numeric order only)
+**Plans:** 0 plans
+
+Plans:
+
+- [ ] TBD (run /gsd-plan-phase 164.2 to break down)
+
 ### Phase 165: DEPS — The 9-PR dependabot campaign
 
 **Goal**: All 9 open dependabot PRs are RESOLVED — landed or deliberately closed — in the research-verified order with the full suite green between each, and production pandas is never downgraded
@@ -394,7 +492,7 @@ Plans:
 |-------|----------------|--------|-----------|
 | 158. OPS-CI merge=deploy | 6/6 | Complete    | 2026-08-21 |
 | 159. RANK ranking integrity | 0/? | Not started | - |
-| 160. PROVENANCE venue/annualization | 0/? | Not started | - |
+| 160. PROVENANCE venue/annualization | 7/7 | 🟡 Arm proven, 1/3 surfaces | Persist arm smoked via ApiKeyManager 2026-08-25; StrategyForm un-smoked, AllocatorExchangeManager unmounted |
 | 161. WIZERR honest errors | 0/? | Not started | - |
 | 162. HONEST visible truth | 0/? | Not started | - |
 | 163. HARDEN reliability + security | 0/? | Not started | - |

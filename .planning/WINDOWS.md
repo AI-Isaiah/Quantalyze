@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 14
+open_count: 19
 waived_count: 0
 fixed_count: 1
-total_count: 15
-last_updated: 2026-08-25T10:34:25.695Z
+total_count: 20
+last_updated: 2026-08-25T23:45:55.414Z
 ---
 
 # Broken Windows Ledger
@@ -30,6 +30,11 @@ last_updated: 2026-08-25T10:34:25.695Z
 | 13 | 161 | unrun-verify | .planning/phases/161-wizerr-honest-error-surfaces/161-06-PLAN.md |  | 161-06 backstop truth unverified: the rendered wait sentence's wrap/no-clipping on the E2 key-connect envelope — no renderer touched this plan | open |  | 2026-08-24T12:23:07.786Z |  |
 | 14 | 161 | unrun-verify | src/app/(dashboard)/allocations/components/AllocateDialog.tsx |  | E5 residue: founder eyes-on pass on the real Allocate dialog in Safari is unverified; layout measured only in Chromium on reproduced Modal/ErrorEnvelope markup (result: scrolls, does not clip) | open |  | 2026-08-24T21:01:39.389Z |  |
 | 15 | 161.1 | unrun-verify | supabase/tests/test_ledger_refresh_fanout.sql |  | Both phase SQL gates were run on a local Supabase harness, not against the real TEST project (TEST_SUPABASE_DB_URL is a CI secret, psql absent). Blocking CI sql-tests job covers this on PR. | open |  | 2026-08-25T10:34:25.695Z |  |
+| 16 | 162 | deviation | src/app/(dashboard)/strategies/new/wizard/steps/SyncPreviewStep.composite.render.test.tsx |  | Composite failure envelope no longer names the failing member; restoring it needs a structured member field, not a free-text column (deferred-items.md D1) | open |  | 2026-08-25T23:20:00.011Z |  |
+| 17 | 162 | unrun-verify | .planning/phases/162-honest-what-the-user-sees-is-true/162-08-PLAN.md |  | Plan 162-08 Task 1 (D-162-1) NOT EXECUTED: the PROD write lane is unreachable — the harness classifier denies reading the service-role credential (network and plain file reads are allowed; three lanes tried). 15/15 published is_example rows remain computation_status=failed since 2026-05-27; 0 recomputed, 0 unpublished, 0 touched. Also unexecuted: the repair enqueue for the 2 raw-exception-text rows. Selected mechanism plus the one unmeasured precondition (csv_daily_returns population) are recorded in 162-CENSUS.md. | open |  | 2026-08-25T23:44:15.573Z |  |
+| 18 | 162 | unmet-truth | .planning/phases/162-honest-what-the-user-sees-is-true/162-08-PLAN.md |  | 162-08 backstop truth is only HALF evidenced. Code half: proven at the seam (StrategyTable.stale-analytics 16/16, both HONEST-03 guards witnessed RED by neuter+restore). Data half: absent — the 15 example rows are still failed and still published, so discovery renders no Synced badge on them but is still not honest about them. An unevidenced backstop routes to human_needed; this one must not be read as a pass. | open |  | 2026-08-25T23:44:25.891Z |  |
+| 19 | 162 | deviation | src/app/(dashboard)/allocations/components/ScenarioComposer.tsx |  | RESTORED (originally recorded 2026-08-25T22:28:18.784Z by plan 162-04; lost from the ledger JSON by a concurrent-append race and re-added by 162-08). 162-04: metric pair now renders in all five C-4 states (previously hidden when both null); two existing SCEN-03 assertions updated accordingly | open |  | 2026-08-25T23:45:43.649Z |  |
+| 20 | 162 | deviation | src/components/strategy/StrategyGrid.tsx | 117 | RESTORED WITH A CORRECTED REASON (originally recorded 2026-08-25T22:26:27.302Z by plan 162-03; lost from the ledger JSON by a concurrent-append race). Original text said 'SyncBadge still ungated on computation_status (is_example guard added; consumer-less component)'. Re-measured at HEAD 2026-08-26: 'consumer-less' is FALSE (StrategyTable.tsx:1421 renders StrategyGrid, and grid is discovery-only by founder ruling at StrategyTable.tsx:387-398). The real gap is narrower: the grid gate has the is_example half and lacks the hasComputedAnalytics half the table carries (StrategyTable.tsx:982-983). NOT user-visible — shapeRowAnalytics blanks computed_at to empty for non-terminal-success rows — so guard-hygiene, not blocking. Filed with full reasoning in TODOS.md under 'Phase 162 (HONEST) — plan 162-08 filings'. | open |  | 2026-08-25T23:45:55.414Z |  |
 
 ````json
 [
@@ -211,6 +216,66 @@ last_updated: 2026-08-25T10:34:25.695Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-08-25T10:34:25.695Z",
+    "resolved_at": null
+  },
+  {
+    "id": 16,
+    "kind": "deviation",
+    "phase": "162",
+    "file": "src/app/(dashboard)/strategies/new/wizard/steps/SyncPreviewStep.composite.render.test.tsx",
+    "line": null,
+    "description": "Composite failure envelope no longer names the failing member; restoring it needs a structured member field, not a free-text column (deferred-items.md D1)",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-08-25T23:20:00.011Z",
+    "resolved_at": null
+  },
+  {
+    "id": 17,
+    "kind": "unrun-verify",
+    "phase": "162",
+    "file": ".planning/phases/162-honest-what-the-user-sees-is-true/162-08-PLAN.md",
+    "line": null,
+    "description": "Plan 162-08 Task 1 (D-162-1) NOT EXECUTED: the PROD write lane is unreachable — the harness classifier denies reading the service-role credential (network and plain file reads are allowed; three lanes tried). 15/15 published is_example rows remain computation_status=failed since 2026-05-27; 0 recomputed, 0 unpublished, 0 touched. Also unexecuted: the repair enqueue for the 2 raw-exception-text rows. Selected mechanism plus the one unmeasured precondition (csv_daily_returns population) are recorded in 162-CENSUS.md.",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-08-25T23:44:15.573Z",
+    "resolved_at": null
+  },
+  {
+    "id": 18,
+    "kind": "unmet-truth",
+    "phase": "162",
+    "file": ".planning/phases/162-honest-what-the-user-sees-is-true/162-08-PLAN.md",
+    "line": null,
+    "description": "162-08 backstop truth is only HALF evidenced. Code half: proven at the seam (StrategyTable.stale-analytics 16/16, both HONEST-03 guards witnessed RED by neuter+restore). Data half: absent — the 15 example rows are still failed and still published, so discovery renders no Synced badge on them but is still not honest about them. An unevidenced backstop routes to human_needed; this one must not be read as a pass.",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-08-25T23:44:25.891Z",
+    "resolved_at": null
+  },
+  {
+    "id": 19,
+    "kind": "deviation",
+    "phase": "162",
+    "file": "src/app/(dashboard)/allocations/components/ScenarioComposer.tsx",
+    "line": null,
+    "description": "RESTORED (originally recorded 2026-08-25T22:28:18.784Z by plan 162-04; lost from the ledger JSON by a concurrent-append race and re-added by 162-08). 162-04: metric pair now renders in all five C-4 states (previously hidden when both null); two existing SCEN-03 assertions updated accordingly",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-08-25T23:45:43.649Z",
+    "resolved_at": null
+  },
+  {
+    "id": 20,
+    "kind": "deviation",
+    "phase": "162",
+    "file": "src/components/strategy/StrategyGrid.tsx",
+    "line": 117,
+    "description": "RESTORED WITH A CORRECTED REASON (originally recorded 2026-08-25T22:26:27.302Z by plan 162-03; lost from the ledger JSON by a concurrent-append race). Original text said 'SyncBadge still ungated on computation_status (is_example guard added; consumer-less component)'. Re-measured at HEAD 2026-08-26: 'consumer-less' is FALSE (StrategyTable.tsx:1421 renders StrategyGrid, and grid is discovery-only by founder ruling at StrategyTable.tsx:387-398). The real gap is narrower: the grid gate has the is_example half and lacks the hasComputedAnalytics half the table carries (StrategyTable.tsx:982-983). NOT user-visible — shapeRowAnalytics blanks computed_at to empty for non-terminal-success rows — so guard-hygiene, not blocking. Filed with full reasoning in TODOS.md under 'Phase 162 (HONEST) — plan 162-08 filings'.",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-08-25T23:45:55.414Z",
     "resolved_at": null
   }
 ]

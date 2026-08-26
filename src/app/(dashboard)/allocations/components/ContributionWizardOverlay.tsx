@@ -34,6 +34,7 @@ import {
   type InitialDraft,
   type WizardDraftKind,
 } from "@/lib/wizard/draft-query";
+import type { PreselectedKey } from "@/app/(dashboard)/strategies/new/wizard/steps/ConnectKeyStep";
 
 /**
  * What the overlay learned from `GET /api/strategies/wizard-draft` (154-02).
@@ -51,12 +52,29 @@ export interface ContributionWizardOverlayProps {
   onClose: () => void;
   /** Receives the finalized (private) strategy id when the wizard completes. */
   onSuccess?: (strategyId: string) => void;
+  /**
+   * 162-06 / HONEST-06 / D-162-3 — the stored key this open is ABOUT.
+   *
+   * Set by /my-strategies when the owner clicks "Finish setup →" on a bare-key
+   * placeholder row; absent (the default) for every other mount, which keeps
+   * those byte-identical to the pre-162 overlay.
+   *
+   * Two things follow from it here, and the wizard owns the rest:
+   *   · the id joins the WizardClient remount key below, so switching away from
+   *     the preselect tears the wizard down instead of leaving its `useState`
+   *     initializers holding a key the user just rejected;
+   *   · a draft that belongs to a DIFFERENT key is not offered (see
+   *     `offeredRead`) — resuming it would silently move the user onto a key
+   *     they did not click.
+   */
+  preselectKey?: PreselectedKey | null;
 }
 
 export function ContributionWizardOverlay({
   isOpen,
   onClose,
   onSuccess,
+  preselectKey = null,
 }: ContributionWizardOverlayProps) {
   // The overlay owns the CSV↔API branch (no route searchParams, Pitfall 3).
   // `key={source}` on WizardClient below drives the remount on toggle, exactly
@@ -76,6 +94,18 @@ export function ContributionWizardOverlay({
   const [draftRead, setDraftRead] = useState<OverlayDraftRead | undefined>(
     undefined,
   );
+  // 162-06 / HONEST-06 — has the owner said "Use a different key" this open?
+  //
+  // ⭐ THE STATE LIVES HERE, NOT IN THE STEP THAT RENDERS THE BUTTON, because
+  // this component owns the remount key the preselected id is part of. Dropping
+  // the preselect must TEAR THE WIZARD DOWN: `WizardClient` seeds its step, its
+  // `apiKeyId` and (through the connect step) its exchange from the preselect in
+  // `useState` initializers, which run once. Flipping a flag in place would
+  // leave every one of them holding the key the owner just rejected, which is
+  // the "reads correct in a diff, does nothing in the browser" shape the draft
+  // deferral above already had to fix once.
+  const [preselectDismissed, setPreselectDismissed] = useState(false);
+  const activePreselect = preselectDismissed ? null : preselectKey;
   // Panel node so we can pull focus INTO the dialog on open (see below).
   const panelRef = useRef<HTMLDivElement>(null);
 
@@ -90,6 +120,12 @@ export function ContributionWizardOverlay({
       // toggle to its default so a reopen always starts on the API branch.
       // eslint-disable-next-line react-hooks/set-state-in-effect
       setSource("api");
+      // 162-06 — the same close-reset, for the same reason: the dismissal
+      // belongs to ONE open. Without it, an owner who clicked "Use a different
+      // key", closed the overlay, and clicked "Finish setup →" on another row
+      // would reopen onto a blank credential form with their new choice
+      // silently discarded.
+      setPreselectDismissed(false);
       return;
     }
     // Move focus INTO the dialog on open. Without this, opening from the mobile
@@ -159,8 +195,19 @@ export function ContributionWizardOverlay({
   // alone cannot tell a CSV draft from a composite one. Switching tabs
   // therefore offers a FRESH flow rather than hijacking a draft into a step it
   // cannot feed.
+  //
+  // 162-06 / HONEST-06 — AND ONLY IF IT BELONGS TO THE KEY THE OWNER CLICKED.
+  // The draft read above asks for the caller's LATEST draft, which has nothing
+  // to do with which placeholder row was clicked: with a preselect for key B and
+  // a live draft on key A, the unguarded expression resumed A — landing the user
+  // on a sync_preview for a key they did not choose, from a click that named B.
+  // The predicate is the draft's OWN `api_key_id`, so the preselected key's own
+  // draft (the stale-page case: another tab started it) still resumes normally.
   const offeredRead =
-    draftRead?.draft && draftRead.kind && draftMatchesSource(draftRead.kind, source)
+    draftRead?.draft &&
+    draftRead.kind &&
+    draftMatchesSource(draftRead.kind, source) &&
+    (!activePreselect || draftRead.draft.api_key_id === activePreselect.id)
       ? draftRead
       : null;
 
@@ -242,11 +289,18 @@ export function ContributionWizardOverlay({
             </p>
           ) : (
             <WizardClient
-              key={`${source}:${offeredRead?.draft?.id ?? "new"}`}
+              // 162-06 — the preselected key id JOINS the key. Choosing a
+              // different key changes this string, which is what tears the
+              // wizard down: the same `useState`-initializers-read-once
+              // property that forced the draft deferral above would otherwise
+              // leave the step holding the key the user just rejected.
+              key={`${source}:${offeredRead?.draft?.id ?? "new"}:${activePreselect?.id ?? "none"}`}
               entryContext="contribution"
               sourceOverride={source}
               initialDraft={offeredRead?.draft ?? null}
               initialDraftKind={offeredRead?.kind ?? null}
+              preselectKey={activePreselect}
+              onUseDifferentKey={() => setPreselectDismissed(true)}
               onSuccess={(id) => onSuccess?.(id)}
               onClose={onClose}
             />

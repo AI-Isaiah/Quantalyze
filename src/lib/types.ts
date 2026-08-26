@@ -1663,10 +1663,18 @@ export type ComputeJobStatus =
 
 /**
  * Error classification used by `mark_compute_job_failed` to decide
- * retry vs final. Set by the Python runner's `classify_exception`
- * helper.
+ * retry vs final. The first three are set by the Python runner's
+ * `classify_exception` helper.
+ *
+ * `orphaned` is different in kind and is NOT writable through that RPC —
+ * `mark_compute_job_failed` still rejects it (deliberately, so a handler can
+ * never claim its own worker died). It is written only by the
+ * `retention_compute_jobs_orphaned_running` reaper's direct UPDATE, for jobs
+ * whose worker went away holding the claim. Those are retryable by definition;
+ * before mig 20260826140000 they were classified `permanent` and the user was
+ * told retrying would not help (Phase 162 F-3).
  */
-export type ErrorKind = "transient" | "permanent" | "unknown";
+export type ErrorKind = "transient" | "permanent" | "unknown" | "orphaned";
 
 /**
  * `ComputeJob` mirrors the `compute_jobs` Postgres row (migration 032).

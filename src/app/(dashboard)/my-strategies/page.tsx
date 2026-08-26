@@ -91,8 +91,17 @@ export default async function MyStrategiesPage() {
 
   // Delta 5 — formatted SERVER-side so the client table never owns exchange
   // naming (and so an unmapped code can never reach the DOM as `undefined`).
+  //
+  // 162-06 / HONEST-06 — `exchange` (the venue ID) rides ALONGSIDE the formatted
+  // label rather than replacing it. The label is what the row shows and what the
+  // wizard's saved-key summary must repeat back; the id is what the wizard needs
+  // to report the venue truthfully in its funnel event and to look up
+  // venue-conditional error copy. Deriving either from the other on the client is
+  // the drift the server-side formatting above exists to prevent. The table
+  // renders only the label — see `MyStrategiesSection`'s prop docblock.
   const placeholderRows = (bareKeys ?? []).map((k) => ({
     id: k.id,
+    exchange: k.exchange,
     exchangeLabel: EXCHANGE_DISPLAY[k.exchange],
     keyLabel: k.label,
   }));

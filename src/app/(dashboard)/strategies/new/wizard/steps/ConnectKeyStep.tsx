@@ -5,6 +5,7 @@ import Link from "next/link";
 import { Input } from "@/components/ui/Input";
 import { Button } from "@/components/ui/Button";
 import {
+  formatKeyError,
   recogniseSeamErrorCode,
   type WizardErrorCode,
 } from "@/lib/wizardErrors";
@@ -314,6 +315,15 @@ const KNOWN_CREATE_WITH_KEY_CODES: ReadonlySet<WizardErrorCode> =
     // roster too` describe in the same invariant file derives the 409 emitters
     // as their own population and reds when this row is missing (observed).
     "KEY_ORPHANED",
+    // 162-05 / D-162-3 — the use-existing-key arm's refusal when no LIVE key of
+    // the caller's matches the `reuse_api_key_id` it was sent. Admitted HERE IN
+    // THE SAME COMMIT the route starts emitting it, for the reason the two rows
+    // above state. ⚠️ It answers 409 from both of its emitters, so the coverage
+    // law derived on "400" is structurally blind to it — the guard that DOES see
+    // it is the `[161-05 / WIZERR-03]` 409 describe in
+    // `wizardErrors.invariant.test.ts`, whose hand-typed set gained this member
+    // in the same commit.
+    "KEY_REUSE_UNAVAILABLE",
     "KEY_RATE_LIMIT",
     "UNKNOWN",
     // Returned by `classifyKeyValidationError` (src/lib/wizardErrors.ts) — the
@@ -389,6 +399,127 @@ const KNOWN_CREATE_WITH_KEY_CODES: ReadonlySet<WizardErrorCode> =
     "SEAM_INTERNAL_FAULT",
   ]);
 
+/**
+ * 162-06 — THE ONE TRANSLATION OF A `create-with-key` FAILURE BODY INTO A
+ * `WizardErrorCode`, extracted so its two callers cannot drift.
+ *
+ * It had a single caller (the credential submit) until the reuse arm arrived;
+ * a second hand-written copy of a translation whose ORDER is the whole safety
+ * property is the pair 162-05 refused to create server-side for the same
+ * reason. Extracted, not copied — behaviour is byte-identical for the
+ * credential caller.
+ *
+ * 140.3-13a / SEAMUX-08 — membership-checked, never cast. See
+ * KNOWN_CREATE_WITH_KEY_CODES above for why the check exists and why
+ * the set is this route's own rather than the whole union.
+ *
+ * 140.4-15 / SEAMRIM-08 — TRANSLATE FIRST, THEN MEMBERSHIP-CHECK, the
+ * same order `SyncPreviewStep`'s kickoff arm adopted in 140.4-12.
+ * `SEAM_CODE_TO_WIZARD_CODE` answers for the seam's WIRE vocabulary
+ * (this route's 503 arm emits `SEAM_MISCONFIGURED`); the set below
+ * answers for the wizard codes the route itself mints.
+ *
+ * ⚠️ 140.5-03 / SEAMPROSE-03 — CORRECTION. This paragraph used to end
+ * "the two vocabularies are disjoint, so neither hop can shadow the
+ * other". THE SENTENCE IS THE WRONG REASON FOR A TRUE CONCLUSION, and
+ * it contradicts this file's own header (search `ORDER IS THE WHOLE
+ * CHANGE`), which already qualifies disjointness as holding HERE and
+ * NOT at every surface.
+ *
+ * THE NECESSARY PROPERTY IS AGREEMENT; DISJOINTNESS IS ONLY SUFFICIENT.
+ * Where the two vocabularies overlap, the table wins by the order
+ * above — harmless precisely because both sides answer the SAME code,
+ * not because they never meet.
+ *
+ * Measured at 140.5-03, predicate stated because a line-based grep gets
+ * this wrong: intersect the KEY SETS (a roster's members / a `Record`'s
+ * keys against `SEAM_CODE_TO_WIZARD_CODE`'s keys), never the values —
+ * `MISSING_STRATEGY_ID: "VALIDATION_FAILED"` is a VALUE and a grep
+ * counts it as a third overlap that does not exist. Under that
+ * predicate: `KNOWN_KICKOFF_CODES` ∩ = {RATE_LIMITED},
+ * `KNOWN_FINALIZE_CODES` ∩ = {SEAM_MISCONFIGURED}, and THIS set,
+ * `KNOWN_ADD_KEY_CODES` and `KNOWN_SET_MEMBERS_CODES` all intersect in
+ * NOTHING. Both real overlaps AGREE at HEAD.
+ *
+ * `seam-ratelimit-posture.invariant.test.ts` derives both sides from
+ * disk and reddens when a shared code gets DIFFERENT answers, so the
+ * property is asserted rather than narrated. Do not restore the
+ * disjointness sentence as the REASON: an empty intersection here is a
+ * fact about today's rosters, and the safety does not depend on it.
+ * 140.4-16 / WR-09 — READ THROUGH THE LEAF, not off the top level.
+ * The commit that added this hop claimed it "mirrors
+ * `SyncPreviewStep`'s kickoff arm exactly". It did not: that arm and
+ * `SubmitStep` both read `seamErrorCode(body)`, which handles the
+ * nested `service_error` shape (`body.detail.code`), while this one
+ * read `data.code` and saw only the flat shape. Harmless today —
+ * this route funnels every caught value through
+ * `classifyKeyValidationError` and never forwards a nested
+ * envelope — but an undisclosed divergence under a comment
+ * asserting equivalence is how the next reader inherits a wrong
+ * premise. The leaf exists precisely so a nested envelope is never
+ * read as "a body carrying no code".
+ */
+function recogniseCreateWithKeyCode(data: { code?: string }): WizardErrorCode {
+  const translated = recogniseSeamErrorCode(seamErrorCode(data));
+  return translated !== "UNKNOWN"
+    ? translated
+    : data.code && KNOWN_CREATE_WITH_KEY_CODES.has(data.code as WizardErrorCode)
+      ? (data.code as WizardErrorCode)
+      : "UNKNOWN";
+}
+
+/**
+ * 162 review / A-6 — the sentinel that tells "the body was `{}`" apart from
+ * "the body was not JSON at all".
+ *
+ * ⚠️ BOTH ARMS USED TO COLLAPSE THE SECOND INTO THE FIRST. `res.json().catch(()
+ * => ({}))` turns a proxy's HTML error page, a truncated body or a gzip fault
+ * into an empty object; `recogniseCreateWithKeyCode({})` then answers `UNKNOWN`
+ * and NOTHING anywhere records that a parse was attempted and failed.
+ * `UNKNOWN` is an honest thing to SHOW — we genuinely do not know the code —
+ * so this is a debuggability loss rather than a false claim, and the fix is
+ * scoped to match: the screen is byte-unchanged, and the console gains the
+ * response's own metadata to correlate against the proxy/CDN logs.
+ *
+ * ⛔ WHAT IS LOGGED IS THE RESPONSE'S OWN METADATA AND NOTHING ELSE — `status`
+ * and `statusText`, never the body. An unparseable body is arbitrary bytes from
+ * an intermediary we did not write; echoing it into the console is how an
+ * internal host or a proxy banner ends up in a user-submitted screenshot. Same
+ * rule the sibling surface states beside its own copy of this shape
+ * (`KeyPermissionBadge.tsx`), and the same reason `scrubSeamError` exists on
+ * the server side of this seam.
+ */
+const PARSE_FAILED = Symbol("parse-failed");
+
+/**
+ * Read a `create-with-key` response body, keeping "unparseable" DISTINGUISHABLE
+ * from "empty". Returns the parsed object, and logs — once, with the HTTP
+ * status the sibling surface formats the same way — when there was no JSON to
+ * parse at all.
+ *
+ * ⚠️ IT STILL RETURNS `{}` ON FAILURE, deliberately. The caller's next move is
+ * `recogniseCreateWithKeyCode`, and `UNKNOWN` is the truthful answer for a body
+ * we could not read. Changing the RENDERED outcome would be inventing a code
+ * from a transport fault; the only thing this adds is the record that it
+ * happened.
+ */
+async function readCreateWithKeyBody<T extends object>(
+  res: Response,
+  arm: "credential" | "reuse",
+): Promise<Partial<T>> {
+  const parsed = (await res.json().catch(() => PARSE_FAILED)) as
+    | Partial<T>
+    | typeof PARSE_FAILED;
+  if (parsed === PARSE_FAILED) {
+    console.error(
+      `[wizard:ConnectKeyStep] ${arm} arm: response body was not JSON — ` +
+        `HTTP ${res.status} (${res.statusText || "no body"})`,
+    );
+    return {};
+  }
+  return parsed;
+}
+
 export interface ConnectKeySuccess {
   strategyId: string;
   apiKeyId: string;
@@ -412,6 +543,37 @@ export interface ConnectKeySuccess {
    * not send it and this type must not grow a field for it.
    */
   deduped?: boolean;
+}
+
+/**
+ * 162-06 / HONEST-06 / D-162-3 — a key the owner ALREADY has, chosen before the
+ * wizard opened.
+ *
+ * Minted by the /my-strategies host from the placeholder row the owner clicked
+ * ("Finish setup →"), threaded through `ContributionWizardOverlay` and
+ * `WizardClient`, and rendered by this step as the saved-key summary
+ * (162-UI-SPEC § C-5) INSTEAD of the credential form.
+ *
+ * ⛔ IT CARRIES NO CREDENTIAL AND NEVER WILL. Preselect means REUSE of the
+ * stored `api_keys` row — the row's secret is not readable by the web tier at
+ * all. A "prefilled" credential form was the measured unwinnable loop: it still
+ * re-POSTs credentials, still collides on the venue-identity index, and still
+ * lands on the same refusal the click was trying to escape.
+ *
+ * ⚠️ `exchange` is the venue ID (the closed `SupportedExchange` union), and
+ * `exchangeLabel` is the SERVER-formatted display string for the same fact. Both
+ * travel because they answer different questions: the label is what the row the
+ * owner clicked showed them (so the summary shows the same words), while the id
+ * is what the funnel event and the error envelope's venue-capability lookup
+ * need. Neither is derived from the other on the client — deriving the display
+ * name here is exactly the "client owns exchange naming" drift the server-side
+ * formatting in the my-strategies page exists to prevent.
+ */
+export interface PreselectedKey {
+  id: string;
+  exchange: ExchangeId;
+  exchangeLabel: string;
+  keyLabel: string;
 }
 
 /**
@@ -446,16 +608,86 @@ export interface ConnectKeyStepProps {
    * the standalone single-key wizard → no behavior change.
    */
   onDraftChange?: (draft: ConnectKeyDraft) => void;
+  /**
+   * 162-06 / HONEST-06 — render the SAVED-KEY SUMMARY (162-UI-SPEC § C-5)
+   * instead of the credential form, for the key the owner already chose.
+   *
+   * Absent (the default) is the credential wizard, byte-identically.
+   */
+  preselectKey?: PreselectedKey | null;
+  /**
+   * 162-06 — the summary's "Use a different key" affordance.
+   *
+   * ⚠️ IT IS NOT HANDLED HERE, DELIBERATELY. Dropping the preselect is the
+   * OVERLAY's decision because the overlay owns the remount key the preselected
+   * id is part of: handling it locally would flip a boolean inside a component
+   * whose own `useState` initializers (starting with `exchange`, seeded from the
+   * preselect) already read that key once. The user would get a form seeded from
+   * the key they just rejected. Going up to the overlay tears this component
+   * down and builds a pristine one.
+   */
+  onUseDifferentKey?: () => void;
 }
 
-export function ConnectKeyStep({ wizardSessionId, onSuccess, footerSlot, onDraftChange }: ConnectKeyStepProps) {
-  const [exchange, setExchange] = useState<ExchangeId>("binance");
+export function ConnectKeyStep({
+  wizardSessionId,
+  onSuccess,
+  footerSlot,
+  onDraftChange,
+  preselectKey = null,
+  onUseDifferentKey,
+}: ConnectKeyStepProps) {
+  // 162-06 — seeded from the preselect when there is one. The credential form is
+  // not rendered in that state, so this is not a form default: it is the venue
+  // the funnel event and the error envelope's venue-capability lookup must name.
+  // ⚠️ A remount (which is what "Use a different key" performs) is what returns
+  // it to the default — this initializer runs once.
+  const [exchange, setExchange] = useState<ExchangeId>(
+    preselectKey?.exchange ?? "binance",
+  );
   const [nickname, setNickname] = useState("");
   const [apiKey, setApiKey] = useState("");
   const [apiSecret, setApiSecret] = useState("");
   const [showSecret, setShowSecret] = useState(false);
   const [passphrase, setPassphrase] = useState("");
   const [submitting, setSubmitting] = useState(false);
+  /**
+   * 162-06 — the saved-key summary's own in-flight flag.
+   *
+   * SEPARATE from `submitting` rather than shared: `submitting` is the
+   * credential attempt, and everything hanging off it (the validate budget, the
+   * 300 ms wait-card gate, the client deadline, the abort controller) describes a
+   * request that spends most of its life inside a VENUE probe. The reuse arm
+   * carries no credentials and probes no venue — it is three owner-scoped reads
+   * and one RPC — so borrowing that state would arm a two-minute escalation
+   * ladder for a request that has no venue leg to be slow in.
+   */
+  const [continuing, setContinuing] = useState(false);
+  /**
+   * 162-06 review / B-1 — "the server refused the SHAPE OF THE REQUEST WE
+   * BUILT", derived from the reuse response's STATUS, not from a list of codes.
+   *
+   * ⭐ WHY THE STATUS AND NOT THE CODE. The reuse POST's body is two ids taken
+   * from a prop and from wizard state; the saved-key summary paints no control
+   * that edits either. A 400 on that arm is therefore DETERMINISTIC in inputs
+   * this screen cannot change — pressing a Retry wired to "send the same thing
+   * again" re-sends the identical two ids and is refused identically, forever.
+   * Every other status the arm answers (409 state, 429 throttle, 5xx seam) turns
+   * on something OUTSIDE the request, so re-sending can genuinely win.
+   *
+   * ⚠️ MEASURED, not assumed: `handleReuseExistingKey` has exactly one 400 arm
+   * (`!isUuid(wizardSessionId) || !isUuid(reuseKeyId)`) plus the POST-level
+   * "body is not an object" guard ahead of it, and both are rejections of what
+   * WE sent. A future 400 added to that arm is a rejection of our request by
+   * construction, so the rule covers it without being edited — which is the
+   * whole reason it is not a hand-typed code roster.
+   *
+   * PER-FAILURE state, cleared on every fresh attempt alongside `errorCode`
+   * (TRAP-3): a verdict about attempt 1's body must never suppress attempt 2's
+   * Retry.
+   */
+  const [reuseRequestShapeRefused, setReuseRequestShapeRefused] =
+    useState(false);
   const [errorCode, setErrorCode] = useState<WizardErrorCode | null>(null);
   /**
    * 140.5-03 / SEAMPROSE-02 — the wait the failing response ADVERTISED, in
@@ -576,6 +808,14 @@ export function ConnectKeyStep({ wizardSessionId, onSuccess, footerSlot, onDraft
    * inside it.
    */
   const submitRowRef = useRef<HTMLDivElement | null>(null);
+  /**
+   * 162-06 / DESIGN-05 — the saved-key summary's CTA row, so focus can land on
+   * its primary control when the step mounts preselected.
+   *
+   * THE ROW, NOT THE BUTTON, for the reason spelled out on `submitRowRef` above:
+   * the shared `ui/Button` takes `ButtonHTMLAttributes`, which carries no `ref`.
+   */
+  const preselectCtaRowRef = useRef<HTMLDivElement | null>(null);
   /**
    * 153.4 review CR-04 — is this component still on screen?
    *
@@ -723,6 +963,29 @@ export function ConnectKeyStep({ wizardSessionId, onSuccess, footerSlot, onDraft
       ?.focus();
   }, [cancelled, submitting]);
 
+  /**
+   * 162-06 / DESIGN-05 focus rule — when this step mounts PRESELECTED, focus
+   * moves to the first interactive control of the step: "Continue with this key".
+   *
+   * The overlay parks focus on its panel on open, which is correct for the
+   * credential form (the first Tab lands on a real control). With the summary
+   * there is no form to walk: the whole step is two controls, and leaving focus
+   * on the panel makes a keyboard user Tab past the header chrome to reach the
+   * one button the screen is asking about.
+   *
+   * Mount-only (`[]`): re-running it would steal focus back from "Use a
+   * different key" on any later render.
+   */
+  useEffect(() => {
+    if (!preselectKey) return;
+    preselectCtaRowRef.current
+      ?.querySelector<HTMLButtonElement>(
+        'button[data-testid="wizard-preselect-continue"]',
+      )
+      ?.focus();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const activeExchange = EXCHANGES.find((e) => e.id === exchange);
   // WR-01: the per-exchange "setup guide" SubAnchors for the flag-gated venues
   // (sfox #sfox-readonly, mt5 #mt5-readonly) are gated on their SERVER go-live
@@ -862,7 +1125,9 @@ export function ConnectKeyStep({ wizardSessionId, onSuccess, footerSlot, onDraft
         }),
       });
 
-      const data = (await res.json().catch(() => ({}))) as {
+      // 162 review / A-6 — reads the body, and RECORDS a parse failure rather
+      // than laundering it into an empty object. See `readCreateWithKeyBody`.
+      const data = await readCreateWithKeyBody<{
         strategy_id?: string;
         api_key_id?: string;
         // 154-06 / WIZCONT-02 — the venue-identity dedup marker. Read as a
@@ -876,66 +1141,12 @@ export function ConnectKeyStep({ wizardSessionId, onSuccess, footerSlot, onDraft
         strategy_name?: string;
         code?: string;
         error?: string;
-      };
+      }>(res, "credential");
 
       if (!res.ok || !data.strategy_id || !data.api_key_id) {
-        // 140.3-13a / SEAMUX-08 — membership-checked, never cast. See
-        // KNOWN_CREATE_WITH_KEY_CODES above for why the check exists and why
-        // the set is this route's own rather than the whole union.
-        //
-        // 140.4-15 / SEAMRIM-08 — TRANSLATE FIRST, THEN MEMBERSHIP-CHECK, the
-        // same order `SyncPreviewStep`'s kickoff arm adopted in 140.4-12.
-        // `SEAM_CODE_TO_WIZARD_CODE` answers for the seam's WIRE vocabulary
-        // (this route's 503 arm emits `SEAM_MISCONFIGURED`); the set below
-        // answers for the wizard codes the route itself mints.
-        //
-        // ⚠️ 140.5-03 / SEAMPROSE-03 — CORRECTION. This paragraph used to end
-        // "the two vocabularies are disjoint, so neither hop can shadow the
-        // other". THE SENTENCE IS THE WRONG REASON FOR A TRUE CONCLUSION, and
-        // it contradicts this file's own header (search `ORDER IS THE WHOLE
-        // CHANGE`), which already qualifies disjointness as holding HERE and
-        // NOT at every surface.
-        //
-        // THE NECESSARY PROPERTY IS AGREEMENT; DISJOINTNESS IS ONLY SUFFICIENT.
-        // Where the two vocabularies overlap, the table wins by the order
-        // above — harmless precisely because both sides answer the SAME code,
-        // not because they never meet.
-        //
-        // Measured at 140.5-03, predicate stated because a line-based grep gets
-        // this wrong: intersect the KEY SETS (a roster's members / a `Record`'s
-        // keys against `SEAM_CODE_TO_WIZARD_CODE`'s keys), never the values —
-        // `MISSING_STRATEGY_ID: "VALIDATION_FAILED"` is a VALUE and a grep
-        // counts it as a third overlap that does not exist. Under that
-        // predicate: `KNOWN_KICKOFF_CODES` ∩ = {RATE_LIMITED},
-        // `KNOWN_FINALIZE_CODES` ∩ = {SEAM_MISCONFIGURED}, and THIS set,
-        // `KNOWN_ADD_KEY_CODES` and `KNOWN_SET_MEMBERS_CODES` all intersect in
-        // NOTHING. Both real overlaps AGREE at HEAD.
-        //
-        // `seam-ratelimit-posture.invariant.test.ts` derives both sides from
-        // disk and reddens when a shared code gets DIFFERENT answers, so the
-        // property is asserted rather than narrated. Do not restore the
-        // disjointness sentence as the REASON: an empty intersection here is a
-        // fact about today's rosters, and the safety does not depend on it.
-        // 140.4-16 / WR-09 — READ THROUGH THE LEAF, not off the top level.
-        // The commit that added this hop claimed it "mirrors
-        // `SyncPreviewStep`'s kickoff arm exactly". It did not: that arm and
-        // `SubmitStep` both read `seamErrorCode(body)`, which handles the
-        // nested `service_error` shape (`body.detail.code`), while this one
-        // read `data.code` and saw only the flat shape. Harmless today —
-        // this route funnels every caught value through
-        // `classifyKeyValidationError` and never forwards a nested
-        // envelope — but an undisclosed divergence under a comment
-        // asserting equivalence is how the next reader inherits a wrong
-        // premise. The leaf exists precisely so a nested envelope is never
-        // read as "a body carrying no code".
-        const translated = recogniseSeamErrorCode(seamErrorCode(data));
-        const code: WizardErrorCode =
-          translated !== "UNKNOWN"
-            ? translated
-            : data.code &&
-                KNOWN_CREATE_WITH_KEY_CODES.has(data.code as WizardErrorCode)
-              ? (data.code as WizardErrorCode)
-              : "UNKNOWN";
+        // The membership-checked translation, shared with the reuse arm. Its
+        // reasoning lives on `recogniseCreateWithKeyCode` above.
+        const code = recogniseCreateWithKeyCode(data);
         setErrorCode(code);
         // 140.5-03 / SEAMPROSE-02 — the wait rides the HEADER, read through the
         // ONE parser. Set from the SAME response as the code above, so a wait
@@ -1074,6 +1285,123 @@ export function ConnectKeyStep({ wizardSessionId, onSuccess, footerSlot, onDraft
     }
   }
 
+  /**
+   * 162-06 / HONEST-06 / D-162-3 — "Continue with this key".
+   *
+   * ⛔ IT SENDS NO CREDENTIALS, AND THAT IS THE ENTIRE POINT. The measured loop
+   * this closes was: an owner clicks "Finish setup →" on a stored-but-unused key,
+   * the wizard opens its credential form, they paste the same key's credentials,
+   * and the venue-identity index refuses them with `KEY_ORPHANED` — a refusal
+   * whose own copy had to admit the remedy was out of reach. Re-POSTing
+   * credentials for a key we already hold cannot escape that loop; asking the
+   * server to BUILD ON the stored row is the only thing that can.
+   *
+   * ⭐ ONE CALL SERVES BOTH LIVE POPULATIONS. The reuse arm (plan 162-05) answers
+   * the resolver's draft envelope either way: if a draft already hangs off this
+   * key it hands that one back, otherwise it mints one. So there is no
+   * "does a draft exist?" branch here to get wrong — the server owns that
+   * question, holding the advisory lock while it answers.
+   *
+   * ⛔ `deduped` IS DELIBERATELY NOT FORWARDED. It is `true` on the arm that
+   * resolved onto an existing draft, and `WizardClient`'s strip for it reads
+   * "These credentials are already connected." — a sentence about credentials
+   * this arm never received, shown to a user who typed none. It is also not a
+   * surprise that needs explaining: the user asked for THIS key and got this
+   * key's draft. Adding a second copy variant for a notice nobody needs would be
+   * the fabrication, not the omission.
+   */
+  async function handleContinueWithKey() {
+    if (!preselectKey || continuing) return;
+    // Cleared together, for the reason each state's own docblock gives: a code,
+    // a wait and a strategy name from a previous attempt must never be rendered
+    // against this one.
+    setErrorCode(null);
+    setRetryAfterSeconds(null);
+    setExistingStrategyName(null);
+    setReuseRequestShapeRefused(false);
+    setContinuing(true);
+
+    try {
+      const res = await wizardFetch("/api/strategies/create-with-key", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        // The pinned reuse contract: the session token and the key id, and
+        // nothing else. No `exchange` — the server reads the venue off the
+        // `api_keys` row, so the wire carries no venue claim of ours to be
+        // wrong about.
+        body: JSON.stringify({
+          wizard_session_id: wizardSessionId,
+          reuse_api_key_id: preselectKey.id,
+        }),
+      });
+
+      // 162 review / A-6 — same reader as the credential arm, for the same
+      // reason: a proxy's HTML error page must not read as "the route answered
+      // with an empty body". See `readCreateWithKeyBody`.
+      const data = await readCreateWithKeyBody<{
+        strategy_id?: string;
+        api_key_id?: string;
+        strategy_name?: string;
+        code?: string;
+        error?: string;
+      }>(res, "reuse");
+
+      if (!res.ok || !data.strategy_id || !data.api_key_id) {
+        const code = recogniseCreateWithKeyCode(data);
+        setErrorCode(code);
+        // 162-06 review / B-1 — see the state's docblock. A 400 on THIS arm is a
+        // refusal of the body we built out of a prop and wizard state, neither
+        // of which this screen can edit, so "send it again" is not a remedy and
+        // no control may promise that it is.
+        setReuseRequestShapeRefused(res.status === 400);
+        setRetryAfterSeconds(parseRetryAfterSeconds(res.headers));
+        setExistingStrategyName(
+          typeof data.strategy_name === "string" &&
+            data.strategy_name.trim().length > 0
+            ? data.strategy_name
+            : null,
+        );
+        trackForQuantsEventClient("wizard_error", {
+          wizard_session_id: wizardSessionId,
+          step: "connect_key",
+          code,
+        });
+        setContinuing(false);
+        return;
+      }
+
+      // Same rule as the credential arm: never advance a wizard the user has
+      // left. `onSuccess` IS the step advance.
+      if (!mountedRef.current) return;
+      onSuccess({
+        strategyId: data.strategy_id,
+        apiKeyId: data.api_key_id,
+        // The venue the OWNER'S OWN page told us this key is on. The response
+        // carries none, and inventing one from the display label would be the
+        // client owning exchange naming.
+        exchange: preselectKey.exchange,
+      });
+      // ⛔ No `setContinuing(false)` on success: `onSuccess` unmounts this step,
+      // and re-enabling the button first opens a double-submit window on a draft
+      // that already exists.
+    } catch (err) {
+      // OUR HOP, NOT THE EXCHANGE'S — and on this arm the exchange was provably
+      // never contacted, because the route's reuse branch returns before any
+      // venue call exists. `SERVICE_UNREACHABLE` states what is known: we sent
+      // it, no answer came back, and we cannot tell whether it was processed.
+      setErrorCode("SERVICE_UNREACHABLE");
+      trackForQuantsEventClient("wizard_error", {
+        wizard_session_id: wizardSessionId,
+        step: "connect_key",
+        code: "SERVICE_UNREACHABLE",
+      });
+      // Nothing to scrub, and it is a measurement rather than an assumption:
+      // this request body is two uuids, and the route authenticates by COOKIE.
+      console.error("[wizard:ConnectKeyStep] reuse submit threw:", err);
+      setContinuing(false);
+    }
+  }
+
   const errorEnvelope = errorCode
     ? buildEnvelope(errorCode, correlationId, {
         // 140.3-10's rule, inherited: `?? undefined` because ABSENCE IS NOT
@@ -1097,7 +1425,24 @@ export function ConnectKeyStep({ wizardSessionId, onSuccess, footerSlot, onDraft
         // about the credentials they typed is the worst outcome this phase can
         // produce, which is why 153.1-04 bound the obligation to the commit
         // that starts EMITTING the code — this one.
-        surface: "connect",
+        //
+        // ⭐ 162-06 review / B-2 (class) — AND IT NAMES WHICH OF THIS STEP'S TWO
+        // RENDERS IS ON SCREEN. `preselectKey` is the discriminator the branch
+        // at the bottom of this component already returns on, so the surface is
+        // read off the SAME value rather than re-derived — the two cannot say
+        // different things about the same render.
+        //
+        // ⛔ THE DEFECT THIS CLOSES: `"connect"` was true of both renders, so a
+        // remedy naming the credential form was ungateable and shipped onto the
+        // one screen that paints no form. `"preselect"` is what lets the copy
+        // table refuse a bullet on the screen that disproves it (see
+        // `NOT_ON_PRESELECT_SURFACE` / `REQUIRES_PRESELECT_SURFACE` in
+        // `wizardErrors.ts`). Byte-neutral for the credential render, and
+        // `SEAM_DEADLINE_EXCEEDED`'s gated bullet — the only user of
+        // `REQUIRES_CONNECT_SURFACE` — is not reachable on the reuse arm at all
+        // (verified against `handleReuseExistingKey`), so nothing it promises is
+        // withheld by this.
+        surface: preselectKey ? "preselect" : "connect",
         // 153.1-03 / D-17 — the venue, as a lookup key into the closed
         // capability record (never interpolated into copy). Absence renders the
         // substitutable remedy unconditionally, so an MT5 user reads "switch to
@@ -1114,6 +1459,171 @@ export function ConnectKeyStep({ wizardSessionId, onSuccess, footerSlot, onDraft
         strategyName: existingStrategyName ?? undefined,
       })
     : null;
+
+  /**
+   * 162-06 review / B-2 — "can re-sending THE SAME request succeed?", answered
+   * by the copy table rather than by a list kept here.
+   *
+   * `clear_and_retry` is the table's word for "send the same thing again", and
+   * it is what tells a transient hop failure (`SERVICE_UNREACHABLE`) apart from
+   * a refusal of the stored key itself (`KEY_REUSE_UNAVAILABLE`,
+   * `VENUE_ALREADY_CONNECTED`), which no amount of re-sending changes. The
+   * preselect branch's Retry reads it to decide whether Retry means "again" or
+   * "another key" — see the call site below.
+   *
+   * ⚠️ READ THROUGH `formatKeyError`, NOT off `WIZARD_ERROR_COPY` directly:
+   * that is the one accessor allowed to know about context-gated bullets, and
+   * reading around it is how a surface ends up disagreeing with what it renders.
+   */
+  const retryCanResend =
+    errorCode !== null &&
+    formatKeyError(errorCode).actions.includes("clear_and_retry");
+
+  // ── 162-06 / HONEST-06 — the SAVED-KEY SUMMARY (162-UI-SPEC § C-5) ──────────
+  //
+  // A SUB-STATE of this step, not a new component family: the owner already
+  // chose a key, so the credential form has nothing to ask for.
+  //
+  // ⛔ NO MASKED FIELDS, NO ROWS OF DOTS. A masked credential here would be
+  // fabricated data — the web tier cannot decrypt a stored secret at all, so any
+  // dots rendered would be a picture of a value nobody read. The two facts shown
+  // are the two facts the row the owner clicked showed them.
+  //
+  // ⛔ The trust atoms ("What we store", "What we reject", …) do NOT render here.
+  // They exist to inform someone about to PASTE a credential; on this path
+  // nothing is pasted, stored or scope-checked, so their claims describe a
+  // transaction that is not happening.
+  if (preselectKey) {
+    return (
+      <section aria-labelledby="wizard-connect-key-heading">
+        <h2
+          id="wizard-connect-key-heading"
+          className="font-sans text-h3 font-semibold text-text-primary"
+        >
+          Connect your exchange
+        </h2>
+
+        {/* DATA PANEL, not a card: square (no radius), flat (no shadow), one
+            hairline border — DESIGN.md § Cards-vs-Data-panels. This is a region
+            of a document stating a fact, not a thing to click. */}
+        <div
+          className="mt-6 border border-border bg-page px-4 py-3"
+          data-testid="wizard-preselect-summary"
+        >
+          {/* Eyebrow: the factsheet annotation voice — Geist Mono, uppercase,
+              eyebrow-std tracking, muted. Colorless by contract: this is a
+              neutral fact, not an error, a warning or a success. */}
+          <span className="text-micro font-mono uppercase tracking-[0.18em] text-text-muted">
+            SAVED KEY
+          </span>
+          {/* Identity line. `truncate` + `title` carry the REAL value on
+              overflow — never a fabricated placeholder. The label is the
+              SERVER-formatted exchange name the placeholder row displayed, so
+              what the owner clicked is what they read back here. */}
+          <p
+            className="mt-1 truncate text-small text-text-primary"
+            title={`${preselectKey.exchangeLabel} — ${preselectKey.keyLabel}`}
+            data-testid="wizard-preselect-identity"
+          >
+            {preselectKey.exchangeLabel} — {preselectKey.keyLabel}
+          </p>
+        </div>
+
+        {errorEnvelope && (
+          <div className="mt-4">
+            {/* 162-06 review / B-2 — WHERE RETRY GOES, DECIDED FROM THE SAME
+                TABLE THE COPY COMES FROM.
+                ⛔ `() => setErrorCode(null)` ALONE WAS THE UNWINNABLE LOOP ONE
+                SCREEN LATER. This branch returns BEFORE the credential form, so
+                on a refusal OF THIS STORED KEY — `KEY_REUSE_UNAVAILABLE`, the
+                row is gone — blanking the banner left the identical screen: the
+                same panel, the same "Continue with this key" refused
+                identically, and no form. That code carries `try_another_key`
+                and NOT `clear_and_retry`, and `try_another_key` means exactly
+                what it says, so Retry is routed to the control that delivers
+                another key.
+                ⚠️ CORRECTION (162-06 review / B-2b). The sentence that stood
+                here named `VENUE_ALREADY_CONNECTED` alongside
+                `KEY_REUSE_UNAVAILABLE` as a code this routing covers, and said
+                both "carry `try_another_key`". Read at HEAD, that entry's
+                `actions` are `["request_call", "expand_log"]` — NEITHER member
+                of `RECOVERABLE_ACTIONS` — so `buildEnvelope` derives
+                `recoverable: false`, `ErrorEnvelope` renders no Retry at all,
+                and this handler is never reached for it. The routing was
+                claiming a code it cannot apply to, which is how a reader
+                concludes that screen is covered when it is not. What that code
+                actually got instead is a preselect-gated bullet naming the
+                painted escape hatch (see `VENUE_ALREADY_CONNECTED` in
+                `wizardErrors.ts`); the remedy is in the copy because there is
+                no control here to route.
+                ⛔ AND IT IS NOT ROUTED FOR EVERY CODE, WHICH IS THE OTHER HALF.
+                `SERVICE_UNREACHABLE` is reachable here too — the reuse arm's
+                catch sets it when OUR OWN hop fails — and it carries
+                `clear_and_retry`: re-sending the same request is precisely its
+                remedy, and its own copy says "try the same action again".
+                Dropping the preselect there would take the key out from under
+                a user whose only problem was a transient network fault. So the
+                branch is `clear_and_retry`-shaped rather than a hand-typed code
+                list: the table already answers "can re-sending this succeed?",
+                and a second answer here is a second thing to drift.
+                ⛔ AND THE TABLE'S ANSWER IS OVERRIDDEN IN EXACTLY ONE
+                DIRECTION — 162-06 review / B-1. `clear_and_retry` is a property
+                of a CODE; "re-sending can win" is a property of THIS ATTEMPT.
+                They part company when the server refused the shape of the body
+                we built (a 400 on this arm — see `reuseRequestShapeRefused`):
+                the two ids go back out unchanged, so the identical refusal
+                comes back. Withholding `onRetry` there is what suppresses the
+                control (`ErrorEnvelope`: `recoverable && Boolean(onRetry)`) —
+                ⭐ never a copy-table edit, which would take the honest Retry
+                away from the credential form where filling the blank field IS
+                the remedy. The override is one-way BY CONSTRUCTION: it can only
+                remove a Retry, never add one to a non-recoverable code.
+                ⚠️ The code is cleared FIRST and unconditionally. The real host
+                tears this step down by remount, but a host that only re-renders
+                must not be left showing a banner about a key the user has moved
+                on from — and on the `clear_and_retry` arm the clear IS the
+                whole action, unchanged from pre-B-2. */}
+            <WizardErrorEnvelope
+              envelope={errorEnvelope}
+              onRetry={
+                reuseRequestShapeRefused && retryCanResend
+                  ? undefined
+                  : () => {
+                      setErrorCode(null);
+                      if (!retryCanResend) onUseDifferentKey?.();
+                    }
+              }
+            />
+          </div>
+        )}
+
+        <div
+          className="mt-6 flex items-center gap-4"
+          ref={preselectCtaRowRef}
+        >
+          <Button
+            type="button"
+            onClick={handleContinueWithKey}
+            disabled={continuing}
+            data-testid="wizard-preselect-continue"
+          >
+            {continuing ? "Continuing..." : "Continue with this key"}
+          </Button>
+          {/* Text button, matching the "Finish setup →" link treatment the
+              owner just clicked. ⛔ NOT destructive and needs no confirmation:
+              it changes a selection, and nothing has been created yet. */}
+          <button
+            type="button"
+            onClick={onUseDifferentKey}
+            className="text-small text-accent underline underline-offset-2"
+            data-testid="wizard-preselect-different"
+          >
+            Use a different key
+          </button>
+        </div>
+      </section>
+    );
+  }
 
   return (
     <section aria-labelledby="wizard-connect-key-heading">

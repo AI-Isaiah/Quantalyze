@@ -809,7 +809,28 @@ function FactsheetHeader({
           )}
         </div>
         <div className="text-left sm:text-right flex flex-row sm:flex-col items-start sm:items-end gap-6 sm:gap-3 flex-wrap">
-          <FreshnessChip computedAt={payload.computedAt} />
+          {/* Phase 162 / HONEST-02 (D-162-2, UI-SPEC C-1) — the recency line
+              stacks DIRECTLY BELOW the chip's date line, so the wrapper (not
+              FreshnessChip) owns the pairing. Putting the line INSIDE the chip
+              would have been the shorter diff and is still the wrong one: the
+              chip's anatomy is one label row + one date line, and the line is a
+              sentence in its own right (pinned by
+              FactsheetView.recency-line.test.tsx F-1 and F-4).
+
+              ⚠️ Both components now read `payload.dates`, and that is the point,
+              not a leak: the founder's 2026-08-26 ruling superseded D-162-2's
+              "existing badge logic is untouched" half, so the chip's TONE and
+              the line's sentence state one fact from one derivation
+              (`resolveSeriesEnd`). READ F-4 ACCORDINGLY — its prose still says
+              the chip "consumes only computedAt", which is no longer true. It
+              passes because its two fixtures share a 112-day-old `computedAt`,
+              which is stale enough to bind the verdict on BOTH sides (series
+              known-old vs series unknown → same "Computed · old"). It is a
+              structural-independence pin now, not a data-independence one. */}
+          <div>
+            <FreshnessChip computedAt={payload.computedAt} seriesDates={payload.dates} />
+            <SeriesRecencyLine seriesDates={payload.dates} />
+          </div>
           {payload.aum != null && (
             <CapacityChip
               aum={payload.aum}
@@ -837,10 +858,88 @@ function formatUsdCompact(v: number): string {
 const EPOCH_SENTINEL = "1970-01-01T00:00:00Z";
 
 /**
+ * The resolved return series' END — the ONE derivation of "how far does the
+ * track record run", shared by `FreshnessChip` and `SeriesRecencyLine` below.
+ *
+ * It exists as a shared function rather than twice inline for the same reason
+ * F-2 compares two RENDERED dates: the chip's tone and the line's sentence now
+ * state one fact, and two independent derivations of one fact are how a number
+ * and a picture drift apart. Returns null when there is no resolvable end —
+ * empty series, or a last point `formatIsoDate` cannot parse (it answers "—").
+ * Callers must treat null as "unknown", never as "fine".
+ */
+function resolveSeriesEnd(seriesDates: string[]): { iso: string; formatted: string } | null {
+  const last = seriesDates.length > 0 ? seriesDates[seriesDates.length - 1] : null;
+  if (!last) return null;
+  const formatted = formatIsoDate(last);
+  if (formatted === "—") return null;
+  return { iso: last, formatted };
+}
+
+/** The chip's freshness verdicts, plus `unknown` (Phase 162 / HONEST-02). */
+type FreshnessTone = "fresh" | "unknown" | "stale" | "old" | "future" | "neutral";
+
+/**
+ * THE chip ladder — 3d / 7d — applied to an age in days. Extracted verbatim
+ * from the tone ternary it replaces so the series arm below reuses the SAME
+ * thresholds. HONEST-02 deliberately introduces NO new threshold: UI-SPEC C-1
+ * records that `computeFreshness` (12h/48h) and this chip (3d/7d) already
+ * disagree, and a fourth ladder for the series would compound it.
+ */
+function bucketByAge(days: number): FreshnessTone {
+  // A future date (days < 0) means the timestamp is ahead of now — treat as
+  // neutral/suspicious, never "fresh". (NEW-C20-07)
+  if (!Number.isFinite(days)) return "neutral";
+  if (days < 0) return "future";
+  if (days <= 3) return "fresh";
+  if (days <= 7) return "stale";
+  return "old";
+}
+
+/**
+ * How pessimistic each verdict is. The chip states the WORST of what it knows,
+ * so this ordering is load-bearing, not cosmetic:
+ *
+ *   `unknown` sits ABOVE `fresh` — an unresolvable series end cannot support a
+ *   freshness claim, so a fresh job over an unknown track reads "—", not green.
+ *
+ *   `unknown` sits BELOW `stale`/`old` — those are DEFINITE claims the chip has
+ *   evidence for ("this job last ran 112 days ago"). Letting a mere absence of
+ *   series data erase a known-bad job age would trade a fact for a shrug.
+ */
+const TONE_RANK: Record<Exclude<FreshnessTone, "neutral">, number> = {
+  fresh: 0,
+  unknown: 1,
+  stale: 2,
+  old: 3,
+  future: 4,
+};
+
+/**
  * Data freshness — institutional buyers reject stale reports.
  * Green ≤ 3d, amber 3-7d, red >7d. Date below.
+ *
+ * Phase 162 / HONEST-02 (founder ruling 2026-08-26) — THE CHIP BUCKETS ON THE
+ * STALER OF TWO FACTS: when the analytics job last RAN (`computedAt`) and where
+ * the TRACK RECORD ends (last point of the resolved return series). Before this,
+ * it read `computedAt` alone, so the 162 census subject — a live, error-free,
+ * still-polling key whose venue-side watermark had not moved in 111 days —
+ * rendered `Computed · fresh` in green one line above "Track record through
+ * May 6, 2026". Both statements were literally true and the pair was a lie: the
+ * chip is a claim about the JOB and every reader takes it as a claim about the
+ * STRATEGY. 162-07 shipped the line beside it on the additive contract D-162-2;
+ * the founder then ruled the badge itself must stop making the claim.
+ *
+ * THE SUBJECT IS NAMED, NOT ASSUMED. "Computed · old" beside a date computed an
+ * hour ago would just move the contradiction. So the eyebrow names whichever
+ * fact is driving the verdict: `Computed · …` while the job is the stalest
+ * thing here (unchanged — every previously-shipped render still reads exactly
+ * this), and `Track record · …` on the one new arm, where a recent job sits over
+ * a dead track. The date line beneath is untouched and still stamps the compute
+ * date: dropping it would have cost the surface its provenance, and the series'
+ * own date is already spelled out by `SeriesRecencyLine` directly below.
  */
-function FreshnessChip({ computedAt }: { computedAt: string }) {
+function FreshnessChip({ computedAt, seriesDates }: { computedAt: string; seriesDates: string[] }) {
   // Hooks must run unconditionally and in the same order every render, so this
   // useState is hoisted ABOVE the EPOCH_SENTINEL early-return below
   // (react-hooks/rules-of-hooks). The initializer runs once per mount so render
@@ -867,14 +966,28 @@ function FreshnessChip({ computedAt }: { computedAt: string }) {
   }
   const d = new Date(computedAt);
   const days = (nowMs - d.getTime()) / 86_400_000;
-  // A future computedAt (days < 0) means the upstream series window is ahead
-  // of now — treat as neutral/suspicious, never "fresh". (NEW-C20-07)
-  const tone =
-    !Number.isFinite(days) ? "neutral"
-    : days < 0 ? "future"
-    : days <= 3 ? "fresh"
-    : days <= 7 ? "stale"
-    : "old";
+  const jobTone = bucketByAge(days);
+  // The series arm. `resolveSeriesEnd` is the SAME derivation SeriesRecencyLine
+  // renders, so the chip and the sentence below it can never disagree about
+  // where the track record ends.
+  const seriesEnd = resolveSeriesEnd(seriesDates);
+  const seriesAgeTone: FreshnessTone = seriesEnd
+    ? bucketByAge((nowMs - new Date(seriesEnd.iso).getTime()) / 86_400_000)
+    : "unknown";
+  // `resolveSeriesEnd` only ever returns a date `formatIsoDate` already parsed,
+  // so `bucketByAge` cannot answer "neutral" here. Mapped rather than asserted:
+  // if that ever stopped holding, the honest read of an unreadable series end
+  // is "unknown", and NEVER a freshness claim.
+  const seriesTone: Exclude<FreshnessTone, "neutral"> =
+    seriesAgeTone === "neutral" ? "unknown" : seriesAgeTone;
+  // An unparseable `computedAt` keeps its own arm: "—", muted, no claim. It is
+  // already the most cautious render, and a series cannot make it worse.
+  // Otherwise the verdict is the STALER of the two, and the eyebrow's subject
+  // is whichever fact carried it there.
+  const seriesIsBinding =
+    jobTone !== "neutral" && TONE_RANK[seriesTone] > TONE_RANK[jobTone];
+  const tone: FreshnessTone = seriesIsBinding ? seriesTone : jobTone;
+  const subject = seriesIsBinding ? "Track record" : "Computed";
   const toneColor =
     tone === "fresh" ? "var(--color-positive)" :
     tone === "stale" ? "var(--color-warning, #B45309)" :
@@ -889,13 +1002,66 @@ function FreshnessChip({ computedAt }: { computedAt: string }) {
     <div>
       <div className="flex items-center justify-end gap-1.5 text-micro font-mono uppercase tracking-[0.18em] text-text-muted">
         <span aria-hidden className="inline-block w-1.5 h-1.5 rounded-full" style={{ background: toneColor }} />
-        Computed · {label}
+        {subject} · {label}
       </div>
       <p className="mt-1 text-small font-mono tabular-nums text-text-secondary">
         {formatIsoDate(computedAt)}
         {Number.isFinite(days) && days >= 0 && <span className="ml-1 text-text-muted">({Math.round(days)}d)</span>}
       </p>
     </div>
+  );
+}
+
+/**
+ * Series-recency line — Phase 162 / HONEST-02 (D-162-2, UI-SPEC § C-1).
+ *
+ * WHY this line exists. `FreshnessChip` above stamps when the analytics job
+ * last RAN. That is not the same fact as how current the TRACK RECORD is: an
+ * account whose fills stopped months ago still gets polled and still gets
+ * recomputed, so when this line shipped the chip read "fresh" over a series
+ * that had ended in the spring. The 162 census measured exactly that case — a
+ * live, polling, error-free key whose venue-side watermark had not moved in
+ * 111 days. Without this line an allocator read a green chip and inferred a
+ * live track record.
+ *
+ * DATA SOURCE — the whole point. The date is the LAST POINT OF THE RESOLVED
+ * RETURN SERIES (`payload.dates`, built by the read path from
+ * `resolveDailyReturnSeries`, src/lib/factsheet/resolve-series.ts). That is a
+ * value only a real analytics run over real fills can advance. NEVER
+ * `computed_at`, NEVER `last_sync_at` — both advance for an account that has
+ * not traded, which is precisely the dishonesty this line exists to kill.
+ *
+ * ADDITIVE BY CONTRACT (D-162-2): no staleness threshold of its own, no tone,
+ * no fourth ladder. The repo already carries one known
+ * chip-vs-`computeFreshness` threshold disagreement; a fourth ladder here
+ * would make it worse. Tone stays on the chip, which earns it.
+ *
+ * ⚠️ D-162-2's OTHER half — "existing badge logic is untouched" — was
+ * SUPERSEDED by the founder on 2026-08-26: fix the badge too, not just the line
+ * beside it. The chip now buckets on the staler of the job and THIS series end,
+ * through the shared `resolveSeriesEnd` above. What survives unchanged is this
+ * line's own contract: it still states a dated fact, still carries no tone, and
+ * still introduces no threshold — the chip reuses ITS OWN 3d/7d ladder for the
+ * series arm rather than inventing one here.
+ */
+function SeriesRecencyLine({ seriesDates }: { seriesDates: string[] }) {
+  // `resolveSeriesEnd` (above) holds BOTH halves of what used to be inline
+  // here: the last-point pick, and `formatIsoDate` — the SAME formatter the
+  // chip's date line one row above calls. Two formatters on adjacent lines is
+  // the drift the one-formatter-per-surface rule exists to prevent, and since
+  // HONEST-02 the chip's TONE reads the same series end, so a second copy of
+  // this derivation could put the badge and the sentence on different days.
+  const end = resolveSeriesEnd(seriesDates);
+  // `resolveSeriesEnd` answers null when the series is empty OR its last point
+  // does not parse. UI-SPEC C-1 unknown-date rule: the line then does not
+  // render AT ALL — no "Track record through —", no placeholder. A claim with
+  // no date fails the print test, and the chip's "Computed · not yet" state
+  // already covers the no-analytics case. Absence is the honest render here,
+  // not a fallback. (The chip has its own answer to that same null: it refuses
+  // to read "fresh" — see TONE_RANK.)
+  if (!end) return null;
+  return (
+    <p className="mt-1 text-caption text-text-muted">Track record through {end.formatted}</p>
   );
 }
 

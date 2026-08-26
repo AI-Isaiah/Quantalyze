@@ -379,6 +379,75 @@ describe("[H-0195/H-0197/H-0198] SyncPreviewStep — polling loop dispositions",
     expect(tradesSpy).not.toHaveBeenCalled();
   });
 
+  // ==========================================================================
+  // Phase 162 / HONEST-01 / UI-SPEC C-2 — the failure envelope shows CURATED
+  // copy, and the `computation_error` column value has no render path into it.
+  // ==========================================================================
+  //
+  // The envelope used to append `Details: {computation_error}.` to the cause,
+  // and until migration 20260826120000 that column held raw
+  // `classify_exception` output — so the wizard rendered strings like
+  // `TypeError: '>' not supported between instances of 'str' and 'NoneType'`
+  // to a user who had just tried to connect an exchange key.
+  //
+  // ⚠️ The sentinel below is shaped like a real Python exception ON PURPOSE. A
+  // sentinel of `"xyzzy"` would prove only that one arbitrary string is absent;
+  // this one fails the way the defect failed.
+  const RAW_SERVER_DETAIL =
+    "TypeError: '>' not supported between instances of 'str' and 'NoneType'";
+
+  async function driveToAnalyticsFailedEnvelope() {
+    installSupabaseMock(() => ({
+      kind: "row",
+      status: "failed",
+      error: RAW_SERVER_DETAIL,
+    }));
+    render(<SyncPreviewStep {...baseProps} />);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(6000);
+    });
+  }
+
+  it("[162/C-2] the computation_error value never renders in the envelope", async () => {
+    await driveToAnalyticsFailedEnvelope();
+
+    const envelope = screen.getByTestId("error-envelope");
+    expect(envelope.getAttribute("data-error-code")).toBe("GATE_ANALYTICS_FAILED");
+
+    // Asserted over the WHOLE envelope subtree rather than over the cause
+    // paragraph alone: the rule is that the value has no render path into the
+    // envelope, and pinning one slot would go green against the same string
+    // reappearing in the fix list or in the diagnostics accordion (which is
+    // user-copyable and is NOT a raw-exception channel either).
+    expect(envelope.textContent ?? "").not.toContain(RAW_SERVER_DETAIL);
+    expect(envelope.textContent ?? "").not.toContain("NoneType");
+    expect(envelope.textContent ?? "").not.toContain("Details:");
+  });
+
+  it("[162/C-2] the envelope still says what happened and what to do", async () => {
+    await driveToAnalyticsFailedEnvelope();
+
+    const envelope = screen.getByTestId("error-envelope");
+    const text = envelope.textContent ?? "";
+
+    // Removing the appendix must not leave a bare title. Title, cause and both
+    // fix lines are the state's whole account of itself, and they come from the
+    // wizardErrors table — the canonical source of human copy (DESIGN-05).
+    expect(text).toContain("Analytics computation failed.");
+    expect(text).toContain("The analytics step failed for this draft.");
+    expect(text).toContain("Retry the sync from this page.");
+    expect(text).toContain("security@quantalyze.com");
+
+    // The recoverable-state controls are unchanged: GATE_ANALYTICS_FAILED
+    // carries `clear_and_retry`, so the Retry CTA renders, and the diagnostics
+    // accordion (code + correlation id) is always present.
+    expect(screen.getByRole("button", { name: "Retry" })).toBeInTheDocument();
+    expect(screen.getByText("Copy diagnostics")).toBeInTheDocument();
+  });
+
   // H-0197: repeated thrown polls must escalate to a recoverable SYNC_FAILED
   // envelope instead of swallowing the error and spinning forever. Before the
   // fix the catch was `console.error` only — the wizard hung on the spinner.

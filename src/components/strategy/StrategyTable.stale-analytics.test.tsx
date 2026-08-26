@@ -58,7 +58,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render, within } from "@testing-library/react";
+import { render, within, fireEvent } from "@testing-library/react";
 import type { Strategy, StrategyAnalytics } from "@/lib/types";
 import { installFetchMock, restoreFetchMock } from "@/test/helpers/fetch";
 
@@ -570,5 +570,127 @@ describe("STALE-01 ordinal — the table refuses to rank what it may not print",
     expect(
       dead.querySelector(`a[href="/factsheet/${ID_DEAD}"]`),
     ).toBeTruthy();
+  });
+});
+
+// =========================================================================
+// Group D — Phase 162 / HONEST-03, UI-SPEC C-6. The example-row class guard.
+//
+// D-162-1 repairs the DATA (the demo seeds get recomputed). This group closes
+// the CLASS so the requirement survives the next drift: nothing syncs a demo
+// seed, so "Synced 3d ago" beside an "Example" chip is a freshness claim with
+// no referent — and it is precisely the claim that sat visibly stale for three
+// months. The guard therefore has to hold in the POST-repair state (fresh
+// computed_at, terminal success), which is exactly what Test 8 constructs; a
+// guard that only held while the data was broken would evaporate on the day the
+// repair lands.
+// =========================================================================
+
+describe("HONEST-03 / C-6 — is_example rows never claim a sync recency", () => {
+  /** An example row in the state the D-162-1 repair will leave behind. */
+  function exampleRow(id: string, name: string) {
+    const r = clientRow(id, name, "complete", LIVE);
+    return {
+      ...r,
+      is_example: true,
+      analytics: {
+        ...r.analytics,
+        computed_at: new Date().toISOString(),
+      } as StrategyAnalytics,
+    };
+  }
+
+  function withFreshComputedAt(r: Row): Row {
+    return {
+      ...r,
+      analytics: {
+        ...r.analytics,
+        computed_at: new Date().toISOString(),
+      } as StrategyAnalytics,
+    };
+  }
+
+  /**
+   * `DEFAULTS.hide_examples` is true, so the hydration effect filters example
+   * rows out of the table entirely. Drive the real "Hide examples" control the
+   * way a user does — a guard proven only on rows nobody can see would be a
+   * guard proven on nothing.
+   */
+  function revealExamples(container: HTMLElement) {
+    const toggle = within(container).getByLabelText(
+      "Hide examples",
+    ) as HTMLInputElement;
+    expect(toggle.checked).toBe(true);
+    fireEvent.click(toggle);
+  }
+
+  it("Test 8: a recomputed example row (terminal success, FRESH computed_at) renders NO SyncBadge", () => {
+    const { container } = render(
+      <StrategyTable
+        strategies={[exampleRow(ID_LIVE, NAME_LIVE)]}
+        categorySlug="stale-spec"
+      />,
+    );
+    revealExamples(container);
+    const row = rowFor(NAME_LIVE);
+    expect(row.textContent).not.toMatch(/Synced/);
+    // Pin the premise: this row DID compute — it takes a rank. Without this the
+    // test would pass on a row that simply had no date to print, which is not
+    // the thing being guarded.
+    expect(rankText(row)).toBe("#1");
+  });
+
+  it("Test 8b: the guard is status-blind — a FAILED example row is also badge-free", () => {
+    const { container } = render(
+      <StrategyTable
+        strategies={[
+          {
+            ...withFreshComputedAt(clientRow(ID_DEAD, NAME_DEAD, "failed", STALE)),
+            is_example: true,
+          },
+        ]}
+        categorySlug="stale-spec"
+      />,
+    );
+    revealExamples(container);
+    expect(rowFor(NAME_DEAD).textContent).not.toMatch(/Synced/);
+  });
+
+  it("Test 9: a NON-example row with the same analytics still renders its SyncBadge", () => {
+    // The guard is example-scoped, not a badge deletion. If this ever goes
+    // quiet, the "fix" has become a removal.
+    render(
+      <StrategyTable
+        strategies={[
+          withFreshComputedAt(clientRow(ID_LIVE, NAME_LIVE, "complete", LIVE)),
+        ]}
+        categorySlug="stale-spec"
+      />,
+    );
+    expect(rowFor(NAME_LIVE).textContent).toMatch(/Synced/);
+  });
+
+  it("Test 10: StrategyGrid's badge is guarded identically", async () => {
+    const { StrategyGrid } = await import("./StrategyGrid");
+    const { container } = render(
+      <StrategyGrid
+        strategies={[
+          exampleRow(ID_LIVE, NAME_LIVE),
+          withFreshComputedAt(clientRow(ID_DEAD, NAME_DEAD, "complete", LIVE)),
+        ]}
+        categorySlug="stale-spec"
+      />,
+    );
+    // Both cards carry an identical fresh computed_at, so exactly ONE "Synced"
+    // claim may render across the grid — and it must not be the example's.
+    expect(container.textContent).toContain("Example");
+    expect(container.textContent?.match(/Synced/g) ?? []).toHaveLength(1);
+    const exampleCard = Array.from(container.querySelectorAll("div")).find(
+      (d) =>
+        (d.textContent ?? "").includes("Example") &&
+        !(d.textContent ?? "").includes(NAME_DEAD),
+    );
+    expect(exampleCard).toBeTruthy();
+    expect(exampleCard!.textContent).not.toMatch(/Synced/);
   });
 });

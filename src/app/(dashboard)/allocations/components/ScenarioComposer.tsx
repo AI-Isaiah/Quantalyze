@@ -645,6 +645,40 @@ function narrowSeriesState(raw: unknown): SeriesState {
 }
 
 /**
+ * Phase 162 / HONEST-05 — what the composer knows about a drawer-added leg's
+ * headline metric pair. THREE values, because there are three different things
+ * to know and only two of them are facts about the strategy:
+ *
+ *   · id ABSENT from the map      → "pending". Nobody has answered yet.
+ *   · `{cagr, sharpe}` (may be    → "settled". The route ANSWERED. Nulls here
+ *     both null)                    are the route withholding a non-rankable
+ *                                   row (`isRankableAnalyticsRow`) — a fact
+ *                                   about the STRATEGY, and the only state that
+ *                                   earns the "no computed metrics" claim.
+ *   · `"unavailable"`             → the SEAM failed. A non-ok response (which
+ *                                   includes our own route's 500 select-error
+ *                                   arm), a network throw, or a malformed body.
+ *
+ * ⭐ The third value exists because collapsing it into the settled pair made the
+ * app state a falsehood: a wedged PostgREST (a documented recurring failure mode
+ * here) would 500 every leg, and the panel would tell the viewer that three
+ * other people's strategies have no computed metrics — while their factsheets,
+ * one click away, show full CAGR and Sharpe. A failure to KNOW is not a settled
+ * absence of the thing; it is an absence of the ANSWER, and the copy must
+ * attribute nothing to the strategy. The series half of the very same response
+ * already draws this line (see the `!r.ok` throw in `fetchAddedReturns`, which
+ * deliberately leaves `addedReturnsById[id]` undefined because a non-ok response
+ * "is a FAILURE, not a genuine empty"); this type is what lets the metrics half
+ * agree with it instead of contradicting it about the same HTTP response.
+ */
+type AddedMetricsEntry =
+  | { cagr: number | null; sharpe: number | null }
+  | "unavailable";
+
+/** The render-facing projection of the above (see `AddedMetricsEntry`). */
+type AddedMetricsState = "pending" | "settled" | "unavailable";
+
+/**
  * DSRC-02 (D2) — per-holding equity contribution, the per-key WEIGHT source.
  *
  * Mirrors the SSR `holdingEquityContribution` (queries.ts:2113) EXACTLY:
@@ -1143,6 +1177,27 @@ export function ScenarioComposer({
   const [addedProvenanceById, setAddedProvenanceById] = useState<
     Record<string, { trust_tier: string | null; is_composite: boolean }>
   >({});
+  // Phase 162 / HONEST-05 — the lazily-fetched headline metric pair (cagr +
+  // sharpe) for a drawer-added, NON-book strategy, keyed by id. Exactly the
+  // addedProvenanceById lifecycle: written by fetchAddedReturns' settle from the
+  // widened /api/strategies/[id]/returns response, purged in handleRemoveAdded
+  // (a re-add starts clean), presentation-only — NEVER threaded into the frozen
+  // engine (Pitfall 3). Before this, `addedStrategyMetadataLookup` sourced the
+  // pair from the BOOK payload alone, so a drawer-added leg's detail panel was
+  // a permanent em-dash pair no matter how much data the strategy had.
+  //
+  // ⭐ The three-way distinction is the whole contract (UI-SPEC C-4, as amended
+  // by the 162 silent-failure audit — see `AddedMetricsEntry`). An id ABSENT
+  // means "not asked / still answering" — em-dashes, SILENCE. An id PRESENT
+  // with a pair (even a null pair) is a settled claim about the STRATEGY and
+  // earns the absence note. An id present as `"unavailable"` is a claim about
+  // the SEAM — em-dashes plus a note that attributes nothing to the strategy.
+  // Collapsing pending into settled would flash a false claim on every load;
+  // collapsing unavailable into settled mints a false claim about somebody
+  // else's track record out of our own outage.
+  const [addedMetricsById, setAddedMetricsById] = useState<
+    Record<string, AddedMetricsEntry>
+  >({});
   // Phase 147 / SCEN-01 — the lazily-fetched `series_state` discriminator for a
   // drawer-added, NON-book strategy, keyed by id. Same lifecycle as
   // addedAssetClassById (settle writer + purge on remove, so a re-add starts
@@ -1461,6 +1516,7 @@ export function ScenarioComposer({
       assetClass: string | null,
       provenance: { trust_tier: string | null; is_composite: boolean },
       seriesState: SeriesState,
+      metrics: { cagr: number | null; sharpe: number | null },
     ) => {
       setAddedReturnsById((prev) => ({ ...prev, [id]: series }));
       setAddedAssetClassById((prev) => ({ ...prev, [id]: assetClass }));
@@ -1469,7 +1525,33 @@ export function ScenarioComposer({
       // SCEN-01 — record what an EMPTY series means for this leg, so the row can
       // say "Syncing" or "No data" instead of rendering 0.00 with no signal.
       setAddedSeriesStateById((prev) => ({ ...prev, [id]: seriesState }));
+      // HONEST-05 — record the co-served metric pair. Written UNCONDITIONALLY,
+      // including when both are null: the WRITE is what turns "still asking"
+      // into the settled claim the absence note is allowed to make (C-4).
+      setAddedMetricsById((prev) => ({ ...prev, [id]: metrics }));
       clearInflight();
+    };
+    // HONEST-05 — record that the metrics question could not be ANSWERED,
+    // without settling a series and without claiming anything about the
+    // strategy.
+    //
+    // ⛔ This used to write `{cagr: null, sharpe: null}` — the same shape the
+    // route's genuine "this row has no computed analytics" answer produces —
+    // and the panel therefore printed "No computed metrics for this strategy"
+    // on the strength of a fetch that never observed the strategy at all. Three
+    // distinct things reach this writer: a non-ok response (INCLUDING our own
+    // /returns route's 500 select-error arm), a network throw, and a malformed
+    // body. None of them is evidence about the strategy; wedge PostgREST for
+    // 40s and the old code told the viewer that every leg they dragged in has
+    // no track record, contradicted by the factsheet one click away.
+    //
+    // `"unavailable"` still counts as "stop spinning" (the row must not sit on
+    // two undescribed em-dashes forever) while WR-01 still requires
+    // `addedReturnsById[id]` to stay undefined so a remove + re-add retries the
+    // series. Two different questions, two different answers — collapsing them
+    // would either strand a permanent spinner or poison the retry.
+    const markMetricsUnavailable = () => {
+      setAddedMetricsById((prev) => ({ ...prev, [id]: "unavailable" }));
     };
     fetch(`/api/strategies/${encodeURIComponent(id)}/returns`, {
       signal: controller.signal,
@@ -1492,6 +1574,8 @@ export function ScenarioComposer({
           trust_tier?: unknown;
           is_composite?: unknown;
           series_state?: unknown;
+          cagr?: unknown;
+          sharpe?: unknown;
         }) => {
           // A 200 with a non-array body is a malformed/failed response, NOT a
           // genuine empty series — treat it as a retryable failure (WR-01).
@@ -1521,6 +1605,19 @@ export function ScenarioComposer({
           // deploy that omits it, or any malformed value, degrades to
           // "available": no chip, no note, never a false Syncing.
           const seriesState = narrowSeriesState(d.series_state);
+          // HONEST-05 — accept a metric only when it is a FINITE number. A
+          // stale deploy predating the widening omits both keys, and the route
+          // itself sends null for any row whose run did not finish
+          // (isRankableAnalyticsRow) — both land here as null, which the panel
+          // renders as an em-dash. A NaN/Infinity that somehow arrived is
+          // absence too; it must never reach a formatter as a "value".
+          const metrics = {
+            cagr: typeof d.cagr === "number" && Number.isFinite(d.cagr) ? d.cagr : null,
+            sharpe:
+              typeof d.sharpe === "number" && Number.isFinite(d.sharpe)
+                ? d.sharpe
+                : null,
+          };
           // A genuine 200 with a real array (including an empty one) settles. An
           // empty array here means the strategy legitimately has no published
           // returns yet — distinct from a failure, so it is cached, not retried.
@@ -1529,6 +1626,7 @@ export function ScenarioComposer({
             assetClass,
             provenance,
             seriesState,
+            metrics,
           );
         },
       )
@@ -1548,6 +1646,12 @@ export function ScenarioComposer({
           "[ScenarioComposer] /api/strategies/<id>/returns fetch failed",
           { id, err },
         );
+        // HONEST-05 (C-4 fetch-error row) — a failure is not an error message
+        // and it is not a settled absence either. The panel must not spin an
+        // em-dash pair forever with nothing said, so it records "we could not
+        // ask" (no red, no zeros, and NO claim about the strategy). The series
+        // stays unsettled and retryable (WR-01, above).
+        markMetricsUnavailable();
         clearInflight();
       });
   }, []);
@@ -2473,6 +2577,15 @@ export function ScenarioComposer({
         const { [id]: _dropState, ...rest } = prev;
         return rest;
       });
+      // HONEST-05 — purge the fetched metric pair identically. Leaving it would
+      // make a re-add render the PREVIOUS answer as settled while the retry is
+      // still in flight — including a settled "no computed metrics" note over a
+      // strategy whose fetch simply had not returned yet (C-4's in-flight row).
+      setAddedMetricsById((prev) => {
+        if (!(id in prev)) return prev;
+        const { [id]: _dropMetrics, ...rest } = prev;
+        return rest;
+      });
       // LEV-02 (round-2 M-2) + WEIGHTS-04 / F1 — purge the removed leg's ENTIRE
       // transient trio (leverage overlay AND the Target-mode/solve twins) via the
       // unified reset, or it strands: leverageByRef is folded into the draft at
@@ -2503,6 +2616,13 @@ export function ScenarioComposer({
         // erases them from the engine-input type.
         trust_tier: string | null;
         is_composite: boolean;
+        // HONEST-05 — what happened to the metric pair for this leg: answered
+        // ("settled"), still asking ("pending"), or the fetch failed
+        // ("unavailable"). A book leg is answered by the SSR payload itself; a
+        // drawer-added leg only once its lazy fetch resolves one way or the
+        // other. Presentation-only, like trust_tier: it rides the lookup and is
+        // erased by the bare-Pick cast at every engine call site (Pitfall 3).
+        metricsState: AddedMetricsState;
       }
     >
   >(() => {
@@ -2511,10 +2631,22 @@ export function ScenarioComposer({
       Pick<
         StrategyForBuilder,
         "disclosure_tier" | "cagr" | "sharpe" | "asset_class"
-      > & { trust_tier: string | null; is_composite: boolean }
+      > & {
+        trust_tier: string | null;
+        is_composite: boolean;
+        metricsState: AddedMetricsState;
+      }
     > = {};
     for (const a of scenario.draft.addedStrategies) {
       const found = strategyById.get(a.id);
+      // HONEST-05 — the lazily-fetched entry, and the PAIR narrowed out of it.
+      // `"unavailable"` carries no figures by construction, so it collapses to
+      // undefined here and every `?? …` below falls through to null exactly as
+      // an unanswered fetch does. The distinction is not lost — it is carried
+      // by `metricsState`, whose whole job is to keep the render from turning a
+      // seam fault into a claim.
+      const lazyMetrics = addedMetricsById[a.id];
+      const lazyPair = lazyMetrics === "unavailable" ? undefined : lazyMetrics;
       // BLEND-01 — build an entry for EVERY added strategy, book or drawer.
       // Previously only book strategies (`if (found)`) got an entry and a
       // non-book leg fell through to the adapter's default meta (public / null
@@ -2525,8 +2657,31 @@ export function ScenarioComposer({
       // non-book one via the `?? …` fallbacks.
       map[a.id] = {
         disclosure_tier: found?.strategy.disclosure_tier ?? "public",
-        cagr: found?.strategy.strategy_analytics?.cagr ?? null,
-        sharpe: found?.strategy.strategy_analytics?.sharpe ?? null,
+        // HONEST-05 — book payload wins; else the lazily-fetched pair from the
+        // widened /returns response; else null. The SAME book-wins precedence
+        // the asset_class and provenance lines below already use. The route
+        // withholds these under isRankableAnalyticsRow, so a dead run's
+        // leftovers can never arrive here to be rendered as live figures.
+        cagr:
+          found?.strategy.strategy_analytics?.cagr ?? lazyPair?.cagr ?? null,
+        sharpe:
+          found?.strategy.strategy_analytics?.sharpe ??
+          lazyPair?.sharpe ??
+          null,
+        // A book leg's pair is answered by the SSR payload, so it is settled
+        // whatever the lazy fetch did (the book-wins precedence above already
+        // ignored the fetch for the values). A non-book leg reports what its
+        // fetch achieved: no entry → still asking; `"unavailable"` → the seam
+        // failed; a pair → an answer, INCLUDING a pair of nulls, which is why
+        // this can never be a truthiness or null check on the values (C-4).
+        metricsState:
+          found != null
+            ? "settled"
+            : lazyMetrics === undefined
+              ? "pending"
+              : lazyMetrics === "unavailable"
+                ? "unavailable"
+                : "settled",
         // Book payload asset_class (84-03) wins; else the lazily-fetched value;
         // else null (unknown → the conservative 252 blend default).
         asset_class:
@@ -2550,6 +2705,7 @@ export function ScenarioComposer({
     strategyById,
     addedAssetClassById,
     addedProvenanceById,
+    addedMetricsById,
   ]);
 
   // CONSTIT-02 (wave-3 render) — the per-row provenance badge variant for each
@@ -2581,31 +2737,57 @@ export function ScenarioComposer({
    * component (PATTERNS "Presentation-only props never reach the engine"; same
    * isolation `addedProvenanceByRef` above applies to trust_tier/is_composite).
    *
-   * Book strategies carry real values; a drawer-added leg carries `null` for
-   * both, because the lazy `/api/strategies/[id]/returns` route does not return
-   * them and CONTEXT locks NO new fetches this phase. Null is rendered as
-   * honest absence by the panel — never a fabricated 0.
+   * ✅ Phase 162 / HONEST-05 — the WR-02 reachability problem this projection
+   * used to document is CLOSED, and the note that described it has been
+   * rewritten. The statement it carried was true when written: `strategyById`
+   * is built from `payload.strategies`, which is BOOK-ONLY (the
+   * portfolio_strategies join, :1075), and a strategy added from the Browse
+   * drawer is BY CONSTRUCTION one the allocator does not already hold — so for
+   * that entire population both values were null and the panel could only ever
+   * show its absence note. The fix logged in TODOS.md under Phase 152 has now
+   * landed: `/api/strategies/[id]/returns` co-serves `cagr` + `sharpe` from the
+   * SAME row it already reads (same RLS, no new round-trip), and
+   * `addedStrategyMetadataLookup` falls back to that settled pair.
    *
-   * ⚠️ Review WR-02 — read that second sentence as the reachability statement it
-   * is, not as an edge case. `strategyById` is built from `payload.strategies`,
-   * which is BOOK-ONLY (the portfolio_strategies join, :1075). A strategy added
-   * from the Browse drawer is BY CONSTRUCTION one the allocator does not already
-   * hold, so for that entire population BOTH values are null and the panel shows
-   * its metrics-absent note every time — the CAGR/SHARPE eyebrows render only
-   * for a leg that is already in the book (e.g. a Bridge candidate the allocator
-   * holds). The pair is deliberately kept rather than deleted, because that
-   * in-book case is live and renders real figures; the note's copy names the
-   * surface so the absent case never reads as "loading" or "click elsewhere".
-   * Widening /api/strategies/[id]/returns to co-serve cagr+sharpe (same row,
-   * same RLS, no new round-trip) is logged in TODOS.md under Phase 152.
+   * So: a book leg carries the SSR payload's values; a drawer-added leg carries
+   * the lazily-fetched pair once it settles; either may still be `null`, which
+   * the panel renders as honest absence — never a fabricated 0.
+   *
+   * `state` rides alongside because a null pair has THREE readings the values
+   * alone cannot separate (UI-SPEC C-4, as amended by the 162 silent-failure
+   * audit):
+   *
+   *   · "pending"     — no answer yet. Em-dashes, and SILENCE.
+   *   · "settled"     — the route answered and withheld the scalars of a run
+   *                     that did not finish (`isRankableAnalyticsRow`) or of a
+   *                     row with no analytics at all. Em-dashes + the claim
+   *                     "this strategy has no computed metrics", which is now
+   *                     something we actually observed.
+   *   · "unavailable" — the fetch FAILED. Em-dashes + a note that says only
+   *                     that we could not load them. This state used to be
+   *                     folded into "settled", which meant a 40-second
+   *                     PostgREST wedge printed a false claim about every
+   *                     strategy the allocator dragged in.
    */
   const addedMetricsByRef = useMemo<
-    Record<string, { cagr: number | null; sharpe: number | null }>
+    Record<
+      string,
+      { cagr: number | null; sharpe: number | null; state: AddedMetricsState }
+    >
   >(() => {
-    const out: Record<string, { cagr: number | null; sharpe: number | null }> =
-      {};
+    const out: Record<
+      string,
+      { cagr: number | null; sharpe: number | null; state: AddedMetricsState }
+    > = {};
     for (const [id, meta] of Object.entries(addedStrategyMetadataLookup)) {
-      out[id] = { cagr: meta.cagr, sharpe: meta.sharpe };
+      // HONEST-05 — `state` rides alongside the pair because the panel needs to
+      // tell "no metrics" from "no answer yet" from "we could not ask"; the
+      // VALUES alone cannot (all three are null).
+      out[id] = {
+        cagr: meta.cagr,
+        sharpe: meta.sharpe,
+        state: meta.metricsState,
+      };
     }
     return out;
   }, [addedStrategyMetadataLookup]);
@@ -6104,7 +6286,10 @@ interface CompositionListProps {
    * new fetches this phase). Presentation-only — this map never reaches the
    * frozen engine, and the panel renders honest absence rather than a 0.
    */
-  addedMetricsByRef: Record<string, { cagr: number | null; sharpe: number | null }>;
+  addedMetricsByRef: Record<
+    string,
+    { cagr: number | null; sharpe: number | null; state: AddedMetricsState }
+  >;
   onToggle: (scopeRef: string) => void;
   onSetWeight: (scopeRef: string, weight: number) => void;
   /**
@@ -7117,8 +7302,27 @@ function CompositionList({
           const metrics = addedMetricsByRef[a.id] ?? {
             cagr: null,
             sharpe: null,
+            state: "pending" as AddedMetricsState,
           };
           const metricsAbsent = metrics.cagr == null && metrics.sharpe == null;
+          // Phase 162 HONEST-05 (UI-SPEC C-4) — the note is a CLAIM about this
+          // strategy ("it has no computed metrics"), so it may only render once
+          // the answer is in, and only when the answer came from a request that
+          // actually REACHED the strategy. All three states render the same two
+          // em-dashes — the honest render of "unknown" — and differ only in what
+          // they are entitled to say underneath:
+          //   pending      → nothing (the claim must not flash on every add)
+          //   settled      → the strategy has no computed metrics
+          //   unavailable  → we could not load them (says nothing about the
+          //                  strategy: the fetch never observed it)
+          const metricsAbsentSettled =
+            metricsAbsent && metrics.state === "settled";
+          // Gated on `metricsAbsent` too, so this note can never appear beside a
+          // live figure. It cannot today — an "unavailable" entry carries no
+          // pair — but the note's wording ("could not load metrics") would be
+          // false next to one, and a render guard is cheaper than the assumption.
+          const metricsUnavailable =
+            metricsAbsent && metrics.state === "unavailable";
           const detailOpen = expandedAddedId === a.id;
           return (
             <li
@@ -7368,17 +7572,38 @@ function CompositionList({
                           : "—"}
                       </span>
                     </div>
-                    {/* The metric pair renders whenever ANYTHING is known. Both
+                    {/* Phase 162 / HONEST-05 (UI-SPEC C-4) — the metric pair
+                        renders ALWAYS, in every one of C-4's five states. Both
                         formatters return "—" for null, so a half-known row shows
-                        its live figure beside a dash — never a fabricated 0.00,
-                        and never an inline toFixed. */}
-                    {!metricsAbsent && (
+                        its live figure beside a dash and a wholly-unknown row
+                        shows two dashes — never a fabricated 0.00, and never an
+                        inline toFixed.
+
+                        It used to be hidden entirely when both were null, which
+                        was defensible only while that state was permanent and
+                        the note was the whole answer. Now the pair fills in
+                        after a lazy fetch, so the eyebrows have to be there
+                        BEFORE it settles or the panel would visibly reflow the
+                        moment the answer arrived — and, worse, the pre-settle
+                        row would render no metric affordance at all while
+                        claiming nothing, leaving the user unable to tell "still
+                        loading" from "nothing to show". Two dashes say
+                        "unknown", which is the true statement in both. */}
+                    {(
                       <>
                         <div className="flex items-center gap-2">
                           <span className={DETAIL_EYEBROW}>CAGR</span>
                           <span
                             data-testid={`scenario-detail-cagr-${a.id}`}
-                            className="font-mono text-xs tabular-nums text-text-primary"
+                            // C-4 / Numbers Contract: a real magnitude reads in
+                            // primary ink (sign-only colour rule — never green
+                            // for positive); an em-dash is muted, because a
+                            // missing value must not compete with a present one.
+                            className={`font-mono text-xs tabular-nums ${
+                              metrics.cagr == null
+                                ? "text-text-muted"
+                                : "text-text-primary"
+                            }`}
                           >
                             {formatPercent(metrics.cagr, 1)}
                           </span>
@@ -7387,7 +7612,11 @@ function CompositionList({
                           <span className={DETAIL_EYEBROW}>SHARPE</span>
                           <span
                             data-testid={`scenario-detail-sharpe-${a.id}`}
-                            className="font-mono text-xs tabular-nums text-text-primary"
+                            className={`font-mono text-xs tabular-nums ${
+                              metrics.sharpe == null
+                                ? "text-text-muted"
+                                : "text-text-primary"
+                            }`}
                           >
                             {formatNumber(metrics.sharpe, 2)}
                           </span>
@@ -7395,25 +7624,68 @@ function CompositionList({
                       </>
                     )}
                   </div>
-                  {/* BOTH missing → one sentence that names the remedy, instead
-                      of two dashes that name nothing.
+                  {/* BOTH missing AND settled → one sentence that names the
+                      remedy, instead of two dashes that name nothing.
 
-                      Review WR-02 — "in this view" → "in the composer". The
-                      metric pair is STRUCTURALLY unreachable for a
-                      drawer-added strategy: `addedStrategyMetadataLookup`
-                      sources cagr/sharpe from the BOOK payload only
-                      (`payload.strategies` is the portfolio_strategies join),
-                      the lazy /api/strategies/[id]/returns route does not
-                      serve them, and CONTEXT locks no new fetches this phase.
-                      So for the population this panel mostly serves, this note
-                      is the panel's PERMANENT metrics statement — it must name
-                      the surface, not hint that expanding something else here
-                      would reveal the figures. The factsheet remedy is real and
-                      always resolves (OWN-02). */}
-                  {metricsAbsent && (
+                      Phase 162 / HONEST-05 — the copy CHANGED, because the old
+                      copy stopped being true here. It read "Metrics not
+                      available in the composer" and its comment called this the
+                      panel's PERMANENT metrics statement: at the time, a
+                      drawer-added leg's pair really was structurally
+                      unreachable — `addedStrategyMetadataLookup` sourced
+                      cagr/sharpe from the BOOK payload alone and the lazy
+                      /api/strategies/[id]/returns route did not serve them.
+                      This phase widened that route to co-serve the pair from
+                      the same row, so a drawer-added leg with computed
+                      analytics now renders real figures. A note still claiming
+                      the composer cannot show metrics would be a lie sitting
+                      next to the fix.
+
+                      What remains true is narrower and belongs to the STRATEGY,
+                      not the surface: this row has no computed metrics (no
+                      analytics row, or a run that did not finish — the route
+                      withholds those under isRankableAnalyticsRow). The
+                      factsheet remedy is real and always resolves (OWN-02).
+
+                      Gated on `metricsAbsentSettled`, never bare
+                      `metricsAbsent`: an in-flight fetch has the same two nulls
+                      and must not be described, and NEITHER may a failed one —
+                      see the sibling note below (C-4). */}
+                  {metricsAbsentSettled && (
                     <p className="mt-2 text-xs text-text-muted">
-                      Metrics not available in the composer — open the factsheet
-                      for full detail.
+                      No computed metrics for this strategy — open the factsheet
+                      for detail.
+                    </p>
+                  )}
+                  {/* The SEAM-fault note (Phase 162 silent-failure audit).
+
+                      Same slot, same muted treatment, same single-note
+                      discipline — and deliberately a DIFFERENT sentence,
+                      because the sentence above is a claim about the strategy
+                      and this row has no standing to make it. What reached here
+                      is a non-ok response (our own route returns 500 from its
+                      select-error arm), a network throw, or a malformed body:
+                      the app failed to ASK, and never observed the strategy at
+                      all.
+
+                      This is the fix for a measured falsehood, not a
+                      hypothetical: with PostgREST wedged — a recurring failure
+                      mode on this stack — an allocator dragging in three
+                      strategies was told all three have no computed metrics,
+                      then found full CAGR and Sharpe on each factsheet one
+                      click away. We told them something false about someone
+                      else's track record, on a money surface.
+
+                      So the copy attributes NOTHING: no cause, no claim about
+                      the strategy's analytics, and no invitation to conclude
+                      anything from the em-dashes. "Right now" is the only
+                      inference offered, and it is the one that is true — the
+                      remove + re-add retry (WR-01) really does re-fire the
+                      fetch. No red: a failure to load is still absence, and
+                      absence is not an error (DESIGN.md gates). */}
+                  {metricsUnavailable && (
+                    <p className="mt-2 text-xs text-text-muted">
+                      We could not load metrics for this strategy right now.
                     </p>
                   )}
                   {/* The panel's single action and its only accent element

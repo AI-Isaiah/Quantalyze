@@ -315,10 +315,27 @@ test.describe("Phase 91 — composite multi-key onboarding (QA-02 / QA-03)", () 
         name: /we could not verify this composite/i,
       }),
     ).toBeVisible({ timeout: 15_000 });
-    // The offending member is named via the scrubbed computation_error the seed
-    // stamps ("… (deribit) failed to reconstruct: upstream geo-blocked").
-    await expect(page.getByText(/\(deribit\)/)).toBeVisible();
-    await expect(page.getByText(/failed to reconstruct/i)).toBeVisible();
+    // ⚠️ THIS ASSERTION WAS INVERTED BY PHASE 162 / HONEST-01 (UI-SPEC C-2).
+    // It used to require that the seeded `computation_error` reach the user —
+    // "… (deribit) failed to reconstruct: upstream geo-blocked" — on the
+    // reasoning that the column was server-SCRUBBED. Scrubbing removes secrets;
+    // it does not turn an internal into user copy, and that column was carrying
+    // raw Python exception text. The appendix is gone, so the envelope body is
+    // wizardErrors copy and nothing else.
+    //
+    // This is the live-DOM twin of SyncPreviewStep.composite.render.test.tsx's
+    // C-2 case, asserted on the branch where the appendix was most load-bearing.
+    // It is NOT vacuous: re-threading the column (the exact regression
+    // HONEST-01 closed) turns both negatives RED, and dropping the envelope
+    // entirely turns the two positives RED.
+    const envelope = page.getByTestId("error-envelope");
+    await expect(envelope).toHaveAttribute(
+      "data-error-code",
+      "GATE_ANALYTICS_FAILED",
+    );
+    await expect(envelope).toContainText("Analytics computation failed.");
+    await expect(envelope).not.toContainText("Details:");
+    await expect(page.getByText(/\(deribit\)/)).toHaveCount(0);
     // No use-this-key CTA on the failed gate — publish is blocked at the GUI.
     await expect(page.getByTestId("wizard-use-this-key")).toHaveCount(0);
 

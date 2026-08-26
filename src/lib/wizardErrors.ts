@@ -268,6 +268,60 @@ export type WizardErrorCode =
   // same thing again", and the same key is refused identically — the DB index
   // is what refused it, and nothing about the second attempt differs.
   | "KEY_ORPHANED"
+  // 162-05 / D-162-3 — the USE-EXISTING-KEY arm's one refusal: the request named
+  // a stored key to reuse, and no LIVE key of the caller's matches it.
+  //
+  // ⛔ ONE CODE FOR THREE STATES ON PURPOSE — "not yours", "no longer exists"
+  // and "soft-disconnected". Splitting them would publish an ownership oracle
+  // for key ids to anyone who can post this route, and the user's remedy is
+  // identical in all three: there is nothing to reuse, so connect the account
+  // with credentials instead. The route emits it from TWO sites (the pre-RPC
+  // ownership refusal and the RPC's own `no_data_found` raise, which is the
+  // TOCTOU window between the two) and both mean exactly this sentence.
+  //
+  // ⚠️ AND NO INCUMBENT COULD TAKE IT, read AT THE EMITTER rather than matched
+  // on names:
+  //   · `KEY_ORPHANED` — "This key is already stored, but nothing uses it."
+  //     Its whole premise is that the key IS stored and IS the caller's. Here we
+  //     have just measured that no live key of theirs matches, so the sentence
+  //     asserts the opposite of what the reads found, and its second remedy
+  //     (email us to release the stored key) points at a key that is not there.
+  //   · `VENUE_ALREADY_CONNECTED` — "already connected to an existing
+  //     strategy". Nothing is connected on this arm; that code IS emitted by
+  //     this same arm for the case where something is, which is precisely why
+  //     it cannot also carry this one.
+  //   · `STALE_CLIENT` — its title ("This page is out of date") is arguably
+  //     true for the reachable population, but its CAUSE names a deploy skew:
+  //     "this tab has been open since before we changed how keys are added, so
+  //     it sent us a request we no longer accept". The request shape here is
+  //     current and accepted; only the key it names is gone. A code whose title
+  //     fits and whose cause lies is not a fit.
+  //   · `DRAFT_ALREADY_EXISTS` / `GATE_DRAFT_GONE` — both speak about a draft.
+  //     This refusal is reached before any draft is read or written.
+  //
+  // RECOVERABLE — DERIVED, NOT DECLARED, on `KEY_ORPHANED`'s own reasoning:
+  // `try_another_key` is a member of `RECOVERABLE_ACTIONS`, and the remedy it
+  // names IS reachable from the one screen that renders this refusal — unlike
+  // on `KEY_ORPHANED`, where the same account is refused identically every
+  // time.
+  //
+  // ⚠️ WHICH SCREEN THAT IS, RE-MEASURED (162-06 review / B-2). This code has
+  // exactly one client emitter — ConnectKeyStep's reuse arm — and that arm
+  // exists only in the PRESELECT sub-state, which RETURNS EARLY, before the
+  // credential form is rendered at all. What stands behind the banner there is
+  // the saved-key panel, "Continue with this key" (refused identically every
+  // time) and a "Use a different key" control. The credential form is therefore
+  // NOT behind the banner on this path: it is ONE CONTROL AWAY, which is why
+  // the first fix line names that control instead of a form the reader cannot
+  // see, and why ConnectKeyStep wires the envelope's Retry to the same control
+  // so both routes land on the form the line promises.
+  // ⛔ DO NOT RESTORE the pre-B-2 sentence ("on ConnectKeyStep the Retry
+  // control clears the banner and returns the user to the credential form"). It
+  // described the form-rendering branch, which this refusal never reaches; as
+  // written it justified recoverability with a screen the user is not on.
+  // ⛔ NOT `clear_and_retry`: re-posting the same `reuse_api_key_id` is refused
+  // identically, because the key it names still does not exist.
+  | "KEY_REUSE_UNAVAILABLE"
   // Sync + gate (SyncPreviewStep) — these wrap strategyGate.ts codes
   | "SYNC_TIMEOUT"
   | "SYNC_FAILED"
@@ -1062,8 +1116,37 @@ const DEADLINE_CAUSE_TAIL =
  * Named as a closed set rather than a bare string so a bullet cannot be gated
  * on a surface nobody passes: a typo is a COMPILE error at the table, not a
  * bullet that silently never renders.
+ *
+ * ⭐ `preselect` IS A SURFACE OF ITS OWN, NOT A FLAVOUR OF `connect` — 162-06
+ * review / B-2 class fix. `ConnectKeyStep` has TWO mutually exclusive renders,
+ * and the second one paints a DIFFERENT SET OF CONTROLS:
+ *
+ *   · `connect`   — the credential form: labelled inputs, a Submit, and a
+ *                   Retry that returns the reader to what they typed.
+ *   · `preselect` — the saved-key summary. TWO controls exist and no others:
+ *                   "Continue with this key" and "Use a different key". There
+ *                   is NO credential form, NO field of any kind, NO draft
+ *                   control, and nothing on the screen to fill in.
+ *
+ * ⛔ WHY THE DISTINCTION IS LOAD-BEARING AND NOT COSMETIC. A remedy that names
+ * a control is only true of the screen that paints it, and this repo has now
+ * shipped that lie twice from the same table: `KEY_REUSE_UNAVAILABLE` told the
+ * reader the credential form "still works normally" on the one screen with no
+ * form (162-06 review / B-2), and `DRAFT_ALREADY_EXISTS` + `KEY_MISSING_
+ * REQUIRED_FIELD` were then found saying the same class of thing on the same
+ * screen. Collapsing the two renders into one surface name is what made those
+ * sentences unfalsifiable: `surface: "connect"` was TRUE of both, so no gate
+ * could tell them apart.
+ *
+ * ⚠️ ABSENT SURFACE STILL MEANS "WE WERE NOT TOLD", for both the `surface` and
+ * the `surfaceIsNot` requirement kinds — see each kind's own absence rule.
  */
-export type WizardSurface = "connect" | "submit" | "csv" | "allocate";
+export type WizardSurface =
+  | "connect"
+  | "preselect"
+  | "submit"
+  | "csv"
+  | "allocate";
 
 /**
  * The venue capabilities a `fix[]` bullet may be gated on. ONE member today.
@@ -1146,7 +1229,32 @@ export type FixRequirement =
    * The absence rule here matches `surface`'s ("fail toward saying less"), not
    * `venueCapability`'s, and the two must not be unified.
    */
-  | { readonly kind: "venueIs"; readonly venue: SupportedExchange };
+  | { readonly kind: "venueIs"; readonly venue: SupportedExchange }
+  /**
+   * 162-06 review / B-2 (class) — "render EVERYWHERE EXCEPT this surface". The
+   * FOURTH kind, added under the rule the union docblock above states: one
+   * member here plus one arm in `requirementMet`, and no new call site.
+   *
+   * ⚠️ IT IS NOT `surface` NEGATED, AND THE ABSENCE RULE IS WHY. `surface`
+   * SUPPRESSES when the caller names none ("fail toward saying less" — a claim
+   * about a screen we were not told about is unverifiable). This kind RENDERS
+   * when the caller names none, and that asymmetry is the entire reason it
+   * exists rather than being folded into the other:
+   *
+   *   · a `surface` bullet is an ADDITION that only one screen has earned;
+   *   · a `surfaceIsNot` bullet is an INCUMBENT that one screen has DISPROVED.
+   *
+   * Suppressing an incumbent on absence would silently delete a remedy from
+   * every caller that predates the gate — the "silent copy deletion, not a
+   * gate" failure `REQUIRES_DERIBIT`'s sibling slot is annotated against. The
+   * default-permissive posture matches `venueCapability`'s for the same reason
+   * (untagged callers keep their copy byte-for-byte), and the SWEEP in
+   * `wizardErrors.test.ts` asserts BOTH halves: the bullet survives with no
+   * surface named, and disappears on the one surface it is barred from.
+   *
+   * ⛔ It is a CLOSED-SET member compared for inequality, never interpolated.
+   */
+  | { readonly kind: "surfaceIsNot"; readonly surface: WizardSurface };
 
 /**
  * "Render only when the venue CAN be substituted" — the incumbent bullets.
@@ -1195,6 +1303,37 @@ const REQUIRES_SUBMIT_SURFACE: FixRequirement = {
 const REQUIRES_CONNECT_SURFACE: FixRequirement = {
   kind: "surface",
   surface: "connect",
+};
+
+/**
+ * "Render only on ConnectKeyStep's SAVED-KEY SUMMARY" — 162-06 review / B-2
+ * (class). Its users are the refusals the reuse arm can put on that screen and
+ * whose incumbent remedy names a control the screen does not paint.
+ *
+ * ⚠️ EVERY BULLET GATED ON THIS MAY NAME ONLY THESE TWO CONTROLS: "Continue
+ * with this key" and "Use a different key". They are the whole screen. That is
+ * asserted against the RENDERED DOM — not against this comment — by
+ * `steps/ConnectKeyStep.preselect-refusal-class.test.tsx`, which reads both
+ * labels off the tree and sweeps EVERY code the reuse arm can reach.
+ */
+const REQUIRES_PRESELECT_SURFACE: FixRequirement = {
+  kind: "surface",
+  surface: "preselect",
+};
+
+/**
+ * "Render anywhere EXCEPT the saved-key summary" — the incumbent half of the
+ * same pair. Tags a bullet that is TRUE on the credential form (and on every
+ * caller that names no surface at all) and FALSE on the one screen with no
+ * form, no fields and no draft controls.
+ *
+ * ⛔ Reach for this ONLY when the bullet is disproved on the preselect screen,
+ * never to tidy a list: absence of a surface renders it, so a bullet tagged
+ * here still reaches every untagged caller unchanged.
+ */
+const NOT_ON_PRESELECT_SURFACE: FixRequirement = {
+  kind: "surfaceIsNot",
+  surface: "preselect",
 };
 
 /**
@@ -1470,6 +1609,26 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
   // a field the form does not show — the copy is static, so the discipline
   // `scrubSeamError` enforces on derived strings is simply written in here.
 
+  // ⚠️ 162-06 review / B-1 — THIS CODE HAS A SECOND EMITTER THAT RECEIVES NO
+  // FIELDS AT ALL, so its remedy is now surface-split.
+  //
+  // `create-with-key`'s USE-EXISTING-KEY arm answers 400 with this code from its
+  // own shape guard (a non-uuid `wizard_session_id` or `reuse_api_key_id`), and
+  // that request body is TWO IDS — the caller typed nothing. The guard's own
+  // comment says the refusal "is about OUR REQUEST SHAPE rather than about the
+  // user's key — which is why it may not wear a `KEY_*` verdict that blames a
+  // credential", and the incumbent bullets below did exactly that on the one
+  // screen with no fields on it: "fill in every field shown" named a control
+  // that is not painted, and "submit again" promised an outcome that a
+  // deterministic shape rejection cannot deliver.
+  //
+  // ⛔ THE SPLIT IS BULLETS ONLY, AND THE REMAINDER IS DISCLOSED RATHER THAN
+  // QUIETLY LIVED WITH: `fixRequires` gates `fix[]` and nothing else, so on the
+  // preselect surface the TITLE and CAUSE still read as though a field were
+  // blank. The whole fix belongs at the emitter — the reuse arm must stop
+  // answering a credential-shaped code for a request that carries no
+  // credentials — and lives in `create-with-key/route.ts`, not here. Until it
+  // lands, the remedy at least names only what the reader can see.
   KEY_MISSING_REQUIRED_FIELD: {
     title: "One of the required fields is empty.",
     cause:
@@ -1477,8 +1636,24 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
     fix: [
       "Fill in every field shown for the exchange you selected — the fields differ by exchange, so a slot that is optional elsewhere may be required here.",
       "Submit again once each one has a value.",
+      // ── preselect-only. Two controls exist on that screen and neither is a
+      // field, so nothing here asks the reader to type or to resubmit.
+      "Nothing on this screen was left blank — this request carried no fields for you to fill, only the key you picked. Email security@quantalyze.com with the correlation id below: a request of ours that our own server refuses is ours to fix.",
+      "“Use a different key” on this screen opens the credential form, which is a different request and may well go through. It is not a workaround for the refusal above, and pressing “Continue with this key” again sends the identical thing and is refused identically.",
+    ],
+    fixRequires: [
+      NOT_ON_PRESELECT_SURFACE,
+      NOT_ON_PRESELECT_SURFACE,
+      REQUIRES_PRESELECT_SURFACE,
+      REQUIRES_PRESELECT_SURFACE,
     ],
     docsHref: "/security#readonly-key",
+    // ⚠️ `clear_and_retry` STAYS, and it stays for the credential emitter: there
+    // the reader fills the blank field and resubmits, which is precisely "send
+    // it again". On the preselect screen re-sending is provably futile, and the
+    // control is withheld THERE, by the surface that knows it — ConnectKeyStep's
+    // preselect branch passes no `onRetry` for a 400. Deleting the action here
+    // would take the honest Retry away from the form as well.
     actions: ["clear_and_retry", "request_call"],
   },
 
@@ -1708,6 +1883,39 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
     actions: ["try_another_key", "request_call"],
   },
 
+  // ⛔ 162-06 review / B-2a — THE BLOCKING INSTANCE OF THE B-2 CLASS, and the
+  // one the B-2 fix itself steers users into.
+  //
+  // REACHABILITY, MEASURED rather than assumed: `create_wizard_strategy_for_key`
+  // inserts into `strategies` with the caller's `wizard_session_id`,
+  // `strategies_user_wizard_session_source_uniq` (20260728120000) raises 23505,
+  // and `create-with-key`'s reuse arm maps that 23505 here. Two live paths:
+  //   · TOCTOU — the first "Continue with this key" landed server-side while the
+  //     client's hop timed out. The client set `SERVICE_UNREACHABLE`, whose
+  //     Retry deliberately KEEPS the preselect, the reader pressed Continue
+  //     again, and the second RPC collided with the first one's committed row;
+  //   · A STALE SESSION ID — `deriveWizardResumeOverrides` restores
+  //     `wizardSessionId` from localStorage on the API branch UNCONDITIONALLY
+  //     (localStorage.ts, source-gated only), so an abandoned draft over key A
+  //     lends its session id to a preselect for key B.
+  //
+  // ⛔ AND THE INCUMBENT REMEDY NAMED TWO CONTROLS THAT SCREEN DOES NOT PAINT.
+  // "Resume draft" and "Start fresh" are WizardClient's resume-banner buttons,
+  // and the banner renders only on `showResumeBanner && initialDraft` — which on
+  // the preselect path is FALSE by construction on the second path above
+  // (ContributionWizardOverlay only offers a draft whose own `api_key_id` is the
+  // preselected key). With `actions` carrying neither member of
+  // `RECOVERABLE_ACTIONS`, no Retry renders either: the reader was left on a
+  // screen naming two absent controls, whose only working control discards the
+  // key they chose.
+  //
+  // ⚠️ THE PRESELECT BULLETS PROMISE ONLY WHAT THE ARM DELIVERS. Re-pressing
+  // "Continue with this key" succeeds on the TOCTOU path and ONLY there, because
+  // the colliding row is now committed and `resolveStrategiesForKey` answers
+  // `kind: "draft"` — the arm's own idempotent envelope, before the RPC is
+  // reached at all. On the stale-session path the collision is over a DIFFERENT
+  // key, that resolver still finds nothing, and the second bullet says so
+  // instead of sending the reader round the loop again.
   DRAFT_ALREADY_EXISTS: {
     title: "You already have a wizard session open for this key.",
     cause:
@@ -1715,8 +1923,26 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
     fix: [
       "Resume the existing draft to continue where you left off.",
       "Or delete it and start fresh here.",
+      // ── preselect-only.
+      "Press “Continue with this key” once more. If the draft already open is this key's, we hand that one back and carry on from where it stopped — nothing is created twice.",
+      "If it is refused a second time, the open draft belongs to a different key of yours and this screen cannot reach it. Email security@quantalyze.com with the correlation id below. Nothing was created by this attempt.",
+    ],
+    fixRequires: [
+      NOT_ON_PRESELECT_SURFACE,
+      NOT_ON_PRESELECT_SURFACE,
+      REQUIRES_PRESELECT_SURFACE,
+      REQUIRES_PRESELECT_SURFACE,
     ],
     docsHref: "/security#draft-resume",
+    // ⛔ UNCHANGED, and deliberately so. `resume_draft` / `start_fresh` are what
+    // the resume banner offers where it renders, and neither is a member of
+    // `RECOVERABLE_ACTIONS` — so no Retry control appears on EITHER surface.
+    // That is right here: on the preselect screen the action the first bullet
+    // names is "Continue with this key", which is already painted as the step's
+    // primary control. A Retry beside it would be a second button for the same
+    // press. ⛔ And `clear_and_retry` must not be added to buy one: it would
+    // render a Retry on the credential surface too, where the collision is not
+    // resolvable by re-sending.
     actions: ["resume_draft", "start_fresh"],
   },
 
@@ -1751,7 +1977,18 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
       "Open the strategy that already uses this account from your strategies page — it keeps updating from this same account.",
       "To list a second strategy, connect a different account: a separate broker account, or a different login on the same broker.",
       "If you believe this account should be free, email security@quantalyze.com before you disconnect anything — disconnecting it stops the existing strategy from updating.",
+      // ── 162-06 review / B-2b — preselect-only, and it exists because this
+      // entry is NOT recoverable: `actions` carries neither member of
+      // `RECOVERABLE_ACTIONS`, so no Retry renders and the reuse arm's own
+      // refusal left the reader with three bullets that named no control on the
+      // screen at all. The bullet above it ("connect a different account") is
+      // the true remedy; this one names the painted control that performs it.
+      // ⛔ It must stay gated: on the credential form the same instruction is
+      // carried out by editing the fields, and "Use a different key" is not
+      // there to press.
+      "On this screen that second option is “Use a different key” — it swaps the saved key out for the credential form. Pressing “Continue with this key” again sends the identical request and is refused identically.",
     ],
+    fixRequires: [null, null, null, REQUIRES_PRESELECT_SURFACE],
     docsHref: "/security",
     // ⛔ NEITHER member of `RECOVERABLE_ACTIONS` (`clear_and_retry`,
     // `try_another_key`), so `recoverable` derives FALSE and no Retry control
@@ -1810,17 +2047,37 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
   // Principles 2) this very requirement exists to enforce. The bullets below
   // name only remedies that were measured to be reachable.
   //
-  // ⚠️ THE UNDERLYING GAP IS REAL AND IS NOT CLOSED HERE: a manager cannot
-  // release their own orphaned key from any surface we ship. That is why the
-  // second bullet routes to us instead of pretending otherwise, and it is
-  // recorded in the phase's deferred items rather than left in the copy.
+  // ⭐ 162-06 / D-162-3 — THE LAST BULLET OF THAT MEASUREMENT NO LONGER HOLDS,
+  // AND THE COPY MOVED IN THE COMMIT THAT BROKE IT. "Finish setup →" now carries
+  // the clicked row's key id into the wizard, which opens on the saved-key
+  // summary and REUSES the stored `api_keys` row through `create-with-key`'s
+  // reuse arm — it no longer re-POSTs credentials, so it no longer lands here.
+  // The sentence that stood in `fix[1]` ("To reuse this exact account, email
+  // security@quantalyze.com … releasing the stored key is not something you can
+  // do from this page") told exactly the users this phase is about that a remedy
+  // they now HAVE does not exist.
+  //
+  // ⚠️ AND IT IS NAMED CONDITIONALLY, BECAUSE THE PAGE IS ROLE-SCOPED. Same
+  // measurement discipline as the divergence above: `/my-strategies` guards on
+  // `requireRolePage(…, "allocator")`, so a `role: "manager"` profile standing in
+  // the manager wizard is redirected off it. Asserting it flatly would re-open
+  // the D-17 class for that population. The row is also not guaranteed to be
+  // there: `getStrategylessActiveKeys` filters on `is_active` and
+  // `sync_status !== "revoked"` while the venue fence that emits this code
+  // filters only on `disconnected_at`, so a revoked-but-not-disconnected key is
+  // refused here and listed nowhere. Both gaps land in the same bullet.
+  //
+  // ⚠️ THE RELEASE GAP IS STILL REAL AND IS STILL NOT CLOSED: nothing we ship
+  // lets an owner of ANY role release their own stored key. 162-06 closed REUSE,
+  // not release, and the last bullet keeps routing to us for it.
   KEY_ORPHANED: {
     title: "This key is already stored, but nothing uses it.",
     cause:
       "These credentials were saved in an earlier session whose draft was deleted, leaving the key attached to nothing. A new strategy cannot be created over the leftover key, and it does not clear on its own.",
     fix: [
       "Connect this strategy with a different account — one whose key is not already stored here.",
-      "To reuse this exact account, email security@quantalyze.com with the correlation id below: releasing the stored key is not something you can do from this page.",
+      "If your account includes the My Strategies page, look for this account there under “No strategy yet”: “Finish setup” on that row builds the strategy from the key already stored, with no credentials to enter again.",
+      "If that page is not part of your account, or it does not list this key, email security@quantalyze.com with the correlation id below: releasing the stored key is not something you can do from this page.",
     ],
     docsHref: "/security",
     // ⛔ `try_another_key` AND NOT `clear_and_retry`. Both are members of
@@ -1832,6 +2089,79 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
     // resume, and `start_fresh` deletes one. Their absence also keeps this entry
     // outside the destructive-action population the `[140.3-10 / TRAP-4]` scan
     // walks.
+    actions: ["try_another_key", "expand_log"],
+  },
+
+  // 162-05 / D-162-3. See the union member's docblock for why this is a member
+  // rather than an alias, and for the four near-misses it was measured against.
+  //
+  // ⚠️ WHAT THIS COPY MAY CLAIM, measured at the arms rather than assumed. Both
+  // emitters return BEFORE any write: the pre-RPC one has performed two reads
+  // and nothing else, and the `no_data_found` one is raised by the function
+  // before its INSERT, inside a transaction that rolls back. So "nothing was
+  // created" is knowable in the way 140.3-15 requires. ⛔ It says nothing about
+  // the user's credentials, which this arm never receives, never sends anywhere
+  // and never stores — a sentence implying otherwise would send them to
+  // regenerate a working key for a state that has nothing to do with it.
+  //
+  // ⚠️ AND IT MAY NOT CLAIM A CREDENTIAL FORM IS ON THE SCREEN (162-06 review /
+  // B-2). The first line used to read "Connect this account here with its API
+  // credentials instead — the form on this step still works normally", and that
+  // was TRUE when 162-05 wrote it: ConnectKeyStep rendered the form on every
+  // path. 162-06 added the PRESELECT sub-state in the same branch, and that
+  // sub-state returns BEFORE the form — so the only screen that can render this
+  // refusal is the one screen with no form on it. Naming the form there left
+  // the reader looking for a control that is not painted, with Retry blanking
+  // the banner and changing nothing: the unwinnable loop 162-06 exists to
+  // close, one screen later. The line now names the CONTROL that reaches the
+  // form — "Use a different key", rendered directly under this envelope — and
+  // ConnectKeyStep's preselect branch wires Retry to the same control.
+  // ⛔ IT STILL CLAIMS NOTHING ABOUT WHERE THE READER CAME FROM — but ⚠️ NOT
+  // FOR THE REASON THAT STOOD HERE. The retired sentence read "This refusal also
+  // renders in the manager wizard while /my-strategies is allocator-gated, so a
+  // flat 'go back to My Strategies' would re-open the D-17 class for managers".
+  // TRACED AT HEAD (162-06 review) AND FALSE: there is no manager population on
+  // this path at all.
+  //   · `preselectKey` reaches `ConnectKeyStep` only through the step mount in
+  //     `WizardClient.tsx` and the one in `MultiKeyConnectStep.tsx`, and this
+  //     code is emitted ONLY by the arm a non-null preselect unlocks;
+  //   · the only production supplier of a NON-NULL preselect is the
+  //     `ContributionWizardOverlay` mount in `MyStrategiesSection.tsx` (the
+  //     "Finish setup" seam). `/strategies/new` mounts `WizardClient` with no
+  //     preselect, and the credential arm never sends `reuse_api_key_id`;
+  //   · `MyStrategiesSection` renders on `/my-strategies`, whose page component
+  //     awaits `requireRolePage(supabase, user, "allocator")` before rendering
+  //     anything.
+  // So every reader of this refusal is an allocator who arrived from that page.
+  // An argument that turns on a population which cannot reach the screen is not
+  // a weaker reason for the right shape — it is a reason that would evaporate
+  // the moment someone checked it, taking the shape with it.
+  //
+  // ⭐ THE MEASURED REASON THE SECOND LINE STAYS CONDITIONAL is about the SEAM,
+  // not about roles. The preselect is a PROP: `ContributionWizardOverlay` is
+  // mounted at five sites and four of them pass none today, and any one of them
+  // may start to. A flat "go back to My Strategies" would be a claim about where
+  // the reader came from that the component cannot check — the same unearned
+  // claim the bullet above it (the credential-form one) turned into a live
+  // defect. "If you arrived from…" costs the current population nothing and
+  // cannot become false when a second supplier appears; and the FIRST line names
+  // only what is painted on the screen, which is checkable from the DOM and is
+  // pinned there.
+  KEY_REUSE_UNAVAILABLE: {
+    title: "That stored key is not available to reuse.",
+    cause:
+      "You asked us to finish setting up a strategy using a key already stored on your account, and we could not find a live one matching it. It may have been disconnected or removed since the page you started from was loaded. Nothing was created and none of your stored keys changed.",
+    fix: [
+      "Choose “Use a different key” on this screen to connect this account with its own API credentials instead.",
+      "If you arrived from My Strategies, reload that page first: the key list it showed you is what this request is checked against, and it is now out of date.",
+      "If neither clears it, email security@quantalyze.com with the correlation id below.",
+    ],
+    docsHref: "/security",
+    // ⛔ `try_another_key` AND NOT `clear_and_retry` — see the union member's
+    // docblock. ⛔ AND NEITHER `resume_draft` NOR `start_fresh`: no draft was
+    // read or written on this arm, and `start_fresh` DELETES one, which also
+    // keeps this entry outside the destructive-action population the
+    // `[140.3-10 / TRAP-4]` scan walks.
     actions: ["try_another_key", "expand_log"],
   },
 
@@ -3369,8 +3699,22 @@ export interface WizardErrorContext {
   days?: number;
   /** Current draft id for support references. */
   draftId?: string;
-  /** Raw computation error to include under SYNC_FAILED / GATE_ANALYTICS_FAILED. */
-  computationError?: string | null;
+  // ⛔ REMOVED 2026-08-26 — `computationError?: string | null`, "raw computation
+  // error to include under SYNC_FAILED / GATE_ANALYTICS_FAILED". Phase 162 /
+  // HONEST-01, UI-SPEC C-2. That field carried
+  // `strategy_analytics.computation_error` — a SERVER column — into the wizard
+  // envelope body as a `Details: …` appendix, and until migration 20260826120000
+  // that column held raw `classify_exception` output, so the envelope rendered
+  // Python exception strings to users. The column is curated at its write
+  // boundary now, and the appendix is STILL wrong: appending curated copy to
+  // curated copy double-renders the same claim, which is the duplication C-2
+  // removes. This file is the canonical source of human copy (DESIGN-05);
+  // operator context belongs in the diagnostics accordion, which carries the
+  // code and the correlation id and is PII-scrubbed.
+  //
+  // The absence is deliberate and TYPED: re-adding a server-detail field here is
+  // the one edit that reopens the render path, so it has to be a decision rather
+  // than a convenience.
   /** File size in MB, formatted as a string with 1 decimal (for CSV_FILE_TOO_LARGE). */
   sizeMb?: string;
   /** Count of blocking cross-key window issues (for MULTI_KEY_WINDOWS_INVALID). */
@@ -3507,6 +3851,14 @@ function requirementMet(
       //     the opposite of the `venueCapability` arm above, argued at the
       //     union member.
       return context?.venue === req.venue;
+    case "surfaceIsNot":
+      // 162-06 review / B-2 (class) — an ABSENT surface is not the barred one,
+      // so the incumbent bullet RENDERS. ⛔ The inverted default is the whole
+      // point of the kind and must not be "unified" with the `surface` arm
+      // three lines up: this gate removes a remedy that one screen disproved,
+      // and applying `surface`'s suppress-on-absence rule to it would delete
+      // that remedy from every caller that names no surface at all.
+      return context?.surface !== req.surface;
   }
 }
 
@@ -3612,16 +3964,12 @@ export function formatKeyError(
     };
   }
 
-  if (
-    (code === "GATE_ANALYTICS_FAILED" || code === "SYNC_FAILED") &&
-    context?.computationError
-  ) {
-    return {
-      ...base,
-      cause: `${base.cause} Details: ${context.computationError}.`,
-    };
-  }
-
+  // ⛔ DELETED 2026-08-26 (Phase 162 / HONEST-01, UI-SPEC C-2) — the arm that
+  // read `context.computationError` and returned
+  // `${base.cause} Details: ${context.computationError}.` for
+  // GATE_ANALYTICS_FAILED and SYNC_FAILED. See the removed field on
+  // WizardErrorContext above for why. Nothing replaces it: the cause sentence
+  // in the table stands alone, which is what it was written to do.
   if (code === "CSV_FILE_TOO_LARGE" && context?.sizeMb !== undefined) {
     return {
       ...base,

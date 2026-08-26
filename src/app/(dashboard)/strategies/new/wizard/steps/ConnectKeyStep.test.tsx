@@ -18,8 +18,9 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { act, render, screen, fireEvent } from "@testing-library/react";
+import { useState } from "react";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { ConnectKeyStep } from "./ConnectKeyStep";
+import { ConnectKeyStep, type PreselectedKey } from "./ConnectKeyStep";
 
 const trackMock = vi.fn();
 vi.mock("@/lib/for-quants-analytics", () => ({
@@ -2155,5 +2156,343 @@ describe("[154.1 / WIZCONT-02] ConnectKeyStep — an already-connected account r
         "Helios Momentum",
       ),
     );
+  });
+});
+
+/**
+ * ═══════════════════════════════════════════════════════════════════════════
+ * [162-06 review / B-2] THE PRESELECT REFUSAL MAY ONLY NAME CONTROLS THAT ARE
+ * ON THE PRESELECT SCREEN.
+ *
+ * ⚠️ THE DEFECT THIS PINS SHIPPED GREEN, and it shipped green because the only
+ * guard was over the COPY TABLE. `KEY_REUSE_UNAVAILABLE`'s first remedy read
+ * "Connect this account here with its API credentials instead — the form on
+ * this step still works normally", which was TRUE the day 162-05 wrote it and
+ * FALSE by the end of the same branch: 162-06 added the preselect sub-state,
+ * which returns early — before the credential form exists in the tree at all.
+ * The measured loop was an owner clicking "Finish setup →" on a key another tab
+ * had disconnected: the server refuses 409, the copy points at a form that is
+ * not painted, Retry blanks the banner and changes nothing, and "Continue with
+ * this key" refuses identically. The one control that works was the one thing
+ * the copy did not mention.
+ *
+ * ⭐ SO THE ORACLE IS THE RENDERED SCREEN, NOT THE TABLE. The escape hatch's
+ * label is read OFF THE DOM and never typed here, so renaming the control
+ * without following the copy reddens this too — a string-vs-string assertion
+ * is exactly what let the defect ship.
+ * ═══════════════════════════════════════════════════════════════════════════
+ */
+describe("[162-06 review / B-2] the preselect refusal points at a control that exists", () => {
+  const PRESELECT: PreselectedKey = {
+    id: "55555555-5555-5555-5555-555555555555",
+    exchange: "bybit",
+    exchangeLabel: "Bybit",
+    keyLabel: "Zavara main",
+  };
+
+  beforeEach(() => {
+    trackMock.mockClear();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  /** The measured refusal: the stored key is gone, so the reuse arm 409s. */
+  function mockReuseRefusal() {
+    return vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(
+        {
+          code: "KEY_REUSE_UNAVAILABLE",
+          error: "That stored key is not available to reuse.",
+        },
+        409,
+      ),
+    );
+  }
+
+  async function refuse(onUseDifferentKey = vi.fn()) {
+    mockReuseRefusal();
+    render(
+      <ConnectKeyStep
+        wizardSessionId={SESSION}
+        onSuccess={vi.fn()}
+        preselectKey={PRESELECT}
+        onUseDifferentKey={onUseDifferentKey}
+      />,
+    );
+    fireEvent.click(screen.getByTestId("wizard-preselect-continue"));
+    const envelope = await screen.findByTestId("error-envelope");
+    return { envelope, onUseDifferentKey };
+  }
+
+  it("names the escape hatch that IS rendered — its label read off the DOM, not typed here", async () => {
+    const { envelope } = await refuse();
+
+    // The screen, MEASURED rather than assumed: there is no credential form
+    // behind this banner. If that stops being true the guard below is asking
+    // the wrong question, so it is asserted rather than narrated.
+    expect(
+      screen.queryByTestId("wizard-connect-submit"),
+      "the preselect branch has started rendering the credential form, so the " +
+        "premise of this whole describe has changed — re-derive it before " +
+        "touching the assertions.",
+    ).toBeNull();
+    expect(screen.queryByPlaceholderText("Paste the read-only key")).toBeNull();
+
+    const escapeHatch = screen.getByTestId("wizard-preselect-different");
+    const escapeLabel = escapeHatch.textContent?.trim() ?? "";
+    expect(
+      escapeLabel.length,
+      "the escape hatch rendered no label at all, so the containment check " +
+        "below would pass against an empty string and check nothing.",
+    ).toBeGreaterThan(3);
+
+    expect(
+      envelope.textContent,
+      "The refusal must name a control the reader can actually see. The only " +
+        "controls on this screen are 'Continue with this key' (refused " +
+        `identically every time) and "${escapeLabel}" — so that is the remedy, ` +
+        "and the copy has to say so.",
+    ).toContain(escapeLabel);
+  });
+
+  it("claims NO credential form is on the screen — the exact sentence that shipped", async () => {
+    const { envelope } = await refuse();
+
+    // Hand-typed PHRASE CLASS: present-tense claims that a form stands on THIS
+    // screen. ⚠️ Deliberately narrow — a sentence about where a control LEADS
+    // ("connect this account with its own API credentials") is honest and must
+    // stay green; only "the form is here" claims are banned.
+    const FORM_IS_ON_THIS_SCREEN = [
+      "the form on this step",
+      "the form on this screen",
+      "the form on this page",
+      "the form below",
+      "the form above",
+      "the form behind",
+      "still works normally",
+      "connect this account here",
+    ] as const;
+
+    const claimsIn = (haystack: string): string[] =>
+      FORM_IS_ON_THIS_SCREEN.filter((p) => haystack.toLowerCase().includes(p));
+
+    // ⛔ POSITIVE CONTROL — the literal sentence that shipped. If the predicate
+    // stops matching it, the assertion below has gone blind and passes for the
+    // wrong reason. Fix the list; never delete this.
+    expect(
+      claimsIn(
+        "Connect this account here with its API credentials instead — the " +
+          "form on this step still works normally.",
+      ),
+      "the form-claim predicate matched NOTHING in the very sentence B-2 was " +
+        "filed against, so it is no longer guarding anything.",
+    ).not.toEqual([]);
+
+    expect(
+      claimsIn(envelope.textContent ?? ""),
+      "The refusal tells the reader to use a form that this branch returns " +
+        "before rendering. That is the unwinnable loop 162-06 exists to close, " +
+        "one screen later: no form, Retry blanks the banner, and 'Continue " +
+        "with this key' is refused identically.",
+    ).toEqual([]);
+  });
+
+  it("Retry reaches the credential form the copy promises — asserted by RENDER, not by a spy", async () => {
+    // A host in miniature: the real one (`ContributionWizardOverlay`) drops the
+    // preselect and tears the step down by remount. The property under test is
+    // the same either way — after Retry, the reader is on the form.
+    function PreselectHost() {
+      const [dismissed, setDismissed] = useState(false);
+      return (
+        <ConnectKeyStep
+          wizardSessionId={SESSION}
+          onSuccess={vi.fn()}
+          preselectKey={dismissed ? null : PRESELECT}
+          onUseDifferentKey={() => setDismissed(true)}
+        />
+      );
+    }
+
+    mockReuseRefusal();
+    render(<PreselectHost />);
+    fireEvent.click(screen.getByTestId("wizard-preselect-continue"));
+    await screen.findByTestId("error-envelope");
+
+    // Recoverability is DERIVED from `try_another_key`; a Retry that is not
+    // offered at all is the other half of the same defect.
+    const retry = screen.getByRole("button", { name: "Retry" });
+    fireEvent.click(retry);
+
+    expect(
+      await screen.findByTestId("wizard-connect-submit"),
+      "Retry cleared the banner and left the reader on the identical screen — " +
+        "the same saved-key panel, the same refusal one click away. " +
+        "`try_another_key` means ANOTHER key, and the only control that " +
+        "delivers one is the escape hatch, so Retry is wired to it.",
+    ).toBeInTheDocument();
+    expect(screen.queryByTestId("wizard-preselect-summary")).toBeNull();
+  });
+
+  /**
+   * ⛔ THE OTHER HALF OF THE SAME WIRING, and the regression the B-2 fix could
+   * easily have caused. `SERVICE_UNREACHABLE` is reachable on this screen —
+   * the reuse arm's catch sets it when OUR OWN hop fails — and it carries
+   * `clear_and_retry`, whose whole meaning is "send the same thing again". Its
+   * copy says "try the same action again". A Retry that dropped the preselect
+   * there would take the key out from under a user whose only problem was a
+   * transient network fault, and hand them a credential form for a key we
+   * already hold — the very re-POST loop 162-06 exists to prevent.
+   */
+  it("a transient hop failure keeps the preselect — Retry there means 'again', not 'another key'", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("offline"));
+    const onUseDifferentKey = vi.fn();
+
+    render(
+      <ConnectKeyStep
+        wizardSessionId={SESSION}
+        onSuccess={vi.fn()}
+        preselectKey={PRESELECT}
+        onUseDifferentKey={onUseDifferentKey}
+      />,
+    );
+    fireEvent.click(screen.getByTestId("wizard-preselect-continue"));
+
+    const envelope = await screen.findByTestId("error-envelope");
+    expect(envelope).toHaveTextContent("We could not reach our own service.");
+
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+
+    expect(
+      onUseDifferentKey,
+      "Retry dropped the preselect on a code whose remedy is to re-send the " +
+        "SAME request. The user loses the key they chose over a network blip, " +
+        "and lands on a credential form for a key we already hold.",
+    ).not.toHaveBeenCalled();
+    // The banner clears and the saved key survives, so "Continue with this
+    // key" — the action its own copy tells them to repeat — is there to press.
+    expect(screen.queryByTestId("error-envelope")).toBeNull();
+    expect(screen.getByTestId("wizard-preselect-continue")).toBeInTheDocument();
+    errSpy.mockRestore();
+  });
+});
+
+/**
+ * ═══════════════════════════════════════════════════════════════════════════
+ * [162 review / A-6] A BODY THAT WAS NOT JSON IS RECORDED AS SUCH.
+ *
+ * `res.json().catch(() => ({}))` collapsed "the route answered with an empty
+ * body" and "an intermediary answered with an HTML error page" into the same
+ * `{}`. `UNKNOWN` is the honest code for both — we genuinely do not know — so
+ * what was lost is DEBUGGABILITY, not truth: nothing anywhere recorded that a
+ * parse had been attempted and failed. The shape is the sibling surface's
+ * (`KeyPermissionBadge.tsx`): a sentinel, and the response's OWN metadata.
+ *
+ * ⛔ THE BODY ITSELF IS NEVER LOGGED. Unparseable bytes come from an
+ * intermediary we did not write; echoing them is how a proxy banner or an
+ * internal host ends up in a user-submitted screenshot. The negative assertion
+ * is as load-bearing as the positive one.
+ * ═══════════════════════════════════════════════════════════════════════════
+ */
+describe("[162 review / A-6] an unparseable response body is distinguishable from an empty one", () => {
+  const PROXY_MARKER = "upstream-proxy-banner-do-not-log-me";
+
+  const PRESELECT: PreselectedKey = {
+    id: "66666666-6666-6666-6666-666666666666",
+    exchange: "bybit",
+    exchangeLabel: "Bybit",
+    keyLabel: "Zavara main",
+  };
+
+  function htmlErrorResponse() {
+    return new Response(`<html><body>${PROXY_MARKER}</body></html>`, {
+      status: 502,
+      statusText: "Bad Gateway",
+      headers: { "Content-Type": "text/html" },
+    });
+  }
+
+  function loggedText(spy: { mock: { calls: unknown[][] } }): string {
+    return spy.mock.calls
+      .map((c) => c.map((a) => String(a)).join(" "))
+      .join("\n");
+  }
+
+  beforeEach(() => {
+    trackMock.mockClear();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("credential arm: logs HTTP status + statusText, still renders UNKNOWN, never echoes the body", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(htmlErrorResponse());
+
+    render(<ConnectKeyStep wizardSessionId={SESSION} onSuccess={vi.fn()} />);
+    fillKeyAndSecret();
+    fireEvent.click(screen.getByTestId("wizard-connect-submit"));
+
+    await vi.waitFor(() => expect(trackMock).toHaveBeenCalled());
+    const payload = trackMock.mock.calls.find(
+      (c) => (c as unknown[])[0] === "wizard_error",
+    )![1] as { code: string };
+    expect(
+      payload.code,
+      "UNKNOWN is the honest code for a body we could not read — A-6 is a " +
+        "debuggability fix and must not invent a code from a transport fault.",
+    ).toBe("UNKNOWN");
+
+    const logged = loggedText(errSpy);
+    expect(
+      logged,
+      "A JSON-parse failure was laundered into an empty object: the screen " +
+        "says UNKNOWN and nothing anywhere records that there was no JSON to " +
+        "read. Support has nothing to correlate against the proxy/CDN logs.",
+    ).toContain("HTTP 502 (Bad Gateway)");
+    expect(logged).toContain("was not JSON");
+    expect(
+      logged,
+      "the unparseable BODY was echoed into the console — arbitrary bytes " +
+        "from an intermediary we did not write.",
+    ).not.toContain(PROXY_MARKER);
+  });
+
+  it("reuse arm: the same record, on the arm the preselect screen uses", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(htmlErrorResponse());
+
+    render(
+      <ConnectKeyStep
+        wizardSessionId={SESSION}
+        onSuccess={vi.fn()}
+        preselectKey={PRESELECT}
+        onUseDifferentKey={vi.fn()}
+      />,
+    );
+    fireEvent.click(screen.getByTestId("wizard-preselect-continue"));
+
+    await vi.waitFor(() => expect(trackMock).toHaveBeenCalled());
+    const logged = loggedText(errSpy);
+    expect(logged).toContain("HTTP 502 (Bad Gateway)");
+    expect(logged).not.toContain(PROXY_MARKER);
+  });
+
+  it("a genuinely EMPTY-but-valid JSON body logs no parse failure — the two stay distinguishable", async () => {
+    // ⛔ THE HALF THAT MAKES THE OTHER TWO MEAN SOMETHING. A log fired on every
+    // non-2xx would satisfy both assertions above while recording nothing about
+    // parsing at all.
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(jsonResponse({}, 500));
+
+    render(<ConnectKeyStep wizardSessionId={SESSION} onSuccess={vi.fn()} />);
+    fillKeyAndSecret();
+    fireEvent.click(screen.getByTestId("wizard-connect-submit"));
+
+    await vi.waitFor(() => expect(trackMock).toHaveBeenCalled());
+    expect(loggedText(errSpy)).not.toContain("was not JSON");
   });
 });
