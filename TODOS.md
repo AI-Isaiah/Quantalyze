@@ -1277,8 +1277,12 @@ TRUE for TEST. Any note repeating the old sentence must name which database it m
 
 **Why no CI signal will ever say so.** Three measured facts compose:
 
-1. `supabase-migrate.yml` targets `vars.SUPABASE_PROJECT_REF`, which is the PROD ref. **No
-   workflow applies migrations to TEST.** TEST's ledger tops out one migration short.
+1. **No workflow applies migrations to TEST.** All four migration-touching workflows checked:
+   `supabase-migrate.yml` targets `vars.SUPABASE_PROJECT_REF` (the PROD ref);
+   `migration-drift-check.yml` runs `db push --include-all --dry-run` — a dry run, also against
+   PROD; `migration-policy.yml` documents that no `db push` or other write is ever invoked;
+   `mutex-probe.yml` uses `TEST_SUPABASE_DB_URL` only to take a lock. TEST's ledger tops out one
+   migration short.
 2. `sql-tests` — the ONLY lane that executes real deployed SQL bodies — has five steps: install
    psql, preflight, acquire mutex, run, release. **There is no migration-apply step.**
 3. TEST sits in the gate's *true pre-apply* state (pre-fix body AND no marker comment), which is
@@ -2741,7 +2745,7 @@ EXECUTED, §str/None follow-through, §Discovery observation).
 
 ### Phase 162 (HONEST) — post-deploy QA finding, ASSIGNED to Phase 163 (added 2026-08-26)
 
-- [ ] **`QA-162-01` / `HONEST-08` — the public discovery table advertises "Synced 7h ago" over a
+- [x] **`QA-162-01` / `HONEST-08` ✅ FIXED + VERIFIED ON PROD — the public discovery table advertised "Synced 7h ago" over a
       112-day-dead series.** Found by the post-deploy QA pass on quantalyze.xyz at v0.74.1.0.
       `/browse/crypto-sma` row #2 `Phoenix Protocol`: badge says **Synced 7h ago**, return series
       ends **2026-05-06** (112 days), and its own factsheet chip correctly says `Track record · old`.

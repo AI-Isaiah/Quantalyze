@@ -1,5 +1,46 @@
 # Changelog
 
+## [0.75.0.2] - 2026-08-26
+
+### Planning record corrected by live measurement
+
+No user-facing change. This release corrects what the project's own records claim about
+Phase 163's compute-job enqueue work, after measuring both live databases rather than
+re-reading the prose.
+
+### Changed
+
+- **OPS-08 is applied and verified on production**, not "code-complete, unapplied" as
+  recorded. The 10-param `_enqueue_compute_job_internal` carries zero `INTO STRICT`
+  lost-race re-reads, raises `serialization_failure`, and holds its marker comment. The
+  old sentence is still true of the TEST database, so both records now say which one
+  they mean.
+- **DRIFT-01 re-framed and root-caused.** The TEST/production divergence is an older
+  function revision, not a comment-stripped build — production stripped of comments is
+  3172 characters against TEST's 3093, so the two are not the same definition. Cause is
+  visible in the TEST migration ledger.
+- **WR-06-UTC mechanism corrected.** The freshness comparison is between two absolute
+  instants, so a viewer's timezone cannot trigger it; the offset enters when the row is
+  written. Census on production: 20 strategies with a return series, none future-dated,
+  so the defect is latent rather than active.
+
+### Added
+
+- **SKIP-01**, a new finding: no workflow applies migrations to the TEST database, and
+  the SQL self-test lane has no apply step, so any migration gate that tolerates a
+  pre-apply state stays silent there permanently. The de-stricted function live on
+  production is exercised by no test. Generalises past OPS-08 to any such gate.
+- Phase 164.1 now owns ten carry-over items that previously belonged to no phase.
+
+### Fixed
+
+- Freshness badges on the public discovery table verified live: both strategies that
+  previously advertised a recent sync over a dead return series now name the track
+  record instead ("Track record ends 7d ago" / "112d ago").
+
+Note: `0.75.0.1` shipped as a commit and a merge but never updated `VERSION`,
+`package.json`, or this file, so it has no entry here.
+
 ## [0.75.0.0] - 2026-08-26
 
 ### v1.20 Phase 163 — HARDEN: fail safe, closed, and loud
