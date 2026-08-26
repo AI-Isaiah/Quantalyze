@@ -18,7 +18,8 @@ const statusMap: Record<string, string> = {
   // Phase 149 Delta 3: `private` is a real strategy status that was missing
   // from both maps, so it fell through to `?? statusMap.draft` / `?? label` and
   // shipped as a DRAFT-inked badge reading raw lowercase "private" on
-  // (dashboard)/strategies/page.tsx:177 and StrategyHeader.tsx:24. Neutral
+  // (dashboard)/strategies/page.tsx:177. StrategyHeader.tsx:24 spells it too but
+  // is NOT a mounted surface (see that file's header), so it is not live use. Neutral
   // owner-chosen state → the same muted ink `archived` uses (DESIGN.md
   // semantic-color gate: never red/amber for a non-error status).
   private: "bg-badge-other/10 text-text-muted",

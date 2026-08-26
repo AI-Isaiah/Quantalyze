@@ -121,7 +121,10 @@ status: complete
 - **One derivation, two surfaces.** `resolveEffectiveRecency` in `src/lib/freshness.ts` owns the staler-of-two decision, and the 3d/7d series ladder was hoisted out of `FactsheetView.tsx` so the chip and the badge read one pair of numbers.
 - **The badge was not deleted, and sync recency was not thrown away.** When the series binds, the compute date moves into the `title` attribute; when sync binds — every healthy row — the render is unchanged.
 - **The anon projection got a scalar, not a blob.** `series_end:returns_series->-1->>date` was measured against the TEST project before it was written, and a regex pin now forbids `returns_series` from ever appearing as a bare column.
-- **All five real SyncBadge mounts made an explicit decision**, forced by a required prop rather than trusted to review.
+- **All four real SyncBadge mounts made an explicit decision**, forced by a required prop rather than trusted to review.
+  ⚠️ CORRECTED 2026-08-26 (review IN-01): this said "five". `StrategyHeader` is not mounted anywhere —
+  `grep -rn "StrategyHeader" src/` returns only its own definition, its own test, and stale prose. Its
+  `seriesEnd={null}` is a real decision about an unreal surface: it can neither confirm nor regress HONEST-08.
 
 ## Task Commits
 
