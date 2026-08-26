@@ -12,6 +12,17 @@ on `main` therefore looked like new additions and were dropped, which against th
 commit immediately before the merge. The intended exclusion of Phase 162's own artifacts
 stands.
 
+**The `.planning` exclusion itself was the wrong mechanism, and is reversed.** v0.74.0.0
+hand-rolled GSD's transient-vs-structural artifact split and applied it to the working branch
+tip. GSD's actual tool for this is `/gsd-pr-branch`, which builds a *separate* clean branch and
+deletes nothing; applied to the branch tip the same split does not hide artifacts from
+reviewers, it removes them from `main`. Worse, upstream is explicit that untracked planning
+**silently breaks parallel executor worktrees** — a worktree is checked out from a commit, so
+the executor finds no `PLAN.md`, and no guard degrades the run to sequential. Completed phase
+directories are meant to be *archived* into `.planning/milestones/v{X.Y}-phases/` at milestone
+close, which this repo has done for every milestone since v0.14. Phase 160/162/164.x artifacts
+are restored to tracking and will be archived with the rest of v1.20.
+
 **Five chart goldens were stale by position, not by content.** Phase 162 added the
 "Track record through {date}" line to the factsheet masthead, which shifts every panel
 below it by a single row. Rather than re-baking on faith, each new PNG was proven to be
