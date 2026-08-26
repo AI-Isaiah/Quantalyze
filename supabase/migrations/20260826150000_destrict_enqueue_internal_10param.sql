@@ -41,6 +41,48 @@
 -- this migration — only the operator's diagnosis improves. The TS half is
 -- recorded as owed work in TODOS.md and is out of this migration's scope.
 --
+-- ⛔ OWED: WR-07 — THE RAISE MESSAGE REACHES A USER-VISIBLE COLUMN, AND THAT
+-- CANNOT BE CLOSED IN SQL. Recorded here rather than patched, deliberately:
+-- the honest answer is "not fixable in this file", and a reworded string would
+-- have looked like a fix while changing nothing that matters.
+--
+-- THE PATH (measured at HEAD, 2026-08-26):
+--   src/app/api/strategies/csv-finalize/route.ts:2035 builds
+--     `compute job enqueue failed: ${enqueueErrMessage}`
+--   -> writeFailedStrategyAnalyticsPlaceholder (:1868)
+--   -> strategy_analytics.computation_error (:1928), a USER-VISIBLE column that
+--      renders verbatim in the wizard failure envelope.
+--
+-- WHY SQL CANNOT CLOSE IT. That prefix is added on the TS side and is
+-- UNCONDITIONAL — no SQLSTATE branch stands in front of it. Whatever this
+-- migration raises, the strategy's owner reads a sentence BEGINNING with
+-- "compute job enqueue failed:". SQL picks which jargon follows the colon; it
+-- cannot remove the jargon. Nor does moving the operator sentence into
+-- USING DETAIL help: the sink reads PostgREST's `.message`, never `.details`.
+--
+-- WHAT IT NEEDS — a TS change in that file, outside this migration's scope:
+--   1. Branch at the sink on the PostgREST error code, `enqueueErr.code ===
+--      '40001'`. MEASURED: zero quoted occurrences of '40001' anywhere in
+--      src/**/*.ts{,x} at HEAD, so no such branch exists yet.
+--   2. On that branch DROP the "compute job enqueue failed: " prefix — it is
+--      half the defect — instead of interpolating into it.
+--   3. The curated sentence does not need inventing. computation_error_copy(TEXT)
+--      (mig 20260826120000, Phase 162 HONEST-01) is IMMUTABLE, TOTAL and
+--      service_role-EXECUTEable, and its ELSE arm is already right for a lost
+--      enqueue race: "Analytics could not complete for this strategy. Retry the
+--      sync, or contact support if this persists." It claims nothing about
+--      automatic retries, which is precisely what makes it true here.
+--   ⚠️ The BRIDGE is not the route, though the helper is. sync_strategy_
+--   analytics_status derives the copy from compute_jobs.error_kind, and a
+--   FAILED ENQUEUE leaves no compute_jobs row to carry a kind — so this path
+--   never reaches the bridge. Call the helper directly.
+--
+-- ⛔ AND DO NOT SHIP THE COPY THE REVIEW SUGGESTED. WR-07 proposed "Your
+-- analytics run collided with another job and will retry automatically." That
+-- is FALSE at HEAD — see the ⛔ block above: nothing in this repo retries a
+-- 40001. It would trade operator jargon for a false promise, which is the
+-- HONEST-01 class over again, one layer down.
+--
 -- BEHAVIOUR DELTA, stated narrowly. The ONLY paths whose behaviour changes are
 -- the four lost-race re-reads, and only when they find NO row:
 --   before → P0002 NO_DATA_FOUND, no message, opaque 500.
@@ -113,6 +155,12 @@
 -- why a knowingly-RED file was the wrong shape — it sorts 30th of ~70 in the
 -- sql-tests glob and the runner exits on first failure, so leaving it red
 -- would have suppressed every file sorting after it.
+-- ⛔ AND IT NO LONGER TOLERATES THE PRE-FIX PAIR UNCONDITIONALLY (phase-163
+-- review, WR-04): coherence alone could not tell "never applied" from "applied,
+-- then reverted by a stale re-base", because those two produce an IDENTICAL
+-- body. The gate now decides that on the CATALOG COMMENT this migration writes
+-- — see the ⛔ note above the COMMENT ON FUNCTION statement below, which is why
+-- the phrase "Phase 163 OPS-08" in it must not be dropped.
 -- ==========================================================================
 
 SET LOCAL lock_timeout = '3s';
@@ -283,18 +331,37 @@ BEGIN
     -- race, retry safe", and the SQLSTATE is the WHOLE signal. A caller that
     -- wants to retry branches on the code, never on this string.
     --
-    -- ⛔ THE MESSAGE IS DELIBERATELY SHORT AND MUST STAY SHORT — it is NOT
-    -- operator-only text. src/app/api/strategies/csv-finalize/route.ts:2012
-    -- interpolates the raw PostgREST message into
-    -- writeFailedStrategyAnalyticsPlaceholder, which lands it VERBATIM in the
-    -- user-visible strategy_analytics.computation_error column, bypassing the
-    -- curated-copy bridge migration 20260826120000 (Phase 162, HONEST-01)
-    -- shipped one day before this file. Naming the internal SECDEF function
-    -- and four internal UUIDs here would therefore show the strategy's own
-    -- owner operator text as their failure copy — precisely the class
-    -- HONEST-01 closed. The caller already knows which target it asked for,
-    -- and the server log's CONTEXT line still names this function for
-    -- operators, so nothing diagnostic is lost by omitting both.
+    -- ⛔ THIS MESSAGE IS OPERATOR TEXT AND IT STILL REACHES A USER-VISIBLE
+    -- COLUMN. An earlier version of this note said the remedy was to keep the
+    -- message SHORT. That is the WRONG PROPERTY and the phase-163 review
+    -- (WR-07) was right to say so: the property that matters is NOT OPERATOR
+    -- JARGON, and shortness does not deliver it.
+    --
+    -- The path, re-measured at HEAD 2026-08-26 (the old note's :2012 was
+    -- stale):
+    --   src/app/api/strategies/csv-finalize/route.ts:2035 builds
+    --     `compute job enqueue failed: ${enqueueErrMessage}`
+    --   then writeFailedStrategyAnalyticsPlaceholder (:1868) writes it to
+    --   strategy_analytics.computation_error (:1928), which renders VERBATIM
+    --   to the strategy's OWNER in the wizard failure envelope.
+    --
+    -- ⚠️ AND THAT PREFIX IS BUILT ON THE TS SIDE, UNCONDITIONALLY, with no
+    -- SQLSTATE branch in front of it. So NO message this function can raise
+    -- keeps operator jargon out of that column: the user reads "compute job
+    -- enqueue failed: ..." whatever follows the colon. SQL can choose WHICH
+    -- jargon appears; it cannot remove jargon. Rewording this string into
+    -- curated user copy would be cosmetic, and it would additionally push user
+    -- copy into the operator log line for the allocator / portfolio / api_key
+    -- callers, which are not user-facing at all. The fix is a TS change, and
+    -- it is recorded as owed work in this file's header ("⛔ OWED: WR-07").
+    -- Until that lands, this string stays operator-shaped and HONEST rather
+    -- than dressed up as user copy it cannot become.
+    --
+    -- What the old note got RIGHT, and what therefore stays: naming the
+    -- internal SECDEF function and the four internal UUIDs here would make the
+    -- leak strictly worse, and nothing diagnostic is lost by omitting them —
+    -- the caller already knows which target it asked for, and the server log's
+    -- CONTEXT line still names this function for operators.
     RAISE EXCEPTION 'enqueue race lost: the winning job already advanced past the in-flight statuses'
       USING ERRCODE = 'serialization_failure';
   END IF;
@@ -340,8 +407,26 @@ GRANT EXECUTE ON FUNCTION public._enqueue_compute_job_internal(
 -- 7-param overload a comment that DOCUMENTS its plain re-read + retry code; the
 -- 10-param's comment predates that fix and said nothing about the race-loser
 -- path. Bring it to parity so the catalog description does not contradict the
--- body. Idempotent: COMMENT overwrites. Comments are NOT part of
--- pg_get_functiondef output, so this cannot interact with the gate token.
+-- body. Idempotent: COMMENT overwrites.
+--
+-- ⛔ THIS COMMENT IS LOAD-BEARING NOW — DO NOT DROP THE PHRASE "Phase 163
+-- OPS-08" FROM IT. It is no longer only documentation. Comments are not part of
+-- pg_get_functiondef output, so this text cannot interact with the STATEMENT-
+-- FORM gate token (that much of the old note here was true, and still is) — but
+-- supabase/tests/test_enqueue_internal_destrict.sql reads it separately, via
+-- obj_description(oid, 'pg_proc'), as its REVERT DISCRIMINATOR (phase-163
+-- review, WR-04).
+--
+-- The reason it can serve that purpose: a database that never received this
+-- migration and one that received it and then lost it to a CREATE OR REPLACE
+-- re-based on 20260716090000 have a BYTE-IDENTICAL body. The comment is the
+-- only thing that differs, because 20260716090000 issues no COMMENT ON FUNCTION
+-- at all and CREATE OR REPLACE does not clear one. Strip the phrase from the
+-- literal below and that gate silently falls back to answering SKIP — exit 0 —
+-- on a genuine regression, which is precisely the hole WR-04 closed.
+--
+-- If a future migration rewrites this comment, it MUST carry the phrase forward
+-- (or supersede the gate's marker in the same change, deliberately, and say so).
 -- --------------------------------------------------------------------------
 COMMENT ON FUNCTION public._enqueue_compute_job_internal(
   uuid, uuid, text, text, uuid[], text, jsonb,
