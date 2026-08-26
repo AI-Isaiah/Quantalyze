@@ -24,7 +24,15 @@ interface FixtureSpec {
 const FIXTURES: FixtureSpec[] = [
   { path: "e2e/api-key-flow.spec.ts", minBytes: 8000, recordedBytes: 9861 },
   { path: "scripts/seed-full-app-demo.ts", minBytes: 50000, recordedBytes: 59393 },
-  { path: "src/lib/observability.ts", minBytes: 700, recordedBytes: 927 },
+  // OPS-06 (Phase 163): 927 → 3003 bytes. `checkStuckNotifications` now returns
+  // a discriminated union (`StuckNotificationsResult`) instead of
+  // `{ stuck: number }`, because `0` used to mean BOTH "nothing stuck" and "the
+  // read failed". The byte pin is re-recorded here IN THE SAME COMMIT as that
+  // rewrite so it keeps measuring a real floor rather than drifting into a
+  // number nobody has checked. `minBytes` is deliberately left at 700: it
+  // guards against deletion/truncation, and raising it in lockstep with every
+  // edit would turn a deletion gate into a size ratchet.
+  { path: "src/lib/observability.ts", minBytes: 700, recordedBytes: 3003 },
 ];
 
 describe("[OBSERV-12] restore-e2e-fixtures presence gate", () => {
@@ -57,4 +65,12 @@ describe("[OBSERV-12] restore-e2e-fixtures presence gate", () => {
       "OBSERV-12: src/lib/observability.ts exists but no longer exports checkStuckNotifications — PR #111 restore reverted?",
     ).toBe(true);
   });
+
+  // OPS-06 (Phase 163) — scope note, so the next reader does not mistake this
+  // file for the contract test. Everything above is a PRESENCE gate: bytes on
+  // disk and one export regex. It cannot tell a correct
+  // `checkStuckNotifications` from one that has collapsed "could not tell" back
+  // into a zero — a reverted body of the same size passes every assertion here.
+  // The BEHAVIOUR lives in src/lib/observability.test.ts (three arms, each
+  // demonstrated RED). Add contract assertions there, not here.
 });
