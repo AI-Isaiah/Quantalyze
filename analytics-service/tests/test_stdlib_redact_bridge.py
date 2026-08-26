@@ -496,7 +496,16 @@ def test_bare_credential_arg_under_a_denylisted_key_template_is_scrubbed():
     """CR-02, in the review's own words: the shape that reads as obviously safe.
 
     `logger.warning("venue rejected api_key=%s for %s", key, strategy_id)` is
-    exactly what the redactor is supposed to catch. Pre-fix it emitted `key` in
+    exactly what the redactor is supposed to catch.
+
+    ⚠️ The fixture value is deliberately NOT credential-SHAPED. It was
+    `AKIA...` until 2026-08-26, when the pre-push secret guardrail correctly flagged
+    it as an AWS access key in the pushed diff — a synthetic fixture that trips a
+    real scanner costs every future pusher a manual triage, and teaches them to
+    bypass the guardrail. The shape is also irrelevant to what this test proves:
+    the redactor catches this case via the DENYLISTED KEY adjacent to the value
+    (`api_key=`), not by recognising the value. A value that had to look like a
+    real credential would mean the arm under test was the shape detector instead. Pre-fix it emitted `key` in
     full: the template scrub ate the `%s`, the code reverted to the original
     template, and the bare value matched nothing on its own.
     """
@@ -504,12 +513,12 @@ def test_bare_credential_arg_under_a_denylisted_key_template_is_scrubbed():
     buf, handler = _attach_capture_handler()
     try:
         logging.getLogger("quantalyze.analytics").warning(
-            "venue rejected api_key=%s for %s", "AKIALIVECREDENTIAL99", "strat-7"
+            "venue rejected api_key=%s for %s", "synthetic-cr02-value-9f3a", "strat-7"
         )
     finally:
         _detach(handler)
     out = buf.getvalue()
-    assert "AKIALIVECREDENTIAL99" not in out, (
+    assert "synthetic-cr02-value-9f3a" not in out, (
         f"CR-02 regression: bare credential arg emitted in plaintext: {out!r}"
     )
     assert "[REDACTED]" in out, f"expected the redaction marker: {out!r}"
