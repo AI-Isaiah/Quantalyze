@@ -406,6 +406,32 @@ Plans:
 
 - [ ] TBD (run /gsd-plan-phase 164.1 to break down)
 
+### Phase 164.2: CURATED-COPY — the curated failure sentence must reach the user (INSERTED)
+
+**Goal:** A computation failure shows the specific, curated sentence its writer produced —
+"Insufficient CSV history. At least 2 data points required." — instead of a generic per-kind
+sentence that replaces it seconds later.
+
+The status bridge (`sync_strategy_analytics_status`) overwrites `strategy_analytics.computation_error`
+on BOTH branches, so D-162-4's curation reaches no user on any path where a `compute_jobs` row
+transitions. Measured 2026-08-26 while closing Phase 162; it PRE-DATES v1.20 — Phase 162 did not
+introduce it, and the red-team claim that 162 caused a regression here was refuted (the retired
+COALESCE read `last_error`, which is non-NULL on all 103 PROD `failed_final` rows, so its left arm
+always won).
+
+⚠️ NOT soundly fixable inside SQL. The bridge cannot tell a curated sentence from a stale one
+because the column carries no provenance. Needs a writer/generation marker on `computation_error`
+that the Python writers set and the bridge respects. Recorded as owed work in migration
+`20260826120000`'s header — deliberately, as owed, not as an accepted trade.
+
+**Requirements**: TBD
+**Depends on:** Phase 164 (ordered AFTER 164.1 — no dependency between them, numeric order only)
+**Plans:** 0 plans
+
+Plans:
+
+- [ ] TBD (run /gsd-plan-phase 164.2 to break down)
+
 ### Phase 165: DEPS — The 9-PR dependabot campaign
 
 **Goal**: All 9 open dependabot PRs are RESOLVED — landed or deliberately closed — in the research-verified order with the full suite green between each, and production pandas is never downgraded
