@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.74.1.0] - 2026-08-26
+
+### fix: restore artifacts the v0.74.0.0 merge deleted, and re-bake 5 stale e2e goldens
+
+**Phase 161.1's planning artifacts came back.** v0.74.0.0 deliberately kept per-phase
+working artifacts out of the merge, but the exclusion list was built against a stale local
+`main` reference — one that predated Phase 161.1 landing. Fourteen files that were already
+on `main` therefore looked like new additions and were dropped, which against the real
+`main` is a deletion of already-landed work. They are restored byte-identical from the
+commit immediately before the merge. The intended exclusion of Phase 162's own artifacts
+stands.
+
+**Five chart goldens were stale by position, not by content.** Phase 162 added the
+"Track record through {date}" line to the factsheet masthead, which shifts every panel
+below it by a single row. Rather than re-baking on faith, each new PNG was proven to be
+the committed golden *displaced*: at the best alignment offset four of the five are
+byte-identical (`mean|Δ| = 0.000`). The fifth is the full-page render, whose only real
+change is the masthead edit itself — its KPI strip is value-identical, checked by cropping
+both renders. No analytics math crossed the frozen-math boundary that gate exists to guard.
+
 ## [0.74.0.0] - 2026-08-26
 
 ### feat: v1.20 Phase 162 — HONEST, what the user sees is true
