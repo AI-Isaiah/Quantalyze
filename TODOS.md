@@ -290,7 +290,7 @@ items were dropped, not carried. Categories: **Fix now** / **Fix mid-term** / **
      mapping `sampled_gapped` to its own reason. One-line fix recorded in
      `.planning/phases/161-wizerr-honest-error-surfaces/deferred-items.md`; the 142.2 pin moves with it.
 
-0.06. **⚠️ A manager cannot release their own orphaned API key — no surface exists.** Found
+0.08. **⚠️ A manager cannot release their own orphaned API key — no surface exists.** Found
    2026-08-24 during Phase 161 (WIZERR-03) execution, when the approved `161-UI-SPEC.md` remedy
    bullet turned out to be **unwinnable at HEAD** and had to be replaced rather than shipped.
    - The UI-SPEC said: *"Disconnect the unused key under Manage keys, then connect it here again."*
@@ -310,7 +310,7 @@ items were dropped, not carried. Categories: **Fix now** / **Fix mid-term** / **
      profile Exchanges panel past `allocatorOnly`, or add a control on `my-strategies`), then point
      the `KEY_ORPHANED` remedy at it.
 
-0.05. **⚠️ MT5 generic fallback names a cause it has NOT proven — a false sentence in the arm that
+0.09. **⚠️ MT5 generic fallback names a cause it has NOT proven — a false sentence in the arm that
    exists for "cause unknown".** Found 2026-08-24 during Phase 161 (WIZERR-01) execution; the plan
    deliberately did not touch it, and `161-UI-SPEC.md` holds arm 3 unchanged, so this is a scoped
    follow-up, not a regression.
@@ -584,6 +584,20 @@ items were dropped, not carried. Categories: **Fix now** / **Fix mid-term** / **
    byte-freeze + mirror-prose machinery can be deleted. Skipped same-pass because each
    reshapes just-red-teamed money-math or test machinery right before ship.
    **Recorded:** 2026-08-23 (/simplify, phase 159)
+
+0.10. **⚠️ The wizard preselect can render a dismissal control that does nothing.** Found by the
+   B-2 fixer while closing the KEY_REUSE_UNAVAILABLE dead end (2026-08-26); recorded, NOT fixed.
+   `onUseDifferentKey` is an OPTIONAL prop while `preselectKey` is also optional, so a host can in
+   principle render the preselect branch with no dismissal handler. The "Use a different key"
+   button would then paint as a no-op — and because `KEY_REUSE_UNAVAILABLE`'s copy now NAMES that
+   control as the remedy, the refusal would point at a dead button. That is the same unwinnable-loop
+   class the fix just closed, one prop away.
+   **Not live today** (measured): `ContributionWizardOverlay:302-303` passes both and
+   `WizardClient:1262-1263` forwards both, so no host omits it. Severity is guard-hygiene, not
+   user-facing — filed per the stopping rule, not blocking.
+   **Fix:** make the two props co-travel in the type (a discriminated union on the preselect
+   branch), so a host that supplies `preselectKey` MUST supply `onUseDifferentKey`. Requires
+   editing `WizardClient.tsx`, which the fixer did not own.
 
 0.1. **⛔ LEDGER-BACKED VENUES HAVE NO RECURRING STRATEGY REFRESH — MT5 factsheets go stale
    silently, forever.** Founder-reported 2026-08-23 ("MT5 strategies are not being read out every
