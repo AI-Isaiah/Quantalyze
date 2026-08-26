@@ -408,9 +408,14 @@ Plans:
 
 ### Phase 164.2: CURATED-COPY — the curated failure sentence must reach the user (INSERTED)
 
-**Goal:** A computation failure shows the specific, curated sentence its writer produced —
-"Insufficient CSV history. At least 2 data points required." — instead of a generic per-kind
-sentence that replaces it seconds later.
+**Goal:** Every failure sentence a user reads is the true, specific one. Two mechanisms, one
+thesis:
+
+- **(a) The curated sentence survives the write.** A computation failure shows what its writer
+  produced — "Insufficient CSV history. At least 2 data points required." — instead of a generic
+  per-kind sentence that replaces it seconds later.
+- **(b) The wizard's refusals stop misattributing.** Four copy falsehoods enumerated below name a
+  cause the code never tested, or blame a party that did not cause the failure.
 
 The status bridge (`sync_strategy_analytics_status`) overwrites `strategy_analytics.computation_error`
 on BOTH branches, so D-162-4's curation reaches no user on any path where a `compute_jobs` row
@@ -423,6 +428,39 @@ always won).
 because the column carries no provenance. Needs a writer/generation marker on `computation_error`
 that the Python writers set and the bridge respects. Recorded as owed work in migration
 `20260826120000`'s header — deliberately, as owed, not as an accepted trade.
+
+**Also in scope — four wizard-copy falsehoods surfaced 2026-08-26.** Same thesis (the sentence a
+user reads must be true); different mechanism and different files from the SQL bridge above. Each
+was found by the fixer that closed the preselect-refusal class and deliberately left open because
+it lived outside that fixer's files — named, not silently dropped:
+
+1. **`KEY_MISSING_REQUIRED_FIELD`'s title and cause stay credential-shaped on the preselect
+   screen** ("One of the required fields is empty.") where there are no fields. `fixRequires`
+   gates `fix[]` only, so the surface-split fix could not reach them. The real fix is at the
+   emitter in `src/app/api/strategies/create-with-key/route.ts`, whose own guard comment already
+   says that arm "may not wear a `KEY_*` verdict that blames a credential". Minting a new copy
+   member moves `EXPECTED_TABLE_SIZE` plus three roster/coverage laws — do it deliberately.
+2. **`KEY_RATE_LIMIT` blames the exchange for OUR limiter.** The 429 comes from
+   `userActionLimiter`, but the copy says "The exchange asked us to slow down… exchange-side
+   throttle", and `fix[1]` "try a different exchange account" cannot clear a per-USER bucket.
+   Identical on the credential arm; `route.ts:891` already records it ("our outage, blamed on
+   their exchange") and accepted it. This is a misattribution class with an existing owner.
+3. **`DRAFT_ALREADY_EXISTS`'s cause says "with the same API key"** — false on the stale-session
+   path, where the collision is on `(user_id, wizard_session_id, source)` and not the key. True
+   on the TOCTOU path and on the credential arm, so the shared `cause` needs splitting, not
+   replacing.
+4. **The stale-`wizardSessionId` ROOT CAUSE is still open** (functional, not copy).
+   `deriveWizardResumeOverrides` restores `wizardSessionId` from localStorage unconditionally on
+   the API branch, so an abandoned draft over key A lends its session id to a preselect for key B
+   and 23505s forever — `resolveStrategiesForKey` looks up by `api_key_id` and never finds B.
+   Re-pressing Continue can never win. Fix belongs in `WizardClient`/`localStorage.ts` (mint a
+   fresh session id when a preselect is supplied) or in the route (re-resolve on 23505). Phase 162
+   shipped honest copy describing this dead end; it did not remove the dead end.
+
+⚠️ **Overlap to dedupe at planning time:** Phase 164.1 already claims "phase 161's deferred
+error-surface items including WIZFORM-02's `code: UNKNOWN` class". Items 1–3 above are wizard
+error-surface work and could equally live there. Decide ownership ONCE when the first of the two
+is planned — do not let both phases carry them.
 
 **Requirements**: TBD
 **Depends on:** Phase 164 (ordered AFTER 164.1 — no dependency between them, numeric order only)
