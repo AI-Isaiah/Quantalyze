@@ -117,6 +117,12 @@ export function StrategyGrid({
               {!s.is_example && (
                 <SyncBadge
                   computedAt={s.analytics.computed_at}
+                  /* HONEST-08 — same rows, same projection, same duty as the
+                     table: the card judges the staler of job- and
+                     series-recency. Both render paths are covered so the class
+                     cannot re-open through whichever one a future page
+                     mounts. */
+                  seriesEnd={s.analytics.series_end ?? null}
                   exchange={s.supported_exchanges?.[0]}
                   className="mb-2"
                 />

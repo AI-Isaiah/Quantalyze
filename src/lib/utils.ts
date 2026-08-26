@@ -175,6 +175,33 @@ export function extractAnalytics(raw: unknown): StrategyAnalytics | null {
   return null;
 }
 
+/**
+ * Phase 163 / HONEST-08 — "where does this strategy's track record end?",
+ * answered ONCE for every surface that asks.
+ *
+ * Two shapes can answer it and a given read carries only one. The anonymous
+ * ranked projection carries a `series_end` SCALAR (the JSONB alias
+ * `series_end:returns_series->-1->>date`, so the array never reaches an
+ * unauthenticated reader); owner- and portfolio-scoped reads carry the
+ * `returns_series` ARRAY itself. Surfaces that had to normalise that by hand
+ * would each grow their own last-element pick, and this whole requirement
+ * exists because two surfaces derived one fact two ways and disagreed.
+ *
+ * ⚠️ Returns `null` for absent / empty / malformed input, never a guess. Null
+ * means UNKNOWN, and `resolveEffectiveRecency` treats unknown as "cannot
+ * support a freshness claim" — never as "fine".
+ */
+export function seriesEndOf(
+  a: StrategyAnalytics | null | undefined,
+): string | null {
+  if (!a) return null;
+  if (a.series_end !== undefined) return a.series_end;
+  const points = a.returns_series;
+  const last =
+    Array.isArray(points) && points.length > 0 ? points[points.length - 1] : null;
+  return typeof last?.date === "string" ? last.date : null;
+}
+
 export const EMPTY_ANALYTICS: StrategyAnalytics = {
   id: "",
   strategy_id: "",
@@ -196,6 +223,12 @@ export const EMPTY_ANALYTICS: StrategyAnalytics = {
   sparkline_drawdown: null,
   metrics_json: null,
   returns_series: null,
+  // Phase 163 / HONEST-08 — explicit, not merely absent. This constant is the
+  // substitute `shapeRowAnalytics` hands back for a row whose run did not
+  // produce numbers, and a run that produced no numbers cannot claim a track
+  // record END either. `null` = unknown, which the freshness resolver reads as
+  // "cannot support a freshness claim".
+  series_end: null,
   drawdown_series: null,
   monthly_returns: null,
   daily_returns: null,

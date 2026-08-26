@@ -38,6 +38,10 @@ function strat(
     max_drawdown?: number | null;
     computed_at?: string | null;
     computation_status?: string | null;
+    // Phase 163 / HONEST-08 — `getPortfolioStrategies` carries the array, and
+    // `seriesEndOf` picks its last point. Fixtures supply it so the badge's
+    // second clock is exercised on the real shape this read delivers.
+    returns_series?: { date: string; value: number }[] | null;
   } | null,
 ): StrategyInput {
   return {
@@ -186,6 +190,13 @@ function hoursAgoIso(hours: number): string {
   return new Date(Date.now() - hours * 60 * 60 * 1000).toISOString();
 }
 
+/** A `returns_series` point date N days back — Phase 163 / HONEST-08. */
+function isoDaysAgo(days: number): string {
+  return new Date(Date.now() - days * 24 * 60 * 60 * 1000)
+    .toISOString()
+    .slice(0, 10);
+}
+
 describe("<StrategyBreakdownTable> — B14 per-constituent freshness", () => {
   it("renders a per-row freshness badge keyed on each constituent's computed_at", () => {
     const strategies: StrategyInput[] = [
@@ -203,10 +214,23 @@ describe("<StrategyBreakdownTable> — B14 per-constituent freshness", () => {
 
   it("distinguishes a fresh constituent (positive dot) from a stale one (negative dot)", () => {
     const strategies: StrategyInput[] = [
-      // 2h ago → fresh (< 12h) → positive token.
-      strat("a", "Fresh", 0.6, { sharpe: 1.5, computed_at: hoursAgoIso(2) }),
+      // 2h ago → fresh (< 12h) → positive token. Phase 163 / HONEST-08: the
+      // row must ALSO carry a live track record to earn the green dot — a job
+      // that ran 2h ago over a dead series is not a fresh constituent, and an
+      // ABSENT series is capped below fresh (see the cap spec below). The
+      // series end is supplied here so this spec keeps testing the fresh/stale
+      // split it was written for rather than the unknown-series cap.
+      strat("a", "Fresh", 0.6, {
+        sharpe: 1.5,
+        computed_at: hoursAgoIso(2),
+        returns_series: [{ date: isoDaysAgo(1), value: 1.2 }],
+      }),
       // 100h ago → stale (≥ 48h) → negative token.
-      strat("b", "Stale", 0.4, { sharpe: 1.0, computed_at: hoursAgoIso(100) }),
+      strat("b", "Stale", 0.4, {
+        sharpe: 1.0,
+        computed_at: hoursAgoIso(100),
+        returns_series: [{ date: isoDaysAgo(1), value: 1.1 }],
+      }),
     ];
 
     const { container } = render(
@@ -232,5 +256,53 @@ describe("<StrategyBreakdownTable> — B14 per-constituent freshness", () => {
     // Rows still render, but with no "Synced … ago" liveness claim.
     expect(screen.getAllByRole("row").slice(1)).toHaveLength(2);
     expect(screen.queryByText(/Synced/i)).toBeNull();
+  });
+
+  /**
+   * Phase 163 / HONEST-08. A portfolio's constituents are OTHER managers'
+   * strategies, so this table makes cross-tenant freshness claims — the same
+   * shape of claim that `/browse` was measured making falsely on production
+   * 2026-08-26 ("Synced 7h ago" over a series that ended 112 days earlier).
+   * The rule is applied here for the same reason it is applied there.
+   */
+  it("HONEST-08: a fresh job over a dead track record reads the TRACK RECORD", () => {
+    const strategies: StrategyInput[] = [
+      strat("a", "DeadTrack", 1, {
+        sharpe: 1.5,
+        computed_at: hoursAgoIso(7),
+        returns_series: [{ date: isoDaysAgo(112), value: 1.4 }],
+      }),
+    ];
+
+    const { container } = render(
+      <StrategyBreakdownTable strategies={strategies} attribution={null} portfolioId="p-1" />,
+    );
+
+    expect(container.querySelectorAll(".bg-positive")).toHaveLength(0);
+    expect(container.querySelectorAll(".bg-negative")).toHaveLength(1);
+    expect(screen.queryByText(/Synced/i)).toBeNull();
+    expect(screen.getByText(/Track record ends/i)).toBeTruthy();
+  });
+
+  it("HONEST-08: an UNKNOWN track record caps the dot below fresh", () => {
+    const strategies: StrategyInput[] = [
+      // Terminal success, computed 2h ago, but the read carried no series at
+      // all — so this surface cannot evidence a live strategy and must not
+      // paint one green.
+      strat("a", "NoSeries", 1, {
+        sharpe: 1.5,
+        computed_at: hoursAgoIso(2),
+        returns_series: null,
+      }),
+    ];
+
+    const { container } = render(
+      <StrategyBreakdownTable strategies={strategies} attribution={null} portfolioId="p-1" />,
+    );
+
+    expect(container.querySelectorAll(".bg-positive")).toHaveLength(0);
+    // Not a staleness claim either — the job really did run 2h ago.
+    expect(container.querySelectorAll(".bg-negative")).toHaveLength(0);
+    expect(screen.getByText(/Synced 2h ago/i)).toBeTruthy();
   });
 });

@@ -1178,7 +1178,20 @@ export function StrategyTable({
                                 printing a sync date it cannot justify no matter
                                 who hands it rows. */}
                             {mayClaimSyncRecency && (
-                              <SyncBadge computedAt={s.analytics.computed_at} exchange={s.supported_exchanges?.[0]} />
+                              <SyncBadge
+                                computedAt={s.analytics.computed_at}
+                                /* HONEST-08 — the row HAS this fact: the
+                                   ranked projection carries the series' last
+                                   date as a scalar alias
+                                   (`series_end:returns_series->-1->>date`), so
+                                   this surface can and must judge the track
+                                   record alongside the job. `?? null` covers
+                                   the reads that predate the alias — absent
+                                   means unknown, which the resolver caps below
+                                   fresh rather than treating as fine. */
+                                seriesEnd={s.analytics.series_end ?? null}
+                                exchange={s.supported_exchanges?.[0]}
+                              />
                             )}
                             {/* Phase 149 Delta 4 — the honest pending chip fills
                                 the slot SyncBadge leaves empty. Gated on

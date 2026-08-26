@@ -643,6 +643,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 | Phase 162 P02 | 2h40m | 3 tasks | 11 files |
 | Phase 163 P01 | 50min | 2 tasks | 6 files |
 | Phase 163 P03 | 50m | 3 tasks | 98 files |
+| Phase 163 P04 | 33min | 3 tasks | 16 files |
 
 ## Accumulated Context
 
@@ -808,6 +809,9 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - [Phase 161]: SEC-02: forward-only redaction — founder declined history rewrite; the scan stops new leakage, it does not unpublish
 - [Phase 161]: SEC-02 gate has ZERO path exclusions — one value-only exemption for the <user> placeholder; a path carve-out is the gitleaks blindness it exists to fix
 - [Phase 161]: Two APPLIED migrations edited comment-only under a RECORDED EXCEPTION — precondition verified read-only first: Supabase CLI reconciles by version, never content hash
+- [Phase 161]: HONEST-08: the staler-of-two comparison is between VERDICTS on per-subject ladders (job 12h/48h, series 3d/7d), not raw dates — a daily series' last point is always older than a fresh job, so older-date-wins would have deleted the sync copy product-wide
+- [Phase 161]: HONEST-08: the 3d/7d series ladder moved from FactsheetView.tsx into lib/freshness.ts and the chip now imports it — one pair of numbers for the list badge and the factsheet chip
+- [Phase 161]: HONEST-08: PostgREST accepts a negative JSONB array index as a projection alias (series_end:returns_series->-1->>date, MEASURED HTTP 200) — but postgrest-js cannot TYPE-parse it, so the call site carries a narrow documented cast
 
 ### Decisions (execution-time, Phase 140.2)
 
