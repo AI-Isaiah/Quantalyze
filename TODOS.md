@@ -1070,6 +1070,29 @@ grey "Track record ends in the future" on both the discovery badge and the facts
 Honest and self-consistent — no longer a contradiction, and no longer amber — but still a
 degraded render for a perfectly healthy strategy.
 
+⭐ **MECHANISM CORRECTED + MEASURED LIVE 2026-08-26.** Two things this entry could be misread as
+saying, both wrong:
+
+1. **The VIEWER's timezone is irrelevant.** `bucketSeriesAge` compares `now.getTime()` against
+   `series_end` parsed at UTC midnight — two absolute instants. Nothing in the read path reads a
+   local calendar. The offset enters on the WRITE side: the reporter's local date is what gets
+   stamped into the series. So the trigger is **a row whose `series_end` is a future UTC date**,
+   not who is looking at it. A browser with an overridden timezone will not reproduce this.
+2. **`strategy_analytics` has no `series_end` column on PROD.** `seriesEndOf` therefore always
+   falls through to the `returns_series` array arm. Anything written against the scalar is
+   describing a shape production does not have.
+
+**Live census on PROD, 2026-08-26 18:54 UTC — the defect is LATENT, not active:**
+
+```
+strategies_with_series 20 | future_dated 0 | dated_today 0 | newest_series_end 2026-08-25
+```
+
+⇒ Nothing renders the degraded copy today. ⛔ A browser QA sweep for this would come back green
+and prove nothing — the precondition is absent from the data, not from the code. Reproducing it
+needs a seeded row stamped with tomorrow's UTC date, which is also the shape the regression test
+must use.
+
 
 ### ⚠️ PRE-EXISTING — a personal email is published in tracked AI-review payloads (added 2026-08-26)
 
@@ -1190,7 +1213,7 @@ these four are the deliberate carry-overs, each with the reason it was not fixed
   either run every file and aggregate failures at the end, or make the expected-red state
   a first-class, per-file declaration the runner understands.
 
-### Phase 163 / OPS-08 — TEST runs a COMMENT-STRIPPED build of `_enqueue_compute_job_internal` (added 2026-08-26)
+### Phase 163 / OPS-08 — TEST runs an OLDER REVISION of `_enqueue_compute_job_internal` (added 2026-08-26, corrected + root-caused 2026-08-26)
 
 Found while pre-flighting the OPS-08 migration's gate arms against both databases. Three
 reviewers independently worried that one gate arm is "meaningful on PROD and vacuous on
@@ -1201,10 +1224,19 @@ TEST". Measuring it explains exactly why, and the cause is broader than that one
 | PROD 7-param | 4622 | 23 | yes |
 | TEST 7-param | 3093 | **0** | no |
 
-**TEST is running a comment-stripped build of the same function.** It is semantically
-identical — every gate arm evaluates the same on both databases, which is why nothing is
-red — but the bodies are not byte-equal and TEST is therefore not a faithful mirror of
-PROD for this function.
+⭐ **CORRECTED 2026-08-26 — "comment-stripped build" was the wrong framing and should not be
+repeated.** Re-measured: PROD's 7-param body stripped of comments is **3172** chars; TEST's raw
+body is **3093**. Not equal, so TEST is NOT this definition minus its comments — TEST is running
+an **older revision** of the function. The observable (0 comment markers vs PROD's 23) is the
+same; the explanation is not, and the wrong one implies a stripping mechanism that does not exist.
+
+⭐ **ROOT CAUSE IS NO LONGER UNKNOWN.** TEST's migration ledger explains it. TEST records
+`version` as the *application* timestamp with the migration's own timestamp in `name`
+(e.g. version `20260826084633` / name `20260826140000`); PROD records the migration timestamp
+as `version`, once each. TEST also carries **duplicate applications** — the three
+`ledger_refresh_*` migrations and `sync_status_protect_marked_refresh` each appear TWICE, at two
+different application times. That is a `db push` re-run over a partially-reset database, not the
+`supabase-migrate` workflow. Different mechanism, different history, hence different bodies.
 
 **Why it matters, concretely.** The migration's gate strips comments before matching,
 because plpgsql stores `prosrc` verbatim. On PROD that strip is LOAD-BEARING: PROD's
@@ -1219,12 +1251,66 @@ there is nothing to strip, so:
   **zero** TEST results. CI cannot detect the removal of the mechanism CI depends on.
 
 - **[DRIFT-01] Re-align TEST's `_enqueue_compute_job_internal` with the repo definition**, or
-  record deliberately that TEST is a stripped mirror. Until then, no CI run can exercise the
+  record deliberately that TEST is an older mirror. Until then, no CI run can exercise the
   comment-strip, and any change to it must be pre-flighted against PROD by reading
   `pg_get_functiondef` directly — a green TEST run is not evidence.
 
-⚠️ Root cause of the stripped build is unknown; it predates this phase. The gate arms were
-all measured green on BOTH databases on 2026-08-26, so nothing is broken today.
+⚠️ The gate arms were all measured green on BOTH databases on 2026-08-26, so nothing is broken
+today. See **SKIP-01** below: the drift is one symptom of TEST never receiving migrations at all.
+
+
+### ⛔ SKIP-01 — nothing applies migrations to TEST, so the OPS-08 gate SKIPs FOREVER (added 2026-08-26)
+
+Found by live measurement after PR #717 merged, while checking whether the recorded "OPS-08
+code-complete, migration unapplied" state was still true. It is true — of the wrong database.
+
+**The recorded state MOVED rather than went stale.** Measured on both databases 2026-08-26:
+
+| `_enqueue_compute_job_internal` (10-param) | PROD | TEST |
+|---|---|---|
+| `INTO STRICT` lost-race re-reads | **0** | **present** |
+| `serialization_failure` raise | **yes** | **no** |
+| OPS-08 marker comment | **yes** | **no** |
+
+So "the deployed function still carries all four `INTO STRICT`" is now FALSE for production and
+TRUE for TEST. Any note repeating the old sentence must name which database it means.
+
+**Why no CI signal will ever say so.** Three measured facts compose:
+
+1. **No workflow applies migrations to TEST.** All four migration-touching workflows checked:
+   `supabase-migrate.yml` targets `vars.SUPABASE_PROJECT_REF` (the PROD ref);
+   `migration-drift-check.yml` runs `db push --include-all --dry-run` — a dry run, also against
+   PROD; `migration-policy.yml` documents that no `db push` or other write is ever invoked;
+   `mutex-probe.yml` uses `TEST_SUPABASE_DB_URL` only to take a lock. TEST's ledger tops out one
+   migration short.
+2. `sql-tests` — the ONLY lane that executes real deployed SQL bodies — has five steps: install
+   psql, preflight, acquire mutex, run, release. **There is no migration-apply step.**
+3. TEST sits in the gate's *true pre-apply* state (pre-fix body AND no marker comment), which is
+   the one state `test_enqueue_internal_destrict.sql` deliberately waves through: `exit 0`,
+   `SKIP (Part 3)`.
+
+⭐ **The pre-apply tolerance was designed for the window between authoring a migration and it
+applying. For the only database CI runs against, that window NEVER CLOSES.** Parts 1+3 SKIP
+permanently. The de-stricted body that is live on production has been executed by **no test,
+ever, anywhere**.
+
+✅ Credit where due — the gate is not naive. It RAISES on a revert (pre-fix body + marker
+present), on a hybrid re-base (some arms moved), and on the marker going dark (post-fix body,
+no marker). It goes silent in exactly one state, and TEST is in that state permanently.
+
+- **[SKIP-01] Make the pre-apply SKIP expire, or give TEST the migrations.** Two shapes, and the
+  choice is a real decision, not a detail:
+  (a) apply `supabase/migrations/**` to TEST as a CI step before `sql-tests` — closes SKIP-01 and
+      **DRIFT-01** together, because both are the same root cause; or
+  (b) keep TEST as-is and make the pre-apply arm fail once the migration is older than some
+      threshold, so a permanent SKIP becomes loud.
+  ⚠️ (a) is the root fix but changes what `sql-tests` is allowed to do to a shared database that
+  has no worker and is already contended — see the shared-test-db mutex notes. Do not treat it
+  as a one-line CI edit.
+
+⚠️ This generalises past OPS-08. ANY migration's self-check that tolerates a pre-apply state is
+permanently silent on TEST by the same three facts. OPS-08 is where it was caught, not where it
+is confined.
 
 
 ### ✅ CLOSED — Phase 163 / WR-07: operator jargon reached a user-visible column (closed 2026-08-26)
@@ -2659,7 +2745,7 @@ EXECUTED, §str/None follow-through, §Discovery observation).
 
 ### Phase 162 (HONEST) — post-deploy QA finding, ASSIGNED to Phase 163 (added 2026-08-26)
 
-- [ ] **`QA-162-01` / `HONEST-08` — the public discovery table advertises "Synced 7h ago" over a
+- [x] **`QA-162-01` / `HONEST-08` ✅ FIXED + VERIFIED ON PROD — the public discovery table advertised "Synced 7h ago" over a
       112-day-dead series.** Found by the post-deploy QA pass on quantalyze.xyz at v0.74.1.0.
       `/browse/crypto-sma` row #2 `Phoenix Protocol`: badge says **Synced 7h ago**, return series
       ends **2026-05-06** (112 days), and its own factsheet chip correctly says `Track record · old`.
@@ -2673,6 +2759,18 @@ EXECUTED, §str/None follow-through, §Discovery observation).
       series-recency in `StrategyTable`/`StrategyGrid`, reusing `FreshnessChip`'s logic rather than
       reimplementing it. ⛔ Do not close by deleting the badge; ⛔ do not test via `is_example`.
       **Severity: HIGH** — public, unauthenticated, real (non-example) strategy, honesty claim.
+      ✅ **FIXED + VERIFIED LIVE ON PROD 2026-08-26** (real browser, unauthenticated, v0.75.0.1).
+      Both named rows now bind to the series arm and changed SUBJECT, not just wording:
+      `Momentum Sphinx` → **"Track record ends 7d ago"**; `Phoenix Protocol` → **"Track record
+      ends 112d ago"**. The contradiction with the factsheet chip is gone.
+- [ ] **[HONEST-08-RESIDUAL] The over-binding direction is still unproven.** On the page above,
+      BOTH visible rows legitimately bind to the series arm (7d → warm, 112d → stale, each
+      strictly worse than its sync verdict), so the render cannot distinguish correct
+      staler-of-two from **always binds to series**. `computeFreshness`'s own comment warns that
+      "older date wins" would flip every row onto the track-record arm and delete the sync copy
+      everywhere — which is the fix the founder ruled out. Prove the sync arm still renders,
+      using a published row with a FRESH series. One exists (newest series end across PROD is
+      1 day old) but is not on the `crypto-sma` cohort. **Routed to Phase 164.1.**
 
 ### Phase 162 (HONEST) — composite failure no longer names the offending member (added 2026-08-26)
 
