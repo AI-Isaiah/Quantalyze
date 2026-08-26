@@ -1064,6 +1064,36 @@ readable with no review step. 45 is what it happens to be today, not a decision 
 public route, two guard amendments and an adversarial cache test, and this is outside SHARE-01..04.
 
 
+### CI-MIGRATE-01 — CI must apply migrations to TEST before `sql-tests` (booked 2026-08-26)
+
+⭐ **Founder-ruled 2026-08-26** while discharging Phase 163's TEST-apply item. Hand-applying one
+migration arms one gate; it does not change why the gate was silent. This item closes the mechanism.
+
+**The mechanism, measured.** All four migration-touching workflows checked: `supabase-migrate.yml`
+targets the PROD ref; `migration-drift-check.yml` runs `db push --include-all --dry-run`, also
+against PROD; `migration-policy.yml` documents that no write is ever invoked; `mutex-probe.yml`
+only takes a lock. And `sql-tests` — the ONLY lane that executes real deployed SQL bodies — has
+five steps (install psql, preflight, acquire mutex, run, release) and NO migration-apply step.
+⇒ TEST is whatever was last pushed by hand, so every migration self-check with a pre-apply
+tolerance is permanently silent there.
+
+- **[CI-MIGRATE-01] Add a migration-apply step to the `sql-tests` lane** (or a job it depends on),
+  so TEST is current before the SQL gates run.
+
+⚠️ **This is NOT a one-line CI edit — three named hazards:**
+1. **TEST is shared and contended.** The lane already acquires a mutex and the DB has no worker.
+   An apply must happen inside that mutex or it races a concurrent run.
+2. **DRIFT-01 means TEST runs OLDER revisions of several functions.** The first bulk apply will
+   surface accumulated drift all at once, inside CI, on everyone's PRs. Land it deliberately —
+   ideally apply once out-of-band first, see what breaks, THEN wire the step.
+3. **Applying arms every previously-silent gate simultaneously.** That is the point, but it means
+   the first green run after this lands is the first honest one — treat a red as information, not
+   as a regression introduced by the wiring.
+
+⭐ Until this lands, the standing rule stands: **a green `sql-tests` run is not evidence that a
+migration gate is armed.** Measure the catalog directly (`pg_get_functiondef` / `obj_description`).
+
+
 ### Phase 163 / WR-06 residual — a non-UTC reporter reads "ends in the future" ~3h every day (added 2026-08-26)
 
 WR-06 is FIXED for the defect it named (a future series end no longer renders amber beside
@@ -1289,6 +1319,20 @@ today. See **SKIP-01** below: the drift is one symptom of TEST never receiving m
 
 Found by live measurement after PR #717 merged, while checking whether the recorded "OPS-08
 code-complete, migration unapplied" state was still true. It is true — of the wrong database.
+
+⚠️ **ATTRIBUTION, corrected 2026-08-26.** The core fact was NOT discovered here. It was already
+written down in TWO places before this entry existed:
+- the migration's own header (`20260826150000:184-186`): *"Nothing applies migrations to the TEST
+  project automatically (supabase-migrate.yml targets PRODUCTION only)"*; and
+- Phase 163's verification report, which records that the gate prints `SKIP (Part 3)` and that
+  `ci.yml`'s whole-file anti-SKIP net keys on a marker STARTING `SKIP:` — which `SKIP (Part 3):`
+  does not match — concluding *"the lane is GREEN and no CI signal will ever report the unapplied
+  state."*
+
+What THIS entry adds is the **permanence**, which neither source drew out: because nothing applies
+migrations to TEST *at all*, the pre-apply state never resolves on its own. Both prior sources
+describe a condition that reads as transitional. It is not. That is the finding, and it is
+narrower than "SKIP-01 was discovered here".
 
 **The recorded state MOVED rather than went stale.** Measured on both databases 2026-08-26:
 
