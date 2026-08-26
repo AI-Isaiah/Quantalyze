@@ -100,6 +100,21 @@ const STATE = vi.hoisted(() => ({
   // Audit-2026-05-07 red-team R-0002: track refund calls so the
   // symmetric-refund tests can assert the 504/503 paths refund the token.
   refundCalls: [] as string[],
+  // Phase 163 SEC-04 — every limiter instance handed to `checkLimit`, in call
+  // order, so a test can assert WHICH bucket this route spends BY IDENTITY.
+  limitersSeen: [] as unknown[],
+}));
+
+/**
+ * Phase 163 SEC-04 — the limiter instance this route must consume.
+ *
+ * A distinguishable object, not `{}`: the identity assertion compares against
+ * this exact reference, so "the route called checkLimit" and "the route called
+ * checkLimit WITH THE COMPUTE BUCKET" stay different claims.
+ */
+const BRIDGE_COMPUTE_LIMITER_SENTINEL = vi.hoisted(() => ({
+  __id: "bridgeComputeLimiter",
+  __limit: "10/3600s",
 }));
 
 vi.mock("@/lib/supabase/server", () => ({
@@ -117,15 +132,24 @@ vi.mock("@/lib/csrf", () => ({
 // ⚠️ EXTENDED, NOT REPLACED (140.4-13 / SEAMRIM-05). See the note in
 // `src/__tests__/csv-validate-route.test.ts`: the pure helpers come from
 // `importActual` so this mock cannot drift from the real 503-vs-429 decision.
+// Phase 163 SEC-04 — this route consumes `bridgeComputeLimiter` (10/3600s),
+// NOT the shared `userActionLimiter` (5/60s). The mock exposes ONLY the
+// limiter the route is supposed to use, so a revert to the shared bucket
+// fails here rather than passing quietly. The refund spy hangs off the SAME
+// object, which is what pins that a refunded token returns to the bucket the
+// token was taken from.
 vi.mock("@/lib/ratelimit", async (importActual) => {
   const actual = await importActual<typeof import("@/lib/ratelimit")>();
   return {
-    userActionLimiter: {
+    bridgeComputeLimiter: Object.assign(BRIDGE_COMPUTE_LIMITER_SENTINEL, {
       resetUsedTokens: async (key: string) => {
         STATE.refundCalls.push(key);
       },
+    }),
+    checkLimit: async (limiter: unknown) => {
+      STATE.limitersSeen.push(limiter);
+      return STATE.checkLimitResult;
     },
-    checkLimit: async () => STATE.checkLimitResult,
     rateLimitDenyJson: actual.rateLimitDenyJson,
     isRateLimitMisconfigured: actual.isRateLimitMisconfigured,
   };
@@ -171,6 +195,7 @@ beforeEach(() => {
   });
   STATE.optimizerCalls = [];
   STATE.refundCalls = [];
+  STATE.limitersSeen = [];
   sentryState.captured.length = 0;
 });
 
@@ -227,6 +252,64 @@ describe("POST /api/portfolio-optimizer — audit-2026-05-07 cluster A", () => {
     });
     expect(res.headers.get("retry-after")).toBe("60");
     expect(res.headers.get("Cache-Control")).toBe("private, no-store");
+  });
+
+  /**
+   * Phase 163 SEC-04 — the deny arms above, bound to the limiter IDENTITY.
+   *
+   * ⚠️ WHY THESE EXIST WHEN THE 429/503 CASES ALREADY COVER THE SHAPES. Those
+   * drive `STATE.checkLimitResult` directly, so they assert what the route does
+   * GIVEN a denial — identically, whichever bucket produced it. Reverting this
+   * route to the shared `userActionLimiter` leaves them green. The contracts
+   * are therefore not evidence about WHICH budget the caller spends, and
+   * SEC-04 is entirely a claim about which budget.
+   *
+   * ── RED DEMO: neuter -> RED -> restore (performed on the sibling route) ────
+   * Reverting a route to `checkLimit(userActionLimiter, ...)` fails on BOTH
+   * tiers: STRUCTURALLY in `seam-ratelimit-posture.invariant.test.ts` via
+   * EXPECTED_ROUTE_LIMITERS, which names the route and both limiters; and
+   * BEHAVIOURALLY here, because the mock exports ONLY `bridgeComputeLimiter`,
+   * so the revert cannot resolve its import and fails at the module boundary
+   * instead of quietly spending the wrong bucket. Observed on
+   * `src/app/api/bridge/route.ts`, then restored from a byte backup (NOT
+   * `git checkout --`, which would have destroyed uncommitted work) and
+   * verified by shasum.
+   */
+  it("[163 SEC-04] the 429 is spent from bridgeComputeLimiter, BY IDENTITY", async () => {
+    STATE.checkLimitResult = { success: false, retryAfter: 42 };
+    const res = await POST(buildRequest({ portfolio_id: "x" }));
+
+    expect(res.status).toBe(429);
+    expect(await res.json()).toEqual({
+      error: "Too many requests",
+      code: "RATE_LIMITED",
+    });
+    expect(res.headers.get("retry-after")).toBe("42");
+
+    expect(
+      STATE.limitersSeen,
+      "This route must spend the COMPUTE bucket (10/3600s), not the shared " +
+        "userActionLimiter (5/60s = 300/hour). /portfolio-optimizer is capped " +
+        "at 10/hour per tenant on the Python side and fires a ~15s round-trip " +
+        "per call, so the shared bucket advertised 30x a budget the backend " +
+        "will not serve.",
+    ).toEqual([BRIDGE_COMPUTE_LIMITER_SENTINEL]);
+  });
+
+  it("[163 SEC-04] the misconfigured 503 arm is unchanged by the swap", async () => {
+    STATE.checkLimitResult = {
+      success: false,
+      retryAfter: 60,
+      reason: "ratelimit_misconfigured",
+    };
+    const res = await POST(buildRequest({ portfolio_id: "x" }));
+
+    expect(res.status).toBe(503);
+    expect(await res.json()).toEqual({
+      error: "Rate limiter unavailable",
+      code: "SEAM_MISCONFIGURED",
+    });
+    expect(STATE.limitersSeen).toEqual([BRIDGE_COMPUTE_LIMITER_SENTINEL]);
   });
 
   it("[140.4-13 / SEAMRIM-05] success → the deny arm does not fire", async () => {

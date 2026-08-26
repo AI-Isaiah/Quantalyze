@@ -117,6 +117,26 @@ function countMatches(src: string, re: RegExp): number {
 const CHECK_LIMIT_CALL = /\bcheckLimit\s*\(/g;
 
 /**
+ * The limiter IDENTITY at each consumption site — the first argument to
+ * `checkLimit`, captured in source order.
+ *
+ * ⚠️ ADDED BY PHASE 163 SEC-04 BECAUSE THE ROSTER ABOVE CANNOT SEE A SWAP.
+ * `EXPECTED_LIMITER_ROUTES` pins which routes consume A limiter; it says
+ * nothing about WHICH ONE. Both `bridge` and `portfolio-optimizer` were
+ * already members before SEC-04 moved them off the shared `userActionLimiter`
+ * onto `bridgeComputeLimiter`, so the whole swap landed with this file GREEN —
+ * measured, not assumed: the suite was run against the swapped tree before
+ * this pin existed and reported 24/24 passing. A limiter can therefore be
+ * changed, or quietly reverted, without anything here failing. That is the
+ * hole this captures.
+ */
+const CHECK_LIMIT_LIMITER = /\bcheckLimit\s*\(\s*([A-Za-z_$][\w$]*)/g;
+
+function captureAll(src: string, re: RegExp): string[] {
+  return [...src.matchAll(re)].map((m) => m[1]);
+}
+
+/**
  * Sites where the 503-vs-429 decision is made by the ARTEFACT rather than by an
  * inlined status literal. Either builder counts, and so does a direct
  * `isRateLimitMisconfigured` branch — that predicate lives inside
@@ -132,6 +152,8 @@ interface RouteScan {
   path: string;
   checkLimitSites: number;
   denyRoutedSites: number;
+  /** Limiter identifier per `checkLimit` site, in source order. */
+  limiters: string[];
 }
 
 function deriveSeamRouteFiles(apiRoot: string): string[] {
@@ -161,6 +183,7 @@ function scanRoute(path: string): RouteScan {
     path,
     checkLimitSites: countMatches(src, CHECK_LIMIT_CALL),
     denyRoutedSites: countMatches(src, DENY_ROUTED_CALL),
+    limiters: captureAll(src, CHECK_LIMIT_LIMITER),
   };
 }
 
@@ -219,6 +242,66 @@ const EXPECTED_LIMITER_ROUTES: readonly string[] = [
  */
 const NO_LIMITER_QUARANTINE: readonly string[] = [];
 
+/**
+ * WHICH limiter each seam route consumes, per arm, in source order.
+ * HAND-TYPED, and compared against the from-disk derivation.
+ *
+ * ⚠️ ADDED BY PHASE 163 SEC-04. The roster above answers "does this route have
+ * a limiter"; this one answers "which one, and is that still the one someone
+ * decided on". Those are different questions, and only the second one can see
+ * a route being moved between buckets — including being moved BACK.
+ *
+ * ── WHY A SEPARATE PIN WAS NEEDED, MEASURED NOT ASSUMED ──────────────────────
+ * SEC-04 moved `bridge` and `portfolio-optimizer` off the shared
+ * `userActionLimiter` (5/60s = 300/hour/user) onto `bridgeComputeLimiter`
+ * (10/3600s), because the Python side serves 10/hour per TENANT and a front
+ * door promising 30x that cannot emit a truthful `Retry-After`. Both routes
+ * were ALREADY members of `EXPECTED_LIMITER_ROUTES`, so the entire swap landed
+ * with this file green — the suite was run against the swapped tree before this
+ * pin existed and reported 24/24 passing. A guard that cannot see the change it
+ * is supposed to be guarding is the shape this repo treats as worse than none.
+ *
+ * ── FALSIFIABILITY: neuter -> RED -> restore (performed, not imagined) ───────
+ * Reverting `src/app/api/bridge/route.ts` to `checkLimit(userActionLimiter, …)`
+ * turns the equality below RED and names the route and both limiters:
+ *   - src/app/api/bridge/route.ts: derived=[userActionLimiter] pinned=[bridgeComputeLimiter]
+ * Restored immediately after observing it. The other assertions in this file
+ * stay GREEN under that same mutation, which is precisely why this one exists.
+ *
+ * ⚠️ A LIMITER CHANGE MUST MOVE THIS PIN IN THE SAME COMMIT — the standing repo
+ * rule for limiter literals. If you are here because the equality failed, do not
+ * relax it: decide whether the route belongs in its new bucket, then retype it.
+ */
+const EXPECTED_ROUTE_LIMITERS: ReadonlyArray<readonly [string, string[]]> = [
+  ["src/app/api/admin/match/eval/route.ts", ["adminActionLimiter"]],
+  ["src/app/api/admin/match/recompute/route.ts", ["adminActionLimiter"]],
+  // Phase 163 SEC-04 — moved off userActionLimiter. Sized from the MEASURED
+  // effective backend budget (slowapi "10/hour" per tenant x 1 measured
+  // replica); see the limiter's docblock in `src/lib/ratelimit.ts`.
+  ["src/app/api/bridge/route.ts", ["bridgeComputeLimiter"]],
+  ["src/app/api/keys/[id]/permissions/route.ts", ["userActionLimiter"]],
+  // TWO arms, TWO different limiters — the per-(user,strategy) fairness bucket
+  // and the per-user aggregate ceiling. Order is source order.
+  ["src/app/api/keys/sync/route.ts", ["keysSyncUserLimiter", "userActionLimiter"]],
+  ["src/app/api/keys/validate-and-encrypt/route.ts", ["userActionLimiter"]],
+  ["src/app/api/portfolio-optimizer/route.ts", ["bridgeComputeLimiter"]],
+  // ⛔ DELIBERATELY NOT MOVED BY SEC-04. `scenario/optimize` calls a DIFFERENT
+  // backend (`/optimize-weights`), whose per-tenant floor is a separately
+  // booked item (L-9). Folding it in here would have been scope creep, and
+  // this line is where that decision stays visible.
+  ["src/app/api/scenario/optimize/route.ts", ["userActionLimiter"]],
+  ["src/app/api/simulator/route.ts", ["simulatorLimiter"]],
+  ["src/app/api/strategies/composite/add-key/route.ts", ["userActionLimiter"]],
+  // Two arms, same limiter (create + kickoff paths).
+  [
+    "src/app/api/strategies/create-with-key/route.ts",
+    ["userActionLimiter", "userActionLimiter"],
+  ],
+  ["src/app/api/strategies/csv-validate/route.ts", ["csvValidateLimiter"]],
+  ["src/app/api/strategies/finalize-wizard/route.ts", ["userActionLimiter"]],
+  ["src/app/api/verify-strategy/route.ts", ["publicIpLimiter"]],
+];
+
 describe("[140.4-13 / SEAMRIM-05] structural — every seam limiter deny goes through the chokepoint", () => {
   it("the scan is not vacuous (a scanner that matched nothing would report agreement forever)", () => {
     // ⚠️ THE FENCE, NOT THE MEASUREMENT. Measured at plan time: 15 seam routes
@@ -258,6 +341,74 @@ describe("[140.4-13 / SEAMRIM-05] structural — every seam limiter deny goes th
         "that adds its limiter — and give it a chokepoint-routed deny while " +
         "you are there, or the next assertion will tell you so.",
     ).toEqual([...EXPECTED_LIMITER_ROUTES]);
+  });
+
+  it("[163 SEC-04] every arm consumes the limiter it was PINNED to (a swap fails BY NAME)", () => {
+    // The needle must actually have found identifiers, or an empty-vs-empty
+    // comparison agrees forever. Pinned lower than the real population so
+    // ordinary growth does not redden the file.
+    const derivedNames = LIMITER_ROUTES.flatMap((s) => s.limiters);
+    expect(
+      derivedNames.length,
+      "`CHECK_LIMIT_LIMITER` captured no limiter identifiers. The first " +
+        "argument to `checkLimit` stopped matching (a rename, a wrapper, a " +
+        "destructure), so the identity equality below is comparing two empty " +
+        "shapes and agrees with everything.",
+    ).toBeGreaterThanOrEqual(12);
+
+    // Every arm must be accounted for: a route with 2 `checkLimit` sites must
+    // yield 2 identifiers, or one arm's limiter is invisible to the pin.
+    const arity = LIMITER_ROUTES.filter(
+      (s) => s.limiters.length !== s.checkLimitSites,
+    ).map((s) => `${s.path} (${s.limiters.length}/${s.checkLimitSites} named)`);
+    expect(
+      arity,
+      "A route consumes more rate-limit tokens than this scan could name " +
+        "limiters for. The unnamed arm could be on ANY bucket and the " +
+        "equality below would not see it.",
+    ).toEqual([]);
+
+    const derived = LIMITER_ROUTES.map(
+      (s) => [s.path, s.limiters] as readonly [string, string[]],
+    );
+    expect(
+      derived,
+      "A seam route consumes a DIFFERENT limiter than the one pinned in this " +
+        "file. This is the assertion that sees a bucket swap — including a " +
+        "revert. `EXPECTED_LIMITER_ROUTES` above cannot: it pins which routes " +
+        "have a limiter, not which one, so moving a route between buckets " +
+        "leaves it green. Decide whether the new bucket is right (does its " +
+        "size tell the truth about the backend budget behind this route?) and " +
+        "retype the pin IN THE SAME COMMIT.",
+    ).toEqual(EXPECTED_ROUTE_LIMITERS.map(([p, l]) => [p, l]));
+  });
+
+  it("[163 SEC-04] the identity needle self-test — BOTH polarities", () => {
+    // POSITIVE: the first argument is captured, not merely detected.
+    const positive = captureAll(
+      stripComments(`
+        const rl = await checkLimit(bridgeComputeLimiter, \`bridge:\${user.id}\`);
+        const rl2 = await checkLimit( keysSyncUserLimiter , key);
+      `),
+      new RegExp(CHECK_LIMIT_LIMITER.source, "g"),
+    );
+    expect(positive).toEqual(["bridgeComputeLimiter", "keysSyncUserLimiter"]);
+
+    // NEGATIVE: a limiter named only in PROSE is not captured. Without the
+    // comment strip, the docblocks in these routes (which quote the limiter
+    // they moved AWAY from) would be read as consumption — the same DEF-16-2
+    // shape the deny-arm scan already guards against, and a live one here:
+    // `portfolio-optimizer/route.ts` names `userActionLimiter` in a comment
+    // explaining why it no longer uses it.
+    const negative = captureAll(
+      stripComments(`
+        // Phase 163 SEC-04: this route no longer calls checkLimit(userActionLimiter, key).
+        /* previously: checkLimit(userActionLimiter, key) */
+        const rl = await checkLimit(bridgeComputeLimiter, key);
+      `),
+      new RegExp(CHECK_LIMIT_LIMITER.source, "g"),
+    );
+    expect(negative).toEqual(["bridgeComputeLimiter"]);
   });
 
   it("EVERY limiter route routes its deny through the artefact — ONCE PER ARM", () => {

@@ -9,7 +9,7 @@ import {
 } from "@/lib/analytics-client";
 import { CircuitOpenError } from "@/lib/seam-errors";
 import { CIRCUIT_OPEN_COPY } from "@/lib/seam-copy";
-import { userActionLimiter, checkLimit, rateLimitDenyJson } from "@/lib/ratelimit";
+import { bridgeComputeLimiter, checkLimit, rateLimitDenyJson } from "@/lib/ratelimit";
 import { NO_STORE_HEADERS } from "@/lib/api/headers";
 // 140.3-13b / SEAMUX-08 — the ONE lazy-Sentry helper, applied under the SINGLE
 // capture policy written out IN FULL in `src/app/api/admin/match/eval/route.ts`
@@ -104,13 +104,19 @@ export async function POST(req: NextRequest) {
   // request is rejected without burning one of the caller's own tokens.
   // Authorization (assertPortfolioOwnership 403 below) and the analytics
   // round-trip stay after the limiter.
-  // Audit-2026-05-07 C-0107 (api-contract c8): apply userActionLimiter
+  // Audit-2026-05-07 C-0107 (api-contract c8): apply a per-caller limiter
   // per ADR-0004. The optimizer fires a 15s Python round-trip on every
-  // call; pre-fix any auth user could hammer it. The 5/min/user cap is
-  // tight enough to neutralise a logged-in attacker without disturbing
-  // legitimate exploratory iteration.
+  // call; pre-fix any auth user could hammer it.
+  //
+  // Phase 163 SEC-04: that limiter is now `bridgeComputeLimiter` (10/3600s),
+  // not the shared `userActionLimiter` (5/60s = 300/hour). The old bucket
+  // advertised 30x the budget the Python side will actually serve — slowapi
+  // "10/hour" per tenant, measured effective at 1 replica — so its denial
+  // could only ever emit Retry-After <= 60 for a wait the backend may set at
+  // up to 3600s. See the limiter's docblock in `src/lib/ratelimit.ts` for the
+  // measurement this size is derived from.
   const rateLimitKey = `optimizer:${user.id}`;
-  const rl = await checkLimit(userActionLimiter, rateLimitKey);
+  const rl = await checkLimit(bridgeComputeLimiter, rateLimitKey);
   if (!rl.success) {
     // 140.4-13 / SEAMRIM-05 — deny through the chokepoint so a limiter
     // misconfiguration answers 503. 140.3-G6 / SEAMUX-03 — the builder's default
@@ -133,14 +139,21 @@ export async function POST(req: NextRequest) {
   // export route already refunds on upload_failed / sign_failed / manifest_
   // drift (red-team R8) — applying the same pattern here closes the
   // asymmetry. Without it, a transient analytics outage burns a legitimate
-  // user's 5/min budget on a deterministic failure (the worker is shared;
-  // if it's down for one user it's down for all). Best-effort refund —
+  // user's compute budget on a deterministic failure (the worker is shared;
+  // if it's down for one user it's down for all). The refund matters MORE
+  // since Phase 163 SEC-04, not less: the budget is now 10/hour rather than
+  // 5/min, so an unrefunded token costs the caller a slot for up to an hour.
+  // Best-effort refund —
   // mirror the export refund's swallow-and-log idiom so a refund failure
   // never shadows the original 5xx the caller is being told about.
   const refundRateLimitToken = async (reason: string): Promise<void> => {
-    if (!userActionLimiter) return;
+    // Phase 163 SEC-04: refund into the SAME bucket the token was taken from.
+    // Refunding to `userActionLimiter` after consuming from
+    // `bridgeComputeLimiter` would credit an unrelated bucket while leaving
+    // the compute budget spent — a silent double-error.
+    if (!bridgeComputeLimiter) return;
     try {
-      await userActionLimiter.resetUsedTokens(rateLimitKey);
+      await bridgeComputeLimiter.resetUsedTokens(rateLimitKey);
     } catch (err) {
       // 140.4-08 / SEAMRIM-06 — the WHOLE ternary is replaced by one leaf call,
       // not one of its arms. `err.message` is exactly where undici puts the
