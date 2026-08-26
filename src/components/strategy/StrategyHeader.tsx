@@ -4,6 +4,28 @@ import { TrustTierLabel } from "./TrustTierLabel";
 import { displayStrategyName } from "@/lib/strategy-display";
 import type { Strategy } from "@/lib/types";
 
+/**
+ * ⛔ THIS COMPONENT IS NOT MOUNTED ANYWHERE (163-REVIEW / IN-01, measured
+ * 2026-08-26). `grep -rn "StrategyHeader" src/` returns its own definition,
+ * its own test file, and three stale prose references that name it as a live
+ * caller — `ui/Badge.tsx:21`, `ui/Badge.test.tsx:9` and
+ * `strategy/TrustTierLabel.tsx:47`. There is no import of it from any page,
+ * layout or component. Nothing here reaches a user.
+ *
+ * RECORDED, NOT DELETED. Deletion is the right end state and is booked rather
+ * than done: it also removes `StrategyHeader.test.tsx`, which is outside the
+ * scope of the review fix that discovered this, and those three stale comments
+ * should be corrected in the same pass so the next reader is not sent looking
+ * for a caller that does not exist.
+ *
+ * ⚠️ WHY IT MATTERS BEYOND TIDINESS. `163-04-SUMMARY.md` counts this file
+ * among "all five real SyncBadge mounts". There are four. The `seriesEnd={null}`
+ * decision below — and the permanent amber capping it buys — is a real
+ * decision about an unreal surface, so it is evidence of nothing: it can
+ * neither confirm nor regress HONEST-08. Any future audit of SyncBadge mount
+ * coverage must discount this file, which is exactly the mistake the SUMMARY
+ * made once already.
+ */
 export function StrategyHeader({
   strategy,
   computedAt,
