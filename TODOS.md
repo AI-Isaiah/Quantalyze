@@ -1083,6 +1083,38 @@ these four are the deliberate carry-overs, each with the reason it was not fixed
   either run every file and aggregate failures at the end, or make the expected-red state
   a first-class, per-file declaration the runner understands.
 
+### Phase 163 / SEC-03 — H-0001 census RE-MEASURED, and the debt is bigger than recorded (added 2026-08-26)
+
+Raised while closing SEC-03. The `it.skip("H-0001 (intended behavior)")` block in
+`src/__tests__/audit-coverage.test.ts` carried a census of the mutation sites that
+`findMutations`' line regex misses. The plan treated it as stale *line numbers*. It was
+worse than that — re-measuring changed the **count**, not just the coordinates:
+
+- The "kill-switch flip" upsert the comment named **no longer exists** — Phase 106 Stage B
+  made flag-monitor alert-only. The record was describing a site that had been deleted.
+- **Three sites it never listed do exist and are uncovered:** `keys/sync:496`,
+  `finalize-wizard:2287`, `finalize-wizard:2360`.
+- Net: the uncovered single-line-mutation set is **6, not 4**. The debt grew while the
+  record said otherwise.
+
+The comment in `audit-coverage.test.ts` now carries the re-measured list, the method that
+produced it, and a warning not to trust the numbers past the next refactor.
+
+⚠️ **Those six sites remain UNFIXED and unaudited.** SEC-03 only put
+`add_wizard_composite_key` under the audit law; it did not fix `findMutations`. H-0001
+stays deferred.
+
+- **[H-0001] Fix `findMutations`' single-line `from(...).insert(...)` detection**, then
+  un-skip the intended-behavior test and re-run the census. Until then the audit-coverage
+  gate is blind to the single-line idiom at six known call sites, and a seventh can appear
+  without anything going red.
+
+**Lesson worth keeping:** a census recorded as prose in a comment decays silently and
+asymmetrically — it under-reported by two AND pointed at one site that no longer existed.
+Re-measure such records rather than re-numbering them; re-numbering would have preserved
+both errors.
+
+
 ### ✅ FIXED (pending CI confirmation) — CI's gitleaks was too old to read our allowlist (raised + fixed 2026-08-23, Phase-160 ship)
 
 **Was:** the `secret-scan` gate ran with **every allowlist entry in `.gitleaks.toml` silently
