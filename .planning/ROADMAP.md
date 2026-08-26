@@ -336,7 +336,17 @@ Plans:
   3. `buildEquityCurveSeries` serves real per-strategy equity curves now that `returns_series` is selected (the hard-coded `equityCurve: null` and its false comment are gone), and drawer-added strategies render CAGR/Sharpe like book rows.
   4. "Finish setup →" opens the wizard with the clicked key preselected.
 
-**Plans**: 1/9 plans executed (2 waves)
+**Plans**: 9/9 plans executed (2 waves)
+
+> ⚠️ **162-08 Task 1 was SUPERSEDED, not completed as written.** It planned a recompute of the
+> 15 example rows. Measured 2026-08-26: `csv_daily_returns` held **0 rows for all 15** while the
+> handler needs ≥2, so the recompute arm was structurally impossible — an enqueue would have
+> fired the fence 15 times. The executor correctly halted (its PROD credential lane was also
+> blocked by the harness) and touched nothing. Founder ruled: unpublish AND delete. Executed and
+> verified on PROD the same day — 15 strategies deleted, 0 examples remain; cascades took 1470
+> match_candidates, 29 portfolio memberships, 5 favourites and 3 contact_requests; 28
+> allocation_events and 3 match_decisions were cleared first as FK blockers. Full backup retained
+> outside the repo. HONEST-03 therefore closes on measurement rather than on recompute.
 
 Plans:
 
@@ -347,7 +357,7 @@ Plans:
 - [x] 162-05-PLAN.md — HONEST-06 server use-existing-key path (D-162-3): decision gate + tracer RPC/route arm + state-adaptive SQL gate — service-role boundary (wave 1, checkpoint)
 - [x] 162-06-PLAN.md — HONEST-06 client preselect thread + C-5 saved-key summary, all three key populations pinned (wave 2)
 - [x] 162-07-PLAN.md — HONEST-02 verdict fix: D-162-2 "Track record through {date}" recency line (flat arm) or recorded pipeline routing (gap arm) (wave 2)
-- [ ] 162-08-PLAN.md — HONEST-03 D-162-1 recompute of the 15 example rows (unpublish fallback, never synthesize) + HONEST-01 follow-throughs + TODOS filings (wave 2)
+- [x] 162-08-PLAN.md — HONEST-03 D-162-1 recompute of the 15 example rows (unpublish fallback, never synthesize) + HONEST-01 follow-throughs + TODOS filings (wave 2)
 - [x] 162-09-PLAN.md — KeyPermissionBadge: scope chips/caption gated on probe_error — a failed probe can no longer render scope facts (PROD QA finding 2026-08-25, phase-goal class) (wave 1)
 
 **UI hint**: yes
