@@ -62,7 +62,7 @@ verified-stale items are excluded by construction.
 - [x] **OPS-02** (L1741): `sql-tests` is in an aggregator's `needs:` — the only gate that executes the deployed cron body cannot be present-and-failing with nothing gating on it.
 - [x] **OPS-03** (L2570 + L1035): The orphaned e2e specs (incl. the NAV-01 surface) run in a CI batch, and DB-types drift gets a regeneration gate (or an explicit recorded decision not to).
 - [x] **OPS-04** (L2715 + L2265 + L2730): The TEST stale-`pending` backlog gets a TEST-only drain (⛔ never a migration, never `cron.unschedule(9)`), and `test_compute_jobs_fencing.py` stamps `claimed_at` in its two direct UPDATEs.
-- [ ] **OPS-05** (L360): The structlog frozen-proxy class is fixed at the class level (no module-level proxy can bind a pre-`configure_logging` chain that skips `_redact_processor`), with a regression test. ⚠️ Two failure modes, each candidate fix closes only one: dropping `cache_logger_on_first_use` misses module-scope `.bind()` (broken regardless of the cache flag per structlog docs) — needs a source-scan gate for Mode A plus a behavioral redaction test for Mode B.
+- [x] **OPS-05** (L360): The structlog frozen-proxy class is fixed at the class level (no module-level proxy can bind a pre-`configure_logging` chain that skips `_redact_processor`), with a regression test. ⚠️ Two failure modes, each candidate fix closes only one: dropping `cache_logger_on_first_use` misses module-scope `.bind()` (broken regardless of the cache flag per structlog docs) — needs a source-scan gate for Mode A plus a behavioral redaction test for Mode B.
 - [ ] **OPS-06** (L3116): `createAdminClient()` cannot throw on the request path after an irreversible commit — the class is closed at all three known sites.
 - [ ] **OPS-07** (L1594 + L1595 + L1600): Flag-monitor honesty — `checkStuckNotifications` distinguishes "nothing stuck" from "could not tell"; a failed denominator read pages instead of logging success; the integration test actually falsifies both.
 - [ ] **OPS-08** (L1562): The 10-param `_enqueue_compute_job_internal` no longer uses `INTO STRICT` on its lost-race branches (parity with the deliberately de-STRICT-ed 7-param overload).
@@ -156,7 +156,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | OPS-02 | Phase 158 | Complete |
 | OPS-03 | Phase 158 | Complete |
 | OPS-04 | Phase 158 | Complete |
-| OPS-05 | Phase 163 | Pending |
+| OPS-05 | Phase 163 | Complete |
 | OPS-06 | Phase 163 | Pending |
 | OPS-07 | Phase 163 | Pending |
 | OPS-08 | Phase 163 | Pending |
