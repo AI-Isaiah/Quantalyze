@@ -1083,6 +1083,69 @@ these four are the deliberate carry-overs, each with the reason it was not fixed
   either run every file and aggregate failures at the end, or make the expected-red state
   a first-class, per-file declaration the runner understands.
 
+### Phase 163 / WR-07 — operator jargon reaches a user-visible column; the fix is in TS, not SQL (added 2026-08-26)
+
+The OPS-08 migration's `serialization_failure` sentence lands verbatim in
+`strategy_analytics.computation_error`, which strategy owners read. Phase 162 removed
+operator prose from user-facing error surfaces; this is the same class, one layer down.
+
+**It cannot be fixed in SQL, and the SQL was deliberately left alone rather than patched
+cosmetically.** Measured: `src/app/api/strategies/csv-finalize/route.ts:2035` builds
+`` `compute job enqueue failed: ${enqueueErrMessage}` `` and hands it to
+`writeFailedStrategyAnalyticsPlaceholder` (:1868), which writes
+`strategy_analytics.computation_error` (:1928). **That prefix is added on the TS side,
+unconditionally, with no SQLSTATE branch in front of it** — so whatever sentence SQL
+raises, the owner still reads one beginning in operator jargon. `USING DETAIL` does not
+help either: the sink reads PostgREST's `.message` and never `.details`.
+
+- **[WR-07-TS] Branch the enqueue-failure copy on SQLSTATE in `csv-finalize/route.ts`.**
+  Three steps: branch on `enqueueErr.code === '40001'` (measured: ZERO quoted `'40001'`
+  anywhere in `src/**/*.ts{,x}` at HEAD — nothing branches on it yet); drop the
+  `compute job enqueue failed:` prefix on that branch; write the ELSE sentence from
+  `computation_error_copy`.
+
+⚠️ **Two corrections to the review's suggested remedy, both worth keeping:**
+- The proposed copy *"will retry automatically"* is **FALSE at HEAD** — nothing in this
+  repo retries a 40001 (see OPS-08-TS above). Shipping it would trade operator jargon for
+  a false promise, which is HONEST-01 again rather than a fix for it.
+- *"route that call through the HONEST-01 bridge"* is not available as stated: the bridge
+  derives copy from `compute_jobs.error_kind`, and a failed **enqueue** leaves no job row
+  to derive from. The helper `computation_error_copy(TEXT)` is directly callable; the
+  bridge is not the route.
+
+
+### Phase 163 / WR-01 — hygiene Rule 1 is INACTIVE in CI by design (added 2026-08-26)
+
+Closing WR-01 removed the local username from the tree entirely (940 -> 0 across nine
+encodings). The needle is now DERIVED AT RUNTIME rather than stored, which is what makes
+that possible — but it has a consequence worth stating plainly rather than discovering
+later.
+
+**Rule 1 (bare-username detection) does not run in CI.** The scanner derives the needle
+from the home-directory basename; on GitHub Actions that is `runner`, which the scanner
+deliberately refuses (measured: `/home/runner` occurs 2800 times across 507 tracked files —
+a naive derivation would have turned `frontend-lint` permanently red on a clean tree). When
+Rule 1 cannot run, the gate says so and drops the username clause from its success line,
+rather than claiming a check it did not perform.
+
+**What still runs in CI:** Rules 2 and 3 are structural absolute-path checks that need no
+needle, so every leaked `\/Users\/<anyone>\/` form (spelled escaped, per the scanner's own convention) is caught everywhere. The residual gap is
+narrow: a BARE username occurrence with no path prefix, in a file added by someone who
+never ran `npm run lint` locally.
+
+**DECIDED 2026-08-26 — not closing it, and why.** The remedy is to wire
+`HYGIENE_LOCAL_USERNAME` into the `frontend-lint` job from a repository secret. Declined:
+the username is already present in published git history (rewriting history was explicitly
+declined by the founder as costing more than it buys), so a secret would add config
+coupling and a workflow-run-visible value in order to protect a string that is not
+actually secret. The local gate plus the structural rules is the right cost/benefit here.
+
+- **[WR-01-CI]** If a bare-username leak ever DOES reach main, that changes the calculus —
+  wire `HYGIENE_LOCAL_USERNAME` into `frontend-lint` from a repository secret and delete
+  this note. One env line plus one secret; no scanner change needed, the precedence chain
+  already reads it first.
+
+
 ### Phase 163 / SEC-03 — H-0001 census RE-MEASURED, and the debt is bigger than recorded (added 2026-08-26)
 
 Raised while closing SEC-03. The `it.skip("H-0001 (intended behavior)")` block in
