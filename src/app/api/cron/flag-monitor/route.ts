@@ -354,7 +354,7 @@ async function getNumerator(args: {
  *      distinguishes a full page from a truncated one, so above 1000 the
  *      denominator was silently fabricated — deflating it, inflating errorRate,
  *      and paging the founder for nothing. A COUNT has no row cap at any
- *      volume; `src/lib/observability.ts` is the in-repo shape.
+ *      volume.
  *   2. WIRE CONTROL. It keyed the denominator on `metadata.correlation_id`,
  *      which originates as the inbound `X-Correlation-Id` header.
  *      `/api/verify-strategy` reaches `postProcessKey` UNAUTHENTICATED and
