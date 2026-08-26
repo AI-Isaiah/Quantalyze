@@ -190,6 +190,33 @@ export function extractAnalytics(raw: unknown): StrategyAnalytics | null {
  * ⚠️ Returns `null` for absent / empty / malformed input, never a guess. Null
  * means UNKNOWN, and `resolveEffectiveRecency` treats unknown as "cannot
  * support a freshness claim" — never as "fine".
+ *
+ * ⛔ THE ARRAY ARM TAKES THE LATEST DATE, NOT THE LAST SLOT — and that is a
+ * correction, not a preference (163-REVIEW, undeclared precondition). It read
+ * `points[points.length - 1]`, which answers the question correctly ONLY if
+ * `returns_series` is stored date-ascending, and nothing on the read side
+ * asserted that. The failure is user-visible and points the WRONG way: on a
+ * descending or backfill-appended array the positional pick returns the OLDEST
+ * point, so a strategy still trading yesterday renders a red dot captioned
+ * "Track record ends 112d ago" — the badge calling a live strategy dead.
+ *
+ * `max` is also what the REST of the codebase already answers this question
+ * with. `public.ledger_refresh_staleness`
+ * (supabase/migrations/20260825120000_ledger_refresh_staleness_view.sql,
+ * decision D-03) asks the same question of the same column and adopted
+ * `max((e->>'date')::date)`, explicitly weighing and rejecting the
+ * alternatives. Two derivations of one fact that disagree on ordering is
+ * exactly how the list badge and the factsheet chip came to contradict each
+ * other; this makes them agree by construction rather than by assumption.
+ *
+ * The writer does sort — `compute_all_metrics` RAISES on a non-monotonic index
+ * (analytics-service/services/metrics.py:491) — so on today's data `max` and
+ * "last" return the same string and no render moves. The point is that the
+ * read no longer DEPENDS on that holding, since a lie here is silent.
+ *
+ * Unreadable elements are SKIPPED rather than allowed to poison the answer: a
+ * single malformed bar should not erase a track record we can otherwise read.
+ * If none is readable the answer is still `null` — unknown, never a guess.
  */
 export function seriesEndOf(
   a: StrategyAnalytics | null | undefined,
@@ -197,9 +224,19 @@ export function seriesEndOf(
   if (!a) return null;
   if (a.series_end !== undefined) return a.series_end;
   const points = a.returns_series;
-  const last =
-    Array.isArray(points) && points.length > 0 ? points[points.length - 1] : null;
-  return typeof last?.date === "string" ? last.date : null;
+  if (!Array.isArray(points)) return null;
+
+  let latest: string | null = null;
+  let latestMs = -Infinity;
+  for (const point of points) {
+    const date = point?.date;
+    if (typeof date !== "string") continue;
+    const ms = Date.parse(date);
+    if (!Number.isFinite(ms) || ms <= latestMs) continue;
+    latest = date;
+    latestMs = ms;
+  }
+  return latest;
 }
 
 export const EMPTY_ANALYTICS: StrategyAnalytics = {

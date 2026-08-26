@@ -284,6 +284,97 @@ describe("<StrategyBreakdownTable> — B14 per-constituent freshness", () => {
     expect(screen.getByText(/Track record ends/i)).toBeTruthy();
   });
 
+  /**
+   * ── The UNDECLARED PRECONDITION behind "where does the track record end" ──
+   *
+   * `seriesEndOf` answered that question by taking `points[points.length - 1]`
+   * — the LAST array element. That is the right answer only if `returns_series`
+   * is stored date-ASCENDING, and nothing in this repo asserted it on the read
+   * side. A silently-wrong "last point" is a freshness lie, which is the exact
+   * class this phase exists to close, so the assumption may not stay unstated.
+   *
+   * IT IS NOT A HYPOTHETICAL DISAGREEMENT. `public.ledger_refresh_staleness`
+   * (supabase/migrations/20260825120000_..._view.sql, decision D-03) asks the
+   * SAME question of the SAME column and answers it with
+   * `max((e->>'date')::date)` — explicitly rejecting a positional pick. Two
+   * derivations of one fact, differing on ordering, is precisely how the list
+   * badge and the factsheet chip came to contradict each other in the first
+   * place.
+   *
+   * THE FAILURE IS USER-VISIBLE AND POINTS THE WRONG WAY. With a descending or
+   * backfill-appended array the positional pick returns the OLDEST date, so a
+   * strategy whose track record ran through YESTERDAY is painted red and
+   * captioned "Track record ends 112d ago" — the badge calling a live strategy
+   * dead. That is why this spec asserts the RENDERED dot and sentence rather
+   * than `seriesEndOf`'s return value: asserting the helper against its own
+   * pick would be self-referential and would survive the bug.
+   *
+   * ⭐ RED DEMONSTRATION (performed 2026-08-26, before the fix). Verbatim:
+   *
+   *     × the track record END is the LATEST point, not the last array slot
+   *       → expected 'h-1.5 w-1.5 rounded-full shrink-0 bg-negative' not to
+   *         contain 'bg-negative'
+   *
+   * The ASCENDING control below stayed green under the unfixed code and must
+   * stay green after, which is what proves the change is a repair of the
+   * unordered case and not a blanket rewrite of the healthy one.
+   */
+  it("PRECONDITION: the track record END is the LATEST point, not the last array slot", () => {
+    const strategies: StrategyInput[] = [
+      strat("a", "Descending", 1, {
+        sharpe: 1.5,
+        computed_at: hoursAgoIso(2),
+        // Newest FIRST — the ordering the read path never asserted. The true
+        // end of this track record is yesterday; the last slot holds the
+        // oldest point.
+        returns_series: [
+          { date: isoDaysAgo(1), value: 1.4 },
+          { date: isoDaysAgo(56), value: 1.2 },
+          { date: isoDaysAgo(112), value: 1.0 },
+        ],
+      }),
+    ];
+
+    const { container } = render(
+      <StrategyBreakdownTable strategies={strategies} attribution={null} portfolioId="p-1" />,
+    );
+
+    // A strategy trading through yesterday is not dead, and the badge may not
+    // say it is.
+    expect(container.querySelectorAll(".bg-negative")).toHaveLength(0);
+    expect(screen.queryByText(/Track record ends/i)).toBeNull();
+    // The job ran 2h ago over a live track record: the honest render is the
+    // sync-keyed one, in green.
+    expect(screen.getByText(/Synced 2h ago/i)).toBeTruthy();
+    expect(container.querySelectorAll(".bg-positive")).toHaveLength(1);
+  });
+
+  it("PRECONDITION CONTROL: an ASCENDING series is unchanged — still the last point", () => {
+    const strategies: StrategyInput[] = [
+      strat("a", "Ascending", 1, {
+        sharpe: 1.5,
+        computed_at: hoursAgoIso(7),
+        // Oldest FIRST — the shape the analytics runner actually writes. Here
+        // the last slot IS the latest point, and the verdict must not move.
+        returns_series: [
+          { date: isoDaysAgo(224), value: 1.0 },
+          { date: isoDaysAgo(168), value: 1.2 },
+          { date: isoDaysAgo(112), value: 1.4 },
+        ],
+      }),
+    ];
+
+    const { container } = render(
+      <StrategyBreakdownTable strategies={strategies} attribution={null} portfolioId="p-1" />,
+    );
+
+    // Dead track record, and it stays dead. Without this control a "fix" that
+    // simply stopped reading the series at all would pass the case above.
+    expect(container.querySelectorAll(".bg-negative")).toHaveLength(1);
+    expect(screen.getByText(/Track record ends/i)).toBeTruthy();
+    expect(screen.queryByText(/Synced/i)).toBeNull();
+  });
+
   it("HONEST-08: an UNKNOWN track record caps the dot below fresh", () => {
     const strategies: StrategyInput[] = [
       // Terminal success, computed 2h ago, but the read carried no series at
