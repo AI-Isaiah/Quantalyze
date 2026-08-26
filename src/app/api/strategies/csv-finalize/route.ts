@@ -1999,9 +1999,11 @@ async function writeFailedStrategyAnalyticsPlaceholder(
  *
  * ⛔ IT MUST NOT PROMISE AN AUTOMATIC RETRY. The review that raised WR-07
  * proposed "…and will retry automatically". MEASURED at HEAD: nothing in this
- * repo retries a 40001 — the one classifier that recognises the code
- * (analytics-service/main_worker.py:392) has a single call site, wrapping the
- * MARK RPCs, never an enqueue. That copy would trade operator jargon for a
+ * repo retries a 40001 — the classifiers that recognise the code
+ * (`_is_serialization_failure` in `main_worker.py`, `_defer_lost_ownership` in
+ * `services/job_worker.py`) each have a single call site, wrapping the MARK
+ * RPCs and the defer path respectively; neither wraps an enqueue and neither
+ * retries. That copy would trade operator jargon for a
  * false promise, which is the HONEST-01 defect over again one layer down. This
  * arm claims nothing about automatic retries, and that is precisely what makes
  * it true here: the enqueue did not happen, no job exists to retry itself, and
