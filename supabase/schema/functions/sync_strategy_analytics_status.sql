@@ -2,7 +2,7 @@
 -- Canonical current body of this function, replayed from supabase/migrations/**.
 -- Regenerate with `npm run schema:functions`. See tech-debt #2.
 
--- source migration: 20260825150000_sync_status_protect_marked_refresh.sql
+-- source migration: 20260826120000_computation_error_curated_copy.sql
 CREATE OR REPLACE FUNCTION sync_strategy_analytics_status(p_strategy_id UUID)
 RETURNS VOID
 LANGUAGE plpgsql
@@ -15,8 +15,12 @@ DECLARE
   v_failed_count       INTEGER;
   v_protected_count    INTEGER;
   v_unresolved_count   INTEGER;
-  v_latest_error       TEXT;
-  v_protected_error    TEXT;
+  -- Phase 162 / HONEST-01: the STRUCTURED kind, not the free-text diagnostic.
+  -- This function no longer reads the operator column at all; the file header
+  -- carries the reasoning, because the self-verify block asserts the identifier
+  -- is absent from this body INCLUDING its comments.
+  v_latest_kind        TEXT;
+  v_protected_kind     TEXT;
   v_publish_healthy    BOOLEAN;
   v_protect_hold       BOOLEAN;
 BEGIN
@@ -175,7 +179,7 @@ BEGIN
   -- four ways, so it is spelled ONCE.
   WITH live_failures AS (
     SELECT
-      f.last_error,
+      f.error_kind,
       f.created_at,
       -- ⛔ The two marker literals are a CROSS-LANGUAGE CONTRACT with no
       -- compiler between their ends: the other ends are
@@ -314,12 +318,16 @@ BEGIN
     -- one of `is_protected` / `NOT is_protected`. Consumed ONLY by the
     -- branch-(a) hold below.
     count(*) FILTER (WHERE is_protected AND NOT has_live_successor),
-    (array_agg(last_error ORDER BY created_at DESC)
+    -- Phase 162 / HONEST-01: the MOST RECENT failure's structured kind, per
+    -- class. Same ordering, same FILTERs, same partition as before — only the
+    -- column changed, from the operator diagnostic to the enum that decides
+    -- which curated sentence the user reads.
+    (array_agg(error_kind ORDER BY created_at DESC)
        FILTER (WHERE NOT is_protected))[1],
-    (array_agg(last_error ORDER BY created_at DESC)
+    (array_agg(error_kind ORDER BY created_at DESC)
        FILTER (WHERE is_protected))[1]
     INTO v_failed_count, v_protected_count, v_unresolved_count,
-         v_latest_error, v_protected_error
+         v_latest_kind, v_protected_kind
     FROM live_failures;
 
   -- ---- the branch-(a) EXEMPTION (161.1 re-review MEDIUM: idempotence) -------
@@ -451,7 +459,10 @@ BEGIN
   END IF;
 
   -- (b) all terminal, any NON-SUPERSEDED UNPROTECTED failed_final → 'failed'
-  -- with the latest error. The supersession and partition rules that decide
+  -- with the CURATED sentence for the latest failure's kind (Phase 162 /
+  -- HONEST-01 — this used to write the job's own diagnostic text, which is how
+  -- a raw Python exception string became the thing a user read on a failed
+  -- sync). The supersession and partition rules that decide
   -- v_failed_count are documented at the CTE above, which is now read before
   -- branch (a) rather than here (the idempotence hoist). Reaching this
   -- statement still means every job is terminal: branch (a) returns otherwise,
@@ -463,7 +474,7 @@ BEGIN
   IF v_failed_count > 0 THEN
     -- JOB-01 (Phase 142): SQL exit transition #1 — clear the stamp.
     INSERT INTO strategy_analytics (strategy_id, computation_status, computation_error, computing_started_at)
-    VALUES (p_strategy_id, 'failed', v_latest_error, NULL)
+    VALUES (p_strategy_id, 'failed', computation_error_copy(v_latest_kind), NULL)
     ON CONFLICT (strategy_id) DO UPDATE
        SET computation_status = EXCLUDED.computation_status,
            computation_error  = EXCLUDED.computation_error,
@@ -487,19 +498,22 @@ BEGIN
   -- precisely the laundering this branch exists to avoid.
   IF v_protected_count > 0 THEN
     UPDATE strategy_analytics
-       -- ⛔ COALESCED, not assigned (161.1 migration review round 4). The
-       -- protected job's `last_error` is NULL on precisely the paths this branch
-       -- exists for — a preflight refusal, a circuit-break, a wedged venue
-       -- gateway or a budget timeout terminalises the job without any Python
-       -- stamp having run to write one. Assigned unconditionally, this statement
-       -- then ERASED whatever diagnostic the row already carried and left
-       -- `computation_error` NULL over a live permanent failure, contradicting
-       -- the header's promise that the failure stays visible in four places in
-       -- the exact scenario that promise was written for. COALESCE makes this
-       -- branch strictly additive: it can only ever put MORE information in that
-       -- column. An older error beside a live failure is more informative than
-       -- NULL, and branches (b)/(c) still clear it on their own terms.
-       SET computation_error   = COALESCE(v_protected_error, strategy_analytics.computation_error),
+       -- ⛔ ASSIGNED, and the COALESCE-over-the-existing-value that stood here
+       -- from 161.1 review round 4 is GONE ON PURPOSE (Phase 162 / HONEST-01).
+       -- That COALESCE guarded exactly one hazard: on the no-Python-stamp paths
+       -- this branch exists for — a preflight refusal, a circuit-break, a wedged
+       -- venue gateway, a budget timeout — the job's diagnostic was NULL, so an
+       -- unconditional assignment ERASED whatever the row already carried and
+       -- left the column NULL over a live permanent failure. `computation_error
+       -- _copy` is TOTAL: NULL in, a sentence out. The hazard cannot occur, and
+       -- a COALESCE whose left arm is provably non-NULL is dead code that
+       -- teaches the next reader that NULL is still reachable here.
+       --
+       -- ⚠️ The removal has a SECOND effect, and it is wanted: a row still
+       -- carrying raw exception text written before this migration is HEALED the
+       -- next time this branch touches it. Under the COALESCE that legacy text
+       -- would have been preserved indefinitely, which is the defect.
+       SET computation_error   = computation_error_copy(v_protected_kind),
            -- JOB-01: this is still an exit from computing. The publish columns
            -- are untouched on purpose; see the header for the full list of what
            -- is deliberately NOT written here (status, warned, computed_at).
