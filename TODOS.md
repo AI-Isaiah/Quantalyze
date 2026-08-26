@@ -2380,6 +2380,25 @@ EXECUTED, §str/None follow-through, §Discovery observation).
 - [ ] (/code-review high, lens 5) HoldingsTable.tsx D-15 comment cites StrategyTable.tsx:1067-1085; the precedent now lives at :1169-1179 — cite by phrase not line number.
 - [x] ~~(/code-review high, lens 5, low-confidence) strategies-row-adapter.ts Half-2 comment~~ **RESOLVED 2026-08-08**: kept `manager: s.codename ?? null` and reworded the comment. Half 1 resolves `organization_name ?? codename ?? null` and an owner's own strategy has a null org, so half 1 lands on the codename too; dropping half 2 to null would make one strategy render "—" while unallocated and its codename once money sits behind it. Cross-half agreement now pinned by test. says "honest — rather than a fabricated manager" but code sets manager: s.codename ?? null — codename-present path renders own codename in the manager column and is untested; decide intended behavior and pin it.
 
+### Phase 162 (HONEST) — ship-gate lint finding (added 2026-08-26)
+
+- [ ] **`computationError` is write-only state in `SyncPreviewStep.tsx`, and two comments say
+      otherwise.** Phase 162 / HONEST-01 deliberately stopped threading the raw computation-error
+      text into the error envelope (`:1935` documents this — correct and intended). What was not
+      cleaned up: the `useState` at `:578` is now never READ. `grep` finds four hits — the
+      declaration, the setter at `:1015`, an unrelated same-named object property at `:1713`, and
+      the comment. The gate reads the locally-passed `nextError`, **not** this state, so `:1935`'s
+      "the gate reads it (`checkStrategyGate`, above)" and `:1013`'s "the failure line update[s]
+      each tick" both overstate what is wired. ESLint surfaces it as the only `no-unused-vars`
+      warning in the repo.
+      **Fix:** delete the dead state and its setter, or keep it and correct both comments to say
+      it is retained write-only. Prefer deletion — Rule 6. Check `SyncPreviewStep` tests first;
+      removing the setter drops one re-render per poll tick when only the error text changes.
+      **Not blocking:** nothing user-facing and no data-integrity exposure — the removal of the
+      raw text from the envelope is exactly what HONEST-01 wanted. Filed per the stopping rule.
+      **Found:** ship gate for v0.74.0.0 (`npm run lint`, 0 errors / 3 warnings).
+
+
 ### Phase 151 (AUM) — deferred by ruling from plan 151-04 (added 2026-08-07)
 
 - [ ] **sFOX holdings: consider the `get_balance_history` `usd_value` NAV anchor instead of per-asset `get_balances`** — deferred from Phase 151, RESEARCH Open Q2. `_fetch_sfox_balance_rows` honours the CONTEXT lock on `get_balances()`, whose rows carry a STRING quantity and NO USD valuation, and whose facade has no ticker endpoint — so a non-stable asset is honestly SKIPPED and named rather than priced at an invented rate. `get_balance_history` returns a daily `usd_value` NAV series: an account-level USD anchor structurally identical to MT5's `account_info().equity`, which would value the whole book with no pricing problem at all. Switching is a CONTEXT amendment (a different method than the one locked), so it belongs to the sFOX go-live phase, not to 151. Until then a live sFOX key with non-stable holdings under-reports its AUM by exactly those assets — visibly, via the `complete_with_warnings` copy that names them.
