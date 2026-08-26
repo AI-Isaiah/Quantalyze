@@ -41,6 +41,31 @@ logging.basicConfig(
     format="%(asctime)s %(name)s %(levelname)s %(message)s",
 )
 
+# Phase 16 / OBSERV-02 + OBSERV-09: configure structlog ONCE at process startup
+# (idempotent), and import the CorrelationMiddleware so we can mount it BEFORE
+# CORSMiddleware below. structlog wraps stdlib logging — coexists with
+# logging.basicConfig() above; both can emit at the same time.
+#
+# OPS-05 (Phase 163) — this block is HOISTED ABOVE every first-party import
+# below, and that ordering is now a gate
+# (tests/test_structlog_frozen_proxy.py::TestEntrypointOrdering). It used to sit
+# after the `from routers import ...` line, which meant the API process was safe
+# only by the ACCIDENT that no router emitted a log line at import time — nothing
+# pinned that. Any line emitted before this call renders through structlog's
+# DEFAULT chain, which contains no `_redact_processor` and no stdlib
+# `setLogRecordFactory` bridge, so an HMAC-bearing ccxt string or an MT5 password
+# in that line reaches the log sink verbatim (MEASURED 2026-08-26; see the test's
+# `test_a_line_emitted_before_configure_leaks`). `services.logging_config` is a
+# near-leaf (structlog + services.redact) so importing it first costs nothing and
+# creates no cycle.
+from services.logging_config import (
+    CorrelationMiddleware,
+    configure_logging,
+    correlation_id_var,
+)
+
+configure_logging()
+
 from routers import cron, exchange, internal, match, optimizer, portfolio, simulator, csv
 from routers import process_key as process_key_router
 from routers.debug_key_flow import router as debug_key_flow_router
@@ -52,18 +77,6 @@ from services.error_contract import (
     VenueTransientHTTPException,
     service_error_response,
 )
-
-# Phase 16 / OBSERV-02 + OBSERV-09: configure structlog ONCE at process startup
-# (idempotent), and import the CorrelationMiddleware so we can mount it BEFORE
-# CORSMiddleware below. structlog wraps stdlib logging — coexists with
-# logging.basicConfig() above; both can emit at the same time.
-from services.logging_config import (
-    CorrelationMiddleware,
-    configure_logging,
-    correlation_id_var,
-)
-
-configure_logging()
 
 # Phase 16 / OBSERV-04 + OBSERV-05 — initialize sentry-sdk[fastapi] AFTER
 # configure_logging() (so structlog is wired before any sentry import side
