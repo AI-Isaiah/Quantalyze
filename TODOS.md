@@ -2380,6 +2380,25 @@ EXECUTED, §str/None follow-through, §Discovery observation).
 - [ ] (/code-review high, lens 5) HoldingsTable.tsx D-15 comment cites StrategyTable.tsx:1067-1085; the precedent now lives at :1169-1179 — cite by phrase not line number.
 - [x] ~~(/code-review high, lens 5, low-confidence) strategies-row-adapter.ts Half-2 comment~~ **RESOLVED 2026-08-08**: kept `manager: s.codename ?? null` and reworded the comment. Half 1 resolves `organization_name ?? codename ?? null` and an owner's own strategy has a null org, so half 1 lands on the codename too; dropping half 2 to null would make one strategy render "—" while unallocated and its codename once money sits behind it. Cross-half agreement now pinned by test. says "honest — rather than a fabricated manager" but code sets manager: s.codename ?? null — codename-present path renders own codename in the manager column and is untested; decide intended behavior and pin it.
 
+### Phase 162 (HONEST) — composite failure no longer names the offending member (added 2026-08-26)
+
+- [ ] **On a composite onboarding failure the user is told the composite failed, but not WHICH
+      member key caused it.** HONEST-01 / UI-SPEC C-2 removed the `computation_error` appendix
+      from the wizard error envelope — correctly, because that column carried raw Python
+      exception text and server-SCRUBBING is not curation. But that appendix was also the only
+      thing naming the offending member ("… (deribit) failed to reconstruct: …"). The envelope
+      now renders generic `GATE_ANALYTICS_FAILED` copy, so a user with a 3-key composite learns
+      only that something failed.
+      **This is the reader half of the gap Phase 164.2 already owns.** 164.2 covers the writer
+      half (the status bridge overwrites the runner's curated sentence on both transition
+      branches, so `computation_error_copy`'s output reaches no user). Even once the writer is
+      fixed, THIS path still will not render it — the appendix is gone by design. The real fix
+      is a curated, member-naming field in the envelope, not re-threading the column.
+      **Do NOT close by re-threading `computation_error`** — that is precisely the regression
+      HONEST-01 closed, and `e2e/composite-onboarding.spec.ts` now asserts its absence.
+      **Found:** ship gate for v0.74.0.0 — `e2e-seeded` went red on the stale assertion, which
+      is how the information loss surfaced at all.
+
 ### Phase 162 (HONEST) — ship-gate lint finding (added 2026-08-26)
 
 - [ ] **`computationError` is write-only state in `SyncPreviewStep.tsx`, and two comments say
