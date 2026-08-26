@@ -374,6 +374,12 @@ export const ROUTE_CONTRACT_MANIFEST: readonly RouteEntry[] = [
       "Share-token PDF deep link — covered by the /portfolio-pdf PUBLIC_ROUTES prefix + bounce-exempt. NEVER MOVE.",
   },
   {
+    route: "/factsheet-share/:token",
+    class: "public",
+    notes:
+      "Phase 164 (SHARE-01) tokenized factsheet recipient route — covered by the /factsheet-share PUBLIC_ROUTES prefix + bounce-exempt. The /factsheet prefix does NOT cover it (matching is exact-or-`route + \"/\"`), which is why /factsheet-share is its own PUBLIC_ROUTES entry. Bounce-exempt so an authed owner opening their own share link is not 307'd to the dashboard. In-the-wild link — NEVER MOVE: a moved path is a dead share link in someone's inbox.",
+  },
+  {
     route: "/scenario-share/:token",
     class: "public",
     notes:
@@ -409,6 +415,12 @@ export const ROUTE_CONTRACT_MANIFEST: readonly RouteEntry[] = [
     class: "exception",
     notes:
       "EXCEPTION (route.ts handler, no page.tsx — so Rule 4 page-existence is skipped). It IS now in PUBLIC_ROUTES (proxy.ts): 51-REVIEW corrected the prior FALSE note ('returns before the session gate matters') — the proxy session gate runs BEFORE the route handler, so an anon liveness/ops probe was 307→login until /api/health was added to PUBLIC_ROUTES. The anon-reachable behavior is pinned by proxy.test (api routes are governed by PUBLIC_ROUTES + proxy.test, not the page-walk guard).",
+  },
+  {
+    route: "/factsheet-share/gone",
+    class: "exception",
+    notes:
+      "EXCEPTION (route.ts handler, no page.tsx — so Rule 4 page-existence is skipped, exactly as for /api/health). Phase 164 / D-08: the 410 emitter every miss on the token lane redirects to. App Router PAGES cannot set a 410 status (only notFound/forbidden/unauthorized exist), so the honest status line needs a route handler. It IS anon-reachable via the /factsheet-share PUBLIC_ROUTES prefix + bounce exemption — it must be, or the redirect target would itself 307 to /login. Classified `exception` rather than `public` purely because it has no backing page file; its public reachability is real and deliberate.",
   },
   {
     route: "/auth/callback",

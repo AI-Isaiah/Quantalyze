@@ -108,16 +108,22 @@ const trackSectionToggle = (section: string) => (open: boolean) =>
   trackFactsheetEvent("factsheet_v2_section_toggle", { section, open });
 
 /**
- * Phase 148 + 150 — the OWNER-LANE render props, threaded together because they
- * share one rule: every one of them is derived from the page's lane decision and
- * NONE of them may live on `FactsheetPayload`. The payload is the object the
- * shared, id-keyed public cache serves; lane state inside it would be handed to
+ * Phase 148 + 150 — the LANE render props, threaded together because they share
+ * one rule: every one of them is derived from the route's lane decision and NONE
+ * of them may live on `FactsheetPayload`. The payload is the object the shared,
+ * id-keyed public cache serves; lane state inside it would be handed to
  * anonymous readers for the full TTL (T-150-27, and the phase-148 pins are the
  * regression gate).
  *
- * All three are `undefined` on every non-owner mount, and each renders ZERO
- * nodes when absent — no wrapper, no reserved space — so the public masthead is
- * byte-identical to today.
+ * All of them are `undefined` on every default mount, and each renders ZERO
+ * nodes (or suppresses none) when absent — no wrapper, no reserved space — so
+ * the public masthead is byte-identical to today.
+ *
+ * ⚠️ The name is now narrower than the contents: phase 164 added
+ * `recipientShare`, which is set by the tokenized RECIPIENT lane, not by an
+ * owner. The interface was not renamed because the rule it encodes — lane state
+ * rides the render props, never the payload — is unchanged, and a rename would
+ * churn five call sites for no invariant. Read "OwnerLane" as "lane".
  */
 interface OwnerLaneProps {
   /** Viewer-context notice rendered ABOVE the masthead (default undefined).
@@ -127,8 +133,25 @@ interface OwnerLaneProps {
    *  (AllocationDashboardV2.tsx:162, ScenarioFactsheetChart.tsx:237).
    *
    *  A string union rather than a boolean so later phases can add notice kinds
-   *  without a second prop. */
-  viewerNotice?: "owner_unpublished";
+   *  without a second prop. Phase 164 (SHARE-01) is that later phase:
+   *  "shared_privately" is passed by the tokenized RECIPIENT lane
+   *  (`/factsheet-share/[token]`). */
+  viewerNotice?: "owner_unpublished" | "shared_privately";
+  /**
+   * Phase 164 (SHARE-01) — the viewer arrived via a private share TOKEN, so
+   * every affordance that hands out or rebuilds a URL must be suppressed.
+   *
+   * ⛔ A RENDER PROP, NEVER A PAYLOAD FIELD. `FactsheetPayload` is the object
+   * the shared id-keyed cache serves, so lane state folded into it would be
+   * cached once and published to every subsequent reader — the T-150-27 rule
+   * that `viewerNotice`, `ownershipMark` and `renameTarget` already follow.
+   *
+   * ⛔ This does NOT replace `useShareMode()` (D-09). The `?share=1` mechanism
+   * on the id route stays byte-identical and keeps serving PUBLISHED strategies;
+   * this flag is the token route's structural equivalent, because that URL has
+   * no query param to sniff. Both are true share mode; see `ControlBar`.
+   */
+  recipientShare?: boolean;
   /**
    * Phase 150 / OWN-03 — the capital mark, READ-ONLY here. The mark is SET from
    * /my-strategies (D-09); the factsheet only shows it, so there is deliberately
@@ -152,6 +175,7 @@ const MASTHEAD_H1 =
 export function FactsheetView({
   payload,
   viewerNotice,
+  recipientShare,
   ownershipMark,
   renameTarget,
 }: { payload: FactsheetPayload } & OwnerLaneProps) {
@@ -160,6 +184,7 @@ export function FactsheetView({
       <FactsheetShell
         payload={payload}
         viewerNotice={viewerNotice}
+        recipientShare={recipientShare}
         ownershipMark={ownershipMark}
         renameTarget={renameTarget}
       />
@@ -175,6 +200,7 @@ export function FactsheetView({
 function FactsheetShell({
   payload,
   viewerNotice,
+  recipientShare,
   ownershipMark,
   renameTarget,
 }: { payload: FactsheetPayload } & OwnerLaneProps) {
@@ -221,6 +247,7 @@ function FactsheetShell({
     <FactsheetBody
       payload={payload}
       viewerNotice={viewerNotice}
+      recipientShare={recipientShare}
       ownershipMark={ownershipMark}
       renameTarget={renameTarget}
     />
@@ -263,6 +290,7 @@ export function FactsheetBody({
   topSlot,
   scenarioMode = false,
   viewerNotice,
+  recipientShare = false,
   ownershipMark,
   renameTarget,
 }: { payload: FactsheetPayload } & FactsheetBodyOptions) {
@@ -299,6 +327,7 @@ export function FactsheetBody({
             the masthead, before any number. NOT `topSlot`, which renders BELOW
             the masthead (UI-SPEC:97). Absent prop ⇒ zero nodes (GUARD-02). */}
         {viewerNotice === "owner_unpublished" && <OwnerUnpublishedNotice />}
+        {viewerNotice === "shared_privately" && <SharedPrivatelyNotice />}
         {!hideHeader && (
           <FactsheetHeader
             payload={payload}
@@ -309,7 +338,7 @@ export function FactsheetBody({
         {topSlot}
         <KpiStrip />
         <SectionNav />
-        <ControlBar scenarioMode={scenarioMode} />
+        <ControlBar scenarioMode={scenarioMode} recipientShare={recipientShare} />
 
         <div className="mt-6 grid grid-cols-1 lg:grid-cols-[1fr_380px] gap-x-12 gap-y-10">
           <section className="flex flex-col gap-10 min-w-0">
@@ -703,6 +732,42 @@ export function OwnerUnpublishedNotice() {
       <p className="mt-1 text-caption text-text-muted">
         This factsheet is visible only from the account that uploaded the strategy. Anyone else who
         opens this link sees a 404 until Quantalyze review publishes it.
+      </p>
+    </section>
+  );
+}
+
+/**
+ * Phase 164 (SHARE-01) — the RECIPIENT-lane visibility notice, rendered only
+ * when the tokenized route passes `viewerNotice="shared_privately"`.
+ *
+ * Deliberately the SAME visual shape as `OwnerUnpublishedNotice` (square, flat,
+ * hairline border, subtle surface, `role="note"`, muted neutral, `mb-6` before
+ * the masthead, `h2` because it precedes the masthead h1) — the two are the same
+ * KIND of statement, "here is who can see this document", and rendering them
+ * differently would imply a distinction that does not exist.
+ *
+ * The copy does two jobs and neither is optional. It tells the recipient the
+ * document is private, so they understand this is not a public listing they
+ * stumbled onto. And it says Quantalyze has not published or reviewed it, so a
+ * strategy that never passed review cannot borrow the platform's credibility
+ * from the surrounding chrome. Muted neutral by the DESIGN.md semantic-color
+ * gates: not red (nothing failed) and not amber (there is no one-click remedy).
+ */
+export function SharedPrivatelyNotice() {
+  return (
+    <section
+      role="note"
+      aria-label="Visibility notice"
+      className="mb-6 border border-border bg-surface-subtle px-4 py-3"
+    >
+      <h2 className="text-caption font-semibold uppercase tracking-[0.18em] text-text-primary">
+        Shared privately
+      </h2>
+      <p className="mt-1 text-caption text-text-muted">
+        The owner of this strategy shared this factsheet with you through a private link.
+        It is not published on Quantalyze and has not been reviewed by Quantalyze. The owner
+        can turn the link off at any time.
       </p>
     </section>
   );
@@ -1514,11 +1579,22 @@ function ShareLinkButton({ strategyId }: { strategyId: string }) {
   );
 }
 
-function ControlBar({ scenarioMode = false }: { scenarioMode?: boolean }) {
+function ControlBar({
+  scenarioMode = false,
+  recipientShare = false,
+}: {
+  scenarioMode?: boolean;
+  recipientShare?: boolean;
+}) {
   const payload = usePayload();
   const { resetXRange } = useXRange();
   const { setComparator } = useComparator();
-  const shareMode = useShareMode();
+  // Phase 164 (D-09) — TWO share mechanisms, one meaning. `useShareMode()` reads
+  // `?share=1` and serves the PUBLISHED id route; it is untouched. The token
+  // route has no query param to read, so its share mode arrives structurally as
+  // a prop. Both suppress the same outbound chrome, so they are OR'd here rather
+  // than branched anywhere below.
+  const shareMode = useShareMode() || recipientShare;
   // Phase 90 (FS-03, D2/D5) + Phase 102 (MTM-01): cash↔MTM toggle. NEVER apiKeyId —
   // the server-truth `dataQuality.composite` marker OR (Phase 102) a single-key
   // options strategy that participates in the MTM basis story (`payload.mtmGate`
@@ -1738,7 +1814,15 @@ function ControlBar({ scenarioMode = false }: { scenarioMode?: boolean }) {
       >
         Reset view
       </button>
-      {!scenarioMode && <ShareLinkButton strategyId={payload.strategyId} />}
+      {/* Phase 164 (SHARE-04) — a RECIPIENT must never see this control. It
+          rebuilds the URL from `window.location` as `<origin><pathname>?share=1`,
+          which on the token route would hand out a Copy-Link button that strips
+          the token and produces a link that 404s for the next person. The
+          published `?share=1` lane is unaffected: `recipientShare` is false
+          there, so this renders exactly as before. */}
+      {!scenarioMode && !recipientShare && (
+        <ShareLinkButton strategyId={payload.strategyId} />
+      )}
       {!scenarioMode && !shareMode && (
         <a
           href={`/compare?ids=${payload.strategyId}`}
