@@ -2222,6 +2222,66 @@ function hasContractualWait(res: Response): boolean {
 }
 
 /**
+ * Release a response this loop is about to WALK AWAY FROM (Phase 163 / OPS-10).
+ *
+ * Called from exactly ONE site — the counting-status retry arm's `continue` —
+ * and that is not an accident of where it was convenient. It is the only exit in
+ * the loop that abandons a real `Response`:
+ *   · the transport arm's `continue` follows a THROWN `fetch`, so no response
+ *     exists to release;
+ *   · the breaker pre-checks `continue` BEFORE `fetch` fires;
+ *   · every other path either returns the response to the caller or throws.
+ * ⛔ Do not sprinkle this call anywhere else. A cancel on a response the caller
+ * still receives hands every seam client an empty stream — a far worse failure
+ * than the buffering this fixes. Both directions are pinned from the outside by
+ * the `[SEAM-06 / OPS-10]` block in `resilient-fetch.retry.test.ts`.
+ *
+ * WHY IT MATTERS: `readDependencyBody` peeks through `res.clone()` and only on
+ * 503, so on every counting status the ORIGINAL body is never consumed. undici
+ * keeps buffering it until that attempt's `AbortSignal.timeout` fires, which on
+ * this seam is up to the full per-attempt budget — held on a billed lambda while
+ * the retry is already in flight.
+ *
+ * ⚠️ CAPABILITY-CHECKED AT EVERY RUNG, for the same reason `readDependencyBody`
+ * checks `clone` and `hasContractualWait` checks `headers.get`: `SeamResponse` is
+ * deliberately structural, and several existing fixtures are bare
+ * `{ ok, status }` literals with no `body` at all. This site sits OUTSIDE the
+ * classification window's `catch`, so a throw here does not get reclassified —
+ * it escapes `resilientFetch` entirely and replaces the real upstream verdict
+ * with a bookkeeping error. Hence: absent body, non-object body, absent or
+ * non-callable `cancel`, a synchronous throw, and a rejected promise are ALL
+ * shrugs. A body we cannot release is not a failure of the request.
+ *
+ * ⚠️ `res.body?.cancel().catch(() => {})` was the shape the plan sketched and it
+ * is NOT sufficient: it covers the absent body but throws on a present body
+ * whose `cancel` is missing or not callable, and on a `cancel` that returns a
+ * non-promise. The ladder below is the belt in front of those braces.
+ */
+function cancelAbandonedBody(res: Response): void {
+  const body: unknown = res.body;
+  if (body === null || typeof body !== "object") return;
+  const cancel = (body as { cancel?: unknown }).cancel;
+  if (typeof cancel !== "function") return;
+  try {
+    const settled: unknown = (cancel as () => unknown).call(body);
+    if (
+      settled !== null &&
+      typeof settled === "object" &&
+      typeof (settled as { catch?: unknown }).catch === "function"
+    ) {
+      // Swallowed deliberately and NOT logged: a stream that is already errored,
+      // locked or spent rejects here, and every one of those means the buffer we
+      // were trying to release is gone — the outcome we wanted. Logging would
+      // also put a seam response object one `console.error` argument away from a
+      // line that must never carry credentials.
+      (settled as Promise<unknown>).catch(() => {});
+    }
+  } catch {
+    // Same shrug, synchronous flavour.
+  }
+}
+
+/**
  * The ONE way to call the Railway analytics service.
  *
  * Sequence: caller/config validation → breaker check → budgeted fetch →
@@ -2689,6 +2749,14 @@ export async function resilientFetch(
           `[resilient-fetch] ${budgetKey}: attempt ${attempt + 1} of ` +
             `${retries + 1} returned ${res.status} — retrying after backoff`,
         );
+        // Phase 163 / OPS-10 — THE ONE ABANDONING EXIT IN THIS LOOP. Everything
+        // below this line walks away from `res` without anyone ever reading it,
+        // so release its buffer here rather than leaving undici holding it until
+        // the attempt signal fires. Capability-checked and total: see
+        // `cancelAbandonedBody`. It must stay INSIDE this branch — the two
+        // fall-throughs (D-01 fail-fast, last-attempt surrender) RETURN this
+        // response with its body intact.
+        cancelAbandonedBody(res);
         continue;
       }
     }

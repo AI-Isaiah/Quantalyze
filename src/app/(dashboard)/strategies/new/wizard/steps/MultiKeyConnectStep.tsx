@@ -902,8 +902,13 @@ export function MultiKeyConnectStep({
    * own docblock USED TO claim was closed ("it does give up, so no request can
    * hold this tab open forever"). ⚠️ That sentence is gone from there now: the
    * unmount hole this effect closes was not its only counter-example — removing a
-   * validating panel breaks it too, and that one is left open deliberately
-   * (153.4 review WR-03, logged in TODOS.md).
+   * validating panel broke it too.
+   *
+   * ⚠️ AND THAT SECOND HOLE IS NOW CLOSED (Phase 163 / SEC-06). This paragraph
+   * used to end "and that one is left open deliberately (153.4 review WR-03,
+   * logged in TODOS.md)". SUPERSEDED: `doRemove` aborts the removed panel's
+   * request by identity, so this effect and that one are now the same discipline
+   * applied at two exits, not a closed hole beside an open one.
    *
    * ⚠️ The reason is `"user"` per panel because leaving IS a user action:
    * recording it as a deadline would put N seam failures in the funnel for N
@@ -1037,7 +1042,67 @@ export function MultiKeyConnectStep({
     });
   }, []);
 
+  /**
+   * Phase 163 / SEC-06 — REMOVING A PANEL RELEASES ITS REQUEST.
+   *
+   * This used to be three lines that dropped the panel and walked away, and it
+   * was the LAST reachable path leaving a credential-carrying POST on the wire
+   * with no client bound of ours: removing a validating panel also recomputes
+   * `anyValidating` to false, which tears down the single interval that was
+   * enforcing that request's deadline. `handleStopWaiting` below is the analog
+   * this copies, down to the `panelsRef` lookup and the reason-before-abort
+   * order.
+   *
+   * ⛔ THE ABORT IS KEYED BY `p.id`, NEVER BY `idx`. The index the user just
+   * clicked is current by construction — that is why reading `panelsRef.current`
+   * at THIS instant is sound — but everything after it is identity-keyed, because
+   * `onMove` reorders panels and the index a validate STARTED from is not the
+   * index its removal is clicked from (the invariant stated above
+   * `abortControllersRef`).
+   *
+   * ⚠️ THE REASON IS SET BEFORE THE ABORT, AND THE ORDER IS LOAD-BEARING. `abort()`
+   * settles the validate's catch, which reads `abortReasonsRef` to tell a user's
+   * choice from a spent budget. Set it after — or not at all — and one healthy
+   * removal lands in the funnel as a `SERVICE_UNREACHABLE`, which is precisely
+   * the misreporting the reason map exists to prevent.
+   *
+   * ⚠️ THE MAPS ARE NOT CLEANED HERE, AND THAT IS DELIBERATE (163-08 deviation,
+   * measured). Cleaning them looks right and is wrong: the catch reads the reason
+   * a microtask LATER, so a synchronous `delete` is indistinguishable from never
+   * having written it and produces exactly the funnel pollution above — MEASURED,
+   * not reasoned: the eager-delete shape reds the SEC-06 cases with a
+   * `SERVICE_UNREACHABLE` in the funnel, identically to omitting the reason.
+   *
+   * Nothing leaks either way. `validatePanel`'s `finally` deletes BOTH entries on
+   * every outcome including this abort, and it runs whether or not the panel is
+   * still mounted because it belongs to the async call, not to the component
+   * (read from that block, which states the same property; a stale map entry has
+   * no observable behaviour to assert on, since panel ids are never reused and
+   * every attempt clears its own reason at :1212). To keep that true the reason
+   * is written ONLY when a controller exists to consume it — writing one with no
+   * in-flight request would leave an entry no `finally` will ever collect.
+   *
+   * ⚠️ AND `pendingWaitFocusRef` IS NOT SET, unlike `handleStopWaiting`. There is
+   * no control left to focus; the focus effect matches on a panel id that no
+   * longer exists, so setting it would park a stale id that steals focus from
+   * whatever the user does next.
+   *
+   * ⛔ NO NEW COPY MAY CLAIM NOTHING WAS SAVED. Aborting stops this browser
+   * listening; it does not stop the server working. `composite/add-key` runs
+   * `validateKey` → `encryptKey` → the add RPC and reads no `request.signal`
+   * (re-verified at this edit), so the credential may still be encrypted and
+   * stored for a panel the user has just deleted. Server-side cancellation is a
+   * recorded non-goal owned by another phase — see the CR-02 paragraph above
+   * `handleStopWaiting`, which states the same bound for the same route.
+   */
   const doRemove = useCallback((idx: number) => {
+    const p = panelsRef.current[idx];
+    if (!p) return;
+    const controller = abortControllersRef.current.get(p.id);
+    if (controller) {
+      abortReasonsRef.current.set(p.id, "user");
+      controller.abort();
+    }
     setAnnouncement(`Key ${idx + 1} removed`);
     setPanels((prev) => prev.filter((_, i) => i !== idx));
   }, []);
@@ -1100,17 +1165,33 @@ export function MultiKeyConnectStep({
    *      The browser gives up LAST — for every panel this interval is still
    *      watching.
    *
-   *      ⚠️ AND THAT IS THE WHOLE OF THE CLAIM. This paragraph used to close
-   *      "so no request can hold this tab open forever", which is false of one
-   *      reachable path (153.4 review WR-03): the `Remove` control is
+   *      ⚠️ THE CLAIM HOLDS AGAIN, AND THIS PARAGRAPH RECORDS WHY IT ONCE DID
+   *      NOT (Phase 163 / SEC-06). It used to close "so no request can hold this
+   *      tab open forever" and then refute itself: the `Remove` control is
    *      deliberately not disabled while a panel is validating, and removing
    *      such a panel recomputes `anyValidating` to false, clears this one
    *      interval, and leaves that request with no client bound of OURS — only
-   *      the platform's invocation limit. Left as-is on purpose rather than
-   *      unfixed by oversight: the abort buys nothing there, because neither
-   *      connect route reads `request.signal` (so it would not stop the key
-   *      being stored) and `updatePanelById` no-ops for an id that is gone (so
-   *      the settled request cannot touch the UI). Logged in TODOS.md.
+   *      the platform's invocation limit (153.4 review WR-03).
+   *
+   *      ⛔ IT THEN SAID: *"Left as-is on purpose rather than unfixed by
+   *      oversight: the abort buys nothing there, because neither connect route
+   *      reads `request.signal` (so it would not stop the key being stored) and
+   *      `updatePanelById` no-ops for an id that is gone (so the settled request
+   *      cannot touch the UI). Logged in TODOS.md."* SUPERSEDED — and note that
+   *      both of its premises are still TRUE. What was wrong was the conclusion
+   *      drawn from them. "The server keeps working" and "the UI cannot be
+   *      touched" do not add up to "the abort buys nothing": what it buys is
+   *      releasing an in-flight request that CARRIES THE USER'S CREDENTIALS from
+   *      a UI context the user has just deleted, and returning the browser's
+   *      connection and its unbounded wait with it. A credential-carrying POST
+   *      must not outlive the panel that owns it, whatever the server does with
+   *      it afterwards. `doRemove` now aborts by identity with reason `"user"`.
+   *
+   *      ⛔ THE HONEST BOUND IS UNCHANGED, so no new copy may over-claim: this
+   *      stops US listening, not the server working. See the CR-02 paragraph
+   *      above `handleStopWaiting` — the route runs on into `encryptKey` and the
+   *      add RPC, and server-side cancellation remains a non-goal owned
+   *      elsewhere.
    *   2. THE ELAPSED FIGURE each panel's card renders.
    */
   const anyValidating = panels.some((p) => p.status === "validating");

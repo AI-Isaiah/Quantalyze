@@ -644,6 +644,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 | Phase 163 P01 | 50min | 2 tasks | 6 files |
 | Phase 163 P03 | 50m | 3 tasks | 98 files |
 | Phase 163 P04 | 33min | 3 tasks | 16 files |
+| Phase 163 P08 | 35min | 2 tasks | 4 files |
 
 ## Accumulated Context
 
@@ -812,6 +813,9 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - [Phase 161]: HONEST-08: the staler-of-two comparison is between VERDICTS on per-subject ladders (job 12h/48h, series 3d/7d), not raw dates — a daily series' last point is always older than a fresh job, so older-date-wins would have deleted the sync copy product-wide
 - [Phase 161]: HONEST-08: the 3d/7d series ladder moved from FactsheetView.tsx into lib/freshness.ts and the chip now imports it — one pair of numbers for the list badge and the factsheet chip
 - [Phase 161]: HONEST-08: PostgREST accepts a negative JSONB array index as a projection alias (series_end:returns_series->-1->>date, MEASURED HTTP 200) — but postgrest-js cannot TYPE-parse it, so the call site carries a narrow documented cast
+- [Phase 161]: 163-08: the seam body cancel uses a full capability ladder, not res.body?.cancel().catch() — the sketch throws on a present body whose cancel is missing or not callable, measured RED
+- [Phase 161]: 163-08: doRemove does NOT clean the abort ref maps (plan deviation, measured) — the catch reads the reason a microtask later, so a synchronous delete reds the funnel with SERVICE_UNREACHABLE; validatePanel's finally already cleans both
+- [Phase 161]: 163-08: vi.fn attaches its own handler to a returned promise, suppressing unhandledRejection — a spy is not a neutral observer of promise handling; use a plain closure when the oracle IS the rejection
 
 ### Decisions (execution-time, Phase 140.2)
 
