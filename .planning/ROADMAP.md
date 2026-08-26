@@ -512,7 +512,7 @@ Plans:
 | 160. PROVENANCE venue/annualization | 7/7 | 🟡 Arm proven, 1/3 surfaces | Persist arm smoked via ApiKeyManager 2026-08-25; StrategyForm un-smoked, AllocatorExchangeManager unmounted |
 | 161. WIZERR honest errors | 0/? | Not started | - |
 | 162. HONEST visible truth | 0/? | Not started | - |
-| 163. HARDEN reliability + security | 0/? | Not started | - |
+| 163. HARDEN reliability + security | 9/9 | Complete | v0.75.0.0 |
 | 164. SHARE revocable links | 0/? | Not started | - |
 | 165. DEPS dependabot campaign | 0/? | Not started | - |
 
@@ -525,7 +525,7 @@ Plans:
 | 160 | RANK-03, RANK-04 |
 | 161 | WIZERR-01, WIZERR-02, WIZERR-03, WIZERR-04, WIZERR-05, WIZERR-06, WIZERR-07, WIZERR-08, WIZERR-09, WIZERR-10, WIZERR-11, WIZERR-12, WIZERR-13 |
 | 162 | HONEST-01, HONEST-02, HONEST-03, HONEST-04, HONEST-05, HONEST-06 |
-| 163 | OPS-05, OPS-06, OPS-07, OPS-08, OPS-09, OPS-10, SEC-01, SEC-02, SEC-03, SEC-04, SEC-05, SEC-06 |
+| 163 | OPS-05, OPS-06, OPS-07, OPS-08, OPS-09, OPS-10, SEC-01, SEC-02, SEC-03, SEC-04, SEC-05, SEC-06, HONEST-08 |
 | 164 | SHARE-01, SHARE-02, SHARE-03, SHARE-04 |
 | 165 | DEPS-01 |
 

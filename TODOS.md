@@ -1038,6 +1038,40 @@ true for 146 and half of 142–145, and **false for 141**.
 
 ## 🟡 FIX MID-TERM
 
+### 🔴 Phase 163 / WR-10 — the password floor was MEASURED, not RAISED (added 2026-08-26)
+
+⚠️ **This item needs a founder decision. It is booked, NOT accepted.** It fell through the
+gap between "fixed" and "recorded" in the phase-163 fix round — re-verification found it
+dispositioned nowhere, which is why it is written up in full here rather than as a one-liner.
+
+SEC-01 closed by MEASURING the hosted password policy and mirroring it in one exported
+constant. The measurement discipline was right and is not in question: the hosted minimum was
+read from the live signup endpoint's own rejection (**6 characters, and `reasons: ["length"]`
+alone, so no character-class requirement**), never assumed from the GoTrue default.
+
+**But measuring a weak floor and faithfully mirroring it is not hardening.** The outcome of a
+requirement in a phase titled *"HARDEN — fail safe, closed, and loud"* is that a platform
+which custodies users' exchange API keys accepts a six-character, all-lowercase password.
+Nothing in the phase raised the actual gate — SEC-01's own docblock says the client constant
+is UX only and the real gate is hosted GoTrue.
+
+**Why this is a security item and not a preference.** 26^6 ≈ 3×10^8 is trivially searchable
+offline and well within online rates, because the observed rate limiting is per-route rather
+than per-account. The connected venue keys are decryptable server-side by the platform, so
+account takeover is key-material exposure, not just account access.
+
+- **[WR-10] RAISE the hosted minimum and enable leaked-password protection.** Both are
+  DASHBOARD-OWNED settings with no repo representation, so a code change alone cannot do it.
+  Sequence: raise the hosted minimum (10–12 is the common floor) and switch on GoTrue's
+  leaked-password protection, THEN move `MIN_PASSWORD_LENGTH` and its recorded reading in the
+  same commit. The procedure is already written down in the constant's docblock.
+
+⚠️ **If the decision is to defer, record the deferral in the SEC-01 entry as an ACCEPTED RISK.**
+Do not leave SEC-01 reading as though the floor were validated — it was observed, and
+observing a weak floor is not the same as clearing it. That distinction is the whole point of
+this phase.
+
+
 ### Phase 163 / OPS-08 (de-strict `_enqueue_compute_job_internal`) — routed onward (added 2026-08-26)
 
 Raised by the three-reviewer gate on `supabase/migrations/20260826150000_destrict_enqueue_internal_10param.sql`.
@@ -1120,36 +1154,29 @@ there is nothing to strip, so:
 all measured green on BOTH databases on 2026-08-26, so nothing is broken today.
 
 
-### Phase 163 / WR-07 — operator jargon reaches a user-visible column; the fix is in TS, not SQL (added 2026-08-26)
+### ✅ CLOSED — Phase 163 / WR-07: operator jargon reached a user-visible column (closed 2026-08-26)
 
-The OPS-08 migration's `serialization_failure` sentence lands verbatim in
-`strategy_analytics.computation_error`, which strategy owners read. Phase 162 removed
-operator prose from user-facing error surfaces; this is the same class, one layer down.
+The OPS-08 migration's `serialization_failure` sentence landed verbatim in
+`strategy_analytics.computation_error`, which strategy owners read. It could NOT be fixed in
+SQL: `csv-finalize` prefixed `compute job enqueue failed:` unconditionally with no SQLSTATE
+branch, so no wording chosen in SQL reached the user unprefixed.
 
-**It cannot be fixed in SQL, and the SQL was deliberately left alone rather than patched
-cosmetically.** Measured: `src/app/api/strategies/csv-finalize/route.ts:2035` builds
-`` `compute job enqueue failed: ${enqueueErrMessage}` `` and hands it to
-`writeFailedStrategyAnalyticsPlaceholder` (:1868), which writes
-`strategy_analytics.computation_error` (:1928). **That prefix is added on the TS side,
-unconditionally, with no SQLSTATE branch in front of it** — so whatever sentence SQL
-raises, the owner still reads one beginning in operator jargon. `USING DETAIL` does not
-help either: the sink reads PostgREST's `.message` and never `.details`.
+**FIXED in TypeScript.** `csv-finalize` now branches on `enqueueErr.code === '40001'` and
+writes the ELSE arm of `computation_error_copy` instead of the operator prefix. The copy is
+pinned to the SQL function by a static parity test, so rewording that arm turns the route RED
+in CI rather than drifting silently.
 
-- **[WR-07-TS] Branch the enqueue-failure copy on SQLSTATE in `csv-finalize/route.ts`.**
-  Three steps: branch on `enqueueErr.code === '40001'` (measured: ZERO quoted `'40001'`
-  anywhere in `src/**/*.ts{,x}` at HEAD — nothing branches on it yet); drop the
-  `compute job enqueue failed:` prefix on that branch; write the ELSE sentence from
-  `computation_error_copy`.
+⚠️ This entry previously recorded the measurement "ZERO quoted `'40001'` in `src/**`" as
+support for the fix. **That measurement was true when written and is FALSE now** — the fix is
+what made it false. Corrected rather than deleted, because a backlog that keeps a stale
+measurement as live evidence is the same defect class this phase closed elsewhere.
 
-⚠️ **Two corrections to the review's suggested remedy, both worth keeping:**
-- The proposed copy *"will retry automatically"* is **FALSE at HEAD** — nothing in this
-  repo retries a 40001 (see OPS-08-TS above). Shipping it would trade operator jargon for
-  a false promise, which is HONEST-01 again rather than a fix for it.
-- *"route that call through the HONEST-01 bridge"* is not available as stated: the bridge
-  derives copy from `compute_jobs.error_kind`, and a failed **enqueue** leaves no job row
-  to derive from. The helper `computation_error_copy(TEXT)` is directly callable; the
-  bridge is not the route.
-
+⭐ Two corrections to the review's proposed remedy stand, and are worth keeping:
+- the suggested copy *"will retry automatically"* is FALSE at HEAD — nothing retries a 40001
+  (see OPS-08-TS). It would have traded operator jargon for a false promise.
+- *"route it through the HONEST-01 bridge"* is not available: the bridge derives copy from
+  `compute_jobs.error_kind`, and a failed ENQUEUE leaves no job row. The helper
+  `computation_error_copy(TEXT)` is directly callable; the bridge is not the route.
 
 ### Phase 163 / WR-01 — hygiene Rule 1 is INACTIVE in CI by design (added 2026-08-26)
 

@@ -194,6 +194,22 @@ file present. Consequence recorded in the file header and below.
 
 ## Blockers
 
+> ⛔ **CORRECTED 2026-08-26 — the section below is STALE AS MERGED.** It was written before
+> the three-reviewer re-audit, which replaced the gate with a both-or-neither COHERENCE form
+> that is **GREEN in the pre-apply state by design** — specifically so a knowingly-red file
+> would not suppress the ~40 `supabase/tests/` files sorting after it (the runner exits on
+> first failure).
+>
+> So the prediction below is inverted: `sql-tests` is **not** red for this file, and nobody
+> needs to hand-apply anything to turn it green. The real consequence is the opposite one and
+> is worse: **no CI signal will ever redden to report that the migration was never applied.**
+> Only prose tracks that. Verified: the gate's `SKIP (Part 3)` marker does not match CI's
+> anti-SKIP net, which keys on a marker *starting* `SKIP:`. Recorded as DRIFT-01 in TODOS.md.
+>
+> The row "Gate RED pre-apply / GREEN post-apply" in the table above describes the same
+> superseded design and is stale for the same reason.
+
+
 **The TEST hand-apply did not happen — it is not reachable from here.** `TEST_SUPABASE_DB_URL`
 is a CI secret and there is no env file in this worktree. The plan's Task 3 asked for the
 flip to be observed on TEST; the substantive property (the gate is falsifiable, and RED for
