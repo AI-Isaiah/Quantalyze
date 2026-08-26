@@ -22,11 +22,14 @@
  *
  * Rules enforced
  * --------------
- *   1. LOCAL-USERNAME — the macOS username appears in a tracked file (matched
- *      case-insensitively). The needle is stored BASE64-ENCODED and decoded at
- *      runtime: a scanner whose source spells its own needle fails its own scan,
- *      and the only way out of that would be the one thing Rule 0 forbids, a
- *      path allowlist for this file.
+ *   1. LOCAL-USERNAME — the local machine username appears in a tracked file
+ *      (matched case-insensitively). ⛔ The needle is DERIVED AT RUNTIME from
+ *      the environment and never committed in any encoding. Storing it base64
+ *      — the first cut of this gate — let the scanner pass its own scan while
+ *      leaving the name recoverable from a public clone by anyone with
+ *      `base64 -d`, so the success line was false of the tree it had walked
+ *      (Phase 163 WR-01). This rule DISABLES ITSELF, loudly, when no plausible
+ *      personal identifier can be derived; see `deriveLocalUsername`.
  *   2. ABSOLUTE-HOME-PATH — the macOS home-directory prefix (spelled escaped:
  *      `\/Users\/`) appears in a tracked file. STRUCTURAL, not name-based, so a
  *      teammate's absolute path with a DIFFERENT username fails too. A gate that
@@ -52,7 +55,12 @@
  *     read with `readFileSync(..., "latin1")`: a byte-exact 1:1 decode that
  *     neither truncates at a NUL nor collapses invalid sequences into
  *     replacement characters the way a utf8 decode would.
- *   - Self-match. See Rules 1-3 — encoded needle, escaped prose.
+ *   - Self-match. See Rules 1-3 — runtime-derived username, char-code structural
+ *     prefixes, escaped prose. ⚠️ An ENCODING IS NOT A REDACTION: base64, hex,
+ *     percent-encoding and split-and-concatenated literals all keep the value
+ *     recoverable, so none of them is an acceptable way to carry a needle in a
+ *     tracked file. The only self-match escape that is also a real redaction is
+ *     not having the value in the tree at all.
  *
  * Demonstrated RED (Phase 163 plan 03, recorded in 163-03-SUMMARY.md): with the
  * scrub landed and `npm run lint` green, a scratch tracked file
@@ -61,6 +69,14 @@
  * `ABSOLUTE-HOME-PATH: .planning/red-demo-scratch.md:1`. Deleting the scratch
  * file returned lint to green. The mutation is: introduce one unescaped home-path
  * prefix into any tracked file; the direction is green → exit 1.
+ *
+ * Demonstrated RED for Rule 1 after the WR-01 rework (2026-08-26), on the real
+ * default derivation: a scratch `red-demo-username.md` holding the derived
+ * username was added with `git add -N`; the gate exited 1 with
+ * `LOCAL-USERNAME: red-demo-username.md:1`. Deleting it returned exit 0 with
+ * `5714 tracked files scanned`. Running with `HYGIENE_LOCAL_USERNAME=runner`
+ * exits 0 but prints the rule-1-DID-NOT-RUN warning and drops the username
+ * clause from the success line — the honest-claim behaviour WR-01 asked for.
  *
  * Exit codes
  * ----------
@@ -82,20 +98,182 @@
 
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
+import { homedir, userInfo } from "node:os";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { dirname, resolve } from "node:path";
+import { basename, dirname, resolve } from "node:path";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(__dirname, "..");
 
 /**
- * The needles, never spelled literally in this source (see Rules 1-3).
- * `USERNAME` is base64; the two path prefixes are char codes. Decoding at
- * runtime is what lets this file pass its own scan without a path carve-out.
+ * The two STRUCTURAL needles, spelled as char codes so this source does not
+ * trip its own Rules 2-3. They encode no identity — they are the shape of a
+ * home path, not anyone's name — so committing them discloses nothing.
+ *
+ * The Rule 1 needle is deliberately absent from this list: see
+ * `deriveLocalUsername` below.
  */
-const USERNAME = Buffer.from("aGVsaW9zLW1hbW11dA==", "base64").toString();
 const HOME_PREFIX = String.fromCharCode(47, 85, 115, 101, 114, 115, 47);
 const SCRATCH_PREFIX = String.fromCharCode(45, 85, 115, 101, 114, 115, 45);
+
+/**
+ * ⛔ THE RULE 1 NEEDLE IS NEVER COMMITTED, IN ANY ENCODING (Phase 163 WR-01).
+ *
+ * The first cut of this gate stored the username base64-encoded so the scanner
+ * could pass its own scan. That kept the gate self-consistent and left the
+ * disclosure fully intact: `base64 -d` recovers the name from a public clone,
+ * so the success line "none carry the local username" was false of the very
+ * tree it had just walked. Hex, char codes and split-and-concatenated literals
+ * all fail the same way — an encoding is not a redaction.
+ *
+ * The needle is therefore derived from the RUNNING MACHINE and exists only in
+ * memory. Precedence:
+ *   1. `HYGIENE_LOCAL_USERNAME` — an explicit override, so CI can inject the
+ *      name from a repository secret without it ever entering the tree.
+ *   2. the basename of the home directory (what actually appears in leaked
+ *      absolute paths).
+ *   3. the OS user record.
+ *
+ * ⚠️ The derived value is NEVER echoed — not into a violation message, not into
+ * the success line, not into a warning. This repo is public, so CI logs are
+ * public; a gate that printed the needle would republish what it just removed.
+ */
+const LOCAL_USERNAME_ENV = "HYGIENE_LOCAL_USERNAME";
+
+/**
+ * A bare substring search for a short or generic name is worse than no rule:
+ * it fails a clean tree. MEASURED on this repo (2026-08-26): the GitHub Actions
+ * account name — `os.userInfo().username` under `/home/runner` — occurs 2800
+ * times across 507 tracked files. Deriving the needle naively would therefore
+ * turn `frontend-lint` permanently red on a tree with zero real leakage.
+ *
+ * So Rule 1 runs only against a name that could plausibly identify a person.
+ * When it cannot, the rule is DISABLED AND SAID SO OUT LOUD (see `main`) rather
+ * than silently passing — the whole point of this phase is fail-safe and loud.
+ * Rules 2-3 are structural and username-agnostic, so they run everywhere and
+ * still catch every home-path form on any machine.
+ */
+const MIN_PLAUSIBLE_USERNAME_LENGTH = 6;
+
+/**
+ * Generic build/CI/container account names, all of them >= the length floor
+ * above (shorter generics such as `root`, `node`, `ci`, `user` and `app` are
+ * already excluded by that floor, so listing them here would be redundant).
+ */
+const GENERIC_ACCOUNTS = new Set([
+  "administrator",
+  "azureuser",
+  "buildkite",
+  "builder",
+  "circleci",
+  "codespace",
+  "container",
+  "devcontainer",
+  "docker",
+  "ec2-user",
+  "github",
+  "gitlab",
+  "jenkins",
+  "runner",
+  "runneradmin",
+  "travis",
+  "ubuntu",
+  "vercel",
+  "vscode",
+  "worker",
+]);
+
+/** Why Rule 1 is or is not running. Never contains the derived value itself. */
+export interface UsernameRuleStatus {
+  active: boolean;
+  reason: string;
+}
+
+/** The raw inputs to the derivation, injectable so tests need not mutate the OS. */
+export interface LocalIdentitySources {
+  envOverride?: string | undefined;
+  homeDir?: string | undefined;
+  osUsername?: string | undefined;
+}
+
+/** The real machine's inputs. Both `os` calls can throw in stripped containers. */
+function defaultIdentitySources(): LocalIdentitySources {
+  let home: string | undefined;
+  try {
+    home = homedir();
+  } catch {
+    home = undefined;
+  }
+  let osUsername: string | undefined;
+  try {
+    osUsername = userInfo().username;
+  } catch {
+    osUsername = undefined;
+  }
+  return {
+    envOverride: process.env[LOCAL_USERNAME_ENV],
+    homeDir: home,
+    osUsername,
+  };
+}
+
+/**
+ * Resolve the Rule 1 needle from the environment. Returns `null` — plus a
+ * reason the caller MUST surface — whenever no plausible personal identifier
+ * is available, rather than searching for something that would false-positive.
+ */
+export function deriveLocalUsername(
+  sources: LocalIdentitySources = defaultIdentitySources(),
+): { username: string | null; status: UsernameRuleStatus } {
+  const fromEnv = (sources.envOverride ?? "").trim();
+  const homeBase = sources.homeDir ? basename(sources.homeDir).trim() : "";
+  const fromOs = (sources.osUsername ?? "").trim();
+
+  let candidate = "";
+  let source = "";
+  if (fromEnv) {
+    candidate = fromEnv;
+    source = `the ${LOCAL_USERNAME_ENV} override`;
+  } else if (homeBase && homeBase !== "/" && homeBase !== ".") {
+    candidate = homeBase;
+    source = "the home-directory basename";
+  } else if (fromOs) {
+    candidate = fromOs;
+    source = "the OS user record";
+  }
+
+  if (!candidate) {
+    return {
+      username: null,
+      status: {
+        active: false,
+        reason: `no local identity could be derived from the environment (no ${LOCAL_USERNAME_ENV}, no home directory, no OS user record)`,
+      },
+    };
+  }
+  if (GENERIC_ACCOUNTS.has(candidate.toLowerCase())) {
+    return {
+      username: null,
+      status: {
+        active: false,
+        reason: `the derived local identity is a known generic CI/build/container account, not a personal identifier — searching for it would flag thousands of ordinary occurrences`,
+      },
+    };
+  }
+  if (candidate.length < MIN_PLAUSIBLE_USERNAME_LENGTH) {
+    return {
+      username: null,
+      status: {
+        active: false,
+        reason: `the derived local identity is shorter than ${MIN_PLAUSIBLE_USERNAME_LENGTH} characters, so a bare substring search would collide with ordinary prose and identifiers`,
+      },
+    };
+  }
+  return {
+    username: candidate,
+    status: { active: true, reason: `derived at runtime from ${source}` },
+  };
+}
 
 /** The founder-locked redaction token — the ONLY exemption, and it is by value. */
 const PLACEHOLDER = "<user>";
@@ -122,16 +300,28 @@ function occurrences(haystack: string, needle: string): number[] {
  * Scan one file's CONTENTS. Pure — takes the text, returns violation strings.
  * `relPath` is used only to label the violation; it NEVER affects whether an
  * occurrence counts (Rule 0: no path allowlist).
+ *
+ * `localUsername` is REQUIRED and has no default on purpose: a default would let
+ * a caller silently run with Rule 1 off and never notice. `null` means the rule
+ * is knowingly inactive (see `deriveLocalUsername`).
  */
-export function scanFile(relPath: string, contents: string): string[] {
+export function scanFile(
+  relPath: string,
+  contents: string,
+  localUsername: string | null,
+): string[] {
   const violations: string[] = [];
 
-  // Rule 1 — the username itself, case-insensitively.
-  const lowered = contents.toLowerCase();
-  for (const idx of occurrences(lowered, USERNAME.toLowerCase())) {
-    violations.push(
-      `LOCAL-USERNAME: ${relPath}:${lineOf(contents, idx)} — the macOS username appears in a tracked file on a public repo. Replace it with the placeholder ${PLACEHOLDER}.`,
-    );
+  // Rule 1 — the username itself, case-insensitively. Skipped only when the
+  // needle could not be derived, which `main` announces loudly.
+  if (localUsername) {
+    const lowered = contents.toLowerCase();
+    for (const idx of occurrences(lowered, localUsername.toLowerCase())) {
+      violations.push(
+        // ⚠️ Never interpolate the needle here — CI logs on a public repo are public.
+        `LOCAL-USERNAME: ${relPath}:${lineOf(contents, idx)} — the local machine username appears in a tracked file on a public repo. Replace it with the placeholder ${PLACEHOLDER}.`,
+      );
+    }
   }
 
   // Rules 2 and 3 — the two structural home-path forms, with the Rule 4 value
@@ -190,7 +380,28 @@ export function listTrackedFiles(rootDir: string): string[] {
 export function runCheck(
   rootDir: string,
   files: string[] = listTrackedFiles(rootDir),
-): { violations: string[]; filesScanned: number } {
+  localUsername?: string | null,
+): {
+  violations: string[];
+  filesScanned: number;
+  usernameRule: UsernameRuleStatus;
+} {
+  // `undefined` = derive from this machine; an explicit `string | null` is an
+  // injected needle (tests) or a knowingly-disabled Rule 1.
+  const derived =
+    localUsername === undefined
+      ? deriveLocalUsername()
+      : {
+          username: localUsername,
+          status: {
+            active: localUsername !== null,
+            reason:
+              localUsername !== null
+                ? "an explicitly supplied needle"
+                : "Rule 1 was explicitly disabled by the caller",
+          },
+        };
+
   const violations: string[] = [];
   let filesScanned = 0;
 
@@ -207,7 +418,7 @@ export function runCheck(
       continue;
     }
     filesScanned += 1;
-    violations.push(...scanFile(rel, contents));
+    violations.push(...scanFile(rel, contents, derived.username));
   }
 
   if (filesScanned === 0) {
@@ -216,11 +427,22 @@ export function runCheck(
     );
   }
 
-  return { violations, filesScanned };
+  return { violations, filesScanned, usernameRule: derived.status };
 }
 
 function main(): void {
-  const { violations, filesScanned } = runCheck(REPO_ROOT);
+  const { violations, filesScanned, usernameRule } = runCheck(REPO_ROOT);
+
+  // Loud BEFORE the verdict: a rule that did not run must never be discoverable
+  // only by reading the source (Phase 163 WR-01 — the success line must not
+  // claim more than the scan actually checked).
+  if (!usernameRule.active) {
+    console.warn(
+      `[check-planning-hygiene] ⚠️ LOCAL-USERNAME (rule 1) DID NOT RUN — ${usernameRule.reason}.\n` +
+        `  Rules 2-3 (absolute and dash-mangled home paths) are structural and ran over every file.\n` +
+        `  To enable rule 1 here, set ${LOCAL_USERNAME_ENV} (in CI, from a repository secret — never commit it).`,
+    );
+  }
 
   if (violations.length > 0) {
     console.error(`[check-planning-hygiene] ${violations.length} violation(s):\n`);
@@ -235,8 +457,13 @@ function main(): void {
     process.exit(1);
   }
 
+  // The claim is scoped to what actually ran. Saying "none carry the local
+  // username" after Rule 1 was skipped is exactly the false success line WR-01
+  // filed, so the username clause appears only when the username was searched.
   console.log(
-    `[check-planning-hygiene] OK — ${filesScanned} tracked files scanned, none carry the local username or an absolute home path.`,
+    usernameRule.active
+      ? `[check-planning-hygiene] OK — ${filesScanned} tracked files scanned, none carry the local username or an absolute home path (rule 1 needle: ${usernameRule.reason}).`
+      : `[check-planning-hygiene] OK — ${filesScanned} tracked files scanned, none carry an absolute home path. LOCAL-USERNAME (rule 1) was NOT checked; see the warning above.`,
   );
 }
 
