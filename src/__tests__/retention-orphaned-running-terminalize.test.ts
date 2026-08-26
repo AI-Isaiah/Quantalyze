@@ -69,14 +69,22 @@ import { describe, it, expect } from "vitest";
 
 const REPO_ROOT = join(__dirname, "..", "..");
 const MIGRATIONS_DIR = join(REPO_ROOT, "supabase", "migrations");
-const FIX_TS = "20260817120000";
-const FIX_FILENAME = `${FIX_TS}_retention_orphaned_running_terminalize.sql`;
+// ⛔ REPOINTED to 20260826140000 (Phase 162 F-3), which re-registers this same
+// cron jobname to classify a reaped orphan as error_kind 'orphaned' rather than
+// 'permanent'. Arm 7 below is what forced this edit: a forward-only cron
+// re-registration that leaves these constants behind makes every assertion in
+// this file guard a body pg_cron NO LONGER RUNS, while staying green.
+// 20260817120000 remains the migration that established the two-arm
+// terminalizer shape; every count below is unchanged by the re-registration,
+// which alters exactly one literal per arm.
+const FIX_TS = "20260826140000";
+const FIX_FILENAME = `${FIX_TS}_compute_jobs_error_kind_orphaned.sql`;
 const FIX_PATH = join(MIGRATIONS_DIR, FIX_FILENAME);
 
 // The repo tip this migration layers on. Invariant #1 of
 // .claude/agents/migration-reviewer.md: the 14-digit prefix must be strictly
 // greater, or the backdated-migration guard needs an allowlist entry.
-const PRIOR_TIP_TS = "20260816140000";
+const PRIOR_TIP_TS = "20260826130000";
 
 // ORACLE INDEPENDENCE. Every literal below is declared LOCALLY and names its
 // production source in a comment. None is imported or derived from the artifact
@@ -329,23 +337,46 @@ describe("JOB-05 orphaned-running terminalizer migration content gate", () => {
         `(jobid 4) DOES key on created_at (20260515113853:195-199).`,
     ).toBe(2);
 
-    // get_user_compute_jobs synthesises its user_message from (status,
-    // error_kind) (20260516104201:784-797); 'permanent' selects the accurate
-    // "we can't retry this automatically" arm. ⚠️ There is NO user_message COLUMN
-    // to write — it is a computed member of that RPC's RETURNS TABLE, and a
-    // migration written against such a column would fail to apply.
+    // TWO surfaces synthesise user-facing copy from (status, error_kind):
+    // get_user_compute_jobs.user_message (20260516104201:784-797) and
+    // computation_error_copy (20260826120000), which is what the status bridge
+    // writes into strategy_analytics.computation_error. ⚠️ There is NO
+    // user_message COLUMN to write — it is a computed member of that RPC's
+    // RETURNS TABLE, and a migration written against such a column would fail
+    // to apply.
     expect(
       body,
       "the body does not set error_kind, so a terminalized row renders the " +
-        "vaguer 'tried multiple times without success' arm rather than the " +
-        "accurate permanent-failure one on the only surface that reads the pair.",
+        "cautious default on both surfaces that read the pair rather than the " +
+        "accurate worker-died one.",
     ).toContain("error_kind");
+
+    // ⛔ 'orphaned', NOT 'permanent' (mig 20260826140000, Phase 162 F-3).
+    // 'permanent' means "skip retries, go directly to failed_final" — but these
+    // jobs are ones whose WORKER DIED holding the claim, so they are retryable
+    // by definition, and both copy surfaces told those users that retrying
+    // would not help. It does not self-heal: the 20260819130500 readmit sweep
+    // is csv-only and is additionally blocked once computation_status reads
+    // 'failed', so the user retrying is the only remaining mechanism.
+    //
+    // A COUNT, not a presence test: a presence test is satisfied by either arm
+    // surviving, so a half-converted body (arm A flipped, arm B still
+    // 'permanent') would pass unnoticed.
+    const orphanKind = count(body, /'orphaned'/g);
+    expect(
+      orphanKind,
+      `the body classifies the failure as 'orphaned' ${orphanKind} time(s), ` +
+        `expected 2 (one per arm). Arm A reaps claims past the 4h window, arm ` +
+        `B reaps never-claimed running rows past 48h — both are worker deaths ` +
+        `and both are retryable.`,
+    ).toBe(2);
     expect(
       body,
-      "the body does not classify the failure as 'permanent' — the documented " +
-        "value for 'skip retries, go directly to failed_final' " +
-        "(20260411144407:159-160).",
-    ).toContain("'permanent'");
+      "the body still classifies a reaped orphan as 'permanent', which is the " +
+        "F-3 defect: a job whose worker died is not a permanent failure, and " +
+        "labelling it one makes both user-facing surfaces state something " +
+        "false about retryability.",
+    ).not.toContain("'permanent'");
 
     // 2 = one FIXED audit literal per arm. Fixed literals only: no identifier, no
     // row data, no upstream error text, no re-attribution of fault.

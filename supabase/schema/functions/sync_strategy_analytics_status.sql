@@ -509,10 +509,20 @@ BEGIN
        -- a COALESCE whose left arm is provably non-NULL is dead code that
        -- teaches the next reader that NULL is still reachable here.
        --
-       -- ⚠️ The removal has a SECOND effect, and it is wanted: a row still
+       -- ⚠️ The removal has TWO further effects. One is wanted: a row still
        -- carrying raw exception text written before this migration is HEALED the
        -- next time this branch touches it. Under the COALESCE that legacy text
        -- would have been preserved indefinitely, which is the defect.
+       --
+       -- ⛔ The other is a COST, and it is taken knowingly (Phase 162 review,
+       -- F-4). On the paths where the Python stamp DID run, that COALESCE also
+       -- preserved the worker's curated per-failure sentence — a real loss of
+       -- specificity on a column the portfolio stale warning renders. It is
+       -- accepted because this column records no PROVENANCE: preferring the
+       -- value already present cannot tell this failure's sentence from an
+       -- older unrelated one, and on the no-stamp paths this branch exists for
+       -- it would attribute a stale cause to a fresh failure. The migration
+       -- file header carries the full argument.
        SET computation_error   = computation_error_copy(v_protected_kind),
            -- JOB-01: this is still an exit from computing. The publish columns
            -- are untouched on purpose; see the header for the full list of what
