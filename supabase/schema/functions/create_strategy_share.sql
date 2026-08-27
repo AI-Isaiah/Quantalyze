@@ -7,8 +7,8 @@
 -- STEP 3: create_strategy_share(p_strategy_id) — atomic mint-or-reuse
 -- --------------------------------------------------------------------------
 -- ONE statement: insert the counter row, or reactivate the existing one. The
--- caller gets back the CURRENT generation and derives the token from it in
--- Node, so:
+-- caller gets back the CURRENT generation AND the row's nonce and derives the
+-- token from both in Node, so:
 --   * strategy never shared -> row at generation 1 -> a fresh link;
 --   * strategy already live -> the SAME generation -> the SAME link (SHARE-01
 --     reuse: Copy Link is idempotent and never breaks the recipient's url);
@@ -33,14 +33,43 @@
 -- A conflicting row belonging to another tenant therefore ERRORS rather than
 -- being silently updated — no cross-tenant write, and the route surfaces a
 -- generic failure rather than an existence oracle.
+--
+-- ⛔ THE RETURN SHAPE CHANGED IN PLACE, NOT BY DROP+CREATE, AND THAT MATTERS.
+-- `CREATE OR REPLACE FUNCTION` CANNOT change a return type — PostgreSQL rejects
+-- it with "cannot change return type of existing function" (MEASURED). The
+-- lawful ways out are (i) DROP + CREATE, or (ii) editing the ORIGINAL
+-- definition. This migration is UNAPPLIED, so (ii) is available and (ii) is
+-- what was done. ⚠️ (i) would have been actively unsafe here: a DROP+CREATE
+-- re-applies Supabase's `pg_default_acl`, silently re-granting EXECUTE to
+-- anon/authenticated/service_role — the exact hazard this file documents at
+-- STEP 5 and that bit mig 20260812083206. Never "fix" a future return-type
+-- change on this function by appending a DROP.
+--
+-- ⚠️ `RETURNS TABLE`, NOT `OUT` PARAMETERS, AND THE REASON IS MEASURED RATHER
+-- THAN STYLISTIC. Both express the same two-column result, but they differ in
+-- the catalog in a way that matters here (PostgreSQL 16, throwaway cluster):
+--   * with OUT parameters, `pg_get_function_identity_arguments` becomes
+--     `p_strategy_id uuid, OUT generation bigint, OUT nonce uuid` — which
+--     SILENTLY BREAKS every probe in this file's STEP 6 and in
+--     test_strategy_shares_rls.sql SHAPE 4 that looks the function up by
+--     `= 'p_strategy_id uuid'`. They do not error; they match zero rows and the
+--     body-shape arms go vacuous. (The first apply of this change did exactly
+--     that: "a share RPC is missing post-create (create present: f)".)
+--   * with RETURNS TABLE, identity arguments stay byte-identical at
+--     `p_strategy_id uuid`, so every existing lookup, every REVOKE/GRANT and
+--     `_assert_no_public_execute('public.create_strategy_share(uuid)')` keep
+--     working untouched — and `pg_get_function_result` returns the greppable
+--     `TABLE(generation bigint, nonce uuid)` instead of a bare `record`.
+-- `RETURN NEXT` emits the single row from the RETURNS TABLE output variables.
+-- The INTO targets are function-qualified (`create_strategy_share.generation`)
+-- so plpgsql cannot confuse the output variable with the column of the same
+-- name — MEASURED clean on both the INSERT and the ON CONFLICT path.
 CREATE OR REPLACE FUNCTION public.create_strategy_share(p_strategy_id UUID)
-RETURNS INTEGER
+RETURNS TABLE (generation BIGINT, nonce UUID)
 LANGUAGE plpgsql
 SECURITY INVOKER
 SET search_path = public, pg_temp
 AS $$
-DECLARE
-  v_generation INTEGER;
 BEGIN
   -- ⛔ FAIL LOUD for a caller with no authenticated identity (founder ruling
   -- 2026-08-27). SECURITY INVOKER + RLS is the ownership wall here, and RLS
@@ -75,12 +104,23 @@ BEGIN
   -- DO UPDATE SET list: reactivation must NOT rewind the counter, or every
   -- previously revoked link would come back to life. created_by/created_at are
   -- likewise never rewritten — the row keeps its original provenance.
+  --
+  -- ⛔⛔ `nonce` MUST NOT APPEAR IN THE COLUMN LIST OR THE DO UPDATE SET LIST,
+  -- and this is a HARD constraint rather than a style note. STEP 2 grants
+  -- `authenticated` INSERT on (strategy_id, created_by) only; PostgreSQL checks
+  -- column privilege against the columns a statement NAMES, so the instant this
+  -- statement names `nonce` this SECURITY INVOKER function starts failing 42501
+  -- for every ordinary owner — and the "obvious fix" is to widen the grant,
+  -- which re-opens the resurrection family. The nonce is populated by its column
+  -- DEFAULT and read back through RETURNING (which needs only SELECT). STEP 6
+  -- arm (ii-d) fails the apply if this ever changes.
   INSERT INTO public.strategy_shares (strategy_id, created_by)
   VALUES (p_strategy_id, auth.uid())
   ON CONFLICT (strategy_id) DO UPDATE
     SET revoked_at = NULL
-  RETURNING strategy_shares.generation INTO v_generation;
+  RETURNING strategy_shares.generation, strategy_shares.nonce
+       INTO create_strategy_share.generation, create_strategy_share.nonce;
 
-  RETURN v_generation;
+  RETURN NEXT;
 END;
 $$;

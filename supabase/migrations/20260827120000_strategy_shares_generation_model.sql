@@ -4,18 +4,23 @@
 -- ============================================================================
 -- The storage layer for the per-strategy factsheet share link. Adds:
 --   (a) strategy_shares — ONE owner-scoped row per strategy holding a
---       monotonic `generation` counter and a `revoked_at` tombstone;
+--       monotonic `generation` counter, an immutable per-row `nonce`, and a
+--       `revoked_at` tombstone;
 --   (b) create_strategy_share(p_strategy_id)  — atomic mint-or-reuse;
 --   (c) revoke_strategy_share(p_strategy_id)  — atomic revoke (stamp + bump).
 --
--- ⛔ TOKEN MODEL — D-02 (164-CONTEXT.md "#### Token model"). The share token is
--- `HMAC(SHARE_TOKEN_SECRET, strategy_id || generation)`, computed in Node. This
--- table stores (strategy_id, generation, revoked_at) and **NEVER a token, raw
--- or hashed**. That is the whole point of the design and the reason this table
+-- ⛔ TOKEN MODEL — D-02 (164-CONTEXT.md "#### Token model"), AS AMENDED BY THE
+-- FOUNDER RULING OF 2026-08-27 (red-team SYNTHESIS §3). The share token is
+-- `HMAC(SHARE_TOKEN_SECRET, "qz.strategy-share.v1" || strategy_id || nonce ||
+-- generation)`, computed in Node. This table stores
+-- (strategy_id, generation, nonce, revoked_at) and **NEVER a token, raw or
+-- hashed**. That is the whole point of the design and the reason this table
 -- deliberately diverges from `scenario_shares` (which stores a `token_hash`):
 --   * Nothing secret sits at rest. A database leak, a backup, a support query
---     or a future RLS mistake yields a uuid, an integer and two timestamps —
---     never a working link.
+--     or a future RLS mistake yields uuids, an integer and two timestamps —
+--     never a working link. ⚠️ The nonce is an unguessable INPUT to the MAC,
+--     not a credential: holding it derives nothing without the secret, which is
+--     why adding it does not reopen the disclosure surface D-02 closed.
 --   * Reuse is a REQUIREMENT, and only a re-derivable token delivers it.
 --     Hash-only storage makes the raw token unrecoverable, so every "Copy Link"
 --     would mint a new link and silently break the recipient's existing one —
@@ -23,6 +28,36 @@
 --   * Revoke is ONE atomic increment: `generation = generation + 1` invalidates
 --     every previously-copied link at once, and a double-revoke converges
 --     naturally (0 rows affected → the route reads that as success, not error).
+--
+-- ⭐ WHY THE NONCE EXISTS, and why it replaced path-by-path column pinning.
+-- The counter alone is a TRANSITIONAL claim: "this row's generation advanced".
+-- Enforcing it needs the row to be (a) never absent, (b) not re-creatable, and
+-- (c) the sole determinant of the token. (a) and (b) both fail — `strategies`
+-- carries ON DELETE CASCADE onto this table (STEP 1), and `strategies.id` is
+-- client-suppliable. So an owner could DELETE their own strategy, re-INSERT it
+-- with the SAME uuid, re-mint, and receive a BIT-IDENTICAL token to the one
+-- they had revoked (MEASURED). No trigger on THIS table can even observe that
+-- delete, and a `strategy_id` column pin cannot touch it: the delete happens on
+-- another table.
+--
+-- The nonce converts the claim into an EXISTENTIAL one — "you hold a token
+-- minted against THIS row" — which a re-created row cannot satisfy, because it
+-- draws a fresh `gen_random_uuid()`. That closes the delete-and-recreate family
+-- WHOLESALE rather than one path at a time: the admin DELETE, the `strategies`
+-- CASCADE, the cross-tenant uuid squat, and cascade routes that do not exist
+-- yet. The property moves from "prove no path can delete this row" — an
+-- enumeration that failed three separate times in this phase — to "an attacker
+-- cannot guess 122 bits".
+--
+-- ⛔ AND IT CLOSES NOTHING WITHOUT THE COLUMN GRANTS IN STEP 2. MEASURED, both
+-- directions, on a throwaway PostgreSQL 16 cluster (2026-08-27):
+--   * with INSERT column-UNRESTRICTED, an owner SELECTs their own nonce under
+--     RLS, cascades the row away via `strategies`, and re-inserts it VERBATIM —
+--     `nonce` came back bit-identical and the attack reproduces WITH the nonce
+--     in hand;
+--   * with `GRANT INSERT (strategy_id, created_by)` in force, that same
+--     statement is rejected `42501 permission denied for table strategy_shares`.
+-- Nonce without the column grant is theatre. Ship both or neither.
 -- SQL cannot compute the HMAC (this repo enables no `pgcrypto digest`; only
 -- gen_random_uuid() from pg13+ core), so — unlike the scenario spine — there is
 -- **NO SECURITY DEFINER reader RPC here**. Token → strategy resolution happens
@@ -112,11 +147,30 @@ SET lock_timeout = '3s';
 -- — so the correct shape is a FULL `UNIQUE (strategy_id)` with
 -- reactivate-in-place on re-share. Per-event history rides `logAuditEvent`
 -- (the `scenario.share.revoke` precedent), not extra rows here.
+--
+-- ⚠️ `generation` IS BIGINT, AND THAT IS HEADROOM — **NOT** THE N1 FIX. Pulled
+-- forward on the "free now, table rewrite later" argument (SYNTHESIS §5): the
+-- widen is instant on an empty table and rewrites a live one. It buys ONLY the
+-- distance to the ceiling. A client that can WRITE `generation` reaches
+-- 2^63-1 exactly as easily as 2^31-1 — one PATCH — and the resulting overflow
+-- wedge is the same unrecoverable one (`revoke_strategy_share` then errors
+-- `out of range`, and the GDPR Art. 17 arm in companion migration
+-- 20260827130000 is the SAME statement, so the whole erasure aborts). ⛔ The
+-- write-access half of N1 stays DEFERRED and is a merge gate for plan 164-03;
+-- STEP 2's `GRANT INSERT (strategy_id, created_by)` closes the INSERT half of
+-- it here (a client can no longer CHOOSE a starting generation), but the
+-- UPDATE half — a bounded-increment rule — is not in this file. Do not read
+-- BIGINT as having closed N1.
 CREATE TABLE strategy_shares (
   id          UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
   strategy_id UUID        NOT NULL UNIQUE REFERENCES strategies ON DELETE CASCADE,
   created_by  UUID        NOT NULL REFERENCES profiles  ON DELETE CASCADE,
-  generation  INTEGER     NOT NULL DEFAULT 1 CHECK (generation >= 1),
+  generation  BIGINT      NOT NULL DEFAULT 1 CHECK (generation >= 1),
+  -- ⛔ THE MAC WITNESS. Server-generated, per ROW, never re-derived, never in
+  -- the URL, and — critically — named by NEITHER RPC, which is the ONLY reason
+  -- it can be made unwritable-by-client while both RPCs stay SECURITY INVOKER
+  -- (STEP 2). It is a MAC INPUT, not a credential.
+  nonce       UUID        NOT NULL DEFAULT gen_random_uuid(),
   created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
   revoked_at  TIMESTAMPTZ
 );
@@ -125,12 +179,16 @@ ALTER TABLE strategy_shares ENABLE ROW LEVEL SECURITY;
 
 COMMENT ON TABLE strategy_shares IS
   'Phase 164 / SHARE-01, SHARE-03. ONE row per strategy carrying the share '
-  'generation counter. ⛔ Stores NO token, raw or hashed (D-02): the link is '
-  'HMAC(SHARE_TOKEN_SECRET, strategy_id || generation) derived in Node, so a '
-  'leak of this table yields only a uuid, an int and timestamps. STATE '
+  'generation counter AND an immutable per-row nonce. ⛔ Stores NO token, raw '
+  'or hashed (D-02): the link is the HMAC, under SHARE_TOKEN_SECRET, over the '
+  'tag "qz.strategy-share.v1" then strategy_id then nonce then generation, '
+  'derived in Node — so a leak of this table yields only uuids, an int and '
+  'timestamps. ⚠️ The nonce is a MAC INPUT, not a token: it derives nothing '
+  'without the secret, which is not in this database. STATE '
   'MACHINE: (1) no row -> the strategy has never been shared; (2) row with '
   'revoked_at IS NULL -> a live link exists, and it is re-derivable from '
-  'generation, so Copy Link returns the SAME url every time (SHARE-01 reuse); '
+  '(nonce, generation), so Copy Link returns the SAME url every time '
+  '(SHARE-01 reuse); '
   '(3) row with revoked_at NOT NULL -> revoked, and generation has ALREADY '
   'been advanced past every link ever handed out, so all of them are dead '
   '(SHARE-03). Re-sharing clears revoked_at WITHOUT resetting generation, so '
@@ -144,9 +202,34 @@ COMMENT ON TABLE strategy_shares IS
   'too.';
 
 COMMENT ON COLUMN strategy_shares.generation IS
-  'Monotonic share generation. Feeds the Node-side HMAC as the second input; '
-  'incrementing it is what makes revocation instantaneous for every '
-  'previously-copied link. NEVER reset, NEVER decremented.';
+  'Monotonic share generation, BIGINT. Feeds the Node-side HMAC as the third '
+  'input; incrementing it is what makes revocation instantaneous for every '
+  'previously-copied link. NEVER reset, NEVER decremented. ⚠️ BIGINT is '
+  'HEADROOM, NOT the overflow fix: a client that can WRITE this column reaches '
+  '2^63-1 as easily as 2^31-1, and the resulting wedge (revoke, and the GDPR '
+  'Art. 17 arm in migration 20260827130000, are the same generation + 1 '
+  'statement) is identically unrecoverable without DDL. STEP 2 closes the '
+  'INSERT half by omitting this column from the INSERT grant; the UPDATE half '
+  '— a bounded-increment rule — is DEFERRED and gates plan 164-03.';
+
+COMMENT ON COLUMN strategy_shares.nonce IS
+  'Phase 164, founder ruling 2026-08-27. Immutable per-row MAC witness. Feeds '
+  'the Node-side HMAC as the THIRD input, so a row that is destroyed and '
+  're-created — via the strategies ON DELETE CASCADE, an admin DELETE, or a '
+  'cascade route that does not exist yet — draws a FRESH nonce and lands in a '
+  'token space DISJOINT from anything ever issued. That is what closes the '
+  'delete-and-recreate resurrection family wholesale, where a per-column pin '
+  'closed it one enumerated path at a time and kept missing one. ⛔ NOT a '
+  'credential: holding it derives nothing without SHARE_TOKEN_SECRET, which is '
+  'why it does not reopen the disclosure surface D-02 closed. ⛔ NOT '
+  'client-writable, and that is load-bearing rather than tidy: STEP 2 grants '
+  'authenticated INSERT on (strategy_id, created_by) and UPDATE on '
+  '(revoked_at, generation) ONLY. MEASURED — with the nonce writable, an owner '
+  'reads it under RLS, cascades the row away and re-inserts it verbatim, and '
+  'the attack reproduces with the nonce in hand. Neither RPC NAMES this '
+  'column, which is precisely why the restriction is compatible with SECURITY '
+  'INVOKER (PostgreSQL requires column privilege only on columns a statement '
+  'names). The trigger rule (0c) binds service_role, which grants cannot.';
 
 COMMENT ON COLUMN strategy_shares.revoked_at IS
   'Soft-revoke tombstone. NULL = live. Rows are never DELETEd (a delete would '
@@ -193,8 +276,15 @@ CREATE POLICY strategy_shares_owner ON strategy_shares
 -- grows (revoked rows are retained forever, never deleted).
 -- ⚠️ D-07 REVISIT THRESHOLD: reconsider the O(1) locator variant above **1,000
 -- active (revoked_at IS NULL) rows**. Today that count is 0.
+-- ⚠️ `INCLUDE (nonce)` is what KEEPS it index-only now that the token also
+-- derives from the nonce. Without it the scan would heap-fetch every candidate
+-- row to read one uuid, which is exactly the degradation this index exists to
+-- prevent. The nonce is a payload column, not a key column — the scan never
+-- searches BY nonce (it cannot; nothing token-derived is stored), it only
+-- needs to READ it.
 CREATE INDEX strategy_shares_active_idx
   ON strategy_shares (strategy_id, generation)
+  INCLUDE (nonce)
   WHERE revoked_at IS NULL;
 
 -- --------------------------------------------------------------------------
@@ -215,10 +305,20 @@ CREATE INDEX strategy_shares_active_idx
 -- above false and defeated the Art. 17 arm in companion migration
 -- 20260827130000, whose whole value is that revocation is IRREVERSIBLE.
 --
--- ⚠️ COLUMN-LEVEL GRANTS ARE NOT THE FIX. Revoking UPDATE(generation) from
--- `authenticated` would also disarm revoke_strategy_share(), which is SECURITY
--- INVOKER and writes `generation` AS THE CALLER. The privilege must stay; what
--- must be constrained is the DIRECTION it may move.
+-- ⚠️ COLUMN-LEVEL GRANTS ARE NOT THE FIX **FOR `generation` AND `revoked_at`**,
+-- and the earlier absolute phrasing of this paragraph was WRONG — it forbade
+-- the very mechanism STEP 2 now relies on. The correct, narrower statement:
+-- PostgreSQL requires column-level INSERT/UPDATE privilege only on the columns
+-- a statement NAMES. Both RPCs NAME `generation` and `revoked_at`, so revoking
+-- those two would disarm revoke_strategy_share(), which is SECURITY INVOKER and
+-- writes AS THE CALLER — those privileges must stay, and what must be
+-- constrained is the DIRECTION they may move, which is this trigger's job.
+-- ⭐ `nonce` is the opposite case, and uniquely so: it is DEFAULT-populated and
+-- NAMED BY NO RPC, so `GRANT INSERT (strategy_id, created_by)` /
+-- `GRANT UPDATE (revoked_at, generation)` lock it while both RPCs keep working
+-- unchanged (MEASURED both ways — see STEP 2). It is therefore the ONLY MAC
+-- input that can be made unwritable-by-client without abandoning the founder's
+-- SECURITY INVOKER ruling.
 --
 -- ⭐ WHY A TRIGGER AND NOT A CHECK CONSTRAINT: the invariant spans OLD and NEW,
 -- which a CHECK cannot see. And ⛔ **a trigger is NOT bypassed by BYPASSRLS** —
@@ -246,13 +346,29 @@ CREATE INDEX strategy_shares_active_idx
 -- columns: STEP 3 tells the reader that reactivation never rewrites
 -- created_by/created_at, and before rule (0b) a raw PATCH falsified that claim.
 --
--- The four rules together are what make the model sound:
+-- The five rules together are what make the model sound:
 --   (0a) strategy_id NEVER changes. Re-pointing the counter re-issues generation
 --        1 for the strategy it was pointed away from.
 --   (0b) id, created_by and created_at NEVER change. Provenance on a live
 --        capability grant must not be forgeable.
+--   (0c) nonce NEVER changes. STEP 2's column grant already denies an ordinary
+--        `authenticated` caller any write naming this column — but a grant
+--        binds only roles that OBEY grants, and `service_role` holds GRANT ALL
+--        and BYPASSRLS and is on this feature's hot path (the recipient lane
+--        reads this table through createAdminClient()). MEASURED with rule (0c)
+--        absent: `SET ROLE service_role; UPDATE strategy_shares SET nonce = <a
+--        nonce recorded earlier>` was ACCEPTED — restoring a recorded nonce is
+--        exactly the R2g residual, and the trigger is the only control on this
+--        table that reaches that caller. ⚠️ It does not ELIMINATE the residual
+--        (an operator who can read SHARE_TOKEN_SECRET can mint any token from
+--        scratch); it removes the cheap in-database form of it.
 --   (1)  generation NEVER decreases. A rewind re-issues a dead token.
 --   (2)  a revocation (revoked_at NULL -> NOT NULL) MUST advance generation.
+-- ⛔ RULES (1) AND (2) ARE NOT SUPERSEDED BY THE NONCE and must both stay. The
+-- nonce closes resurrection via row DESTRUCTION AND RE-CREATION; (1) and (2)
+-- govern the SAME row, which keeps its nonce throughout. A rewind on a
+-- surviving row re-derives a dead token with the nonce unchanged — the nonce is
+-- simply a constant in that pre-image and contributes nothing.
 -- (2) is what lets reactivation stay unconstrained: because every revoked row
 -- provably got there by advancing, clearing `revoked_at` without touching the
 -- counter — exactly what create_strategy_share() does — can never return the
@@ -296,6 +412,16 @@ BEGIN
       USING ERRCODE = 'check_violation';
   END IF;
 
+  -- (0c) the MAC witness is write-once. Deliberately its OWN rule and its OWN
+  -- message rather than a fourth column bolted onto (0b): (0b) is a provenance
+  -- claim (who/when), this is a CRYPTOGRAPHIC one, and the arms that pin them
+  -- need distinguishable messages or one deletion hides behind the other's text.
+  IF NEW.nonce IS DISTINCT FROM OLD.nonce THEN
+    RAISE EXCEPTION 'strategy_shares: nonce is immutable — refusing to rewrite the MAC witness on strategy %. The nonce is what makes a destroyed-and-recreated row land in a token space DISJOINT from every token ever issued; letting it be written back restores a recorded value and resurrects those tokens. STEP 2''s column grant already denies this to `authenticated`, so a write that reaches this rule came from a role that BYPASSES grants — service_role, which holds GRANT ALL and is on this feature''s hot path. A trigger is the only control on this table that binds it.',
+      OLD.strategy_id
+      USING ERRCODE = 'check_violation';
+  END IF;
+
   IF NEW.generation < OLD.generation THEN
     RAISE EXCEPTION 'strategy_shares: generation is monotonic — refusing to rewind it from % to % on strategy %. A rewind re-issues every share token minted at the lower generation, including ones that were explicitly REVOKED, as anonymous access to an unpublished factsheet.',
       OLD.generation, NEW.generation, OLD.strategy_id
@@ -315,9 +441,13 @@ END;
 $$;
 
 COMMENT ON FUNCTION public.strategy_shares_enforce_monotonic_generation() IS
-  'Phase 164 / SHARE-03. BEFORE UPDATE guard over FOUR rules (the name predates '
-  'the last two and is kept because STEP 6, the table COMMENT and '
-  'test_strategy_shares_rls.sql all pin it): (0a) strategy_id is IMMUTABLE — '
+  'Phase 164 / SHARE-03. BEFORE UPDATE guard over FIVE rules (the name predates '
+  'the last three and is kept because STEP 6, the table COMMENT and '
+  'test_strategy_shares_rls.sql all pin it): (0c) nonce is IMMUTABLE — the MAC '
+  'witness must not be written back from a recorded value, and since STEP 2''s '
+  'column grant already denies this to `authenticated`, the rule exists for the '
+  'role that bypasses grants entirely (service_role, GRANT ALL + BYPASSRLS, on '
+  'this feature''s hot path); (0a) strategy_id is IMMUTABLE — '
   're-pointing the row at another strategy the same owner holds leaves the '
   'original with no row, and the next create_strategy_share() re-issues it at '
   'generation 1, resurrecting every token revoked at generation 1 in TWO '
@@ -366,10 +496,55 @@ CREATE TRIGGER strategy_shares_monotonic_generation
 -- strategies/profiles still work: referential actions execute internally and
 -- do not consult the caller's privileges, so account deletion is unaffected.
 -- service_role keeps DELETE for exactly those maintenance paths.
+--
+-- ⭐⭐ THE WRITE GRANTS ARE COLUMN-SCOPED, AND THAT IS THE OTHER HALF OF THE
+-- NONCE FIX — not a tidy-up. Founder ruling 2026-08-27 (red-team SYNTHESIS §3).
+--
+-- WHY IT IS POSSIBLE AT ALL. PostgreSQL checks column-level INSERT/UPDATE
+-- privilege only against the columns a statement NAMES. `nonce` is populated by
+-- its column DEFAULT and is named by NEITHER RPC, so locking it does not disarm
+-- them — unlike `generation`/`revoked_at`, which both RPCs name explicitly and
+-- which therefore cannot be withdrawn from a SECURITY INVOKER writer (STEP 1b).
+-- ⇒ The nonce is the ONLY MAC input that can be made unwritable-by-client while
+-- keeping the founder's SECURITY INVOKER ruling intact.
+--
+-- WHY IT IS NECESSARY. MEASURED both directions on a throwaway PostgreSQL 16
+-- cluster with this migration applied verbatim (2026-08-27):
+--   * WITHOUT it — `INSERT INTO strategy_shares (strategy_id, created_by, nonce)`
+--     from an ordinary owner token was ACCEPTED, and the nonce came back
+--     BIT-IDENTICAL. The owner SELECTs their own nonce under RLS, DELETEs their
+--     `strategies` row (the CASCADE takes the share row with it), re-INSERTs the
+--     strategy with the same client-suppliable uuid, and re-inserts the share
+--     row verbatim. The nonce closes NOTHING against that.
+--   * WITH it — the same statement is rejected
+--     `42501 permission denied for table strategy_shares`, while
+--     create_strategy_share (mint AND the ON CONFLICT reuse path) and
+--     revoke_strategy_share both still run unchanged as SECURITY INVOKER.
+--
+-- ⭐ IT ALSO CLOSES R3's INSERT HALF FOR FREE, which is worth naming because it
+-- is not obvious: the trigger is BEFORE **UPDATE** only, so INSERT was wholly
+-- unguarded and a client could choose `generation` and pre-stamp `revoked_at`
+-- on a fresh row. Both columns are now absent from the INSERT grant, so
+-- `INSERT ... (strategy_id, created_by, generation)` is rejected 42501
+-- (MEASURED). ⚠️ The UPDATE half of N1 — a bounded-increment rule — is NOT
+-- closed here; see the BIGINT note at STEP 1.
+--
+-- ⛔ STILL POSITIVE-ONLY. `REVOKE ALL` first, then state exactly what to GIVE,
+-- at table level and at column level. A subtractive `REVOKE INSERT(nonce)` is
+-- only ever as complete as its enumeration and would silently re-open on the
+-- next column added to this table.
+--
+-- ⚠️ SELECT STAYS TABLE-WIDE, INCLUDING `nonce`, and that is required rather
+-- than lax: create_strategy_share RETURNs the nonce to its caller and runs AS
+-- THE CALLER, so revoking SELECT(nonce) would break the mint lane. Reading the
+-- nonce is harmless — it derives nothing without SHARE_TOKEN_SECRET. WRITING it
+-- is the attack, and writing is what is closed.
 REVOKE ALL ON strategy_shares FROM PUBLIC, anon, authenticated;
 
-GRANT SELECT, INSERT, UPDATE ON strategy_shares TO authenticated;
-GRANT ALL    ON strategy_shares TO service_role;
+GRANT SELECT                           ON strategy_shares TO authenticated;
+GRANT INSERT (strategy_id, created_by) ON strategy_shares TO authenticated;
+GRANT UPDATE (revoked_at, generation)  ON strategy_shares TO authenticated;
+GRANT ALL                              ON strategy_shares TO service_role;
 
 -- --------------------------------------------------------------------------
 -- STEP 2b: pin the `authenticated` privilege set EXACTLY
@@ -380,9 +555,17 @@ GRANT ALL    ON strategy_shares TO service_role;
 -- member of), so depending on WHO applies this migration it can under-report
 -- and turn the assertion vacuously green. relacl is the authoritative store
 -- and is not filtered.
+--
+-- ⚠️ TWO CATALOGS, because the posture now lives in two places. Table-level
+-- grants are in `pg_class.relacl`; COLUMN-level grants are in
+-- `pg_attribute.attacl` and are INVISIBLE to relacl. A pin that read only
+-- relacl would see `{SELECT}` and report the write surface as CLOSED while
+-- every column grant sat beside it unexamined — including, one day, a
+-- re-granted `INSERT (nonce)`. Both are asserted, and both as EXACT SETS.
 DO $$
 DECLARE
   v_privs TEXT[];
+  v_cols  TEXT;
 BEGIN
   SELECT array_agg(DISTINCT acl.privilege_type ORDER BY acl.privilege_type)
     INTO v_privs
@@ -392,20 +575,38 @@ BEGIN
    WHERE c.oid = 'public.strategy_shares'::regclass
      AND r.rolname = 'authenticated';
 
-  IF v_privs IS DISTINCT FROM ARRAY['INSERT', 'SELECT', 'UPDATE']::TEXT[] THEN
-    RAISE EXCEPTION 'Migration 164-02 verification failed: `authenticated` holds privilege set % on strategy_shares, expected exactly {INSERT,SELECT,UPDATE}. DELETE lets one tenant discard their counter and resurrect their own revoked tokens; TRUNCATE — which is EXEMPT FROM RLS — does it for EVERY tenant at once.',
+  -- RED-UNDER: restore the old table-wide grant in STEP 2
+  --            (`GRANT SELECT, INSERT, UPDATE ON strategy_shares TO authenticated`).
+  IF v_privs IS DISTINCT FROM ARRAY['SELECT']::TEXT[] THEN
+    RAISE EXCEPTION 'Migration 164-02 verification failed: `authenticated` holds TABLE-level privilege set % on strategy_shares, expected exactly {SELECT}. A table-level INSERT or UPDATE covers EVERY column — including `nonce`, whose unwritability is what makes the MAC witness a witness (MEASURED: with a table-wide INSERT grant, an owner re-inserts a recorded nonce verbatim after cascading the row away, and the revoked token derives again). DELETE lets one tenant discard their counter; TRUNCATE — EXEMPT FROM RLS — does it for EVERY tenant at once.',
       COALESCE(v_privs::TEXT, '(none)');
   END IF;
 
-  RAISE NOTICE 'Migration 164-02: authenticated privilege set on strategy_shares pinned to {INSERT,SELECT,UPDATE}.';
+  SELECT string_agg(a.attname || ':' || acl.privilege_type, ',' ORDER BY a.attname, acl.privilege_type)
+    INTO v_cols
+    FROM pg_attribute a
+    CROSS JOIN LATERAL aclexplode(a.attacl) AS acl
+    JOIN pg_roles r ON r.oid = acl.grantee
+   WHERE a.attrelid = 'public.strategy_shares'::regclass
+     AND a.attnum > 0 AND NOT a.attisdropped
+     AND r.rolname = 'authenticated';
+
+  -- RED-UNDER: add `GRANT INSERT (nonce) ON strategy_shares TO authenticated`
+  --            to STEP 2 (the exact re-grant that undoes the whole fix).
+  IF v_cols IS DISTINCT FROM 'created_by:INSERT,generation:UPDATE,revoked_at:UPDATE,strategy_id:INSERT' THEN
+    RAISE EXCEPTION 'Migration 164-02 verification failed: `authenticated` holds COLUMN-level grants "%" on strategy_shares, expected exactly "created_by:INSERT,generation:UPDATE,revoked_at:UPDATE,strategy_id:INSERT". ⛔ Any grant naming `nonce` reopens the delete-and-recreate resurrection family the nonce exists to close; any INSERT grant naming `generation` or `revoked_at` reopens R3''s INSERT half (a client-chosen starting counter, or a pre-stamped tombstone, on a fresh row that no BEFORE UPDATE trigger ever sees).',
+      COALESCE(v_cols, '(none)');
+  END IF;
+
+  RAISE NOTICE 'Migration 164-02: authenticated pinned to TABLE {SELECT} + COLUMNS {INSERT(strategy_id,created_by), UPDATE(revoked_at,generation)} — nonce unwritable.';
 END $$;
 
 -- --------------------------------------------------------------------------
 -- STEP 3: create_strategy_share(p_strategy_id) — atomic mint-or-reuse
 -- --------------------------------------------------------------------------
 -- ONE statement: insert the counter row, or reactivate the existing one. The
--- caller gets back the CURRENT generation and derives the token from it in
--- Node, so:
+-- caller gets back the CURRENT generation AND the row's nonce and derives the
+-- token from both in Node, so:
 --   * strategy never shared -> row at generation 1 -> a fresh link;
 --   * strategy already live -> the SAME generation -> the SAME link (SHARE-01
 --     reuse: Copy Link is idempotent and never breaks the recipient's url);
@@ -430,14 +631,43 @@ END $$;
 -- A conflicting row belonging to another tenant therefore ERRORS rather than
 -- being silently updated — no cross-tenant write, and the route surfaces a
 -- generic failure rather than an existence oracle.
+--
+-- ⛔ THE RETURN SHAPE CHANGED IN PLACE, NOT BY DROP+CREATE, AND THAT MATTERS.
+-- `CREATE OR REPLACE FUNCTION` CANNOT change a return type — PostgreSQL rejects
+-- it with "cannot change return type of existing function" (MEASURED). The
+-- lawful ways out are (i) DROP + CREATE, or (ii) editing the ORIGINAL
+-- definition. This migration is UNAPPLIED, so (ii) is available and (ii) is
+-- what was done. ⚠️ (i) would have been actively unsafe here: a DROP+CREATE
+-- re-applies Supabase's `pg_default_acl`, silently re-granting EXECUTE to
+-- anon/authenticated/service_role — the exact hazard this file documents at
+-- STEP 5 and that bit mig 20260812083206. Never "fix" a future return-type
+-- change on this function by appending a DROP.
+--
+-- ⚠️ `RETURNS TABLE`, NOT `OUT` PARAMETERS, AND THE REASON IS MEASURED RATHER
+-- THAN STYLISTIC. Both express the same two-column result, but they differ in
+-- the catalog in a way that matters here (PostgreSQL 16, throwaway cluster):
+--   * with OUT parameters, `pg_get_function_identity_arguments` becomes
+--     `p_strategy_id uuid, OUT generation bigint, OUT nonce uuid` — which
+--     SILENTLY BREAKS every probe in this file's STEP 6 and in
+--     test_strategy_shares_rls.sql SHAPE 4 that looks the function up by
+--     `= 'p_strategy_id uuid'`. They do not error; they match zero rows and the
+--     body-shape arms go vacuous. (The first apply of this change did exactly
+--     that: "a share RPC is missing post-create (create present: f)".)
+--   * with RETURNS TABLE, identity arguments stay byte-identical at
+--     `p_strategy_id uuid`, so every existing lookup, every REVOKE/GRANT and
+--     `_assert_no_public_execute('public.create_strategy_share(uuid)')` keep
+--     working untouched — and `pg_get_function_result` returns the greppable
+--     `TABLE(generation bigint, nonce uuid)` instead of a bare `record`.
+-- `RETURN NEXT` emits the single row from the RETURNS TABLE output variables.
+-- The INTO targets are function-qualified (`create_strategy_share.generation`)
+-- so plpgsql cannot confuse the output variable with the column of the same
+-- name — MEASURED clean on both the INSERT and the ON CONFLICT path.
 CREATE OR REPLACE FUNCTION public.create_strategy_share(p_strategy_id UUID)
-RETURNS INTEGER
+RETURNS TABLE (generation BIGINT, nonce UUID)
 LANGUAGE plpgsql
 SECURITY INVOKER
 SET search_path = public, pg_temp
 AS $$
-DECLARE
-  v_generation INTEGER;
 BEGIN
   -- ⛔ FAIL LOUD for a caller with no authenticated identity (founder ruling
   -- 2026-08-27). SECURITY INVOKER + RLS is the ownership wall here, and RLS
@@ -472,22 +702,38 @@ BEGIN
   -- DO UPDATE SET list: reactivation must NOT rewind the counter, or every
   -- previously revoked link would come back to life. created_by/created_at are
   -- likewise never rewritten — the row keeps its original provenance.
+  --
+  -- ⛔⛔ `nonce` MUST NOT APPEAR IN THE COLUMN LIST OR THE DO UPDATE SET LIST,
+  -- and this is a HARD constraint rather than a style note. STEP 2 grants
+  -- `authenticated` INSERT on (strategy_id, created_by) only; PostgreSQL checks
+  -- column privilege against the columns a statement NAMES, so the instant this
+  -- statement names `nonce` this SECURITY INVOKER function starts failing 42501
+  -- for every ordinary owner — and the "obvious fix" is to widen the grant,
+  -- which re-opens the resurrection family. The nonce is populated by its column
+  -- DEFAULT and read back through RETURNING (which needs only SELECT). STEP 6
+  -- arm (ii-d) fails the apply if this ever changes.
   INSERT INTO public.strategy_shares (strategy_id, created_by)
   VALUES (p_strategy_id, auth.uid())
   ON CONFLICT (strategy_id) DO UPDATE
     SET revoked_at = NULL
-  RETURNING strategy_shares.generation INTO v_generation;
+  RETURNING strategy_shares.generation, strategy_shares.nonce
+       INTO create_strategy_share.generation, create_strategy_share.nonce;
 
-  RETURN v_generation;
+  RETURN NEXT;
 END;
 $$;
 
 COMMENT ON FUNCTION public.create_strategy_share(UUID) IS
-  'Phase 164 / SHARE-01. Atomic mint-or-reuse of a strategy share. Returns the '
-  'CURRENT generation; the caller derives the token as '
-  'HMAC(SHARE_TOKEN_SECRET, strategy_id || generation) in Node — nothing '
-  'token-derived is ever stored. Idempotent while the share is live (the same '
-  'generation returns the same url, which is what makes Copy Link reuse work). '
+  'Phase 164 / SHARE-01. Atomic mint-or-reuse of a strategy share. Returns '
+  '(generation, nonce); the caller derives the token as '
+  'HMAC(SHARE_TOKEN_SECRET, over the tag "qz.strategy-share.v1" then '
+  'strategy_id then nonce then generation) in Node — nothing token-derived is ever stored. ⛔ The body must '
+  'never NAME `nonce` in the INSERT column list or the DO UPDATE SET list: '
+  'STEP 2 grants authenticated INSERT on (strategy_id, created_by) only, and '
+  'naming the column would make this SECURITY INVOKER function fail 42501 for '
+  'every owner. It is DEFAULT-populated and read back via RETURNING. '
+  'Idempotent while the share is live (the same generation AND the same nonce '
+  'return the same url, which is what makes Copy Link reuse work). '
   'Reactivating a revoked share clears revoked_at WITHOUT rewinding generation, '
   'created_by or created_at, so revoked links stay dead. SECURITY INVOKER — '
   'RLS gates it as the caller and created_by is auth.uid() inside the body. '
@@ -664,6 +910,7 @@ DECLARE
   v_trg      INTEGER;
   v_trigfn   TEXT;
   v_trigfn_s TEXT;
+  v_create_res TEXT;
 BEGIN
   SELECT pg_get_functiondef(p.oid) INTO v_create
     FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
@@ -708,8 +955,39 @@ BEGIN
   END IF;
 
   -- (ii) mint never writes generation.
+  -- RED-UNDER: add `, generation = 1` to the DO UPDATE SET list in STEP 3.
   IF v_create_s ~* 'SET[^;]*\mgeneration\s*=' THEN
     RAISE EXCEPTION 'Migration 164-02 verification failed: create_strategy_share assigns `generation` — reactivation must never rewind the counter (revoked links would come back to life)';
+  END IF;
+
+  -- (ii-d) mint never NAMES `nonce` as a write target. This is not a duplicate
+  -- of STEP 2b's grant pin: the grant pin proves the PRIVILEGE is absent, this
+  -- proves the STATEMENT does not need it. They fail on opposite edits, and
+  -- naming the column is the edit that makes someone WIDEN the grant to "fix"
+  -- the resulting 42501 — which is how the resurrection family comes back.
+  -- The nonce is DEFAULT-populated; RETURNING reads it back on SELECT alone.
+  -- RED-UNDER: add `nonce` to the INSERT column list in STEP 3
+  --            (`INSERT INTO public.strategy_shares (strategy_id, created_by, nonce)`).
+  IF v_create_s ~* 'INSERT\s+INTO\s+public\.strategy_shares\s*\([^)]*\mnonce\M'
+     OR v_create_s ~* 'SET[^;]*\mnonce\s*=' THEN
+    RAISE EXCEPTION 'Migration 164-02 verification failed: create_strategy_share NAMES `nonce` as a write target. PostgreSQL checks column privilege against the columns a statement names, and STEP 2 grants authenticated INSERT on (strategy_id, created_by) only — so this SECURITY INVOKER function now fails 42501 for every owner, and the obvious remedy (widening the grant) re-opens the delete-and-recreate resurrection family the nonce exists to close. The nonce must stay DEFAULT-populated and read back via RETURNING.';
+  END IF;
+
+  -- (ii-e) ...but the mint MUST hand the nonce back, or the route cannot derive
+  -- the token at all. Catalog-based, not a text probe: the OUT-parameter set is
+  -- the contract the Node caller is typed against, and a body that computed the
+  -- nonce into a local and dropped it would satisfy any regex over the text.
+  -- RED-UNDER: delete `OUT nonce UUID` from the STEP 3 signature (and the
+  --            matching RETURNING/INTO targets).
+  SELECT pg_get_function_result(p.oid) INTO v_create_res
+    FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+   WHERE n.nspname = 'public' AND p.proname = 'create_strategy_share'
+     AND pg_get_function_identity_arguments(p.oid) = 'p_strategy_id uuid';
+  IF v_create_res IS NULL
+     OR v_create_res !~* 'TABLE\s*\([^)]*\mnonce\s+uuid\M'
+     OR v_create_res !~* 'TABLE\s*\([^)]*\mgeneration\s+bigint\M' THEN
+    RAISE EXCEPTION 'Migration 164-02 verification failed: create_strategy_share does not declare `TABLE(generation bigint, nonce uuid)` — its declared result is "%". The token is HMAC(secret, tag then strategy_id then nonce then generation — written without pipes because src/__tests__/raise-exception-concat-grammar.test.ts forbids them anywhere in a RAISE format slot, and it is right to: PL/pgSQL needs that slot to be ONE literal, so a real concat there is SQLSTATE 42601 at apply and a guard cannot tell prose from code); with no nonce coming back the mint route cannot derive a link at all, and the temptation is to drop the nonce from the pre-image, which silently restores the pre-fix resurrection behaviour. ⛔ A bare `record` here means someone converted the signature to OUT parameters — that ALSO changes pg_get_function_identity_arguments and silently voids every `= ''p_strategy_id uuid''` lookup in this file and in test_strategy_shares_rls.sql.',
+      COALESCE(v_create_res, '(function not found)');
   END IF;
 
   -- (ii-b) BOTH RPCs refuse a caller with no authenticated identity. RLS does
@@ -807,7 +1085,20 @@ BEGIN
     RAISE EXCEPTION 'Migration 164-02 verification failed: the monotonicity trigger lost rule (2) — a revocation is no longer required to ADVANCE generation. A raw tombstone at the same counter is COSMETIC: the row drops out of the active scan, and the next create_strategy_share() clears it at the SAME generation and brings the supposedly-revoked token back to life.';
   END IF;
 
-  RAISE NOTICE 'Migration 164-02: share RPC body-shape verified (atomic bump + live-only predicate + no delete + no generation rewind + auth.uid() fail-loud + revoke ownership predicate + INVOKER + search_path + monotonicity trigger present AND carrying all four rules: strategy_id pin, provenance pin, no-rewind, revocation-advances).';
+  -- (v-c) ...and rule (0c), the nonce pin. Its own probe rather than a fourth
+  -- column folded into the (0b) check above, because it guards a different
+  -- actor: STEP 2's column grant already denies an `authenticated` write naming
+  -- `nonce`, so the ONLY caller this rule can ever fire for is one that bypasses
+  -- grants — service_role. Deleting it is therefore invisible to every
+  -- client-role arm in this file and in test_strategy_shares_rls.sql except the
+  -- one that runs AS service_role.
+  -- RED-UNDER: delete the `IF NEW.nonce IS DISTINCT FROM OLD.nonce` block from
+  --            strategy_shares_enforce_monotonic_generation() in STEP 1b.
+  IF v_trigfn_s !~* 'NEW\.nonce\s+IS\s+DISTINCT\s+FROM\s+OLD\.nonce' THEN
+    RAISE EXCEPTION 'Migration 164-02 verification failed: the monotonicity trigger lost rule (0c) — the nonce is no longer immutable. MEASURED with the rule absent: `SET ROLE service_role; UPDATE strategy_shares SET nonce = <a value recorded before the row was destroyed>` was ACCEPTED. Restoring a recorded nonce re-derives every token that row ever issued, which is the whole resurrection family walking back in through the one role that GRANTs cannot bind.';
+  END IF;
+
+  RAISE NOTICE 'Migration 164-02: share RPC body-shape verified (atomic bump + live-only predicate + no delete + no generation rewind + mint never names nonce + mint returns nonce + auth.uid() fail-loud + revoke ownership predicate + INVOKER + search_path + monotonicity trigger present AND carrying all five rules: strategy_id pin, provenance pin, nonce pin, no-rewind, revocation-advances).';
 END $$;
 
 -- --------------------------------------------------------------------------
@@ -841,11 +1132,28 @@ BEGIN
      AND a.attnum > 0
      AND NOT a.attisdropped;
 
-  IF v_cols IS DISTINCT FROM 'created_at,created_by,generation,id,revoked_at,strategy_id' THEN
-    RAISE EXCEPTION 'Migration 164-02 verification failed: strategy_shares column set is "%", expected exactly "created_at,created_by,generation,id,revoked_at,strategy_id". ⛔ D-02: this table must NEVER hold a token, raw or hashed.', v_cols;
+  -- ⚠️ `nonce` IS IN THIS SET AND IS NOT A TOKEN. The distinction is the one
+  -- D-02 actually draws: a token (raw or hashed) is a value that, ON ITS OWN,
+  -- reproduces or verifies a working link. The nonce is a MAC *input* — it
+  -- derives nothing without SHARE_TOKEN_SECRET, which is not in this database.
+  -- A leak of this table still yields only uuids, an integer and timestamps.
+  --
+  -- RED-UNDER: add a `token_hash TEXT` column to the STEP 1 CREATE TABLE.
+  -- ⚠️ AND NOT the other direction, stated honestly rather than claimed: this
+  -- arm CANNOT be the first failure for a DELETED `nonce`. That column is
+  -- load-bearing in four places that all execute earlier — the COMMENT ON
+  -- COLUMN (STEP 1), `INCLUDE (nonce)` on the active index, trigger rule (0c),
+  -- and the RETURNING in STEP 3 — so removing it aborts the apply long before
+  -- STEP 7 runs (MEASURED: `column "nonce" of relation "strategy_shares" does
+  -- not exist`, at the COMMENT). The nonce's PRESENCE is therefore pinned
+  -- structurally by the DDL, and what this arm uniquely detects is a column
+  -- ADDED at rest. It is listed in the expected set because the set must be
+  -- exact, not because this arm is what defends it.
+  IF v_cols IS DISTINCT FROM 'created_at,created_by,generation,id,nonce,revoked_at,strategy_id' THEN
+    RAISE EXCEPTION 'Migration 164-02 verification failed: strategy_shares column set is "%", expected exactly "created_at,created_by,generation,id,nonce,revoked_at,strategy_id". ⛔ D-02: this table must NEVER hold a token, raw or hashed. ⚠️ `nonce` belongs in that set and is NOT a token — it derives nothing without SHARE_TOKEN_SECRET, which is not in this database.', v_cols;
   END IF;
 
-  RAISE NOTICE 'Migration 164-02: strategy_shares holds no token at rest (column set pinned).';
+  RAISE NOTICE 'Migration 164-02: strategy_shares holds no token at rest, and the nonce is present (column set pinned).';
 END $$;
 
 COMMIT;
