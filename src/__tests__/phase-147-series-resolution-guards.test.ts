@@ -352,14 +352,32 @@ describe("SCEN-01 LAYER B — every series reader resolves through the ONE resol
 
   // --- The two REFERENCE implementations (pinned so they cannot regress) ---
 
-  it("REFERENCE factsheet v2 page still selects returns_series AND resolves it (SC2's 'equals what the detail page renders' anchor)", () => {
-    const src = stripComments(readSource("src/app/factsheet/[id]/v2/page.tsx"));
+  // ⚠️ RE-POINTED 2026-08-27 (phase 164 / D-06). The factsheet v2 page's payload
+  // builder moved VERBATIM to `src/lib/factsheet/fetch-and-build-payload.ts` so
+  // the tokenized recipient lane could call the SAME builder. The select and the
+  // resolver call travelled with it, so pinning the PAGE for them would now pin
+  // an empty file — the guard follows the code, it is not weakened. The pin is
+  // split in two so BOTH halves of the original claim survive:
+  //   (i) the builder still selects returns_series and resolves it, and
+  //  (ii) the v2 page still reaches the strategy series through that builder,
+  //       so "the reference surface renders the resolved series" stays true.
+  // Without (ii) a page that stopped calling the builder would leave (i) green.
+  it("REFERENCE factsheet payload builder still selects returns_series AND resolves it (SC2's 'equals what the detail page renders' anchor)", () => {
+    const src = stripComments(
+      readSource("src/lib/factsheet/fetch-and-build-payload.ts"),
+    );
     expect(src).toContain(RESOLVER_CALL);
     const payloads = selectPayloads(src).filter((p) =>
       DAILY_RETURNS_COLUMN.test(p),
     );
     expect(payloads.length).toBeGreaterThan(0);
     for (const p of payloads) expect(p).toContain("returns_series");
+  });
+
+  it("REFERENCE factsheet v2 page still resolves its series THROUGH that builder", () => {
+    const src = stripComments(readSource("src/app/factsheet/[id]/v2/page.tsx"));
+    expect(src).toContain("@/lib/factsheet/fetch-and-build-payload");
+    expect(src).toContain("fetchAndBuildPayload(");
   });
 
   it("REFERENCE discovery strategy page still resolves through the same resolver", () => {

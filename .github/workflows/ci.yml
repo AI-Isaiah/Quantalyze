@@ -723,6 +723,12 @@ jobs:
           ADMIN_EMAIL: test@example.com
           PLATFORM_NAME: Quantalyze
           PLATFORM_EMAIL: test@quantalyze.com
+          # Phase 164 / D-02: `src/lib/strategy-share-token.ts` validates this
+          # at MODULE SCOPE and throws when absent — deliberately, so a
+          # misconfigured deploy fails loudly instead of at the founder's first
+          # Copy Link. Any build-time evaluation of a share surface therefore
+          # needs a value here. Obviously fake and >= the 32-char floor.
+          SHARE_TOKEN_SECRET: placeholder_share_token_secret_not_a_real_secret
       # Upload the build output for the e2e job to download. Exclude
       # .next/cache (the actions/cache above already persists it across
       # runs; including it here would inflate every per-run artifact by
@@ -3052,6 +3058,11 @@ jobs:
           ADMIN_EMAIL: test@example.com
           PLATFORM_NAME: Quantalyze
           PLATFORM_EMAIL: test@quantalyze.com
+          # Phase 164 / D-02 — same reason as the frontend-build step above:
+          # the share-token module throws at MODULE SCOPE without this. A fake
+          # >= 32-char placeholder; the e2e specs that exercise share links mint
+          # their tokens under this same value.
+          SHARE_TOKEN_SECRET: placeholder_share_token_secret_not_a_real_secret
       # retro-PR188-D4 (pr-test-analyzer #36, HIGH/8): assert the rebuild
       # actually produced a bundle inlined with the REAL test-Supabase
       # URL. If the build ever short-circuits silently (e.g. a restored

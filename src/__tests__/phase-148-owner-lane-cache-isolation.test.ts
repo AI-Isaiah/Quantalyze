@@ -47,10 +47,27 @@ import { describe, expect, it } from "vitest";
  *      formatted across three lines, so that literal does not exist in the
  *      source at all. It would pin formatting, not the seam, and would redden
  *      on any reflow.)
- *   4. REPO-WIDE: no production source other than page.tsx mentions
- *      `buildFactsheetPayloadCached` or `fetchAndBuildPayload` — the phase-147
- *      "no fifth reader" clause restated for factsheet payload resolution. An
- *      allowlist structurally cannot catch a brand-new offender file; a walk
+ *   4. REPO-WIDE, TWO TOKENS WITH TWO DIFFERENT RULES (amended 2026-08-27,
+ *      phase 164 ruling D-06 — the builder moved to the lib package so a second,
+ *      tokenized recipient lane can call it without importing a page module):
+ *
+ *      4a. `buildFactsheetPayloadCached` — RULE UNCHANGED. No production source
+ *          other than page.tsx may mention it. The cached wrapper is what makes
+ *          the id-only key dangerous, and the lane decision that makes it safe
+ *          lives in page.tsx and nowhere else. It did NOT move.
+ *      4b. `fetchAndBuildPayload` — MODULE PIN, stronger than the two-caller
+ *          allow-list the first D-06 draft proposed. (i) Exactly ONE production
+ *          file may contain a `function fetchAndBuildPayload` DECLARATION, and
+ *          it must be `src/lib/factsheet/fetch-and-build-payload.ts`; (ii) every
+ *          OTHER production file whose comment-stripped source names the
+ *          identifier must also carry the literal import specifier
+ *          `@/lib/factsheet/fetch-and-build-payload`. So a new consumer is legal
+ *          only through the canonical module, and a second builder — a copy, a
+ *          re-declaration, a "just for the token lane" variant — is structurally
+ *          impossible. That matters because the entire SL-1 disclosure argument
+ *          rests on both lanes producing the SAME bytes from the SAME builder.
+ *
+ *      An allowlist structurally cannot catch a brand-new offender file; a walk
  *      can.
  *   5. `generateMetadata` never contains `withPublishedOrOwner` (T-148-03:
  *      draft name/description must never reach <title>/OG, which are fetched by
@@ -141,12 +158,73 @@ import { describe, expect, it } from "vitest";
  *   Both mutations were reverted by RE-EDITING the mutated lines (never a
  *   file-level `git checkout --`), and `git diff --quiet -- page.tsx` exits 0.
  *   The gate is 9/9 green on the fixed tree.
+ *
+ * ─────────────────────────────────────────────────────────────────────────
+ * AMENDMENT 2026-08-27 — phase 164, ruling D-06 (reviewed, not incidental).
+ *
+ * `fetchAndBuildPayload` moved VERBATIM out of page.tsx into
+ * `src/lib/factsheet/fetch-and-build-payload.ts` so the tokenized recipient
+ * lane (`/factsheet-share/[token]`) can call the SAME builder without importing
+ * a Next.js page module. `buildFactsheetPayloadCached` did NOT move and its
+ * rule is untouched. Pin 4 therefore splits into 4a / 4b above: page-private
+ * for the wrapper, canonical-module for the builder.
+ *
+ * Why a module pin rather than the two-caller allow-list the first draft of
+ * D-06 proposed: an allow-list answers "who may call it", which is the wrong
+ * question. The property that keeps the token lane safe is that there is ONE
+ * builder, so both lanes emit the same bytes for the same id. A module pin says
+ * exactly that, and it stays correct when a third consumer appears.
+ *
+ * Rule-9 NON-VACUITY — THREE experiments run during this amendment (2026-08-27),
+ * one per new assertion, each a temporary production file under `src/`:
+ *
+ *   3. BUILDER NAMED WITHOUT THE CANONICAL IMPORT (rule 4b(ii)).
+ *      `src/lib/__gate_demo__/a.ts` containing only
+ *      `export const note = "fetchAndBuildPayload is reachable from here";`
+ *      × every other production file that names fetchAndBuildPayload imports it
+ *        from the canonical module (D-06)
+ *        + "src/lib/__gate_demo__/a.ts — fetchAndBuildPayload without
+ *           @/lib/factsheet/fetch-and-build-payload"
+ *      → 1 failed / 11 passed.
+ *
+ *   4. DUPLICATE BUILDER DECLARATION (rule 4b(i)). The same file rewritten to
+ *      `export async function fetchAndBuildPayload() { … }` WHILE importing the
+ *      canonical specifier — i.e. it satisfies 4b(ii) and is still caught:
+ *      × exactly ONE production file declares fetchAndBuildPayload, and it is
+ *        the canonical lib module (D-06)
+ *        + "src/lib/__gate_demo__/a.ts"
+ *      → 1 failed / 11 passed. This is the experiment that shows the module pin
+ *        is strictly stronger than an import-path check on its own.
+ *
+ *   5. CACHED WRAPPER NAMED OUTSIDE THE PAGE (rule 4a, unchanged rule but a
+ *      re-proved gate after the refactor of `offenders()` into two functions):
+ *      × no file other than the factsheet v2 page mentions
+ *        buildFactsheetPayloadCached
+ *        + "src/lib/__gate_demo__/a.ts — buildFactsheetPayloadCached"
+ *      → 1 failed / 11 passed.
+ *
+ *   All three were restored by DELETING the temporary directory (never a
+ *   file-level `git checkout --`, which would have destroyed the uncommitted
+ *   move). The gate is 12/12 green on the moved tree, with `tsc --noEmit` at 0.
  */
 
 const ROOT = join(__dirname, "..", "..");
 
 /** The one surface this phase's cache-isolation property lives on. */
 const PAGE = "src/app/factsheet/[id]/v2/page.tsx";
+
+/**
+ * The canonical home of the payload builder (phase 164 / D-06). The cached
+ * wrapper stayed on PAGE; only the builder moved here.
+ */
+const BUILDER = "src/lib/factsheet/fetch-and-build-payload.ts";
+
+/**
+ * The import specifier every consumer of the builder must use. Deliberately the
+ * `@/` alias form and not a relative path: one spelling means one thing to
+ * grep, to this gate, and to a reviewer.
+ */
+const BUILDER_SPECIFIER = "@/lib/factsheet/fetch-and-build-payload";
 
 /** Read a pinned source fail-loud (missing file → explicit failure). */
 function readSource(relPath: string): string {
@@ -355,29 +433,87 @@ describe("OWN-02 — the shared factsheet cache can only ever be filled by the p
 // ─────────────────────────────────────────────────────────────────────────
 
 describe("OWN-02 — no production source outside the factsheet page resolves a factsheet payload", () => {
-  /** Every `file — token` offender pair, empty on a healthy tree. */
-  function offenders(): string[] {
+  /**
+   * Rule 4a — the CACHED WRAPPER is page-private. Every `file — token` offender
+   * pair, empty on a healthy tree.
+   */
+  function cachedWrapperOffenders(): string[] {
     const found: string[] = [];
     for (const abs of productionSources(join(ROOT, "src"))) {
       const rel = relative(ROOT, abs);
       if (rel === PAGE) continue;
       const src = stripComments(readFileSync(abs, "utf8"));
-      for (const token of [
-        "buildFactsheetPayloadCached",
-        "fetchAndBuildPayload",
-      ]) {
-        if (src.includes(token)) found.push(`${rel} — ${token}`);
+      if (src.includes("buildFactsheetPayloadCached")) {
+        found.push(`${rel} — buildFactsheetPayloadCached`);
       }
     }
     return found;
   }
 
-  it("no file other than the factsheet v2 page mentions buildFactsheetPayloadCached or fetchAndBuildPayload (a second caller is a second cache policy)", () => {
+  /**
+   * Rule 4b(i) — every production file carrying a `function fetchAndBuildPayload`
+   * DECLARATION. Exactly one is legal, and it is BUILDER. The substring covers
+   * `export async function fetchAndBuildPayload(` as shipped, and it would also
+   * catch a bare `function fetchAndBuildPayload` copied into a new file.
+   */
+  function builderDeclarers(): string[] {
+    return productionSources(join(ROOT, "src"))
+      .filter((abs) =>
+        stripComments(readFileSync(abs, "utf8")).includes(
+          "function fetchAndBuildPayload",
+        ),
+      )
+      .map((abs) => relative(ROOT, abs));
+  }
+
+  /**
+   * Rule 4b(ii) — every production file that NAMES the builder but is neither
+   * its canonical home nor an importer of the canonical specifier. A file here
+   * has either re-declared the builder or reached it by some other path, and
+   * both break the "one builder, same bytes on both lanes" SL-1 argument.
+   */
+  function builderNonImporters(): string[] {
+    const found: string[] = [];
+    for (const abs of productionSources(join(ROOT, "src"))) {
+      const rel = relative(ROOT, abs);
+      if (rel === BUILDER) continue;
+      const src = stripComments(readFileSync(abs, "utf8"));
+      if (!src.includes("fetchAndBuildPayload")) continue;
+      if (src.includes(BUILDER_SPECIFIER)) continue;
+      found.push(`${rel} — fetchAndBuildPayload without ${BUILDER_SPECIFIER}`);
+    }
+    return found;
+  }
+
+  it("no file other than the factsheet v2 page mentions buildFactsheetPayloadCached (a second caller is a second cache policy)", () => {
     // A repo-wide walk, not an allowlist: a brand-new file the gate author
-    // never hand-picked is caught. Both builders are module-private today —
-    // this keeps them that way, because a caller outside page.tsx would have no
-    // access to the lane decision that makes the cached one safe.
-    expect(offenders()).toEqual([]);
+    // never hand-picked is caught. The cached wrapper is module-private to
+    // page.tsx and stays that way, because a caller outside page.tsx would have
+    // no access to the lane decision that makes it safe.
+    expect(cachedWrapperOffenders()).toEqual([]);
+  });
+
+  it("exactly ONE production file declares fetchAndBuildPayload, and it is the canonical lib module (D-06)", () => {
+    // A duplicate builder is the failure this forbids. Two builders drifting
+    // apart would mean the token lane and the owner lane no longer produce the
+    // same bytes for the same id — and the whole SL-1 argument is that they do.
+    expect(builderDeclarers()).toEqual([BUILDER]);
+  });
+
+  it("every other production file that names fetchAndBuildPayload imports it from the canonical module (D-06)", () => {
+    // Stronger than a two-caller allow-list: a NEW consumer is legal, but only
+    // through `@/lib/factsheet/fetch-and-build-payload`. Reaching the builder
+    // any other way — a copy, a re-export chain, a local re-declaration — is an
+    // offender the walk catches without the gate author having to predict it.
+    expect(builderNonImporters()).toEqual([]);
+  });
+
+  it("the page still imports the builder from its canonical home (the seam is real, not a name collision)", () => {
+    // Without this, `builderNonImporters()` could pass on a tree where the page
+    // stopped calling the builder at all — a green gate over a deleted lane.
+    const pageSrc = stripComments(readSource(PAGE));
+    expect(pageSrc).toContain(BUILDER_SPECIFIER);
+    expect(pageSrc).toContain("fetchAndBuildPayload");
   });
 
   it("the walk is non-vacuous: it really does read production sources, and it really does strip comments", () => {
