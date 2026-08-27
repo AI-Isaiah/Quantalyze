@@ -1238,6 +1238,10 @@ can wedge their own erasure until an operator deletes one row* — an availabili
 one-statement remedy, not an unrecoverable regulatory failure. Still blocking 164-03; no longer the
 worst item in the corpus.
 
+⭐⭐ **N2 DOES NOT REPRODUCE (measured 2026-08-27) — and the proposed fix WAS the bug.** Three interleavings, two concurrent sessions each (one holds the row lock in an open transaction, the other arrives 1s in and blocks): revoke∥revoke converges (`rows=1` / `rows=0`, generation advances exactly once); revoke-then-mint and mint-then-revoke both converge with no lost update, no counter inflation and no resurrection. Root cause of the non-reproduction: **both RPCs are single statements** — one `UPDATE … WHERE … AND revoked_at IS NULL`, one `INSERT … ON CONFLICT DO UPDATE … RETURNING` — so there is no read-then-write window for a `SELECT … FOR UPDATE` to protect, and under READ COMMITTED the blocked writer re-evaluates its `WHERE` against the updated row (EvalPlanQual).
+
+⛔ `revoked_at IS NULL` is **the convergence contract**, not a racy predicate. The recorded remedy — rewrite STEP 6 arm (i-b) *so the fix can land* — would have removed the guard, and removing the predicate is what makes a double-revoke inflate the counter. **The arm was not enforcing the bug; the proposed fix was the bug.** None of this was visible without running it: the reasoning chain reads as sound end to end and is simply false. Recommend closing gate condition 3 as not-a-defect and dropping N2 from 164-06 (leaving that plan N1-only) — ⚠️ founder call, since the corpus records N2 as `[M]`. Limits: READ COMMITTED (PostgREST's default), two sessions not N, three interleavings not an exhaustive schedule search.
+
 ### NYQ-01 — a config-enabled planning gate stopped firing and nothing noticed (booked 2026-08-26)
 
 ⭐ **Founder-ruled 2026-08-26: regenerate, don't waive.** Surfaced while closing Phase 164's

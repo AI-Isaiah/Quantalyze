@@ -129,3 +129,54 @@ operator deletes one row — not *"unrecoverable without DDL, with no operator r
 defect, still blocking 164-03, still worth closing at the root in 164-06. But it is an availability
 bug with a one-statement operator remedy, not the unrecoverable regulatory failure the corpus
 records. The stricter framing survived only because nobody re-ran it after the fix that changed it.
+
+---
+
+## 6. N2 DOES NOT REPRODUCE — and the proposed fix would have introduced the bug
+
+Gate condition 3 reads: *"`SELECT … FOR UPDATE` in `revoke_strategy_share`, **and** STEP 6 arm (i-b)
+rewritten so it no longer fails the apply when the racy predicate is removed. ⚠️ Until that arm is
+rewritten, the durable gate enforces the bug."*
+
+Measured on the live cluster, three interleavings, two concurrent sessions each (session 1 holds
+the row lock inside an open transaction for 3s; session 2 arrives 1s in and blocks):
+
+| Race | Result |
+|---|---|
+| revoke ∥ revoke | A `rows=1`, B **blocks → `rows=0`**; final `generation=2`, revoked. **Converges.** |
+| revoke then mint | revoke `rows=1`; mint **blocks → returns gen 3**, live. gen-2 tokens dead, owner holds a fresh link. |
+| mint then revoke | mint gen 3; revoke **blocks → `rows=1`** → gen 4, revoked. The just-minted gen-3 token is dead. |
+
+No lost update, no counter inflation beyond +1 per revoke, no resurrection, in any ordering.
+
+**Why there is no race to fix.** Both RPCs are *single statements* — there is no read-then-write
+window for a `FOR UPDATE` to protect:
+
+```sql
+-- revoke: one UPDATE
+UPDATE public.strategy_shares SET revoked_at = now(), generation = generation + 1
+ WHERE strategy_id = p_strategy_id AND created_by = auth.uid() AND revoked_at IS NULL;
+
+-- mint: one INSERT
+INSERT INTO public.strategy_shares (strategy_id, created_by) VALUES (…)
+ON CONFLICT (strategy_id) DO UPDATE SET revoked_at = NULL
+RETURNING strategy_shares.generation, strategy_shares.nonce;
+```
+
+Under READ COMMITTED the blocked writer takes the row lock, then **re-evaluates its `WHERE` against
+the updated row** (EvalPlanQual) — which is exactly why the second revoke matches zero.
+
+### ⛔ The proposed remedy was the actual hazard
+
+`revoked_at IS NULL` is not "the racy predicate" — it **is** the convergence contract, and arm (i-b)
+exists precisely to stop anyone deleting it. Rewriting that arm "so the fix can land" would have
+removed the guard, and removing the predicate is what would make a double-revoke inflate the
+counter. **The arm was not enforcing the bug; the proposed fix was the bug.** Nothing about this was
+visible without running it — the reasoning chain is plausible end to end and simply false.
+
+**Recommendation:** close gate condition 3 as *not a defect*, on this evidence, and drop N2 from
+`164-06`'s scope — leaving that plan as N1-only. ⚠️ Founder call, not mine to take unilaterally:
+the corpus records N2 as `[M]`-severity, and this contradicts it.
+
+**Limits.** READ COMMITTED only (PostgREST's default; the RPCs set no isolation level). Two
+sessions, not N. The three interleavings above, not an exhaustive schedule search.
