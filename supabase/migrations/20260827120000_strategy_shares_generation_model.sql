@@ -1002,11 +1002,42 @@ COMMENT ON FUNCTION public.revoke_strategy_share(UUID) IS
 -- service_role holding EXECUTE on BOTH functions — Supabase's `pg_default_acl`
 -- grants every new function in `public` to anon/authenticated/service_role, and
 -- revoking PUBLIC does not touch a grant made to a NAMED role. So both RPCs
--- shipped callable by the BYPASSRLS role. Not exploitable — the `auth.uid() IS
--- NULL` body guard refuses it — but STEP 3/4's comments claim TWO independent
--- walls for that caller and only one existed. This restores the second, and it
--- matches the house posture (mig 20260515205431 revokes _assert_no_public_execute
--- from PUBLIC, anon, authenticated AND service_role for the same reason).
+-- shipped callable by the BYPASSRLS role. This REVOKE is what closes that, and
+-- it matches the house posture (mig 20260515205431 revokes
+-- _assert_no_public_execute from PUBLIC, anon, authenticated AND service_role
+-- for the same reason).
+--
+-- ⛔⛔ AND THIS REVOKE IS THE ONLY WALL AGAINST `service_role`, NOT THE SECOND OF
+-- TWO. An earlier version of this paragraph — and of STEP 3/4's comments —
+-- claimed "two independent walls" for that caller, with the `auth.uid() IS
+-- NULL` body guard as the other. THAT CLAIM WAS FALSE and it is corrected here
+-- rather than quietly softened. `auth.uid()` reads `request.jwt.claims`, a GUC
+-- the CALLER sets: any principal that can reach the function can also
+-- `set_config('request.jwt.claims', ...)` first, at which point auth.uid() is
+-- whatever they chose and the guard is satisfied.
+-- MEASURED (throwaway PostgreSQL 16, 2026-08-28), with EXECUTE temporarily
+-- granted so that only the body guard was under test:
+--   SET LOCAL ROLE service_role;
+--   PERFORM set_config('request.jwt.claims', '{"sub":"<VICTIM uuid>"}', true);
+--   SELECT public.revoke_strategy_share('<victim strategy>');
+--   -> rows=1, revoked_at stamped, generation 1 -> 2 on ANOTHER TENANT'S live
+--      share, reported to the caller as success.
+-- ⭐ WHAT THE BODY GUARD IS STILL WORTH, stated at its real size: it converts an
+-- ACCIDENT into a CONTRACT. An admin client that reaches this function WITHOUT
+-- having set claims — which is what `createAdminClient()` does — gets a loud,
+-- named refusal instead of an opaque 23502 (create) or a silent cross-tenant
+-- revoke returning 1 (revoke). It is a correctness guard against the honest
+-- mistake, not a security boundary against a deliberate one. The incremental
+-- capability it withholds from a principal that already holds `GRANT ALL` on
+-- this table and BYPASSRLS is nil — such a principal can simply UPDATE the row.
+-- ⚠️ A `pg_has_role(current_user, 'service_role', 'member')` assertion was
+-- EVALUATED as hardening and NOT SHIPPED, because it could not be shown to
+-- leave every intended caller working. MEASURED on the same cluster:
+-- `pg_has_role(current_user,'service_role','member')` is TRUE for `postgres` —
+-- superusers are members of every role — so the assertion would refuse these
+-- SECURITY INVOKER RPCs to any psql/migration/SQL-editor session, which is a
+-- larger and less visible regression than the accident it would prevent. It is
+-- recorded here so the next reader does not re-derive it and ship it.
 REVOKE ALL ON FUNCTION public.create_strategy_share(UUID) FROM PUBLIC, anon, service_role;
 REVOKE ALL ON FUNCTION public.revoke_strategy_share(UUID) FROM PUBLIC, anon, service_role;
 GRANT EXECUTE ON FUNCTION public.create_strategy_share(UUID) TO authenticated;
@@ -1030,7 +1061,7 @@ BEGIN
   PERFORM public._assert_no_public_execute('public.revoke_strategy_share(uuid)');
 
   IF has_function_privilege('service_role', 'public.create_strategy_share(uuid)', 'EXECUTE') THEN
-    RAISE EXCEPTION 'Migration 164-02 verification failed: service_role retains EXECUTE on create_strategy_share after the REVOKE. That role is BYPASSRLS and is exactly what createAdminClient() connects as, so the ONLY thing left between it and an ON CONFLICT reactivation of another tenant''s revoked share would be the auth.uid() fail-loud guard in the body — the two-wall posture this file claims would be a one-wall posture.';
+    RAISE EXCEPTION 'Migration 164-02 verification failed: service_role retains EXECUTE on create_strategy_share after the REVOKE. That role is BYPASSRLS and is exactly what createAdminClient() connects as, and this REVOKE is the ONLY wall against it — the auth.uid() fail-loud guard in the body is NOT a second one, because auth.uid() reads the caller-settable request.jwt.claims GUC and MEASURED (2026-08-28) a service_role call that sets it first revokes another tenant''s live share and is told it succeeded. With the grant back, nothing stands between an admin transport and an ON CONFLICT reactivation of someone else''s revoked share.';
   END IF;
   IF has_function_privilege('service_role', 'public.revoke_strategy_share(uuid)', 'EXECUTE') THEN
     RAISE EXCEPTION 'Migration 164-02 verification failed: service_role retains EXECUTE on revoke_strategy_share after the REVOKE. That role is BYPASSRLS, so with the body guard also gone this RPC is an unauthenticated cross-tenant kill switch that revokes any tenant''s live share and returns 1.';
@@ -1152,10 +1183,16 @@ BEGIN
       COALESCE(v_create_res, '(function not found)');
   END IF;
 
-  -- (ii-b) BOTH RPCs refuse a caller with no authenticated identity. RLS does
-  -- not apply to a BYPASSRLS role, so for `service_role` this guard is the
-  -- FIRST wall, not a redundant one. Probed against the comment-stripped body
-  -- precisely because both bodies discuss this guard in prose.
+  -- (ii-b) BOTH RPCs refuse a caller with NO authenticated identity. ⚠️ Read
+  -- that literally — "no identity", not "the wrong identity". RLS does not apply
+  -- to a BYPASSRLS role, so for `service_role` this is the only thing in the
+  -- body that looks at who is calling; but `auth.uid()` reads the
+  -- caller-settable `request.jwt.claims` GUC, so it stops the admin client that
+  -- arrives WITHOUT claims (the honest mistake) and not one that sets them first
+  -- (MEASURED 2026-08-28 — see STEP 5). It is a contract, not a wall; the wall
+  -- against that role is STEP 5's EXECUTE revoke, pinned durably by
+  -- SERVICE-ROLE 0-acl. Probed against the comment-stripped body precisely
+  -- because both bodies discuss this guard in prose.
   IF v_create_s !~* 'auth\.uid\s*\(\s*\)\s+IS\s+NULL'
      OR v_revoke_s !~* 'auth\.uid\s*\(\s*\)\s+IS\s+NULL' THEN
     RAISE EXCEPTION 'Migration 164-02 verification failed: a strategy-share RPC lost its `auth.uid() IS NULL` fail-loud guard — a service-role/admin client would reach the body with RLS not applied. MEASURED consequences: revoke becomes an unauthenticated cross-tenant kill switch that revokes another tenant''s live share and RETURNS 1; create degrades to an opaque 23502 on created_by, whose NOT NULL is the only (incidental) thing preventing an ON CONFLICT reactivation of someone else''s revoked share';

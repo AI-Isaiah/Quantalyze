@@ -261,6 +261,11 @@ DECLARE
   -- because strat_a4 already carries the row N1 2a inserted.
   strat_a5       UUID;
   nonce_a5       UUID;
+  -- SERVICE-ROLE 2f (2026-08-28): tenant A's pre-attempt state, snapshotted so
+  -- the spoofed-claims arm compares against a value it captured rather than
+  -- against an assumption about where the file has left strat_a.
+  sr_rev_pre     TIMESTAMPTZ;
+  sr_gen_pre     BIGINT;
 BEGIN
   -- ----- SEED (seeding/service-role context — bypasses RLS) ---------------
   -- Both strategies are status='private': an unpublished strategy is the ONLY
@@ -2047,7 +2052,7 @@ BEGIN
      AND r.rolname = 'service_role'
      AND acl.privilege_type = 'EXECUTE';
   IF row_cnt <> 0 THEN
-    RAISE EXCEPTION 'TEST FAILED (SERVICE-ROLE 0-acl): service_role holds % standing EXECUTE grant(s) on the share RPCs, expected 0. That role is BYPASSRLS and is what createAdminClient() connects as, so this deletes the grant-layer wall and leaves ONLY the auth.uid() fail-loud guard in the body — the two-wall posture STEP 3/4 of migration 20260827120000 claims collapses to one. ⛔ Read as a REGRESSION of the REVOKE, which pg_default_acl re-applies on any DROP+CREATE of these functions.', row_cnt;
+    RAISE EXCEPTION 'TEST FAILED (SERVICE-ROLE 0-acl): service_role holds % standing EXECUTE grant(s) on the share RPCs, expected 0. That role is BYPASSRLS and is what createAdminClient() connects as, so this deletes the ONLY wall that binds it. ⛔ The auth.uid() fail-loud guard in the body is NOT a fallback and must not be read as one: auth.uid() reads the caller-settable request.jwt.claims GUC, and SERVICE-ROLE 2f below MEASURES that a service_role caller who sets that GUC first revokes ANOTHER TENANT''S live share and is told it succeeded. ⛔ Read as a REGRESSION of the REVOKE, which pg_default_acl re-applies on any DROP+CREATE of these functions.', row_cnt;
   END IF;
 
   SET LOCAL ROLE service_role;
@@ -2129,13 +2134,78 @@ BEGIN
     raised := TRUE; err_msg := SQLERRM;
   END;
   RESET ROLE;
-  EXECUTE 'REVOKE EXECUTE ON FUNCTION public.revoke_strategy_share(UUID) FROM service_role';
-  EXECUTE 'REVOKE EXECUTE ON FUNCTION public.create_strategy_share(UUID) FROM service_role';
   IF NOT raised THEN
+    EXECUTE 'REVOKE EXECUTE ON FUNCTION public.revoke_strategy_share(UUID) FROM service_role';
+    EXECUTE 'REVOKE EXECUTE ON FUNCTION public.create_strategy_share(UUID) FROM service_role';
     RAISE EXCEPTION 'TEST FAILED (SERVICE-ROLE 2c): with EXECUTE granted, service_role ran create_strategy_share to completion. It must refuse: for that role auth.uid() is NULL and RLS does not apply, so the ON CONFLICT DO UPDATE path would set revoked_at = NULL on an EXISTING row with no policy in the way. Today the NOT NULL on created_by raises 23502 first and blocks that INCIDENTALLY — completing successfully means even that accident is gone.';
   END IF;
   IF err_msg NOT LIKE '%not callable by a service-role%' THEN
+    EXECUTE 'REVOKE EXECUTE ON FUNCTION public.revoke_strategy_share(UUID) FROM service_role';
+    EXECUTE 'REVOKE EXECUTE ON FUNCTION public.create_strategy_share(UUID) FROM service_role';
     RAISE EXCEPTION 'TEST FAILED (SERVICE-ROLE 2d): service_role''s mint failed, but NOT on the fail-loud guard (got: %)', err_msg;
+  END IF;
+
+  -- ======================================================================
+  -- SERVICE-ROLE 2f: SPOOFED CLAIMS — what actually bounds a service_role
+  --                  caller once it has EXECUTE
+  -- ======================================================================
+  -- ⛔⛔ 2a AND 2c CERTIFY A STRICTLY WEAKER PROPERTY THAN THEIR NAMES SUGGEST,
+  -- and this arm exists to stop the file overclaiming. Both call with
+  -- `request.jwt.claims` set to NULL, so `auth.uid()` is NULL and the fail-loud
+  -- guard fires. But `auth.uid()` READS THAT GUC, and a caller that can reach
+  -- the function can set it first. MEASURED (throwaway PostgreSQL 16,
+  -- 2026-08-28) with EXECUTE granted exactly as it is here:
+  --     SET LOCAL ROLE service_role;
+  --     PERFORM set_config('request.jwt.claims', '{"sub":"<victim>"}', true);
+  --     SELECT public.revoke_strategy_share('<victim strategy>');
+  --   -> rows=1, revoked_at stamped, generation 1 -> 2 on ANOTHER TENANT'S live
+  --      share, reported to the caller as SUCCESS.
+  -- So the body guard is NOT a second wall against this role. STEP 5's EXECUTE
+  -- revoke is the only one, and SERVICE-ROLE 0-acl is what pins it durably.
+  --
+  -- ⭐ WHAT THIS ARM THEREFORE ASSERTS is the property that IS true and IS
+  -- load-bearing: once claims are spoofed, the caller is bounded by
+  -- `created_by = auth.uid()` in revoke's UPDATE and by NOTHING ELSE. RLS does
+  -- not apply to a BYPASSRLS role, so for this caller that predicate is the
+  -- whole of tenancy. Drop it and a spoofed service_role call becomes an
+  -- unbounded cross-tenant kill switch: spoof ANY sub, name ANY strategy.
+  -- ⛔ NOT the same arm as TENANT 4b, which routes the same predicate through an
+  -- `authenticated` caller — there RLS ALSO scopes the UPDATE, so 4b stays green
+  -- with the predicate deleted. This is the only arm in the file that isolates
+  -- it, and it needs the spoof to do so.
+  --
+  -- `NOT raised` is asserted too, and it is the anti-vacuity half: if the
+  -- set_config did not take, auth.uid() would be NULL, the fail-loud guard would
+  -- refuse, `affected` would never be assigned, and the arm would "pass" while
+  -- measuring the guard from 2a all over again.
+  -- RED-UNDER: delete the `AND created_by = auth.uid()` predicate from
+  --            revoke_strategy_share's UPDATE (migration 20260827120000 STEP 4).
+  -- ⚠️ LAYERED: SHAPE 4c greps the body for that predicate and fires first, and
+  --    migration 20260827120000's STEP 6 arm (ii-c) greps for it too and ABORTS
+  --    THE APPLY — so both must go in the same mutation. With both gone this arm
+  --    is the first failure (MEASURED).
+  SELECT revoked_at, generation INTO sr_rev_pre, sr_gen_pre
+    FROM strategy_shares WHERE strategy_id = strat_a;
+  PERFORM set_config('request.jwt.claims',
+    json_build_object('sub', uid_b::text, 'role', 'authenticated')::text, true);
+  SET LOCAL ROLE service_role;
+  raised := FALSE; err_msg := NULL; affected := NULL;
+  BEGIN
+    SELECT public.revoke_strategy_share(strat_a) INTO affected;
+  EXCEPTION WHEN OTHERS THEN
+    raised := TRUE; err_msg := SQLERRM;
+  END;
+  RESET ROLE;
+  PERFORM set_config('request.jwt.claims', NULL, true);
+  SELECT revoked_at, generation INTO now_revoked, gen_probe
+    FROM strategy_shares WHERE strategy_id = strat_a;
+  EXECUTE 'REVOKE EXECUTE ON FUNCTION public.revoke_strategy_share(UUID) FROM service_role';
+  EXECUTE 'REVOKE EXECUTE ON FUNCTION public.create_strategy_share(UUID) FROM service_role';
+  IF raised
+     OR affected IS DISTINCT FROM 0
+     OR now_revoked IS DISTINCT FROM sr_rev_pre
+     OR gen_probe IS DISTINCT FROM sr_gen_pre THEN
+    RAISE EXCEPTION 'TEST FAILED (SERVICE-ROLE 2f): a service_role caller SPOOFING tenant B''s claims reached tenant A''s share row (raised=%, error=%, rows=%, revoked_at % -> %, generation % -> %). Expected: no error — auth.uid() reads the caller-settable request.jwt.claims GUC, so the fail-loud guard does NOT bind a caller who sets it, and an arm that expected a refusal here would be certifying a wall that does not exist — and 0 rows, because `created_by = auth.uid()` in revoke_strategy_share''s UPDATE is the ONLY thing scoping this caller. RLS does not apply to a BYPASSRLS role. Without that predicate a spoofed admin-client call is an unbounded cross-tenant kill switch: any sub, any strategy, returning success. ⛔ If raised=t instead, the spoof did not take and this arm measured the guard from SERVICE-ROLE 2a rather than the predicate.', raised, COALESCE(err_msg, '(none)'), COALESCE(affected::TEXT, '(unset)'), COALESCE(sr_rev_pre::TEXT, '(null)'), COALESCE(now_revoked::TEXT, '(null)'), sr_gen_pre, gen_probe;
   END IF;
 
   -- Belt-and-braces: the temporary EXECUTE grants really are gone.
@@ -2387,7 +2457,7 @@ BEGIN
       raised, COALESCE(err_msg, '(none)'), COALESCE(san_ok::TEXT, '(null)'), b_revoked, gen_pre_san, gen_b_after;
   END IF;
 
-  RAISE NOTICE 'test_strategy_shares_rls: ALL 102 ARMS EXECUTED (SHAPE 1, SHAPE 1b, SHAPE 1c, SHAPE 2a, SHAPE 2b, SHAPE 3, SHAPE 3b, SHAPE 4a, SHAPE 4b, SHAPE 4c, SHAPE 4d, SHAPE 4e, SHAPE 5, SHAPE 5b-pre, SHAPE 5b, OWNER 1a, OWNER 1b, OWNER 1c, OWNER 2a, OWNER 2b, OWNER 2c, OWNER 2d, TENANT 1a, TENANT 1b, TENANT 2a, TENANT 2b, TENANT 3a, TENANT 3b, N1 2a, N1 2b, N1 1a, N1 1b, N1 1c, NO-DELETE 1, REVOKE 1a, REVOKE 1b, REVOKE 1c, REVOKE 2a, REVOKE 2b, REACTIVATE 1a, REACTIVATE 1b, REACTIVATE 1c, REACTIVATE 1d, REACTIVATE 1e, REACTIVATE 1f, REACTIVATE 1g, TRIGGER 1a, TRIGGER 1b, MONOTONIC 1a, MONOTONIC 1b, MONOTONIC 1c, TRIGGER 2a, TRIGGER 2b, TRIGGER 3a, TRIGGER 3b, TRIGGER 3c, TRIGGER 3d-i, TRIGGER 3d-ii, TRIGGER 4a, TRIGGER 4b, TRIGGER 4c-i, TRIGGER 4c-ii, NONCE 1a, NONCE 1b, NONCE 2a, NONCE 2b, NONCE 3, NONCE 4a, NONCE 4b, NONCE 4c, TENANT 4a, TENANT 4b, TENANT 4c, TENANT 5a, TENANT 5b, ANON 1a, ANON 1b, ANON 1b-grant, ANON 1c, ANON 1c-grant, ANON 1d, ANON 1d-grant, ANON 2, ANON 2b, SERVICE-ROLE 0-acl, SERVICE-ROLE 1, SERVICE-ROLE 1-grant, SERVICE-ROLE 2a, SERVICE-ROLE 2b, SERVICE-ROLE 2c, SERVICE-ROLE 2d, SERVICE-ROLE 2e, NONCE 5a, NONCE 5b, NONCE 5c, SANITIZE 1a, SANITIZE 1b, SANITIZE 1c, SANITIZE 1d, SANITIZE 1e, SANITIZE 1f, N1 3a). Observed generation sequence: %', gen_seen;
+  RAISE NOTICE 'test_strategy_shares_rls: ALL 103 ARMS EXECUTED (SHAPE 1, SHAPE 1b, SHAPE 1c, SHAPE 2a, SHAPE 2b, SHAPE 3, SHAPE 3b, SHAPE 4a, SHAPE 4b, SHAPE 4c, SHAPE 4d, SHAPE 4e, SHAPE 5, SHAPE 5b-pre, SHAPE 5b, OWNER 1a, OWNER 1b, OWNER 1c, OWNER 2a, OWNER 2b, OWNER 2c, OWNER 2d, TENANT 1a, TENANT 1b, TENANT 2a, TENANT 2b, TENANT 3a, TENANT 3b, N1 2a, N1 2b, N1 1a, N1 1b, N1 1c, NO-DELETE 1, REVOKE 1a, REVOKE 1b, REVOKE 1c, REVOKE 2a, REVOKE 2b, REACTIVATE 1a, REACTIVATE 1b, REACTIVATE 1c, REACTIVATE 1d, REACTIVATE 1e, REACTIVATE 1f, REACTIVATE 1g, TRIGGER 1a, TRIGGER 1b, MONOTONIC 1a, MONOTONIC 1b, MONOTONIC 1c, TRIGGER 2a, TRIGGER 2b, TRIGGER 3a, TRIGGER 3b, TRIGGER 3c, TRIGGER 3d-i, TRIGGER 3d-ii, TRIGGER 4a, TRIGGER 4b, TRIGGER 4c-i, TRIGGER 4c-ii, NONCE 1a, NONCE 1b, NONCE 2a, NONCE 2b, NONCE 3, NONCE 4a, NONCE 4b, NONCE 4c, TENANT 4a, TENANT 4b, TENANT 4c, TENANT 5a, TENANT 5b, ANON 1a, ANON 1b, ANON 1b-grant, ANON 1c, ANON 1c-grant, ANON 1d, ANON 1d-grant, ANON 2, ANON 2b, SERVICE-ROLE 0-acl, SERVICE-ROLE 1, SERVICE-ROLE 1-grant, SERVICE-ROLE 2a, SERVICE-ROLE 2b, SERVICE-ROLE 2c, SERVICE-ROLE 2d, SERVICE-ROLE 2f, SERVICE-ROLE 2e, NONCE 5a, NONCE 5b, NONCE 5c, SANITIZE 1a, SANITIZE 1b, SANITIZE 1c, SANITIZE 1d, SANITIZE 1e, SANITIZE 1f, N1 3a). Observed generation sequence: %', gen_seen;
 END
 $$;
 
