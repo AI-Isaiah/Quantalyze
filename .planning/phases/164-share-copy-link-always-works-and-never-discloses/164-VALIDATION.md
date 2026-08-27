@@ -70,6 +70,9 @@ failures that read as regressions. Serialize: vitest → pytest → mypy.
 | 164-05-01 | 05 | 2 | SHARE-02 | Token in telemetry | Sentry path scrub (net-new) strips the token from captured events | unit | `npx vitest run src/lib/scrub-share-path.test.ts src/instrumentation.test.ts && npx tsc --noEmit` | ❌ W0 | ⬜ pending |
 | 164-05-02 | 05 | 2 | SHARE-02 | Referrer / analytics leak | `no-referrer` per-route; Plausible exclusion; recipient analytics suppressed | unit + build | `set -o pipefail; npx vitest run src/app/layout src/app/factsheet/[id]/v2/factsheet-analytics --silent 2>&1 \| tail -15 && npm run build 2>&1 \| tail -5` | ✅ | ⬜ pending |
 | 164-05-03 | 05 | 2 | SHARE-02 | **Cache poisoning** | ORDERED: after a token-lane render, anon `/factsheet/<id>` STILL 404s | acceptance (**RED-first**) | `npx vitest run "src/app/factsheet-share/[token]/page.cache-isolation.test.tsx" src/__tests__/phase-148-owner-lane-cache-isolation.test.ts` | ❌ W0 | ⬜ pending |
+| 164-06-01 | 06 | 2 | SHARE-03 | N1 / ceiling jump | Trigger forces `generation=1` on INSERT and bounds every UPDATE to +1 | SQL (real PG) + snapshot | `npx tsx scripts/dump-sql-functions.ts --check` — behaviour proven by `pg-harness/run.sh`, NOT by a vitest file | ✅ | ⬜ pending |
+| 164-06-02 | 06 | 2 | SHARE-03 | Silent-skip / vacuity | 5 new arms, each OBSERVED red under its own RED-UNDER; floors re-derived PRE-EDIT in the same diff | contract + SQL gate | `set -o pipefail; npx vitest run src/__tests__/contracts/ci-anti-skip-gate.contract.test.ts 2>&1 \| tail -20` | ✅ | ⬜ pending |
+| 164-06-03 | 06 | 2 | SHARE-03 | Prod auto-apply | Harness run → three reviewers (execution status declared) → TEST hand-apply → `sql-tests` green | **blocking-human checkpoint** | none — `gate="blocking-human"`, typed `<resume-signal>` required | n/a | ⬜ pending |
 
 *Status: ⬜ pending · ✅ green · ❌ red · ⚠️ flaky*
 
@@ -87,6 +90,14 @@ failures that read as regressions. Serialize: vitest → pytest → mypy.
 - [ ] token-lane rows added to `src/__tests__/phase-148-owner-lane-cache-isolation.test.ts` — **extend, do not fork**
 
 *Framework install: none — vitest, Playwright and the `sql-tests` lane all already exist.*
+
+⭐ **Added 2026-08-27 for plan 06.** Its behavioural oracle is **not** a vitest file — it is
+`pg-harness/run.sh`, a throwaway PostgreSQL cluster (`PROC-01`). That is deliberate: N1 is a
+trigger/privilege defect that no TypeScript test can observe, and the phase already proved that
+prose in an `<automated>` block is not a command. ⚠️ This plan was authored by the orchestrator
+rather than by `gsd-planner`, because `/gsd-plan-phase 164` replans the WHOLE phase and 164-01/02
+are already executed with SUMMARYs on disk. The step-5.5 rows above are the gate that would
+otherwise have been skipped — see `NYQ-01`.
 
 ---
 
