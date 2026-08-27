@@ -59,17 +59,75 @@
 -- DEFINER owned by the table owner, so RLS is not applied to this statement and
 -- the predicate is the ONLY scope there is.
 --
--- WHY CREATE OR REPLACE OF THE WHOLE BODY (the house rule)
+-- WHY CREATE OR REPLACE OF THE WHOLE BODY, AND WHAT IT IS RE-BASED ON
 -- ---------------------------------------------------------------------------
--- Re-base-on-latest-definition: `grep -rn "FUNCTION public.sanitize_user"
--- supabase/migrations/` returns seven definitions; the newest by filename
--- ordering is 20260517013100. The body below is reproduced VERBATIM from that
--- file with exactly ONE statement added (marked "Phase 164 / B1") and the
--- COMMENT extended. Nothing else changes — the advisory lock, the
+-- ⛔ CORRECTED 2026-08-27 (DRIFT-02). The first cut of this file followed the
+-- house rule literally: `grep -rn "FUNCTION public.sanitize_user"
+-- supabase/migrations/` returns seven definitions, the newest by filename
+-- ordering is 20260517013100, so the body was re-based on that. THAT WAS WRONG,
+-- and a migration reviewer verified it as faithful — faithful to the wrong
+-- baseline, which is indistinguishable from correct at review time.
+--
+-- 20260620120000_verification_requests_view_shim_apply.sql is LATER and it also
+-- edits this function, but it does so with a SURGICAL IN-PLACE PATCH rather than
+-- a CREATE OR REPLACE — so it matches no grep for the function name, and the
+-- authoritative body existed ONLY IN THE DATABASE. Re-basing on the newest full
+-- repo body silently reverted a repoint that shim's own header calls MANDATORY,
+-- aiming GDPR Art. 17 erasure at a VIEW.
+--
+-- ⭐ THE RULE THIS FILE NOW FOLLOWS: for any function that has ever been
+-- surgically patched, re-base on `pg_get_functiondef()` read from PRODUCTION,
+-- not on a repo file. Measured 2026-08-27 against the live PROD definition:
+--
+--   md5 = 2f4ccf13db95b93464e028e5bce1e0f4   length = 6696 chars
+--   The PROD body was transcribed and the transcription PROVED exact by md5
+--   equality — not eyeballed. Diffing it against the body below, with the added
+--   B1 block and the added DRIFT-02 comment block removed, leaves exactly TWO
+--   hunks: the `CREATE OR REPLACE` header wrapper (`uuid`/`UUID`,
+--   `boolean`/`BOOLEAN`, `SET search_path TO 'public','pg_catalog'` vs
+--   `= public, pg_catalog`) and the `$function$` vs `$$` delimiter. Both are
+--   semantically identical. ZERO statement-level differences remain.
+--
+--   ⚠️ Before this correction the same diff had a THIRD hunk — the erasure
+--   DELETE naming the view instead of the table. That one hunk was the bug.
+--
+-- The body below therefore carries exactly ONE added statement (marked
+-- "Phase 164 / B1") and the COMMENT extended. Nothing else changes — the advisory lock, the
 -- sentinel-progress signal, the sole-admin orphan audit loop, the
 -- case-insensitive notification_dispatches purge and the auth purge are all
 -- carried forward byte-for-byte, and STEP 2 below re-asserts each one against
 -- the LIVE definition so a transcription slip aborts this apply.
+--
+-- EXECUTION EVIDENCE — THIS FILE WAS RUN, NOT ASSERTED (2026-08-27)
+-- ---------------------------------------------------------------------------
+-- The red-team synthesis' single highest-leverage finding was that a 456-line
+-- migration and a 536-line SQL gate were authored, committed, declared done and
+-- reviewed by three specialists with ZERO executions. This file breaks that.
+-- Run against a throwaway cluster, PostgreSQL 16.13 (Homebrew, aarch64):
+--
+--   apply (roles anon/authenticated/service_role + public._assert_no_public_execute
+--          pre-created; every table the body names is resolved at RUNTIME, not at
+--          CREATE time, so a bare cluster exercises the whole file):
+--     BEGIN / SET / CREATE FUNCTION / COMMENT / REVOKE / GRANT
+--     NOTICE: Phase 164 / B1: sanitize_user revokes the subject's
+--             strategy_shares links ... every pre-existing sanitize invariant
+--             survived the whole-body replace.
+--     DO / COMMIT                                                    -> GREEN
+--
+--   anti-vacuity (a test that cannot fail is worse than none):
+--     mutation 1  body DELETE re-pointed at the VIEW (the real DRIFT-02 bug)
+--                 -> RED, arm 1
+--     mutation 2  body DELETE removed entirely       -> RED, arm 1
+--     mutation 3  legacy DELETE kept AND a view-named DELETE added alongside
+--                 -> RED, arm 2   (mutations 1 and 2 abort on arm 1 before
+--                                  arm 2 is ever reached, so arm 2 needed its
+--                                  own mutation to be shown reachable at all)
+--     restore     unmutated file                     -> GREEN again
+--
+-- ⚠️ What this run does NOT prove: the runtime behaviour of the statements. No
+-- table exists on that cluster, so nothing was erased and nothing was revoked.
+-- This proves the file applies, and that its self-verification arms bite. The
+-- behavioural proof still belongs to the TEST hand-apply.
 --
 -- GDPR EXPORT-COVERAGE COUPLING (do not rename this file casually)
 -- ---------------------------------------------------------------------------
@@ -244,7 +302,17 @@ BEGIN
      AND revoked_at IS NULL;
 
   IF v_target_email IS NOT NULL THEN
-    DELETE FROM verification_requests WHERE email = v_target_email;
+    -- ⛔ verification_requests_legacy IS THE TABLE. `verification_requests` is a
+    -- VIEW (relkind 'v', 13 cols) that 20260620120000_verification_requests_view_shim_apply.sql
+    -- repointed this DELETE away from — MANDATORY, because erasure aimed at the
+    -- view hits its INSTEAD OF trigger instead of the rows. That shim was a
+    -- SURGICAL in-place patch, so it matches no grep for this function and the
+    -- repo held no copy of it; re-basing on the newest FULL body in the repo
+    -- (20260517013100) therefore silently REVERTED it. See DRIFT-02 in root
+    -- TODOS.md. Corrected 2026-08-27 against PROD's live pg_get_functiondef
+    -- (md5 2f4ccf13db95b93464e028e5bce1e0f4) — the diff proved this identifier
+    -- was the ONLY substantive drift in the whole 193-line body.
+    DELETE FROM verification_requests_legacy WHERE email = v_target_email;
 
     -- audit-2026-05-07 M-0796 + PR #182 retro audit (Task #57): purge
     -- notification_dispatches rows keyed to the target user's email. The
@@ -391,6 +459,23 @@ BEGIN
   -- the next mint at generation 1 resurrects every already-revoked token.
   IF v_body_stripped ~* '\mDELETE\s+FROM\s+(?:public\.)?strategy_shares\M' THEN
     RAISE EXCEPTION 'Phase 164 / B1 verification failed: sanitize_user DELETEs from strategy_shares. Erasure must SOFT-revoke: a delete discards the generation counter, so the next create_strategy_share() restarts at generation 1 and every token minted at generation 1 — including revoked ones — starts working again.';
+  END IF;
+
+  -- ⛔ DRIFT-02 (2026-08-27): the Art. 17 erasure DELETE must name the TABLE,
+  -- never the VIEW. 20260620120000_verification_requests_view_shim_apply.sql
+  -- repointed this statement from `verification_requests` (relkind 'v', a view
+  -- with an INSTEAD OF trigger) to `verification_requests_legacy` (relkind 'r',
+  -- the real table) and called the repoint MANDATORY. It did so with a SURGICAL
+  -- in-place patch, so it matches no grep for this function and left no full
+  -- body in the repo — which is exactly how the first cut of THIS migration
+  -- silently reverted it while three reviewers called the re-base faithful.
+  -- These two arms make that revert un-shippable rather than un-noticed.
+  -- RED-UNDER: change either identifier back to `verification_requests`.
+  IF v_body_stripped !~* '\mDELETE\s+FROM\s+(?:public\.)?verification_requests_legacy\M' THEN
+    RAISE EXCEPTION 'Phase 164 / B1 verification failed (DRIFT-02): sanitize_user does not DELETE FROM verification_requests_legacy. That is the TABLE holding the subject''s verification-request PII; migration 20260620120000 repointed erasure onto it precisely because the same name without the _legacy suffix is now a VIEW. Without this statement the GDPR Art. 17 erasure leaves that PII in place.';
+  END IF;
+  IF v_body_stripped ~* '\mDELETE\s+FROM\s+(?:public\.)?verification_requests\M' THEN
+    RAISE EXCEPTION 'Phase 164 / B1 verification failed (DRIFT-02): sanitize_user DELETEs from the VIEW public.verification_requests. Erasure aimed at the view hits its INSTEAD OF trigger, not the rows. Migration 20260620120000 repointed this to verification_requests_legacy and called the repoint MANDATORY; a whole-body CREATE OR REPLACE re-based on any repo file older than that shim reverts it silently, because the shim was a surgical in-place patch that left no full body behind to re-base on.';
   END IF;
 
   -- Preservation gates carried forward from 20260517013100 — re-assert every

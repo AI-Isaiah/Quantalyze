@@ -1144,6 +1144,38 @@ own header calls the repoint **MANDATORY**.
 and the reality diverge, and nothing in the pipeline compares them. DRIFT-01 was TEST-vs-repo;
 this is **repo-vs-PROD**, and it is the more dangerous direction because merging auto-applies.
 
+**✅ DRIFT-02a RESOLVED 2026-08-27 — and it was a ONE-IDENTIFIER fix, provably.** Read PROD's live
+`pg_get_functiondef(sanitize_user)` (md5 `2f4ccf13db95b93464e028e5bce1e0f4`, 6696 chars),
+transcribed it, and **proved the transcription exact by md5 equality** rather than by eye. Diffing
+that verified body against the shipped body — with the added B1 arm and the added DRIFT-02 comment
+block removed — left exactly **two hunks, both the `CREATE OR REPLACE` header wrapper**
+(`uuid`/`UUID`, `boolean`/`BOOLEAN`, `SET search_path TO 'public','pg_catalog'` vs
+`= public, pg_catalog`) and the `$function$` vs `$$` delimiter. Semantically identical, **zero**
+statement-level differences. Before the correction the same diff had a third hunk — the erasure
+DELETE naming the view — and that one hunk was the entire bug. So a 193-line body needed a 193-line
+re-base only in the sense that it needed to be *checked* line by line; the repair was one token.
+
+Two `sql-tests`-style arms now make the revert un-shippable rather than un-noticed: a positive arm
+requiring `DELETE FROM verification_requests_legacy`, and a negative arm rejecting any DELETE
+against the bare view. ⭐ **Both were demonstrated able to fail**, which took three mutations, not
+two — mutations 1 and 2 abort on the positive arm before the negative arm is ever evaluated, so the
+negative arm needed its own mutation (keep the legacy DELETE, add a view-named one alongside) to be
+shown reachable at all. Without that third mutation the second arm would have been a test that
+cannot fail, in a file whose whole subject is a check that failed to check.
+
+⭐ **Executed, not asserted** — PostgreSQL 16.13, throwaway cluster, full apply GREEN, three
+mutations RED, restore GREEN. This is `PROC-01` practised on the first file it applies to. Nothing
+was applied to TEST or PROD. Run output is recorded in the migration header.
+
+⚠️ **DRIFT-02b and DRIFT-02c remain open** — this closed the instance, not the class. Nothing yet
+compares a whole-body replace against PROD before merge, and nothing yet stops the next surgical
+in-place patch from erasing the repo's copy of a body. Route both with the `PROC-*` standards.
+
+⚠️ **Checked and clear:** `scripts/check-gdpr-export-coverage.ts` harvests `DELETE FROM <table>`
+out of migrations whose FILENAME matches `/sanitize_user/i`, so the repointed identifier changes
+what it sees. Ran it — the only failure is the pre-existing, *intended* `strategy_shares` one that
+cannot clear until the declaring migration is applied. No new redness.
+
 ### Phase 164 (SHARE) — ACCEPTED RESIDUALS, named (booked 2026-08-27)
 
 Source: `.planning/phases/164-share-.../red-team/SYNTHESIS.md` §7 + §8 item 6. The synthesizer's
