@@ -735,6 +735,42 @@ export const USER_EXPORT_TABLES: readonly UserExportTable[] = [
   { kind: "direct", table: "scenario_shares", user_column: "created_by" },
   { kind: "direct", table: "scenarios", user_column: "allocator_id" },
   { kind: "direct", table: "strategies", user_column: "user_id" },
+  // ⛔ PENDING — `strategy_shares` (Phase 164, migration 20260827120000) BELONGS
+  // HERE and is deliberately NOT yet listed. It is user-owned via `created_by`
+  // (NOT NULL REFERENCES profiles ON DELETE CASCADE): one row per strategy
+  // recording that the owner created / revoked a factsheet share link, and
+  // when — personal data GDPR Art. 15 entitles them to export, exactly like the
+  // `scenario_shares` row above. (Unlike scenario_shares there is not even a
+  // digest to weigh: D-02 forbids storing a token, raw or hashed. The exported
+  // `generation` integer is one of two HMAC inputs and is inert without
+  // SHARE_TOKEN_SECRET, and the export's subject is the very person who can
+  // press "Copy Link" for the real url.)
+  //
+  // WHY IT IS NOT LISTED YET: `table` is typed `PublicTable = keyof
+  // Database["public"]["Tables"]`, and `src/lib/database.types.ts` is GENERATED
+  // from the LIVE schema. The migration is authored but applied nowhere yet, so
+  // adding the entry now is a hard `tsc` error (MEASURED 2026-08-27: TS2322
+  // "Type '\"strategy_shares\"' is not assignable to ... Did you mean
+  // '\"strategy_keys\"'?"). ⛔ It must NOT be worked around by adding the table
+  // to EXCLUDED_TABLES in scripts/check-gdpr-export-coverage.ts — that arm
+  // means "genuinely not exportable" and would permanently and silently drop a
+  // user-owned table from every Art. 15 export.
+  //
+  // ORDER OF OPERATIONS (owned by the 164-02 blocking checkpoint):
+  //   1. hand-apply migration 20260827120000 to the TEST project;
+  //   2. regenerate src/lib/database.types.ts from the applied schema;
+  //   3. add `{ kind: "direct", table: "strategy_shares", user_column:
+  //      "created_by" }` on the line below (sorted after `strategies`,
+  //      'i' < 'y', per the alphabetical-order gate);
+  //   4. add the matching `strategy_shares` key to SANITIZE_PARITY_ALLOWLIST in
+  //      scripts/check-gdpr-export-coverage.ts — its rationale is already
+  //      written out in a PENDING comment at that site. Steps 3 and 4 must land
+  //      TOGETHER: the allowlist's staleness check rejects a key with no
+  //      manifest entry, and the manifest entry has no sanitize policy without
+  //      the allowlist key.
+  // Until then `scripts/check-gdpr-export-coverage.ts` exits 1 and its failure
+  // text states this exact remedy — that redness is the reminder, and it is the
+  // correct state to be in. ⛔ Do NOT silence it with an EXCLUDED_TABLES entry.
   { kind: "direct", table: "user_app_roles", user_column: "user_id" },
   { kind: "direct", table: "user_favorites", user_column: "user_id" },
   { kind: "direct", table: "user_notes", user_column: "user_id" },

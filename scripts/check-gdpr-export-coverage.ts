@@ -422,6 +422,21 @@ export const SANITIZE_PARITY_ALLOWLIST: Record<
     reason:
       "Allocator's own scenario share-link state (migration 20260622120000). ON DELETE CASCADE from profiles (and from scenarios) erases all share rows when the profile is sanitized/deleted. No explicit sanitize_user matrix row needed; mirrors the scenarios CASCADE-erasure allowlist.",
   },
+  // ⛔ PENDING — `strategy_shares` (Phase 164, migration 20260827120000) needs an
+  // entry here, and it is deliberately NOT added yet. It cannot be: this
+  // allowlist's own staleness check (below) rejects a key with no matching
+  // USER_EXPORT_TABLES entry, and that manifest entry is blocked on the
+  // post-apply regeneration of database.types.ts. The two must land together.
+  // The rationale, when it lands: the owner's own factsheet share-link state
+  // (strategy_id, generation, revoked_at — NO token, raw or hashed), user-owned
+  // via `created_by NOT NULL REFERENCES profiles ON DELETE CASCADE` (and
+  // `strategy_id ... REFERENCES strategies ON DELETE CASCADE`). Both CASCADE FKs
+  // erase every share row when the profile is deleted during sanitize, so no
+  // explicit sanitize_user matrix row is required — and the migration's
+  // client-side `REVOKE DELETE` does not impede that, because referential
+  // actions execute internally without consulting the caller's privileges.
+  // Mirrors the scenario_shares CASCADE-erasure pattern above. See the PENDING
+  // block in src/lib/gdpr-export-manifest.ts for the full order of operations.
 };
 
 /**
