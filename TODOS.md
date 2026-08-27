@@ -1144,6 +1144,51 @@ own header calls the repoint **MANDATORY**.
 and the reality diverge, and nothing in the pipeline compares them. DRIFT-01 was TEST-vs-repo;
 this is **repo-vs-PROD**, and it is the more dangerous direction because merging auto-applies.
 
+### Phase 164 (SHARE) — ACCEPTED RESIDUALS, named (booked 2026-08-27)
+
+Source: `.planning/phases/164-share-.../red-team/SYNTHESIS.md` §7 + §8 item 6. The synthesizer's
+finding was that these three were **accepted in conversation and written down nowhere** — and
+"accepting a residual silently is indistinguishable from missing it." That is the whole reason
+this section exists. None of these is a task. Each is a decision with a name against it.
+
+- **[SHARE-RES-R4] PITR / branch-DB restore defeats revocation.** A point-in-time restore or a
+  Supabase branch DB restores `strategy_shares` *including the nonce and the generation counter*,
+  so every token that was live at the snapshot instant becomes live again. **Nothing in-database
+  can close this** — the revocation state and the thing being restored are the same store.
+  Design-neutral: hash-at-rest does not survive a restore either, so this is not a cost of the
+  HMAC+generation model.
+  **Mitigation shipped:** per-environment `SHARE_TOKEN_SECRET` (founder ruling 2026-08-26),
+  which bounds the blast radius to the restored environment — a branch or preview DB can no
+  longer derive production-valid tokens. **Accepted:** the within-environment restore case.
+  ⚠️ Operational consequence, not yet an item anywhere: a PROD restore is also a share-link
+  un-revoke. Whoever runs one must re-revoke, and nothing reminds them.
+
+- **[SHARE-RES-R2g] `service_role` DELETE+INSERT is not bound by anything in-database.** The
+  nonce **downgrades** this from resurrection to link-death: an admin who deletes a row and
+  re-inserts it gets a fresh `gen_random_uuid()` nonce, so the old tokens stop working rather
+  than come back. The residual is narrower and requires intent: an admin who **records the nonce
+  before deleting** can restore the exact row and revive every previously-revoked link.
+  **Not closable in SQL** — `service_role` is the transport `createAdminClient()` uses, and any
+  actor able to read `SHARE_TOKEN_SECRET` can mint tokens directly without touching the table at
+  all. The in-database control would be theatre. **Accepted.**
+
+- **[SHARE-RES-F5] Capability URLs leak through channels no header controls.** Platform access
+  logs, link unfurlers, browser history, and screen shares all see a token that is part of the
+  URL. Inherent to capability URLs; the phase's own D-01 (`/factsheet-share/[token]`) chose a
+  path segment over a query param. **Accepted.**
+  ⚠️ **Correction to SYNTHESIS §7 (my error, propagated).** SYNTHESIS says `Referrer-Policy`
+  "strips query strings cross-origin, never paths." That is wrong, and it originated in a claim
+  I made and later measured to be false. Under the default `strict-origin-when-cross-origin` a
+  cross-origin request sends **only the origin** — neither path nor query survives. So the
+  path-vs-query choice is **Referrer-neutral**, and this phase ships per-route `no-referrer`
+  anyway, which closes that channel outright. The path choice still matters, but for a different
+  and narrower reason: log and analytics pipelines commonly redact query strings while retaining
+  paths. Keep the residual; discard the stated mechanism.
+
+**What is NOT on this list, deliberately:** N1 (INT4 overflow wedging Art.17 erasure) and N2
+(revoke race). Those are **open defects gating 164-03**, not residuals — see the six-condition
+merge gate at `SYNTHESIS.md:270-287` and the wave restructure in ROADMAP Phase 164.
+
 ### NYQ-01 — a config-enabled planning gate stopped firing and nothing noticed (booked 2026-08-26)
 
 ⭐ **Founder-ruled 2026-08-26: regenerate, don't waive.** Surfaced while closing Phase 164's

@@ -403,15 +403,45 @@ Plans:
   4. Revoke is immediate and convergent: regeneration kills previously-copied links; a revoked/unknown token renders a content-free `410` + `no-store` on the TOKEN lane only (the bare-id lane keeps its uniform 404 or the id becomes an existence oracle); soft-revoke, never DELETE; double-revoke converges; the owner can see whether a live link exists.
   5. The share affordance is honest as a CLASS: no "Link copied!" for a link that cannot work, ONE predicate across all three affordance sites (`FactsheetView`, strategies page, discovery detail), a token-link RECIPIENT never sees a Copy-Link control that rebuilds the URL without the token, and `OwnerUnpublishedNotice`'s "anyone else sees a 404" sentence is corrected in this same phase.
 
-**Plans**: 5 plans
+**Plans**: 7 plans
 **UI hint**: yes
 
 Plans:
 - [ ] 164-01-PLAN.md — TRACER: builder seam extracted to `src/lib/factsheet/` + phase-148 guard re-pointed to pin the MODULE; HMAC+generation token module (loud at module load); `/factsheet-share/[token]` recipient route + 410 `gone` sibling + proxy/route-contract wiring + structural recipient mode (wave 1)
 - [ ] 164-02-PLAN.md — phase-29 guard narrowed to the scenario locked set (never a migration rename) + `strategy_shares` migration (generation model, no token at rest, two INVOKER RPCs) + SKIP-01-clean SQL gate; blocking three-reviewer + TEST hand-apply checkpoint (wave 1)
-- [ ] 164-03-PLAN.md — mint-or-reuse + atomic-revoke API routes under the audit law; byte-identical-reuse regression pin; 404-as-convergence (wave 2)
-- [ ] 164-04-PLAN.md — SHARE-04 honesty class: status-aware Copy Link (published lane byte-unchanged), factsheet revoke with inline confirm, OwnerUnpublishedNotice corrected, ONE predicate across three affordance sites (wave 2)
-- [ ] 164-05-PLAN.md — leak-channel closure (Sentry path scrub net-new, per-route no-referrer, Plausible exclusion, recipient analytics suppression) + the ORDERED adversarial cache test, RED-demonstrated (wave 2)
+- [ ] 164-05-PLAN.md — leak-channel closure (Sentry path scrub net-new, per-route no-referrer, Plausible exclusion, recipient analytics suppression) + the ORDERED adversarial cache test, RED-demonstrated (wave 2 — MOVED UP 2026-08-27, gate condition 5)
+- [ ] 164-06-PLAN.md — N1 + N2 root closure: `BEFORE INSERT` trigger forcing `generation = 1`, bounded-increment rule on UPDATE, `SELECT … FOR UPDATE` in `revoke_strategy_share`, STEP 6 arm (i-b) rewritten so it stops pinning the race it was meant to catch, and `sanitize_user`'s Art.17 arm made provably non-abortable (wave 2 — NEW 2026-08-27, gate conditions 2+3)
+- [ ] 164-07-PLAN.md — F6: the cache guard pinned over the TRANSITIVE import graph rather than one file's bytes (wave 2 — NEW 2026-08-27, gate condition 4)
+- [ ] 164-03-PLAN.md — mint-or-reuse + atomic-revoke API routes under the audit law; byte-identical-reuse regression pin; 404-as-convergence (wave 3 — DEMOTED 2026-08-27; ⛔ its merge is the gate)
+- [ ] 164-04-PLAN.md — SHARE-04 honesty class: status-aware Copy Link (published lane byte-unchanged), factsheet revoke with inline confirm, OwnerUnpublishedNotice corrected, ONE predicate across three affordance sites (wave 3 — DEMOTED 2026-08-27, follows 164-03)
+
+**⛔ Wave restructure 2026-08-27 — 164-03's merge is a gate, not a step.** Six red teams plus a
+synthesizer established that the moment `164-03` merges, the mint route makes `strategy_shares`
+writable by owners — and **N1 becomes reachable by any owner, on their own row, with a single
+PATCH, unrecoverably without DDL, aborting that data subject's own Art.17 erasure.** That is a
+regulatory failure mode the data subject can trigger themselves with no operator remedy, and the
+synthesizer named it the single worst item in the corpus. It is harmless *only* while the table has
+zero rows, which is exactly the window that closes at 164-03.
+
+So the phase is now three waves, and the six conditions at `SYNTHESIS.md:270-287` must ALL hold at
+the moment 164-03 merges:
+
+| # | Condition | Where it lands | State at 2026-08-27 |
+|---|---|---|---|
+| 1 | Nonce in the MAC pre-image **plus** `REVOKE INSERT(nonce), UPDATE(nonce) FROM authenticated`, with a test proving neither RPC names the column | 164-02 | ✅ shipped (`a48b8bf6d`) |
+| 2 | N1 closed at the root: `BIGINT` **plus** `BEFORE INSERT` forcing `generation = 1` **plus** a bounded-increment rule; `sanitize_user`'s Art.17 arm provably non-abortable | 164-02 (BIGINT) + **164-06** | ⚠️ BIGINT only — and BIGINT is headroom, **NOT** the fix |
+| 3 | N2: `SELECT … FOR UPDATE` in `revoke_strategy_share`, **and** STEP 6 arm (i-b) rewritten so removing the racy predicate no longer fails the apply | **164-06** | ❌ open — ⛔ until the arm is rewritten the durable gate *enforces the bug* |
+| 4 | F6: cache guard pinned over the transitive graph, `page.cache-isolation.test.tsx` written and demonstrated RED first | **164-07** + 164-05 | ❌ open |
+| 5 | F1/F2/F4 shipped (Plausible exclusion, Sentry path scrub, per-route `no-referrer`) | 164-05 | ❌ open — plan exists, moved into wave 2 |
+| 6 | Every one of the above **executed against a real PostgreSQL instance**, run output in the plan — not asserted in prose | all | ❌ open — this is `PROC-01`, routed to 164.1 as a standard but binding on this phase NOW |
+
+⚠️ Wave 2 is now `164-05` + `164-06` + `164-07`; wave 3 is `164-03` + `164-04`. `164-06` and
+`164-07` are net-new and unplanned. ⛔ **`20260827130000_sanitize_user_revoke_strategy_shares.sql`
+is BLOCKED on `DRIFT-02`** (root `TODOS.md`) — it was re-based on a repo file that PROD superseded
+via a surgical in-place patch, and shipping it as written would revert a mandatory GDPR repoint,
+pointing Art.17 erasure at a VIEW. Re-base it on `pg_get_functiondef` output from PROD before it
+moves. The three residuals accepted rather than closed (`SHARE-RES-R4`, `SHARE-RES-R2g`,
+`SHARE-RES-F5`) are named in root `TODOS.md`.
 
 **Research note:** the payload-builder seam is the one un-measured integration (extracting the build half of `fetchAndBuildPayload` touches the composite arm AND the single-key basis arm — MEDIUM confidence, wider than it looks). Budget a research pass at plan time; don't discover it. Token-leak channels: Sentry `beforeSend` scrub verified against a REAL captured event, `Referrer-Policy: no-referrer` per-route, generic metadata (link-unfurl dullness accepted explicitly — a private link SHOULD be dull in a chat preview). *(Planning update 2026-08-26: the seam measurement is now done — the composite/basis arms moved to `src/lib/factsheet/` in July, so the extraction in 164-01 is a one-function verbatim move per the founder's final D-06 ruling.)*
 
@@ -480,6 +510,43 @@ re-derive them here; read the entry before planning.
 - **[PII-01]** Decide whether the `13-REVIEWS/` AI-review payload artifacts stay tracked (5
   occurrences of a personal address, public repo, no ongoing consumer). Deleting forward does not
   remove them from history — that limit is deliberate and stands. If kept, record the decision.
+
+**Carried in from Phase 164's red-team (routed 2026-08-27).** Six red teams plus a synthesizer
+found that ~13 of 17 items in the 164 corpus were **caused by the workflow, not by the domain**
+(`SYNTHESIS.md` §7). The founder adopted three of the eight proposed process changes and declined
+the fourth (a `gsd-plan-checker.md:752` change — upstream gsd-core, not ours to fork). These are
+the adopted three. They are **process standards, not features**: each one is a gate that would have
+caught defects this phase spent 39 commits and three fix rounds failing to close.
+
+- ⭐ **[PROC-01] A runnable throwaway PostgreSQL instance BEFORE authoring, and its run output in
+  the plan.** Root cause of every `[M]`-severity finding in the corpus (R1, R2a, R2b, R2b′, R3, N1,
+  N2). A 456-line migration and a 536-line SQL gate were authored, committed, declared done, and
+  reviewed by three specialists with **zero executions** — the executor's own words were "NOT RUN
+  — no local psql run was attempted", and the plan's `<automated>` block was English prose. Every
+  one of those seven defects was later found on an ad-hoc cluster that exists in no plan, no skill
+  and no CI lane. Fix: an `initdb`/docker script plus one CI lane, and a PLAN rule that a migration
+  task's `<automated>` block must be a **command**, not a sentence. ⛔ Do not conflate with
+  **SKIP-01** — that is about applying migrations to TEST; this is about executing them *anywhere*
+  before review. Both are needed; neither substitutes for the other.
+- ⭐ **[PROC-02] Reviewers must declare execution status, and UNEXECUTED blocks.** `gsd-code-reviewer`
+  is read-only **by construction**, and nothing in the loop ever said so out loud — so three clean
+  reviews of a never-executed migration read exactly like three clean reviews of a tested one. This
+  is the cheapest item in the corpus (one agent-prompt field) and it is what would have surfaced
+  PROC-01 at review time instead of at red-team time.
+- **[PROC-03] Per-arm `RED-UNDER` annotation in SQL gate files.** Every assertion arm states, inline,
+  the single mutation that makes it fail. Already applied by hand across
+  `test_strategy_shares_rls.sql`'s 101 arms during 164's fix rounds — this routes the *convention*
+  so the next gate file is born with it. Directly serves the founder rule that **a test that cannot
+  fail is worse than none**: two structurally-unfailable arms were found and deleted in 164 (a
+  post-rejection mutation probe inside a PL/pgSQL `BEGIN…EXCEPTION` implicit subtransaction, and a
+  `pg_get_functiondef` regex satisfiable by an in-body `--` comment).
+
+⚠️ **Explicitly NOT adopted** (founder, 2026-08-26): the "paths not facts" change to
+`gsd-plan-checker.md:752`, and Team 6's remedy #9 (redesign `strategy_shares` as an insert-only
+generations table with the current state as a view). #9 would close R1/R2a/R2b/R3/N2 *by
+construction* and is recorded as the better design — it was declined on cost, and because the
+per-row nonce buys ~90% of its benefit today on an empty table. If this table is ever redesigned,
+start from `SYNTHESIS.md` §6 remedy 2.
 
 Plans:
 
@@ -579,7 +646,7 @@ Plans:
 | 161. WIZERR honest errors | 0/? | Not started | - |
 | 162. HONEST visible truth | 0/? | Not started | - |
 | 163. HARDEN reliability + security | 9/9 | Complete | v0.75.0.0 |
-| 164. SHARE revocable links | 0/5 | Planned | - |
+| 164. SHARE revocable links | 0/7 | Planned | - |
 | 165. DEPS dependabot campaign | 0/? | Not started | - |
 
 ### Requirement Coverage (v1.20)
