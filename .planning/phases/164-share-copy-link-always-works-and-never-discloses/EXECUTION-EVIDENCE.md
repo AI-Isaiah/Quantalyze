@@ -87,3 +87,45 @@ the migration is the layer that runs on PROD. Booked as a candidate for 164.1 al
 Verified end-to-end from a clean `initdb` on a second port before this file was written.
 Promoting the harness to `scripts/` plus a CI lane is `PROC-01`'s implementation, routed to
 Phase 164.1 — this copy is the evidence, not the standard.
+
+---
+
+## 5. N1 RE-MEASURED AT HEAD — reproduces, and the severity is now WRONG in SYNTHESIS
+
+A dated blocker is a claim, not a fact. With the real applied schema in front of me, N1 was
+re-measured rather than taken on trust. It **reproduces**, and `BIGINT` closed nothing:
+
+```
+step 1  mint                                        generation = 1
+step 2  owner PATCHes generation = 9223372036854775807   ⛔ ACCEPTED
+        (they hold the UPDATE(generation) column grant; the trigger forbids a
+         DECREASE only — nothing bounds the increase)
+step 3  revoke_strategy_share(sid)                   ⛔ WEDGED  22003 bigint out of range
+step 4  sanitize_user(uid)                           ⛔⛔ Art.17 ERASURE ABORTED  22003
+```
+
+Step 4 is the one that matters: the GDPR arm runs the same `generation + 1`, so a data subject can
+**abort their own erasure** with one PATCH. Confirms the migration header's own warning that
+`BIGINT` is headroom, **not** the N1 fix. Gate condition 2 stays open, and 164-06 stays required.
+
+### ⭐ But the recorded severity is overstated, and the nonce is why
+
+`SYNTHESIS.md` calls N1 *"unrecoverable without DDL, or a DELETE that resurrects everything"* and
+ranks it the worst item in the corpus. The three operator remedies, measured:
+
+| Remedy (`service_role`) | Result |
+|---|---|
+| A — stamp `revoked_at` without bumping | ⛔ **BLOCKED** by trigger rule 2 (revocation-must-advance) |
+| B — rewind `generation` to a sane value | ⛔ **BLOCKED** by trigger rule 1 (monotonic) |
+| C — `DELETE` the row | ✅ **WORKS** — and it does **not** resurrect anything |
+
+C is the correction. The claim that a DELETE "resurrects everything" was true of the pre-nonce
+design and was **not re-checked after the nonce landed**. A re-created row draws a fresh
+`gen_random_uuid()` nonce, so every previously-minted token is dead rather than revived — link
+death, which is the correct outcome for an erasure anyway.
+
+**So N1's true shape at HEAD is:** a data subject can wedge their own Art. 17 erasure until an
+operator deletes one row — not *"unrecoverable without DDL, with no operator remedy."* Still a real
+defect, still blocking 164-03, still worth closing at the root in 164-06. But it is an availability
+bug with a one-statement operator remedy, not the unrecoverable regulatory failure the corpus
+records. The stricter framing survived only because nobody re-ran it after the fix that changed it.

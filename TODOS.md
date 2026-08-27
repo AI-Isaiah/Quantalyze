@@ -1221,6 +1221,23 @@ this section exists. None of these is a task. Each is a decision with a name aga
 (revoke race). Those are **open defects gating 164-03**, not residuals — see the six-condition
 merge gate at `SYNTHESIS.md:270-287` and the wave restructure in ROADMAP Phase 164.
 
+⭐ **N1 RE-MEASURED AT HEAD 2026-08-27 — reproduces, but its recorded severity is WRONG.** Run
+against the real applied schema on a throwaway PostgreSQL 16.13 (see
+`.planning/phases/164-.../EXECUTION-EVIDENCE.md` §5): an owner PATCHes `generation` to bigint max
+(⛔ accepted — they hold the `UPDATE(generation)` column grant and the trigger forbids only a
+*decrease*), `revoke_strategy_share` then wedges `22003`, and **`sanitize_user` aborts the entire
+Art. 17 erasure with the same `22003`**. `BIGINT` raised the ceiling and closed nothing, exactly as
+that migration's own header warns. 164-06 stays required.
+
+**But** `SYNTHESIS.md` calls it "unrecoverable without DDL, or a DELETE that resurrects
+everything." Measured, `service_role` remedies A (tombstone without bump) and B (rewind) are both
+correctly BLOCKED by the trigger — and remedy C (`DELETE` the row) **works and resurrects
+nothing**, because a re-created row draws a fresh nonce and every old token dies. That claim was
+true pre-nonce and was never re-checked after the nonce landed. True shape at HEAD: *a data subject
+can wedge their own erasure until an operator deletes one row* — an availability bug with a
+one-statement remedy, not an unrecoverable regulatory failure. Still blocking 164-03; no longer the
+worst item in the corpus.
+
 ### NYQ-01 — a config-enabled planning gate stopped firing and nothing noticed (booked 2026-08-26)
 
 ⭐ **Founder-ruled 2026-08-26: regenerate, don't waive.** Surfaced while closing Phase 164's
