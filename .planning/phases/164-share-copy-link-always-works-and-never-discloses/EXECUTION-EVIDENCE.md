@@ -174,9 +174,10 @@ removed the guard, and removing the predicate is what would make a double-revoke
 counter. **The arm was not enforcing the bug; the proposed fix was the bug.** Nothing about this was
 visible without running it — the reasoning chain is plausible end to end and simply false.
 
-**Recommendation:** close gate condition 3 as *not a defect*, on this evidence, and drop N2 from
-`164-06`'s scope — leaving that plan as N1-only. ⚠️ Founder call, not mine to take unilaterally:
-the corpus records N2 as `[M]`-severity, and this contradicts it.
+**DECIDED — founder ruling 2026-08-27: N2 dropped, `164-06` is N1-only.** Gate condition 3 is
+closed as *not a defect* on this evidence, overriding the corpus's `[M]` severity. ⛔ Re-opening it
+requires new measured evidence, not re-reasoning: `revoked_at IS NULL` is a guard and STEP 6 arm
+(i-b) protects it, so "adding `FOR UPDATE`" is a regression, not a hardening.
 
 **Limits.** READ COMMITTED only (PostgREST's default; the RPCs set no isolation level). Two
 sessions, not N. The three interleavings above, not an exhaustive schedule search.
