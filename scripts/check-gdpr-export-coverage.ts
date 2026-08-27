@@ -74,13 +74,16 @@
  * `system`, `cross-party` or `pre-auth` fails there, and `scoped` entries
  * must additionally really appear in USER_EXPORT_TABLES.
  *
- * The correct remedy when this hook names a table is the four-step order of
- * operations written out at the ⛔ PENDING block in
- * `src/lib/gdpr-export-manifest.ts`: (1) apply the migration, (2) regenerate
- * `src/lib/database.types.ts`, (3) add the USER_EXPORT_TABLES entry, (4) add
- * the matching SANITIZE_PARITY_ALLOWLIST key here — 3 and 4 together. Until
- * that lands, this hook exiting 1 IS THE CORRECT STATE; the redness is the
- * reminder. Do not silence it.
+ * The correct remedy when this hook names a table is the order of operations
+ * written out at the ⛔ PENDING block in `src/lib/gdpr-export-manifest.ts`:
+ * (1) apply the migration, (2) regenerate `src/lib/database.types.ts`, (3) add
+ * the USER_EXPORT_TABLES entry. A SANITIZE_PARITY_ALLOWLIST key is NOT a
+ * fourth step — it is needed only when the table has no Art. 17 policy at all,
+ * and a sanitize_user migration naming the table already IS that policy. (This
+ * used to be stated as an unconditional step 4; it went false for
+ * `strategy_shares` the moment migration 20260827130000 landed.) Until the
+ * manifest entry lands, this hook exiting 1 IS THE CORRECT STATE; the redness
+ * is the reminder. Do not silence it.
  *
  * Invocation
  * ----------
@@ -457,21 +460,22 @@ export const SANITIZE_PARITY_ALLOWLIST: Record<
     reason:
       "Allocator's own scenario share-link state (migration 20260622120000). ON DELETE CASCADE from profiles (and from scenarios) erases all share rows when the profile is sanitized/deleted. No explicit sanitize_user matrix row needed; mirrors the scenarios CASCADE-erasure allowlist.",
   },
-  // ⛔ PENDING — `strategy_shares` (Phase 164, migration 20260827120000) needs an
-  // entry here, and it is deliberately NOT added yet. It cannot be: this
-  // allowlist's own staleness check (below) rejects a key with no matching
-  // USER_EXPORT_TABLES entry, and that manifest entry is blocked on the
-  // post-apply regeneration of database.types.ts. The two must land together.
-  // The rationale, when it lands: the owner's own factsheet share-link state
-  // (strategy_id, generation, revoked_at — NO token, raw or hashed), user-owned
-  // via `created_by NOT NULL REFERENCES profiles ON DELETE CASCADE` (and
-  // `strategy_id ... REFERENCES strategies ON DELETE CASCADE`). Both CASCADE FKs
-  // erase every share row when the profile is deleted during sanitize, so no
-  // explicit sanitize_user matrix row is required — and the migration's
-  // client-side `REVOKE DELETE` does not impede that, because referential
-  // actions execute internally without consulting the caller's privileges.
-  // Mirrors the scenario_shares CASCADE-erasure pattern above. See the PENDING
-  // block in src/lib/gdpr-export-manifest.ts for the full order of operations.
+  // ⛔ `strategy_shares` (Phase 164) does NOT belong here, and this is the note
+  // that stops someone adding it. An earlier revision of this comment said the
+  // table "needs an entry here" once its manifest entry lands. That stopped
+  // being true when the companion migration
+  // 20260827130000_sanitize_user_revoke_strategy_shares.sql landed: it gives
+  // the table a REAL Art. 17 policy (a live `UPDATE strategy_shares SET
+  // revoked_at = now(), generation = generation + 1 WHERE created_by =
+  // p_user_id AND revoked_at IS NULL` arm, plus its `-- strategy_shares |
+  // ANONYMIZE` matrix row), and its own header says an allowlist entry is
+  // therefore unnecessary (20260827130000:81-84). MEASURED 2026-08-27:
+  // strategy_shares covered = true, in SANITIZE_PARITY_ALLOWLIST = false.
+  //
+  // An allowlist key only asserts "this table needs no erasure policy". Adding
+  // one to a table that HAS a policy is not a tightening — it is a second,
+  // weaker claim sitting next to the real one, and it would go stale silently
+  // if the real arm were ever removed.
 };
 
 /**
@@ -505,6 +509,97 @@ function scanSanitizeUserCoverage(): Set<string> {
 }
 
 /**
+ * Blank out everything in a SQL file that is PROSE rather than executable
+ * statement text: `--` line comments, slash-star block comments, and
+ * single-quoted string literals (`''` is the SQL escape for a literal quote,
+ * and doubling keeps the alternating pairing in sync). Block comments nest.
+ *
+ * ⚠️ WHY THIS EXISTS (Phase 164 re-review, MEASURED). The statement scan below
+ * gates an Art. 15/17 parity property, and it used to run over RAW file text.
+ * Prose that merely QUOTES a statement therefore satisfied it. Reviewer's
+ * neuter: delete the live `UPDATE strategy_shares ...` arm (153 bytes) from
+ * migration 20260827130000 and the hook still reported the table covered,
+ * because a header comment (`--   UPDATE strategy_shares`) and two RAISE
+ * EXCEPTION messages quoting the statement verbatim inside string literals fed
+ * the same regex. A gate an engineer can satisfy by describing the work is not
+ * a gate. Note the asymmetry this closes: every verification DO block in this
+ * phase's migrations already strips comments before matching — the TypeScript
+ * hook that gates the same property did not.
+ *
+ * ⚠️ ORDER AND SCOPE MATTER, in both directions:
+ *   - Comments are consumed in the SAME left-to-right pass as literals, not by
+ *     a prior line-based regex sweep. A standalone `--` strip would truncate
+ *     any line where a string literal legitimately contains `--`, silently
+ *     deleting real statements after it on that line.
+ *   - Conversely, an apostrophe inside a comment (`-- don't`) would desync a
+ *     standalone literal sweep. One pass, one state machine, neither hazard.
+ *   - Dollar-quoted regions (`$$ ... $$`) are deliberately NOT treated as
+ *     opaque strings: the sanitize_user function BODY is dollar-quoted, and
+ *     that body is exactly where the real statements live. Dollar quoting is
+ *     transparent here; only `'...'` is blanked.
+ *
+ * Newlines are preserved so line numbers in any downstream diagnostics still
+ * line up with the source file.
+ *
+ * MEASURED on the live sanitize_user corpus: 48 names before, 39 after. All 9
+ * dropped names (`in`, `raises`, `sanitize_user`, `that`, `this`, `to`,
+ * `touches`, `triggers`, `with`) are prose words following the word "UPDATE"
+ * or "DELETE FROM" in a sentence — no migration declares a CREATE TABLE for
+ * any of them, and no real table lost coverage.
+ */
+export function stripSqlProse(sql: string): string {
+  let out = "";
+  let i = 0;
+  const n = sql.length;
+  while (i < n) {
+    if (sql[i] === "-" && sql[i + 1] === "-") {
+      while (i < n && sql[i] !== "\n") i++;
+      continue;
+    }
+    if (sql[i] === "/" && sql[i + 1] === "*") {
+      let depth = 1;
+      i += 2;
+      while (i < n && depth > 0) {
+        if (sql[i] === "/" && sql[i + 1] === "*") {
+          depth++;
+          i += 2;
+          continue;
+        }
+        if (sql[i] === "*" && sql[i + 1] === "/") {
+          depth--;
+          i += 2;
+          continue;
+        }
+        if (sql[i] === "\n") out += "\n";
+        i++;
+      }
+      continue;
+    }
+    if (sql[i] === "'") {
+      i++;
+      while (i < n) {
+        if (sql[i] === "'" && sql[i + 1] === "'") {
+          i += 2;
+          continue;
+        }
+        if (sql[i] === "'") {
+          i++;
+          break;
+        }
+        if (sql[i] === "\n") out += "\n";
+        i++;
+      }
+      // A blank stands in for the literal so adjacent tokens do not fuse.
+      out += " ";
+      continue;
+    }
+    out += sql[i];
+    i++;
+  }
+  return out;
+}
+
+/**
  * Pure helper for tests: extract sanitize-coverage names from a
  * sanitize_user migration's SQL.
  */
@@ -513,15 +608,21 @@ export function extractSanitizeCoverageFromContent(
   covered: Set<string> = new Set(),
 ): Set<string> {
   // Matrix comment-block lines: `-- <table> | <STRATEGY> | ...`
+  // ⚠️ This scan runs on the RAW text on purpose — the matrix IS a comment
+  // block, and a matrix row is a deliberate, documented declaration of the
+  // table's erasure strategy. Only the STATEMENT scan below is prose-blind.
   const matrixLineRe =
     /^--\s+([a-z_]+)\s+\|\s+(ANONYMIZE|PURGE|PRESERVE|CASCADE|SKIPPED)\b/gim;
   let m: RegExpExecArray | null;
   while ((m = matrixLineRe.exec(content)) !== null) {
     covered.add(m[1]);
   }
-  // SQL body: any DELETE FROM <table> or UPDATE <table>.
+  // SQL body: any DELETE FROM <table> or UPDATE <table>. Comments and string
+  // literals are blanked first, so only EXECUTABLE statements count — see
+  // stripSqlProse() for the neuter that proved this was necessary.
+  const executable = stripSqlProse(content);
   const stmtRe = /\b(?:DELETE\s+FROM|UPDATE)\s+(?:public\.)?([a-z_]+)\b/gi;
-  while ((m = stmtRe.exec(content)) !== null) {
+  while ((m = stmtRe.exec(executable)) !== null) {
     const table = m[1];
     // Drop auth.* (not in the public-schema manifest scope).
     if (table === "users" || table === "sessions" || table === "refresh_tokens") {
@@ -948,18 +1049,24 @@ export function runCoverageCheck(opts: {
     }
     errorLog(
       "\nFIX — the table is user-owned, so it BELONGS in the export. Follow the " +
-        "four-step order of operations recorded at the PENDING block in " +
+        "order of operations recorded at the PENDING block in " +
         "src/lib/gdpr-export-manifest.ts:\n" +
         "  1. apply the declaring migration (the entry cannot compile before it — " +
         "`table` is typed against the GENERATED src/lib/database.types.ts);\n" +
         "  2. regenerate src/lib/database.types.ts from the applied schema;\n" +
         '  3. add `{ kind: "direct", table: "<name>", user_column: "<col>" }` to ' +
         "USER_EXPORT_TABLES in src/lib/gdpr-export-manifest.ts (or `indirect` / " +
-        "`projected` as appropriate), in alphabetical order;\n" +
-        "  4. add the matching key to SANITIZE_PARITY_ALLOWLIST in this script, or a " +
-        "row to the sanitize_user matrix. Steps 3 and 4 must land TOGETHER — the " +
-        "allowlist rejects a key with no manifest entry, and a manifest entry with " +
-        "no sanitize policy fails the Art. 15/17 parity check.\n" +
+        "`projected` as appropriate), in alphabetical order.\n" +
+        "\nA manifest entry ALSO needs an Art. 17 erasure policy or the parity check " +
+        "fails — but check whether the table already has one before adding anything. " +
+        "A sanitize_user migration that names the table (a `-- <table> | STRATEGY` " +
+        "matrix row, or a real DELETE/UPDATE arm) IS the policy, and is strictly " +
+        "better than a SANITIZE_PARITY_ALLOWLIST key, which only asserts that no " +
+        "policy is needed. Add the allowlist key ONLY when neither exists — and then " +
+        "together with step 3, since the allowlist rejects a key with no manifest " +
+        "entry. For strategy_shares (Phase 164) the policy already exists, in " +
+        "20260827130000_sanitize_user_revoke_strategy_shares.sql: no allowlist key " +
+        "is needed.\n" +
         "\n⛔ DO NOT add this table to EXCLUDED_TABLES. That arm means 'these rows " +
         "are not any single user's' — it is not a way to make this failure go away, " +
         "and it is not cheaper-but-equivalent. Silencing a user-owned table there " +

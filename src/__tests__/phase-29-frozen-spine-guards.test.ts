@@ -118,7 +118,11 @@ function resolveBaselineRef(): string {
  *   - `git ls-files --others --exclude-standard` — untracked, not-ignored
  *     files (a new migration / RLS-sql edit may still be uncommitted; src &
  *     supabase files are tracked but a brand-new one shows up here first).
- * `.planning/` is gitignored, so it never pollutes the set.
+ * ⚠️ `.planning/` is TRACKED in this repo (.gitignore:53-63 — untracked
+ * planning silently breaks the parallel-executor worktrees), so it DOES land
+ * in the delta. This comment used to claim the opposite. It is harmless only
+ * because every caller filters on a `supabase/` or `src/` prefix first; do not
+ * remove those prefix filters on the strength of the old claim.
  */
 function changedFiles(base: string): string[] {
   const committed = git(["diff", "--name-only", base, "HEAD"])
@@ -201,21 +205,44 @@ function stripSqlComments(sql: string): string {
 /**
  * Does this changed migration actually TOUCH the frozen scenario spine?
  *
- * Reads the file. A path in the delta that cannot be read is a DELETED
- * migration — there is no content left to scan, and deleting a migration is at
- * least as serious as editing one, so it falls back to the filename rather than
- * being waved through. FAIL LOUD (Rule 12): an unreadable path is never treated
- * as clean.
+ * Reads the working-tree file. A path in the delta that cannot be read is a
+ * DELETED migration, and deleting a migration is at least as serious as
+ * editing one.
+ *
+ * ⚠️ THE FALLBACK USED TO CONTRADICT ITS OWN DOCBLOCK (finding L1, 2026-08-27).
+ * It returned `/scenario/i.test(file)` while claiming "FAIL LOUD (Rule 12): an
+ * unreadable path is never treated as clean". Those are incompatible: a deleted
+ * migration that CREATED `scenario_shares` but whose filename lacks the
+ * substring "scenario" returned false and was waved through silently — the
+ * exact rename-dodge the header above calls dishonest, arriving through the
+ * back door.
+ *
+ * Two honest answers were available and the weaker one is not used: the deleted
+ * file's content still exists at the baseline ref, so the REAL question ("did
+ * it touch the spine?") is answerable rather than guessable. Read it out of git
+ * and apply the same content rule. Only if git cannot produce the blob either
+ * — no content anywhere, nothing left to reason about — does this return TRUE
+ * unconditionally. Suspect-by-default is what the docblock always promised;
+ * a false positive costs one human glance at a deleted migration, a false
+ * negative ships an unguarded spine change.
  */
 function touchesScenarioSpine(file: string): boolean {
-  let sql: string;
   try {
-    sql = readFileSync(path.resolve(CWD, file), "utf8");
+    return SPINE_CONTENT_RE.test(
+      stripSqlComments(readFileSync(path.resolve(CWD, file), "utf8")),
+    );
   } catch {
-    // Deleted (or otherwise unreadable) — fall back to the filename signal.
-    return /scenario/i.test(file);
+    // Not in the working tree — deleted. Recover the content from the baseline.
   }
-  return SPINE_CONTENT_RE.test(stripSqlComments(sql));
+  try {
+    return SPINE_CONTENT_RE.test(
+      stripSqlComments(git(["show", `${BASE}:${file}`])),
+    );
+  } catch {
+    // No readable content in the working tree OR at the baseline. Nothing can
+    // be established, so the path is SUSPECT, never clean.
+    return true;
+  }
 }
 
 const RLS_SQL_SCENARIOS = "supabase/tests/test_scenarios_rls.sql";
@@ -228,6 +255,66 @@ describe("Phase 29 frozen-spine exit-gate guards", () => {
     // a future refactor that swallows the error is caught.
     expect(BASE, "phase baseline ref must resolve to a non-empty sha").toBeTruthy();
     expect(typeof BASE).toBe("string");
+  });
+
+  describe("touchesScenarioSpine: an unreadable path is SUSPECT, never clean", () => {
+    // Finding L1 (2026-08-27). The deleted-file fallback returned
+    // `/scenario/i.test(file)` under a docblock promising "an unreadable path
+    // is never treated as clean" — so a deleted migration that had CREATED
+    // `scenario_shares` under a filename without the substring "scenario" was
+    // waved straight through. The gate reads DDL precisely so a filename cannot
+    // decide the verdict; the fallback handed the decision back to the filename.
+
+    it("reads spine content out of the working tree when the file is present", () => {
+      // Limb 1, and the non-vacuity anchor: if this stops returning true the
+      // two cases below prove nothing, because everything would read as
+      // suspect for the wrong reason.
+      expect(
+        touchesScenarioSpine(
+          "supabase/migrations/20260622120000_scenario_shares_and_read_rpc.sql",
+        ),
+        "the real scenario_shares migration is no longer detected as spine-" +
+          "touching — SPINE_CONTENT_RE or the file has moved",
+      ).toBe(true);
+      expect(
+        touchesScenarioSpine(
+          "supabase/migrations/20260827120000_strategy_shares_generation_model.sql",
+        ),
+        "Phase 164's strategy_shares migration false-positived — it touches no " +
+          "locked object and the word-boundary narrowing exists to keep it out",
+      ).toBe(false);
+    });
+
+    it("a path readable NOWHERE is treated as suspect, whatever its filename", () => {
+      // Limb 3, and the L1 pin. This filename deliberately does NOT contain
+      // "scenario": under the old fallback it returned FALSE and the deletion
+      // shipped silently. A verdict that cannot be established must not be
+      // established as clean.
+      expect(
+        touchesScenarioSpine(
+          "supabase/migrations/20990101000000_no_such_file_anywhere.sql",
+        ),
+        "an unreadable path was reported as NOT touching the spine. Nothing " +
+          "can be read at the working tree or the baseline, so nothing is " +
+          "known — and the docblock promises suspect-by-default (Rule 12).",
+      ).toBe(true);
+    });
+
+    it("the baseline-recovery limb it falls back to can actually read a deleted file's content", () => {
+      // Limb 2. It cannot be triggered through touchesScenarioSpine() today
+      // (this branch deletes no migration — `git diff --diff-filter=D` is
+      // empty), so what is pinned is the mechanism the limb depends on: that a
+      // migration's content is recoverable from BASE and yields the same
+      // verdict as reading it from disk. If `git show <base>:<path>` ever stops
+      // working, limb 2 silently degrades into limb 3 and every deletion reads
+      // as suspect — noisy rather than unsafe, but worth knowing.
+      const recovered = git([
+        "show",
+        `${BASE}:supabase/migrations/20260622120000_scenario_shares_and_read_rpc.sql`,
+      ]);
+      expect(recovered.length).toBeGreaterThan(0);
+      expect(SPINE_CONTENT_RE.test(stripSqlComments(recovered))).toBe(true);
+    });
   });
 
   it("exit gate (no-schema-change): no new scenario-spine migration shipped this phase", () => {
