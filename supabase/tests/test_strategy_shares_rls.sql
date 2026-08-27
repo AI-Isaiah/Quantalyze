@@ -21,24 +21,58 @@
 -- gate from going dark. Sequence (the 164-02 blocking checkpoint owns it):
 --   1. three reviewers over the migration — migration-reviewer,
 --      rls-policy-auditor, silent-failure-hunter;
---   2. hand-apply 20260827120000 to the TEST project;
+--   2. hand-apply BOTH migrations to the TEST project, IN ORDER:
+--        20260827120000_strategy_shares_generation_model.sql          (table+RPCs)
+--        20260827130000_sanitize_user_revoke_strategy_shares.sql      (GDPR arm)
+--      ⛔ The second references the table the first creates; applying it alone
+--      fails, and applying only the first leaves the SANITIZE block below RED —
+--      correctly, because B1 would still be open.
 --   3. this file goes green in `sql-tests`;
 --   4. merge to main — at which point the Supabase Migrate workflow applies the
---      same migration to PRODUCTION automatically.
+--      same migrations to PRODUCTION automatically.
+--
+-- ⚠️ ANTI-VACUITY DEMONSTRATIONS ARE OWED AT STEP 2, NOT BEFORE IT. The
+-- neuter -> observe-RED -> restore ritual this repo requires cannot run against
+-- a database where the objects do not exist, and nothing applies migrations to
+-- TEST before the hand-apply. The arms below were instead demonstrated against
+-- a THROWAWAY local PostgreSQL 16 replica of this schema (results recorded in
+-- the fix commit message); re-run the same neuters against TEST once step 2
+-- lands. Arms whose neuter must be re-observed there: TENANT 3, TENANT 5,
+-- ANON 1b, SERVICE-ROLE 2, SANITIZE 1, SHAPE 3.
 --
 -- WHAT THIS FILE ASSERTS (content-by-field; a 200 / a row count proves nothing)
 -- ---------------------------------------------------------------------------
 --   * SHAPE  — the column set is EXACTLY the six DDL columns, so no
 --     token/token_hash/secret column has appeared at rest (D-02, T-164-07);
---     and both RPCs are SECURITY INVOKER with no PUBLIC EXECUTE.
+--     both RPCs are SECURITY INVOKER with no PUBLIC EXECUTE; `authenticated`
+--     holds EXACTLY {INSERT, SELECT, UPDATE} (so DELETE **and TRUNCATE**, which
+--     is exempt from RLS, are both closed); and both RPC bodies still carry the
+--     `auth.uid() IS NULL` fail-loud plus revoke's own `created_by = auth.uid()`
+--     predicate.
 --   * ANON   — blocked at BOTH layers: the grant layer (42501 on select and on
 --     RPC execute) AND, independently, the policy layer (0 rows even when
 --     SELECT is temporarily granted inside this rolled-back transaction).
+--   * SERVICE-ROLE — blocked at BOTH layers too, and this one matters because
+--     service_role is BYPASSRLS and the recipient lane already reads this table
+--     through `createAdminClient()`: no EXECUTE grant (layer 1), AND the body
+--     raises `insufficient_privilege` even when EXECUTE is temporarily granted
+--     (layer 2). Without layer 2 a single future `GRANT EXECUTE ... TO
+--     service_role` would hand a BYPASSRLS caller the whole table.
 --   * TENANT — the CR-01 owner-coherence WITH CHECK clause rejects an
 --     authenticated user minting a share for ANOTHER tenant's strategy, via
---     the RPC and via a raw table INSERT; and a forged `created_by` is
---     rejected. A cross-tenant read returns 0 rows and a cross-tenant revoke
---     affects 0 rows without disturbing the victim's counter.
+--     the RPC and via a raw table INSERT; a forged `created_by` is rejected on
+--     a strategy the caller DOES own (so only that half of WITH CHECK can do
+--     the rejecting); and the `ON CONFLICT DO UPDATE` path is exercised
+--     separately against a tenant's EXISTING row, because that path is gated by
+--     the policy's USING clause rather than its WITH CHECK. A cross-tenant read
+--     returns 0 rows and a cross-tenant revoke affects 0 rows without
+--     disturbing the victim's counter.
+--   * SANITIZE — a GDPR Art. 17 erasure REVOKES every live share row the
+--     subject created (revoked_at stamped, generation advanced by exactly 1),
+--     retains the row rather than deleting it, and leaves other tenants' rows
+--     untouched. sanitize_user ANONYMIZES rather than deletes, so NEITHER
+--     ON DELETE CASCADE FK fires and this arm is the only thing that kills the
+--     subject's links (companion migration 20260827130000).
 --   * REVOKE — one call stamps revoked_at AND advances generation by EXACTLY 1;
 --     a second call affects 0 rows and does NOT inflate the counter further
 --     (convergence, SHARE-03).
@@ -71,9 +105,20 @@
 -- Hygiene: all fixture work runs inside an explicit transaction that ends in
 -- ROLLBACK, so the shared test DB is never polluted. The exception-trapped arms
 -- use nested BEGIN ... EXCEPTION (an implicit savepoint) so a deliberately
--- failing statement does not abort the outer block. The one GRANT this file
--- issues (layer-2 anon proof) is both explicitly reverted AND covered by the
--- ROLLBACK.
+-- failing statement does not abort the outer block. The GRANTs this file issues
+-- (the layer-2 anon proof and the layer-2 service_role proof) are each
+-- explicitly reverted, re-checked against the catalog afterwards, AND covered
+-- by the ROLLBACK.
+--
+-- ⚠️ ORDERING IS LOAD-BEARING in three places, each marked at its site:
+--   1. `strat_a2` must never be shared — ANON 1b needs a strategy_id with no
+--      share row so UNIQUE(strategy_id) cannot pre-empt the privilege check.
+--   2. TENANT 5 seeds tenant B's share row and must stay AFTER TENANT 1-4;
+--      seeding it earlier pushes TENANT 1 onto the ON CONFLICT path and makes
+--      it stop proving the CR-01 EXISTS clause.
+--   3. SANITIZE 1 runs LAST — it anonymizes tenant A's profile and strategies
+--      and bans the auth user, so every arm that needs A intact must precede
+--      it.
 --
 -- Usage:
 --   psql "$TEST_SUPABASE_DB_URL" -v ON_ERROR_STOP=1 -f \
@@ -97,6 +142,7 @@ DECLARE
   uid_a        UUID := gen_random_uuid();
   uid_b        UUID := gen_random_uuid();
   strat_a      UUID;
+  strat_a2     UUID;
   strat_b      UUID;
   gen_mint     INTEGER;
   gen_reuse    INTEGER;
@@ -115,6 +161,15 @@ DECLARE
   now_revoked  TIMESTAMPTZ;
   v_cols       TEXT;
   v_secdef     BOOLEAN;
+  v_privs      TEXT[];
+  v_create_s   TEXT;
+  v_revoke_s   TEXT;
+  gen_b        INTEGER;
+  gen_b_after  INTEGER;
+  b_by         UUID;
+  b_revoked    TIMESTAMPTZ;
+  gen_pre_san  INTEGER;
+  san_ok       BOOLEAN;
   i            INTEGER;
 BEGIN
   -- ----- SEED (seeding/service-role context — bypasses RLS) ---------------
@@ -131,6 +186,15 @@ BEGIN
   VALUES (uid_a, 'strategy-shares A strategy', 'private', '{}', '{}', '{}', ARRAY['binance'])
   RETURNING id INTO strat_a;
 
+  -- A SECOND strategy owned by A that is NEVER shared. Required by ANON 1b: an
+  -- anon INSERT probe must target a strategy_id with NO existing share row, or
+  -- the UNIQUE(strategy_id) constraint can raise 23505 BEFORE the privilege
+  -- check is ever reached and the arm passes on the wrong error. ⛔ Nothing
+  -- below may mint a share for this strategy.
+  INSERT INTO strategies (user_id, name, status, strategy_types, subtypes, markets, supported_exchanges)
+  VALUES (uid_a, 'strategy-shares A never-shared strategy', 'private', '{}', '{}', '{}', ARRAY['binance'])
+  RETURNING id INTO strat_a2;
+
   INSERT INTO auth.users (id, instance_id, email, created_at, updated_at)
   VALUES (uid_b, '00000000-0000-0000-0000-000000000000',
           'test-strategy-shares-owner-b@quantalyze.test', now(), now());
@@ -141,7 +205,8 @@ BEGIN
   VALUES (uid_b, 'strategy-shares B strategy', 'private', '{}', '{}', '{}', ARRAY['binance'])
   RETURNING id INTO strat_b;
 
-  RAISE NOTICE 'Seed OK: A uid=% strat=%, B uid=% strat=%', uid_a, strat_a, uid_b, strat_b;
+  RAISE NOTICE 'Seed OK: A uid=% strat=% (never-shared %), B uid=% strat=%',
+    uid_a, strat_a, strat_a2, uid_b, strat_b;
 
   -- ======================================================================
   -- SHAPE 1: NO TOKEN AT REST (D-02 / T-164-07)
@@ -152,9 +217,18 @@ BEGIN
   -- disclosure surface D-02 rejected, and nothing else in the stack would
   -- notice. An `expected >= 6 columns` style assertion would NOT catch that;
   -- only an exact set does.
-  SELECT string_agg(column_name, ',' ORDER BY column_name) INTO v_cols
-    FROM information_schema.columns
-   WHERE table_schema = 'public' AND table_name = 'strategy_shares';
+  --
+  -- Read from pg_attribute, NOT information_schema.columns: that view is
+  -- PRIVILEGE-FILTERED (it lists only columns the current role holds some
+  -- privilege on), so under a less-privileged session it silently returns a
+  -- SHORT list and this arm would report "a column vanished" when the truth is
+  -- "you cannot see it". pg_attribute is the authoritative catalog and is not
+  -- filtered — the assertion then measures the SCHEMA, not the session.
+  SELECT string_agg(a.attname, ',' ORDER BY a.attname) INTO v_cols
+    FROM pg_attribute a
+   WHERE a.attrelid = 'public.strategy_shares'::regclass
+     AND a.attnum > 0
+     AND NOT a.attisdropped;
   IF v_cols IS DISTINCT FROM 'created_at,created_by,generation,id,revoked_at,strategy_id' THEN
     RAISE EXCEPTION 'TEST FAILED (SHAPE 1): strategy_shares columns are "%", expected exactly "created_at,created_by,generation,id,revoked_at,strategy_id". ⛔ D-02: this table must NEVER hold a token, raw or hashed — a leak must yield only a uuid, an int and timestamps.', v_cols;
   END IF;
@@ -188,6 +262,72 @@ BEGIN
   -- caught here, not only at the migration's own apply-time self-verify.
   PERFORM public._assert_no_public_execute('public.create_strategy_share(uuid)');
   PERFORM public._assert_no_public_execute('public.revoke_strategy_share(uuid)');
+
+  -- ======================================================================
+  -- SHAPE 3: `authenticated` holds EXACTLY {INSERT, SELECT, UPDATE}
+  -- ======================================================================
+  -- ⛔ The posture must be POSITIVE-ONLY. Revoking DELETE by name (the original
+  -- migration's approach) leaves the rest of Supabase's inherited GRANT ALL
+  -- standing — including TRUNCATE, which is **EXEMPT FROM RLS**. One
+  -- `TRUNCATE strategy_shares` from any authenticated session would discard
+  -- EVERY tenant's counter at once, and every revoked link in the system would
+  -- come back to life at generation 1. No policy on this table can stop a
+  -- TRUNCATE, so only the absent grant can.
+  --
+  -- Asserting the EXACT set (rather than "DELETE is absent") is what makes the
+  -- arm complete: it catches TRUNCATE, REFERENCES and TRIGGER, and it catches
+  -- the next privilege Postgres adds, none of which an enumeration of
+  -- forbidden names ever would.
+  --
+  -- Read via aclexplode(pg_class.relacl), NOT information_schema.role_table_grants
+  -- (used at ANON 2b below for a different question): that view is
+  -- privilege-filtered and can under-report, which for an EXACT-SET assertion
+  -- means a false GREEN direction is impossible but a confusing false RED is —
+  -- and relacl removes the ambiguity entirely.
+  SELECT array_agg(DISTINCT acl.privilege_type ORDER BY acl.privilege_type)
+    INTO v_privs
+    FROM pg_class c
+    CROSS JOIN LATERAL aclexplode(c.relacl) AS acl
+    JOIN pg_roles r ON r.oid = acl.grantee
+   WHERE c.oid = 'public.strategy_shares'::regclass
+     AND r.rolname = 'authenticated';
+  IF v_privs IS DISTINCT FROM ARRAY['INSERT', 'SELECT', 'UPDATE']::TEXT[] THEN
+    RAISE EXCEPTION 'TEST FAILED (SHAPE 3): `authenticated` holds privilege set % on strategy_shares, expected exactly {INSERT,SELECT,UPDATE}. DELETE lets one tenant discard their counter and resurrect their own revoked tokens; TRUNCATE — EXEMPT FROM RLS — does it for EVERY tenant at once. Migration 20260827120000 STEP 2 must REVOKE ALL then GRANT the positive set.', COALESCE(v_privs::TEXT, '(none)');
+  END IF;
+
+  -- ======================================================================
+  -- SHAPE 4: both RPCs refuse an unauthenticated caller, and revoke carries
+  --          its own ownership predicate
+  -- ======================================================================
+  -- These two properties are the ONLY thing standing between a BYPASSRLS role
+  -- and this table, and neither is reachable behaviourally while the other
+  -- holds — so they are pinned STRUCTURALLY here and BEHAVIOURALLY in the
+  -- SERVICE-ROLE block below. `revoke_strategy_share` without
+  -- `created_by = auth.uid()` is an unauthenticated cross-tenant kill switch
+  -- that returns 1 and reads as success.
+  --
+  -- ⛔ Probe the COMMENT-STRIPPED body. pg_get_functiondef returns in-body
+  -- comments verbatim, and both bodies discuss these guards at length in prose
+  -- — an unstripped regex would be satisfied by the COMMENT ALONE and would
+  -- stay green with the statement deleted.
+  SELECT regexp_replace(pg_get_functiondef(p.oid), '--[^\n]*', '', 'g') INTO v_create_s
+    FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+   WHERE n.nspname = 'public' AND p.proname = 'create_strategy_share'
+     AND pg_get_function_identity_arguments(p.oid) = 'p_strategy_id uuid';
+  SELECT regexp_replace(pg_get_functiondef(p.oid), '--[^\n]*', '', 'g') INTO v_revoke_s
+    FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+   WHERE n.nspname = 'public' AND p.proname = 'revoke_strategy_share'
+     AND pg_get_function_identity_arguments(p.oid) = 'p_strategy_id uuid';
+  IF v_create_s IS NULL OR v_revoke_s IS NULL THEN
+    RAISE EXCEPTION 'TEST FAILED (SHAPE 4a): a share RPC body could not be read (create: %, revoke: %) — the two regex arms below would be VACUOUSLY true on NULL', (v_create_s IS NOT NULL), (v_revoke_s IS NOT NULL);
+  END IF;
+  IF v_create_s !~* 'auth\.uid\s*\(\s*\)\s+IS\s+NULL'
+     OR v_revoke_s !~* 'auth\.uid\s*\(\s*\)\s+IS\s+NULL' THEN
+    RAISE EXCEPTION 'TEST FAILED (SHAPE 4b): a strategy-share RPC lost its `auth.uid() IS NULL` fail-loud guard. RLS does not apply to a BYPASSRLS role, and this feature''s recipient lane already reads this table through createAdminClient() (service_role) — so for that caller this guard is the FIRST wall, not a redundant one. MEASURED without it: revoke revokes ANOTHER TENANT''S live share and returns 1; create degrades to an opaque 23502 on created_by, whose NOT NULL is the only (incidental) thing stopping an ON CONFLICT reactivation of someone else''s revoked share.';
+  END IF;
+  IF v_revoke_s !~* 'created_by\s*=\s*auth\.uid\s*\(\s*\)' THEN
+    RAISE EXCEPTION 'TEST FAILED (SHAPE 4c): revoke_strategy_share lost the `created_by = auth.uid()` predicate on its UPDATE — for any BYPASSRLS caller the statement would revoke ANY tenant''s share and report success';
+  END IF;
 
   -- ======================================================================
   -- OWNER 1: positive control — the owner CAN mint, and the first mint is gen 1
@@ -282,15 +422,33 @@ BEGIN
   -- ======================================================================
   -- TENANT 3: forged created_by is rejected
   -- ======================================================================
+  -- ⛔ THE STRATEGY ID MUST BE **A's**, NOT B's. This arm previously inserted
+  -- (strat_b, uid_b), which BOTH halves of WITH CHECK reject — the EXISTS half
+  -- because A does not own strat_b, and the created_by half because uid_b is
+  -- not auth.uid(). It therefore stayed GREEN with the `created_by = auth.uid()`
+  -- half — the very clause its failure message names — DELETED. Using strat_a
+  -- (which A DOES own) satisfies the EXISTS half, so only the created_by half
+  -- can do the rejecting and the arm finally measures what it claims.
+  --
+  -- The `row-level security` message assertion is what keeps it honest even
+  -- though strat_a already HAS a share row: with the created_by half deleted
+  -- the INSERT would get as far as the UNIQUE(strategy_id) index and raise
+  -- 23505, and a bare `raised := TRUE` would swallow that as a pass. Postgres
+  -- evaluates RLS WITH CHECK (ExecWithCheckOptions) BEFORE index insertion, so
+  -- while the clause is present the error is RLS and this arm is exact.
   raised := FALSE;
   BEGIN
-    INSERT INTO strategy_shares (strategy_id, created_by) VALUES (strat_b, uid_b);
+    INSERT INTO strategy_shares (strategy_id, created_by) VALUES (strat_a, uid_b);
   EXCEPTION WHEN OTHERS THEN
     raised := TRUE; err_msg := SQLERRM;
   END;
   IF NOT raised THEN
     RESET ROLE;
-    RAISE EXCEPTION 'TEST FAILED (TENANT 3): tenant A wrote a share row with created_by = tenant B — the `created_by = auth.uid()` half of WITH CHECK is missing';
+    RAISE EXCEPTION 'TEST FAILED (TENANT 3a): tenant A wrote a share row with created_by = tenant B — the `created_by = auth.uid()` half of WITH CHECK is missing';
+  END IF;
+  IF err_msg NOT LIKE '%row-level security%' THEN
+    RESET ROLE;
+    RAISE EXCEPTION 'TEST FAILED (TENANT 3b): the forged-created_by INSERT was blocked by something OTHER than RLS (got: %) — most likely the UNIQUE(strategy_id) index raising 23505, which means the `created_by = auth.uid()` half of WITH CHECK is NOT independently proven', err_msg;
   END IF;
 
   -- ======================================================================
@@ -450,6 +608,119 @@ BEGIN
   END IF;
 
   -- ======================================================================
+  -- TENANT 5: cross-tenant mint against a strategy that ALREADY HAS a row
+  -- ======================================================================
+  -- Every cross-tenant probe above targets strat_b, for which NO share row
+  -- existed, so all of them exercise the plain INSERT path against an empty
+  -- slot. This block seeds tenant B's row first, so the same attack runs
+  -- against a REAL victim row — the case where a partial write would actually
+  -- have something to damage.
+  --
+  -- ⚠️ WALL ORDERING, MEASURED (PostgreSQL 16) rather than assumed — the
+  -- obvious reading of this arm is WRONG and the next reader deserves the
+  -- facts:
+  --   * With the CR-01 EXISTS half present, `INSERT ... ON CONFLICT DO UPDATE`
+  --     is rejected at WCO_RLS_INSERT_CHECK on the PROPOSED tuple — message
+  --     "new row violates row-level security policy" — BEFORE the conflict
+  --     handler runs at all. So the DO UPDATE path is not merely unexercised
+  --     cross-tenant, it is UNREACHABLE cross-tenant. That is the correct
+  --     defense-in-depth outcome, not a gap.
+  --   * Drop that EXISTS half and execution DOES reach ExecOnConflictUpdate,
+  --     where the policy's USING clause is evaluated against the EXISTING row
+  --     and rejects with the DISTINCT message "new row violates row-level
+  --     security policy (USING expression)". That is the second wall.
+  -- ⛔ Consequence for honesty: 5b/5c below go RED on the SAME neuter that
+  -- reddens TENANT 1 (dropping the EXISTS half) — they are NOT an independent
+  -- pin of the USING clause. TENANT 5h is; it reaches USING with nothing in
+  -- front of it. What 5b-5g uniquely prove is that the rejection is TOTAL when
+  -- a victim row exists: no partial write, no revoked_at clearing, no
+  -- provenance rewrite, no second row.
+  --
+  -- ⚠️ Deliberately placed AFTER the TENANT 1-4 family. Seeding B's row EARLIER
+  -- (the obvious placement) would push TENANT 1's mint against a strategy that
+  -- now has a row — and TENANT 1 would still pass, on the same first wall, so
+  -- nothing would be lost there; but TENANT 2's RAW INSERT would then hit
+  -- UNIQUE(strategy_id) and fail on 23505 instead of on RLS, breaking a
+  -- currently-exact arm. Ordering this last keeps TENANT 1/2 clean.
+  PERFORM set_config('request.jwt.claims',
+    json_build_object('sub', uid_b::text, 'role', 'authenticated')::text, true);
+  SET LOCAL ROLE authenticated;
+
+  -- Positive control: B can mint on their OWN strategy (so the negative arm
+  -- below cannot pass because minting is broken for everyone).
+  SELECT public.create_strategy_share(strat_b) INTO gen_b;
+  IF gen_b IS NULL OR gen_b <> 1 THEN
+    RESET ROLE;
+    RAISE EXCEPTION 'TEST FAILED (TENANT 5a): tenant B''s first mint on their own strategy returned %, expected 1', gen_b;
+  END IF;
+
+  RESET ROLE;
+  PERFORM set_config('request.jwt.claims', NULL, true);
+  PERFORM set_config('request.jwt.claims',
+    json_build_object('sub', uid_a::text, 'role', 'authenticated')::text, true);
+  SET LOCAL ROLE authenticated;
+
+  raised := FALSE;
+  BEGIN
+    PERFORM public.create_strategy_share(strat_b);
+  EXCEPTION WHEN OTHERS THEN
+    raised := TRUE; err_msg := SQLERRM;
+  END;
+  IF NOT raised THEN
+    RESET ROLE;
+    RAISE EXCEPTION 'TEST FAILED (TENANT 5b): tenant A minted against tenant B''s EXISTING share row without error. Both policy walls are gone: the CR-01 EXISTS half of WITH CHECK (which normally rejects the proposed tuple first) AND the USING clause the ON CONFLICT DO UPDATE path falls through to. `SET revoked_at = NULL` on that path RESURRECTS another tenant''s revoked link.';
+  END IF;
+  IF err_msg NOT LIKE '%row-level security%' THEN
+    RESET ROLE;
+    RAISE EXCEPTION 'TEST FAILED (TENANT 5c): the cross-tenant conflict write was blocked by something OTHER than RLS (got: %) — most likely UNIQUE(strategy_id) raising 23505, which would mean neither policy wall was proven', err_msg;
+  END IF;
+
+  -- ⚠️ WHERE THE `USING` CLAUSE IS ACTUALLY PINNED — read this before adding an
+  -- arm here. A raw cross-tenant `UPDATE strategy_shares ... WHERE strategy_id
+  -- = strat_b` looks like the obvious independent pin on USING, and it was
+  -- written, measured and then DELETED, because it cannot fail:
+  --   * shipped policy            -> 0 rows, no exception (correct);
+  --   * FOR ALL `USING (true)`    -> TENANT 4a fires FIRST (B can suddenly SEE
+  --                                  A's row), so the raw arm never runs;
+  --   * policy split per-command with only the UPDATE arm loosened -> the
+  --     SELECT policy still filters the UPDATE's own scan, so the raw arm sees
+  --     0 rows and passes — CORRECTLY, because the loosening is not
+  --     exploitable while SELECT stays scoped.
+  -- There is no configuration in which it is the first failure, and an arm that
+  -- cannot fail is worse than no arm. **TENANT 4a is the USING pin.**
+  -- ⛔ And note what is NO LONGER one: TENANT 4b routes through
+  -- revoke_strategy_share, which now carries its own `created_by = auth.uid()`
+  -- predicate (B2 fix), so it returns 0 even with RLS wide open. Do not read
+  -- 4b as an RLS proof any more — it is a proof of the RPC's predicate.
+
+  RESET ROLE;
+  PERFORM set_config('request.jwt.claims', NULL, true);
+
+  -- ...and B's row is byte-untouched by A's attempt. A rejection that still
+  -- moved the counter, cleared the tombstone or rewrote provenance would be a
+  -- successful attack wearing an error message.
+  SELECT generation, revoked_at, created_by INTO gen_b_after, b_revoked, b_by
+    FROM strategy_shares WHERE strategy_id = strat_b;
+  IF gen_b_after IS DISTINCT FROM gen_b THEN
+    RESET ROLE;
+    RAISE EXCEPTION 'TEST FAILED (TENANT 5d): tenant A''s rejected conflict-write moved tenant B''s generation from % to %', gen_b, gen_b_after;
+  END IF;
+  IF b_revoked IS NOT NULL THEN
+    RESET ROLE;
+    RAISE EXCEPTION 'TEST FAILED (TENANT 5e): tenant B''s share is revoked after tenant A''s rejected attempt — the conflict path wrote to a row it must not touch';
+  END IF;
+  IF b_by IS DISTINCT FROM uid_b THEN
+    RESET ROLE;
+    RAISE EXCEPTION 'TEST FAILED (TENANT 5f): tenant B''s created_by changed from % to % — tenant A''s rejected attempt rewrote provenance', uid_b, b_by;
+  END IF;
+
+  SELECT count(*) INTO row_cnt FROM strategy_shares WHERE strategy_id = strat_b;
+  IF row_cnt <> 1 THEN
+    RESET ROLE;
+    RAISE EXCEPTION 'TEST FAILED (TENANT 5g): % share rows exist for tenant B''s strategy, expected exactly 1', row_cnt;
+  END IF;
+
+  -- ======================================================================
   -- ANON 1: blocked at the GRANT layer (42501)
   -- ======================================================================
   SET LOCAL ROLE anon;
@@ -464,15 +735,39 @@ BEGIN
     RAISE EXCEPTION 'TEST FAILED (ANON 1a): anon holds a SELECT grant on strategy_shares (no 42501) — `REVOKE ALL ON strategy_shares FROM PUBLIC, anon` is missing or was re-granted';
   END IF;
 
+  -- ⛔ TWO defects fixed here, both of which made this arm unable to fail.
+  --   (1) It caught `WHEN OTHERS` while every sibling arm (1a, 1c, 1d) catches
+  --       `insufficient_privilege`.
+  --   (2) It targeted strat_a, which ALREADY HAS a share row — and
+  --       strategy_id is NOT NULL UNIQUE. Had anon held full INSERT rights the
+  --       statement would have raised 23505 (unique_violation), `WHEN OTHERS`
+  --       would have caught it, and the arm would have reported that anon is
+  --       blocked while anon could in fact write to the table.
+  -- Fix: narrow the handler, and target strat_a2 — an A-owned strategy that is
+  -- deliberately NEVER shared, so no constraint error can pre-empt the
+  -- privilege check.
+  --
+  -- The `permission denied` message assertion pins the GRANT layer
+  -- specifically. Both an absent grant AND an RLS rejection raise 42501, so
+  -- SQLSTATE alone cannot tell them apart; the message can. Postgres checks
+  -- table privileges at executor start, BEFORE any per-row RLS evaluation, so
+  -- while the REVOKE holds this is exactly the error anon gets. If a future
+  -- `GRANT INSERT ... TO anon` lands and only RLS saves us, this arm goes RED —
+  -- which is the point: ANON 2 below proves the policy layer, and this one must
+  -- keep proving the grant layer independently.
   raised := FALSE;
   BEGIN
-    INSERT INTO strategy_shares (strategy_id, created_by) VALUES (strat_a, uid_a);
-  EXCEPTION WHEN OTHERS THEN
-    raised := TRUE;
+    INSERT INTO strategy_shares (strategy_id, created_by) VALUES (strat_a2, uid_a);
+  EXCEPTION WHEN insufficient_privilege THEN
+    raised := TRUE; err_msg := SQLERRM;
   END;
   IF NOT raised THEN
     RESET ROLE;
-    RAISE EXCEPTION 'TEST FAILED (ANON 1b): anon INSERTed into strategy_shares';
+    RAISE EXCEPTION 'TEST FAILED (ANON 1b): anon INSERTed into strategy_shares — `REVOKE ALL ON strategy_shares FROM PUBLIC, anon, authenticated` is missing or anon was re-granted INSERT';
+  END IF;
+  IF err_msg NOT LIKE '%permission denied%' THEN
+    RESET ROLE;
+    RAISE EXCEPTION 'TEST FAILED (ANON 1b-grant): anon''s INSERT was rejected by something other than the GRANT layer (got: %). A 42501 from RLS would satisfy a naive arm while anon still held an INSERT grant; this arm must prove the grant is ABSENT, because ANON 2 already proves the policy independently.', err_msg;
   END IF;
 
   -- anon must not be able to invoke either RPC.
@@ -529,7 +824,160 @@ BEGIN
     RAISE EXCEPTION 'TEST FAILED (ANON 2b): % anon grant(s) remain on strategy_shares after the layer-2 probe — the REVOKE did not take (the transaction ROLLBACK is still the backstop, but this must not be relied on)', row_cnt;
   END IF;
 
-  RAISE NOTICE 'test_strategy_shares_rls: ALL PASS (no token at rest, anon dead at both layers, CR-01 owner-coherence enforced, revoke atomic + convergent, reuse idempotent, generation monotonic, no client DELETE). Observed generation sequence: %', gen_seen;
+  -- ======================================================================
+  -- SERVICE-ROLE 1: no EXECUTE on either RPC (grant layer)
+  -- ======================================================================
+  -- `service_role` is BYPASSRLS. It is also what `createAdminClient()` connects
+  -- as, and migration 20260827120000 STEP 2 records that this feature's
+  -- recipient lane ALREADY reads strategy_shares through an admin client — so
+  -- an admin client is inside the blast radius by design, not hypothetically.
+  -- Neither RPC is meant for it. Prove the grant layer first.
+  SET LOCAL ROLE service_role;
+  raised := FALSE;
+  BEGIN
+    PERFORM public.revoke_strategy_share(strat_a);
+  EXCEPTION WHEN insufficient_privilege THEN
+    raised := TRUE;
+  END;
+  RESET ROLE;
+  IF NOT raised THEN
+    RAISE EXCEPTION 'TEST FAILED (SERVICE-ROLE 1): service_role executed revoke_strategy_share — it holds neither an explicit GRANT nor the PUBLIC default the migration revokes. A BYPASSRLS caller on this RPC is an unauthenticated cross-tenant kill switch.';
+  END IF;
+
+  -- ======================================================================
+  -- SERVICE-ROLE 2: the BODY guard bites even WITH execute granted
+  -- ======================================================================
+  -- ⛔ SERVICE-ROLE 1 alone is VACUOUS with respect to the fail-loud guard: the
+  -- EXECUTE privilege is checked BEFORE the body ever runs, so that arm stays
+  -- green whether or not the `auth.uid() IS NULL` guard exists. A single future
+  -- `GRANT EXECUTE ... TO service_role` — the obvious "fix" someone reaches for
+  -- when an admin-client call 404s — would then hand a BYPASSRLS caller the
+  -- whole table with nothing left to stop it.
+  --
+  -- So grant EXECUTE temporarily inside this rolled-back transaction and prove
+  -- the BODY refuses independently. Same layer-1/layer-2 shape as ANON 1 vs
+  -- ANON 2 above. The grant is reverted immediately and the closing ROLLBACK is
+  -- the backstop.
+  --
+  -- The message assertion is load-bearing: with the guard deleted the call
+  -- would SUCCEED (revoking tenant A's share, cross-tenant, with RLS bypassed),
+  -- and `raised` would be FALSE — but if the temporary GRANT ever failed to
+  -- take, the error would be `permission denied for function` and a bare
+  -- `raised := TRUE` would call that a pass. Pinning the text keeps the arm
+  -- measuring the guard rather than the grant.
+  EXECUTE 'GRANT EXECUTE ON FUNCTION public.revoke_strategy_share(UUID) TO service_role';
+  EXECUTE 'GRANT EXECUTE ON FUNCTION public.create_strategy_share(UUID) TO service_role';
+  PERFORM set_config('request.jwt.claims', NULL, true);
+
+  SET LOCAL ROLE service_role;
+  raised := FALSE;
+  BEGIN
+    PERFORM public.revoke_strategy_share(strat_a);
+  EXCEPTION WHEN OTHERS THEN
+    raised := TRUE; err_msg := SQLERRM;
+  END;
+  RESET ROLE;
+  IF NOT raised THEN
+    EXECUTE 'REVOKE EXECUTE ON FUNCTION public.revoke_strategy_share(UUID) FROM service_role';
+    EXECUTE 'REVOKE EXECUTE ON FUNCTION public.create_strategy_share(UUID) FROM service_role';
+    RAISE EXCEPTION 'TEST FAILED (SERVICE-ROLE 2a): with EXECUTE granted, service_role ran revoke_strategy_share to completion. auth.uid() is NULL for that role and RLS does not apply to it, so the UPDATE reached ANOTHER TENANT''S row and the caller got a success back. The `IF auth.uid() IS NULL THEN RAISE` guard in migration 20260827120000 is missing.';
+  END IF;
+  IF err_msg NOT LIKE '%not callable by a service-role%' THEN
+    EXECUTE 'REVOKE EXECUTE ON FUNCTION public.revoke_strategy_share(UUID) FROM service_role';
+    EXECUTE 'REVOKE EXECUTE ON FUNCTION public.create_strategy_share(UUID) FROM service_role';
+    RAISE EXCEPTION 'TEST FAILED (SERVICE-ROLE 2b): service_role''s revoke failed, but NOT on the fail-loud guard (got: %). If this says "permission denied for function" the temporary GRANT did not take and this arm proved nothing about the body.', err_msg;
+  END IF;
+
+  SET LOCAL ROLE service_role;
+  raised := FALSE;
+  BEGIN
+    PERFORM public.create_strategy_share(strat_a);
+  EXCEPTION WHEN OTHERS THEN
+    raised := TRUE; err_msg := SQLERRM;
+  END;
+  RESET ROLE;
+  EXECUTE 'REVOKE EXECUTE ON FUNCTION public.revoke_strategy_share(UUID) FROM service_role';
+  EXECUTE 'REVOKE EXECUTE ON FUNCTION public.create_strategy_share(UUID) FROM service_role';
+  IF NOT raised THEN
+    RAISE EXCEPTION 'TEST FAILED (SERVICE-ROLE 2c): with EXECUTE granted, service_role ran create_strategy_share to completion. It must refuse: for that role auth.uid() is NULL and RLS does not apply, so the ON CONFLICT DO UPDATE path would set revoked_at = NULL on an EXISTING row with no policy in the way. Today the NOT NULL on created_by raises 23502 first and blocks that INCIDENTALLY — completing successfully means even that accident is gone.';
+  END IF;
+  IF err_msg NOT LIKE '%not callable by a service-role%' THEN
+    RAISE EXCEPTION 'TEST FAILED (SERVICE-ROLE 2d): service_role''s mint failed, but NOT on the fail-loud guard (got: %)', err_msg;
+  END IF;
+
+  -- Belt-and-braces: the temporary EXECUTE grants really are gone.
+  SELECT count(*) INTO row_cnt
+    FROM pg_proc p
+    CROSS JOIN LATERAL aclexplode(p.proacl) AS acl
+    JOIN pg_roles r ON r.oid = acl.grantee
+    JOIN pg_namespace n ON n.oid = p.pronamespace
+   WHERE n.nspname = 'public'
+     AND p.proname IN ('create_strategy_share', 'revoke_strategy_share')
+     AND r.rolname = 'service_role';
+  IF row_cnt <> 0 THEN
+    RAISE EXCEPTION 'TEST FAILED (SERVICE-ROLE 2e): % service_role EXECUTE grant(s) remain on the share RPCs after the layer-2 probe — the REVOKE did not take (the ROLLBACK is still the backstop, but must not be relied on)', row_cnt;
+  END IF;
+
+  -- ======================================================================
+  -- SANITIZE 1: GDPR Art. 17 erasure KILLS the subject's share links (B1)
+  -- ======================================================================
+  -- ⛔ `sanitize_user` ANONYMIZES; it deletes neither `profiles` nor
+  -- `auth.users`, so NEITHER of strategy_shares' ON DELETE CASCADE FKs ever
+  -- fires. Without the explicit arm added in companion migration
+  -- 20260827130000, every capability URL the data subject minted keeps
+  -- resolving to their unpublished factsheet forever after their erasure — and
+  -- the same function sets `banned_until = 'infinity'` and purges their
+  -- sessions, so they can never log back in to revoke it themselves.
+  --
+  -- The migration's own DO block cannot pin this: it runs ONCE, at apply. This
+  -- is the durable pin, and it exercises the REAL function end-to-end rather
+  -- than grepping its text.
+  PERFORM set_config('request.jwt.claims',
+    json_build_object('sub', uid_a::text, 'role', 'authenticated')::text, true);
+  SET LOCAL ROLE authenticated;
+  SELECT public.create_strategy_share(strat_a) INTO gen_pre_san;
+  RESET ROLE;
+  PERFORM set_config('request.jwt.claims', NULL, true);
+
+  -- Precondition: A's share is LIVE, or the arm below would be vacuous (an
+  -- already-revoked row is skipped by the `revoked_at IS NULL` predicate and
+  -- would "pass" without the erasure arm existing at all).
+  SELECT revoked_at INTO now_revoked FROM strategy_shares WHERE strategy_id = strat_a;
+  IF now_revoked IS NOT NULL THEN
+    RAISE EXCEPTION 'TEST FAILED (SANITIZE 1a): tenant A''s share is not live before sanitize_user — the assertions below would pass VACUOUSLY';
+  END IF;
+
+  SELECT public.sanitize_user(uid_a) INTO san_ok;
+  IF san_ok IS NOT TRUE THEN
+    RAISE EXCEPTION 'TEST FAILED (SANITIZE 1b): sanitize_user(uid_a) returned % — expected TRUE for a not-yet-sanitized user. The erasure assertions below cannot be trusted if the erasure did not run.', san_ok;
+  END IF;
+
+  SELECT revoked_at, generation INTO now_revoked, gen_final
+    FROM strategy_shares WHERE strategy_id = strat_a;
+  IF now_revoked IS NULL THEN
+    RAISE EXCEPTION 'TEST FAILED (SANITIZE 1c): after sanitize_user the data subject''s share row is STILL LIVE. Every link they ever copied still resolves to their unpublished factsheet — returns curve, metrics and trade analytics all survive the anonymize — and banned_until = infinity means they can never log in to revoke it. Companion migration 20260827130000 is missing or its `UPDATE strategy_shares` arm was dropped.';
+  END IF;
+  IF gen_final <> gen_pre_san + 1 THEN
+    RAISE EXCEPTION 'TEST FAILED (SANITIZE 1d): generation is % after erasure, expected % (exactly +1). If it is UNCHANGED the erasure is COSMETIC: revoked_at is stamped but the token still derives from the same counter, so every previously-copied link KEEPS WORKING.', gen_final, gen_pre_san + 1;
+  END IF;
+
+  -- REVOKE, never DELETE. A delete rewinds the counter, so the next mint would
+  -- restart at generation 1 and resurrect every token minted at generation 1.
+  SELECT count(*) INTO row_cnt FROM strategy_shares WHERE strategy_id = strat_a;
+  IF row_cnt <> 1 THEN
+    RAISE EXCEPTION 'TEST FAILED (SANITIZE 1e): the subject''s share row count is % after erasure, expected 1. sanitize_user must SOFT-revoke: deleting the row discards the generation counter, and the next create_strategy_share() would restart at generation 1 — resurrecting every already-revoked token.', row_cnt;
+  END IF;
+
+  -- ...and the erasure is scoped to the subject. `created_by = p_user_id` is
+  -- the ONLY scope this statement has (sanitize_user is SECURITY DEFINER, so
+  -- RLS is not applied to it), which makes a cross-tenant control mandatory.
+  SELECT generation, revoked_at INTO gen_b_after, b_revoked
+    FROM strategy_shares WHERE strategy_id = strat_b;
+  IF b_revoked IS NOT NULL OR gen_b_after IS DISTINCT FROM gen_b THEN
+    RAISE EXCEPTION 'TEST FAILED (SANITIZE 1f): erasing tenant A also revoked tenant B''s share (revoked_at=%, generation % -> %) — the `created_by = p_user_id` predicate is missing from the sanitize arm, so ONE user''s Art. 17 request kills EVERY user''s share links', b_revoked, gen_b, gen_b_after;
+  END IF;
+
+  RAISE NOTICE 'test_strategy_shares_rls: ALL PASS (no token at rest, anon dead at both layers, service_role dead at both layers, CR-01 owner-coherence enforced on the INSERT and the ON CONFLICT path, revoke atomic + convergent + ownership-scoped, reuse idempotent, generation monotonic, no client DELETE or TRUNCATE, GDPR erasure revokes the subject''s links without touching other tenants). Observed generation sequence: %', gen_seen;
 END
 $$;
 
