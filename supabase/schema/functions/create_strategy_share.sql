@@ -42,6 +42,30 @@ AS $$
 DECLARE
   v_generation INTEGER;
 BEGIN
+  -- ⛔ FAIL LOUD for a caller with no authenticated identity (founder ruling
+  -- 2026-08-27). SECURITY INVOKER + RLS is the ownership wall here, and RLS
+  -- DOES NOT APPLY to a BYPASSRLS role — `service_role`, which is exactly what
+  -- `createAdminClient()` connects as, and the recipient lane already uses an
+  -- admin client against this table (STEP 2).
+  --
+  -- MEASURED (PostgreSQL 16), so the rationale is not guesswork: without this
+  -- guard a service_role call raises `23502 null value in column "created_by"`
+  -- — ExecConstraints checks NOT NULL on the proposed tuple BEFORE speculative
+  -- insertion, so the ON CONFLICT DO UPDATE path is never reached and an
+  -- existing revoked row is NOT reactivated. The NOT NULL column therefore
+  -- happens to block the cross-tenant resurrection today. ⚠️ That is an
+  -- INCIDENTAL save, not a designed one: it evaporates the moment `created_by`
+  -- becomes nullable or a future overload accepts it as a parameter. And 23502
+  -- reads as "some database hiccup", not "you called this wrong" — the route
+  -- would log a constraint error and nobody would learn that an admin client
+  -- must never take this path. The guard converts an accident into a contract.
+  -- (Contrast revoke_strategy_share, where the missing guard was NOT
+  -- incidental: it revoked another tenant's live share and returned 1.)
+  IF auth.uid() IS NULL THEN
+    RAISE EXCEPTION 'create_strategy_share: no authenticated user — not callable by a service-role/admin client'
+      USING ERRCODE = 'insufficient_privilege';
+  END IF;
+
   IF p_strategy_id IS NULL THEN
     RAISE EXCEPTION 'create_strategy_share: p_strategy_id must not be NULL'
       USING ERRCODE = 'null_value_not_allowed';

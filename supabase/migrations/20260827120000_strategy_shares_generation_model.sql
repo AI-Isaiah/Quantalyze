@@ -73,9 +73,25 @@
 --     prior body to re-base against.
 --   * `SET search_path = public, pg_temp` on both functions (the canon from
 --     mig 87 H-B / mig 117), never `pg_catalog`.
---   * Both FKs are ON DELETE CASCADE (strategies, profiles), so `sanitize_user`
---     needs NO new arm — deleting a user drops their strategies and their
---     share rows with them.
+--   * ⛔ `sanitize_user` NEEDS AN EXPLICIT ARM — and gets one, in the companion
+--     migration 20260827130000_sanitize_user_revoke_strategy_shares.sql. An
+--     earlier draft of this line claimed the two ON DELETE CASCADE FKs made a
+--     new arm unnecessary. That was FALSE. `sanitize_user` is an
+--     ANONYMIZE-not-DELETE RPC: its latest body
+--     (20260517013100_sanitize_user_recipient_email_case_insensitive.sql)
+--     contains ZERO `DELETE FROM profiles` and ZERO `DELETE FROM auth.users`
+--     — it UPDATEs both — so nothing is ever deleted and NO cascade fires.
+--     Erasure therefore rides that explicit arm, never a cascade. Without it,
+--     every share link the data subject minted keeps resolving after a GDPR
+--     Art. 17 erasure: anonymous access to their unpublished factsheet, with
+--     the returns curve, the metrics and the trade analytics all surviving the
+--     anonymize. And the subject cannot self-remedy, because the same RPC sets
+--     `banned_until = 'infinity'` and purges their sessions — they can never
+--     log back in to press Revoke.
+--     ⛔ That arm REVOKES (revoked_at + generation bump); it must NEVER delete.
+--     A delete rewinds the counter, the next mint restarts at generation 1, and
+--     every previously-revoked token is resurrected — this file's own STEP 2
+--     argument turned on itself.
 --   * The phase-29 frozen-spine migration guard was NARROWED in the same commit
 --     as this file (`src/__tests__/phase-29-frozen-spine-guards.test.ts`,
 --     founder ruling D-05) so that `/scenario/i` still freezes the scenario
@@ -176,32 +192,69 @@ CREATE INDEX strategy_shares_active_idx
   WHERE revoked_at IS NULL;
 
 -- --------------------------------------------------------------------------
--- STEP 2: table grants — anon dead, and clients cannot DELETE
+-- STEP 2: table grants — POSITIVE-ONLY (anon dead, DELETE and TRUNCATE closed)
 -- --------------------------------------------------------------------------
 -- A fresh table inherits Supabase's default GRANT ALL to anon/authenticated.
 -- There is NO public-read use case for this table: the recipient lane reads it
 -- through `createAdminClient()` (service_role) in Node, exactly like
--- /scenario-share. Drop anon's grants entirely.
-REVOKE ALL ON strategy_shares FROM PUBLIC, anon;
+-- /scenario-share.
+--
+-- ⛔ THE POSTURE IS POSITIVE-ONLY, NOT SUBTRACTIVE. An earlier draft revoked
+-- only `DELETE` by name from `authenticated` and left the rest of the
+-- inherited GRANT ALL standing — which keeps TRUNCATE, REFERENCES and TRIGGER.
+-- TRUNCATE is the dangerous one: **it is EXEMPT FROM RLS**, so one
+-- `TRUNCATE strategy_shares` from any authenticated session discards EVERY
+-- tenant's counter simultaneously, and every revoked link in the system comes
+-- back to life at generation 1. That is the token-resurrection failure below,
+-- escalated from one tenant to all of them, and no policy on this table can
+-- stop it. A subtractive posture is only ever as complete as its enumeration;
+-- stating what to GIVE is complete by construction. Same shape as
+-- 20260825120000_ledger_refresh_staleness_view.sql:333.
+--
+-- ⛔ TOKEN-RESURRECTION GUARD — why DELETE is absent from the positive list.
+-- The RLS policy above is FOR ALL, which would otherwise let an owner DELETE
+-- their own share row. That is not equivalent to revoking: a DELETE discards
+-- the counter, so the next create_strategy_share() inserts a fresh row at
+-- generation = 1 and every token minted at generation 1 — including ones the
+-- owner explicitly REVOKED — becomes valid again. Revocation must be
+-- irreversible, so no client role gets DELETE. Soft-revoke (revoked_at +
+-- generation bump) is the only supported un-share. FK cascades from
+-- strategies/profiles still work: referential actions execute internally and
+-- do not consult the caller's privileges, so account deletion is unaffected.
+-- service_role keeps DELETE for exactly those maintenance paths.
+REVOKE ALL ON strategy_shares FROM PUBLIC, anon, authenticated;
 
--- ⛔ TOKEN-RESURRECTION GUARD. The RLS policy above is FOR ALL, which would
--- otherwise let an owner DELETE their own share row. That is not equivalent to
--- revoking: a DELETE discards the counter, so the next
--- create_strategy_share() inserts a fresh row at generation = 1 and every
--- token minted at generation 1 — including ones the owner explicitly REVOKED —
--- becomes valid again. Revocation must be irreversible, so no client role gets
--- DELETE. Soft-revoke (revoked_at + generation bump) is the only supported
--- un-share. FK cascades from strategies/profiles still work: referential
--- actions execute internally and do not consult the caller's privileges, so
--- `sanitize_user` and account deletion are unaffected. service_role keeps
--- DELETE for exactly those maintenance paths.
-REVOKE DELETE ON strategy_shares FROM authenticated;
-
--- State the working grants explicitly rather than inheriting whatever
--- ALTER DEFAULT PRIVILEGES happens to be configured on the project — the
--- REVOKE above is only meaningful if the positive side is pinned too.
 GRANT SELECT, INSERT, UPDATE ON strategy_shares TO authenticated;
 GRANT ALL    ON strategy_shares TO service_role;
+
+-- --------------------------------------------------------------------------
+-- STEP 2b: pin the `authenticated` privilege set EXACTLY
+-- --------------------------------------------------------------------------
+-- Read the ACL from pg_class.relacl via aclexplode, NOT from
+-- information_schema.role_table_grants: that view is PRIVILEGE-FILTERED (it
+-- only surfaces grants whose grantor or grantee the current role is, or is a
+-- member of), so depending on WHO applies this migration it can under-report
+-- and turn the assertion vacuously green. relacl is the authoritative store
+-- and is not filtered.
+DO $$
+DECLARE
+  v_privs TEXT[];
+BEGIN
+  SELECT array_agg(DISTINCT acl.privilege_type ORDER BY acl.privilege_type)
+    INTO v_privs
+    FROM pg_class c
+    CROSS JOIN LATERAL aclexplode(c.relacl) AS acl
+    JOIN pg_roles r ON r.oid = acl.grantee
+   WHERE c.oid = 'public.strategy_shares'::regclass
+     AND r.rolname = 'authenticated';
+
+  IF v_privs IS DISTINCT FROM ARRAY['INSERT', 'SELECT', 'UPDATE']::TEXT[] THEN
+    RAISE EXCEPTION 'Migration 164-02 verification failed: `authenticated` holds privilege set % on strategy_shares, expected exactly {INSERT,SELECT,UPDATE}. DELETE lets one tenant discard their counter and resurrect their own revoked tokens; TRUNCATE — which is EXEMPT FROM RLS — does it for EVERY tenant at once.',
+      COALESCE(v_privs::TEXT, '(none)');
+  END IF;
+
+  RAISE NOTICE 'Migration 164-02: authenticated privilege set on strategy_shares pinned to {INSERT,SELECT,UPDATE}.';
+END $$;
 
 -- --------------------------------------------------------------------------
 -- STEP 3: create_strategy_share(p_strategy_id) — atomic mint-or-reuse
@@ -242,6 +295,30 @@ AS $$
 DECLARE
   v_generation INTEGER;
 BEGIN
+  -- ⛔ FAIL LOUD for a caller with no authenticated identity (founder ruling
+  -- 2026-08-27). SECURITY INVOKER + RLS is the ownership wall here, and RLS
+  -- DOES NOT APPLY to a BYPASSRLS role — `service_role`, which is exactly what
+  -- `createAdminClient()` connects as, and the recipient lane already uses an
+  -- admin client against this table (STEP 2).
+  --
+  -- MEASURED (PostgreSQL 16), so the rationale is not guesswork: without this
+  -- guard a service_role call raises `23502 null value in column "created_by"`
+  -- — ExecConstraints checks NOT NULL on the proposed tuple BEFORE speculative
+  -- insertion, so the ON CONFLICT DO UPDATE path is never reached and an
+  -- existing revoked row is NOT reactivated. The NOT NULL column therefore
+  -- happens to block the cross-tenant resurrection today. ⚠️ That is an
+  -- INCIDENTAL save, not a designed one: it evaporates the moment `created_by`
+  -- becomes nullable or a future overload accepts it as a parameter. And 23502
+  -- reads as "some database hiccup", not "you called this wrong" — the route
+  -- would log a constraint error and nobody would learn that an admin client
+  -- must never take this path. The guard converts an accident into a contract.
+  -- (Contrast revoke_strategy_share, where the missing guard was NOT
+  -- incidental: it revoked another tenant's live share and returned 1.)
+  IF auth.uid() IS NULL THEN
+    RAISE EXCEPTION 'create_strategy_share: no authenticated user — not callable by a service-role/admin client'
+      USING ERRCODE = 'insufficient_privilege';
+  END IF;
+
   IF p_strategy_id IS NULL THEN
     RAISE EXCEPTION 'create_strategy_share: p_strategy_id must not be NULL'
       USING ERRCODE = 'null_value_not_allowed';
@@ -269,7 +346,12 @@ COMMENT ON FUNCTION public.create_strategy_share(UUID) IS
   'generation returns the same url, which is what makes Copy Link reuse work). '
   'Reactivating a revoked share clears revoked_at WITHOUT rewinding generation, '
   'created_by or created_at, so revoked links stay dead. SECURITY INVOKER — '
-  'RLS gates it as the caller and created_by is auth.uid() inside the body.';
+  'RLS gates it as the caller and created_by is auth.uid() inside the body. '
+  '⛔ RAISES insufficient_privilege when auth.uid() IS NULL. RLS does not apply '
+  'to a BYPASSRLS role; without the guard such a caller gets an opaque 23502 on '
+  'created_by (measured — the NOT NULL blocks the ON CONFLICT reactivation '
+  'incidentally, and would stop doing so if created_by ever became nullable). '
+  'Not callable by a service-role/admin client, by design.';
 
 -- --------------------------------------------------------------------------
 -- STEP 4: revoke_strategy_share(p_strategy_id) — atomic stamp + bump
@@ -305,14 +387,35 @@ AS $$
 DECLARE
   v_rows INTEGER;
 BEGIN
+  -- ⛔ FAIL LOUD for a caller with no authenticated identity (founder ruling
+  -- 2026-08-27), and BEFORE the p_strategy_id convergence exit below — an
+  -- admin client passing NULL must not receive the indistinguishable 0.
+  -- Without this guard a `service_role` caller (BYPASSRLS — and STEP 2 records
+  -- that this feature's recipient lane already reads this table through
+  -- `createAdminClient()`) reaches the UPDATE with NO policy applied, revokes
+  -- ANY tenant's live share and gets `1` back: a silent cross-tenant kill
+  -- switch that reports success. The ownership predicate below closes the same
+  -- hole from the other side; a 0-row return would not be enough on its own,
+  -- because the route maps 0 to a 404 the client reads as SUCCESS.
+  IF auth.uid() IS NULL THEN
+    RAISE EXCEPTION 'revoke_strategy_share: no authenticated user — not callable by a service-role/admin client'
+      USING ERRCODE = 'insufficient_privilege';
+  END IF;
+
   IF p_strategy_id IS NULL THEN
     RETURN 0;   -- nothing to revoke; converges like any other miss
   END IF;
 
+  -- ⭐ `created_by = auth.uid()` is LOAD-BEARING, not a restatement of the
+  -- policy. For an ordinary `authenticated` caller the strategy_shares_owner
+  -- USING clause already scopes this UPDATE; for a BYPASSRLS role it does not,
+  -- and this predicate is then the ONLY thing standing between the caller and
+  -- another tenant's counter. Defense-in-depth behind the guard above.
   UPDATE public.strategy_shares
      SET revoked_at = now(),
          generation = generation + 1
    WHERE strategy_id = p_strategy_id
+     AND created_by = auth.uid()
      AND revoked_at IS NULL;
 
   GET DIAGNOSTICS v_rows = ROW_COUNT;
@@ -327,7 +430,12 @@ COMMENT ON FUNCTION public.revoke_strategy_share(UUID) IS
   'race can leave the counter short. Returns the affected row count: 1 = just '
   'revoked, 0 = already revoked or never shared (CONVERGENCE — the route maps '
   'it to 404 and the client treats it as success). Soft-revoke only; rows are '
-  'never deleted. SECURITY INVOKER — RLS scopes it to the caller''s own rows.';
+  'never deleted. SECURITY INVOKER — RLS scopes it to the caller''s own rows, '
+  'and the UPDATE carries an independent `created_by = auth.uid()` predicate '
+  'for the case where RLS does NOT apply. ⛔ RAISES insufficient_privilege when '
+  'auth.uid() IS NULL: without that, a BYPASSRLS service-role caller was an '
+  'unauthenticated cross-tenant kill switch that returned 1 and read as '
+  'success. Not callable by a service-role/admin client, by design.';
 
 -- --------------------------------------------------------------------------
 -- STEP 5: function grants + PUBLIC-EXECUTE self-verify
@@ -361,12 +469,25 @@ END $$;
 --        "revoked" link keeps working);
 --   (ii) mint must NOT assign generation (assign it and reactivation rewinds
 --        the counter, resurrecting revoked links).
--- Assert both against pg_get_functiondef so the loosening fails the APPLY.
+--
+-- ⚠️ WHAT THIS BLOCK IS AND IS NOT. A `DO` block runs ONCE, at this migration's
+-- apply, and never again — so it CANNOT "fail the apply" of some future
+-- loosening. An earlier draft of this comment claimed it could; that was
+-- wrong. What it actually buys is a guard on THIS apply against an authoring
+-- slip: if the body above were edited between review and apply, or if a
+-- concurrently-applied migration redefined either RPC first, the apply aborts
+-- instead of silently deploying a body nobody checked. The DURABLE pin — the
+-- one that keeps biting on every future CI run — is
+-- `supabase/tests/test_strategy_shares_rls.sql`, which re-asserts every
+-- property below against the LIVE database. Both are needed; neither
+-- substitutes for the other.
 DO $$
 DECLARE
-  v_create TEXT;
-  v_revoke TEXT;
-  v_secdef BOOLEAN;
+  v_create   TEXT;
+  v_revoke   TEXT;
+  v_create_s TEXT;
+  v_revoke_s TEXT;
+  v_secdef   BOOLEAN;
 BEGIN
   SELECT pg_get_functiondef(p.oid) INTO v_create
     FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
@@ -382,14 +503,23 @@ BEGIN
       (v_create IS NOT NULL), (v_revoke IS NOT NULL);
   END IF;
 
+  -- ⛔ Strip `--` line comments before any LIVE-STATEMENT probe below.
+  -- pg_get_functiondef returns in-body comments VERBATIM, so a probe run
+  -- against the raw text can be satisfied by a comment that merely DESCRIBES
+  -- the mechanism — and both bodies above are heavily commented with the exact
+  -- phrases the arms look for. This repo has already been bitten by that
+  -- (mig 20260517013100 STEP 2 carries the same guard for the same reason).
+  v_create_s := regexp_replace(v_create, '--[^\n]*', '', 'g');
+  v_revoke_s := regexp_replace(v_revoke, '--[^\n]*', '', 'g');
+
   -- (i) revoke increments the counter, in-statement.
-  IF v_revoke !~* 'generation\s*=\s*generation\s*\+\s*1' THEN
+  IF v_revoke_s !~* 'generation\s*=\s*generation\s*\+\s*1' THEN
     RAISE EXCEPTION 'Migration 164-02 verification failed: revoke_strategy_share lost the atomic `generation = generation + 1` bump — revocation would be COSMETIC and every revoked link would keep working';
   END IF;
 
   -- (i-b) ...and only over rows that are still live, so a double-revoke cannot
   -- keep inflating the counter (0 rows is the convergence contract).
-  IF v_revoke !~* 'revoked_at\s+IS\s+NULL' THEN
+  IF v_revoke_s !~* 'revoked_at\s+IS\s+NULL' THEN
     RAISE EXCEPTION 'Migration 164-02 verification failed: revoke_strategy_share lost the `revoked_at IS NULL` predicate — double-revoke would no longer converge at 0 rows';
   END IF;
 
@@ -397,13 +527,29 @@ BEGIN
   -- `\M` (end of word), NOT `\m`, closes the anchor: `\m` after FROM demands
   -- the position be a word START, which it never is, and the arm would be
   -- silently vacuous.
-  IF v_revoke ~* '\mDELETE\s+FROM\M' THEN
+  IF v_revoke_s ~* '\mDELETE\s+FROM\M' THEN
     RAISE EXCEPTION 'Migration 164-02 verification failed: revoke_strategy_share performs a DELETE — revocation must be a soft tombstone, or re-sharing resets generation and RESURRECTS revoked links';
   END IF;
 
   -- (ii) mint never writes generation.
-  IF v_create ~* 'SET[^;]*\mgeneration\s*=' THEN
+  IF v_create_s ~* 'SET[^;]*\mgeneration\s*=' THEN
     RAISE EXCEPTION 'Migration 164-02 verification failed: create_strategy_share assigns `generation` — reactivation must never rewind the counter (revoked links would come back to life)';
+  END IF;
+
+  -- (ii-b) BOTH RPCs refuse a caller with no authenticated identity. RLS does
+  -- not apply to a BYPASSRLS role, so for `service_role` this guard is the
+  -- FIRST wall, not a redundant one. Probed against the comment-stripped body
+  -- precisely because both bodies discuss this guard in prose.
+  IF v_create_s !~* 'auth\.uid\s*\(\s*\)\s+IS\s+NULL'
+     OR v_revoke_s !~* 'auth\.uid\s*\(\s*\)\s+IS\s+NULL' THEN
+    RAISE EXCEPTION 'Migration 164-02 verification failed: a strategy-share RPC lost its `auth.uid() IS NULL` fail-loud guard — a service-role/admin client would reach the body with RLS not applied. MEASURED consequences: revoke becomes an unauthenticated cross-tenant kill switch that revokes another tenant''s live share and RETURNS 1; create degrades to an opaque 23502 on created_by, whose NOT NULL is the only (incidental) thing preventing an ON CONFLICT reactivation of someone else''s revoked share';
+  END IF;
+
+  -- (ii-c) revoke carries its OWN ownership predicate, independent of the
+  -- policy. Drop it and the only cross-tenant wall left is RLS — which the
+  -- BYPASSRLS role the recipient lane already uses does not obey.
+  IF v_revoke_s !~* 'created_by\s*=\s*auth\.uid\s*\(\s*\)' THEN
+    RAISE EXCEPTION 'Migration 164-02 verification failed: revoke_strategy_share lost the `created_by = auth.uid()` predicate on its UPDATE — for any BYPASSRLS caller the statement would revoke ANY tenant''s share and report success';
   END IF;
 
   -- (iii) neither RPC is SECURITY DEFINER: RLS is the ownership wall here, and
@@ -421,12 +567,12 @@ BEGIN
 
   -- (iv) search-path hardening present on both (pg_get_functiondef emits
   -- `SET search_path TO public, pg_temp`; accept TO or =).
-  IF v_create !~* 'search_path\s*(=|TO)\s*''?public''?,\s*''?pg_temp''?'
-     OR v_revoke !~* 'search_path\s*(=|TO)\s*''?public''?,\s*''?pg_temp''?' THEN
+  IF v_create_s !~* 'search_path\s*(=|TO)\s*''?public''?,\s*''?pg_temp''?'
+     OR v_revoke_s !~* 'search_path\s*(=|TO)\s*''?public''?,\s*''?pg_temp''?' THEN
     RAISE EXCEPTION 'Migration 164-02 verification failed: a strategy-share RPC is missing SET search_path = public, pg_temp';
   END IF;
 
-  RAISE NOTICE 'Migration 164-02: share RPC body-shape verified (atomic bump + live-only predicate + no delete + no generation rewind + INVOKER + search_path).';
+  RAISE NOTICE 'Migration 164-02: share RPC body-shape verified (atomic bump + live-only predicate + no delete + no generation rewind + auth.uid() fail-loud + revoke ownership predicate + INVOKER + search_path).';
 END $$;
 
 -- --------------------------------------------------------------------------
@@ -435,16 +581,30 @@ END $$;
 -- The single most important property of this table is a NEGATIVE one: it holds
 -- no secret. A future ALTER that adds a `token`/`token_hash`/`secret` column
 -- would reintroduce exactly the disclosure surface D-02 rejected, and nothing
--- else in the stack would notice. Pin the column set here so the APPLY of any
--- such migration is at least preceded by a deliberate edit of this assertion's
--- successor, and pin it again from supabase/tests/test_strategy_shares_rls.sql.
+-- else in the stack would notice.
+--
+-- ⚠️ Same caveat as STEP 6: this DO block runs ONCE, at THIS apply. It cannot
+-- reach forward and fail a future ALTER's apply — an earlier draft of this
+-- comment said it could, and that was wrong. Here it pins the shape the rest
+-- of this migration was reviewed against. The DURABLE pin, the one a future
+-- token column actually trips, is the identical assertion in
+-- supabase/tests/test_strategy_shares_rls.sql, which runs on every CI push.
+--
+-- Read the column set from pg_attribute, NOT information_schema.columns: that
+-- view is PRIVILEGE-FILTERED (it only shows columns the current role has some
+-- privilege on), so a role with partial privileges would see a SHORT list —
+-- and a short list is DISTINCT FROM the expected string, which fails loudly
+-- here but would report the wrong cause. pg_attribute is the authoritative
+-- catalog and is not filtered.
 DO $$
 DECLARE
   v_cols TEXT;
 BEGIN
-  SELECT string_agg(column_name, ',' ORDER BY column_name) INTO v_cols
-    FROM information_schema.columns
-   WHERE table_schema = 'public' AND table_name = 'strategy_shares';
+  SELECT string_agg(a.attname, ',' ORDER BY a.attname) INTO v_cols
+    FROM pg_attribute a
+   WHERE a.attrelid = 'public.strategy_shares'::regclass
+     AND a.attnum > 0
+     AND NOT a.attisdropped;
 
   IF v_cols IS DISTINCT FROM 'created_at,created_by,generation,id,revoked_at,strategy_id' THEN
     RAISE EXCEPTION 'Migration 164-02 verification failed: strategy_shares column set is "%", expected exactly "created_at,created_by,generation,id,revoked_at,strategy_id". ⛔ D-02: this table must NEVER hold a token, raw or hashed.', v_cols;

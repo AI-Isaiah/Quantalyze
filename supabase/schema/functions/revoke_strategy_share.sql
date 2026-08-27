@@ -37,14 +37,35 @@ AS $$
 DECLARE
   v_rows INTEGER;
 BEGIN
+  -- ⛔ FAIL LOUD for a caller with no authenticated identity (founder ruling
+  -- 2026-08-27), and BEFORE the p_strategy_id convergence exit below — an
+  -- admin client passing NULL must not receive the indistinguishable 0.
+  -- Without this guard a `service_role` caller (BYPASSRLS — and STEP 2 records
+  -- that this feature's recipient lane already reads this table through
+  -- `createAdminClient()`) reaches the UPDATE with NO policy applied, revokes
+  -- ANY tenant's live share and gets `1` back: a silent cross-tenant kill
+  -- switch that reports success. The ownership predicate below closes the same
+  -- hole from the other side; a 0-row return would not be enough on its own,
+  -- because the route maps 0 to a 404 the client reads as SUCCESS.
+  IF auth.uid() IS NULL THEN
+    RAISE EXCEPTION 'revoke_strategy_share: no authenticated user — not callable by a service-role/admin client'
+      USING ERRCODE = 'insufficient_privilege';
+  END IF;
+
   IF p_strategy_id IS NULL THEN
     RETURN 0;   -- nothing to revoke; converges like any other miss
   END IF;
 
+  -- ⭐ `created_by = auth.uid()` is LOAD-BEARING, not a restatement of the
+  -- policy. For an ordinary `authenticated` caller the strategy_shares_owner
+  -- USING clause already scopes this UPDATE; for a BYPASSRLS role it does not,
+  -- and this predicate is then the ONLY thing standing between the caller and
+  -- another tenant's counter. Defense-in-depth behind the guard above.
   UPDATE public.strategy_shares
      SET revoked_at = now(),
          generation = generation + 1
    WHERE strategy_id = p_strategy_id
+     AND created_by = auth.uid()
      AND revoked_at IS NULL;
 
   GET DIAGNOSTICS v_rows = ROW_COUNT;
