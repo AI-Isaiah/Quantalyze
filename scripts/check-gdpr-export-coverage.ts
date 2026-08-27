@@ -505,6 +505,97 @@ function scanSanitizeUserCoverage(): Set<string> {
 }
 
 /**
+ * Blank out everything in a SQL file that is PROSE rather than executable
+ * statement text: `--` line comments, slash-star block comments, and
+ * single-quoted string literals (`''` is the SQL escape for a literal quote,
+ * and doubling keeps the alternating pairing in sync). Block comments nest.
+ *
+ * ⚠️ WHY THIS EXISTS (Phase 164 re-review, MEASURED). The statement scan below
+ * gates an Art. 15/17 parity property, and it used to run over RAW file text.
+ * Prose that merely QUOTES a statement therefore satisfied it. Reviewer's
+ * neuter: delete the live `UPDATE strategy_shares ...` arm (153 bytes) from
+ * migration 20260827130000 and the hook still reported the table covered,
+ * because a header comment (`--   UPDATE strategy_shares`) and two RAISE
+ * EXCEPTION messages quoting the statement verbatim inside string literals fed
+ * the same regex. A gate an engineer can satisfy by describing the work is not
+ * a gate. Note the asymmetry this closes: every verification DO block in this
+ * phase's migrations already strips comments before matching — the TypeScript
+ * hook that gates the same property did not.
+ *
+ * ⚠️ ORDER AND SCOPE MATTER, in both directions:
+ *   - Comments are consumed in the SAME left-to-right pass as literals, not by
+ *     a prior line-based regex sweep. A standalone `--` strip would truncate
+ *     any line where a string literal legitimately contains `--`, silently
+ *     deleting real statements after it on that line.
+ *   - Conversely, an apostrophe inside a comment (`-- don't`) would desync a
+ *     standalone literal sweep. One pass, one state machine, neither hazard.
+ *   - Dollar-quoted regions (`$$ ... $$`) are deliberately NOT treated as
+ *     opaque strings: the sanitize_user function BODY is dollar-quoted, and
+ *     that body is exactly where the real statements live. Dollar quoting is
+ *     transparent here; only `'...'` is blanked.
+ *
+ * Newlines are preserved so line numbers in any downstream diagnostics still
+ * line up with the source file.
+ *
+ * MEASURED on the live sanitize_user corpus: 48 names before, 39 after. All 9
+ * dropped names (`in`, `raises`, `sanitize_user`, `that`, `this`, `to`,
+ * `touches`, `triggers`, `with`) are prose words following the word "UPDATE"
+ * or "DELETE FROM" in a sentence — no migration declares a CREATE TABLE for
+ * any of them, and no real table lost coverage.
+ */
+export function stripSqlProse(sql: string): string {
+  let out = "";
+  let i = 0;
+  const n = sql.length;
+  while (i < n) {
+    if (sql[i] === "-" && sql[i + 1] === "-") {
+      while (i < n && sql[i] !== "\n") i++;
+      continue;
+    }
+    if (sql[i] === "/" && sql[i + 1] === "*") {
+      let depth = 1;
+      i += 2;
+      while (i < n && depth > 0) {
+        if (sql[i] === "/" && sql[i + 1] === "*") {
+          depth++;
+          i += 2;
+          continue;
+        }
+        if (sql[i] === "*" && sql[i + 1] === "/") {
+          depth--;
+          i += 2;
+          continue;
+        }
+        if (sql[i] === "\n") out += "\n";
+        i++;
+      }
+      continue;
+    }
+    if (sql[i] === "'") {
+      i++;
+      while (i < n) {
+        if (sql[i] === "'" && sql[i + 1] === "'") {
+          i += 2;
+          continue;
+        }
+        if (sql[i] === "'") {
+          i++;
+          break;
+        }
+        if (sql[i] === "\n") out += "\n";
+        i++;
+      }
+      // A blank stands in for the literal so adjacent tokens do not fuse.
+      out += " ";
+      continue;
+    }
+    out += sql[i];
+    i++;
+  }
+  return out;
+}
+
+/**
  * Pure helper for tests: extract sanitize-coverage names from a
  * sanitize_user migration's SQL.
  */
@@ -513,15 +604,21 @@ export function extractSanitizeCoverageFromContent(
   covered: Set<string> = new Set(),
 ): Set<string> {
   // Matrix comment-block lines: `-- <table> | <STRATEGY> | ...`
+  // ⚠️ This scan runs on the RAW text on purpose — the matrix IS a comment
+  // block, and a matrix row is a deliberate, documented declaration of the
+  // table's erasure strategy. Only the STATEMENT scan below is prose-blind.
   const matrixLineRe =
     /^--\s+([a-z_]+)\s+\|\s+(ANONYMIZE|PURGE|PRESERVE|CASCADE|SKIPPED)\b/gim;
   let m: RegExpExecArray | null;
   while ((m = matrixLineRe.exec(content)) !== null) {
     covered.add(m[1]);
   }
-  // SQL body: any DELETE FROM <table> or UPDATE <table>.
+  // SQL body: any DELETE FROM <table> or UPDATE <table>. Comments and string
+  // literals are blanked first, so only EXECUTABLE statements count — see
+  // stripSqlProse() for the neuter that proved this was necessary.
+  const executable = stripSqlProse(content);
   const stmtRe = /\b(?:DELETE\s+FROM|UPDATE)\s+(?:public\.)?([a-z_]+)\b/gi;
-  while ((m = stmtRe.exec(content)) !== null) {
+  while ((m = stmtRe.exec(executable)) !== null) {
     const table = m[1];
     // Drop auth.* (not in the public-schema manifest scope).
     if (table === "users" || table === "sessions" || table === "refresh_tokens") {

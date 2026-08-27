@@ -31,6 +31,7 @@ import {
   EXCLUDED_TABLES,
   extractManifestEntries,
   extractManifestTables,
+  extractSanitizeCoverageFromContent,
   extractUserTablesFromMigration,
 } from "../../scripts/check-gdpr-export-coverage";
 import { USER_EXPORT_TABLES } from "@/lib/gdpr-export-manifest";
@@ -1012,5 +1013,139 @@ describe("B13: typed-manifest coverage derivation (live USER_EXPORT_TABLES)", ()
         `derived coverage set is missing manifest entry "${spec.table}"`,
       ).toBe(true);
     }
+  });
+});
+
+/**
+ * Phase 164 re-review (2026-08-27) — the Art. 15/17 parity gate must not be
+ * satisfiable by PROSE that merely quotes a statement.
+ *
+ * MEASURED before the fix. The reviewer deleted the live 5-line
+ * `UPDATE strategy_shares ...` arm (153 bytes) from migration 20260827130000
+ * and re-ran the hook: 0 live statements remained, and the hook still reported
+ * `strategy_shares` Art. 17-covered, because
+ * `extractSanitizeCoverageFromContent` scanned RAW file text. A header comment
+ * (`--   UPDATE strategy_shares`) and two RAISE EXCEPTION messages quoting the
+ * arm verbatim inside string literals all matched the statement regex. An
+ * engineer could satisfy an erasure gate by DESCRIBING the erasure.
+ *
+ * The fix blanks comments and single-quoted literals before the statement
+ * scan. Re-measured with the same neuter: prose feeds no longer count, and the
+ * table falls out of the covered set once its matrix row is removed too.
+ *
+ * ⚠️ WHAT IS STILL DELIBERATELY ACCEPTED. A matrix row (`-- <table> |
+ * ANONYMIZE | ...`) IS a comment and DOES still count — that is the documented
+ * design (see the docblock on scanSanitizeUserCoverage): the matrix is the
+ * declared erasure policy, and some strategies (PRESERVE, CASCADE) have no
+ * statement to find. Only the STATEMENT limb is prose-blind now. The guarantee
+ * that the live UPDATE arm actually exists is enforced separately, by the
+ * verification DO block inside migration 20260827130000 itself.
+ *
+ * The over-stripping cases below matter as much as the under-stripping ones: a
+ * stripper that also blinded the scan to real statements would make this gate
+ * vacuous in the opposite direction, and every case here would still pass.
+ */
+describe("sanitize parity: prose cannot satisfy the statement scan", () => {
+  it("a comment quoting an UPDATE does not count as coverage", () => {
+    const sql = [
+      "-- This migration is where we would normally write:",
+      "--   UPDATE phantom_table SET revoked_at = now() WHERE created_by = p_user_id;",
+      "-- ...but we have not written it yet.",
+    ].join("\n");
+    expect(
+      extractSanitizeCoverageFromContent(sql).has("phantom_table"),
+      "a commented-out UPDATE was accepted as proof of an Art. 17 erasure " +
+        "policy — the parity gate is satisfiable by describing the work",
+    ).toBe(false);
+  });
+
+  it("a statement quoted inside a string literal does not count as coverage", () => {
+    // The exact shape that kept strategy_shares green under the neuter: a
+    // RAISE EXCEPTION whose message names the arm it is checking for.
+    const sql = [
+      "DO $$",
+      "BEGIN",
+      "  IF v_body !~* 'UPDATE phantom_table' THEN",
+      "    RAISE EXCEPTION 'sanitize_user lacks the live `UPDATE phantom_table SET revoked_at = now()` arm.';",
+      "  END IF;",
+      "END $$;",
+    ].join("\n");
+    expect(
+      extractSanitizeCoverageFromContent(sql).has("phantom_table"),
+      "an UPDATE quoted inside a string literal was accepted as proof of an " +
+        "Art. 17 erasure policy",
+    ).toBe(false);
+  });
+
+  it("a REAL statement inside a dollar-quoted function body still counts", () => {
+    // Anti-over-strip #1. The sanitize_user body IS dollar-quoted, so treating
+    // `$$ ... $$` as an opaque literal would blind the scan to every real
+    // statement in the repo and leave the two cases above passing vacuously.
+    const sql = [
+      "CREATE OR REPLACE FUNCTION sanitize_user(p_user_id UUID) RETURNS void AS $$",
+      "BEGIN",
+      "  UPDATE phantom_table SET revoked_at = now() WHERE created_by = p_user_id;",
+      "  DELETE FROM other_phantom WHERE user_id = p_user_id;",
+      "END;",
+      "$$ LANGUAGE plpgsql;",
+    ].join("\n");
+    const covered = extractSanitizeCoverageFromContent(sql);
+    expect(covered.has("phantom_table")).toBe(true);
+    expect(covered.has("other_phantom")).toBe(true);
+  });
+
+  it("a string literal containing `--` does not swallow a real statement after it", () => {
+    // Anti-over-strip #2. A naive line-based `--` sweep run BEFORE literal
+    // handling would treat the `--` inside the literal as a comment start and
+    // delete the rest of the line, including the real statement.
+    const sql =
+      "UPDATE audit_note SET body = 'redacted -- by request'; DELETE FROM phantom_table WHERE user_id = p_user_id;";
+    const covered = extractSanitizeCoverageFromContent(sql);
+    expect(covered.has("audit_note")).toBe(true);
+    expect(
+      covered.has("phantom_table"),
+      "a real DELETE was lost because a string literal contained `--` — the " +
+        "stripper is eating executable SQL",
+    ).toBe(true);
+  });
+
+  it("an apostrophe inside a comment does not desync literal pairing", () => {
+    // Anti-over-strip #3. `don't` inside a comment leaves one unmatched quote.
+    // Handled in a prior pass it would desync every literal after it and
+    // swallow the real statement below.
+    // The trailing literal is what makes this case able to FAIL: with only one
+    // stray quote there is nothing to pair it with, so a literal-first sweep
+    // would find no match and the case would pass vacuously.
+    const sql = [
+      "-- we don't purge here, we revoke",
+      "UPDATE phantom_table SET revoked_at = now() WHERE created_by = p_user_id;",
+      "UPDATE audit_note SET note = 'done';",
+    ].join("\n");
+    expect(
+      extractSanitizeCoverageFromContent(sql).has("phantom_table"),
+      "a real UPDATE was lost after a comment containing an apostrophe",
+    ).toBe(true);
+  });
+
+  it("non-vacuity: the live corpus still reports strategy_shares covered", () => {
+    // The fix must close the prose hole WITHOUT dropping the real arm that
+    // migration 20260827130000 actually executes. If this flips false, the
+    // stripper has become too aggressive against real SQL.
+    const dir = join(REPO_ROOT, MIGRATIONS_REL);
+    const covered = new Set<string>();
+    for (const filename of readdirSync(dir).filter(
+      (f) => f.endsWith(".sql") && /sanitize_user/i.test(f),
+    )) {
+      extractSanitizeCoverageFromContent(
+        readFileSync(join(dir, filename), "utf8"),
+        covered,
+      );
+    }
+    expect(covered.has("strategy_shares")).toBe(true);
+    expect(
+      covered.size,
+      "the sanitize coverage set collapsed — the prose stripper is removing " +
+        "real statements, not just prose",
+    ).toBeGreaterThan(30);
   });
 });
