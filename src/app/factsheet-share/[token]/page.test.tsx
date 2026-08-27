@@ -78,7 +78,11 @@ const sharesReadMock = vi.hoisted(() =>
     // on an error — {data: null, error} without throwing. Typing it non-null
     // here would make the "DB error" case below unwritable, which is exactly
     // the case most likely to regress.
-    data: [] as Array<{ strategy_id: string; generation: number }> | null,
+    data: [] as Array<{
+      strategy_id: string;
+      generation: number;
+      nonce: string;
+    }> | null,
     error: null as { message?: string } | null,
   })),
 );
@@ -140,14 +144,33 @@ vi.mock("@/app/factsheet/[id]/v2/FactsheetView", () => ({
 
 const STRATEGY_ID = "11111111-2222-3333-4444-555555555555";
 const GENERATION = 3;
+
+/**
+ * The share row's MAC witness (founder ruling 2026-08-27). It joined the
+ * pre-image so that a row destroyed and re-created — via the `strategies`
+ * ON DELETE CASCADE, which no control on `strategy_shares` can observe — lands
+ * in a token space disjoint from every token ever issued. The route must SELECT
+ * it and pass it to `verifyShareToken`, which is what the projection pin and the
+ * resolve tests below jointly enforce.
+ */
+const NONCE = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+
 /** Derived under the test-setup fixture secret — a genuinely valid token. */
-const VALID_TOKEN = deriveShareToken(STRATEGY_ID, GENERATION);
+const VALID_TOKEN = deriveShareToken(STRATEGY_ID, NONCE, GENERATION);
 
 /** A well-formed token that matches no active row. */
 const UNKNOWN_TOKEN = deriveShareToken(
   "99999999-8888-7777-6666-555555555555",
+  NONCE,
   1,
 );
+
+/** One active-share candidate row, in the projection the route asks for. */
+const ROW = {
+  strategy_id: STRATEGY_ID,
+  generation: GENERATION,
+  nonce: NONCE,
+};
 
 async function loadPage() {
   return (await import("./page")).default;
@@ -180,7 +203,7 @@ beforeEach(() => {
 describe("recipient render — a valid token shows the factsheet in recipient mode", () => {
   beforeEach(() => {
     sharesReadMock.mockResolvedValue({
-      data: [{ strategy_id: STRATEGY_ID, generation: GENERATION }],
+      data: [ROW],
       error: null,
     });
   });
@@ -209,24 +232,56 @@ describe("recipient render — a valid token shows the factsheet in recipient mo
   it("scans only NON-REVOKED rows — the revoke filter is in the query, not in JS", async () => {
     await renderPage(VALID_TOKEN);
     const [cols, isCol, isVal] = sharesReadMock.mock.calls[0];
-    expect(cols).toBe("strategy_id, generation");
+    expect(cols).toBe("strategy_id, generation, nonce");
     expect(isCol).toBe("revoked_at");
     expect(isVal).toBeNull();
   });
 
   it("a token for a PREVIOUS generation of the same strategy no longer resolves (revocation works)", async () => {
     // The row says generation 3; the recipient holds a generation-2 link.
-    const stale = deriveShareToken(STRATEGY_ID, GENERATION - 1);
+    const stale = deriveShareToken(STRATEGY_ID, NONCE, GENERATION - 1);
     const paths = await renderExpectingRedirect(stale);
     expect(paths).toEqual(["/factsheet-share/gone"]);
     expect(buildMock).not.toHaveBeenCalled();
+  });
+
+  it("a token minted against a DESTROYED row does not resolve against the row that replaced it — at the SAME generation", async () => {
+    // ⭐ THE CASCADE-REBIRTH PROPERTY, AT THE ROUTE. `strategy_shares.strategy_id`
+    // cascades from `strategies`, and `strategies.id` is client-suppliable, so a
+    // share row can be destroyed and re-created at the same strategy id — and
+    // the replacement starts at generation 1 again, because the counter really
+    // was discarded. The generation arm above therefore CANNOT catch this: both
+    // rows can be at the same generation, so the two tokens differ only through
+    // the nonce.
+    //
+    // Held at the SAME generation deliberately. If the route ever stopped
+    // passing `candidate.nonce` into `verifyShareToken`, the previous arm would
+    // still pass (generations differ there) and this one would fail — which is
+    // what makes it an arm rather than a restatement.
+    const REBORN = { ...ROW, nonce: "ffffffff-0000-1111-2222-333333333333" };
+    sharesReadMock.mockResolvedValue({ data: [REBORN], error: null });
+
+    const paths = await renderExpectingRedirect(VALID_TOKEN);
+    expect(paths).toEqual(["/factsheet-share/gone"]);
+    expect(buildMock).not.toHaveBeenCalled();
+
+    // Positive control on the SAME shape, so the arm above cannot be passing
+    // because the lane is simply broken: the reborn row's OWN token resolves.
+    vi.clearAllMocks();
+    checkLimitMock.mockResolvedValue({ success: true });
+    buildMock.mockResolvedValue({ strategyId: "stub" } as never);
+    sharesReadMock.mockResolvedValue({ data: [REBORN], error: null });
+    const html = await renderPage(
+      deriveShareToken(STRATEGY_ID, REBORN.nonce, GENERATION),
+    );
+    expect(html).toContain('data-testid="factsheet-view"');
   });
 });
 
 describe("every miss class lands on a genuine 410, never notFound()", () => {
   it("an UNKNOWN but well-formed token redirects to /factsheet-share/gone", async () => {
     sharesReadMock.mockResolvedValue({
-      data: [{ strategy_id: STRATEGY_ID, generation: GENERATION }],
+      data: [ROW],
       error: null,
     });
     const paths = await renderExpectingRedirect(UNKNOWN_TOKEN);
@@ -288,7 +343,7 @@ describe("rate limiting runs FIRST (the enumeration defence)", () => {
 describe("a valid token whose payload is not built yet is PENDING, not dead", () => {
   it("renders the pending card rather than redirecting to gone", async () => {
     sharesReadMock.mockResolvedValue({
-      data: [{ strategy_id: STRATEGY_ID, generation: GENERATION }],
+      data: [ROW],
       error: null,
     });
     buildMock.mockResolvedValue(null);

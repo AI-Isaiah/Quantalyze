@@ -43,15 +43,42 @@
 -- (ANON 1c-grant,
 -- ANON 1d-grant, SERVICE-ROLE 1-grant).
 --
+-- ⭐ PER-ARM RED-UNDER (standing requirement, founder-adopted 2026-08-27).
+-- Every arm added by the nonce change carries an adjacent
+-- `-- RED-UNDER: <the exact mutation that reddens THIS arm>` comment, and each
+-- of those mutations was performed individually on the throwaway cluster with
+-- that arm observed as the FIRST failure — not merely the batch observed red,
+-- which is how six structurally-unfailable arms entered this file across two
+-- earlier fix rounds. Where an arm could NOT be made the first failure, that is
+-- recorded at the arm instead of papered over (see SHAPE 1's note on a deleted
+-- `nonce`, and NONCE 5c).
+--
 -- WHAT THIS FILE ASSERTS (content-by-field; a 200 / a row count proves nothing)
 -- ---------------------------------------------------------------------------
---   * SHAPE  — the column set is EXACTLY the six DDL columns, so no
+--   * SHAPE  — the column set is EXACTLY the seven DDL columns, so no
 --     token/token_hash/secret column has appeared at rest (D-02, T-164-07);
---     both RPCs are SECURITY INVOKER with no PUBLIC EXECUTE; `authenticated`
---     holds EXACTLY {INSERT, SELECT, UPDATE} (so DELETE **and TRUNCATE**, which
---     is exempt from RLS, are both closed); and both RPC bodies still carry the
---     `auth.uid() IS NULL` fail-loud plus revoke's own `created_by = auth.uid()`
---     predicate.
+--     `nonce` is uuid NOT NULL DEFAULT gen_random_uuid() (server-generated, so
+--     no client ever supplies it) and `generation` is BIGINT; both RPCs are
+--     SECURITY INVOKER with no PUBLIC EXECUTE; `authenticated` holds EXACTLY
+--     {SELECT} at TABLE level and EXACTLY
+--     {INSERT(strategy_id, created_by), UPDATE(revoked_at, generation)} at
+--     COLUMN level (so DELETE **and TRUNCATE**, which is exempt from RLS, are
+--     both closed, AND `nonce` is unwritable); create_strategy_share NEVER
+--     names `nonce` as a write target but DOES return it; and both RPC bodies
+--     still carry the `auth.uid() IS NULL` fail-loud plus revoke's own
+--     `created_by = auth.uid()` predicate.
+--   * NONCE  — the founder ruling of 2026-08-27. The MAC pre-image gained an
+--     immutable per-row nonce, and the arms prove BOTH halves of it, because
+--     either alone closes nothing: the owner can neither UPDATE nor INSERT a
+--     nonce of their choosing (GRANT layer, message-pinned to `permission
+--     denied` so trigger rule (0c) cannot mask it), service_role — which
+--     bypasses grants AND RLS — is refused by rule (0c) instead, and, the
+--     positive property everything rests on, a row DESTROYED by the
+--     `strategies` ON DELETE CASCADE and re-created at the SAME uuid comes back
+--     with a DIFFERENT nonce, so its tokens are disjoint from every token ever
+--     issued. Reuse and reactivation return the SAME nonce (SHARE-01 would
+--     otherwise break through a column that did not exist when OWNER 2a was
+--     written).
 --   * ANON   — blocked at BOTH layers: the grant layer (42501 on select and on
 --     RPC execute) AND, independently, the policy layer (0 rows even when
 --     SELECT is temporarily granted inside this rolled-back transaction).
@@ -137,6 +164,21 @@
 --   3. SANITIZE 1 runs LAST — it anonymizes tenant A's profile and strategies
 --      and bans the auth user, so every arm that needs A intact must precede
 --      it.
+--   4. `strat_a3` is SACRIFICIAL and belongs to NONCE 4 alone. That arm DELETEs
+--      it and re-creates it at the same uuid to reproduce the cascade-rebirth
+--      for real, so no other arm may use it or assume its share row survives.
+--
+-- ⚠️ TWO ARMS CHANGED WHICH LAYER THEY MEASURE at the 2026-08-27 nonce ruling,
+-- and the change is recorded here because a reader who remembers the old file
+-- will otherwise think they were weakened. `strategy_id` and `created_at` are
+-- absent from the column-scoped UPDATE grant, so for an ordinary
+-- `authenticated` caller the re-point (TRIGGER 3) and the provenance rewrite
+-- (TRIGGER 4) are now refused at the GRANT layer and never reach trigger rules
+-- (0a)/(0b). Those arms therefore pin `permission denied` now — a real and
+-- strictly earlier defence — and the trigger rules are pinned behaviourally
+-- against `service_role` by the new TRIGGER 3d / TRIGGER 4c, which is the one
+-- caller no grant binds. Neither arm subsumes the other, and dropping either
+-- would leave a rule unproven.
 --
 -- Usage:
 --   psql "$TEST_SUPABASE_DB_URL" -v ON_ERROR_STOP=1 -f \
@@ -162,12 +204,15 @@ DECLARE
   strat_a      UUID;
   strat_a2     UUID;
   strat_b      UUID;
-  gen_mint     INTEGER;
-  gen_reuse    INTEGER;
-  gen_revoked  INTEGER;
-  gen_remint   INTEGER;
-  gen_final    INTEGER;
-  gen_seen     INTEGER[] := '{}';
+  -- ⚠️ BIGINT, matching the widened column (SHAPE 1c). Declaring these INTEGER
+  -- would re-impose the 2^31 ceiling inside the test harness itself, so a
+  -- future overflow arm would fail on the VARIABLE rather than on the column.
+  gen_mint     BIGINT;
+  gen_reuse    BIGINT;
+  gen_revoked  BIGINT;
+  gen_remint   BIGINT;
+  gen_final    BIGINT;
+  gen_seen     BIGINT[] := '{}';
   affected     INTEGER;
   row_cnt      INTEGER;
   raised       BOOLEAN;
@@ -182,14 +227,28 @@ DECLARE
   v_privs      TEXT[];
   v_create_s   TEXT;
   v_revoke_s   TEXT;
-  gen_b        INTEGER;
-  gen_b_after  INTEGER;
+  gen_b        BIGINT;
+  gen_b_after  BIGINT;
   b_by         UUID;
   b_revoked    TIMESTAMPTZ;
-  gen_pre_san  INTEGER;
+  gen_pre_san  BIGINT;
   san_ok       BOOLEAN;
-  gen_probe    INTEGER;
+  gen_probe    BIGINT;
   i            INTEGER;
+  -- Nonce / width introspection and the behavioural nonce arms.
+  nonce_notnull  BOOLEAN;
+  nonce_type     TEXT;
+  nonce_default  TEXT;
+  gen_type       TEXT;
+  v_colgrants    TEXT;
+  nonce_mint     UUID;
+  nonce_reuse    UUID;
+  nonce_after    UUID;
+  nonce_a3_pre   UUID;
+  nonce_a3_post  UUID;
+  strat_a3       UUID;
+  v_create_res   TEXT;
+  v_trigfn_s     TEXT;
 BEGIN
   -- ----- SEED (seeding/service-role context — bypasses RLS) ---------------
   -- Both strategies are status='private': an unpublished strategy is the ONLY
@@ -213,6 +272,15 @@ BEGIN
   INSERT INTO strategies (user_id, name, status, strategy_types, subtypes, markets, supported_exchanges)
   VALUES (uid_a, 'strategy-shares A never-shared strategy', 'private', '{}', '{}', '{}', ARRAY['binance'])
   RETURNING id INTO strat_a2;
+
+  -- A THIRD A-owned strategy, used by NONCE 4 alone. It is deliberately
+  -- SACRIFICIAL: that arm DELETEs it and re-creates it at the same uuid to
+  -- reproduce the cascade-rebirth attack for real. Nothing else may depend on
+  -- its share row surviving, and no other arm may share it — a re-created
+  -- strategy is exactly the state the rest of this file does not expect.
+  INSERT INTO strategies (user_id, name, status, strategy_types, subtypes, markets, supported_exchanges)
+  VALUES (uid_a, 'strategy-shares A cascade-rebirth strategy', 'private', '{}', '{}', '{}', ARRAY['binance'])
+  RETURNING id INTO strat_a3;
 
   INSERT INTO auth.users (id, instance_id, email, created_at, updated_at)
   VALUES (uid_b, '00000000-0000-0000-0000-000000000000',
@@ -248,8 +316,58 @@ BEGIN
    WHERE a.attrelid = 'public.strategy_shares'::regclass
      AND a.attnum > 0
      AND NOT a.attisdropped;
-  IF v_cols IS DISTINCT FROM 'created_at,created_by,generation,id,revoked_at,strategy_id' THEN
-    RAISE EXCEPTION 'TEST FAILED (SHAPE 1): strategy_shares columns are "%", expected exactly "created_at,created_by,generation,id,revoked_at,strategy_id". ⛔ D-02: this table must NEVER hold a token, raw or hashed — a leak must yield only a uuid, an int and timestamps.', v_cols;
+  --
+  -- ⚠️ `nonce` IS IN THIS SET AND IS NOT A TOKEN. D-02's line is between a
+  -- value that ON ITS OWN reproduces or verifies a working link (a token, raw
+  -- or hashed — forbidden) and a MAC *input* that derives nothing without
+  -- SHARE_TOKEN_SECRET, which is not in this database. A leak of this table
+  -- still yields only uuids, an integer and timestamps.
+  -- RED-UNDER: add a `token_hash TEXT` column to the STEP 1 CREATE TABLE in
+  --            migration 20260827120000.
+  IF v_cols IS DISTINCT FROM 'created_at,created_by,generation,id,nonce,revoked_at,strategy_id' THEN
+    RAISE EXCEPTION 'TEST FAILED (SHAPE 1): strategy_shares columns are "%", expected exactly "created_at,created_by,generation,id,nonce,revoked_at,strategy_id". ⛔ D-02: this table must NEVER hold a token, raw or hashed — a leak must yield only uuids, an int and timestamps.', v_cols;
+  END IF;
+
+  -- ======================================================================
+  -- SHAPE 1b: the nonce column is NOT NULL with a SERVER-SIDE default
+  -- ======================================================================
+  -- SHAPE 1 proves the column EXISTS. It says nothing about whether the value
+  -- is server-generated, and that is the whole property: a nullable nonce, or
+  -- one without a DEFAULT, would have to be supplied BY THE CLIENT — which is
+  -- precisely the write the column grants exist to forbid, arriving through the
+  -- front door. The two failures are indistinguishable to SHAPE 1.
+  -- RED-UNDER: drop `DEFAULT gen_random_uuid()` from the nonce column in the
+  --            STEP 1 CREATE TABLE.
+  SELECT a.attnotnull, format_type(a.atttypid, a.atttypmod),
+         COALESCE(pg_get_expr(d.adbin, d.adrelid), '(none)')
+    INTO nonce_notnull, nonce_type, nonce_default
+    FROM pg_attribute a
+    LEFT JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum
+   WHERE a.attrelid = 'public.strategy_shares'::regclass AND a.attname = 'nonce';
+  IF nonce_type IS DISTINCT FROM 'uuid'
+     OR nonce_notnull IS NOT TRUE
+     OR nonce_default <> 'gen_random_uuid()' THEN
+    RAISE EXCEPTION 'TEST FAILED (SHAPE 1b): strategy_shares.nonce is (type=%, notnull=%, default=%), expected (uuid, true, gen_random_uuid()). The nonce must be SERVER-generated and mandatory: without the DEFAULT the value has to come from the client on every INSERT, which is the exact write `GRANT INSERT (strategy_id, created_by)` refuses — so mint would break for every owner, and the "fix" would be to grant INSERT(nonce), reopening the delete-and-recreate resurrection family. Without NOT NULL a row can carry a NULL witness, and every such row shares one degenerate token space.',
+      nonce_type, nonce_notnull, nonce_default;
+  END IF;
+
+  -- ======================================================================
+  -- SHAPE 1c: generation is BIGINT — HEADROOM, and NOT the N1 fix
+  -- ======================================================================
+  -- ⛔ Read the failure message before concluding anything from a green here.
+  -- Widening the counter buys DISTANCE to the overflow ceiling, nothing else. A
+  -- client that can WRITE `generation` reaches 2^63-1 as easily as 2^31-1, and
+  -- the wedge that follows is identical and still unrecoverable without DDL.
+  -- The INSERT half of that write access is closed (SHAPE 3b: `generation` is
+  -- absent from the INSERT grant); the UPDATE half — a bounded-increment rule —
+  -- is DEFERRED and is a merge gate for plan 164-03.
+  -- RED-UNDER: change `generation BIGINT` back to `generation INTEGER` in the
+  --            STEP 1 CREATE TABLE.
+  SELECT format_type(a.atttypid, a.atttypmod) INTO gen_type
+    FROM pg_attribute a
+   WHERE a.attrelid = 'public.strategy_shares'::regclass AND a.attname = 'generation';
+  IF gen_type IS DISTINCT FROM 'bigint' THEN
+    RAISE EXCEPTION 'TEST FAILED (SHAPE 1c): strategy_shares.generation is %, expected bigint. The widen is instant on an empty table and a full table REWRITE once rows exist, which is why it was pulled forward; reverting it re-introduces an INT4 ceiling that a single `PATCH {"generation": 2147483647}` can reach, after which revoke_strategy_share errors `out of range` — and the GDPR Art. 17 arm in migration 20260827130000 is the SAME statement, so the entire erasure aborts with no operator remedy.', gen_type;
   END IF;
 
   -- ======================================================================
@@ -283,7 +401,7 @@ BEGIN
   PERFORM public._assert_no_public_execute('public.revoke_strategy_share(uuid)');
 
   -- ======================================================================
-  -- SHAPE 3: `authenticated` holds EXACTLY {INSERT, SELECT, UPDATE}
+  -- SHAPE 3: `authenticated` holds EXACTLY {SELECT} at TABLE level
   -- ======================================================================
   -- ⛔ The posture must be POSITIVE-ONLY. Revoking DELETE by name (the original
   -- migration's approach) leaves the rest of Supabase's inherited GRANT ALL
@@ -298,6 +416,18 @@ BEGIN
   -- the next privilege Postgres adds, none of which an enumeration of
   -- forbidden names ever would.
   --
+  -- ⭐ THE EXPECTED SET NARROWED TO {SELECT} AT THE FOUNDER RULING OF
+  -- 2026-08-27, and the reason is the nonce. A TABLE-level INSERT or UPDATE
+  -- grant covers EVERY column, present and future — including `nonce`, whose
+  -- unwritability is the entire second half of the fix. MEASURED (PostgreSQL
+  -- 16) with a table-wide INSERT grant: an owner SELECTs their own nonce under
+  -- RLS, DELETEs their `strategies` row so the CASCADE takes the share row,
+  -- re-INSERTs the strategy at the same client-suppliable uuid, and re-inserts
+  -- the share row VERBATIM — the nonce came back bit-identical and the revoked
+  -- token derives again. The write grants are therefore COLUMN-scoped, pinned
+  -- separately by SHAPE 3b, and this arm is what stops a table-level grant from
+  -- silently re-covering everything.
+  --
   -- Read via aclexplode(pg_class.relacl), NOT information_schema.role_table_grants:
   -- that view is privilege-filtered and can under-report, which for an
   -- EXACT-SET assertion means a false GREEN direction is impossible but a
@@ -311,8 +441,47 @@ BEGIN
     JOIN pg_roles r ON r.oid = acl.grantee
    WHERE c.oid = 'public.strategy_shares'::regclass
      AND r.rolname = 'authenticated';
-  IF v_privs IS DISTINCT FROM ARRAY['INSERT', 'SELECT', 'UPDATE']::TEXT[] THEN
-    RAISE EXCEPTION 'TEST FAILED (SHAPE 3): `authenticated` holds privilege set % on strategy_shares, expected exactly {INSERT,SELECT,UPDATE}. DELETE lets one tenant discard their counter and resurrect their own revoked tokens; TRUNCATE — EXEMPT FROM RLS — does it for EVERY tenant at once. Migration 20260827120000 STEP 2 must REVOKE ALL then GRANT the positive set.', COALESCE(v_privs::TEXT, '(none)');
+  -- RED-UNDER: restore `GRANT SELECT, INSERT, UPDATE ON strategy_shares TO
+  --            authenticated` in migration 20260827120000 STEP 2.
+  IF v_privs IS DISTINCT FROM ARRAY['SELECT']::TEXT[] THEN
+    RAISE EXCEPTION 'TEST FAILED (SHAPE 3): `authenticated` holds TABLE-level privilege set % on strategy_shares, expected exactly {SELECT}. A table-level INSERT or UPDATE covers EVERY column including `nonce` — MEASURED: with it, an owner re-inserts a recorded nonce verbatim after cascading the row away and the revoked token derives again. DELETE lets one tenant discard their counter; TRUNCATE — EXEMPT FROM RLS — does it for EVERY tenant at once. Migration 20260827120000 STEP 2 must REVOKE ALL then GRANT SELECT at table level and the writes per COLUMN.', COALESCE(v_privs::TEXT, '(none)');
+  END IF;
+
+  -- ======================================================================
+  -- SHAPE 3b: the COLUMN-level write grants are EXACTLY the four allowed
+  -- ======================================================================
+  -- ⛔ SHAPE 3 CANNOT SEE THIS AND IS NOT A SUBSTITUTE. Table grants live in
+  -- `pg_class.relacl`; COLUMN grants live in `pg_attribute.attacl` and are
+  -- INVISIBLE to relacl. A single `GRANT INSERT (nonce) ON strategy_shares TO
+  -- authenticated` leaves SHAPE 3 reading a serene `{SELECT}` while the entire
+  -- fix is undone. That grant is also the exact edit a future engineer reaches
+  -- for the moment `create_strategy_share` starts failing 42501 because someone
+  -- named `nonce` in its INSERT — which is why SHAPE 4d pins the other side of
+  -- the same coupling.
+  --
+  -- The set is asserted EXACTLY, in both directions:
+  --   * `nonce` must be ABSENT — its unwritability is what makes a
+  --     destroyed-and-recreated row land in a disjoint token space;
+  --   * `generation` and `revoked_at` must be absent from the INSERT half —
+  --     the trigger is BEFORE **UPDATE** only, so a fresh row is seen by no
+  --     rule at all and a client could otherwise choose its starting counter
+  --     (pre-wedging the overflow of SHAPE 1c) or pre-stamp a tombstone;
+  --   * `strategy_id` and `created_by` must be PRESENT on INSERT, and
+  --     `revoked_at`/`generation` on UPDATE, or both SECURITY INVOKER RPCs stop
+  --     working for every owner (mint, reuse and revoke all write as the
+  --     caller). This arm is the positive control for its own negative.
+  -- RED-UNDER: add `GRANT INSERT (nonce) ON strategy_shares TO authenticated`
+  --            to migration 20260827120000 STEP 2.
+  SELECT string_agg(a.attname || ':' || acl.privilege_type, ',' ORDER BY a.attname, acl.privilege_type)
+    INTO v_colgrants
+    FROM pg_attribute a
+    CROSS JOIN LATERAL aclexplode(a.attacl) AS acl
+    JOIN pg_roles r ON r.oid = acl.grantee
+   WHERE a.attrelid = 'public.strategy_shares'::regclass
+     AND a.attnum > 0 AND NOT a.attisdropped
+     AND r.rolname = 'authenticated';
+  IF v_colgrants IS DISTINCT FROM 'created_by:INSERT,generation:UPDATE,revoked_at:UPDATE,strategy_id:INSERT' THEN
+    RAISE EXCEPTION 'TEST FAILED (SHAPE 3b): `authenticated` holds COLUMN-level grants "%" on strategy_shares, expected exactly "created_by:INSERT,generation:UPDATE,revoked_at:UPDATE,strategy_id:INSERT". ⛔ A grant naming `nonce` re-opens the whole delete-and-recreate resurrection family: the owner reads their nonce under RLS, cascades the row away via `strategies`, and re-inserts it verbatim (MEASURED — accepted, bit-identical). ⛔ An INSERT grant naming `generation` or `revoked_at` re-opens R3''s INSERT half, which NO trigger covers because the trigger is BEFORE UPDATE only. ⚠️ And a MISSING grant is equally fatal in the other direction — both RPCs are SECURITY INVOKER and write as the caller, so mint or revoke would 42501 for every owner.', COALESCE(v_colgrants, '(none)');
   END IF;
 
   -- ======================================================================
@@ -350,6 +519,57 @@ BEGIN
   END IF;
 
   -- ======================================================================
+  -- SHAPE 4d: create_strategy_share NEVER NAMES `nonce` as a write target
+  -- ======================================================================
+  -- ⭐ THIS IS THE OTHER HALF OF SHAPE 3b, AND THE PAIR IS THE POINT. SHAPE 3b
+  -- proves the PRIVILEGE on `nonce` is absent; this proves the STATEMENT does
+  -- not need it. They fail on opposite edits, and the failure mode they jointly
+  -- prevent is a two-step one that neither catches alone: someone adds `nonce`
+  -- to the INSERT column list (harmless-looking, "be explicit"), every owner's
+  -- mint starts returning 42501 because PostgreSQL checks column privilege
+  -- against the columns a statement NAMES, and the obvious remedy is to widen
+  -- the grant — at which point the resurrection family is back and SHAPE 3b is
+  -- the only thing left objecting.
+  --
+  -- Comment-stripped, like every body probe here: STEP 3's body discusses the
+  -- nonce at length in prose, and an unstripped regex would fire on the
+  -- COMMENT rather than on code.
+  -- RED-UNDER: change STEP 3's INSERT to
+  --            `INSERT INTO public.strategy_shares (strategy_id, created_by, nonce)`.
+  IF v_create_s ~* 'INSERT\s+INTO\s+public\.strategy_shares\s*\([^)]*\mnonce\M'
+     OR v_create_s ~* 'SET[^;]*\mnonce\s*=' THEN
+    RAISE EXCEPTION 'TEST FAILED (SHAPE 4d): create_strategy_share NAMES `nonce` as a write target. It is DEFAULT-populated and read back through RETURNING precisely so the column grant can exclude it; naming it makes this SECURITY INVOKER function fail 42501 for every owner, and the natural "fix" (GRANT INSERT (nonce)) restores the delete-and-recreate resurrection the nonce exists to close.';
+  END IF;
+
+  -- ======================================================================
+  -- SHAPE 4e: ...but it MUST hand the nonce back
+  -- ======================================================================
+  -- Catalog-based rather than a text probe, because the OUT shape is the
+  -- contract the Node caller is typed against: a body that read the nonce into
+  -- a local and dropped it would satisfy any regex over the text while the mint
+  -- route received nothing to derive from.
+  --
+  -- ⚠️ It ALSO detects a conversion to OUT parameters, which is not cosmetic:
+  -- MEASURED (PostgreSQL 16), OUT parameters change
+  -- `pg_get_function_identity_arguments` to
+  -- `p_strategy_id uuid, OUT generation bigint, OUT nonce uuid`, and every
+  -- lookup in this file and in the migration that matches `= 'p_strategy_id
+  -- uuid'` then silently returns ZERO ROWS — SHAPE 4a is what would catch it,
+  -- but only because 4a asserts non-NULL. `RETURNS TABLE` leaves identity
+  -- arguments byte-unchanged, which is why it is the shape that shipped.
+  -- RED-UNDER: change STEP 3's signature to `RETURNS TABLE (generation BIGINT)`
+  --            (and drop the matching RETURNING/INTO targets).
+  SELECT pg_get_function_result(p.oid) INTO v_create_res
+    FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+   WHERE n.nspname = 'public' AND p.proname = 'create_strategy_share'
+     AND pg_get_function_identity_arguments(p.oid) = 'p_strategy_id uuid';
+  IF v_create_res IS NULL
+     OR v_create_res !~* 'TABLE\s*\([^)]*\mnonce\s+uuid\M'
+     OR v_create_res !~* 'TABLE\s*\([^)]*\mgeneration\s+bigint\M' THEN
+    RAISE EXCEPTION 'TEST FAILED (SHAPE 4e): create_strategy_share does not declare `TABLE(generation bigint, nonce uuid)` — its declared result is "%". The token is HMAC(secret, over the tag "qz.strategy-share.v1" then strategy_id then nonce then generation — spelled without pipes because a RAISE format slot must be ONE literal and src/__tests__/raise-exception-concat-grammar.test.ts cannot tell prose from a real concat); with no nonce coming back the mint route cannot derive a link at all, and the tempting repair is to drop the nonce from the pre-image, which silently restores the pre-fix resurrection behaviour. ⛔ A bare `record` means someone converted the signature to OUT parameters, which ALSO voids every `= ''p_strategy_id uuid''` lookup in this file.', COALESCE(v_create_res, '(function not found)');
+  END IF;
+
+  -- ======================================================================
   -- SHAPE 5: the monotonicity trigger exists, BEFORE UPDATE, FOR EACH ROW
   -- ======================================================================
   -- Structural companion to the behavioural TRIGGER 1 / TRIGGER 2 arms below.
@@ -371,7 +591,34 @@ BEGIN
      AND (t.tgtype & 2) = 2
      AND (t.tgtype & 16) = 16;
   IF row_cnt <> 1 THEN
-    RAISE EXCEPTION 'TEST FAILED (SHAPE 5): expected exactly 1 BEFORE UPDATE FOR EACH ROW trigger named strategy_shares_monotonic_generation on strategy_shares, found %. Without it the owner''s column-unrestricted UPDATE grant plus the FOR ALL policy let a raw PATCH rewind the counter — MEASURED (PostgreSQL 16): generation went 2 -> 1 and revoked_at was cleared in ONE request, resurrecting every link the owner had revoked. ⛔ A trigger is also the ONLY control on this table that binds service_role, which BYPASSRLS exempts from every policy here.', row_cnt;
+    RAISE EXCEPTION 'TEST FAILED (SHAPE 5): expected exactly 1 BEFORE UPDATE FOR EACH ROW trigger named strategy_shares_monotonic_generation on strategy_shares, found %. Without it the owner''s UPDATE grant on (revoked_at, generation) plus the FOR ALL policy let a raw PATCH rewind the counter — MEASURED (PostgreSQL 16): generation went 2 -> 1 and revoked_at was cleared in ONE request, resurrecting every link the owner had revoked. ⛔ A trigger is also the ONLY control on this table that binds service_role, which BYPASSRLS exempts from every policy here and which GRANT ALL exempts from every column grant.', row_cnt;
+  END IF;
+
+  -- ======================================================================
+  -- SHAPE 5b: ...and the trigger function still carries rule (0c)
+  -- ======================================================================
+  -- SHAPE 5 proves a trigger of the right TIMING and LEVEL exists; it says
+  -- nothing about what the function behind it compares, so a CREATE OR REPLACE
+  -- that quietly drops one rule passes it unchanged. Rule (0c) is the one most
+  -- likely to be dropped by accident and least likely to be missed by anything
+  -- else, because STEP 2's column grant already denies the same write to
+  -- `authenticated` — so its ONLY observable caller is service_role, and every
+  -- client-role arm in this file stays green without it. NONCE 5 is the
+  -- behavioural pin; this is the structural one, and it fires even if a future
+  -- edit removes the service_role fixture NONCE 5 depends on.
+  -- Comment-stripped for the usual reason: the trigger body labels its rules in
+  -- prose, so a raw-text probe could be satisfied by the label.
+  -- RED-UNDER: delete the `IF NEW.nonce IS DISTINCT FROM OLD.nonce` block from
+  --            strategy_shares_enforce_monotonic_generation() (STEP 1b).
+  SELECT regexp_replace(pg_get_functiondef(p.oid), '--[^\n]*', '', 'g') INTO v_trigfn_s
+    FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+   WHERE n.nspname = 'public'
+     AND p.proname = 'strategy_shares_enforce_monotonic_generation';
+  IF v_trigfn_s IS NULL THEN
+    RAISE EXCEPTION 'TEST FAILED (SHAPE 5b-pre): the trigger function body could not be read, so the rule probe below would be VACUOUSLY true on NULL';
+  END IF;
+  IF v_trigfn_s !~* 'NEW\.nonce\s+IS\s+DISTINCT\s+FROM\s+OLD\.nonce' THEN
+    RAISE EXCEPTION 'TEST FAILED (SHAPE 5b): the monotonicity trigger lost rule (0c) — the nonce is no longer immutable. STEP 2''s column grant hides this from every `authenticated` arm in this file, so the loss is INVISIBLE except through service_role: MEASURED, `SET ROLE service_role; UPDATE strategy_shares SET nonce = <recorded value>` was ACCEPTED with the rule absent, restoring a nonce and re-deriving every token that row ever issued.';
   END IF;
 
   -- ======================================================================
@@ -383,7 +630,13 @@ BEGIN
     json_build_object('sub', uid_a::text, 'role', 'authenticated')::text, true);
   SET LOCAL ROLE authenticated;
 
-  SELECT public.create_strategy_share(strat_a) INTO gen_mint;
+  -- ⚠️ CALL SHAPE CHANGED. create_strategy_share now returns
+  -- `TABLE(generation bigint, nonce uuid)` — the recipient lane needs BOTH to
+  -- derive the token — so every call site is a `SELECT ... FROM fn(...)`, not a
+  -- scalar `SELECT fn(...)`. The alias `c` keeps `c.generation` unambiguous
+  -- against the plpgsql variables of the same name.
+  SELECT c.generation, c.nonce INTO gen_mint, nonce_mint
+    FROM public.create_strategy_share(strat_a) c;
   IF gen_mint IS NULL THEN
     RESET ROLE;
     RAISE EXCEPTION 'TEST FAILED (OWNER 1a): create_strategy_share returned NULL — the owner could not mint their own share';
@@ -395,18 +648,61 @@ BEGIN
   gen_seen := gen_seen || gen_mint;
 
   -- ======================================================================
+  -- OWNER 1c: the mint hands back a real, server-generated nonce
+  -- ======================================================================
+  -- SHAPE 4e pins the DECLARED result type; this pins that a value actually
+  -- arrives. A signature can promise `nonce uuid` and return NULL for it — from
+  -- a RETURNING that lost the column, or a RETURN NEXT reached before the
+  -- assignment — and every downstream arm comparing two nonces would then be
+  -- comparing NULL to NULL. `IS DISTINCT FROM` (which those arms use, correctly,
+  -- so a NULL cannot masquerade as equality) would report them as the same, and
+  -- OWNER 2d's "reuse returns the same nonce" would pass VACUOUSLY.
+  -- RED-UNDER: drop `strategy_shares.nonce` from STEP 3's RETURNING/INTO lists
+  --            while leaving the RETURNS TABLE signature intact.
+  IF nonce_mint IS NULL THEN
+    RESET ROLE;
+    RAISE EXCEPTION 'TEST FAILED (OWNER 1c): create_strategy_share returned a NULL nonce. The token derives from it, so the mint route would HMAC over the string "null" for every strategy — one shared token space, and a single leaked link would verify against every other strategy at the same generation. It also makes every nonce-comparison arm below vacuous.';
+  END IF;
+
+  -- ======================================================================
   -- OWNER 2: REUSE (SHARE-01) — minting again while live is idempotent
   -- ======================================================================
   -- This is the requirement the whole generation model exists to satisfy. A
   -- verbatim port of the scenario spine (hash-at-rest + unconditional
   -- pre-revoke on mint) would return a DIFFERENT value here and silently kill
   -- the recipient's existing link — the founder-hit defect.
-  SELECT public.create_strategy_share(strat_a) INTO gen_reuse;
+  SELECT c.generation, c.nonce INTO gen_reuse, nonce_reuse
+    FROM public.create_strategy_share(strat_a) c;
   IF gen_reuse <> gen_mint THEN
     RESET ROLE;
     RAISE EXCEPTION 'TEST FAILED (OWNER 2a): re-minting a LIVE share returned generation % but the first mint returned % — Copy Link would hand out a different url and break the recipient''s existing link (SHARE-01 reuse)', gen_reuse, gen_mint;
   END IF;
   gen_seen := gen_seen || gen_reuse;
+
+  -- ⭐ OWNER 2d: reuse must return the SAME NONCE, not merely the same
+  -- generation. The nonce joined the MAC pre-image, so it is now a second way
+  -- to break SHARE-01 that OWNER 2a cannot see at all: a mint path that
+  -- re-rolled the nonce (an `ON CONFLICT DO UPDATE SET nonce =
+  -- gen_random_uuid()`, or an INSERT that lost its conflict target and landed a
+  -- second row) would hold the counter steady and STILL hand out a different
+  -- URL on every click — which is precisely the founder-hit defect this phase
+  -- exists to remove, now reachable through a column that did not exist when
+  -- OWNER 2a was written.
+  -- RED-UNDER: add `, nonce = gen_random_uuid()` to STEP 3's DO UPDATE SET list.
+  -- ⚠️ THIS ARM IS THE FOURTH LINE, NOT THE FIRST, and saying so is the point.
+  -- "The mint writes the nonce" is refused by THREE earlier controls, each of
+  -- which had to be removed before this arm could be observed red (MEASURED,
+  -- 2026-08-27): the column grant (SHAPE 3b), the body-text pin (SHAPE 4d), and
+  -- trigger rule (0c) at RUNTIME (SHAPE 5b / NONCE 5) — the trigger refuses the
+  -- UPDATE even with the grant widened AND the body edited. With all three
+  -- gone, this arm is the first failure. It is kept because it is the only one
+  -- that states the CONSEQUENCE in the language the requirement is written in
+  -- — Copy Link stops returning the same URL — and because a future engineer
+  -- rewriting the catalog pins would otherwise take the whole defence with them.
+  IF nonce_reuse IS DISTINCT FROM nonce_mint THEN
+    RESET ROLE;
+    RAISE EXCEPTION 'TEST FAILED (OWNER 2d): re-minting a LIVE share returned nonce % but the first mint returned % — the generation held steady, so OWNER 2a passed, yet the derived token CHANGED. Copy Link hands out a new url and silently breaks the recipient''s existing link: the founder-hit defect, wearing the nonce as its new hat.', nonce_reuse, nonce_mint;
+  END IF;
 
   SELECT count(*) INTO row_cnt FROM strategy_shares WHERE strategy_id = strat_a;
   IF row_cnt <> 1 THEN
@@ -560,7 +856,8 @@ BEGIN
   -- ======================================================================
   -- REACTIVATE 1: re-share returns the ADVANCED generation (old links stay dead)
   -- ======================================================================
-  SELECT public.create_strategy_share(strat_a) INTO gen_remint;
+  SELECT c.generation, c.nonce INTO gen_remint, nonce_after
+    FROM public.create_strategy_share(strat_a) c;
   IF gen_remint = gen_mint THEN
     RESET ROLE;
     RAISE EXCEPTION 'TEST FAILED (REACTIVATE 1a): re-sharing returned generation % — the SAME value as the pre-revoke mint. The counter was REWOUND, so every link the owner revoked is live again.', gen_remint;
@@ -590,6 +887,28 @@ BEGIN
   IF row_cnt <> 1 THEN
     RESET ROLE;
     RAISE EXCEPTION 'TEST FAILED (REACTIVATE 1f): reactivation produced % rows for one strategy, expected 1 (in-place UPDATE, not a second row)', row_cnt;
+  END IF;
+
+  -- REACTIVATE 1g: the nonce SURVIVES a revoke-then-reshare, unchanged.
+  -- ⛔ This is the arm that proves the nonce did NOT quietly take over
+  -- `generation`'s job, and it is deliberately the OPPOSITE assertion to
+  -- NONCE 2 below. Within the life of ONE row the nonce is a CONSTANT in the
+  -- MAC pre-image: revocation is still driven entirely by the counter, and the
+  -- nonce contributes nothing to it. Re-rolling the nonce here would look like
+  -- extra security and would in fact be a bug — it would make reactivation
+  -- non-deterministic while leaving rules (1) and (2) as the only real
+  -- protection, and it would break Copy Link reuse across a re-share.
+  -- REACTIVATE 1b already pins the counter's half of the same statement.
+  -- RED-UNDER: re-roll the nonce ONLY on the revoked -> live transition —
+  --   `SET revoked_at = NULL, nonce = CASE WHEN strategy_shares.revoked_at IS
+  --    NOT NULL THEN gen_random_uuid() ELSE strategy_shares.nonce END`
+  -- — which leaves OWNER 2d (live reuse) GREEN and makes this arm the only
+  -- failure. MEASURED red that way, with the same three earlier layers removed
+  -- as for OWNER 2d (column grant, body-text pin, trigger rule (0c)); an
+  -- unconditional re-roll would be caught by OWNER 2d first.
+  IF nonce_after IS DISTINCT FROM nonce_mint THEN
+    RESET ROLE;
+    RAISE EXCEPTION 'TEST FAILED (REACTIVATE 1g): the nonce changed from % to % across revoke -> re-share. The nonce is the row''s IDENTITY witness, not a second revocation counter: within one row''s life it must be constant, and rules (1)+(2) of the monotonicity trigger are what keep revoked links dead. A re-rolled nonce makes reactivation non-deterministic and would break SHARE-01 reuse for any recipient who reloads across a re-share.', nonce_mint, nonce_after;
   END IF;
 
   -- ======================================================================
@@ -771,7 +1090,7 @@ BEGIN
   END;
 
   -- REQUEST 2 of the attack, run for real.
-  SELECT public.create_strategy_share(strat_a) INTO gen_probe;
+  SELECT c.generation INTO gen_probe FROM public.create_strategy_share(strat_a) c;
 
   IF gen_probe IS NULL OR gen_probe = 1 OR gen_probe < gen_final THEN
     RESET ROLE;
@@ -786,11 +1105,54 @@ BEGIN
   -- arm that cannot tell the two apart is measuring luck.
   IF NOT raised THEN
     RESET ROLE;
-    RAISE EXCEPTION 'TEST FAILED (TRIGGER 3b): the cross-strategy re-point did not RAISE — it was accepted, or it silently matched 0 rows. The owner holds a column-unrestricted UPDATE grant and their own row satisfies both halves of strategy_shares_owner, so the only layer entitled to reject this is the trigger. If it merely matched 0 rows then TRIGGER 3a above passed on an accident of the policy rather than on the rule under test.';
+    RAISE EXCEPTION 'TEST FAILED (TRIGGER 3b): the cross-strategy re-point did not RAISE — it was accepted, or it silently matched 0 rows. Two independent layers should refuse it (the column grant, then the trigger), so no rejection at all means BOTH are gone. If it merely matched 0 rows then TRIGGER 3a above passed on an accident of the policy rather than on the rule under test.';
+  END IF;
+  -- ⚠️ THE REJECTING LAYER CHANGED AT THE 2026-08-27 FOUNDER RULING, and the
+  -- message pin changed with it rather than being loosened. `strategy_id` is
+  -- absent from `GRANT UPDATE (revoked_at, generation)`, so for an ordinary
+  -- `authenticated` caller the re-point is now dead ONE LAYER EARLIER, at the
+  -- grant (MEASURED: `permission denied for table strategy_shares`). It never
+  -- reaches trigger rule (0a). That is strictly better security and strictly
+  -- worse evidence: this arm can no longer prove rule (0a) exists, and pinning
+  -- it to the trigger's old message would simply have gone RED forever.
+  -- ⛔ So this arm now pins the GRANT layer — which is a real property, and the
+  -- first one to fail if someone widens the UPDATE grant back to the table —
+  -- and rule (0a) is proven behaviourally by TRIGGER 3d below, against the one
+  -- role no grant binds. Neither arm subsumes the other.
+  -- RED-UNDER: `GRANT UPDATE (strategy_id) ON strategy_shares TO authenticated`
+  --            on the live database, SHAPE 3b neutered. First failure —
+  --            MEASURED 2026-08-27.
+  IF err_msg NOT LIKE '%permission denied%' THEN
+    RESET ROLE;
+    RAISE EXCEPTION 'TEST FAILED (TRIGGER 3c): the re-point was rejected, but NOT by the GRANT layer (got: %). `strategy_id` must not appear in any UPDATE grant to `authenticated`: with the column-scoped grant in force this statement cannot execute at all, which is a stronger guarantee than a trigger veto because it also covers columns added to this table in future. If this message is "strategy_id is immutable" then the grant was widened and only the trigger is left.', err_msg;
+  END IF;
+
+  -- ======================================================================
+  -- TRIGGER 3d: rule (0a) still bites the role GRANTS cannot bind
+  -- ======================================================================
+  -- TRIGGER 3c above proves the grant layer, and the grant layer does not exist
+  -- for `service_role` — GRANT ALL plus BYPASSRLS, and this feature's recipient
+  -- lane already reads the table through `createAdminClient()`. For that caller
+  -- rule (0a) is the only control, exactly as rule (0c) is the only control on
+  -- the nonce (NONCE 5). Without this arm, deleting rule (0a) would go entirely
+  -- unnoticed by every behavioural arm in this file.
+  -- RED-UNDER: delete the `IF NEW.strategy_id IS DISTINCT FROM OLD.strategy_id`
+  --            block from strategy_shares_enforce_monotonic_generation().
+  RESET ROLE;
+  SET LOCAL ROLE service_role;
+  raised := FALSE;
+  BEGIN
+    UPDATE strategy_shares SET strategy_id = strat_a2 WHERE strategy_id = strat_a;
+  EXCEPTION WHEN OTHERS THEN
+    raised := TRUE; err_msg := SQLERRM;
+  END;
+  RESET ROLE;
+  SET LOCAL ROLE authenticated;
+  IF NOT raised THEN
+    RAISE EXCEPTION 'TEST FAILED (TRIGGER 3d-i): service_role re-pointed a share row at another strategy. That role bypasses both the column grant and RLS, so trigger rule (0a) is the only thing that could have refused it and it is missing. The counter walks away with the second strategy, the original is left with NO share row, and the very next create_strategy_share() on it inserts at generation 1 — re-issuing every token that strategy revoked at generation 1.';
   END IF;
   IF err_msg NOT LIKE '%strategy_id is immutable%' THEN
-    RESET ROLE;
-    RAISE EXCEPTION 'TEST FAILED (TRIGGER 3c): the re-point was rejected by something OTHER than the strategy_id-immutability rule (got: %). A rejection from the grant layer, a policy rewrite or an FK blocks today and stops blocking on the next unrelated change, so this arm proves nothing about the trigger unless the rejection came FROM it.', err_msg;
+    RAISE EXCEPTION 'TEST FAILED (TRIGGER 3d-ii): the service_role re-point was rejected by something OTHER than rule (0a) (got: %). All five trigger rules share an errcode, and UNIQUE(strategy_id) would also reject a collision, so only the message distinguishes the rule under test from an accident.', err_msg;
   END IF;
 
   -- ⚠️ STATE CHANGE, and it is deliberate: request 2 above REACTIVATED strat_a
@@ -824,11 +1186,220 @@ BEGIN
   END;
   IF NOT raised THEN
     RESET ROLE;
-    RAISE EXCEPTION 'TEST FAILED (TRIGGER 4a): the owner backdated created_at on their own share row with a raw UPDATE. Nothing but the trigger guards that column — the grant is column-unrestricted and the row passes both halves of strategy_shares_owner — so rule (0b) of strategy_shares_monotonic_generation (migration 20260827120000 STEP 1b) is missing, and the provenance STEP 3 promises is forgeable: who minted a live anonymous capability link, and when, both become whatever the owner types.';
+    RAISE EXCEPTION 'TEST FAILED (TRIGGER 4a): the owner backdated created_at on their own share row with a raw UPDATE. Two layers should refuse it — `created_at` is absent from `GRANT UPDATE (revoked_at, generation)`, and trigger rule (0b) vetoes it for anyone the grant does not bind — so no rejection at all means both are gone, and the provenance STEP 3 promises is forgeable: who minted a live anonymous capability link, and when, both become whatever the owner types.';
+  END IF;
+  -- Same layer shift as TRIGGER 3c, same reasoning, recorded rather than
+  -- silently absorbed: `created_at` is not in the column-scoped UPDATE grant,
+  -- so for `authenticated` this is now a grant rejection and rule (0b) is never
+  -- reached. Rule (0b) is proven against service_role by TRIGGER 4c below.
+  -- RED-UNDER: `GRANT UPDATE (created_at) ON strategy_shares TO authenticated`
+  --            on the live database, SHAPE 3b neutered. First failure —
+  --            MEASURED 2026-08-27.
+  IF err_msg NOT LIKE '%permission denied%' THEN
+    RESET ROLE;
+    RAISE EXCEPTION 'TEST FAILED (TRIGGER 4b): the provenance rewrite was rejected, but NOT by the GRANT layer (got: %). No provenance column may appear in an UPDATE grant to `authenticated`; if this message is "identity and provenance are immutable" then the grant was widened and the trigger is the last line.', err_msg;
+  END IF;
+
+  -- ======================================================================
+  -- TRIGGER 4c: rule (0b) still bites service_role
+  -- ======================================================================
+  -- `created_at` is the probe of the three columns rule (0b) pins (id,
+  -- created_by, created_at) for the reason the original arm gave and which
+  -- still holds: rewriting `created_by` ALSO trips the `created_by = auth.uid()`
+  -- half of WITH CHECK, so an arm there could pass on the policy while the rule
+  -- was gone. For service_role there is no policy at all, which makes the
+  -- choice even cleaner — only the trigger can refuse.
+  -- RED-UNDER: delete the `NEW.created_at IS DISTINCT FROM OLD.created_at`
+  --            clause from rule (0b).
+  RESET ROLE;
+  SET LOCAL ROLE service_role;
+  raised := FALSE;
+  BEGIN
+    UPDATE strategy_shares
+       SET created_at = created_at - INTERVAL '1 year'
+     WHERE strategy_id = strat_a;
+  EXCEPTION WHEN OTHERS THEN
+    raised := TRUE; err_msg := SQLERRM;
+  END;
+  RESET ROLE;
+  SET LOCAL ROLE authenticated;
+  IF NOT raised THEN
+    RAISE EXCEPTION 'TEST FAILED (TRIGGER 4c-i): service_role backdated created_at on a share row. It bypasses the column grant and RLS alike, so rule (0b) is the only control and it is missing.';
   END IF;
   IF err_msg NOT LIKE '%identity and provenance are immutable%' THEN
+    RAISE EXCEPTION 'TEST FAILED (TRIGGER 4c-ii): the service_role provenance rewrite was rejected by something OTHER than rule (0b) (got: %)', err_msg;
+  END IF;
+
+  -- ======================================================================
+  -- NONCE 1: the owner cannot WRITE the nonce — GRANT layer, not RLS
+  -- ======================================================================
+  -- ⛔ THE LAYER IS THE ASSERTION. The owner holds UPDATE on this table and
+  -- their own row satisfies both halves of strategy_shares_owner, so RLS lets
+  -- this through; and the trigger's rule (0c) would ALSO reject it, with a
+  -- different message. Three layers could each be the one that fired, and the
+  -- one that MUST fire is the grant — because it is the only one that also
+  -- stops the INSERT form of the same attack (NONCE 2), where no BEFORE UPDATE
+  -- trigger exists to help. Pin `permission denied`, not a bare `raised`:
+  -- rule (0c) raises `check_violation` with the text "nonce is immutable", and
+  -- a bare arm would report the grant as absent-and-safe while it was in fact
+  -- present-and-masked.
+  -- RED-UNDER: `GRANT UPDATE (nonce) ON strategy_shares TO authenticated` on
+  --            the live database. ⚠️ SHAPE 3b's exact-set pin fires first on
+  --            ANY grant drift, so this arm was observed red with SHAPE 3b
+  --            neutered — at which point NONCE 1b is the first failure and
+  --            correctly names rule (0c) as the layer that refused.
+  --
+  -- ⛔ `WHEN OTHERS`, DELIBERATELY, AND THE NARROW HANDLER WAS A MEASURED BUG.
+  -- Written as `WHEN insufficient_privilege` — matching every sibling grant arm
+  -- in this file — NONCE 1b could NEVER FIRE. Under its own RED-UNDER mutation
+  -- the grant admits the statement, trigger rule (0c) raises `check_violation`,
+  -- the narrow handler does not catch it, and the exception escapes the whole
+  -- DO block: the file still goes red (fail-loud, correct) but with the
+  -- trigger's message and NONCE 1b's diagnostic — the one sentence that says
+  -- WHICH layer refused — never prints. MEASURED 2026-08-27: the run aborted
+  -- with "strategy_shares: nonce is immutable", not with NONCE 1b.
+  -- `WHEN OTHERS` plus the message pin below is what makes the arm reportable.
+  raised := FALSE;
+  BEGIN
+    UPDATE strategy_shares SET nonce = gen_random_uuid() WHERE strategy_id = strat_a;
+  EXCEPTION WHEN OTHERS THEN
+    raised := TRUE; err_msg := SQLERRM;
+  END;
+  IF NOT raised THEN
     RESET ROLE;
-    RAISE EXCEPTION 'TEST FAILED (TRIGGER 4b): the provenance rewrite was rejected by something OTHER than the identity/provenance rule (got: %) — this arm proves nothing about the trigger unless the rejection came FROM it', err_msg;
+    RAISE EXCEPTION 'TEST FAILED (NONCE 1a): the owner UPDATEd `nonce` on their own share row without a privilege error. The column-scoped write grant (migration 20260827120000 STEP 2: GRANT UPDATE (revoked_at, generation)) is missing or was widened. With the nonce writable, an owner can hold a recorded value and put it back after the row is destroyed and re-created — which re-derives every token that row ever issued.';
+  END IF;
+  IF err_msg NOT LIKE '%permission denied%' THEN
+    RESET ROLE;
+    RAISE EXCEPTION 'TEST FAILED (NONCE 1b): the nonce write was rejected, but NOT by the GRANT layer (got: %). If this is trigger rule (0c) — "nonce is immutable", errcode check_violation — then `authenticated` still HOLDS UPDATE(nonce) and this arm proved nothing about the grant. The distinction matters: rule (0c) is a BEFORE UPDATE trigger and cannot see the INSERT form of the same attack, which NONCE 2 exercises.', err_msg;
+  END IF;
+
+  -- ======================================================================
+  -- NONCE 2: ...and cannot supply one on INSERT either — THE R2b CLOSURE
+  -- ======================================================================
+  -- ⛔ NONCE 1 DOES NOT COVER THIS, AND THIS IS THE ONE THAT MATTERS. The
+  -- trigger is BEFORE **UPDATE** only, so an INSERT is seen by NO rule at all;
+  -- the grant is the sole control. The full attack, MEASURED end-to-end on a
+  -- throwaway PostgreSQL 16 cluster (2026-08-27):
+  --   1. the owner SELECTs their own nonce — RLS permits it, and it must, since
+  --      create_strategy_share RETURNs it as the caller;
+  --   2. the owner DELETEs their `strategies` row. ON DELETE CASCADE takes the
+  --      share row with it. ⚠️ No control on THIS table can observe that — not
+  --      the trigger (nothing UPDATEs), not the missing DELETE grant (the
+  --      cascade is a referential action and does not consult privileges), not
+  --      RLS;
+  --   3. the owner re-INSERTs the strategy with the SAME client-suppliable
+  --      uuid, and re-inserts the share row VERBATIM, nonce included.
+  -- With a table-wide INSERT grant that final statement was ACCEPTED and the
+  -- nonce came back BIT-IDENTICAL. With the column grant it is 42501. That one
+  -- statement is the difference between the nonce closing the resurrection
+  -- family and the nonce being decoration.
+  --
+  -- Target strat_a2 — never shared, per this file's ordering constraint 1 — so
+  -- UNIQUE(strategy_id) cannot raise 23505 before the privilege check and give
+  -- this arm a false pass on the wrong error.
+  -- RED-UNDER: `GRANT INSERT (nonce) ON strategy_shares TO authenticated` on
+  --            the live database, with SHAPE 3b neutered (its exact-set pin
+  --            fires first on any grant drift). NONCE 2a is then the first
+  --            failure — MEASURED 2026-08-27. ⚠️ Note the asymmetry with
+  --            NONCE 1: there is NO BEFORE INSERT trigger, so nothing behind
+  --            the grant catches this one. The INSERT simply SUCCEEDS.
+  raised := FALSE;
+  BEGIN
+    INSERT INTO strategy_shares (strategy_id, created_by, nonce)
+    VALUES (strat_a2, uid_a, nonce_mint);
+  EXCEPTION WHEN insufficient_privilege THEN
+    raised := TRUE; err_msg := SQLERRM;
+  END;
+  IF NOT raised THEN
+    RESET ROLE;
+    RAISE EXCEPTION 'TEST FAILED (NONCE 2a): the owner INSERTed a share row carrying a nonce OF THEIR CHOOSING. That is the whole delete-and-recreate resurrection: read your nonce, cascade the row away through `strategies` (which no control on this table can see), re-create the strategy at the same client-suppliable uuid, and re-insert the row verbatim — the previously-revoked token derives again, bit-identical. The trigger cannot help here: it is BEFORE UPDATE and an INSERT is seen by no rule. `GRANT INSERT (strategy_id, created_by)` is the only control, and it is missing or was widened.';
+  END IF;
+  IF err_msg NOT LIKE '%permission denied%' THEN
+    RESET ROLE;
+    RAISE EXCEPTION 'TEST FAILED (NONCE 2b): the chosen-nonce INSERT was rejected by something OTHER than the grant layer (got: %) — most likely RLS or a constraint, either of which blocks today by accident and stops blocking on the next unrelated change. Only an absent INSERT(nonce) privilege closes this durably.', err_msg;
+  END IF;
+
+  -- ======================================================================
+  -- NONCE 3: R3''s INSERT half — a client cannot CHOOSE a starting generation
+  -- ======================================================================
+  -- Same mechanism, different column, and worth its own arm because the
+  -- consequence is different in kind: this one is an availability wedge, not a
+  -- disclosure. The trigger is BEFORE UPDATE, so a FRESH row's `generation` was
+  -- wholly unguarded — `INSERT ... (strategy_id, created_by, generation)` with
+  -- 2^63-1 pre-wedges the overflow that SHAPE 1c only widened the distance to.
+  -- revoke_strategy_share would then error `out of range`, and the GDPR Art. 17
+  -- arm in migration 20260827130000 is the SAME statement, so the data
+  -- subject''s entire erasure aborts — triggerable BY the data subject, with no
+  -- operator remedy short of DDL.
+  -- RED-UNDER: `GRANT INSERT (generation) ON strategy_shares TO authenticated`
+  --            on the live database, SHAPE 3b neutered. First failure —
+  --            MEASURED 2026-08-27.
+  raised := FALSE;
+  BEGIN
+    INSERT INTO strategy_shares (strategy_id, created_by, generation)
+    VALUES (strat_a2, uid_a, 9223372036854775807);
+  EXCEPTION WHEN insufficient_privilege THEN
+    raised := TRUE; err_msg := SQLERRM;
+  END;
+  IF NOT raised THEN
+    RESET ROLE;
+    RAISE EXCEPTION 'TEST FAILED (NONCE 3): the owner INSERTed a share row with a generation of their own choosing. Nothing else guards a FRESH row — the monotonicity trigger is BEFORE UPDATE — so a client can plant the counter at the BIGINT ceiling and permanently wedge their own revoke AND their own GDPR Art. 17 erasure, which share the same `generation + 1` statement.';
+  END IF;
+
+  -- ======================================================================
+  -- NONCE 4: THE CASCADE-REBIRTH END STATE — a re-created row is a NEW row
+  -- ======================================================================
+  -- ⛔ EVERY ARM ABOVE ASSERTS THAT AN ATTACK IS REFUSED. This one asserts the
+  -- POSITIVE PROPERTY the whole design rests on, and it is the only arm in this
+  -- file that does: even when the row IS destroyed and re-created — which no
+  -- control on this table can prevent, because the delete happens on
+  -- `strategies` and rides a referential action that consults no privilege and
+  -- fires no trigger here — the rebuilt row lands in a token space DISJOINT
+  -- from the old one. That is the difference between "we enumerated the paths"
+  -- (which this phase attempted three times and missed one each time) and
+  -- "the property holds down every path, including ones nobody has thought of".
+  --
+  -- The attack is run FOR REAL rather than probed: delete, re-create at the
+  -- SAME client-suppliable uuid, re-mint. There is no exception block, so
+  -- nothing here can be reading its own subtransaction rollback.
+  --
+  -- ⚠️ Note what this arm does NOT claim. The re-minted generation is 1 again —
+  -- the counter genuinely was discarded, and that is unfixable by any
+  -- generation-based scheme. The nonce is what makes generation 1 on the NEW
+  -- row a different token from generation 1 on the OLD one.
+  -- RED-UNDER: make the nonce reproducible instead of random — e.g. add a
+  --            BEFORE INSERT trigger setting `NEW.nonce =
+  --            md5(NEW.strategy_id::text)::uuid`. SHAPE 1b stays GREEN (the
+  --            column DEFAULT is untouched), and this arm is the only failure.
+  SELECT c.nonce INTO nonce_a3_pre FROM public.create_strategy_share(strat_a3) c;
+  IF nonce_a3_pre IS NULL THEN
+    RESET ROLE;
+    RAISE EXCEPTION 'TEST FAILED (NONCE 4a): the pre-rebirth mint returned a NULL nonce, so the comparison below would be NULL-vs-NULL and could not fail';
+  END IF;
+
+  RESET ROLE;
+  PERFORM set_config('request.jwt.claims', NULL, true);
+
+  -- The cascade, and the re-creation at the SAME uuid. Run in the seeding
+  -- context: the point under test is the END STATE of `strategy_shares`, and
+  -- routing it through `strategies`'s own RLS would make this arm depend on a
+  -- policy in another migration that this file does not own.
+  DELETE FROM strategies WHERE id = strat_a3;
+  SELECT count(*) INTO row_cnt FROM strategy_shares WHERE strategy_id = strat_a3;
+  IF row_cnt <> 0 THEN
+    RAISE EXCEPTION 'TEST FAILED (NONCE 4b): deleting the parent strategy left % share row(s) behind — the ON DELETE CASCADE this arm models is gone, so the resurrection path it reproduces is no longer the real one and the arm is measuring a fiction', row_cnt;
+  END IF;
+  INSERT INTO strategies (id, user_id, name, status, strategy_types, subtypes, markets, supported_exchanges)
+  VALUES (strat_a3, uid_a, 'strategy-shares A cascade-rebirth strategy', 'private', '{}', '{}', '{}', ARRAY['binance']);
+
+  PERFORM set_config('request.jwt.claims',
+    json_build_object('sub', uid_a::text, 'role', 'authenticated')::text, true);
+  SET LOCAL ROLE authenticated;
+  SELECT c.nonce INTO nonce_a3_post FROM public.create_strategy_share(strat_a3) c;
+  IF nonce_a3_post IS NULL OR nonce_a3_post IS NOT DISTINCT FROM nonce_a3_pre THEN
+    RESET ROLE;
+    RAISE EXCEPTION 'TEST FAILED (NONCE 4c): after the parent strategy was DELETEd (cascading the share row away) and re-created at the SAME uuid, the re-minted share carries nonce % — the pre-cascade value was %. Identical (or NULL) means the token pre-image is fully reproducible from client-controlled inputs, so the MAC over (tag, strategy_id, nonce, 1) re-derives BIT-IDENTICALLY and every link that strategy ever REVOKED at generation 1 resolves again as anonymous access to an unpublished factsheet. No trigger, grant or policy on strategy_shares can see this delete — it happens on `strategies` and rides a referential action. The unguessable per-row nonce is the ONLY thing that closes it.', nonce_a3_post, nonce_a3_pre;
   END IF;
 
   RESET ROLE;
@@ -910,7 +1481,7 @@ BEGIN
 
   -- Positive control: B can mint on their OWN strategy (so the negative arm
   -- below cannot pass because minting is broken for everyone).
-  SELECT public.create_strategy_share(strat_b) INTO gen_b;
+  SELECT c.generation INTO gen_b FROM public.create_strategy_share(strat_b) c;
   IF gen_b IS NULL OR gen_b <> 1 THEN
     RESET ROLE;
     RAISE EXCEPTION 'TEST FAILED (TENANT 5a): tenant B''s first mint on their own strategy returned %, expected 1', gen_b;
@@ -1274,6 +1845,62 @@ BEGIN
   END IF;
 
   -- ======================================================================
+  -- NONCE 5: rule (0c) binds service_role — the role GRANTS cannot bind
+  -- ======================================================================
+  -- ⛔ NONCE 1 AND NONCE 2 PROVE THE GRANT LAYER, AND THE GRANT LAYER DOES NOT
+  -- EXIST FOR THIS CALLER. `service_role` holds GRANT ALL on this table and is
+  -- BYPASSRLS, and migration 20260827120000 STEP 2 records that this feature's
+  -- recipient lane ALREADY reads strategy_shares through `createAdminClient()`
+  -- — so it is on the hot path, not hypothetical. For that caller a trigger is
+  -- the only control on this table at all, which makes rule (0c) the sole thing
+  -- standing between an admin transport and a RESTORED nonce.
+  --
+  -- MEASURED (PostgreSQL 16, throwaway cluster, 2026-08-27) with rule (0c)
+  -- absent: `SET ROLE service_role; UPDATE strategy_shares SET nonce = <a value
+  -- recorded before the row was destroyed>` was ACCEPTED, raised=f. That is
+  -- SYNTHESIS §3's R2g residual in its cheapest form.
+  --
+  -- ⚠️ WHAT THIS DOES **NOT** BUY, so nobody reads a green here as more than it
+  -- is: an operator who can read `SHARE_TOKEN_SECRET` can mint any token from
+  -- scratch, and no in-database control binds that. The residual is inherent
+  -- and is accepted in writing (SYNTHESIS §7). Rule (0c) removes the form of it
+  -- that needs nothing but a table write.
+  --
+  -- Message-pinned, and pinned to (0c) SPECIFICALLY rather than to any
+  -- trigger error: rules (0a)/(0b)/(1)/(2) all raise `check_violation` from the
+  -- same function, and this statement touches only `nonce`, so a bare `raised`
+  -- would be satisfied by a rule that has nothing to do with the nonce.
+  -- RED-UNDER: delete the `IF NEW.nonce IS DISTINCT FROM OLD.nonce` block from
+  --            strategy_shares_enforce_monotonic_generation() (STEP 1b).
+  SET LOCAL ROLE service_role;
+  raised := FALSE;
+  BEGIN
+    UPDATE strategy_shares SET nonce = nonce_mint WHERE strategy_id = strat_b;
+  EXCEPTION WHEN OTHERS THEN
+    raised := TRUE; err_msg := SQLERRM;
+  END;
+  RESET ROLE;
+  IF NOT raised THEN
+    RAISE EXCEPTION 'TEST FAILED (NONCE 5a): service_role rewrote `nonce` on a share row. That role holds GRANT ALL and BYPASSRLS, so neither the column grant (NONCE 1/2) nor the owner policy applies to it — trigger rule (0c) is the ONLY control on this table that reaches it, and it is missing. An admin transport can then record a nonce, let the row be destroyed and re-created, and put the old value back, re-deriving every token that row ever issued.';
+  END IF;
+  IF err_msg NOT LIKE '%nonce is immutable%' THEN
+    RAISE EXCEPTION 'TEST FAILED (NONCE 5b): the service_role nonce rewrite was rejected by something OTHER than rule (0c) (got: %). All five trigger rules raise check_violation from the same function, and this statement touches only `nonce`, so a rejection carrying any other message means rule (0c) is gone and some unrelated rule fired — or that a grant/policy blocked it, which for a BYPASSRLS role with GRANT ALL would itself be the surprise worth investigating.', err_msg;
+  END IF;
+
+  -- ...and the victim row is byte-untouched. Unlike the rejected-write probes
+  -- this file DELETED as unfailable, this one is NOT reading its own
+  -- subtransaction rollback: with rule (0c) absent the UPDATE SUCCEEDS and
+  -- COMMITS inside the block, no exception is raised, `raised` stays FALSE, and
+  -- the nonce really is the rewritten value — NONCE 5a fires first in that
+  -- world, so this arm is a consistency check on the trigger's BEFORE timing
+  -- rather than an independent pin. It is kept because it costs nothing and
+  -- would catch an AFTER-trigger miscreation that SHAPE 5 somehow admitted.
+  SELECT nonce INTO nonce_after FROM strategy_shares WHERE strategy_id = strat_b;
+  IF nonce_after = nonce_mint THEN
+    RAISE EXCEPTION 'TEST FAILED (NONCE 5c): the rejected nonce rewrite still landed — tenant B''s row now carries tenant A''s nonce. A BEFORE trigger that raises must leave the tuple untouched; if this fires, the guard was installed AFTER the write.';
+  END IF;
+
+  -- ======================================================================
   -- SANITIZE 1: GDPR Art. 17 erasure KILLS the subject's share links (B1)
   -- ======================================================================
   -- ⛔ `sanitize_user` ANONYMIZES; it deletes neither `profiles` nor
@@ -1290,7 +1917,7 @@ BEGIN
   PERFORM set_config('request.jwt.claims',
     json_build_object('sub', uid_a::text, 'role', 'authenticated')::text, true);
   SET LOCAL ROLE authenticated;
-  SELECT public.create_strategy_share(strat_a) INTO gen_pre_san;
+  SELECT c.generation INTO gen_pre_san FROM public.create_strategy_share(strat_a) c;
   RESET ROLE;
   PERFORM set_config('request.jwt.claims', NULL, true);
 
@@ -1332,7 +1959,7 @@ BEGIN
     RAISE EXCEPTION 'TEST FAILED (SANITIZE 1f): erasing tenant A also revoked tenant B''s share (revoked_at=%, generation % -> %) — the `created_by = p_user_id` predicate is missing from the sanitize arm, so ONE user''s Art. 17 request kills EVERY user''s share links', b_revoked, gen_b, gen_b_after;
   END IF;
 
-  RAISE NOTICE 'test_strategy_shares_rls: ALL 76 ARMS EXECUTED (SHAPE 1, SHAPE 2a, SHAPE 2b, SHAPE 3, SHAPE 4a, SHAPE 4b, SHAPE 4c, SHAPE 5, OWNER 1a, OWNER 1b, OWNER 2a, OWNER 2b, OWNER 2c, TENANT 1a, TENANT 1b, TENANT 2a, TENANT 2b, TENANT 3a, TENANT 3b, NO-DELETE 1, REVOKE 1a, REVOKE 1b, REVOKE 1c, REVOKE 2a, REVOKE 2b, REACTIVATE 1a, REACTIVATE 1b, REACTIVATE 1c, REACTIVATE 1d, REACTIVATE 1e, REACTIVATE 1f, TRIGGER 1a, TRIGGER 1b, MONOTONIC 1a, MONOTONIC 1b, MONOTONIC 1c, TRIGGER 2a, TRIGGER 2b, TRIGGER 3a, TRIGGER 3b, TRIGGER 3c, TRIGGER 4a, TRIGGER 4b, TENANT 4a, TENANT 4b, TENANT 4c, TENANT 5a, TENANT 5b, TENANT 5c, TENANT 5d, TENANT 5e, TENANT 5f, TENANT 5g, ANON 1a, ANON 1b, ANON 1b-grant, ANON 1c, ANON 1c-grant, ANON 1d, ANON 1d-grant, ANON 2, ANON 2b, SERVICE-ROLE 0-acl, SERVICE-ROLE 1, SERVICE-ROLE 1-grant, SERVICE-ROLE 2a, SERVICE-ROLE 2b, SERVICE-ROLE 2c, SERVICE-ROLE 2d, SERVICE-ROLE 2e, SANITIZE 1a, SANITIZE 1b, SANITIZE 1c, SANITIZE 1d, SANITIZE 1e, SANITIZE 1f). Observed generation sequence: %', gen_seen;
+  RAISE NOTICE 'test_strategy_shares_rls: ALL 101 ARMS EXECUTED (SHAPE 1, SHAPE 1b, SHAPE 1c, SHAPE 2a, SHAPE 2b, SHAPE 3, SHAPE 3b, SHAPE 4a, SHAPE 4b, SHAPE 4c, SHAPE 4d, SHAPE 4e, SHAPE 5, SHAPE 5b-pre, SHAPE 5b, OWNER 1a, OWNER 1b, OWNER 1c, OWNER 2a, OWNER 2b, OWNER 2c, OWNER 2d, TENANT 1a, TENANT 1b, TENANT 2a, TENANT 2b, TENANT 3a, TENANT 3b, NO-DELETE 1, REVOKE 1a, REVOKE 1b, REVOKE 1c, REVOKE 2a, REVOKE 2b, REACTIVATE 1a, REACTIVATE 1b, REACTIVATE 1c, REACTIVATE 1d, REACTIVATE 1e, REACTIVATE 1f, REACTIVATE 1g, TRIGGER 1a, TRIGGER 1b, MONOTONIC 1a, MONOTONIC 1b, MONOTONIC 1c, TRIGGER 2a, TRIGGER 2b, TRIGGER 3a, TRIGGER 3b, TRIGGER 3c, TRIGGER 3d-i, TRIGGER 3d-ii, TRIGGER 4a, TRIGGER 4b, TRIGGER 4c-i, TRIGGER 4c-ii, NONCE 1a, NONCE 1b, NONCE 2a, NONCE 2b, NONCE 3, NONCE 4a, NONCE 4b, NONCE 4c, TENANT 4a, TENANT 4b, TENANT 4c, TENANT 5a, TENANT 5b, TENANT 5c, TENANT 5d, TENANT 5e, TENANT 5f, TENANT 5g, ANON 1a, ANON 1b, ANON 1b-grant, ANON 1c, ANON 1c-grant, ANON 1d, ANON 1d-grant, ANON 2, ANON 2b, SERVICE-ROLE 0-acl, SERVICE-ROLE 1, SERVICE-ROLE 1-grant, SERVICE-ROLE 2a, SERVICE-ROLE 2b, SERVICE-ROLE 2c, SERVICE-ROLE 2d, SERVICE-ROLE 2e, NONCE 5a, NONCE 5b, NONCE 5c, SANITIZE 1a, SANITIZE 1b, SANITIZE 1c, SANITIZE 1d, SANITIZE 1e, SANITIZE 1f). Observed generation sequence: %', gen_seen;
 END
 $$;
 

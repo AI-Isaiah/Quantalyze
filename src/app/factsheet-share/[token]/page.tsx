@@ -3,8 +3,14 @@
 // (ruling D-04 — the tearsheet and PDF routes are deliberately OUT of scope and
 // still 404 for a recipient). Two reads happen here, both on the admin
 // (service_role) transport:
-//   (1) `strategy_shares(strategy_id, generation)` filtered to
-//       `revoked_at IS NULL` — the candidate set for the constant-time scan;
+//   (1) `strategy_shares(strategy_id, generation, nonce)` filtered to
+//       `revoked_at IS NULL` — the candidate set for the constant-time scan.
+//       ⛔ `nonce` joined the MAC pre-image at the founder ruling of
+//       2026-08-27 and is a MAC INPUT ONLY: it must never be rendered, logged,
+//       put in a URL, or passed into the payload. It derives nothing without
+//       SHARE_TOKEN_SECRET, but it is also the one column whose secrecy makes a
+//       destroyed-and-recreated share row unforgeable, so leaking it hands an
+//       attacker the only database-side value they cannot otherwise obtain;
 //   (2) `fetchAndBuildPayload(strategy_id, <identity predicate>)` — the SAME
 //       builder the owner lane calls, invoked DIRECTLY.
 //
@@ -75,8 +81,20 @@ export const metadata: Metadata = {
   robots: "noindex",
 };
 
-/** One active share row. Projection is exactly what the scan needs. */
-type ShareCandidate = { strategy_id: string; generation: number };
+/**
+ * One active share row. Projection is exactly what the scan needs — and no more.
+ *
+ * ⛔ `nonce` IS PART OF THE MAC PRE-IMAGE (founder ruling 2026-08-27) and must
+ * be selected, or nothing verifies. It is a MAC INPUT, never a credential and
+ * never rendered: it derives nothing without SHARE_TOKEN_SECRET, it does not
+ * appear in the URL, and it must not reach the payload, the DOM or a log line.
+ * The active index carries `INCLUDE (nonce)` so reading it costs no heap fetch.
+ */
+type ShareCandidate = {
+  strategy_id: string;
+  generation: number;
+  nonce: string;
+};
 
 /**
  * ⛔ THE IDENTITY PREDICATE, NAMED AND COMMENTED SO IT CANNOT BE MISREAD.
@@ -139,7 +157,7 @@ async function findShareMatch(token: string): Promise<ShareCandidate | null> {
       };
     }
   )("strategy_shares")
-    .select("strategy_id, generation")
+    .select("strategy_id, generation, nonce")
     .is("revoked_at", null);
 
   if (error) {
@@ -155,7 +173,14 @@ async function findShareMatch(token: string): Promise<ShareCandidate | null> {
   }
 
   for (const candidate of data ?? []) {
-    if (verifyShareToken(token, candidate.strategy_id, candidate.generation)) {
+    if (
+      verifyShareToken(
+        token,
+        candidate.strategy_id,
+        candidate.nonce,
+        candidate.generation,
+      )
+    ) {
       return candidate;
     }
   }
