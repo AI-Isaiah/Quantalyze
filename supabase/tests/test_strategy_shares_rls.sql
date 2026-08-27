@@ -901,26 +901,49 @@ BEGIN
   END IF;
 
   -- anon must not be able to invoke either RPC.
+  --
+  -- ⛔ THE MESSAGE ASSERTIONS BELOW ARE NOT DECORATION — same defect, same fix,
+  -- as ANON 1b-grant above. `insufficient_privilege` (42501) is raised by BOTH
+  -- walls on this surface: the absent EXECUTE grant, AND the `auth.uid() IS
+  -- NULL` fail-loud guard inside both bodies (auth.uid() is NULL for anon here,
+  -- the claims having been cleared before this block). SQLSTATE alone therefore
+  -- cannot tell "anon cannot reach the function" from "anon reached it and the
+  -- body threw her out".
+  -- MEASURED (PostgreSQL 16 replica) with `GRANT EXECUTE ... TO anon` in force:
+  -- both arms below, written to catch bare `insufficient_privilege`, reported
+  -- PASS while anon demonstrably held EXECUTE — the swallowed SQLERRM was
+  -- "create_strategy_share: no authenticated user — not callable by a
+  -- service-role/admin client". Pinning `permission denied for function` is
+  -- what makes them measure the GRANT layer, which is their only job: the body
+  -- guard is proven independently and behaviourally by SERVICE-ROLE 2.
   raised := FALSE;
   BEGIN
     PERFORM public.create_strategy_share(strat_a);
   EXCEPTION WHEN insufficient_privilege THEN
-    raised := TRUE;
+    raised := TRUE; err_msg := SQLERRM;
   END;
   IF NOT raised THEN
     RESET ROLE;
     RAISE EXCEPTION 'TEST FAILED (ANON 1c): anon holds EXECUTE on create_strategy_share — the REVOKE/GRANT block in migration 20260827120000 is missing or was overridden';
+  END IF;
+  IF err_msg NOT LIKE '%permission denied for function%' THEN
+    RESET ROLE;
+    RAISE EXCEPTION 'TEST FAILED (ANON 1c-grant): anon''s create_strategy_share call was rejected by something other than the GRANT layer (got: %). The body''s `auth.uid() IS NULL` guard raises the SAME 42501, so this arm passes on the wrong wall unless the message is pinned — MEASURED: with EXECUTE granted to anon the bare-SQLSTATE version reported PASS.', err_msg;
   END IF;
 
   raised := FALSE;
   BEGIN
     PERFORM public.revoke_strategy_share(strat_a);
   EXCEPTION WHEN insufficient_privilege THEN
-    raised := TRUE;
+    raised := TRUE; err_msg := SQLERRM;
   END;
   IF NOT raised THEN
     RESET ROLE;
     RAISE EXCEPTION 'TEST FAILED (ANON 1d): anon holds EXECUTE on revoke_strategy_share';
+  END IF;
+  IF err_msg NOT LIKE '%permission denied for function%' THEN
+    RESET ROLE;
+    RAISE EXCEPTION 'TEST FAILED (ANON 1d-grant): anon''s revoke_strategy_share call was rejected by something other than the GRANT layer (got: %) — see ANON 1c-grant; the body guard raises the same errcode and would satisfy a bare-SQLSTATE arm', err_msg;
   END IF;
 
   RESET ROLE;
@@ -1001,11 +1024,26 @@ BEGIN
   BEGIN
     PERFORM public.revoke_strategy_share(strat_a);
   EXCEPTION WHEN insufficient_privilege THEN
-    raised := TRUE;
+    raised := TRUE; err_msg := SQLERRM;
   END;
   RESET ROLE;
   IF NOT raised THEN
     RAISE EXCEPTION 'TEST FAILED (SERVICE-ROLE 1): service_role executed revoke_strategy_share — it holds neither an explicit GRANT nor the PUBLIC default the migration revokes. A BYPASSRLS caller on this RPC is an unauthenticated cross-tenant kill switch.';
+  END IF;
+  -- ⛔ Same defect and same fix as ANON 1b-grant / 1c-grant / 1d-grant. The
+  -- `auth.uid() IS NULL` guard in the body raises `insufficient_privilege` too
+  -- — and for service_role auth.uid() is ALWAYS NULL, so the body ALWAYS
+  -- refuses. A bare-SQLSTATE arm here is therefore satisfied by the body
+  -- whether or not the grant exists, which is precisely the wall it claims to
+  -- prove. MEASURED (PostgreSQL 16 replica): with `GRANT EXECUTE ... TO
+  -- service_role` in force, the bare version reported PASS while swallowing
+  -- "revoke_strategy_share: no authenticated user — not callable by a
+  -- service-role/admin client".
+  -- ⚠️ SERVICE-ROLE 0-acl above is the primary detector for that drift and
+  -- fires earlier; this message pin keeps THIS arm honest about which layer it
+  -- measured, so the two cannot both go dark on the same regression.
+  IF err_msg NOT LIKE '%permission denied for function%' THEN
+    RAISE EXCEPTION 'TEST FAILED (SERVICE-ROLE 1-grant): service_role''s revoke_strategy_share call was rejected by something other than the GRANT layer (got: %). If this is the fail-loud body guard, service_role HOLDS EXECUTE and this arm proved nothing — the grant-layer wall it names is gone.', err_msg;
   END IF;
 
   -- ======================================================================
@@ -1070,6 +1108,15 @@ BEGIN
   END IF;
 
   -- Belt-and-braces: the temporary EXECUTE grants really are gone.
+  -- ⛔ THIS ARM CANNOT ANSWER "did the migration ship a service_role grant?" and
+  -- must not be read as if it did: lines above REVOKE the standing grant along
+  -- with the temporary one, so by the time this counts, a shipped grant and no
+  -- shipped grant are indistinguishable. That question is owned by
+  -- SERVICE-ROLE 0-acl, which snapshots the LIVE ACL BEFORE the temporary GRANT
+  -- is issued. What this arm uniquely proves is that the probe CLEANED UP —
+  -- worth keeping, because the file's other backstop is the closing ROLLBACK
+  -- and a leaked EXECUTE grant on a shared test database would silently
+  -- pre-satisfy SERVICE-ROLE 0-acl's failure condition on the NEXT run.
   SELECT count(*) INTO row_cnt
     FROM pg_proc p
     CROSS JOIN LATERAL aclexplode(p.proacl) AS acl
@@ -1141,7 +1188,7 @@ BEGIN
     RAISE EXCEPTION 'TEST FAILED (SANITIZE 1f): erasing tenant A also revoked tenant B''s share (revoked_at=%, generation % -> %) — the `created_by = p_user_id` predicate is missing from the sanitize arm, so ONE user''s Art. 17 request kills EVERY user''s share links', b_revoked, gen_b, gen_b_after;
   END IF;
 
-  RAISE NOTICE 'test_strategy_shares_rls: ALL 70 ARMS EXECUTED (SHAPE 1, SHAPE 2a, SHAPE 2b, SHAPE 3, SHAPE 4a, SHAPE 4b, SHAPE 4c, SHAPE 5, OWNER 1a, OWNER 1b, OWNER 2a, OWNER 2b, OWNER 2c, TENANT 1a, TENANT 1b, TENANT 2a, TENANT 2b, TENANT 3a, TENANT 3b, NO-DELETE 1, REVOKE 1a, REVOKE 1b, REVOKE 1c, REVOKE 2a, REVOKE 2b, REACTIVATE 1a, REACTIVATE 1b, REACTIVATE 1c, REACTIVATE 1d, REACTIVATE 1e, REACTIVATE 1f, TRIGGER 1a, TRIGGER 1b, TRIGGER 1c, MONOTONIC 1a, MONOTONIC 1b, MONOTONIC 1c, TRIGGER 2a, TRIGGER 2b, TRIGGER 2c, TENANT 4a, TENANT 4b, TENANT 4c, TENANT 5a, TENANT 5b, TENANT 5c, TENANT 5d, TENANT 5e, TENANT 5f, TENANT 5g, ANON 1a, ANON 1b, ANON 1b-grant, ANON 1c, ANON 1d, ANON 2, ANON 2b, SERVICE-ROLE 0-acl, SERVICE-ROLE 1, SERVICE-ROLE 2a, SERVICE-ROLE 2b, SERVICE-ROLE 2c, SERVICE-ROLE 2d, SERVICE-ROLE 2e, SANITIZE 1a, SANITIZE 1b, SANITIZE 1c, SANITIZE 1d, SANITIZE 1e, SANITIZE 1f). Observed generation sequence: %', gen_seen;
+  RAISE NOTICE 'test_strategy_shares_rls: ALL 73 ARMS EXECUTED (SHAPE 1, SHAPE 2a, SHAPE 2b, SHAPE 3, SHAPE 4a, SHAPE 4b, SHAPE 4c, SHAPE 5, OWNER 1a, OWNER 1b, OWNER 2a, OWNER 2b, OWNER 2c, TENANT 1a, TENANT 1b, TENANT 2a, TENANT 2b, TENANT 3a, TENANT 3b, NO-DELETE 1, REVOKE 1a, REVOKE 1b, REVOKE 1c, REVOKE 2a, REVOKE 2b, REACTIVATE 1a, REACTIVATE 1b, REACTIVATE 1c, REACTIVATE 1d, REACTIVATE 1e, REACTIVATE 1f, TRIGGER 1a, TRIGGER 1b, TRIGGER 1c, MONOTONIC 1a, MONOTONIC 1b, MONOTONIC 1c, TRIGGER 2a, TRIGGER 2b, TRIGGER 2c, TENANT 4a, TENANT 4b, TENANT 4c, TENANT 5a, TENANT 5b, TENANT 5c, TENANT 5d, TENANT 5e, TENANT 5f, TENANT 5g, ANON 1a, ANON 1b, ANON 1b-grant, ANON 1c, ANON 1c-grant, ANON 1d, ANON 1d-grant, ANON 2, ANON 2b, SERVICE-ROLE 0-acl, SERVICE-ROLE 1, SERVICE-ROLE 1-grant, SERVICE-ROLE 2a, SERVICE-ROLE 2b, SERVICE-ROLE 2c, SERVICE-ROLE 2d, SERVICE-ROLE 2e, SANITIZE 1a, SANITIZE 1b, SANITIZE 1c, SANITIZE 1d, SANITIZE 1e, SANITIZE 1f). Observed generation sequence: %', gen_seen;
 END
 $$;
 
