@@ -1688,10 +1688,10 @@ jobs:
           #   test_ledger_refresh_fanout.sql                 10
           #   test_ledger_refresh_staleness.sql               8
           #   test_retention_crons_safe.sql                   4
-          #   test_strategy_shares_rls.sql                   76
+          #   test_strategy_shares_rls.sql                  101
           #   test_sync_status_marked_refresh_protected.sql  16
           SENTINEL_FLOOR=8   # files declaring a sentinel
-          ARMS_FLOOR=139     # 9 + 6 + 10 + 10 + 8 + 4 + 76 + 16
+          ARMS_FLOOR=164     # 9 + 6 + 10 + 10 + 8 + 4 + 101 + 16
           # RAISING these as arms are added is expected and cheap — and it is not
           # optional: src/__tests__/contracts/ci-anti-skip-gate.contract.test.ts
           # re-derives the table above from the corpus and goes red when a count,
