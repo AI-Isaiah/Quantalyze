@@ -4,15 +4,26 @@
  * (phase 164, ruling D-06) so a second, tokenized recipient lane can import it
  * without importing a Next.js page module.
  *
- * ⛔ THIS MODULE HAS NO CACHE REACH, AND THAT ABSENCE IS THE POINT (SL-1).
- * It imports `next/cache` nowhere and it imports the factsheet page nowhere.
- * The cached wrapper `buildFactsheetPayloadCached` deliberately did NOT move —
- * it stays private to `v2/page.tsx`, where the lane decision that makes it safe
- * also lives. The effective `unstable_cache` key on that route is id-ONLY, so
- * any viewer-dependent payload routed through the wrapper would be served to
- * every later reader of that id — anonymous ones included — for the full TTL.
- * A lane needing a viewer-dependent payload calls `fetchAndBuildPayload`
- * DIRECTLY, exactly as the owner lane does.
+ * ⛔ NO CACHE REACH — AND THAT ABSENCE IS ENFORCED, NOT CLAIMED HERE (SL-1).
+ * `src/__tests__/phase-148-owner-lane-cache-isolation.test.ts` walks this
+ * module's whole TRANSITIVE import closure — 38 modules as measured 2026-08-27,
+ * not this file's own bytes — and fails if ANY of them imports `next/cache` or
+ * names `unstable_cache` / `revalidateTag` / `revalidatePath` / `cacheTag` /
+ * `cacheLife`. The SCOPE is the fact worth knowing: a cache wrapped around a
+ * read three hops down this graph discloses exactly as much as one written
+ * here, and until phase 164 nothing looked past this file. The sentence that
+ * stood here asserted the absence on its own authority; a comment is not a
+ * control.
+ *
+ * WHY THE ABSENCE MATTERS — the argument the guard exists to protect. The
+ * cached wrapper `buildFactsheetPayloadCached` deliberately did NOT move; it
+ * stays private to `v2/page.tsx`, where the lane decision that makes it safe
+ * also lives, and this module imports that page nowhere. The effective
+ * `unstable_cache` key on that route is id-ONLY, so any viewer-dependent
+ * payload routed through the wrapper would be served to every later reader of
+ * that id — anonymous ones included — for the full TTL. A lane needing a
+ * viewer-dependent payload calls `fetchAndBuildPayload` DIRECTLY, exactly as
+ * the owner lane does.
  *
  * ⛔ Do NOT re-declare this function anywhere else. `src/__tests__/phase-148-owner-lane-cache-isolation.test.ts`
  * pins this file as the canonical home: exactly one production file may declare
