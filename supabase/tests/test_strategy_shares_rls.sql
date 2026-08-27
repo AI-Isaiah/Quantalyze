@@ -614,18 +614,40 @@ BEGIN
   END IF;
 
   -- ======================================================================
-  -- SHAPE 5: the monotonicity trigger exists, BEFORE UPDATE, FOR EACH ROW
+  -- SHAPE 5: the trigger exists, BEFORE **INSERT OR UPDATE**, FOR EACH ROW
   -- ======================================================================
   -- Structural companion to the behavioural TRIGGER 1 / TRIGGER 2 arms below.
   -- It is not redundant with them: those two also go RED if the trigger is
   -- merely DROPPED, but they cannot distinguish a correct trigger from one
-  -- re-created with the wrong timing or level, and both miscreations silently
-  -- stop guarding:
+  -- re-created with the wrong timing, level or EVENT SET, and every such
+  -- miscreation silently stops guarding:
   --   * AFTER instead of BEFORE — it still raises, but any AFTER trigger
   --     ordered ahead of it has already observed the rewound row;
   --   * STATEMENT instead of ROW — OLD/NEW do not exist, so the body becomes a
-  --     runtime error on EVERY update rather than a guard on the bad ones.
-  -- tgtype bit 0 = ROW, bit 1 = BEFORE, bit 4 = UPDATE.
+  --     runtime error on EVERY update rather than a guard on the bad ones;
+  --   * UPDATE only, without INSERT — the R3 INSERT pin (forced generation,
+  --     forced nonce) is silently retired for every role a column grant does
+  --     not bind.
+  -- ⛔⛔ THE INSERT BIT IS ASSERTED SEPARATELY AND THAT WAS A REAL GAP, not a
+  -- tidy-up. 164-06 widened the trigger to BEFORE INSERT OR UPDATE and taught
+  -- migration 20260827120000's STEP 6 arm (v) to test bit 2; THIS arm — the
+  -- DURABLE pin, the one that re-runs on every CI push, against the live
+  -- catalog — never received the same fix and still tested bits 1, 2 and 16
+  -- only. `&` masking means a trigger narrowed back to `BEFORE UPDATE`
+  -- satisfies every one of those terms. MEASURED 2026-08-28: with the trigger
+  -- changed to `BEFORE UPDATE ON strategy_shares` (and migration arm (v)'s
+  -- INSERT term removed so the apply survived), SHAPE 5 PASSED and the file ran
+  -- on for sixteen more arms before N1 2a caught it BEHAVIOURALLY — "a
+  -- service_role INSERT naming generation = 987654321 landed at 987654321".
+  -- A structural pin that a behavioural arm has to rescue is not a pin.
+  -- Each event the guard claims to cover needs its own bit test.
+  -- tgtype bit 0 = ROW, bit 1 = BEFORE, bit 2 = INSERT, bit 4 = UPDATE.
+  -- RED-UNDER: change the CREATE TRIGGER in migration 20260827120000 STEP 1b to
+  --            `BEFORE UPDATE ON strategy_shares`.
+  -- ⚠️ LAYERED: migration arm (v) tests the same bit and ABORTS THE APPLY, so
+  --    its `AND (t.tgtype & 4) = 4` term must be removed in the same mutation
+  --    or this file never runs. With both gone SHAPE 5 is the first failure
+  --    (MEASURED) — where before the fix it was silent and N1 2a was.
   SELECT count(*) INTO row_cnt
     FROM pg_trigger t
    WHERE t.tgrelid = 'public.strategy_shares'::regclass
@@ -633,9 +655,10 @@ BEGIN
      AND t.tgname = 'strategy_shares_monotonic_generation'
      AND (t.tgtype & 1) = 1
      AND (t.tgtype & 2) = 2
+     AND (t.tgtype & 4) = 4
      AND (t.tgtype & 16) = 16;
   IF row_cnt <> 1 THEN
-    RAISE EXCEPTION 'TEST FAILED (SHAPE 5): expected exactly 1 BEFORE UPDATE FOR EACH ROW trigger named strategy_shares_monotonic_generation on strategy_shares, found %. Without it the owner''s UPDATE grant on (revoked_at, generation) plus the FOR ALL policy let a raw PATCH rewind the counter — MEASURED (PostgreSQL 16): generation went 2 -> 1 and revoked_at was cleared in ONE request, resurrecting every link the owner had revoked. ⛔ A trigger is also the ONLY control on this table that binds service_role, which BYPASSRLS exempts from every policy here and which GRANT ALL exempts from every column grant.', row_cnt;
+    RAISE EXCEPTION 'TEST FAILED (SHAPE 5): expected exactly 1 BEFORE INSERT OR UPDATE FOR EACH ROW trigger named strategy_shares_monotonic_generation on strategy_shares, found %. Without its UPDATE half the owner''s UPDATE grant on (revoked_at, generation) plus the FOR ALL policy let a raw PATCH rewind the counter — MEASURED (PostgreSQL 16): generation went 2 -> 1 and revoked_at was cleared in ONE request, resurrecting every link the owner had revoked. Without its INSERT half a role that bypasses grants lands a fresh row at a starting generation AND a nonce of its own choosing, which no column grant reaches — that is the whole delete-and-recreate resurrection family, and it is what N1 2a and N1 2b prove behaviourally. ⛔ A trigger is also the ONLY control on this table that binds service_role, which BYPASSRLS exempts from every policy here and which GRANT ALL exempts from every column grant.', row_cnt;
   END IF;
 
   -- ======================================================================
