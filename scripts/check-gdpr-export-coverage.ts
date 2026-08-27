@@ -1,7 +1,13 @@
 #!/usr/bin/env -S npx tsx
 /**
- * CI hook — fail if `src/lib/gdpr-export.ts::USER_EXPORT_TABLES` lacks a case
- * for any migration-declared user-owned table.
+ * CI hook — fail if `src/lib/gdpr-export-manifest.ts::USER_EXPORT_TABLES`
+ * lacks a case for any migration-declared user-owned table.
+ *
+ * ⚠️ The manifest array is DEFINED in `src/lib/gdpr-export-manifest.ts`.
+ * `src/lib/gdpr-export.ts` only imports it. This docblock and the failure
+ * text below both used to say `gdpr-export.ts`, which misdirected the exact
+ * engineer acting on the failure to a file where the array does not exist
+ * (B3, 2026-08-27).
  *
  * Sprint 6 closeout Task 7.3. The GDPR export route assembles a bundle of
  * every user-referencing table (see `src/lib/gdpr-export.ts`). When a new
@@ -43,9 +49,38 @@
  *   - `for_quants_leads`, `relationship_documents`, etc. — they're
  *      cross-party and appear via their parent tables.
  *
- * If the CI fails with a table you believe should be allowlisted, add
- * it to EXCLUDED_TABLES below AND document the rationale in the
- * per-table matrix comment block of migration 20260417110538_sanitize_user.sql.
+ * ⛔ EXCLUDED_TABLES IS NOT A REMEDY FOR A FAILING RUN (B3, 2026-08-27)
+ * ---------------------------------------------------------------------
+ * This block used to read "if the CI fails with a table you believe should
+ * be allowlisted, add it to EXCLUDED_TABLES below", and the runtime failure
+ * text said the same. That advertised the cheapest wrong fix as if it were
+ * a peer of the right one — and it is strictly less work, because an
+ * EXCLUDED_TABLES key is a plain string while a USER_EXPORT_TABLES entry is
+ * typed against the GENERATED `database.types.ts` and cannot be added until
+ * the migration is applied. An engineer facing red tests took the cheap
+ * path, CI went green, and a user-owned table was permanently and silently
+ * absent from every Art. 15 export with no red anywhere.
+ *
+ * A USER-OWNED TABLE IS NEVER ELIGIBLE FOR EXCLUDED_TABLES. Concretely: if
+ * the table declares an owner column that is `NOT NULL REFERENCES profiles
+ * | auth.users ... ON DELETE CASCADE`, its rows belong to exactly one data
+ * subject and Art. 15 entitles them to it. EXCLUDED_TABLES answers a
+ * different question — "these rows are not any one user's" — and answering
+ * it falsely is a privacy defect, not a config choice.
+ *
+ * That bar is ENFORCED, not merely written down, by
+ * `src/__tests__/gdpr-export-coverage-hook.test.ts` ("B3:" cases), which
+ * runs in CI. Excluding a CASCADE-owned table under class `scoped`,
+ * `system`, `cross-party` or `pre-auth` fails there, and `scoped` entries
+ * must additionally really appear in USER_EXPORT_TABLES.
+ *
+ * The correct remedy when this hook names a table is the four-step order of
+ * operations written out at the ⛔ PENDING block in
+ * `src/lib/gdpr-export-manifest.ts`: (1) apply the migration, (2) regenerate
+ * `src/lib/database.types.ts`, (3) add the USER_EXPORT_TABLES entry, (4) add
+ * the matching SANITIZE_PARITY_ALLOWLIST key here — 3 and 4 together. Until
+ * that lands, this hook exiting 1 IS THE CORRECT STATE; the redness is the
+ * reminder. Do not silence it.
  *
  * Invocation
  * ----------
@@ -908,16 +943,33 @@ export function runCoverageCheck(opts: {
     );
     for (const { table, migration } of missing) {
       errorLog(
-        `  - ${table} (declared in ${migration}) -> add to USER_EXPORT_TABLES in src/lib/gdpr-export.ts`,
+        `  - ${table} (declared in ${migration}) -> add to USER_EXPORT_TABLES in src/lib/gdpr-export-manifest.ts`,
       );
     }
     errorLog(
-      "\nFIX: open src/lib/gdpr-export.ts, locate the USER_EXPORT_TABLES " +
-        'array, and add a `{ kind: "direct", table: "<name>", user_column: ' +
-        '"<col>" }` entry (or `indirect` / `projected` as appropriate).\n' +
-        "If the table genuinely should NOT appear in the export (e.g., cross-party " +
-        "audit-only), add it to EXCLUDED_TABLES in scripts/check-gdpr-export-coverage.ts " +
-        "and document the rationale in migration 055's per-table matrix.",
+      "\nFIX — the table is user-owned, so it BELONGS in the export. Follow the " +
+        "four-step order of operations recorded at the PENDING block in " +
+        "src/lib/gdpr-export-manifest.ts:\n" +
+        "  1. apply the declaring migration (the entry cannot compile before it — " +
+        "`table` is typed against the GENERATED src/lib/database.types.ts);\n" +
+        "  2. regenerate src/lib/database.types.ts from the applied schema;\n" +
+        '  3. add `{ kind: "direct", table: "<name>", user_column: "<col>" }` to ' +
+        "USER_EXPORT_TABLES in src/lib/gdpr-export-manifest.ts (or `indirect` / " +
+        "`projected` as appropriate), in alphabetical order;\n" +
+        "  4. add the matching key to SANITIZE_PARITY_ALLOWLIST in this script, or a " +
+        "row to the sanitize_user matrix. Steps 3 and 4 must land TOGETHER — the " +
+        "allowlist rejects a key with no manifest entry, and a manifest entry with " +
+        "no sanitize policy fails the Art. 15/17 parity check.\n" +
+        "\n⛔ DO NOT add this table to EXCLUDED_TABLES. That arm means 'these rows " +
+        "are not any single user's' — it is not a way to make this failure go away, " +
+        "and it is not cheaper-but-equivalent. Silencing a user-owned table there " +
+        "drops it from EVERY Art. 15 export permanently and silently, with green CI. " +
+        "A table whose owner column is `NOT NULL REFERENCES profiles | auth.users " +
+        "... ON DELETE CASCADE` is NEVER eligible; " +
+        "src/__tests__/gdpr-export-coverage-hook.test.ts enforces that in CI, so the " +
+        "shortcut fails there rather than shipping.\n" +
+        "\nUntil step 3 lands, THIS FAILURE IS THE CORRECT STATE. The redness is the " +
+        "reminder that a user-owned table is not yet exportable.",
     );
     return 1;
   }

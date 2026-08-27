@@ -21,6 +21,18 @@ const MAX_THREADS = Math.max(1, os.cpus().length - 1);
 // list).
 const INCLUDE = [
   "src/**/*.test.{ts,tsx}",
+  // D-164-A / B3 (2026-08-27) — colocated tests for the CI gate SCRIPTS.
+  // There was no `scripts/**` glob here, so `scripts/check-gdpr-export-
+  // coverage.test.ts` — 20 KB of assertions over the GDPR export-coverage
+  // hook — had NEVER executed in this repo's CI. An uncollected test file is
+  // indistinguishable from a passing one by every signal a reviewer reads,
+  // which is the same class of defect the hook itself guards against. Adding
+  // the glob was the remedy recorded in the phase's deferred-items.md, and it
+  // is taken here because B3 hardens that exact hook and the assertions had to
+  // be running for the hardening to mean anything.
+  // ⚠️ Directory-wide on purpose: a per-file entry would leave the next
+  // colocated script test uncollected and silent all over again.
+  "scripts/**/*.test.{ts,tsx}",
   "tests/a11y/**/*.test.ts",
   "tests/visual/**/*.test.ts",
   "tests/visual/**/*.test.tsx",
