@@ -226,15 +226,53 @@ CREATE INDEX strategy_shares_active_idx
 -- it is the only control here that also covers the admin transport the
 -- recipient lane already uses (STEP 2).
 --
--- The two rules together are what make the model sound:
---   (1) generation NEVER decreases. A rewind re-issues a dead token.
---   (2) a revocation (revoked_at NULL -> NOT NULL) MUST advance generation.
+-- ⛔ THE TWO-REQUEST RE-POINT — why guarding `generation` ALONE is not enough.
+-- An earlier version of this trigger compared only the counter and the
+-- tombstone. It never looked at `strategy_id`, so the identical end state was
+-- reachable in two requests instead of one, both issued as the row's own owner:
+--   1. `PATCH /rest/v1/strategy_shares?strategy_id=eq.<A>` `{"strategy_id":"<B>"}`
+--      where B is a second strategy the SAME user owns and has never shared.
+--      USING passes (created_by is unchanged), the CR-01 WITH CHECK EXISTS
+--      passes (they really do own B), UNIQUE(strategy_id) is free because B has
+--      no row, and the counter is untouched — so nothing above rejected it. The
+--      advanced counter walks away with strategy B and strategy A is left with
+--      NO share row at all.
+--   2. `create_strategy_share(A)` then takes the INSERT path and lands a fresh
+--      row at `generation` DEFAULT 1. HMAC(secret, A || 1) is byte-identical to
+--      the token A handed out — and REVOKED — at generation 1, so every
+--      recipient holding that dead url is back inside the unpublished factsheet.
+-- The counter is only meaningful RELATIVE to the strategy it counts for. That
+-- binding is therefore IMMUTABLE, and so are the row identity and provenance
+-- columns: STEP 3 tells the reader that reactivation never rewrites
+-- created_by/created_at, and before rule (0b) a raw PATCH falsified that claim.
+--
+-- The four rules together are what make the model sound:
+--   (0a) strategy_id NEVER changes. Re-pointing the counter re-issues generation
+--        1 for the strategy it was pointed away from.
+--   (0b) id, created_by and created_at NEVER change. Provenance on a live
+--        capability grant must not be forgeable.
+--   (1)  generation NEVER decreases. A rewind re-issues a dead token.
+--   (2)  a revocation (revoked_at NULL -> NOT NULL) MUST advance generation.
 -- (2) is what lets reactivation stay unconstrained: because every revoked row
 -- provably got there by advancing, clearing `revoked_at` without touching the
 -- counter — exactly what create_strategy_share() does — can never return the
 -- row to a generation that was live before a revoke. Without (2) an owner could
 -- raw-stamp revoked_at at generation G (making the link merely go dark), then
 -- re-mint and bring that same generation-G token back to life.
+--
+-- ⚠️ THE FUNCTION NAME IS NOW NARROWER THAN ITS JOB, and is kept anyway:
+-- `strategy_shares_enforce_monotonic_generation` / trigger
+-- `strategy_shares_monotonic_generation` are pinned by name in STEP 6 (v), by
+-- `supabase/tests/test_strategy_shares_rls.sql` (SHAPE 5) and by this table's
+-- COMMENT. Renaming to chase the widened scope would touch four sites to buy a
+-- better word; the scope is documented here and in the function COMMENT instead.
+--
+-- ⛔ FOUNDER RULING (2026-08-27) — the alternative fix was CONSIDERED AND
+-- REJECTED: revoking the client UPDATE grant outright and converting both RPCs
+-- to SECURITY DEFINER would also close the re-point, but it deletes RLS as the
+-- ownership wall on this surface and moves the whole tenancy argument inside two
+-- function bodies. The column pin plus SECURITY INVOKER is the ruling. Do not
+-- re-litigate it.
 CREATE OR REPLACE FUNCTION public.strategy_shares_enforce_monotonic_generation()
 RETURNS TRIGGER
 LANGUAGE plpgsql
@@ -242,6 +280,22 @@ SECURITY INVOKER
 SET search_path = public, pg_temp
 AS $$
 BEGIN
+  -- (0a) the counter is bound to ONE strategy, permanently.
+  IF NEW.strategy_id IS DISTINCT FROM OLD.strategy_id THEN
+    RAISE EXCEPTION 'strategy_shares: strategy_id is immutable — refusing to re-point the share row for strategy % at strategy %. The generation counter is only meaningful RELATIVE to the strategy it counts for. Moving it leaves the original strategy with NO share row, so the very next create_strategy_share() inserts a fresh one at generation 1 and re-issues every token that strategy ever had at generation 1 — including the ones that were explicitly REVOKED. Two requests, both legitimate for the row owner, same end state as rewinding the counter.',
+      OLD.strategy_id, NEW.strategy_id
+      USING ERRCODE = 'check_violation';
+  END IF;
+
+  -- (0b) row identity and provenance are write-once.
+  IF NEW.id IS DISTINCT FROM OLD.id
+     OR NEW.created_by IS DISTINCT FROM OLD.created_by
+     OR NEW.created_at IS DISTINCT FROM OLD.created_at THEN
+    RAISE EXCEPTION 'strategy_shares: identity and provenance are immutable — refusing to rewrite id, created_by or created_at on strategy %. STEP 3 of this migration tells every future reader that reactivation never rewrites provenance; without this rule a raw PATCH falsifies that claim and forges who minted a live anonymous capability link, and when.',
+      OLD.strategy_id
+      USING ERRCODE = 'check_violation';
+  END IF;
+
   IF NEW.generation < OLD.generation THEN
     RAISE EXCEPTION 'strategy_shares: generation is monotonic — refusing to rewind it from % to % on strategy %. A rewind re-issues every share token minted at the lower generation, including ones that were explicitly REVOKED, as anonymous access to an unpublished factsheet.',
       OLD.generation, NEW.generation, OLD.strategy_id
@@ -261,8 +315,15 @@ END;
 $$;
 
 COMMENT ON FUNCTION public.strategy_shares_enforce_monotonic_generation() IS
-  'Phase 164 / SHARE-03. BEFORE UPDATE guard making the generation counter '
-  'monotonic AND making every revocation advance it. Closes the owner '
+  'Phase 164 / SHARE-03. BEFORE UPDATE guard over FOUR rules (the name predates '
+  'the last two and is kept because STEP 6, the table COMMENT and '
+  'test_strategy_shares_rls.sql all pin it): (0a) strategy_id is IMMUTABLE — '
+  're-pointing the row at another strategy the same owner holds leaves the '
+  'original with no row, and the next create_strategy_share() re-issues it at '
+  'generation 1, resurrecting every token revoked at generation 1 in TWO '
+  'requests; (0b) id, created_by and created_at are immutable, so the '
+  'provenance STEP 3 promises cannot be forged by a raw PATCH; (1) generation '
+  'is monotonic; (2) every revocation advances it. Closes the owner '
   'self-rewind: the FOR ALL policy plus a column-unrestricted UPDATE grant let '
   'an owner PATCH their own row back to a revoked generation and clear '
   'revoked_at, resurrecting every link they had revoked (MEASURED). ⛔ Triggers '
@@ -601,6 +662,8 @@ DECLARE
   v_revoke_s TEXT;
   v_secdef   BOOLEAN;
   v_trg      INTEGER;
+  v_trigfn   TEXT;
+  v_trigfn_s TEXT;
 BEGIN
   SELECT pg_get_functiondef(p.oid) INTO v_create
     FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
@@ -704,7 +767,47 @@ BEGIN
     RAISE EXCEPTION 'Migration 164-02 verification failed: the BEFORE UPDATE FOR EACH ROW trigger strategy_shares_monotonic_generation is absent or misshapen (matching triggers: %). Without it an owner can PATCH their own row back to a revoked generation and clear revoked_at, resurrecting every link they revoked — MEASURED, not hypothetical.', v_trg;
   END IF;
 
-  RAISE NOTICE 'Migration 164-02: share RPC body-shape verified (atomic bump + live-only predicate + no delete + no generation rewind + auth.uid() fail-loud + revoke ownership predicate + INVOKER + search_path + monotonicity trigger).';
+  -- (v-b) ...and it still carries ALL FOUR rules. (v) above proves a trigger of
+  -- the right timing and level EXISTS; it says nothing about what the function
+  -- behind it compares, so a `CREATE OR REPLACE` that quietly drops one rule
+  -- passes (v) unchanged. Each rule closes a DIFFERENT route to the same end
+  -- state — a token that was revoked resolving again — so each needs its own
+  -- probe. Comment-stripped for the usual reason (mig 20260517013100 STEP 2):
+  -- pg_get_functiondef returns in-body comments verbatim and this body labels
+  -- its rules in prose, so a raw-text probe could be satisfied by the label
+  -- rather than by the code. ⚠️ Apply-time only, like every DO block here — the
+  -- DURABLE pins are the behavioural TRIGGER 1-4 arms in
+  -- supabase/tests/test_strategy_shares_rls.sql, which break the invariant
+  -- against the live database instead of grepping a body.
+  SELECT pg_get_functiondef(p.oid) INTO v_trigfn
+    FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+   WHERE n.nspname = 'public'
+     AND p.proname = 'strategy_shares_enforce_monotonic_generation';
+  IF v_trigfn IS NULL THEN
+    RAISE EXCEPTION 'Migration 164-02 verification failed: the trigger function public.strategy_shares_enforce_monotonic_generation() could not be read, so every rule probe below would be VACUOUSLY true on NULL';
+  END IF;
+  v_trigfn_s := regexp_replace(v_trigfn, '--[^\n]*', '', 'g');
+
+  IF v_trigfn_s !~* 'NEW\.strategy_id\s+IS\s+DISTINCT\s+FROM\s+OLD\.strategy_id' THEN
+    RAISE EXCEPTION 'Migration 164-02 verification failed: the monotonicity trigger lost rule (0a) — it no longer compares NEW.strategy_id to OLD.strategy_id. The owner can then re-point their share row at a second strategy they own in ONE PATCH (USING passes, the CR-01 WITH CHECK passes, UNIQUE(strategy_id) is free), leaving the original strategy with no row; create_strategy_share() on it then inserts at generation 1 and every token that strategy revoked at generation 1 works again.';
+  END IF;
+
+  IF v_trigfn_s !~* 'NEW\.id\s+IS\s+DISTINCT\s+FROM\s+OLD\.id'
+     OR v_trigfn_s !~* 'NEW\.created_by\s+IS\s+DISTINCT\s+FROM\s+OLD\.created_by'
+     OR v_trigfn_s !~* 'NEW\.created_at\s+IS\s+DISTINCT\s+FROM\s+OLD\.created_at' THEN
+    RAISE EXCEPTION 'Migration 164-02 verification failed: the monotonicity trigger lost rule (0b) — id, created_by and created_at are no longer pinned. STEP 3 of this file tells every reader that reactivation never rewrites provenance; without the rule a raw PATCH does exactly that, forging who minted a live anonymous capability link and when.';
+  END IF;
+
+  IF v_trigfn_s !~* 'NEW\.generation\s*<\s*OLD\.generation' THEN
+    RAISE EXCEPTION 'Migration 164-02 verification failed: the monotonicity trigger lost rule (1) — it no longer refuses a generation REWIND, which is the single-request form of the resurrection above (MEASURED: generation 2 -> 1 with revoked_at cleared, from an ordinary owner token).';
+  END IF;
+
+  IF v_trigfn_s !~* 'OLD\.revoked_at\s+IS\s+NULL'
+     OR v_trigfn_s !~* 'NEW\.generation\s*<=\s*OLD\.generation' THEN
+    RAISE EXCEPTION 'Migration 164-02 verification failed: the monotonicity trigger lost rule (2) — a revocation is no longer required to ADVANCE generation. A raw tombstone at the same counter is COSMETIC: the row drops out of the active scan, and the next create_strategy_share() clears it at the SAME generation and brings the supposedly-revoked token back to life.';
+  END IF;
+
+  RAISE NOTICE 'Migration 164-02: share RPC body-shape verified (atomic bump + live-only predicate + no delete + no generation rewind + auth.uid() fail-loud + revoke ownership predicate + INVOKER + search_path + monotonicity trigger present AND carrying all four rules: strategy_id pin, provenance pin, no-rewind, revocation-advances).';
 END $$;
 
 -- --------------------------------------------------------------------------
