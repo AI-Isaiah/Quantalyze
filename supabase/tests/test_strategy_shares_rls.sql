@@ -249,6 +249,10 @@ DECLARE
   strat_a3       UUID;
   v_create_res   TEXT;
   v_trigfn_s     TEXT;
+  -- N1 (164-06): the bounded-increment arms and the INSERT pin.
+  strat_a4       UUID;
+  gen_a4         BIGINT;
+  gen_a4_pre     BIGINT;
 BEGIN
   -- ----- SEED (seeding/service-role context — bypasses RLS) ---------------
   -- Both strategies are status='private': an unpublished strategy is the ONLY
@@ -281,6 +285,22 @@ BEGIN
   INSERT INTO strategies (user_id, name, status, strategy_types, subtypes, markets, supported_exchanges)
   VALUES (uid_a, 'strategy-shares A cascade-rebirth strategy', 'private', '{}', '{}', '{}', ARRAY['binance'])
   RETURNING id INTO strat_a3;
+
+  -- A FOURTH A-owned strategy, reserved for the N1 arms (164-06). It needs its
+  -- own row for two reasons and both are load-bearing:
+  --   * N1 2a INSERTs the share row itself, as service_role, naming
+  --     `generation` — so the target must have NO existing row or
+  --     UNIQUE(strategy_id) raises 23505 before the trigger is ever consulted
+  --     and the arm passes on the wrong error (the defect ANON 1b records).
+  --     ⛔ strat_a2 cannot be used: it is the never-shared strategy ANON 1b
+  --     depends on, and minting here would re-open that same defect there.
+  --   * N1 1c ACCEPTS a +1 and therefore MOVES a counter. Doing that on strat_a
+  --     would shift `gen_seen`, whose observed sequence {1,1,2,2,2,3} is the
+  --     end-to-end state machine this file reports. A dedicated row keeps the
+  --     bound arms and the sequence independent.
+  INSERT INTO strategies (user_id, name, status, strategy_types, subtypes, markets, supported_exchanges)
+  VALUES (uid_a, 'strategy-shares A bounded-increment strategy', 'private', '{}', '{}', '{}', ARRAY['binance'])
+  RETURNING id INTO strat_a4;
 
   INSERT INTO auth.users (id, instance_id, email, created_at, updated_at)
   VALUES (uid_b, '00000000-0000-0000-0000-000000000000',
@@ -790,6 +810,136 @@ BEGIN
   IF err_msg NOT LIKE '%row-level security%' THEN
     RESET ROLE;
     RAISE EXCEPTION 'TEST FAILED (TENANT 3b): the forged-created_by INSERT was blocked by something OTHER than RLS (got: %) — most likely the UNIQUE(strategy_id) index raising 23505, which means the `created_by = auth.uid()` half of WITH CHECK is NOT independently proven', err_msg;
+  END IF;
+
+  -- ======================================================================
+  -- N1 2a: a service_role INSERT that NAMES generation still lands at 1
+  -- ======================================================================
+  -- ⛔ THE COLUMN GRANT CANNOT BE WHAT PROVES THIS, which is the whole point of
+  -- running the probe as service_role. STEP 2 omits `generation` from
+  -- authenticated's INSERT grant, so an owner naming it gets 42501 and never
+  -- reaches the table — a green there measures the GRANT. `service_role` holds
+  -- GRANT ALL and BYPASSRLS, so for it the grant layer does not exist and the
+  -- only thing left is the trigger's `TG_OP = 'INSERT'` branch. That role is not
+  -- hypothetical here: migration 20260827120000 STEP 2 records that this
+  -- feature's recipient lane already reads this table through
+  -- `createAdminClient()`.
+  --
+  -- WHY IT MATTERS. A row minted at a chosen starting counter is a token
+  -- forgery primitive: land generation at a value some already-revoked token was
+  -- issued under and that token derives again, as anonymous access to an
+  -- unpublished factsheet. FORCING the value (rather than rejecting a wrong one)
+  -- is what makes the starting counter inexpressible instead of merely guarded.
+  --
+  -- RED-UNDER: delete the `NEW.generation := 1;` assignment from the
+  --            `IF TG_OP = 'INSERT'` branch of
+  --            strategy_shares_enforce_monotonic_generation() (STEP 1b),
+  --            keeping the guard and its RETURN.
+  -- ⛔ NOT "delete the whole branch", and the difference is not pedantry: on an
+  -- INSERT `OLD` is unassigned, so with the early return gone the next rule
+  -- raises `record old is not assigned yet` and this file dies on a PL/pgSQL
+  -- error rather than on this arm. The assignment is the part that carries the
+  -- security property, so the assignment is what the mutation removes.
+  -- ⚠️ LAYERED, and said plainly rather than implied: migration 20260827120000's
+  -- own STEP 6 arm (v-d) greps for `NEW.generation := 1` and ABORTS THE APPLY
+  -- without it, so (v-d) must be removed in the same mutation or this file never
+  -- runs. Same shape as SHAPE 5b vs (v-c), and as OWNER 2d's three earlier
+  -- layers. With both gone this arm is the first failure (MEASURED).
+  SET LOCAL ROLE service_role;
+  INSERT INTO strategy_shares (strategy_id, created_by, generation)
+  VALUES (strat_a4, uid_a, 987654321);
+  SET LOCAL ROLE authenticated;
+
+  SELECT generation INTO gen_a4 FROM strategy_shares WHERE strategy_id = strat_a4;
+  IF gen_a4 IS DISTINCT FROM 1 THEN
+    RESET ROLE;
+    RAISE EXCEPTION 'TEST FAILED (N1 2a): a service_role INSERT naming generation = 987654321 landed at %, expected 1. The trigger no longer FORCES the starting counter on INSERT, and no column grant binds this caller — service_role holds GRANT ALL and BYPASSRLS and is what createAdminClient() connects as. A row minted at a counter some already-revoked token was issued under re-derives that token: anonymous access to an unpublished factsheet, from a value the writer chose.', gen_a4;
+  END IF;
+
+  -- ======================================================================
+  -- N1 1a: the CEILING JUMP is refused (the whole of N1)
+  -- ======================================================================
+  -- MEASURED at HEAD before this fix (EXECUTION-EVIDENCE.md §5): the owner holds
+  -- the STEP 2 `UPDATE (revoked_at, generation)` column grant, the FOR ALL
+  -- policy admits their own-row write, and rule (1) forbids only a DECREASE — so
+  -- `PATCH {"generation": 9223372036854775807}` was ACCEPTED. After it,
+  -- revoke_strategy_share WEDGED on 22003 and sanitize_user ABORTED THE ENTIRE
+  -- GDPR ART. 17 ERASURE on the same `generation + 1` statement. A data subject
+  -- could wedge their own erasure with one request.
+  -- ⚠️ BIGINT did not close this and this arm is why the file says so out loud:
+  -- 2^63-1 is one PATCH away from any value, exactly like 2^31-1.
+  -- RED-UNDER: delete the `IF NEW.generation > OLD.generation + 1` block from
+  --            strategy_shares_enforce_monotonic_generation() (STEP 1b).
+  -- ⚠️ LAYERED: migration 20260827120000 STEP 6 arm (v-e) greps for that block
+  --            and aborts the apply without it, so remove (v-e) too. With both
+  --            gone this arm is the first failure in the file (MEASURED).
+  raised := FALSE; err_msg := NULL;
+  BEGIN
+    UPDATE strategy_shares SET generation = 9223372036854775807 WHERE strategy_id = strat_a4;
+  EXCEPTION WHEN OTHERS THEN
+    raised := TRUE; err_msg := SQLERRM;
+  END;
+  -- Message-pinned as well as `raised`, for the reason TRIGGER 1b records: all
+  -- of this trigger's rules share `check_violation`, so a rejection by rule (1)
+  -- or (2) — or by a lost grant — would otherwise be read as the bound biting.
+  IF NOT raised OR err_msg NOT LIKE '%AT MOST ONE%' THEN
+    RESET ROLE;
+    RAISE EXCEPTION 'TEST FAILED (N1 1a): the owner drove generation to the BIGINT ceiling with a raw UPDATE and the bounded-increment rule did not stop it (raised=%, error=%). revoke_strategy_share and the GDPR Art. 17 arm in migration 20260827130000 are the SAME generation + 1 statement, so both then raise 22003 and the data subject has WEDGED THEIR OWN ERASURE using a column the product grants them.', raised, COALESCE(err_msg, '(none)');
+  END IF;
+
+  -- ======================================================================
+  -- N1 1b: +2 is refused as well — the off-by-one neighbour
+  -- ======================================================================
+  -- ⭐ WITHOUT THIS ARM, N1 1a CANNOT TELL `+ 1` FROM `+ 2`. A rule written
+  -- `NEW.generation > OLD.generation + 2` still refuses 2^63-1, so 1a stays
+  -- green while the counter may jump two at a time — and a two-step advance
+  -- skips a generation that no token was ever issued under, which is harmless,
+  -- but the rule it proves is no longer the rule the file claims. This arm is
+  -- what pins the constant, and it is the difference between "bounded" and
+  -- "bounded by ONE".
+  -- RED-UNDER: change `OLD.generation + 1` to `OLD.generation + 2` in rule (6).
+  --            No other arm in this file or in the migration moves.
+  raised := FALSE; err_msg := NULL;
+  BEGIN
+    UPDATE strategy_shares SET generation = generation + 2 WHERE strategy_id = strat_a4;
+  EXCEPTION WHEN OTHERS THEN
+    raised := TRUE; err_msg := SQLERRM;
+  END;
+  IF NOT raised OR err_msg NOT LIKE '%AT MOST ONE%' THEN
+    RESET ROLE;
+    RAISE EXCEPTION 'TEST FAILED (N1 1b): the owner advanced generation by TWO in one raw UPDATE and the rule did not stop it (raised=%, error=%). The bound is not "advance by at most one" but something looser, so N1 1a above is proving a weaker property than its name claims — and whatever the real constant is, nothing in this file pins it.', raised, COALESCE(err_msg, '(none)');
+  END IF;
+
+  -- ======================================================================
+  -- N1 1c: ...and +1 is still ACCEPTED — the bound did not brick the writers
+  -- ======================================================================
+  -- ⛔ THE COUNTER-ARM TO 1a AND 1b, and the reason it exists is that the
+  -- cheapest way to make both of those pass is to refuse EVERY increase — which
+  -- would disarm revocation entirely (revoke_strategy_share and the Art. 17
+  -- erasure arm are both `generation = generation + 1`) while leaving this
+  -- file's rejection arms green. A guard that refuses the intended writers is
+  -- not a guard, it is an outage.
+  -- RED-UNDER: change rule (6) to `NEW.generation >= OLD.generation + 1`, i.e.
+  --            refuse any increase at all.
+  -- ⚠️ POSITION IS LOAD-BEARING. This arm sits BEFORE the first
+  --    revoke_strategy_share call (REVOKE 1a below), because that call performs
+  --    the identical `+ 1` and would abort the file first under the same
+  --    mutation — leaving this arm structurally unobservable. Moving it after
+  --    REVOKE 1 silently retires it. MEASURED red in this position.
+  gen_a4_pre := gen_a4;
+  raised := FALSE; err_msg := NULL;
+  BEGIN
+    UPDATE strategy_shares SET generation = generation + 1 WHERE strategy_id = strat_a4;
+  EXCEPTION WHEN OTHERS THEN
+    raised := TRUE; err_msg := SQLERRM;
+  END;
+  SELECT generation INTO gen_a4 FROM strategy_shares WHERE strategy_id = strat_a4;
+  -- Subtract rather than add, for the reason N1 3a records at the end of this
+  -- file: `gen_a4_pre + 1` overflows in precisely the states where this arm is
+  -- interesting, and an arm that aborts on its own arithmetic reports nothing.
+  IF raised OR (gen_a4 - gen_a4_pre) IS DISTINCT FROM 1 THEN
+    RESET ROLE;
+    RAISE EXCEPTION 'TEST FAILED (N1 1c): a lawful +1 advance was refused or did not land (raised=%, error=%, generation % -> %, expected exactly one more). The bounded-increment rule is rejecting the increment it exists to permit, which disarms BOTH intended writers: revoke_strategy_share and the GDPR Art. 17 arm in migration 20260827130000 are the same `generation = generation + 1` statement, so revocation stops working entirely and every previously-copied link stays alive.', raised, COALESCE(err_msg, '(none)'), gen_a4_pre, gen_a4;
   END IF;
 
   -- ======================================================================
@@ -1959,7 +2109,97 @@ BEGIN
     RAISE EXCEPTION 'TEST FAILED (SANITIZE 1f): erasing tenant A also revoked tenant B''s share (revoked_at=%, generation % -> %) — the `created_by = p_user_id` predicate is missing from the sanitize arm, so ONE user''s Art. 17 request kills EVERY user''s share links', b_revoked, gen_b, gen_b_after;
   END IF;
 
-  RAISE NOTICE 'test_strategy_shares_rls: ALL 101 ARMS EXECUTED (SHAPE 1, SHAPE 1b, SHAPE 1c, SHAPE 2a, SHAPE 2b, SHAPE 3, SHAPE 3b, SHAPE 4a, SHAPE 4b, SHAPE 4c, SHAPE 4d, SHAPE 4e, SHAPE 5, SHAPE 5b-pre, SHAPE 5b, OWNER 1a, OWNER 1b, OWNER 1c, OWNER 2a, OWNER 2b, OWNER 2c, OWNER 2d, TENANT 1a, TENANT 1b, TENANT 2a, TENANT 2b, TENANT 3a, TENANT 3b, NO-DELETE 1, REVOKE 1a, REVOKE 1b, REVOKE 1c, REVOKE 2a, REVOKE 2b, REACTIVATE 1a, REACTIVATE 1b, REACTIVATE 1c, REACTIVATE 1d, REACTIVATE 1e, REACTIVATE 1f, REACTIVATE 1g, TRIGGER 1a, TRIGGER 1b, MONOTONIC 1a, MONOTONIC 1b, MONOTONIC 1c, TRIGGER 2a, TRIGGER 2b, TRIGGER 3a, TRIGGER 3b, TRIGGER 3c, TRIGGER 3d-i, TRIGGER 3d-ii, TRIGGER 4a, TRIGGER 4b, TRIGGER 4c-i, TRIGGER 4c-ii, NONCE 1a, NONCE 1b, NONCE 2a, NONCE 2b, NONCE 3, NONCE 4a, NONCE 4b, NONCE 4c, TENANT 4a, TENANT 4b, TENANT 4c, TENANT 5a, TENANT 5b, TENANT 5c, TENANT 5d, TENANT 5e, TENANT 5f, TENANT 5g, ANON 1a, ANON 1b, ANON 1b-grant, ANON 1c, ANON 1c-grant, ANON 1d, ANON 1d-grant, ANON 2, ANON 2b, SERVICE-ROLE 0-acl, SERVICE-ROLE 1, SERVICE-ROLE 1-grant, SERVICE-ROLE 2a, SERVICE-ROLE 2b, SERVICE-ROLE 2c, SERVICE-ROLE 2d, SERVICE-ROLE 2e, NONCE 5a, NONCE 5b, NONCE 5c, SANITIZE 1a, SANITIZE 1b, SANITIZE 1c, SANITIZE 1d, SANITIZE 1e, SANITIZE 1f). Observed generation sequence: %', gen_seen;
+  -- ======================================================================
+  -- N1 3a: the ART. 17 ERASURE IS NON-ABORTABLE — the arm that would have
+  --        caught N1
+  -- ======================================================================
+  -- ⛔ THIS IS THE CONSEQUENCE ARM. SANITIZE 1c/1d prove the erasure REVOKES;
+  -- this proves it CANNOT BE STOPPED by the data subject, which is a different
+  -- property and was the actual severity of N1. Reproduced verbatim from
+  -- EXECUTION-EVIDENCE.md §5 against the live schema:
+  --   step 2  the subject PATCHes generation = 9223372036854775807
+  --   step 4  sanitize_user(uid)   ⛔ Art. 17 ERASURE ABORTED, 22003
+  -- The erasure arm runs the same `generation + 1` as revoke, so overflowing the
+  -- counter aborts the WHOLE anonymize — with `banned_until = 'infinity'` the
+  -- subject cannot log back in to undo it, and an operator must DELETE the row
+  -- by hand before the erasure can run at all. One PATCH, using a column the
+  -- product grants every user.
+  --
+  -- ⭐ RUN ON TENANT B, AND ONLY HERE. B's row must still be live and untouched
+  -- for SANITIZE 1f directly above (which proves A's erasure did not reach it),
+  -- so this is the first point in the file where B may be erased. Moving it
+  -- earlier makes SANITIZE 1f fail; moving it into the A block makes it a second
+  -- sanitize_user call on an already-sanitized user, which returns FALSE.
+  --
+  -- ⚠️ THE CEILING JUMP HERE IS A PRECONDITION, NOT AN ASSERTION — 1a already
+  -- pins the rejection, and asserting it twice would make this arm a duplicate
+  -- of that one rather than a test of the erasure. What is asserted is only that
+  -- the erasure COMPLETED and advanced by exactly one. The `+1` is deliberately
+  -- performed FIRST so that under the mutation below the swallowed jump leaves
+  -- the counter at the ceiling and it is sanitize_user, not this file's own
+  -- setup, that raises.
+  -- RED-UNDER: delete the `IF NEW.generation > OLD.generation + 1` block from
+  --            strategy_shares_enforce_monotonic_generation() (STEP 1b).
+  -- ⚠️ LAYERED FOUR DEEP, and the depth was MEASURED rather than predicted —
+  --    the first two attempts at this mutation both surfaced a different arm
+  --    (the OWNER 2d precedent, applied honestly). To observe THIS arm red:
+  --      1. remove migration 20260827120000's STEP 6 arm (v-e), which greps for
+  --         rule (6) and aborts the apply without it;
+  --      2. neuter N1 1a's ASSERTION — it detects the same defect and fires
+  --         first, which is intended: 1a is the cheap detector;
+  --      3. neuter 1a's UPDATE STATEMENT too, not just its assertion. Left to
+  --         run, the jump parks strat_a4 at 2^63-1 and then N1 1b overflows and
+  --         fires instead (measured);
+  --      4. and 1b's statement likewise — otherwise sanitize_user(uid_a) in the
+  --         SANITIZE block hits that same ceilinged A-owned row and aborts
+  --         there, so tenant A's erasure wedges before tenant B's is reached.
+  --    Step 4 is itself a demonstration of the defect: with rule (6) gone the
+  --    Art. 17 erasure aborts on ANY of the subject's rows, not just the one the
+  --    attacker aimed at. With all four applied this arm goes red on
+  --    `raised=t, error=bigint out of range` (MEASURED). Its standing value is
+  --    to state the consequence in the language the regulation is written in,
+  --    and to fail if the erasure ever becomes abortable by a route rule (6)
+  --    does not cover.
+  PERFORM set_config('request.jwt.claims',
+    json_build_object('sub', uid_b::text, 'role', 'authenticated')::text, true);
+  SET LOCAL ROLE authenticated;
+  -- Drive the counter as high as the rules NOW permit: exactly one step.
+  UPDATE strategy_shares SET generation = generation + 1 WHERE strategy_id = strat_b;
+  BEGIN
+    UPDATE strategy_shares SET generation = 9223372036854775807 WHERE strategy_id = strat_b;
+  EXCEPTION WHEN OTHERS THEN
+    NULL;   -- refused by rule (6): the post-fix path, pinned by N1 1a, not here
+  END;
+  SELECT generation INTO gen_pre_san FROM strategy_shares WHERE strategy_id = strat_b;
+  RESET ROLE;
+  PERFORM set_config('request.jwt.claims', NULL, true);
+
+  raised := FALSE; err_msg := NULL; san_ok := NULL;
+  BEGIN
+    SELECT public.sanitize_user(uid_b) INTO san_ok;
+  EXCEPTION WHEN OTHERS THEN
+    raised := TRUE; err_msg := SQLERRM;
+  END;
+  SELECT revoked_at, generation INTO b_revoked, gen_b_after
+    FROM strategy_shares WHERE strategy_id = strat_b;
+  -- ⛔ SUBTRACT, NEVER `gen_pre_san + 1`. MEASURED while observing this arm red:
+  -- written as `gen_b_after IS DISTINCT FROM gen_pre_san + 1` the arm ABORTED
+  -- ON ITS OWN ARITHMETIC — in the failure case the counter is sitting at
+  -- 2^63-1, so both the comparison and the message's `expected %` slot overflow
+  -- and psql reports a bare `bigint out of range ... at RAISE` instead of this
+  -- diagnosis. PL/pgSQL gives no short-circuit guarantee, so guarding it behind
+  -- `raised` would not have helped. An arm whose report overflows exactly when
+  -- it fires is a test that cannot speak, which is barely better than one that
+  -- cannot fail. The difference is always small and never overflows.
+  IF raised
+     OR san_ok IS NOT TRUE
+     OR b_revoked IS NULL
+     OR (gen_b_after - gen_pre_san) IS DISTINCT FROM 1 THEN
+    RAISE EXCEPTION 'TEST FAILED (N1 3a): the GDPR Art. 17 erasure did not complete cleanly for a subject who had just attempted the ceiling jump (raised=%, error=%, returned=%, revoked_at=%, generation % -> %, expected exactly one more than the pre-erasure value). If the error is 22003 bigint out of range, the bounded-increment rule is gone and the data subject WEDGED THEIR OWN ERASURE with one PATCH — the whole anonymize aborts, banned_until = infinity means they can never log in to undo it, and an operator must hand-DELETE the share row before Art. 17 can be honoured at all.',
+      raised, COALESCE(err_msg, '(none)'), COALESCE(san_ok::TEXT, '(null)'), b_revoked, gen_pre_san, gen_b_after;
+  END IF;
+
+  RAISE NOTICE 'test_strategy_shares_rls: ALL 106 ARMS EXECUTED (SHAPE 1, SHAPE 1b, SHAPE 1c, SHAPE 2a, SHAPE 2b, SHAPE 3, SHAPE 3b, SHAPE 4a, SHAPE 4b, SHAPE 4c, SHAPE 4d, SHAPE 4e, SHAPE 5, SHAPE 5b-pre, SHAPE 5b, OWNER 1a, OWNER 1b, OWNER 1c, OWNER 2a, OWNER 2b, OWNER 2c, OWNER 2d, TENANT 1a, TENANT 1b, TENANT 2a, TENANT 2b, TENANT 3a, TENANT 3b, N1 2a, N1 1a, N1 1b, N1 1c, NO-DELETE 1, REVOKE 1a, REVOKE 1b, REVOKE 1c, REVOKE 2a, REVOKE 2b, REACTIVATE 1a, REACTIVATE 1b, REACTIVATE 1c, REACTIVATE 1d, REACTIVATE 1e, REACTIVATE 1f, REACTIVATE 1g, TRIGGER 1a, TRIGGER 1b, MONOTONIC 1a, MONOTONIC 1b, MONOTONIC 1c, TRIGGER 2a, TRIGGER 2b, TRIGGER 3a, TRIGGER 3b, TRIGGER 3c, TRIGGER 3d-i, TRIGGER 3d-ii, TRIGGER 4a, TRIGGER 4b, TRIGGER 4c-i, TRIGGER 4c-ii, NONCE 1a, NONCE 1b, NONCE 2a, NONCE 2b, NONCE 3, NONCE 4a, NONCE 4b, NONCE 4c, TENANT 4a, TENANT 4b, TENANT 4c, TENANT 5a, TENANT 5b, TENANT 5c, TENANT 5d, TENANT 5e, TENANT 5f, TENANT 5g, ANON 1a, ANON 1b, ANON 1b-grant, ANON 1c, ANON 1c-grant, ANON 1d, ANON 1d-grant, ANON 2, ANON 2b, SERVICE-ROLE 0-acl, SERVICE-ROLE 1, SERVICE-ROLE 1-grant, SERVICE-ROLE 2a, SERVICE-ROLE 2b, SERVICE-ROLE 2c, SERVICE-ROLE 2d, SERVICE-ROLE 2e, NONCE 5a, NONCE 5b, NONCE 5c, SANITIZE 1a, SANITIZE 1b, SANITIZE 1c, SANITIZE 1d, SANITIZE 1e, SANITIZE 1f, N1 3a). Observed generation sequence: %', gen_seen;
 END
 $$;
 
