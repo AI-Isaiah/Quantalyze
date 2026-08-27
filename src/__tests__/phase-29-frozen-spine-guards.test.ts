@@ -135,31 +135,88 @@ function changedFiles(base: string): string[] {
 const BASE = resolveBaselineRef();
 const CHANGED = changedFiles(BASE);
 
-// Forbidden-set pattern for new scenario-spine migrations. The locked set is
-// scenarios / scenario_shares / get_shared_scenario / create_scenario_share;
-// every one CONTAINS the substring "scenario", so /scenario/i alone covers the
-// entire locked set and is the gate.
+// The locked scenario spine, as the guard's own header names it. These are
+// matched against the migration's comment-stripped CONTENT — see below.
 //
+// Word boundaries are load-bearing. `\bscenarios\b` does NOT match
+// `scenario_shares` (underscore is a word character), so each locked object is
+// listed explicitly rather than relying on one substring to cover all four. It
+// also means the unrelated `scenario_commit_idempotency` /
+// `scenario_downgrade_sweep` objects do not trip the gate.
+const SCENARIO_SPINE_IDENTIFIERS = [
+  "scenarios",
+  "scenario_shares",
+  "get_shared_scenario",
+  "create_scenario_share",
+] as const;
+
+const SPINE_CONTENT_RE = new RegExp(
+  `\\b(?:${SCENARIO_SPINE_IDENTIFIERS.join("|")})\\b`,
+  "i",
+);
+
 // 2026-08-27 — NARROWED from `/scenario|share/i` (Phase 164, plan 164-02;
 // FOUNDER RULING D-05, 164-CONTEXT.md "Blocker 1"). The `share` alternative was
 // REDUNDANT for the locked set — all four locked names already match
 // /scenario/i — and it false-positived on `strategy_shares`, an unrelated table
 // (Phase 164's per-strategy factsheet share) whose migration filename merely
-// contains the substring "share". Narrowing removes the false positive without
-// unfreezing one byte of the scenario spine.
-// ⛔ The REJECTED alternative was renaming the strategy_shares migration to
-// dodge the substring: that satisfies CI without satisfying the gate and leaves
-// the trap armed for the next table with "share" in its name.
-// ⚠️ Anti-vacuity, re-demonstrated at the narrowing (recorded in
-// .planning/.../164-02-SUMMARY.md): an untracked probe migration whose FILENAME
-// contains "scenario" still turns the exit gate below RED, then green again on
-// removal. A narrowed guard that no longer fails on anything is worse than the
-// one it replaced.
+// contains the substring "share".
+//
+// 2026-08-27, SAME DAY — REGATED ONTO CONTENT (finding M6). The narrowing above
+// left a FILENAME-only test, and a filename is not the object being frozen.
+// MEASURED: a migration named `..._share_link_ttl.sql` or
+// `..._add_expiry_to_shares.sql` sailed straight through — and those are exactly
+// the names a genuine `ALTER TABLE scenario_shares` migration would plausibly
+// carry, so the gate could be walked past by an author who was not even trying.
+// The guard's own header calls a rename-dodge dishonest; under a filename-only
+// test EVERY name was a dodge, including honest ones. Reading the DDL closes
+// both directions at once: a spine-touching migration is caught under any
+// filename, and a migration that merely has "scenario" in its NAME while
+// touching nothing locked no longer false-positives.
+//
+// ⛔ The REJECTED alternative remains rejected: renaming a migration to dodge a
+// substring satisfies CI without satisfying the gate. It is now also USELESS,
+// which is the better kind of prohibition.
+//
+// Comments are stripped before matching, for the H-1019 reason the GDPR hook
+// learned the hard way — a `-- ... scenario_shares ...` line that merely
+// DOCUMENTS a neighbouring object is prose, and prose is not DDL. MEASURED on
+// this phase's migration (20260827120000_strategy_shares_generation_model.sql):
+// zero spine hits after stripping, so the real change passes cleanly.
+//
 // ⚠️ Cross-phase: Phase 164.1 ("retire the frozen-spine gates that no longer
-// bite") must treat this narrowing as the already-done 164 slice — see
-// ROADMAP.md, Phase 164.1 "Cross-phase note from Phase 164 planning
-// (2026-08-26)". Do NOT edit this guard a second time with a second rationale.
-const FORBIDDEN_MIGRATION_RE = /scenario/i;
+// bite") must treat this as the already-done 164 slice — see ROADMAP.md, Phase
+// 164.1 "Cross-phase note from Phase 164 planning (2026-08-26)". Do NOT edit
+// this guard a third time with a third rationale.
+
+/**
+ * Strip SQL comments so a documentation line cannot be read as DDL. Line
+ * comments and block comments both go; block comments become a newline so line
+ * structure survives.
+ */
+function stripSqlComments(sql: string): string {
+  return sql.replace(/\/\*[\s\S]*?\*\//g, "\n").replace(/--[^\n]*/g, "");
+}
+
+/**
+ * Does this changed migration actually TOUCH the frozen scenario spine?
+ *
+ * Reads the file. A path in the delta that cannot be read is a DELETED
+ * migration — there is no content left to scan, and deleting a migration is at
+ * least as serious as editing one, so it falls back to the filename rather than
+ * being waved through. FAIL LOUD (Rule 12): an unreadable path is never treated
+ * as clean.
+ */
+function touchesScenarioSpine(file: string): boolean {
+  let sql: string;
+  try {
+    sql = readFileSync(path.resolve(CWD, file), "utf8");
+  } catch {
+    // Deleted (or otherwise unreadable) — fall back to the filename signal.
+    return /scenario/i.test(file);
+  }
+  return SPINE_CONTENT_RE.test(stripSqlComments(sql));
+}
 
 const RLS_SQL_SCENARIOS = "supabase/tests/test_scenarios_rls.sql";
 const RLS_SQL_SHARES = "supabase/tests/test_scenario_shares_rls.sql";
@@ -175,18 +232,18 @@ describe("Phase 29 frozen-spine exit-gate guards", () => {
 
   it("exit gate (no-schema-change): no new scenario-spine migration shipped this phase", () => {
     const offendingMigrations = CHANGED.filter(
-      (f) =>
-        f.startsWith("supabase/migrations/") &&
-        FORBIDDEN_MIGRATION_RE.test(f),
+      (f) => f.startsWith("supabase/migrations/") && touchesScenarioSpine(f),
     );
     expect(
       offendingMigrations,
-      "Phase 29 exit gate VIOLATED — a new/changed migration touching " +
-        "scenarios / scenario_shares / get_shared_scenario / " +
-        "create_scenario_share landed in the phase delta. v1.2 requires " +
-        "ZERO `scenarios` schema change; a 'named portfolio' is a `scenarios` " +
-        "row, not new DDL. Remove the migration (ROADMAP Phase 29 Exit Gates, " +
-        "29-RESEARCH Pitfall 3). Offending files: " +
+      "Phase 29 exit gate VIOLATED — a new/changed migration whose " +
+        "comment-stripped DDL references the frozen scenario spine (" +
+        SCENARIO_SPINE_IDENTIFIERS.join(" / ") +
+        ") landed in the phase delta. v1.2 requires ZERO `scenarios` schema " +
+        "change; a 'named portfolio' is a `scenarios` row, not new DDL. Remove " +
+        "the migration (ROADMAP Phase 29 Exit Gates, 29-RESEARCH Pitfall 3). " +
+        "⛔ Renaming the file does NOT clear this gate — it reads the SQL, not " +
+        "the filename. Offending files: " +
         offendingMigrations.join(", "),
     ).toEqual([]);
   });

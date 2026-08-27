@@ -28,6 +28,7 @@ import {
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
+  EXCLUDED_TABLES,
   extractManifestEntries,
   extractManifestTables,
   extractUserTablesFromMigration,
@@ -722,6 +723,208 @@ CREATE TABLE audit_log_cold (
     // The wider regex detects it; EXCLUDED_TABLES does not suppress it.
     // This is the correct behavior — runCoverageCheck allowlist handles it.
     expect(out.has("audit_log_cold")).toBe(true);
+  });
+});
+
+/**
+ * B3 (2026-08-27) — EXCLUDED_TABLES may not be used to SILENCE a user-owned
+ * table, and this is the gate that says so.
+ *
+ * THE HOLE THIS CLOSES. When a migration declares a new user-owned table, the
+ * hook exits 1 until a `USER_EXPORT_TABLES` entry lands. That entry is typed
+ * against the GENERATED `src/lib/database.types.ts`, so it cannot even compile
+ * until the migration is applied — a four-step remedy. Meanwhile
+ * `EXCLUDED_TABLES` is `Record<string, {class, reason}>`: a PLAIN STRING key.
+ * Adding one line there compiles today, flips the hook to exit 0, and turns
+ * every red case in this file green. It is strictly LESS work than the correct
+ * fix, and until this block existed nothing anywhere discriminated the two.
+ * The failing script's own stderr used to RECOMMEND it. Result: an engineer or
+ * agent hits red tests, takes the cheap path, CI goes green, the PR merges,
+ * PROD auto-applies — and a user-owned table is permanently and silently
+ * absent from every Art. 15 export, with no red anywhere.
+ *
+ * WHAT IS PINNED, and why in this shape. Two general rules plus one specific
+ * pin. The general rules are preferred (a name list rots; a rule does not) and
+ * both were MEASURED against the live corpus before being written:
+ *
+ *   (1) CLASS COHERENCE. A table whose owner column is `NOT NULL REFERENCES
+ *       profiles | auth.users ... ON DELETE CASCADE` has exactly one data
+ *       subject per row, which CONTRADICTS four of the five exclusion classes
+ *       by their own definitions: `system` ("no per-user, row-level
+ *       ownership"), `cross-party` ("multi-owner surface"), `pre-auth` ("no
+ *       user FK"), and `scoped` ("indirect-owned via a user-FK parent" — the
+ *       FK here is direct). So those four are refused outright. `ephemeral` is
+ *       the one class that can honestly coexist with a CASCADE owner FK, and
+ *       exactly one live entry relies on it (`scenario_commit_idempotency`, a
+ *       server-side dedup cache) — measured, 22 CASCADE-owned tables exist and
+ *       it is the ONLY one in EXCLUDED_TABLES.
+ *
+ *   (2) `scoped` STOPS BEING PROSE. The class asserts the table "appears in
+ *       USER_EXPORT_TABLES as an IndirectUserTable". No code path checked
+ *       that, so the claim was decoration: a `scoped` entry naming a table
+ *       absent from the manifest read as covered while exporting nothing.
+ *       Now the manifest is consulted.
+ *
+ *   (3) A SPECIFIC PIN on `strategy_shares` (Phase 164). Rule (1) leaves
+ *       `ephemeral` reachable, and this table is the live target of the
+ *       advertised shortcut, so it is named outright as well. Belt and
+ *       braces, deliberately: the general rule is the durable mechanism, the
+ *       pin is what makes the known-live attempt impossible rather than
+ *       merely implausible.
+ *
+ * ⚠️ NON-VACUITY. These cases are meaningless unless the scan really SEES
+ * `strategy_shares` as CASCADE-owned, so that is asserted directly below
+ * rather than assumed — otherwise a regex drift would leave every case here
+ * passing over an empty set.
+ */
+describe("B3: EXCLUDED_TABLES cannot silence a user-owned table", () => {
+  /**
+   * An owner column that makes every row belong to exactly one data subject:
+   * `<col> UUID NOT NULL REFERENCES profiles|auth.users(...) ON DELETE CASCADE`.
+   * The CASCADE is what proves the DB itself treats the row as the user's —
+   * erasing the user erases the row.
+   */
+  const CASCADE_OWNER_COLUMN_RE =
+    /\b([a-z_]+)\s+UUID\s+NOT\s+NULL\s+REFERENCES\s+(?:auth\.users|public\.profiles|profiles)\s*(?:\([a-z_]+\))?\s*ON\s+DELETE\s+CASCADE/i;
+
+  /** Same CREATE TABLE shape the hook's own scanner uses (quoted / qualified). */
+  const CREATE_TABLE_RE =
+    /CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(?:(?:"[a-z0-9_]+"|[a-z0-9_]+)\.)?(?:"([a-z0-9_]+)"|([a-z0-9_]+))\s*\(([\s\S]*?)\n\s*\)\s*;/gi;
+
+  /** Comments must not count as DDL — the H-1019 phantom-match lesson. */
+  function stripSqlComments(sql: string): string {
+    return sql.replace(/\/\*[\s\S]*?\*\//g, "\n").replace(/--[^\n]*/g, "");
+  }
+
+  /** table name -> { migration, ownerColumn } for every CASCADE-owned table. */
+  function scanCascadeOwnedTables(): Map<
+    string,
+    { migration: string; ownerColumn: string }
+  > {
+    const dir = join(REPO_ROOT, MIGRATIONS_REL);
+    const out = new Map<string, { migration: string; ownerColumn: string }>();
+    for (const filename of readdirSync(dir).filter((f) => f.endsWith(".sql"))) {
+      const sql = stripSqlComments(readFileSync(join(dir, filename), "utf8"));
+      CREATE_TABLE_RE.lastIndex = 0;
+      let m: RegExpExecArray | null;
+      while ((m = CREATE_TABLE_RE.exec(sql)) !== null) {
+        const table = m[1] ?? m[2];
+        const hit = CASCADE_OWNER_COLUMN_RE.exec(m[3]);
+        if (hit && !out.has(table)) {
+          out.set(table, { migration: filename, ownerColumn: hit[1] });
+        }
+      }
+    }
+    return out;
+  }
+
+  const CASCADE_OWNED = scanCascadeOwnedTables();
+
+  // The four classes whose own definitions are contradicted by a NOT NULL
+  // CASCADE owner FK. `ephemeral` is deliberately absent — see the docblock.
+  const CLASSES_INCOMPATIBLE_WITH_DIRECT_OWNERSHIP = [
+    "scoped",
+    "system",
+    "cross-party",
+    "pre-auth",
+  ] as const;
+
+  it("non-vacuity: the scan actually sees strategy_shares as CASCADE-owned", () => {
+    // Everything below quantifies over CASCADE_OWNED. If the regex drifts and
+    // the set empties, every case in this block passes while asserting
+    // nothing — the failure mode this repo calls a test that cannot fail.
+    expect(
+      CASCADE_OWNED.size,
+      "no CASCADE-owned tables found at all — the DDL scan is broken, and the " +
+        "B3 cases below are quantifying over an empty set",
+    ).toBeGreaterThan(10);
+    const found = CASCADE_OWNED.get("strategy_shares");
+    expect(
+      found,
+      "strategy_shares was not detected as user-owned. It declares `created_by " +
+        "UUID NOT NULL REFERENCES profiles(id) ON DELETE CASCADE` (Phase 164, " +
+        "migration 20260827120000). If that migration was renamed or its column " +
+        "changed, re-derive this gate — do NOT delete it.",
+    ).toBeDefined();
+    expect(found!.ownerColumn).toBe("created_by");
+  });
+
+  it("strategy_shares is NOT in EXCLUDED_TABLES", () => {
+    // The specific pin (3). strategy_shares records that the owner created /
+    // revoked a factsheet share link, and when — personal data Art. 15
+    // entitles them to. The correct remedy for the hook's failure is the
+    // four-step order of operations at the PENDING block in
+    // src/lib/gdpr-export-manifest.ts, NOT an exclusion.
+    expect(
+      Object.keys(EXCLUDED_TABLES),
+      "strategy_shares was added to EXCLUDED_TABLES. That silences the GDPR " +
+        "coverage hook instead of satisfying it, and permanently drops a " +
+        "user-owned table from every Art. 15 export with green CI. Remove the " +
+        "entry and follow the four-step remedy in src/lib/gdpr-export-manifest.ts " +
+        "(apply migration -> regenerate database.types.ts -> USER_EXPORT_TABLES " +
+        "entry -> SANITIZE_PARITY_ALLOWLIST key).",
+    ).not.toContain("strategy_shares");
+  });
+
+  it("no CASCADE-owned table is excluded as scoped / system / cross-party / pre-auth", () => {
+    // The general rule (1). Each of these four classes asserts something the
+    // FK contradicts, so an entry pairing them is self-refuting.
+    const offenders: string[] = [];
+    for (const [table, meta] of Object.entries(EXCLUDED_TABLES)) {
+      const owned = CASCADE_OWNED.get(table);
+      if (!owned) continue;
+      if (
+        (CLASSES_INCOMPATIBLE_WITH_DIRECT_OWNERSHIP as readonly string[]).includes(
+          meta.class,
+        )
+      ) {
+        offenders.push(
+          `${table} (class="${meta.class}", owner column "${owned.ownerColumn}" ` +
+            `declared in ${owned.migration})`,
+        );
+      }
+    }
+    expect(
+      offenders,
+      "EXCLUDED_TABLES entry/entries exclude a DIRECTLY user-owned table under a " +
+        "class whose own definition rules that out. A `NOT NULL <owner> " +
+        "REFERENCES profiles|auth.users ON DELETE CASCADE` column means every row " +
+        "belongs to exactly one data subject, so the table is not `system` (no " +
+        "row-level ownership), not `cross-party` (multi-owner), not `pre-auth` " +
+        "(no user FK) and not `scoped` (indirect via a parent — this FK is " +
+        "direct). Put the table in USER_EXPORT_TABLES instead. Offenders: " +
+        offenders.join("; "),
+    ).toEqual([]);
+  });
+
+  it("every `scoped` exclusion really appears in USER_EXPORT_TABLES", () => {
+    // The general rule (2). `scoped` means "the data IS exported, just not
+    // directly" — a checkable claim that nothing checked, so it could be
+    // asserted about a table the manifest never mentions.
+    const manifestTables = extractManifestTables();
+    const unbacked = Object.entries(EXCLUDED_TABLES)
+      .filter(([, meta]) => meta.class === "scoped")
+      .map(([table]) => table)
+      .filter((table) => !manifestTables.has(table));
+    expect(
+      unbacked,
+      "EXCLUDED_TABLES entry/entries are classed `scoped` — which asserts the " +
+        "table appears in USER_EXPORT_TABLES as an IndirectUserTable, i.e. that " +
+        "its rows ARE exported via a parent — but the manifest does not list " +
+        "them. The rationale is therefore false and the rows are exported " +
+        "nowhere. Either add the manifest entry the class claims exists, or pick " +
+        "the class that is actually true. Unbacked: " + unbacked.join(", "),
+    ).toEqual([]);
+    // Guard the guard: `scoped` must be a class in live use, or the loop above
+    // is vacuous and would stay green if the check were deleted.
+    const scopedCount = Object.values(EXCLUDED_TABLES).filter(
+      (m) => m.class === "scoped",
+    ).length;
+    expect(
+      scopedCount,
+      "no EXCLUDED_TABLES entry is classed `scoped` any more, so the assertion " +
+        "above ran over an empty set and proves nothing",
+    ).toBeGreaterThan(0);
   });
 });
 
