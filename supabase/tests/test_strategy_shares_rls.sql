@@ -627,13 +627,23 @@ BEGIN
     RAISE EXCEPTION 'TEST FAILED (TRIGGER 1b): the no-bump revocation was rejected by something OTHER than the monotonicity trigger (got: %) — this arm proves nothing about the trigger unless the rejection came FROM it', err_msg;
   END IF;
 
-  -- A rejection that still wrote is a successful attack wearing an error.
-  SELECT generation, revoked_at INTO gen_probe, now_revoked
-    FROM strategy_shares WHERE strategy_id = strat_a;
-  IF gen_probe <> gen_remint OR now_revoked IS NOT NULL THEN
-    RESET ROLE;
-    RAISE EXCEPTION 'TEST FAILED (TRIGGER 1c): the rejected no-bump revocation still mutated the row (generation % -> %, revoked_at now %) — a BEFORE trigger that raises must leave the tuple untouched', gen_remint, gen_probe, now_revoked;
-  END IF;
+  -- ⛔ NO "did the rejected UPDATE still write?" ARM HERE — one existed, was
+  -- counted, and was DELETED (round-3 review, 2026-08-27) for exactly the
+  -- reason this file already applied to TENANT 5h below: it could not fail.
+  -- Two independent mechanisms make it unreachable, and either alone is fatal:
+  --   * the statement above sits inside a nested BEGIN ... EXCEPTION, which
+  --     PL/pgSQL executes as an implicit SUBTRANSACTION. Catching the error
+  --     rolls back every database change the block made, so the tuple is
+  --     untouched in EVERY configuration — not because the guard is a BEFORE
+  --     trigger, but because the handler undid the write. The arm was reading
+  --     its own rollback and calling it a security property.
+  --   * in the one configuration where a write could survive — the rule
+  --     deleted, so nothing raises at all — TRIGGER 1a fires first and the
+  --     probe never runs.
+  -- The no-partial-write property is therefore STRUCTURAL, and it is recorded
+  -- here rather than asserted. An arm that cannot fail is worse than no arm:
+  -- it inflates the corpus-wide floors in .github/workflows/ci.yml while
+  -- proving nothing, and it reads to the next person like coverage.
 
   -- ======================================================================
   -- MONOTONICITY: generation never decreases across the whole cycle
@@ -703,12 +713,13 @@ BEGIN
     RAISE EXCEPTION 'TEST FAILED (TRIGGER 2b): the self-rewind was rejected by something OTHER than the monotonicity trigger (got: %). The owner holds UPDATE on this table and passes the policy, so a rejection from any other layer means the trigger is unproven and this arm is measuring an accident.', err_msg;
   END IF;
 
-  SELECT generation, revoked_at INTO gen_probe, now_revoked
-    FROM strategy_shares WHERE strategy_id = strat_a;
-  IF gen_probe <> gen_final OR now_revoked IS NULL THEN
-    RESET ROLE;
-    RAISE EXCEPTION 'TEST FAILED (TRIGGER 2c): the rejected self-rewind still mutated the row (generation % -> %, revoked_at now %) — a partial write here is the full attack, because clearing the tombstone alone already re-publishes the link', gen_final, gen_probe, now_revoked;
-  END IF;
+  -- ⛔ AND NO post-rejection mutation probe here either, for the identical
+  -- reason recorded at TRIGGER 1 above: the subtransaction rollback makes it
+  -- unreachable, and TRIGGER 2a fires first in the only configuration where a
+  -- write could survive. TRIGGER 3 below is how this file DOES assert an
+  -- end-state consequence — by issuing the attack's second request for real,
+  -- OUTSIDE the exception block, so the assertion sits downstream of nothing
+  -- that was rolled back.
 
   -- ======================================================================
   -- TRIGGER 3: THE TWO-REQUEST RE-POINT — the counter cannot walk away and
@@ -1321,7 +1332,7 @@ BEGIN
     RAISE EXCEPTION 'TEST FAILED (SANITIZE 1f): erasing tenant A also revoked tenant B''s share (revoked_at=%, generation % -> %) — the `created_by = p_user_id` predicate is missing from the sanitize arm, so ONE user''s Art. 17 request kills EVERY user''s share links', b_revoked, gen_b, gen_b_after;
   END IF;
 
-  RAISE NOTICE 'test_strategy_shares_rls: ALL 78 ARMS EXECUTED (SHAPE 1, SHAPE 2a, SHAPE 2b, SHAPE 3, SHAPE 4a, SHAPE 4b, SHAPE 4c, SHAPE 5, OWNER 1a, OWNER 1b, OWNER 2a, OWNER 2b, OWNER 2c, TENANT 1a, TENANT 1b, TENANT 2a, TENANT 2b, TENANT 3a, TENANT 3b, NO-DELETE 1, REVOKE 1a, REVOKE 1b, REVOKE 1c, REVOKE 2a, REVOKE 2b, REACTIVATE 1a, REACTIVATE 1b, REACTIVATE 1c, REACTIVATE 1d, REACTIVATE 1e, REACTIVATE 1f, TRIGGER 1a, TRIGGER 1b, TRIGGER 1c, MONOTONIC 1a, MONOTONIC 1b, MONOTONIC 1c, TRIGGER 2a, TRIGGER 2b, TRIGGER 2c, TRIGGER 3a, TRIGGER 3b, TRIGGER 3c, TRIGGER 4a, TRIGGER 4b, TENANT 4a, TENANT 4b, TENANT 4c, TENANT 5a, TENANT 5b, TENANT 5c, TENANT 5d, TENANT 5e, TENANT 5f, TENANT 5g, ANON 1a, ANON 1b, ANON 1b-grant, ANON 1c, ANON 1c-grant, ANON 1d, ANON 1d-grant, ANON 2, ANON 2b, SERVICE-ROLE 0-acl, SERVICE-ROLE 1, SERVICE-ROLE 1-grant, SERVICE-ROLE 2a, SERVICE-ROLE 2b, SERVICE-ROLE 2c, SERVICE-ROLE 2d, SERVICE-ROLE 2e, SANITIZE 1a, SANITIZE 1b, SANITIZE 1c, SANITIZE 1d, SANITIZE 1e, SANITIZE 1f). Observed generation sequence: %', gen_seen;
+  RAISE NOTICE 'test_strategy_shares_rls: ALL 76 ARMS EXECUTED (SHAPE 1, SHAPE 2a, SHAPE 2b, SHAPE 3, SHAPE 4a, SHAPE 4b, SHAPE 4c, SHAPE 5, OWNER 1a, OWNER 1b, OWNER 2a, OWNER 2b, OWNER 2c, TENANT 1a, TENANT 1b, TENANT 2a, TENANT 2b, TENANT 3a, TENANT 3b, NO-DELETE 1, REVOKE 1a, REVOKE 1b, REVOKE 1c, REVOKE 2a, REVOKE 2b, REACTIVATE 1a, REACTIVATE 1b, REACTIVATE 1c, REACTIVATE 1d, REACTIVATE 1e, REACTIVATE 1f, TRIGGER 1a, TRIGGER 1b, MONOTONIC 1a, MONOTONIC 1b, MONOTONIC 1c, TRIGGER 2a, TRIGGER 2b, TRIGGER 3a, TRIGGER 3b, TRIGGER 3c, TRIGGER 4a, TRIGGER 4b, TENANT 4a, TENANT 4b, TENANT 4c, TENANT 5a, TENANT 5b, TENANT 5c, TENANT 5d, TENANT 5e, TENANT 5f, TENANT 5g, ANON 1a, ANON 1b, ANON 1b-grant, ANON 1c, ANON 1c-grant, ANON 1d, ANON 1d-grant, ANON 2, ANON 2b, SERVICE-ROLE 0-acl, SERVICE-ROLE 1, SERVICE-ROLE 1-grant, SERVICE-ROLE 2a, SERVICE-ROLE 2b, SERVICE-ROLE 2c, SERVICE-ROLE 2d, SERVICE-ROLE 2e, SANITIZE 1a, SANITIZE 1b, SANITIZE 1c, SANITIZE 1d, SANITIZE 1e, SANITIZE 1f). Observed generation sequence: %', gen_seen;
 END
 $$;
 
