@@ -503,13 +503,29 @@ BEGIN
   -- named `nonce` in its INSERT — which is why SHAPE 4d pins the other side of
   -- the same coupling.
   --
+  -- ⚠️ THE RATIONALE BELOW WAS RESTATED 2026-08-28. It used to argue that these
+  -- grants are the SOLE control on a fresh row because "the trigger is BEFORE
+  -- UPDATE only, so a fresh row is seen by no rule at all". That was true when
+  -- it was written and has been FALSE since 164-06 widened the trigger to
+  -- BEFORE INSERT OR UPDATE. Two layers now cover a fresh row, and saying so
+  -- matters in both directions: a reader who believes the grant is the only
+  -- control over-weights it, and a reader who learns the trigger covers INSERT
+  -- may conclude the grant is redundant. It is not — see below.
+  --
   -- The set is asserted EXACTLY, in both directions:
-  --   * `nonce` must be ABSENT — its unwritability is what makes a
-  --     destroyed-and-recreated row land in a disjoint token space;
-  --   * `generation` and `revoked_at` must be absent from the INSERT half —
-  --     the trigger is BEFORE **UPDATE** only, so a fresh row is seen by no
-  --     rule at all and a client could otherwise choose its starting counter
-  --     (pre-wedging the overflow of SHAPE 1c) or pre-stamp a tombstone;
+  --   * `nonce` must be ABSENT — its unwritability is the `authenticated`-side
+  --     layer of what makes a destroyed-and-recreated row land in a disjoint
+  --     token space. The trigger's INSERT branch re-rolls the nonce and is the
+  --     layer that covers the roles a grant cannot bind (N1 2b);
+  --   * `generation` and `revoked_at` must be absent from the INSERT half. The
+  --     trigger's INSERT branch FORCES generation to 1, so a widened grant no
+  --     longer plants a chosen starting counter — but `revoked_at` is covered by
+  --     NO rule on the INSERT path at all (rule (2) fires only on the
+  --     NULL -> NOT NULL transition of an UPDATE), so a client holding
+  --     `INSERT (revoked_at)` could still pre-stamp a tombstone on a fresh row.
+  --     For `generation` the grant is now the CHEAP detector rather than the
+  --     only one, and it is kept for defence in depth and because a grant is
+  --     the only control that automatically covers columns added in future;
   --   * `strategy_id` and `created_by` must be PRESENT on INSERT, and
   --     `revoked_at`/`generation` on UPDATE, or both SECURITY INVOKER RPCs stop
   --     working for every owner (mint, reuse and revoke all write as the
@@ -525,7 +541,7 @@ BEGIN
      AND a.attnum > 0 AND NOT a.attisdropped
      AND r.rolname = 'authenticated';
   IF v_colgrants IS DISTINCT FROM 'created_by:INSERT,generation:UPDATE,revoked_at:UPDATE,strategy_id:INSERT' THEN
-    RAISE EXCEPTION 'TEST FAILED (SHAPE 3b): `authenticated` holds COLUMN-level grants "%" on strategy_shares, expected exactly "created_by:INSERT,generation:UPDATE,revoked_at:UPDATE,strategy_id:INSERT". ⛔ A grant naming `nonce` re-opens the whole delete-and-recreate resurrection family: the owner reads their nonce under RLS, cascades the row away via `strategies`, and re-inserts it verbatim (MEASURED — accepted, bit-identical). ⛔ An INSERT grant naming `generation` or `revoked_at` re-opens R3''s INSERT half, which NO trigger covers because the trigger is BEFORE UPDATE only. ⚠️ And a MISSING grant is equally fatal in the other direction — both RPCs are SECURITY INVOKER and write as the caller, so mint or revoke would 42501 for every owner.', COALESCE(v_colgrants, '(none)');
+    RAISE EXCEPTION 'TEST FAILED (SHAPE 3b): `authenticated` holds COLUMN-level grants "%" on strategy_shares, expected exactly "created_by:INSERT,generation:UPDATE,revoked_at:UPDATE,strategy_id:INSERT". ⛔ A grant naming `nonce` re-opens the `authenticated` side of the delete-and-recreate resurrection family: the owner reads their nonce under RLS, cascades the row away via `strategies`, and re-inserts it verbatim (MEASURED — accepted, bit-identical, before the trigger gained its INSERT branch). ⛔ An INSERT grant naming `revoked_at` re-opens R3''s INSERT half outright — NO trigger rule covers a tombstone on a fresh row, because rule (2) fires only on the NULL to NOT NULL transition of an UPDATE. ⚠️ An INSERT grant naming `generation` or `nonce` is now caught a second time by the trigger''s INSERT branch, which FORCES both (N1 2a, N1 2b); that makes this arm the cheap detector rather than the last line for those two columns, and it is kept because a grant is the only control that automatically covers columns added to this table in future. ⚠️ And a MISSING grant is equally fatal in the other direction — both RPCs are SECURITY INVOKER and write as the caller, so mint or revoke would 42501 for every owner.', COALESCE(v_colgrants, '(none)');
   END IF;
 
   -- ======================================================================
@@ -1480,9 +1496,18 @@ BEGIN
   -- their own row satisfies both halves of strategy_shares_owner, so RLS lets
   -- this through; and the trigger's rule (0c) would ALSO reject it, with a
   -- different message. Three layers could each be the one that fired, and the
-  -- one that MUST fire is the grant — because it is the only one that also
-  -- stops the INSERT form of the same attack (NONCE 2), where no BEFORE UPDATE
-  -- trigger exists to help. Pin `permission denied`, not a bare `raised`:
+  -- one that MUST fire is the grant — because it is the layer that REFUSES the
+  -- statement outright rather than correcting it, and it is the one this arm
+  -- names. ⚠️ RESTATED 2026-08-28: this used to say the grant is "the only one
+  -- that also stops the INSERT form of the same attack (NONCE 2), where no
+  -- BEFORE UPDATE trigger exists to help". Since 164-06 the trigger is BEFORE
+  -- INSERT OR UPDATE, and since the F-3 fix its INSERT branch re-rolls the
+  -- nonce, so the INSERT form is covered twice — by the grant for
+  -- `authenticated` (NONCE 2) and by the trigger for the roles a grant cannot
+  -- bind (N1 2b). The two are still not interchangeable: the grant makes the
+  -- write IMPOSSIBLE (42501), the trigger makes it INEFFECTIVE (a fresh nonce
+  -- is stored), and only the first tells the caller they got it wrong.
+  -- Pin `permission denied`, not a bare `raised`:
   -- rule (0c) raises `check_violation` with the text "nonce is immutable", and
   -- a bare arm would report the grant as absent-and-safe while it was in fact
   -- present-and-masked.
@@ -1514,16 +1539,28 @@ BEGIN
   END IF;
   IF err_msg NOT LIKE '%permission denied%' THEN
     RESET ROLE;
-    RAISE EXCEPTION 'TEST FAILED (NONCE 1b): the nonce write was rejected, but NOT by the GRANT layer (got: %). If this is trigger rule (0c) — "nonce is immutable", errcode check_violation — then `authenticated` still HOLDS UPDATE(nonce) and this arm proved nothing about the grant. The distinction matters: rule (0c) is a BEFORE UPDATE trigger and cannot see the INSERT form of the same attack, which NONCE 2 exercises.', err_msg;
+    RAISE EXCEPTION 'TEST FAILED (NONCE 1b): the nonce write was rejected, but NOT by the GRANT layer (got: %). If this is trigger rule (0c) — "nonce is immutable", errcode check_violation — then `authenticated` still HOLDS UPDATE(nonce) and this arm proved nothing about the grant. The distinction matters: rule (0c) is an UPDATE-side rule, so it never sees the INSERT form of the same attack — that form is closed by the grant (NONCE 2) and, for the roles a grant cannot bind, by the trigger''s separate INSERT branch (N1 2b). A green here that came from rule (0c) means the `authenticated` half of that pair is gone.', err_msg;
   END IF;
 
   -- ======================================================================
   -- NONCE 2: ...and cannot supply one on INSERT either — THE R2b CLOSURE
   -- ======================================================================
-  -- ⛔ NONCE 1 DOES NOT COVER THIS, AND THIS IS THE ONE THAT MATTERS. The
-  -- trigger is BEFORE **UPDATE** only, so an INSERT is seen by NO rule at all;
-  -- the grant is the sole control. The full attack, MEASURED end-to-end on a
-  -- throwaway PostgreSQL 16 cluster (2026-08-27):
+  -- ⛔ NONCE 1 DOES NOT COVER THIS. Rule (0c) is an UPDATE-side rule, so it
+  -- never sees an INSERT; the layer this arm measures is the GRANT.
+  -- ⚠️ RESTATED 2026-08-28. This block used to say "the trigger is BEFORE
+  -- UPDATE only, so an INSERT is seen by NO rule at all; the grant is the sole
+  -- control". Since 164-06 the trigger is BEFORE INSERT OR UPDATE, and since the
+  -- F-3 fix its INSERT branch re-rolls the nonce — so the grant is no longer
+  -- SOLE, it is the `authenticated`-side layer of a pair, and N1 2b is the
+  -- other. Keeping the old sentence would have been the more dangerous error of
+  -- the two: it invites a future reader to conclude that widening this grant is
+  -- catastrophic-and-therefore-unthinkable, when in fact the honest reason to
+  -- keep it narrow is that the grant REFUSES the statement (42501, the caller
+  -- learns) while the trigger merely NEUTRALISES it (a fresh nonce is stored,
+  -- silently).
+  -- The full attack, MEASURED end-to-end on a
+  -- throwaway PostgreSQL 16 cluster (2026-08-27), against the pre-164-06
+  -- trigger:
   --   1. the owner SELECTs their own nonce — RLS permits it, and it must, since
   --      create_strategy_share RETURNs it as the caller;
   --   2. the owner DELETEs their `strategies` row. ON DELETE CASCADE takes the
@@ -1544,9 +1581,13 @@ BEGIN
   -- RED-UNDER: `GRANT INSERT (nonce) ON strategy_shares TO authenticated` on
   --            the live database, with SHAPE 3b neutered (its exact-set pin
   --            fires first on any grant drift). NONCE 2a is then the first
-  --            failure — MEASURED 2026-08-27. ⚠️ Note the asymmetry with
-  --            NONCE 1: there is NO BEFORE INSERT trigger, so nothing behind
-  --            the grant catches this one. The INSERT simply SUCCEEDS.
+  --            failure — MEASURED 2026-08-27. ⚠️ Under that mutation the INSERT
+  --            SUCCEEDS — which is what makes `raised = FALSE` the detection —
+  --            but since the F-3 fix the row it lands carries a FRESH nonce,
+  --            not the chosen one: the trigger's INSERT branch overwrote it.
+  --            So the failure this arm reports is now "the privilege wall is
+  --            gone", not "the token was resurrected"; N1 2b is what would go
+  --            red if the resurrection itself were reachable again.
   raised := FALSE;
   BEGIN
     INSERT INTO strategy_shares (strategy_id, created_by, nonce)
@@ -1556,7 +1597,7 @@ BEGIN
   END;
   IF NOT raised THEN
     RESET ROLE;
-    RAISE EXCEPTION 'TEST FAILED (NONCE 2a): the owner INSERTed a share row carrying a nonce OF THEIR CHOOSING. That is the whole delete-and-recreate resurrection: read your nonce, cascade the row away through `strategies` (which no control on this table can see), re-create the strategy at the same client-suppliable uuid, and re-insert the row verbatim — the previously-revoked token derives again, bit-identical. The trigger cannot help here: it is BEFORE UPDATE and an INSERT is seen by no rule. `GRANT INSERT (strategy_id, created_by)` is the only control, and it is missing or was widened.';
+    RAISE EXCEPTION 'TEST FAILED (NONCE 2a): the owner INSERTed a share row NAMING `nonce`, with no privilege error. That statement is the last step of the delete-and-recreate resurrection: read your nonce, cascade the row away through `strategies` (which no control on this table can see), re-create the strategy at the same client-suppliable uuid, and re-insert the row verbatim. `GRANT INSERT (strategy_id, created_by)` is the wall that must refuse it and it is missing or was widened. ⚠️ Read the scope exactly: since 164-06 the trigger also covers INSERT and its branch re-rolls the nonce, so the row this statement landed most likely carries a FRESH value and the token is NOT resurrected — that second layer is pinned by N1 2b, against the roles a grant cannot bind. What THIS arm reports is that the privilege wall is gone, which is a real regression on its own: the grant REFUSES the write and tells the caller, where the trigger silently corrects it.';
   END IF;
   IF err_msg NOT LIKE '%permission denied%' THEN
     RESET ROLE;
@@ -1566,18 +1607,30 @@ BEGIN
   -- ======================================================================
   -- NONCE 3: R3''s INSERT half — a client cannot CHOOSE a starting generation
   -- ======================================================================
-  -- Same mechanism, different column, and worth its own arm because the
-  -- consequence is different in kind: this one is an availability wedge, not a
-  -- disclosure. The trigger is BEFORE UPDATE, so a FRESH row's `generation` was
-  -- wholly unguarded — `INSERT ... (strategy_id, created_by, generation)` with
-  -- 2^63-1 pre-wedges the overflow that SHAPE 1c only widened the distance to.
-  -- revoke_strategy_share would then error `out of range`, and the GDPR Art. 17
-  -- arm in migration 20260827130000 is the SAME statement, so the data
-  -- subject''s entire erasure aborts — triggerable BY the data subject, with no
-  -- operator remedy short of DDL.
+  -- Same mechanism, different column, kept as its own arm because it pins a
+  -- different grant term.
+  -- ⚠️ WHAT THIS ARM PROVES WAS RESTATED 2026-08-28, because the consequence it
+  -- used to name is NO LONGER REACHABLE and an arm that threatens an impossible
+  -- outcome teaches the next reader the wrong model. The old text said the
+  -- trigger is BEFORE UPDATE, so a fresh row's `generation` is "wholly
+  -- unguarded", and that `INSERT ... (strategy_id, created_by, generation)` with
+  -- 2^63-1 pre-wedges the overflow — wedging revoke_strategy_share and, on the
+  -- same `generation + 1` statement, the data subject's own GDPR Art. 17
+  -- erasure. That was true before 164-06. It is false now: the trigger's INSERT
+  -- branch FORCES `generation := 1`, so even with the grant widened the planted
+  -- value never reaches the table. The ceiling wedge survives ONLY through the
+  -- UPDATE path, which is rule (6)'s job and is pinned by N1 1a/1b/1c.
+  -- ⭐ So this arm's standing value is the GRANT, not the wedge: `generation`
+  -- must not appear in any INSERT grant to `authenticated`, because a widened
+  -- grant means the column is reachable and the trigger's INSERT branch is the
+  -- only thing correcting it — two layers to one, silently. SHAPE 3b is the
+  -- exact-set structural pin; this is the behavioural one.
   -- RED-UNDER: `GRANT INSERT (generation) ON strategy_shares TO authenticated`
   --            on the live database, SHAPE 3b neutered. First failure —
-  --            MEASURED 2026-08-27.
+  --            MEASURED 2026-08-27. ⚠️ Under that mutation the INSERT now
+  --            SUCCEEDS and lands at generation 1, not at 2^63-1 — the arm
+  --            still fires on `NOT raised`, which is the privilege wall it
+  --            actually measures.
   raised := FALSE;
   BEGIN
     INSERT INTO strategy_shares (strategy_id, created_by, generation)
@@ -1587,7 +1640,7 @@ BEGIN
   END;
   IF NOT raised THEN
     RESET ROLE;
-    RAISE EXCEPTION 'TEST FAILED (NONCE 3): the owner INSERTed a share row with a generation of their own choosing. Nothing else guards a FRESH row — the monotonicity trigger is BEFORE UPDATE — so a client can plant the counter at the BIGINT ceiling and permanently wedge their own revoke AND their own GDPR Art. 17 erasure, which share the same `generation + 1` statement.';
+    RAISE EXCEPTION 'TEST FAILED (NONCE 3): the owner INSERTed a share row NAMING `generation`, with no privilege error — `generation` has appeared in an INSERT grant to `authenticated`. ⚠️ The row itself most likely landed at 1: since 164-06 the trigger also fires BEFORE INSERT and FORCES the starting counter, so the planted 2^63-1 never reaches the table and the availability wedge this arm once named is no longer reachable through INSERT (it survives only through UPDATE, which is rule (6) and N1 1a/1b/1c). What is gone is the PRIVILEGE wall: the column is now reachable and the trigger''s INSERT branch is the only thing correcting it, two layers reduced to one, silently. Restore the column-scoped grant.';
   END IF;
 
   -- ======================================================================

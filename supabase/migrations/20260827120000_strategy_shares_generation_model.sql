@@ -756,7 +756,7 @@ BEGIN
   -- RED-UNDER: add `GRANT INSERT (nonce) ON strategy_shares TO authenticated`
   --            to STEP 2 (the exact re-grant that undoes the whole fix).
   IF v_cols IS DISTINCT FROM 'created_by:INSERT,generation:UPDATE,revoked_at:UPDATE,strategy_id:INSERT' THEN
-    RAISE EXCEPTION 'Migration 164-02 verification failed: `authenticated` holds COLUMN-level grants "%" on strategy_shares, expected exactly "created_by:INSERT,generation:UPDATE,revoked_at:UPDATE,strategy_id:INSERT". ⛔ Any grant naming `nonce` reopens the delete-and-recreate resurrection family the nonce exists to close; any INSERT grant naming `generation` or `revoked_at` reopens R3''s INSERT half (a client-chosen starting counter, or a pre-stamped tombstone, on a fresh row that no BEFORE UPDATE trigger ever sees).',
+    RAISE EXCEPTION 'Migration 164-02 verification failed: `authenticated` holds COLUMN-level grants "%" on strategy_shares, expected exactly "created_by:INSERT,generation:UPDATE,revoked_at:UPDATE,strategy_id:INSERT". ⛔ An INSERT grant naming `revoked_at` reopens R3''s INSERT half outright: a pre-stamped tombstone on a fresh row is covered by NO trigger rule, because rule (2) fires only on the NULL to NOT NULL transition of an UPDATE. ⚠️ Grants naming `nonce` or `generation` are caught a second time by the trigger''s INSERT branch, which FORCES both — so for those two columns this arm is the cheap detector rather than the last line, and it is kept because a grant is the only control that automatically covers columns added to this table in future, and because a grant REFUSES the write (42501, the caller learns) where the trigger silently corrects it.',
       COALESCE(v_cols, '(none)');
   END IF;
 
