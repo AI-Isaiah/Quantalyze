@@ -633,6 +633,51 @@ Plans:
 
 - [ ] TBD (run /gsd-plan-phase 164.2 to break down)
 
+### Phase 164.3: VACUITY — a control that cannot fail must be caught by machine, not by red team (INSERTED)
+
+**Goal**: A control that cannot fail is detected by a machine, on every push, instead of by a six-team red team once per milestone.
+**Depends on:** Phase 164 (its measured corpus is this phase's specification), ordered after 164.1 and 164.2 — numeric order only, no dependency on either.
+**Requirements**: TBD (run `/gsd-discuss-phase 164.3`)
+
+**Why this exists — measured, not felt.** Phase 164 produced **five distinct vacuity mechanisms**,
+and the DRIFT family alongside them. ⛔ Every single one was **GREEN in CI**, survived code review,
+and was found only by executing adversarially after a red team. That is the finding: not "we write
+weak tests", but **nothing in the pipeline can tell a control that holds from one that cannot fail.**
+Detection currently costs a red team.
+
+| # | Mechanism | Where it hid |
+|---|---|---|
+| 1 | Post-rejection probe inside a PL/pgSQL `BEGIN…EXCEPTION` — an implicit subtransaction, so the arm reads its own rollback | Found twice: removed at TRIGGER 1, survived undeclared at TENANT 5d-5g. A genuine cross-tenant write placed inside the handler moved the victim's counter **and the file went green** |
+| 2 | `pg_get_functiondef` regex satisfiable by an in-body `--` comment | Migration STEP 2 arms |
+| 3 | A diagnostic computing `pre + 1`, which overflowed in exactly the state it was diagnosing — the arm aborted on its own arithmetic | N1 3a / N1 1c |
+| 4 | Partial bitmask: `tgtype & 16` only, so a trigger narrowed back to `BEFORE UPDATE` satisfied every remaining term and the INSERT pin could be deleted invisibly | Fixed in the migration, **still blind in the durable gate** |
+| 5 | An arm made structurally unreachable by an earlier arm covering the same state — the reachable one then reported the defect as its **exact opposite** ("row is STILL LIVE" when the row was deleted) | SANITIZE 1c / 1e |
+
+Plus the **drift** half, same root — *the claim and the thing are never compared*: `DRIFT-02`
+(repo vs PROD, which nearly shipped a GDPR regression), `DRIFT-01` (TEST vs repo), `SKIP-01` (a gate
+that SKIPs forever and reads as PASS), and stale comments that **argued away** the coverage which
+would have caught a token-resurrection bug.
+
+**Success Criteria** (what must be TRUE):
+
+  1. **A mutation runner exists and runs in CI.** Every arm in `supabase/tests/*.sql` already carries a `RED-UNDER: <the exact mutation that makes me fail>` annotation. The runner machine-applies each, asserts the file goes RED, and restores. ⭐ This alone would have caught mechanisms 1, 4 and 5 with no human involved. It is the highest-value item in the phase by a distance.
+  2. **The throwaway-PostgreSQL lane is real** — `PROC-01`'s implementation. Today it is a script under `.planning/`, written mid-phase, whose own two defects (reusing another agent's cluster then `DROP SCHEMA public CASCADE`; RLS enabled on nothing but the table under test) were found by reviewers using it.
+  3. **A static linter rejects the five measured shapes** on new gate files, so mechanism 6 is a lint failure rather than a red-team finding.
+  4. **No whole-body `CREATE OR REPLACE` merges without a repo-vs-PROD diff** (`DRIFT-02b`). A function that has ever been surgically patched has no true body in the repo, and "re-base on the latest definition" is unsatisfiable from files alone.
+  5. ⛔ **Each of the four is demonstrated against the phase-164 corpus** — re-introduce each historical mechanism and show the new machinery catches it. A vacuity detector that has never caught a vacuity is the joke that writes itself.
+
+**Explicitly OUT of scope:** the GSD-machinery gaps — `depends_on` yielding `blocked_by: {}` so plan
+ordering is unenforced, wave frontmatter drifting from ROADMAP, and `NYQ-01`. Same smell, different
+system (upstream `gsd-core`, not this repo). Mixing them in makes this unshippable. Book them
+separately.
+
+**Plans:** 0 plans
+
+Plans:
+
+- [ ] TBD (run /gsd-plan-phase 164.3 to break down)
+
+
 ### Phase 165: DEPS — The 9-PR dependabot campaign
 
 **Goal**: All 9 open dependabot PRs are RESOLVED — landed or deliberately closed — in the research-verified order with the full suite green between each, and production pandas is never downgraded
@@ -660,6 +705,7 @@ Plans:
 | 162. HONEST visible truth | 0/? | Not started | - |
 | 163. HARDEN reliability + security | 9/9 | Complete | v0.75.0.0 |
 | 164. SHARE revocable links | 0/7 | Planned | - |
+| 164.3 VACUITY (mechanical anti-vacuity) | 0/? | Inserted 2026-08-28 | - |
 | 165. DEPS dependabot campaign | 0/? | Not started | - |
 
 ### Requirement Coverage (v1.20)
