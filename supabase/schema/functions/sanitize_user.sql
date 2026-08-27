@@ -2,11 +2,18 @@
 -- Canonical current body of this function, replayed from supabase/migrations/**.
 -- Regenerate with `npm run schema:functions`. See tech-debt #2.
 
--- source migration: 20260517013100_sanitize_user_recipient_email_case_insensitive.sql
+-- source migration: 20260827130000_sanitize_user_revoke_strategy_shares.sql
 -- --------------------------------------------------------------------------
--- STEP 1: replace sanitize_user with case-insensitive recipient_email match
+-- STEP 1: sanitize_user + the strategy_shares revoke arm
 -- --------------------------------------------------------------------------
--- Body identical to 20260516160100 EXCEPT line marked "M-0796 + retro fix".
+-- sanitize_user coverage matrix row (read by scripts/check-gdpr-export-coverage.ts):
+-- strategy_shares | ANONYMIZE | revoke-in-place. revoked_at stamped and generation
+--   bumped for every live row the subject created, which kills every capability URL
+--   derived from the old counter. The row itself is RETAINED deliberately: it holds
+--   no PII (uuid + int + timestamps, D-02 guarantees no token at rest) and deleting
+--   it would rewind the counter and resurrect the very links this arm just killed.
+--
+-- Body identical to 20260517013100 EXCEPT the block marked "Phase 164 / B1".
 CREATE OR REPLACE FUNCTION public.sanitize_user(p_user_id UUID)
 RETURNS BOOLEAN
 LANGUAGE plpgsql
@@ -116,6 +123,30 @@ BEGIN
     exchange_fill_id  = NULL
   WHERE strategy_id IN (SELECT id FROM strategies WHERE user_id = p_user_id)
     AND (raw_data IS NOT NULL OR exchange_order_id IS NOT NULL OR exchange_fill_id IS NOT NULL);
+
+  -- Phase 164 / B1 (2026-08-27) — kill every share link the subject minted.
+  -- `strategy_shares` (migration 20260827120000) holds a `generation` counter
+  -- from which an anonymous capability URL to an UNPUBLISHED factsheet is
+  -- derived in Node. The anonymize above does NOT empty the factsheet, and
+  -- neither FK cascade fires here because this function deletes neither
+  -- `profiles` nor `auth.users` — so without this statement every link the
+  -- subject ever handed out keeps working forever after their Art. 17 erasure,
+  -- and the `banned_until = 'infinity'` below means they can never log back in
+  -- to revoke it themselves.
+  --
+  -- Bumping `generation` is what actually kills the links: the token is
+  -- HMAC(secret, strategy_id || generation), so +1 invalidates every url ever
+  -- copied, at once. Stamping `revoked_at` alone would be COSMETIC.
+  --
+  -- REVOKE, NEVER DELETE. A delete discards the counter; the next mint for that
+  -- strategy would restart at generation 1 and RESURRECT every token minted at
+  -- generation 1, including ones already revoked. The row holds no PII, so
+  -- retaining it costs the subject nothing.
+  UPDATE strategy_shares
+     SET revoked_at = now(),
+         generation = generation + 1
+   WHERE created_by = p_user_id
+     AND revoked_at IS NULL;
 
   IF v_target_email IS NOT NULL THEN
     DELETE FROM verification_requests WHERE email = v_target_email;
