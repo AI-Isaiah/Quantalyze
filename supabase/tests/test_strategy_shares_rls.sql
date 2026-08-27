@@ -292,11 +292,12 @@ BEGIN
   -- the next privilege Postgres adds, none of which an enumeration of
   -- forbidden names ever would.
   --
-  -- Read via aclexplode(pg_class.relacl), NOT information_schema.role_table_grants
-  -- (used at ANON 2b below for a different question): that view is
-  -- privilege-filtered and can under-report, which for an EXACT-SET assertion
-  -- means a false GREEN direction is impossible but a confusing false RED is —
-  -- and relacl removes the ambiguity entirely.
+  -- Read via aclexplode(pg_class.relacl), NOT information_schema.role_table_grants:
+  -- that view is privilege-filtered and can under-report, which for an
+  -- EXACT-SET assertion means a false GREEN direction is impossible but a
+  -- confusing false RED is — and relacl removes the ambiguity entirely. Every
+  -- ACL arm in this file now reads relacl/proacl for that reason (SHAPE 3,
+  -- ANON 2b, SERVICE-ROLE 0-acl, SERVICE-ROLE 2e).
   SELECT array_agg(DISTINCT acl.privilege_type ORDER BY acl.privilege_type)
     INTO v_privs
     FROM pg_class c
@@ -761,10 +762,14 @@ BEGIN
   --     security policy (USING expression)". That is the second wall.
   -- ⛔ Consequence for honesty: 5b/5c below go RED on the SAME neuter that
   -- reddens TENANT 1 (dropping the EXISTS half) — they are NOT an independent
-  -- pin of the USING clause. TENANT 5h is; it reaches USING with nothing in
-  -- front of it. What 5b-5g uniquely prove is that the rejection is TOTAL when
-  -- a victim row exists: no partial write, no revoked_at clearing, no
-  -- provenance rewrite, no second row.
+  -- pin of the USING clause. **TENANT 4a is the USING pin** — see the note
+  -- immediately after 5c, which records why the obvious raw cross-tenant UPDATE
+  -- arm here was written, measured and then DELETED as unfailable. (An earlier
+  -- version of this sentence named a "TENANT 5h" that has never existed: the
+  -- roster is 5a-5g, and 5h WAS that deleted arm. The two passages now agree.)
+  -- What 5b-5g uniquely prove is that the rejection is TOTAL when a victim row
+  -- exists: no partial write, no revoked_at clearing, no provenance rewrite, no
+  -- second row.
   --
   -- ⚠️ Deliberately placed AFTER the TENANT 1-4 family. Seeding B's row EARLIER
   -- (the obvious placement) would push TENANT 1's mint against a strategy that
@@ -970,9 +975,21 @@ BEGIN
   END IF;
 
   -- Belt-and-braces: the temporary grant really is gone.
+  -- ⛔ Read via aclexplode(pg_class.relacl), matching SHAPE 3 above and
+  -- SERVICE-ROLE 2e below. This arm previously read
+  -- `information_schema.role_table_grants`, which is PRIVILEGE-FILTERED — it
+  -- surfaces only grants whose grantor or grantee the current role is, or is a
+  -- member of. For SHAPE 3's exact-set question that filtering can only produce
+  -- a confusing false RED, but this arm asks a COUNT-IS-ZERO question, where
+  -- under-reporting yields a false GREEN: a genuinely leaked anon grant that
+  -- the applying role happens not to see reads as "no grants remain". relacl is
+  -- the authoritative store and is not filtered.
   SELECT count(*) INTO row_cnt
-    FROM information_schema.role_table_grants
-   WHERE table_schema = 'public' AND table_name = 'strategy_shares' AND grantee = 'anon';
+    FROM pg_class c
+    CROSS JOIN LATERAL aclexplode(c.relacl) AS acl
+    JOIN pg_roles r ON r.oid = acl.grantee
+   WHERE c.oid = 'public.strategy_shares'::regclass
+     AND r.rolname = 'anon';
   IF row_cnt <> 0 THEN
     RAISE EXCEPTION 'TEST FAILED (ANON 2b): % anon grant(s) remain on strategy_shares after the layer-2 probe — the REVOKE did not take (the transaction ROLLBACK is still the backstop, but this must not be relied on)', row_cnt;
   END IF;
