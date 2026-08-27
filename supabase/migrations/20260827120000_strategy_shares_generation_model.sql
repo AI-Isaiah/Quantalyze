@@ -155,12 +155,14 @@ SET lock_timeout = '3s';
 -- 2^63-1 exactly as easily as 2^31-1 — one PATCH — and the resulting overflow
 -- wedge is the same unrecoverable one (`revoke_strategy_share` then errors
 -- `out of range`, and the GDPR Art. 17 arm in companion migration
--- 20260827130000 is the SAME statement, so the whole erasure aborts). ⛔ The
--- write-access half of N1 stays DEFERRED and is a merge gate for plan 164-03;
--- STEP 2's `GRANT INSERT (strategy_id, created_by)` closes the INSERT half of
--- it here (a client can no longer CHOOSE a starting generation), but the
--- UPDATE half — a bounded-increment rule — is not in this file. Do not read
--- BIGINT as having closed N1.
+-- 20260827130000 is the SAME statement, so the whole erasure aborts).
+-- ⭐ WHAT ACTUALLY CLOSES N1 IS STEP 1b, not this line — and keeping the
+-- distinction matters precisely because BIGINT is the part that LOOKS like a
+-- fix. Both halves now live in the trigger: its INSERT branch FORCES generation
+-- to 1 for every caller, including the BYPASSRLS roles STEP 2's
+-- `GRANT INSERT (strategy_id, created_by)` cannot bind, and rule (6) bounds
+-- every UPDATE to +1 so the ceiling is unreachable by construction. Do not read
+-- BIGINT as having closed either half.
 CREATE TABLE strategy_shares (
   id          UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
   strategy_id UUID        NOT NULL UNIQUE REFERENCES strategies ON DELETE CASCADE,
@@ -192,25 +194,37 @@ COMMENT ON TABLE strategy_shares IS
   '(3) row with revoked_at NOT NULL -> revoked, and generation has ALREADY '
   'been advanced past every link ever handed out, so all of them are dead '
   '(SHARE-03). Re-sharing clears revoked_at WITHOUT resetting generation, so '
-  'the new link differs from every old one. ⛔ generation is monotonic by '
-  'ENFORCEMENT, not by construction: the intended writers advance it by +1 '
-  '(revoke_strategy_share, and the GDPR Art. 17 arm in migration '
-  '20260827130000), but the owner''s UPDATE grant is column-unrestricted and '
-  'the FOR ALL policy admits their own-row writes, so a raw PATCH could rewind '
-  'it. The BEFORE UPDATE trigger strategy_shares_monotonic_generation (STEP 1b) '
-  'is what actually forbids that — and, being a trigger, it binds service_role '
-  'too.';
+  'the new link differs from every old one. ⛔ generation is monotonic AND '
+  'BOUNDED by ENFORCEMENT: the owner holds UPDATE on this column (STEP 2 must '
+  'grant it — revoke_strategy_share is SECURITY INVOKER and writes it AS THE '
+  'CALLER) and the FOR ALL policy admits their own-row writes, so the raw PATCH '
+  'reaches the row. What constrains it is the BEFORE INSERT OR UPDATE trigger '
+  'strategy_shares_monotonic_generation (STEP 1b): it FORCES generation to 1 on '
+  'every INSERT, refuses every rewind, and admits an advance of AT MOST +1 — so '
+  'the counter can neither go backwards (link resurrection) nor be driven to '
+  'the BIGINT ceiling (which wedged revoke and ABORTED the GDPR Art. 17 erasure '
+  'in migration 20260827130000, both being the same generation + 1 statement). '
+  'Being a trigger, it binds service_role too, which the column grants cannot.';
 
 COMMENT ON COLUMN strategy_shares.generation IS
   'Monotonic share generation, BIGINT. Feeds the Node-side HMAC as the third '
   'input; incrementing it is what makes revocation instantaneous for every '
-  'previously-copied link. NEVER reset, NEVER decremented. ⚠️ BIGINT is '
+  'previously-copied link. NEVER reset, NEVER decremented, and NEVER advanced '
+  'by more than 1 in one statement.⚠️ BIGINT is '
   'HEADROOM, NOT the overflow fix: a client that can WRITE this column reaches '
   '2^63-1 as easily as 2^31-1, and the resulting wedge (revoke, and the GDPR '
   'Art. 17 arm in migration 20260827130000, are the same generation + 1 '
-  'statement) is identically unrecoverable without DDL. STEP 2 closes the '
-  'INSERT half by omitting this column from the INSERT grant; the UPDATE half '
-  '— a bounded-increment rule — is DEFERRED and gates plan 164-03.';
+  'statement) aborts the erasure of the very data subject who caused it. The '
+  'FIX is STEP 1b, not the width: the trigger FORCES this column to 1 on every '
+  'INSERT (covering the BYPASSRLS roles the INSERT grant cannot bind) and its '
+  'rule (6) admits an advance of AT MOST +1, so reaching the ceiling would take '
+  'on the order of 9.2e18 separately committed statements. Overflow is '
+  'therefore unreachable BY CONSTRUCTION, which is why nothing on this surface '
+  'carries a numeric_value_out_of_range handler — and why nothing should: '
+  'swallowing that error would turn a loud, complete erasure failure into a '
+  'silent, incomplete one. STEP 2 closes the INSERT half at the grant layer for '
+  '`authenticated` by omitting this column from the INSERT grant; the trigger '
+  'closes it for every other role, and bounds the UPDATE half besides.';
 
 COMMENT ON COLUMN strategy_shares.nonce IS
   'Phase 164, founder ruling 2026-08-27. Immutable per-row MAC witness. Feeds '
@@ -346,7 +360,39 @@ CREATE INDEX strategy_shares_active_idx
 -- columns: STEP 3 tells the reader that reactivation never rewrites
 -- created_by/created_at, and before rule (0b) a raw PATCH falsified that claim.
 --
--- The five rules together are what make the model sound:
+-- ⛔⛔ N1 — THE CEILING JUMP, AND WHY THE FIX IS RULE (6) AND NOT AN EXCEPTION
+-- HANDLER. Plan 164-06, closing the gap this file's STEP 1 note above DEFERRED.
+-- MEASURED at HEAD on a throwaway PostgreSQL 16 cluster (2026-08-27,
+-- EXECUTION-EVIDENCE.md §5) with rules (0a)-(2) in force and rule (6) absent:
+--   step 1  mint                                       generation = 1
+--   step 2  owner PATCHes generation = 9223372036854775807   ACCEPTED
+--   step 3  revoke_strategy_share(sid)                  WEDGED 22003
+--   step 4  sanitize_user(uid)          Art. 17 ERASURE ABORTED 22003
+-- Step 4 is the one that matters. `BIGINT` (STEP 1) raised the ceiling and
+-- closed NOTHING: a client that can WRITE this column reaches 2^63-1 exactly as
+-- easily as 2^31-1, in one request, because rule (1) forbids only a DECREASE.
+--
+-- ⭐ THE BOUND MAKES OVERFLOW UNREACHABLE BY CONSTRUCTION, which is why there is
+-- no exception handler anywhere on this surface and why the next reader should
+-- not add one. `generation` starts at 1 (the INSERT branch above FORCES it),
+-- moves only by +1 (rule (6)), and every +1 is its own committed statement — so
+-- arriving at 2^63-1 takes on the order of 9.2e18 revokes. The Art. 17 arm in
+-- companion migration 20260827130000 runs the same `generation + 1`; it
+-- therefore CANNOT raise 22003, and it needs no handler to say so.
+--
+-- ⛔ REJECTED ALTERNATIVE, recorded because it is the obvious one: wrapping that
+-- B1 arm in `EXCEPTION WHEN numeric_value_out_of_range THEN ... CONTINUE`. That
+-- converts a LOUD, COMPLETE failure into a SILENT, INCOMPLETE erasure — the
+-- subject's share links survive, and the caller is told the erasure succeeded.
+-- Aborting is strictly better than that, so the abort is not the defect; being
+-- able to REACH it is. The fix belongs at the root, and the root is this
+-- trigger.
+--
+-- The six rules plus the INSERT pin are what make the model sound:
+--   (I)  on INSERT, generation is FORCED to 1 — not validated, overwritten — so
+--        no caller can express a starting counter. STEP 2's column grant closes
+--        this for `authenticated` only; the trigger closes it for the BYPASSRLS
+--        roles a grant cannot bind (R3).
 --   (0a) strategy_id NEVER changes. Re-pointing the counter re-issues generation
 --        1 for the strategy it was pointed away from.
 --   (0b) id, created_by and created_at NEVER change. Provenance on a live
@@ -364,6 +410,8 @@ CREATE INDEX strategy_shares_active_idx
 --        scratch); it removes the cheap in-database form of it.
 --   (1)  generation NEVER decreases. A rewind re-issues a dead token.
 --   (2)  a revocation (revoked_at NULL -> NOT NULL) MUST advance generation.
+--   (6)  an UPDATE advances generation by AT MOST ONE. With (1) this pins the
+--        counter to "stay, or advance by exactly one" — the whole of N1.
 -- ⛔ RULES (1) AND (2) ARE NOT SUPERSEDED BY THE NONCE and must both stay. The
 -- nonce closes resurrection via row DESTRUCTION AND RE-CREATION; (1) and (2)
 -- govern the SAME row, which keeps its nonce throughout. A rewind on a
@@ -396,6 +444,23 @@ SECURITY INVOKER
 SET search_path = public, pg_temp
 AS $$
 BEGIN
+  -- (I) INSERT: the starting counter is not EXPRESSIBLE by any caller.
+  -- ⛔ Must be the first statement and must RETURN. On an INSERT `OLD` is
+  -- unassigned, and PL/pgSQL raises "record old is not assigned yet" on the
+  -- very first comparison below — so every rule after this point is
+  -- UPDATE-only by construction, not by convention.
+  -- FORCE rather than reject: a rejection lets the caller learn which starting
+  -- values are legal, and every legal value other than 1 is a bug. Overwriting
+  -- means no caller — not `authenticated`, not `service_role`, not a future
+  -- BYPASSRLS maintenance script — can express a starting generation at all.
+  -- `nonce` is untouched here on purpose: column DEFAULTs are applied while the
+  -- tuple is being formed, BEFORE row triggers fire, so NEW.nonce is already
+  -- the server-generated value the mint RPC reads back through RETURNING.
+  IF TG_OP = 'INSERT' THEN
+    NEW.generation := 1;
+    RETURN NEW;
+  END IF;
+
   -- (0a) the counter is bound to ONE strategy, permanently.
   IF NEW.strategy_id IS DISTINCT FROM OLD.strategy_id THEN
     RAISE EXCEPTION 'strategy_shares: strategy_id is immutable — refusing to re-point the share row for strategy % at strategy %. The generation counter is only meaningful RELATIVE to the strategy it counts for. Moving it leaves the original strategy with NO share row, so the very next create_strategy_share() inserts a fresh one at generation 1 and re-issues every token that strategy ever had at generation 1 — including the ones that were explicitly REVOKED. Two requests, both legitimate for the row owner, same end state as rewinding the counter.',
@@ -436,14 +501,28 @@ BEGIN
       USING ERRCODE = 'check_violation';
   END IF;
 
+  -- (6) an UPDATE may advance generation by AT MOST ONE. Ordered last on
+  -- purpose: rule (1) has already refused every decrease, so by the time
+  -- control reaches here NEW.generation >= OLD.generation and the two rules
+  -- together pin the counter to "stay, or advance by exactly one". Nothing
+  -- else is expressible.
+  IF NEW.generation > OLD.generation + 1 THEN
+    RAISE EXCEPTION 'strategy_shares: generation may advance by AT MOST ONE per statement — refusing to move it from % to % on strategy %. An unbounded jump does not merely skip numbers: it drives the counter to the BIGINT ceiling in ONE request from an ordinary owner token (they hold the STEP 2 UPDATE(generation) column grant, and rule (1) forbids only a DECREASE). After that, revoke_strategy_share and the GDPR Art. 17 erasure arm in migration 20260827130000 are the SAME generation + 1 statement, so both raise 22003 numeric_value_out_of_range and the data subject has WEDGED THEIR OWN ERASURE with one PATCH (MEASURED 2026-08-27). Bounding every advance to +1 is what makes that overflow unreachable by construction.',
+      OLD.generation, NEW.generation, OLD.strategy_id
+      USING ERRCODE = 'check_violation';
+  END IF;
+
   RETURN NEW;
 END;
 $$;
 
 COMMENT ON FUNCTION public.strategy_shares_enforce_monotonic_generation() IS
-  'Phase 164 / SHARE-03. BEFORE UPDATE guard over FIVE rules (the name predates '
-  'the last three and is kept because STEP 6, the table COMMENT and '
-  'test_strategy_shares_rls.sql all pin it): (0c) nonce is IMMUTABLE — the MAC '
+  'Phase 164 / SHARE-03 and 164-06. BEFORE INSERT OR UPDATE guard. On INSERT it '
+  'FORCES generation to 1 and returns — not "rejects a wrong value", overwrites '
+  'it — so no caller can express a starting counter, including the BYPASSRLS '
+  'roles that STEP 2''s column grant cannot bind (R3). On UPDATE it enforces SIX '
+  'rules (the name predates all but one and is kept because STEP 6, the table '
+  'COMMENT and test_strategy_shares_rls.sql all pin it): (0c) nonce is IMMUTABLE — the MAC '
   'witness must not be written back from a recorded value, and since STEP 2''s '
   'column grant already denies this to `authenticated`, the rule exists for the '
   'role that bypasses grants entirely (service_role, GRANT ALL + BYPASSRLS, on '
@@ -453,15 +532,29 @@ COMMENT ON FUNCTION public.strategy_shares_enforce_monotonic_generation() IS
   'generation 1, resurrecting every token revoked at generation 1 in TWO '
   'requests; (0b) id, created_by and created_at are immutable, so the '
   'provenance STEP 3 promises cannot be forged by a raw PATCH; (1) generation '
-  'is monotonic; (2) every revocation advances it. Closes the owner '
+  'is monotonic; (2) every revocation advances it; (6) an UPDATE advances it by '
+  'AT MOST ONE. Closes the owner '
   'self-rewind: the FOR ALL policy plus a column-unrestricted UPDATE grant let '
   'an owner PATCH their own row back to a revoked generation and clear '
-  'revoked_at, resurrecting every link they had revoked (MEASURED). ⛔ Triggers '
+  'revoked_at, resurrecting every link they had revoked (MEASURED). ⭐ Rule (6) '
+  'closes the opposite direction, N1: the same PATCH could set generation to '
+  '2^63-1, after which revoke_strategy_share and the GDPR Art. 17 arm in '
+  'migration 20260827130000 — the same generation + 1 statement — both raise '
+  '22003 and the data subject has ABORTED THEIR OWN ERASURE (MEASURED). With '
+  '(1) and (6) the counter may only stay or advance by exactly one, so the '
+  'BIGINT ceiling is unreachable by construction and no overflow handler is '
+  'needed anywhere on this surface. ⛔ Triggers '
   'are NOT bypassed by BYPASSRLS, so this covers service_role as well — the '
   'only control on this table that does.';
 
+-- ⛔ `BEFORE INSERT OR UPDATE`, not `BEFORE UPDATE`. The INSERT half is what
+-- covers the roles GRANTs cannot bind: STEP 2 omits `generation` from
+-- authenticated's INSERT grant, but `service_role` holds GRANT ALL, so before
+-- the TG_OP branch above an admin transport could land a fresh row at any
+-- starting counter it liked. Widening the trigger is the only control on this
+-- table that reaches that caller (R3's closure).
 CREATE TRIGGER strategy_shares_monotonic_generation
-  BEFORE UPDATE ON strategy_shares
+  BEFORE INSERT OR UPDATE ON strategy_shares
   FOR EACH ROW
   EXECUTE FUNCTION public.strategy_shares_enforce_monotonic_generation();
 
@@ -521,13 +614,18 @@ CREATE TRIGGER strategy_shares_monotonic_generation
 --     create_strategy_share (mint AND the ON CONFLICT reuse path) and
 --     revoke_strategy_share both still run unchanged as SECURITY INVOKER.
 --
--- ⭐ IT ALSO CLOSES R3's INSERT HALF FOR FREE, which is worth naming because it
--- is not obvious: the trigger is BEFORE **UPDATE** only, so INSERT was wholly
--- unguarded and a client could choose `generation` and pre-stamp `revoked_at`
--- on a fresh row. Both columns are now absent from the INSERT grant, so
--- `INSERT ... (strategy_id, created_by, generation)` is rejected 42501
--- (MEASURED). ⚠️ The UPDATE half of N1 — a bounded-increment rule — is NOT
--- closed here; see the BIGINT note at STEP 1.
+-- ⭐ IT ALSO COVERS R3's INSERT HALF AT THE GRANT LAYER, which is worth naming
+-- because it is not obvious: `generation` and `revoked_at` are both absent from
+-- the INSERT grant, so `INSERT ... (strategy_id, created_by, generation)` from
+-- an ordinary owner is rejected 42501 (MEASURED) — a client cannot choose a
+-- starting counter or pre-stamp a tombstone on a fresh row.
+-- ⛔ AND A GRANT IS ONLY HALF OF IT, which is why STEP 1b's trigger now fires
+-- `BEFORE INSERT OR UPDATE` and FORCES `generation := 1`. A grant binds only
+-- roles that OBEY grants; `service_role` holds GRANT ALL and BYPASSRLS and is
+-- on this feature's hot path. The two layers fail on OPPOSITE edits — widen the
+-- grant and the trigger still pins the value; drop the trigger branch and the
+-- grant still stops `authenticated` — so neither is redundant. The UPDATE half
+-- of N1 (the bounded increment, rule (6)) is likewise in STEP 1b, not here.
 --
 -- ⛔ STILL POSITIVE-ONLY. `REVOKE ALL` first, then state exactly what to GIVE,
 -- at table level and at column level. A subtractive `REVOKE INSERT(nonce)` is
@@ -1032,7 +1130,12 @@ BEGIN
   -- the row would already have been written for any AFTER trigger ordered
   -- before it) and FOR EACH ROW (a STATEMENT-level trigger has no OLD/NEW at
   -- all, so the comparison would be a runtime error rather than a guard).
-  -- tgtype bit 0 = ROW, bit 1 = BEFORE, bit 4 = UPDATE.
+  -- tgtype bit 0 = ROW, bit 1 = BEFORE, bit 2 = INSERT, bit 4 = UPDATE.
+  -- ⛔ THE INSERT BIT IS ASSERTED SEPARATELY AND ON PURPOSE (164-06). The old
+  -- form omitted it, and `&` masking means a trigger narrowed back to
+  -- `BEFORE UPDATE` would have satisfied every remaining term — the R3 INSERT
+  -- pin could be deleted without this block noticing. Each event the guard
+  -- claims to cover needs its own bit test.
   SELECT count(*) INTO v_trg
     FROM pg_trigger t
    WHERE t.tgrelid = 'public.strategy_shares'::regclass
@@ -1040,9 +1143,10 @@ BEGIN
      AND t.tgname = 'strategy_shares_monotonic_generation'
      AND (t.tgtype & 1) = 1
      AND (t.tgtype & 2) = 2
+     AND (t.tgtype & 4) = 4
      AND (t.tgtype & 16) = 16;
   IF v_trg <> 1 THEN
-    RAISE EXCEPTION 'Migration 164-02 verification failed: the BEFORE UPDATE FOR EACH ROW trigger strategy_shares_monotonic_generation is absent or misshapen (matching triggers: %). Without it an owner can PATCH their own row back to a revoked generation and clear revoked_at, resurrecting every link they revoked — MEASURED, not hypothetical.', v_trg;
+    RAISE EXCEPTION 'Migration 164-02 verification failed: the BEFORE INSERT OR UPDATE FOR EACH ROW trigger strategy_shares_monotonic_generation is absent or misshapen (matching triggers: %). Without its UPDATE half an owner can PATCH their own row back to a revoked generation and clear revoked_at, resurrecting every link they revoked; without its INSERT half a BYPASSRLS role can land a fresh row at any starting counter it likes, which no column grant reaches — both MEASURED, neither hypothetical.', v_trg;
   END IF;
 
   -- (v-b) ...and it still carries ALL FOUR rules. (v) above proves a trigger of
@@ -1098,7 +1202,30 @@ BEGIN
     RAISE EXCEPTION 'Migration 164-02 verification failed: the monotonicity trigger lost rule (0c) — the nonce is no longer immutable. MEASURED with the rule absent: `SET ROLE service_role; UPDATE strategy_shares SET nonce = <a value recorded before the row was destroyed>` was ACCEPTED. Restoring a recorded nonce re-derives every token that row ever issued, which is the whole resurrection family walking back in through the one role that GRANTs cannot bind.';
   END IF;
 
-  RAISE NOTICE 'Migration 164-02: share RPC body-shape verified (atomic bump + live-only predicate + no delete + no generation rewind + mint never names nonce + mint returns nonce + auth.uid() fail-loud + revoke ownership predicate + INVOKER + search_path + monotonicity trigger present AND carrying all five rules: strategy_id pin, provenance pin, nonce pin, no-rewind, revocation-advances).';
+  -- (v-d) ...and the INSERT branch, which is the ONLY control that pins the
+  -- starting counter for a role that bypasses grants. Two probes, not one: the
+  -- TG_OP guard without the assignment is a no-op branch, and the assignment
+  -- without the guard would try to read OLD on an UPDATE path it does not
+  -- belong to. Deleting either is invisible to every UPDATE-side arm above.
+  -- RED-UNDER: delete the `IF TG_OP = 'INSERT' THEN NEW.generation := 1;
+  --            RETURN NEW; END IF;` block from STEP 1b.
+  IF v_trigfn_s !~* 'TG_OP\s*=\s*''INSERT'''
+     OR v_trigfn_s !~* 'NEW\.generation\s*:=\s*1' THEN
+    RAISE EXCEPTION 'Migration 164-02 verification failed: the monotonicity trigger lost its INSERT branch — generation is no longer FORCED to 1 on insert. STEP 2 omits the column from authenticated''s INSERT grant, so this rule''s only caller is one that BYPASSES grants: service_role, which holds GRANT ALL and is on this feature''s hot path. Such a caller could then land a fresh row at a chosen starting counter, and a row minted at a generation some revoked token already used re-issues that token.';
+  END IF;
+
+  -- (v-e) ...and rule (6), the bounded increment. This is N1's closure and it
+  -- is the reason nothing on this surface carries an overflow handler: with the
+  -- rule gone, one PATCH sets generation to 2^63-1 and the GDPR Art. 17 arm in
+  -- migration 20260827130000 — the same generation + 1 statement — aborts the
+  -- data subject's own erasure with 22003 (MEASURED 2026-08-27).
+  -- RED-UNDER: delete the `IF NEW.generation > OLD.generation + 1` block from
+  --            strategy_shares_enforce_monotonic_generation() in STEP 1b.
+  IF v_trigfn_s !~* 'NEW\.generation\s*>\s*OLD\.generation\s*\+\s*1' THEN
+    RAISE EXCEPTION 'Migration 164-02 verification failed: the monotonicity trigger lost rule (6) — an UPDATE is no longer bounded to advancing generation by AT MOST ONE. Rule (1) forbids only a DECREASE, so the owner''s UPDATE(generation) column grant then reaches the BIGINT ceiling in a single PATCH, after which revoke_strategy_share WEDGES on 22003 and sanitize_user ABORTS THE ENTIRE ART. 17 ERASURE on the same statement. A data subject can wedge their own erasure with data they control, and the overflow that this file argues is unreachable by construction becomes reachable in one request.';
+  END IF;
+
+  RAISE NOTICE 'Migration 164-02: share RPC body-shape verified (atomic bump + live-only predicate + no delete + no generation rewind + mint never names nonce + mint returns nonce + auth.uid() fail-loud + revoke ownership predicate + INVOKER + search_path + monotonicity trigger present on INSERT AND UPDATE AND carrying all six rules plus the INSERT pin: forced-1-on-insert, strategy_id pin, provenance pin, nonce pin, no-rewind, revocation-advances, at-most-plus-one).';
 END $$;
 
 -- --------------------------------------------------------------------------

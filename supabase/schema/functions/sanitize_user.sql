@@ -149,7 +149,17 @@ BEGIN
      AND revoked_at IS NULL;
 
   IF v_target_email IS NOT NULL THEN
-    DELETE FROM verification_requests WHERE email = v_target_email;
+    -- ⛔ verification_requests_legacy IS THE TABLE. `verification_requests` is a
+    -- VIEW (relkind 'v', 13 cols) that 20260620120000_verification_requests_view_shim_apply.sql
+    -- repointed this DELETE away from — MANDATORY, because erasure aimed at the
+    -- view hits its INSTEAD OF trigger instead of the rows. That shim was a
+    -- SURGICAL in-place patch, so it matches no grep for this function and the
+    -- repo held no copy of it; re-basing on the newest FULL body in the repo
+    -- (20260517013100) therefore silently REVERTED it. See DRIFT-02 in root
+    -- TODOS.md. Corrected 2026-08-27 against PROD's live pg_get_functiondef
+    -- (md5 2f4ccf13db95b93464e028e5bce1e0f4) — the diff proved this identifier
+    -- was the ONLY substantive drift in the whole 193-line body.
+    DELETE FROM verification_requests_legacy WHERE email = v_target_email;
 
     -- audit-2026-05-07 M-0796 + PR #182 retro audit (Task #57): purge
     -- notification_dispatches rows keyed to the target user's email. The
