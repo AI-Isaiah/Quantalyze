@@ -761,13 +761,22 @@ export const USER_EXPORT_TABLES: readonly UserExportTable[] = [
   //   2. regenerate src/lib/database.types.ts from the applied schema;
   //   3. add `{ kind: "direct", table: "strategy_shares", user_column:
   //      "created_by" }` on the line below (sorted after `strategies`,
-  //      'i' < 'y', per the alphabetical-order gate);
-  //   4. add the matching `strategy_shares` key to SANITIZE_PARITY_ALLOWLIST in
-  //      scripts/check-gdpr-export-coverage.ts — its rationale is already
-  //      written out in a PENDING comment at that site. Steps 3 and 4 must land
-  //      TOGETHER: the allowlist's staleness check rejects a key with no
-  //      manifest entry, and the manifest entry has no sanitize policy without
-  //      the allowlist key.
+  //      'i' < 'y', per the alphabetical-order gate).
+  //
+  // ⚠️ THERE IS NO STEP 4, and there used to be. This block instructed a fourth
+  // step — "add the matching `strategy_shares` key to SANITIZE_PARITY_ALLOWLIST
+  // ... the manifest entry has no sanitize policy without the allowlist key" —
+  // which became FALSE the moment the companion migration
+  // 20260827130000_sanitize_user_revoke_strategy_shares.sql landed. MEASURED
+  // 2026-08-27: strategy_shares covered = true, in SANITIZE_PARITY_ALLOWLIST =
+  // false. The migration supplies a REAL Art. 17 policy (a live `UPDATE
+  // strategy_shares SET revoked_at = now(), generation = generation + 1` arm
+  // plus its matrix row), which is strictly better than an allowlist entry
+  // asserting no policy is needed — and its own header says so at
+  // 20260827130000:81-84. Adding the key anyway is tolerated rather than fatal,
+  // so this was harmless in effect; it was still wrong instructions at the
+  // exact moment an engineer acts on them, which is the failure shape this
+  // phase just closed a CRITICAL for.
   // Until then `scripts/check-gdpr-export-coverage.ts` exits 1 and its failure
   // text states this exact remedy — that redness is the reminder, and it is the
   // correct state to be in. ⛔ Do NOT silence it with an EXCLUDED_TABLES entry.

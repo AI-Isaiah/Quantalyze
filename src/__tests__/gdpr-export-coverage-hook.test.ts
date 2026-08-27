@@ -33,6 +33,7 @@ import {
   extractManifestTables,
   extractSanitizeCoverageFromContent,
   extractUserTablesFromMigration,
+  SANITIZE_PARITY_ALLOWLIST,
 } from "../../scripts/check-gdpr-export-coverage";
 import { USER_EXPORT_TABLES } from "@/lib/gdpr-export-manifest";
 
@@ -734,7 +735,7 @@ CREATE TABLE audit_log_cold (
  * THE HOLE THIS CLOSES. When a migration declares a new user-owned table, the
  * hook exits 1 until a `USER_EXPORT_TABLES` entry lands. That entry is typed
  * against the GENERATED `src/lib/database.types.ts`, so it cannot even compile
- * until the migration is applied — a four-step remedy. Meanwhile
+ * until the migration is applied — a three-step remedy. Meanwhile
  * `EXCLUDED_TABLES` is `Record<string, {class, reason}>`: a PLAIN STRING key.
  * Adding one line there compiles today, flips the hook to exit 0, and turns
  * every red case in this file green. It is strictly LESS work than the correct
@@ -896,16 +897,17 @@ describe("B3: EXCLUDED_TABLES cannot silence a user-owned table", () => {
     // The specific pin (3). strategy_shares records that the owner created /
     // revoked a factsheet share link, and when — personal data Art. 15
     // entitles them to. The correct remedy for the hook's failure is the
-    // four-step order of operations at the PENDING block in
+    // order of operations at the PENDING block in
     // src/lib/gdpr-export-manifest.ts, NOT an exclusion.
     expect(
       Object.keys(EXCLUDED_TABLES),
       "strategy_shares was added to EXCLUDED_TABLES. That silences the GDPR " +
         "coverage hook instead of satisfying it, and permanently drops a " +
         "user-owned table from every Art. 15 export with green CI. Remove the " +
-        "entry and follow the four-step remedy in src/lib/gdpr-export-manifest.ts " +
+        "entry and follow the remedy in src/lib/gdpr-export-manifest.ts " +
         "(apply migration -> regenerate database.types.ts -> USER_EXPORT_TABLES " +
-        "entry -> SANITIZE_PARITY_ALLOWLIST key).",
+        "entry). No SANITIZE_PARITY_ALLOWLIST key is needed: migration " +
+        "20260827130000 already supplies the Art. 17 policy.",
     ).not.toContain("strategy_shares");
   });
 
@@ -1046,6 +1048,21 @@ describe("B13: typed-manifest coverage derivation (live USER_EXPORT_TABLES)", ()
  * vacuous in the opposite direction, and every case here would still pass.
  */
 describe("sanitize parity: prose cannot satisfy the statement scan", () => {
+  /** The covered-set the live hook derives from the real migration corpus. */
+  function liveSanitizeCoverage(): Set<string> {
+    const dir = join(REPO_ROOT, MIGRATIONS_REL);
+    const covered = new Set<string>();
+    for (const filename of readdirSync(dir).filter(
+      (f) => f.endsWith(".sql") && /sanitize_user/i.test(f),
+    )) {
+      extractSanitizeCoverageFromContent(
+        readFileSync(join(dir, filename), "utf8"),
+        covered,
+      );
+    }
+    return covered;
+  }
+
   it("a comment quoting an UPDATE does not count as coverage", () => {
     const sql = [
       "-- This migration is where we would normally write:",
@@ -1131,21 +1148,40 @@ describe("sanitize parity: prose cannot satisfy the statement scan", () => {
     // The fix must close the prose hole WITHOUT dropping the real arm that
     // migration 20260827130000 actually executes. If this flips false, the
     // stripper has become too aggressive against real SQL.
-    const dir = join(REPO_ROOT, MIGRATIONS_REL);
-    const covered = new Set<string>();
-    for (const filename of readdirSync(dir).filter(
-      (f) => f.endsWith(".sql") && /sanitize_user/i.test(f),
-    )) {
-      extractSanitizeCoverageFromContent(
-        readFileSync(join(dir, filename), "utf8"),
-        covered,
-      );
-    }
-    expect(covered.has("strategy_shares")).toBe(true);
+    expect(liveSanitizeCoverage().has("strategy_shares")).toBe(true);
     expect(
-      covered.size,
+      liveSanitizeCoverage().size,
       "the sanitize coverage set collapsed — the prose stripper is removing " +
         "real statements, not just prose",
     ).toBeGreaterThan(30);
+  });
+
+  it("the remedy text's claim holds: strategy_shares has a policy, so needs no allowlist key", () => {
+    // Keeps the REMEDIATION PROSE honest, which is the whole point of this
+    // case. Both scripts/check-gdpr-export-coverage.ts and
+    // src/lib/gdpr-export-manifest.ts used to instruct a fourth step — "add
+    // the matching strategy_shares key to SANITIZE_PARITY_ALLOWLIST ... the
+    // manifest entry has no sanitize policy without the allowlist key". That
+    // went FALSE when migration 20260827130000 landed a real Art. 17 arm.
+    // Wrong instructions at the exact moment an engineer acts on them is the
+    // failure shape this phase already closed a CRITICAL for, so the corrected
+    // text is pinned to the two facts it asserts rather than left as prose
+    // that can rot again.
+    expect(
+      liveSanitizeCoverage().has("strategy_shares"),
+      "strategy_shares no longer has a sanitize_user policy. The remedy text " +
+        "in scripts/check-gdpr-export-coverage.ts and " +
+        "src/lib/gdpr-export-manifest.ts both say no SANITIZE_PARITY_ALLOWLIST " +
+        "key is needed BECAUSE migration 20260827130000 supplies one. If that " +
+        "arm was removed, the instructions are now wrong — fix the text, do " +
+        "not delete this case.",
+    ).toBe(true);
+    expect(
+      Object.keys(SANITIZE_PARITY_ALLOWLIST),
+      "strategy_shares was added to SANITIZE_PARITY_ALLOWLIST. It has a REAL " +
+        "erasure policy (migration 20260827130000); an allowlist key asserts " +
+        "the weaker, different thing — that no policy is needed — and would go " +
+        "stale silently if the real arm were ever removed.",
+    ).not.toContain("strategy_shares");
   });
 });
