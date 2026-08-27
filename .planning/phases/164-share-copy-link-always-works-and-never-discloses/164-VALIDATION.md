@@ -73,6 +73,8 @@ failures that read as regressions. Serialize: vitest → pytest → mypy.
 | 164-06-01 | 06 | 2 | SHARE-03 | N1 / ceiling jump | Trigger forces `generation=1` on INSERT and bounds every UPDATE to +1 | SQL (real PG) + snapshot | `npx tsx scripts/dump-sql-functions.ts --check` — behaviour proven by `pg-harness/run.sh`, NOT by a vitest file | ✅ | ⬜ pending |
 | 164-06-02 | 06 | 2 | SHARE-03 | Silent-skip / vacuity | 5 new arms, each OBSERVED red under its own RED-UNDER; floors re-derived PRE-EDIT in the same diff | contract + SQL gate | `set -o pipefail; npx vitest run src/__tests__/contracts/ci-anti-skip-gate.contract.test.ts 2>&1 \| tail -20` | ✅ | ⬜ pending |
 | 164-06-03 | 06 | 2 | SHARE-03 | Prod auto-apply | Harness run → three reviewers (execution status declared) → TEST hand-apply → `sql-tests` green | **blocking-human checkpoint** | none — `gate="blocking-human"`, typed `<resume-signal>` required | n/a | ⬜ pending |
+| 164-07-01 | 07 | 2 | SHARE-02 | F6 / cache reach | No module in the builder's 38-module transitive closure imports `next/cache`; walker proven non-vacuous by a size floor + an alias assertion | structural guard (**RED-first**, planted import in a DEEP dep) | `set -o pipefail; npx vitest run src/__tests__/phase-148-owner-lane-cache-isolation.test.ts 2>&1 \| tail -20` | ✅ | ⬜ pending |
+| 164-07-02 | 07 | 2 | SHARE-02 | Unenforced claim in prose | Builder docblock CITES the guard instead of asserting the absence | contract suite (a comment alone can redden `contracts/`) | `set -o pipefail; npx vitest run src/__tests__/contracts 2>&1 \| tail -20` | ✅ | ⬜ pending |
 
 *Status: ⬜ pending · ✅ green · ❌ red · ⚠️ flaky*
 
