@@ -1634,8 +1634,10 @@ jobs:
               # arms_declared past any floor while asserting nothing. Comment lines
               # are excluded because these files DISCUSS RAISE EXCEPTION at length
               # in their headers and prose must never count as coverage. Slack on
-              # the real corpus is wide (tightest is 6 arms / 9 sites), so this
-              # cannot fire on an honest file by accident.
+              # the real corpus is NO LONGER uniform: test_strategy_shares_rls.sql
+              # runs 73 arms across 73 non-comment sites — zero slack — so on that
+              # file an honest edit that adds an assertion without updating the
+              # roster WILL fire here. That is intended; the roster is the pin.
               raises="$(grep -aF 'RAISE EXCEPTION' "$f" | grep -acvE '^[[:space:]]*--' || true)"
               if [ "$n_arms" -gt "$raises" ]; then
                 echo "::error file=$f::declares ${n_arms} arms but contains only ${raises} non-comment RAISE EXCEPTION line(s). An arm with no way to raise cannot fail, so it is not an arm — and a file declaring more arms than it can fail inflates the corpus-wide floors below while proving nothing. Either these arms assert through something this check cannot see, in which case say so IN THIS WORKFLOW where it is visible, or the count is fiction."
@@ -1686,10 +1688,10 @@ jobs:
           #   test_ledger_refresh_fanout.sql                 10
           #   test_ledger_refresh_staleness.sql               8
           #   test_retention_crons_safe.sql                   4
-          #   test_strategy_shares_rls.sql                   62
+          #   test_strategy_shares_rls.sql                   73
           #   test_sync_status_marked_refresh_protected.sql  16
           SENTINEL_FLOOR=8   # files declaring a sentinel
-          ARMS_FLOOR=125     # 9 + 6 + 10 + 10 + 8 + 4 + 62 + 16
+          ARMS_FLOOR=136     # 9 + 6 + 10 + 10 + 8 + 4 + 73 + 16
           # RAISING these as arms are added is expected and cheap — and it is not
           # optional: src/__tests__/contracts/ci-anti-skip-gate.contract.test.ts
           # re-derives the table above from the corpus and goes red when a count,
