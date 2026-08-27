@@ -1,5 +1,5 @@
 import { readdirSync, existsSync, readFileSync, statSync } from "node:fs";
-import { join, relative } from "node:path";
+import { dirname, join, relative, resolve } from "node:path";
 
 import { describe, expect, it } from "vitest";
 
@@ -206,6 +206,59 @@ import { describe, expect, it } from "vitest";
  *   All three were restored by DELETING the temporary directory (never a
  *   file-level `git checkout --`, which would have destroyed the uncommitted
  *   move). The gate is 12/12 green on the moved tree, with `tsc --noEmit` at 0.
+ *
+ * ─────────────────────────────────────────────────────────────────────────
+ * AMENDMENT 2026-08-28 — phase 164 / SHARE-02, finding F6.
+ *
+ * 8. THE BUILDER'S WHOLE TRANSITIVE CLOSURE HAS NO CACHE REACH. Pins 1-7 all
+ *    scan ONE file's bytes. `fetch-and-build-payload.ts` plus its 37
+ *    transitive dependencies were unguarded, and the builder's own docblock
+ *    asserted "It imports `next/cache` nowhere" on nothing but its own
+ *    authority. The failure that leaves every other gate green: a perf PR
+ *    wraps a composite read in `unstable_cache([…, id])` two or three hops
+ *    inside the graph. The effective key on the v2 route is id-ONLY, so the
+ *    entry is SHARED between lanes — the token lane fills it with an
+ *    unpublished payload and the next anonymous reader of that id is served
+ *    the unpublished factsheet for the full TTL. Silent, TTL-long, invisible.
+ *
+ *    The closure walker follows relative AND `@/` specifiers (the single
+ *    tsconfig mapping), resolves .ts/.tsx/index files, cycle-safes on a
+ *    visited set, and strips comments first — load-bearing a THIRD time here,
+ *    because the entry's own docblock names `next/cache` while documenting
+ *    this very hazard.
+ *
+ * Rule-9 NON-VACUITY — the walker's own blindness is the threat, so three of
+ * the six new assertions guard the walker rather than the property: the
+ * closure FLOOR (>= 30, against an INDEPENDENT pre-edit measurement of 38 on
+ * 2026-08-27 — a resolver that resolves nothing returns {entry} and passes
+ * every no-cache-reach assertion vacuously), an ALIAS-ONLY witness module (a
+ * resolver that drops `@/` walks a smaller graph and looks healthy), and a
+ * BARE-specifier collection check (`next/cache` IS a bare specifier — drop
+ * those and the headline assertion can never fire).
+ *
+ *   6. PLANTED CACHE IMPORT IN A DEPTH-3 DEPENDENCY (2026-08-28). ⛔ Planted
+ *      deliberately NOT in the entry — a guard that reads only the entry file
+ *      is the bug being fixed here, so proving it there proves nothing.
+ *      `import { unstable_cache } from "next/cache";` was added to
+ *      `src/lib/utils.ts`, three hops in:
+ *      × NO module in the closure imports next/cache or names a Next cache API
+ *        AssertionError: expected [ Array(1) ] to deeply equal []
+ *        + "src/lib/utils.ts — imports \"next/cache\"; names unstable_cache —
+ *           reached via src/lib/factsheet/fetch-and-build-payload.ts →
+ *           src/lib/strategy-display.ts → src/lib/types.ts → src/lib/utils.ts"
+ *      → 1 failed / 17 passed.
+ *
+ *      MEASURED ASYMMETRY, again: all TWELVE pre-existing assertions in this
+ *      file stayed GREEN under that mutation. They read page.tsx and the
+ *      builder's own bytes, and neither changed. For this edit the closure
+ *      guard is the SOLE control.
+ *
+ *      Restored from a BYTE BACKUP verified by `shasum`
+ *      (806c8681bab71e74b6ac544d99010392638ae11f before and after) with
+ *      `git diff --quiet -- src/lib/utils.ts` exiting 0 — never a file-level
+ *      `git checkout --`, which silently discards uncommitted work.
+ *
+ *   The gate is 18/18 green on the real tree.
  */
 
 const ROOT = join(__dirname, "..", "..");
@@ -539,5 +592,250 @@ describe("OWN-02 — no production source outside the factsheet page resolves a 
     // cache. Its total absence would mean the owner lane was deleted, which
     // must not read as "cache isolation holds".
     expect(src).toContain("withPublishedOrOwner");
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────
+// Phase 164 (SHARE-02 / F6) — the builder's whole TRANSITIVE closure, not one
+// file's bytes. Everything above this line scans a single named source.
+// ─────────────────────────────────────────────────────────────────────────
+
+/**
+ * The ONE path mapping `tsconfig.json` declares (`"@/*": ["./src/*"]`,
+ * tsconfig.json:21-23). The walker resolves that alias and nothing else —
+ * inventing further mappings would make this gate disagree with the compiler
+ * about what the graph even is.
+ */
+const ALIAS_PREFIX = "@/";
+
+/** The module whose presence anywhere in the closure IS the disclosure hazard. */
+const CACHE_MODULE = "next/cache";
+
+/**
+ * Next data-cache APIs by name. A module can acquire cache reach without
+ * spelling `next/cache` at its own top (a re-export, a thin helper, a future
+ * `"use cache"`-era import surface), so the token scan is a SECOND, independent
+ * net rather than a restatement of the specifier check.
+ */
+const CACHE_TOKENS = [
+  "unstable_cache",
+  "revalidateTag",
+  "revalidatePath",
+  "cacheTag",
+  "cacheLife",
+] as const;
+
+/**
+ * PRE-EDIT MEASUREMENT — taken 2026-08-27, before this guard existed, by a
+ * throwaway script, and DELIBERATELY not by the walker below:
+ *
+ *   closure size, entry included .... 38 modules
+ *   bare specifiers reached ......... @supabase/supabase-js, zod
+ *   next/cache in closure ........... false
+ *
+ * (Re-measured 2026-08-28 at 38, same set, plus the side-effect import
+ * `server-only` — which the pre-edit script did not collect because it looked
+ * only at `from "…"` forms. Same graph, wider specifier net.)
+ *
+ * ⛔ THE FLOOR IS THE WHOLE POINT. A resolver that silently resolves nothing
+ * returns a closure of {entry} and then passes every "no cache reach"
+ * assertion below VACUOUSLY — green, fast, and blind. Deriving the floor by
+ * running the finished walker would encode whatever the walker happens to do,
+ * including doing nothing. 30 is set under the measured 38 so ordinary
+ * refactors (a module inlined, a helper merged) do not redden it, while a
+ * resolver that stops resolving does.
+ */
+const CLOSURE_FLOOR = 30;
+
+/**
+ * A module reached ONLY through a `@/` specifier as measured 2026-08-27:
+ * `src/lib/factsheet/allocator-portfolio-payload.ts:1` imports it as
+ * `@/lib/portfolio-math-utils` and nothing in the closure reaches it relatively.
+ * A resolver that handles `./…` and silently drops aliases looks perfectly
+ * healthy — it just walks a smaller graph. This module is how we tell.
+ */
+const ALIAS_ONLY_WITNESS = "src/lib/portfolio-math-utils.ts";
+
+/**
+ * Every module-specifier string literal in a source: `from "x"`, a bare
+ * side-effect `import "x"`, and `import("x")`. Run on comment-STRIPPED text —
+ * `fetch-and-build-payload.ts`'s own docblock names `next/cache` (it documents
+ * the very hazard this gate enforces), so an unstripped scan would report the
+ * entry as its own offender and the gate would be red on a healthy tree.
+ */
+const IMPORT_SPECIFIER = /(?:\bfrom\s*|\bimport\s*\(\s*|^\s*import\s+)["']([^"']+)["']/gm;
+
+function importSpecifiers(src: string): string[] {
+  return [...src.matchAll(IMPORT_SPECIFIER)].map((m) => m[1]);
+}
+
+/**
+ * Resolve a relative or `@/` specifier to a repo-relative file, or null when it
+ * is bare (a package) or names nothing on disk. Candidate order matches what
+ * the bundler does for extensionless imports; the bare `base` candidate last is
+ * what pulls the `resolveJsonModule` data files into the closure.
+ */
+function resolveSpecifier(spec: string, fromRel: string): string | null {
+  let base: string;
+  if (spec.startsWith(ALIAS_PREFIX)) {
+    base = join(ROOT, "src", spec.slice(ALIAS_PREFIX.length));
+  } else if (spec.startsWith(".")) {
+    base = resolve(join(ROOT, dirname(fromRel)), spec);
+  } else {
+    return null;
+  }
+  for (const candidate of [
+    `${base}.ts`,
+    `${base}.tsx`,
+    join(base, "index.ts"),
+    join(base, "index.tsx"),
+    base,
+  ]) {
+    if (existsSync(candidate) && statSync(candidate).isFile()) {
+      return relative(ROOT, candidate);
+    }
+  }
+  return null;
+}
+
+type Closure = {
+  /** module → the import chain that reached it, entry first. */
+  chains: Map<string, string[]>;
+  /** Literal text of every bare (unresolved-by-design) specifier reached. */
+  bare: Set<string>;
+  /** Modules reached through `@/` and never through a relative path. */
+  aliasOnly: string[];
+  /** `file -> spec` for a relative/alias specifier that resolved to NOTHING. */
+  unresolved: string[];
+};
+
+/**
+ * Transitive import closure of `entryRel`, following relative and `@/`
+ * specifiers with a `visited` set for cycle safety. Bare specifiers are not
+ * resolved — but their TEXT is collected, because the `next/cache` assertion is
+ * on the specifier string, not on a file that exists under `src/`.
+ */
+function transitiveClosure(entryRel: string): Closure {
+  const chains = new Map<string, string[]>([[entryRel, [entryRel]]]);
+  const bare = new Set<string>();
+  const forms = new Map<string, Set<string>>();
+  const unresolved: string[] = [];
+  const queue: string[] = [entryRel];
+  while (queue.length > 0) {
+    const rel = queue.shift() as string;
+    // JSON data files are closure MEMBERS (they are imported, and they are
+    // scanned for cache tokens below) but they declare no imports of their own.
+    if (!/\.tsx?$/.test(rel)) continue;
+    const src = stripComments(readSource(rel));
+    for (const spec of importSpecifiers(src)) {
+      const isAlias = spec.startsWith(ALIAS_PREFIX);
+      const isRelative = spec.startsWith(".");
+      if (!isAlias && !isRelative) {
+        bare.add(spec);
+        continue;
+      }
+      const target = resolveSpecifier(spec, rel);
+      if (target === null) {
+        // Fail LOUD rather than walking a smaller graph: an edge that resolves
+        // to nothing is an entire subtree this gate never looked at.
+        unresolved.push(`${rel} -> ${spec}`);
+        continue;
+      }
+      if (!forms.has(target)) forms.set(target, new Set<string>());
+      (forms.get(target) as Set<string>).add(isAlias ? "alias" : "relative");
+      if (chains.has(target)) continue;
+      chains.set(target, [...(chains.get(rel) as string[]), target]);
+      queue.push(target);
+    }
+  }
+  const aliasOnly = [...forms.entries()]
+    .filter(([, f]) => f.has("alias") && !f.has("relative"))
+    .map(([mod]) => mod)
+    .sort();
+  return { chains, bare, aliasOnly, unresolved };
+}
+
+/**
+ * Every closure member with cache reach, each reported with the REASON and the
+ * import chain that reached it. A guard that says only "something in the graph
+ * caches" costs the next reader an afternoon of bisecting imports.
+ */
+function cacheReachOffenders(closure: Closure): string[] {
+  const found: string[] = [];
+  for (const [rel, chain] of closure.chains) {
+    const src = stripComments(readSource(rel));
+    const reasons: string[] = [];
+    if (/\.tsx?$/.test(rel)) {
+      for (const spec of importSpecifiers(src)) {
+        if (spec === CACHE_MODULE || spec.startsWith(`${CACHE_MODULE}/`)) {
+          reasons.push(`imports "${spec}"`);
+        }
+      }
+    }
+    for (const token of CACHE_TOKENS) {
+      if (new RegExp(`\\b${token}\\b`).test(src)) reasons.push(`names ${token}`);
+    }
+    if (reasons.length > 0) {
+      found.push(
+        `${rel} — ${[...new Set(reasons)].join("; ")} — reached via ${chain.join(" → ")}`,
+      );
+    }
+  }
+  return found;
+}
+
+describe("SHARE-02 / F6 — the payload builder's TRANSITIVE closure has no reach into the Next data cache", () => {
+  const closure = transitiveClosure(BUILDER);
+
+  it(`walks a real graph: at least ${CLOSURE_FLOOR} modules (38 measured PRE-EDIT on 2026-08-27)`, () => {
+    // ⛔ Read the CLOSURE_FLOOR docblock before touching this number. The floor
+    // is an INDEPENDENT measurement, not this walker's own output — it is the
+    // only thing standing between the assertions below and a resolver that
+    // resolves nothing and passes all of them vacuously.
+    expect(closure.chains.size).toBeGreaterThanOrEqual(CLOSURE_FLOOR);
+  });
+
+  it("really followed `@/` aliases and not just relative paths", () => {
+    // A resolver that handles `./…` and drops `@/…` walks a strictly smaller
+    // graph while looking entirely healthy. ALIAS_ONLY_WITNESS is reachable
+    // ONLY through an alias specifier, so its presence cannot be explained by
+    // relative resolution alone.
+    expect(closure.aliasOnly.length).toBeGreaterThan(0);
+    expect([...closure.chains.keys()]).toContain(ALIAS_ONLY_WITNESS);
+    expect(closure.aliasOnly).toContain(ALIAS_ONLY_WITNESS);
+  });
+
+  it("really collected BARE specifiers — the net that would catch `next/cache` itself", () => {
+    // `next/cache` is a bare specifier. If bare specifiers were silently
+    // dropped instead of collected, the offender scan could never see one and
+    // the headline assertion would be vacuous. These two are the pre-edit
+    // measurement's bare set, so this pins the mechanism on known ground.
+    expect([...closure.bare]).toContain("@supabase/supabase-js");
+    expect([...closure.bare]).toContain("zod");
+  });
+
+  it("resolved EVERY relative and alias specifier it met (an unresolved edge is an unwalked subtree)", () => {
+    expect(closure.unresolved).toEqual([]);
+  });
+
+  it("strips comments before matching — the entry's own docblock names next/cache", () => {
+    // Load-bearing, not decorative: `fetch-and-build-payload.ts` documents this
+    // very hazard in prose. Without stripping, the entry would be reported as
+    // its own offender and this gate would be red on a healthy tree — which is
+    // how a gate gets disabled.
+    const raw = readSource(BUILDER);
+    expect(raw).toContain(CACHE_MODULE);
+    expect(stripComments(raw)).not.toContain(CACHE_MODULE);
+  });
+
+  it("NO module in the closure imports next/cache or names a Next cache API", () => {
+    // THE PROPERTY. The failure it forbids: a perf PR wraps a composite read in
+    // `unstable_cache([…, id])` somewhere inside this graph. The effective key
+    // on the v2 route is id-ONLY, so the entry is shared between lanes — the
+    // token lane fills it with an unpublished payload and the next ANONYMOUS
+    // reader of that id is served the unpublished factsheet for the full TTL.
+    // Every other gate in this file stays green through that edit: they read
+    // page.tsx and the builder's own bytes, and neither changed.
+    expect(cacheReachOffenders(closure)).toEqual([]);
   });
 });
