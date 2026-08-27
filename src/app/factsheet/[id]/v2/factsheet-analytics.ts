@@ -12,6 +12,8 @@
  * non-blocking catch chain) so behavior is consistent across the platform.
  */
 
+import { isSharePath } from "@/lib/scrub-share-path";
+
 type PostHogModule = typeof import("posthog-js").default;
 
 export type FactsheetV2Event =
@@ -73,6 +75,29 @@ export function trackFactsheetEvent(
   props: FactsheetV2EventProps = {},
 ): void {
   if (typeof window === "undefined") return;
+  // ⛔ RECIPIENT-MODE SUPPRESSION (phase 164 / SHARE-01). `FactsheetView` is
+  // rendered by BOTH lanes — the owner/public id route and the tokenized
+  // recipient route — so without this gate a recipient's toggle clicks would
+  // send product-analytics events from a page whose URL is a live capability.
+  // PostHog's browser SDK attaches `$current_url` to every capture, so the
+  // token would ride out on the first event.
+  //
+  // ⭐ PATH-DERIVED ON PURPOSE, not a prop. The route itself implies share
+  // mode (there is no `?share=1` on this lane to sniff — ruling D-01), and a
+  // `recipientShare` prop threaded down to this module would be one refactor
+  // away from being dropped at a single call site, silently. The pathname
+  // cannot drift from the route.
+  //
+  // ⚠️ AND IT IS THE ONLY MITIGATION HERE. The CSP's `connect-src` happens to
+  // omit the PostHog host at HEAD, so a capture would be blocked by the
+  // browser today — but that is an ACCIDENT of the current header, not a
+  // control (Pitfall 6): adding PostHog to the CSP is a routine, unrelated
+  // edit that would silently re-open this channel. Do not delete this gate on
+  // the strength of the CSP.
+  //
+  // Gating here rather than inside `init()` also means the PostHog bundle is
+  // never even imported on the share lane.
+  if (isSharePath(window.location.pathname)) return;
   void init()
     .then(posthog => {
       if (!posthog) return;

@@ -5,17 +5,17 @@ milestone_name: Backlog Burndown (Phases 158+)
 current_phase: 163
 current_phase_name: HARDEN — Fail safe, closed, and loud
 status: reviewing
-stopped_at: Completed 164-07-PLAN.md
-last_updated: "2026-08-27T22:45:19.411Z"
+stopped_at: Completed 164-05 and 164-07 (wave 2); 164-06 at its blocking-human checkpoint
+last_updated: "2026-08-27T22:54:04.757Z"
 last_activity: 2026-08-26
 last_activity_desc: Phase 163 wave 2 — SEC-01 measured password floor + SEC-03 audit law; all gates green; ledger corrections from verification
-state_head: 1955e2734b7cb6d5d689ad69ce995670b6e0b0ca
+state_head: 22a1cb708217a0e386a9fdcca5ae3d8639761b82
 progress:
   total_phases: 12
   completed_phases: 1
   total_plans: 60
   completed_plans: 53
-  percent: 8
+  percent: 9
 ---
 
 # Project State — Quantalyze
@@ -646,6 +646,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 | Phase 163 P04 | 33min | 3 tasks | 16 files |
 | Phase 163 P08 | 35min | 2 tasks | 4 files |
 | Phase 164 P07 | 12min | 2 tasks | 2 files |
+| Phase 164 P05 | 32min | 3 tasks | 13 files |
 
 ## Accumulated Context
 
@@ -822,6 +823,8 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - [Phase 161]: 163-08: vi.fn attaches its own handler to a returned promise, suppressing unhandledRejection — a spy is not a neutral observer of promise handling; use a plain closure when the oracle IS the rejection
 - [Phase 163]: 164-07: cache-reach guard extends phase-148-owner-lane-cache-isolation.test.ts over the builder's whole 38-module transitive closure; floor >= 30 cites an INDEPENDENT pre-edit measurement, never the walker's own output
 - [Phase 163]: 164-07: RED planted at DEPTH 3 (src/lib/utils.ts), not on the entry — all 12 pre-existing assertions in the same file stayed GREEN under that mutation, which is the measured asymmetry justifying the closure pin
+- [Phase 163]: 164-05: Plausible mitigated by conditional script omission, NOT data-exclude — the assumed mechanism is pageview-only AND removed from Plausible's current script (both measured 2026-08-28)
+- [Phase 163]: 164-05: per-route no-referrer is justified by the SAME-ORIGIN gap; the CONTEXT/PLAN claim that strict-origin-when-cross-origin 'never strips the path' is FALSE (cross-origin it sends origin only) and is recorded as false in code + test
 
 ### Decisions (execution-time, Phase 140.2)
 
@@ -1524,8 +1527,8 @@ Load-bearing sequencing (real dependencies, do not reorder):
 
 ## Session
 
-**Last Date:** 2026-08-27T22:29:04.555Z
-**Stopped At:** Completed 164-07-PLAN.md
+**Last Date:** 2026-08-27T22:54:04.253Z
+**Stopped At:** Completed 164-05 and 164-07 (wave 2); 164-06 at its blocking-human checkpoint
 **Last Date:** 2026-08-25T22:26:01.687Z
 **Stopped At:** Completed 162-03-PLAN.md
 **Last Date:** 2026-08-25T22:28:04.096Z
@@ -1582,3 +1585,4 @@ pre-merge `e0493913`. Fix is PR #669. Supabase migrations and the Vercel fronten
 - 161-07 D-161-07-A: the wizard COMPOSITE arm still renders GATE_SERIES_PROVENANCE_UNVERIFIED for sampled_gapped — a false sentence on a reachable path (the 142.2 FIX-2 downgrade). Fix = route that arm through the examined/unexamined split; requires re-cutting one 142.2 oracle.
 - 161.1: OQ-3 still OPEN — closes only when a founder executes the runbook's step 1 and records whether the database-level or role-level app.* GUC form verified. Also: deribit has ZERO live refresh coverage until plan 04's stitch_composite arm lands (TODOS 0.3)
 - 161.1-04 (wave 4, 2026-08-25): the composite arm LANDED DORMANT — `enqueue_ledger_composite_refresh` (migration `20260825140000`), 8-arm SQL gate, static gates 10-11, and the D-15 non-destructive guard EXTENDED to `run_stitch_composite_job._stamp_failed` (a second destructive stamp plan 02's guard never covered; found by measurement, fixed under Rule 2). ⛔ **Task 3 is a BLOCKING founder LIVE op and is NOT done:** one manual `stitch_composite` enqueue for the one live PROD composite must be observed to completion (`last_return_date` advancing in the staleness view, NOT a job going green) before the composite schedule is documented as activatable. The runbook's composite section is deliberately UNWRITTEN until then. TODOS 0.3 stays OPEN — half of its close condition (the arm exists) is met, half (a composite observed to refresh) is not.
+- 164-05 MEASURED: the phase-148 guard does NOT catch a second unstable_cache call site outside factsheet/[id]/v2/page.tsx (12/12 green under NEUTER-D). 164-07's closure guard does not close it either — the page imports the builder, not the reverse. Closed for the token route by src/app/factsheet-share/[token]/page.no-cache-reach.test.ts; the general repo-wide call-site pin is still unowned.

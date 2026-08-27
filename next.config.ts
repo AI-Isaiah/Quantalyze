@@ -99,6 +99,35 @@ const nextConfig: NextConfig = {
         ],
       },
       {
+        // Phase 164 / SHARE-01 — the recipient share lane carries a capability
+        // token in its PATH (ruling D-01), so this route gets `no-referrer`
+        // while the global `strict-origin-when-cross-origin` above stays
+        // untouched for everything else. Route-scoped headers are merged with
+        // the `/(.*)` block and the more specific source wins on a key
+        // collision, so this overrides Referrer-Policy here and nothing else.
+        //
+        // WHAT THE GLOBAL POLICY ACTUALLY LEAVES OPEN — stated precisely,
+        // because an earlier draft of this rationale had the mechanism wrong.
+        // Under `strict-origin-when-cross-origin` a CROSS-origin request sends
+        // only the ORIGIN: neither path nor query survives, so the global
+        // policy is already sufficient there. (The earlier claim that it
+        // "strips query strings but never the path" is FALSE and must not be
+        // repeated — it would have justified this header for a reason that
+        // does not exist.) The real gap is SAME-ORIGIN navigation, where the
+        // policy sends the FULL URL as `Referer` — path, token and all. Any
+        // same-origin subresource or link click from the recipient page would
+        // put the live token in a request header, and in this app's own server
+        // logs. `no-referrer` closes that, and costs nothing: there is no
+        // referrer-based analytics or attribution on this lane.
+        //
+        // ⚠️ It does NOT close third-party subresources loaded BY the page —
+        // those are cross-origin and were already origin-only. The remaining
+        // path-token channels are handled elsewhere: Plausible in
+        // `src/app/PlausibleScript.tsx`, Sentry in `src/instrumentation.ts`.
+        source: "/factsheet-share/:path*",
+        headers: [{ key: "Referrer-Policy", value: "no-referrer" }],
+      },
+      {
         // Audit-2026-05-07 P334: tightened from s-maxage=60 to s-maxage=10
         // and added `Vary: Cookie` so per-session demo state (sb-* auth
         // cookies that gate the founder-view route) is keyed correctly
