@@ -38,7 +38,9 @@
 -- a THROWAWAY local PostgreSQL 16 replica of this schema (results recorded in
 -- the fix commit message); re-run the same neuters against TEST once step 2
 -- lands. Arms whose neuter must be re-observed there: TENANT 3, TENANT 5,
--- ANON 1b, SERVICE-ROLE 2, SANITIZE 1, SHAPE 3.
+-- ANON 1b, SERVICE-ROLE 2, SANITIZE 1, SHAPE 3, SHAPE 5, TRIGGER 1, TRIGGER 2,
+-- SERVICE-ROLE 0-acl, and the three `-grant` message arms (ANON 1c-grant,
+-- ANON 1d-grant, SERVICE-ROLE 1-grant).
 --
 -- WHAT THIS FILE ASSERTS (content-by-field; a 200 / a row count proves nothing)
 -- ---------------------------------------------------------------------------
@@ -84,6 +86,16 @@
 --     leaves created_by / created_at untouched.
 --   * MONOTONICITY — generation never decreases across the full
 --     mint -> reuse -> revoke -> revoke -> re-mint -> revoke cycle.
+--   * TRIGGER — and, separately, that the monotonic invariant holds for RAW
+--     TABLE WRITES and not merely for the two RPCs. ⛔ The MONOTONICITY arms
+--     drive the cycle THROUGH the RPCs, which are the only writers that behave
+--     monotonically by construction, so they stay GREEN with no trigger
+--     installed at all. The owner holds a column-unrestricted UPDATE grant and
+--     the FOR ALL policy admits their own row, so a raw PATCH rewinding
+--     `generation` and clearing `revoked_at` was ACCEPTED (MEASURED,
+--     PostgreSQL 16) — resurrecting every link they had revoked. TRIGGER 1
+--     pins that a revocation must ADVANCE the counter; TRIGGER 2 pins that the
+--     counter can never be rewound; SHAPE 5 pins the trigger's timing/level.
 --   * NO HARD DELETE — `authenticated` has no DELETE grant, so a client cannot
 --     discard the counter and resurrect already-revoked tokens.
 --
@@ -170,6 +182,7 @@ DECLARE
   b_revoked    TIMESTAMPTZ;
   gen_pre_san  INTEGER;
   san_ok       BOOLEAN;
+  gen_probe    INTEGER;
   i            INTEGER;
 BEGIN
   -- ----- SEED (seeding/service-role context — bypasses RLS) ---------------
@@ -327,6 +340,31 @@ BEGIN
   END IF;
   IF v_revoke_s !~* 'created_by\s*=\s*auth\.uid\s*\(\s*\)' THEN
     RAISE EXCEPTION 'TEST FAILED (SHAPE 4c): revoke_strategy_share lost the `created_by = auth.uid()` predicate on its UPDATE — for any BYPASSRLS caller the statement would revoke ANY tenant''s share and report success';
+  END IF;
+
+  -- ======================================================================
+  -- SHAPE 5: the monotonicity trigger exists, BEFORE UPDATE, FOR EACH ROW
+  -- ======================================================================
+  -- Structural companion to the behavioural TRIGGER 1 / TRIGGER 2 arms below.
+  -- It is not redundant with them: those two also go RED if the trigger is
+  -- merely DROPPED, but they cannot distinguish a correct trigger from one
+  -- re-created with the wrong timing or level, and both miscreations silently
+  -- stop guarding:
+  --   * AFTER instead of BEFORE — it still raises, but any AFTER trigger
+  --     ordered ahead of it has already observed the rewound row;
+  --   * STATEMENT instead of ROW — OLD/NEW do not exist, so the body becomes a
+  --     runtime error on EVERY update rather than a guard on the bad ones.
+  -- tgtype bit 0 = ROW, bit 1 = BEFORE, bit 4 = UPDATE.
+  SELECT count(*) INTO row_cnt
+    FROM pg_trigger t
+   WHERE t.tgrelid = 'public.strategy_shares'::regclass
+     AND NOT t.tgisinternal
+     AND t.tgname = 'strategy_shares_monotonic_generation'
+     AND (t.tgtype & 1) = 1
+     AND (t.tgtype & 2) = 2
+     AND (t.tgtype & 16) = 16;
+  IF row_cnt <> 1 THEN
+    RAISE EXCEPTION 'TEST FAILED (SHAPE 5): expected exactly 1 BEFORE UPDATE FOR EACH ROW trigger named strategy_shares_monotonic_generation on strategy_shares, found %. Without it the owner''s column-unrestricted UPDATE grant plus the FOR ALL policy let a raw PATCH rewind the counter — MEASURED (PostgreSQL 16): generation went 2 -> 1 and revoked_at was cleared in ONE request, resurrecting every link the owner had revoked. ⛔ A trigger is also the ONLY control on this table that binds service_role, which BYPASSRLS exempts from every policy here.', row_cnt;
   END IF;
 
   -- ======================================================================
@@ -548,6 +586,49 @@ BEGIN
   END IF;
 
   -- ======================================================================
+  -- TRIGGER 1: a revocation that does NOT advance the counter is refused
+  -- ======================================================================
+  -- ⛔ Run against a LIVE row — this is the only window in the file where
+  -- strat_a is live (reactivated above, revoked again by MONOTONIC 1a below),
+  -- and the rule under test only fires on the revoked_at NULL -> NOT NULL
+  -- transition. Moving this block loses the arm silently.
+  --
+  -- WHY THE RULE EXISTS. Stamping revoked_at alone LOOKS fail-safe: the row
+  -- drops out of the recipient lane's active scan and the link 410s. But the
+  -- counter never moved, so the next create_strategy_share() clears the
+  -- tombstone at the SAME generation and the "revoked" token resolves again.
+  -- Making every revocation advance the counter is what lets reactivation stay
+  -- unconstrained — it guarantees no revoked row can ever be returned to a
+  -- generation that was live before it.
+  raised := FALSE;
+  BEGIN
+    UPDATE strategy_shares SET revoked_at = now() WHERE strategy_id = strat_a;
+  EXCEPTION WHEN OTHERS THEN
+    raised := TRUE; err_msg := SQLERRM;
+  END;
+  IF NOT raised THEN
+    RESET ROLE;
+    RAISE EXCEPTION 'TEST FAILED (TRIGGER 1a): the owner stamped revoked_at by raw UPDATE without advancing generation. That revocation is COSMETIC — the link only disappears from the active scan, and the next create_strategy_share() clears the tombstone at the same generation and brings the supposedly-revoked token back to life. The strategy_shares_monotonic_generation trigger is missing its revocation-must-advance rule.';
+  END IF;
+  -- Message-pinned, not just `raised`: an ordinary owner holds UPDATE on this
+  -- table and this row passes both halves of WITH CHECK, so with the rule gone
+  -- the statement SUCCEEDS rather than failing differently — but if some future
+  -- change makes it fail for an unrelated reason (a lost grant, a policy
+  -- rewrite) a bare `raised` would report the guard as present when it is not.
+  IF err_msg NOT LIKE '%revocation must ADVANCE generation%' THEN
+    RESET ROLE;
+    RAISE EXCEPTION 'TEST FAILED (TRIGGER 1b): the no-bump revocation was rejected by something OTHER than the monotonicity trigger (got: %) — this arm proves nothing about the trigger unless the rejection came FROM it', err_msg;
+  END IF;
+
+  -- A rejection that still wrote is a successful attack wearing an error.
+  SELECT generation, revoked_at INTO gen_probe, now_revoked
+    FROM strategy_shares WHERE strategy_id = strat_a;
+  IF gen_probe <> gen_remint OR now_revoked IS NOT NULL THEN
+    RESET ROLE;
+    RAISE EXCEPTION 'TEST FAILED (TRIGGER 1c): the rejected no-bump revocation still mutated the row (generation % -> %, revoked_at now %) — a BEFORE trigger that raises must leave the tuple untouched', gen_remint, gen_probe, now_revoked;
+  END IF;
+
+  -- ======================================================================
   -- MONOTONICITY: generation never decreases across the whole cycle
   -- ======================================================================
   SELECT public.revoke_strategy_share(strat_a) INTO affected;
@@ -571,6 +652,55 @@ BEGIN
   IF gen_seen[array_length(gen_seen, 1)] <= gen_seen[1] THEN
     RESET ROLE;
     RAISE EXCEPTION 'TEST FAILED (MONOTONIC 1c): the counter ended at % having started at % — two revokes must have advanced it. A never-advancing counter would make the monotonicity loop above vacuously true. Sequence: %', gen_seen[array_length(gen_seen, 1)], gen_seen[1], gen_seen;
+  END IF;
+
+  -- ======================================================================
+  -- TRIGGER 2: THE OWNER SELF-REWIND — a raw PATCH cannot resurrect links
+  -- ======================================================================
+  -- ⛔ MONOTONIC 1 ABOVE DOES NOT COVER THIS, and reading it as if it did is the
+  -- mistake this arm exists to prevent. Every step of that cycle goes through
+  -- the two RPCs, which are the only writers that BEHAVE monotonically — so
+  -- MONOTONIC 1 stays GREEN with no trigger installed at all. It measures the
+  -- RPCs; this measures the TABLE.
+  --
+  -- The attack needs no privilege the product does not already hand every user:
+  --   * STEP 2 grants `authenticated` a column-UNRESTRICTED UPDATE (it must —
+  --     revoke_strategy_share is SECURITY INVOKER and writes generation AS THE
+  --     CALLER, so revoking UPDATE(generation) would disarm the RPC);
+  --   * strategy_shares_owner is FOR ALL, and an owner's own-row UPDATE
+  --     satisfies USING and WITH CHECK alike while created_by is unchanged.
+  -- MEASURED on a PostgreSQL 16 replica of this schema before the fix: a single
+  -- `PATCH /rest/v1/strategy_shares?strategy_id=eq.<own>` with
+  -- `{"generation": 1, "revoked_at": null}` moved generation 2 -> 1 and cleared
+  -- the tombstone. Every recipient still holding a revoked link regained
+  -- anonymous access to that owner's UNPUBLISHED factsheet, and the Art. 17
+  -- erasure arm in companion migration 20260827130000 became reversible by the
+  -- very user it had just been applied to.
+  --
+  -- ⚠️ The row is REVOKED at this point (MONOTONIC 1a), which is what makes the
+  -- probe faithful: it is the state a revoked-link resurrection starts from.
+  raised := FALSE;
+  BEGIN
+    UPDATE strategy_shares
+       SET generation = 1, revoked_at = NULL
+     WHERE strategy_id = strat_a;
+  EXCEPTION WHEN OTHERS THEN
+    raised := TRUE; err_msg := SQLERRM;
+  END;
+  IF NOT raised THEN
+    RESET ROLE;
+    RAISE EXCEPTION 'TEST FAILED (TRIGGER 2a): the owner rewound generation to 1 and cleared revoked_at with a raw UPDATE. Every share token they ever REVOKED at generation 1 is live again as anonymous access to their unpublished factsheet. Neither the grant layer nor RLS can stop this — the owner legitimately holds UPDATE and the FOR ALL policy admits their own row — so the strategy_shares_monotonic_generation trigger (migration 20260827120000 STEP 1b) is the ONLY control, and it is missing.';
+  END IF;
+  IF err_msg NOT LIKE '%generation is monotonic%' THEN
+    RESET ROLE;
+    RAISE EXCEPTION 'TEST FAILED (TRIGGER 2b): the self-rewind was rejected by something OTHER than the monotonicity trigger (got: %). The owner holds UPDATE on this table and passes the policy, so a rejection from any other layer means the trigger is unproven and this arm is measuring an accident.', err_msg;
+  END IF;
+
+  SELECT generation, revoked_at INTO gen_probe, now_revoked
+    FROM strategy_shares WHERE strategy_id = strat_a;
+  IF gen_probe <> gen_final OR now_revoked IS NULL THEN
+    RESET ROLE;
+    RAISE EXCEPTION 'TEST FAILED (TRIGGER 2c): the rejected self-rewind still mutated the row (generation % -> %, revoked_at now %) — a partial write here is the full attack, because clearing the tombstone alone already re-publishes the link', gen_final, gen_probe, now_revoked;
   END IF;
 
   RESET ROLE;
@@ -977,7 +1107,7 @@ BEGIN
     RAISE EXCEPTION 'TEST FAILED (SANITIZE 1f): erasing tenant A also revoked tenant B''s share (revoked_at=%, generation % -> %) — the `created_by = p_user_id` predicate is missing from the sanitize arm, so ONE user''s Art. 17 request kills EVERY user''s share links', b_revoked, gen_b, gen_b_after;
   END IF;
 
-  RAISE NOTICE 'test_strategy_shares_rls: ALL 62 ARMS EXECUTED (SHAPE 1, SHAPE 2a, SHAPE 2b, SHAPE 3, SHAPE 4a, SHAPE 4b, SHAPE 4c, OWNER 1a, OWNER 1b, OWNER 2a, OWNER 2b, OWNER 2c, TENANT 1a, TENANT 1b, TENANT 2a, TENANT 2b, TENANT 3a, TENANT 3b, NO-DELETE 1, REVOKE 1a, REVOKE 1b, REVOKE 1c, REVOKE 2a, REVOKE 2b, REACTIVATE 1a, REACTIVATE 1b, REACTIVATE 1c, REACTIVATE 1d, REACTIVATE 1e, REACTIVATE 1f, MONOTONIC 1a, MONOTONIC 1b, MONOTONIC 1c, TENANT 4a, TENANT 4b, TENANT 4c, TENANT 5a, TENANT 5b, TENANT 5c, TENANT 5d, TENANT 5e, TENANT 5f, TENANT 5g, ANON 1a, ANON 1b, ANON 1b-grant, ANON 1c, ANON 1d, ANON 2, ANON 2b, SERVICE-ROLE 1, SERVICE-ROLE 2a, SERVICE-ROLE 2b, SERVICE-ROLE 2c, SERVICE-ROLE 2d, SERVICE-ROLE 2e, SANITIZE 1a, SANITIZE 1b, SANITIZE 1c, SANITIZE 1d, SANITIZE 1e, SANITIZE 1f). Observed generation sequence: %', gen_seen;
+  RAISE NOTICE 'test_strategy_shares_rls: ALL 69 ARMS EXECUTED (SHAPE 1, SHAPE 2a, SHAPE 2b, SHAPE 3, SHAPE 4a, SHAPE 4b, SHAPE 4c, SHAPE 5, OWNER 1a, OWNER 1b, OWNER 2a, OWNER 2b, OWNER 2c, TENANT 1a, TENANT 1b, TENANT 2a, TENANT 2b, TENANT 3a, TENANT 3b, NO-DELETE 1, REVOKE 1a, REVOKE 1b, REVOKE 1c, REVOKE 2a, REVOKE 2b, REACTIVATE 1a, REACTIVATE 1b, REACTIVATE 1c, REACTIVATE 1d, REACTIVATE 1e, REACTIVATE 1f, TRIGGER 1a, TRIGGER 1b, TRIGGER 1c, MONOTONIC 1a, MONOTONIC 1b, MONOTONIC 1c, TRIGGER 2a, TRIGGER 2b, TRIGGER 2c, TENANT 4a, TENANT 4b, TENANT 4c, TENANT 5a, TENANT 5b, TENANT 5c, TENANT 5d, TENANT 5e, TENANT 5f, TENANT 5g, ANON 1a, ANON 1b, ANON 1b-grant, ANON 1c, ANON 1d, ANON 2, ANON 2b, SERVICE-ROLE 1, SERVICE-ROLE 2a, SERVICE-ROLE 2b, SERVICE-ROLE 2c, SERVICE-ROLE 2d, SERVICE-ROLE 2e, SANITIZE 1a, SANITIZE 1b, SANITIZE 1c, SANITIZE 1d, SANITIZE 1e, SANITIZE 1f). Observed generation sequence: %', gen_seen;
 END
 $$;
 

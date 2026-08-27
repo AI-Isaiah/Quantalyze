@@ -134,8 +134,14 @@ COMMENT ON TABLE strategy_shares IS
   '(3) row with revoked_at NOT NULL -> revoked, and generation has ALREADY '
   'been advanced past every link ever handed out, so all of them are dead '
   '(SHARE-03). Re-sharing clears revoked_at WITHOUT resetting generation, so '
-  'the new link differs from every old one. generation is monotonic by '
-  'construction: only revoke_strategy_share() writes it, and only as +1.';
+  'the new link differs from every old one. ⛔ generation is monotonic by '
+  'ENFORCEMENT, not by construction: the intended writers advance it by +1 '
+  '(revoke_strategy_share, and the GDPR Art. 17 arm in migration '
+  '20260827130000), but the owner''s UPDATE grant is column-unrestricted and '
+  'the FOR ALL policy admits their own-row writes, so a raw PATCH could rewind '
+  'it. The BEFORE UPDATE trigger strategy_shares_monotonic_generation (STEP 1b) '
+  'is what actually forbids that — and, being a trigger, it binds service_role '
+  'too.';
 
 COMMENT ON COLUMN strategy_shares.generation IS
   'Monotonic share generation. Feeds the Node-side HMAC as the second input; '
@@ -190,6 +196,83 @@ CREATE POLICY strategy_shares_owner ON strategy_shares
 CREATE INDEX strategy_shares_active_idx
   ON strategy_shares (strategy_id, generation)
   WHERE revoked_at IS NULL;
+
+-- --------------------------------------------------------------------------
+-- STEP 1b: enforce the monotonic-counter invariant IN THE DATABASE
+-- --------------------------------------------------------------------------
+-- ⛔ THE OWNER SELF-REWIND. Everything above assumes `generation` only ever
+-- moves through revoke_strategy_share(). It does not, and the gap was MEASURED
+-- (PostgreSQL 16, throwaway replica of this schema, 2026-08-27) rather than
+-- reasoned about:
+--   * the STEP 2 grant is column-UNRESTRICTED (`GRANT SELECT, INSERT, UPDATE`);
+--   * `strategy_shares_owner` is FOR ALL, and an owner's UPDATE of their OWN
+--     row satisfies USING *and* WITH CHECK whenever created_by is unchanged.
+-- So a plain `PATCH /rest/v1/strategy_shares?strategy_id=eq.<own>` carrying
+-- `{"generation": 1, "revoked_at": null}` was accepted: generation went 2 -> 1
+-- and the tombstone was cleared, in one request, from an ordinary user token.
+-- Every recipient still holding a previously-revoked link regained anonymous
+-- access to that owner's UNPUBLISHED factsheet. It also made the table COMMENT
+-- above false and defeated the Art. 17 arm in companion migration
+-- 20260827130000, whose whole value is that revocation is IRREVERSIBLE.
+--
+-- ⚠️ COLUMN-LEVEL GRANTS ARE NOT THE FIX. Revoking UPDATE(generation) from
+-- `authenticated` would also disarm revoke_strategy_share(), which is SECURITY
+-- INVOKER and writes `generation` AS THE CALLER. The privilege must stay; what
+-- must be constrained is the DIRECTION it may move.
+--
+-- ⭐ WHY A TRIGGER AND NOT A CHECK CONSTRAINT: the invariant spans OLD and NEW,
+-- which a CHECK cannot see. And ⛔ **a trigger is NOT bypassed by BYPASSRLS** —
+-- unlike every RLS policy on this table, this fires for `service_role` too, so
+-- it is the only control here that also covers the admin transport the
+-- recipient lane already uses (STEP 2).
+--
+-- The two rules together are what make the model sound:
+--   (1) generation NEVER decreases. A rewind re-issues a dead token.
+--   (2) a revocation (revoked_at NULL -> NOT NULL) MUST advance generation.
+-- (2) is what lets reactivation stay unconstrained: because every revoked row
+-- provably got there by advancing, clearing `revoked_at` without touching the
+-- counter — exactly what create_strategy_share() does — can never return the
+-- row to a generation that was live before a revoke. Without (2) an owner could
+-- raw-stamp revoked_at at generation G (making the link merely go dark), then
+-- re-mint and bring that same generation-G token back to life.
+CREATE OR REPLACE FUNCTION public.strategy_shares_enforce_monotonic_generation()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SECURITY INVOKER
+SET search_path = public, pg_temp
+AS $$
+BEGIN
+  IF NEW.generation < OLD.generation THEN
+    RAISE EXCEPTION 'strategy_shares: generation is monotonic — refusing to rewind it from % to % on strategy %. A rewind re-issues every share token minted at the lower generation, including ones that were explicitly REVOKED, as anonymous access to an unpublished factsheet.',
+      OLD.generation, NEW.generation, OLD.strategy_id
+      USING ERRCODE = 'check_violation';
+  END IF;
+
+  IF OLD.revoked_at IS NULL
+     AND NEW.revoked_at IS NOT NULL
+     AND NEW.generation <= OLD.generation THEN
+    RAISE EXCEPTION 'strategy_shares: a revocation must ADVANCE generation — refusing to stamp revoked_at on strategy % while generation stays at %. A tombstone without a bump is COSMETIC: the link merely disappears from the active scan, and the next create_strategy_share() clears the tombstone at the SAME generation and brings the supposedly-revoked token back to life.',
+      OLD.strategy_id, OLD.generation
+      USING ERRCODE = 'check_violation';
+  END IF;
+
+  RETURN NEW;
+END;
+$$;
+
+COMMENT ON FUNCTION public.strategy_shares_enforce_monotonic_generation() IS
+  'Phase 164 / SHARE-03. BEFORE UPDATE guard making the generation counter '
+  'monotonic AND making every revocation advance it. Closes the owner '
+  'self-rewind: the FOR ALL policy plus a column-unrestricted UPDATE grant let '
+  'an owner PATCH their own row back to a revoked generation and clear '
+  'revoked_at, resurrecting every link they had revoked (MEASURED). ⛔ Triggers '
+  'are NOT bypassed by BYPASSRLS, so this covers service_role as well — the '
+  'only control on this table that does.';
+
+CREATE TRIGGER strategy_shares_monotonic_generation
+  BEFORE UPDATE ON strategy_shares
+  FOR EACH ROW
+  EXECUTE FUNCTION public.strategy_shares_enforce_monotonic_generation();
 
 -- --------------------------------------------------------------------------
 -- STEP 2: table grants — POSITIVE-ONLY (anon dead, DELETE and TRUNCATE closed)
@@ -488,6 +571,7 @@ DECLARE
   v_create_s TEXT;
   v_revoke_s TEXT;
   v_secdef   BOOLEAN;
+  v_trg      INTEGER;
 BEGIN
   SELECT pg_get_functiondef(p.oid) INTO v_create
     FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
@@ -572,7 +656,26 @@ BEGIN
     RAISE EXCEPTION 'Migration 164-02 verification failed: a strategy-share RPC is missing SET search_path = public, pg_temp';
   END IF;
 
-  RAISE NOTICE 'Migration 164-02: share RPC body-shape verified (atomic bump + live-only predicate + no delete + no generation rewind + auth.uid() fail-loud + revoke ownership predicate + INVOKER + search_path).';
+  -- (v) the STEP 1b monotonicity trigger is installed, and installed with the
+  -- right shape. BEFORE (not AFTER — an AFTER trigger cannot veto the write by
+  -- returning NULL and would have to rely on raising, which it still can, but
+  -- the row would already have been written for any AFTER trigger ordered
+  -- before it) and FOR EACH ROW (a STATEMENT-level trigger has no OLD/NEW at
+  -- all, so the comparison would be a runtime error rather than a guard).
+  -- tgtype bit 0 = ROW, bit 1 = BEFORE, bit 4 = UPDATE.
+  SELECT count(*) INTO v_trg
+    FROM pg_trigger t
+   WHERE t.tgrelid = 'public.strategy_shares'::regclass
+     AND NOT t.tgisinternal
+     AND t.tgname = 'strategy_shares_monotonic_generation'
+     AND (t.tgtype & 1) = 1
+     AND (t.tgtype & 2) = 2
+     AND (t.tgtype & 16) = 16;
+  IF v_trg <> 1 THEN
+    RAISE EXCEPTION 'Migration 164-02 verification failed: the BEFORE UPDATE FOR EACH ROW trigger strategy_shares_monotonic_generation is absent or misshapen (matching triggers: %). Without it an owner can PATCH their own row back to a revoked generation and clear revoked_at, resurrecting every link they revoked — MEASURED, not hypothetical.', v_trg;
+  END IF;
+
+  RAISE NOTICE 'Migration 164-02: share RPC body-shape verified (atomic bump + live-only predicate + no delete + no generation rewind + auth.uid() fail-loud + revoke ownership predicate + INVOKER + search_path + monotonicity trigger).';
 END $$;
 
 -- --------------------------------------------------------------------------
