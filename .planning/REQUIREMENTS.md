@@ -25,7 +25,7 @@ verified-stale items are excluded by construction.
 ### SHARE — SHARELINK-01 revocable share links (founder-decided model)
 
 - [ ] **SHARE-01** (L27): "Copy Link" always yields a URL its recipient can view — a revocable per-strategy share token carried in the URL, mint-or-reuse on copy; the bare `/factsheet/<id>` URL stays owner-only and the id stays a non-secret. (URL shape — `?s=<token>` on the id route vs a separate `/factsheet-share/[token]` route — is the SHARE phase plan's decision; research disagrees and the choice must be argued, not defaulted: A-D1.)
-- [ ] **SHARE-02** (L27): The token lane never contaminates the id-keyed public cache — after any token-lane render, an anonymous request for `/factsheet/<id>` of an unpublished strategy STILL 404s (adversarial acceptance, same class as OWN-02).
+- [x] **SHARE-02** (L27): The token lane never contaminates the id-keyed public cache — after any token-lane render, an anonymous request for `/factsheet/<id>` of an unpublished strategy STILL 404s (adversarial acceptance, same class as OWN-02).
 - [ ] **SHARE-03** (L27): A revoke control regenerates the token and kills previously-copied links.
 - [ ] **SHARE-04** (L27): The share affordance is honest as a CLASS — no "Link copied!" success for a link that cannot work, consistent across `FactsheetView` and the strategies page, and covering the two research-found siblings: a token-link RECIPIENT must not see a Copy-Link control that rebuilds the URL without the token (`FactsheetView.tsx:1312` strips it today), and `OwnerUnpublishedNotice`'s "anyone else sees a 404" sentence must be corrected in the same phase (it becomes false the moment tokens ship).
 
@@ -59,6 +59,7 @@ verified-stale items are excluded by construction.
   failure `FreshnessChip` warns about (it would delete the sync copy everywhere) needs a
   published row with a FRESH series to prove absent. Newest series end across PROD is 1 day
   old, so such a row exists but is not on this cohort.
+
 - [x] **HONEST-02** (L1953): The factsheet freshness badge reflects series recency — a strategy whose return series ended 89 days ago cannot read FRESH; investigate (flat account vs derive gap) before fixing.
 - [x] **HONEST-03** (L1959): Example strategies don't advertise stale "Synced Nd ago" badges on discovery.
 - [x] **HONEST-04** (L1991): `buildEquityCurveSeries` serves real per-strategy equity curves now that `returns_series` is selected — the hard-coded `equityCurve: null` and its false comment go.
@@ -77,6 +78,7 @@ verified-stale items are excluded by construction.
   ⚠️ AMENDED 2026-08-26. The original wording opened with "`checkStuckNotifications` distinguishes 'nothing stuck' from 'could not tell'". That clause is closed BY DELETION, not by implementation: the phase did rewrite the function to a discriminated union so `0` would stop meaning both — and review WR-11 then found the function had ZERO production callers and never had any. It originated in a v1.0.0 diagnostic spike that was never wired. The whole module is gone (`src/lib/observability.ts`, 68 lines, its test, its byte-gate fixture, and a `knip.json` entry-point declaration that existed solely to silence the dead-code detector on it — three separate guards protecting code nobody called).
   ⭐ The reason this is a closure and not a regression: an uncalled monitor is not observability. It reads as coverage while providing none, which is the same defect the requirement's own word "honesty" is about. Wiring a caller would have manufactured a monitor no one asked for or consumed.
   The surviving clauses are MET and strengthened — review WR-02 found the fix had closed one of four blind arms, and the three numerator arms (sentry fetch threw, non-ok response, missing credentials) now return 503 like the denominator arms already did.
+
 - [~] **OPS-08** (L1562): The 10-param `_enqueue_compute_job_internal` no longer uses `INTO STRICT` on its lost-race branches (parity with the deliberately de-STRICT-ed 7-param overload).
   ✅ MET — MEASURED ON PROD 2026-08-26 after the merge: the 10-param body carries **0**
   `INTO STRICT` lost-race re-reads, raises `serialization_failure`, and holds the OPS-08 marker
@@ -88,6 +90,7 @@ verified-stale items are excluded by construction.
   would have been causally backwards. ⛔ Verified consequence: the gate's
   `SKIP (Part 3)` marker does not match CI's anti-SKIP net, so the lane stays green and NO CI
   signal will ever redden to report the unapplied state — only prose tracks it. See DRIFT-01.
+
 - [x] **OPS-09** (L1561): The resync draft pre-check is deterministic (`ORDER BY created_at DESC` + bounded window).
 - [x] **OPS-10** (L1558): The retry loop cancels abandoned response bodies (`body.cancel()`) so undici stops buffering until the attempt signal fires.
 - [x] **OPS-11** (L1531): The `MultiKeyConnectStep` order-sensitive flake is root-caused (unrestored `vi.stubGlobal`/`vi.mock` class) and fixed, not retried-away.
@@ -179,7 +182,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | RANK-08 | Phase 159 | Complete |
 | RANK-09 | Phase 159 | Complete |
 | SHARE-01 | Phase 164 | Pending |
-| SHARE-02 | Phase 164 | Pending |
+| SHARE-02 | Phase 164 | Complete |
 | SHARE-03 | Phase 164 | Pending |
 | SHARE-04 | Phase 164 | Pending |
 | WIZERR-01 | Phase 161 | Complete |

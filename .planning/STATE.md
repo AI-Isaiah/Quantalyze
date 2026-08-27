@@ -5,16 +5,16 @@ milestone_name: Backlog Burndown (Phases 158+)
 current_phase: 163
 current_phase_name: HARDEN — Fail safe, closed, and loud
 status: reviewing
-stopped_at: Phase 163 COMPLETE — 9/9 plans merged (both waves); verification gaps_found 12/13, OPS-08 code-complete but UNAPPLIED
-last_updated: "2026-08-26T00:00:00.000Z"
+stopped_at: Completed 164-07-PLAN.md
+last_updated: "2026-08-27T22:29:05.058Z"
 last_activity: 2026-08-26
 last_activity_desc: Phase 163 wave 2 — SEC-01 measured password floor + SEC-03 audit law; all gates green; ledger corrections from verification
-state_head: 21c232837722e7d1582eef3452462c2eb1d52047
+state_head: 6b07bdbcb79a8d79a879e479f9499ea8e0dd6426
 progress:
   total_phases: 11
   completed_phases: 1
-  total_plans: 53
-  completed_plans: 43
+  total_plans: 60
+  completed_plans: 53
   percent: 9
 ---
 
@@ -645,6 +645,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 | Phase 163 P03 | 50m | 3 tasks | 98 files |
 | Phase 163 P04 | 33min | 3 tasks | 16 files |
 | Phase 163 P08 | 35min | 2 tasks | 4 files |
+| Phase 164 P07 | 12min | 2 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -818,6 +819,8 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - [Phase 161]: 163-08: the seam body cancel uses a full capability ladder, not res.body?.cancel().catch() — the sketch throws on a present body whose cancel is missing or not callable, measured RED
 - [Phase 161]: 163-08: doRemove does NOT clean the abort ref maps (plan deviation, measured) — the catch reads the reason a microtask later, so a synchronous delete reds the funnel with SERVICE_UNREACHABLE; validatePanel's finally already cleans both
 - [Phase 161]: 163-08: vi.fn attaches its own handler to a returned promise, suppressing unhandledRejection — a spy is not a neutral observer of promise handling; use a plain closure when the oracle IS the rejection
+- [Phase 163]: 164-07: cache-reach guard extends phase-148-owner-lane-cache-isolation.test.ts over the builder's whole 38-module transitive closure; floor >= 30 cites an INDEPENDENT pre-edit measurement, never the walker's own output
+- [Phase 163]: 164-07: RED planted at DEPTH 3 (src/lib/utils.ts), not on the entry — all 12 pre-existing assertions in the same file stayed GREEN under that mutation, which is the measured asymmetry justifying the closure pin
 
 ### Decisions (execution-time, Phase 140.2)
 
@@ -1520,8 +1523,8 @@ Load-bearing sequencing (real dependencies, do not reorder):
 
 ## Session
 
-**Last Date:** 2026-08-26T13:00:58.065Z
-**Stopped At:** Completed 163-01-PLAN.md
+**Last Date:** 2026-08-27T22:29:04.555Z
+**Stopped At:** Completed 164-07-PLAN.md
 **Last Date:** 2026-08-25T22:26:01.687Z
 **Stopped At:** Completed 162-03-PLAN.md
 **Last Date:** 2026-08-25T22:28:04.096Z
