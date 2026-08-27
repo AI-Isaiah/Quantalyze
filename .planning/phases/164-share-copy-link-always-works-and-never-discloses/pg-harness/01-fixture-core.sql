@@ -46,6 +46,19 @@ CREATE OR REPLACE FUNCTION auth.uid() RETURNS UUID
 GRANT EXECUTE ON FUNCTION auth.uid() TO anon, authenticated, service_role;
 GRANT SELECT ON strategies, profiles TO authenticated;
 
+-- ⭐ RLS ON `strategies` — the gap the harness could not see (migration-reviewer,
+-- 2026-08-28). The strategy_shares policy's CR-01 owner-coherence clause is
+-- `EXISTS (SELECT 1 FROM public.strategies …)`, and a sub-select inside a policy
+-- IS subject to the referenced table's own RLS. With RLS off on `strategies`,
+-- every harness run for this phase evaluated that clause UNGUARDED — i.e. the
+-- one production behaviour it exists to describe was never exercised here.
+-- The real policy is permissive for the owner, so enabling it must NOT break the
+-- mint lane; that is precisely the assertion this fixture now makes runnable.
+ALTER TABLE strategies ENABLE ROW LEVEL SECURITY;
+CREATE POLICY strategies_read ON strategies
+  FOR SELECT TO authenticated
+  USING (status = 'published' OR user_id = auth.uid());
+
 CREATE OR REPLACE FUNCTION public._assert_no_public_execute(p_function_signature text)
  RETURNS void LANGUAGE plpgsql AS $function$
 DECLARE v_oid OID; v_leaks INTEGER;

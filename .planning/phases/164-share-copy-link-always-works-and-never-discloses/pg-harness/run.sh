@@ -28,7 +28,19 @@ PGD=${PGD:-$(mktemp -d)/pg164}
 PORT=${PORT:-55432}
 psqlq() { psql -h 127.0.0.1 -p "$PORT" -U postgres -d postgres -v ON_ERROR_STOP=1 "$@"; }
 
-if ! pg_isready -h 127.0.0.1 -p "$PORT" -q 2>/dev/null; then
+# ⛔ NEVER REUSE A CLUSTER WE DID NOT CREATE. 01-fixture-core.sql opens with
+# DROP SCHEMA public CASCADE, so attaching to a port another agent is already
+# using DESTROYS their database underneath them. Measured 2026-08-28: a reviewer
+# lost an entire session this way and only noticed because sanitize_user
+# vanished from pg_proc after it had already called it. Fail loud instead.
+if pg_isready -h 127.0.0.1 -p "$PORT" -q 2>/dev/null; then
+  echo "ERROR: something is already listening on 127.0.0.1:$PORT." >&2
+  echo "This harness would DROP SCHEMA public CASCADE on it. Refusing." >&2
+  echo "Pick a free port and a private data dir:" >&2
+  echo "  PORT=\$((55000 + RANDOM % 900)) PGD=\$(mktemp -d)/pg $0" >&2
+  exit 2
+fi
+if true; then
   mkdir -p "$PGD"
   initdb -D "$PGD/data" -U postgres --auth=trust -E UTF8 >/dev/null
   # -k '' => TCP only. A unix socket under a scratch path blows the 103-byte limit.

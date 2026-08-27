@@ -1200,9 +1200,34 @@ this section exists. None of these is a task. Each is a decision with a name aga
   re-inserts it gets a fresh `gen_random_uuid()` nonce, so the old tokens stop working rather
   than come back. The residual is narrower and requires intent: an admin who **records the nonce
   before deleting** can restore the exact row and revive every previously-revoked link.
-  **Not closable in SQL** — `service_role` is the transport `createAdminClient()` uses, and any
-  actor able to read `SHARE_TOKEN_SECRET` can mint tokens directly without touching the table at
-  all. The in-database control would be theatre. **Accepted.**
+  ⛔ **CORRECTED 2026-08-28 — BOTH HALVES OF THIS WERE WRONG.** Two reviewers measured it.
+
+  (1) **It IS closable in SQL, in one line.** The trigger's INSERT branch forced `generation := 1`
+  but left `nonce` caller-suppliable, so `service_role` DELETE + re-INSERT with a recorded nonce
+  landed back on generation 1 — a byte-identical HMAC to a token that had been explicitly revoked.
+  `NEW.nonce := gen_random_uuid();` in that branch closes it, verified not to break the mint lane
+  (the RPC never names `nonce` and reads it back via `RETURNING`). Being fixed now.
+
+  (2) **My justification conflated two different credentials.** I argued that anyone holding
+  `service_role` could read `SHARE_TOKEN_SECRET` and mint directly anyway. `service_role` is a
+  DATABASE credential; `SHARE_TOKEN_SECRET` is a Vercel environment variable. A database-only
+  compromise, a pooler session, `pg_cron`, or an ordinary admin script holds one and not the other.
+  Closing the in-database form is real defence, not theatre.
+
+  ⚠️ **And the residual's blast radius was understated.** Measured by the RLS auditor: the restore
+  reverses a completed **GDPR Art. 17 erasure**, reconstructing the exact pre-erasure
+  `(nonce, generation, live)` triple — `gen 3 → sanitize_user → gen 4 revoked → DELETE + INSERT
+  (recorded nonce) → gen 1 → two lawful +1 bumps → gen 3 → un-revoke`. Two statements, loopable to
+  any N. Rule (6)'s +1 bound does not constrain it, because the DELETE resets the counter. The
+  subject cannot self-remedy: the same RPC sets `banned_until = 'infinity'` and purges their
+  sessions.
+
+  **What remains accepted after the fix:** an actor holding `service_role` can still DELETE the row
+  outright (killing links — the correct outcome for an erasure) and can mint fresh capabilities.
+  What it can no longer do is resurrect a *specific previously-issued* link. If irreversibility of
+  erasure is load-bearing for the GDPR posture, a counter cannot carry it — that needs an
+  append-only revocation ledger, and it belongs in the Art. 17 DPIA rather than a migration
+  comment. Booked, not done.
 
 - **[SHARE-RES-F5] Capability URLs leak through channels no header controls.** Platform access
   logs, link unfurlers, browser history, and screen shares all see a token that is part of the
