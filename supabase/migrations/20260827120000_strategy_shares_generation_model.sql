@@ -526,19 +526,48 @@ COMMENT ON FUNCTION public.revoke_strategy_share(UUID) IS
 -- Both RPCs are invoked by the authenticated owner only. anon must never reach
 -- them (there is no anon lane in this design at all). REVOKE from PUBLIC/anon
 -- as defense-in-depth against default-ACL drift, then GRANT to authenticated.
-REVOKE ALL ON FUNCTION public.create_strategy_share(UUID) FROM PUBLIC, anon;
-REVOKE ALL ON FUNCTION public.revoke_strategy_share(UUID) FROM PUBLIC, anon;
+--
+-- ⛔ `service_role` IS ON THE REVOKE LIST, and its absence was a real gap.
+-- MEASURED on a PostgreSQL 16 replica carrying Supabase's default ACLs: with
+-- the REVOKE naming only PUBLIC and anon, `aclexplode(proacl)` showed
+-- service_role holding EXECUTE on BOTH functions — Supabase's `pg_default_acl`
+-- grants every new function in `public` to anon/authenticated/service_role, and
+-- revoking PUBLIC does not touch a grant made to a NAMED role. So both RPCs
+-- shipped callable by the BYPASSRLS role. Not exploitable — the `auth.uid() IS
+-- NULL` body guard refuses it — but STEP 3/4's comments claim TWO independent
+-- walls for that caller and only one existed. This restores the second, and it
+-- matches the house posture (mig 20260515205431 revokes _assert_no_public_execute
+-- from PUBLIC, anon, authenticated AND service_role for the same reason).
+REVOKE ALL ON FUNCTION public.create_strategy_share(UUID) FROM PUBLIC, anon, service_role;
+REVOKE ALL ON FUNCTION public.revoke_strategy_share(UUID) FROM PUBLIC, anon, service_role;
 GRANT EXECUTE ON FUNCTION public.create_strategy_share(UUID) TO authenticated;
 GRANT EXECUTE ON FUNCTION public.revoke_strategy_share(UUID) TO authenticated;
 
 -- Self-verify with the mig-134 canon (CALL it; do NOT redefine the helper).
 -- Aborts the apply if PUBLIC retained EXECUTE — a grant we cannot revoke is a
 -- real CRITICAL and the apply MUST fail rather than ship a quiet leak.
+--
+-- ⚠️ THE REVOKE ABOVE IS NOT THE DURABLE CONTROL, and must not be read as one.
+-- This repo has MEASURED that REVOKE does not survive: `pg_default_acl` re-grants
+-- on any DROP+CREATE, "and that is a CLASS" (ROADMAP.md:1534; it bit
+-- mig 20260812083206 for anon, recorded at 20260826130000 §(v)). The block below
+-- makes THIS apply fail loudly if the revoke did not take; the control that keeps
+-- biting on every future CI run is `SERVICE-ROLE 0-acl` in
+-- supabase/tests/test_strategy_shares_rls.sql, which reads the LIVE ACL out of
+-- aclexplode(pg_proc.proacl) rather than trusting a comment or a marker.
 DO $$
 BEGIN
   PERFORM public._assert_no_public_execute('public.create_strategy_share(uuid)');
   PERFORM public._assert_no_public_execute('public.revoke_strategy_share(uuid)');
-  RAISE NOTICE 'Migration 164-02: PUBLIC EXECUTE absence verified for create_strategy_share + revoke_strategy_share.';
+
+  IF has_function_privilege('service_role', 'public.create_strategy_share(uuid)', 'EXECUTE') THEN
+    RAISE EXCEPTION 'Migration 164-02 verification failed: service_role retains EXECUTE on create_strategy_share after the REVOKE. That role is BYPASSRLS and is exactly what createAdminClient() connects as, so the ONLY thing left between it and an ON CONFLICT reactivation of another tenant''s revoked share would be the auth.uid() fail-loud guard in the body — the two-wall posture this file claims would be a one-wall posture.';
+  END IF;
+  IF has_function_privilege('service_role', 'public.revoke_strategy_share(uuid)', 'EXECUTE') THEN
+    RAISE EXCEPTION 'Migration 164-02 verification failed: service_role retains EXECUTE on revoke_strategy_share after the REVOKE. That role is BYPASSRLS, so with the body guard also gone this RPC is an unauthenticated cross-tenant kill switch that revokes any tenant''s live share and returns 1.';
+  END IF;
+
+  RAISE NOTICE 'Migration 164-02: EXECUTE absence verified for PUBLIC and service_role on create_strategy_share + revoke_strategy_share.';
 END $$;
 
 -- --------------------------------------------------------------------------

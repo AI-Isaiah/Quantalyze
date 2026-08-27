@@ -962,6 +962,40 @@ BEGIN
   -- recipient lane ALREADY reads strategy_shares through an admin client — so
   -- an admin client is inside the blast radius by design, not hypothetically.
   -- Neither RPC is meant for it. Prove the grant layer first.
+  --
+  -- ======================================================================
+  -- SERVICE-ROLE 0-acl: the STANDING ACL grants service_role no EXECUTE
+  -- ======================================================================
+  -- ⛔ THIS MUST RUN BEFORE THE TEMPORARY GRANTS BELOW, and it is the only arm
+  -- in the file that can answer the standing-ACL question. SERVICE-ROLE 2e
+  -- looks like it does, but it runs AFTER the layer-2 probe has already REVOKEd
+  -- what it granted, so it measures "the revoke took", not "the migration
+  -- shipped no grant".
+  --
+  -- ⚠️ AND IT IS THE DURABLE CONTROL, not the REVOKE in the migration. This
+  -- repo has MEASURED that `REVOKE` does not survive — Supabase's
+  -- `pg_default_acl` re-grants on any DROP+CREATE, "and that is a CLASS"
+  -- (ROADMAP.md:1534; it bit mig 20260812083206 for anon). A migration's own
+  -- apply-time check runs ONCE; this one re-runs on every CI push, and it reads
+  -- the LIVE catalog rather than a marker comment.
+  --
+  -- MEASURED before the fix (PostgreSQL 16 replica carrying Supabase's default
+  -- ACLs): with the migration revoking only `FROM PUBLIC, anon`, this query
+  -- returned 2 — service_role held EXECUTE on BOTH RPCs, because revoking
+  -- PUBLIC does not touch a grant made to a NAMED role.
+  SELECT count(*) INTO row_cnt
+    FROM pg_proc p
+    CROSS JOIN LATERAL aclexplode(p.proacl) AS acl
+    JOIN pg_roles r ON r.oid = acl.grantee
+    JOIN pg_namespace n ON n.oid = p.pronamespace
+   WHERE n.nspname = 'public'
+     AND p.proname IN ('create_strategy_share', 'revoke_strategy_share')
+     AND r.rolname = 'service_role'
+     AND acl.privilege_type = 'EXECUTE';
+  IF row_cnt <> 0 THEN
+    RAISE EXCEPTION 'TEST FAILED (SERVICE-ROLE 0-acl): service_role holds % standing EXECUTE grant(s) on the share RPCs, expected 0. That role is BYPASSRLS and is what createAdminClient() connects as, so this deletes the grant-layer wall and leaves ONLY the auth.uid() fail-loud guard in the body — the two-wall posture STEP 3/4 of migration 20260827120000 claims collapses to one. ⛔ Read as a REGRESSION of the REVOKE, which pg_default_acl re-applies on any DROP+CREATE of these functions.', row_cnt;
+  END IF;
+
   SET LOCAL ROLE service_role;
   raised := FALSE;
   BEGIN
@@ -1107,7 +1141,7 @@ BEGIN
     RAISE EXCEPTION 'TEST FAILED (SANITIZE 1f): erasing tenant A also revoked tenant B''s share (revoked_at=%, generation % -> %) — the `created_by = p_user_id` predicate is missing from the sanitize arm, so ONE user''s Art. 17 request kills EVERY user''s share links', b_revoked, gen_b, gen_b_after;
   END IF;
 
-  RAISE NOTICE 'test_strategy_shares_rls: ALL 69 ARMS EXECUTED (SHAPE 1, SHAPE 2a, SHAPE 2b, SHAPE 3, SHAPE 4a, SHAPE 4b, SHAPE 4c, SHAPE 5, OWNER 1a, OWNER 1b, OWNER 2a, OWNER 2b, OWNER 2c, TENANT 1a, TENANT 1b, TENANT 2a, TENANT 2b, TENANT 3a, TENANT 3b, NO-DELETE 1, REVOKE 1a, REVOKE 1b, REVOKE 1c, REVOKE 2a, REVOKE 2b, REACTIVATE 1a, REACTIVATE 1b, REACTIVATE 1c, REACTIVATE 1d, REACTIVATE 1e, REACTIVATE 1f, TRIGGER 1a, TRIGGER 1b, TRIGGER 1c, MONOTONIC 1a, MONOTONIC 1b, MONOTONIC 1c, TRIGGER 2a, TRIGGER 2b, TRIGGER 2c, TENANT 4a, TENANT 4b, TENANT 4c, TENANT 5a, TENANT 5b, TENANT 5c, TENANT 5d, TENANT 5e, TENANT 5f, TENANT 5g, ANON 1a, ANON 1b, ANON 1b-grant, ANON 1c, ANON 1d, ANON 2, ANON 2b, SERVICE-ROLE 1, SERVICE-ROLE 2a, SERVICE-ROLE 2b, SERVICE-ROLE 2c, SERVICE-ROLE 2d, SERVICE-ROLE 2e, SANITIZE 1a, SANITIZE 1b, SANITIZE 1c, SANITIZE 1d, SANITIZE 1e, SANITIZE 1f). Observed generation sequence: %', gen_seen;
+  RAISE NOTICE 'test_strategy_shares_rls: ALL 70 ARMS EXECUTED (SHAPE 1, SHAPE 2a, SHAPE 2b, SHAPE 3, SHAPE 4a, SHAPE 4b, SHAPE 4c, SHAPE 5, OWNER 1a, OWNER 1b, OWNER 2a, OWNER 2b, OWNER 2c, TENANT 1a, TENANT 1b, TENANT 2a, TENANT 2b, TENANT 3a, TENANT 3b, NO-DELETE 1, REVOKE 1a, REVOKE 1b, REVOKE 1c, REVOKE 2a, REVOKE 2b, REACTIVATE 1a, REACTIVATE 1b, REACTIVATE 1c, REACTIVATE 1d, REACTIVATE 1e, REACTIVATE 1f, TRIGGER 1a, TRIGGER 1b, TRIGGER 1c, MONOTONIC 1a, MONOTONIC 1b, MONOTONIC 1c, TRIGGER 2a, TRIGGER 2b, TRIGGER 2c, TENANT 4a, TENANT 4b, TENANT 4c, TENANT 5a, TENANT 5b, TENANT 5c, TENANT 5d, TENANT 5e, TENANT 5f, TENANT 5g, ANON 1a, ANON 1b, ANON 1b-grant, ANON 1c, ANON 1d, ANON 2, ANON 2b, SERVICE-ROLE 0-acl, SERVICE-ROLE 1, SERVICE-ROLE 2a, SERVICE-ROLE 2b, SERVICE-ROLE 2c, SERVICE-ROLE 2d, SERVICE-ROLE 2e, SANITIZE 1a, SANITIZE 1b, SANITIZE 1c, SANITIZE 1d, SANITIZE 1e, SANITIZE 1f). Observed generation sequence: %', gen_seen;
 END
 $$;
 
