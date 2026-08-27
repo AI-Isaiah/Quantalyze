@@ -403,13 +403,14 @@ Plans:
   4. Revoke is immediate and convergent: regeneration kills previously-copied links; a revoked/unknown token renders a content-free `410` + `no-store` on the TOKEN lane only (the bare-id lane keeps its uniform 404 or the id becomes an existence oracle); soft-revoke, never DELETE; double-revoke converges; the owner can see whether a live link exists.
   5. The share affordance is honest as a CLASS: no "Link copied!" for a link that cannot work, ONE predicate across all three affordance sites (`FactsheetView`, strategies page, discovery detail), a token-link RECIPIENT never sees a Copy-Link control that rebuilds the URL without the token, and `OwnerUnpublishedNotice`'s "anyone else sees a 404" sentence is corrected in this same phase.
 
-**Plans**: 7 plans
+**Plans**: 3/7 plans executed
 **UI hint**: yes
 
 Plans:
-- [ ] 164-01-PLAN.md — TRACER: builder seam extracted to `src/lib/factsheet/` + phase-148 guard re-pointed to pin the MODULE; HMAC+generation token module (loud at module load); `/factsheet-share/[token]` recipient route + 410 `gone` sibling + proxy/route-contract wiring + structural recipient mode (wave 1)
-- [ ] 164-02-PLAN.md — phase-29 guard narrowed to the scenario locked set (never a migration rename) + `strategy_shares` migration (generation model, no token at rest, two INVOKER RPCs) + SKIP-01-clean SQL gate; blocking three-reviewer + TEST hand-apply checkpoint (wave 1)
-- [ ] 164-05-PLAN.md — leak-channel closure (Sentry path scrub net-new, per-route no-referrer, Plausible exclusion, recipient analytics suppression) + the ORDERED adversarial cache test, RED-demonstrated (wave 2 — MOVED UP 2026-08-27, gate condition 5)
+
+- [x] 164-01-PLAN.md — TRACER: builder seam extracted to `src/lib/factsheet/` + phase-148 guard re-pointed to pin the MODULE; HMAC+generation token module (loud at module load); `/factsheet-share/[token]` recipient route + 410 `gone` sibling + proxy/route-contract wiring + structural recipient mode (wave 1)
+- [x] 164-02-PLAN.md — phase-29 guard narrowed to the scenario locked set (never a migration rename) + `strategy_shares` migration (generation model, no token at rest, two INVOKER RPCs) + SKIP-01-clean SQL gate; blocking three-reviewer + TEST hand-apply checkpoint (wave 1)
+- [x] 164-05-PLAN.md — leak-channel closure (Sentry path scrub net-new, per-route no-referrer, Plausible exclusion, recipient analytics suppression) + the ORDERED adversarial cache test, RED-demonstrated (wave 2 — MOVED UP 2026-08-27, gate condition 5)
 - [ ] 164-06-PLAN.md — **N1 ONLY** (founder ruling 2026-08-27: N2 dropped): `BEFORE INSERT` trigger forcing `generation = 1`, a **bounded-increment** rule on UPDATE so an owner cannot PATCH `generation` toward the bigint ceiling, and `sanitize_user`'s Art.17 arm made provably non-abortable. ⛔ Do NOT add `SELECT … FOR UPDATE`, and do NOT touch STEP 6 arm (i-b) — see gate row 3 (wave 2 — NEW 2026-08-27, gate condition 2)
 - [ ] 164-07-PLAN.md — F6: the cache guard pinned over the TRANSITIVE import graph rather than one file's bytes (wave 2 — NEW 2026-08-27, gate condition 4)
 - [ ] 164-03-PLAN.md — mint-or-reuse + atomic-revoke API routes under the audit law; byte-identical-reuse regression pin; 404-as-convergence (wave 3 — DEMOTED 2026-08-27; ⛔ its merge is the gate)
@@ -472,41 +473,51 @@ re-derive them here; read the entry before planning.
   expire so a permanent SKIP goes loud. ⚠️ (a) touches a shared, contended, worker-less database;
   not a one-line CI edit. ⚠️ Generalises: ANY migration self-check that tolerates pre-apply is
   permanently silent on TEST.
+
 - **[OPS-08-TS]** The SQL half of OPS-08 raises `serialization_failure` (40001); nothing in `src/`
   branches on it. Measured at HEAD 2026-08-26: zero non-test hits. A lost race still answers a
   blanket 500. Fix: retry once at the enqueue call sites (allocator holdings sync, csv-finalize).
+
 - **[OPS-08-F2]** Both pg_cron fan-out paths catch `WHEN OTHERS` around the enqueue and report
   success, so a tick UNDER-COUNTS silently. Pre-existing. Fix: surface a non-zero failure count.
+
 - **[OPS-08-F9]** `test_enqueue_internal_destrict.sql` has no `ALL N ARMS EXECUTED` sentinel — any
   arm can be neutered and the file still exits 0. ⚠️ Not free-standing: needs `SENTINEL_FLOOR`
   7→8 and `ARMS_FLOOR` 63→68 in `ci.yml` plus the derivation entry in
   `ci-anti-skip-gate.contract.test.ts`, in ONE diff.
+
 - **[OPS-08-F8]** The `sql-tests` loop exits on first failure, so one expected-red file suppresses
   ~40 of ~70 others. Fix: aggregate failures, or make expected-red a per-file declaration.
+
 - **[WR-06-UTC]** `series_end` is day-granular; a row stamped with a future UTC date renders
   "ends in the future". ⛔ Must fix `bucketSeriesAge` (`src/lib/freshness.ts`) and `bucketByAge`
   (`FactsheetView.tsx`) in ONE commit — half-fixing manufactures a new two-surface contradiction.
   ⚠️ The VIEWER's timezone is irrelevant (both sides are absolute instants); the offset enters on
   the write side. LATENT on PROD — census 2026-08-26: 20 strategies with a series, **0**
   future-dated. The regression test must SEED the future-dated row; a browser sweep proves nothing.
+
 - **[DRIFT-01]** TEST runs an **older revision** of `_enqueue_compute_job_internal` (corrected
   2026-08-26 — not a comment-stripped copy: PROD stripped = 3172 chars vs TEST raw = 3093), so no
   CI run exercises the migration gate's comment-strip. Root cause is now known: TEST is
   `db push`-ed, with duplicate applications in its ledger. Subsumed by **SKIP-01** fix (a).
+
 - **[H-0001]** `findMutations`' single-line `from(...).insert(...)` regex is blind at **6** known
   call sites (re-measured 2026-08-26 — the count grew, it was not just stale line numbers). Fix
   the detection, un-skip the intended-behavior test in `audit-coverage.test.ts`, re-run the census.
+
 - **[161-ERRPREFIX]** (founder ruling 2026-08-26) `KeyPermissionBadge.tsx:140` renders
   `err.code ? `${err.code}: ${message}` : message`, so a founder with a broken key reads
   `KEY_UNDECRYPTABLE: This stored key can no longer be decrypted…`. RULED: **split** — prose to the
   user, structured code to the log and Sentry breadcrumb. ⚠️ CLASS change: the same site emits other
   codes (PROBE_BACKEND_UNAVAILABLE…), so branch the class, not the one string. The prefix was
   deliberate (comment at :137-138, support-ticket greppability) — preserve that property in the logs.
+
 - **[HONEST-08-RESIDUAL]** The shipped staler-of-two badge is verified live on PROD, but both
   visible rows bind to the series arm, so "correct staler-of-two" and "always binds to series"
   are not yet distinguished. `FreshnessChip`'s own comment warns over-binding would delete the
   sync copy everywhere. Prove the sync arm still renders, using a published row with a fresh
   series (one exists — newest series end is 1 day old — but not on the `crypto-sma` cohort).
+
 - **[PII-01]** Decide whether the `13-REVIEWS/` AI-review payload artifacts stay tracked (5
   occurrences of a personal address, public repo, no ongoing consumer). Deleting forward does not
   remove them from history — that limit is deliberate and stands. If kept, record the decision.
@@ -528,11 +539,13 @@ caught defects this phase spent 39 commits and three fix rounds failing to close
   task's `<automated>` block must be a **command**, not a sentence. ⛔ Do not conflate with
   **SKIP-01** — that is about applying migrations to TEST; this is about executing them *anywhere*
   before review. Both are needed; neither substitutes for the other.
+
 - ⭐ **[PROC-02] Reviewers must declare execution status, and UNEXECUTED blocks.** `gsd-code-reviewer`
   is read-only **by construction**, and nothing in the loop ever said so out loud — so three clean
   reviews of a never-executed migration read exactly like three clean reviews of a tested one. This
   is the cheapest item in the corpus (one agent-prompt field) and it is what would have surfaced
   PROC-01 at review time instead of at red-team time.
+
 - **[PROC-03] Per-arm `RED-UNDER` annotation in SQL gate files.** Every assertion arm states, inline,
   the single mutation that makes it fail. Already applied by hand across
   `test_strategy_shares_rls.sql`'s 101 arms during 164's fix rounds — this routes the *convention*

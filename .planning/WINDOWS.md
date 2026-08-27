@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 20
+open_count: 23
 waived_count: 0
 fixed_count: 1
-total_count: 21
-last_updated: 2026-08-26T12:32:31.476Z
+total_count: 24
+last_updated: 2026-08-27T22:54:37.686Z
 ---
 
 # Broken Windows Ledger
@@ -36,7 +36,9 @@ last_updated: 2026-08-26T12:32:31.476Z
 | 19 | 162 | deviation | src/app/(dashboard)/allocations/components/ScenarioComposer.tsx |  | RESTORED (originally recorded 2026-08-25T22:28:18.784Z by plan 162-04; lost from the ledger JSON by a concurrent-append race and re-added by 162-08). 162-04: metric pair now renders in all five C-4 states (previously hidden when both null); two existing SCEN-03 assertions updated accordingly | open |  | 2026-08-25T23:45:43.649Z |  |
 | 20 | 162 | deviation | src/components/strategy/StrategyGrid.tsx | 117 | RESTORED WITH A CORRECTED REASON (originally recorded 2026-08-25T22:26:27.302Z by plan 162-03; lost from the ledger JSON by a concurrent-append race). Original text said 'SyncBadge still ungated on computation_status (is_example guard added; consumer-less component)'. Re-measured at HEAD 2026-08-26: 'consumer-less' is FALSE (StrategyTable.tsx:1421 renders StrategyGrid, and grid is discovery-only by founder ruling at StrategyTable.tsx:387-398). The real gap is narrower: the grid gate has the is_example half and lacks the hasComputedAnalytics half the table carries (StrategyTable.tsx:982-983). NOT user-visible — shapeRowAnalytics blanks computed_at to empty for non-terminal-success rows — so guard-hygiene, not blocking. Filed with full reasoning in TODOS.md under 'Phase 162 (HONEST) — plan 162-08 filings'. | open |  | 2026-08-25T23:45:55.414Z |  |
 | 21 | 163 | deviation | .planning/REQUIREMENTS.md |  | SEC-02 checkbox left unchecked by plan instruction — status is the phase verifier's call | open |  | 2026-08-26T12:32:31.476Z |  |
-| 21 | 163 | deviation | src/lib/freshness.ts |  | HONEST-08: the plan's stated staler-of-two rule (older date wins) was corrected to a per-subject verdict comparison — see 163-04-SUMMARY deviation 1 | open |  | 2026-08-26T12:58:42.034Z |  |
+| 22 | 164 | unrun-verify | src/instrumentation.ts |  | Sentry token scrub proven only at wiring+transform level; a REAL captured event on a deployed token URL is unread (164-CONTEXT.md Blocker 3 mandates it) — post-deploy UAT | open |  | 2026-08-27T22:54:22.410Z |  |
+| 23 | 164 | deviation | src/app/factsheet-share/gone/route.ts | 77 | 164-01 comment + test name repeat the FALSE claim that Referrer-Policy 'does not strip' the path; the header is correct, the stated reason is not. Needs a one-line correction pass. | open |  | 2026-08-27T22:54:30.377Z |  |
+| 24 | 164 | unrun-verify | src/app/PlausibleScript.tsx |  | Plausible withdrawal proven in jsdom markup only; the deployed check (network panel filtered to plausible.io shows ZERO requests on a token link) is post-deploy UAT | open |  | 2026-08-27T22:54:37.686Z |  |
 
 ````json
 [
@@ -290,6 +292,42 @@ last_updated: 2026-08-26T12:32:31.476Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-08-26T12:32:31.476Z",
+    "resolved_at": null
+  },
+  {
+    "id": 22,
+    "kind": "unrun-verify",
+    "phase": "164",
+    "file": "src/instrumentation.ts",
+    "line": null,
+    "description": "Sentry token scrub proven only at wiring+transform level; a REAL captured event on a deployed token URL is unread (164-CONTEXT.md Blocker 3 mandates it) — post-deploy UAT",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-08-27T22:54:22.410Z",
+    "resolved_at": null
+  },
+  {
+    "id": 23,
+    "kind": "deviation",
+    "phase": "164",
+    "file": "src/app/factsheet-share/gone/route.ts",
+    "line": 77,
+    "description": "164-01 comment + test name repeat the FALSE claim that Referrer-Policy 'does not strip' the path; the header is correct, the stated reason is not. Needs a one-line correction pass.",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-08-27T22:54:30.377Z",
+    "resolved_at": null
+  },
+  {
+    "id": 24,
+    "kind": "unrun-verify",
+    "phase": "164",
+    "file": "src/app/PlausibleScript.tsx",
+    "line": null,
+    "description": "Plausible withdrawal proven in jsdom markup only; the deployed check (network panel filtered to plausible.io shows ZERO requests on a token link) is post-deploy UAT",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-08-27T22:54:37.686Z",
     "resolved_at": null
   }
 ]
