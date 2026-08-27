@@ -13,7 +13,7 @@
  */
 import { describe, it, expect } from "vitest";
 
-import { scrubSharePath } from "./scrub-share-path";
+import { scrubSharePath, isSharePath } from "./scrub-share-path";
 
 /** A real-shaped token: 43 base64url characters, the width `deriveShareToken`
  *  emits. Typed by hand so these vectors do not depend on the deriver. */
@@ -115,6 +115,35 @@ describe("scrubSharePath — pass-through", () => {
     "",
   ])("leaves %j byte-identical", (input) => {
     expect(scrubSharePath(input)).toBe(input);
+  });
+});
+
+describe("isSharePath — the shared client-suppression predicate", () => {
+  it.each([
+    `/factsheet-share/${TOKEN}`,
+    "/factsheet-share/gone",
+    "/factsheet-share/lolno",
+    "/factsheet-share", // the bare prefix counts — fail-closed by intent
+  ])("is TRUE for %j", (p) => {
+    expect(isSharePath(p)).toBe(true);
+  });
+
+  it.each([
+    "/factsheet/44444444-4444-4444-8444-444444444444/v2",
+    "/scenario-share/abcdef",
+    "/browse",
+    "/",
+    "/factsheet-shareholders", // ⛔ prefix-adjacent, must NOT match
+  ])("is FALSE for %j", (p) => {
+    expect(isSharePath(p)).toBe(false);
+  });
+
+  it("takes a PATHNAME — a full URL is not a pathname and must not match", () => {
+    // Documented, not aspirational: the guard is the parameter name and the
+    // docblock, so this pins the behaviour a caller would get wrong.
+    expect(isSharePath(`https://quantalyze.xyz/factsheet-share/${TOKEN}`)).toBe(
+      false,
+    );
   });
 });
 

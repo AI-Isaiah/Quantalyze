@@ -1,10 +1,10 @@
 // Phase 16 / OBSERV-01 + OBSERV-04 — meta carries correlation_id to client
 // error boundaries (Plan 3 src/app/error.tsx + global-error.tsx consumers).
 import type { Metadata, Viewport } from "next";
-import Script from "next/script";
 import { DM_Sans, Instrument_Serif, Geist_Mono } from "next/font/google";
 import "./globals.css";
 import { getCorrelationId, CORRELATION_HEADER } from "@/lib/correlation-id";
+import { PlausibleScript } from "./PlausibleScript";
 
 // Phase-16 IN-06: drift guard at module scope — fails the type-check if
 // CORRELATION_HEADER ever drifts from the literal string inlined into the
@@ -89,14 +89,14 @@ export default async function RootLayout({
       </head>
       <body className="h-full font-sans antialiased">
         {children}
-        {plausibleDomain && (
-          <Script
-            defer
-            data-domain={plausibleDomain}
-            src="https://plausible.io/js/script.tagged-events.js"
-            strategy="afterInteractive"
-          />
-        )}
+        {/* Phase 164 / SHARE-01 — the tag moved behind a route gate.
+            Plausible sends `location.href` on every event, and under ruling
+            D-01 the share token IS the pathname, so a recipient view would
+            hand a live capability to a third-party host. `PlausibleScript`
+            renders nothing on `/factsheet-share/*`; everywhere else it emits
+            exactly the tag that used to be inlined here. See that file for the
+            measured reason `data-exclude` was rejected in favour of omission. */}
+        {plausibleDomain && <PlausibleScript domain={plausibleDomain} />}
       </body>
     </html>
   );

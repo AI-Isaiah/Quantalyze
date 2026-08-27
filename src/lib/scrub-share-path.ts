@@ -87,3 +87,28 @@ const SHARE_PATH_RE = /\/factsheet-share\/[A-Za-z0-9._~%!$&'()*+,;=:@-]+/g;
 export function scrubSharePath(value: string): string {
   return value.replace(SHARE_PATH_RE, SHARE_PATH_PLACEHOLDER);
 }
+
+/**
+ * Is this pathname on the recipient share lane?
+ *
+ * The predicate two client-side suppressions share — the Plausible script gate
+ * in `src/app/PlausibleScript.tsx` and the product-analytics no-op in
+ * `src/app/factsheet/[id]/v2/factsheet-analytics.ts`. One function rather than
+ * two hand-written `startsWith` calls, because two copies of a leak boundary
+ * drift and only one of them gets fixed.
+ *
+ * ⚠️ The bare prefix (`/factsheet-share`, no token) counts. It is not a share
+ * URL anyone can hold, but it is on the lane, and both suppressions are
+ * fail-closed by intent: suppressing one pageview too many costs a statistic,
+ * suppressing one too few costs the capability. Same shape as the proxy's own
+ * prefix arm (`src/proxy.ts`).
+ *
+ * ⛔ Takes a PATHNAME, not a full URL. A caller passing `location.href` would
+ * get `false` for every share URL, silently — hence the name and this line.
+ */
+export function isSharePath(pathname: string): boolean {
+  return (
+    pathname === SHARE_ROUTE_PREFIX ||
+    pathname.startsWith(`${SHARE_ROUTE_PREFIX}/`)
+  );
+}
