@@ -53,10 +53,20 @@ describe("GET /factsheet-share/gone — caching and indexing", () => {
     expect(res.headers.get("x-robots-tag")).toMatch(/noindex/);
   });
 
-  it("suppresses the referrer entirely (the token is a PATH segment, which Referrer-Policy does not strip)", async () => {
-    // Under the query-param design the origin's
-    // `strict-origin-when-cross-origin` would have dropped the token. As a path
-    // segment it survives, so this hop opts out of sending a referrer at all.
+  it("suppresses the referrer entirely — the SAME-ORIGIN hop is the leak, not the cross-origin one", async () => {
+    // ⛔ CORRECTED 2026-08-28. This test's name and comment previously claimed
+    // `Referrer-Policy` "does not strip" a path segment, and that the
+    // query-param design would have been safer. That is FALSE, and the error
+    // was mine — it propagated from 164-CONTEXT.md into three files.
+    //
+    // Under the default `strict-origin-when-cross-origin`, a CROSS-origin
+    // request sends only the origin: neither the path nor the query survives.
+    // The path-vs-query choice is therefore Referrer-neutral, and D-01 costs
+    // nothing here.
+    //
+    // The real gap is SAME-ORIGIN, where the full URL — token and all — is sent
+    // and lands in our own edge and analytics logs. `no-referrer` is what closes
+    // that, and it is why this header is per-route rather than global.
     const res = await GET();
     expect(res.headers.get("referrer-policy")).toBe("no-referrer");
   });
