@@ -38,7 +38,9 @@
 -- a THROWAWAY local PostgreSQL 16 replica of this schema (results recorded in
 -- the fix commit message); re-run the same neuters against TEST once step 2
 -- lands. Arms whose neuter must be re-observed there: TENANT 3, TENANT 5,
--- ANON 1b, SERVICE-ROLE 2, SANITIZE 1, SHAPE 3.
+-- ANON 1b, SERVICE-ROLE 2, SANITIZE 1, SHAPE 3, SHAPE 5, TRIGGER 1, TRIGGER 2,
+-- SERVICE-ROLE 0-acl, and the three `-grant` message arms (ANON 1c-grant,
+-- ANON 1d-grant, SERVICE-ROLE 1-grant).
 --
 -- WHAT THIS FILE ASSERTS (content-by-field; a 200 / a row count proves nothing)
 -- ---------------------------------------------------------------------------
@@ -84,6 +86,16 @@
 --     leaves created_by / created_at untouched.
 --   * MONOTONICITY — generation never decreases across the full
 --     mint -> reuse -> revoke -> revoke -> re-mint -> revoke cycle.
+--   * TRIGGER — and, separately, that the monotonic invariant holds for RAW
+--     TABLE WRITES and not merely for the two RPCs. ⛔ The MONOTONICITY arms
+--     drive the cycle THROUGH the RPCs, which are the only writers that behave
+--     monotonically by construction, so they stay GREEN with no trigger
+--     installed at all. The owner holds a column-unrestricted UPDATE grant and
+--     the FOR ALL policy admits their own row, so a raw PATCH rewinding
+--     `generation` and clearing `revoked_at` was ACCEPTED (MEASURED,
+--     PostgreSQL 16) — resurrecting every link they had revoked. TRIGGER 1
+--     pins that a revocation must ADVANCE the counter; TRIGGER 2 pins that the
+--     counter can never be rewound; SHAPE 5 pins the trigger's timing/level.
 --   * NO HARD DELETE — `authenticated` has no DELETE grant, so a client cannot
 --     discard the counter and resurrect already-revoked tokens.
 --
@@ -170,6 +182,7 @@ DECLARE
   b_revoked    TIMESTAMPTZ;
   gen_pre_san  INTEGER;
   san_ok       BOOLEAN;
+  gen_probe    INTEGER;
   i            INTEGER;
 BEGIN
   -- ----- SEED (seeding/service-role context — bypasses RLS) ---------------
@@ -279,11 +292,12 @@ BEGIN
   -- the next privilege Postgres adds, none of which an enumeration of
   -- forbidden names ever would.
   --
-  -- Read via aclexplode(pg_class.relacl), NOT information_schema.role_table_grants
-  -- (used at ANON 2b below for a different question): that view is
-  -- privilege-filtered and can under-report, which for an EXACT-SET assertion
-  -- means a false GREEN direction is impossible but a confusing false RED is —
-  -- and relacl removes the ambiguity entirely.
+  -- Read via aclexplode(pg_class.relacl), NOT information_schema.role_table_grants:
+  -- that view is privilege-filtered and can under-report, which for an
+  -- EXACT-SET assertion means a false GREEN direction is impossible but a
+  -- confusing false RED is — and relacl removes the ambiguity entirely. Every
+  -- ACL arm in this file now reads relacl/proacl for that reason (SHAPE 3,
+  -- ANON 2b, SERVICE-ROLE 0-acl, SERVICE-ROLE 2e).
   SELECT array_agg(DISTINCT acl.privilege_type ORDER BY acl.privilege_type)
     INTO v_privs
     FROM pg_class c
@@ -327,6 +341,31 @@ BEGIN
   END IF;
   IF v_revoke_s !~* 'created_by\s*=\s*auth\.uid\s*\(\s*\)' THEN
     RAISE EXCEPTION 'TEST FAILED (SHAPE 4c): revoke_strategy_share lost the `created_by = auth.uid()` predicate on its UPDATE — for any BYPASSRLS caller the statement would revoke ANY tenant''s share and report success';
+  END IF;
+
+  -- ======================================================================
+  -- SHAPE 5: the monotonicity trigger exists, BEFORE UPDATE, FOR EACH ROW
+  -- ======================================================================
+  -- Structural companion to the behavioural TRIGGER 1 / TRIGGER 2 arms below.
+  -- It is not redundant with them: those two also go RED if the trigger is
+  -- merely DROPPED, but they cannot distinguish a correct trigger from one
+  -- re-created with the wrong timing or level, and both miscreations silently
+  -- stop guarding:
+  --   * AFTER instead of BEFORE — it still raises, but any AFTER trigger
+  --     ordered ahead of it has already observed the rewound row;
+  --   * STATEMENT instead of ROW — OLD/NEW do not exist, so the body becomes a
+  --     runtime error on EVERY update rather than a guard on the bad ones.
+  -- tgtype bit 0 = ROW, bit 1 = BEFORE, bit 4 = UPDATE.
+  SELECT count(*) INTO row_cnt
+    FROM pg_trigger t
+   WHERE t.tgrelid = 'public.strategy_shares'::regclass
+     AND NOT t.tgisinternal
+     AND t.tgname = 'strategy_shares_monotonic_generation'
+     AND (t.tgtype & 1) = 1
+     AND (t.tgtype & 2) = 2
+     AND (t.tgtype & 16) = 16;
+  IF row_cnt <> 1 THEN
+    RAISE EXCEPTION 'TEST FAILED (SHAPE 5): expected exactly 1 BEFORE UPDATE FOR EACH ROW trigger named strategy_shares_monotonic_generation on strategy_shares, found %. Without it the owner''s column-unrestricted UPDATE grant plus the FOR ALL policy let a raw PATCH rewind the counter — MEASURED (PostgreSQL 16): generation went 2 -> 1 and revoked_at was cleared in ONE request, resurrecting every link the owner had revoked. ⛔ A trigger is also the ONLY control on this table that binds service_role, which BYPASSRLS exempts from every policy here.', row_cnt;
   END IF;
 
   -- ======================================================================
@@ -548,6 +587,49 @@ BEGIN
   END IF;
 
   -- ======================================================================
+  -- TRIGGER 1: a revocation that does NOT advance the counter is refused
+  -- ======================================================================
+  -- ⛔ Run against a LIVE row — this is the only window in the file where
+  -- strat_a is live (reactivated above, revoked again by MONOTONIC 1a below),
+  -- and the rule under test only fires on the revoked_at NULL -> NOT NULL
+  -- transition. Moving this block loses the arm silently.
+  --
+  -- WHY THE RULE EXISTS. Stamping revoked_at alone LOOKS fail-safe: the row
+  -- drops out of the recipient lane's active scan and the link 410s. But the
+  -- counter never moved, so the next create_strategy_share() clears the
+  -- tombstone at the SAME generation and the "revoked" token resolves again.
+  -- Making every revocation advance the counter is what lets reactivation stay
+  -- unconstrained — it guarantees no revoked row can ever be returned to a
+  -- generation that was live before it.
+  raised := FALSE;
+  BEGIN
+    UPDATE strategy_shares SET revoked_at = now() WHERE strategy_id = strat_a;
+  EXCEPTION WHEN OTHERS THEN
+    raised := TRUE; err_msg := SQLERRM;
+  END;
+  IF NOT raised THEN
+    RESET ROLE;
+    RAISE EXCEPTION 'TEST FAILED (TRIGGER 1a): the owner stamped revoked_at by raw UPDATE without advancing generation. That revocation is COSMETIC — the link only disappears from the active scan, and the next create_strategy_share() clears the tombstone at the same generation and brings the supposedly-revoked token back to life. The strategy_shares_monotonic_generation trigger is missing its revocation-must-advance rule.';
+  END IF;
+  -- Message-pinned, not just `raised`: an ordinary owner holds UPDATE on this
+  -- table and this row passes both halves of WITH CHECK, so with the rule gone
+  -- the statement SUCCEEDS rather than failing differently — but if some future
+  -- change makes it fail for an unrelated reason (a lost grant, a policy
+  -- rewrite) a bare `raised` would report the guard as present when it is not.
+  IF err_msg NOT LIKE '%revocation must ADVANCE generation%' THEN
+    RESET ROLE;
+    RAISE EXCEPTION 'TEST FAILED (TRIGGER 1b): the no-bump revocation was rejected by something OTHER than the monotonicity trigger (got: %) — this arm proves nothing about the trigger unless the rejection came FROM it', err_msg;
+  END IF;
+
+  -- A rejection that still wrote is a successful attack wearing an error.
+  SELECT generation, revoked_at INTO gen_probe, now_revoked
+    FROM strategy_shares WHERE strategy_id = strat_a;
+  IF gen_probe <> gen_remint OR now_revoked IS NOT NULL THEN
+    RESET ROLE;
+    RAISE EXCEPTION 'TEST FAILED (TRIGGER 1c): the rejected no-bump revocation still mutated the row (generation % -> %, revoked_at now %) — a BEFORE trigger that raises must leave the tuple untouched', gen_remint, gen_probe, now_revoked;
+  END IF;
+
+  -- ======================================================================
   -- MONOTONICITY: generation never decreases across the whole cycle
   -- ======================================================================
   SELECT public.revoke_strategy_share(strat_a) INTO affected;
@@ -571,6 +653,55 @@ BEGIN
   IF gen_seen[array_length(gen_seen, 1)] <= gen_seen[1] THEN
     RESET ROLE;
     RAISE EXCEPTION 'TEST FAILED (MONOTONIC 1c): the counter ended at % having started at % — two revokes must have advanced it. A never-advancing counter would make the monotonicity loop above vacuously true. Sequence: %', gen_seen[array_length(gen_seen, 1)], gen_seen[1], gen_seen;
+  END IF;
+
+  -- ======================================================================
+  -- TRIGGER 2: THE OWNER SELF-REWIND — a raw PATCH cannot resurrect links
+  -- ======================================================================
+  -- ⛔ MONOTONIC 1 ABOVE DOES NOT COVER THIS, and reading it as if it did is the
+  -- mistake this arm exists to prevent. Every step of that cycle goes through
+  -- the two RPCs, which are the only writers that BEHAVE monotonically — so
+  -- MONOTONIC 1 stays GREEN with no trigger installed at all. It measures the
+  -- RPCs; this measures the TABLE.
+  --
+  -- The attack needs no privilege the product does not already hand every user:
+  --   * STEP 2 grants `authenticated` a column-UNRESTRICTED UPDATE (it must —
+  --     revoke_strategy_share is SECURITY INVOKER and writes generation AS THE
+  --     CALLER, so revoking UPDATE(generation) would disarm the RPC);
+  --   * strategy_shares_owner is FOR ALL, and an owner's own-row UPDATE
+  --     satisfies USING and WITH CHECK alike while created_by is unchanged.
+  -- MEASURED on a PostgreSQL 16 replica of this schema before the fix: a single
+  -- `PATCH /rest/v1/strategy_shares?strategy_id=eq.<own>` with
+  -- `{"generation": 1, "revoked_at": null}` moved generation 2 -> 1 and cleared
+  -- the tombstone. Every recipient still holding a revoked link regained
+  -- anonymous access to that owner's UNPUBLISHED factsheet, and the Art. 17
+  -- erasure arm in companion migration 20260827130000 became reversible by the
+  -- very user it had just been applied to.
+  --
+  -- ⚠️ The row is REVOKED at this point (MONOTONIC 1a), which is what makes the
+  -- probe faithful: it is the state a revoked-link resurrection starts from.
+  raised := FALSE;
+  BEGIN
+    UPDATE strategy_shares
+       SET generation = 1, revoked_at = NULL
+     WHERE strategy_id = strat_a;
+  EXCEPTION WHEN OTHERS THEN
+    raised := TRUE; err_msg := SQLERRM;
+  END;
+  IF NOT raised THEN
+    RESET ROLE;
+    RAISE EXCEPTION 'TEST FAILED (TRIGGER 2a): the owner rewound generation to 1 and cleared revoked_at with a raw UPDATE. Every share token they ever REVOKED at generation 1 is live again as anonymous access to their unpublished factsheet. Neither the grant layer nor RLS can stop this — the owner legitimately holds UPDATE and the FOR ALL policy admits their own row — so the strategy_shares_monotonic_generation trigger (migration 20260827120000 STEP 1b) is the ONLY control, and it is missing.';
+  END IF;
+  IF err_msg NOT LIKE '%generation is monotonic%' THEN
+    RESET ROLE;
+    RAISE EXCEPTION 'TEST FAILED (TRIGGER 2b): the self-rewind was rejected by something OTHER than the monotonicity trigger (got: %). The owner holds UPDATE on this table and passes the policy, so a rejection from any other layer means the trigger is unproven and this arm is measuring an accident.', err_msg;
+  END IF;
+
+  SELECT generation, revoked_at INTO gen_probe, now_revoked
+    FROM strategy_shares WHERE strategy_id = strat_a;
+  IF gen_probe <> gen_final OR now_revoked IS NULL THEN
+    RESET ROLE;
+    RAISE EXCEPTION 'TEST FAILED (TRIGGER 2c): the rejected self-rewind still mutated the row (generation % -> %, revoked_at now %) — a partial write here is the full attack, because clearing the tombstone alone already re-publishes the link', gen_final, gen_probe, now_revoked;
   END IF;
 
   RESET ROLE;
@@ -631,10 +762,14 @@ BEGIN
   --     security policy (USING expression)". That is the second wall.
   -- ⛔ Consequence for honesty: 5b/5c below go RED on the SAME neuter that
   -- reddens TENANT 1 (dropping the EXISTS half) — they are NOT an independent
-  -- pin of the USING clause. TENANT 5h is; it reaches USING with nothing in
-  -- front of it. What 5b-5g uniquely prove is that the rejection is TOTAL when
-  -- a victim row exists: no partial write, no revoked_at clearing, no
-  -- provenance rewrite, no second row.
+  -- pin of the USING clause. **TENANT 4a is the USING pin** — see the note
+  -- immediately after 5c, which records why the obvious raw cross-tenant UPDATE
+  -- arm here was written, measured and then DELETED as unfailable. (An earlier
+  -- version of this sentence named a "TENANT 5h" that has never existed: the
+  -- roster is 5a-5g, and 5h WAS that deleted arm. The two passages now agree.)
+  -- What 5b-5g uniquely prove is that the rejection is TOTAL when a victim row
+  -- exists: no partial write, no revoked_at clearing, no provenance rewrite, no
+  -- second row.
   --
   -- ⚠️ Deliberately placed AFTER the TENANT 1-4 family. Seeding B's row EARLIER
   -- (the obvious placement) would push TENANT 1's mint against a strategy that
@@ -771,26 +906,49 @@ BEGIN
   END IF;
 
   -- anon must not be able to invoke either RPC.
+  --
+  -- ⛔ THE MESSAGE ASSERTIONS BELOW ARE NOT DECORATION — same defect, same fix,
+  -- as ANON 1b-grant above. `insufficient_privilege` (42501) is raised by BOTH
+  -- walls on this surface: the absent EXECUTE grant, AND the `auth.uid() IS
+  -- NULL` fail-loud guard inside both bodies (auth.uid() is NULL for anon here,
+  -- the claims having been cleared before this block). SQLSTATE alone therefore
+  -- cannot tell "anon cannot reach the function" from "anon reached it and the
+  -- body threw her out".
+  -- MEASURED (PostgreSQL 16 replica) with `GRANT EXECUTE ... TO anon` in force:
+  -- both arms below, written to catch bare `insufficient_privilege`, reported
+  -- PASS while anon demonstrably held EXECUTE — the swallowed SQLERRM was
+  -- "create_strategy_share: no authenticated user — not callable by a
+  -- service-role/admin client". Pinning `permission denied for function` is
+  -- what makes them measure the GRANT layer, which is their only job: the body
+  -- guard is proven independently and behaviourally by SERVICE-ROLE 2.
   raised := FALSE;
   BEGIN
     PERFORM public.create_strategy_share(strat_a);
   EXCEPTION WHEN insufficient_privilege THEN
-    raised := TRUE;
+    raised := TRUE; err_msg := SQLERRM;
   END;
   IF NOT raised THEN
     RESET ROLE;
     RAISE EXCEPTION 'TEST FAILED (ANON 1c): anon holds EXECUTE on create_strategy_share — the REVOKE/GRANT block in migration 20260827120000 is missing or was overridden';
+  END IF;
+  IF err_msg NOT LIKE '%permission denied for function%' THEN
+    RESET ROLE;
+    RAISE EXCEPTION 'TEST FAILED (ANON 1c-grant): anon''s create_strategy_share call was rejected by something other than the GRANT layer (got: %). The body''s `auth.uid() IS NULL` guard raises the SAME 42501, so this arm passes on the wrong wall unless the message is pinned — MEASURED: with EXECUTE granted to anon the bare-SQLSTATE version reported PASS.', err_msg;
   END IF;
 
   raised := FALSE;
   BEGIN
     PERFORM public.revoke_strategy_share(strat_a);
   EXCEPTION WHEN insufficient_privilege THEN
-    raised := TRUE;
+    raised := TRUE; err_msg := SQLERRM;
   END;
   IF NOT raised THEN
     RESET ROLE;
     RAISE EXCEPTION 'TEST FAILED (ANON 1d): anon holds EXECUTE on revoke_strategy_share';
+  END IF;
+  IF err_msg NOT LIKE '%permission denied for function%' THEN
+    RESET ROLE;
+    RAISE EXCEPTION 'TEST FAILED (ANON 1d-grant): anon''s revoke_strategy_share call was rejected by something other than the GRANT layer (got: %) — see ANON 1c-grant; the body guard raises the same errcode and would satisfy a bare-SQLSTATE arm', err_msg;
   END IF;
 
   RESET ROLE;
@@ -817,9 +975,21 @@ BEGIN
   END IF;
 
   -- Belt-and-braces: the temporary grant really is gone.
+  -- ⛔ Read via aclexplode(pg_class.relacl), matching SHAPE 3 above and
+  -- SERVICE-ROLE 2e below. This arm previously read
+  -- `information_schema.role_table_grants`, which is PRIVILEGE-FILTERED — it
+  -- surfaces only grants whose grantor or grantee the current role is, or is a
+  -- member of. For SHAPE 3's exact-set question that filtering can only produce
+  -- a confusing false RED, but this arm asks a COUNT-IS-ZERO question, where
+  -- under-reporting yields a false GREEN: a genuinely leaked anon grant that
+  -- the applying role happens not to see reads as "no grants remain". relacl is
+  -- the authoritative store and is not filtered.
   SELECT count(*) INTO row_cnt
-    FROM information_schema.role_table_grants
-   WHERE table_schema = 'public' AND table_name = 'strategy_shares' AND grantee = 'anon';
+    FROM pg_class c
+    CROSS JOIN LATERAL aclexplode(c.relacl) AS acl
+    JOIN pg_roles r ON r.oid = acl.grantee
+   WHERE c.oid = 'public.strategy_shares'::regclass
+     AND r.rolname = 'anon';
   IF row_cnt <> 0 THEN
     RAISE EXCEPTION 'TEST FAILED (ANON 2b): % anon grant(s) remain on strategy_shares after the layer-2 probe — the REVOKE did not take (the transaction ROLLBACK is still the backstop, but this must not be relied on)', row_cnt;
   END IF;
@@ -832,16 +1002,65 @@ BEGIN
   -- recipient lane ALREADY reads strategy_shares through an admin client — so
   -- an admin client is inside the blast radius by design, not hypothetically.
   -- Neither RPC is meant for it. Prove the grant layer first.
+  --
+  -- ======================================================================
+  -- SERVICE-ROLE 0-acl: the STANDING ACL grants service_role no EXECUTE
+  -- ======================================================================
+  -- ⛔ THIS MUST RUN BEFORE THE TEMPORARY GRANTS BELOW, and it is the only arm
+  -- in the file that can answer the standing-ACL question. SERVICE-ROLE 2e
+  -- looks like it does, but it runs AFTER the layer-2 probe has already REVOKEd
+  -- what it granted, so it measures "the revoke took", not "the migration
+  -- shipped no grant".
+  --
+  -- ⚠️ AND IT IS THE DURABLE CONTROL, not the REVOKE in the migration. This
+  -- repo has MEASURED that `REVOKE` does not survive — Supabase's
+  -- `pg_default_acl` re-grants on any DROP+CREATE, "and that is a CLASS"
+  -- (ROADMAP.md:1534; it bit mig 20260812083206 for anon). A migration's own
+  -- apply-time check runs ONCE; this one re-runs on every CI push, and it reads
+  -- the LIVE catalog rather than a marker comment.
+  --
+  -- MEASURED before the fix (PostgreSQL 16 replica carrying Supabase's default
+  -- ACLs): with the migration revoking only `FROM PUBLIC, anon`, this query
+  -- returned 2 — service_role held EXECUTE on BOTH RPCs, because revoking
+  -- PUBLIC does not touch a grant made to a NAMED role.
+  SELECT count(*) INTO row_cnt
+    FROM pg_proc p
+    CROSS JOIN LATERAL aclexplode(p.proacl) AS acl
+    JOIN pg_roles r ON r.oid = acl.grantee
+    JOIN pg_namespace n ON n.oid = p.pronamespace
+   WHERE n.nspname = 'public'
+     AND p.proname IN ('create_strategy_share', 'revoke_strategy_share')
+     AND r.rolname = 'service_role'
+     AND acl.privilege_type = 'EXECUTE';
+  IF row_cnt <> 0 THEN
+    RAISE EXCEPTION 'TEST FAILED (SERVICE-ROLE 0-acl): service_role holds % standing EXECUTE grant(s) on the share RPCs, expected 0. That role is BYPASSRLS and is what createAdminClient() connects as, so this deletes the grant-layer wall and leaves ONLY the auth.uid() fail-loud guard in the body — the two-wall posture STEP 3/4 of migration 20260827120000 claims collapses to one. ⛔ Read as a REGRESSION of the REVOKE, which pg_default_acl re-applies on any DROP+CREATE of these functions.', row_cnt;
+  END IF;
+
   SET LOCAL ROLE service_role;
   raised := FALSE;
   BEGIN
     PERFORM public.revoke_strategy_share(strat_a);
   EXCEPTION WHEN insufficient_privilege THEN
-    raised := TRUE;
+    raised := TRUE; err_msg := SQLERRM;
   END;
   RESET ROLE;
   IF NOT raised THEN
     RAISE EXCEPTION 'TEST FAILED (SERVICE-ROLE 1): service_role executed revoke_strategy_share — it holds neither an explicit GRANT nor the PUBLIC default the migration revokes. A BYPASSRLS caller on this RPC is an unauthenticated cross-tenant kill switch.';
+  END IF;
+  -- ⛔ Same defect and same fix as ANON 1b-grant / 1c-grant / 1d-grant. The
+  -- `auth.uid() IS NULL` guard in the body raises `insufficient_privilege` too
+  -- — and for service_role auth.uid() is ALWAYS NULL, so the body ALWAYS
+  -- refuses. A bare-SQLSTATE arm here is therefore satisfied by the body
+  -- whether or not the grant exists, which is precisely the wall it claims to
+  -- prove. MEASURED (PostgreSQL 16 replica): with `GRANT EXECUTE ... TO
+  -- service_role` in force, the bare version reported PASS while swallowing
+  -- "revoke_strategy_share: no authenticated user — not callable by a
+  -- service-role/admin client".
+  -- ⚠️ SERVICE-ROLE 0-acl above is the primary detector for that drift and
+  -- fires earlier; this message pin keeps THIS arm honest about which layer it
+  -- measured, so the two cannot both go dark on the same regression.
+  IF err_msg NOT LIKE '%permission denied for function%' THEN
+    RAISE EXCEPTION 'TEST FAILED (SERVICE-ROLE 1-grant): service_role''s revoke_strategy_share call was rejected by something other than the GRANT layer (got: %). If this is the fail-loud body guard, service_role HOLDS EXECUTE and this arm proved nothing — the grant-layer wall it names is gone.', err_msg;
   END IF;
 
   -- ======================================================================
@@ -906,6 +1125,15 @@ BEGIN
   END IF;
 
   -- Belt-and-braces: the temporary EXECUTE grants really are gone.
+  -- ⛔ THIS ARM CANNOT ANSWER "did the migration ship a service_role grant?" and
+  -- must not be read as if it did: lines above REVOKE the standing grant along
+  -- with the temporary one, so by the time this counts, a shipped grant and no
+  -- shipped grant are indistinguishable. That question is owned by
+  -- SERVICE-ROLE 0-acl, which snapshots the LIVE ACL BEFORE the temporary GRANT
+  -- is issued. What this arm uniquely proves is that the probe CLEANED UP —
+  -- worth keeping, because the file's other backstop is the closing ROLLBACK
+  -- and a leaked EXECUTE grant on a shared test database would silently
+  -- pre-satisfy SERVICE-ROLE 0-acl's failure condition on the NEXT run.
   SELECT count(*) INTO row_cnt
     FROM pg_proc p
     CROSS JOIN LATERAL aclexplode(p.proacl) AS acl
@@ -977,7 +1205,7 @@ BEGIN
     RAISE EXCEPTION 'TEST FAILED (SANITIZE 1f): erasing tenant A also revoked tenant B''s share (revoked_at=%, generation % -> %) — the `created_by = p_user_id` predicate is missing from the sanitize arm, so ONE user''s Art. 17 request kills EVERY user''s share links', b_revoked, gen_b, gen_b_after;
   END IF;
 
-  RAISE NOTICE 'test_strategy_shares_rls: ALL 62 ARMS EXECUTED (SHAPE 1, SHAPE 2a, SHAPE 2b, SHAPE 3, SHAPE 4a, SHAPE 4b, SHAPE 4c, OWNER 1a, OWNER 1b, OWNER 2a, OWNER 2b, OWNER 2c, TENANT 1a, TENANT 1b, TENANT 2a, TENANT 2b, TENANT 3a, TENANT 3b, NO-DELETE 1, REVOKE 1a, REVOKE 1b, REVOKE 1c, REVOKE 2a, REVOKE 2b, REACTIVATE 1a, REACTIVATE 1b, REACTIVATE 1c, REACTIVATE 1d, REACTIVATE 1e, REACTIVATE 1f, MONOTONIC 1a, MONOTONIC 1b, MONOTONIC 1c, TENANT 4a, TENANT 4b, TENANT 4c, TENANT 5a, TENANT 5b, TENANT 5c, TENANT 5d, TENANT 5e, TENANT 5f, TENANT 5g, ANON 1a, ANON 1b, ANON 1b-grant, ANON 1c, ANON 1d, ANON 2, ANON 2b, SERVICE-ROLE 1, SERVICE-ROLE 2a, SERVICE-ROLE 2b, SERVICE-ROLE 2c, SERVICE-ROLE 2d, SERVICE-ROLE 2e, SANITIZE 1a, SANITIZE 1b, SANITIZE 1c, SANITIZE 1d, SANITIZE 1e, SANITIZE 1f). Observed generation sequence: %', gen_seen;
+  RAISE NOTICE 'test_strategy_shares_rls: ALL 73 ARMS EXECUTED (SHAPE 1, SHAPE 2a, SHAPE 2b, SHAPE 3, SHAPE 4a, SHAPE 4b, SHAPE 4c, SHAPE 5, OWNER 1a, OWNER 1b, OWNER 2a, OWNER 2b, OWNER 2c, TENANT 1a, TENANT 1b, TENANT 2a, TENANT 2b, TENANT 3a, TENANT 3b, NO-DELETE 1, REVOKE 1a, REVOKE 1b, REVOKE 1c, REVOKE 2a, REVOKE 2b, REACTIVATE 1a, REACTIVATE 1b, REACTIVATE 1c, REACTIVATE 1d, REACTIVATE 1e, REACTIVATE 1f, TRIGGER 1a, TRIGGER 1b, TRIGGER 1c, MONOTONIC 1a, MONOTONIC 1b, MONOTONIC 1c, TRIGGER 2a, TRIGGER 2b, TRIGGER 2c, TENANT 4a, TENANT 4b, TENANT 4c, TENANT 5a, TENANT 5b, TENANT 5c, TENANT 5d, TENANT 5e, TENANT 5f, TENANT 5g, ANON 1a, ANON 1b, ANON 1b-grant, ANON 1c, ANON 1c-grant, ANON 1d, ANON 1d-grant, ANON 2, ANON 2b, SERVICE-ROLE 0-acl, SERVICE-ROLE 1, SERVICE-ROLE 1-grant, SERVICE-ROLE 2a, SERVICE-ROLE 2b, SERVICE-ROLE 2c, SERVICE-ROLE 2d, SERVICE-ROLE 2e, SANITIZE 1a, SANITIZE 1b, SANITIZE 1c, SANITIZE 1d, SANITIZE 1e, SANITIZE 1f). Observed generation sequence: %', gen_seen;
 END
 $$;
 
