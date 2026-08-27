@@ -132,4 +132,9 @@ that flip to `validate-phase §6`, and because flipping it here would be the orc
 off its own artifact. Wave 0 is genuinely incomplete — that box is unticked because it is untrue,
 not as a formality.
 
+⛔ **ORCHESTRATOR-OWNED FILE (2026-08-27).** Plans 06 and 07 run concurrently and both once
+listed this file in `files_modified` — a shared write target for two agents that share the git
+index. Their rows are already written above; executors must NOT edit this file. The orchestrator
+flips the Status column after the wave.
+
 **Approval:** pending
