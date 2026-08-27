@@ -1714,10 +1714,18 @@ jobs:
           # / OWNER 2d) rather than on an arm. Net -5, derived from the PRE-EDIT
           # count of 106 minus the five deletions (5b, 5c, 5d, 5f, 5g) plus the
           # one rebuilt arm — not read off the finished file.
-          #   test_strategy_shares_rls.sql                  101
+          # Re-measured 2026-08-28 (164 gate, F-3): +1 for N1 2b, the
+          # forced-nonce-on-INSERT pin. The trigger's INSERT branch forced only
+          # `generation`, leaving `nonce` caller-suppliable, and MEASURED that
+          # combination was worse than neither: mint -> revoke -> service_role
+          # DELETE -> service_role INSERT naming the recorded nonce came back at
+          # generation 1 with that nonce and revoked_at NULL, byte-identical to
+          # the pre-revoke triple. N1 2b is the behavioural twin of N1 2a, run
+          # as the one role no column grant binds. 101 + 1 = 102.
+          #   test_strategy_shares_rls.sql                  102
           #   test_sync_status_marked_refresh_protected.sql  16
           SENTINEL_FLOOR=8   # files declaring a sentinel
-          ARMS_FLOOR=164     # 9 + 6 + 10 + 10 + 8 + 4 + 101 + 16
+          ARMS_FLOOR=165     # 9 + 6 + 10 + 10 + 8 + 4 + 102 + 16
           # RAISING these as arms are added is expected and cheap — and it is not
           # optional: src/__tests__/contracts/ci-anti-skip-gate.contract.test.ts
           # re-derives the table above from the corpus and goes red when a count,

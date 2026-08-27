@@ -257,6 +257,10 @@ DECLARE
   strat_a4       UUID;
   gen_a4         BIGINT;
   gen_a4_pre     BIGINT;
+  -- N1 2b (2026-08-28): the forced-nonce-on-INSERT pin needs its own strategy,
+  -- because strat_a4 already carries the row N1 2a inserted.
+  strat_a5       UUID;
+  nonce_a5       UUID;
 BEGIN
   -- ----- SEED (seeding/service-role context — bypasses RLS) ---------------
   -- Both strategies are status='private': an unpublished strategy is the ONLY
@@ -305,6 +309,17 @@ BEGIN
   INSERT INTO strategies (user_id, name, status, strategy_types, subtypes, markets, supported_exchanges)
   VALUES (uid_a, 'strategy-shares A bounded-increment strategy', 'private', '{}', '{}', '{}', ARRAY['binance'])
   RETURNING id INTO strat_a4;
+
+  -- A FIFTH A-owned strategy, reserved for N1 2b (the forced-nonce-on-INSERT
+  -- pin, 2026-08-28). It cannot share strat_a4: that row already exists by the
+  -- time N1 2b runs — N1 2a inserted it — so UNIQUE(strategy_id) would raise
+  -- 23505 before the trigger was consulted and the arm would pass on the wrong
+  -- error, the exact defect ANON 1b and NONCE 2 both record. It cannot use
+  -- strat_a2 either, for the reason given above. And it must NOT be strat_a3,
+  -- which NONCE 4 destroys and re-creates.
+  INSERT INTO strategies (user_id, name, status, strategy_types, subtypes, markets, supported_exchanges)
+  VALUES (uid_a, 'strategy-shares A forced-nonce strategy', 'private', '{}', '{}', '{}', ARRAY['binance'])
+  RETURNING id INTO strat_a5;
 
   INSERT INTO auth.users (id, instance_id, email, created_at, updated_at)
   VALUES (uid_b, '00000000-0000-0000-0000-000000000000',
@@ -858,6 +873,52 @@ BEGIN
   IF gen_a4 IS DISTINCT FROM 1 THEN
     RESET ROLE;
     RAISE EXCEPTION 'TEST FAILED (N1 2a): a service_role INSERT naming generation = 987654321 landed at %, expected 1. The trigger no longer FORCES the starting counter on INSERT, and no column grant binds this caller — service_role holds GRANT ALL and BYPASSRLS and is what createAdminClient() connects as. A row minted at a counter some already-revoked token was issued under re-derives that token: anonymous access to an unpublished factsheet, from a value the writer chose.', gen_a4;
+  END IF;
+
+  -- ======================================================================
+  -- N1 2b: ...and a service_role INSERT that NAMES a RECORDED nonce gets a
+  --        FRESH one — the other half of the same forgery primitive
+  -- ======================================================================
+  -- ⛔ N1 2a DOES NOT COVER THIS AND THE PAIR IS THE POINT. `generation` and
+  -- `nonce` are the two MAC inputs; forcing one while the other stays
+  -- caller-suppliable closes nothing, because the token is derived from BOTH.
+  -- Before the 2026-08-28 fix the trigger forced only `generation`, and that
+  -- made the hole WORSE rather than better — the clamp back to 1 is what
+  -- reconstructed the ORIGINAL counter. MEASURED end-to-end on a throwaway
+  -- PostgreSQL 16 cluster:
+  --   1. owner mints                    -> generation 1, nonce N
+  --   2. owner revokes                  -> generation 2; the token over (N, 1)
+  --                                        is now DEAD
+  --   3. `SET ROLE service_role; DELETE FROM strategy_shares WHERE ...`
+  --   4. `SET ROLE service_role; INSERT INTO strategy_shares
+  --       (strategy_id, created_by, nonce) VALUES (..., N)`
+  --   -> stored row: generation 1, nonce N, revoked_at NULL. Byte-identical to
+  --      the pre-revoke triple, so the REVOKED url resolves again — and steps
+  --      3+4 also fully reverse a completed Art. 17 erasure, restoring links the
+  --      regulation required to be killed.
+  --
+  -- ⛔ RUN AS service_role, exactly like N1 2a and for the same reason: STEP 2
+  -- omits `nonce` from authenticated's INSERT grant, so an owner naming it gets
+  -- 42501 and never reaches the table (that is NONCE 2a, and it measures the
+  -- GRANT). This arm measures the TRIGGER, against the one role no grant binds.
+  -- The recorded value is `nonce_mint` — tenant A's real, live nonce — so a
+  -- green here is not an accident of using an unrelated uuid.
+  -- RED-UNDER: delete the `NEW.nonce := gen_random_uuid();` assignment from the
+  --            `IF TG_OP = 'INSERT'` branch of
+  --            strategy_shares_enforce_monotonic_generation() (STEP 1b).
+  -- ⚠️ LAYERED: migration 20260827120000's STEP 6 arm (v-d2) greps for
+  --    `NEW.nonce :=` and ABORTS THE APPLY without it, so (v-d2) must be removed
+  --    in the same mutation or this file never runs. With both gone this arm is
+  --    the first failure (MEASURED).
+  SET LOCAL ROLE service_role;
+  INSERT INTO strategy_shares (strategy_id, created_by, nonce)
+  VALUES (strat_a5, uid_a, nonce_mint);
+  SET LOCAL ROLE authenticated;
+
+  SELECT nonce INTO nonce_a5 FROM strategy_shares WHERE strategy_id = strat_a5;
+  IF nonce_a5 IS NULL OR nonce_a5 = nonce_mint THEN
+    RESET ROLE;
+    RAISE EXCEPTION 'TEST FAILED (N1 2b): a service_role INSERT naming nonce = % stored %, expected a DIFFERENT, server-generated value. The trigger no longer FORCES the nonce on INSERT, and the column DEFAULT does not cover this — a DEFAULT applies only when the statement does not NAME the column, and no grant binds this caller. Combined with the forced `generation := 1` that N1 2a pins, an admin transport can DELETE a revoked row and re-insert it with the recorded nonce to rebuild the exact pre-revoke (nonce, generation, live) triple: every token that row ever issued derives again, and a completed GDPR Art. 17 erasure is reversed.', nonce_mint, COALESCE(nonce_a5::TEXT, '(no row)');
   END IF;
 
   -- ======================================================================
@@ -2326,7 +2387,7 @@ BEGIN
       raised, COALESCE(err_msg, '(none)'), COALESCE(san_ok::TEXT, '(null)'), b_revoked, gen_pre_san, gen_b_after;
   END IF;
 
-  RAISE NOTICE 'test_strategy_shares_rls: ALL 101 ARMS EXECUTED (SHAPE 1, SHAPE 1b, SHAPE 1c, SHAPE 2a, SHAPE 2b, SHAPE 3, SHAPE 3b, SHAPE 4a, SHAPE 4b, SHAPE 4c, SHAPE 4d, SHAPE 4e, SHAPE 5, SHAPE 5b-pre, SHAPE 5b, OWNER 1a, OWNER 1b, OWNER 1c, OWNER 2a, OWNER 2b, OWNER 2c, OWNER 2d, TENANT 1a, TENANT 1b, TENANT 2a, TENANT 2b, TENANT 3a, TENANT 3b, N1 2a, N1 1a, N1 1b, N1 1c, NO-DELETE 1, REVOKE 1a, REVOKE 1b, REVOKE 1c, REVOKE 2a, REVOKE 2b, REACTIVATE 1a, REACTIVATE 1b, REACTIVATE 1c, REACTIVATE 1d, REACTIVATE 1e, REACTIVATE 1f, REACTIVATE 1g, TRIGGER 1a, TRIGGER 1b, MONOTONIC 1a, MONOTONIC 1b, MONOTONIC 1c, TRIGGER 2a, TRIGGER 2b, TRIGGER 3a, TRIGGER 3b, TRIGGER 3c, TRIGGER 3d-i, TRIGGER 3d-ii, TRIGGER 4a, TRIGGER 4b, TRIGGER 4c-i, TRIGGER 4c-ii, NONCE 1a, NONCE 1b, NONCE 2a, NONCE 2b, NONCE 3, NONCE 4a, NONCE 4b, NONCE 4c, TENANT 4a, TENANT 4b, TENANT 4c, TENANT 5a, TENANT 5b, ANON 1a, ANON 1b, ANON 1b-grant, ANON 1c, ANON 1c-grant, ANON 1d, ANON 1d-grant, ANON 2, ANON 2b, SERVICE-ROLE 0-acl, SERVICE-ROLE 1, SERVICE-ROLE 1-grant, SERVICE-ROLE 2a, SERVICE-ROLE 2b, SERVICE-ROLE 2c, SERVICE-ROLE 2d, SERVICE-ROLE 2e, NONCE 5a, NONCE 5b, NONCE 5c, SANITIZE 1a, SANITIZE 1b, SANITIZE 1c, SANITIZE 1d, SANITIZE 1e, SANITIZE 1f, N1 3a). Observed generation sequence: %', gen_seen;
+  RAISE NOTICE 'test_strategy_shares_rls: ALL 102 ARMS EXECUTED (SHAPE 1, SHAPE 1b, SHAPE 1c, SHAPE 2a, SHAPE 2b, SHAPE 3, SHAPE 3b, SHAPE 4a, SHAPE 4b, SHAPE 4c, SHAPE 4d, SHAPE 4e, SHAPE 5, SHAPE 5b-pre, SHAPE 5b, OWNER 1a, OWNER 1b, OWNER 1c, OWNER 2a, OWNER 2b, OWNER 2c, OWNER 2d, TENANT 1a, TENANT 1b, TENANT 2a, TENANT 2b, TENANT 3a, TENANT 3b, N1 2a, N1 2b, N1 1a, N1 1b, N1 1c, NO-DELETE 1, REVOKE 1a, REVOKE 1b, REVOKE 1c, REVOKE 2a, REVOKE 2b, REACTIVATE 1a, REACTIVATE 1b, REACTIVATE 1c, REACTIVATE 1d, REACTIVATE 1e, REACTIVATE 1f, REACTIVATE 1g, TRIGGER 1a, TRIGGER 1b, MONOTONIC 1a, MONOTONIC 1b, MONOTONIC 1c, TRIGGER 2a, TRIGGER 2b, TRIGGER 3a, TRIGGER 3b, TRIGGER 3c, TRIGGER 3d-i, TRIGGER 3d-ii, TRIGGER 4a, TRIGGER 4b, TRIGGER 4c-i, TRIGGER 4c-ii, NONCE 1a, NONCE 1b, NONCE 2a, NONCE 2b, NONCE 3, NONCE 4a, NONCE 4b, NONCE 4c, TENANT 4a, TENANT 4b, TENANT 4c, TENANT 5a, TENANT 5b, ANON 1a, ANON 1b, ANON 1b-grant, ANON 1c, ANON 1c-grant, ANON 1d, ANON 1d-grant, ANON 2, ANON 2b, SERVICE-ROLE 0-acl, SERVICE-ROLE 1, SERVICE-ROLE 1-grant, SERVICE-ROLE 2a, SERVICE-ROLE 2b, SERVICE-ROLE 2c, SERVICE-ROLE 2d, SERVICE-ROLE 2e, NONCE 5a, NONCE 5b, NONCE 5c, SANITIZE 1a, SANITIZE 1b, SANITIZE 1c, SANITIZE 1d, SANITIZE 1e, SANITIZE 1f, N1 3a). Observed generation sequence: %', gen_seen;
 END
 $$;
 
