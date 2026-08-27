@@ -432,13 +432,30 @@ DECLARE
   v_body          TEXT;
   v_body_stripped TEXT;
 BEGIN
-  SELECT pg_get_functiondef(p.oid) INTO v_body
+  -- ⛔ MATCH THE IDENTITY ARGUMENTS, AND USE `INTO STRICT`. Latent today —
+  -- `sanitize_user` has never had an overload — and closed anyway, because both
+  -- halves fail in the same silent direction the rest of this file is built to
+  -- avoid. `proname` alone matches EVERY overload, and a bare `SELECT ... INTO`
+  -- on a multi-row result takes an ARBITRARY row without erroring: the probes
+  -- below would then verify whichever body PostgreSQL happened to return, and a
+  -- new overload lacking the Art. 17 arm could apply cleanly while this block
+  -- reported success against its sibling. `INTO STRICT` turns "0 or 2+ rows"
+  -- into a loud P0002/P0003 at apply time instead. The signature filter is the
+  -- same one migration 20260827120000's STEP 6 uses for both share RPCs, and
+  -- that file records what it costs when the identity string drifts (an OUT
+  -- parameter conversion silently matched zero rows and every body-shape arm
+  -- went vacuous) — which is exactly why the STRICT is not optional here.
+  SELECT pg_get_functiondef(p.oid) INTO STRICT v_body
     FROM pg_proc p
     JOIN pg_namespace n ON p.pronamespace = n.oid
-   WHERE n.nspname = 'public' AND p.proname = 'sanitize_user';
+   WHERE n.nspname = 'public'
+     AND p.proname = 'sanitize_user'
+     AND pg_get_function_identity_arguments(p.oid) = 'p_user_id uuid';
 
+  -- Kept as well as the STRICT above: STRICT raises `query returned no rows`,
+  -- which does not say WHICH object is missing or why anyone should care.
   IF v_body IS NULL THEN
-    RAISE EXCEPTION 'Phase 164 / B1 verification failed: sanitize_user not installed';
+    RAISE EXCEPTION 'Phase 164 / B1 verification failed: sanitize_user(p_user_id uuid) not installed';
   END IF;
 
   -- ⛔ Strip line-comments before EVERY live-statement probe. pg_get_functiondef

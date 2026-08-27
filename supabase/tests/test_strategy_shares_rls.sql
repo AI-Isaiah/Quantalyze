@@ -1030,6 +1030,13 @@ BEGIN
   -- not a guard, it is an outage.
   -- RED-UNDER: change rule (6) to `NEW.generation >= OLD.generation + 1`, i.e.
   --            refuse any increase at all.
+  -- ⚠️ LAYERED, and this note was MISSING while its two siblings carried one —
+  --    N1 1a and N1 3a both record it, so its absence here read as "this
+  --    mutation stands alone", which it does not. Migration 20260827120000's
+  --    STEP 6 arm (v-e) greps for the literal `NEW.generation > OLD.generation
+  --    + 1`; the `>=` form does not match that regex, so the arm ABORTS THE
+  --    APPLY and this file never runs at all. (v-e) must be removed in the same
+  --    mutation. With both gone this arm is the first failure.
   -- ⚠️ POSITION IS LOAD-BEARING. This arm sits BEFORE the first
   --    revoke_strategy_share call (REVOKE 1a below), because that call performs
   --    the identical `+ 1` and would abort the file first under the same
@@ -1087,9 +1094,18 @@ BEGIN
     RESET ROLE;
     RAISE EXCEPTION 'TEST FAILED (REVOKE 1b): revoked_at is still NULL after revoke — the tombstone was not stamped';
   END IF;
-  IF gen_revoked <> gen_mint + 1 THEN
+  -- ⛔ SUBTRACT, NEVER `gen_mint + 1` — the shape N1 1c and N1 3a were rewritten
+  -- to. Rule (6) makes the BIGINT ceiling unattainable today, so this arm cannot
+  -- currently reach a state where `gen_mint + 1` overflows; it is written this
+  -- way anyway because the file must state ONE rule for this comparison. The
+  -- reason N1 3a records is that an arm whose own arithmetic (and whose
+  -- `expected %` slot) overflows exactly when it fires reports `bigint out of
+  -- range ... at RAISE` instead of its diagnosis — a test that cannot speak,
+  -- which is barely better than one that cannot fail. The difference is always
+  -- small and never overflows.
+  IF (gen_revoked - gen_mint) IS DISTINCT FROM 1 THEN
     RESET ROLE;
-    RAISE EXCEPTION 'TEST FAILED (REVOKE 1c): generation is % after one revoke, expected % (exactly +1). If it is UNCHANGED the revoke is COSMETIC — revoked_at is set but the token still derives from the same counter, so every previously-copied link KEEPS WORKING (SHARE-03 defeated).', gen_revoked, gen_mint + 1;
+    RAISE EXCEPTION 'TEST FAILED (REVOKE 1c): generation is % after one revoke, up from % — expected exactly one more. If it is UNCHANGED the revoke is COSMETIC — revoked_at is set but the token still derives from the same counter, so every previously-copied link KEEPS WORKING (SHARE-03 defeated).', gen_revoked, gen_mint;
   END IF;
   gen_seen := gen_seen || gen_revoked;
 
@@ -1206,8 +1222,11 @@ BEGIN
   END IF;
 
   -- ⛔ NO "did the rejected UPDATE still write?" ARM HERE — one existed, was
-  -- counted, and was DELETED (round-3 review, 2026-08-27) for exactly the
-  -- reason this file already applied to TENANT 5h below: it could not fail.
+  -- counted, and was DELETED (round-3 review, 2026-08-27) for exactly the reason
+  -- the TENANT 5 block below records: it could not fail. (This sentence used to
+  -- point at a "TENANT 5h", which was the name of an arm deleted BEFORE that
+  -- roster was written down and has never appeared in the file — a dangling
+  -- pointer into the file's own history. The TENANT 5 block is the live record.)
   -- Two independent mechanisms make it unreachable, and either alone is fatal:
   --   * the statement above sits inside a nested BEGIN ... EXCEPTION, which
   --     PL/pgSQL executes as an implicit SUBTRANSACTION. Catching the error
@@ -1757,10 +1776,11 @@ BEGIN
   -- ⛔ Consequence for honesty: the arms below go RED on the SAME neuter that
   -- reddens TENANT 1 (dropping the EXISTS half) — they are NOT an independent
   -- pin of the USING clause. **TENANT 4a is the USING pin** — see the note
-  -- after 5c, which records why the obvious raw cross-tenant UPDATE arm here was
+  -- below, which records why the obvious raw cross-tenant UPDATE arm here was
   -- written, measured and then DELETED as unfailable. (An earlier version of
-  -- this sentence named a "TENANT 5h" that has never existed: 5h WAS that
-  -- deleted arm. The two passages now agree.)
+  -- this sentence named a "TENANT 5h" that has never appeared in the file: 5h
+  -- WAS that deleted arm. The TRIGGER 1 note above carried the same dangling
+  -- name until 2026-08-28; both now point here instead.)
   --
   -- ⛔⛔ THE 2026-08-28 RESTRUCTURE, AND WHY THE OLD SHAPE PROVED NOTHING. This
   -- block used to run the conflict-write inside a nested `BEGIN … EXCEPTION`,
@@ -2430,8 +2450,12 @@ BEGIN
   IF now_revoked IS NULL THEN
     RAISE EXCEPTION 'TEST FAILED (SANITIZE 1c): after sanitize_user the data subject''s share row is STILL LIVE. Every link they ever copied still resolves to their unpublished factsheet — returns curve, metrics and trade analytics all survive the anonymize — and banned_until = infinity means they can never log in to revoke it. Companion migration 20260827130000 is missing or its `UPDATE strategy_shares` arm was dropped. (SANITIZE 1e above has already proved the row EXISTS, so this really is a live row and not a missing one.)';
   END IF;
-  IF gen_final <> gen_pre_san + 1 THEN
-    RAISE EXCEPTION 'TEST FAILED (SANITIZE 1d): generation is % after erasure, expected % (exactly +1). If it is UNCHANGED the erasure is COSMETIC: revoked_at is stamped but the token still derives from the same counter, so every previously-copied link KEEPS WORKING.', gen_final, gen_pre_san + 1;
+  -- ⛔ SUBTRACT, NEVER `gen_pre_san + 1` — same rule as REVOKE 1c above and N1
+  -- 1c / N1 3a below, and it is least dispensable HERE of all four: N1 3a is the
+  -- arm that drives this same counter toward the ceiling on purpose, and it was
+  -- written as `+ 1` first and MEASURED aborting on its own arithmetic.
+  IF (gen_final - gen_pre_san) IS DISTINCT FROM 1 THEN
+    RAISE EXCEPTION 'TEST FAILED (SANITIZE 1d): generation is % after erasure, up from % — expected exactly one more. If it is UNCHANGED the erasure is COSMETIC: revoked_at is stamped but the token still derives from the same counter, so every previously-copied link KEEPS WORKING.', gen_final, gen_pre_san;
   END IF;
 
   -- ...and the erasure is scoped to the subject. `created_by = p_user_id` is
