@@ -433,7 +433,7 @@ the moment 164-03 merges:
 | 3 | N2: `SELECT … FOR UPDATE` in `revoke_strategy_share`, **and** STEP 6 arm (i-b) rewritten so removing the racy predicate no longer fails the apply | **164-06** | ❌ open — ⛔ until the arm is rewritten the durable gate *enforces the bug* |
 | 4 | F6: cache guard pinned over the transitive graph, `page.cache-isolation.test.tsx` written and demonstrated RED first | **164-07** + 164-05 | ❌ open |
 | 5 | F1/F2/F4 shipped (Plausible exclusion, Sentry path scrub, per-route `no-referrer`) | 164-05 | ❌ open — plan exists, moved into wave 2 |
-| 6 | Every one of the above **executed against a real PostgreSQL instance**, run output in the plan — not asserted in prose | all | ❌ open — this is `PROC-01`, routed to 164.1 as a standard but binding on this phase NOW |
+| 6 | Every one of the above **executed against a real PostgreSQL instance**, run output in the plan — not asserted in prose | all | 🟡 **discharged for what exists today** — 2026-08-27, PostgreSQL 16.13 throwaway cluster: both migrations APPLIED, `test_strategy_shares_rls.sql` **ALL 101 ARMS EXECUTED** exit 0, sequence `{1,1,2,2,2,3}`; arms proven able to fail (3 mutations on 130000, a `USING (true)` tenant leak caught by TENANT 4a). See `EXECUTION-EVIDENCE.md` + `pg-harness/run.sh`. ⛔ Re-arms for 164-06/164-07 |
 
 ⚠️ Wave 2 is now `164-05` + `164-06` + `164-07`; wave 3 is `164-03` + `164-04`. `164-06` and
 `164-07` are net-new and unplanned. ⛔ **`20260827130000_sanitize_user_revoke_strategy_shares.sql`
