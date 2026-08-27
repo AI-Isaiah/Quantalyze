@@ -91,14 +91,30 @@
 -- trigger.
 --
 -- The six rules plus the INSERT pin are what make the model sound:
---   (I)  on INSERT, generation is FORCED to 1 — not validated, overwritten — so
---        no caller can express a starting counter. STEP 2's column grant closes
---        this for `authenticated` only; the trigger closes it for the BYPASSRLS
---        roles a grant cannot bind (R3).
+--   (I)  on INSERT, generation is FORCED to 1 AND nonce is FORCED to a fresh
+--        gen_random_uuid() — not validated, overwritten — so no caller can
+--        express either MAC input on a fresh row. STEP 2's column grant closes
+--        both for `authenticated` only; the trigger closes them for the BYPASSRLS
+--        roles a grant cannot bind (R3). ⛔ The nonce half was ADDED 2026-08-28
+--        and is not decoration: a column DEFAULT applies only when the statement
+--        does not NAME the column, so before it a service_role
+--        DELETE + `INSERT ... (strategy_id, created_by, nonce)` restored a
+--        recorded nonce while this branch clamped generation back to 1 —
+--        rebuilding the exact pre-revoke (nonce, generation, live) triple, and
+--        with it every revoked token (MEASURED).
 --   (0a) strategy_id NEVER changes. Re-pointing the counter re-issues generation
 --        1 for the strategy it was pointed away from.
---   (0b) id, created_by and created_at NEVER change. Provenance on a live
---        capability grant must not be forgeable.
+--   (0b) id, created_by and created_at are never REWRITTEN. ⚠️ Read that
+--        narrowly, because the wider claim it used to make ("provenance on a
+--        live capability grant must not be forgeable") is FALSE on the INSERT
+--        side and was flagged as such: this rule is UPDATE-only, so a caller
+--        that bypasses grants can still CHOOSE `id` and `created_at` on a fresh
+--        row. That is accepted, not overlooked. Provenance on INSERT is
+--        caller-supplied by design — `created_by` IS the mint RPC's auth.uid(),
+--        so there is nothing to force it to — and neither `id` nor `created_at`
+--        is an input to the MAC, so neither buys a token. The rule's real job is
+--        to stop a SURVIVING row's provenance being rewritten, which is what
+--        STEP 3 promises the reader about reactivation.
 --   (0c) nonce NEVER changes. STEP 2's column grant already denies an ordinary
 --        `authenticated` caller any write naming this column — but a grant
 --        binds only roles that OBEY grants, and `service_role` holds GRANT ALL
@@ -155,11 +171,50 @@ BEGIN
   -- values are legal, and every legal value other than 1 is a bug. Overwriting
   -- means no caller — not `authenticated`, not `service_role`, not a future
   -- BYPASSRLS maintenance script — can express a starting generation at all.
-  -- `nonce` is untouched here on purpose: column DEFAULTs are applied while the
-  -- tuple is being formed, BEFORE row triggers fire, so NEW.nonce is already
-  -- the server-generated value the mint RPC reads back through RETURNING.
+  -- ⛔⛔ `nonce` IS RE-ROLLED HERE, AND LEAVING IT TO THE COLUMN DEFAULT WAS A
+  -- MEASURED HOLE (2026-08-28 three-reviewer gate, F-3). A DEFAULT only applies
+  -- when the statement does not NAME the column; a caller that names it supplies
+  -- its own value, and rule (0c) below is UPDATE-only by construction. STEP 2's
+  -- column grant closes the naming for `authenticated` — and for nobody else.
+  -- MEASURED on a throwaway PostgreSQL 16 cluster, with this line absent:
+  --   1. owner mints                       -> generation 1, nonce N
+  --   2. owner revokes                     -> generation 2; the token derived
+  --                                           from (N, 1) is now DEAD
+  --   3. `SET ROLE service_role; DELETE FROM strategy_shares ...`
+  --   4. `SET ROLE service_role; INSERT INTO strategy_shares
+  --       (strategy_id, created_by, nonce) VALUES (..., N)`
+  --   -> stored row came back as generation 1 (this branch FORCED it back down),
+  --      nonce N, revoked_at NULL. The (nonce, generation, live) triple is
+  --      byte-identical to the pre-revoke one, so HMAC over it re-derives the
+  --      REVOKED token exactly. Step 3+4 also fully reverses an Art. 17 erasure.
+  -- ⭐ Forcing rather than rejecting, for the same reason `generation` is forced:
+  -- a rejection teaches the caller which values are legal. Overwriting means no
+  -- caller — not `authenticated`, not `service_role`, not a future BYPASSRLS
+  -- maintenance script — can express a nonce at all, so a destroyed-and-
+  -- recreated row ALWAYS lands in a token space disjoint from every token that
+  -- row ever issued. That is the property the nonce exists to provide, and
+  -- before this line it held only against callers who obey column grants.
+  -- ⚠️ It does not disturb the mint lane: `create_strategy_share` never NAMES
+  -- `nonce` (STEP 3, pinned by STEP 6 arm (ii-d) and by SHAPE 4d), and it reads
+  -- the value back through `RETURNING`, which observes the post-trigger tuple —
+  -- MEASURED clean on both the INSERT and the ON CONFLICT path.
+  -- ⚠️ AND IT DOES NOT TOUCH REUSE OR REACTIVATION. `INSERT ... ON CONFLICT DO
+  -- UPDATE` fires this branch on the PROPOSED tuple, which is then DISCARDED on
+  -- conflict; the surviving row keeps its own nonce, so OWNER 2d (live reuse
+  -- returns the SAME nonce) and REACTIVATE 1g (revoke -> re-share returns the
+  -- SAME nonce) both stay green — measured, not assumed.
+  --
+  -- ⚠️ RULE (0b) HAS NO INSERT HALF AND DELIBERATELY GAINS NONE. A service_role
+  -- INSERT can still choose `id` and `created_at`. That is NOT closed here and
+  -- the COMMENT on this function is worded accordingly: (0b) is a claim about
+  -- never REWRITING provenance on a surviving row, not about establishing it.
+  -- Provenance on INSERT is caller-supplied by design — `created_by` IS the
+  -- mint RPC's `auth.uid()`, so forcing it is not available — and neither `id`
+  -- nor `created_at` is an input to the MAC, so neither buys a token. The nonce
+  -- is forced because it IS a MAC input; the rest is documented, not guarded.
   IF TG_OP = 'INSERT' THEN
     NEW.generation := 1;
+    NEW.nonce := gen_random_uuid();
     RETURN NEW;
   END IF;
 

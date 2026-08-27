@@ -229,8 +229,12 @@ DECLARE
   v_revoke_s   TEXT;
   gen_b        BIGINT;
   gen_b_after  BIGINT;
-  b_by         UUID;
   b_revoked    TIMESTAMPTZ;
+  -- TENANT 5's pre-attempt snapshot of tenant B's tombstone. Separate from
+  -- `b_revoked` on purpose: the end-state arm has to compare the AFTER value
+  -- against a BEFORE value it captured itself, or it cannot tell "the attack
+  -- was refused" from "the setup never revoked anything".
+  b_revoked_pre TIMESTAMPTZ;
   gen_pre_san  BIGINT;
   san_ok       BOOLEAN;
   gen_probe    BIGINT;
@@ -253,6 +257,15 @@ DECLARE
   strat_a4       UUID;
   gen_a4         BIGINT;
   gen_a4_pre     BIGINT;
+  -- N1 2b (2026-08-28): the forced-nonce-on-INSERT pin needs its own strategy,
+  -- because strat_a4 already carries the row N1 2a inserted.
+  strat_a5       UUID;
+  nonce_a5       UUID;
+  -- SERVICE-ROLE 2f (2026-08-28): tenant A's pre-attempt state, snapshotted so
+  -- the spoofed-claims arm compares against a value it captured rather than
+  -- against an assumption about where the file has left strat_a.
+  sr_rev_pre     TIMESTAMPTZ;
+  sr_gen_pre     BIGINT;
 BEGIN
   -- ----- SEED (seeding/service-role context — bypasses RLS) ---------------
   -- Both strategies are status='private': an unpublished strategy is the ONLY
@@ -301,6 +314,17 @@ BEGIN
   INSERT INTO strategies (user_id, name, status, strategy_types, subtypes, markets, supported_exchanges)
   VALUES (uid_a, 'strategy-shares A bounded-increment strategy', 'private', '{}', '{}', '{}', ARRAY['binance'])
   RETURNING id INTO strat_a4;
+
+  -- A FIFTH A-owned strategy, reserved for N1 2b (the forced-nonce-on-INSERT
+  -- pin, 2026-08-28). It cannot share strat_a4: that row already exists by the
+  -- time N1 2b runs — N1 2a inserted it — so UNIQUE(strategy_id) would raise
+  -- 23505 before the trigger was consulted and the arm would pass on the wrong
+  -- error, the exact defect ANON 1b and NONCE 2 both record. It cannot use
+  -- strat_a2 either, for the reason given above. And it must NOT be strat_a3,
+  -- which NONCE 4 destroys and re-creates.
+  INSERT INTO strategies (user_id, name, status, strategy_types, subtypes, markets, supported_exchanges)
+  VALUES (uid_a, 'strategy-shares A forced-nonce strategy', 'private', '{}', '{}', '{}', ARRAY['binance'])
+  RETURNING id INTO strat_a5;
 
   INSERT INTO auth.users (id, instance_id, email, created_at, updated_at)
   VALUES (uid_b, '00000000-0000-0000-0000-000000000000',
@@ -479,13 +503,29 @@ BEGIN
   -- named `nonce` in its INSERT — which is why SHAPE 4d pins the other side of
   -- the same coupling.
   --
+  -- ⚠️ THE RATIONALE BELOW WAS RESTATED 2026-08-28. It used to argue that these
+  -- grants are the SOLE control on a fresh row because "the trigger is BEFORE
+  -- UPDATE only, so a fresh row is seen by no rule at all". That was true when
+  -- it was written and has been FALSE since 164-06 widened the trigger to
+  -- BEFORE INSERT OR UPDATE. Two layers now cover a fresh row, and saying so
+  -- matters in both directions: a reader who believes the grant is the only
+  -- control over-weights it, and a reader who learns the trigger covers INSERT
+  -- may conclude the grant is redundant. It is not — see below.
+  --
   -- The set is asserted EXACTLY, in both directions:
-  --   * `nonce` must be ABSENT — its unwritability is what makes a
-  --     destroyed-and-recreated row land in a disjoint token space;
-  --   * `generation` and `revoked_at` must be absent from the INSERT half —
-  --     the trigger is BEFORE **UPDATE** only, so a fresh row is seen by no
-  --     rule at all and a client could otherwise choose its starting counter
-  --     (pre-wedging the overflow of SHAPE 1c) or pre-stamp a tombstone;
+  --   * `nonce` must be ABSENT — its unwritability is the `authenticated`-side
+  --     layer of what makes a destroyed-and-recreated row land in a disjoint
+  --     token space. The trigger's INSERT branch re-rolls the nonce and is the
+  --     layer that covers the roles a grant cannot bind (N1 2b);
+  --   * `generation` and `revoked_at` must be absent from the INSERT half. The
+  --     trigger's INSERT branch FORCES generation to 1, so a widened grant no
+  --     longer plants a chosen starting counter — but `revoked_at` is covered by
+  --     NO rule on the INSERT path at all (rule (2) fires only on the
+  --     NULL -> NOT NULL transition of an UPDATE), so a client holding
+  --     `INSERT (revoked_at)` could still pre-stamp a tombstone on a fresh row.
+  --     For `generation` the grant is now the CHEAP detector rather than the
+  --     only one, and it is kept for defence in depth and because a grant is
+  --     the only control that automatically covers columns added in future;
   --   * `strategy_id` and `created_by` must be PRESENT on INSERT, and
   --     `revoked_at`/`generation` on UPDATE, or both SECURITY INVOKER RPCs stop
   --     working for every owner (mint, reuse and revoke all write as the
@@ -501,7 +541,7 @@ BEGIN
      AND a.attnum > 0 AND NOT a.attisdropped
      AND r.rolname = 'authenticated';
   IF v_colgrants IS DISTINCT FROM 'created_by:INSERT,generation:UPDATE,revoked_at:UPDATE,strategy_id:INSERT' THEN
-    RAISE EXCEPTION 'TEST FAILED (SHAPE 3b): `authenticated` holds COLUMN-level grants "%" on strategy_shares, expected exactly "created_by:INSERT,generation:UPDATE,revoked_at:UPDATE,strategy_id:INSERT". ⛔ A grant naming `nonce` re-opens the whole delete-and-recreate resurrection family: the owner reads their nonce under RLS, cascades the row away via `strategies`, and re-inserts it verbatim (MEASURED — accepted, bit-identical). ⛔ An INSERT grant naming `generation` or `revoked_at` re-opens R3''s INSERT half, which NO trigger covers because the trigger is BEFORE UPDATE only. ⚠️ And a MISSING grant is equally fatal in the other direction — both RPCs are SECURITY INVOKER and write as the caller, so mint or revoke would 42501 for every owner.', COALESCE(v_colgrants, '(none)');
+    RAISE EXCEPTION 'TEST FAILED (SHAPE 3b): `authenticated` holds COLUMN-level grants "%" on strategy_shares, expected exactly "created_by:INSERT,generation:UPDATE,revoked_at:UPDATE,strategy_id:INSERT". ⛔ A grant naming `nonce` re-opens the `authenticated` side of the delete-and-recreate resurrection family: the owner reads their nonce under RLS, cascades the row away via `strategies`, and re-inserts it verbatim (MEASURED — accepted, bit-identical, before the trigger gained its INSERT branch). ⛔ An INSERT grant naming `revoked_at` re-opens R3''s INSERT half outright — NO trigger rule covers a tombstone on a fresh row, because rule (2) fires only on the NULL to NOT NULL transition of an UPDATE. ⚠️ An INSERT grant naming `generation` or `nonce` is now caught a second time by the trigger''s INSERT branch, which FORCES both (N1 2a, N1 2b); that makes this arm the cheap detector rather than the last line for those two columns, and it is kept because a grant is the only control that automatically covers columns added to this table in future. ⚠️ And a MISSING grant is equally fatal in the other direction — both RPCs are SECURITY INVOKER and write as the caller, so mint or revoke would 42501 for every owner.', COALESCE(v_colgrants, '(none)');
   END IF;
 
   -- ======================================================================
@@ -590,18 +630,40 @@ BEGIN
   END IF;
 
   -- ======================================================================
-  -- SHAPE 5: the monotonicity trigger exists, BEFORE UPDATE, FOR EACH ROW
+  -- SHAPE 5: the trigger exists, BEFORE **INSERT OR UPDATE**, FOR EACH ROW
   -- ======================================================================
   -- Structural companion to the behavioural TRIGGER 1 / TRIGGER 2 arms below.
   -- It is not redundant with them: those two also go RED if the trigger is
   -- merely DROPPED, but they cannot distinguish a correct trigger from one
-  -- re-created with the wrong timing or level, and both miscreations silently
-  -- stop guarding:
+  -- re-created with the wrong timing, level or EVENT SET, and every such
+  -- miscreation silently stops guarding:
   --   * AFTER instead of BEFORE — it still raises, but any AFTER trigger
   --     ordered ahead of it has already observed the rewound row;
   --   * STATEMENT instead of ROW — OLD/NEW do not exist, so the body becomes a
-  --     runtime error on EVERY update rather than a guard on the bad ones.
-  -- tgtype bit 0 = ROW, bit 1 = BEFORE, bit 4 = UPDATE.
+  --     runtime error on EVERY update rather than a guard on the bad ones;
+  --   * UPDATE only, without INSERT — the R3 INSERT pin (forced generation,
+  --     forced nonce) is silently retired for every role a column grant does
+  --     not bind.
+  -- ⛔⛔ THE INSERT BIT IS ASSERTED SEPARATELY AND THAT WAS A REAL GAP, not a
+  -- tidy-up. 164-06 widened the trigger to BEFORE INSERT OR UPDATE and taught
+  -- migration 20260827120000's STEP 6 arm (v) to test bit 2; THIS arm — the
+  -- DURABLE pin, the one that re-runs on every CI push, against the live
+  -- catalog — never received the same fix and still tested bits 1, 2 and 16
+  -- only. `&` masking means a trigger narrowed back to `BEFORE UPDATE`
+  -- satisfies every one of those terms. MEASURED 2026-08-28: with the trigger
+  -- changed to `BEFORE UPDATE ON strategy_shares` (and migration arm (v)'s
+  -- INSERT term removed so the apply survived), SHAPE 5 PASSED and the file ran
+  -- on for sixteen more arms before N1 2a caught it BEHAVIOURALLY — "a
+  -- service_role INSERT naming generation = 987654321 landed at 987654321".
+  -- A structural pin that a behavioural arm has to rescue is not a pin.
+  -- Each event the guard claims to cover needs its own bit test.
+  -- tgtype bit 0 = ROW, bit 1 = BEFORE, bit 2 = INSERT, bit 4 = UPDATE.
+  -- RED-UNDER: change the CREATE TRIGGER in migration 20260827120000 STEP 1b to
+  --            `BEFORE UPDATE ON strategy_shares`.
+  -- ⚠️ LAYERED: migration arm (v) tests the same bit and ABORTS THE APPLY, so
+  --    its `AND (t.tgtype & 4) = 4` term must be removed in the same mutation
+  --    or this file never runs. With both gone SHAPE 5 is the first failure
+  --    (MEASURED) — where before the fix it was silent and N1 2a was.
   SELECT count(*) INTO row_cnt
     FROM pg_trigger t
    WHERE t.tgrelid = 'public.strategy_shares'::regclass
@@ -609,9 +671,10 @@ BEGIN
      AND t.tgname = 'strategy_shares_monotonic_generation'
      AND (t.tgtype & 1) = 1
      AND (t.tgtype & 2) = 2
+     AND (t.tgtype & 4) = 4
      AND (t.tgtype & 16) = 16;
   IF row_cnt <> 1 THEN
-    RAISE EXCEPTION 'TEST FAILED (SHAPE 5): expected exactly 1 BEFORE UPDATE FOR EACH ROW trigger named strategy_shares_monotonic_generation on strategy_shares, found %. Without it the owner''s UPDATE grant on (revoked_at, generation) plus the FOR ALL policy let a raw PATCH rewind the counter — MEASURED (PostgreSQL 16): generation went 2 -> 1 and revoked_at was cleared in ONE request, resurrecting every link the owner had revoked. ⛔ A trigger is also the ONLY control on this table that binds service_role, which BYPASSRLS exempts from every policy here and which GRANT ALL exempts from every column grant.', row_cnt;
+    RAISE EXCEPTION 'TEST FAILED (SHAPE 5): expected exactly 1 BEFORE INSERT OR UPDATE FOR EACH ROW trigger named strategy_shares_monotonic_generation on strategy_shares, found %. Without its UPDATE half the owner''s UPDATE grant on (revoked_at, generation) plus the FOR ALL policy let a raw PATCH rewind the counter — MEASURED (PostgreSQL 16): generation went 2 -> 1 and revoked_at was cleared in ONE request, resurrecting every link the owner had revoked. Without its INSERT half a role that bypasses grants lands a fresh row at a starting generation AND a nonce of its own choosing, which no column grant reaches — that is the whole delete-and-recreate resurrection family, and it is what N1 2a and N1 2b prove behaviourally. ⛔ A trigger is also the ONLY control on this table that binds service_role, which BYPASSRLS exempts from every policy here and which GRANT ALL exempts from every column grant.', row_cnt;
   END IF;
 
   -- ======================================================================
@@ -857,6 +920,52 @@ BEGIN
   END IF;
 
   -- ======================================================================
+  -- N1 2b: ...and a service_role INSERT that NAMES a RECORDED nonce gets a
+  --        FRESH one — the other half of the same forgery primitive
+  -- ======================================================================
+  -- ⛔ N1 2a DOES NOT COVER THIS AND THE PAIR IS THE POINT. `generation` and
+  -- `nonce` are the two MAC inputs; forcing one while the other stays
+  -- caller-suppliable closes nothing, because the token is derived from BOTH.
+  -- Before the 2026-08-28 fix the trigger forced only `generation`, and that
+  -- made the hole WORSE rather than better — the clamp back to 1 is what
+  -- reconstructed the ORIGINAL counter. MEASURED end-to-end on a throwaway
+  -- PostgreSQL 16 cluster:
+  --   1. owner mints                    -> generation 1, nonce N
+  --   2. owner revokes                  -> generation 2; the token over (N, 1)
+  --                                        is now DEAD
+  --   3. `SET ROLE service_role; DELETE FROM strategy_shares WHERE ...`
+  --   4. `SET ROLE service_role; INSERT INTO strategy_shares
+  --       (strategy_id, created_by, nonce) VALUES (..., N)`
+  --   -> stored row: generation 1, nonce N, revoked_at NULL. Byte-identical to
+  --      the pre-revoke triple, so the REVOKED url resolves again — and steps
+  --      3+4 also fully reverse a completed Art. 17 erasure, restoring links the
+  --      regulation required to be killed.
+  --
+  -- ⛔ RUN AS service_role, exactly like N1 2a and for the same reason: STEP 2
+  -- omits `nonce` from authenticated's INSERT grant, so an owner naming it gets
+  -- 42501 and never reaches the table (that is NONCE 2a, and it measures the
+  -- GRANT). This arm measures the TRIGGER, against the one role no grant binds.
+  -- The recorded value is `nonce_mint` — tenant A's real, live nonce — so a
+  -- green here is not an accident of using an unrelated uuid.
+  -- RED-UNDER: delete the `NEW.nonce := gen_random_uuid();` assignment from the
+  --            `IF TG_OP = 'INSERT'` branch of
+  --            strategy_shares_enforce_monotonic_generation() (STEP 1b).
+  -- ⚠️ LAYERED: migration 20260827120000's STEP 6 arm (v-d2) greps for
+  --    `NEW.nonce :=` and ABORTS THE APPLY without it, so (v-d2) must be removed
+  --    in the same mutation or this file never runs. With both gone this arm is
+  --    the first failure (MEASURED).
+  SET LOCAL ROLE service_role;
+  INSERT INTO strategy_shares (strategy_id, created_by, nonce)
+  VALUES (strat_a5, uid_a, nonce_mint);
+  SET LOCAL ROLE authenticated;
+
+  SELECT nonce INTO nonce_a5 FROM strategy_shares WHERE strategy_id = strat_a5;
+  IF nonce_a5 IS NULL OR nonce_a5 = nonce_mint THEN
+    RESET ROLE;
+    RAISE EXCEPTION 'TEST FAILED (N1 2b): a service_role INSERT naming nonce = % stored %, expected a DIFFERENT, server-generated value. The trigger no longer FORCES the nonce on INSERT, and the column DEFAULT does not cover this — a DEFAULT applies only when the statement does not NAME the column, and no grant binds this caller. Combined with the forced `generation := 1` that N1 2a pins, an admin transport can DELETE a revoked row and re-insert it with the recorded nonce to rebuild the exact pre-revoke (nonce, generation, live) triple: every token that row ever issued derives again, and a completed GDPR Art. 17 erasure is reversed.', nonce_mint, COALESCE(nonce_a5::TEXT, '(no row)');
+  END IF;
+
+  -- ======================================================================
   -- N1 1a: the CEILING JUMP is refused (the whole of N1)
   -- ======================================================================
   -- MEASURED at HEAD before this fix (EXECUTION-EVIDENCE.md §5): the owner holds
@@ -921,6 +1030,13 @@ BEGIN
   -- not a guard, it is an outage.
   -- RED-UNDER: change rule (6) to `NEW.generation >= OLD.generation + 1`, i.e.
   --            refuse any increase at all.
+  -- ⚠️ LAYERED, and this note was MISSING while its two siblings carried one —
+  --    N1 1a and N1 3a both record it, so its absence here read as "this
+  --    mutation stands alone", which it does not. Migration 20260827120000's
+  --    STEP 6 arm (v-e) greps for the literal `NEW.generation > OLD.generation
+  --    + 1`; the `>=` form does not match that regex, so the arm ABORTS THE
+  --    APPLY and this file never runs at all. (v-e) must be removed in the same
+  --    mutation. With both gone this arm is the first failure.
   -- ⚠️ POSITION IS LOAD-BEARING. This arm sits BEFORE the first
   --    revoke_strategy_share call (REVOKE 1a below), because that call performs
   --    the identical `+ 1` and would abort the file first under the same
@@ -978,9 +1094,18 @@ BEGIN
     RESET ROLE;
     RAISE EXCEPTION 'TEST FAILED (REVOKE 1b): revoked_at is still NULL after revoke — the tombstone was not stamped';
   END IF;
-  IF gen_revoked <> gen_mint + 1 THEN
+  -- ⛔ SUBTRACT, NEVER `gen_mint + 1` — the shape N1 1c and N1 3a were rewritten
+  -- to. Rule (6) makes the BIGINT ceiling unattainable today, so this arm cannot
+  -- currently reach a state where `gen_mint + 1` overflows; it is written this
+  -- way anyway because the file must state ONE rule for this comparison. The
+  -- reason N1 3a records is that an arm whose own arithmetic (and whose
+  -- `expected %` slot) overflows exactly when it fires reports `bigint out of
+  -- range ... at RAISE` instead of its diagnosis — a test that cannot speak,
+  -- which is barely better than one that cannot fail. The difference is always
+  -- small and never overflows.
+  IF (gen_revoked - gen_mint) IS DISTINCT FROM 1 THEN
     RESET ROLE;
-    RAISE EXCEPTION 'TEST FAILED (REVOKE 1c): generation is % after one revoke, expected % (exactly +1). If it is UNCHANGED the revoke is COSMETIC — revoked_at is set but the token still derives from the same counter, so every previously-copied link KEEPS WORKING (SHARE-03 defeated).', gen_revoked, gen_mint + 1;
+    RAISE EXCEPTION 'TEST FAILED (REVOKE 1c): generation is % after one revoke, up from % — expected exactly one more. If it is UNCHANGED the revoke is COSMETIC — revoked_at is set but the token still derives from the same counter, so every previously-copied link KEEPS WORKING (SHARE-03 defeated).', gen_revoked, gen_mint;
   END IF;
   gen_seen := gen_seen || gen_revoked;
 
@@ -1097,8 +1222,11 @@ BEGIN
   END IF;
 
   -- ⛔ NO "did the rejected UPDATE still write?" ARM HERE — one existed, was
-  -- counted, and was DELETED (round-3 review, 2026-08-27) for exactly the
-  -- reason this file already applied to TENANT 5h below: it could not fail.
+  -- counted, and was DELETED (round-3 review, 2026-08-27) for exactly the reason
+  -- the TENANT 5 block below records: it could not fail. (This sentence used to
+  -- point at a "TENANT 5h", which was the name of an arm deleted BEFORE that
+  -- roster was written down and has never appeared in the file — a dangling
+  -- pointer into the file's own history. The TENANT 5 block is the live record.)
   -- Two independent mechanisms make it unreachable, and either alone is fatal:
   --   * the statement above sits inside a nested BEGIN ... EXCEPTION, which
   --     PL/pgSQL executes as an implicit SUBTRANSACTION. Catching the error
@@ -1387,9 +1515,18 @@ BEGIN
   -- their own row satisfies both halves of strategy_shares_owner, so RLS lets
   -- this through; and the trigger's rule (0c) would ALSO reject it, with a
   -- different message. Three layers could each be the one that fired, and the
-  -- one that MUST fire is the grant — because it is the only one that also
-  -- stops the INSERT form of the same attack (NONCE 2), where no BEFORE UPDATE
-  -- trigger exists to help. Pin `permission denied`, not a bare `raised`:
+  -- one that MUST fire is the grant — because it is the layer that REFUSES the
+  -- statement outright rather than correcting it, and it is the one this arm
+  -- names. ⚠️ RESTATED 2026-08-28: this used to say the grant is "the only one
+  -- that also stops the INSERT form of the same attack (NONCE 2), where no
+  -- BEFORE UPDATE trigger exists to help". Since 164-06 the trigger is BEFORE
+  -- INSERT OR UPDATE, and since the F-3 fix its INSERT branch re-rolls the
+  -- nonce, so the INSERT form is covered twice — by the grant for
+  -- `authenticated` (NONCE 2) and by the trigger for the roles a grant cannot
+  -- bind (N1 2b). The two are still not interchangeable: the grant makes the
+  -- write IMPOSSIBLE (42501), the trigger makes it INEFFECTIVE (a fresh nonce
+  -- is stored), and only the first tells the caller they got it wrong.
+  -- Pin `permission denied`, not a bare `raised`:
   -- rule (0c) raises `check_violation` with the text "nonce is immutable", and
   -- a bare arm would report the grant as absent-and-safe while it was in fact
   -- present-and-masked.
@@ -1421,16 +1558,28 @@ BEGIN
   END IF;
   IF err_msg NOT LIKE '%permission denied%' THEN
     RESET ROLE;
-    RAISE EXCEPTION 'TEST FAILED (NONCE 1b): the nonce write was rejected, but NOT by the GRANT layer (got: %). If this is trigger rule (0c) — "nonce is immutable", errcode check_violation — then `authenticated` still HOLDS UPDATE(nonce) and this arm proved nothing about the grant. The distinction matters: rule (0c) is a BEFORE UPDATE trigger and cannot see the INSERT form of the same attack, which NONCE 2 exercises.', err_msg;
+    RAISE EXCEPTION 'TEST FAILED (NONCE 1b): the nonce write was rejected, but NOT by the GRANT layer (got: %). If this is trigger rule (0c) — "nonce is immutable", errcode check_violation — then `authenticated` still HOLDS UPDATE(nonce) and this arm proved nothing about the grant. The distinction matters: rule (0c) is an UPDATE-side rule, so it never sees the INSERT form of the same attack — that form is closed by the grant (NONCE 2) and, for the roles a grant cannot bind, by the trigger''s separate INSERT branch (N1 2b). A green here that came from rule (0c) means the `authenticated` half of that pair is gone.', err_msg;
   END IF;
 
   -- ======================================================================
   -- NONCE 2: ...and cannot supply one on INSERT either — THE R2b CLOSURE
   -- ======================================================================
-  -- ⛔ NONCE 1 DOES NOT COVER THIS, AND THIS IS THE ONE THAT MATTERS. The
-  -- trigger is BEFORE **UPDATE** only, so an INSERT is seen by NO rule at all;
-  -- the grant is the sole control. The full attack, MEASURED end-to-end on a
-  -- throwaway PostgreSQL 16 cluster (2026-08-27):
+  -- ⛔ NONCE 1 DOES NOT COVER THIS. Rule (0c) is an UPDATE-side rule, so it
+  -- never sees an INSERT; the layer this arm measures is the GRANT.
+  -- ⚠️ RESTATED 2026-08-28. This block used to say "the trigger is BEFORE
+  -- UPDATE only, so an INSERT is seen by NO rule at all; the grant is the sole
+  -- control". Since 164-06 the trigger is BEFORE INSERT OR UPDATE, and since the
+  -- F-3 fix its INSERT branch re-rolls the nonce — so the grant is no longer
+  -- SOLE, it is the `authenticated`-side layer of a pair, and N1 2b is the
+  -- other. Keeping the old sentence would have been the more dangerous error of
+  -- the two: it invites a future reader to conclude that widening this grant is
+  -- catastrophic-and-therefore-unthinkable, when in fact the honest reason to
+  -- keep it narrow is that the grant REFUSES the statement (42501, the caller
+  -- learns) while the trigger merely NEUTRALISES it (a fresh nonce is stored,
+  -- silently).
+  -- The full attack, MEASURED end-to-end on a
+  -- throwaway PostgreSQL 16 cluster (2026-08-27), against the pre-164-06
+  -- trigger:
   --   1. the owner SELECTs their own nonce — RLS permits it, and it must, since
   --      create_strategy_share RETURNs it as the caller;
   --   2. the owner DELETEs their `strategies` row. ON DELETE CASCADE takes the
@@ -1451,9 +1600,13 @@ BEGIN
   -- RED-UNDER: `GRANT INSERT (nonce) ON strategy_shares TO authenticated` on
   --            the live database, with SHAPE 3b neutered (its exact-set pin
   --            fires first on any grant drift). NONCE 2a is then the first
-  --            failure — MEASURED 2026-08-27. ⚠️ Note the asymmetry with
-  --            NONCE 1: there is NO BEFORE INSERT trigger, so nothing behind
-  --            the grant catches this one. The INSERT simply SUCCEEDS.
+  --            failure — MEASURED 2026-08-27. ⚠️ Under that mutation the INSERT
+  --            SUCCEEDS — which is what makes `raised = FALSE` the detection —
+  --            but since the F-3 fix the row it lands carries a FRESH nonce,
+  --            not the chosen one: the trigger's INSERT branch overwrote it.
+  --            So the failure this arm reports is now "the privilege wall is
+  --            gone", not "the token was resurrected"; N1 2b is what would go
+  --            red if the resurrection itself were reachable again.
   raised := FALSE;
   BEGIN
     INSERT INTO strategy_shares (strategy_id, created_by, nonce)
@@ -1463,7 +1616,7 @@ BEGIN
   END;
   IF NOT raised THEN
     RESET ROLE;
-    RAISE EXCEPTION 'TEST FAILED (NONCE 2a): the owner INSERTed a share row carrying a nonce OF THEIR CHOOSING. That is the whole delete-and-recreate resurrection: read your nonce, cascade the row away through `strategies` (which no control on this table can see), re-create the strategy at the same client-suppliable uuid, and re-insert the row verbatim — the previously-revoked token derives again, bit-identical. The trigger cannot help here: it is BEFORE UPDATE and an INSERT is seen by no rule. `GRANT INSERT (strategy_id, created_by)` is the only control, and it is missing or was widened.';
+    RAISE EXCEPTION 'TEST FAILED (NONCE 2a): the owner INSERTed a share row NAMING `nonce`, with no privilege error. That statement is the last step of the delete-and-recreate resurrection: read your nonce, cascade the row away through `strategies` (which no control on this table can see), re-create the strategy at the same client-suppliable uuid, and re-insert the row verbatim. `GRANT INSERT (strategy_id, created_by)` is the wall that must refuse it and it is missing or was widened. ⚠️ Read the scope exactly: since 164-06 the trigger also covers INSERT and its branch re-rolls the nonce, so the row this statement landed most likely carries a FRESH value and the token is NOT resurrected — that second layer is pinned by N1 2b, against the roles a grant cannot bind. What THIS arm reports is that the privilege wall is gone, which is a real regression on its own: the grant REFUSES the write and tells the caller, where the trigger silently corrects it.';
   END IF;
   IF err_msg NOT LIKE '%permission denied%' THEN
     RESET ROLE;
@@ -1473,18 +1626,30 @@ BEGIN
   -- ======================================================================
   -- NONCE 3: R3''s INSERT half — a client cannot CHOOSE a starting generation
   -- ======================================================================
-  -- Same mechanism, different column, and worth its own arm because the
-  -- consequence is different in kind: this one is an availability wedge, not a
-  -- disclosure. The trigger is BEFORE UPDATE, so a FRESH row's `generation` was
-  -- wholly unguarded — `INSERT ... (strategy_id, created_by, generation)` with
-  -- 2^63-1 pre-wedges the overflow that SHAPE 1c only widened the distance to.
-  -- revoke_strategy_share would then error `out of range`, and the GDPR Art. 17
-  -- arm in migration 20260827130000 is the SAME statement, so the data
-  -- subject''s entire erasure aborts — triggerable BY the data subject, with no
-  -- operator remedy short of DDL.
+  -- Same mechanism, different column, kept as its own arm because it pins a
+  -- different grant term.
+  -- ⚠️ WHAT THIS ARM PROVES WAS RESTATED 2026-08-28, because the consequence it
+  -- used to name is NO LONGER REACHABLE and an arm that threatens an impossible
+  -- outcome teaches the next reader the wrong model. The old text said the
+  -- trigger is BEFORE UPDATE, so a fresh row's `generation` is "wholly
+  -- unguarded", and that `INSERT ... (strategy_id, created_by, generation)` with
+  -- 2^63-1 pre-wedges the overflow — wedging revoke_strategy_share and, on the
+  -- same `generation + 1` statement, the data subject's own GDPR Art. 17
+  -- erasure. That was true before 164-06. It is false now: the trigger's INSERT
+  -- branch FORCES `generation := 1`, so even with the grant widened the planted
+  -- value never reaches the table. The ceiling wedge survives ONLY through the
+  -- UPDATE path, which is rule (6)'s job and is pinned by N1 1a/1b/1c.
+  -- ⭐ So this arm's standing value is the GRANT, not the wedge: `generation`
+  -- must not appear in any INSERT grant to `authenticated`, because a widened
+  -- grant means the column is reachable and the trigger's INSERT branch is the
+  -- only thing correcting it — two layers to one, silently. SHAPE 3b is the
+  -- exact-set structural pin; this is the behavioural one.
   -- RED-UNDER: `GRANT INSERT (generation) ON strategy_shares TO authenticated`
   --            on the live database, SHAPE 3b neutered. First failure —
-  --            MEASURED 2026-08-27.
+  --            MEASURED 2026-08-27. ⚠️ Under that mutation the INSERT now
+  --            SUCCEEDS and lands at generation 1, not at 2^63-1 — the arm
+  --            still fires on `NOT raised`, which is the privilege wall it
+  --            actually measures.
   raised := FALSE;
   BEGIN
     INSERT INTO strategy_shares (strategy_id, created_by, generation)
@@ -1494,7 +1659,7 @@ BEGIN
   END;
   IF NOT raised THEN
     RESET ROLE;
-    RAISE EXCEPTION 'TEST FAILED (NONCE 3): the owner INSERTed a share row with a generation of their own choosing. Nothing else guards a FRESH row — the monotonicity trigger is BEFORE UPDATE — so a client can plant the counter at the BIGINT ceiling and permanently wedge their own revoke AND their own GDPR Art. 17 erasure, which share the same `generation + 1` statement.';
+    RAISE EXCEPTION 'TEST FAILED (NONCE 3): the owner INSERTed a share row NAMING `generation`, with no privilege error — `generation` has appeared in an INSERT grant to `authenticated`. ⚠️ The row itself most likely landed at 1: since 164-06 the trigger also fires BEFORE INSERT and FORCES the starting counter, so the planted 2^63-1 never reaches the table and the availability wedge this arm once named is no longer reachable through INSERT (it survives only through UPDATE, which is rule (6) and N1 1a/1b/1c). What is gone is the PRIVILEGE wall: the column is now reachable and the trigger''s INSERT branch is the only thing correcting it, two layers reduced to one, silently. Restore the column-scoped grant.';
   END IF;
 
   -- ======================================================================
@@ -1608,16 +1773,87 @@ BEGIN
   --     where the policy's USING clause is evaluated against the EXISTING row
   --     and rejects with the DISTINCT message "new row violates row-level
   --     security policy (USING expression)". That is the second wall.
-  -- ⛔ Consequence for honesty: 5b/5c below go RED on the SAME neuter that
+  -- ⛔ Consequence for honesty: the arms below go RED on the SAME neuter that
   -- reddens TENANT 1 (dropping the EXISTS half) — they are NOT an independent
   -- pin of the USING clause. **TENANT 4a is the USING pin** — see the note
-  -- immediately after 5c, which records why the obvious raw cross-tenant UPDATE
-  -- arm here was written, measured and then DELETED as unfailable. (An earlier
-  -- version of this sentence named a "TENANT 5h" that has never existed: the
-  -- roster is 5a-5g, and 5h WAS that deleted arm. The two passages now agree.)
-  -- What 5b-5g uniquely prove is that the rejection is TOTAL when a victim row
-  -- exists: no partial write, no revoked_at clearing, no provenance rewrite, no
-  -- second row.
+  -- below, which records why the obvious raw cross-tenant UPDATE arm here was
+  -- written, measured and then DELETED as unfailable. (An earlier version of
+  -- this sentence named a "TENANT 5h" that has never appeared in the file: 5h
+  -- WAS that deleted arm. The TRIGGER 1 note above carried the same dangling
+  -- name until 2026-08-28; both now point here instead.)
+  --
+  -- ⛔⛔ THE 2026-08-28 RESTRUCTURE, AND WHY THE OLD SHAPE PROVED NOTHING. This
+  -- block used to run the conflict-write inside a nested `BEGIN … EXCEPTION`,
+  -- assert `raised`, and THEN read tenant B's row through four arms (5d-5g:
+  -- generation, tombstone, provenance, row count) that claimed to prove "the
+  -- rejection was TOTAL — no partial write". They proved the opposite of a
+  -- security property: they were reading THEIR OWN SUBTRANSACTION ROLLBACK.
+  -- PL/pgSQL executes a nested BEGIN … EXCEPTION as an implicit subtransaction,
+  -- so catching the error rolls back every database change the block made — in
+  -- EVERY configuration, whether or not any wall exists.
+  -- MEASURED (PostgreSQL 16 throwaway cluster, 2026-08-28): a GENUINE
+  -- cross-tenant write placed inside that block —
+  --   `SET LOCAL ROLE service_role;
+  --    UPDATE strategy_shares SET revoked_at = now(), generation = generation + 1
+  --      WHERE strategy_id = strat_b;`
+  -- — moved B's counter 1 -> 2 and stamped B's tombstone, and THE WHOLE FILE
+  -- STILL WENT GREEN: psql exit 0, and the completion notice reported every one
+  -- of that day's 106 arms as executed. The identical statement moved OUTSIDE
+  -- the block was caught immediately ("TENANT 5d: tenant A's rejected
+  -- conflict-write moved tenant B's generation from 1 to 2"). The handler, not
+  -- the guard, was doing all the work.
+  -- ⛔ AND DO NOT QUOTE THIS FILE'S COMPLETION NOTICE VERBATIM IN A COMMENT.
+  -- The sentinel check in .github/workflows/ci.yml — and the psql stub in
+  -- src/__tests__/contracts/ci-anti-skip-gate.contract.test.ts — both take the
+  -- FIRST match of that notice's text in the file, so a prose copy sitting
+  -- ABOVE the real notice shadows it and the gate reports the sentinel as never
+  -- printed while psql exits 0. MEASURED 2026-08-28, on this very paragraph.
+  --
+  -- ⭐ THE FIX IS TRIGGER 3'S PRECEDENT: assert the attack's END STATE, from
+  -- outside the handler, on a row where a successful write would LEAVE A MARK.
+  -- `create_strategy_share`'s conflict path is `SET revoked_at = NULL` and
+  -- nothing else, so against a LIVE victim row a successful cross-tenant write
+  -- is invisible — which is why this block now REVOKES B's share first. Then:
+  --   * walls present -> the statement raises, the subtransaction discards it,
+  --     B's row is still revoked;
+  --   * both walls gone -> the statement SUCCEEDS, no exception is raised, the
+  --     subtransaction COMMITS, and B's revoked link is LIVE AGAIN. TENANT 5b
+  --     is the first failure, on the end state rather than on an error string.
+  --
+  -- ⚠️ THE ROSTER IS NOW 5a AND 5b, AND THE OLD 5b/5c COLLAPSED INTO ONE ARM
+  -- rather than being kept as three. This was measured, not preferred. The
+  -- conflict-write either RAISES (and the subtransaction discards it) or
+  -- SUCCEEDS (and the tombstone clears); there is no third world, so "it was
+  -- rejected" and "B's row survived" can never both be first, and whichever is
+  -- written second is unfailable. The end state is the one kept, because it is
+  -- the property that matters and it survives a future change in which the RPC
+  -- stops raising but still fails to write.
+  -- ⛔ AND THE MESSAGE PIN CANNOT BE AN ARM OF ITS OWN EITHER — MEASURED, after
+  -- three attempts to redden it. For a rejection to arrive from something other
+  -- than RLS while the tombstone survives, the mint RPC's conflict clause or the
+  -- INSERT column grant has to change; and BOTH of those abort the file far
+  -- earlier on an UNWRAPPED call, not on an arm. `ON CONFLICT ... DO NOTHING`
+  -- surfaced OWNER 2d ("re-minting a LIVE share returned nonce <NULL>");
+  -- dropping the ON CONFLICT clause outright, or revoking
+  -- `INSERT (strategy_id)`, kills OWNER 1a / OWNER 2a, whose
+  -- `SELECT ... FROM create_strategy_share(...)` calls carry no exception block
+  -- at all, so psql dies on a raw 23505/42501 instead. There is no configuration
+  -- in which a standalone message arm is the first failure, so the message test
+  -- lives INSIDE 5b as one more disjunct — it costs nothing there and inflates
+  -- no floor.
+  --
+  -- ⛔ THE OLD 5d, 5f AND 5g ARE DELETED, and none of them can be restored by
+  -- putting them after the end-state read, because the conflict path cannot
+  -- touch what they measured even when it fully succeeds:
+  --   * 5d (generation) — `DO UPDATE SET revoked_at = NULL` never writes the
+  --     counter. Adding a bump to that SET list would redden REACTIVATE 1b in
+  --     the owner's OWN lane, with no policy mutation at all;
+  --   * 5f (created_by) — likewise absent from the SET list, and rewriting it
+  --     on an existing row is trigger rule (0b), pinned behaviourally against
+  --     the one role grants cannot bind by TRIGGER 4c;
+  --   * 5g (row count) — `UNIQUE(strategy_id)` makes a second row unreachable,
+  --     and dropping that index makes `ON CONFLICT (strategy_id)` itself an
+  --     error, which raises and rolls back. Unfailable in every configuration.
   --
   -- ⚠️ Deliberately placed AFTER the TENANT 1-4 family. Seeding B's row EARLIER
   -- (the obvious placement) would push TENANT 1's mint against a strategy that
@@ -1637,26 +1873,84 @@ BEGIN
     RAISE EXCEPTION 'TEST FAILED (TENANT 5a): tenant B''s first mint on their own strategy returned %, expected 1', gen_b;
   END IF;
 
+  -- ⭐ REVOKE B'S SHARE — this is what gives the end-state arm something to
+  -- observe. `create_strategy_share`'s conflict path writes exactly one column,
+  -- `revoked_at = NULL`, so against a live row a fully successful cross-tenant
+  -- write leaves the table byte-identical and NO end-state arm can exist. B's
+  -- row is put back LIVE a few lines below, before anything downstream reads it.
+  SELECT public.revoke_strategy_share(strat_b) INTO affected;
+  SELECT revoked_at INTO b_revoked_pre FROM strategy_shares WHERE strategy_id = strat_b;
+
   RESET ROLE;
   PERFORM set_config('request.jwt.claims', NULL, true);
   PERFORM set_config('request.jwt.claims',
     json_build_object('sub', uid_a::text, 'role', 'authenticated')::text, true);
   SET LOCAL ROLE authenticated;
 
-  raised := FALSE;
+  raised := FALSE; err_msg := NULL;
   BEGIN
     PERFORM public.create_strategy_share(strat_b);
   EXCEPTION WHEN OTHERS THEN
     raised := TRUE; err_msg := SQLERRM;
   END;
-  IF NOT raised THEN
-    RESET ROLE;
-    RAISE EXCEPTION 'TEST FAILED (TENANT 5b): tenant A minted against tenant B''s EXISTING share row without error. Both policy walls are gone: the CR-01 EXISTS half of WITH CHECK (which normally rejects the proposed tuple first) AND the USING clause the ON CONFLICT DO UPDATE path falls through to. `SET revoked_at = NULL` on that path RESURRECTS another tenant''s revoked link.';
+
+  RESET ROLE;
+  PERFORM set_config('request.jwt.claims', NULL, true);
+
+  -- ======================================================================
+  -- TENANT 5b: THE END STATE — B's REVOKED link is still dead
+  -- ======================================================================
+  -- ⛔ READ FROM OUTSIDE THE HANDLER, WHICH IS THE ENTIRE POINT (see the
+  -- restructure note above). This is the arm the deleted 5d-5g pretended to be:
+  -- when both policy walls are gone the conflict-write does not raise, so the
+  -- subtransaction COMMITS and `revoked_at = NULL` really does land on a row
+  -- tenant A does not own. B's revoked capability url resolves again.
+  --
+  -- `b_revoked_pre` is checked in the SAME arm rather than as a separate "-pre"
+  -- vacuity guard, deliberately: a standalone pre-arm could never be the first
+  -- failure (REVOKE 1b already fires for any breakage of the tombstone stamp),
+  -- so it would be decoration. Folded in, it costs nothing and stops this arm
+  -- from passing on a world where the setup revoke silently did nothing.
+  -- RED-UNDER: replace the strategy_shares_owner policy's clauses with
+  --            `USING (true) WITH CHECK (true)` on the live database.
+  -- ⚠️ LAYERED NINE DEEP, and the depth was MEASURED, not predicted — the
+  --    mutation unblocks every cross-tenant probe in the file:
+  --      1-7. neuter the ASSERTIONS of TENANT 1a, 1b, 2a, 2b, 3a, 3b and 4a,
+  --           all of which fire earlier;
+  --      8-9. neuter TENANT 1's and TENANT 2's WRITE STATEMENTS as well, not
+  --           just their assertions. Left to run they SUCCEED under the loose
+  --           policy and plant a tenant-A-owned share row on strat_b, after
+  --           which tenant B's own revoke (`created_by = auth.uid()`) matches
+  --           zero rows and THIS arm fires on its vacuity half instead —
+  --           reporting `revoked_at was (null) before the attempt`, which is a
+  --           true statement about a setup that never ran, not the attack.
+  --    Step 8-9 is the OWNER 2d / N1 3a precedent applied honestly. With all
+  --    nine applied TENANT 5b is the FIRST failure, on the attack half —
+  --    MEASURED 2026-08-28: `revoked_at was 2026-08-28 00:50:47.415812+02
+  --    before the attempt, (null) after; raised=f`. That is tenant A clearing
+  --    tenant B's tombstone, surviving the subtransaction because nothing
+  --    raised, and being caught from outside it.
+  SELECT revoked_at INTO b_revoked FROM strategy_shares WHERE strategy_id = strat_b;
+  IF b_revoked_pre IS NULL
+     OR b_revoked IS NULL
+     OR NOT raised
+     OR err_msg NOT LIKE '%row-level security%' THEN
+    RAISE EXCEPTION 'TEST FAILED (TENANT 5b): tenant B''s REVOKED share row did not survive tenant A''s cross-tenant conflict-write (revoked_at was % before the attempt, % after; raised=%, error=%). If the AFTER value is NULL, `INSERT ... ON CONFLICT DO UPDATE SET revoked_at = NULL` reached a row tenant A does not own: BOTH policy walls are gone — the CR-01 EXISTS half of WITH CHECK, which normally rejects the proposed tuple before the conflict handler runs at all, AND the USING clause that path otherwise falls through to. Every link tenant B revoked resolves again, as anonymous access to an unpublished factsheet. If the BEFORE value is NULL the setup revoke did not take and this arm would have passed vacuously. If the error is not an RLS one the write was blocked by an accident — UNIQUE(strategy_id) raising 23505, or a missing grant — which stops blocking on the next unrelated change.', COALESCE(b_revoked_pre::TEXT, '(null)'), COALESCE(b_revoked::TEXT, '(null)'), raised, COALESCE(err_msg, '(none)');
   END IF;
-  IF err_msg NOT LIKE '%row-level security%' THEN
-    RESET ROLE;
-    RAISE EXCEPTION 'TEST FAILED (TENANT 5c): the cross-tenant conflict write was blocked by something OTHER than RLS (got: %) — most likely UNIQUE(strategy_id) raising 23505, which would mean neither policy wall was proven', err_msg;
-  END IF;
+
+  -- ⭐ PUT B'S SHARE BACK LIVE, at the ADVANCED counter, and refresh `gen_b`.
+  -- (5b above is the last arm of this block; what follows is state restoration.)
+  -- Not cleanup for its own sake: SANITIZE 1f below proves that erasing tenant A
+  -- does NOT revoke tenant B, which requires B to be live and `gen_b` to hold
+  -- B's current counter; and N1 3a's erasure arm needs a LIVE row, because the
+  -- Art. 17 statement carries `revoked_at IS NULL` and would otherwise match
+  -- zero rows and report a clean erasure that never happened.
+  PERFORM set_config('request.jwt.claims',
+    json_build_object('sub', uid_b::text, 'role', 'authenticated')::text, true);
+  SET LOCAL ROLE authenticated;
+  SELECT c.generation INTO gen_b FROM public.create_strategy_share(strat_b) c;
+  RESET ROLE;
+  PERFORM set_config('request.jwt.claims', NULL, true);
 
   -- ⚠️ WHERE THE `USING` CLAUSE IS ACTUALLY PINNED — read this before adding an
   -- arm here. A raw cross-tenant `UPDATE strategy_shares ... WHERE strategy_id
@@ -1675,33 +1969,6 @@ BEGIN
   -- revoke_strategy_share, which now carries its own `created_by = auth.uid()`
   -- predicate (B2 fix), so it returns 0 even with RLS wide open. Do not read
   -- 4b as an RLS proof any more — it is a proof of the RPC's predicate.
-
-  RESET ROLE;
-  PERFORM set_config('request.jwt.claims', NULL, true);
-
-  -- ...and B's row is byte-untouched by A's attempt. A rejection that still
-  -- moved the counter, cleared the tombstone or rewrote provenance would be a
-  -- successful attack wearing an error message.
-  SELECT generation, revoked_at, created_by INTO gen_b_after, b_revoked, b_by
-    FROM strategy_shares WHERE strategy_id = strat_b;
-  IF gen_b_after IS DISTINCT FROM gen_b THEN
-    RESET ROLE;
-    RAISE EXCEPTION 'TEST FAILED (TENANT 5d): tenant A''s rejected conflict-write moved tenant B''s generation from % to %', gen_b, gen_b_after;
-  END IF;
-  IF b_revoked IS NOT NULL THEN
-    RESET ROLE;
-    RAISE EXCEPTION 'TEST FAILED (TENANT 5e): tenant B''s share is revoked after tenant A''s rejected attempt — the conflict path wrote to a row it must not touch';
-  END IF;
-  IF b_by IS DISTINCT FROM uid_b THEN
-    RESET ROLE;
-    RAISE EXCEPTION 'TEST FAILED (TENANT 5f): tenant B''s created_by changed from % to % — tenant A''s rejected attempt rewrote provenance', uid_b, b_by;
-  END IF;
-
-  SELECT count(*) INTO row_cnt FROM strategy_shares WHERE strategy_id = strat_b;
-  IF row_cnt <> 1 THEN
-    RESET ROLE;
-    RAISE EXCEPTION 'TEST FAILED (TENANT 5g): % share rows exist for tenant B''s strategy, expected exactly 1', row_cnt;
-  END IF;
 
   -- ======================================================================
   -- ANON 1: blocked at the GRANT layer (42501)
@@ -1881,7 +2148,7 @@ BEGIN
      AND r.rolname = 'service_role'
      AND acl.privilege_type = 'EXECUTE';
   IF row_cnt <> 0 THEN
-    RAISE EXCEPTION 'TEST FAILED (SERVICE-ROLE 0-acl): service_role holds % standing EXECUTE grant(s) on the share RPCs, expected 0. That role is BYPASSRLS and is what createAdminClient() connects as, so this deletes the grant-layer wall and leaves ONLY the auth.uid() fail-loud guard in the body — the two-wall posture STEP 3/4 of migration 20260827120000 claims collapses to one. ⛔ Read as a REGRESSION of the REVOKE, which pg_default_acl re-applies on any DROP+CREATE of these functions.', row_cnt;
+    RAISE EXCEPTION 'TEST FAILED (SERVICE-ROLE 0-acl): service_role holds % standing EXECUTE grant(s) on the share RPCs, expected 0. That role is BYPASSRLS and is what createAdminClient() connects as, so this deletes the ONLY wall that binds it. ⛔ The auth.uid() fail-loud guard in the body is NOT a fallback and must not be read as one: auth.uid() reads the caller-settable request.jwt.claims GUC, and SERVICE-ROLE 2f below MEASURES that a service_role caller who sets that GUC first revokes ANOTHER TENANT''S live share and is told it succeeded. ⛔ Read as a REGRESSION of the REVOKE, which pg_default_acl re-applies on any DROP+CREATE of these functions.', row_cnt;
   END IF;
 
   SET LOCAL ROLE service_role;
@@ -1963,13 +2230,78 @@ BEGIN
     raised := TRUE; err_msg := SQLERRM;
   END;
   RESET ROLE;
-  EXECUTE 'REVOKE EXECUTE ON FUNCTION public.revoke_strategy_share(UUID) FROM service_role';
-  EXECUTE 'REVOKE EXECUTE ON FUNCTION public.create_strategy_share(UUID) FROM service_role';
   IF NOT raised THEN
+    EXECUTE 'REVOKE EXECUTE ON FUNCTION public.revoke_strategy_share(UUID) FROM service_role';
+    EXECUTE 'REVOKE EXECUTE ON FUNCTION public.create_strategy_share(UUID) FROM service_role';
     RAISE EXCEPTION 'TEST FAILED (SERVICE-ROLE 2c): with EXECUTE granted, service_role ran create_strategy_share to completion. It must refuse: for that role auth.uid() is NULL and RLS does not apply, so the ON CONFLICT DO UPDATE path would set revoked_at = NULL on an EXISTING row with no policy in the way. Today the NOT NULL on created_by raises 23502 first and blocks that INCIDENTALLY — completing successfully means even that accident is gone.';
   END IF;
   IF err_msg NOT LIKE '%not callable by a service-role%' THEN
+    EXECUTE 'REVOKE EXECUTE ON FUNCTION public.revoke_strategy_share(UUID) FROM service_role';
+    EXECUTE 'REVOKE EXECUTE ON FUNCTION public.create_strategy_share(UUID) FROM service_role';
     RAISE EXCEPTION 'TEST FAILED (SERVICE-ROLE 2d): service_role''s mint failed, but NOT on the fail-loud guard (got: %)', err_msg;
+  END IF;
+
+  -- ======================================================================
+  -- SERVICE-ROLE 2f: SPOOFED CLAIMS — what actually bounds a service_role
+  --                  caller once it has EXECUTE
+  -- ======================================================================
+  -- ⛔⛔ 2a AND 2c CERTIFY A STRICTLY WEAKER PROPERTY THAN THEIR NAMES SUGGEST,
+  -- and this arm exists to stop the file overclaiming. Both call with
+  -- `request.jwt.claims` set to NULL, so `auth.uid()` is NULL and the fail-loud
+  -- guard fires. But `auth.uid()` READS THAT GUC, and a caller that can reach
+  -- the function can set it first. MEASURED (throwaway PostgreSQL 16,
+  -- 2026-08-28) with EXECUTE granted exactly as it is here:
+  --     SET LOCAL ROLE service_role;
+  --     PERFORM set_config('request.jwt.claims', '{"sub":"<victim>"}', true);
+  --     SELECT public.revoke_strategy_share('<victim strategy>');
+  --   -> rows=1, revoked_at stamped, generation 1 -> 2 on ANOTHER TENANT'S live
+  --      share, reported to the caller as SUCCESS.
+  -- So the body guard is NOT a second wall against this role. STEP 5's EXECUTE
+  -- revoke is the only one, and SERVICE-ROLE 0-acl is what pins it durably.
+  --
+  -- ⭐ WHAT THIS ARM THEREFORE ASSERTS is the property that IS true and IS
+  -- load-bearing: once claims are spoofed, the caller is bounded by
+  -- `created_by = auth.uid()` in revoke's UPDATE and by NOTHING ELSE. RLS does
+  -- not apply to a BYPASSRLS role, so for this caller that predicate is the
+  -- whole of tenancy. Drop it and a spoofed service_role call becomes an
+  -- unbounded cross-tenant kill switch: spoof ANY sub, name ANY strategy.
+  -- ⛔ NOT the same arm as TENANT 4b, which routes the same predicate through an
+  -- `authenticated` caller — there RLS ALSO scopes the UPDATE, so 4b stays green
+  -- with the predicate deleted. This is the only arm in the file that isolates
+  -- it, and it needs the spoof to do so.
+  --
+  -- `NOT raised` is asserted too, and it is the anti-vacuity half: if the
+  -- set_config did not take, auth.uid() would be NULL, the fail-loud guard would
+  -- refuse, `affected` would never be assigned, and the arm would "pass" while
+  -- measuring the guard from 2a all over again.
+  -- RED-UNDER: delete the `AND created_by = auth.uid()` predicate from
+  --            revoke_strategy_share's UPDATE (migration 20260827120000 STEP 4).
+  -- ⚠️ LAYERED: SHAPE 4c greps the body for that predicate and fires first, and
+  --    migration 20260827120000's STEP 6 arm (ii-c) greps for it too and ABORTS
+  --    THE APPLY — so both must go in the same mutation. With both gone this arm
+  --    is the first failure (MEASURED).
+  SELECT revoked_at, generation INTO sr_rev_pre, sr_gen_pre
+    FROM strategy_shares WHERE strategy_id = strat_a;
+  PERFORM set_config('request.jwt.claims',
+    json_build_object('sub', uid_b::text, 'role', 'authenticated')::text, true);
+  SET LOCAL ROLE service_role;
+  raised := FALSE; err_msg := NULL; affected := NULL;
+  BEGIN
+    SELECT public.revoke_strategy_share(strat_a) INTO affected;
+  EXCEPTION WHEN OTHERS THEN
+    raised := TRUE; err_msg := SQLERRM;
+  END;
+  RESET ROLE;
+  PERFORM set_config('request.jwt.claims', NULL, true);
+  SELECT revoked_at, generation INTO now_revoked, gen_probe
+    FROM strategy_shares WHERE strategy_id = strat_a;
+  EXECUTE 'REVOKE EXECUTE ON FUNCTION public.revoke_strategy_share(UUID) FROM service_role';
+  EXECUTE 'REVOKE EXECUTE ON FUNCTION public.create_strategy_share(UUID) FROM service_role';
+  IF raised
+     OR affected IS DISTINCT FROM 0
+     OR now_revoked IS DISTINCT FROM sr_rev_pre
+     OR gen_probe IS DISTINCT FROM sr_gen_pre THEN
+    RAISE EXCEPTION 'TEST FAILED (SERVICE-ROLE 2f): a service_role caller SPOOFING tenant B''s claims reached tenant A''s share row (raised=%, error=%, rows=%, revoked_at % -> %, generation % -> %). Expected: no error — auth.uid() reads the caller-settable request.jwt.claims GUC, so the fail-loud guard does NOT bind a caller who sets it, and an arm that expected a refusal here would be certifying a wall that does not exist — and 0 rows, because `created_by = auth.uid()` in revoke_strategy_share''s UPDATE is the ONLY thing scoping this caller. RLS does not apply to a BYPASSRLS role. Without that predicate a spoofed admin-client call is an unbounded cross-tenant kill switch: any sub, any strategy, returning success. ⛔ If raised=t instead, the spoof did not take and this arm measured the guard from SERVICE-ROLE 2a rather than the predicate.', raised, COALESCE(err_msg, '(none)'), COALESCE(affected::TEXT, '(unset)'), COALESCE(sr_rev_pre::TEXT, '(null)'), COALESCE(now_revoked::TEXT, '(null)'), sr_gen_pre, gen_probe;
   END IF;
 
   -- Belt-and-braces: the temporary EXECUTE grants really are gone.
@@ -2084,20 +2416,46 @@ BEGIN
     RAISE EXCEPTION 'TEST FAILED (SANITIZE 1b): sanitize_user(uid_a) returned % — expected TRUE for a not-yet-sanitized user. The erasure assertions below cannot be trusted if the erasure did not run.', san_ok;
   END IF;
 
+  -- ⛔⛔ THE ROW-COUNT ARM MUST COME FIRST, AND THE ORDER IS A CORRECTNESS
+  -- PROPERTY, NOT A STYLE ONE. It used to sit LAST, after the revoked_at and
+  -- generation arms, and that made it unreachable AND made the arm above it lie:
+  -- `SELECT revoked_at, generation INTO ...` matches ZERO ROWS when the row was
+  -- DELETEd, which leaves `now_revoked` NULL — the exact condition SANITIZE 1c
+  -- reads as "still live". `UNIQUE(strategy_id)` means the count can never be
+  -- anything but 0 or 1, so there was no configuration in which 1e fired first.
+  -- MEASURED 2026-08-28, with sanitize_user's arm changed to
+  -- `DELETE FROM strategy_shares WHERE created_by = p_user_id AND revoked_at IS
+  -- NULL` (and migration 20260827130000's two apply-time greps neutered so the
+  -- apply survived): the file reported
+  --   "SANITIZE 1c: after sanitize_user the data subject's share row is STILL
+  --    LIVE ... its `UPDATE strategy_shares` arm was dropped"
+  -- for an erasure that had DELETED the row — the precise inverse of what
+  -- happened, sending the operator to look for a statement that is present.
+  -- With the count read first, the same mutation reports SANITIZE 1e instead.
+  -- RED-UNDER: change sanitize_user's `UPDATE strategy_shares SET revoked_at =
+  --            now(), generation = generation + 1 ...` to a `DELETE FROM
+  --            strategy_shares ...` with the same WHERE clause.
+  -- ⚠️ LAYERED: migration 20260827130000's STEP 2 greps for that UPDATE and
+  --    separately rejects any `DELETE FROM strategy_shares`, and either arm
+  --    aborts the apply — so both must be neutered in the same mutation or this
+  --    file never runs. With both gone SANITIZE 1e is the first failure
+  --    (MEASURED: "share row count is 0 after erasure, expected 1").
+  SELECT count(*) INTO row_cnt FROM strategy_shares WHERE strategy_id = strat_a;
+  IF row_cnt <> 1 THEN
+    RAISE EXCEPTION 'TEST FAILED (SANITIZE 1e): the subject''s share row count is % after erasure, expected 1. sanitize_user must SOFT-revoke: deleting the row discards the generation counter, and the next create_strategy_share() would restart at generation 1 — resurrecting every already-revoked token. ⛔ Read this BEFORE SANITIZE 1c below: when the row is gone, 1c''s `SELECT revoked_at INTO` matches nothing, leaves the variable NULL and would report the erasure as having left the row LIVE — the exact opposite of a hard delete. That is why this arm is ordered first.', row_cnt;
+  END IF;
+
   SELECT revoked_at, generation INTO now_revoked, gen_final
     FROM strategy_shares WHERE strategy_id = strat_a;
   IF now_revoked IS NULL THEN
-    RAISE EXCEPTION 'TEST FAILED (SANITIZE 1c): after sanitize_user the data subject''s share row is STILL LIVE. Every link they ever copied still resolves to their unpublished factsheet — returns curve, metrics and trade analytics all survive the anonymize — and banned_until = infinity means they can never log in to revoke it. Companion migration 20260827130000 is missing or its `UPDATE strategy_shares` arm was dropped.';
+    RAISE EXCEPTION 'TEST FAILED (SANITIZE 1c): after sanitize_user the data subject''s share row is STILL LIVE. Every link they ever copied still resolves to their unpublished factsheet — returns curve, metrics and trade analytics all survive the anonymize — and banned_until = infinity means they can never log in to revoke it. Companion migration 20260827130000 is missing or its `UPDATE strategy_shares` arm was dropped. (SANITIZE 1e above has already proved the row EXISTS, so this really is a live row and not a missing one.)';
   END IF;
-  IF gen_final <> gen_pre_san + 1 THEN
-    RAISE EXCEPTION 'TEST FAILED (SANITIZE 1d): generation is % after erasure, expected % (exactly +1). If it is UNCHANGED the erasure is COSMETIC: revoked_at is stamped but the token still derives from the same counter, so every previously-copied link KEEPS WORKING.', gen_final, gen_pre_san + 1;
-  END IF;
-
-  -- REVOKE, never DELETE. A delete rewinds the counter, so the next mint would
-  -- restart at generation 1 and resurrect every token minted at generation 1.
-  SELECT count(*) INTO row_cnt FROM strategy_shares WHERE strategy_id = strat_a;
-  IF row_cnt <> 1 THEN
-    RAISE EXCEPTION 'TEST FAILED (SANITIZE 1e): the subject''s share row count is % after erasure, expected 1. sanitize_user must SOFT-revoke: deleting the row discards the generation counter, and the next create_strategy_share() would restart at generation 1 — resurrecting every already-revoked token.', row_cnt;
+  -- ⛔ SUBTRACT, NEVER `gen_pre_san + 1` — same rule as REVOKE 1c above and N1
+  -- 1c / N1 3a below, and it is least dispensable HERE of all four: N1 3a is the
+  -- arm that drives this same counter toward the ceiling on purpose, and it was
+  -- written as `+ 1` first and MEASURED aborting on its own arithmetic.
+  IF (gen_final - gen_pre_san) IS DISTINCT FROM 1 THEN
+    RAISE EXCEPTION 'TEST FAILED (SANITIZE 1d): generation is % after erasure, up from % — expected exactly one more. If it is UNCHANGED the erasure is COSMETIC: revoked_at is stamped but the token still derives from the same counter, so every previously-copied link KEEPS WORKING.', gen_final, gen_pre_san;
   END IF;
 
   -- ...and the erasure is scoped to the subject. `created_by = p_user_id` is
@@ -2199,7 +2557,7 @@ BEGIN
       raised, COALESCE(err_msg, '(none)'), COALESCE(san_ok::TEXT, '(null)'), b_revoked, gen_pre_san, gen_b_after;
   END IF;
 
-  RAISE NOTICE 'test_strategy_shares_rls: ALL 106 ARMS EXECUTED (SHAPE 1, SHAPE 1b, SHAPE 1c, SHAPE 2a, SHAPE 2b, SHAPE 3, SHAPE 3b, SHAPE 4a, SHAPE 4b, SHAPE 4c, SHAPE 4d, SHAPE 4e, SHAPE 5, SHAPE 5b-pre, SHAPE 5b, OWNER 1a, OWNER 1b, OWNER 1c, OWNER 2a, OWNER 2b, OWNER 2c, OWNER 2d, TENANT 1a, TENANT 1b, TENANT 2a, TENANT 2b, TENANT 3a, TENANT 3b, N1 2a, N1 1a, N1 1b, N1 1c, NO-DELETE 1, REVOKE 1a, REVOKE 1b, REVOKE 1c, REVOKE 2a, REVOKE 2b, REACTIVATE 1a, REACTIVATE 1b, REACTIVATE 1c, REACTIVATE 1d, REACTIVATE 1e, REACTIVATE 1f, REACTIVATE 1g, TRIGGER 1a, TRIGGER 1b, MONOTONIC 1a, MONOTONIC 1b, MONOTONIC 1c, TRIGGER 2a, TRIGGER 2b, TRIGGER 3a, TRIGGER 3b, TRIGGER 3c, TRIGGER 3d-i, TRIGGER 3d-ii, TRIGGER 4a, TRIGGER 4b, TRIGGER 4c-i, TRIGGER 4c-ii, NONCE 1a, NONCE 1b, NONCE 2a, NONCE 2b, NONCE 3, NONCE 4a, NONCE 4b, NONCE 4c, TENANT 4a, TENANT 4b, TENANT 4c, TENANT 5a, TENANT 5b, TENANT 5c, TENANT 5d, TENANT 5e, TENANT 5f, TENANT 5g, ANON 1a, ANON 1b, ANON 1b-grant, ANON 1c, ANON 1c-grant, ANON 1d, ANON 1d-grant, ANON 2, ANON 2b, SERVICE-ROLE 0-acl, SERVICE-ROLE 1, SERVICE-ROLE 1-grant, SERVICE-ROLE 2a, SERVICE-ROLE 2b, SERVICE-ROLE 2c, SERVICE-ROLE 2d, SERVICE-ROLE 2e, NONCE 5a, NONCE 5b, NONCE 5c, SANITIZE 1a, SANITIZE 1b, SANITIZE 1c, SANITIZE 1d, SANITIZE 1e, SANITIZE 1f, N1 3a). Observed generation sequence: %', gen_seen;
+  RAISE NOTICE 'test_strategy_shares_rls: ALL 103 ARMS EXECUTED (SHAPE 1, SHAPE 1b, SHAPE 1c, SHAPE 2a, SHAPE 2b, SHAPE 3, SHAPE 3b, SHAPE 4a, SHAPE 4b, SHAPE 4c, SHAPE 4d, SHAPE 4e, SHAPE 5, SHAPE 5b-pre, SHAPE 5b, OWNER 1a, OWNER 1b, OWNER 1c, OWNER 2a, OWNER 2b, OWNER 2c, OWNER 2d, TENANT 1a, TENANT 1b, TENANT 2a, TENANT 2b, TENANT 3a, TENANT 3b, N1 2a, N1 2b, N1 1a, N1 1b, N1 1c, NO-DELETE 1, REVOKE 1a, REVOKE 1b, REVOKE 1c, REVOKE 2a, REVOKE 2b, REACTIVATE 1a, REACTIVATE 1b, REACTIVATE 1c, REACTIVATE 1d, REACTIVATE 1e, REACTIVATE 1f, REACTIVATE 1g, TRIGGER 1a, TRIGGER 1b, MONOTONIC 1a, MONOTONIC 1b, MONOTONIC 1c, TRIGGER 2a, TRIGGER 2b, TRIGGER 3a, TRIGGER 3b, TRIGGER 3c, TRIGGER 3d-i, TRIGGER 3d-ii, TRIGGER 4a, TRIGGER 4b, TRIGGER 4c-i, TRIGGER 4c-ii, NONCE 1a, NONCE 1b, NONCE 2a, NONCE 2b, NONCE 3, NONCE 4a, NONCE 4b, NONCE 4c, TENANT 4a, TENANT 4b, TENANT 4c, TENANT 5a, TENANT 5b, ANON 1a, ANON 1b, ANON 1b-grant, ANON 1c, ANON 1c-grant, ANON 1d, ANON 1d-grant, ANON 2, ANON 2b, SERVICE-ROLE 0-acl, SERVICE-ROLE 1, SERVICE-ROLE 1-grant, SERVICE-ROLE 2a, SERVICE-ROLE 2b, SERVICE-ROLE 2c, SERVICE-ROLE 2d, SERVICE-ROLE 2f, SERVICE-ROLE 2e, NONCE 5a, NONCE 5b, NONCE 5c, SANITIZE 1a, SANITIZE 1b, SANITIZE 1c, SANITIZE 1d, SANITIZE 1e, SANITIZE 1f, N1 3a). Observed generation sequence: %', gen_seen;
 END
 $$;
 

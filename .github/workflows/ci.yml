@@ -1696,10 +1696,47 @@ jobs:
           # plus the five arms actually added, not read off the finished file —
           # a floor taken from the file it is supposed to constrain always
           # passes and pins nothing.
-          #   test_strategy_shares_rls.sql                  106
+          # Re-measured 2026-08-28 (164 three-reviewer gate, F-1):
+          # test_strategy_shares_rls.sql goes 106 -> 102. The TENANT 5 block's
+          # four end-state arms (5d generation, 5e tombstone, 5f provenance,
+          # 5g row count) were reading their OWN SUBTRANSACTION ROLLBACK and
+          # could not fail: MEASURED on a throwaway PostgreSQL 16 cluster, a
+          # genuine cross-tenant write placed inside the arm's nested
+          # `BEGIN … EXCEPTION` moved tenant B's counter 1 -> 2 and stamped B's
+          # tombstone, and the whole file still exited 0 with all 106 arms
+          # "executed". One replacement arm was rebuilt on TRIGGER 3's
+          # precedent — the victim row is revoked first, and the end state is
+          # read from OUTSIDE the handler — and it reuses the name TENANT 5b.
+          # The old 5b and 5c collapse into it as extra disjuncts: measured,
+          # neither can ever be a FIRST failure once the end-state read precedes
+          # them, and every mutation that would redden the message pin instead
+          # aborts the file on an UNWRAPPED owner-lane call (OWNER 1a / OWNER 2a
+          # / OWNER 2d) rather than on an arm. Net -5, derived from the PRE-EDIT
+          # count of 106 minus the five deletions (5b, 5c, 5d, 5f, 5g) plus the
+          # one rebuilt arm — not read off the finished file.
+          # Re-measured 2026-08-28 (164 gate, F-3): +1 for N1 2b, the
+          # forced-nonce-on-INSERT pin. The trigger's INSERT branch forced only
+          # `generation`, leaving `nonce` caller-suppliable, and MEASURED that
+          # combination was worse than neither: mint -> revoke -> service_role
+          # DELETE -> service_role INSERT naming the recorded nonce came back at
+          # generation 1 with that nonce and revoked_at NULL, byte-identical to
+          # the pre-revoke triple. N1 2b is the behavioural twin of N1 2a, run
+          # as the one role no column grant binds. 101 + 1 = 102.
+          # Re-measured 2026-08-28 (164 gate, F-4): +1 for SERVICE-ROLE 2f, the
+          # spoofed-claims arm. SERVICE-ROLE 2a/2c call with claims = NULL only,
+          # so they certified "the body refuses a caller with no identity" while
+          # the file read it as "the body is a second wall against
+          # service_role". It is not: auth.uid() reads the caller-settable
+          # request.jwt.claims GUC, and MEASURED, a service_role call that sets
+          # it first revoked another tenant's live share and was told it
+          # succeeded. 2f pins what actually bounds that caller — the
+          # `created_by = auth.uid()` predicate in revoke's UPDATE, which no
+          # other arm isolates because for an `authenticated` caller RLS also
+          # scopes the statement. 102 + 1 = 103.
+          #   test_strategy_shares_rls.sql                  103
           #   test_sync_status_marked_refresh_protected.sql  16
           SENTINEL_FLOOR=8   # files declaring a sentinel
-          ARMS_FLOOR=169     # 9 + 6 + 10 + 10 + 8 + 4 + 106 + 16
+          ARMS_FLOOR=166     # 9 + 6 + 10 + 10 + 8 + 4 + 103 + 16
           # RAISING these as arms are added is expected and cheap — and it is not
           # optional: src/__tests__/contracts/ci-anti-skip-gate.contract.test.ts
           # re-derives the table above from the corpus and goes red when a count,
