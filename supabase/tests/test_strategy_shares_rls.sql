@@ -39,7 +39,8 @@
 -- the fix commit message); re-run the same neuters against TEST once step 2
 -- lands. Arms whose neuter must be re-observed there: TENANT 3, TENANT 5,
 -- ANON 1b, SERVICE-ROLE 2, SANITIZE 1, SHAPE 3, SHAPE 5, TRIGGER 1, TRIGGER 2,
--- SERVICE-ROLE 0-acl, and the three `-grant` message arms (ANON 1c-grant,
+-- TRIGGER 3, TRIGGER 4, SERVICE-ROLE 0-acl, and the three `-grant` message arms
+-- (ANON 1c-grant,
 -- ANON 1d-grant, SERVICE-ROLE 1-grant).
 --
 -- WHAT THIS FILE ASSERTS (content-by-field; a 200 / a row count proves nothing)
@@ -86,7 +87,7 @@
 --     leaves created_by / created_at untouched.
 --   * MONOTONICITY — generation never decreases across the full
 --     mint -> reuse -> revoke -> revoke -> re-mint -> revoke cycle.
---   * TRIGGER — and, separately, that the monotonic invariant holds for RAW
+--   * TRIGGER — and, separately, that the row-level invariants hold for RAW
 --     TABLE WRITES and not merely for the two RPCs. ⛔ The MONOTONICITY arms
 --     drive the cycle THROUGH the RPCs, which are the only writers that behave
 --     monotonically by construction, so they stay GREEN with no trigger
@@ -95,7 +96,12 @@
 --     `generation` and clearing `revoked_at` was ACCEPTED (MEASURED,
 --     PostgreSQL 16) — resurrecting every link they had revoked. TRIGGER 1
 --     pins that a revocation must ADVANCE the counter; TRIGGER 2 pins that the
---     counter can never be rewound; SHAPE 5 pins the trigger's timing/level.
+--     counter can never be rewound; TRIGGER 3 pins that the counter cannot be
+--     RE-POINTED at another strategy the same owner holds, which reaches the
+--     identical end state in TWO requests without writing the counter at all;
+--     TRIGGER 4 pins that id/created_by/created_at cannot be rewritten, so the
+--     provenance of a live capability grant is not forgeable; SHAPE 5 pins the
+--     trigger's timing/level.
 --   * NO HARD DELETE — `authenticated` has no DELETE grant, so a client cannot
 --     discard the counter and resurrect already-revoked tokens.
 --
@@ -704,6 +710,116 @@ BEGIN
     RAISE EXCEPTION 'TEST FAILED (TRIGGER 2c): the rejected self-rewind still mutated the row (generation % -> %, revoked_at now %) — a partial write here is the full attack, because clearing the tombstone alone already re-publishes the link', gen_final, gen_probe, now_revoked;
   END IF;
 
+  -- ======================================================================
+  -- TRIGGER 3: THE TWO-REQUEST RE-POINT — the counter cannot walk away and
+  --            leave generation 1 unclaimed behind it
+  -- ======================================================================
+  -- ⛔ TRIGGER 2 ABOVE DOES NOT COVER THIS. It pins the VALUE of `generation`;
+  -- this pins WHICH STRATEGY that value counts for. The same end state — a
+  -- REVOKED token resolving again — is reachable without ever writing the
+  -- counter, in two requests, both of which an ordinary owner is entitled to
+  -- make:
+  --   1. `PATCH /rest/v1/strategy_shares?strategy_id=eq.<A>`
+  --      `{"strategy_id": "<A2>"}`, where A2 is a second strategy the SAME user
+  --      owns and has never shared. USING passes (created_by is unchanged), the
+  --      CR-01 WITH CHECK EXISTS passes (they really do own A2),
+  --      UNIQUE(strategy_id) is free because A2 has no row, and `generation`
+  --      and `revoked_at` are both untouched so neither pre-existing trigger
+  --      rule looks at anything. Strategy A is left with NO share row.
+  --   2. `create_strategy_share(A)` then takes the INSERT path and lands a
+  --      fresh row at `generation` DEFAULT 1. HMAC(secret, A || 1) is
+  --      byte-identical to the token A handed out and REVOKED at generation 1,
+  --      findShareMatch() scans it as ACTIVE, and every recipient still holding
+  --      that dead url is back inside the unpublished factsheet.
+  --
+  -- ⭐ HOW THIS ARM IS BUILT, and why request 2 runs UNCONDITIONALLY. The
+  -- obvious shape — assert request 1 raised, then probe whether the row moved —
+  -- is the shape this file has recorded as unfailable: request 1 is wrapped in
+  -- a nested BEGIN ... EXCEPTION, which is an implicit subtransaction, so
+  -- catching the error rolls its writes back and the "did it move?" probe is
+  -- unreachable in every configuration. So the ARM here is the attack's END
+  -- STATE, not request 1's error. Request 2 is issued whether or not request 1
+  -- raised, and TRIGGER 3a asks the only question that separates the two
+  -- worlds: with the rule present, A still owns its advanced counter and the
+  -- mint reuses it; with the rule gone, request 1 succeeded, A has no row, and
+  -- the mint returns 1. TRIGGER 3a is therefore the FIRST failure when rule
+  -- (0a) is deleted, which is what makes it an arm rather than decoration.
+  --
+  -- ⚠️ strat_a2 IS NEVER SHARED BY THIS BLOCK, and must not be — ordering
+  -- constraint 1 in this file's header (ANON 1b needs a strategy_id with no
+  -- share row so UNIQUE(strategy_id) cannot pre-empt the privilege check). The
+  -- re-point is REJECTED, and the rejection is a subtransaction rollback, so no
+  -- row for strat_a2 can survive it. That invariant is structural, not
+  -- asserted: an "expected 0 rows for strat_a2" probe would sit downstream of
+  -- the same rollback and could never fail.
+  raised := FALSE;
+  BEGIN
+    UPDATE strategy_shares SET strategy_id = strat_a2 WHERE strategy_id = strat_a;
+  EXCEPTION WHEN OTHERS THEN
+    raised := TRUE; err_msg := SQLERRM;
+  END;
+
+  -- REQUEST 2 of the attack, run for real.
+  SELECT public.create_strategy_share(strat_a) INTO gen_probe;
+
+  IF gen_probe IS NULL OR gen_probe = 1 OR gen_probe < gen_final THEN
+    RESET ROLE;
+    RAISE EXCEPTION 'TEST FAILED (TRIGGER 3a): after the owner re-pointed their share row at a second strategy they own, create_strategy_share() on the ORIGINAL strategy returned generation % — the counter stood at % before the attempt. A fresh generation-1 row means every token that strategy REVOKED at generation 1 derives again and resolves as anonymous access to an unpublished factsheet. The counter is only meaningful relative to the strategy it counts for, so strategy_shares_monotonic_generation must refuse ANY change to strategy_id (migration 20260827120000 STEP 1b, rule 0a) — and it did not.', gen_probe, gen_final;
+  END IF;
+
+  -- Message-pinned in two steps, for the same reason TRIGGER 1b/2b are: the
+  -- end-state arm above passes just as happily if request 1 was a silent no-op
+  -- (a policy that filtered the owner's own row out of the UPDATE scan would do
+  -- exactly that) as if it was REJECTED. A no-op blocks today's attack by
+  -- accident and would stop blocking it the moment the policy is retuned, so an
+  -- arm that cannot tell the two apart is measuring luck.
+  IF NOT raised THEN
+    RESET ROLE;
+    RAISE EXCEPTION 'TEST FAILED (TRIGGER 3b): the cross-strategy re-point did not RAISE — it was accepted, or it silently matched 0 rows. The owner holds a column-unrestricted UPDATE grant and their own row satisfies both halves of strategy_shares_owner, so the only layer entitled to reject this is the trigger. If it merely matched 0 rows then TRIGGER 3a above passed on an accident of the policy rather than on the rule under test.';
+  END IF;
+  IF err_msg NOT LIKE '%strategy_id is immutable%' THEN
+    RESET ROLE;
+    RAISE EXCEPTION 'TEST FAILED (TRIGGER 3c): the re-point was rejected by something OTHER than the strategy_id-immutability rule (got: %). A rejection from the grant layer, a policy rewrite or an FK blocks today and stops blocking on the next unrelated change, so this arm proves nothing about the trigger unless the rejection came FROM it.', err_msg;
+  END IF;
+
+  -- ⚠️ STATE CHANGE, and it is deliberate: request 2 above REACTIVATED strat_a
+  -- (revoked_at cleared, generation unchanged at gen_final). Everything
+  -- downstream that reads A's row must expect it LIVE. This STRENGTHENS TENANT
+  -- 4b below, which until now revoked an ALREADY-REVOKED row and so returned 0
+  -- through the `revoked_at IS NULL` predicate no matter what RLS did.
+
+  -- ======================================================================
+  -- TRIGGER 4: provenance on a live capability grant is not forgeable
+  -- ======================================================================
+  -- STEP 3 of migration 20260827120000 tells every future reader that
+  -- reactivation never rewrites `created_by` or `created_at`. That was a claim
+  -- about ONE code path, read as a property of the ROW — and a raw PATCH
+  -- falsified it, because the owner's UPDATE grant is column-unrestricted and
+  -- their own row passes the policy. REACTIVATE 1d/1e pin the RPC; this pins
+  -- the TABLE, the same split TRIGGER 2 draws against MONOTONIC 1.
+  --
+  -- `created_at` is the probe of the three pinned columns (id, created_by,
+  -- created_at) because it is the only one NO other layer guards: rewriting
+  -- `created_by` also trips the `created_by = auth.uid()` half of WITH CHECK,
+  -- so an arm there could pass on the policy while rule (0b) was gone. A
+  -- rejection here can only have come from the trigger.
+  raised := FALSE;
+  BEGIN
+    UPDATE strategy_shares
+       SET created_at = created_at - INTERVAL '1 year'
+     WHERE strategy_id = strat_a;
+  EXCEPTION WHEN OTHERS THEN
+    raised := TRUE; err_msg := SQLERRM;
+  END;
+  IF NOT raised THEN
+    RESET ROLE;
+    RAISE EXCEPTION 'TEST FAILED (TRIGGER 4a): the owner backdated created_at on their own share row with a raw UPDATE. Nothing but the trigger guards that column — the grant is column-unrestricted and the row passes both halves of strategy_shares_owner — so rule (0b) of strategy_shares_monotonic_generation (migration 20260827120000 STEP 1b) is missing, and the provenance STEP 3 promises is forgeable: who minted a live anonymous capability link, and when, both become whatever the owner types.';
+  END IF;
+  IF err_msg NOT LIKE '%identity and provenance are immutable%' THEN
+    RESET ROLE;
+    RAISE EXCEPTION 'TEST FAILED (TRIGGER 4b): the provenance rewrite was rejected by something OTHER than the identity/provenance rule (got: %) — this arm proves nothing about the trigger unless the rejection came FROM it', err_msg;
+  END IF;
+
   RESET ROLE;
   PERFORM set_config('request.jwt.claims', NULL, true);
 
@@ -1205,7 +1321,7 @@ BEGIN
     RAISE EXCEPTION 'TEST FAILED (SANITIZE 1f): erasing tenant A also revoked tenant B''s share (revoked_at=%, generation % -> %) — the `created_by = p_user_id` predicate is missing from the sanitize arm, so ONE user''s Art. 17 request kills EVERY user''s share links', b_revoked, gen_b, gen_b_after;
   END IF;
 
-  RAISE NOTICE 'test_strategy_shares_rls: ALL 73 ARMS EXECUTED (SHAPE 1, SHAPE 2a, SHAPE 2b, SHAPE 3, SHAPE 4a, SHAPE 4b, SHAPE 4c, SHAPE 5, OWNER 1a, OWNER 1b, OWNER 2a, OWNER 2b, OWNER 2c, TENANT 1a, TENANT 1b, TENANT 2a, TENANT 2b, TENANT 3a, TENANT 3b, NO-DELETE 1, REVOKE 1a, REVOKE 1b, REVOKE 1c, REVOKE 2a, REVOKE 2b, REACTIVATE 1a, REACTIVATE 1b, REACTIVATE 1c, REACTIVATE 1d, REACTIVATE 1e, REACTIVATE 1f, TRIGGER 1a, TRIGGER 1b, TRIGGER 1c, MONOTONIC 1a, MONOTONIC 1b, MONOTONIC 1c, TRIGGER 2a, TRIGGER 2b, TRIGGER 2c, TENANT 4a, TENANT 4b, TENANT 4c, TENANT 5a, TENANT 5b, TENANT 5c, TENANT 5d, TENANT 5e, TENANT 5f, TENANT 5g, ANON 1a, ANON 1b, ANON 1b-grant, ANON 1c, ANON 1c-grant, ANON 1d, ANON 1d-grant, ANON 2, ANON 2b, SERVICE-ROLE 0-acl, SERVICE-ROLE 1, SERVICE-ROLE 1-grant, SERVICE-ROLE 2a, SERVICE-ROLE 2b, SERVICE-ROLE 2c, SERVICE-ROLE 2d, SERVICE-ROLE 2e, SANITIZE 1a, SANITIZE 1b, SANITIZE 1c, SANITIZE 1d, SANITIZE 1e, SANITIZE 1f). Observed generation sequence: %', gen_seen;
+  RAISE NOTICE 'test_strategy_shares_rls: ALL 78 ARMS EXECUTED (SHAPE 1, SHAPE 2a, SHAPE 2b, SHAPE 3, SHAPE 4a, SHAPE 4b, SHAPE 4c, SHAPE 5, OWNER 1a, OWNER 1b, OWNER 2a, OWNER 2b, OWNER 2c, TENANT 1a, TENANT 1b, TENANT 2a, TENANT 2b, TENANT 3a, TENANT 3b, NO-DELETE 1, REVOKE 1a, REVOKE 1b, REVOKE 1c, REVOKE 2a, REVOKE 2b, REACTIVATE 1a, REACTIVATE 1b, REACTIVATE 1c, REACTIVATE 1d, REACTIVATE 1e, REACTIVATE 1f, TRIGGER 1a, TRIGGER 1b, TRIGGER 1c, MONOTONIC 1a, MONOTONIC 1b, MONOTONIC 1c, TRIGGER 2a, TRIGGER 2b, TRIGGER 2c, TRIGGER 3a, TRIGGER 3b, TRIGGER 3c, TRIGGER 4a, TRIGGER 4b, TENANT 4a, TENANT 4b, TENANT 4c, TENANT 5a, TENANT 5b, TENANT 5c, TENANT 5d, TENANT 5e, TENANT 5f, TENANT 5g, ANON 1a, ANON 1b, ANON 1b-grant, ANON 1c, ANON 1c-grant, ANON 1d, ANON 1d-grant, ANON 2, ANON 2b, SERVICE-ROLE 0-acl, SERVICE-ROLE 1, SERVICE-ROLE 1-grant, SERVICE-ROLE 2a, SERVICE-ROLE 2b, SERVICE-ROLE 2c, SERVICE-ROLE 2d, SERVICE-ROLE 2e, SANITIZE 1a, SANITIZE 1b, SANITIZE 1c, SANITIZE 1d, SANITIZE 1e, SANITIZE 1f). Observed generation sequence: %', gen_seen;
 END
 $$;
 
