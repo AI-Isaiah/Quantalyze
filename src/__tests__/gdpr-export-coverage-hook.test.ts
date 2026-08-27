@@ -747,8 +747,9 @@ CREATE TABLE audit_log_cold (
  * pin. The general rules are preferred (a name list rots; a rule does not) and
  * both were MEASURED against the live corpus before being written:
  *
- *   (1) CLASS COHERENCE. A table whose owner column is `NOT NULL REFERENCES
- *       profiles | auth.users ... ON DELETE CASCADE` has exactly one data
+ *   (1) CLASS COHERENCE. A table whose owner column is `NOT NULL REFERENCES`
+ *       or `PRIMARY KEY REFERENCES` `profiles | auth.users ... ON DELETE
+ *       CASCADE` has exactly one data
  *       subject per row, which CONTRADICTS four of the five exclusion classes
  *       by their own definitions: `system` ("no per-user, row-level
  *       ownership"), `cross-party` ("multi-owner surface"), `pre-auth` ("no
@@ -756,8 +757,20 @@ CREATE TABLE audit_log_cold (
  *       FK here is direct). So those four are refused outright. `ephemeral` is
  *       the one class that can honestly coexist with a CASCADE owner FK, and
  *       exactly one live entry relies on it (`scenario_commit_idempotency`, a
- *       server-side dedup cache) — measured, 22 CASCADE-owned tables exist and
+ *       server-side dedup cache) — measured, 25 CASCADE-owned tables exist and
  *       it is the ONLY one in EXCLUDED_TABLES.
+ *
+ *       ⚠️ THE `PRIMARY KEY` ARM IS LOAD-BEARING, not cosmetic. Until
+ *       2026-08-27 this rule demanded the literal token `NOT NULL`, which
+ *       silently exempted the canonical one-row-per-user shape
+ *       `user_id UUID PRIMARY KEY REFERENCES profiles(id) ON DELETE CASCADE`
+ *       — a STRICTLY STRONGER ownership declaration (a PK implies NOT NULL
+ *       *and* uniqueness). Re-measured on the live corpus: strict = 22
+ *       tables, this rule = 25. The three it had been missing are `profiles`,
+ *       `allocator_preferences` and `investor_attestations`, none of which is
+ *       in EXCLUDED_TABLES today — so there was no live offender, but the
+ *       rule left THREE unguarded shapes for a future table rather than the
+ *       one (`ephemeral`) this docblock documents.
  *
  *   (2) `scoped` STOPS BEING PROSE. The class asserts the table "appears in
  *       USER_EXPORT_TABLES as an IndirectUserTable". No code path checked
@@ -780,12 +793,15 @@ CREATE TABLE audit_log_cold (
 describe("B3: EXCLUDED_TABLES cannot silence a user-owned table", () => {
   /**
    * An owner column that makes every row belong to exactly one data subject:
-   * `<col> UUID NOT NULL REFERENCES profiles|auth.users(...) ON DELETE CASCADE`.
-   * The CASCADE is what proves the DB itself treats the row as the user's —
-   * erasing the user erases the row.
+   * `<col> UUID NOT NULL REFERENCES profiles|auth.users(...) ON DELETE CASCADE`,
+   * or the same shape declared as `PRIMARY KEY` instead of `NOT NULL` — the
+   * one-row-per-user table. A PK is not a weaker claim than NOT NULL, it is a
+   * stronger one (non-null AND unique), so both arms are accepted. The CASCADE
+   * is what proves the DB itself treats the row as the user's — erasing the
+   * user erases the row.
    */
   const CASCADE_OWNER_COLUMN_RE =
-    /\b([a-z_]+)\s+UUID\s+NOT\s+NULL\s+REFERENCES\s+(?:auth\.users|public\.profiles|profiles)\s*(?:\([a-z_]+\))?\s*ON\s+DELETE\s+CASCADE/i;
+    /\b([a-z_]+)\s+UUID\s+(?:NOT\s+NULL|PRIMARY\s+KEY)\s+REFERENCES\s+(?:auth\.users|public\.profiles|profiles)\s*(?:\([a-z_]+\))?\s*ON\s+DELETE\s+CASCADE/i;
 
   /** Same CREATE TABLE shape the hook's own scanner uses (quoted / qualified). */
   const CREATE_TABLE_RE =
@@ -849,6 +865,32 @@ describe("B3: EXCLUDED_TABLES cannot silence a user-owned table", () => {
     expect(found!.ownerColumn).toBe("created_by");
   });
 
+  it("the `PRIMARY KEY REFERENCES` ownership shape is in scope, not just `NOT NULL`", () => {
+    // Guards the 2026-08-27 widening. `user_id UUID PRIMARY KEY REFERENCES
+    // profiles(id) ON DELETE CASCADE` is the canonical one-row-per-user table
+    // and a STRONGER ownership claim than NOT NULL, but the original rule
+    // demanded the literal token `NOT NULL` and so waved all three of these
+    // through. Reverting the regex to the NOT NULL-only form re-opens exactly
+    // that bypass, and this case is what makes the revert red instead of
+    // silent. These are live tables, not fixtures — if one is genuinely
+    // dropped or reshaped, re-derive the list from the migration, do not
+    // delete the case.
+    for (const table of [
+      "profiles",
+      "allocator_preferences",
+      "investor_attestations",
+    ]) {
+      expect(
+        CASCADE_OWNED.get(table),
+        `${table} declares a \`UUID PRIMARY KEY REFERENCES profiles|auth.users ` +
+          `ON DELETE CASCADE\` owner column but the CASCADE scan did not see it. ` +
+          `CASCADE_OWNER_COLUMN_RE has probably lost its \`PRIMARY KEY\` arm, ` +
+          `which silently exempts every one-row-per-user table from the class-` +
+          `coherence rule below.`,
+      ).toBeDefined();
+    }
+  });
+
   it("strategy_shares is NOT in EXCLUDED_TABLES", () => {
     // The specific pin (3). strategy_shares records that the owner created /
     // revoked a factsheet share link, and when — personal data Art. 15
@@ -887,8 +929,9 @@ describe("B3: EXCLUDED_TABLES cannot silence a user-owned table", () => {
     expect(
       offenders,
       "EXCLUDED_TABLES entry/entries exclude a DIRECTLY user-owned table under a " +
-        "class whose own definition rules that out. A `NOT NULL <owner> " +
-        "REFERENCES profiles|auth.users ON DELETE CASCADE` column means every row " +
+        "class whose own definition rules that out. A `<owner> UUID NOT NULL` (or " +
+        "`PRIMARY KEY`) `REFERENCES profiles|auth.users ON DELETE CASCADE` column " +
+        "means every row " +
         "belongs to exactly one data subject, so the table is not `system` (no " +
         "row-level ownership), not `cross-party` (multi-owner), not `pre-auth` " +
         "(no user FK) and not `scoped` (indirect via a parent — this FK is " +
