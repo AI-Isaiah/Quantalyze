@@ -2189,20 +2189,42 @@ BEGIN
     RAISE EXCEPTION 'TEST FAILED (SANITIZE 1b): sanitize_user(uid_a) returned % — expected TRUE for a not-yet-sanitized user. The erasure assertions below cannot be trusted if the erasure did not run.', san_ok;
   END IF;
 
+  -- ⛔⛔ THE ROW-COUNT ARM MUST COME FIRST, AND THE ORDER IS A CORRECTNESS
+  -- PROPERTY, NOT A STYLE ONE. It used to sit LAST, after the revoked_at and
+  -- generation arms, and that made it unreachable AND made the arm above it lie:
+  -- `SELECT revoked_at, generation INTO ...` matches ZERO ROWS when the row was
+  -- DELETEd, which leaves `now_revoked` NULL — the exact condition SANITIZE 1c
+  -- reads as "still live". `UNIQUE(strategy_id)` means the count can never be
+  -- anything but 0 or 1, so there was no configuration in which 1e fired first.
+  -- MEASURED 2026-08-28, with sanitize_user's arm changed to
+  -- `DELETE FROM strategy_shares WHERE created_by = p_user_id AND revoked_at IS
+  -- NULL` (and migration 20260827130000's two apply-time greps neutered so the
+  -- apply survived): the file reported
+  --   "SANITIZE 1c: after sanitize_user the data subject's share row is STILL
+  --    LIVE ... its `UPDATE strategy_shares` arm was dropped"
+  -- for an erasure that had DELETED the row — the precise inverse of what
+  -- happened, sending the operator to look for a statement that is present.
+  -- With the count read first, the same mutation reports SANITIZE 1e instead.
+  -- RED-UNDER: change sanitize_user's `UPDATE strategy_shares SET revoked_at =
+  --            now(), generation = generation + 1 ...` to a `DELETE FROM
+  --            strategy_shares ...` with the same WHERE clause.
+  -- ⚠️ LAYERED: migration 20260827130000's STEP 2 greps for that UPDATE and
+  --    separately rejects any `DELETE FROM strategy_shares`, and either arm
+  --    aborts the apply — so both must be neutered in the same mutation or this
+  --    file never runs. With both gone SANITIZE 1e is the first failure
+  --    (MEASURED: "share row count is 0 after erasure, expected 1").
+  SELECT count(*) INTO row_cnt FROM strategy_shares WHERE strategy_id = strat_a;
+  IF row_cnt <> 1 THEN
+    RAISE EXCEPTION 'TEST FAILED (SANITIZE 1e): the subject''s share row count is % after erasure, expected 1. sanitize_user must SOFT-revoke: deleting the row discards the generation counter, and the next create_strategy_share() would restart at generation 1 — resurrecting every already-revoked token. ⛔ Read this BEFORE SANITIZE 1c below: when the row is gone, 1c''s `SELECT revoked_at INTO` matches nothing, leaves the variable NULL and would report the erasure as having left the row LIVE — the exact opposite of a hard delete. That is why this arm is ordered first.', row_cnt;
+  END IF;
+
   SELECT revoked_at, generation INTO now_revoked, gen_final
     FROM strategy_shares WHERE strategy_id = strat_a;
   IF now_revoked IS NULL THEN
-    RAISE EXCEPTION 'TEST FAILED (SANITIZE 1c): after sanitize_user the data subject''s share row is STILL LIVE. Every link they ever copied still resolves to their unpublished factsheet — returns curve, metrics and trade analytics all survive the anonymize — and banned_until = infinity means they can never log in to revoke it. Companion migration 20260827130000 is missing or its `UPDATE strategy_shares` arm was dropped.';
+    RAISE EXCEPTION 'TEST FAILED (SANITIZE 1c): after sanitize_user the data subject''s share row is STILL LIVE. Every link they ever copied still resolves to their unpublished factsheet — returns curve, metrics and trade analytics all survive the anonymize — and banned_until = infinity means they can never log in to revoke it. Companion migration 20260827130000 is missing or its `UPDATE strategy_shares` arm was dropped. (SANITIZE 1e above has already proved the row EXISTS, so this really is a live row and not a missing one.)';
   END IF;
   IF gen_final <> gen_pre_san + 1 THEN
     RAISE EXCEPTION 'TEST FAILED (SANITIZE 1d): generation is % after erasure, expected % (exactly +1). If it is UNCHANGED the erasure is COSMETIC: revoked_at is stamped but the token still derives from the same counter, so every previously-copied link KEEPS WORKING.', gen_final, gen_pre_san + 1;
-  END IF;
-
-  -- REVOKE, never DELETE. A delete rewinds the counter, so the next mint would
-  -- restart at generation 1 and resurrect every token minted at generation 1.
-  SELECT count(*) INTO row_cnt FROM strategy_shares WHERE strategy_id = strat_a;
-  IF row_cnt <> 1 THEN
-    RAISE EXCEPTION 'TEST FAILED (SANITIZE 1e): the subject''s share row count is % after erasure, expected 1. sanitize_user must SOFT-revoke: deleting the row discards the generation counter, and the next create_strategy_share() would restart at generation 1 — resurrecting every already-revoked token.', row_cnt;
   END IF;
 
   -- ...and the erasure is scoped to the subject. `created_by = p_user_id` is
