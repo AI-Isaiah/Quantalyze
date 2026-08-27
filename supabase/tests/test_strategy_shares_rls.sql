@@ -229,8 +229,12 @@ DECLARE
   v_revoke_s   TEXT;
   gen_b        BIGINT;
   gen_b_after  BIGINT;
-  b_by         UUID;
   b_revoked    TIMESTAMPTZ;
+  -- TENANT 5's pre-attempt snapshot of tenant B's tombstone. Separate from
+  -- `b_revoked` on purpose: the end-state arm has to compare the AFTER value
+  -- against a BEFORE value it captured itself, or it cannot tell "the attack
+  -- was refused" from "the setup never revoked anything".
+  b_revoked_pre TIMESTAMPTZ;
   gen_pre_san  BIGINT;
   san_ok       BOOLEAN;
   gen_probe    BIGINT;
@@ -1608,16 +1612,86 @@ BEGIN
   --     where the policy's USING clause is evaluated against the EXISTING row
   --     and rejects with the DISTINCT message "new row violates row-level
   --     security policy (USING expression)". That is the second wall.
-  -- ⛔ Consequence for honesty: 5b/5c below go RED on the SAME neuter that
+  -- ⛔ Consequence for honesty: the arms below go RED on the SAME neuter that
   -- reddens TENANT 1 (dropping the EXISTS half) — they are NOT an independent
   -- pin of the USING clause. **TENANT 4a is the USING pin** — see the note
-  -- immediately after 5c, which records why the obvious raw cross-tenant UPDATE
-  -- arm here was written, measured and then DELETED as unfailable. (An earlier
-  -- version of this sentence named a "TENANT 5h" that has never existed: the
-  -- roster is 5a-5g, and 5h WAS that deleted arm. The two passages now agree.)
-  -- What 5b-5g uniquely prove is that the rejection is TOTAL when a victim row
-  -- exists: no partial write, no revoked_at clearing, no provenance rewrite, no
-  -- second row.
+  -- after 5c, which records why the obvious raw cross-tenant UPDATE arm here was
+  -- written, measured and then DELETED as unfailable. (An earlier version of
+  -- this sentence named a "TENANT 5h" that has never existed: 5h WAS that
+  -- deleted arm. The two passages now agree.)
+  --
+  -- ⛔⛔ THE 2026-08-28 RESTRUCTURE, AND WHY THE OLD SHAPE PROVED NOTHING. This
+  -- block used to run the conflict-write inside a nested `BEGIN … EXCEPTION`,
+  -- assert `raised`, and THEN read tenant B's row through four arms (5d-5g:
+  -- generation, tombstone, provenance, row count) that claimed to prove "the
+  -- rejection was TOTAL — no partial write". They proved the opposite of a
+  -- security property: they were reading THEIR OWN SUBTRANSACTION ROLLBACK.
+  -- PL/pgSQL executes a nested BEGIN … EXCEPTION as an implicit subtransaction,
+  -- so catching the error rolls back every database change the block made — in
+  -- EVERY configuration, whether or not any wall exists.
+  -- MEASURED (PostgreSQL 16 throwaway cluster, 2026-08-28): a GENUINE
+  -- cross-tenant write placed inside that block —
+  --   `SET LOCAL ROLE service_role;
+  --    UPDATE strategy_shares SET revoked_at = now(), generation = generation + 1
+  --      WHERE strategy_id = strat_b;`
+  -- — moved B's counter 1 -> 2 and stamped B's tombstone, and THE WHOLE FILE
+  -- STILL WENT GREEN: psql exit 0, and the completion notice reported every one
+  -- of that day's 106 arms as executed. The identical statement moved OUTSIDE
+  -- the block was caught immediately ("TENANT 5d: tenant A's rejected
+  -- conflict-write moved tenant B's generation from 1 to 2"). The handler, not
+  -- the guard, was doing all the work.
+  -- ⛔ AND DO NOT QUOTE THIS FILE'S COMPLETION NOTICE VERBATIM IN A COMMENT.
+  -- The sentinel check in .github/workflows/ci.yml — and the psql stub in
+  -- src/__tests__/contracts/ci-anti-skip-gate.contract.test.ts — both take the
+  -- FIRST match of that notice's text in the file, so a prose copy sitting
+  -- ABOVE the real notice shadows it and the gate reports the sentinel as never
+  -- printed while psql exits 0. MEASURED 2026-08-28, on this very paragraph.
+  --
+  -- ⭐ THE FIX IS TRIGGER 3'S PRECEDENT: assert the attack's END STATE, from
+  -- outside the handler, on a row where a successful write would LEAVE A MARK.
+  -- `create_strategy_share`'s conflict path is `SET revoked_at = NULL` and
+  -- nothing else, so against a LIVE victim row a successful cross-tenant write
+  -- is invisible — which is why this block now REVOKES B's share first. Then:
+  --   * walls present -> the statement raises, the subtransaction discards it,
+  --     B's row is still revoked;
+  --   * both walls gone -> the statement SUCCEEDS, no exception is raised, the
+  --     subtransaction COMMITS, and B's revoked link is LIVE AGAIN. TENANT 5b
+  --     is the first failure, on the end state rather than on an error string.
+  --
+  -- ⚠️ THE ROSTER IS NOW 5a AND 5b, AND THE OLD 5b/5c COLLAPSED INTO ONE ARM
+  -- rather than being kept as three. This was measured, not preferred. The
+  -- conflict-write either RAISES (and the subtransaction discards it) or
+  -- SUCCEEDS (and the tombstone clears); there is no third world, so "it was
+  -- rejected" and "B's row survived" can never both be first, and whichever is
+  -- written second is unfailable. The end state is the one kept, because it is
+  -- the property that matters and it survives a future change in which the RPC
+  -- stops raising but still fails to write.
+  -- ⛔ AND THE MESSAGE PIN CANNOT BE AN ARM OF ITS OWN EITHER — MEASURED, after
+  -- three attempts to redden it. For a rejection to arrive from something other
+  -- than RLS while the tombstone survives, the mint RPC's conflict clause or the
+  -- INSERT column grant has to change; and BOTH of those abort the file far
+  -- earlier on an UNWRAPPED call, not on an arm. `ON CONFLICT ... DO NOTHING`
+  -- surfaced OWNER 2d ("re-minting a LIVE share returned nonce <NULL>");
+  -- dropping the ON CONFLICT clause outright, or revoking
+  -- `INSERT (strategy_id)`, kills OWNER 1a / OWNER 2a, whose
+  -- `SELECT ... FROM create_strategy_share(...)` calls carry no exception block
+  -- at all, so psql dies on a raw 23505/42501 instead. There is no configuration
+  -- in which a standalone message arm is the first failure, so the message test
+  -- lives INSIDE 5b as one more disjunct — it costs nothing there and inflates
+  -- no floor.
+  --
+  -- ⛔ THE OLD 5d, 5f AND 5g ARE DELETED, and none of them can be restored by
+  -- putting them after the end-state read, because the conflict path cannot
+  -- touch what they measured even when it fully succeeds:
+  --   * 5d (generation) — `DO UPDATE SET revoked_at = NULL` never writes the
+  --     counter. Adding a bump to that SET list would redden REACTIVATE 1b in
+  --     the owner's OWN lane, with no policy mutation at all;
+  --   * 5f (created_by) — likewise absent from the SET list, and rewriting it
+  --     on an existing row is trigger rule (0b), pinned behaviourally against
+  --     the one role grants cannot bind by TRIGGER 4c;
+  --   * 5g (row count) — `UNIQUE(strategy_id)` makes a second row unreachable,
+  --     and dropping that index makes `ON CONFLICT (strategy_id)` itself an
+  --     error, which raises and rolls back. Unfailable in every configuration.
   --
   -- ⚠️ Deliberately placed AFTER the TENANT 1-4 family. Seeding B's row EARLIER
   -- (the obvious placement) would push TENANT 1's mint against a strategy that
@@ -1637,26 +1711,84 @@ BEGIN
     RAISE EXCEPTION 'TEST FAILED (TENANT 5a): tenant B''s first mint on their own strategy returned %, expected 1', gen_b;
   END IF;
 
+  -- ⭐ REVOKE B'S SHARE — this is what gives the end-state arm something to
+  -- observe. `create_strategy_share`'s conflict path writes exactly one column,
+  -- `revoked_at = NULL`, so against a live row a fully successful cross-tenant
+  -- write leaves the table byte-identical and NO end-state arm can exist. B's
+  -- row is put back LIVE a few lines below, before anything downstream reads it.
+  SELECT public.revoke_strategy_share(strat_b) INTO affected;
+  SELECT revoked_at INTO b_revoked_pre FROM strategy_shares WHERE strategy_id = strat_b;
+
   RESET ROLE;
   PERFORM set_config('request.jwt.claims', NULL, true);
   PERFORM set_config('request.jwt.claims',
     json_build_object('sub', uid_a::text, 'role', 'authenticated')::text, true);
   SET LOCAL ROLE authenticated;
 
-  raised := FALSE;
+  raised := FALSE; err_msg := NULL;
   BEGIN
     PERFORM public.create_strategy_share(strat_b);
   EXCEPTION WHEN OTHERS THEN
     raised := TRUE; err_msg := SQLERRM;
   END;
-  IF NOT raised THEN
-    RESET ROLE;
-    RAISE EXCEPTION 'TEST FAILED (TENANT 5b): tenant A minted against tenant B''s EXISTING share row without error. Both policy walls are gone: the CR-01 EXISTS half of WITH CHECK (which normally rejects the proposed tuple first) AND the USING clause the ON CONFLICT DO UPDATE path falls through to. `SET revoked_at = NULL` on that path RESURRECTS another tenant''s revoked link.';
+
+  RESET ROLE;
+  PERFORM set_config('request.jwt.claims', NULL, true);
+
+  -- ======================================================================
+  -- TENANT 5b: THE END STATE — B's REVOKED link is still dead
+  -- ======================================================================
+  -- ⛔ READ FROM OUTSIDE THE HANDLER, WHICH IS THE ENTIRE POINT (see the
+  -- restructure note above). This is the arm the deleted 5d-5g pretended to be:
+  -- when both policy walls are gone the conflict-write does not raise, so the
+  -- subtransaction COMMITS and `revoked_at = NULL` really does land on a row
+  -- tenant A does not own. B's revoked capability url resolves again.
+  --
+  -- `b_revoked_pre` is checked in the SAME arm rather than as a separate "-pre"
+  -- vacuity guard, deliberately: a standalone pre-arm could never be the first
+  -- failure (REVOKE 1b already fires for any breakage of the tombstone stamp),
+  -- so it would be decoration. Folded in, it costs nothing and stops this arm
+  -- from passing on a world where the setup revoke silently did nothing.
+  -- RED-UNDER: replace the strategy_shares_owner policy's clauses with
+  --            `USING (true) WITH CHECK (true)` on the live database.
+  -- ⚠️ LAYERED NINE DEEP, and the depth was MEASURED, not predicted — the
+  --    mutation unblocks every cross-tenant probe in the file:
+  --      1-7. neuter the ASSERTIONS of TENANT 1a, 1b, 2a, 2b, 3a, 3b and 4a,
+  --           all of which fire earlier;
+  --      8-9. neuter TENANT 1's and TENANT 2's WRITE STATEMENTS as well, not
+  --           just their assertions. Left to run they SUCCEED under the loose
+  --           policy and plant a tenant-A-owned share row on strat_b, after
+  --           which tenant B's own revoke (`created_by = auth.uid()`) matches
+  --           zero rows and THIS arm fires on its vacuity half instead —
+  --           reporting `revoked_at was (null) before the attempt`, which is a
+  --           true statement about a setup that never ran, not the attack.
+  --    Step 8-9 is the OWNER 2d / N1 3a precedent applied honestly. With all
+  --    nine applied TENANT 5b is the FIRST failure, on the attack half —
+  --    MEASURED 2026-08-28: `revoked_at was 2026-08-28 00:50:47.415812+02
+  --    before the attempt, (null) after; raised=f`. That is tenant A clearing
+  --    tenant B's tombstone, surviving the subtransaction because nothing
+  --    raised, and being caught from outside it.
+  SELECT revoked_at INTO b_revoked FROM strategy_shares WHERE strategy_id = strat_b;
+  IF b_revoked_pre IS NULL
+     OR b_revoked IS NULL
+     OR NOT raised
+     OR err_msg NOT LIKE '%row-level security%' THEN
+    RAISE EXCEPTION 'TEST FAILED (TENANT 5b): tenant B''s REVOKED share row did not survive tenant A''s cross-tenant conflict-write (revoked_at was % before the attempt, % after; raised=%, error=%). If the AFTER value is NULL, `INSERT ... ON CONFLICT DO UPDATE SET revoked_at = NULL` reached a row tenant A does not own: BOTH policy walls are gone — the CR-01 EXISTS half of WITH CHECK, which normally rejects the proposed tuple before the conflict handler runs at all, AND the USING clause that path otherwise falls through to. Every link tenant B revoked resolves again, as anonymous access to an unpublished factsheet. If the BEFORE value is NULL the setup revoke did not take and this arm would have passed vacuously. If the error is not an RLS one the write was blocked by an accident — UNIQUE(strategy_id) raising 23505, or a missing grant — which stops blocking on the next unrelated change.', COALESCE(b_revoked_pre::TEXT, '(null)'), COALESCE(b_revoked::TEXT, '(null)'), raised, COALESCE(err_msg, '(none)');
   END IF;
-  IF err_msg NOT LIKE '%row-level security%' THEN
-    RESET ROLE;
-    RAISE EXCEPTION 'TEST FAILED (TENANT 5c): the cross-tenant conflict write was blocked by something OTHER than RLS (got: %) — most likely UNIQUE(strategy_id) raising 23505, which would mean neither policy wall was proven', err_msg;
-  END IF;
+
+  -- ⭐ PUT B'S SHARE BACK LIVE, at the ADVANCED counter, and refresh `gen_b`.
+  -- (5b above is the last arm of this block; what follows is state restoration.)
+  -- Not cleanup for its own sake: SANITIZE 1f below proves that erasing tenant A
+  -- does NOT revoke tenant B, which requires B to be live and `gen_b` to hold
+  -- B's current counter; and N1 3a's erasure arm needs a LIVE row, because the
+  -- Art. 17 statement carries `revoked_at IS NULL` and would otherwise match
+  -- zero rows and report a clean erasure that never happened.
+  PERFORM set_config('request.jwt.claims',
+    json_build_object('sub', uid_b::text, 'role', 'authenticated')::text, true);
+  SET LOCAL ROLE authenticated;
+  SELECT c.generation INTO gen_b FROM public.create_strategy_share(strat_b) c;
+  RESET ROLE;
+  PERFORM set_config('request.jwt.claims', NULL, true);
 
   -- ⚠️ WHERE THE `USING` CLAUSE IS ACTUALLY PINNED — read this before adding an
   -- arm here. A raw cross-tenant `UPDATE strategy_shares ... WHERE strategy_id
@@ -1675,33 +1807,6 @@ BEGIN
   -- revoke_strategy_share, which now carries its own `created_by = auth.uid()`
   -- predicate (B2 fix), so it returns 0 even with RLS wide open. Do not read
   -- 4b as an RLS proof any more — it is a proof of the RPC's predicate.
-
-  RESET ROLE;
-  PERFORM set_config('request.jwt.claims', NULL, true);
-
-  -- ...and B's row is byte-untouched by A's attempt. A rejection that still
-  -- moved the counter, cleared the tombstone or rewrote provenance would be a
-  -- successful attack wearing an error message.
-  SELECT generation, revoked_at, created_by INTO gen_b_after, b_revoked, b_by
-    FROM strategy_shares WHERE strategy_id = strat_b;
-  IF gen_b_after IS DISTINCT FROM gen_b THEN
-    RESET ROLE;
-    RAISE EXCEPTION 'TEST FAILED (TENANT 5d): tenant A''s rejected conflict-write moved tenant B''s generation from % to %', gen_b, gen_b_after;
-  END IF;
-  IF b_revoked IS NOT NULL THEN
-    RESET ROLE;
-    RAISE EXCEPTION 'TEST FAILED (TENANT 5e): tenant B''s share is revoked after tenant A''s rejected attempt — the conflict path wrote to a row it must not touch';
-  END IF;
-  IF b_by IS DISTINCT FROM uid_b THEN
-    RESET ROLE;
-    RAISE EXCEPTION 'TEST FAILED (TENANT 5f): tenant B''s created_by changed from % to % — tenant A''s rejected attempt rewrote provenance', uid_b, b_by;
-  END IF;
-
-  SELECT count(*) INTO row_cnt FROM strategy_shares WHERE strategy_id = strat_b;
-  IF row_cnt <> 1 THEN
-    RESET ROLE;
-    RAISE EXCEPTION 'TEST FAILED (TENANT 5g): % share rows exist for tenant B''s strategy, expected exactly 1', row_cnt;
-  END IF;
 
   -- ======================================================================
   -- ANON 1: blocked at the GRANT layer (42501)
@@ -2199,7 +2304,7 @@ BEGIN
       raised, COALESCE(err_msg, '(none)'), COALESCE(san_ok::TEXT, '(null)'), b_revoked, gen_pre_san, gen_b_after;
   END IF;
 
-  RAISE NOTICE 'test_strategy_shares_rls: ALL 106 ARMS EXECUTED (SHAPE 1, SHAPE 1b, SHAPE 1c, SHAPE 2a, SHAPE 2b, SHAPE 3, SHAPE 3b, SHAPE 4a, SHAPE 4b, SHAPE 4c, SHAPE 4d, SHAPE 4e, SHAPE 5, SHAPE 5b-pre, SHAPE 5b, OWNER 1a, OWNER 1b, OWNER 1c, OWNER 2a, OWNER 2b, OWNER 2c, OWNER 2d, TENANT 1a, TENANT 1b, TENANT 2a, TENANT 2b, TENANT 3a, TENANT 3b, N1 2a, N1 1a, N1 1b, N1 1c, NO-DELETE 1, REVOKE 1a, REVOKE 1b, REVOKE 1c, REVOKE 2a, REVOKE 2b, REACTIVATE 1a, REACTIVATE 1b, REACTIVATE 1c, REACTIVATE 1d, REACTIVATE 1e, REACTIVATE 1f, REACTIVATE 1g, TRIGGER 1a, TRIGGER 1b, MONOTONIC 1a, MONOTONIC 1b, MONOTONIC 1c, TRIGGER 2a, TRIGGER 2b, TRIGGER 3a, TRIGGER 3b, TRIGGER 3c, TRIGGER 3d-i, TRIGGER 3d-ii, TRIGGER 4a, TRIGGER 4b, TRIGGER 4c-i, TRIGGER 4c-ii, NONCE 1a, NONCE 1b, NONCE 2a, NONCE 2b, NONCE 3, NONCE 4a, NONCE 4b, NONCE 4c, TENANT 4a, TENANT 4b, TENANT 4c, TENANT 5a, TENANT 5b, TENANT 5c, TENANT 5d, TENANT 5e, TENANT 5f, TENANT 5g, ANON 1a, ANON 1b, ANON 1b-grant, ANON 1c, ANON 1c-grant, ANON 1d, ANON 1d-grant, ANON 2, ANON 2b, SERVICE-ROLE 0-acl, SERVICE-ROLE 1, SERVICE-ROLE 1-grant, SERVICE-ROLE 2a, SERVICE-ROLE 2b, SERVICE-ROLE 2c, SERVICE-ROLE 2d, SERVICE-ROLE 2e, NONCE 5a, NONCE 5b, NONCE 5c, SANITIZE 1a, SANITIZE 1b, SANITIZE 1c, SANITIZE 1d, SANITIZE 1e, SANITIZE 1f, N1 3a). Observed generation sequence: %', gen_seen;
+  RAISE NOTICE 'test_strategy_shares_rls: ALL 101 ARMS EXECUTED (SHAPE 1, SHAPE 1b, SHAPE 1c, SHAPE 2a, SHAPE 2b, SHAPE 3, SHAPE 3b, SHAPE 4a, SHAPE 4b, SHAPE 4c, SHAPE 4d, SHAPE 4e, SHAPE 5, SHAPE 5b-pre, SHAPE 5b, OWNER 1a, OWNER 1b, OWNER 1c, OWNER 2a, OWNER 2b, OWNER 2c, OWNER 2d, TENANT 1a, TENANT 1b, TENANT 2a, TENANT 2b, TENANT 3a, TENANT 3b, N1 2a, N1 1a, N1 1b, N1 1c, NO-DELETE 1, REVOKE 1a, REVOKE 1b, REVOKE 1c, REVOKE 2a, REVOKE 2b, REACTIVATE 1a, REACTIVATE 1b, REACTIVATE 1c, REACTIVATE 1d, REACTIVATE 1e, REACTIVATE 1f, REACTIVATE 1g, TRIGGER 1a, TRIGGER 1b, MONOTONIC 1a, MONOTONIC 1b, MONOTONIC 1c, TRIGGER 2a, TRIGGER 2b, TRIGGER 3a, TRIGGER 3b, TRIGGER 3c, TRIGGER 3d-i, TRIGGER 3d-ii, TRIGGER 4a, TRIGGER 4b, TRIGGER 4c-i, TRIGGER 4c-ii, NONCE 1a, NONCE 1b, NONCE 2a, NONCE 2b, NONCE 3, NONCE 4a, NONCE 4b, NONCE 4c, TENANT 4a, TENANT 4b, TENANT 4c, TENANT 5a, TENANT 5b, ANON 1a, ANON 1b, ANON 1b-grant, ANON 1c, ANON 1c-grant, ANON 1d, ANON 1d-grant, ANON 2, ANON 2b, SERVICE-ROLE 0-acl, SERVICE-ROLE 1, SERVICE-ROLE 1-grant, SERVICE-ROLE 2a, SERVICE-ROLE 2b, SERVICE-ROLE 2c, SERVICE-ROLE 2d, SERVICE-ROLE 2e, NONCE 5a, NONCE 5b, NONCE 5c, SANITIZE 1a, SANITIZE 1b, SANITIZE 1c, SANITIZE 1d, SANITIZE 1e, SANITIZE 1f, N1 3a). Observed generation sequence: %', gen_seen;
 END
 $$;
 
