@@ -1317,6 +1317,79 @@ follows is everything that was not.
   regression gate over phases 158–163. Fixed (both added to `NO_INPUT`), but the *gap* is that a
   phase can add a rate-limited route and never run the invariant that governs it.
 
+### Phase 164 (SHARE) — /qa on PRODUCTION, post-deploy (booked 2026-08-28)
+
+Ran to close UAT 7 (Plausible) and UAT 9 (Sentry), which were recorded BLOCKED locally.
+Neither closed. Both found something better than a pass.
+
+- **✅ FIXED — [SHARE-QA-01] the share token could still reach Sentry, in a TAG.**
+  `scrubSentryEvent` covered `request.url`, `transaction`, breadcrumbs, spans, trace
+  description and `extra` — but NOT `event.tags`. ⛔ Evidence is a LIVE PRODUCTION EVENT:
+  QUANTALYZE-16 shows the SDK setting a `url` tag from the raw request URL independently
+  of `request.url` (`transaction: GET /factsheet/[id]` parameterised, `url` tag
+  `https://quantalyze.xyz/factsheet/Next.Metadata` RAW). On the share lane that tag would
+  have carried a live capability to a third-party store, and tags are INDEXED and
+  queryable — worse than a body field. ⛔ The existing test could not find it: `tokenEvent()`
+  was built to cover "every channel the scrubber claims to cover", so it mirrored the
+  implementation's own surface and inherited its blind spot. Fixed + fixture extended;
+  both arms OBSERVED red with the scrub removed.
+  **Class still open:** the scrub enumerates fields by hand. Nothing proves the enumeration
+  matches what the SDK actually populates. A future SDK version can add a field and the
+  scrub will silently not cover it. Candidate for 164.3 (VACUITY).
+
+- **✅ FIXED — [SHARE-QA-02] `secret-scan` went RED on main** after the v0.76.0.0 squash
+  merge: 5 `generic-api-key` findings on the phase's hand-typed 43-char token fixtures.
+  Rule-scoped allowlist (not a path exemption, per the config's own CR-03 lesson), proven
+  NARROW by probe. Same push-to-main-only asymmetry several existing entries document.
+
+- **✅ [SHARE-QA-03] UAT 7 (Plausible) — CLOSED AS NOT-APPLICABLE. Founder call 2026-08-28:
+  THERE IS NO PLAUSIBLE ACCOUNT.** Measured first, then explained: zero `plausible.io`
+  requests on prod `/strategies`, no script tag in the DOM, `window.plausible === undefined`,
+  and `NEXT_PUBLIC_PLAUSIBLE_DOMAIN` unset in every Vercel environment. The reason is not a
+  misconfiguration to fix — the service was never signed up for. `src/app/layout.tsx:49,99`
+  gates the tag on that var, so the tag can never load and UAT 7 can never obtain a positive
+  control. Recording it as permanently blocked would leave a checkpoint nobody can ever close.
+  ⛔ **Do NOT "fix" this by setting the var.** A `data-domain` with no matching Plausible site
+  loads the script and drops every event silently — it would manufacture a passing positive
+  control while recording nothing, which is worse than the honest absence.
+  **Status of the SHARE-01 Plausible mitigation: DORMANT BY DESIGN, and still correct.**
+  `PlausibleScript` withholds the tag on `/factsheet-share/*` and is unit-tested; it arms the
+  moment analytics is ever adopted. The CSP already allows `https://plausible.io` in both
+  `script-src` and `connect-src` (`next.config.ts:97`) — harmless, but it is an allowance for
+  a host this app never contacts. ⚠️ If analytics is ever adopted, re-open UAT 7 and get the
+  positive control before trusting the negative.
+
+- **✅ [SHARE-QA-04] UAT 9 (Sentry) — CLOSED, and closing it found a LIVE LEAK.**
+  Method: real `next build && next start`, SDK pointed at a local ingest server, a genuine
+  500 driven on `/factsheet-share/<token>`, then the transmitted bytes read directly. Prod
+  was never touched.
+  ⛔ **`contexts.trace.data.http.target` carried the RAW TOKEN** while `http.route`,
+  `request.url`, `transaction`, `extra.path` and `tags.routePath` beside it were all
+  correctly scrubbed. `http.target` is the OTel convention for the raw request target.
+  Fixed in `cb644bd45` by making the scrub RECURSIVE (nested objects + arrays) rather than
+  by naming one more field — this was the SECOND miss of a hand-maintained enumeration
+  after `tags`.
+  Re-verified end-to-end: 40 requests to force trace sampling (0.1), 10 transaction
+  envelopes, `http.target` now reads `/factsheet-share/[token]` — PRESENT and scrubbed,
+  not absent.
+
+- **⛔ [SHARE-QA-05] UAT 9 WAS NEVER REPRODUCIBLE ON A DEV SERVER — measured, not assumed.**
+  Next 16.2.11 does **not** invoke `instrumentation.ts`'s `onRequestError` in `next dev`.
+  Proven with a temporary probe: a real 500 on the share lane produced no probe output and
+  no Sentry event, with `SENTRY_DSN` set and the capture server confirmed reachable. The
+  same request under `next start` fired the hook immediately.
+  **Consequence for the backlog:** any future check of the Sentry redaction path MUST use a
+  production build. A dev-server run will show a clean capture for the wrong reason and read
+  exactly like a pass.
+
+- **[SHARE-QA-06] the scrub still enumerates WHERE to walk, even though it no longer
+  enumerates WHAT to scrub.** `scrubSentryEvent` names `request.url`, `transaction`,
+  `breadcrumbs`, `spans`, `contexts.trace`, `extra`, `tags`. Two of those were added only
+  after a live leak. Nothing proves the list matches what the SDK populates, and the wire
+  capture used above is the only thing that ever has. ⭐ Candidate mechanism for 164.3
+  (VACUITY): keep the capture harness and assert on transmitted bytes, rather than on a
+  fixture that mirrors the implementation's own idea of its surface.
+
 ### Phase 164 (SHARE) — browser-UAT findings (booked 2026-08-28)
 
 Source: `164-UAT.md`, 9 checkpoints against localhost pointed at TEST — 7 passed, 2 recorded

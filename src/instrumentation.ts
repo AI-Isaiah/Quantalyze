@@ -45,18 +45,52 @@ type ScrubbableEvent = {
   request?: { url?: unknown } | null;
   transaction?: unknown;
   breadcrumbs?: Array<{ message?: unknown; data?: unknown } | null> | null;
-  spans?: Array<{ description?: unknown } | null> | null;
-  contexts?: { trace?: { description?: unknown } | null } | null;
+  spans?: Array<{ description?: unknown; data?: unknown } | null> | null;
+  contexts?: { trace?: { description?: unknown; data?: unknown } | null } | null;
   extra?: Record<string, unknown> | null;
+  tags?: Record<string, unknown> | null;
 };
 
-/** Scrub every string value of a loose record in place. Non-strings untouched. */
-function scrubRecordStrings(record: unknown): void {
-  if (record == null || typeof record !== "object") return;
+/**
+ * Scrub every string ANYWHERE inside a loose value, in place — nested objects
+ * and arrays included. Non-strings untouched.
+ *
+ * ⛔ THE SHALLOW VERSION LEAKED A LIVE TOKEN, MEASURED. This walked only the
+ * top level and scrubbed `typeof value === "string"`, so any string one level
+ * down survived. Captured off the wire from a real production build
+ * (/qa 2026-08-28), driving a genuine 500 on `/factsheet-share/<token>` into a
+ * local Sentry ingest and reading the transmitted bytes:
+ *
+ *     contexts.trace.data.http.target  /factsheet-share/QAuatNINEzzzz…  <- RAW
+ *     contexts.trace.data.http.route   /factsheet-share/[token]         <- ok
+ *
+ * `http.target` is the OpenTelemetry semantic convention for the raw request
+ * target, and Next's instrumentation sets it. `contexts.trace.data` is an
+ * object, so the shallow walk skipped the whole subtree while `request.url`,
+ * `transaction`, `extra.path` and `spans[].description` were all correctly
+ * scrubbed one field away.
+ *
+ * ⚠️ Enumerating fields is what failed here, twice — `tags` was the first miss,
+ * also found in production. So this recurses instead of naming more paths: a
+ * future SDK version that adds another nested URL field is covered without an
+ * edit. Depth is capped because `beforeSend` must never throw (a throw there
+ * drops the event); 8 is far past any real Sentry event shape.
+ */
+function scrubRecordStrings(record: unknown, depth = 0): void {
+  if (record == null || typeof record !== "object" || depth > 8) return;
+  if (Array.isArray(record)) {
+    for (let i = 0; i < record.length; i++) {
+      const value: unknown = record[i];
+      if (typeof value === "string") record[i] = scrubSharePath(value);
+      else scrubRecordStrings(value, depth + 1);
+    }
+    return;
+  }
   const obj = record as Record<string, unknown>;
   for (const key of Object.keys(obj)) {
     const value = obj[key];
     if (typeof value === "string") obj[key] = scrubSharePath(value);
+    else scrubRecordStrings(value, depth + 1);
   }
 }
 
@@ -104,18 +138,37 @@ export function scrubSentryEvent<T>(event: T): T {
     scrubRecordStrings(crumb.data);
   }
   for (const span of e.spans ?? []) {
-    if (span && typeof span.description === "string") {
+    if (!span) continue;
+    if (typeof span.description === "string") {
       span.description = scrubSharePath(span.description);
     }
+    // Same shape as the trace context above: spans carry an attribute bag that
+    // can hold `http.target`.
+    scrubRecordStrings(span.data);
   }
   const trace = e.contexts?.trace;
-  if (trace && typeof trace.description === "string") {
-    trace.description = scrubSharePath(trace.description);
+  if (trace) {
+    if (typeof trace.description === "string") {
+      trace.description = scrubSharePath(trace.description);
+    }
+    // `trace.data` is where `http.target` lives — the raw request target. This
+    // is the field that was measured leaking a live token off the wire.
+    scrubRecordStrings(trace.data);
   }
   // `extra` is scrubbed as a backstop even though `onRequestError` below
   // already scrubs the one field it sets. Defence in depth costs nothing here
   // and covers any future `captureException` call that forwards a raw path.
   scrubRecordStrings(e.extra);
+  // ⛔ TAGS — FOUND ON PRODUCTION, NOT BY REVIEW (/qa 2026-08-28). The SDK's own
+  // http/Next integration sets a `url` TAG from the raw request URL, entirely
+  // independently of `request.url`. Measured on live event QUANTALYZE-16:
+  // `transaction` was parameterised to `GET /factsheet/[id]` while the `url`
+  // tag carried `https://quantalyze.xyz/factsheet/Next.Metadata` verbatim. On
+  // the share lane that tag would have carried a LIVE CAPABILITY, and a tag is
+  // worse than a body field: tags are indexed and queryable in the Sentry UI.
+  // The scrubber covered every channel it had thought of, and this was not one
+  // of them — which is why the fixture below now carries a tag too.
+  scrubRecordStrings(e.tags);
 
   return event;
 }
