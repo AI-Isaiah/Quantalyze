@@ -25,7 +25,15 @@ import { GET } from "./route";
  */
 
 const HEADING = "This link is no longer active";
-const BODY = "The person who shared it turned it off. Ask them for a new link.";
+// Phase 164 / SHARE-04 (class-honesty sweep): the body no longer asserts a
+// CAUSE it cannot know. This handler serves unknown tokens, malformed tokens
+// and share-read errors as well as genuine revokes, so "the person who shared
+// it turned it off" was false in three of its four reachable states. The
+// replacement covers all of them and still refuses to distinguish them, which
+// is what keeps the response free of an existence oracle.
+const BODY =
+  "It may have been turned off by the person who shared it, or it may never " +
+  "have been valid. Ask them for a new link.";
 
 describe("GET /factsheet-share/gone — status", () => {
   it("returns a genuine HTTP 410, not a 200 or a 404", async () => {

@@ -194,6 +194,21 @@ export default async function FactsheetV2Page({
   // pins are the regression gate — T-150-27). Nothing below this point touches
   // the unstable_cache callback or its wrapper.
   let ownershipMark: CapitalOwnership | null = null;
+  // Phase 164 / SHARE-04 — does a LIVE private share link exist for this
+  // strategy? Read on the OWNER PROBE only, and lane-local for exactly the same
+  // reason `ownershipMark` is: it is threaded to FactsheetView as a render prop
+  // and must NEVER become a `FactsheetPayload` field, because the payload is the
+  // object the id-keyed cache serves to anonymous readers for the full TTL
+  // (T-164-01, the T-150-27 rule).
+  //
+  // It changes what the page may TRUTHFULLY say. With a live link the owner
+  // notice's "anyone else who opens this link sees a 404" sentence is false, and
+  // the revoke control has something to revoke.
+  //
+  // ⛔ FALSE means "no live link, as far as this render can tell" — it is the
+  // fail-closed value, not a claim. A read error degrades to false with a
+  // server-side log rather than crashing the owner's own factsheet.
+  let hasActiveShare = false;
   if (signRes.error || !signature) {
     const {
       data: { user },
@@ -276,6 +291,61 @@ export default async function FactsheetV2Page({
       ownershipMark = isCapitalOwnership(ownRow.capital_ownership)
         ? ownRow.capital_ownership
         : null;
+      // Share-link EXISTENCE, on the REQUEST-scoped client (RLS on — the owner
+      // may read their own strategy's share row; nobody else's predicate can
+      // reach it). Deliberately NOT the admin client: this fact is only ever
+      // needed for the session user's own strategy, so the request client is
+      // both sufficient and the narrower authority.
+      //
+      // ⛔ `revoked_at` ONLY. Do NOT add `generation` (or `nonce`): both are MAC
+      // inputs to `deriveShareToken`, and key material has no business on a
+      // render path. The UI needs to know THAT a link is live, never WHICH link
+      // it is — the URL itself comes from the client calling the idempotent mint
+      // route, which returns the same url every time (D-02's reuse payoff). This
+      // is also why the token module is not imported here: deriving the url
+      // server-side would put its module-load secret assertion on the entire id
+      // route's import graph.
+      //
+      // The generated database.types.ts has not been regenerated for
+      // `strategy_shares` (the table landed in plan 164-02), so the typed
+      // `.from()` overload does not know it. Cast through unknown — same shape
+      // and same deletion trigger as the cast in
+      // `src/app/factsheet-share/[token]/page.tsx`.
+      const { data: shareRow, error: shareError } = await (
+        supabase.from as unknown as (table: "strategy_shares") => {
+          select: (cols: string) => {
+            eq: (
+              col: string,
+              value: string,
+            ) => {
+              maybeSingle: () => Promise<{
+                data: { revoked_at: string | null } | null;
+                error: { message?: string; code?: string } | null;
+              }>;
+            };
+          };
+        }
+      )("strategy_shares")
+        .select("revoked_at")
+        .eq("strategy_id", id)
+        .maybeSingle();
+      if (shareError) {
+        // error-absent ≠ legit-absent (Rule 12). A PostgREST error returns
+        // {data:null,error} without throwing, and silently reading that as "no
+        // link" would hide a live link from its own owner — they would see the
+        // 404 sentence while a recipient is reading the factsheet. The render
+        // still degrades to false (the notice's conservative variant, no revoke
+        // control), but the breadcrumb is logged rather than swallowed.
+        console.error("[factsheet/v2/page] share-state read failed", {
+          id,
+          code: shareError.code,
+          message: shareError.message,
+        });
+        captureToSentry(shareError, {
+          tags: { route: "factsheet/v2/page", stage: "share-state" },
+        });
+      }
+      hasActiveShare = !!shareRow && shareRow.revoked_at === null;
     }
   }
   const signAnalytics = Array.isArray(signature.strategy_analytics)
@@ -326,7 +396,9 @@ export default async function FactsheetV2Page({
             owner is MOST likely to share the URL. Same exported component as
             the full render (single-sourced UI-SPEC copy), first child so the
             disclosure precedes any document content (UI-SPEC:97). */}
-        {lane === "owner" && <OwnerUnpublishedNotice />}
+        {lane === "owner" && (
+          <OwnerUnpublishedNotice hasActiveShare={hasActiveShare} />
+        )}
         <p className="text-fixed-10 font-mono uppercase tracking-[0.22em] text-text-muted">
           Institutional Factsheet · Quantalyze
         </p>
@@ -412,6 +484,14 @@ export default async function FactsheetV2Page({
         payload={payloadWithTrust}
         viewerNotice={lane === "owner" ? "owner_unpublished" : undefined}
         ownershipMark={lane === "owner" ? ownershipMark : undefined}
+        // Phase 164 / SHARE-04 — a THIRD lane-derived render prop under the same
+        // rule as the two above. Its PRESENCE is the "this row is unpublished and
+        // the session owns it" half of the share predicate (the owner lane is
+        // reachable only in that state — the same free gate `renameTarget` uses),
+        // and `hasActiveShare` is the "a link is live right now" half. Absent on
+        // every other mount, so the published `?share=1` lane is byte-identical
+        // (D-09) and the recipient/scenario mounts are untouched.
+        ownerShare={lane === "owner" ? { hasActiveShare } : undefined}
         renameTarget={
           lane === "owner"
             ? { id, name: payloadWithTrust.strategyName }

@@ -193,7 +193,17 @@ export default async function StrategyDetailPage({
         ]}
       />
       <div className="mb-4 flex flex-wrap items-center justify-end gap-3">
-        <ShareableLink strategyId={strategy.id} variant="primary" />
+        {/* Phase 164 (SHARE-04) — `published` is a literal true here, and that
+            is a claim this page can actually make: `getStrategyDetail` wraps its
+            query in `withPublishedOnly` and returns null otherwise, so an
+            unpublished strategy `notFound()`s above and never reaches this JSX.
+            The projection deliberately omits `status` (see the comment on
+            `getStrategyDetail`), so reading `strategy.status` here would yield
+            `undefined` and fail CLOSED into the mint lane — a token link for a
+            strategy that already has a public URL. Behaviour is unchanged; the
+            site now consumes the same component contract as the other two,
+            which is the whole point of the task. */}
+        <ShareableLink strategyId={strategy.id} published variant="primary" />
         {disclosureTier === "institutional" && (
           <a
             href={`/factsheet/${strategy.id}/tearsheet`}
