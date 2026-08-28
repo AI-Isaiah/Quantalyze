@@ -3,6 +3,102 @@
 import { useState, useCallback } from "react";
 import { Button } from "@/components/ui/Button";
 
+/**
+ * Phase 164 (SHARE-04) — THE ONE SHARE PREDICATE, and its two consequences.
+ *
+ * The defect this closes: three surfaces hand out a "share" URL and each one
+ * decided for itself what that URL should be. `ShareLinkButton` on the factsheet
+ * built `<origin><pathname>?share=1` UNCONDITIONALLY, so an owner viewing an
+ * unpublished strategy copied a link that 404s for its recipient. The strategies
+ * page hid the control entirely for unpublished rows. Discovery detail had a
+ * third opinion. Point-fixing any one of them leaves the class alive, so the
+ * decision itself lives here, once, and all three call it.
+ *
+ * TWO MECHANISMS IS THE INTENDED END STATE, not a smell to collapse (ruling
+ * D-09). They differ because their SUBJECTS differ:
+ *
+ *   published   → the public id URL. The id is already public, so a revocable
+ *                 capability token would be revocation theatre over public data.
+ *   unpublished → `/factsheet-share/<token>`. The id must stay a non-secret and
+ *                 the payload is private, so access needs a revocable capability.
+ *
+ * ⛔ Do NOT "simplify" this by minting for both. That would replace a working,
+ * byte-stable public URL with a capability whose revocation promises nothing,
+ * and D-09 exists precisely because an earlier draft of the phase context said
+ * the opposite of the ruling.
+ */
+export type ShareAffordanceMode = "public-url" | "mint-token";
+
+/**
+ * The predicate. Deliberately a named function rather than an inline
+ * `published ? … : …` at three call sites: a grep for this identifier is the
+ * drift check, and a fourth surface that wants a share control has exactly one
+ * obvious thing to call.
+ */
+export function shareAffordanceMode(published: boolean): ShareAffordanceMode {
+  return published ? "public-url" : "mint-token";
+}
+
+/** `status` values are `text` in the DB; anything that is not the published
+ *  literal is treated as unpublished (fail-CLOSED — an unrecognised status must
+ *  not be handed a public URL that may 404). */
+export function isPublishedStatus(status: string | null | undefined): boolean {
+  return status === "published";
+}
+
+/**
+ * Mint-or-REUSE the private share URL for a strategy (plan 164-03's route).
+ *
+ * The route is idempotent by construction — the token re-derives from the stored
+ * (nonce, generation) pair, so two mints in two sessions return the SAME url
+ * until a revoke. That is why no caller caches the url: re-minting on every click
+ * is correct AND cheap, unlike the scenario-share precedent
+ * (`SavedScenariosList`), whose storage makes the raw token unrecoverable and
+ * which therefore has to keep a session cache.
+ *
+ * ⛔ THROWS on every non-happy path — non-2xx, unparseable body, missing or
+ * empty `url`. That is the whole point: the callers' failure arms must be
+ * reachable from a mint failure exactly as they are from a clipboard failure,
+ * because both mean the same thing to the user — no working link reached your
+ * clipboard. A resolver that returned `undefined` here would let a caller
+ * "succeed" with an empty string and flash "Link copied!" for nothing (T-164-15).
+ */
+export async function mintShareUrl(strategyId: string): Promise<string> {
+  const res = await fetch(`/api/strategies/${strategyId}/share`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+  });
+  if (!res.ok) {
+    throw new Error(`share mint failed: ${res.status}`);
+  }
+  const body = (await res.json().catch(() => null)) as { url?: unknown } | null;
+  const url = body?.url;
+  if (typeof url !== "string" || url.length === 0) {
+    throw new Error("share mint returned no url");
+  }
+  return url;
+}
+
+/**
+ * The whole decision in one call: pick the mechanism, then produce the URL.
+ *
+ * `publicUrl` is a THUNK supplied by the caller rather than built here, because
+ * the two published-lane URLs are legitimately different and both are pinned:
+ * the factsheet's own Copy Link rebuilds `<origin><pathname>?share=1` (D-09,
+ * byte-identical), while `ShareableLink` links `<origin>/factsheet/<id>`. Making
+ * this function invent one would silently rewrite whichever site it did not
+ * anticipate. It is a thunk, not a string, so the `window.location` read never
+ * happens on the mint branch or during SSR.
+ */
+export async function resolveShareUrl(
+  published: boolean,
+  opts: { strategyId: string; publicUrl: () => string },
+): Promise<string> {
+  return shareAffordanceMode(published) === "public-url"
+    ? opts.publicUrl()
+    : mintShareUrl(opts.strategyId);
+}
+
 interface ShareableLinkProps {
   strategyId: string;
   variant?: "primary" | "secondary";
