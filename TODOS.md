@@ -1604,11 +1604,31 @@ also false positives worth knowing about, because they will recur on every futur
 already visible on any public repo, so the address is very likely public already through
 `git log`. What is new is the address sitting inside AI-vendor request payloads.
 
+- **✅ DECIDED 2026-08-28 — [PII-01] the `13-REVIEWS/` payload artifacts are DELETED FORWARD.**
+  Founder-approved during the Phase 164.x dedup. Six tracked files, 376 KB, removed from
+  `.planning/milestones/v0.17.0.0-phases/13-discovery-v2-polish/13-REVIEWS/`: `grok-request.json`
+  (the 174 KB single-line payload holding the five `@gmail.com` occurrences and the
+  `internal.url_private` match), `grok-payload.md`, `grok-response.json`, `grok-review.md`,
+  `claude-fresh-review.md`, `SYNTHESIS.md`. Nothing consumed them — a repo-wide grep across
+  `*.ts/*.tsx/*.py/*.json/*.yml` returned zero references.
+  ⛔ **RECORDED LIMIT, not a fix:** they remain in git history and are still world-readable there.
+  History rewriting was explicitly declined by the founder and that decision STANDS — this deletion
+  narrows what a reader of the current tree finds, and does not pretend the data is gone. Anyone
+  re-discovering the address in history should find this entry, not re-open the question.
+  ⚠️ The marginal risk statement below still holds and should not be overstated: commit author
+  emails are already public via `git log`, so the address was very likely public independently.
+  What this removes is the copy sitting inside AI-vendor request payloads.
+  ⛔ These artifacts predate the standing no-Grok/no-Codex rule; they are not evidence of current practice.
+
+<details><summary>Original open item (superseded 2026-08-28)</summary>
+
 - **[PII-01] Decide whether the `13-REVIEWS/` payload artifacts should stay tracked.** They
   are historical AI-review request/response dumps with no ongoing consumer. Deleting them
   forward removes them from the working tree but NOT from history (history rewriting was
   explicitly declined by the founder, so that limit is deliberate and stands). If they are
   kept, the decision should be recorded rather than left implicit.
+
+</details>
 
 ⛔ Related standing rule: Grok and Codex are no longer used at all. These artifacts predate
 that decision — they are not evidence of current practice.

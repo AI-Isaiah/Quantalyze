@@ -2,20 +2,20 @@
 gsd_state_version: 1.0
 milestone: v1.20
 milestone_name: Backlog Burndown (Phases 158+)
-current_phase: 164.1
-current_phase_name: HARDEN-GUARDS — retire the frozen-spine gates that no longer bite
+current_phase: 164.3
+current_phase_name: VACUITY — a control that cannot fail must be caught by machine, not by red team
 status: planned
-stopped_at: Phase 164 COMPLETE (7/7) and shipped v0.76.0.0; follow-up v0.76.1.0 landed. Next: 164.1 (empty dir — needs discuss/plan/execute)
-last_updated: "2026-08-28T13:36:44.000Z"
+stopped_at: 164.3 RESEQUENCED to run first (founder-approved 2026-08-28). Its throwaway-PG lane + mutation runner are the substrate 164.1's gate work needs; five carry-overs moved 164.1 -> 164.3, three -> 164.2, PII-01 decided inline.
+last_updated: "2026-08-28T14:29:08.803Z"
 last_activity: 2026-08-28
-last_activity_desc: Phase 164 SHARE shipped v0.76.0.0 (#720); post-deploy Sentry tag + contexts.trace.data token leaks fixed and secret-scan un-redded in v0.76.1.0 (#721). ROADMAP progress table reconciled: 159/161/161.1/162/164 were stale.
-state_head: 77e003005306ece8521eab4b9f579960245f3be0
+last_activity_desc: "Phase 164 SHARE shipped v0.76.0.0 (#720); post-deploy Sentry tag + contexts.trace.data token leaks fixed and secret-scan un-redded in v0.76.1.0 (#721). ROADMAP progress table reconciled: 159/161/161.1/162/164 were stale."
+state_head: 06c19a434b9f26cbd6c3ff120fb638b0b823286e
 progress:
-  total_phases: 12
-  completed_phases: 7
+  total_phases: 13
+  completed_phases: 1
   total_plans: 60
-  completed_plans: 58
-  percent: 58
+  completed_plans: 57
+  percent: 8
 ---
 
 # Project State — Quantalyze
@@ -669,6 +669,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - Phase 164 RESTRUCTURED to three waves 2026-08-27 (5 plans -> 7). Driver: the red-team synthesis established that 164-03's merge is a GATE, not a step — the moment the mint route makes `strategy_shares` owner-writable, N1 (INT4 generation overflow) becomes reachable by any owner via a single PATCH, is unrecoverable without DDL, and ABORTS that data subject's own Art.17 erasure. Harmless only while the table has zero rows, which is the window 164-03 closes. New wave 2 = 164-05 (moved up) + 164-06 (N1+N2 root closure, NEW) + 164-07 (F6 transitive cache guard, NEW); wave 3 = 164-03 + 164-04. Six merge conditions tabulated in ROADMAP against SYNTHESIS.md:270-287. ⛔ `20260827130000_sanitize_user_revoke_strategy_shares.sql` is BLOCKED on DRIFT-02 (re-based on a repo file PROD superseded by a surgical in-place patch; shipping it would point Art.17 erasure at a VIEW). Three residuals accepted and NAMED in TODOS.md: SHARE-RES-R4 (PITR), SHARE-RES-R2g (service_role), SHARE-RES-F5 (capability-URL channels). Three process standards routed to 164.1: PROC-01 (runnable PG before authoring), PROC-02 (reviewers declare execution status), PROC-03 (per-arm RED-UNDER).
 - FOUNDER RULING 2026-08-27: N2 DROPPED, 164-06 is N1-ONLY. Gate condition 3 closed as not-a-defect on measured evidence (3 interleavings x 2 concurrent sessions, all converge; both RPCs are single statements, no read-then-write window). Overrides the red-team corpus, which records N2 as [M]-severity. The prescribed remedy was the hazard: `revoked_at IS NULL` is the convergence contract and STEP 6 arm (i-b) guards it, so adding `SELECT ... FOR UPDATE` and rewriting that arm would have REMOVED the guard and created the counter-inflation bug. Re-opening requires new MEASURED evidence, not re-reasoning. N1 still reproduces and 164-06 still exists to close it.
 - Phase 164.3 inserted after Phase 164: VACUITY — mechanical detection of controls that cannot fail. Driver: phase 164 produced FIVE distinct vacuity mechanisms plus the DRIFT family; every one was GREEN in CI, survived review, and was found only by adversarial execution after a six-team red team. Deliverables are mechanisms not instances: a mutation runner over RED-UNDER annotations, the throwaway-Postgres CI lane (PROC-01), a static linter for the five measured shapes, and a repo-vs-PROD body diff before any whole-body CREATE OR REPLACE (DRIFT-02b). Ordered after 164.2 by number only. EXCLUDES the GSD-machinery gaps (depends_on unenforced, wave frontmatter drift, NYQ-01) — different system.
+- Phase 164.4 inserted after Phase 164.3: REDUNDER-BACKFILL: RED-UNDER coverage measured at 1 file of 71 at HEAD; 164.3 criterion 1 assumed all arms already annotated. HARD dep on 164.3 — its mutation runner is what makes a hand-authored RED-UNDER machine-checkable instead of a claim. (URGENT)
 
 ### Decisions
 

@@ -1,5 +1,40 @@
 # Changelog
 
+## [0.76.1.2] - 2026-08-28
+
+### The plan for the next three phases described work two of them shared
+
+No user-facing change, no source change. This is planning hygiene plus one
+privacy cleanup, done before the next phase starts building against it.
+
+### Fixed
+
+- **Five backlog items were owned by two phases at once.** Phase 164.1 and Phase 164.3
+  both claimed SKIP-01, DRIFT-01, OPS-08-F9, OPS-08-F8 and H-0001. Work claimed twice
+  gets built twice or by neither. Each now has exactly one owner, verified
+  mechanically rather than by reading.
+- **A phase specification asserted something untrue about the codebase.** Phase 164.3
+  stated that every SQL gate test already carried the annotation its new checker needs.
+  Measured: one file of seventy-one. The claim was corrected in place, with the
+  measurement, so the next planner cannot build against it. This is the same
+  never-checked-the-claim problem that phase exists to eliminate, found inside its own
+  specification.
+- **Two phases ran in an order that would have built the same machinery twice.** The
+  phase that builds the checking tool now runs before the phases that need it.
+
+### Added
+
+- **A new phase (164.4) for the annotation gap**, rather than accepting it. It runs after
+  the tool that verifies the annotations exists, because writing them by hand without
+  that tool would produce exactly the unverifiable claims the work is meant to remove.
+
+### Removed
+
+- **Historical AI-review payload files containing a personal email address.** Six files
+  in an archived planning folder, world-readable because this repository is public, with
+  nothing referencing them. Removed from the current tree. They remain in version history
+  and that limit is recorded rather than implied.
+
 ## [0.76.1.1] - 2026-08-28
 
 ### The plan ledger said "not started" about work already in production
