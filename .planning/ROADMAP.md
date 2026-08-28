@@ -449,9 +449,29 @@ moves. The three residuals accepted rather than closed (`SHARE-RES-R4`, `SHARE-R
 ### Phase 164.1: HARDEN-GUARDS — retire the frozen-spine gates that no longer bite, close the composite-stamp twin, put the advisory lock behind a real concurrency test, fix the PYAPI-06 blind spot that let a production service-key mismatch run silently, and close phase 161's deferred error-surface items including WIZFORM-02's code:UNKNOWN class, plus the Phase 163 carry-overs — headed by SKIP-01 (nothing applies migrations to TEST, so the OPS-08 SQL gate SKIPs permanently and the deployed body is tested nowhere), then OPS-08's un-written TypeScript retry half, the freshness UTC day-granularity residual, the TEST/PROD function-revision drift, the audit-coverage blind spot, and the tracked-PII decision (INSERTED)
 
 **Goal:** [Urgent work - to be planned]
-**Requirements**: TBD (original scope) + carry-overs SKIP-01, OPS-08-TS, OPS-08-F2, OPS-08-F9, OPS-08-F8, WR-06-UTC, DRIFT-01, H-0001, PII-01, HONEST-08-RESIDUAL
-**Depends on:** Phase 164
+**Requirements**: TBD (original scope) + carry-overs OPS-08-TS, OPS-08-F2
+**Depends on:** Phase 164, and now **Phase 164.3** (see DEDUP below — 164.3 builds the substrate this phase's gate work is tested on)
 **Plans:** 0 plans
+
+⛔ **DEDUP 2026-08-28 — five carry-overs LEFT this phase, three MOVED to 164.2, one DECIDED inline.**
+Founder-approved. Before this, ten items were listed here and five of them were ALSO claimed by
+164.3's success criteria — the second such overlap in this phase group (the 164.1↔164.2 one is
+flagged below). An item claimed by two phases gets built twice or by neither.
+
+| Carry-over | Now owned by | Why |
+|---|---|---|
+| SKIP-01, DRIFT-01 | **164.3** | 164.3's own thesis names both in its "drift half", and its criterion 2 (throwaway-PostgreSQL lane, `PROC-01`) removes the pre-apply state and the older mirror at the root. |
+| OPS-08-F9, OPS-08-F8 | **164.3** | Criterion 1's mutation runner walks every `RED-UNDER` arm in `supabase/tests/*.sql`; a sentinel-free file and a first-failure-truncated loop are the same defect it exists to catch. |
+| H-0001 | **164.3** | A coverage gate blind to an idiom IS one of the five measured vacuity shapes (criterion 3). |
+| WR-06-UTC, HONEST-08-RESIDUAL | **164.2** | Both are user-facing rendered truth, which is 164.2 CURATED-COPY's subject, not gate integrity. |
+| WIZFORM-02 (`code: UNKNOWN`) | **164.2** | Same reason — a failure sentence the user reads. |
+| PII-01 | **decided inline** | `13-REVIEWS/` deleted forward; history retains them and that limit is recorded. No build work, so it needs no phase. |
+
+⛔ **SKIP-01 shape ruled 2026-08-28: NOT option (a).** TODOS offers (a) apply `supabase/migrations/**`
+to TEST in CI or (b) expire the pre-apply SKIP. (a) was recommended and is **WITHDRAWN**: it changes
+what `sql-tests` may do to a shared database that has no worker and is already contended, and 164.3's
+disposable per-run cluster replaces that machinery anyway. Building (a) first means building it twice
+and taking shared-database risk in between.
 
 **Cross-phase note from Phase 164 planning (2026-08-26):** the phase-29 frozen-spine migration
 guard's `FORBIDDEN_MIGRATION_RE` is narrowed IN PHASE 164 (plan 164-02, founder ruling) from the
@@ -627,6 +647,8 @@ is planned — do not let both phases carry them.
 
 **Requirements**: TBD
 **Depends on:** Phase 164 (ordered AFTER 164.1 — no dependency between them, numeric order only)
+**Absorbed from 164.1 in the 2026-08-28 dedup:** WR-06-UTC, HONEST-08-RESIDUAL, and WIZFORM-02's
+`code: UNKNOWN` class — all three are sentences a user reads, which is this phase's subject.
 **Plans:** 0 plans
 
 Plans:
@@ -636,8 +658,15 @@ Plans:
 ### Phase 164.3: VACUITY — a control that cannot fail must be caught by machine, not by red team (INSERTED)
 
 **Goal**: A control that cannot fail is detected by a machine, on every push, instead of by a six-team red team once per milestone.
-**Depends on:** Phase 164 (its measured corpus is this phase's specification), ordered after 164.1 and 164.2 — numeric order only, no dependency on either.
-**Requirements**: TBD (run `/gsd-discuss-phase 164.3`)
+**Depends on:** Phase 164 (its measured corpus is this phase's specification).
+⛔ **RESEQUENCED 2026-08-28 — this phase now runs FIRST, before 164.1 and 164.2.** Founder-approved.
+The previous line read "ordered after 164.1 and 164.2 — numeric order only, no dependency on either",
+and that "no dependency" is exactly what makes the move free. The direction was backwards: criterion 2
+builds a real disposable PostgreSQL lane and criterion 1 builds a mutation runner, and those two ARE
+the substrate on which 164.1's gate work would otherwise be hand-tested. Doing 164.1 first means
+building gate machinery twice.
+**Requirements**: TBD (run `/gsd-discuss-phase 164.3`) + **absorbed from 164.1:** SKIP-01, DRIFT-01,
+OPS-08-F9, OPS-08-F8, H-0001 (see the DEDUP table under Phase 164.1 for the reasoning per item).
 
 **Why this exists — measured, not felt.** Phase 164 produced **five distinct vacuity mechanisms**,
 and the DRIFT family alongside them. ⛔ Every single one was **GREEN in CI**, survived code review,
@@ -715,9 +744,9 @@ Plans:
 | 162. HONEST visible truth | 9/9 | Complete | v0.74.0.0 |
 | 163. HARDEN reliability + security | 9/9 | Complete | v0.75.0.0 |
 | 164. SHARE revocable links | 7/7 | Complete | v0.76.0.0 |
-| 164.1 HARDEN-GUARDS (spine gates, SKIP-01, WIZFORM-02) | 0/? | Inserted 2026-08-28 | - |
-| 164.2 CURATED-COPY (curated failure sentence reaches the user) | 0/? | Inserted 2026-08-28 | - |
-| 164.3 VACUITY (mechanical anti-vacuity) | 0/? | Inserted 2026-08-28 | - |
+| 164.1 HARDEN-GUARDS (spine gates, OPS-08-TS/F2, PYAPI-06) | 0/? | Queued 2nd (deduped 2026-08-28) | - |
+| 164.2 CURATED-COPY (+ WIZFORM-02, WR-06-UTC, HONEST-08-RESIDUAL) | 0/? | Queued 3rd (deduped 2026-08-28) | - |
+| 164.3 VACUITY (+ SKIP-01, DRIFT-01, OPS-08-F9/F8, H-0001) | 0/? | ◆ RUNS FIRST (resequenced 2026-08-28) | - |
 | 165. DEPS dependabot campaign | 0/? | Not started | - |
 
 ### Requirement Coverage (v1.20)

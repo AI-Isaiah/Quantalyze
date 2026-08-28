@@ -2,10 +2,10 @@
 gsd_state_version: 1.0
 milestone: v1.20
 milestone_name: Backlog Burndown (Phases 158+)
-current_phase: 164.1
-current_phase_name: HARDEN-GUARDS — retire the frozen-spine gates that no longer bite
+current_phase: 164.3
+current_phase_name: VACUITY — a control that cannot fail must be caught by machine, not by red team
 status: planned
-stopped_at: Phase 164 COMPLETE (7/7) and shipped v0.76.0.0; follow-up v0.76.1.0 landed. Next: 164.1 (empty dir — needs discuss/plan/execute)
+stopped_at: 164.3 RESEQUENCED to run first (founder-approved 2026-08-28). Its throwaway-PG lane + mutation runner are the substrate 164.1's gate work needs; five carry-overs moved 164.1 -> 164.3, three -> 164.2, PII-01 decided inline.
 last_updated: "2026-08-28T13:36:44.000Z"
 last_activity: 2026-08-28
 last_activity_desc: Phase 164 SHARE shipped v0.76.0.0 (#720); post-deploy Sentry tag + contexts.trace.data token leaks fixed and secret-scan un-redded in v0.76.1.0 (#721). ROADMAP progress table reconciled: 159/161/161.1/162/164 were stale.

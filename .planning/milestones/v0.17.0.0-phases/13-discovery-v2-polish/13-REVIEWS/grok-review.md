@@ -1,8 +1,0 @@
-# Grok review FAILED
-
-```
-{
-  "code": "Client specified an invalid argument",
-  "error": "Model not found: grok-4.2"
-}
-```
