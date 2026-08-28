@@ -446,6 +446,7 @@ moves. The three residuals accepted rather than closed (`SHARE-RES-R4`, `SHARE-R
 
 **Research note:** the payload-builder seam is the one un-measured integration (extracting the build half of `fetchAndBuildPayload` touches the composite arm AND the single-key basis arm — MEDIUM confidence, wider than it looks). Budget a research pass at plan time; don't discover it. Token-leak channels: Sentry `beforeSend` scrub verified against a REAL captured event, `Referrer-Policy: no-referrer` per-route, generic metadata (link-unfurl dullness accepted explicitly — a private link SHOULD be dull in a chat preview). *(Planning update 2026-08-26: the seam measurement is now done — the composite/basis arms moved to `src/lib/factsheet/` in July, so the extraction in 164-01 is a one-function verbatim move per the founder's final D-06 ruling.)*
 
+
 ### Phase 164.1: HARDEN-GUARDS — retire the frozen-spine gates that no longer bite, close the composite-stamp twin, put the advisory lock behind a real concurrency test, fix the PYAPI-06 blind spot that let a production service-key mismatch run silently, and close phase 161's deferred error-surface items including WIZFORM-02's code:UNKNOWN class, plus the Phase 163 carry-overs — headed by SKIP-01 (nothing applies migrations to TEST, so the OPS-08 SQL gate SKIPs permanently and the deployed body is tested nowhere), then OPS-08's un-written TypeScript retry half, the freshness UTC day-granularity residual, the TEST/PROD function-revision drift, the audit-coverage blind spot, and the tracked-PII decision (INSERTED)
 
 **Goal:** [Urgent work - to be planned]
@@ -689,7 +690,23 @@ would have caught a token-resurrection bug.
 
 **Success Criteria** (what must be TRUE):
 
-  1. **A mutation runner exists and runs in CI.** Every arm in `supabase/tests/*.sql` already carries a `RED-UNDER: <the exact mutation that makes me fail>` annotation. The runner machine-applies each, asserts the file goes RED, and restores. ⭐ This alone would have caught mechanisms 1, 4 and 5 with no human involved. It is the highest-value item in the phase by a distance.
+  1. **A mutation runner exists and runs in CI.** Arms carrying a
+     `RED-UNDER: <the exact mutation that makes me fail>` annotation are machine-mutated by the
+     runner, which asserts the file goes RED and then restores it. ⭐ This alone would have caught
+     mechanisms 1, 4 and 5 with no human involved. It is the highest-value item in the phase by a
+     distance.
+     ⛔ **CORRECTED 2026-08-28 — this criterion previously read "Every arm in `supabase/tests/*.sql`
+     already carries" one. MEASURED at HEAD, that is 1 file of 71** (33 annotations, all in
+     `test_strategy_shares_rls.sql`). The sentence was a claim never compared to the thing — the
+     exact defect this phase exists to catch, sitting in its own spec. Do NOT plan against the old
+     wording: the runner covers the annotated corpus, and **Phase 164.4 (REDUNDER-BACKFILL)** closes
+     the remaining 70 files using this runner as the oracle.
+     ⭐ This phase stays shippable regardless: all five measured mechanisms (`TENANT`, `TRIGGER`,
+     `SANITIZE`, `STEP 2`, `N1`) live in the already-annotated file, so criterion 6 is reachable with
+     the 33 annotations that exist today.
+     ⚠️ The runner MUST print its coverage (files annotated / files total) on every run. A runner
+     reporting PASS while silently covering 1.4% of the corpus is the same shape as `SKIP-01`, which
+     is on this phase's own list.
   2. **The throwaway-PostgreSQL lane is real** — `PROC-01`'s implementation. Today it is a script under `.planning/`, written mid-phase, whose own two defects (reusing another agent's cluster then `DROP SCHEMA public CASCADE`; RLS enabled on nothing but the table under test) were found by reviewers using it.
   3. **A static linter rejects the five measured shapes** on new gate files, so mechanism 6 is a lint failure rather than a red-team finding.
   4. **No whole-body `CREATE OR REPLACE` merges without a repo-vs-PROD diff** (`DRIFT-02b`). A function that has ever been surgically patched has no true body in the repo, and "re-base on the latest definition" is unsatisfiable from files alone.
@@ -715,6 +732,55 @@ separately.
 Plans:
 
 - [ ] TBD (run /gsd-plan-phase 164.3 to break down)
+
+### Phase 164.4: REDUNDER-BACKFILL — every SQL gate arm gets a RED-UNDER annotation that a machine PROVES bites (INSERTED)
+
+**Goal**: Every arm in `supabase/tests/*.sql` carries a `RED-UNDER` annotation naming the exact
+mutation that makes it fail, and the Phase 164.3 mutation runner PROVES each one bites — red under
+its own mutation, green when restored. Coverage moves from 1 file to all of them, behind a floor
+that cannot regress.
+**Depends on:** ⛔ **Phase 164.3 — HARD, not ordering.** 164.3 builds the mutation runner, and the
+runner is the only thing that makes this phase safe to do at all.
+**Requirements**: TBD (run `/gsd-discuss-phase 164.4`)
+
+**Why this is its own phase, and why it CANNOT come first.** MEASURED at HEAD 2026-08-28:
+`grep -rl RED-UNDER supabase/tests/` returns **1 file of 71** — 33 annotations, all in
+`test_strategy_shares_rls.sql`, the file Phase 164 wrote. 164.3's criterion 1 asserts that "every arm
+in `supabase/tests/*.sql` **already carries**" one. That is false by a factor of 71, and it is
+false in exactly the way 164.3 exists to catch: **a claim and the thing were never compared.**
+
+⭐ **The ordering is load-bearing, not tidiness.** A hand-written `RED-UNDER` is itself a CLAIM —
+"this mutation reddens this arm". Authoring ~166 such claims at speed, by hand, is a vacuity
+mechanism manufactured at scale: an annotation that does not actually redden its arm passes
+silently and reads as coverage. Doing the backfill BEFORE the runner exists would be the phase
+group defeating its own thesis. With the runner in CI the claim is machine-checked — a
+`RED-UNDER` that fails to redden its arm **fails the build**. That single fact converts this work
+from faith-based to verified, and it is why this phase waits.
+
+⚠️ 164.3 remains shippable without this phase, and deliberately so: all five measured vacuity
+mechanisms (`TENANT`, `TRIGGER`, `SANITIZE`, `STEP 2`, `N1`) live in the already-annotated file,
+so 164.3's criterion 6 is reachable with the 33 annotations that exist today. This phase closes the
+corpus gap; it is not a prerequisite for 164.3 being real.
+
+**Success Criteria** (what must be TRUE):
+
+  1. **Every arm carries a `RED-UNDER`** naming the exact mutation that makes it fail.
+  2. **The 164.3 runner executes ALL of them** — each demonstrated RED under its own mutation and
+     GREEN when restored. An annotation that never reddens its arm is a FAILURE, not a pass.
+  3. **The coverage figure is CI output and floor-ratcheted.** A runner reporting PASS while covering
+     a fraction of the corpus is the same shape as a gate that SKIPs forever and reads as PASS —
+     which is on 164.3's own defect list. No silent caps: the number is printed every run.
+  4. ⛔ **Any arm that cannot be given a falsifying mutation is RECORDED with its reason, never
+     silently skipped.** An arm nobody can make fail is the finding, not an exception.
+
+**Explicitly OUT of scope:** writing new gate coverage. This phase annotates and proves what already
+exists; it does not add arms. New coverage is a different phase with a different risk profile.
+
+**Plans:** 0 plans
+
+Plans:
+
+- [ ] TBD (run /gsd-plan-phase 164.4 to break down)
 
 ### Phase 165: DEPS — The 9-PR dependabot campaign
 
@@ -747,6 +813,7 @@ Plans:
 | 164.1 HARDEN-GUARDS (spine gates, OPS-08-TS/F2, PYAPI-06) | 0/? | Queued 2nd (deduped 2026-08-28) | - |
 | 164.2 CURATED-COPY (+ WIZFORM-02, WR-06-UTC, HONEST-08-RESIDUAL) | 0/? | Queued 3rd (deduped 2026-08-28) | - |
 | 164.3 VACUITY (+ SKIP-01, DRIFT-01, OPS-08-F9/F8, H-0001) | 0/? | ◆ RUNS FIRST (resequenced 2026-08-28) | - |
+| 164.4 REDUNDER-BACKFILL (1/71 files annotated today) | 0/? | Queued after 164.3 (HARD dep) | - |
 | 165. DEPS dependabot campaign | 0/? | Not started | - |
 
 ### Requirement Coverage (v1.20)
