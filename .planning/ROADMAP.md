@@ -708,12 +708,15 @@ Plans:
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 158. OPS-CI merge=deploy | 6/6 | Complete    | 2026-08-21 |
-| 159. RANK ranking integrity | 0/? | Not started | - |
+| 159. RANK ranking integrity | 6/7 | Complete | v0.70.0.0 |
 | 160. PROVENANCE venue/annualization | 7/7 | 🟡 Arm proven, 1/3 surfaces | Persist arm smoked via ApiKeyManager 2026-08-25; StrategyForm un-smoked, AllocatorExchangeManager unmounted |
-| 161. WIZERR honest errors | 0/? | Not started | - |
-| 162. HONEST visible truth | 0/? | Not started | - |
+| 161. WIZERR honest errors | 10/10 | Complete | v0.72.0.0 |
+| 161.1 LEDGER-REFRESH (shipped dormant) | 5/5 | Complete | v0.73.0.0 |
+| 162. HONEST visible truth | 9/9 | Complete | v0.74.0.0 |
 | 163. HARDEN reliability + security | 9/9 | Complete | v0.75.0.0 |
-| 164. SHARE revocable links | 0/7 | Planned | - |
+| 164. SHARE revocable links | 7/7 | Complete | v0.76.0.0 |
+| 164.1 HARDEN-GUARDS (spine gates, SKIP-01, WIZFORM-02) | 0/? | Inserted 2026-08-28 | - |
+| 164.2 CURATED-COPY (curated failure sentence reaches the user) | 0/? | Inserted 2026-08-28 | - |
 | 164.3 VACUITY (mechanical anti-vacuity) | 0/? | Inserted 2026-08-28 | - |
 | 165. DEPS dependabot campaign | 0/? | Not started | - |
 

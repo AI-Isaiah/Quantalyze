@@ -1,5 +1,34 @@
 # Changelog
 
+## [0.76.1.1] - 2026-08-28
+
+### The plan ledger said "not started" about work already in production
+
+No user-facing change, no source change. This corrects the project's own progress
+records, which had drifted far enough that the next automated run would have read them
+as instructions.
+
+### Fixed
+
+- **The v1.20 progress table claimed five phases were unstarted or planned when they had
+  already shipped.** Phases 159, 161, 161.1, 162 and 164 were all merged and deployed —
+  161.1 was missing from the table entirely, and 164 was recorded as `0/7 | Planned` on
+  the same day it went to production as v0.76.0.0. Every row now carries its measured
+  plan count and the release that shipped it, checked against the merge history rather
+  than against the previous entry.
+- **`STATE.md` pointed at a phase two releases back.** It named 163 as current and
+  described 164 as stopped mid-wave, while 164 was complete and shipped. It now points at
+  164.1 with the real completion counts (7 phases, 58 plans).
+- Phases 164.1 and 164.2 were absent from the progress table even though both had been
+  inserted into the roadmap body, so anything reading the table alone could not see them.
+
+### Added
+
+- `SHARE-QA-07` booked: the recursive redaction added in 0.76.1.0 assigns into every
+  nested object it walks, which weakens the promise made at the top of that file that a
+  future SDK change can never throw inside the error-reporting hook. A throw there drops
+  the report entirely. Not a live defect, and the remedy is recorded for Phase 164.1.
+
 ## [0.76.1.0] - 2026-08-28
 
 ### A private share link could still leak through error reporting
