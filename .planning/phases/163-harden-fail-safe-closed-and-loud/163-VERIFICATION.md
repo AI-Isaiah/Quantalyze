@@ -62,6 +62,7 @@ gaps:
     missing:
       - "Merge to main so the PROD auto-migrate applies 20260826150000, then re-read the deployed body and tick OPS-08 by measurement."
       - "Hand-apply to the TEST project so `sql-tests` prints `OPS-08 Part 1+3 OK` instead of `SKIP (Part 3)` — otherwise the recurring gate stays half-armed on TEST forever."
+    result: "PASSED 2026-08-28 — measured directly against PROD via pg_get_functiondef, with comments STRIPPED before matching. The deployed 10-param `_enqueue_compute_job_internal` has ZERO `INTO STRICT` in code AND zero including comments. ⚠️ Comment-stripping was load-bearing, not pedantry: the sibling 7-param overload reports 0 in code but 1 including comments, i.e. a naive grep of the function body would have reported the 7-param as still carrying INTO STRICT when it does not. This is the pg_get_functiondef-returns-comments trap already recorded in this project's learnings."
   - truth: "Every finding this phase's own review raised is either FIXED or RECORDED"
     status: failed
     reason: >-
@@ -137,6 +138,7 @@ human_verification:
   - test: "Hand-apply `20260826150000` to the TEST project, then run the `sql-tests` lane."
     expected: "`test_enqueue_internal_destrict.sql` prints `OPS-08 Part 1+3 OK: the deployed 10-param body carries no strict lost-race re-read, does raise serialization_failure on an exhausted one, and its catalog COMMENT still carries the revert-discriminator marker.` — not `SKIP (Part 3)`."
     why_human: "Requires the TEST database URL, a CI secret with no representation in this worktree. No automated lane applies migrations to TEST. Until this happens, Part 3 is withheld on every CI run."
+    result: "CLOSED-BY-MEASUREMENT 2026-08-28 — NO hand-apply was needed; it was already applied. TEST's supabase_migrations.schema_migrations carries name='destrict_enqueue_internal_10param' at version 20260826210044, and the SEMANTIC is verified independently of the ledger: TEST's 10-param `_enqueue_compute_job_internal` has ZERO `INTO STRICT` in code (comments stripped before matching). ⛔ PREMISE CORRECTION: this item, and SKIP-01 generally, assume nothing applies migrations to TEST. Something does. The ledger RE-STAMPS the version column at apply time while preserving the repo filename in the NAME column — e.g. repo 20260827120000 is stored at version 20260828061901. Comparing repo filenames against the VERSION column reports every recent migration as missing (it reported 12 of 12 missing here); joining on NAME shows all 12 present, several applied twice. Any future TEST-drift check MUST join on name, not version."
 ---
 
 # Phase 163: HARDEN — Fail safe, closed, and loud — Verification Report
