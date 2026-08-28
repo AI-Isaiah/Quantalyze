@@ -1269,6 +1269,51 @@ worst item in the corpus.
 
 ⛔ `revoked_at IS NULL` is **the convergence contract**, not a racy predicate. The recorded remedy — rewrite STEP 6 arm (i-b) *so the fix can land* — would have removed the guard, and removing the predicate is what makes a double-revoke inflate the counter. **The arm was not enforcing the bug; the proposed fix was the bug.** None of this was visible without running it: the reasoning chain reads as sound end to end and is simply false. Recommend closing gate condition 3 as not-a-defect and dropping N2 from 164-06 (leaving that plan N1-only) — ⚠️ founder call, since the corpus records N2 as `[M]`. Limits: READ COMMITTED (PostgREST's default), two sessions not N, three interleavings not an exhaustive schedule search.
 
+### Phase 164 (SHARE) — code-review + closure residuals (booked 2026-08-28)
+
+Source: `164-REVIEW.md` (0 critical / 3 warning / 6 info) plus two defects found while running the
+closure pipeline. The two user-reachable warnings (WR-02, WR-03) are FIXED and committed; what
+follows is everything that was not.
+
+- **[SHARE-WR-01] `.env.example` instructs the operator to REUSE one `SHARE_TOKEN_SECRET`.**
+  The block added in 164-01 says "set it in ALL Vercel environments", which reads as one shared
+  value — precisely the configuration the founder ruling of 2026-08-26 forbids, because a preview
+  DB seeded from a production snapshot then becomes a production-token factory. The module docblock,
+  `SECRET_REMEDY` and the boot error all say **DISTINCT per environment**; the file an operator
+  actually follows verbatim says the opposite, and nothing downstream detects it (the boot check
+  verifies length, not distinctness). The same block also documents the stale two-argument
+  pre-image `HMAC(secret, "<id>.<generation>")`; the real one is
+  `qz.strategy-share.v1.<id>.<nonce>.<generation>`.
+  ⛔ **NEEDS A HUMAN — this environment denies agent read/write on `.env*`.** Replacement text is
+  in the session log; the fix is two sentences.
+
+- **[SHARE-D-164-C] `create_scenario_share` is not in `MUTATING_RPC_NAMES` at all.** Pre-existing,
+  on shipped code: `allocator/scenario/share/route.ts` has therefore never been under the audit
+  law. Phase 164 put the new `create_strategy_share` / `revoke_strategy_share` under it and left
+  the older sibling out, which is now the only unaudited share mint in the tree.
+
+- **[SHARE-INFO] six Info findings**, none blocking under the stopping rule: ci.yml arm-count
+  narrative arithmetic (the *enforced* integers are correct and were re-verified — 103/166/8); the
+  Sentry breadcrumb/extra scrub is one level deep; the 32-char secret floor is duplicated with no
+  drift test; `sanitize_user` keeps `SET search_path = public, pg_catalog` with no explicit trailing
+  `pg_temp`; `strategy-share-token.test.ts` mutates `process.env.SHARE_TOKEN_SECRET` without
+  per-test restore; and a future strategy-ownership transfer would wedge mint and orphan a live
+  capability.
+
+- **[SHARE-COV-01] a `#` comment inside a SUMMARY's `coverage:` block silently voids the whole
+  block.** Measured 2026-08-28: `gsd-tools query uat.classify-coverage` returned
+  `mode: legacy` with a single `malformed_block` error, and the fallback is a **quiet** prose
+  extraction — every deliverable is dropped and nothing fails. Related: 164-04's block shipped with
+  `deliverable:` instead of `id:`+`description:` and free-text `kind:` values, which produced 27
+  validation errors and 0 auto-passed deliverables while reading as authoritative. Both repaired;
+  the class belongs to Phase 164.3 (VACUITY).
+
+- **[SHARE-B15-01] ⚠️ the B15 limiter registry has no owner in the phase that adds a route.**
+  The two new share routes landed unclassified in `src/lib/api/limiter-ordering.test.ts`, and
+  nothing inside phase 164 scans that registry — it went red only under the execute-phase
+  regression gate over phases 158–163. Fixed (both added to `NO_INPUT`), but the *gap* is that a
+  phase can add a rate-limited route and never run the invariant that governs it.
+
 ### ⚠️ GSD-01 — `/gsd-plan-phase` cannot add ONE plan to a partly-executed phase (booked 2026-08-28)
 
 `/gsd-plan-phase <N>` replans the **whole** phase. Once some plans carry SUMMARYs, running it risks
