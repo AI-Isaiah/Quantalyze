@@ -189,6 +189,25 @@ _PHASE_IDENTIFIER_TOKENS: Final[tuple[str, ...]] = (
     "ledger_refresh_staleness",
 )
 
+# ⛔ A CITATION IS NOT A USE. Floor 3 below asks "does this migration BELONG to
+# the enqueue surface", and it proxies belonging by content token. A migration
+# FILENAME is not a use of the surface: 20260827120000 (the strategy_shares
+# generation model, a phase-164 file with nothing to do with ledger refresh)
+# matched `ledger_refresh_staleness` solely because one comment cites
+# `20260825120000_ledger_refresh_staleness_view.sql:333` as its precedent.
+# Citing a migration is how this repo carries provenance; making that a gate
+# violation would tax the practice the gates depend on.
+#
+# ⚠️ THIS NARROWS SELECTION (floor 3) AND NOTHING ELSE. Floor 4's offender scan
+# stays on RAW text, comments included — a commented-out `cron.schedule` is one
+# uncomment away from PROD and must still be caught. Nor can this hide a real
+# offender: to CALL the surface, the identifier has to appear as bare SQL, and
+# bare SQL never sits inside a `<14 digits>_<name>.sql` filename token. The
+# positive control in floor 2b proves the redaction stays this narrow.
+_MIGRATION_FILENAME_CITATION_RE: Final[re.Pattern[str]] = re.compile(
+    r"\d{14}_[A-Za-z0-9_]+\.sql"
+)
+
 # ⛔ THE NORMALISERS gate 4 / gate 10d reject around the activation read (F16).
 # The activation comparison was asserted with an UNANCHORED
 # `re.search(r"(?:<>|!=|=)\s*'true'")`, which `lower(v_enabled) <> 'true'` and
@@ -1160,17 +1179,46 @@ class TestGate3Dormancy:
             "delete the check."
         )
 
+        # ⛔ FLOOR 2b — THE CITATION REDACTION IS NARROW. Floor 3 scans redacted
+        # text, and a redaction that ate too much would make it pass by
+        # scanning nothing — the same match-nothing vacuity floor 2 exists to
+        # catch, reintroduced one layer down. The defining migrations USE every
+        # token in bare SQL, so redaction must leave all four standing.
+        over_redacted = sorted(
+            token
+            for token in _PHASE_IDENTIFIER_TOKENS
+            if not any(
+                token in _MIGRATION_FILENAME_CITATION_RE.sub(" ", body)
+                for body in scanned_text.values()
+            )
+        )
+        assert not over_redacted, (
+            f"{over_redacted} survive in the scanned phase migrations as RAW "
+            "text but not after filename-citation redaction, so "
+            "_MIGRATION_FILENAME_CITATION_RE is eating real SQL and floor 3 is "
+            "now scanning a hollowed-out file. Narrow the pattern; do not "
+            "delete the check."
+        )
+
         # ⛔ FLOOR 3 — NOTHING BELONGING TO THIS SURFACE ESCAPED THE WINDOW. A
         # window is still a selection: a migration for this phase dated
         # 20260826 would sit outside it and be scanned by nothing. This is the
         # assertion the old glob had no equivalent of, and it is CONTENT-based,
         # so no naming convention can satisfy it.
+        #
+        # Filename citations are redacted first — see
+        # _MIGRATION_FILENAME_CITATION_RE. Naming a migration in a comment is
+        # provenance, not membership; calling the surface takes bare SQL, which
+        # the redaction cannot reach.
         escaped = sorted(
             path.name
             for path in _migrations_dir().glob("*.sql")
             if path.name not in scanned
             and any(
-                token in path.read_text(encoding="utf-8")
+                token
+                in _MIGRATION_FILENAME_CITATION_RE.sub(
+                    " ", path.read_text(encoding="utf-8")
+                )
                 for token in _PHASE_IDENTIFIER_TOKENS
             )
         )
