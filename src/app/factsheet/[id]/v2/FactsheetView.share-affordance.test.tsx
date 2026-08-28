@@ -3,7 +3,7 @@ import { render, fireEvent, waitFor } from "@testing-library/react";
 import type { DailyPoint } from "@/lib/portfolio-math-utils";
 import { buildScenarioFactsheetPayload } from "@/app/(dashboard)/allocations/widgets/performance/scenario-factsheet-payload";
 import { FactsheetProvider } from "./factsheet-context";
-import { FactsheetBody } from "./FactsheetView";
+import { FactsheetBody, OwnerUnpublishedPanel } from "./FactsheetView";
 
 /**
  * Phase 164 (SHARE-04 / SHARE-01) — the share affordance stops lying.
@@ -561,5 +561,96 @@ describe("absence is the default — no ownerShare means no owner controls at al
     expect(container.textContent).toContain(LABEL_COPY);
     expect(container.textContent).not.toContain(LABEL_CREATE);
     expect(container.textContent).not.toContain(LABEL_REVOKE);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// REGRESSION — the pending factsheet promised a share link it could not mint
+// ---------------------------------------------------------------------------
+//
+// FOUND IN BROWSER UAT 2026-08-28, not by any test in this phase. `page.tsx`'s
+// pending-state early return (the "still computing" placeholder) rendered
+// `OwnerUnpublishedNotice` ALONE. That notice ends with "You can create a
+// private share link to let someone view it without publishing" — and the page
+// had zero clickable elements. Same SHARE-04 dishonesty class the describe
+// block above closes, reappearing on the one render path the class review
+// never walked, and on the path the placeholder's own comment calls the moment
+// "an owner is MOST likely to share the URL".
+//
+// ⛔ WHY BOTH HALVES. Arm 1 pins the COMPONENT's intent: a notice that promises
+// a capability ships the control for it. Arm 2 pins the WIRING, because a green
+// arm 1 says nothing about whether `page.tsx` actually mounts the panel — the
+// bug was never in the notice, it was in what the pending return chose to
+// render. Testing the fix's helper is not testing the call site (the measured
+// lesson from the high-tackle plan).
+//
+// ⚠️ HONEST LIMIT, MEASURED WHILE DEMONSTRATING THESE ARMS RED. They pin DOM
+// PRESENCE, not visibility: mutating the controls' wrapper to `className=
+// "hidden"` left all three arms GREEN, because jsdom does no layout. The arms
+// go red on the shape the bug actually had — the panel reduced to the bare
+// notice (arms 1-2), and `page.tsx` rendering that bare notice (arm 3), both
+// OBSERVED red. A control that renders but is styled invisible would slip
+// past; that is a visual-regression job, not this file's.
+describe("REGRESSION — a notice that promises a share link ships the control", () => {
+  it("the panel renders the promise sentence AND a control that can act on it", () => {
+    fetchMock.mockResolvedValue(jsonResponse(200, { url: MINTED_URL }));
+    const { container } = render(
+      <OwnerUnpublishedPanel strategyId={STRATEGY_ID} />,
+    );
+
+    // The promise is on screen...
+    expect(container.textContent).toContain(
+      "You can create a private share link to let someone view it without publishing.",
+    );
+    // ...and so is the thing that keeps it. This is the assertion the pending
+    // page failed: prose without an affordance.
+    const btn = shareButton(container);
+    expect(btn.textContent).toBe(LABEL_CREATE);
+  });
+
+  it("minting flips the notice AND surfaces revoke — one state, so neither claim can go stale", async () => {
+    fetchMock.mockResolvedValue(jsonResponse(200, { url: MINTED_URL }));
+    const { container } = render(
+      <OwnerUnpublishedPanel strategyId={STRATEGY_ID} />,
+    );
+
+    fireEvent.click(shareButton(container));
+
+    await waitFor(() => {
+      expect(container.textContent).toContain(LIVE_LINK_CLAIM);
+    });
+    // The live-link sentence promises revocation ("until you revoke it"). If
+    // the controls did not hang off the SAME state as the notice, fixing the
+    // missing mint button would have manufactured this second false claim.
+    expect(container.textContent).not.toContain(FOUR_OH_FOUR_CLAIM);
+    const revoke = Array.from(container.querySelectorAll("button")).find(
+      (b) => (b.textContent ?? "") === LABEL_REVOKE,
+    );
+    expect(
+      revoke,
+      "the notice says 'until you revoke it' — the revoke control must exist",
+    ).toBeDefined();
+  });
+
+  it("page.tsx mounts the PANEL, never the bare notice", async () => {
+    const { readFileSync } = await import("node:fs");
+    const { join } = await import("node:path");
+    // Same convention as page.share-affordance.test.tsx's drift pin: resolve
+    // from __dirname, not import.meta.url — this directory is `[id]`, and the
+    // brackets come back percent-encoded through a file:// URL.
+    const src = readFileSync(join(__dirname, "page.tsx"), "utf8");
+
+    // Positive control: without this the negative below passes on a file that
+    // renders no owner notice at all (or on a read that silently returned "").
+    expect(
+      src,
+      "page.tsx must render the owner panel — it is the only sanctioned owner-notice renderer here",
+    ).toContain("<OwnerUnpublishedPanel");
+    // The regression itself: the bare notice carries the promise with no
+    // control, so page.tsx must never render it directly on any lane.
+    expect(
+      src,
+      "page.tsx renders <OwnerUnpublishedNotice> directly — that notice promises a share link it ships no control for (browser UAT 2026-08-28). Render OwnerUnpublishedPanel instead.",
+    ).not.toContain("<OwnerUnpublishedNotice");
   });
 });
