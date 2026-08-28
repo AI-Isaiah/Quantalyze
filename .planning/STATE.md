@@ -2,20 +2,20 @@
 gsd_state_version: 1.0
 milestone: v1.20
 milestone_name: Backlog Burndown (Phases 158+)
-current_phase: 163
-current_phase_name: HARDEN — Fail safe, closed, and loud
-status: reviewing
-stopped_at: Completed 164-03 (wave 3); 164-06 at its blocking-human checkpoint
-last_updated: "2026-08-28T08:31:51.036Z"
-last_activity: 2026-08-26
-last_activity_desc: Phase 163 wave 2 — SEC-01 measured password floor + SEC-03 audit law; all gates green; ledger corrections from verification
-state_head: b2ec01684b8078645198f377cbc2c55b584b076a
+current_phase: 164.1
+current_phase_name: HARDEN-GUARDS — retire the frozen-spine gates that no longer bite
+status: planned
+stopped_at: Phase 164 COMPLETE (7/7) and shipped v0.76.0.0; follow-up v0.76.1.0 landed. Next: 164.1 (empty dir — needs discuss/plan/execute)
+last_updated: "2026-08-28T13:36:44.000Z"
+last_activity: 2026-08-28
+last_activity_desc: Phase 164 SHARE shipped v0.76.0.0 (#720); post-deploy Sentry tag + contexts.trace.data token leaks fixed and secret-scan un-redded in v0.76.1.0 (#721). ROADMAP progress table reconciled: 159/161/161.1/162/164 were stale.
+state_head: 77e003005306ece8521eab4b9f579960245f3be0
 progress:
   total_phases: 12
-  completed_phases: 1
+  completed_phases: 7
   total_plans: 60
-  completed_plans: 55
-  percent: 8
+  completed_plans: 58
+  percent: 58
 ---
 
 # Project State — Quantalyze

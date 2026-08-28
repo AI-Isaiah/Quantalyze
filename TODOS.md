@@ -1390,6 +1390,21 @@ Neither closed. Both found something better than a pass.
   (VACUITY): keep the capture harness and assert on transmitted bytes, rather than on a
   fixture that mirrors the implementation's own idea of its surface.
 
+- **[SHARE-QA-07] the recursive scrub weakened the file's own no-throw contract.**
+  `src/instrumentation.ts:41` promises that a future SDK shape change degrades to "that
+  field was not scrubbed" and NEVER to a throw inside `beforeSend` — and a throw there
+  drops the whole event, so the failure mode is silent loss of error reporting. The
+  shallow walk assigned only to top-level keys; the recursive one assigns unconditionally
+  across every nested object and array it reaches, so a frozen object, a sealed object or
+  a getter-only property anywhere in the subtree now throws where it previously could not.
+  No evidence Sentry freezes events and `beforeSend` has no `try/catch`, so this is
+  hardening, not a live defect — but the comment currently overstates the guarantee.
+  Remedy is one of: wrap the body in `try/catch` and return the event unscrubbed-but-
+  delivered on throw (WRONG — that would ship the token), wrap and return `null` to DROP
+  the event fail-closed, or assign only when `scrubSharePath` actually changed the string.
+  ⭐ The third is cheapest and shrinks the write surface to the rare match. Decide in
+  164.1; do not leave the contract comment claiming more than the code delivers.
+
 ### Phase 164 (SHARE) — browser-UAT findings (booked 2026-08-28)
 
 Source: `164-UAT.md`, 9 checkpoints against localhost pointed at TEST — 7 passed, 2 recorded
