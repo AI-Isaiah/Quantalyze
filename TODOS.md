@@ -1342,16 +1342,22 @@ Neither closed. Both found something better than a pass.
   Rule-scoped allowlist (not a path exemption, per the config's own CR-03 lesson), proven
   NARROW by probe. Same push-to-main-only asymmetry several existing entries document.
 
-- **[SHARE-QA-03] ⛔ UAT 7 (Plausible) IS STILL BLOCKED — on production too, and for a
-  bigger reason than expected.** `NEXT_PUBLIC_PLAUSIBLE_DOMAIN` is **not set in ANY Vercel
-  environment**, and `layout.tsx:99` gates the tag on `plausibleDomain &&`. Measured: zero
-  `plausible.io` requests on `/strategies` (a normal page), no script tag in the DOM,
-  `window.plausible === undefined`. So the positive control fails on prod exactly as it did
-  locally, and the negative on the share lane still proves nothing.
-  ⚠️ The wider point: **Plausible is not running anywhere.** The SHARE-01 mitigation is
-  correct defensive code that arms the moment someone sets the env var — but nobody has
-  ever observed it working, and no test in the repo can observe it either. Either set the
-  var and close this, or record that site analytics is off.
+- **✅ [SHARE-QA-03] UAT 7 (Plausible) — CLOSED AS NOT-APPLICABLE. Founder call 2026-08-28:
+  THERE IS NO PLAUSIBLE ACCOUNT.** Measured first, then explained: zero `plausible.io`
+  requests on prod `/strategies`, no script tag in the DOM, `window.plausible === undefined`,
+  and `NEXT_PUBLIC_PLAUSIBLE_DOMAIN` unset in every Vercel environment. The reason is not a
+  misconfiguration to fix — the service was never signed up for. `src/app/layout.tsx:49,99`
+  gates the tag on that var, so the tag can never load and UAT 7 can never obtain a positive
+  control. Recording it as permanently blocked would leave a checkpoint nobody can ever close.
+  ⛔ **Do NOT "fix" this by setting the var.** A `data-domain` with no matching Plausible site
+  loads the script and drops every event silently — it would manufacture a passing positive
+  control while recording nothing, which is worse than the honest absence.
+  **Status of the SHARE-01 Plausible mitigation: DORMANT BY DESIGN, and still correct.**
+  `PlausibleScript` withholds the tag on `/factsheet-share/*` and is unit-tested; it arms the
+  moment analytics is ever adopted. The CSP already allows `https://plausible.io` in both
+  `script-src` and `connect-src` (`next.config.ts:97`) — harmless, but it is an allowance for
+  a host this app never contacts. ⚠️ If analytics is ever adopted, re-open UAT 7 and get the
+  positive control before trusting the negative.
 
 - **[SHARE-QA-04] UAT 9 (Sentry) narrowed from BLOCKED to "no event yet".** The positive
   control now PASSES: prod Sentry is live and receiving (6 issues in 30d, most recent 5
