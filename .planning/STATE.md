@@ -5,17 +5,17 @@ milestone_name: Backlog Burndown (Phases 158+)
 current_phase: 163
 current_phase_name: HARDEN — Fail safe, closed, and loud
 status: reviewing
-stopped_at: Completed 164-05 and 164-07 (wave 2); 164-06 at its blocking-human checkpoint
-last_updated: "2026-08-27T22:54:04.757Z"
+stopped_at: Completed 164-03 (wave 3); 164-06 at its blocking-human checkpoint
+last_updated: "2026-08-28T08:31:51.036Z"
 last_activity: 2026-08-26
 last_activity_desc: Phase 163 wave 2 — SEC-01 measured password floor + SEC-03 audit law; all gates green; ledger corrections from verification
-state_head: 22a1cb708217a0e386a9fdcca5ae3d8639761b82
+state_head: b2ec01684b8078645198f377cbc2c55b584b076a
 progress:
   total_phases: 12
   completed_phases: 1
   total_plans: 60
-  completed_plans: 53
-  percent: 9
+  completed_plans: 55
+  percent: 8
 ---
 
 # Project State — Quantalyze
@@ -495,7 +495,7 @@ Prior-phase 141.1 close-out detail (retained; NOT about 142.1):
         2 WARNING gaps, no BLOCKER. See `140.1-VERIFICATION.md`. Not transitioned (`--no-transition`).
 Last activity: 2026-08-02 -- Phase 142 execution started
 
-Progress: [█░░░░░░░░░] 9%
+Progress: [█░░░░░░░░░] 8%
 
 ### Phase 140.1 close-out — open items (do NOT lose these)
 
@@ -647,6 +647,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 | Phase 163 P08 | 35min | 2 tasks | 4 files |
 | Phase 164 P07 | 12min | 2 tasks | 2 files |
 | Phase 164 P05 | 32min | 3 tasks | 13 files |
+| Phase 164 P03 | 21min | 2 tasks | 6 files |
 
 ## Accumulated Context
 
@@ -825,6 +826,8 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - [Phase 163]: 164-07: RED planted at DEPTH 3 (src/lib/utils.ts), not on the entry — all 12 pre-existing assertions in the same file stayed GREEN under that mutation, which is the measured asymmetry justifying the closure pin
 - [Phase 163]: 164-05: Plausible mitigated by conditional script omission, NOT data-exclude — the assumed mechanism is pageview-only AND removed from Plausible's current script (both measured 2026-08-28)
 - [Phase 163]: 164-05: per-route no-referrer is justified by the SAME-ORIGIN gap; the CONTEXT/PLAN claim that strict-origin-when-cross-origin 'never strips the path' is FALSE (cross-origin it sends origin only) and is recorded as false in code + test
+- [Phase 163]: 164-03: deriveShareToken takes THREE arguments (id, nonce, generation) — the mint route round-trips a minted url through verifyShareToken because a 43-char shape assertion passes for the stale two-argument pre-image too
+- [Phase 163]: 164-03: MEASURED — the audit-coverage mutating-RPC detector scans line-by-line, so a Prettier wrap between .rpc( and the name disarms it exactly as a method-cast does; both share routes cast the CLIENT and keep the call on one line (deferred-items D-164-C)
 
 ### Decisions (execution-time, Phase 140.2)
 
@@ -1527,8 +1530,8 @@ Load-bearing sequencing (real dependencies, do not reorder):
 
 ## Session
 
-**Last Date:** 2026-08-27T22:54:04.253Z
-**Stopped At:** Completed 164-05 and 164-07 (wave 2); 164-06 at its blocking-human checkpoint
+**Last Date:** 2026-08-28T08:31:50.147Z
+**Stopped At:** Completed 164-03 (wave 3); 164-06 at its blocking-human checkpoint
 **Last Date:** 2026-08-25T22:26:01.687Z
 **Stopped At:** Completed 162-03-PLAN.md
 **Last Date:** 2026-08-25T22:28:04.096Z

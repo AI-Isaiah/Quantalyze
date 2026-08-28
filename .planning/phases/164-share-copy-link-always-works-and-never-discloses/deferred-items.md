@@ -80,3 +80,53 @@ generation is unchanged and the row is still live. That assertion sits downstrea
 of nothing that was rolled back and is the first failure when either policy wall
 is loosened. If no such reformulation is found, delete the four, drop them from
 the roster, and lower the declared count and `ARMS_FLOOR` in the same diff.
+
+## D-164-C — the mutating-RPC audit detector is disarmed by a LINE WRAP, and nothing says so
+
+**Found during:** plan 164-03, Task 1 (2026-08-28), while checking that
+`create_strategy_share`'s entry in `MUTATING_RPC_NAMES` actually reaches the new
+mint route.
+
+**Measured.** `findRpcMutations`
+(`src/__tests__/audit-coverage.test.ts:264-269`) tests `MUTATING_RPC_RE`
+— `\.rpc\(\s*['"]<name>['"]` — against **one line at a time**. The `\s*` looks
+like it spans a newline, and in a whole-file match it would; against a single
+line it cannot. So a call written the way Prettier would wrap it:
+
+```ts
+const { data, error } = await shareRpc.rpc(
+  "create_strategy_share",
+  { p_strategy_id: id },
+);
+```
+
+is INVISIBLE to the gate. MEASURED both ways on the 164-03 mint route: with the
+call wrapped, deleting its `logAuditEvent` left the whole audit-coverage suite
+GREEN; with the call on one line, the same deletion turned it RED. 164-03 keeps
+both of its RPC calls on one line with a comment saying why, and pins the shape
+in each route test — but that is a local fix for two files.
+
+**This is the second disarming mechanism in the same detector.** The first is
+already recorded in that file: casting `supabase.rpc` (rather than the client)
+erases the literal entirely, which is why
+`finalize_csv_strategy_with_returns`'s entry is decorative and is noted as
+deferred-items #3. A third, smaller finding alongside it:
+**`create_scenario_share` is not in `MUTATING_RPC_NAMES` at all**, so
+`src/app/api/allocator/scenario/share/route.ts` has never been under the audit
+law. That route does emit `scenario.share`, so there is no audit HOLE today —
+only an unenforced one.
+
+**Why not fixed here:** the fix belongs to the gate, not to a route, and it
+would change the mutation population across the whole `src/app/api` corpus
+mid-phase. 164-03's blast radius is two routes.
+
+**Remedy when picked up.** Make the detector see the call rather than the line:
+run `MUTATING_RPC_RE` against the whole file (recording the matched offset's
+line) instead of per-line, and add a `\.rpc\s+as\s+unknown` /
+`rpc:\s*\(` shaped detector — or, more robustly, match the RPC NAME literal
+anywhere in the file and then locate its enclosing statement, which catches both
+the wrap and the method-cast in one rule. Add `create_scenario_share` to
+`MUTATING_RPC_NAMES` in the same change. Verify each addition the way SEC-03
+prescribes: delete the corresponding `logAuditEvent` and confirm the suite goes
+RED. Likely home: Phase 164.1 ("gates that no longer bite"), which already owns
+D-164-A.

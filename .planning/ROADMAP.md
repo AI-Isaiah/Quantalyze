@@ -403,7 +403,7 @@ Plans:
   4. Revoke is immediate and convergent: regeneration kills previously-copied links; a revoked/unknown token renders a content-free `410` + `no-store` on the TOKEN lane only (the bare-id lane keeps its uniform 404 or the id becomes an existence oracle); soft-revoke, never DELETE; double-revoke converges; the owner can see whether a live link exists.
   5. The share affordance is honest as a CLASS: no "Link copied!" for a link that cannot work, ONE predicate across all three affordance sites (`FactsheetView`, strategies page, discovery detail), a token-link RECIPIENT never sees a Copy-Link control that rebuilds the URL without the token, and `OwnerUnpublishedNotice`'s "anyone else sees a 404" sentence is corrected in this same phase.
 
-**Plans**: 3/7 plans executed
+**Plans**: 5/7 plans executed
 **UI hint**: yes
 
 Plans:
@@ -413,7 +413,7 @@ Plans:
 - [x] 164-05-PLAN.md — leak-channel closure (Sentry path scrub net-new, per-route no-referrer, Plausible exclusion, recipient analytics suppression) + the ORDERED adversarial cache test, RED-demonstrated (wave 2 — MOVED UP 2026-08-27, gate condition 5)
 - [ ] 164-06-PLAN.md — **N1 ONLY** (founder ruling 2026-08-27: N2 dropped): `BEFORE INSERT` trigger forcing `generation = 1`, a **bounded-increment** rule on UPDATE so an owner cannot PATCH `generation` toward the bigint ceiling, and `sanitize_user`'s Art.17 arm made provably non-abortable. ⛔ Do NOT add `SELECT … FOR UPDATE`, and do NOT touch STEP 6 arm (i-b) — see gate row 3 (wave 2 — NEW 2026-08-27, gate condition 2)
 - [x] 164-07-PLAN.md — F6: the cache guard pinned over the TRANSITIVE import graph rather than one file's bytes (wave 2 — NEW 2026-08-27, gate condition 4)
-- [ ] 164-03-PLAN.md — mint-or-reuse + atomic-revoke API routes under the audit law; byte-identical-reuse regression pin; 404-as-convergence (wave 3 — DEMOTED 2026-08-27; ⛔ its merge is the gate)
+- [x] 164-03-PLAN.md — mint-or-reuse + atomic-revoke API routes under the audit law; byte-identical-reuse regression pin; 404-as-convergence (wave 3 — DEMOTED 2026-08-27; ⛔ its merge is the gate)
 - [ ] 164-04-PLAN.md — SHARE-04 honesty class: status-aware Copy Link (published lane byte-unchanged), factsheet revoke with inline confirm, OwnerUnpublishedNotice corrected, ONE predicate across three affordance sites (wave 3 — DEMOTED 2026-08-27, follows 164-03)
 
 **⛔ Wave restructure 2026-08-27 — 164-03's merge is a gate, not a step.** Six red teams plus a
@@ -673,6 +673,7 @@ would have caught a token-resurrection bug.
      plan. Both were caught by grepping the plan for what the phase had learned and re-resolving
      its anchors, which is mechanisable: resolve every `file:line` and every named symbol in a
      PLAN.md at execute time, and fail loud on a miss.
+
   6. ⛔ **Each of the five is demonstrated against the phase-164 corpus** — re-introduce each historical mechanism and show the new machinery catches it. A vacuity detector that has never caught a vacuity is the joke that writes itself.
 
 **Explicitly OUT of scope:** the GSD-machinery gaps — `depends_on` yielding `blocked_by: {}` so plan
@@ -685,7 +686,6 @@ separately.
 Plans:
 
 - [ ] TBD (run /gsd-plan-phase 164.3 to break down)
-
 
 ### Phase 165: DEPS — The 9-PR dependabot campaign
 
