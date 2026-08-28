@@ -57,6 +57,18 @@ import { isSharePath } from "@/lib/scrub-share-path";
  * component too, so the tag is absent from the SSR HTML as well as after
  * hydration.
  *
+ * ⚠️ THIS CONTROL IS LOAD-TIME, AND THAT IS A REAL LIMIT (WR-02). Returning
+ * null keeps the tag out of the SSR HTML and out of the hydrated tree, but it
+ * cannot un-run a script already on the page. A client-side navigation from a
+ * normal page INTO `/factsheet-share/<token>` would leave the loaded tracker
+ * running, and its own history hook would post `location.href` — the token.
+ * Nothing in `src/` links into the lane (recipients paste an external URL,
+ * which is a full load; Copy Link writes to the clipboard rather than
+ * navigating), and by the same standard applied to `data-exclude` above that
+ * accident is not a mitigation — so it is enforced as an invariant by the
+ * WR-02 arms in `PlausibleScript.test.tsx`, which scan every tracked and
+ * untracked file under `src/` for an `href=`/`router.push()` into the lane.
+ *
  * ⚠️ `usePathname` needs a `Suspense` boundary only when `cacheComponents` is
  * enabled (same doc). It is not enabled here — and `src/app/layout.tsx` already
  * carries the note that turning it on requires reworking that file's

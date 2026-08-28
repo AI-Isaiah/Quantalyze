@@ -560,3 +560,43 @@ describe("POST /api/strategies/[id]/share — source pins", () => {
     expect(ROUTE_SRC).not.toMatch(/\.(insert|upsert|update)\(/);
   });
 });
+
+describe("WR-03 — the origin the Copy Link url is built on", () => {
+  beforeEach(() => {
+    seedOwned();
+    seedMint();
+  });
+
+  /**
+   * ⛔ WHY THIS MATTERS MORE HERE THAN ON THE SCENARIO TWIN. This response is
+   * consumed by Copy Link: whatever origin lands in `url` goes straight onto
+   * the owner's clipboard under a "Link copied" flash. A wrong origin is not a
+   * visible error — it is a dead link the owner has already sent to someone.
+   */
+  it("falls back to the CSRF-validated request origin, NEVER to localhost", async () => {
+    // The measured failure: a production deploy that never set
+    // NEXT_PUBLIC_APP_URL. Before the fix this returned
+    // `http://localhost:3000/factsheet-share/<token>` with status 200.
+    delete process.env.NEXT_PUBLIC_APP_URL;
+    const res = await POST(makeReq(), makeCtx());
+    expect(res.status).toBe(200);
+    const { url } = (await res.json()) as { url: string };
+    expect(url).not.toContain("localhost");
+    expect(url.startsWith(`${APP_URL}/factsheet-share/`)).toBe(true);
+  });
+
+  it("prefers the configured origin over the request's, so links stay canonical", async () => {
+    // A Vercel alias host is allow-listed by CSRF but is not the address we
+    // want on a link the owner forwards. The explicit config still wins.
+    const alias = "https://quantalyze-rho.vercel.test";
+    const res = await POST(
+      new NextRequest(`${alias}/api/strategies/${STRATEGY_ID}/share`, {
+        method: "POST",
+        headers: new Headers({ origin: alias }),
+      }),
+      makeCtx(),
+    );
+    const { url } = (await res.json()) as { url: string };
+    expect(url.startsWith(`${APP_URL}/factsheet-share/`)).toBe(true);
+  });
+});

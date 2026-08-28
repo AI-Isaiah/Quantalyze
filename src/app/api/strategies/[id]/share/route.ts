@@ -83,9 +83,42 @@ export const runtime = "nodejs";
  * PER-REQUEST rather than captured at module load so the resolved origin always
  * reflects the running environment (the scenario mint route's `resolveAppUrl`
  * shape; never a hardcoded host).
+ *
+ * ⛔ WHY THIS TAKES `req` AND THE SCENARIO ROUTE'S TWIN DOES NOT (WR-03).
+ * The scenario twin falls straight through to `http://localhost:3000` when the
+ * env var is unset. For THIS route that fallback is a silent wrong answer with
+ * a user-visible consequence: step (9) is a Copy Link, so a production deploy
+ * missing `NEXT_PUBLIC_APP_URL` would put `http://localhost:3000/...` on the
+ * owner's clipboard under a "Link copied" flash — a dead link, indistinguishable
+ * from a working one until the recipient opens it. Same silent-misconfig class
+ * D-02 closed for the secret; closing it here too.
+ *
+ * The middle rung is the CSRF-validated request origin. It is safe to trust
+ * precisely because step (1) already ran: `assertSameOrigin` returned null, so
+ * `source` exists, parses, and its host is a member of the `ALLOWED_HOSTS`
+ * allow-list (`src/lib/csrf.ts`) — which admits `localhost` ONLY when
+ * `NODE_ENV !== "production"`. A spoofed Host header cannot reach here, and
+ * nothing derived from it is persisted; it only shapes the URL handed back to
+ * the same authenticated caller who sent it.
+ *
+ * The literal stays as the last rung so a unit test or a script calling POST
+ * with neither env var nor headers still gets a well-formed URL.
  */
-function resolveAppUrl(): string {
-  return process.env.NEXT_PUBLIC_APP_URL ?? "http://localhost:3000";
+function resolveAppUrl(req: NextRequest): string {
+  const configured = process.env.NEXT_PUBLIC_APP_URL;
+  if (configured) return configured;
+
+  const source = req.headers.get("origin") ?? req.headers.get("referer");
+  if (source) {
+    try {
+      return new URL(source).origin;
+    } catch {
+      // Unreachable after assertSameOrigin, which 403s an unparseable source.
+      // Fall through rather than throw — a dead link beats a 500 on Copy Link.
+    }
+  }
+
+  return "http://localhost:3000";
 }
 
 /** The recipient lane this token opens. */
@@ -315,7 +348,7 @@ export async function POST(
 
   // (9) The token is externalised exactly HERE and nowhere else.
   return NextResponse.json(
-    { url: `${resolveAppUrl()}${SHARE_PATH_PREFIX}${token}` },
+    { url: `${resolveAppUrl(req)}${SHARE_PATH_PREFIX}${token}` },
     { status: 200, headers: NO_STORE_HEADERS },
   );
 }
