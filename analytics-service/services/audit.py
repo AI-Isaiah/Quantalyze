@@ -186,6 +186,12 @@ AuditAction = Literal[
     # test test_action_literal_matches_ts_union stays green.
     "strategy.ownership_mark",
     "strategy.rename",
+    # --- Phase 164 / SHARE-01 + SHARE-03: the strategy share capability
+    # (TS-only call sites -- the mint and revoke routes are Next.js writes and
+    # the worker never touches strategy_shares). Kept here so the TS<->Python
+    # AuditAction parity test test_action_literal_matches_ts_union stays green.
+    "strategy.share.mint",
+    "strategy.share.revoke",
     # --- Phase 146.2 / T-146.2-12: the CSV finalize commit (TS-only call
     # site -- the fold is invoked from the Next.js csv-finalize route). Kept
     # here so the TS<->Python AuditAction parity test
