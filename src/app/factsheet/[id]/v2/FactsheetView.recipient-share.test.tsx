@@ -98,10 +98,14 @@ const COMPARE_LABEL = "Compare strategies";
 const NOTICE_HEADING = "Shared privately";
 const OWNER_NOTICE_HEADING = "Unpublished — only you can see this";
 
+const CREATE_LINK_LABEL = "Create share link";
+const REVOKE_LABEL = "Revoke link";
+
 function renderBody(
   props: {
     recipientShare?: boolean;
     viewerNotice?: "owner_unpublished" | "shared_privately";
+    ownerShare?: { hasActiveShare: boolean };
   } = {},
 ) {
   return render(
@@ -125,6 +129,32 @@ describe("recipientShare suppresses every URL-handing-out affordance", () => {
   it("renders NO Compare-strategies link (share mode hides outbound navigation)", () => {
     const { container } = renderBody({ recipientShare: true });
     expect(container.textContent).not.toContain(COMPARE_LABEL);
+  });
+
+  it("suppresses BOTH Copy-Link branches and the REVOKE control even when owner share state is present (SHARE-04)", () => {
+    // Phase 164 plan 04, task 3 — the COMPOSITION check, and the only one that
+    // can fail. The three assertions above pass trivially on a recipient mount
+    // because `ownerShare` is absent there, so nothing owner-shaped could
+    // render anyway. This arm forces the collision: owner share state AND
+    // recipient mode on the same mount.
+    //
+    // Why that state is worth defending against rather than dismissing as
+    // impossible: `recipientShare` and `ownerShare` are two independent props
+    // on one component, and the thing standing between them is a single `&&`
+    // in the ControlBar. A recipient who could see a Revoke button would be
+    // offered a control over ANOTHER TENANT'S capability — the far worse
+    // sibling of the rebuild-and-reshare hazard the Copy-Link assertions cover
+    // (T-164-16). "The page never passes both" is a claim about a caller; this
+    // is a claim about the component.
+    const { container } = renderBody({
+      recipientShare: true,
+      viewerNotice: "shared_privately",
+      ownerShare: { hasActiveShare: true },
+    });
+
+    expect(container.textContent).not.toContain(COPY_LINK_LABEL);
+    expect(container.textContent).not.toContain(CREATE_LINK_LABEL);
+    expect(container.textContent).not.toContain(REVOKE_LABEL);
   });
 
   it("still renders the factsheet itself — suppression is of chrome, not of content", () => {

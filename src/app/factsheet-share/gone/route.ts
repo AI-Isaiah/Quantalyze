@@ -26,14 +26,29 @@ export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
 /**
- * The entire body. Deliberately short, deliberately specific about the CAUSE
- * (someone turned it off) and the REMEDY (ask them for a new one), and
- * deliberately silent about everything else. Extracted so the test can pin the
- * exact copy rather than a paraphrase of it.
+ * The entire body. Deliberately short, deliberately clear about the REMEDY (ask
+ * for a new one), and deliberately silent about everything else. Extracted so
+ * the test can pin the exact copy rather than a paraphrase of it.
+ *
+ * ⚠️ AMENDED phase 164 / SHARE-04 (the class-honesty sweep). The original body
+ * read "The person who shared it turned it off." — a specific CAUSE, asserted
+ * as fact. Read against the SECURITY BOUNDARY note above, that sentence is
+ * false in most of the states that reach this handler: an unknown token, a
+ * malformed token and a share read that errored all land here too, and in none
+ * of those did anyone turn anything off. It is the same defect class this phase
+ * exists to close — an interface stating something it does not know — and it
+ * was hiding in the page whose whole job is to be trustworthy to a stranger.
+ *
+ * The replacement names the two possibilities WITHOUT distinguishing them, so
+ * it stays true across every miss class while disclosing exactly as little as
+ * before: the reader still cannot tell whether the token was ever valid. That
+ * indistinguishability is the point, not a side effect — it is what keeps this
+ * response free of an existence oracle.
  */
 export const GONE_HEADING = "This link is no longer active";
 export const GONE_BODY =
-  "The person who shared it turned it off. Ask them for a new link.";
+  "It may have been turned off by the person who shared it, or it may never " +
+  "have been valid. Ask them for a new link.";
 
 const BODY_HTML = `<!doctype html>
 <html lang="en">
