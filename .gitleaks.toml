@@ -196,6 +196,36 @@ paths = ['''(^|/)\.planning/''']
 # the default OR, that test failed with `expected 'generic-api-key' to be
 # 'jwt'` — i.e. a broad allowlist had silently degraded a falsifiability guard.
 # AND means "this literal, and only inside .planning/".
+# Phase 164 (SHARE-01) share-token test fixtures. Four suites type a 43-char
+# base64url literal BY HAND — the exact width `deriveShareToken` emits — because
+# each one asserts the token is ABSENT from a scrubbed output (Sentry event,
+# Plausible URL, factsheet analytics payload). Deriving the fixture instead would
+# make the oracle self-referential: a broken deriver would produce a broken
+# expectation and the test could never fail. `generic-api-key` scores the
+# hand-typed literal on entropy alone.
+#
+# These cannot be live capabilities. A real share token is
+# HMAC(SHARE_TOKEN_SECRET, "qz.strategy-share.v1.<id>.<nonce>.<generation>") —
+# a hand-typed string matches no strategy, and the lane 410s on a miss.
+#
+# ⛔ RULE-SCOPED, NOT A PATH EXEMPTION, per the CR-03 lesson above: a blanket
+# `paths` entry would make these four files invisible to EVERY rule, including
+# `jwt` and `private-key`. Only the entropy detector is wrong here, so only the
+# entropy detector is suppressed.
+#
+# Same push-to-main-only asymmetry as the entries above: the PR-diff scan passed
+# on #720 and the squash-commit scan on main flagged all five. Reproduced
+# locally with `gitleaks detect -c .gitleaks.toml --log-opts=-1`.
+[[allowlists]]
+description = "Phase 164 share-token fixtures: entropy false-positives only"
+targetRules = ["generic-api-key"]
+paths = [
+  '''(^|/)src/lib/scrub-share-path\.test\.ts$''',
+  '''(^|/)src/instrumentation\.test\.ts$''',
+  '''(^|/)src/app/PlausibleScript\.test\.tsx$''',
+  '''(^|/)src/app/factsheet/\[id\]/v2/factsheet-analytics\.test\.ts$''',
+]
+
 [[allowlists]]
 description = "canonical jwt.io tutorial JWT fixture (HS256, sub=12345) — not a real token"
 targetRules = ["jwt"]
