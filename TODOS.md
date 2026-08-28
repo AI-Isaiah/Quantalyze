@@ -1269,6 +1269,31 @@ worst item in the corpus.
 
 ⛔ `revoked_at IS NULL` is **the convergence contract**, not a racy predicate. The recorded remedy — rewrite STEP 6 arm (i-b) *so the fix can land* — would have removed the guard, and removing the predicate is what makes a double-revoke inflate the counter. **The arm was not enforcing the bug; the proposed fix was the bug.** None of this was visible without running it: the reasoning chain reads as sound end to end and is simply false. Recommend closing gate condition 3 as not-a-defect and dropping N2 from 164-06 (leaving that plan N1-only) — ⚠️ founder call, since the corpus records N2 as `[M]`. Limits: READ COMMITTED (PostgREST's default), two sessions not N, three interleavings not an exhaustive schedule search.
 
+### ⚠️ DRIFT-03 — an MCP hand-apply stamps the ledger with the APPLY TIME, not the filename (booked 2026-08-28)
+
+Surfaced during the Phase 164 TEST hand-apply. `apply_migration` writes
+`supabase_migrations.schema_migrations.version` as the **wall-clock time of the apply**, keeping the
+real filename only in the `name` column. TEST now reads:
+
+```
+20260828061901  ->  name 20260827120000_strategy_shares_generation_model
+20260828062101  ->  name 20260827130000_sanitize_user_revoke_strategy_shares
+```
+
+PROD's Migrate workflow will register the same two files as `20260827120000` / `20260827130000`.
+
+⛔ **So any TEST-vs-PROD drift check keyed on `version` silently reports these as missing from TEST.**
+Not hypothetical — `DRIFT-01` is exactly such a check, and `CI-MIGRATE-01` proposes building more of
+them. A comparison that joins on `version` will conclude TEST is behind when it is current.
+
+Pre-existing, not caused by this phase: the row above these two,
+`20260826210044:destrict_enqueue_internal_10param`, has the identical shape.
+
+**Fix:** key drift comparisons on `name`, not `version` — or normalise `version` from the leading
+timestamp in `name`. **Route to Phase 164.3** (`DRIFT-02b`'s neighbour): it is the same root as the
+rest of that phase — *the claim and the thing are never compared*, and here the join key itself is
+the thing that lies.
+
 ### NYQ-01 — a config-enabled planning gate stopped firing and nothing noticed (booked 2026-08-26)
 
 ⭐ **Founder-ruled 2026-08-26: regenerate, don't waive.** Surfaced while closing Phase 164's
