@@ -664,7 +664,16 @@ would have caught a token-resurrection bug.
   2. **The throwaway-PostgreSQL lane is real** — `PROC-01`'s implementation. Today it is a script under `.planning/`, written mid-phase, whose own two defects (reusing another agent's cluster then `DROP SCHEMA public CASCADE`; RLS enabled on nothing but the table under test) were found by reviewers using it.
   3. **A static linter rejects the five measured shapes** on new gate files, so mechanism 6 is a lint failure rather than a red-team finding.
   4. **No whole-body `CREATE OR REPLACE` merges without a repo-vs-PROD diff** (`DRIFT-02b`). A function that has ever been surgically patched has no true body in the repo, and "re-base on the latest definition" is unsatisfiable from files alone.
-  5. ⛔ **Each of the four is demonstrated against the phase-164 corpus** — re-introduce each historical mechanism and show the new machinery catches it. A vacuity detector that has never caught a vacuity is the joke that writes itself.
+  5. **A plan's claims about the codebase are verified, not trusted.** A PLAN.md asserts line
+     anchors, function signatures and RPC return shapes — and NOTHING compares them to the tree.
+     Both wave-3 plans were stale when execution reached them: `164-03` specified a two-argument
+     `deriveShareToken` that would have minted links failing verification (the token gained a third
+     input mid-phase), and `164-04` anchored edits at `v2/page.tsx:563-573` in a file that had
+     shrunk to 423 lines. Neither is catchable by review — a reviewer reads the plan against the
+     plan. Both were caught by grepping the plan for what the phase had learned and re-resolving
+     its anchors, which is mechanisable: resolve every `file:line` and every named symbol in a
+     PLAN.md at execute time, and fail loud on a miss.
+  6. ⛔ **Each of the five is demonstrated against the phase-164 corpus** — re-introduce each historical mechanism and show the new machinery catches it. A vacuity detector that has never caught a vacuity is the joke that writes itself.
 
 **Explicitly OUT of scope:** the GSD-machinery gaps — `depends_on` yielding `blocked_by: {}` so plan
 ordering is unenforced, wave frontmatter drifting from ROADMAP, and `NYQ-01`. Same smell, different
