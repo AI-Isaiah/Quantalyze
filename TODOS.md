@@ -1269,6 +1269,27 @@ worst item in the corpus.
 
 ⛔ `revoked_at IS NULL` is **the convergence contract**, not a racy predicate. The recorded remedy — rewrite STEP 6 arm (i-b) *so the fix can land* — would have removed the guard, and removing the predicate is what makes a double-revoke inflate the counter. **The arm was not enforcing the bug; the proposed fix was the bug.** None of this was visible without running it: the reasoning chain reads as sound end to end and is simply false. Recommend closing gate condition 3 as not-a-defect and dropping N2 from 164-06 (leaving that plan N1-only) — ⚠️ founder call, since the corpus records N2 as `[M]`. Limits: READ COMMITTED (PostgREST's default), two sessions not N, three interleavings not an exhaustive schedule search.
 
+### ⚠️ GSD-01 — `/gsd-plan-phase` cannot add ONE plan to a partly-executed phase (booked 2026-08-28)
+
+`/gsd-plan-phase <N>` replans the **whole** phase. Once some plans carry SUMMARYs, running it risks
+regenerating or renumbering executed work, so the only safe path is authoring the new PLAN.md by
+hand — which skips the orchestrator-only gates (`plan-phase` step 5.5's VALIDATION.md refresh, and
+7.5), and skips `gsd-plan-checker` entirely.
+
+Hit four times in phase 164: `164-06` and `164-07` were hand-authored net-new; `164-03` and
+`164-04` were hand-revised. In each case the VALIDATION.md rows had to be written by the
+orchestrator to cover the gate that did not fire — see the note at the bottom of
+`164-VALIDATION.md`.
+
+⚠️ **This is the same family as `NYQ-01`** (a config-enabled planning gate stopped firing and
+nothing noticed). There the gate was silent by accident; here it is silent because the only safe
+route around a tool limitation goes past it.
+
+**Fix:** an `--add-plan` mode that appends a single plan to an existing phase and runs the checker
+plus the 5.5 refresh over it alone. ⛔ Upstream `gsd-core`, not this repo — same bucket as
+`depends_on` yielding `blocked_by: {}` and wave frontmatter drifting from ROADMAP. Phase 164.3
+**excludes** this bucket deliberately; do not fold it in.
+
 ### ⚠️ DRIFT-03 — an MCP hand-apply stamps the ledger with the APPLY TIME, not the filename (booked 2026-08-28)
 
 Surfaced during the Phase 164 TEST hand-apply. `apply_migration` writes
