@@ -2756,6 +2756,51 @@ export type Database = {
           },
         ]
       }
+      strategy_shares: {
+        Row: {
+          created_at: string
+          created_by: string
+          generation: number
+          id: string
+          nonce: string
+          revoked_at: string | null
+          strategy_id: string
+        }
+        Insert: {
+          created_at?: string
+          created_by: string
+          generation?: number
+          id?: string
+          nonce?: string
+          revoked_at?: string | null
+          strategy_id: string
+        }
+        Update: {
+          created_at?: string
+          created_by?: string
+          generation?: number
+          id?: string
+          nonce?: string
+          revoked_at?: string | null
+          strategy_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "strategy_shares_created_by_fkey"
+            columns: ["created_by"]
+            isOneToOne: false
+            referencedRelation: "profiles"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "strategy_shares_strategy_id_fkey"
+            columns: ["strategy_id"]
+            isOneToOne: true
+            referencedRelation: "strategies"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       strategy_verifications: {
         Row: {
           correlation_id: string | null
