@@ -1,5 +1,28 @@
 # Changelog
 
+## [0.76.1.0] - 2026-08-28
+
+### A private share link could still leak through error reporting
+
+Both fixes below came out of testing the *previous* release on production. Neither was
+found by review, by the browser UAT, or by any test in the phase that built the feature.
+
+### Fixed
+
+- **A private share link could reach our error-reporting provider.** If a page error
+  happened while someone was viewing a shared factsheet, the link itself — the part that
+  grants access — was sent along with the error report in two places the redaction missed.
+  Anyone with access to those reports could have opened the factsheet. The redaction now
+  walks the whole report rather than a hand-written list of fields, so a link cannot ride
+  out in a corner nobody thought to check.
+- Restored the secret-scanning check on the main branch, which the previous release turned
+  red on synthetic test fixtures.
+
+### Changed
+
+- The share-link test fixtures are recognised as test data by the secret scanner, scoped to
+  the one detector that misreads them rather than exempting those files wholesale.
+
 ## [0.76.0.0] - 2026-08-28
 
 ### Phase 164 — Copy Link always works, and never discloses
