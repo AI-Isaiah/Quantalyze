@@ -4,7 +4,10 @@ import { Button } from "@/components/ui/Button";
 import { Badge } from "@/components/ui/Badge";
 import { Card } from "@/components/ui/Card";
 import { StrategyActions } from "@/components/strategy/StrategyActions";
-import { ShareableLink, isPublishedStatus } from "@/components/strategy/ShareableLink";
+import { ShareableLink } from "@/components/strategy/ShareableLink";
+// Server component: import the predicate from the NON-client module. Importing
+// it from ShareableLink.tsx compiles but throws at request time.
+import { isPublishedStatus } from "@/lib/share-affordance";
 import { PendingIntros } from "@/components/strategy/PendingIntros";
 import Link from "next/link";
 import { redirect } from "next/navigation";

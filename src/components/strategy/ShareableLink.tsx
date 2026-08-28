@@ -27,24 +27,19 @@ import { Button } from "@/components/ui/Button";
  * and D-09 exists precisely because an earlier draft of the phase context said
  * the opposite of the ruling.
  */
-export type ShareAffordanceMode = "public-url" | "mint-token";
-
-/**
- * The predicate. Deliberately a named function rather than an inline
- * `published ? … : …` at three call sites: a grep for this identifier is the
- * drift check, and a fourth surface that wants a share control has exactly one
- * obvious thing to call.
- */
-export function shareAffordanceMode(published: boolean): ShareAffordanceMode {
-  return published ? "public-url" : "mint-token";
-}
-
-/** `status` values are `text` in the DB; anything that is not the published
- *  literal is treated as unpublished (fail-CLOSED — an unrecognised status must
- *  not be handed a public URL that may 404). */
-export function isPublishedStatus(status: string | null | undefined): boolean {
-  return status === "published";
-}
+// ⛔ DECLARED IN `@/lib/share-affordance`, NOT HERE — that module carries no
+// `"use client"` directive. This file does, and a Server Component may not CALL
+// an export of a client module (only render it, or pass it as a prop). The
+// strategies page is a server component and calls `isPublishedStatus`, which
+// threw on every request until the declarations moved. Re-exported so the
+// existing consumers of this path keep working and there is still ONE
+// declaration to grep for.
+export {
+  shareAffordanceMode,
+  isPublishedStatus,
+  type ShareAffordanceMode,
+} from "@/lib/share-affordance";
+import { shareAffordanceMode } from "@/lib/share-affordance";
 
 /**
  * Mint-or-REUSE the private share URL for a strategy (plan 164-03's route).

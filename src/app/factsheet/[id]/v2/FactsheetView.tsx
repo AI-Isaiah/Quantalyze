@@ -831,6 +831,57 @@ export function OwnerUnpublishedNotice({
 }
 
 /**
+ * Phase 164 (SHARE-04) — the owner's visibility notice WITH the controls it
+ * talks about, for render paths that never reach `<FactsheetView>`.
+ *
+ * ⛔ WHY THIS EXISTS. `page.tsx`'s pending-state early return (the "still
+ * computing" placeholder) rendered `OwnerUnpublishedNotice` alone. That notice
+ * ends with "You can create a private share link to let someone view it without
+ * publishing" — and on that path there was no control to do it. MEASURED
+ * 2026-08-28 in the browser: zero clickable elements on the whole page, under a
+ * sentence promising a capability. That is the same dishonesty class SHARE-04
+ * exists to close, reappearing on the one render the class review did not walk.
+ * The placeholder's own comment says the pending state "is when an owner is MOST
+ * likely to share the URL", which makes the omission worse, not incidental.
+ *
+ * ⛔ WHY THE NOTICE AND THE CONTROLS SHARE ONE STATE, rather than the caller
+ * passing `hasActiveShare` to a notice and mounting buttons beside it. Minting
+ * flips the notice's own text to "shared through your private link … until you
+ * revoke it". If the controls were not driven by the SAME `shareLive`, fixing
+ * the missing mint button would have manufactured a second false claim on the
+ * next render: a notice promising revocation with no revoke control. Both
+ * controls hang off this one state, exactly as `FactsheetView` does.
+ */
+export function OwnerUnpublishedPanel({
+  strategyId,
+  hasActiveShare = false,
+}: {
+  strategyId: string;
+  hasActiveShare?: boolean;
+}) {
+  const [shareLive, setShareLive] = React.useState(hasActiveShare);
+
+  return (
+    <div className="mb-6">
+      <OwnerUnpublishedNotice hasActiveShare={shareLive} />
+      <div className="-mt-4 mb-2 flex flex-wrap items-center gap-2">
+        <ShareLinkButton
+          strategyId={strategyId}
+          ownerShare={{ hasActiveShare: shareLive }}
+          onShareLiveChange={setShareLive}
+        />
+        {shareLive && (
+          <ShareRevokeControl
+            strategyId={strategyId}
+            onShareLiveChange={setShareLive}
+          />
+        )}
+      </div>
+    </div>
+  );
+}
+
+/**
  * Phase 164 (SHARE-01) — the RECIPIENT-lane visibility notice, rendered only
  * when the tokenized route passes `viewerNotice="shared_privately"`.
  *

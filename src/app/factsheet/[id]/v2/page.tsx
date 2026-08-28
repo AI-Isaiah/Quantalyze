@@ -19,7 +19,7 @@ import {
 // that makes the cached wrapper safe lives in this file, and only here.
 import { fetchAndBuildPayload } from "@/lib/factsheet/fetch-and-build-payload";
 import type { FactsheetPayload, TrustTierKind } from "@/lib/factsheet/types";
-import { FactsheetView, OwnerUnpublishedNotice } from "./FactsheetView";
+import { FactsheetView, OwnerUnpublishedPanel } from "./FactsheetView";
 
 // Pin to dynamic rendering. This route's render output already depends on the
 // per-request authentication state (cookies → supabase.auth.getUser() inside
@@ -397,7 +397,10 @@ export default async function FactsheetV2Page({
             the full render (single-sourced UI-SPEC copy), first child so the
             disclosure precedes any document content (UI-SPEC:97). */}
         {lane === "owner" && (
-          <OwnerUnpublishedNotice hasActiveShare={hasActiveShare} />
+          <OwnerUnpublishedPanel
+            strategyId={signature.id}
+            hasActiveShare={hasActiveShare}
+          />
         )}
         <p className="text-fixed-10 font-mono uppercase tracking-[0.22em] text-text-muted">
           Institutional Factsheet · Quantalyze

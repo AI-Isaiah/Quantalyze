@@ -240,8 +240,31 @@ describe("one predicate, three sites — the drift pin", () => {
     // Anti-vacuity for the three assertions above: they check that consumers
     // NAME the identifier. If a second file could DECLARE it, every one of them
     // could pass while two incompatible predicates shipped.
-    const canonical = readSrc("src/components/strategy/ShareableLink.tsx");
+    // ⛔ THE CANONICAL FILE MOVED, and the move is load-bearing. The predicate
+    // was declared in ShareableLink.tsx, which carries `"use client"`. The
+    // strategies page is a SERVER component and calls `isPublishedStatus`, so
+    // every GET /strategies threw "Attempted to call isPublishedStatus() from
+    // the server" — measured in the dev server 2026-08-28, found by browser UAT,
+    // invisible to this suite because jsdom does not enforce the RSC boundary.
+    // The declarations now live in a module with no directive; ShareableLink
+    // re-exports them, so all three consumers still name one identifier.
+    const canonical = readSrc("src/lib/share-affordance.ts");
     expect(canonical).toContain("export function shareAffordanceMode(");
+    // ⛔ A DIRECTIVE, NOT A SUBSTRING. `expect(canonical).not.toContain('"use
+    // client"')` was written first and failed immediately — the file's own
+    // docblock EXPLAINS why it carries no directive, and the explanation
+    // contains the string. A prose mention is not a directive; only a bare
+    // statement is. Same shape as every other text-oracle defect this phase
+    // turned up, arriving here as a false POSITIVE instead of a false negative.
+    expect(
+      canonical.split("\n").some((l) => l.trim().replace(/;$/, "") === '"use client"'),
+      "src/lib/share-affordance.ts must carry no \"use client\" directive — a server component calls it",
+    ).toBe(false);
+    // The re-export site must NOT re-declare — it forwards only.
+    expect(
+      readSrc("src/components/strategy/ShareableLink.tsx"),
+      "ShareableLink must re-export the predicate, never re-declare it",
+    ).not.toContain("function shareAffordanceMode(");
     for (const rel of [
       ...SITES,
       "src/app/factsheet/[id]/v2/FactsheetView.tsx",
