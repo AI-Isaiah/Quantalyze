@@ -53,61 +53,78 @@ key-decisions:
 requirements-completed: [SHARE-01, SHARE-04]
 
 coverage:
-  - deliverable: "Published Copy Link yields /factsheet/<id>?share=1, byte-identical (D-09)"
-    human_judgment: false
+  - id: D1
+    description: "Published Copy Link yields /factsheet/<id>?share=1, byte-identical (D-09)"
+    requirement: SHARE-04
     verification:
-      - kind: source-byte-equality
-        ref: "shasum of the url-producing line, HEAD vs tree: e7ced002aff1ea9d8dbd5fb322dfe81cf032384e (identical)"
+      - kind: other
+        ref: "source-byte-equality: shasum of the url-producing line, HEAD vs tree — e7ced002aff1ea9d8dbd5fb322dfe81cf032384e (identical)"
         status: pass
-      - kind: test
+      - kind: unit
         ref: "src/app/factsheet/[id]/v2/FactsheetView.share-affordance.test.tsx#copies <origin><pathname>?share=1 and NEVER calls the mint route"
         status: pass
-  - deliverable: "Unpublished Copy Link mints-or-reuses and copies the token url; failure never flashes success (SHARE-04)"
     human_judgment: false
+  - id: D2
+    description: "Unpublished Copy Link mints-or-reuses and copies the token url; failure never flashes success (SHARE-04)"
+    requirement: SHARE-04
     verification:
-      - kind: test
+      - kind: unit
         ref: "src/app/factsheet/[id]/v2/FactsheetView.share-affordance.test.tsx#T-164-15 — NO success flash for a link that cannot work (4 arms)"
         status: pass
-      - kind: mutation
-        ref: "setPhase('failed') -> setPhase('copied') turned 4/18 arms RED; restored by byte backup (shasum eccfbd51)"
+      - kind: other
+        ref: "mutation: setPhase('failed') -> setPhase('copied') turned 4/18 arms RED; restored by byte backup (shasum eccfbd51)"
         status: pass
-  - deliverable: "Revoke on the factsheet with inline confirm; 404 converges (D-03 / SHARE-03)"
     human_judgment: false
+  - id: D3
+    description: "Revoke on the factsheet with inline confirm; 404 converges (D-03 / SHARE-03)"
+    requirement: SHARE-03
     verification:
-      - kind: test
+      - kind: unit
         ref: "src/app/factsheet/[id]/v2/FactsheetView.share-affordance.test.tsx#D-03 / SHARE-03 — revoke lives on the factsheet, with an INLINE confirm (6 arms)"
         status: pass
-      - kind: command
-        ref: "git diff 0b32e00d4~1..HEAD -- src/components/strategy/StrategyActions.tsx (empty)"
+      - kind: other
+        ref: "command: git diff 0b32e00d4~1..HEAD -- src/components/strategy/StrategyActions.tsx (empty)"
         status: pass
-  - deliverable: "ONE predicate at all three affordance sites (SHARE-04)"
     human_judgment: false
+  - id: D4
+    description: "ONE predicate at all three affordance sites (SHARE-04)"
+    requirement: SHARE-04
     verification:
-      - kind: test
+      - kind: unit
         ref: "src/app/(dashboard)/strategies/page.share-affordance.test.tsx#one predicate, three sites — the drift pin (4 arms incl. the single-declaration anti-vacuity arm)"
         status: pass
-  - deliverable: "OwnerUnpublishedNotice never asserts a false 404 claim (SHARE-04)"
     human_judgment: false
+  - id: D5
+    description: "OwnerUnpublishedNotice never asserts a false 404 claim (SHARE-04)"
+    requirement: SHARE-04
     verification:
-      - kind: test
+      - kind: unit
         ref: "src/app/factsheet/[id]/v2/FactsheetView.share-affordance.test.tsx#SHARE-04 — the owner notice states only TRUE sentences (2 arms)"
         status: pass
-  - deliverable: "Recipient mode suppresses every owner share control (T-164-16)"
     human_judgment: false
+  - id: D6
+    description: "Recipient mode suppresses every owner share control (T-164-16)"
+    requirement: SHARE-04
     verification:
-      - kind: test
+      - kind: unit
         ref: "src/app/factsheet/[id]/v2/FactsheetView.recipient-share.test.tsx#suppresses BOTH Copy-Link branches and the REVOKE control even when owner share state is present"
         status: pass
-      - kind: mutation
-        ref: "dropping !recipientShare from the revoke guard turned that arm RED; restored by byte backup (shasum eccfbd51)"
+      - kind: other
+        ref: "mutation: dropping !recipientShare from the revoke guard turned that arm RED; restored by byte backup (shasum eccfbd51)"
         status: pass
-  - deliverable: "Owner lane share state never reaches the cached payload (T-164-01)"
     human_judgment: false
+  - id: D7
+    description: "Owner lane share state never reaches the cached payload (T-164-01)"
+    requirement: SHARE-02
     verification:
-      - kind: test
+      - kind: unit
         ref: "src/__tests__/phase-148-owner-lane-cache-isolation.test.ts (18 arms) + factsheet-share/[token]/page.cache-isolation.test.tsx + page.no-cache-reach.test.ts — 31 passed"
         status: pass
-  - deliverable: "End-to-end owner UAT: mint, verify in a private window, revoke, confirm the 410"
+    human_judgment: false
+  - id: D8
+    description: "End-to-end owner UAT: mint, verify in a private window, revoke, confirm the 410"
+    requirement: SHARE-04
+    verification: []
     human_judgment: true
     rationale: "Requires a real browser, a real SHARE_TOKEN_SECRET and plan 164-03's routes deployed; no unit test can assert that a copied URL opens for a different session."
 
@@ -283,3 +300,23 @@ Blocked on plan 164-03's routes being deployed and `SHARE_TOKEN_SECRET` being se
 - commit `2ae51d33c` — FOUND
 - commit `255f74e36` — FOUND
 - `git diff` on `src/components/strategy/StrategyActions.tsx` across all three commits — EMPTY (D-03)
+
+## Coverage-block repair (2026-08-28, post-hoc)
+
+The `coverage:` block as originally written used `deliverable:` where the schema
+wants `id:` + `description:`, and free-text `kind:` values (`test`, `mutation`,
+`command`, `source-byte-equality`) where the enum is
+`unit|integration|e2e|automated_ui|manual_procedural|other`.
+
+Measured before the repair: `gsd-tools query uat.classify-coverage` returned
+**27 validation errors, 8/8 entries rejected, 0 auto-passed** — every deliverable
+degraded to a human checkpoint with `description: null`. The block looked
+authoritative and validated to nothing, which is the same failure shape this
+phase was full of. After the re-key: **8 total, 7 auto-passed, 1 human
+checkpoint (D8), 0 errors.** Refs and statuses are unchanged; only the keys are.
+
+⚠️ SECOND FINDING, worth its own guard. The first repair attempt kept a `#`
+comment inside the block explaining the change. That alone flipped the whole
+block back to `mode: legacy` with a single `malformed_block` error — a YAML
+comment silently discards every entry and the fallback is a **quiet** prose
+extraction, not a failure. Do not put comments inside `coverage:`.
