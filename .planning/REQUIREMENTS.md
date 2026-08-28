@@ -148,6 +148,22 @@ verified-stale items are excluded by construction.
 
 - [ ] **DEPS-01** (L798): All 9 open dependabot PRs are RESOLVED — landed or deliberately closed — in the research-verified order, full local suite between each. Binding corrections from STACK research (2026-08-20): prerequisite commit fixes `requirements.in` pandas 2.2.3→3.0.3 on main BEFORE #685 (which otherwise silently downgrades production pandas 3.0.3→2.3.3); #686's nine red checks are one incomplete dependabot lockfile — rebase + `npm install`, don't bisect; #614 (TypeScript 7) is CLOSED with reasons, not landed (compiler-API import in the seam-log coverage gate + typescript-eslint peer <6.1.0); #646 lands jsdom 30.0.1 not 30.0.0 (getComputedStyle calc() regression; note Node-25 local exclusion); #612 (supabase/setup-cli 3 — rides the PROD auto-migrate workflow, install source changes GitHub→npm) lands ALONE, validated on migration-drift-check first; #606 is closed as stale (bump the `fast-uri` override instead). Order: pandas prereq → #643 → #627/#626 → #612 → #685 → #686 → #645 → #646 → close #614/#606. ⛔ Blocked on OPS-01.
 
+### VAC — A control that cannot fail is caught by machine (Phase 164.3)
+
+Derived from ROADMAP §Phase 164.3 success criteria 1-6 plus the decisions locked in
+`164.3-CONTEXT.md`. The ROADMAP line previously read `TBD (run /gsd-discuss-phase 164.3)`;
+discuss ran 2026-08-28 and these are its output.
+
+- [ ] **VAC-01**: A mutation runner runs IN CI over every arm carrying a `RED-UNDER` annotation — applies the named mutation, asserts the file goes RED, restores, asserts GREEN. It prints coverage as `files_annotated / files_total` on every run. Both failure modes exit 1: an annotation whose mutation does not redden its arm, and coverage below a ratchet floor pinned at the measured value (1/71 at HEAD; fails on REGRESSION, never "until 71/71").
+- [ ] **VAC-02**: The disposable-PostgreSQL lane is real — ONE script with identical semantics locally and in a CI job that hosts its own throwaway cluster. It MUST stop and remove every cluster it starts, including on failure and on interrupt. ⛔ It may not use the shared TEST database: a mutation run deliberately breaks and restores arms, and TEST sits behind an advisory-lock mutex shared with other CI.
+- [ ] **VAC-03**: A static linter rejects the five measured vacuity shapes on new gate files, so a sixth mechanism is a lint failure rather than a red-team finding.
+- [ ] **VAC-04**: No whole-body `CREATE OR REPLACE` merges without a repo-vs-PROD body diff (`DRIFT-02b`), run as a CI job through a least-privilege read-only role. ⚠️ It MUST strip `--` comments before matching — `pg_get_functiondef` returns them, and matching a comment is mechanism 2 on this phase's own list. When the credential is absent it exits 1 with an explicit error; it NEVER skips and never exits 0 (a skip would be this phase committing `SKIP-01`).
+- [ ] **VAC-05**: A PLAN.md's claims about the tree are verified, not trusted — every `file:line` anchor and named symbol is re-resolved at execute time and a miss fails loud.
+- [ ] **VAC-06**: Each of the five historical mechanisms is re-introduced against the phase-164 corpus and demonstrated caught. All five live in `supabase/tests/test_strategy_shares_rls.sql`, the only annotated file, so this is reachable without 164.4.
+- [ ] **VAC-07**: Phase 159's two blocked items close on the new lane as ONE spec — two concurrent `csv-finalize` POSTs on one never-classified `wizard_session_id`; exactly one 2xx applied receipt, one honest raced refusal, `category_id` holds the winner. Bounded to one spec, no production code changes.
+- [ ] **VAC-08**: The repo-vs-TEST drift check (`DRIFT-01` / `SKIP-01`) joins `supabase_migrations.schema_migrations` on **`name`**, not `version`. ⛔ MEASURED 2026-08-28: the ledger re-stamps `version` at apply time while preserving the repo filename in `name`; joining on `version` reports 12 of 12 recent migrations missing when all 12 are present. A check that joins on `version` is itself a vacuous control. Pairs with a body-level assertion — presence in the ledger is not evidence the deployed body matches.
+
+
 ## Future Requirements (deferred, stay in TODOS.md)
 
 All verified-open items NOT listed above remain in TODOS.md untouched — notably the r2 quick-win
@@ -182,6 +198,14 @@ Which phases cover which requirements. Updated during roadmap creation.
 | RANK-08 | Phase 159 | Complete |
 | RANK-09 | Phase 159 | Complete |
 | SHARE-01 | Phase 164 | Complete |
+| VAC-01 | Phase 164.3 | Pending |
+| VAC-02 | Phase 164.3 | Pending |
+| VAC-03 | Phase 164.3 | Pending |
+| VAC-04 | Phase 164.3 | Pending |
+| VAC-05 | Phase 164.3 | Pending |
+| VAC-06 | Phase 164.3 | Pending |
+| VAC-07 | Phase 164.3 | Pending |
+| VAC-08 | Phase 164.3 | Pending |
 | SHARE-02 | Phase 164 | Complete |
 | SHARE-03 | Phase 164 | Complete |
 | SHARE-04 | Phase 164 | Complete |

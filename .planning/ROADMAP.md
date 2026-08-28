@@ -457,8 +457,12 @@ and that "no dependency" is exactly what makes the move free. The direction was 
 builds a real disposable PostgreSQL lane and criterion 1 builds a mutation runner, and those two ARE
 the substrate on which 164.1's gate work would otherwise be hand-tested. Doing 164.1 first means
 building gate machinery twice.
-**Requirements**: TBD (run `/gsd-discuss-phase 164.3`) + **absorbed from 164.1:** SKIP-01, DRIFT-01,
-OPS-08-F9, OPS-08-F8, H-0001 (see the DEDUP table under Phase 164.1 for the reasoning per item).
+**Requirements**: VAC-01, VAC-02, VAC-03, VAC-04, VAC-05, VAC-06, VAC-07, VAC-08 (defined in
+REQUIREMENTS.md by the 2026-08-28 discuss pass; the line previously read `TBD`)
++ **absorbed from 164.1:** SKIP-01, DRIFT-01, OPS-08-F9, OPS-08-F8, H-0001 (see the DEDUP table
+under Phase 164.1 for the reasoning per item).
+⚠️ SKIP-01's premise FAILED re-measurement — see the VERIFIED CORRECTIONS block in
+`164.3-CONTEXT.md`. It is now VAC-08 (a drift check that joins on `name`), NOT a migration-apply lane.
 
 **Why this exists — measured, not felt.** Phase 164 produced **five distinct vacuity mechanisms**,
 and the DRIFT family alongside them. ⛔ Every single one was **GREEN in CI**, survived code review,
