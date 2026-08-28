@@ -27,7 +27,7 @@ verified-stale items are excluded by construction.
 - [ ] **SHARE-01** (L27): "Copy Link" always yields a URL its recipient can view — a revocable per-strategy share token carried in the URL, mint-or-reuse on copy; the bare `/factsheet/<id>` URL stays owner-only and the id stays a non-secret. (URL shape — `?s=<token>` on the id route vs a separate `/factsheet-share/[token]` route — is the SHARE phase plan's decision; research disagrees and the choice must be argued, not defaulted: A-D1.)
 - [x] **SHARE-02** (L27): The token lane never contaminates the id-keyed public cache — after any token-lane render, an anonymous request for `/factsheet/<id>` of an unpublished strategy STILL 404s (adversarial acceptance, same class as OWN-02).
 - [ ] **SHARE-03** (L27): A revoke control regenerates the token and kills previously-copied links.
-- [ ] **SHARE-04** (L27): The share affordance is honest as a CLASS — no "Link copied!" success for a link that cannot work, consistent across `FactsheetView` and the strategies page, and covering the two research-found siblings: a token-link RECIPIENT must not see a Copy-Link control that rebuilds the URL without the token (`FactsheetView.tsx:1312` strips it today), and `OwnerUnpublishedNotice`'s "anyone else sees a 404" sentence must be corrected in the same phase (it becomes false the moment tokens ship).
+- [x] **SHARE-04** (L27): The share affordance is honest as a CLASS — no "Link copied!" success for a link that cannot work, consistent across `FactsheetView` and the strategies page, and covering the two research-found siblings: a token-link RECIPIENT must not see a Copy-Link control that rebuilds the URL without the token (`FactsheetView.tsx:1312` strips it today), and `OwnerUnpublishedNotice`'s "anyone else sees a 404" sentence must be corrected in the same phase (it becomes false the moment tokens ship).
 
 ### WIZERR — Honest error surfaces (the recorded WIZFORM-02 class residue)
 
@@ -184,7 +184,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | SHARE-01 | Phase 164 | Pending |
 | SHARE-02 | Phase 164 | Complete |
 | SHARE-03 | Phase 164 | Pending |
-| SHARE-04 | Phase 164 | Pending |
+| SHARE-04 | Phase 164 | Complete |
 | WIZERR-01 | Phase 161 | Complete |
 | WIZERR-02 | Phase 161 | Complete |
 | WIZERR-03 | Phase 161 | Complete |
