@@ -225,7 +225,7 @@ Plans:
 Inserted after 161 for roadmap ordering only — it MAY be pulled ahead, and it is the more urgent
 of the two because it is a live, founder-reported data-integrity defect.
 **Requirements**: LEDGER-01, LEDGER-02, LEDGER-03, LEDGER-04
-**Plans:** 3/5 plans executed
+**Plans:** 5/5 plans executed
 
 **Root cause (measured on PROD 2026-08-24; ⚠️ CORRECTED 2026-08-25 by re-measurement at HEAD
 `57a407ea` — two claims below were false as originally written):**
