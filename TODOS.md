@@ -3153,6 +3153,9 @@ EXECUTED, §str/None follow-through, §Discovery observation).
       `csv_daily_returns` (a *different* table from the `strategy_analytics.daily_returns` the
       census confirmed). If they do not, `run_csv_strategy_analytics` fails with "Insufficient
       CSV history" and D-162-1's fence fires for all 15 → unpublish, and say so.
+
+  </details>
+
 - [ ] **Two `strategy_analytics` rows still render raw exception prose, and their only
       re-write path is a dead job kind.** `ec722557-7781-44db-8f2c-edbe252957c0`
       (`pending_review`) and `8581f739-1a7b-42a4-a209-3acfa327e259` (**published**) each carry
@@ -3200,7 +3203,18 @@ EXECUTED, §str/None follow-through, §Discovery observation).
       into a shared helper both render paths import) and add a grid case for a `failed` row
       carrying a fresh `computed_at` — no such case exists today, so the missing half is
       currently unpinned on the grid side.
-- [ ] **FOUNDER CALL — is `HONEST-02` satisfied by an adjacent honest line, or must the badge
+- [x] **✅ RULED + FIXED IN CODE 2026-08-26 (recorded here 2026-08-28) — the badge itself stopped
+      reading FRESH; the adjacent-line-only option was NOT taken.** `SyncBadge` now derives from
+      `resolveEffectiveRecency(computedAt, seriesEnd)` (`SyncBadge.tsx:99`, `src/lib/freshness.ts`),
+      i.e. the STALER OF THE TWO clocks, and renders `Track record ends {when}` when the series is
+      the binding one (`:113`, `:135`). `HONEST-02` is `- [x]` / `Complete` in REQUIREMENTS (:63, :208).
+      Pinned by `FactsheetView.chip-honesty.test.tsx` and `SyncBadge.staler-of-two.test.tsx`, both
+      written to name the EXACT label and tone token per input rather than asserting the absence of
+      the word "fresh" — the vacuous shape that let the bug ship in the first place. Everything below
+      this line is the SUPERSEDED pre-ruling record, kept for the reasoning.
+      <details><summary>Superseded pre-ruling record</summary>
+
+**FOUNDER CALL — is `HONEST-02` satisfied by an adjacent honest line, or must the badge
       itself stop reading FRESH?** Requirement: *"the factsheet freshness **badge** reflects
       series recency — a strategy whose return series ended 89 days ago cannot read FRESH."*
       Plan 162-07 shipped D-162-2's recency line ("Track record through {date}", keyed on the
@@ -3210,7 +3224,20 @@ EXECUTED, §str/None follow-through, §Discovery observation).
       claim in isolation — user-facing by the stopping rule — but D-162-2 was a founder
       decision, so the scope call is the founder's. **The checkbox stays OPEN; do not tick
       HONEST-02 at phase close without a ruling.**
-- [ ] **FOUNDER CALL — may a permanently-inconclusive root cause close `HONEST-01`?** The
+</details>
+
+- [x] **✅ RULED 2026-08-26 BY SPLIT (recorded here 2026-08-28) — neither closed-as-inconclusive nor
+      left blocking.** Commit `578ad5f3` ("split HONEST-01, close HONEST-03 by deletion of the example
+      cohort") separated the conjunction: the delivered half (leaked text curated at the write
+      boundary) closes as `HONEST-01`, now `- [x]` / `Complete` in REQUIREMENTS (:50, :205); the
+      inconclusive half became its OWN requirement, `HONEST-07` (:51), which remains `- [ ]` and
+      carries the pinned search key forward. So the answer to the question as posed is: a
+      permanently-inconclusive root cause does NOT close a requirement — it gets its own, and stays
+      open there, instead of being absorbed into a tick. No regression test was minted for a compare
+      never shown to be the raiser. Everything below this line is the SUPERSEDED pre-ruling record.
+      <details><summary>Superseded pre-ruling record</summary>
+
+**FOUNDER CALL — may a permanently-inconclusive root cause close `HONEST-01`?** The
       requirement is a conjunction: the leaked text mapped at the writer, **with** the
       underlying `str`/`None` compare root-caused. First half delivered (162-02). Second half
       is `inconclusive` **as a decided verdict, not as unfinished work**: stage
@@ -3222,6 +3249,8 @@ EXECUTED, §str/None follow-through, §Discovery observation).
       with Sentry, the search key is exact: kind `poll_positions`, 2026-06-10 … 2026-06-14, two
       strategy ids. ⚠️ The kind has been silent fleet-wide since 2026-06-14, so absence of
       recurrence is **not** evidence of a fix.
+</details>
+
 - [ ] **`.planning/WINDOWS.md` loses entries under concurrent appends — measured, with data
       already lost once.** `gsd-tools windows append` does read-modify-write over the whole
       file, so parallel wave agents clobber each other. Observed on 2026-08-26: at commit
