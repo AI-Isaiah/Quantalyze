@@ -123,14 +123,43 @@ describe("[164 SHARE-01] Sentry never receives a share token", () => {
       breadcrumbs: [
         { message: `navigated to /factsheet-share/${TOKEN}` },
         { data: { url: `https://quantalyze.xyz/factsheet-share/${TOKEN}` } },
+        // The console integration's real shape: `arguments` is an ARRAY, so a
+        // walk that only scrubs top-level strings skips it entirely. Observed
+        // off the wire, not invented.
+        { data: { arguments: [`/factsheet-share/${TOKEN}`] } },
+        // An OBJECT inside that array — also the observed shape
+        // (`breadcrumbs[].data.arguments[].stack` came back off the wire).
+        // Pins the array branch's own recursion, which an array of plain
+        // strings does not: that case is handled by the string check beside it.
+        { data: { arguments: [{ stack: `at /factsheet-share/${TOKEN}:1:1` }] } },
       ],
-      spans: [{ description: `GET /factsheet-share/${TOKEN}` }],
-      contexts: { trace: { description: `/factsheet-share/${TOKEN}` } },
       extra: { path: `/factsheet-share/${TOKEN}` },
       // The SDK sets this tag itself, from the raw URL — see the note in
       // scrubSentryEvent. Verified against a real production event before
       // being added here, not assumed.
       tags: { url: `https://quantalyze.xyz/factsheet-share/${TOKEN}` },
+      // ⛔ NESTED, AND THIS IS THE POINT. Both of these were captured OFF THE
+      // WIRE from a real `next build && next start` server driven into a 500 on
+      // the share lane (/qa 2026-08-28): `contexts.trace.data.http.target` held
+      // the RAW token while `http.route` beside it was parameterised, because
+      // the scrub walked only the top level of a record. `data.arguments` is
+      // the array shape from Sentry's console integration. A fixture that only
+      // models flat fields cannot fail on either.
+      contexts: {
+        trace: {
+          description: `/factsheet-share/${TOKEN}`,
+          data: {
+            "http.route": "/factsheet-share/[token]",
+            "http.target": `/factsheet-share/${TOKEN}`,
+          },
+        },
+      },
+      spans: [
+        {
+          description: `GET /factsheet-share/${TOKEN}`,
+          data: { "http.target": `/factsheet-share/${TOKEN}` },
+        },
+      ],
     };
   }
 
