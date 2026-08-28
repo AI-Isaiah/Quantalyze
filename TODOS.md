@@ -1317,6 +1317,49 @@ follows is everything that was not.
   regression gate over phases 158–163. Fixed (both added to `NO_INPUT`), but the *gap* is that a
   phase can add a rate-limited route and never run the invariant that governs it.
 
+### Phase 164 (SHARE) — /qa on PRODUCTION, post-deploy (booked 2026-08-28)
+
+Ran to close UAT 7 (Plausible) and UAT 9 (Sentry), which were recorded BLOCKED locally.
+Neither closed. Both found something better than a pass.
+
+- **✅ FIXED — [SHARE-QA-01] the share token could still reach Sentry, in a TAG.**
+  `scrubSentryEvent` covered `request.url`, `transaction`, breadcrumbs, spans, trace
+  description and `extra` — but NOT `event.tags`. ⛔ Evidence is a LIVE PRODUCTION EVENT:
+  QUANTALYZE-16 shows the SDK setting a `url` tag from the raw request URL independently
+  of `request.url` (`transaction: GET /factsheet/[id]` parameterised, `url` tag
+  `https://quantalyze.xyz/factsheet/Next.Metadata` RAW). On the share lane that tag would
+  have carried a live capability to a third-party store, and tags are INDEXED and
+  queryable — worse than a body field. ⛔ The existing test could not find it: `tokenEvent()`
+  was built to cover "every channel the scrubber claims to cover", so it mirrored the
+  implementation's own surface and inherited its blind spot. Fixed + fixture extended;
+  both arms OBSERVED red with the scrub removed.
+  **Class still open:** the scrub enumerates fields by hand. Nothing proves the enumeration
+  matches what the SDK actually populates. A future SDK version can add a field and the
+  scrub will silently not cover it. Candidate for 164.3 (VACUITY).
+
+- **✅ FIXED — [SHARE-QA-02] `secret-scan` went RED on main** after the v0.76.0.0 squash
+  merge: 5 `generic-api-key` findings on the phase's hand-typed 43-char token fixtures.
+  Rule-scoped allowlist (not a path exemption, per the config's own CR-03 lesson), proven
+  NARROW by probe. Same push-to-main-only asymmetry several existing entries document.
+
+- **[SHARE-QA-03] ⛔ UAT 7 (Plausible) IS STILL BLOCKED — on production too, and for a
+  bigger reason than expected.** `NEXT_PUBLIC_PLAUSIBLE_DOMAIN` is **not set in ANY Vercel
+  environment**, and `layout.tsx:99` gates the tag on `plausibleDomain &&`. Measured: zero
+  `plausible.io` requests on `/strategies` (a normal page), no script tag in the DOM,
+  `window.plausible === undefined`. So the positive control fails on prod exactly as it did
+  locally, and the negative on the share lane still proves nothing.
+  ⚠️ The wider point: **Plausible is not running anywhere.** The SHARE-01 mitigation is
+  correct defensive code that arms the moment someone sets the env var — but nobody has
+  ever observed it working, and no test in the repo can observe it either. Either set the
+  var and close this, or record that site analytics is off.
+
+- **[SHARE-QA-04] UAT 9 (Sentry) narrowed from BLOCKED to "no event yet".** The positive
+  control now PASSES: prod Sentry is live and receiving (6 issues in 30d, most recent 5
+  minutes before the check). What is missing is a share-lane error to inspect, and the lane
+  is minutes old. Closing this needs either a real error on `/factsheet-share/*` or a
+  deliberate one, which is not worth causing on production. The SHARE-QA-01 fix above is
+  the more valuable outcome of looking.
+
 ### Phase 164 (SHARE) — browser-UAT findings (booked 2026-08-28)
 
 Source: `164-UAT.md`, 9 checkpoints against localhost pointed at TEST — 7 passed, 2 recorded
