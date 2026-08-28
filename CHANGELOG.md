@@ -1,5 +1,46 @@
 # Changelog
 
+## [0.76.0.0] - 2026-08-28
+
+### Phase 164 wave 2 — a revoked share link can no longer be resurrected
+
+Closes all six merge-gate conditions for the share-token lane. Nothing is user-visible
+yet: the mint and revoke routes are wave 3, so no share link can be created on production
+today. What lands here is the storage layer, its guards, and the leak channels closed
+around it.
+
+### Fixed
+
+- **A revoked share link could be brought back to life.** An owner could set the share
+  counter to its maximum in one request; the revoke path then failed, and so did that
+  user's GDPR erasure — with no way for them to fix it, because the same routine locks
+  them out of their account. The counter can now only move by one, so the failure is
+  unreachable rather than merely unlikely.
+- **An admin who had recorded a link's internal id could restore a link the owner had
+  already revoked**, including one killed by a GDPR erasure. Re-creating the row now
+  draws a fresh id, so old links stay dead.
+- **A GDPR erasure was aimed at a database view instead of the table**, which would have
+  left personal data in place. The repo no longer held the true version of that routine —
+  an earlier change had edited it in place — so it was rebuilt from production and proven
+  identical before the fix was applied.
+
+### Added
+
+- Share links are stripped from error reports, analytics and referrer headers, so a
+  private link cannot leak through telemetry.
+- A guard that fails the build if any code the factsheet builder depends on — 38 modules,
+  not just the one file — starts caching by strategy id. That is the path by which a
+  private factsheet could have been served to an anonymous visitor.
+- Share-link records now appear in the GDPR data export, alongside the existing
+  scenario-share records.
+- Phase 164.3 added to the roadmap: make a test that cannot fail detectable by machine.
+  Five such tests were found in this phase, every one green in CI.
+
+### Changed
+
+- The share-token secret is now set per environment rather than shared, so a preview
+  deployment cannot derive a link that works in production.
+
 ## [0.75.0.3] - 2026-08-26
 
 ### Two silent planning gates found, and the Phase 164 plans closed out
