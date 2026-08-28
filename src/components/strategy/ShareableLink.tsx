@@ -80,37 +80,71 @@ export async function mintShareUrl(strategyId: string): Promise<string> {
 }
 
 /**
- * The whole decision in one call: pick the mechanism, then produce the URL.
+ * ⛔ THERE IS DELIBERATELY NO `resolveShareUrl(published, …)` HELPER.
  *
- * `publicUrl` is a THUNK supplied by the caller rather than built here, because
- * the two published-lane URLs are legitimately different and both are pinned:
- * the factsheet's own Copy Link rebuilds `<origin><pathname>?share=1` (D-09,
- * byte-identical), while `ShareableLink` links `<origin>/factsheet/<id>`. Making
- * this function invent one would silently rewrite whichever site it did not
- * anticipate. It is a thunk, not a string, so the `window.location` read never
- * happens on the mint branch or during SSR.
+ * An async "give me the URL for either lane" wrapper is the obvious shape and it
+ * is the wrong one: it forces an `await` onto the PUBLISHED path, where the URL
+ * is already known synchronously. That await inserts a microtask between the
+ * click and `navigator.clipboard.writeText`, and Safari has historically dropped
+ * transient user activation across exactly that boundary — so the tidier
+ * abstraction would trade a working copy button for a symmetrical call site.
+ *
+ * Both consumers therefore branch on `shareAffordanceMode` themselves and share
+ * `mintShareUrl` for the half that genuinely is asynchronous. That is the whole
+ * of the duplication, and it is two lines at each site.
  */
-export async function resolveShareUrl(
-  published: boolean,
-  opts: { strategyId: string; publicUrl: () => string },
-): Promise<string> {
-  return shareAffordanceMode(published) === "public-url"
-    ? opts.publicUrl()
-    : mintShareUrl(opts.strategyId);
-}
 
 interface ShareableLinkProps {
   strategyId: string;
+  /**
+   * Phase 164 (SHARE-04) — REQUIRED, and required on purpose.
+   *
+   * Before this phase the component had no idea whether the strategy it was
+   * sharing was published, so `/strategies` hid the control entirely for
+   * unpublished rows (an owner with a private strategy simply had no way to show
+   * it to anyone) while the factsheet's sibling control handed out a URL that
+   * 404s. Making the caller state the fact is what closes the class: a new
+   * surface cannot mount this component while leaving the question unanswered.
+   */
+  published: boolean;
   variant?: "primary" | "secondary";
 }
 
-export function ShareableLink({ strategyId, variant = "secondary" }: ShareableLinkProps) {
+export function ShareableLink({ strategyId, published, variant = "secondary" }: ShareableLinkProps) {
   const [copied, setCopied] = useState(false);
 
   const [copyFailed, setCopyFailed] = useState(false);
+  // Phase 164 (SHARE-04) — a mint failure gets its OWN state rather than reusing
+  // `copyFailed`, because the two need different advice. "Copy the URL manually"
+  // is actionable when a URL exists and the clipboard refused it; it is useless
+  // when no URL was ever produced.
+  const [mintFailed, setMintFailed] = useState(false);
+  const [minting, setMinting] = useState(false);
 
   const handleCopy = useCallback(async () => {
-    const url = `${window.location.origin}/factsheet/${strategyId}`;
+    setMintFailed(false);
+    let url: string;
+    if (shareAffordanceMode(published) === "public-url") {
+      // Synchronous — see the note above `ShareableLinkProps` on why this arm
+      // must not be routed through an async resolver. Byte-identical to the
+      // pre-phase-164 URL.
+      url = `${window.location.origin}/factsheet/${strategyId}`;
+    } else {
+      setMinting(true);
+      try {
+        url = await mintShareUrl(strategyId);
+      } catch {
+        // The honest-failure discipline this component already models for the
+        // clipboard (audit-#43), extended to cover the mint identically: a
+        // failure here must never reach the success badge.
+        setCopied(false);
+        setMintFailed(true);
+        setMinting(false);
+        setTimeout(() => setMintFailed(false), 4000);
+        return;
+      }
+      setMinting(false);
+    }
     try {
       await navigator.clipboard.writeText(url);
       setCopied(true);
@@ -143,10 +177,14 @@ export function ShareableLink({ strategyId, variant = "secondary" }: ShareableLi
       setCopyFailed(true);
       setTimeout(() => setCopyFailed(false), 4000);
     }
-  }, [strategyId]);
+  }, [strategyId, published]);
 
   return (
-    <Button variant={variant === "primary" ? "primary" : "secondary"} onClick={handleCopy}>
+    <Button
+      variant={variant === "primary" ? "primary" : "secondary"}
+      onClick={handleCopy}
+      disabled={minting}
+    >
       {copied ? (
         <>
           <svg className="h-4 w-4 mr-1.5 text-positive" viewBox="0 0 16 16" fill="currentColor">
@@ -161,12 +199,30 @@ export function ShareableLink({ strategyId, variant = "secondary" }: ShareableLi
           </svg>
           Copy failed — copy the URL manually
         </>
+      ) : mintFailed ? (
+        <>
+          <svg className="h-4 w-4 mr-1.5 text-negative" viewBox="0 0 16 16" fill="currentColor">
+            <path fillRule="evenodd" d="M8 15A7 7 0 108 1a7 7 0 000 14zm0-10a.75.75 0 01.75.75v3a.75.75 0 01-1.5 0v-3A.75.75 0 018 5zm0 6.5a.75.75 0 100-1.5.75.75 0 000 1.5z" clipRule="evenodd" />
+          </svg>
+          Couldn&apos;t create the link — try again
+        </>
+      ) : minting ? (
+        <>
+          <svg className="h-4 w-4 mr-1.5" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M6.5 9.5l3-3M8.25 4.75L9.5 3.5a2.12 2.12 0 013 3L11.25 7.75M7.75 11.25L6.5 12.5a2.12 2.12 0 01-3-3l1.25-1.25" />
+          </svg>
+          Creating link…
+        </>
       ) : (
         <>
           <svg className="h-4 w-4 mr-1.5" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
             <path d="M6.5 9.5l3-3M8.25 4.75L9.5 3.5a2.12 2.12 0 013 3L11.25 7.75M7.75 11.25L6.5 12.5a2.12 2.12 0 01-3-3l1.25-1.25" />
           </svg>
-          Share Factsheet
+          {/* An unpublished strategy has no public factsheet to "share", so the
+              published label would be a false description of what the click
+              does. "Get private link" is true whether the route mints a new
+              capability or reuses the live one. */}
+          {published ? "Share Factsheet" : "Get private link"}
         </>
       )}
     </Button>

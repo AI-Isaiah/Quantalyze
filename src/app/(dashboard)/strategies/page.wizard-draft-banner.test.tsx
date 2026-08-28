@@ -40,9 +40,18 @@ vi.mock("@/components/layout/PageHeader", () => ({
 vi.mock("@/components/strategy/StrategyActions", () => ({
   StrategyActions: () => null,
 }));
-vi.mock("@/components/strategy/ShareableLink", () => ({
-  ShareableLink: () => null,
-}));
+// Phase 164 (SHARE-04): the page now also imports the shared publication
+// predicate from this module, so a factory that returns only the component
+// leaves `isPublishedStatus` undefined and the row render throws. Re-export the
+// REAL predicate rather than a stub — it is a pure two-token function, and
+// stubbing it would let this file stay green while the page asked the wrong
+// question about which URL a row should hand out.
+vi.mock("@/components/strategy/ShareableLink", async () => {
+  const actual = await vi.importActual<
+    typeof import("@/components/strategy/ShareableLink")
+  >("@/components/strategy/ShareableLink");
+  return { ...actual, ShareableLink: () => null };
+});
 vi.mock("@/components/strategy/PendingIntros", () => ({
   PendingIntros: () => null,
 }));
