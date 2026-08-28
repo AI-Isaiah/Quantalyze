@@ -1359,12 +1359,36 @@ Neither closed. Both found something better than a pass.
   a host this app never contacts. ⚠️ If analytics is ever adopted, re-open UAT 7 and get the
   positive control before trusting the negative.
 
-- **[SHARE-QA-04] UAT 9 (Sentry) narrowed from BLOCKED to "no event yet".** The positive
-  control now PASSES: prod Sentry is live and receiving (6 issues in 30d, most recent 5
-  minutes before the check). What is missing is a share-lane error to inspect, and the lane
-  is minutes old. Closing this needs either a real error on `/factsheet-share/*` or a
-  deliberate one, which is not worth causing on production. The SHARE-QA-01 fix above is
-  the more valuable outcome of looking.
+- **✅ [SHARE-QA-04] UAT 9 (Sentry) — CLOSED, and closing it found a LIVE LEAK.**
+  Method: real `next build && next start`, SDK pointed at a local ingest server, a genuine
+  500 driven on `/factsheet-share/<token>`, then the transmitted bytes read directly. Prod
+  was never touched.
+  ⛔ **`contexts.trace.data.http.target` carried the RAW TOKEN** while `http.route`,
+  `request.url`, `transaction`, `extra.path` and `tags.routePath` beside it were all
+  correctly scrubbed. `http.target` is the OTel convention for the raw request target.
+  Fixed in `cb644bd45` by making the scrub RECURSIVE (nested objects + arrays) rather than
+  by naming one more field — this was the SECOND miss of a hand-maintained enumeration
+  after `tags`.
+  Re-verified end-to-end: 40 requests to force trace sampling (0.1), 10 transaction
+  envelopes, `http.target` now reads `/factsheet-share/[token]` — PRESENT and scrubbed,
+  not absent.
+
+- **⛔ [SHARE-QA-05] UAT 9 WAS NEVER REPRODUCIBLE ON A DEV SERVER — measured, not assumed.**
+  Next 16.2.11 does **not** invoke `instrumentation.ts`'s `onRequestError` in `next dev`.
+  Proven with a temporary probe: a real 500 on the share lane produced no probe output and
+  no Sentry event, with `SENTRY_DSN` set and the capture server confirmed reachable. The
+  same request under `next start` fired the hook immediately.
+  **Consequence for the backlog:** any future check of the Sentry redaction path MUST use a
+  production build. A dev-server run will show a clean capture for the wrong reason and read
+  exactly like a pass.
+
+- **[SHARE-QA-06] the scrub still enumerates WHERE to walk, even though it no longer
+  enumerates WHAT to scrub.** `scrubSentryEvent` names `request.url`, `transaction`,
+  `breadcrumbs`, `spans`, `contexts.trace`, `extra`, `tags`. Two of those were added only
+  after a live leak. Nothing proves the list matches what the SDK populates, and the wire
+  capture used above is the only thing that ever has. ⭐ Candidate mechanism for 164.3
+  (VACUITY): keep the capture harness and assert on transmitted bytes, rather than on a
+  fixture that mirrors the implementation's own idea of its surface.
 
 ### Phase 164 (SHARE) — browser-UAT findings (booked 2026-08-28)
 
