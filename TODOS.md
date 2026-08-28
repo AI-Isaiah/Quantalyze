@@ -1275,7 +1275,7 @@ Source: `164-REVIEW.md` (0 critical / 3 warning / 6 info) plus two defects found
 closure pipeline. The two user-reachable warnings (WR-02, WR-03) are FIXED and committed; what
 follows is everything that was not.
 
-- **[SHARE-WR-01] `.env.example` instructs the operator to REUSE one `SHARE_TOKEN_SECRET`.**
+- **✅ CLOSED 2026-08-28 — [SHARE-WR-01] `.env.example` instructed the operator to REUSE one `SHARE_TOKEN_SECRET`.**
   The block added in 164-01 says "set it in ALL Vercel environments", which reads as one shared
   value — precisely the configuration the founder ruling of 2026-08-26 forbids, because a preview
   DB seeded from a production snapshot then becomes a production-token factory. The module docblock,
@@ -1284,8 +1284,11 @@ follows is everything that was not.
   verifies length, not distinctness). The same block also documents the stale two-argument
   pre-image `HMAC(secret, "<id>.<generation>")`; the real one is
   `qz.strategy-share.v1.<id>.<nonce>.<generation>`.
-  ⛔ **NEEDS A HUMAN — this environment denies agent read/write on `.env*`.** Replacement text is
-  in the session log; the fix is two sentences.
+  **Fixed in `40527f101`** via a scripted patch the founder ran (this environment denies agent
+  access to `.env*`). ⚠️ Lesson kept: the first patch located the block by walking up over
+  contiguous `#` lines from the assignment, which swallowed the section banner and the module-load
+  rationale — a structural anchor that treats a section header as part of the paragraph below it.
+  Restored in the same commit.
 
 - **[SHARE-D-164-C] `create_scenario_share` is not in `MUTATING_RPC_NAMES` at all.** Pre-existing,
   on shipped code: `allocator/scenario/share/route.ts` has therefore never been under the audit
