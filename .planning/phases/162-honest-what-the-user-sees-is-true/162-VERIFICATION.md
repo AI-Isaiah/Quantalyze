@@ -30,8 +30,8 @@ human_verification:
   - test: "162-01 backstop attestation: 'every census number came from read-only PROD queries, never TEST'"
     expected: "Attestation stands (the census documents the read lane, the PROD-ref check, and the no-write rule in detail)"
     why_human: "Declared `verification: backstop`; a post-hoc repo read cannot re-derive which database a throwaway scratchpad script queried. No contradicting evidence found."
-gaps: []
     result: "DISCHARGED BY MEASUREMENT 2026-08-26, per founder ruling — re-queried read-only against PROD rather than attested. Three census numbers reproduce EXACTLY: S2 series end 2026-05-06 = 2026-05-06; S2 trades 273 = 273; S2 trades after series end 0 = 0. The fourth reconciles by the documented delta: the census scanned 48 strategies, the table now holds 33, and the census header records 15 example rows deleted the same day (48 - 15 = 33). So the spot-check corroborates the census numbers AND the deletion record in one pass. ⚠️ This proves the values, not retroactively that the original run was read-only — that rests on the lane recorded at 162-CENSUS.md:14-18 (GET-only, ref-guard aborts before any request, client-side reduction), which the founder accepted as adequate provenance."
+gaps: []
 ---
 
 # Phase 162: HONEST — What the user sees is true — Verification Report

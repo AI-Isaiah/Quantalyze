@@ -1,7 +1,7 @@
 ---
 phase: 163-harden-fail-safe-closed-and-loud
 verified: 2026-08-26T18:45:00Z
-status: gaps_found
+status: passed
 score: 12/13 requirements MET at HEAD (OPS-08 MET-AT-MERGE by construction)
 behavior_unverified: 0
 overrides_applied: 0
@@ -79,6 +79,7 @@ gaps:
         issue: "SEC-01's five recorded points cover the reading, the method, the enforcement locus and the drift-proofing limit. None of them records WR-10's substantive concern or a decision about it."
     missing:
       - "A founder decision, recorded in the SEC-01 entry or TODOS.md: raise the hosted minimum (10-12) and enable leaked-password protection, OR accept the 6-char floor as a named, dated risk."
+    result: "CLOSED 2026-08-28 — re-measured at HEAD; the gap text is a STALE CLAIM. WR-10 is now dispositioned in BOTH places the finding named, by the fallback route it explicitly allowed (\"if the founder prefers to defer, record the deferral as an accepted risk\"). (1) `.planning/REQUIREMENTS.md` SEC-01 carries a `QUALIFIED 2026-08-26 (review WR-10)` block that states plainly what was delivered was a MEASUREMENT and not a raised floor, followed by `ACCEPTED RISK — founder decision 2026-08-26`, naming the key-material exposure path and the revisit triggers (paying clients, a custody/compliance requirement). (2) `TODOS.md:1637` books it: `ACCEPTED RISK — Phase 163 / WR-10: the password floor was MEASURED, not RAISED (decided 2026-08-26)`, with the un-taken remedy preserved at :1665 as `[WR-10] RAISE the hosted minimum and enable leaked-password protection`. The gap said a repo-wide grep for WR-10 returned only the review file; at HEAD it returns REQUIREMENTS :108 and :116 plus TODOS :1637 and :1665. 19 of 19 findings are now fixed or recorded. NOT claimed: that the floor is adequate — it is knowingly accepted, and raising it stays a dashboard-owned founder action with no repo representation."
   - truth: "The project's own ledger and backlog describe what this phase achieved"
     status: partial
     reason: >-
@@ -123,6 +124,7 @@ gaps:
       - "Set the ROADMAP progress row to `9/9 | Complete | 2026-08-26` and add HONEST-08 to the 163 coverage row."
       - "Mark the TODOS WR-07 entry ✅ RESOLVED with the HEAD coordinate, keeping the analysis (it is what stops the defect being re-derived in SQL)."
       - "Add a dated addendum to 163-06-SUMMARY recording the eb27e5ada / ef4d9d3f8 reshape, or correct the two rows."
+    result: "CLOSED 2026-08-28 — all five residues re-measured at HEAD and every one is already repaired; the gap is a stale claim and its LINE NUMBERS are stale too (the ROADMAP was resequenced since), so each was located by content, not coordinate. (1) REQUIREMENTS checkboxes: OPS-06 :76, OPS-09 :94, SEC-01 :107, SEC-02 :128, SEC-04 :143, SEC-05 :144 all read `- [x]`, matching their `Complete` traceability rows. OPS-08 :82 correctly reads `- [~]` — partial, not blank — which is the honest marker for `Complete on PROD, not on TEST`. (2) ROADMAP progress row :811 reads `| 163. HARDEN reliability + security | 9/9 | Complete | v0.75.0.0 |`, no longer `0/? | Not started`. (3) ROADMAP requirement-coverage row :828 now lists 13 IDs INCLUDING HONEST-08. (4) TODOS WR-07 :1853 reads `CLOSED — Phase 163 / WR-07 ... (closed 2026-08-26)`, no longer owed work; the false `ZERO quoted 40001 in src/**` assertion is gone, and the implementation it contradicted is still at `src/app/api/strategies/csv-finalize/route.ts:2044` (`enqueueLostRace = enqueueErr.code === \"40001\"`). (5) 163-06-SUMMARY carries the dated addendum at :197 (`CORRECTED 2026-08-26 — the section below is STALE AS MERGED`) and a second at :210 covering the `Gate RED pre-apply / GREEN post-apply` row at :190. (6) STATE.md no longer embeds the superseded `gaps_found 12/13` verdict. Bookkeeping only — no code moved."
 deferred: []
 behavior_unverified_items: []
 coincidental_reliance_items: []
