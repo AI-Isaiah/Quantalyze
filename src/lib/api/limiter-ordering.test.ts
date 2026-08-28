@@ -159,6 +159,17 @@ const NO_INPUT = new Set([
   // (isUuid → 400) BEFORE auth/checkLimit — same NO_INPUT shape as the
   // returns/browse siblings above.
   "strategies/[id]/sync-progress/route.ts",
+  // Phase 164 / SHARE-01 + SHARE-03 — share mint and revoke POSTs. Both are
+  // body-less: the ONLY input is the `[id]` URL param, validated (isUuid → 400)
+  // BEFORE checkLimit — a malformed id is a shape error, distinct from the 404
+  // both routes return for a well-formed id the caller does not own, which is
+  // what keeps the lane from being an existence oracle. With no body to parse,
+  // the burn-a-token-on-bad-body bug cannot
+  // occur — the same NO_INPUT shape as the returns/sync-progress siblings above.
+  // They are POSTs rather than GETs, which changes nothing here: the bucket is
+  // about whether there is input to validate ahead of the limiter, not the verb.
+  "strategies/[id]/share/route.ts",
+  "strategies/[id]/share/revoke/route.ts",
 ]);
 
 // limit-FIRST is intentional here (public/unauth scraper defense).

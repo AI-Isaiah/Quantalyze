@@ -723,6 +723,12 @@ jobs:
           ADMIN_EMAIL: test@example.com
           PLATFORM_NAME: Quantalyze
           PLATFORM_EMAIL: test@quantalyze.com
+          # Phase 164 / D-02: `src/lib/strategy-share-token.ts` validates this
+          # at MODULE SCOPE and throws when absent — deliberately, so a
+          # misconfigured deploy fails loudly instead of at the founder's first
+          # Copy Link. Any build-time evaluation of a share surface therefore
+          # needs a value here. Obviously fake and >= the 32-char floor.
+          SHARE_TOKEN_SECRET: placeholder_share_token_secret_not_a_real_secret
       # Upload the build output for the e2e job to download. Exclude
       # .next/cache (the actions/cache above already persists it across
       # runs; including it here would inflate every per-run artifact by
@@ -1628,8 +1634,10 @@ jobs:
               # arms_declared past any floor while asserting nothing. Comment lines
               # are excluded because these files DISCUSS RAISE EXCEPTION at length
               # in their headers and prose must never count as coverage. Slack on
-              # the real corpus is wide (tightest is 6 arms / 9 sites), so this
-              # cannot fire on an honest file by accident.
+              # the real corpus is NO LONGER uniform: test_strategy_shares_rls.sql
+              # runs 106 arms across 106 non-comment sites — zero slack — so on that
+              # file an honest edit that adds an assertion without updating the
+              # roster WILL fire here. That is intended; the roster is the pin.
               raises="$(grep -aF 'RAISE EXCEPTION' "$f" | grep -acvE '^[[:space:]]*--' || true)"
               if [ "$n_arms" -gt "$raises" ]; then
                 echo "::error file=$f::declares ${n_arms} arms but contains only ${raises} non-comment RAISE EXCEPTION line(s). An arm with no way to raise cannot fail, so it is not an arm — and a file declaring more arms than it can fail inflates the corpus-wide floors below while proving nothing. Either these arms assert through something this check cannot see, in which case say so IN THIS WORKFLOW where it is visible, or the count is fiction."
@@ -1680,9 +1688,55 @@ jobs:
           #   test_ledger_refresh_fanout.sql                 10
           #   test_ledger_refresh_staleness.sql               8
           #   test_retention_crons_safe.sql                   4
+          # Re-measured 2026-08-27 (164-06): test_strategy_shares_rls.sql goes
+          # 101 -> 106 for the five N1 arms (the bounded-increment rule, its
+          # off-by-one neighbour, the lawful +1, the forced-1-on-INSERT pin, and
+          # the Art. 17 erasure-completes arm). The file set is unchanged, so
+          # SENTINEL_FLOOR does not move. Derived from the PRE-EDIT count of 101
+          # plus the five arms actually added, not read off the finished file —
+          # a floor taken from the file it is supposed to constrain always
+          # passes and pins nothing.
+          # Re-measured 2026-08-28 (164 three-reviewer gate, F-1):
+          # test_strategy_shares_rls.sql goes 106 -> 102. The TENANT 5 block's
+          # four end-state arms (5d generation, 5e tombstone, 5f provenance,
+          # 5g row count) were reading their OWN SUBTRANSACTION ROLLBACK and
+          # could not fail: MEASURED on a throwaway PostgreSQL 16 cluster, a
+          # genuine cross-tenant write placed inside the arm's nested
+          # `BEGIN … EXCEPTION` moved tenant B's counter 1 -> 2 and stamped B's
+          # tombstone, and the whole file still exited 0 with all 106 arms
+          # "executed". One replacement arm was rebuilt on TRIGGER 3's
+          # precedent — the victim row is revoked first, and the end state is
+          # read from OUTSIDE the handler — and it reuses the name TENANT 5b.
+          # The old 5b and 5c collapse into it as extra disjuncts: measured,
+          # neither can ever be a FIRST failure once the end-state read precedes
+          # them, and every mutation that would redden the message pin instead
+          # aborts the file on an UNWRAPPED owner-lane call (OWNER 1a / OWNER 2a
+          # / OWNER 2d) rather than on an arm. Net -5, derived from the PRE-EDIT
+          # count of 106 minus the five deletions (5b, 5c, 5d, 5f, 5g) plus the
+          # one rebuilt arm — not read off the finished file.
+          # Re-measured 2026-08-28 (164 gate, F-3): +1 for N1 2b, the
+          # forced-nonce-on-INSERT pin. The trigger's INSERT branch forced only
+          # `generation`, leaving `nonce` caller-suppliable, and MEASURED that
+          # combination was worse than neither: mint -> revoke -> service_role
+          # DELETE -> service_role INSERT naming the recorded nonce came back at
+          # generation 1 with that nonce and revoked_at NULL, byte-identical to
+          # the pre-revoke triple. N1 2b is the behavioural twin of N1 2a, run
+          # as the one role no column grant binds. 101 + 1 = 102.
+          # Re-measured 2026-08-28 (164 gate, F-4): +1 for SERVICE-ROLE 2f, the
+          # spoofed-claims arm. SERVICE-ROLE 2a/2c call with claims = NULL only,
+          # so they certified "the body refuses a caller with no identity" while
+          # the file read it as "the body is a second wall against
+          # service_role". It is not: auth.uid() reads the caller-settable
+          # request.jwt.claims GUC, and MEASURED, a service_role call that sets
+          # it first revoked another tenant's live share and was told it
+          # succeeded. 2f pins what actually bounds that caller — the
+          # `created_by = auth.uid()` predicate in revoke's UPDATE, which no
+          # other arm isolates because for an `authenticated` caller RLS also
+          # scopes the statement. 102 + 1 = 103.
+          #   test_strategy_shares_rls.sql                  103
           #   test_sync_status_marked_refresh_protected.sql  16
-          SENTINEL_FLOOR=7   # files declaring a sentinel
-          ARMS_FLOOR=63      # 9 + 6 + 10 + 10 + 8 + 4 + 16
+          SENTINEL_FLOOR=8   # files declaring a sentinel
+          ARMS_FLOOR=166     # 9 + 6 + 10 + 10 + 8 + 4 + 103 + 16
           # RAISING these as arms are added is expected and cheap — and it is not
           # optional: src/__tests__/contracts/ci-anti-skip-gate.contract.test.ts
           # re-derives the table above from the corpus and goes red when a count,
@@ -3052,6 +3106,11 @@ jobs:
           ADMIN_EMAIL: test@example.com
           PLATFORM_NAME: Quantalyze
           PLATFORM_EMAIL: test@quantalyze.com
+          # Phase 164 / D-02 — same reason as the frontend-build step above:
+          # the share-token module throws at MODULE SCOPE without this. A fake
+          # >= 32-char placeholder; the e2e specs that exercise share links mint
+          # their tokens under this same value.
+          SHARE_TOKEN_SECRET: placeholder_share_token_secret_not_a_real_secret
       # retro-PR188-D4 (pr-test-analyzer #36, HIGH/8): assert the rebuild
       # actually produced a bundle inlined with the REAL test-Supabase
       # URL. If the build ever short-circuits silently (e.g. a restored

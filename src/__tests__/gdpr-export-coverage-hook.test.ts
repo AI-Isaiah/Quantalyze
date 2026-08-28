@@ -28,9 +28,12 @@ import {
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
+  EXCLUDED_TABLES,
   extractManifestEntries,
   extractManifestTables,
+  extractSanitizeCoverageFromContent,
   extractUserTablesFromMigration,
+  SANITIZE_PARITY_ALLOWLIST,
 } from "../../scripts/check-gdpr-export-coverage";
 import { USER_EXPORT_TABLES } from "@/lib/gdpr-export-manifest";
 
@@ -726,6 +729,252 @@ CREATE TABLE audit_log_cold (
 });
 
 /**
+ * B3 (2026-08-27) — EXCLUDED_TABLES may not be used to SILENCE a user-owned
+ * table, and this is the gate that says so.
+ *
+ * THE HOLE THIS CLOSES. When a migration declares a new user-owned table, the
+ * hook exits 1 until a `USER_EXPORT_TABLES` entry lands. That entry is typed
+ * against the GENERATED `src/lib/database.types.ts`, so it cannot even compile
+ * until the migration is applied — a three-step remedy. Meanwhile
+ * `EXCLUDED_TABLES` is `Record<string, {class, reason}>`: a PLAIN STRING key.
+ * Adding one line there compiles today, flips the hook to exit 0, and turns
+ * every red case in this file green. It is strictly LESS work than the correct
+ * fix, and until this block existed nothing anywhere discriminated the two.
+ * The failing script's own stderr used to RECOMMEND it. Result: an engineer or
+ * agent hits red tests, takes the cheap path, CI goes green, the PR merges,
+ * PROD auto-applies — and a user-owned table is permanently and silently
+ * absent from every Art. 15 export, with no red anywhere.
+ *
+ * WHAT IS PINNED, and why in this shape. Two general rules plus one specific
+ * pin. The general rules are preferred (a name list rots; a rule does not) and
+ * both were MEASURED against the live corpus before being written:
+ *
+ *   (1) CLASS COHERENCE. A table whose owner column is `NOT NULL REFERENCES`
+ *       or `PRIMARY KEY REFERENCES` `profiles | auth.users ... ON DELETE
+ *       CASCADE` has exactly one data
+ *       subject per row, which CONTRADICTS four of the five exclusion classes
+ *       by their own definitions: `system` ("no per-user, row-level
+ *       ownership"), `cross-party` ("multi-owner surface"), `pre-auth` ("no
+ *       user FK"), and `scoped` ("indirect-owned via a user-FK parent" — the
+ *       FK here is direct). So those four are refused outright. `ephemeral` is
+ *       the one class that can honestly coexist with a CASCADE owner FK, and
+ *       exactly one live entry relies on it (`scenario_commit_idempotency`, a
+ *       server-side dedup cache) — measured, 25 CASCADE-owned tables exist and
+ *       it is the ONLY one in EXCLUDED_TABLES.
+ *
+ *       ⚠️ THE `PRIMARY KEY` ARM IS LOAD-BEARING, not cosmetic. Until
+ *       2026-08-27 this rule demanded the literal token `NOT NULL`, which
+ *       silently exempted the canonical one-row-per-user shape
+ *       `user_id UUID PRIMARY KEY REFERENCES profiles(id) ON DELETE CASCADE`
+ *       — a STRICTLY STRONGER ownership declaration (a PK implies NOT NULL
+ *       *and* uniqueness). Re-measured on the live corpus: strict = 22
+ *       tables, this rule = 25. The three it had been missing are `profiles`,
+ *       `allocator_preferences` and `investor_attestations`, none of which is
+ *       in EXCLUDED_TABLES today — so there was no live offender, but the
+ *       rule left THREE unguarded shapes for a future table rather than the
+ *       one (`ephemeral`) this docblock documents.
+ *
+ *   (2) `scoped` STOPS BEING PROSE. The class asserts the table "appears in
+ *       USER_EXPORT_TABLES as an IndirectUserTable". No code path checked
+ *       that, so the claim was decoration: a `scoped` entry naming a table
+ *       absent from the manifest read as covered while exporting nothing.
+ *       Now the manifest is consulted.
+ *
+ *   (3) A SPECIFIC PIN on `strategy_shares` (Phase 164). Rule (1) leaves
+ *       `ephemeral` reachable, and this table is the live target of the
+ *       advertised shortcut, so it is named outright as well. Belt and
+ *       braces, deliberately: the general rule is the durable mechanism, the
+ *       pin is what makes the known-live attempt impossible rather than
+ *       merely implausible.
+ *
+ * ⚠️ NON-VACUITY. These cases are meaningless unless the scan really SEES
+ * `strategy_shares` as CASCADE-owned, so that is asserted directly below
+ * rather than assumed — otherwise a regex drift would leave every case here
+ * passing over an empty set.
+ */
+describe("B3: EXCLUDED_TABLES cannot silence a user-owned table", () => {
+  /**
+   * An owner column that makes every row belong to exactly one data subject:
+   * `<col> UUID NOT NULL REFERENCES profiles|auth.users(...) ON DELETE CASCADE`,
+   * or the same shape declared as `PRIMARY KEY` instead of `NOT NULL` — the
+   * one-row-per-user table. A PK is not a weaker claim than NOT NULL, it is a
+   * stronger one (non-null AND unique), so both arms are accepted. The CASCADE
+   * is what proves the DB itself treats the row as the user's — erasing the
+   * user erases the row.
+   */
+  const CASCADE_OWNER_COLUMN_RE =
+    /\b([a-z_]+)\s+UUID\s+(?:NOT\s+NULL|PRIMARY\s+KEY)\s+REFERENCES\s+(?:auth\.users|public\.profiles|profiles)\s*(?:\([a-z_]+\))?\s*ON\s+DELETE\s+CASCADE/i;
+
+  /** Same CREATE TABLE shape the hook's own scanner uses (quoted / qualified). */
+  const CREATE_TABLE_RE =
+    /CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(?:(?:"[a-z0-9_]+"|[a-z0-9_]+)\.)?(?:"([a-z0-9_]+)"|([a-z0-9_]+))\s*\(([\s\S]*?)\n\s*\)\s*;/gi;
+
+  /** Comments must not count as DDL — the H-1019 phantom-match lesson. */
+  function stripSqlComments(sql: string): string {
+    return sql.replace(/\/\*[\s\S]*?\*\//g, "\n").replace(/--[^\n]*/g, "");
+  }
+
+  /** table name -> { migration, ownerColumn } for every CASCADE-owned table. */
+  function scanCascadeOwnedTables(): Map<
+    string,
+    { migration: string; ownerColumn: string }
+  > {
+    const dir = join(REPO_ROOT, MIGRATIONS_REL);
+    const out = new Map<string, { migration: string; ownerColumn: string }>();
+    for (const filename of readdirSync(dir).filter((f) => f.endsWith(".sql"))) {
+      const sql = stripSqlComments(readFileSync(join(dir, filename), "utf8"));
+      CREATE_TABLE_RE.lastIndex = 0;
+      let m: RegExpExecArray | null;
+      while ((m = CREATE_TABLE_RE.exec(sql)) !== null) {
+        const table = m[1] ?? m[2];
+        const hit = CASCADE_OWNER_COLUMN_RE.exec(m[3]);
+        if (hit && !out.has(table)) {
+          out.set(table, { migration: filename, ownerColumn: hit[1] });
+        }
+      }
+    }
+    return out;
+  }
+
+  const CASCADE_OWNED = scanCascadeOwnedTables();
+
+  // The four classes whose own definitions are contradicted by a NOT NULL
+  // CASCADE owner FK. `ephemeral` is deliberately absent — see the docblock.
+  const CLASSES_INCOMPATIBLE_WITH_DIRECT_OWNERSHIP = [
+    "scoped",
+    "system",
+    "cross-party",
+    "pre-auth",
+  ] as const;
+
+  it("non-vacuity: the scan actually sees strategy_shares as CASCADE-owned", () => {
+    // Everything below quantifies over CASCADE_OWNED. If the regex drifts and
+    // the set empties, every case in this block passes while asserting
+    // nothing — the failure mode this repo calls a test that cannot fail.
+    expect(
+      CASCADE_OWNED.size,
+      "no CASCADE-owned tables found at all — the DDL scan is broken, and the " +
+        "B3 cases below are quantifying over an empty set",
+    ).toBeGreaterThan(10);
+    const found = CASCADE_OWNED.get("strategy_shares");
+    expect(
+      found,
+      "strategy_shares was not detected as user-owned. It declares `created_by " +
+        "UUID NOT NULL REFERENCES profiles(id) ON DELETE CASCADE` (Phase 164, " +
+        "migration 20260827120000). If that migration was renamed or its column " +
+        "changed, re-derive this gate — do NOT delete it.",
+    ).toBeDefined();
+    expect(found!.ownerColumn).toBe("created_by");
+  });
+
+  it("the `PRIMARY KEY REFERENCES` ownership shape is in scope, not just `NOT NULL`", () => {
+    // Guards the 2026-08-27 widening. `user_id UUID PRIMARY KEY REFERENCES
+    // profiles(id) ON DELETE CASCADE` is the canonical one-row-per-user table
+    // and a STRONGER ownership claim than NOT NULL, but the original rule
+    // demanded the literal token `NOT NULL` and so waved all three of these
+    // through. Reverting the regex to the NOT NULL-only form re-opens exactly
+    // that bypass, and this case is what makes the revert red instead of
+    // silent. These are live tables, not fixtures — if one is genuinely
+    // dropped or reshaped, re-derive the list from the migration, do not
+    // delete the case.
+    for (const table of [
+      "profiles",
+      "allocator_preferences",
+      "investor_attestations",
+    ]) {
+      expect(
+        CASCADE_OWNED.get(table),
+        `${table} declares a \`UUID PRIMARY KEY REFERENCES profiles|auth.users ` +
+          `ON DELETE CASCADE\` owner column but the CASCADE scan did not see it. ` +
+          `CASCADE_OWNER_COLUMN_RE has probably lost its \`PRIMARY KEY\` arm, ` +
+          `which silently exempts every one-row-per-user table from the class-` +
+          `coherence rule below.`,
+      ).toBeDefined();
+    }
+  });
+
+  it("strategy_shares is NOT in EXCLUDED_TABLES", () => {
+    // The specific pin (3). strategy_shares records that the owner created /
+    // revoked a factsheet share link, and when — personal data Art. 15
+    // entitles them to. The correct remedy for the hook's failure is the
+    // order of operations at the PENDING block in
+    // src/lib/gdpr-export-manifest.ts, NOT an exclusion.
+    expect(
+      Object.keys(EXCLUDED_TABLES),
+      "strategy_shares was added to EXCLUDED_TABLES. That silences the GDPR " +
+        "coverage hook instead of satisfying it, and permanently drops a " +
+        "user-owned table from every Art. 15 export with green CI. Remove the " +
+        "entry and follow the remedy in src/lib/gdpr-export-manifest.ts " +
+        "(apply migration -> regenerate database.types.ts -> USER_EXPORT_TABLES " +
+        "entry). No SANITIZE_PARITY_ALLOWLIST key is needed: migration " +
+        "20260827130000 already supplies the Art. 17 policy.",
+    ).not.toContain("strategy_shares");
+  });
+
+  it("no CASCADE-owned table is excluded as scoped / system / cross-party / pre-auth", () => {
+    // The general rule (1). Each of these four classes asserts something the
+    // FK contradicts, so an entry pairing them is self-refuting.
+    const offenders: string[] = [];
+    for (const [table, meta] of Object.entries(EXCLUDED_TABLES)) {
+      const owned = CASCADE_OWNED.get(table);
+      if (!owned) continue;
+      if (
+        (CLASSES_INCOMPATIBLE_WITH_DIRECT_OWNERSHIP as readonly string[]).includes(
+          meta.class,
+        )
+      ) {
+        offenders.push(
+          `${table} (class="${meta.class}", owner column "${owned.ownerColumn}" ` +
+            `declared in ${owned.migration})`,
+        );
+      }
+    }
+    expect(
+      offenders,
+      "EXCLUDED_TABLES entry/entries exclude a DIRECTLY user-owned table under a " +
+        "class whose own definition rules that out. A `<owner> UUID NOT NULL` (or " +
+        "`PRIMARY KEY`) `REFERENCES profiles|auth.users ON DELETE CASCADE` column " +
+        "means every row " +
+        "belongs to exactly one data subject, so the table is not `system` (no " +
+        "row-level ownership), not `cross-party` (multi-owner), not `pre-auth` " +
+        "(no user FK) and not `scoped` (indirect via a parent — this FK is " +
+        "direct). Put the table in USER_EXPORT_TABLES instead. Offenders: " +
+        offenders.join("; "),
+    ).toEqual([]);
+  });
+
+  it("every `scoped` exclusion really appears in USER_EXPORT_TABLES", () => {
+    // The general rule (2). `scoped` means "the data IS exported, just not
+    // directly" — a checkable claim that nothing checked, so it could be
+    // asserted about a table the manifest never mentions.
+    const manifestTables = extractManifestTables();
+    const unbacked = Object.entries(EXCLUDED_TABLES)
+      .filter(([, meta]) => meta.class === "scoped")
+      .map(([table]) => table)
+      .filter((table) => !manifestTables.has(table));
+    expect(
+      unbacked,
+      "EXCLUDED_TABLES entry/entries are classed `scoped` — which asserts the " +
+        "table appears in USER_EXPORT_TABLES as an IndirectUserTable, i.e. that " +
+        "its rows ARE exported via a parent — but the manifest does not list " +
+        "them. The rationale is therefore false and the rows are exported " +
+        "nowhere. Either add the manifest entry the class claims exists, or pick " +
+        "the class that is actually true. Unbacked: " + unbacked.join(", "),
+    ).toEqual([]);
+    // Guard the guard: `scoped` must be a class in live use, or the loop above
+    // is vacuous and would stay green if the check were deleted.
+    const scopedCount = Object.values(EXCLUDED_TABLES).filter(
+      (m) => m.class === "scoped",
+    ).length;
+    expect(
+      scopedCount,
+      "no EXCLUDED_TABLES entry is classed `scoped` any more, so the assertion " +
+        "above ran over an empty set and proves nothing",
+    ).toBeGreaterThan(0);
+  });
+});
+
+/**
  * B13: the coverage hook now derives its checks from the imported typed
  * `USER_EXPORT_TABLES` array (not a source-text regex). These tests pin
  * the by-construction guarantees that the typed seam buys us, against the
@@ -766,5 +1015,173 @@ describe("B13: typed-manifest coverage derivation (live USER_EXPORT_TABLES)", ()
         `derived coverage set is missing manifest entry "${spec.table}"`,
       ).toBe(true);
     }
+  });
+});
+
+/**
+ * Phase 164 re-review (2026-08-27) — the Art. 15/17 parity gate must not be
+ * satisfiable by PROSE that merely quotes a statement.
+ *
+ * MEASURED before the fix. The reviewer deleted the live 5-line
+ * `UPDATE strategy_shares ...` arm (153 bytes) from migration 20260827130000
+ * and re-ran the hook: 0 live statements remained, and the hook still reported
+ * `strategy_shares` Art. 17-covered, because
+ * `extractSanitizeCoverageFromContent` scanned RAW file text. A header comment
+ * (`--   UPDATE strategy_shares`) and two RAISE EXCEPTION messages quoting the
+ * arm verbatim inside string literals all matched the statement regex. An
+ * engineer could satisfy an erasure gate by DESCRIBING the erasure.
+ *
+ * The fix blanks comments and single-quoted literals before the statement
+ * scan. Re-measured with the same neuter: prose feeds no longer count, and the
+ * table falls out of the covered set once its matrix row is removed too.
+ *
+ * ⚠️ WHAT IS STILL DELIBERATELY ACCEPTED. A matrix row (`-- <table> |
+ * ANONYMIZE | ...`) IS a comment and DOES still count — that is the documented
+ * design (see the docblock on scanSanitizeUserCoverage): the matrix is the
+ * declared erasure policy, and some strategies (PRESERVE, CASCADE) have no
+ * statement to find. Only the STATEMENT limb is prose-blind now. The guarantee
+ * that the live UPDATE arm actually exists is enforced separately, by the
+ * verification DO block inside migration 20260827130000 itself.
+ *
+ * The over-stripping cases below matter as much as the under-stripping ones: a
+ * stripper that also blinded the scan to real statements would make this gate
+ * vacuous in the opposite direction, and every case here would still pass.
+ */
+describe("sanitize parity: prose cannot satisfy the statement scan", () => {
+  /** The covered-set the live hook derives from the real migration corpus. */
+  function liveSanitizeCoverage(): Set<string> {
+    const dir = join(REPO_ROOT, MIGRATIONS_REL);
+    const covered = new Set<string>();
+    for (const filename of readdirSync(dir).filter(
+      (f) => f.endsWith(".sql") && /sanitize_user/i.test(f),
+    )) {
+      extractSanitizeCoverageFromContent(
+        readFileSync(join(dir, filename), "utf8"),
+        covered,
+      );
+    }
+    return covered;
+  }
+
+  it("a comment quoting an UPDATE does not count as coverage", () => {
+    const sql = [
+      "-- This migration is where we would normally write:",
+      "--   UPDATE phantom_table SET revoked_at = now() WHERE created_by = p_user_id;",
+      "-- ...but we have not written it yet.",
+    ].join("\n");
+    expect(
+      extractSanitizeCoverageFromContent(sql).has("phantom_table"),
+      "a commented-out UPDATE was accepted as proof of an Art. 17 erasure " +
+        "policy — the parity gate is satisfiable by describing the work",
+    ).toBe(false);
+  });
+
+  it("a statement quoted inside a string literal does not count as coverage", () => {
+    // The exact shape that kept strategy_shares green under the neuter: a
+    // RAISE EXCEPTION whose message names the arm it is checking for.
+    const sql = [
+      "DO $$",
+      "BEGIN",
+      "  IF v_body !~* 'UPDATE phantom_table' THEN",
+      "    RAISE EXCEPTION 'sanitize_user lacks the live `UPDATE phantom_table SET revoked_at = now()` arm.';",
+      "  END IF;",
+      "END $$;",
+    ].join("\n");
+    expect(
+      extractSanitizeCoverageFromContent(sql).has("phantom_table"),
+      "an UPDATE quoted inside a string literal was accepted as proof of an " +
+        "Art. 17 erasure policy",
+    ).toBe(false);
+  });
+
+  it("a REAL statement inside a dollar-quoted function body still counts", () => {
+    // Anti-over-strip #1. The sanitize_user body IS dollar-quoted, so treating
+    // `$$ ... $$` as an opaque literal would blind the scan to every real
+    // statement in the repo and leave the two cases above passing vacuously.
+    const sql = [
+      "CREATE OR REPLACE FUNCTION sanitize_user(p_user_id UUID) RETURNS void AS $$",
+      "BEGIN",
+      "  UPDATE phantom_table SET revoked_at = now() WHERE created_by = p_user_id;",
+      "  DELETE FROM other_phantom WHERE user_id = p_user_id;",
+      "END;",
+      "$$ LANGUAGE plpgsql;",
+    ].join("\n");
+    const covered = extractSanitizeCoverageFromContent(sql);
+    expect(covered.has("phantom_table")).toBe(true);
+    expect(covered.has("other_phantom")).toBe(true);
+  });
+
+  it("a string literal containing `--` does not swallow a real statement after it", () => {
+    // Anti-over-strip #2. A naive line-based `--` sweep run BEFORE literal
+    // handling would treat the `--` inside the literal as a comment start and
+    // delete the rest of the line, including the real statement.
+    const sql =
+      "UPDATE audit_note SET body = 'redacted -- by request'; DELETE FROM phantom_table WHERE user_id = p_user_id;";
+    const covered = extractSanitizeCoverageFromContent(sql);
+    expect(covered.has("audit_note")).toBe(true);
+    expect(
+      covered.has("phantom_table"),
+      "a real DELETE was lost because a string literal contained `--` — the " +
+        "stripper is eating executable SQL",
+    ).toBe(true);
+  });
+
+  it("an apostrophe inside a comment does not desync literal pairing", () => {
+    // Anti-over-strip #3. `don't` inside a comment leaves one unmatched quote.
+    // Handled in a prior pass it would desync every literal after it and
+    // swallow the real statement below.
+    // The trailing literal is what makes this case able to FAIL: with only one
+    // stray quote there is nothing to pair it with, so a literal-first sweep
+    // would find no match and the case would pass vacuously.
+    const sql = [
+      "-- we don't purge here, we revoke",
+      "UPDATE phantom_table SET revoked_at = now() WHERE created_by = p_user_id;",
+      "UPDATE audit_note SET note = 'done';",
+    ].join("\n");
+    expect(
+      extractSanitizeCoverageFromContent(sql).has("phantom_table"),
+      "a real UPDATE was lost after a comment containing an apostrophe",
+    ).toBe(true);
+  });
+
+  it("non-vacuity: the live corpus still reports strategy_shares covered", () => {
+    // The fix must close the prose hole WITHOUT dropping the real arm that
+    // migration 20260827130000 actually executes. If this flips false, the
+    // stripper has become too aggressive against real SQL.
+    expect(liveSanitizeCoverage().has("strategy_shares")).toBe(true);
+    expect(
+      liveSanitizeCoverage().size,
+      "the sanitize coverage set collapsed — the prose stripper is removing " +
+        "real statements, not just prose",
+    ).toBeGreaterThan(30);
+  });
+
+  it("the remedy text's claim holds: strategy_shares has a policy, so needs no allowlist key", () => {
+    // Keeps the REMEDIATION PROSE honest, which is the whole point of this
+    // case. Both scripts/check-gdpr-export-coverage.ts and
+    // src/lib/gdpr-export-manifest.ts used to instruct a fourth step — "add
+    // the matching strategy_shares key to SANITIZE_PARITY_ALLOWLIST ... the
+    // manifest entry has no sanitize policy without the allowlist key". That
+    // went FALSE when migration 20260827130000 landed a real Art. 17 arm.
+    // Wrong instructions at the exact moment an engineer acts on them is the
+    // failure shape this phase already closed a CRITICAL for, so the corrected
+    // text is pinned to the two facts it asserts rather than left as prose
+    // that can rot again.
+    expect(
+      liveSanitizeCoverage().has("strategy_shares"),
+      "strategy_shares no longer has a sanitize_user policy. The remedy text " +
+        "in scripts/check-gdpr-export-coverage.ts and " +
+        "src/lib/gdpr-export-manifest.ts both say no SANITIZE_PARITY_ALLOWLIST " +
+        "key is needed BECAUSE migration 20260827130000 supplies one. If that " +
+        "arm was removed, the instructions are now wrong — fix the text, do " +
+        "not delete this case.",
+    ).toBe(true);
+    expect(
+      Object.keys(SANITIZE_PARITY_ALLOWLIST),
+      "strategy_shares was added to SANITIZE_PARITY_ALLOWLIST. It has a REAL " +
+        "erasure policy (migration 20260827130000); an allowlist key asserts " +
+        "the weaker, different thing — that no policy is needed — and would go " +
+        "stale silently if the real arm were ever removed.",
+    ).not.toContain("strategy_shares");
   });
 });

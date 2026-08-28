@@ -230,6 +230,18 @@ const MUTATING_RPC_NAMES: readonly string[] = [
   "stamp_first_bridge_surfaced",
   "stamp_first_sync_success",
   "sync_trades",
+  // Phase 164 (SHARE-01): mints or reactivates a strategy's share link
+  // (migration 20260827120000). Handing out a capability URL for a PRIVATE
+  // factsheet is exactly the kind of act the audit trail exists to record, and
+  // listing the name here is what makes the law reach the 164-03 route — the
+  // SEC-03 lesson above: with the name unlisted the gate never sees the call,
+  // so neither an emission nor a pragma is ever required of it.
+  "create_strategy_share",
+  // Phase 164 (SHARE-03): revokes a strategy's share link by bumping the
+  // generation counter (same migration). T-164-11 — mint and revoke are the
+  // two halves of one repudiation surface; auditing only the mint would leave
+  // "who killed this link, and when" unanswerable.
+  "revoke_strategy_share",
 ];
 
 /**

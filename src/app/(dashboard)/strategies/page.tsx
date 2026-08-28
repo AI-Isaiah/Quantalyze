@@ -5,6 +5,9 @@ import { Badge } from "@/components/ui/Badge";
 import { Card } from "@/components/ui/Card";
 import { StrategyActions } from "@/components/strategy/StrategyActions";
 import { ShareableLink } from "@/components/strategy/ShareableLink";
+// Server component: import the predicate from the NON-client module. Importing
+// it from ShareableLink.tsx compiles but throws at request time.
+import { isPublishedStatus } from "@/lib/share-affordance";
 import { PendingIntros } from "@/components/strategy/PendingIntros";
 import Link from "next/link";
 import { redirect } from "next/navigation";
@@ -171,9 +174,20 @@ export default async function StrategiesPage() {
                   )}
                 </div>
                 <div className="flex items-center gap-3 ml-4">
-                  {s.status === "published" && (
-                    <ShareableLink strategyId={s.id} />
-                  )}
+                  {/* Phase 164 (SHARE-04) — the status gate is GONE, and its
+                      removal is the point, not a side effect. Hiding the control
+                      for unpublished rows was the other half of the same
+                      dishonesty class as the factsheet's 404-producing Copy
+                      Link: an owner with a private strategy had no affordance at
+                      all, so the product's answer to "show this to my LP" was
+                      "you can't". Every row on this page belongs to the session
+                      user, so an unpublished row now yields a working, revocable
+                      private link instead of nothing.
+                      ⛔ `StrategyActions` in the same row is untouched (D-03). */}
+                  <ShareableLink
+                    strategyId={s.id}
+                    published={isPublishedStatus(s.status)}
+                  />
                   <Badge label={s.status} type="status" />
                   <StrategyActions strategyId={s.id} status={s.status} hasApiKey={!!s.api_key_id} hasData={!!s.api_key_id} />
                   <span className="text-xs text-text-muted">

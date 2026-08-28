@@ -70,6 +70,26 @@ vi.mock("@/lib/api/approval-gate", () => ({
 // two scopes above do not already close. Recorded as a deviation in
 // 140.5-01-SUMMARY.md.
 //
+// Phase 164 / D-02 — `src/lib/strategy-share-token.ts` validates
+// SHARE_TOKEN_SECRET at MODULE SCOPE and throws when it is missing or shorter
+// than 32 chars. That loudness is the point in production, but it means any
+// test file that transitively imports the token module (the recipient page, the
+// mint route, the revoke route, the owner-lane share-state read) would fail at
+// IMPORT time with an env error rather than an assertion.
+//
+// ⚠️ POSITION IS LOAD-BEARING: this must run BEFORE the `INHERITED_ENV`
+// snapshot below, so the env-restore fence treats the fixture as BASELINE. Set
+// after the snapshot, `afterAll`'s `restoreEnv(INHERITED_ENV)` would DELETE it
+// as a "key added since", and every test file after the first in a worker would
+// import the module into a throw.
+//
+// Nullish-coalescing assignment, not a bare assignment: a test that
+// deliberately drives a different secret (the cross-secret divergence pin) or a
+// real local `.env` value still wins. This is an obviously-fake fixture and
+// carries no production meaning.
+process.env.SHARE_TOKEN_SECRET ??=
+  "test-fixture-share-token-secret-not-a-real-secret-0123456789";
+
 // Captured at setup-file scope, which for each test file runs BEFORE that
 // file's own module-scope code — so this is the environment the file was
 // handed, not the environment it made.

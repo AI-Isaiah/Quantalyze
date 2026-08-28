@@ -1038,6 +1038,404 @@ true for 146 and half of 142–145, and **false for 141**.
 
 ## 🟡 FIX MID-TERM
 
+### RANK-SPLAT-01 — the anon metrics surface is unbounded by construction (booked 2026-08-26)
+
+Booked by founder ruling while closing Phase 159's product call. RANK-02 itself is ACCEPTED as
+written and the requirement is MET — this is the broader disclosure question the verifier deferred.
+
+**Measured on PROD 2026-08-26.** `src/app/factsheet/[id]/tearsheet/page.tsx:151` reads
+`analytics.metrics_json` as a whole object, and `v2/page.tsx:96` likewise projects
+`metrics_json_by_basis` as a whole column. An ANONYMOUS reader of a published strategy therefore
+receives **45 distinct keys**, among them `kelly_criterion`, `risk_of_ruin`, `smart_sharpe`,
+`treynor`, `beta`, `alpha`, `benchmark_returns`, `drawdown_episodes`.
+
+⚠️ **The defect is the mechanism, not the contents.** Every one of the 45 is a derived performance
+statistic — no account, key, or identity data — and a published strategy is public by intent. The
+problem is that the set has no boundary: whatever the analytics stage writes becomes publicly
+readable with no review step. 45 is what it happens to be today, not a decision anyone took.
+
+- **[RANK-SPLAT-01] Replace the whole-column projection with a named alias set (or an RPC that
+  returns one)**, so the anonymous surface is a deliberate list. A metric added upstream should be
+  invisible until someone adds it to the list. ⚠️ Pin it with a test that FAILS when a new key
+  appears in the projection, or the boundary decays the first time the compute stage learns
+  something new.
+
+⛔ Deliberately NOT scoped into Phase 164 (founder call): 164 already carries a migration, a new
+public route, two guard amendments and an adversarial cache test, and this is outside SHARE-01..04.
+
+
+### CI-MIGRATE-01 — CI must apply migrations to TEST before `sql-tests` (booked 2026-08-26)
+
+⭐ **Founder-ruled 2026-08-26** while discharging Phase 163's TEST-apply item. Hand-applying one
+migration arms one gate; it does not change why the gate was silent. This item closes the mechanism.
+
+**The mechanism, measured.** All four migration-touching workflows checked: `supabase-migrate.yml`
+targets the PROD ref; `migration-drift-check.yml` runs `db push --include-all --dry-run`, also
+against PROD; `migration-policy.yml` documents that no write is ever invoked; `mutex-probe.yml`
+only takes a lock. And `sql-tests` — the ONLY lane that executes real deployed SQL bodies — has
+five steps (install psql, preflight, acquire mutex, run, release) and NO migration-apply step.
+⇒ TEST is whatever was last pushed by hand, so every migration self-check with a pre-apply
+tolerance is permanently silent there.
+
+- **[CI-MIGRATE-01] Add a migration-apply step to the `sql-tests` lane** (or a job it depends on),
+  so TEST is current before the SQL gates run.
+
+⚠️ **This is NOT a one-line CI edit — three named hazards:**
+1. **TEST is shared and contended.** The lane already acquires a mutex and the DB has no worker.
+   An apply must happen inside that mutex or it races a concurrent run.
+2. **DRIFT-01 means TEST runs OLDER revisions of several functions.** The first bulk apply will
+   surface accumulated drift all at once, inside CI, on everyone's PRs. Land it deliberately —
+   ideally apply once out-of-band first, see what breaks, THEN wire the step.
+3. **Applying arms every previously-silent gate simultaneously.** That is the point, but it means
+   the first green run after this lands is the first honest one — treat a red as information, not
+   as a regression introduced by the wiring.
+
+⭐ Until this lands, the standing rule stands: **a green `sql-tests` run is not evidence that a
+migration gate is armed.** Measure the catalog directly (`pg_get_functiondef` / `obj_description`).
+
+
+### ⛔ DRIFT-02 — a surgical in-place patch means the REPO no longer holds the true function body (booked 2026-08-27)
+
+⭐ Caught by the pre-merge PROD diff, which is the ONLY thing that could have caught it.
+It blocked a GDPR regression from shipping.
+
+**What happened.** Phase 164's companion migration `20260827130000` does a whole-body
+`CREATE OR REPLACE` of `sanitize_user`, re-based on the newest full definition in the repo
+(`20260517013100`). Measured against PROD:
+
+| | PROD (live) | what we were about to ship |
+|---|---|---|
+| erasure target | `DELETE FROM verification_requests_legacy` | `DELETE FROM verification_requests` |
+| `verification_requests` | a **VIEW** (relkind `v`, 13 cols) | — |
+| `verification_requests_legacy` | the **TABLE** (relkind `r`, 18 cols) | — |
+
+Shipping it would have sent GDPR erasure at the VIEW — either erroring mid-erasure or
+deleting through a filtered view and silently under-purging PII. That is precisely what
+`20260620120000_verification_requests_view_shim_apply.sql` STEP 5.5 exists to prevent; its
+own header calls the repoint **MANDATORY**.
+
+**Why every existing control missed it.**
+1. `20260620120000` performs a **surgical in-place repoint** — a string replacement against
+   the live definition — not a full `CREATE OR REPLACE`. So it does not match
+   `grep "FUNCTION public.sanitize_user"`, and the repo's newest FULL body is still the
+   superseded `20260517013100`.
+2. ⛔ **The authoritative body exists only in the database.** "Re-base on the latest
+   definition" is UNSATISFIABLE from repo files for any function a surgical patch has
+   touched. This is a CLASS, not an instance — it applies to every future whole-body
+   replace of any surgically-patched function.
+3. The migration reviewer verified the re-base as faithful — 47→48 statements, single
+   insertion, zero deletions. It was faithful **to the wrong baseline**. Faithfulness to a
+   stale source reads identically to correctness.
+4. The shim's own drift guard (`:268`) aborts if `sanitize_user` has drifted — but it runs
+   once, inside that migration, and cannot protect a later one.
+
+- **[DRIFT-02a] Re-base `20260827130000` on PROD's live body**, not on `20260517013100`.
+  The only correct source is `pg_get_functiondef` against production.
+- **[DRIFT-02b] Add a pre-merge gate for whole-body replaces.** Any migration containing
+  `CREATE OR REPLACE FUNCTION` for a function that already exists in PROD must diff its body
+  against `pg_get_functiondef` and fail on any delta the migration does not explicitly claim.
+  Cheap version: a checklist item; real version: a CI step with a read-only PROD connection.
+- **[DRIFT-02c] Stop shipping surgical in-place patches**, or record them in a
+  `supabase/schema/functions/*.sql` snapshot at the time they land, so the repo keeps a
+  recoverable true body. The snapshot directory already exists and is already regenerated by
+  other migrations — the shim simply did not update it.
+
+⚠️ Same family as **DRIFT-01** (TEST runs an older revision) and **SKIP-01**: the artifact
+and the reality diverge, and nothing in the pipeline compares them. DRIFT-01 was TEST-vs-repo;
+this is **repo-vs-PROD**, and it is the more dangerous direction because merging auto-applies.
+
+**✅ DRIFT-02a RESOLVED 2026-08-27 — and it was a ONE-IDENTIFIER fix, provably.** Read PROD's live
+`pg_get_functiondef(sanitize_user)` (md5 `2f4ccf13db95b93464e028e5bce1e0f4`, 6696 chars),
+transcribed it, and **proved the transcription exact by md5 equality** rather than by eye. Diffing
+that verified body against the shipped body — with the added B1 arm and the added DRIFT-02 comment
+block removed — left exactly **two hunks, both the `CREATE OR REPLACE` header wrapper**
+(`uuid`/`UUID`, `boolean`/`BOOLEAN`, `SET search_path TO 'public','pg_catalog'` vs
+`= public, pg_catalog`) and the `$function$` vs `$$` delimiter. Semantically identical, **zero**
+statement-level differences. Before the correction the same diff had a third hunk — the erasure
+DELETE naming the view — and that one hunk was the entire bug. So a 193-line body needed a 193-line
+re-base only in the sense that it needed to be *checked* line by line; the repair was one token.
+
+Two `sql-tests`-style arms now make the revert un-shippable rather than un-noticed: a positive arm
+requiring `DELETE FROM verification_requests_legacy`, and a negative arm rejecting any DELETE
+against the bare view. ⭐ **Both were demonstrated able to fail**, which took three mutations, not
+two — mutations 1 and 2 abort on the positive arm before the negative arm is ever evaluated, so the
+negative arm needed its own mutation (keep the legacy DELETE, add a view-named one alongside) to be
+shown reachable at all. Without that third mutation the second arm would have been a test that
+cannot fail, in a file whose whole subject is a check that failed to check.
+
+⭐ **Executed, not asserted** — PostgreSQL 16.13, throwaway cluster, full apply GREEN, three
+mutations RED, restore GREEN. This is `PROC-01` practised on the first file it applies to. Nothing
+was applied to TEST or PROD. Run output is recorded in the migration header.
+
+⚠️ **DRIFT-02b and DRIFT-02c remain open** — this closed the instance, not the class. Nothing yet
+compares a whole-body replace against PROD before merge, and nothing yet stops the next surgical
+in-place patch from erasing the repo's copy of a body. Route both with the `PROC-*` standards.
+
+⚠️ **Checked and clear:** `scripts/check-gdpr-export-coverage.ts` harvests `DELETE FROM <table>`
+out of migrations whose FILENAME matches `/sanitize_user/i`, so the repointed identifier changes
+what it sees. Ran it — the only failure is the pre-existing, *intended* `strategy_shares` one that
+cannot clear until the declaring migration is applied. No new redness.
+
+### Phase 164 (SHARE) — ACCEPTED RESIDUALS, named (booked 2026-08-27)
+
+Source: `.planning/phases/164-share-.../red-team/SYNTHESIS.md` §7 + §8 item 6. The synthesizer's
+finding was that these three were **accepted in conversation and written down nowhere** — and
+"accepting a residual silently is indistinguishable from missing it." That is the whole reason
+this section exists. None of these is a task. Each is a decision with a name against it.
+
+- **[SHARE-RES-R4] PITR / branch-DB restore defeats revocation.** A point-in-time restore or a
+  Supabase branch DB restores `strategy_shares` *including the nonce and the generation counter*,
+  so every token that was live at the snapshot instant becomes live again. **Nothing in-database
+  can close this** — the revocation state and the thing being restored are the same store.
+  Design-neutral: hash-at-rest does not survive a restore either, so this is not a cost of the
+  HMAC+generation model.
+  **Mitigation shipped:** per-environment `SHARE_TOKEN_SECRET` (founder ruling 2026-08-26),
+  which bounds the blast radius to the restored environment — a branch or preview DB can no
+  longer derive production-valid tokens. **Accepted:** the within-environment restore case.
+  ⚠️ Operational consequence, not yet an item anywhere: a PROD restore is also a share-link
+  un-revoke. Whoever runs one must re-revoke, and nothing reminds them.
+
+- **[SHARE-RES-R2g] `service_role` DELETE+INSERT is not bound by anything in-database.** The
+  nonce **downgrades** this from resurrection to link-death: an admin who deletes a row and
+  re-inserts it gets a fresh `gen_random_uuid()` nonce, so the old tokens stop working rather
+  than come back. The residual is narrower and requires intent: an admin who **records the nonce
+  before deleting** can restore the exact row and revive every previously-revoked link.
+  ⛔ **CORRECTED 2026-08-28 — BOTH HALVES OF THIS WERE WRONG.** Two reviewers measured it.
+
+  (1) **It IS closable in SQL, in one line.** The trigger's INSERT branch forced `generation := 1`
+  but left `nonce` caller-suppliable, so `service_role` DELETE + re-INSERT with a recorded nonce
+  landed back on generation 1 — a byte-identical HMAC to a token that had been explicitly revoked.
+  `NEW.nonce := gen_random_uuid();` in that branch closes it, verified not to break the mint lane
+  (the RPC never names `nonce` and reads it back via `RETURNING`). Being fixed now.
+
+  (2) **My justification conflated two different credentials.** I argued that anyone holding
+  `service_role` could read `SHARE_TOKEN_SECRET` and mint directly anyway. `service_role` is a
+  DATABASE credential; `SHARE_TOKEN_SECRET` is a Vercel environment variable. A database-only
+  compromise, a pooler session, `pg_cron`, or an ordinary admin script holds one and not the other.
+  Closing the in-database form is real defence, not theatre.
+
+  ⚠️ **And the residual's blast radius was understated.** Measured by the RLS auditor: the restore
+  reverses a completed **GDPR Art. 17 erasure**, reconstructing the exact pre-erasure
+  `(nonce, generation, live)` triple — `gen 3 → sanitize_user → gen 4 revoked → DELETE + INSERT
+  (recorded nonce) → gen 1 → two lawful +1 bumps → gen 3 → un-revoke`. Two statements, loopable to
+  any N. Rule (6)'s +1 bound does not constrain it, because the DELETE resets the counter. The
+  subject cannot self-remedy: the same RPC sets `banned_until = 'infinity'` and purges their
+  sessions.
+
+  **What remains accepted after the fix:** an actor holding `service_role` can still DELETE the row
+  outright (killing links — the correct outcome for an erasure) and can mint fresh capabilities.
+  What it can no longer do is resurrect a *specific previously-issued* link. If irreversibility of
+  erasure is load-bearing for the GDPR posture, a counter cannot carry it — that needs an
+  append-only revocation ledger, and it belongs in the Art. 17 DPIA rather than a migration
+  comment. Booked, not done.
+
+- **[SHARE-RES-F5] Capability URLs leak through channels no header controls.** Platform access
+  logs, link unfurlers, browser history, and screen shares all see a token that is part of the
+  URL. Inherent to capability URLs; the phase's own D-01 (`/factsheet-share/[token]`) chose a
+  path segment over a query param. **Accepted.**
+  ⚠️ **Correction to SYNTHESIS §7 (my error, propagated).** SYNTHESIS says `Referrer-Policy`
+  "strips query strings cross-origin, never paths." That is wrong, and it originated in a claim
+  I made and later measured to be false. Under the default `strict-origin-when-cross-origin` a
+  cross-origin request sends **only the origin** — neither path nor query survives. So the
+  path-vs-query choice is **Referrer-neutral**, and this phase ships per-route `no-referrer`
+  anyway, which closes that channel outright. The path choice still matters, but for a different
+  and narrower reason: log and analytics pipelines commonly redact query strings while retaining
+  paths. Keep the residual; discard the stated mechanism.
+
+**What is NOT on this list, deliberately:** N1 (INT4 overflow wedging Art.17 erasure) and N2
+(revoke race). Those are **open defects gating 164-03**, not residuals — see the six-condition
+merge gate at `SYNTHESIS.md:270-287` and the wave restructure in ROADMAP Phase 164.
+
+⭐ **N1 RE-MEASURED AT HEAD 2026-08-27 — reproduces, but its recorded severity is WRONG.** Run
+against the real applied schema on a throwaway PostgreSQL 16.13 (see
+`.planning/phases/164-.../EXECUTION-EVIDENCE.md` §5): an owner PATCHes `generation` to bigint max
+(⛔ accepted — they hold the `UPDATE(generation)` column grant and the trigger forbids only a
+*decrease*), `revoke_strategy_share` then wedges `22003`, and **`sanitize_user` aborts the entire
+Art. 17 erasure with the same `22003`**. `BIGINT` raised the ceiling and closed nothing, exactly as
+that migration's own header warns. 164-06 stays required.
+
+**But** `SYNTHESIS.md` calls it "unrecoverable without DDL, or a DELETE that resurrects
+everything." Measured, `service_role` remedies A (tombstone without bump) and B (rewind) are both
+correctly BLOCKED by the trigger — and remedy C (`DELETE` the row) **works and resurrects
+nothing**, because a re-created row draws a fresh nonce and every old token dies. That claim was
+true pre-nonce and was never re-checked after the nonce landed. True shape at HEAD: *a data subject
+can wedge their own erasure until an operator deletes one row* — an availability bug with a
+one-statement remedy, not an unrecoverable regulatory failure. Still blocking 164-03; no longer the
+worst item in the corpus.
+
+✅ **N2 CLOSED AS NOT-A-DEFECT — founder ruling 2026-08-27. Dropped from 164-06, which is now N1-only.** ⛔ Do not re-open by adding `SELECT … FOR UPDATE` or editing STEP 6 arm (i-b) without new measured evidence; the arm is a guard, not a bug-pin.
+
+⭐⭐ **N2 DOES NOT REPRODUCE (measured 2026-08-27) — and the proposed fix WAS the bug.** Three interleavings, two concurrent sessions each (one holds the row lock in an open transaction, the other arrives 1s in and blocks): revoke∥revoke converges (`rows=1` / `rows=0`, generation advances exactly once); revoke-then-mint and mint-then-revoke both converge with no lost update, no counter inflation and no resurrection. Root cause of the non-reproduction: **both RPCs are single statements** — one `UPDATE … WHERE … AND revoked_at IS NULL`, one `INSERT … ON CONFLICT DO UPDATE … RETURNING` — so there is no read-then-write window for a `SELECT … FOR UPDATE` to protect, and under READ COMMITTED the blocked writer re-evaluates its `WHERE` against the updated row (EvalPlanQual).
+
+⛔ `revoked_at IS NULL` is **the convergence contract**, not a racy predicate. The recorded remedy — rewrite STEP 6 arm (i-b) *so the fix can land* — would have removed the guard, and removing the predicate is what makes a double-revoke inflate the counter. **The arm was not enforcing the bug; the proposed fix was the bug.** None of this was visible without running it: the reasoning chain reads as sound end to end and is simply false. Recommend closing gate condition 3 as not-a-defect and dropping N2 from 164-06 (leaving that plan N1-only) — ⚠️ founder call, since the corpus records N2 as `[M]`. Limits: READ COMMITTED (PostgREST's default), two sessions not N, three interleavings not an exhaustive schedule search.
+
+### Phase 164 (SHARE) — code-review + closure residuals (booked 2026-08-28)
+
+Source: `164-REVIEW.md` (0 critical / 3 warning / 6 info) plus two defects found while running the
+closure pipeline. The two user-reachable warnings (WR-02, WR-03) are FIXED and committed; what
+follows is everything that was not.
+
+- **✅ CLOSED 2026-08-28 — [SHARE-WR-01] `.env.example` instructed the operator to REUSE one `SHARE_TOKEN_SECRET`.**
+  The block added in 164-01 says "set it in ALL Vercel environments", which reads as one shared
+  value — precisely the configuration the founder ruling of 2026-08-26 forbids, because a preview
+  DB seeded from a production snapshot then becomes a production-token factory. The module docblock,
+  `SECRET_REMEDY` and the boot error all say **DISTINCT per environment**; the file an operator
+  actually follows verbatim says the opposite, and nothing downstream detects it (the boot check
+  verifies length, not distinctness). The same block also documents the stale two-argument
+  pre-image `HMAC(secret, "<id>.<generation>")`; the real one is
+  `qz.strategy-share.v1.<id>.<nonce>.<generation>`.
+  **Fixed in `40527f101`** via a scripted patch the founder ran (this environment denies agent
+  access to `.env*`). ⚠️ Lesson kept: the first patch located the block by walking up over
+  contiguous `#` lines from the assignment, which swallowed the section banner and the module-load
+  rationale — a structural anchor that treats a section header as part of the paragraph below it.
+  Restored in the same commit.
+
+- **[SHARE-D-164-C] `create_scenario_share` is not in `MUTATING_RPC_NAMES` at all.** Pre-existing,
+  on shipped code: `allocator/scenario/share/route.ts` has therefore never been under the audit
+  law. Phase 164 put the new `create_strategy_share` / `revoke_strategy_share` under it and left
+  the older sibling out, which is now the only unaudited share mint in the tree.
+
+- **[SHARE-INFO] six Info findings**, none blocking under the stopping rule: ci.yml arm-count
+  narrative arithmetic (the *enforced* integers are correct and were re-verified — 103/166/8); the
+  Sentry breadcrumb/extra scrub is one level deep; the 32-char secret floor is duplicated with no
+  drift test; `sanitize_user` keeps `SET search_path = public, pg_catalog` with no explicit trailing
+  `pg_temp`; `strategy-share-token.test.ts` mutates `process.env.SHARE_TOKEN_SECRET` without
+  per-test restore; and a future strategy-ownership transfer would wedge mint and orphan a live
+  capability.
+
+- **[SHARE-COV-01] a `#` comment inside a SUMMARY's `coverage:` block silently voids the whole
+  block.** Measured 2026-08-28: `gsd-tools query uat.classify-coverage` returned
+  `mode: legacy` with a single `malformed_block` error, and the fallback is a **quiet** prose
+  extraction — every deliverable is dropped and nothing fails. Related: 164-04's block shipped with
+  `deliverable:` instead of `id:`+`description:` and free-text `kind:` values, which produced 27
+  validation errors and 0 auto-passed deliverables while reading as authoritative. Both repaired;
+  the class belongs to Phase 164.3 (VACUITY).
+
+- **[SHARE-B15-01] ⚠️ the B15 limiter registry has no owner in the phase that adds a route.**
+  The two new share routes landed unclassified in `src/lib/api/limiter-ordering.test.ts`, and
+  nothing inside phase 164 scans that registry — it went red only under the execute-phase
+  regression gate over phases 158–163. Fixed (both added to `NO_INPUT`), but the *gap* is that a
+  phase can add a rate-limited route and never run the invariant that governs it.
+
+### Phase 164 (SHARE) — browser-UAT findings (booked 2026-08-28)
+
+Source: `164-UAT.md`, 9 checkpoints against localhost pointed at TEST — 7 passed, 2 recorded
+BLOCKED. Both defects below were found ONLY by driving the browser, after a code review, a
+verifier pass and a green 88-file regression gate had all cleared the phase.
+
+- **✅ FIXED — [SHARE-UAT-01] every `GET /strategies` threw.** `isPublishedStatus` was declared in
+  `ShareableLink.tsx`, which carries `"use client"`; `strategies/page.tsx` is a Server Component
+  and CALLS it — on the exact line this phase added when it removed the status gate. Three
+  requests, three throws. ⛔ **The class, not the instance:** `page.share-affordance.test.tsx`
+  makes the same call and passes, because **jsdom does not enforce the RSC boundary**, so no unit
+  test in this repo could have caught it. Fixed in `4db23fe3b` by moving the declarations to a
+  directive-free `src/lib/share-affordance.ts`; pinned by a directive assertion that matches a
+  bare statement, not a substring (the docblock explains the absence and contains the string).
+  **Still open as a class:** nothing detects a server component calling a client-module export.
+  Candidate for Phase 164.3 (VACUITY) — it is a control that cannot fail, in the test layer.
+
+- **✅ FIXED — [SHARE-UAT-02] the pending factsheet promised a share link with no control.** The
+  still-computing early return rendered `OwnerUnpublishedNotice` alone — a notice ending "You can
+  create a private share link…" — on a page with ZERO clickable elements. Same SHARE-04 dishonesty
+  class the phase exists to close, on the one render path the class review never walked, and on
+  the path the placeholder's own comment calls the moment "an owner is MOST likely to share the
+  URL". Fixed in `4db23fe3b` (`OwnerUnpublishedPanel`: notice and controls on one `shareLive`
+  state, so fixing the missing mint button could not manufacture a false revoke promise).
+  Regression-pinned in `8f26f2a21` — three arms, all OBSERVED red under the bug's real shape.
+  ⚠️ Those arms pin DOM **presence**, not visibility: a `className="hidden"` mutation left all
+  three GREEN, because jsdom does no layout. Visual-regression territory, not booked as a defect.
+
+- **[SHARE-UAT-03] ⛔ THE IN-PAGE BUTTON HAS NEVER BEEN SUCCESSFULLY CLICKED.** Both synthetic
+  clicks produced **zero network requests**, so checkpoints 1/2/6 (mint, reuse, revoke) were
+  exercised against the ROUTES, not through the component's own handler. The route contract is
+  proven; the click path is not — and that is exactly where the WR-02 Safari
+  transient-user-activation concern would surface. A human click is owed. Not fixable by an agent
+  in this environment.
+
+- **[SHARE-UAT-04] UAT tests 7 (Plausible) and 9 (Sentry) are BLOCKED, not passed.** No
+  `plausible.io` request on the share lane — but none on a normal page either, because Plausible
+  is not configured on the local server. Without the positive control the negative proves nothing.
+  Same for Sentry (`SENTRY_DSN` unset locally). Both need a deployed environment to become real
+  evidence. Recorded as blocked deliberately: reporting them as passes is the vacuity this phase
+  spent its whole red-team budget on.
+
+### ⚠️ GSD-01 — `/gsd-plan-phase` cannot add ONE plan to a partly-executed phase (booked 2026-08-28)
+
+`/gsd-plan-phase <N>` replans the **whole** phase. Once some plans carry SUMMARYs, running it risks
+regenerating or renumbering executed work, so the only safe path is authoring the new PLAN.md by
+hand — which skips the orchestrator-only gates (`plan-phase` step 5.5's VALIDATION.md refresh, and
+7.5), and skips `gsd-plan-checker` entirely.
+
+Hit four times in phase 164: `164-06` and `164-07` were hand-authored net-new; `164-03` and
+`164-04` were hand-revised. In each case the VALIDATION.md rows had to be written by the
+orchestrator to cover the gate that did not fire — see the note at the bottom of
+`164-VALIDATION.md`.
+
+⚠️ **This is the same family as `NYQ-01`** (a config-enabled planning gate stopped firing and
+nothing noticed). There the gate was silent by accident; here it is silent because the only safe
+route around a tool limitation goes past it.
+
+**Fix:** an `--add-plan` mode that appends a single plan to an existing phase and runs the checker
+plus the 5.5 refresh over it alone. ⛔ Upstream `gsd-core`, not this repo — same bucket as
+`depends_on` yielding `blocked_by: {}` and wave frontmatter drifting from ROADMAP. Phase 164.3
+**excludes** this bucket deliberately; do not fold it in.
+
+### ⚠️ DRIFT-03 — an MCP hand-apply stamps the ledger with the APPLY TIME, not the filename (booked 2026-08-28)
+
+Surfaced during the Phase 164 TEST hand-apply. `apply_migration` writes
+`supabase_migrations.schema_migrations.version` as the **wall-clock time of the apply**, keeping the
+real filename only in the `name` column. TEST now reads:
+
+```
+20260828061901  ->  name 20260827120000_strategy_shares_generation_model
+20260828062101  ->  name 20260827130000_sanitize_user_revoke_strategy_shares
+```
+
+PROD's Migrate workflow will register the same two files as `20260827120000` / `20260827130000`.
+
+⛔ **So any TEST-vs-PROD drift check keyed on `version` silently reports these as missing from TEST.**
+Not hypothetical — `DRIFT-01` is exactly such a check, and `CI-MIGRATE-01` proposes building more of
+them. A comparison that joins on `version` will conclude TEST is behind when it is current.
+
+Pre-existing, not caused by this phase: the row above these two,
+`20260826210044:destrict_enqueue_internal_10param`, has the identical shape.
+
+**Fix:** key drift comparisons on `name`, not `version` — or normalise `version` from the leading
+timestamp in `name`. **Route to Phase 164.3** (`DRIFT-02b`'s neighbour): it is the same root as the
+rest of that phase — *the claim and the thing are never compared*, and here the join key itself is
+the thing that lies.
+
+### NYQ-01 — a config-enabled planning gate stopped firing and nothing noticed (booked 2026-08-26)
+
+⭐ **Founder-ruled 2026-08-26: regenerate, don't waive.** Surfaced while closing Phase 164's
+plan-checker gate.
+
+**The mechanism, measured.** `.planning/config.json` sets `workflow.nyquist_validation: true`.
+`plan-phase` step 5.5 keys on a `## Validation Architecture` section in the phase RESEARCH.md and
+writes `{phase}-VALIDATION.md`. Measured across phases 158–164:
+
+| Phase | RESEARCH has `## Validation Architecture` | VALIDATION.md |
+|---|---|---|
+| 158, 159, 160, 161, 162 | yes | **present** |
+| 161.1, 163, 164 | yes | **absent** |
+
+So the precondition held every time and the artifact simply stopped being written. 163 was planned,
+executed, verified and SHIPPED without it. Nothing in the pipeline reported a missing gate —
+`gsd-plan-checker` only flags it if something invokes the checker, and on 164 the planner had been
+hand-spawned outside the orchestrator, so the checker did not run either until it was invoked by
+hand. **Two independent gates were silent at once, and the run still looked clean.**
+
+- **[NYQ-01] Make a skipped step 5.5 loud.** Writing 164-VALIDATION.md by hand fixes one instance;
+  it does not fix why five phases' worth of the gate produced nothing. Wanted: a check that fails
+  when `nyquist_validation: true` and a phase has `## Validation Architecture` but no VALIDATION.md
+  — the same shape as the `sql-tests` anti-SKIP net.
+- **[NYQ-01b] Backfill or explicitly waive 163 and 161.1.** Both shipped; the artifact is now
+  archival, so a recorded waiver may be the honest close rather than a reconstructed document.
+
+⚠️ Same family as **SKIP-01** and **CI-MIGRATE-01**: a gate whose failure mode is *silence*, where
+the green run and the un-run run are indistinguishable from the outside. The standing lesson holds —
+**absence of a red is not evidence a gate fired.** Check the artifact, not the exit code.
+
 ### Phase 163 / WR-06 residual — a non-UTC reporter reads "ends in the future" ~3h every day (added 2026-08-26)
 
 WR-06 is FIXED for the defect it named (a future series end no longer renders amber beside
@@ -1261,8 +1659,39 @@ today. See **SKIP-01** below: the drift is one symptom of TEST never receiving m
 
 ### ⛔ SKIP-01 — nothing applies migrations to TEST, so the OPS-08 gate SKIPs FOREVER (added 2026-08-26)
 
+✅ **REMEDY CONFIRMED BY MEASUREMENT 2026-08-26 (this instance only).** `20260826150000` was
+hand-applied to TEST via MCP (10-param body MD5 `f349af15a256ad00bd31952723ae7b00`, 7674 bytes —
+byte-identical to PROD), and PR #720's `sql-tests` lane then printed the *assertion* arm rather
+than the skip:
+
+```
+test_enqueue_internal_destrict.sql:775: NOTICE:  OPS-08 Part 1+3 OK: the deployed 10-param
+body carries no strict lost-race re-read, does raise serialization_failure on an exhausted
+one, and its catalog COMMENT still carries the revert-discriminator marker.
+```
+
+⚠️ This closes the *instance*, not the class. The green check itself proved nothing — the
+`SKIP (Part 3)` arm exits green too, which is what made this invisible. The evidence is the NOTICE
+text, read out of the job log. **CI-MIGRATE-01 remains the class fix**; until it lands, every new
+migration self-check is born silent on TEST.
+
+
 Found by live measurement after PR #717 merged, while checking whether the recorded "OPS-08
 code-complete, migration unapplied" state was still true. It is true — of the wrong database.
+
+⚠️ **ATTRIBUTION, corrected 2026-08-26.** The core fact was NOT discovered here. It was already
+written down in TWO places before this entry existed:
+- the migration's own header (`20260826150000:184-186`): *"Nothing applies migrations to the TEST
+  project automatically (supabase-migrate.yml targets PRODUCTION only)"*; and
+- Phase 163's verification report, which records that the gate prints `SKIP (Part 3)` and that
+  `ci.yml`'s whole-file anti-SKIP net keys on a marker STARTING `SKIP:` — which `SKIP (Part 3):`
+  does not match — concluding *"the lane is GREEN and no CI signal will ever report the unapplied
+  state."*
+
+What THIS entry adds is the **permanence**, which neither source drew out: because nothing applies
+migrations to TEST *at all*, the pre-apply state never resolves on its own. Both prior sources
+describe a condition that reads as transitional. It is not. That is the finding, and it is
+narrower than "SKIP-01 was discovered here".
 
 **The recorded state MOVED rather than went stale.** Measured on both databases 2026-08-26:
 

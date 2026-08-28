@@ -509,7 +509,14 @@ describe("SC4 — uniform notFound, session-keyed owner predicate", () => {
     // Lane B additionally selects `status`, the column the WR-01 lane gate
     // reads (a probe-derived lane cannot distinguish "matched because
     // published" from "matched because owner").
-    expect(STATE.observed.requestSelects).toHaveLength(2);
+    //
+    // Phase 164 (SHARE-04) widened this from 2 to 3: after the owner probe
+    // resolves an unpublished row the page ALSO reads that strategy's
+    // share-link existence on the same request-scoped client. The count is
+    // still pinned exactly, not loosened to `>= 2`, because an unbounded
+    // number of request-client reads on this lane is itself the thing worth
+    // noticing — every one of them runs on a page an owner loads.
+    expect(STATE.observed.requestSelects).toHaveLength(3);
     expect(STATE.observed.requestSelects[0]).toBe(SIGNATURE_SELECT);
     const laneBSelect = STATE.observed.requestSelects[1];
     for (const col of SIGNATURE_SELECT.split(", ")) {
@@ -522,6 +529,28 @@ describe("SC4 — uniform notFound, session-keyed owner predicate", () => {
       laneBSelect,
       "Lane B select must carry `status` — the WR-01 lane gate reads it",
     ).toContain("status");
+  });
+
+  it("10. the share-state read selects `revoked_at` ONLY — no MAC input reaches a render path (SHARE-04)", async () => {
+    givenOwnerDraft();
+
+    await renderPage();
+
+    // WHY THIS IS A SEPARATE, NAMED ASSERTION rather than a clause of the one
+    // above: `generation` and `nonce` are the two inputs `deriveShareToken`
+    // MACs to produce a share token. The owner UI needs to know THAT a link is
+    // live, never WHICH link it is — the URL comes back from the idempotent
+    // mint route, called by the client. A well-meaning "while we're here, grab
+    // the generation so we can show the link count" edit would put key material
+    // on a server-rendered page's data path, and nothing else in this file
+    // would notice. This is the sole control for that edit.
+    const shareSelect = STATE.observed.requestSelects[2];
+    expect(
+      shareSelect,
+      "the owner lane must read the share row's revoked_at (existence, not the counter)",
+    ).toBe("revoked_at");
+    expect(shareSelect).not.toContain("generation");
+    expect(shareSelect).not.toContain("nonce");
   });
 });
 

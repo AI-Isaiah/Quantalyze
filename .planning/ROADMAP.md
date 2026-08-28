@@ -403,10 +403,48 @@ Plans:
   4. Revoke is immediate and convergent: regeneration kills previously-copied links; a revoked/unknown token renders a content-free `410` + `no-store` on the TOKEN lane only (the bare-id lane keeps its uniform 404 or the id becomes an existence oracle); soft-revoke, never DELETE; double-revoke converges; the owner can see whether a live link exists.
   5. The share affordance is honest as a CLASS: no "Link copied!" for a link that cannot work, ONE predicate across all three affordance sites (`FactsheetView`, strategies page, discovery detail), a token-link RECIPIENT never sees a Copy-Link control that rebuilds the URL without the token, and `OwnerUnpublishedNotice`'s "anyone else sees a 404" sentence is corrected in this same phase.
 
-**Plans**: TBD
+**Plans**: 7/7 plans executed
 **UI hint**: yes
 
-**Research note:** the payload-builder seam is the one un-measured integration (extracting the build half of `fetchAndBuildPayload` touches the composite arm AND the single-key basis arm — MEDIUM confidence, wider than it looks). Budget a research pass at plan time; don't discover it. Token-leak channels: Sentry `beforeSend` scrub verified against a REAL captured event, `Referrer-Policy: no-referrer` per-route, generic metadata (link-unfurl dullness accepted explicitly — a private link SHOULD be dull in a chat preview).
+Plans:
+
+- [x] 164-01-PLAN.md — TRACER: builder seam extracted to `src/lib/factsheet/` + phase-148 guard re-pointed to pin the MODULE; HMAC+generation token module (loud at module load); `/factsheet-share/[token]` recipient route + 410 `gone` sibling + proxy/route-contract wiring + structural recipient mode (wave 1)
+- [x] 164-02-PLAN.md — phase-29 guard narrowed to the scenario locked set (never a migration rename) + `strategy_shares` migration (generation model, no token at rest, two INVOKER RPCs) + SKIP-01-clean SQL gate; blocking three-reviewer + TEST hand-apply checkpoint (wave 1)
+- [x] 164-05-PLAN.md — leak-channel closure (Sentry path scrub net-new, per-route no-referrer, Plausible exclusion, recipient analytics suppression) + the ORDERED adversarial cache test, RED-demonstrated (wave 2 — MOVED UP 2026-08-27, gate condition 5)
+- [x] 164-06-PLAN.md — **N1 ONLY** (founder ruling 2026-08-27: N2 dropped): `BEFORE INSERT` trigger forcing `generation = 1`, a **bounded-increment** rule on UPDATE so an owner cannot PATCH `generation` toward the bigint ceiling, and `sanitize_user`'s Art.17 arm made provably non-abortable. ⛔ Do NOT add `SELECT … FOR UPDATE`, and do NOT touch STEP 6 arm (i-b) — see gate row 3 (wave 2 — NEW 2026-08-27, gate condition 2)
+- [x] 164-07-PLAN.md — F6: the cache guard pinned over the TRANSITIVE import graph rather than one file's bytes (wave 2 — NEW 2026-08-27, gate condition 4)
+- [x] 164-03-PLAN.md — mint-or-reuse + atomic-revoke API routes under the audit law; byte-identical-reuse regression pin; 404-as-convergence (wave 3 — DEMOTED 2026-08-27; ⛔ its merge is the gate)
+- [x] 164-04-PLAN.md — SHARE-04 honesty class: status-aware Copy Link (published lane byte-unchanged), factsheet revoke with inline confirm, OwnerUnpublishedNotice corrected, ONE predicate across three affordance sites (wave 3 — DEMOTED 2026-08-27, follows 164-03)
+
+**⛔ Wave restructure 2026-08-27 — 164-03's merge is a gate, not a step.** Six red teams plus a
+synthesizer established that the moment `164-03` merges, the mint route makes `strategy_shares`
+writable by owners — and **N1 becomes reachable by any owner, on their own row, with a single
+PATCH, unrecoverably without DDL, aborting that data subject's own Art.17 erasure.** That is a
+regulatory failure mode the data subject can trigger themselves with no operator remedy, and the
+synthesizer named it the single worst item in the corpus. It is harmless *only* while the table has
+zero rows, which is exactly the window that closes at 164-03.
+
+So the phase is now three waves, and the six conditions at `SYNTHESIS.md:270-287` must ALL hold at
+the moment 164-03 merges:
+
+| # | Condition | Where it lands | State at 2026-08-27 |
+|---|---|---|---|
+| 1 | Nonce in the MAC pre-image **plus** `REVOKE INSERT(nonce), UPDATE(nonce) FROM authenticated`, with a test proving neither RPC names the column | 164-02 | ✅ shipped (`a48b8bf6d`) |
+| 2 | N1 closed at the root: `BIGINT` **plus** `BEFORE INSERT` forcing `generation = 1` **plus** a bounded-increment rule; `sanitize_user`'s Art.17 arm provably non-abortable | 164-02 + **164-06** | ✅ **CLOSED 2026-08-28 (164-06), verified by the orchestrator on a fresh cluster.** Trigger widened to `BEFORE INSERT OR UPDATE`; INSERT forces 1 (closing R3 for BYPASSRLS roles grants never reach); rule (6) bounds every UPDATE to +1, so overflow is unreachable BY CONSTRUCTION and the Art.17 arm needs no handler. The N1 reproduction now rejects at **step 2** — yesterday it ended `Art.17 ERASURE ABORTED 22003`. Gate **103** arms, floors ARMS_FLOOR=166 / SENTINEL_FLOOR=8 (the 106/169 pair written here on 2026-08-27 was a forecast that the final arm count undershot; the file, its closing sentinel roster and ci.yml are mutually consistent at 103 and were re-counted 2026-08-28) |
+| 3 | ~~N2 race in `revoke_strategy_share`~~ | ~~164-06~~ | ✅ **CLOSED AS NOT-A-DEFECT — founder ruling 2026-08-27.** Measured: 3 interleavings × 2 concurrent sessions, all converge; both RPCs are single statements so there is no read-then-write window. ⛔ AND THE PRESCRIBED FIX WAS THE HAZARD — `revoked_at IS NULL` is the convergence CONTRACT, and rewriting arm (i-b) *so the fix could land* would have removed the guard and created the counter-inflation bug. **Nobody may re-open this by adding `FOR UPDATE` or editing arm (i-b) without new measured evidence.** `EXECUTION-EVIDENCE.md` §6 |
+| 4 | F6: cache guard pinned over the transitive graph, `page.cache-isolation.test.tsx` written and demonstrated RED first | **164-07** + 164-05 | ✅ **CLOSED 2026-08-28.** Static half (164-07): the builder's 38-module closure pinned against `next/cache`, RED proven at depth 3. Behavioural half (164-05): the ORDERED spec written and RED-first. ⚠️ 164-05 MEASURED that the plan's claim of two detectors was FALSE — phase-148 stayed green under the poison (it counts `unstable_cache(` in one file; its repo-wide walks ban two symbols the neuter never used), and 164-07 does not cover it either because the page imports the builder, not the reverse. Gap was unowned; closed with a third file. Two detectors is now true BY MEASUREMENT |
+| 5 | F1/F2/F4 shipped (Plausible exclusion, Sentry path scrub, per-route `no-referrer`) | 164-05 | ✅ **CLOSED 2026-08-28.** ⚠️ Two plan errors corrected by measurement: Plausible's `data-exclude` is REMOVED from the current script and its exclusion is gated behind `pageview` while `location.href` rides every event — mitigated by not loading the script on the lane at all; and the `Referrer-Policy` justification was my error (cross-origin sends origin ONLY, so path-vs-query is Referrer-neutral) — the header stands on the SAME-ORIGIN gap, and the false mechanism is now recorded as false in all four files that carried it |
+| 6 | Every one of the above **executed against a real PostgreSQL instance**, run output in the plan — not asserted in prose | all | 🟡 **discharged for what exists today** — 2026-08-27, PostgreSQL 16.13 throwaway cluster: both migrations APPLIED, `test_strategy_shares_rls.sql` **ALL 101 ARMS EXECUTED** exit 0, sequence `{1,1,2,2,2,3}`; arms proven able to fail (3 mutations on 130000, a `USING (true)` tenant leak caught by TENANT 4a). See `EXECUTION-EVIDENCE.md` + `pg-harness/run.sh`. ⛔ Re-arms for 164-06/164-07 |
+
+⚠️ Wave 2 is now `164-05` + `164-06` + `164-07`; wave 3 is `164-03` + `164-04`. `164-06` and
+`164-07` are net-new and unplanned. ⛔ **`20260827130000_sanitize_user_revoke_strategy_shares.sql`
+is BLOCKED on `DRIFT-02`** (root `TODOS.md`) — it was re-based on a repo file that PROD superseded
+via a surgical in-place patch, and shipping it as written would revert a mandatory GDPR repoint,
+pointing Art.17 erasure at a VIEW. Re-base it on `pg_get_functiondef` output from PROD before it
+moves. The three residuals accepted rather than closed (`SHARE-RES-R4`, `SHARE-RES-R2g`,
+`SHARE-RES-F5`) are named in root `TODOS.md`.
+
+**Research note:** the payload-builder seam is the one un-measured integration (extracting the build half of `fetchAndBuildPayload` touches the composite arm AND the single-key basis arm — MEDIUM confidence, wider than it looks). Budget a research pass at plan time; don't discover it. Token-leak channels: Sentry `beforeSend` scrub verified against a REAL captured event, `Referrer-Policy: no-referrer` per-route, generic metadata (link-unfurl dullness accepted explicitly — a private link SHOULD be dull in a chat preview). *(Planning update 2026-08-26: the seam measurement is now done — the composite/basis arms moved to `src/lib/factsheet/` in July, so the extraction in 164-01 is a one-function verbatim move per the founder's final D-06 ruling.)*
 
 ### Phase 164.1: HARDEN-GUARDS — retire the frozen-spine gates that no longer bite, close the composite-stamp twin, put the advisory lock behind a real concurrency test, fix the PYAPI-06 blind spot that let a production service-key mismatch run silently, and close phase 161's deferred error-surface items including WIZFORM-02's code:UNKNOWN class, plus the Phase 163 carry-overs — headed by SKIP-01 (nothing applies migrations to TEST, so the OPS-08 SQL gate SKIPs permanently and the deployed body is tested nowhere), then OPS-08's un-written TypeScript retry half, the freshness UTC day-granularity residual, the TEST/PROD function-revision drift, the audit-coverage blind spot, and the tracked-PII decision (INSERTED)
 
@@ -414,6 +452,13 @@ Plans:
 **Requirements**: TBD (original scope) + carry-overs SKIP-01, OPS-08-TS, OPS-08-F2, OPS-08-F9, OPS-08-F8, WR-06-UTC, DRIFT-01, H-0001, PII-01, HONEST-08-RESIDUAL
 **Depends on:** Phase 164
 **Plans:** 0 plans
+
+**Cross-phase note from Phase 164 planning (2026-08-26):** the phase-29 frozen-spine migration
+guard's `FORBIDDEN_MIGRATION_RE` is narrowed IN PHASE 164 (plan 164-02, founder ruling) from the
+two-alternative substring to `/scenario/i` — the guard's own locked set (`scenario_shares`,
+`get_shared_scenario`, `create_scenario_share`) all match it, and the second alternative
+false-positived on `strategy_shares`. When 164.1 retires frozen-spine gates, treat that narrowing
+as the already-done 164 slice — do not edit the same guard a second time with a second rationale.
 
 **Carried in from Phase 163 (routed 2026-08-26).** Each item's full statement, measurement, and
 the reason it was NOT fixed in 163 live in root `TODOS.md` — the single source of truth. Do not
@@ -428,38 +473,93 @@ re-derive them here; read the entry before planning.
   expire so a permanent SKIP goes loud. ⚠️ (a) touches a shared, contended, worker-less database;
   not a one-line CI edit. ⚠️ Generalises: ANY migration self-check that tolerates pre-apply is
   permanently silent on TEST.
+
 - **[OPS-08-TS]** The SQL half of OPS-08 raises `serialization_failure` (40001); nothing in `src/`
   branches on it. Measured at HEAD 2026-08-26: zero non-test hits. A lost race still answers a
   blanket 500. Fix: retry once at the enqueue call sites (allocator holdings sync, csv-finalize).
+
 - **[OPS-08-F2]** Both pg_cron fan-out paths catch `WHEN OTHERS` around the enqueue and report
   success, so a tick UNDER-COUNTS silently. Pre-existing. Fix: surface a non-zero failure count.
+
 - **[OPS-08-F9]** `test_enqueue_internal_destrict.sql` has no `ALL N ARMS EXECUTED` sentinel — any
   arm can be neutered and the file still exits 0. ⚠️ Not free-standing: needs `SENTINEL_FLOOR`
   7→8 and `ARMS_FLOOR` 63→68 in `ci.yml` plus the derivation entry in
   `ci-anti-skip-gate.contract.test.ts`, in ONE diff.
+
 - **[OPS-08-F8]** The `sql-tests` loop exits on first failure, so one expected-red file suppresses
   ~40 of ~70 others. Fix: aggregate failures, or make expected-red a per-file declaration.
+
 - **[WR-06-UTC]** `series_end` is day-granular; a row stamped with a future UTC date renders
   "ends in the future". ⛔ Must fix `bucketSeriesAge` (`src/lib/freshness.ts`) and `bucketByAge`
   (`FactsheetView.tsx`) in ONE commit — half-fixing manufactures a new two-surface contradiction.
   ⚠️ The VIEWER's timezone is irrelevant (both sides are absolute instants); the offset enters on
   the write side. LATENT on PROD — census 2026-08-26: 20 strategies with a series, **0**
   future-dated. The regression test must SEED the future-dated row; a browser sweep proves nothing.
+
 - **[DRIFT-01]** TEST runs an **older revision** of `_enqueue_compute_job_internal` (corrected
   2026-08-26 — not a comment-stripped copy: PROD stripped = 3172 chars vs TEST raw = 3093), so no
   CI run exercises the migration gate's comment-strip. Root cause is now known: TEST is
   `db push`-ed, with duplicate applications in its ledger. Subsumed by **SKIP-01** fix (a).
+
 - **[H-0001]** `findMutations`' single-line `from(...).insert(...)` regex is blind at **6** known
   call sites (re-measured 2026-08-26 — the count grew, it was not just stale line numbers). Fix
   the detection, un-skip the intended-behavior test in `audit-coverage.test.ts`, re-run the census.
+
+- **[161-ERRPREFIX]** (founder ruling 2026-08-26) `KeyPermissionBadge.tsx:140` renders
+  `err.code ? `${err.code}: ${message}` : message`, so a founder with a broken key reads
+  `KEY_UNDECRYPTABLE: This stored key can no longer be decrypted…`. RULED: **split** — prose to the
+  user, structured code to the log and Sentry breadcrumb. ⚠️ CLASS change: the same site emits other
+  codes (PROBE_BACKEND_UNAVAILABLE…), so branch the class, not the one string. The prefix was
+  deliberate (comment at :137-138, support-ticket greppability) — preserve that property in the logs.
+
 - **[HONEST-08-RESIDUAL]** The shipped staler-of-two badge is verified live on PROD, but both
   visible rows bind to the series arm, so "correct staler-of-two" and "always binds to series"
   are not yet distinguished. `FreshnessChip`'s own comment warns over-binding would delete the
   sync copy everywhere. Prove the sync arm still renders, using a published row with a fresh
   series (one exists — newest series end is 1 day old — but not on the `crypto-sma` cohort).
+
 - **[PII-01]** Decide whether the `13-REVIEWS/` AI-review payload artifacts stay tracked (5
   occurrences of a personal address, public repo, no ongoing consumer). Deleting forward does not
   remove them from history — that limit is deliberate and stands. If kept, record the decision.
+
+**Carried in from Phase 164's red-team (routed 2026-08-27).** Six red teams plus a synthesizer
+found that ~13 of 17 items in the 164 corpus were **caused by the workflow, not by the domain**
+(`SYNTHESIS.md` §7). The founder adopted three of the eight proposed process changes and declined
+the fourth (a `gsd-plan-checker.md:752` change — upstream gsd-core, not ours to fork). These are
+the adopted three. They are **process standards, not features**: each one is a gate that would have
+caught defects this phase spent 39 commits and three fix rounds failing to close.
+
+- ⭐ **[PROC-01] A runnable throwaway PostgreSQL instance BEFORE authoring, and its run output in
+  the plan.** Root cause of every `[M]`-severity finding in the corpus (R1, R2a, R2b, R2b′, R3, N1,
+  N2). A 456-line migration and a 536-line SQL gate were authored, committed, declared done, and
+  reviewed by three specialists with **zero executions** — the executor's own words were "NOT RUN
+  — no local psql run was attempted", and the plan's `<automated>` block was English prose. Every
+  one of those seven defects was later found on an ad-hoc cluster that exists in no plan, no skill
+  and no CI lane. Fix: an `initdb`/docker script plus one CI lane, and a PLAN rule that a migration
+  task's `<automated>` block must be a **command**, not a sentence. ⛔ Do not conflate with
+  **SKIP-01** — that is about applying migrations to TEST; this is about executing them *anywhere*
+  before review. Both are needed; neither substitutes for the other.
+
+- ⭐ **[PROC-02] Reviewers must declare execution status, and UNEXECUTED blocks.** `gsd-code-reviewer`
+  is read-only **by construction**, and nothing in the loop ever said so out loud — so three clean
+  reviews of a never-executed migration read exactly like three clean reviews of a tested one. This
+  is the cheapest item in the corpus (one agent-prompt field) and it is what would have surfaced
+  PROC-01 at review time instead of at red-team time.
+
+- **[PROC-03] Per-arm `RED-UNDER` annotation in SQL gate files.** Every assertion arm states, inline,
+  the single mutation that makes it fail. Already applied by hand across
+  `test_strategy_shares_rls.sql`'s 101 arms during 164's fix rounds — this routes the *convention*
+  so the next gate file is born with it. Directly serves the founder rule that **a test that cannot
+  fail is worse than none**: two structurally-unfailable arms were found and deleted in 164 (a
+  post-rejection mutation probe inside a PL/pgSQL `BEGIN…EXCEPTION` implicit subtransaction, and a
+  `pg_get_functiondef` regex satisfiable by an in-body `--` comment).
+
+⚠️ **Explicitly NOT adopted** (founder, 2026-08-26): the "paths not facts" change to
+`gsd-plan-checker.md:752`, and Team 6's remedy #9 (redesign `strategy_shares` as an insert-only
+generations table with the current state as a view). #9 would close R1/R2a/R2b/R3/N2 *by
+construction* and is recorded as the better design — it was declined on cost, and because the
+per-row nonce buys ~90% of its benefit today on an empty table. If this table is ever redesigned,
+start from `SYNTHESIS.md` §6 remedy 2.
 
 Plans:
 
@@ -533,6 +633,60 @@ Plans:
 
 - [ ] TBD (run /gsd-plan-phase 164.2 to break down)
 
+### Phase 164.3: VACUITY — a control that cannot fail must be caught by machine, not by red team (INSERTED)
+
+**Goal**: A control that cannot fail is detected by a machine, on every push, instead of by a six-team red team once per milestone.
+**Depends on:** Phase 164 (its measured corpus is this phase's specification), ordered after 164.1 and 164.2 — numeric order only, no dependency on either.
+**Requirements**: TBD (run `/gsd-discuss-phase 164.3`)
+
+**Why this exists — measured, not felt.** Phase 164 produced **five distinct vacuity mechanisms**,
+and the DRIFT family alongside them. ⛔ Every single one was **GREEN in CI**, survived code review,
+and was found only by executing adversarially after a red team. That is the finding: not "we write
+weak tests", but **nothing in the pipeline can tell a control that holds from one that cannot fail.**
+Detection currently costs a red team.
+
+| # | Mechanism | Where it hid |
+|---|---|---|
+| 1 | Post-rejection probe inside a PL/pgSQL `BEGIN…EXCEPTION` — an implicit subtransaction, so the arm reads its own rollback | Found twice: removed at TRIGGER 1, survived undeclared at TENANT 5d-5g. A genuine cross-tenant write placed inside the handler moved the victim's counter **and the file went green** |
+| 2 | `pg_get_functiondef` regex satisfiable by an in-body `--` comment | Migration STEP 2 arms |
+| 3 | A diagnostic computing `pre + 1`, which overflowed in exactly the state it was diagnosing — the arm aborted on its own arithmetic | N1 3a / N1 1c |
+| 4 | Partial bitmask: `tgtype & 16` only, so a trigger narrowed back to `BEFORE UPDATE` satisfied every remaining term and the INSERT pin could be deleted invisibly | Fixed in the migration, **still blind in the durable gate** |
+| 5 | An arm made structurally unreachable by an earlier arm covering the same state — the reachable one then reported the defect as its **exact opposite** ("row is STILL LIVE" when the row was deleted) | SANITIZE 1c / 1e |
+
+Plus the **drift** half, same root — *the claim and the thing are never compared*: `DRIFT-02`
+(repo vs PROD, which nearly shipped a GDPR regression), `DRIFT-01` (TEST vs repo), `SKIP-01` (a gate
+that SKIPs forever and reads as PASS), and stale comments that **argued away** the coverage which
+would have caught a token-resurrection bug.
+
+**Success Criteria** (what must be TRUE):
+
+  1. **A mutation runner exists and runs in CI.** Every arm in `supabase/tests/*.sql` already carries a `RED-UNDER: <the exact mutation that makes me fail>` annotation. The runner machine-applies each, asserts the file goes RED, and restores. ⭐ This alone would have caught mechanisms 1, 4 and 5 with no human involved. It is the highest-value item in the phase by a distance.
+  2. **The throwaway-PostgreSQL lane is real** — `PROC-01`'s implementation. Today it is a script under `.planning/`, written mid-phase, whose own two defects (reusing another agent's cluster then `DROP SCHEMA public CASCADE`; RLS enabled on nothing but the table under test) were found by reviewers using it.
+  3. **A static linter rejects the five measured shapes** on new gate files, so mechanism 6 is a lint failure rather than a red-team finding.
+  4. **No whole-body `CREATE OR REPLACE` merges without a repo-vs-PROD diff** (`DRIFT-02b`). A function that has ever been surgically patched has no true body in the repo, and "re-base on the latest definition" is unsatisfiable from files alone.
+  5. **A plan's claims about the codebase are verified, not trusted.** A PLAN.md asserts line
+     anchors, function signatures and RPC return shapes — and NOTHING compares them to the tree.
+     Both wave-3 plans were stale when execution reached them: `164-03` specified a two-argument
+     `deriveShareToken` that would have minted links failing verification (the token gained a third
+     input mid-phase), and `164-04` anchored edits at `v2/page.tsx:563-573` in a file that had
+     shrunk to 423 lines. Neither is catchable by review — a reviewer reads the plan against the
+     plan. Both were caught by grepping the plan for what the phase had learned and re-resolving
+     its anchors, which is mechanisable: resolve every `file:line` and every named symbol in a
+     PLAN.md at execute time, and fail loud on a miss.
+
+  6. ⛔ **Each of the five is demonstrated against the phase-164 corpus** — re-introduce each historical mechanism and show the new machinery catches it. A vacuity detector that has never caught a vacuity is the joke that writes itself.
+
+**Explicitly OUT of scope:** the GSD-machinery gaps — `depends_on` yielding `blocked_by: {}` so plan
+ordering is unenforced, wave frontmatter drifting from ROADMAP, and `NYQ-01`. Same smell, different
+system (upstream `gsd-core`, not this repo). Mixing them in makes this unshippable. Book them
+separately.
+
+**Plans:** 0 plans
+
+Plans:
+
+- [ ] TBD (run /gsd-plan-phase 164.3 to break down)
+
 ### Phase 165: DEPS — The 9-PR dependabot campaign
 
 **Goal**: All 9 open dependabot PRs are RESOLVED — landed or deliberately closed — in the research-verified order with the full suite green between each, and production pandas is never downgraded
@@ -559,7 +713,8 @@ Plans:
 | 161. WIZERR honest errors | 0/? | Not started | - |
 | 162. HONEST visible truth | 0/? | Not started | - |
 | 163. HARDEN reliability + security | 9/9 | Complete | v0.75.0.0 |
-| 164. SHARE revocable links | 0/? | Not started | - |
+| 164. SHARE revocable links | 0/7 | Planned | - |
+| 164.3 VACUITY (mechanical anti-vacuity) | 0/? | Inserted 2026-08-28 | - |
 | 165. DEPS dependabot campaign | 0/? | Not started | - |
 
 ### Requirement Coverage (v1.20)

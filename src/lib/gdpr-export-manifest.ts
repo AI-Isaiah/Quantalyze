@@ -735,6 +735,24 @@ export const USER_EXPORT_TABLES: readonly UserExportTable[] = [
   { kind: "direct", table: "scenario_shares", user_column: "created_by" },
   { kind: "direct", table: "scenarios", user_column: "allocator_id" },
   { kind: "direct", table: "strategies", user_column: "user_id" },
+  // ✅ LANDED 2026-08-28. The PENDING block that stood here is gone because its
+  // three steps are done: migration 20260827120000 hand-applied to TEST after
+  // the three-reviewer gate, `strategy_shares` added to database.types.ts, and
+  // the entry below written. There was never a step 4 — the companion migration
+  // 20260827130000 supplies a REAL Art. 17 policy (a live `UPDATE
+  // strategy_shares SET revoked_at = now(), generation = generation + 1` arm),
+  // which is strictly better than a SANITIZE_PARITY_ALLOWLIST key asserting no
+  // policy is needed.
+  //
+  // Why it belongs in the export: user-owned via `created_by` (NOT NULL
+  // REFERENCES profiles ON DELETE CASCADE) — one row per strategy recording
+  // that the owner created or revoked a factsheet share link, and when. Art. 15
+  // personal data, exactly like `scenario_shares` above. ⛔ Nothing exported
+  // here is a credential: D-02 forbids storing a token raw or hashed, and both
+  // `generation` and `nonce` are inert HMAC INPUTS without SHARE_TOKEN_SECRET,
+  // which lives in Vercel and not in this database. The export's subject is the
+  // very person who can press "Copy Link" for the real url.
+  { kind: "direct", table: "strategy_shares", user_column: "created_by" },
   { kind: "direct", table: "user_app_roles", user_column: "user_id" },
   { kind: "direct", table: "user_favorites", user_column: "user_id" },
   { kind: "direct", table: "user_notes", user_column: "user_id" },

@@ -14,7 +14,7 @@ import { createServerClient } from "@supabase/ssr";
 // would be bounced to the dashboard mid-reset. /forgot-password is NOT
 // bounce-exempt: an already-authed user landing there bounces to the dashboard,
 // matching /login + /signup.
-const PUBLIC_ROUTES = ["/login", "/signup", "/forgot-password", "/reset-password", "/api/health", "/strategy", "/factsheet", "/api/factsheet", "/browse", "/api/keys", "/api/trades", "/api/verify-strategy", "/api/alert-digest", "/portfolio-pdf", "/scenario-share", "/api/benchmark/btc", "/legal", "/demo", "/api/demo", "/for-quants", "/api/for-quants-lead", "/security"];
+const PUBLIC_ROUTES = ["/login", "/signup", "/forgot-password", "/reset-password", "/api/health", "/strategy", "/factsheet", "/api/factsheet", "/browse", "/api/keys", "/api/trades", "/api/verify-strategy", "/api/alert-digest", "/portfolio-pdf", "/scenario-share", "/factsheet-share", "/api/benchmark/btc", "/legal", "/demo", "/api/demo", "/for-quants", "/api/for-quants-lead", "/security"];
 // 51-REVIEW (red-team): /api/health is a documented public liveness probe, but
 // it was NOT in PUBLIC_ROUTES — the proxy session gate runs BEFORE the route
 // handler, so an unauthenticated uptime/ops probe got 307→login instead of
@@ -115,6 +115,15 @@ export async function proxy(request: NextRequest) {
   const isLegalRoute = path === "/legal" || path.startsWith("/legal/");
   const isScenarioShareRoute =
     path === "/scenario-share" || path.startsWith("/scenario-share/");
+  // Phase 164 (SHARE-01) — the tokenized factsheet recipient lane, plus its
+  // `/factsheet-share/gone` 410 sibling. The existing "/factsheet" PUBLIC_ROUTES
+  // entry does NOT cover this: matching is exact-or-`route + "/"`, and
+  // "/factsheet-share" is neither "/factsheet" nor prefixed by "/factsheet/".
+  // Bounce-exempt because an AUTHED owner opening their own share link (the
+  // first thing anyone does after clicking Copy Link) would otherwise be 307'd
+  // to the dashboard and never see the page they just shared.
+  const isFactsheetShareRoute =
+    path === "/factsheet-share" || path.startsWith("/factsheet-share/");
   // /reset-password is public (anon can render the "request a new link"
   // affordance) BUT is reached in the normal flow WITH a recovery session that
   // /auth/callback mints from the email token — so an authed user there must
@@ -133,6 +142,7 @@ export async function proxy(request: NextRequest) {
     isPortfolioPdfRoute ||
     isLegalRoute ||
     isScenarioShareRoute ||
+    isFactsheetShareRoute ||
     isResetPasswordRoute;
   if (session && isPublicRoute && !isApiRoute && !isAuthBounceExempt) {
     const redirect = request.nextUrl.searchParams.get("redirect");

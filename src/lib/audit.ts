@@ -426,6 +426,22 @@ export type AuditAction =
   // the union-s first semicolon.)
   | "strategy.ownership_mark"
   | "strategy.rename"
+  // --- Phase 164 / SHARE-01 + SHARE-03: the strategy share capability ------
+  // share.mint = the owner minted OR REUSED the share link for one of their
+  // own strategies. share.revoke = the owner killed every previously-copied
+  // link by bumping the stored generation counter. Handing out a capability
+  // URL for a PRIVATE factsheet, and withdrawing it, are the two halves of one
+  // repudiation surface -- auditing only the mint would leave who killed this
+  // link, and when, unanswerable (T-164-11).
+  // metadata carries the generation ONLY and NEVER the token. The token is a
+  // bearer credential and an append-only audit table is not a secret store --
+  // a support query or a GDPR export that returned one would hand out a
+  // working link to a private strategy (T-164-13).
+  // (Keep this comment free of the semicolon character and of double
+  // quotes -- the Python parity test-s TS union parser captures only up to
+  // the union-s first semicolon.)
+  | "strategy.share.mint"
+  | "strategy.share.revoke"
   // --- Phase 146.2 / T-146.2-12: the CSV finalize commit -------------------
   // csv_finalize = the wizard-s CSV upload committed a strategy, its
   // verification row and its whole daily-returns series in ONE transaction
@@ -646,6 +662,13 @@ export const AUDIT_ACTION_ENTITY_TYPE_MAP = {
   // Phase 150 / OWN-03 — entity_id is the strategies id for both.
   "strategy.ownership_mark": "strategy",
   "strategy.rename": "strategy",
+  // Phase 164 / SHARE-01 + SHARE-03 — entity_id is the strategies id for both.
+  // `strategy` and not a `strategy_share` entity_type on purpose: the share row
+  // is an attribute of the strategy from the audit trail's point of view, its
+  // id is not stable across a revoke-and-remint, and entity_id must pair with
+  // an id a forensic query can actually resolve.
+  "strategy.share.mint": "strategy",
+  "strategy.share.revoke": "strategy",
   // Phase 146.2 / T-146.2-12 — entity_id is the newly committed strategies id.
   // `strategy` is the internally-consistent entity_type for the same reason
   // `trades.upload` anchors there: the fold writes a strategy, a verification

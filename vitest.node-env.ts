@@ -32,6 +32,10 @@
  * per-file because the population is genuinely interleaved.
  */
 export const NODE_ENV_TEST_FILES: string[] = [
+  // D-164-A (2026-08-27): newly COLLECTED — `scripts/**/*.test.ts` was absent
+  // from vitest.config.ts's INCLUDE, so this file had never run. Pure fs +
+  // regex assertions over the GDPR coverage hook; zero DOM tokens (measured).
+  "scripts/check-gdpr-export-coverage.test.ts",
   "src/__tests__/admin-csrf-ratelimit-grep.test.ts",
   "src/__tests__/allocator-equity-rls.test.ts",
   "src/__tests__/allocator-holdings-rls.test.ts",

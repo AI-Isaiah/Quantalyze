@@ -10,6 +10,16 @@ import { SERIES_FRESH_DAYS, SERIES_STALE_DAYS } from "@/lib/freshness";
 import { TrustTierLabel } from "@/components/strategy/TrustTierLabel";
 import { OwnershipTag } from "@/components/strategy/OwnershipTag";
 import { RenameStrategyDialog } from "@/components/strategy/RenameStrategyDialog";
+// Phase 164 (SHARE-04) — THE ONE SHARE PREDICATE, shared with the other two
+// affordance sites (the strategies page and discovery detail, both of which go
+// through `ShareableLink` in the same module). Importing the decision rather
+// than restating it is what makes "one predicate, three sites" a fact a grep can
+// check instead of a promise in a comment.
+import {
+  shareAffordanceMode,
+  mintShareUrl,
+  type ShareAffordanceMode,
+} from "@/components/strategy/ShareableLink";
 import type { CapitalOwnership } from "@/lib/capital-ownership";
 import { FactsheetProvider, useActiveComparator, useComparator, useDisplay, usePayload, useToggles, useXRange } from "./factsheet-context";
 import { BasisProvider, useBasis, useBasisMetrics, useBasisOrCash, useBasisSeriesView, useAppliedLeverage, leverageApplies, leverageEligibleFor, mtmDisabledReasonCopy, mtmReasonTone, smoothedDisabledReasonCopy, type Basis } from "./basis-context";
@@ -108,16 +118,22 @@ const trackSectionToggle = (section: string) => (open: boolean) =>
   trackFactsheetEvent("factsheet_v2_section_toggle", { section, open });
 
 /**
- * Phase 148 + 150 — the OWNER-LANE render props, threaded together because they
- * share one rule: every one of them is derived from the page's lane decision and
- * NONE of them may live on `FactsheetPayload`. The payload is the object the
- * shared, id-keyed public cache serves; lane state inside it would be handed to
+ * Phase 148 + 150 — the LANE render props, threaded together because they share
+ * one rule: every one of them is derived from the route's lane decision and NONE
+ * of them may live on `FactsheetPayload`. The payload is the object the shared,
+ * id-keyed public cache serves; lane state inside it would be handed to
  * anonymous readers for the full TTL (T-150-27, and the phase-148 pins are the
  * regression gate).
  *
- * All three are `undefined` on every non-owner mount, and each renders ZERO
- * nodes when absent — no wrapper, no reserved space — so the public masthead is
- * byte-identical to today.
+ * All of them are `undefined` on every default mount, and each renders ZERO
+ * nodes (or suppresses none) when absent — no wrapper, no reserved space — so
+ * the public masthead is byte-identical to today.
+ *
+ * ⚠️ The name is now narrower than the contents: phase 164 added
+ * `recipientShare`, which is set by the tokenized RECIPIENT lane, not by an
+ * owner. The interface was not renamed because the rule it encodes — lane state
+ * rides the render props, never the payload — is unchanged, and a rename would
+ * churn five call sites for no invariant. Read "OwnerLane" as "lane".
  */
 interface OwnerLaneProps {
   /** Viewer-context notice rendered ABOVE the masthead (default undefined).
@@ -127,8 +143,25 @@ interface OwnerLaneProps {
    *  (AllocationDashboardV2.tsx:162, ScenarioFactsheetChart.tsx:237).
    *
    *  A string union rather than a boolean so later phases can add notice kinds
-   *  without a second prop. */
-  viewerNotice?: "owner_unpublished";
+   *  without a second prop. Phase 164 (SHARE-01) is that later phase:
+   *  "shared_privately" is passed by the tokenized RECIPIENT lane
+   *  (`/factsheet-share/[token]`). */
+  viewerNotice?: "owner_unpublished" | "shared_privately";
+  /**
+   * Phase 164 (SHARE-01) — the viewer arrived via a private share TOKEN, so
+   * every affordance that hands out or rebuilds a URL must be suppressed.
+   *
+   * ⛔ A RENDER PROP, NEVER A PAYLOAD FIELD. `FactsheetPayload` is the object
+   * the shared id-keyed cache serves, so lane state folded into it would be
+   * cached once and published to every subsequent reader — the T-150-27 rule
+   * that `viewerNotice`, `ownershipMark` and `renameTarget` already follow.
+   *
+   * ⛔ This does NOT replace `useShareMode()` (D-09). The `?share=1` mechanism
+   * on the id route stays byte-identical and keeps serving PUBLISHED strategies;
+   * this flag is the token route's structural equivalent, because that URL has
+   * no query param to sniff. Both are true share mode; see `ControlBar`.
+   */
+  recipientShare?: boolean;
   /**
    * Phase 150 / OWN-03 — the capital mark, READ-ONLY here. The mark is SET from
    * /my-strategies (D-09); the factsheet only shows it, so there is deliberately
@@ -142,6 +175,28 @@ interface OwnerLaneProps {
    * unpublished row the session owns — the D-17 gate for free).
    */
   renameTarget?: { id: string; name: string };
+  /**
+   * Phase 164 / SHARE-04 — the owner-lane SHARE state, and the reason the Copy
+   * Link control stops lying.
+   *
+   * PRESENCE IS THE PREDICATE. The v2 page passes this only on `lane === "owner"`,
+   * which is reachable only for an UNPUBLISHED row the session owns (the same
+   * free gate `renameTarget` rides). So `ownerShare !== undefined` ⇔ "not
+   * published", which is exactly the input `shareAffordanceMode` needs, with no
+   * second predicate to keep in sync. Absent ⇒ the published lane, whose URL is
+   * byte-identical to before this phase (D-09).
+   *
+   * `hasActiveShare` is the live-link half: it decides whether the revoke control
+   * renders at all, and which of the owner notice's two TRUE sentences is shown.
+   *
+   * ⛔ A RENDER PROP, NEVER A PAYLOAD FIELD — T-164-01. `FactsheetPayload` is the
+   * object the shared id-keyed cache serves; owner share state folded into it
+   * would be cached once and handed to anonymous readers for the full TTL.
+   *
+   * ⛔ It carries NO token and NO `generation`. The URL is obtained by the CLIENT
+   * calling the idempotent mint route, which returns the same url every time.
+   */
+  ownerShare?: { hasActiveShare: boolean };
 }
 
 /** The masthead H1's class string, extracted so the owner and public arms of
@@ -152,16 +207,20 @@ const MASTHEAD_H1 =
 export function FactsheetView({
   payload,
   viewerNotice,
+  recipientShare,
   ownershipMark,
   renameTarget,
+  ownerShare,
 }: { payload: FactsheetPayload } & OwnerLaneProps) {
   return (
     <FactsheetProvider payload={payload}>
       <FactsheetShell
         payload={payload}
         viewerNotice={viewerNotice}
+        recipientShare={recipientShare}
         ownershipMark={ownershipMark}
         renameTarget={renameTarget}
+        ownerShare={ownerShare}
       />
     </FactsheetProvider>
   );
@@ -175,8 +234,10 @@ export function FactsheetView({
 function FactsheetShell({
   payload,
   viewerNotice,
+  recipientShare,
   ownershipMark,
   renameTarget,
+  ownerShare,
 }: { payload: FactsheetPayload } & OwnerLaneProps) {
 
   // One-shot view event when the page mounts so adoption of the new
@@ -221,8 +282,10 @@ function FactsheetShell({
     <FactsheetBody
       payload={payload}
       viewerNotice={viewerNotice}
+      recipientShare={recipientShare}
       ownershipMark={ownershipMark}
       renameTarget={renameTarget}
+      ownerShare={ownerShare}
     />
   );
 }
@@ -263,10 +326,26 @@ export function FactsheetBody({
   topSlot,
   scenarioMode = false,
   viewerNotice,
+  recipientShare = false,
   ownershipMark,
   renameTarget,
+  ownerShare,
 }: { payload: FactsheetPayload } & FactsheetBodyOptions) {
   const { colorblind, darkMode } = useDisplay();
+  // Phase 164 / SHARE-04 — the live-link fact, held HERE because two children on
+  // opposite sides of the tree read it (the notice above the masthead, the share
+  // + revoke controls in the ControlBar) and because minting or revoking must
+  // update BOTH in the same tick. The server value seeds it; a successful mint
+  // flips it true and a converged revoke flips it false, with no refetch — the
+  // route's answer is already known at that point, so re-reading it would only
+  // add a window in which the page contradicts what the user just did.
+  //
+  // ⛔ Not `useEffect`-synced from the prop. A prop change only arrives with a
+  // fresh server render, which already remounts this subtree; an effect would
+  // additionally clobber a just-minted `true` on any unrelated re-render.
+  const [shareLive, setShareLive] = React.useState(
+    ownerShare?.hasActiveShare ?? false,
+  );
   // Centralised palette — resolve once, apply as CSS custom properties on
   // the article container so descendants pick up the new tokens via var().
   const resolved = resolvePalette({ darkMode, colorblind });
@@ -298,7 +377,10 @@ export function FactsheetBody({
             document content, so the notice is the article's FIRST child — above
             the masthead, before any number. NOT `topSlot`, which renders BELOW
             the masthead (UI-SPEC:97). Absent prop ⇒ zero nodes (GUARD-02). */}
-        {viewerNotice === "owner_unpublished" && <OwnerUnpublishedNotice />}
+        {viewerNotice === "owner_unpublished" && (
+          <OwnerUnpublishedNotice hasActiveShare={shareLive} />
+        )}
+        {viewerNotice === "shared_privately" && <SharedPrivatelyNotice />}
         {!hideHeader && (
           <FactsheetHeader
             payload={payload}
@@ -309,7 +391,12 @@ export function FactsheetBody({
         {topSlot}
         <KpiStrip />
         <SectionNav />
-        <ControlBar scenarioMode={scenarioMode} />
+        <ControlBar
+          scenarioMode={scenarioMode}
+          recipientShare={recipientShare}
+          ownerShare={ownerShare ? { hasActiveShare: shareLive } : undefined}
+          onShareLiveChange={setShareLive}
+        />
 
         <div className="mt-6 grid grid-cols-1 lg:grid-cols-[1fr_380px] gap-x-12 gap-y-10">
           <section className="flex flex-col gap-10 min-w-0">
@@ -689,8 +776,33 @@ function NotEnoughDataPanel({ title, body }: { title: string; body: string }) {
  * an owner is MOST likely to share the URL "for when it's ready", so the
  * placeholder must carry the disclosure too. One exported component keeps the
  * UI-SPEC copy single-sourced; do NOT inline a second copy of the banner.
+ *
+ * ─────────────────────────────────────────────────────────────────────────
+ * Phase 164 (SHARE-04) — TWO VARIANTS, BOTH TRUE, BECAUSE ONE SENTENCE STOPPED
+ * BEING TRUE.
+ *
+ * The original copy said "only you can see this … anyone else who opens this
+ * link sees a 404". Both clauses become FALSE the moment the owner mints a share
+ * token: someone else CAN see the factsheet, and they do not get a 404. That is
+ * not a cosmetic staleness — it is the platform telling an owner their draft is
+ * unreachable while a recipient is reading it, which is precisely the class of
+ * dishonest affordance this milestone exists to remove. The 404 sentence must
+ * therefore not merely be softened; in the live-link state it must not render.
+ *
+ * The heading branches for the same reason. "only you can see this" is a
+ * disclosure claim, not a label, and a live link falsifies it exactly as it
+ * falsifies the body.
+ *
+ * ⚠️ `hasActiveShare` defaults FALSE, so every call site that does not pass it
+ * gets the pre-phase-164 copy verbatim — the placeholder arm, and any future
+ * caller that has no share state to offer. Absence of knowledge renders the
+ * conservative sentence, never the permissive one.
  */
-export function OwnerUnpublishedNotice() {
+export function OwnerUnpublishedNotice({
+  hasActiveShare = false,
+}: {
+  hasActiveShare?: boolean;
+}) {
   return (
     <section
       role="note"
@@ -698,11 +810,108 @@ export function OwnerUnpublishedNotice() {
       className="mb-6 border border-border bg-surface-subtle px-4 py-3"
     >
       <h2 className="text-caption font-semibold uppercase tracking-[0.18em] text-text-primary">
-        Unpublished — only you can see this
+        {hasActiveShare
+          ? "Unpublished — shared through your private link"
+          : "Unpublished — only you can see this"}
+      </h2>
+      {hasActiveShare ? (
+        <p className="mt-1 text-caption text-text-muted">
+          This factsheet is not published, so it is not listed on Quantalyze. A private share
+          link is live: anyone holding that link can view this factsheet until you revoke it.
+        </p>
+      ) : (
+        <p className="mt-1 text-caption text-text-muted">
+          This factsheet is visible only from the account that uploaded the strategy. Anyone else who
+          opens this link sees a 404 until Quantalyze review publishes it. You can create a private
+          share link to let someone view it without publishing.
+        </p>
+      )}
+    </section>
+  );
+}
+
+/**
+ * Phase 164 (SHARE-04) — the owner's visibility notice WITH the controls it
+ * talks about, for render paths that never reach `<FactsheetView>`.
+ *
+ * ⛔ WHY THIS EXISTS. `page.tsx`'s pending-state early return (the "still
+ * computing" placeholder) rendered `OwnerUnpublishedNotice` alone. That notice
+ * ends with "You can create a private share link to let someone view it without
+ * publishing" — and on that path there was no control to do it. MEASURED
+ * 2026-08-28 in the browser: zero clickable elements on the whole page, under a
+ * sentence promising a capability. That is the same dishonesty class SHARE-04
+ * exists to close, reappearing on the one render the class review did not walk.
+ * The placeholder's own comment says the pending state "is when an owner is MOST
+ * likely to share the URL", which makes the omission worse, not incidental.
+ *
+ * ⛔ WHY THE NOTICE AND THE CONTROLS SHARE ONE STATE, rather than the caller
+ * passing `hasActiveShare` to a notice and mounting buttons beside it. Minting
+ * flips the notice's own text to "shared through your private link … until you
+ * revoke it". If the controls were not driven by the SAME `shareLive`, fixing
+ * the missing mint button would have manufactured a second false claim on the
+ * next render: a notice promising revocation with no revoke control. Both
+ * controls hang off this one state, exactly as `FactsheetView` does.
+ */
+export function OwnerUnpublishedPanel({
+  strategyId,
+  hasActiveShare = false,
+}: {
+  strategyId: string;
+  hasActiveShare?: boolean;
+}) {
+  const [shareLive, setShareLive] = React.useState(hasActiveShare);
+
+  return (
+    <div className="mb-6">
+      <OwnerUnpublishedNotice hasActiveShare={shareLive} />
+      <div className="-mt-4 mb-2 flex flex-wrap items-center gap-2">
+        <ShareLinkButton
+          strategyId={strategyId}
+          ownerShare={{ hasActiveShare: shareLive }}
+          onShareLiveChange={setShareLive}
+        />
+        {shareLive && (
+          <ShareRevokeControl
+            strategyId={strategyId}
+            onShareLiveChange={setShareLive}
+          />
+        )}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Phase 164 (SHARE-01) — the RECIPIENT-lane visibility notice, rendered only
+ * when the tokenized route passes `viewerNotice="shared_privately"`.
+ *
+ * Deliberately the SAME visual shape as `OwnerUnpublishedNotice` (square, flat,
+ * hairline border, subtle surface, `role="note"`, muted neutral, `mb-6` before
+ * the masthead, `h2` because it precedes the masthead h1) — the two are the same
+ * KIND of statement, "here is who can see this document", and rendering them
+ * differently would imply a distinction that does not exist.
+ *
+ * The copy does two jobs and neither is optional. It tells the recipient the
+ * document is private, so they understand this is not a public listing they
+ * stumbled onto. And it says Quantalyze has not published or reviewed it, so a
+ * strategy that never passed review cannot borrow the platform's credibility
+ * from the surrounding chrome. Muted neutral by the DESIGN.md semantic-color
+ * gates: not red (nothing failed) and not amber (there is no one-click remedy).
+ */
+export function SharedPrivatelyNotice() {
+  return (
+    <section
+      role="note"
+      aria-label="Visibility notice"
+      className="mb-6 border border-border bg-surface-subtle px-4 py-3"
+    >
+      <h2 className="text-caption font-semibold uppercase tracking-[0.18em] text-text-primary">
+        Shared privately
       </h2>
       <p className="mt-1 text-caption text-text-muted">
-        This factsheet is visible only from the account that uploaded the strategy. Anyone else who
-        opens this link sees a 404 until Quantalyze review publishes it.
+        The owner of this strategy shared this factsheet with you through a private link.
+        It is not published on Quantalyze and has not been reviewed by Quantalyze. The owner
+        can turn the link off at any time.
       </p>
     </section>
   );
@@ -1480,17 +1689,90 @@ function useShareMode(): boolean {
   return shareMode;
 }
 
-function ShareLinkButton({ strategyId }: { strategyId: string }) {
-  const [copied, setCopied] = React.useState(false);
-  const onClick = React.useCallback(() => {
+/**
+ * Phase 164 (SHARE-04) — the Copy-Link button's four visible states.
+ *
+ * `working` and `failed` are reachable ONLY on the mint lane. The published lane
+ * keeps its original fire-and-forget handler, which has no in-flight state and
+ * whose clipboard rejection deliberately leaves the label alone (FINDING-9), so
+ * `shareButtonLabel` reproduces the pre-phase-164 rendering for it exactly.
+ */
+type ShareCopyPhase = "idle" | "working" | "copied" | "failed";
+
+/**
+ * Label as a pure function of state — extracted so the D-09 byte-identity claim
+ * about the published lane is a two-line argument anyone can check, rather than
+ * something buried in a nested ternary inside JSX.
+ */
+function shareButtonLabel(
+  phase: ShareCopyPhase,
+  mode: ShareAffordanceMode,
+  hasActiveShare: boolean,
+): string {
+  if (phase === "copied") return "Link copied";
+  // ⛔ D-09. The published lane only ever holds "idle" or "copied", so this one
+  // literal IS the whole of its old rendering.
+  if (mode === "public-url") return "Copy share link";
+  if (phase === "working") return hasActiveShare ? "Copying…" : "Creating link…";
+  // Deliberately generic: the mint may have failed, or the mint succeeded and
+  // the clipboard refused. Both mean the same thing to the person standing in
+  // front of it — no working link reached your clipboard — and a label that
+  // named the wrong one would be a guess presented as a fact.
+  if (phase === "failed") return "Couldn't copy the link — try again";
+  return hasActiveShare ? "Copy share link" : "Create share link";
+}
+
+/**
+ * Phase 164 (SHARE-04) — the share affordance, now status-aware.
+ *
+ * THE DEFECT: this component took only `strategyId`, did not know whether the
+ * strategy was published, and built the `?share=1` URL unconditionally. An owner
+ * viewing their own UNPUBLISHED strategy therefore copied a URL that 404s for
+ * whoever they sent it to — and the button said "Link copied", so nothing about
+ * the interaction suggested anything was wrong. That is the founder-hit bug.
+ *
+ * THE FIX IS A BRANCH, NOT A REPLACEMENT (ruling D-09). Published strategies
+ * keep the exact URL and the exact handler they had; unpublished ones mint-or-
+ * reuse a revocable capability. The two mechanisms differ because a public id
+ * and a private capability are different subjects — see `shareAffordanceMode`.
+ *
+ * ⛔ NO "Link copied!" FOR A LINK THAT CANNOT WORK (T-164-15). On the mint lane
+ * every failure — non-2xx, malformed body, absent clipboard, rejected write —
+ * lands in `failed`, and `copied` is set on exactly one path: after an awaited
+ * clipboard write of a url the route actually returned.
+ */
+function ShareLinkButton({
+  strategyId,
+  ownerShare,
+  onShareLiveChange,
+}: {
+  strategyId: string;
+  ownerShare?: { hasActiveShare: boolean };
+  onShareLiveChange?: (live: boolean) => void;
+}) {
+  const [phase, setPhase] = React.useState<ShareCopyPhase>("idle");
+  // THE ONE PREDICATE, imported from the module the other two affordance sites
+  // call (src/components/strategy/ShareableLink.tsx). `ownerShare` is passed
+  // only on the owner lane, which is reachable only for an unpublished row the
+  // session owns — so its absence IS "published", with no second predicate to
+  // drift out of sync.
+  const mode = shareAffordanceMode(ownerShare === undefined);
+  const hasActiveShare = ownerShare?.hasActiveShare ?? false;
+
+  const copyPublishedUrl = React.useCallback(() => {
     if (typeof window === "undefined") return;
+    // ⛔ D-09 — BYTE-IDENTICAL to the pre-phase-164 handler, deliberately. The
+    // URL shape, the fire-and-forget promise, the 1500ms flash and the
+    // log-only rejection arm are all the behaviour a published factsheet has
+    // today, and this phase is not allowed to change any of it.
+    //
     // Strip every query param except `share=1` so recipients don't inherit
     // the sender's transient camera/comparator state.
     const url = `${window.location.origin}${window.location.pathname}?share=1`;
     void navigator.clipboard?.writeText(url).then(
       () => {
-        setCopied(true);
-        window.setTimeout(() => setCopied(false), 1500);
+        setPhase("copied");
+        window.setTimeout(() => setPhase("idle"), 1500);
       },
       () => {
         // FINDING-9 (b06-silentfailure): Log so we can track clipboard
@@ -1502,23 +1784,177 @@ function ShareLinkButton({ strategyId }: { strategyId: string }) {
     );
     trackFactsheetEvent("factsheet_v2_share_copy", { strategy_id: strategyId });
   }, [strategyId]);
+
+  const mintAndCopy = React.useCallback(async () => {
+    if (typeof window === "undefined") return;
+    setPhase("working");
+    trackFactsheetEvent("factsheet_v2_share_copy", { strategy_id: strategyId });
+    try {
+      // Mint happens over the NETWORK before the clipboard write — the async
+      // wrinkle this lane has and the published lane does not.
+      const url = await mintShareUrl(strategyId);
+      // The share row exists NOW, whether or not the clipboard write lands.
+      // House precedent (SavedScenariosList, audit-#43): never block the link
+      // on the copy. Flipping here is what keeps the notice honest — a live
+      // link is live even when the owner has to copy the URL by hand.
+      onShareLiveChange?.(true);
+      // ⛔ NOT `navigator.clipboard?.writeText(url)`. Optional chaining on a
+      // missing clipboard yields `undefined`, and `await undefined` RESOLVES —
+      // which would flash "Link copied" having copied nothing at all.
+      if (typeof navigator.clipboard?.writeText !== "function") {
+        throw new Error("clipboard unavailable");
+      }
+      await navigator.clipboard.writeText(url);
+      setPhase("copied");
+      window.setTimeout(() => setPhase("idle"), 1500);
+    } catch (err) {
+      console.warn("[factsheet] share mint/copy failed", { strategyId, err });
+      setPhase("failed");
+      window.setTimeout(() => setPhase("idle"), 4000);
+    }
+  }, [strategyId, onShareLiveChange]);
+
   return (
     <button
       type="button"
-      onClick={onClick}
-      title="Copy a public, link-only factsheet URL — recipients see the same page with no outbound navigation"
-      className="px-2.5 py-1 text-micro font-mono uppercase tracking-wider rounded-sm border bg-surface-subtle text-text-2 border-border hover:bg-surface focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent min-h-[28px] pointer-coarse:min-h-[44px]"
+      onClick={mode === "public-url" ? copyPublishedUrl : () => void mintAndCopy()}
+      disabled={phase === "working"}
+      title={
+        mode === "public-url"
+          ? "Copy a public, link-only factsheet URL — recipients see the same page with no outbound navigation"
+          : "Copy a private, revocable link to this unpublished factsheet — anyone holding it can view this page until you revoke the link"
+      }
+      className="px-2.5 py-1 text-micro font-mono uppercase tracking-wider rounded-sm border bg-surface-subtle text-text-2 border-border hover:bg-surface focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent min-h-[28px] pointer-coarse:min-h-[44px] disabled:opacity-60"
     >
-      {copied ? "Link copied" : "Copy share link"}
+      {shareButtonLabel(phase, mode, hasActiveShare)}
     </button>
   );
 }
 
-function ControlBar({ scenarioMode = false }: { scenarioMode?: boolean }) {
+/**
+ * Phase 164 (SHARE-03 / D-03) — revoke, ON THE FACTSHEET, beside the control
+ * that handed the link out. `StrategyActions` is deliberately NOT touched: its
+ * private fall-through stays exactly as it is.
+ *
+ * INLINE CONFIRM, never `window.confirm` — the shape is lifted from
+ * `SavedScenariosList` (confirm sentence + danger Revoke + ghost "Keep link"),
+ * because a browser dialog is unstyleable, unannounceable to the surrounding
+ * page, and blocks the whole tab for a decision that is local to one control.
+ *
+ * ⛔ 404 IS CONVERGENCE, NOT FAILURE. The revoke route returns 404 when there is
+ * no active share to revoke — a benign double-revoke across two tabs, a stale
+ * live-link flag, or an already-expired share. The link IS gone, so the
+ * end-state matches a 200: flip the local state, dismiss the confirm, and do
+ * NOT show an error the user cannot act on. The route's 404 contract is
+ * unchanged (it preserves the no-existence-oracle posture); the client simply
+ * stops reading "already revoked" as "revoke failed".
+ */
+function ShareRevokeControl({
+  strategyId,
+  onShareLiveChange,
+}: {
+  strategyId: string;
+  onShareLiveChange?: (live: boolean) => void;
+}) {
+  const [confirming, setConfirming] = React.useState(false);
+  const [failed, setFailed] = React.useState(false);
+
+  const confirmRevoke = React.useCallback(async () => {
+    setFailed(false);
+    try {
+      const res = await fetch(`/api/strategies/${strategyId}/share/revoke`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+      });
+      if (!res.ok && res.status !== 404) {
+        // Honest failure — the link stays LIVE, so the live state is not
+        // flipped and the Copy/Revoke controls stay on screen beside the alert.
+        setFailed(true);
+        setConfirming(false);
+        return;
+      }
+      setConfirming(false);
+      onShareLiveChange?.(false);
+    } catch (err) {
+      console.warn("[factsheet] share revoke failed", { strategyId, err });
+      setFailed(true);
+      setConfirming(false);
+    }
+  }, [strategyId, onShareLiveChange]);
+
+  if (confirming) {
+    return (
+      <span className="flex flex-wrap items-center gap-2">
+        <span className="text-caption text-text-secondary">
+          Revoke this share link? Anyone with the link will lose access.
+        </span>
+        <button
+          type="button"
+          autoFocus
+          onClick={() => void confirmRevoke()}
+          className="px-2.5 py-1 text-micro font-mono uppercase tracking-wider rounded-sm border bg-surface-subtle text-negative border-border hover:bg-surface focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent min-h-[28px] pointer-coarse:min-h-[44px]"
+        >
+          Revoke
+        </button>
+        <button
+          type="button"
+          onClick={() => setConfirming(false)}
+          className="px-2.5 py-1 text-micro font-mono uppercase tracking-wider rounded-sm text-text-2 hover:bg-surface focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent min-h-[28px] pointer-coarse:min-h-[44px]"
+        >
+          Keep link
+        </button>
+      </span>
+    );
+  }
+
+  return (
+    <span className="flex flex-wrap items-center gap-2">
+      <button
+        type="button"
+        onClick={() => {
+          setFailed(false);
+          setConfirming(true);
+        }}
+        title="Turn off the private share link — anyone holding it loses access immediately"
+        className="px-2.5 py-1 text-micro font-mono uppercase tracking-wider rounded-sm border bg-surface-subtle text-negative border-border hover:bg-surface focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent min-h-[28px] pointer-coarse:min-h-[44px]"
+      >
+        Revoke link
+      </button>
+      {failed && (
+        <span role="alert" className="text-caption text-negative">
+          Couldn&apos;t revoke this link. Try again.
+        </span>
+      )}
+    </span>
+  );
+}
+
+function ControlBar({
+  scenarioMode = false,
+  recipientShare = false,
+  ownerShare,
+  onShareLiveChange,
+}: {
+  scenarioMode?: boolean;
+  recipientShare?: boolean;
+  /** Phase 164 (SHARE-04) — owner-lane share state; see `OwnerLaneProps`.
+   *  Absent on every non-owner mount, which is what keeps the published
+   *  `?share=1` lane byte-identical (D-09). */
+  ownerShare?: { hasActiveShare: boolean };
+  /** Lifted setter: minting and revoking both change what the notice ABOVE the
+   *  masthead may truthfully say, so the fact lives in `FactsheetBody` and both
+   *  controls report into it. */
+  onShareLiveChange?: (live: boolean) => void;
+}) {
   const payload = usePayload();
   const { resetXRange } = useXRange();
   const { setComparator } = useComparator();
-  const shareMode = useShareMode();
+  // Phase 164 (D-09) — TWO share mechanisms, one meaning. `useShareMode()` reads
+  // `?share=1` and serves the PUBLISHED id route; it is untouched. The token
+  // route has no query param to read, so its share mode arrives structurally as
+  // a prop. Both suppress the same outbound chrome, so they are OR'd here rather
+  // than branched anywhere below.
+  const shareMode = useShareMode() || recipientShare;
   // Phase 90 (FS-03, D2/D5) + Phase 102 (MTM-01): cash↔MTM toggle. NEVER apiKeyId —
   // the server-truth `dataQuality.composite` marker OR (Phase 102) a single-key
   // options strategy that participates in the MTM basis story (`payload.mtmGate`
@@ -1738,7 +2174,31 @@ function ControlBar({ scenarioMode = false }: { scenarioMode?: boolean }) {
       >
         Reset view
       </button>
-      {!scenarioMode && <ShareLinkButton strategyId={payload.strategyId} />}
+      {/* Phase 164 (SHARE-04) — a RECIPIENT must never see this control. It
+          rebuilds the URL from `window.location` as `<origin><pathname>?share=1`,
+          which on the token route would hand out a Copy-Link button that strips
+          the token and produces a link that 404s for the next person. The
+          published `?share=1` lane is unaffected: `recipientShare` is false
+          there, so this renders exactly as before. */}
+      {!scenarioMode && !recipientShare && (
+        <ShareLinkButton
+          strategyId={payload.strategyId}
+          ownerShare={ownerShare}
+          onShareLiveChange={onShareLiveChange}
+        />
+      )}
+      {/* Phase 164 (D-03 / SHARE-03) — revoke sits beside the control that
+          handed the link out, and only while there is a link to revoke. The
+          `!recipientShare` guard is not redundant belt-and-braces: a recipient
+          must never see ANY control that manages someone else's capability,
+          and gating it on the same flag as the Copy-Link control means the two
+          cannot drift apart (T-164-16). */}
+      {!scenarioMode && !recipientShare && ownerShare?.hasActiveShare && (
+        <ShareRevokeControl
+          strategyId={payload.strategyId}
+          onShareLiveChange={onShareLiveChange}
+        />
+      )}
       {!scenarioMode && !shareMode && (
         <a
           href={`/compare?ids=${payload.strategyId}`}

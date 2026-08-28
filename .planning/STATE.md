@@ -5,17 +5,17 @@ milestone_name: Backlog Burndown (Phases 158+)
 current_phase: 163
 current_phase_name: HARDEN — Fail safe, closed, and loud
 status: reviewing
-stopped_at: Phase 163 COMPLETE — 9/9 plans merged (both waves); verification gaps_found 12/13, OPS-08 code-complete but UNAPPLIED
-last_updated: "2026-08-26T00:00:00.000Z"
+stopped_at: Completed 164-03 (wave 3); 164-06 at its blocking-human checkpoint
+last_updated: "2026-08-28T08:31:51.036Z"
 last_activity: 2026-08-26
 last_activity_desc: Phase 163 wave 2 — SEC-01 measured password floor + SEC-03 audit law; all gates green; ledger corrections from verification
-state_head: 21c232837722e7d1582eef3452462c2eb1d52047
+state_head: b2ec01684b8078645198f377cbc2c55b584b076a
 progress:
-  total_phases: 11
+  total_phases: 12
   completed_phases: 1
-  total_plans: 53
-  completed_plans: 43
-  percent: 9
+  total_plans: 60
+  completed_plans: 55
+  percent: 8
 ---
 
 # Project State — Quantalyze
@@ -495,7 +495,7 @@ Prior-phase 141.1 close-out detail (retained; NOT about 142.1):
         2 WARNING gaps, no BLOCKER. See `140.1-VERIFICATION.md`. Not transitioned (`--no-transition`).
 Last activity: 2026-08-02 -- Phase 142 execution started
 
-Progress: [█░░░░░░░░░] 9%
+Progress: [█░░░░░░░░░] 8%
 
 ### Phase 140.1 close-out — open items (do NOT lose these)
 
@@ -645,6 +645,9 @@ Load-bearing sequencing (real dependencies, do not reorder):
 | Phase 163 P03 | 50m | 3 tasks | 98 files |
 | Phase 163 P04 | 33min | 3 tasks | 16 files |
 | Phase 163 P08 | 35min | 2 tasks | 4 files |
+| Phase 164 P07 | 12min | 2 tasks | 2 files |
+| Phase 164 P05 | 32min | 3 tasks | 13 files |
+| Phase 164 P03 | 21min | 2 tasks | 6 files |
 
 ## Accumulated Context
 
@@ -663,6 +666,9 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - Phase 153.6 inserted after Phase 153: PARITY — nine findings from the /code-review xhigh over the 153->153.5 span; three of four root causes are one-path-only fixes (URGENT)
 - Phase 161.1 inserted after Phase 161: LEDGER-REFRESH — recurring strategy refresh for ledger-backed venues (mt5/sfox/deribit). Founder-reported 2026-08-23, root-caused by PROD measurement 2026-08-24: process_key_long is the ONLY path reaching strategy_analytics for a ledger venue and is enqueued solely at strategy creation; both daily strategy crons gate on ccxt-only exchange sets. Ship the mechanism DORMANT (schedule unregistered, founder-gated live op) per the SFOX_ENABLED / WORKER-03 pattern. (URGENT)
 - Phase 164.1 inserted after Phase 164: HARDEN-GUARDS. Scope collected in TODOS 0.01: DEC-1/3/4 (spine gates, composite twin, advisory lock), the PYAPI-06 detection gap found in the 2026-08-25 prod outage, phase 161's deferred error-surface items D-161-01..07-B, and WIZFORM-02 (code:UNKNOWN) with a live 2026-08-25 reproduction. Ordering is load-bearing: MUST follow 164, because DEC-1 retires guards over scenarios/scenario_shares and 164 is the phase that touches them. NOTE: Current Phase pointer deliberately NOT moved to 164.1 — work is in flight on 162 and this phase is scheduled, not urgent-next.
+- Phase 164 RESTRUCTURED to three waves 2026-08-27 (5 plans -> 7). Driver: the red-team synthesis established that 164-03's merge is a GATE, not a step — the moment the mint route makes `strategy_shares` owner-writable, N1 (INT4 generation overflow) becomes reachable by any owner via a single PATCH, is unrecoverable without DDL, and ABORTS that data subject's own Art.17 erasure. Harmless only while the table has zero rows, which is the window 164-03 closes. New wave 2 = 164-05 (moved up) + 164-06 (N1+N2 root closure, NEW) + 164-07 (F6 transitive cache guard, NEW); wave 3 = 164-03 + 164-04. Six merge conditions tabulated in ROADMAP against SYNTHESIS.md:270-287. ⛔ `20260827130000_sanitize_user_revoke_strategy_shares.sql` is BLOCKED on DRIFT-02 (re-based on a repo file PROD superseded by a surgical in-place patch; shipping it would point Art.17 erasure at a VIEW). Three residuals accepted and NAMED in TODOS.md: SHARE-RES-R4 (PITR), SHARE-RES-R2g (service_role), SHARE-RES-F5 (capability-URL channels). Three process standards routed to 164.1: PROC-01 (runnable PG before authoring), PROC-02 (reviewers declare execution status), PROC-03 (per-arm RED-UNDER).
+- FOUNDER RULING 2026-08-27: N2 DROPPED, 164-06 is N1-ONLY. Gate condition 3 closed as not-a-defect on measured evidence (3 interleavings x 2 concurrent sessions, all converge; both RPCs are single statements, no read-then-write window). Overrides the red-team corpus, which records N2 as [M]-severity. The prescribed remedy was the hazard: `revoked_at IS NULL` is the convergence contract and STEP 6 arm (i-b) guards it, so adding `SELECT ... FOR UPDATE` and rewriting that arm would have REMOVED the guard and created the counter-inflation bug. Re-opening requires new MEASURED evidence, not re-reasoning. N1 still reproduces and 164-06 still exists to close it.
+- Phase 164.3 inserted after Phase 164: VACUITY — mechanical detection of controls that cannot fail. Driver: phase 164 produced FIVE distinct vacuity mechanisms plus the DRIFT family; every one was GREEN in CI, survived review, and was found only by adversarial execution after a six-team red team. Deliverables are mechanisms not instances: a mutation runner over RED-UNDER annotations, the throwaway-Postgres CI lane (PROC-01), a static linter for the five measured shapes, and a repo-vs-PROD body diff before any whole-body CREATE OR REPLACE (DRIFT-02b). Ordered after 164.2 by number only. EXCLUDES the GSD-machinery gaps (depends_on unenforced, wave frontmatter drift, NYQ-01) — different system.
 
 ### Decisions
 
@@ -816,6 +822,12 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - [Phase 161]: 163-08: the seam body cancel uses a full capability ladder, not res.body?.cancel().catch() — the sketch throws on a present body whose cancel is missing or not callable, measured RED
 - [Phase 161]: 163-08: doRemove does NOT clean the abort ref maps (plan deviation, measured) — the catch reads the reason a microtask later, so a synchronous delete reds the funnel with SERVICE_UNREACHABLE; validatePanel's finally already cleans both
 - [Phase 161]: 163-08: vi.fn attaches its own handler to a returned promise, suppressing unhandledRejection — a spy is not a neutral observer of promise handling; use a plain closure when the oracle IS the rejection
+- [Phase 163]: 164-07: cache-reach guard extends phase-148-owner-lane-cache-isolation.test.ts over the builder's whole 38-module transitive closure; floor >= 30 cites an INDEPENDENT pre-edit measurement, never the walker's own output
+- [Phase 163]: 164-07: RED planted at DEPTH 3 (src/lib/utils.ts), not on the entry — all 12 pre-existing assertions in the same file stayed GREEN under that mutation, which is the measured asymmetry justifying the closure pin
+- [Phase 163]: 164-05: Plausible mitigated by conditional script omission, NOT data-exclude — the assumed mechanism is pageview-only AND removed from Plausible's current script (both measured 2026-08-28)
+- [Phase 163]: 164-05: per-route no-referrer is justified by the SAME-ORIGIN gap; the CONTEXT/PLAN claim that strict-origin-when-cross-origin 'never strips the path' is FALSE (cross-origin it sends origin only) and is recorded as false in code + test
+- [Phase 163]: 164-03: deriveShareToken takes THREE arguments (id, nonce, generation) — the mint route round-trips a minted url through verifyShareToken because a 43-char shape assertion passes for the stale two-argument pre-image too
+- [Phase 163]: 164-03: MEASURED — the audit-coverage mutating-RPC detector scans line-by-line, so a Prettier wrap between .rpc( and the name disarms it exactly as a method-cast does; both share routes cast the CLIENT and keep the call on one line (deferred-items D-164-C)
 
 ### Decisions (execution-time, Phase 140.2)
 
@@ -1518,8 +1530,8 @@ Load-bearing sequencing (real dependencies, do not reorder):
 
 ## Session
 
-**Last Date:** 2026-08-26T13:00:58.065Z
-**Stopped At:** Completed 163-01-PLAN.md
+**Last Date:** 2026-08-28T08:31:50.147Z
+**Stopped At:** Completed 164-03 (wave 3); 164-06 at its blocking-human checkpoint
 **Last Date:** 2026-08-25T22:26:01.687Z
 **Stopped At:** Completed 162-03-PLAN.md
 **Last Date:** 2026-08-25T22:28:04.096Z
@@ -1576,3 +1588,4 @@ pre-merge `e0493913`. Fix is PR #669. Supabase migrations and the Vercel fronten
 - 161-07 D-161-07-A: the wizard COMPOSITE arm still renders GATE_SERIES_PROVENANCE_UNVERIFIED for sampled_gapped — a false sentence on a reachable path (the 142.2 FIX-2 downgrade). Fix = route that arm through the examined/unexamined split; requires re-cutting one 142.2 oracle.
 - 161.1: OQ-3 still OPEN — closes only when a founder executes the runbook's step 1 and records whether the database-level or role-level app.* GUC form verified. Also: deribit has ZERO live refresh coverage until plan 04's stitch_composite arm lands (TODOS 0.3)
 - 161.1-04 (wave 4, 2026-08-25): the composite arm LANDED DORMANT — `enqueue_ledger_composite_refresh` (migration `20260825140000`), 8-arm SQL gate, static gates 10-11, and the D-15 non-destructive guard EXTENDED to `run_stitch_composite_job._stamp_failed` (a second destructive stamp plan 02's guard never covered; found by measurement, fixed under Rule 2). ⛔ **Task 3 is a BLOCKING founder LIVE op and is NOT done:** one manual `stitch_composite` enqueue for the one live PROD composite must be observed to completion (`last_return_date` advancing in the staleness view, NOT a job going green) before the composite schedule is documented as activatable. The runbook's composite section is deliberately UNWRITTEN until then. TODOS 0.3 stays OPEN — half of its close condition (the arm exists) is met, half (a composite observed to refresh) is not.
+- 164-05 MEASURED: the phase-148 guard does NOT catch a second unstable_cache call site outside factsheet/[id]/v2/page.tsx (12/12 green under NEUTER-D). 164-07's closure guard does not close it either — the page imports the builder, not the reverse. Closed for the token route by src/app/factsheet-share/[token]/page.no-cache-reach.test.ts; the general repo-wide call-site pin is still unowned.
