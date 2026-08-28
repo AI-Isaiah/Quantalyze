@@ -48,6 +48,7 @@ type ScrubbableEvent = {
   spans?: Array<{ description?: unknown } | null> | null;
   contexts?: { trace?: { description?: unknown } | null } | null;
   extra?: Record<string, unknown> | null;
+  tags?: Record<string, unknown> | null;
 };
 
 /** Scrub every string value of a loose record in place. Non-strings untouched. */
@@ -116,6 +117,16 @@ export function scrubSentryEvent<T>(event: T): T {
   // already scrubs the one field it sets. Defence in depth costs nothing here
   // and covers any future `captureException` call that forwards a raw path.
   scrubRecordStrings(e.extra);
+  // ⛔ TAGS — FOUND ON PRODUCTION, NOT BY REVIEW (/qa 2026-08-28). The SDK's own
+  // http/Next integration sets a `url` TAG from the raw request URL, entirely
+  // independently of `request.url`. Measured on live event QUANTALYZE-16:
+  // `transaction` was parameterised to `GET /factsheet/[id]` while the `url`
+  // tag carried `https://quantalyze.xyz/factsheet/Next.Metadata` verbatim. On
+  // the share lane that tag would have carried a LIVE CAPABILITY, and a tag is
+  // worse than a body field: tags are indexed and queryable in the Sentry UI.
+  // The scrubber covered every channel it had thought of, and this was not one
+  // of them — which is why the fixture below now carries a tag too.
+  scrubRecordStrings(e.tags);
 
   return event;
 }

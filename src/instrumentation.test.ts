@@ -127,6 +127,10 @@ describe("[164 SHARE-01] Sentry never receives a share token", () => {
       spans: [{ description: `GET /factsheet-share/${TOKEN}` }],
       contexts: { trace: { description: `/factsheet-share/${TOKEN}` } },
       extra: { path: `/factsheet-share/${TOKEN}` },
+      // The SDK sets this tag itself, from the raw URL — see the note in
+      // scrubSentryEvent. Verified against a real production event before
+      // being added here, not assumed.
+      tags: { url: `https://quantalyze.xyz/factsheet-share/${TOKEN}` },
     };
   }
 
