@@ -26,6 +26,31 @@ items were dropped, not carried. Categories: **Fix now** / **Fix mid-term** / **
 
 ## 🔴 FIX NOW — live correctness, trust-boundary security, active go-live
 
+0.005. **`[SHARE-HOST-01]` Every private share link a user copies points at the UNBRANDED host.**
+   MEASURED on production 2026-08-28 while discharging Phase 164's browser UAT. Standing on
+   `https://quantalyze.xyz/strategies`, signed in, `POST /api/strategies/<id>/share` returned
+   `{"url":"https://quantalyze-rho.vercel.app/factsheet-share/<token>"}`. So the owner copies a
+   `vercel.app` link and the recipient sees a host that is not the product.
+   **Cause, exactly:** `resolveAppUrl` (`src/app/api/strategies/[id]/share/route.ts:107-109`)
+   prefers `NEXT_PUBLIC_APP_URL` over the request `origin`, and that variable is
+   `https://quantalyze-rho.vercel.app` in **Vercel Production AND Preview** (read from a clean
+   directory, not from a repo-local `.env`). The origin fallback at `:111-119` is therefore dead
+   in every deployed environment.
+   **Two distinct consequences, both live:**
+   1. User-facing trust — a private factsheet link to an investor arrives on a domain the sender
+      never showed them. The one surface whose whole job is "share this safely".
+   2. Preview mints PRODUCTION-host links. A share created on a preview deploy resolves against
+      production, which crosses an environment boundary that `.env.example`'s own
+      `SHARE_TOKEN_SECRET` note (`Do NOT reuse one value across environments`) exists to keep shut.
+   **Fix shape (not taken here — it is a config + one-line decision):** either set
+   `NEXT_PUBLIC_APP_URL` per environment to the branded host, or drop the env-var preference and
+   let `resolveAppUrl` use the request origin, which is already correct by construction and is
+   what the sibling scenario-share route would want too. ⚠️ Do NOT "fix" this by hardcoding a
+   host — the localhost fallback at `:121` is load-bearing for local dev.
+   ⛔ NOT affected: token derivation, revocation, or the 410 lane. The link WORKS; it is the host
+   that is wrong. Full loop verified green in `164-VERIFICATION.md` human item 4.
+
+
 0.01. **📋 PHASE 164.1 SCOPE — single source. Collected 2026-08-25; the phase does NOT exist yet.**
    Create with `/gsd-phase --insert 164` (decimal phases land AFTER their integer, so 164.1 sits
    between 164 and 165). Build the CONTEXT from THIS list rather than re-deriving it.
