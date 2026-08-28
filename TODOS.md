@@ -1317,6 +1317,48 @@ follows is everything that was not.
   regression gate over phases 158–163. Fixed (both added to `NO_INPUT`), but the *gap* is that a
   phase can add a rate-limited route and never run the invariant that governs it.
 
+### Phase 164 (SHARE) — browser-UAT findings (booked 2026-08-28)
+
+Source: `164-UAT.md`, 9 checkpoints against localhost pointed at TEST — 7 passed, 2 recorded
+BLOCKED. Both defects below were found ONLY by driving the browser, after a code review, a
+verifier pass and a green 88-file regression gate had all cleared the phase.
+
+- **✅ FIXED — [SHARE-UAT-01] every `GET /strategies` threw.** `isPublishedStatus` was declared in
+  `ShareableLink.tsx`, which carries `"use client"`; `strategies/page.tsx` is a Server Component
+  and CALLS it — on the exact line this phase added when it removed the status gate. Three
+  requests, three throws. ⛔ **The class, not the instance:** `page.share-affordance.test.tsx`
+  makes the same call and passes, because **jsdom does not enforce the RSC boundary**, so no unit
+  test in this repo could have caught it. Fixed in `4db23fe3b` by moving the declarations to a
+  directive-free `src/lib/share-affordance.ts`; pinned by a directive assertion that matches a
+  bare statement, not a substring (the docblock explains the absence and contains the string).
+  **Still open as a class:** nothing detects a server component calling a client-module export.
+  Candidate for Phase 164.3 (VACUITY) — it is a control that cannot fail, in the test layer.
+
+- **✅ FIXED — [SHARE-UAT-02] the pending factsheet promised a share link with no control.** The
+  still-computing early return rendered `OwnerUnpublishedNotice` alone — a notice ending "You can
+  create a private share link…" — on a page with ZERO clickable elements. Same SHARE-04 dishonesty
+  class the phase exists to close, on the one render path the class review never walked, and on
+  the path the placeholder's own comment calls the moment "an owner is MOST likely to share the
+  URL". Fixed in `4db23fe3b` (`OwnerUnpublishedPanel`: notice and controls on one `shareLive`
+  state, so fixing the missing mint button could not manufacture a false revoke promise).
+  Regression-pinned in `8f26f2a21` — three arms, all OBSERVED red under the bug's real shape.
+  ⚠️ Those arms pin DOM **presence**, not visibility: a `className="hidden"` mutation left all
+  three GREEN, because jsdom does no layout. Visual-regression territory, not booked as a defect.
+
+- **[SHARE-UAT-03] ⛔ THE IN-PAGE BUTTON HAS NEVER BEEN SUCCESSFULLY CLICKED.** Both synthetic
+  clicks produced **zero network requests**, so checkpoints 1/2/6 (mint, reuse, revoke) were
+  exercised against the ROUTES, not through the component's own handler. The route contract is
+  proven; the click path is not — and that is exactly where the WR-02 Safari
+  transient-user-activation concern would surface. A human click is owed. Not fixable by an agent
+  in this environment.
+
+- **[SHARE-UAT-04] UAT tests 7 (Plausible) and 9 (Sentry) are BLOCKED, not passed.** No
+  `plausible.io` request on the share lane — but none on a normal page either, because Plausible
+  is not configured on the local server. Without the positive control the negative proves nothing.
+  Same for Sentry (`SENTRY_DSN` unset locally). Both need a deployed environment to become real
+  evidence. Recorded as blocked deliberately: reporting them as passes is the vacuity this phase
+  spent its whole red-team budget on.
+
 ### ⚠️ GSD-01 — `/gsd-plan-phase` cannot add ONE plan to a partly-executed phase (booked 2026-08-28)
 
 `/gsd-plan-phase <N>` replans the **whole** phase. Once some plans carry SUMMARYs, running it risks

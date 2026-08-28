@@ -2,15 +2,43 @@
 
 ## [0.76.0.0] - 2026-08-28
 
-### Phase 164 wave 2 — a revoked share link can no longer be resurrected
+### Phase 164 — Copy Link always works, and never discloses
 
-Closes all six merge-gate conditions for the share-token lane. Nothing is user-visible
-yet: the mint and revoke routes are wave 3, so no share link can be created on production
-today. What lands here is the storage layer, its guards, and the leak channels closed
-around it.
+Copy Link now works on a strategy that has not been published. It used to hand you a URL
+that 404s for whoever you sent it to, under a "Link copied" flash — which is why nobody
+caught it from the screen. An unpublished strategy now gets a private, revocable share
+link instead, and a published one still gets exactly the public URL it always did.
+
+### Added
+
+- **A private share link for unpublished strategies.** Copy Link on a strategy Quantalyze
+  has not published mints a link only the people you send it to can open. The strategy
+  stays unlisted and its normal address keeps returning 404 to everyone else.
+- **Revoke, on the factsheet, with an inline confirm.** Revoking kills the link for
+  everyone holding it. Clicking Copy Link again returns the SAME link rather than minting
+  a second one, so there is never a link you have forgotten about.
+- **A dead-link page that says nothing.** A revoked link and a link that never existed
+  return byte-for-byte the same response, so neither one reveals whether a strategy is
+  there.
+- Share links are stripped from error reports, analytics and referrer headers, and the
+  analytics tag does not load at all on the share lane — a private link cannot leak
+  through telemetry.
+- Share-link records now appear in the GDPR data export, alongside scenario shares.
+- A guard that fails the build if any code the factsheet builder depends on — 38 modules,
+  not just the one file — starts caching by strategy id. That is the path by which a
+  private factsheet could have been served to an anonymous visitor.
 
 ### Fixed
 
+- **The strategies page threw on every request.** A shared predicate lived in a
+  browser-only module while the server-rendered page called it. Found by driving the
+  browser; no unit test in the suite could see it, because the test environment does not
+  enforce that boundary.
+- **A still-computing factsheet promised its owner a share link and gave them nothing to
+  click.** The placeholder page carried the notice ("you can create a private share
+  link") with no control anywhere on the page. It now carries the controls the notice
+  talks about, driven by the same state, so neither the mint nor the revoke sentence can
+  go stale.
 - **A revoked share link could be brought back to life.** An owner could set the share
   counter to its maximum in one request; the revoke path then failed, and so did that
   user's GDPR erasure — with no way for them to fix it, because the same routine locks
@@ -23,23 +51,17 @@ around it.
   left personal data in place. The repo no longer held the true version of that routine —
   an earlier change had edited it in place — so it was rebuilt from production and proven
   identical before the fix was applied.
-
-### Added
-
-- Share links are stripped from error reports, analytics and referrer headers, so a
-  private link cannot leak through telemetry.
-- A guard that fails the build if any code the factsheet builder depends on — 38 modules,
-  not just the one file — starts caching by strategy id. That is the path by which a
-  private factsheet could have been served to an anonymous visitor.
-- Share-link records now appear in the GDPR data export, alongside the existing
-  scenario-share records.
-- Phase 164.3 added to the roadmap: make a test that cannot fail detectable by machine.
-  Five such tests were found in this phase, every one green in CI.
+- **Copy Link could have put a localhost address on your clipboard** if the deployment
+  were missing its public-URL setting — a dead link, indistinguishable from a working one
+  until your recipient opened it.
 
 ### Changed
 
 - The share-token secret is now set per environment rather than shared, so a preview
-  deployment cannot derive a link that works in production.
+  deployment cannot derive a link that works in production. A missing or too-short secret
+  now fails loudly at boot instead of quietly producing links nobody can open.
+- Phase 164.3 added to the roadmap: make a test that cannot fail detectable by machine.
+  Five such tests were found in this phase, every one green in CI.
 
 ## [0.75.0.3] - 2026-08-26
 
