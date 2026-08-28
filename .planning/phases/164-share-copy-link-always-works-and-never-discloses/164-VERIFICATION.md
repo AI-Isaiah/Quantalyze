@@ -2,22 +2,34 @@
 phase: 164-share-copy-link-always-works-and-never-discloses
 verified: 2026-08-28T12:00:00Z
 status: human_needed
+reconciled: 2026-08-28T13:20:00Z
+human_items_open: 2  # the in-page click (never successfully driven), and the sql-tests CI run against TEST
+human_items_resolved: 2  # SHARE_TOKEN_SECRET in Vercel, .env.example WR-01
 score: 5/5 must-haves verified
 behavior_unverified: 0
 overrides_applied: 0
 human_verification:
-  - test: "TEST hand-apply checkpoint (164-02 Task 3, gate=blocking-human — STILL OPEN). Hand-apply supabase/migrations/20260827120000_strategy_shares_generation_model.sql and 20260827130000_sanitize_user_revoke_strategy_shares.sql to the TEST database, then confirm the sql-tests CI job runs supabase/tests/test_strategy_shares_rls.sql GREEN against TEST."
-    expected: "Both migrations apply cleanly (self-verification blocks pass); the 103-arm gate goes green in CI. DRIFT-02a is RESOLVED (body re-based on PROD's pg_get_functiondef, md5-proven), so 20260827130000 is no longer blocked — but the apply itself is a deliberate human gate (SKIP-01: nothing applies migrations to TEST automatically, and the gate has NO pre-apply tolerance arm by design)."
-    why_human: "Verifier is forbidden to touch Supabase TEST or apply migrations. The throwaway-PG proof (run in this verification, exit 0) explicitly does NOT prove behaviour against TEST's real schema/RLS — the harness header says so itself."
-  - test: "Set SHARE_TOKEN_SECRET (>= 32 chars, e.g. openssl rand -base64 48) in Vercel for ALL environments and in .env.local, BEFORE merging this branch."
-    expected: "Build/boot succeeds. A missing/short value fails LOUD at module load with a named remedy (verified in code) — but the setting itself is an operator action the codebase cannot perform."
-    why_human: "164-01 user_setup item. Env-var state in Vercel is not inspectable from this environment."
-  - test: "WR-01 (164-REVIEW): fix .env.example — it tells the operator to reuse one SHARE_TOKEN_SECRET across all environments and documents the stale two-field pre-image."
-    expected: ".env.example documents per-environment secrets and the qz.strategy-share.v1.<id>.<nonce>.<generation> pre-image."
-    why_human: "The environment denies agent access to .env* files; only a human can edit it. Advisory severity (operator-facing doc), explicitly NOT fixed in the review round."
-  - test: "Browser UAT of the full loop on a real server: owner opens an UNPUBLISHED strategy's factsheet, clicks Copy Link → paste URL into an incognito window → factsheet renders with no owner chrome and no Copy-Link control. Click Copy Link again in a second session → same URL. Revoke on the factsheet (inline confirm) → the copied link now shows the 410 dead-link page. Copy Link on a PUBLISHED strategy → /factsheet/<id>?share=1 exactly as before."
-    expected: "Every step as described; anonymous /factsheet/<id> of the unpublished strategy 404s throughout."
-    why_human: "Clipboard interaction, Safari transient-user-activation behaviour, and real-server rendering are visual/runtime properties a jsdom test cannot fully certify. All underlying invariants ARE covered by passing tests; this is the end-to-end confirmation."
+  # ⚠️ RECONCILED 2026-08-28 during /ship. This block was written before three of
+  # its four items were closed, and a stale "human_needed ×4" would have shipped
+  # into the PR as a false claim. Each item now carries its measured state.
+  - test: "TEST hand-apply checkpoint (164-02 Task 3, gate=blocking-human). Hand-apply supabase/migrations/20260827120000_strategy_shares_generation_model.sql and 20260827130000_sanitize_user_revoke_strategy_shares.sql to the TEST database, then confirm the sql-tests CI job runs supabase/tests/test_strategy_shares_rls.sql GREEN against TEST."
+    status: "PARTIALLY RESOLVED — the apply is DONE, the CI confirmation is not."
+    resolved: "Both migrations are applied to TEST and TEST was measured drift-free (c3d06bbe6, which also books DRIFT-03: the MCP apply stamps schema_migrations.version with APPLY time, not the filename timestamp)."
+    still_open: "The sql-tests CI job has not yet run the 103-arm gate against TEST for this branch — that happens on this push. Watch it; a red gate here is the phase's most consequential signal."
+    why_human: "Verifier is forbidden to touch Supabase TEST or apply migrations. The throwaway-PG proof (exit 0) explicitly does NOT prove behaviour against TEST's real schema/RLS — the harness header says so itself."
+  - test: "Set SHARE_TOKEN_SECRET (>= 32 chars) in Vercel for ALL environments, BEFORE merging this branch."
+    status: "RESOLVED."
+    resolved: "Re-measured at ship time with `vercel env ls`: SHARE_TOKEN_SECRET is present and Encrypted in Production, Preview and Development. Names only — no value was read."
+    why_human: "164-01 user_setup item; the value itself is the operator's, never the agent's."
+  - test: "WR-01 (164-REVIEW): fix .env.example — it told the operator to reuse one SHARE_TOKEN_SECRET across all environments and documented the stale two-field pre-image."
+    status: "RESOLVED."
+    resolved: "Closed in 40527f101 / dfa270e99 — a separate value per environment, the real qz.strategy-share.v1.<id>.<nonce>.<generation> pre-image, and rotation scoped to one environment. Applied by the operator running a supplied patch script, since this environment denies agent access to .env* files."
+    why_human: "Agent access to .env* is denied by the environment; only the operator can write the file."
+  - test: "Browser UAT of the full loop on a real server: mint, reuse, recipient render, revoke, dead link, published lane unchanged."
+    status: "MOSTLY RESOLVED — 7 of 9 checkpoints passed, 2 recorded BLOCKED, 1 path still owed."
+    resolved: "164-UAT.md, run against localhost pointed at TEST. Mint 200 with a 43-char token under `private, no-store`; two sequential mints BYTE-IDENTICAL (mint-or-REUSE); anonymous recipient 200 while /factsheet/<id> 404s in the same anonymous context; unknown and revoked tokens both 410 with an IDENTICAL 425-byte body; revoke converges 200 then 404; generation 1 -> 2 exactly +1 with revoked_at set and nonce/created_by intact (soft-revoke, never DELETE); Referrer-Policy: no-referrer on the lane. It also FOUND TWO BLOCKING DEFECTS no test in the phase could reach, both fixed (4db23fe3b) and now regression-pinned (8f26f2a21)."
+    still_open: "(a) THE IN-PAGE BUTTON WAS NEVER SUCCESSFULLY CLICKED — both synthetic clicks produced zero network requests, so mint/reuse/revoke were exercised against the ROUTES, not through the component handler. The route contract is proven; the click path is not, and that is exactly where the WR-02 Safari transient-activation concern would surface. A human click is still owed. (b) UAT tests 7 (Plausible) and 9 (Sentry) are recorded BLOCKED, not passed: neither is configured on the local server, so their absence proves nothing without a positive control."
+    why_human: "Clipboard interaction, Safari transient-user-activation, and real-server rendering are runtime properties a jsdom test cannot certify."
 ---
 
 # Phase 164: SHARE — Copy Link always works, and never discloses — Verification Report
