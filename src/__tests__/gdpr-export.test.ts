@@ -316,7 +316,15 @@ describe("collectUserExportBundle — mocked client", () => {
     // halving-only loop that stopped early would leave headroom > maxRowCost
     // and fail this — which is exactly the I3 regression under guard.
     expect(serializedBytes + maxRowCost).toBeGreaterThan(EXPORT_SIZE_CAP_BYTES);
-  });
+    // Timeout raised off the 5s default. EXPORT_SIZE_CAP_BYTES is 100 MB, so
+    // this case builds ~158 MB of row strings and re-serializes them on every
+    // binary-search pivot — measured 1.77s ISOLATED, but >5s under the loaded
+    // full suite, where it went red purely from GC/memory-bandwidth
+    // contention (2026-08-29, at 848 test files). The cost is inherent to what
+    // the case verifies: a tight pack against the real cap. This widens the
+    // clock ONLY — every assertion above still bites, verified by neutering
+    // the binary search and observing RED.
+  }, 30_000);
 
   it("returns zero rows for a user with no data (happy empty path)", async () => {
     const mock = makeMockClient({});
