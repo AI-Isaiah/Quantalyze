@@ -254,27 +254,66 @@ export const ABSORBABLE_CLEANUP = /^[ \t]*RESET[ \t]+ROLE[ \t]*;[ \t]*$/i;
 const IGNORABLE_LINE = /^[ \t]*(--.*)?$/;
 
 /**
- * The head of the block the RAISE sits in. Reaching one of these means every
- * line between it and the RAISE has been classified, so the scan can stop.
- *
- * ⚠️ This is a bare word match. It MUST only ever be applied to EXECUTABLE
- * text — see `stripTrailingComment` and the ordering note in the scan below.
- * Applied to a raw line it treats `-- raise the exception the harness looks
- * for` as a branch head, which ends the scan one line early and lets the
- * statement above it leak. That was a live bypass (R2-C01).
+ * The branch-head keywords, exported so the cross-product oracle in
+ * `mutation-runner-neuter.test.ts` can GENERATE its inputs from this list
+ * rather than hand-listing spellings. Adding a keyword here automatically
+ * widens that test's input space.
  */
-const BRANCH_HEAD = /\b(THEN|BEGIN|ELSE|ELSIF|LOOP|DECLARE|EXCEPTION)\b/i;
+export const BRANCH_HEAD_WORDS = ["THEN", "BEGIN", "ELSE", "ELSIF", "LOOP", "DECLARE", "EXCEPTION"];
 
 /**
- * Drop a trailing `--` comment so BRANCH_HEAD sees only executable text.
+ * Strip the NON-CODE regions of a SQL line, so a keyword can only be read
+ * where PostgreSQL would read one.
  *
- * Deliberately naive about string literals: `RAISE NOTICE 'a--b THEN'` strips
- * to `RAISE NOTICE 'a`, which no longer matches BRANCH_HEAD and therefore
- * REFUSES rather than terminating the scan. Refusing is the safe direction —
- * a refusal is a loud, named `neuter-missed` defect, whereas a wrong
- * termination is the silent state leak this whole block exists to prevent.
+ * ⛔ R3-C01, and the reason this is a classifier rather than another needle.
+ * Rounds 1 and 2 each closed the ONE spelling the reviewer demonstrated — a
+ * whole-line `--` comment — and each declared the class closed. Round 3
+ * reached the identical `SET ROLE` leak with three more spellings in minutes:
+ * a keyword inside a single-quoted literal (`PERFORM run_sql('BEGIN');`),
+ * inside a slash-star block comment reading "we then raise the exception",
+ * and inside a dollar-quoted body (`EXECUTE $q$ DECLARE junk int; $q$;`). Enumerating a
+ * fourth spelling is a guaranteed fourth failure, so the rule is stated over
+ * the STRUCTURE of the line instead: remove everything that is not code, then
+ * ask what remains.
+ *
+ * Order matters. Dollar-quoted bodies are removed first because they may
+ * legally contain unbalanced `'` and `--`; single-quoted literals next
+ * (collapsed to `''` so the line still parses as a statement) because they may
+ * contain `--` and `/*`; block comments next; the `--` tail last.
+ *
+ * ⚠️ Honest scope: this is a line-local classifier, so a literal, a block
+ * comment or a dollar-quoted body that SPANS lines is only masked on the lines
+ * where its delimiters both appear. An unterminated opener leaves a fragment
+ * that is not a branch head, so the scan REFUSES — the loud direction.
  */
-const stripTrailingComment = (line) => line.replace(/--.*$/, "");
+export const executableText = (line) =>
+  line
+    .replace(/\$([A-Za-z_]\w*)?\$[\s\S]*?\$\1?\$/g, " ") // dollar-quoted body
+    .replace(/'(?:''|[^'])*'/g, "''") // single-quoted literal
+    .replace(/\/\*[\s\S]*?\*\//g, " ") // block comment
+    .replace(/--.*$/, ""); // trailing line comment
+
+/**
+ * TRUE when the line IS a branch head, not when it merely MENTIONS one.
+ *
+ * The old predicate was `\b(THEN|BEGIN|ELSE|…)\b` anywhere in the line, which
+ * is why every non-code embedding above bypassed it. A PL/pgSQL branch head is
+ * a whole line: a bare `BEGIN` / `DECLARE` / `ELSE` / `LOOP`, an `EXCEPTION`
+ * (optionally with its `WHEN …` on the same line), or a line ENDING in `THEN`
+ * (`IF … THEN`, `ELSIF … THEN`) or `LOOP` (`FOR … LOOP`).
+ *
+ * MEASURED 2026-08-29 against the real gate file, all 104 arm identities /
+ * 103 backward scans: this predicate terminates on EXACTLY the same lines the
+ * old bare-word one did — **0 disagreements**. It refuses nothing that exists.
+ */
+export const isBranchHead = (line) => {
+  const t = executableText(line).trim().replace(/;$/, "");
+  return (
+    /^(BEGIN|DECLARE|ELSE|LOOP)$/i.test(t) ||
+    /^EXCEPTION(\s+WHEN\b.*)?$/i.test(t) ||
+    /\b(THEN|LOOP)$/i.test(t)
+  );
+};
 
 export function neuterArm(text, arm) {
   const lines = text.split("\n");
@@ -322,16 +361,18 @@ export function neuterArm(text, arm) {
   // MEASURED 2026-08-29 against the real corpus: all 30 arms still execute and
   // bite, so this refuses nothing that exists today.
   // ⛔ ORDER IS LOAD-BEARING (R2-C01). Classify FIRST, terminate LAST, and
-  // terminate only on EXECUTABLE text. The previous version tested BRANCH_HEAD
-  // in the loop condition — before `IGNORABLE_LINE` was consulted and with no
-  // comment stripping — so a whole-line `-- … the exception …` comment, the
-  // likeliest comment to sit beside a `RAISE EXCEPTION`, ended the scan before
-  // the statement above it was ever examined. Measured: `SET ROLE postgres;`
-  // survived the neuter and stayed live for the rest of the file, which is
-  // verbatim the leak class described in the header above.
+  // terminate only on a line that IS a branch head (R3-C01), never on one that
+  // merely MENTIONS a branch-head keyword. Round 1 fixed the loop ORDER; round
+  // 2 added `--` stripping; round 3 still reached the leak through a string
+  // literal, a block comment and a dollar-quoted body, because the predicate
+  // was a bare word match. `isBranchHead` classifies the line structurally
+  // after `executableText` removes every non-code region, so the rule ranges
+  // over the CLASS of embeddings instead of over a list of spellings.
   for (let k = start - 1; k >= 0; k -= 1) {
-    if (IGNORABLE_LINE.test(lines[k])) continue; // blank or whole-line comment
-    if (BRANCH_HEAD.test(stripTrailingComment(lines[k]))) break; // real branch head
+    // Blank, whole-line `--` comment, or a line whose entire content is a
+    // block comment / dollar-quoted noise: no runtime effect, nothing to leak.
+    if (IGNORABLE_LINE.test(lines[k]) || executableText(lines[k]).trim() === "") continue;
+    if (isBranchHead(lines[k])) break; // structurally a branch head
     return {
       text,
       found: false,
