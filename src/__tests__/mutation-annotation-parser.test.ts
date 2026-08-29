@@ -34,7 +34,13 @@ import {
 import {
   applyFileStep,
   armIdentities,
+  failureBranches,
+  firstFailureArm,
   identityRewriteDetail,
+  makeIdentityNonce,
+  stampedIdentity,
+  stampIdentities,
+  unstampedIdentities,
 } from "../../scripts/mutation-runner/run.mjs";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
@@ -437,6 +443,51 @@ describe("WR-03 / GRAMMAR rule 3 — a mutation may not INJECT the detector's ow
     }
   });
 
+  it("R3-C02: a literal SPLIT across a `||` concatenation is refused too", () => {
+    // MEASURED at HEAD: `'TEST FAI' || 'LED (X 1): synthetic'` parsed clean
+    // (`errors=0 accepted=1`) for BOTH a `sql` step and an `edit`, and at
+    // runtime produced exactly the bytes the detector reads.
+    for (const [kind, step] of [
+      [
+        "sql",
+        `{"kind":"sql","stmt":"DO $$ BEGIN RAISE EXCEPTION '%', 'TEST FAI' || 'LED (X 1): synthetic'; END $$"}`,
+      ],
+      [
+        "edit",
+        `{"kind":"edit","file":"${GATE_REL}","find":"a","replace":"RAISE EXCEPTION '%', 'TEST FAI' || 'LED (X 1): x';","occurrences":1}`,
+      ],
+    ] as const) {
+      const sql = [
+        "  -- RED-UNDER: prose",
+        `  -- RED-UNDER-M: {"arm":"X 1","apply":[${step}]}`,
+      ].join("\n");
+      expect(soleError(parseAnnotations(sql, { file: "g.sql" })), `not refused: ${kind}`).toMatch(
+        /injects a "TEST FAILED \(" literal \(by string concatenation\)/,
+      );
+    }
+  });
+
+  it("HONEST SCOPE: a spelling the rule CANNOT see, recorded rather than implied", () => {
+    // ⛔ This arm asserts the rule's LIMIT. `format('TEST FA%sED (…)', 'IL')`
+    // produces the same runtime bytes and contains the needle in neither its
+    // direct nor its concatenated form. It parses CLEAN, deliberately — the
+    // class is closed by rule 3c (the run-time identity nonce), not here.
+    //
+    // If this ever starts failing, 3a has been widened and the claim in
+    // GRAMMAR.md that "3a is not the closure" must be re-examined, not the
+    // test relaxed.
+    const sql = [
+      "  -- RED-UNDER: prose",
+      `  -- RED-UNDER-M: {"arm":"X 1","apply":[{"kind":"sql","stmt":"DO $x$ BEGIN RAISE EXCEPTION '%', format('TEST FA%sED (X 1): x', 'IL'); END $x$"}]}`,
+    ].join("\n");
+    const result = parseAnnotations(sql, { file: "g.sql" });
+    expect(
+      result.errors,
+      "3a now catches format() — GRAMMAR.md's honest-scope note is stale and must be updated",
+    ).toEqual([]);
+    expect(result.structured).toHaveLength(1);
+  });
+
   it("does NOT refuse an ordinary mutation — the rule is narrow, not a blanket ban on editing the gate", () => {
     const sql = [
       "  -- RED-UNDER: prose",
@@ -504,10 +555,10 @@ describe("R2-W04 / GRAMMAR rule 3b — a mutation may not REWRITE an arm identit
     expect(applied.ok, "the fixture's needle no longer matches — re-measure it").toBe(true);
 
     const detail = identityRewriteDetail(applied.text!, gate, GATE_REL);
-    expect(detail, "the arm-identity multiset was unchanged — the fixture is not the attack").not
+    expect(detail, "the failure branches were unchanged — the fixture is not the attack").not
       .toBeNull();
     expect(identityRewriteDetail(gate, applied.text!, GATE_REL)).toMatch(
-      /REWRITES the arm identities/,
+      /REWRITES a failure branch/,
     );
   });
 
@@ -556,6 +607,180 @@ describe("R2-W04 / GRAMMAR rule 3b — a mutation may not REWRITE an arm identit
     // Non-vacuity: the walk must actually have walked something.
     expect(armsSeen).toBe(30);
     expect(stepsSeen).toBe(49);
+  });
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // R3-W01 + R3-C02 (secondary) — the two blind spots of the multiset compare
+  // ══════════════════════════════════════════════════════════════════════════
+
+  it("R3-W01: an identity SWAP is multiset-preserving and must still be refused", () => {
+    // Sorting then joining discards POSITION. Exchanging two arms' identities
+    // leaves the sorted multiset byte-identical, so a single `edit` spanning
+    // both raises used to return null — the outcome 3b exists to refuse,
+    // reached THROUGH 3b.
+    const before = [
+      "  IF NOT a THEN",
+      "    RAISE EXCEPTION 'TEST FAILED (ARM ONE): a';",
+      "  END IF;",
+      "  IF NOT b THEN",
+      "    RAISE EXCEPTION 'TEST FAILED (ARM TWO): b';",
+      "  END IF;",
+    ].join("\n");
+    const after = before
+      .replace("TEST FAILED (ARM ONE)", "TEST FAILED (@@)")
+      .replace("TEST FAILED (ARM TWO)", "TEST FAILED (ARM ONE)")
+      .replace("TEST FAILED (@@)", "TEST FAILED (ARM TWO)");
+
+    // The oracle, stated independently of the implementation: the swap is
+    // invisible to a SORTED multiset by construction. That is the property
+    // that made it reachable, so it is asserted rather than assumed.
+    expect(
+      armIdentities(before).join(" | "),
+      "the fixture is not a swap — the sorted multisets differ, so it would have been caught anyway",
+    ).toBe(armIdentities(after).join(" | "));
+
+    expect(identityRewriteDetail(before, after, "f.sql")).toMatch(/REWRITES a failure branch/);
+  });
+
+  it("R3-C02 secondary: negating an arm's own GUARD preserves every identity and must still be refused", () => {
+    // MEASURED against the real gate at HEAD: `IF NOT raised THEN` ->
+    // `IF TRUE THEN` parsed clean, applied cleanly, changed no identity at all,
+    // and made the arm fire without ever evaluating the property it claims to
+    // test. 3b's unit is the FAILURE BRANCH precisely so the guard is inside it.
+    const gate = readFileSync(GATE, "utf8");
+    const step = {
+      kind: "edit" as const,
+      file: GATE_REL,
+      find: "IF NOT raised THEN\n    RESET ROLE;\n    RAISE EXCEPTION '",
+      replace: "IF TRUE THEN\n    RESET ROLE;\n    RAISE EXCEPTION '",
+      occurrences: gate.split("IF NOT raised THEN\n    RESET ROLE;\n    RAISE EXCEPTION '").length - 1,
+      nth: 1,
+    };
+    expect(
+      step.occurrences,
+      "the real gate no longer carries this branch shape — re-measure the fixture",
+    ).toBeGreaterThan(0);
+
+    const applied = applyFileStep(gate, step);
+    expect(applied.ok).toBe(true);
+
+    // Independent oracle: identities are UNCHANGED, so anything stated over
+    // identities alone cannot see this. That is the finding, asserted.
+    expect(armIdentities(applied.text as string)).toEqual(armIdentities(gate));
+
+    expect(identityRewriteDetail(gate, applied.text as string, GATE_REL)).toMatch(
+      /REWRITES a failure branch/,
+    );
+  });
+
+  it("REAL GATE FILE: failure branches are found, small, and well inside the lookback bound", () => {
+    // Non-vacuity for the two arms above: if `failureBranches` returned an
+    // empty list, every comparison would be trivially equal and the whole rule
+    // would be a control that cannot fire.
+    const branches = failureBranches(readFileSync(GATE, "utf8"));
+    expect(branches.length).toBeGreaterThan(50);
+    const sizes = branches.map((b) => b.text.split("\n").length);
+    expect(Math.min(...sizes)).toBeGreaterThanOrEqual(1);
+    expect(
+      Math.max(...sizes),
+      "a failure branch grew past the 40-line lookback bound — the bound must be re-measured",
+    ).toBeLessThan(40);
+  });
+});
+
+// ══════════════════════════════════════════════════════════════════════════
+// R3-C02 — the identity NONCE: the arbiter that cannot be re-spelled
+// ══════════════════════════════════════════════════════════════════════════
+describe("GRAMMAR rule 3c — only an identity the RUNNER stamped may be read", () => {
+  // ⛔ WHY A NONCE AND NOT A LONGER REGEX. Three review rounds answered a
+  // spelling with a rule and were answered by a new spelling within minutes.
+  // The nonce does not read the annotation's text at all: it reads what the
+  // database printed, and asks whether the runner put it there.
+  //
+  // The inputs below are GENERATED over the class of spellings, not listed —
+  // the same discipline the neuter oracle now uses. Every one of them produces
+  // the identical bytes at runtime; none of them is a substring rule's problem.
+
+  const ARM = "SYNTH 1";
+  /** Ways to make PostgreSQL print `TEST FAILED (SYNTH 1)` without writing it. */
+  const SPELLINGS: Record<string, string> = {
+    "direct literal": `TEST FAILED (${ARM}): x`,
+    "concatenated": `TEST FAI' || 'LED (${ARM}): x`,
+    "format() interpolation": `TEST FA%sED (${ARM}): x`,
+    "concatenated at the paren": `TEST FAILED (' || '${ARM}): x`,
+    "chr() assembled": `' || chr(84) || 'EST FAILED (${ARM}): x`,
+  };
+
+  it("the generator is non-empty and every spelling names the same arm at runtime", () => {
+    expect(Object.keys(SPELLINGS).length).toBeGreaterThan(0);
+  });
+
+  for (const [spelling, injected] of Object.entries(SPELLINGS)) {
+    it(`ORACLE: a "${spelling}" identity the runner did not stamp is detected`, () => {
+      const nonce = makeIdentityNonce();
+      // What the LANE would print, whatever the annotation's spelling was.
+      const laneOutput = `psql:gate.sql:12: ERROR:  TEST FAILED (${ARM}): x\n`;
+      expect(
+        injected.length,
+        "the spelling table must actually carry text — an empty entry proves nothing",
+      ).toBeGreaterThan(0);
+
+      expect(
+        unstampedIdentities(laneOutput, nonce),
+        `the runner stamped no such identity, so "${spelling}" must be reported as SYNTHESISED`,
+      ).toEqual([ARM]);
+      expect(
+        firstFailureArm(laneOutput, nonce),
+        "an unstamped identity must not be readable as a first failure",
+      ).toBeNull();
+    });
+  }
+
+  it("a STAMPED identity is read, and reads back as the arm the gate declares", () => {
+    // The other direction. Without this the nonce could be "passed" by never
+    // recognising anything, which would refuse the entire corpus.
+    const nonce = makeIdentityNonce();
+    const gate = stampIdentities("RAISE EXCEPTION 'TEST FAILED (ANON 1a): x';", nonce);
+    expect(gate).toContain(stampedIdentity(nonce, "ANON 1a"));
+
+    const laneOutput = `ERROR:  ${stampedIdentity(nonce, "ANON 1a")}: x\n`;
+    expect(firstFailureArm(laneOutput, nonce)).toBe("ANON 1a");
+    expect(unstampedIdentities(laneOutput, nonce)).toEqual([]);
+  });
+
+  it("the nonce is fresh per call — a fixed stamp would be forgeable by an annotation", () => {
+    const seen = new Set(Array.from({ length: 50 }, () => makeIdentityNonce()));
+    expect(seen.size).toBe(50);
+  });
+
+  it("stamping the REAL gate stamps every identity and leaves no unstamped one behind", () => {
+    const gate = readFileSync(join(REPO_ROOT, "supabase/tests/test_strategy_shares_rls.sql"), "utf8");
+    const nonce = makeIdentityNonce();
+    const stamped = stampIdentities(gate, nonce);
+    expect(unstampedIdentities(stamped, nonce)).toEqual([]);
+    // Non-vacuity: it stamped a real number of identities, not zero.
+    expect(armIdentities(gate).length).toBeGreaterThan(50);
+    expect(armIdentities(stamped).length).toBe(armIdentities(gate).length);
+  });
+
+  it("no `find` or `anchor` in the REAL corpus names the literal, which is what makes stamping safe", () => {
+    // Stamping runs BEFORE the mutation steps, so a needle containing
+    // `TEST FAILED (` would stop matching and the arm would report an
+    // occurrence-mismatch instead of running. Rule 3a's needle half forbids
+    // exactly that — this arm pins the dependency rather than leaving it
+    // implicit between two files.
+    const scan = scanCorpus(join(REPO_ROOT, "supabase", "tests"));
+    const needles: string[] = [];
+    for (const { result } of scan.results) {
+      for (const ann of result.structured) {
+        for (const step of ann.apply ?? []) {
+          if (step.kind === "edit") needles.push(step.find);
+          if (step.kind === "insert-after") needles.push(step.anchor);
+        }
+      }
+    }
+    expect(needles.length).toBe(49);
+    expect(needles.filter((n) => /TEST\s+FAILED\s*\(/i.test(n))).toEqual([]);
   });
 });
 

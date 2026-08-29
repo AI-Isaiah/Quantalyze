@@ -149,6 +149,7 @@ const DEFECT_KINDS = [
   "wrong-first-failure",
   "neuter-missed",
   "identity-rewrite",
+  "synthesised-identity",
   "baseline",
   "restore",
   "dirty-checkout",
@@ -429,10 +430,103 @@ function gitStatus() {
   return proc.stdout.split("\n").filter((l) => l.trim().length > 0);
 }
 
-/** First `TEST FAILED (<ARM>)` in lane output, in emission order. */
-export function firstFailureArm(output) {
-  const match = output.match(/TEST FAILED \(([^)]*)\)/);
+// ===========================================================================
+// R3-C02 — THE IDENTITY NONCE: the detector reads only what the RUNNER wrote
+// ===========================================================================
+//
+// ⛔ THE DEFECT THIS CLOSES, and why three rounds of text rules did not.
+//
+// The runner credits an arm as BITING when the first `TEST FAILED (<id>)` in
+// the lane's output names that arm. Rule 3a refuses an annotation whose
+// injected text contains the literal `TEST FAILED (`. SQL concatenates string
+// literals, so the literal never has to appear:
+//
+//   {"arm":"X 1","apply":[{"kind":"sql","stmt":
+//     "DO $$ BEGIN RAISE EXCEPTION '%', 'TEST FAI' || 'LED (X 1): x'; END $$"}]}
+//
+// MEASURED at HEAD: `errors=0 accepted=1`, and at runtime the lane emits
+// `TEST FAILED (X 1)`, `firstFailureArm` reads `X 1`, the arm reports
+// `RED (identity ok)` and `biting` rises — for an arm that never ran, against a
+// gate file that was never touched. `biting` is the quantity ARMS_FLOOR bounds,
+// so this is a vacuous PASS in the phase's headline number.
+//
+// Substring matching cannot win: `format()`, `chr()`, `||` and a hundred other
+// spellings all produce the same bytes at runtime and none of them contain the
+// needle. Every round that answered a spelling with a longer regex was answered
+// by a new spelling in minutes.
+//
+// So the rule is no longer stated over TEXT at all. Before the lane runs, the
+// runner rewrites the SCRATCH copy of the pristine gate, stamping a fresh
+// random nonce into every identity it finds:
+//
+//     TEST FAILED (ANON 1a)   ->   TEST FAILED (7f3c9a1e|ANON 1a)
+//
+// and the detector then reads ONLY stamped identities. An annotation cannot
+// produce a stamped identity because it cannot know the nonce — it is generated
+// per arm run, after the annotation was parsed. Any `TEST FAILED (` the lane
+// emits WITHOUT the stamp is, by construction, text the runner did not put in
+// the gate file: the defect kind `synthesised-identity`.
+//
+// This ranges over the CLASS rather than over a list of spellings, and it
+// covers every step kind — `sql` steps were never subject to the apply-time
+// content rule at all, which is the second half of R3-C02.
+//
+// ⚠️ HONEST RESIDUAL, named rather than implied: the stamp is unforgeable to an
+// annotation that only writes SQL. It is NOT unforgeable to SQL that READS the
+// stamped gate file back off disk (`pg_read_file` as superuser) and echoes it.
+// Nothing in the corpus does that and it would be visible in review as an
+// obviously hostile annotation, but it is the boundary of this control.
+
+/** A fresh, unguessable identity stamp. Generated per arm run, never reused. */
+export function makeIdentityNonce() {
+  return `m${Math.random().toString(36).slice(2, 10)}${Date.now().toString(36)}`;
+}
+
+/**
+ * Stamp every arm identity in a gate file with `nonce`.
+ *
+ * ⚠️ Called on the PRISTINE copy, BEFORE any mutation step. Stamping after the
+ * mutation would stamp whatever the mutation injected, which is exactly the
+ * thing being refused.
+ */
+export function stampIdentities(text, nonce) {
+  return text.split("TEST FAILED (").join(`TEST FAILED (${nonce}|`);
+}
+
+/** The identity the gate emits for `arm` once stamped. */
+export function stampedIdentity(nonce, arm) {
+  return `TEST FAILED (${nonce}|${arm})`;
+}
+
+/**
+ * First `TEST FAILED (<ARM>)` in lane output, in emission order.
+ *
+ * With a `nonce`, only STAMPED identities are readable — see the block above.
+ * Without one (the baseline and restore legs, which run the pristine gate) it
+ * falls back to the unstamped form.
+ *
+ * @param {string} output
+ * @param {string | null} [nonce]
+ */
+export function firstFailureArm(output, nonce = null) {
+  const re = nonce
+    ? new RegExp(`TEST FAILED \\(${nonce}\\|([^)]*)\\)`)
+    : /TEST FAILED \(([^)]*)\)/;
+  const match = output.match(re);
   return match ? match[1] : null;
+}
+
+/**
+ * Identities the lane emitted that the runner did NOT stamp.
+ *
+ * Every raise in the gate copy carries the stamp, so an unstamped identity can
+ * only have come from the mutation itself — an injected raise in any file, or a
+ * `sql` step raising directly against the database, in ANY spelling.
+ */
+export function unstampedIdentities(output, nonce) {
+  return [...output.matchAll(/TEST FAILED \(([^)]*)\)/g)]
+    .map((m) => m[1])
+    .filter((id) => !id.startsWith(`${nonce}|`));
 }
 
 /**
@@ -452,41 +546,161 @@ export function firstFailureArm(output) {
  * `biting` would rise for an arm whose own logic never ran — the exact outcome
  * rule 3 exists to prevent, reached without the literal rule 3 looks for.
  *
- * The invariant that closes the CLASS is stated over the OUTPUT rather than
- * over the annotation's spelling: a mutation may change what the gate DOES,
- * never who it says it is. So the multiset of readable identities must survive
- * the mutation unchanged.
+ * The invariant that closes the CLASS is stated over the FILE rather than over
+ * the annotation's spelling: a mutation may change what the gate DOES, never
+ * who it says it is, and never the condition under which it says it.
+ *
+ * ⛔ R3-W01 + R3-C02. The first version of this compared a SORTED MULTISET of
+ * identities, which is blind in two measured ways:
+ *
+ *   - SWAPS. Exchanging two arms' identities leaves the sorted multiset
+ *     byte-identical, so a single `edit` spanning both raises returned `null`.
+ *     Combined with a step that breaks the OTHER arm, that arm then reports
+ *     under the arm-under-test's ID — the outcome the rule exists to refuse,
+ *     reached THROUGH the rule.
+ *   - GUARD NEGATION. `IF NOT raised THEN` -> `IF TRUE THEN` preserves every
+ *     identity exactly, and MEASURED against the real gate it parsed clean,
+ *     applied cleanly and returned `null` from the multiset compare — while
+ *     the `WITH CHECK` the arm claims to test was never evaluated.
+ *
+ * So the unit of the invariant is now the FAILURE BRANCH: the exact text from
+ * the head of the branch enclosing a `TEST FAILED (` raise through the end of
+ * that raise's statement, in FILE ORDER. A mutation must leave that ordered
+ * list byte-identical. That covers identity rewrites, identity swaps
+ * (position-sensitive), guard negations (the head is part of the block), and
+ * injected raises carrying the literal (a new block appears).
+ *
+ * ⚠️ WHAT IT DOES NOT COVER, stated rather than implied: a raise INJECTED with
+ * the literal spelled indirectly (`'TEST FAI' || 'LED (X)'`) is not recognised
+ * as a failure branch, so it does not appear in either list. That half of the
+ * class is closed at RUNTIME by the identity nonce above, which is the only
+ * place it can be closed — see `unstampedIdentities`.
  *
  * MEASURED 2026-08-29 across the real corpus — 30 annotated arms, 49 file
  * steps — 0 violations. The widened rule refuses nothing that exists today.
  *
  * ⚠️ NEUTERS ARE NOT SUBJECT TO THIS, deliberately: neutering an arm removes
  * its identity ON PURPOSE. The comparison is taken across a MUTATION step
- * only, with the post-neuter text as its "before", so an identity the neuter
- * removed is absent from both sides.
+ * only, with the post-neuter text as its "before", so a branch the neuter
+ * commented out is absent from both sides.
  */
 export function armIdentities(text) {
   return [...text.matchAll(/TEST FAILED \(([^)]*)\)/g)].map((m) => m[1]).sort();
 }
 
-/** `null` when the mutation preserved every identity; otherwise a description. */
-export function identityRewriteDetail(before, after, file) {
-  const b = armIdentities(before);
-  const a = armIdentities(after);
-  if (JSON.stringify(b) === JSON.stringify(a)) return null;
+/** Identities in FILE ORDER — position-sensitive, so a swap is visible. */
+export function armIdentitiesInOrder(text) {
+  return [...text.matchAll(/TEST FAILED \(([^)]*)\)/g)].map((m) => m[1]);
+}
 
-  const count = (list, id) => list.filter((x) => x === id).length;
-  const moved = [...new Set([...b, ...a])]
-    .filter((id) => count(b, id) !== count(a, id))
-    .map((id) => `${JSON.stringify(id)} ${count(b, id)}->${count(a, id)}`)
-    .sort();
+/**
+ * Index of the last line of the statement starting at `from`, tracking
+ * single-quote state so a `;` inside a message literal does not end it early.
+ * `''` is the SQL escape for a literal quote. Returns -1 if unterminated.
+ */
+function statementEndLine(lines, from) {
+  let inQuote = false;
+  for (let i = from; i < lines.length; i += 1) {
+    const line = lines[i];
+    for (let c = 0; c < line.length; c += 1) {
+      const ch = line[c];
+      if (ch === "'") {
+        if (inQuote && line[c + 1] === "'") {
+          c += 1;
+          continue;
+        }
+        inQuote = !inQuote;
+      } else if (ch === ";" && !inQuote) {
+        return i;
+      }
+    }
+  }
+  return -1;
+}
+
+/**
+ * Every FAILURE BRANCH in `text`, in file order: `{ id, text }` where `text` is
+ * the exact source from the enclosing branch head through the end of the RAISE.
+ *
+ * The backward walk reuses the R3-C01 primitives (`executableText` /
+ * `isBranchHead`), so "what counts as a branch head" has ONE definition in this
+ * file rather than two that can drift apart.
+ */
+/**
+ * How far back a failure branch's head may sit from its RAISE.
+ *
+ * MEASURED 2026-08-29 on `supabase/tests/test_strategy_shares_rls.sql`: the
+ * furthest any of the 104 identities sits from its enclosing branch head is
+ * printed by the REAL CORPUS arm in `mutation-annotation-parser.test.ts`, and
+ * the bound is pinned well above it so a normal arm never falls back.
+ */
+const FAILURE_BRANCH_LOOKBACK = 40;
+
+export function failureBranches(text) {
+  const lines = text.split("\n");
+  const out = [];
+  for (let i = 0; i < lines.length; i += 1) {
+    if (/^[ \t]*--/.test(lines[i])) continue; // a commented-out (neutered) raise
+    const m = lines[i].match(/TEST FAILED \(([^)]*)\)/);
+    if (!m) continue;
+
+    let raiseAt = i;
+    while (raiseAt >= 0 && !/\bRAISE\s+EXCEPTION\b/i.test(lines[raiseAt])) raiseAt -= 1;
+    if (raiseAt < 0) raiseAt = i;
+
+    // Walk back to the NEAREST branch head. The guard is the load-bearing part
+    // of the block: `IF NOT raised THEN` -> `IF TRUE THEN` preserves every
+    // identity and every raise, and MEASURED against the real gate it passed
+    // the old multiset compare while making the arm fire without evaluating
+    // the property it claims to test (R3-C02, secondary).
+    //
+    // Intervening non-head statements (the corpus's `RESET ROLE;` abort-path
+    // cleanup) are walked THROUGH, unlike `neuterArm`, which refuses them —
+    // there the concern is what stays live after a rewrite, here it is only
+    // where the block begins.
+    //
+    // BOUNDED so a raise with no enclosing branch cannot swallow the file. If
+    // no head is found inside the bound the block is the raise statement alone,
+    // which is the narrow direction; that is safe here only because the nonce
+    // (not this function) is what closes the injection half of the class.
+    let head = raiseAt;
+    for (let k = raiseAt - 1; k >= 0 && raiseAt - k <= FAILURE_BRANCH_LOOKBACK; k -= 1) {
+      if (isBranchHead(lines[k])) {
+        head = k;
+        break;
+      }
+    }
+
+    const end = statementEndLine(lines, raiseAt);
+    out.push({ id: m[1], text: lines.slice(head, (end === -1 ? i : end) + 1).join("\n") });
+    i = end === -1 ? i : end;
+  }
+  return out;
+}
+
+/** `null` when the mutation preserved every failure branch; otherwise a description. */
+export function identityRewriteDetail(before, after, file) {
+  const b = failureBranches(before);
+  const a = failureBranches(after);
+  if (b.length === a.length && b.every((x, i) => x.text === a[i].text)) return null;
+
+  const changed = [];
+  for (let i = 0; i < Math.max(b.length, a.length); i += 1) {
+    if (b[i]?.text === a[i]?.text) continue;
+    changed.push(
+      `#${i + 1} ${JSON.stringify(b[i]?.id ?? null)} -> ${JSON.stringify(a[i]?.id ?? null)}`,
+    );
+    if (changed.length === 4) break;
+  }
 
   return (
-    `MEASURE_FAIL: the mutation REWRITES the arm identities in ${file} (${moved.join(", ")}). ` +
-    `A mutation may change what the gate DOES; it may never change who the gate SAYS IT IS. ` +
-    `Re-pointing a raise makes the first-failure check attribute another arm's failure to this ` +
-    `one, so the arm would count as biting without its own logic ever running. Mutate the code ` +
-    `under test, not the failure identity.`
+    `MEASURE_FAIL: the mutation REWRITES a failure branch in ${file} ` +
+    `(${b.length} branch(es) before, ${a.length} after; first differences: ${changed.join(", ")}). ` +
+    `A mutation may change what the gate DOES; it may never change who the gate SAYS IT IS, nor ` +
+    `the condition under which it says it. Re-pointing a raise makes the first-failure check ` +
+    `attribute another arm's failure to this one; negating a guard makes the arm fire without ` +
+    `evaluating the property it claims to test. Either way the arm would count as biting without ` +
+    `its own logic ever running. Mutate the code under test, not the failure branch.`
   );
 }
 
@@ -677,6 +891,19 @@ export function runCorpus({
           gateText = result.text;
         }
         if (neuterFailed) continue;
+
+        // ── R3-C02: stamp the PRISTINE gate, BEFORE any mutation runs ───────
+        // Every identity the detector will accept is written here, by the
+        // runner, with a nonce the annotation cannot know. Stamping after the
+        // mutation would stamp whatever the mutation injected. Neuters run
+        // first (above) because their needle is the UNSTAMPED literal, and a
+        // neutered raise is commented out either way.
+        //
+        // Rule 3a guarantees no `find`/`anchor` names a `TEST FAILED (`
+        // literal (measured: 0 of 49 file steps), which is what makes it safe
+        // to stamp before the mutation steps run their occurrence counts.
+        const nonce = makeIdentityNonce();
+        gateText = stampIdentities(gateText, nonce);
         writeFileSync(armMap.get(gateRel), gateText);
 
         // Mutation steps, in order, on the copies.
@@ -726,9 +953,29 @@ export function runCorpus({
         armsExecuted += 1;
         timings.push(run.seconds);
 
-        const first = firstFailureArm(run.output);
+        const first = firstFailureArm(run.output, nonce);
+        // ── R3-C02: an identity the runner did not stamp was SYNTHESISED ────
+        // Every raise in the gate copy carries the nonce, so an unstamped
+        // `TEST FAILED (…)` in the output came from the mutation itself — an
+        // injected raise in any file, or a `sql` step raising directly against
+        // the database, in ANY spelling (`'TEST FAI' || 'LED (…)'`, `format`,
+        // `chr`, …). This is the arbiter that cannot be re-spelled around,
+        // because it does not read the annotation's text at all.
+        const synthesised = unstampedIdentities(run.output, nonce);
         let verdict;
-        if (run.status === 0) {
+        if (synthesised.length > 0) {
+          verdict = `SYNTHESISED(${synthesised[0]})`;
+          addDefect(
+            "synthesised-identity",
+            ann.arm,
+            gateRel,
+            `MEASURE_FAIL: the lane emitted TEST FAILED (${synthesised[0]}), which the runner did ` +
+              `NOT stamp into the gate file. Every raise in the gate copy carries this run's ` +
+              `identity nonce, so an unstamped identity was SYNTHESISED by the mutation — the ` +
+              `mutation satisfied the DETECTOR instead of the arm. This arm is NOT counted as ` +
+              `biting. Mutate the code under test, never the failure output.`,
+          );
+        } else if (run.status === 0) {
           verdict = "NO-RED";
           addDefect(
             "no-red",
@@ -759,7 +1006,7 @@ export function runCorpus({
         // A neuter that silently missed leaves the shadowing arm live, which
         // would make the identity check fail for the wrong reason.
         for (const entry of ann.neuter) {
-          if (run.output.includes(`TEST FAILED (${entry.arm})`)) {
+          if (run.output.includes(stampedIdentity(nonce, entry.arm))) {
             addDefect(
               "neuter-missed",
               ann.arm,
@@ -836,8 +1083,14 @@ export function runCorpus({
   // non-biting arm the two disagree. That is not a hole — the runner exits 1
   // on such a run first — but two meanings under one name is how a floor
   // decays into a number nobody compares. So CI now reads THIS line.
+  // ⛔ R3-C02: `synthesised-identity` MUST subtract here. It is raised for an
+  // arm that DID execute a lane, so without this term the arm would still be
+  // counted as biting — which is the whole defect: a vacuous PASS inflating
+  // the one number ARMS_FLOOR bounds.
   const bitingArms =
-    armsExecuted - defects.filter((d) => ["no-red", "wrong-first-failure"].includes(d.kind)).length;
+    armsExecuted -
+    defects.filter((d) => ["no-red", "wrong-first-failure", "synthesised-identity"].includes(d.kind))
+      .length;
   log(`biting: ${bitingArms}   (executed arms that reddened their OWN arm first — the quantity ARMS_FLOOR bounds)`);
   for (const w of waivers) log(`  waived: ${w.arm} — ${w.reason}`);
   if (timings.length > 0) {
@@ -888,6 +1141,10 @@ export function runCorpus({
     armsAnnotated,
     armsExecuted,
     armsWaived,
+    // Exposed so the self-test can assert the number ARMS_FLOOR is compared
+    // against, rather than re-deriving it from the defect list and agreeing
+    // with the implementation by construction.
+    bitingArms,
     defects,
     exitCode: defects.length > 0 ? 1 : narrowed ? 2 : 0,
   };
@@ -1064,7 +1321,7 @@ function selfTest() {
   // 6 outright, so each states the floor appropriate to ITS corpus. Check 5 is
   // where an ARMS_FLOOR regression is proven to fire — the mode that could not
   // be proven at all while the floor was 0.
-  console.log("=== SELF-TEST 1/7: a non-biting annotation must exit 1 with `no-red` ===");
+  console.log("=== SELF-TEST 1/8: a non-biting annotation must exit 1 with `no-red` ===");
   const a = runCorpus({ scopeDir: SELFTEST_DIR, onlyFile: "nonbiting-gate.sql", armsFloor: 0, log: quiet });
   pass =
     expect(a.exitCode === 1, `exit code is 1 (got ${a.exitCode})`) &&
@@ -1074,7 +1331,7 @@ function selfTest() {
     ) &&
     pass;
 
-  console.log("=== SELF-TEST 2/7: a FILES_FLOOR regression must exit 1 with `floor` ===");
+  console.log("=== SELF-TEST 2/8: a FILES_FLOOR regression must exit 1 with `floor` ===");
   const b = runCorpus({ scopeDir: FIXTURE_CORPUS, filesFloor: 99, armsFloor: 0, log: quiet });
   pass =
     expect(b.exitCode === 1, `exit code is 1 (got ${b.exitCode})`) &&
@@ -1084,7 +1341,7 @@ function selfTest() {
     ) &&
     pass;
 
-  console.log("=== SELF-TEST 3/7: reddening the WRONG arm must exit 1 with `wrong-first-failure` ===");
+  console.log("=== SELF-TEST 3/8: reddening the WRONG arm must exit 1 with `wrong-first-failure` ===");
   const c = runCorpus({ scopeDir: SELFTEST_DIR, onlyFile: "wrong-identity-gate.sql", armsFloor: 0, log: quiet });
   pass =
     expect(c.exitCode === 1, `exit code is 1 (got ${c.exitCode})`) &&
@@ -1096,7 +1353,7 @@ function selfTest() {
     ) &&
     pass;
 
-  console.log("=== SELF-TEST 4/7: a wrong `occurrences` must exit 1 with MEASURE_FAIL, NOT `no-red` ===");
+  console.log("=== SELF-TEST 4/8: a wrong `occurrences` must exit 1 with MEASURE_FAIL, NOT `no-red` ===");
   const d = runCorpus({ scopeDir: SELFTEST_DIR, onlyFile: "occurrence-mismatch-gate.sql", armsFloor: 0, log: quiet });
   pass =
     expect(d.exitCode === 1, `exit code is 1 (got ${d.exitCode})`) &&
@@ -1115,7 +1372,7 @@ function selfTest() {
   // FILES_FLOOR half of D-09's floor mode. Now that the floor is a measured 30
   // this check exists, and it is what stops the pinned floor from decaying back
   // into a constant nobody compares to anything.
-  console.log("=== SELF-TEST 5/7: an ARMS_FLOOR regression must exit 1 with `floor` ===");
+  console.log("=== SELF-TEST 5/8: an ARMS_FLOOR regression must exit 1 with `floor` ===");
   const f = runCorpus({ scopeDir: FIXTURE_CORPUS, armsFloor: 99, log: quiet });
   pass =
     expect(f.exitCode === 1, `exit code is 1 (got ${f.exitCode})`) &&
@@ -1129,7 +1386,7 @@ function selfTest() {
     ) &&
     pass;
 
-  console.log("=== SELF-TEST 6/7: the green fixture corpus must exit 0 ===");
+  console.log("=== SELF-TEST 6/8: the green fixture corpus must exit 0 ===");
   const e = runCorpus({ scopeDir: FIXTURE_CORPUS, armsFloor: 2, log: quiet });
   pass =
     expect(e.exitCode === 0, `exit code is 0 (got ${e.exitCode}; defects: ${JSON.stringify(e.defects)})`) &&
@@ -1144,7 +1401,7 @@ function selfTest() {
   // fixture's annotation deliberately carries no failure literal in either its
   // needle or its replacement, so this check can only pass on the CONTENT
   // invariant (`identityRewriteDetail`) and not on the spelling rule.
-  console.log("=== SELF-TEST 7/7: rewriting an arm IDENTITY must exit 1 with `identity-rewrite` ===");
+  console.log("=== SELF-TEST 7/8: rewriting an arm IDENTITY must exit 1 with `identity-rewrite` ===");
   const g = runCorpus({ scopeDir: SELFTEST_DIR, onlyFile: "identity-rewrite-gate.sql", armsFloor: 0, log: quiet });
   pass =
     expect(g.exitCode === 1, `exit code is 1 (got ${g.exitCode})`) &&
@@ -1159,6 +1416,30 @@ function selfTest() {
     expect(
       !g.defects.some((x) => x.kind === "no-red" || x.kind === "wrong-first-failure"),
       'no "no-red" or "wrong-first-failure" defect — a refused mutation is not a non-biting arm',
+    ) &&
+    pass;
+
+  console.log("");
+  console.log("=== SELF-TEST 8/8: SYNTHESISING an identity must exit 1 with `synthesised-identity` ===");
+  const h = runCorpus({
+    scopeDir: SELFTEST_DIR,
+    onlyFile: "synthesised-identity-gate.sql",
+    armsFloor: 0,
+    log: quiet,
+  });
+  pass =
+    expect(h.exitCode === 1, `exit code is 1 (got ${h.exitCode})`) &&
+    expect(
+      h.defects.some((x) => x.kind === "synthesised-identity" && x.arm === "SYNTH 1"),
+      'the defect table names SYNTH 1 with kind "synthesised-identity"',
+    ) &&
+    expect(
+      h.armsExecuted === 1,
+      `the arm DID reach a lane (executed ${h.armsExecuted}) — this mode is caught at RUNTIME, not at parse time, which is the whole point`,
+    ) &&
+    expect(
+      h.bitingArms === 0,
+      `the arm is NOT counted as biting (biting ${h.bitingArms}) — a synthesised identity must not inflate the quantity ARMS_FLOOR bounds`,
     ) &&
     pass;
 

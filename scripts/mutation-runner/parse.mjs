@@ -106,11 +106,34 @@ function isRepoRelativePath(p) {
  */
 const INJECTS_FIRST_FAILURE_LITERAL = /TEST\s+FAILED\s*\(/i;
 
+/**
+ * Collapse SQL literal concatenation before applying the spelling rule.
+ *
+ * ⛔ R3-C02, measured: `'TEST FAI' || 'LED (X 1): synthetic'` contains the
+ * needle in neither the file nor the parsed step, so it parsed clean
+ * (`errors=0 accepted=1`) and at runtime produced exactly the bytes the
+ * detector reads.
+ *
+ * ⚠️ THIS DOES NOT CLOSE THE CLASS AND MUST NOT BE READ AS DOING SO. It closes
+ * ONE more spelling. `format('TEST FA%sED (X)', 'IL')`, `chr(84) || …` and an
+ * unbounded set of others produce the same bytes and are invisible here. A rule
+ * stated over an annotation's SPELLING can always be re-spelled around — that
+ * is the lesson of three review rounds, not a hypothesis. The class is closed
+ * at RUNTIME by the identity nonce in `run.mjs` (`unstampedIdentities`), which
+ * reads what the lane actually emitted rather than what the annotation says.
+ * This rule survives only because a static refusal is cheaper, fires in
+ * `--parse-only` on a database-less platform, and names the mistake earlier.
+ */
+const collapseSqlConcat = (s) => s.replace(/'\s*\|\|\s*'/g, "").replace(/'\s*\n\s*'/g, "");
+
 function refuseSelfSatisfying(at, field, injected) {
   if (typeof injected !== "string") return;
-  if (!INJECTS_FIRST_FAILURE_LITERAL.test(injected)) return;
+  const direct = INJECTS_FIRST_FAILURE_LITERAL.test(injected);
+  const byConcat = INJECTS_FIRST_FAILURE_LITERAL.test(collapseSqlConcat(injected));
+  if (!direct && !byConcat) return;
   throw (
-    `${at}: "${field}" injects a "TEST FAILED (" literal. A mutation that WRITES the string ` +
+    `${at}: "${field}" injects a "TEST FAILED (" literal ` +
+    `(${direct ? "directly" : "by string concatenation"}). A mutation that WRITES the string ` +
     `the first-failure identity check looks for satisfies the DETECTOR instead of the arm — it ` +
     `would report RED (identity ok) and count as a biting arm without the arm's own logic ever ` +
     `running. Mutate the code under test, not the failure message.`
@@ -127,9 +150,14 @@ function refuseSelfSatisfying(at, field, injected) {
  * needle names the literal outright. It does NOT close the general shape —
  * `{"find":"ANON 1a): ","replace":"N1 1a): "}` carries no `TEST FAILED`
  * anywhere and passes here. That shape is refused by CONTENT, at apply time,
- * by `identityRewriteDetail` in run.mjs, which compares the arm identities the
- * file carries before and after. A rule stated over the annotation's spelling
- * can always be re-spelled around; the invariant over the file cannot.
+ * by `identityRewriteDetail` in run.mjs, which compares the FAILURE BRANCHES
+ * the file carries before and after. A rule stated over the annotation's
+ * spelling can always be re-spelled around; the invariant over the file cannot.
+ *
+ * ⭐ It also load-bears for the R3-C02 identity nonce: because no `find` or
+ * `anchor` may name a `TEST FAILED (` literal, the runner can stamp every
+ * identity in the gate copy BEFORE the mutation steps run without disturbing a
+ * single needle or occurrence count.
  *
  * MEASURED 2026-08-29: 0 of the 49 file steps in the real corpus target this
  * literal, so nothing legitimate is refused.

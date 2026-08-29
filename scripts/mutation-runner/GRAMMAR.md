@@ -89,15 +89,26 @@ path. They are separate defect kinds in the report table.
 ### 3. A mutation may not change WHO the gate says it is
 
 A mutation may change what the gate **does**. It may never change what the
-first-failure identity check **reads**. That has two halves, refused in two
-different places, because one of them is not decidable from the annotation's
-text.
+first-failure identity check **reads**, nor the condition under which the gate
+says it. That has **three** halves, refused in three different places, because
+each is decidable somewhere the others are not.
+
+⛔ **Read this before adding a fourth regex.** Rule 3 has been "closed" in three
+consecutive review rounds and re-opened in each of them by a re-spelling —
+`{"find":"ANON 1a): "}` defeated the injection rule, `'TEST FAI' || 'LED ('`
+defeated the needle rule, `IF NOT raised` → `IF TRUE` defeated the identity
+rule, and a `sql` step was never subject to the apply-time rule at all. **Any
+rule stated over an annotation's spelling can be re-spelled around.** 3a is kept
+because it is cheap and early, but it is explicitly NOT the closure. 3b is stated
+over the file. 3c is stated over what the database actually printed, and is the
+only one of the three that cannot be re-spelled at all.
 
 #### 3a — it may not INJECT the literal (refused at parse time)
 
 The injected text of every step — `replace` on an `edit`, `text` on an
 `insert-after`, `stmt` on a `sql` — is **refused at parse time** when it contains
-a `TEST FAILED (` literal (matched case-insensitively, with any whitespace).
+a `TEST FAILED (` literal (matched case-insensitively, with any whitespace),
+**directly or after collapsing SQL string concatenation** (`'TEST FAI' || 'LED ('`).
 
 The runner proves an arm bites by requiring that the **first**
 `TEST FAILED (<ARM>)` in the lane's output names the intended arm. Rules 1 and 2
@@ -128,7 +139,18 @@ failure message in *either* direction changes what the identity check reads
 instead of what the arm does. Measured: **0 of the 49** file steps in the real
 corpus target this literal.
 
-#### 3b — it may not REWRITE an identity (refused at apply time, by CONTENT)
+⭐ That needle rule also load-bears for 3c: because no needle may name the
+literal, the runner can stamp every identity in the gate copy **before** the
+mutation steps run, without disturbing a single `find` or occurrence count.
+
+⚠️ **3a is not the closure and must never be cited as one.** Concatenation
+collapsing closes one more spelling; `format('TEST FA%sED (X)', 'IL')`,
+`chr(84) || …` and an unbounded set of others produce the same bytes at runtime
+and are invisible here. That is not a hypothesis — the self-test fixture
+`fixtures/selftest/synthesised-identity-gate.sql` is deliberately spelled with
+`format()` so that only 3c can catch it.
+
+#### 3b — it may not REWRITE a FAILURE BRANCH (refused at apply time, by CONTENT)
 
 ⛔ 3a is a rule about **how the annotation is spelled**, and a rule about
 spelling can be re-spelled around. The general attack carries no `TEST FAILED`
@@ -146,17 +168,76 @@ and `biting` rises for an arm whose own logic never ran — the same outcome 3a
 exists to prevent, reached without the literal 3a looks for.
 
 So the runner also states the rule over the **file**, where it cannot be
-re-spelled: the multiset of arm identities the first-failure regex can read
-must survive a mutation **unchanged**. A step that changes it is the defect
-kind `identity-rewrite`, raised **before** the lane runs, in both the full run
-and `--parse-only`.
+re-spelled. The unit is the **failure branch**: the exact text from the head of
+the branch enclosing a `TEST FAILED (` raise through the end of that raise's
+statement. The ordered list of failure branches must survive a mutation
+**byte-identical**. A step that changes it is the defect kind
+`identity-rewrite`, raised **before** the lane runs, in both the full run and
+`--parse-only`.
+
+⚠️ The unit used to be a **sorted multiset of identities**, and that was blind in
+two measured ways, both found in round 3:
+
+- **swaps.** Exchanging two arms' identities leaves the sorted multiset
+  byte-identical, so a single `edit` spanning both raises returned "no
+  violation". Ordering by position makes it visible.
+- **guard negation.** `IF NOT raised THEN` → `IF TRUE THEN` preserves every
+  identity exactly. Measured against the real gate it parsed clean, applied
+  cleanly and passed the multiset compare — while the owner-coherence
+  `WITH CHECK` the arm claims to test was never evaluated. The guard is part of
+  the branch, so it is part of the invariant.
 
 ⚠️ Neuters are deliberately exempt — neutering an arm removes its identity on
 purpose. The comparison is taken across a mutation step only, with the
 post-neuter text as its "before".
 
-Measured 2026-08-29 across the real corpus — 30 annotated arms, 49 file steps —
-**0 violations**, so the invariant refuses nothing that exists.
+Measured 2026-08-29 across the real corpus — 30 annotated arms, 49 file steps,
+103 failure branches — **0 violations**, so the invariant refuses nothing that
+exists.
+
+⚠️ 3b does **not** see a raise injected with the literal spelled indirectly: it
+is not recognised as a failure branch, so it appears in neither list. That half
+belongs to 3c.
+
+#### 3c — the identity the detector reads must be one the RUNNER wrote (refused at RUN time, by NONCE)
+
+⛔ The measured shape that defeated both halves above, and which no text rule can
+reach:
+
+```json
+{"arm":"X 1","apply":[{"kind":"sql",
+  "stmt":"DO $$ BEGIN RAISE EXCEPTION '%', 'TEST FAI' || 'LED (X 1): x'; END $$"}]}
+```
+
+`errors=0 accepted=1`. At runtime the lane emits `TEST FAILED (X 1)`,
+`firstFailureArm` reads `X 1`, the runner reports `RED (identity ok)` and
+`biting` rises — **for an arm that never ran, against a gate file that was never
+touched.** A `sql` step is not a file edit, so it was never subject to 3b at
+all; and its spelling can always be changed, so 3a can always be evaded.
+
+So the runner stops asking what the annotation *says* and asserts over what the
+database *printed*. Before each arm's lane runs, it rewrites the **scratch copy
+of the pristine gate**, stamping a fresh random nonce into every identity:
+
+```
+TEST FAILED (ANON 1a)   ->   TEST FAILED (7f3c9a1e|ANON 1a)
+```
+
+and the first-failure check then reads **only stamped identities**. An
+annotation cannot produce a stamped identity, because the nonce is generated per
+arm run, after parsing. Any `TEST FAILED (` the lane emits **without** the stamp
+is by construction text the runner did not put in the gate file: the defect kind
+`synthesised-identity`, and the arm is **not counted as biting**.
+
+Order is load-bearing: neuters run first (their needle is the unstamped
+literal), then the stamp, then the mutation steps. Stamping *after* the mutation
+would stamp whatever the mutation injected — the thing being refused.
+
+⚠️ **Honest residual.** The stamp is unforgeable to an annotation that only
+writes SQL. It is not unforgeable to SQL that reads the stamped gate file back
+off disk (`pg_read_file` as superuser) and echoes it. Nothing in the corpus does
+that, and such an annotation would be obviously hostile in review, but that is
+the boundary of this control and it is stated rather than implied.
 
 ---
 
@@ -207,7 +288,7 @@ and *before* the gate. This is not a file edit; it is routed through the lane's
 | Key | Type | Required | Meaning |
 |---|---|---|---|
 | `kind` | `"sql"` | yes | |
-| `stmt` | string | yes | Non-empty. **May not contain a `TEST FAILED (` literal — rule 3a.** |
+| `stmt` | string | yes | Non-empty. **May not contain a `TEST FAILED (` literal, directly or by concatenation — rule 3a.** ⚠️ A `sql` step is not a file edit, so rule **3b cannot apply to it**; what bounds it is rule **3c**, the run-time identity nonce. |
 
 ### `RED-UNDER-SETUP` — the in-file apply list
 
@@ -385,7 +466,8 @@ raising is never silently swallowed.
 | `no-red` | The mutation applied, the gate still passed. The arm cannot fail. |
 | `wrong-first-failure` | The gate went red, but the FIRST `TEST FAILED (…)` names a different arm. Red-anywhere is not success. |
 | `neuter-missed` | A neutered arm still appeared in the output. |
-| `identity-rewrite` | **MEASURE_FAIL.** The step changed the multiset of `TEST FAILED (<id>)` identities in the file — rule 3b. The mutation was NOT applied and the arm never reached a lane. |
+| `identity-rewrite` | **MEASURE_FAIL.** The step changed the ordered list of FAILURE BRANCHES in the file — an identity, an identity swap, an injected raise, or the guard the raise sits behind (rule 3b). The mutation was NOT applied and the arm never reached a lane. |
+| `synthesised-identity` | **MEASURE_FAIL.** The lane emitted a `TEST FAILED (…)` the runner did not stamp (rule 3c). The mutation SYNTHESISED the identity the detector reads instead of exercising the arm. The arm ran, and is NOT counted as biting. |
 | `baseline` | Pristine copies did not go GREEN before any mutation — a broken corpus. |
 | `restore` | Pristine copies did not go GREEN after the arm runs. |
 | `dirty-checkout` | `git status --porcelain` was non-empty after the run. Mutations must only ever touch scratch copies. |
