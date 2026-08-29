@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 25
+open_count: 26
 waived_count: 0
 fixed_count: 1
-total_count: 26
-last_updated: 2026-08-29T02:11:06.140Z
+total_count: 27
+last_updated: 2026-08-29T02:54:49.352Z
 ---
 
 # Broken Windows Ledger
@@ -41,6 +41,7 @@ last_updated: 2026-08-29T02:11:06.140Z
 | 24 | 164 | unrun-verify | src/app/PlausibleScript.tsx |  | Plausible withdrawal proven in jsdom markup only; the deployed check (network panel filtered to plausible.io shows ZERO requests on a token link) is post-deploy UAT | open |  | 2026-08-27T22:54:37.686Z |  |
 | 25 | 164.3 | unrun-verify | scripts/prod-body-drift-check.sh |  | VAC-04's first real-PROD execution pends the next migrations PR; the live supabase db dump path is stub-proven only | open |  | 2026-08-29T02:10:57.580Z |  |
 | 26 | 164.3 | unrun-verify | scripts/test-ledger-drift-check.sh |  | VAC-08's first real-TEST execution pends the next CI run of this branch; the name-joined schema_migrations query and pg_get_functiondef read are stub-proven only (this plan may not write to the shared TEST database) | open |  | 2026-08-29T02:11:06.140Z |  |
+| 27 | 164.3 | unmet-truth | scripts/mutation-runner/run.mjs | 123 | ARMS_FLOOR ships at 0 and therefore cannot fire; plan 164.3-08 must pin it from the first full-corpus measurement | open |  | 2026-08-29T02:54:49.352Z |  |
 
 ````json
 [
@@ -354,6 +355,18 @@ last_updated: 2026-08-29T02:11:06.140Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-08-29T02:11:06.140Z",
+    "resolved_at": null
+  },
+  {
+    "id": 27,
+    "kind": "unmet-truth",
+    "phase": "164.3",
+    "file": "scripts/mutation-runner/run.mjs",
+    "line": 123,
+    "description": "ARMS_FLOOR ships at 0 and therefore cannot fire; plan 164.3-08 must pin it from the first full-corpus measurement",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-08-29T02:54:49.352Z",
     "resolved_at": null
   }
 ]

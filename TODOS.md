@@ -1775,6 +1775,25 @@ these four are the deliberate carry-overs, each with the reason it was not fixed
   either run every file and aggregate failures at the end, or make the expected-red state
   a first-class, per-file declaration the runner understands.
 
+  ⚠️ **STILL OPEN. Phase 164.3 plan 05 did NOT close this class — read carefully before
+  ticking it off.** That plan built a NEW tool, `scripts/mutation-runner/run.mjs`, which
+  aggregates across arms by design: it runs every annotated arm, collects defects into one
+  table, and only then exits (first-failure identity is asserted WITHIN an arm's run, never
+  ACROSS arms). So the run-all-and-aggregate shape now exists in the repo and is proven by
+  `--self-test`.
+
+  But that is a *second* runner standing beside the problem, not a fix to it. **The
+  pre-existing `sql-tests` loop in `.github/workflows/ci.yml` is untouched and still exits on
+  first failure**, so the ~40-of-~70 suppression described above is exactly as live today as
+  when this item was written. Converting that loop is a riskier edit to a live gate that
+  guards production migrations, and it was deliberately deferred rather than bundled into a
+  plan whose subject was the mutation runner.
+
+  Recording this explicitly because the tempting summary — "164.3 added arm aggregation, so
+  F8 is handled" — would be a claim about a different artifact than the one this item names.
+  That substitution is the precise defect class Phase 164.3 exists to catch, and it would be
+  a poor look to commit it in the ledger entry for the phase's own work.
+
 ### Phase 163 / OPS-08 — TEST runs an OLDER REVISION of `_enqueue_compute_job_internal` (added 2026-08-26, corrected + root-caused 2026-08-26)
 
 Found while pre-flighting the OPS-08 migration's gate arms against both databases. Three
