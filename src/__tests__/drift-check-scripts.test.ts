@@ -77,6 +77,30 @@ function writeStubFetcher(dir: string): string {
   return p;
 }
 
+/**
+ * A stub PROD function-name index (WR-01). It lists the names the fetcher's
+ * source really holds, so the gate can tell "genuinely not in PROD" from "the
+ * extractor returned nothing". `names` defaults to whatever is in `live/`.
+ */
+function writeStubNameIndex(dir: string, names?: string[]): string {
+  const p = join(dir, "stub-index.sh");
+  const body =
+    names === undefined
+      ? [
+          `for f in "${join(dir, "live")}"/*.sql; do`,
+          '  [ -e "$f" ] || continue',
+          '  basename "$f" .sql',
+          "done",
+        ]
+      : names.map((n) => `echo "${n}"`);
+  writeFileSync(
+    p,
+    ["#!/usr/bin/env bash", ...body, "exit 0"].join("\n"),
+  );
+  chmodSync(p, 0o755);
+  return p;
+}
+
 const COMMITTED_BODY =
   "CREATE OR REPLACE FUNCTION public.demo_fn(p_id UUID)\nRETURNS UUID\nLANGUAGE plpgsql\nAS $$\nBEGIN\n  RETURN p_id;\nEND\n$$;";
 
@@ -97,7 +121,15 @@ function prodBodyHash(rendered: string): string {
 /** Lay out snapshot/, live/ and migrations/ and return the env for the gate. */
 function scaffoldProdCase(
   dir: string,
-  opts: { prodBody?: string; migrationExtra?: string; snapshot?: boolean },
+  opts: {
+    prodBody?: string;
+    migrationExtra?: string;
+    snapshot?: boolean;
+    /** Override the PROD name index. Undefined = derive it from live/. */
+    indexNames?: string[];
+    /** Replace the migration body outright (e.g. to use another schema). */
+    migrationBody?: string;
+  },
 ): Record<string, string> {
   mkdirSync(join(dir, "snapshot"), { recursive: true });
   mkdirSync(join(dir, "live"), { recursive: true });
@@ -110,11 +142,18 @@ function scaffoldProdCase(
     writeFileSync(join(dir, "live", "demo_fn.sql"), opts.prodBody);
   }
   const migration = join(dir, "migrations", "20260829120000_demo.sql");
-  writeFileSync(migration, `${opts.migrationExtra ?? ""}\n${COMMITTED_BODY}\n`);
+  writeFileSync(
+    migration,
+    `${opts.migrationExtra ?? ""}\n${opts.migrationBody ?? COMMITTED_BODY}\n`,
+  );
 
   return {
     ...FAKE_CREDS,
     BODY_FETCH_CMD: `bash ${writeStubFetcher(dir)}`,
+    // Always non-empty: the gate fails closed on an empty index, and an index
+    // derived purely from live/ would be empty in the "absent from PROD" cases.
+    // `other_fn` stands for the rest of PROD's catalogue.
+    BODY_NAME_INDEX_CMD: `bash ${writeStubNameIndex(dir, opts.indexNames ?? (opts.prodBody === undefined ? ["other_fn"] : ["demo_fn", "other_fn"]))}`,
     CHANGED_MIGRATIONS: migration,
     SNAPSHOT_DIR: join(dir, "snapshot"),
   };
@@ -209,12 +248,130 @@ describe("VAC-04 — scripts/prod-body-drift-check.sh", () => {
     });
   });
 
-  it("GREEN: a function absent from PROD is a NEW function, not drift", () => {
+  it("GREEN: a function MEASURED absent from PROD's name index is a NEW function, not drift", () => {
     withTempDir((dir) => {
       const env = scaffoldProdCase(dir, {});
       const { status, out } = run(PROD_GATE, env);
       expect(status).toBe(0);
-      expect(out).toContain("absent in PROD");
+      expect(out).toContain("measured absent");
+      // The zero is stated, not silent — it is the one case where a green run
+      // legitimately compares nothing.
+      expect(out).toContain("ZERO bodies compared");
+      expect(out).toContain("measured zero, not an unread one");
+    });
+  });
+
+  // ── WR-01 ────────────────────────────────────────────────────────────────
+  // `--extract-fn` exits 0 with EMPTY stdout for a name it cannot find, and
+  // the gate read that as "absent in PROD — a NEW function (pass)". So any
+  // regression in the extractor's name matching turned every name into a pass
+  // and the whole gate green having compared nothing.
+
+  it("RED: a name that IS in PROD's index but yields no body is an EXTRACTOR failure, not a new function", () => {
+    withTempDir((dir) => {
+      // No live/demo_fn.sql (the fetcher returns empty), but PROD's index says
+      // demo_fn exists. That combination can only mean extraction failed.
+      const env = scaffoldProdCase(dir, { indexNames: ["demo_fn", "other_fn"] });
+      const { status, out } = run(PROD_GATE, env);
+      expect(status).toBe(1);
+      expect(out).toContain("IS in the PROD source's function-name index");
+      expect(out).toContain("extraction failure, not a new");
+      expect(out).not.toContain("no unacknowledged repo-vs-PROD body drift");
+    });
+  });
+
+  it("RED: an unset BODY_NAME_INDEX_CMD exits 1 — absence must be measured, not inferred from an empty pipe", () => {
+    withTempDir((dir) => {
+      const env = scaffoldProdCase(dir, { prodBody: PROD_BODY_EQUIVALENT });
+      const { status, out } = run(PROD_GATE, {
+        ...env,
+        BODY_NAME_INDEX_CMD: "",
+      });
+      expect(status).toBe(1);
+      expect(out).toContain("BODY_NAME_INDEX_CMD is unset");
+    });
+  });
+
+  it("RED: an EMPTY PROD name index fails closed — a broken index is not a database with no functions", () => {
+    withTempDir((dir) => {
+      const env = scaffoldProdCase(dir, {
+        prodBody: PROD_BODY_EQUIVALENT,
+        indexNames: [],
+      });
+      const { status, out } = run(PROD_GATE, env);
+      expect(status).toBe(1);
+      expect(out).toContain("index came back EMPTY");
+    });
+  });
+
+  it("RED: an index command that ERRORS exits 1, and its stderr is withheld", () => {
+    withTempDir((dir) => {
+      const env = scaffoldProdCase(dir, { prodBody: PROD_BODY_EQUIVALENT });
+      const bad = join(dir, "index-boom.sh");
+      writeFileSync(
+        bad,
+        '#!/usr/bin/env bash\necho "postgresql://user:pw@host:5432/db" >&2\nexit 9\n',
+      );
+      chmodSync(bad, 0o755);
+      const { status, out } = run(PROD_GATE, {
+        ...env,
+        BODY_NAME_INDEX_CMD: `bash ${bad}`,
+      });
+      expect(status).toBe(1);
+      expect(out).toContain("could not index PROD's function names");
+      expect(out).not.toContain("postgresql://");
+    });
+  });
+
+  it("RED: ZERO comparisons for any reason OTHER than measured absence is a MEASURE_FAIL", () => {
+    withTempDir((dir) => {
+      // A floor on `checked` alone would be wrong — a PR that only ADDS
+      // functions legitimately compares nothing. So the floor is: zero
+      // comparisons is acceptable ONLY when every named function was measured
+      // absent. Here the fetcher errors, so neither happened.
+      const env = scaffoldProdCase(dir, { prodBody: PROD_BODY_EQUIVALENT });
+      const boom = join(dir, "fetch-boom.sh");
+      writeFileSync(boom, "#!/usr/bin/env bash\nexit 3\n");
+      chmodSync(boom, 0o755);
+      const { status, out } = run(PROD_GATE, {
+        ...env,
+        BODY_FETCH_CMD: `bash ${boom}`,
+      });
+      expect(status).toBe(1);
+      expect(out).toContain("ZERO bodies compared, and only 0 of 1");
+      expect(out).not.toContain("no unacknowledged repo-vs-PROD body drift");
+    });
+  });
+
+  it("RED: a definition in a schema the PROD dump does not cover exits 1 instead of passing as 'new'", () => {
+    withTempDir((dir) => {
+      // The dump is taken with `--schema public`. `private.hidden_fn` is absent
+      // from it whatever PROD holds, so "absent = new = pass" would be a pass
+      // for something never looked at.
+      const env = scaffoldProdCase(dir, {
+        migrationBody:
+          "CREATE OR REPLACE FUNCTION private.hidden_fn(p_id UUID)\nRETURNS UUID\nLANGUAGE plpgsql\nAS $$\nBEGIN\n  RETURN p_id;\nEND\n$$;",
+        indexNames: ["other_fn"],
+      });
+      const { status, out } = run(PROD_GATE, env);
+      expect(status).toBe(1);
+      expect(out).toContain("private.hidden_fn");
+      expect(out).toContain("covers only schema(s): public");
+    });
+  });
+
+  it("GREEN: an UNQUALIFIED definition is accepted — it resolves through search_path into the dumped schema", () => {
+    withTempDir((dir) => {
+      // 56 of the repo's own definitions are unqualified (measured
+      // 2026-08-29), so refusing them would break every real PR.
+      const env = scaffoldProdCase(dir, {
+        migrationBody:
+          "CREATE OR REPLACE FUNCTION demo_fn(p_id UUID)\nRETURNS UUID\nLANGUAGE plpgsql\nAS $$\nBEGIN\n  RETURN p_id;\nEND\n$$;",
+        prodBody: PROD_BODY_EQUIVALENT,
+      });
+      const { status, out } = run(PROD_GATE, env);
+      expect(status).toBe(0);
+      expect(out).toContain("1 match");
     });
   });
 

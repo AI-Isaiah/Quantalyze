@@ -240,24 +240,34 @@ const FN_RE = /\bCREATE\s+(?:OR\s+REPLACE\s+)?FUNCTION\s+/gi;
 function readQualifiedName(sql, from) {
   let i = from;
   let last = "";
+  // The segment BEFORE the last one — i.e. the schema qualifier, when there is
+  // one. `name` deliberately stays the last segment (every caller matches on
+  // it), but the qualifier has to be recoverable: VAC-04 reads a PROD dump
+  // taken with `--schema public`, so a `CREATE FUNCTION private.f(...)` in a
+  // migration is invisible to that dump and would otherwise be classified
+  // "absent in PROD — a NEW function (pass)". Losing the schema here is what
+  // made that misclassification unavoidable downstream.
+  let prev = "";
   for (;;) {
     while (i < sql.length && /\s/.test(sql[i])) i++;
     if (sql[i] === '"') {
       const close = sql.indexOf('"', i + 1);
-      if (close === -1) return { name: last, end: i };
+      if (close === -1) return { name: last, schema: prev, end: i };
+      prev = last;
       last = sql.slice(i + 1, close);
       i = close + 1;
     } else {
       const start = i;
       while (i < sql.length && /[A-Za-z0-9_]/.test(sql[i])) i++;
-      if (i === start) return { name: last, end: i };
+      if (i === start) return { name: last, schema: prev, end: i };
+      prev = last;
       last = sql.slice(start, i);
     }
     if (sql[i] === ".") {
       i++;
       continue;
     }
-    return { name: last, end: i };
+    return { name: last, schema: prev, end: i };
   }
 }
 
@@ -295,7 +305,7 @@ export function extractFunctionDefs(sql) {
     const nextStart =
       s + 1 < starts.length ? starts[s + 1].stmtStart : sql.length;
     const { end: afterName } = readQualifiedName(sql, afterKeyword);
-    const { name } = readQualifiedName(sql, afterKeyword);
+    const { name, schema } = readQualifiedName(sql, afterKeyword);
 
     let j = afterName;
     while (j < sql.length && /\s/.test(masked[j])) j++;
@@ -331,6 +341,8 @@ export function extractFunctionDefs(sql) {
       : "";
     defs.push({
       name,
+      /** "" when the definition is unqualified. See readQualifiedName. */
+      schema,
       nargs,
       bodyKind,
       body,
@@ -547,6 +559,24 @@ function main(argv) {
         for (const d of extractFunctionDefs(readFileSync(f, "utf8")))
           names.add(d.name);
       for (const nm of [...names].sort()) process.stdout.write(nm + "\n");
+      return 0;
+    }
+    case "--function-qualified-names": {
+      // Same scan as --function-names, but emits `schema<TAB>name` so a caller
+      // can tell WHICH schema a definition targets. VAC-04 needs it: its PROD
+      // dump is `--schema public`, and a definition in another schema is
+      // absent from that dump for a reason that has nothing to do with the
+      // function being new.
+      const files = argv.slice(1);
+      if (files.length === 0) {
+        console.error("::error::--function-qualified-names requires at least one file");
+        return 2;
+      }
+      const seen = new Set();
+      for (const f of files)
+        for (const d of extractFunctionDefs(readFileSync(f, "utf8")))
+          seen.add(`${d.schema}\t${d.name}`);
+      for (const row of [...seen].sort()) process.stdout.write(row + "\n");
       return 0;
     }
     case "--extract-fn": {

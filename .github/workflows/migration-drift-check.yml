@@ -190,5 +190,15 @@ jobs:
             exit 1
           fi
           export BODY_FETCH_CMD="node scripts/sql-body-normalize.mjs --extract-fn ${DUMP}"
+          # The fetcher exits 0 with EMPTY stdout for a name it cannot find, and
+          # the gate used to read that as "new function — pass". The index makes
+          # absence a measurement instead: a name that IS in this list but
+          # yields no body is an extractor failure and the gate exits 1 (WR-01).
+          export BODY_NAME_INDEX_CMD="node scripts/sql-body-normalize.mjs --function-names ${DUMP}"
+          # Must stay in step with the --schema flag on the dump above. The gate
+          # refuses any migration that defines a function outside these schemas,
+          # because such a function is absent from this dump for a reason that
+          # has nothing to do with it being new.
+          export PROD_DUMP_SCHEMAS="public"
           # Mode identity (Pitfall 2): this is the exact command a developer runs.
           bash scripts/prod-body-drift-check.sh

@@ -48,10 +48,34 @@
 #   SUPABASE_PROJECT_REF, SUPABASE_ACCESS_TOKEN, SUPABASE_DB_PASSWORD
 # Required input:
 #   BODY_FETCH_CMD    command prefix, invoked as `$BODY_FETCH_CMD <fn-name>`;
-#                     stdout is the live definition text, empty = absent in
-#                     PROD. Word-split on IFS, so its arguments must not
-#                     contain spaces (RUNNER_TEMP paths do not).
+#                     stdout is the live definition text, empty = the name was
+#                     not found in the source it reads. Word-split on IFS, so
+#                     its arguments must not contain spaces (RUNNER_TEMP paths
+#                     do not).
+#   BODY_NAME_INDEX_CMD
+#                     command invoked with NO arguments; stdout is the
+#                     newline-separated list of function names the fetcher's
+#                     source actually contains.
+#                     ⛔ WHY THIS IS REQUIRED AND NOT OPTIONAL (WR-04/WR-01):
+#                     `BODY_FETCH_CMD` exits 0 with EMPTY stdout for a name it
+#                     cannot find, and this gate used to read that as "absent
+#                     in PROD — a NEW function (pass)". "Could not extract" and
+#                     "genuinely not there" then shared one code path, so any
+#                     regression in the extractor's name matching turned EVERY
+#                     name into a pass and the whole gate green. The index
+#                     makes absence a MEASUREMENT: a name that IS in the index
+#                     but yields no body is an extractor failure and exits 1.
+#                     An optional index would reinstate the hole for anyone who
+#                     forgot to set it, which is the SKIP-01 shape.
 # Optional:
+#   PROD_DUMP_SCHEMAS space-separated schemas the fetcher's source covers.
+#                     Default "public", matching `supabase db dump --linked
+#                     --schema public` in migration-drift-check.yml. A migration
+#                     that defines a function in a schema NOT listed here is a
+#                     hard failure: the dump cannot see it, so this gate cannot
+#                     compare it, and reporting it as a new function would be a
+#                     pass for something never looked at. Keep this in step with
+#                     the dump command — they are two halves of one claim.
 #   CHANGED_MIGRATIONS  newline-separated migration paths. When unset, derived
 #                       from `git merge-base HEAD $BASE_REF`.
 #   BASE_REF            default origin/main
@@ -84,7 +108,10 @@ for var in SUPABASE_PROJECT_REF SUPABASE_ACCESS_TOKEN SUPABASE_DB_PASSWORD; do
 done
 
 [ -n "${BODY_FETCH_CMD:-}" ] || fail "BODY_FETCH_CMD is unset — there is no way to read PROD bodies, and a gate that cannot read cannot pass."
+[ -n "${BODY_NAME_INDEX_CMD:-}" ] || fail "BODY_NAME_INDEX_CMD is unset — without PROD's function-name index this gate cannot tell 'genuinely absent from PROD' from 'the extractor returned nothing', and it would read the second as a pass."
 command -v node >/dev/null 2>&1 || fail "node is not on PATH; the shared normalizer cannot run."
+
+PROD_DUMP_SCHEMAS="${PROD_DUMP_SCHEMAS:-public}"
 
 SNAPSHOT_DIR="${SNAPSHOT_DIR:-supabase/schema/functions}"
 NORMALIZER="${NORMALIZER:-scripts/sql-body-normalize.mjs}"
@@ -147,6 +174,54 @@ if [ "${NAME_COUNT:-0}" -eq 0 ]; then
 fi
 
 echo "Functions defined or replaced by this PR: ${NAME_COUNT}"
+
+# ── 2b. EVERY DEFINITION MUST BE IN A SCHEMA THE SOURCE ACTUALLY COVERS ──────
+# The fetcher reads a dump taken with `--schema public`. A `CREATE OR REPLACE
+# FUNCTION private.f(...)` is therefore absent from it for a reason that has
+# nothing to do with the function being new — and "absent" is a pass below.
+# Refusing here keeps the gate's coverage equal to its claim.
+# MEASURED 2026-08-29: all 112 function definitions under supabase/migrations/
+# are `public.` or unqualified, so this is a latent hole today; it opens with
+# the first non-public definition, silently.
+node "$NORMALIZER" --function-qualified-names "${CHANGED_FILES[@]}" > "$TMP/qualified.txt" \
+  || fail "could not read the schema qualifiers of this PR's function definitions."
+# ⚠️ Split by hand rather than with `IFS=$'\t' read -r a b`. TAB is IFS
+# WHITESPACE, so `read` collapses a leading tab and an UNQUALIFIED row
+# ("<empty>\tdemo_fn") would arrive as schema="demo_fn", name="" — which
+# refused every unqualified definition in the repo. Measured while writing
+# this guard.
+while IFS= read -r _row; do
+  [ -n "$_row" ] || continue
+  _schema="${_row%%	*}"
+  _name="${_row#*	}"
+  # Unqualified is fine: it resolves through search_path, which puts it in the
+  # same schema the dump covers. Only an EXPLICIT foreign qualifier is refused.
+  [ -n "${_schema:-}" ] || continue
+  _ok=0
+  for _s in $PROD_DUMP_SCHEMAS; do
+    [ "$_schema" = "$_s" ] && _ok=1
+  done
+  if [ "$_ok" -eq 0 ]; then
+    echo "::error::${GATE}: this PR defines ${_schema}.${_name}, but the PROD source this gate reads"
+    echo "::error::covers only schema(s): ${PROD_DUMP_SCHEMAS}. That function would be reported"
+    echo "::error::'absent in PROD — a NEW function (pass)' whatever PROD actually holds, which is"
+    echo "::error::a pass for something never compared. Widen the dump (and PROD_DUMP_SCHEMAS)"
+    echo "::error::together, or move the definition."
+    exit 1
+  fi
+done < "$TMP/qualified.txt"
+
+# ── 2c. PROD'S FUNCTION-NAME INDEX — so "absent" is measured, not inferred ───
+# shellcheck disable=SC2086
+$BODY_NAME_INDEX_CMD > "$TMP/prod-names.txt" 2>"$TMP/prod-names.err" \
+  || fail "could not index PROD's function names (stderr withheld — public log). Without the index, an extractor that stops matching would make every name read as a new function."
+# An index with no names at all is not a PROD with no functions — it is an
+# index that did not work. The workflow's own dump-shape guard proves the dump
+# holds at least one CREATE FUNCTION, so an empty index here contradicts it.
+grep -aqE '[^[:space:]]' "$TMP/prod-names.txt" \
+  || fail "PROD's function-name index came back EMPTY. A database with zero functions is not a state this gate can distinguish from a broken index, so it fails closed."
+PROD_NAME_COUNT="$(grep -ac '[^[:space:]]' "$TMP/prod-names.txt" || true)"
+echo "Functions indexed in the PROD source: ${PROD_NAME_COUNT:-0}"
 echo ""
 
 # ── 3. COMPARE, PER FUNCTION ─────────────────────────────────────────────────
@@ -155,6 +230,11 @@ checked=0
 matched=0
 acked=0
 absent=0
+# Every name must reach exactly one terminal disposition. Counted so the
+# arithmetic can be closed at the end: a loop that silently skipped a name
+# would otherwise leave the gate reporting success for a function it never
+# accounted for.
+accounted=0
 
 for fname in "${NAMES[@]}"; do
   live="$TMP/${fname}.live.sql"
@@ -166,12 +246,24 @@ for fname in "${NAMES[@]}"; do
     echo "::error::${GATE}: the PROD body fetcher failed for '${fname}' (stderr withheld — public log)."
     echo "::error::A gate that could not read cannot report a pass."
     bad=1
+    accounted=$((accounted + 1))
     continue
   fi
 
   if [ ! -s "$live" ] || ! grep -aqE '[^[:space:]]' "$live"; then
-    echo "  ${fname}: absent in PROD — treated as a NEW function (pass)."
-    absent=$((absent + 1))
+    # WR-01: empty stdout is TWO different facts. Ask the index which one.
+    if grep -aqxF -- "$fname" "$TMP/prod-names.txt"; then
+      echo "::error::${GATE}: '${fname}' IS in the PROD source's function-name index, but the"
+      echo "::error::fetcher extracted no body for it. That is an extraction failure, not a new"
+      echo "::error::function. Reporting it as 'new — pass' would be a pass for something this"
+      echo "::error::gate could not read; the same failure repeated for every name would turn the"
+      echo "::error::whole gate green having compared nothing."
+      bad=1
+    else
+      echo "  ${fname}: measured absent — not in the PROD source's ${PROD_NAME_COUNT}-name index. Treated as a NEW function (pass)."
+      absent=$((absent + 1))
+    fi
+    accounted=$((accounted + 1))
     continue
   fi
 
@@ -181,14 +273,17 @@ for fname in "${NAMES[@]}"; do
     echo "::error::The snapshot is STALE. sql-function-snapshot.yml should have caught this;"
     echo "::error::run 'npm run schema:functions' and commit the result."
     bad=1
+    accounted=$((accounted + 1))
     continue
   fi
 
   node "$NORMALIZER" --diff-bodies "$snapshot" "$live" > "$TMP/${fname}.rows" \
     || fail "the normalizer could not compare '${fname}'."
 
+  rows=0
   while IFS=$'\t' read -r status name nargs snap_hash live_hash hunks; do
     [ -n "${status:-}" ] || continue
+    rows=$((rows + 1))
     case "$status" in
       MATCH)
         checked=$((checked + 1))
@@ -238,10 +333,41 @@ for fname in "${NAMES[@]}"; do
         ;;
     esac
   done < "$TMP/${fname}.rows"
+
+  if [ "$rows" -eq 0 ]; then
+    # A non-empty live body that the comparator turned into zero rows is the
+    # same hole as an empty fetch, one layer down: nothing was compared and
+    # nothing said so.
+    echo "::error::${GATE}: the comparator produced ZERO rows for '${fname}' from a non-empty PROD body."
+    echo "::error::Nothing was compared for it, so nothing about it can be reported as clean."
+    bad=1
+  fi
+  accounted=$((accounted + 1))
 done
 
 echo ""
-echo "${GATE}: ${checked} body comparison(s) — ${matched} match, ${acked} acknowledged drift, ${absent} new function(s)."
+echo "${GATE}: ${checked} body comparison(s) — ${matched} match, ${acked} acknowledged drift, ${absent} measured-absent (new) function(s)."
+
+# ── 4. THE ARITHMETIC MUST CLOSE ─────────────────────────────────────────────
+# Without this, a loop that skipped names — or a fetcher that made every name
+# take the absent branch — reports "0 body comparison(s)" and exits 0. A floor
+# on `checked` alone would be wrong (a PR that only ADDS functions legitimately
+# compares nothing), so the floor is on ACCOUNTING: every named function
+# reached a disposition, and each disposition was measured.
+if [ "$accounted" -ne "$NAME_COUNT" ]; then
+  fail "MEASURE_FAIL: ${NAME_COUNT} function(s) named by this PR's migrations, but only ${accounted} reached a disposition. The arithmetic does not close, so this run did not account for every function and cannot report a pass."
+fi
+if [ "$checked" -eq 0 ] && [ "$absent" -eq "$NAME_COUNT" ]; then
+  # The ONE way zero comparisons is legitimate: every named function was
+  # measured absent from PROD's index, i.e. this PR only adds functions.
+  # Stated out loud rather than left as a silent "0".
+  echo "::notice::${GATE}: ZERO bodies compared — all ${NAME_COUNT} function(s) named by this PR were measured absent from the PROD source's ${PROD_NAME_COUNT}-name index, i.e. they are new. This is a measured zero, not an unread one."
+elif [ "$checked" -eq 0 ]; then
+  # Zero comparisons for any OTHER reason is a gate that ran and looked at
+  # nothing. It must not be able to reach the success line below.
+  echo "::error::${GATE}: MEASURE_FAIL — ZERO bodies compared, and only ${absent} of ${NAME_COUNT} function(s) were measured absent from PROD. The rest reached no comparison at all, so this run has nothing to report clean."
+  bad=1
+fi
 
 if [ "$bad" = 1 ]; then
   exit 1
