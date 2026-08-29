@@ -29,7 +29,7 @@ import {
   chmodSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 
 import { normalizeSql } from "../../scripts/sql-body-normalize.mjs";
 import { createHash } from "node:crypto";
@@ -604,24 +604,75 @@ describe("IN-04 — the scratch directory does not survive a fail() path", () =>
     // paths leaked their `mktemp -d`. Measured 2026-08-29 with the EXIT trap
     // removed: leaked=1 per failing run; with it: leaked=0.
     //
-    // ⚠️ This counts the REAL temp root, not $TMPDIR. macOS `mktemp -d` with
-    // no template ignores TMPDIR and uses the confstr path — a first version
-    // of this check pointed at a scratch TMPDIR, measured 0 leaks with the fix
-    // AND 0 without it, and would have shipped as a test that cannot fail.
-    const tempRoot = dirname(mkdtempSync(join(tmpdir(), "probe-")));
-    const countScratch = () =>
-      readdirSync(tempRoot).filter((n) => n.startsWith("tmp.")).length;
+    // ⛔ R2-W01: ASK the child where its `mktemp -d` lands. Do not compute it.
+    //
+    // The previous version was `dirname(mkdtempSync(join(tmpdir(), "probe-")))`,
+    // which is IDENTICALLY `os.tmpdir()` — mkdtemp creates its directory INSIDE
+    // the path it is given, so dirname gives that path straight back. Measured:
+    //   test computes tempRoot as:   /var/folders/…/T
+    //   os.tmpdir():                 /var/folders/…/T        IDENTICAL: true
+    // So the comment claiming it "counts the REAL temp root, not $TMPDIR"
+    // described the exact quantity it had just been rewritten to stop using.
+    // Under a TMPDIR override — which GSD worktrees and wrapper harnesses set
+    // routinely — the two diverge and the assertion goes blind: measured, with
+    // the gate's EXIT traps REMOVED and TMPDIR pointed at a scratch dir, this
+    // case PASSED while 63 `tmp.*` directories sat in the real temp root.
+    //
+    // Asking a `bash -c mktemp -d` child is derivation-independent: it is the
+    // same primitive, the same interpreter and the same environment the gate
+    // itself uses, and it is correct on macOS (confstr, ignores TMPDIR) and on
+    // Linux (GNU mktemp, honours TMPDIR) without this test knowing which.
+    // It also cleans up after itself — the old probe directory was never removed,
+    // so the anti-leak test leaked.
+    const probe = spawnSync("bash", ["-c", 'd=$(mktemp -d); printf %s "$d"; rmdir "$d"'], {
+      cwd: process.cwd(),
+      encoding: "utf8",
+    });
+    expect(
+      probe.status,
+      "could not locate the shell's temp root — the measurement below would be pointed at nothing",
+    ).toBe(0);
+    const tempRoot = dirname(probe.stdout.trim());
+
+    // ⛔ R2-W02: attribute by CONTENT, never by a bare count of a machine-wide
+    // directory. `tmp.` is the default `mktemp -d` prefix used by three scripts
+    // in this repo and by a great deal of unrelated software, and vitest runs
+    // files in parallel workers — a raw `count - before` is red when a stranger
+    // creates one and red again when a stranger removes one. This gate's scratch
+    // directory always holds `missing.txt` by the time the fail() path driven
+    // below is reached (half 1 writes it; the BODY_CHECK_FUNCTIONS guard is in
+    // half 2), so that file is a signature no other process shares.
+    const scratchDirs = () =>
+      readdirSync(tempRoot)
+        .filter((n) => n.startsWith("tmp."))
+        .filter((n) => existsSync(join(tempRoot, n, "missing.txt")));
+
+    // CALIBRATION, so a filter that matches nothing cannot masquerade as
+    // "no leak". Plant a directory of exactly the shape the detector looks for
+    // and require the detector to see it. Without this the two filters above
+    // could both be wrong and the case would still read green.
+    const planted = mkdtempSync(join(tempRoot, "tmp."));
+    try {
+      writeFileSync(join(planted, "missing.txt"), "");
+      expect(
+        scratchDirs(),
+        "the leak detector cannot see a planted scratch directory, so it could not see a real one",
+      ).toContain(basename(planted));
+    } finally {
+      rmSync(planted, { recursive: true, force: true });
+    }
 
     withTempDir((dir) => {
       const env = scaffoldLedgerCase(dir, {});
-      const before = countScratch();
+      const before = new Set(scratchDirs());
       const { status } = run(LEDGER_GATE, { ...env, BODY_CHECK_FUNCTIONS: " " });
       expect(status).toBe(1); // it must have taken a fail() path at all
+      const added = scratchDirs().filter((n) => !before.has(n));
       expect(
-        countScratch() - before,
+        added,
         "a failing run left its mktemp -d behind. RETURN traps do not fire on exit; this script " +
           "family's stated purpose is that nothing it creates survives.",
-      ).toBe(0);
+      ).toEqual([]);
     });
   });
 
