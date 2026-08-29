@@ -16,8 +16,17 @@
 
 -- RED-UNDER-SETUP: {"apply":["scripts/mutation-runner/fixtures/mini-migration.sql"]}
 
+-- ⚠️ `nth` IS DELIBERATELY 1, NOT 3. An earlier draft used nth:3, and the
+-- self-test still passed with the occurrence assertion NEUTERED — because
+-- locating the 3rd of 1 matches fails independently, so a redundant downstream
+-- guard caught it and the check never exercised the count assertion at all.
+-- With nth:1 the needle IS locatable and ONLY the `occurrences` comparison can
+-- reject it, so neutering that comparison turns this check RED. Measured
+-- 2026-08-29. A test that cannot fail when its mechanism is removed is worse
+-- than no test.
+
   -- RED-UNDER: change `generation  BIGINT` to `generation  INTEGER`.
-  -- RED-UNDER-M: {"arm":"OCCMISS 1","apply":[{"kind":"edit","file":"scripts/mutation-runner/fixtures/mini-migration.sql","find":"generation  BIGINT","replace":"generation  INTEGER","occurrences":3,"nth":3}]}
+  -- RED-UNDER-M: {"arm":"OCCMISS 1","apply":[{"kind":"edit","file":"scripts/mutation-runner/fixtures/mini-migration.sql","find":"generation  BIGINT","replace":"generation  INTEGER","occurrences":3,"nth":1}]}
 DO $$
 DECLARE
   gen_type TEXT;

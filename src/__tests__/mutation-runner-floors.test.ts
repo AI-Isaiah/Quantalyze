@@ -1,0 +1,148 @@
+/**
+ * Mutation-runner coverage ratchet — contract test (D-01, D-09).
+ *
+ * WHY THIS FILE EXISTS. `run.mjs` stores its coverage floor as a constant. A
+ * constant nobody re-derives is a claim nobody compares to the thing, which is
+ * the defect class this whole phase exists for. This test re-derives
+ * `files_annotated` and `files_total` from `supabase/tests/` INDEPENDENTLY —
+ * its own directory walk, its own line-start regex, deliberately not importing
+ * the parser it is checking — and fails on drift in EITHER direction:
+ *
+ *   - annotated < FILES_FLOOR  → a real regression; someone deleted annotations
+ *   - annotated > FILES_FLOOR  → the ratchet is stale and must be raised
+ *
+ * This is the floor-plus-contract-test storage pattern already used in this
+ * repo by `src/__tests__/contracts/ci-anti-skip-gate.contract.test.ts` against
+ * ci.yml's SENTINEL_FLOOR / ARMS_FLOOR.
+ */
+import { describe, expect, it } from "vitest";
+import { readFileSync, readdirSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+
+import { ARMS_FLOOR, FILES_FLOOR } from "../../scripts/mutation-runner/run.mjs";
+import { scanCorpus } from "../../scripts/mutation-runner/parse.mjs";
+
+const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
+const GATE_DIR = join(REPO_ROOT, "supabase", "tests");
+
+/**
+ * Independent re-derivation. These regexes are written out again on purpose —
+ * importing the parser's own constants would make this test agree with the
+ * parser by construction and prove nothing about the corpus.
+ */
+const PROSE = /^[ \t]*--[ \t]*RED-UNDER:/;
+const TWIN = /^[ \t]*--[ \t]*RED-UNDER-M:/;
+
+function rederive() {
+  const files = readdirSync(GATE_DIR)
+    .filter((f) => f.endsWith(".sql"))
+    .sort();
+  const perFile = files.map((name) => {
+    // node:fs, never shell grep — grep is silently NUL-blind in this repo.
+    const lines = readFileSync(join(GATE_DIR, name), "utf8").split("\n");
+    return {
+      name,
+      prose: lines.filter((l) => PROSE.test(l)).length,
+      twins: lines.filter((l) => TWIN.test(l)).length,
+    };
+  });
+  return {
+    filesTotal: files.length,
+    annotated: perFile.filter((f) => f.prose > 0),
+    perFile,
+  };
+}
+
+describe("corpus re-derivation", () => {
+  it("finds a non-empty corpus — otherwise every assertion below would be vacuous", () => {
+    const { filesTotal, annotated } = rederive();
+    expect(filesTotal).toBeGreaterThan(0);
+    expect(annotated.length).toBeGreaterThan(0);
+  });
+
+  it("agrees with the parser's own scanCorpus, computed two different ways", () => {
+    const mine = rederive();
+    const theirs = scanCorpus(GATE_DIR);
+
+    expect(theirs.filesTotal).toBe(mine.filesTotal);
+    expect(theirs.filesAnnotated).toBe(mine.annotated.length);
+    expect(theirs.annotatedFiles).toEqual(mine.annotated.map((f) => f.name));
+  });
+
+  it("counts markers at line start only — a naive substring count is strictly larger", () => {
+    // The corpus header documents the annotation syntax, so an unanchored count
+    // is inflated by the file's own prose ABOUT annotations. If the runner's
+    // numerator ever silently became the naive count, coverage would rise
+    // without a single new annotation.
+    const { annotated } = rederive();
+    for (const file of annotated) {
+      const naive = readFileSync(join(GATE_DIR, file.name), "utf8").split("RED-UNDER").length - 1;
+      expect(naive).toBeGreaterThanOrEqual(file.prose);
+    }
+    const totalAnchored = annotated.reduce((n, f) => n + f.prose, 0);
+    expect(totalAnchored).toBe(30);
+  });
+});
+
+describe("FILES_FLOOR ratchet", () => {
+  it("matches the measured corpus exactly — drift in EITHER direction fails", () => {
+    const { annotated, filesTotal } = rederive();
+    expect(
+      annotated.length,
+      annotated.length < FILES_FLOOR
+        ? `REGRESSION: ${annotated.length} of ${filesTotal} gate files are annotated, below the pinned floor of ${FILES_FLOOR}. Annotations were removed.`
+        : `RATCHET STALE: ${annotated.length} of ${filesTotal} gate files are now annotated but FILES_FLOOR is still ${FILES_FLOOR}. Raise FILES_FLOOR in scripts/mutation-runner/run.mjs to ${annotated.length}.`,
+    ).toBe(FILES_FLOOR);
+  });
+
+  it("is a positive integer — a floor of 0 could never fire", () => {
+    expect(Number.isInteger(FILES_FLOOR)).toBe(true);
+    expect(FILES_FLOOR).toBeGreaterThan(0);
+  });
+});
+
+describe("ARMS_FLOOR ratchet", () => {
+  it("exists as a named constant and is a non-negative integer", () => {
+    // Guards against silent deletion. It is deliberately 0 today; see the
+    // honest-gap assertion below.
+    expect(Number.isInteger(ARMS_FLOOR)).toBe(true);
+    expect(ARMS_FLOOR).toBeGreaterThanOrEqual(0);
+  });
+
+  it("never demands more biting arms than the corpus actually declares", () => {
+    const totalTwins = rederive().perFile.reduce((n, f) => n + f.twins, 0);
+    expect(ARMS_FLOOR).toBeLessThanOrEqual(totalTwins);
+  });
+
+  it("is still unpinned precisely because the corpus has no RED-UNDER-M twins yet", () => {
+    // ⚠️ HONEST GAP, asserted rather than asserted-away. Plan 164.3-08 writes
+    // the structured twins and takes the first full-corpus measurement; it MUST
+    // pin ARMS_FLOOR at that value, at which point this expectation flips and
+    // is meant to be updated in the same commit. A floor invented before the
+    // measurement exists would be the fabricated-baseline defect.
+    const totalTwins = rederive().perFile.reduce((n, f) => n + f.twins, 0);
+    if (totalTwins === 0) {
+      expect(ARMS_FLOOR).toBe(0);
+    } else {
+      expect(
+        ARMS_FLOOR,
+        `The corpus now declares ${totalTwins} RED-UNDER-M twin(s). ARMS_FLOOR must be pinned from a measured full-corpus run (plan 164.3-08), not left at 0.`,
+      ).toBeGreaterThan(0);
+    }
+  });
+});
+
+describe("parity invariant", () => {
+  it("any file carrying structured twins must have one per prose marker", () => {
+    // Bites the moment plan 164.3-08 starts annotating: a partial backfill that
+    // annotates the easy arms and leaves the hard ones prose-only fails here.
+    for (const file of rederive().perFile) {
+      if (file.twins === 0) continue;
+      expect(
+        file.twins,
+        `${file.name}: ${file.prose} prose RED-UNDER marker(s) but ${file.twins} RED-UNDER-M twin(s). Every prose claim needs an executable twin (a waiver counts).`,
+      ).toBe(file.prose);
+    }
+  });
+});

@@ -217,7 +217,12 @@ export function parseAnnotations(text, { file = "<unknown>" } = {}) {
   const structured = [];
   const errors = [];
   const seenArms = new Map();
-  let setup = null;
+  /**
+   * The single RED-UNDER-SETUP declaration, once seen. Explicitly annotated so
+   * TypeScript consumers (the contract tests, and Phase 164.4's tooling) get a
+   * real type instead of inferring `null` from the initialiser.
+   */
+  let setup = /** @type {{ apply: string[], line: number } | null} */ (null);
 
   lines.forEach((lineText, i) => {
     const lineNo = i + 1;
