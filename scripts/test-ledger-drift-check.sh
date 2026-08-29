@@ -278,6 +278,26 @@ check() {
   local names_seen=0
   for fname in $BODY_CHECK_FUNCTIONS; do
     names_seen=$((names_seen + 1))
+    # ⛔ SP-I06 — THE GUARD THIS FILE ALREADY APPLIES ON THE OTHER SIDE.
+    # Migration filenames get an explicit charset allowlist before they are
+    # interpolated into SQL (half 1, and it fails loud). `fname` had no
+    # equivalent, and it is interpolated into `p.proname = '$1'` in
+    # `default_body_fetch` AND used as a filesystem path component twice below.
+    # BODY_CHECK_FUNCTIONS is env-overridable, so that is one environment
+    # variable away from injecting SQL into a database OTHER PEOPLE'S CI
+    # depends on — TEST is SHARED. Not exploitable today (the default is
+    # hardcoded and the workflow does not override it), which is why this is
+    # hardening; an asymmetric guard is still a guard that has to be argued
+    # about instead of read.
+    #
+    # Same charset as prod-body-drift-check.sh's (SP-I07): Postgres' unquoted
+    # identifier set, `$` included. Refuse rather than sanitise — a rewritten
+    # name would compare the WRONG function and report a pass for it.
+    case "$fname" in
+      "" | *[!A-Za-z0-9_$]*)
+        fail "BODY_CHECK_FUNCTIONS names '${fname}', which carries characters this gate refuses to interpolate into SQL or to use as a filename component. Rename the function, or widen this allowlist deliberately."
+        ;;
+    esac
     live="${tmp}/${fname}.live.sql"
     if ! run_body_fetch "$fname" > "$live" 2>"${tmp}/${fname}.err"; then
       echo "::error::${GATE}: could not read TEST's definition of '${fname}' (stderr withheld — public log)."

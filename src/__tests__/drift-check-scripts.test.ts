@@ -968,6 +968,44 @@ describe("VAC-08 — scripts/test-ledger-drift-check.sh", () => {
     });
   });
 
+  it("SP-I06: a BODY_CHECK_FUNCTIONS name that is not a bare identifier is REFUSED before it reaches SQL", () => {
+    // ⛔ Half 1 applies an explicit charset allowlist to migration filenames
+    // before interpolating them into SQL, and fails loud. `fname` had no
+    // equivalent, and it is interpolated into `p.proname = '$1'` in
+    // `default_body_fetch` AND used twice as a filesystem path component.
+    // BODY_CHECK_FUNCTIONS is env-overridable, so that is one environment
+    // variable away from injecting SQL into the SHARED TEST database.
+    withTempDir((dir) => {
+      const env = scaffoldLedgerCase(dir, {});
+      const hostile = "selftest_fn'; DROP TABLE x; --";
+      const { status, out } = run(LEDGER_GATE, {
+        ...env,
+        BODY_CHECK_FUNCTIONS: hostile,
+      });
+      expect(status).toBe(1);
+      expect(out).toContain("refuses to interpolate into SQL");
+      expect(out).not.toContain("ledger and body checks clean");
+      // Refused BEFORE any comparison — not caught afterwards by the tallies.
+      expect(out).not.toContain("body comparison(s)");
+    });
+
+    // The other direction: the SHIPPED DEFAULT must still be accepted, or the
+    // guard has quietly disabled half 2 — which is the WR-02 defect it sits
+    // beside. Derived from the script, not restated here.
+    const src = readFileSync(LEDGER_GATE, "utf8");
+    const m = /BODY_CHECK_FUNCTIONS="\$\{BODY_CHECK_FUNCTIONS:-([^}]*)\}"/.exec(src);
+    expect(m, "could not read the default BODY_CHECK_FUNCTIONS list").not.toBeNull();
+    const defaults = (m as RegExpExecArray)[1].trim().split(/\s+/);
+    expect(defaults.length, "an empty default list would make this check vacuous").toBeGreaterThan(2);
+    for (const n of defaults) expect(n, `the shipped default "${n}" is refused by the guard`).toMatch(/^[A-Za-z0-9_$]+$/);
+
+    withTempDir((dir) => {
+      const env = scaffoldLedgerCase(dir, {});
+      const { status } = run(LEDGER_GATE, env);
+      expect(status, "the guard reddened the normal green path").toBe(0);
+    });
+  });
+
   it("SP-M02: SIGINT EXITS — it does not delete the scratch dir and carry on", () => {
     // ⛔ `trap "rm -rf '$tmp'" EXIT INT TERM`. A bash signal handler RESUMES
     // the script when it returns; it does not exit. So Ctrl-C deleted $tmp and
