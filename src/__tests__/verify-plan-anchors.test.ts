@@ -643,16 +643,36 @@ describe("WR-06 — a deliberately deferred plan can leave the pending set HONES
     ]);
   });
 
-  it("`status: deferred` in the PLAN's own frontmatter also exempts it", () => {
+  it("`status: deferred` in the PLAN's own frontmatter also exempts it — WITH the record", () => {
+    // ⚠️ R3-W02: the fixture carries a date and an owning phase because the
+    // rule now demands them on BOTH routes. It was updated rather than the rule
+    // being carved out around it — the bare two-word flag this used to assert
+    // was measured exempting a plan with a stale claim at exit 0.
     const root = tree("deferred-frontmatter", {
       ".planning/phases/99-open/99-01-PLAN.md":
-        "---\nphase: 99\nstatus: deferred\n---\n\nbody\n",
+        "---\nphase: 99\nstatus: deferred\ndeferred_on: 2026-08-29\ndeferred_to: Phase 164.5\n---\n\nbody\n",
     });
 
     const found = findPendingPlans(root);
 
     expect(found.pending).toEqual([]);
     expect(found.deferred[0].marker).toBe("frontmatter status: deferred");
+  });
+
+  it("R3-W02: the frontmatter flag ALONE — no date, no owner — does not exempt", () => {
+    // MEASURED at HEAD before this fix: exit 0, `deferred: 1`, and the plan's
+    // stale claim was never resolved. A two-word line written by the same PR
+    // that adds the plan retired the plan from the scanned set.
+    const root = tree("deferred-frontmatter-flag-only", {
+      ".planning/phases/99-open/99-01-PLAN.md": "---\nphase: 99\nstatus: deferred\n---\n\nbody\n",
+    });
+
+    const found = findPendingPlans(root);
+
+    expect(found.deferred).toEqual([]);
+    expect(found.pending.map((p) => p.replace(/\\/g, "/"))).toEqual([
+      ".planning/phases/99-open/99-01-PLAN.md",
+    ]);
   });
 
   it("`status: deferred` OUTSIDE the frontmatter does not exempt anything", () => {
@@ -792,51 +812,90 @@ describe("the CLI contract", () => {
     expect(res.status).toBe(0);
   });
 
-  it("R2-W05: a deferral marker with no date or no owning phase does NOT exempt", () => {
-    // ⛔ The old rule was "non-whitespace content", which a one-byte file
-    // satisfies — and both deferral routes are writable by the SAME PR that
-    // adds the plan. That is a self-service switch, not a record.
-    //
-    // Failing towards MORE scanning is the only safe direction for a switch
-    // whose purpose is to switch a gate off, so each rejected marker leaves its
-    // plan PENDING and its claims checked.
-    const cases: Array<[string, string, boolean]> = [
-      ["x", "one byte", false],
-      ["Deferred because it is hard.\n", "prose with no date and no owner", false],
-      ["Deferred 2026-08-29 because it is hard.\n", "a date but no owning phase", false],
-      ["Deferred; owned by Phase 164.5.\n", "an owner but no date", false],
-      ["Deferred 2026-08-29. Owner: Phase 164.5. Measurement: 69 of 262 fail.\n", "dated and owned", true],
-    ];
+  // ⛔ R2-W05 + R3-W02. The old rule was "non-whitespace content", which a
+  // one-byte file satisfies — and both deferral routes are writable by the SAME
+  // PR that adds the plan. That is a self-service switch, not a record.
+  //
+  // R2-W05 floored ONE route and the shipped test only ever wrote
+  // `-DEFERRED.md` bodies, so the OTHER route — `status: deferred` in the
+  // plan's own frontmatter — kept exempting on a two-word flag with no date and
+  // no owner, MEASURED at exit 0 with a stale claim unchecked, while the
+  // function's own header claimed both routes required a record.
+  //
+  // So the cases are now a CROSS-PRODUCT of {record body} x {route}, generated,
+  // not listed per route. A rule floored on one route and not the other is
+  // unrepresentable here.
+  //
+  // Failing towards MORE scanning is the only safe direction for a switch whose
+  // purpose is to switch a gate off, so each rejected marker leaves its plan
+  // PENDING and its claims checked.
+  const DEFERRAL_RECORDS: Array<[string, string, boolean]> = [
+    ["x", "one byte", false],
+    ["Deferred because it is hard.\n", "prose with no date and no owner", false],
+    ["Deferred 2026-08-29 because it is hard.\n", "a date but no owning phase", false],
+    ["Deferred; owned by Phase 164.5.\n", "an owner but no date", false],
+    [
+      "Deferred 2026-08-29. Owner: Phase 164.5. Measurement: 69 of 262 fail.\n",
+      "dated and owned",
+      true,
+    ],
+  ];
 
-    for (const [body, label, shouldExempt] of cases) {
-      const root = tree(`defer-${label.replace(/\W+/g, "-")}`, {
-        "src/a.ts": linesFile(10),
-        ".planning/phases/99-fixture/99-01-PLAN.md": "Edit src/a.ts:50-60 here.\n",
-        ".planning/phases/99-fixture/99-01-DEFERRED.md": body,
-      });
+  /** The two documented routes, as file layouts. Both must obey one rule. */
+  const DEFERRAL_ROUTES: Record<string, (record: string) => Record<string, string>> = {
+    "sibling -DEFERRED.md": (record) => ({
+      ".planning/phases/99-fixture/99-01-PLAN.md": "Edit src/a.ts:50-60 here.\n",
+      ".planning/phases/99-fixture/99-01-DEFERRED.md": record,
+    }),
+    "frontmatter status: deferred": (record) => ({
+      ".planning/phases/99-fixture/99-01-PLAN.md":
+        `---\nstatus: deferred\n---\n${record}Edit src/a.ts:50-60 here.\n`,
+    }),
+  };
 
-      const res = spawnSync("node", [join(REPO_ROOT, VERIFIER), "--pending", "--root", root], {
-        cwd: REPO_ROOT,
-        encoding: "utf8",
-      });
-      const out = `${res.stdout}${res.stderr}`;
-
-      if (shouldExempt) {
-        expect(out, `a dated, owned marker must exempt (${label})`).toMatch(
-          /^scanned: 0 pending plan file\(s\) of 1$/m,
-        );
-        expect(out).toMatch(/^deferred: 1 plan file\(s\)/m);
-      } else {
-        expect(out, `a marker that is ${label} must NOT exempt`).toMatch(
-          /^scanned: 1 pending plan file\(s\) of 1$/m,
-        );
-        expect(out).toMatch(/^deferred: 0 plan file\(s\)/m);
-        // And the plan's claims really are still being checked — the point of
-        // refusing the marker. src/a.ts is 10 lines; the claim names 50-60.
-        expect(res.status, `a non-exempt plan's stale claim must still redden (${label})`).toBe(1);
-      }
-    }
+  it("the deferral cross-product is generated over BOTH routes", () => {
+    // Non-vacuity: if either table were empty the arms below would silently
+    // vanish and this file would still report green.
+    expect(Object.keys(DEFERRAL_ROUTES)).toHaveLength(2);
+    expect(DEFERRAL_RECORDS.filter(([, , ok]) => ok)).toHaveLength(1);
+    expect(DEFERRAL_RECORDS.filter(([, , ok]) => !ok).length).toBeGreaterThan(0);
   });
+
+  for (const [route, layout] of Object.entries(DEFERRAL_ROUTES)) {
+    for (const [record, label, shouldExempt] of DEFERRAL_RECORDS) {
+      it(`R2-W05/R3-W02: via "${route}", a marker that is ${label} ${shouldExempt ? "exempts" : "does NOT exempt"}`, () => {
+        const root = tree(`defer-${route.replace(/\W+/g, "-")}-${label.replace(/\W+/g, "-")}`, {
+          "src/a.ts": linesFile(10),
+          ...layout(record),
+        });
+
+        const res = spawnSync("node", [join(REPO_ROOT, VERIFIER), "--pending", "--root", root], {
+          cwd: REPO_ROOT,
+          encoding: "utf8",
+        });
+        const out = `${res.stdout}${res.stderr}`;
+
+        if (shouldExempt) {
+          expect(out, `a dated, owned marker must exempt (${route}, ${label})`).toMatch(
+            /^scanned: 0 pending plan file\(s\) of 1$/m,
+          );
+          expect(out).toMatch(/^deferred: 1 plan file\(s\)/m);
+          expect(res.status).toBe(0);
+        } else {
+          expect(out, `a marker that is ${label} must NOT exempt via ${route}`).toMatch(
+            /^scanned: 1 pending plan file\(s\) of 1$/m,
+          );
+          expect(out).toMatch(/^deferred: 0 plan file\(s\)/m);
+          // And the plan's claims really are still being checked — the point of
+          // refusing the marker. src/a.ts is 10 lines; the claim names 50-60.
+          expect(
+            res.status,
+            `a non-exempt plan's stale claim must still redden (${route}, ${label})`,
+          ).toBe(1);
+        }
+      });
+    }
+  }
 
   it("R2-W05: the REAL marker in the tree satisfies the tightened rule", () => {
     // Non-vacuity for the arm above: the tightened rule must not have been

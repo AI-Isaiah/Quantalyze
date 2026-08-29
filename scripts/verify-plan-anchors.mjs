@@ -555,10 +555,18 @@ export function verifyPaths(planPaths, options = {}) {
  * only exit available was to FABRICATE a SUMMARY for work nobody did.
  *
  * Two markers are honoured, and BOTH require a written record rather than a
- * flag, so the exemption costs the same as the honesty it stands in for:
+ * flag — a DATE and an OWNING PHASE — so the exemption costs the same as the
+ * honesty it stands in for:
  *
- *   1. a sibling `<n>-DEFERRED.md` with non-whitespace content, or
- *   2. `status: deferred` in the PLAN's own YAML frontmatter.
+ *   1. a sibling `<n>-DEFERRED.md` carrying a date and an owning phase, or
+ *   2. `status: deferred` in the PLAN's own YAML frontmatter, with a date and
+ *      an owning phase somewhere in the plan.
+ *
+ * ⛔ That sentence was FALSE of route 2 between R2-W05 and R3-W02: the
+ * frontmatter route exempted a plan on a two-word flag with no date, no owner
+ * and no record, measured at exit 0 with a stale claim unchecked. It is true
+ * now, and it is true because `deferralMarker` applies one rule to both routes
+ * — not because the paragraph says so.
  *
  * ⚠️ An exemption mechanism is a way to silence a gate, so it is never silent:
  * every exempted plan is PRINTED with its marker, and an EMPTY `-DEFERRED.md`
@@ -614,7 +622,25 @@ function deferralMarker(absDir, planName) {
   const close = text.indexOf("\n---", 3);
   if (close === -1) return null;
   const frontmatter = text.slice(0, close);
-  if (/^status:[ \t]*deferred[ \t]*$/m.test(frontmatter)) return "frontmatter status: deferred";
+  if (!/^status:[ \t]*deferred[ \t]*$/m.test(frontmatter)) return null;
+
+  // ⛔ R3-W02. R2-W05 floored ONE of the two routes. This one was left as a
+  // TWO-WORD FLAG with no date and no owner, while the header above already
+  // claimed BOTH routes "require a written record rather than a flag" — a
+  // sentence that was false of this branch on the day it was written.
+  //
+  // MEASURED at HEAD against a synthetic tree with no `-DEFERRED.md` at all: a
+  // plan carrying nothing but `status: deferred` was exempted, exit 0, and its
+  // stale `src/a.ts:50-60` claim was never resolved.
+  //
+  // The SAME record rule now applies to both routes. The date and owner may sit
+  // anywhere in the plan — frontmatter or body — because that is where a plan
+  // naturally carries them; what is refused is a deferral that carries NEITHER.
+  //
+  // ⚠️ Failing towards MORE scanning is the only safe direction for a switch
+  // whose purpose is to switch a gate off: a rejected marker leaves the plan
+  // pending and its claims checked.
+  if (MARKER_DATE.test(text) && MARKER_OWNER.test(text)) return "frontmatter status: deferred";
   return null;
 }
 
