@@ -124,3 +124,18 @@ scripts/mark-reverified-closed.py
 
 # GSD runtime sentinel — machine-written, timestamped, not source
 .gsd/
+
+# VAC-07 local-stack lane (scripts/local-stack/run.sh).
+# .stack-env holds the local stack's generated API URL + anon/service-role keys.
+# Those keys are the CLI's well-known local dev defaults, not secrets — but the
+# file is ignored so that NO key ever lands in a commit by construction rather
+# than by remembering (threat T-164.3-09).
+scripts/local-stack/.stack-env
+# baseline.sql is a schema dump. Ignored by default because a dump can carry a
+# DSN, host, or project ref. Committing one is a deliberate, reviewed act:
+# run the secret scan in scripts/local-stack/REPLAY-SPIKE.md first, then
+# `git add -f`. Never add it casually.
+scripts/local-stack/baseline.sql
+# Derived per-run Supabase workdir (a copy of supabase/config.toml with
+# [db.migrations] disabled). Generated, never authored.
+scripts/local-stack/.stack/
