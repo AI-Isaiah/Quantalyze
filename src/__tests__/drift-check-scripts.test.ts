@@ -22,6 +22,8 @@ import {
   mkdtempSync,
   mkdirSync,
   writeFileSync,
+  readFileSync,
+  existsSync,
   rmSync,
   chmodSync,
 } from "node:fs";
@@ -398,6 +400,57 @@ describe("VAC-08 — scripts/test-ledger-drift-check.sh", () => {
     );
     expect(res.status).toBe(1);
   });
+});
+
+describe("IN-02 — no INVISIBLE characters in the Phase 164.3 gate scripts", () => {
+  // Two of these files carried a U+200B inside a JSDoc block comment, put there
+  // to stop the comment terminating early (`a/*c*<ZWSP>/b`). It worked, and it
+  // is the wrong tool: an invisible control character cannot be seen in review,
+  // it trips this environment's injection scanners on every read, and this repo
+  // already has one measured file that a bare `grep` is silently blind to
+  // because of an embedded NUL. A gate script is the last place a reader should
+  // have to trust that what they see is what is there. Escape visibly instead
+  // (`a/*c*\/b`).
+  //
+  // Read with node:fs, never shell grep, for the reason above.
+  const SCRIPTS = [
+    "scripts/sql-body-normalize.mjs",
+    "scripts/verify-plan-anchors.mjs",
+    "scripts/lint-sql-gates.mjs",
+    "scripts/mutation-runner/run.mjs",
+    "scripts/mutation-runner/parse.mjs",
+    "scripts/prod-body-drift-check.sh",
+    "scripts/test-ledger-drift-check.sh",
+    "scripts/pg-lane/run.sh",
+    "scripts/local-stack/run.sh",
+  ];
+
+  /** Zero-width and directional-formatting characters, plus a bare NUL. */
+  const INVISIBLE =
+    /[ ­᠎​-‏‪-‮⁠-⁤⁦-⁩﻿]/;
+
+  it("the file list itself is non-empty and every entry exists", () => {
+    // Without this, the loop below is satisfied by a typo'd path list.
+    expect(SCRIPTS.length).toBeGreaterThan(0);
+    for (const rel of SCRIPTS) {
+      expect(existsSync(rel), `${rel} is missing — update this list`).toBe(true);
+    }
+  });
+
+  for (const rel of SCRIPTS) {
+    it(`${rel} carries no zero-width or bidi control characters`, () => {
+      const offenders = readFileSync(rel, "utf8")
+        .split("\n")
+        .map((line, i) => ({ line, n: i + 1 }))
+        .filter(({ line }) => INVISIBLE.test(line))
+        .map(({ n, line }) => `${rel}:${n}: ${JSON.stringify(line.trim().slice(0, 100))}`);
+      expect(
+        offenders,
+        `Invisible character(s) found. They cannot be seen in review and they trip secret/injection scanners. ` +
+          `If you needed to stop a block comment terminating, escape it visibly: a/*c*\\/b.`,
+      ).toEqual([]);
+    });
+  }
 });
 
 describe("OPS-08-F9 — the anti-skip floors are already raised (verify and record, do NOT change)", () => {

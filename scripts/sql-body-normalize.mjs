@@ -65,7 +65,7 @@ function isIdentChar(ch) {
  * Returns:
  *  - `stripped`: the text with comments removed and every string literal kept
  *    verbatim. Block comments collapse to ONE space (they are token
- *    separators: `a/*c*​/b` must not become `ab`); line comments vanish and
+ *    separators: `a/*c*\/b` must not become `ab`); line comments vanish and
  *    their newline is preserved so line structure survives.
  *  - `masked`: the SAME LENGTH as the input, with comment bodies and string
  *    CONTENTS replaced by spaces (newlines preserved). Delimiters are kept.
