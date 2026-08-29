@@ -16,6 +16,22 @@
 # `name`. Use `EXISTS`, so a twice-applied migration matches once and
 # double-apply is tolerated by construction.
 #
+# ⛔ THE PARAGRAPH ABOVE IS TRUE OF THE 12 MIGRATIONS IT MEASURED AND FALSE OF
+#    THE CORPUS. Measured 2026-08-29 on this gate's FIRST real run against TEST
+#    (CI run 33274341298): 253 of 262 repo migrations reported ABSENT when
+#    joined on `name`; only 9 matched. That cannot be real drift — `e2e-seeded`
+#    passes against the same database in the same run, so the schema is there.
+#    The 12-row sample was drawn from RECENT migrations and generalized to all
+#    262, and nothing caught it across four review rounds because this gate had
+#    never executed (WINDOWS.md 26 recorded exactly that). This is the defect
+#    class the phase exists to remove, occurring inside the phase.
+#
+#    DO NOT pick a new join key by reasoning. The failure path now prints the
+#    ledger's ACTUAL shape (`run_ledger_query shape`): row counts, how many
+#    carry a NULL `name`, and sample (version, name) pairs. Fix the join from
+#    that measurement. ⛔ Do NOT hand-apply migrations to TEST to make this
+#    gate green — TEST is shared with other people's CI.
+#
 # ── THE TWO HALVES ──────────────────────────────────────────────────────────
 # 1. LEDGER PRESENCE. Every `supabase/migrations/*.sql` basename must have a
 #    `schema_migrations` row with that `name`. Any that does not → exit 1.
@@ -96,6 +112,29 @@ default_ledger_query() {
               FROM supabase_migrations.schema_migrations m
              WHERE m.name IS NOT NULL
                AND NOT (m.name = ANY (ARRAY[${names_csv}]::text[]));" \
+        | tr -d '\r' | sed '/^[[:space:]]*$/d'
+      ;;
+    shape)
+      # DIAGNOSTIC ONLY — never decides pass/fail. A gate that fails must print
+      # enough for the next reader to diagnose it without a database of their
+      # own; otherwise the failure is a claim about the ledger that cannot be
+      # checked. Emits row counts and five sample (version, name) pairs.
+      # Migration filenames are already public in this repo, so this discloses
+      # nothing the tree does not.
+      psql "$TEST_SUPABASE_DB_URL" -X -q -A -t -v ON_ERROR_STOP=1 \
+        -c "SET statement_timeout = '30s';" \
+        -c "SELECT 'rows_total=' || count(*)
+              || ' name_null=' || count(*) FILTER (WHERE name IS NULL)
+              || ' name_set='  || count(*) FILTER (WHERE name IS NOT NULL)
+              FROM supabase_migrations.schema_migrations;" \
+        -c "SELECT 'sample version=' || coalesce(version,'<null>')
+              || ' name=' || coalesce(name,'<null>')
+              FROM supabase_migrations.schema_migrations
+             ORDER BY version DESC LIMIT 5;" \
+        -c "SELECT 'oldest  version=' || coalesce(version,'<null>')
+              || ' name=' || coalesce(name,'<null>')
+              FROM supabase_migrations.schema_migrations
+             ORDER BY version ASC LIMIT 3;" \
         | tr -d '\r' | sed '/^[[:space:]]*$/d'
       ;;
     *) fail "unknown ledger query direction '${direction}'" ;;
@@ -226,8 +265,20 @@ check() {
   if [ "$missing_count" -gt 0 ]; then
     echo "::error::${GATE}: ${missing_count} repo migration(s) are not present in the TEST ledger (joined on schema_migrations.name):"
     sed 's/^/::error::  /' "$missing_file"
-    echo "::error::TEST is migrated BY HAND in this repo. Apply the missing migrations to the"
-    echo "::error::TEST project, or retire the file deliberately."
+    # WHAT THE LEDGER ACTUALLY LOOKS LIKE. Added 2026-08-29 after this gate's
+    # FIRST real run against TEST reported 253 of 262 missing — a number that
+    # cannot be true (e2e-seeded passes against the same database, so the
+    # schema is there). The join key was chosen from a 12-row sample of RECENT
+    # migrations and generalized to all 262; the sample was not the corpus.
+    # A gate that fails must show its evidence, or its failure is just another
+    # unchecked claim.
+    echo "::error::--- TEST ledger shape (diagnostic, does not decide pass/fail) ---"
+    if run_ledger_query shape "$names_csv" 2>/dev/null | sed 's/^/::error::  /'; then :; else
+      echo "::error::  (shape probe failed — the ledger could not be described)"
+    fi
+    echo "::error::If name_null is large, the join key is wrong for older rows and the"
+    echo "::error::fix belongs in the gate, NOT in a hand-apply to TEST. Do not apply"
+    echo "::error::migrations to TEST to make this gate green — TEST is shared."
     bad=1
   else
     echo "  ledger presence: all ${#repo_names[@]} repo migrations found by name."
