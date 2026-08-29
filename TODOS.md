@@ -4926,18 +4926,27 @@ follows is what was deliberately left, with the reason.
 
 ---
 
-## Phase 164.3 round-4 residuals — findings NOT in 164.3.1's scope
+## Phase 164.3 round-4 residuals — ⚠️ SUPERSEDED 2026-08-29: 9 of 11 are now OWNED BY PHASE 164.3.1
 
 Logged 2026-08-29 under the founder rule "fix the criticals, log the remaining in TODOS".
 Round 4 ran three agents in parallel over `4106db31..HEAD` (gsd-code-reviewer,
-silent-failure-hunter, testing). Phase **164.3.1 SOUND-PRIMITIVES** owns only Primitive A
-(the neuter scan, `isBranchHead`) and Primitive B (the mutation identity nonce). Everything
-below is a DIFFERENT primitive and is deliberately out of that phase's scope.
+silent-failure-hunter, testing).
 
-⚠️ **[VAC04-C] is a FOURTH-INSTANCE primitive in its own right** — the same trigger that
-created 164.3.1. It is logged rather than phased because 164.3.1 does not block on it and
-164.4 does not consume it, but it should not be read as an ordinary leftover. Decide
-explicitly whether it earns 164.3.2 before 164.5 plans the VAC-04 gates.
+⚠️ **STATUS CHANGED THE SAME DAY. Do NOT work these as loose TODOS.** Writing them up
+established that FOUR primitives were cycling, not two: [VAC04-C] meets the same
+four-instance trigger that created 164.3.1, and "a control whose own oracle or fixture
+agrees with it by construction" is a fourth. **Founder decision: scope all four into
+164.3.1.** The phase was edited in place — see `.planning/ROADMAP.md` Phase 164.3.1 and the
+Roadmap Evolution entry in `.planning/STATE.md`.
+
+**Owned by 164.3.1 (do not fix here):** [VAC04-C] and members [VAC04-C1] [VAC04-C2]
+[VAC04-C3] [VAC04-C4] (PRIMITIVE C); [AUDCOV-01], [VAC-SELFREF-01], [MUT-W02] (PRIMITIVE D,
+plus AUDCOV-01's live stripper regression); [MUT-I01] (folded into PRIMITIVE A's tokenizer).
+They are kept below because the phase description cites these IDs and the measured detail
+lives here — a deferred finding that cannot be acted on without re-deriving it quietly
+expires. Close them when 164.3.1 closes, not before.
+
+**Still genuinely open as TODOS:** [MUT-I02] and [MUT-I03] only — both prose.
 
 - [ ] **[VAC04-C] "VAC-04 reports PASS having compared nothing" is a THIRD cycling primitive, four instances deep** — lineage: (1) R1 `WR-01` — "absent → new function, pass" with no floor on `checked`; (2) R2-W03 — the `accounted != NAME_COUNT` floor was tautological; (3) ship-stage `SP-C05` — the name index and the body fetcher were one code path, so `sanitize_user$v2` vanished from both; (4) round 4, below. Four fixes, four re-openings, each closing the previous example. Members [VAC04-C1]..[VAC04-C4]. The unifying defect is that the gate's "I found nothing to compare" path exits 0, so every blindness in any reader converts directly into a green gate over PRODUCTION function bodies. **Fix direction: make the ZERO path itself fail closed** rather than adding a fifth reader — a gate that compared nothing should be required to say so and stop.
 - [ ] **[VAC04-C1] the two name readers' blind spots COMPOSE — gate exits 0 printing "Two independent readings agree"** (reviewer R4-C03, Critical) — `scripts/sql-function-names-naive.mjs:83-86` (`DEF_RE`) + `scripts/sql-body-normalize.mjs` (`extractFunctionDefs`), unioned at `scripts/prod-body-drift-check.sh:207-217`. The naive reader cannot see a definition that does not START a line; the lexer cannot see a `$` in an identifier. A single definition trips both. MEASURED at HEAD, three shapes where BOTH return the empty set: `CREATE OR REPLACE FUNCTION\n    public.sanitize_user$v2(p uuid)`; `SELECT 1; CREATE OR REPLACE FUNCTION public.mid$v2(p uuid)`; `CREATE\n  OR REPLACE FUNCTION public.split$v2(p uuid)`. Driven end-to-end through the real gate with CI-shaped stubs on shape 1: `::notice::VAC-04 …: this PR's migrations define no functions — nothing to compare. (Two independent readings agree; see SP-C05.)` / `GATE EXIT=0`. The parenthetical IS the finding: two readers that failed for two *different* reasons on the *same* line are not corroboration. Corpus-wide claim holds TODAY — both readings independently re-derived over all 380 `.sql` files under `supabase/migrations/` + `supabase/schema/functions/`, **0 disagreements** — so this is latent, not live. **Fix:** on the zero path only, run a deliberately crude third reading (`--strip-comments` piped to `grep -aqiE 'CREATE[[:space:]]+(OR[[:space:]]+REPLACE[[:space:]]+)?FUNCTION'`) and `MEASURE_FAIL` if it still sees a definition — a refusal to guess, not a gate (7 of 262 migrations mention it in prose, which is why it must not red-light on its own). Also fix the naive reader's own blind spot: `DEF_RE` should match the whole text with the `m` flag and allow `FUNCTION[ \t\r\n]+`, which removes shapes 1 and 3 from the composition entirely.

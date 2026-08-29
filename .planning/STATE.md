@@ -6,10 +6,10 @@ current_phase: 164.3
 current_phase_name: VACUITY — a control that cannot fail must be caught by machine
 status: executing
 stopped_at: "164.3 PLANNED — 10 plans in 5 waves, verified by gsd-plan-checker on iteration 3 of 3. Each of the first two iterations found an error-swallowing verify shape the previous had missed (|| fallback; then a `wc -l` tail and a printed-not-tested `grep -c`); all three removed. FIVE premises in this phase's own spec failed re-measurement: SKIP-01 (migrations DO reach TEST), OPS-08-F9 (floors already 8/166), criterion 4 (118 committed function bodies exist), the PROD-linked CI job (already exists, dissolving the phase's only human gate), and the corpus size (30 arm-anchored markers, not 33 — a grep counting its own documentation). NO founder-gated item remains."
-last_updated: "2026-08-29T19:14:53.128Z"
+last_updated: "2026-08-29T20:01:50.715Z"
 last_activity: 2026-08-29
 last_activity_desc: Phase 164.3 execution started
-state_head: 7883ad1ab6c286feb6cf5382de31f8326d8af7c9
+state_head: 6754843730376c30bb342c5eaaacfa1afffee845
 progress:
   total_phases: 14
   completed_phases: 4
@@ -671,6 +671,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - Phase 164.3 inserted after Phase 164: VACUITY — mechanical detection of controls that cannot fail. Driver: phase 164 produced FIVE distinct vacuity mechanisms plus the DRIFT family; every one was GREEN in CI, survived review, and was found only by adversarial execution after a six-team red team. Deliverables are mechanisms not instances: a mutation runner over RED-UNDER annotations, the throwaway-Postgres CI lane (PROC-01), a static linter for the five measured shapes, and a repo-vs-PROD body diff before any whole-body CREATE OR REPLACE (DRIFT-02b). Ordered after 164.2 by number only. EXCLUDES the GSD-machinery gaps (depends_on unenforced, wave frontmatter drift, NYQ-01) — different system.
 - Phase 164.4 inserted after Phase 164.3: REDUNDER-BACKFILL: RED-UNDER coverage measured at 1 file of 71 at HEAD; 164.3 criterion 1 assumed all arms already annotated. HARD dep on 164.3 — its mutation runner is what makes a hand-authored RED-UNDER machine-checkable instead of a claim. (URGENT)
 - Phase 164.3.1 inserted after Phase 164.3: SOUND-PRIMITIVES: both mutation-runner primitives re-opened a FOURTH time (R4-C01 neuter scan, R4-C02 identity nonce). Blocks 164.4. (URGENT)
+- Phase 164.3.1 edited: scope widened from TWO primitives to FOUR (founder decision): adds PRIMITIVE C (VAC-04 reports PASS having compared nothing, WR-01 -> R2-W03 -> SP-C05 -> round 4) and PRIMITIVE D (a control whose own oracle or fixture agrees with it by construction); absorbs VAC04-C1..C4, AUDCOV-01, VAC-SELFREF-01, MUT-I01, MUT-W02; deliverables 4 -> 7; success criteria added. Only MUT-I02 and MUT-I03 remain in TODOS.
 
 ### Decisions
 
