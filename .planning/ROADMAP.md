@@ -491,8 +491,10 @@ would have caught a token-resurrection bug.
      mechanisms 1, 4 and 5 with no human involved. It is the highest-value item in the phase by a
      distance.
      ⛔ **CORRECTED 2026-08-28 — this criterion previously read "Every arm in `supabase/tests/*.sql`
-     already carries" one. MEASURED at HEAD, that is 1 file of 71** (33 annotations, all in
-     `test_strategy_shares_rls.sql`). The sentence was a claim never compared to the thing — the
+     already carries" one. MEASURED at HEAD, that is 1 file of 71** (**30** arm-anchored
+     annotations, all in `test_strategy_shares_rls.sql`; a naive `grep -c "RED-UNDER"` says 33 because
+     it counts the file's own header documenting the syntax at :46/:48 plus a prose reference at
+     :1541 — re-measured 2026-08-29). The sentence was a claim never compared to the thing — the
      exact defect this phase exists to catch, sitting in its own spec. Do NOT plan against the old
      wording: the runner covers the annotated corpus, and **Phase 164.4 (REDUNDER-BACKFILL)** closes
      the remaining 70 files using this runner as the oracle.
