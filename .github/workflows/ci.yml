@@ -1163,10 +1163,40 @@ jobs:
           total_plans=$(echo "$scanned_line" | sed -E 's|^scanned: [0-9]+ pending plan file\(s\) of ([0-9]+)$|\1|')
           case "$total_plans" in ''|*[!0-9]*)
             echo "::error::MEASURE_FAIL: could not read the total plan count out of '$scanned_line'."; exit 1;; esac
+          # CR-02: zero plan files is TWO different states and they must not
+          # share this exit. `/gsd-complete-milestone` moves every phase dir
+          # into .planning/milestones/v{X.Y}-phases/, leaving .planning/phases
+          # legitimately empty — this repo has already produced that state once
+          # (e9a57671). Failing on it reddens the required `frontend` check on
+          # EVERY PR until someone creates a phase directory, and the only
+          # remedy available is to switch this job off.
+          #
+          # The verifier now distinguishes them itself: a corpus it cannot
+          # locate or READ is a MEASURE_FAIL and never reaches here, and a
+          # corpus it opened and enumerated and found empty prints an explicit
+          # `measured-zero:` line. So this step demands that line rather than
+          # trusting the count — a zero with no measurement behind it is still
+          # a MEASURE_FAIL.
           if [ "$total_plans" -eq 0 ]; then
-            echo "::error::MEASURE_FAIL: ZERO plan files found under .planning/phases. Zero pending plans because zero plans were discovered is a broken glob, not a clean corpus."
+            if grep -a -q -m1 '^measured-zero: ' "$ANCHOR_LOG"; then
+              grep -a -m1 '^measured-zero: ' "$ANCHOR_LOG"
+              echo "Zero plan files, and the verifier proved it READ the corpus to establish that. Archived corpus accepted."
+            else
+              echo "::error::MEASURE_FAIL: ZERO plan files found under .planning/phases AND no 'measured-zero:' line was printed. An unmeasured zero is a broken glob, not a clean corpus."
+              exit 1
+            fi
+          fi
+
+          # The deferral exemptions (WR-06) must be REPORTED on every run. A
+          # plan can leave the pending set by carrying an explicit deferral
+          # marker; if that count ever stopped being printed, plans could be
+          # exempted without anyone seeing it.
+          deferred_line=$(grep -a -m1 -E '^deferred: [0-9]+ plan file\(s\) exempted by an explicit deferral marker$' "$ANCHOR_LOG" || true)
+          if [ -z "$deferred_line" ]; then
+            echo "::error::MEASURE_FAIL: the run printed NO 'deferred: N plan file(s) …' line. Plans can leave the pending set by carrying a deferral marker, so a run that does not report how many did is hiding its own exemptions."
             exit 1
           fi
+          echo "$deferred_line"
 
           claims_line=$(grep -a -m1 -E '^claims: [0-9]+ checked$' "$ANCHOR_LOG" || true)
           if [ -z "$claims_line" ]; then

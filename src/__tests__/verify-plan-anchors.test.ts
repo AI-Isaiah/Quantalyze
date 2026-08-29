@@ -38,7 +38,14 @@
  */
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import {
+  chmodSync,
+  mkdtempSync,
+  mkdirSync,
+  readdirSync,
+  writeFileSync,
+  rmSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
@@ -502,13 +509,67 @@ describe("pending-plan discovery — executed plans are archival and exempt", ()
     ]);
   });
 
-  it("reports MEASURE_FAIL when the corpus glob finds no plan files at all", () => {
-    const root = tree("no-plans", { ".planning/phases/99-open/README.md": "x\n" });
+  it("reports MEASURE_FAIL when .planning/phases cannot be LOCATED", () => {
+    // The corpus was never opened. Zero here means "did not look".
+    const root = tree("no-phases-dir", { "src/a.ts": "x\n" });
 
     const found = findPendingPlans(root);
 
     expect(found.planFiles).toBe(0);
     expect(found.measureFail).toBe(true);
+    expect(found.corpusState).toBe("unlocatable");
+    expect(found.measureReason).toContain("could not be located");
+  });
+
+  it("reports MEASURE_FAIL when .planning/phases exists but cannot be READ", () => {
+    // ⛔ The other half of CR-02. An unreadable corpus is not an empty one, and
+    // if this ever silently returned zero the gate would go green having
+    // enumerated nothing. Skipped where a chmod cannot make a dir unreadable
+    // (root, or a filesystem without POSIX modes) rather than asserted
+    // vacuously.
+    const root = tree("unreadable-phases", {
+      ".planning/phases/98-done/98-01-PLAN.md": "a\n",
+    });
+    const phases = join(root, ".planning", "phases");
+    chmodSync(phases, 0o000);
+    let readableAnyway = true;
+    try {
+      readdirSync(phases);
+    } catch {
+      readableAnyway = false;
+    }
+    try {
+      if (readableAnyway) {
+        // Running as root, or no POSIX modes. Say so instead of pretending.
+        expect(readableAnyway).toBe(true);
+        return;
+      }
+      const found = findPendingPlans(root);
+      expect(found.measureFail).toBe(true);
+      expect(found.corpusState).toBe("unreadable");
+      expect(found.measureReason).toContain("could NOT be read");
+    } finally {
+      chmodSync(phases, 0o755);
+    }
+  });
+
+  it("CR-02: an ARCHIVED corpus — present, readable, zero plan files — is a MEASURED zero, not a broken glob", () => {
+    // This is exactly what /gsd-complete-milestone leaves behind: every phase
+    // directory moved into .planning/milestones/v{X.Y}-phases/. This repo has
+    // produced that state before (e9a57671). Treating it as a MEASURE_FAIL
+    // reddened the required `frontend` check on EVERY PR, with no remedy but
+    // to switch the job off.
+    const root = tree("archived-corpus", {
+      ".planning/phases/.keep": "",
+      ".planning/milestones/v1.20-phases/164-old/164-01-PLAN.md": "a\n",
+    });
+
+    const found = findPendingPlans(root);
+
+    expect(found.planFiles).toBe(0);
+    expect(found.pending).toEqual([]);
+    expect(found.measureFail).toBe(false);
+    expect(found.corpusState).toBe("archived");
   });
 
   it("does NOT report MEASURE_FAIL when plans exist and all are executed", () => {
@@ -525,6 +586,83 @@ describe("pending-plan discovery — executed plans are archival and exempt", ()
     expect(found.planFiles).toBe(1);
     expect(found.pending).toEqual([]);
     expect(found.measureFail).toBe(false);
+    expect(found.corpusState).toBe("populated");
+  });
+});
+
+describe("WR-06 — a deliberately deferred plan can leave the pending set HONESTLY", () => {
+  it("a sibling <n>-DEFERRED.md with content exempts the plan and is reported", () => {
+    const root = tree("deferred-sibling", {
+      ".planning/phases/99-open/99-01-PLAN.md": "a\n",
+      ".planning/phases/99-open/99-01-DEFERRED.md":
+        "Deferred 2026-08-29 by founder decision: the substrate does not exist.\n",
+      ".planning/phases/99-open/99-02-PLAN.md": "b\n",
+    });
+
+    const found = findPendingPlans(root);
+
+    expect(found.planFiles).toBe(2);
+    expect(found.pending.map((p) => p.replace(/\\/g, "/"))).toEqual([
+      ".planning/phases/99-open/99-02-PLAN.md",
+    ]);
+    expect(found.deferred.map((d) => d.plan.replace(/\\/g, "/"))).toEqual([
+      ".planning/phases/99-open/99-01-PLAN.md",
+    ]);
+    expect(found.deferred[0].marker).toBe("99-01-DEFERRED.md");
+  });
+
+  it("an EMPTY -DEFERRED.md does NOT exempt — a marker with no reason in it is a checkbox", () => {
+    // The exemption must cost the same as the honesty it stands in for. If a
+    // zero-byte file were enough, this mechanism would be a switch for turning
+    // the gate off one plan at a time.
+    const root = tree("deferred-empty", {
+      ".planning/phases/99-open/99-01-PLAN.md": "a\n",
+      ".planning/phases/99-open/99-01-DEFERRED.md": "   \n\n",
+    });
+
+    const found = findPendingPlans(root);
+
+    expect(found.deferred).toEqual([]);
+    expect(found.pending.map((p) => p.replace(/\\/g, "/"))).toEqual([
+      ".planning/phases/99-open/99-01-PLAN.md",
+    ]);
+  });
+
+  it("`status: deferred` in the PLAN's own frontmatter also exempts it", () => {
+    const root = tree("deferred-frontmatter", {
+      ".planning/phases/99-open/99-01-PLAN.md":
+        "---\nphase: 99\nstatus: deferred\n---\n\nbody\n",
+    });
+
+    const found = findPendingPlans(root);
+
+    expect(found.pending).toEqual([]);
+    expect(found.deferred[0].marker).toBe("frontmatter status: deferred");
+  });
+
+  it("`status: deferred` OUTSIDE the frontmatter does not exempt anything", () => {
+    const root = tree("deferred-body-only", {
+      ".planning/phases/99-open/99-01-PLAN.md":
+        "---\nphase: 99\n---\n\nWe considered writing `status: deferred` here.\n",
+    });
+
+    const found = findPendingPlans(root);
+
+    expect(found.deferred).toEqual([]);
+    expect(found.pending.length).toBe(1);
+  });
+
+  it("phase 164.3 plan 07 — the real deferral this repo carries — is exempt and REPORTED", () => {
+    // Pinned against the real tree, not a fixture: the point of WR-06 is that
+    // THIS plan stops coupling every unrelated PR to its anchors.
+    const found = findPendingPlans(REPO_ROOT);
+    const deferredPlans = found.deferred.map((d) => d.plan.replace(/\\/g, "/"));
+    expect(deferredPlans).toContain(
+      ".planning/phases/164.3-vacuity-a-control-that-cannot-fail-must-be-caught-by-machine/164.3-07-PLAN.md",
+    );
+    expect(found.pending.map((p) => p.replace(/\\/g, "/"))).not.toContain(
+      ".planning/phases/164.3-vacuity-a-control-that-cannot-fail-must-be-caught-by-machine/164.3-07-PLAN.md",
+    );
   });
 });
 
@@ -573,7 +711,48 @@ describe("the CLI contract", () => {
     const out = `${res.stdout}${res.stderr}`;
     expect(out).toMatch(/^scanned: \d+ pending plan file\(s\) of \d+$/m);
     expect(out).toMatch(/^claims: \d+ checked$/m);
+    // WR-06: the exemptions are printed on EVERY run, and ci.yml asserts on
+    // this exact line. A deferral nobody can see is a way to switch this gate
+    // off one plan at a time.
+    expect(out).toMatch(
+      /^deferred: \d+ plan file\(s\) exempted by an explicit deferral marker$/m,
+    );
     expect(res.status).toBe(0);
+  });
+
+  it("CR-02: --pending on an ARCHIVED corpus exits 0 and prints the measured zero", () => {
+    // The exact input the review measured as wrongly fatal.
+    const root = tree("cli-archived", {
+      ".planning/phases/00-x/.keep": "",
+    });
+
+    const res = spawnSync(
+      "node",
+      [join(REPO_ROOT, VERIFIER), "--pending", "--root", root],
+      { cwd: REPO_ROOT, encoding: "utf8" },
+    );
+    const out = `${res.stdout}${res.stderr}`;
+
+    expect(res.status).toBe(0);
+    expect(out).toMatch(/^scanned: 0 pending plan file\(s\) of 0$/m);
+    expect(out).toMatch(/^measured-zero: /m);
+    expect(out).not.toContain("MEASURE_FAIL");
+  });
+
+  it("CR-02: --pending on an UNLOCATABLE corpus still exits 1 — the two did not collapse", () => {
+    const root = tree("cli-unlocatable", { "src/a.ts": "x\n" });
+
+    const res = spawnSync(
+      "node",
+      [join(REPO_ROOT, VERIFIER), "--pending", "--root", root],
+      { cwd: REPO_ROOT, encoding: "utf8" },
+    );
+    const out = `${res.stdout}${res.stderr}`;
+
+    expect(res.status).toBe(1);
+    expect(out).toContain("MEASURE_FAIL");
+    expect(out).toContain("could not be located");
+    expect(out).not.toContain("measured-zero:");
   });
 
   it("exits 1 and names the plan when a claim misses", () => {
