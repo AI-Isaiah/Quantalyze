@@ -1,0 +1,58 @@
+# VAC-08 ledger baseline — migrations MEASURED absent from the TEST ledger.
+#
+# DATED 2026-08-30, CI run 33277829284. This is a RATCHET, not a mute button:
+# the gate still fails loud on any migration missing from TEST that is NOT
+# listed here. What this file does is stop a KNOWN, pre-existing gap from
+# masking a NEW one, which is the same shape as this phase's coverage floor
+# (D-01/D-09: pinned at the measured value, fails on REGRESSION, never
+# "until zero").
+#
+# ⛔ THIS FILE MUST ONLY SHRINK. A name listed here that later turns up PRESENT
+#    in the ledger is a HARD FAILURE, not an advisory — delete the line. A
+#    baseline allowed to hold stale entries is a control that quietly stops
+#    controlling, which is what this phase exists to remove.
+#
+# ⚠️ LEDGER ABSENCE IS NOT OBJECT ABSENCE. These 32 have no schema_migrations
+#    row under any of the four naming conventions. Whether their OBJECTS exist
+#    in TEST (hand-applied, or installed by a later migration) is a DIFFERENT
+#    question this gate does not answer. Do not read this list as "TEST is
+#    missing 32 features".
+#
+# ⛔ DO NOT hand-apply these to TEST to shorten the list. TEST is shared with
+#    other people's CI. Removing entries is a founder decision, and
+#    20260823120000_revoke_api_keys_insert refuses BY DESIGN on a database it
+#    cannot identify, so it may never be applicable.
+#
+# Owner: [VAC08-LEDGER-32] in TODOS.md.
+20260525113000_phase19_soak_status_rpc
+20260525192740_test_force_cold_purge
+20260526095850_log_audit_event_null_auth_errcode
+20260526100000_claim_dedupe_done_pending_children_guard
+20260527102050_replace_allocator_equity_snapshots
+20260527152800_phase19_soak_daily
+20260528061155_claim_dedupe_tie_break_and_short_circuit
+20260528183000_validate_scenario_diff_percent_range_fix
+20260528223200_drop_stale_bridge_outcomes_percent_inline_check
+20260529150000_lock_profile_privileged_columns
+20260529160000_allocator_equity_pre_terminus_flag
+20260529170000_defer_compute_job_claim_token_fence
+20260529170100_circuit_breaker_db_clock_rpcs
+20260529180000_fix_mark_compute_job_failed_error_kind_column
+20260530120000_admin_role_mutate
+20260531120000_get_latest_portfolio_analytics_for_user
+20260601193000_claim_priority_restore_failed_retry_and_c39_guard
+20260602120000_strategy_analytics_computation_status_add_complete_with_warnings
+20260602180000_funding_fees_exchange_check
+20260604120000_for_quants_leads_email_day_unique
+20260614120000_derive_broker_dailies_kind
+20260620120000_verification_requests_view_shim_apply
+20260704150835_funding_match_key_1h_rekey
+20260707120000_sync_status_preserve_warnings
+20260709130000_strategies_asset_class
+20260710120000_strategy_keys
+20260715120000_grant_anon_execute_current_user_has_app_role
+20260808120000_strategies_user_id_index
+20260814120000_wizard_rpcs_revoke_authenticated
+20260819150000_reconcile_sweep_readmit_attempt_ceiling
+20260819151000_csv_finalize_fold_guard1_null_safe
+20260823120000_revoke_api_keys_insert

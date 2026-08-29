@@ -928,7 +928,15 @@ function scaffoldLedgerCase(
     opts.testBody ?? PROD_BODY_EQUIVALENT,
   );
 
+  // Default to an EMPTY baseline. Without this every arm inherits the repo's
+  // real 32-entry vac08-ledger-baseline.txt, whose entries are "stale" against
+  // a one-migration fixture — a scaffold leaking production data into unit
+  // arms. Arms that exercise the ratchet set LEDGER_BASELINE_FILE explicitly.
+  const emptyBaseline = join(dir, "baseline.empty.txt");
+  writeFileSync(emptyBaseline, "# intentionally empty\n");
+
   return {
+    LEDGER_BASELINE_FILE: emptyBaseline,
     TEST_SUPABASE_DB_URL: "stub-dsn-never-used",
     LEDGER_QUERY_CMD: `bash ${writeStubLedger(dir, opts.missing ?? [], [], opts.ledgerRows ?? null)}`,
     BODY_FETCH_CMD: `bash ${writeStubFetcher(dir)}`,
@@ -948,6 +956,60 @@ describe("VAC-08 — scripts/test-ledger-drift-check.sh", () => {
   //
   // Three arms, and the CONTROL is load-bearing: without it a floor that fired
   // unconditionally would also pass arm 1.
+  // ── RATCHET ────────────────────────────────────────────────────────────────
+  // 32 migrations were MEASURED absent from TEST on 2026-08-30 (CI 33277829284)
+  // and are carried in a dated baseline. The gate must still fail on drift that
+  // is NOT baselined, and must refuse to let the baseline hold stale entries —
+  // a baseline allowed to rot is a control that quietly stops controlling.
+  describe("baseline ratchet", () => {
+    const writeBaseline = (dir: string, names: string[]) => {
+      const f = join(dir, "baseline.txt");
+      writeFileSync(f, ["# dated baseline", ...names].join("\n") + "\n");
+      return f;
+    };
+
+    it("RED: drift that is NOT baselined still fails, and is named", () => {
+      withTempDir((dir) => {
+        const env = scaffoldLedgerCase(dir, { missing: ["20260829120000_demo"] });
+        const { status, out } = run(LEDGER_GATE, {
+          ...env,
+          LEDGER_BASELINE_FILE: writeBaseline(dir, ["20260101000000_something_else"]),
+        });
+        expect(status).toBe(1);
+        expect(out).toContain("NOT baselined");
+        expect(out).toContain("20260829120000_demo");
+      });
+    });
+
+    it("GREEN: the SAME drift passes once it is baselined — and says so", () => {
+      withTempDir((dir) => {
+        const env = scaffoldLedgerCase(dir, { missing: ["20260829120000_demo"] });
+        const { status, out } = run(LEDGER_GATE, {
+          ...env,
+          LEDGER_BASELINE_FILE: writeBaseline(dir, ["20260829120000_demo"]),
+        });
+        expect(status).toBe(0);
+        // It must not go quiet: a ratchet that hides the carried gap is a mute
+        // button. The count has to stay visible in the output.
+        expect(out).toContain("1 absent");
+        expect(out).toContain("0 NEW drift");
+      });
+    });
+
+    it("RED: a baseline entry that is now PRESENT is a hard failure, not an advisory", () => {
+      withTempDir((dir) => {
+        const env = scaffoldLedgerCase(dir, { missing: [] });
+        const { status, out } = run(LEDGER_GATE, {
+          ...env,
+          LEDGER_BASELINE_FILE: writeBaseline(dir, ["20260829120000_demo"]),
+        });
+        expect(status).toBe(1);
+        expect(out).toContain("may only shrink");
+        expect(out).toContain("20260829120000_demo");
+      });
+    });
+  });
+
   describe("distinguishes a broken instrument from a drift finding", () => {
     it("RED: a populated ledger matching under half the repo is MEASURE_FAIL, not drift", () => {
       withTempDir((dir) => {

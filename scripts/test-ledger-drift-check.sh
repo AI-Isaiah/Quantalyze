@@ -347,10 +347,45 @@ check() {
     exit 1
   fi
 
+  # ── RATCHET ────────────────────────────────────────────────────────────────
+  # Split the measured-missing set against a DATED baseline of known-absent
+  # migrations. New drift fails; the known gap is carried explicitly, with an
+  # owner, instead of as a number nobody wrote down. Same shape as the coverage
+  # floor (D-01/D-09): pinned at the measured value, fails on REGRESSION.
+  local baseline="${LEDGER_BASELINE_FILE:-$(dirname "$0")/vac08-ledger-baseline.txt}"
+  local new_file="${tmp}/missing.new.txt" stale_file="${tmp}/baseline.stale.txt"
+  : > "$new_file"; : > "$stale_file"
+  if [ -f "$baseline" ]; then
+    # Baselined names, comments and blank lines stripped.
+    local base_names="${tmp}/baseline.names.txt"
+    sed 's/#.*//' "$baseline" | sed 's/[[:space:]]*$//' | sed '/^$/d' > "$base_names"
+    # NEW drift = measured missing, not baselined.
+    grep -aFxv -f "$base_names" "$missing_file" > "$new_file" || true
+    # STALE baseline = baselined, but NOT measured missing any more.
+    grep -aFxv -f "$missing_file" "$base_names" > "$stale_file" || true
+  else
+    cp "$missing_file" "$new_file"
+    echo "::warning::${GATE}: no ledger baseline at ${baseline} — every measured absence is treated as new."
+  fi
+
+  local new_count stale_count
+  new_count="$(grep -ac '[^[:space:]]' "$new_file" || true)"; new_count="${new_count:-0}"
+  stale_count="$(grep -ac '[^[:space:]]' "$stale_file" || true)"; stale_count="${stale_count:-0}"
+
   local bad=0
-  if [ "$missing_count" -gt 0 ]; then
-    echo "::error::${GATE}: ${missing_count} repo migration(s) are not present in the TEST ledger (joined on schema_migrations.name):"
-    sed 's/^/::error::  /' "$missing_file"
+  if [ "$stale_count" -gt 0 ]; then
+    # A baseline that may hold stale entries is a control that quietly stops
+    # controlling. Shrinking it is progress and MUST be recorded.
+    echo "::error::${GATE}: ${stale_count} baseline entr(y/ies) are no longer MEASURED absent."
+    echo "::error::Either the migration reached TEST, or its file left the repo. Both mean the"
+    echo "::error::same thing: the line is stale. The baseline may only shrink — delete these"
+    echo "::error::lines from ${baseline}:"
+    sed 's/^/::error::  /' "$stale_file"
+    bad=1
+  fi
+  if [ "$new_count" -gt 0 ]; then
+    echo "::error::${GATE}: ${new_count} repo migration(s) are not present in the TEST ledger and are NOT baselined:"
+    sed 's/^/::error::  /' "$new_file"
     # WHAT THE LEDGER ACTUALLY LOOKS LIKE. Added 2026-08-29 after this gate's
     # FIRST real run against TEST reported 253 of 262 missing — a number that
     # cannot be true (e2e-seeded passes against the same database, so the
@@ -366,8 +401,8 @@ check() {
     echo "::error::fix belongs in the gate, NOT in a hand-apply to TEST. Do not apply"
     echo "::error::migrations to TEST to make this gate green — TEST is shared."
     bad=1
-  else
-    echo "  ledger presence: all ${#repo_names[@]} repo migrations found by name."
+  elif [ "$stale_count" -eq 0 ]; then
+    echo "  ledger presence: ${missing_count} absent, all ${missing_count} baselined (see ${baseline}); 0 NEW drift."
   fi
 
   # Advisory only — squashes and CLI-era rows make this direction noisy.
@@ -583,9 +618,18 @@ STUB
     fi
   }
 
+  # An EMPTY baseline for every arm. Without it the self-test inherits the
+  # repo's real vac08-ledger-baseline.txt, whose 32 entries are all "stale"
+  # against a one-migration fixture — the harness would be measuring production
+  # data it never set up, and every arm would red for a reason unrelated to what
+  # it is testing. The ratchet itself is proven in
+  # src/__tests__/drift-check-scripts.test.ts, which sets the file explicitly.
+  printf '# self-test: intentionally empty\n' > "$tmp/baseline.txt"
+
   arm_env() {
     MIGRATIONS_DIR="$tmp/migrations" \
     SNAPSHOT_DIR="$tmp/snapshot" \
+    LEDGER_BASELINE_FILE="$tmp/baseline.txt" \
     LIVE_DIR="$1" \
     MISSING_NAMES="$2" \
     LEDGER_QUERY_CMD="bash $tmp/ledger.sh" \
