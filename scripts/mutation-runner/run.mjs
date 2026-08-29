@@ -148,6 +148,7 @@ const DEFECT_KINDS = [
   "no-red",
   "wrong-first-failure",
   "neuter-missed",
+  "identity-rewrite",
   "baseline",
   "restore",
   "dirty-checkout",
@@ -393,6 +394,61 @@ export function firstFailureArm(output) {
   return match ? match[1] : null;
 }
 
+/**
+ * Every arm identity the first-failure check could read out of `text`, sorted.
+ *
+ * ⛔ R2-W04. GRAMMAR rule 3 refuses a mutation that WRITES a `TEST FAILED (`
+ * literal. That is one spelling of the attack. The general shape carries no
+ * such literal at all — it RE-TARGETS an existing raise so a DIFFERENT arm
+ * reports under the arm-under-test's ID:
+ *
+ *   {"kind":"edit","file":"supabase/tests/…","find":"ANON 1a): ",
+ *    "replace":"N1 1a): ","occurrences":1}
+ *
+ * MEASURED at HEAD: the parser accepted that verbatim, and applying it moved
+ * `ANON 1a` from 1 occurrence to 0 and `N1 1a` from 1 to 2. `firstFailureArm`
+ * would then read `N1 1a`, the runner would report `RED (identity ok)`, and
+ * `biting` would rise for an arm whose own logic never ran — the exact outcome
+ * rule 3 exists to prevent, reached without the literal rule 3 looks for.
+ *
+ * The invariant that closes the CLASS is stated over the OUTPUT rather than
+ * over the annotation's spelling: a mutation may change what the gate DOES,
+ * never who it says it is. So the multiset of readable identities must survive
+ * the mutation unchanged.
+ *
+ * MEASURED 2026-08-29 across the real corpus — 30 annotated arms, 49 file
+ * steps — 0 violations. The widened rule refuses nothing that exists today.
+ *
+ * ⚠️ NEUTERS ARE NOT SUBJECT TO THIS, deliberately: neutering an arm removes
+ * its identity ON PURPOSE. The comparison is taken across a MUTATION step
+ * only, with the post-neuter text as its "before", so an identity the neuter
+ * removed is absent from both sides.
+ */
+export function armIdentities(text) {
+  return [...text.matchAll(/TEST FAILED \(([^)]*)\)/g)].map((m) => m[1]).sort();
+}
+
+/** `null` when the mutation preserved every identity; otherwise a description. */
+export function identityRewriteDetail(before, after, file) {
+  const b = armIdentities(before);
+  const a = armIdentities(after);
+  if (b.join(" ") === a.join(" ")) return null;
+
+  const count = (list, id) => list.filter((x) => x === id).length;
+  const moved = [...new Set([...b, ...a])]
+    .filter((id) => count(b, id) !== count(a, id))
+    .map((id) => `${JSON.stringify(id)} ${count(b, id)}->${count(a, id)}`)
+    .sort();
+
+  return (
+    `MEASURE_FAIL: the mutation REWRITES the arm identities in ${file} (${moved.join(", ")}). ` +
+    `A mutation may change what the gate DOES; it may never change who the gate SAYS IT IS. ` +
+    `Re-pointing a raise makes the first-failure check attribute another arm's failure to this ` +
+    `one, so the arm would count as biting without its own logic ever running. Mutate the code ` +
+    `under test, not the failure identity.`
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Lane invocation
 // ---------------------------------------------------------------------------
@@ -601,6 +657,12 @@ export function runCorpus({
               gateRel,
               `MEASURE_FAIL: ${JSON.stringify(needle)} occurs ${applied.actual}x in ${step.file}, annotation claims ${step.occurrences}x — mutation NOT applied, so this arm was NOT tested`,
             );
+            measureFailed = true;
+            break;
+          }
+          const rewrite = identityRewriteDetail(before, applied.text, step.file);
+          if (rewrite !== null) {
+            addDefect("identity-rewrite", ann.arm, gateRel, rewrite);
             measureFailed = true;
             break;
           }
@@ -880,7 +942,8 @@ export function parseOnlyCorpus({ scopeDir, log = (s) => console.log(s) }) {
           continue;
         }
         const needle = step.kind === "edit" ? step.find : step.anchor;
-        const actual = countOccurrences(readFileSync(target, "utf8"), needle);
+        const before = readFileSync(target, "utf8");
+        const actual = countOccurrences(before, needle);
         if (actual !== step.occurrences) {
           addDefect(
             "occurrence-mismatch",
@@ -888,6 +951,16 @@ export function parseOnlyCorpus({ scopeDir, log = (s) => console.log(s) }) {
             gateRel,
             `MEASURE_FAIL: ${JSON.stringify(needle)} occurs ${actual}x in ${step.file}, annotation claims ${step.occurrences}x`,
           );
+          continue;
+        }
+        // R2-W04: identity rewriting is decidable WITHOUT a lane, so refuse it
+        // here too. `--parse-only` is what CI runs on platforms with no
+        // database, and an annotation that re-points a raise must not have to
+        // wait for a lane to be caught.
+        const applied = applyFileStep(before, step);
+        if (applied.ok) {
+          const rewrite = identityRewriteDetail(before, applied.text, step.file);
+          if (rewrite !== null) addDefect("identity-rewrite", ann.arm, gateRel, rewrite);
         }
       }
     }
@@ -950,7 +1023,7 @@ function selfTest() {
   // 6 outright, so each states the floor appropriate to ITS corpus. Check 5 is
   // where an ARMS_FLOOR regression is proven to fire — the mode that could not
   // be proven at all while the floor was 0.
-  console.log("=== SELF-TEST 1/6: a non-biting annotation must exit 1 with `no-red` ===");
+  console.log("=== SELF-TEST 1/7: a non-biting annotation must exit 1 with `no-red` ===");
   const a = runCorpus({ scopeDir: SELFTEST_DIR, onlyFile: "nonbiting-gate.sql", armsFloor: 0, log: quiet });
   pass =
     expect(a.exitCode === 1, `exit code is 1 (got ${a.exitCode})`) &&
@@ -960,7 +1033,7 @@ function selfTest() {
     ) &&
     pass;
 
-  console.log("=== SELF-TEST 2/6: a FILES_FLOOR regression must exit 1 with `floor` ===");
+  console.log("=== SELF-TEST 2/7: a FILES_FLOOR regression must exit 1 with `floor` ===");
   const b = runCorpus({ scopeDir: FIXTURE_CORPUS, filesFloor: 99, armsFloor: 0, log: quiet });
   pass =
     expect(b.exitCode === 1, `exit code is 1 (got ${b.exitCode})`) &&
@@ -970,7 +1043,7 @@ function selfTest() {
     ) &&
     pass;
 
-  console.log("=== SELF-TEST 3/6: reddening the WRONG arm must exit 1 with `wrong-first-failure` ===");
+  console.log("=== SELF-TEST 3/7: reddening the WRONG arm must exit 1 with `wrong-first-failure` ===");
   const c = runCorpus({ scopeDir: SELFTEST_DIR, onlyFile: "wrong-identity-gate.sql", armsFloor: 0, log: quiet });
   pass =
     expect(c.exitCode === 1, `exit code is 1 (got ${c.exitCode})`) &&
@@ -982,7 +1055,7 @@ function selfTest() {
     ) &&
     pass;
 
-  console.log("=== SELF-TEST 4/6: a wrong `occurrences` must exit 1 with MEASURE_FAIL, NOT `no-red` ===");
+  console.log("=== SELF-TEST 4/7: a wrong `occurrences` must exit 1 with MEASURE_FAIL, NOT `no-red` ===");
   const d = runCorpus({ scopeDir: SELFTEST_DIR, onlyFile: "occurrence-mismatch-gate.sql", armsFloor: 0, log: quiet });
   pass =
     expect(d.exitCode === 1, `exit code is 1 (got ${d.exitCode})`) &&
@@ -1001,7 +1074,7 @@ function selfTest() {
   // FILES_FLOOR half of D-09's floor mode. Now that the floor is a measured 30
   // this check exists, and it is what stops the pinned floor from decaying back
   // into a constant nobody compares to anything.
-  console.log("=== SELF-TEST 5/6: an ARMS_FLOOR regression must exit 1 with `floor` ===");
+  console.log("=== SELF-TEST 5/7: an ARMS_FLOOR regression must exit 1 with `floor` ===");
   const f = runCorpus({ scopeDir: FIXTURE_CORPUS, armsFloor: 99, log: quiet });
   pass =
     expect(f.exitCode === 1, `exit code is 1 (got ${f.exitCode})`) &&
@@ -1015,12 +1088,37 @@ function selfTest() {
     ) &&
     pass;
 
-  console.log("=== SELF-TEST 6/6: the green fixture corpus must exit 0 ===");
+  console.log("=== SELF-TEST 6/7: the green fixture corpus must exit 0 ===");
   const e = runCorpus({ scopeDir: FIXTURE_CORPUS, armsFloor: 2, log: quiet });
   pass =
     expect(e.exitCode === 0, `exit code is 0 (got ${e.exitCode}; defects: ${JSON.stringify(e.defects)})`) &&
     expect(e.armsExecuted === 2, `2 arms executed (got ${e.armsExecuted})`) &&
     expect(e.armsWaived === 1, `1 arm waived (got ${e.armsWaived})`) &&
+    pass;
+
+  // ⭐ R2-W04. GRAMMAR rule 3 refused ONE spelling — a mutation that WRITES a
+  // first-failure literal. The general shape writes no such literal: it
+  // re-points an EXISTING raise so another arm reports under the arm-under-
+  // test's ID, and it parsed clean against the real gate file at HEAD. The
+  // fixture's annotation deliberately carries no failure literal in either its
+  // needle or its replacement, so this check can only pass on the CONTENT
+  // invariant (`identityRewriteDetail`) and not on the spelling rule.
+  console.log("=== SELF-TEST 7/7: rewriting an arm IDENTITY must exit 1 with `identity-rewrite` ===");
+  const g = runCorpus({ scopeDir: SELFTEST_DIR, onlyFile: "identity-rewrite-gate.sql", armsFloor: 0, log: quiet });
+  pass =
+    expect(g.exitCode === 1, `exit code is 1 (got ${g.exitCode})`) &&
+    expect(
+      g.defects.some((x) => x.kind === "identity-rewrite" && x.arm === "IDREWRITE 1"),
+      'the defect table names IDREWRITE 1 with kind "identity-rewrite"',
+    ) &&
+    expect(
+      g.armsExecuted === 0,
+      `the arm never reached a lane (executed ${g.armsExecuted}) — a rewritten identity is refused BEFORE it can be counted as biting`,
+    ) &&
+    expect(
+      !g.defects.some((x) => x.kind === "no-red" || x.kind === "wrong-first-failure"),
+      'no "no-red" or "wrong-first-failure" defect — a refused mutation is not a non-biting arm',
+    ) &&
     pass;
 
   console.log("");

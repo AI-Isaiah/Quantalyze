@@ -86,7 +86,14 @@ wrong occurrence reads the resulting red as **success**. Both are vacuity, so
 "could not locate the bytes" and "the arm did not redden" must never share a code
 path. They are separate defect kinds in the report table.
 
-### 3. A mutation may not INJECT the string the detector looks for
+### 3. A mutation may not change WHO the gate says it is
+
+A mutation may change what the gate **does**. It may never change what the
+first-failure identity check **reads**. That has two halves, refused in two
+different places, because one of them is not decidable from the annotation's
+text.
+
+#### 3a — it may not INJECT the literal (refused at parse time)
 
 The injected text of every step — `replace` on an `edit`, `text` on an
 `insert-after`, `stmt` on a `sql` — is **refused at parse time** when it contains
@@ -115,6 +122,42 @@ Mutate the code under test, never the failure message. Measured 2026-08-29:
 **0 of the 30** annotations in the real corpus inject this literal, so the rule
 refuses nothing that exists.
 
+The needle side is refused too: `find` on an `edit` and `anchor` on an
+`insert-after` may not name a `TEST FAILED (` literal either. Rewriting a
+failure message in *either* direction changes what the identity check reads
+instead of what the arm does. Measured: **0 of the 49** file steps in the real
+corpus target this literal.
+
+#### 3b — it may not REWRITE an identity (refused at apply time, by CONTENT)
+
+⛔ 3a is a rule about **how the annotation is spelled**, and a rule about
+spelling can be re-spelled around. The general attack carries no `TEST FAILED`
+text anywhere — it re-points an **existing** raise:
+
+```json
+{"arm":"N1 1a","apply":[{"kind":"edit","file":"supabase/tests/<gate>.sql",
+  "find":"ANON 1a): ","replace":"N1 1a): ","occurrences":1}]}
+```
+
+Measured against the real gate file: that parses **clean** under 3a, and
+applying it moves `ANON 1a` from 1 occurrence to 0 and `N1 1a` from 1 to 2.
+`firstFailureArm` then reads `N1 1a`, the runner reports `RED (identity ok)`,
+and `biting` rises for an arm whose own logic never ran — the same outcome 3a
+exists to prevent, reached without the literal 3a looks for.
+
+So the runner also states the rule over the **file**, where it cannot be
+re-spelled: the multiset of arm identities the first-failure regex can read
+must survive a mutation **unchanged**. A step that changes it is the defect
+kind `identity-rewrite`, raised **before** the lane runs, in both the full run
+and `--parse-only`.
+
+⚠️ Neuters are deliberately exempt — neutering an arm removes its identity on
+purpose. The comparison is taken across a mutation step only, with the
+post-neuter text as its "before".
+
+Measured 2026-08-29 across the real corpus — 30 annotated arms, 49 file steps —
+**0 violations**, so the invariant refuses nothing that exists.
+
 ---
 
 ## Schema
@@ -141,8 +184,8 @@ neither.
 |---|---|---|---|
 | `kind` | `"edit"` | yes | |
 | `file` | string | yes | Repo-relative. No leading `/`, no `..` segment. |
-| `find` | string | yes | Byte-exact needle. Non-empty. |
-| `replace` | string | yes | May be `""` to delete the needle. **May not contain a `TEST FAILED (` literal — rule 3.** |
+| `find` | string | yes | Byte-exact needle. Non-empty. **May not name a `TEST FAILED (` literal — rule 3a.** |
+| `replace` | string | yes | May be `""` to delete the needle. **May not contain a `TEST FAILED (` literal — rule 3a.** |
 | `occurrences` | positive int | **yes** | Measured total matches in the file. |
 | `nth` | positive int | no (default `1`) | Which match to mutate. Must be ≤ `occurrences`. |
 
@@ -152,8 +195,8 @@ neither.
 |---|---|---|---|
 | `kind` | `"insert-after"` | yes | |
 | `file` | string | yes | Repo-relative. |
-| `anchor` | string | yes | Byte-exact text to insert after. |
-| `text` | string | yes | Text inserted immediately after the anchor. **May not contain a `TEST FAILED (` literal — rule 3.** |
+| `anchor` | string | yes | Byte-exact text to insert after. **May not name a `TEST FAILED (` literal — rule 3a.** |
+| `text` | string | yes | Text inserted immediately after the anchor. **May not contain a `TEST FAILED (` literal — rule 3a.** |
 | `occurrences` | positive int | **yes** | Measured total anchor matches. |
 | `nth` | positive int | no (default `1`) | |
 
@@ -164,7 +207,7 @@ and *before* the gate. This is not a file edit; it is routed through the lane's
 | Key | Type | Required | Meaning |
 |---|---|---|---|
 | `kind` | `"sql"` | yes | |
-| `stmt` | string | yes | Non-empty. **May not contain a `TEST FAILED (` literal — rule 3.** |
+| `stmt` | string | yes | Non-empty. **May not contain a `TEST FAILED (` literal — rule 3a.** |
 
 ### `RED-UNDER-SETUP` — the in-file apply list
 
@@ -342,6 +385,7 @@ raising is never silently swallowed.
 | `no-red` | The mutation applied, the gate still passed. The arm cannot fail. |
 | `wrong-first-failure` | The gate went red, but the FIRST `TEST FAILED (…)` names a different arm. Red-anywhere is not success. |
 | `neuter-missed` | A neutered arm still appeared in the output. |
+| `identity-rewrite` | **MEASURE_FAIL.** The step changed the multiset of `TEST FAILED (<id>)` identities in the file — rule 3b. The mutation was NOT applied and the arm never reached a lane. |
 | `baseline` | Pristine copies did not go GREEN before any mutation — a broken corpus. |
 | `restore` | Pristine copies did not go GREEN after the arm runs. |
 | `dirty-checkout` | `git status --porcelain` was non-empty after the run. Mutations must only ever touch scratch copies. |

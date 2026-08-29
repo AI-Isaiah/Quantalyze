@@ -31,6 +31,11 @@ import {
   parseFile,
   scanCorpus,
 } from "../../scripts/mutation-runner/parse.mjs";
+import {
+  applyFileStep,
+  armIdentities,
+  identityRewriteDetail,
+} from "../../scripts/mutation-runner/run.mjs";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 
@@ -451,6 +456,106 @@ describe("WR-03 / GRAMMAR rule 3 — a mutation may not INJECT the detector's ow
     );
     expect(result.errors).toEqual([]);
     expect(result.structured).toHaveLength(30);
+  });
+});
+
+describe("R2-W04 / GRAMMAR rule 3b — a mutation may not REWRITE an arm identity", () => {
+  // ⛔ Rule 3a is a rule about how the annotation is SPELLED, and a rule about
+  // spelling can be re-spelled around. The general attack carries no
+  // `TEST FAILED` text anywhere: it re-points an EXISTING raise so a different
+  // arm reports under the arm-under-test's ID. Measured at HEAD against the
+  // real gate file, `{"find":"ANON 1a): ","replace":"N1 1a): "}` parsed CLEAN
+  // and moved `ANON 1a` from 1 occurrence to 0 and `N1 1a` from 1 to 2 —
+  // `RED (identity ok)`, biting +1, for an arm that never ran.
+  //
+  // So the invariant is stated over the FILE, where it cannot be re-spelled.
+  const GATE_REL = "supabase/tests/test_strategy_shares_rls.sql";
+  const GATE = join(REPO_ROOT, GATE_REL);
+
+  const retarget = (victim: string, into: string, occurrences: number) => ({
+    kind: "edit" as const,
+    file: GATE_REL,
+    find: `${victim}): `,
+    replace: `${into}): `,
+    occurrences,
+    nth: 1,
+  });
+
+  it("the parse-time SPELLING rule does not catch it — which is why 3b exists", () => {
+    // Recorded, not lamented. If this ever starts failing, 3b's justification
+    // has changed and the comment above must change with it.
+    const sql = [
+      "  -- RED-UNDER: prose",
+      `  -- RED-UNDER-M: {"arm":"N1 1a","apply":[{"kind":"edit","file":"${GATE_REL}","find":"ANON 1a): ","replace":"N1 1a): ","occurrences":1}]}`,
+    ].join("\n");
+    const result = parseAnnotations(sql, { file: "g.sql" });
+    expect(result.errors).toEqual([]);
+    expect(result.structured).toHaveLength(1);
+  });
+
+  it("REAL GATE FILE: re-pointing another arm's raise is refused by CONTENT", () => {
+    const gate = readFileSync(GATE, "utf8");
+    const identities = armIdentities(gate);
+    const victim = identities.find((id) => id !== "N1 1a");
+    expect(victim, "the gate carries no second arm to re-point — update this test").toBeDefined();
+
+    const occurrences = gate.split(`${victim}): `).length - 1;
+    const applied = applyFileStep(gate, retarget(victim as string, "N1 1a", occurrences));
+    expect(applied.ok, "the fixture's needle no longer matches — re-measure it").toBe(true);
+
+    const detail = identityRewriteDetail(applied.text!, gate, GATE_REL);
+    expect(detail, "the arm-identity multiset was unchanged — the fixture is not the attack").not
+      .toBeNull();
+    expect(identityRewriteDetail(gate, applied.text!, GATE_REL)).toMatch(
+      /REWRITES the arm identities/,
+    );
+  });
+
+  it("does NOT fire on an ordinary mutation, nor on one that leaves identities alone", () => {
+    // A subtractive rule that fires on everything is as useless as one that
+    // fires on nothing.
+    const before = "RAISE EXCEPTION 'TEST FAILED (A): x';\nSELECT 1;";
+    const after = "RAISE EXCEPTION 'TEST FAILED (A): x';\nSELECT 2;";
+    expect(identityRewriteDetail(before, after, "f.sql")).toBeNull();
+  });
+
+  it("REAL CORPUS: no annotation that exists today rewrites an identity", () => {
+    // Measured before shipping the invariant: 30 arms, 49 file steps, 0
+    // violations. Pinned so 164.4's ~70-file backfill cannot introduce the
+    // shape and then be "fixed" by relaxing the rule.
+    const scan = scanCorpus(join(REPO_ROOT, "supabase", "tests"));
+    const buffers = new Map<string, string>();
+    let armsSeen = 0;
+    let stepsSeen = 0;
+    const violations: string[] = [];
+
+    for (const { result } of scan.results) {
+      for (const ann of result.structured) {
+        if (ann.waiver) continue;
+        armsSeen += 1;
+        buffers.clear();
+        for (const step of ann.apply) {
+          if (step.kind === "sql") continue;
+          stepsSeen += 1;
+          const abs = join(REPO_ROOT, step.file);
+          if (!buffers.has(step.file)) buffers.set(step.file, readFileSync(abs, "utf8"));
+          const text = buffers.get(step.file) as string;
+          const applied = applyFileStep(text, step);
+          if (!applied.ok) {
+            violations.push(`${ann.arm}: ${step.file} occurrence-mismatch (${applied.actual})`);
+            continue;
+          }
+          const detail = identityRewriteDetail(text, applied.text as string, step.file);
+          if (detail !== null) violations.push(`${ann.arm}: ${detail}`);
+          buffers.set(step.file, applied.text as string);
+        }
+      }
+    }
+
+    expect(violations).toEqual([]);
+    // Non-vacuity: the walk must actually have walked something.
+    expect(armsSeen).toBe(30);
+    expect(stepsSeen).toBe(49);
   });
 });
 

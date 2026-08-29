@@ -117,6 +117,33 @@ function refuseSelfSatisfying(at, field, injected) {
   );
 }
 
+/**
+ * The other half of rule 3: a mutation must not TARGET a failure literal
+ * either. Rewriting an existing raise changes what the identity check reads
+ * instead of what the arm does, in the same way and for the same reason as
+ * writing one.
+ *
+ * ⚠️ HONEST SCOPE, because it matters. This closes the spelling where the
+ * needle names the literal outright. It does NOT close the general shape —
+ * `{"find":"ANON 1a): ","replace":"N1 1a): "}` carries no `TEST FAILED`
+ * anywhere and passes here. That shape is refused by CONTENT, at apply time,
+ * by `identityRewriteDetail` in run.mjs, which compares the arm identities the
+ * file carries before and after. A rule stated over the annotation's spelling
+ * can always be re-spelled around; the invariant over the file cannot.
+ *
+ * MEASURED 2026-08-29: 0 of the 49 file steps in the real corpus target this
+ * literal, so nothing legitimate is refused.
+ */
+function refuseRetargetingFailureLiteral(at, field, targeted) {
+  if (typeof targeted !== "string") return;
+  if (!INJECTS_FIRST_FAILURE_LITERAL.test(targeted)) return;
+  throw (
+    `${at}: "${field}" TARGETS a "TEST FAILED (" literal. Rewriting a failure message — in ` +
+    `either direction — changes what the first-failure identity check reads instead of what the ` +
+    `arm does. Mutate the code under test, not the failure identity.`
+  );
+}
+
 /** Validate one `apply` step. Returns the normalised step, or throws a message string. */
 function validateStep(step, index) {
   const at = `apply step ${index + 1}`;
@@ -155,6 +182,7 @@ function validateStep(step, index) {
     if (!isNonEmptyString(step.find)) throw `${at}: "find" must be a non-empty string`;
     if (typeof step.replace !== "string") throw `${at}: "replace" must be a string (use "" to delete)`;
     refuseSelfSatisfying(at, "replace", step.replace);
+    refuseRetargetingFailureLiteral(at, "find", step.find);
     return {
       kind: "edit",
       file: step.file,
@@ -168,6 +196,7 @@ function validateStep(step, index) {
   if (!isNonEmptyString(step.anchor)) throw `${at}: "anchor" must be a non-empty string`;
   if (!isNonEmptyString(step.text)) throw `${at}: "text" must be a non-empty string`;
   refuseSelfSatisfying(at, "text", step.text);
+  refuseRetargetingFailureLiteral(at, "anchor", step.anchor);
   return {
     kind: "insert-after",
     file: step.file,
