@@ -154,8 +154,12 @@ supabase db dump --db-url "$TEST_DB_URL" -f scripts/local-stack/baseline.sql
 Then, before any commit of that file, prove it carries no secrets:
 
 ```
-grep -nE 'postgres(ql)?://|@[a-z0-9.-]+\.supabase\.(co|com)|[a-z]{20}\.supabase' scripts/local-stack/baseline.sql
+grep -anE 'postgres(ql)?://|@[a-z0-9.-]+\.supabase\.(co|com)|[a-z]{20}\.supabase|\\connect|ALTER DATABASE|eyJ[A-Za-z0-9_-]{10,}' scripts/local-stack/baseline.sql
 ```
+
+⚠️ SP-M03: the three original alternatives did not cover `\connect`, `ALTER DATABASE` or a
+JWT, which `supabase/schema/BASELINE.md` nonetheless certified as scanned for. Keep the two
+copies of this pattern identical — they are two halves of one claim.
 
 Any hit ⇒ **do not commit**; regenerate per run into the gitignored path instead. Schema DDL is
 already public via `supabase/migrations/`, so a clean dump is committable — a dump carrying a DSN,

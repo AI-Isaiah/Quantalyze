@@ -85,10 +85,20 @@ Read-only, from a checkout linked to production, DSN never committed or echoed:
 
 ```
 supabase db dump --linked -f supabase/schema/baseline.sql
-grep -nE 'postgres(ql)?://|@[a-z0-9.-]+\.supabase\.(co|com)|[a-z]{20}\.supabase' supabase/schema/baseline.sql
+grep -anE 'postgres(ql)?://|@[a-z0-9.-]+\.supabase\.(co|com)|[a-z]{20}\.supabase|\\connect|ALTER DATABASE|eyJ[A-Za-z0-9_-]{10,}' supabase/schema/baseline.sql
 ```
 
 Any hit on the second command means **do not commit**.
+
+⚠️ **SP-M03 — the CLAIM used to exceed the COMMAND.** The certification above names five
+classes (DSN, `\connect`, `ALTER DATABASE`, JWT, project ref); this grep matched only three
+of them. A future regeneration carrying a `\connect` line or a JWT would have passed the
+documented check and landed in a PUBLIC repo. The pattern now covers all five, and `-a` is
+not optional — this repository contains a MEASURED NUL-bearing file, and grep reports a
+NUL-bearing file as clean with exit 1. Today's `baseline.sql` is clean under the FULL set
+(re-run independently 2026-08-29), so this is forward-looking, not a live exposure. If you
+widen the prose, widen this line in the same edit — that mismatch is the defect class this
+whole phase exists to remove.
 
 ## What the first use of this file found
 
