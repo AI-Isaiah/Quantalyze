@@ -9,6 +9,7 @@
  *   node scripts/mutation-runner/run.mjs                    # full corpus: supabase/tests/
  *   node scripts/mutation-runner/run.mjs --fixture-corpus   # the synthetic corpus
  *   node scripts/mutation-runner/run.mjs --self-test        # prove the exit-1 modes fire
+ *   node scripts/mutation-runner/run.mjs --parse-only       # STATIC only — runs ZERO arms
  *   node scripts/mutation-runner/run.mjs --file <gate.sql>  # DIAGNOSTIC (never exits 0)
  *   node scripts/mutation-runner/run.mjs --arm "<ARM ID>"   # DIAGNOSTIC (never exits 0)
  *
@@ -652,6 +653,140 @@ export function runCorpus({
 }
 
 // ---------------------------------------------------------------------------
+// --parse-only: the STATIC half of the gate. No cluster, no mutation.
+// ---------------------------------------------------------------------------
+//
+// Added by plan 164.3-08 because annotating 30 real arms needs a sub-second
+// answer to "is every prose marker twinned, and does every needle still match
+// the bytes it claims?". Booting a cluster per arm to learn that a JSON object
+// is malformed is a 65-second answer to a 50-millisecond question.
+//
+// ⛔ THIS MODE IS NOT THE GATE AND MUST NEVER BE WIRED INTO CI AS ONE. It runs
+// ZERO arms, so it cannot observe a non-biting annotation — the defect the
+// whole phase exists to detect. It exits 0 on a clean parse (unlike
+// --file/--arm, which exit 2) because it checks the WHOLE corpus rather than a
+// subset, and its own contract is a static one it fully discharges. The
+// mechanism that stops it being mistaken for the gate is not this comment: the
+// CI job asserts the printed `arms:` line shows an EXECUTED count at or above
+// ARMS_FLOOR, and this mode always prints 0 executed. Swap the invocation and
+// that assertion fails.
+//
+// It DOES measure `occurrences` against the real bytes. That is a static
+// measurement, not a mutation, and it is what catches the plan-01 prose-locator
+// hazard (a needle that drifted, or was never there) without a cluster.
+export function parseOnlyCorpus({ scopeDir, log = (s) => console.log(s) }) {
+  const corpus = scanCorpus(scopeDir);
+  const defects = [];
+  const addDefect = (kind, arm, file, detail) => {
+    if (!DEFECT_KINDS.includes(kind)) throw new Error(`unknown defect kind ${kind}`);
+    defects.push({ kind, arm, file, detail });
+  };
+
+  let armsAnnotated = 0;
+  let armsWaived = 0;
+  const waivers = [];
+
+  for (const name of corpus.annotatedFiles) {
+    const gateAbsRepo = join(scopeDir, name);
+    const gateRel = relative(REPO_ROOT, gateAbsRepo);
+    const parsed = parseFile(gateAbsRepo);
+
+    for (const err of parsed.errors) addDefect("parse", null, gateRel, err.message);
+    if (!parsed.parity.ok) {
+      addDefect(
+        "parity",
+        null,
+        gateRel,
+        `${parsed.parity.prose} prose RED-UNDER marker(s) vs ${parsed.parity.structured} RED-UNDER-M twin(s)`,
+      );
+    }
+    log(
+      `  ${gateRel}: ${parsed.parity.prose} prose / ${parsed.parity.structured} twin(s) / ` +
+        `${parsed.structured.filter((a) => a.waiver).length} waiver(s)`,
+    );
+
+    armsAnnotated += parsed.structured.length;
+    for (const ann of parsed.structured) {
+      if (ann.waiver) {
+        armsWaived += 1;
+        waivers.push({ arm: ann.arm, file: gateRel, reason: ann.waiver });
+      }
+    }
+
+    if (!parsed.setup) {
+      addDefect("parse", null, gateRel, "no RED-UNDER-SETUP line — the runner refuses to guess a corpus");
+      continue;
+    }
+    for (const rel of parsed.setup.apply) {
+      if (!existsSync(join(REPO_ROOT, rel))) {
+        addDefect("bad-file-ref", null, gateRel, `RED-UNDER-SETUP names a file that does not exist: ${rel}`);
+      }
+    }
+
+    const corpusRels = [...parsed.setup.apply, gateRel];
+    for (const ann of parsed.structured) {
+      for (const step of ann.apply) {
+        if (step.kind === "sql") continue;
+        if (!corpusRels.includes(step.file)) {
+          addDefect(
+            "bad-file-ref",
+            ann.arm,
+            gateRel,
+            `step targets ${step.file}, which is not in this gate's RED-UNDER-SETUP apply list`,
+          );
+          continue;
+        }
+        const target = join(REPO_ROOT, step.file);
+        if (!existsSync(target)) {
+          addDefect("bad-file-ref", ann.arm, gateRel, `step targets a file that does not exist: ${step.file}`);
+          continue;
+        }
+        const needle = step.kind === "edit" ? step.find : step.anchor;
+        const actual = countOccurrences(readFileSync(target, "utf8"), needle);
+        if (actual !== step.occurrences) {
+          addDefect(
+            "occurrence-mismatch",
+            ann.arm,
+            gateRel,
+            `MEASURE_FAIL: ${JSON.stringify(needle)} occurs ${actual}x in ${step.file}, annotation claims ${step.occurrences}x`,
+          );
+        }
+      }
+    }
+  }
+
+  log("");
+  log(`coverage: files ${corpus.filesAnnotated}/${corpus.filesTotal}`);
+  log(`arms: 0/${armsAnnotated}/${armsWaived}   (executed/annotated/waived)`);
+  for (const w of waivers) log(`  waived: ${w.arm} — ${w.reason}`);
+  log("");
+  log("⚠️ STATIC PARSE ONLY — ZERO arms executed. This is NOT the gate: it cannot");
+  log("   observe a non-biting annotation. Run `node scripts/mutation-runner/run.mjs`.");
+  log("");
+
+  if (defects.length === 0) {
+    log("✅ No static defects. Every prose marker has a twin and every needle still matches.");
+  } else {
+    log(`❌ ${defects.length} static defect(s):`);
+    log("");
+    for (const d of defects) {
+      log(`  ${d.kind.padEnd(20)}  ${(d.arm ?? "-").padEnd(24)}  ${d.file ?? "-"}`);
+      log(`      ${d.detail}`);
+    }
+  }
+
+  return {
+    scopeDir,
+    filesTotal: corpus.filesTotal,
+    filesAnnotated: corpus.filesAnnotated,
+    armsAnnotated,
+    armsWaived,
+    defects,
+    exitCode: defects.length > 0 ? 1 : 0,
+  };
+}
+
+// ---------------------------------------------------------------------------
 // --self-test: prove BOTH exit-1 modes actually fire (D-09), machine-checked.
 // ---------------------------------------------------------------------------
 
@@ -741,10 +876,12 @@ function main(argv) {
   let scopeDir = DEFAULT_CORPUS;
   let onlyFile = null;
   let onlyArm = null;
+  let parseOnly = false;
 
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
     if (arg === "--self-test") return selfTest();
+    else if (arg === "--parse-only") parseOnly = true;
     else if (arg === "--fixture-corpus") scopeDir = FIXTURE_CORPUS;
     else if (arg === "--file") {
       onlyFile = argv[++i];
@@ -761,9 +898,20 @@ function main(argv) {
       }
     } else {
       console.error(`ERROR: unknown argument ${JSON.stringify(arg)}`);
-      console.error("Usage: node scripts/mutation-runner/run.mjs [--fixture-corpus] [--file <gate.sql>] [--arm <ID>] [--self-test]");
+      console.error(
+        "Usage: node scripts/mutation-runner/run.mjs [--fixture-corpus] [--file <gate.sql>] [--arm <ID>] [--parse-only] [--self-test]",
+      );
       return 3;
     }
+  }
+
+  if (parseOnly) {
+    if (onlyFile || onlyArm) {
+      console.error("ERROR: --parse-only is a whole-corpus static check and does not combine with --file/--arm");
+      return 3;
+    }
+    console.log(`mutation-runner: STATIC PARSE, scope ${relative(REPO_ROOT, scopeDir) || "."}`);
+    return parseOnlyCorpus({ scopeDir }).exitCode;
   }
 
   if (!existsSync(LANE)) {
