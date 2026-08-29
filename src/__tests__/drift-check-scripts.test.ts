@@ -407,6 +407,90 @@ describe("VAC-04 — scripts/prod-body-drift-check.sh", () => {
     });
   });
 
+  it("R2-W03 RED: a name whose every comparator row is ADVISORY is short in the disposition sum, even beside a name that compared cleanly", () => {
+    // ⛔ This is the case the old `accounted != NAME_COUNT` floor could not
+    // see. That counter was incremented once on every path through the loop,
+    // so it was guaranteed by the loop's structure and could only be reddened
+    // by deleting one of its own increments — which is not a proof.
+    //
+    // The adversarial input, built from OUTSIDE: a fetcher that returns
+    // NON-EMPTY text carrying no extractable definition for one of two names.
+    // That is what a psql notice, a stray comment or an error printed on
+    // stdout looks like. It survives the empty-body check; the comparator
+    // emits a single SNAPSHOT_ONLY row, so `rows` is 1 and the zero-rows guard
+    // stays quiet; SNAPSHOT_ONLY increments nothing. The SECOND name is what
+    // makes it silent — it compares normally, so `checked` is non-zero and the
+    // `checked -eq 0` branch stays quiet too.
+    //
+    // MEASURED before the fix, this exact fixture:
+    //   "1 body comparison(s) … 0 measured-absent" for 2 named functions
+    //   "::notice:: no unacknowledged repo-vs-PROD body drift"      exit 0
+    // …while `ghost_fn`, which PROD's index says EXISTS, was compared against
+    // nothing at all.
+    withTempDir((dir) => {
+      mkdirSync(join(dir, "snapshot"), { recursive: true });
+      mkdirSync(join(dir, "live"), { recursive: true });
+      mkdirSync(join(dir, "migrations"), { recursive: true });
+
+      const bodyFor = (n: string) => COMMITTED_BODY.replace("demo_fn", n);
+      writeFileSync(join(dir, "snapshot", "good_fn.sql"), bodyFor("good_fn"));
+      writeFileSync(join(dir, "snapshot", "ghost_fn.sql"), bodyFor("ghost_fn"));
+      writeFileSync(join(dir, "live", "good_fn.sql"), bodyFor("good_fn"));
+      writeFileSync(join(dir, "live", "ghost_fn.sql"), "-- no rows returned for ghost_fn\n");
+
+      const migration = join(dir, "migrations", "20260829120000_demo.sql");
+      writeFileSync(migration, `${bodyFor("good_fn")}\n\n${bodyFor("ghost_fn")}\n`);
+
+      const { status, out } = run(PROD_GATE, {
+        ...FAKE_CREDS,
+        BODY_FETCH_CMD: `bash ${writeStubFetcher(dir)}`,
+        BODY_NAME_INDEX_CMD: `bash ${writeStubNameIndex(dir, ["good_fn", "ghost_fn", "other_fn"])}`,
+        CHANGED_MIGRATIONS: migration,
+        SNAPSHOT_DIR: join(dir, "snapshot"),
+      });
+
+      expect(status, "the gate reported a pass for a function it compared against nothing").toBe(1);
+      expect(out).toContain("the dispositions sum to 1");
+      expect(out).toContain("1 compared / 0 measured-absent / 0 failed");
+      expect(out).not.toContain("no unacknowledged repo-vs-PROD body drift");
+    });
+  });
+
+  it("R2-W03 GREEN: the disposition sum closes for each of the three real dispositions", () => {
+    // The other direction. A floor that fires on everything is as useless as
+    // one that fires on nothing, and this one is subtractive — it must not go
+    // red on the states the gate is supposed to accept. One case per tally.
+    withTempDir((dir) => {
+      // compared
+      const env = scaffoldProdCase(dir, { prodBody: PROD_BODY_EQUIVALENT });
+      const a = run(PROD_GATE, env);
+      expect(a.status, a.out).toBe(0);
+      expect(a.out).not.toContain("dispositions sum to");
+    });
+    withTempDir((dir) => {
+      // measured-absent: the name is not in PROD's index at all
+      const env = scaffoldProdCase(dir, { indexNames: ["other_fn"] });
+      const b = run(PROD_GATE, env);
+      expect(b.status, b.out).toBe(0);
+      expect(b.out).toContain("measured absent");
+      expect(b.out).not.toContain("dispositions sum to");
+    });
+    withTempDir((dir) => {
+      // failed: the fetcher errors. Exit 1, but on the READ failure, never on
+      // an accounting complaint — the sum still closes.
+      const env = scaffoldProdCase(dir, { prodBody: PROD_BODY_EQUIVALENT });
+      const boom = join(dir, "fetch-boom.sh");
+      writeFileSync(boom, "#!/usr/bin/env bash\nexit 3\n");
+      chmodSync(boom, 0o755);
+      const c = run(PROD_GATE, { ...env, BODY_FETCH_CMD: `bash ${boom}` });
+      expect(c.status).toBe(1);
+      expect(c.out).toContain("the PROD body fetcher failed");
+      expect(c.out, "the fetch failure must not ALSO read as an unaccounted name").not.toContain(
+        "dispositions sum to",
+      );
+    });
+  });
+
   it("REDACTION: a successful run prints no body text (public repo, T-164.3-04)", () => {
     withTempDir((dir) => {
       const env = scaffoldProdCase(dir, { prodBody: PROD_BODY_EQUIVALENT });

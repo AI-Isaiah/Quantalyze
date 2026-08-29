@@ -230,11 +230,35 @@ checked=0
 matched=0
 acked=0
 absent=0
-# Every name must reach exactly one terminal disposition. Counted so the
-# arithmetic can be closed at the end: a loop that silently skipped a name
-# would otherwise leave the gate reporting success for a function it never
-# accounted for.
-accounted=0
+# ── THE THREE TERMINAL DISPOSITIONS, tallied INDEPENDENTLY ───────────────────
+#
+# ⛔ R2-W03. The previous version kept a single `accounted` counter incremented
+# once on every path through the loop. That is guaranteed by the loop's own
+# structure: it could only be made to fire by deleting one of its own
+# increments, which is not a proof of anything. It was blind to the failure it
+# claimed to detect — a name that reaches the end of the loop having been
+# neither compared nor classified.
+#
+# MEASURED 2026-08-29, the exact input, two functions:
+#   the fetcher returns NON-EMPTY text carrying no extractable definition for
+#   `ghost_fn` (a psql notice, an error line, a stray comment). It survives the
+#   empty-body check, the comparator emits one SNAPSHOT_ONLY row — so `rows`
+#   is 1 and the zero-rows guard stays quiet — and SNAPSHOT_ONLY increments
+#   NOTHING. With a second name comparing normally, `checked` is non-zero so
+#   the `checked -eq 0` branch stays quiet too. Result:
+#     "1 body comparison(s) … 0 measured-absent" for 2 named functions
+#     "::notice:: no unacknowledged repo-vs-PROD body drift"   exit 0
+#   while `ghost_fn` — which PROD's index says EXISTS — was compared against
+#   nothing. `accounted` read 2 of 2 throughout.
+#
+# So the dispositions are now tallied SEPARATELY, each at the point where the
+# thing it names actually happens, and required to SUM to NAME_COUNT. A name
+# that reaches no disposition is short in the sum and cannot hide behind a
+# sibling that did.
+# (`absent` above is the third tally — a name measured absent from PROD's
+# index, i.e. a genuinely new function.)
+compared_names=0   # produced at least one COMPARISON row (MATCH/DRIFT/SNAPSHOT_MISSING/UNCOMPARABLE)
+failed_names=0     # reached an ERROR disposition: unreadable, unextractable, or no snapshot
 
 for fname in "${NAMES[@]}"; do
   live="$TMP/${fname}.live.sql"
@@ -246,7 +270,7 @@ for fname in "${NAMES[@]}"; do
     echo "::error::${GATE}: the PROD body fetcher failed for '${fname}' (stderr withheld — public log)."
     echo "::error::A gate that could not read cannot report a pass."
     bad=1
-    accounted=$((accounted + 1))
+    failed_names=$((failed_names + 1))
     continue
   fi
 
@@ -259,11 +283,11 @@ for fname in "${NAMES[@]}"; do
       echo "::error::gate could not read; the same failure repeated for every name would turn the"
       echo "::error::whole gate green having compared nothing."
       bad=1
+      failed_names=$((failed_names + 1))
     else
       echo "  ${fname}: measured absent — not in the PROD source's ${PROD_NAME_COUNT}-name index. Treated as a NEW function (pass)."
       absent=$((absent + 1))
     fi
-    accounted=$((accounted + 1))
     continue
   fi
 
@@ -273,7 +297,7 @@ for fname in "${NAMES[@]}"; do
     echo "::error::The snapshot is STALE. sql-function-snapshot.yml should have caught this;"
     echo "::error::run 'npm run schema:functions' and commit the result."
     bad=1
-    accounted=$((accounted + 1))
+    failed_names=$((failed_names + 1))
     continue
   fi
 
@@ -281,6 +305,10 @@ for fname in "${NAMES[@]}"; do
     || fail "the normalizer could not compare '${fname}'."
 
   rows=0
+  # Derived from `checked` — the comparison tally itself — rather than set by
+  # hand alongside it, so "this name was compared" cannot be true while
+  # "something was compared" is false. See the R2-W03 note above.
+  checked_before="$checked"
   while IFS=$'\t' read -r status name nargs snap_hash live_hash hunks; do
     [ -n "${status:-}" ] || continue
     rows=$((rows + 1))
@@ -341,21 +369,30 @@ for fname in "${NAMES[@]}"; do
     echo "::error::${GATE}: the comparator produced ZERO rows for '${fname}' from a non-empty PROD body."
     echo "::error::Nothing was compared for it, so nothing about it can be reported as clean."
     bad=1
+    failed_names=$((failed_names + 1))
+  elif [ "$checked" -gt "$checked_before" ]; then
+    compared_names=$((compared_names + 1))
   fi
-  accounted=$((accounted + 1))
+  # ⚠️ DELIBERATELY NO `else`. A name whose rows were ALL advisory
+  # (SNAPSHOT_ONLY) reaches neither branch, so it is counted by none of the
+  # three tallies and the sum below goes short. That is the point: it is
+  # exactly the state where a name was named, fetched, and measured against
+  # nothing. Giving it a disposition here would restore the tautology.
 done
 
 echo ""
 echo "${GATE}: ${checked} body comparison(s) — ${matched} match, ${acked} acknowledged drift, ${absent} measured-absent (new) function(s)."
 
 # ── 4. THE ARITHMETIC MUST CLOSE ─────────────────────────────────────────────
-# Without this, a loop that skipped names — or a fetcher that made every name
-# take the absent branch — reports "0 body comparison(s)" and exits 0. A floor
-# on `checked` alone would be wrong (a PR that only ADDS functions legitimately
-# compares nothing), so the floor is on ACCOUNTING: every named function
-# reached a disposition, and each disposition was measured.
-if [ "$accounted" -ne "$NAME_COUNT" ]; then
-  fail "MEASURE_FAIL: ${NAME_COUNT} function(s) named by this PR's migrations, but only ${accounted} reached a disposition. The arithmetic does not close, so this run did not account for every function and cannot report a pass."
+# A floor on `checked` alone would be wrong — a PR that only ADDS functions
+# legitimately compares nothing — so the floor is on ACCOUNTING. But the
+# accounting must be DERIVED from what happened, not incremented beside it:
+# see the R2-W03 note in section 3. The three tallies are raised at the three
+# points where the three things actually occur, and a name that occasions none
+# of them is short here.
+disposed=$((compared_names + absent + failed_names))
+if [ "$disposed" -ne "$NAME_COUNT" ]; then
+  fail "MEASURE_FAIL: ${NAME_COUNT} function(s) named by this PR's migrations, but the dispositions sum to ${disposed} (${compared_names} compared / ${absent} measured-absent / ${failed_names} failed). At least one named function was fetched and then measured against NOTHING — every row the comparator produced for it was advisory. A pass cannot be reported for a function this run never compared."
 fi
 if [ "$checked" -eq 0 ] && [ "$absent" -eq "$NAME_COUNT" ]; then
   # The ONE way zero comparisons is legitimate: every named function was
