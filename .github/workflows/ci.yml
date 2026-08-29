@@ -1312,6 +1312,35 @@ jobs:
             2>/dev/null | tr -d '\r' | tail -1)" || true
           echo "::error::timed out after ${waited}s waiting for the shared-test-db advisory lock (key 61616158). Lock census: ${census:-unavailable}. TWO causes are possible and this step cannot distinguish them: (1) QUEUE DEPTH — concurrent runs each hold the lock ~20m, which is a NORMAL condition in this repo; re-run once the queue drains. (2) A WEDGED holder whose runner is gone. Triage (count the waiters first) and manual unlock: docs/runbooks/shared-test-db-mutex.md sections 2-3."
           exit 1
+      # ── Phase 164.3 / VAC-08 — repo-vs-TEST ledger and body drift ──────────
+      #
+      # Placed AFTER the mutex acquisition so it runs inside this job's held
+      # advisory lock, like every other DB-touching step here. Its queries are
+      # plain read-only SELECTs, so the 6543→5432 SESSION-mode DSN rewrite the
+      # mutex needs is NOT required — a transaction-mode pooler serves these
+      # fine. The DSN is passed through `env:` and never echoed (WR-08).
+      #
+      # SKIP SURFACE: none new. This step INHERITS the `sql-tests` job's
+      # already-documented one — the job's `if:` excludes fork PRs and requires
+      # vars.E2E_TEST_DB_CONFIGURED, and the `frontend` aggregator is the sole
+      # judge of whether a skipped JOB is tolerable. Within the job the step
+      # follows "Run SQL self-tests"'s contract, not the mutex step's: an absent
+      # TEST_SUPABASE_DB_URL is an `::error::` and exit 1, never a quiet pass.
+      #
+      # ⛔ The ledger query joins schema_migrations on `name`, NEVER `version`.
+      # Measured 2026-08-28: the ledger re-stamps `version` at apply time, so a
+      # version-join reported 12 of 12 recent migrations missing when all 12
+      # were present. That check would itself have been a vacuous control.
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6.4.0
+        with:
+          node-version: 22
+      - name: VAC-08 - repo-vs-TEST ledger and function body drift
+        env:
+          TEST_SUPABASE_DB_URL: ${{ secrets.TEST_SUPABASE_DB_URL }}
+        run: |
+          set -euo pipefail
+          # Mode identity (Pitfall 2): the exact command a developer runs.
+          bash scripts/test-ledger-drift-check.sh
       - name: Run SQL self-tests against test Supabase project
         env:
           # PG connection string for the test project (qmnijlgmdhviwzwfyzlc).
