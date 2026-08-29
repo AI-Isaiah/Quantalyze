@@ -83,8 +83,12 @@ function writeStubFetcher(dir: string): string {
  * source really holds, so the gate can tell "genuinely not in PROD" from "the
  * extractor returned nothing". `names` defaults to whatever is in `live/`.
  */
-function writeStubNameIndex(dir: string, names?: string[]): string {
-  const p = join(dir, "stub-index.sh");
+function writeStubNameIndex(
+  dir: string,
+  names?: string[],
+  filename = "stub-index.sh",
+): string {
+  const p = join(dir, filename);
   const body =
     names === undefined
       ? [
@@ -128,6 +132,11 @@ function scaffoldProdCase(
     snapshot?: boolean;
     /** Override the PROD name index. Undefined = derive it from live/. */
     indexNames?: string[];
+    /**
+     * Override the INDEPENDENT cross-check index (SP-C05). Undefined = the
+     * same names as the primary, i.e. two readings that agree.
+     */
+    xcheckNames?: string[];
     /** Replace the migration body outright (e.g. to use another schema). */
     migrationBody?: string;
   },
@@ -148,13 +157,23 @@ function scaffoldProdCase(
     `${opts.migrationExtra ?? ""}\n${opts.migrationBody ?? COMMITTED_BODY}\n`,
   );
 
+  const indexNames =
+    opts.indexNames ??
+    (opts.prodBody === undefined ? ["other_fn"] : ["demo_fn", "other_fn"]);
+
   return {
     ...FAKE_CREDS,
     BODY_FETCH_CMD: `bash ${writeStubFetcher(dir)}`,
     // Always non-empty: the gate fails closed on an empty index, and an index
     // derived purely from live/ would be empty in the "absent from PROD" cases.
     // `other_fn` stands for the rest of PROD's catalogue.
-    BODY_NAME_INDEX_CMD: `bash ${writeStubNameIndex(dir, opts.indexNames ?? (opts.prodBody === undefined ? ["other_fn"] : ["demo_fn", "other_fn"]))}`,
+    BODY_NAME_INDEX_CMD: `bash ${writeStubNameIndex(dir, indexNames)}`,
+    // SP-C05: the gate now requires a SECOND, independently derived index and
+    // unions the two. These arms stub it to agree with the primary, so they
+    // keep measuring what they were written to measure. The arms that prove
+    // the two are really different code paths are in their own describe block
+    // below, and they use the REAL CI commands rather than stubs.
+    BODY_NAME_INDEX_XCHECK_CMD: `bash ${writeStubNameIndex(dir, opts.xcheckNames ?? indexNames, "stub-index-xcheck.sh")}`,
     CHANGED_MIGRATIONS: migration,
     SNAPSHOT_DIR: join(dir, "snapshot"),
   };
@@ -445,6 +464,7 @@ describe("VAC-04 — scripts/prod-body-drift-check.sh", () => {
         ...FAKE_CREDS,
         BODY_FETCH_CMD: `bash ${writeStubFetcher(dir)}`,
         BODY_NAME_INDEX_CMD: `bash ${writeStubNameIndex(dir, ["good_fn", "ghost_fn", "other_fn"])}`,
+        BODY_NAME_INDEX_XCHECK_CMD: `bash ${writeStubNameIndex(dir, ["good_fn", "ghost_fn", "other_fn"], "stub-index-xcheck.sh")}`,
         CHANGED_MIGRATIONS: migration,
         SNAPSHOT_DIR: join(dir, "snapshot"),
       });
@@ -499,6 +519,256 @@ describe("VAC-04 — scripts/prod-body-drift-check.sh", () => {
       expect(out).not.toContain("RETURN p_id");
       expect(out).not.toContain("out-of-band comment");
     });
+  });
+});
+
+// ── SP-C05 ───────────────────────────────────────────────────────────────────
+//
+// ⛔ THE DEFECT, AND WHY THE ARMS ABOVE COULD NOT SEE IT.
+//
+// VAC-04's one silent pass is "measured absent from PROD's index — a NEW
+// function". `prod-body-drift-check.sh` claims in prose that the index makes
+// that absence "a MEASUREMENT". It did not: the index (`--function-names`) and
+// the body fetcher (`--extract-fn`) were the SAME function
+// (`extractFunctionDefs`) over the SAME dump, and that function silently
+// `continue`s past any definition it cannot parse. A dropped definition was
+// therefore missing from BOTH, the two agreed BY CONSTRUCTION, and the gate
+// reported a pass.
+//
+// The arms above could not detect that, because every one of them stubs the
+// index with a shell script — proving the helper, never the wiring. So these
+// arms drive the REAL commands the workflow pastes, over a REAL file, with the
+// measured input.
+describe("SP-C05 — 'absent from PROD' must be measured by an instrument that did not produce the absence", () => {
+  /** The measured SP-C05 input: a `$` in the identifier is enough. */
+  const DOLLAR_FN =
+    "CREATE OR REPLACE FUNCTION public.sanitize_user$v2(p uuid)\n" +
+    "RETURNS void\nLANGUAGE plpgsql\nAS $fn$\nBEGIN\n" +
+    "  DELETE FROM audit_log WHERE user_id = p;\nEND;\n$fn$;\n";
+
+  /** An ordinary function, so no fixture below is a one-definition special case. */
+  const PLAIN_FN =
+    "CREATE OR REPLACE FUNCTION public.some_other_fn(a int)\n" +
+    "RETURNS int LANGUAGE sql AS $$ SELECT a $$;\n";
+
+  const NORMALIZER = "scripts/sql-body-normalize.mjs";
+  const NAIVE = "scripts/sql-function-names-naive.mjs";
+
+  /**
+   * The gate wired EXACTLY as `.github/workflows/migration-drift-check.yml`
+   * wires it — real normalizer, real independent reader, one dump file.
+   */
+  function realWiring(dumpPath: string) {
+    return {
+      BODY_FETCH_CMD: `node ${NORMALIZER} --extract-fn ${dumpPath}`,
+      BODY_NAME_INDEX_CMD: `node ${NORMALIZER} --function-names ${dumpPath}`,
+      BODY_NAME_INDEX_XCHECK_CMD: `node ${NAIVE} ${dumpPath}`,
+    };
+  }
+
+  function scaffold(dir: string, dumpBody: string) {
+    mkdirSync(join(dir, "snapshot"), { recursive: true });
+    const dump = join(dir, "prod-dump.sql");
+    writeFileSync(dump, dumpBody);
+    const migration = join(dir, "20260829120000_dollar.sql");
+    writeFileSync(migration, DOLLAR_FN);
+    return {
+      ...FAKE_CREDS,
+      ...realWiring(dump),
+      CHANGED_MIGRATIONS: migration,
+      SNAPSHOT_DIR: join(dir, "snapshot"),
+    };
+  }
+
+  // ── The independence itself, measured from the two real programs ──────────
+  // If this arm ever reports agreement, every arm below it becomes vacuous:
+  // two readings that see the same thing cannot cross-check each other. It is
+  // deliberately the FIRST arm.
+  it("the two readings genuinely DISAGREE on the measured input — otherwise nothing below proves anything", () => {
+    withTempDir((dir) => {
+      const f = join(dir, "in.sql");
+      writeFileSync(f, DOLLAR_FN);
+      const lexer = spawnSync("node", [NORMALIZER, "--function-names", f], {
+        encoding: "utf8",
+      });
+      const naive = spawnSync("node", [NAIVE, f], { encoding: "utf8" });
+      expect(lexer.status, "the normalizer must EXIT 0 — it drops the definition silently, which is the whole problem").toBe(0);
+      expect(naive.status).toBe(0);
+      expect(
+        lexer.stdout.trim(),
+        "the lexer-based reading is expected to see NOTHING here (readQualifiedName stops at the `$`)",
+      ).toBe("");
+      expect(
+        naive.stdout.trim(),
+        "the independent reading MUST see the definition, or it cannot contradict the first",
+      ).toBe("sanitize_user$v2");
+    });
+  });
+
+  it("the independent reader DEPENDS on nothing but node builtins — 'independent' is a claim about the code, so it is read off the code", () => {
+    // ⚠️ A raw `not.toContain("sql-body-normalize")` over the file would be
+    // WRONG here, and measurably so: the file names the normalizer a dozen
+    // times, in its header and in its own self-test messages, because saying
+    // WHICH reading it exists to contradict is the point. So the subject is the
+    // set of MODULE SPECIFIERS, static and dynamic — which is what "shares no
+    // implementation" is actually a statement about.
+    const specifiers = (src: string) => [
+      ...[...src.matchAll(/^import\s[\s\S]*?from\s+"([^"]+)"/gm)].map((m) => m[1]),
+      ...[...src.matchAll(/\bimport\s*\(\s*["']([^"']+)["']/g)].map((m) => m[1]),
+      ...[...src.matchAll(/\brequire\s*\(\s*["']([^"']+)["']/g)].map((m) => m[1]),
+    ];
+
+    // Calibration — the extractor is driven against a source that DOES depend
+    // on the normalizer, all three ways, so a broken extractor cannot report
+    // "no dependencies" for the real file below.
+    const planted = specifiers(
+      'import { extractFunctionDefs } from "./sql-body-normalize.mjs";\n' +
+        'const a = await import("./sql-body-normalize.mjs");\n' +
+        'const b = require("./sql-body-normalize.mjs");\n',
+    );
+    expect(planted.filter((s) => s === "./sql-body-normalize.mjs")).toHaveLength(3);
+
+    const found = specifiers(readFileSync(NAIVE, "utf8"));
+    expect(found.length, "a file with NO dependencies at all would make the next assertion vacuous").toBeGreaterThan(0);
+    expect(found.every((s) => s.startsWith("node:")), `unexpected dependency: ${found.join(", ")}`).toBe(true);
+  });
+
+  // ── The end-to-end defect, RED before and GREEN after ─────────────────────
+
+  it("RED: a definition the normalizer cannot parse but PROD HOLDS now exits 1 — it used to be 'nothing to compare', exit 0", () => {
+    withTempDir((dir) => {
+      const env = scaffold(dir, PLAIN_FN + DOLLAR_FN);
+      const { status, out } = run(PROD_GATE, env);
+      expect(status, "PROD holds a body this gate cannot extract; that is a failure to measure, never a pass").toBe(1);
+      expect(out).toContain("IS in the PROD source's function-name index");
+      expect(out).toContain("extraction failure, not a new");
+      // The old silent line must NOT appear: that string is what exit 0 said.
+      expect(out).not.toContain("define no functions — nothing to compare");
+      expect(out).not.toContain("no unacknowledged repo-vs-PROD body drift");
+    });
+  });
+
+  it("the same input is still classified honestly when PROD does NOT hold it: measured absent, and the disagreement is REPORTED", () => {
+    withTempDir((dir) => {
+      const env = scaffold(dir, PLAIN_FN);
+      const { status, out } = run(PROD_GATE, env);
+      expect(status).toBe(0);
+      // It reached a disposition instead of the "no functions" early exit.
+      expect(out).toContain("Functions defined or replaced by this PR: 1");
+      expect(out).toContain("sanitize_user$v2: measured absent");
+      expect(out).toContain("ZERO bodies compared");
+      // A name only one reading can see is surfaced, never swallowed.
+      expect(out).toContain(
+        "the independent name reader found function definition(s) the normalizer's parser did not",
+      );
+    });
+  });
+
+  it("RED: an unset BODY_NAME_INDEX_XCHECK_CMD exits 1 — one index is the instrument measuring itself", () => {
+    withTempDir((dir) => {
+      const env = scaffold(dir, PLAIN_FN + DOLLAR_FN);
+      const { status, out } = run(PROD_GATE, {
+        ...env,
+        BODY_NAME_INDEX_XCHECK_CMD: "",
+      });
+      expect(status).toBe(1);
+      expect(out).toContain("BODY_NAME_INDEX_XCHECK_CMD is unset");
+    });
+  });
+
+  it("RED: an EMPTY cross-check index exits 1 — a cross-check that finds nothing cannot contradict anything", () => {
+    withTempDir((dir) => {
+      const env = scaffold(dir, PLAIN_FN + DOLLAR_FN);
+      const empty = join(dir, "empty.sh");
+      writeFileSync(empty, "#!/usr/bin/env bash\nexit 0\n");
+      chmodSync(empty, 0o755);
+      const { status, out } = run(PROD_GATE, {
+        ...env,
+        BODY_NAME_INDEX_XCHECK_CMD: `bash ${empty}`,
+      });
+      expect(status).toBe(1);
+      expect(out).toContain("cross-check index of PROD's function names came back EMPTY");
+    });
+  });
+
+  it("RED: pointing the two READINGS at the same program exits 1 — two invocations are not two derivations", () => {
+    withTempDir((dir) => {
+      const env = scaffold(dir, PLAIN_FN + DOLLAR_FN);
+      const { status, out } = run(PROD_GATE, {
+        ...env,
+        NAIVE_NAMES: NORMALIZER,
+      });
+      expect(status).toBe(1);
+      expect(out).toContain("resolve to the SAME file");
+    });
+  });
+
+  // ── Non-vacuity: the union must refuse nothing that exists ────────────────
+
+  it("the two readings agree on the ENTIRE real corpus, so the union widens nothing today", async () => {
+    const { extractFunctionDefs } = await import(
+      "../../scripts/sql-body-normalize.mjs"
+    );
+    const { naiveFunctionDefs } = await import(
+      "../../scripts/sql-function-names-naive.mjs"
+    );
+    const files: string[] = [];
+    for (const d of ["supabase/migrations", "supabase/schema/functions"]) {
+      for (const f of readdirSync(d)) if (f.endsWith(".sql")) files.push(`${d}/${f}`);
+    }
+    expect(files.length, "an empty corpus would make this arm unfailable").toBeGreaterThan(200);
+    let definitions = 0;
+    const disagreements: string[] = [];
+    for (const f of files) {
+      const sql = readFileSync(f, "utf8");
+      const a = new Set(extractFunctionDefs(sql).map((d: { name: string }) => d.name));
+      const b = new Set(naiveFunctionDefs(sql).map((d: { name: string }) => d.name));
+      definitions += a.size;
+      for (const n of a) if (!b.has(n)) disagreements.push(`${f}: lexer-only ${n}`);
+      for (const n of b) if (!a.has(n)) disagreements.push(`${f}: naive-only ${n}`);
+    }
+    expect(definitions, "zero definitions would make the comparison trivially equal").toBeGreaterThan(100);
+    expect(disagreements).toEqual([]);
+  });
+
+  // ── The WIRING, not the helper — SP-C05's own complaint about the old test ─
+
+  it("the workflow wires the cross-check to a DIFFERENT script from the fetcher and the primary index", () => {
+    const yml = readFileSync(
+      ".github/workflows/migration-drift-check.yml",
+      "utf8",
+    );
+    const grab = (name: string) => {
+      const m = new RegExp(`export ${name}="([^"]+)"`).exec(yml);
+      expect(m, `${name} must be exported by the workflow`).not.toBeNull();
+      return (m as RegExpExecArray)[1];
+    };
+    const fetch = grab("BODY_FETCH_CMD");
+    const primary = grab("BODY_NAME_INDEX_CMD");
+    const xcheck = grab("BODY_NAME_INDEX_XCHECK_CMD");
+    // The old wiring's exact shape: fetcher and index naming one script.
+    expect(fetch).toContain("sql-body-normalize.mjs");
+    expect(primary).toContain("sql-body-normalize.mjs");
+    expect(
+      xcheck,
+      "the cross-check must not be the program whose blindness it exists to detect",
+    ).not.toContain("sql-body-normalize.mjs");
+    expect(xcheck).toContain("sql-function-names-naive.mjs");
+    // All three read the SAME dump — the disagreement must be about the
+    // READING, never about looking at two different things.
+    const dumpOf = (cmd: string) => cmd.slice(cmd.lastIndexOf(" ") + 1);
+    expect(dumpOf(xcheck)).toBe(dumpOf(primary));
+    expect(dumpOf(fetch)).toBe(dumpOf(primary));
+    // An edit to the new reader must re-run the gate that depends on it.
+    expect(yml).toContain("- 'scripts/sql-function-names-naive.mjs'");
+  });
+
+  it("the independent reader's own self-test passes and is non-empty", () => {
+    const r = spawnSync("node", [NAIVE, "--self-test"], { encoding: "utf8" });
+    expect(r.status).toBe(0);
+    const m = /self-test OK \((\d+) checks\)/.exec(r.stdout);
+    expect(m, "the self-test must SAY how many checks it ran").not.toBeNull();
+    expect(Number((m as RegExpExecArray)[1])).toBeGreaterThan(5);
   });
 });
 

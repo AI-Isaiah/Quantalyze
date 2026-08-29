@@ -32,8 +32,17 @@ on:
       - 'supabase/migrations/**'
       - '.github/workflows/migration-drift-check.yml'
       # VAC-04's own implementation: edits to the gate must re-run the gate.
+      # ⚠️ These entries are the subject of an OPEN founder decision recorded in
+      # TODOS.md: a PR touching only them runs with SUPABASE_DB_PASSWORD in env,
+      # executing script content from the PR head. Fork PRs are excluded by the
+      # same-repo `if:` below, so the blast radius is push-access collaborators
+      # and the mitigation is required reviewers on the `Production`
+      # environment. Adding a name to this list does NOT widen that radius — a
+      # collaborator who can edit any one of them can already trigger the run —
+      # but it must not be extended to non-VAC-04 paths.
       - 'scripts/prod-body-drift-check.sh'
       - 'scripts/sql-body-normalize.mjs'
+      - 'scripts/sql-function-names-naive.mjs'
 
 concurrency:
   group: migration-drift-check-${{ github.event.pull_request.number }}
@@ -195,6 +204,17 @@ jobs:
           # absence a measurement instead: a name that IS in this list but
           # yields no body is an extractor failure and the gate exits 1 (WR-01).
           export BODY_NAME_INDEX_CMD="node scripts/sql-body-normalize.mjs --function-names ${DUMP}"
+          # ⛔ SP-C05 — the index above and the fetcher above it are the SAME
+          # function (`extractFunctionDefs`) over the SAME dump, and it silently
+          # skips a definition it cannot parse. So a dropped definition was
+          # missing from BOTH, they agreed by construction, and the gate printed
+          # "measured absent — Treated as a NEW function (pass)". MEASURED
+          # 2026-08-29 on `CREATE OR REPLACE FUNCTION public.sanitize_user$v2(p
+          # uuid)`: the whole gate exited 0 having compared nothing. This second
+          # index is a different derivation — a line-anchored regex, no lexer,
+          # `$` in the identifier charset, importing nothing from the normalizer.
+          # The gate unions them, so absence needs BOTH readings to agree.
+          export BODY_NAME_INDEX_XCHECK_CMD="node scripts/sql-function-names-naive.mjs ${DUMP}"
           # Must stay in step with the --schema flag on the dump above. The gate
           # refuses any migration that defines a function outside these schemas,
           # because such a function is absent from this dump for a reason that

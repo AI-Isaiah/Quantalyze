@@ -67,6 +67,27 @@
 #                     but yields no body is an extractor failure and exits 1.
 #                     An optional index would reinstate the hole for anyone who
 #                     forgot to set it, which is the SKIP-01 shape.
+#   BODY_NAME_INDEX_XCHECK_CMD
+#                     command invoked with NO arguments; a SECOND, INDEPENDENTLY
+#                     DERIVED index of the same source.
+#                     ⛔ WHY A SECOND ONE EXISTS (SP-C05). The paragraph above
+#                     claims the index makes absence "a MEASUREMENT". It did
+#                     not: the index and the fetcher were BOTH
+#                     `extractFunctionDefs()` over the SAME dump, and that
+#                     function silently skips a definition it cannot parse. A
+#                     dropped definition was therefore missing from the index
+#                     AND from the fetch, so the two AGREED BY CONSTRUCTION and
+#                     the gate printed "measured absent — Treated as a NEW
+#                     function (pass)". MEASURED 2026-08-29 with the CI-shaped
+#                     commands, on `CREATE OR REPLACE FUNCTION
+#                     public.sanitize_user$v2(p uuid)` — a `$` in the
+#                     identifier is enough — the whole gate exited 0 having
+#                     compared nothing. Two readings that share an
+#                     implementation are one measurement wearing two hats.
+#                     The two indexes are UNIONED: a name is treated as absent
+#                     from PROD only when BOTH readings fail to find it. In CI
+#                     this is scripts/sql-function-names-naive.mjs, which
+#                     imports nothing from the normalizer.
 # Optional:
 #   PROD_DUMP_SCHEMAS space-separated schemas the fetcher's source covers.
 #                     Default "public", matching `supabase db dump --linked
@@ -81,6 +102,10 @@
 #   BASE_REF            default origin/main
 #   SNAPSHOT_DIR        default supabase/schema/functions
 #   NORMALIZER          default scripts/sql-body-normalize.mjs
+#   NAIVE_NAMES         default scripts/sql-function-names-naive.mjs — the
+#                       independent second reading applied to THIS PR's
+#                       migrations, for the same reason
+#                       BODY_NAME_INDEX_XCHECK_CMD exists on the PROD side.
 #
 # ── USAGE (CI pastes this verbatim — mode identity) ──────────────────────────
 #   bash scripts/prod-body-drift-check.sh
@@ -109,14 +134,23 @@ done
 
 [ -n "${BODY_FETCH_CMD:-}" ] || fail "BODY_FETCH_CMD is unset — there is no way to read PROD bodies, and a gate that cannot read cannot pass."
 [ -n "${BODY_NAME_INDEX_CMD:-}" ] || fail "BODY_NAME_INDEX_CMD is unset — without PROD's function-name index this gate cannot tell 'genuinely absent from PROD' from 'the extractor returned nothing', and it would read the second as a pass."
+[ -n "${BODY_NAME_INDEX_XCHECK_CMD:-}" ] || fail "BODY_NAME_INDEX_XCHECK_CMD is unset — with ONE index, 'absent from PROD' is measured by the same code that produced the absence, and the gate passes on every definition that code cannot parse (SP-C05, MEASURED). Optional would reinstate that hole for anyone who forgot to set it, which is the SKIP-01 shape."
 command -v node >/dev/null 2>&1 || fail "node is not on PATH; the shared normalizer cannot run."
 
 PROD_DUMP_SCHEMAS="${PROD_DUMP_SCHEMAS:-public}"
 
 SNAPSHOT_DIR="${SNAPSHOT_DIR:-supabase/schema/functions}"
 NORMALIZER="${NORMALIZER:-scripts/sql-body-normalize.mjs}"
+NAIVE_NAMES="${NAIVE_NAMES:-scripts/sql-function-names-naive.mjs}"
 BASE_REF="${BASE_REF:-origin/main}"
 [ -f "$NORMALIZER" ] || fail "normalizer not found at ${NORMALIZER}."
+[ -f "$NAIVE_NAMES" ] || fail "the independent name reader was not found at ${NAIVE_NAMES}. Without a SECOND derivation, 'this PR's migrations define no functions' is a claim the normalizer makes about its own parse (SP-C05)."
+# ⛔ The two readings must not be the same program. If they were, the union
+# below would be one measurement printed twice — the exact defect SP-C05 named,
+# reintroduced by a configuration mistake rather than a code one.
+if [ "$(cd "$(dirname "$NORMALIZER")" && pwd)/$(basename "$NORMALIZER")" = "$(cd "$(dirname "$NAIVE_NAMES")" && pwd)/$(basename "$NAIVE_NAMES")" ]; then
+  fail "NORMALIZER and NAIVE_NAMES resolve to the SAME file (${NORMALIZER}). Two readings that share an implementation agree by construction; this gate needs two derivations, not two invocations."
+fi
 [ -d "$SNAPSHOT_DIR" ] || fail "committed snapshot dir not found at ${SNAPSHOT_DIR}."
 
 TMP="$(mktemp -d)"
@@ -159,17 +193,55 @@ echo "Migrations changed by this PR: ${CHANGED_COUNT}"
 # Function names come from the shared normalizer, which reads with node `fs` and
 # ignores a `CREATE OR REPLACE FUNCTION` that sits inside a comment or a string.
 # (Shell grep is silently blind past a NUL byte — measured in this repo.)
-node "$NORMALIZER" --function-names "${CHANGED_FILES[@]}" > "$TMP/names.txt" \
+node "$NORMALIZER" --function-names "${CHANGED_FILES[@]}" > "$TMP/names.lexer.txt" \
   || fail "could not extract function names from the changed migrations."
+# ⛔ SP-C05, LEFT-HAND SIDE. The exit-0 below says "this PR's migrations define
+# no functions". That was the NORMALIZER's opinion of its own parse, and the
+# normalizer skips a definition it cannot read. MEASURED 2026-08-29: a migration
+# whose only content is
+#     CREATE OR REPLACE FUNCTION public.sanitize_user$v2(p uuid)
+# produced zero names and the gate exited 0 having compared nothing, because a
+# `$` in the identifier stops its name reader before the argument list. So the
+# claim is now checked against an INDEPENDENT reading (a line-anchored regex,
+# no lexer, `$` in the identifier charset, no imports from the normalizer) and
+# the two are UNIONED. MEASURED over all 380 .sql files under
+# supabase/migrations/ and supabase/schema/functions/: the two readings return
+# identical name sets, so the union refuses nothing that exists.
+node "$NAIVE_NAMES" "${CHANGED_FILES[@]}" > "$TMP/names.naive.txt" \
+  || fail "the independent name reader failed on the changed migrations."
+sort -u "$TMP/names.lexer.txt" "$TMP/names.naive.txt" | sed '/^[[:space:]]*$/d' > "$TMP/names.txt"
 
 NAMES=()
 while IFS= read -r _line; do
   [ -n "$_line" ] && NAMES+=("$_line")
 done < "$TMP/names.txt"
 
+# Names only ONE reading can see are the evidence that the two are not one code
+# path. Reported, never swallowed: a name the normalizer cannot see is a name
+# `--extract-fn` cannot fetch either, so this gate will FAIL CLOSED on it if
+# PROD has it — which is the whole change from the silent pass it used to be.
+# LC_ALL=C on BOTH sides: `comm` requires its inputs in the same collation
+# order as its own comparison, and a locale mismatch makes it silently emit
+# wrong rows instead of failing.
+LC_ALL=C comm -13 <(LC_ALL=C sort -u "$TMP/names.lexer.txt") <(LC_ALL=C sort -u "$TMP/names.naive.txt") | sed '/^[[:space:]]*$/d' > "$TMP/names.naive-only.txt"
+if grep -aqE '[^[:space:]]' "$TMP/names.naive-only.txt"; then
+  echo "::warning::${GATE}: the independent name reader found function definition(s) the normalizer's parser did not:"
+  sed 's/^/::warning::  /' "$TMP/names.naive-only.txt"
+  echo "::warning::They are included below. The body fetcher shares the normalizer's parser, so if"
+  echo "::warning::PROD holds any of them this gate will report an EXTRACTION FAILURE and exit 1"
+  echo "::warning::rather than the 'new function — pass' it used to report (SP-C05)."
+fi
+
 NAME_COUNT="${#NAMES[@]}"
 if [ "${NAME_COUNT:-0}" -eq 0 ]; then
-  echo "::notice::${GATE}: this PR's migrations define no functions — nothing to compare."
+  # Now a TWO-READING zero: neither the lexer-based parser nor the line-anchored
+  # regex found a definition. ⚠️ Residual, stated rather than implied: a
+  # definition assembled at run time inside dynamic SQL (`EXECUTE 'CREATE
+  # FUNCTION …'`) is claimed by neither reading and still reaches this exit 0.
+  # A cruder token scan was MEASURED as the alternative and rejected: 7 of the
+  # 262 migrations in this repo mention `CREATE … FUNCTION` in prose while
+  # defining none, so it would red real PRs for reading a comment.
+  echo "::notice::${GATE}: this PR's migrations define no functions — nothing to compare. (Two independent readings agree; see SP-C05.)"
   exit 0
 fi
 
@@ -183,8 +255,14 @@ echo "Functions defined or replaced by this PR: ${NAME_COUNT}"
 # MEASURED 2026-08-29: all 112 function definitions under supabase/migrations/
 # are `public.` or unqualified, so this is a latent hole today; it opens with
 # the first non-public definition, silently.
-node "$NORMALIZER" --function-qualified-names "${CHANGED_FILES[@]}" > "$TMP/qualified.txt" \
+# Unioned for the same reason the name list above is: a definition only the
+# independent reading can see must still be schema-checked, or it would reach
+# the comparison loop as a bare name with its qualifier never examined.
+node "$NORMALIZER" --function-qualified-names "${CHANGED_FILES[@]}" > "$TMP/qualified.lexer.txt" \
   || fail "could not read the schema qualifiers of this PR's function definitions."
+node "$NAIVE_NAMES" --qualified "${CHANGED_FILES[@]}" > "$TMP/qualified.naive.txt" \
+  || fail "the independent name reader could not read the schema qualifiers of this PR's function definitions."
+LC_ALL=C sort -u "$TMP/qualified.lexer.txt" "$TMP/qualified.naive.txt" | sed '/^[[:space:]]*$/d' > "$TMP/qualified.txt"
 # ⚠️ Split by hand rather than with `IFS=$'\t' read -r a b`. TAB is IFS
 # WHITESPACE, so `read` collapses a leading tab and an UNQUALIFIED row
 # ("<empty>\tdemo_fn") would arrive as schema="demo_fn", name="" — which
@@ -212,16 +290,44 @@ while IFS= read -r _row; do
 done < "$TMP/qualified.txt"
 
 # ── 2c. PROD'S FUNCTION-NAME INDEX — so "absent" is measured, not inferred ───
+#
+# ⛔ SP-C05. This index decides the gate's only silent pass ("measured absent —
+# Treated as a NEW function"). It was produced by the SAME function as the body
+# fetcher, over the SAME dump, so a definition that function could not parse was
+# missing from both and they AGREED BY CONSTRUCTION — an absence measured with
+# the instrument that produced it. Two independently derived indexes are read
+# and UNIONED: a name counts as absent from PROD only when BOTH readings miss
+# it. Neither is trusted to be the complete one.
 # shellcheck disable=SC2086
-$BODY_NAME_INDEX_CMD > "$TMP/prod-names.txt" 2>"$TMP/prod-names.err" \
+$BODY_NAME_INDEX_CMD > "$TMP/prod-names.primary.txt" 2>"$TMP/prod-names.err" \
   || fail "could not index PROD's function names (stderr withheld — public log). Without the index, an extractor that stops matching would make every name read as a new function."
+# shellcheck disable=SC2086
+$BODY_NAME_INDEX_XCHECK_CMD > "$TMP/prod-names.xcheck.txt" 2>"$TMP/prod-names.xcheck.err" \
+  || fail "could not build the INDEPENDENT cross-check index of PROD's function names (stderr withheld — public log). With only the primary index, absence from PROD is measured by the same parser that produced the absence."
+LC_ALL=C sort -u "$TMP/prod-names.primary.txt" "$TMP/prod-names.xcheck.txt" | sed '/^[[:space:]]*$/d' > "$TMP/prod-names.txt"
 # An index with no names at all is not a PROD with no functions — it is an
 # index that did not work. The workflow's own dump-shape guard proves the dump
 # holds at least one CREATE FUNCTION, so an empty index here contradicts it.
-grep -aqE '[^[:space:]]' "$TMP/prod-names.txt" \
+grep -aqE '[^[:space:]]' "$TMP/prod-names.primary.txt" \
   || fail "PROD's function-name index came back EMPTY. A database with zero functions is not a state this gate can distinguish from a broken index, so it fails closed."
+grep -aqE '[^[:space:]]' "$TMP/prod-names.xcheck.txt" \
+  || fail "the INDEPENDENT cross-check index of PROD's function names came back EMPTY. A cross-check that finds nothing cannot contradict anything, so it would silently degrade this gate back to a single reading of itself."
 PROD_NAME_COUNT="$(grep -ac '[^[:space:]]' "$TMP/prod-names.txt" || true)"
-echo "Functions indexed in the PROD source: ${PROD_NAME_COUNT:-0}"
+# Disagreement between the two readings is EVIDENCE, and it is what tells a
+# maintainer that one of the parsers has started missing definitions. It is
+# reported, not failed on: the union has already made every per-name decision
+# below fail closed, and a pre-existing quirk in PROD's dump must not red every
+# migration PR. A name the primary index misses and this PR touches DOES exit 1
+# — through the "IS in the index but the fetcher extracted no body" branch.
+LC_ALL=C comm -13 <(LC_ALL=C sort -u "$TMP/prod-names.primary.txt") <(LC_ALL=C sort -u "$TMP/prod-names.xcheck.txt") | sed '/^[[:space:]]*$/d' > "$TMP/prod-names.xcheck-only.txt"
+XCHECK_ONLY_COUNT="$(grep -ac '[^[:space:]]' "$TMP/prod-names.xcheck-only.txt" || true)"
+if [ "${XCHECK_ONLY_COUNT:-0}" -gt 0 ]; then
+  echo "::warning::${GATE}: the independent cross-check index found ${XCHECK_ONLY_COUNT} function name(s) the primary index did not:"
+  sed 's/^/::warning::  /' "$TMP/prod-names.xcheck-only.txt"
+  echo "::warning::The primary index shares its parser with the body fetcher, so those names would"
+  echo "::warning::previously have been reported 'absent from PROD — a NEW function (pass)'."
+fi
+echo "Functions indexed in the PROD source: ${PROD_NAME_COUNT:-0} (union of two independent readings)"
 echo ""
 
 # ── 3. COMPARE, PER FUNCTION ─────────────────────────────────────────────────
