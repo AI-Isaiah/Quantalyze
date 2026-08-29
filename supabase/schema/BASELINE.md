@@ -1,9 +1,39 @@
 # `baseline.sql` — committed full-schema snapshot
 
 **What it is:** a byte-identical `supabase db dump` (schema only, zero data statements)
-of the production catalogue. It is the schema source for the VAC-07 local-stack lane,
-which cannot use `supabase db reset` because the migration chain does not replay — see
-`scripts/local-stack/REPLAY-SPIKE.md` for that measurement.
+of the production catalogue. It exists to become the schema source for the VAC-07
+local-stack lane, which cannot use `supabase db reset` because the migration chain does
+not replay — see `scripts/local-stack/REPLAY-SPIKE.md` for that measurement.
+
+## ⛔ NOT WIRED YET — this file currently has NO consumer
+
+**Nothing reads it.** `scripts/local-stack/run.sh:50` sets
+`BASELINE_FILE="${LANE_DIR}/baseline.sql"` — that is `scripts/local-stack/baseline.sql`,
+a *different* path, which `.gitignore:138` ignores and which does not exist in a fresh
+checkout. MEASURED 2026-08-29: `bash scripts/local-stack/run.sh up` exits 1 with
+`FATAL: no schema baseline at .../scripts/local-stack/baseline.sql`. A grep across
+`scripts/`, `.github/`, `package.json` and `src/` for `supabase/schema/baseline.sql`
+returns only this document.
+
+This section replaces a sentence that read *"It **is** the schema source for the VAC-07
+local-stack lane"* — present tense, about a wiring that does not exist. That is this
+phase's own defect class (a claim never compared to the thing) inside an artifact this
+phase shipped, so it is corrected here rather than papered over.
+
+**The wiring is deliberately NOT done in 164.3.** VAC-07 was deferred by founder decision
+on 2026-08-29 (`.planning/phases/164.3-…/164.3-07-DEFERRED.md`), and repointing `run.sh`
+now would change plan 04's shipped behaviour without plan 04's gates being re-run.
+
+**Phase 164.5 (BASELINE-SNAPSHOT) owns all three steps**, together:
+
+1. repoint `BASELINE_FILE` at `supabase/schema/baseline.sql` (or add it as the fallback);
+2. drop `.gitignore:138`, which is what makes the lane-local path invisible;
+3. add the staleness gate below, including an assertion that the loaded baseline's
+   sha256 matches the one recorded here — so a silently-swapped baseline is a failure
+   rather than a load.
+
+Until then the lane fails loud, which is the correct behaviour for a lane with no schema.
+It is not, and must not be described as, a lane that reads this file.
 
 ## Provenance
 

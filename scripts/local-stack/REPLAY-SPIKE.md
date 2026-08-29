@@ -115,7 +115,27 @@ The lane loads a **pre-built schema baseline**, not a migration replay. `scripts
 implements this mode and **fails loud** when the baseline file is absent — it never degrades to
 "replay what it can".
 
-## ⛔ BLOCKING-HUMAN — the baseline artifact itself is not produced here
+## ✅ SUPERSEDED 2026-08-29 — the baseline artifact now EXISTS and is committed
+
+The BLOCKING-HUMAN block below was written before the artifact existed and is kept for
+its reasoning, not its instructions. **Do not follow its command.** The baseline was
+subsequently taken from **production** (read-only `supabase db dump --linked`) and
+committed at **`supabase/schema/baseline.sql`**, with its provenance, sha256, shape and
+secret-scan recorded in `supabase/schema/BASELINE.md`.
+
+Two things the block below gets wrong at HEAD:
+
+- it names `scripts/local-stack/baseline.sql`, the **gitignored** lane-local path
+  (`.gitignore:138`). The committed artifact is at `supabase/schema/baseline.sql`;
+- it dumps from **TEST**, which its own closing paragraph warns re-couples a disposable
+  lane to a shared environment's drift. The committed dump is from PROD, which settles
+  that open question.
+
+⚠️ **The lane still does not read either file.** `run.sh:50` points at the gitignored
+lane path, so `run.sh up` exits 1 FATAL. Repointing it is Phase 164.5's, together with
+dropping `.gitignore:138` and adding the staleness gate — see `supabase/schema/BASELINE.md`.
+
+## ⛔ BLOCKING-HUMAN (HISTORICAL — see the block above before acting on any of this)
 
 D-15's fallback was "generate the baseline with a read-only `supabase db dump` against TEST".
 **That action was not taken, deliberately.** Every remaining source of a real, complete schema is

@@ -388,7 +388,7 @@ last_updated: 2026-08-29T09:24:22.877Z
     "phase": "164.3",
     "file": "supabase/schema/baseline.sql",
     "line": null,
-    "description": "supabase/schema/baseline.sql is committed with NO staleness gate. sql-function-snapshot.yml gates supabase/schema/functions/; nothing gates this file, so production can drift from it silently and the lane would keep loading stale bytes as if current. Phase 164.5 builds the --check gate; mind the 2.84.2-vs-2.98.2 pg_dump formatting skew when doing so.",
+    "description": "supabase/schema/baseline.sql is committed with NO staleness gate AND NO consumer. sql-function-snapshot.yml gates supabase/schema/functions/; nothing gates this file, so production can drift from it silently. CORRECTED 2026-08-29 (WR-04/G1): this entry previously said 'the lane would keep loading stale bytes as if current', which described a wiring that does not exist — scripts/local-stack/run.sh:50 reads the gitignored scripts/local-stack/baseline.sql, so `run.sh up` exits 1 FATAL and reads nothing. Phase 164.5 owns all three together: repoint run.sh, drop .gitignore:138, and build the --check gate (including a sha256 assertion against BASELINE.md's recorded hash). Mind the 2.84.2-vs-2.98.2 pg_dump formatting skew when doing so.",
     "status": "open",
     "reason": "",
     "recorded_at": "2026-08-29T11:35:00.000Z",
