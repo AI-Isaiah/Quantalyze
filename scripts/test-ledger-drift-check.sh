@@ -154,8 +154,16 @@ check() {
 
   local tmp
   tmp="$(mktemp -d)"
+  # ⛔ IN-04: RETURN alone is not enough. It fires when the FUNCTION returns,
+  # and every `fail` below `exit`s the shell instead — so each of this
+  # function's ~8 failure paths left the mktemp directory behind. EXIT/INT/TERM
+  # cover those. Both traps are kept: RETURN cleans up promptly when `check` is
+  # called more than once in a process (the self-test's arms), EXIT catches the
+  # paths that never return.
   # shellcheck disable=SC2064
   trap "rm -rf '$tmp'" RETURN
+  # shellcheck disable=SC2064
+  trap "rm -rf '$tmp'" EXIT INT TERM
 
   # ── HALF 1: LEDGER PRESENCE ───────────────────────────────────────────────
   local repo_names=()
@@ -327,8 +335,11 @@ self_test() {
   local inverted="${1:-}"
   local tmp
   tmp="$(mktemp -d)"
+  # IN-04, as above: RETURN misses every `exit` path.
   # shellcheck disable=SC2064
   trap "rm -rf '$tmp'" RETURN
+  # shellcheck disable=SC2064
+  trap "rm -rf '$tmp'" EXIT INT TERM
 
   mkdir -p "$tmp/migrations" "$tmp/snapshot" "$tmp/live"
   # shellcheck disable=SC2016  # `$$` and `$function$` are SQL dollar-quote tags, deliberately literal.

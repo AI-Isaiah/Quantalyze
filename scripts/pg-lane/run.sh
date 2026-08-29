@@ -118,6 +118,23 @@ cleanup() {
   exit "$status"
 }
 
+# ⛔ IN-04: registered HERE, at the top level, not inside `run_lane`.
+# It used to be registered just before `initdb`, which left two paths
+# uncovered: `legacy_run` sets OWNED_WORKDIR from `mktemp -d` BEFORE calling
+# `run_lane`, and `run_lane`'s own argument validation (`--gate` missing,
+# apply file not found) calls `fail` — which `exit`s — before the trap
+# existed. Both leaked the scratch directory. Small directories, but this is
+# the script family whose entire stated purpose is that nothing it creates
+# survives, and D-04's measured cost was 27 orphans and a disk-exhaustion
+# incident.
+#
+# Registering at top level is safe because `cleanup` is guarded on CREATED and
+# OWNED_WORKDIR, both initialised empty above: with nothing created it is a
+# no-op. INT/TERM still route through EXIT so there is one teardown path.
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
 psqlq() { psql -h 127.0.0.1 -p "$PORT" -U postgres -d postgres -v ON_ERROR_STOP=1 "$@"; }
 
 # ---------------------------------------------------------------------------
@@ -159,11 +176,10 @@ run_lane() {
     exit 2
   fi
 
-  # Trap registered BEFORE initdb — a cleanup line at the end is exactly the
-  # shape that leaked 27 clusters. INT/TERM route through EXIT.
-  trap cleanup EXIT
-  trap 'exit 130' INT
-  trap 'exit 143' TERM
+  # The trap is registered at TOP LEVEL (see above), which is strictly earlier
+  # than this point — a cleanup line at the end is exactly the shape that
+  # leaked 27 clusters, and a trap registered after argument validation leaked
+  # the scratch dir on every early `fail` (IN-04).
 
   mkdir -p "$PGD"
   CREATED=1

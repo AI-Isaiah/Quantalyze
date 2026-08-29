@@ -23,12 +23,13 @@ import {
   mkdirSync,
   writeFileSync,
   readFileSync,
+  readdirSync,
   existsSync,
   rmSync,
   chmodSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 import { normalizeSql } from "../../scripts/sql-body-normalize.mjs";
 import { createHash } from "node:crypto";
@@ -593,6 +594,59 @@ describe("VAC-08 — scripts/test-ledger-drift-check.sh", () => {
       },
     );
     expect(res.status).toBe(1);
+  });
+});
+
+describe("IN-04 — the scratch directory does not survive a fail() path", () => {
+  it("MEASURED: a failing VAC-08 run leaves no new mktemp directory behind", () => {
+    // `trap "rm -rf '$tmp'" RETURN` fires when the FUNCTION returns. Every
+    // `fail` inside `check()` `exit`s the shell instead, so all ~8 failure
+    // paths leaked their `mktemp -d`. Measured 2026-08-29 with the EXIT trap
+    // removed: leaked=1 per failing run; with it: leaked=0.
+    //
+    // ⚠️ This counts the REAL temp root, not $TMPDIR. macOS `mktemp -d` with
+    // no template ignores TMPDIR and uses the confstr path — a first version
+    // of this check pointed at a scratch TMPDIR, measured 0 leaks with the fix
+    // AND 0 without it, and would have shipped as a test that cannot fail.
+    const tempRoot = dirname(mkdtempSync(join(tmpdir(), "probe-")));
+    const countScratch = () =>
+      readdirSync(tempRoot).filter((n) => n.startsWith("tmp.")).length;
+
+    withTempDir((dir) => {
+      const env = scaffoldLedgerCase(dir, {});
+      const before = countScratch();
+      const { status } = run(LEDGER_GATE, { ...env, BODY_CHECK_FUNCTIONS: " " });
+      expect(status).toBe(1); // it must have taken a fail() path at all
+      expect(
+        countScratch() - before,
+        "a failing run left its mktemp -d behind. RETURN traps do not fire on exit; this script " +
+          "family's stated purpose is that nothing it creates survives.",
+      ).toBe(0);
+    });
+  });
+
+  it("pg-lane registers its cleanup trap BEFORE the first mktemp, not inside run_lane", () => {
+    // `legacy_run` sets OWNED_WORKDIR from `mktemp -d` and only THEN calls
+    // `run_lane`, which used to register the trap after its own argument
+    // validation — so an early `fail` (missing gate or apply file) leaked the
+    // directory. Driving that path needs a real cluster, so the ordering is
+    // asserted structurally instead. It still fails if the trap moves back.
+    // Line numbers, over EXECUTABLE lines only — a first version of this
+    // compared string offsets and matched the words "mktemp -d" inside the
+    // very comment that explains the fix, so it failed on correct code.
+    const lines = readFileSync("scripts/pg-lane/run.sh", "utf8").split("\n");
+    const code = lines.map((l, i) => ({ l, n: i + 1 })).filter(({ l }) => !/^\s*#/.test(l));
+
+    const trapAt = code.find(({ l }) => /^trap cleanup EXIT\b/.test(l))?.n;
+    const firstMktemp = code.find(({ l }) => /mktemp -d/.test(l))?.n;
+
+    expect(trapAt, "no TOP-LEVEL `trap cleanup EXIT` in scripts/pg-lane/run.sh").toBeDefined();
+    expect(firstMktemp, "no executable `mktemp -d` found — update this test").toBeDefined();
+    expect(
+      trapAt as number,
+      "the cleanup trap is registered AFTER the first mktemp -d, so a failure between them leaks " +
+        "the scratch directory (IN-04).",
+    ).toBeLessThan(firstMktemp as number);
   });
 });
 
