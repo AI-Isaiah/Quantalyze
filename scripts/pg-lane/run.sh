@@ -80,7 +80,9 @@ resolve_pgbin() {
 # Portability fix 2 (D-07): the fixed default PORT=55432 serialised concurrent
 # agents — the collision guard correctly refused rather than destroying a
 # neighbour's cluster, which made the lane unusable in parallel. Bind port 0 and
-# let the OS pick. The pg_isready guard below still covers the TOCTOU window.
+# let the OS pick. The collision guard below still covers the TOCTOU window —
+# since IN-07 it is a bind test rather than `pg_isready`, so it answers for ANY
+# listener, not only a postgres already accepting connections.
 # ---------------------------------------------------------------------------
 alloc_port() {
   if command -v node >/dev/null 2>&1; then
@@ -144,7 +146,7 @@ run_lane() {
   local workdir="$1" gate="$2" post="$3"; shift 3
   local applies=()
   if [ "$#" -gt 0 ]; then applies=("$@"); fi
-  local f i
+  local f i port_occupied
 
   [ -n "$workdir" ] || fail "--workdir is required"
   [ -n "$gate" ] || fail "--gate is required"
@@ -168,8 +170,36 @@ run_lane() {
   # reviewer lost an entire session this way and only noticed because
   # sanitize_user vanished from pg_proc after it had already called it. Fail
   # loud instead. (D-03: this guard must survive the promotion verbatim.)
-  if pg_isready -h 127.0.0.1 -p "$PORT" -q 2>/dev/null; then
-    echo "ERROR: something is already listening on 127.0.0.1:$PORT." >&2
+  #
+  # ⛔ IN-07: the guard used to be `pg_isready` alone, which exits 0 only for a
+  # server ACCEPTING connections. A postgres that is starting up, in recovery,
+  # or refusing connections exits non-zero and the guard passed — while the
+  # message printed claimed the broader property "something is already
+  # listening". The blast radius was bounded (`pg_ctl -w start` then fails to
+  # bind and `set -e` aborts before any `psqlq`), but a refusal message that
+  # claims a broader check than it performs is this phase's own subject.
+  #
+  # A bind test answers the question the message asks — and detects a
+  # NON-postgres listener too, which `pg_isready` never could. It uses the same
+  # `node -e` primitive `alloc_port` already relies on. When node is absent the
+  # guard falls back to `pg_isready` AND says out loud what it could not check,
+  # rather than printing the broad claim regardless.
+  port_occupied=""
+  if command -v node >/dev/null 2>&1; then
+    if ! node -e 'const s=require("net").createServer();s.once("error",()=>process.exit(1));s.listen(Number(process.argv[1]),"127.0.0.1",()=>s.close(()=>process.exit(0)));' "$PORT" 2>/dev/null; then
+      port_occupied="something is already listening on 127.0.0.1:$PORT (measured by trying to bind it)"
+    fi
+  else
+    if pg_isready -h 127.0.0.1 -p "$PORT" -q 2>/dev/null; then
+      port_occupied="a PostgreSQL server on 127.0.0.1:$PORT is accepting connections"
+    else
+      echo "NOTE: node is unavailable, so this collision guard could only ask pg_isready." >&2
+      echo "      That answers ONLY for a server accepting connections — a postgres still" >&2
+      echo "      starting up or in recovery, or any non-postgres listener, is NOT covered." >&2
+    fi
+  fi
+  if [ -n "$port_occupied" ]; then
+    echo "ERROR: ${port_occupied}." >&2
     echo "This lane would DROP SCHEMA public CASCADE on it. Refusing." >&2
     echo "Pick a free port (or unset PORT to auto-allocate):" >&2
     echo "  PORT=\$((55000 + RANDOM % 900)) $0 ..." >&2
@@ -424,6 +454,39 @@ self_test() {
   no_orphan "$squat_port" "$squat_wd/pgd" "collision squatter teardown"
   rm -rf "$squat_wd"
   echo "  ok  refused an occupied port with exit 2 (against a real cluster)"
+
+  # IN-07: the same refusal against a NON-postgres listener. The old
+  # `pg_isready` guard could not see this at all — it exits non-zero for
+  # anything that is not a PostgreSQL server accepting connections — while the
+  # message it printed claimed the broad property "something is already
+  # listening". This arm is what makes the message and the check the same
+  # claim. Skipped (loudly) when node is absent, because the fallback guard
+  # genuinely cannot cover it and says so at runtime.
+  if command -v node >/dev/null 2>&1; then
+    local tcp_port tcp_pid tcp_wd tcp_rc
+    tcp_port=$(alloc_port)
+    node -e 'const s=require("net").createServer();s.listen(Number(process.argv[1]),"127.0.0.1",()=>{setTimeout(()=>process.exit(0),30000)});' "$tcp_port" &
+    tcp_pid=$!
+    for i in $(seq 1 40); do
+      if ! node -e 'const s=require("net").createServer();s.once("error",()=>process.exit(1));s.listen(Number(process.argv[1]),"127.0.0.1",()=>s.close(()=>process.exit(0)));' "$tcp_port" 2>/dev/null; then break; fi
+      sleep 0.25
+    done
+    tcp_wd=$(mktemp -d)
+    set +e
+    PORT="$tcp_port" bash "$0" --workdir "$tcp_wd" \
+      --apply "$FIXTURES/01-fixture-core.sql" --gate "$FIXTURES/01-fixture-core.sql" >"$tcp_wd/out" 2>&1
+    tcp_rc=$?
+    set -e
+    kill -9 "$tcp_pid" 2>/dev/null || true
+    wait "$tcp_pid" 2>/dev/null || true
+    [ "$tcp_rc" -eq 2 ] || { cat "$tcp_wd/out" >&2; rm -rf "$tcp_wd"; st_fail "non-postgres listener run exited $tcp_rc, expected 2 — the guard is narrower than its message"; }
+    grep -a -q "Refusing" "$tcp_wd/out" || { rm -rf "$tcp_wd"; st_fail "non-postgres listener run did not print the refusal message"; }
+    [ ! -d "$tcp_wd/pgd" ] || { rm -rf "$tcp_wd"; st_fail "non-postgres listener run created a data dir before refusing"; }
+    rm -rf "$tcp_wd"
+    echo "  ok  refused a NON-postgres listener with exit 2 (pg_isready alone could not see it)"
+  else
+    echo "  SKIP non-postgres-listener arm: node is unavailable, so the guard falls back to pg_isready and CANNOT cover this case. Not a pass." >&2
+  fi
 
   echo "=== SELF-TEST 2/4: kill mid-run leaves NO orphan (D-04: on interrupt) ==="
   kill_check TERM "SIGTERM mid-run"
