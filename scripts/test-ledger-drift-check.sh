@@ -47,6 +47,24 @@
 # neither is redundant, and dropping either reproduces a known-false verdict.
 #   bare-ts    version=20260826084633  name=20260826140000
 #              -> name  ==  the repo basename's TIMESTAMP PREFIX
+#   desc-only  version=20260826210044  name=destrict_enqueue_internal_10param
+#              -> name  ==  the repo basename's DESCRIPTION (version re-stamped)
+#
+# ⛔ THE ENUMERATION IS CLOSED, AND THAT IS THE POINT. A repo basename is
+#    `<timestamp>_<description>`. The ledger has, at different times, stored in
+#    `name`: the whole thing, the description, the timestamp, or nothing (with
+#    version carrying the timestamp). That is FOUR possibilities and there is no
+#    fifth — every substring of the basename is now covered. Adding clauses
+#    until the missing count reaches zero would be building a matcher that
+#    matches anything, which is this phase's defect wearing the opposite mask.
+#    Whatever remains missing after these four is REAL DRIFT.
+#
+# ⚠️ BOTH DIRECTIONS USE THE SAME PREDICATE. Before 2026-08-30 the advisory
+#    `extra` direction still joined on `name` alone, so it reported "224 of 239
+#    ledger rows have no repo file" while the `missing` direction, using all the
+#    clauses, disagreed. Two readings of one relation that disagree BY
+#    CONSTRUCTION is the exact shape this phase exists to remove; they are now
+#    one predicate, and a change to one is a change to both.
 #
 # The third convention was found in the shape diagnostic on CI run 33276251646,
 # AFTER the first two clauses cut the false-missing count from 253 to 56. Each
@@ -127,7 +145,8 @@ default_ledger_query() {
                    SELECT 1 FROM supabase_migrations.schema_migrations m
                     WHERE m.name = r.fname
                        OR (m.version || '_' || m.name) = r.fname
-                       OR m.name = split_part(r.fname, '_', 1));" \
+                       OR m.name = split_part(r.fname, '_', 1)
+                       OR m.name = substr(r.fname, strpos(r.fname, '_') + 1));" \
         | tr -d '\r' | sed '/^[[:space:]]*$/d'
       ;;
     extra)
@@ -136,7 +155,12 @@ default_ledger_query() {
         -c "SELECT m.name
               FROM supabase_migrations.schema_migrations m
              WHERE m.name IS NOT NULL
-               AND NOT (m.name = ANY (ARRAY[${names_csv}]::text[]));" \
+               AND NOT EXISTS (
+                   SELECT 1 FROM unnest(ARRAY[${names_csv}]::text[]) AS r(fname)
+                    WHERE m.name = r.fname
+                       OR (m.version || '_' || m.name) = r.fname
+                       OR m.name = split_part(r.fname, '_', 1)
+                       OR m.name = substr(r.fname, strpos(r.fname, '_') + 1));" \
         | tr -d '\r' | sed '/^[[:space:]]*$/d'
       ;;
     ledger_rows)
