@@ -920,6 +920,30 @@ jobs:
             exit 1
           fi
           bad=0
+          # ⛔ SP-L02. Each of these greps used to end `>/dev/null 2>&1`, and
+          # that second redirect discards the ERROR channel: grep exits 0 on a
+          # hit, 1 on none, and >= 2 when it could not read the file at all —
+          # so an unreadable or unstattable file read as CLEAN. The step's own
+          # MEASURE_FAIL covered only a zero-length glob. "Silently declines to
+          # read a file" is the exact shape the NUL note above names, one line
+          # up from where it was happening.
+          #
+          # stdout still goes to /dev/null (the match itself is not wanted);
+          # stderr is NOT suppressed, and any exit >= 2 is a hard failure.
+          scan() {
+            local f="$1" pattern="$2" label="$3" rc
+            set +e
+            grep -anE "$pattern" "$f" >/dev/null
+            rc=$?
+            set -e
+            if [ "$rc" -eq 0 ]; then
+              echo "::error file=$f::contains '$label' — refused by the mutation-lane preflight"
+              bad=1
+            elif [ "$rc" -gt 1 ]; then
+              echo "::error file=$f::MEASURE_FAIL: grep exited $rc scanning for '$label'. The file could not be read, so this preflight has NOT cleared it — that is not the same as clean."
+              bad=1
+            fi
+          }
           for f in "${files[@]}"; do
             # IN-06: this read '^\\\!|^\\!| \\\!| \\!'. In ERE both `\\\!` and
             # `\\!` denote a literal backslash followed by a literal `!`, so
@@ -927,22 +951,15 @@ jobs:
             # as a deliberate distinction which does not exist. Verified
             # behaviour-identical against a `\!`-at-line-start file, a
             # `\!`-after-a-space file and a clean file (exit 0/0/1 both ways).
-            if grep -anE '(^| )\\!' "$f" >/dev/null 2>&1; then
-              echo "::error file=$f::contains '\\!' (shell escape) — refused by the mutation-lane preflight"
-              bad=1
-            fi
-            if grep -anE '\\copy\b' "$f" >/dev/null 2>&1; then
-              echo "::error file=$f::contains '\\copy' (client file IO) — refused by the mutation-lane preflight"
-              bad=1
-            fi
-            if grep -anE '\\COPY\b' "$f" >/dev/null 2>&1; then
-              echo "::error file=$f::contains '\\COPY' (client file IO) — refused by the mutation-lane preflight"
-              bad=1
-            fi
-            if grep -anE '^\\o |^\\o$| \\o ' "$f" >/dev/null 2>&1; then
-              echo "::error file=$f::contains '\\o' (output redirect) — refused by the mutation-lane preflight"
-              bad=1
-            fi
+            #
+            #   \!       shell escape (reads env vars, curls them out)
+            #   \copy    client-side file IO
+            #   \COPY    upper-case form
+            #   \o ...   redirect query output into a file
+            scan "$f" '(^| )\\!'            '\!'
+            scan "$f" '\\copy\b'             '\copy'
+            scan "$f" '\\COPY\b'             '\COPY'
+            scan "$f" '^\\o |^\\o$| \\o '     '\o'
           done
           if [ "$bad" = 1 ]; then
             echo "::error::One or more files the mutation runner executes contain a refused psql meta-command."

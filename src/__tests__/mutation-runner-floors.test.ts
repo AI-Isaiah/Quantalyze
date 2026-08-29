@@ -18,6 +18,8 @@
 import { describe, expect, it } from "vitest";
 import { spawnSync } from "node:child_process";
 import {
+  chmodSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   readdirSync,
@@ -408,6 +410,111 @@ describe("SP-C02 — the runner's `--self-test` is WIRED into CI, before the cor
       "synthesised-identity",
       "wrong-first-failure",
     ]);
+  });
+});
+
+describe("SP-L02 — the meta-command preflight cannot report 'clean' for a file it could not read", () => {
+  // ⛔ Each grep in that step ended `>/dev/null 2>&1`, and the second redirect
+  // discards the ERROR channel: grep exits 0 on a hit, 1 on none, and >= 2 when
+  // it could not read the file at all — so an unreadable or unstattable file
+  // read as CLEAN. The step's own MEASURE_FAIL covered only a zero-length glob.
+  //
+  // ⭐ These arms EXTRACT AND RUN THE REAL `run:` BLOCK from ci.yml. Copying it
+  // into the test would produce a second program that can agree with itself
+  // while CI's diverges — the defect class this phase exists for. What runs
+  // here is the workflow's own text.
+
+  /** The step's `run:` block, dedented, straight out of ci.yml. */
+  function preflightScript(): string {
+    const ci = readFileSync(CI_PATH, "utf8");
+    const stepAt = ci.indexOf(
+      "- name: Preflight - reject psql meta-commands in every file the runner executes",
+    );
+    expect(stepAt, "the preflight step was renamed or removed").toBeGreaterThan(-1);
+    const runAt = ci.indexOf("\n        run: |\n", stepAt);
+    expect(runAt, "the preflight step no longer carries a `run: |` block").toBeGreaterThan(-1);
+    const body = ci.slice(runAt + "\n        run: |\n".length);
+    const out: string[] = [];
+    for (const line of body.split("\n")) {
+      if (line.trim() !== "" && !line.startsWith("          ")) break;
+      out.push(line.slice(10));
+    }
+    return out.join("\n");
+  }
+
+  /** Run it in a throwaway tree carrying the globs it scans. */
+  function runPreflight(files: Record<string, string>, lock?: string) {
+    const dir = mkdtempSync(join(tmpdir(), "preflight-"));
+    try {
+      for (const [rel, content] of Object.entries(files)) {
+        const abs = join(dir, rel);
+        mkdirSync(dirname(abs), { recursive: true });
+        writeFileSync(abs, content);
+      }
+      const script = join(dir, "preflight.sh");
+      writeFileSync(script, preflightScript());
+      if (lock) chmodSync(join(dir, lock), 0o000);
+      const res = spawnSync("bash", [script], {
+        cwd: dir,
+        encoding: "utf8",
+      });
+      if (lock) chmodSync(join(dir, lock), 0o644);
+      return { status: res.status, out: `${res.stdout ?? ""}${res.stderr ?? ""}` };
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  const CLEAN = "SELECT 1;\nDO $$ BEGIN RAISE NOTICE 'ok'; END $$;\n";
+
+  it("GREEN: a clean corpus passes and says how many files it read", () => {
+    const r = runPreflight({ "supabase/tests/test_a.sql": CLEAN });
+    expect(r.status, r.out).toBe(0);
+    expect(r.out).toContain("Preflight clean: 1 file(s)");
+  });
+
+  it("the detector still FIRES on each refused meta-command — otherwise nothing below is evidence", () => {
+    for (const [label, content] of [
+      ["\\!", "SELECT 1;\n\\! curl http://x\n"],
+      ["\\copy", "SELECT 1;\n\\copy t FROM 'f.csv'\n"],
+      ["\\COPY", "SELECT 1;\n\\COPY t FROM 'f.csv'\n"],
+      ["\\o", "SELECT 1;\n\\o /tmp/out\n"],
+    ] as const) {
+      const r = runPreflight({ "supabase/tests/test_a.sql": content });
+      expect(r.status, `${label} was not refused: ${r.out}`).toBe(1);
+      expect(r.out).toContain(label);
+    }
+  });
+
+  it("RED: an UNREADABLE file is a MEASURE_FAIL — it must not read as clean", () => {
+    const r = runPreflight(
+      {
+        "supabase/tests/test_a.sql": CLEAN,
+        "supabase/tests/test_locked.sql": CLEAN,
+      },
+      "supabase/tests/test_locked.sql",
+    );
+    expect(r.status, `a file the preflight could not read was reported clean:\n${r.out}`).toBe(1);
+    expect(r.out).toContain("MEASURE_FAIL: grep exited");
+    expect(r.out).toContain("has NOT cleared it");
+    expect(r.out).not.toContain("Preflight clean:");
+  });
+
+  it("the error channel is no longer discarded — no `2>/dev/null` on the scan", () => {
+    // The mechanism, pinned directly: the redirect is what made an unreadable
+    // file indistinguishable from a clean one.
+    const script = preflightScript();
+    expect(script.length, "the extracted block is empty — the extractor broke").toBeGreaterThan(400);
+    // ⚠️ COMMENTS STRIPPED: the block's own comment QUOTES the redirect it
+    // removed, and that prose is worth keeping. The subject is the code.
+    const code = script
+      .split("\n")
+      .filter((l) => !/^\s*#/.test(l))
+      .join("\n");
+    expect(code, "the comment stripper removed the code as well").toContain("grep -anE");
+    expect(code).not.toContain("2>/dev/null");
+    expect(code).not.toContain("2>&1");
+    expect(code).toContain('elif [ "$rc" -gt 1 ]; then');
   });
 });
 
