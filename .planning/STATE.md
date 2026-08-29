@@ -6,10 +6,10 @@ current_phase: 164.3
 current_phase_name: VACUITY — a control that cannot fail must be caught by machine
 status: executing
 stopped_at: "164.3 PLANNED — 10 plans in 5 waves, verified by gsd-plan-checker on iteration 3 of 3. Each of the first two iterations found an error-swallowing verify shape the previous had missed (|| fallback; then a `wc -l` tail and a printed-not-tested `grep -c`); all three removed. FIVE premises in this phase's own spec failed re-measurement: SKIP-01 (migrations DO reach TEST), OPS-08-F9 (floors already 8/166), criterion 4 (118 committed function bodies exist), the PROD-linked CI job (already exists, dissolving the phase's only human gate), and the corpus size (30 arm-anchored markers, not 33 — a grep counting its own documentation). NO founder-gated item remains."
-last_updated: "2026-08-29T20:01:50.715Z"
+last_updated: "2026-08-29T22:08:18.727Z"
 last_activity: 2026-08-29
 last_activity_desc: Phase 164.3 execution started
-state_head: 6754843730376c30bb342c5eaaacfa1afffee845
+state_head: d2775455140d33e2a9e8c5537d31d469d2bdaf91
 progress:
   total_phases: 14
   completed_phases: 4
@@ -672,6 +672,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - Phase 164.4 inserted after Phase 164.3: REDUNDER-BACKFILL: RED-UNDER coverage measured at 1 file of 71 at HEAD; 164.3 criterion 1 assumed all arms already annotated. HARD dep on 164.3 — its mutation runner is what makes a hand-authored RED-UNDER machine-checkable instead of a claim. (URGENT)
 - Phase 164.3.1 inserted after Phase 164.3: SOUND-PRIMITIVES: both mutation-runner primitives re-opened a FOURTH time (R4-C01 neuter scan, R4-C02 identity nonce). Blocks 164.4. (URGENT)
 - Phase 164.3.1 edited: scope widened from TWO primitives to FOUR (founder decision): adds PRIMITIVE C (VAC-04 reports PASS having compared nothing, WR-01 -> R2-W03 -> SP-C05 -> round 4) and PRIMITIVE D (a control whose own oracle or fixture agrees with it by construction); absorbs VAC04-C1..C4, AUDCOV-01, VAC-SELFREF-01, MUT-I01, MUT-W02; deliverables 4 -> 7; success criteria added. Only MUT-I02 and MUT-I03 remain in TODOS.
+- Phase 164.3.1 edited: added deliverables 8 (diagnostic-first) and 9 (VAC-08 regression instances + absurdity floor on VAC-04 and the mutation runner); widened PRIMITIVE C to both verdict directions after VAC-08's 253-of-262 mirror case; success criteria 7-9 added; sample-vs-corpus logged as a RULE, deliberately NOT a fifth primitive (one instance vs four reopenings for A-D)
 
 ### Decisions
 
