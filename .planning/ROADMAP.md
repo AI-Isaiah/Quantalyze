@@ -505,7 +505,7 @@ would have caught a token-resurrection bug.
      reporting PASS while silently covering 1.4% of the corpus is the same shape as `SKIP-01`, which
      is on this phase's own list.
   2. **The throwaway-PostgreSQL lane is real** — `PROC-01`'s implementation. Today it is a script under `.planning/`, written mid-phase, whose own two defects (reusing another agent's cluster then `DROP SCHEMA public CASCADE`; RLS enabled on nothing but the table under test) were found by reviewers using it.
-  3. **A static linter rejects the five measured shapes** on new gate files, so mechanism 6 is a lint failure rather than a red-team finding.
+  3. **A static linter rejects the four statically-decidable measured shapes** on new gate files (mechanisms 1, 2, 4 and a narrow 3), so a further mechanism of those kinds is a lint failure rather than a red-team finding. Mechanism 5 is **delegated** to the mutation runner's first-failure identity per D-16 — it is not decidable in SQL text, and a rule that cannot fire is the defect this phase exists to remove. Machine-pinned via the linter's `DELEGATED_MECHANISMS` export. *(Corrected 2026-08-29, gap G3 — this criterion said "five" after D-16 narrowed it; the plan line at :538 already said four.)*
   4. **No whole-body `CREATE OR REPLACE` merges without a repo-vs-PROD diff** (`DRIFT-02b`). A function that has ever been surgically patched has no true body in the repo, and "re-base on the latest definition" is unsatisfiable from files alone.
   5. **A plan's claims about the codebase are verified, not trusted.** A PLAN.md asserts line
      anchors, function signatures and RPC return shapes — and NOTHING compares them to the tree.

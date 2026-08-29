@@ -86,6 +86,41 @@ describe("lint-sql-gates: the shipped rule set (D-16)", () => {
     const r3 = RULES.find((r) => r.mechanism === 3)!;
     expect(r3.scope.toLowerCase()).toContain("undecidable");
   });
+
+  it("G3: the PLANNING DOCUMENTS do not claim more shapes than the linter ships", () => {
+    // ⛔ Verification gap G3. D-16 narrowed VAC-03 from five shapes to four
+    // plus a delegation, and the narrowing reached ROADMAP:538 (the plan line)
+    // but NOT ROADMAP's success criterion 3 nor REQUIREMENTS.md's VAC-03 —
+    // both of which still read "the five measured (vacuity) shapes". The
+    // shipped artifact was correct; the requirement sentence over-claimed it,
+    // which is the shape this phase catalogues, and "a scope amendment that
+    // touches one file is incomplete" is a standing rule here.
+    //
+    // Pinned by machine so the count in the requirement and the count in the
+    // code cannot drift apart again in either direction.
+    const shipped = RULES.length;
+    expect(shipped).toBe(4);
+
+    for (const rel of [".planning/REQUIREMENTS.md", ".planning/ROADMAP.md"]) {
+      const text = readFileSync(join(ROOT, rel), "utf8");
+      const claims = text
+        .split("\n")
+        .map((line, i) => ({ line, n: i + 1 }))
+        .filter(
+          ({ line }) =>
+            /\bVAC-03\b/.test(line) ||
+            /static linter (rejects|for)/i.test(line),
+        )
+        .filter(({ line }) => /\bfive\b[^.]{0,40}\b(measured )?(vacuity )?shapes?\b/i.test(line));
+
+      expect(
+        claims.map(({ n, line }) => `${rel}:${n}: ${line.trim().slice(0, 140)}`),
+        `A planning sentence still claims FIVE shapes while the linter ships ${shipped} rules and ` +
+          `delegates mechanism 5 to the mutation runner per D-16. Correct the sentence, or — if a ` +
+          `fifth rule was genuinely added — update this test and DELEGATED_MECHANISMS together.`,
+      ).toEqual([]);
+    }
+  });
 });
 
 describe("lint-sql-gates: every rule fires on red and passes on green", () => {
