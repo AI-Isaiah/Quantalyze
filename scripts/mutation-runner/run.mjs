@@ -242,6 +242,22 @@ export function applyFileStep(text, step) {
  * wrong by construction. Only an exact `RESET ROLE;` is absorbed — nothing
  * else, so a branch that does real work is never silently swallowed.
  */
+/**
+ * The ONLY abort-path statement the neuter absorbs along with the RAISE.
+ * Exported so a test can assert the set is exactly this, and so widening it is
+ * a visible, reviewed edit rather than a regex tweak inside a loop.
+ */
+export const ABSORBABLE_CLEANUP = /^[ \t]*RESET[ \t]+ROLE[ \t]*;[ \t]*$/i;
+
+/** Blank, or a whole-line `--` comment. Carries no runtime effect. */
+const IGNORABLE_LINE = /^[ \t]*(--.*)?$/;
+
+/**
+ * The head of the block the RAISE sits in. Reaching one of these means every
+ * line between it and the RAISE has been classified, so the scan can stop.
+ */
+const BRANCH_HEAD = /\b(THEN|BEGIN|ELSE|ELSIF|LOOP|DECLARE|EXCEPTION)\b/i;
+
 export function neuterArm(text, arm) {
   const lines = text.split("\n");
   const needle = `TEST FAILED (${arm})`;
@@ -268,7 +284,38 @@ export function neuterArm(text, arm) {
   // here would terminate on `RESET ROLE;`'s own semicolon and leave the RAISE
   // live, which is a neuter that silently did nothing.
   let start = raiseAt;
-  while (start > 0 && /^[ \t]*RESET[ \t]+ROLE[ \t]*;[ \t]*$/i.test(lines[start - 1])) start -= 1;
+  while (start > 0 && ABSORBABLE_CLEANUP.test(lines[start - 1])) start -= 1;
+
+  // ── WR-07: refuse what we cannot classify, instead of leaking it ──────────
+  // The absorbed set is ONE literal statement, and the header is explicit that
+  // the `RESET ROLE;` leak "was loud HERE only by luck". An abort branch that
+  // reads `RESET search_path;`, `SET ROLE postgres;`, `PERFORM set_config(…)`
+  // or `ROLLBACK TO SAVEPOINT s;` before its RAISE produces the identical
+  // class of silent state leak into every later arm, and the old code left it
+  // live with no signal at all. Phase 164.4 backfills ~70 files against this
+  // primitive, which is where the luck runs out.
+  //
+  // So: walk from the absorb point back to the head of the enclosing branch
+  // and refuse anything that is not blank, not a comment, and not absorbable.
+  // A refusal surfaces as a `neuter-missed` defect — loud, named, and fixable
+  // by extending the absorbable set DELIBERATELY — which is strictly better
+  // than a leak that makes downstream arms pass for the wrong reason.
+  //
+  // MEASURED 2026-08-29 against the real corpus: all 30 arms still execute and
+  // bite, so this refuses nothing that exists today.
+  for (let k = start - 1; k >= 0 && !BRANCH_HEAD.test(lines[k]); k -= 1) {
+    if (IGNORABLE_LINE.test(lines[k])) continue;
+    return {
+      text,
+      found: false,
+      reason:
+        `the abort branch for "${arm}" carries an unrecognised statement before its RAISE ` +
+        `(line ${k + 1}: ${lines[k].trim()}). Neutering only the RAISE would leave that statement ` +
+        `executing for the rest of the file — the measured RESET ROLE class, where a leaked ` +
+        `superuser session made sixteen later arms pass for a reason unrelated to their grants. ` +
+        `Extend ABSORBABLE_CLEANUP deliberately, or restructure the branch.`,
+    };
+  }
 
   // Walk forward to the statement terminator, tracking single-quote state so a
   // ';' inside the message literal does not end the statement early. '' is the
