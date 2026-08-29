@@ -767,12 +767,91 @@ describe("IN-04 — the scratch directory does not survive a fail() path", () =>
     });
   });
 
+  it("R3-W03 DRIVEN: a pg-lane run that fails at initdb leaves no scratch directory", () => {
+    // ⛔ THIS ARM REPLACES A CLAIM, NOT JUST A GAP. The round-2 fix report said
+    // of the structural pin below: "Driving the leak needs a real cluster
+    // failure mid-`legacy_run`." That was not true. The script already has the
+    // seam — `PGBIN` — and driving it takes three seconds and no PostgreSQL:
+    //
+    //   pg_ctl stub exits 0  -> run_lane's `[ -x "$PGBIN/pg_ctl" ]` preflight passes
+    //   initdb  stub exits 1 -> `set -e` aborts INSIDE legacy_run, after
+    //                           OWNED_WORKDIR=$(mktemp -d) and after mkdir "$PGD"
+    //   the EXIT trap fires  -> nothing may survive
+    //
+    // The structural pin below compares LINE NUMBERS and says nothing about
+    // what `cleanup` does: deleting the whole `OWNED_WORKDIR` block from
+    // `cleanup()` leaves it green while every failing run leaks. That is IN-04's
+    // defect restored under a green control. This arm reds on exactly that.
+    const probe = spawnSync("bash", ["-c", 'd=$(mktemp -d); printf %s "$d"; rmdir "$d"'], {
+      cwd: process.cwd(),
+      encoding: "utf8",
+    });
+    expect(probe.status, "could not locate the shell's temp root").toBe(0);
+    expect(probe.stdout.trim(), "the probe printed no path").toMatch(/^\//);
+    const tempRoot = dirname(probe.stdout.trim());
+
+    // Attribute by CONTENT, as R2-W02 established: `tmp.` is a shared prefix
+    // and vitest runs files in parallel workers, so a bare count is red when a
+    // stranger creates a directory and red again when one removes it. By the
+    // time the stub `initdb` fails, `run_lane` has already done `mkdir -p
+    // "$PGD"`, so a `pgd` subdirectory is this lane's signature.
+    const laneScratch = () =>
+      readdirSync(tempRoot)
+        .filter((n) => n.startsWith("tmp."))
+        .filter((n) => existsSync(join(tempRoot, n, "pgd")));
+
+    // CALIBRATION: a filter that matches nothing must not read as "no leak".
+    const planted = mkdtempSync(join(tempRoot, "tmp."));
+    try {
+      mkdirSync(join(planted, "pgd"), { recursive: true });
+      expect(
+        laneScratch(),
+        "the leak detector cannot see a planted lane scratch directory, so it could not see a real one",
+      ).toContain(basename(planted));
+    } finally {
+      rmSync(planted, { recursive: true, force: true });
+    }
+
+    const bin = mkdtempSync(join(tempRoot, "tmp.pglane-stubbin-"));
+    try {
+      writeFileSync(join(bin, "pg_ctl"), "#!/bin/sh\nexit 0\n");
+      writeFileSync(join(bin, "initdb"), '#!/bin/sh\necho "initdb: stub failure" >&2\nexit 1\n');
+      chmodSync(join(bin, "pg_ctl"), 0o755);
+      chmodSync(join(bin, "initdb"), 0o755);
+
+      const before = new Set(laneScratch());
+      const res = spawnSync("bash", [join(process.cwd(), "scripts", "pg-lane", "run.sh")], {
+        cwd: process.cwd(),
+        encoding: "utf8",
+        env: { ...process.env, PGBIN: bin },
+        timeout: 120_000,
+      });
+      expect(
+        res.status,
+        "the stub must make the lane FAIL — otherwise nothing is driven and this arm proves nothing",
+      ).not.toBe(0);
+
+      const added = laneScratch().filter((n) => !before.has(n));
+      expect(
+        added,
+        "the EXIT trap did not remove legacy_run's OWNED_WORKDIR. This script family's stated " +
+          "purpose is that nothing it creates survives; D-04's measured cost was 27 orphans and a " +
+          "disk-exhaustion incident.",
+      ).toEqual([]);
+    } finally {
+      rmSync(bin, { recursive: true, force: true });
+    }
+  });
+
   it("pg-lane registers its cleanup trap BEFORE the first mktemp, not inside run_lane", () => {
-    // `legacy_run` sets OWNED_WORKDIR from `mktemp -d` and only THEN calls
-    // `run_lane`, which used to register the trap after its own argument
-    // validation — so an early `fail` (missing gate or apply file) leaked the
-    // directory. Driving that path needs a real cluster, so the ordering is
-    // asserted structurally instead. It still fails if the trap moves back.
+    // Kept ALONGSIDE the driven arm above, not instead of it. This one is
+    // cheap, is independent of the environment, and catches the specific
+    // regression of moving the trap back inside `run_lane` — a shape the driven
+    // arm would also catch, but only on the paths it exercises.
+    //
+    // ⚠️ What it does NOT check is what `cleanup` DOES, which is why the arm
+    // above exists. The round-2 report's claim that this path could only be
+    // driven with a real cluster was wrong, and is corrected there.
     // Line numbers, over EXECUTABLE lines only — a first version of this
     // compared string offsets and matched the words "mktemp -d" inside the
     // very comment that explains the fix, so it failed on correct code.
