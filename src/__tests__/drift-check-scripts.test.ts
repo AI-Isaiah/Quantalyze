@@ -882,39 +882,140 @@ describe("IN-02 — no INVISIBLE characters in the Phase 164.3 gate scripts", ()
   // (`a/*c*\/b`).
   //
   // Read with node:fs, never shell grep, for the reason above.
+  //
+  // ⛔ R3-W04. The list used to be nine hand-written script paths plus this
+  // file. Of the sixteen files round 2 changed it covered THREE — it did not
+  // cover `ci.yml`, `GRAMMAR.md`, the self-test SQL fixtures, or ANY of the
+  // five test files that round authored. The NUL R2-I02 caught happened to land
+  // in a listed file; nothing structural made that so. A hand-list of a moving
+  // surface is the same defect as a hand-picked oracle.
+  //
+  // So the surface is DERIVED: everything under `scripts/` (recursively — that
+  // is where every gate, fixture and corpus file this phase owns lives), the CI
+  // workflow the gates are wired into, and every test file in `src/__tests__/`.
+  // Adding a gate script or a gate test enrols it automatically.
+  //
+  // ⚠️ `src/lib/wizardErrors.test.ts` carries a DELIBERATE NUL at line 1572 — a
+  // known, owned exception that makes `grep` silently blind to that file. It is
+  // not under `src/__tests__/`, so this derivation does not reach it, and the
+  // derivation is deliberately NOT widened to all of `src/`.
+  const walk = (dir: string): string[] =>
+    readdirSync(dir, { withFileTypes: true }).flatMap((e) =>
+      e.isDirectory() ? walk(join(dir, e.name)) : [join(dir, e.name)],
+    );
+
   const SCRIPTS = [
-    "scripts/sql-body-normalize.mjs",
-    "scripts/verify-plan-anchors.mjs",
-    "scripts/lint-sql-gates.mjs",
-    "scripts/mutation-runner/run.mjs",
-    "scripts/mutation-runner/parse.mjs",
-    "scripts/prod-body-drift-check.sh",
-    "scripts/test-ledger-drift-check.sh",
-    "scripts/pg-lane/run.sh",
-    "scripts/local-stack/run.sh",
-    // ⛔ R2-I02: THIS FILE. The character class below used to be written with
-    // the raw U+200B/U+200E/U+2066… bytes, so the file that forbids invisible
-    // characters was itself a scanner tripwire — and it was not in its own
-    // list, so nothing said so. The class is now written with \uXXXX escapes,
-    // proven byte-equivalent as a character class over all of the BMP before
-    // the swap, and the file scans itself.
-    "src/__tests__/drift-check-scripts.test.ts",
-  ];
+    ...walk("scripts"),
+    ".github/workflows/ci.yml",
+    ...readdirSync("src/__tests__")
+      .filter((f) => f.endsWith(".test.ts"))
+      .map((f) => join("src/__tests__", f)),
+  ].sort();
 
-  /** Zero-width and directional-formatting characters, plus a bare NUL. */
-  const INVISIBLE =
-    /[\u0000\u00AD\u180E\u200B-\u200F\u202A-\u202E\u2060-\u2064\u2066-\u2069\uFEFF]/;
+  /**
+   * Invisible and text-smuggling characters.
+   *
+   * ⛔ R3-W04 widened the shipped class, which covered only NUL, soft hyphen,
+   * U+180E, the ZW-star/bidi block and the BOM. It missed:
+   *   - every C0 control except NUL, including U+001B ESC (which injects ANSI
+   *     escape sequences into a CI log), and the whole C1 range;
+   *   - U+00A0 NBSP and the other space separators (U+2000-200A, U+202F,
+   *     U+205F, U+3000). An NBSP inside a shell script's `[ -n "$x" ]` is a
+   *     syntax error that is invisible in review — precisely what this pin
+   *     exists for;
+   *   - U+2028/U+2029, which `.split("\n")` does not separate on either;
+   *   - U+FFF9-FFFB interlinear annotation;
+   *   - the astral TAG block U+E0000-E007F, the standard modern text-smuggling
+   *     range, entirely outside the BMP the old class covered.
+   *
+   * ⚠️ VARIATION SELECTORS ARE CONDITIONAL, a deliberate departure from the
+   * reviewer's suggested class. U+FE0F is the second code point of every emoji
+   * this codebase writes in emoji presentation — the warning sign, the no-entry
+   * sign, the star, the check mark — so a blanket U+FE00-FE0F ban reports 11
+   * offenders in `run.mjs` alone and would have to be switched off, which is
+   * worse than a narrower rule that stays on. A variation selector NOT preceded
+   * by an Extended_Pictographic has no legitimate use here and is still refused.
+   *
+   * Written entirely in ESCAPES, per R2-I02: this file is in its own list, and a
+   * class written with raw bytes makes the file that forbids invisible
+   * characters a tripwire for every scanner that reads it.
+   */
+  const INVISIBLE = new RegExp(
+    "[\\u0000-\\u0008\\u000B\\u000C\\u000E-\\u001F\\u007F-\\u009F" +
+      "\\u00A0\\u00AD\\u180E\\u2000-\\u200F\\u2028\\u2029\\u202A-\\u202F" +
+      "\\u205F-\\u2064\\u2066-\\u206F\\u3000\\uFEFF\\uFFF9-\\uFFFB]" +
+      "|[\\u{E0000}-\\u{E007F}]" +
+      "|(?<!\\p{Extended_Pictographic})[\\uFE00-\\uFE0F]",
+    "u",
+  );
 
-  it("the file list itself is non-empty and every entry exists", () => {
-    // Without this, the loop below is satisfied by a typo'd path list.
-    expect(SCRIPTS.length).toBeGreaterThan(0);
+  it("the derived surface is non-empty, covers this phase's gates, and every entry exists", () => {
+    // Without this, the loop below is satisfied by a glob that matched nothing.
+    expect(SCRIPTS.length).toBeGreaterThan(20);
     for (const rel of SCRIPTS) {
-      expect(existsSync(rel), `${rel} is missing — update this list`).toBe(true);
+      expect(existsSync(rel), `${rel} is missing — the derivation is broken`).toBe(true);
+    }
+    // The files round 2 changed that the old hand-list did NOT cover.
+    for (const rel of [
+      ".github/workflows/ci.yml",
+      "scripts/mutation-runner/GRAMMAR.md",
+      "scripts/mutation-runner/fixtures/selftest/identity-rewrite-gate.sql",
+      "src/__tests__/mutation-runner-neuter.test.ts",
+      "src/__tests__/mutation-annotation-parser.test.ts",
+      "src/__tests__/verify-plan-anchors.test.ts",
+      "src/__tests__/baseline-wiring-claim.test.ts",
+      "src/__tests__/local-stack-teardown-assertion.test.ts",
+      "src/__tests__/drift-check-scripts.test.ts",
+    ]) {
+      expect(SCRIPTS, `${rel} is not covered by the derived surface`).toContain(rel);
+    }
+  });
+
+  it("the class catches every widened category, and does NOT fire on emoji presentation", () => {
+    // ⭐ A widened class that cannot fire on its new categories is a widening in
+    // name only, and one that fires on the warning sign would be switched off.
+    // Both directions are asserted. Every sample is built from ESCAPES.
+    const CATEGORIES: Array<[string, string]> = [
+      ["NUL", "a\u{0000}b"],
+      ["ESC", "a\u{001B}b"],
+      ["DEL", "a\u{007F}b"],
+      ["C1 control", "a\u{0085}b"],
+      ["NBSP", "a\u{00A0}b"],
+      ["en quad", "a\u{2000}b"],
+      ["narrow no-break space", "a\u{202F}b"],
+      ["medium mathematical space", "a\u{205F}b"],
+      ["ideographic space", "a\u{3000}b"],
+      ["line separator", "a\u{2028}b"],
+      ["paragraph separator", "a\u{2029}b"],
+      ["soft hyphen", "a\u{00AD}b"],
+      ["zero-width space", "a\u{200B}b"],
+      ["LTR mark", "a\u{200E}b"],
+      ["bidi override", "a\u{202E}b"],
+      ["word joiner", "a\u{2060}b"],
+      ["bidi isolate", "a\u{2066}b"],
+      ["BOM", "a\u{FEFF}b"],
+      ["interlinear annotation anchor", "a\u{FFF9}b"],
+      ["tag character (astral)", "a\u{E0041}b"],
+      ["bare variation selector", "a\u{FE0F}b"],
+    ];
+    for (const [label, sample] of CATEGORIES) {
+      expect(INVISIBLE.test(sample), `the class does not catch ${label}`).toBe(true);
+    }
+    // Non-vacuity: the table must actually have been walked.
+    expect(CATEGORIES.length).toBeGreaterThan(15);
+
+    for (const [label, sample] of [
+      ["warning sign in emoji presentation", "\u{26A0}\u{FE0F}"],
+      ["check mark in emoji presentation", "\u{2714}\u{FE0F}"],
+      ["no-entry sign", "\u{26D4}"],
+      ["plain ASCII", "const x = 1;"],
+    ] as const) {
+      expect(INVISIBLE.test(sample), `the class FALSELY fires on ${label}`).toBe(false);
     }
   });
 
   for (const rel of SCRIPTS) {
-    it(`${rel} carries no zero-width or bidi control characters`, () => {
+    it(`${rel} carries no invisible or text-smuggling characters`, () => {
       const offenders = readFileSync(rel, "utf8")
         .split("\n")
         .map((line, i) => ({ line, n: i + 1 }))
