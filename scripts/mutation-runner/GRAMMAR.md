@@ -28,7 +28,7 @@ kill.
 
 ---
 
-## The two anchoring rules
+## The three annotation rules
 
 ### 1. Markers count only at comment line start
 
@@ -86,6 +86,35 @@ wrong occurrence reads the resulting red as **success**. Both are vacuity, so
 "could not locate the bytes" and "the arm did not redden" must never share a code
 path. They are separate defect kinds in the report table.
 
+### 3. A mutation may not INJECT the string the detector looks for
+
+The injected text of every step — `replace` on an `edit`, `text` on an
+`insert-after`, `stmt` on a `sql` — is **refused at parse time** when it contains
+a `TEST FAILED (` literal (matched case-insensitively, with any whitespace).
+
+The runner proves an arm bites by requiring that the **first**
+`TEST FAILED (<ARM>)` in the lane's output names the intended arm. Rules 1 and 2
+constrain a mutation's *shape*; nothing constrained its *content*, and the gate
+file is itself in the corpus — four real steps already edit
+`supabase/tests/test_strategy_shares_rls.sql`, so "annotations only touch
+migrations" is not an invariant. That left this shape representable:
+
+```json
+{"arm":"X","apply":[{"kind":"edit","file":"supabase/tests/<gate>.sql",
+  "find":"<any 1-occurrence line>",
+  "replace":"RAISE EXCEPTION 'TEST FAILED (X): x';","occurrences":1}]}
+```
+
+It reports `RED (identity ok)`, counts toward `armsExecuted` and raises the
+biting count — for an arm whose own logic never ran. The mutation satisfies the
+**detector** instead of the **arm**: a vacuous check inside the vacuity
+detector, and the exact defect class Phase 164.4 would inherit across seventy
+more files.
+
+Mutate the code under test, never the failure message. Measured 2026-08-29:
+**0 of the 30** annotations in the real corpus inject this literal, so the rule
+refuses nothing that exists.
+
 ---
 
 ## Schema
@@ -113,7 +142,7 @@ neither.
 | `kind` | `"edit"` | yes | |
 | `file` | string | yes | Repo-relative. No leading `/`, no `..` segment. |
 | `find` | string | yes | Byte-exact needle. Non-empty. |
-| `replace` | string | yes | May be `""` to delete the needle. |
+| `replace` | string | yes | May be `""` to delete the needle. **May not contain a `TEST FAILED (` literal — rule 3.** |
 | `occurrences` | positive int | **yes** | Measured total matches in the file. |
 | `nth` | positive int | no (default `1`) | Which match to mutate. Must be ≤ `occurrences`. |
 
@@ -124,7 +153,7 @@ neither.
 | `kind` | `"insert-after"` | yes | |
 | `file` | string | yes | Repo-relative. |
 | `anchor` | string | yes | Byte-exact text to insert after. |
-| `text` | string | yes | Text inserted immediately after the anchor. |
+| `text` | string | yes | Text inserted immediately after the anchor. **May not contain a `TEST FAILED (` literal — rule 3.** |
 | `occurrences` | positive int | **yes** | Measured total anchor matches. |
 | `nth` | positive int | no (default `1`) | |
 
@@ -135,7 +164,7 @@ and *before* the gate. This is not a file edit; it is routed through the lane's
 | Key | Type | Required | Meaning |
 |---|---|---|---|
 | `kind` | `"sql"` | yes | |
-| `stmt` | string | yes | Non-empty. |
+| `stmt` | string | yes | Non-empty. **May not contain a `TEST FAILED (` literal — rule 3.** |
 
 ### `RED-UNDER-SETUP` — the in-file apply list
 

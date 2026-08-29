@@ -82,6 +82,41 @@ function isRepoRelativePath(p) {
   return !p.split(/[\\/]/).includes("..");
 }
 
+/**
+ * The literal the runner's first-failure identity check looks for.
+ *
+ * ⛔ WR-03. `run.mjs` proves an arm bites by requiring that the FIRST
+ * `TEST FAILED (<ARM>)` in the lane's output names the intended arm. Until
+ * this guard existed, `validateStep` constrained only the SHAPE of a mutation
+ * — kind, path safety, occurrences, nth — and said nothing about its CONTENT.
+ * The gate file is itself in the runner's corpus (four real steps already edit
+ * `supabase/tests/test_strategy_shares_rls.sql`), so an annotation of the form
+ *
+ *   {"kind":"edit","file":"supabase/tests/<gate>.sql","find":"<any line>",
+ *    "replace":"RAISE EXCEPTION 'TEST FAILED (X): x';","occurrences":1}
+ *
+ * produced `RED (identity ok)`, counted toward `armsExecuted` and raised the
+ * biting count — for an arm that was never exercised. The mutation SATISFIES
+ * THE DETECTOR instead of the arm: a vacuous check inside the vacuity
+ * detector. Phase 164.4 backfills ~70 more files against this schema, so the
+ * shape had to be unrepresentable rather than merely discouraged.
+ *
+ * MEASURED 2026-08-29: zero of the 30 annotations in the real corpus inject
+ * this literal, so nothing legitimate is refused.
+ */
+const INJECTS_FIRST_FAILURE_LITERAL = /TEST\s+FAILED\s*\(/i;
+
+function refuseSelfSatisfying(at, field, injected) {
+  if (typeof injected !== "string") return;
+  if (!INJECTS_FIRST_FAILURE_LITERAL.test(injected)) return;
+  throw (
+    `${at}: "${field}" injects a "TEST FAILED (" literal. A mutation that WRITES the string ` +
+    `the first-failure identity check looks for satisfies the DETECTOR instead of the arm — it ` +
+    `would report RED (identity ok) and count as a biting arm without the arm's own logic ever ` +
+    `running. Mutate the code under test, not the failure message.`
+  );
+}
+
 /** Validate one `apply` step. Returns the normalised step, or throws a message string. */
 function validateStep(step, index) {
   const at = `apply step ${index + 1}`;
@@ -95,6 +130,9 @@ function validateStep(step, index) {
 
   if (step.kind === "sql") {
     if (!isNonEmptyString(step.stmt)) throw `${at}: "stmt" must be a non-empty string`;
+    // A `sql` step runs against the lane's database, so a RAISE in it reaches
+    // the same output stream firstFailureArm() reads.
+    refuseSelfSatisfying(at, "stmt", step.stmt);
     return { kind: "sql", stmt: step.stmt };
   }
 
@@ -116,6 +154,7 @@ function validateStep(step, index) {
   if (step.kind === "edit") {
     if (!isNonEmptyString(step.find)) throw `${at}: "find" must be a non-empty string`;
     if (typeof step.replace !== "string") throw `${at}: "replace" must be a string (use "" to delete)`;
+    refuseSelfSatisfying(at, "replace", step.replace);
     return {
       kind: "edit",
       file: step.file,
@@ -128,6 +167,7 @@ function validateStep(step, index) {
 
   if (!isNonEmptyString(step.anchor)) throw `${at}: "anchor" must be a non-empty string`;
   if (!isNonEmptyString(step.text)) throw `${at}: "text" must be a non-empty string`;
+  refuseSelfSatisfying(at, "text", step.text);
   return {
     kind: "insert-after",
     file: step.file,

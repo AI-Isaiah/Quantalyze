@@ -375,6 +375,84 @@ describe("RED-UNDER-SETUP — the in-file apply list", () => {
   });
 });
 
+describe("WR-03 / GRAMMAR rule 3 — a mutation may not INJECT the detector's own string", () => {
+  // The runner proves an arm bites by requiring the FIRST `TEST FAILED (<ARM>)`
+  // in the lane's output to name the intended arm. `validateStep` constrained
+  // only SHAPE, and the gate file is itself in the corpus, so a mutation could
+  // WRITE that literal into the gate and report `RED (identity ok)` for an arm
+  // whose logic never ran — a vacuous check inside the vacuity detector.
+  const GATE_REL = "supabase/tests/test_strategy_shares_rls.sql";
+
+  it("rejects an `edit` whose replacement writes a TEST FAILED ( literal", () => {
+    const sql = [
+      "  -- RED-UNDER: prose",
+      `  -- RED-UNDER-M: {"arm":"X","apply":[{"kind":"edit","file":"${GATE_REL}","find":"anything","replace":"RAISE EXCEPTION 'TEST FAILED (X): forged';","occurrences":1}]}`,
+    ].join("\n");
+    expect(soleError(parseAnnotations(sql, { file: "g.sql" }))).toMatch(
+      /injects a "TEST FAILED \(" literal/,
+    );
+  });
+
+  it("rejects an `insert-after` whose inserted text writes the literal", () => {
+    const sql = [
+      "  -- RED-UNDER: prose",
+      `  -- RED-UNDER-M: {"arm":"X","apply":[{"kind":"insert-after","file":"${GATE_REL}","anchor":"a","text":"\\n  RAISE EXCEPTION 'TEST FAILED (X)';","occurrences":1}]}`,
+    ].join("\n");
+    expect(soleError(parseAnnotations(sql, { file: "g.sql" }))).toMatch(
+      /injects a "TEST FAILED \(" literal/,
+    );
+  });
+
+  it("rejects a `sql` step that raises the literal on the lane's database", () => {
+    const sql = [
+      "  -- RED-UNDER: prose",
+      `  -- RED-UNDER-M: {"arm":"X","apply":[{"kind":"sql","stmt":"DO $$ BEGIN RAISE EXCEPTION 'TEST FAILED (X)'; END $$;"}]}`,
+    ].join("\n");
+    expect(soleError(parseAnnotations(sql, { file: "g.sql" }))).toMatch(
+      /injects a "TEST FAILED \(" literal/,
+    );
+  });
+
+  it("matches case-insensitively and across whitespace — the obvious evasions", () => {
+    for (const injected of [
+      "raise exception 'test failed (X)';",
+      "RAISE EXCEPTION 'TEST  FAILED  (X)';",
+      "RAISE EXCEPTION 'TEST\tFAILED(X)';",
+      "RAISE EXCEPTION 'TEST\nFAILED (X)';",
+    ]) {
+      const sql = [
+        "  -- RED-UNDER: prose",
+        `  -- RED-UNDER-M: {"arm":"X","apply":[{"kind":"edit","file":"${GATE_REL}","find":"a","replace":${JSON.stringify(injected)},"occurrences":1}]}`,
+      ].join("\n");
+      expect(
+        soleError(parseAnnotations(sql, { file: "g.sql" })),
+        `not refused: ${injected}`,
+      ).toMatch(/injects a "TEST FAILED \(" literal/);
+    }
+  });
+
+  it("does NOT refuse an ordinary mutation — the rule is narrow, not a blanket ban on editing the gate", () => {
+    const sql = [
+      "  -- RED-UNDER: prose",
+      `  -- RED-UNDER-M: {"arm":"X","apply":[{"kind":"edit","file":"${GATE_REL}","find":"generation  BIGINT","replace":"generation  INTEGER","occurrences":1}]}`,
+    ].join("\n");
+    const result = parseAnnotations(sql, { file: "g.sql" });
+    expect(result.errors).toEqual([]);
+    expect(result.structured).toHaveLength(1);
+  });
+
+  it("the REAL corpus contains no annotation this rule refuses", () => {
+    // Measured before shipping the rule: 0 of 30. Pinned so a future backfill
+    // (164.4, ~70 files) cannot quietly introduce the shape and then be
+    // "fixed" by relaxing the rule.
+    const result = parseFile(
+      join(REPO_ROOT, "supabase", "tests", "test_strategy_shares_rls.sql"),
+    );
+    expect(result.errors).toEqual([]);
+    expect(result.structured).toHaveLength(30);
+  });
+});
+
 describe("against the real corpus (reads via node:fs, never shell grep)", () => {
   const GATE = join(REPO_ROOT, "supabase", "tests", "test_strategy_shares_rls.sql");
 
