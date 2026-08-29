@@ -968,6 +968,50 @@ describe("VAC-08 — scripts/test-ledger-drift-check.sh", () => {
     });
   });
 
+  it("SP-M01 RED: a grep that ERRORS while counting is a MEASURE_FAIL, not 'counted zero'", () => {
+    // ⛔ `missing_count="$(grep -ac … || true)"; missing_count="${missing_count:-0}"`.
+    // grep exits 0 with a count, 1 on no match, and >= 2 on an ERROR — and on
+    // >= 2 the substitution is EMPTY, `${:-0}` makes it 0, and the gate prints
+    // "all N repo migrations found by name."
+    //
+    // Driven with a `grep` that delegates to the real one for everything EXCEPT
+    // the missing-row file, where it exits 2. That is the only way to reach the
+    // branch: the file is created inside the script's own scratch dir.
+    withTempDir((dir) => {
+      const bin = join(dir, "bin");
+      mkdirSync(bin, { recursive: true });
+      const realGrep = spawnSync("bash", ["-c", "command -v grep"], {
+        encoding: "utf8",
+      }).stdout.trim();
+      expect(realGrep, "no real grep on PATH to delegate to").not.toBe("");
+      writeFileSync(
+        join(bin, "grep"),
+        [
+          "#!/usr/bin/env bash",
+          'for a in "$@"; do case "$a" in *missing.txt) exit 2;; esac; done',
+          `exec ${realGrep} "$@"`,
+        ].join("\n"),
+      );
+      chmodSync(join(bin, "grep"), 0o755);
+
+      // The ledger itself is CLEAN, so the only thing that can redden this run
+      // is the unreadable count — otherwise the arm would pass for the wrong
+      // reason.
+      const env = scaffoldLedgerCase(dir, {});
+      const clean = run(LEDGER_GATE, env);
+      expect(clean.status, "the fixture must be green before the grep is broken").toBe(0);
+
+      const { status, out } = run(LEDGER_GATE, {
+        ...env,
+        PATH: `${bin}:${process.env.PATH ?? ""}`,
+      });
+      expect(status, "an uncountable result was reported as a count of zero").toBe(1);
+      expect(out).toContain("could not count the missing-migration rows");
+      expect(out).not.toContain("repo migrations found by name");
+      expect(out).not.toContain("ledger and body checks clean");
+    });
+  });
+
   it("RED: an EMPTY migrations corpus is an error, not a quiet pass (F11's shape)", () => {
     withTempDir((dir) => {
       const env = scaffoldLedgerCase(dir, {});

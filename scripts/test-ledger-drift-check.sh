@@ -197,8 +197,20 @@ check() {
   run_ledger_query missing "$names_csv" > "$missing_file" \
     || fail "the ledger presence query failed (output withheld — it can carry connection detail)."
 
-  local missing_count
-  missing_count="$(grep -ac '[^[:space:]]' "$missing_file" || true)"
+  # ⛔ SP-M01. This read
+  #     missing_count="$(grep -ac … || true)"; missing_count="${missing_count:-0}"
+  # and that turns "could not count" into "counted zero". `grep` exits 0 with a
+  # count, 1 with no match, and >= 2 on an ERROR (unreadable file, I/O failure)
+  # — and on >= 2 the substitution is EMPTY, `${:-0}` makes it `0`, and the
+  # branch below prints "all N repo migrations found by name." A gate that
+  # cannot read its own result must not report the result it wanted.
+  local missing_count grep_rc
+  set +e
+  missing_count="$(grep -ac '[^[:space:]]' "$missing_file")"
+  grep_rc=$?
+  set -e
+  [ "$grep_rc" -le 1 ] || fail "MEASURE_FAIL: could not count the missing-migration rows (grep exited ${grep_rc} on ${missing_file}). An uncountable result is not a count of zero."
+  # Only exit 1 (no match) legitimately yields an empty count.
   missing_count="${missing_count:-0}"
 
   local bad=0
@@ -215,8 +227,19 @@ check() {
   # Advisory only — squashes and CLI-era rows make this direction noisy.
   local extra_file="${tmp}/extra.txt"
   if run_ledger_query extra "$names_csv" > "$extra_file" 2>/dev/null; then
-    local extra_count
-    extra_count="$(grep -ac '[^[:space:]]' "$extra_file" || true)"
+    # Same shape as SP-M01, one line down. This direction is ADVISORY by
+    # design (squashes and CLI-era rows make it noisy), so an uncountable
+    # result is surfaced as a warning rather than failing the gate — but it is
+    # never allowed to read as "counted zero, nothing to report".
+    local extra_count extra_rc
+    set +e
+    extra_count="$(grep -ac '[^[:space:]]' "$extra_file")"
+    extra_rc=$?
+    set -e
+    if [ "$extra_rc" -gt 1 ]; then
+      echo "::warning::${GATE}: could not count the advisory extra-ledger rows (grep exited ${extra_rc}). This direction is advisory, so the run continues — but it reported nothing because it could not read, not because there was nothing."
+      extra_count=0
+    fi
     if [ "${extra_count:-0}" -gt 0 ]; then
       echo "  advisory: ${extra_count} ledger row(s) have no repo file (squashes / CLI-era rows). Not a failure."
     fi
