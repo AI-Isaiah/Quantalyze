@@ -522,11 +522,20 @@ ordering is unenforced, wave frontmatter drifting from ROADMAP, and `NYQ-01`. Sa
 system (upstream `gsd-core`, not this repo). Mixing them in makes this unshippable. Book them
 separately.
 
-**Plans:** 0 plans
+**Plans:** 10 plans
 
 Plans:
 
-- [ ] TBD (run /gsd-plan-phase 164.3 to break down)
+- [ ] 164.3-01-PLAN.md — Disposable-PG lane promoted (trap cleanup, PGBIN chain, free port) + SHAPE 1c tracer proof (VAC-02) [wave 1]
+- [ ] 164.3-02-PLAN.md — Drift family: shared normalizer, VAC-04 PROD-body step in migration-drift-check.yml (D-12/D-13/D-17), VAC-08 name-join ledger check + body assertion, OPS-08-F9 verify-and-record (VAC-04, VAC-08, SKIP-01, DRIFT-01) [wave 1]
+- [ ] 164.3-03-PLAN.md — H-0001: findMutations single-line detection fixed, un-skipped, re-censused, counted allowlist [wave 1]
+- [ ] 164.3-04-PLAN.md — VAC-07 SPIKE: 263-migration replay measured + local-stack lane with trapped teardown (D-15) [wave 1]
+- [ ] 164.3-05-PLAN.md — Mutation runner core: RED-UNDER-M grammar + parser + first-failure identity + both exit-1 modes + aggregation (VAC-01, OPS-08-F8) [wave 2]
+- [ ] 164.3-06-PLAN.md — Static vacuity linter, mechanisms 1/2/4 + narrow 3, red fixtures per rule, NO mechanism-5 rule (VAC-03, D-16) [wave 2]
+- [ ] 164.3-07-PLAN.md — Phase 159 closure spec: two concurrent csv-finalize POSTs, one 2xx + one honest 409, winner holds (VAC-07, D-08) [wave 2]
+- [ ] 164.3-08-PLAN.md — Corpus annotation backfill (30 arm-anchored markers, measured), full run green, ARMS_FLOOR pinned, sql-mutation CI job + aggregator row (VAC-01) [wave 3]
+- [ ] 164.3-09-PLAN.md — Plan-anchor verifier: range + quote re-resolution over pending plans, CI seam + execute-time convention (VAC-05, D-06 own wave) [wave 4]
+- [ ] 164.3-10-PLAN.md — All five mechanisms re-introduced and demonstrated caught, durable via vitest pin + every-push runner (VAC-06) [wave 5]
 
 ### Phase 164.4: REDUNDER-BACKFILL — every SQL gate arm gets a RED-UNDER annotation that a machine PROVES bites (INSERTED)
 
