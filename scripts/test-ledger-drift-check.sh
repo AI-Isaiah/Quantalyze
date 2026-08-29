@@ -215,9 +215,29 @@ check() {
   fi
 
   # ── HALF 2: BODY PAIRING ──────────────────────────────────────────────────
+  #
+  # WR-02: half 1 refuses an empty corpus explicitly ("that is not a pass").
+  # Half 2 had no equivalent, and it needs one for a reason half 1 does not:
+  # BODY_CHECK_FUNCTIONS is an env-overridable, space-separated list, so a
+  # WHITESPACE-ONLY value survives the `${…:-default}` above (`:-` only
+  # substitutes for empty) and then `for fname in $BODY_CHECK_FUNCTIONS`
+  # iterates ZERO times. MEASURED 2026-08-29 before this guard:
+  #   BODY_CHECK_FUNCTIONS=" " bash scripts/test-ledger-drift-check.sh
+  #   -> "0 body comparison(s)" … "ledger and body checks clean" … exit 0
+  # DRIFT-01 — the finding this half exists for — was unchecked while the gate
+  # read green. `tr -d` rather than `${var// /}` so the check is identical
+  # under the bash a developer has locally (macOS 3.2) and the runner's bash 5.
+  local body_check_names
+  body_check_names="$(printf '%s' "$BODY_CHECK_FUNCTIONS" | tr -d '[:space:]')"
+  if [ -z "$body_check_names" ]; then
+    fail "BODY_CHECK_FUNCTIONS is empty or whitespace-only, so half 2 compared NOTHING. Presence in the ledger is not evidence the body matches (DRIFT-01) — that is not a pass."
+  fi
+
   local fname live snapshot rows
   local compared=0
+  local names_seen=0
   for fname in $BODY_CHECK_FUNCTIONS; do
+    names_seen=$((names_seen + 1))
     live="${tmp}/${fname}.live.sql"
     if ! run_body_fetch "$fname" > "$live" 2>"${tmp}/${fname}.err"; then
       echo "::error::${GATE}: could not read TEST's definition of '${fname}' (stderr withheld — public log)."
@@ -280,7 +300,21 @@ check() {
   done
 
   echo ""
-  echo "${GATE}: ${#repo_names[@]} migration(s) checked against the ledger, ${compared} body comparison(s)."
+  echo "${GATE}: ${#repo_names[@]} migration(s) checked against the ledger, ${compared} body comparison(s) over ${names_seen} named function(s)."
+
+  # The second half of WR-02. The guard above catches an empty LIST; this
+  # catches a non-empty list that still produced no comparison — a fetcher
+  # returning nothing for every name, or a comparator emitting no rows. Unlike
+  # VAC-04, there is no legitimate zero here: every name in this list is a
+  # function the committed snapshot already has a body for, so zero
+  # comparisons always means the gate did not look.
+  if [ "$compared" -eq 0 ]; then
+    echo "::error::${GATE}: MEASURE_FAIL — ZERO body comparisons for [${BODY_CHECK_FUNCTIONS}]."
+    echo "::error::Presence in the ledger is not evidence the body matches (DRIFT-01), so a run"
+    echo "::error::that compared no bodies has nothing to report clean."
+    bad=1
+  fi
+
   if [ "$bad" = 1 ]; then
     return 1
   fi
@@ -347,7 +381,7 @@ STUB
     MISSING_NAMES="$2" \
     LEDGER_QUERY_CMD="bash $tmp/ledger.sh" \
     BODY_FETCH_CMD="bash $tmp/body.sh" \
-    BODY_CHECK_FUNCTIONS="selftest_fn" \
+    BODY_CHECK_FUNCTIONS="${3:-selftest_fn}" \
     NORMALIZER="$NORMALIZER" \
     bash "$0" --run-check
   }
@@ -360,6 +394,18 @@ STUB
   printf '%s\n' "$drifted" > "$tmp/live/selftest_fn.sql"
   run_arm "body-mismatch RED" 1 arm_env "$tmp/live" ""
 
+  # RED 3 (WR-02) — a whitespace-only function list. It survives the
+  # `${…:-default}` above and then iterates zero times, so before the guard
+  # this arm exited 0 with "ledger and body checks clean" having compared
+  # nothing. Half 1 always refused its empty corpus; half 2 now does too.
+  printf '%s\n' "$body" > "$tmp/live/selftest_fn.sql"
+  run_arm "empty-body-check-list RED" 1 arm_env "$tmp/live" "" " "
+
+  # RED 4 (WR-02) — a NON-empty list where every fetch comes back empty. The
+  # list guard cannot see this one; the zero-comparison floor after the loop
+  # can. `$tmp/nowhere` has no bodies in it.
+  run_arm "zero-comparisons RED" 1 arm_env "$tmp/nowhere" ""
+
   # GREEN — everything present, bodies equal after normalization.
   printf '%s\n' "$body" > "$tmp/live/selftest_fn.sql"
   run_arm "green path" 0 arm_env "$tmp/live" ""
@@ -369,7 +415,7 @@ STUB
     echo "SELF-TEST FAIL: ${pass}/${total} arms behaved as declared."
     return 1
   fi
-  echo "${GATE}: self-test OK (${pass}/${total} arms — both red modes fire and the green path passes)."
+  echo "${GATE}: self-test OK (${pass}/${total} arms — all four red modes fire and the green path passes)."
   return 0
 }
 

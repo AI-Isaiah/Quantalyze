@@ -532,7 +532,42 @@ describe("VAC-08 — scripts/test-ledger-drift-check.sh", () => {
     });
   });
 
-  it("--self-test proves BOTH red modes and the green path, and exits 0", () => {
+  it("WR-02 RED: a WHITESPACE-ONLY BODY_CHECK_FUNCTIONS exits 1 — half 2 must not compare nothing and pass", () => {
+    withTempDir((dir) => {
+      // `${BODY_CHECK_FUNCTIONS:-default}` only substitutes for EMPTY, so a
+      // single space survives it and then `for fname in $LIST` iterates zero
+      // times. MEASURED before the guard: "0 body comparison(s)" … "ledger and
+      // body checks clean" … exit 0, with DRIFT-01 unchecked.
+      const env = scaffoldLedgerCase(dir, {});
+      const { status, out } = run(LEDGER_GATE, {
+        ...env,
+        BODY_CHECK_FUNCTIONS: " ",
+      });
+      expect(status).toBe(1);
+      expect(out).toContain("half 2 compared NOTHING");
+      expect(out).not.toContain("ledger and body checks clean");
+    });
+  });
+
+  it("WR-02 RED: a non-empty list that yields ZERO comparisons is a MEASURE_FAIL", () => {
+    withTempDir((dir) => {
+      // The list guard cannot see this shape: the names are there, but the
+      // fetcher returns nothing for any of them.
+      const env = scaffoldLedgerCase(dir, {});
+      const silent = join(dir, "silent-fetch.sh");
+      writeFileSync(silent, "#!/usr/bin/env bash\nexit 0\n");
+      chmodSync(silent, 0o755);
+      const { status, out } = run(LEDGER_GATE, {
+        ...env,
+        BODY_FETCH_CMD: `bash ${silent}`,
+      });
+      expect(status).toBe(1);
+      expect(out).toContain("ZERO body comparisons");
+      expect(out).not.toContain("ledger and body checks clean");
+    });
+  });
+
+  it("--self-test proves ALL FOUR red modes and the green path, and exits 0", () => {
     const res = spawnSync("bash", [LEDGER_GATE, "--self-test"], {
       cwd: process.cwd(),
       encoding: "utf8",
@@ -541,6 +576,8 @@ describe("VAC-08 — scripts/test-ledger-drift-check.sh", () => {
     expect(res.status).toBe(0);
     expect(out).toContain("missing-ledger-row RED");
     expect(out).toContain("body-mismatch RED");
+    expect(out).toContain("empty-body-check-list RED");
+    expect(out).toContain("zero-comparisons RED");
     expect(out).toContain("green path");
   });
 
