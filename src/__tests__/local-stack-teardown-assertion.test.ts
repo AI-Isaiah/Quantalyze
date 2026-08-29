@@ -151,10 +151,36 @@ describe("R2-I03 — every dispatched mode is documented, and usage() prints onl
 
     const text = usage();
     for (const mode of modes) {
-      expect(text, `mode "${mode}" is dispatched but absent from the INVOCATIONS block`).toContain(
-        mode,
-      );
+      // ⛔ R3-I01: `expect(text).toContain("up")` is UNFALSIFIABLE. `modes`
+      // includes the bare words `up` and `down`, and the header's own
+      // "run.sh up --no-schema" line — or the word "backup", or "up to" in any
+      // sentence — satisfies a bare substring check. Two of the five assertions
+      // this loop makes could not have failed.
+      //
+      // Anchor a bare-word mode to the invocation it must appear in. The `--`
+      // modes carry their own signal and are checked as-is.
+      const needle = mode.startsWith("--") ? mode : `run.sh ${mode}`;
+      expect(
+        text,
+        `mode "${mode}" is dispatched but absent from the INVOCATIONS block (looked for ${JSON.stringify(needle)})`,
+      ).toContain(needle);
     }
+  });
+
+  it("R3-I01: the anchored check can actually fail — a bare substring one could not", () => {
+    // Non-vacuity for the arm above, driven rather than argued. The header
+    // legitimately contains the word "up" in prose; what it must contain is the
+    // INVOCATION. Removing the invocation line while leaving prose mentioning
+    // the mode is exactly the drift the arm exists for, so the two needles are
+    // compared here directly.
+    const text = usage();
+    const prose = "the stack comes up and the baseline is loaded";
+    expect(prose).toContain("up"); // a bare check is satisfied by prose
+    expect(prose).not.toContain("run.sh up"); // the anchored one is not
+    // And the real header satisfies the anchored form, so the arm above is
+    // asserting a property the subject genuinely has.
+    expect(text).toContain("run.sh up");
+    expect(text).toContain("run.sh down");
   });
 
   it("the help text stops at the header — it does not print shell code", () => {
