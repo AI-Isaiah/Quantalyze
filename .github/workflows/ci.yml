@@ -921,7 +921,13 @@ jobs:
           fi
           bad=0
           for f in "${files[@]}"; do
-            if grep -anE '^\\\!|^\\!| \\\!| \\!' "$f" >/dev/null 2>&1; then
+            # IN-06: this read '^\\\!|^\\!| \\\!| \\!'. In ERE both `\\\!` and
+            # `\\!` denote a literal backslash followed by a literal `!`, so
+            # alternatives 1/2 and 3/4 were duplicates — redundancy that reads
+            # as a deliberate distinction which does not exist. Verified
+            # behaviour-identical against a `\!`-at-line-start file, a
+            # `\!`-after-a-space file and a clean file (exit 0/0/1 both ways).
+            if grep -anE '(^| )\\!' "$f" >/dev/null 2>&1; then
               echo "::error file=$f::contains '\\!' (shell escape) — refused by the mutation-lane preflight"
               bad=1
             fi
@@ -1035,12 +1041,35 @@ jobs:
             echo "::error::MEASURE_FAIL: ZERO arms executed. The gate cannot observe a non-biting annotation without running one. If the step above was changed to --parse-only, that is a static check, not this gate."
             exit 1
           fi
-          if [ "$arms_executed" -lt "$arms_floor" ]; then
-            echo "::error::ARMS_FLOOR regression: $arms_executed arm(s) executed < floor $arms_floor. An annotation was deleted, or converted to a waiver without lowering the floor in scripts/mutation-runner/run.mjs."
+          # IN-05: ARMS_FLOOR bounds BITING arms — executed minus those that did
+          # not redden or reddened on the wrong arm — not raw executed. This
+          # step used to compare `arms_executed` to the same constant and print
+          # "ARMS_FLOOR regression: N arm(s) executed < floor", naming a
+          # quantity the constant was never measured against. The runner now
+          # prints the real one under its own name and this reads THAT.
+          #
+          # A missing `biting:` line is a MEASURE_FAIL and not a zero: it is
+          # also what a `--parse-only` swap produces, since that mode executes
+          # nothing and deliberately does not print it.
+          biting_line=$(grep -a -m1 -E '^biting: [0-9]+ ' "$RUNNER_LOG" || true)
+          if [ -z "$biting_line" ]; then
+            echo "::error::MEASURE_FAIL: the run printed NO 'biting: N' line, so the quantity ARMS_FLOOR actually bounds is unknown. Either the runner stopped reporting it, or the step above was not the gate (--parse-only executes zero arms and does not print it)."
+            exit 1
+          fi
+          echo "$biting_line"
+          biting=$(echo "$biting_line" | sed -E 's|^biting: ([0-9]+) .*|\1|')
+          case "$biting" in ''|*[!0-9]*)
+            echo "::error::MEASURE_FAIL: could not read the biting count out of '$biting_line'."; exit 1;; esac
+          if [ "$biting" -gt "$arms_executed" ]; then
+            echo "::error::MEASURE_FAIL: biting ($biting) exceeds executed ($arms_executed). Those two numbers come from the same run and cannot disagree this way; one of them is not measuring what it claims."
+            exit 1
+          fi
+          if [ "$biting" -lt "$arms_floor" ]; then
+            echo "::error::ARMS_FLOOR regression: $biting biting arm(s) < floor $arms_floor. An annotation stopped biting, was deleted, or was converted to a waiver without lowering the floor in scripts/mutation-runner/run.mjs."
             exit 1
           fi
 
-          echo "Coverage print is present and both floors hold: files $files_annotated >= $files_floor, arms $arms_executed >= $arms_floor."
+          echo "Coverage print is present and both floors hold: files $files_annotated >= $files_floor, biting arms $biting >= $arms_floor (of $arms_executed executed)."
 
   plan-anchor-verify:
     # Phase 164.3 / VAC-05 — re-resolve every anchor and quote a PENDING plan

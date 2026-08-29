@@ -16,6 +16,7 @@
  * ci.yml's SENTINEL_FLOOR / ARMS_FLOOR.
  */
 import { describe, expect, it } from "vitest";
+import { spawnSync } from "node:child_process";
 import { readFileSync, readdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -156,6 +157,52 @@ describe("ARMS_FLOOR ratchet", () => {
       ARMS_FLOOR,
       `The corpus declares ${twins} twin(s) of which ${waivers} are waivers, so a green run bites ${twins - waivers}. ARMS_FLOOR is ${ARMS_FLOOR}. Update the floor in scripts/mutation-runner/run.mjs from a MEASURED run, never from this number.`,
     ).toBe(twins - waivers);
+  });
+});
+
+describe("IN-05 — CI's floor and the runner's floor bound the SAME quantity", () => {
+  // `run.mjs` compares ARMS_FLOOR to `biting` = executed minus (no-red +
+  // wrong-first-failure). The ci.yml assertion parsed `arms: E/A/W` and
+  // compared raw E to the same constant, then reported an "ARMS_FLOOR
+  // regression" naming a quantity the constant was never measured against. On
+  // a run with any non-biting arm the two disagree. Two meanings under one
+  // name is how a floor decays into a number nobody compares.
+  const RUNNER = "scripts/mutation-runner/run.mjs";
+  const CI = ".github/workflows/ci.yml";
+
+  it("the runner prints a distinct `biting:` line on a real run", () => {
+    // Asserted on the source rather than by running the lane (which needs
+    // PostgreSQL): the print must exist in the gate path, and it must be the
+    // same variable the floor comparison uses.
+    const src = readFileSync(RUNNER, "utf8");
+    expect(src).toMatch(/log\(`biting: \$\{bitingArms\}/);
+    expect(src).toMatch(/if \(bitingArms < armsFloor\)/);
+    // And the floor must NOT be compared against raw executed any more.
+    expect(src).not.toMatch(/if \(armsExecuted < armsFloor\)/);
+  });
+
+  it("`--parse-only` deliberately does NOT print it — so CI's demand for it also catches a mode swap", () => {
+    const res = spawnSync("node", [RUNNER, "--parse-only"], {
+      cwd: REPO_ROOT,
+      encoding: "utf8",
+    });
+    const out = `${res.stdout ?? ""}${res.stderr ?? ""}`;
+    expect(res.status).toBe(0);
+    expect(out).toMatch(/^arms: 0\//m);
+    expect(out).not.toMatch(/^biting: /m);
+  });
+
+  it("ci.yml reads the `biting:` line and no longer compares ARMS_FLOOR to executed", () => {
+    const ci = readFileSync(CI, "utf8");
+    expect(ci).toContain("^biting: [0-9]+ ");
+    expect(ci).toContain("ARMS_FLOOR regression: $biting biting arm(s)");
+    expect(
+      ci,
+      "ci.yml still compares raw executed arms to ARMS_FLOOR — the quantity the constant was not measured against.",
+    ).not.toContain('if [ "$arms_executed" -lt "$arms_floor" ]');
+    // The executed-is-zero MEASURE_FAIL must survive: it is the arm that
+    // catches a --parse-only swap.
+    expect(ci).toContain('if [ "$arms_executed" -eq 0 ]');
   });
 });
 

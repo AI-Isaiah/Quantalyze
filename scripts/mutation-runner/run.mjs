@@ -697,6 +697,19 @@ export function runCorpus({
   log("");
   log(`coverage: files ${corpus.filesAnnotated}/${corpus.filesTotal}`);
   log(`arms: ${armsExecuted}/${armsAnnotated}/${armsWaived}   (executed/annotated/waived)`);
+  // IN-05: the number ARMS_FLOOR is actually compared against, printed under
+  // its own name.
+  //
+  // The floor here compares `biting` — executed arms MINUS those that failed
+  // to redden or reddened on the wrong arm. The CI assertion parsed `arms:
+  // E/A/W` and compared raw E, then reported an "ARMS_FLOOR regression" using
+  // a quantity the constant was never measured against. On a run with any
+  // non-biting arm the two disagree. That is not a hole — the runner exits 1
+  // on such a run first — but two meanings under one name is how a floor
+  // decays into a number nobody compares. So CI now reads THIS line.
+  const bitingArms =
+    armsExecuted - defects.filter((d) => ["no-red", "wrong-first-failure"].includes(d.kind)).length;
+  log(`biting: ${bitingArms}   (executed arms that reddened their OWN arm first — the quantity ARMS_FLOOR bounds)`);
   for (const w of waivers) log(`  waived: ${w.arm} — ${w.reason}`);
   if (timings.length > 0) {
     const total = timings.reduce((a, b) => a + b, 0);
@@ -716,9 +729,8 @@ export function runCorpus({
         `FILES_FLOOR regression: ${corpus.filesAnnotated} annotated file(s) < floor ${filesFloor}`,
       );
     }
-    const biting = armsExecuted - defects.filter((d) => ["no-red", "wrong-first-failure"].includes(d.kind)).length;
-    if (biting < armsFloor) {
-      addDefect("floor", null, scopeDir, `ARMS_FLOOR regression: ${biting} biting arm(s) < floor ${armsFloor}`);
+    if (bitingArms < armsFloor) {
+      addDefect("floor", null, scopeDir, `ARMS_FLOOR regression: ${bitingArms} biting arm(s) < floor ${armsFloor}`);
     }
   }
 
