@@ -167,20 +167,44 @@ describe("R2-I03 — every dispatched mode is documented, and usage() prints onl
     }
   });
 
-  it("R3-I01: the anchored check can actually fail — a bare substring one could not", () => {
-    // Non-vacuity for the arm above, driven rather than argued. The header
-    // legitimately contains the word "up" in prose; what it must contain is the
-    // INVOCATION. Removing the invocation line while leaving prose mentioning
-    // the mode is exactly the drift the arm exists for, so the two needles are
-    // compared here directly.
+  it("R3-I01/SP-C04: the anchored check FIRES on the real header with the invocation removed; a bare one does not", () => {
+    // ⛔ SP-C04. This arm used to read:
+    //     const prose = "the stack comes up and the baseline is loaded";
+    //     expect(prose).toContain("up");
+    //     expect(prose).not.toContain("run.sh up");
+    // Both assertions are about a string literal defined two lines above. They
+    // are true regardless of run.sh, of usage(), of anything in the repo —
+    // they would still pass if the entire lane were deleted. Its stated
+    // purpose was "non-vacuity for the arm above, DRIVEN rather than argued",
+    // and it was neither.
+    //
+    // So it is driven now: the SUBJECT is mutilated (the invocation line is
+    // deleted from the REAL usage() text) and the two needles are applied to
+    // what comes back.
     const text = usage();
-    const prose = "the stack comes up and the baseline is loaded";
-    expect(prose).toContain("up"); // a bare check is satisfied by prose
-    expect(prose).not.toContain("run.sh up"); // the anchored one is not
-    // And the real header satisfies the anchored form, so the arm above is
-    // asserting a property the subject genuinely has.
-    expect(text).toContain("run.sh up");
-    expect(text).toContain("run.sh down");
+    for (const mode of ["up", "down"]) {
+      const anchored = `run.sh ${mode}`;
+      expect(text, `the real header must carry "${anchored}", or the mutilation below removes nothing`).toContain(anchored);
+
+      const mutilated = text
+        .split("\n")
+        .filter((l) => !l.includes(anchored))
+        .join("\n");
+      // Calibration: the deletion really happened.
+      expect(mutilated.length, "the mutilation removed nothing").toBeLessThan(text.length);
+
+      // ⭐ THE POINT. On the mutilated header the ANCHORED needle fires…
+      expect(
+        mutilated,
+        `the anchored needle survived deletion of every "${anchored}" line — it is not anchored to anything`,
+      ).not.toContain(anchored);
+      // …while a BARE one is still satisfied, by the header's own prose. That
+      // is why the loop above cannot use a bare needle.
+      expect(
+        mutilated,
+        `the bare word "${mode}" no longer appears at all, so this comparison shows nothing — pick a mode the header discusses in prose`,
+      ).toContain(mode);
+    }
   });
 
   it("the help text stops at the header — it does not print shell code", () => {
