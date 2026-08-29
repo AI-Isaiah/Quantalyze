@@ -255,8 +255,25 @@ const IGNORABLE_LINE = /^[ \t]*(--.*)?$/;
 /**
  * The head of the block the RAISE sits in. Reaching one of these means every
  * line between it and the RAISE has been classified, so the scan can stop.
+ *
+ * ⚠️ This is a bare word match. It MUST only ever be applied to EXECUTABLE
+ * text — see `stripTrailingComment` and the ordering note in the scan below.
+ * Applied to a raw line it treats `-- raise the exception the harness looks
+ * for` as a branch head, which ends the scan one line early and lets the
+ * statement above it leak. That was a live bypass (R2-C01).
  */
 const BRANCH_HEAD = /\b(THEN|BEGIN|ELSE|ELSIF|LOOP|DECLARE|EXCEPTION)\b/i;
+
+/**
+ * Drop a trailing `--` comment so BRANCH_HEAD sees only executable text.
+ *
+ * Deliberately naive about string literals: `RAISE NOTICE 'a--b THEN'` strips
+ * to `RAISE NOTICE 'a`, which no longer matches BRANCH_HEAD and therefore
+ * REFUSES rather than terminating the scan. Refusing is the safe direction —
+ * a refusal is a loud, named `neuter-missed` defect, whereas a wrong
+ * termination is the silent state leak this whole block exists to prevent.
+ */
+const stripTrailingComment = (line) => line.replace(/--.*$/, "");
 
 export function neuterArm(text, arm) {
   const lines = text.split("\n");
@@ -303,8 +320,17 @@ export function neuterArm(text, arm) {
   //
   // MEASURED 2026-08-29 against the real corpus: all 30 arms still execute and
   // bite, so this refuses nothing that exists today.
-  for (let k = start - 1; k >= 0 && !BRANCH_HEAD.test(lines[k]); k -= 1) {
-    if (IGNORABLE_LINE.test(lines[k])) continue;
+  // ⛔ ORDER IS LOAD-BEARING (R2-C01). Classify FIRST, terminate LAST, and
+  // terminate only on EXECUTABLE text. The previous version tested BRANCH_HEAD
+  // in the loop condition — before `IGNORABLE_LINE` was consulted and with no
+  // comment stripping — so a whole-line `-- … the exception …` comment, the
+  // likeliest comment to sit beside a `RAISE EXCEPTION`, ended the scan before
+  // the statement above it was ever examined. Measured: `SET ROLE postgres;`
+  // survived the neuter and stayed live for the rest of the file, which is
+  // verbatim the leak class described in the header above.
+  for (let k = start - 1; k >= 0; k -= 1) {
+    if (IGNORABLE_LINE.test(lines[k])) continue; // blank or whole-line comment
+    if (BRANCH_HEAD.test(stripTrailingComment(lines[k]))) break; // real branch head
     return {
       text,
       found: false,

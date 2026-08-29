@@ -169,6 +169,87 @@ describe("WR-07 — an abort-path statement it cannot classify is REFUSED, not l
     expect(neuterArm(text, "ARM D").found).toBe(true);
   });
 
+  // ── R2-C01: a comment must not be able to END the scan ────────────────────
+  // The arm above ("an explanatory comment") passes on a comment containing no
+  // branch-head word, so it could never have caught this. BRANCH_HEAD is a bare
+  // word match, and it used to be tested in the loop CONDITION — before
+  // IGNORABLE_LINE, with no comment stripping. So a comment carrying THEN /
+  // BEGIN / ELSE / LOOP / DECLARE / EXCEPTION terminated the backward scan one
+  // line early, and whatever sat above it was neutered-around and left live.
+  //
+  // `exception` is the single likeliest word to appear in a comment sitting
+  // beside a `RAISE EXCEPTION`, which is what made this reachable rather than
+  // theoretical.
+  const BRANCH_HEAD_WORDS = ["THEN", "BEGIN", "ELSE", "ELSIF", "LOOP", "DECLARE", "EXCEPTION"];
+
+  for (const word of BRANCH_HEAD_WORDS) {
+    it(`a comment containing "${word}" does not end the scan early`, () => {
+      const text = [
+        "  IF NOT raised THEN",
+        "    SET ROLE postgres;",
+        `    -- now raise the ${word.toLowerCase()} the harness looks for`,
+        "    RAISE EXCEPTION 'TEST FAILED (ARM E): it did not bite';",
+        "  END IF;",
+        "  SELECT 1;",
+      ].join("\n");
+
+      const result = neuterArm(text, "ARM E");
+      expect(
+        result.found,
+        `a comment mentioning "${word}" ended the backward scan, so "SET ROLE postgres;" was ` +
+          `never classified and would stay live for the rest of the file.`,
+      ).toBe(false);
+      expect(result.reason).toContain("SET ROLE postgres;");
+    });
+  }
+
+  it("INDEPENDENT ORACLE: no accepted neuter may leave a SET ROLE live", () => {
+    // This asserts a PROPERTY of the OUTPUT — "nothing that changes the session
+    // role survives an accepted neuter" — rather than re-deriving the scan's own
+    // rules. It is the leak class stated directly, so it stays true regardless of
+    // how the scan is later reorganised, and it cannot be satisfied by agreeing
+    // with the implementation.
+    const comments = [
+      "-- now raise the exception the harness looks for",
+      "-- BEGIN by restoring the role",
+      "--THEN abort",
+      "\t-- declare defeat",
+      "-- if the loop did not bite, complain",
+    ];
+
+    for (const comment of comments) {
+      const text = [
+        "  IF NOT raised THEN",
+        "    SET ROLE postgres;",
+        `    ${comment}`,
+        "    RAISE EXCEPTION 'TEST FAILED (ARM F): it did not bite';",
+        "  END IF;",
+        "  SELECT 1;",
+      ].join("\n");
+
+      const result = neuterArm(text, "ARM F");
+      const leaked = result.found && executableLines(result.text, /SET\s+ROLE/i).length > 0;
+      expect(
+        leaked,
+        `neuterArm accepted the neuter and left "SET ROLE postgres;" executing, guarded only by ` +
+          `the comment ${JSON.stringify(comment)}. That is the measured RESET ROLE leak class.`,
+      ).toBe(false);
+    }
+  });
+
+  it("a REAL branch head still ends the scan even with a trailing comment after it", () => {
+    // The other direction: comment stripping must not make BRANCH_HEAD blind to
+    // executable text that happens to carry a trailing comment. Without this,
+    // the fix above could be "passed" by never terminating at all, which would
+    // refuse every arm in the corpus.
+    const text = [
+      "  IF NOT raised THEN -- the arm under test",
+      "    RAISE EXCEPTION 'TEST FAILED (ARM G): it did not bite';",
+      "  END IF;",
+    ].join("\n");
+    expect(neuterArm(text, "ARM G").found).toBe(true);
+  });
+
   it("REAL CORPUS: it refuses the four SERVICE-ROLE arms whose branches REVOKE before raising, and nothing else", () => {
     // Measured, not asserted in the abstract. SERVICE-ROLE 2a-2d each drop two
     // `EXECUTE 'REVOKE EXECUTE ON FUNCTION … FROM service_role'` statements
