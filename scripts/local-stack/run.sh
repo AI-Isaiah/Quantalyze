@@ -153,9 +153,18 @@ assert_local() {
 # --- env handoff --------------------------------------------------------------
 write_env_handoff() {
   local tmp
+  # `mktemp` creates the file at 0600 itself, and the key material is written
+  # into that already-restricted file — so it is never world-readable, not
+  # even briefly.
+  #
+  # IN-03: a `umask 077` used to sit here with a comment claiming it was what
+  # created the file restrictively. It was not: `mktemp` had already created
+  # the file on the line above, and `umask` affects neither an existing file's
+  # mode nor the `>` redirect below. The real protection is `mktemp` plus the
+  # `chmod 600` after the `mv`. The stray umask then persisted for the rest of
+  # the process. A comment crediting the wrong mechanism is how a protection
+  # gets removed later by someone who reads it and moves the wrong line.
   tmp="$(mktemp)"
-  # Create with restrictive permissions BEFORE any key material is written.
-  umask 077
   sb status -o env >"$tmp"
 
   local api_url
@@ -249,8 +258,50 @@ cmd_down() {
   log "down complete"
 }
 
+# `docker` is reached through a seam so the teardown assertion below can be
+# driven red without a Docker daemon (see --assert-teardown).
+DOCKER_BIN="${DOCKER_BIN:-docker}"
+
 running_project_containers() {
-  docker ps --filter "name=_${PROJECT_ID}\$" --format '{{.Names}}'
+  "$DOCKER_BIN" ps --filter "name=_${PROJECT_ID}\$" --format '{{.Names}}'
+}
+
+# ── The teardown assertion, on its own so it can be exercised in isolation ───
+#
+# ⛔ WR-05. This was written as
+#
+#     leftover="$(running_project_containers || true)"
+#     if [ -z "$leftover" ]; then count=0; else count=…; fi
+#
+# and the `|| true` collapsed EVERY `docker ps` failure — daemon stopped,
+# socket permission denied, docker not on PATH — into an empty string, which
+# became count=0, which printed "surviving <id> containers -> 0" and reached
+# SELF-TEST PASSED. "Could not count" and "counted zero" shared a code path
+# inside the one assertion whose entire purpose is proving the D-04 orphan
+# class is closed. Exact input: stop the Docker daemon after `cmd_down` returns
+# and before this ran.
+#
+# Unmeasured is not zero.
+assert_no_surviving_containers() {
+  local leftover count rc=0
+  leftover="$(running_project_containers)" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    echo "SELF-TEST FAILED: MEASURE_FAIL — '${DOCKER_BIN} ps' exited ${rc}, so the teardown assertion could not be evaluated." >&2
+    echo "                  This is the one control that proves nothing survives; it does not get to pass by not looking." >&2
+    return 1
+  fi
+  if [ -z "$leftover" ]; then
+    count=0
+  else
+    count="$(printf '%s\n' "$leftover" | grep -c .)"
+  fi
+  log "SELF-TEST: surviving ${PROJECT_ID} containers -> ${count} (measured; docker ps exited 0)"
+  if [ "$count" != "0" ]; then
+    echo "SELF-TEST FAILED: ${count} container(s) survived teardown:" >&2
+    printf '%s\n' "$leftover" >&2
+    return 1
+  fi
+  return 0
 }
 
 cmd_self_test() {
@@ -293,19 +344,7 @@ cmd_self_test() {
   cmd_down
 
   # The assertion that must be ABLE to fail: nothing of this project may survive.
-  local leftover count
-  leftover="$(running_project_containers || true)"
-  if [ -z "$leftover" ]; then
-    count=0
-  else
-    count="$(printf '%s\n' "$leftover" | grep -c .)"
-  fi
-  log "SELF-TEST: surviving ${PROJECT_ID} containers -> ${count}"
-  if [ "$count" != "0" ]; then
-    echo "SELF-TEST FAILED: ${count} container(s) survived teardown:" >&2
-    printf '%s\n' "$leftover" >&2
-    exit 1
-  fi
+  assert_no_surviving_containers || exit 1
 
   if [ -e "$ENV_FILE" ]; then
     echo "SELF-TEST FAILED: env handoff survived teardown: ${ENV_FILE}" >&2
@@ -323,5 +362,10 @@ case "${1:-}" in
   up)          shift; cmd_up "${1:-}" ;;
   down)        cmd_down ;;
   --self-test) cmd_self_test ;;
+  # Runs ONLY the teardown assertion, against whatever `DOCKER_BIN` names.
+  # Exists so the assertion's own red arms can be proven without a Docker
+  # daemon and without starting a stack — a control nobody can drive red is
+  # the thing this lane exists inside a phase about.
+  --assert-teardown) assert_no_surviving_containers ;;
   *)           usage; exit 2 ;;
 esac
