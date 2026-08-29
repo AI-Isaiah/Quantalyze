@@ -98,79 +98,160 @@ function collectRouteFiles(dir: string): string[] {
 }
 
 /**
+ * A supabase mutator method call, wherever it sits on its line.
+ *
+ * H-0001 (fixed 2026-08-29, Phase 164.3): this is deliberately NOT
+ * anchored to the start of the line. The previous anchor,
+ * `/^\s*\.(insert|update|delete|upsert)\s*\(/`, required the mutator to
+ * be the FIRST non-whitespace token — i.e. a leading-dot continuation
+ * line — so the single-line idiom
+ *   `const { error } = await supabase.from('trades').insert(batch);`
+ * was invisible to the detector, and so was the mid-continuation form
+ *   `.eq('id', id).update({ … })`.
+ * Anchoring to `.from(...)` (below) is what keeps the false-positive
+ * guard: `weights.update(...)` or `Array.prototype.delete(...)` are
+ * still ignored because no `.from(` anchors them.
+ */
+const MUTATOR_CALL_RE = /\.(insert|update|delete|upsert)\s*\(/;
+
+/** A supabase table selector — the anchor that makes a mutator a DB write. */
+const FROM_CALL_RE = /\.from\s*\(/;
+
+/**
+ * Blank out the body of MULTI-LINE block comments, line by line.
+ *
+ * `stripLineComment` handles `// …` and a `/* … *\/` pair that opens and
+ * closes on ONE line; it cannot see a JSDoc banner whose body spans
+ * lines. That gap was harmless while `findMutations` only matched a
+ * mutator at the START of a line — prose almost never begins with
+ * `.insert(`. Matching MID-line (the H-0001 fix) makes it live: measured
+ * 2026-08-29, the very first run of the fixed detector reported
+ * `src/app/api/allocator/scenario/commit/route.ts:10` as an uncovered
+ * mutation site. That line is documentation —
+ * `* handler — every \`supabase.from().insert()\` commits independently`
+ * — inside the route's header block. A fabricated site in a counted
+ * allowlist is worse than no allowlist: it is a number that was never
+ * compared to the thing it claims to count.
+ *
+ * A block is entered ONLY when a line's first non-whitespace token is
+ * `/*`. Entering on any occurrence would let a string literal such as
+ * `"src/**\/*.ts"` open a phantom comment and blank the rest of the
+ * file — a detector silently going blind, which is the failure this
+ * whole file exists to prevent. A line that STARTS with `/*` is a
+ * comment in any valid TypeScript, and an unterminated block would not
+ * compile, so the blanking cannot run away.
+ */
+function stripBlockComments(lines: string[]): string[] {
+  const out: string[] = [];
+  let inBlock = false;
+  for (const raw of lines) {
+    if (inBlock) {
+      const end = raw.indexOf("*/");
+      if (end < 0) {
+        out.push("");
+        continue;
+      }
+      inBlock = false;
+      out.push(stripLineComment(raw.slice(end + 2)));
+      continue;
+    }
+    const code = stripLineComment(raw);
+    if (code.trimStart().startsWith("/*")) {
+      inBlock = !code.includes("*/");
+      out.push("");
+      continue;
+    }
+    out.push(code);
+  }
+  return out;
+}
+
+/**
  * Find every supabase-client-style mutation call in a file's source.
  *
- * Pattern: a line whose leading-whitespace prefix is followed by one
- * of the four method names + optional space + open paren. We require
- * the mutation to be part of a supabase chain by checking that a
- * `.from(` call appears within the 5 prior lines — this avoids false
- * positives on e.g. `Array.update(...)` or `weights.update(...)`.
- * Every DB mutation in this codebase follows the
- * `.from("table").insert(...)` idiom.
+ * A mutation is a `.insert(` / `.update(` / `.delete(` / `.upsert(`
+ * call anchored to a `.from(...)` table selector. Two anchoring shapes
+ * are recognised, and they are exhaustive over the idioms this codebase
+ * uses:
  *
- * `chainStart` is resolved by walking backward from the `.from(` line
- * to the first line whose non-whitespace prefix does NOT start with
- * `.` or end with a continuation (`=>`, `(`, `,`, `{`, `&&`, `||`). In
- * practice this lands on the `const { data, error } = await supabase`
- * line, which is where a pragma naturally sits.
+ *   (A) SAME-LINE — `.from(` appears earlier on the mutator's own line:
+ *       `const { error } = await supabase.from('trades').insert(batch);`
+ *       This is the H-0001 shape that used to escape entirely.
+ *
+ *   (B) CHAIN-CONTINUATION — the mutator sits on a leading-dot
+ *       continuation line and `.from(` anchors the chain some lines
+ *       above. Walk back across the contiguous run of continuation
+ *       lines (M-0004, 2026-05-25: not a flat 5-line window — a chain
+ *       may stack arbitrarily many modifier lines between `.from(...)`
+ *       and the terminal mutator). A blank line is tolerated; a
+ *       non-`.` statement line ends the chain, so we never cross into
+ *       an unrelated statement.
+ *
+ * `chainStart` — the line a `@audit-skip` pragma must sit above — is
+ * the statement that opens the chain. When the `.from(` line is itself
+ * a continuation, walk back to the statement head (typically
+ * `const { data, error } = await supabase`). When it is NOT a
+ * continuation, the statement starts on that very line: walking back
+ * further would anchor the pragma window to the PRECEDING statement and
+ * silently move an author's pragma out of scope. That distinction only
+ * became load-bearing with shape (A), where the `.from(` line is always
+ * the statement head.
  */
 function findMutations(file: string, src: string): Mutation[] {
-  const lines = src.split("\n");
+  const rawLines = src.split("\n");
+  // Detection runs over comment-stripped source; `snippet` still quotes
+  // the RAW line so failure output is readable.
+  const lines = stripBlockComments(rawLines);
   const mutations: Mutation[] = [];
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
-    const mutationMatch = /^\s*\.(insert|update|delete|upsert)\s*\(/.exec(line);
+    const mutationMatch = MUTATOR_CALL_RE.exec(line);
     if (!mutationMatch) continue;
 
-    // M-0004 (audit 2026-05-25): anchor the lookback to the chain head
-    // instead of a flat 5-line window. A supabase chain can stack many
-    // modifier lines between `.from(...)` and the terminal mutation
-    // (e.g. `.from(x).select(...).eq(...).eq(...).order(...).insert(...)`
-    // formatted one-method-per-line). The terminal mutation line and
-    // every intervening modifier are chain-continuation lines (trimmed
-    // form starts with `.`). Walk back across the contiguous run of
-    // continuation lines — regardless of how many there are — and find
-    // the `.from(` that anchors the chain. A blank line is tolerated; a
-    // non-`.` statement line ends the chain, so we never cross into an
-    // unrelated statement. This keeps the previous false-positive guard
-    // (a mutation NOT part of a supabase `.from(...)` chain is still
-    // skipped) while no longer dropping wide chains the 5-line window
-    // missed.
     let fromIdx = -1;
-    for (let j = i - 1; j >= 0; j--) {
-      const trimmed = lines[j].trim();
-      if (trimmed === "") continue; // tolerate blank lines inside the chain
-      if (/\.from\(/.test(lines[j])) {
-        fromIdx = j;
-        break;
+
+    // (A) same-line anchor: `.from(...)` earlier on this very line.
+    const fromOnLine = FROM_CALL_RE.exec(line);
+    if (fromOnLine && fromOnLine.index < mutationMatch.index) {
+      fromIdx = i;
+    } else if (line.trim().startsWith(".")) {
+      // (B) chain continuation: walk back to the `.from(` that anchors
+      // this chain.
+      for (let j = i - 1; j >= 0; j--) {
+        const trimmed = lines[j].trim();
+        if (trimmed === "") continue; // tolerate blank lines inside the chain
+        if (FROM_CALL_RE.test(lines[j])) {
+          fromIdx = j;
+          break;
+        }
+        // Still a chain-continuation line? Keep walking. Otherwise the
+        // mutation isn't anchored to a `.from(...)` — bail out.
+        if (!trimmed.startsWith(".")) break;
       }
-      // Still a chain-continuation line? Keep walking. Otherwise the
-      // mutation isn't anchored to a `.from(...)` — bail out.
-      if (!trimmed.startsWith(".")) break;
     }
     if (fromIdx < 0) continue;
 
-    // Walk back from the .from line to find the first non-chain line.
-    // A "chain line" is one whose first non-whitespace char is a `.` —
-    // those are method-chain continuations. The statement start is the
-    // first line that ISN'T a chain continuation.
+    // Resolve the statement head. Only walk back when the `.from(` line
+    // is itself a chain continuation — see the doc comment above.
     let chainStart = fromIdx;
-    for (let j = fromIdx - 1; j >= 0; j--) {
-      const trimmed = lines[j].trim();
-      if (trimmed.startsWith(".") || trimmed === "") {
-        // continuation or blank line — keep walking
-        continue;
+    if (lines[fromIdx].trim().startsWith(".")) {
+      for (let j = fromIdx - 1; j >= 0; j--) {
+        const trimmed = lines[j].trim();
+        if (trimmed.startsWith(".") || trimmed === "") {
+          // continuation or blank line — keep walking
+          continue;
+        }
+        // This is the actual statement-start line (e.g. `const { data } = await supabase`).
+        chainStart = j;
+        break;
       }
-      // This is the actual statement-start line (e.g. `const { data } = await supabase`).
-      chainStart = j;
-      break;
     }
 
     mutations.push({
       file,
       line: i + 1,
       chainStart: chainStart + 1,
-      snippet: line.trim(),
+      snippet: rawLines[i].trim(),
     });
   }
   return mutations;
@@ -953,84 +1034,122 @@ describe("audit-coverage helpers — H-0004/H-0005 audit gap fixtures", () => {
     expect(mutations.length).toBeGreaterThanOrEqual(1);
   });
 
-  // H-0001 (audit 2026-05-07) — findMutations' line regex
-  // `/^\s*\.(insert|update|delete|upsert)\s*\(/` requires the mutator method
-  // to be the FIRST non-whitespace token on its line (a leading-dot
-  // continuation). The single-line idiom
-  //   `const { error } = await supabase.from('trades').insert(batch);`
-  // puts `.insert(` MID-line (right after `.from(...)`), so it matches
-  // neither the leading-dot anchor nor any continuation — the mutation is
-  // invisible to the detector and ships entirely outside the coverage gate.
+  // H-0001 false-positive guard — the counterpart to the fix below.
   //
-  // This GREEN test pins the CURRENT (buggy) behavior so it is documented and
-  // so any "fix" to findMutations must also reckon with the live corpus (see
-  // the .skip'd intended-behavior test below). A regression test, not an
-  // endorsement: the single-line form IS a real Supabase mutation and SHOULD
-  // be detected.
-  it("H-0001 (current behavior): findMutations MISSES the single-line `from(...).insert(...)` idiom — surfaced gap", () => {
+  // The fix loosened the mutator anchor from "first token on the line" to
+  // "anywhere on the line", so the ONLY thing still separating a DB write
+  // from an ordinary method call is the `.from(...)` table selector. This
+  // test is what makes that boundary a law rather than a hope: a mid-line
+  // `.update(` / `.delete(` with no `.from(` anchor must stay invisible.
+  //
+  // Without it, the obvious "fix" — matching `.insert(` anywhere — would
+  // pass every other test in this file while flooding the gate with noise
+  // from `weights.update(...)`, `map.delete(...)`, `set.delete(...)`. A
+  // gate that cries wolf gets muted, which lands in the same place as a
+  // gate that cannot fail.
+  it("control: a mid-line `.update(`/`.delete(` with NO `.from(` anchor is NOT a mutation (H-0001 false-positive guard)", () => {
     const src = [
       "export async function POST() {",
-      "  const { error } = await supabase.from('trades').insert(batch);",
+      "  const weights = new Map();",
+      "  weights.update({ a: 1 });",
+      "  weights.delete('a');",
+      "  const merged = Object.assign({}, base).update(patch);",
       "  return Response.json({ ok: true });",
       "}",
     ].join("\n");
-    // BUG: zero mutations detected, even though this line mutates the DB.
-    // When findMutations is fixed to anchor on `.from(...).<mut>(` regardless
-    // of line position, flip this to `toBeGreaterThanOrEqual(1)` AND see the
-    // .skip'd test below for the live-corpus sites that fix surfaces.
     expect(findMutations("synthetic.ts", src)).toHaveLength(0);
   });
 
-  // H-0001 — intended behavior (SKIPPED: surfaces a real production gap).
+  // H-0001 — prose must never be mistaken for a call site.
   //
-  // The detector SHOULD catch the single-line `.from(...).insert(...)` form.
-  // It is skipped rather than enabled because fixing findMutations to detect
-  // it turns the live-corpus gate (the final `describe` in this file) RED on
-  // real, currently-unaudited single-line mutation sites.
+  // Matching MID-line put the detector's eyes on documentation for the
+  // first time. MEASURED 2026-08-29: the very first run of the fixed
+  // detector reported a 7th "uncovered mutation" at
+  // scenario/commit/route.ts:10 — a line inside the route's JSDoc header
+  // reading "every `supabase.from().insert()` commits independently".
+  // A fabricated entry in a counted allowlist is not a small error: the
+  // whole value of a count is that it was compared to the thing.
+  it("control: a `from(...).insert(...)` mention inside a multi-line block comment is NOT a mutation", () => {
+    const src = [
+      "/**",
+      " * Note: every `supabase.from('trades').insert()` commits independently,",
+      " * so the RPC is the single-transaction implementation.",
+      " */",
+      "export async function POST() {",
+      "  return Response.json({ ok: true });",
+      "}",
+    ].join("\n");
+    expect(findMutations("synthetic.ts", src)).toHaveLength(0);
+  });
+
+  // H-0001 — intended behavior. LIVE since 2026-08-29 (Phase 164.3).
   //
-  // ⚠️ CENSUS RE-MEASURED 2026-08-26 (DEF-141.2-03-A). Every coordinate the
-  // previous version of this comment carried was stale, and its count was
-  // wrong in BOTH directions — a listed site no longer exists and three
-  // unlisted ones do. Do not trust these numbers past the next refactor of
-  // the named routes; re-measure. Method: enumerate every line in
-  // src/app/api/**/route.ts carrying `.from(` AND a `.insert|update|delete|
-  // upsert(` that does NOT start the line (the exact form findMutations'
-  // `/^\s*\.(insert|…)\s*\(/` anchor misses), then check for an @audit-skip
-  // in the 8-line window above and a logAuditEvent* inside the SAME enclosing
-  // function (the gate walks FORWARD only, so an emit earlier in the file or
-  // in a sibling function does not count).
+  // ## What it guards
   //
-  // UNCOVERED — would go RED (6):
-  //   - src/app/api/admin/partner-import/route.ts:705      (profiles upsert — @audit-skip is 15 lines up, outside the 8-line window)
-  //   - src/app/api/cron/flag-monitor/route.ts:403         (feature_flags upsert — zero-denominator streak; the file contains no logAuditEvent* at all)
-  //   - src/app/api/cron/flag-monitor/route.ts:518         (feature_flags upsert — streak reset; same)
-  //   - src/app/api/keys/sync/route.ts:496                 (strategy_analytics upsert in stampCompositeFailedUnlessComplete; the file's only emit is at :371, a different function)
-  //   - src/app/api/strategies/finalize-wizard/route.ts:2287 (strategy_analytics upsert in compositeMemberCount; the file's only emit is at :2149, in runLegacyFinalize)
-  //   - src/app/api/strategies/finalize-wizard/route.ts:2360 (strategy_analytics upsert in unifiedFinalizeWizardHandler; no emit in that function)
+  // The single-line idiom
+  //   `const { error } = await supabase.from('trades').insert(batch);`
+  // is a real DB mutation. From 2026-05-07 to 2026-08-29 `findMutations`
+  // could not see it: the anchor
+  // `/^\s*\.(insert|update|delete|upsert)\s*\(/` demanded the mutator be
+  // the first token on its line, and here it sits mid-line right after
+  // `.from(...)`. Six live call sites mutated production tables entirely
+  // outside the audit gate, and a seventh could have joined them without
+  // anything going red.
   //
-  // The retired "kill-switch flip" site the old list named is GONE, not
-  // moved: Phase 106 Stage B made flag-monitor ALERT-ONLY and it now never
-  // writes the kill-switch row (see the comment at flag-monitor/route.ts:438).
+  // ## Why it was skipped, and why skipping was the wrong answer
   //
-  // COVERED today via in-window @audit-skip pragmas (4):
-  //   trades/upload:130, admin/strategy-review:484, partner-import:762 & :793.
+  // It was skipped because enabling it turns the live-corpus gate red on
+  // those six real sites, and fixing THEM is production work. But a skip
+  // is not a deferral — it is a control that cannot fail, indistinguishable
+  // in CI from a control that passes. The debt now lives in
+  // H_0001_UNCOVERED_ALLOWLIST, where it is counted, explained, and
+  // exact-set asserted, so this test can be live while the route work
+  // stays open under H-0001 in TODOS.md.
   //
-  // Those six sites mutate the DB with no audit emission and no @audit-skip
-  // in scope — exactly the blind spot H-0001 predicted. Fixing them is a
-  // production-code change (add pragmas or audit emits to the routes), out of
-  // scope for a test-only pass. Enable this test + the findMutations fix +
-  // the six route fixes together.
-  // TODO(surfaced): H-0001 — fix findMutations single-line detection, then
-  //   audit-instrument (or pragma) the six flagged routes above, then
-  //   un-skip and flip the current-behavior test to expect >= 1.
-  it.skip("H-0001 (intended behavior): findMutations DETECTS the single-line `from(...).insert(...)` idiom", () => {
+  // ## This test is the regression detector for the fix
+  //
+  // If anyone re-anchors the mutator regex to the start of a line, THIS
+  // goes red first and by name. VERIFIED by neutering: restoring the old
+  // `/^\s*\.(…)\s*\(/` anchor in the working tree fails this test with
+  // "expected +0 to be greater than or equal to 1", and restoring the fix
+  // returns it to green (Phase 164.3 Task 2).
+  //
+  // ⚠️ Note the sibling shapes are covered too — `update`/`delete`/`upsert`
+  // share the regex, and the M-0004 chain-continuation form has its own
+  // test above. Do not narrow this to `insert`.
+  it("H-0001 (intended behavior): findMutations DETECTS the single-line `from(...).insert(...)` idiom", () => {
     const src = [
       "export async function POST() {",
       "  const { error } = await supabase.from('trades').insert(batch);",
       "  return Response.json({ ok: true });",
       "}",
     ].join("\n");
-    expect(findMutations("synthetic.ts", src).length).toBeGreaterThanOrEqual(1);
+    const mutations = findMutations("synthetic.ts", src);
+    expect(mutations.length).toBeGreaterThanOrEqual(1);
+    // The pragma anchor must be the statement itself. Walking further back
+    // would place the 8-line `@audit-skip` window above the PRECEDING
+    // statement, so an author's correctly-placed pragma would not count.
+    expect(mutations[0].line).toBe(2);
+    expect(mutations[0].chainStart).toBe(2);
+  });
+
+  // Sibling coverage for the same fix: `update`, `delete` and `upsert` are
+  // the other three members of the mutator class, and a fix that only
+  // taught the detector about `insert` would leave three quarters of the
+  // blind spot open — every one of the six live sites the census found is
+  // an `upsert`, not an `insert`.
+  it("H-0001: the single-line idiom is detected for update/delete/upsert too, not just insert", () => {
+    for (const method of ["update", "delete", "upsert"]) {
+      const src = [
+        "export async function POST() {",
+        `  const { error } = await supabase.from('trades').${method}({ a: 1 });`,
+        "  return Response.json({ ok: true });",
+        "}",
+      ].join("\n");
+      expect(findMutations("synthetic.ts", src).length).toBeGreaterThanOrEqual(
+        1,
+      );
+    }
   });
 
   // H-0005 (FIXED 2026-05-25) — findMutations + findHelperMutations +
@@ -1226,6 +1345,107 @@ describe("audit-coverage scan performance — H-0003 (S9b) import-resolution rea
   });
 });
 
+/**
+ * H-0001 — the six PRE-EXISTING uncovered single-line mutation sites,
+ * as a counted, exact-set-asserted allowlist.
+ *
+ * ## Why this list exists
+ *
+ * Until 2026-08-29 `findMutations` could not see the single-line
+ * `from(...).insert(...)` idiom at all. These six sites therefore mutated
+ * the database with no audit emission, no `@audit-skip` pragma, and NO
+ * FAILURE SIGNAL — and a seventh could have joined them in silence. That
+ * is a control that cannot fail, which is strictly worse than no control:
+ * it spends the credibility of a green check on a promise it never kept.
+ *
+ * Fixing the detector without recording the debt would have turned this
+ * gate permanently red and taught everyone to ignore it. Fixing the six
+ * ROUTES is production work (add an audit emission or a justified pragma
+ * to each) and is deliberately NOT in this test-only pass — it stays open
+ * under H-0001 in TODOS.md. So the debt is written down instead, in a form
+ * a machine reads on every push.
+ *
+ * ## Why the assertion is an EXACT SET, not a floor
+ *
+ * A `<= 6` floor would silently absorb a seventh site — the exact failure
+ * being closed. So drift reds in BOTH directions:
+ *   - a NEW uncovered site not in this list  -> red (debt grew)
+ *   - a listed site that got fixed or deleted -> red (list went stale)
+ * The second half is the one people forget. An allowlist nobody is forced
+ * to re-read is how a record decays into fiction — which is precisely what
+ * happened to the PREVIOUS census of these same sites: recorded as prose in
+ * a comment, it under-reported by two AND named a site Phase 106 had
+ * already deleted (TODOS.md, "H-0001 census RE-MEASURED", 2026-08-26).
+ *
+ * ## Method (re-measured at HEAD, 2026-08-29 — do not re-number, RE-MEASURE)
+ *
+ * Ran the fixed detector over the live corpus and read the gate's own
+ * output. Detected sites went 71 -> 81; of the 10 newly visible, 4 already
+ * carried an in-window `@audit-skip` (trades/upload, admin/strategy-review,
+ * and two in partner-import — pragmas that were DECORATIVE until now,
+ * because the gate never saw the call they guarded, the SEC-03 lesson) and
+ * these 6 carry nothing.
+ *
+ * ⚠️ Two coordinates in the 2026-08-26 record had already drifted:
+ * flag-monitor's streak sites moved 403 -> 489 and 518 -> 620. The SITES
+ * are the same two; only the line numbers rotted. That is why the identity
+ * key below is `file + snippet` and NOT the line number — a key that
+ * decays every time an unrelated line is inserted above it trains people
+ * to re-number the record rather than re-measure it, preserving whatever
+ * errors it already contained.
+ */
+const H_0001_UNCOVERED_ALLOWLIST: ReadonlyArray<{
+  file: string;
+  snippet: string;
+  reason: string;
+}> = [
+  {
+    file: "src/app/api/admin/partner-import/route.ts",
+    snippet: 'const { error: profileErr } = await admin.from("profiles").upsert(',
+    reason:
+      "H-0001: profiles upsert. An @audit-skip pragma exists but sits ~15 lines above the chain start, outside the 8-line window — so it does not count. Fix = move the pragma into the window or emit a real audit event.",
+  },
+  {
+    file: "src/app/api/cron/flag-monitor/route.ts",
+    snippet: 'await args.admin.from("feature_flags").upsert(',
+    reason:
+      "H-0001: zero-denominator streak increment. The file contains no logAuditEvent* call at all, so there is nothing for the forward walk to find.",
+  },
+  {
+    file: "src/app/api/cron/flag-monitor/route.ts",
+    snippet: 'await admin.from("feature_flags").upsert(',
+    reason:
+      "H-0001: streak reset on the first non-zero window. Same file, same absence of any audit emission.",
+  },
+  {
+    file: "src/app/api/keys/sync/route.ts",
+    snippet:
+      'const { error: stampErr } = await admin.from("strategy_analytics").upsert(',
+    reason:
+      "H-0001: strategy_analytics upsert in stampCompositeFailedUnlessComplete. The file's only emission lives in a DIFFERENT function, and the coverage walk is scoped to the enclosing function body (P694).",
+  },
+  {
+    file: "src/app/api/strategies/finalize-wizard/route.ts",
+    snippet: 'await admin.from("strategy_analytics").upsert(',
+    reason:
+      "H-0001: strategy_analytics upsert in compositeMemberCount. The file's only emission is in runLegacyFinalize, a different function.",
+  },
+  {
+    file: "src/app/api/strategies/finalize-wizard/route.ts",
+    snippet: 'await compositeAdmin.from("strategy_analytics").upsert(',
+    reason:
+      "H-0001: strategy_analytics upsert in unifiedFinalizeWizardHandler. No emission in that function.",
+  },
+];
+
+/**
+ * Identity for an uncovered site: repo-relative path + the trimmed source
+ * line. Deliberately NOT the line number — see the allowlist header.
+ */
+function siteKey(site: { file: string; snippet: string }): string {
+  return `${site.file} :: ${site.snippet}`;
+}
+
 describe("audit coverage: every mutation site in src/app/api must emit or skip", () => {
   it("every .insert/.update/.delete/.upsert has a logAuditEvent or @audit-skip", () => {
     const routeFiles = collectRouteFiles(API_DIR);
@@ -1301,8 +1521,17 @@ describe("audit coverage: every mutation site in src/app/api must emit or skip",
       }
     }
 
-    if (uncovered.length > 0) {
-      const formatted = uncovered
+    // ── H-0001: the debt is COUNTED, never silent ────────────────────
+    // Every uncovered site must be an EXACT member of the allowlist, and
+    // every allowlist entry must still be uncovered. Drift in EITHER
+    // direction is red — see H_0001_UNCOVERED_ALLOWLIST's header for why
+    // both halves are load-bearing.
+    const allowKeys = new Set(H_0001_UNCOVERED_ALLOWLIST.map(siteKey));
+    const uncoveredKeys = new Set(uncovered.map(siteKey));
+
+    const newlyUncovered = uncovered.filter((u) => !allowKeys.has(siteKey(u)));
+    if (newlyUncovered.length > 0) {
+      const formatted = newlyUncovered
         .map((u) => `  ${u.file}:${u.line}\n    > ${u.snippet}`)
         .join("\n");
       const guidance =
@@ -1310,22 +1539,57 @@ describe("audit coverage: every mutation site in src/app/api must emit or skip",
         "  1. A logAuditEvent(...) or logAuditEventAsUser(...) call within 60 lines after the mutation, OR\n" +
         "  2. A `// @audit-skip: <reason>` pragma within 8 lines above the mutation chain's start line (explain why this mutation does not need an audit event — e.g., internal state tracking, denormalization cache, cron GC).\n" +
         "\n" +
-        "See src/lib/audit.ts + docs/architecture/adr-0023-audit-event-taxonomy.md for the taxonomy.";
+        "See src/lib/audit.ts + docs/architecture/adr-0023-audit-event-taxonomy.md for the taxonomy.\n" +
+        "\n" +
+        "Do NOT add the site to H_0001_UNCOVERED_ALLOWLIST to silence this. That list is\n" +
+        "a frozen record of PRE-EXISTING debt (measured 2026-08-29); it is a ratchet that\n" +
+        "only shrinks. A NEW uncovered mutation is the thing this gate exists to stop.";
       throw new Error(
-        `Found ${uncovered.length} uninstrumented mutation(s):\n${formatted}\n\n${guidance}`,
+        `Found ${newlyUncovered.length} uninstrumented mutation(s) NOT in the H-0001 allowlist:\n${formatted}\n\n${guidance}`,
       );
     }
 
-    expect(uncovered).toEqual([]);
+    const dischargedEntries = H_0001_UNCOVERED_ALLOWLIST.filter(
+      (a) => !uncoveredKeys.has(siteKey(a)),
+    );
+    if (dischargedEntries.length > 0) {
+      const formatted = dischargedEntries
+        .map((a) => `  ${a.file}\n    > ${a.snippet}\n    (${a.reason})`)
+        .join("\n");
+      throw new Error(
+        `${dischargedEntries.length} H-0001 allowlist entr(y/ies) are no longer uncovered:\n${formatted}\n\n` +
+          "Good news — the debt shrank. Now DELETE those entries from\n" +
+          "H_0001_UNCOVERED_ALLOWLIST and lower the count assertion below.\n" +
+          "The allowlist reds when it goes stale on purpose: an allowlist that\n" +
+          "silently keeps exempting a site that no longer needs exempting is how\n" +
+          "a list of six becomes a list of seven nobody re-reads.",
+      );
+    }
+
+    // The count is VISIBLE, and shrinking it is a deliberate edit. A
+    // bare set-comparison would let the number drift out of the prose
+    // record (the TODOS lesson: the previous census under-reported by two
+    // AND named a deleted site). This literal is the number that must
+    // match the SUMMARY and TODOS entry.
+    expect(H_0001_UNCOVERED_ALLOWLIST).toHaveLength(6);
+    expect(uncovered).toHaveLength(H_0001_UNCOVERED_ALLOWLIST.length);
 
     // H-0003: the gate is only meaningful if the detectors actually fired.
-    // The corpus surfaces ~56 mutation sites today (direct chains + helper
-    // calls + mutating RPCs + import-graph hops). A regression that disarms
-    // a detector (e.g. findMutations' anchor walk silently returning []) or
-    // a path break that scans empty files would drop this toward 0 while
-    // `uncovered` stays empty and the test still passes. Pin a conservative
-    // floor (25) so a silently-disarmed detector fails loudly instead of
-    // green-but-vacuous.
-    expect(detectedMutationSites).toBeGreaterThanOrEqual(25);
+    // A regression that disarms a detector (e.g. findMutations' anchor walk
+    // silently returning []) or a path break that scans empty files would
+    // drop this toward 0 while `uncovered` stays empty and the test still
+    // passes.
+    //
+    // Ratcheted 25 -> 60 on 2026-08-29 (H-0001). MEASURED the same day, by
+    // running the gate at HEAD and at HEAD~fix: the corpus surfaces 81 sites
+    // with the single-line detection and 71 without it — so the "~56" the
+    // previous comment claimed was itself a stale number nobody re-measured.
+    // 60 sits below both so legitimate route deletions don't trip it, while
+    // a grossly disarmed detector still fails loudly. ⚠️ This floor CANNOT
+    // catch the 81 -> 71 single-line regression on its own; that is what the
+    // "H-0001 (intended behavior)" test and the exact-set allowlist above are
+    // for. Three detectors, because a floor wide enough to be quiet is too
+    // wide to bite.
+    expect(detectedMutationSites).toBeGreaterThanOrEqual(60);
   });
 });
