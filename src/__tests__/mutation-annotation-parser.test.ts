@@ -21,7 +21,8 @@
  *      this phase's thesis committed by this phase's own spec.
  */
 import { describe, expect, it } from "vitest";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -464,6 +465,37 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
     // the same bytes must be strictly larger, or this test is asserting nothing.
     const naive = readFileSync(GATE, "utf8").split("RED-UNDER").length - 1;
     expect(naive).toBeGreaterThan(30);
+  });
+
+  it("IN-01: scanCorpus counts a STRUCTURED-ONLY file as annotated, so the runner's own parity gate reaches it", () => {
+    // `runCorpus` and `parseOnlyCorpus` iterate `annotatedFiles` and nothing
+    // else. While that list required a PROSE marker, a file with five
+    // `RED-UNDER-M` twins and no prose was never parsed, never
+    // parity-checked, its arms never executed, and no defect was raised — the
+    // runner reported clean having not looked at it. Asserted through a real
+    // temp directory rather than by reading the source, so the property is the
+    // subject and not the implementation.
+    const dir = mkdtempSync(join(tmpdir(), "scan-corpus-"));
+    try {
+      writeFileSync(
+        join(dir, "structured_only.sql"),
+        [
+          "  -- RED-UNDER-SETUP: {\"apply\":[\"supabase/migrations/x.sql\"]}",
+          '  -- RED-UNDER-M: {"arm":"A","apply":[{"kind":"sql","stmt":"SELECT 1"}]}',
+        ].join("\n"),
+      );
+      writeFileSync(join(dir, "plain.sql"), "SELECT 1;\n");
+
+      const corpus = scanCorpus(dir);
+
+      expect(corpus.filesTotal).toBe(2);
+      expect(corpus.annotatedFiles).toEqual(["structured_only.sql"]);
+      // And once it IS in the list, the parity gate sees it and fails it.
+      const scanned = corpus.results.find((r) => r.name === "structured_only.sql");
+      expect(scanned?.result.parity).toMatchObject({ prose: 0, structured: 1, ok: false });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it("scanCorpus reports 1 of 71 files annotated", () => {

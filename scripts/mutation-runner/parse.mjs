@@ -340,9 +340,26 @@ export function parseFile(path) {
 
 /**
  * Scan a directory of `.sql` gate files for the coverage numerator/denominator
- * (D-01). "Annotated" means at least one LINE-START prose marker — the same
- * anchor the parity gate uses, so coverage can never be inflated by a file that
- * merely documents the syntax.
+ * (D-01). "Annotated" means at least one LINE-START marker of EITHER kind — a
+ * prose `RED-UNDER:` or a structured `RED-UNDER-M:` twin. Both use the same
+ * line-start anchor the parity gate uses, so coverage still cannot be inflated
+ * by a file that merely documents the syntax.
+ *
+ * ⛔ IN-01: this used to require `prose.length > 0`, and `runCorpus` /
+ * `parseOnlyCorpus` iterate ONLY this list. A file carrying five
+ * `RED-UNDER-M` twins and zero prose markers was therefore never parsed, never
+ * parity-checked, its arms never executed, and it counted toward neither the
+ * numerator nor a defect — the runner reported clean having not looked at it.
+ * The per-file parity gate cannot catch that: it only runs for files already
+ * in this list. The hole was covered only from OUTSIDE the gate, by a vitest
+ * file that walks every file itself, so a developer running
+ * `node scripts/mutation-runner/run.mjs` locally saw green regardless.
+ *
+ * With `||`, a structured-only file enters the list and the runner's own
+ * parity check fires on it (`prose 0 !== structured 5`).
+ *
+ * MEASURED 2026-08-29: no file in `supabase/tests/` is structured-only, so
+ * `filesAnnotated` is unchanged at 1 of 71 and the FILES_FLOOR does not move.
  */
 export function scanCorpus(dir) {
   const files = readdirSync(dir)
@@ -355,7 +372,7 @@ export function scanCorpus(dir) {
       file: join(dir, name),
     });
     results.push({ name, result });
-    if (result.prose.length > 0) annotatedFiles.push(name);
+    if (result.prose.length > 0 || result.structured.length > 0) annotatedFiles.push(name);
   }
   return {
     dir,
