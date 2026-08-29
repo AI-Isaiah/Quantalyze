@@ -2,10 +2,26 @@
  * VAC-06 — the five demonstrated vacuity mechanisms must STAY demonstrable.
  *
  * The demonstrations themselves live in
- *   .planning/phases/164.3-vacuity-.../164.3-VAC06-DEMOS.md
+ *   scripts/mutation-runner/VAC06-DEMOS.md
  * where each of the five mechanisms from the ROADMAP's Phase 164.3 table
  * (:473-479) was re-introduced into the real phase-164 corpus and observed
  * caught, with verbatim detector output.
+ *
+ * ⛔ WHY THAT PATH AND NOT THE PHASE DIRECTORY (CR-01, 2026-08-29). The record
+ * was originally written to
+ * `.planning/phases/164.3-…/164.3-VAC06-DEMOS.md`, and this file asserted its
+ * existence. That coupling was itself a control that fails for the wrong
+ * reason: this test ships in a `src/`-only commit while the record shipped in a
+ * `.planning/phases/**` commit, and TWO mandated workflows separate them —
+ * `/gsd-pr-branch` (which CLAUDE.md makes non-optional before every PR) DROPS
+ * `.planning/phases/**` commits, and `/gsd-complete-milestone` RELOCATES the
+ * phase directory into `.planning/milestones/v{X.Y}-phases/`. Either one turns
+ * the required `frontend` check red for a reason the change under test did not
+ * cause, and the standard remedy for that — tolerating absence — would convert
+ * the pin into a no-op. MEASURED before the move: hiding the record made this
+ * file fail 2 of 10 with `… /164.3-VAC06-DEMOS.md is missing` and an ENOENT.
+ * The record now lives beside its subject, in a normal source path that both
+ * workflows preserve, so the assertion can stay unconditional.
  *
  * WHY THIS FILE EXISTS. A demonstration recorded once is a claim; what makes it
  * a control is that something re-proves it without a human. Two things do:
@@ -35,13 +51,7 @@ import { fileURLToPath } from "node:url";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const GATE = join(REPO_ROOT, "supabase", "tests", "test_strategy_shares_rls.sql");
-const DEMOS = join(
-  REPO_ROOT,
-  ".planning",
-  "phases",
-  "164.3-vacuity-a-control-that-cannot-fail-must-be-caught-by-machine",
-  "164.3-VAC06-DEMOS.md",
-);
+const DEMOS = join(REPO_ROOT, "scripts", "mutation-runner", "VAC06-DEMOS.md");
 const FIXTURES = join(REPO_ROOT, "scripts", "lint-sql-gates-fixtures");
 
 /** Line-start anchored, per GRAMMAR.md rule 1. `RED-UNDER:` never matches this. */
@@ -62,6 +72,19 @@ interface Mechanism {
   anchor: Anchor;
   /** Strings the DEMOS record must still contain, so doc and corpus cannot drift apart. */
   docNeedles: string[];
+  /**
+   * Arm IDs the demonstration depends on being present in the GATE FILE as a
+   * live `RAISE … 'TEST FAILED (<id>)'` site, distinct from the arm the
+   * mechanism was demonstrated against.
+   *
+   * These are the demonstration's *neighbours*: mechanism 4's is the arm whose
+   * remaining terms a narrowed bitmask still satisfies, and mechanism 5's is
+   * the EARLIER arm that makes the demonstrated one structurally unreachable.
+   * Without the neighbour, the demonstration is not reproducible — and the
+   * neighbour's presence is a fact about the corpus, so it is asserted against
+   * the corpus rather than against the prose record.
+   */
+  companionArms?: string[];
 }
 
 /**
@@ -107,6 +130,7 @@ const MECHANISMS: Mechanism[] = [
     detector: "mutation runner (wrong-first-failure)",
     anchor: { kind: "arm", arm: "SHAPE 5" },
     docNeedles: ["SHAPE 5", "wrong-first-failure", "N1 2a"],
+    companionArms: ["N1 2a"],
   },
   {
     n: 5,
@@ -117,6 +141,7 @@ const MECHANISMS: Mechanism[] = [
     detector: "mutation runner first-failure identity ONLY (D-16)",
     anchor: { kind: "arm", arm: "SANITIZE 1e" },
     docNeedles: ["SANITIZE 1e", "SANITIZE 1c", "wrong-first-failure"],
+    companionArms: ["SANITIZE 1c"],
   },
 ];
 
@@ -176,7 +201,7 @@ describe("VAC-06 — each demonstrated mechanism keeps its anchor in the corpus"
           arms,
           `The VAC-06 demonstration for mechanism ${mech.n} was performed against arm "${arm}", whose detector is ${mech.detector}. ` +
             `That arm no longer has a line-start-anchored RED-UNDER-M annotation in supabase/tests/test_strategy_shares_rls.sql, ` +
-            `so the runner no longer tests it and the demonstration in 164.3-VAC06-DEMOS.md is no longer re-provable on every push. ` +
+            `so the runner no longer tests it and the demonstration in VAC06-DEMOS.md is no longer re-provable on every push. ` +
             `Restore the annotation, or re-do the demonstration against a different arm and update BOTH this list and the DEMOS record.`,
         ).toContain(arm);
       });
@@ -201,10 +226,45 @@ describe("VAC-06 — each demonstrated mechanism keeps its anchor in the corpus"
         }
       });
     }
+
+    for (const companion of mech.companionArms ?? []) {
+      it(`mechanism ${mech.n}: its companion arm "${companion}" still raises in the gate file`, () => {
+        // Asserted against the CORPUS, not against the prose record: the
+        // neighbour arm's existence is a fact about
+        // supabase/tests/test_strategy_shares_rls.sql, and a fact about the
+        // corpus that is only pinned in a markdown file is a claim.
+        const text = readFileSync(GATE, "utf8");
+        const needle = `TEST FAILED (${companion})`;
+        expect(
+          text.split(needle).length - 1,
+          `The VAC-06 demonstration for mechanism ${mech.n} is only reproducible while arm "${companion}" ` +
+            `still raises in supabase/tests/test_strategy_shares_rls.sql — it is the neighbour the mechanism acts through ` +
+            `(${mech.n === 5 ? "the EARLIER arm that makes the demonstrated one unreachable" : "the arm a narrowed bitmask still satisfies"}). ` +
+            `Expected exactly one '${needle}' raise site. If the arm was renamed or removed, re-do the demonstration and update BOTH this list and VAC06-DEMOS.md.`,
+        ).toBe(1);
+      });
+    }
   }
 });
 
 describe("VAC-06 — the demonstration record and the corpus cannot drift apart", () => {
+  it("keeps the record on a DURABLE path — not under .planning/phases/ (CR-01)", () => {
+    // The assertions below are unconditional on purpose. That is only safe
+    // while the record lives somewhere both `/gsd-pr-branch` and
+    // `/gsd-complete-milestone` preserve. Re-homing it under
+    // `.planning/phases/**` would make this whole describe block fail on a
+    // state neither the code nor the corpus caused — and the tempting remedy
+    // for that (skip when absent) is the defect this phase exists to remove.
+    const rel = DEMOS.slice(REPO_ROOT.length + 1).split("\\").join("/");
+    expect(
+      rel.startsWith(".planning/"),
+      `VAC06-DEMOS.md must not live under .planning/ — it is asserted unconditionally below, and ` +
+        `/gsd-pr-branch drops .planning/phases/** commits while /gsd-complete-milestone relocates the phase dir. ` +
+        `Current path: ${rel}`,
+    ).toBe(false);
+    expect(existsSync(DEMOS), `${rel} is missing`).toBe(true);
+  });
+
   it("documents exactly five mechanisms, numbered 1 to 5", () => {
     expect(existsSync(DEMOS), `${DEMOS} is missing`).toBe(true);
     const headings = readFileSync(DEMOS, "utf8")
@@ -212,7 +272,7 @@ describe("VAC-06 — the demonstration record and the corpus cannot drift apart"
       .filter((l) => l.startsWith("## Mechanism "));
     expect(
       headings,
-      "164.3-VAC06-DEMOS.md must carry one '## Mechanism N' section per mechanism. " +
+      "VAC06-DEMOS.md must carry one '## Mechanism N' section per mechanism. " +
         "A mechanism dropped from the record is a mechanism nobody can re-verify.",
     ).toHaveLength(5);
     for (const mech of MECHANISMS) {
@@ -226,7 +286,7 @@ describe("VAC-06 — the demonstration record and the corpus cannot drift apart"
       for (const needle of mech.docNeedles) {
         expect(
           doc.includes(needle),
-          `164.3-VAC06-DEMOS.md no longer mentions "${needle}" for mechanism ${mech.n}. ` +
+          `VAC06-DEMOS.md no longer mentions "${needle}" for mechanism ${mech.n}. ` +
             `The record must keep naming the arm/fixture it was measured against and the defect kind that caught it, ` +
             `or it stops being evidence a verifier can re-execute.`,
         ).toBe(true);
