@@ -213,6 +213,34 @@ describe("lint-sql-gates: the CI invocation (mode identity)", () => {
     expect(header).toContain("node scripts/lint-sql-gates.mjs");
   });
 
+  it("is invoked by CI with the EXACT local command, unwrapped", () => {
+    // Mode identity (164.3-RESEARCH Pitfall 2, and this repo's measured
+    // gstack-evidence case where a WRAPPED run reddened a suite a direct run
+    // passed): a CI-only invocation mode is a different program. Pinning the
+    // bare `run:` lines stops a future edit adding `npm run`, `npx`, a
+    // `|| true`, or a shell wrapper around either step.
+    const ci = readFileSync(join(ROOT, ".github/workflows/ci.yml"), "utf8");
+    const runLines = ci
+      .split("\n")
+      .map((l) => l.trim())
+      .filter((l) => l.includes("lint-sql-gates.mjs") && l.startsWith("run:"));
+    expect(runLines).toEqual([
+      "run: node scripts/lint-sql-gates.mjs --self-test",
+      "run: node scripts/lint-sql-gates.mjs",
+    ]);
+  });
+
+  it("is BLOCKING — wired into the frontend aggregator's needs AND its result loop", () => {
+    // Either half alone leaves the gate advisory. That is not hypothetical
+    // here: SEAMCORE-09 records `frontend-seam-redis` sitting in exactly that
+    // half-wired state, and a gate nothing gates on is this phase's own thesis.
+    const ci = readFileSync(join(ROOT, ".github/workflows/ci.yml"), "utf8");
+    expect(ci).toContain("      - sql-gate-lint\n");
+    expect(ci).toContain('"sql-gate-lint=${{ needs.sql-gate-lint.result }}"');
+    // ⛔ No tolerance arm: the job is hermetic, so a `skipped` is always a fault.
+    expect(ci).not.toMatch(/\[ "\$name" = "sql-gate-lint" \]/);
+  });
+
   it("leaves the corpus untouched — a linter that could edit gate files is a liability", () => {
     const src = readFileSync(join(ROOT, LINTER), "utf8");
     expect(src).not.toMatch(/writeFileSync|appendFileSync|unlinkSync|rmSync|mkdirSync|child_process/);

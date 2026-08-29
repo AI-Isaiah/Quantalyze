@@ -754,6 +754,53 @@ jobs:
           # directory" because the artifact carried no .next at all.
           include-hidden-files: true
 
+  sql-gate-lint:
+    # Phase 164.3 / VAC-03 — the static vacuity linter over supabase/tests/*.sql.
+    #
+    # WHY IT EXISTS. Phase 164's review found five distinct mechanisms by which
+    # an arm of a SQL gate file was GREEN in CI while proving nothing. All five
+    # shipped, passed review, and passed this very workflow. Three of them, plus
+    # one narrow case of a fourth, are detectable in the file TEXT — so a sixth
+    # instance written into a NEW gate file becomes a lint failure on the
+    # pushing developer's machine instead of a red-team finding two phases on.
+    # There is deliberately no rule for the fifth mechanism (arm reachability is
+    # not statically decidable, phase decision D-16); the mutation runner's
+    # first-failure identity assertion is its detector.
+    #
+    # HERMETIC BY DESIGN: NO database, NO Docker, NO secrets, NO network — so
+    # this gate can never flake, and it runs identically on a fork PR, a
+    # same-repo PR, a push and a workflow_dispatch. That property is what earns
+    # it the NO-TOLERANCE row in the `frontend` aggregator below: unlike
+    # `sql-tests` and `e2e-seeded`, it has no legitimate reason to be skipped,
+    # so any non-success is a real fault. Same reasoning as `frontend-seam-redis`.
+    #
+    # `permissions:` and `concurrency:` are inherited from the workflow level
+    # (lines ~40 and ~53) exactly as every other job here does; restating them
+    # per-job would fork two sources of truth for no gain, and a second
+    # concurrency group inside a workflow that already has one changes
+    # cancellation semantics rather than tightening them.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6.4.0
+        with:
+          node-version: 22
+          cache: npm
+      - name: Rule self-test - every rule fires on its red fixture
+        # Runs BEFORE the corpus scan on purpose. A corpus scan that reports
+        # "0 findings" tells you nothing unless the rules can still fire; this
+        # step is what distinguishes a clean corpus from a defanged linter.
+        # No node_modules needed — the script has zero dependencies.
+        run: node scripts/lint-sql-gates.mjs --self-test
+      - name: Lint SQL gate files for the measured vacuity shapes
+        # Mode identity (164.3-RESEARCH Pitfall 2): this is the EXACT command a
+        # developer runs locally, pasted verbatim from the script's header. No
+        # wrapper, no flags, no npm alias — wrapping a run changes its result,
+        # and a CI-only invocation mode is a different program.
+        run: node scripts/lint-sql-gates.mjs
+
   frontend:
     # Aggregator. Branch protection gates on this single required check;
     # `needs:` enforces that every parallel frontend-* job above passed.
@@ -799,6 +846,23 @@ jobs:
     # Wall-clock cost is ACCEPTED: this aggregator now waits on `sql-tests`,
     # which itself needs `python` (~7m) plus its mutex wait. The alternative is
     # the present-but-ungating state this requirement exists to kill.
+    # Phase 164.3 / VAC-03 (2026-08-29): `sql-gate-lint` is BLOCKING here, wired
+    # into BOTH places below — either one alone leaves it advisory, the same trap
+    # SEAMCORE-09 recorded for `frontend-seam-redis`. It takes the loop's STRICT
+    # default arm and must NEVER be given a tolerance arm: it is hermetic (no
+    # database, no Docker, no secrets, no network), so it runs identically on a
+    # fork PR, a same-repo PR, a push and a workflow_dispatch. It therefore has
+    # no legitimate skip, and a `skipped` result there is always a real fault —
+    # exactly the `frontend-seam-redis` reasoning, and the OPPOSITE of the
+    # `sql-tests` / `e2e-seeded` rows, whose tolerances exist only because those
+    # jobs consume a repo variable a fork cannot see.
+    # ⛔ The DB-touching jobs' ban on new `needs:` edges does NOT apply to this
+    # one: that ban exists because those jobs share the TEST advisory-lock mutex
+    # and their `if:` conditions diverge, so a chain edge can silently skip a
+    # dependent. `sql-gate-lint` touches no shared resource, has no `if:`, and
+    # runs on every event — it cannot skip a dependent and cannot queue behind
+    # the mutex.
+    #
     # NOTE: this `needs:` entry is NOT one of the ⛔-banned chain edges among the
     # DB-touching jobs (see the notes on `sql-tests` / `e2e-seeded`). Those are
     # banned because a skipped `needs:` job SKIPS its dependents; this job
@@ -815,6 +879,7 @@ jobs:
       - frontend-build
       - e2e-seeded
       - sql-tests
+      - sql-gate-lint
     if: always()
     steps:
       - name: Verify all frontend-* jobs succeeded
@@ -829,7 +894,8 @@ jobs:
             "frontend-policy=${{ needs.frontend-policy.result }}" \
             "frontend-build=${{ needs.frontend-build.result }}" \
             "e2e-seeded=${{ needs.e2e-seeded.result }}" \
-            "sql-tests=${{ needs.sql-tests.result }}"; do
+            "sql-tests=${{ needs.sql-tests.result }}" \
+            "sql-gate-lint=${{ needs.sql-gate-lint.result }}"; do
             name="${r%=*}"; result="${r#*=}"
             echo "$name: $result"
             if [ "$name" = "e2e-seeded" ]; then
