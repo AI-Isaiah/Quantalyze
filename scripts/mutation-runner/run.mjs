@@ -432,7 +432,7 @@ export function armIdentities(text) {
 export function identityRewriteDetail(before, after, file) {
   const b = armIdentities(before);
   const a = armIdentities(after);
-  if (b.join(" ") === a.join(" ")) return null;
+  if (JSON.stringify(b) === JSON.stringify(a)) return null;
 
   const count = (list, id) => list.filter((x) => x === id).length;
   const moved = [...new Set([...b, ...a])]

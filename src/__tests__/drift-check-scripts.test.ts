@@ -806,11 +806,18 @@ describe("IN-02 — no INVISIBLE characters in the Phase 164.3 gate scripts", ()
     "scripts/test-ledger-drift-check.sh",
     "scripts/pg-lane/run.sh",
     "scripts/local-stack/run.sh",
+    // ⛔ R2-I02: THIS FILE. The character class below used to be written with
+    // the raw U+200B/U+200E/U+2066… bytes, so the file that forbids invisible
+    // characters was itself a scanner tripwire — and it was not in its own
+    // list, so nothing said so. The class is now written with \uXXXX escapes,
+    // proven byte-equivalent as a character class over all of the BMP before
+    // the swap, and the file scans itself.
+    "src/__tests__/drift-check-scripts.test.ts",
   ];
 
   /** Zero-width and directional-formatting characters, plus a bare NUL. */
   const INVISIBLE =
-    /[ ­᠎​-‏‪-‮⁠-⁤⁦-⁩﻿]/;
+    /[\u0000\u00AD\u180E\u200B-\u200F\u202A-\u202E\u2060-\u2064\u2066-\u2069\uFEFF]/;
 
   it("the file list itself is non-empty and every entry exists", () => {
     // Without this, the loop below is satisfied by a typo'd path list.
