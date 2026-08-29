@@ -1227,6 +1227,48 @@ jobs:
           fi
           echo "$deferred_line"
 
+          # ⛔ R2-W05: "the line is printed" IS NOT A CONTROL, because nothing
+          # compared the print to anything. Both deferral routes — a sibling
+          # `<n>-DEFERRED.md`, and `status: deferred` in the plan's own
+          # frontmatter — are writable by the SAME PR that adds the plan, so a
+          # PR could empty the pending set entirely and this step would still
+          # pass, having asserted only that a number appeared.
+          #
+          # So the VALUE is asserted, against a ratchet pinned by measurement —
+          # the same discipline the mutation runner's ARMS_FLOOR uses, and for
+          # the same reason: waiver creep is how the thing being waived hides.
+          #
+          # DEFERRED_CEILING MEASURED 2026-08-29:
+          #   node scripts/verify-plan-anchors.mjs --pending
+          #   -> scanned: 2 pending plan file(s) of 70
+          #      deferred: 1 plan file(s) exempted …   (164.3-07, VAC-07)
+          # A SECOND deferral therefore reddens this job until someone raises
+          # this number in a reviewed edit to this file — which is exactly the
+          # cost an exemption should carry. It never demands fewer.
+          DEFERRED_CEILING=1
+          deferred_n=$(echo "$deferred_line" | sed -E 's|^deferred: ([0-9]+) plan file\(s\) exempted by an explicit deferral marker$|\1|')
+          case "$deferred_n" in ''|*[!0-9]*)
+            echo "::error::MEASURE_FAIL: could not read the deferral count out of '$deferred_line'."; exit 1;; esac
+          if [ "$deferred_n" -gt "$DEFERRED_CEILING" ]; then
+            echo "::error::DEFERRAL_CEILING regression: ${deferred_n} plan file(s) are exempted from anchor verification, ceiling is ${DEFERRED_CEILING}. A deferral marker switches this gate off for a plan and is writable by the PR that adds the plan, so growing the exempt set is a deliberate, reviewed edit to DEFERRED_CEILING in ci.yml — not something a PR does to itself."
+            exit 1
+          fi
+
+          # And the count must not be able to LIE about itself: the verifier
+          # prints one `  deferred: <path>  [<marker>]` line per exemption, so
+          # the two numbers are produced independently and must agree. A count
+          # printed without its detail lines would otherwise satisfy the ceiling
+          # above while hiding what it exempted.
+          deferred_detail=$(grep -a -c -E '^  deferred: .+  \[.+\]$' "$ANCHOR_LOG" || true)
+          deferred_detail=${deferred_detail:-0}
+          if [ "$deferred_detail" -ne "$deferred_n" ]; then
+            echo "::error::MEASURE_FAIL: the run reports ${deferred_n} exempted plan file(s) but printed ${deferred_detail} exemption detail line(s). The count and the list disagree, so what was exempted is unknown."
+            exit 1
+          fi
+          if [ "$deferred_n" -gt 0 ]; then
+            grep -a -E '^  deferred: .+  \[.+\]$' "$ANCHOR_LOG"
+          fi
+
           claims_line=$(grep -a -m1 -E '^claims: [0-9]+ checked$' "$ANCHOR_LOG" || true)
           if [ -z "$claims_line" ]; then
             echo "::error::MEASURE_FAIL: the run printed NO 'claims: N checked' line, so the number of claims actually re-resolved is unknown. Unknown is not zero and it is not fine."

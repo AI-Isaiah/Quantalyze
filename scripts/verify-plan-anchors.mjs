@@ -565,6 +565,26 @@ export function verifyPaths(planPaths, options = {}) {
  * does not count — a marker with no reason in it is the checkbox this phase
  * exists to distrust.
  */
+/**
+ * What a deferral marker must SAY to be one.
+ *
+ * ⛔ R2-W05. "non-whitespace content" is satisfied by a one-byte file, and both
+ * markers are writable by the same PR that adds the plan. That is a
+ * self-service switch, not a record — and this phase's whole subject is the
+ * difference between a checkbox and a measurement.
+ *
+ * A deferral is a dated decision with an owner. Requiring the marker to carry
+ * both makes the exemption cost what the honesty costs, and makes it legible to
+ * a machine rather than only to a log reader: a marker that names no phase can
+ * never be chased, and one that carries no date can never be shown to be stale.
+ *
+ * MEASURED 2026-08-29: the one marker that exists, `164.3-07-DEFERRED.md`,
+ * satisfies both — so this refuses nothing real while making the next one cost
+ * a sentence.
+ */
+const MARKER_DATE = /\b20\d{2}-\d{2}-\d{2}\b/;
+const MARKER_OWNER = /\bPhase\s+\d+(\.\d+)?\b/i;
+
 function deferralMarker(absDir, planName) {
   const deferredName = planName.replace(/-PLAN\.md$/, "-DEFERRED.md");
   const deferredPath = join(absDir, deferredName);
@@ -576,7 +596,12 @@ function deferralMarker(absDir, planName) {
       // Unreadable is NOT deferred. Fall through and let it stay pending.
       return null;
     }
-    if (body.trim().length > 0) return deferredName;
+    // ⚠️ A marker that fails these does NOT exempt: the plan stays pending and
+    // its anchors keep being checked. Failing towards MORE scanning is the only
+    // safe direction for a switch whose whole purpose is to switch a gate off.
+    if (body.trim().length > 0 && MARKER_DATE.test(body) && MARKER_OWNER.test(body)) {
+      return deferredName;
+    }
   }
 
   let text = "";

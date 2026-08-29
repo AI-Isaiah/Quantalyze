@@ -595,8 +595,11 @@ describe("WR-06 — a deliberately deferred plan can leave the pending set HONES
   it("a sibling <n>-DEFERRED.md with content exempts the plan and is reported", () => {
     const root = tree("deferred-sibling", {
       ".planning/phases/99-open/99-01-PLAN.md": "a\n",
+      // R2-W05: the marker must name a DATE and an OWNING PHASE. "Non-empty"
+      // was satisfiable by one byte, and both deferral routes are writable by
+      // the same PR that adds the plan.
       ".planning/phases/99-open/99-01-DEFERRED.md":
-        "Deferred 2026-08-29 by founder decision: the substrate does not exist.\n",
+        "Deferred 2026-08-29 by founder decision: the substrate does not exist. Owner: Phase 164.5.\n",
       ".planning/phases/99-open/99-02-PLAN.md": "b\n",
     });
 
@@ -612,7 +615,7 @@ describe("WR-06 — a deliberately deferred plan can leave the pending set HONES
     expect(found.deferred[0].marker).toBe("99-01-DEFERRED.md");
   });
 
-  it("an EMPTY -DEFERRED.md does NOT exempt — a marker with no reason in it is a checkbox", () => {
+  it("an EMPTY or UNDATED/UNOWNED -DEFERRED.md does NOT exempt — a marker with no record in it is a checkbox", () => {
     // The exemption must cost the same as the honesty it stands in for. If a
     // zero-byte file were enough, this mechanism would be a switch for turning
     // the gate off one plan at a time.
@@ -776,6 +779,167 @@ describe("the CLI contract", () => {
       /^deferred: \d+ plan file\(s\) exempted by an explicit deferral marker$/m,
     );
     expect(res.status).toBe(0);
+  });
+
+  it("R2-W05: a deferral marker with no date or no owning phase does NOT exempt", () => {
+    // ⛔ The old rule was "non-whitespace content", which a one-byte file
+    // satisfies — and both deferral routes are writable by the SAME PR that
+    // adds the plan. That is a self-service switch, not a record.
+    //
+    // Failing towards MORE scanning is the only safe direction for a switch
+    // whose purpose is to switch a gate off, so each rejected marker leaves its
+    // plan PENDING and its claims checked.
+    const cases: Array<[string, string, boolean]> = [
+      ["x", "one byte", false],
+      ["Deferred because it is hard.\n", "prose with no date and no owner", false],
+      ["Deferred 2026-08-29 because it is hard.\n", "a date but no owning phase", false],
+      ["Deferred; owned by Phase 164.5.\n", "an owner but no date", false],
+      ["Deferred 2026-08-29. Owner: Phase 164.5. Measurement: 69 of 262 fail.\n", "dated and owned", true],
+    ];
+
+    for (const [body, label, shouldExempt] of cases) {
+      const root = tree(`defer-${label.replace(/\W+/g, "-")}`, {
+        "src/a.ts": linesFile(10),
+        ".planning/phases/99-fixture/99-01-PLAN.md": "Edit src/a.ts:50-60 here.\n",
+        ".planning/phases/99-fixture/99-01-DEFERRED.md": body,
+      });
+
+      const res = spawnSync("node", [join(REPO_ROOT, VERIFIER), "--pending", "--root", root], {
+        cwd: REPO_ROOT,
+        encoding: "utf8",
+      });
+      const out = `${res.stdout}${res.stderr}`;
+
+      if (shouldExempt) {
+        expect(out, `a dated, owned marker must exempt (${label})`).toMatch(
+          /^scanned: 0 pending plan file\(s\) of 1$/m,
+        );
+        expect(out).toMatch(/^deferred: 1 plan file\(s\)/m);
+      } else {
+        expect(out, `a marker that is ${label} must NOT exempt`).toMatch(
+          /^scanned: 1 pending plan file\(s\) of 1$/m,
+        );
+        expect(out).toMatch(/^deferred: 0 plan file\(s\)/m);
+        // And the plan's claims really are still being checked — the point of
+        // refusing the marker. src/a.ts is 10 lines; the claim names 50-60.
+        expect(res.status, `a non-exempt plan's stale claim must still redden (${label})`).toBe(1);
+      }
+    }
+  });
+
+  it("R2-W05: the REAL marker in the tree satisfies the tightened rule", () => {
+    // Non-vacuity for the arm above: the tightened rule must not have been
+    // satisfied by making it unsatisfiable. 164.3-07-DEFERRED.md is the one
+    // marker that exists, and it must still exempt.
+    const res = spawnSync("node", [VERIFIER, "--pending"], {
+      cwd: REPO_ROOT,
+      encoding: "utf8",
+    });
+    const out = `${res.stdout}${res.stderr}`;
+    expect(out).toMatch(/^deferred: 1 plan file\(s\) exempted by an explicit deferral marker$/m);
+    expect(out).toMatch(/^ {2}deferred: .+164\.3-07-PLAN\.md {2}\[164\.3-07-DEFERRED\.md\]$/m);
+    expect(res.status).toBe(0);
+  });
+
+  describe("R2-W05: ci.yml asserts the deferral COUNT, not just that a line was printed", () => {
+    // ⛔ The finding: "it is printed" is not a control, because nothing
+    // compared the print to anything. These arms drive the SHIPPED shell block
+    // — extracted from ci.yml, not retyped — against synthesized logs, so a
+    // change to ci.yml that drops the assertion reds this file.
+    const CI = join(REPO_ROOT, ".github", "workflows", "ci.yml");
+
+    /** The `run:` body of the plan-anchor-verify assertion step, dedented. */
+    function assertionScript(): string {
+      const lines = readFileSync(CI, "utf8").split("\n");
+      const marker = lines.findIndex((l) => l.includes('if [ ! -s "$ANCHOR_LOG" ]; then'));
+      expect(marker, "could not find the plan-anchor-verify assertion step in ci.yml").toBeGreaterThan(-1);
+      let start = marker;
+      while (start >= 0 && !/^\s*run: \|\s*$/.test(lines[start])) start -= 1;
+      expect(start, "the assertion step has no `run: |` block").toBeGreaterThan(-1);
+      const indent = (lines[start].match(/^\s*/) as RegExpMatchArray)[0].length + 2;
+      const body: string[] = [];
+      for (let i = start + 1; i < lines.length; i += 1) {
+        const l = lines[i];
+        if (l.trim().length === 0) {
+          body.push("");
+          continue;
+        }
+        if ((l.match(/^\s*/) as RegExpMatchArray)[0].length < indent) break;
+        body.push(l.slice(indent));
+      }
+      const script = body.join("\n");
+      // Non-vacuity: an empty or truncated extraction would "pass" every arm.
+      expect(script).toContain("DEFERRED_CEILING");
+      expect(script).toContain("claims_line");
+      return script;
+    }
+
+    function drive(log: string): { status: number | null; out: string } {
+      const dir = tree(`ci-assert-${Math.random().toString(36).slice(2)}`, {
+        "assert.sh": assertionScript(),
+        "anchor.log": log,
+      });
+      const res = spawnSync("bash", [join(dir, "assert.sh")], {
+        cwd: REPO_ROOT,
+        encoding: "utf8",
+        env: { ...process.env, ANCHOR_LOG: join(dir, "anchor.log") },
+      });
+      return { status: res.status, out: `${res.stdout ?? ""}${res.stderr ?? ""}` };
+    }
+
+    const logFor = (pending: number, total: number, deferred: string[]) =>
+      [
+        `scanned: ${pending} pending plan file(s) of ${total}`,
+        `deferred: ${deferred.length} plan file(s) exempted by an explicit deferral marker`,
+        ...deferred.map((p) => `  deferred: ${p}  [x-DEFERRED.md]`),
+        "claims: 7 checked",
+        "OK.",
+      ].join("\n") + "\n";
+
+    it("PASSES on the real tree's current log (1 exemption, at the pinned ceiling)", () => {
+      const real = spawnSync("node", [VERIFIER, "--pending"], {
+        cwd: REPO_ROOT,
+        encoding: "utf8",
+      });
+      const r = drive(`${real.stdout}${real.stderr}`);
+      expect(r.status, r.out).toBe(0);
+    });
+
+    it("FAILS when the exempt set grows past the pinned ceiling", () => {
+      const r = drive(logFor(1, 70, ["a/1-PLAN.md", "b/2-PLAN.md"]));
+      expect(r.status).toBe(1);
+      expect(r.out).toContain("DEFERRAL_CEILING regression");
+    });
+
+    it("FAILS when the count and its detail lines disagree — the count cannot lie", () => {
+      const log =
+        [
+          "scanned: 1 pending plan file(s) of 70",
+          "deferred: 1 plan file(s) exempted by an explicit deferral marker",
+          "claims: 7 checked",
+        ].join("\n") + "\n";
+      const r = drive(log);
+      expect(r.status).toBe(1);
+      expect(r.out).toContain("printed 0 exemption detail line(s)");
+    });
+
+    it("still FAILS when the deferred line vanishes entirely", () => {
+      const log =
+        ["scanned: 1 pending plan file(s) of 70", "claims: 7 checked"].join("\n") + "\n";
+      const r = drive(log);
+      expect(r.status).toBe(1);
+      expect(r.out).toContain("printed NO 'deferred: N plan file(s)");
+    });
+
+    it("does NOT fail on the honest all-executed-plus-one-deferral state", () => {
+      // The reviewer's suggested arm — fail when pending==0 && deferred>0 —
+      // would redden CI here, and this state is legitimate and imminent: phase
+      // 164.3 is 9/10 executed with plan 07 deferred, so it arrives the moment
+      // plan 10 lands a SUMMARY. A ceiling asserts the value without
+      // criminalising an honest tree.
+      const r = drive(logFor(0, 70, ["164.3/07-PLAN.md"]));
+      expect(r.status, r.out).toBe(0);
+    });
   });
 
   it("CR-02: --pending on an ARCHIVED corpus exits 0 and prints the measured zero", () => {
