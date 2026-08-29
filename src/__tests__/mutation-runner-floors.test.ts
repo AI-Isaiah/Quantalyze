@@ -33,6 +33,9 @@ const GATE_DIR = join(REPO_ROOT, "supabase", "tests");
  */
 const PROSE = /^[ \t]*--[ \t]*RED-UNDER:/;
 const TWIN = /^[ \t]*--[ \t]*RED-UNDER-M:/;
+// A waiver is a twin declaring no executable mutation. Matched textually here,
+// deliberately, rather than by JSON.parse through the parser under test.
+const WAIVER = /^[ \t]*--[ \t]*RED-UNDER-M:.*"waiver"[ \t]*:/;
 
 function rederive() {
   const files = readdirSync(GATE_DIR)
@@ -45,6 +48,7 @@ function rederive() {
       name,
       prose: lines.filter((l) => PROSE.test(l)).length,
       twins: lines.filter((l) => TWIN.test(l)).length,
+      waivers: lines.filter((l) => WAIVER.test(l)).length,
     };
   });
   return {
@@ -104,8 +108,7 @@ describe("FILES_FLOOR ratchet", () => {
 
 describe("ARMS_FLOOR ratchet", () => {
   it("exists as a named constant and is a non-negative integer", () => {
-    // Guards against silent deletion. It is deliberately 0 today; see the
-    // honest-gap assertion below.
+    // Guards against silent deletion.
     expect(Number.isInteger(ARMS_FLOOR)).toBe(true);
     expect(ARMS_FLOOR).toBeGreaterThanOrEqual(0);
   });
@@ -115,21 +118,44 @@ describe("ARMS_FLOOR ratchet", () => {
     expect(ARMS_FLOOR).toBeLessThanOrEqual(totalTwins);
   });
 
-  it("is still unpinned precisely because the corpus has no RED-UNDER-M twins yet", () => {
-    // ⚠️ HONEST GAP, asserted rather than asserted-away. Plan 164.3-08 writes
-    // the structured twins and takes the first full-corpus measurement; it MUST
-    // pin ARMS_FLOOR at that value, at which point this expectation flips and
-    // is meant to be updated in the same commit. A floor invented before the
-    // measurement exists would be the fabricated-baseline defect.
+  it("is PINNED now that the corpus carries twins — a floor of 0 cannot fire", () => {
+    // ⚠️ THIS IS THE ASSERTION THAT CLOSED WINDOWS.md ENTRY 27. Plan 05 shipped
+    // ARMS_FLOOR = 0 knowing it could not fire, and wrote this expectation to
+    // flip the instant twins appeared. Plan 164.3-08 measured the first green
+    // full-corpus run (30/30/0, exit 0, 2026-08-29) and pinned it at 30.
+    // A floor invented before that measurement would have been the
+    // fabricated-baseline defect; one left at 0 afterwards is a dead control.
     const totalTwins = rederive().perFile.reduce((n, f) => n + f.twins, 0);
     if (totalTwins === 0) {
       expect(ARMS_FLOOR).toBe(0);
     } else {
       expect(
         ARMS_FLOOR,
-        `The corpus now declares ${totalTwins} RED-UNDER-M twin(s). ARMS_FLOOR must be pinned from a measured full-corpus run (plan 164.3-08), not left at 0.`,
+        `The corpus declares ${totalTwins} RED-UNDER-M twin(s). ARMS_FLOOR must be pinned from a measured full-corpus run (plan 164.3-08), not left at 0.`,
       ).toBeGreaterThan(0);
     }
+  });
+
+  it("equals the number of NON-WAIVED twins — the biting count the run measured", () => {
+    // ⛔ THE RATCHET'S OTHER DIRECTION, and it is what makes waiver creep
+    // visible (T-164.3-21). `biting` in run.mjs is executed-minus-defects, and
+    // on a green run every non-waived twin executes and bites — so the floor
+    // and the non-waived twin count are the same number by construction.
+    // If they drift apart, either an arm was converted to a waiver (the floor
+    // must come down, deliberately and in review) or twins were added (the
+    // ratchet is stale and must be raised). Both are edits somebody makes on
+    // purpose; neither may happen silently.
+    //
+    // Re-derived here from the corpus with this file's own regexes — NOT read
+    // back from run.mjs, which is the artifact under test.
+    const perFile = rederive().perFile;
+    const twins = perFile.reduce((n, f) => n + f.twins, 0);
+    const waivers = perFile.reduce((n, f) => n + f.waivers, 0);
+    if (twins === 0) return;
+    expect(
+      ARMS_FLOOR,
+      `The corpus declares ${twins} twin(s) of which ${waivers} are waivers, so a green run bites ${twins - waivers}. ARMS_FLOOR is ${ARMS_FLOOR}. Update the floor in scripts/mutation-runner/run.mjs from a MEASURED run, never from this number.`,
+    ).toBe(twins - waivers);
   });
 });
 

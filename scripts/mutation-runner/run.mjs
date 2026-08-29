@@ -9,6 +9,7 @@
  *   node scripts/mutation-runner/run.mjs                    # full corpus: supabase/tests/
  *   node scripts/mutation-runner/run.mjs --fixture-corpus   # the synthetic corpus
  *   node scripts/mutation-runner/run.mjs --self-test        # prove the exit-1 modes fire
+ *   node scripts/mutation-runner/run.mjs --parse-only       # STATIC only — runs ZERO arms
  *   node scripts/mutation-runner/run.mjs --file <gate.sql>  # DIAGNOSTIC (never exits 0)
  *   node scripts/mutation-runner/run.mjs --arm "<ARM ID>"   # DIAGNOSTIC (never exits 0)
  *
@@ -114,13 +115,30 @@ const FIXTURE_CORPUS = join(REPO_ROOT, "scripts", "mutation-runner", "fixtures")
 // Phase 164.4 raises FILES_FLOOR as it backfills the other 70 files.
 export const FILES_FLOOR = 1;
 
-// ⚠️ ARMS_FLOOR IS DELIBERATELY 0 AND THEREFORE CANNOT FIRE YET. It is a named
-// constant, not an omission. The real corpus has no RED-UNDER-M twins yet —
-// plan 164.3-08 writes them — so the first honest full-corpus measurement does
-// not exist at the time this ships. Inventing a number here would be the
-// fabricated-baseline defect: a floor that was never compared to anything.
-// PLAN 164.3-08 MUST PIN THIS from its first full-corpus run.
-export const ARMS_FLOOR = 0;
+// ARMS_FLOOR — PINNED 2026-08-29 BY MEASUREMENT (plan 164.3-08), not chosen.
+//
+// It shipped at 0 in plan 05, which is a control that cannot fire, recorded as
+// such (WINDOWS.md entry 27) because no honest full-corpus measurement existed:
+// the real gate had zero RED-UNDER-M twins. That measurement now exists.
+//
+// MEASURED on the first green full-corpus run, 2026-08-29:
+//   `node scripts/mutation-runner/run.mjs` -> exit 0
+//   coverage: files 1/71
+//   arms: 30/30/0  (executed/annotated/waived)
+//   30 of 30 arms RED with first-failure identity ok; 0 waivers; 64s wall clock
+//
+// "Biting" is executed arms MINUS `no-red` and `wrong-first-failure` defects,
+// which on that run was 30 - 0 = 30. The number was read off the RUN, never off
+// this file — a floor picked by reading the finished artifact always passes.
+//
+// ⚠️ RATCHET, NOT A TARGET. It fails on REGRESSION only: an annotation that
+// stops biting, or one deleted outright, drops the biting count below 30 and
+// exits 1. It never demands more than the corpus declares. Phase 164.4 raises
+// it as it backfills the other 70 files.
+// ⛔ Converting an arm to a `waiver` LOWERS the biting count and therefore trips
+// this floor. That is deliberate: waiver creep is how a non-biting arm hides
+// (T-164.3-21), so widening a waiver has to be an explicit, reviewed edit here.
+export const ARMS_FLOOR = 30;
 
 const DEFECT_KINDS = [
   "parse",
@@ -195,6 +213,34 @@ export function applyFileStep(text, step) {
  *
  * `NULL;` is substituted rather than deleting the statement, so an `IF … THEN`
  * whose only statement was the RAISE keeps a non-empty body.
+ *
+ * ⛔ THE FAILURE BRANCH'S TRAILING `RESET ROLE;` GOES WITH IT, AND THAT IS A
+ * CORRECTNESS REQUIREMENT, NOT TIDYING. MEASURED 2026-08-29 while annotating
+ * the real corpus (plan 164.3-08): `N1 3a`'s mutation neuters `N1 1a`, whose
+ * failure branch reads
+ *
+ *     IF NOT raised OR err_msg NOT LIKE '%AT MOST ONE%' THEN
+ *       RESET ROLE;
+ *       RAISE EXCEPTION 'TEST FAILED (N1 1a): …';
+ *     END IF;
+ *
+ * Neutering only the RAISE left `RESET ROLE;` executing — and the branch DOES
+ * execute under that mutation, which is the whole reason the arm is neutered.
+ * The session dropped from `authenticated` to the (superuser) session role for
+ * the ENTIRE REST OF THE FILE, and sixteen arms later `NO-DELETE 1`'s
+ * `DELETE FROM strategy_shares` succeeded because a superuser needs no grant.
+ * The runner reported `wrong-first-failure: NO-DELETE 1`.
+ *
+ * ⚠️ It was loud HERE only by luck. A leaked superuser role makes every
+ * downstream GRANT arm pass for a reason unrelated to the grant — a silent
+ * vacuous PASS inside the vacuity detector, and the exact defect class Phase
+ * 164.4 would inherit across seventy more files.
+ *
+ * The reasoning that makes this the RIGHT semantics rather than a patch: those
+ * statements exist solely to restore state before ABORTING the file. Once the
+ * arm is neutered the file continues, so running its abort-path cleanup is
+ * wrong by construction. Only an exact `RESET ROLE;` is absorbed — nothing
+ * else, so a branch that does real work is never silently swallowed.
  */
 export function neuterArm(text, arm) {
   const lines = text.split("\n");
@@ -210,18 +256,26 @@ export function neuterArm(text, arm) {
   }
   if (hit === -1) return { text, found: false, reason: `no statement contains "${needle}"` };
 
-  let start = hit;
-  while (start >= 0 && !/\bRAISE\s+EXCEPTION\b/i.test(lines[start])) start -= 1;
-  if (start < 0) {
+  let raiseAt = hit;
+  while (raiseAt >= 0 && !/\bRAISE\s+EXCEPTION\b/i.test(lines[raiseAt])) raiseAt -= 1;
+  if (raiseAt < 0) {
     return { text, found: false, reason: `no RAISE EXCEPTION precedes "${needle}"` };
   }
+
+  // Absorb the abort-path cleanup that immediately precedes the RAISE. See the
+  // header: leaving `RESET ROLE;` behind leaks a superuser session into every
+  // later arm. The forward scan below still starts at the RAISE — starting it
+  // here would terminate on `RESET ROLE;`'s own semicolon and leave the RAISE
+  // live, which is a neuter that silently did nothing.
+  let start = raiseAt;
+  while (start > 0 && /^[ \t]*RESET[ \t]+ROLE[ \t]*;[ \t]*$/i.test(lines[start - 1])) start -= 1;
 
   // Walk forward to the statement terminator, tracking single-quote state so a
   // ';' inside the message literal does not end the statement early. '' is the
   // SQL escape for a literal quote.
   let end = -1;
   let inQuote = false;
-  outer: for (let i = start; i < lines.length; i += 1) {
+  outer: for (let i = raiseAt; i < lines.length; i += 1) {
     const line = lines[i];
     for (let c = 0; c < line.length; c += 1) {
       const ch = line[c];
@@ -652,6 +706,140 @@ export function runCorpus({
 }
 
 // ---------------------------------------------------------------------------
+// --parse-only: the STATIC half of the gate. No cluster, no mutation.
+// ---------------------------------------------------------------------------
+//
+// Added by plan 164.3-08 because annotating 30 real arms needs a sub-second
+// answer to "is every prose marker twinned, and does every needle still match
+// the bytes it claims?". Booting a cluster per arm to learn that a JSON object
+// is malformed is a 65-second answer to a 50-millisecond question.
+//
+// ⛔ THIS MODE IS NOT THE GATE AND MUST NEVER BE WIRED INTO CI AS ONE. It runs
+// ZERO arms, so it cannot observe a non-biting annotation — the defect the
+// whole phase exists to detect. It exits 0 on a clean parse (unlike
+// --file/--arm, which exit 2) because it checks the WHOLE corpus rather than a
+// subset, and its own contract is a static one it fully discharges. The
+// mechanism that stops it being mistaken for the gate is not this comment: the
+// CI job asserts the printed `arms:` line shows an EXECUTED count at or above
+// ARMS_FLOOR, and this mode always prints 0 executed. Swap the invocation and
+// that assertion fails.
+//
+// It DOES measure `occurrences` against the real bytes. That is a static
+// measurement, not a mutation, and it is what catches the plan-01 prose-locator
+// hazard (a needle that drifted, or was never there) without a cluster.
+export function parseOnlyCorpus({ scopeDir, log = (s) => console.log(s) }) {
+  const corpus = scanCorpus(scopeDir);
+  const defects = [];
+  const addDefect = (kind, arm, file, detail) => {
+    if (!DEFECT_KINDS.includes(kind)) throw new Error(`unknown defect kind ${kind}`);
+    defects.push({ kind, arm, file, detail });
+  };
+
+  let armsAnnotated = 0;
+  let armsWaived = 0;
+  const waivers = [];
+
+  for (const name of corpus.annotatedFiles) {
+    const gateAbsRepo = join(scopeDir, name);
+    const gateRel = relative(REPO_ROOT, gateAbsRepo);
+    const parsed = parseFile(gateAbsRepo);
+
+    for (const err of parsed.errors) addDefect("parse", null, gateRel, err.message);
+    if (!parsed.parity.ok) {
+      addDefect(
+        "parity",
+        null,
+        gateRel,
+        `${parsed.parity.prose} prose RED-UNDER marker(s) vs ${parsed.parity.structured} RED-UNDER-M twin(s)`,
+      );
+    }
+    log(
+      `  ${gateRel}: ${parsed.parity.prose} prose / ${parsed.parity.structured} twin(s) / ` +
+        `${parsed.structured.filter((a) => a.waiver).length} waiver(s)`,
+    );
+
+    armsAnnotated += parsed.structured.length;
+    for (const ann of parsed.structured) {
+      if (ann.waiver) {
+        armsWaived += 1;
+        waivers.push({ arm: ann.arm, file: gateRel, reason: ann.waiver });
+      }
+    }
+
+    if (!parsed.setup) {
+      addDefect("parse", null, gateRel, "no RED-UNDER-SETUP line — the runner refuses to guess a corpus");
+      continue;
+    }
+    for (const rel of parsed.setup.apply) {
+      if (!existsSync(join(REPO_ROOT, rel))) {
+        addDefect("bad-file-ref", null, gateRel, `RED-UNDER-SETUP names a file that does not exist: ${rel}`);
+      }
+    }
+
+    const corpusRels = [...parsed.setup.apply, gateRel];
+    for (const ann of parsed.structured) {
+      for (const step of ann.apply) {
+        if (step.kind === "sql") continue;
+        if (!corpusRels.includes(step.file)) {
+          addDefect(
+            "bad-file-ref",
+            ann.arm,
+            gateRel,
+            `step targets ${step.file}, which is not in this gate's RED-UNDER-SETUP apply list`,
+          );
+          continue;
+        }
+        const target = join(REPO_ROOT, step.file);
+        if (!existsSync(target)) {
+          addDefect("bad-file-ref", ann.arm, gateRel, `step targets a file that does not exist: ${step.file}`);
+          continue;
+        }
+        const needle = step.kind === "edit" ? step.find : step.anchor;
+        const actual = countOccurrences(readFileSync(target, "utf8"), needle);
+        if (actual !== step.occurrences) {
+          addDefect(
+            "occurrence-mismatch",
+            ann.arm,
+            gateRel,
+            `MEASURE_FAIL: ${JSON.stringify(needle)} occurs ${actual}x in ${step.file}, annotation claims ${step.occurrences}x`,
+          );
+        }
+      }
+    }
+  }
+
+  log("");
+  log(`coverage: files ${corpus.filesAnnotated}/${corpus.filesTotal}`);
+  log(`arms: 0/${armsAnnotated}/${armsWaived}   (executed/annotated/waived)`);
+  for (const w of waivers) log(`  waived: ${w.arm} — ${w.reason}`);
+  log("");
+  log("⚠️ STATIC PARSE ONLY — ZERO arms executed. This is NOT the gate: it cannot");
+  log("   observe a non-biting annotation. Run `node scripts/mutation-runner/run.mjs`.");
+  log("");
+
+  if (defects.length === 0) {
+    log("✅ No static defects. Every prose marker has a twin and every needle still matches.");
+  } else {
+    log(`❌ ${defects.length} static defect(s):`);
+    log("");
+    for (const d of defects) {
+      log(`  ${d.kind.padEnd(20)}  ${(d.arm ?? "-").padEnd(24)}  ${d.file ?? "-"}`);
+      log(`      ${d.detail}`);
+    }
+  }
+
+  return {
+    scopeDir,
+    filesTotal: corpus.filesTotal,
+    filesAnnotated: corpus.filesAnnotated,
+    armsAnnotated,
+    armsWaived,
+    defects,
+    exitCode: defects.length > 0 ? 1 : 0,
+  };
+}
+
+// ---------------------------------------------------------------------------
 // --self-test: prove BOTH exit-1 modes actually fire (D-09), machine-checked.
 // ---------------------------------------------------------------------------
 
@@ -670,8 +858,15 @@ function selfTest() {
   const quiet = () => {};
   let pass = true;
 
-  console.log("=== SELF-TEST 1/5: a non-biting annotation must exit 1 with `no-red` ===");
-  const a = runCorpus({ scopeDir: SELFTEST_DIR, onlyFile: "nonbiting-gate.sql", log: quiet });
+  // ⚠️ EVERY SCENARIO PASSES AN EXPLICIT `armsFloor`, and that is required for
+  // the checks to measure what they name. The synthetic corpora carry 2 arms;
+  // the REAL ARMS_FLOOR is 30 (measured 2026-08-29). Inheriting the default
+  // would add a spurious `floor` defect to every scenario below and break check
+  // 6 outright, so each states the floor appropriate to ITS corpus. Check 5 is
+  // where an ARMS_FLOOR regression is proven to fire — the mode that could not
+  // be proven at all while the floor was 0.
+  console.log("=== SELF-TEST 1/6: a non-biting annotation must exit 1 with `no-red` ===");
+  const a = runCorpus({ scopeDir: SELFTEST_DIR, onlyFile: "nonbiting-gate.sql", armsFloor: 0, log: quiet });
   pass =
     expect(a.exitCode === 1, `exit code is 1 (got ${a.exitCode})`) &&
     expect(
@@ -680,8 +875,8 @@ function selfTest() {
     ) &&
     pass;
 
-  console.log("=== SELF-TEST 2/5: a FILES_FLOOR regression must exit 1 with `floor` ===");
-  const b = runCorpus({ scopeDir: FIXTURE_CORPUS, filesFloor: 99, log: quiet });
+  console.log("=== SELF-TEST 2/6: a FILES_FLOOR regression must exit 1 with `floor` ===");
+  const b = runCorpus({ scopeDir: FIXTURE_CORPUS, filesFloor: 99, armsFloor: 0, log: quiet });
   pass =
     expect(b.exitCode === 1, `exit code is 1 (got ${b.exitCode})`) &&
     expect(
@@ -690,8 +885,8 @@ function selfTest() {
     ) &&
     pass;
 
-  console.log("=== SELF-TEST 3/5: reddening the WRONG arm must exit 1 with `wrong-first-failure` ===");
-  const c = runCorpus({ scopeDir: SELFTEST_DIR, onlyFile: "wrong-identity-gate.sql", log: quiet });
+  console.log("=== SELF-TEST 3/6: reddening the WRONG arm must exit 1 with `wrong-first-failure` ===");
+  const c = runCorpus({ scopeDir: SELFTEST_DIR, onlyFile: "wrong-identity-gate.sql", armsFloor: 0, log: quiet });
   pass =
     expect(c.exitCode === 1, `exit code is 1 (got ${c.exitCode})`) &&
     expect(
@@ -702,8 +897,8 @@ function selfTest() {
     ) &&
     pass;
 
-  console.log("=== SELF-TEST 4/5: a wrong `occurrences` must exit 1 with MEASURE_FAIL, NOT `no-red` ===");
-  const d = runCorpus({ scopeDir: SELFTEST_DIR, onlyFile: "occurrence-mismatch-gate.sql", log: quiet });
+  console.log("=== SELF-TEST 4/6: a wrong `occurrences` must exit 1 with MEASURE_FAIL, NOT `no-red` ===");
+  const d = runCorpus({ scopeDir: SELFTEST_DIR, onlyFile: "occurrence-mismatch-gate.sql", armsFloor: 0, log: quiet });
   pass =
     expect(d.exitCode === 1, `exit code is 1 (got ${d.exitCode})`) &&
     expect(
@@ -716,8 +911,27 @@ function selfTest() {
     ) &&
     pass;
 
-  console.log("=== SELF-TEST 5/5: the green fixture corpus must exit 0 ===");
-  const e = runCorpus({ scopeDir: FIXTURE_CORPUS, log: quiet });
+  // ⭐ THE MODE PLAN 05 COULD NOT PROVE. While ARMS_FLOOR was 0 no regression
+  // could be constructed, so `--self-test` shipped exercising only the
+  // FILES_FLOOR half of D-09's floor mode. Now that the floor is a measured 30
+  // this check exists, and it is what stops the pinned floor from decaying back
+  // into a constant nobody compares to anything.
+  console.log("=== SELF-TEST 5/6: an ARMS_FLOOR regression must exit 1 with `floor` ===");
+  const f = runCorpus({ scopeDir: FIXTURE_CORPUS, armsFloor: 99, log: quiet });
+  pass =
+    expect(f.exitCode === 1, `exit code is 1 (got ${f.exitCode})`) &&
+    expect(
+      f.defects.some((x) => x.kind === "floor" && /ARMS_FLOOR regression/.test(x.detail)),
+      "the defect table names an ARMS_FLOOR regression",
+    ) &&
+    expect(
+      !f.defects.some((x) => x.kind === "floor" && /FILES_FLOOR/.test(x.detail)),
+      "no FILES_FLOOR defect — the two floors are reported distinguishably",
+    ) &&
+    pass;
+
+  console.log("=== SELF-TEST 6/6: the green fixture corpus must exit 0 ===");
+  const e = runCorpus({ scopeDir: FIXTURE_CORPUS, armsFloor: 2, log: quiet });
   pass =
     expect(e.exitCode === 0, `exit code is 0 (got ${e.exitCode}; defects: ${JSON.stringify(e.defects)})`) &&
     expect(e.armsExecuted === 2, `2 arms executed (got ${e.armsExecuted})`) &&
@@ -726,7 +940,7 @@ function selfTest() {
 
   console.log("");
   if (pass) {
-    console.log("=== SELF-TEST PASSED: both exit-1 modes and the wrong-identity + MEASURE_FAIL modes all fire ===");
+    console.log("=== SELF-TEST PASSED: both floor modes, the wrong-identity mode and MEASURE_FAIL all fire ===");
     return 0;
   }
   console.error("=== SELF-TEST FAILED ===");
@@ -741,10 +955,12 @@ function main(argv) {
   let scopeDir = DEFAULT_CORPUS;
   let onlyFile = null;
   let onlyArm = null;
+  let parseOnly = false;
 
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
     if (arg === "--self-test") return selfTest();
+    else if (arg === "--parse-only") parseOnly = true;
     else if (arg === "--fixture-corpus") scopeDir = FIXTURE_CORPUS;
     else if (arg === "--file") {
       onlyFile = argv[++i];
@@ -761,9 +977,20 @@ function main(argv) {
       }
     } else {
       console.error(`ERROR: unknown argument ${JSON.stringify(arg)}`);
-      console.error("Usage: node scripts/mutation-runner/run.mjs [--fixture-corpus] [--file <gate.sql>] [--arm <ID>] [--self-test]");
+      console.error(
+        "Usage: node scripts/mutation-runner/run.mjs [--fixture-corpus] [--file <gate.sql>] [--arm <ID>] [--parse-only] [--self-test]",
+      );
       return 3;
     }
+  }
+
+  if (parseOnly) {
+    if (onlyFile || onlyArm) {
+      console.error("ERROR: --parse-only is a whole-corpus static check and does not combine with --file/--arm");
+      return 3;
+    }
+    console.log(`mutation-runner: STATIC PARSE, scope ${relative(REPO_ROOT, scopeDir) || "."}`);
+    return parseOnlyCorpus({ scopeDir }).exitCode;
   }
 
   if (!existsSync(LANE)) {

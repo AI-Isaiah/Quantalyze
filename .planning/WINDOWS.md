@@ -2,9 +2,9 @@
 schema_version: 1
 open_count: 26
 waived_count: 0
-fixed_count: 1
-total_count: 27
-last_updated: 2026-08-29T02:54:49.352Z
+fixed_count: 2
+total_count: 28
+last_updated: 2026-08-29T09:24:22.877Z
 ---
 
 # Broken Windows Ledger
@@ -41,7 +41,8 @@ last_updated: 2026-08-29T02:54:49.352Z
 | 24 | 164 | unrun-verify | src/app/PlausibleScript.tsx |  | Plausible withdrawal proven in jsdom markup only; the deployed check (network panel filtered to plausible.io shows ZERO requests on a token link) is post-deploy UAT | open |  | 2026-08-27T22:54:37.686Z |  |
 | 25 | 164.3 | unrun-verify | scripts/prod-body-drift-check.sh |  | VAC-04's first real-PROD execution pends the next migrations PR; the live supabase db dump path is stub-proven only | open |  | 2026-08-29T02:10:57.580Z |  |
 | 26 | 164.3 | unrun-verify | scripts/test-ledger-drift-check.sh |  | VAC-08's first real-TEST execution pends the next CI run of this branch; the name-joined schema_migrations query and pg_get_functiondef read are stub-proven only (this plan may not write to the shared TEST database) | open |  | 2026-08-29T02:11:06.140Z |  |
-| 27 | 164.3 | unmet-truth | scripts/mutation-runner/run.mjs | 123 | ARMS_FLOOR ships at 0 and therefore cannot fire; plan 164.3-08 must pin it from the first full-corpus measurement | open |  | 2026-08-29T02:54:49.352Z |  |
+| 27 | 164.3 | unmet-truth | scripts/mutation-runner/run.mjs | 123 | ARMS_FLOOR ships at 0 and therefore cannot fire; plan 164.3-08 must pin it from the first full-corpus measurement | fixed |  | 2026-08-29T02:54:49.352Z | 2026-08-29T08:58:19.520Z |
+| 28 | 164.3 | unrun-verify | .github/workflows/ci.yml |  | sql-mutation's first ubuntu execution pends the first CI run of this branch: RESEARCH assumption A1 (PostgreSQL 16 server binaries under /usr/lib/postgresql/<major>/bin) has never been measured — the lane, the runner and the job were all built on macOS, where the probe reports no such glob. A red first run names a real portability defect. | open |  | 2026-08-29T09:24:22.877Z |  |
 
 ````json
 [
@@ -364,9 +365,21 @@ last_updated: 2026-08-29T02:54:49.352Z
     "file": "scripts/mutation-runner/run.mjs",
     "line": 123,
     "description": "ARMS_FLOOR ships at 0 and therefore cannot fire; plan 164.3-08 must pin it from the first full-corpus measurement",
-    "status": "open",
+    "status": "fixed",
     "reason": "",
     "recorded_at": "2026-08-29T02:54:49.352Z",
+    "resolved_at": "2026-08-29T08:58:19.520Z"
+  },
+  {
+    "id": 28,
+    "kind": "unrun-verify",
+    "phase": "164.3",
+    "file": ".github/workflows/ci.yml",
+    "line": null,
+    "description": "sql-mutation's first ubuntu execution pends the first CI run of this branch: RESEARCH assumption A1 (PostgreSQL 16 server binaries under /usr/lib/postgresql/<major>/bin) has never been measured — the lane, the runner and the job were all built on macOS, where the probe reports no such glob. A red first run names a real portability defect.",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-08-29T09:24:22.877Z",
     "resolved_at": null
   }
 ]
