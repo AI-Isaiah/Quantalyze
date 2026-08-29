@@ -381,6 +381,18 @@ last_updated: 2026-08-29T09:24:22.877Z
     "reason": "",
     "recorded_at": "2026-08-29T09:24:22.877Z",
     "resolved_at": null
+  },
+  {
+    "id": 29,
+    "kind": "unmet-truth",
+    "phase": "164.3",
+    "file": "supabase/schema/baseline.sql",
+    "line": null,
+    "description": "supabase/schema/baseline.sql is committed with NO staleness gate. sql-function-snapshot.yml gates supabase/schema/functions/; nothing gates this file, so production can drift from it silently and the lane would keep loading stale bytes as if current. Phase 164.5 builds the --check gate; mind the 2.84.2-vs-2.98.2 pg_dump formatting skew when doing so.",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-08-29T11:35:00.000Z",
+    "resolved_at": null
   }
 ]
 ````
