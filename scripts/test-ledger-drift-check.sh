@@ -163,7 +163,16 @@ check() {
   # shellcheck disable=SC2064
   trap "rm -rf '$tmp'" RETURN
   # shellcheck disable=SC2064
-  trap "rm -rf '$tmp'" EXIT INT TERM
+  trap "rm -rf '$tmp'" EXIT
+  # ⛔ SP-M02. This was one `trap … EXIT INT TERM`, and a bash signal handler
+  # RESUMES the script when it returns — it does not exit. So Ctrl-C deleted
+  # $tmp and execution CONTINUED against files that no longer exist, inside a
+  # function whose entire subject is comparing file contents. Split, so INT and
+  # TERM route THROUGH the EXIT trap and there is exactly one teardown path.
+  # `scripts/pg-lane/run.sh` and `scripts/local-stack/run.sh` both already do
+  # this; this file was the odd one out.
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
 
   # ── HALF 1: LEDGER PRESENCE ───────────────────────────────────────────────
   local repo_names=()
@@ -362,7 +371,16 @@ self_test() {
   # shellcheck disable=SC2064
   trap "rm -rf '$tmp'" RETURN
   # shellcheck disable=SC2064
-  trap "rm -rf '$tmp'" EXIT INT TERM
+  trap "rm -rf '$tmp'" EXIT
+  # ⛔ SP-M02. This was one `trap … EXIT INT TERM`, and a bash signal handler
+  # RESUMES the script when it returns — it does not exit. So Ctrl-C deleted
+  # $tmp and execution CONTINUED against files that no longer exist, inside a
+  # function whose entire subject is comparing file contents. Split, so INT and
+  # TERM route THROUGH the EXIT trap and there is exactly one teardown path.
+  # `scripts/pg-lane/run.sh` and `scripts/local-stack/run.sh` both already do
+  # this; this file was the odd one out.
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
 
   mkdir -p "$tmp/migrations" "$tmp/snapshot" "$tmp/live"
   # shellcheck disable=SC2016  # `$$` and `$function$` are SQL dollar-quote tags, deliberately literal.

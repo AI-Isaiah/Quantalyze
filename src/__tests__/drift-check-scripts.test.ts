@@ -968,6 +968,41 @@ describe("VAC-08 — scripts/test-ledger-drift-check.sh", () => {
     });
   });
 
+  it("SP-M02: SIGINT EXITS — it does not delete the scratch dir and carry on", () => {
+    // ⛔ `trap "rm -rf '$tmp'" EXIT INT TERM`. A bash signal handler RESUMES
+    // the script when it returns; it does not exit. So Ctrl-C deleted $tmp and
+    // execution CONTINUED against files that no longer exist, inside a function
+    // whose whole subject is comparing file contents.
+    //
+    // Driven: the injected ledger query signals the script that invoked it, so
+    // the interrupt lands at a real point in the run rather than at a guessed
+    // moment.
+    withTempDir((dir) => {
+      const env = scaffoldLedgerCase(dir, {});
+      const interrupt = join(dir, "interrupt-query.sh");
+      writeFileSync(
+        interrupt,
+        [
+          "#!/usr/bin/env bash",
+          "# Produce nothing, then interrupt the gate that called us.",
+          'kill -INT "$PPID"',
+          "exit 0",
+        ].join("\n"),
+      );
+      chmodSync(interrupt, 0o755);
+
+      const { status, out } = run(LEDGER_GATE, {
+        ...env,
+        LEDGER_QUERY_CMD: `bash ${interrupt}`,
+      });
+      expect(status, "SIGINT did not terminate the gate — it resumed after the handler").toBe(130);
+      // The tell-tale of resumption: the run reaching the COUNT of a file the
+      // handler has already deleted.
+      expect(out).not.toContain("could not count the missing-migration rows");
+      expect(out).not.toContain("ledger and body checks clean");
+    });
+  });
+
   it("SP-M01 RED: a grep that ERRORS while counting is a MEASURE_FAIL, not 'counted zero'", () => {
     // ⛔ `missing_count="$(grep -ac … || true)"; missing_count="${missing_count:-0}"`.
     // grep exits 0 with a count, 1 on no match, and >= 2 on an ERROR — and on
