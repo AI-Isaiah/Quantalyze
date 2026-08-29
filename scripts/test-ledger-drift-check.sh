@@ -45,8 +45,15 @@
 # files. Joining on `name` alone matched 9. Joining on `version` alone was
 # already known to fail on the re-stamped rows. BOTH clauses are required;
 # neither is redundant, and dropping either reproduces a known-false verdict.
-# Rows with no repo counterpart (hand-applied, e.g. name=destrict_enqueue_...)
-# surface only in the ADVISORY `extra` direction, never here.
+#   bare-ts    version=20260826084633  name=20260826140000
+#              -> name  ==  the repo basename's TIMESTAMP PREFIX
+#
+# The third convention was found in the shape diagnostic on CI run 33276251646,
+# AFTER the first two clauses cut the false-missing count from 253 to 56. Each
+# clause was added because a measurement demanded it; none was reasoned into
+# existence. Rows with no repo counterpart (hand-applied, e.g.
+# name=destrict_enqueue_internal_10param) surface only in the ADVISORY `extra`
+# direction, never here.
 #
 # ── THE TWO HALVES ──────────────────────────────────────────────────────────
 # 1. LEDGER PRESENCE. Every `supabase/migrations/*.sql` basename must have a
@@ -119,7 +126,8 @@ default_ledger_query() {
              WHERE NOT EXISTS (
                    SELECT 1 FROM supabase_migrations.schema_migrations m
                     WHERE m.name = r.fname
-                       OR (m.version || '_' || m.name) = r.fname);" \
+                       OR (m.version || '_' || m.name) = r.fname
+                       OR m.name = split_part(r.fname, '_', 1));" \
         | tr -d '\r' | sed '/^[[:space:]]*$/d'
       ;;
     extra)
