@@ -1042,6 +1042,141 @@ jobs:
 
           echo "Coverage print is present and both floors hold: files $files_annotated >= $files_floor, arms $arms_executed >= $arms_floor."
 
+  plan-anchor-verify:
+    # Phase 164.3 / VAC-05 — re-resolve every anchor and quote a PENDING plan
+    # makes about the tree.
+    #
+    # WHY IT EXISTS. A plan is a set of claims about the tree, and nothing ever
+    # compared them to it. Both of Phase 164's wave-3 plans were STALE ON
+    # ARRIVAL, measured: `164-04` anchored edits at `v2/page.tsx:563-573` in a
+    # file an earlier plan had shrunk to 423 lines, and `164-03` specified a
+    # two-argument `deriveShareToken` against a source whose signature had grown
+    # a third parameter — followed literally it would have minted share links
+    # that fail verification. A human caught both by reading carefully. This job
+    # is that reading, mechanized.
+    #
+    # ⛔ SCOPED TO `pull_request`, DELIBERATELY NOT main-push. This is D-13's
+    # ruling applied to the analogous case rather than re-decided:
+    # `.planning/` is TRACKED here and plans routinely merge to main BEFORE they
+    # execute (this phase's own plans do). A pending plan sitting on main whose
+    # anchor drifts because unrelated code merged would redden main CI — and
+    # **Railway waits on main CI and SKIPS the analytics-service deploy when it
+    # is red**. D-13 removed exactly that coupling for VAC-04; a push trigger
+    # here would re-introduce it through a different door. The founder accepted
+    # a red board, not halted deploys.
+    # Nothing is lost by the narrower trigger: a stale anchor matters at EXECUTE
+    # time, and execution happens on a branch, so the PR is where the check has
+    # to bite. See the aggregator row below — it is STRICT on `pull_request` and
+    # tolerates `skipped` ONLY on the events this `if:` excludes.
+    #
+    # HERMETIC BY DESIGN: NO database, NO Docker, NO secrets, NO network, NO
+    # node_modules (the script imports only node builtins). It reads tracked
+    # files and exits. It cannot flake, and it runs identically on a fork PR.
+    #
+    # `permissions:` and `concurrency:` are inherited from the workflow level
+    # (lines ~40 and ~53), matching `sql-gate-lint` and `sql-mutation`.
+    # Restating them per-job would fork two sources of truth, and a second
+    # concurrency group inside a workflow that already has one changes
+    # cancellation semantics rather than tightening them.
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6.4.0
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Self-test - both measured failure shapes still fire
+        # Runs BEFORE the corpus scan, for a reason MEASURED on this repo on
+        # 2026-08-29: the pending-plan corpus contained ZERO `path:line` anchors
+        # that day. A corpus scan reporting "no stale claims" over a corpus with
+        # no range claims in it says nothing at all about whether the range and
+        # quote rules still work — so this step proves they do, against the two
+        # historical failures as fixtures, before the scan's verdict is allowed
+        # to mean anything. Same reasoning as `sql-gate-lint`'s rule self-test.
+        run: node scripts/verify-plan-anchors.mjs --self-test
+
+      - name: Re-resolve every pending plan's claims against the tree
+        # ⛔ MODE IDENTITY (164.3-RESEARCH Pitfall 2,
+        # `reference_gstack_evidence_wrapper_reddens_suite`). The command below
+        # is byte-identical to the one in the script's own header and to what a
+        # developer runs locally. No wrapper, no flags, no npm alias.
+        #
+        # stdout goes to a FILE and is `cat` back, not through `| tee`: a PIPE
+        # makes `$?` the LAST command's status, a hazard this phase already hit
+        # once (a `--self-test` reported FAIL while the shell reported 0). The
+        # log also has to survive into the assertion step below, and it lives in
+        # RUNNER_TEMP rather than the workspace so it cannot dirty the checkout.
+        env:
+          ANCHOR_LOG: ${{ runner.temp }}/plan-anchor-verify.log
+        run: |
+          set -uo pipefail
+          node scripts/verify-plan-anchors.mjs --pending > "$ANCHOR_LOG" 2>&1
+          status=$?
+          cat "$ANCHOR_LOG"
+          exit $status
+
+      - name: Assert the scan PRINTED its counts and ran in the mode it claims
+        # The counts, made LOAD-BEARING. Without this step, a build of the
+        # verifier that silently stopped printing them would pass unnoticed, and
+        # a reviewer would have no way to tell a scan of five plans from a scan
+        # of none.
+        #
+        # It also closes the invocation-swap hole: `--self-test` exits 0 having
+        # scanned NO plan at all. Its output carries no `scanned: … pending plan
+        # file(s) of …` line, so swapping it into the step above to green a red
+        # board fails here. That mechanism — not a comment asking nicely — is
+        # what keeps the two modes distinct.
+        #
+        # ⛔ EVERY ASSERTION DISTINGUISHES "could not measure" FROM "measured, no
+        # problem": an absent line is a MEASURE_FAIL with its own message, never
+        # a silent pass, because an empty shell variable satisfies a numeric
+        # `-eq 0` test.
+        #
+        # ⚠️ WHAT IS DELIBERATELY *NOT* ASSERTED: a floor on the claim count.
+        # Zero claims is a LEGITIMATE measurement — it is what a tree whose
+        # plans have all been executed reports, and MEASURED on 2026-08-29 the
+        # five pending plans carried 16 claims, none of them range anchors. A
+        # floor would redden CI for an honest state. The burden of "the rules
+        # can still fire" is carried by the self-test step above, which is the
+        # only place it can be carried without inventing a number.
+        env:
+          ANCHOR_LOG: ${{ runner.temp }}/plan-anchor-verify.log
+        run: |
+          set -euo pipefail
+
+          if [ ! -s "$ANCHOR_LOG" ]; then
+            echo "::error::MEASURE_FAIL: $ANCHOR_LOG is missing or empty. The verifier produced no output to check, which is not the same as a clean scan."
+            exit 1
+          fi
+
+          scanned_line=$(grep -a -m1 -E '^scanned: [0-9]+ pending plan file\(s\) of [0-9]+$' "$ANCHOR_LOG" || true)
+          if [ -z "$scanned_line" ]; then
+            echo "::error::MEASURE_FAIL: the run printed NO 'scanned: N pending plan file(s) of M' line. Either the verifier stopped reporting what it looked at, or the step above was not run in --pending mode (--self-test scans no plan at all)."
+            exit 1
+          fi
+          echo "$scanned_line"
+
+          total_plans=$(echo "$scanned_line" | sed -E 's|^scanned: [0-9]+ pending plan file\(s\) of ([0-9]+)$|\1|')
+          case "$total_plans" in ''|*[!0-9]*)
+            echo "::error::MEASURE_FAIL: could not read the total plan count out of '$scanned_line'."; exit 1;; esac
+          if [ "$total_plans" -eq 0 ]; then
+            echo "::error::MEASURE_FAIL: ZERO plan files found under .planning/phases. Zero pending plans because zero plans were discovered is a broken glob, not a clean corpus."
+            exit 1
+          fi
+
+          claims_line=$(grep -a -m1 -E '^claims: [0-9]+ checked$' "$ANCHOR_LOG" || true)
+          if [ -z "$claims_line" ]; then
+            echo "::error::MEASURE_FAIL: the run printed NO 'claims: N checked' line, so the number of claims actually re-resolved is unknown. Unknown is not zero and it is not fine."
+            exit 1
+          fi
+          echo "$claims_line"
+
+          echo "Scan counts are present and the mode is the one this gate requires: $total_plans plan file(s) discovered."
+
   frontend:
     # Aggregator. Branch protection gates on this single required check;
     # `needs:` enforces that every parallel frontend-* job above passed.
@@ -1123,6 +1258,22 @@ jobs:
     # dependent. `sql-mutation` shares no resource, waits on no mutex, and
     # deliberately never touches the shared TEST database (D-07).
     #
+    # Phase 164.3 / VAC-05 (2026-08-29): `plan-anchor-verify` is BLOCKING here,
+    # wired into BOTH places below — either one alone leaves it advisory, the
+    # trap SEAMCORE-09 recorded for `frontend-seam-redis`.
+    # ⚠️ ITS ROW IS THE ONE EXCEPTION TO "hermetic ⇒ no tolerance arm", and the
+    # reason is a TRIGGER, not a credential. The job carries
+    # `if: github.event_name == 'pull_request'` because `.planning/` is TRACKED
+    # and plans merge to main BEFORE they execute, so a pending plan whose
+    # anchor drifts on main would redden main CI — and Railway waits on main CI
+    # and SKIPS the analytics-service deploy when it is red (D-13's reasoning,
+    # applied rather than re-decided). It therefore SKIPS BY DESIGN on push and
+    # on workflow_dispatch, and that skip is tolerated FOR THIS ROW ONLY.
+    # On a `pull_request` — the event its `if:` admits and the event where a
+    # stale anchor actually matters, because execution happens on a branch —
+    # the row is STRICT: the job consumes no secret and no repo variable, so it
+    # runs identically on a fork PR and any non-success there is a real fault.
+    #
     # NOTE: this `needs:` entry is NOT one of the ⛔-banned chain edges among the
     # DB-touching jobs (see the notes on `sql-tests` / `e2e-seeded`). Those are
     # banned because a skipped `needs:` job SKIPS its dependents; this job
@@ -1141,6 +1292,7 @@ jobs:
       - sql-tests
       - sql-gate-lint
       - sql-mutation
+      - plan-anchor-verify
     if: always()
     steps:
       - name: Verify all frontend-* jobs succeeded
@@ -1157,7 +1309,8 @@ jobs:
             "e2e-seeded=${{ needs.e2e-seeded.result }}" \
             "sql-tests=${{ needs.sql-tests.result }}" \
             "sql-gate-lint=${{ needs.sql-gate-lint.result }}" \
-            "sql-mutation=${{ needs.sql-mutation.result }}"; do
+            "sql-mutation=${{ needs.sql-mutation.result }}" \
+            "plan-anchor-verify=${{ needs.plan-anchor-verify.result }}"; do
             name="${r%=*}"; result="${r#*=}"
             echo "$name: $result"
             if [ "$name" = "e2e-seeded" ]; then
@@ -1215,6 +1368,26 @@ jobs:
                 else
                   echo "::error::sql-tests result=$result (fork_pr=$is_fork_pr, dispatch=$is_dispatch). The SQL self-tests — the only gate that EXECUTEs the deployed cron bodies (it caught D-19) — did not pass. If this is a mutex acquire timeout, see docs/runbooks/shared-test-db-mutex.md sections 2-3: queue depth and a wedged holder are different faults."
                 fi
+                fail=1
+              fi
+            elif [ "$name" = "plan-anchor-verify" ]; then
+              # Phase 164.3 / VAC-05: BLOCKING, and STRICT on the only event it
+              # runs on. Its `if:` scopes it to `pull_request` so that a pending
+              # plan's anchor drifting on main cannot redden main CI and stall
+              # the Railway analytics deploy (D-13's reasoning; the full
+              # argument is in the job's own header and in the note above).
+              # A skip on push / workflow_dispatch is therefore skip-by-design
+              # and tolerated FOR THIS ROW ONLY. On a pull_request the job is
+              # hermetic — no secret, no repo variable, no network — so it runs
+              # identically on a fork PR and ANY non-success, skip included, is
+              # a real fault.
+              is_pr='${{ github.event_name == 'pull_request' }}'
+              if [ "$result" = "success" ]; then
+                :
+              elif [ "$result" = "skipped" ] && [ "$is_pr" != "true" ]; then
+                echo "plan-anchor-verify skipped (event is not pull_request — its if: scopes it there on purpose); tolerated for this row only."
+              else
+                echo "::error::plan-anchor-verify result=$result on a pull_request (is_pr=$is_pr). The pending plans' anchors were NOT re-resolved against the tree. A skip here means the job's if: was changed or the job was removed — it consumes no secret and cannot legitimately skip on a PR, fork or not."
                 fail=1
               fi
             elif [ "$result" != "success" ]; then
