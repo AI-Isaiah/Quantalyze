@@ -414,6 +414,18 @@ self_test() {
   if [ -z "${PGBIN:-}" ]; then PGBIN=$(resolve_pgbin) || exit 1; fi
   export PATH="$PGBIN:$PATH"
 
+  # ⛔ SP-H01. Arm 2 says "Not a pass" when its prerequisite is missing and then
+  # NOTHING ACTS ON IT: the arm was silently dropped from the count and the run
+  # still printed "SELF-TEST PASSED (5/5)" and exited 0. The dropped arm is
+  # precisely the one proving the collision guard is as WIDE as its message
+  # (IN-07) — so a `node`-less machine reported the broad property proven while
+  # only the narrow one had been checked. That is the SKIP-01 shape this branch
+  # exists to delete, committed inside the branch's own lane.
+  #
+  # Every skip is now tallied and REPORTED, and an incomplete self-test exits 1.
+  local st_skipped=0
+  local st_skips=""
+
   echo "=== SELF-TEST 1/5: occupied-port refusal (the collision guard bites) ==="
   # The squatter is a REAL cluster held by a first lane run — the measured
   # scenario (two agents on one fixed port), not a stand-in TCP listener that
@@ -500,6 +512,8 @@ self_test() {
     echo "  ok  refused a NON-postgres listener with exit 2 (pg_isready alone could not see it)"
   else
     echo "  SKIP non-postgres-listener arm: node is unavailable, so the guard falls back to pg_isready and CANNOT cover this case. Not a pass." >&2
+    st_skipped=$((st_skipped + 1))
+    st_skips="${st_skips}${st_skips:+, }arm 2 (non-postgres listener): node absent"
   fi
 
   echo "=== SELF-TEST 3/5: kill mid-run leaves NO orphan (D-04: on interrupt) ==="
@@ -536,6 +550,15 @@ self_test() {
   rm -rf "$wd"
   echo "  ok  passing gate exited 0 and cleaned up"
 
+  # ⛔ SP-H01: "5/5" must be a COUNT, not a caption. An arm that did not run is
+  # subtracted, named, and turned into exit 1 — "could not check" and "checked,
+  # no problem" do not share an exit code here.
+  if [ "$st_skipped" -ne 0 ]; then
+    echo "=== SELF-TEST INCOMPLETE ($((5 - st_skipped))/5 run, ${st_skipped} skipped: ${st_skips}) ===" >&2
+    echo "A self-test that could not run an arm has not proven that arm. Install the" >&2
+    echo "missing prerequisite and re-run; this is a hard failure, not a pass." >&2
+    exit 1
+  fi
   echo "=== SELF-TEST PASSED (5/5) ==="
 }
 

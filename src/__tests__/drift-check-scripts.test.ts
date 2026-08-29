@@ -1231,6 +1231,67 @@ describe("IN-04 — the scratch directory does not survive a fail() path", () =>
         "the scratch directory (IN-04).",
     ).toBeLessThan(firstMktemp as number);
   });
+
+  it("SP-H01: every SKIP in pg-lane's self-test is TALLIED, and a tallied skip exits 1", () => {
+    // ⛔ Arm 2 printed "Not a pass" and NOTHING ACTED ON IT: the arm was
+    // silently dropped from the count, the run still printed "SELF-TEST PASSED
+    // (5/5)" and exited 0. MEASURED before the fix, with `node` removed from
+    // PATH: exit 0, "SKIP non-postgres-listener arm … Not a pass." followed by
+    // "=== SELF-TEST PASSED (5/5) ===". The dropped arm is precisely the one
+    // proving the collision guard is as WIDE as its message (IN-07).
+    //
+    // Driving this in vitest would mean standing up four PostgreSQL clusters,
+    // so the DRIVEN proof lives in the fix's own measurement (recorded in the
+    // commit) and what is pinned here is the structural property: SKIPs and
+    // tallies are COUNTED against each other, so a sixth arm that skips without
+    // tallying fails.
+    const src = readFileSync("scripts/pg-lane/run.sh", "utf8");
+    const start = src.indexOf("self_test() {");
+    // ⚠️ COMMENTS STRIPPED FIRST. A first version searched the raw text and
+    // matched "SELF-TEST PASSED (5/5)" inside the very comment that explains
+    // this fix — the same trap the trap-ordering arm above records. The subject
+    // is the CODE.
+    const body = src
+      .slice(start, src.indexOf("\n# ---", start))
+      .split("\n")
+      .filter((l) => !/^\s*#/.test(l))
+      .join("\n");
+    expect(body.length, "self_test() must be findable in the source").toBeGreaterThan(500);
+    expect(body, "the comment stripper removed the code as well").toContain("st_skipped=0");
+
+    const countSkipEchoes = (text: string) =>
+      text.split("\n").filter((l) => /^\s*echo "\s*SKIP /.test(l)).length;
+    const countTallies = (text: string) =>
+      text.split("\n").filter((l) => /st_skipped=\$\(\(st_skipped \+ 1\)\)/.test(l)).length;
+
+    const skips = countSkipEchoes(body);
+    expect(skips, "no SKIP branch found — either the arm moved or this predicate stopped matching").toBeGreaterThan(0);
+    expect(
+      countTallies(body),
+      "a self-test arm prints SKIP without incrementing st_skipped, so it is silently dropped from the count",
+    ).toBe(skips);
+
+    // Calibration: the same predicates report the mismatch when the tally is
+    // deleted, so a matching pair is evidence rather than a coincidence.
+    const withoutTally = body
+      .split("\n")
+      .filter((l) => !/st_skipped=\$\(\(st_skipped \+ 1\)\)/.test(l))
+      .join("\n");
+    expect(countSkipEchoes(withoutTally)).toBe(skips);
+    expect(countTallies(withoutTally)).toBe(0);
+
+    // The verdict subtracts, names the skips, and EXITS 1 — before the
+    // "PASSED" line can be reached.
+    const incompleteAt = body.indexOf("SELF-TEST INCOMPLETE");
+    const passedAt = body.indexOf("SELF-TEST PASSED (5/5)");
+    expect(incompleteAt, "no INCOMPLETE verdict — a skipped arm would still read as a pass").toBeGreaterThan(-1);
+    expect(passedAt).toBeGreaterThan(-1);
+    expect(incompleteAt).toBeLessThan(passedAt);
+    expect(body).toMatch(/if \[ "\$st_skipped" -ne 0 \]; then/);
+    expect(body.slice(incompleteAt, passedAt)).toContain("exit 1");
+    // The count is DERIVED from the tally, not a caption.
+    expect(body).toContain("$((5 - st_skipped))/5 run");
+  });
 });
 
 describe("IN-02 — no INVISIBLE characters in the Phase 164.3 gate scripts", () => {
