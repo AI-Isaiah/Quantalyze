@@ -899,17 +899,26 @@ describe("IN-02 — no INVISIBLE characters in the Phase 164.3 gate scripts", ()
   // known, owned exception that makes `grep` silently blind to that file. It is
   // not under `src/__tests__/`, so this derivation does not reach it, and the
   // derivation is deliberately NOT widened to all of `src/`.
-  const walk = (dir: string): string[] =>
-    readdirSync(dir, { withFileTypes: true }).flatMap((e) =>
-      e.isDirectory() ? walk(join(dir, e.name)) : [join(dir, e.name)],
-    );
+  // ⚠️ Derived from the TRACKED surface, via `git ls-files`, not from a
+  // filesystem walk. MEASURED: a `readdirSync` walk of `scripts/` picked up
+  // `scripts/__pycache__/*.pyc` — gitignored Python bytecode, dense with C0
+  // bytes, which reddened three arms in the main checkout while passing in a
+  // clean worktree that had never run the Python scripts. An untracked build
+  // artefact is not part of this phase's surface; `git ls-files` says so by
+  // construction, and it cannot drift the way an extension denylist would.
+  const tracked = (...pathspecs: string[]): string[] => {
+    const res = spawnSync("git", ["ls-files", "-z", "--", ...pathspecs], {
+      cwd: process.cwd(),
+      encoding: "utf8",
+    });
+    expect(res.status, "git ls-files failed — the surface below would be empty").toBe(0);
+    return res.stdout.split("\u0000").filter((p) => p.length > 0);
+  };
 
   const SCRIPTS = [
-    ...walk("scripts"),
-    ".github/workflows/ci.yml",
-    ...readdirSync("src/__tests__")
-      .filter((f) => f.endsWith(".test.ts"))
-      .map((f) => join("src/__tests__", f)),
+    ...tracked("scripts"),
+    ...tracked(".github/workflows/ci.yml"),
+    ...tracked("src/__tests__").filter((f) => f.endsWith(".test.ts")),
   ].sort();
 
   /**
