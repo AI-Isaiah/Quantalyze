@@ -45,11 +45,12 @@ Environment overrides: `PGBIN` (server-binaries dir) and `PORT` (pin a port
 instead of auto-allocating). `PGD` is **not** overridable — it is derived from
 `--workdir` so cleanup owns exactly what this run made.
 
-## The other two entry points
+## The other three entry points
 
 ```bash
 bash scripts/pg-lane/run.sh                 # legacy demo — fixtures + the two
                                             # Phase 164 migrations + the 103-arm gate
+bash scripts/pg-lane/run.sh --self-test     # prove the guard and the cleanup CAN fail
 bash scripts/pg-lane/run.sh --tracer-proof  # SHAPE 1c: mutate -> RED -> pristine -> GREEN
 ```
 
@@ -77,6 +78,28 @@ therefore pins the real bytes and refuses any occurrence count other than 1
 (`MEASURE_FAIL`). This is the prose-locator hazard RESEARCH §Q3 predicted, and it
 is why the structured `RED-UNDER-M` annotation must carry executable bytes rather
 than a prose locator.
+
+### `--self-test`
+
+Four checks, in order. It exists because a control that cannot fail is worse than
+no control:
+
+1. **occupied-port refusal** — stands up a real cluster, then points a second
+   lane run at the same port and requires exit `2` plus the refusal message, and
+   that no data dir was created before refusing;
+2. **kill mid-run leaves no orphan** — launches a run in its own process group,
+   signals it (`SIGTERM`, then `SIGINT`) once the cluster is up, and requires that
+   nothing is listening on the run's port and the data dir is gone. This is the
+   check that discharges D-04's *"including on failure and on interrupt"*;
+3. **failure-path cleanup** — a deliberately failing gate: non-zero exit **and**
+   full cleanup;
+4. **success-path cleanup** — a passing gate: exit 0 **and** full cleanup.
+
+**Anti-vacuity evidence (2026-08-29).** The trap registration was neutered in a
+scratch copy of the script and the copy's self-test was observed **RED**:
+`SELF-TEST FAIL: SIGTERM mid-run: a postgres is STILL listening on
+127.0.0.1:59794 — orphaned cluster`. The neutered copy was discarded; nothing
+neutered is committed.
 
 ## Why it exists
 
@@ -128,6 +151,7 @@ byte-identical from `pg-harness/`; the 103-arm gate needed nothing added.
 |---|---|
 | one full lane run (boot + 2 fixtures + 2 migrations + 103-arm gate) | **~2 s** |
 | `--tracer-proof` (two full lane runs + copy/mutate) | ~5 s |
+| `--self-test` (four checks, two of which wait on a signalled run) | ~39 s |
 
 Budgeting note for the corpus run: ~2 s per arm, so 30 arms ≈ 1 minute of lane
 time. Minutes, not hours.

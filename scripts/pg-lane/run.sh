@@ -23,6 +23,7 @@
 #
 #   bash scripts/pg-lane/run.sh                 # legacy demo: fixtures + the two
 #                                               # Phase 164 migrations + the gate
+#   bash scripts/pg-lane/run.sh --self-test     # prove the guard and the cleanup
 #   bash scripts/pg-lane/run.sh --tracer-proof  # SHAPE 1c mutate->RED->pristine->GREEN
 #
 # Semantics: boot a throwaway cluster under <scratch-dir>/pgd, apply the --apply
@@ -304,6 +305,147 @@ tracer_proof() {
   echo "=== TRACER PROOF PASSED: mutate -> RED(SHAPE 1c) -> pristine -> GREEN ==="
 }
 
+# ===========================================================================
+# --self-test — prove the guard and the cleanup CAN fail (this phase's own
+# standard: a control that cannot fail is worse than no control).
+# ===========================================================================
+st_fail() { echo "SELF-TEST FAIL: $*" >&2; exit 1; }
+
+# no_orphan <port> <pgd> <label> — the assertion both kill checks share.
+no_orphan() {
+  local port="$1" pgd="$2" label="$3"
+  if pg_isready -h 127.0.0.1 -p "$port" -q 2>/dev/null; then
+    "$PGBIN/pg_ctl" -D "$pgd/data" stop -m immediate -w >/dev/null 2>&1 || true
+    st_fail "$label: a postgres is STILL listening on 127.0.0.1:$port — orphaned cluster"
+  fi
+  if [ -d "$pgd" ]; then
+    st_fail "$label: the run's data dir still exists ($pgd) — cleanup did not run"
+  fi
+}
+
+# kill_check <signal> <label> — launch a lane run in its own process group,
+# wait for the cluster to come up, signal it, then assert no orphan remains.
+kill_check() {
+  local sig="$1" label="$2" wd port i pid gate
+  wd=$(mktemp -d)
+  port=$(alloc_port)
+  gate="$wd/slow-gate.sql"
+  printf 'SELECT pg_sleep(4);\n' >"$gate"
+
+  set -m
+  PORT="$port" bash "$0" --workdir "$wd" \
+    --apply "$FIXTURES/01-fixture-core.sql" --gate "$gate" >"$wd/out" 2>&1 &
+  pid=$!
+  set +m
+
+  for i in $(seq 1 120); do
+    if pg_isready -h 127.0.0.1 -p "$port" -q 2>/dev/null; then break; fi
+    sleep 0.25
+  done
+  pg_isready -h 127.0.0.1 -p "$port" -q 2>/dev/null \
+    || { kill -9 "$pid" 2>/dev/null || true; st_fail "$label: the lane never started a cluster to interrupt"; }
+
+  kill -"$sig" "$pid" 2>/dev/null || true
+  # Bash defers a trapped signal until the running foreground command returns,
+  # so allow the in-flight psql to finish before judging. Bounded, never open.
+  for i in $(seq 1 80); do
+    if ! kill -0 "$pid" 2>/dev/null; then break; fi
+    sleep 0.25
+  done
+  if kill -0 "$pid" 2>/dev/null; then
+    kill -9 "$pid" 2>/dev/null || true
+    st_fail "$label: the lane did not exit within 20s of SIG$sig"
+  fi
+  wait "$pid" 2>/dev/null || true
+
+  no_orphan "$port" "$wd/pgd" "$label"
+  rm -rf "$wd"
+  echo "  ok  $label — no listener on :$port, data dir removed"
+}
+
+self_test() {
+  local wd port rc gate
+  if [ -z "${PGBIN:-}" ]; then PGBIN=$(resolve_pgbin) || exit 1; fi
+  export PATH="$PGBIN:$PATH"
+
+  echo "=== SELF-TEST 1/4: occupied-port refusal (the collision guard bites) ==="
+  # The squatter is a REAL cluster held by a first lane run — the measured
+  # scenario (two agents on one fixed port), not a stand-in TCP listener that
+  # pg_isready would never recognise.
+  local squat_wd squat_port squat_pid i
+  squat_wd=$(mktemp -d)
+  squat_port=$(alloc_port)
+  printf 'SELECT pg_sleep(25);\n' >"$squat_wd/hold.sql"
+  set -m
+  PORT="$squat_port" bash "$0" --workdir "$squat_wd" \
+    --apply "$FIXTURES/01-fixture-core.sql" --gate "$squat_wd/hold.sql" >"$squat_wd/out" 2>&1 &
+  squat_pid=$!
+  set +m
+  for i in $(seq 1 120); do
+    if pg_isready -h 127.0.0.1 -p "$squat_port" -q 2>/dev/null; then break; fi
+    sleep 0.25
+  done
+  pg_isready -h 127.0.0.1 -p "$squat_port" -q 2>/dev/null \
+    || { kill -9 "$squat_pid" 2>/dev/null || true; st_fail "could not stand up a cluster to collide with"; }
+
+  wd=$(mktemp -d)
+  set +e
+  PORT="$squat_port" bash "$0" --workdir "$wd" \
+    --apply "$FIXTURES/01-fixture-core.sql" --gate "$FIXTURES/01-fixture-core.sql" >"$wd/out" 2>&1
+  rc=$?
+  set -e
+  [ "$rc" -eq 2 ] || { cat "$wd/out" >&2; kill -9 "$squat_pid" 2>/dev/null || true; st_fail "occupied-port run exited $rc, expected 2"; }
+  grep -a -q "Refusing" "$wd/out" || { kill -9 "$squat_pid" 2>/dev/null || true; st_fail "occupied-port run did not print the refusal message"; }
+  [ ! -d "$wd/pgd" ] || { kill -9 "$squat_pid" 2>/dev/null || true; st_fail "occupied-port run created a data dir before refusing"; }
+  rm -rf "$wd"
+
+  kill -TERM "$squat_pid" 2>/dev/null || true
+  for i in $(seq 1 160); do
+    if ! kill -0 "$squat_pid" 2>/dev/null; then break; fi
+    sleep 0.25
+  done
+  wait "$squat_pid" 2>/dev/null || true
+  no_orphan "$squat_port" "$squat_wd/pgd" "collision squatter teardown"
+  rm -rf "$squat_wd"
+  echo "  ok  refused an occupied port with exit 2 (against a real cluster)"
+
+  echo "=== SELF-TEST 2/4: kill mid-run leaves NO orphan (D-04: on interrupt) ==="
+  kill_check TERM "SIGTERM mid-run"
+  kill_check INT  "SIGINT mid-run"
+
+  echo "=== SELF-TEST 3/4: failure-path cleanup ==="
+  wd=$(mktemp -d)
+  gate="$wd/failing-gate.sql"
+  printf "DO \$\$ BEGIN RAISE EXCEPTION 'TEST FAILED (SELF-TEST): deliberate'; END \$\$;\n" >"$gate"
+  port=$(alloc_port)
+  set +e
+  PORT="$port" bash "$0" --workdir "$wd" \
+    --apply "$FIXTURES/01-fixture-core.sql" --gate "$gate" >"$wd/out" 2>&1
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || st_fail "the deliberately-failing gate exited 0"
+  no_orphan "$port" "$wd/pgd" "failure-path"
+  rm -rf "$wd"
+  echo "  ok  failing gate exited $rc and cleaned up"
+
+  echo "=== SELF-TEST 4/4: success-path cleanup ==="
+  wd=$(mktemp -d)
+  gate="$wd/passing-gate.sql"
+  printf 'SELECT 1;\n' >"$gate"
+  port=$(alloc_port)
+  set +e
+  PORT="$port" bash "$0" --workdir "$wd" \
+    --apply "$FIXTURES/01-fixture-core.sql" --gate "$gate" >"$wd/out" 2>&1
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || { cat "$wd/out" >&2; st_fail "the passing gate exited $rc"; }
+  no_orphan "$port" "$wd/pgd" "success-path"
+  rm -rf "$wd"
+  echo "  ok  passing gate exited 0 and cleaned up"
+
+  echo "=== SELF-TEST PASSED (4/4) ==="
+}
+
 # ---------------------------------------------------------------------------
 # Argument parsing
 # ---------------------------------------------------------------------------
@@ -313,6 +455,7 @@ main() {
   if [ "$#" -eq 0 ]; then legacy_run; return; fi
 
   case "$1" in
+    --self-test)    self_test; return ;;
     --tracer-proof) tracer_proof; return ;;
     -h|--help)      sed -n '2,45p' "$0"; return ;;
   esac
