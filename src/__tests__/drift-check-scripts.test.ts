@@ -807,6 +807,54 @@ describe("SP-C05 — 'absent from PROD' must be measured by an instrument that d
     });
   });
 
+  it("SP-I07: a function name that is not a safe path component is REFUSED, not written to disk", () => {
+    // ⛔ `live="$TMP/${fname}.live.sql"` and `snapshot="${SNAPSHOT_DIR}/${fname}.sql"`
+    // make the function name a path component, and it comes from a reader that
+    // accepts a quoted, schema-qualified identifier. `public."../../x"` is a
+    // traversal write. Hardening rather than an open hole — it needs a
+    // maintainer-authored migration — but a gate whose failure mode is "wrote
+    // outside its scratch directory" cannot be the thing that guards PROD.
+    withTempDir((dir) => {
+      mkdirSync(join(dir, "snapshot"), { recursive: true });
+      const dump = join(dir, "prod-dump.sql");
+      writeFileSync(dump, PLAIN_FN);
+      const migration = join(dir, "20260829120000_traversal.sql");
+      writeFileSync(
+        migration,
+        'CREATE OR REPLACE FUNCTION public."../../pwned"(a int)\nRETURNS int LANGUAGE sql AS $$ SELECT a $$;\n',
+      );
+      // Calibration: the readers really do surface that name, so the refusal
+      // below is refusing something that reached the loop.
+      const seen = spawnSync("node", [NAIVE, migration], { encoding: "utf8" });
+      expect(seen.stdout.trim()).toBe("../../pwned");
+
+      const { status, out } = run(PROD_GATE, {
+        ...FAKE_CREDS,
+        ...realWiring(dump),
+        CHANGED_MIGRATIONS: migration,
+        SNAPSHOT_DIR: join(dir, "snapshot"),
+      });
+      expect(status).toBe(1);
+      expect(out).toContain("refuses to use as a filename component");
+      // Nothing was written outside the scratch dir under either name.
+      expect(existsSync(join(dir, "pwned.live.sql"))).toBe(false);
+      expect(existsSync(join(dir, "snapshot", "../../pwned.sql"))).toBe(false);
+    });
+  });
+
+  it("SP-I07 the other direction: a `$` is LEGAL in an identifier and must NOT be refused", () => {
+    // A guard that refuses everything is as useless as one that refuses
+    // nothing — and `$` is exactly the character SP-C05's measured case turns
+    // on, so refusing it would make this gate fail on the wrong thing.
+    withTempDir((dir) => {
+      const env = scaffold(dir, PLAIN_FN);
+      const { status, out } = run(PROD_GATE, env);
+      expect(status).toBe(0);
+      expect(out).not.toContain("refuses to use as a filename component");
+      expect(out).toContain("sanitize_user$v2: measured absent");
+    });
+  });
+
   it("the independent reader's own self-test passes and is non-empty", () => {
     const r = spawnSync("node", [NAIVE, "--self-test"], { encoding: "utf8" });
     expect(r.status).toBe(0);

@@ -378,6 +378,35 @@ compared_names=0   # produced at least one COMPARISON row (MATCH/DRIFT/SNAPSHOT_
 failed_names=0     # reached an ERROR disposition: unreadable, unextractable, or no snapshot
 
 for fname in "${NAMES[@]}"; do
+  # ⛔ SP-I07. `fname` becomes a FILESYSTEM PATH COMPONENT on the next line and
+  # on the snapshot line below, and it comes from a name reader that accepts a
+  # possibly-quoted, possibly-schema-qualified identifier — so
+  # `CREATE FUNCTION public."../../x"(…)` yields a traversal write. It takes a
+  # maintainer-authored migration to reach, so this is hardening rather than an
+  # open hole, but a gate whose failure mode is "wrote outside its scratch
+  # directory" has no business being the thing that guards production.
+  #
+  # Refuse rather than sanitise: silently rewriting the name would compare the
+  # WRONG function and report a pass for it. The same reasoning, and the same
+  # shape, as test-ledger-drift-check.sh's migration-filename allowlist.
+  #
+  # The allowlist is exactly Postgres' UNQUOTED-identifier charset,
+  # `[A-Za-z0-9_$]`. `$` is deliberately IN it: it is legal in an identifier, it
+  # is inert as a path component, and every use site quotes the expansion — so
+  # excluding it would refuse a legal function for no safety gain, and would
+  # collide with SP-C05's measured `sanitize_user$v2` case, which must reach the
+  # comparison so that the gate fails on the RIGHT thing. MEASURED 2026-08-29:
+  # all 359 function names in this repo are inside this charset.
+  case "$fname" in
+    "" | *[!A-Za-z0-9_$]*)
+      echo "::error::${GATE}: this PR defines a function named '${fname}', which carries characters"
+      echo "::error::this gate refuses to use as a filename component. It would be written into a"
+      echo "::error::scratch path and read back out of the committed snapshot directory, so a"
+      echo "::error::traversal or a collision there is a comparison against the wrong body."
+      echo "::error::Rename the function, or widen this allowlist deliberately."
+      exit 1
+      ;;
+  esac
   live="$TMP/${fname}.live.sql"
   ferr="$TMP/${fname}.fetch.err"
 

@@ -85,6 +85,16 @@ import { readFileSync } from "node:fs";
 const DEF_RE =
   /^[ \t]*CREATE[ \t]+(?:OR[ \t]+REPLACE[ \t]+)?FUNCTION[ \t]+((?:"[^"]*"|[A-Za-z0-9_$]+)(?:[ \t]*\.[ \t]*(?:"[^"]*"|[A-Za-z0-9_$]+))*)/i;
 
+/**
+ * The segments of a dotted identifier chain.
+ *
+ * ⚠️ NOT `chain.split(".")`. A quoted segment may CONTAIN dots, and the naive
+ * split turned `public."../../pwned"` into six pieces ending in `/pwned"` —
+ * found by the SP-I07 traversal fixture, which is the whole reason that fixture
+ * asserts what this reader returns before asserting what the gate does with it.
+ */
+const SEGMENT_RE = /"(?:[^"]|"")*"|[A-Za-z0-9_$]+/g;
+
 /** Strip one layer of double quotes from an identifier segment. */
 function unquote(segment) {
   return segment.startsWith('"') && segment.endsWith('"') && segment.length >= 2
@@ -103,9 +113,8 @@ export function naiveFunctionDefs(sql) {
   for (const line of sql.split("\n")) {
     const m = DEF_RE.exec(line);
     if (m === null) continue;
-    const segments = m[1]
-      .split(".")
-      .map((s) => unquote(s.trim()))
+    const segments = (m[1].match(SEGMENT_RE) ?? [])
+      .map((s) => unquote(s))
       .filter((s) => s !== "");
     if (segments.length === 0) continue;
     out.push({
@@ -140,6 +149,21 @@ function selfTest() {
   assert(
     naiveFunctionDefs("CREATE FUNCTION private.g()\n")[0].schema === "private",
     "an explicit schema qualifier must be recoverable",
+  );
+  // ⛔ Regression pin. `chain.split(".")` returned `/pwned"` here, because a
+  // QUOTED segment may contain dots. That matters beyond tidiness: the name is
+  // used as a filesystem path component downstream (SP-I07), so a reader that
+  // mangles it hands the refusal a different string from the one the other
+  // reader sees, and the two stop agreeing about what the migration defines.
+  assert(
+    names('CREATE OR REPLACE FUNCTION public."../../pwned"(a int)\n').join() ===
+      "../../pwned",
+    "a quoted segment containing dots must survive as ONE segment",
+  );
+  assert(
+    naiveFunctionDefs('CREATE FUNCTION public."../../pwned"(a int)\n')[0]
+      .schema === "public",
+    "…and its schema qualifier must still be read correctly",
   );
   assert(
     naiveFunctionDefs("CREATE FUNCTION g()\n")[0].schema === "",
