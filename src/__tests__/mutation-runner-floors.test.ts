@@ -21,11 +21,17 @@ import { readFileSync, readdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { ARMS_FLOOR, FILES_FLOOR } from "../../scripts/mutation-runner/run.mjs";
+import {
+  ARMS_FLOOR,
+  DEFECT_KINDS,
+  FILES_FLOOR,
+} from "../../scripts/mutation-runner/run.mjs";
 import { scanCorpus } from "../../scripts/mutation-runner/parse.mjs";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const GATE_DIR = join(REPO_ROOT, "supabase", "tests");
+const CI_PATH = join(REPO_ROOT, ".github", "workflows", "ci.yml");
+const RUNNER_PATH = join(REPO_ROOT, "scripts", "mutation-runner", "run.mjs");
 
 /**
  * Independent re-derivation. These regexes are written out again on purpose —
@@ -203,6 +209,125 @@ describe("IN-05 — CI's floor and the runner's floor bound the SAME quantity", 
     // The executed-is-zero MEASURE_FAIL must survive: it is the arm that
     // catches a --parse-only swap.
     expect(ci).toContain('if [ "$arms_executed" -eq 0 ]');
+  });
+});
+
+describe("SP-C02 — the runner's `--self-test` is WIRED into CI, before the corpus run, unwrapped", () => {
+  // ⛔ THE DEFECT. `node scripts/mutation-runner/run.mjs --self-test` was
+  // invoked by NOTHING (verified by repo-wide grep), while both sibling jobs
+  // run theirs. It is the SOLE proof that the runner's defect kinds can still
+  // fire: the full-corpus run CI does execute is GREEN BY CONSTRUCTION at
+  // 30/30, so a runner whose defect reporting was disabled would still print
+  // `arms: 30/30/0`, clear both floors and exit 0. Vitest covers `neuterArm`,
+  // the floors and the identity helpers — never `runCorpus`'s defect reporting,
+  // which needs a cluster. So "0 defects" was a number nothing could
+  // contradict.
+  const CI_TEXT = readFileSync(CI_PATH, "utf8");
+
+  /**
+   * The predicate under test, written over ARBITRARY TEXT so it can be
+   * calibrated against a copy of ci.yml with the step removed. A predicate only
+   * ever applied to the passing input is not evidence.
+   */
+  const bareRunLines = (text: string) =>
+    text
+      .split("\n")
+      .map((l) => l.trim())
+      .filter(
+        (l) => l.startsWith("run:") && l.includes("mutation-runner/run.mjs"),
+      );
+
+  it("ci.yml invokes it with the EXACT bare command from the script's own header", () => {
+    // Mode identity (164.3-RESEARCH Pitfall 2, and this repo's measured
+    // gstack-evidence case where a WRAPPED run reddened a suite a direct run
+    // passed). Pinning the bare `run:` line stops a future edit adding `npm
+    // run`, `npx`, a `|| true`, or a shell wrapper.
+    expect(bareRunLines(CI_TEXT)).toEqual([
+      "run: node scripts/mutation-runner/run.mjs --self-test",
+    ]);
+    // It must be the command the script documents, not a variant invented here.
+    const header = readFileSync(RUNNER_PATH, "utf8").slice(0, 4000);
+    expect(header).toContain("node scripts/mutation-runner/run.mjs --self-test");
+  });
+
+  it("CALIBRATION: the same predicate reports the step ABSENT when it is removed", () => {
+    // Without this arm, the assertion above could be satisfied by a predicate
+    // that matches anything — the shape SP-C01 found one describe block away.
+    const without = CI_TEXT.replace(
+      "        run: node scripts/mutation-runner/run.mjs --self-test\n",
+      "",
+    );
+    expect(without, "the deletion must actually change the text").not.toBe(CI_TEXT);
+    expect(bareRunLines(without)).toEqual([]);
+  });
+
+  it("the self-test step comes BEFORE the corpus run — a clean scan proves nothing from a defanged detector", () => {
+    const selfTestAt = CI_TEXT.indexOf(
+      "run: node scripts/mutation-runner/run.mjs --self-test",
+    );
+    const corpusAt = CI_TEXT.indexOf(
+      'node scripts/mutation-runner/run.mjs > "$RUNNER_LOG" 2>&1',
+    );
+    expect(selfTestAt, "the self-test invocation is missing").toBeGreaterThan(-1);
+    expect(corpusAt, "the corpus invocation is missing").toBeGreaterThan(-1);
+    expect(selfTestAt).toBeLessThan(corpusAt);
+    // Both live in the SAME job. A self-test wired into some other job would
+    // satisfy the ordering above while proving nothing about `sql-mutation`.
+    const job = CI_TEXT.slice(
+      CI_TEXT.indexOf("\n  sql-mutation:"),
+      CI_TEXT.indexOf("\n  plan-anchor-verify:"),
+    );
+    expect(job.length, "the sql-mutation job slice must be non-empty").toBeGreaterThan(1000);
+    expect(job).toContain("run: node scripts/mutation-runner/run.mjs --self-test");
+    expect(job).toContain('node scripts/mutation-runner/run.mjs > "$RUNNER_LOG" 2>&1');
+    // Nothing in the job may soften a failure into a pass.
+    expect(job).not.toContain("continue-on-error");
+    expect(job).not.toContain("run.mjs --self-test || true");
+  });
+
+  it("every defect kind is either exercised by the self-test or on the reviewed not-covered list — ranged over the runner's OWN list", () => {
+    // The two sets are derived, never restated: DEFECT_KINDS is exported by
+    // run.mjs, and the exercised set is read out of selfTest()'s source. A new
+    // kind added without a scenario fails here BY NAME.
+    const src = readFileSync(RUNNER_PATH, "utf8");
+    const selfTestBody = src.slice(src.indexOf("function selfTest()"));
+    expect(selfTestBody.length, "selfTest() must be findable in the source").toBeGreaterThan(1000);
+    const exercised = new Set(
+      [...selfTestBody.matchAll(/kind === "([a-z-]+)"/g)].map((m) => m[1]),
+    );
+    expect(DEFECT_KINDS.length, "an empty kind list would make this arm vacuous").toBeGreaterThan(5);
+    expect(exercised.size, "the self-test must assert on at least one kind").toBeGreaterThan(0);
+    // Every kind the self-test names must be a real kind — a typo here would
+    // silently make a scenario assert on something that can never be reported.
+    for (const k of exercised) expect(DEFECT_KINDS).toContain(k);
+
+    const uncovered = DEFECT_KINDS.filter((k: string) => !exercised.has(k)).sort();
+    // ⚠️ EXACT SET, so this list cannot grow silently. Each entry is a kind the
+    // self-test does not construct, and each has a reason:
+    //   parse / parity / bad-file-ref — static, and covered by --parse-only and
+    //     by the parser's own vitest file;
+    //   neuter-missed / baseline / restore / dirty-checkout — each needs a
+    //     corpus deliberately broken in a way that would also break the fixture
+    //     corpus for every other scenario. NAMED here rather than implied, so
+    //     the gap is visible instead of absent.
+    expect(uncovered).toEqual([
+      "bad-file-ref",
+      "baseline",
+      "dirty-checkout",
+      "neuter-missed",
+      "parity",
+      "parse",
+      "restore",
+    ]);
+    // The six kinds SP-C02 names as the self-test's whole purpose.
+    expect([...exercised].sort()).toEqual([
+      "floor",
+      "identity-rewrite",
+      "no-red",
+      "occurrence-mismatch",
+      "synthesised-identity",
+      "wrong-first-failure",
+    ]);
   });
 });
 

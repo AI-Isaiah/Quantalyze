@@ -140,7 +140,15 @@ export const FILES_FLOOR = 1;
 // (T-164.3-21), so widening a waiver has to be an explicit, reviewed edit here.
 export const ARMS_FLOOR = 30;
 
-const DEFECT_KINDS = [
+/**
+ * Every defect this runner can report. EXPORTED (SP-C02) so the CI-wiring test
+ * can range over it rather than restating it: a new kind added here without a
+ * `--self-test` scenario, or without a place on the reviewed
+ * not-covered-by-the-self-test list, fails by name in
+ * src/__tests__/mutation-runner-floors.test.ts. A list restated in a test is a
+ * second thing to drift; a list the implementation owns is not.
+ */
+export const DEFECT_KINDS = [
   "parse",
   "parity",
   "bad-file-ref",

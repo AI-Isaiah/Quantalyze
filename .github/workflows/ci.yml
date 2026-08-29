@@ -950,6 +950,33 @@ jobs:
           fi
           echo "Preflight clean: ${#files[@]} file(s) free of refused meta-commands."
 
+      - name: Runner self-test - every defect kind still fires
+        # ⛔ SP-C02. This step was MISSING, and its absence was the largest hole
+        # in this job. Verified by repo-wide grep at the time: `run.mjs
+        # --self-test` was invoked by NOTHING, while the two sibling jobs both
+        # run theirs (`lint-sql-gates.mjs --self-test` at ~:796,
+        # `verify-plan-anchors.mjs --self-test` at ~:1139).
+        #
+        # It is the SOLE proof that the runner's six defect kinds — `no-red`,
+        # `wrong-first-failure`, `occurrence-mismatch`, `identity-rewrite`,
+        # `synthesised-identity`, `floor` — can still fire. The corpus run below
+        # is GREEN BY CONSTRUCTION at 30/30: a runner whose defect reporting was
+        # disabled would still print `arms: 30/30/0`, clear both floors and exit
+        # 0. Vitest covers `neuterArm`, the floors and the identity helpers; it
+        # never covers `runCorpus`'s defect REPORTING, because that needs a
+        # cluster. So without this step, "0 defects" was a number nothing could
+        # contradict — this phase's own thesis, inside this phase's own gate.
+        #
+        # BEFORE the corpus run, for the same reason `sql-gate-lint` orders its
+        # two steps that way: a clean scan means nothing unless the detector can
+        # still fire. It needs no extra provisioning — it drives the same
+        # throwaway `initdb` cluster `scripts/pg-lane/run.sh` creates for the
+        # corpus run. Measured 2026-08-29: 8/8, in seconds.
+        #
+        # ⛔ MODE IDENTITY: the bare command from the script's own header, no
+        # wrapper. Pinned from vitest by src/__tests__/mutation-runner-floors.test.ts.
+        run: node scripts/mutation-runner/run.mjs --self-test
+
       - name: Mutate every annotated RED-UNDER arm and require it to bite
         # ⛔ MODE IDENTITY (164.3-RESEARCH Pitfall 2,
         # `reference_gstack_evidence_wrapper_reddens_suite`). The command below
