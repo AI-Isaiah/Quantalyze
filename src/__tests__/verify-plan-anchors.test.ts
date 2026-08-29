@@ -522,7 +522,7 @@ describe("pending-plan discovery — executed plans are archival and exempt", ()
     expect(found.measureReason).toContain("could not be located");
   });
 
-  it("reports MEASURE_FAIL when .planning/phases exists but cannot be READ", () => {
+  it("reports MEASURE_FAIL when .planning/phases exists but cannot be READ", (ctx) => {
     // ⛔ The other half of CR-02. An unreadable corpus is not an empty one, and
     // if this ever silently returned zero the gate would go green having
     // enumerated nothing. Skipped where a chmod cannot make a dir unreadable
@@ -541,8 +541,19 @@ describe("pending-plan discovery — executed plans are archival and exempt", ()
     }
     try {
       if (readableAnyway) {
-        // Running as root, or no POSIX modes. Say so instead of pretending.
-        expect(readableAnyway).toBe(true);
+        // ⛔ R2-I05: `expect(readableAnyway).toBe(true)` is TRUE BY THE BRANCH
+        // CONDITION — it records nothing and the arm counts as a pass. A
+        // permanently-skipped arm that reads as green is the shape this whole
+        // phase exists to refuse. Running as root or on a filesystem without
+        // POSIX modes is a real reason not to assert, so it is announced on
+        // stderr where a CI reader can see it, and the arm reports SKIPPED
+        // rather than pretending to have measured something.
+        console.warn(
+          "SKIPPED (not a pass): chmod 000 did not make .planning/phases unreadable — running " +
+            "as root, or on a filesystem without POSIX modes. The 'unreadable corpus is a " +
+            "MEASURE_FAIL' half of CR-02 was NOT exercised in this environment.",
+        );
+        ctx.skip();
         return;
       }
       const found = findPendingPlans(root);

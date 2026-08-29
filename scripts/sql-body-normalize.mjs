@@ -304,8 +304,9 @@ export function extractFunctionDefs(sql) {
     const { stmtStart, afterKeyword } = starts[s];
     const nextStart =
       s + 1 < starts.length ? starts[s + 1].stmtStart : sql.length;
-    const { end: afterName } = readQualifiedName(sql, afterKeyword);
-    const { name, schema } = readQualifiedName(sql, afterKeyword);
+    // R2-I05: one call, one destructuring. This parsed the same input twice to
+    // pick different fields off it.
+    const { end: afterName, name, schema } = readQualifiedName(sql, afterKeyword);
 
     let j = afterName;
     while (j < sql.length && /\s/.test(masked[j])) j++;
