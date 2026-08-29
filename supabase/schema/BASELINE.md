@@ -104,10 +104,30 @@ whole phase exists to remove.
 
 Diffing its function names against `supabase/schema/functions/` surfaced
 `create_allocator_connected_strategy`: present in production, defined by **no migration in this
-repo**, `SECURITY DEFINER`, `OWNER TO postgres`, and `GRANT ALL ... TO authenticated` — an
-authenticated-reachable RPC that writes encrypted credential material into `api_keys`,
-`strategies` and `portfolio_strategies`. Its own comment points at "migration 043", a legacy
-numbered file that does not exist here. Nothing in `src/` calls it.
+repo**. Its own comment points at "migration 043", a legacy numbered file that does not exist
+here. Nothing in `src/` calls it.
+
+⚠️ **SP-I05 — this paragraph used to read as a live vulnerability, and it is not one.** It
+described the function as `SECURITY DEFINER` + `OWNER TO postgres` + `GRANT ALL … TO
+authenticated` writing encrypted credential material, and OMITTED the guards. All three
+attributes are true, and the body — re-read from `baseline.sql` on 2026-08-29 — refuses
+anything but a self-write:
+
+| Guard | Effect |
+|---|---|
+| `v_auth_uid UUID := auth.uid();` then `IF v_auth_uid IS NULL THEN RAISE` | no anon caller |
+| `IF v_auth_uid <> p_user_id THEN RAISE` | cannot write for another user |
+| `IF v_portfolio_owner IS NULL THEN RAISE` | portfolio must exist |
+| `IF v_portfolio_owner <> p_user_id THEN RAISE` | portfolio must be the caller's |
+
+It also carries `SET search_path TO 'public', 'pg_catalog'`, which closes the usual
+SECURITY DEFINER hazard. **It is not exploitable**, and triaging DRIFT-04 as a security
+incident would spend the response budget in the wrong place.
+
+The real issue is GOVERNANCE, and it is unchanged: a production function defined by no
+migration, carried by no snapshot, called by nothing in `src/`, and INVISIBLE TO EVERY GATE —
+so its next edit is unreviewable by construction. Disposition stays **DROP** (or adopt it
+under a migration); that is a founder call, not a remediation deadline.
 
 Neither existing gate could see it. `dump-sql-functions.ts` is hermetic, so a function absent
 from the migrations is absent from its input and therefore from its diff. VAC-04 compares
