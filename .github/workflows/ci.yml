@@ -1060,8 +1060,18 @@ jobs:
           biting=$(echo "$biting_line" | sed -E 's|^biting: ([0-9]+) .*|\1|')
           case "$biting" in ''|*[!0-9]*)
             echo "::error::MEASURE_FAIL: could not read the biting count out of '$biting_line'."; exit 1;; esac
+          # ⚠️ R2-I01, STATED SO IT IS NOT MISREAD AS A LIVE CHECK: this arm is
+          # UNREACHABLE for any log the runner produces. `bitingArms` is
+          # `armsExecuted` minus a subset of the defects, so `biting <=
+          # executed` holds by construction (run.mjs, the ARMS_FLOOR block).
+          # It is kept deliberately, and only for what it DOES cover: a log
+          # that was hand-edited, spliced from two runs, or assembled by a
+          # wrapper. This step's whole job is to read numbers out of a text
+          # file it did not produce, so "these two cannot disagree" is worth
+          # asserting about the FILE even though it is trivially true of the
+          # program. It is not evidence that the runner is consistent.
           if [ "$biting" -gt "$arms_executed" ]; then
-            echo "::error::MEASURE_FAIL: biting ($biting) exceeds executed ($arms_executed). Those two numbers come from the same run and cannot disagree this way; one of them is not measuring what it claims."
+            echo "::error::MEASURE_FAIL: biting ($biting) exceeds executed ($arms_executed). Those two numbers come from the same run and cannot disagree this way, so this log was not produced by one run of the gate."
             exit 1
           fi
           if [ "$biting" -lt "$arms_floor" ]; then
