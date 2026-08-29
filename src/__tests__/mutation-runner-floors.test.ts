@@ -17,7 +17,14 @@
  */
 import { describe, expect, it } from "vitest";
 import { spawnSync } from "node:child_process";
-import { readFileSync, readdirSync } from "node:fs";
+import {
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -44,13 +51,13 @@ const TWIN = /^[ \t]*--[ \t]*RED-UNDER-M:/;
 // deliberately, rather than by JSON.parse through the parser under test.
 const WAIVER = /^[ \t]*--[ \t]*RED-UNDER-M:.*"waiver"[ \t]*:/;
 
-function rederive() {
-  const files = readdirSync(GATE_DIR)
+function rederive(dir: string = GATE_DIR) {
+  const files = readdirSync(dir)
     .filter((f) => f.endsWith(".sql"))
     .sort();
   const perFile = files.map((name) => {
     // node:fs, never shell grep — grep is silently NUL-blind in this repo.
-    const lines = readFileSync(join(GATE_DIR, name), "utf8").split("\n");
+    const lines = readFileSync(join(dir, name), "utf8").split("\n");
     return {
       name,
       prose: lines.filter((l) => PROSE.test(l)).length,
@@ -60,7 +67,15 @@ function rederive() {
   });
   return {
     filesTotal: files.length,
-    annotated: perFile.filter((f) => f.prose > 0),
+    // ⛔ SP-I04. This read `f.prose > 0`, while `scanCorpus` counts a file as
+    // annotated on prose OR a structured twin (deliberately — IN-01). The two
+    // agree TODAY only because the single annotated file happens to carry both.
+    // The moment 164.4 backfills a structured-only file they diverge, and
+    // `FILES_FLOOR` and the runner's coverage numerator would bound DIFFERENT
+    // QUANTITIES — the ARMS_FLOOR/IN-05 defect, one file over. It would fail
+    // loudly, but on the ratchet rather than on the corpus, sending the reader
+    // to the wrong place. Same predicate, same quantity.
+    annotated: perFile.filter((f) => f.prose > 0 || f.twins > 0),
     perFile,
   };
 }
@@ -79,6 +94,47 @@ describe("corpus re-derivation", () => {
     expect(theirs.filesTotal).toBe(mine.filesTotal);
     expect(theirs.filesAnnotated).toBe(mine.annotated.length);
     expect(theirs.annotatedFiles).toEqual(mine.annotated.map((f) => f.name));
+  });
+
+  it("SP-I04: the two predicates agree on a STRUCTURED-ONLY file — driven, because the real corpus cannot show it", () => {
+    // ⛔ WHY A SYNTHETIC CORPUS. The real corpus has exactly one annotated file
+    // and it carries BOTH marker kinds, so `prose > 0` and `prose > 0 || twins
+    // > 0` are indistinguishable on it — the arm above would pass either way.
+    // The divergence appears the moment 164.4 backfills a structured-only file,
+    // which is precisely when nobody will be looking. So the input is built
+    // here rather than waited for.
+    const dir = mkdtempSync(join(tmpdir(), "floors-corpus-"));
+    try {
+      const setup = `-- RED-UNDER-SETUP: {"apply":["supabase/tests/test_strategy_shares_rls.sql"]}`;
+      const twin = (arm: string) =>
+        `  -- RED-UNDER-M: {"arm":"${arm}","waiver":"no first-failure mutation exists"}`;
+      writeFileSync(join(dir, "a-both.sql"), [setup, "  -- RED-UNDER: prose", twin("A")].join("\n"));
+      // The file the old predicate could not see.
+      writeFileSync(join(dir, "b-twin-only.sql"), [setup, twin("B")].join("\n"));
+      writeFileSync(join(dir, "c-neither.sql"), "SELECT 1;\n");
+
+      const mine = rederive(dir);
+      const theirs = scanCorpus(dir);
+
+      // Calibration: the file really is structured-only, or this proves nothing.
+      const twinOnly = mine.perFile.find((f) => f.name === "b-twin-only.sql");
+      expect(twinOnly).toBeDefined();
+      expect(twinOnly?.prose).toBe(0);
+      expect(twinOnly?.twins).toBeGreaterThan(0);
+
+      // The OLD predicate, applied here so the divergence is shown rather than
+      // asserted: it drops the structured-only file, the parser's does not.
+      const underOldPredicate = mine.perFile.filter((f) => f.prose > 0).map((f) => f.name);
+      expect(underOldPredicate).toEqual(["a-both.sql"]);
+      expect(theirs.annotatedFiles).toEqual(["a-both.sql", "b-twin-only.sql"]);
+
+      // And the repaired one agrees with the parser, which is the property.
+      expect(mine.annotated.map((f) => f.name)).toEqual(theirs.annotatedFiles);
+      expect(theirs.filesAnnotated).toBe(mine.annotated.length);
+      expect(mine.filesTotal).toBe(3);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it("counts markers at line start only — the PARSER's count is STRICTLY below a naive substring count", () => {
