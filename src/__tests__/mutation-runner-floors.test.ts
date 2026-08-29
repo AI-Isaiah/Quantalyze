@@ -26,7 +26,7 @@ import {
   DEFECT_KINDS,
   FILES_FLOOR,
 } from "../../scripts/mutation-runner/run.mjs";
-import { scanCorpus } from "../../scripts/mutation-runner/parse.mjs";
+import { parseFile, scanCorpus } from "../../scripts/mutation-runner/parse.mjs";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const GATE_DIR = join(REPO_ROOT, "supabase", "tests");
@@ -81,15 +81,39 @@ describe("corpus re-derivation", () => {
     expect(theirs.annotatedFiles).toEqual(mine.annotated.map((f) => f.name));
   });
 
-  it("counts markers at line start only — a naive substring count is strictly larger", () => {
-    // The corpus header documents the annotation syntax, so an unanchored count
-    // is inflated by the file's own prose ABOUT annotations. If the runner's
-    // numerator ever silently became the naive count, coverage would rise
-    // without a single new annotation.
+  it("counts markers at line start only — the PARSER's count is STRICTLY below a naive substring count", () => {
+    // ⛔ SP-C03. This arm used to read `expect(naive).toBeGreaterThanOrEqual(
+    // file.prose)`, which CANNOT FAIL for any input: `naive` counts every
+    // `RED-UNDER` substring, `file.prose` counts line-anchored marker lines,
+    // each such line contains at least one substring, and the lines are
+    // disjoint. Its title said "strictly larger" while it asserted `>=`, and
+    // — worse — NEITHER quantity came from the implementation, so it could not
+    // detect the failure its own comment describes.
+    //
+    // Both defects are closed by making the subject `parseFile`, the thing that
+    // actually produces the runner's numerator. If it ever stopped anchoring,
+    // its count would climb toward the naive one and `>` would red.
     const { annotated } = rederive();
+    expect(annotated.length, "no annotated file — every assertion below would be vacuous").toBeGreaterThan(0);
     for (const file of annotated) {
-      const naive = readFileSync(join(GATE_DIR, file.name), "utf8").split("RED-UNDER").length - 1;
-      expect(naive).toBeGreaterThanOrEqual(file.prose);
+      const path = join(GATE_DIR, file.name);
+      const naive = readFileSync(path, "utf8").split("RED-UNDER").length - 1;
+      const parsed = parseFile(path).prose.length;
+      // The parser and this file's INDEPENDENT re-derivation must agree; they
+      // are two different regexes over the same bytes.
+      expect(
+        parsed,
+        `${file.name}: the parser counts ${parsed} prose marker(s), this test's independent scan counts ${file.prose}`,
+      ).toBe(file.prose);
+      // ⭐ STRICTLY. The corpus header documents the syntax, and every
+      // structured twin line also carries the `RED-UNDER` substring, so an
+      // anchored count is necessarily below an unanchored one wherever a twin
+      // exists — which the parity gate guarantees for every annotated file.
+      // MEASURED 2026-08-29 on the real corpus: 30 anchored, 66 naive.
+      expect(
+        naive,
+        `${file.name}: the naive substring count (${naive}) is not STRICTLY above the parser's anchored count (${parsed}). Either the parser stopped anchoring, or this file no longer carries the inflated shapes the anchor exists to exclude.`,
+      ).toBeGreaterThan(parsed);
     }
     const totalAnchored = annotated.reduce((n, f) => n + f.prose, 0);
     expect(totalAnchored).toBe(30);
