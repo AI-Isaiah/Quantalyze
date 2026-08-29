@@ -1063,6 +1063,23 @@ true for 146 and half of 142–145, and **false for 141**.
 
 ## 🟡 FIX MID-TERM
 
+- [ ] **`[VAC-04-ROLE]` Swap Phase 164.3's repo-vs-PROD body diff onto a zero-table-grant role.**
+      Booked 2026-08-29 as the deferred half of a founder ruling, so it is not lost.
+      **Current state (deliberate, not an oversight):** VAC-04 runs as a step inside
+      `.github/workflows/migration-drift-check.yml` and reuses the `SUPABASE_ACCESS_TOKEN` +
+      `SUPABASE_DB_PASSWORD` that job already carries. That was chosen over minting a second prod
+      credential, because the secret is already in that job's blast radius on every migrations PR —
+      adding a step widens nothing, while a new secret would have been a second copy of prod access
+      rather than a smaller one.
+      **The improvement:** `pg_get_functiondef` needs NO table privileges, so a role with zero
+      grants can do the whole job. A credential whose permitted actions are legible from its name
+      beats a shared one whose are not.
+      **Done when:** a login role with no table grants exists, its DSN is a CI secret, VAC-04 reads
+      only that, and the check still exits 1 (never skips) when it is absent.
+      ⚠️ Not urgent and not blocking: this changes WHICH credential is used, not whether the control
+      works. Do not let it gate the phase.
+
+
 ### RANK-SPLAT-01 — the anon metrics surface is unbounded by construction (booked 2026-08-26)
 
 Booked by founder ruling while closing Phase 159's product call. RANK-02 itself is ACCEPTED as
