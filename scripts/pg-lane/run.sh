@@ -414,7 +414,7 @@ self_test() {
   if [ -z "${PGBIN:-}" ]; then PGBIN=$(resolve_pgbin) || exit 1; fi
   export PATH="$PGBIN:$PATH"
 
-  echo "=== SELF-TEST 1/4: occupied-port refusal (the collision guard bites) ==="
+  echo "=== SELF-TEST 1/5: occupied-port refusal (the collision guard bites) ==="
   # The squatter is a REAL cluster held by a first lane run — the measured
   # scenario (two agents on one fixed port), not a stand-in TCP listener that
   # pg_isready would never recognise.
@@ -455,6 +455,7 @@ self_test() {
   rm -rf "$squat_wd"
   echo "  ok  refused an occupied port with exit 2 (against a real cluster)"
 
+  echo "=== SELF-TEST 2/5: refusal against a NON-postgres listener (IN-07) ==="
   # IN-07: the same refusal against a NON-postgres listener. The old
   # `pg_isready` guard could not see this at all — it exits non-zero for
   # anything that is not a PostgreSQL server accepting connections — while the
@@ -467,10 +468,23 @@ self_test() {
     tcp_port=$(alloc_port)
     node -e 'const s=require("net").createServer();s.listen(Number(process.argv[1]),"127.0.0.1",()=>{setTimeout(()=>process.exit(0),30000)});' "$tcp_port" &
     tcp_pid=$!
+    # ⛔ R2-I04: the readiness loop breaks when the bind FAILS, i.e. when the
+    # listener is up. If the background node listener never comes up, the loop
+    # simply exhausts its 40 iterations and falls through — the lane then runs
+    # UNREFUSED (correctly, there is nothing to collide with) and the arm below
+    # reports "the guard is narrower than its message", blaming the guard for a
+    # FIXTURE that did not start. So the precondition is asserted explicitly,
+    # with its own message, before the guard is judged.
+    local listener_up=0
     for i in $(seq 1 40); do
-      if ! node -e 'const s=require("net").createServer();s.once("error",()=>process.exit(1));s.listen(Number(process.argv[1]),"127.0.0.1",()=>s.close(()=>process.exit(0)));' "$tcp_port" 2>/dev/null; then break; fi
+      if ! node -e 'const s=require("net").createServer();s.once("error",()=>process.exit(1));s.listen(Number(process.argv[1]),"127.0.0.1",()=>s.close(()=>process.exit(0)));' "$tcp_port" 2>/dev/null; then listener_up=1; break; fi
       sleep 0.25
     done
+    if [ "$listener_up" -ne 1 ]; then
+      kill -9 "$tcp_pid" 2>/dev/null || true
+      wait "$tcp_pid" 2>/dev/null || true
+      st_fail "could not stand up a plain TCP listener on 127.0.0.1:${tcp_port} to collide with. That is a FIXTURE failure, not a guard failure — this arm has proven nothing about the guard and must not report that it has."
+    fi
     tcp_wd=$(mktemp -d)
     set +e
     PORT="$tcp_port" bash "$0" --workdir "$tcp_wd" \
@@ -488,11 +502,11 @@ self_test() {
     echo "  SKIP non-postgres-listener arm: node is unavailable, so the guard falls back to pg_isready and CANNOT cover this case. Not a pass." >&2
   fi
 
-  echo "=== SELF-TEST 2/4: kill mid-run leaves NO orphan (D-04: on interrupt) ==="
+  echo "=== SELF-TEST 3/5: kill mid-run leaves NO orphan (D-04: on interrupt) ==="
   kill_check TERM "SIGTERM mid-run"
   kill_check INT  "SIGINT mid-run"
 
-  echo "=== SELF-TEST 3/4: failure-path cleanup ==="
+  echo "=== SELF-TEST 4/5: failure-path cleanup ==="
   wd=$(mktemp -d)
   gate="$wd/failing-gate.sql"
   printf "DO \$\$ BEGIN RAISE EXCEPTION 'TEST FAILED (SELF-TEST): deliberate'; END \$\$;\n" >"$gate"
@@ -507,7 +521,7 @@ self_test() {
   rm -rf "$wd"
   echo "  ok  failing gate exited $rc and cleaned up"
 
-  echo "=== SELF-TEST 4/4: success-path cleanup ==="
+  echo "=== SELF-TEST 5/5: success-path cleanup ==="
   wd=$(mktemp -d)
   gate="$wd/passing-gate.sql"
   printf 'SELECT 1;\n' >"$gate"
@@ -522,7 +536,7 @@ self_test() {
   rm -rf "$wd"
   echo "  ok  passing gate exited 0 and cleaned up"
 
-  echo "=== SELF-TEST PASSED (4/4) ==="
+  echo "=== SELF-TEST PASSED (5/5) ==="
 }
 
 # ---------------------------------------------------------------------------
