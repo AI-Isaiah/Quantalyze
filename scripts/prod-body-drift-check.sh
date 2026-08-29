@@ -165,7 +165,18 @@ else
   # (migration-drift-check.yml: "Could not resolve merge base; failing closed").
   # An unresolvable merge base means the file list is unknown, not empty.
   [ -n "$MERGE_BASE" ] || fail "could not resolve the merge base against ${BASE_REF}; failing closed rather than checking an unknown file set."
-  git diff --diff-filter=ACMR --name-only "$MERGE_BASE"...HEAD -- 'supabase/migrations/*.sql' > "$TMP/changed.txt" || true
+  # ⛔ SP-C06. This line ended in `|| true`, which converted "could not list the
+  # changed files" into "no migration files changed". With the merge base
+  # RESOLVED but the diff itself failing (a bad object, a shallow object
+  # database, a pathspec error), changed.txt was empty, CHANGED_COUNT was 0, and
+  # the run took the "HONEST EXIT 0" branch below — whose own comment asserts
+  # that "could not measure" never lands there. `set -e` would have caught it;
+  # the `|| true` was what defeated `set -e`.
+  set +e
+  git diff --diff-filter=ACMR --name-only "$MERGE_BASE"...HEAD -- 'supabase/migrations/*.sql' > "$TMP/changed.txt"
+  _diff_rc=$?
+  set -e
+  [ "$_diff_rc" -eq 0 ] || fail "MEASURE_FAIL: could not enumerate this PR's migration changes (git diff exited ${_diff_rc} against merge base ${MERGE_BASE}). An unreadable file list is not an empty one, and this gate must not read it as 'nothing changed'."
 fi
 
 # Read into an array rather than re-splitting an unquoted command substitution

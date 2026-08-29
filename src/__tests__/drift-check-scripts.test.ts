@@ -763,6 +763,50 @@ describe("SP-C05 — 'absent from PROD' must be measured by an instrument that d
     expect(yml).toContain("- 'scripts/sql-function-names-naive.mjs'");
   });
 
+  it("SP-C06: a FAILING `git diff` is a MEASURE_FAIL, not 'no migration files changed'", () => {
+    // ⛔ The line read `git diff … > changed.txt || true`, which converted
+    // "could not list the changed files" into "the list is empty" and then into
+    // the HONEST-EXIT-0 branch — whose own comment asserts that "could not
+    // measure" never reaches it. `set -e` would have caught it; the `|| true`
+    // is what defeated `set -e`.
+    //
+    // Driven with a stub `git` that RESOLVES the merge base and then FAILS the
+    // diff, which is the exact state the branch could not distinguish (a bad
+    // object, a shallow object database, a pathspec error).
+    withTempDir((dir) => {
+      const bin = join(dir, "bin");
+      mkdirSync(bin, { recursive: true });
+      const realGit = spawnSync("bash", ["-c", "command -v git"], {
+        encoding: "utf8",
+      }).stdout.trim();
+      expect(realGit, "no real git on PATH to delegate to").not.toBe("");
+      writeFileSync(
+        join(bin, "git"),
+        [
+          "#!/usr/bin/env bash",
+          'case "$1" in',
+          "  merge-base) echo 0000000000000000000000000000000000000000; exit 0;;",
+          '  diff) echo "fatal: bad object" >&2; exit 128;;',
+          `  *) exec ${realGit} "$@";;`,
+          "esac",
+        ].join("\n"),
+      );
+      chmodSync(join(bin, "git"), 0o755);
+
+      const env = scaffold(dir, PLAIN_FN);
+      const { status, out } = run(PROD_GATE, {
+        ...env,
+        // Force the derive-from-git branch.
+        CHANGED_MIGRATIONS: "",
+        PATH: `${bin}:${process.env.PATH ?? ""}`,
+      });
+      expect(status, "an unreadable file list was read as an empty one").toBe(1);
+      expect(out).toContain("could not enumerate this PR's migration changes");
+      expect(out).not.toContain("changes no migration files");
+      expect(out).not.toContain("no unacknowledged repo-vs-PROD body drift");
+    });
+  });
+
   it("the independent reader's own self-test passes and is non-empty", () => {
     const r = spawnSync("node", [NAIVE, "--self-test"], { encoding: "utf8" });
     expect(r.status).toBe(0);
