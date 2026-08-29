@@ -32,6 +32,22 @@
 #    that measurement. ⛔ Do NOT hand-apply migrations to TEST to make this
 #    gate green — TEST is shared with other people's CI.
 #
+#
+# ── THE JOIN, AS MEASURED (2026-08-29, CI run 33275241405) ──────────────────
+# The ledger uses TWO conventions and a repo file matches under either:
+#
+#   old rows   version=20260405061911  name=initial_schema
+#              -> version || '_' || name  ==  repo basename
+#   recent     version=20260828061901  name=20260827120000_strategy_shares_...
+#              -> name                   ==  repo basename   (version re-stamped)
+#
+# Measured shape: rows_total=239 name_null=2 name_set=237 against 262 repo
+# files. Joining on `name` alone matched 9. Joining on `version` alone was
+# already known to fail on the re-stamped rows. BOTH clauses are required;
+# neither is redundant, and dropping either reproduces a known-false verdict.
+# Rows with no repo counterpart (hand-applied, e.g. name=destrict_enqueue_...)
+# surface only in the ADVISORY `extra` direction, never here.
+#
 # ── THE TWO HALVES ──────────────────────────────────────────────────────────
 # 1. LEDGER PRESENCE. Every `supabase/migrations/*.sql` basename must have a
 #    `schema_migrations` row with that `name`. Any that does not → exit 1.
@@ -102,7 +118,8 @@ default_ledger_query() {
               FROM unnest(ARRAY[${names_csv}]::text[]) AS r(fname)
              WHERE NOT EXISTS (
                    SELECT 1 FROM supabase_migrations.schema_migrations m
-                    WHERE m.name = r.fname);" \
+                    WHERE m.name = r.fname
+                       OR (m.version || '_' || m.name) = r.fname);" \
         | tr -d '\r' | sed '/^[[:space:]]*$/d'
       ;;
     extra)
@@ -113,6 +130,13 @@ default_ledger_query() {
              WHERE m.name IS NOT NULL
                AND NOT (m.name = ANY (ARRAY[${names_csv}]::text[]));" \
         | tr -d '\r' | sed '/^[[:space:]]*$/d'
+      ;;
+    ledger_rows)
+      # Count-only. Feeds the ABSURDITY FLOOR below; never printed as a finding.
+      psql "$TEST_SUPABASE_DB_URL" -X -q -A -t -v ON_ERROR_STOP=1 \
+        -c "SET statement_timeout = '30s';" \
+        -c "SELECT count(*) FROM supabase_migrations.schema_migrations;" \
+        | tr -d '\r' | sed '/^[[:space:]]*$/d' | head -1
       ;;
     shape)
       # DIAGNOSTIC ONLY — never decides pass/fail. A gate that fails must print
@@ -260,6 +284,36 @@ check() {
   [ "$grep_rc" -le 1 ] || fail "MEASURE_FAIL: could not count the missing-migration rows (grep exited ${grep_rc} on ${missing_file}). An uncountable result is not a count of zero."
   # Only exit 1 (no match) legitimately yields an empty count.
   missing_count="${missing_count:-0}"
+
+  # ── ABSURDITY FLOOR ────────────────────────────────────────────────────────
+  # Is this a DRIFT FINDING, or is the instrument broken? The gate held both
+  # numbers on 2026-08-29 and never asked: it reported "253 of 262 migrations
+  # are not present" against a database that `e2e-seeded` was passing against in
+  # the same run. A populated ledger that matches almost nothing is a WRONG KEY,
+  # not 253 un-applied migrations, and saying the second is worse than saying
+  # nothing — it sends the reader to hand-apply migrations to a SHARED database.
+  #
+  # The rule: if the ledger is substantially populated (>= 50 rows) but fewer
+  # than HALF the REPO's migrations matched it, the join is not measuring what
+  # it claims. Compared against the REPO total, not the ledger total — a repo
+  # with few migrations and a long ledger (squashes, hand-applied rows) is
+  # normal and must not trip this. Separation is wide, not tuned: the real
+  # defect scored matched=9 of 262 (fires); ordinary drift of 30 un-applied
+  # migrations scores matched=232 of 262 (silent).
+  local ledger_rows matched
+  ledger_rows="$(run_ledger_query ledger_rows "$names_csv" 2>/dev/null || echo "")"
+  case "$ledger_rows" in (*[!0-9]*|"") ledger_rows="" ;; esac
+  matched=$(( ${#repo_names[@]} - missing_count ))
+  if [ -n "$ledger_rows" ] && [ "$ledger_rows" -ge 50 ] && [ $(( matched * 2 )) -lt "${#repo_names[@]}" ]; then
+    echo "::error::${GATE}: MEASURE_FAIL — this is the GATE failing, not the database."
+    echo "::error::The TEST ledger holds ${ledger_rows} rows, but only ${matched} of ${#repo_names[@]} repo"
+    echo "::error::migrations matched it. A populated ledger that matches almost nothing means the"
+    echo "::error::JOIN KEY is wrong; it does not mean $(( missing_count )) migrations were never applied."
+    echo "::error::⛔ Do NOT hand-apply migrations to TEST on the strength of this run — TEST is"
+    echo "::error::shared with other people's CI. Fix the join, using the shape diagnostic below."
+    run_ledger_query shape "$names_csv" 2>/dev/null | sed 's/^/::error::  /' || true
+    exit 1
+  fi
 
   local bad=0
   if [ "$missing_count" -gt 0 ]; then

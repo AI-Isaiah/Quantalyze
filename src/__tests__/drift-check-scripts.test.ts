@@ -875,14 +875,22 @@ function writeStubLedger(
   dir: string,
   missing: string[],
   advisory: string[] = [],
+  ledgerRows: string | null = null,
 ): string {
   const p = join(dir, "stub-ledger.sh");
   writeFileSync(
     p,
     [
       "#!/usr/bin/env bash",
-      '# $1 = "missing" | "extra"',
-      'if [ "$1" = "missing" ]; then',
+      '# $1 = "missing" | "extra" | "ledger_rows" | "shape"',
+      'if [ "$1" = "ledger_rows" ]; then',
+      // Absent by default, so every pre-existing arm keeps its old behaviour:
+      // an unreadable row count leaves the absurdity floor silent rather than
+      // letting it decide anything.
+      ledgerRows === null ? "  exit 0" : `  echo "${ledgerRows}"`,
+      'elif [ "$1" = "shape" ]; then',
+      '  echo "rows_total=stub"',
+      'elif [ "$1" = "missing" ]; then',
       "  true",
       ...missing.map((m) => `  echo "${m}"`),
       "else",
@@ -898,7 +906,12 @@ function writeStubLedger(
 
 function scaffoldLedgerCase(
   dir: string,
-  opts: { missing?: string[]; testBody?: string; snapshot?: boolean },
+  opts: {
+    missing?: string[];
+    testBody?: string;
+    snapshot?: boolean;
+    ledgerRows?: string | null;
+  },
 ): Record<string, string> {
   mkdirSync(join(dir, "snapshot"), { recursive: true });
   mkdirSync(join(dir, "live"), { recursive: true });
@@ -917,7 +930,7 @@ function scaffoldLedgerCase(
 
   return {
     TEST_SUPABASE_DB_URL: "stub-dsn-never-used",
-    LEDGER_QUERY_CMD: `bash ${writeStubLedger(dir, opts.missing ?? [])}`,
+    LEDGER_QUERY_CMD: `bash ${writeStubLedger(dir, opts.missing ?? [], [], opts.ledgerRows ?? null)}`,
     BODY_FETCH_CMD: `bash ${writeStubFetcher(dir)}`,
     MIGRATIONS_DIR: join(dir, "migrations"),
     SNAPSHOT_DIR: join(dir, "snapshot"),
@@ -926,6 +939,59 @@ function scaffoldLedgerCase(
 }
 
 describe("VAC-08 — scripts/test-ledger-drift-check.sh", () => {
+  // ── ABSURDITY FLOOR ────────────────────────────────────────────────────────
+  // Regression pin for the 2026-08-29 defect: VAC-08's FIRST real run reported
+  // "253 of 262 repo migrations are not present in the TEST ledger" against a
+  // database `e2e-seeded` was passing on in the same run. The number was a
+  // wrong join key, not drift — but the gate said the frightening thing, which
+  // points a reader at hand-applying migrations to a SHARED database.
+  //
+  // Three arms, and the CONTROL is load-bearing: without it a floor that fired
+  // unconditionally would also pass arm 1.
+  describe("distinguishes a broken instrument from a drift finding", () => {
+    it("RED: a populated ledger matching under half the repo is MEASURE_FAIL, not drift", () => {
+      withTempDir((dir) => {
+        const env = scaffoldLedgerCase(dir, {
+          missing: ["20260829120000_demo"], // 0 of 1 matched
+          ledgerRows: "239", // ...against a clearly populated ledger
+        });
+        const { status, out } = run(LEDGER_GATE, env);
+        expect(status).toBe(1);
+        expect(out).toContain("MEASURE_FAIL");
+        expect(out).toContain("this is the GATE failing, not the database");
+        // It must NOT tell the reader to go apply migrations to shared TEST.
+        expect(out).toContain("Do NOT hand-apply migrations to TEST");
+      });
+    });
+
+    it("CONTROL: the same populated ledger with everything matched stays silent", () => {
+      withTempDir((dir) => {
+        const env = scaffoldLedgerCase(dir, {
+          missing: [], // 1 of 1 matched
+          ledgerRows: "239", // same ledger size as the arm above
+        });
+        const { status, out } = run(LEDGER_GATE, env);
+        expect(out).not.toContain("MEASURE_FAIL");
+        expect(status).toBe(0);
+      });
+    });
+
+    it("CONTROL: a SMALL ledger with nothing matched is ordinary drift, not MEASURE_FAIL", () => {
+      withTempDir((dir) => {
+        // Under 50 rows the ledger is not established enough to accuse the
+        // join; the honest report is the drift finding, loudly.
+        const env = scaffoldLedgerCase(dir, {
+          missing: ["20260829120000_demo"],
+          ledgerRows: "12",
+        });
+        const { status, out } = run(LEDGER_GATE, env);
+        expect(status).toBe(1);
+        expect(out).not.toContain("MEASURE_FAIL");
+        expect(out).toContain("not present in the TEST ledger");
+      });
+    });
+  });
+
   it("RED: a repo migration with no matching schema_migrations.name row exits 1 and names it", () => {
     withTempDir((dir) => {
       const env = scaffoldLedgerCase(dir, { missing: ["20260829120000_demo"] });
