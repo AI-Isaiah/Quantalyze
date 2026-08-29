@@ -330,7 +330,10 @@ describe("VAC-04 — scripts/prod-body-drift-check.sh", () => {
       const bad = join(dir, "index-boom.sh");
       writeFileSync(
         bad,
-        '#!/usr/bin/env bash\necho "postgresql://user:pw@host:5432/db" >&2\nexit 9\n',
+        // No user:password here ON PURPOSE. The assertion pins `not.toContain("postgresql://")`,
+        // so a credential adds nothing to what is proven — but a password-shaped DSN trips the
+        // pre-push credential scanner on every push of this file (measured 2026-08-29, 2 HIGH).
+        '#!/usr/bin/env bash\necho "postgresql://host:5432/db" >&2\nexit 9\n',
       );
       chmodSync(bad, 0o755);
       const { status, out } = run(PROD_GATE, {
@@ -413,7 +416,8 @@ describe("VAC-04 — scripts/prod-body-drift-check.sh", () => {
       const bad = join(dir, "boom.sh");
       writeFileSync(
         bad,
-        '#!/usr/bin/env bash\necho "postgresql://user:pw@host:5432/db" >&2\nexit 7\n',
+        // Host-only DSN, same reason as above.
+        '#!/usr/bin/env bash\necho "postgresql://host:5432/db" >&2\nexit 7\n',
       );
       chmodSync(bad, 0o755);
       const { status, out } = run(PROD_GATE, {
