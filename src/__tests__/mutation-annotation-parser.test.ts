@@ -1,0 +1,397 @@
+/**
+ * RED-UNDER-M annotation parser — behaviour gate (VAC-01, phase 164.3 plan 05).
+ *
+ * WHY THIS FILE EXISTS. The 30 existing `RED-UNDER` annotations in
+ * `supabase/tests/test_strategy_shares_rls.sql` are PROSE (D-14). A machine
+ * cannot execute "change `generation BIGINT` back to `generation INTEGER` in
+ * the STEP 1 CREATE TABLE" — plan 164.3-01 MEASURED what happens when you try:
+ * that literal string occurs exactly once in the migration and it is NOT the
+ * CREATE TABLE column, it is `RETURNS TABLE (generation BIGINT, nonce UUID)` at
+ * line 828. Mutating it aborts the apply, so the gate never runs and no arm can
+ * be the first failure. The real column at line 170 carries TWO spaces.
+ *
+ * Two consequences are encoded as tests here:
+ *   1. A structured annotation MUST carry executable bytes AND a measured
+ *      `occurrences` count. A find/replace that matches a different number of
+ *      times than the annotator measured is a MEASURE_FAIL, never a silent
+ *      no-op and never "the arm did not redden".
+ *   2. Markers are recognised ONLY at comment line start. A naive substring
+ *      count of the marker returns 33 on the corpus because the file's own
+ *      HEADER documents the syntax three times. A count satisfied by prose is
+ *      this phase's thesis committed by this phase's own spec.
+ */
+import { describe, expect, it } from "vitest";
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+
+import {
+  parseAnnotations,
+  parseFile,
+  scanCorpus,
+} from "../../scripts/mutation-runner/parse.mjs";
+
+const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
+
+/** Convenience: the sole error message, or a readable dump when there is not exactly one. */
+function soleError(result: ReturnType<typeof parseAnnotations>): string {
+  if (result.errors.length !== 1) {
+    throw new Error(
+      `expected exactly 1 parse error, got ${result.errors.length}: ${JSON.stringify(result.errors)}`,
+    );
+  }
+  return result.errors[0].message;
+}
+
+describe("line-start anchoring (the 30-vs-33 correction)", () => {
+  it("counts a prose marker at comment line start, with leading whitespace", () => {
+    const sql = [
+      "DO $$ BEGIN",
+      "  -- RED-UNDER: change `generation BIGINT` back to `generation INTEGER` in the",
+      "  --            STEP 1 CREATE TABLE.",
+      '  -- RED-UNDER-M: {"arm":"SHAPE 1c","apply":[{"kind":"edit","file":"m.sql","find":"a","replace":"b","occurrences":1}]}',
+      "END $$;",
+    ].join("\n");
+
+    const result = parseAnnotations(sql, { file: "g.sql" });
+
+    expect(result.errors).toEqual([]);
+    expect(result.prose).toHaveLength(1);
+    expect(result.prose[0].line).toBe(2);
+    expect(result.structured).toHaveLength(1);
+    expect(result.parity.ok).toBe(true);
+  });
+
+  it("counts ZERO for the corpus header shape — the marker mentioned mid-line inside a doc comment", () => {
+    // Reproduced from supabase/tests/test_strategy_shares_rls.sql:46-48. The
+    // third line even matches a plain `grep -c 'RED-UNDER:'`, which is exactly
+    // how the recorded count became 33.
+    const sql = [
+      "-- ⭐ PER-ARM RED-UNDER (standing requirement, founder-adopted 2026-08-27).",
+      "-- Every arm added by the nonce change carries an adjacent",
+      "-- `-- RED-UNDER: <the exact mutation that reddens THIS arm>` comment, and each",
+      "-- of those mutations was performed individually on the throwaway cluster.",
+    ].join("\n");
+
+    const result = parseAnnotations(sql, { file: "g.sql" });
+
+    expect(result.prose).toHaveLength(0);
+    expect(result.structured).toHaveLength(0);
+    expect(result.errors).toEqual([]);
+  });
+
+  it("does not mistake a structured twin or a setup line for a prose marker", () => {
+    const sql = [
+      '-- RED-UNDER-SETUP: {"apply":["a.sql"]}',
+      '-- RED-UNDER-M: {"arm":"A","waiver":"no first-failure mutation exists"}',
+    ].join("\n");
+
+    const result = parseAnnotations(sql, { file: "g.sql" });
+
+    expect(result.prose).toHaveLength(0);
+    expect(result.structured).toHaveLength(1);
+    expect(result.setup).toEqual({ apply: ["a.sql"], line: 1 });
+  });
+
+  it("ignores a marker that is not in a comment at all", () => {
+    const sql = "SELECT 'RED-UNDER: not a comment' AS s;";
+    expect(parseAnnotations(sql, { file: "g.sql" }).prose).toHaveLength(0);
+  });
+});
+
+describe("the three corpus mutation shapes", () => {
+  it("SHAPE 1 — a migration-file edit with byte-exact find/replace and a measured occurrence count", () => {
+    // The prose is verbatim from test_strategy_shares_rls.sql:408-409. The
+    // structured twin carries the bytes plan 01 measured (TWO spaces), not the
+    // prose locator's single-space string.
+    const sql = [
+      "  -- RED-UNDER: change `generation BIGINT` back to `generation INTEGER` in the",
+      "  --            STEP 1 CREATE TABLE.",
+      '  -- RED-UNDER-M: {"arm":"SHAPE 1c","apply":[{"kind":"edit","file":"supabase/migrations/20260827120000_strategy_shares_generation_model.sql","find":"generation  BIGINT","replace":"generation  INTEGER","occurrences":1,"nth":1}]}',
+    ].join("\n");
+
+    const { structured, errors } = parseAnnotations(sql, { file: "g.sql" });
+
+    expect(errors).toEqual([]);
+    expect(structured[0].arm).toBe("SHAPE 1c");
+    expect(structured[0].waiver).toBeNull();
+    expect(structured[0].apply).toEqual([
+      {
+        kind: "edit",
+        file: "supabase/migrations/20260827120000_strategy_shares_generation_model.sql",
+        find: "generation  BIGINT",
+        replace: "generation  INTEGER",
+        occurrences: 1,
+        nth: 1,
+      },
+    ]);
+  });
+
+  it("SHAPE 1b — an insertion, expressed as insert-after with a byte-exact anchor", () => {
+    // Prose verbatim from :369-370 — "add a `token_hash TEXT` column to the
+    // STEP 1 CREATE TABLE", an insertion the prose gives no exact point for.
+    const sql = [
+      "  -- RED-UNDER: add a `token_hash TEXT` column to the STEP 1 CREATE TABLE in",
+      "  --            migration 20260827120000.",
+      '  -- RED-UNDER-M: {"arm":"SHAPE 2","apply":[{"kind":"insert-after","file":"m.sql","anchor":"  generation  BIGINT      NOT NULL DEFAULT 1 CHECK (generation >= 1),","text":"\\n  token_hash  TEXT,","occurrences":1}]}',
+    ].join("\n");
+
+    const { structured, errors } = parseAnnotations(sql, { file: "g.sql" });
+
+    expect(errors).toEqual([]);
+    expect(structured[0].apply[0].kind).toBe("insert-after");
+    expect(structured[0].apply[0].anchor).toContain("generation  BIGINT");
+    expect(structured[0].apply[0].nth).toBe(1); // defaulted
+  });
+
+  it("SHAPE 2 — a live-DB GRANT statement with a prerequisite neuter of ANOTHER arm", () => {
+    // Prose verbatim from :1533-1537: SHAPE 3b's exact-set pin fires first on
+    // ANY grant drift, so NONCE 1b was observed red with SHAPE 3b neutered.
+    const sql = [
+      "  -- RED-UNDER: `GRANT UPDATE (nonce) ON strategy_shares TO authenticated` on",
+      "  --            the live database. ⚠️ SHAPE 3b's exact-set pin fires first on",
+      "  --            ANY grant drift, so this arm was observed red with SHAPE 3b",
+      "  --            neutered.",
+      '  -- RED-UNDER-M: {"arm":"NONCE 1b","apply":[{"kind":"sql","stmt":"GRANT UPDATE (nonce) ON strategy_shares TO authenticated"}],"neuter":[{"arm":"SHAPE 3b"}]}',
+    ].join("\n");
+
+    const { structured, errors } = parseAnnotations(sql, { file: "g.sql" });
+
+    expect(errors).toEqual([]);
+    expect(structured[0].apply).toEqual([
+      { kind: "sql", stmt: "GRANT UPDATE (nonce) ON strategy_shares TO authenticated" },
+    ]);
+    expect(structured[0].neuter).toEqual([{ arm: "SHAPE 3b" }]);
+  });
+
+  it("SHAPE 3 — a LAYERED compound mutation is a multi-step apply array", () => {
+    // Prose verbatim from :661-665: the migration arm tests the same bit and
+    // ABORTS THE APPLY, so its term must be removed in the SAME mutation.
+    const sql = [
+      "  -- RED-UNDER: change the CREATE TRIGGER in migration 20260827120000 STEP 1b to",
+      "  --            `BEFORE UPDATE ON strategy_shares`.",
+      "  -- ⚠️ LAYERED: migration arm (v) tests the same bit and ABORTS THE APPLY, so",
+      "  --    its `AND (t.tgtype & 4) = 4` term must be removed in the same mutation.",
+      '  -- RED-UNDER-M: {"arm":"SHAPE 5","apply":[{"kind":"edit","file":"m.sql","find":"BEFORE INSERT OR UPDATE ON strategy_shares","replace":"BEFORE UPDATE ON strategy_shares","occurrences":1},{"kind":"edit","file":"m.sql","find":" AND (t.tgtype & 4) = 4","replace":"","occurrences":1}]}',
+    ].join("\n");
+
+    const { structured, errors } = parseAnnotations(sql, { file: "g.sql" });
+
+    expect(errors).toEqual([]);
+    expect(structured[0].apply).toHaveLength(2);
+    expect(structured[0].apply[1].replace).toBe("");
+  });
+
+  it("a waiver is a counted twin carrying a reason, and never has an apply", () => {
+    const sql = [
+      "  -- RED-UNDER: none — a deleted `nonce` aborts the apply, so this arm can",
+      "  --            never be the FIRST failure.",
+      '  -- RED-UNDER-M: {"arm":"SHAPE 1","waiver":"a deleted nonce column aborts the apply; no first-failure mutation exists"}',
+    ].join("\n");
+
+    const { structured, errors } = parseAnnotations(sql, { file: "g.sql" });
+
+    expect(errors).toEqual([]);
+    expect(structured[0].waiver).toMatch(/aborts the apply/);
+    expect(structured[0].apply).toEqual([]);
+  });
+});
+
+describe("parity gate", () => {
+  it("a prose annotation without a structured twin is a named parity defect", () => {
+    const sql = [
+      "  -- RED-UNDER: mutation A.",
+      '  -- RED-UNDER-M: {"arm":"A","waiver":"r"}',
+      "  -- RED-UNDER: mutation B, with no twin.",
+    ].join("\n");
+
+    const result = parseAnnotations(sql, { file: "g.sql" });
+
+    expect(result.parity).toMatchObject({ prose: 2, structured: 1, ok: false });
+  });
+
+  it("a waiver counts as a twin, so a waived arm satisfies parity", () => {
+    const sql = [
+      "  -- RED-UNDER: no mutation exists.",
+      '  -- RED-UNDER-M: {"arm":"A","waiver":"none exists"}',
+    ].join("\n");
+
+    expect(parseAnnotations(sql, { file: "g.sql" }).parity.ok).toBe(true);
+  });
+
+  it("reports parity failure in the other direction too — a twin with no prose claim", () => {
+    const sql = '  -- RED-UNDER-M: {"arm":"A","waiver":"none exists"}';
+    expect(parseAnnotations(sql, { file: "g.sql" }).parity).toMatchObject({
+      prose: 0,
+      structured: 1,
+      ok: false,
+    });
+  });
+});
+
+describe("malformed annotations fail loud, naming the line", () => {
+  const cases: Array<[string, string, RegExp]> = [
+    [
+      "malformed JSON",
+      '  -- RED-UNDER-M: {"arm":"A", "apply":[}',
+      /malformed JSON/i,
+    ],
+    [
+      "not an object",
+      '  -- RED-UNDER-M: ["arm"]',
+      /must be a JSON object/i,
+    ],
+    [
+      "missing arm",
+      '  -- RED-UNDER-M: {"waiver":"r"}',
+      /"arm"/,
+    ],
+    [
+      "empty arm",
+      '  -- RED-UNDER-M: {"arm":"   ","waiver":"r"}',
+      /"arm"/,
+    ],
+    [
+      "unknown top-level key",
+      '  -- RED-UNDER-M: {"arm":"A","waiver":"r","expect":"red"}',
+      /unknown key.*expect/i,
+    ],
+    [
+      "apply and waiver together",
+      '  -- RED-UNDER-M: {"arm":"A","waiver":"r","apply":[{"kind":"sql","stmt":"SELECT 1"}]}',
+      /mutually exclusive/i,
+    ],
+    [
+      "neither apply nor waiver",
+      '  -- RED-UNDER-M: {"arm":"A"}',
+      /exactly one of/i,
+    ],
+    [
+      "empty apply array",
+      '  -- RED-UNDER-M: {"arm":"A","apply":[]}',
+      /at least one step/i,
+    ],
+    [
+      "unknown step kind",
+      '  -- RED-UNDER-M: {"arm":"A","apply":[{"kind":"patch","file":"m.sql"}]}',
+      /unknown step kind.*patch/i,
+    ],
+    [
+      "unknown step key",
+      '  -- RED-UNDER-M: {"arm":"A","apply":[{"kind":"sql","stmt":"SELECT 1","file":"m.sql"}]}',
+      /unknown key.*file/i,
+    ],
+    [
+      "edit missing occurrences — the measurement that plan 01 proved mandatory",
+      '  -- RED-UNDER-M: {"arm":"A","apply":[{"kind":"edit","file":"m.sql","find":"a","replace":"b"}]}',
+      /"occurrences"/,
+    ],
+    [
+      "occurrences must be a positive integer",
+      '  -- RED-UNDER-M: {"arm":"A","apply":[{"kind":"edit","file":"m.sql","find":"a","replace":"b","occurrences":0}]}',
+      /"occurrences"/,
+    ],
+    [
+      "nth beyond the measured occurrence count",
+      '  -- RED-UNDER-M: {"arm":"A","apply":[{"kind":"edit","file":"m.sql","find":"a","replace":"b","occurrences":1,"nth":2}]}',
+      /"nth".*exceeds/i,
+    ],
+    [
+      "edit with an empty find",
+      '  -- RED-UNDER-M: {"arm":"A","apply":[{"kind":"edit","file":"m.sql","find":"","replace":"b","occurrences":1}]}',
+      /"find"/,
+    ],
+    [
+      "sql step with an empty stmt",
+      '  -- RED-UNDER-M: {"arm":"A","apply":[{"kind":"sql","stmt":""}]}',
+      /"stmt"/,
+    ],
+    [
+      "waiver with a neuter",
+      '  -- RED-UNDER-M: {"arm":"A","waiver":"r","neuter":[{"arm":"B"}]}',
+      /waiver.*neuter/i,
+    ],
+    [
+      "neuter entry missing arm",
+      '  -- RED-UNDER-M: {"arm":"A","apply":[{"kind":"sql","stmt":"SELECT 1"}],"neuter":[{}]}',
+      /neuter.*"arm"/i,
+    ],
+  ];
+
+  it.each(cases)("%s", (_name, line, pattern) => {
+    const result = parseAnnotations(line, { file: "g.sql" });
+    const message = soleError(result);
+    expect(message).toMatch(pattern);
+    expect(message).toMatch(/g\.sql:1/);
+  });
+
+  it("never silently skips a bad annotation — it is not counted as a valid twin", () => {
+    const sql = [
+      "  -- RED-UNDER: mutation A.",
+      '  -- RED-UNDER-M: {"arm":"A", broken}',
+    ].join("\n");
+
+    const result = parseAnnotations(sql, { file: "g.sql" });
+
+    expect(result.errors).toHaveLength(1);
+    expect(result.structured).toHaveLength(0);
+    expect(result.parity.ok).toBe(false);
+  });
+
+  it("rejects a duplicate arm id within one file", () => {
+    const sql = [
+      '  -- RED-UNDER-M: {"arm":"A","waiver":"r"}',
+      '  -- RED-UNDER-M: {"arm":"A","waiver":"r2"}',
+    ].join("\n");
+
+    expect(soleError(parseAnnotations(sql, { file: "g.sql" }))).toMatch(/duplicate arm/i);
+  });
+});
+
+describe("RED-UNDER-SETUP — the in-file apply list", () => {
+  it("parses the apply list", () => {
+    const sql = '-- RED-UNDER-SETUP: {"apply":["a/b.sql","c/d.sql"]}';
+    const result = parseAnnotations(sql, { file: "g.sql" });
+    expect(result.errors).toEqual([]);
+    expect(result.setup?.apply).toEqual(["a/b.sql", "c/d.sql"]);
+  });
+
+  it("rejects a second setup line", () => {
+    const sql = [
+      '-- RED-UNDER-SETUP: {"apply":["a.sql"]}',
+      '-- RED-UNDER-SETUP: {"apply":["b.sql"]}',
+    ].join("\n");
+    expect(soleError(parseAnnotations(sql, { file: "g.sql" }))).toMatch(/one RED-UNDER-SETUP/i);
+  });
+
+  it("rejects an absolute or escaping path — the runner only copies files inside the repo", () => {
+    const sql = '-- RED-UNDER-SETUP: {"apply":["../../etc/passwd"]}';
+    expect(soleError(parseAnnotations(sql, { file: "g.sql" }))).toMatch(/repo-relative/i);
+  });
+
+  it("rejects an empty apply list", () => {
+    const sql = '-- RED-UNDER-SETUP: {"apply":[]}';
+    expect(soleError(parseAnnotations(sql, { file: "g.sql" }))).toMatch(/at least one/i);
+  });
+});
+
+describe("against the real corpus (reads via node:fs, never shell grep)", () => {
+  const GATE = join(REPO_ROOT, "supabase", "tests", "test_strategy_shares_rls.sql");
+
+  it("finds exactly 30 line-start prose markers — NOT the 33 a naive substring count reports", () => {
+    const result = parseFile(GATE);
+    expect(result.prose).toHaveLength(30);
+
+    // Prove the 33 is real and is what anchoring excludes: the naive count over
+    // the same bytes must be strictly larger, or this test is asserting nothing.
+    const naive = readFileSync(GATE, "utf8").split("RED-UNDER").length - 1;
+    expect(naive).toBeGreaterThan(30);
+  });
+
+  it("scanCorpus reports 1 of 71 files annotated", () => {
+    const corpus = scanCorpus(join(REPO_ROOT, "supabase", "tests"));
+    expect(corpus.filesTotal).toBe(71);
+    expect(corpus.filesAnnotated).toBe(1);
+    expect(corpus.annotatedFiles).toEqual(["test_strategy_shares_rls.sql"]);
+  });
+});
