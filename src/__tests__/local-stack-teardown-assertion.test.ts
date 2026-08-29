@@ -28,7 +28,7 @@
  */
 import { describe, expect, it } from "vitest";
 import { spawnSync } from "node:child_process";
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -120,5 +120,53 @@ describe("IN-03 — the env handoff's protection is credited to the mechanism th
     // pass on a function that protects nothing.
     expect(out).toContain("HAS-CHMOD");
     expect(out).toContain("HAS-MKTEMP");
+  });
+});
+
+describe("R2-I03 — every dispatched mode is documented, and usage() prints only the header", () => {
+  // The two new seams (`--assert-teardown`, `--print-baseline-path`) were
+  // dispatched but absent from the INVOCATIONS block, which is the block
+  // `usage()` prints — so `run.sh` with no argument documented neither. And
+  // `usage()` was a hardcoded `sed -n '3,45p'`; line 45 became
+  // `set -euo pipefail` once the header grew, so the help text ended with a
+  // shell option.
+  //
+  // Derived on both sides rather than asserted as a list: the modes come from
+  // the `case` dispatch, the help text from running the script. A mode added
+  // to the dispatch without a line in the header reds this.
+  const usage = () => {
+    const res = spawnSync("bash", [LANE], { cwd: process.cwd(), encoding: "utf8" });
+    // A no-argument run is a usage error by design.
+    expect(res.status).toBe(2);
+    return `${res.stdout ?? ""}${res.stderr ?? ""}`;
+  };
+
+  it("the help text names every mode the case statement dispatches", () => {
+    const src = readFileSync(LANE, "utf8");
+    const block = src.slice(src.indexOf('case "${1:-}" in'));
+    const modes = [...block.matchAll(/^ {2}(--?[a-z-]+|up|down)\)/gm)].map((m) => m[1]);
+
+    // Non-vacuity: an empty mode list would satisfy every assertion below.
+    expect(modes.length, "found no dispatched modes — the case statement moved").toBeGreaterThan(3);
+
+    const text = usage();
+    for (const mode of modes) {
+      expect(text, `mode "${mode}" is dispatched but absent from the INVOCATIONS block`).toContain(
+        mode,
+      );
+    }
+  });
+
+  it("the help text stops at the header — it does not print shell code", () => {
+    const text = usage();
+    expect(text).toContain("INVOCATIONS");
+    expect(text, "usage() ran past the header and printed a shell directive").not.toContain(
+      "set -euo pipefail",
+    );
+    // Every non-blank line it prints is a comment line.
+    for (const line of text.split("\n")) {
+      if (line.trim().length === 0) continue;
+      expect(line, `usage() printed a non-comment line: ${JSON.stringify(line)}`).toMatch(/^\s*#/);
+    }
   });
 });

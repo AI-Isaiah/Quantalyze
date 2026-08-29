@@ -36,6 +36,13 @@
 #   scripts/local-stack/run.sh down          # supabase stop --no-backup
 #   scripts/local-stack/run.sh --self-test   # up --no-schema -> probe -> down -> assert 0 containers
 #
+# Diagnostic / assertion seams (no daemon, no stack, no side effects):
+#   scripts/local-stack/run.sh --assert-teardown       # run ONLY the teardown assertion
+#   scripts/local-stack/run.sh --print-baseline-path   # print the RESOLVED BASELINE_FILE
+#
+# ⚠️ R2-I03: these were dispatched but absent from this block, which is the
+# block `usage()` prints — so `run.sh` with no argument documented neither.
+#
 # After `up`, Playwright consumes scripts/local-stack/.stack-env (gitignored).
 #
 # ⛔ LOCAL ONLY. This script never accepts a remote target. It asserts the API URL the
@@ -355,7 +362,12 @@ cmd_self_test() {
 }
 
 usage() {
-  sed -n '3,45p' "${BASH_SOURCE[0]}"
+  # ⚠️ R2-I03: the range must stop at the last COMMENT line of the header. It
+  # read '3,45p', and line 45 became `set -euo pipefail` when the INVOCATIONS
+  # block grew — so the help text ended with a shell option. Derived rather
+  # than hardcoded, so it cannot go stale again: print until the first line
+  # that is not a comment and not blank.
+  awk 'NR < 3 { next } /^[^#]/ && NF { exit } { print }' "${BASH_SOURCE[0]}"
 }
 
 case "${1:-}" in
@@ -367,5 +379,12 @@ case "${1:-}" in
   # daemon and without starting a stack — a control nobody can drive red is
   # the thing this lane exists inside a phase about.
   --assert-teardown) assert_no_surviving_containers ;;
+  # Prints the RESOLVED BASELINE_FILE and exits. Exists so a test can ASK the
+  # lane which schema source it reads instead of pattern-matching the
+  # assignment line — R2-W06: `BASELINE_FILE="${REPO_ROOT}/supabase/schema/${NAME}"`
+  # and any other perfectly ordinary spelling reads as "unwired" to a
+  # substring match, which would let a test enforce a now-false claim while
+  # staying green.
+  --print-baseline-path) printf '%s\n' "$BASELINE_FILE" ;;
   *)           usage; exit 2 ;;
 esac
