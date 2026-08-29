@@ -181,7 +181,17 @@ function readText(abs) {
  */
 function createIndex(root) {
   let files = null;
+  // ⛔ SP-L01. The walk used to `catch { return; }`, pruning an unreadable
+  // directory SILENTLY. The index is what decides `path-ambiguous`, so a
+  // pruned subtree turns a shorthand anchor that should be reported ambiguous
+  // into one that "uniquely" matches the only file the walk managed to see —
+  // and it PASSES. A scanner that quietly declines to read is exactly the
+  // shape this phase exists to remove, so the failures are collected and the
+  // caller turns them into measureFails.
+  const walkErrors = [];
   return {
+    /** Directories the walk could not read. Populated lazily, with the walk. */
+    walkErrors,
     suffixMatches(path) {
       if (files === null) {
         files = [];
@@ -189,7 +199,10 @@ function createIndex(root) {
           let entries;
           try {
             entries = readdirSync(dir, { withFileTypes: true });
-          } catch {
+          } catch (err) {
+            walkErrors.push(
+              `${relative(root, dir).split("\\").join("/") || "."}: ${err.code ?? err.message}`,
+            );
             return;
           }
           for (const entry of entries) {
@@ -538,6 +551,16 @@ export function verifyPaths(planPaths, options = {}) {
     const result = verifyPlan(abs, { root, index });
     claims += result.claims;
     misses.push(...result.misses);
+  }
+
+  // SP-L01: an incomplete index makes every shorthand resolution below it
+  // suspect, so it is a MEASURE_FAIL rather than a quiet narrowing. Reported
+  // AFTER the loop because the walk is lazy — it only happens if some anchor
+  // actually needed a shorthand resolution.
+  for (const e of index.walkErrors) {
+    measureFails.push(
+      `could not read directory ${e} while indexing the tree, so the shorthand-anchor index is INCOMPLETE. A shorthand that should be reported path-ambiguous can resolve uniquely against a partial index and pass.`,
+    );
   }
 
   return { scanned, claims, misses, measureFail: measureFails.length > 0, measureFails };

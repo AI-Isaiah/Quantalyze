@@ -364,6 +364,52 @@ describe("false-positive discipline (T-164.3-23)", () => {
     expect(res.misses.map((m) => m.code)).toEqual(["path-ambiguous"]);
     expect(res.misses[0].reason).toContain("src/app/a/route.ts");
   });
+
+  it("SP-L01: an UNREADABLE directory is a MEASURE_FAIL, not a quietly smaller index", () => {
+    // ⛔ The walk did `catch { return; }`. The index is what decides
+    // `path-ambiguous`, so a silently pruned subtree turns a shorthand that
+    // SHOULD be ambiguous into one that "uniquely" matches the only file the
+    // walk managed to see — and it passes.
+    //
+    // Driven with the ambiguous fixture above, one of whose two matches sits in
+    // a directory made unreadable. The arm therefore proves BOTH halves in one
+    // input: the index really is incomplete, AND the verifier says so instead
+    // of resolving against the remainder.
+    const root = tree("anchor-unreadable-dir", {
+      "src/app/a/route.ts": linesFile(50),
+      "src/app/b/route.ts": linesFile(50),
+      ".planning/phases/99-fixture/99-01-PLAN.md": "See route.ts:10-12 for the CAS.\n",
+    });
+    const locked = join(root, "src/app/b");
+    chmodSync(locked, 0o000);
+    try {
+      // Calibration: the directory really is unreadable in this environment.
+      // Running as root would defeat the fixture, and a silently-readable
+      // directory would make the assertions below meaningless.
+      let readable = true;
+      try {
+        readdirSync(locked);
+      } catch {
+        readable = false;
+      }
+      expect(readable, "the fixture directory is still readable — this arm would prove nothing").toBe(false);
+
+      const res = verifyPaths(planPath(root, ".planning/phases/99-fixture/99-01-PLAN.md"), {
+        root,
+      });
+
+      expect(res.measureFail, "an unreadable directory was pruned silently").toBe(true);
+      expect(res.measureFails.join("\n")).toContain("shorthand-anchor index is INCOMPLETE");
+      expect(res.measureFails.join("\n")).toContain("src/app/b");
+      // ⭐ And the consequence the finding names: with `b` invisible, the
+      // shorthand resolves "uniquely" to `a` and produces NO miss at all. The
+      // measureFail is the ONLY thing standing between that and a pass.
+      expect(res.misses).toEqual([]);
+    } finally {
+      chmodSync(locked, 0o755);
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("NUL bytes — the file shell grep cannot read", () => {
