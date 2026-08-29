@@ -1063,6 +1063,20 @@ true for 146 and half of 142–145, and **false for 141**.
 
 ## 🟡 FIX MID-TERM
 
+- [ ] **Two cosmetic verify-precision notes from Phase 164.3's plan gate (logged 2026-08-29).**
+      Neither is user-facing nor data-integrity, so neither blocked the phase — recorded so they are
+      not re-derived.
+      1. `164.3-02-PLAN.md` Task 3 asserts the OPS-08-F9 floors with `grep -a "SENTINEL_FLOOR=8"`,
+         which would also match `SENTINEL_FLOOR=80` or a comment containing the string. It is
+         verify-and-record of an ALREADY-DONE raise (floors are 8 and 166 at `ci.yml:1738-1739`),
+         not a shipped control, so a loose match cannot hide a regression here. Tighten to an
+         anchored exact match if the arm ever becomes load-bearing.
+      2. `164.3-07-PLAN.md` Task 1's verify masks the status of its `local-stack ... down` teardown
+         (`up && test; RC=$?; down; exit $RC`). That is deliberate — it preserves the TEST verdict
+         rather than letting a teardown hiccup overwrite it — and orphaned containers are caught
+         independently by the lane's `--self-test` no-containers assertion and by the next `up`.
+
+
 - [ ] **`[VAC-04-ROLE]` Swap Phase 164.3's repo-vs-PROD body diff onto a zero-table-grant role.**
       Booked 2026-08-29 as the deferred half of a founder ruling, so it is not lost.
       **Current state (deliberate, not an oversight):** VAC-04 runs as a step inside

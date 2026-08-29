@@ -5,10 +5,10 @@ milestone_name: Backlog Burndown (Phases 158+)
 current_phase: 164.3
 current_phase_name: VACUITY — a control that cannot fail must be caught by machine, not by red team
 status: planned
-stopped_at: 164.3 RESEQUENCED to run first (founder-approved 2026-08-28). Its throwaway-PG lane + mutation runner are the substrate 164.1's gate work needs; five carry-overs moved 164.1 -> 164.3, three -> 164.2, PII-01 decided inline.
-last_updated: "2026-08-28T14:29:08.803Z"
-last_activity: 2026-08-28
-last_activity_desc: "Phase 164 SHARE shipped v0.76.0.0 (#720); post-deploy Sentry tag + contexts.trace.data token leaks fixed and secret-scan un-redded in v0.76.1.0 (#721). ROADMAP progress table reconciled: 159/161/161.1/162/164 were stale."
+stopped_at: 164.3 PLANNED — 10 plans in 5 waves, verified by gsd-plan-checker on iteration 3 of 3. Each of the first two iterations found an error-swallowing verify shape the previous had missed (|| fallback; then a `wc -l` tail and a printed-not-tested `grep -c`); all three removed. FIVE premises in this phase's own spec failed re-measurement: SKIP-01 (migrations DO reach TEST), OPS-08-F9 (floors already 8/166), criterion 4 (118 committed function bodies exist), the PROD-linked CI job (already exists, dissolving the phase's only human gate), and the corpus size (30 arm-anchored markers, not 33 — a grep counting its own documentation). NO founder-gated item remains.
+last_updated: "2026-08-29T00:00:00.000Z"
+last_activity: 2026-08-29
+last_activity_desc: "Ledger closed out: completed phases 1 -> 4 (158/160/163/164 pass), zero OPEN human items across all seven, 161.1 given the retrospective VERIFICATION.md it shipped without. Then 164.3 discussed (17 decisions), researched, pattern-mapped and planned."
 state_head: 06c19a434b9f26cbd6c3ff120fb638b0b823286e
 progress:
   total_phases: 13
