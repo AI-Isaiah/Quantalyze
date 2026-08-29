@@ -702,39 +702,163 @@ describe("GRAMMAR rule 3c — only an identity the RUNNER stamped may be read", 
   // the identical bytes at runtime; none of them is a substring rule's problem.
 
   const ARM = "SYNTH 1";
-  /** Ways to make PostgreSQL print `TEST FAILED (SYNTH 1)` without writing it. */
-  const SPELLINGS: Record<string, string> = {
-    "direct literal": `TEST FAILED (${ARM}): x`,
-    "concatenated": `TEST FAI' || 'LED (${ARM}): x`,
-    "format() interpolation": `TEST FA%sED (${ARM}): x`,
-    "concatenated at the paren": `TEST FAILED (' || '${ARM}): x`,
-    "chr() assembled": `' || chr(84) || 'EST FAILED (${ARM}): x`,
-  };
 
-  it("the generator is non-empty and every spelling names the same arm at runtime", () => {
-    expect(Object.keys(SPELLINGS).length).toBeGreaterThan(0);
+  // ══════════════════════════════════════════════════════════════════════════
+  // ⛔ SP-C01 — WHAT WAS HERE BEFORE, AND WHY IT WAS WORSE THAN NOTHING.
+  //
+  // This block used to loop a five-row `SPELLINGS` table and call itself an
+  // ORACLE over the class of injections. The loop body built its lane output
+  // from `ARM` alone, so `injected` NEVER REACHED THE SYSTEM UNDER TEST and all
+  // five arms were byte-identical. PROVEN by neuter: replacing every SPELLINGS
+  // value with `NEUTERED-GARBAGE-N` left all 63 tests green. It was the exact
+  // "enumerates instances while claiming the class" defect the comment one
+  // describe block up says it replaced.
+  //
+  // The repair is not a bigger table. It is noticing that 3a and 3c range over
+  // TWO DIFFERENT AXES, and the old table was on the wrong one for 3c:
+  //
+  //   * a SPELLING is an input to the PARSER. Whether 3a can see it is
+  //     spelling-dependent and decidable here, so the spelling table now goes
+  //     through `parseAnnotations` and is asserted as an EXACT classification.
+  //   * 3c never reads the annotation at all. Its input is the LANE'S OUTPUT,
+  //     so that is what its table generates: prefixes, positions, mixtures of
+  //     stamped and unstamped identities, and the near-misses a substring rule
+  //     would fumble.
+  //
+  // ⚠️ HONEST RESIDUAL, stated rather than implied: NO arm in this file can
+  // carry a spelling all the way to a lane output, because that requires
+  // PostgreSQL to evaluate `format()` / `chr()` / `||`. The end-to-end proof
+  // for one such spelling is the runner's own SELF-TEST 8/8, whose fixture is
+  // deliberately spelled with `format()` so it can only pass on 3c — and which
+  // CI now actually runs (SP-C02). This file proves the two halves; that step
+  // proves they meet.
+  // ══════════════════════════════════════════════════════════════════════════
+
+  /**
+   * Ways to make PostgreSQL print `TEST FAILED (SYNTH 1)`.
+   * `refusedBy3a` is the MEASURED classification, and it is asserted as an
+   * exact map below — widening 3a without updating it is a failure, which is
+   * what keeps GRAMMAR.md's "3a is not the closure" claim from going stale.
+   */
+  const SPELLINGS: { name: string; stmtBody: string; refusedBy3a: boolean }[] = [
+    { name: "direct literal", stmtBody: `'TEST FAILED (${ARM}): x'`, refusedBy3a: true },
+    { name: "concatenated", stmtBody: `'TEST FAI' || 'LED (${ARM}): x'`, refusedBy3a: true },
+    { name: "concatenated at the paren", stmtBody: `'TEST FAILED (' || '${ARM}): x'`, refusedBy3a: true },
+    { name: "format() interpolation", stmtBody: `format('TEST FA%sED (${ARM}): x', 'IL')`, refusedBy3a: false },
+    { name: "chr() assembled", stmtBody: `chr(84) || 'EST FAILED (${ARM}): x'`, refusedBy3a: false },
+  ];
+
+  /** The annotation a spelling produces, built the way a real one is. */
+  const SETUP_FILE = "supabase/tests/test_strategy_shares_rls.sql";
+  const annotationFor = (stmtBody: string) =>
+    [
+      `-- RED-UNDER-SETUP: {"apply":["${SETUP_FILE}"]}`,
+      `  -- RED-UNDER: prose`,
+      `  -- RED-UNDER-M: {"arm":"${ARM}","apply":[{"kind":"sql","stmt":${JSON.stringify(
+        `DO $$ BEGIN RAISE EXCEPTION '%', ${stmtBody}; END $$`,
+      )}}]}`,
+    ].join("\n");
+
+  it("the spelling table is non-empty, names ONE arm throughout, and covers BOTH sides of 3a", () => {
+    // What the old arm at this position claimed in its title and did not do.
+    expect(SPELLINGS.length).toBeGreaterThan(3);
+    for (const s of SPELLINGS) {
+      expect(s.stmtBody, `${s.name} is empty`).not.toBe("");
+      expect(s.stmtBody, `${s.name} does not name ${ARM}`).toContain(ARM);
+    }
+    // A table that is all-refused or all-invisible would make one of the two
+    // arms below vacuous.
+    expect(SPELLINGS.some((s) => s.refusedBy3a)).toBe(true);
+    expect(SPELLINGS.some((s) => !s.refusedBy3a)).toBe(true);
   });
 
-  for (const [spelling, injected] of Object.entries(SPELLINGS)) {
-    it(`ORACLE: a "${spelling}" identity the runner did not stamp is detected`, () => {
-      const nonce = makeIdentityNonce();
-      // What the LANE would print, whatever the annotation's spelling was.
-      const laneOutput = `psql:gate.sql:12: ERROR:  TEST FAILED (${ARM}): x\n`;
-      expect(
-        injected.length,
-        "the spelling table must actually carry text — an empty entry proves nothing",
-      ).toBeGreaterThan(0);
+  it.each(SPELLINGS)(
+    "3a's verdict on the $name spelling is the MEASURED one — the spelling reaches the real parser",
+    ({ name, stmtBody, refusedBy3a }) => {
+      // ⭐ THIS is what makes `stmtBody` load-bearing: it goes into the parser,
+      // and the parser's answer is what is asserted. Garbage here changes the
+      // verdict and reds the arm.
+      const result = parseAnnotations(annotationFor(stmtBody), { file: "g.sql" });
+      if (refusedBy3a) {
+        expect(result.structured, `${name} was ACCEPTED but is listed as refused`).toHaveLength(0);
+        expect(soleError(result)).toMatch(/injects a "TEST FAILED \(" literal/);
+      } else {
+        // Deliberately invisible to 3a. If this flips, 3a has been widened and
+        // GRAMMAR.md's honest-scope note is stale — that is the finding, not
+        // this arm.
+        expect(
+          result.errors,
+          `3a now sees the ${name} spelling; GRAMMAR.md's "3a is not the closure" note must be re-examined`,
+        ).toHaveLength(0);
+        expect(result.structured).toHaveLength(1);
+      }
+    },
+  );
 
+  /**
+   * 3c's real input space: what the LANE printed. Generated over the shapes a
+   * psql log actually produces, because that — not the annotation's spelling —
+   * is what `unstampedIdentities` and `firstFailureArm` read.
+   */
+  const laneOutputShapes = (identity: string) => [
+    { name: "bare line", text: `${identity}: x\n` },
+    { name: "psql ERROR prefix", text: `psql:gate.sql:12: ERROR:  ${identity}: x\n` },
+    { name: "preceded by unrelated NOTICE lines", text: `NOTICE:  step 1 ok\nNOTICE:  step 2 ok\nERROR:  ${identity}: x\n` },
+    { name: "mid-line, after other text", text: `ERROR:  something then ${identity}: x\n` },
+    { name: "trailing CONTEXT lines", text: `ERROR:  ${identity}: x\nCONTEXT:  PL/pgSQL function inline_code_block\n` },
+    { name: "repeated twice", text: `ERROR:  ${identity}: x\nERROR:  ${identity}: y\n` },
+    { name: "no trailing newline", text: `ERROR:  ${identity}: x` },
+  ];
+
+  it("the lane-output generator is non-empty and every shape really contains the identity", () => {
+    const shapes = laneOutputShapes(`TEST FAILED (${ARM})`);
+    expect(shapes.length).toBeGreaterThan(5);
+    for (const s of shapes) expect(s.text, s.name).toContain(`TEST FAILED (${ARM})`);
+  });
+
+  it.each(laneOutputShapes(`TEST FAILED (${ARM})`))(
+    "ORACLE: an UNSTAMPED identity in the $name shape is reported SYNTHESISED and is not readable as a first failure",
+    ({ text }) => {
+      const nonce = makeIdentityNonce();
+      const unstamped = unstampedIdentities(text, nonce);
       expect(
-        unstampedIdentities(laneOutput, nonce),
-        `the runner stamped no such identity, so "${spelling}" must be reported as SYNTHESISED`,
+        unstamped.length,
+        "the detector saw NO unstamped identity in a shape that contains one",
+      ).toBeGreaterThan(0);
+      expect(
+        [...new Set(unstamped)],
+        "the runner stamped no such identity, so it must be reported as SYNTHESISED",
       ).toEqual([ARM]);
       expect(
-        firstFailureArm(laneOutput, nonce),
+        firstFailureArm(text, nonce),
         "an unstamped identity must not be readable as a first failure",
       ).toBeNull();
-    });
-  }
+    },
+  );
+
+  it.each(laneOutputShapes("__STAMP__"))(
+    "the OTHER direction: a STAMPED identity in the $name shape IS read, and reports no synthesis",
+    ({ text }) => {
+      // A detector that refused everything would pass every arm above while
+      // rejecting the entire real corpus.
+      const nonce = makeIdentityNonce();
+      const real = text.replace(/__STAMP__/g, stampedIdentity(nonce, ARM));
+      expect(real, "the stamp substitution must have happened").not.toContain("__STAMP__");
+      expect(firstFailureArm(real, nonce)).toBe(ARM);
+      expect(unstampedIdentities(real, nonce)).toEqual([]);
+    },
+  );
+
+  it("a MIXTURE reports both halves: the stamped arm is the first failure, the unstamped one is synthesised", () => {
+    // Neither table above can see this, and it is the shape a real attack
+    // produces — an injected raise landing beside the gate's own.
+    const nonce = makeIdentityNonce();
+    const out =
+      `ERROR:  ${stampedIdentity(nonce, "ANON 1a")}: real\n` +
+      `ERROR:  TEST FAILED (${ARM}): forged\n`;
+    expect(firstFailureArm(out, nonce)).toBe("ANON 1a");
+    expect(unstampedIdentities(out, nonce)).toEqual([ARM]);
+  });
 
   it("a STAMPED identity is read, and reads back as the arm the gate declares", () => {
     // The other direction. Without this the nonce could be "passed" by never
