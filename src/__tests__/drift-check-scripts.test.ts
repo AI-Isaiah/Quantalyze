@@ -716,6 +716,13 @@ describe("IN-04 — the scratch directory does not survive a fail() path", () =>
       probe.status,
       "could not locate the shell's temp root — the measurement below would be pointed at nothing",
     ).toBe(0);
+    // ⛔ R3-I02: `dirname("")` is `"."`. An empty stdout would point `tempRoot`
+    // at the REPO ROOT, and the calibration step below would then plant a
+    // `tmp.*` directory in the checkout — a dirty tree, which the mutation
+    // runner reports as its own defect kind. The status guard above makes that
+    // unreachable for a working `mktemp`, which is exactly why the failure
+    // would be a surprise rather than a diagnosis.
+    expect(probe.stdout.trim(), "the probe printed no path").toMatch(/^\//);
     const tempRoot = dirname(probe.stdout.trim());
 
     // ⛔ R2-W02: attribute by CONTENT, never by a bare count of a machine-wide
