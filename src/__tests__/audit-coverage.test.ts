@@ -133,14 +133,50 @@ const FROM_CALL_RE = /\.from\s*\(/;
  * allowlist is worse than no allowlist: it is a number that was never
  * compared to the thing it claims to count.
  *
- * A block is entered ONLY when a line's first non-whitespace token is
- * `/*`. Entering on any occurrence would let a string literal such as
- * `"src/**\/*.ts"` open a phantom comment and blank the rest of the
- * file — a detector silently going blind, which is the failure this
- * whole file exists to prevent. A line that STARTS with `/*` is a
- * comment in any valid TypeScript, and an unterminated block would not
- * compile, so the blanking cannot run away.
+ * ⛔ SP-I01. A block used to be entered ONLY when a line's first
+ * non-whitespace token was `/*`, so a block opened MID-LINE
+ * (`const x = 1; /* note`) left its continuation lines classified as
+ * CODE. Reproduced: a JSDoc-ish continuation mentioning
+ * `supabase.from('trades').insert()` was reported as a mutation site —
+ * the same fabricated-site class this header already names as measured,
+ * now feeding a COUNTED exact-set allowlist.
+ *
+ * The old comment justified the restriction by the risk that a string
+ * literal such as `"src/**\/*.ts"` would open a phantom comment and
+ * blank the rest of the file — a detector silently going blind, which is
+ * the failure this whole file exists to prevent. That risk is real and
+ * is closed properly instead of avoided: `unmatchedBlockOpen` tracks
+ * quote state, so a `/*` inside a string, a char class or a template
+ * literal cannot open a block. An unterminated real block would not
+ * compile, so the blanking still cannot run away.
  */
+
+/**
+ * Index of a `/*` that opens a block and is NOT inside a string literal,
+ * or -1. `stripLineComment` has already removed every `/* … *\/` pair
+ * that opens and closes on this line, so any survivor is unmatched.
+ */
+function unmatchedBlockOpen(code: string): number {
+  let quote: string | null = null;
+  for (let i = 0; i < code.length; i++) {
+    const c = code[i];
+    if (quote !== null) {
+      if (c === "\\") {
+        i++;
+        continue;
+      }
+      if (c === quote) quote = null;
+      continue;
+    }
+    if (c === "'" || c === '"' || c === "`") {
+      quote = c;
+      continue;
+    }
+    if (c === "/" && code[i + 1] === "*") return i;
+  }
+  return -1;
+}
+
 function stripBlockComments(lines: string[]): string[] {
   const out: string[] = [];
   let inBlock = false;
@@ -156,9 +192,12 @@ function stripBlockComments(lines: string[]): string[] {
       continue;
     }
     const code = stripLineComment(raw);
-    if (code.trimStart().startsWith("/*")) {
-      inBlock = !code.includes("*/");
-      out.push("");
+    const open = unmatchedBlockOpen(code);
+    if (open >= 0) {
+      inBlock = true;
+      // Whatever precedes the opener on this line IS code and is kept —
+      // `await supabase.from('t').insert(x); /* note` must still be seen.
+      out.push(code.slice(0, open));
       continue;
     }
     out.push(code);
@@ -1080,6 +1119,65 @@ describe("audit-coverage helpers — H-0004/H-0005 audit gap fixtures", () => {
       "}",
     ].join("\n");
     expect(findMutations("synthetic.ts", src)).toHaveLength(0);
+  });
+
+  // ── SP-I01 ───────────────────────────────────────────────────────────────
+  // The arm above covers a block opened at the START of a line. A block opened
+  // MID-line was not entered at all, so its continuation lines stayed
+  // classified as CODE — the same fabricated-site class, one shape over, and it
+  // feeds a COUNTED exact-set allowlist.
+  it("SP-I01 control: a mention inside a block comment opened MID-LINE is NOT a mutation", () => {
+    const src = [
+      "export async function POST() {",
+      "  const n = 1; /* Note: the old path did",
+      "   * await supabase.from('trades').insert(batch)",
+      "   * per row, which is why the RPC exists.",
+      "   */",
+      "  return Response.json({ ok: n });",
+      "}",
+    ].join("\n");
+    expect(
+      findMutations("synthetic.ts", src),
+      "a block comment opened mid-line left its body classified as code",
+    ).toHaveLength(0);
+  });
+
+  it("SP-I01: CODE BEFORE a mid-line opener is still seen — the fix must not blind the detector", () => {
+    // The other direction. Blanking the whole line would hide a real write,
+    // which is a strictly worse failure than the false positive being fixed.
+    const src = [
+      "export async function POST() {",
+      "  const { error } = await supabase.from('trades').insert(batch); /* legacy note",
+      "   * kept for the migration window",
+      "   */",
+      "  return Response.json({ ok: !error });",
+      "}",
+    ].join("\n");
+    const found = findMutations("synthetic.ts", src);
+    expect(found).toHaveLength(1);
+    expect(found[0].line).toBe(2);
+  });
+
+  it("SP-I01: a `/*` inside a STRING does not open a phantom block — the risk the old restriction avoided", () => {
+    // The old code entered a block only on a line-leading `/*`, and its comment
+    // justified that by this exact hazard: a phantom opener would blank the
+    // rest of the file and the detector would go silently blind. Closed by
+    // tracking quote state rather than by refusing to look.
+    const src = [
+      "export async function POST() {",
+      "  const glob = '/*';",
+      '  const other = "a /* b";',
+      "  const tpl = `c /* d`;",
+      "  const { error } = await supabase.from('trades').insert(batch);",
+      "  return Response.json({ ok: !error });",
+      "}",
+    ].join("\n");
+    const found = findMutations("synthetic.ts", src);
+    expect(
+      found,
+      "a `/*` inside a string literal opened a phantom block and blanked the real write below it",
+    ).toHaveLength(1);
+    expect(found[0].line).toBe(5);
   });
 
   // H-0001 — intended behavior. LIVE since 2026-08-29 (Phase 164.3).
