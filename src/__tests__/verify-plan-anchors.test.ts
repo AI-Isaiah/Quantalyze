@@ -42,6 +42,7 @@ import {
   chmodSync,
   mkdtempSync,
   mkdirSync,
+  readFileSync,
   readdirSync,
   writeFileSync,
   rmSync,
@@ -650,6 +651,63 @@ describe("WR-06 — a deliberately deferred plan can leave the pending set HONES
 
     expect(found.deferred).toEqual([]);
     expect(found.pending.length).toBe(1);
+  });
+
+  it("G2: an exempted plan is ROUTED — dated reason, owning phase, and no stale unblocker left behind", () => {
+    // ⛔ Verification gap G2. The exemption mechanism above is what lets a
+    // deferred plan leave the pending set. That must not become a way to make
+    // a plan disappear: before this, plan 07's non-execution existed ONLY as
+    // an unchecked ROADMAP checkbox — no date, no reason, no owning phase —
+    // while Phase 159's two blocked items still named 164.3 as their
+    // unblocker and carried a closing recipe plan 04's own measurement had
+    // falsified. Closing the phase like that leaves two items blocked on a
+    // completed phase.
+    //
+    // So the deferral marker is not enough on its own: the ledger must carry
+    // the routing, and no other artifact may still point at the wrong phase.
+    const found = findPendingPlans(REPO_ROOT);
+    const deferred = found.deferred.filter((d) =>
+      d.plan.replace(/\\/g, "/").includes("/164.3-07-PLAN.md"),
+    );
+    if (deferred.length === 0) {
+      // Plan 07 executed or was removed — this pin no longer applies, and the
+      // ledger item should be closed by whoever did that.
+      return;
+    }
+
+    const marker = readFileSync(
+      join(
+        REPO_ROOT,
+        ".planning/phases/164.3-vacuity-a-control-that-cannot-fail-must-be-caught-by-machine",
+        "164.3-07-DEFERRED.md",
+      ),
+      "utf8",
+    );
+    expect(marker, "the deferral marker must be DATED").toContain("2026-08-29");
+    expect(marker, "the deferral marker must name an OWNING phase").toContain("164.5");
+    expect(
+      marker,
+      "the deferral marker must carry the MEASUREMENT that forced it, not just an assertion",
+    ).toContain("69 fail");
+
+    const todos = readFileSync(join(REPO_ROOT, "TODOS.md"), "utf8");
+    expect(
+      todos,
+      "TODOS.md is the single backlog ground truth in this repo. A deferral recorded only in a " +
+        "phase directory is routed to nothing once the phase is archived.",
+    ).toContain("[VAC-07-DEFER]");
+
+    // And the falsified recipe must be gone from Phase 159's blocked items.
+    const v159 = readFileSync(
+      join(REPO_ROOT, ".planning/phases/159-rank-public-ranking-integrity/159-VERIFICATION.md"),
+      "utf8",
+    );
+    expect(
+      v159,
+      "Phase 159's blocked items still carry the 'cheap once 164.3 lands' closing recipe, which " +
+        "plan 04's replay measurement falsified. They are blocked on a completed phase.",
+    ).not.toContain("cheap once 164.3 lands: 164.3 ships a disposable-PostgreSQL lane");
+    expect(v159).toContain("blocked on PHASE 164.5");
   });
 
   it("phase 164.3 plan 07 — the real deferral this repo carries — is exempt and REPORTED", () => {

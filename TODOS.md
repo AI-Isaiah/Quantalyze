@@ -1077,6 +1077,33 @@ true for 146 and half of 142–145, and **false for 141**.
          independently by the lane's `--self-test` no-containers assertion and by the next `up`.
 
 
+- [ ] **`[VAC-07-DEFER]` Phase 164.3 plan 07 (VAC-07) was DEFERRED 2026-08-29 by founder decision — owned by Phase 164.5.**
+      Booked 2026-08-29 (verification gap G2). Before this, the deferral existed only as an
+      unchecked ROADMAP checkbox: no date, no reason, no owning phase. An unchecked box is
+      inferable, not recorded — and it left Phase 159's two blocked items naming a completed
+      phase as their unblocker.
+      **The measurement that forced it** (plan 04, recorded in `scripts/local-stack/REPLAY-SPIKE.md`):
+      the migration chain does NOT replay from empty. 262 migration files, **69 fail / 193 apply**,
+      under BOTH the Supabase CLI and plain `psql`, from at least **six independent root causes** —
+      one of which, `20260823120000_revoke_api_keys_insert.sql`, refuses **BY DESIGN** to run
+      against a database it cannot identify and therefore can never replay onto a fresh local DB.
+      So `supabase db reset` cannot be the lane's schema source, and the substrate became a
+      committed schema dump (`supabase/schema/baseline.sql`) — a separate act of work from the spec.
+      **Delivered:** `scripts/local-stack/run.sh` — the Supabase-CLI local-stack lane, with a
+      trapped teardown, a `[db.migrations]`-disabled derived workdir, a mode-600 env handoff, and a
+      baseline loader that REFUSES rather than degrading to the 193-of-262 partial schema. It fails
+      loud and tears down; measured.
+      **NOT delivered:** the csv-finalize race spec itself. **VAC-07 is not satisfied** and
+      `.planning/REQUIREMENTS.md` keeps it `Pending`.
+      **Phase 164.5 must, in one change:** (a) repoint `scripts/local-stack/run.sh:50` at the
+      committed `supabase/schema/baseline.sql` — today it reads the gitignored, non-existent
+      `scripts/local-stack/baseline.sql`; (b) drop `.gitignore:138`; (c) add the baseline staleness
+      gate (WINDOWS 29 / DRIFT-05) including a sha256 assertion against `supabase/schema/BASELINE.md`;
+      (d) THEN write the spec — two concurrent `csv-finalize` POSTs on one never-classified
+      `wizard_session_id`; exactly one 2xx applied receipt, one honest raced refusal, `category_id`
+      holds the winner.
+      Full record: `.planning/phases/164.3-vacuity-a-control-that-cannot-fail-must-be-caught-by-machine/164.3-07-DEFERRED.md`.
+
 - [ ] **`[VAC-04-ROLE]` Swap Phase 164.3's repo-vs-PROD body diff onto a zero-table-grant role.**
       Booked 2026-08-29 as the deferred half of a founder ruling, so it is not lost.
       **Current state (deliberate, not an oversight):** VAC-04 runs as a step inside
@@ -1998,14 +2025,30 @@ worse than that — re-measuring changed the **count**, not just the coordinates
 The comment in `audit-coverage.test.ts` now carries the re-measured list, the method that
 produced it, and a warning not to trust the numbers past the next refactor.
 
-⚠️ **Those six sites remain UNFIXED and unaudited.** SEC-03 only put
-`add_wizard_composite_key` under the audit law; it did not fix `findMutations`. H-0001
-stays deferred.
+✅ **DETECTOR HALF CLOSED 2026-08-29 — Phase 164.3 plan 03, commit `311ac9cd`.**
+(Corrected 2026-08-29, verification gap G4: everything below this line previously read
+"H-0001 stays deferred" and asked for a fix that had already landed, which would have sent
+the next reader to redo finished work.)
 
-- **[H-0001] Fix `findMutations`' single-line `from(...).insert(...)` detection**, then
-  un-skip the intended-behavior test and re-run the census. Until then the audit-coverage
-  gate is blind to the single-line idiom at six known call sites, and a seventh can appear
-  without anything going red.
+What plan 03 actually did, re-measured at HEAD:
+
+- `findMutations` no longer anchors the mutator to the start of a line, so the single-line
+  idiom `const { error } = await supabase.from('trades').insert(batch);` is visible;
+- the intended-behavior test is **un-skipped and live** — `grep -c '\.skip('
+  src/__tests__/audit-coverage.test.ts` returns **0**;
+- the census was re-run and the six sites are pinned as an EXACT SET in
+  `H_0001_UNCOVERED_ALLOWLIST`, asserted in both directions: a new uncovered site is red,
+  and an allowlisted site that gets covered is *also* red so the list cannot rot.
+
+⚠️ **What remains open, and it is not a detector problem.** The **six allowlisted ROUTES**
+are still unaudited — `add_wizard_composite_key` aside, SEC-03 put none of them under the
+audit law. Bringing each under it is a per-site compliance judgment (which actor, which
+event shape, which failure mode), not a regex change.
+
+- **[H-0001] Bring the six `H_0001_UNCOVERED_ALLOWLIST` routes under the audit law**, one
+  per-site decision at a time, shrinking the allowlist as each lands. The gate is no longer
+  blind — a SEVENTH site now goes red on arrival — so this is a bounded backlog rather than
+  an open hole.
 
 **Lesson worth keeping:** a census recorded as prose in a comment decays silently and
 asymmetrically — it under-reported by two AND pointed at one site that no longer existed.
