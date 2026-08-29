@@ -265,15 +265,83 @@ describe("lint-sql-gates: the CI invocation (mode identity)", () => {
     ]);
   });
 
-  it("is BLOCKING — wired into the frontend aggregator's needs AND its result loop", () => {
-    // Either half alone leaves the gate advisory. That is not hypothetical
-    // here: SEAMCORE-09 records `frontend-seam-redis` sitting in exactly that
-    // half-wired state, and a gate nothing gates on is this phase's own thesis.
+  // ── SP-I03 ───────────────────────────────────────────────────────────────
+  // This pin used to cover `sql-gate-lint` ALONE. `sql-mutation` — the phase's
+  // headline detector — and `plan-anchor-verify` had none, so either could have
+  // been dropped from `needs:` or from the result loop and stayed green. Either
+  // half alone leaves a gate advisory, and that is not hypothetical: SEAMCORE-09
+  // records `frontend-seam-redis` sitting in exactly that half-wired state.
+  //
+  // The table is the SUBJECT, so widening it is one line. Each row also records
+  // its tolerance posture, because "no tolerance arm" is a DIFFERENT claim for
+  // `plan-anchor-verify` (which legitimately self-skips off a pull_request)
+  // than for the two hermetic jobs — asserting the same thing about all three
+  // would have been wrong, and would have had to be deleted the first time it
+  // was read.
+  const AGGREGATED_JOBS = [
+    { job: "sql-gate-lint", tolerance: null },
+    { job: "sql-mutation", tolerance: null },
+    { job: "plan-anchor-verify", tolerance: "is_pr" },
+  ] as const;
+
+  it.each(AGGREGATED_JOBS)(
+    "$job is BLOCKING — in the aggregator's needs AND in its result loop",
+    ({ job }) => {
+      const ci = readFileSync(join(ROOT, ".github/workflows/ci.yml"), "utf8");
+      expect(ci, `${job} is missing from the aggregator's needs:`).toContain(
+        `      - ${job}\n`,
+      );
+      expect(ci, `${job} is missing from the aggregator's result loop`).toContain(
+        `"${job}=\${{ needs.${job}.result }}"`,
+      );
+    },
+  );
+
+  it.each(AGGREGATED_JOBS)(
+    "$job's tolerance posture is exactly what its hermeticity justifies",
+    ({ job, tolerance }) => {
+      const ci = readFileSync(join(ROOT, ".github/workflows/ci.yml"), "utf8");
+      const arm = new RegExp(`\\[ "\\$name" = "${job}" \\]`);
+      if (tolerance === null) {
+        // Hermetic: no database, no secret, no network, no `if:`. A `skipped`
+        // is therefore ALWAYS a fault, so the strict default arm must apply.
+        expect(ci, `${job} has grown a per-job tolerance arm; it is hermetic and cannot legitimately skip`).not.toMatch(arm);
+      } else {
+        // `plan-anchor-verify` scopes itself to pull_request on purpose (D-13:
+        // an anchor drifting on main must not stall the Railway deploy), so its
+        // skip tolerance is REQUIRED — and must stay conditioned on the event,
+        // not on the result alone.
+        expect(ci, `${job} lost its tolerance arm; it self-skips off a pull_request and would redden every push`).toMatch(arm);
+        expect(ci).toContain(`${tolerance}='\${{ github.event_name ==`);
+        expect(ci).toContain(`[ "$result" = "skipped" ] && [ "$${tolerance}" != "true" ]`);
+      }
+    },
+  );
+
+  it("the table above covers EVERY job this phase added — derived from ci.yml, not restated", () => {
+    // Without this arm the table is a hand-list, and a fourth job added by
+    // 164.4 would be unpinned exactly as `sql-mutation` was. The population is
+    // read off ci.yml: every job that runs one of this phase's three scripts.
     const ci = readFileSync(join(ROOT, ".github/workflows/ci.yml"), "utf8");
-    expect(ci).toContain("      - sql-gate-lint\n");
-    expect(ci).toContain('"sql-gate-lint=${{ needs.sql-gate-lint.result }}"');
-    // ⛔ No tolerance arm: the job is hermetic, so a `skipped` is always a fault.
-    expect(ci).not.toMatch(/\[ "\$name" = "sql-gate-lint" \]/);
+    const PHASE_SCRIPTS = [
+      "scripts/lint-sql-gates.mjs",
+      "scripts/mutation-runner/run.mjs",
+      "scripts/verify-plan-anchors.mjs",
+    ];
+    // Job headers are exactly two spaces deep in this workflow.
+    const jobs = [...ci.matchAll(/^ {2}([a-z0-9-]+):$/gm)].map((m) => ({
+      name: m[1],
+      at: m.index as number,
+    }));
+    expect(jobs.length, "no job headers parsed — this arm would be checking an empty set").toBeGreaterThan(10);
+    const owning = new Set<string>();
+    for (let i = 0; i < jobs.length; i++) {
+      const body = ci.slice(jobs[i].at, jobs[i + 1]?.at ?? ci.length);
+      if (PHASE_SCRIPTS.some((s) => body.includes(s))) owning.add(jobs[i].name);
+    }
+    expect([...owning].sort()).toEqual(
+      AGGREGATED_JOBS.map((r) => r.job).slice().sort(),
+    );
   });
 
   it("leaves the corpus untouched — a linter that could edit gate files is a liability", () => {
