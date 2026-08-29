@@ -149,11 +149,44 @@ describe("lint-sql-gates: every rule fires on red and passes on green", () => {
     expect(res.findings, `${ruleId} green fixture must be clean`).toEqual([]);
   });
 
-  it("every red fixture cites the mechanism it reproduces", () => {
+  it("every red fixture cites the mechanism it reproduces — the NUMBER, derived from RULES", () => {
+    // ⛔ SP-I02. This asserted only `toContain("RED FIXTURE")`, which is the
+    // banner every fixture has by construction — so a fixture whose mechanism
+    // attribution was DELETED, or COPIED from another rule, passed the arm
+    // titled "cites the mechanism it reproduces". The number is now derived
+    // from `RULES`, which the linter owns, so the citation is compared to the
+    // thing rather than to itself.
+    const attribution = (ruleId: string) => {
+      const rule = RULES.find((r: { id: string }) => r.id === ruleId);
+      expect(rule, `${ruleId} is not in RULES`).toBeDefined();
+      return `RED FIXTURE for ${ruleId} (mechanism ${(rule as { mechanism: number }).mechanism}).`;
+    };
+
     for (const ruleId of EXPECTED_RULE_IDS) {
       const text = readFileSync(fixture(ruleId, "red"), "utf8");
-      expect(text).toContain("RED FIXTURE");
+      expect(
+        text,
+        `${ruleId}'s red fixture does not cite its own rule id and mechanism number`,
+      ).toContain(attribution(ruleId));
     }
+
+    // Calibration, both failure shapes the finding names, applied to a copy so
+    // the fixtures on disk are untouched:
+    //   * attribution DELETED  — the banner alone must not satisfy it;
+    //   * attribution COPIED from another rule — a real risk, since the
+    //     fixtures are written by hand from a template.
+    const first = EXPECTED_RULE_IDS[0];
+    const other = EXPECTED_RULE_IDS[1];
+    expect(other, "need two rules to prove a cross-attribution is caught").toBeDefined();
+    const text = readFileSync(fixture(first, "red"), "utf8");
+    const banner = "-- RED FIXTURE (see the rule for the mechanism).\n";
+    expect(banner).toContain("RED FIXTURE");
+    expect(banner, "the OLD assertion passes on a fixture with no attribution at all").not.toContain(
+      attribution(first),
+    );
+    const crossAttributed = text.replace(attribution(first), attribution(other));
+    expect(crossAttributed, "the mutation must have changed the text").not.toBe(text);
+    expect(crossAttributed).not.toContain(attribution(first));
   });
 });
 
