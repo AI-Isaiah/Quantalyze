@@ -24,6 +24,30 @@ numbers; the aggregator `frontend` check gates branch protection on it.
 full-suite coverage run is gone. The prior 60% floor was enforced nowhere —
 CI ran vitest sharded without `--coverage`.)
 
+## SQL gate integrity jobs (v0.77.0.0, Phase 164.3)
+
+The `frontend` aggregator gates more than coverage now. Three jobs in
+`.github/workflows/ci.yml` are in both its `needs:` list and its result loop, so
+a failure fails the aggregate rather than passing quietly:
+
+- **`sql-mutation`** — mutates every SQL gate arm carrying a `RED-UNDER`
+  annotation, asserts the file goes RED with that arm named, restores, asserts
+  GREEN. Exits 1 on an annotation that does not bite, and on coverage below a
+  ratchet floor pinned at the measured value. Runs on its own throwaway
+  PostgreSQL cluster (`scripts/pg-lane/run.sh`), never against shared TEST.
+- **`sql-gate-lint`** — four static rules over `supabase/tests`, each shipped
+  with a red and a green fixture proving the rule can fire.
+- **`plan-anchor-verify`** — re-resolves every `file:line` anchor and named
+  symbol a pending PLAN.md asserts, and fails loud on a miss.
+
+Two more gates live outside the aggregator: **VAC-04** (repo-vs-PROD function
+body diff) is a step in `migration-drift-check.yml` on migration PRs, and
+**VAC-08** (repo-vs-TEST ledger + body drift) runs in `sql-tests`. Both exit 1
+when their credential is absent — neither ever skips.
+
+⚠️ As of v0.77.0.0 none of these five has been observed on its real host or
+credential; see `.planning/WINDOWS.md` entries 25, 26 and 28.
+
 ## Design System
 Always read DESIGN.md before making any visual or UI decisions.
 All font choices, colors, spacing, and aesthetic direction are defined there.
