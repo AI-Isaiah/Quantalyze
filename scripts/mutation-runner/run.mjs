@@ -115,13 +115,30 @@ const FIXTURE_CORPUS = join(REPO_ROOT, "scripts", "mutation-runner", "fixtures")
 // Phase 164.4 raises FILES_FLOOR as it backfills the other 70 files.
 export const FILES_FLOOR = 1;
 
-// ⚠️ ARMS_FLOOR IS DELIBERATELY 0 AND THEREFORE CANNOT FIRE YET. It is a named
-// constant, not an omission. The real corpus has no RED-UNDER-M twins yet —
-// plan 164.3-08 writes them — so the first honest full-corpus measurement does
-// not exist at the time this ships. Inventing a number here would be the
-// fabricated-baseline defect: a floor that was never compared to anything.
-// PLAN 164.3-08 MUST PIN THIS from its first full-corpus run.
-export const ARMS_FLOOR = 0;
+// ARMS_FLOOR — PINNED 2026-08-29 BY MEASUREMENT (plan 164.3-08), not chosen.
+//
+// It shipped at 0 in plan 05, which is a control that cannot fire, recorded as
+// such (WINDOWS.md entry 27) because no honest full-corpus measurement existed:
+// the real gate had zero RED-UNDER-M twins. That measurement now exists.
+//
+// MEASURED on the first green full-corpus run, 2026-08-29:
+//   `node scripts/mutation-runner/run.mjs` -> exit 0
+//   coverage: files 1/71
+//   arms: 30/30/0  (executed/annotated/waived)
+//   30 of 30 arms RED with first-failure identity ok; 0 waivers; 64s wall clock
+//
+// "Biting" is executed arms MINUS `no-red` and `wrong-first-failure` defects,
+// which on that run was 30 - 0 = 30. The number was read off the RUN, never off
+// this file — a floor picked by reading the finished artifact always passes.
+//
+// ⚠️ RATCHET, NOT A TARGET. It fails on REGRESSION only: an annotation that
+// stops biting, or one deleted outright, drops the biting count below 30 and
+// exits 1. It never demands more than the corpus declares. Phase 164.4 raises
+// it as it backfills the other 70 files.
+// ⛔ Converting an arm to a `waiver` LOWERS the biting count and therefore trips
+// this floor. That is deliberate: waiver creep is how a non-biting arm hides
+// (T-164.3-21), so widening a waiver has to be an explicit, reviewed edit here.
+export const ARMS_FLOOR = 30;
 
 const DEFECT_KINDS = [
   "parse",
@@ -196,6 +213,34 @@ export function applyFileStep(text, step) {
  *
  * `NULL;` is substituted rather than deleting the statement, so an `IF … THEN`
  * whose only statement was the RAISE keeps a non-empty body.
+ *
+ * ⛔ THE FAILURE BRANCH'S TRAILING `RESET ROLE;` GOES WITH IT, AND THAT IS A
+ * CORRECTNESS REQUIREMENT, NOT TIDYING. MEASURED 2026-08-29 while annotating
+ * the real corpus (plan 164.3-08): `N1 3a`'s mutation neuters `N1 1a`, whose
+ * failure branch reads
+ *
+ *     IF NOT raised OR err_msg NOT LIKE '%AT MOST ONE%' THEN
+ *       RESET ROLE;
+ *       RAISE EXCEPTION 'TEST FAILED (N1 1a): …';
+ *     END IF;
+ *
+ * Neutering only the RAISE left `RESET ROLE;` executing — and the branch DOES
+ * execute under that mutation, which is the whole reason the arm is neutered.
+ * The session dropped from `authenticated` to the (superuser) session role for
+ * the ENTIRE REST OF THE FILE, and sixteen arms later `NO-DELETE 1`'s
+ * `DELETE FROM strategy_shares` succeeded because a superuser needs no grant.
+ * The runner reported `wrong-first-failure: NO-DELETE 1`.
+ *
+ * ⚠️ It was loud HERE only by luck. A leaked superuser role makes every
+ * downstream GRANT arm pass for a reason unrelated to the grant — a silent
+ * vacuous PASS inside the vacuity detector, and the exact defect class Phase
+ * 164.4 would inherit across seventy more files.
+ *
+ * The reasoning that makes this the RIGHT semantics rather than a patch: those
+ * statements exist solely to restore state before ABORTING the file. Once the
+ * arm is neutered the file continues, so running its abort-path cleanup is
+ * wrong by construction. Only an exact `RESET ROLE;` is absorbed — nothing
+ * else, so a branch that does real work is never silently swallowed.
  */
 export function neuterArm(text, arm) {
   const lines = text.split("\n");
@@ -211,18 +256,26 @@ export function neuterArm(text, arm) {
   }
   if (hit === -1) return { text, found: false, reason: `no statement contains "${needle}"` };
 
-  let start = hit;
-  while (start >= 0 && !/\bRAISE\s+EXCEPTION\b/i.test(lines[start])) start -= 1;
-  if (start < 0) {
+  let raiseAt = hit;
+  while (raiseAt >= 0 && !/\bRAISE\s+EXCEPTION\b/i.test(lines[raiseAt])) raiseAt -= 1;
+  if (raiseAt < 0) {
     return { text, found: false, reason: `no RAISE EXCEPTION precedes "${needle}"` };
   }
+
+  // Absorb the abort-path cleanup that immediately precedes the RAISE. See the
+  // header: leaving `RESET ROLE;` behind leaks a superuser session into every
+  // later arm. The forward scan below still starts at the RAISE — starting it
+  // here would terminate on `RESET ROLE;`'s own semicolon and leave the RAISE
+  // live, which is a neuter that silently did nothing.
+  let start = raiseAt;
+  while (start > 0 && /^[ \t]*RESET[ \t]+ROLE[ \t]*;[ \t]*$/i.test(lines[start - 1])) start -= 1;
 
   // Walk forward to the statement terminator, tracking single-quote state so a
   // ';' inside the message literal does not end the statement early. '' is the
   // SQL escape for a literal quote.
   let end = -1;
   let inQuote = false;
-  outer: for (let i = start; i < lines.length; i += 1) {
+  outer: for (let i = raiseAt; i < lines.length; i += 1) {
     const line = lines[i];
     for (let c = 0; c < line.length; c += 1) {
       const ch = line[c];
@@ -805,8 +858,15 @@ function selfTest() {
   const quiet = () => {};
   let pass = true;
 
-  console.log("=== SELF-TEST 1/5: a non-biting annotation must exit 1 with `no-red` ===");
-  const a = runCorpus({ scopeDir: SELFTEST_DIR, onlyFile: "nonbiting-gate.sql", log: quiet });
+  // ⚠️ EVERY SCENARIO PASSES AN EXPLICIT `armsFloor`, and that is required for
+  // the checks to measure what they name. The synthetic corpora carry 2 arms;
+  // the REAL ARMS_FLOOR is 30 (measured 2026-08-29). Inheriting the default
+  // would add a spurious `floor` defect to every scenario below and break check
+  // 6 outright, so each states the floor appropriate to ITS corpus. Check 5 is
+  // where an ARMS_FLOOR regression is proven to fire — the mode that could not
+  // be proven at all while the floor was 0.
+  console.log("=== SELF-TEST 1/6: a non-biting annotation must exit 1 with `no-red` ===");
+  const a = runCorpus({ scopeDir: SELFTEST_DIR, onlyFile: "nonbiting-gate.sql", armsFloor: 0, log: quiet });
   pass =
     expect(a.exitCode === 1, `exit code is 1 (got ${a.exitCode})`) &&
     expect(
@@ -815,8 +875,8 @@ function selfTest() {
     ) &&
     pass;
 
-  console.log("=== SELF-TEST 2/5: a FILES_FLOOR regression must exit 1 with `floor` ===");
-  const b = runCorpus({ scopeDir: FIXTURE_CORPUS, filesFloor: 99, log: quiet });
+  console.log("=== SELF-TEST 2/6: a FILES_FLOOR regression must exit 1 with `floor` ===");
+  const b = runCorpus({ scopeDir: FIXTURE_CORPUS, filesFloor: 99, armsFloor: 0, log: quiet });
   pass =
     expect(b.exitCode === 1, `exit code is 1 (got ${b.exitCode})`) &&
     expect(
@@ -825,8 +885,8 @@ function selfTest() {
     ) &&
     pass;
 
-  console.log("=== SELF-TEST 3/5: reddening the WRONG arm must exit 1 with `wrong-first-failure` ===");
-  const c = runCorpus({ scopeDir: SELFTEST_DIR, onlyFile: "wrong-identity-gate.sql", log: quiet });
+  console.log("=== SELF-TEST 3/6: reddening the WRONG arm must exit 1 with `wrong-first-failure` ===");
+  const c = runCorpus({ scopeDir: SELFTEST_DIR, onlyFile: "wrong-identity-gate.sql", armsFloor: 0, log: quiet });
   pass =
     expect(c.exitCode === 1, `exit code is 1 (got ${c.exitCode})`) &&
     expect(
@@ -837,8 +897,8 @@ function selfTest() {
     ) &&
     pass;
 
-  console.log("=== SELF-TEST 4/5: a wrong `occurrences` must exit 1 with MEASURE_FAIL, NOT `no-red` ===");
-  const d = runCorpus({ scopeDir: SELFTEST_DIR, onlyFile: "occurrence-mismatch-gate.sql", log: quiet });
+  console.log("=== SELF-TEST 4/6: a wrong `occurrences` must exit 1 with MEASURE_FAIL, NOT `no-red` ===");
+  const d = runCorpus({ scopeDir: SELFTEST_DIR, onlyFile: "occurrence-mismatch-gate.sql", armsFloor: 0, log: quiet });
   pass =
     expect(d.exitCode === 1, `exit code is 1 (got ${d.exitCode})`) &&
     expect(
@@ -851,8 +911,27 @@ function selfTest() {
     ) &&
     pass;
 
-  console.log("=== SELF-TEST 5/5: the green fixture corpus must exit 0 ===");
-  const e = runCorpus({ scopeDir: FIXTURE_CORPUS, log: quiet });
+  // ⭐ THE MODE PLAN 05 COULD NOT PROVE. While ARMS_FLOOR was 0 no regression
+  // could be constructed, so `--self-test` shipped exercising only the
+  // FILES_FLOOR half of D-09's floor mode. Now that the floor is a measured 30
+  // this check exists, and it is what stops the pinned floor from decaying back
+  // into a constant nobody compares to anything.
+  console.log("=== SELF-TEST 5/6: an ARMS_FLOOR regression must exit 1 with `floor` ===");
+  const f = runCorpus({ scopeDir: FIXTURE_CORPUS, armsFloor: 99, log: quiet });
+  pass =
+    expect(f.exitCode === 1, `exit code is 1 (got ${f.exitCode})`) &&
+    expect(
+      f.defects.some((x) => x.kind === "floor" && /ARMS_FLOOR regression/.test(x.detail)),
+      "the defect table names an ARMS_FLOOR regression",
+    ) &&
+    expect(
+      !f.defects.some((x) => x.kind === "floor" && /FILES_FLOOR/.test(x.detail)),
+      "no FILES_FLOOR defect — the two floors are reported distinguishably",
+    ) &&
+    pass;
+
+  console.log("=== SELF-TEST 6/6: the green fixture corpus must exit 0 ===");
+  const e = runCorpus({ scopeDir: FIXTURE_CORPUS, armsFloor: 2, log: quiet });
   pass =
     expect(e.exitCode === 0, `exit code is 0 (got ${e.exitCode}; defects: ${JSON.stringify(e.defects)})`) &&
     expect(e.armsExecuted === 2, `2 arms executed (got ${e.armsExecuted})`) &&
@@ -861,7 +940,7 @@ function selfTest() {
 
   console.log("");
   if (pass) {
-    console.log("=== SELF-TEST PASSED: both exit-1 modes and the wrong-identity + MEASURE_FAIL modes all fire ===");
+    console.log("=== SELF-TEST PASSED: both floor modes, the wrong-identity mode and MEASURE_FAIL all fire ===");
     return 0;
   }
   console.error("=== SELF-TEST FAILED ===");

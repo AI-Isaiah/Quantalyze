@@ -168,18 +168,24 @@ lines are verbatim from the corpus.
 ⚠️ Note the twin's needle carries **two** spaces and the prose's carries one.
 The twin is what executes; see rule 2 above.
 
-### Shape 1b — insertion with no exact point in the prose (`:369-370`)
+### Shape 1b — insertion with no exact point in the prose (`:369-378`)
 
 ```sql
   -- RED-UNDER: add a `token_hash TEXT` column to the STEP 1 CREATE TABLE in
   --            migration 20260827120000.
-  -- RED-UNDER-M: {"arm":"SHAPE 2","apply":[{"kind":"insert-after","file":"supabase/migrations/20260827120000_strategy_shares_generation_model.sql","anchor":"  generation  BIGINT      NOT NULL DEFAULT 1 CHECK (generation >= 1),","text":"\n  token_hash  TEXT,","occurrences":1}]}
+  -- RED-UNDER-M: {"arm":"SHAPE 1","apply":[{"kind":"insert-after","file":"…20260827120000….sql","anchor":"  generation  BIGINT      NOT NULL DEFAULT 1 CHECK (generation >= 1),","text":"\n  token_hash  TEXT,","occurrences":1},{"kind":"edit","file":"…20260827120000….sql","find":"'created_at,created_by,generation,id,nonce,revoked_at,strategy_id'","replace":"'created_at,created_by,generation,id,nonce,revoked_at,strategy_id,token_hash'","occurrences":1}]}
 ```
 
 The prose says *"the STEP 1 CREATE TABLE"*; the twin names the byte the insertion
 follows. This is the whole point of the grammar.
 
-### Shape 2 — live-DB `GRANT` with a prerequisite neuter (`:1533-1537`)
+⚠️ The **second** step is not decoration. The migration's own STEP 7 pins the
+same exact column set and would ABORT THE APPLY, so the gate would never run and
+no arm could be the first failure. Re-baselining it in the same mutation is what
+makes `SHAPE 1` reachable — the LAYERED discipline below, applied to an arm whose
+prose does not mention layering at all.
+
+### Shape 2 — live-DB `GRANT` with a prerequisite neuter (`:1533-1577`)
 
 ```sql
   -- RED-UNDER: `GRANT UPDATE (nonce) ON strategy_shares TO authenticated` on
@@ -191,6 +197,11 @@ follows. This is the whole point of the grammar.
 ```
 
 The prerequisite neuter was buried in prose. Here it is a field.
+
+⚠️ Grant drift is a **`sql` step, never a migration edit**, and that is forced
+rather than preferred: the migration's STEP 2b pins `authenticated`'s privilege
+set EXACTLY and aborts the apply on any drift, so editing STEP 2 means the gate
+never runs. The lane's `--post-apply` hook exists for exactly this.
 
 ### Shape 3 — LAYERED compound mutation (`:661-665`)
 
@@ -208,10 +219,16 @@ edits land in one run.
 
 ### Shape 4 — waiver
 
+⚠️ **The real corpus has none.** All 30 arm-anchored prose markers in
+`test_strategy_shares_rls.sql` were given executable twins by plan 164.3-08 and
+all 30 bite (`arms: 30/30/0`, 2026-08-29). The form is documented for 164.4,
+which will meet arms this file does not have. This is an ILLUSTRATION, not a
+corpus quote:
+
 ```sql
   -- RED-UNDER: none — a deleted `nonce` aborts the apply, so this arm can
   --            never be the FIRST failure.
-  -- RED-UNDER-M: {"arm":"SHAPE 1","waiver":"a deleted nonce column aborts the apply; no first-failure mutation exists"}
+  -- RED-UNDER-M: {"arm":"<ARM>","waiver":"a deleted nonce column aborts the apply; no first-failure mutation exists"}
 ```
 
 Waivers exist so an unfailable arm is **visible and counted**, not silently
@@ -219,6 +236,11 @@ absent. Every run prints `arms: <executed>/<annotated>/<waived>` with each
 waiver's reason. A waiver is the honest form of "we could not prove this one";
 omitting the annotation entirely is the dishonest form, and the parity gate makes
 it a hard failure.
+
+⛔ **A waiver is not free.** Converting a biting arm to a waiver lowers the biting
+count and therefore trips `ARMS_FLOOR` (pinned at the measured 30). Widening a
+waiver has to be a deliberate, reviewed edit to that constant — which is what
+stops waiver creep from quietly hiding a non-biting arm (`T-164.3-21`).
 
 ---
 
@@ -248,6 +270,38 @@ appear in the output. A neuter that silently missed its target would leave the
 shadowing arm live, the annotated arm would not be first, and the run would
 report a wrong-identity defect for the wrong reason. `neuter-missed` is therefore
 its own defect kind.
+
+### The abort-path cleanup goes with the RAISE
+
+A `RESET ROLE;` sitting immediately before the neutered `RAISE` is commented out
+**with it**. This is semantics, not tidying: those statements exist only to
+restore state before ABORTING the file, and a neutered arm's file keeps running,
+so executing its abort-path cleanup corrupts everything downstream.
+
+MEASURED 2026-08-29, plan 164.3-08's first full-corpus run. `N1 3a` neuters
+`N1 1a`, whose branch is
+
+```sql
+  IF NOT raised OR err_msg NOT LIKE '%AT MOST ONE%' THEN
+    RESET ROLE;
+    RAISE EXCEPTION 'TEST FAILED (N1 1a): …';
+  END IF;
+```
+
+and which **does** execute under that mutation — that is why it needs neutering.
+With only the `RAISE` removed, the session dropped from `authenticated` to the
+superuser session role for the rest of the file, and sixteen arms later
+`NO-DELETE 1`'s `DELETE FROM strategy_shares` succeeded because a superuser needs
+no grant. The runner reported `wrong-first-failure: NO-DELETE 1`.
+
+⛔ **It was loud only by luck.** A leaked superuser role makes every downstream
+GRANT arm pass for a reason unrelated to the grant — a vacuous PASS inside the
+vacuity detector. Phase 164.4 annotates seventy more files against this
+primitive, so the behaviour is pinned by
+`src/__tests__/mutation-runner-neuter.test.ts` rather than left to the corpus.
+
+Only an exact `RESET ROLE;` is absorbed. A branch that does real work before
+raising is never silently swallowed.
 
 ## Defect kinds the runner reports
 
