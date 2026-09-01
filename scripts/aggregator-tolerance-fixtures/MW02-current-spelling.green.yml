@@ -1,0 +1,80 @@
+# MW02 GREEN FIXTURE — the `frontend` aggregator's result loop AS IT IS SPELLED
+# TODAY. Phase 164.3.1 plan 08, [MUT-W02].
+#
+# PROVENANCE. Quoted from `.github/workflows/ci.yml`, the `frontend` job's
+# "Verify all frontend-* jobs succeeded" step, on 2026-09-01 at 420b8fcb. Every
+# `if`/`elif` CONDITION line is byte-faithful to the real file, including
+# indentation; only the `echo` bodies and the rows of the `for r in` list that
+# carry no per-job arm are trimmed, because the parser reads CONDITIONS and a
+# fixture carrying six paragraphs of error prose rots for reasons that have
+# nothing to do with what it pins.
+#
+# WHAT IT PINS. Parsing this file must yield EXACTLY the same classification —
+# the same job arms, the same tolerance-bearing set, the same guard variables —
+# as parsing the real `ci.yml`. That is the fixture-fidelity check: it proves
+# the red fixture below is being compared against a faithful model of today's
+# workflow rather than against a strawman.
+#
+# ⚠️ IF YOU EDIT THE AGGREGATOR'S RESULT LOOP, UPDATE THIS FILE. The fidelity
+# arm in `src/__tests__/lint-sql-gates.test.ts` will red until you do. That is
+# the intended coupling: a tolerance posture that changes in `ci.yml` and not
+# here is a change nobody wrote down.
+#
+# Pair member: MW02-alternate-spelling.red.yml
+# House contract (`scripts/lint-sql-gates.mjs:33-40`): a rule without a firing
+# fixture does not merge.
+
+      - name: Verify all frontend-* jobs succeeded
+        run: |
+          fail=0
+          for r in \
+            "frontend-typecheck=${{ needs.frontend-typecheck.result }}" \
+            "e2e-seeded=${{ needs.e2e-seeded.result }}" \
+            "sql-tests=${{ needs.sql-tests.result }}" \
+            "sql-gate-lint=${{ needs.sql-gate-lint.result }}" \
+            "sql-mutation=${{ needs.sql-mutation.result }}" \
+            "plan-anchor-verify=${{ needs.plan-anchor-verify.result }}"; do
+            name="${r%=*}"; result="${r#*=}"
+            echo "$name: $result"
+            if [ "$name" = "e2e-seeded" ]; then
+              is_fork_pr='${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}'
+              if [ "$result" = "success" ]; then
+                :
+              elif [ "$result" = "skipped" ] && [ "$is_fork_pr" = "true" ]; then
+                echo "e2e-seeded skipped (fork PR — no test-DB access); tolerated for this row only."
+              else
+                echo "::error::e2e-seeded result=$result on a TRUSTED event."
+                fail=1
+              fi
+            elif [ "$name" = "sql-tests" ]; then
+              is_fork_pr='${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}'
+              is_dispatch='${{ github.event_name == 'workflow_dispatch' }}'
+              if [ "$result" = "success" ]; then
+                :
+              elif [ "$result" = "skipped" ] && { [ "$is_fork_pr" = "true" ] || [ "$is_dispatch" = "true" ]; }; then
+                echo "sql-tests skipped (fork PR / workflow_dispatch); tolerated for this row only."
+              else
+                if [ "$result" = "skipped" ]; then
+                  echo "::error::sql-tests result=skipped on a TRUSTED event."
+                else
+                  echo "::error::sql-tests result=$result."
+                fi
+                fail=1
+              fi
+            elif [ "$name" = "plan-anchor-verify" ]; then
+              is_pr='${{ github.event_name == 'pull_request' }}'
+              if [ "$result" = "success" ]; then
+                :
+              elif [ "$result" = "skipped" ] && [ "$is_pr" != "true" ]; then
+                echo "plan-anchor-verify skipped (event is not pull_request); tolerated for this row only."
+              else
+                echo "::error::plan-anchor-verify result=$result on a pull_request."
+                fail=1
+              fi
+            elif [ "$result" != "success" ]; then
+              fail=1
+            fi
+          done
+          if [ "$fail" = "1" ]; then
+            exit 1
+          fi

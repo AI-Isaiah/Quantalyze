@@ -22,7 +22,7 @@
  */
 import { describe, it, expect } from "vitest";
 import { spawnSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
 import {
@@ -291,6 +291,211 @@ describe("lint-sql-gates: the pre-existing-violation allowlist (T-164.3-15)", ()
   });
 });
 
+// ═══════════════════════════════════════════════════════════════════════════
+// [MUT-W02] — the aggregator's tolerance posture, parsed STRUCTURALLY
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// THE DEFECT, MEASURED. The pin this replaces asserted each job's tolerance
+// posture with a regex over ONE literal spelling —
+// `new RegExp('\\[ "\\$name" = "' + job + '" \\]')` — and for a `tolerance:
+// null` row asserted `not.toMatch(...)`. That is an assertion about BYTES. An
+// equivalently-written arm (`[[ $name == 'sql-mutation' ]]`) is a real, working
+// per-job skip tolerance that widens what branch protection accepts, and the
+// regex does not match a byte of it, so the old pin stayed GREEN. Observed
+// 2026-09-01 against `MW02-alternate-spelling.red.yml`:
+//
+//     AssertionError: expected '# MW02 RED FIXTURE — a per-job tolera…'
+//     to match /\[ "\$name" = "sql-mutation" \]/
+//
+// THE RE-EXPRESSION. Extract the result-loop script block from the workflow
+// bytes by its own literal markers (`for r in \` … `done` — the SP-L02 extract
+// idiom this file already uses), then enumerate the shell BRANCH CONDITIONS
+// line-wise, normalising bracket style, operator spelling, quoting and `${x}`
+// bracing away. The assertion becomes one about the SET of tolerance arms
+// rather than one spelling of one arm.
+//
+// NO YAML DEPENDENCY. RESEARCH § "Don't Hand-Roll" is about parsers for
+// languages whose grammar you do not control; this reads a script block the
+// repo itself wrote, by markers the repo itself placed, and its non-vacuity
+// floor fires if that assumption ever stops holding. Adding a YAML parser to a
+// repo with a banned-package supply-chain gate to read four `if` lines is the
+// worse trade.
+
+type LoopCondition = {
+  /** The `$name = <job>` arm this condition sits inside, or null at chain level. */
+  job: string | null;
+  indent: number;
+  raw: string;
+  normalized: string;
+  /** Shell variables the condition tests, other than the loop's own `name`/`result`. */
+  guards: string[];
+};
+
+export type ResultLoopParse = {
+  /** Non-null when the parse cannot be trusted. NEVER report zero findings instead. */
+  measureFail: string | null;
+  conditions: LoopCondition[];
+  /** Jobs given their own `$name = …` arm, in source order. */
+  jobArms: string[];
+  /** job -> guard variables of its tolerance arm(s). Absent => no tolerance arm. */
+  tolerance: Map<string, string[]>;
+};
+
+/**
+ * Normalise a shell condition to a spelling-independent form:
+ * `[[ "$result" == 'skipped' && "${is_fork_pr}" == 'true' ]]`
+ *   -> `$result = skipped && $is_fork_pr = true`
+ */
+export function normalizeCondition(raw: string): string {
+  // The sentinel is written as an explicit escape, NEVER as a raw control
+  // byte in the source: this repo has a MEASURED grep-blind file
+  // (`src/lib/wizardErrors.test.ts` carries a literal NUL at line 1572, and
+  // `grep` exits 1 there, which reads as "clean").
+  const NE = "\u0001";
+  return raw
+    .replace(/\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g, "$$$1") // ${x} -> $x
+    .replace(/[[\]{};]/g, " ") // bracket style and grouping braces are noise
+    .replace(/["']/g, "") // quoting is noise
+    .replace(/\s*!=\s*/g, ` ${NE} `) // protect != from the = collapse below
+    .replace(/\s*==?\s*/g, " = ") // `==` and `=` are the same test
+    .split(NE)
+    .join("!=")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+/**
+ * The `for r in \` … `done` block of a result loop, from raw workflow bytes.
+ * Anchored on the loop's own markers rather than on the step name, so the same
+ * function reads `ci.yml` and the MW02 fixture snippets.
+ */
+export function extractResultLoopBlock(yamlText: string): string | null {
+  const lines = yamlText.split("\n");
+  const start = lines.findIndex((l) => /^\s*for r in \\\s*$/.test(l));
+  if (start < 0) return null;
+  const end = lines.findIndex((l, i) => i > start && /^\s*done\s*$/.test(l));
+  if (end < 0) return null;
+  return lines.slice(start, end + 1).join("\n");
+}
+
+/**
+ * Enumerate the result loop's per-job branch conditions.
+ *
+ * A JOB ARM is a chain-level condition testing the loop's `$name` against a
+ * literal. A TOLERANCE ARM is a condition INSIDE a job arm, at that arm's own
+ * if-chain indent, that admits `skipped` as an outcome.
+ *
+ * The indent test is what distinguishes a tolerance from a message selector:
+ * the real `sql-tests` arm contains a nested `if [ "$result" = "skipped" ]`
+ * inside its FAILING branch, two spaces deeper, which only chooses which error
+ * text to print. Classifying that as a tolerance would report the aggregator as
+ * laxer than it is — the mirror of the defect being closed here, and the
+ * non-vacuity floor would not have caught it.
+ */
+export function extractResultLoopConditions(yamlText: string): ResultLoopParse {
+  const empty: ResultLoopParse = {
+    measureFail: null,
+    conditions: [],
+    jobArms: [],
+    tolerance: new Map(),
+  };
+
+  const block = extractResultLoopBlock(yamlText);
+  if (block === null) {
+    return {
+      ...empty,
+      measureFail:
+        "no `for r in \\` … `done` block found — the result loop's own markers are gone, so this parse measured NOTHING",
+    };
+  }
+
+  const conditions: LoopCondition[] = [];
+  const jobArms: string[] = [];
+  const tolerance = new Map<string, string[]>();
+
+  let chainIndent: number | null = null; // indent of the `$name = …` chain
+  let currentJob: string | null = null;
+  let jobChainIndent: number | null = null; // indent of the current job's inner chain
+
+  for (const line of block.split("\n")) {
+    const m = /^(\s*)(?:el)?if\s+(.+?)\s*;\s*then\s*$/.exec(line);
+    if (m === null) continue;
+    const indent = m[1].length;
+    const raw = m[2];
+    const normalized = normalizeCondition(raw);
+
+    const nameArm = /^\$name\s*=\s*(\S+)$/.exec(normalized);
+    if (nameArm !== null) {
+      if (chainIndent === null) chainIndent = indent;
+      currentJob = nameArm[1];
+      jobChainIndent = null;
+      jobArms.push(currentJob);
+    } else if (chainIndent !== null && indent <= chainIndent) {
+      // Back at chain level on a non-name condition: the strict default arm.
+      currentJob = null;
+      jobChainIndent = null;
+    } else if (currentJob !== null) {
+      if (jobChainIndent === null) jobChainIndent = indent;
+      if (indent === jobChainIndent && /\$result\s*=\s*skipped/.test(normalized)) {
+        const guards = [...normalized.matchAll(/\$([A-Za-z_][A-Za-z0-9_]*)/g)]
+          .map((g) => g[1])
+          .filter((v) => v !== "name" && v !== "result");
+        tolerance.set(currentJob, [...new Set([...(tolerance.get(currentJob) ?? []), ...guards])]);
+      }
+    }
+
+    const guards = [...normalized.matchAll(/\$([A-Za-z_][A-Za-z0-9_]*)/g)]
+      .map((g) => g[1])
+      .filter((v) => v !== "name" && v !== "result");
+    conditions.push({ job: currentJob, indent, raw, normalized, guards });
+  }
+
+  if (conditions.length === 0 || jobArms.length === 0) {
+    return {
+      ...empty,
+      measureFail: `the loop block parsed to ${conditions.length} condition(s) and ${jobArms.length} job arm(s) — an empty parse is never a pass`,
+    };
+  }
+
+  return { measureFail: null, conditions, jobArms, tolerance };
+}
+
+/**
+ * NON-VACUITY FLOOR. MEASURED 2026-09-01 at 420b8fcb:
+ *
+ *   $ node -e '…extractResultLoopConditions(readFileSync(".github/workflows/ci.yml"))…'
+ *   conditions=11 jobArms=3 tolerance=e2e-seeded,sql-tests,plan-anchor-verify
+ *
+ * 11 = 3 `$name = …` arms + 1 strict default at chain level, + 2 inner
+ * conditions each for `e2e-seeded` and `plan-anchor-verify`, + 3 for
+ * `sql-tests` (its failing branch carries the nested message selector).
+ *
+ * The floor is 8, not 11: pinned AT the measurement it reds on every legitimate
+ * arm removal and gets raised by reflex, which is how a floor stops being a
+ * measurement (D-10 — wide separation, never taste). 8 still catches the
+ * failure this exists for: a marker rename or an indentation change that makes
+ * the walk return a handful of conditions and report a clean, lax aggregator.
+ * Total collapse is caught separately and unconditionally by `measureFail`.
+ */
+const RESULT_LOOP_CONDITION_FLOOR = 8;
+
+/**
+ * The FULL tolerance-bearing set of the real aggregator, measured 2026-09-01 at
+ * 420b8fcb by the command in the floor's comment above. Pinned exactly, in ANY
+ * spelling — this is what [MUT-W02] failed to do.
+ *
+ * All three are tolerances of a SKIP-BY-DESIGN, and each is justified by
+ * something the job cannot control:
+ *   * `e2e-seeded`  — a fork PR cannot see `E2E_TEST_DB_CONFIGURED`.
+ *   * `sql-tests`   — same, plus `workflow_dispatch`, which its `if:` excludes.
+ *   * `plan-anchor-verify` — its `if:` scopes it to `pull_request` so a drifting
+ *     anchor on main cannot stall the Railway deploy (D-13).
+ * Every other row takes the strict default: any non-success fails the aggregate.
+ * A FOURTH entry appearing here means some job grew a reason to be allowed to
+ * skip, and that is a decision, not a refactor.
+ */
+const TOLERANCE_BEARING_JOBS = ["e2e-seeded", "plan-anchor-verify", "sql-tests"] as const;
+
 describe("lint-sql-gates: the CI invocation (mode identity)", () => {
   it("exits 0 over the real 71-file corpus with the allowlist applied", () => {
     const res = runCli([]);
@@ -363,26 +568,178 @@ describe("lint-sql-gates: the CI invocation (mode identity)", () => {
     },
   );
 
+  // ── [MUT-W02], re-expressed ────────────────────────────────────────────
+  // The parse itself must be sound before any conclusion is drawn from it.
+  // MEASURE_FAIL and the floor are checked FIRST and unconditionally, so a
+  // walker that stopped finding the loop reds here instead of reporting a
+  // clean, permissive aggregator.
+  it("the result-loop parse is sound before anything is concluded from it", () => {
+    const ci = readFileSync(join(ROOT, ".github/workflows/ci.yml"), "utf8");
+    const parsed = extractResultLoopConditions(ci);
+
+    // DIAGNOSTIC-FIRST (D-12): print what was SEEN, not only the verdict. This
+    // is also the measurement command for the floor above — running this file
+    // bare re-derives it, so the threshold's provenance is a command anyone can
+    // repeat, not a number in a comment. Written with process.stdout.write, not
+    // console.log: vitest 4's default reporter swallows console output from
+    // PASSING tests, and a measurement visible only on failure is not one.
+    process.stdout.write(
+      `MW02 result-loop parse: ${parsed.conditions.length} condition(s), ` +
+        `${parsed.jobArms.length} job arm(s) [${parsed.jobArms.join(", ")}], ` +
+        `tolerance-bearing: ${[...parsed.tolerance]
+          .map(([j, g]) => `${j}(${g.join("+") || "unguarded"})`)
+          .join(", ")}\n`,
+    );
+
+    expect(
+      parsed.measureFail,
+      "the aggregator's result loop could not be parsed — this gate must never report a tolerance posture it did not measure",
+    ).toBeNull();
+    expect(
+      parsed.conditions.length,
+      `only ${parsed.conditions.length} branch condition(s) parsed out of the result loop; 11 were measured on 2026-09-01 at 420b8fcb, so anything under ${RESULT_LOOP_CONDITION_FLOOR} means the walk broke rather than the loop shrank`,
+    ).toBeGreaterThanOrEqual(RESULT_LOOP_CONDITION_FLOOR);
+  });
+
+  it("the FULL tolerance-bearing set is exactly the three skip-by-design jobs, in ANY spelling", () => {
+    const ci = readFileSync(join(ROOT, ".github/workflows/ci.yml"), "utf8");
+    const parsed = extractResultLoopConditions(ci);
+    expect(parsed.measureFail).toBeNull();
+
+    // This is the assertion [MUT-W02] could not make. The old pin asked "does
+    // this job's arm appear, spelled THIS way?" — one job, one spelling. This
+    // asks "which jobs are allowed to skip at all?", over every arm in the
+    // loop, in any spelling. A fourth job appearing here — or one of these
+    // three losing its arm — fails by name.
+    expect(
+      [...parsed.tolerance.keys()].sort(),
+      "the aggregator's set of skip-tolerant jobs changed. A job gaining tolerance means a `skipped` result now passes branch protection for it; a job losing it means it will redden every event it legitimately skips on. Either is a decision that belongs in TOLERANCE_BEARING_JOBS with its reason, not a silent edit to ci.yml",
+    ).toEqual([...TOLERANCE_BEARING_JOBS].sort());
+  });
+
   it.each(AGGREGATED_JOBS)(
     "$job's tolerance posture is exactly what its hermeticity justifies",
     ({ job, tolerance }) => {
       const ci = readFileSync(join(ROOT, ".github/workflows/ci.yml"), "utf8");
-      const arm = new RegExp(`\\[ "\\$name" = "${job}" \\]`);
+      const parsed = extractResultLoopConditions(ci);
+      expect(parsed.measureFail).toBeNull();
+      const guards = parsed.tolerance.get(job);
+
       if (tolerance === null) {
         // Hermetic: no database, no secret, no network, no `if:`. A `skipped`
         // is therefore ALWAYS a fault, so the strict default arm must apply.
-        expect(ci, `${job} has grown a per-job tolerance arm; it is hermetic and cannot legitimately skip`).not.toMatch(arm);
+        // Asserted over the PARSE, so an equivalently-spelled arm is caught —
+        // the MW02 red fixture is the standing proof that it is.
+        expect(
+          guards,
+          `${job} has grown a per-job tolerance arm (guards: ${guards?.join("+") ?? "-"}); it is hermetic and cannot legitimately skip`,
+        ).toBeUndefined();
       } else {
         // `plan-anchor-verify` scopes itself to pull_request on purpose (D-13:
         // an anchor drifting on main must not stall the Railway deploy), so its
-        // skip tolerance is REQUIRED — and must stay conditioned on the event,
-        // not on the result alone.
-        expect(ci, `${job} lost its tolerance arm; it self-skips off a pull_request and would redden every push`).toMatch(arm);
+        // skip tolerance is REQUIRED — and must stay conditioned on the EVENT,
+        // not on the result alone. An unguarded arm parses to an empty guard
+        // list and fails the containment check below.
+        expect(
+          guards,
+          `${job} lost its tolerance arm; it self-skips off a pull_request and would redden every push`,
+        ).toBeDefined();
+        expect(
+          guards,
+          `${job}'s tolerance is no longer conditioned on ${tolerance}; a skip tolerated on the result alone tolerates the fault too`,
+        ).toContain(tolerance);
+        // The guard must still be BOUND to the event — the parse sees the
+        // condition, not the assignment that gives the variable its value.
         expect(ci).toContain(`${tolerance}='\${{ github.event_name ==`);
-        expect(ci).toContain(`[ "$result" = "skipped" ] && [ "$${tolerance}" != "true" ]`);
       }
     },
   );
+
+  // ── The MW02 fixture pair ──────────────────────────────────────────────
+  it("MW02 red fixture: the OLD single-spelling regex is BLIND to it, the parser is not", () => {
+    const red = readFileSync(
+      join(ROOT, "scripts/aggregator-tolerance-fixtures/MW02-alternate-spelling.red.yml"),
+      "utf8",
+    );
+
+    // (1) THE RECORDED DEFECT, kept permanently. This is the exact regex the
+    // pre-plan-08 pin built, applied to an arm that really does tolerate a skip
+    // for `sql-mutation`. It matches nothing, so `not.toMatch(...)` — the old
+    // "this job has NOT grown a tolerance arm" assertion — passed on a
+    // workflow that HAD grown one. Observed 2026-09-01 as the TDD red step.
+    const oldArm = new RegExp(`\\[ "\\$name" = "sql-mutation" \\]`);
+    expect(
+      red,
+      "the red fixture must remain invisible to the old regex; if this starts matching, the fixture has drifted back toward the literal spelling and stops modelling the defect",
+    ).not.toMatch(oldArm);
+
+    // (2) THE NEW VISIBILITY.
+    const parsed = extractResultLoopConditions(red);
+    expect(parsed.measureFail, "the red fixture must parse — an unparseable fixture proves nothing").toBeNull();
+    expect(
+      parsed.jobArms,
+      "the parser must recognise the alternate-spelled `[[ $name == 'sql-mutation' ]]` as a job arm",
+    ).toContain("sql-mutation");
+    expect(
+      parsed.tolerance.get("sql-mutation"),
+      "the parser must classify sql-mutation as tolerance-bearing in the red fixture; if it does not, the re-expression has been narrowed back toward a spelling and [MUT-W02] is reopened",
+    ).toContain("is_fork_pr");
+  });
+
+  it("MW02 green fixture: classifies IDENTICALLY to the real ci.yml (fixture fidelity)", () => {
+    const green = readFileSync(
+      join(ROOT, "scripts/aggregator-tolerance-fixtures/MW02-current-spelling.green.yml"),
+      "utf8",
+    );
+    const ci = readFileSync(join(ROOT, ".github/workflows/ci.yml"), "utf8");
+
+    const fromFixture = extractResultLoopConditions(green);
+    const fromReal = extractResultLoopConditions(ci);
+    expect(fromFixture.measureFail).toBeNull();
+    expect(fromReal.measureFail).toBeNull();
+
+    // VACUITY FENCE. Two empty parses are "identical" too. Prove the fixture
+    // parse found real arms before proving it agrees with the real file — the
+    // lesson the SRO green fixture cost (`self-referential-oracle.test.ts`'s
+    // countExpectCallSites: an ABSENCE is satisfied perfectly by rubble).
+    expect(
+      fromFixture.jobArms.length,
+      "the green fixture must parse to real job arms; an empty parse would agree with anything",
+    ).toBeGreaterThanOrEqual(3);
+
+    const classify = (p: ResultLoopParse) =>
+      [...p.tolerance].map(([j, g]) => `${j}:${[...g].sort().join("+")}`).sort();
+    expect(
+      classify(fromFixture),
+      "the green fixture no longer models the real result loop — ci.yml's tolerance posture changed and the fixture was not updated with it, so the red fixture is being compared against a stale model",
+    ).toEqual(classify(fromReal));
+    expect(fromFixture.jobArms.slice().sort()).toEqual(fromReal.jobArms.slice().sort());
+  });
+
+  it("the MW02 fixture-ID set is pinned exactly — pairs and nothing else", () => {
+    // The two members are named for what they SPELL, not by a shared ID, so
+    // they cannot be paired by `<id>.{red,green}` the way
+    // `scripts/lint-sql-gates-fixtures/` pairs its members. Each side is
+    // therefore pinned by name. The contract that matters is unchanged: adding
+    // a member reds until its arm exists, and dropping one reds immediately.
+    const dir = join(ROOT, "scripts/aggregator-tolerance-fixtures");
+    const onDisk = readdirSync(dir);
+    const red = onDisk.filter((n) => n.endsWith(".red.yml")).map((n) => n.replace(/\.red\.yml$/, ""));
+    const green = onDisk
+      .filter((n) => n.endsWith(".green.yml"))
+      .map((n) => n.replace(/\.green\.yml$/, ""));
+
+    expect(red.sort(), "every registered MW02 fixture ID must have a RED member").toEqual([
+      "MW02-alternate-spelling",
+    ]);
+    expect(green.sort(), "every registered MW02 fixture ID must have a GREEN member").toEqual([
+      "MW02-current-spelling",
+    ]);
+    expect(
+      onDisk.filter((n) => !n.endsWith(".red.yml") && !n.endsWith(".green.yml")),
+      "the fixture directory holds the pair and nothing else",
+    ).toEqual([]);
+  });
 
   it("the table above covers EVERY job this phase added — derived from ci.yml, not restated", () => {
     // Without this arm the table is a hand-list, and a fourth job added by
