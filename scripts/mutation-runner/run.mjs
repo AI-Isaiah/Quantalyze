@@ -14,8 +14,9 @@
  *   node scripts/mutation-runner/run.mjs --arm "<ARM ID>"   # DIAGNOSTIC (never exits 0)
  *
  * Exit codes:
- *   0  full gate run, no defects, floors held
- *   1  at least one defect, or a coverage floor regression
+ *   0  full gate run, no defects, floors held, the runner's own counts agree
+ *   1  at least one defect, a coverage floor regression, or an ABSURDITY — the
+ *      runner's two independent arm tallies disagree (164.3.1-10, D-09)
  *   2  NARROWED DIAGNOSTIC RUN that found no defects. Deliberately NOT 0: a run
  *      that executed a subset of arms must never be mistakable for a passing
  *      gate. That mistake — a partial check reading as a full PASS — is
@@ -217,6 +218,11 @@ export const DEFECT_KINDS = [
   "restore",
   "dirty-checkout",
   "floor",
+  // 164.3.1-10: the runner's OWN counts disagree (see absurdityViolations).
+  // A GATE defect, not a corpus finding — kept distinct from `floor` so the
+  // defect table and the CI count-recheck step can tell "the corpus regressed"
+  // from "the instrument is broken" by name.
+  "absurdity",
 ];
 
 // ---------------------------------------------------------------------------
@@ -1264,16 +1270,167 @@ export function identityRewriteDetail(before, after, file) {
 // Lane invocation
 // ---------------------------------------------------------------------------
 
-function runLane({ workdir, applyAbs, postApplyAbs, gateAbs }) {
+/**
+ * The three legs a lane can be spawned for. `arm` is the only one the verdict
+ * loop counts as executed; `baseline` and `restore` bracket a gate's arms and
+ * are tallied separately so the cross-check below compares like with like.
+ */
+const LANE_LEGS = ["baseline", "arm", "restore"];
+
+/**
+ * 164.3.1-10 — THE LANE RUNNER'S OWN TALLY, one counter per leg.
+ *
+ * ⭐ INDEPENDENCE IS THE CONTROL (SP-C05). This is incremented in exactly one
+ * place — inside `runLane`, beside the `spawnSync` that actually starts a
+ * lane — and read by `runCorpus` only as a snapshot delta. The verdict loop's
+ * `armsExecuted` is a DIFFERENT variable in a DIFFERENT function. The two can
+ * agree only if the loop really drove a lane for every arm it counted; one
+ * variable incremented in two places would agree with itself by construction
+ * and prove nothing. A stub that replaces `runLane` wholesale, a branch that
+ * skips the call, or a short-circuit that returns a canned result all leave
+ * this counter behind — which is exactly the state `absurdityViolations`
+ * exists to name. Monotonic on purpose: nothing resets it, so no caller can
+ * zero it to make a run look consistent.
+ */
+const laneTally = { baseline: 0, arm: 0, restore: 0 };
+
+function runLane({ workdir, applyAbs, postApplyAbs, gateAbs, leg }) {
+  // Refuse to guess which leg this is: an untagged lane would be an
+  // unaccounted invocation, and the cross-check treats that as absurd.
+  if (!LANE_LEGS.includes(leg)) throw new Error(`runLane: unknown leg ${JSON.stringify(leg)}`);
   const args = [LANE, "--workdir", workdir, "--apply", ...applyAbs];
   if (postApplyAbs) args.push("--post-apply", postApplyAbs);
   args.push("--gate", gateAbs);
   const started = Date.now();
   const proc = spawnSync("bash", args, { encoding: "utf8", maxBuffer: 128 * 1024 * 1024 });
+  // Counted at the spawn, after it returned: a lane is an invocation only if
+  // the process was actually started, never because this function was entered.
+  laneTally[leg] += 1;
   // stderr first: psql streams RAISE output there, and ON_ERROR_STOP=1 aborts
   // at the first failing statement, so emission order is failure order.
   const output = `${proc.stderr || ""}\n${proc.stdout || ""}`;
   return { status: proc.status, output, seconds: (Date.now() - started) / 1000 };
+}
+
+// ===========================================================================
+// 164.3.1-10 — THE RUNNER'S ABSURDITY FLOOR (D-09 runner half; SC-7/SC-8/SC-9)
+// ===========================================================================
+//
+// ⛔ THE DEFECT THIS CLOSES. Until this plan `armsExecuted` was ONE tally,
+// incremented in the verdict loop, and nothing compared it to what actually
+// ran. A runner whose lane path was stubbed, skipped or short-circuited would
+// still print `arms: 30/30/0` and `biting: 30`, clear both floors and exit 0.
+// That is the `--parse-only` shape — a run that executed nothing reading as a
+// full PASS — reached INSIDE the process, where the CI count-recheck step's
+// executed-is-zero guard cannot see it because the number it reads is the
+// one that lied. And it is VAC-08's 253-of-262 in mirror image: a gate
+// holding every number needed to know its own verdict was absurd, and never
+// comparing them.
+//
+// THE RULE — two INDEPENDENT tallies and one arithmetic invariant, all three
+// printed on every run and re-asserted by the sql-mutation job's count-recheck
+// step (which parses the printed `lane-invocations:` line and MEASURE_FAILs
+// on its absence, so a runner that stops printing it fails CI):
+//
+//   armsExecuted     the verdict loop's count           (`armsExecuted += 1`)
+//   laneInvocations  arm-leg lanes the LANE RUNNER itself counted at the
+//                    spawn                              (`laneTally.arm`)
+//   biting           executed minus the non-biting defect kinds
+//
+//   (1) armsExecuted === laneInvocations — EXACT, in both directions. Fewer
+//       lanes than arms: arms were CLAIMED that never ran. More lanes than
+//       arms: lanes ran that no verdict accounts for.
+//   (2) biting <= armsExecuted — the impossible count. Trivially true of this
+//       program (biting is executed minus a subset), asserted anyway because
+//       the CI step reads these numbers out of a text file it did not
+//       produce, and "these two cannot disagree" is worth stating about the
+//       FILE (ci.yml's R2-I01 note; this is its in-process twin).
+//
+// ─── MEASURED (SC-9) — quoted from plan 164.3.1-09's committed record, ─────
+// ─── never re-measured from memory ─────────────────────────────────────────
+//   RECORD        .planning/phases/164.3.1-sound-primitives-the-neuter-scan-
+//                 and-the-mutation-identity-c/164.3.1-09-REDERIVATION.md
+//   DATE / HEAD   2026-09-01, HEAD a305a71a, under the statement tokenizer
+//                 (plan 01) and source-location attribution (plan 05)
+//   COMMAND       `node scripts/mutation-runner/run.mjs` -> exit 0
+//                   coverage: files 1/71
+//                   arms: 30/30/0   (executed/annotated/waived)
+//                   biting: 30
+//   SILENT SHAPE  executed 30 / lane arm-invocations 30 / biting 30
+//                 -> 0 violations (the legitimate corpus; re-observed on the
+//                 real corpus with the new line printed — 164.3.1-10-SUMMARY)
+//   SAMPLE SIZE   30 arms executed, all 30 `RED (identity ok)`, 0 moved from
+//                 the pre-phase per-arm baseline; 1 baseline + 1 restore leg
+//   COVERAGE      1 annotated gate file of 71 in supabase/tests/
+//                 (test_strategy_shares_rls.sql, blob 5ae6855f, byte-identical
+//                 at the phase base and at HEAD)
+//   FIRES SHAPE   the severed tally: executed 30 / invocations 0 / biting 30
+//                 -> 1 violation, exit 1, all three numbers printed. Observed
+//                 on the REAL runner under a byte-backed neuter of the
+//                 `laneTally[leg] += 1` line, restore sha-verified
+//                 (164.3.1-10-SUMMARY.md) — the WIRING fires, not only the
+//                 helper (RESEARCH Pitfall 6).
+//   SEPARATION    there is no threshold to tune. The legitimate shape sits at
+//                 equality (30 = 30); the absurd shape sits at 30 vs 0. The
+//                 "wide separation" D-10 asks of a floor is here the full
+//                 width of the count, because the rule is exact rather than
+//                 a ratio — a single missing lane (30 vs 29) also fires.
+//
+// ⚠️ WHAT THIS DOES NOT COVER, stated rather than implied: the tally counts
+// SPAWNS. A lane that was started but did nothing useful (a `run.sh` that
+// exited early, a cluster that never booted) is counted as an invocation;
+// that half is covered by the baseline/restore GREEN legs and by
+// source-location attribution, which refuse to credit an arm whose output
+// carries no attributable raise. This floor bounds "did the loop drive a lane
+// per arm", nothing more — and it says so.
+//
+// Template: scripts/test-ledger-drift-check.sh's ABSURDITY FLOOR (VAC-08) —
+// diagnostic first, then the refusal, and the sentence that this is the GATE
+// failing, not the thing it measures.
+
+/**
+ * PURE. Returns one evidence string per violated invariant, or [] when the
+ * three counts are mutually consistent. Every string carries all three
+ * numbers in a machine-readable tail and says it is the gate failing — a bare
+ * conclusion is the repudiation shape SC-7 refuses.
+ *
+ * @param {{armsExecuted: number, laneInvocations: number, biting: number}} counts
+ * @returns {string[]}
+ */
+export function absurdityViolations({ armsExecuted, laneInvocations, biting }) {
+  const tail = `(executed=${armsExecuted} lane-invocations=${laneInvocations} biting=${biting})`;
+  const gate = "MEASURE_FAIL — this is the GATE failing, not the corpus:";
+  const isCount = (n) => Number.isInteger(n) && n >= 0;
+  // An absent or malformed measurement must never read as a consistent one.
+  if (![armsExecuted, laneInvocations, biting].every(isCount)) {
+    return [
+      `${gate} the three counts cannot be cross-checked because at least one is not a ` +
+        `non-negative integer ${tail}. An unmeasurable count is not a count of zero.`,
+    ];
+  }
+  const out = [];
+  if (armsExecuted > laneInvocations) {
+    out.push(
+      `${gate} the verdict loop counted ${armsExecuted} executed arm(s) but the lane runner ` +
+        `spawned only ${laneInvocations} arm lane(s) ${tail}. ${armsExecuted - laneInvocations} ` +
+        `arm(s) were CLAIMED without a lane ever running — the parse-only shape, reached inside ` +
+        `the process. Neither \`arms:\` nor \`biting:\` above is a measurement on this run.`,
+    );
+  } else if (laneInvocations > armsExecuted) {
+    out.push(
+      `${gate} the lane runner spawned ${laneInvocations} arm lane(s) but the verdict loop counted ` +
+        `only ${armsExecuted} executed arm(s) ${tail}. ${laneInvocations - armsExecuted} lane(s) ` +
+        `are UNACCOUNTED for — they ran and no verdict describes what they found.`,
+    );
+  }
+  if (biting > armsExecuted) {
+    out.push(
+      `${gate} biting (${biting}) exceeds executed (${armsExecuted}) ${tail}. Biting is executed ` +
+        `minus a subset of the defects, so this count is impossible for one run of this program; ` +
+        `either the counts were assembled from two runs or the arithmetic was tampered with.`,
+    );
+  }
+  return out;
 }
 
 /**
@@ -1327,6 +1484,11 @@ export function runCorpus({
   let armsExecuted = 0;
   const waivers = [];
   const timings = [];
+
+  // 164.3.1-10: the lane runner's tally is read as a DELTA across this run —
+  // snapshot now, subtract at the summary. Never reset: this function does not
+  // write that counter, and must not, or the two tallies stop being two.
+  const laneTallyBefore = { ...laneTally };
 
   let targets = corpus.annotatedFiles;
   if (onlyFile) {
@@ -1411,6 +1573,7 @@ export function runCorpus({
         applyAbs: parsed.setup.apply.map((r) => baseMap.get(r)),
         postApplyAbs: null,
         gateAbs: baseMap.get(gateRel),
+        leg: "baseline",
       });
       log(`  baseline  ${gateRel} — exit ${baseline.status} (${baseline.seconds.toFixed(1)}s)`);
       if (baseline.status !== 0) {
@@ -1508,7 +1671,10 @@ export function runCorpus({
           applyAbs: parsed.setup.apply.map((r) => armMap.get(r)),
           postApplyAbs,
           gateAbs,
+          leg: "arm",
         });
+        // The verdict loop's OWN count. Its twin is `laneTally.arm`, kept
+        // inside runLane; the summary cross-checks the two (164.3.1-10).
         armsExecuted += 1;
         timings.push(run.seconds);
 
@@ -1628,6 +1794,7 @@ export function runCorpus({
         applyAbs: parsed.setup.apply.map((r) => restoreMap.get(r)),
         postApplyAbs: null,
         gateAbs: restoreMap.get(gateRel),
+        leg: "restore",
       });
       log(`  restore   ${gateRel} — exit ${restore.status} (${restore.seconds.toFixed(1)}s)`);
       if (restore.status !== 0) {
@@ -1687,6 +1854,21 @@ export function runCorpus({
     defects.filter((d) => ["no-red", "wrong-first-failure", "synthesised-identity"].includes(d.kind))
       .length;
   log(`biting: ${bitingArms}   (executed arms that reddened their OWN arm first — the quantity ARMS_FLOOR bounds)`);
+  // 164.3.1-10: the lane runner's OWN count of arm lanes, printed beside the
+  // verdict loop's `arms:` so the two can be compared — here, and again by the
+  // CI count-recheck step, which parses this line and MEASURE_FAILs on its
+  // absence. The non-arm legs are printed as evidence, not compared.
+  const laneLegs = {
+    baseline: laneTally.baseline - laneTallyBefore.baseline,
+    arm: laneTally.arm - laneTallyBefore.arm,
+    restore: laneTally.restore - laneTallyBefore.restore,
+  };
+  const laneInvocations = laneLegs.arm;
+  log(
+    `lane-invocations: ${laneInvocations}   (arm lanes actually spawned — tallied inside runLane, ` +
+      `independent of the ${armsExecuted} the verdict loop counted; plus ${laneLegs.baseline} ` +
+      `baseline / ${laneLegs.restore} restore leg(s))`,
+  );
   for (const w of waivers) log(`  waived: ${w.arm} — ${w.reason}`);
   if (timings.length > 0) {
     const total = timings.reduce((a, b) => a + b, 0);
@@ -1709,6 +1891,15 @@ export function runCorpus({
     if (bitingArms < armsFloor) {
       addDefect("floor", null, scopeDir, `ARMS_FLOOR regression: ${bitingArms} biting arm(s) < floor ${armsFloor}`);
     }
+  }
+
+  // -----------------------------------------------------------------------
+  // Absurdity floor (164.3.1-10, D-09): the runner's own counts must agree.
+  // Applied in EVERY mode, narrowed included — a diagnostic run that miscounts
+  // is no more trustworthy than a full one. See absurdityViolations.
+  // -----------------------------------------------------------------------
+  for (const violation of absurdityViolations({ armsExecuted, laneInvocations, biting: bitingArms })) {
+    addDefect("absurdity", null, null, violation);
   }
 
   // -----------------------------------------------------------------------
@@ -1740,6 +1931,10 @@ export function runCorpus({
     // against, rather than re-deriving it from the defect list and agreeing
     // with the implementation by construction.
     bitingArms,
+    // 164.3.1-10: the lane runner's arm-leg count this run was cross-checked
+    // against, exposed for the same reason; the other legs beside it.
+    laneInvocations,
+    laneLegs,
     defects,
     exitCode: defects.length > 0 ? 1 : narrowed ? 2 : 0,
   };
@@ -1986,6 +2181,13 @@ function selfTest() {
   pass =
     expect(e.exitCode === 0, `exit code is 0 (got ${e.exitCode}; defects: ${JSON.stringify(e.defects)})`) &&
     expect(e.armsExecuted === 2, `2 arms executed (got ${e.armsExecuted})`) &&
+    // 164.3.1-10: the lane runner's OWN tally counted through REAL lanes, and
+    // it agrees with the verdict loop — the absurdity floor's SILENT direction
+    // proven on the wiring, not on the pure function alone.
+    expect(
+      e.laneInvocations === 2,
+      `the lane runner itself counted 2 arm lanes (got ${e.laneInvocations}) — the cross-check's second, independent tally`,
+    ) &&
     expect(e.armsWaived === 1, `1 arm waived (got ${e.armsWaived})`) &&
     pass;
 
