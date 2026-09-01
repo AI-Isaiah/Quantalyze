@@ -615,7 +615,16 @@ Plans:
 
 ### Phase 164.1: HARDEN-GUARDS — retire the frozen-spine gates that no longer bite, close the composite-stamp twin, put the advisory lock behind a real concurrency test, fix the PYAPI-06 blind spot that let a production service-key mismatch run silently, and close phase 161's deferred error-surface items including WIZFORM-02's code:UNKNOWN class, plus the Phase 163 carry-overs — headed by SKIP-01 (nothing applies migrations to TEST, so the OPS-08 SQL gate SKIPs permanently and the deployed body is tested nowhere), then OPS-08's un-written TypeScript retry half, the freshness UTC day-granularity residual, the TEST/PROD function-revision drift, the audit-coverage blind spot, and the tracked-PII decision (INSERTED)
 
-**Goal:** [Urgent work - to be planned]
+**Goal:** Every guard in this phase's scope either bites or is gone, and every silent production failure in it becomes loud. Two halves. (a) **Gate hygiene** — retire the frozen-spine gates that no longer bite, close the composite-stamp twin, put the advisory lock behind a real concurrency test, and land the Phase 163 carry-overs. (b) **Production observability** — one periodic prober covering the three places where production can be broken while every instrument reads green: PYAPI-06 (service-key mismatch), CRON-OBS-01 (`net._http_response`), MT5-WEDGE-OBS-01 (MT5 round-trip). A probe that SKIPs on an absent credential is the defect, not the fix.
+
+**Success Criteria**:
+1. No gate is retired on inspection alone. Every gate removed in (a) is first neutered and observed NOT to redden, with that observation recorded in the phase artifact. A gate that still bites is kept.
+2. The advisory lock has a concurrency test that FAILS when the lock is removed — proven by neuter, observe RED, restore. A test that passes with the lock gone does not count.
+3. One prober covers all three observability targets and fails loud on non-2xx, `-10004`, and `-10005`. Proven per arm by removing that arm's credential and observing a NON-ZERO exit — never a SKIP (`SKIP-01`'s discipline).
+4. The MT5 arm distinguishes "bridge not attached" (`-10004`) from "bridge attached, terminal not answering" (`-10005`). The two have different remedies and the code alone identifies neither; an arm that reports them as one failure has not met this.
+5. CRON-DRIFT-01 compares PROD `cron.job` against what is ACHIEVABLE on Supabase (Vault), not against the GUC design in `20260408215026`, which returns 42501 and could never have run here. Drift fails loud.
+6. Every item in this phase's carried-in list is closed with measured evidence or explicitly re-routed to a named owning phase. No item is silently dropped.
+
 **Requirements**: TBD (original scope) + carry-overs OPS-08-TS, OPS-08-F2 + ADDED 2026-09-01: CRON-OBS-01, MT5-WEDGE-OBS-01
 **Depends on:** Phase 164, and now **Phase 164.3** (see DEDUP below — 164.3 builds the substrate this phase's gate work is tested on)
 **Plans:** 0 plans
