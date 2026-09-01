@@ -1180,6 +1180,90 @@ describe("audit-coverage helpers — H-0004/H-0005 audit gap fixtures", () => {
     expect(found[0].line).toBe(5);
   });
 
+  // ── [AUDCOV-01] ──────────────────────────────────────────────────────────
+  // The SP-I01 arm above is SINGLE-LINE: its backtick pair opens and closes on
+  // one line, so per-line quote state sufficed and the arm stayed green while
+  // the detector went blind. That is exactly why the shipped arms did not catch
+  // [AUDCOV-01] — the regression lives one shape over, in the MULTI-line
+  // template literal.
+  //
+  // MEASURED before the fix — plan 164.3.1-03's committed calibration artifact
+  // (`164.3.1-03-CALIBRATION-AUDCOV.md`), driven through this file's OWN
+  // extracted bytes at subject blob dff9d1a1:
+  //
+  //     AUDCOV-CAL A=[] B=[5] C=[3]
+  //
+  // Case A returned NO sites. `unmatchedBlockOpen`'s quote state was function-
+  // local and discarded at every newline, so line 3's `/*` — sitting INSIDE the
+  // template literal opened on line 2 — was scanned with fresh state, read as
+  // unquoted, opened a phantom block, and blanked lines 4-7 including the real
+  // write on line 5. The pre-SP-I01 code found that site: main was blinder than
+  // it had been.
+  //
+  // The three arms are a set, and the set is what makes the claim falsifiable.
+  // A is the pin. B is the CALIBRATION CONTROL and must not move — without it,
+  // "A now finds its site" proves nothing, because a stripper that returned
+  // every line unblanked would also make A pass. C fences the shipped
+  // single-line behavior against a fix that over-corrects. Movement on exactly
+  // one row is the acceptance; a change that also moves B or C is not the fix.
+  //
+  // Inputs are the plan-03 fixture arrays verbatim, so the in-gate arms and the
+  // calibration instrument measure the same bytes.
+  const AUDCOV_01_CASE_A = [
+    "export async function POST() {",
+    "  const tpl = `a multi-line template",
+    "   a glob like /* appears mid-template",
+    "   and it ends here`;",
+    "  const { error } = await supabase.from('trades').insert(batch);",
+    "  return Response.json({ ok: !error });",
+    "}",
+  ].join("\n");
+
+  const AUDCOV_01_CASE_B = [
+    "export async function POST() {",
+    "  const tpl = `a multi-line template",
+    "   a glob like appears mid-template",
+    "   and it ends here`;",
+    "  const { error } = await supabase.from('trades').insert(batch);",
+    "  return Response.json({ ok: !error });",
+    "}",
+  ].join("\n");
+
+  const AUDCOV_01_CASE_C = [
+    "export async function POST() {",
+    "  const tpl = `c /* d`;",
+    "  const { error } = await supabase.from('trades').insert(batch);",
+    "  return Response.json({ ok: !error });",
+    "}",
+  ].join("\n");
+
+  it("case A ([AUDCOV-01]): a `/*` inside a MULTI-LINE template no longer blanks the file", () => {
+    const found = findMutations("case-A.ts", AUDCOV_01_CASE_A);
+    expect(
+      found.map((m) => m.line),
+      "[AUDCOV-01]: the `/*` on continuation line 3 is INSIDE the template opened " +
+        "on line 2, but per-line quote state forgot the backtick, so it opened a " +
+        "phantom block and blanked the real write on line 5",
+    ).toEqual([5]);
+  });
+
+  it("case B (calibration control): the same input without the `/*` still finds its site", () => {
+    const found = findMutations("case-B.ts", AUDCOV_01_CASE_B);
+    expect(
+      found.map((m) => m.line),
+      "the control moved — the harness, the extraction or the detector changed, " +
+        "so case A's result is no longer evidence about the stripper",
+    ).toEqual([5]);
+  });
+
+  it("case C (shipped single-line behavior fenced): a `/*` inside a single-line template stays quoted", () => {
+    const found = findMutations("case-C.ts", AUDCOV_01_CASE_C);
+    expect(
+      found.map((m) => m.line),
+      "the shipped SP-I01 single-line-template behavior regressed",
+    ).toEqual([3]);
+  });
+
   // H-0001 — intended behavior. LIVE since 2026-08-29 (Phase 164.3).
   //
   // ## What it guards
