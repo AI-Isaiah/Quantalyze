@@ -346,6 +346,95 @@ describe("VAC-04 — scripts/prod-body-drift-check.sh", () => {
     });
   });
 
+  it("VAC04-C3 RED: a grep that ERRORS on the name index is a MEASURE_FAIL, not 'measured absent'", () => {
+    // ⛔ [VAC04-C3]. The membership test was a bare
+    //     if grep -aqxF -- "$fname" "$TMP/prod-names.txt"; then … else … fi
+    // and `grep` exits 0 on a match, 1 on NO match, and >= 2 on an ERROR
+    // (unreadable file, I/O failure, a broken locale). Exit 1 and exit 2 both
+    // fall to the SAME `else`, which prints
+    //     "measured absent — … Treated as a NEW function (pass)."
+    // So an index the gate COULD NOT READ was reported as an index it read and
+    // found nothing in — turning the one fail-CLOSED arm of this gate (WR-01's
+    // "absence is a MEASUREMENT") into a fail-OPEN one. Repeated across every
+    // name, it is the whole gate green having compared nothing.
+    //
+    // MEASURED at this plan's base 420b8fcb, this exact fixture:
+    //   "  demo_fn: measured absent — not in the PROD source's 1-name index.
+    //    Treated as a NEW function (pass)."
+    //   "::notice::…: ZERO bodies compared — all 1 function(s) … measured absent
+    //    … This is a measured zero, not an unread one."          exit 0
+    // …while the index read had failed outright.
+    //
+    // Driven with the SP-M01 idiom: a PATH-shim `grep` that delegates to the
+    // real one for everything EXCEPT this one call. Keyed on the FLAGS AND the
+    // file (`-aqxF` + `*prod-names.txt`) rather than the file alone, because
+    // `PROD_NAME_COUNT` counts the same file with `-ac` — targeting the file
+    // alone would redden the run one step earlier and prove the wrong branch.
+    withTempDir((dir) => {
+      const bin = join(dir, "bin");
+      mkdirSync(bin, { recursive: true });
+      const realGrep = spawnSync("bash", ["-c", "command -v grep"], {
+        encoding: "utf8",
+      }).stdout.trim();
+      expect(realGrep, "no real grep on PATH to delegate to").not.toBe("");
+      writeFileSync(
+        join(bin, "grep"),
+        [
+          "#!/usr/bin/env bash",
+          "flag=0; idx=0",
+          'for a in "$@"; do',
+          '  case "$a" in',
+          "    -aqxF) flag=1 ;;",
+          "    *prod-names.txt) idx=1 ;;",
+          "  esac",
+          "done",
+          '[ "$flag" = 1 ] && [ "$idx" = 1 ] && exit 2',
+          `exec ${realGrep} "$@"`,
+        ].join("\n"),
+      );
+      chmodSync(join(bin, "grep"), 0o755);
+
+      // No live/demo_fn.sql -> the fetcher returns empty; the index does not
+      // hold demo_fn -> the UNSHIMMED run takes the measured-absent pass. So
+      // the only thing that can change this run's verdict is the broken grep.
+      const env = scaffoldProdCase(dir, {});
+      const clean = run(PROD_GATE, env);
+      expect(clean.status, "the fixture must be GREEN before the grep is broken").toBe(0);
+      expect(clean.out).toContain("measured absent");
+
+      const { status, out } = run(PROD_GATE, {
+        ...env,
+        PATH: `${bin}:${process.env.PATH ?? ""}`,
+      });
+      expect(status, "an UNREADABLE index was reported as an index that measured absence").toBe(1);
+      expect(out).toContain("MEASURE_FAIL");
+      // Diagnostic-first (SC-7): it must name the file, the searched name and
+      // the exit code — a conclusion without its evidence is the thing this
+      // phase exists to stop.
+      expect(out).toContain("prod-names.txt");
+      expect(out).toContain("demo_fn");
+      expect(out).toMatch(/grep exited\s*:\s*2\b/);
+      // The fail-OPEN text must be GONE — the whole point of the branch.
+      expect(out).not.toContain("Treated as a NEW function (pass)");
+      expect(out).not.toContain("no unacknowledged repo-vs-PROD body drift");
+    });
+  });
+
+  it("VAC04-C3 CONTROL: exit 1 (genuinely not in a READABLE index) is still a measured-absent pass", () => {
+    // The other direction. A three-way branch that treats 1 like 2 fails every
+    // add-a-function PR; this arm is what stops the C3 fix from being a fix
+    // that breaks the gate's only legitimate silent pass. It is the standing
+    // arm at "GREEN: a function MEASURED absent…", restated here so the C3
+    // branching carries its own control beside it.
+    withTempDir((dir) => {
+      const env = scaffoldProdCase(dir, { indexNames: ["other_fn"] });
+      const { status, out } = run(PROD_GATE, env);
+      expect(status, out).toBe(0);
+      expect(out).toContain("Treated as a NEW function (pass)");
+      expect(out).not.toContain("MEASURE_FAIL");
+    });
+  });
+
   it("RED: ZERO comparisons for any reason OTHER than measured absence is a MEASURE_FAIL", () => {
     withTempDir((dir) => {
       // A floor on `checked` alone would be wrong — a PR that only ADDS
