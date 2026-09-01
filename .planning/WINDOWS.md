@@ -393,6 +393,30 @@ last_updated: 2026-08-29T09:24:22.877Z
     "reason": "",
     "recorded_at": "2026-08-29T11:35:00.000Z",
     "resolved_at": null
-  }
+  },
+  {
+    "id": 30,
+    "kind": "unmet-truth",
+    "phase": "164.3.1",
+    "file": "src/__tests__/self-referential-oracle.test.ts",
+    "line": null,
+    "description": "The Primitive-D self-referential-oracle AST gate ships REPORT-ONLY in plan 164.3.1-02 and blocks NOTHING until plan 164.3.1-08 flips it. Until that flip lands, a new self-referential assertion can enter the tree and the gate will print a finding without failing the suite. SC-5's calibration half is met (the rule was observed flagging src/__tests__/lint-sql-gates.test.ts:183-184 at HEAD before the site was fixed); the enforcing half is 08's.",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-09-01T18:30:00.000Z",
+    "resolved_at": null
+    },
+  {
+    "id": 31,
+    "kind": "unmet-truth",
+    "phase": "164.3.1",
+    "file": "src/__tests__/self-referential-oracle.test.ts",
+    "line": null,
+    "description": "MEASURED at HEAD by plan 164.3.1-02: the rule reports 23 findings across 14 files of 128 scanned, and 19 of those are one shared false-positive mechanism - the accumulator idiom (const offenders: string[] = [] -> loop pushes -> expect(offenders).toEqual([])), which CAN fail and is not a primitive-D instance. 2 are the real target and 2 are type-level contracts in types-design-tests.test.ts that genuinely cannot fail at runtime. The rule was deliberately NOT narrowed after the count was seen - tuning a detector to produce a comfortable number is itself the self-referential move this phase exists to stop. Plan 164.3.1-08 must decide explicitly: teach mutation-awareness and re-measure and re-run the fire proof, OR allowlist the 19 by their shared mechanism with the measurement recorded. Detail in 164.3.1-02-CALIBRATION.md section III.a.",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-09-01T18:30:00.000Z",
+    "resolved_at": null
+    }
 ]
 ````

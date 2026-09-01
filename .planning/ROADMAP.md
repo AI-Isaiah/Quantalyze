@@ -547,6 +547,7 @@ Plans:
 **Requirements**: TBD
 **Depends on:** Phase 164.3
 **Success Criteria**:
+
 1. Every one of the measured instances across all four primitives is an EXECUTABLE arm in the regression corpus, and each is proven to RED by neutering its fix and observing the failure — a corpus entry that cannot fail is itself a primitive-D instance.
 2. The neuter classifier is statement-based: the seven compound lines already in supabase/tests/test_profiles_privileged_columns_locked.sql are classified correctly, and no accepted neuter leaves `SET ROLE postgres;` live on any corpus file.
 3. The arm identity cannot be produced by any SQL the gate executes — demonstrated by re-running the R4-C02 `current_query()` trigger and observing NO-IDENTITY — or the reachability proof is recorded with the constructs it covers.
@@ -556,14 +557,15 @@ Plans:
 7. Every gate in the family PRINTS ITS EVIDENCE on failure, demonstrated by driving each one to its failure path and reading the output: the failure names what was measured (counts, keys, samples), not only the conclusion. An arm asserts this so a future gate cannot ship a bare conclusion.
 8. The absurdity floor exists on VAC-04 and on the mutation runner as well as VAC-08, each proven able to fire AND proven silent on a legitimate finding — a two-directional neuter, because a floor that fires unconditionally also passes its own RED arm. Every threshold records the measurement that set it and the separation it achieves.
 9. Every gate whose key, threshold or join rests on a measurement carries that measurement's SAMPLE SIZE and COVERAGE beside it, plus an arm asserting the key against the full corpus. Verified by grepping the family for justifying measurements and finding no bare ones.
-**Plans:** 12 plans (5 waves)
+
+**Plans:** 4/12 plans executed (5 waves)
 
 Plans:
 
-- [ ] 164.3.1-01-PLAN.md — TRACER + Primitive A: statement tokenizer, neuter path routed through it (Wave 1) [SC-2]
-- [ ] 164.3.1-02-PLAN.md — Primitive-D AST rule REPORT-ONLY + calibration at HEAD on lint-sql-gates.test.ts:182-186 (Wave 1) [SC-5]
-- [ ] 164.3.1-03-PLAN.md — [AUDCOV-01] before-state calibration: A/B/C = []/[5]/[3] via extracted real bytes (Wave 1) [SC-5]
-- [ ] 164.3.1-04-PLAN.md — VAC-04 union readers hardened: realpath guards (C2) + charset refusal (C4) (Wave 1) [SC-4, SC-7]
+- [x] 164.3.1-01-PLAN.md — TRACER + Primitive A: statement tokenizer, neuter path routed through it (Wave 1) [SC-2]
+- [x] 164.3.1-02-PLAN.md — Primitive-D AST rule REPORT-ONLY + calibration at HEAD on lint-sql-gates.test.ts:182-186 (Wave 1) [SC-5]
+- [x] 164.3.1-03-PLAN.md — [AUDCOV-01] before-state calibration: A/B/C = []/[5]/[3] via extracted real bytes (Wave 1) [SC-5]
+- [x] 164.3.1-04-PLAN.md — VAC-04 union readers hardened: realpath guards (C2) + charset refusal (C4) (Wave 1) [SC-4, SC-7]
 - [ ] 164.3.1-05-PLAN.md — Primitive B: source-location attribution replaces the nonce; single-frame chain rule; verbose pg-lane (Wave 2) [SC-3, SC-7]
 - [ ] 164.3.1-06-PLAN.md — [AUDCOV-01] fix: cross-line quote state; A finds its site, B/C controls hold (Wave 2) [SC-5]
 - [ ] 164.3.1-07-PLAN.md — VAC-04 gate: grep exit branching (C3), loud-warn zero path + flip arm, absurdity floor (Wave 2) [SC-4 PARTIAL, SC-7, SC-8, SC-9]
@@ -629,6 +631,7 @@ Plans:
 **Goal:** Every guard in this phase's scope either bites or is gone, and every silent production failure in it becomes loud. Two halves. (a) **Gate hygiene** — retire the frozen-spine gates that no longer bite, close the composite-stamp twin, put the advisory lock behind a real concurrency test, and land the Phase 163 carry-overs. (b) **Production observability** — one periodic prober covering the three places where production can be broken while every instrument reads green: PYAPI-06 (service-key mismatch), CRON-OBS-01 (`net._http_response`), MT5-WEDGE-OBS-01 (MT5 round-trip). A probe that SKIPs on an absent credential is the defect, not the fix.
 
 **Success Criteria**:
+
 1. No gate is retired on inspection alone. Every gate removed in (a) is first neutered and observed NOT to redden, with that observation recorded in the phase artifact. A gate that still bites is kept.
 2. The advisory lock has a concurrency test that FAILS when the lock is removed — proven by neuter, observe RED, restore. A test that passes with the lock gone does not count.
 3. One prober covers all three observability targets and fails loud on non-2xx, `-10004`, and `-10005`. Proven per arm by removing that arm's credential and observing a NON-ZERO exit — never a SKIP (`SKIP-01`'s discipline).
