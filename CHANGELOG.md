@@ -1,5 +1,52 @@
 # Changelog
 
+## [0.77.0.1] - 2026-09-01
+
+### Booked: a wedged MT5 gateway is invisible to every automated signal
+
+Backlog only. No production source change, no CI change, no schema change.
+
+### Added
+
+- **`MT5-WEDGE-OBS-01` in TODOS.md.** A user-facing MT5 key-connect failure ran
+  with every instrument green: Railway reported the `mt5-gateway` service healthy
+  (container up, port listening — the failure sits one layer below, inside the
+  Wine/MT5 terminal), `/health` on analytics-service never touches MT5, and the
+  gateway's own log for a failed call is `accepted … welcome … goodbye` with no
+  ERROR line and no non-zero exit. The only thing that spoke was a human clicking
+  connect, and what they saw was `KEY_NETWORK_TIMEOUT` — the generic catch tail —
+  which reads as "your broker is slow" rather than "our gateway is not answering".
+  Books the probe that is missing: a real MT5 round-trip, failing loud on
+  `-10005`/`-10004`, counted and surfaced rather than silently skipped.
+
+  Two corrections are recorded in the item because both were wrong readings made
+  during this incident, and both cost a wasted remedy:
+
+  - **A redeploy does not fix it.** Measured: a clean redeploy booted the rpyc
+    server in 14s, and a real `validate_key` ten minutes later reproduced the
+    failure exactly (`accepted … welcome` then `goodbye` 46s later, no work done).
+    This is not uptime drift that a restart clears.
+  - **"The terminal isn't logged in" is not the explanation.** The validate path
+    takes the per-terminal lease and calls `login(...)` itself on every call
+    (`analytics-service/routers/exchange.py:767-782`), and the gateway carries no
+    `MT5_LOGIN` / `MT5_SERVER` variables. A pre-logged-in terminal was never a
+    precondition, so a VNC login is not the remedy either.
+
+  **Root cause, confirmed by direct observation the same day:** the terminal was
+  sitting at an interactive **login prompt**. A modal dialog blocks MT5's message
+  loop, so `terminal64.exe` never services the Python IPC bridge and every call
+  times out as `-10005`. The Wine prefix sits on a persistent Railway volume, so
+  the dialog — and therefore the wedge — replays on every redeploy, which is why a
+  restart is not a remedy here even though a restart has cleared a wedge before.
+
+  The distinction the item now pins, because it was gotten wrong twice: the
+  terminal does not need to be logged IN, it needs to not be stuck in a MODAL
+  DIALOG. "Logged out" is harmless. "Showing a login box" is fatal.
+
+  The item also declines to claim the gateway "ran healthy for five days then
+  wedged" — nothing probes MT5, so that span is unprovable, which is the whole
+  reason the item exists.
+
 ## [0.77.0.0] - 2026-08-29
 
 ### A control that cannot fail is now caught by a machine, not by a reviewer
