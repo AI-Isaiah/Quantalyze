@@ -405,6 +405,94 @@ if [ "${XCHECK_ONLY_COUNT:-0}" -gt 0 ]; then
   echo "::warning::The primary index shares its parser with the body fetcher, so those names would"
   echo "::warning::previously have been reported 'absent from PROD — a NEW function (pass)'."
 fi
+
+# ── ABSURDITY FLOOR ──────────────────────────────────────────────────────────
+# MEASURED 2026-09-01 at 15ab417b, sample size and coverage stated below (SC-9).
+# Is this a PROD that genuinely holds almost no functions, or a BROKEN READER?
+# The empty-index guards above answer that only for EXACTLY zero. One name
+# through and they go quiet — and a near-empty index is the "every function is
+# new — pass" shape, because a name absent from a tiny index takes the
+# measured-absent pass on every iteration of the loop below. This is D-09's
+# VAC-04 half, templated on VAC-08's floor at
+# test-ledger-drift-check.sh:320-350 (structure, not numbers).
+#
+# ── THE RULE, AND WHY IT IS A RATIO AND NOT A LITERAL ───────────────────────
+# The floor is calibrated against a SECOND, INDEPENDENTLY PRODUCED population
+# the gate already holds: the committed snapshot directory. Those bodies are
+# generated FROM PROD by `npm run schema:functions`, so their count is a prior
+# measurement of PROD's public-schema function catalogue — not a number someone
+# chose. A hardcoded literal would rot the moment PROD's catalogue grew or
+# shrank, and D-10 is explicit that thresholds are set by MEASUREMENT, never by
+# taste. So: if the snapshot is substantially populated but PROD's index holds
+# fewer than HALF as many names, the READER is broken, not the database.
+#
+# ── SAMPLE SIZE AND COVERAGE (SC-9) ─────────────────────────────────────────
+#   Corpus      : 380 `.sql` files — 262 under supabase/migrations/ and 118
+#                 under supabase/schema/functions/.
+#   Definitions : 359 across that corpus; 122 DISTINCT function names in the
+#                 union of the two readers (0 disagreements).
+#   PROD proxy  : 118 committed bodies in supabase/schema/functions/, generated
+#                 from PROD (`npm run schema:functions`); the gate's own header
+#                 records the same 118 verified 2026-08-28.
+#   Measured    : 2026-09-01 at 15ab417b, with the SAME two readers this gate
+#                 unions, over the whole corpus (not a sample of it).
+#
+# ── WIDE SEPARATION, BOTH DIRECTIONS STATED WITH THEIR MEASURED VALUES ──────
+#   FIRES  : a broken reader scores 0 names. MEASURED 2026-09-01 (plan
+#            164.3.1-04's pre-fix probe): the [VAC04-C2] guard defect made BOTH
+#            readers print nothing and exit 0 on every symlinked invocation.
+#            0 * 2 = 0, far under 118 — fires.
+#   SILENT : the real index scores 118-122 names. 122 * 2 = 244, far over 118 —
+#            silent. Ordinary churn does not approach the halfway mark: PROD
+#            would have to lose ~60 functions in one PR to reach it.
+#   The two sides are an order of magnitude apart around the 59-name halfway
+#   point, so this is separation, not tuning.
+#
+# ── WHAT THIS DOES NOT COVER, stated rather than implied ────────────────────
+# When the snapshot population is under SNAPSHOT_MIN the ratio has no reliable
+# denominator and the floor goes INERT. That state is ANNOUNCED rather than
+# silent (the else branch below), because a control that quietly stops
+# controlling is the defect this phase exists to stop. It is also loud
+# elsewhere: with a depopulated snapshot, every compared function hits the
+# "PROD has it but the committed snapshot does not" failure above.
+SNAPSHOT_MIN=50
+set +e
+SNAPSHOT_BODY_COUNT="$(find "$SNAPSHOT_DIR" -maxdepth 1 -type f -name '*.sql' -print | grep -ac '[^[:space:]]')"
+_snap_rc=$?
+set -e
+# Same grep exit-code discipline as [VAC04-C3] and SP-M01: 0 = counted, 1 = no
+# rows, >= 2 = could not read. An uncountable population is not an empty one.
+[ "$_snap_rc" -le 1 ] || fail "MEASURE_FAIL: could not count the committed snapshot bodies under ${SNAPSHOT_DIR} (grep exited ${_snap_rc}). The absurdity floor calibrates against that population, and an uncountable denominator is not a denominator of zero."
+SNAPSHOT_BODY_COUNT="${SNAPSHOT_BODY_COUNT:-0}"
+if [ "${SNAPSHOT_BODY_COUNT:-0}" -ge "$SNAPSHOT_MIN" ]; then
+  if [ $(( ${PROD_NAME_COUNT:-0} * 2 )) -lt "$SNAPSHOT_BODY_COUNT" ]; then
+    echo "::error::${GATE}: MEASURE_FAIL — this is the GATE failing, not the database."
+    echo "::error::"
+    echo "::error::WHAT WAS READ (evidence first — D-12/SC-7):"
+    echo "::error::  PROD function-name index : ${PROD_NAME_COUNT:-0} name(s), union of two readings"
+    echo "::error::  committed snapshot bodies: ${SNAPSHOT_BODY_COUNT} under ${SNAPSHOT_DIR}"
+    echo "::error::  absurdity floor          : the index must hold at least half the snapshot"
+    echo "::error::                             population ($(( SNAPSHOT_BODY_COUNT / 2 )) name(s)) once that"
+    echo "::error::                             population is >= ${SNAPSHOT_MIN}"
+    echo "::error::  first names actually read:"
+    head -n 10 "$TMP/prod-names.txt" | sed 's|^|::error::    |'
+    echo "::error::"
+    echo "::error::Those snapshot bodies were generated FROM PROD, so the repository already"
+    echo "::error::knows PROD holds roughly that many functions. An index holding a small"
+    echo "::error::fraction of them is a reader that stopped matching, not a database that"
+    echo "::error::dropped its catalogue — and every name absent from a tiny index takes this"
+    echo "::error::gate's measured-absent pass, so the failure mode is 'every function is new"
+    echo "::error::— pass' with nothing compared at all."
+    echo "::error::Fix the index reader (or the dump it reads); do NOT widen this floor to"
+    echo "::error::make the run green."
+    exit 1
+  fi
+else
+  # Announced, never silent — see "WHAT THIS DOES NOT COVER" above.
+  echo "::warning::${GATE}: the absurdity floor is INERT this run — the committed snapshot"
+  echo "::warning::population under ${SNAPSHOT_DIR} is ${SNAPSHOT_BODY_COUNT}, below the ${SNAPSHOT_MIN} needed to"
+  echo "::warning::calibrate against it. A near-empty PROD name index would NOT be caught here."
+fi
 echo "Functions indexed in the PROD source: ${PROD_NAME_COUNT:-0} (union of two independent readings)"
 echo ""
 
