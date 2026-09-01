@@ -1217,6 +1217,72 @@ Two gaps remain, and neither is closed by that fix:
 ⭐ **Standing rule until CRON-OBS-01 lands: `cron.job_run_details.status = 'succeeded'` is NOT
 evidence that a pg_net-based job worked.** Read `net._http_response`.
 
+### MT5-WEDGE-OBS-01 — a wedged MT5 gateway is invisible to every automated signal (booked 2026-09-01)
+
+Same class as `CRON-OBS-01`: the failure is real, user-facing, and silent to every instrument.
+
+**Measured 2026-09-01.** The `mt5-gateway` Railway service was running deployment `cc895b87`,
+created 2026-08-25T12:47:54Z — the same interrupted maintenance window that stranded the cron key
+(`CRON-DRIFT-01`). User key-connect failed with:
+
+⚠️ Whether MT5 worked at any point between 08-25 and 09-01 is **unknown and unprovable**: nothing
+probes it, which is precisely what this item books. Do not describe this as "healthy for 5 days
+then wedged" — that is an inference from an absence of complaints, not a measurement.
+
+```
+analytics-service (deployment 8a885909):
+  11:07:33  validate_key: MT5 transient upstream failure (code=-10005)
+  11:08:50  validate_key: MT5 transient upstream failure (code=-10005)
+mt5-gateway (deployment cc895b87):
+  11:08:05  accepted ('10.224.213.79', 36962) … welcome
+  11:08:50  goodbye          <- 45s later, no work done
+```
+
+`-10005` is an MT5 IPC timeout — the rpyc transport accepts the connection and the terminal never
+answers.
+
+⛔ **A redeploy does NOT fix this.** Measured the same day: redeploy `9117450b` booted clean
+(`mt5linux server is running on port 8001`, 14s), and a real `validate_key` 10 minutes later
+reproduced the failure exactly:
+
+```
+analytics-service  11:46:36  validate_key: MT5 transient upstream failure (code=-10005)
+mt5-gateway        11:45:50  accepted ('10.143.156.226', 33992) … welcome
+                   11:46:36  goodbye          <- 46s, no work done
+```
+
+So this is NOT uptime drift that a restart clears. The transport layer is healthy — it accepts and
+welcomes. What never answers is the **MT5 terminal**, which boots without a broker session: the
+container log says `Running MT5...` and `mt5linux server is running on port 8001` and never says
+the terminal logged in to the configured broker server. The remedy is a human VNC login at the
+gateway's web console (KasmVNC, service domain port 3000), not a redeploy.
+
+**Why nothing caught it.**
+
+- Railway reports the service **healthy** — the container is running and the port is listening.
+  The wedge is inside the Wine/MT5 terminal, one layer below what the platform can see.
+- `/health` on analytics-service does not touch MT5 at all, so it stays green.
+- The gateway's own log for a wedged call is `accepted … welcome … goodbye` — no ERROR line, no
+  non-zero exit. Nothing to alert on without knowing that a 45s gap between welcome and goodbye
+  with no work in between IS the failure.
+- The only thing that spoke was a **human clicking connect in the wizard**, and what they saw was
+  `KEY_NETWORK_TIMEOUT` (the generic catch tail, `src/app/api/strategies/finalize-wizard/route.ts:215-245`)
+  — which reads as "your broker is slow", not "our gateway is dead".
+
+**What is needed.** A periodic probe that actually round-trips MT5 (not a port check, not
+`/health`) and fails loud on `-10005`/`-10004`, counted and surfaced. ⚠️ Not a silent skip when
+the credential is absent — that is `SKIP-01`.
+
+⭐ **Standing rule until this lands: a green `mt5-gateway` in Railway is NOT evidence that MT5
+works.** The only current proof is a real `validate_key` round-trip.
+
+⚠️ **`-10005` does not mean "transport problem" and `-10004` does not have a monopoly on
+"not logged in".** A terminal with no broker session makes the IPC call HANG, so it times out as
+`-10005` rather than returning `-10004`. Do not triage on the code alone — the earlier reading of
+this incident as a transport wedge, and the redeploy that followed from it, both came from exactly
+that inference. Check whether the terminal has a broker session before touching the container.
+
+
 ### ⛔ DRIFT-02 — a surgical in-place patch means the REPO no longer holds the true function body (booked 2026-08-27)
 
 ⭐ Caught by the pre-merge PROD diff, which is the ONLY thing that could have caught it.

@@ -1,5 +1,39 @@
 # Changelog
 
+## [0.77.0.1] - 2026-09-01
+
+### Booked: a wedged MT5 gateway is invisible to every automated signal
+
+Backlog only. No production source change, no CI change, no schema change.
+
+### Added
+
+- **`MT5-WEDGE-OBS-01` in TODOS.md.** A user-facing MT5 key-connect failure ran
+  with every instrument green: Railway reported the `mt5-gateway` service healthy
+  (container up, port listening — the failure sits one layer below, inside the
+  Wine/MT5 terminal), `/health` on analytics-service never touches MT5, and the
+  gateway's own log for a failed call is `accepted … welcome … goodbye` with no
+  ERROR line and no non-zero exit. The only thing that spoke was a human clicking
+  connect, and what they saw was `KEY_NETWORK_TIMEOUT` — the generic catch tail —
+  which reads as "your broker is slow" rather than "our gateway is not answering".
+  Books the probe that is missing: a real MT5 round-trip, failing loud on
+  `-10005`/`-10004`, counted and surfaced rather than silently skipped.
+
+  Two corrections are recorded in the item because both were wrong readings made
+  during this incident, and both cost a wasted remedy:
+
+  - **A redeploy does not fix it.** Measured: a clean redeploy booted the rpyc
+    server in 14s, and a real `validate_key` ten minutes later reproduced the
+    failure exactly (`accepted … welcome` then `goodbye` 46s later, no work done).
+    This is not uptime drift that a restart clears.
+  - **`-10005` is not a transport verdict.** A terminal with no broker session
+    makes the IPC call hang, so it times out as `-10005` instead of returning
+    `-10004`. Triaging on the code alone is what produced the redeploy.
+
+  The item also declines to claim the gateway "ran healthy for five days then
+  wedged" — nothing probes MT5, so that span is unprovable, which is the whole
+  reason the item exists.
+
 ## [0.77.0.0] - 2026-08-29
 
 ### A control that cannot fail is now caught by a machine, not by a reviewer
