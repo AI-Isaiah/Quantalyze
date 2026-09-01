@@ -12,7 +12,7 @@
  * reach the system under test, a literal cannot.
  *
  * Not collected by vitest (`*.green.ts`, not `*.test.ts`); type-checked by
- * `tsc --noEmit` via tsconfig's `**/*.ts` include.
+ * `tsc --noEmit`, which includes every `.ts` file in the tree.
  */
 import { readFileSync } from "node:fs";
 import { join } from "node:path";

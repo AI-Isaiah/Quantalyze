@@ -9,7 +9,8 @@
  *
  * This file is NOT collected by vitest: `vitest.config.ts`'s INCLUDE globs
  * match `*.test.{ts,tsx}` only, and this is `*.red.ts`. It IS type-checked,
- * because `tsconfig.json`'s include is `**/*.ts` — hence the real imports.
+ * because `tsconfig.json` includes every `.ts` file in the tree — hence the
+ * real imports rather than a bare snippet.
  *
  * The rule-quality contract this pair satisfies is the house one, stated at
  * `scripts/lint-sql-gates.mjs:33-40`: "A rule without a firing fixture does not
