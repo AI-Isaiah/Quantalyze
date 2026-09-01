@@ -417,6 +417,18 @@ last_updated: 2026-08-29T09:24:22.877Z
     "reason": "",
     "recorded_at": "2026-09-01T18:30:00.000Z",
     "resolved_at": null
-    }
+    },
+{
+    "id": 32,
+    "kind": "unrun-verify",
+    "phase": "164.3.1",
+    "file": "scripts/verify-plan-anchors.mjs",
+    "line": null,
+    "description": "verify-plan-anchors.mjs resolves a shorthand anchor (bare filename:line, e.g. lint-sql-gates.test.ts:182-186) by searching the tree, so LIVE agent worktrees under .claude/worktrees/agent-* make it match several copies of the same file and it reports [path-ambiguous] MISSes. MEASURED 2026-09-01 during phase 164.3.1 wave 2: 6 path-ambiguous misses in plans 05 and 08 with 4 worktrees present; the SAME tree copied without worktrees reports 'claims: 95 checked / OK: 10 plan file(s), no stale claims' exit 0. CI is unaffected (it clones fresh, no worktrees), so this is a LOCAL-ONLY false fail during parallel execution. DO NOT 'fix' the affected plans by rewriting correct anchors - that destroys accurate claims to silence an instrument artefact. Correct responses: re-run after worktree pruning, or give the anchors repo-root paths. Fixing the instrument (exclude .claude/worktrees from the search) is the durable answer and is not yet done.",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-09-01T19:15:00.000Z",
+    "resolved_at": null
+  }
 ]
 ````
