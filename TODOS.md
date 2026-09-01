@@ -1214,6 +1214,14 @@ Two gaps remain, and neither is closed by that fix:
   header would have been silent too. Needs a periodic check that fails loud on non-2xx in
   `net._http_response`, counted and surfaced (⚠️ not a silent skip — that is `SKIP-01`).
 
+
+➡️ **ROUTED 2026-09-01 to Phase 164.1 (HARDEN-GUARDS).** That phase already owns this class — its
+title names the PYAPI-06 blind spot that let a production service-key mismatch run silently. NOT
+164.3/164.3.1: those own gate integrity (a control that cannot fail), this is production
+observability (a service down while every instrument reads green). ⭐ `CRON-OBS-01` and
+`MT5-WEDGE-OBS-01` are ONE mechanism with two targets — a periodic prober that fails loud — and
+are to be planned as one slice, not two.
+
 ⭐ **Standing rule until CRON-OBS-01 lands: `cron.job_run_details.status = 'succeeded'` is NOT
 evidence that a pg_net-based job worked.** Read `net._http_response`.
 
@@ -1311,6 +1319,14 @@ human clicking connect.
 **What is needed.** A periodic probe that actually round-trips MT5 (not a port check, not
 `/health`) and fails loud on `-10005`/`-10004`, counted and surfaced. ⚠️ Not a silent skip when
 the credential is absent — that is `SKIP-01`.
+
+
+➡️ **ROUTED 2026-09-01 to Phase 164.1 (HARDEN-GUARDS).** That phase already owns this class — its
+title names the PYAPI-06 blind spot that let a production service-key mismatch run silently. NOT
+164.3/164.3.1: those own gate integrity (a control that cannot fail), this is production
+observability (a service down while every instrument reads green). ⭐ `CRON-OBS-01` and
+`MT5-WEDGE-OBS-01` are ONE mechanism with two targets — a periodic prober that fails loud — and
+are to be planned as one slice, not two.
 
 ⭐ **Standing rule until this lands: a green `mt5-gateway` in Railway is NOT evidence that MT5
 works.** The only current proof is a real `validate_key` round-trip.

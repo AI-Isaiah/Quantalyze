@@ -1,5 +1,34 @@
 # Changelog
 
+## [0.77.0.2] - 2026-09-01
+
+### Routed: both production-observability blind spots now have an owning phase
+
+Planning only. No production source change, no CI change, no schema change.
+
+### Changed
+
+- **`CRON-OBS-01` and `MT5-WEDGE-OBS-01` added to Phase 164.1 (HARDEN-GUARDS) scope.**
+  Both were booked the same day from the same 2026-08-25 12:47 maintenance window
+  and both are the same shape: production broken while every instrument reads
+  green. 164.1 already owns that class — its title names the PYAPI-06 blind spot
+  that let a production service-key mismatch run silently.
+
+  Deliberately NOT routed to 164.3 / 164.3.1, which own **gate integrity** (a
+  control that cannot fail). These are **production observability** (a service
+  that is down while nothing reports it). Different subject, and an item claimed
+  by two phases gets built twice or by neither — the failure this phase group has
+  already hit twice.
+
+  Recorded as ONE mechanism with two targets — a periodic prober that fails loud —
+  to be planned as a single slice rather than two unrelated ones. Both inherit
+  164.1's anti-silent-skip discipline (`SKIP-01`'s): a probe that SKIPs when its
+  credential is absent is the defect, not the fix.
+
+  The routing is written in both directions — `ROADMAP.md` Phase 164.1 scope and
+  the two `TODOS.md` entries — so neither ledger can assert a disposition the
+  other contradicts.
+
 ## [0.77.0.1] - 2026-09-01
 
 ### Booked: a wedged MT5 gateway is invisible to every automated signal
