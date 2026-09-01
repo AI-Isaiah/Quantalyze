@@ -655,8 +655,12 @@ describe("164.3.1-10 — the runner's absurdity floor (D-09): two INDEPENDENT ta
     const r = runCorpus({
       scopeDir: SELFTEST_DIR,
       onlyFile: "no-such-gate.sql",
+      onlyArm: null,
+      filesFloor: FILES_FLOOR,
       armsFloor: 0,
-      log: (s: string) => lines.push(s),
+      log: (s: string) => {
+        lines.push(s);
+      },
     });
     const at = (re: RegExp) => lines.findIndex((l) => re.test(l));
     const coverage = at(/^coverage: files \d+\/\d+$/);
