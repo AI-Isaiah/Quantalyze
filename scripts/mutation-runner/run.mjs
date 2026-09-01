@@ -336,8 +336,31 @@ export const executableText = (source) => maskNonCode(source);
  * ends, and the statements that follow it on the same line are separate units
  * the scan must classify on their own.
  *
- * Re-measured against the same 104 identities / 103 backward scans — see the
- * measured-corpus block above `neuterArm`.
+ * ═══════════════════════════════════════════════════════════════════════════
+ * RE-MEASURED 2026-09-01 (phase 164.3.1 plan 01 task 3), R3-C01 discipline.
+ * ═══════════════════════════════════════════════════════════════════════════
+ * SAMPLE: `supabase/tests/test_strategy_shares_rls.sql`, the only annotated
+ * file in the corpus (1 of 71 — see FILES_FLOOR).
+ * SAMPLE SIZE: 104 `TEST FAILED (` occurrences, 104 distinct identities, 103
+ * backward scans performed (the 104th identity is the header's own syntax
+ * documentation and carries no raise, so no scan runs for it).
+ * COVERAGE: 103 of 103 scans compared, statement predicate vs the DELETED line
+ * predicate transcribed verbatim from HEAD `e0660031` as an INDEPENDENT
+ * instrument.
+ * RESULT: 103 agreements, 0 disagreements. Refusals: 4 under BOTH predicates,
+ * the same four arms — SERVICE-ROLE 2a/2b/2c/2d, whose branches each `EXECUTE
+ * 'REVOKE EXECUTE ON FUNCTION public.create_strategy_share(UUID) FROM
+ * service_role'` before raising (lines 2249 / 2254 / 2268 / 2273). Each refusal
+ * is LOUD and names its statement. ZERO refusals were added by this change.
+ *
+ * ⚠️ WHAT THIS MEASUREMENT DOES AND DOES NOT BOUND, because the previous one at
+ * this spot was true and did not save the predicate: it bounds NON-REGRESSION
+ * on the shapes THIS ONE FILE contains. It says nothing about shapes it does
+ * not contain — and the compound line that broke the old predicate lives in a
+ * DIFFERENT file (`test_profiles_privileged_columns_locked.sql`, seven times).
+ * The class is closed by CONSTRUCTION above, not by this number; the number
+ * only proves the construction refuses nothing the corpus already relies on.
+ * Phase 164.4 raises the coverage as it backfills the other 70 files.
  */
 export const isBranchHead = (statement) => statement != null && statement.head === true;
 
@@ -458,6 +481,10 @@ export function neuterArm(text, arm) {
   //
   // MEASURED 2026-08-29 against the real corpus: all 30 arms still execute and
   // bite, so this refuses nothing that exists today.
+  // RE-MEASURED 2026-09-01 under the statement predicate (sample size and
+  // coverage in the `isBranchHead` block above): 103 of 103 backward scans
+  // agree with the deleted line predicate, 0 disagreements, the same 4 loud
+  // refusals, 0 added. Full corpus run unchanged at arms 30/30/0, biting 30.
   // ⛔ ORDER IS LOAD-BEARING (R2-C01). Classify FIRST, terminate LAST, and
   // terminate only on a unit that IS a branch head (R3-C01), never on one that
   // merely MENTIONS a branch-head keyword. Round 1 fixed the loop ORDER; round
@@ -570,9 +597,14 @@ export function neuterArm(text, arm) {
   const suffix = nl === -1 ? tail : tail.slice(0, nl);
   const rest = tail.slice(suffix.length);
 
-  const startsOnOwnLine = prefix.trim() === "";
-  // A trailing `--` comment goes with the neutered statement, as it always has.
-  const endsLine = suffix.trim() === "" || /^[ \t]*--/.test(suffix);
+  // "Is there code out here?" is asked of the SAME masking projection every
+  // other decision in this file uses — not of a second `^[ \t]*--` predicate.
+  // A trailing `--` comment or a `/* … */` therefore goes with the neutered
+  // statement, as it always has, without this line owning its own idea of what
+  // a comment is. That second idea is how [VAC04-C1]'s composing blind spot is
+  // built, and there is exactly one definition of code in this file.
+  const startsOnOwnLine = executableText(prefix).trim() === "";
+  const endsLine = executableText(suffix).trim() === "";
 
   if (startsOnOwnLine && endsLine) {
     const start = statements[startIdx].startLine - 1;
