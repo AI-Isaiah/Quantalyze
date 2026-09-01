@@ -1,5 +1,37 @@
 # Changelog
 
+## [0.77.0.3] - 2026-09-01
+
+### Phase 164.1 gets a real goal and six success criteria
+
+Planning only. No production source change, no CI change, no schema change.
+
+### Changed
+
+- **Phase 164.1's `Goal` was still the `[Urgent work - to be planned]` placeholder
+  and it had zero success criteria.** v0.77.0.2 added the two observability items
+  to its scope prose and Requirements line, but a phase with no measurable
+  criteria means `/gsd-plan-phase 164.1` would plan against title prose alone.
+  Applied through the `gsd-phase --edit` workflow rather than by hand, which is
+  what caught the gap: hand-editing the roadmap skips the orchestrator-only gates.
+
+  The goal now names the phase's two halves — gate hygiene, and production
+  observability (PYAPI-06, `CRON-OBS-01`, `MT5-WEDGE-OBS-01` as one prober with
+  three targets).
+
+  The six criteria are written to be un-fakeable, matching the standard this repo
+  already enforces elsewhere: no gate is retired on inspection alone (neuter it,
+  observe that it does NOT redden, record that); the advisory-lock test must FAIL
+  when the lock is removed; an absent credential must exit non-zero rather than
+  SKIP; and the MT5 arm must separate `-10004` from `-10005`, which name
+  different remedies.
+
+  Workflow gates that ran: `depends_on` validated (164, 164.3 exist, no
+  self-reference), phase status checked (`disk_status: empty` — no executed plans
+  invalidated), milestone scope re-derived and verified unchanged after the write
+  (14 phases, identical), and STATE.md Roadmap Evolution updated — the last of
+  which the earlier hand-edit had skipped entirely.
+
 ## [0.77.0.2] - 2026-09-01
 
 ### Routed: both production-observability blind spots now have an owning phase
