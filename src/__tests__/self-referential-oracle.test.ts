@@ -18,17 +18,50 @@
  * `src/lib/seam-log-coverage.test.ts:6`, the repo's other AST-walking gate,
  * whose parse/walk shape this file copies). Nothing was installed for this.
  *
- * ── REPORT-ONLY IN THIS PLAN, AND THAT IS DELIBERATE ───────────────────────
- * Plan 164.3.1-02 ships the detector and MEASURES it. It fixes nothing and
- * asserts nothing about the corpus-wide finding count. The ordering is the
- * point: CONTEXT.md D-06 requires the rule to be observed flagging the real
- * `:182-186` instance AT HEAD, BEFORE that site is fixed — "a rule written
- * after the fix and never observed firing on the real instance is unproven."
- * The measurement is committed at
- * `.planning/phases/164.3.1-.../164.3.1-02-CALIBRATION.md`. Plan 164.3.1-08
- * consumes that count, sizes the measured-exception allowlist (D-05: every
- * entry carries its measurement), fixes the `:182-186` site, and flips the
- * corpus scan to blocking.
+ * ── BLOCKING SINCE PLAN 164.3.1-08 (was report-only in 164.3.1-02) ─────────
+ * Plan 164.3.1-02 shipped the detector and MEASURED it, asserting nothing about
+ * the corpus-wide finding count. The ordering was the point: CONTEXT.md D-06
+ * requires the rule to be observed flagging the real `:182-186` instance AT
+ * HEAD, BEFORE that site is fixed — "a rule written after the fix and never
+ * observed firing on the real instance is unproven." That measurement is
+ * committed at `.planning/phases/164.3.1-.../164.3.1-02-CALIBRATION.md` § II.
+ *
+ * Plan 164.3.1-08 consumed it: the `:182-186` site is FIXED, the corpus scan is
+ * EXACT-SET BLOCKING against `SRO_ALLOWLIST` below (D-05: every entry carries
+ * the measurement that justifies it), and one measured imprecision was closed
+ * rather than allowlisted — see the next block, which is the honest record of a
+ * detector change made AFTER a count was seen.
+ *
+ * ── THE MUTATION NARROWING, AND WHY IT IS NOT COUNT-TUNING ─────────────────
+ * The 164.3.1-02 calibration measured 23 findings / 14 files / 128 scanned and
+ * then SPLIT them by re-reading the flagged sites (§ III.a): 19 of 23 were ONE
+ * shared shape — `const offenders: string[] = []` → a loop `push`es →
+ * `expect(offenders).toEqual([])`. Those assertions were MEASURED able to fail.
+ * They are not Primitive-D instances; they are this detector's own dominant
+ * imprecision, recorded there as non-coverage bound 4 ("NO MUTATION
+ * MODELLING"). The calibration deliberately declined to narrow the rule and
+ * handed plan 08 the choice, ranking narrow-then-re-measure ABOVE allowlisting
+ * the 19.
+ *
+ * Plan 08 narrowed. The reasoning, recorded because "tune the detector until
+ * the number is comfortable" is exactly the move this phase distrusts:
+ *   * The change is justified INDEPENDENTLY of the count. A binding mutated
+ *     between its declaration and the assertion that reads it is not a
+ *     constant, so the premise the finding rests on is false at those sites.
+ *   * Allowlisting them would mean 19 entries whose justification reads "the
+ *     detector is wrong here". Under D-05 an allowlist entry records a MEASURED
+ *     EXCEPTION, not a known detector bug; recording a bug as a permanent
+ *     exception is how a gate becomes ceremony.
+ *   * The accumulator idiom is the repo's dominant HONEST gate-test shape (12
+ *     of the 14 flagged files). A blocking gate that reds on it would be waived
+ *     by reflex — a control routinely waived is a control that cannot fail.
+ *   * The narrowing LOSES NO ENFORCEMENT relative to allowlisting: both leave
+ *     those sites unflagged. It only generalises to sites not yet written.
+ * The compensating controls the calibration demanded were all performed and are
+ * recorded in `164.3.1-08-SUMMARY.md`: the corpus was RE-MEASURED after the
+ * change (before and after the `:182-186` fix), the SRO-02 fixture pair below
+ * pins the narrowing in BOTH directions so it cannot silently widen back, and
+ * the fire proof was RE-RUN against the narrowed, blocking rule.
  *
  * ── WHAT THIS RULE DOES NOT COVER, stated rather than implied ──────────────
  * (RESEARCH anti-pattern 5 — every control states its own bounds, because the
@@ -45,6 +78,15 @@
  *      literal laundered through a helper (`expect(wrap(lit))`) is invisible,
  *      and the matcher's arguments are never examined — only `expect`'s own
  *      argument 0.
+ *   4. ANY METHOD CALL ON THE BINDING COUNTS AS MUTATION. `isMutatedBetween`
+ *      cannot tell `offenders.push(x)` from `offenders.join(",")` without type
+ *      information, so it treats every method call on the binding as mutation
+ *      and declines to report. That is deliberate: for a BLOCKING gate the
+ *      conservative direction is to miss rather than to red on honest code, and
+ *      the alternative — a hardcoded list of mutator NAMES — would be silently
+ *      wrong for any custom mutator, which is a false attestation rather than a
+ *      stated miss. (Bound 4 in the 02 calibration was "no mutation modelling
+ *      at all"; this is its replacement, narrower and stated.)
  * A subject that is a call into the system under test is out of scope BY
  * DESIGN: that is precisely what makes the green fixture green.
  */
@@ -64,24 +106,94 @@ export const SRO_FIXTURE_DIR = "scripts/self-referential-oracle-fixtures";
  * pair exists on disk, and dropping a fixture reds it immediately. An unpaired
  * or unregistered fixture fails BY NAME.
  */
-export const SRO_FIXTURE_IDS: readonly string[] = ["SRO-01-same-block-const"];
+export const SRO_FIXTURE_IDS: readonly string[] = [
+  "SRO-01-same-block-const",
+  "SRO-02-mutated-binding",
+];
 
 /** Report line prefixes. Exported so plan 164.3.1-08 and the calibration
  *  artifact grep for the same tokens this file prints. */
 export const SRO_FINDING_PREFIX = "SELF-REF-ORACLE finding:";
-export const SRO_SUMMARY_PREFIX = "SELF-REF-ORACLE report-only summary:";
+export const SRO_SUMMARY_PREFIX = "SELF-REF-ORACLE blocking summary:";
 
 /** The scanned population. */
 const CORPUS_DIR = "src/__tests__";
 
 /**
  * Non-vacuity floor for the corpus walk. MEASURED 127 files under
- * `src/__tests__/**\/*.test.ts` on 2026-09-01 at 4752920d. A broken walker
+ * `src/__tests__/**\/*.test.ts` on 2026-09-01 at 4752920d, 128 at 807702ff
+ * (the 164.3.1-02 calibration run), and 130 at 420b8fcb (the 164.3.1-08 run
+ * that flipped this gate blocking — Wave-1 siblings added two). A broken walker
  * scores 0 and reds here rather than reporting a clean scan of nothing;
  * ordinary churn stays far above 100. (SC-9 measured-threshold convention:
- * thresholds are set by measurement with wide separation, never by taste.)
+ * thresholds are set by measurement with wide separation, never by taste — the
+ * floor is deliberately NOT ratcheted to 130, because a floor pinned at the
+ * measurement reds on every legitimate test deletion and gets raised by reflex.)
  */
 const CORPUS_FLOOR = 100;
+
+/**
+ * THE MEASURED-EXCEPTION ALLOWLIST (CONTEXT.md D-05). The corpus scan below is
+ * EXACT against this set in BOTH directions: a finding that is not here fails by
+ * name, and an entry no longer found fails by name too.
+ *
+ * ⛔ EVERY ENTRY CARRIES THE MEASUREMENT THAT JUSTIFIES IT. D-05 is literal
+ * about this — "an unexplained entry is itself a primitive-D instance" — because
+ * an allowlist of bare file names is a control whose exceptions cannot be
+ * audited. `reason` states what was measured; `measured` cites where.
+ *
+ * KEYED ON `file + subjectName + kind`, NEVER ON THE LINE NUMBER. This mirrors
+ * `audit-coverage.test.ts:1488-1495`'s hard-won record: its sites moved
+ * 403 -> 489 and 518 -> 620 under unrelated edits, and a key that decays on
+ * every insertion above it trains people to RE-NUMBER the record rather than
+ * RE-MEASURE it, preserving whatever errors it already held.
+ *
+ * ── SIZING, AND ITS ARITHMETIC (plan 164.3.1-08) ───────────────────────────
+ * `164.3.1-02-CALIBRATION.md` § III recorded 23 findings / 14 files / 128
+ * scanned at HEAD before any fix, and § III.a split them by re-reading the
+ * flagged sites. This list is that record, minus what was disposed of:
+ *
+ *     23  recorded findings at HEAD (calibration § III)
+ *   − 19  MEASURED false positives — the accumulator idiom, mutated between
+ *         declaration and assertion, so able to fail. NOT allowlisted: the
+ *         detector was narrowed instead (see the header). Re-measured after the
+ *         narrowing and before the site fix: 23 -> 4, and the 4 survivors were
+ *         exactly the two classes § III.a called TRUE POSITIVE, which is an
+ *         independent confirmation of that split.
+ *   −  2  FIXED, not excepted — [VAC-SELFREF-01] at
+ *         `lint-sql-gates.test.ts:183` and `:184`, the calibration target.
+ *   =  2  entries below.
+ *
+ * Re-measured after both dispositions on 2026-09-01 with
+ * `npx vitest run src/__tests__/self-referential-oracle.test.ts`:
+ * "2 finding(s) in 1 file(s), 130 file(s) scanned".
+ */
+export const SRO_ALLOWLIST: ReadonlyArray<{
+  file: string;
+  subjectName: string;
+  kind: SelfRefFinding["kind"];
+  reason: string;
+  measured: string;
+}> = [
+  {
+    file: "src/__tests__/types-design-tests.test.ts",
+    subjectName: "empty",
+    kind: "same-block-const",
+    reason:
+      "TRUE POSITIVE at runtime, and deliberately so. `const empty: LazyMetricsPayload = {}` then `expect(empty).toEqual({})` cannot fail when vitest runs it — the real assertion is the TYPE ANNOTATION, checked by `tsc --noEmit`, which is where this contract actually binds: the arm reds if `LazyMetricsPayload` stops accepting an empty map (the Partial<Record<…>> bug it was written for). The vitest arm is the annotation's carrier, not its oracle. Allowlisted rather than converted to `satisfies` because `types-design-tests.test.ts` is outside plan 164.3.1-08's declared file set; conversion is a candidate for the plan 164.3.1-12 corpus pass.",
+    measured:
+      "164.3.1-02-CALIBRATION.md § III (finding `types-design-tests.test.ts:27 expect(empty)`) and § III.a row 'Type-level contract' (2 findings / 1 file, classed TRUE POSITIVE at runtime by reading the site). Re-confirmed present 2026-09-01 after the mutation narrowing.",
+  },
+  {
+    file: "src/__tests__/types-design-tests.test.ts",
+    subjectName: "_kinds",
+    kind: "same-block-const",
+    reason:
+      "TRUE POSITIVE at runtime, same mechanism. `const _kinds: StrategyAnalyticsSeriesKind[] = [ …12 string literals ]` then `expect(_kinds).toHaveLength(12)` counts the literals the block itself just wrote. What binds is the annotation: `tsc` reds if any of the 12 stops being a member of `StrategyAnalyticsSeriesKind`. Same disposition and same 164.3.1-12 candidacy as the entry above.",
+    measured:
+      "164.3.1-02-CALIBRATION.md § III (finding `types-design-tests.test.ts:63 expect(_kinds)`) and § III.a row 'Type-level contract'. Re-confirmed present 2026-09-01 after the mutation narrowing.",
+  },
+];
 
 export type SelfRefFinding = {
   file: string;
@@ -149,11 +261,106 @@ function enclosingStatement(node: ts.Node): { stmt: ts.Statement; container: Con
 }
 
 /**
- * Line of the `const <subject> = <literal-only>` binding in the SAME block, or
- * null. Scans BACKWARDS from the expect's own statement so the nearest
- * shadowing declaration wins; if that nearest binding is not literal-only the
- * subject is considered reachable from the system under test and nothing is
- * reported, even if an earlier literal of the same name exists.
+ * The identifier a member chain is rooted at: `x` for `x`, `x.y`, `x[i].z`.
+ * Anything not rooted at a bare identifier (a call result, a literal) is null.
+ */
+function rootIdentifier(node: ts.Expression): ts.Identifier | null {
+  let cur: ts.Node = node;
+  while (ts.isPropertyAccessExpression(cur) || ts.isElementAccessExpression(cur)) {
+    cur = cur.expression;
+  }
+  return ts.isIdentifier(cur) ? cur : null;
+}
+
+const ASSIGNMENT_OPERATORS: ReadonlySet<ts.SyntaxKind> = new Set([
+  ts.SyntaxKind.EqualsToken,
+  ts.SyntaxKind.PlusEqualsToken,
+  ts.SyntaxKind.MinusEqualsToken,
+  ts.SyntaxKind.AsteriskEqualsToken,
+  ts.SyntaxKind.SlashEqualsToken,
+  ts.SyntaxKind.PercentEqualsToken,
+  ts.SyntaxKind.AmpersandAmpersandEqualsToken,
+  ts.SyntaxKind.BarBarEqualsToken,
+  ts.SyntaxKind.QuestionQuestionEqualsToken,
+]);
+
+/**
+ * True when `subjectName` is MUTATED by any statement strictly between its
+ * declaration and the statement holding the assertion.
+ *
+ * THE POINT (calibration § III.a). `const offenders: string[] = []` has a
+ * literal-only initializer, but a loop that `push`es into it means the value at
+ * assertion time was PRODUCED BY THE SYSTEM UNDER TEST. `expect(offenders)`
+ * there can fail; it is not a self-referential oracle, and 19 of the 23 findings
+ * measured at HEAD on 2026-09-01 were exactly this shape. Reporting them would
+ * make the blocking gate red on the repo's dominant honest idiom.
+ *
+ * Direct mutation evidence only — the binding must itself be the receiver or the
+ * assignment target. The subject merely APPEARING as a call argument
+ * (`JSON.stringify(subject)` in an assertion message, or an earlier
+ * `expect(subject)` on the same const) is deliberately NOT mutation: counting it
+ * would have suppressed `:184` of the calibration target, whose only
+ * intervening statement is the `expect` at `:183`.
+ *
+ * See non-coverage bound 4 in the file header for what this deliberately misses.
+ */
+export function isMutatedBetween(
+  subjectName: string,
+  statements: readonly ts.Statement[],
+  declIndex: number,
+  expectIndex: number,
+): boolean {
+  let mutated = false;
+
+  const visit = (n: ts.Node): void => {
+    if (mutated) return;
+
+    // `subject.push(x)`, `subject.set(k, v)`, `subject[k]()` — a method call
+    // whose receiver chain is rooted at the binding.
+    if (
+      ts.isCallExpression(n) &&
+      (ts.isPropertyAccessExpression(n.expression) || ts.isElementAccessExpression(n.expression))
+    ) {
+      const root = rootIdentifier(n.expression);
+      if (root !== null && root.text === subjectName) {
+        mutated = true;
+        return;
+      }
+    }
+
+    // `subject.k = v`, `subject[i] = v` (`subject = v` cannot occur on a const).
+    if (ts.isBinaryExpression(n) && ASSIGNMENT_OPERATORS.has(n.operatorToken.kind)) {
+      const root = rootIdentifier(n.left);
+      if (root !== null && root.text === subjectName) {
+        mutated = true;
+        return;
+      }
+    }
+
+    // `delete subject.k`
+    if (ts.isDeleteExpression(n)) {
+      const root = rootIdentifier(n.expression);
+      if (root !== null && root.text === subjectName) {
+        mutated = true;
+        return;
+      }
+    }
+
+    ts.forEachChild(n, visit);
+  };
+
+  for (let i = declIndex + 1; i < expectIndex; i++) visit(statements[i]);
+  return mutated;
+}
+
+/**
+ * Line of the `const <subject> = <literal-only>` binding in the SAME block that
+ * is STILL literal-valued at the assertion, or null. Scans BACKWARDS from the
+ * expect's own statement so the nearest shadowing declaration wins; if that
+ * nearest binding is not literal-only the subject is considered reachable from
+ * the system under test and nothing is reported, even if an earlier literal of
+ * the same name exists. A binding mutated on the way to the assertion
+ * (`isMutatedBetween`) is likewise not reported — it is no longer a constant.
  */
 function resolveSameBlockLiteralConst(
   subject: ts.Identifier,
@@ -171,6 +378,7 @@ function resolveSameBlockLiteralConst(
     for (const decl of statement.declarationList.declarations) {
       if (!ts.isIdentifier(decl.name) || decl.name.text !== subject.text) continue;
       if (decl.initializer === undefined || !isLiteralOnly(decl.initializer)) return null;
+      if (isMutatedBetween(subject.text, statements, i, stop)) return null;
       return source.getLineAndCharacterOfPosition(decl.name.getStart(source)).line + 1;
     }
   }
@@ -280,6 +488,18 @@ export function countExpectCallSites(fileName: string, code: string): number {
   return sites;
 }
 
+/**
+ * The allowlist identity key: file + subject + kind, NEVER the line number.
+ * Shared by the findings and the allowlist so the two sets are comparable.
+ */
+export function findingKey(f: {
+  file: string;
+  subjectName: string | null;
+  kind: SelfRefFinding["kind"];
+}): string {
+  return `${f.file}::${f.subjectName ?? "<literal>"}::${f.kind}`;
+}
+
 /** One report line per finding, in the shape the calibration artifact quotes. */
 export function formatFinding(f: SelfRefFinding): string {
   const subject = f.subjectName === null ? "<literal>" : f.subjectName;
@@ -353,7 +573,43 @@ describe("primitive D — self-referential oracle detector", () => {
     expect(stray, "the fixture directory holds pairs and nothing else").toEqual([]);
   });
 
-  it("report-only corpus scan over src/__tests__", () => {
+  // ── SRO-02: the mutation narrowing, pinned in BOTH directions ───────────
+  // Plan 164.3.1-08 narrowed the detector AFTER seeing a corpus count. These
+  // two arms are what stop that narrowing drifting: widen it and the red
+  // fixture stops being flagged; revert or break it and the green fixture
+  // starts being flagged. Either way an arm reds by name.
+  it("SRO-02 red fixture — an INERT collection const is still flagged", () => {
+    const relPath = `${SRO_FIXTURE_DIR}/SRO-02-mutated-binding.red.ts`;
+    const code = readFixture("SRO-02-mutated-binding", "red");
+    const findings = findSelfReferentialExpects(relPath, code);
+    const sameBlock = findings.filter((f) => f.kind === "same-block-const");
+
+    expect(
+      sameBlock.map((f) => f.subjectName),
+      `an array const that is never mutated is still a constant, so the assertion reading it is still true by construction; if this arm is empty the mutation narrowing has been widened past "mutated" into "collection-shaped" or "merely mentioned". Findings were ${JSON.stringify(findings)}`,
+    ).toContain("offenders");
+  });
+
+  it("SRO-02 green fixture — the accumulator idiom passes, and is really being read", () => {
+    const relPath = `${SRO_FIXTURE_DIR}/SRO-02-mutated-binding.green.ts`;
+    const code = readFixture("SRO-02-mutated-binding", "green");
+
+    // VACUITY FENCE FIRST — the SRO-01 green arm's hard-won lesson (see
+    // countExpectCallSites). An absence proves nothing until the parse is known
+    // to have found the assertions it is an absence of.
+    expect(
+      countExpectCallSites(relPath, code),
+      "the green fixture must parse to at least one real expect() site; zero means the fixture was corrupted and the emptiness below would be rubble, not cleanliness",
+    ).toBeGreaterThanOrEqual(1);
+
+    const findings = findSelfReferentialExpects(relPath, code);
+    expect(
+      findings,
+      `a binding filled by the scan it reports on CAN fail and is not primitive D; flagging it would red the repo's dominant honest gate-test idiom (19 of 23 findings at HEAD, calibration § III.a). Findings were ${JSON.stringify(findings)}`,
+    ).toHaveLength(0);
+  });
+
+  it("BLOCKING corpus scan over src/__tests__ — exact against SRO_ALLOWLIST", () => {
     const files = listCorpusFiles();
 
     expect(
@@ -383,11 +639,54 @@ describe("primitive D — self-referential oracle detector", () => {
       `${report}${SRO_SUMMARY_PREFIX} ${findings.length} finding(s) in ${affected.size} file(s), ${files.length} file(s) scanned\n`,
     );
 
-    // REPORT-ONLY BY PHASE DESIGN — there is deliberately NO assertion on the
-    // finding count here. Plan 164.3.1-08 flips this to blocking against the
-    // measured allowlist. Only finding SHAPE is checked, so a detector emitting
-    // unusable records still reds.
+    // Shape first: a detector emitting unusable records must red here rather
+    // than pass the set comparison below on garbage keys.
     const malformed = findings.filter((f) => !f.file || !Number.isInteger(f.expectLine) || f.expectLine < 1);
     expect(malformed, "every finding must carry a file and a 1-based expect line").toEqual([]);
+
+    // ── BLOCKING, EXACT, BOTH DIRECTIONS (D-05) ──────────────────────────
+    // The discipline is `audit-coverage.test.ts:1625-1650`'s: a new finding
+    // fails by name with instructions that do NOT include "add it to the
+    // allowlist", and a discharged entry fails by name too, so the exception
+    // list can only shrink silently — never grow.
+    const allowKeys = new Set(SRO_ALLOWLIST.map(findingKey));
+    const foundKeys = new Set(findings.map(findingKey));
+
+    const unexplained = findings.filter((f) => !allowKeys.has(findingKey(f)));
+    if (unexplained.length > 0) {
+      const formatted = unexplained.map((f) => `  ${formatFinding(f)}`).join("\n");
+      throw new Error(
+        `Found ${unexplained.length} self-referential oracle(s) NOT in SRO_ALLOWLIST:\n${formatted}\n\n` +
+          "Each flagged assertion reads a `const` bound to a literal in its OWN block, so it\n" +
+          "holds whether or not the system under test exists — it cannot fail when the behaviour\n" +
+          "it claims to pin changes. FIX IT: bind the subject to something the system under test\n" +
+          "produced (read the real artifact, call the real function) and assert what is true of\n" +
+          "those bytes. `scripts/self-referential-oracle-fixtures/SRO-01-same-block-const.green.ts`\n" +
+          "is the repaired idiom, one line long.\n" +
+          "\n" +
+          "⛔ Do NOT add the site to SRO_ALLOWLIST to silence this. That list holds MEASURED\n" +
+          "exceptions only, each carrying the measurement that justifies it (CONTEXT.md D-05:\n" +
+          "an unexplained entry is itself a primitive-D instance). A newly written\n" +
+          "self-referential oracle is the exact thing this gate exists to stop — four review\n" +
+          "rounds closed the example and declared the class closed before this machine existed.",
+      );
+    }
+
+    const discharged = SRO_ALLOWLIST.filter((a) => !foundKeys.has(findingKey(a)));
+    if (discharged.length > 0) {
+      const formatted = discharged
+        .map((a) => `  ${a.file} :: ${a.subjectName} :: ${a.kind}\n    (${a.reason})`)
+        .join("\n");
+      throw new Error(
+        `${discharged.length} SRO_ALLOWLIST entr(y/ies) are no longer flagged:\n${formatted}\n\n` +
+          "Good news — the debt shrank, or the detector moved. Establish WHICH before editing:\n" +
+          "  * the site was fixed  -> DELETE the entry, and update the arithmetic in the\n" +
+          "    SRO_ALLOWLIST header so the sizing still reconciles against the calibration;\n" +
+          "  * the detector stopped seeing it -> that is a REGRESSION in the rule, not a\n" +
+          "    discharge. Re-run the fire proof before touching this list.\n" +
+          "A stale entry is not harmless: it overstates the rule's coverage, which is the\n" +
+          "false-attestation shape this phase exists to close.",
+      );
+    }
   });
 });
