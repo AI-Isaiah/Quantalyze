@@ -1143,6 +1143,128 @@ describe("[VAC04-C1] — the zero path FAILS CLOSED: both readers' evidence, THE
     });
   });
 
+  // ── THE THIRD DIRECTION (D-13, 2026-09-01) ─────────────────────────────────
+  //
+  // ⛔ WHY THIS EXISTS. The refusal above was UNCONDITIONAL: every changed set
+  // with no extractable function refused, not only the composing shape.
+  // MEASURED at HEAD over all 262 migrations in this repo — 111 define no
+  // function either structural reader can see — so it permanently blocked
+  // roughly two migration PRs in five from a gate whose subject is function
+  // BODY drift. A gate that reds on `ALTER TABLE` acquires an escape hatch from
+  // whoever is on call, which is a slower version of the failure this phase
+  // exists to prevent.
+  //
+  // So the zero path now discriminates with a deliberately CRUDE textual scan,
+  // used ONLY here and never as a reader. Three directions, all required, and
+  // all three are needed together: the refusal arm alone is passed by a gate
+  // that refuses everything, the pass arm alone by a gate that passes
+  // everything, and BOTH are passed by a tripwire wired to a constant. The two
+  // neuter directions were driven by hand and are recorded in
+  // `164.3.1-07-SUMMARY.md` § "Follow-up 2026-09-01".
+  const ALTER_ONLY =
+    "ALTER TABLE public.api_keys ADD COLUMN IF NOT EXISTS kek_version INTEGER NOT NULL DEFAULT 1;\n" +
+    "CREATE INDEX IF NOT EXISTS api_keys_kek_version_idx ON public.api_keys (kek_version);\n";
+
+  it("CALIBRATION: the ALTER-only fixture is invisible to both readers for the RIGHT reason — there is no function in it", () => {
+    // Deliberately paired with the composing calibration above. Both fixtures
+    // produce zero names from both readers; the ONLY thing separating them is
+    // whether a definition is actually there. If this fixture were visible to a
+    // reader, the pass arm below would be exercising the ordinary non-empty
+    // path and would prove nothing about the legitimate-zero branch.
+    withTempDir((dir) => {
+      const f = join(dir, "alter_only.sql");
+      writeFileSync(f, ALTER_ONLY);
+      const lexer = spawnSync("node", [NORMALIZER, "--function-names", f], { encoding: "utf8" });
+      const naive = spawnSync("node", [NAIVE, f], { encoding: "utf8" });
+      expect(lexer.status).toBe(0);
+      expect(naive.status).toBe(0);
+      expect(lexer.stdout.trim()).toBe("");
+      expect(naive.stdout.trim()).toBe("");
+    });
+  });
+
+  it("LEGITIMATE ZERO: an ALTER-only changed set PASSES, with a notice naming what was scanned", () => {
+    withTempDir((dir) => {
+      // Identical wiring to the refusal arm; the ONLY difference is that this
+      // changed set contains no function definition for anything to have missed.
+      const env = scaffold(dir, ALTER_ONLY);
+      const { status, out } = run(PROD_GATE, env);
+
+      expect(
+        status,
+        "a changed set with genuinely no function in it must PASS — refusing it makes " +
+          "a function-body gate a nuisance on 41% of migration PRs, and nuisance gates " +
+          "get escape hatches\n" + out,
+      ).toBe(0);
+
+      // The notice must be EVIDENCE, not a bare verdict (D-12/SC-7): what was
+      // changed, what each of the three readings returned.
+      expect(out).toContain("Migrations changed by this PR: 1");
+      expect(out).toContain("20260901120000_zero_path.sql");
+      expect(out, "the pass must SAY the third scan ran and found nothing").toMatch(
+        /crude textual scan[^\n]*-> 0 of 1 file\(s\)/,
+      );
+      expect(out).toContain("LEGITIMATE");
+      // A legitimate zero is a measurement, not a measurement failure.
+      expect(out).not.toContain("MEASURE_FAIL");
+      // And it is not the old fail-open text returning by another door.
+      expect(out).not.toContain("(Two independent readings agree; see SP-C05.)");
+    });
+  });
+
+  it("CORPUS: on REAL repo migrations the tripwire passes an ALTER-only one and BLOCKS a comment-only mention", () => {
+    // The measured separation, driven against the actual files rather than
+    // restated as a number. MEASURED at HEAD across all 262 migrations: 111 are
+    // structural-zero, of which 108 carry no textual `CREATE … FUNCTION` (pass)
+    // and 3 mention one inside a COMMENT (block). Blocking on a comment is the
+    // tripwire's known imprecision and its FAIL-SAFE direction — 3 of 262, and
+    // erring toward the block is correct for a gate over PRODUCTION bodies.
+    const LEGIT = "supabase/migrations/20260405093827_kek_version.sql";
+    const COMMENT_ONLY = [
+      "supabase/migrations/20260515130001_enqueue_compute_job_internal_acl_remediation.sql",
+      "supabase/migrations/20260516170100_reset_stalled_portfolio_analytics_revoke_public.sql",
+      "supabase/migrations/20260517013200_notification_dispatches_recipient_email_lower_idx.sql",
+    ];
+
+    withTempDir((dir) => {
+      const base = scaffold(dir, ALTER_ONLY);
+
+      const legit = run(PROD_GATE, { ...base, CHANGED_MIGRATIONS: LEGIT });
+      expect(
+        legit.status,
+        `a real ALTER-only migration must not be blocked by a function-body gate\n${legit.out}`,
+      ).toBe(0);
+      expect(legit.out).toContain("LEGITIMATE");
+
+      for (const f of COMMENT_ONLY) {
+        const res = run(PROD_GATE, { ...base, CHANGED_MIGRATIONS: f });
+        expect(
+          res.status,
+          `${f} mentions CREATE … FUNCTION in a comment while both readers see nothing — ` +
+            `the tripwire must fail SAFE and block\n${res.out}`,
+        ).not.toBe(0);
+        expect(res.out).toContain("MEASURE_FAIL");
+        expect(res.out, "the refusal must NAME the file the third scan hit in").toContain(f);
+      }
+    });
+  });
+
+  it("REOPEN PIN: the tripwire's crudeness is documented AS DELIBERATE, so it is not upgraded into a parser", () => {
+    // By name, node:fs, same reasoning as the marker arm below. The rationale is
+    // the load-bearing part: a later reader who "fixes" the scan into a real
+    // parser would give it the same blind spots as the two readers it exists to
+    // check, and the discriminator would silently stop discriminating.
+    const src = readFileSync(PROD_GATE, "utf8");
+    expect(src).toContain("VAC04-ZERO-PATH-TRIPWIRE");
+    expect(
+      src,
+      "the crudeness rationale was deleted — the next reader has nothing stopping them",
+    ).toContain('DO NOT "IMPROVE" THIS INTO A PARSER');
+    expect(src.toLowerCase()).toContain("blind spots do not overlap");
+    // No human override. The tripwire is a measurement, not a knob (D-13).
+    expect(src).toContain("the tripwire is a MEASUREMENT, not a");
+  });
+
   // ── (b) The reopen pin's BY-NAME direction ─────────────────────────────────
   it("REOPEN PIN: the gate script carries the VAC04-ZERO-PATH-FAILS-CLOSED marker and its ordering note", () => {
     // node:fs, never shell grep — `src/lib/wizardErrors.test.ts` carries a
