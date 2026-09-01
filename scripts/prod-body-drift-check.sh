@@ -422,7 +422,43 @@ for fname in "${NAMES[@]}"; do
 
   if [ ! -s "$live" ] || ! grep -aqE '[^[:space:]]' "$live"; then
     # WR-01: empty stdout is TWO different facts. Ask the index which one.
-    if grep -aqxF -- "$fname" "$TMP/prod-names.txt"; then
+    #
+    # ⛔ [VAC04-C3]. This was a BARE `if grep …; then … else … fi`, and `grep`
+    # exits 0 on a match, 1 on NO match, and >= 2 on an ERROR — an unreadable
+    # file, an I/O failure, a broken locale. Exit 1 and exit 2 both fell to the
+    # same `else`, which prints "measured absent … Treated as a NEW function
+    # (pass)". So an index this gate COULD NOT READ was reported as an index it
+    # read and found nothing in, turning WR-01's one fail-CLOSED arm ("absence
+    # is a MEASUREMENT") into a fail-OPEN one. Repeated across every name it is
+    # the whole gate green having compared nothing.
+    #
+    # MEASURED 2026-09-01 with a `grep` shimmed to exit 2 on this call alone:
+    #   "  demo_fn: measured absent — not in the PROD source's 1-name index.
+    #    Treated as a NEW function (pass)."
+    #   "::notice::… ZERO bodies compared … This is a measured zero, not an
+    #    unread one."                                                  exit 0
+    # The last sentence was the exact inversion of the truth.
+    #
+    # The status is CAPTURED and branched three ways, using VAC-08's discipline
+    # at test-ledger-drift-check.sh:311-318. `-aqxF` is kept verbatim: NUL-safe,
+    # fixed-string, whole-line — the reason for each flag is the house idiom.
+    set +e
+    grep -aqxF -- "$fname" "$TMP/prod-names.txt"
+    _idx_rc=$?
+    set -e
+    if [ "$_idx_rc" -ge 2 ]; then
+      echo "::error::${GATE}: MEASURE_FAIL — could not READ the PROD function-name index while"
+      echo "::error::deciding whether '${fname}' is absent from PROD."
+      echo "::error::  index file  : ${TMP}/prod-names.txt"
+      echo "::error::  searched for: ${fname}"
+      echo "::error::  grep exited : ${_idx_rc}   (0 = present, 1 = measured absent, >= 2 = ERROR)"
+      echo "::error::An index this gate could not read is not an index that measured absence."
+      echo "::error::Reporting '${fname}' as a NEW function here would be a pass for a name this"
+      echo "::error::run never looked up — and the same failure on every name is the whole gate"
+      echo "::error::green having compared nothing."
+      exit 1
+    fi
+    if [ "$_idx_rc" -eq 0 ]; then
       echo "::error::${GATE}: '${fname}' IS in the PROD source's function-name index, but the"
       echo "::error::fetcher extracted no body for it. That is an extraction failure, not a new"
       echo "::error::function. Reporting it as 'new — pass' would be a pass for something this"
@@ -431,6 +467,10 @@ for fname in "${NAMES[@]}"; do
       bad=1
       failed_names=$((failed_names + 1))
     else
+      # Exactly status 1 — the >= 2 leg exited above and 0 was taken by the
+      # branch above, so the three legs are exhaustive over grep's status. This
+      # is the ONE silent pass this gate has, and it is now reachable only from
+      # a grep that RAN and reported no match.
       echo "  ${fname}: measured absent — not in the PROD source's ${PROD_NAME_COUNT}-name index. Treated as a NEW function (pass)."
       absent=$((absent + 1))
     fi
