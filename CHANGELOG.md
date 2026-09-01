@@ -32,11 +32,16 @@ Backlog only. No production source change, no CI change, no schema change.
     `MT5_LOGIN` / `MT5_SERVER` variables. A pre-logged-in terminal was never a
     precondition, so a VNC login is not the remedy either.
 
-  Both wrong readings came from reasoning about the error code instead of reading
-  the call path. What the item records as the actual next diagnostic: the Wine
-  prefix sits on a persistent Railway volume, so MT5 profile state survives every
-  redeploy — marked `[HYPOTHESIS — not yet measured]`, to be confirmed by opening
-  the gateway's VNC console and observing what the terminal displays.
+  **Root cause, confirmed by direct observation the same day:** the terminal was
+  sitting at an interactive **login prompt**. A modal dialog blocks MT5's message
+  loop, so `terminal64.exe` never services the Python IPC bridge and every call
+  times out as `-10005`. The Wine prefix sits on a persistent Railway volume, so
+  the dialog — and therefore the wedge — replays on every redeploy, which is why a
+  restart is not a remedy here even though a restart has cleared a wedge before.
+
+  The distinction the item now pins, because it was gotten wrong twice: the
+  terminal does not need to be logged IN, it needs to not be stuck in a MODAL
+  DIALOG. "Logged out" is harmless. "Showing a login box" is fatal.
 
   The item also declines to claim the gateway "ran healthy for five days then
   wedged" — nothing probes MT5, so that span is unprovable, which is the whole

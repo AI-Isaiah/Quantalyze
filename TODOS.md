@@ -1264,14 +1264,22 @@ one terminal cycles through hundreds of accounts a day). The gateway carries no 
 `MT5_SERVER` variables because it was never meant to hold a session. A pre-logged-in terminal was
 never a precondition.
 
-**Why a restart is not a remedy [HYPOTHESIS — not yet measured].** The service mounts a persistent
-volume (`RAILWAY_VOLUME_ID` / `RAILWAY_VOLUME_MOUNT_PATH` are set, and the boot log mounts it), so
-the Wine prefix and the MT5 profile survive every redeploy. A terminal stuck behind a modal dialog
-— update prompt, authorization box, expired-account notice — never services IPC, and that state
-replays on each restart because it lives on the volume, not in the image. This would explain why
-the 2026-09-01 redeploy failed to clear a wedge that a redeploy HAS cleared before. Unverified:
-confirming it means opening the KasmVNC console and looking at what the terminal is actually
-displaying. That observation is the next diagnostic step, not a login.
+⭐ **ROOT CAUSE, CONFIRMED by direct observation 2026-09-01.** The terminal was sitting at an
+**interactive login prompt**. A modal dialog blocks MT5's message loop, so `terminal64.exe` never
+services the Python IPC bridge and every call times out as `-10005`. The service mounts a
+persistent volume (`RAILWAY_VOLUME_ID` / `RAILWAY_VOLUME_MOUNT_PATH` are set, and the boot log
+mounts it), so the Wine prefix and MT5 profile survive every redeploy — which is why the dialog,
+and therefore the wedge, replays on every restart and why a redeploy is not a remedy here even
+though a redeploy HAS cleared a wedge before.
+
+⚠️ **The precise statement, because it was gotten wrong twice.** The terminal does NOT need to be
+logged in for our calls to work — the validate path logs in per call. What it must not be is stuck
+in a MODAL DIALOG. "Logged out" is harmless; "showing a login box" is fatal. Those are different
+states and only the second one wedges the bridge.
+
+**Remedy:** complete the login at the VNC console so the terminal reaches its normal running state
+and saves the account. Cancelling the dialog unblocks IPC for the current boot but the prompt
+returns on the next restart, reproducing the wedge.
 
 **Why nothing caught it.**
 
@@ -1297,10 +1305,14 @@ are recorded here so the next person does not repeat them.**
 
 1. *"It wedged after 5 days of uptime, so restart it."* → the redeploy changed nothing. Uptime was
    never measured; nothing probes MT5.
-2. *"The terminal isn't logged in, so log it in over VNC."* → the validate path logs in per call.
-   Contradicted by `exchange.py:767-782` and by the absence of any `MT5_LOGIN` variable.
+2. *"The terminal isn't logged in, so log it in over VNC."* → right ACTION, wrong REASON, and the
+   reason is what makes it reusable. The validate path logs in per call (`exchange.py:767-782`)
+   and there is no `MT5_LOGIN` variable, so a missing SESSION was never the problem. The problem
+   was the login DIALOG blocking the message loop. Reasoning from "it needs a session" would send
+   you to re-enter credentials on a terminal that is merely logged out and working fine.
 
-Both came from reasoning about the error code instead of reading the call path. Read the call path.
+The first came from reasoning about the error code instead of reading the call path. The second
+came from reading the call path but not looking at the screen. Both were needed.
 
 
 ### ⛔ DRIFT-02 — a surgical in-place patch means the REPO no longer holds the true function body (booked 2026-08-27)
