@@ -245,15 +245,82 @@ fi
 
 NAME_COUNT="${#NAMES[@]}"
 if [ "${NAME_COUNT:-0}" -eq 0 ]; then
-  # Now a TWO-READING zero: neither the lexer-based parser nor the line-anchored
-  # regex found a definition. ⚠️ Residual, stated rather than implied: a
-  # definition assembled at run time inside dynamic SQL (`EXECUTE 'CREATE
-  # FUNCTION …'`) is claimed by neither reading and still reaches this exit 0.
+  # ── VAC04-ZERO-PATH-FAILS-CLOSED ───────────────────────────────────────────
+  #
+  # ⛔ [VAC04-C1]. This branch used to be a one-line `::notice::` and `exit 0`:
+  #     "this PR's migrations define no functions — nothing to compare.
+  #      (Two independent readings agree; see SP-C05.)"
+  # and the parenthesis was doing work it cannot do. TWO READINGS AGREEING IS
+  # NOT A MEASUREMENT WHEN THEIR BLIND SPOTS OVERLAP — that is one absence
+  # observed twice, not two observations of absence. SP-C05 bought INDEPENDENCE
+  # (the two readers do not share an implementation); independence is not
+  # COVERAGE.
+  #
+  # MEASURED 2026-09-01 at bab02576 on the P8 composing shape — one line, two
+  # statements, a `$` in the identifier:
+  #     SELECT 1; CREATE OR REPLACE FUNCTION public.fn$v2(p uuid) …
+  # The line-anchored reader never starts (the line does not BEGIN with
+  # `CREATE`); the lexer's `readQualifiedName` stops at the `$`. Both print
+  # NOTHING and exit 0, and this gate printed:
+  #     "Migrations changed by this PR: 1"
+  #     "::notice::… define no functions — nothing to compare. (Two independent
+  #      readings agree; see SP-C05.)"                                  exit 0
+  # A gate over PRODUCTION function bodies, green, having compared nothing.
+  # That is Primitive C's canonical case: a VERDICT not bounded by what was
+  # MEASURED. So this path now REFUSES — and prints its evidence FIRST, because
+  # a gate that ships a bare conclusion is the same defect one level down
+  # (D-12 / SC-7).
+  #
+  # ⚠️ WHAT THIS COSTS, stated rather than discovered. This refuses EVERY
+  # migration PR whose changed migrations define no function — not only the
+  # exotic composing shape. That blast radius is KNOWN AND ACCEPTED (founder
+  # decision, amended D-07, 2026-09-01, reversing a same-day call that would
+  # have deferred the flip to Phase 164.4 and left success criterion 4 unmet at
+  # phase end). The risk is carried by ORDERING, not by weakening the gate:
+  #
+  # ⛔ MIGRATION PRs ARE HELD UNTIL PHASE 164.3.1 AND PHASE 164.4 HAVE BOTH
+  #    LANDED. If you are reading this because your PR is blocked here, the gate
+  #    is WORKING. Route the ordering, not the gate. Do NOT revert this branch
+  #    to `exit 0`: the reopen pin in src/__tests__/drift-check-scripts.test.ts
+  #    ("[VAC04-C1] — the zero path FAILS CLOSED") REDs by execution if you do,
+  #    and by name if you delete the marker above.
+  #
+  # ⚠️ Residual, still stated: a definition assembled at run time inside dynamic
+  # SQL (`EXECUTE 'CREATE FUNCTION …'`) is claimed by neither reading either. It
+  # no longer reaches an exit 0 — it reaches this refusal, with everything else.
   # A cruder token scan was MEASURED as the alternative and rejected: 7 of the
   # 262 migrations in this repo mention `CREATE … FUNCTION` in prose while
   # defining none, so it would red real PRs for reading a comment.
-  echo "::notice::${GATE}: this PR's migrations define no functions — nothing to compare. (Two independent readings agree; see SP-C05.)"
-  exit 0
+  _lexer_n="$(grep -ac '[^[:space:]]' "$TMP/names.lexer.txt" || true)"
+  _naive_n="$(grep -ac '[^[:space:]]' "$TMP/names.naive.txt" || true)"
+  echo "::error::${GATE}: MEASURE_FAIL — NOTHING WAS COMPARED."
+  echo "::error::"
+  echo "::error::WHAT THE TWO READERS SAW (evidence first — D-12/SC-7):"
+  echo "::error::  changed migration file(s): ${CHANGED_COUNT}"
+  sed 's|^|::error::    |' "$TMP/changed.txt"
+  echo "::error::  ${NORMALIZER} --function-names -> ${_lexer_n:-0} name(s)"
+  grep -aqE '[^[:space:]]' "$TMP/names.lexer.txt" \
+    && sed 's|^|::error::    |' "$TMP/names.lexer.txt" \
+    || echo "::error::    (none)"
+  echo "::error::  ${NAIVE_NAMES} -> ${_naive_n:-0} name(s)"
+  grep -aqE '[^[:space:]]' "$TMP/names.naive.txt" \
+    && sed 's|^|::error::    |' "$TMP/names.naive.txt" \
+    || echo "::error::    (none)"
+  echo "::error::"
+  echo "::error::[VAC04-C1] Two independent readings agreeing on ZERO is not evidence of"
+  echo "::error::absence when their blind spots OVERLAP — it is one absence observed twice."
+  echo "::error::MEASURED 2026-09-01: a mid-line definition carrying a '\$' in its identifier"
+  echo "::error::is invisible to BOTH readers, and this gate exited 0 on it having compared"
+  echo "::error::nothing at all, over PRODUCTION function bodies. A gate cannot report a pass"
+  echo "::error::for a comparison it never made, so this path fails closed."
+  echo "::error::"
+  echo "::error::⛔ ORDERING, not a defect to route around: migration PRs are HELD until Phase"
+  echo "::error::164.3.1 AND Phase 164.4 have both landed (founder decision, amended D-07,"
+  echo "::error::2026-09-01). A block here is this gate WORKING."
+  echo "::error::To proceed on a PR that genuinely defines a function, make the definition"
+  echo "::error::visible to at least one reader — put 'CREATE OR REPLACE FUNCTION' at the"
+  echo "::error::start of its own line — and re-run."
+  exit 1
 fi
 
 echo "Functions defined or replaced by this PR: ${NAME_COUNT}"
