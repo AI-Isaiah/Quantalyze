@@ -423,7 +423,6 @@ export function neuterArm(text, arm) {
     };
   }
   const raiseStmt = statements[raiseIdx];
-  const raiseAt = raiseStmt.startLine - 1;
 
   // Absorb the abort-path cleanup that immediately precedes the RAISE. See the
   // header: leaving `RESET ROLE;` behind leaks a superuser session into every
@@ -432,8 +431,8 @@ export function neuterArm(text, arm) {
   // live, which is a neuter that silently did nothing.
   //
   // ⭐ Absorption is now asked of a STATEMENT, so `IF NOT ok THEN RESET ROLE;
-  // RAISE …;` on ONE line absorbs correctly — the old line walk started at
-  // `raiseAt - 1` and could not see a cleanup sharing the RAISE's line at all.
+  // RAISE …;` on ONE line absorbs correctly — the old line walk started at the
+  // line BEFORE the RAISE's and could not see a cleanup sharing its line.
   let startIdx = raiseIdx;
   for (;;) {
     const p = prevSiblingIndex(statements, startIdx, raiseStmt.depth);
@@ -526,38 +525,81 @@ export function neuterArm(text, arm) {
     return refuse(stmt);
   }
 
-  // Walk forward to the statement terminator, tracking single-quote state so a
-  // ';' inside the message literal does not end the statement early. '' is the
-  // SQL escape for a literal quote.
-  let end = -1;
-  let inQuote = false;
-  outer: for (let i = raiseAt; i < lines.length; i += 1) {
-    const line = lines[i];
-    for (let c = 0; c < line.length; c += 1) {
-      const ch = line[c];
-      if (ch === "'") {
-        if (inQuote && line[c + 1] === "'") {
-          c += 1;
-          continue;
-        }
-        inQuote = !inQuote;
-      } else if (ch === ";" && !inQuote) {
-        end = i;
-        break outer;
-      }
-    }
-  }
-  if (end === -1) {
+  // ── [MUT-I01]: where the RAISE ENDS ──────────────────────────────────────
+  //
+  // ⛔ THE DELETED READER AND WHY IT WAS DELETED RATHER THAN REPAIRED. This
+  // used to be a raw character walk from the RAISE's line, tracking ONE
+  // character — `'`, with the `''` escape — and nothing else. An apostrophe
+  // inside a `--` comment inside the RAISE's own span therefore flipped its
+  // parity, and the two parities failed DIFFERENTLY:
+  //
+  //   ODD  — the real terminator was swallowed, no `;` was ever found, and a
+  //          perfectly legal arm was refused as `neuter-missed`. Loud, false.
+  //   EVEN — parity was restored by a second apostrophe AFTER the real
+  //          terminator had been swallowed, so the walk ran on and ended on a
+  //          LATER statement's `;`. The neuter then commented out a statement
+  //          that had to survive, and reported success. SILENT.
+  //
+  // A repaired walk would have to know comments, which means knowing literals,
+  // dollar quotes and block comments — that is the tokenizer. So the end of the
+  // RAISE is simply the end of the RAISE's STATEMENT, and the duplicate walker
+  // is gone. `terminated: false` (a statement running to EOF with no `;`) keeps
+  // the one refusal that was always real: an unterminated statement is a
+  // MEASURE failure, not a shorter statement.
+  if (!raiseStmt.terminated) {
     return { text, found: false, reason: `could not find the end of the RAISE statement for "${arm}"` };
   }
 
-  const indent = (lines[start].match(/^[ \t]*/) || [""])[0];
-  const replacement = [
-    ...lines.slice(start, end + 1).map((l) => `-- NEUTERED(${arm}) ${l}`),
-    `${indent}NULL; -- neutered ${arm} by the mutation runner`,
-  ];
-  lines.splice(start, end - start + 1, ...replacement);
-  return { text: lines.join("\n"), found: true };
+  // ── The rewrite ──────────────────────────────────────────────────────────
+  //
+  // The span is a STATEMENT RANGE, from the first absorbed statement through
+  // the RAISE's terminator. The whole-line splice below is correct only when
+  // that range aligns to line boundaries — and the real corpus does not oblige:
+  // `test_profiles_privileged_columns_locked.sql:97` puts a head, a
+  // `RESET ROLE;`, a RAISE and an `END IF;` on ONE line. Commenting that whole
+  // line deletes every statement on it, which is P5's silent over-neuter
+  // reached by a different road. So a span that starts or ends mid-line is
+  // rewritten AROUND: the code before it and after it on those lines is
+  // re-emitted verbatim on its own line, and only the span is commented.
+  const spanStart = statements[startIdx].start;
+  const spanEnd = raiseStmt.end;
+  const lineHead = text.lastIndexOf("\n", spanStart - 1) + 1;
+  const prefix = text.slice(lineHead, spanStart);
+  const tail = text.slice(spanEnd);
+  const nl = tail.indexOf("\n");
+  const suffix = nl === -1 ? tail : tail.slice(0, nl);
+  const rest = tail.slice(suffix.length);
+
+  const startsOnOwnLine = prefix.trim() === "";
+  // A trailing `--` comment goes with the neutered statement, as it always has.
+  const endsLine = suffix.trim() === "" || /^[ \t]*--/.test(suffix);
+
+  if (startsOnOwnLine && endsLine) {
+    const start = statements[startIdx].startLine - 1;
+    const end = raiseStmt.endLine - 1;
+    const indent = (lines[start].match(/^[ \t]*/) || [""])[0];
+    const replacement = [
+      ...lines.slice(start, end + 1).map((l) => `-- NEUTERED(${arm}) ${l}`),
+      `${indent}NULL; -- neutered ${arm} by the mutation runner`,
+    ];
+    lines.splice(start, end - start + 1, ...replacement);
+    return { text: lines.join("\n"), found: true };
+  }
+
+  const indent = (prefix.match(/^[ \t]*/) || [""])[0];
+  const commented = text
+    .slice(spanStart, spanEnd)
+    .split("\n")
+    .map((l) => `-- NEUTERED(${arm}) ${l}`)
+    .join("\n");
+  const rewritten =
+    text.slice(0, lineHead) +
+    (startsOnOwnLine ? "" : `${prefix.replace(/[ \t]+$/, "")}\n`) +
+    `${commented}\n` +
+    `${indent}NULL; -- neutered ${arm} by the mutation runner` +
+    (endsLine ? suffix : `\n${suffix}`) +
+    rest;
+  return { text: rewritten, found: true };
 }
 
 /**
@@ -734,31 +776,6 @@ export function armIdentitiesInOrder(text) {
 }
 
 /**
- * Index of the last line of the statement starting at `from`, tracking
- * single-quote state so a `;` inside a message literal does not end it early.
- * `''` is the SQL escape for a literal quote. Returns -1 if unterminated.
- */
-function statementEndLine(lines, from) {
-  let inQuote = false;
-  for (let i = from; i < lines.length; i += 1) {
-    const line = lines[i];
-    for (let c = 0; c < line.length; c += 1) {
-      const ch = line[c];
-      if (ch === "'") {
-        if (inQuote && line[c + 1] === "'") {
-          c += 1;
-          continue;
-        }
-        inQuote = !inQuote;
-      } else if (ch === ";" && !inQuote) {
-        return i;
-      }
-    }
-  }
-  return -1;
-}
-
-/**
  * Every FAILURE BRANCH in `text`, in file order: `{ id, text }` where `text` is
  * the exact source from the enclosing branch head through the end of the RAISE.
  *
@@ -816,9 +833,10 @@ export function failureBranches(text) {
       }
     }
 
-    const end = statementEndLine(lines, stmt.startLine - 1);
-    const endLine = end === -1 ? stmt.startLine - 1 : end;
-    out.push({ id: m[1], text: lines.slice(headLine - 1, endLine + 1).join("\n") });
+    // The raise's end is its STATEMENT's end. The second copy of the
+    // single-quote-only forward walker that used to live here — the other half
+    // of [MUT-I01] — is deleted, not wrapped.
+    out.push({ id: m[1], text: lines.slice(headLine - 1, stmt.endLine).join("\n") });
   }
   return out;
 }
