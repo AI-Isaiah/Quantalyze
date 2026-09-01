@@ -101,16 +101,137 @@ function parseSource(file: string, code: string): ts.SourceFile {
 }
 
 /**
+ * True when `node`'s subtree contains no `Identifier`, call, or member access —
+ * that is, nothing through which a value could have reached the system under
+ * test. A template qualifies only if every one of its span expressions does,
+ * which the generic walk gives us for free.
+ */
+function isLiteralOnly(node: ts.Node): boolean {
+  let literal = true;
+  const walk = (n: ts.Node): void => {
+    if (!literal) return;
+    if (
+      ts.isIdentifier(n) ||
+      ts.isCallExpression(n) ||
+      ts.isPropertyAccessExpression(n) ||
+      ts.isElementAccessExpression(n)
+    ) {
+      literal = false;
+      return;
+    }
+    ts.forEachChild(n, walk);
+  };
+  walk(node);
+  return literal;
+}
+
+type Container = ts.Block | ts.SourceFile;
+
+/**
+ * The statement that owns `node`, plus the block that owns THAT statement.
+ * Climbs `parent` (hence `setParentNodes`) and proves statement-hood by
+ * MEMBERSHIP in the container's own statement list rather than by a kind
+ * predicate — membership is what the preceding-statements scan actually needs.
+ */
+function enclosingStatement(node: ts.Node): { stmt: ts.Statement; container: Container } | null {
+  let cur: ts.Node = node;
+  while (cur.parent) {
+    const parent = cur.parent;
+    if (ts.isBlock(parent) || ts.isSourceFile(parent)) {
+      const container = parent as Container;
+      if (container.statements.indexOf(cur as ts.Statement) >= 0) {
+        return { stmt: cur as ts.Statement, container };
+      }
+    }
+    cur = parent;
+  }
+  return null;
+}
+
+/**
+ * Line of the `const <subject> = <literal-only>` binding in the SAME block, or
+ * null. Scans BACKWARDS from the expect's own statement so the nearest
+ * shadowing declaration wins; if that nearest binding is not literal-only the
+ * subject is considered reachable from the system under test and nothing is
+ * reported, even if an earlier literal of the same name exists.
+ */
+function resolveSameBlockLiteralConst(
+  subject: ts.Identifier,
+  expectCall: ts.Node,
+  source: ts.SourceFile,
+): number | null {
+  const owned = enclosingStatement(expectCall);
+  if (owned === null) return null;
+  const statements = owned.container.statements;
+  const stop = statements.indexOf(owned.stmt);
+  for (let i = stop - 1; i >= 0; i--) {
+    const statement = statements[i];
+    if (!ts.isVariableStatement(statement)) continue;
+    if ((statement.declarationList.flags & ts.NodeFlags.Const) === 0) continue;
+    for (const decl of statement.declarationList.declarations) {
+      if (!ts.isIdentifier(decl.name) || decl.name.text !== subject.text) continue;
+      if (decl.initializer === undefined || !isLiteralOnly(decl.initializer)) return null;
+      return source.getLineAndCharacterOfPosition(decl.name.getStart(source)).line + 1;
+    }
+  }
+  return null;
+}
+
+/**
  * The detector. Pure: takes a name and bytes, returns findings sorted by
  * expectLine. See the header for the three bounds it does not cross.
+ *
+ * The SUBJECT is `expect`'s argument 0 — this repo uses the two-argument
+ * `expect(subject, message)` form widely, and the message is deliberately
+ * ignored. The matcher side is never examined.
  */
 export function findSelfReferentialExpects(fileName: string, code: string): SelfRefFinding[] {
-  // TDD RED — the walk is not implemented yet. The SRO-01 red fixture test
-  // below MUST fail against this stub; that failure is the fire proof that the
-  // fixture test is bound to the detector and not to its own expectations.
-  void fileName;
-  void code;
-  return [];
+  const source = parseSource(fileName, code);
+  const findings: SelfRefFinding[] = [];
+  const lineOf = (n: ts.Node): number =>
+    source.getLineAndCharacterOfPosition(n.getStart(source)).line + 1;
+
+  const walk = (node: ts.Node): void => {
+    if (
+      ts.isCallExpression(node) &&
+      ts.isIdentifier(node.expression) &&
+      node.expression.text === "expect" &&
+      node.arguments.length > 0
+    ) {
+      const subject = node.arguments[0];
+      const expectLine = lineOf(node);
+
+      if (
+        ts.isStringLiteral(subject) ||
+        ts.isNoSubstitutionTemplateLiteral(subject) ||
+        ts.isNumericLiteral(subject)
+      ) {
+        findings.push({
+          file: fileName,
+          expectLine,
+          subjectName: null,
+          declLine: null,
+          kind: "inline-literal",
+        });
+      } else if (ts.isIdentifier(subject)) {
+        const declLine = resolveSameBlockLiteralConst(subject, node, source);
+        if (declLine !== null) {
+          findings.push({
+            file: fileName,
+            expectLine,
+            subjectName: subject.text,
+            declLine,
+            kind: "same-block-const",
+          });
+        }
+      }
+    }
+    ts.forEachChild(node, walk);
+  };
+
+  ts.forEachChild(source, walk);
+  findings.sort((a, b) => a.expectLine - b.expectLine);
+  return findings;
 }
 
 /**
@@ -128,6 +249,35 @@ export function listCorpusFiles(): string[] {
     .filter((name) => name.endsWith(".test.ts"))
     .map((name) => `${CORPUS_DIR}/${name.split(sep).join("/")}`)
     .sort();
+}
+
+/**
+ * Bare `expect(...)` call sites in `code`. The fixture tests' VACUITY FENCE.
+ *
+ * MEASURED THIS SESSION, and the reason this function exists: the first draft
+ * of both fixtures carried the glob `**` + `/*.ts` inside their JSDoc banner.
+ * The `*` + `/` in the middle of that glob TERMINATES the block comment, so the
+ * remaining prose parsed as code — `ts.createSourceFile` recovers rather than
+ * throwing (`seam-log-coverage.test.ts:1010`), and it returned a tree of
+ * nonsense `BinaryExpression`s containing NO call expressions at all. The red
+ * fixture test caught it, because it asserts a POSITIVE. The green fixture test
+ * did not: it asserts an ABSENCE, and an absence is satisfied perfectly by a
+ * corrupted parse. "Green fixture is clean" would have read as proof while
+ * inspecting rubble — a self-referential oracle inside the self-referential
+ * oracle detector. Counting the fixture's `expect` sites is what makes the
+ * green assertion bind to the fixture's real contents.
+ */
+export function countExpectCallSites(fileName: string, code: string): number {
+  const source = parseSource(fileName, code);
+  let sites = 0;
+  const walk = (node: ts.Node): void => {
+    if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === "expect") {
+      sites += 1;
+    }
+    ts.forEachChild(node, walk);
+  };
+  ts.forEachChild(source, walk);
+  return sites;
 }
 
 /** One report line per finding, in the shape the calibration artifact quotes. */
@@ -166,9 +316,18 @@ describe("primitive D — self-referential oracle detector", () => {
     ).toBeLessThan(hit.expectLine);
   });
 
-  it("SRO-01 green fixture is clean", () => {
+  it("SRO-01 green fixture is clean, and is really being read", () => {
     const relPath = `${SRO_FIXTURE_DIR}/SRO-01-same-block-const.green.ts`;
-    const findings = findSelfReferentialExpects(relPath, readFixture("SRO-01-same-block-const", "green"));
+    const code = readFixture("SRO-01-same-block-const", "green");
+
+    // VACUITY FENCE FIRST — see countExpectCallSites. An absence proves nothing
+    // until we know the parse found the assertions it is an absence of.
+    expect(
+      countExpectCallSites(relPath, code),
+      "the green fixture must parse to at least one real expect() site; zero means the fixture was corrupted (a stray comment terminator) and the emptiness below would be rubble, not cleanliness",
+    ).toBeGreaterThanOrEqual(1);
+
+    const findings = findSelfReferentialExpects(relPath, code);
     expect(
       findings,
       `the repaired idiom must pass — a rule that flags it would flag every honest assertion; findings were ${JSON.stringify(findings)}`,
@@ -209,10 +368,19 @@ describe("primitive D — self-referential oracle detector", () => {
     }
     findings.sort((a, b) => (a.file === b.file ? a.expectLine - b.expectLine : a.file < b.file ? -1 : 1));
 
-    for (const f of findings) console.log(formatFinding(f));
+    // ⚠️ WRITTEN TO stdout DIRECTLY, NOT VIA `console.log`. MEASURED this
+    // session: vitest 4.1.10's DEFAULT reporter swallows console output from
+    // PASSING tests, so a report-only gate that logs its findings prints
+    // nothing on a green run — the report would exist only in the source. A
+    // raw `process.stdout.write` is not intercepted, so the bare
+    // `vitest run <file>` command records the measurement. (`--reporter=verbose`
+    // and `--disable-console-intercept` also surface console output, but a gate
+    // whose evidence depends on the caller remembering a flag is one flag away
+    // from being evidence of nothing.)
+    const report = findings.map((f) => `${formatFinding(f)}\n`).join("");
     const affected = new Set(findings.map((f) => f.file));
-    console.log(
-      `${SRO_SUMMARY_PREFIX} ${findings.length} finding(s) in ${affected.size} file(s), ${files.length} file(s) scanned`,
+    process.stdout.write(
+      `${report}${SRO_SUMMARY_PREFIX} ${findings.length} finding(s) in ${affected.size} file(s), ${files.length} file(s) scanned\n`,
     );
 
     // REPORT-ONLY BY PHASE DESIGN — there is deliberately NO assertion on the
