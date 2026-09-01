@@ -74,7 +74,9 @@
  * Reads with node `fs`, never `grep`: this repository contains a file with a
  * deliberate NUL byte, and grep silently reports a NUL-bearing file as clean.
  */
-import { readFileSync } from "node:fs";
+import { readFileSync, realpathSync } from "node:fs";
+import { resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 /**
  * `CREATE [OR REPLACE] FUNCTION <chain>` at the start of a line, followed by
@@ -220,8 +222,35 @@ function main(argv) {
   return 0;
 }
 
-const invokedDirectly =
-  process.argv[1] && import.meta.url === `file://${process.argv[1]}`;
-if (invokedDirectly) {
+// Run only when invoked directly, NOT when imported — drift-check-scripts.test.ts
+// imports `naiveFunctionDefs` from this module for the corpus-parity arm, and
+// importing must not trigger main's exit. Hence the `!process.argv[1]` guard.
+//
+// ⛔ Compare REALPATHS. The previous form compared `import.meta.url` to a raw
+// `file://` + argv[1] concatenation, and MEASURED 2026-09-01 that was false on
+// TWO ordinary invocation shapes: a symlinked path (import.meta.url is
+// realpath-resolved, argv[1] is not) and a path containing a space
+// (import.meta.url percent-encodes it, the concatenation does not). In both,
+// main() never ran, stdout was empty, and the process exited 0 — VAC-04 reading
+// NOTHING while reporting success. [VAC04-C2]
+//
+// This function is DUPLICATED verbatim in scripts/sql-body-normalize.mjs rather
+// than shared. That is deliberate: these two readers are VAC-04's two supposedly
+// independent derivations, and the defect above was one mechanism failing BOTH.
+// A shared guard module would rebuild that coupling — and would also break this
+// file's machine-pinned "node: builtins only" import contract.
+//
+// The catch falls back toward RUNNING the gate, never toward skipping it: an
+// unresolvable argv path must not be a silent pass.
+function invokedDirectly() {
+  if (!process.argv[1]) return false;
+  try {
+    return realpathSync(process.argv[1]) === fileURLToPath(import.meta.url);
+  } catch {
+    return resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+  }
+}
+
+if (invokedDirectly()) {
   process.exit(main(process.argv.slice(2)));
 }
