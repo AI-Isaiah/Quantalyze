@@ -1281,6 +1281,21 @@ states and only the second one wedges the bridge.
 and saves the account. Cancelling the dialog unblocks IPC for the current boot but the prompt
 returns on the next restart, reproducing the wedge.
 
+✅ **RESOLVED AND VERIFIED 2026-09-01 12:07.** The founder completed the login the dialog was
+asking for — **not** the account being added through the wizard, which is the point: any login
+clears the modal, because the validate path re-logins per call. Verified end-to-end, not just at
+the probe:
+
+```
+12:07:13  job_worker derive_broker_dailies: upserted 278 daily-return rows
+          strategy 401d5f31… (venue=mt5 realized=0 funding=0 heuristic_capital=False)
+12:09:25  job_worker derive_broker_dailies: upserted 278 daily-return rows  (same strategy)
+```
+
+No `-10005` after the modal cleared. ⚠️ The observability gap this item books is **still open** —
+what closed was the outage, not the blind spot. Nothing would have told us either way without a
+human clicking connect.
+
 **Why nothing caught it.**
 
 - Railway reports the service **healthy** — the container is running and the port is listening.
