@@ -429,6 +429,54 @@ last_updated: 2026-08-29T09:24:22.877Z
     "reason": "",
     "recorded_at": "2026-09-01T19:15:00.000Z",
     "resolved_at": null
+  },
+{
+    "id": 33,
+    "kind": "unmet-truth",
+    "phase": "164.3.1",
+    "file": "src/__tests__/types-design-tests.test.ts",
+    "line": 27,
+    "description": "expect(empty).toEqual({}) cannot fail at runtime - the real contract is the type annotation, not the assertion. Flagged by the Primitive-D self-referential-oracle gate (plan 164.3.1-02 calibration, one of the 2 genuine type-level survivors) and allowlisted in SRO_ALLOWLIST with its measurement per D-05. Candidate for `satisfies` conversion so the contract is checked by the compiler rather than by an assertion that cannot fail.",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-09-01T19:45:00.000Z",
+    "resolved_at": null
+  },
+{
+    "id": 34,
+    "kind": "unmet-truth",
+    "phase": "164.3.1",
+    "file": "src/__tests__/types-design-tests.test.ts",
+    "line": 63,
+    "description": "expect(_kinds).toHaveLength(12) counts literals the same block just wrote, so it cannot fail for any change to the system under test. Same disposition as entry 33: allowlisted in SRO_ALLOWLIST with its measurement, candidate for `satisfies` conversion.",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-09-01T19:45:00.000Z",
+    "resolved_at": null
+  },
+{
+    "id": 35,
+    "kind": "unmet-truth",
+    "phase": "164.3.1",
+    "file": "src/__tests__/audit-coverage.test.ts",
+    "line": null,
+    "description": "RESIDUAL disclosed by plan 164.3.1-06 rather than left implied: stripLineComment still truncates a `//` sitting INSIDE a multi-line template literal before the block scan sees the line. Pre-existing, out of 06's scope, and provably no effect on the A/B/C cases (A moved []->[5], B and C unchanged). It is the next thing a real tokenizer would close - note that phase 164.3.1 built exactly such a tokenizer for SQL in scripts/mutation-runner/parse.mjs, so the shape of the fix already exists in-repo.",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-09-01T19:45:00.000Z",
+    "resolved_at": null
+  },
+{
+    "id": 36,
+    "kind": "unrun-verify",
+    "phase": "164.3.1",
+    "file": "scripts/mutation-runner/run.mjs",
+    "line": null,
+    "description": "MEASURED by plan 164.3.1-05: RESEARCH's nested-EXECUTE forgery recipe is a VACUOUS proof of the exactly-one-frame CONTEXT rule. The recipe spells the arm identity inside the EXECUTEd DO string, and psql echoes that string back as a `SQL statement \"...\"` CONTEXT frame - so the identity is sighted a second time in a FIELD rather than a message, making it unattributable independently of chain length. Neutering the chain rule does NOT flip that recipe; a proof run on it alone would pass while proving nothing about the leg it claims to test. Plan 05 added FORGE 3 (same forgery, echo removed via a GUC + current_setting()), under which the neuter DOES flip the forgery to a false `RED (identity ok)` and biting rises 1->2. Recorded because the vacuous recipe came from this phase's own RESEARCH and was carried into the executor dispatch as authoritative - the class is 'a proof inherited from research is still an unchecked claim until it is observed failing'.",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-09-01T19:45:00.000Z",
+    "resolved_at": null
   }
 ]
 ````
