@@ -558,7 +558,7 @@ Plans:
 8. The absurdity floor exists on VAC-04 and on the mutation runner as well as VAC-08, each proven able to fire AND proven silent on a legitimate finding — a two-directional neuter, because a floor that fires unconditionally also passes its own RED arm. Every threshold records the measurement that set it and the separation it achieves.
 9. Every gate whose key, threshold or join rests on a measurement carries that measurement's SAMPLE SIZE and COVERAGE beside it, plus an arm asserting the key against the full corpus. Verified by grepping the family for justifying measurements and finding no bare ones.
 
-**Plans:** 4/12 plans executed (5 waves)
+**Plans:** 8/12 plans executed (5 waves)
 
 Plans:
 
@@ -566,10 +566,10 @@ Plans:
 - [x] 164.3.1-02-PLAN.md — Primitive-D AST rule REPORT-ONLY + calibration at HEAD on lint-sql-gates.test.ts:182-186 (Wave 1) [SC-5]
 - [x] 164.3.1-03-PLAN.md — [AUDCOV-01] before-state calibration: A/B/C = []/[5]/[3] via extracted real bytes (Wave 1) [SC-5]
 - [x] 164.3.1-04-PLAN.md — VAC-04 union readers hardened: realpath guards (C2) + charset refusal (C4) (Wave 1) [SC-4, SC-7]
-- [ ] 164.3.1-05-PLAN.md — Primitive B: source-location attribution replaces the nonce; single-frame chain rule; verbose pg-lane (Wave 2) [SC-3, SC-7]
-- [ ] 164.3.1-06-PLAN.md — [AUDCOV-01] fix: cross-line quote state; A finds its site, B/C controls hold (Wave 2) [SC-5]
-- [ ] 164.3.1-07-PLAN.md — VAC-04 gate: grep exit branching (C3), fail-closed zero path + reopen pin, absurdity floor (Wave 2) [SC-4 PARTIAL, SC-7, SC-8, SC-9]
-- [ ] 164.3.1-08-PLAN.md — Primitive-D rule BLOCKING with measured allowlist; :182-186 fixed; [MUT-W02] structural parse (Wave 2) [SC-5, SC-9]
+- [x] 164.3.1-05-PLAN.md — Primitive B: source-location attribution replaces the nonce; single-frame chain rule; verbose pg-lane (Wave 2) [SC-3, SC-7]
+- [x] 164.3.1-06-PLAN.md — [AUDCOV-01] fix: cross-line quote state; A finds its site, B/C controls hold (Wave 2) [SC-5]
+- [x] 164.3.1-07-PLAN.md — VAC-04 gate: grep exit branching (C3), fail-closed zero path + reopen pin, absurdity floor (Wave 2) [SC-4 PARTIAL, SC-7, SC-8, SC-9]
+- [x] 164.3.1-08-PLAN.md — Primitive-D rule BLOCKING with measured allowlist; :182-186 fixed; [MUT-W02] structural parse (Wave 2) [SC-5, SC-9]
 - [ ] 164.3.1-09-PLAN.md — Measure-first: ARMS_FLOOR + biting re-derived under sound primitives, movement recorded (Wave 3) [SC-6, SC-9]
 - [ ] 164.3.1-10-PLAN.md — Mutation-runner absurdity floor: armsExecuted vs lane invocations, printed + CI-asserted (Wave 4) [SC-7, SC-8, SC-9]
 - [ ] 164.3.1-11-PLAN.md — Regression corpus A+B: four lane-driven selftest fixtures, recursive RED proofs (Wave 5) [SC-1]
