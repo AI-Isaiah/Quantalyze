@@ -273,6 +273,29 @@ function readQualifiedName(sql, from) {
   }
 }
 
+/**
+ * Refuse rather than silently narrow. [VAC04-C4]
+ *
+ * The thrown error carries a `charsetRefusal` marker so `main()` can format a
+ * diagnostic for THIS condition while any other error stays a loud crash — a
+ * blanket catch would turn an internal fault into a formatted pass, which is
+ * the same defect class from the other side.
+ */
+function charsetRefusal(sql, offset, prefix) {
+  const cp = sql.codePointAt(offset);
+  const detail = {
+    line: sql.slice(0, offset).split("\n").length,
+    prefix,
+    offender: String.fromCodePoint(cp),
+    codepoint: `U+${cp.toString(16).toUpperCase().padStart(4, "0")}`,
+  };
+  const err = new Error(
+    `identifier leaves the unquoted charset [A-Za-z0-9_$]: read '${detail.prefix}' then hit '${detail.offender}' (${detail.codepoint}) at line ${detail.line}`,
+  );
+  err.charsetRefusal = detail;
+  return err;
+}
+
 /** Count top-level (depth-0) commas in an already-masked argument list. */
 function countArgs(maskedArgs) {
   if (maskedArgs.trim() === "") return 0;
@@ -312,6 +335,40 @@ export function extractFunctionDefs(sql) {
 
     let j = afterName;
     while (j < sql.length && /\s/.test(masked[j])) j++;
+
+    // ⛔ REFUSE RATHER THAN DROP. `readQualifiedName`'s ident loop is
+    // `/[A-Za-z0-9_]/`, so it stops at the first byte outside that set and the
+    // `(` test below then DROPS the whole definition — silently, exit 0.
+    // MEASURED 2026-09-01: `public.fúnc_é(p uuid)` printed nothing at all,
+    // while the naive member printed the truncated `f`. Either way VAC-04 loses
+    // the real subject: the name is absent from the index, so the function is
+    // classified "absent from PROD, therefore NEW, therefore a pass".
+    //
+    // The tell is the FOLLOWER byte in MASKED text (masked, so a block comment
+    // butted against the name — `foo/*c*/(…)` — is a space here and stays
+    // legal). A name that really ended is followed by EOF, whitespace, or `(`.
+    //
+    // ⭐ `$` IS EXEMPT, and that exemption is load-bearing in three ways:
+    //   1. `$` is inside Postgres' unquoted-identifier charset, so hitting one
+    //      is NOT a charset violation — it is this reader stopping early.
+    //   2. That early stop is SP-C05's measured limitation and the entire
+    //      reason sql-function-names-naive.mjs exists: it reads
+    //      `sanitize_user$v2`, this member cannot, and the caller unions them.
+    //   3. The drop-not-refuse behavior is machine-pinned by
+    //      drift-check-scripts.test.ts's "the two readings genuinely DISAGREE"
+    //      arm. Refusing `$` would break the union's design — and its e2e gate
+    //      arms — while claiming to harden it.
+    // So a `$` follower falls through to the DROP below, exactly as before.
+    const follower = masked[j];
+    if (
+      follower !== undefined &&
+      !/\s/.test(follower) &&
+      follower !== "(" &&
+      follower !== "$"
+    ) {
+      throw charsetRefusal(sql, j, schema ? `${schema}.${name}` : name);
+    }
+
     if (masked[j] !== "(") continue; // not a function definition we can parse
     let depth = 0;
     let close = -1;
@@ -493,6 +550,28 @@ function readInput(file) {
   return file ? readFileSync(file, "utf8") : readFileSync(0, "utf8");
 }
 
+/**
+ * Format a [VAC04-C4] charset refusal and return the CLI exit code.
+ *
+ * ⛔ Identifier-and-position facts ONLY — never the source line, never any
+ * slice of a function body. This module's index mode runs over a PROD dump
+ * inside a PUBLIC CI log; echoing context here would defeat the "prints no
+ * body text in any reporting mode" contract in this file's header.
+ *
+ * Anything without the marker RETHROWS: an internal fault must stay a loud
+ * crash rather than becoming a tidy exit code.
+ */
+function reportCharsetRefusal(err, file) {
+  if (!err?.charsetRefusal) throw err;
+  const r = err.charsetRefusal;
+  console.error(
+    `::error::sql-body-normalize: ${file}:${r.line}: identifier leaves the unquoted charset [A-Za-z0-9_$] — read '${r.prefix}' then hit '${r.offender}' (${r.codepoint}). ` +
+      "Refusing rather than dropping: a dropped definition is absent from the function-name index, so VAC-04 classifies it 'absent from PROD, therefore NEW, therefore a pass'. " +
+      'Quote the identifier ("...") if that character is intended.',
+  );
+  return 1; // 2 stays reserved for usage errors.
+}
+
 function selfTest() {
   const checks = [];
   const assert = (cond, msg) => checks.push({ cond: Boolean(cond), msg });
@@ -534,6 +613,20 @@ function selfTest() {
     extractFunctionDefs("-- CREATE OR REPLACE FUNCTION g()").length === 0,
     "a commented mention is not a def",
   );
+  // ⛔ [VAC04-C4] regression pin. This input produced NO definition at all and
+  // exit 0, so VAC-04 read "absent from PROD — a NEW function — pass".
+  let refusedNonAscii = false;
+  try {
+    extractFunctionDefs(
+      "CREATE OR REPLACE FUNCTION public.fúnc_é(p uuid) RETURNS void LANGUAGE plpgsql AS $$ BEGIN END; $$;",
+    );
+  } catch (err) {
+    refusedNonAscii = Boolean(err?.charsetRefusal);
+  }
+  assert(
+    refusedNonAscii,
+    "an UNQUOTED identifier leaving [A-Za-z0-9_$] must be REFUSED, not dropped — a dropped definition is absent from the name index, so the gate cannot tell 'new function' from 'could not read it' ([VAC04-C4])",
+  );
 
   const failed = checks.filter((c) => !c.cond);
   for (const f of failed) console.error(`SELF-TEST FAIL: ${f.msg}`);
@@ -558,9 +651,14 @@ function main(argv) {
         return 2;
       }
       const names = new Set();
-      for (const f of files)
-        for (const d of extractFunctionDefs(readFileSync(f, "utf8")))
-          names.add(d.name);
+      for (const f of files) {
+        try {
+          for (const d of extractFunctionDefs(readFileSync(f, "utf8")))
+            names.add(d.name);
+        } catch (err) {
+          return reportCharsetRefusal(err, f);
+        }
+      }
       for (const nm of [...names].sort()) process.stdout.write(nm + "\n");
       return 0;
     }
@@ -576,9 +674,14 @@ function main(argv) {
         return 2;
       }
       const seen = new Set();
-      for (const f of files)
-        for (const d of extractFunctionDefs(readFileSync(f, "utf8")))
-          seen.add(`${d.schema}\t${d.name}`);
+      for (const f of files) {
+        try {
+          for (const d of extractFunctionDefs(readFileSync(f, "utf8")))
+            seen.add(`${d.schema}\t${d.name}`);
+        } catch (err) {
+          return reportCharsetRefusal(err, f);
+        }
+      }
       for (const row of [...seen].sort()) process.stdout.write(row + "\n");
       return 0;
     }
@@ -588,9 +691,14 @@ function main(argv) {
         console.error("::error::--extract-fn requires <file> <function-name>");
         return 2;
       }
-      const defs = extractFunctionDefs(readFileSync(file, "utf8")).filter(
-        (d) => d.name === name,
-      );
+      let defs;
+      try {
+        defs = extractFunctionDefs(readFileSync(file, "utf8")).filter(
+          (d) => d.name === name,
+        );
+      } catch (err) {
+        return reportCharsetRefusal(err, file);
+      }
       for (const d of defs) process.stdout.write(d.text.trimEnd() + "\n");
       return 0;
     }
@@ -602,10 +710,23 @@ function main(argv) {
         );
         return 2;
       }
-      const rows = diffFunctionBodies(
-        readFileSync(snapFile, "utf8"),
-        readFileSync(liveFile, "utf8"),
-      );
+      const snapSql = readFileSync(snapFile, "utf8");
+      const liveSql = readFileSync(liveFile, "utf8");
+      let rows;
+      try {
+        rows = diffFunctionBodies(snapSql, liveSql);
+      } catch (err) {
+        if (!err?.charsetRefusal) throw err;
+        // Attribute the refusal to a FILE — "one of these two" is not a
+        // diagnostic. Re-parsing the snapshot alone says which side threw.
+        let which = liveFile;
+        try {
+          extractFunctionDefs(snapSql);
+        } catch {
+          which = snapFile;
+        }
+        return reportCharsetRefusal(err, which);
+      }
       for (const r of rows) process.stdout.write(formatDiffRow(r) + "\n");
       // Always 0: this mode REPORTS. The calling gate decides the verdict, so
       // that the acknowledgment-pragma policy lives in exactly one place.
