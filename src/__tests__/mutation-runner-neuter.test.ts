@@ -197,12 +197,19 @@ describe("WR-07 — an abort-path statement it cannot classify is REFUSED, not l
   // scan — so the fix cannot be "passed" by never terminating, which would
   // refuse every arm in the real corpus.
   //
-  // ⚠️ WHAT THIS STILL DOES NOT COVER, stated rather than implied: the
-  // embeddings are LINE-LOCAL. A literal, block comment or dollar-quoted body
-  // whose delimiters straddle a newline is not generated here, because
-  // `executableText` is a line classifier and would leave a fragment — which
-  // refuses (the loud direction), not leaks. A multi-line masking pass is a
-  // real remaining gap and is named in the fix report.
+  // ⭐ THE LINE-LOCAL CONSTRAINT IS LIFTED (phase 164.3.1). This block used to
+  // say: "the embeddings are LINE-LOCAL. A literal, block comment or
+  // dollar-quoted body whose delimiters straddle a newline is not generated
+  // here, because `executableText` is a line classifier and would leave a
+  // fragment — which refuses (the loud direction), not leaks. A multi-line
+  // masking pass is a real remaining gap and is named in the fix report."
+  //
+  // That gap is closed: the classifier is a STATEMENT TOKENIZER carrying every
+  // lexical state ACROSS lines, so the multi-line embeddings are now
+  // generated too (MULTILINE_EMBEDDINGS below) and asserted against the same
+  // leak class. The stated scope was true when written and is kept here rather
+  // than deleted, because the record of what a control did NOT cover is what
+  // makes the next reader check instead of assume.
 
   /**
    * Every syntactic context in which a branch-head keyword is NOT a branch
@@ -216,6 +223,26 @@ describe("WR-07 — an abort-path statement it cannot classify is REFUSED, not l
     "literal mid-sentence": (w) => `PERFORM set_config('x', 'a ${w} b', false);`,
     "dollar-quoted, tagged": (w) => `EXECUTE $q$ ${w} junk int; $q$;`,
     "dollar-quoted, bare": (w) => `EXECUTE $$ ${w} junk int; $$;`,
+  };
+
+  /**
+   * The same class, with the non-code region STRADDLING NEWLINES — the three
+   * R3 residual shapes plus the general form. Each returns a MULTI-LINE
+   * fragment whose interior carries `word` where PostgreSQL reads no code.
+   *
+   * The old line-local reader saw the interior lines raw: a body line reading
+   * exactly `BEGIN`, or one ending in `THEN`, was read as a branch head and
+   * TERMINATED the scan — the leak; and the closing `$q$;` / `*\/` fragment
+   * was read as an unclassifiable statement — the spurious refusal. Both
+   * directions are the same defect, and both are generated here.
+   */
+  const MULTILINE_EMBEDDINGS: Record<string, (word: string) => string> = {
+    "multi-line block comment": (w) => `/* explanatory\n${w}\n*/`,
+    "multi-line single-quoted literal": (w) => `PERFORM set_config('x', 'a\n${w}\nb', false);`,
+    "multi-line dollar-quoted body, tagged": (w) => `EXECUTE $q$\n${w}\n$q$;`,
+    "multi-line dollar-quoted body, bare": (w) => `EXECUTE $$\n${w}\n$$;`,
+    "R3 residual: dollar body whose interior line is a declaration": (w) =>
+      `EXECUTE $q$\n${w} junk int;\n$q$;`,
   };
 
   /**
@@ -242,6 +269,7 @@ describe("WR-07 — an abort-path statement it cannot classify is REFUSED, not l
     expect(BRANCH_HEAD_WORDS.length).toBeGreaterThan(0);
     expect(Object.keys(BARE_CODE).sort()).toEqual([...BRANCH_HEAD_WORDS].sort());
     expect(Object.keys(EMBEDDINGS).length).toBeGreaterThan(0);
+    expect(Object.keys(MULTILINE_EMBEDDINGS).length).toBeGreaterThan(0);
   });
 
   for (const word of BRANCH_HEAD_WORDS) {
@@ -285,6 +313,33 @@ describe("WR-07 — an abort-path statement it cannot classify is REFUSED, not l
           `the refusal must NAME the statement it could not classify, so a reader can fix it. ` +
             `Got: ${JSON.stringify(result.reason)}`,
         ).toBe(true);
+      });
+    }
+
+    for (const [embedding, render] of Object.entries(MULTILINE_EMBEDDINGS)) {
+      it(`ORACLE (multi-line): "${word}" in a ${embedding} must not end the scan`, () => {
+        const text = [
+          "  IF NOT raised THEN",
+          "    SET ROLE postgres;",
+          render(word),
+          "    RAISE EXCEPTION 'TEST FAILED (ARM ML): it did not bite';",
+          "  END IF;",
+          "  SELECT 1;",
+        ].join("\n");
+
+        const result = neuterArm(text, "ARM ML");
+
+        const leaked = result.found && executableLines(result.text, /SET\s+ROLE/i).length > 0;
+        expect(
+          leaked,
+          `neuterArm ACCEPTED the neuter and left "SET ROLE postgres;" executing. Between it and ` +
+            `the RAISE was a ${embedding} whose INTERIOR reads ${JSON.stringify(word)} — text ` +
+            `PostgreSQL never reads as code. A classifier that carries quote and comment state ` +
+            `across lines cannot see a branch head there.`,
+        ).toBe(false);
+
+        expect(result.found).toBe(false);
+        expect(result.reason).toContain("unrecognised statement before its RAISE");
       });
     }
 
@@ -376,5 +431,316 @@ describe("WR-07 — an abort-path statement it cannot classify is REFUSED, not l
         true,
       );
     }
+  });
+});
+
+// ══════════════════════════════════════════════════════════════════════════
+// PRIMITIVE A — A COMPOUND LINE IS NOT A BRANCH HEAD (phase 164.3.1, [R4-C01])
+// ══════════════════════════════════════════════════════════════════════════
+//
+// ⛔ THE DEFECT, MEASURED AT HEAD `fa2291d2` AND RE-MEASURED THIS SESSION.
+// `isBranchHead` was a LINE predicate with two UNANCHORED arms:
+//
+//     /^EXCEPTION(\s+WHEN\b.*)?$/i     ← the `.*` swallows trailing STATEMENTS
+//     /\b(THEN|LOOP)$/i                ← no start anchor
+//
+// so `EXCEPTION WHEN OTHERS THEN v_raised := true; END;` — a line that exists
+// SEVEN TIMES in `supabase/tests/test_profiles_privileged_columns_locked.sql`
+// — was accepted whole as a "branch head". The backward scan broke there, the
+// neuter was ACCEPTED, and every statement sharing that line stayed live. The
+// same hole accepts `SET ROLE postgres; IF NOT ok THEN`, which hands a
+// superuser session to every later arm — the measured RESET ROLE class, but
+// silent, because the scan believed it had reached the head of the branch.
+//
+// The fix is not a fifth regex (the ROADMAP goal refuses one by name): the line
+// is TOKENIZED INTO STATEMENTS and `isBranchHead` is asked of a STATEMENT, so a
+// compound line decomposes and its trailing statements become visible.
+//
+// ⭐ ANTI-VACUITY, and the RED direction is real: under the OLD line predicate
+// this block fails, stating that the compound line was swallowed as a head and
+// its trailing statements left executing. Recorded verbatim in the SUMMARY.
+describe("Primitive A: a compound line decomposes — its trailing statements are never swallowed", () => {
+  const PRIVESC_GATE = join(
+    REPO_ROOT,
+    "supabase",
+    "tests",
+    "test_profiles_privileged_columns_locked.sql",
+  );
+
+  /**
+   * The REAL bytes, extracted from the REAL file at runtime. A copy of the
+   * shape inside the test would drift away from the corpus silently (SP-L02):
+   * the whole point is that these lines EXIST, so they are read, not retyped.
+   *
+   * Line numbers are deliberately NOT pinned — the count is, so a corpus edit
+   * that removes the shape fails here loudly instead of quietly emptying the
+   * cross-product.
+   */
+  const COMPOUND_RE = /^\s*EXCEPTION\s+WHEN\s+OTHERS\s+THEN\s+\S.*;\s*END\s*;\s*$/;
+  const compoundLines = readFileSync(PRIVESC_GATE, "utf8")
+    .split("\n")
+    .map((text, i) => ({ line: i + 1, text }))
+    .filter((l) => COMPOUND_RE.test(l.text));
+
+  it("the calibration input still exists in the real corpus (>= 7 compound lines)", () => {
+    // Non-vacuity guard. If the file were reshaped, every drive below would
+    // silently vanish and this file would still report green.
+    expect(
+      compoundLines.length,
+      `test_profiles_privileged_columns_locked.sql no longer carries the compound ` +
+        `"EXCEPTION WHEN OTHERS THEN <stmt>; END;" shape this primitive is calibrated on. ` +
+        `Re-measure before changing the classifier.`,
+    ).toBeGreaterThanOrEqual(7);
+  });
+
+  it("TRACER: the first real compound line above a RAISE is REFUSED, not accepted as a head", () => {
+    const compound = compoundLines[0];
+    const text = [
+      "  IF NOT raised THEN",
+      compound.text,
+      "    RAISE EXCEPTION 'TEST FAILED (ARM P1): it did not bite';",
+      "  END IF;",
+      "  SELECT 1;",
+    ].join("\n");
+
+    const result = neuterArm(text, "ARM P1");
+
+    // The leak class, stated over the OUTPUT (R3-C01's format): an accepted
+    // neuter that leaves the compound line's trailing statements executing is
+    // the defect, whatever the scan believed terminated it.
+    const swallowed =
+      result.found && executableLines(result.text, /v_raised\s*:=\s*true;/i).length > 0;
+    expect(
+      swallowed,
+      `neuterArm ACCEPTED the neuter and left the compound line's trailing statements ` +
+        `executing. The only thing between the branch head and the RAISE was ` +
+        `${JSON.stringify(compound.text.trim())} — a line carrying an EXCEPTION head AND two ` +
+        `further statements. Accepting it whole as a "branch head" is [R4-C01]: the same hole ` +
+        `accepts "SET ROLE postgres; IF NOT ok THEN" and hands a superuser session to every ` +
+        `later arm.`,
+    ).toBe(false);
+
+    // And it must refuse LOUDLY, naming the statement it could not classify and
+    // the line it sits on — a vague `found: false` is how the next reader
+    // mis-diagnoses this.
+    expect(result.found).toBe(false);
+    expect(result.reason).toContain("unrecognised statement before its RAISE");
+    expect(
+      result.reason,
+      `the refusal must NAME the trailing statement decomposed out of the compound line. ` +
+        `Got: ${JSON.stringify(result.reason)}`,
+    ).toContain("END;");
+    expect(result.text, "a refusal must not mutate the text").toBe(text);
+  });
+
+  it("GENERALISED: every one of the real compound lines is refused, not just the tracer's", () => {
+    // The tracer proved ONE line end-to-end. A primitive proved on one instance
+    // is an example, so the drive is quantified over every instance the file
+    // actually carries.
+    for (const compound of compoundLines) {
+      const text = [
+        "  IF NOT raised THEN",
+        compound.text,
+        `    RAISE EXCEPTION 'TEST FAILED (ARM P1-${compound.line}): it did not bite';`,
+        "  END IF;",
+        "  SELECT 1;",
+      ].join("\n");
+
+      const result = neuterArm(text, `ARM P1-${compound.line}`);
+      const swallowed =
+        result.found && executableLines(result.text, /v_raised\s*:=\s*true;/i).length > 0;
+      expect(
+        swallowed,
+        `line ${compound.line} of test_profiles_privileged_columns_locked.sql was swallowed whole ` +
+          `as a branch head: ${JSON.stringify(compound.text.trim())}`,
+      ).toBe(false);
+      expect(result.found, `line ${compound.line}: reason ${JSON.stringify(result.reason)}`).toBe(
+        false,
+      );
+      expect(result.reason).toContain("unrecognised statement before its RAISE");
+    }
+  });
+
+  it("P3: `SET ROLE postgres; IF NOT ok THEN` can no longer produce an accepted neuter", () => {
+    // The ROADMAP's own spelling of the defect, and RESEARCH premise P3's
+    // measured synthetic. The compound HEAD shape: the head is real, but a
+    // privileged statement shares its line BEFORE it, so a scan that terminates
+    // on the LINE believes it reached the head of the branch and accepts a
+    // neuter whose output still runs `SET ROLE postgres;`.
+    const text = [
+      "  IF NOT raised THEN",
+      "    SET ROLE postgres; IF NOT ok THEN",
+      "    RAISE EXCEPTION 'TEST FAILED (ARM P3): it did not bite';",
+      "  END IF;",
+      "  SELECT 1;",
+    ].join("\n");
+
+    const result = neuterArm(text, "ARM P3");
+
+    const leaked = result.found && executableLines(result.text, /SET\s+ROLE\s+postgres/i).length > 0;
+    expect(
+      leaked,
+      `neuterArm ACCEPTED the neuter and left "SET ROLE postgres;" executing — a superuser ` +
+        `session handed to every later arm, with no signal. This is [R4-C01] verbatim.`,
+    ).toBe(false);
+
+    expect(result.found).toBe(false);
+    expect(result.reason).toContain("unrecognised statement before its RAISE");
+    expect(result.reason).toContain("SET ROLE postgres;");
+  });
+});
+
+// ══════════════════════════════════════════════════════════════════════════
+// [MUT-I01] — THE FORWARD SCAN, BOTH DIRECTIONS (phase 164.3.1)
+// ══════════════════════════════════════════════════════════════════════════
+//
+// ⛔ THE DEFECT, MEASURED AT HEAD. `neuterArm`'s forward walk and
+// `statementEndLine` each tracked ONE character — `'` — with no notion of a
+// comment. An apostrophe inside a `--` comment inside a RAISE's span therefore
+// flipped the scan's quote parity, and the two parities fail DIFFERENTLY:
+//
+//   ODD  (P4) — the real terminator is swallowed and none is found: the arm is
+//               refused with "could not find the end of the RAISE statement".
+//               LOUD, and a false defect against a perfectly legal arm.
+//   EVEN (P5) — parity is restored by a second apostrophe, the real terminator
+//               is still swallowed, and the scan ends on a LATER statement's
+//               semicolon. The neuter then comments out a statement that must
+//               survive. SILENT, and it rewrites the arm's semantics.
+//
+// ⭐ A FIX THAT CLOSES ONLY P4 IS A FAIL. The loud direction is the one a
+// reviewer demonstrates; the silent one is the one that ships. Both are pinned,
+// and both were observed RED before the routing — verbatim text in the SUMMARY.
+describe("[MUT-I01]: comment state inside a RAISE's span, both parities", () => {
+  it("P4 (odd parity, LOUD): an apostrophe in a `--` comment is not a spurious neuter-missed", () => {
+    // RESEARCH premise P4's measured shape.
+    const text = [
+      "  IF NOT raised THEN",
+      "    RAISE EXCEPTION 'TEST FAILED (ARM P4): it did not bite',",
+      "      -- don't worry",
+      "      some_var;",
+      "  END IF;",
+      "  SELECT 1;",
+    ].join("\n");
+
+    const result = neuterArm(text, "ARM P4");
+
+    expect(
+      result.found,
+      `neuterArm REFUSED a legal arm: ${JSON.stringify(result.reason)}. The only thing between ` +
+        `the RAISE and its terminator was a "--" comment containing an apostrophe, which is not ` +
+        `a quote — a reader that tracks "'" alone cannot tell the difference, and reports a ` +
+        `neuter-missed defect against an arm that is fine.`,
+    ).toBe(true);
+
+    // The FULL statement, through its true terminator, is what gets neutered —
+    // not a prefix of it.
+    expect(executableLines(result.text, /RAISE\s+EXCEPTION/i)).toEqual([]);
+    expect(executableLines(result.text, /some_var;/)).toEqual([]);
+    expect(result.text).toContain("NULL; -- neutered ARM P4 by the mutation runner");
+  });
+
+  it("P5 (even parity, SILENT): the statement after the RAISE's terminator must SURVIVE", () => {
+    // RESEARCH premise P5's measured shape: a second apostrophe restores parity
+    // AFTER the real terminator has been swallowed, so the scan runs on and
+    // ends on the NEXT statement's semicolon.
+    const text = [
+      "  IF NOT raised THEN",
+      "    RAISE EXCEPTION 'TEST FAILED (ARM P5): it did not bite',",
+      "      -- don't worry",
+      "      some_var;",
+      "    -- it isn't optional",
+      "    PERFORM must_survive();",
+      "  END IF;",
+    ].join("\n");
+
+    const result = neuterArm(text, "ARM P5");
+    expect(result.found, `reason: ${JSON.stringify(result.reason)}`).toBe(true);
+
+    expect(
+      executableLines(result.text, /PERFORM\s+must_survive\(\);/),
+      `the neuter swallowed "PERFORM must_survive();" — a statement OUTSIDE the RAISE, commented ` +
+        `out with no signal whatsoever. This is the SILENT half of [MUT-I01]: the neuter reported ` +
+        `success while rewriting what the arm does. A fix that closes only the loud P4 direction ` +
+        `leaves this live.`,
+    ).toEqual(["    PERFORM must_survive();"]);
+
+    // And it still did its job.
+    expect(executableLines(result.text, /RAISE\s+EXCEPTION/i)).toEqual([]);
+  });
+
+  it("R3 residual: a multi-line block comment above a RAISE now CLASSIFIES instead of refusing", () => {
+    // The line-local reader saw the closing `*/` as an unclassifiable statement
+    // and refused a legal arm; it saw the interior line `BEGIN` as a branch
+    // head. Neither is code. Both directions are gone at once, because the
+    // comment is no longer a sequence of lines — it is one lexical region.
+    for (const interior of ["BEGIN", "DECLARE junk int;", "IF NOT ok THEN"]) {
+      const text = [
+        "  IF NOT raised THEN",
+        "    /* explanatory",
+        interior,
+        "    */",
+        "    RAISE EXCEPTION 'TEST FAILED (ARM R3): it did not bite';",
+        "  END IF;",
+      ].join("\n");
+
+      const result = neuterArm(text, "ARM R3");
+      expect(
+        result.found,
+        `a multi-line comment whose interior reads ${JSON.stringify(interior)} produced a ` +
+          `refusal: ${JSON.stringify(result.reason)}. A comment carries no runtime effect on any ` +
+          `of its lines.`,
+      ).toBe(true);
+    }
+  });
+});
+
+// ══════════════════════════════════════════════════════════════════════════
+// SUB-LINE NEUTER SPANS — the rewrite must produce valid PL/pgSQL
+// ══════════════════════════════════════════════════════════════════════════
+//
+// ⛔ The whole-line splice is only correct when the neuter's span aligns to
+// line boundaries. The real corpus does not oblige:
+// `test_profiles_privileged_columns_locked.sql:97` carries a head, a
+// `RESET ROLE;`, a RAISE and an `END IF;` on ONE line. Commenting the whole
+// line deletes every statement on it — including ones that must survive — and
+// reports success. That is P5's defect reached by a different road.
+describe("a neuter span that starts or ends mid-line rewrites only the span", () => {
+  it("keeps the statements sharing the RAISE's line live", () => {
+    const text = [
+      "  IF v_raised THEN RAISE EXCEPTION 'TEST FAILED (ARM SUB): x'; ELSE PERFORM must_survive(); END IF;",
+      "  SELECT 1;",
+    ].join("\n");
+
+    const result = neuterArm(text, "ARM SUB");
+    expect(result.found, `reason: ${JSON.stringify(result.reason)}`).toBe(true);
+
+    expect(
+      executableLines(result.text, /PERFORM\s+must_survive\(\);/).length,
+      `the whole-line splice commented out the ELSE arm that shares the RAISE's line. The neuter ` +
+        `range is a STATEMENT, not a line, and everything outside it must survive verbatim.`,
+    ).toBe(1);
+
+    // The head and the block terminator survive, so the block is still balanced.
+    expect(executableLines(result.text, /IF v_raised THEN/).length).toBe(1);
+    expect(executableLines(result.text, /END IF;/).length).toBe(1);
+    // The RAISE is gone and the branch keeps a non-empty body.
+    expect(executableLines(result.text, /RAISE\s+EXCEPTION/i)).toEqual([]);
+    expect(result.text).toContain("NULL; -- neutered ARM SUB by the mutation runner");
+  });
+
+  it("absorbs a RESET ROLE that shares the RAISE's line — the corpus :97 shape", () => {
+    const text = [
+      "  IF NOT v_raised THEN RESET ROLE; RAISE EXCEPTION 'TEST FAILED (ARM 97): x'; END IF;",
+      "  PERFORM after();",
+    ].join("\n");
+
+    const result = neuterArm(text, "ARM 97");
+    expect(result.found, `reason: ${JSON.stringify(result.reason)}`).toBe(true);
+    expect(
+      executableLines(result.text, /RESET\s+ROLE/i),
+      "the abort-path RESET ROLE stayed live because it shared the RAISE's line — the leak the " +
+        "absorption exists to prevent, reached through a line boundary",
+    ).toEqual([]);
+    expect(executableLines(result.text, /PERFORM\s+after\(\);/).length).toBe(1);
   });
 });

@@ -90,7 +90,13 @@ import { tmpdir } from "node:os";
 import { dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { parseFile, scanCorpus } from "./parse.mjs";
+import {
+  BRANCH_HEAD_KEYWORDS,
+  maskNonCode,
+  parseFile,
+  scanCorpus,
+  tokenizeStatements,
+} from "./parse.mjs";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const LANE = join(REPO_ROOT, "scripts", "pg-lane", "run.sh");
@@ -259,20 +265,22 @@ export function applyFileStep(text, step) {
  */
 export const ABSORBABLE_CLEANUP = /^[ \t]*RESET[ \t]+ROLE[ \t]*;[ \t]*$/i;
 
-/** Blank, or a whole-line `--` comment. Carries no runtime effect. */
-const IGNORABLE_LINE = /^[ \t]*(--.*)?$/;
-
 /**
  * The branch-head keywords, exported so the cross-product oracle in
  * `mutation-runner-neuter.test.ts` can GENERATE its inputs from this list
  * rather than hand-listing spellings. Adding a keyword here automatically
  * widens that test's input space.
+ *
+ * ⭐ ONE DEFINITION (phase 164.3.1, Primitive A). The list is the TOKENIZER's
+ * own, re-exported rather than restated: a list restated in a second file is a
+ * second thing to drift.
  */
-export const BRANCH_HEAD_WORDS = ["THEN", "BEGIN", "ELSE", "ELSIF", "LOOP", "DECLARE", "EXCEPTION"];
+export const BRANCH_HEAD_WORDS = BRANCH_HEAD_KEYWORDS;
 
 /**
- * Strip the NON-CODE regions of a SQL line, so a keyword can only be read
- * where PostgreSQL would read one.
+ * The masking projection of SQL source: every non-code region blanked, offsets
+ * and line numbers preserved, so a keyword can only be read where PostgreSQL
+ * would read one.
  *
  * ⛔ R3-C01, and the reason this is a classifier rather than another needle.
  * Rounds 1 and 2 each closed the ONE spelling the reviewer demonstrated — a
@@ -280,77 +288,181 @@ export const BRANCH_HEAD_WORDS = ["THEN", "BEGIN", "ELSE", "ELSIF", "LOOP", "DEC
  * reached the identical `SET ROLE` leak with three more spellings in minutes:
  * a keyword inside a single-quoted literal (`PERFORM run_sql('BEGIN');`),
  * inside a slash-star block comment reading "we then raise the exception",
- * and inside a dollar-quoted body (`EXECUTE $q$ DECLARE junk int; $q$;`). Enumerating a
- * fourth spelling is a guaranteed fourth failure, so the rule is stated over
- * the STRUCTURE of the line instead: remove everything that is not code, then
- * ask what remains.
+ * and inside a dollar-quoted body (`EXECUTE $q$ DECLARE junk int; $q$;`).
+ * Enumerating a fourth spelling is a guaranteed fourth failure, so the rule is
+ * stated over the STRUCTURE of the source instead: remove everything that is
+ * not code, then ask what remains.
  *
- * Order matters. Dollar-quoted bodies are removed first because they may
- * legally contain unbalanced `'` and `--`; single-quoted literals next
- * (collapsed to `''` so the line still parses as a statement) because they may
- * contain `--` and `/*`; block comments next; the `--` tail last.
- *
- * ⚠️ Honest scope: this is a line-local classifier, so a literal, a block
- * comment or a dollar-quoted body that SPANS lines is only masked on the lines
- * where its delimiters both appear. An unterminated opener leaves a fragment
- * that is not a branch head, so the scan REFUSES — the loud direction.
+ * ⭐ SUPERSEDED IMPLEMENTATION, phase 164.3.1 (the measured history is kept, not
+ * deleted). This used to be a four-regex pipeline applied ONE LINE AT A TIME,
+ * with the honest scope note that a literal, block comment or dollar-quoted
+ * body SPANNING lines was masked only where both delimiters appeared. That
+ * line-locality is exactly what [MUT-I01] and [R4-C01] were made of, so the
+ * masking is now a projection of the STATEMENT TOKENIZER's state
+ * (`maskNonCode` in parse.mjs), which carries `'…'`, `"…"`, `$tag$…$tag$`,
+ * `/* *\/` (nesting) and `--` ACROSS lines. There is exactly one state machine
+ * in this codebase that decides what is code, and this is a view of it.
  */
-export const executableText = (line) =>
-  line
-    .replace(/\$([A-Za-z_]\w*)?\$[\s\S]*?\$\1?\$/g, " ") // dollar-quoted body
-    .replace(/'(?:''|[^'])*'/g, "''") // single-quoted literal
-    .replace(/\/\*[\s\S]*?\*\//g, " ") // block comment
-    .replace(/--.*$/, ""); // trailing line comment
+export const executableText = (source) => maskNonCode(source);
 
 /**
- * TRUE when the line IS a branch head, not when it merely MENTIONS one.
+ * TRUE when a STATEMENT is a branch head, not when it merely MENTIONS one.
  *
- * The old predicate was `\b(THEN|BEGIN|ELSE|…)\b` anywhere in the line, which
- * is why every non-code embedding above bypassed it. A PL/pgSQL branch head is
- * a whole line: a bare `BEGIN` / `DECLARE` / `ELSE` / `LOOP`, an `EXCEPTION`
- * (optionally with its `WHEN …` on the same line), or a line ENDING in `THEN`
- * (`IF … THEN`, `ELSIF … THEN`) or `LOOP` (`FOR … LOOP`).
+ * ⛔ SUPERSEDED PREDICATE AND ITS SUPERSEDED MEASUREMENT, phase 164.3.1 — kept
+ * because the history is the argument, not decoration.
  *
- * MEASURED 2026-08-29 against the real gate file, all 104 arm identities /
- * 103 backward scans: this predicate terminates on EXACTLY the same lines the
- * old bare-word one did — **0 disagreements**. It refuses nothing that exists.
+ * The first version was `\b(THEN|BEGIN|ELSE|…)\b` anywhere in the LINE, which
+ * every non-code embedding bypassed. The second was structural but still a LINE
+ * predicate, with two UNANCHORED arms:
+ *
+ *     /^EXCEPTION(\s+WHEN\b.*)?$/i     ← `.*` swallows trailing STATEMENTS
+ *     /\b(THEN|LOOP)$/i                ← no start anchor
+ *
+ * Its measurement — "MEASURED 2026-08-29 against the real gate file, all 104
+ * arm identities / 103 backward scans: 0 disagreements" — was true and did not
+ * save it, because the disagreements it could not have found are on lines the
+ * gate file does not contain: `EXCEPTION WHEN OTHERS THEN v_raised := true;
+ * END;` exists SEVEN times in test_profiles_privileged_columns_locked.sql, and
+ * `SET ROLE postgres; IF NOT ok THEN` is the ROADMAP's own [R4-C01] spelling.
+ * Both were accepted WHOLE, so the backward scan terminated on them and every
+ * statement sharing their line stayed live — a superuser session handed to
+ * every later arm, silently. A measurement over one file's shapes is not a
+ * measurement over the class.
+ *
+ * So the question is no longer asked of a LINE at all. `tokenizeStatements`
+ * decomposes a compound line into its statements and marks the branch-head
+ * UNITS among them; this predicate reads that mark. The unanchored arms cannot
+ * be re-opened because there are no arms — the head ends where its keyword
+ * ends, and the statements that follow it on the same line are separate units
+ * the scan must classify on their own.
+ *
+ * ═══════════════════════════════════════════════════════════════════════════
+ * RE-MEASURED 2026-09-01 (phase 164.3.1 plan 01 task 3), R3-C01 discipline.
+ * ═══════════════════════════════════════════════════════════════════════════
+ * SAMPLE: `supabase/tests/test_strategy_shares_rls.sql`, the only annotated
+ * file in the corpus (1 of 71 — see FILES_FLOOR).
+ * SAMPLE SIZE: 104 `TEST FAILED (` occurrences, 104 distinct identities, 103
+ * backward scans performed (the 104th identity is the header's own syntax
+ * documentation and carries no raise, so no scan runs for it).
+ * COVERAGE: 103 of 103 scans compared, statement predicate vs the DELETED line
+ * predicate transcribed verbatim from HEAD `e0660031` as an INDEPENDENT
+ * instrument.
+ * RESULT: 103 agreements, 0 disagreements. Refusals: 4 under BOTH predicates,
+ * the same four arms — SERVICE-ROLE 2a/2b/2c/2d, whose branches each `EXECUTE
+ * 'REVOKE EXECUTE ON FUNCTION public.create_strategy_share(UUID) FROM
+ * service_role'` before raising (lines 2249 / 2254 / 2268 / 2273). Each refusal
+ * is LOUD and names its statement. ZERO refusals were added by this change.
+ *
+ * ⚠️ WHAT THIS MEASUREMENT DOES AND DOES NOT BOUND, because the previous one at
+ * this spot was true and did not save the predicate: it bounds NON-REGRESSION
+ * on the shapes THIS ONE FILE contains. It says nothing about shapes it does
+ * not contain — and the compound line that broke the old predicate lives in a
+ * DIFFERENT file (`test_profiles_privileged_columns_locked.sql`, seven times).
+ * The class is closed by CONSTRUCTION above, not by this number; the number
+ * only proves the construction refuses nothing the corpus already relies on.
+ * Phase 164.4 raises the coverage as it backfills the other 70 files.
  */
-export const isBranchHead = (line) => {
-  const t = executableText(line).trim().replace(/;$/, "");
-  return (
-    /^(BEGIN|DECLARE|ELSE|LOOP)$/i.test(t) ||
-    /^EXCEPTION(\s+WHEN\b.*)?$/i.test(t) ||
-    /\b(THEN|LOOP)$/i.test(t)
-  );
-};
+export const isBranchHead = (statement) => statement != null && statement.head === true;
+
+/** A `RAISE EXCEPTION`, read in the masking projection so a mention in a literal is not one. */
+const RAISE_EXCEPTION_RE = /\bRAISE\s+EXCEPTION\b/i;
+
+/**
+ * The index of the previous SIBLING statement — same nesting depth, same
+ * enclosing body — or -1 at the top of the block.
+ *
+ * `tokenizeStatements` emits pre-order, so a preceding sibling's own nested
+ * statements sit between it and `idx` and are skipped; a shallower statement
+ * means the walk has reached the head of the enclosing body and must stop
+ * rather than wander into the block before it.
+ */
+function prevSiblingIndex(statements, idx, depth) {
+  for (let k = idx - 1; k >= 0; k -= 1) {
+    if (statements[k].depth < depth) return -1;
+    if (statements[k].depth === depth) return k;
+  }
+  return -1;
+}
+
+/**
+ * Indices of the statements that carry `needle` and enclose no nested statement
+ * that also carries it — i.e. the RAISE itself, never the `DO $$ … $$;` block
+ * around it. Diagnostics and neuter ranges must name the innermost unit; a
+ * container would name the whole file.
+ */
+function innermostCarriers(statements, needle) {
+  const out = [];
+  for (let i = 0; i < statements.length; i += 1) {
+    if (!statements[i].text.includes(needle)) continue;
+    let nested = false;
+    for (let j = i + 1; j < statements.length && statements[j].depth > statements[i].depth; j += 1) {
+      if (statements[j].text.includes(needle)) {
+        nested = true;
+        break;
+      }
+    }
+    if (!nested) out.push(i);
+  }
+  return out;
+}
+
+/**
+ * The statement that RAISES `needle`, or null.
+ *
+ * Requires the carrier to match `RAISE EXCEPTION` in its MASKING PROJECTION, so
+ * neither a mention inside a literal nor a commented-out (already neutered)
+ * raise qualifies — a comment is not part of any statement, so it cannot be
+ * one. This also narrows a real defect in the reader it replaces: that one
+ * walked back over the WHOLE file for any line matching `RAISE EXCEPTION`, so a
+ * bare `TEST FAILED (` literal produced a branch anchored on an unrelated raise
+ * hundreds of lines earlier. A `TEST FAILED (` that is not raised is refused at
+ * parse time by GRAMMAR rule 3a and at runtime by the identity nonce (3c) — the
+ * two places it is decidable.
+ */
+function raiseStatementIndex(statements, needle) {
+  for (const i of innermostCarriers(statements, needle)) {
+    if (RAISE_EXCEPTION_RE.test(statements[i].executableText)) return i;
+  }
+  return -1;
+}
+
+/** A statement rendered on one line, for a diagnostic that must PRINT WHAT IT SAW (D-12). */
+const oneLine = (statement) => statement.text.trim().replace(/\s*\n\s*/g, " ");
 
 export function neuterArm(text, arm) {
   const lines = text.split("\n");
   const needle = `TEST FAILED (${arm})`;
-  const isComment = (l) => /^[ \t]*--/.test(l);
+  const statements = tokenizeStatements(text);
 
-  let hit = -1;
-  for (let i = 0; i < lines.length; i += 1) {
-    if (lines[i].includes(needle) && !isComment(lines[i])) {
-      hit = i;
-      break;
-    }
+  const raiseIdx = raiseStatementIndex(statements, needle);
+  if (raiseIdx === -1) {
+    const carried = statements.some((s) => s.text.includes(needle));
+    return {
+      text,
+      found: false,
+      reason: carried
+        ? `no RAISE EXCEPTION precedes "${needle}"`
+        : `no statement contains "${needle}"`,
+    };
   }
-  if (hit === -1) return { text, found: false, reason: `no statement contains "${needle}"` };
-
-  let raiseAt = hit;
-  while (raiseAt >= 0 && !/\bRAISE\s+EXCEPTION\b/i.test(lines[raiseAt])) raiseAt -= 1;
-  if (raiseAt < 0) {
-    return { text, found: false, reason: `no RAISE EXCEPTION precedes "${needle}"` };
-  }
+  const raiseStmt = statements[raiseIdx];
 
   // Absorb the abort-path cleanup that immediately precedes the RAISE. See the
   // header: leaving `RESET ROLE;` behind leaks a superuser session into every
   // later arm. The forward scan below still starts at the RAISE — starting it
   // here would terminate on `RESET ROLE;`'s own semicolon and leave the RAISE
   // live, which is a neuter that silently did nothing.
-  let start = raiseAt;
-  while (start > 0 && ABSORBABLE_CLEANUP.test(lines[start - 1])) start -= 1;
+  //
+  // ⭐ Absorption is now asked of a STATEMENT, so `IF NOT ok THEN RESET ROLE;
+  // RAISE …;` on ONE line absorbs correctly — the old line walk started at the
+  // line BEFORE the RAISE's and could not see a cleanup sharing its line.
+  let startIdx = raiseIdx;
+  for (;;) {
+    const p = prevSiblingIndex(statements, startIdx, raiseStmt.depth);
+    if (p === -1 || !ABSORBABLE_CLEANUP.test(statements[p].text)) break;
+    startIdx = p;
+  }
+  const start = statements[startIdx].startLine - 1;
 
   // ── WR-07: refuse what we cannot classify, instead of leaking it ──────────
   // The absorbed set is ONE literal statement, and the header is explicit that
@@ -369,63 +481,157 @@ export function neuterArm(text, arm) {
   //
   // MEASURED 2026-08-29 against the real corpus: all 30 arms still execute and
   // bite, so this refuses nothing that exists today.
+  // RE-MEASURED 2026-09-01 under the statement predicate (sample size and
+  // coverage in the `isBranchHead` block above): 103 of 103 backward scans
+  // agree with the deleted line predicate, 0 disagreements, the same 4 loud
+  // refusals, 0 added. Full corpus run unchanged at arms 30/30/0, biting 30.
   // ⛔ ORDER IS LOAD-BEARING (R2-C01). Classify FIRST, terminate LAST, and
-  // terminate only on a line that IS a branch head (R3-C01), never on one that
+  // terminate only on a unit that IS a branch head (R3-C01), never on one that
   // merely MENTIONS a branch-head keyword. Round 1 fixed the loop ORDER; round
   // 2 added `--` stripping; round 3 still reached the leak through a string
   // literal, a block comment and a dollar-quoted body, because the predicate
-  // was a bare word match. `isBranchHead` classifies the line structurally
-  // after `executableText` removes every non-code region, so the rule ranges
-  // over the CLASS of embeddings instead of over a list of spellings.
-  for (let k = start - 1; k >= 0; k -= 1) {
-    // Blank, whole-line `--` comment, or a line whose entire content is a
-    // block comment / dollar-quoted noise: no runtime effect, nothing to leak.
-    if (IGNORABLE_LINE.test(lines[k]) || executableText(lines[k]).trim() === "") continue;
-    if (isBranchHead(lines[k])) break; // structurally a branch head
-    return {
-      text,
-      found: false,
-      reason:
-        `the abort branch for "${arm}" carries an unrecognised statement before its RAISE ` +
-        `(line ${k + 1}: ${lines[k].trim()}). Neutering only the RAISE would leave that statement ` +
-        `executing for the rest of the file — the measured RESET ROLE class, where a leaked ` +
-        `superuser session made sixteen later arms pass for a reason unrelated to their grants. ` +
-        `Extend ABSORBABLE_CLEANUP deliberately, or restructure the branch.`,
-    };
+  // was a bare word match; round 4 ([R4-C01]) reached it through a COMPOUND
+  // LINE, because the predicate — structural by then — was still asked of a
+  // LINE, and a line carrying a head plus two more statements answered "yes".
+  //
+  // ⭐ The walk is now over STATEMENTS at the RAISE's own nesting depth. That
+  // closes the compound-line direction BY CONSTRUCTION rather than by a fifth
+  // spelling rule: `EXCEPTION WHEN OTHERS THEN v_raised := true; END;`
+  // decomposes into a head and two statements, so the statements are seen and
+  // classified instead of being swallowed by the head's regex; and
+  // `SET ROLE postgres; IF NOT ok THEN` decomposes so the privileged statement
+  // is classified instead of hiding behind the head that follows it.
+  //
+  // Comments and blank regions need no special case any more: the tokenizer
+  // never emits them as statements, so there is nothing to skip. That deletes
+  // the line-local `IGNORABLE_LINE` predicate rather than keeping an
+  // unreachable branch around it.
+  //
+  // THE RULE, stated once and implemented exactly: walking back from the absorb
+  // point, every STATEMENT must be ignorable (the tokenizer emits none),
+  // absorbable (ABSORBABLE_CLEANUP), or a branch head that terminates the walk.
+  // Any other statement — INCLUDING ONE SHARING A LINE WITH THE HEAD, ON EITHER
+  // SIDE OF IT — is refused, naming the statement and its line.
+  //
+  // Both sides matter and for the same reason. A statement AFTER the head on
+  // its line is inside the branch and is reached by the walk normally. A
+  // statement BEFORE the head on its line is [R4-C01]'s own spelling —
+  // `SET ROLE postgres; IF NOT ok THEN` — and it is refused because the
+  // branch's boundary and the LINE's boundary disagree there. Every one of the
+  // four rounds of this defect was a boundary disagreement read as agreement,
+  // and this rewrite is line-oriented: it comments whole lines, splices `NULL;`
+  // at a line's indent, and addresses every diagnostic by line. Accepting a
+  // head whose line begins with something else means trusting a coincidence.
+  // Refusing is the loud direction, and the real corpus contains no such head
+  // (re-measured — see the block above).
+  const refuse = (stmt) => ({
+    text,
+    found: false,
+    reason:
+      `the abort branch for "${arm}" carries an unrecognised statement before its RAISE ` +
+      `(line ${stmt.startLine}: ${oneLine(stmt)}). Neutering only the RAISE would leave that ` +
+      `statement executing for the rest of the file — the measured RESET ROLE class, where a ` +
+      `leaked superuser session made sixteen later arms pass for a reason unrelated to their ` +
+      `grants. Extend ABSORBABLE_CLEANUP deliberately, or restructure the branch.`,
+  });
+
+  for (
+    let k = prevSiblingIndex(statements, startIdx, raiseStmt.depth);
+    k !== -1;
+    k = prevSiblingIndex(statements, k, raiseStmt.depth)
+  ) {
+    const stmt = statements[k];
+    if (stmt.executableText.trim() === "") continue;
+    if (isBranchHead(stmt)) {
+      const shares = prevSiblingIndex(statements, k, stmt.depth);
+      if (shares !== -1 && statements[shares].endLine === stmt.startLine) {
+        return refuse(statements[shares]);
+      }
+      break; // structurally a branch head, and it begins its own line
+    }
+    return refuse(stmt);
   }
 
-  // Walk forward to the statement terminator, tracking single-quote state so a
-  // ';' inside the message literal does not end the statement early. '' is the
-  // SQL escape for a literal quote.
-  let end = -1;
-  let inQuote = false;
-  outer: for (let i = raiseAt; i < lines.length; i += 1) {
-    const line = lines[i];
-    for (let c = 0; c < line.length; c += 1) {
-      const ch = line[c];
-      if (ch === "'") {
-        if (inQuote && line[c + 1] === "'") {
-          c += 1;
-          continue;
-        }
-        inQuote = !inQuote;
-      } else if (ch === ";" && !inQuote) {
-        end = i;
-        break outer;
-      }
-    }
-  }
-  if (end === -1) {
+  // ── [MUT-I01]: where the RAISE ENDS ──────────────────────────────────────
+  //
+  // ⛔ THE DELETED READER AND WHY IT WAS DELETED RATHER THAN REPAIRED. This
+  // used to be a raw character walk from the RAISE's line, tracking ONE
+  // character — `'`, with the `''` escape — and nothing else. An apostrophe
+  // inside a `--` comment inside the RAISE's own span therefore flipped its
+  // parity, and the two parities failed DIFFERENTLY:
+  //
+  //   ODD  — the real terminator was swallowed, no `;` was ever found, and a
+  //          perfectly legal arm was refused as `neuter-missed`. Loud, false.
+  //   EVEN — parity was restored by a second apostrophe AFTER the real
+  //          terminator had been swallowed, so the walk ran on and ended on a
+  //          LATER statement's `;`. The neuter then commented out a statement
+  //          that had to survive, and reported success. SILENT.
+  //
+  // A repaired walk would have to know comments, which means knowing literals,
+  // dollar quotes and block comments — that is the tokenizer. So the end of the
+  // RAISE is simply the end of the RAISE's STATEMENT, and the duplicate walker
+  // is gone. `terminated: false` (a statement running to EOF with no `;`) keeps
+  // the one refusal that was always real: an unterminated statement is a
+  // MEASURE failure, not a shorter statement.
+  if (!raiseStmt.terminated) {
     return { text, found: false, reason: `could not find the end of the RAISE statement for "${arm}"` };
   }
 
-  const indent = (lines[start].match(/^[ \t]*/) || [""])[0];
-  const replacement = [
-    ...lines.slice(start, end + 1).map((l) => `-- NEUTERED(${arm}) ${l}`),
-    `${indent}NULL; -- neutered ${arm} by the mutation runner`,
-  ];
-  lines.splice(start, end - start + 1, ...replacement);
-  return { text: lines.join("\n"), found: true };
+  // ── The rewrite ──────────────────────────────────────────────────────────
+  //
+  // The span is a STATEMENT RANGE, from the first absorbed statement through
+  // the RAISE's terminator. The whole-line splice below is correct only when
+  // that range aligns to line boundaries — and the real corpus does not oblige:
+  // `test_profiles_privileged_columns_locked.sql:97` puts a head, a
+  // `RESET ROLE;`, a RAISE and an `END IF;` on ONE line. Commenting that whole
+  // line deletes every statement on it, which is P5's silent over-neuter
+  // reached by a different road. So a span that starts or ends mid-line is
+  // rewritten AROUND: the code before it and after it on those lines is
+  // re-emitted verbatim on its own line, and only the span is commented.
+  const spanStart = statements[startIdx].start;
+  const spanEnd = raiseStmt.end;
+  const lineHead = text.lastIndexOf("\n", spanStart - 1) + 1;
+  const prefix = text.slice(lineHead, spanStart);
+  const tail = text.slice(spanEnd);
+  const nl = tail.indexOf("\n");
+  const suffix = nl === -1 ? tail : tail.slice(0, nl);
+  const rest = tail.slice(suffix.length);
+
+  // "Is there code out here?" is asked of the SAME masking projection every
+  // other decision in this file uses — not of a second `^[ \t]*--` predicate.
+  // A trailing `--` comment or a `/* … */` therefore goes with the neutered
+  // statement, as it always has, without this line owning its own idea of what
+  // a comment is. That second idea is how [VAC04-C1]'s composing blind spot is
+  // built, and there is exactly one definition of code in this file.
+  const startsOnOwnLine = executableText(prefix).trim() === "";
+  const endsLine = executableText(suffix).trim() === "";
+
+  if (startsOnOwnLine && endsLine) {
+    const start = statements[startIdx].startLine - 1;
+    const end = raiseStmt.endLine - 1;
+    const indent = (lines[start].match(/^[ \t]*/) || [""])[0];
+    const replacement = [
+      ...lines.slice(start, end + 1).map((l) => `-- NEUTERED(${arm}) ${l}`),
+      `${indent}NULL; -- neutered ${arm} by the mutation runner`,
+    ];
+    lines.splice(start, end - start + 1, ...replacement);
+    return { text: lines.join("\n"), found: true };
+  }
+
+  const indent = (prefix.match(/^[ \t]*/) || [""])[0];
+  const commented = text
+    .slice(spanStart, spanEnd)
+    .split("\n")
+    .map((l) => `-- NEUTERED(${arm}) ${l}`)
+    .join("\n");
+  const rewritten =
+    text.slice(0, lineHead) +
+    (startsOnOwnLine ? "" : `${prefix.replace(/[ \t]+$/, "")}\n`) +
+    `${commented}\n` +
+    `${indent}NULL; -- neutered ${arm} by the mutation runner` +
+    (endsLine ? suffix : `\n${suffix}`) +
+    rest;
+  return { text: rewritten, found: true };
 }
 
 /**
@@ -602,37 +808,12 @@ export function armIdentitiesInOrder(text) {
 }
 
 /**
- * Index of the last line of the statement starting at `from`, tracking
- * single-quote state so a `;` inside a message literal does not end it early.
- * `''` is the SQL escape for a literal quote. Returns -1 if unterminated.
- */
-function statementEndLine(lines, from) {
-  let inQuote = false;
-  for (let i = from; i < lines.length; i += 1) {
-    const line = lines[i];
-    for (let c = 0; c < line.length; c += 1) {
-      const ch = line[c];
-      if (ch === "'") {
-        if (inQuote && line[c + 1] === "'") {
-          c += 1;
-          continue;
-        }
-        inQuote = !inQuote;
-      } else if (ch === ";" && !inQuote) {
-        return i;
-      }
-    }
-  }
-  return -1;
-}
-
-/**
  * Every FAILURE BRANCH in `text`, in file order: `{ id, text }` where `text` is
  * the exact source from the enclosing branch head through the end of the RAISE.
  *
- * The backward walk reuses the R3-C01 primitives (`executableText` /
- * `isBranchHead`), so "what counts as a branch head" has ONE definition in this
- * file rather than two that can drift apart.
+ * The backward walk reuses the same STATEMENT TOKENIZER `neuterArm` uses, so
+ * "what counts as a branch head" has ONE definition across this file rather
+ * than two that can drift apart.
  */
 /**
  * How far back a failure branch's head may sit from its RAISE.
@@ -646,15 +827,16 @@ const FAILURE_BRANCH_LOOKBACK = 40;
 
 export function failureBranches(text) {
   const lines = text.split("\n");
+  const statements = tokenizeStatements(text);
   const out = [];
-  for (let i = 0; i < lines.length; i += 1) {
-    if (/^[ \t]*--/.test(lines[i])) continue; // a commented-out (neutered) raise
-    const m = lines[i].match(/TEST FAILED \(([^)]*)\)/);
+  for (const idx of innermostCarriers(statements, "TEST FAILED (")) {
+    const stmt = statements[idx];
+    // A commented-out (neutered) raise is not a statement at all, so it cannot
+    // reach here — the tokenizer's masking, not a `^--` line test, is what
+    // excludes it.
+    if (!RAISE_EXCEPTION_RE.test(stmt.executableText)) continue;
+    const m = stmt.text.match(/TEST FAILED \(([^)]*)\)/);
     if (!m) continue;
-
-    let raiseAt = i;
-    while (raiseAt >= 0 && !/\bRAISE\s+EXCEPTION\b/i.test(lines[raiseAt])) raiseAt -= 1;
-    if (raiseAt < 0) raiseAt = i;
 
     // Walk back to the NEAREST branch head. The guard is the load-bearing part
     // of the block: `IF NOT raised THEN` -> `IF TRUE THEN` preserves every
@@ -671,17 +853,22 @@ export function failureBranches(text) {
     // no head is found inside the bound the block is the raise statement alone,
     // which is the narrow direction; that is safe here only because the nonce
     // (not this function) is what closes the injection half of the class.
-    let head = raiseAt;
-    for (let k = raiseAt - 1; k >= 0 && raiseAt - k <= FAILURE_BRANCH_LOOKBACK; k -= 1) {
-      if (isBranchHead(lines[k])) {
-        head = k;
+    let headLine = stmt.startLine;
+    for (
+      let k = prevSiblingIndex(statements, idx, stmt.depth);
+      k !== -1 && stmt.startLine - statements[k].startLine <= FAILURE_BRANCH_LOOKBACK;
+      k = prevSiblingIndex(statements, k, stmt.depth)
+    ) {
+      if (isBranchHead(statements[k])) {
+        headLine = statements[k].startLine;
         break;
       }
     }
 
-    const end = statementEndLine(lines, raiseAt);
-    out.push({ id: m[1], text: lines.slice(head, (end === -1 ? i : end) + 1).join("\n") });
-    i = end === -1 ? i : end;
+    // The raise's end is its STATEMENT's end. The second copy of the
+    // single-quote-only forward walker that used to live here — the other half
+    // of [MUT-I01] — is deleted, not wrapped.
+    out.push({ id: m[1], text: lines.slice(headLine - 1, stmt.endLine).join("\n") });
   }
   return out;
 }
