@@ -34,13 +34,10 @@ import {
 import {
   applyFileStep,
   armIdentities,
+  attributeIdentities,
   failureBranches,
-  firstFailureArm,
+  gateAttributionRecords,
   identityRewriteDetail,
-  makeIdentityNonce,
-  stampedIdentity,
-  stampIdentities,
-  unstampedIdentities,
 } from "../../scripts/mutation-runner/run.mjs";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
@@ -689,210 +686,400 @@ describe("R2-W04 / GRAMMAR rule 3b — a mutation may not REWRITE an arm identit
 });
 
 // ══════════════════════════════════════════════════════════════════════════
-// R3-C02 — the identity NONCE: the arbiter that cannot be re-spelled
+// 164.3.1-05 — arm identity by SOURCE LOCATION (supersedes the R3-C02 nonce)
 // ══════════════════════════════════════════════════════════════════════════
-describe("GRAMMAR rule 3c — only an identity the RUNNER stamped may be read", () => {
-  // ⛔ WHY A NONCE AND NOT A LONGER REGEX. Three review rounds answered a
-  // spelling with a rule and were answered by a new spelling within minutes.
-  // The nonce does not read the annotation's text at all: it reads what the
-  // database printed, and asks whether the runner put it there.
+describe("GRAMMAR rule 3c — an identity is READ only where the RUNNER's gate raised it", () => {
+  // ⛔ WHY SOURCE LOCATION AND NOT A NONCE. The nonce (R3-C02, 2026-08-29)
+  // stamped a per-run secret into the gate's identities and read only stamped
+  // ones. [R4-C02] MEASURED that dead: the stamp travels in the QUERY TEXT of
+  // the statement the gate is running, and PostgreSQL hands query text to
+  // server-side code. An `AFTER INSERT` trigger installed by a `sql` step read
+  // it back with `current_query()` and re-raised it, and an arm guarded by
+  // `IF FALSE` scored `RED (identity ok)` with `biting: 1`.
   //
-  // The inputs below are GENERATED over the class of spellings, not listed —
-  // the same discipline the neuter oracle now uses. Every one of them produces
-  // the identical bytes at runtime; none of them is a substring rule's problem.
+  // The identity is now WHERE the raise came from, which the executing SQL
+  // cannot choose. Three legs, ALL required:
+  //   (a) the `psql:` prefix names this lane's gate scratch file;
+  //   (b) the CONTEXT chain is EXACTLY ONE `inline_code_block line N at RAISE`;
+  //   (c) stmtStartLine + N − 1 === the arm's recorded raise line.
+  //
+  // ⚠️ EVERY OUTPUT SHAPE BELOW WAS MEASURED, not composed. They are the
+  // verbatim bytes `scripts/pg-lane/run.sh` emitted from a throwaway
+  // PostgreSQL 16.13 cluster on 2026-09-01 (the same six drives recorded in
+  // `164.3.1-05-ATTRIBUTION.md`), with only the absolute scratch path
+  // substituted. A pin written from the shape the parser expects would test
+  // the parser against itself.
 
-  const ARM = "SYNTH 1";
-
-  // ══════════════════════════════════════════════════════════════════════════
-  // ⛔ SP-C01 — WHAT WAS HERE BEFORE, AND WHY IT WAS WORSE THAN NOTHING.
-  //
-  // This block used to loop a five-row `SPELLINGS` table and call itself an
-  // ORACLE over the class of injections. The loop body built its lane output
-  // from `ARM` alone, so `injected` NEVER REACHED THE SYSTEM UNDER TEST and all
-  // five arms were byte-identical. PROVEN by neuter: replacing every SPELLINGS
-  // value with `NEUTERED-GARBAGE-N` left all 63 tests green. It was the exact
-  // "enumerates instances while claiming the class" defect the comment one
-  // describe block up says it replaced.
-  //
-  // The repair is not a bigger table. It is noticing that 3a and 3c range over
-  // TWO DIFFERENT AXES, and the old table was on the wrong one for 3c:
-  //
-  //   * a SPELLING is an input to the PARSER. Whether 3a can see it is
-  //     spelling-dependent and decidable here, so the spelling table now goes
-  //     through `parseAnnotations` and is asserted as an EXACT classification.
-  //   * 3c never reads the annotation at all. Its input is the LANE'S OUTPUT,
-  //     so that is what its table generates: prefixes, positions, mixtures of
-  //     stamped and unstamped identities, and the near-misses a substring rule
-  //     would fumble.
-  //
-  // ⚠️ HONEST RESIDUAL, stated rather than implied: NO arm in this file can
-  // carry a spelling all the way to a lane output, because that requires
-  // PostgreSQL to evaluate `format()` / `chr()` / `||`. The end-to-end proof
-  // for one such spelling is the runner's own SELF-TEST 8/8, whose fixture is
-  // deliberately spelled with `format()` so it can only pass on 3c — and which
-  // CI now actually runs (SP-C02). This file proves the two halves; that step
-  // proves they meet.
-  // ══════════════════════════════════════════════════════════════════════════
+  /** The gate path psql echoes — the runner passes an absolute scratch path. */
+  const GATE_PATH = "/tmp/mut-slot-7/src/supabase/tests/gate.sql";
+  const OTHER_PATH = "/tmp/mut-slot-7/post-apply.sql";
+  const LOCATION = "LOCATION:  exec_stmt_raise, pl_exec.c:3911";
 
   /**
-   * Ways to make PostgreSQL print `TEST FAILED (SYNTH 1)`.
-   * `refusedBy3a` is the MEASURED classification, and it is asserted as an
-   * exact map below — widening 3a without updating it is a failure, which is
-   * what keeps GRAMMAR.md's "3a is not the closure" claim from going stale.
+   * The genuine gate: `DO` on line 3, the RAISE on line 7, `END $$;` on line 9.
+   * Real SQL text, tokenized by the real `gateAttributionRecords`, so the
+   * record arithmetic is under test rather than hand-supplied.
    */
-  const SPELLINGS: { name: string; stmtBody: string; refusedBy3a: boolean }[] = [
-    { name: "direct literal", stmtBody: `'TEST FAILED (${ARM}): x'`, refusedBy3a: true },
-    { name: "concatenated", stmtBody: `'TEST FAI' || 'LED (${ARM}): x'`, refusedBy3a: true },
-    { name: "concatenated at the paren", stmtBody: `'TEST FAILED (' || '${ARM}): x'`, refusedBy3a: true },
-    { name: "format() interpolation", stmtBody: `format('TEST FA%sED (${ARM}): x', 'IL')`, refusedBy3a: false },
-    { name: "chr() assembled", stmtBody: `chr(84) || 'EST FAILED (${ARM}): x'`, refusedBy3a: false },
-  ];
+  const GENUINE_GATE = [
+    "-- case 1: genuine single-frame DO raise",
+    "-- (DO on line 3, RAISE on line 7, END on line 9)",
+    "DO $$",
+    "BEGIN",
+    "  RAISE NOTICE 'about to raise';",
+    "  IF TRUE THEN",
+    "    RAISE EXCEPTION 'TEST FAILED (X 1): demo arm';",
+    "  END IF;",
+    "END $$;",
+    "",
+  ].join("\n");
 
-  /** The annotation a spelling produces, built the way a real one is. */
-  const SETUP_FILE = "supabase/tests/test_strategy_shares_rls.sql";
-  const annotationFor = (stmtBody: string) =>
-    [
-      `-- RED-UNDER-SETUP: {"apply":["${SETUP_FILE}"]}`,
-      `  -- RED-UNDER: prose`,
-      `  -- RED-UNDER-M: {"arm":"${ARM}","apply":[{"kind":"sql","stmt":${JSON.stringify(
-        `DO $$ BEGIN RAISE EXCEPTION '%', ${stmtBody}; END $$`,
-      )}}]}`,
+  /** Two DO blocks; the raise is in the SECOND (line 9, block 6-10). */
+  const TWO_BLOCK_GATE = [
+    "-- case 4: multi-statement gate, raise in the SECOND DO block",
+    "DO $$",
+    "BEGIN",
+    "  RAISE NOTICE 'first block ok';",
+    "END $$;",
+    "DO $$",
+    "BEGIN",
+    "  RAISE NOTICE 'second block starting';",
+    "  RAISE EXCEPTION 'TEST FAILED (Y 2): from second block';",
+    "END $$;",
+    "",
+  ].join("\n");
+
+  /** The forgery's target: `DO` line 2, RAISE line 6, `END $$;` line 8. */
+  const FORGERY_TARGET_GATE = [
+    "-- case 5/6: the arm the forgery aims at; its own guard is IF FALSE",
+    "DO $$",
+    "BEGIN",
+    "  INSERT INTO t VALUES (1);",
+    "  IF FALSE THEN",
+    "    RAISE EXCEPTION 'TEST FAILED (X 1): the arm under test fired.';",
+    "  END IF;",
+    "END $$;",
+    "",
+  ].join("\n");
+
+  const attribute = (output: string, gateText: string, gatePath = GATE_PATH) =>
+    attributeIdentities(output, { gatePath, records: gateAttributionRecords(gateText) });
+
+  // ── The record arithmetic itself (the plan-01 span contract, consumed) ────
+
+  it("gateAttributionRecords resolves a DO-body raise to its enclosing block's span", () => {
+    expect(gateAttributionRecords(GENUINE_GATE)).toEqual([
+      { arm: "X 1", raiseFileLine: 7, stmtStartLine: 3, stmtEndLine: 9 },
+    ]);
+    expect(gateAttributionRecords(TWO_BLOCK_GATE)).toEqual([
+      { arm: "Y 2", raiseFileLine: 9, stmtStartLine: 6, stmtEndLine: 10 },
+    ]);
+  });
+
+  it("a `TEST FAILED (` that is not RAISED yields no record — a comment is not a statement", () => {
+    // The mini-gate fixture carries the literal inside a `--` documentation
+    // comment. A record for it would let a forged raise attribute to a line
+    // nothing executes.
+    const gate = [
+      "-- RAISE EXCEPTION 'TEST FAILED (<ARM ID>): explanation'",
+      "DO $$",
+      "BEGIN",
+      "  RAISE EXCEPTION 'TEST FAILED (REAL 1): x';",
+      "END $$;",
+      "",
     ].join("\n");
+    expect(gateAttributionRecords(gate).map((r) => r.arm)).toEqual(["REAL 1"]);
+  });
 
-  it("the spelling table is non-empty, names ONE arm throughout, and covers BOTH sides of 3a", () => {
-    // What the old arm at this position claimed in its title and did not do.
-    expect(SPELLINGS.length).toBeGreaterThan(3);
-    for (const s of SPELLINGS) {
-      expect(s.stmtBody, `${s.name} is empty`).not.toBe("");
-      expect(s.stmtBody, `${s.name} does not name ${ARM}`).toContain(ARM);
+  // ── The five measured PG 16.13 output shapes ─────────────────────────────
+
+  it("MEASURED shape 1 — a genuine single-frame DO raise is ATTRIBUTED", () => {
+    const output = [
+      `psql:${GATE_PATH}:9: NOTICE:  00000: about to raise`,
+      LOCATION,
+      `psql:${GATE_PATH}:9: ERROR:  P0001: TEST FAILED (X 1): demo arm`,
+      "CONTEXT:  PL/pgSQL function inline_code_block line 5 at RAISE",
+      LOCATION,
+      "",
+    ].join("\n");
+    const r = attribute(output, GENUINE_GATE);
+    expect(r.measureFail).toBeNull();
+    expect(r.firstAttributed).toBe("X 1");
+    expect(r.unattributable).toEqual([]);
+  });
+
+  it("MEASURED shape 2 — a trigger raise (named-function frame) is UNATTRIBUTABLE", () => {
+    // The R4-C02 path: an AFTER INSERT trigger installed by a `sql` step,
+    // raising the arm's exact message text. The nonce scored this RED.
+    const output = [
+      `psql:${GATE_PATH}:2: ERROR:  P0001: TEST FAILED (X 1): demo arm`,
+      "CONTEXT:  PL/pgSQL function forge_fn() line 3 at RAISE",
+      LOCATION,
+      "",
+    ].join("\n");
+    const r = attribute(output, GENUINE_GATE);
+    expect(r.firstAttributed).toBeNull();
+    expect(r.unattributable.map((u) => u.identity)).toEqual(["X 1"]);
+    expect(r.unattributable[0].why).toMatch(/forge_fn\(\)/);
+  });
+
+  it("MEASURED shape 3 — a trigger fired from INSIDE a DO (multi-frame) is UNATTRIBUTABLE", () => {
+    const output = [
+      `psql:${GATE_PATH}:5: ERROR:  P0001: TEST FAILED (X 1): demo arm`,
+      "CONTEXT:  PL/pgSQL function forge_fn() line 3 at RAISE",
+      'SQL statement "INSERT INTO t VALUES (1)"',
+      "PL/pgSQL function inline_code_block line 3 at SQL statement",
+      LOCATION,
+      "",
+    ].join("\n");
+    const r = attribute(output, GENUINE_GATE);
+    expect(r.firstAttributed).toBeNull();
+    // `inline_code_block` DOES appear in the chain here — but deeper, and only
+    // `at SQL statement`. Matching the string anywhere in the chain would
+    // accept this.
+    expect(r.unattributable[0].why).toMatch(/EXACTLY ONE/);
+  });
+
+  it("MEASURED shape 4 — a raise in the SECOND DO block attributes via DO_start + N − 1", () => {
+    const output = [
+      `psql:${GATE_PATH}:5: NOTICE:  00000: first block ok`,
+      LOCATION,
+      "DO",
+      `psql:${GATE_PATH}:10: NOTICE:  00000: second block starting`,
+      LOCATION,
+      `psql:${GATE_PATH}:10: ERROR:  P0001: TEST FAILED (Y 2): from second block`,
+      "CONTEXT:  PL/pgSQL function inline_code_block line 4 at RAISE",
+      LOCATION,
+      "",
+    ].join("\n");
+    const r = attribute(output, TWO_BLOCK_GATE);
+    expect(r.firstAttributed).toBe("Y 2");
+    // Non-vacuity: the arithmetic is what carried it. 6 + 4 − 1 = 9, and 9 is
+    // the raise's real file line — a parser that ignored N would also "pass".
+    expect(gateAttributionRecords(TWO_BLOCK_GATE)[0]).toMatchObject({
+      stmtStartLine: 6,
+      raiseFileLine: 9,
+    });
+  });
+
+  it("MEASURED shape 5 — the nested-EXECUTE DO FORGERY is REFUSED, and ONLY the chain rule refuses it", () => {
+    // ⭐ THE SINGLE MOST IMPORTANT PIN IN THIS FILE. A trigger running
+    // `EXECUTE 'DO $d$' || repeat(E'\n', 4) || 'BEGIN RAISE …; END $d$'`
+    // produces an `inline_code_block … at RAISE` innermost frame whose NAME
+    // AND LINE are attacker-chosen, under the gate file's own prefix.
+    // MEASURED 2026-09-01: with 4 padding newlines it landed on the genuine
+    // arm's EXACT resolved line.
+    const output = [
+      `psql:${GATE_PATH}:8: ERROR:  P0001: TEST FAILED (X 1): forged with padded line`,
+      "CONTEXT:  PL/pgSQL function inline_code_block line 5 at RAISE",
+      'SQL statement "DO $d$',
+      "",
+      "",
+      "",
+      `BEGIN RAISE EXCEPTION 'TEST FAILED (X 1): forged with padded line'; END $d$"`,
+      "PL/pgSQL function forge_fn() line 3 at EXECUTE",
+      'SQL statement "INSERT INTO t VALUES (1)"',
+      "PL/pgSQL function inline_code_block line 3 at SQL statement",
+      LOCATION,
+      "",
+    ].join("\n");
+    const r = attribute(output, FORGERY_TARGET_GATE);
+
+    expect(r.firstAttributed, "the forgery must NOT be attributable to the arm").toBeNull();
+    expect(r.unattributable[0].why).toMatch(/EXACTLY ONE/);
+
+    // ⛔ NON-VACUITY — the reason this pin exists at all. Legs (a) and (c) BOTH
+    // PASS for this forgery: the prefix names the gate file at the right
+    // statement end line, and the forged CONTEXT line resolves to the genuine
+    // arm's real raise line. If either of those did not hold, the refusal
+    // above would prove nothing about the CHAIN rule. Assert it directly.
+    const rec = gateAttributionRecords(FORGERY_TARGET_GATE)[0];
+    expect(rec, "leg (a): the forgery's psql prefix line IS the block's end line").toMatchObject({
+      stmtEndLine: 8,
+    });
+    expect(
+      rec.stmtStartLine + 5 - 1,
+      "leg (c): the forged CONTEXT line 5 resolves to the genuine arm's raise line",
+    ).toBe(rec.raiseFileLine);
+
+    // And the control: the SAME gate, the SAME arm, raised genuinely, IS read.
+    const genuine = [
+      `psql:${GATE_PATH}:8: ERROR:  P0001: TEST FAILED (X 1): the arm under test fired.`,
+      "CONTEXT:  PL/pgSQL function inline_code_block line 5 at RAISE",
+      LOCATION,
+      "",
+    ].join("\n");
+    expect(
+      attribute(genuine, FORGERY_TARGET_GATE).firstAttributed,
+      "an attribution that refuses everything would also refuse the forgery",
+    ).toBe("X 1");
+  });
+
+  // ── The three shapes that are not a CONTEXT chain problem ────────────────
+
+  it("MEASURED — `TEST FAILED (…)` carried by a RAISE NOTICE is UNATTRIBUTABLE (the lane exited 0)", () => {
+    // The strongest property of the nonce design was that it scanned ALL
+    // output, not the first ERROR. A NOTICE forges the identity WITHOUT
+    // aborting the lane, so a first-ERROR-only reader sees nothing at all.
+    const output = [
+      `psql:${GATE_PATH}:8: NOTICE:  00000: TEST FAILED (X 1): carried by a NOTICE`,
+      LOCATION,
+      "DO",
+      "",
+    ].join("\n");
+    const r = attribute(output, FORGERY_TARGET_GATE);
+    expect(r.firstAttributed).toBeNull();
+    expect(r.unattributable.map((u) => u.identity)).toEqual(["X 1"]);
+    expect(r.unattributable[0].why).toMatch(/severity is NOTICE/);
+  });
+
+  it("a perfect single-frame raise from a NON-GATE file is UNATTRIBUTABLE (leg (a))", () => {
+    // The `sql` steps run from `post-apply.sql`. Everything else about this
+    // block is indistinguishable from shape 1.
+    const output = [
+      `psql:${OTHER_PATH}:9: ERROR:  P0001: TEST FAILED (X 1): demo arm`,
+      "CONTEXT:  PL/pgSQL function inline_code_block line 5 at RAISE",
+      LOCATION,
+      "",
+    ].join("\n");
+    const r = attribute(output, GENUINE_GATE);
+    expect(r.firstAttributed).toBeNull();
+    expect(r.unattributable[0].why).toMatch(/post-apply\.sql/);
+  });
+
+  it("a single frame resolving to the WRONG line is UNATTRIBUTABLE (leg (c))", () => {
+    // Same file, same shape, CONTEXT line 4 instead of 5 → file line 6, and
+    // the arm is raised at 7.
+    const output = [
+      `psql:${GATE_PATH}:9: ERROR:  P0001: TEST FAILED (X 1): demo arm`,
+      "CONTEXT:  PL/pgSQL function inline_code_block line 4 at RAISE",
+      LOCATION,
+      "",
+    ].join("\n");
+    const r = attribute(output, GENUINE_GATE);
+    expect(r.firstAttributed).toBeNull();
+    expect(r.unattributable[0].why).toMatch(/source location does not match/);
+    // SC-7: the diagnostic must say what it saw AND what it wanted.
+    expect(r.unattributable[0].why).toContain("CONTEXT line 4");
+    expect(r.unattributable[0].why).toContain(`${GATE_PATH}:7`);
+  });
+
+  it("an identity the gate does not raise at all is UNATTRIBUTABLE, naming that", () => {
+    const output = [
+      `psql:${GATE_PATH}:9: ERROR:  P0001: TEST FAILED (GHOST 9): never declared`,
+      "CONTEXT:  PL/pgSQL function inline_code_block line 5 at RAISE",
+      LOCATION,
+      "",
+    ].join("\n");
+    const r = attribute(output, GENUINE_GATE);
+    expect(r.firstAttributed).toBeNull();
+    expect(r.unattributable[0].why).toMatch(/declares no RAISE for "GHOST 9"/);
+  });
+
+  it("VERBOSITY=verbose is required, and its absence is refused rather than assumed", () => {
+    // The default-verbosity shape: no `P0001:` token, no `LOCATION:` sentinel.
+    // Without the sentinel the chain's extent is unknown, so its frame count
+    // is not assertable — that must refuse, never silently accept.
+    const output = [
+      `psql:${GATE_PATH}:9: ERROR:  TEST FAILED (X 1): demo arm`,
+      "CONTEXT:  PL/pgSQL function inline_code_block line 5 at RAISE",
+      "",
+    ].join("\n");
+    const r = attribute(output, GENUINE_GATE);
+    expect(r.firstAttributed).toBeNull();
+    expect(r.unattributable[0].why).toMatch(/VERBOSITY=verbose/);
+  });
+
+  // ── The output-grammar residual: loud, never silent ──────────────────────
+
+  it("MEASURE_FAIL: psql-shaped output the parser cannot read is a LOUD failure, not 'no arm'", () => {
+    // ⚠️ WINDOWS.md 28: the `sql-mutation` job has never executed on its ubuntu
+    // CI host. If that host's psql speaks a different (or localized) grammar,
+    // "no attributable arm" would read exactly like a real defect and a green
+    // lane would read like a pass. It gets its own name instead.
+    const localized = [
+      `psql:${GATE_PATH}:9: FEHLER:  P0001: TEST FAILED (X 1): demo arm`,
+      "KONTEXT:  PL/pgSQL-Funktion inline_code_block Zeile 5 bei RAISE",
+      "",
+    ].join("\n");
+    const r = attribute(localized, GENUINE_GATE);
+    expect(r.measureFail, "an unparseable psql grammar must not read as a clean 'no identity'").not.toBeNull();
+    expect(r.measureFail).toContain("FEHLER");
+    expect(r.blocks).toBe(0);
+
+    // The other direction — a parseable output must NOT raise MEASURE_FAIL, or
+    // the control would fire on every real run and mean nothing.
+    const fine = [
+      `psql:${GATE_PATH}:9: ERROR:  P0001: TEST FAILED (X 1): demo arm`,
+      "CONTEXT:  PL/pgSQL function inline_code_block line 5 at RAISE",
+      LOCATION,
+      "",
+    ].join("\n");
+    expect(attribute(fine, GENUINE_GATE).measureFail).toBeNull();
+  });
+
+  it("empty or non-psql output is NOT a MEASURE_FAIL — the control must be specific", () => {
+    expect(attribute("", GENUINE_GATE).measureFail).toBeNull();
+    expect(attribute("cluster on 127.0.0.1:5433 never became ready\n", GENUINE_GATE).measureFail).toBeNull();
+  });
+
+  // ── The nonce channel is GONE, not deprecated-but-live ───────────────────
+
+  it("no nonce helper is exported any more — the forgeable channel is REMOVED", async () => {
+    // Checked on the module's EXPORT SURFACE, not on comment text: a helper
+    // that still exists is a path an attacker reaches through current_query().
+    const mod: Record<string, unknown> = await import("../../scripts/mutation-runner/run.mjs");
+    for (const gone of [
+      "makeIdentityNonce",
+      "stampIdentities",
+      "stampedIdentity",
+      "firstFailureArm",
+      "unstampedIdentities",
+    ]) {
+      expect(mod[gone], `${gone} must no longer exist`).toBeUndefined();
     }
-    // A table that is all-refused or all-invisible would make one of the two
-    // arms below vacuous.
-    expect(SPELLINGS.some((s) => s.refusedBy3a)).toBe(true);
-    expect(SPELLINGS.some((s) => !s.refusedBy3a)).toBe(true);
+    expect(typeof mod.attributeIdentities).toBe("function");
+    expect(typeof mod.gateAttributionRecords).toBe("function");
   });
 
-  it.each(SPELLINGS)(
-    "3a's verdict on the $name spelling is the MEASURED one — the spelling reaches the real parser",
-    ({ name, stmtBody, refusedBy3a }) => {
-      // ⭐ THIS is what makes `stmtBody` load-bearing: it goes into the parser,
-      // and the parser's answer is what is asserted. Garbage here changes the
-      // verdict and reds the arm.
-      const result = parseAnnotations(annotationFor(stmtBody), { file: "g.sql" });
-      if (refusedBy3a) {
-        expect(result.structured, `${name} was ACCEPTED but is listed as refused`).toHaveLength(0);
-        expect(soleError(result)).toMatch(/injects a "TEST FAILED \(" literal/);
-      } else {
-        // Deliberately invisible to 3a. If this flips, 3a has been widened and
-        // GRAMMAR.md's honest-scope note is stale — that is the finding, not
-        // this arm.
-        expect(
-          result.errors,
-          `3a now sees the ${name} spelling; GRAMMAR.md's "3a is not the closure" note must be re-examined`,
-        ).toHaveLength(0);
-        expect(result.structured).toHaveLength(1);
-      }
-    },
-  );
+  // ── Against the real corpus: the passing control, corpus-wide ────────────
 
-  /**
-   * 3c's real input space: what the LANE printed. Generated over the shapes a
-   * psql log actually produces, because that — not the annotation's spelling —
-   * is what `unstampedIdentities` and `firstFailureArm` read.
-   */
-  const laneOutputShapes = (identity: string) => [
-    { name: "bare line", text: `${identity}: x\n` },
-    { name: "psql ERROR prefix", text: `psql:gate.sql:12: ERROR:  ${identity}: x\n` },
-    { name: "preceded by unrelated NOTICE lines", text: `NOTICE:  step 1 ok\nNOTICE:  step 2 ok\nERROR:  ${identity}: x\n` },
-    { name: "mid-line, after other text", text: `ERROR:  something then ${identity}: x\n` },
-    { name: "trailing CONTEXT lines", text: `ERROR:  ${identity}: x\nCONTEXT:  PL/pgSQL function inline_code_block\n` },
-    { name: "repeated twice", text: `ERROR:  ${identity}: x\nERROR:  ${identity}: y\n` },
-    { name: "no trailing newline", text: `ERROR:  ${identity}: x` },
-  ];
-
-  it("the lane-output generator is non-empty and every shape really contains the identity", () => {
-    const shapes = laneOutputShapes(`TEST FAILED (${ARM})`);
-    expect(shapes.length).toBeGreaterThan(5);
-    for (const s of shapes) expect(s.text, s.name).toContain(`TEST FAILED (${ARM})`);
-  });
-
-  it.each(laneOutputShapes(`TEST FAILED (${ARM})`))(
-    "ORACLE: an UNSTAMPED identity in the $name shape is reported SYNTHESISED and is not readable as a first failure",
-    ({ text }) => {
-      const nonce = makeIdentityNonce();
-      const unstamped = unstampedIdentities(text, nonce);
-      expect(
-        unstamped.length,
-        "the detector saw NO unstamped identity in a shape that contains one",
-      ).toBeGreaterThan(0);
-      expect(
-        [...new Set(unstamped)],
-        "the runner stamped no such identity, so it must be reported as SYNTHESISED",
-      ).toEqual([ARM]);
-      expect(
-        firstFailureArm(text, nonce),
-        "an unstamped identity must not be readable as a first failure",
-      ).toBeNull();
-    },
-  );
-
-  it.each(laneOutputShapes("__STAMP__"))(
-    "the OTHER direction: a STAMPED identity in the $name shape IS read, and reports no synthesis",
-    ({ text }) => {
-      // A detector that refused everything would pass every arm above while
-      // rejecting the entire real corpus.
-      const nonce = makeIdentityNonce();
-      const real = text.replace(/__STAMP__/g, stampedIdentity(nonce, ARM));
-      expect(real, "the stamp substitution must have happened").not.toContain("__STAMP__");
-      expect(firstFailureArm(real, nonce)).toBe(ARM);
-      expect(unstampedIdentities(real, nonce)).toEqual([]);
-    },
-  );
-
-  it("a MIXTURE reports both halves: the stamped arm is the first failure, the unstamped one is synthesised", () => {
-    // Neither table above can see this, and it is the shape a real attack
-    // produces — an injected raise landing beside the gate's own.
-    const nonce = makeIdentityNonce();
-    const out =
-      `ERROR:  ${stampedIdentity(nonce, "ANON 1a")}: real\n` +
-      `ERROR:  TEST FAILED (${ARM}): forged\n`;
-    expect(firstFailureArm(out, nonce)).toBe("ANON 1a");
-    expect(unstampedIdentities(out, nonce)).toEqual([ARM]);
-  });
-
-  it("a STAMPED identity is read, and reads back as the arm the gate declares", () => {
-    // The other direction. Without this the nonce could be "passed" by never
-    // recognising anything, which would refuse the entire corpus.
-    const nonce = makeIdentityNonce();
-    const gate = stampIdentities("RAISE EXCEPTION 'TEST FAILED (ANON 1a): x';", nonce);
-    expect(gate).toContain(stampedIdentity(nonce, "ANON 1a"));
-
-    const laneOutput = `ERROR:  ${stampedIdentity(nonce, "ANON 1a")}: x\n`;
-    expect(firstFailureArm(laneOutput, nonce)).toBe("ANON 1a");
-    expect(unstampedIdentities(laneOutput, nonce)).toEqual([]);
-  });
-
-  it("the nonce is fresh per call — a fixed stamp would be forgeable by an annotation", () => {
-    const seen = new Set(Array.from({ length: 50 }, () => makeIdentityNonce()));
-    expect(seen.size).toBe(50);
-  });
-
-  it("stamping the REAL gate stamps every identity and leaves no unstamped one behind", () => {
+  it("REAL CORPUS: every identity resolves to a single-frame DO-body raise", () => {
+    // A3 (RESEARCH): all 104 corpus identities raise directly from a DO body,
+    // which is what makes the single-frame rule safe to enforce. If that ever
+    // stops being true this arm says so before the runner does.
     const gate = readFileSync(join(REPO_ROOT, "supabase/tests/test_strategy_shares_rls.sql"), "utf8");
-    const nonce = makeIdentityNonce();
-    const stamped = stampIdentities(gate, nonce);
-    expect(unstampedIdentities(stamped, nonce)).toEqual([]);
-    // Non-vacuity: it stamped a real number of identities, not zero.
-    expect(armIdentities(gate).length).toBeGreaterThan(50);
-    expect(armIdentities(stamped).length).toBe(armIdentities(gate).length);
+    const records = gateAttributionRecords(gate);
+    expect(records.length).toBeGreaterThan(50);
+    for (const r of records) {
+      expect(r.stmtStartLine, `${r.arm}: raise before its enclosing block`).toBeLessThan(r.raiseFileLine);
+      expect(r.raiseFileLine, `${r.arm}: raise after its enclosing block`).toBeLessThan(r.stmtEndLine);
+    }
+    // Non-vacuity: the count matches the identities the file actually carries,
+    // minus the ones that are not raised (documentation comments).
+    expect(records.length).toBeLessThanOrEqual(armIdentities(gate).length);
   });
 
-  it("no `find` or `anchor` in the REAL corpus names the literal, which is what makes stamping safe", () => {
-    // Stamping runs BEFORE the mutation steps, so a needle containing
-    // `TEST FAILED (` would stop matching and the arm would report an
-    // occurrence-mismatch instead of running. Rule 3a's needle half forbids
-    // exactly that — this arm pins the dependency rather than leaving it
-    // implicit between two files.
+  it("REAL CORPUS: a genuine arm's measured output shape attributes against the real gate", () => {
+    // The wiring, not the helper: the real gate's real bytes, the real
+    // tokenizer, and the psql shape the lane really emits for that arm.
+    const gate = readFileSync(join(REPO_ROOT, "supabase/tests/test_strategy_shares_rls.sql"), "utf8");
+    const records = gateAttributionRecords(gate);
+    const rec = records[0];
+    const contextLine = rec.raiseFileLine - rec.stmtStartLine + 1;
+    const output = [
+      `psql:${GATE_PATH}:${rec.stmtEndLine}: ERROR:  P0001: TEST FAILED (${rec.arm}): real`,
+      `CONTEXT:  PL/pgSQL function inline_code_block line ${contextLine} at RAISE`,
+      LOCATION,
+      "",
+    ].join("\n");
+    expect(attributeIdentities(output, { gatePath: GATE_PATH, records }).firstAttributed).toBe(rec.arm);
+  });
+
+  it("no `find` or `anchor` in the REAL corpus names the literal — rule 3b's needle half", () => {
+    // This pinned the nonce's stamping safety until 2026-09-01. The stamp is
+    // gone, so that dependency is gone with it — but the rule itself is not:
+    // `identityRewriteDetail` compares failure branches across a step, and a
+    // needle naming the literal is how an annotation re-points one.
     const scan = scanCorpus(join(REPO_ROOT, "supabase", "tests"));
     const needles: string[] = [];
     for (const { result } of scan.results) {
