@@ -624,16 +624,17 @@ describe("164.3.1-10 — the runner's absurdity floor (D-09): two INDEPENDENT ta
     // incremented INSIDE runLane and nowhere in runCorpus; `armsExecuted` is
     // incremented inside runCorpus and nowhere in runLane.
     const src = readFileSync(RUNNER_PATH, "utf8");
-    const laneAt = src.indexOf("function runLane(");
-    const laneEnd = src.indexOf("function materialize(");
-    const corpusAt = src.indexOf("export function runCorpus(");
-    const corpusEnd = src.indexOf("export function parseOnlyCorpus(");
-    expect(laneAt, "runLane not found").toBeGreaterThan(-1);
-    expect(laneEnd, "materialize not found after runLane").toBeGreaterThan(laneAt);
-    expect(corpusAt, "runCorpus not found").toBeGreaterThan(-1);
-    expect(corpusEnd, "parseOnlyCorpus not found after runCorpus").toBeGreaterThan(corpusAt);
-    const runLaneBody = src.slice(laneAt, laneEnd);
-    const runCorpusBody = src.slice(corpusAt, corpusEnd);
+    // Each function is sliced from its own header to its own column-0 closing
+    // brace, so prose in a NEIGHBOURING block cannot make this pin red or green.
+    const fnBody = (header: string) => {
+      const at = src.indexOf(header);
+      expect(at, `${header} not found`).toBeGreaterThan(-1);
+      const end = src.indexOf("\n}\n", at);
+      expect(end, `${header} has no column-0 closing brace`).toBeGreaterThan(at);
+      return src.slice(at, end + 2);
+    };
+    const runLaneBody = fnBody("function runLane(");
+    const runCorpusBody = fnBody("export function runCorpus(");
 
     expect(runLaneBody).toMatch(/laneTally\[leg\] \+= 1/);
     expect(runLaneBody).not.toMatch(/armsExecuted/);
