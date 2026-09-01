@@ -418,6 +418,419 @@ export function parseFile(path) {
  * MEASURED 2026-08-29: no file in `supabase/tests/` is structured-only, so
  * `filesAnnotated` is unchanged at 1 of 71 and the FILES_FLOOR does not move.
  */
+// ===========================================================================
+// tokenizeStatements — THE SINGLE DEFINITION OF "WHAT IS CODE" (PRIMITIVE A)
+// ===========================================================================
+//
+// ⛔ THE DEFECT CLASS THIS EXISTS FOR, and why it is a tokenizer rather than a
+// fifth regex. `run.mjs` carried FOUR readers that each decided independently
+// what counted as code — `executableText`'s four-regex masking pipeline,
+// `isBranchHead`'s two unanchored line arms, `neuterArm`'s forward scan and
+// `statementEndLine`, the last two tracking only `'`. Each carried its own
+// partial definition, so the same defect class re-opened FOUR times:
+//
+//   [R4-C01] `EXCEPTION WHEN OTHERS THEN v_raised := true; END;` (seven real
+//     lines in supabase/tests/test_profiles_privileged_columns_locked.sql) and
+//     `SET ROLE postgres; IF NOT ok THEN` were both accepted WHOLE as branch
+//     heads, so the backward scan broke there and an accepted neuter left the
+//     line's other statements — including a superuser `SET ROLE` — executing.
+//   [MUT-I01] an apostrophe inside a `--` comment inside a RAISE's span flipped
+//     the forward scan's quote parity: odd parity spuriously REFUSED a legal
+//     arm, and even parity silently OVER-NEUTERED the statement after it.
+//
+// Every one of those is a consequence of reading LINES and of tracking one
+// quote character. The rule is therefore restated over STATEMENTS, with all
+// five lexical states carried ACROSS lines, in ONE place that every consumer
+// calls. The ROADMAP goal refuses a fifth regex pass by name.
+//
+// ⚠️ THE SPAN SHAPE IS A PUBLISHED CONTRACT, not an implementation detail.
+// Plan 164.3.1-05 (Primitive B, source-location attribution) resolves a raise's
+// file line as `DO_statement.startLine + psql_CONTEXT_line − 1`, so:
+//   • `startLine`/`endLine` are 1-BASED and INCLUSIVE;
+//   • a `DO $$ … $$;` block is ONE statement whose `startLine` is the DO line.
+// Renaming the export or reshaping those fields ripples through plans 05, 09,
+// 10 and 11. `src/__tests__/sql-statement-tokenizer.test.ts` pins it.
+//
+// ⚠️ BLOCK COMMENTS NEST (RESEARCH A4). PostgreSQL's `/* … */` nests, and the
+// line-local regex this replaces did not handle that. The tokenizer NESTS —
+// strictly more correct than the reader it replaces — and the choice ships with
+// a fixture in the span-contract test file so which behaviour shipped is a
+// measured fact rather than a reading of the code.
+//
+// ⚠️ HONEST SCOPE, stated rather than implied. This is a STATEMENT tokenizer,
+// not a PL/pgSQL parser: it knows lexical state and the shape of a branch head,
+// and nothing else. It does not know scoping, expressions or types. A construct
+// it cannot classify becomes an ordinary statement, which the neuter scan then
+// REFUSES loudly — the safe direction — rather than absorbing silently. A full
+// parser was evaluated and REJECTED (CONTEXT § Primitive A): `libpg-query` is a
+// native dependency in a repo with a banned-package supply-chain gate, and
+// `pgsql-ast-parser` does not cover all PL/pgSQL, so it would need a fallback
+// reader — reintroducing the two-readers-with-composing-blind-spots defect
+// ([VAC04-C1]) this primitive exists to close.
+//
+// Takes TEXT only. It performs NO file I/O; any tokenizer-driven read stays
+// behind `isRepoRelativePath` above.
+
+/** A dollar-quote delimiter, sticky so it can be tested at an exact offset. */
+const DOLLAR_TAG_RE = /\$([A-Za-z_]\w*)?\$/y;
+
+/** Bare branch heads: a segment whose entire code content is this one word. */
+const BARE_HEADS = new Set(["BEGIN", "DECLARE", "ELSE"]);
+
+/**
+ * Segment-opening keywords after which a `THEN` closes a branch head.
+ *
+ * Anchoring on the segment's FIRST word is what closes the unanchored
+ * `/\b(THEN|LOOP)$/i` arm: `SET ROLE postgres; IF NOT ok THEN` opens with `SET`
+ * for its first statement and with `IF` for the head that follows it, so the
+ * two are separable and neither swallows the other.
+ */
+const THEN_OPENERS = new Set(["IF", "ELSIF", "ELSEIF", "WHEN", "EXCEPTION"]);
+
+/** Segment-opening keywords after which a `LOOP` closes a branch head. */
+const LOOP_OPENERS = new Set(["FOR", "FOREACH", "WHILE", "LOOP", "END"]);
+
+/**
+ * Every keyword that can constitute or terminate a branch-head unit.
+ *
+ * Re-exported by `run.mjs` as `BRANCH_HEAD_WORDS`, which the neuter test's
+ * cross-product oracle GENERATES its inputs from — so a keyword added here
+ * automatically widens that test, and one added without a bare-code spelling
+ * fails its completeness assertion by name rather than silently dropping out.
+ */
+export const BRANCH_HEAD_KEYWORDS = [
+  "THEN",
+  "BEGIN",
+  "ELSE",
+  "ELSIF",
+  "LOOP",
+  "DECLARE",
+  "EXCEPTION",
+];
+
+const isWordStart = (ch) => ch !== undefined && /[A-Za-z_]/.test(ch);
+const isWordChar = (ch) => ch !== undefined && /[A-Za-z0-9_]/.test(ch);
+
+/** 1-based line number lookup over precomputed line-start offsets. */
+function makeLineOf(text) {
+  const starts = [0];
+  for (let i = 0; i < text.length; i += 1) if (text[i] === "\n") starts.push(i + 1);
+  return (offset) => {
+    let lo = 0;
+    let hi = starts.length - 1;
+    while (lo < hi) {
+      const mid = (lo + hi + 1) >> 1;
+      if (starts[mid] <= offset) lo = mid;
+      else hi = mid - 1;
+    }
+    return lo + 1;
+  };
+}
+
+/** The next word after `from`, skipping whitespace and comments. Read-only. */
+function peekNextWord(text, from, to) {
+  let i = from;
+  for (;;) {
+    while (i < to && /\s/.test(text[i])) i += 1;
+    if (i < to - 1 && text[i] === "-" && text[i + 1] === "-") {
+      while (i < to && text[i] !== "\n") i += 1;
+      continue;
+    }
+    if (i < to - 1 && text[i] === "/" && text[i + 1] === "*") {
+      let nest = 0;
+      while (i < to) {
+        if (text[i] === "/" && text[i + 1] === "*") {
+          nest += 1;
+          i += 2;
+        } else if (text[i] === "*" && text[i + 1] === "/") {
+          nest -= 1;
+          i += 2;
+          if (nest === 0) break;
+        } else i += 1;
+      }
+      continue;
+    }
+    break;
+  }
+  if (!isWordStart(text[i])) return null;
+  let j = i;
+  while (j < to && isWordChar(text[j])) j += 1;
+  return text.slice(i, j).toUpperCase();
+}
+
+/**
+ * Scan `[from, to)` at `depth`, appending statements to `out` (when non-null)
+ * and returning the MASKING PROJECTION of the region: same length as the
+ * source, with every non-code region blanked to spaces and newlines preserved
+ * so offsets and line numbers are identical to the original.
+ *
+ * ONE state machine. `maskNonCode` and `tokenizeStatements` are two views of
+ * this single scan, never two readers — that duality is the defect this file
+ * exists to remove, not a shape to reproduce.
+ */
+function scanRegion(text, from, to, depth, lineOf, out) {
+  const mask = text.slice(from, to).split("");
+  /** Blank `[a, b)` in the mask, preserving newlines. */
+  const blank = (a, b) => {
+    for (let k = Math.max(a, from); k < Math.min(b, to); k += 1) {
+      if (text[k] !== "\n") mask[k - from] = " ";
+    }
+  };
+
+  let i = from;
+  let stmtStart = -1;
+  let firstWord = null;
+  let parenDepth = 0;
+  let caseDepth = 0;
+  let bodies = [];
+  let awaitingExceptionThen = false;
+
+  const resetSegment = () => {
+    stmtStart = -1;
+    firstWord = null;
+    parenDepth = 0;
+    caseDepth = 0;
+    bodies = [];
+    awaitingExceptionThen = false;
+  };
+
+  const emit = (end, { head = false, terminated = false } = {}) => {
+    if (stmtStart === -1 || end <= stmtStart) {
+      resetSegment();
+      return;
+    }
+    if (out !== null) {
+      out.push({
+        startLine: lineOf(stmtStart),
+        endLine: lineOf(end - 1),
+        text: text.slice(stmtStart, end),
+        executableText: mask.slice(stmtStart - from, end - from).join(""),
+        head,
+        terminated,
+        depth,
+        start: stmtStart,
+        end,
+      });
+      // Pre-order: a statement is followed by the statements of any body it
+      // encloses, so siblings at one depth stay in source order and a consumer
+      // can walk them by index (see `run.mjs`'s backward scan).
+      for (const body of bodies) scanRegion(text, body.from, body.to, depth + 1, lineOf, out);
+    }
+    resetSegment();
+  };
+
+  while (i < to) {
+    const ch = text[i];
+
+    // ── line comment: to end of line ────────────────────────────────────────
+    if (ch === "-" && i + 1 < to && text[i + 1] === "-") {
+      let j = i;
+      while (j < to && text[j] !== "\n") j += 1;
+      blank(i, j);
+      i = j;
+      continue;
+    }
+
+    // ── block comment: NESTING (PostgreSQL semantics — RESEARCH A4) ─────────
+    if (ch === "/" && i + 1 < to && text[i + 1] === "*") {
+      let j = i;
+      let nest = 0;
+      while (j < to) {
+        if (text[j] === "/" && j + 1 < to && text[j + 1] === "*") {
+          nest += 1;
+          j += 2;
+        } else if (text[j] === "*" && j + 1 < to && text[j + 1] === "/") {
+          nest -= 1;
+          j += 2;
+          if (nest === 0) break;
+        } else j += 1;
+      }
+      blank(i, j);
+      i = j;
+      continue;
+    }
+
+    // ── single-quoted literal, `''` escape, carried ACROSS lines ────────────
+    if (ch === "'") {
+      if (stmtStart === -1) stmtStart = i;
+      let j = i + 1;
+      let closed = false;
+      while (j < to) {
+        if (text[j] !== "'") {
+          j += 1;
+          continue;
+        }
+        if (j + 1 < to && text[j + 1] === "'") {
+          j += 2;
+          continue;
+        }
+        j += 1;
+        closed = true;
+        break;
+      }
+      // Blank the INTERIOR only: the delimiters stay so the projection still
+      // reads as `'…'` and a keyword inside a literal can never be code.
+      blank(i + 1, closed ? j - 1 : j);
+      i = j;
+      continue;
+    }
+
+    // ── double-quoted identifier: CODE, kept verbatim in the projection ─────
+    if (ch === '"') {
+      if (stmtStart === -1) stmtStart = i;
+      let j = i + 1;
+      while (j < to) {
+        if (text[j] !== '"') {
+          j += 1;
+          continue;
+        }
+        if (j + 1 < to && text[j + 1] === '"') {
+          j += 2;
+          continue;
+        }
+        j += 1;
+        break;
+      }
+      i = j;
+      continue;
+    }
+
+    // ── dollar-quoted body, tag-matched, carried ACROSS lines ───────────────
+    if (ch === "$") {
+      DOLLAR_TAG_RE.lastIndex = i;
+      const m = DOLLAR_TAG_RE.exec(text);
+      if (m !== null && m.index === i) {
+        const tag = m[0];
+        const bodyFrom = i + tag.length;
+        const closeAt = text.indexOf(tag, bodyFrom);
+        const unterminated = closeAt === -1 || closeAt + tag.length > to;
+        const bodyTo = unterminated ? to : closeAt;
+        const after = unterminated ? to : closeAt + tag.length;
+        if (stmtStart === -1) stmtStart = i;
+        blank(i, after);
+        if (bodyTo > bodyFrom) bodies.push({ from: bodyFrom, to: bodyTo });
+        i = after;
+        continue;
+      }
+      // A bare `$` (a `$1` parameter, or `$` inside an identifier). Not a
+      // delimiter — fall through and treat it as an ordinary character.
+    }
+
+    // ── statement terminator, in normal state only ──────────────────────────
+    if (ch === ";") {
+      if (stmtStart !== -1) emit(i + 1, { terminated: true });
+      else resetSegment();
+      i += 1;
+      continue;
+    }
+
+    if (ch === "(" || ch === ")") {
+      if (stmtStart === -1) stmtStart = i;
+      if (ch === "(") parenDepth += 1;
+      else parenDepth = Math.max(0, parenDepth - 1);
+      i += 1;
+      continue;
+    }
+
+    // ── word ────────────────────────────────────────────────────────────────
+    if (isWordStart(ch)) {
+      let j = i;
+      while (j < to && isWordChar(text[j])) j += 1;
+      const word = text.slice(i, j).toUpperCase();
+      const wordStart = i;
+      if (stmtStart === -1) stmtStart = wordStart;
+      if (firstWord === null) firstWord = word;
+
+      // A `CASE … WHEN … THEN … ELSE … END` EXPRESSION is not a branch: its
+      // THEN and ELSE must not be read as heads. Depth-tracked so the head
+      // rules below only fire at expression depth 0.
+      if (parenDepth === 0) {
+        if (word === "CASE") caseDepth += 1;
+        else if (word === "END" && caseDepth > 0) caseDepth -= 1;
+      }
+
+      if (parenDepth === 0 && caseDepth === 0) {
+        if (awaitingExceptionThen) {
+          if (word === "THEN") {
+            i = j;
+            emit(j, { head: true });
+            continue;
+          }
+        } else if (BARE_HEADS.has(word) && stmtStart === wordStart) {
+          i = j;
+          emit(j, { head: true });
+          continue;
+        } else if (word === "EXCEPTION" && stmtStart === wordStart) {
+          // `EXCEPTION` alone opens the handler section; `EXCEPTION WHEN … THEN`
+          // is ONE head unit. Peeking is read-only and touches no scanner state.
+          if (peekNextWord(text, j, to) === "WHEN") awaitingExceptionThen = true;
+          else {
+            i = j;
+            emit(j, { head: true });
+            continue;
+          }
+        } else if (word === "THEN" && THEN_OPENERS.has(firstWord)) {
+          i = j;
+          emit(j, { head: true });
+          continue;
+        } else if (word === "LOOP" && LOOP_OPENERS.has(firstWord)) {
+          i = j;
+          emit(j, { head: true });
+          continue;
+        }
+      }
+
+      i = j;
+      continue;
+    }
+
+    if (!/\s/.test(ch) && stmtStart === -1) stmtStart = i;
+    i += 1;
+  }
+
+  // A trailing segment with no terminator. `terminated: false` is what lets the
+  // neuter refuse "could not find the end of the RAISE statement" instead of
+  // guessing an end — an unterminated statement is a MEASURE failure, not a
+  // shorter statement.
+  if (stmtStart !== -1) emit(to, { terminated: false });
+
+  return mask.join("");
+}
+
+/**
+ * Every SQL statement in `text`, in pre-order.
+ *
+ * @param {string} text
+ * @returns {Array<{
+ *   startLine: number, endLine: number, text: string, executableText: string,
+ *   head: boolean, terminated: boolean, depth: number, start: number, end: number
+ * }>}
+ *
+ * `startLine`/`endLine` are 1-based and INCLUSIVE (the plan-05 contract above).
+ * `head` marks a branch-head unit — a bare `BEGIN`/`DECLARE`/`ELSE`, an
+ * `EXCEPTION [WHEN … THEN]` clause, or a segment opening with `IF`/`ELSIF`/
+ * `WHEN`/`FOR`/`WHILE`/`LOOP`/`END` and closing on `THEN`/`LOOP`. Head units
+ * carry no semicolon, which is exactly why a compound line decomposes: the head
+ * ends where the keyword ends and the statements sharing its line follow it.
+ * `depth` is dollar-quote nesting: a `DO $$ … $$;` block is ONE depth-0
+ * statement, and the PL/pgSQL statements inside its body are depth 1, emitted
+ * immediately after it so siblings at any depth remain in source order.
+ */
+export function tokenizeStatements(text) {
+  const out = [];
+  scanRegion(text, 0, text.length, 0, makeLineOf(text), out);
+  return out;
+}
+
+/**
+ * The masking projection alone: `text` with every non-code region blanked to
+ * spaces, newlines and offsets preserved. Same scan as `tokenizeStatements` —
+ * one definition of what is code, two views of it.
+ */
+export function maskNonCode(text) {
+  return scanRegion(text, 0, text.length, 0, makeLineOf(text), null);
+}
+
 export function scanCorpus(dir) {
   const files = readdirSync(dir)
     .filter((f) => f.endsWith(".sql"))

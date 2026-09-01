@@ -378,3 +378,131 @@ describe("WR-07 — an abort-path statement it cannot classify is REFUSED, not l
     }
   });
 });
+
+// ══════════════════════════════════════════════════════════════════════════
+// PRIMITIVE A — A COMPOUND LINE IS NOT A BRANCH HEAD (phase 164.3.1, [R4-C01])
+// ══════════════════════════════════════════════════════════════════════════
+//
+// ⛔ THE DEFECT, MEASURED AT HEAD `fa2291d2` AND RE-MEASURED THIS SESSION.
+// `isBranchHead` was a LINE predicate with two UNANCHORED arms:
+//
+//     /^EXCEPTION(\s+WHEN\b.*)?$/i     ← the `.*` swallows trailing STATEMENTS
+//     /\b(THEN|LOOP)$/i                ← no start anchor
+//
+// so `EXCEPTION WHEN OTHERS THEN v_raised := true; END;` — a line that exists
+// SEVEN TIMES in `supabase/tests/test_profiles_privileged_columns_locked.sql`
+// — was accepted whole as a "branch head". The backward scan broke there, the
+// neuter was ACCEPTED, and every statement sharing that line stayed live. The
+// same hole accepts `SET ROLE postgres; IF NOT ok THEN`, which hands a
+// superuser session to every later arm — the measured RESET ROLE class, but
+// silent, because the scan believed it had reached the head of the branch.
+//
+// The fix is not a fifth regex (the ROADMAP goal refuses one by name): the line
+// is TOKENIZED INTO STATEMENTS and `isBranchHead` is asked of a STATEMENT, so a
+// compound line decomposes and its trailing statements become visible.
+//
+// ⭐ ANTI-VACUITY, and the RED direction is real: under the OLD line predicate
+// this block fails, stating that the compound line was swallowed as a head and
+// its trailing statements left executing. Recorded verbatim in the SUMMARY.
+describe("Primitive A: a compound line decomposes — its trailing statements are never swallowed", () => {
+  const PRIVESC_GATE = join(
+    REPO_ROOT,
+    "supabase",
+    "tests",
+    "test_profiles_privileged_columns_locked.sql",
+  );
+
+  /**
+   * The REAL bytes, extracted from the REAL file at runtime. A copy of the
+   * shape inside the test would drift away from the corpus silently (SP-L02):
+   * the whole point is that these lines EXIST, so they are read, not retyped.
+   *
+   * Line numbers are deliberately NOT pinned — the count is, so a corpus edit
+   * that removes the shape fails here loudly instead of quietly emptying the
+   * cross-product.
+   */
+  const COMPOUND_RE = /^\s*EXCEPTION\s+WHEN\s+OTHERS\s+THEN\s+\S.*;\s*END\s*;\s*$/;
+  const compoundLines = readFileSync(PRIVESC_GATE, "utf8")
+    .split("\n")
+    .map((text, i) => ({ line: i + 1, text }))
+    .filter((l) => COMPOUND_RE.test(l.text));
+
+  it("the calibration input still exists in the real corpus (>= 7 compound lines)", () => {
+    // Non-vacuity guard. If the file were reshaped, every drive below would
+    // silently vanish and this file would still report green.
+    expect(
+      compoundLines.length,
+      `test_profiles_privileged_columns_locked.sql no longer carries the compound ` +
+        `"EXCEPTION WHEN OTHERS THEN <stmt>; END;" shape this primitive is calibrated on. ` +
+        `Re-measure before changing the classifier.`,
+    ).toBeGreaterThanOrEqual(7);
+  });
+
+  it("TRACER: the first real compound line above a RAISE is REFUSED, not accepted as a head", () => {
+    const compound = compoundLines[0];
+    const text = [
+      "  IF NOT raised THEN",
+      compound.text,
+      "    RAISE EXCEPTION 'TEST FAILED (ARM P1): it did not bite';",
+      "  END IF;",
+      "  SELECT 1;",
+    ].join("\n");
+
+    const result = neuterArm(text, "ARM P1");
+
+    // The leak class, stated over the OUTPUT (R3-C01's format): an accepted
+    // neuter that leaves the compound line's trailing statements executing is
+    // the defect, whatever the scan believed terminated it.
+    const swallowed =
+      result.found && executableLines(result.text, /v_raised\s*:=\s*true;/i).length > 0;
+    expect(
+      swallowed,
+      `neuterArm ACCEPTED the neuter and left the compound line's trailing statements ` +
+        `executing. The only thing between the branch head and the RAISE was ` +
+        `${JSON.stringify(compound.text.trim())} — a line carrying an EXCEPTION head AND two ` +
+        `further statements. Accepting it whole as a "branch head" is [R4-C01]: the same hole ` +
+        `accepts "SET ROLE postgres; IF NOT ok THEN" and hands a superuser session to every ` +
+        `later arm.`,
+    ).toBe(false);
+
+    // And it must refuse LOUDLY, naming the statement it could not classify and
+    // the line it sits on — a vague `found: false` is how the next reader
+    // mis-diagnoses this.
+    expect(result.found).toBe(false);
+    expect(result.reason).toContain("unrecognised statement before its RAISE");
+    expect(
+      result.reason,
+      `the refusal must NAME the trailing statement decomposed out of the compound line. ` +
+        `Got: ${JSON.stringify(result.reason)}`,
+    ).toContain("END;");
+    expect(result.text, "a refusal must not mutate the text").toBe(text);
+  });
+
+  it("P3: `SET ROLE postgres; IF NOT ok THEN` can no longer produce an accepted neuter", () => {
+    // The ROADMAP's own spelling of the defect, and RESEARCH premise P3's
+    // measured synthetic. The compound HEAD shape: the head is real, but a
+    // privileged statement shares its line BEFORE it, so a scan that terminates
+    // on the LINE believes it reached the head of the branch and accepts a
+    // neuter whose output still runs `SET ROLE postgres;`.
+    const text = [
+      "  IF NOT raised THEN",
+      "    SET ROLE postgres; IF NOT ok THEN",
+      "    RAISE EXCEPTION 'TEST FAILED (ARM P3): it did not bite';",
+      "  END IF;",
+      "  SELECT 1;",
+    ].join("\n");
+
+    const result = neuterArm(text, "ARM P3");
+
+    const leaked = result.found && executableLines(result.text, /SET\s+ROLE\s+postgres/i).length > 0;
+    expect(
+      leaked,
+      `neuterArm ACCEPTED the neuter and left "SET ROLE postgres;" executing — a superuser ` +
+        `session handed to every later arm, with no signal. This is [R4-C01] verbatim.`,
+    ).toBe(false);
+
+    expect(result.found).toBe(false);
+    expect(result.reason).toContain("unrecognised statement before its RAISE");
+    expect(result.reason).toContain("SET ROLE postgres;");
+  });
+});
