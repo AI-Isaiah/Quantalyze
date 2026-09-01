@@ -118,6 +118,12 @@ const FIXTURE_CORPUS = join(REPO_ROOT, "scripts", "mutation-runner", "fixtures")
 // carrying 30 prose markers. A floor picked by reading the finished artifact
 // always passes and would prove nothing.
 //
+// RE-CONFIRMED 2026-09-01 (plan 164.3.1-09, SC-6/SC-9): the same run that
+// re-derived ARMS_FLOOR below printed `coverage: files 1/71` — still 1 annotated
+// file of 71, still supabase/tests/test_strategy_shares_rls.sql, whose blob is
+// byte-identical at the phase base and at HEAD (5ae6855f). Command, sample size
+// and record are stated once in the ARMS_FLOOR block below. No value change.
+//
 // Phase 164.4 raises FILES_FLOOR as it backfills the other 70 files.
 export const FILES_FLOOR = 1;
 
@@ -137,6 +143,44 @@ export const FILES_FLOOR = 1;
 // which on that run was 30 - 0 = 30. The number was read off the RUN, never off
 // this file — a floor picked by reading the finished artifact always passes.
 //
+// ⭐ RE-DERIVED 2026-09-01 UNDER THE SOUND PRIMITIVES (plan 164.3.1-09, SC-6).
+// The 2026-08-29 pin above STAYS as lineage: it is not superseded, it is
+// re-earned. Plans 164.3.1-01 and -05 replaced BOTH mechanisms that produce this
+// number — line-based classification became statement tokenization, and the
+// in-query identity nonce became source-location attribution — so 30 was correct
+// by SCOPE but not yet by MECHANISM until measured again from scratch.
+//
+//   VALUE        30 — UNCHANGED. biting = 30 executed − 0 (no-red +
+//                wrong-first-failure + synthesised-identity) = 30 − 0 = 30.
+//   DATE         2026-09-01, at HEAD a305a71a.
+//   COMMAND      `node scripts/mutation-runner/run.mjs` -> exit 0
+//                  coverage: files 1/71
+//                  arms: 30/30/0   (executed/annotated/waived)
+//                  biting: 30
+//                  per-arm lane time: mean 1.7s over 30 arm run(s)
+//   SAMPLE SIZE  30 arms executed, all 30 `RED (identity ok)`, 0 moved from the
+//                pre-phase per-arm baseline. Plus 104 identities / 103 backward
+//                scans re-measured over the same file (99 accepted, 4 refused —
+//                SERVICE-ROLE 2a-2d at :2249/:2254/:2268/:2273 — 0 refusals
+//                added by the new primitives).
+//   COVERAGE     1 annotated gate file of 71 in supabase/tests/, namely
+//                supabase/tests/test_strategy_shares_rls.sql. Its blob is
+//                BYTE-IDENTICAL at the phase base c2251b6d and at HEAD
+//                (5ae6855f), so the INPUT was fixed and only the MECHANISM
+//                moved — which is what makes "unchanged" a measurement here
+//                rather than a coincidence of two different corpora.
+//   RECORD       .planning/phases/164.3.1-sound-primitives-the-neuter-scan-and-
+//                the-mutation-identity-c/164.3.1-09-REDERIVATION.md
+//
+// ⭐ Same integer, STRICTLY SMALLER admissible set. `identity ok` used to mean
+// "the failure text carried this run's nonce" — a secret the gate's own SQL
+// could read back through current_query(). It now means the raise's psql prefix
+// names this lane's gate file at the failing statement's last line, AND the
+// CONTEXT chain is exactly one `inline_code_block line N at RAISE` frame, AND N
+// resolves through the tokenizer's spans to the arm's recorded raise line. A
+// floor of 30 is therefore harder to satisfy than it was — the safe direction
+// for a ratchet, and the fact plan 164.3.1-10 must carry with the integer.
+//
 // ⚠️ RATCHET, NOT A TARGET. It fails on REGRESSION only: an annotation that
 // stops biting, or one deleted outright, drops the biting count below 30 and
 // exits 1. It never demands more than the corpus declares. Phase 164.4 raises
@@ -144,6 +188,11 @@ export const FILES_FLOOR = 1;
 // ⛔ Converting an arm to a `waiver` LOWERS the biting count and therefore trips
 // this floor. That is deliberate: waiver creep is how a non-biting arm hides
 // (T-164.3-21), so widening a waiver has to be an explicit, reviewed edit here.
+//
+// CURRENCY, stated where the VALUE is — derivation, sample size and coverage in
+// the block above; record in 164.3.1-09-REDERIVATION.md:
+// RE-DERIVED 2026-09-01 under the sound primitives (plan 164.3.1-09).
+// Measured biting 30 — value UNCHANGED.
 export const ARMS_FLOOR = 30;
 
 /**
