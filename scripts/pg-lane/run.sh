@@ -137,7 +137,20 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-psqlq() { psql -h 127.0.0.1 -p "$PORT" -U postgres -d postgres -v ON_ERROR_STOP=1 "$@"; }
+# `VERBOSITY=verbose` is set on EVERY leg, not only the gate leg (164.3.1-05,
+# RESEARCH Open Question 2 — a discretion call, recorded here rather than
+# implied). Verbose adds the inline SQLSTATE token (`P0001:` after `ERROR:`)
+# and a `LOCATION:` line after every ERROR *and* NOTICE. The runner's
+# source-location attribution needs both: `P0001` asserts the error really is
+# a `RAISE EXCEPTION`, and `LOCATION:` is the end-of-block sentinel that bounds
+# the CONTEXT chain it must count frames in.
+#
+# UNIFORM rather than gate-leg-only because uniformity means the runner has ONE
+# output grammar to parse instead of two — a second shape is a second parser,
+# and a second parser is where a silent divergence lives. The cost is bounded:
+# apply/post-apply legs run `-q`, so the extra noise is a `LOCATION:` line per
+# message they were already printing, and those legs emit nothing on success.
+psqlq() { psql -h 127.0.0.1 -p "$PORT" -U postgres -d postgres -v ON_ERROR_STOP=1 -v VERBOSITY=verbose "$@"; }
 
 # ---------------------------------------------------------------------------
 # run_lane <workdir> <gate> [--post <file>] -- <apply files...>

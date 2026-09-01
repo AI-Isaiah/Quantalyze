@@ -416,8 +416,9 @@ function innermostCarriers(statements, needle) {
  * walked back over the WHOLE file for any line matching `RAISE EXCEPTION`, so a
  * bare `TEST FAILED (` literal produced a branch anchored on an unrelated raise
  * hundreds of lines earlier. A `TEST FAILED (` that is not raised is refused at
- * parse time by GRAMMAR rule 3a and at runtime by the identity nonce (3c) — the
- * two places it is decidable.
+ * parse time by GRAMMAR rule 3a and at runtime by source-location attribution
+ * (3c — `attributeIdentities`; the identity nonce until 2026-09-01) — the two
+ * places it is decidable.
  */
 function raiseStatementIndex(statements, needle) {
   for (const i of innermostCarriers(statements, needle)) {
@@ -645,102 +646,410 @@ function gitStatus() {
 }
 
 // ===========================================================================
-// R3-C02 — THE IDENTITY NONCE: the detector reads only what the RUNNER wrote
+// 164.3.1-05 — ARM IDENTITY BY SOURCE LOCATION (supersedes the R3-C02 NONCE)
 // ===========================================================================
 //
-// ⛔ THE DEFECT THIS CLOSES, and why three rounds of text rules did not.
+// ⛔ THE DEFECT THIS CLOSES, and why the mechanism it replaces could not.
 //
-// The runner credits an arm as BITING when the first `TEST FAILED (<id>)` in
-// the lane's output names that arm. Rule 3a refuses an annotation whose
-// injected text contains the literal `TEST FAILED (`. SQL concatenates string
-// literals, so the literal never has to appear:
+// The runner credits an arm as BITING when the lane's output names that arm.
+// Rule 3a refuses an annotation whose injected text contains the literal
+// `TEST FAILED (`; SQL concatenates string literals, so the literal never has
+// to appear, and substring matching could never win — `format()`, `chr()`,
+// `||` and a hundred other spellings produce the same bytes at runtime.
 //
-//   {"arm":"X 1","apply":[{"kind":"sql","stmt":
-//     "DO $$ BEGIN RAISE EXCEPTION '%', 'TEST FAI' || 'LED (X 1): x'; END $$"}]}
-//
-// MEASURED at HEAD: `errors=0 accepted=1`, and at runtime the lane emits
-// `TEST FAILED (X 1)`, `firstFailureArm` reads `X 1`, the arm reports
-// `RED (identity ok)` and `biting` rises — for an arm that never ran, against a
-// gate file that was never touched. `biting` is the quantity ARMS_FLOOR bounds,
-// so this is a vacuous PASS in the phase's headline number.
-//
-// Substring matching cannot win: `format()`, `chr()`, `||` and a hundred other
-// spellings all produce the same bytes at runtime and none of them contain the
-// needle. Every round that answered a spelling with a longer regex was answered
-// by a new spelling in minutes.
-//
-// So the rule is no longer stated over TEXT at all. Before the lane runs, the
-// runner rewrites the SCRATCH copy of the pristine gate, stamping a fresh
-// random nonce into every identity it finds:
+// R3-C02 (2026-08-29, SUPERSEDED — kept because it is the measured history
+// this design is built on) answered that by stamping a per-run random NONCE
+// into every identity in the SCRATCH copy of the gate:
 //
 //     TEST FAILED (ANON 1a)   ->   TEST FAILED (7f3c9a1e|ANON 1a)
 //
-// and the detector then reads ONLY stamped identities. An annotation cannot
-// produce a stamped identity because it cannot know the nonce — it is generated
-// per arm run, after the annotation was parsed. Any `TEST FAILED (` the lane
-// emits WITHOUT the stamp is, by construction, text the runner did not put in
-// the gate file: the defect kind `synthesised-identity`.
+// and reading only stamped identities. An annotation could not know the nonce,
+// so any `TEST FAILED (` without the stamp was, by construction, text the
+// runner did not put in the gate file: `synthesised-identity`.
 //
-// This ranges over the CLASS rather than over a list of spellings, and it
-// covers every step kind — `sql` steps were never subject to the apply-time
-// content rule at all, which is the second half of R3-C02.
+// ⛔ WHY THAT WAS NOT ENOUGH — [R4-C02], MEASURED LIVE. The nonce is a SECRET
+// TRANSMITTED TO THE ATTACKER. The stamped text sits in the query text of the
+// statement the gate is running, and PostgreSQL hands that text to any
+// server-side code that asks for it. An `AFTER INSERT` trigger installed by a
+// `sql` step needs no file read and no superuser:
 //
-// ⚠️ HONEST RESIDUAL, named rather than implied: the stamp is unforgeable to an
-// annotation that only writes SQL. It is NOT unforgeable to SQL that READS the
-// stamped gate file back off disk (`pg_read_file` as superuser) and echoes it.
-// Nothing in the corpus does that and it would be visible in review as an
-// obviously hostile annotation, but it is the boundary of this control.
+//     CREATE FUNCTION forge() RETURNS trigger AS $f$ BEGIN
+//       RAISE EXCEPTION '%', substring(current_query() from 'TEST FAILED \([^)]*\)');
+//     END $f$ LANGUAGE plpgsql;
+//
+// MEASURED: an arm whose own raise was guarded by `IF FALSE` scored
+// `RED (identity ok)` with `biting: 1`. `biting` is the quantity ARMS_FLOOR
+// bounds, so that was a vacuous PASS in the headline number — the same class
+// the nonce existed to close, reached THROUGH the nonce.
+//
+// ⭐ THE REPLACEMENT (CONTEXT D-01, locked): the identity is no longer a
+// SECRET that must be kept from the SQL. It is the raise's SOURCE LOCATION,
+// which the executing SQL cannot choose. Nothing is transmitted, so
+// `current_query()` and `pg_stat_activity` have nothing to read.
+//
+// The rule is THREE-LEGGED, and all three legs are load-bearing. Measured on
+// PostgreSQL 16.13 through the real `pg-lane` with `VERBOSITY=verbose`
+// (2026-09-01, this checkout; RESEARCH § The Key Measurement measured the same
+// shapes independently):
+//
+//   (a) the `psql:<file>:<line>:` prefix names the GATE SCRATCH FILE this
+//       runner wrote for this lane, at the failing statement's LAST line;
+//   (b) the error's CONTEXT chain is EXACTLY ONE frame, of the shape
+//       `PL/pgSQL function inline_code_block line N at RAISE`, bounded by the
+//       `LOCATION:` sentinel verbose emits;
+//   (c) N resolves through the Primitive A tokenizer's statement spans to the
+//       arm's recorded raise line:  raise_file_line = DO_start + N − 1.
+//
+// ⚠️ LEG (b) IS THE ONE THAT IS EASY TO OMIT AND IMPOSSIBLE TO DO WITHOUT.
+// Asserting only the INNERMOST frame is forgeable. A trigger that runs
+// `EXECUTE 'DO $d$' || repeat(E'\n', k) || 'BEGIN RAISE …; END $d$'` produces
+// an `inline_code_block line N at RAISE` frame whose NAME AND LINE are both
+// attacker-chosen, under the gate file's own `psql:` prefix — legs (a) and (c)
+// both PASS. MEASURED 2026-09-01: with k = 4 the forgery landed on the genuine
+// arm's exact resolved line. What the attacker cannot REMOVE is the rest of
+// the chain:
+//
+//     CONTEXT:  PL/pgSQL function inline_code_block line 5 at RAISE   ← forged
+//     SQL statement "DO $d$ … END $d$"
+//     PL/pgSQL function forge_fn() line 3 at EXECUTE
+//     SQL statement "INSERT INTO t VALUES (1)"
+//     PL/pgSQL function inline_code_block line 3 at SQL statement
+//     LOCATION:  exec_stmt_raise, pl_exec.c:3911
+//
+// so the chain LENGTH is the control, and `164.3.1-05-ATTRIBUTION.md` records
+// it flipping to a false `RED (identity ok)` when neutered to first-frame-only.
+//
+// ⚠️ HONEST RESIDUAL, named rather than implied — the boundary MOVED, it did
+// not disappear:
+//
+//   1. A hostile annotation can still make the database print ARBITRARY TEXT.
+//      What it can no longer do is make that text ATTRIBUTABLE: every forged
+//      raise arrives with a chain it did not choose, so it scores SYNTHESISED
+//      or NO-IDENTITY rather than RED. A hostile annotation also remains
+//      visibly hostile in review, which is the final control.
+//      ⚠️ MEASURED 2026-09-01, and it is the reason the chain rule needed its
+//      own dedicated fixture: RESEARCH's forgery recipe is refused TWICE over.
+//      It spells the identity inside the EXECUTEd DO string, psql prints that
+//      string back as a `SQL statement "…"` CONTEXT frame, and a FIELD-carried
+//      identity is unattributable independently of chain length. Neutering the
+//      chain rule therefore did NOT flip it — so a "proof" run on that recipe
+//      alone would have passed while proving nothing about leg (b). The echo
+//      is removable (the trigger can stash the text in a GUC and have the
+//      forged DO read it back with current_setting()); the chain is not. The
+//      chain-length proof in 164.3.1-05-ATTRIBUTION.md is run against the
+//      ECHO-FREE variant for exactly that reason.
+//   2. A LEGITIMATE arm whose raise is nested inside `EXECUTE`, a helper
+//      function or a trigger is refused NO-IDENTITY — BY DESIGN, LOUDLY. All
+//      104 corpus identities raise directly from a DO body (single frame), so
+//      the passing control holds corpus-wide; GRAMMAR.md § 3c states this as a
+//      164.4 authoring rule so it is a contract rather than a surprise.
+//   3. The psql CONTEXT format is MEASURED on macOS / PostgreSQL 16.13 ONLY.
+//      The `sql-mutation` CI job has never executed on its ubuntu host at all
+//      (WINDOWS.md 28), so this parse rides an already-unobserved host. That
+//      residual is INHERITED, not absorbed: `attributeIdentities` reports
+//      `measureFail` when the output carries psql-shaped diagnostics it cannot
+//      parse into blocks (a changed format, or a localized `FEHLER:`/`KONTEXT:`
+//      build), and the runner turns that into a LOUD defect. An unparseable
+//      format must never read as "no attributable arm", because that is
+//      indistinguishable from a real defect — and never as a pass.
 
-/** A fresh, unguessable identity stamp. Generated per arm run, never reused. */
-export function makeIdentityNonce() {
-  return `m${Math.random().toString(36).slice(2, 10)}${Date.now().toString(36)}`;
+/** psql's per-message header: `psql:<path>:<line>: <SEVERITY>:  <rest>`. */
+const PSQL_HEADER_RE =
+  /^psql:(.*):(\d+): (ERROR|FATAL|PANIC|WARNING|NOTICE|INFO|LOG|DEBUG):  (.*)$/;
+
+/** A psql diagnostic FIELD line. `LOCATION` is verbose's end-of-block sentinel. */
+const PSQL_FIELD_RE = /^(CONTEXT|DETAIL|HINT|QUERY|STATEMENT|LOCATION):  (.*)$/;
+
+/** Anything psql-prefixed at all — used only to tell "no blocks" from "no output". */
+const PSQL_PREFIXED_RE = /^psql:.+:\d+: /;
+
+/** `VERBOSITY=verbose` puts the SQLSTATE in front of the message text. */
+const VERBOSE_SQLSTATE_RE = /^([0-9A-Z]{5}): ([\s\S]*)$/;
+
+/** The ONE legal CONTEXT chain: a single direct DO-body RAISE frame. */
+const SINGLE_DO_FRAME_RE = /^PL\/pgSQL function inline_code_block line (\d+) at RAISE$/;
+
+/** Every `TEST FAILED (<id>)` occurrence, with its identity. */
+const IDENTITY_RE = /TEST FAILED \(([^)]*)\)/g;
+
+/**
+ * Attribution records for every arm identity RAISED by `gateText`.
+ *
+ * One record per (raise statement, identity). An identity raised twice yields
+ * two records and attribution accepts EITHER, because both are the runner's
+ * own text — the record set is a description of the file, not a claim of
+ * uniqueness.
+ *
+ * ⚠️ Build this from the gate copy AS THE LANE WILL RUN IT — after neuters AND
+ * after every mutation `edit`, read back off disk. A mutation may legally edit
+ * the gate file (the real corpus's `N1 3a` does), and psql reports the lines of
+ * the bytes it actually parsed. Building from the pre-mutation text would
+ * resolve against lines that no longer exist.
+ *
+ * `stmtEndLine`/`stmtStartLine` are the ENCLOSING TOP-LEVEL (depth 0) statement
+ * — the `DO $$ … $$;` block. psql's `psql:<file>:<N>:` prefix names that
+ * statement's LAST line, and PL/pgSQL's CONTEXT line is relative to its FIRST
+ * (line 1 = the remainder of the `DO $$` line), which is what makes
+ * `stmtStartLine + contextLine − 1 === raiseFileLine` the resolution.
+ * Verified 5×: RESEARCH § The Key Measurement (2×) and this checkout's own
+ * `pg-lane` measurement of gate1/gate5/gate7 (3×), 2026-09-01.
+ */
+export function gateAttributionRecords(gateText) {
+  const statements = tokenizeStatements(gateText);
+  const records = [];
+  for (const idx of innermostCarriers(statements, "TEST FAILED (")) {
+    const stmt = statements[idx];
+    // A commented-out (already neutered) raise is not a statement at all, and a
+    // bare `TEST FAILED (` literal is not a raise — the same narrowing
+    // `raiseStatementIndex` applies, for the same reason.
+    if (!RAISE_EXCEPTION_RE.test(stmt.executableText)) continue;
+    // The enclosing top-level statement: the last depth-0 statement at or
+    // before this one. `tokenizeStatements` emits pre-order, so that is the
+    // `DO $$ … $$;` block this raise lives inside.
+    let top = null;
+    for (let j = idx; j >= 0; j -= 1) {
+      if (statements[j].depth === 0) {
+        top = statements[j];
+        break;
+      }
+    }
+    if (top === null) continue;
+    for (const arm of armIdentitiesInOrder(stmt.text)) {
+      records.push({
+        arm,
+        raiseFileLine: stmt.startLine,
+        stmtStartLine: top.startLine,
+        stmtEndLine: top.endLine,
+      });
+    }
+  }
+  return records;
 }
 
 /**
- * Stamp every arm identity in a gate file with `nonce`.
+ * Parse lane output into psql message blocks.
  *
- * ⚠️ Called on the PRISTINE copy, BEFORE any mutation step. Stamping after the
- * mutation would stamp whatever the mutation injected, which is exactly the
- * thing being refused.
+ * A block starts at a `psql:<path>:<line>: <SEVERITY>:  …` header and runs to
+ * the next header. Within it, `CONTEXT:`/`LOCATION:`/… start FIELDS; any other
+ * line continues whatever is currently open (the message, or the last field).
+ * That matters: a CONTEXT chain frame quoting a multi-line `SQL statement "…"`
+ * spans several unprefixed lines (MEASURED — the nested-EXECUTE forgery), so
+ * counting newlines between `CONTEXT:` and `LOCATION:` is NOT frame counting.
+ *
+ * @returns {{ blocks: object[], lineOwner: (object|null)[], lines: string[] }}
  */
-export function stampIdentities(text, nonce) {
-  return text.split("TEST FAILED (").join(`TEST FAILED (${nonce}|`);
-}
+function parsePsqlBlocks(output) {
+  const lines = output.split("\n");
+  const blocks = [];
+  const lineOwner = new Array(lines.length).fill(null);
+  let block = null;
+  let part = null;
 
-/** The identity the gate emits for `arm` once stamped. */
-export function stampedIdentity(nonce, arm) {
-  return `TEST FAILED (${nonce}|${arm})`;
+  for (let i = 0; i < lines.length; i += 1) {
+    const header = PSQL_HEADER_RE.exec(lines[i]);
+    if (header !== null) {
+      const verbose = VERBOSE_SQLSTATE_RE.exec(header[4]);
+      block = {
+        path: header[1],
+        line: Number(header[2]),
+        severity: header[3],
+        sqlstate: verbose ? verbose[1] : null,
+        message: verbose ? verbose[2] : header[4],
+        fields: [],
+      };
+      blocks.push(block);
+      part = { kind: "message" };
+      lineOwner[i] = { block, part };
+      continue;
+    }
+    if (block === null) continue; // preamble / stdout before any message
+    const field = PSQL_FIELD_RE.exec(lines[i]);
+    if (field !== null) {
+      const entry = { name: field[1], value: field[2] };
+      block.fields.push(entry);
+      part = { kind: "field", entry };
+      lineOwner[i] = { block, part };
+      continue;
+    }
+    // Continuation of whatever is open.
+    if (part.kind === "message") block.message += `\n${lines[i]}`;
+    else part.entry.value += `\n${lines[i]}`;
+    lineOwner[i] = { block, part };
+  }
+  return { blocks, lineOwner, lines };
 }
 
 /**
- * First `TEST FAILED (<ARM>)` in lane output, in emission order.
+ * Classify EVERY `TEST FAILED (…)` occurrence in lane `output`.
  *
- * With a `nonce`, only STAMPED identities are readable — see the block above.
- * Without one (the baseline and restore legs, which run the pristine gate) it
- * falls back to the unstamped form.
+ * @param {string} output   combined stderr+stdout of one lane
+ * @param {{gatePath: string, records: {arm:string,raiseFileLine:number,stmtStartLine:number,stmtEndLine:number}[]}} ctx
+ * @returns {{
+ *   sightings: {identity:string, arm:string|null, why:string, seen:string}[],
+ *   firstAttributed: string|null,
+ *   unattributable: {identity:string, why:string, seen:string}[],
+ *   measureFail: string|null,
+ *   blocks: number,
+ * }}
  *
- * @param {string} output
- * @param {string | null} [nonce]
+ * ⚠️ The scan covers ALL output, not just the first ERROR. `RAISE NOTICE` can
+ * carry a `TEST FAILED (…)` without aborting the lane at all (MEASURED: exit 0,
+ * severity NOTICE, no CONTEXT chain), which is the property the nonce design's
+ * `unstampedIdentities` had and this replacement must not lose.
  */
-export function firstFailureArm(output, nonce = null) {
-  const re = nonce
-    ? new RegExp(`TEST FAILED \\(${nonce}\\|([^)]*)\\)`)
-    : /TEST FAILED \(([^)]*)\)/;
-  const match = output.match(re);
-  return match ? match[1] : null;
+export function attributeIdentities(output, ctx) {
+  const { blocks, lineOwner, lines } = parsePsqlBlocks(output);
+
+  // ── MEASURE_FAIL: an output grammar we do not understand ──────────────────
+  // Never a silent pass, and never "no attributable arm" — an unparseable
+  // format is indistinguishable from a real defect, so it gets its own name.
+  let measureFail = null;
+  const psqlShaped = lines.filter((l) => PSQL_PREFIXED_RE.test(l));
+  if (psqlShaped.length > 0 && blocks.length === 0) {
+    measureFail =
+      `the lane emitted ${psqlShaped.length} psql-prefixed diagnostic line(s) that this parser ` +
+      `could not read as message blocks. The CONTEXT/severity grammar is measured on macOS / ` +
+      `PostgreSQL 16.13 only (WINDOWS.md 28: the sql-mutation job has never run on its CI host), ` +
+      `and a localized or changed psql build would land here. FIRST UNPARSED LINE: ` +
+      `${JSON.stringify(psqlShaped[0])}`;
+  }
+
+  const sightings = [];
+  for (let i = 0; i < lines.length; i += 1) {
+    IDENTITY_RE.lastIndex = 0;
+    let match;
+    while ((match = IDENTITY_RE.exec(lines[i])) !== null) {
+      const identity = match[1];
+      const owner = lineOwner[i];
+      const seen = oneLineOf(lines[i]);
+      if (owner === null) {
+        sightings.push({
+          identity,
+          arm: null,
+          why: "outside any psql message block (raw stdout/stderr text)",
+          seen,
+        });
+        continue;
+      }
+      if (owner.part.kind !== "message") {
+        sightings.push({
+          identity,
+          arm: null,
+          why: `carried by the ${owner.part.entry.name} field of a ${owner.block.severity} block, not by its message`,
+          seen,
+        });
+        continue;
+      }
+      sightings.push(judgeBlock(identity, owner.block, ctx, seen));
+    }
+  }
+
+  const firstAttributed = sightings.find((s) => s.arm !== null)?.arm ?? null;
+  return {
+    sightings,
+    firstAttributed,
+    unattributable: sightings.filter((s) => s.arm === null),
+    measureFail,
+    blocks: blocks.length,
+    // Carried through so a diagnostic can state the EXPECTATION from the same
+    // records the judgement used — two readers of one fact, never two facts.
+    records: ctx.records,
+  };
 }
 
 /**
- * Identities the lane emitted that the runner did NOT stamp.
- *
- * Every raise in the gate copy carries the stamp, so an unstamped identity can
- * only have come from the mutation itself — an injected raise in any file, or a
- * `sql` step raising directly against the database, in ANY spelling.
+ * Where a genuine raise of `identity` WOULD have to come from, in file:line
+ * terms — the "expected" half of a diagnostic that must print what it saw AND
+ * what it wanted (SC-7). Reads the same records the judgement used, so the two
+ * halves cannot drift apart.
  */
-export function unstampedIdentities(output, nonce) {
-  return [...output.matchAll(/TEST FAILED \(([^)]*)\)/g)]
-    .map((m) => m[1])
-    .filter((id) => !id.startsWith(`${nonce}|`));
+function describeExpectedRaise(attribution, identity, gatePath) {
+  const recs = (attribution.records ?? []).filter((r) => r.arm === identity);
+  if (recs.length === 0) return `a raise of "${identity}" — but the gate file declares none`;
+  return recs
+    .map(
+      (r) =>
+        `${gatePath}:${r.raiseFileLine} (statement ${r.stmtStartLine}-${r.stmtEndLine}, so psql ` +
+        `prefix :${r.stmtEndLine} and CONTEXT line ${r.raiseFileLine - r.stmtStartLine + 1})`,
+    )
+    .join(" or ");
+}
+
+/** Every identity the lane emitted and what became of it — the "what I saw" half. */
+function describeSightings(attribution) {
+  if (attribution.sightings.length === 0) return "none — the lane emitted no TEST FAILED (…) at all";
+  return attribution.sightings
+    .map((s) => `"${s.identity}" → ${s.arm === null ? `UNATTRIBUTABLE (${s.why})` : s.arm}`)
+    .join("; ");
+}
+
+/** One line, bounded — a diagnostic must PRINT WHAT IT SAW without printing a novel. */
+function oneLineOf(text) {
+  const flat = text.trim().replace(/\s*\n\s*/g, " ");
+  return flat.length > 200 ? `${flat.slice(0, 200)}…` : flat;
+}
+
+/** The three-legged rule, applied to one identity sighting in one block's message. */
+function judgeBlock(identity, block, ctx, seen) {
+  const no = (why) => ({ identity, arm: null, why, seen });
+
+  if (block.severity !== "ERROR") {
+    return no(`severity is ${block.severity}, not ERROR — a NOTICE/WARNING cannot fail an arm`);
+  }
+  if (block.sqlstate !== "P0001") {
+    return no(
+      `SQLSTATE is ${block.sqlstate === null ? "absent (is VERBOSITY=verbose set?)" : block.sqlstate}, ` +
+        `not P0001 — the error is not a RAISE EXCEPTION`,
+    );
+  }
+  // ── leg (a): the psql prefix names THIS lane's gate scratch file ──────────
+  if (block.path !== ctx.gatePath) {
+    return no(`raised from ${block.path}, not from this lane's gate file ${ctx.gatePath}`);
+  }
+  // ── leg (b): the CONTEXT chain is EXACTLY ONE direct DO-body RAISE frame ──
+  const contextIdx = block.fields.findIndex((f) => f.name === "CONTEXT");
+  if (contextIdx === -1) {
+    return no(
+      `the error carries NO CONTEXT chain (fields: ${block.fields.map((f) => f.name).join(", ") || "none"}) ` +
+        `— a PL/pgSQL RAISE always has one`,
+    );
+  }
+  if (!block.fields.slice(contextIdx + 1).some((f) => f.name === "LOCATION")) {
+    return no(
+      "the CONTEXT chain is not bounded by a LOCATION sentinel — its extent is unknown, so its " +
+        "frame count cannot be asserted (is VERBOSITY=verbose set on this leg?)",
+    );
+  }
+  const chain = block.fields[contextIdx].value;
+  const frame = SINGLE_DO_FRAME_RE.exec(chain.trim());
+  if (frame === null) {
+    const chainLines = chain.trim().split("\n");
+    return no(
+      `the CONTEXT chain is not EXACTLY ONE "inline_code_block line N at RAISE" frame — it has ` +
+        `${chainLines.length} line(s), first: ${JSON.stringify(oneLineOf(chainLines[0] ?? ""))}. ` +
+        `A nested EXECUTE, a helper function or a trigger forges the INNERMOST frame; it cannot ` +
+        `forge the chain's LENGTH`,
+    );
+  }
+  // ── leg (c): the frame line resolves to a raise the RUNNER's gate declares ─
+  const contextLine = Number(frame[1]);
+  const candidates = ctx.records.filter((r) => r.arm === identity);
+  if (candidates.length === 0) {
+    return no(`the gate file this lane ran declares no RAISE for "${identity}"`);
+  }
+  for (const rec of candidates) {
+    if (block.line !== rec.stmtEndLine) continue;
+    if (rec.stmtStartLine + contextLine - 1 !== rec.raiseFileLine) continue;
+    return { identity, arm: identity, why: "attributed", seen };
+  }
+  const shown = candidates
+    .map((r) => `${ctx.gatePath}:${r.raiseFileLine} (block ${r.stmtStartLine}-${r.stmtEndLine})`)
+    .join(", ");
+  return no(
+    `source location does not match: psql reported statement end line ${block.line} and CONTEXT ` +
+      `line ${contextLine} (resolving to file line ${candidates[0].stmtStartLine + contextLine - 1}), ` +
+      `but "${identity}" is raised at ${shown}`,
+  );
 }
 
 /**
@@ -755,7 +1064,8 @@ export function unstampedIdentities(output, nonce) {
  *    "replace":"N1 1a): ","occurrences":1}
  *
  * MEASURED at HEAD: the parser accepted that verbatim, and applying it moved
- * `ANON 1a` from 1 occurrence to 0 and `N1 1a` from 1 to 2. `firstFailureArm`
+ * `ANON 1a` from 1 occurrence to 0 and `N1 1a` from 1 to 2. The first-failure
+ * reader (`firstFailureArm` then; `attributeIdentities` since 2026-09-01)
  * would then read `N1 1a`, the runner would report `RED (identity ok)`, and
  * `biting` would rise for an arm whose own logic never ran — the exact outcome
  * rule 3 exists to prevent, reached without the literal rule 3 looks for.
@@ -787,8 +1097,10 @@ export function unstampedIdentities(output, nonce) {
  * ⚠️ WHAT IT DOES NOT COVER, stated rather than implied: a raise INJECTED with
  * the literal spelled indirectly (`'TEST FAI' || 'LED (X)'`) is not recognised
  * as a failure branch, so it does not appear in either list. That half of the
- * class is closed at RUNTIME by the identity nonce above, which is the only
- * place it can be closed — see `unstampedIdentities`.
+ * class is closed at RUNTIME by the source-location attribution above, which is
+ * the only place it can be closed — see `attributeIdentities`. (Until
+ * 2026-09-01 that runtime closure was the identity nonce; it was superseded
+ * because the nonce transmitted its secret to the server — [R4-C02].)
  *
  * MEASURED 2026-08-29 across the real corpus — 30 annotated arms, 49 file
  * steps — 0 violations. The widened rule refuses nothing that exists today.
@@ -1057,7 +1369,15 @@ export function runCorpus({
           "baseline",
           null,
           gateRel,
-          `pristine corpus did not go GREEN (exit ${baseline.status}); first failure: ${firstFailureArm(baseline.output) ?? "none"}`,
+          // ⚠️ This one reader is a PLAIN-TEXT needle on purpose, and it is the
+          // only one left in the file. It reads no ARM IDENTITY DECISION: the
+          // baseline leg runs the pristine gate with no mutation at all, so
+          // there is no adversary and nothing to attribute — the string is
+          // pure diagnostic, telling a human which raise fired in a corpus
+          // that was supposed to be green. Nothing downstream consumes it.
+          `pristine corpus did not go GREEN (exit ${baseline.status}); first failure: ${
+            baseline.output.match(/TEST FAILED \(([^)]*)\)/)?.[1] ?? "none"
+          }`,
         );
         continue; // arms cannot be judged against a red baseline
       }
@@ -1087,18 +1407,12 @@ export function runCorpus({
         }
         if (neuterFailed) continue;
 
-        // ── R3-C02: stamp the PRISTINE gate, BEFORE any mutation runs ───────
-        // Every identity the detector will accept is written here, by the
-        // runner, with a nonce the annotation cannot know. Stamping after the
-        // mutation would stamp whatever the mutation injected. Neuters run
-        // first (above) because their needle is the UNSTAMPED literal, and a
-        // neutered raise is commented out either way.
-        //
-        // Rule 3a guarantees no `find`/`anchor` names a `TEST FAILED (`
-        // literal (measured: 0 of 49 file steps), which is what makes it safe
-        // to stamp before the mutation steps run their occurrence counts.
-        const nonce = makeIdentityNonce();
-        gateText = stampIdentities(gateText, nonce);
+        // ⛔ 164.3.1-05: the gate text is written back VERBATIM. The R3-C02
+        // nonce stamp that used to happen here is DELETED, not disabled — it
+        // transmitted the runner's secret to the server inside the query text,
+        // where `current_query()` handed it straight to an attacker's trigger
+        // ([R4-C02], measured live). Nothing is transmitted now; the identity
+        // is the raise's SOURCE LOCATION, read back off the lane's output.
         writeFileSync(armMap.get(gateRel), gateText);
 
         // Mutation steps, in order, on the copies.
@@ -1139,36 +1453,61 @@ export function runCorpus({
           writeFileSync(postApplyAbs, `${sqlStatements.map((s) => `${s};`).join("\n")}\n`);
         }
 
+        const gateAbs = armMap.get(gateRel);
         const run = runLane({
           workdir: join(armSlot, "lane"),
           applyAbs: parsed.setup.apply.map((r) => armMap.get(r)),
           postApplyAbs,
-          gateAbs: armMap.get(gateRel),
+          gateAbs,
         });
         armsExecuted += 1;
         timings.push(run.seconds);
 
-        const first = firstFailureArm(run.output, nonce);
-        // ── R3-C02: an identity the runner did not stamp was SYNTHESISED ────
-        // Every raise in the gate copy carries the nonce, so an unstamped
-        // `TEST FAILED (…)` in the output came from the mutation itself — an
-        // injected raise in any file, or a `sql` step raising directly against
-        // the database, in ANY spelling (`'TEST FAI' || 'LED (…)'`, `format`,
-        // `chr`, …). This is the arbiter that cannot be re-spelled around,
-        // because it does not read the annotation's text at all.
-        const synthesised = unstampedIdentities(run.output, nonce);
+        // ── 164.3.1-05: attribute by SOURCE LOCATION ────────────────────────
+        // Records come from the gate copy AS THE LANE RAN IT — read back off
+        // disk AFTER the mutation steps, because a mutation may legally edit
+        // the gate file and psql reports the lines of the bytes it parsed.
+        const attribution = attributeIdentities(run.output, {
+          gatePath: gateAbs,
+          records: gateAttributionRecords(readFileSync(gateAbs, "utf8")),
+        });
+        const first = attribution.firstAttributed;
+        const synthesised = attribution.unattributable;
         let verdict;
-        if (synthesised.length > 0) {
-          verdict = `SYNTHESISED(${synthesised[0]})`;
+        if (attribution.measureFail !== null) {
+          // The output grammar itself was unreadable. This must NEVER collapse
+          // into "no attributable arm" — that reads identically to a real
+          // defect and would let an unobserved host pass or fail for reasons
+          // nobody can diagnose from the log.
+          verdict = "MEASURE-FAIL(output-grammar)";
           addDefect(
             "synthesised-identity",
             ann.arm,
             gateRel,
-            `MEASURE_FAIL: the lane emitted TEST FAILED (${synthesised[0]}), which the runner did ` +
-              `NOT stamp into the gate file. Every raise in the gate copy carries this run's ` +
-              `identity nonce, so an unstamped identity was SYNTHESISED by the mutation — the ` +
-              `mutation satisfied the DETECTOR instead of the arm. This arm is NOT counted as ` +
-              `biting. Mutate the code under test, never the failure output.`,
+            `MEASURE_FAIL: ${attribution.measureFail}. This arm was NOT judged — the runner could ` +
+              `not read the lane's output, so neither RED nor GREEN is a measurement here.`,
+          );
+        } else if (synthesised.length > 0) {
+          // ── An identity the runner cannot ATTRIBUTE was SYNTHESISED ───────
+          // Checked FIRST, before red/no-red, and over ALL output rather than
+          // the first ERROR — a `RAISE NOTICE` can carry the identity without
+          // aborting the lane at all (MEASURED: exit 0, severity NOTICE). This
+          // is the arbiter that cannot be re-spelled around, because it does
+          // not read the annotation's text: it reads WHERE the raise came from.
+          verdict = `SYNTHESISED(${synthesised[0].identity})`;
+          addDefect(
+            "synthesised-identity",
+            ann.arm,
+            gateRel,
+            `MEASURE_FAIL: the lane emitted TEST FAILED (${synthesised[0].identity}), which this ` +
+              `runner's gate file did not raise. WHY IT IS NOT ATTRIBUTABLE: ${synthesised[0].why}. ` +
+              `WHAT WAS SEEN: ${synthesised[0].seen}. EXPECTED, for a genuine arm: an ERROR/P0001 ` +
+              `block under ${gateAbs} whose CONTEXT chain is exactly one ` +
+              `"PL/pgSQL function inline_code_block line N at RAISE" frame resolving to ` +
+              `${describeExpectedRaise(attribution, synthesised[0].identity, gateAbs)}. The mutation ` +
+              `satisfied the DETECTOR instead of the arm. This arm is NOT counted as biting. ` +
+              `Mutate the code under test, never the failure output.` +
+              (synthesised.length > 1 ? ` (+${synthesised.length - 1} further unattributable sighting(s))` : ""),
           );
         } else if (run.status === 0) {
           verdict = "NO-RED";
@@ -1184,7 +1523,12 @@ export function runCorpus({
             "wrong-first-failure",
             ann.arm,
             gateRel,
-            `gate exited ${run.status} but emitted no "TEST FAILED (…)" line — the failure is not attributable to any arm`,
+            `gate exited ${run.status} but no "TEST FAILED (…)" in its output was ATTRIBUTABLE to a ` +
+              `raise in ${gateAbs} — the failure is not attributable to any arm. EXPECTED: an ` +
+              `ERROR/P0001 block under that path whose CONTEXT chain is exactly one ` +
+              `"PL/pgSQL function inline_code_block line N at RAISE" frame resolving to ` +
+              `${describeExpectedRaise(attribution, ann.arm, gateAbs)}. ` +
+              `SIGHTINGS: ${describeSightings(attribution)}`,
           );
         } else if (first !== ann.arm) {
           verdict = `WRONG-ARM(${first})`;
@@ -1200,8 +1544,15 @@ export function runCorpus({
 
         // A neuter that silently missed leaves the shadowing arm live, which
         // would make the identity check fail for the wrong reason.
+        //
+        // ⚠️ This reads the PLAIN identity text ANYWHERE in the output, not an
+        // attributed sighting, and that direction is deliberate. Under the
+        // nonce this was `stampedIdentity(...)`, which a forgery could evade;
+        // now the only thing a forgery can do here is make CI FAIL for an arm
+        // that was neutered — the loud direction. A neuter that truly took
+        // effect leaves the raise commented out, so the gate cannot emit it.
         for (const entry of ann.neuter) {
-          if (run.output.includes(stampedIdentity(nonce, entry.arm))) {
+          if (run.output.includes(`TEST FAILED (${entry.arm})`)) {
             addDefect(
               "neuter-missed",
               ann.arm,
