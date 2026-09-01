@@ -1177,6 +1177,46 @@ tolerance is permanently silent there.
 migration gate is armed.** Measure the catalog directly (`pg_get_functiondef` / `obj_description`).
 
 
+### CRON-DRIFT-01 / CRON-OBS-01 — a PROD cron job 401'd hourly for 7 DAYS behind a green cron history (booked 2026-09-01)
+
+**Measured 2026-09-01, live in PROD.** Sentry `QUANTALYZE-18` (169 events, escalating, first seen
+2026-08-25T12:49Z) was `config_secret: SERVICE_KEY / config_fault: mismatched` from
+`analytics-service/main.py:833`. `net._http_response` ids 3479-3484 showed six consecutive hourly
+`401 {"detail":"Unauthorized"}` — while `cron.job_run_details` recorded `succeeded / '1 row'` for
+every one of those ticks.
+
+**Root cause.** A Railway `SERVICE_KEY` rotation on 2026-08-25 12:46. Someone created the Vault
+secret `analytics_service_key`, described it verbatim as "X-Service-Key for match_engine_cron
+(cron.job jobid 1)", and never re-pointed jobid 1 at it. The job kept an INLINE copy of the old
+key. First 401 landed 12:49:29 — three minutes after the vault write. Fixed 2026-09-01 by
+re-scheduling jobid 1 onto a `DO` block that reads `vault.decrypted_secrets`; verified id 3485
+`200 {"status":"ok","processed":14,"skipped":0,"failed":0}`.
+
+Two gaps remain, and neither is closed by that fix:
+
+- **[CRON-DRIFT-01] Nothing compares PROD `cron.job` against the repo's migrations.** PROD jobid 1
+  carried a hardcoded `url := 'https://…'` plus an inline key, while
+  `supabase/migrations/20260408215026_schedule_match_cron_hourly.sql:70-76` had rebuilt it on
+  `current_setting(...)` explicitly so "the secret never lands in `cron.job.command`". That rebuild
+  never took effect and nothing noticed for months. This is `VAC-04`'s shape (repo-vs-PROD function
+  body diff, shipped in v0.77.0.0) applied to `cron.job` — which has no equivalent.
+  ⚠️ **The GUC design in that migration is UNRUNNABLE on Supabase anyway**: `ALTER DATABASE … SET
+  app.analytics_service_key` returns `42501 permission denied to set parameter` because a custom
+  PLACEHOLDER GUC needs superuser and the `postgres` role is not one. So the migration as committed
+  could never have worked here. Any gate must compare against what is ACHIEVABLE, not just what the
+  migration says. Vault is the working mechanism.
+
+- **[CRON-OBS-01] Nothing watches `net._http_response`.** `net.http_post` is ASYNC: pg_cron logs
+  success for ENQUEUING and never sees the status code. Every other alarm is structurally blind
+  here — `/health` stays green (`SERVICE_KEY` skips `/health`, `/internal/*`, `/process-key`), and a
+  4xx never trips the 140.2 breaker. The PYAPI-06 Sentry capture was the ONLY instrument that
+  spoke, and it fires only for a NON-EMPTY wrong key (`if provided:` at `main.py:830`) — an absent
+  header would have been silent too. Needs a periodic check that fails loud on non-2xx in
+  `net._http_response`, counted and surfaced (⚠️ not a silent skip — that is `SKIP-01`).
+
+⭐ **Standing rule until CRON-OBS-01 lands: `cron.job_run_details.status = 'succeeded'` is NOT
+evidence that a pg_net-based job worked.** Read `net._http_response`.
+
 ### ⛔ DRIFT-02 — a surgical in-place patch means the REPO no longer holds the true function body (booked 2026-08-27)
 
 ⭐ Caught by the pre-merge PROD diff, which is the ONLY thing that could have caught it.
