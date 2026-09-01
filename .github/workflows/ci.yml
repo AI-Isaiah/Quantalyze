@@ -988,8 +988,8 @@ jobs:
         # two steps that way: a clean scan means nothing unless the detector can
         # still fire. It needs no extra provisioning — it drives the same
         # throwaway `initdb` cluster `scripts/pg-lane/run.sh` creates for the
-        # corpus run. Measured 2026-08-29: 8/8, in seconds; 10/10 after
-        # 164.3.1-11 added the Primitive-A regression corpus (2026-09-01).
+        # corpus run. Measured 2026-08-29: 8/8, in seconds; 12/12 after
+        # 164.3.1-11 added the Primitive-A and -B regression corpus (2026-09-01).
         #
         # ⛔ MODE IDENTITY: the bare command from the script's own header, no
         # wrapper. Pinned from vitest by src/__tests__/mutation-runner-floors.test.ts.

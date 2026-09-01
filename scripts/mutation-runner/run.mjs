@@ -2118,7 +2118,7 @@ function selfTest() {
   // 6 outright, so each states the floor appropriate to ITS corpus. Check 5 is
   // where an ARMS_FLOOR regression is proven to fire — the mode that could not
   // be proven at all while the floor was 0.
-  console.log("=== SELF-TEST 1/10: a non-biting annotation must exit 1 with `no-red` ===");
+  console.log("=== SELF-TEST 1/12: a non-biting annotation must exit 1 with `no-red` ===");
   const a = runCorpus({ scopeDir: SELFTEST_DIR, onlyFile: "nonbiting-gate.sql", armsFloor: 0, log: quiet });
   pass =
     expect(a.exitCode === 1, `exit code is 1 (got ${a.exitCode})`) &&
@@ -2128,7 +2128,7 @@ function selfTest() {
     ) &&
     pass;
 
-  console.log("=== SELF-TEST 2/10: a FILES_FLOOR regression must exit 1 with `floor` ===");
+  console.log("=== SELF-TEST 2/12: a FILES_FLOOR regression must exit 1 with `floor` ===");
   const b = runCorpus({ scopeDir: FIXTURE_CORPUS, filesFloor: 99, armsFloor: 0, log: quiet });
   pass =
     expect(b.exitCode === 1, `exit code is 1 (got ${b.exitCode})`) &&
@@ -2138,7 +2138,7 @@ function selfTest() {
     ) &&
     pass;
 
-  console.log("=== SELF-TEST 3/10: reddening the WRONG arm must exit 1 with `wrong-first-failure` ===");
+  console.log("=== SELF-TEST 3/12: reddening the WRONG arm must exit 1 with `wrong-first-failure` ===");
   const c = runCorpus({ scopeDir: SELFTEST_DIR, onlyFile: "wrong-identity-gate.sql", armsFloor: 0, log: quiet });
   pass =
     expect(c.exitCode === 1, `exit code is 1 (got ${c.exitCode})`) &&
@@ -2150,7 +2150,7 @@ function selfTest() {
     ) &&
     pass;
 
-  console.log("=== SELF-TEST 4/10: a wrong `occurrences` must exit 1 with MEASURE_FAIL, NOT `no-red` ===");
+  console.log("=== SELF-TEST 4/12: a wrong `occurrences` must exit 1 with MEASURE_FAIL, NOT `no-red` ===");
   const d = runCorpus({ scopeDir: SELFTEST_DIR, onlyFile: "occurrence-mismatch-gate.sql", armsFloor: 0, log: quiet });
   pass =
     expect(d.exitCode === 1, `exit code is 1 (got ${d.exitCode})`) &&
@@ -2169,7 +2169,7 @@ function selfTest() {
   // FILES_FLOOR half of D-09's floor mode. Now that the floor is a measured 30
   // this check exists, and it is what stops the pinned floor from decaying back
   // into a constant nobody compares to anything.
-  console.log("=== SELF-TEST 5/10: an ARMS_FLOOR regression must exit 1 with `floor` ===");
+  console.log("=== SELF-TEST 5/12: an ARMS_FLOOR regression must exit 1 with `floor` ===");
   const f = runCorpus({ scopeDir: FIXTURE_CORPUS, armsFloor: 99, log: quiet });
   pass =
     expect(f.exitCode === 1, `exit code is 1 (got ${f.exitCode})`) &&
@@ -2183,7 +2183,7 @@ function selfTest() {
     ) &&
     pass;
 
-  console.log("=== SELF-TEST 6/10: the green fixture corpus must exit 0 ===");
+  console.log("=== SELF-TEST 6/12: the green fixture corpus must exit 0 ===");
   const e = runCorpus({ scopeDir: FIXTURE_CORPUS, armsFloor: 2, log: quiet });
   pass =
     expect(e.exitCode === 0, `exit code is 0 (got ${e.exitCode}; defects: ${JSON.stringify(e.defects)})`) &&
@@ -2205,7 +2205,7 @@ function selfTest() {
   // fixture's annotation deliberately carries no failure literal in either its
   // needle or its replacement, so this check can only pass on the CONTENT
   // invariant (`identityRewriteDetail`) and not on the spelling rule.
-  console.log("=== SELF-TEST 7/10: rewriting an arm IDENTITY must exit 1 with `identity-rewrite` ===");
+  console.log("=== SELF-TEST 7/12: rewriting an arm IDENTITY must exit 1 with `identity-rewrite` ===");
   const g = runCorpus({ scopeDir: SELFTEST_DIR, onlyFile: "identity-rewrite-gate.sql", armsFloor: 0, log: quiet });
   pass =
     expect(g.exitCode === 1, `exit code is 1 (got ${g.exitCode})`) &&
@@ -2224,7 +2224,7 @@ function selfTest() {
     pass;
 
   console.log("");
-  console.log("=== SELF-TEST 8/10: SYNTHESISING an identity must exit 1 with `synthesised-identity` ===");
+  console.log("=== SELF-TEST 8/12: SYNTHESISING an identity must exit 1 with `synthesised-identity` ===");
   const h = runCorpus({
     scopeDir: SELFTEST_DIR,
     onlyFile: "synthesised-identity-gate.sql",
@@ -2255,7 +2255,7 @@ function selfTest() {
   // itself a Primitive-D instance, so the proof is part of the entry.
   console.log("");
   console.log(
-    "=== SELF-TEST 9/10: [R4-C01] the P3 compound HEAD must be REFUSED as `neuter-missed` naming `SET ROLE postgres;`, beside an ACCEPTED P1-shape neuter ===",
+    "=== SELF-TEST 9/12: [R4-C01] the P3 compound HEAD must be REFUSED as `neuter-missed` naming `SET ROLE postgres;`, beside an ACCEPTED P1-shape neuter ===",
   );
   // armsFloor 1 states the corpus's own number: exactly ONE arm can bite — the
   // control BEHIND P1 — because the refused arm never lanes. ⚠️ It is INERT
@@ -2292,7 +2292,7 @@ function selfTest() {
 
   console.log("");
   console.log(
-    "=== SELF-TEST 10/10: [MUT-I01] an apostrophe in a `--` comment inside a RAISE must neither refuse the neuter (P4) nor over-neuter the statement after it (P5) ===",
+    "=== SELF-TEST 10/12: [MUT-I01] an apostrophe in a `--` comment inside a RAISE must neither refuse the neuter (P4) nor over-neuter the statement after it (P5) ===",
   );
   // armsFloor 2 states the corpus's own number: both annotated arms must bite.
   // ⚠️ INERT in a narrowed run (no floor is enforced) — the count is asserted
@@ -2319,6 +2319,82 @@ function selfTest() {
     expect(
       j.armsExecuted === 2 && j.bitingArms === 2 && j.laneInvocations === 2,
       `both arms laned and bit (executed ${j.armsExecuted}, biting ${j.bitingArms}, lanes ${j.laneInvocations}) — BEHIND ODD and BEHIND EVEN each scored RED (identity ok) behind a correctly neutered P4/P5 arm`,
+    ) &&
+    pass;
+
+  // ⭐ 164.3.1-11 — THE REGRESSION CORPUS, PRIMITIVE B (SC-1 + SC-3). Every
+  // measured instance of "an arm counts toward biting without executing" is a
+  // PERMANENT arm here, each with its PASSING CONTROL in the SAME run (CONTEXT
+  // D-02: an attribution that refuses everything also passes a forgery test,
+  // so a genuine arm must score RED (identity ok) beside the refusals). The
+  // two entries fail under DIFFERENT neuters of `judgeBlock`: the
+  // current_query() trigger is refused by its FIRST frame (`forge_fn()`), the
+  // echo-free nested-EXECUTE forgery ONLY by the chain's LENGTH — which is
+  // what makes them two entries and not one (164.3.1-11-CORPUS-PROOFS.md).
+  // Both fixtures are promoted VERBATIM from 164.3.1-05-ATTRIBUTION.md § 3.
+  console.log("");
+  console.log(
+    "=== SELF-TEST 11/12: [R4-C02] a current_query() trigger re-raising the identity must be SYNTHESISED, with the genuine arm RED (identity ok) beside it ===",
+  );
+  // armsFloor 1 states the corpus's own number: only the genuine control can
+  // bite. INERT in a narrowed run — the control is asserted on bitingArms.
+  const k = runCorpus({ scopeDir: SELFTEST_DIR, onlyFile: "current-query-forge-gate.sql", armsFloor: 1, log: quiet });
+  const cqForge = k.defects.find((x) => x.kind === "synthesised-identity" && x.arm === "FORGE 1");
+  pass =
+    expect(k.exitCode === 1, `exit code is 1 (got ${k.exitCode})`) &&
+    expect(
+      cqForge !== undefined,
+      'the defect table names FORGE 1 with kind "synthesised-identity" — the R4-C02 trigger that scored RED (identity ok) with biting 1 under the nonce is REFUSED under source-location attribution',
+    ) &&
+    expect(
+      cqForge !== undefined && cqForge.detail.includes("not EXACTLY ONE") && cqForge.detail.includes("forge_fn()"),
+      "the refusal names the chain rule and the trigger frame `forge_fn()` — leg (b) refused it by its FIRST frame, before chain length was even needed",
+    ) &&
+    expect(
+      k.armsExecuted === 2 && k.bitingArms === 1 && !k.defects.some((x) => x.arm === "CTRL 1"),
+      `the PASSING CONTROL scored RED (identity ok) in the SAME run (executed ${k.armsExecuted}, biting ${k.bitingArms}) — the attribution is not refusing everything`,
+    ) &&
+    expect(
+      k.defects.length === 1,
+      `exactly one defect (got ${k.defects.length}: ${JSON.stringify(k.defects.map((x) => [x.kind, x.arm]))})`,
+    ) &&
+    pass;
+
+  console.log("");
+  console.log(
+    "=== SELF-TEST 12/12: the nested-EXECUTE DO forgery AIMED at the genuine raise line must be SYNTHESISED by chain LENGTH alone, with the genuine arm RED (identity ok) beside it ===",
+  );
+  // armsFloor 1: as in 11/12 — stated, inert here, asserted on bitingArms.
+  const l = runCorpus({ scopeDir: SELFTEST_DIR, onlyFile: "nested-execute-forge-gate.sql", armsFloor: 1, log: quiet });
+  const forge2 = l.defects.find((x) => x.kind === "synthesised-identity" && x.arm === "FORGE 2");
+  const forge3 = l.defects.find((x) => x.kind === "synthesised-identity" && x.arm === "FORGE 3");
+  pass =
+    expect(l.exitCode === 1, `exit code is 1 (got ${l.exitCode})`) &&
+    expect(
+      forge2 !== undefined && forge3 !== undefined,
+      'the defect table names BOTH FORGE 2 and FORGE 3 with kind "synthesised-identity"',
+    ) &&
+    expect(
+      forge3 !== undefined &&
+        forge3.detail.includes("not EXACTLY ONE") &&
+        forge3.detail.includes("inline_code_block line 5 at RAISE"),
+      "FORGE 3 was AIMED — its forged first frame reads `inline_code_block line 5 at RAISE`, the genuine arm's own resolved line (legs (a) and (c) PASS) — and the chain's LENGTH refused it",
+    ) &&
+    expect(
+      forge3 !== undefined && !forge3.detail.includes("further unattributable sighting"),
+      "FORGE 3 is ECHO-FREE (a single sighting): the chain rule stands ALONE, so a neuter proof on it cannot be rescued by a second control",
+    ) &&
+    expect(
+      forge2 !== undefined && forge2.detail.includes("further unattributable sighting"),
+      "FORGE 2 is DOUBLE-GUARDED (its echoed `SQL statement` frame is a second, field-carried sighting) — the measured reason FORGE 3 exists (164.3.1-05-ATTRIBUTION.md § 5)",
+    ) &&
+    expect(
+      l.armsExecuted === 3 && l.bitingArms === 1 && !l.defects.some((x) => x.arm === "CTRL 1"),
+      `the PASSING CONTROL scored RED (identity ok) in the SAME run (executed ${l.armsExecuted}, biting ${l.bitingArms})`,
+    ) &&
+    expect(
+      l.defects.length === 2,
+      `exactly two defects (got ${l.defects.length}: ${JSON.stringify(l.defects.map((x) => [x.kind, x.arm]))})`,
     ) &&
     pass;
 
