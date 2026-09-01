@@ -3,9 +3,9 @@ gsd_state_version: 1.0
 milestone: v1.20
 milestone_name: Backlog Burndown (Phases 158+)
 current_phase: 164.3.1
-current_phase_name: SOUND-PRIMITIVES
+current_phase_name: SOUND-PRIMITIVES — four cycling primitives closed by construction
 status: executing
-stopped_at: "164.3 PLANNED — 10 plans in 5 waves, verified by gsd-plan-checker on iteration 3 of 3. Each of the first two iterations found an error-swallowing verify shape the previous had missed (|| fallback; then a `wc -l` tail and a printed-not-tested `grep -c`); all three removed. FIVE premises in this phase's own spec failed re-measurement: SKIP-01 (migrations DO reach TEST), OPS-08-F9 (floors already 8/166), criterion 4 (118 committed function bodies exist), the PROD-linked CI job (already exists, dissolving the phase's only human gate), and the corpus size (30 arm-anchored markers, not 33 — a grep counting its own documentation). NO founder-gated item remains."
+stopped_at: "164.3.1 WAVES 1-2 COMPLETE AND MERGED (8/12 plans). Stopped at user request before Wave 3. Branch phase-164.3.1-sound-primitives, all work committed, zero worktrees outstanding. Merged-tree gates all GREEN: vitest 13671 passed / 0 failed, tsc --noEmit clean, mutation self-test exit 0, full corpus exit 0 at 30/30/0 biting 30, plan-anchor-verify exit 0 (35 claims). REMAINING: Wave 3 = plan 09 (SC-6 re-derivation), Wave 4 = plan 10 (runner absurdity floor), Wave 5 = plans 11+12 (regression corpus + frontend-aggregator wiring). RESUME: /gsd-execute-phase 164.3.1"
 last_updated: "2026-09-01T17:46:04.349Z"
 last_activity: 2026-09-01
 last_activity_desc: Phase 164.3.1 execution started
@@ -1594,3 +1594,21 @@ pre-merge `e0493913`. Fix is PR #669. Supabase migrations and the Vercel fronten
 - 161.1: OQ-3 still OPEN — closes only when a founder executes the runbook's step 1 and records whether the database-level or role-level app.* GUC form verified. Also: deribit has ZERO live refresh coverage until plan 04's stitch_composite arm lands (TODOS 0.3)
 - 161.1-04 (wave 4, 2026-08-25): the composite arm LANDED DORMANT — `enqueue_ledger_composite_refresh` (migration `20260825140000`), 8-arm SQL gate, static gates 10-11, and the D-15 non-destructive guard EXTENDED to `run_stitch_composite_job._stamp_failed` (a second destructive stamp plan 02's guard never covered; found by measurement, fixed under Rule 2). ⛔ **Task 3 is a BLOCKING founder LIVE op and is NOT done:** one manual `stitch_composite` enqueue for the one live PROD composite must be observed to completion (`last_return_date` advancing in the staleness view, NOT a job going green) before the composite schedule is documented as activatable. The runbook's composite section is deliberately UNWRITTEN until then. TODOS 0.3 stays OPEN — half of its close condition (the arm exists) is met, half (a composite observed to refresh) is not.
 - 164-05 MEASURED: the phase-148 guard does NOT catch a second unstable_cache call site outside factsheet/[id]/v2/page.tsx (12/12 green under NEUTER-D). 164-07's closure guard does not close it either — the page imports the builder, not the reverse. Closed for the token route by src/app/factsheet-share/[token]/page.no-cache-reach.test.ts; the general repo-wide call-site pin is still unowned.
+
+## ⛔ Standing constraint from Phase 164.3.1 — do not lose this between sessions
+
+**Hold migration PRs until Phase 164.3.1 AND Phase 164.4 have BOTH landed.**
+
+VAC-04's zero path now fails closed (amended D-07, 2026-09-01, reversing a same-day call that
+would have deferred the flip to 164.4 and left success criterion 4 unmet). The wedge risk that
+deferral was meant to avoid is carried by ORDERING instead of by weakening the gate.
+
+D-13 narrows what is actually held: a changed set containing **no textual `CREATE … FUNCTION`
+anywhere** passes with a notice (measured: 108 of 262 migrations), so only a genuinely BLIND zero
+refuses. A block at `scripts/prod-body-drift-check.sh`'s zero path is the gate WORKING — route the
+ordering, never the gate. Do not add an ack-pragma; the reopen pin in
+`src/__tests__/drift-check-scripts.test.ts` REDs by execution if the path is reverted to `exit 0`,
+and by name if the `VAC04-ZERO-PATH-FAILS-CLOSED` marker is deleted.
+
+**SC-4 is MET, not PARTIAL.** Any artifact still saying PARTIAL is superseded — see
+`164.3.1-CONTEXT.md` § Amendment 2026-09-01.
