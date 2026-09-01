@@ -34,6 +34,8 @@ import {
   ARMS_FLOOR,
   DEFECT_KINDS,
   FILES_FLOOR,
+  absurdityViolations,
+  runCorpus,
 } from "../../scripts/mutation-runner/run.mjs";
 import { parseFile, scanCorpus } from "../../scripts/mutation-runner/parse.mjs";
 
@@ -41,6 +43,7 @@ const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const GATE_DIR = join(REPO_ROOT, "supabase", "tests");
 const CI_PATH = join(REPO_ROOT, ".github", "workflows", "ci.yml");
 const RUNNER_PATH = join(REPO_ROOT, "scripts", "mutation-runner", "run.mjs");
+const SELFTEST_DIR = join(REPO_ROOT, "scripts", "mutation-runner", "fixtures", "selftest");
 
 /**
  * Independent re-derivation. These regexes are written out again on purpose —
@@ -392,7 +395,16 @@ describe("SP-C02 — the runner's `--self-test` is WIRED into CI, before the cor
     //     corpus deliberately broken in a way that would also break the fixture
     //     corpus for every other scenario. NAMED here rather than implied, so
     //     the gap is visible instead of absent.
+    //   absurdity (164.3.1-10) — the runner's OWN two tallies disagreeing. No
+    //     corpus can produce it, by construction: that is the point of an
+    //     internal cross-check. Its FIRE direction is proven twice elsewhere —
+    //     on the pure function by the pins in the `absurdity floor` describe
+    //     below, and on the REAL runner by the severed-tally neuter recorded in
+    //     164.3.1-10-SUMMARY.md (exit 1, `absurdity` naming 30/0/30). Its
+    //     SILENT direction is `--self-test` scenario 6 (2 arms, 2 lanes) and
+    //     every green full-corpus run.
     expect(uncovered).toEqual([
+      "absurdity",
       "bad-file-ref",
       "baseline",
       "dirty-checkout",
@@ -515,6 +527,151 @@ describe("SP-L02 — the meta-command preflight cannot report 'clean' for a file
     expect(code).not.toContain("2>/dev/null");
     expect(code).not.toContain("2>&1");
     expect(code).toContain('elif [ "$rc" -gt 1 ]; then');
+  });
+});
+
+describe("164.3.1-10 — the runner's absurdity floor (D-09): two INDEPENDENT tallies, cross-checked", () => {
+  // ⛔ THE DEFECT. `armsExecuted` was ONE tally incremented in the verdict
+  // loop, and nothing compared it to what actually ran. A runner whose lane
+  // path was stubbed or skipped would still print `arms: 30/30/0`, `biting:
+  // 30`, clear both floors and exit 0 — the parse-only shape, reached INSIDE
+  // the process where the CI step's `--parse-only` guard cannot see it. That
+  // is VAC-08's 253-of-262 in mirror image: a gate holding every number needed
+  // to know its own verdict was absurd, and never comparing them.
+  //
+  // The numbers below are QUOTED from plan 09's committed re-derivation
+  // (164.3.1-09-REDERIVATION.md §2 and §6 — HEAD a305a71a, 2026-09-01: 30 arms
+  // executed, biting 30, 1 annotated file of 71). They are not re-measured
+  // here, and they are deliberately NOT read back from run.mjs, which is the
+  // artifact under test — a pin that reads its expectation off the subject
+  // agrees with it by construction.
+  const LEGIT = { armsExecuted: 30, laneInvocations: 30, biting: 30 };
+
+  it("the kind exists — a violation must be able to reach the defect table under its own name", () => {
+    expect(DEFECT_KINDS).toContain("absurdity");
+  });
+
+  // ── SILENT direction ────────────────────────────────────────────────────
+  it("SILENT on the measured legitimate shape — the plan-09 numbers, 30/30/30", () => {
+    expect(absurdityViolations(LEGIT)).toEqual([]);
+  });
+
+  it("SILENT on ordinary partial shapes — fewer biting than executed is a CORPUS finding, not an absurdity", () => {
+    // A non-biting arm lowers `biting` and is reported by its own kind
+    // (`no-red` etc.) and by ARMS_FLOOR. The absurdity floor must stay out of
+    // that lane, or it fires on every honest regression and gets disabled.
+    expect(absurdityViolations({ armsExecuted: 30, laneInvocations: 30, biting: 12 })).toEqual([]);
+    expect(absurdityViolations({ armsExecuted: 30, laneInvocations: 30, biting: 0 })).toEqual([]);
+    // A run that executed nothing and claims nothing is consistent (the
+    // executed-is-zero MEASURE_FAIL belongs to the CI step, not to this rule).
+    expect(absurdityViolations({ armsExecuted: 0, laneInvocations: 0, biting: 0 })).toEqual([]);
+  });
+
+  // ── FIRES direction ─────────────────────────────────────────────────────
+  // Each arm asserts the evidence, not just that SOMETHING fired: the message
+  // must carry all three numbers in a machine-readable tail and say that it is
+  // the GATE failing, not the corpus (SC-7, D-12).
+  const evidence = (v: string, e: number, l: number, b: number) => {
+    expect(v).toMatch(/GATE failing, not the corpus/);
+    expect(v).toMatch(new RegExp(`executed=${e}\\b`));
+    expect(v).toMatch(new RegExp(`lane-invocations=${l}\\b`));
+    expect(v).toMatch(new RegExp(`biting=${b}\\b`));
+  };
+
+  it("FIRES on the parse-only shape — 30 arms CLAIMED executed with ZERO lanes spawned", () => {
+    const v = absurdityViolations({ armsExecuted: 30, laneInvocations: 0, biting: 30 });
+    expect(v).toHaveLength(1);
+    evidence(v[0], 30, 0, 30);
+    expect(v[0]).toMatch(/CLAIMED/);
+  });
+
+  it("FIRES on a single missing lane too — the rule is exact, not a tolerance", () => {
+    const v = absurdityViolations({ armsExecuted: 30, laneInvocations: 29, biting: 30 });
+    expect(v).toHaveLength(1);
+    evidence(v[0], 30, 29, 30);
+  });
+
+  it("FIRES on unaccounted lanes — more arm lanes spawned than the verdict loop counted", () => {
+    const v = absurdityViolations({ armsExecuted: 30, laneInvocations: 31, biting: 30 });
+    expect(v).toHaveLength(1);
+    evidence(v[0], 30, 31, 30);
+    expect(v[0]).toMatch(/UNACCOUNTED/);
+  });
+
+  it("FIRES on the impossible count — biting above executed", () => {
+    const v = absurdityViolations({ armsExecuted: 30, laneInvocations: 30, biting: 31 });
+    expect(v).toHaveLength(1);
+    evidence(v[0], 30, 30, 31);
+  });
+
+  it("FIRES on an UNMEASURABLE input — an absent number is a MEASURE_FAIL, never a silent pass", () => {
+    for (const bad of [
+      { armsExecuted: Number.NaN, laneInvocations: 30, biting: 30 },
+      { armsExecuted: 30, laneInvocations: undefined, biting: 30 },
+      { armsExecuted: 30, laneInvocations: 30, biting: -1 },
+      { armsExecuted: 30.5, laneInvocations: 30, biting: 30 },
+    ]) {
+      const v = absurdityViolations(bad as never);
+      expect(v.length, JSON.stringify(bad)).toBeGreaterThan(0);
+      expect(v[0]).toMatch(/MEASURE_FAIL/);
+    }
+  });
+
+  // ── INDEPENDENCE — the SP-C05 one-code-path check ───────────────────────
+  it("the two tallies live in two code paths: the lane runner counts at the spawn, the verdict loop counts separately", () => {
+    // One variable incremented in two places would agree with itself by
+    // construction. Pinned on the source, like IN-05 above: the lane tally is
+    // incremented INSIDE runLane and nowhere in runCorpus; `armsExecuted` is
+    // incremented inside runCorpus and nowhere in runLane.
+    const src = readFileSync(RUNNER_PATH, "utf8");
+    const laneAt = src.indexOf("function runLane(");
+    const laneEnd = src.indexOf("function materialize(");
+    const corpusAt = src.indexOf("export function runCorpus(");
+    const corpusEnd = src.indexOf("export function parseOnlyCorpus(");
+    expect(laneAt, "runLane not found").toBeGreaterThan(-1);
+    expect(laneEnd, "materialize not found after runLane").toBeGreaterThan(laneAt);
+    expect(corpusAt, "runCorpus not found").toBeGreaterThan(-1);
+    expect(corpusEnd, "parseOnlyCorpus not found after runCorpus").toBeGreaterThan(corpusAt);
+    const runLaneBody = src.slice(laneAt, laneEnd);
+    const runCorpusBody = src.slice(corpusAt, corpusEnd);
+
+    expect(runLaneBody).toMatch(/laneTally\[leg\] \+= 1/);
+    expect(runLaneBody).not.toMatch(/armsExecuted/);
+    expect(runCorpusBody).toMatch(/armsExecuted \+= 1/);
+    expect(runCorpusBody).not.toMatch(/laneTally(\[[^\]]*\]|\.\w+)\s*(\+=|=|\+\+|--)/);
+  });
+
+  // ── PRINT CONTRACT — the wiring that prints, not a string constant ──────
+  it("the runner PRINTS the lane tally beside coverage/arms/biting — driven through runCorpus's real summary block", () => {
+    // A narrowed run whose --file matches no gate in the selftest corpus: no
+    // lane is spawned, so no cluster is needed here, and the REAL summary
+    // block still runs and prints. What this pins is the wiring — the line
+    // exists, in the runner's own format, in its place beside the three lines
+    // the CI count-recheck step already parses. A NON-ZERO count through real
+    // lanes is asserted by `--self-test` scenario 6 (2 arms, 2 lanes), which
+    // the sql-mutation job runs with a cluster.
+    const lines: string[] = [];
+    const r = runCorpus({
+      scopeDir: SELFTEST_DIR,
+      onlyFile: "no-such-gate.sql",
+      armsFloor: 0,
+      log: (s: string) => lines.push(s),
+    });
+    const at = (re: RegExp) => lines.findIndex((l) => re.test(l));
+    const coverage = at(/^coverage: files \d+\/\d+$/);
+    const arms = at(/^arms: \d+\/\d+\/\d+ /);
+    const biting = at(/^biting: \d+ /);
+    const lane = at(/^lane-invocations: \d+ /);
+    expect(coverage, "no coverage line").toBeGreaterThan(-1);
+    expect(arms, "no arms line").toBeGreaterThan(coverage);
+    expect(biting, "no biting line").toBeGreaterThan(arms);
+    expect(lane, `no lane-invocations line; printed:\n${lines.join("\n")}`).toBeGreaterThan(biting);
+    // The printed count is the number the cross-check used, exposed on the
+    // result exactly as `bitingArms` is for the self-test.
+    expect(r.armsExecuted).toBe(0);
+    expect(r.laneInvocations).toBe(0);
+    expect(lines[lane]).toMatch(/^lane-invocations: 0 /);
+    expect(r.defects.some((d: { kind: string }) => d.kind === "absurdity")).toBe(false);
   });
 });
 
