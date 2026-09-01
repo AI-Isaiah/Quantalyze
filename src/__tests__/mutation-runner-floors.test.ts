@@ -676,6 +676,142 @@ describe("164.3.1-10 — the runner's absurdity floor (D-09): two INDEPENDENT ta
   });
 });
 
+describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-parse-only pattern, extended)", () => {
+  // The runner's in-process floor is half the deliverable. The other half is
+  // the sql-mutation job's count-recheck step reading the printed line back
+  // and failing on absence or disagreement — otherwise a runner that stopped
+  // printing the second tally passes CI quietly, which is the defect class
+  // this phase exists for. Both halves are pinned here: the TEXT (so the
+  // parse cannot be deleted silently) and the BEHAVIOUR (the step's real
+  // `run:` block, extracted from ci.yml and executed — SP-L02's idiom, the
+  // same one the preflight pins above use — because a CI-only shell bug is
+  // otherwise invisible until the never-yet-observed ubuntu run).
+  const CI_TEXT = readFileSync(CI_PATH, "utf8");
+
+  it("ci.yml parses the lane-invocations line with the missing-line MEASURE_FAIL discipline and asserts exact agreement", () => {
+    const job = CI_TEXT.slice(
+      CI_TEXT.indexOf("\n  sql-mutation:"),
+      CI_TEXT.indexOf("\n  plan-anchor-verify:"),
+    );
+    expect(job.length, "the sql-mutation job slice must be non-empty").toBeGreaterThan(1000);
+    expect(job).toContain("^lane-invocations: [0-9]+ ");
+    expect(job).toContain("NO 'lane-invocations: N' line");
+    expect(job).toContain('if [ "$lane_invocations" -ne "$arms_executed" ]');
+    // Evidence, not conclusion (SC-7): the violation names every parsed number.
+    expect(job).toContain("executed=$arms_executed lane-invocations=$lane_invocations biting=$biting");
+    // The executed-is-zero MEASURE_FAIL and the biting arm both survive — the
+    // new assertion sits BESIDE its siblings, it does not replace them.
+    expect(job).toContain('if [ "$arms_executed" -eq 0 ]');
+    expect(job).toContain('if [ "$biting" -gt "$arms_executed" ]');
+    // No literal count restated in the workflow.
+    expect(job).not.toMatch(/lane_invocations" -(eq|ne|lt|gt) "?30/);
+  });
+
+  /** The count-recheck step's `run:` block, dedented, straight out of ci.yml. */
+  function countRecheckScript(): string {
+    const stepAt = CI_TEXT.indexOf(
+      "- name: Assert the run PRINTED its coverage and cleared both floors",
+    );
+    expect(stepAt, "the count-recheck step was renamed or removed").toBeGreaterThan(-1);
+    const runAt = CI_TEXT.indexOf("\n        run: |\n", stepAt);
+    expect(runAt, "the count-recheck step no longer carries a `run: |` block").toBeGreaterThan(-1);
+    const body = CI_TEXT.slice(runAt + "\n        run: |\n".length);
+    const out: string[] = [];
+    for (const line of body.split("\n")) {
+      if (line.trim() !== "" && !line.startsWith("          ")) break;
+      out.push(line.slice(10));
+    }
+    return out.join("\n");
+  }
+
+  /** Run the extracted block from REPO_ROOT (it imports run.mjs by relative path) against `log`. */
+  function runCountRecheck(log: string) {
+    const dir = mkdtempSync(join(tmpdir(), "count-recheck-"));
+    try {
+      const logPath = join(dir, "mutation-runner.log");
+      writeFileSync(logPath, log);
+      const script = join(dir, "count-recheck.sh");
+      writeFileSync(script, countRecheckScript());
+      const res = spawnSync("bash", [script], {
+        cwd: REPO_ROOT,
+        encoding: "utf8",
+        env: { ...process.env, RUNNER_LOG: logPath },
+      });
+      return { status: res.status, out: `${res.stdout ?? ""}${res.stderr ?? ""}` };
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  // The summary lines in the runner's OWN printed format — the same four
+  // shapes the print-contract pin above asserts on real runner output — at the
+  // plan-09 numbers. Built once so the RED arms below are one-line mutations
+  // of the GREEN input rather than independently-typed fixtures.
+  const GREEN_LOG = [
+    "mutation-runner: scope supabase/tests",
+    "  baseline  supabase/tests/test_strategy_shares_rls.sql — exit 0 (1.8s)",
+    "  arm SHAPE 1                  exit   3  RED (identity ok)  (1.7s)",
+    "  restore   supabase/tests/test_strategy_shares_rls.sql — exit 0 (1.8s)",
+    "",
+    "coverage: files 1/71",
+    "arms: 30/30/0   (executed/annotated/waived)",
+    "biting: 30   (executed arms that reddened their OWN arm first — the quantity ARMS_FLOOR bounds)",
+    "lane-invocations: 30   (arm lanes actually spawned — tallied inside runLane, independent of the 30 the verdict loop counted; plus 1 baseline / 1 restore leg(s))",
+    "per-arm lane time: mean 1.7s over 30 arm run(s)",
+    "",
+    "✅ No defects. Every annotated arm bit its own arm first.",
+    "",
+  ].join("\n");
+
+  it("GREEN: a log whose two tallies agree passes and says so", () => {
+    const r = runCountRecheck(GREEN_LOG);
+    expect(r.status, r.out).toBe(0);
+    expect(r.out).toContain("the runner's two tallies agree");
+    expect(r.out).toContain("30 arm lane(s) spawned");
+  });
+
+  it("RED: the lane-invocations line ABSENT is a MEASURE_FAIL — the runner stopped reporting, or --parse-only was swapped in", () => {
+    const without = GREEN_LOG.replace(/^lane-invocations: .*\n/m, "");
+    expect(without, "the deletion must actually change the log").not.toBe(GREEN_LOG);
+    const r = runCountRecheck(without);
+    expect(r.status, r.out).toBe(1);
+    expect(r.out).toContain("MEASURE_FAIL");
+    expect(r.out).toContain("NO 'lane-invocations: N' line");
+    expect(r.out).not.toContain("two tallies agree");
+  });
+
+  it("RED: the parse-only shape — 30 executed claimed, 0 lanes counted — fails naming all three numbers", () => {
+    const severed = GREEN_LOG.replace(/^lane-invocations: 30 /m, "lane-invocations: 0 ");
+    expect(severed).not.toBe(GREEN_LOG);
+    const r = runCountRecheck(severed);
+    expect(r.status, r.out).toBe(1);
+    expect(r.out).toContain("GATE failing, not the corpus");
+    expect(r.out).toContain("executed=30 lane-invocations=0 biting=30");
+    expect(r.out).not.toContain("two tallies agree");
+  });
+
+  it("RED: a single unaccounted lane also fails — the relation is exact", () => {
+    const extra = GREEN_LOG.replace(/^lane-invocations: 30 /m, "lane-invocations: 31 ");
+    const r = runCountRecheck(extra);
+    expect(r.status, r.out).toBe(1);
+    expect(r.out).toContain("executed=30 lane-invocations=31 biting=30");
+  });
+
+  it("the siblings still bite in the same extracted block — executed-is-zero and biting-above-executed", () => {
+    // Calibration for the extract-and-run harness itself: if the extraction
+    // returned an empty or truncated block, these established arms would not
+    // fire either, and the GREEN arm above would be passing on nothing.
+    const zero = GREEN_LOG.replace(/^arms: 30\/30\/0 /m, "arms: 0/30/0 ");
+    const z = runCountRecheck(zero);
+    expect(z.status, z.out).toBe(1);
+    expect(z.out).toContain("ZERO arms executed");
+    const spliced = GREEN_LOG.replace(/^biting: 30 /m, "biting: 31 ");
+    const s = runCountRecheck(spliced);
+    expect(s.status, s.out).toBe(1);
+    expect(s.out).toContain("biting (31) exceeds executed (30)");
+  });
+});
+
 describe("parity invariant", () => {
   it("any file carrying structured twins must have one per prose marker", () => {
     // Bites the moment plan 164.3-08 starts annotating: a partial backfill that
