@@ -727,6 +727,17 @@ function gitStatus() {
 //      raise arrives with a chain it did not choose, so it scores SYNTHESISED
 //      or NO-IDENTITY rather than RED. A hostile annotation also remains
 //      visibly hostile in review, which is the final control.
+//      ⚠️ MEASURED 2026-09-01, and it is the reason the chain rule needed its
+//      own dedicated fixture: RESEARCH's forgery recipe is refused TWICE over.
+//      It spells the identity inside the EXECUTEd DO string, psql prints that
+//      string back as a `SQL statement "…"` CONTEXT frame, and a FIELD-carried
+//      identity is unattributable independently of chain length. Neutering the
+//      chain rule therefore did NOT flip it — so a "proof" run on that recipe
+//      alone would have passed while proving nothing about leg (b). The echo
+//      is removable (the trigger can stash the text in a GUC and have the
+//      forged DO read it back with current_setting()); the chain is not. The
+//      chain-length proof in 164.3.1-05-ATTRIBUTION.md is run against the
+//      ECHO-FREE variant for exactly that reason.
 //   2. A LEGITIMATE arm whose raise is nested inside `EXECUTE`, a helper
 //      function or a trigger is refused NO-IDENTITY — BY DESIGN, LOUDLY. All
 //      104 corpus identities raise directly from a DO body (single frame), so
