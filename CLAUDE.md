@@ -48,6 +48,33 @@ when their credential is absent — neither ever skips.
 ⚠️ As of v0.77.0.0 none of these five has been observed on its real host or
 credential; see `.planning/WINDOWS.md` entries 25, 26 and 28.
 
+## Which database am I on? (ask FIRST, every time)
+
+⛔ **This checkout's Supabase CLI is linked to PRODUCTION.** `supabase/.temp/project-ref` holds
+the same ref `src/lib/test-safety.ts:26` pins as prod. So `supabase db push`, `db reset --linked`,
+`--project-ref` and `--db-url` from this directory all target prod. The link is deliberate — the
+pre-flight migration gates diff against PROD on purpose — so do not "fix" it by unlinking.
+
+⛔ **`current_database()` is `postgres` on BOTH projects.** It proves nothing. Neither does a
+green query, a familiar-looking table, or the dashboard's own chrome. Before any statement that
+writes, run:
+
+```sql
+SELECT shobj_description(oid, 'pg_database') AS which_database
+  FROM pg_database WHERE datname = current_database();
+```
+
+Each project carries a hand-set `COMMENT ON DATABASE` naming itself. If it comes back NULL, the
+marker was lost — re-set it before writing, do not proceed on a guess.
+
+Guard coverage, measured 2026-09-01: the TS/e2e path is safe (`assertNotProductionSupabaseUrl`
+throws before any write via `getAdmin()`), and CI's `sql-tests` uses its own `TEST_SUPABASE_DB_URL`.
+The **CLI** and the **browser SQL editor** have no automated guard at all. The marker above is the
+only thing standing between a dashboard tab and production.
+
+⚠️ TEST is SHARED with other people's CI. A write there is not private, and a global assertion
+there is not reliable (see `FANOUT-GLOBAL-01` in TODOS.md).
+
 ## Design System
 Always read DESIGN.md before making any visual or UI decisions.
 All font choices, colors, spacing, and aesthetic direction are defined there.
