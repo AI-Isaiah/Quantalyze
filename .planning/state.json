@@ -1,0 +1,68 @@
+{
+  "contract": "1.0.0",
+  "flavor": "core",
+  "milestone": "v1.20 — Backlog Burndown (Phases 158+)",
+  "phases": [
+    {
+      "number": "147",
+      "name": "SCEN-01 engine series",
+      "status": "complete"
+    },
+    {
+      "number": "148",
+      "name": "OWN owner factsheet",
+      "status": "complete"
+    },
+    {
+      "number": "149",
+      "name": "NAV my-strategies ranking",
+      "status": "complete"
+    },
+    {
+      "number": "150",
+      "name": "OWN-03 portfolio question",
+      "status": "complete"
+    },
+    {
+      "number": "151",
+      "name": "AUM book + sizing",
+      "status": "complete"
+    },
+    {
+      "number": "152",
+      "name": "SCEN composer legibility",
+      "status": "complete"
+    },
+    {
+      "number": "153",
+      "name": "WIZFORM + MT5-14",
+      "status": "pending"
+    },
+    {
+      "number": "153.7",
+      "name": "WIZFORM-02-CLASS (INSERTED)",
+      "status": "pending"
+    },
+    {
+      "number": "154",
+      "name": "WIZCONT + STALE",
+      "status": "complete"
+    },
+    {
+      "number": "155",
+      "name": "MT5-VERIFY + acceptance",
+      "status": "pending"
+    },
+    {
+      "number": "156",
+      "name": "CONNECT-REFACTOR",
+      "status": "pending"
+    }
+  ],
+  "next": {
+    "command": "/gsd:progress --next",
+    "label": "Advance to the next step",
+    "reason": "Phase 164 of 14 · 29% · executing"
+  },
+  "updated_at": "2026-09-01T17:46:04.394Z"
+}

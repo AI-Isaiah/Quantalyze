@@ -2,18 +2,18 @@
 gsd_state_version: 1.0
 milestone: v1.20
 milestone_name: Backlog Burndown (Phases 158+)
-current_phase: 164.3
-current_phase_name: VACUITY — a control that cannot fail must be caught by machine
+current_phase: 164.3.1
+current_phase_name: SOUND-PRIMITIVES
 status: executing
 stopped_at: "164.3 PLANNED — 10 plans in 5 waves, verified by gsd-plan-checker on iteration 3 of 3. Each of the first two iterations found an error-swallowing verify shape the previous had missed (|| fallback; then a `wc -l` tail and a printed-not-tested `grep -c`); all three removed. FIVE premises in this phase's own spec failed re-measurement: SKIP-01 (migrations DO reach TEST), OPS-08-F9 (floors already 8/166), criterion 4 (118 committed function bodies exist), the PROD-linked CI job (already exists, dissolving the phase's only human gate), and the corpus size (30 arm-anchored markers, not 33 — a grep counting its own documentation). NO founder-gated item remains."
-last_updated: "2026-09-01T13:55:35.543Z"
-last_activity: 2026-08-29
-last_activity_desc: Phase 164.3 execution started
-state_head: 9748313bf51adc10efb5c6d5da75d0c95d49aa8c
+last_updated: "2026-09-01T17:46:04.349Z"
+last_activity: 2026-09-01
+last_activity_desc: Phase 164.3.1 execution started
+state_head: e06600315913b58f884b96eb355adee74c1797f0
 progress:
   total_phases: 14
   completed_phases: 4
-  total_plans: 70
+  total_plans: 82
   completed_plans: 66
   percent: 29
 ---
@@ -113,10 +113,10 @@ zero unclassified) and `161-VALIDATION.md` (Nyquist strategy, 4 Wave-0 gaps, ant
 
 ## Current Position
 
-Phase: 164.3 (VACUITY — a control that cannot fail must be caught by machine) — EXECUTING
-Plan: 1 of 10
-Status: Executing Phase 164.3
-Last activity: 2026-08-29 — Phase 164.3 execution started
+Phase: 164.3.1 (SOUND-PRIMITIVES) — EXECUTING
+Plan: 1 of 12
+Status: Executing Phase 164.3.1
+Last activity: 2026-09-01 — Phase 164.3.1 execution started
 
 ⚠️ Phase 160 remains OPEN on its human gate — see `## Deferred Verification`. Advancing this
 pointer to 161 does NOT close it; resume it only via `/gsd-verify-work 160`.
