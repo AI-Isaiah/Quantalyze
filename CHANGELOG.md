@@ -26,9 +26,17 @@ Backlog only. No production source change, no CI change, no schema change.
     server in 14s, and a real `validate_key` ten minutes later reproduced the
     failure exactly (`accepted … welcome` then `goodbye` 46s later, no work done).
     This is not uptime drift that a restart clears.
-  - **`-10005` is not a transport verdict.** A terminal with no broker session
-    makes the IPC call hang, so it times out as `-10005` instead of returning
-    `-10004`. Triaging on the code alone is what produced the redeploy.
+  - **"The terminal isn't logged in" is not the explanation.** The validate path
+    takes the per-terminal lease and calls `login(...)` itself on every call
+    (`analytics-service/routers/exchange.py:767-782`), and the gateway carries no
+    `MT5_LOGIN` / `MT5_SERVER` variables. A pre-logged-in terminal was never a
+    precondition, so a VNC login is not the remedy either.
+
+  Both wrong readings came from reasoning about the error code instead of reading
+  the call path. What the item records as the actual next diagnostic: the Wine
+  prefix sits on a persistent Railway volume, so MT5 profile state survives every
+  redeploy — marked `[HYPOTHESIS — not yet measured]`, to be confirmed by opening
+  the gateway's VNC console and observing what the terminal displays.
 
   The item also declines to claim the gateway "ran healthy for five days then
   wedged" — nothing probes MT5, so that span is unprovable, which is the whole

@@ -1251,11 +1251,27 @@ mt5-gateway        11:45:50  accepted ('10.143.156.226', 33992) … welcome
                    11:46:36  goodbye          <- 46s, no work done
 ```
 
-So this is NOT uptime drift that a restart clears. The transport layer is healthy — it accepts and
-welcomes. What never answers is the **MT5 terminal**, which boots without a broker session: the
-container log says `Running MT5...` and `mt5linux server is running on port 8001` and never says
-the terminal logged in to the configured broker server. The remedy is a human VNC login at the
-gateway's web console (KasmVNC, service domain port 3000), not a redeploy.
+So this is NOT uptime drift that a restart clears. The rpyc transport is healthy — it accepts and
+welcomes. What never answers is `terminal64.exe` behind it, which matches this repo's own
+documented reading of the code (`analytics-service/services/mt5_validation.py:79-83`): `-10004` is
+"the bridge isn't attached at all", `-10005` is "the bridge IS attached but the terminal stopped
+answering".
+
+⛔ **"Not logged in" is NOT the explanation, and a VNC login is NOT the remedy.** The validate path
+takes the per-terminal lease and calls `login(...)` itself on every call
+(`analytics-service/routers/exchange.py:767-782`; MT5 binds one account per terminal at a time, so
+one terminal cycles through hundreds of accounts a day). The gateway carries no `MT5_LOGIN` /
+`MT5_SERVER` variables because it was never meant to hold a session. A pre-logged-in terminal was
+never a precondition.
+
+**Why a restart is not a remedy [HYPOTHESIS — not yet measured].** The service mounts a persistent
+volume (`RAILWAY_VOLUME_ID` / `RAILWAY_VOLUME_MOUNT_PATH` are set, and the boot log mounts it), so
+the Wine prefix and the MT5 profile survive every redeploy. A terminal stuck behind a modal dialog
+— update prompt, authorization box, expired-account notice — never services IPC, and that state
+replays on each restart because it lives on the volume, not in the image. This would explain why
+the 2026-09-01 redeploy failed to clear a wedge that a redeploy HAS cleared before. Unverified:
+confirming it means opening the KasmVNC console and looking at what the terminal is actually
+displaying. That observation is the next diagnostic step, not a login.
 
 **Why nothing caught it.**
 
@@ -1276,11 +1292,15 @@ the credential is absent — that is `SKIP-01`.
 ⭐ **Standing rule until this lands: a green `mt5-gateway` in Railway is NOT evidence that MT5
 works.** The only current proof is a real `validate_key` round-trip.
 
-⚠️ **`-10005` does not mean "transport problem" and `-10004` does not have a monopoly on
-"not logged in".** A terminal with no broker session makes the IPC call HANG, so it times out as
-`-10005` rather than returning `-10004`. Do not triage on the code alone — the earlier reading of
-this incident as a transport wedge, and the redeploy that followed from it, both came from exactly
-that inference. Check whether the terminal has a broker session before touching the container.
+⚠️ **Two wrong readings were made live during this incident. Both cost a wasted remedy, and both
+are recorded here so the next person does not repeat them.**
+
+1. *"It wedged after 5 days of uptime, so restart it."* → the redeploy changed nothing. Uptime was
+   never measured; nothing probes MT5.
+2. *"The terminal isn't logged in, so log it in over VNC."* → the validate path logs in per call.
+   Contradicted by `exchange.py:767-782` and by the absence of any `MT5_LOGIN` variable.
+
+Both came from reasoning about the error code instead of reading the call path. Read the call path.
 
 
 ### ⛔ DRIFT-02 — a surgical in-place patch means the REPO no longer holds the true function body (booked 2026-08-27)
