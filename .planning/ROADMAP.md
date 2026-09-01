@@ -616,7 +616,7 @@ Plans:
 ### Phase 164.1: HARDEN-GUARDS — retire the frozen-spine gates that no longer bite, close the composite-stamp twin, put the advisory lock behind a real concurrency test, fix the PYAPI-06 blind spot that let a production service-key mismatch run silently, and close phase 161's deferred error-surface items including WIZFORM-02's code:UNKNOWN class, plus the Phase 163 carry-overs — headed by SKIP-01 (nothing applies migrations to TEST, so the OPS-08 SQL gate SKIPs permanently and the deployed body is tested nowhere), then OPS-08's un-written TypeScript retry half, the freshness UTC day-granularity residual, the TEST/PROD function-revision drift, the audit-coverage blind spot, and the tracked-PII decision (INSERTED)
 
 **Goal:** [Urgent work - to be planned]
-**Requirements**: TBD (original scope) + carry-overs OPS-08-TS, OPS-08-F2
+**Requirements**: TBD (original scope) + carry-overs OPS-08-TS, OPS-08-F2 + ADDED 2026-09-01: CRON-OBS-01, MT5-WEDGE-OBS-01
 **Depends on:** Phase 164, and now **Phase 164.3** (see DEDUP below — 164.3 builds the substrate this phase's gate work is tested on)
 **Plans:** 0 plans
 
@@ -639,6 +639,40 @@ to TEST in CI or (b) expire the pre-apply SKIP. (a) was recommended and is **WIT
 what `sql-tests` may do to a shared database that has no worker and is already contended, and 164.3's
 disposable per-run cluster replaces that machinery anyway. Building (a) first means building it twice
 and taking shared-database risk in between.
+
+⭐ **ADDED 2026-09-01 — two production-observability blind spots, both measured live.** Routed
+here rather than to 164.3/164.3.1 on purpose: those own **gate integrity** (a control that cannot
+fail), these are **production observability** (a service that is down while every instrument reads
+green). This phase already owns that class — its title names the PYAPI-06 blind spot that let a
+production service-key mismatch run silently. Full statement, measurement, and root cause for each
+live in root `TODOS.md`; read the entry before planning, do not re-derive.
+
+- ⛔ **[CRON-OBS-01] Nothing watches `net._http_response`.** `net.http_post` is ASYNC, so pg_cron
+  logs `succeeded` for ENQUEUING and never sees the status code. Measured live: PROD jobid 1
+  returned **401 hourly for 7 days** (ids 3479-3484) behind a green `cron.job_run_details`. Every
+  other alarm is structurally blind — `/health` skips `SERVICE_KEY`, and a 4xx never trips the
+  140.2 breaker. Needs a periodic check that fails loud on non-2xx, counted and surfaced.
+  ⚠️ Ships with **CRON-DRIFT-01** (nothing compares PROD `cron.job` against the repo's
+  migrations — `VAC-04`'s shape applied to `cron.job`, which has no equivalent). ⛔ The GUC design
+  in `20260408215026` is UNRUNNABLE on Supabase at all (`ALTER DATABASE … SET` on a custom
+  placeholder GUC needs superuser, returns 42501), so any gate must compare against what is
+  ACHIEVABLE, not what the migration says. Vault is the working mechanism.
+
+- ⛔ **[MT5-WEDGE-OBS-01] Nothing probes MT5.** A user-facing key-connect outage ran with Railway
+  reporting the service healthy, `/health` green (it never touches MT5), and the gateway logging
+  `accepted … welcome … goodbye` with no ERROR line. The only instrument was a human clicking
+  connect, and it told them `KEY_NETWORK_TIMEOUT` — "your broker is slow". Needs a probe that
+  actually round-trips MT5 (not a port check, not `/health`) and fails loud on `-10005`/`-10004`.
+  ⚠️ Root cause 2026-09-01 was a **modal login dialog** blocking `terminal64.exe`'s message loop;
+  it survives redeploys because the Wine prefix is on a persistent volume. The probe must therefore
+  distinguish "bridge not attached" from "bridge attached, terminal not answering" — the two states
+  have different remedies and `-10005` alone identifies neither.
+
+⭐ **These two are ONE mechanism with two targets** — a periodic prober that fails loud — and should
+be planned as such, not as two unrelated slices.
+
+⚠️ **Both inherit this phase's anti-silent-skip discipline (`SKIP-01`'s):** a probe that SKIPs when
+its credential is absent is the defect, not the fix. Absent credential must go loud.
 
 **Cross-phase note from Phase 164 planning (2026-08-26):** the phase-29 frozen-spine migration
 guard's `FORBIDDEN_MIGRATION_RE` is narrowed IN PHASE 164 (plan 164-02, founder ruling) from the
