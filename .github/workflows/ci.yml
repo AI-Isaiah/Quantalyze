@@ -754,6 +754,584 @@ jobs:
           # directory" because the artifact carried no .next at all.
           include-hidden-files: true
 
+  sql-gate-lint:
+    # Phase 164.3 / VAC-03 — the static vacuity linter over supabase/tests/*.sql.
+    #
+    # WHY IT EXISTS. Phase 164's review found five distinct mechanisms by which
+    # an arm of a SQL gate file was GREEN in CI while proving nothing. All five
+    # shipped, passed review, and passed this very workflow. Three of them, plus
+    # one narrow case of a fourth, are detectable in the file TEXT — so a sixth
+    # instance written into a NEW gate file becomes a lint failure on the
+    # pushing developer's machine instead of a red-team finding two phases on.
+    # There is deliberately no rule for the fifth mechanism (arm reachability is
+    # not statically decidable, phase decision D-16); the mutation runner's
+    # first-failure identity assertion is its detector.
+    #
+    # HERMETIC BY DESIGN: NO database, NO Docker, NO secrets, NO network — so
+    # this gate can never flake, and it runs identically on a fork PR, a
+    # same-repo PR, a push and a workflow_dispatch. That property is what earns
+    # it the NO-TOLERANCE row in the `frontend` aggregator below: unlike
+    # `sql-tests` and `e2e-seeded`, it has no legitimate reason to be skipped,
+    # so any non-success is a real fault. Same reasoning as `frontend-seam-redis`.
+    #
+    # `permissions:` and `concurrency:` are inherited from the workflow level
+    # (lines ~40 and ~53) exactly as every other job here does; restating them
+    # per-job would fork two sources of truth for no gain, and a second
+    # concurrency group inside a workflow that already has one changes
+    # cancellation semantics rather than tightening them.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6.4.0
+        with:
+          node-version: 22
+          cache: npm
+      - name: Rule self-test - every rule fires on its red fixture
+        # Runs BEFORE the corpus scan on purpose. A corpus scan that reports
+        # "0 findings" tells you nothing unless the rules can still fire; this
+        # step is what distinguishes a clean corpus from a defanged linter.
+        # No node_modules needed — the script has zero dependencies.
+        run: node scripts/lint-sql-gates.mjs --self-test
+      - name: Lint SQL gate files for the measured vacuity shapes
+        # Mode identity (164.3-RESEARCH Pitfall 2): this is the EXACT command a
+        # developer runs locally, pasted verbatim from the script's header. No
+        # wrapper, no flags, no npm alias — wrapping a run changes its result,
+        # and a CI-only invocation mode is a different program.
+        run: node scripts/lint-sql-gates.mjs
+
+  sql-mutation:
+    # Phase 164.3 / VAC-01 + VAC-02 — the RED-UNDER mutation runner over the
+    # annotated SQL gate corpus. THE ON-EVERY-PUSH DETECTOR THIS PHASE EXISTS
+    # TO CREATE.
+    #
+    # WHY IT EXISTS. A gate arm that CANNOT FAIL is indistinguishable from a
+    # passing one by every signal a reviewer reads — green check, green log,
+    # three specialist reviews. All five vacuity mechanisms Phase 164's review
+    # catalogued were GREEN in this very workflow. The only way to know an arm
+    # can fail is to BREAK the thing it guards and watch it fail, so that is
+    # what this job does: for each of the 30 annotated arms it applies the
+    # arm's declared mutation to COPIES, runs the gate, and requires that the
+    # FIRST `TEST FAILED (…)` names THAT arm — red-anywhere is not success —
+    # then restores and requires green. `sql-gate-lint` above catches the
+    # statically-decidable shapes; this catches the one that is not (D-16).
+    #
+    # ⛔ IT MUST NOT TOUCH THE SHARED TEST DATABASE, and that is a hard
+    # constraint rather than a preference (D-07). The run deliberately BREAKS
+    # arms and restores them, and TEST sits behind an advisory-lock mutex shared
+    # with everyone else's CI. Every arm therefore gets its OWN throwaway
+    # PostgreSQL cluster, created by `scripts/pg-lane/run.sh` under a scratch
+    # dir and torn down on success, on failure and on interrupt.
+    #
+    # CONSEQUENCE FOR THE AGGREGATOR ROW: no secret, no repo variable, no shared
+    # resource, no `if:` — so this job runs identically on a fork PR, a same-repo
+    # PR, a push and a workflow_dispatch, and a `skipped` result is ALWAYS a real
+    # fault. It therefore takes the aggregator's STRICT default arm with NO
+    # tolerance, exactly like `frontend-seam-redis` and `sql-gate-lint`, and the
+    # OPPOSITE of `sql-tests` / `e2e-seeded`.
+    # ⛔ The DB-touching jobs' ban on new `needs:` edges does NOT apply here: that
+    # ban exists because those jobs share the TEST advisory-lock mutex and their
+    # `if:` conditions diverge, so a chain edge can silently skip a dependent.
+    # This job has NO mutex, NO `if:`, and its clusters are private to its own
+    # runner — it can neither queue behind the mutex nor skip a dependent.
+    #
+    # `permissions:` and `concurrency:` are inherited from the workflow level
+    # (lines ~40 and ~53), matching `sql-gate-lint` and every other job here.
+    # Restating them per-job would fork two sources of truth, and a second
+    # concurrency group inside a workflow that already has one changes
+    # cancellation semantics rather than tightening them.
+    #
+    # No `npm ci` and no node_modules: `run.mjs` and `parse.mjs` import only
+    # node builtins. An install this job does not need is an install that can
+    # fail and flake the gate.
+    #
+    # TIMEOUT (threat T-164.3-20): 30 arms x ~2.0s of lane time plus cluster
+    # boots measured at 64s wall clock locally (2026-08-29). 15 minutes is an
+    # order of magnitude of headroom for a slower runner while still bounding a
+    # wedged cluster rather than burning the job's default 360.
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6.4.0
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Probe - the runner image's PostgreSQL server binaries resolve
+        # 164.3-RESEARCH assumption A1 ("ubuntu-latest ships PostgreSQL server
+        # binaries under /usr/lib/postgresql/<major>/bin") has NEVER been
+        # executed — the lane and the runner were built and measured on macOS
+        # only. This step converts the assumption into a MEASUREMENT printed in
+        # the job log, on the first CI run, before anything depends on it.
+        #
+        # It is deliberately NON-FATAL on its own: `scripts/pg-lane/run.sh`
+        # carries a four-step resolution chain (`pg_ctl` on PATH -> `pg_config
+        # --bindir` -> /usr/lib/postgresql/*/bin -> homebrew) and fails loud by
+        # itself if every step misses. Duplicating that judgement here would
+        # create a second, divergent opinion about which layout is acceptable.
+        # What this step buys is a NAMED diagnosis in the log when the lane does
+        # fail, instead of an opaque initdb error.
+        run: |
+          set -uo pipefail
+          echo "PATH pg_ctl:      $(command -v pg_ctl || echo '(not on PATH)')"
+          echo "pg_config bindir: $(pg_config --bindir 2>/dev/null || echo '(pg_config absent)')"
+          echo "--- /usr/lib/postgresql glob ---"
+          ls -d /usr/lib/postgresql/*/bin 2>/dev/null || echo "(no /usr/lib/postgresql/*/bin)"
+          echo "--- initdb/pg_ctl under that glob ---"
+          ls -l /usr/lib/postgresql/*/bin/initdb /usr/lib/postgresql/*/bin/pg_ctl 2>/dev/null \
+            || echo "(no initdb/pg_ctl under the glob)"
+
+      - name: Preflight - reject psql meta-commands in every file the runner executes
+        # SAME REFUSAL AS `sql-tests`' Finding 6 preflight, WIDENED TO THE FILE
+        # SET THIS JOB ACTUALLY EXECUTES. That job scans only
+        # `supabase/tests/test_*.sql`; this one applies fixtures and MIGRATIONS
+        # to a live cluster too, and psql meta-commands are CLIENT-side — the
+        # server cannot refuse them, so they must be refused at the file level
+        # before psql ever opens the file (T-164.3-19).
+        #
+        # The scanned set is a deliberate SUPERSET of the RED-UNDER-SETUP apply
+        # lists (all tests + all lane fixtures + all migrations) rather than a
+        # list derived from the annotations. A derived list is a second place
+        # for the corpus to drift; a superset can only ever over-refuse, and an
+        # over-refusal here would itself be a finding worth stopping for.
+        # MEASURED 2026-08-29: 335 files scanned, 0 hits.
+        #
+        # ⚠️ `grep -a`, NOT bare `grep`. This repo has a MEASURED NUL-blind file
+        # (`src/lib/wizardErrors.test.ts` carries a deliberate NUL): ugrep skips
+        # such a file entirely and its exit 1 reads as "clean". A scanner that
+        # silently declines to read a file is the vacuity shape this phase is
+        # about, so the binary-safe flag is not optional here.
+        #
+        # Patterns, one grep each so the error names the exact meta-command:
+        #   \!       shell escape (reads env vars, curls them out)
+        #   \copy    client-side file IO
+        #   \COPY    upper-case form
+        #   \o ...   redirect query output into a file an artifact could carry
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          files=(supabase/tests/test_*.sql scripts/pg-lane/fixtures/*.sql supabase/migrations/*.sql)
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "::error::MEASURE_FAIL: the preflight matched ZERO files. The runner executes SQL, so an empty scan set means the glob is wrong, not that the corpus is clean."
+            exit 1
+          fi
+          bad=0
+          # ⛔ SP-L02. Each of these greps used to end `>/dev/null 2>&1`, and
+          # that second redirect discards the ERROR channel: grep exits 0 on a
+          # hit, 1 on none, and >= 2 when it could not read the file at all —
+          # so an unreadable or unstattable file read as CLEAN. The step's own
+          # MEASURE_FAIL covered only a zero-length glob. "Silently declines to
+          # read a file" is the exact shape the NUL note above names, one line
+          # up from where it was happening.
+          #
+          # stdout still goes to /dev/null (the match itself is not wanted);
+          # stderr is NOT suppressed, and any exit >= 2 is a hard failure.
+          scan() {
+            local f="$1" pattern="$2" label="$3" rc
+            set +e
+            grep -anE "$pattern" "$f" >/dev/null
+            rc=$?
+            set -e
+            if [ "$rc" -eq 0 ]; then
+              echo "::error file=$f::contains '$label' — refused by the mutation-lane preflight"
+              bad=1
+            elif [ "$rc" -gt 1 ]; then
+              echo "::error file=$f::MEASURE_FAIL: grep exited $rc scanning for '$label'. The file could not be read, so this preflight has NOT cleared it — that is not the same as clean."
+              bad=1
+            fi
+          }
+          for f in "${files[@]}"; do
+            # IN-06: this read '^\\\!|^\\!| \\\!| \\!'. In ERE both `\\\!` and
+            # `\\!` denote a literal backslash followed by a literal `!`, so
+            # alternatives 1/2 and 3/4 were duplicates — redundancy that reads
+            # as a deliberate distinction which does not exist. Verified
+            # behaviour-identical against a `\!`-at-line-start file, a
+            # `\!`-after-a-space file and a clean file (exit 0/0/1 both ways).
+            #
+            #   \!       shell escape (reads env vars, curls them out)
+            #   \copy    client-side file IO
+            #   \COPY    upper-case form
+            #   \o ...   redirect query output into a file
+            scan "$f" '(^| )\\!'            '\!'
+            scan "$f" '\\copy\b'             '\copy'
+            scan "$f" '\\COPY\b'             '\COPY'
+            scan "$f" '^\\o |^\\o$| \\o '     '\o'
+          done
+          if [ "$bad" = 1 ]; then
+            echo "::error::One or more files the mutation runner executes contain a refused psql meta-command."
+            exit 1
+          fi
+          echo "Preflight clean: ${#files[@]} file(s) free of refused meta-commands."
+
+      - name: Runner self-test - every defect kind still fires
+        # ⛔ SP-C02. This step was MISSING, and its absence was the largest hole
+        # in this job. Verified by repo-wide grep at the time: `run.mjs
+        # --self-test` was invoked by NOTHING, while the two sibling jobs both
+        # run theirs (`lint-sql-gates.mjs --self-test` at ~:796,
+        # `verify-plan-anchors.mjs --self-test` at ~:1139).
+        #
+        # It is the SOLE proof that the runner's six defect kinds — `no-red`,
+        # `wrong-first-failure`, `occurrence-mismatch`, `identity-rewrite`,
+        # `synthesised-identity`, `floor` — can still fire. The corpus run below
+        # is GREEN BY CONSTRUCTION at 30/30: a runner whose defect reporting was
+        # disabled would still print `arms: 30/30/0`, clear both floors and exit
+        # 0. Vitest covers `neuterArm`, the floors and the identity helpers; it
+        # never covers `runCorpus`'s defect REPORTING, because that needs a
+        # cluster. So without this step, "0 defects" was a number nothing could
+        # contradict — this phase's own thesis, inside this phase's own gate.
+        #
+        # BEFORE the corpus run, for the same reason `sql-gate-lint` orders its
+        # two steps that way: a clean scan means nothing unless the detector can
+        # still fire. It needs no extra provisioning — it drives the same
+        # throwaway `initdb` cluster `scripts/pg-lane/run.sh` creates for the
+        # corpus run. Measured 2026-08-29: 8/8, in seconds.
+        #
+        # ⛔ MODE IDENTITY: the bare command from the script's own header, no
+        # wrapper. Pinned from vitest by src/__tests__/mutation-runner-floors.test.ts.
+        run: node scripts/mutation-runner/run.mjs --self-test
+
+      - name: Mutate every annotated RED-UNDER arm and require it to bite
+        # ⛔ MODE IDENTITY (164.3-RESEARCH Pitfall 2,
+        # `reference_gstack_evidence_wrapper_reddens_suite`). The command below
+        # is byte-identical to the one in the script's own header and to what a
+        # developer runs locally. No wrapper, no flags, no npm alias.
+        #
+        # Its stdout goes to a FILE and is `cat` back into the log, rather than
+        # through `| tee`. Two measured reasons, both from this repo:
+        #   * a PIPE makes `$?` the LAST command's status. That hazard bit this
+        #     plan's own execution (`--self-test` reported FAIL while the shell
+        #     reported exit 0, because `$?` was `tail`'s). `status=$?` on the
+        #     very next line cannot be fooled;
+        #   * the log has to survive into the assertion step below, and the file
+        #     must live in RUNNER_TEMP, NOT the workspace: the runner asserts
+        #     `git status --porcelain` is unchanged across its own run and would
+        #     report `dirty-checkout` on a log file written beside the corpus.
+        # argv is unchanged either way — only the stdout fd differs, which in CI
+        # is a file regardless.
+        env:
+          RUNNER_LOG: ${{ runner.temp }}/mutation-runner.log
+        run: |
+          set -uo pipefail
+          node scripts/mutation-runner/run.mjs > "$RUNNER_LOG" 2>&1
+          status=$?
+          cat "$RUNNER_LOG"
+          exit $status
+
+      - name: Assert the run PRINTED its coverage and cleared both floors
+        # D-01's print, made LOAD-BEARING. The runner prints coverage and arm
+        # counts on every run; without this step a build of the runner that
+        # silently stopped printing them would pass unnoticed, and the coverage
+        # ratchet would become a number nobody compares to anything — which is
+        # this phase's entire subject, committed inside this phase's own gate.
+        #
+        # It also closes the invocation-swap hole: `--parse-only` is a legitimate
+        # mode that checks the whole corpus statically and exits 0, but it runs
+        # ZERO arms. If anyone ever swaps it into the step above to make a red
+        # board green, the executed-arm assertion below fails. That mechanism —
+        # not the comment in run.mjs — is what keeps the static mode out of here.
+        #
+        # ⛔ EVERY ASSERTION DISTINGUISHES "could not measure" FROM "measured, no
+        # problem". An absent line is a MEASURE_FAIL with its own message, never
+        # a silent pass: an empty shell variable satisfies a numeric `-eq 0`
+        # test, so the extraction is checked BEFORE any comparison.
+        #
+        # The floors are read FROM run.mjs, never restated here — a second copy
+        # in ci.yml is a second thing to drift. `node -e` leaves
+        # `process.argv[1]` undefined, so importing the module does not trip its
+        # CLI entry point.
+        env:
+          RUNNER_LOG: ${{ runner.temp }}/mutation-runner.log
+        run: |
+          set -euo pipefail
+
+          if [ ! -s "$RUNNER_LOG" ]; then
+            echo "::error::MEASURE_FAIL: $RUNNER_LOG is missing or empty. The runner produced no output to check, which is not the same as a clean run."
+            exit 1
+          fi
+
+          floors=$(node -e 'import("./scripts/mutation-runner/run.mjs").then(m => console.log(m.FILES_FLOOR, m.ARMS_FLOOR))')
+          files_floor=$(echo "$floors" | cut -d" " -f1)
+          arms_floor=$(echo "$floors" | cut -d" " -f2)
+          case "$files_floor" in ''|*[!0-9]*)
+            echo "::error::MEASURE_FAIL: could not read FILES_FLOOR from scripts/mutation-runner/run.mjs (got '$files_floor')."; exit 1;; esac
+          case "$arms_floor" in ''|*[!0-9]*)
+            echo "::error::MEASURE_FAIL: could not read ARMS_FLOOR from scripts/mutation-runner/run.mjs (got '$arms_floor')."; exit 1;; esac
+          echo "floors from run.mjs: FILES_FLOOR=$files_floor ARMS_FLOOR=$arms_floor"
+
+          coverage_line=$(grep -a -m1 -E '^coverage: files [0-9]+/[0-9]+$' "$RUNNER_LOG" || true)
+          if [ -z "$coverage_line" ]; then
+            echo "::error::MEASURE_FAIL: the run printed NO 'coverage: files N/M' line. D-01 requires coverage on every run; a runner that stopped printing it has silently retired its own ratchet."
+            exit 1
+          fi
+          echo "$coverage_line"
+          files_annotated=$(echo "$coverage_line" | sed -E 's|^coverage: files ([0-9]+)/[0-9]+$|\1|')
+          if [ "$files_annotated" -lt "$files_floor" ]; then
+            echo "::error::FILES_FLOOR regression: $files_annotated annotated file(s) < floor $files_floor."
+            exit 1
+          fi
+
+          arms_line=$(grep -a -m1 -E '^arms: [0-9]+/[0-9]+/[0-9]+ ' "$RUNNER_LOG" || true)
+          if [ -z "$arms_line" ]; then
+            echo "::error::MEASURE_FAIL: the run printed NO 'arms: E/A/W' line, so the number of arms actually EXECUTED is unknown. Unknown is not zero and it is not fine."
+            exit 1
+          fi
+          echo "$arms_line"
+          arms_executed=$(echo "$arms_line" | sed -E 's|^arms: ([0-9]+)/[0-9]+/[0-9]+ .*|\1|')
+          if [ "$arms_executed" -eq 0 ]; then
+            echo "::error::MEASURE_FAIL: ZERO arms executed. The gate cannot observe a non-biting annotation without running one. If the step above was changed to --parse-only, that is a static check, not this gate."
+            exit 1
+          fi
+          # IN-05: ARMS_FLOOR bounds BITING arms — executed minus those that did
+          # not redden or reddened on the wrong arm — not raw executed. This
+          # step used to compare `arms_executed` to the same constant and print
+          # "ARMS_FLOOR regression: N arm(s) executed < floor", naming a
+          # quantity the constant was never measured against. The runner now
+          # prints the real one under its own name and this reads THAT.
+          #
+          # A missing `biting:` line is a MEASURE_FAIL and not a zero: it is
+          # also what a `--parse-only` swap produces, since that mode executes
+          # nothing and deliberately does not print it.
+          biting_line=$(grep -a -m1 -E '^biting: [0-9]+ ' "$RUNNER_LOG" || true)
+          if [ -z "$biting_line" ]; then
+            echo "::error::MEASURE_FAIL: the run printed NO 'biting: N' line, so the quantity ARMS_FLOOR actually bounds is unknown. Either the runner stopped reporting it, or the step above was not the gate (--parse-only executes zero arms and does not print it)."
+            exit 1
+          fi
+          echo "$biting_line"
+          biting=$(echo "$biting_line" | sed -E 's|^biting: ([0-9]+) .*|\1|')
+          case "$biting" in ''|*[!0-9]*)
+            echo "::error::MEASURE_FAIL: could not read the biting count out of '$biting_line'."; exit 1;; esac
+          # ⚠️ R2-I01, STATED SO IT IS NOT MISREAD AS A LIVE CHECK: this arm is
+          # UNREACHABLE for any log the runner produces. `bitingArms` is
+          # `armsExecuted` minus a subset of the defects, so `biting <=
+          # executed` holds by construction (run.mjs, the ARMS_FLOOR block).
+          # It is kept deliberately, and only for what it DOES cover: a log
+          # that was hand-edited, spliced from two runs, or assembled by a
+          # wrapper. This step's whole job is to read numbers out of a text
+          # file it did not produce, so "these two cannot disagree" is worth
+          # asserting about the FILE even though it is trivially true of the
+          # program. It is not evidence that the runner is consistent.
+          if [ "$biting" -gt "$arms_executed" ]; then
+            echo "::error::MEASURE_FAIL: biting ($biting) exceeds executed ($arms_executed). Those two numbers come from the same run and cannot disagree this way, so this log was not produced by one run of the gate."
+            exit 1
+          fi
+          if [ "$biting" -lt "$arms_floor" ]; then
+            echo "::error::ARMS_FLOOR regression: $biting biting arm(s) < floor $arms_floor. An annotation stopped biting, was deleted, or was converted to a waiver without lowering the floor in scripts/mutation-runner/run.mjs."
+            exit 1
+          fi
+
+          echo "Coverage print is present and both floors hold: files $files_annotated >= $files_floor, biting arms $biting >= $arms_floor (of $arms_executed executed)."
+
+  plan-anchor-verify:
+    # Phase 164.3 / VAC-05 — re-resolve every anchor and quote a PENDING plan
+    # makes about the tree.
+    #
+    # WHY IT EXISTS. A plan is a set of claims about the tree, and nothing ever
+    # compared them to it. Both of Phase 164's wave-3 plans were STALE ON
+    # ARRIVAL, measured: `164-04` anchored edits at `v2/page.tsx:563-573` in a
+    # file an earlier plan had shrunk to 423 lines, and `164-03` specified a
+    # two-argument `deriveShareToken` against a source whose signature had grown
+    # a third parameter — followed literally it would have minted share links
+    # that fail verification. A human caught both by reading carefully. This job
+    # is that reading, mechanized.
+    #
+    # ⛔ SCOPED TO `pull_request`, DELIBERATELY NOT main-push. This is D-13's
+    # ruling applied to the analogous case rather than re-decided:
+    # `.planning/` is TRACKED here and plans routinely merge to main BEFORE they
+    # execute (this phase's own plans do). A pending plan sitting on main whose
+    # anchor drifts because unrelated code merged would redden main CI — and
+    # **Railway waits on main CI and SKIPS the analytics-service deploy when it
+    # is red**. D-13 removed exactly that coupling for VAC-04; a push trigger
+    # here would re-introduce it through a different door. The founder accepted
+    # a red board, not halted deploys.
+    # Nothing is lost by the narrower trigger: a stale anchor matters at EXECUTE
+    # time, and execution happens on a branch, so the PR is where the check has
+    # to bite. See the aggregator row below — it is STRICT on `pull_request` and
+    # tolerates `skipped` ONLY on the events this `if:` excludes.
+    #
+    # HERMETIC BY DESIGN: NO database, NO Docker, NO secrets, NO network, NO
+    # node_modules (the script imports only node builtins). It reads tracked
+    # files and exits. It cannot flake, and it runs identically on a fork PR.
+    #
+    # `permissions:` and `concurrency:` are inherited from the workflow level
+    # (lines ~40 and ~53), matching `sql-gate-lint` and `sql-mutation`.
+    # Restating them per-job would fork two sources of truth, and a second
+    # concurrency group inside a workflow that already has one changes
+    # cancellation semantics rather than tightening them.
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6.4.0
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Self-test - both measured failure shapes still fire
+        # Runs BEFORE the corpus scan, for a reason MEASURED on this repo on
+        # 2026-08-29: the pending-plan corpus contained ZERO `path:line` anchors
+        # that day. A corpus scan reporting "no stale claims" over a corpus with
+        # no range claims in it says nothing at all about whether the range and
+        # quote rules still work — so this step proves they do, against the two
+        # historical failures as fixtures, before the scan's verdict is allowed
+        # to mean anything. Same reasoning as `sql-gate-lint`'s rule self-test.
+        run: node scripts/verify-plan-anchors.mjs --self-test
+
+      - name: Re-resolve every pending plan's claims against the tree
+        # ⛔ MODE IDENTITY (164.3-RESEARCH Pitfall 2,
+        # `reference_gstack_evidence_wrapper_reddens_suite`). The command below
+        # is byte-identical to the one in the script's own header and to what a
+        # developer runs locally. No wrapper, no flags, no npm alias.
+        #
+        # stdout goes to a FILE and is `cat` back, not through `| tee`: a PIPE
+        # makes `$?` the LAST command's status, a hazard this phase already hit
+        # once (a `--self-test` reported FAIL while the shell reported 0). The
+        # log also has to survive into the assertion step below, and it lives in
+        # RUNNER_TEMP rather than the workspace so it cannot dirty the checkout.
+        env:
+          ANCHOR_LOG: ${{ runner.temp }}/plan-anchor-verify.log
+        run: |
+          set -uo pipefail
+          node scripts/verify-plan-anchors.mjs --pending > "$ANCHOR_LOG" 2>&1
+          status=$?
+          cat "$ANCHOR_LOG"
+          exit $status
+
+      - name: Assert the scan PRINTED its counts and ran in the mode it claims
+        # The counts, made LOAD-BEARING. Without this step, a build of the
+        # verifier that silently stopped printing them would pass unnoticed, and
+        # a reviewer would have no way to tell a scan of five plans from a scan
+        # of none.
+        #
+        # It also closes the invocation-swap hole: `--self-test` exits 0 having
+        # scanned NO plan at all. Its output carries no `scanned: … pending plan
+        # file(s) of …` line, so swapping it into the step above to green a red
+        # board fails here. That mechanism — not a comment asking nicely — is
+        # what keeps the two modes distinct.
+        #
+        # ⛔ EVERY ASSERTION DISTINGUISHES "could not measure" FROM "measured, no
+        # problem": an absent line is a MEASURE_FAIL with its own message, never
+        # a silent pass, because an empty shell variable satisfies a numeric
+        # `-eq 0` test.
+        #
+        # ⚠️ WHAT IS DELIBERATELY *NOT* ASSERTED: a floor on the claim count.
+        # Zero claims is a LEGITIMATE measurement — it is what a tree whose
+        # plans have all been executed reports, and MEASURED on 2026-08-29 the
+        # five pending plans carried 16 claims, none of them range anchors. A
+        # floor would redden CI for an honest state. The burden of "the rules
+        # can still fire" is carried by the self-test step above, which is the
+        # only place it can be carried without inventing a number.
+        env:
+          ANCHOR_LOG: ${{ runner.temp }}/plan-anchor-verify.log
+        run: |
+          set -euo pipefail
+
+          if [ ! -s "$ANCHOR_LOG" ]; then
+            echo "::error::MEASURE_FAIL: $ANCHOR_LOG is missing or empty. The verifier produced no output to check, which is not the same as a clean scan."
+            exit 1
+          fi
+
+          scanned_line=$(grep -a -m1 -E '^scanned: [0-9]+ pending plan file\(s\) of [0-9]+$' "$ANCHOR_LOG" || true)
+          if [ -z "$scanned_line" ]; then
+            echo "::error::MEASURE_FAIL: the run printed NO 'scanned: N pending plan file(s) of M' line. Either the verifier stopped reporting what it looked at, or the step above was not run in --pending mode (--self-test scans no plan at all)."
+            exit 1
+          fi
+          echo "$scanned_line"
+
+          total_plans=$(echo "$scanned_line" | sed -E 's|^scanned: [0-9]+ pending plan file\(s\) of ([0-9]+)$|\1|')
+          case "$total_plans" in ''|*[!0-9]*)
+            echo "::error::MEASURE_FAIL: could not read the total plan count out of '$scanned_line'."; exit 1;; esac
+          # CR-02: zero plan files is TWO different states and they must not
+          # share this exit. `/gsd-complete-milestone` moves every phase dir
+          # into .planning/milestones/v{X.Y}-phases/, leaving .planning/phases
+          # legitimately empty — this repo has already produced that state once
+          # (e9a57671). Failing on it reddens the required `frontend` check on
+          # EVERY PR until someone creates a phase directory, and the only
+          # remedy available is to switch this job off.
+          #
+          # The verifier now distinguishes them itself: a corpus it cannot
+          # locate or READ is a MEASURE_FAIL and never reaches here, and a
+          # corpus it opened and enumerated and found empty prints an explicit
+          # `measured-zero:` line. So this step demands that line rather than
+          # trusting the count — a zero with no measurement behind it is still
+          # a MEASURE_FAIL.
+          if [ "$total_plans" -eq 0 ]; then
+            if grep -a -q -m1 '^measured-zero: ' "$ANCHOR_LOG"; then
+              grep -a -m1 '^measured-zero: ' "$ANCHOR_LOG"
+              echo "Zero plan files, and the verifier proved it READ the corpus to establish that. Archived corpus accepted."
+            else
+              echo "::error::MEASURE_FAIL: ZERO plan files found under .planning/phases AND no 'measured-zero:' line was printed. An unmeasured zero is a broken glob, not a clean corpus."
+              exit 1
+            fi
+          fi
+
+          # The deferral exemptions (WR-06) must be REPORTED on every run. A
+          # plan can leave the pending set by carrying an explicit deferral
+          # marker; if that count ever stopped being printed, plans could be
+          # exempted without anyone seeing it.
+          deferred_line=$(grep -a -m1 -E '^deferred: [0-9]+ plan file\(s\) exempted by an explicit deferral marker$' "$ANCHOR_LOG" || true)
+          if [ -z "$deferred_line" ]; then
+            echo "::error::MEASURE_FAIL: the run printed NO 'deferred: N plan file(s) …' line. Plans can leave the pending set by carrying a deferral marker, so a run that does not report how many did is hiding its own exemptions."
+            exit 1
+          fi
+          echo "$deferred_line"
+
+          # ⛔ R2-W05: "the line is printed" IS NOT A CONTROL, because nothing
+          # compared the print to anything. Both deferral routes — a sibling
+          # `<n>-DEFERRED.md`, and `status: deferred` in the plan's own
+          # frontmatter — are writable by the SAME PR that adds the plan, so a
+          # PR could empty the pending set entirely and this step would still
+          # pass, having asserted only that a number appeared.
+          #
+          # So the VALUE is asserted, against a ratchet pinned by measurement —
+          # the same discipline the mutation runner's ARMS_FLOOR uses, and for
+          # the same reason: waiver creep is how the thing being waived hides.
+          #
+          # DEFERRED_CEILING MEASURED 2026-08-29:
+          #   node scripts/verify-plan-anchors.mjs --pending
+          #   -> scanned: 2 pending plan file(s) of 70
+          #      deferred: 1 plan file(s) exempted …   (164.3-07, VAC-07)
+          # A SECOND deferral therefore reddens this job until someone raises
+          # this number in a reviewed edit to this file — which is exactly the
+          # cost an exemption should carry. It never demands fewer.
+          DEFERRED_CEILING=1
+          deferred_n=$(echo "$deferred_line" | sed -E 's|^deferred: ([0-9]+) plan file\(s\) exempted by an explicit deferral marker$|\1|')
+          case "$deferred_n" in ''|*[!0-9]*)
+            echo "::error::MEASURE_FAIL: could not read the deferral count out of '$deferred_line'."; exit 1;; esac
+          if [ "$deferred_n" -gt "$DEFERRED_CEILING" ]; then
+            echo "::error::DEFERRAL_CEILING regression: ${deferred_n} plan file(s) are exempted from anchor verification, ceiling is ${DEFERRED_CEILING}. A deferral marker switches this gate off for a plan and is writable by the PR that adds the plan, so growing the exempt set is a deliberate, reviewed edit to DEFERRED_CEILING in ci.yml — not something a PR does to itself."
+            exit 1
+          fi
+
+          # And the count must not be able to LIE about itself: the verifier
+          # prints one `  deferred: <path>  [<marker>]` line per exemption, so
+          # the two numbers are produced independently and must agree. A count
+          # printed without its detail lines would otherwise satisfy the ceiling
+          # above while hiding what it exempted.
+          deferred_detail=$(grep -a -c -E '^  deferred: .+  \[.+\]$' "$ANCHOR_LOG" || true)
+          deferred_detail=${deferred_detail:-0}
+          if [ "$deferred_detail" -ne "$deferred_n" ]; then
+            echo "::error::MEASURE_FAIL: the run reports ${deferred_n} exempted plan file(s) but printed ${deferred_detail} exemption detail line(s). The count and the list disagree, so what was exempted is unknown."
+            exit 1
+          fi
+          if [ "$deferred_n" -gt 0 ]; then
+            grep -a -E '^  deferred: .+  \[.+\]$' "$ANCHOR_LOG"
+          fi
+
+          claims_line=$(grep -a -m1 -E '^claims: [0-9]+ checked$' "$ANCHOR_LOG" || true)
+          if [ -z "$claims_line" ]; then
+            echo "::error::MEASURE_FAIL: the run printed NO 'claims: N checked' line, so the number of claims actually re-resolved is unknown. Unknown is not zero and it is not fine."
+            exit 1
+          fi
+          echo "$claims_line"
+
+          echo "Scan counts are present and the mode is the one this gate requires: $total_plans plan file(s) discovered."
+
   frontend:
     # Aggregator. Branch protection gates on this single required check;
     # `needs:` enforces that every parallel frontend-* job above passed.
@@ -799,6 +1377,58 @@ jobs:
     # Wall-clock cost is ACCEPTED: this aggregator now waits on `sql-tests`,
     # which itself needs `python` (~7m) plus its mutex wait. The alternative is
     # the present-but-ungating state this requirement exists to kill.
+    # Phase 164.3 / VAC-03 (2026-08-29): `sql-gate-lint` is BLOCKING here, wired
+    # into BOTH places below — either one alone leaves it advisory, the same trap
+    # SEAMCORE-09 recorded for `frontend-seam-redis`. It takes the loop's STRICT
+    # default arm and must NEVER be given a tolerance arm: it is hermetic (no
+    # database, no Docker, no secrets, no network), so it runs identically on a
+    # fork PR, a same-repo PR, a push and a workflow_dispatch. It therefore has
+    # no legitimate skip, and a `skipped` result there is always a real fault —
+    # exactly the `frontend-seam-redis` reasoning, and the OPPOSITE of the
+    # `sql-tests` / `e2e-seeded` rows, whose tolerances exist only because those
+    # jobs consume a repo variable a fork cannot see.
+    # ⛔ The DB-touching jobs' ban on new `needs:` edges does NOT apply to this
+    # one: that ban exists because those jobs share the TEST advisory-lock mutex
+    # and their `if:` conditions diverge, so a chain edge can silently skip a
+    # dependent. `sql-gate-lint` touches no shared resource, has no `if:`, and
+    # runs on every event — it cannot skip a dependent and cannot queue behind
+    # the mutex.
+    #
+    # Phase 164.3 / VAC-01 (2026-08-29): `sql-mutation` is BLOCKING here, wired
+    # into BOTH places below for the same reason as its siblings — either one
+    # alone leaves it advisory. It takes the loop's STRICT default arm and must
+    # NEVER be given a tolerance arm: it consumes no secret and no repo
+    # variable, hosts its own throwaway PostgreSQL clusters, and carries no
+    # `if:`, so it runs identically on a fork PR, a same-repo PR, a push and a
+    # workflow_dispatch. It has no legitimate skip, so a `skipped` there is
+    # always a real fault — the `frontend-seam-redis` / `sql-gate-lint`
+    # reasoning, and the OPPOSITE of the `sql-tests` / `e2e-seeded` rows.
+    # ⭐ WHAT REDDENS IT: an annotated gate arm whose declared mutation no longer
+    # makes that arm the FIRST failure. That is the "control that cannot fail"
+    # class — every instance of which was GREEN in this workflow before this job
+    # existed — so a strict row is the whole point of building it.
+    # ⛔ The DB-touching jobs' ban on new `needs:` edges does NOT apply to it:
+    # that ban exists because those jobs share the TEST advisory-lock mutex and
+    # their `if:` conditions diverge, so a chain edge can silently skip a
+    # dependent. `sql-mutation` shares no resource, waits on no mutex, and
+    # deliberately never touches the shared TEST database (D-07).
+    #
+    # Phase 164.3 / VAC-05 (2026-08-29): `plan-anchor-verify` is BLOCKING here,
+    # wired into BOTH places below — either one alone leaves it advisory, the
+    # trap SEAMCORE-09 recorded for `frontend-seam-redis`.
+    # ⚠️ ITS ROW IS THE ONE EXCEPTION TO "hermetic ⇒ no tolerance arm", and the
+    # reason is a TRIGGER, not a credential. The job carries
+    # `if: github.event_name == 'pull_request'` because `.planning/` is TRACKED
+    # and plans merge to main BEFORE they execute, so a pending plan whose
+    # anchor drifts on main would redden main CI — and Railway waits on main CI
+    # and SKIPS the analytics-service deploy when it is red (D-13's reasoning,
+    # applied rather than re-decided). It therefore SKIPS BY DESIGN on push and
+    # on workflow_dispatch, and that skip is tolerated FOR THIS ROW ONLY.
+    # On a `pull_request` — the event its `if:` admits and the event where a
+    # stale anchor actually matters, because execution happens on a branch —
+    # the row is STRICT: the job consumes no secret and no repo variable, so it
+    # runs identically on a fork PR and any non-success there is a real fault.
+    #
     # NOTE: this `needs:` entry is NOT one of the ⛔-banned chain edges among the
     # DB-touching jobs (see the notes on `sql-tests` / `e2e-seeded`). Those are
     # banned because a skipped `needs:` job SKIPS its dependents; this job
@@ -815,6 +1445,9 @@ jobs:
       - frontend-build
       - e2e-seeded
       - sql-tests
+      - sql-gate-lint
+      - sql-mutation
+      - plan-anchor-verify
     if: always()
     steps:
       - name: Verify all frontend-* jobs succeeded
@@ -829,7 +1462,10 @@ jobs:
             "frontend-policy=${{ needs.frontend-policy.result }}" \
             "frontend-build=${{ needs.frontend-build.result }}" \
             "e2e-seeded=${{ needs.e2e-seeded.result }}" \
-            "sql-tests=${{ needs.sql-tests.result }}"; do
+            "sql-tests=${{ needs.sql-tests.result }}" \
+            "sql-gate-lint=${{ needs.sql-gate-lint.result }}" \
+            "sql-mutation=${{ needs.sql-mutation.result }}" \
+            "plan-anchor-verify=${{ needs.plan-anchor-verify.result }}"; do
             name="${r%=*}"; result="${r#*=}"
             echo "$name: $result"
             if [ "$name" = "e2e-seeded" ]; then
@@ -887,6 +1523,26 @@ jobs:
                 else
                   echo "::error::sql-tests result=$result (fork_pr=$is_fork_pr, dispatch=$is_dispatch). The SQL self-tests — the only gate that EXECUTEs the deployed cron bodies (it caught D-19) — did not pass. If this is a mutex acquire timeout, see docs/runbooks/shared-test-db-mutex.md sections 2-3: queue depth and a wedged holder are different faults."
                 fi
+                fail=1
+              fi
+            elif [ "$name" = "plan-anchor-verify" ]; then
+              # Phase 164.3 / VAC-05: BLOCKING, and STRICT on the only event it
+              # runs on. Its `if:` scopes it to `pull_request` so that a pending
+              # plan's anchor drifting on main cannot redden main CI and stall
+              # the Railway analytics deploy (D-13's reasoning; the full
+              # argument is in the job's own header and in the note above).
+              # A skip on push / workflow_dispatch is therefore skip-by-design
+              # and tolerated FOR THIS ROW ONLY. On a pull_request the job is
+              # hermetic — no secret, no repo variable, no network — so it runs
+              # identically on a fork PR and ANY non-success, skip included, is
+              # a real fault.
+              is_pr='${{ github.event_name == 'pull_request' }}'
+              if [ "$result" = "success" ]; then
+                :
+              elif [ "$result" = "skipped" ] && [ "$is_pr" != "true" ]; then
+                echo "plan-anchor-verify skipped (event is not pull_request — its if: scopes it there on purpose); tolerated for this row only."
+              else
+                echo "::error::plan-anchor-verify result=$result on a pull_request (is_pr=$is_pr). The pending plans' anchors were NOT re-resolved against the tree. A skip here means the job's if: was changed or the job was removed — it consumes no secret and cannot legitimately skip on a PR, fork or not."
                 fail=1
               fi
             elif [ "$result" != "success" ]; then
@@ -1312,6 +1968,35 @@ jobs:
             2>/dev/null | tr -d '\r' | tail -1)" || true
           echo "::error::timed out after ${waited}s waiting for the shared-test-db advisory lock (key 61616158). Lock census: ${census:-unavailable}. TWO causes are possible and this step cannot distinguish them: (1) QUEUE DEPTH — concurrent runs each hold the lock ~20m, which is a NORMAL condition in this repo; re-run once the queue drains. (2) A WEDGED holder whose runner is gone. Triage (count the waiters first) and manual unlock: docs/runbooks/shared-test-db-mutex.md sections 2-3."
           exit 1
+      # ── Phase 164.3 / VAC-08 — repo-vs-TEST ledger and body drift ──────────
+      #
+      # Placed AFTER the mutex acquisition so it runs inside this job's held
+      # advisory lock, like every other DB-touching step here. Its queries are
+      # plain read-only SELECTs, so the 6543→5432 SESSION-mode DSN rewrite the
+      # mutex needs is NOT required — a transaction-mode pooler serves these
+      # fine. The DSN is passed through `env:` and never echoed (WR-08).
+      #
+      # SKIP SURFACE: none new. This step INHERITS the `sql-tests` job's
+      # already-documented one — the job's `if:` excludes fork PRs and requires
+      # vars.E2E_TEST_DB_CONFIGURED, and the `frontend` aggregator is the sole
+      # judge of whether a skipped JOB is tolerable. Within the job the step
+      # follows "Run SQL self-tests"'s contract, not the mutex step's: an absent
+      # TEST_SUPABASE_DB_URL is an `::error::` and exit 1, never a quiet pass.
+      #
+      # ⛔ The ledger query joins schema_migrations on `name`, NEVER `version`.
+      # Measured 2026-08-28: the ledger re-stamps `version` at apply time, so a
+      # version-join reported 12 of 12 recent migrations missing when all 12
+      # were present. That check would itself have been a vacuous control.
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6.4.0
+        with:
+          node-version: 22
+      - name: VAC-08 - repo-vs-TEST ledger and function body drift
+        env:
+          TEST_SUPABASE_DB_URL: ${{ secrets.TEST_SUPABASE_DB_URL }}
+        run: |
+          set -euo pipefail
+          # Mode identity (Pitfall 2): the exact command a developer runs.
+          bash scripts/test-ledger-drift-check.sh
       - name: Run SQL self-tests against test Supabase project
         env:
           # PG connection string for the test project (qmnijlgmdhviwzwfyzlc).

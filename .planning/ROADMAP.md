@@ -225,7 +225,7 @@ Plans:
 Inserted after 161 for roadmap ordering only — it MAY be pulled ahead, and it is the more urgent
 of the two because it is a live, founder-reported data-integrity defect.
 **Requirements**: LEDGER-01, LEDGER-02, LEDGER-03, LEDGER-04
-**Plans:** 3/5 plans executed
+**Plans:** 5/5 plans executed
 
 **Root cause (measured on PROD 2026-08-24; ⚠️ CORRECTED 2026-08-25 by re-measurement at HEAD
 `57a407ea` — two claims below were false as originally written):**
@@ -446,6 +446,172 @@ moves. The three residuals accepted rather than closed (`SHARE-RES-R4`, `SHARE-R
 
 **Research note:** the payload-builder seam is the one un-measured integration (extracting the build half of `fetchAndBuildPayload` touches the composite arm AND the single-key basis arm — MEDIUM confidence, wider than it looks). Budget a research pass at plan time; don't discover it. Token-leak channels: Sentry `beforeSend` scrub verified against a REAL captured event, `Referrer-Policy: no-referrer` per-route, generic metadata (link-unfurl dullness accepted explicitly — a private link SHOULD be dull in a chat preview). *(Planning update 2026-08-26: the seam measurement is now done — the composite/basis arms moved to `src/lib/factsheet/` in July, so the extraction in 164-01 is a one-function verbatim move per the founder's final D-06 ruling.)*
 
+### Phase 164.3: VACUITY — a control that cannot fail must be caught by machine, not by red team (INSERTED)
+
+**Goal**: A control that cannot fail is detected by a machine, on every push, instead of by a six-team red team once per milestone.
+**Depends on:** Phase 164 (its measured corpus is this phase's specification).
+⛔ **RESEQUENCED 2026-08-28 — this phase now runs FIRST, before 164.1 and 164.2.** Founder-approved.
+The previous line read "ordered after 164.1 and 164.2 — numeric order only, no dependency on either",
+and that "no dependency" is exactly what makes the move free. The direction was backwards: criterion 2
+builds a real disposable PostgreSQL lane and criterion 1 builds a mutation runner, and those two ARE
+the substrate on which 164.1's gate work would otherwise be hand-tested. Doing 164.1 first means
+building gate machinery twice.
+**Requirements**: VAC-01, VAC-02, VAC-03, VAC-04, VAC-05, VAC-06, VAC-07, VAC-08 (defined in
+REQUIREMENTS.md by the 2026-08-28 discuss pass; the line previously read `TBD`)
+
++ **absorbed from 164.1:** SKIP-01, DRIFT-01, OPS-08-F9, OPS-08-F8, H-0001 (see the DEDUP table
+
+under Phase 164.1 for the reasoning per item).
+⚠️ SKIP-01's premise FAILED re-measurement — see the VERIFIED CORRECTIONS block in
+`164.3-CONTEXT.md`. It is now VAC-08 (a drift check that joins on `name`), NOT a migration-apply lane.
+
+**Why this exists — measured, not felt.** Phase 164 produced **five distinct vacuity mechanisms**,
+and the DRIFT family alongside them. ⛔ Every single one was **GREEN in CI**, survived code review,
+and was found only by executing adversarially after a red team. That is the finding: not "we write
+weak tests", but **nothing in the pipeline can tell a control that holds from one that cannot fail.**
+Detection currently costs a red team.
+
+| # | Mechanism | Where it hid |
+|---|---|---|
+| 1 | Post-rejection probe inside a PL/pgSQL `BEGIN…EXCEPTION` — an implicit subtransaction, so the arm reads its own rollback | Found twice: removed at TRIGGER 1, survived undeclared at TENANT 5d-5g. A genuine cross-tenant write placed inside the handler moved the victim's counter **and the file went green** |
+| 2 | `pg_get_functiondef` regex satisfiable by an in-body `--` comment | Migration STEP 2 arms |
+| 3 | A diagnostic computing `pre + 1`, which overflowed in exactly the state it was diagnosing — the arm aborted on its own arithmetic | N1 3a / N1 1c |
+| 4 | Partial bitmask: `tgtype & 16` only, so a trigger narrowed back to `BEFORE UPDATE` satisfied every remaining term and the INSERT pin could be deleted invisibly | Fixed in the migration, **still blind in the durable gate** |
+| 5 | An arm made structurally unreachable by an earlier arm covering the same state — the reachable one then reported the defect as its **exact opposite** ("row is STILL LIVE" when the row was deleted) | SANITIZE 1c / 1e |
+
+Plus the **drift** half, same root — *the claim and the thing are never compared*: `DRIFT-02`
+(repo vs PROD, which nearly shipped a GDPR regression), `DRIFT-01` (TEST vs repo), `SKIP-01` (a gate
+that SKIPs forever and reads as PASS), and stale comments that **argued away** the coverage which
+would have caught a token-resurrection bug.
+
+**Success Criteria** (what must be TRUE):
+
+  1. **A mutation runner exists and runs in CI.** Arms carrying a
+     `RED-UNDER: <the exact mutation that makes me fail>` annotation are machine-mutated by the
+     runner, which asserts the file goes RED and then restores it. ⭐ This alone would have caught
+     mechanisms 1, 4 and 5 with no human involved. It is the highest-value item in the phase by a
+     distance.
+     ⛔ **CORRECTED 2026-08-28 — this criterion previously read "Every arm in `supabase/tests/*.sql`
+     already carries" one. MEASURED at HEAD, that is 1 file of 71** (**30** arm-anchored
+     annotations, all in `test_strategy_shares_rls.sql`; a naive `grep -c "RED-UNDER"` says 33 because
+     it counts the file's own header documenting the syntax at :46/:48 plus a prose reference at
+     :1541 — re-measured 2026-08-29). The sentence was a claim never compared to the thing — the
+     exact defect this phase exists to catch, sitting in its own spec. Do NOT plan against the old
+     wording: the runner covers the annotated corpus, and **Phase 164.4 (REDUNDER-BACKFILL)** closes
+     the remaining 70 files using this runner as the oracle.
+     ⭐ This phase stays shippable regardless: all five measured mechanisms (`TENANT`, `TRIGGER`,
+     `SANITIZE`, `STEP 2`, `N1`) live in the already-annotated file, so criterion 6 is reachable with
+     the 33 annotations that exist today.
+     ⚠️ The runner MUST print its coverage (files annotated / files total) on every run. A runner
+     reporting PASS while silently covering 1.4% of the corpus is the same shape as `SKIP-01`, which
+     is on this phase's own list.
+
+  2. **The throwaway-PostgreSQL lane is real** — `PROC-01`'s implementation. Today it is a script under `.planning/`, written mid-phase, whose own two defects (reusing another agent's cluster then `DROP SCHEMA public CASCADE`; RLS enabled on nothing but the table under test) were found by reviewers using it.
+  3. **A static linter rejects the four statically-decidable measured shapes** on new gate files (mechanisms 1, 2, 4 and a narrow 3), so a further mechanism of those kinds is a lint failure rather than a red-team finding. Mechanism 5 is **delegated** to the mutation runner's first-failure identity per D-16 — it is not decidable in SQL text, and a rule that cannot fire is the defect this phase exists to remove. Machine-pinned via the linter's `DELEGATED_MECHANISMS` export. *(Corrected 2026-08-29, gap G3 — this criterion said "five" after D-16 narrowed it; the plan line at :538 already said four.)*
+  4. **No whole-body `CREATE OR REPLACE` merges without a repo-vs-PROD diff** (`DRIFT-02b`). A function that has ever been surgically patched has no true body in the repo, and "re-base on the latest definition" is unsatisfiable from files alone.
+  5. **A plan's claims about the codebase are verified, not trusted.** A PLAN.md asserts line
+     anchors, function signatures and RPC return shapes — and NOTHING compares them to the tree.
+     Both wave-3 plans were stale when execution reached them: `164-03` specified a two-argument
+     `deriveShareToken` that would have minted links failing verification (the token gained a third
+     input mid-phase), and `164-04` anchored edits at `v2/page.tsx:563-573` in a file that had
+     shrunk to 423 lines. Neither is catchable by review — a reviewer reads the plan against the
+     plan. Both were caught by grepping the plan for what the phase had learned and re-resolving
+     its anchors, which is mechanisable: resolve every `file:line` and every named symbol in a
+     PLAN.md at execute time, and fail loud on a miss.
+
+  6. ⛔ **Each of the five is demonstrated against the phase-164 corpus** — re-introduce each historical mechanism and show the new machinery catches it. A vacuity detector that has never caught a vacuity is the joke that writes itself.
+
+**Explicitly OUT of scope:** the GSD-machinery gaps — `depends_on` yielding `blocked_by: {}` so plan
+ordering is unenforced, wave frontmatter drifting from ROADMAP, and `NYQ-01`. Same smell, different
+system (upstream `gsd-core`, not this repo). Mixing them in makes this unshippable. Book them
+separately.
+
+**Plans:** 9/10 plans executed
+
+Plans:
+
+- [x] 164.3-01-PLAN.md — Disposable-PG lane promoted (trap cleanup, PGBIN chain, free port) + SHAPE 1c tracer proof (VAC-02) [wave 1]
+- [x] 164.3-02-PLAN.md — Drift family: shared normalizer, VAC-04 PROD-body step in migration-drift-check.yml (D-12/D-13/D-17), VAC-08 name-join ledger check + body assertion, OPS-08-F9 verify-and-record (VAC-04, VAC-08, SKIP-01, DRIFT-01) [wave 1]
+- [x] 164.3-03-PLAN.md — H-0001: findMutations single-line detection fixed, un-skipped, re-censused, counted allowlist [wave 1]
+- [x] 164.3-04-PLAN.md — VAC-07 SPIKE: 263-migration replay measured + local-stack lane with trapped teardown (D-15) [wave 1]
+- [x] 164.3-05-PLAN.md — Mutation runner core: RED-UNDER-M grammar + parser + first-failure identity + both exit-1 modes + aggregation (VAC-01, OPS-08-F8) [wave 2]
+- [x] 164.3-06-PLAN.md — Static vacuity linter, mechanisms 1/2/4 + narrow 3, red fixtures per rule, NO mechanism-5 rule (VAC-03, D-16) [wave 2]
+- [ ] 164.3-07-PLAN.md — Phase 159 closure spec: two concurrent csv-finalize POSTs, one 2xx + one honest 409, winner holds (VAC-07, D-08) [wave 2]
+- [x] 164.3-08-PLAN.md — Corpus annotation backfill (30 arm-anchored markers, measured), full run green, ARMS_FLOOR pinned, sql-mutation CI job + aggregator row (VAC-01) [wave 3]
+- [x] 164.3-09-PLAN.md — Plan-anchor verifier: range + quote re-resolution over pending plans, CI seam + execute-time convention (VAC-05, D-06 own wave) [wave 4]
+- [x] 164.3-10-PLAN.md — All five mechanisms re-introduced and demonstrated caught, durable via vitest pin + every-push runner (VAC-06) [wave 5]
+
+### Phase 164.3.1: SOUND-PRIMITIVES — all FOUR cycling primitives closed by construction: neuter scan, mutation identity, VAC-04, self-referential oracle (INSERTED)
+
+**Goal:** SOUND-PRIMITIVES — four control primitives on this branch have each re-opened FOUR times, every round closing the reviewer's EXAMPLE and then declaring the CLASS closed in code comments, in GRAMMAR.md and in the fix report. Each must now be sound BY CONSTRUCTION, not by which files happen to be annotated or which spelling happens to be in the corpus today. Scope covers all four (founder decision 2026-08-29, widened from the original two). PRIMITIVE A — an accepted neuter leaves privileged state live. Lineage WR-07 -> R2-C01 (a `--` comment containing EXCEPTION) -> R3-C01 (keyword in a string literal, block comment, dollar-quoted body) -> R4-C01, where `isBranchHead` (scripts/mutation-runner/run.mjs:322-329) has two UNANCHORED arms, so the compound line `SET ROLE postgres; IF NOT ok THEN` is accepted as structurally a branch head, the backward scan breaks, and `neuterArm` returns found:true with `SET ROLE postgres;` still live; a leaked superuser then makes every downstream GRANT arm pass for a reason unrelated to its grant. SEVEN lines of exactly this shape ALREADY EXIST in supabase/tests/test_profiles_privileged_columns_locked.sql (96/101/106/111/116/121/132), the directory phase 164.4 backfills. The round-3 fixer's disclosed line-local residual was NOT the hole; the predicate is, and a fifth regex pass will not close it. Carries [MUT-I01]: `neuterArm`'s forward scan and `statementEndLine` walk raw characters tracking only `'`, so a legal multi-line RAISE with an apostrophe inside a `--` comment returns a spurious neuter-missed, and the even-parity case over-neuters SILENTLY. PRIMITIVE B — an arm counts toward `biting` without executing. Lineage WR-03 -> R2-W04 -> R3-C02 (a split literal) -> the runtime identity nonce -> R4-C02, where the nonce is forgeable with NO file read and NO superuser: the stamped text sits in the query text of the statement the gate is running, and Postgres hands it to server-side code via current_query(). MEASURED — an AFTER INSERT trigger installed by a `sql` step scored RED (identity ok) and biting: 1 for an arm guarded by IF FALSE; the control with a constant scored NO-IDENTITY, biting 0. The real corpus already ships CREATE OR REPLACE FUNCTION RETURNS TRIGGER plus CREATE TRIGGER `sql` steps, so the capability cannot be revoked without refusing a legitimate arm; this needs a DESIGN decision about where the identity lives, not another guard. PRIMITIVE C — a gate's VERDICT is not bounded by what it actually measured, in EITHER direction. Originally scoped as "VAC-04 reports PASS having compared nothing"; widened 2026-08-30 after the mirror case shipped and was caught in this branch's own CI. VAC-08's first real run reported "253 of 262 repo migrations are not present in the TEST ledger" against a database e2e-seeded was passing on in the SAME run — a finding the gate never really measured, phrased so confidently it pointed a reader at hand-applying 253 migrations to a SHARED database. Same root cause as the PASS direction: the gate held every number needed to know its own verdict was absurd (repo total, missing count) and never compared them. VAC-08 now carries an ABSURDITY FLOOR; VAC-04 and the mutation runner do not, and that is this phase's work. Lineage WR-01 ("absent -> new function, pass" with no floor on `checked`) -> R2-W03 (the `accounted != NAME_COUNT` floor was tautological) -> ship-stage SP-C05 (the name index and the body fetcher were one code path, so `sanitize_user$v2` vanished from both) -> round 4. Members, all measured at HEAD: [VAC04-C1] the two readers' blind spots COMPOSE (the naive reader cannot see a definition that does not START a line; the lexer cannot see `$` in an identifier), so three shapes return the empty set from BOTH and the gate exits 0 printing "Two independent readings agree"; [VAC04-C2] the main-module guard `import.meta.url === file://${process.argv[1]}` no-ops on any symlinked path or path containing a space, so `main()` never runs, stdout is empty and the script exits 0 — measured with a PASSING CONTROL (plain path true, symlink false, space false) — and BOTH union members carry the identical guard, so the two "independent" derivations fail together through one mechanism; [VAC04-C3] `grep -aqxF` exit 2 (unreadable index) and exit 1 (not in index) both land in the else that prints "measured absent — Treated as a NEW function (pass)", turning the fail-CLOSED arm into a fail-OPEN one; [VAC04-C4] a non-ASCII identifier is TRUNCATED by one reader and dropped by the other, so the gate compares the WRONG function body and can report MATCH for a different subject. The unifying defect: the gate's "nothing to compare" path exits 0, so every blindness in any reader converts directly into a green gate over PRODUCTION function bodies. PRIMITIVE D — a control whose own oracle or fixture agrees with it BY CONSTRUCTION. Instances: the four vacuity mechanisms found in round 1 (including a five-row table named INDEPENDENT ORACLE whose values never reached the system under test, proven by neuter — replacing all five with garbage left 63 tests green); SP-C04, removed from local-stack-teardown-assertion.test.ts; [VAC-SELFREF-01], the SAME shape reintroduced within that same fix round at src/__tests__/lint-sql-gates.test.ts:182-186, where two assertions describe a string constant defined two lines above and cannot fail for any change to lintFile, the fixtures or the rule set; [AUDCOV-01], where all three shipped SP-I01 arms use single-line strings so the fixture agrees with the claim by construction and cannot catch the multi-line case; and [MUT-W02], where the per-job tolerance pin asserts ONE literal spelling so an equivalently-written tolerance arm widens the aggregator unseen. This primitive recurs through hand-authored test code written fast to close vacuity findings, which is why it needs a MACHINE check, not another careful pass. [AUDCOV-01] additionally carries a LIVE REGRESSION and is the one item here that must not merge as-is: the SP-I01 fix deleted the comment justifying line-leading `/*` entry and widened `unmatchedBlockOpen`, which tracks quote state per line reset at every newline, so a multi-line template literal containing `/*` opens a phantom block and blanks the rest of the file. MEASURED against the file's own real bytes: A) multi-line template with `/*` -> sites [] ; B) control without the `/*` -> sites [line 5] ; C) the shipped single-line arm -> sites [line 3]. The PRE-FIX code found site A. This makes main's H-0001 audit-coverage gate blinder than it was, unlike the rest of the branch which is incomplete-but-new. DELIVERABLES. (1) Replace the line-and-regex neuter classifier with a SQL-aware tokenizer carrying quote, dollar-quote and block-comment state ACROSS lines and classifying STATEMENTS rather than lines, and route `neuterArm`'s forward scan and `statementEndLine` through it so the file has ONE definition of what is code. (2) Move the arm identity somewhere the executing SQL cannot observe, or PROVE no server-side construct can reach it, and record which. (3) Make VAC-04's ZERO path fail closed rather than trusting agreement between readers with overlapping blind spots, and fix the three concrete members: the realpath idiom already at scripts/check-banned-packages.mjs:446 in BOTH union members, explicit exit-code branching on the name-index grep with >= 2 a hard fail, and refuse-rather-than-truncate on any identifier leaving the unquoted charset. (4) Fix the audit-coverage stripper by carrying string state across lines with quoteAtEnd forced to null for `'` and `"`, and add the three-arm table with B as the calibration control. (5) Add a MACHINE check for primitive D that flags an assertion whose subject is a constant defined in the same block, and re-express [MUT-W02] as a parse of the aggregator's branch conditions with its own non-vacuity floor. (6) A REGRESSION CORPUS carrying every measured instance across all four primitives as EXECUTABLE arms, so instance five reds in CI rather than in a review. (7) Re-derive ARMS_FLOOR and the biting count under the sound primitives and record any movement, because today's 30/30/0 is correct by SCOPE, not by mechanism. (8) DIAGNOSTIC-FIRST — every gate in this family must PRINT WHAT IT SAW when it fails, not only its conclusion. This is the strongest measured result of the 2026-08-29/30 ship: adding a shape diagnostic to VAC-08 surfaced two further ledger conventions in two CI cycles that FOUR review rounds of reasoning had missed, and reasoning is what produced the wrong join key in the first place. A failure that asserts a conclusion without showing its evidence is another unchecked claim. (9) Carry the VAC-08 instances into the REGRESSION CORPUS of deliverable (3) as executable arms — the 253-of-262 verdict and the three-convention join — so instance four of the Primitive C family reds in CI rather than in a review. Extend the absurdity floor to VAC-04 (which can still report "every function is new — pass" when its name reader breaks) and to the mutation runner (which can report arm counts it did not execute). Pick every threshold the way VAC-08's was picked — by measurement with wide separation (9/262 fires, 232/262 silent), never by taste. ⚖️ RULE, deliberately NOT a fifth primitive: where a gate's key, threshold or join is justified by a measurement, record that measurement's SAMPLE SIZE and COVERAGE beside it, and carry an arm asserting it against the FULL corpus. VAC-08's join key was validated on 12 rows and applied to 262; it was wrong for 253 of them and nothing caught it for four rounds because the gate had never executed. This shape has exactly ONE measured instance, and A-D each reopened FOUR times — promoting one instance to a primitive would inflate the taxonomy to look thorough, which is a species of the same disease. If it reopens, promote it then, with evidence. HARD DEPENDENCY: must complete BEFORE 164.4 REDUNDER-BACKFILL, which annotates ~70 files each asserting a machine proved the arm bites — against unsound primitives those are not 70 bugs but 70 FALSE ATTESTATIONS. EXCLUDES only two prose items, which stay in TODOS.md: [MUT-I02], a header denominator saying 114 migrations where there are 262, and [MUT-I03], a one-line note that concurrent agents editing the tree redden the runner's own dirty-checkout gate.
+**Requirements**: TBD
+**Depends on:** Phase 164.3
+**Success Criteria**:
+1. Every one of the measured instances across all four primitives is an EXECUTABLE arm in the regression corpus, and each is proven to RED by neutering its fix and observing the failure — a corpus entry that cannot fail is itself a primitive-D instance.
+2. The neuter classifier is statement-based: the seven compound lines already in supabase/tests/test_profiles_privileged_columns_locked.sql are classified correctly, and no accepted neuter leaves `SET ROLE postgres;` live on any corpus file.
+3. The arm identity cannot be produced by any SQL the gate executes — demonstrated by re-running the R4-C02 `current_query()` trigger and observing NO-IDENTITY — or the reachability proof is recorded with the constructs it covers.
+4. VAC-04 cannot exit 0 having compared nothing: the zero path fails closed, and each of [VAC04-C1]..[VAC04-C4] is driven end-to-end through the real gate and observed to exit non-zero on its own measured input.
+5. `stripBlockComments` finds the multi-line-template site (case A) while the B control still passes, and the machine check for primitive D flags the `lint-sql-gates.test.ts:182-186` shape at HEAD before it is fixed.
+6. ARMS_FLOOR and the biting count are re-derived under the sound primitives, and any movement from today's 30/30/0 is recorded with the reason.
+7. Every gate in the family PRINTS ITS EVIDENCE on failure, demonstrated by driving each one to its failure path and reading the output: the failure names what was measured (counts, keys, samples), not only the conclusion. An arm asserts this so a future gate cannot ship a bare conclusion.
+8. The absurdity floor exists on VAC-04 and on the mutation runner as well as VAC-08, each proven able to fire AND proven silent on a legitimate finding — a two-directional neuter, because a floor that fires unconditionally also passes its own RED arm. Every threshold records the measurement that set it and the separation it achieves.
+9. Every gate whose key, threshold or join rests on a measurement carries that measurement's SAMPLE SIZE and COVERAGE beside it, plus an arm asserting the key against the full corpus. Verified by grepping the family for justifying measurements and finding no bare ones.
+**Plans:** 0 plans
+
+Plans:
+
+- [ ] TBD (run /gsd-plan-phase 164.3.1 to break down)
+
+### Phase 164.4: REDUNDER-BACKFILL — every SQL gate arm gets a RED-UNDER annotation that a machine PROVES bites (INSERTED)
+
+**Goal**: Every arm in `supabase/tests/*.sql` carries a `RED-UNDER` annotation naming the exact
+mutation that makes it fail, and the Phase 164.3 mutation runner PROVES each one bites — red under
+its own mutation, green when restored. Coverage moves from 1 file to all of them, behind a floor
+that cannot regress.
+**Depends on:** ⛔ **Phase 164.3 — HARD, not ordering.** 164.3 builds the mutation runner, and the
+runner is the only thing that makes this phase safe to do at all.
+**Requirements**: TBD (run `/gsd-discuss-phase 164.4`)
+
+**Why this is its own phase, and why it CANNOT come first.** MEASURED at HEAD 2026-08-28:
+`grep -rl RED-UNDER supabase/tests/` returns **1 file of 71** — 33 annotations, all in
+`test_strategy_shares_rls.sql`, the file Phase 164 wrote. 164.3's criterion 1 asserts that "every arm
+in `supabase/tests/*.sql` **already carries**" one. That is false by a factor of 71, and it is
+false in exactly the way 164.3 exists to catch: **a claim and the thing were never compared.**
+
+⭐ **The ordering is load-bearing, not tidiness.** A hand-written `RED-UNDER` is itself a CLAIM —
+"this mutation reddens this arm". Authoring ~166 such claims at speed, by hand, is a vacuity
+mechanism manufactured at scale: an annotation that does not actually redden its arm passes
+silently and reads as coverage. Doing the backfill BEFORE the runner exists would be the phase
+group defeating its own thesis. With the runner in CI the claim is machine-checked — a
+`RED-UNDER` that fails to redden its arm **fails the build**. That single fact converts this work
+from faith-based to verified, and it is why this phase waits.
+
+⚠️ 164.3 remains shippable without this phase, and deliberately so: all five measured vacuity
+mechanisms (`TENANT`, `TRIGGER`, `SANITIZE`, `STEP 2`, `N1`) live in the already-annotated file,
+so 164.3's criterion 6 is reachable with the 33 annotations that exist today. This phase closes the
+corpus gap; it is not a prerequisite for 164.3 being real.
+
+**Success Criteria** (what must be TRUE):
+
+  1. **Every arm carries a `RED-UNDER`** naming the exact mutation that makes it fail.
+  2. **The 164.3 runner executes ALL of them** — each demonstrated RED under its own mutation and
+     GREEN when restored. An annotation that never reddens its arm is a FAILURE, not a pass.
+
+  3. **The coverage figure is CI output and floor-ratcheted.** A runner reporting PASS while covering
+     a fraction of the corpus is the same shape as a gate that SKIPs forever and reads as PASS —
+     which is on 164.3's own defect list. No silent caps: the number is printed every run.
+
+  4. ⛔ **Any arm that cannot be given a falsifying mutation is RECORDED with its reason, never
+     silently skipped.** An arm nobody can make fail is the finding, not an exception.
+
+**Explicitly OUT of scope:** writing new gate coverage. This phase annotates and proves what already
+exists; it does not add arms. New coverage is a different phase with a different risk profile.
+
+**Plans:** 0 plans
+
+Plans:
+
+- [ ] TBD (run /gsd-plan-phase 164.4 to break down)
 
 ### Phase 164.1: HARDEN-GUARDS — retire the frozen-spine gates that no longer bite, close the composite-stamp twin, put the advisory lock behind a real concurrency test, fix the PYAPI-06 blind spot that let a production service-key mismatch run silently, and close phase 161's deferred error-surface items including WIZFORM-02's code:UNKNOWN class, plus the Phase 163 carry-overs — headed by SKIP-01 (nothing applies migrations to TEST, so the OPS-08 SQL gate SKIPs permanently and the deployed body is tested nowhere), then OPS-08's un-written TypeScript retry half, the freshness UTC day-granularity residual, the TEST/PROD function-revision drift, the audit-coverage blind spot, and the tracked-PII decision (INSERTED)
 
@@ -655,132 +821,6 @@ is planned — do not let both phases carry them.
 Plans:
 
 - [ ] TBD (run /gsd-plan-phase 164.2 to break down)
-
-### Phase 164.3: VACUITY — a control that cannot fail must be caught by machine, not by red team (INSERTED)
-
-**Goal**: A control that cannot fail is detected by a machine, on every push, instead of by a six-team red team once per milestone.
-**Depends on:** Phase 164 (its measured corpus is this phase's specification).
-⛔ **RESEQUENCED 2026-08-28 — this phase now runs FIRST, before 164.1 and 164.2.** Founder-approved.
-The previous line read "ordered after 164.1 and 164.2 — numeric order only, no dependency on either",
-and that "no dependency" is exactly what makes the move free. The direction was backwards: criterion 2
-builds a real disposable PostgreSQL lane and criterion 1 builds a mutation runner, and those two ARE
-the substrate on which 164.1's gate work would otherwise be hand-tested. Doing 164.1 first means
-building gate machinery twice.
-**Requirements**: TBD (run `/gsd-discuss-phase 164.3`) + **absorbed from 164.1:** SKIP-01, DRIFT-01,
-OPS-08-F9, OPS-08-F8, H-0001 (see the DEDUP table under Phase 164.1 for the reasoning per item).
-
-**Why this exists — measured, not felt.** Phase 164 produced **five distinct vacuity mechanisms**,
-and the DRIFT family alongside them. ⛔ Every single one was **GREEN in CI**, survived code review,
-and was found only by executing adversarially after a red team. That is the finding: not "we write
-weak tests", but **nothing in the pipeline can tell a control that holds from one that cannot fail.**
-Detection currently costs a red team.
-
-| # | Mechanism | Where it hid |
-|---|---|---|
-| 1 | Post-rejection probe inside a PL/pgSQL `BEGIN…EXCEPTION` — an implicit subtransaction, so the arm reads its own rollback | Found twice: removed at TRIGGER 1, survived undeclared at TENANT 5d-5g. A genuine cross-tenant write placed inside the handler moved the victim's counter **and the file went green** |
-| 2 | `pg_get_functiondef` regex satisfiable by an in-body `--` comment | Migration STEP 2 arms |
-| 3 | A diagnostic computing `pre + 1`, which overflowed in exactly the state it was diagnosing — the arm aborted on its own arithmetic | N1 3a / N1 1c |
-| 4 | Partial bitmask: `tgtype & 16` only, so a trigger narrowed back to `BEFORE UPDATE` satisfied every remaining term and the INSERT pin could be deleted invisibly | Fixed in the migration, **still blind in the durable gate** |
-| 5 | An arm made structurally unreachable by an earlier arm covering the same state — the reachable one then reported the defect as its **exact opposite** ("row is STILL LIVE" when the row was deleted) | SANITIZE 1c / 1e |
-
-Plus the **drift** half, same root — *the claim and the thing are never compared*: `DRIFT-02`
-(repo vs PROD, which nearly shipped a GDPR regression), `DRIFT-01` (TEST vs repo), `SKIP-01` (a gate
-that SKIPs forever and reads as PASS), and stale comments that **argued away** the coverage which
-would have caught a token-resurrection bug.
-
-**Success Criteria** (what must be TRUE):
-
-  1. **A mutation runner exists and runs in CI.** Arms carrying a
-     `RED-UNDER: <the exact mutation that makes me fail>` annotation are machine-mutated by the
-     runner, which asserts the file goes RED and then restores it. ⭐ This alone would have caught
-     mechanisms 1, 4 and 5 with no human involved. It is the highest-value item in the phase by a
-     distance.
-     ⛔ **CORRECTED 2026-08-28 — this criterion previously read "Every arm in `supabase/tests/*.sql`
-     already carries" one. MEASURED at HEAD, that is 1 file of 71** (33 annotations, all in
-     `test_strategy_shares_rls.sql`). The sentence was a claim never compared to the thing — the
-     exact defect this phase exists to catch, sitting in its own spec. Do NOT plan against the old
-     wording: the runner covers the annotated corpus, and **Phase 164.4 (REDUNDER-BACKFILL)** closes
-     the remaining 70 files using this runner as the oracle.
-     ⭐ This phase stays shippable regardless: all five measured mechanisms (`TENANT`, `TRIGGER`,
-     `SANITIZE`, `STEP 2`, `N1`) live in the already-annotated file, so criterion 6 is reachable with
-     the 33 annotations that exist today.
-     ⚠️ The runner MUST print its coverage (files annotated / files total) on every run. A runner
-     reporting PASS while silently covering 1.4% of the corpus is the same shape as `SKIP-01`, which
-     is on this phase's own list.
-  2. **The throwaway-PostgreSQL lane is real** — `PROC-01`'s implementation. Today it is a script under `.planning/`, written mid-phase, whose own two defects (reusing another agent's cluster then `DROP SCHEMA public CASCADE`; RLS enabled on nothing but the table under test) were found by reviewers using it.
-  3. **A static linter rejects the five measured shapes** on new gate files, so mechanism 6 is a lint failure rather than a red-team finding.
-  4. **No whole-body `CREATE OR REPLACE` merges without a repo-vs-PROD diff** (`DRIFT-02b`). A function that has ever been surgically patched has no true body in the repo, and "re-base on the latest definition" is unsatisfiable from files alone.
-  5. **A plan's claims about the codebase are verified, not trusted.** A PLAN.md asserts line
-     anchors, function signatures and RPC return shapes — and NOTHING compares them to the tree.
-     Both wave-3 plans were stale when execution reached them: `164-03` specified a two-argument
-     `deriveShareToken` that would have minted links failing verification (the token gained a third
-     input mid-phase), and `164-04` anchored edits at `v2/page.tsx:563-573` in a file that had
-     shrunk to 423 lines. Neither is catchable by review — a reviewer reads the plan against the
-     plan. Both were caught by grepping the plan for what the phase had learned and re-resolving
-     its anchors, which is mechanisable: resolve every `file:line` and every named symbol in a
-     PLAN.md at execute time, and fail loud on a miss.
-
-  6. ⛔ **Each of the five is demonstrated against the phase-164 corpus** — re-introduce each historical mechanism and show the new machinery catches it. A vacuity detector that has never caught a vacuity is the joke that writes itself.
-
-**Explicitly OUT of scope:** the GSD-machinery gaps — `depends_on` yielding `blocked_by: {}` so plan
-ordering is unenforced, wave frontmatter drifting from ROADMAP, and `NYQ-01`. Same smell, different
-system (upstream `gsd-core`, not this repo). Mixing them in makes this unshippable. Book them
-separately.
-
-**Plans:** 0 plans
-
-Plans:
-
-- [ ] TBD (run /gsd-plan-phase 164.3 to break down)
-
-### Phase 164.4: REDUNDER-BACKFILL — every SQL gate arm gets a RED-UNDER annotation that a machine PROVES bites (INSERTED)
-
-**Goal**: Every arm in `supabase/tests/*.sql` carries a `RED-UNDER` annotation naming the exact
-mutation that makes it fail, and the Phase 164.3 mutation runner PROVES each one bites — red under
-its own mutation, green when restored. Coverage moves from 1 file to all of them, behind a floor
-that cannot regress.
-**Depends on:** ⛔ **Phase 164.3 — HARD, not ordering.** 164.3 builds the mutation runner, and the
-runner is the only thing that makes this phase safe to do at all.
-**Requirements**: TBD (run `/gsd-discuss-phase 164.4`)
-
-**Why this is its own phase, and why it CANNOT come first.** MEASURED at HEAD 2026-08-28:
-`grep -rl RED-UNDER supabase/tests/` returns **1 file of 71** — 33 annotations, all in
-`test_strategy_shares_rls.sql`, the file Phase 164 wrote. 164.3's criterion 1 asserts that "every arm
-in `supabase/tests/*.sql` **already carries**" one. That is false by a factor of 71, and it is
-false in exactly the way 164.3 exists to catch: **a claim and the thing were never compared.**
-
-⭐ **The ordering is load-bearing, not tidiness.** A hand-written `RED-UNDER` is itself a CLAIM —
-"this mutation reddens this arm". Authoring ~166 such claims at speed, by hand, is a vacuity
-mechanism manufactured at scale: an annotation that does not actually redden its arm passes
-silently and reads as coverage. Doing the backfill BEFORE the runner exists would be the phase
-group defeating its own thesis. With the runner in CI the claim is machine-checked — a
-`RED-UNDER` that fails to redden its arm **fails the build**. That single fact converts this work
-from faith-based to verified, and it is why this phase waits.
-
-⚠️ 164.3 remains shippable without this phase, and deliberately so: all five measured vacuity
-mechanisms (`TENANT`, `TRIGGER`, `SANITIZE`, `STEP 2`, `N1`) live in the already-annotated file,
-so 164.3's criterion 6 is reachable with the 33 annotations that exist today. This phase closes the
-corpus gap; it is not a prerequisite for 164.3 being real.
-
-**Success Criteria** (what must be TRUE):
-
-  1. **Every arm carries a `RED-UNDER`** naming the exact mutation that makes it fail.
-  2. **The 164.3 runner executes ALL of them** — each demonstrated RED under its own mutation and
-     GREEN when restored. An annotation that never reddens its arm is a FAILURE, not a pass.
-  3. **The coverage figure is CI output and floor-ratcheted.** A runner reporting PASS while covering
-     a fraction of the corpus is the same shape as a gate that SKIPs forever and reads as PASS —
-     which is on 164.3's own defect list. No silent caps: the number is printed every run.
-  4. ⛔ **Any arm that cannot be given a falsifying mutation is RECORDED with its reason, never
-     silently skipped.** An arm nobody can make fail is the finding, not an exception.
-
-**Explicitly OUT of scope:** writing new gate coverage. This phase annotates and proves what already
-exists; it does not add arms. New coverage is a different phase with a different risk profile.
-
-**Plans:** 0 plans
-
-Plans:
-
-- [ ] TBD (run /gsd-plan-phase 164.4 to break down)
 
 ### Phase 165: DEPS — The 9-PR dependabot campaign
 

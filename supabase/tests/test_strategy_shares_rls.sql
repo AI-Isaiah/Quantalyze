@@ -53,6 +53,13 @@
 -- recorded at the arm instead of papered over (see SHAPE 1's note on a deleted
 -- `nonce`, and NONCE 5c).
 --
+-- ⭐ MACHINE-EXECUTABLE TWINS (phase 164.3, VAC-01). Each prose RED-UNDER above
+-- an arm now carries an adjacent `RED-UNDER-M` object that scripts/mutation-runner
+-- executes on every push: it mutates COPIES, requires the FIRST `TEST FAILED (…)`
+-- to name that arm, and restores GREEN. The schema is scripts/mutation-runner/
+-- GRAMMAR.md. The line below declares what the lane applies before this gate.
+-- RED-UNDER-SETUP: {"apply":["scripts/pg-lane/fixtures/01-fixture-core.sql","scripts/pg-lane/fixtures/02-fixture-sanitize-tables.sql","supabase/migrations/20260827120000_strategy_shares_generation_model.sql","supabase/migrations/20260827130000_sanitize_user_revoke_strategy_shares.sql"]}
+--
 -- WHAT THIS FILE ASSERTS (content-by-field; a 200 / a row count proves nothing)
 -- ---------------------------------------------------------------------------
 --   * SHAPE  — the column set is EXACTLY the seven DDL columns, so no
@@ -368,6 +375,7 @@ BEGIN
   -- still yields only uuids, an integer and timestamps.
   -- RED-UNDER: add a `token_hash TEXT` column to the STEP 1 CREATE TABLE in
   --            migration 20260827120000.
+  -- RED-UNDER-M: {"arm":"SHAPE 1","apply":[{"kind":"insert-after","file":"supabase/migrations/20260827120000_strategy_shares_generation_model.sql","anchor":"  generation  BIGINT      NOT NULL DEFAULT 1 CHECK (generation >= 1),","text":"\n  token_hash  TEXT,","occurrences":1},{"kind":"edit","file":"supabase/migrations/20260827120000_strategy_shares_generation_model.sql","find":"'created_at,created_by,generation,id,nonce,revoked_at,strategy_id'","replace":"'created_at,created_by,generation,id,nonce,revoked_at,strategy_id,token_hash'","occurrences":1}]}
   IF v_cols IS DISTINCT FROM 'created_at,created_by,generation,id,nonce,revoked_at,strategy_id' THEN
     RAISE EXCEPTION 'TEST FAILED (SHAPE 1): strategy_shares columns are "%", expected exactly "created_at,created_by,generation,id,nonce,revoked_at,strategy_id". ⛔ D-02: this table must NEVER hold a token, raw or hashed — a leak must yield only uuids, an int and timestamps.', v_cols;
   END IF;
@@ -382,6 +390,7 @@ BEGIN
   -- front door. The two failures are indistinguishable to SHAPE 1.
   -- RED-UNDER: drop `DEFAULT gen_random_uuid()` from the nonce column in the
   --            STEP 1 CREATE TABLE.
+  -- RED-UNDER-M: {"arm":"SHAPE 1b","apply":[{"kind":"edit","file":"supabase/migrations/20260827120000_strategy_shares_generation_model.sql","find":"  nonce       UUID        NOT NULL DEFAULT gen_random_uuid(),","replace":"  nonce       UUID        NOT NULL,","occurrences":1}]}
   SELECT a.attnotnull, format_type(a.atttypid, a.atttypmod),
          COALESCE(pg_get_expr(d.adbin, d.adrelid), '(none)')
     INTO nonce_notnull, nonce_type, nonce_default
@@ -407,6 +416,7 @@ BEGIN
   -- is DEFERRED and is a merge gate for plan 164-03.
   -- RED-UNDER: change `generation BIGINT` back to `generation INTEGER` in the
   --            STEP 1 CREATE TABLE.
+  -- RED-UNDER-M: {"arm":"SHAPE 1c","apply":[{"kind":"edit","file":"supabase/migrations/20260827120000_strategy_shares_generation_model.sql","find":"  generation  BIGINT","replace":"  generation  INTEGER","occurrences":1}]}
   SELECT format_type(a.atttypid, a.atttypmod) INTO gen_type
     FROM pg_attribute a
    WHERE a.attrelid = 'public.strategy_shares'::regclass AND a.attname = 'generation';
@@ -487,6 +497,7 @@ BEGIN
      AND r.rolname = 'authenticated';
   -- RED-UNDER: restore `GRANT SELECT, INSERT, UPDATE ON strategy_shares TO
   --            authenticated` in migration 20260827120000 STEP 2.
+  -- RED-UNDER-M: {"arm":"SHAPE 3","apply":[{"kind":"sql","stmt":"GRANT SELECT, INSERT, UPDATE ON strategy_shares TO authenticated"}]}
   IF v_privs IS DISTINCT FROM ARRAY['SELECT']::TEXT[] THEN
     RAISE EXCEPTION 'TEST FAILED (SHAPE 3): `authenticated` holds TABLE-level privilege set % on strategy_shares, expected exactly {SELECT}. A table-level INSERT or UPDATE covers EVERY column including `nonce` — MEASURED: with it, an owner re-inserts a recorded nonce verbatim after cascading the row away and the revoked token derives again. DELETE lets one tenant discard their counter; TRUNCATE — EXEMPT FROM RLS — does it for EVERY tenant at once. Migration 20260827120000 STEP 2 must REVOKE ALL then GRANT SELECT at table level and the writes per COLUMN.', COALESCE(v_privs::TEXT, '(none)');
   END IF;
@@ -532,6 +543,7 @@ BEGIN
   --     caller). This arm is the positive control for its own negative.
   -- RED-UNDER: add `GRANT INSERT (nonce) ON strategy_shares TO authenticated`
   --            to migration 20260827120000 STEP 2.
+  -- RED-UNDER-M: {"arm":"SHAPE 3b","apply":[{"kind":"sql","stmt":"GRANT INSERT (nonce) ON strategy_shares TO authenticated"}]}
   SELECT string_agg(a.attname || ':' || acl.privilege_type, ',' ORDER BY a.attname, acl.privilege_type)
     INTO v_colgrants
     FROM pg_attribute a
@@ -596,6 +608,7 @@ BEGIN
   -- COMMENT rather than on code.
   -- RED-UNDER: change STEP 3's INSERT to
   --            `INSERT INTO public.strategy_shares (strategy_id, created_by, nonce)`.
+  -- RED-UNDER-M: {"arm":"SHAPE 4d","apply":[{"kind":"edit","file":"supabase/migrations/20260827120000_strategy_shares_generation_model.sql","find":"INSERT INTO public.strategy_shares (strategy_id, created_by)","replace":"INSERT INTO public.strategy_shares (strategy_id, created_by, nonce)","occurrences":1},{"kind":"edit","file":"supabase/migrations/20260827120000_strategy_shares_generation_model.sql","find":"  IF v_create_s ~* 'INSERT\\s+INTO\\s+public\\.strategy_shares\\s*\\([^)]*\\mnonce\\M'\n     OR v_create_s ~* 'SET[^;]*\\mnonce\\s*=' THEN\n","replace":"  IF FALSE THEN\n","occurrences":1}]}
   IF v_create_s ~* 'INSERT\s+INTO\s+public\.strategy_shares\s*\([^)]*\mnonce\M'
      OR v_create_s ~* 'SET[^;]*\mnonce\s*=' THEN
     RAISE EXCEPTION 'TEST FAILED (SHAPE 4d): create_strategy_share NAMES `nonce` as a write target. It is DEFAULT-populated and read back through RETURNING precisely so the column grant can exclude it; naming it makes this SECURITY INVOKER function fail 42501 for every owner, and the natural "fix" (GRANT INSERT (nonce)) restores the delete-and-recreate resurrection the nonce exists to close.';
@@ -619,6 +632,7 @@ BEGIN
   -- arguments byte-unchanged, which is why it is the shape that shipped.
   -- RED-UNDER: change STEP 3's signature to `RETURNS TABLE (generation BIGINT)`
   --            (and drop the matching RETURNING/INTO targets).
+  -- RED-UNDER-M: {"arm":"SHAPE 4e","apply":[{"kind":"edit","file":"supabase/migrations/20260827120000_strategy_shares_generation_model.sql","find":"RETURNS TABLE (generation BIGINT, nonce UUID)","replace":"RETURNS TABLE (generation BIGINT)","occurrences":1},{"kind":"edit","file":"supabase/migrations/20260827120000_strategy_shares_generation_model.sql","find":"  RETURNING strategy_shares.generation, strategy_shares.nonce\n       INTO create_strategy_share.generation, create_strategy_share.nonce;\n","replace":"  RETURNING strategy_shares.generation\n       INTO create_strategy_share.generation;\n","occurrences":1},{"kind":"edit","file":"supabase/migrations/20260827120000_strategy_shares_generation_model.sql","find":"  IF v_create_res IS NULL\n     OR v_create_res !~* 'TABLE\\s*\\([^)]*\\mnonce\\s+uuid\\M'\n     OR v_create_res !~* 'TABLE\\s*\\([^)]*\\mgeneration\\s+bigint\\M' THEN\n","replace":"  IF FALSE THEN\n","occurrences":1}]}
   SELECT pg_get_function_result(p.oid) INTO v_create_res
     FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
    WHERE n.nspname = 'public' AND p.proname = 'create_strategy_share'
@@ -664,6 +678,7 @@ BEGIN
   --    its `AND (t.tgtype & 4) = 4` term must be removed in the same mutation
   --    or this file never runs. With both gone SHAPE 5 is the first failure
   --    (MEASURED) — where before the fix it was silent and N1 2a was.
+  -- RED-UNDER-M: {"arm":"SHAPE 5","apply":[{"kind":"edit","file":"supabase/migrations/20260827120000_strategy_shares_generation_model.sql","find":"  BEFORE INSERT OR UPDATE ON strategy_shares","replace":"  BEFORE UPDATE ON strategy_shares","occurrences":1},{"kind":"edit","file":"supabase/migrations/20260827120000_strategy_shares_generation_model.sql","find":"     AND (t.tgtype & 4) = 4\n","replace":"","occurrences":1}]}
   SELECT count(*) INTO row_cnt
     FROM pg_trigger t
    WHERE t.tgrelid = 'public.strategy_shares'::regclass
@@ -693,6 +708,7 @@ BEGIN
   -- prose, so a raw-text probe could be satisfied by the label.
   -- RED-UNDER: delete the `IF NEW.nonce IS DISTINCT FROM OLD.nonce` block from
   --            strategy_shares_enforce_monotonic_generation() (STEP 1b).
+  -- RED-UNDER-M: {"arm":"SHAPE 5b","apply":[{"kind":"edit","file":"supabase/migrations/20260827120000_strategy_shares_generation_model.sql","find":"  IF NEW.nonce IS DISTINCT FROM OLD.nonce THEN\n    RAISE EXCEPTION 'strategy_shares: nonce is immutable — refusing to rewrite the MAC witness on strategy %. The nonce is what makes a destroyed-and-recreated row land in a token space DISJOINT from every token ever issued; letting it be written back restores a recorded value and resurrects those tokens. STEP 2''s column grant already denies this to `authenticated`, so a write that reaches this rule came from a role that BYPASSES grants — service_role, which holds GRANT ALL and is on this feature''s hot path. A trigger is the only control on this table that binds it.',\n      OLD.strategy_id\n      USING ERRCODE = 'check_violation';\n  END IF;\n","replace":"","occurrences":1},{"kind":"edit","file":"supabase/migrations/20260827120000_strategy_shares_generation_model.sql","find":"  IF v_trigfn_s !~* 'NEW\\.nonce\\s+IS\\s+DISTINCT\\s+FROM\\s+OLD\\.nonce' THEN\n","replace":"  IF FALSE THEN\n","occurrences":1}]}
   SELECT regexp_replace(pg_get_functiondef(p.oid), '--[^\n]*', '', 'g') INTO v_trigfn_s
     FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
    WHERE n.nspname = 'public'
@@ -742,6 +758,7 @@ BEGIN
   -- OWNER 2d's "reuse returns the same nonce" would pass VACUOUSLY.
   -- RED-UNDER: drop `strategy_shares.nonce` from STEP 3's RETURNING/INTO lists
   --            while leaving the RETURNS TABLE signature intact.
+  -- RED-UNDER-M: {"arm":"OWNER 1c","apply":[{"kind":"edit","file":"supabase/migrations/20260827120000_strategy_shares_generation_model.sql","find":"  RETURNING strategy_shares.generation, strategy_shares.nonce\n       INTO create_strategy_share.generation, create_strategy_share.nonce;\n","replace":"  RETURNING strategy_shares.generation\n       INTO create_strategy_share.generation;\n","occurrences":1}]}
   IF nonce_mint IS NULL THEN
     RESET ROLE;
     RAISE EXCEPTION 'TEST FAILED (OWNER 1c): create_strategy_share returned a NULL nonce. The token derives from it, so the mint route would HMAC over the string "null" for every strategy — one shared token space, and a single leaked link would verify against every other strategy at the same generation. It also makes every nonce-comparison arm below vacuous.';
@@ -782,6 +799,7 @@ BEGIN
   -- that states the CONSEQUENCE in the language the requirement is written in
   -- — Copy Link stops returning the same URL — and because a future engineer
   -- rewriting the catalog pins would otherwise take the whole defence with them.
+  -- RED-UNDER-M: {"arm":"OWNER 2d","apply":[{"kind":"edit","file":"supabase/migrations/20260827120000_strategy_shares_generation_model.sql","find":"    SET revoked_at = NULL","replace":"    SET revoked_at = NULL, nonce = gen_random_uuid()","occurrences":1},{"kind":"edit","file":"supabase/migrations/20260827120000_strategy_shares_generation_model.sql","find":"  IF v_create_s ~* 'INSERT\\s+INTO\\s+public\\.strategy_shares\\s*\\([^)]*\\mnonce\\M'\n     OR v_create_s ~* 'SET[^;]*\\mnonce\\s*=' THEN\n","replace":"  IF FALSE THEN\n","occurrences":1},{"kind":"edit","file":"supabase/migrations/20260827120000_strategy_shares_generation_model.sql","find":"  IF NEW.nonce IS DISTINCT FROM OLD.nonce THEN\n    RAISE EXCEPTION 'strategy_shares: nonce is immutable — refusing to rewrite the MAC witness on strategy %. The nonce is what makes a destroyed-and-recreated row land in a token space DISJOINT from every token ever issued; letting it be written back restores a recorded value and resurrects those tokens. STEP 2''s column grant already denies this to `authenticated`, so a write that reaches this rule came from a role that BYPASSES grants — service_role, which holds GRANT ALL and is on this feature''s hot path. A trigger is the only control on this table that binds it.',\n      OLD.strategy_id\n      USING ERRCODE = 'check_violation';\n  END IF;\n","replace":"","occurrences":1},{"kind":"edit","file":"supabase/migrations/20260827120000_strategy_shares_generation_model.sql","find":"  IF v_trigfn_s !~* 'NEW\\.nonce\\s+IS\\s+DISTINCT\\s+FROM\\s+OLD\\.nonce' THEN\n","replace":"  IF FALSE THEN\n","occurrences":1},{"kind":"sql","stmt":"GRANT UPDATE (nonce) ON strategy_shares TO authenticated"}],"neuter":[{"arm":"SHAPE 3b"},{"arm":"SHAPE 4d"},{"arm":"SHAPE 5b"}]}
   IF nonce_reuse IS DISTINCT FROM nonce_mint THEN
     RESET ROLE;
     RAISE EXCEPTION 'TEST FAILED (OWNER 2d): re-minting a LIVE share returned nonce % but the first mint returned % — the generation held steady, so OWNER 2a passed, yet the derived token CHANGED. Copy Link hands out a new url and silently breaks the recipient''s existing link: the founder-hit defect, wearing the nonce as its new hat.', nonce_reuse, nonce_mint;
@@ -908,6 +926,7 @@ BEGIN
   -- without it, so (v-d) must be removed in the same mutation or this file never
   -- runs. Same shape as SHAPE 5b vs (v-c), and as OWNER 2d's three earlier
   -- layers. With both gone this arm is the first failure (MEASURED).
+  -- RED-UNDER-M: {"arm":"N1 2a","apply":[{"kind":"edit","file":"supabase/migrations/20260827120000_strategy_shares_generation_model.sql","find":"    NEW.generation := 1;\n","replace":"","occurrences":1},{"kind":"edit","file":"supabase/migrations/20260827120000_strategy_shares_generation_model.sql","find":"  IF v_trigfn_s !~* 'TG_OP\\s*=\\s*''INSERT'''\n     OR v_trigfn_s !~* 'NEW\\.generation\\s*:=\\s*1' THEN\n","replace":"  IF FALSE THEN\n","occurrences":1}]}
   SET LOCAL ROLE service_role;
   INSERT INTO strategy_shares (strategy_id, created_by, generation)
   VALUES (strat_a4, uid_a, 987654321);
@@ -954,6 +973,7 @@ BEGIN
   --    `NEW.nonce :=` and ABORTS THE APPLY without it, so (v-d2) must be removed
   --    in the same mutation or this file never runs. With both gone this arm is
   --    the first failure (MEASURED).
+  -- RED-UNDER-M: {"arm":"N1 2b","apply":[{"kind":"edit","file":"supabase/migrations/20260827120000_strategy_shares_generation_model.sql","find":"    NEW.nonce := gen_random_uuid();\n","replace":"","occurrences":1},{"kind":"edit","file":"supabase/migrations/20260827120000_strategy_shares_generation_model.sql","find":"  IF v_trigfn_s !~* 'NEW\\.nonce\\s*:=' THEN\n","replace":"  IF FALSE THEN\n","occurrences":1}]}
   SET LOCAL ROLE service_role;
   INSERT INTO strategy_shares (strategy_id, created_by, nonce)
   VALUES (strat_a5, uid_a, nonce_mint);
@@ -982,6 +1002,7 @@ BEGIN
   -- ⚠️ LAYERED: migration 20260827120000 STEP 6 arm (v-e) greps for that block
   --            and aborts the apply without it, so remove (v-e) too. With both
   --            gone this arm is the first failure in the file (MEASURED).
+  -- RED-UNDER-M: {"arm":"N1 1a","apply":[{"kind":"edit","file":"supabase/migrations/20260827120000_strategy_shares_generation_model.sql","find":"  IF NEW.generation > OLD.generation + 1 THEN\n    RAISE EXCEPTION 'strategy_shares: generation may advance by AT MOST ONE per statement — refusing to move it from % to % on strategy %. An unbounded jump does not merely skip numbers: it drives the counter to the BIGINT ceiling in ONE request from an ordinary owner token (they hold the STEP 2 UPDATE(generation) column grant, and rule (1) forbids only a DECREASE). After that, revoke_strategy_share and the GDPR Art. 17 erasure arm in migration 20260827130000 are the SAME generation + 1 statement, so both raise 22003 numeric_value_out_of_range and the data subject has WEDGED THEIR OWN ERASURE with one PATCH (MEASURED 2026-08-27). Bounding every advance to +1 is what makes that overflow unreachable by construction.',\n      OLD.generation, NEW.generation, OLD.strategy_id\n      USING ERRCODE = 'check_violation';\n  END IF;\n","replace":"","occurrences":1},{"kind":"edit","file":"supabase/migrations/20260827120000_strategy_shares_generation_model.sql","find":"  IF v_trigfn_s !~* 'NEW\\.generation\\s*>\\s*OLD\\.generation\\s*\\+\\s*1' THEN\n","replace":"  IF FALSE THEN\n","occurrences":1}]}
   raised := FALSE; err_msg := NULL;
   BEGIN
     UPDATE strategy_shares SET generation = 9223372036854775807 WHERE strategy_id = strat_a4;
@@ -1008,6 +1029,7 @@ BEGIN
   -- "bounded by ONE".
   -- RED-UNDER: change `OLD.generation + 1` to `OLD.generation + 2` in rule (6).
   --            No other arm in this file or in the migration moves.
+  -- RED-UNDER-M: {"arm":"N1 1b","apply":[{"kind":"edit","file":"supabase/migrations/20260827120000_strategy_shares_generation_model.sql","find":"  IF NEW.generation > OLD.generation + 1 THEN","replace":"  IF NEW.generation > OLD.generation + 2 THEN","occurrences":1},{"kind":"edit","file":"supabase/migrations/20260827120000_strategy_shares_generation_model.sql","find":"  IF v_trigfn_s !~* 'NEW\\.generation\\s*>\\s*OLD\\.generation\\s*\\+\\s*1' THEN\n","replace":"  IF FALSE THEN\n","occurrences":1}]}
   raised := FALSE; err_msg := NULL;
   BEGIN
     UPDATE strategy_shares SET generation = generation + 2 WHERE strategy_id = strat_a4;
@@ -1042,6 +1064,7 @@ BEGIN
   --    the identical `+ 1` and would abort the file first under the same
   --    mutation — leaving this arm structurally unobservable. Moving it after
   --    REVOKE 1 silently retires it. MEASURED red in this position.
+  -- RED-UNDER-M: {"arm":"N1 1c","apply":[{"kind":"edit","file":"supabase/migrations/20260827120000_strategy_shares_generation_model.sql","find":"  IF NEW.generation > OLD.generation + 1 THEN","replace":"  IF NEW.generation >= OLD.generation + 1 THEN","occurrences":1},{"kind":"edit","file":"supabase/migrations/20260827120000_strategy_shares_generation_model.sql","find":"  IF v_trigfn_s !~* 'NEW\\.generation\\s*>\\s*OLD\\.generation\\s*\\+\\s*1' THEN\n","replace":"  IF FALSE THEN\n","occurrences":1}]}
   gen_a4_pre := gen_a4;
   raised := FALSE; err_msg := NULL;
   BEGIN
@@ -1181,6 +1204,7 @@ BEGIN
   -- failure. MEASURED red that way, with the same three earlier layers removed
   -- as for OWNER 2d (column grant, body-text pin, trigger rule (0c)); an
   -- unconditional re-roll would be caught by OWNER 2d first.
+  -- RED-UNDER-M: {"arm":"REACTIVATE 1g","apply":[{"kind":"edit","file":"supabase/migrations/20260827120000_strategy_shares_generation_model.sql","find":"    SET revoked_at = NULL","replace":"    SET revoked_at = NULL, nonce = CASE WHEN strategy_shares.revoked_at IS NOT NULL THEN gen_random_uuid() ELSE strategy_shares.nonce END","occurrences":1},{"kind":"edit","file":"supabase/migrations/20260827120000_strategy_shares_generation_model.sql","find":"  IF v_create_s ~* 'INSERT\\s+INTO\\s+public\\.strategy_shares\\s*\\([^)]*\\mnonce\\M'\n     OR v_create_s ~* 'SET[^;]*\\mnonce\\s*=' THEN\n","replace":"  IF FALSE THEN\n","occurrences":1},{"kind":"edit","file":"supabase/migrations/20260827120000_strategy_shares_generation_model.sql","find":"  IF NEW.nonce IS DISTINCT FROM OLD.nonce THEN\n    RAISE EXCEPTION 'strategy_shares: nonce is immutable — refusing to rewrite the MAC witness on strategy %. The nonce is what makes a destroyed-and-recreated row land in a token space DISJOINT from every token ever issued; letting it be written back restores a recorded value and resurrects those tokens. STEP 2''s column grant already denies this to `authenticated`, so a write that reaches this rule came from a role that BYPASSES grants — service_role, which holds GRANT ALL and is on this feature''s hot path. A trigger is the only control on this table that binds it.',\n      OLD.strategy_id\n      USING ERRCODE = 'check_violation';\n  END IF;\n","replace":"","occurrences":1},{"kind":"edit","file":"supabase/migrations/20260827120000_strategy_shares_generation_model.sql","find":"  IF v_trigfn_s !~* 'NEW\\.nonce\\s+IS\\s+DISTINCT\\s+FROM\\s+OLD\\.nonce' THEN\n","replace":"  IF FALSE THEN\n","occurrences":1},{"kind":"sql","stmt":"GRANT UPDATE (nonce) ON strategy_shares TO authenticated"}],"neuter":[{"arm":"SHAPE 3b"},{"arm":"SHAPE 4d"},{"arm":"SHAPE 5b"}]}
   IF nonce_after IS DISTINCT FROM nonce_mint THEN
     RESET ROLE;
     RAISE EXCEPTION 'TEST FAILED (REACTIVATE 1g): the nonce changed from % to % across revoke -> re-share. The nonce is the row''s IDENTITY witness, not a second revocation counter: within one row''s life it must be constant, and rules (1)+(2) of the monotonicity trigger are what keep revoked links dead. A re-rolled nonce makes reactivation non-deterministic and would break SHARE-01 reuse for any recipient who reloads across a re-share.', nonce_mint, nonce_after;
@@ -1400,6 +1424,7 @@ BEGIN
   -- RED-UNDER: `GRANT UPDATE (strategy_id) ON strategy_shares TO authenticated`
   --            on the live database, SHAPE 3b neutered. First failure —
   --            MEASURED 2026-08-27.
+  -- RED-UNDER-M: {"arm":"TRIGGER 3c","apply":[{"kind":"sql","stmt":"GRANT UPDATE (strategy_id) ON strategy_shares TO authenticated"}],"neuter":[{"arm":"SHAPE 3b"}]}
   IF err_msg NOT LIKE '%permission denied%' THEN
     RESET ROLE;
     RAISE EXCEPTION 'TEST FAILED (TRIGGER 3c): the re-point was rejected, but NOT by the GRANT layer (got: %). `strategy_id` must not appear in any UPDATE grant to `authenticated`: with the column-scoped grant in force this statement cannot execute at all, which is a stronger guarantee than a trigger veto because it also covers columns added to this table in future. If this message is "strategy_id is immutable" then the grant was widened and only the trigger is left.', err_msg;
@@ -1416,6 +1441,7 @@ BEGIN
   -- unnoticed by every behavioural arm in this file.
   -- RED-UNDER: delete the `IF NEW.strategy_id IS DISTINCT FROM OLD.strategy_id`
   --            block from strategy_shares_enforce_monotonic_generation().
+  -- RED-UNDER-M: {"arm":"TRIGGER 3d-i","apply":[{"kind":"edit","file":"supabase/migrations/20260827120000_strategy_shares_generation_model.sql","find":"  IF NEW.strategy_id IS DISTINCT FROM OLD.strategy_id THEN\n    RAISE EXCEPTION 'strategy_shares: strategy_id is immutable — refusing to re-point the share row for strategy % at strategy %. The generation counter is only meaningful RELATIVE to the strategy it counts for. Moving it leaves the original strategy with NO share row, so the very next create_strategy_share() inserts a fresh one at generation 1 and re-issues every token that strategy ever had at generation 1 — including the ones that were explicitly REVOKED. Two requests, both legitimate for the row owner, same end state as rewinding the counter.',\n      OLD.strategy_id, NEW.strategy_id\n      USING ERRCODE = 'check_violation';\n  END IF;\n","replace":"","occurrences":1},{"kind":"edit","file":"supabase/migrations/20260827120000_strategy_shares_generation_model.sql","find":"  IF v_trigfn_s !~* 'NEW\\.strategy_id\\s+IS\\s+DISTINCT\\s+FROM\\s+OLD\\.strategy_id' THEN\n","replace":"  IF FALSE THEN\n","occurrences":1}]}
   RESET ROLE;
   SET LOCAL ROLE service_role;
   raised := FALSE;
@@ -1473,6 +1499,7 @@ BEGIN
   -- RED-UNDER: `GRANT UPDATE (created_at) ON strategy_shares TO authenticated`
   --            on the live database, SHAPE 3b neutered. First failure —
   --            MEASURED 2026-08-27.
+  -- RED-UNDER-M: {"arm":"TRIGGER 4b","apply":[{"kind":"sql","stmt":"GRANT UPDATE (created_at) ON strategy_shares TO authenticated"}],"neuter":[{"arm":"SHAPE 3b"}]}
   IF err_msg NOT LIKE '%permission denied%' THEN
     RESET ROLE;
     RAISE EXCEPTION 'TEST FAILED (TRIGGER 4b): the provenance rewrite was rejected, but NOT by the GRANT layer (got: %). No provenance column may appear in an UPDATE grant to `authenticated`; if this message is "identity and provenance are immutable" then the grant was widened and the trigger is the last line.', err_msg;
@@ -1489,6 +1516,7 @@ BEGIN
   -- choice even cleaner — only the trigger can refuse.
   -- RED-UNDER: delete the `NEW.created_at IS DISTINCT FROM OLD.created_at`
   --            clause from rule (0b).
+  -- RED-UNDER-M: {"arm":"TRIGGER 4c-i","apply":[{"kind":"edit","file":"supabase/migrations/20260827120000_strategy_shares_generation_model.sql","find":"\n     OR NEW.created_at IS DISTINCT FROM OLD.created_at THEN","replace":" THEN","occurrences":1},{"kind":"edit","file":"supabase/migrations/20260827120000_strategy_shares_generation_model.sql","find":"\n     OR v_trigfn_s !~* 'NEW\\.created_at\\s+IS\\s+DISTINCT\\s+FROM\\s+OLD\\.created_at'","replace":"","occurrences":1}]}
   RESET ROLE;
   SET LOCAL ROLE service_role;
   raised := FALSE;
@@ -1546,6 +1574,7 @@ BEGIN
   -- WHICH layer refused — never prints. MEASURED 2026-08-27: the run aborted
   -- with "strategy_shares: nonce is immutable", not with NONCE 1b.
   -- `WHEN OTHERS` plus the message pin below is what makes the arm reportable.
+  -- RED-UNDER-M: {"arm":"NONCE 1b","apply":[{"kind":"sql","stmt":"GRANT UPDATE (nonce) ON strategy_shares TO authenticated"}],"neuter":[{"arm":"SHAPE 3b"}]}
   raised := FALSE;
   BEGIN
     UPDATE strategy_shares SET nonce = gen_random_uuid() WHERE strategy_id = strat_a;
@@ -1607,6 +1636,7 @@ BEGIN
   --            So the failure this arm reports is now "the privilege wall is
   --            gone", not "the token was resurrected"; N1 2b is what would go
   --            red if the resurrection itself were reachable again.
+  -- RED-UNDER-M: {"arm":"NONCE 2a","apply":[{"kind":"sql","stmt":"GRANT INSERT (nonce) ON strategy_shares TO authenticated"}],"neuter":[{"arm":"SHAPE 3b"}]}
   raised := FALSE;
   BEGIN
     INSERT INTO strategy_shares (strategy_id, created_by, nonce)
@@ -1650,6 +1680,7 @@ BEGIN
   --            SUCCEEDS and lands at generation 1, not at 2^63-1 — the arm
   --            still fires on `NOT raised`, which is the privilege wall it
   --            actually measures.
+  -- RED-UNDER-M: {"arm":"NONCE 3","apply":[{"kind":"sql","stmt":"GRANT INSERT (generation) ON strategy_shares TO authenticated"}],"neuter":[{"arm":"SHAPE 3b"}]}
   raised := FALSE;
   BEGIN
     INSERT INTO strategy_shares (strategy_id, created_by, generation)
@@ -1687,6 +1718,7 @@ BEGIN
   --            BEFORE INSERT trigger setting `NEW.nonce =
   --            md5(NEW.strategy_id::text)::uuid`. SHAPE 1b stays GREEN (the
   --            column DEFAULT is untouched), and this arm is the only failure.
+  -- RED-UNDER-M: {"arm":"NONCE 4c","apply":[{"kind":"sql","stmt":"CREATE OR REPLACE FUNCTION public.zz_reproducible_nonce() RETURNS TRIGGER LANGUAGE plpgsql AS $zz$ BEGIN NEW.nonce := md5(NEW.strategy_id::text)::uuid; RETURN NEW; END; $zz$"},{"kind":"sql","stmt":"CREATE TRIGGER zz_reproducible_nonce BEFORE INSERT ON strategy_shares FOR EACH ROW EXECUTE FUNCTION public.zz_reproducible_nonce()"}]}
   SELECT c.nonce INTO nonce_a3_pre FROM public.create_strategy_share(strat_a3) c;
   IF nonce_a3_pre IS NULL THEN
     RESET ROLE;
@@ -1930,6 +1962,7 @@ BEGIN
   --    before the attempt, (null) after; raised=f`. That is tenant A clearing
   --    tenant B's tombstone, surviving the subtransaction because nothing
   --    raised, and being caught from outside it.
+  -- RED-UNDER-M: {"arm":"TENANT 5b","apply":[{"kind":"sql","stmt":"ALTER POLICY strategy_shares_owner ON strategy_shares USING (true) WITH CHECK (true)"},{"kind":"edit","file":"supabase/tests/test_strategy_shares_rls.sql","find":"    PERFORM public.create_strategy_share(strat_b);\n","replace":"    NULL;\n","occurrences":2,"nth":1},{"kind":"edit","file":"supabase/tests/test_strategy_shares_rls.sql","find":"    INSERT INTO strategy_shares (strategy_id, created_by) VALUES (strat_b, uid_a);\n","replace":"    NULL;\n","occurrences":1}],"neuter":[{"arm":"TENANT 1a"},{"arm":"TENANT 1b"},{"arm":"TENANT 2a"},{"arm":"TENANT 2b"},{"arm":"TENANT 3a"},{"arm":"TENANT 3b"},{"arm":"TENANT 4a"}]}
   SELECT revoked_at INTO b_revoked FROM strategy_shares WHERE strategy_id = strat_b;
   IF b_revoked_pre IS NULL
      OR b_revoked IS NULL
@@ -2280,6 +2313,7 @@ BEGIN
   --    migration 20260827120000's STEP 6 arm (ii-c) greps for it too and ABORTS
   --    THE APPLY — so both must go in the same mutation. With both gone this arm
   --    is the first failure (MEASURED).
+  -- RED-UNDER-M: {"arm":"SERVICE-ROLE 2f","apply":[{"kind":"edit","file":"supabase/migrations/20260827120000_strategy_shares_generation_model.sql","find":"\n     AND created_by = auth.uid()","replace":"","occurrences":1},{"kind":"edit","file":"supabase/migrations/20260827120000_strategy_shares_generation_model.sql","find":"  IF v_revoke_s !~* 'created_by\\s*=\\s*auth\\.uid\\s*\\(\\s*\\)' THEN\n","replace":"  IF FALSE THEN\n","occurrences":1}],"neuter":[{"arm":"SHAPE 4c"}]}
   SELECT revoked_at, generation INTO sr_rev_pre, sr_gen_pre
     FROM strategy_shares WHERE strategy_id = strat_a;
   PERFORM set_config('request.jwt.claims',
@@ -2354,6 +2388,7 @@ BEGIN
   -- would be satisfied by a rule that has nothing to do with the nonce.
   -- RED-UNDER: delete the `IF NEW.nonce IS DISTINCT FROM OLD.nonce` block from
   --            strategy_shares_enforce_monotonic_generation() (STEP 1b).
+  -- RED-UNDER-M: {"arm":"NONCE 5a","apply":[{"kind":"edit","file":"supabase/migrations/20260827120000_strategy_shares_generation_model.sql","find":"  IF NEW.nonce IS DISTINCT FROM OLD.nonce THEN\n    RAISE EXCEPTION 'strategy_shares: nonce is immutable — refusing to rewrite the MAC witness on strategy %. The nonce is what makes a destroyed-and-recreated row land in a token space DISJOINT from every token ever issued; letting it be written back restores a recorded value and resurrects those tokens. STEP 2''s column grant already denies this to `authenticated`, so a write that reaches this rule came from a role that BYPASSES grants — service_role, which holds GRANT ALL and is on this feature''s hot path. A trigger is the only control on this table that binds it.',\n      OLD.strategy_id\n      USING ERRCODE = 'check_violation';\n  END IF;\n","replace":"","occurrences":1},{"kind":"edit","file":"supabase/migrations/20260827120000_strategy_shares_generation_model.sql","find":"  IF v_trigfn_s !~* 'NEW\\.nonce\\s+IS\\s+DISTINCT\\s+FROM\\s+OLD\\.nonce' THEN\n","replace":"  IF FALSE THEN\n","occurrences":1}],"neuter":[{"arm":"SHAPE 5b"}]}
   SET LOCAL ROLE service_role;
   raised := FALSE;
   BEGIN
@@ -2440,6 +2475,7 @@ BEGIN
   --    aborts the apply — so both must be neutered in the same mutation or this
   --    file never runs. With both gone SANITIZE 1e is the first failure
   --    (MEASURED: "share row count is 0 after erasure, expected 1").
+  -- RED-UNDER-M: {"arm":"SANITIZE 1e","apply":[{"kind":"edit","file":"supabase/migrations/20260827130000_sanitize_user_revoke_strategy_shares.sql","find":"  UPDATE strategy_shares\n     SET revoked_at = now(),\n         generation = generation + 1\n   WHERE created_by = p_user_id\n     AND revoked_at IS NULL;\n","replace":"  DELETE FROM strategy_shares\n   WHERE created_by = p_user_id\n     AND revoked_at IS NULL;\n","occurrences":1},{"kind":"edit","file":"supabase/migrations/20260827130000_sanitize_user_revoke_strategy_shares.sql","find":"  IF v_body_stripped !~* 'UPDATE\\s+(?:public\\.)?strategy_shares\\s+SET\\s+revoked_at\\s*=\\s*now\\s*\\(\\s*\\)\\s*,\\s*generation\\s*=\\s*generation\\s*\\+\\s*1\\s+WHERE\\s+created_by\\s*=\\s*p_user_id\\s+AND\\s+revoked_at\\s+IS\\s+NULL' THEN\n","replace":"  IF FALSE THEN\n","occurrences":1},{"kind":"edit","file":"supabase/migrations/20260827130000_sanitize_user_revoke_strategy_shares.sql","find":"  IF v_body_stripped ~* '\\mDELETE\\s+FROM\\s+(?:public\\.)?strategy_shares\\M' THEN\n","replace":"  IF FALSE THEN\n","occurrences":1}]}
   SELECT count(*) INTO row_cnt FROM strategy_shares WHERE strategy_id = strat_a;
   IF row_cnt <> 1 THEN
     RAISE EXCEPTION 'TEST FAILED (SANITIZE 1e): the subject''s share row count is % after erasure, expected 1. sanitize_user must SOFT-revoke: deleting the row discards the generation counter, and the next create_strategy_share() would restart at generation 1 — resurrecting every already-revoked token. ⛔ Read this BEFORE SANITIZE 1c below: when the row is gone, 1c''s `SELECT revoked_at INTO` matches nothing, leaves the variable NULL and would report the erasure as having left the row LIVE — the exact opposite of a hard delete. That is why this arm is ordered first.', row_cnt;
@@ -2518,6 +2554,7 @@ BEGIN
   --    to state the consequence in the language the regulation is written in,
   --    and to fail if the erasure ever becomes abortable by a route rule (6)
   --    does not cover.
+  -- RED-UNDER-M: {"arm":"N1 3a","apply":[{"kind":"edit","file":"supabase/migrations/20260827120000_strategy_shares_generation_model.sql","find":"  IF NEW.generation > OLD.generation + 1 THEN\n    RAISE EXCEPTION 'strategy_shares: generation may advance by AT MOST ONE per statement — refusing to move it from % to % on strategy %. An unbounded jump does not merely skip numbers: it drives the counter to the BIGINT ceiling in ONE request from an ordinary owner token (they hold the STEP 2 UPDATE(generation) column grant, and rule (1) forbids only a DECREASE). After that, revoke_strategy_share and the GDPR Art. 17 erasure arm in migration 20260827130000 are the SAME generation + 1 statement, so both raise 22003 numeric_value_out_of_range and the data subject has WEDGED THEIR OWN ERASURE with one PATCH (MEASURED 2026-08-27). Bounding every advance to +1 is what makes that overflow unreachable by construction.',\n      OLD.generation, NEW.generation, OLD.strategy_id\n      USING ERRCODE = 'check_violation';\n  END IF;\n","replace":"","occurrences":1},{"kind":"edit","file":"supabase/migrations/20260827120000_strategy_shares_generation_model.sql","find":"  IF v_trigfn_s !~* 'NEW\\.generation\\s*>\\s*OLD\\.generation\\s*\\+\\s*1' THEN\n","replace":"  IF FALSE THEN\n","occurrences":1},{"kind":"edit","file":"supabase/tests/test_strategy_shares_rls.sql","find":"    UPDATE strategy_shares SET generation = 9223372036854775807 WHERE strategy_id = strat_a4;\n","replace":"    NULL;\n","occurrences":1},{"kind":"edit","file":"supabase/tests/test_strategy_shares_rls.sql","find":"    UPDATE strategy_shares SET generation = generation + 2 WHERE strategy_id = strat_a4;\n","replace":"    NULL;\n","occurrences":1}],"neuter":[{"arm":"N1 1a"},{"arm":"N1 1b"}]}
   PERFORM set_config('request.jwt.claims',
     json_build_object('sub', uid_b::text, 'role', 'authenticated')::text, true);
   SET LOCAL ROLE authenticated;

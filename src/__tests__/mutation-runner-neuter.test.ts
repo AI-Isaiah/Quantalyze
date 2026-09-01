@@ -1,0 +1,380 @@
+/**
+ * `neuterArm` — the abort-path cleanup must be neutered WITH the RAISE.
+ *
+ * WHY THIS FILE EXISTS. MEASURED 2026-08-29 (plan 164.3-08, first full-corpus
+ * run): neutering only the `RAISE EXCEPTION` left the failure branch's
+ * `RESET ROLE;` executing. In `supabase/tests/test_strategy_shares_rls.sql` the
+ * neutered arm's branch reads
+ *
+ *     IF NOT raised OR err_msg NOT LIKE '%AT MOST ONE%' THEN
+ *       RESET ROLE;
+ *       RAISE EXCEPTION 'TEST FAILED (N1 1a): …';
+ *     END IF;
+ *
+ * and it DOES execute under the mutation that neuters it — that is precisely
+ * why the arm needed neutering. The session therefore dropped from
+ * `authenticated` to the superuser session role for the entire rest of the
+ * file, and sixteen arms later `NO-DELETE 1`'s `DELETE FROM strategy_shares`
+ * succeeded because a superuser needs no grant. The runner reported
+ * `wrong-first-failure: NO-DELETE 1`.
+ *
+ * ⚠️ IT WAS LOUD ONLY BY LUCK. A leaked superuser role makes every downstream
+ * GRANT arm pass for a reason unrelated to the grant — a vacuous PASS inside
+ * the vacuity detector. Phase 164.4 backfills seventy more files against this
+ * primitive, so the guard is pinned here rather than left to the corpus.
+ *
+ * ⭐ ANTI-VACUITY. These cases fail when the absorption loop in `neuterArm` is
+ * removed: case 1 then finds a live `RESET ROLE;` outside the neutered range.
+ * Verified by single-point neuter on 2026-08-29 — see the SUMMARY.
+ */
+import { describe, expect, it } from "vitest";
+
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+
+import { ABSORBABLE_CLEANUP, BRANCH_HEAD_WORDS, neuterArm } from "../../scripts/mutation-runner/run.mjs";
+
+const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
+
+/**
+ * Executable (non-comment) lines matching a pattern. `run.mjs` is untyped, so
+ * the text is narrowed to `string` here rather than letting `any` propagate —
+ * an `any` would make every assertion below type-check vacuously.
+ */
+function executableLines(text: string, pattern: RegExp): string[] {
+  return text
+    .split("\n")
+    .filter((l: string) => !/^[ \t]*--/.test(l))
+    .filter((l: string) => pattern.test(l));
+}
+
+/** The exact shape the real corpus uses for a role-scoped arm. */
+const WITH_RESET = [
+  "  IF NOT raised THEN",
+  "    RESET ROLE;",
+  "    RAISE EXCEPTION 'TEST FAILED (ARM A): it did not bite';",
+  "  END IF;",
+  "  SELECT 1;",
+].join("\n");
+
+/** The same arm with no cleanup — nothing extra may be swallowed. */
+const WITHOUT_RESET = [
+  "  IF NOT raised THEN",
+  "    RAISE EXCEPTION 'TEST FAILED (ARM B): it did not bite';",
+  "  END IF;",
+  "  RESET ROLE;",
+].join("\n");
+
+describe("neuterArm absorbs the abort-path RESET ROLE", () => {
+  it("leaves no executable RESET ROLE inside the neutered branch", () => {
+    const result = neuterArm(WITH_RESET, "ARM A");
+    expect(result.found).toBe(true);
+
+    expect(
+      executableLines(result.text, /RESET\s+ROLE/i),
+      "the neutered branch still runs RESET ROLE, which leaks a superuser session into every later arm",
+    ).toEqual([]);
+  });
+
+  it("comments the RESET ROLE out rather than deleting it, so the mutation is readable", () => {
+    const result = neuterArm(WITH_RESET, "ARM A");
+    expect(result.text).toContain("-- NEUTERED(ARM A)     RESET ROLE;");
+    expect(result.text).toContain("-- NEUTERED(ARM A)     RAISE EXCEPTION 'TEST FAILED (ARM A)");
+    // The branch keeps a non-empty body.
+    expect(result.text).toContain("NULL; -- neutered ARM A by the mutation runner");
+  });
+
+  it("still neuters the RAISE itself — absorbing the cleanup must not shorten the range", () => {
+    const result = neuterArm(WITH_RESET, "ARM A");
+    expect(
+      executableLines(result.text, /RAISE\s+EXCEPTION/i),
+      "the RAISE survived — a neuter that silently did nothing is worse than none",
+    ).toEqual([]);
+  });
+
+  it("swallows nothing when the branch carries no cleanup", () => {
+    const result = neuterArm(WITHOUT_RESET, "ARM B");
+    expect(result.found).toBe(true);
+    // The trailing RESET ROLE belongs to the surrounding code, not the branch.
+    expect(executableLines(result.text, /RESET\s+ROLE/i)).toEqual(["  RESET ROLE;"]);
+  });
+
+  it("reports found:false for an arm that is not there, never a silent no-op", () => {
+    const result = neuterArm(WITH_RESET, "ARM MISSING");
+    expect(result.found).toBe(false);
+    expect(result.text).toBe(WITH_RESET);
+  });
+});
+
+describe("WR-07 — an abort-path statement it cannot classify is REFUSED, not leaked", () => {
+  // The absorbed set is one literal statement, and the header above says the
+  // RESET ROLE leak "was loud only by luck". Any other cleanup in an abort
+  // branch — RESET search_path, SET ROLE postgres, PERFORM set_config(…),
+  // ROLLBACK TO SAVEPOINT, a REVOKE — produces the identical silent leak into
+  // every later arm, and the loop absorbed none of them and said nothing.
+  //
+  // Refusing turns that leak into a NAMED `neuter-missed` defect. Louder is
+  // the whole point: a leak makes downstream arms pass for the wrong reason,
+  // which is a vacuous PASS inside the vacuity detector.
+
+  const LEAKY = (cleanup: string) =>
+    [
+      "  IF NOT raised THEN",
+      `    ${cleanup}`,
+      "    RAISE EXCEPTION 'TEST FAILED (ARM C): it did not bite';",
+      "  END IF;",
+      "  SELECT 1;",
+    ].join("\n");
+
+  const UNCLASSIFIABLE = [
+    "RESET search_path;",
+    "SET ROLE postgres;",
+    "PERFORM set_config('request.jwt.claims', NULL, true);",
+    "ROLLBACK TO SAVEPOINT s;",
+    "EXECUTE 'REVOKE EXECUTE ON FUNCTION public.f(UUID) FROM service_role';",
+  ];
+
+  for (const cleanup of UNCLASSIFIABLE) {
+    it(`refuses "${cleanup}" instead of leaving it live`, () => {
+      const result = neuterArm(LEAKY(cleanup), "ARM C");
+      expect(
+        result.found,
+        `neuterArm accepted an abort branch carrying "${cleanup}". Neutering only the RAISE leaves ` +
+          `it executing for the rest of the file.`,
+      ).toBe(false);
+      expect(result.reason).toContain("unrecognised statement before its RAISE");
+      expect(result.reason).toContain(cleanup);
+      // Refusal must not mutate the text — a half-applied neuter is worse than
+      // either outcome.
+      expect(result.text).toBe(LEAKY(cleanup));
+    });
+  }
+
+  it("still accepts the one shape it is allowed to absorb, and only that one", () => {
+    // Pinned so widening the absorbed set is a visible edit to an exported
+    // constant, reviewed on its own terms, rather than a regex tweak.
+    expect(ABSORBABLE_CLEANUP.source).toBe("^[ \\t]*RESET[ \\t]+ROLE[ \\t]*;[ \\t]*$");
+    expect(neuterArm(WITH_RESET, "ARM A").found).toBe(true);
+  });
+
+  it("blank lines and whole-line comments before the RAISE are not statements", () => {
+    const text = [
+      "  IF NOT raised THEN",
+      "    -- an explanatory comment",
+      "",
+      "    RAISE EXCEPTION 'TEST FAILED (ARM D): it did not bite';",
+      "  END IF;",
+    ].join("\n");
+    expect(neuterArm(text, "ARM D").found).toBe(true);
+  });
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // R3-C01 — THE ORACLE QUANTIFIES OVER THE CLASS, IT DOES NOT ENUMERATE IT
+  // ══════════════════════════════════════════════════════════════════════════
+  //
+  // ⛔ THIS BLOCK REPLACES A TEST THAT LOOKED LIKE AN ORACLE AND WAS NOT. Its
+  // predecessor was titled "INDEPENDENT ORACLE: no accepted neuter may leave a
+  // SET ROLE live" and was quantified over FIVE HAND-PICKED `--` comments. Two
+  // review rounds in a row closed the ONE embedding the reviewer had
+  // demonstrated and then declared the class closed; round 3 reached the same
+  // `SET ROLE` leak in minutes with three embeddings nobody had listed — a
+  // keyword in a single-quoted literal, in a block comment, and in a
+  // dollar-quoted body. A test that enumerates five instances is not an oracle
+  // over a class.
+  //
+  // So the inputs are GENERATED as a cross-product:
+  //
+  //     BRANCH_HEAD_WORDS  (imported from run.mjs — the implementation's own
+  //                         keyword list, so adding a keyword there widens
+  //                         this test automatically)
+  //   x EMBEDDINGS         (every syntactic context a keyword can sit in and
+  //                         NOT be a branch head)
+  //
+  // and the assertion is the leak class stated directly over the OUTPUT: no
+  // accepted neuter may leave a session-role change executing. Both directions
+  // are asserted — a genuine BARE-CODE branch head must still terminate the
+  // scan — so the fix cannot be "passed" by never terminating, which would
+  // refuse every arm in the real corpus.
+  //
+  // ⚠️ WHAT THIS STILL DOES NOT COVER, stated rather than implied: the
+  // embeddings are LINE-LOCAL. A literal, block comment or dollar-quoted body
+  // whose delimiters straddle a newline is not generated here, because
+  // `executableText` is a line classifier and would leave a fragment — which
+  // refuses (the loud direction), not leaks. A multi-line masking pass is a
+  // real remaining gap and is named in the fix report.
+
+  /**
+   * Every syntactic context in which a branch-head keyword is NOT a branch
+   * head. Each returns a single SQL line carrying `word` in that context.
+   */
+  const EMBEDDINGS: Record<string, (word: string) => string> = {
+    "line comment": (w) => `-- now raise the ${w.toLowerCase()} the harness looks for`,
+    "line comment, no space": (w) => `--${w} abort`,
+    "block comment": (w) => `/* now raise the ${w.toLowerCase()} the harness looks for */`,
+    "single-quoted literal": (w) => `PERFORM run_sql('${w}');`,
+    "literal mid-sentence": (w) => `PERFORM set_config('x', 'a ${w} b', false);`,
+    "dollar-quoted, tagged": (w) => `EXECUTE $q$ ${w} junk int; $q$;`,
+    "dollar-quoted, bare": (w) => `EXECUTE $$ ${w} junk int; $$;`,
+  };
+
+  /**
+   * The BARE-CODE spelling of each keyword: the line that genuinely IS a
+   * branch head, and on which the scan MUST terminate. Keyed by the same list
+   * the implementation exports, so a keyword added there without a bare-code
+   * spelling here fails the completeness assertion below rather than silently
+   * dropping out of the cross-product.
+   */
+  const BARE_CODE: Record<string, string> = {
+    THEN: "IF NOT raised THEN",
+    BEGIN: "BEGIN",
+    ELSE: "ELSE",
+    ELSIF: "ELSIF raised THEN",
+    LOOP: "FOR r IN SELECT 1 LOOP",
+    DECLARE: "DECLARE",
+    EXCEPTION: "EXCEPTION WHEN others THEN",
+  };
+
+  it("the cross-product is generated from the implementation's own keyword list", () => {
+    // Non-vacuity guard. If BRANCH_HEAD_WORDS were empty, or a keyword had no
+    // bare-code spelling, every generated arm below would silently vanish and
+    // the file would still report green.
+    expect(BRANCH_HEAD_WORDS.length).toBeGreaterThan(0);
+    expect(Object.keys(BARE_CODE).sort()).toEqual([...BRANCH_HEAD_WORDS].sort());
+    expect(Object.keys(EMBEDDINGS).length).toBeGreaterThan(0);
+  });
+
+  for (const word of BRANCH_HEAD_WORDS) {
+    for (const [embedding, render] of Object.entries(EMBEDDINGS)) {
+      it(`ORACLE: "${word}" in a ${embedding} must not end the scan`, () => {
+        const line = render(word);
+        const text = [
+          "  IF NOT raised THEN",
+          "    SET ROLE postgres;",
+          `    ${line}`,
+          "    RAISE EXCEPTION 'TEST FAILED (ARM E): it did not bite';",
+          "  END IF;",
+          "  SELECT 1;",
+        ].join("\n");
+
+        const result = neuterArm(text, "ARM E");
+
+        // The leak class, stated over the OUTPUT rather than over the scan's
+        // own rules: an accepted neuter that leaves a session-role change live
+        // is the measured RESET ROLE defect, whatever terminated the scan.
+        const leaked = result.found && executableLines(result.text, /SET\s+ROLE/i).length > 0;
+        expect(
+          leaked,
+          `neuterArm ACCEPTED the neuter and left "SET ROLE postgres;" executing. The only thing ` +
+            `between it and the RAISE was ${JSON.stringify(line)} — a ${embedding}, which is not ` +
+            `executable code and must never terminate the backward scan.`,
+        ).toBe(false);
+
+        // And it must refuse LOUDLY, naming the statement it could not
+        // classify — a silent `found: false` with a vague reason is how the
+        // next reader mis-diagnoses this. WHICH statement gets named depends on
+        // the embedding: a comment is skipped and the refusal names
+        // `SET ROLE postgres;`, while an executable line carrying the keyword
+        // inside a literal or a dollar-quoted body is itself the unclassifiable
+        // statement. Both are refusals and neither leaks, so the assertion is
+        // over the SHAPE of the refusal, not over which line it names.
+        expect(result.found).toBe(false);
+        expect(result.reason).toContain("unrecognised statement before its RAISE");
+        expect(
+          result.reason?.includes("SET ROLE postgres;") || result.reason?.includes(line),
+          `the refusal must NAME the statement it could not classify, so a reader can fix it. ` +
+            `Got: ${JSON.stringify(result.reason)}`,
+        ).toBe(true);
+      });
+    }
+
+    it(`ORACLE (other direction): bare-code "${BARE_CODE[word]}" MUST end the scan`, () => {
+      // Without this half the fix could be "passed" by never terminating at
+      // all, which refuses every arm in the real corpus while reporting green
+      // on every leak case above.
+      const text = [
+        `  ${BARE_CODE[word]}`,
+        "    RAISE EXCEPTION 'TEST FAILED (ARM G): it did not bite';",
+        "  END IF;",
+      ].join("\n");
+      expect(
+        neuterArm(text, "ARM G").found,
+        `${JSON.stringify(BARE_CODE[word])} is structurally a branch head and must terminate the ` +
+          `backward scan. A predicate that never terminates refuses the whole corpus.`,
+      ).toBe(true);
+    });
+  }
+
+  it("a REAL branch head still ends the scan even with a trailing comment after it", () => {
+    const text = [
+      "  IF NOT raised THEN -- the arm under test",
+      "    RAISE EXCEPTION 'TEST FAILED (ARM G): it did not bite';",
+      "  END IF;",
+    ].join("\n");
+    expect(neuterArm(text, "ARM G").found).toBe(true);
+  });
+
+  it("a legitimate block comment above a RAISE is not a spurious refusal", () => {
+    // The primitive was wrong in BOTH directions (R3-C01): a block comment
+    // carrying no keyword was refused as an "unrecognised statement", so an
+    // ordinary comment produced a `neuter-missed` defect.
+    const text = [
+      "  IF NOT raised THEN",
+      "    /* explanatory */",
+      "    RAISE EXCEPTION 'TEST FAILED (ARM H): it did not bite';",
+      "  END IF;",
+    ].join("\n");
+    expect(neuterArm(text, "ARM H").found).toBe(true);
+  });
+
+  it("REAL CORPUS: it refuses the four SERVICE-ROLE arms whose branches REVOKE before raising, and nothing else", () => {
+    // Measured, not asserted in the abstract. SERVICE-ROLE 2a-2d each drop two
+    // `EXECUTE 'REVOKE EXECUTE ON FUNCTION … FROM service_role'` statements
+    // before their RAISE. Neutering only the RAISE would revoke the grant that
+    // arms 2b/2c/2d themselves depend on, so every one of them would then fail
+    // with "permission denied" instead of for its real reason — the RESET ROLE
+    // class exactly. None of these arms is currently a neuter target, which is
+    // why the corpus still runs 30/30.
+    const gate = readFileSync(
+      join(REPO_ROOT, "supabase", "tests", "test_strategy_shares_rls.sql"),
+      "utf8",
+    );
+    const armIds = [...new Set([...gate.matchAll(/TEST FAILED \(([^)]*)\)/g)].map((m) => m[1]))];
+    expect(armIds.length).toBeGreaterThan(50);
+
+    const refused = armIds.filter((arm) => {
+      const r = neuterArm(gate, arm);
+      return !r.found && /unrecognised statement before its RAISE/.test(r.reason ?? "");
+    });
+    expect(refused.sort()).toEqual([
+      "SERVICE-ROLE 2a",
+      "SERVICE-ROLE 2b",
+      "SERVICE-ROLE 2c",
+      "SERVICE-ROLE 2d",
+    ]);
+  });
+
+  it("REAL CORPUS: every arm the annotations actually ASK to neuter is still classifiable", () => {
+    // The refusal above must not have broken the corpus. This asserts the
+    // property the full runner proves at 30/30, without needing PostgreSQL.
+    const gate = readFileSync(
+      join(REPO_ROOT, "supabase", "tests", "test_strategy_shares_rls.sql"),
+      "utf8",
+    );
+    const twin = /^[ \t]*--[ \t]*RED-UNDER-M:[ \t]*(\{.*\})[ \t]*$/;
+    const targets = new Set<string>();
+    for (const line of gate.split("\n")) {
+      const m = twin.exec(line);
+      if (m === null) continue;
+      const parsed = JSON.parse(m[1]) as { neuter?: Array<{ arm: string }> };
+      for (const n of parsed.neuter ?? []) targets.add(n.arm);
+    }
+    expect(targets.size).toBeGreaterThan(0);
+    for (const arm of targets) {
+      const r = neuterArm(gate, arm);
+      expect(r.found, `neuterArm refused "${arm}", which an annotation asks it to neuter: ${r.reason}`).toBe(
+        true,
+      );
+    }
+  });
+});

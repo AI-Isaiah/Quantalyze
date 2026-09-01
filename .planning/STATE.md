@@ -3,19 +3,19 @@ gsd_state_version: 1.0
 milestone: v1.20
 milestone_name: Backlog Burndown (Phases 158+)
 current_phase: 164.3
-current_phase_name: VACUITY — a control that cannot fail must be caught by machine, not by red team
-status: planned
-stopped_at: 164.3 RESEQUENCED to run first (founder-approved 2026-08-28). Its throwaway-PG lane + mutation runner are the substrate 164.1's gate work needs; five carry-overs moved 164.1 -> 164.3, three -> 164.2, PII-01 decided inline.
-last_updated: "2026-08-28T14:29:08.803Z"
-last_activity: 2026-08-28
-last_activity_desc: "Phase 164 SHARE shipped v0.76.0.0 (#720); post-deploy Sentry tag + contexts.trace.data token leaks fixed and secret-scan un-redded in v0.76.1.0 (#721). ROADMAP progress table reconciled: 159/161/161.1/162/164 were stale."
-state_head: 06c19a434b9f26cbd6c3ff120fb638b0b823286e
+current_phase_name: VACUITY — a control that cannot fail must be caught by machine
+status: executing
+stopped_at: "164.3 PLANNED — 10 plans in 5 waves, verified by gsd-plan-checker on iteration 3 of 3. Each of the first two iterations found an error-swallowing verify shape the previous had missed (|| fallback; then a `wc -l` tail and a printed-not-tested `grep -c`); all three removed. FIVE premises in this phase's own spec failed re-measurement: SKIP-01 (migrations DO reach TEST), OPS-08-F9 (floors already 8/166), criterion 4 (118 committed function bodies exist), the PROD-linked CI job (already exists, dissolving the phase's only human gate), and the corpus size (30 arm-anchored markers, not 33 — a grep counting its own documentation). NO founder-gated item remains."
+last_updated: "2026-08-29T22:08:18.727Z"
+last_activity: 2026-08-29
+last_activity_desc: Phase 164.3 execution started
+state_head: d2775455140d33e2a9e8c5537d31d469d2bdaf91
 progress:
-  total_phases: 13
-  completed_phases: 1
-  total_plans: 60
-  completed_plans: 57
-  percent: 8
+  total_phases: 14
+  completed_phases: 4
+  total_plans: 70
+  completed_plans: 66
+  percent: 29
 ---
 
 # Project State — Quantalyze
@@ -113,10 +113,10 @@ zero unclassified) and `161-VALIDATION.md` (Nyquist strategy, 4 Wave-0 gaps, ant
 
 ## Current Position
 
-Phase: 161 (WIZERR — Honest error surfaces) — EXECUTING
-Plan: 10 of 10
-Status: Waves 1-3 landing; 161-07..161-10 pending
-Last activity: 2026-08-24 — Phase 161 waves 1-3
+Phase: 164.3 (VACUITY — a control that cannot fail must be caught by machine) — EXECUTING
+Plan: 1 of 10
+Status: Executing Phase 164.3
+Last activity: 2026-08-29 — Phase 164.3 execution started
 
 ⚠️ Phase 160 remains OPEN on its human gate — see `## Deferred Verification`. Advancing this
 pointer to 161 does NOT close it; resume it only via `/gsd-verify-work 160`.
@@ -670,6 +670,9 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - FOUNDER RULING 2026-08-27: N2 DROPPED, 164-06 is N1-ONLY. Gate condition 3 closed as not-a-defect on measured evidence (3 interleavings x 2 concurrent sessions, all converge; both RPCs are single statements, no read-then-write window). Overrides the red-team corpus, which records N2 as [M]-severity. The prescribed remedy was the hazard: `revoked_at IS NULL` is the convergence contract and STEP 6 arm (i-b) guards it, so adding `SELECT ... FOR UPDATE` and rewriting that arm would have REMOVED the guard and created the counter-inflation bug. Re-opening requires new MEASURED evidence, not re-reasoning. N1 still reproduces and 164-06 still exists to close it.
 - Phase 164.3 inserted after Phase 164: VACUITY — mechanical detection of controls that cannot fail. Driver: phase 164 produced FIVE distinct vacuity mechanisms plus the DRIFT family; every one was GREEN in CI, survived review, and was found only by adversarial execution after a six-team red team. Deliverables are mechanisms not instances: a mutation runner over RED-UNDER annotations, the throwaway-Postgres CI lane (PROC-01), a static linter for the five measured shapes, and a repo-vs-PROD body diff before any whole-body CREATE OR REPLACE (DRIFT-02b). Ordered after 164.2 by number only. EXCLUDES the GSD-machinery gaps (depends_on unenforced, wave frontmatter drift, NYQ-01) — different system.
 - Phase 164.4 inserted after Phase 164.3: REDUNDER-BACKFILL: RED-UNDER coverage measured at 1 file of 71 at HEAD; 164.3 criterion 1 assumed all arms already annotated. HARD dep on 164.3 — its mutation runner is what makes a hand-authored RED-UNDER machine-checkable instead of a claim. (URGENT)
+- Phase 164.3.1 inserted after Phase 164.3: SOUND-PRIMITIVES: both mutation-runner primitives re-opened a FOURTH time (R4-C01 neuter scan, R4-C02 identity nonce). Blocks 164.4. (URGENT)
+- Phase 164.3.1 edited: scope widened from TWO primitives to FOUR (founder decision): adds PRIMITIVE C (VAC-04 reports PASS having compared nothing, WR-01 -> R2-W03 -> SP-C05 -> round 4) and PRIMITIVE D (a control whose own oracle or fixture agrees with it by construction); absorbs VAC04-C1..C4, AUDCOV-01, VAC-SELFREF-01, MUT-I01, MUT-W02; deliverables 4 -> 7; success criteria added. Only MUT-I02 and MUT-I03 remain in TODOS.
+- Phase 164.3.1 edited: added deliverables 8 (diagnostic-first) and 9 (VAC-08 regression instances + absurdity floor on VAC-04 and the mutation runner); widened PRIMITIVE C to both verdict directions after VAC-08's 253-of-262 mirror case; success criteria 7-9 added; sample-vs-corpus logged as a RULE, deliberately NOT a fifth primitive (one instance vs four reopenings for A-D)
 
 ### Decisions
 

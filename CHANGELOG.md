@@ -1,5 +1,70 @@
 # Changelog
 
+## [0.77.0.0] - 2026-08-29
+
+### A control that cannot fail is now caught by a machine, not by a reviewer
+
+No user-facing change and no production source change. Every line here is CI
+tooling, test infrastructure, or a committed schema artifact. What it buys: five
+separate times, a gate in this repo was green because it could not fail — a
+neutered arm that still passed, an assertion about a constant the test defined
+itself, a floor only reddenable by deleting its own producer. Each was found by a
+human reading code. From this release the machine finds them.
+
+### Added
+
+- **A mutation runner over annotated SQL gate arms.** For every arm carrying a
+  `RED-UNDER` annotation it applies the named mutation, asserts the file goes RED
+  with the right arm named, restores, and asserts GREEN. An annotation whose
+  mutation does not redden its arm now exits 1. It prints coverage as
+  `files_annotated / files_total` on every run against a ratchet floor pinned at
+  today's measured value, so a runner that passes while covering almost nothing
+  is itself a failure.
+- **A disposable-PostgreSQL lane** — one script with identical semantics locally
+  and in CI, hosting its own throwaway cluster. It stops and removes every cluster
+  it starts, including on failure and on interrupt, and allocates a free port per
+  run so concurrent agents no longer collide.
+- **A static linter for gate vacuity** with four rules, each shipped with a red
+  and a green fixture proving the rule can fire. The fifth measured shape is not
+  statically decidable in SQL text and is deliberately delegated to the mutation
+  runner rather than rounded up with a rule that could never fire.
+- **A repo-vs-PRODUCTION function-body diff**, running on migration pull requests.
+  It strips `--` comments before matching, because `pg_get_functiondef` returns
+  them and matching a comment is one of the vacuity shapes this release exists to
+  remove. When its credential is absent it exits 1 with an explicit error; it
+  never skips.
+- **A repo-vs-TEST ledger and body check** that joins migration history on `name`,
+  not `version` — the shared database re-stamps `version` at apply time, so the
+  obvious join reports drift that does not exist.
+- **A plan-anchor verifier**: every `file:line` anchor and named symbol a plan
+  asserts is re-resolved before execution, and a miss fails loud.
+- **The production schema baseline** (`supabase/schema/baseline.sql`) — a
+  reviewed, secret-scanned, verbatim schema dump with its provenance and sha256
+  recorded. It exists because the migration chain does not replay from empty:
+  69 of 262 migrations fail, one of them refusing by design on a database it
+  cannot identify.
+
+### Changed
+
+- Three new CI jobs (`sql-mutation`, `sql-gate-lint`, `plan-anchor-verify`) are
+  wired into the `frontend` aggregator in both its `needs:` list and its result
+  loop, so a failure there fails the aggregate rather than passing quietly.
+
+### Fixed
+
+- **The audit-coverage gate was blind to the single-line
+  `from(...).insert(...)` idiom.** The detector is fixed, its intended-behavior
+  test is un-skipped, and the census is re-run; the six routes it now surfaces
+  are pinned as an exact allowlist so the set cannot grow silently.
+
+### Not shipped
+
+- The csv-finalize race spec is **deferred**, recorded with its reason and an
+  owning phase rather than left as an unchecked box. Three of the gates above
+  have never executed against their real host or credential — an ubuntu runner,
+  the shared test database, and a production credential — and that is stated
+  rather than implied by a green board.
+
 ## [0.76.1.2] - 2026-08-28
 
 ### The plan for the next three phases described work two of them shared

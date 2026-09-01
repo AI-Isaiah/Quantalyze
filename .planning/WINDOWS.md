@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 23
+open_count: 26
 waived_count: 0
-fixed_count: 1
-total_count: 24
-last_updated: 2026-08-27T22:54:37.686Z
+fixed_count: 2
+total_count: 28
+last_updated: 2026-08-29T09:24:22.877Z
 ---
 
 # Broken Windows Ledger
@@ -39,6 +39,10 @@ last_updated: 2026-08-27T22:54:37.686Z
 | 22 | 164 | unrun-verify | src/instrumentation.ts |  | Sentry token scrub proven only at wiring+transform level; a REAL captured event on a deployed token URL is unread (164-CONTEXT.md Blocker 3 mandates it) — post-deploy UAT | open |  | 2026-08-27T22:54:22.410Z |  |
 | 23 | 164 | deviation | src/app/factsheet-share/gone/route.ts | 77 | 164-01 comment + test name repeat the FALSE claim that Referrer-Policy 'does not strip' the path; the header is correct, the stated reason is not. Needs a one-line correction pass. | open |  | 2026-08-27T22:54:30.377Z |  |
 | 24 | 164 | unrun-verify | src/app/PlausibleScript.tsx |  | Plausible withdrawal proven in jsdom markup only; the deployed check (network panel filtered to plausible.io shows ZERO requests on a token link) is post-deploy UAT | open |  | 2026-08-27T22:54:37.686Z |  |
+| 25 | 164.3 | unrun-verify | scripts/prod-body-drift-check.sh |  | VAC-04's first real-PROD execution pends the next migrations PR; the live supabase db dump path is stub-proven only | open |  | 2026-08-29T02:10:57.580Z |  |
+| 26 | 164.3 | unrun-verify | scripts/test-ledger-drift-check.sh |  | VAC-08's first real-TEST execution pends the next CI run of this branch; the name-joined schema_migrations query and pg_get_functiondef read are stub-proven only (this plan may not write to the shared TEST database) | open |  | 2026-08-29T02:11:06.140Z |  |
+| 27 | 164.3 | unmet-truth | scripts/mutation-runner/run.mjs | 123 | ARMS_FLOOR ships at 0 and therefore cannot fire; plan 164.3-08 must pin it from the first full-corpus measurement | fixed |  | 2026-08-29T02:54:49.352Z | 2026-08-29T08:58:19.520Z |
+| 28 | 164.3 | unrun-verify | .github/workflows/ci.yml |  | sql-mutation's first ubuntu execution pends the first CI run of this branch: RESEARCH assumption A1 (PostgreSQL 16 server binaries under /usr/lib/postgresql/<major>/bin) has never been measured — the lane, the runner and the job were all built on macOS, where the probe reports no such glob. A red first run names a real portability defect. | open |  | 2026-08-29T09:24:22.877Z |  |
 
 ````json
 [
@@ -328,6 +332,66 @@ last_updated: 2026-08-27T22:54:37.686Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-08-27T22:54:37.686Z",
+    "resolved_at": null
+  },
+  {
+    "id": 25,
+    "kind": "unrun-verify",
+    "phase": "164.3",
+    "file": "scripts/prod-body-drift-check.sh",
+    "line": null,
+    "description": "VAC-04's first real-PROD execution pends the next migrations PR; the live supabase db dump path is stub-proven only",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-08-29T02:10:57.580Z",
+    "resolved_at": null
+  },
+  {
+    "id": 26,
+    "kind": "unrun-verify",
+    "phase": "164.3",
+    "file": "scripts/test-ledger-drift-check.sh",
+    "line": null,
+    "description": "VAC-08's first real-TEST execution pends the next CI run of this branch; the name-joined schema_migrations query and pg_get_functiondef read are stub-proven only (this plan may not write to the shared TEST database)",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-08-29T02:11:06.140Z",
+    "resolved_at": null
+  },
+  {
+    "id": 27,
+    "kind": "unmet-truth",
+    "phase": "164.3",
+    "file": "scripts/mutation-runner/run.mjs",
+    "line": 123,
+    "description": "ARMS_FLOOR ships at 0 and therefore cannot fire; plan 164.3-08 must pin it from the first full-corpus measurement",
+    "status": "fixed",
+    "reason": "",
+    "recorded_at": "2026-08-29T02:54:49.352Z",
+    "resolved_at": "2026-08-29T08:58:19.520Z"
+  },
+  {
+    "id": 28,
+    "kind": "unrun-verify",
+    "phase": "164.3",
+    "file": ".github/workflows/ci.yml",
+    "line": null,
+    "description": "sql-mutation's first ubuntu execution pends the first CI run of this branch: RESEARCH assumption A1 (PostgreSQL 16 server binaries under /usr/lib/postgresql/<major>/bin) has never been measured — the lane, the runner and the job were all built on macOS, where the probe reports no such glob. A red first run names a real portability defect.",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-08-29T09:24:22.877Z",
+    "resolved_at": null
+  },
+  {
+    "id": 29,
+    "kind": "unmet-truth",
+    "phase": "164.3",
+    "file": "supabase/schema/baseline.sql",
+    "line": null,
+    "description": "supabase/schema/baseline.sql is committed with NO staleness gate AND NO consumer. sql-function-snapshot.yml gates supabase/schema/functions/; nothing gates this file, so production can drift from it silently. CORRECTED 2026-08-29 (WR-04/G1): this entry previously said 'the lane would keep loading stale bytes as if current', which described a wiring that does not exist — scripts/local-stack/run.sh:50 reads the gitignored scripts/local-stack/baseline.sql, so `run.sh up` exits 1 FATAL and reads nothing. Phase 164.5 owns all three together: repoint run.sh, drop .gitignore:138, and build the --check gate (including a sha256 assertion against BASELINE.md's recorded hash). Mind the 2.84.2-vs-2.98.2 pg_dump formatting skew when doing so.",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-08-29T11:35:00.000Z",
     "resolved_at": null
   }
 ]

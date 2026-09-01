@@ -26,6 +26,31 @@ items were dropped, not carried. Categories: **Fix now** / **Fix mid-term** / **
 
 ## 🔴 FIX NOW — live correctness, trust-boundary security, active go-live
 
+0.005. **`[SHARE-HOST-01]` Every private share link a user copies points at the UNBRANDED host.**
+   MEASURED on production 2026-08-28 while discharging Phase 164's browser UAT. Standing on
+   `https://quantalyze.xyz/strategies`, signed in, `POST /api/strategies/<id>/share` returned
+   `{"url":"https://quantalyze-rho.vercel.app/factsheet-share/<token>"}`. So the owner copies a
+   `vercel.app` link and the recipient sees a host that is not the product.
+   **Cause, exactly:** `resolveAppUrl` (`src/app/api/strategies/[id]/share/route.ts:107-109`)
+   prefers `NEXT_PUBLIC_APP_URL` over the request `origin`, and that variable is
+   `https://quantalyze-rho.vercel.app` in **Vercel Production AND Preview** (read from a clean
+   directory, not from a repo-local `.env`). The origin fallback at `:111-119` is therefore dead
+   in every deployed environment.
+   **Two distinct consequences, both live:**
+   1. User-facing trust — a private factsheet link to an investor arrives on a domain the sender
+      never showed them. The one surface whose whole job is "share this safely".
+   2. Preview mints PRODUCTION-host links. A share created on a preview deploy resolves against
+      production, which crosses an environment boundary that `.env.example`'s own
+      `SHARE_TOKEN_SECRET` note (`Do NOT reuse one value across environments`) exists to keep shut.
+   **Fix shape (not taken here — it is a config + one-line decision):** either set
+   `NEXT_PUBLIC_APP_URL` per environment to the branded host, or drop the env-var preference and
+   let `resolveAppUrl` use the request origin, which is already correct by construction and is
+   what the sibling scenario-share route would want too. ⚠️ Do NOT "fix" this by hardcoding a
+   host — the localhost fallback at `:121` is load-bearing for local dev.
+   ⛔ NOT affected: token derivation, revocation, or the 410 lane. The link WORKS; it is the host
+   that is wrong. Full loop verified green in `164-VERIFICATION.md` human item 4.
+
+
 0.01. **📋 PHASE 164.1 SCOPE — single source. Collected 2026-08-25; the phase does NOT exist yet.**
    Create with `/gsd-phase --insert 164` (decimal phases land AFTER their integer, so 164.1 sits
    between 164 and 165). Build the CONTEXT from THIS list rather than re-deriving it.
@@ -1038,6 +1063,64 @@ true for 146 and half of 142–145, and **false for 141**.
 
 ## 🟡 FIX MID-TERM
 
+- [ ] **Two cosmetic verify-precision notes from Phase 164.3's plan gate (logged 2026-08-29).**
+      Neither is user-facing nor data-integrity, so neither blocked the phase — recorded so they are
+      not re-derived.
+      1. `164.3-02-PLAN.md` Task 3 asserts the OPS-08-F9 floors with `grep -a "SENTINEL_FLOOR=8"`,
+         which would also match `SENTINEL_FLOOR=80` or a comment containing the string. It is
+         verify-and-record of an ALREADY-DONE raise (floors are 8 and 166 at `ci.yml:1738-1739`),
+         not a shipped control, so a loose match cannot hide a regression here. Tighten to an
+         anchored exact match if the arm ever becomes load-bearing.
+      2. `164.3-07-PLAN.md` Task 1's verify masks the status of its `local-stack ... down` teardown
+         (`up && test; RC=$?; down; exit $RC`). That is deliberate — it preserves the TEST verdict
+         rather than letting a teardown hiccup overwrite it — and orphaned containers are caught
+         independently by the lane's `--self-test` no-containers assertion and by the next `up`.
+
+
+- [ ] **`[VAC-07-DEFER]` Phase 164.3 plan 07 (VAC-07) was DEFERRED 2026-08-29 by founder decision — owned by Phase 164.5.**
+      Booked 2026-08-29 (verification gap G2). Before this, the deferral existed only as an
+      unchecked ROADMAP checkbox: no date, no reason, no owning phase. An unchecked box is
+      inferable, not recorded — and it left Phase 159's two blocked items naming a completed
+      phase as their unblocker.
+      **The measurement that forced it** (plan 04, recorded in `scripts/local-stack/REPLAY-SPIKE.md`):
+      the migration chain does NOT replay from empty. 262 migration files, **69 fail / 193 apply**,
+      under BOTH the Supabase CLI and plain `psql`, from at least **six independent root causes** —
+      one of which, `20260823120000_revoke_api_keys_insert.sql`, refuses **BY DESIGN** to run
+      against a database it cannot identify and therefore can never replay onto a fresh local DB.
+      So `supabase db reset` cannot be the lane's schema source, and the substrate became a
+      committed schema dump (`supabase/schema/baseline.sql`) — a separate act of work from the spec.
+      **Delivered:** `scripts/local-stack/run.sh` — the Supabase-CLI local-stack lane, with a
+      trapped teardown, a `[db.migrations]`-disabled derived workdir, a mode-600 env handoff, and a
+      baseline loader that REFUSES rather than degrading to the 193-of-262 partial schema. It fails
+      loud and tears down; measured.
+      **NOT delivered:** the csv-finalize race spec itself. **VAC-07 is not satisfied** and
+      `.planning/REQUIREMENTS.md` keeps it `Pending`.
+      **Phase 164.5 must, in one change:** (a) repoint `scripts/local-stack/run.sh:50` at the
+      committed `supabase/schema/baseline.sql` — today it reads the gitignored, non-existent
+      `scripts/local-stack/baseline.sql`; (b) drop `.gitignore:138`; (c) add the baseline staleness
+      gate (WINDOWS 29 / DRIFT-05) including a sha256 assertion against `supabase/schema/BASELINE.md`;
+      (d) THEN write the spec — two concurrent `csv-finalize` POSTs on one never-classified
+      `wizard_session_id`; exactly one 2xx applied receipt, one honest raced refusal, `category_id`
+      holds the winner.
+      Full record: `.planning/phases/164.3-vacuity-a-control-that-cannot-fail-must-be-caught-by-machine/164.3-07-DEFERRED.md`.
+
+- [ ] **`[VAC-04-ROLE]` Swap Phase 164.3's repo-vs-PROD body diff onto a zero-table-grant role.**
+      Booked 2026-08-29 as the deferred half of a founder ruling, so it is not lost.
+      **Current state (deliberate, not an oversight):** VAC-04 runs as a step inside
+      `.github/workflows/migration-drift-check.yml` and reuses the `SUPABASE_ACCESS_TOKEN` +
+      `SUPABASE_DB_PASSWORD` that job already carries. That was chosen over minting a second prod
+      credential, because the secret is already in that job's blast radius on every migrations PR —
+      adding a step widens nothing, while a new secret would have been a second copy of prod access
+      rather than a smaller one.
+      **The improvement:** `pg_get_functiondef` needs NO table privileges, so a role with zero
+      grants can do the whole job. A credential whose permitted actions are legible from its name
+      beats a shared one whose are not.
+      **Done when:** a login role with no table grants exists, its DSN is a CI secret, VAC-04 reads
+      only that, and the check still exits 1 (never skips) when it is absent.
+      ⚠️ Not urgent and not blocking: this changes WHICH credential is used, not whether the control
+      works. Do not let it gate the phase.
+
+
 ### RANK-SPLAT-01 — the anon metrics surface is unbounded by construction (booked 2026-08-26)
 
 Booked by founder ruling while closing Phase 159's product call. RANK-02 itself is ACCEPTED as
@@ -1719,6 +1802,25 @@ these four are the deliberate carry-overs, each with the reason it was not fixed
   either run every file and aggregate failures at the end, or make the expected-red state
   a first-class, per-file declaration the runner understands.
 
+  ⚠️ **STILL OPEN. Phase 164.3 plan 05 did NOT close this class — read carefully before
+  ticking it off.** That plan built a NEW tool, `scripts/mutation-runner/run.mjs`, which
+  aggregates across arms by design: it runs every annotated arm, collects defects into one
+  table, and only then exits (first-failure identity is asserted WITHIN an arm's run, never
+  ACROSS arms). So the run-all-and-aggregate shape now exists in the repo and is proven by
+  `--self-test`.
+
+  But that is a *second* runner standing beside the problem, not a fix to it. **The
+  pre-existing `sql-tests` loop in `.github/workflows/ci.yml` is untouched and still exits on
+  first failure**, so the ~40-of-~70 suppression described above is exactly as live today as
+  when this item was written. Converting that loop is a riskier edit to a live gate that
+  guards production migrations, and it was deliberately deferred rather than bundled into a
+  plan whose subject was the mutation runner.
+
+  Recording this explicitly because the tempting summary — "164.3 added arm aggregation, so
+  F8 is handled" — would be a claim about a different artifact than the one this item names.
+  That substitution is the precise defect class Phase 164.3 exists to catch, and it would be
+  a poor look to commit it in the ledger entry for the phase's own work.
+
 ### Phase 163 / OPS-08 — TEST runs an OLDER REVISION of `_enqueue_compute_job_internal` (added 2026-08-26, corrected + root-caused 2026-08-26)
 
 Found while pre-flighting the OPS-08 migration's gate arms against both databases. Three
@@ -1923,14 +2025,30 @@ worse than that — re-measuring changed the **count**, not just the coordinates
 The comment in `audit-coverage.test.ts` now carries the re-measured list, the method that
 produced it, and a warning not to trust the numbers past the next refactor.
 
-⚠️ **Those six sites remain UNFIXED and unaudited.** SEC-03 only put
-`add_wizard_composite_key` under the audit law; it did not fix `findMutations`. H-0001
-stays deferred.
+✅ **DETECTOR HALF CLOSED 2026-08-29 — Phase 164.3 plan 03, commit `311ac9cd`.**
+(Corrected 2026-08-29, verification gap G4: everything below this line previously read
+"H-0001 stays deferred" and asked for a fix that had already landed, which would have sent
+the next reader to redo finished work.)
 
-- **[H-0001] Fix `findMutations`' single-line `from(...).insert(...)` detection**, then
-  un-skip the intended-behavior test and re-run the census. Until then the audit-coverage
-  gate is blind to the single-line idiom at six known call sites, and a seventh can appear
-  without anything going red.
+What plan 03 actually did, re-measured at HEAD:
+
+- `findMutations` no longer anchors the mutator to the start of a line, so the single-line
+  idiom `const { error } = await supabase.from('trades').insert(batch);` is visible;
+- the intended-behavior test is **un-skipped and live** — `grep -c '\.skip('
+  src/__tests__/audit-coverage.test.ts` returns **0**;
+- the census was re-run and the six sites are pinned as an EXACT SET in
+  `H_0001_UNCOVERED_ALLOWLIST`, asserted in both directions: a new uncovered site is red,
+  and an allowlisted site that gets covered is *also* red so the list cannot rot.
+
+⚠️ **What remains open, and it is not a detector problem.** The **six allowlisted ROUTES**
+are still unaudited — `add_wizard_composite_key` aside, SEC-03 put none of them under the
+audit law. Bringing each under it is a per-site compliance judgment (which actor, which
+event shape, which failure mode), not a regex change.
+
+- **[H-0001] Bring the six `H_0001_UNCOVERED_ALLOWLIST` routes under the audit law**, one
+  per-site decision at a time, shrinking the allowlist as each lands. The gate is no longer
+  blind — a SEVENTH site now goes red on arrival — so this is a bounded backlog rather than
+  an open hole.
 
 **Lesson worth keeping:** a census recorded as prose in a comment decays silently and
 asymmetrically — it under-reported by two AND pointed at one site that no longer existed.
@@ -3153,6 +3271,9 @@ EXECUTED, §str/None follow-through, §Discovery observation).
       `csv_daily_returns` (a *different* table from the `strategy_analytics.daily_returns` the
       census confirmed). If they do not, `run_csv_strategy_analytics` fails with "Insufficient
       CSV history" and D-162-1's fence fires for all 15 → unpublish, and say so.
+
+  </details>
+
 - [ ] **Two `strategy_analytics` rows still render raw exception prose, and their only
       re-write path is a dead job kind.** `ec722557-7781-44db-8f2c-edbe252957c0`
       (`pending_review`) and `8581f739-1a7b-42a4-a209-3acfa327e259` (**published**) each carry
@@ -3200,7 +3321,18 @@ EXECUTED, §str/None follow-through, §Discovery observation).
       into a shared helper both render paths import) and add a grid case for a `failed` row
       carrying a fresh `computed_at` — no such case exists today, so the missing half is
       currently unpinned on the grid side.
-- [ ] **FOUNDER CALL — is `HONEST-02` satisfied by an adjacent honest line, or must the badge
+- [x] **✅ RULED + FIXED IN CODE 2026-08-26 (recorded here 2026-08-28) — the badge itself stopped
+      reading FRESH; the adjacent-line-only option was NOT taken.** `SyncBadge` now derives from
+      `resolveEffectiveRecency(computedAt, seriesEnd)` (`SyncBadge.tsx:99`, `src/lib/freshness.ts`),
+      i.e. the STALER OF THE TWO clocks, and renders `Track record ends {when}` when the series is
+      the binding one (`:113`, `:135`). `HONEST-02` is `- [x]` / `Complete` in REQUIREMENTS (:63, :208).
+      Pinned by `FactsheetView.chip-honesty.test.tsx` and `SyncBadge.staler-of-two.test.tsx`, both
+      written to name the EXACT label and tone token per input rather than asserting the absence of
+      the word "fresh" — the vacuous shape that let the bug ship in the first place. Everything below
+      this line is the SUPERSEDED pre-ruling record, kept for the reasoning.
+      <details><summary>Superseded pre-ruling record</summary>
+
+**FOUNDER CALL — is `HONEST-02` satisfied by an adjacent honest line, or must the badge
       itself stop reading FRESH?** Requirement: *"the factsheet freshness **badge** reflects
       series recency — a strategy whose return series ended 89 days ago cannot read FRESH."*
       Plan 162-07 shipped D-162-2's recency line ("Track record through {date}", keyed on the
@@ -3210,7 +3342,20 @@ EXECUTED, §str/None follow-through, §Discovery observation).
       claim in isolation — user-facing by the stopping rule — but D-162-2 was a founder
       decision, so the scope call is the founder's. **The checkbox stays OPEN; do not tick
       HONEST-02 at phase close without a ruling.**
-- [ ] **FOUNDER CALL — may a permanently-inconclusive root cause close `HONEST-01`?** The
+</details>
+
+- [x] **✅ RULED 2026-08-26 BY SPLIT (recorded here 2026-08-28) — neither closed-as-inconclusive nor
+      left blocking.** Commit `578ad5f3` ("split HONEST-01, close HONEST-03 by deletion of the example
+      cohort") separated the conjunction: the delivered half (leaked text curated at the write
+      boundary) closes as `HONEST-01`, now `- [x]` / `Complete` in REQUIREMENTS (:50, :205); the
+      inconclusive half became its OWN requirement, `HONEST-07` (:51), which remains `- [ ]` and
+      carries the pinned search key forward. So the answer to the question as posed is: a
+      permanently-inconclusive root cause does NOT close a requirement — it gets its own, and stays
+      open there, instead of being absorbed into a tick. No regression test was minted for a compare
+      never shown to be the raiser. Everything below this line is the SUPERSEDED pre-ruling record.
+      <details><summary>Superseded pre-ruling record</summary>
+
+**FOUNDER CALL — may a permanently-inconclusive root cause close `HONEST-01`?** The
       requirement is a conjunction: the leaked text mapped at the writer, **with** the
       underlying `str`/`None` compare root-caused. First half delivered (162-02). Second half
       is `inconclusive` **as a decided verdict, not as unfinished work**: stage
@@ -3222,6 +3367,8 @@ EXECUTED, §str/None follow-through, §Discovery observation).
       with Sentry, the search key is exact: kind `poll_positions`, 2026-06-10 … 2026-06-14, two
       strategy ids. ⚠️ The kind has been silent fleet-wide since 2026-06-14, so absence of
       recurrence is **not** evidence of a fix.
+</details>
+
 - [ ] **`.planning/WINDOWS.md` loses entries under concurrent appends — measured, with data
       already lost once.** `gsd-tools windows append` does read-modify-write over the whole
       file, so parallel wave agents clobber each other. Observed on 2026-08-26: at commit
@@ -4770,3 +4917,52 @@ follows is what was deliberately left, with the reason.
   - `supabase/tests/test_ledger_refresh_composite_arm.sql:82` — "having executed ZERO of arms A-I"
     left as-is deliberately: it is a dated record of a measurement taken when the file had arms A–I.
     Editing it to A–J would misstate what was measured.
+
+- [ ] **[DRIFT-04] `create_allocator_connected_strategy` exists in PROD under no migration** — surfaced 2026-08-29 by diffing `supabase/schema/baseline.sql` function names against `supabase/schema/functions/` (119 in PROD vs 118 snapshotted). It is `SECURITY DEFINER`, `OWNER TO postgres`, `SET search_path TO public,pg_catalog`, and `GRANT ALL ... TO authenticated` — so every logged-in session can reach it at `/rest/v1/rpc/`. It writes encrypted credential material (`p_api_key_encrypted`, `p_api_secret_encrypted`, `p_passphrase_encrypted`, `p_dek_encrypted`, `p_nonce`, `p_kek_version`) into `api_keys` + `strategies` + `portfolio_strategies`. Its own COMMENT cites "migration 043", a legacy numbered file absent from this repo. Nothing in `src/` calls it (`database.types.ts` is generated FROM the DB, so it proves existence, not use). Body guards look correct from the dump: raises without an auth session, raises when `p_user_id` != `auth.uid()`, checks portfolio ownership — **no exploit is claimed**. The issue is governance: an authenticated-reachable SECDEF credential-writing RPC that no file in this repo defines, that no PR ever reviewed, and that any hardening of the wizard RPCs (incl. Phase 156 CONNECT-REFACTOR) silently will not cover. **FOUNDER DECISION 2026-08-29: DROP it.** Adopt-then-drop was the earlier recommendation and it no longer holds — committing `supabase/schema/baseline.sql` secured reversibility (the verbatim body is in git; a revert migration can be cut from the file), which was adopt-first's whole justification. What remains of adopt-first is two production DDL changes instead of one, plus transcription risk: `CREATE OR REPLACE` with a body differing even slightly from live IS a production behaviour change, and pg_dump's rendering is not the original source. MEASURED 2026-08-29: the function still WORKS (it supplies all four `api_keys` NOT NULL-without-default columns) and is PostgREST-exposed (present in the `public` schema `Functions` block of the generated `database.types.ts`), so this is not dead-by-decay. Migration shape, owned by Phase 164.5: `DROP FUNCTION public.create_allocator_connected_strategy(<exact 11 arg types>)` with **NO `IF EXISTS` and NO `CASCADE`** — `IF EXISTS` silently no-ops on a signature mismatch (a vacuous pass) and `CASCADE` silently removes dependents. Pre-flight must (a) assert the live body matches `baseline.sql` and abort otherwise, (b) assert zero dependent objects, (c) read `pg_stat_statements` for call evidence and **abort saying so when it is unavailable — never infer zero calls from an absent measurement**. NOT in 164.3: production DDL on a credential surface gets its own review. ⚠️ One unverified claim to settle first (the drop makes it moot either way): the function's COMMENT asserts `source='allocator_connected'` keeps the row off Discovery; `src/lib/strategy-sources.ts` only enumerates the value and the actual Discovery/ranking filter was NOT traced. If that filter does not hold, this is ranking integrity, not governance.
+- [ ] **[DRIFT-05] add the PROD→snapshot direction to the function-snapshot gate** — today `dump-sql-functions.ts --check` compares migrations→snapshot and is hermetic by design, so a function present in PROD but in no migration is absent from its input and therefore from its diff: structurally invisible, permanently green. `supabase/schema/baseline.sql` makes the missing direction computable; a name-set diff is a two-line assertion. This is how DRIFT-04 would have been caught years ago. **FOUNDER DECISION 2026-08-29: build it, as TWO gates in Phase 164.5, and do not conflate them.** (a) HERMETIC name-set diff, both directions, comparing two COMMITTED files — `baseline.sql`'s function names against `supabase/schema/functions/*.sql`. No credentials, no Docker, no network, cannot flake; a third assertion inside `dump-sql-functions.ts --check`. It catches the DRIFT-04 class but only AS OF THE LAST BASELINE REFRESH. (b) baseline-vs-LIVE staleness — needs credentials, so it rides the PR-triggered credentialed job VAC-04 already uses; this is WINDOWS.md 29. Shipping (a) while believing it covers (b) would be a control that reads green while blind — the exact defect class Phase 164.3 exists to eliminate. Build (a) first: it costs nothing and closes the measured hole.
+- [ ] **[SEC-DRIFTPATHS-01] ⚖️ FOUNDER DECISION NEEDED — confirm the `Production` environment carries REQUIRED REVIEWERS.** Raised 2026-08-29 by the Phase 164.3 ship-stage security specialist. `.github/workflows/migration-drift-check.yml` runs `environment: Production` with `SUPABASE_DB_PASSWORD` + `SUPABASE_ACCESS_TOKEN` in env, and its `paths:` filter includes the gate's own implementation — `scripts/prod-body-drift-check.sh`, `scripts/sql-body-normalize.mjs`, and (added by SP-C05) `scripts/sql-function-names-naive.mjs`. So a PR touching ONLY those files triggers a credentialed run that executes script content **from the PR head**. That is intended: "edits to the gate must re-run the gate" is the whole point of those entries, and a gate whose own edits do not re-run it is the claim-vs-thing defect this phase exists to remove. **This is NOT a code fix and the workflow was deliberately left alone.** Fork PRs are already excluded by the same-repo `if:` at `migration-drift-check.yml:55`, so the blast radius is **push-access collaborators**, which today is the founder alone. The mitigation, if that ever stops being true, is GitHub's environment protection: required reviewers on `Production`. **What the founder must confirm:** open Settings → Environments → Production and record whether required reviewers are configured. If they are, this item closes as verified. If they are not, it is arbitrary code execution with the production DB password for anyone with push access, and it should be configured before the first non-founder committer. ⚠️ Do NOT "fix" this by removing the script paths from the filter — that would silently restore a gate that its own edits cannot re-run.
+
+- [ ] **[GSD-02] `phase-plan-index` drops `depends_on` when the line carries a trailing `#` comment** — measured 2026-08-29 on phase 164.3: plans 06 and 09 declare `depends_on: [...] # no code dependency — sequential ci.yml ownership`, and the tool reported both as wave 1 with a warning that the DAG disagreed with the declared wave. Plan 10, whose `depends_on` carries no comment, resolved correctly. Following that DAG would have put plans 02, 06 and 09 — three editors of `.github/workflows/ci.yml` — in a single parallel wave. Execution used the DECLARED waves instead. Upstream gsd-core parser bug; not fixed here.
+
+---
+
+## Phase 164.3 round-4 residuals — ⚠️ SUPERSEDED 2026-08-29: 9 of 11 are now OWNED BY PHASE 164.3.1
+
+Logged 2026-08-29 under the founder rule "fix the criticals, log the remaining in TODOS".
+Round 4 ran three agents in parallel over `4106db31..HEAD` (gsd-code-reviewer,
+silent-failure-hunter, testing).
+
+⚠️ **STATUS CHANGED THE SAME DAY. Do NOT work these as loose TODOS.** Writing them up
+established that FOUR primitives were cycling, not two: [VAC04-C] meets the same
+four-instance trigger that created 164.3.1, and "a control whose own oracle or fixture
+agrees with it by construction" is a fourth. **Founder decision: scope all four into
+164.3.1.** The phase was edited in place — see `.planning/ROADMAP.md` Phase 164.3.1 and the
+Roadmap Evolution entry in `.planning/STATE.md`.
+
+**Owned by 164.3.1 (do not fix here):** [VAC04-C] and members [VAC04-C1] [VAC04-C2]
+[VAC04-C3] [VAC04-C4] (PRIMITIVE C); [AUDCOV-01], [VAC-SELFREF-01], [MUT-W02] (PRIMITIVE D,
+plus AUDCOV-01's live stripper regression); [MUT-I01] (folded into PRIMITIVE A's tokenizer).
+They are kept below because the phase description cites these IDs and the measured detail
+lives here — a deferred finding that cannot be acted on without re-deriving it quietly
+expires. Close them when 164.3.1 closes, not before.
+
+**Still genuinely open as TODOS:** [MUT-I02] and [MUT-I03] only — both prose.
+
+- [ ] **[VAC04-C] "VAC-04 reports PASS having compared nothing" is a THIRD cycling primitive, four instances deep** — lineage: (1) R1 `WR-01` — "absent → new function, pass" with no floor on `checked`; (2) R2-W03 — the `accounted != NAME_COUNT` floor was tautological; (3) ship-stage `SP-C05` — the name index and the body fetcher were one code path, so `sanitize_user$v2` vanished from both; (4) round 4, below. Four fixes, four re-openings, each closing the previous example. Members [VAC04-C1]..[VAC04-C4]. The unifying defect is that the gate's "I found nothing to compare" path exits 0, so every blindness in any reader converts directly into a green gate over PRODUCTION function bodies. **Fix direction: make the ZERO path itself fail closed** rather than adding a fifth reader — a gate that compared nothing should be required to say so and stop.
+- [ ] **[VAC04-C1] the two name readers' blind spots COMPOSE — gate exits 0 printing "Two independent readings agree"** (reviewer R4-C03, Critical) — `scripts/sql-function-names-naive.mjs:83-86` (`DEF_RE`) + `scripts/sql-body-normalize.mjs` (`extractFunctionDefs`), unioned at `scripts/prod-body-drift-check.sh:207-217`. The naive reader cannot see a definition that does not START a line; the lexer cannot see a `$` in an identifier. A single definition trips both. MEASURED at HEAD, three shapes where BOTH return the empty set: `CREATE OR REPLACE FUNCTION\n    public.sanitize_user$v2(p uuid)`; `SELECT 1; CREATE OR REPLACE FUNCTION public.mid$v2(p uuid)`; `CREATE\n  OR REPLACE FUNCTION public.split$v2(p uuid)`. Driven end-to-end through the real gate with CI-shaped stubs on shape 1: `::notice::VAC-04 …: this PR's migrations define no functions — nothing to compare. (Two independent readings agree; see SP-C05.)` / `GATE EXIT=0`. The parenthetical IS the finding: two readers that failed for two *different* reasons on the *same* line are not corroboration. Corpus-wide claim holds TODAY — both readings independently re-derived over all 380 `.sql` files under `supabase/migrations/` + `supabase/schema/functions/`, **0 disagreements** — so this is latent, not live. **Fix:** on the zero path only, run a deliberately crude third reading (`--strip-comments` piped to `grep -aqiE 'CREATE[[:space:]]+(OR[[:space:]]+REPLACE[[:space:]]+)?FUNCTION'`) and `MEASURE_FAIL` if it still sees a definition — a refusal to guess, not a gate (7 of 262 migrations mention it in prose, which is why it must not red-light on its own). Also fix the naive reader's own blind spot: `DEF_RE` should match the whole text with the `m` flag and allow `FUNCTION[ \t\r\n]+`, which removes shapes 1 and 3 from the composition entirely.
+- [ ] **[VAC04-C2] the main-module guard no-ops on any symlinked path or path containing a space, so one union member silently never executes** (silent-failure-hunter, Critical) — `scripts/sql-function-names-naive.mjs:224` and `scripts/sql-body-normalize.mjs:623`, both spelled `process.argv[1] && import.meta.url === \`file://${process.argv[1]}\``. The left side is realpath-resolved and percent-encoded; the right side is raw. MEASURED 2026-08-29 with a passing control so the probe can distinguish: plain path `naive=true correct=true`; via symlink `naive=false correct=true`; path containing a space `naive=false correct=true`. When false, `main()` never runs, stdout is empty, **exit 0** — and the gate reads empty stdout as "the independent reading found no names", collapsing the union to the single parser `SP-C05` was about while still printing *"Two independent readings agree"*. On macOS `/tmp` → `/private/tmp` is enough to trigger it, so any operator running these from a temp checkout gets a silent no-op. **Both** union members carry the identical guard (the newer file copied it), so the two "independent" derivations fail together through one mechanism. The repo already documents the correct idiom at `scripts/check-banned-packages.mjs:439-448`: `realpathSync(process.argv[1]) === fileURLToPath(import.meta.url)`, with the realpath rationale in a comment. **Fix:** adopt that idiom in both files. (`scripts/lint-sql-gates.mjs:953` uses `resolve()` — better, still not realpath-safe.)
+- [ ] **[VAC04-C3] `grep -aqxF` exit 2 (unreadable index) is indistinguishable from exit 1 (not in index), and both print "measured absent — pass"** (silent-failure-hunter, High) — `scripts/prod-body-drift-check.sh:425`. This is the WR-01 disambiguator: when the fetcher returns an empty body, the gate asks the name index which fact that is. `if grep -aqxF -- "$fname" "$TMP/prod-names.txt"` takes the `else` branch on BOTH "no match" and "file unreadable / I/O error", and the `else` prints `${fname}: measured absent — not in the PROD source's ${PROD_NAME_COUNT}-name index. Treated as a NEW function (pass).` So an unreadable index turns the fail-CLOSED arm into a fail-OPEN one — in the exact arm written to prevent a fail-open, whose own error text says "A gate that could not read cannot report a pass." **Fix:** capture the exit code on its own line after a bare invocation (so `$?` is really grep's, per SP-M01), branch on `0`/`1`, and treat `>= 2` as a hard `fail` naming the code.
+- [ ] **[VAC04-C4] a non-ASCII unqualified identifier is TRUNCATED by one reader and dropped by the other, so VAC-04 compares the WRONG function** (reviewer R4-W01, Warning by severity, worst failure mode in the set) — `scripts/sql-function-names-naive.mjs:85` and `scripts/sql-body-normalize.mjs`, both `[A-Za-z0-9_$]`. Postgres accepts unquoted non-ASCII identifiers. MEASURED at HEAD on `CREATE OR REPLACE FUNCTION public.sanitize_üser(p uuid)`: lexer returns nothing, naive returns `sanitize_`. Driven through the gate: it warns about `sanitize_`, reports `sanitize_: measured absent … Treated as a NEW function (pass)`, `GATE EXIT=0`, and never looks at `sanitize_üser`. If PROD holds a real `sanitize_`, the gate compares THAT function's body against `supabase/schema/functions/sanitize_.sql` and reports MATCH — a clean result for the wrong subject, strictly worse than the silent pass SP-C05 removed. **Fix:** truncation must be impossible. Validate the captured chain against `^(?:"[^"]*"|[A-Za-z0-9_$]+)(?:[ \t]*\.[ \t]*(?:"[^"]*"|[A-Za-z0-9_$]+))*$` and THROW rather than letting the chain regex stop at the first illegal byte; same guard in `extractFunctionDefs`. Note both readers currently agree by *both* being ASCII-only — another instance of [VAC04-C1]'s shape.
+
+- [ ] **[AUDCOV-01] the SP-I01 fix REOPENED the phantom-block hazard whose justification it deleted — a multi-line template literal containing `/*` blinds the detector for the rest of the file** (reviewer R4-C04 + testing specialist, Critical) — `src/__tests__/audit-coverage.test.ts:159-178` (`unmatchedBlockOpen`), consumed at `:180-205` (`stripBlockComments`). The pre-fix code entered a block only on a line-LEADING `/*` and its comment said why: entering on any occurrence would let a string such as `"src/**/*.ts"` open a phantom comment and blank the rest of the file. Commit `4dfda654` deleted that sentence and asserted the risk "is closed properly instead of avoided: `unmatchedBlockOpen` tracks quote state". It tracks quote state **per line, reset at every newline** — and multi-line template literals are legal TypeScript. MEASURED against the file's own real bytes (transpiled slice of `MUTATOR_CALL_RE` … `findMutations` + `stripLineComment`, nothing retyped): A) multi-line template containing `/*` → `sites: []` ⛔; B) control, identical without the `/*` → `sites: [line 5]` ✅; C) single-line string `/*`, the shipped SP-I01 arm → `sites: [line 3]` ✅. **The pre-fix code found site A.** Live impact TODAY: none — both strippers A/B'd over all 194 non-test files under `src/app/api`, route files with a site-set difference: 0. But a missed site is a DB write with no audit event that the counted `ALLOWLIST` then certifies as covered, and all three shipped SP-I01 arms use single-line strings, so the fixture agrees with the claim by construction and nothing can catch it. ⚠️ This is a pre-existing gate on `main` (H-0001) made BLINDER than it was, not new machinery with holes — that distinction is why it is filed Critical. **Fix:** carry string state across lines the way `inBlock` already is, forcing `quoteAtEnd` to `null` for `'` and `"` (an unterminated one is a syntax error) so only a backtick survives a newline and the runaway stays bounded exactly as the original comment argued. Add the three-arm table above as the test, with B as the calibration control so the arm cannot pass on a stripper that returns everything.
+
+- [ ] **[VAC-SELFREF-01] `lint-sql-gates.test.ts` asserts properties of a string literal it defines two lines above — the SP-C04 shape, reintroduced in the same fix round that removed it** (testing specialist, Critical) — `src/__tests__/lint-sql-gates.test.ts:182-186`: `const banner = "-- RED FIXTURE (see the rule for the mechanism).\n";` followed by `expect(banner).toContain("RED FIXTURE")` and `expect(banner, "the OLD assertion passes on a fixture with no attribution at all").not.toContain(attribution(first))`. Both assertions are about a constant defined in the same block; neither can fail for any change to `lintFile`, the fixtures, or the rule set. The surrounding calibration (the `crossAttributed` mutation) IS real and does bite — only the two `banner` lines are vacuous. Confirmed present at HEAD 2026-08-29. **Why it matters beyond the two lines:** "assert a constant the test itself defines" is a FOURTH cycling primitive, removed from `local-stack-teardown-assertion.test.ts` and reintroduced here within one fix round — evidence that closing vacuity findings by writing more untested test code reproduces the defect. **Fix:** read the banner from the fixture on disk, or delete the two lines; the `crossAttributed` arm already carries the real property.
+
+- [ ] **[MUT-I01] `neuterArm`'s forward statement scan and `statementEndLine` do not use `executableText`, so one file has two different ideas of what a SQL line contains** (reviewer R4-I01, Info) — `scripts/mutation-runner/run.mjs:397-419` (forward scan) and `:608-628` (`statementEndLine`). Both walk raw characters tracking only `'`, with no masking of `--` comments or dollar-quoted bodies, while `executableText` sits ~200 lines above and exists precisely to do that. MEASURED consequence on a legal multi-line RAISE — `RAISE EXCEPTION 'TEST FAILED (X 1): boom'   -- it's the guard` / `USING HINT = 'check the policy';` — the apostrophe inside the `--` comment flips `inQuote`, the scan runs to EOF, and the runner returns `could not find the end of the RAISE statement for "X 1"`: a spurious `neuter-missed`. That is the LOUD direction so it is not a leak, but it is a false refusal **164.4 will hit while backfilling 70 files**, and the reverse parity (an even number of stray quotes) would over-neuter SILENTLY instead. `failureBranches` inherits the same scanner. **Fix:** route both scans through `executableText` per line before the character walk, or give `statementEndLine` the same masking — one definition of "what is code" per file. ⚠️ Adjacent to 164.3.1's Primitive A but NOT the same defect: 164.3.1 replaces the branch-head *classifier*; this is the statement-*extent* scanner. Worth folding into that phase's tokenizer if the design allows.
+- [ ] **[MUT-I02] `sql-function-names-naive.mjs`'s corpus-measurement header understates the migration count by 148** (reviewer R4-I02, Info) — `scripts/sql-function-names-naive.mjs:64` says "MEASURED 2026-08-29 over the whole corpus (114 files under `supabase/migrations/` and 118 under `supabase/schema/functions/`)". MEASURED at HEAD: `supabase/migrations/*.sql` = **262**, `supabase/schema/functions/*.sql` = 118, total 380. The sibling claim at `scripts/prod-body-drift-check.sh:212` ("all 380 .sql files") is correct, and the RESULT is correct — both readings re-derived over all 380 files, 0 disagreements — only this one header's denominator is wrong. Prose-only, non-blocking per the review stopping rule. **Fix:** `(262 files under supabase/migrations/ and 118 under supabase/schema/functions/)`.
+- [ ] **[MUT-I03] document that concurrent agents editing the tree make the mutation runner's own `dirty-checkout` gate red for unrelated reasons** (reviewer R4-I03, Info) — during round 4 the runner's `dirty-checkout` detector fired with `M src/__tests__/audit-coverage.test.ts`; the diff was another agent's uncommitted `it("PROBE multi-line template with unmatched slash-star", …)` with a `console.log` and no assertion, independently probing [AUDCOV-01]. Reverted, not at HEAD, not in the reviewed range. Two observations worth keeping: (1) `dirty-checkout` works and is worth keeping; (2) the next operator should not chase a red that belongs to a concurrent editor. **Fix:** one line in the runner's header naming the interaction.
+- [ ] **[MUT-W02] the per-job tolerance pin asserts ONE literal spelling, so an equivalently-written tolerance arm widens the aggregator silently** (reviewer R4-W02, Warning) — `src/__tests__/lint-sql-gates.test.ts:341-360`. The posture arm is the right design and the POPULATION half is genuinely derived from `ci.yml` (confirmed: it fails if a fourth job appears). The `tolerance: null` half is only ``const arm = new RegExp(`\\[ "\\$name" = "${job}" \\]`)``. That is one spelling; `[ "${name}" = "sql-mutation" ]`, `case "$name" in sql-mutation)`, `[[ $name == sql-mutation ]]`, or an `if:` on the job itself all install a tolerance the pin cannot see. All three arms in `ci.yml` use the pinned spelling today, so this is future drift, not a live hole — but "cannot silently widen" is the property the fixer claimed and it is not what is asserted. **Fix:** parse the aggregator's `if/elif` chain and range over its branch conditions (`/"\$\{?name\}?"?\s*(?:=|==)\s*"?([a-z0-9-]+)"?/g`), asserting `named.has(job) === (tolerance !== null)` per job, plus a `named.size > 2` floor so the arm cannot pass on an empty set.
+
+- [ ] **[VAC08-LEDGER-32] 32 repo migrations have no TEST ledger row — measured, baselined, and NOT yet applied** — surfaced 2026-08-30 by VAC-08's first working run (CI 33277829284, PR #724). The count fell 253 → 56 → 53 → 32 as each of four ledger naming conventions was found by the gate's own shape diagnostic; the enumeration is now closed (a basename is `<ts>_<desc>` and `name` has held the whole thing, the description, the timestamp, or nothing — there is no fifth substring), so **32 is real drift, not a join bug**. Arithmetic closes in both directions: 237 of 239 ledger rows now match a repo file and 230 of 262 repo files match a ledger row, leaving no spare rows to explain the 32. They are carried in `scripts/vac08-ledger-baseline.txt` as a dated RATCHET — the gate still fails loud on any *new* migration that misses TEST, and a baselined entry that later turns up present is a hard failure ("delete this line"), so the file can only shrink. ⚠️ **LEDGER ABSENCE IS NOT OBJECT ABSENCE.** These have no `schema_migrations` row; whether their objects exist in TEST (hand-applied, or installed by a later migration) is a different question this gate does not answer, and the body half of VAC-08 reports all four checked function bodies MATCHING the committed snapshot. Do not read the list as "TEST is missing 32 features". ⚠️ **Four are security migrations** — `20260529150000_lock_profile_privileged_columns`, `20260814120000_wizard_rpcs_revoke_authenticated`, `20260715120000_grant_anon_execute_current_user_has_app_role`, `20260823120000_revoke_api_keys_insert` — so any RLS/SQL test asserting those grants may be asserting them against a schema that never received them; worth a targeted object-level probe before trusting those tests. ⛔ `20260823120000_revoke_api_keys_insert` refuses BY DESIGN on a database it cannot identify and may never be applicable to TEST. ⛔ **Do NOT hand-apply these to TEST to shorten the list** — TEST is shared with other people's CI; that is a founder decision, not an agent one. Owner: Phase 164.5 (which already owns the drift-gate family), or a founder call to apply them.
+
+- [ ] **[SQLTEST-GLOBALPRE-01] `test_ledger_refresh_fanout.sql` asserts a GLOBAL precondition on the SHARED test database, so anyone's leftover row reds it** — measured 2026-08-30 on PR #724 CI run 33278937294: `psql:supabase/tests/test_ledger_refresh_fanout.sql:595: ERROR: TEST PRECONDITION FAILED: 1 committed strategy/strategies on this database are already stale, live and ledger-backed... Park or clean them in the test project`. **Not caused by that branch** — it never touched the file (only `test_strategy_shares_rls.sql`), and main was green 2026-08-28. The file's reasoning is sound in isolation: a competing stale strategy would fight its fixtures for the global per-tick LIMIT and make arms G1/G2 measure the wrong thing, and it correctly refuses to touch rows it did not seed (its own D-05 note: shared project, concurrent PRs). But refusing to run is still a red board, and the precondition is a statement about **the whole database**, not about its own fixtures — which is exactly the anti-pattern already fixed for the e2e specs in PR #654 (⭐"e2e specs assert their OWN seed invariant, NOT global empty-state"). On a database shared with other people's CI this arm reds for reasons no author controls, and the standing remedy — "park or clean them in the test project" — is a WRITE to shared TEST, i.e. a founder action, not an agent one. **Two candidate fixes, both out of Phase 164.3's scope:** (a) scope the per-tick LIMIT contention check to strategies this file seeded (tag its fixtures and compare within the tag), so the arm measures its own invariant like the e2e specs now do; or (b) keep the global check but downgrade it from a hard precondition to a SKIP-WITH-REASON that is counted and reported, so a polluted shared DB is visible without being indistinguishable from a real fan-out defect. ⚠️ (b) needs care: an uncounted skip that exits 0 is `SKIP-01`, this repo's own named defect — the skip must be tallied and surfaced, never silent. Owner: unassigned; raise with the shared-test-db runbook (`docs/runbooks/shared-test-db-mutex.md`), which already documents the queue-depth vs wedged-holder distinction for the sibling failure mode.

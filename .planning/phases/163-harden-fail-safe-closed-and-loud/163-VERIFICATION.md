@@ -1,7 +1,7 @@
 ---
 phase: 163-harden-fail-safe-closed-and-loud
 verified: 2026-08-26T18:45:00Z
-status: gaps_found
+status: passed
 score: 12/13 requirements MET at HEAD (OPS-08 MET-AT-MERGE by construction)
 behavior_unverified: 0
 overrides_applied: 0
@@ -62,6 +62,7 @@ gaps:
     missing:
       - "Merge to main so the PROD auto-migrate applies 20260826150000, then re-read the deployed body and tick OPS-08 by measurement."
       - "Hand-apply to the TEST project so `sql-tests` prints `OPS-08 Part 1+3 OK` instead of `SKIP (Part 3)` — otherwise the recurring gate stays half-armed on TEST forever."
+    result: "PASSED 2026-08-28 — measured directly against PROD via pg_get_functiondef, with comments STRIPPED before matching. The deployed 10-param `_enqueue_compute_job_internal` has ZERO `INTO STRICT` in code AND zero including comments. ⚠️ Comment-stripping was load-bearing, not pedantry: the sibling 7-param overload reports 0 in code but 1 including comments, i.e. a naive grep of the function body would have reported the 7-param as still carrying INTO STRICT when it does not. This is the pg_get_functiondef-returns-comments trap already recorded in this project's learnings."
   - truth: "Every finding this phase's own review raised is either FIXED or RECORDED"
     status: failed
     reason: >-
@@ -78,6 +79,7 @@ gaps:
         issue: "SEC-01's five recorded points cover the reading, the method, the enforcement locus and the drift-proofing limit. None of them records WR-10's substantive concern or a decision about it."
     missing:
       - "A founder decision, recorded in the SEC-01 entry or TODOS.md: raise the hosted minimum (10-12) and enable leaked-password protection, OR accept the 6-char floor as a named, dated risk."
+    result: "CLOSED 2026-08-28 — re-measured at HEAD; the gap text is a STALE CLAIM. WR-10 is now dispositioned in BOTH places the finding named, by the fallback route it explicitly allowed (\"if the founder prefers to defer, record the deferral as an accepted risk\"). (1) `.planning/REQUIREMENTS.md` SEC-01 carries a `QUALIFIED 2026-08-26 (review WR-10)` block that states plainly what was delivered was a MEASUREMENT and not a raised floor, followed by `ACCEPTED RISK — founder decision 2026-08-26`, naming the key-material exposure path and the revisit triggers (paying clients, a custody/compliance requirement). (2) `TODOS.md:1637` books it: `ACCEPTED RISK — Phase 163 / WR-10: the password floor was MEASURED, not RAISED (decided 2026-08-26)`, with the un-taken remedy preserved at :1665 as `[WR-10] RAISE the hosted minimum and enable leaked-password protection`. The gap said a repo-wide grep for WR-10 returned only the review file; at HEAD it returns REQUIREMENTS :108 and :116 plus TODOS :1637 and :1665. 19 of 19 findings are now fixed or recorded. NOT claimed: that the floor is adequate — it is knowingly accepted, and raising it stays a dashboard-owned founder action with no repo representation."
   - truth: "The project's own ledger and backlog describe what this phase achieved"
     status: partial
     reason: >-
@@ -122,6 +124,7 @@ gaps:
       - "Set the ROADMAP progress row to `9/9 | Complete | 2026-08-26` and add HONEST-08 to the 163 coverage row."
       - "Mark the TODOS WR-07 entry ✅ RESOLVED with the HEAD coordinate, keeping the analysis (it is what stops the defect being re-derived in SQL)."
       - "Add a dated addendum to 163-06-SUMMARY recording the eb27e5ada / ef4d9d3f8 reshape, or correct the two rows."
+    result: "CLOSED 2026-08-28 — all five residues re-measured at HEAD and every one is already repaired; the gap is a stale claim and its LINE NUMBERS are stale too (the ROADMAP was resequenced since), so each was located by content, not coordinate. (1) REQUIREMENTS checkboxes: OPS-06 :76, OPS-09 :94, SEC-01 :107, SEC-02 :128, SEC-04 :143, SEC-05 :144 all read `- [x]`, matching their `Complete` traceability rows. OPS-08 :82 correctly reads `- [~]` — partial, not blank — which is the honest marker for `Complete on PROD, not on TEST`. (2) ROADMAP progress row :811 reads `| 163. HARDEN reliability + security | 9/9 | Complete | v0.75.0.0 |`, no longer `0/? | Not started`. (3) ROADMAP requirement-coverage row :828 now lists 13 IDs INCLUDING HONEST-08. (4) TODOS WR-07 :1853 reads `CLOSED — Phase 163 / WR-07 ... (closed 2026-08-26)`, no longer owed work; the false `ZERO quoted 40001 in src/**` assertion is gone, and the implementation it contradicted is still at `src/app/api/strategies/csv-finalize/route.ts:2044` (`enqueueLostRace = enqueueErr.code === \"40001\"`). (5) 163-06-SUMMARY carries the dated addendum at :197 (`CORRECTED 2026-08-26 — the section below is STALE AS MERGED`) and a second at :210 covering the `Gate RED pre-apply / GREEN post-apply` row at :190. (6) STATE.md no longer embeds the superseded `gaps_found 12/13` verdict. Bookkeeping only — no code moved."
 deferred: []
 behavior_unverified_items: []
 coincidental_reliance_items: []
@@ -137,6 +140,7 @@ human_verification:
   - test: "Hand-apply `20260826150000` to the TEST project, then run the `sql-tests` lane."
     expected: "`test_enqueue_internal_destrict.sql` prints `OPS-08 Part 1+3 OK: the deployed 10-param body carries no strict lost-race re-read, does raise serialization_failure on an exhausted one, and its catalog COMMENT still carries the revert-discriminator marker.` — not `SKIP (Part 3)`."
     why_human: "Requires the TEST database URL, a CI secret with no representation in this worktree. No automated lane applies migrations to TEST. Until this happens, Part 3 is withheld on every CI run."
+    result: "CLOSED-BY-MEASUREMENT 2026-08-28 — NO hand-apply was needed; it was already applied. TEST's supabase_migrations.schema_migrations carries name='destrict_enqueue_internal_10param' at version 20260826210044, and the SEMANTIC is verified independently of the ledger: TEST's 10-param `_enqueue_compute_job_internal` has ZERO `INTO STRICT` in code (comments stripped before matching). ⛔ PREMISE CORRECTION: this item, and SKIP-01 generally, assume nothing applies migrations to TEST. Something does. The ledger RE-STAMPS the version column at apply time while preserving the repo filename in the NAME column — e.g. repo 20260827120000 is stored at version 20260828061901. Comparing repo filenames against the VERSION column reports every recent migration as missing (it reported 12 of 12 missing here); joining on NAME shows all 12 present, several applied twice. Any future TEST-drift check MUST join on name, not version."
 ---
 
 # Phase 163: HARDEN — Fail safe, closed, and loud — Verification Report
