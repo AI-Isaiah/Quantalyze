@@ -2086,7 +2086,14 @@ export function parseOnlyCorpus({ scopeDir, log = (s) => console.log(s) }) {
 }
 
 // ---------------------------------------------------------------------------
-// --self-test: prove BOTH exit-1 modes actually fire (D-09), machine-checked.
+// --self-test: prove BOTH exit-1 modes actually fire (D-09), machine-checked;
+// and, since 164.3.1-11, drive the REGRESSION CORPUS — every measured instance
+// of the phase-164.3.1 primitives as a permanent lane-driven arm (SC-1).
+//
+// ⚠️ The `N/M` scenario headers are a COUNTED set. Before adding or removing a
+// scenario, grep for the current denominator across run.mjs, src/__tests__
+// (with -a) and .github/workflows and renumber every spelling in one edit — a
+// stale count makes this self-test lie about its own coverage.
 // ---------------------------------------------------------------------------
 
 const SELFTEST_DIR = join(FIXTURE_CORPUS, "selftest");
@@ -2111,7 +2118,7 @@ function selfTest() {
   // 6 outright, so each states the floor appropriate to ITS corpus. Check 5 is
   // where an ARMS_FLOOR regression is proven to fire — the mode that could not
   // be proven at all while the floor was 0.
-  console.log("=== SELF-TEST 1/8: a non-biting annotation must exit 1 with `no-red` ===");
+  console.log("=== SELF-TEST 1/10: a non-biting annotation must exit 1 with `no-red` ===");
   const a = runCorpus({ scopeDir: SELFTEST_DIR, onlyFile: "nonbiting-gate.sql", armsFloor: 0, log: quiet });
   pass =
     expect(a.exitCode === 1, `exit code is 1 (got ${a.exitCode})`) &&
@@ -2121,7 +2128,7 @@ function selfTest() {
     ) &&
     pass;
 
-  console.log("=== SELF-TEST 2/8: a FILES_FLOOR regression must exit 1 with `floor` ===");
+  console.log("=== SELF-TEST 2/10: a FILES_FLOOR regression must exit 1 with `floor` ===");
   const b = runCorpus({ scopeDir: FIXTURE_CORPUS, filesFloor: 99, armsFloor: 0, log: quiet });
   pass =
     expect(b.exitCode === 1, `exit code is 1 (got ${b.exitCode})`) &&
@@ -2131,7 +2138,7 @@ function selfTest() {
     ) &&
     pass;
 
-  console.log("=== SELF-TEST 3/8: reddening the WRONG arm must exit 1 with `wrong-first-failure` ===");
+  console.log("=== SELF-TEST 3/10: reddening the WRONG arm must exit 1 with `wrong-first-failure` ===");
   const c = runCorpus({ scopeDir: SELFTEST_DIR, onlyFile: "wrong-identity-gate.sql", armsFloor: 0, log: quiet });
   pass =
     expect(c.exitCode === 1, `exit code is 1 (got ${c.exitCode})`) &&
@@ -2143,7 +2150,7 @@ function selfTest() {
     ) &&
     pass;
 
-  console.log("=== SELF-TEST 4/8: a wrong `occurrences` must exit 1 with MEASURE_FAIL, NOT `no-red` ===");
+  console.log("=== SELF-TEST 4/10: a wrong `occurrences` must exit 1 with MEASURE_FAIL, NOT `no-red` ===");
   const d = runCorpus({ scopeDir: SELFTEST_DIR, onlyFile: "occurrence-mismatch-gate.sql", armsFloor: 0, log: quiet });
   pass =
     expect(d.exitCode === 1, `exit code is 1 (got ${d.exitCode})`) &&
@@ -2162,7 +2169,7 @@ function selfTest() {
   // FILES_FLOOR half of D-09's floor mode. Now that the floor is a measured 30
   // this check exists, and it is what stops the pinned floor from decaying back
   // into a constant nobody compares to anything.
-  console.log("=== SELF-TEST 5/8: an ARMS_FLOOR regression must exit 1 with `floor` ===");
+  console.log("=== SELF-TEST 5/10: an ARMS_FLOOR regression must exit 1 with `floor` ===");
   const f = runCorpus({ scopeDir: FIXTURE_CORPUS, armsFloor: 99, log: quiet });
   pass =
     expect(f.exitCode === 1, `exit code is 1 (got ${f.exitCode})`) &&
@@ -2176,7 +2183,7 @@ function selfTest() {
     ) &&
     pass;
 
-  console.log("=== SELF-TEST 6/8: the green fixture corpus must exit 0 ===");
+  console.log("=== SELF-TEST 6/10: the green fixture corpus must exit 0 ===");
   const e = runCorpus({ scopeDir: FIXTURE_CORPUS, armsFloor: 2, log: quiet });
   pass =
     expect(e.exitCode === 0, `exit code is 0 (got ${e.exitCode}; defects: ${JSON.stringify(e.defects)})`) &&
@@ -2198,7 +2205,7 @@ function selfTest() {
   // fixture's annotation deliberately carries no failure literal in either its
   // needle or its replacement, so this check can only pass on the CONTENT
   // invariant (`identityRewriteDetail`) and not on the spelling rule.
-  console.log("=== SELF-TEST 7/8: rewriting an arm IDENTITY must exit 1 with `identity-rewrite` ===");
+  console.log("=== SELF-TEST 7/10: rewriting an arm IDENTITY must exit 1 with `identity-rewrite` ===");
   const g = runCorpus({ scopeDir: SELFTEST_DIR, onlyFile: "identity-rewrite-gate.sql", armsFloor: 0, log: quiet });
   pass =
     expect(g.exitCode === 1, `exit code is 1 (got ${g.exitCode})`) &&
@@ -2217,7 +2224,7 @@ function selfTest() {
     pass;
 
   console.log("");
-  console.log("=== SELF-TEST 8/8: SYNTHESISING an identity must exit 1 with `synthesised-identity` ===");
+  console.log("=== SELF-TEST 8/10: SYNTHESISING an identity must exit 1 with `synthesised-identity` ===");
   const h = runCorpus({
     scopeDir: SELFTEST_DIR,
     onlyFile: "synthesised-identity-gate.sql",
@@ -2240,9 +2247,86 @@ function selfTest() {
     ) &&
     pass;
 
+  // ⭐ 164.3.1-11 — THE REGRESSION CORPUS, PRIMITIVE A (SC-1). Every measured
+  // instance of "an accepted neuter leaves privileged state live" is a
+  // PERMANENT arm here, driven through REAL lanes on every PR. Each scenario
+  // was proven able to RED by neutering ITS fix in this file and observing the
+  // failure (164.3.1-11-CORPUS-PROOFS.md) — a corpus entry that cannot fail is
+  // itself a Primitive-D instance, so the proof is part of the entry.
+  console.log("");
+  console.log(
+    "=== SELF-TEST 9/10: [R4-C01] the P3 compound HEAD must be REFUSED as `neuter-missed` naming `SET ROLE postgres;`, beside an ACCEPTED P1-shape neuter ===",
+  );
+  // armsFloor 1 states the corpus's own number: exactly ONE arm can bite — the
+  // control BEHIND P1 — because the refused arm never lanes. ⚠️ It is INERT
+  // here: a narrowed (onlyFile) run enforces NO floor (see `narrowed` above),
+  // so the control's survival is asserted DIRECTLY on bitingArms below, never
+  // through the floor.
+  const i = runCorpus({ scopeDir: SELFTEST_DIR, onlyFile: "compound-head-gate.sql", armsFloor: 1, log: quiet });
+  const compoundRefusal = i.defects.find((x) => x.kind === "neuter-missed" && x.arm === "BEHIND HEAD");
+  pass =
+    expect(i.exitCode === 1, `exit code is 1 (got ${i.exitCode})`) &&
+    expect(
+      compoundRefusal !== undefined && compoundRefusal.detail.includes('could not neuter "COMPOUND HEAD"'),
+      'the defect table names BEHIND HEAD with kind "neuter-missed", refusing its neuter of COMPOUND HEAD',
+    ) &&
+    expect(
+      compoundRefusal !== undefined &&
+        compoundRefusal.detail.includes("unrecognised statement before its RAISE") &&
+        compoundRefusal.detail.includes("SET ROLE postgres;"),
+      "the refusal NAMES `SET ROLE postgres;` as the statement sharing the head's line — [R4-C01]'s own spelling, classified instead of swallowed",
+    ) &&
+    expect(
+      i.armsExecuted === 1 && i.laneInvocations === 1,
+      `only the control reached a lane (executed ${i.armsExecuted}, lanes ${i.laneInvocations}) — a refused neuter never runs, so a live SET ROLE postgres; can never reach a lane`,
+    ) &&
+    expect(
+      i.bitingArms === 1 && !i.defects.some((x) => x.arm === "BEHIND P1"),
+      `the PASSING CONTROL scored RED (identity ok) (biting ${i.bitingArms}): the P1 EXCEPTION-compound line decomposed and its neuter was ACCEPTED — the classifier is not refusing every compound line`,
+    ) &&
+    expect(
+      i.defects.length === 1,
+      `exactly one defect (got ${i.defects.length}: ${JSON.stringify(i.defects.map((x) => [x.kind, x.arm]))}) — no no-red, no wrong-first-failure, no floor: a refused neuter is not a lane result`,
+    ) &&
+    pass;
+
+  console.log("");
+  console.log(
+    "=== SELF-TEST 10/10: [MUT-I01] an apostrophe in a `--` comment inside a RAISE must neither refuse the neuter (P4) nor over-neuter the statement after it (P5) ===",
+  );
+  // armsFloor 2 states the corpus's own number: both annotated arms must bite.
+  // ⚠️ INERT in a narrowed run (no floor is enforced) — the count is asserted
+  // DIRECTLY on bitingArms below.
+  //
+  // A defect-free NARROWED run exits 2, never 0 (run.mjs header: a subset run
+  // must never be mistakable for a passing gate). 2 with an empty defect table
+  // is therefore the GREEN shape for this scenario; 0 here would mean the
+  // narrowed guard itself had been lost.
+  const j = runCorpus({ scopeDir: SELFTEST_DIR, onlyFile: "comment-parity-gate.sql", armsFloor: 2, log: quiet });
+  pass =
+    expect(
+      j.exitCode === 2 && j.defects.length === 0,
+      `narrowed run is GREEN: exit code 2 with an empty defect table (got ${j.exitCode}; defects: ${JSON.stringify(j.defects)})`,
+    ) &&
+    expect(
+      !j.defects.some((x) => x.kind === "neuter-missed"),
+      "P4 (odd parity, LOUD): no `neuter-missed` — the apostrophe inside `-- don't worry` did not produce a spurious \"could not find the end of the RAISE statement\"",
+    ) &&
+    expect(
+      !j.defects.some((x) => x.kind === "wrong-first-failure" && x.detail.includes("SURVIVOR LOST")),
+      "P5 (even parity, SILENT): no `wrong-first-failure` naming SURVIVOR LOST — the statement after the RAISE's terminator SURVIVED the neuter and recorded that it ran",
+    ) &&
+    expect(
+      j.armsExecuted === 2 && j.bitingArms === 2 && j.laneInvocations === 2,
+      `both arms laned and bit (executed ${j.armsExecuted}, biting ${j.bitingArms}, lanes ${j.laneInvocations}) — BEHIND ODD and BEHIND EVEN each scored RED (identity ok) behind a correctly neutered P4/P5 arm`,
+    ) &&
+    pass;
+
   console.log("");
   if (pass) {
-    console.log("=== SELF-TEST PASSED: both floor modes, the wrong-identity mode and MEASURE_FAIL all fire ===");
+    console.log(
+      "=== SELF-TEST PASSED: both floor modes, the wrong-identity mode and MEASURE_FAIL all fire, and the 164.3.1-11 regression corpus holds ===",
+    );
     return 0;
   }
   console.error("=== SELF-TEST FAILED ===");

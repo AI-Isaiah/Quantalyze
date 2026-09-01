@@ -391,10 +391,15 @@ describe("SP-C02 — the runner's `--self-test` is WIRED into CI, before the cor
     // self-test does not construct, and each has a reason:
     //   parse / parity / bad-file-ref — static, and covered by --parse-only and
     //     by the parser's own vitest file;
-    //   neuter-missed / baseline / restore / dirty-checkout — each needs a
-    //     corpus deliberately broken in a way that would also break the fixture
-    //     corpus for every other scenario. NAMED here rather than implied, so
-    //     the gap is visible instead of absent.
+    //   baseline / restore / dirty-checkout — each needs a corpus deliberately
+    //     broken in a way that would also break the fixture corpus for every
+    //     other scenario. NAMED here rather than implied, so the gap is visible
+    //     instead of absent.
+    //   neuter-missed LEFT this list in 164.3.1-11: the compound-head corpus
+    //     entry (fixtures/selftest/compound-head-gate.sql, scenario 9) refuses
+    //     a neuter INSIDE its own file — the [R4-C01] `SET ROLE postgres; IF
+    //     NOT ok THEN` shape — without touching the corpus every other scenario
+    //     shares, so the kind is now exercised through a real lane.
     //   absurdity (164.3.1-10) — the runner's OWN two tallies disagreeing. No
     //     corpus can produce it, by construction: that is the point of an
     //     internal cross-check. Its FIRE direction is proven twice elsewhere —
@@ -408,15 +413,16 @@ describe("SP-C02 — the runner's `--self-test` is WIRED into CI, before the cor
       "bad-file-ref",
       "baseline",
       "dirty-checkout",
-      "neuter-missed",
       "parity",
       "parse",
       "restore",
     ]);
-    // The six kinds SP-C02 names as the self-test's whole purpose.
+    // The six kinds SP-C02 names as the self-test's whole purpose, plus
+    // neuter-missed (164.3.1-11, scenario 9 — see the list above).
     expect([...exercised].sort()).toEqual([
       "floor",
       "identity-rewrite",
+      "neuter-missed",
       "no-red",
       "occurrence-mismatch",
       "synthesised-identity",
