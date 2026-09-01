@@ -271,28 +271,111 @@ if [ "${NAME_COUNT:-0}" -eq 0 ]; then
   # a gate that ships a bare conclusion is the same defect one level down
   # (D-12 / SC-7).
   #
-  # ⚠️ WHAT THIS COSTS, stated rather than discovered. This refuses EVERY
-  # migration PR whose changed migrations define no function — not only the
-  # exotic composing shape. That blast radius is KNOWN AND ACCEPTED (founder
-  # decision, amended D-07, 2026-09-01, reversing a same-day call that would
-  # have deferred the flip to Phase 164.4 and left success criterion 4 unmet at
-  # phase end). The risk is carried by ORDERING, not by weakening the gate:
+  # ⚠️ WHAT THIS COSTS, AND WHO PAYS IT — AMENDED 2026-09-01 (D-13, second
+  # refinement). The first fail-closed version refused EVERY migration PR whose
+  # changed migrations define no function, not only the exotic composing shape.
+  # MEASURED at HEAD over all 262 migrations in this repo: 111 define no
+  # function that either structural reader can see, so that version permanently
+  # blocked roughly two migration PRs in five — `ALTER TABLE`, `INSERT`, policy
+  # and index changes — from a gate whose subject is FUNCTION BODY drift. That
+  # satisfies the criterion's letter while making the gate a NUISANCE on
+  # legitimate work, and a nuisance gate acquires an escape hatch from whoever
+  # is on call at 2am. That is a slower version of the failure this gate exists
+  # to prevent. So the zero path now SEPARATES two states that look identical
+  # to the two structural readers:
   #
-  # ⛔ MIGRATION PRs ARE HELD UNTIL PHASE 164.3.1 AND PHASE 164.4 HAVE BOTH
-  #    LANDED. If you are reading this because your PR is blocked here, the gate
-  #    is WORKING. Route the ordering, not the gate. Do NOT revert this branch
-  #    to `exit 0`: the reopen pin in src/__tests__/drift-check-scripts.test.ts
-  #    ("[VAC04-C1] — the zero path FAILS CLOSED") REDs by execution if you do,
-  #    and by name if you delete the marker above.
+  #   (a) LEGITIMATE zero — the changed migrations genuinely contain no
+  #       function definition at all. PASSES, with a notice naming what was
+  #       scanned and why the zero is trustworthy.
+  #   (b) BLIND zero — a definition IS present and both readers missed it.
+  #       REFUSES, exactly as below, with the full evidence block.
   #
-  # ⚠️ Residual, still stated: a definition assembled at run time inside dynamic
-  # SQL (`EXECUTE 'CREATE FUNCTION …'`) is claimed by neither reading either. It
-  # no longer reaches an exit 0 — it reaches this refusal, with everything else.
-  # A cruder token scan was MEASURED as the alternative and rejected: 7 of the
-  # 262 migrations in this repo mention `CREATE … FUNCTION` in prose while
-  # defining none, so it would red real PRs for reading a comment.
+  # SC-4 is preserved in letter AND in intent: never exit 0 having compared
+  # nothing WHEN THERE WAS SOMETHING TO COMPARE.
+  #
+  # ── VAC04-ZERO-PATH-TRIPWIRE — the discriminator, and why it stays CRUDE ───
+  #
+  # ⛔ DO NOT "IMPROVE" THIS INTO A PARSER. Its crudeness is the entire reason
+  # it is admissible here. It is a THIRD reading, and its BLIND SPOTS DO NOT OVERLAP
+  # the other two precisely because it understands neither statements
+  # nor identifiers: it sees the non-line-start shape the line-anchored reader
+  # misses, and the `$`-identifier the lexer's `readQualifiedName` misses. Give
+  # it structure and it starts sharing their assumptions — and a tripwire that
+  # shares the blind spots of the instruments it is checking turns "two
+  # independent readings agree" into one absence observed three times, which is
+  # the exact defect ([VAC04-C1]) this branch was written to close.
+  #
+  # It was correctly REJECTED as a REPLACEMENT reader, because it cannot tell
+  # code from prose. MEASURED at HEAD: of the 111 migrations no structural
+  # reader sees a function in, 3 mention `CREATE … FUNCTION` inside a COMMENT
+  # while defining none —
+  #     20260515130001_enqueue_compute_job_internal_acl_remediation.sql
+  #     20260516170100_reset_stalled_portfolio_analytics_revoke_public.sql
+  #     20260517013200_notification_dispatches_recipient_email_lower_idx.sql
+  # As a READER those 3 would be false extractions. As a TRIPWIRE they cause a
+  # BLOCK — which is FAIL-SAFE, and rare. The measured separation is 108 of 262
+  # passing as legitimate zeros against 3 of 262 blocking on a comment (D-10:
+  # thresholds by measurement, wide separation, never taste). Erring toward the
+  # block is the correct direction for a gate over PRODUCTION function bodies.
+  #
+  # ⛔ MIGRATION PRs ARE STILL HELD UNTIL PHASE 164.3.1 AND PHASE 164.4 HAVE
+  #    BOTH LANDED. This refinement narrows WHICH PRs are held; it does not
+  #    retire the sequencing (founder decision, amended D-07, 2026-09-01). If
+  #    you are reading this because your PR is blocked here, the gate is
+  #    WORKING. Route the ordering, not the gate. Do NOT revert this branch to
+  #    an unconditional `exit 0`, and do NOT add an acknowledgment pragma or
+  #    any other human override to it: the tripwire is a MEASUREMENT, not a
+  #    knob. The reopen pin in src/__tests__/drift-check-scripts.test.ts
+  #    ("[VAC04-C1] — the zero path FAILS CLOSED") REDs by execution if you
+  #    revert it, and by name if you delete the marker above.
+  #
+  # ⚠️ Residual, still stated: a definition assembled at run time inside
+  # dynamic SQL (`EXECUTE 'CREATE FUNCTION …'`) is claimed by neither
+  # structural reading. It does not reach an exit 0 — the textual tripwire sees
+  # the token and routes it to the refusal below, with everything else.
   _lexer_n="$(grep -ac '[^[:space:]]' "$TMP/names.lexer.txt" || true)"
   _naive_n="$(grep -ac '[^[:space:]]' "$TMP/names.naive.txt" || true)"
+
+  # THE SCAN. Whole-file and newline-FLATTENED, so a `CREATE OR REPLACE` split
+  # across lines from its `FUNCTION` is still seen; case-insensitive; `grep -a`
+  # because this repo carries a measured NUL byte that makes a plain grep exit
+  # 1 and read as "clean", and a tripwire defeated by one byte is not a
+  # tripwire. Exit status captured with the `grep_rc` idiom from
+  # scripts/test-ledger-drift-check.sh:311-318 — grep exits 0 on a match, 1 on
+  # none, and >= 2 on an ERROR, and an UNREADABLE migration must never be
+  # counted as a migration with no function in it.
+  : > "$TMP/textual-hits.txt"
+  for _f in "${CHANGED_FILES[@]}"; do
+    tr '\n' ' ' < "$_f" > "$TMP/flat.txt" \
+      || fail "MEASURE_FAIL: could not read ${_f} for the zero-path textual scan. An unreadable migration is not a migration without a function in it."
+    set +e
+    grep -aoiE 'CREATE[[:space:]]+(OR[[:space:]]+REPLACE[[:space:]]+)?FUNCTION' "$TMP/flat.txt" > "$TMP/flat.hits.txt"
+    _tw_rc=$?
+    set -e
+    [ "$_tw_rc" -le 1 ] || fail "MEASURE_FAIL: the zero-path textual scan could not read ${_f} (grep exited ${_tw_rc}). An unscannable file is not a clean one."
+    if [ "$_tw_rc" -eq 0 ]; then
+      printf '%s\n' "$_f" >> "$TMP/textual-hits.txt"
+    fi
+  done
+
+  if ! grep -aqE '[^[:space:]]' "$TMP/textual-hits.txt"; then
+    # ── (a) LEGITIMATE ZERO ───────────────────────────────────────────────────
+    echo "::notice::${GATE}: no functions defined, and the zero is LEGITIMATE — nothing to compare."
+    echo "::notice::WHAT WAS SCANNED (evidence first — D-12/SC-7):"
+    echo "::notice::  changed migration file(s): ${CHANGED_COUNT}"
+    sed 's|^|::notice::    |' "$TMP/changed.txt"
+    echo "::notice::  ${NORMALIZER} --function-names -> ${_lexer_n:-0} name(s)"
+    echo "::notice::  ${NAIVE_NAMES} -> ${_naive_n:-0} name(s)"
+    echo "::notice::  crude textual scan for 'CREATE [OR REPLACE] FUNCTION' -> 0 of ${CHANGED_COUNT} file(s)"
+    echo "::notice::A THIRD reading — deliberately crude, sharing neither structural reader's"
+    echo "::notice::blind spots — finds no such text ANYWHERE in the changed set. So the two"
+    echo "::notice::readers' zero is an absence of FUNCTIONS, not an absence of VISION, and"
+    echo "::notice::there was genuinely nothing here to compare against PROD. Had that scan"
+    echo "::notice::found the text with both readers still empty, this run would have REFUSED."
+    exit 0
+  fi
+
+  # ── (b) BLIND ZERO ──────────────────────────────────────────────────────────
   echo "::error::${GATE}: MEASURE_FAIL — NOTHING WAS COMPARED."
   echo "::error::"
   echo "::error::WHAT THE TWO READERS SAW (evidence first — D-12/SC-7):"
@@ -306,9 +389,15 @@ if [ "${NAME_COUNT:-0}" -eq 0 ]; then
   grep -aqE '[^[:space:]]' "$TMP/names.naive.txt" \
     && sed 's|^|::error::    |' "$TMP/names.naive.txt" \
     || echo "::error::    (none)"
+  echo "::error::  crude textual scan for 'CREATE [OR REPLACE] FUNCTION' -> HIT in:"
+  sed 's|^|::error::    |' "$TMP/textual-hits.txt"
   echo "::error::"
   echo "::error::[VAC04-C1] Two independent readings agreeing on ZERO is not evidence of"
   echo "::error::absence when their blind spots OVERLAP — it is one absence observed twice."
+  echo "::error::This is a BLIND zero, not a legitimate one: a THIRD reading, too crude to"
+  echo "::error::share either structural reader's blind spots, FOUND the text they missed in"
+  echo "::error::the file(s) listed above. A changed set with no function in it at all would"
+  echo "::error::have passed here with a notice; this one did not."
   echo "::error::MEASURED 2026-09-01: a mid-line definition carrying a '\$' in its identifier"
   echo "::error::is invisible to BOTH readers, and this gate exited 0 on it having compared"
   echo "::error::nothing at all, over PRODUCTION function bodies. A gate cannot report a pass"
