@@ -1161,6 +1161,183 @@ describe("[VAC04-C1] — the zero path FAILS CLOSED: both readers' evidence, THE
   });
 });
 
+// ── VAC-04 ABSURDITY FLOOR (D-09's VAC-04 half) ──────────────────────────────
+//
+// ⛔ THE DEFECT SHAPE. The empty-index guards answer "is the reader broken?"
+// only for EXACTLY zero names. One name through and they go quiet — and a
+// near-empty index is precisely the "every function is new — pass" state,
+// because a name absent from a tiny index takes the gate's measured-absent pass
+// on every iteration. So VAC-04 could report a clean run off a reader that had
+// stopped matching, which is Primitive C over PRODUCTION function bodies.
+//
+// The floor is calibrated against a SECOND, independently produced population
+// the gate already holds — the committed snapshot bodies, generated FROM PROD
+// by `npm run schema:functions`. It is a RATIO, not a literal, so it cannot rot
+// as PROD's catalogue changes (D-10: thresholds by MEASUREMENT, never taste).
+//
+// Proven TWO-DIRECTIONALLY below, because a floor that fires unconditionally
+// also passes its own RED arm (D-10, SC-8).
+describe("VAC-04 absurdity floor — a tiny PROD index is a broken reader, not an empty database", () => {
+  /** The REAL committed snapshot: 118 bodies, measured 2026-09-01 at 15ab417b. */
+  const REAL_SNAPSHOT_DIR = "supabase/schema/functions";
+
+  const FN_BODY =
+    "CREATE OR REPLACE FUNCTION public.demo_fn(p_id UUID)\nRETURNS UUID\n" +
+    "LANGUAGE plpgsql\nAS $$\nBEGIN\n  RETURN p_id;\nEND\n$$;";
+
+  /**
+   * The population the floor calibrates against, read the same way the gate
+   * reads it. Asserted rather than assumed: if this ever drops below the gate's
+   * SNAPSHOT_MIN the floor goes inert and BOTH arms below would pass for the
+   * wrong reason.
+   */
+  const snapshotBodyCount = () =>
+    readdirSync(REAL_SNAPSHOT_DIR).filter((f) => f.endsWith(".sql")).length;
+
+  it("CALIBRATION: the real snapshot population is large enough to calibrate against", () => {
+    // The gate's SNAPSHOT_MIN is 50. Read off the script rather than restated
+    // here, so the two cannot drift apart silently.
+    const src = readFileSync(PROD_GATE, "utf8");
+    const m = /^SNAPSHOT_MIN=(\d+)$/m.exec(src);
+    expect(m, "the gate must declare SNAPSHOT_MIN — the floor's precondition").not.toBeNull();
+    const min = Number((m as RegExpExecArray)[1]);
+    expect(snapshotBodyCount()).toBeGreaterThanOrEqual(min);
+    // And the measured record beside the rule must not go missing (SC-9).
+    expect(src).toContain("SAMPLE SIZE AND COVERAGE");
+    expect(src).toContain("WIDE SEPARATION");
+  });
+
+  it("FIRES: a plausible-but-TINY PROD index is a MEASURE_FAIL with evidence, never the all-new pass", () => {
+    withTempDir((dir) => {
+      mkdirSync(join(dir, "migrations"), { recursive: true });
+      const migration = join(dir, "migrations", "20260901120000_demo.sql");
+      writeFileSync(migration, `${FN_BODY}\n`);
+
+      // A handful of names — the shape a reader that has stopped matching
+      // produces. Non-empty on BOTH readings, so the existing empty-index
+      // guards stay quiet and this arm is exercising the FLOOR, not them.
+      const tiny = ["some_fn", "another_fn", "third_fn"];
+      const { status, out } = run(PROD_GATE, {
+        ...FAKE_CREDS,
+        BODY_FETCH_CMD: `bash ${writeStubFetcher(dir)}`,
+        BODY_NAME_INDEX_CMD: `bash ${writeStubNameIndex(dir, tiny)}`,
+        BODY_NAME_INDEX_XCHECK_CMD: `bash ${writeStubNameIndex(dir, tiny, "stub-index-xcheck.sh")}`,
+        CHANGED_MIGRATIONS: migration,
+        SNAPSHOT_DIR: REAL_SNAPSHOT_DIR,
+      });
+
+      expect(status, "a near-empty index was accepted as a measurement of PROD").toBe(1);
+      expect(out).toContain("MEASURE_FAIL");
+      expect(out).toContain("this is the GATE failing, not the database");
+      // Evidence, not just a verdict (SC-7): both counts and a sample of what
+      // WAS read.
+      expect(out).toMatch(/PROD function-name index\s*:\s*3 name\(s\)/);
+      expect(out).toMatch(
+        new RegExp(`committed snapshot bodies:\\s*${snapshotBodyCount()}\\b`),
+      );
+      expect(out).toContain("some_fn");
+      // The pass it must never reach.
+      expect(out).not.toContain("Treated as a NEW function (pass)");
+      expect(out).not.toContain("no unacknowledged repo-vs-PROD body drift");
+      expect(out).not.toContain("measured zero, not an unread one");
+    });
+  });
+
+  it("SILENT: a realistic index built from the repo corpus leaves the floor quiet and the run reaches its normal verdict", () => {
+    // The load-bearing direction. A floor that fires unconditionally would also
+    // pass the arm above, so without this one nothing is proven. Same real
+    // snapshot dir, same PR — the ONLY difference is a realistically sized
+    // index, generated from the repo's own corpus rather than hand-written.
+    withTempDir((dir) => {
+      mkdirSync(join(dir, "migrations"), { recursive: true });
+      const migration = join(dir, "migrations", "20260901120000_demo.sql");
+      writeFileSync(migration, `${FN_BODY}\n`);
+
+      const realistic = readdirSync(REAL_SNAPSHOT_DIR)
+        .filter((f) => f.endsWith(".sql"))
+        .map((f) => basename(f, ".sql"));
+      expect(
+        realistic.length,
+        "a short 'realistic' index would make this arm prove nothing",
+      ).toBeGreaterThan(100);
+      // `demo_fn` is deliberately NOT in it, so this run takes the gate's one
+      // silent pass — the measured-absent path the floor exists to protect.
+      // Proving the floor quiet HERE is stronger than proving it quiet on a
+      // drift comparison: this is the exact verdict a broken reader would fake.
+      expect(realistic).not.toContain("demo_fn");
+
+      const { status, out } = run(PROD_GATE, {
+        ...FAKE_CREDS,
+        BODY_FETCH_CMD: `bash ${writeStubFetcher(dir)}`,
+        BODY_NAME_INDEX_CMD: `bash ${writeStubNameIndex(dir, realistic)}`,
+        BODY_NAME_INDEX_XCHECK_CMD: `bash ${writeStubNameIndex(dir, realistic, "stub-index-xcheck.sh")}`,
+        CHANGED_MIGRATIONS: migration,
+        SNAPSHOT_DIR: REAL_SNAPSHOT_DIR,
+      });
+
+      expect(status, out).toBe(0);
+      expect(out).not.toContain("MEASURE_FAIL");
+      expect(out).not.toContain("this is the GATE failing");
+      expect(out).toContain("Treated as a NEW function (pass)");
+      expect(out).toContain("measured zero, not an unread one");
+    });
+  });
+
+  it("SILENT: ordinary DRIFT against a realistic index still reaches its drift verdict, not the floor", () => {
+    // The second silent direction: the floor must not PRE-EMPT a real finding.
+    // Driven on a REAL committed function against the REAL snapshot dir, so the
+    // floor is genuinely ACTIVE (118 bodies) rather than merely switched off by
+    // a scratch dir too small to calibrate against.
+    withTempDir((dir) => {
+      const FN = "_assert_owner";
+      const committed = readFileSync(join(REAL_SNAPSHOT_DIR, `${FN}.sql`), "utf8");
+      // split/join, never String.replace: `$&`, `$1`, "$`" and "$'" are special
+      // in a replacement string, and this body is full of `$$` and `$1`.
+      const drifted = committed.split("v_found := FOUND;").join("v_found := TRUE;");
+      expect(drifted, "the drift edit must actually change the body").not.toBe(committed);
+
+      mkdirSync(join(dir, "migrations"), { recursive: true });
+      mkdirSync(join(dir, "live"), { recursive: true });
+      const migration = join(dir, "migrations", "20260901120000_assert_owner.sql");
+      writeFileSync(migration, committed);
+      writeFileSync(join(dir, "live", `${FN}.sql`), drifted);
+
+      const realistic = readdirSync(REAL_SNAPSHOT_DIR)
+        .filter((f) => f.endsWith(".sql"))
+        .map((f) => basename(f, ".sql"));
+      expect(realistic).toContain(FN);
+
+      const { status, out } = run(PROD_GATE, {
+        ...FAKE_CREDS,
+        BODY_FETCH_CMD: `bash ${writeStubFetcher(dir)}`,
+        BODY_NAME_INDEX_CMD: `bash ${writeStubNameIndex(dir, realistic)}`,
+        BODY_NAME_INDEX_XCHECK_CMD: `bash ${writeStubNameIndex(dir, realistic, "stub-index-xcheck.sh")}`,
+        CHANGED_MIGRATIONS: migration,
+        SNAPSHOT_DIR: REAL_SNAPSHOT_DIR,
+      });
+
+      expect(status).toBe(1);
+      // Exit 1 for the RIGHT reason: drift, not the floor.
+      expect(out).toContain("PROD's live body is NOT the committed body");
+      expect(out).not.toContain("this is the GATE failing, not the database");
+      expect(out).not.toContain("absurdity floor is INERT");
+    });
+  });
+
+  it("the floor announces itself INERT rather than going quiet when it has no denominator", () => {
+    // RESEARCH anti-pattern 5: a control that stops controlling must SAY so.
+    // Every scaffolded arm in this file runs with a 0-1 body snapshot dir, so
+    // this is also the state the rest of the suite runs in — worth being loud.
+    withTempDir((dir) => {
+      const env = scaffoldProdCase(dir, { prodBody: PROD_BODY_EQUIVALENT });
+      const { status, out } = run(PROD_GATE, env);
+      expect(status, out).toBe(0);
+      expect(out).toContain("absurdity floor is INERT this run");
+      expect(out).not.toContain("MEASURE_FAIL");
+    });
+  });
+});
+
 // ── VAC-08 ───────────────────────────────────────────────────────────────────
 
 /** A stub ledger query: emits the names it was told are MISSING from the ledger. */
