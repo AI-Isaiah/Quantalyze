@@ -119,8 +119,9 @@ const INJECTS_FIRST_FAILURE_LITERAL = /TEST\s+FAILED\s*\(/i;
  * unbounded set of others produce the same bytes and are invisible here. A rule
  * stated over an annotation's SPELLING can always be re-spelled around — that
  * is the lesson of three review rounds, not a hypothesis. The class is closed
- * at RUNTIME by the identity nonce in `run.mjs` (`unstampedIdentities`), which
- * reads what the lane actually emitted rather than what the annotation says.
+ * at RUNTIME by source-location attribution in `run.mjs`
+ * (`attributeIdentities`; the identity nonce until 2026-09-01), which reads
+ * WHERE the lane's raise came from rather than what the annotation says.
  * This rule survives only because a static refusal is cheaper, fires in
  * `--parse-only` on a database-less platform, and names the mistake earlier.
  */
@@ -154,10 +155,12 @@ function refuseSelfSatisfying(at, field, injected) {
  * the file carries before and after. A rule stated over the annotation's
  * spelling can always be re-spelled around; the invariant over the file cannot.
  *
- * ⭐ It also load-bears for the R3-C02 identity nonce: because no `find` or
- * `anchor` may name a `TEST FAILED (` literal, the runner can stamp every
- * identity in the gate copy BEFORE the mutation steps run without disturbing a
- * single needle or occurrence count.
+ * ⭐ It load-bore for the R3-C02 identity NONCE (superseded 2026-09-01): because
+ * no `find` or `anchor` may name a `TEST FAILED (` literal, the runner could
+ * stamp every identity in the gate copy BEFORE the mutation steps ran without
+ * disturbing a needle or an occurrence count. Source-location attribution no
+ * longer rewrites the gate at all, so that dependency is GONE — the rule now
+ * stands on `identityRewriteDetail` alone, which is where it always belonged.
  *
  * MEASURED 2026-08-29: 0 of the 49 file steps in the real corpus target this
  * literal, so nothing legitimate is refused.
@@ -186,7 +189,7 @@ function validateStep(step, index) {
   if (step.kind === "sql") {
     if (!isNonEmptyString(step.stmt)) throw `${at}: "stmt" must be a non-empty string`;
     // A `sql` step runs against the lane's database, so a RAISE in it reaches
-    // the same output stream firstFailureArm() reads.
+    // the same output stream `attributeIdentities()` reads.
     refuseSelfSatisfying(at, "stmt", step.stmt);
     return { kind: "sql", stmt: step.stmt };
   }
