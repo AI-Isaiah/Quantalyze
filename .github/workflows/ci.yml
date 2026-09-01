@@ -1113,9 +1113,42 @@ jobs:
           # wrapper. This step's whole job is to read numbers out of a text
           # file it did not produce, so "these two cannot disagree" is worth
           # asserting about the FILE even though it is trivially true of the
-          # program. It is not evidence that the runner is consistent.
+          # program. It is not evidence that the runner is consistent. (Since
+          # 164.3.1-10 the runner asserts this same relation IN-PROCESS as
+          # part of its absurdity floor — `absurdityViolations` in run.mjs —
+          # so a violation here means the file, not the arithmetic.)
           if [ "$biting" -gt "$arms_executed" ]; then
             echo "::error::MEASURE_FAIL: biting ($biting) exceeds executed ($arms_executed). Those two numbers come from the same run and cannot disagree this way, so this log was not produced by one run of the gate."
+            exit 1
+          fi
+          # 164.3.1-10 — THE RUNNER'S ABSURDITY FLOOR, RE-ASSERTED OUT OF PROCESS.
+          # The runner now counts its arm lanes TWICE, independently: once in
+          # its verdict loop (the `arms: E/…` line above) and once INSIDE the
+          # lane runner at the spawn (`lane-invocations: N`). It fails itself
+          # when they disagree. This step re-reads both numbers out of the log
+          # and asserts the same relation, for the same reason every other arm
+          # here exists: a build of the runner that silently stopped printing
+          # the second tally — or a log assembled from something other than one
+          # honest run — must fail HERE rather than pass quietly. A missing line
+          # is a MEASURE_FAIL and never a zero (an empty variable satisfies a
+          # numeric test), checked BEFORE any comparison, like every line above.
+          # The relation is EXACT: the printed count IS the arm-leg count; the
+          # baseline and restore legs are printed in the same line's parenthesis
+          # as evidence and are not compared. No literal is restated here — both
+          # sides come from the run output, and the measured values behind the
+          # rule (30/30/30 at plan 164.3.1-09's re-derivation) live beside the
+          # rule in run.mjs, once.
+          lane_line=$(grep -a -m1 -E '^lane-invocations: [0-9]+ ' "$RUNNER_LOG" || true)
+          if [ -z "$lane_line" ]; then
+            echo "::error::MEASURE_FAIL: the run printed NO 'lane-invocations: N' line, so the runner's second, independent count of arm lanes is unknown and its own cross-check cannot be re-asserted. Either the runner stopped reporting it (164.3.1-10), or the step above was not the gate (--parse-only executes zero arms and prints no lane tally)."
+            exit 1
+          fi
+          echo "$lane_line"
+          lane_invocations=$(echo "$lane_line" | sed -E 's|^lane-invocations: ([0-9]+) .*|\1|')
+          case "$lane_invocations" in ''|*[!0-9]*)
+            echo "::error::MEASURE_FAIL: could not read the lane-invocation count out of '$lane_line'."; exit 1;; esac
+          if [ "$lane_invocations" -ne "$arms_executed" ]; then
+            echo "::error::MEASURE_FAIL — this is the GATE failing, not the corpus: the verdict loop reported $arms_executed executed arm(s) but the lane runner counted $lane_invocations arm lane(s) (executed=$arms_executed lane-invocations=$lane_invocations biting=$biting). Arms were claimed that no lane ran, or lanes ran that no verdict describes. The runner's own in-process floor exits 1 on this; a log reaching this step with these numbers was not produced by one honest run of the gate."
             exit 1
           fi
           if [ "$biting" -lt "$arms_floor" ]; then
@@ -1123,7 +1156,7 @@ jobs:
             exit 1
           fi
 
-          echo "Coverage print is present and both floors hold: files $files_annotated >= $files_floor, biting arms $biting >= $arms_floor (of $arms_executed executed)."
+          echo "Coverage print is present, both floors hold and the runner's two tallies agree: files $files_annotated >= $files_floor, biting arms $biting >= $arms_floor (of $arms_executed executed, $lane_invocations arm lane(s) spawned)."
 
   plan-anchor-verify:
     # Phase 164.3 / VAC-05 — re-resolve every anchor and quote a PENDING plan
