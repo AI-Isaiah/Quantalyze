@@ -5,16 +5,16 @@ milestone_name: Backlog Burndown (Phases 158+)
 current_phase: 164.3.1
 current_phase_name: SOUND-PRIMITIVES — four cycling primitives closed by construction
 status: executing
-stopped_at: Completed 164.3.1-09-PLAN.md
-last_updated: "2026-09-01T20:58:55.070Z"
+stopped_at: Completed 164.3.1-10-PLAN.md
+last_updated: "2026-09-01T21:31:51.200Z"
 last_activity: 2026-09-01
 last_activity_desc: Phase 164.3.1 execution resumed (wave continue)
-state_head: 938cdaf996dc850db26663ed4ac05df4242137b4
+state_head: 05bd73a6d39842941cfad80b5b6976a3ecf1cfca
 progress:
   total_phases: 14
   completed_phases: 4
   total_plans: 82
-  completed_plans: 75
+  completed_plans: 76
   percent: 29
 ---
 
@@ -649,6 +649,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 | Phase 164 P05 | 32min | 3 tasks | 13 files |
 | Phase 164 P03 | 21min | 2 tasks | 6 files |
 | Phase 164.3.1 P09 | 12 min | 2 tasks | 2 files |
+| Phase 164.3.1 P10 | 22 min | 3 tasks | 3 files |
 
 ## Accumulated Context
 
@@ -836,6 +837,8 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - [Phase 163]: 164-03: MEASURED — the audit-coverage mutating-RPC detector scans line-by-line, so a Prettier wrap between .rpc( and the name disarms it exactly as a method-cast does; both share routes cast the CLIENT and keep the call on one line (deferred-items D-164-C)
 - [Phase 164.3.1]: 164.3.1-09: ARMS_FLOOR=30 and FILES_FLOOR=1 RE-DERIVED under the sound primitives and HOLD — 30/30/0, biting 30, 0 of 30 arms moved; comments-only diff, floors test untouched per the lockstep rule. — The gate file blob is byte-identical at the phase base and HEAD (5ae6855f), so the input was fixed and only the mechanism moved — that is what makes no-movement a measurement rather than two different corpora agreeing by luck.
 - [Phase 164.3.1]: 164.3.1-09: biting 30 is the SAME integer over a STRICTLY SMALLER admissible set — plan 10 must carry that qualitative fact with the number when it sets absurdity-floor thresholds. — identity ok moved from a transmitted nonce (readable by the gate via current_query()) to a three-legged source-location rule, so a floor of 30 is harder to satisfy than it was pre-phase.
+- [Phase 164.3.1]: 164.3.1-10: dedicated 'absurdity' defect kind (instrument failing) kept distinct from 'floor' (corpus regression); lane tally arm-scoped, relation EXACT equality, counter monotonic and read as a snapshot delta
+- [Phase 164.3.1]: 164.3.1-10: vitest print-contract pin is cluster-free; the non-zero-through-real-lanes proof lives in --self-test scenario 6 so the unobserved-ubuntu risk (WINDOWS 28) stays out of the blocking vitest shards
 
 ### Decisions (execution-time, Phase 140.2)
 
@@ -1538,8 +1541,8 @@ Load-bearing sequencing (real dependencies, do not reorder):
 
 ## Session
 
-**Last Date:** 2026-09-01T20:58:13.768Z
-**Stopped At:** Completed 164.3.1-09-PLAN.md
+**Last Date:** 2026-09-01T21:31:50.464Z
+**Stopped At:** Completed 164.3.1-10-PLAN.md
 **Last Date:** 2026-08-25T22:26:01.687Z
 **Stopped At:** Completed 162-03-PLAN.md
 **Last Date:** 2026-08-25T22:28:04.096Z
