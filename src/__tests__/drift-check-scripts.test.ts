@@ -957,6 +957,210 @@ describe("SP-C05 — 'absent from PROD' must be measured by an instrument that d
   });
 });
 
+// ── [VAC04-C1] ───────────────────────────────────────────────────────────────
+//
+// ⛔ THE DEFECT. SP-C05 above proves the two readings are independent. This
+// block is about what happens when they are independent AND BOTH BLIND — because
+// independence is not coverage. `prod-body-drift-check.sh`'s zero path read
+//
+//     "this PR's migrations define no functions — nothing to compare.
+//      (Two independent readings agree; see SP-C05.)"          exit 0
+//
+// and "two independent readings agree" was doing work it cannot do. Agreement
+// between two instruments whose blind spots OVERLAP is not evidence of absence;
+// it is one absence observed twice. MEASURED 2026-09-01 on the P8 composing
+// shape (RESEARCH § Pattern 3) — a mid-line `$`-identifier definition — both
+// readers print NOTHING and exit 0, so the gate reported success having compared
+// nothing at all, over PRODUCTION function bodies. That is Primitive C's
+// canonical case: a VERDICT not bounded by what was MEASURED.
+//
+// ── THE REOPEN PIN (amended D-08, 2026-09-01) ────────────────────────────────
+// The blast-radius decision that would have deferred the fail-closed flip to
+// Phase 164.4 was REVERSED the same day (CONTEXT.md § Amendment 2026-09-01,
+// D-07), so there is no future flip left to guarantee and the superseded
+// FILES_FLOOR flip-coupling design is retired. The arms below are a STANDING
+// REGRESSION PIN on the CLOSED state instead, failing in two independent ways:
+//
+//   (a) BY EXECUTION — the refusal arm drives the real gate on the real
+//       composing fixture and requires a NON-ZERO exit. Reverting the branch to
+//       `exit 0` flips that assertion.
+//   (b) BY NAME — the marker arm reads the gate's own bytes (node:fs, never
+//       shell grep: this repo carries a measured NUL-blind file) and requires
+//       the `VAC04-ZERO-PATH-FAILS-CLOSED` token. Deleting or rerouting the
+//       branch fails here even if some other path happens to exit non-zero.
+//
+// ⛔ ORDERING, carried here as well as in the gate script so it is not lost:
+// migration PRs are HELD until Phase 164.3.1 AND Phase 164.4 have both landed.
+// A block at this refusal is the gate WORKING — route the ordering, never the
+// gate.
+describe("[VAC04-C1] — the zero path FAILS CLOSED: both readers' evidence, THEN a refusal", () => {
+  /**
+   * P8's composing shape (RESEARCH § Pattern 3, MEASURED-TRUE). One line, two
+   * statements: the line-anchored reader never starts because the line does not
+   * BEGIN with `CREATE`, and the lexer's `readQualifiedName` stops at the `$`
+   * (SP-C05's measured limitation). Neither reading can see it.
+   */
+  const COMPOSING_FN =
+    "SELECT 1; CREATE OR REPLACE FUNCTION public.fn$v2(p uuid) RETURNS void " +
+    "LANGUAGE plpgsql AS $fn$ BEGIN NULL; END; $fn$;\n";
+
+  /** A definition BOTH readers see — the control's only difference from the above. */
+  const VISIBLE_FN =
+    "CREATE OR REPLACE FUNCTION public.some_other_fn(a int)\n" +
+    "RETURNS int LANGUAGE sql AS $$ SELECT a $$;\n";
+
+  const NORMALIZER = "scripts/sql-body-normalize.mjs";
+  const NAIVE = "scripts/sql-function-names-naive.mjs";
+
+  /** The gate wired exactly as `migration-drift-check.yml` wires it. */
+  function scaffold(
+    dir: string,
+    migrationBody: string,
+    opts: { dumpBody?: string; snapshotFor?: string } = {},
+  ): Record<string, string> {
+    mkdirSync(join(dir, "snapshot"), { recursive: true });
+    const dump = join(dir, "prod-dump.sql");
+    writeFileSync(dump, opts.dumpBody ?? VISIBLE_FN);
+    const migration = join(dir, "20260901120000_zero_path.sql");
+    writeFileSync(migration, migrationBody);
+    if (opts.snapshotFor) {
+      writeFileSync(join(dir, "snapshot", `${opts.snapshotFor}.sql`), VISIBLE_FN);
+    }
+    return {
+      ...FAKE_CREDS,
+      BODY_FETCH_CMD: `node ${NORMALIZER} --extract-fn ${dump}`,
+      BODY_NAME_INDEX_CMD: `node ${NORMALIZER} --function-names ${dump}`,
+      BODY_NAME_INDEX_XCHECK_CMD: `node ${NAIVE} ${dump}`,
+      CHANGED_MIGRATIONS: migration,
+      SNAPSHOT_DIR: join(dir, "snapshot"),
+    };
+  }
+
+  // ── Calibration. Deliberately FIRST: if either reader can see the fixture,
+  // the refusal arm below is exercising an ordinary empty-input path and proves
+  // nothing about COMPOSING blindness. The fixture has to be the real thing.
+  it("CALIBRATION: the composing fixture is invisible to BOTH readers — and the control is visible to both", () => {
+    withTempDir((dir) => {
+      const blind = join(dir, "composing.sql");
+      writeFileSync(blind, COMPOSING_FN);
+      const seen = join(dir, "visible.sql");
+      writeFileSync(seen, VISIBLE_FN);
+
+      const blindLexer = spawnSync("node", [NORMALIZER, "--function-names", blind], {
+        encoding: "utf8",
+      });
+      const blindNaive = spawnSync("node", [NAIVE, blind], { encoding: "utf8" });
+      expect(blindLexer.status, "the lexer must EXIT 0 — dropping the definition silently is the defect").toBe(0);
+      expect(blindNaive.status).toBe(0);
+      expect(blindLexer.stdout.trim(), "the lexer reading must see NOTHING here").toBe("");
+      expect(blindNaive.stdout.trim(), "the line-anchored reading must see NOTHING here").toBe("");
+
+      // Without this half, "both saw nothing" could equally mean "both readers
+      // are broken", and the arm would pass for the wrong reason.
+      const seenLexer = spawnSync("node", [NORMALIZER, "--function-names", seen], {
+        encoding: "utf8",
+      });
+      const seenNaive = spawnSync("node", [NAIVE, seen], { encoding: "utf8" });
+      expect(seenLexer.stdout.trim()).toBe("some_other_fn");
+      expect(seenNaive.stdout.trim()).toBe("some_other_fn");
+    });
+  });
+
+  // ── (a) The reopen pin's EXECUTION direction ───────────────────────────────
+  it("REOPEN PIN: the composing zero path prints BOTH readers' evidence and then EXITS NON-ZERO", () => {
+    // MEASURED at this task's base bab02576, this exact fixture, before the fix:
+    //   "Migrations changed by this PR: 1"
+    //   "::notice::VAC-04 repo-vs-PROD function-body drift gate: this PR's
+    //    migrations define no functions — nothing to compare. (Two independent
+    //    readings agree; see SP-C05.)"                                  exit 0
+    // One line of conclusion, zero lines of evidence, for a run that compared
+    // nothing over PRODUCTION function bodies.
+    withTempDir((dir) => {
+      const env = scaffold(dir, COMPOSING_FN);
+      const { status, out } = run(PROD_GATE, env);
+
+      expect(
+        status,
+        "the gate exited 0 having compared NOTHING — the zero path has been reopened",
+      ).not.toBe(0);
+
+      // Evidence BEFORE the conclusion (D-12 / SC-7): a gate must never ship a
+      // bare verdict. The changed-file list and BOTH readers' outputs.
+      expect(out).toContain("20260901120000_zero_path.sql");
+      expect(out).toContain(NORMALIZER);
+      expect(out).toContain(NAIVE);
+      expect(out, "the evidence must state that BOTH readings returned zero names").toMatch(
+        /0 name\(s\)[\s\S]*0 name\(s\)/,
+      );
+      expect(out).toContain("MEASURE_FAIL");
+      // The reasoning, not just the refusal.
+      expect(out).toContain("blind spots");
+      // The ordering constraint must be readable AT the point of refusal.
+      expect(out).toContain("164.4");
+      // The old fail-open conclusion must be GONE — these two strings ARE what
+      // the exit-0 branch printed, quoted from bab02576. Pinned as the exact
+      // sentences rather than a loose phrase: the refusal's own prose argues
+      // ABOUT reader agreement, so a substring like "readings agree" would
+      // match the fix and make this assertion unfailable.
+      expect(out).not.toContain("define no functions — nothing to compare");
+      expect(out).not.toContain("(Two independent readings agree; see SP-C05.)");
+      expect(out).not.toContain("no unacknowledged repo-vs-PROD body drift");
+    });
+  });
+
+  // ── The PASSING CONTROL. Load-bearing: a gate that refuses EVERYTHING also
+  // passes its own refusal arm, so the refusal proves nothing without this.
+  it("CONTROL: a legitimate non-empty comparison still reaches its normal verdict", () => {
+    withTempDir((dir) => {
+      // Identical wiring; the ONLY difference from the arm above is that the
+      // migration's definition is one both readers can see.
+      const env = scaffold(dir, VISIBLE_FN, { snapshotFor: "some_other_fn" });
+      const { status, out } = run(PROD_GATE, env);
+      expect(status, out).toBe(0);
+      expect(out).toContain("Functions defined or replaced by this PR: 1");
+      expect(out).toContain("1 match");
+      expect(out).toContain("no unacknowledged repo-vs-PROD body drift");
+      expect(out, "the refusal must fire ONLY on the compared-nothing state").not.toContain(
+        "VAC04-ZERO-PATH-FAILS-CLOSED",
+      );
+    });
+  });
+
+  it("CONTROL: the OTHER zero path — a PR that changes no migration files at all — is still a quiet exit 0", () => {
+    // `:198-199` is a legitimate nothing-to-do: the merge base RESOLVED and the
+    // diff is genuinely empty. It is NOT the compared-nothing state, and the
+    // fail-closed change must not have swept it up.
+    withTempDir((dir) => {
+      const env = scaffold(dir, VISIBLE_FN, { snapshotFor: "some_other_fn" });
+      const { status, out } = run(PROD_GATE, {
+        ...env,
+        CHANGED_MIGRATIONS: "",
+        BASE_REF: "HEAD",
+      });
+      expect(status, out).toBe(0);
+      expect(out).toContain("changes no migration files");
+      expect(out).not.toContain("MEASURE_FAIL");
+    });
+  });
+
+  // ── (b) The reopen pin's BY-NAME direction ─────────────────────────────────
+  it("REOPEN PIN: the gate script carries the VAC04-ZERO-PATH-FAILS-CLOSED marker and its ordering note", () => {
+    // node:fs, never shell grep — `src/lib/wizardErrors.test.ts` carries a
+    // measured NUL byte that makes grep exit 1 and read as "clean", and a pin
+    // that can be defeated by a byte is not a pin.
+    const src = readFileSync(PROD_GATE, "utf8");
+    expect(
+      src,
+      "the fail-closed branch was deleted or rerouted — [VAC04-C1] is reopened",
+    ).toContain("VAC04-ZERO-PATH-FAILS-CLOSED");
+    // The marker alone would let the branch be gutted to `exit 0` under an
+    // intact comment; the execution arm above covers that. What THIS arm adds is
+    // that the ordering constraint stays where a blocked reader will find it.
+    expect(src).toContain("164.4");
+    expect(src.toLowerCase()).toContain("hold");
+  });
+});
+
 // ── VAC-08 ───────────────────────────────────────────────────────────────────
 
 /** A stub ledger query: emits the names it was told are MISSING from the ledger. */
