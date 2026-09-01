@@ -170,20 +170,53 @@ describe("lint-sql-gates: every rule fires on red and passes on green", () => {
       ).toContain(attribution(ruleId));
     }
 
-    // Calibration, both failure shapes the finding names, applied to a copy so
-    // the fixtures on disk are untouched:
-    //   * attribution DELETED  — the banner alone must not satisfy it;
+    // Calibration, both failure shapes the finding names, applied to a COPY of
+    // the red fixture's REAL BYTES so the fixtures on disk are untouched:
+    //   * attribution DEGRADED to a bare banner — the banner alone must not
+    //     satisfy the arm;
     //   * attribution COPIED from another rule — a real risk, since the
     //     fixtures are written by hand from a template.
+    //
+    // ⛔ [VAC-SELFREF-01] FIXED HERE — Phase 164.3.1 plan 08. The DEGRADED half
+    // used to assert against `const banner = "-- RED FIXTURE (see the rule for
+    // the mechanism).\n"`, a string literal declared one line above the two
+    // assertions that read it. Those assertions held whether or not the
+    // fixtures, `RULES` or `attribution` existed, so they could not fail: a
+    // self-referential oracle, primitive D. It was not caught by four review
+    // rounds; it was caught by machine —
+    // `src/__tests__/self-referential-oracle.test.ts` flagged this file at
+    // `:183` and `:184` AT HEAD, before this fix, recorded verbatim in
+    // `164.3.1-02-CALIBRATION.md` § II. The subject below is now the fixture's
+    // real bytes, degraded by the very mutation the finding describes, so it
+    // fails when the fixtures, the linter's `RULES`, or `attribution` change.
+    //
+    // MEASURED 2026-09-01 (`grep -ac "RED FIXTURE"
+    // scripts/lint-sql-gates-fixtures/*.red.sql` → 1 per file): the phrase
+    // "RED FIXTURE" occurs EXACTLY ONCE in each red fixture — inside the
+    // attribution line itself. So the degradation that reproduces the reported
+    // blindness is REPLACING the attribution with a bare banner, not deleting
+    // it: an outright deletion would take "RED FIXTURE" with it and the old
+    // assertion would have reddened too. The synthetic const asserted a
+    // property of an imagined fixture; these bytes are the real ones.
     const first = EXPECTED_RULE_IDS[0];
     const other = EXPECTED_RULE_IDS[1];
     expect(other, "need two rules to prove a cross-attribution is caught").toBeDefined();
     const text = readFileSync(fixture(first, "red"), "utf8");
-    const banner = "-- RED FIXTURE (see the rule for the mechanism).\n";
-    expect(banner).toContain("RED FIXTURE");
-    expect(banner, "the OLD assertion passes on a fixture with no attribution at all").not.toContain(
-      attribution(first),
-    );
+
+    const degraded = text.replace(attribution(first), "RED FIXTURE (see the rule for the mechanism).");
+    expect(
+      degraded,
+      "the degradation must have changed the real fixture text — if it did not, the fixture no longer carries its attribution and the loop above should already have failed",
+    ).not.toBe(text);
+    expect(
+      degraded,
+      'the OLD arm — a bare toContain("RED FIXTURE") — still passes on a fixture whose mechanism attribution has been degraded away; that is the SP-I02 vacuity, demonstrated on the real bytes',
+    ).toContain("RED FIXTURE");
+    expect(
+      degraded,
+      "the CURRENT arm must catch a degraded attribution that the old banner-only arm accepted",
+    ).not.toContain(attribution(first));
+
     const crossAttributed = text.replace(attribution(first), attribution(other));
     expect(crossAttributed, "the mutation must have changed the text").not.toBe(text);
     expect(crossAttributed).not.toContain(attribution(first));
