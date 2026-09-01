@@ -5,16 +5,16 @@ milestone_name: Backlog Burndown (Phases 158+)
 current_phase: 164.3.1
 current_phase_name: SOUND-PRIMITIVES — four cycling primitives closed by construction
 status: executing
-stopped_at: "164.3.1 WAVES 1-2 COMPLETE AND MERGED (8/12 plans). Stopped at user request before Wave 3. Branch phase-164.3.1-sound-primitives, all work committed, zero worktrees outstanding. Merged-tree gates all GREEN: vitest 13671 passed / 0 failed, tsc --noEmit clean, mutation self-test exit 0, full corpus exit 0 at 30/30/0 biting 30, plan-anchor-verify exit 0 (35 claims). REMAINING: Wave 3 = plan 09 (SC-6 re-derivation), Wave 4 = plan 10 (runner absurdity floor), Wave 5 = plans 11+12 (regression corpus + frontend-aggregator wiring). RESUME: /gsd-execute-phase 164.3.1"
-last_updated: "2026-09-01T17:46:04.349Z"
+stopped_at: Completed 164.3.1-09-PLAN.md
+last_updated: "2026-09-01T20:58:55.070Z"
 last_activity: 2026-09-01
-last_activity_desc: Phase 164.3.1 execution started
-state_head: e06600315913b58f884b96eb355adee74c1797f0
+last_activity_desc: Phase 164.3.1 execution resumed (wave continue)
+state_head: 938cdaf996dc850db26663ed4ac05df4242137b4
 progress:
   total_phases: 14
   completed_phases: 4
   total_plans: 82
-  completed_plans: 66
+  completed_plans: 75
   percent: 29
 ---
 
@@ -116,7 +116,7 @@ zero unclassified) and `161-VALIDATION.md` (Nyquist strategy, 4 Wave-0 gaps, ant
 Phase: 164.3.1 (SOUND-PRIMITIVES) — EXECUTING
 Plan: 1 of 12
 Status: Executing Phase 164.3.1
-Last activity: 2026-09-01 — Phase 164.3.1 execution started
+Last activity: 2026-09-01 — Phase 164.3.1 execution resumed (wave continue)
 
 ⚠️ Phase 160 remains OPEN on its human gate — see `## Deferred Verification`. Advancing this
 pointer to 161 does NOT close it; resume it only via `/gsd-verify-work 160`.
@@ -495,7 +495,7 @@ Prior-phase 141.1 close-out detail (retained; NOT about 142.1):
         2 WARNING gaps, no BLOCKER. See `140.1-VERIFICATION.md`. Not transitioned (`--no-transition`).
 Last activity: 2026-08-02 -- Phase 142 execution started
 
-Progress: [█░░░░░░░░░] 8%
+Progress: [███░░░░░░░] 29%
 
 ### Phase 140.1 close-out — open items (do NOT lose these)
 
@@ -648,6 +648,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 | Phase 164 P07 | 12min | 2 tasks | 2 files |
 | Phase 164 P05 | 32min | 3 tasks | 13 files |
 | Phase 164 P03 | 21min | 2 tasks | 6 files |
+| Phase 164.3.1 P09 | 12 min | 2 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -833,6 +834,8 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - [Phase 163]: 164-05: per-route no-referrer is justified by the SAME-ORIGIN gap; the CONTEXT/PLAN claim that strict-origin-when-cross-origin 'never strips the path' is FALSE (cross-origin it sends origin only) and is recorded as false in code + test
 - [Phase 163]: 164-03: deriveShareToken takes THREE arguments (id, nonce, generation) — the mint route round-trips a minted url through verifyShareToken because a 43-char shape assertion passes for the stale two-argument pre-image too
 - [Phase 163]: 164-03: MEASURED — the audit-coverage mutating-RPC detector scans line-by-line, so a Prettier wrap between .rpc( and the name disarms it exactly as a method-cast does; both share routes cast the CLIENT and keep the call on one line (deferred-items D-164-C)
+- [Phase 164.3.1]: 164.3.1-09: ARMS_FLOOR=30 and FILES_FLOOR=1 RE-DERIVED under the sound primitives and HOLD — 30/30/0, biting 30, 0 of 30 arms moved; comments-only diff, floors test untouched per the lockstep rule. — The gate file blob is byte-identical at the phase base and HEAD (5ae6855f), so the input was fixed and only the mechanism moved — that is what makes no-movement a measurement rather than two different corpora agreeing by luck.
+- [Phase 164.3.1]: 164.3.1-09: biting 30 is the SAME integer over a STRICTLY SMALLER admissible set — plan 10 must carry that qualitative fact with the number when it sets absurdity-floor thresholds. — identity ok moved from a transmitted nonce (readable by the gate via current_query()) to a three-legged source-location rule, so a floor of 30 is harder to satisfy than it was pre-phase.
 
 ### Decisions (execution-time, Phase 140.2)
 
@@ -1535,8 +1538,8 @@ Load-bearing sequencing (real dependencies, do not reorder):
 
 ## Session
 
-**Last Date:** 2026-08-28T08:31:50.147Z
-**Stopped At:** Completed 164-03 (wave 3); 164-06 at its blocking-human checkpoint
+**Last Date:** 2026-09-01T20:58:13.768Z
+**Stopped At:** Completed 164.3.1-09-PLAN.md
 **Last Date:** 2026-08-25T22:26:01.687Z
 **Stopped At:** Completed 162-03-PLAN.md
 **Last Date:** 2026-08-25T22:28:04.096Z
@@ -1594,6 +1597,7 @@ pre-merge `e0493913`. Fix is PR #669. Supabase migrations and the Vercel fronten
 - 161.1: OQ-3 still OPEN — closes only when a founder executes the runbook's step 1 and records whether the database-level or role-level app.* GUC form verified. Also: deribit has ZERO live refresh coverage until plan 04's stitch_composite arm lands (TODOS 0.3)
 - 161.1-04 (wave 4, 2026-08-25): the composite arm LANDED DORMANT — `enqueue_ledger_composite_refresh` (migration `20260825140000`), 8-arm SQL gate, static gates 10-11, and the D-15 non-destructive guard EXTENDED to `run_stitch_composite_job._stamp_failed` (a second destructive stamp plan 02's guard never covered; found by measurement, fixed under Rule 2). ⛔ **Task 3 is a BLOCKING founder LIVE op and is NOT done:** one manual `stitch_composite` enqueue for the one live PROD composite must be observed to completion (`last_return_date` advancing in the staleness view, NOT a job going green) before the composite schedule is documented as activatable. The runbook's composite section is deliberately UNWRITTEN until then. TODOS 0.3 stays OPEN — half of its close condition (the arm exists) is met, half (a composite observed to refresh) is not.
 - 164-05 MEASURED: the phase-148 guard does NOT catch a second unstable_cache call site outside factsheet/[id]/v2/page.tsx (12/12 green under NEUTER-D). 164-07's closure guard does not close it either — the page imports the builder, not the reverse. Closed for the token route by src/app/factsheet-share/[token]/page.no-cache-reach.test.ts; the general repo-wide call-site pin is still unowned.
+- `state.advance-plan` REFUSES on this STATE.md (measured 2026-09-01 by 164.3.1-09): the `## Current Position` section carries a **second** `Phase:` line — line 129, inside the retained `### Retained — Phase 156 close-out` block — so the verb returns `ambiguous_position_phase` and will not advance rather than silently picking the first. Left UNRESOLVED on purpose: that block is marked *do NOT lose this*, and restructuring a retained ledger is outside a measure-only plan's scope. ⚠️ Consequence: the `Plan: 1 of 12` line under Current Position is **STALE** (9 of 12 plans now have SUMMARYs on disk). Read the frontmatter `progress` block or count `.planning/phases/164.3.1-*/`, never that line. Fix = move the Phase-156 retained block out of `## Current Position` into its own top-level section, or teach the verb to ignore `###`-nested entries.
 
 ## ⛔ Standing constraint from Phase 164.3.1 — do not lose this between sessions
 

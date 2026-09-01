@@ -558,7 +558,7 @@ Plans:
 8. The absurdity floor exists on VAC-04 and on the mutation runner as well as VAC-08, each proven able to fire AND proven silent on a legitimate finding — a two-directional neuter, because a floor that fires unconditionally also passes its own RED arm. Every threshold records the measurement that set it and the separation it achieves.
 9. Every gate whose key, threshold or join rests on a measurement carries that measurement's SAMPLE SIZE and COVERAGE beside it, plus an arm asserting the key against the full corpus. Verified by grepping the family for justifying measurements and finding no bare ones.
 
-**Plans:** 8/12 plans executed (5 waves)
+**Plans:** 9/12 plans executed (5 waves)
 
 Plans:
 
@@ -570,7 +570,7 @@ Plans:
 - [x] 164.3.1-06-PLAN.md — [AUDCOV-01] fix: cross-line quote state; A finds its site, B/C controls hold (Wave 2) [SC-5]
 - [x] 164.3.1-07-PLAN.md — VAC-04 gate: grep exit branching (C3), fail-closed zero path + reopen pin, absurdity floor (Wave 2) [SC-4 PARTIAL, SC-7, SC-8, SC-9]
 - [x] 164.3.1-08-PLAN.md — Primitive-D rule BLOCKING with measured allowlist; :182-186 fixed; [MUT-W02] structural parse (Wave 2) [SC-5, SC-9]
-- [ ] 164.3.1-09-PLAN.md — Measure-first: ARMS_FLOOR + biting re-derived under sound primitives, movement recorded (Wave 3) [SC-6, SC-9]
+- [x] 164.3.1-09-PLAN.md — Measure-first: ARMS_FLOOR + biting re-derived under sound primitives, movement recorded (Wave 3) [SC-6, SC-9]
 - [ ] 164.3.1-10-PLAN.md — Mutation-runner absurdity floor: armsExecuted vs lane invocations, printed + CI-asserted (Wave 4) [SC-7, SC-8, SC-9]
 - [ ] 164.3.1-11-PLAN.md — Regression corpus A+B: four lane-driven selftest fixtures, recursive RED proofs (Wave 5) [SC-1]
 - [ ] 164.3.1-12-PLAN.md — Regression corpus C+D + VAC-08 instances, instance→arm registry, SC-7/SC-9 meta-arms (Wave 5) [SC-1, SC-7, SC-9]
