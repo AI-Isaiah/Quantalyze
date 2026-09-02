@@ -1005,6 +1005,45 @@ export function gateAttributionRecords(gateText) {
 }
 
 /**
+ * An identity's SECTION — the coverage unit the founder locked on 2026-09-02
+ * (ROADMAP § SCOPE AMENDMENT: one `RED-UNDER-M` per named assertion group).
+ *
+ * ⛔ THE UNIT IS DERIVED FROM THE IDENTITIES, NEVER FROM THE `-- ====` BANNERS.
+ * MEASURED 2026-09-02: the banner convention is not uniform across the 44 idiom
+ * files — `test_reconcile_dropped_enqueue_sweep.sql`,
+ * `test_strategy_analytics_stuck_computing_reaper.sql` and
+ * `test_retention_orphaned_running.sql` carry 8 / 12 / 6 banners for 39 / 29 /
+ * 25 sections, because there they delimit coarse "Part 1 / Part 2" blocks. A
+ * count taken off banners UNDERCOUNTS, which would make a half-annotated file
+ * read as complete — the exact direction this column exists to expose.
+ *
+ * The rule strips a trailing sub-suffix: `SHAPE 2a` -> `SHAPE 2`,
+ * `TRIGGER 3d-i` -> `TRIGGER 3`, `ANON 1b-grant` -> `ANON 1`. An identity with
+ * no such suffix is its own section.
+ */
+export const sectionOfIdentity = (id) => id.replace(/(\d)[a-z]*(-[A-Za-z]+)?$/, "$1");
+
+/**
+ * How many SECTIONS a gate file has: distinct sections over the identities the
+ * runner can actually attribute.
+ *
+ * ⛔ Built on `gateAttributionRecords`, not on a raw scan of the file text.
+ * MEASURED 2026-09-02 on the reference file: a raw `TEST FAILED (…)` sweep of
+ * `test_strategy_shares_rls.sql` yields 104 identities / 36 sections, because
+ * the file's own HEADER documents the idiom; the attributable set is 103 / 35.
+ * The number printed beside `annotated` has to be the number an annotation
+ * could ever reach, or the gap it exposes would be an artefact of the counter.
+ *
+ * ⚠️ This plan PRINTS the field. It does NOT yet pin `annotated >= sections`:
+ * the reference file is 30 twins over 35 sections until plan 164.4-02 closes
+ * the 15, so the pin would fail on the very run this plan measures. Plan 02
+ * arms it.
+ */
+export function gateSectionCount(gateText) {
+  return new Set(gateAttributionRecords(gateText).map((r) => sectionOfIdentity(r.arm))).size;
+}
+
+/**
  * Parse lane output into psql message blocks.
  *
  * A block starts at a `psql:<path>:<line>: <SEVERITY>:  …` header and runs to
@@ -1654,10 +1693,34 @@ function runLane({ workdir, applyAbs, postApplyAbs, gateAbs, leg }) {
  * numbers in a machine-readable tail and says it is the gate failing — a bare
  * conclusion is the repudiation shape SC-7 refuses.
  *
- * @param {{armsExecuted: number, laneInvocations: number, biting: number}} counts
+ * ⭐ 2026-09-02 (164.4-01) — TWO MORE RELATIONS, over the PER-FILE breakdown.
+ * `perFile` and `armsAnnotated` are OPTIONAL: a caller that passes neither gets
+ * exactly the three-count behaviour above, which is what the pure-arithmetic
+ * fixtures in `mutation-runner-floors.test.ts` exercise. When they ARE passed:
+ *
+ *   (3) sum(perFile.biting) === biting
+ *   (4) sum(perFile.annotated) === armsAnnotated
+ *
+ * These are not restatements of the aggregate. The aggregate subtracts the
+ * non-biting defect kinds GLOBALLY; the per-file column subtracts the ones that
+ * NAME that file. A non-biting defect attributed to no file — or to a file the
+ * loop never listed — deflates the aggregate and leaves the breakdown intact,
+ * so the two disagree and say so. That is the shape RESEARCH Pitfall 2 warns
+ * about in miniature: a number that moved for a reason nothing in the report
+ * accounts for.
+ *
+ * @param {{armsExecuted: number, laneInvocations: number, biting: number,
+ *          perFile?: Array<{name: string, annotated: number, biting: number}> | null,
+ *          armsAnnotated?: number | null}} counts
  * @returns {string[]}
  */
-export function absurdityViolations({ armsExecuted, laneInvocations, biting }) {
+export function absurdityViolations({
+  armsExecuted,
+  laneInvocations,
+  biting,
+  perFile = null,
+  armsAnnotated = null,
+}) {
   const tail = `(executed=${armsExecuted} lane-invocations=${laneInvocations} biting=${biting})`;
   const gate = "MEASURE_FAIL — this is the GATE failing, not the corpus:";
   const isCount = (n) => Number.isInteger(n) && n >= 0;
@@ -1689,6 +1752,36 @@ export function absurdityViolations({ armsExecuted, laneInvocations, biting }) {
         `minus a subset of the defects, so this count is impossible for one run of this program; ` +
         `either the counts were assembled from two runs or the arithmetic was tampered with.`,
     );
+  }
+  if (perFile !== null) {
+    if (!perFile.every((r) => isCount(r.biting) && isCount(r.annotated))) {
+      out.push(
+        `${gate} the per-file breakdown carries a field that is not a non-negative integer ` +
+          `${tail}. An unmeasurable column is not a column of zeroes.`,
+      );
+      return out;
+    }
+    const sumBiting = perFile.reduce((a, r) => a + r.biting, 0);
+    if (sumBiting !== biting) {
+      out.push(
+        `${gate} the per-file breakdown sums to ${sumBiting} biting arm(s) but the aggregate ` +
+          `reports ${biting} ${tail}, across ${perFile.length} file(s). The two are derived from ` +
+          `the same run — the aggregate subtracts the non-biting defects globally, the columns ` +
+          `subtract the ones naming each file — so a disagreement means a defect belongs to no ` +
+          `file the loop listed, or a column was not kept.`,
+      );
+    }
+    if (armsAnnotated !== null) {
+      const sumAnnotated = perFile.reduce((a, r) => a + r.annotated, 0);
+      if (!isCount(armsAnnotated) || sumAnnotated !== armsAnnotated) {
+        out.push(
+          `${gate} the per-file breakdown sums to ${sumAnnotated} annotated twin(s) but the ` +
+            `aggregate reports ${armsAnnotated} ${tail}, across ${perFile.length} file(s). Every ` +
+            `twin belongs to exactly one gate file; a gap here means twins were counted for a ` +
+            `file the report does not describe.`,
+        );
+      }
+    }
   }
   return out;
 }
@@ -1726,6 +1819,49 @@ export function absurdityViolations({ armsExecuted, laneInvocations, biting }) {
 // line-start prefix, first match only, and the coverage grep is `$`-ANCHORED.
 // So `unreachable:` is a NEW, distinct column-0 prefix (it collides with none
 // of the four existing greps) and every other new line is INDENTED.
+
+/**
+ * The defect kinds that take an EXECUTED arm out of `biting`. Named once, so
+ * the aggregate `bitingArms` and the per-file `biting` column cannot come to
+ * mean two different things under one word.
+ *
+ * ⛔ `synthesised-identity` MUST be here: it is raised for an arm that DID run
+ * a lane, so omitting it counts a vacuous PASS as biting — the one number
+ * ARMS_FLOOR bounds. `lane-unrunnable` is NOT here: it is handled by
+ * `armsUnjudged`, because the never-started case raises it without ever
+ * incrementing `armsExecuted` and subtracting by kind would push biting below
+ * what ran.
+ */
+const NON_BITING_DEFECT_KINDS = ["no-red", "wrong-first-failure", "synthesised-identity"];
+
+/**
+ * The per-file rows the report prints and the absurdity floor cross-sums.
+ *
+ * `judged` is what the file's arms actually reached a verdict on, and it is the
+ * column that makes threat T-164.4-05 visible: a file whose baseline went RED
+ * is `continue`d before any arm runs, so it shows `annotated 39 / judged 0` —
+ * 39 twins of coverage that measured nothing. `biting` subtracts, from that
+ * file's judged arms, the non-biting defects that NAME that file.
+ */
+function perFileRows(tallies, defects) {
+  return tallies.map((t) => {
+    const judged = t.executed - t.unjudged;
+    const nonBiting = defects.filter(
+      (d) => d.file === t.gateRel && NON_BITING_DEFECT_KINDS.includes(d.kind),
+    ).length;
+    return { ...t, judged, biting: judged - nonBiting };
+  });
+}
+
+/** One indented per-file line, in the per-item shape of the `  waived:` line. */
+function logPerFileRows(rows, log) {
+  for (const r of rows) {
+    log(
+      `  file ${r.name}: sections ${r.sections} / judged ${r.judged} / annotated ${r.annotated} / ` +
+        `waived ${r.waived} / biting ${r.biting}`,
+    );
+  }
+}
 
 /**
  * Print the corpus classification: the excluded files by name, then the idiom
@@ -1815,6 +1951,12 @@ export function runCorpus({
   let armsUnjudged = 0;
   const waivers = [];
   const timings = [];
+  // 164.4-01 — the PER-FILE view (threat T-164.4-05). `filesAnnotated` counts a
+  // file whose baseline went RED exactly like one whose 39 arms all bit: the
+  // arm loop is `continue`d and the file still reads as coverage. So each
+  // target keeps its own tally and the report prints it. Ratchet on `biting`,
+  // never on `annotated`.
+  const perFileTallies = [];
 
   // 164.3.1-10: the lane runner's tally is read as a DELTA across this run —
   // snapshot now, subtract at the summary. Never reset: this function does not
@@ -1849,6 +1991,18 @@ export function runCorpus({
       const gateAbsRepo = join(scopeDir, name);
       const gateRel = relative(REPO_ROOT, gateAbsRepo);
       const parsed = parseFile(gateAbsRepo);
+      // Opened HERE, before any `continue` below, so a file that never reaches
+      // an arm still gets a printed row saying so.
+      const tally = {
+        name,
+        gateRel,
+        sections: gateSectionCount(readFileSync(gateAbsRepo, "utf8")),
+        annotated: 0,
+        waived: 0,
+        executed: 0,
+        unjudged: 0,
+      };
+      perFileTallies.push(tally);
 
       for (const err of parsed.errors) addDefect("parse", null, gateRel, err.message);
       if (!parsed.parity.ok) {
@@ -1885,9 +2039,11 @@ export function runCorpus({
       }
 
       armsAnnotated += annotations.length;
+      tally.annotated = annotations.length;
       for (const ann of annotations) {
         if (ann.waiver) {
           armsWaived += 1;
+          tally.waived += 1;
           waivers.push({ arm: ann.arm, file: gateRel, reason: ann.waiver });
         }
       }
@@ -2024,6 +2180,8 @@ export function runCorpus({
           if (run.invoked) {
             armsExecuted += 1;
             armsUnjudged += 1;
+            tally.executed += 1;
+            tally.unjudged += 1;
           }
           addDefect(
             "lane-unrunnable",
@@ -2038,6 +2196,7 @@ export function runCorpus({
         // The verdict loop's OWN count. Its twin is `laneTally.arm`, kept
         // inside runLane; the summary cross-checks the two (164.3.1-10).
         armsExecuted += 1;
+        tally.executed += 1;
         timings.push(run.seconds);
 
         // ── 164.3.1-05: attribute by SOURCE LOCATION ────────────────────────
@@ -2236,10 +2395,7 @@ export function runCorpus({
   // by kind: the never-started case raises one without ever incrementing
   // `armsExecuted`, and subtracting it would push biting below what ran.
   const bitingArms =
-    armsExecuted -
-    armsUnjudged -
-    defects.filter((d) => ["no-red", "wrong-first-failure", "synthesised-identity"].includes(d.kind))
-      .length;
+    armsExecuted - armsUnjudged - defects.filter((d) => NON_BITING_DEFECT_KINDS.includes(d.kind)).length;
   log(`biting: ${bitingArms}   (executed arms that reddened their OWN arm first — the quantity ARMS_FLOOR bounds)`);
   // 164.3.1-10: the lane runner's OWN count of arm lanes, printed beside the
   // verdict loop's `arms:` so the two can be compared — here, and again by the
@@ -2256,6 +2412,8 @@ export function runCorpus({
       `independent of the ${armsExecuted} the verdict loop counted; plus ${laneLegs.baseline} ` +
       `baseline / ${laneLegs.restore} restore leg(s))`,
   );
+  const fileRows = perFileRows(perFileTallies, defects);
+  logPerFileRows(fileRows, log);
   for (const w of waivers) log(`  waived: ${w.arm} — ${w.reason}`);
   if (timings.length > 0) {
     const total = timings.reduce((a, b) => a + b, 0);
@@ -2299,7 +2457,13 @@ export function runCorpus({
   // Applied in EVERY mode, narrowed included — a diagnostic run that miscounts
   // is no more trustworthy than a full one. See absurdityViolations.
   // -----------------------------------------------------------------------
-  for (const violation of absurdityViolations({ armsExecuted, laneInvocations, biting: bitingArms })) {
+  for (const violation of absurdityViolations({
+    armsExecuted,
+    laneInvocations,
+    biting: bitingArms,
+    perFile: fileRows,
+    armsAnnotated,
+  })) {
     addDefect("absurdity", null, null, violation);
   }
 
@@ -2398,11 +2562,26 @@ export function parseOnlyCorpus({ scopeDir, log = (s) => console.log(s) }) {
   let armsAnnotated = 0;
   let armsWaived = 0;
   const waivers = [];
+  // Same per-file view as the gate path, with the two lane-dependent columns
+  // pinned at 0 — this mode runs no lane, so nothing is judged and nothing
+  // bites. Printing them as 0 rather than omitting the columns keeps the two
+  // modes' line shape identical, which is what lets one regex read both.
+  const perFileTallies = [];
 
   for (const name of corpus.annotatedFiles) {
     const gateAbsRepo = join(scopeDir, name);
     const gateRel = relative(REPO_ROOT, gateAbsRepo);
     const parsed = parseFile(gateAbsRepo);
+    const tally = {
+      name,
+      gateRel,
+      sections: gateSectionCount(readFileSync(gateAbsRepo, "utf8")),
+      annotated: parsed.structured.length,
+      waived: parsed.structured.filter((a) => a.waiver).length,
+      executed: 0,
+      unjudged: 0,
+    };
+    perFileTallies.push(tally);
 
     for (const err of parsed.errors) addDefect("parse", null, gateRel, err.message);
     if (!parsed.parity.ok) {
@@ -2497,6 +2676,7 @@ export function parseOnlyCorpus({ scopeDir, log = (s) => console.log(s) }) {
   log(`coverage: files ${corpus.filesAnnotated}/${corpus.filesTotal}`);
   logCorpusClassification(corpus, log);
   log(`arms: 0/${armsAnnotated}/${armsWaived}   (executed/annotated/waived)`);
+  logPerFileRows(perFileRows(perFileTallies, defects), log);
   for (const w of waivers) log(`  waived: ${w.arm} — ${w.reason}`);
   log("");
   log("⚠️ STATIC PARSE ONLY — ZERO arms executed. This is NOT the gate: it cannot");

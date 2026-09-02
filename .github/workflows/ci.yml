@@ -1206,6 +1206,45 @@ jobs:
             echo "::error::MEASURE_FAIL — this is the GATE failing, not the corpus: the verdict loop reported $arms_executed executed arm(s) but the lane runner counted $lane_invocations arm lane(s) (executed=$arms_executed lane-invocations=$lane_invocations biting=$biting). Arms were claimed that no lane ran, or lanes ran that no verdict describes. The runner's own in-process floor exits 1 on this; a log reaching this step with these numbers was not produced by one honest run of the gate."
             exit 1
           fi
+          # 164.4-01 — THE PER-FILE BREAKDOWN, CROSS-SUMMED (threat T-164.4-05).
+          # `coverage: files N/71` counts a file whose baseline went RED exactly
+          # like one whose 39 arms all bit: the arm loop is `continue`d and the
+          # file still reads as coverage. The runner now prints one row per
+          # annotated file — sections / judged / annotated / waived / biting —
+          # so a half-annotated or never-judged file is visible in the log
+          # rather than averaged into a green aggregate.
+          #
+          # Three arms, same discipline as every assertion above:
+          #   (1) NO rows at all -> MEASURE_FAIL. The runner stopped reporting.
+          #   (2) one row per annotated file, cross-checked against the
+          #       `coverage:` numerator already read. Rows and coverage are two
+          #       readings of the same loop and cannot disagree.
+          #   (3) the rows' `biting` column must SUM to the aggregate `biting:`
+          #       already read. The runner asserts this in-process too
+          #       (`absurdityViolations`); asserting it here is the same
+          #       out-of-process re-read as the lane-invocations arm, for a step
+          #       whose whole job is reading numbers out of a file it did not
+          #       produce. No literal integer is restated — both sides come from
+          #       the run output.
+          file_rows=$(grep -a -E '^  file .+: sections [0-9]+ / judged [0-9]+ / annotated [0-9]+ / waived [0-9]+ / biting [0-9]+$' "$RUNNER_LOG" || true)
+          if [ -z "$file_rows" ]; then
+            echo "::error::MEASURE_FAIL: the run printed NO '  file <name>: sections … / judged … / biting …' row, so which annotated files actually reached a verdict is unknown. A file whose baseline went red counts toward coverage while judging nothing; without the per-file rows that gap is invisible."
+            exit 1
+          fi
+          printf '%s\n' "$file_rows"
+          file_rows_count=$(printf '%s\n' "$file_rows" | wc -l | tr -d '[:space:]')
+          if [ "$file_rows_count" -ne "$files_annotated" ]; then
+            echo "::error::MEASURE_FAIL: the run printed $file_rows_count per-file row(s) but reported $files_annotated annotated file(s) on its coverage line. Those are two readings of the same loop; a disagreement means a file was counted as coverage without being described, or described without being counted."
+            exit 1
+          fi
+          per_file_biting=$(printf '%s\n' "$file_rows" | awk '{ for (i = 1; i <= NF; i++) if ($i == "biting") s += $(i + 1) } END { print s + 0 }')
+          case "$per_file_biting" in ''|*[!0-9]*)
+            echo "::error::MEASURE_FAIL: could not sum the per-file biting column."; exit 1;; esac
+          if [ "$per_file_biting" -ne "$biting" ]; then
+            echo "::error::MEASURE_FAIL: the per-file rows sum to $per_file_biting biting arm(s) but the aggregate 'biting:' line reports $biting. ARMS_FLOOR is compared against the aggregate, so a breakdown that does not add up to it means the floor is bounding a number the report cannot account for."
+            exit 1
+          fi
+
           if [ "$biting" -lt "$arms_floor" ]; then
             echo "::error::ARMS_FLOOR regression: $biting biting arm(s) < floor $arms_floor. An annotation stopped biting, was deleted, or was converted to a waiver without lowering the floor in scripts/mutation-runner/run.mjs."
             exit 1
