@@ -133,7 +133,7 @@ function refuseSelfSatisfying(at, field, injected) {
   const byConcat = INJECTS_FIRST_FAILURE_LITERAL.test(collapseSqlConcat(injected));
   if (!direct && !byConcat) return;
   throw (
-    `${at}: "${field}" injects a "TEST FAILED (" literal ` +
+    `${at}: "${field}" injects a "${IDENTITY_CARRIER}" literal ` +
     `(${direct ? "directly" : "by string concatenation"}). A mutation that WRITES the string ` +
     `the first-failure identity check looks for satisfies the DETECTOR instead of the arm — it ` +
     `would report RED (identity ok) and count as a biting arm without the arm's own logic ever ` +
@@ -169,19 +169,32 @@ function refuseRetargetingFailureLiteral(at, field, targeted) {
   if (typeof targeted !== "string") return;
   if (!INJECTS_FIRST_FAILURE_LITERAL.test(targeted)) return;
   throw (
-    `${at}: "${field}" TARGETS a "TEST FAILED (" literal. Rewriting a failure message — in ` +
+    `${at}: "${field}" TARGETS a "${IDENTITY_CARRIER}" literal. Rewriting a failure message — in ` +
     `either direction — changes what the first-failure identity check reads instead of what the ` +
     `arm does. Mutate the code under test, not the failure identity.`
   );
 }
 
 /**
- * The pg-lane stand-in fixtures. `scripts/pg-lane/run.sh:44-51` states what
+ * The pg-lane stand-in fixtures. `scripts/pg-lane/run.sh:43-50` states what
  * they do and do not prove: they carry only the columns the real migrations'
  * FKs, policies and function bodies name — they are the author's model of the
  * schema, not the schema.
  */
 const PG_LANE_FIXTURE_DIR = "scripts/pg-lane/fixtures/";
+
+/**
+ * A repo-relative path reduced to the segments that survive resolution: `\` is
+ * read as `/`, and empty (`//`) and `.` segments are dropped, because
+ * `join(REPO_ROOT, rel)` drops them too. Used to compare a path against a
+ * directory by what it OPENS rather than by how it is spelled.
+ */
+const normalizeRepoPath = (p) =>
+  p
+    .replace(/\\/g, "/")
+    .split("/")
+    .filter((seg) => seg !== "" && seg !== ".")
+    .join("/");
 
 /**
  * ⭐ AUTHORING RULE, phase 164.4 (threat T-164.4-01). NO TWIN MAY TARGET A
@@ -210,9 +223,26 @@ const PG_LANE_FIXTURE_DIR = "scripts/pg-lane/fixtures/";
  * sitting BETWEEN two migrations (`04-fixture-compute-jobs-targets.sql`), so
  * "stand-ins first" is a default, not an invariant, and a position-keyed rule
  * would refuse a correct setup.
+ *
+ * ⛔ IT MUST NORMALISE, NOT STRING-PATCH. Measured 2026-09-02: a prefix test
+ * over the raw spelling refused `scripts/pg-lane/fixtures/03-…sql` and let
+ * `scripts/pg-lane/./fixtures/03-…sql` and `scripts/pg-lane//fixtures/03-…sql`
+ * straight through — both resolve to the IDENTICAL stand-in once `materialize`
+ * does `join(REPO_ROOT, rel)`, and `bad-file-ref` compares `step.file` to the
+ * corpus by exact string, so listing the same odd spelling in
+ * `RED-UNDER-SETUP` satisfies that check too. So the path is decomposed and
+ * degenerate segments (empty, `.`) are DROPPED before the prefix test, rather
+ * than two known spellings being patched away. `isRepoRelativePath` has
+ * already refused `..`, absolute paths and drive letters, so normalisation
+ * here cannot walk out of the checkout. The comparison is case-folded because
+ * on a case-insensitive checkout `Scripts/PG-Lane/Fixtures/…` opens the same
+ * stand-in; nothing legitimate differs from this directory by case alone.
  */
 function targetsPgLaneFixture(p) {
-  return p.replace(/\\/g, "/").replace(/^(?:\.\/)+/, "").startsWith(PG_LANE_FIXTURE_DIR);
+  // Trailing "/" so the directory itself matches and a sibling whose name
+  // merely STARTS with "fixtures" (e.g. `scripts/pg-lane/fixtures-extra/`)
+  // does not.
+  return `${normalizeRepoPath(p)}/`.toLowerCase().startsWith(PG_LANE_FIXTURE_DIR.toLowerCase());
 }
 
 /** Validate one `apply` step. Returns the normalised step, or throws a message string. */
@@ -919,9 +949,11 @@ export function maskNonCode(text) {
 export const RAISE_EXCEPTION_RE = /\bRAISE\s+EXCEPTION\b/i;
 
 /**
- * The literal every arm identity is carried in. Spelled once, beside the raise
- * regex it is always read with (`run.mjs` spells it too, for the readers that
- * predate this constant; nothing here re-derives it).
+ * The literal every arm identity is carried in. Spelled ONCE, beside the raise
+ * regex it is always read with. Every reader imports it — this module's own
+ * refusal messages and `run.mjs` alike — and nothing re-spells or re-derives
+ * it, for the same reason `RAISE_EXCEPTION_RE` moved here: two spellings of
+ * one literal is how two readers of "is this an arm identity" drift apart.
  */
 export const IDENTITY_CARRIER = "TEST FAILED (";
 
