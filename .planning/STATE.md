@@ -5,16 +5,16 @@ milestone_name: Backlog Burndown (Phases 158+)
 current_phase: 164.3.1
 current_phase_name: SOUND-PRIMITIVES — four cycling primitives closed by construction
 status: executing
-stopped_at: Completed 164.3.1-10-PLAN.md
-last_updated: "2026-09-01T21:31:51.200Z"
+stopped_at: Completed 164.3.1-11-PLAN.md
+last_updated: "2026-09-02T06:10:26.995Z"
 last_activity: 2026-09-01
 last_activity_desc: Phase 164.3.1 execution resumed (wave continue)
-state_head: 05bd73a6d39842941cfad80b5b6976a3ecf1cfca
+state_head: 7d6f934b1e2b8f5e531bf83e8768af5156180eb7
 progress:
   total_phases: 14
   completed_phases: 4
   total_plans: 82
-  completed_plans: 76
+  completed_plans: 77
   percent: 29
 ---
 
@@ -650,6 +650,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 | Phase 164 P03 | 21min | 2 tasks | 6 files |
 | Phase 164.3.1 P09 | 12 min | 2 tasks | 2 files |
 | Phase 164.3.1 P10 | 22 min | 3 tasks | 3 files |
+| Phase 164.3.1 P11 | 8h 31m | 3 tasks | 8 files |
 
 ## Accumulated Context
 
@@ -839,6 +840,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - [Phase 164.3.1]: 164.3.1-09: biting 30 is the SAME integer over a STRICTLY SMALLER admissible set — plan 10 must carry that qualitative fact with the number when it sets absurdity-floor thresholds. — identity ok moved from a transmitted nonce (readable by the gate via current_query()) to a three-legged source-location rule, so a floor of 30 is harder to satisfy than it was pre-phase.
 - [Phase 164.3.1]: 164.3.1-10: dedicated 'absurdity' defect kind (instrument failing) kept distinct from 'floor' (corpus regression); lane tally arm-scoped, relation EXACT equality, counter monotonic and read as a snapshot delta
 - [Phase 164.3.1]: 164.3.1-10: vitest print-contract pin is cluster-free; the non-zero-through-real-lanes proof lives in --self-test scenario 6 so the unobserved-ubuntu risk (WINDOWS 28) stays out of the blocking vitest shards
+- [Phase 164.3.1]: 164.3.1-11: corpus entries pin the runner's VERDICT TABLE through real lanes, each with a passing control in the same run; P5's silent over-neuter is made loud inside the fixture (SURVIVOR LOST) rather than by exposing lane output; the two Primitive-B entries are proven to fail under DIFFERENT neuters (N3 whole attribution → {8,11,12}; N4 chain length only → {12})
 
 ### Decisions (execution-time, Phase 140.2)
 
@@ -1541,8 +1543,8 @@ Load-bearing sequencing (real dependencies, do not reorder):
 
 ## Session
 
-**Last Date:** 2026-09-01T21:31:50.464Z
-**Stopped At:** Completed 164.3.1-10-PLAN.md
+**Last Date:** 2026-09-02T06:10:26.266Z
+**Stopped At:** Completed 164.3.1-11-PLAN.md
 **Last Date:** 2026-08-25T22:26:01.687Z
 **Stopped At:** Completed 162-03-PLAN.md
 **Last Date:** 2026-08-25T22:28:04.096Z
