@@ -3,17 +3,17 @@ gsd_state_version: 1.0
 milestone: v1.20
 milestone_name: Backlog Burndown (Phases 158+)
 current_phase: 164.3.1
-current_phase_name: SOUND-PRIMITIVES — four cycling primitives closed by construction
+current_phase_name: sound-primitives-the-neuter-scan-and-the-mutation-identity-c
 status: executing
 stopped_at: Completed 164.3.1-12-PLAN.md
-last_updated: "2026-09-02T06:41:44.022Z"
+last_updated: "2026-09-02T08:07:14.563Z"
 last_activity: 2026-09-01
 last_activity_desc: Phase 164.3.1 execution resumed (wave continue)
-state_head: 5aa5038b4a39ebe6efbdea1c3cf3286c948b79d1
+state_head: 2a5d051ef1b91d5fc33235b37b3fe3b71ba5d10c
 progress:
   total_phases: 14
   completed_phases: 4
-  total_plans: 82
+  total_plans: 83
   completed_plans: 78
   percent: 29
 ---
@@ -113,9 +113,9 @@ zero unclassified) and `161-VALIDATION.md` (Nyquist strategy, 4 Wave-0 gaps, ant
 
 ## Current Position
 
-Phase: 164.3.1 (SOUND-PRIMITIVES) — EXECUTING
+Phase: 164.3.1 (sound-primitives-the-neuter-scan-and-the-mutation-identity-c) — READY TO EXECUTE
 Plan: 1 of 12
-Status: Executing Phase 164.3.1
+Status: Ready to execute
 Last activity: 2026-09-01 — Phase 164.3.1 execution resumed (wave continue)
 
 ⚠️ Phase 160 remains OPEN on its human gate — see `## Deferred Verification`. Advancing this
