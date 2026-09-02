@@ -1582,7 +1582,7 @@ describe("[VAC04-C2] GATE-LEVEL — the realpath guard driven THROUGH THE REAL G
   // This is what cycles C2-N1 / C2-N2 produce on the REAL readers (recorded in
   // 164.3.1-13-SUMMARY.md); here it runs on every CI run so the fixed leg can
   // never pass for a reason unrelated to the guard.
-  it("CALIBRATION LEG (standing RED direction): readers carrying the PRE-FIX guard, reached through symlinks, give ZERO names and the MEASURE_FAIL refusal — the readers-ran line never prints", () => {
+  it("CALIBRATION LEG (standing RED direction): readers carrying the PRE-FIX guard, reached through symlinks AND through a space path, give ZERO names and the MEASURE_FAIL refusal — the readers-ran line never prints", () => {
     // By-name pin on the REAL sources first: a real reader that lost its
     // realpath guard reds HERE, by name, before any scratch copy is derived.
     for (const script of [NAIVE, NORMALIZER]) {
@@ -1595,7 +1595,14 @@ describe("[VAC04-C2] GATE-LEVEL — the realpath guard driven THROUGH THE REAL G
     withTempDir((dir) => {
       mkdirSync(join(dir, "pre-fix"), { recursive: true });
       mkdirSync(join(dir, "pre-fix-links"), { recursive: true });
+      // IN-05 (164.3.1 review): the fixed leg claims TWO shapes (cases 1 and 4
+      // are space-path load-bearing), so the standing RED direction shows both
+      // — the pre-fix copies are also written under a directory whose name
+      // carries a space and run through that path. Recorded cycles C2-N1/C2-N2
+      // showed it; this makes it run on every CI run.
+      mkdirSync(join(dir, "pre-fix copies"), { recursive: true });
       const links: Record<string, string> = {};
+      const spaced: Record<string, string> = {};
       for (const script of [NAIVE, NORMALIZER]) {
         const neutered = readFileSync(script, "utf8")
           .replace(FIXED_RETURN_REALPATH, PRE_FIX_RETURN)
@@ -1609,29 +1616,37 @@ describe("[VAC04-C2] GATE-LEVEL — the realpath guard driven THROUGH THE REAL G
         const link = join(dir, "pre-fix-links", basename(script));
         symlinkSync(copy, link);
         links[script] = link;
+        const spacedCopy = join(dir, "pre-fix copies", basename(script));
+        writeFileSync(spacedCopy, neutered);
+        spaced[script] = spacedCopy;
       }
-      const normalizerLink = links[NORMALIZER];
-      const naiveLink = links[NAIVE];
 
-      // MEASURED 2026-09-02 (both fixtures): both evidence lines `0 name(s)`,
-      // "MEASURE_FAIL — NOTHING WAS COMPARED.", exit 1.
-      for (const [label, fixture] of [
-        ["fixture-A", NAIVE_ONLY_FN],
-        ["fixture-B", NORMALIZER_ONLY_FN],
+      // MEASURED 2026-09-02 (both fixtures, both shapes): both evidence lines
+      // `0 name(s)`, "MEASURE_FAIL — NOTHING WAS COMPARED.", exit 1.
+      for (const [shape, readers] of [
+        ["symlink", { normalizer: links[NORMALIZER], naive: links[NAIVE] }],
+        ["space", { normalizer: spaced[NORMALIZER], naive: spaced[NAIVE] }],
       ] as const) {
-        const sub = join(dir, label);
-        mkdirSync(sub, { recursive: true });
-        const env = scaffold(sub, fixture, { normalizer: normalizerLink, naive: naiveLink });
-        const { status, out } = run(PROD_GATE, env);
-        expect(
-          status,
-          `${label}: the gate PASSED with readers whose guard cannot run through a symlink — the fixed leg above proves nothing\n${out}`,
-        ).not.toBe(0);
-        expect(out).toContain("MEASURE_FAIL");
-        // Evidence lines (D-12/SC-7) naming the INJECTED paths, each at zero.
-        expect(out).toContain(`${normalizerLink} --function-names -> 0 name(s)`);
-        expect(out).toContain(`${naiveLink} -> 0 name(s)`);
-        expect(out, `${label}: the readers-ran line printed although neither reader ran`).not.toContain(READERS_RAN);
+        for (const [label, fixture] of [
+          ["fixture-A", NAIVE_ONLY_FN],
+          ["fixture-B", NORMALIZER_ONLY_FN],
+        ] as const) {
+          // The scratch sub-dir name carries NO space: the `BODY_*_CMD`
+          // strings word-split over `${dump}` (describe comment above).
+          const sub = join(dir, `${shape}-${label}`);
+          mkdirSync(sub, { recursive: true });
+          const env = scaffold(sub, fixture, readers);
+          const { status, out } = run(PROD_GATE, env);
+          expect(
+            status,
+            `${shape}/${label}: the gate PASSED with readers whose guard cannot run through a ${shape} path — the fixed leg above proves nothing\n${out}`,
+          ).not.toBe(0);
+          expect(out).toContain("MEASURE_FAIL");
+          // Evidence lines (D-12/SC-7) naming the INJECTED paths, each at zero.
+          expect(out).toContain(`${readers.normalizer} --function-names -> 0 name(s)`);
+          expect(out).toContain(`${readers.naive} -> 0 name(s)`);
+          expect(out, `${shape}/${label}: the readers-ran line printed although neither reader ran`).not.toContain(READERS_RAN);
+        }
       }
     });
   }, 30_000);
