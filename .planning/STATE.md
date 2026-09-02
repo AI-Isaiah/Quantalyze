@@ -5,16 +5,16 @@ milestone_name: Backlog Burndown (Phases 158+)
 current_phase: 164.3.1
 current_phase_name: SOUND-PRIMITIVES — four cycling primitives closed by construction
 status: executing
-stopped_at: Completed 164.3.1-11-PLAN.md
-last_updated: "2026-09-02T06:10:26.995Z"
+stopped_at: Completed 164.3.1-12-PLAN.md
+last_updated: "2026-09-02T06:41:44.022Z"
 last_activity: 2026-09-01
 last_activity_desc: Phase 164.3.1 execution resumed (wave continue)
-state_head: 7d6f934b1e2b8f5e531bf83e8768af5156180eb7
+state_head: 5aa5038b4a39ebe6efbdea1c3cf3286c948b79d1
 progress:
   total_phases: 14
   completed_phases: 4
   total_plans: 82
-  completed_plans: 77
+  completed_plans: 78
   percent: 29
 ---
 
@@ -651,6 +651,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 | Phase 164.3.1 P09 | 12 min | 2 tasks | 2 files |
 | Phase 164.3.1 P10 | 22 min | 3 tasks | 3 files |
 | Phase 164.3.1 P11 | 8h 31m | 3 tasks | 8 files |
+| Phase 164.3.1 P12 | 26 min | 3 tasks | 3 files |
 
 ## Accumulated Context
 
@@ -841,6 +842,9 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - [Phase 164.3.1]: 164.3.1-10: dedicated 'absurdity' defect kind (instrument failing) kept distinct from 'floor' (corpus regression); lane tally arm-scoped, relation EXACT equality, counter monotonic and read as a snapshot delta
 - [Phase 164.3.1]: 164.3.1-10: vitest print-contract pin is cluster-free; the non-zero-through-real-lanes proof lives in --self-test scenario 6 so the unobserved-ubuntu risk (WINDOWS 28) stays out of the blocking vitest shards
 - [Phase 164.3.1]: 164.3.1-11: corpus entries pin the runner's VERDICT TABLE through real lanes, each with a passing control in the same run; P5's silent over-neuter is made loud inside the fixture (SURVIVOR LOST) rather than by exposing lane output; the two Primitive-B entries are proven to fail under DIFFERENT neuters (N3 whole attribution → {8,11,12}; N4 chain length only → {12})
+- [Phase 164.3.1]: 164.3.1-12: VAC08-JOIN evaluates the gate's clauses via a JS interpreter of the four documented shapes that REFUSES unknown clauses; rows from a fixed table, predicate from the script (a first draft that built rows from the script stayed green under the neuter)
+- [Phase 164.3.1]: 164.3.1-12: join clause 2 (version||'_'||name) measured SUBSUMED by clause 4 (desc-only); pinned as EXPECTED_SPECIFICITY, script header :44-47 reported stale not patched
+- [Phase 164.3.1]: 164.3.1-12: meta-arm allowlists classified BEFORE keys were transcribed (17 of 68 emissions, four classes); KNOWN_THRESHOLD_SITES exact set of 6; ${GATE} excluded from what counts as a runtime value
 
 ### Decisions (execution-time, Phase 140.2)
 
@@ -1543,8 +1547,8 @@ Load-bearing sequencing (real dependencies, do not reorder):
 
 ## Session
 
-**Last Date:** 2026-09-02T06:10:26.266Z
-**Stopped At:** Completed 164.3.1-11-PLAN.md
+**Last Date:** 2026-09-02T06:41:43.302Z
+**Stopped At:** Completed 164.3.1-12-PLAN.md
 **Last Date:** 2026-08-25T22:26:01.687Z
 **Stopped At:** Completed 162-03-PLAN.md
 **Last Date:** 2026-08-25T22:28:04.096Z

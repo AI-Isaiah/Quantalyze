@@ -558,7 +558,7 @@ Plans:
 8. The absurdity floor exists on VAC-04 and on the mutation runner as well as VAC-08, each proven able to fire AND proven silent on a legitimate finding — a two-directional neuter, because a floor that fires unconditionally also passes its own RED arm. Every threshold records the measurement that set it and the separation it achieves.
 9. Every gate whose key, threshold or join rests on a measurement carries that measurement's SAMPLE SIZE and COVERAGE beside it, plus an arm asserting the key against the full corpus. Verified by grepping the family for justifying measurements and finding no bare ones.
 
-**Plans:** 11/12 plans executed (5 waves)
+**Plans:** 12/12 plans executed (5 waves)
 
 Plans:
 
@@ -573,7 +573,7 @@ Plans:
 - [x] 164.3.1-09-PLAN.md — Measure-first: ARMS_FLOOR + biting re-derived under sound primitives, movement recorded (Wave 3) [SC-6, SC-9]
 - [x] 164.3.1-10-PLAN.md — Mutation-runner absurdity floor: armsExecuted vs lane invocations, printed + CI-asserted (Wave 4) [SC-7, SC-8, SC-9]
 - [x] 164.3.1-11-PLAN.md — Regression corpus A+B: four lane-driven selftest fixtures, recursive RED proofs (Wave 5) [SC-1]
-- [ ] 164.3.1-12-PLAN.md — Regression corpus C+D + VAC-08 instances, instance→arm registry, SC-7/SC-9 meta-arms (Wave 5) [SC-1, SC-7, SC-9]
+- [x] 164.3.1-12-PLAN.md — Regression corpus C+D + VAC-08 instances, instance→arm registry, SC-7/SC-9 meta-arms (Wave 5) [SC-1, SC-7, SC-9]
 
 ### Phase 164.4: REDUNDER-BACKFILL — every SQL gate arm gets a RED-UNDER annotation that a machine PROVES bites (INSERTED)
 
