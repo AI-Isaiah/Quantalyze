@@ -599,7 +599,7 @@ name on every run**. (Scope narrowed from "all of them" by founder decision 2026
 SCOPE AMENDMENT below; the rename of the 27 is booked as `[REDUNDER-NONIDIOM]` in `TODOS.md`.)
 **Depends on:** ⛔ **Phase 164.3 — HARD, not ordering.** 164.3 builds the mutation runner, and the
 runner is the only thing that makes this phase safe to do at all.
-**Requirements**: TBD (run `/gsd-discuss-phase 164.4`)
+**Requirements**: SC-1, SC-2, SC-3, SC-4 — the four success criteria below stand in for requirement IDs (no `REQUIREMENTS.md` IDs exist for this inserted phase; RESEARCH § Phase Requirements). Discussed 2026-09-02 (`164.4-CONTEXT.md`).
 
 **Why this is its own phase, and why it CANNOT come first.** MEASURED at HEAD 2026-08-28:
 `grep -rl RED-UNDER supabase/tests/` returns **1 file of 71** — 33 annotations, all in
@@ -673,11 +673,23 @@ this phase, not a precondition of it.
 **Explicitly OUT of scope:** writing new gate coverage. This phase annotates and proves what already
 exists; it does not add arms. New coverage is a different phase with a different risk profile.
 
-**Plans:** 0 plans
+**Plans:** 13 plans
 
 Plans:
 
-- [ ] TBD (run /gsd-plan-phase 164.4 to break down)
+- [ ] 164.4-00-PLAN.md — Fixture-strategy spike: stand-ins vs stubbed real chain decided BY MEASUREMENT (timeboxed to 8 stub iterations, 4.0 s/lane rule); largest file's apply list proven GREEN; F1 residual closed
+- [ ] 164.4-01-PLAN.md — Wave 0 runner/CI: `unreachable:` line naming the 27 excluded files, per-file `judged/annotated/waived/biting` breakdown, ci.yml MEASURE_FAIL assertions, GREEN/RED log fixtures, parse-time refusal of fixture targets with red self-test fixture (arm unit = SECTION, 355 sections / ~365 twins stated on the record)
+- [ ] 164.4-02-PLAN.md — Reference file: the 15 un-twinned sections of test_strategy_shares_rls.sql; ARMS_FLOOR 30 → measured (≈45); full lockstep-pin choreography rehearsed
+- [ ] 164.4-03-PLAN.md — Batch 1: test_reconcile_dropped_enqueue_sweep (39 sections); FILES_FLOOR 1 → 2
+- [ ] 164.4-04-PLAN.md — Batch 2: stuck_computing_reaper (29) + retention_orphaned_running (25); FILES_FLOOR → 4
+- [ ] 164.4-05-PLAN.md — Batch 3: the three ledger_refresh gates (15 + 15 + 11); FILES_FLOOR → 7
+- [ ] 164.4-06-PLAN.md — Batch 4: wizard_composite_members, capital_ownership_allocation_guard, create_wizard_strategy_for_key, scenario_shares_rls, strategy_keys_rls (48); FILES_FLOOR → 12
+- [ ] 164.4-07-PLAN.md — Batch 5: strategies_private_owner_isolation, api_keys_venue_identity_uniq, capital_ownership_column, csv_daily_returns_perkey_rls (29); FILES_FLOOR → 16
+- [ ] 164.4-08-PLAN.md — Batch 6: csv_finalize_atomic_fold, derive_allocator_keys_fanout, funding_fees_rls, allocator_equity_derived_rls, user_notes_dashboard_scope (33); FILES_FLOOR → 21
+- [ ] 164.4-09-PLAN.md — Batch 7: six five-section files (30); FILES_FLOOR → 27; sql-mutation timeout re-justified from measured wall clocks
+- [ ] 164.4-10-PLAN.md — Batch 8: six files (23); FILES_FLOOR → 33
+- [ ] 164.4-11-PLAN.md — Batch 9: the last four non-mixed files (8); FILES_FLOOR → 37; waiver tally stated for the mixed-file gate
+- [ ] 164.4-12-PLAN.md — Batch 10: the seven ⚠️ mixed files (15), waivers last-resort with reasons, >5 → STOP; end state FILES_FLOOR 44, ARMS_FLOOR ≈ 365, 27 files printed, final prose sweep
 
 ### Phase 164.1: HARDEN-GUARDS — retire the frozen-spine gates that no longer bite, close the composite-stamp twin, put the advisory lock behind a real concurrency test, fix the PYAPI-06 blind spot that let a production service-key mismatch run silently, and close phase 161's deferred error-surface items including WIZFORM-02's code:UNKNOWN class, plus the Phase 163 carry-overs — headed by SKIP-01 (nothing applies migrations to TEST, so the OPS-08 SQL gate SKIPs permanently and the deployed body is tested nowhere), then OPS-08's un-written TypeScript retry half, the freshness UTC day-granularity residual, the TEST/PROD function-revision drift, the audit-coverage blind spot, and the tracked-PII decision (INSERTED)
 
@@ -963,7 +975,7 @@ Plans:
 | 164.1 HARDEN-GUARDS (spine gates, OPS-08-TS/F2, PYAPI-06) | 0/? | Queued 2nd (deduped 2026-08-28) | - |
 | 164.2 CURATED-COPY (+ WIZFORM-02, WR-06-UTC, HONEST-08-RESIDUAL) | 0/? | Queued 3rd (deduped 2026-08-28) | - |
 | 164.3 VACUITY (+ SKIP-01, DRIFT-01, OPS-08-F9/F8, H-0001) | 0/? | ◆ RUNS FIRST (resequenced 2026-08-28) | - |
-| 164.4 REDUNDER-BACKFILL (1/44 idiom files annotated today; scope narrowed to the idiom corpus 2026-09-02, 27 non-idiom files printed-and-excluded) | 0/? | Ready to plan — 164.3.1 HARD dep CLOSED 2026-09-02 (verification passed 9/9) | - |
+| 164.4 REDUNDER-BACKFILL (1/44 idiom files annotated today; scope narrowed to the idiom corpus 2026-09-02, 27 non-idiom files printed-and-excluded) | 0/13 | Planned 2026-09-02 — 13 plans (spike, Wave 0 runner/CI, reference file, 10 file-batches landed one PR at a time with sql-mutation GREEN on ubuntu between); 164.3.1 HARD dep CLOSED 2026-09-02 | - |
 | 165. DEPS dependabot campaign | 0/? | Not started | - |
 
 ### Requirement Coverage (v1.20)
