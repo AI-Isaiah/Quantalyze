@@ -378,6 +378,103 @@ export function extractResultLoopBlock(yamlText: string): string | null {
   return lines.slice(start, end + 1).join("\n");
 }
 
+// ── [MUT-W02] EXECUTION ORACLE (WR-03, 164.3.1 review) ─────────────────────
+//
+// `extractResultLoopConditions` above reads `if`/`elif` lines. That is a
+// spelling FAMILY, not the behaviour: a tolerance written as
+// `case "$result" in success|skipped) …`, as a negated guard
+// (`[[ $result != success && $is_fork_pr != true ]]`), or as an `||` chain is a
+// real, effective skip tolerance the parser reports as ABSENT — and the
+// `tolerance === null` arm then passes on a workflow that grew one. GRAMMAR § 3
+// of the mutation runner states this phase's own lesson: any rule stated over
+// a spelling can be re-spelled around. So the loop is RUN. The block is the
+// real script; `${{ needs.<job>.result }}` is substituted per job and every
+// other `${{ … }}` expression (the event guards) is forced to BOTH values,
+// over all combinations. What comes back is the loop's own verdict.
+const NEEDS_RESULT_RE = /\$\{\{\s*needs\.([A-Za-z0-9_-]+)\.result\s*\}\}/g;
+const ANY_EXPRESSION_RE = /\$\{\{([^}]*)\}\}/g;
+
+/** The jobs the loop iterates, read off its own `"<job>=${{ needs.<job>.result }}"` rows. */
+export function resultLoopJobs(block: string): string[] {
+  return [...block.matchAll(/"([A-Za-z0-9_-]+)=\$\{\{\s*needs\.\1\.result\s*\}\}"/g)].map((m) => m[1]);
+}
+
+/** Every DISTINCT non-`needs` `${{ … }}` expression in the block — the event guards. */
+export function resultLoopGuardExpressions(block: string): string[] {
+  const out = new Set<string>();
+  for (const m of block.matchAll(ANY_EXPRESSION_RE)) {
+    const expr = m[1].trim();
+    if (!/^needs\.[A-Za-z0-9_-]+\.result$/.test(expr)) out.add(expr);
+  }
+  return [...out];
+}
+
+/** All 2^n truth assignments over the guard expressions. */
+export function guardCombinations(exprs: string[]): Array<Record<string, boolean>> {
+  const combos: Array<Record<string, boolean>> = [];
+  for (let bits = 0; bits < 1 << exprs.length; bits += 1) {
+    const g: Record<string, boolean> = {};
+    exprs.forEach((e, i) => {
+      g[e] = Boolean(bits & (1 << i));
+    });
+    combos.push(g);
+  }
+  return combos;
+}
+
+/**
+ * RUN the loop under bash with the given job results (default `success`) and
+ * guard values. Throws — never returns a verdict — when the script does not
+ * reach its own `fail` variable, so a broken substitution is a MEASURE_FAIL
+ * rather than a pass.
+ */
+export function executeResultLoop(
+  block: string,
+  results: Record<string, string>,
+  guards: Record<string, boolean>,
+): { fail: boolean; stdout: string } {
+  const script = block
+    .replace(NEEDS_RESULT_RE, (_m, job: string) => results[job] ?? "success")
+    .replace(ANY_EXPRESSION_RE, (m, expr: string) => {
+      const key = expr.trim();
+      if (!(key in guards)) throw new Error(`unsubstituted expression in the result loop: ${m}`);
+      return guards[key] ? "true" : "false";
+    });
+  // `-eo pipefail` is what GitHub's default `run:` shell sets.
+  const res = spawnSync("bash", ["-eo", "pipefail"], {
+    input: `fail=0\n${script}\nprintf 'FAIL=%s\\n' "$fail"\n`,
+    encoding: "utf8",
+  });
+  const m = /^FAIL=(\d+)$/m.exec(res.stdout ?? "");
+  if (res.status !== 0 || m === null) {
+    throw new Error(
+      `the result loop did not run to its verdict (status ${res.status}) — nothing below may be read as a pass:\n${res.stdout}${res.stderr}`,
+    );
+  }
+  return { fail: m[1] !== "0", stdout: res.stdout };
+}
+
+/**
+ * The loop's tolerance POSTURE by execution: for every job, how many guard
+ * combinations tolerate a `skipped` result (the loop passes with that one job
+ * skipped and every other job successful).
+ */
+export function executedTolerancePosture(block: string): {
+  jobs: string[];
+  combos: number;
+  toleratedSkips: Map<string, number>;
+} {
+  const jobs = resultLoopJobs(block);
+  const combos = guardCombinations(resultLoopGuardExpressions(block));
+  const toleratedSkips = new Map<string, number>();
+  for (const job of jobs) {
+    let n = 0;
+    for (const g of combos) if (!executeResultLoop(block, { [job]: "skipped" }, g).fail) n += 1;
+    toleratedSkips.set(job, n);
+  }
+  return { jobs, combos: combos.length, toleratedSkips };
+}
+
 /**
  * Enumerate the result loop's per-job branch conditions.
  *
@@ -481,8 +578,12 @@ const RESULT_LOOP_CONDITION_FLOOR = 8;
 
 /**
  * The FULL tolerance-bearing set of the real aggregator, measured 2026-09-01 at
- * 420b8fcb by the command in the floor's comment above. Pinned exactly, in ANY
- * spelling — this is what [MUT-W02] failed to do.
+ * 420b8fcb by the command in the floor's comment above. Pinned exactly TWICE:
+ * by the `if`/`elif` parser over the spellings it reads, and — WR-03 (164.3.1
+ * review) — by the EXECUTION oracle below, which RUNS the loop and so cannot
+ * be re-spelled around (`case`, negated guards, `||` chains). [MUT-W02]
+ * pinned one spelling of one arm; the parser widened that to a family; the
+ * execution oracle closes the class.
  *
  * All three are tolerances of a SKIP-BY-DESIGN, and each is justified by
  * something the job cannot control:
@@ -601,16 +702,19 @@ describe("lint-sql-gates: the CI invocation (mode identity)", () => {
     ).toBeGreaterThanOrEqual(RESULT_LOOP_CONDITION_FLOOR);
   });
 
-  it("the FULL tolerance-bearing set is exactly the three skip-by-design jobs, in ANY spelling", () => {
+  it("the FULL tolerance-bearing set is exactly the three skip-by-design jobs, in any if/elif spelling the parser reads", () => {
     const ci = readFileSync(join(ROOT, ".github/workflows/ci.yml"), "utf8");
     const parsed = extractResultLoopConditions(ci);
     expect(parsed.measureFail).toBeNull();
 
     // This is the assertion [MUT-W02] could not make. The old pin asked "does
     // this job's arm appear, spelled THIS way?" — one job, one spelling. This
-    // asks "which jobs are allowed to skip at all?", over every arm in the
-    // loop, in any spelling. A fourth job appearing here — or one of these
-    // three losing its arm — fails by name.
+    // asks "which jobs are allowed to skip at all?", over every `if`/`elif`
+    // arm in the loop, bracket style / operator / quoting normalised away. It
+    // is STILL a parse of a spelling family (WR-03): a `case` arm or a negated
+    // guard is invisible to it, which is why the EXECUTION oracle below makes
+    // the same claim by running the loop. A fourth job appearing here — or one
+    // of these three losing its arm — fails by name.
     expect(
       [...parsed.tolerance.keys()].sort(),
       "the aggregator's set of skip-tolerant jobs changed. A job gaining tolerance means a `skipped` result now passes branch protection for it; a job losing it means it will redden every event it legitimately skips on. Either is a decision that belongs in TOLERANCE_BEARING_JOBS with its reason, not a silent edit to ci.yml",
@@ -628,8 +732,10 @@ describe("lint-sql-gates: the CI invocation (mode identity)", () => {
       if (tolerance === null) {
         // Hermetic: no database, no secret, no network, no `if:`. A `skipped`
         // is therefore ALWAYS a fault, so the strict default arm must apply.
-        // Asserted over the PARSE, so an equivalently-spelled arm is caught —
-        // the MW02 red fixture is the standing proof that it is.
+        // Asserted over the PARSE, so an equivalently-spelled `if`/`elif` arm
+        // is caught — the MW02 alternate-spelling fixture is the standing
+        // proof. Spellings the parser cannot read (`case`, negated guards)
+        // are caught by the EXECUTION oracle, which asserts the same thing.
         expect(
           guards,
           `${job} has grown a per-job tolerance arm (guards: ${guards?.join("+") ?? "-"}); it is hermetic and cannot legitimately skip`,
@@ -731,6 +837,7 @@ describe("lint-sql-gates: the CI invocation (mode identity)", () => {
 
     expect(red.sort(), "every registered MW02 fixture ID must have a RED member").toEqual([
       "MW02-alternate-spelling",
+      "MW02-case-spelling",
     ]);
     expect(green.sort(), "every registered MW02 fixture ID must have a GREEN member").toEqual([
       "MW02-current-spelling",
@@ -765,6 +872,113 @@ describe("lint-sql-gates: the CI invocation (mode identity)", () => {
     expect([...owning].sort()).toEqual(
       AGGREGATED_JOBS.map((r) => r.job).slice().sort(),
     );
+  });
+
+  // ── [MUT-W02] by EXECUTION (WR-03) ────────────────────────────────────
+  describe("EXECUTION ORACLE — the result loop is RUN, so a skip tolerance is observed in ANY spelling", () => {
+    const loopOf = (rel: string): string => {
+      const block = extractResultLoopBlock(readFileSync(join(ROOT, rel), "utf8"));
+      expect(block, `${rel}: no \`for r in \\\` … \`done\` block — nothing was executed`).not.toBeNull();
+      return block as string;
+    };
+    const CI = ".github/workflows/ci.yml";
+    const RED_ALT = "scripts/aggregator-tolerance-fixtures/MW02-alternate-spelling.red.yml";
+    const RED_CASE = "scripts/aggregator-tolerance-fixtures/MW02-case-spelling.red.yml";
+    const GREEN = "scripts/aggregator-tolerance-fixtures/MW02-current-spelling.green.yml";
+
+    it("CONTROL: with every job successful the real loop PASSES under every guard combination", () => {
+      // Without this, a loop that always sets fail=1 would satisfy every
+      // "the skip is rejected" arm below.
+      const block = loopOf(CI);
+      const combos = guardCombinations(resultLoopGuardExpressions(block));
+      expect(combos.length, "no guard expressions parsed — the substitution found nothing").toBeGreaterThan(1);
+      for (const g of combos) expect(executeResultLoop(block, {}, g).fail, JSON.stringify(g)).toBe(false);
+    });
+
+    it("the real loop: the jobs whose SKIP is tolerated are exactly TOLERANCE_BEARING_JOBS — by execution, spelling-free", () => {
+      const block = loopOf(CI);
+      const posture = executedTolerancePosture(block);
+      // DIAGNOSTIC-FIRST (D-12): what was executed, not only the verdict.
+      process.stdout.write(
+        `MW02 executed posture: ${posture.jobs.length} job(s) × ${posture.combos} guard combination(s); ` +
+          `tolerated skips: ${[...posture.toleratedSkips].map(([j, n]) => `${j}=${n}`).join(", ")}\n`,
+      );
+      // Non-vacuity: every aggregated job is in the loop and was executed.
+      for (const { job } of AGGREGATED_JOBS) expect(posture.jobs, `${job} is not iterated by the loop`).toContain(job);
+      expect(posture.combos).toBeGreaterThan(1);
+
+      const tolerant = [...posture.toleratedSkips].filter(([, n]) => n > 0).map(([j]) => j).sort();
+      expect(
+        tolerant,
+        "the set of jobs whose `skipped` result passes the aggregate changed — by EXECUTION, so no spelling hides it. A job gaining tolerance means branch protection now passes on its skip; a job losing it reddens every event it legitimately skips on. Either belongs in TOLERANCE_BEARING_JOBS with its reason",
+      ).toEqual([...TOLERANCE_BEARING_JOBS].sort());
+    });
+
+    it("every tolerated skip is CONDITIONED on the event — some guard combination still rejects it", () => {
+      // A tolerance that passes under EVERY combination tolerates the fault
+      // too (the same claim the parser arm makes via `toContain(tolerance)`).
+      const block = loopOf(CI);
+      const posture = executedTolerancePosture(block);
+      for (const job of TOLERANCE_BEARING_JOBS) {
+        const n = posture.toleratedSkips.get(job) ?? 0;
+        expect(n, `${job}: its skip is tolerated under no combination`).toBeGreaterThan(0);
+        expect(n, `${job}: its skip is tolerated UNCONDITIONALLY — the fault is tolerated with the design skip`).toBeLessThan(posture.combos);
+      }
+    });
+
+    it("hermetic jobs reject skipped, failure AND cancelled under every combination", () => {
+      const block = loopOf(CI);
+      const combos = guardCombinations(resultLoopGuardExpressions(block));
+      const hermetic = AGGREGATED_JOBS.filter((r) => r.tolerance === null).map((r) => r.job);
+      expect(hermetic.length).toBeGreaterThan(0);
+      for (const job of hermetic) {
+        for (const outcome of ["skipped", "failure", "cancelled"]) {
+          for (const g of combos) {
+            expect(
+              executeResultLoop(block, { [job]: outcome }, g).fail,
+              `${job}=${outcome} PASSED the aggregate under ${JSON.stringify(g)}`,
+            ).toBe(true);
+          }
+        }
+      }
+    });
+
+    it("MW02 alternate-spelling red fixture: EXECUTION sees sql-mutation's skip tolerated under the fork-PR guard", () => {
+      const posture = executedTolerancePosture(loopOf(RED_ALT));
+      expect(posture.toleratedSkips.get("sql-mutation"), "the oracle no longer observes the `[[`/`==` tolerance").toBeGreaterThan(0);
+      expect(posture.toleratedSkips.get("sql-gate-lint")).toBe(0);
+    });
+
+    it("MW02 case-spelling red fixture: the if/elif PARSER is BLIND to it (recorded) — EXECUTION is not", () => {
+      const yaml = readFileSync(join(ROOT, RED_CASE), "utf8");
+      // (1) THE RECORDED BLINDNESS, kept permanently as the contrast pin. The
+      // parser sees the `[ "$name" = "sql-mutation" ]` job arm and NO
+      // tolerance — the `case` statement carries no `if` line for it to read.
+      // If this starts reporting a tolerance the fixture has drifted back into
+      // the parser's spelling family and stops modelling the gap.
+      const parsed = extractResultLoopConditions(yaml);
+      expect(parsed.measureFail).toBeNull();
+      expect(parsed.jobArms).toContain("sql-mutation");
+      expect(parsed.tolerance.get("sql-mutation"), "the parser must stay blind to the `case` spelling for this fixture to model WR-03").toBeUndefined();
+      // (2) THE NEW VISIBILITY. Running it: skipped + fork-PR guard true passes.
+      const block = loopOf(RED_CASE);
+      const posture = executedTolerancePosture(block);
+      expect(
+        posture.toleratedSkips.get("sql-mutation"),
+        "EXECUTION must classify sql-mutation as tolerance-bearing in the case-spelled fixture; if it does not, the oracle has been narrowed back toward a spelling and [MUT-W02] is reopened one spelling wider",
+      ).toBeGreaterThan(0);
+      expect(posture.toleratedSkips.get("sql-mutation")).toBeLessThan(posture.combos);
+    });
+
+    it("MW02 green fixture executes to the SAME tolerance posture as the real ci.yml (fixture fidelity, by execution)", () => {
+      const real = executedTolerancePosture(loopOf(CI));
+      const fixture = executedTolerancePosture(loopOf(GREEN));
+      // Vacuity fence: the fixture parsed to real jobs before agreement means anything.
+      expect(fixture.jobs.length).toBeGreaterThanOrEqual(3);
+      const tolerant = (p: ReturnType<typeof executedTolerancePosture>) =>
+        [...p.toleratedSkips].filter(([, n]) => n > 0).map(([j, n]) => `${j}:${n}/${p.combos}`).sort();
+      expect(tolerant(fixture), "the green fixture no longer executes like the real loop").toEqual(tolerant(real));
+    });
   });
 
   it("leaves the corpus untouched — a linter that could edit gate files is a liability", () => {
