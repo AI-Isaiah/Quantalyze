@@ -1,5 +1,67 @@
 # Changelog
 
+## [0.77.1.0] - 2026-09-02
+
+### Phase 164.3.1 — sound primitives: the SQL gate integrity checks can no longer be satisfied without doing the work
+
+No production source change, no schema change. Everything here is CI gate
+tooling, its tests, and the planning record for the phase. The five gates
+v0.77.0.0 introduced were built on measurements that turned out to be
+forgeable or blind in specific shapes; this release replaces those primitives
+with sound ones and proves each one can fail.
+
+### Fixed
+
+- **The mutation runner's neuter is statement-based, not line-based.** A single
+  SQL statement tokenizer (`scripts/mutation-runner/parse.mjs`) is now the one
+  definition of "what is code" for every scan — forward and backward. Compound
+  lines decompose, block closers are never mistaken for branch heads, `E'…'`
+  backslash escapes are honoured, and no accepted neuter can leave a
+  `SET ROLE` executing before OR after the RAISE. The [MUT-I01] comment-parity
+  hole is closed in both directions.
+- **An arm's identity is its source location, not a nonce in the query.** The
+  runner attributes every `TEST FAILED (…)` sighting to the gate file, line and
+  single PL/pgSQL frame psql reports under `VERBOSITY=verbose`. Forgeries from
+  `current_query()`, nested `EXECUTE`, and — found in this release's own review,
+  live on PostgreSQL 16 — `CONTEXT:`/`LOCATION:` lines embedded inside a RAISE
+  message are all refused with a named reason, each pinned by a self-test
+  scenario with a passing control in the same run (15 scenarios, up from 8).
+- **VAC-04 (repo-vs-PROD function bodies) cannot exit 0 having compared
+  nothing.** Both name readers refuse rather than truncate on identifiers that
+  leave the unquoted charset, run their guards through symlinks and paths with
+  spaces, and a comment-masked textual tripwire now runs over every changed
+  file unconditionally, so a definition both structural readers miss beside one
+  they see is a MEASURE_FAIL instead of a clean pass. A tiny PROD name index is
+  reported as a broken reader (absurdity floor), and prose inside a block
+  comment no longer trips the charset refusal with a wrong-reason error.
+- **The runner cross-checks its own arm counts** through two independent
+  tallies and fails itself when they disagree; CI re-asserts the same relation
+  out of process. A lane that could not be spawned or was killed by a signal is
+  reported as "this arm was NOT judged", never as a corpus defect. Waivers now
+  have a pinned ceiling (0) so annotated-file counts cannot be inflated with
+  arms that never lane.
+- `stripBlockComments` in the audit-coverage scanner carries quote state across
+  lines, and the self-referential-oracle lint rule went BLOCKING with an
+  exact-set allowlist after fixing the one site it was calibrated on.
+- The throwaway pg-lane cluster's cleanup is loud when `pg_ctl stop` fails and
+  kills the orphaned postmaster before removing its data directory.
+
+### Added
+
+- Regression corpus for every measured vacuity instance, bound in an exact-set
+  instance→arm registry, plus two meta-arms over the whole gate family:
+  diagnostic-first (every failure prints evidence before the verdict) and
+  bare-measurement (every floor/threshold carries its sample and date).
+- `ARMS_FLOOR` and biting re-derived under the sound primitives (30/30, no
+  movement), with the measurement recorded beside the rule.
+
+### Changed
+
+- The [MUT-W02] aggregator-tolerance rule parses the result loop structurally
+  and asserts posture by executing it, instead of matching one spelling.
+- GRAMMAR.md rule 3c is rewritten to source-location attribution, with a
+  164.4 authoring rule: never echo an identity except from its own RAISE.
+
 ## [0.77.0.3] - 2026-09-01
 
 ### Phase 164.1 gets a real goal and six success criteria
