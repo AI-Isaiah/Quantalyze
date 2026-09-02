@@ -1557,6 +1557,212 @@ describe("[VAC04-C2] GATE-LEVEL — the realpath guard driven THROUGH THE REAL G
   }, 30_000);
 });
 
+// ── [VAC04-C4] GATE-LEVEL ────────────────────────────────────────────────────
+//
+// MEASURED PRE-FIX GATE BEHAVIOUR (164.3.1-04, reproduced 2026-09-02 through
+// the real gate with both refusals disabled in scratch copies): on
+// `CREATE OR REPLACE FUNCTION public.fúnc_é(p uuid)` the naive reader
+// TRUNCATED the identifier to `f` (its charset regex stops at the first
+// non-ASCII byte) and the normalizer DROPPED the definition; the gate unioned
+// {f}, looked `f` up in PROD's index, reported
+//     "Functions defined or replaced by this PR: 1"
+//     "  f: measured absent — … Treated as a NEW function (pass)."
+//     "no unacknowledged repo-vs-PROD body drift"          exit 0
+// — a pass for a function nobody defined, over PRODUCTION bodies. The fix
+// (plan 04) makes both readers REFUSE with the offending codepoint. Plan 04
+// proved that on the reader CLIs; this block drives it THROUGH THE REAL GATE
+// (SC-4), on the same P10 input, and asserts the gate's own output.
+//
+// WHICH SITE THE INPUT REACHES. The normalizer's `--function-names` call at
+// prod-body-drift-check.sh:207 is the FIRST reader call and the ONLY site this
+// input reaches: its `|| fail` wraps the refusal into
+// "could not extract function names from the changed migrations." and exits 1.
+// The naive reader's call at :221 is never executed on this input — so the
+// naive refusal's reachability AT GATE LEVEL on THIS input is a STATED
+// NON-COVERAGE, not a claim. What IS shown (the stated-bound `it` below) is
+// that with ONLY the normalizer's refusal disabled the naive refusal still
+// reaches the verdict through :221's `|| fail`, which is why the recorded
+// neuter cycle C4-N1 (164.3.1-13-SUMMARY.md) disables BOTH members: a
+// single-member neuter cannot flip the gate's exit code.
+//
+// WHY BODY TEXT MUST NEVER APPEAR. The gate and its readers run in a PUBLIC CI
+// log, and the normalizer's index run reads a PROD dump. The refusal may name
+// the identifier prefix, the byte, the codepoint and the file:line — never a
+// slice of a body. Asserted here at gate level with a calibrated sentinel.
+describe("[VAC04-C4] GATE-LEVEL — the charset refusal driven THROUGH THE REAL GATE: a non-ASCII identifier must be REFUSED, never compared as a different function", () => {
+  const NORMALIZER = "scripts/sql-body-normalize.mjs";
+  const NAIVE = "scripts/sql-function-names-naive.mjs";
+
+  /** Appears ONLY inside the function body; the gate output must never carry it. */
+  const BODY_SENTINEL = "ZZ_VAC04_BODY_SENTINEL_ZZ";
+
+  /**
+   * The P10 input, verbatim from vac04-reader-guards.test.ts. The leading
+   * comment line puts the definition on line 2, so the diagnostic's 1-based
+   * line number is computed, not a hardcoded 1.
+   */
+  const P10_SQL =
+    "-- fixture header, so the definition is NOT on line 1\n" +
+    "CREATE OR REPLACE FUNCTION public.fúnc_é(p uuid)\n" +
+    "RETURNS void\nLANGUAGE plpgsql\nAS $$\nBEGIN\n" +
+    `  PERFORM 1; -- ${BODY_SENTINEL}\nEND;\n$$;\n`;
+
+  /** What PROD holds — a different function, so a truncated `f` is measured absent. */
+  const PROD_FN =
+    "CREATE OR REPLACE FUNCTION public.some_other_fn(a int)\n" +
+    "RETURNS int LANGUAGE sql AS $$ SELECT a $$;\n";
+
+  const MIGRATION_BASENAME = "20260902120000_gate_level_c4.sql";
+
+  /** The refusal diagnostic (normalize.mjs:568 / naive.mjs:305) and the gate's wrapper (:208). */
+  const CHARSET_DIAGNOSTIC = "leaves the unquoted charset";
+  const OFFENDING_CODEPOINT = "U+00FA";
+  const GATE_WRAPPER = "could not extract function names from the changed migrations";
+  const NAIVE_WRAPPER = "the independent name reader failed on the changed migrations";
+  const READERS_RAN = "Functions defined or replaced by this PR: 1";
+  const SUCCESS_NOTICE = "no unacknowledged repo-vs-PROD body drift";
+
+  /** The two refusal sites the scratch neuters disable (naive.mjs:171, normalize.mjs:369). */
+  const NAIVE_REFUSAL_CONDITION =
+    'follower !== undefined && !/\\s/.test(follower) && follower !== "("';
+  const NORMALIZER_REFUSAL_THROW = "throw charsetRefusal(sql, j,";
+
+  /** The gate wired as migration-drift-check.yml wires it, on the P10 migration. */
+  function scaffold(
+    dir: string,
+    readers: { normalizer: string; naive: string } = { normalizer: NORMALIZER, naive: NAIVE },
+  ): { env: Record<string, string>; migration: string } {
+    mkdirSync(join(dir, "snapshot"), { recursive: true });
+    const dump = join(dir, "prod-dump.sql");
+    writeFileSync(dump, PROD_FN);
+    const migration = join(dir, MIGRATION_BASENAME);
+    writeFileSync(migration, P10_SQL);
+    return {
+      migration,
+      env: {
+        ...FAKE_CREDS,
+        BODY_FETCH_CMD: `node ${NORMALIZER} --extract-fn ${dump}`,
+        BODY_NAME_INDEX_CMD: `node ${NORMALIZER} --function-names ${dump}`,
+        BODY_NAME_INDEX_XCHECK_CMD: `node ${NAIVE} ${dump}`,
+        CHANGED_MIGRATIONS: migration,
+        SNAPSHOT_DIR: join(dir, "snapshot"),
+        NORMALIZER: readers.normalizer,
+        NAIVE_NAMES: readers.naive,
+      },
+    };
+  }
+
+  /**
+   * Scratch copies with the refusal DISABLED — the pre-fix truncate/drop
+   * behaviour. Each copy keeps its script's basename (distinct basenames, so
+   * the gate's :151 same-file refusal does not fire before either reader runs).
+   *
+   * Proven neutered by ABSENCE only — the replaced refusal text is gone from
+   * the copy. Deliberately NOT a `source !== copy` check: under the recorded
+   * C4-N1 cycle the REAL sources are already neutered, the replacements no-op
+   * and the copies come out byte-identical, and a differs-from-source assertion
+   * would RED this leg for a reason unrelated to the gate. The leg's teeth are
+   * its gate-outcome assertions, which RED the moment a copy still refuses.
+   */
+  function neuteredCopies(dir: string): { normalizer: string; naive: string } {
+    mkdirSync(join(dir, "neutered"), { recursive: true });
+
+    const naiveCopy = readFileSync(NAIVE, "utf8").replace(NAIVE_REFUSAL_CONDITION, "false");
+    expect(naiveCopy, "the naive scratch copy still carries its follower-byte refusal").not.toContain(
+      NAIVE_REFUSAL_CONDITION,
+    );
+    const naivePath = join(dir, "neutered", basename(NAIVE));
+    writeFileSync(naivePath, naiveCopy);
+
+    const normalizerCopy = readFileSync(NORMALIZER, "utf8").replace(
+      /^[ \t]*throw charsetRefusal\(sql, j,.*$/m,
+      "      continue;",
+    );
+    expect(normalizerCopy, "the normalizer scratch copy still carries its charset throw").not.toContain(
+      NORMALIZER_REFUSAL_THROW,
+    );
+    const normalizerPath = join(dir, "neutered", basename(NORMALIZER));
+    writeFileSync(normalizerPath, normalizerCopy);
+
+    return { normalizer: normalizerPath, naive: naivePath };
+  }
+
+  /** 1-based line of the definition inside P10_SQL — computed, so the `:N:` assertion is not a hardcoded 2. */
+  function definitionLine(): number {
+    return P10_SQL.split("\n").findIndex((l) => l.startsWith("CREATE")) + 1;
+  }
+
+  // ── THE REFUSAL ARM: the real gate, the real readers, the P10 migration.
+  it("REFUSAL: the real gate exits 1 on `public.fúnc_é`, naming U+00FA and the file:line — and prints NO body text, no readers-ran line, no verdict", () => {
+    // MEASURED 2026-09-02 through the gate:
+    //   "::error::sql-body-normalize: <migration>:2: identifier leaves the unquoted
+    //    charset [A-Za-z0-9_$] — read 'public.f' then hit 'ú' (U+00FA). …"
+    //   "::error::VAC-04 …: could not extract function names from the changed migrations."
+    //   exit 1
+    withTempDir((dir) => {
+      const { env, migration } = scaffold(dir);
+      const { status, out } = run(PROD_GATE, env);
+      expect(status, `the gate did not refuse a non-ASCII identifier\n${out}`).toBe(1);
+
+      // Diagnostic-first (D-12 / SC-7): the evidence, not only the exit code.
+      expect(out).toContain(CHARSET_DIAGNOSTIC);
+      expect(out).toContain(OFFENDING_CODEPOINT);
+      expect(out, "the refusal must name the file and the 1-based line of the definition").toContain(
+        `${migration}:${definitionLine()}:`,
+      );
+      expect(out, "the refusal must say what prefix was read before the offending byte").toContain("read 'public.f'");
+      expect(out, "the gate's own wrapper must carry the reader's exit into the verdict").toContain(GATE_WRAPPER);
+
+      // Non-leakage. Calibration: the sentinel really is in the input.
+      expect(P10_SQL).toContain(BODY_SENTINEL);
+      expect(out, "function body text reached the gate output — a PUBLIC CI log").not.toContain(BODY_SENTINEL);
+
+      // No comparison happened, and the output must not pretend one did.
+      expect(out).not.toContain("Functions defined or replaced by this PR");
+      expect(out).not.toContain("measured absent");
+      expect(out).not.toContain(SUCCESS_NOTICE);
+    });
+  }, 30_000);
+
+  // ── CALIBRATION LEG: the standing RED direction. With BOTH refusals
+  // disabled the SAME wiring compares the WRONG subject and PASSES — the exact
+  // pre-fix behaviour, measured verbatim 2026-09-02. Runs on every CI run so the
+  // refusal arm above can never pass for a reason unrelated to the refusal.
+  it("CALIBRATION LEG (standing RED direction): with BOTH refusals disabled, the gate counts a truncated `f`, measures it absent and PASSES — the wrong-subject pass", () => {
+    withTempDir((dir) => {
+      const { env } = scaffold(dir, neuteredCopies(dir));
+      const { status, out } = run(PROD_GATE, env);
+      expect(
+        status,
+        `the neutered readers still refused — the calibration copies are not the pre-fix shape\n${out}`,
+      ).toBe(0);
+      expect(out).toContain(READERS_RAN);
+      expect(out, "the truncated name `f` must be what the gate looked up").toContain("f: measured absent");
+      expect(out).toContain(SUCCESS_NOTICE);
+      expect(out, "no refusal may fire with both refusals disabled").not.toContain(OFFENDING_CODEPOINT);
+    });
+  }, 30_000);
+
+  // ── STATED BOUND, its OWN `it`: with ONLY the normalizer's refusal disabled
+  // the REAL naive reader still refuses through :221's `|| fail`. This depends
+  // on the real naive reader, which is why it REDs under the recorded C4-N1
+  // cycle (both real refusals disabled → the gate exits 0, no U+00FA) while
+  // the calibration leg above, built from copies only, stays green. Folding it
+  // into that leg would blur the RED set.
+  it("STATED BOUND: with only the normalizer's refusal disabled, the REAL naive reader's refusal still reaches the verdict through :221 — exit 1 naming U+00FA under its own prefix", () => {
+    withTempDir((dir) => {
+      const { normalizer } = neuteredCopies(dir);
+      const { env } = scaffold(dir, { normalizer, naive: NAIVE });
+      const { status, out } = run(PROD_GATE, env);
+      expect(status, `the naive refusal did not reach the gate's verdict\n${out}`).toBe(1);
+      expect(out).toMatch(/sql-function-names-naive: [^\n]*U\+00FA/);
+      expect(out).toContain(NAIVE_WRAPPER);
+      expect(out).not.toContain(READERS_RAN);
+      expect(out).not.toContain(BODY_SENTINEL);
+    });
+  }, 30_000);
+});
+
 // ── VAC-04 ABSURDITY FLOOR (D-09's VAC-04 half) ──────────────────────────────
 //
 // ⛔ THE DEFECT SHAPE. The empty-index guards answer "is the reader broken?"
