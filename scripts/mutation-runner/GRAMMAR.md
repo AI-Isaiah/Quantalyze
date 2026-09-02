@@ -409,7 +409,7 @@ gate → fixtures is a second place to drift. A gate file with annotations but n
 All four are drawn from `supabase/tests/test_strategy_shares_rls.sql`. The prose
 lines are verbatim from the corpus.
 
-### Shape 1 — migration-file edit (`:408-409`)
+### Shape 1 — migration-file edit (`:417-419`)
 
 ```sql
   -- RED-UNDER: change `generation BIGINT` back to `generation INTEGER` in the
@@ -420,7 +420,7 @@ lines are verbatim from the corpus.
 ⚠️ Note the twin's needle carries **two** spaces and the prose's carries one.
 The twin is what executes; see rule 2 above.
 
-### Shape 1b — insertion with no exact point in the prose (`:369-378`)
+### Shape 1b — insertion with no exact point in the prose (`:376-378`)
 
 ```sql
   -- RED-UNDER: add a `token_hash TEXT` column to the STEP 1 CREATE TABLE in
@@ -437,7 +437,7 @@ no arm could be the first failure. Re-baselining it in the same mutation is what
 makes `SHAPE 1` reachable — the LAYERED discipline below, applied to an arm whose
 prose does not mention layering at all.
 
-### Shape 2 — live-DB `GRANT` with a prerequisite neuter (`:1533-1577`)
+### Shape 2 — live-DB `GRANT` with a prerequisite neuter (`:1561-1577`)
 
 ```sql
   -- RED-UNDER: `GRANT UPDATE (nonce) ON strategy_shares TO authenticated` on
@@ -455,7 +455,7 @@ rather than preferred: the migration's STEP 2b pins `authenticated`'s privilege
 set EXACTLY and aborts the apply on any drift, so editing STEP 2 means the gate
 never runs. The lane's `--post-apply` hook exists for exactly this.
 
-### Shape 3 — LAYERED compound mutation (`:661-665`)
+### Shape 3 — LAYERED compound mutation (`:675-681`)
 
 ```sql
   -- RED-UNDER: change the CREATE TRIGGER in migration 20260827120000 STEP 1b to
