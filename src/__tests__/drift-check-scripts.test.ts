@@ -144,6 +144,63 @@ function prodBodyHash(rendered: string): string {
   return createHash("sha256").update(normalizeSql(m[1]), "utf8").digest("hex");
 }
 
+/** The real readers, as migration-drift-check.yml wires them. */
+const REAL_NORMALIZER = "scripts/sql-body-normalize.mjs";
+const REAL_NAIVE = "scripts/sql-function-names-naive.mjs";
+
+/** What PROD holds in the gate-level scaffolds — a function the PR does not name, so the PR's own name is measured absent. */
+const SOME_OTHER_FN =
+  "CREATE OR REPLACE FUNCTION public.some_other_fn(a int)\n" +
+  "RETURNS int LANGUAGE sql AS $$ SELECT a $$;\n";
+
+/** Substring count — the same reading as `countOf` in gate-family-meta.test.ts. */
+function occurrences(haystack: string, needle: string): number {
+  return haystack.split(needle).length - 1;
+}
+
+/**
+ * The VAC-04 gate wired exactly as migration-drift-check.yml wires it, over a
+ * scratch PROD dump read by the REAL readers — with, optionally, injected
+ * left-hand readers (the C2 / C4 gate-level arms) and a committed snapshot for
+ * one name. ONE scaffold for the three gate-level describes (IN-08, 164.3.1
+ * review); each describe keeps its own fixtures, which are the load-bearing
+ * part. A fourth `BODY_*` command, or a change to the env contract, is now
+ * one edit.
+ */
+function gateScaffold(
+  dir: string,
+  opts: {
+    migrationBasename: string;
+    migrationBody: string;
+    dumpBody?: string;
+    snapshotFor?: string;
+    readers?: { normalizer: string; naive: string };
+  },
+): { env: Record<string, string>; migration: string } {
+  mkdirSync(join(dir, "snapshot"), { recursive: true });
+  const dump = join(dir, "prod-dump.sql");
+  const dumpBody = opts.dumpBody ?? SOME_OTHER_FN;
+  writeFileSync(dump, dumpBody);
+  const migration = join(dir, opts.migrationBasename);
+  writeFileSync(migration, opts.migrationBody);
+  if (opts.snapshotFor) {
+    writeFileSync(join(dir, "snapshot", `${opts.snapshotFor}.sql`), dumpBody);
+  }
+  const env: Record<string, string> = {
+    ...FAKE_CREDS,
+    BODY_FETCH_CMD: `node ${REAL_NORMALIZER} --extract-fn ${dump}`,
+    BODY_NAME_INDEX_CMD: `node ${REAL_NORMALIZER} --function-names ${dump}`,
+    BODY_NAME_INDEX_XCHECK_CMD: `node ${REAL_NAIVE} ${dump}`,
+    CHANGED_MIGRATIONS: migration,
+    SNAPSHOT_DIR: join(dir, "snapshot"),
+  };
+  if (opts.readers) {
+    env.NORMALIZER = opts.readers.normalizer;
+    env.NAIVE_NAMES = opts.readers.naive;
+  }
+  return { env, migration };
+}
+
 /** Lay out snapshot/, live/ and migrations/ and return the env for the gate. */
 function scaffoldProdCase(
   dir: string,
@@ -1071,28 +1128,18 @@ describe("[VAC04-C1] — the zero path FAILS CLOSED: both readers' evidence, THE
   const NORMALIZER = "scripts/sql-body-normalize.mjs";
   const NAIVE = "scripts/sql-function-names-naive.mjs";
 
-  /** The gate wired exactly as `migration-drift-check.yml` wires it. */
+  /** The gate wired exactly as `migration-drift-check.yml` wires it (`gateScaffold`, IN-08). */
   function scaffold(
     dir: string,
     migrationBody: string,
     opts: { dumpBody?: string; snapshotFor?: string } = {},
   ): Record<string, string> {
-    mkdirSync(join(dir, "snapshot"), { recursive: true });
-    const dump = join(dir, "prod-dump.sql");
-    writeFileSync(dump, opts.dumpBody ?? VISIBLE_FN);
-    const migration = join(dir, "20260901120000_zero_path.sql");
-    writeFileSync(migration, migrationBody);
-    if (opts.snapshotFor) {
-      writeFileSync(join(dir, "snapshot", `${opts.snapshotFor}.sql`), VISIBLE_FN);
-    }
-    return {
-      ...FAKE_CREDS,
-      BODY_FETCH_CMD: `node ${NORMALIZER} --extract-fn ${dump}`,
-      BODY_NAME_INDEX_CMD: `node ${NORMALIZER} --function-names ${dump}`,
-      BODY_NAME_INDEX_XCHECK_CMD: `node ${NAIVE} ${dump}`,
-      CHANGED_MIGRATIONS: migration,
-      SNAPSHOT_DIR: join(dir, "snapshot"),
-    };
+    return gateScaffold(dir, {
+      migrationBasename: "20260901120000_zero_path.sql",
+      migrationBody,
+      dumpBody: opts.dumpBody ?? VISIBLE_FN,
+      snapshotFor: opts.snapshotFor,
+    }).env;
   }
 
   // ── Calibration. Deliberately FIRST: if either reader can see the fixture,
@@ -1416,11 +1463,6 @@ describe("[VAC04-C2] GATE-LEVEL — the realpath guard driven THROUGH THE REAL G
     "LANGUAGE sql AS $$ SELECT a $$;\n";
   const NORMALIZER_ONLY_NAME = "mid_fn";
 
-  /** What PROD holds — a different function, so the PR's name is measured absent. */
-  const PROD_FN =
-    "CREATE OR REPLACE FUNCTION public.some_other_fn(a int)\n" +
-    "RETURNS int LANGUAGE sql AS $$ SELECT a $$;\n";
-
   /** The arm's PASS condition: the gate's name count, reached only if a reader RAN. */
   const READERS_RAN = "Functions defined or replaced by this PR: 1";
   /** Printed only when the naive reader saw a name the normalizer did not (:239). */
@@ -1437,10 +1479,6 @@ describe("[VAC04-C2] GATE-LEVEL — the realpath guard driven THROUGH THE REAL G
     "return resolve(process.argv[1]) === fileURLToPath(import.meta.url);";
 
   type Shape = "symlink" | "space";
-
-  function occurrences(haystack: string, needle: string): number {
-    return haystack.split(needle).length - 1;
-  }
 
   /**
    * A reader reached through the given shape. Both shapes keep the script's own
@@ -1462,27 +1500,13 @@ describe("[VAC04-C2] GATE-LEVEL — the realpath guard driven THROUGH THE REAL G
     return copy;
   }
 
-  /** The gate wired as migration-drift-check.yml wires it, plus the injected left-hand readers. */
+  /** The gate wired as migration-drift-check.yml wires it, plus the injected left-hand readers (`gateScaffold`, IN-08). */
   function scaffold(
     dir: string,
     migrationBody: string,
     readers: { normalizer: string; naive: string },
   ): Record<string, string> {
-    mkdirSync(join(dir, "snapshot"), { recursive: true });
-    const dump = join(dir, "prod-dump.sql");
-    writeFileSync(dump, PROD_FN);
-    const migration = join(dir, "20260902120000_gate_level_c2.sql");
-    writeFileSync(migration, migrationBody);
-    return {
-      ...FAKE_CREDS,
-      BODY_FETCH_CMD: `node ${NORMALIZER} --extract-fn ${dump}`,
-      BODY_NAME_INDEX_CMD: `node ${NORMALIZER} --function-names ${dump}`,
-      BODY_NAME_INDEX_XCHECK_CMD: `node ${NAIVE} ${dump}`,
-      CHANGED_MIGRATIONS: migration,
-      SNAPSHOT_DIR: join(dir, "snapshot"),
-      NORMALIZER: readers.normalizer,
-      NAIVE_NAMES: readers.naive,
-    };
+    return gateScaffold(dir, { migrationBasename: "20260902120000_gate_level_c2.sql", migrationBody, readers }).env;
   }
 
   // ── Calibration. Deliberately FIRST: if a fixture were visible to BOTH
@@ -1702,11 +1726,6 @@ describe("[VAC04-C4] GATE-LEVEL — the charset refusal driven THROUGH THE REAL 
     "RETURNS void\nLANGUAGE plpgsql\nAS $$\nBEGIN\n" +
     `  PERFORM 1; -- ${BODY_SENTINEL}\nEND;\n$$;\n`;
 
-  /** What PROD holds — a different function, so a truncated `f` is measured absent. */
-  const PROD_FN =
-    "CREATE OR REPLACE FUNCTION public.some_other_fn(a int)\n" +
-    "RETURNS int LANGUAGE sql AS $$ SELECT a $$;\n";
-
   const MIGRATION_BASENAME = "20260902120000_gate_level_c4.sql";
 
   /** The refusal diagnostic (normalize.mjs:568 / naive.mjs:305) and the gate's wrapper (:208). */
@@ -1722,29 +1741,12 @@ describe("[VAC04-C4] GATE-LEVEL — the charset refusal driven THROUGH THE REAL 
     'follower !== undefined && !/\\s/.test(follower) && follower !== "("';
   const NORMALIZER_REFUSAL_THROW = "throw charsetRefusal(sql, j,";
 
-  /** The gate wired as migration-drift-check.yml wires it, on the P10 migration. */
+  /** The gate wired as migration-drift-check.yml wires it, on the P10 migration (`gateScaffold`, IN-08). */
   function scaffold(
     dir: string,
     readers: { normalizer: string; naive: string } = { normalizer: NORMALIZER, naive: NAIVE },
   ): { env: Record<string, string>; migration: string } {
-    mkdirSync(join(dir, "snapshot"), { recursive: true });
-    const dump = join(dir, "prod-dump.sql");
-    writeFileSync(dump, PROD_FN);
-    const migration = join(dir, MIGRATION_BASENAME);
-    writeFileSync(migration, P10_SQL);
-    return {
-      migration,
-      env: {
-        ...FAKE_CREDS,
-        BODY_FETCH_CMD: `node ${NORMALIZER} --extract-fn ${dump}`,
-        BODY_NAME_INDEX_CMD: `node ${NORMALIZER} --function-names ${dump}`,
-        BODY_NAME_INDEX_XCHECK_CMD: `node ${NAIVE} ${dump}`,
-        CHANGED_MIGRATIONS: migration,
-        SNAPSHOT_DIR: join(dir, "snapshot"),
-        NORMALIZER: readers.normalizer,
-        NAIVE_NAMES: readers.naive,
-      },
-    };
+    return gateScaffold(dir, { migrationBasename: MIGRATION_BASENAME, migrationBody: P10_SQL, readers });
   }
 
   /**
