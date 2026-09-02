@@ -1063,6 +1063,16 @@ true for 146 and half of 142–145, and **false for 141**.
 
 ## 🟡 FIX MID-TERM
 
+- [ ] **`[WINDOWS-LEDGER-DRIFT]` `.planning/WINDOWS.md` refuses every append: its frontmatter counts and its entries disagree (logged 2026-09-02, Plan 164.4-00).**
+      `gsd-tools windows append` exits with `Ledger counts disagree with entries: frontmatter
+      open/waived/fixed/total=26/0/2/28 but entries yield 29/0/2/31`. Measured cause: the file carries
+      TWO representations — a markdown table with ids 1-28 (26 open / 2 fixed, which is what the
+      frontmatter counts) AND a JSON block further down holding 3 more entries (phases 164.3 / 164.3.1)
+      that the frontmatter never counted. Drift predates this plan (`last_updated: 2026-08-29`).
+      **Consequence: the broken-windows ledger is WRITE-BLOCKED** — Plan 164.4-00 could not record its
+      two findings there and recorded them here instead. Decide which representation is canonical, then
+      reconcile the frontmatter. Do not "fix" it by editing the counts blind.
+
 - [ ] **`[REDUNDER-PGCRON]` Three Phase-164.4 idiom gate files can NEVER reach a GREEN pg-lane baseline — the lane has no `pg_cron` (measured 2026-09-02, Plan 164.4-00).**
       `scripts/pg-lane/run.sh` boots a vanilla `initdb` cluster. Measured on it: `pg_available_extensions`
       has **0 rows** for `pg_cron`, and `CREATE EXTENSION pg_cron` fails `0A000 … Could not open extension

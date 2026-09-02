@@ -673,7 +673,7 @@ this phase, not a precondition of it.
 **Explicitly OUT of scope:** writing new gate coverage. This phase annotates and proves what already
 exists; it does not add arms. New coverage is a different phase with a different risk profile.
 
-**Plans:** 13 plans
+**Plans:** 0/13 plans executed
 
 Plans:
 
