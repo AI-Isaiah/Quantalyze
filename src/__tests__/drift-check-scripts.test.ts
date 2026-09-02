@@ -1811,6 +1811,12 @@ describe("[VAC04-C4] GATE-LEVEL — the charset refusal driven THROUGH THE REAL 
       // Non-leakage. Calibration: the sentinel really is in the input.
       expect(P10_SQL).toContain(BODY_SENTINEL);
       expect(out, "function body text reached the gate output — a PUBLIC CI log").not.toContain(BODY_SENTINEL);
+      // IN-06 (164.3.1 review): the readers' rule is stronger than "no body"
+      // — never the SOURCE LINE either (naive.mjs:302-303). `(p uuid)` sits on
+      // the definition line and is the only line-2 fragment beyond the allowed
+      // `read 'public.f'` prefix. Calibrated against the line, then pinned.
+      expect(P10_SQL.split("\n")[definitionLine() - 1]).toContain("(p uuid)");
+      expect(out, "the refusal echoed the definition line").not.toContain("(p uuid)");
 
       // No comparison happened, and the output must not pretend one did.
       expect(out).not.toContain("Functions defined or replaced by this PR");
@@ -1854,6 +1860,7 @@ describe("[VAC04-C4] GATE-LEVEL — the charset refusal driven THROUGH THE REAL 
       expect(out).toContain(NAIVE_WRAPPER);
       expect(out).not.toContain(READERS_RAN);
       expect(out).not.toContain(BODY_SENTINEL);
+      expect(out, "the naive refusal echoed the definition line (IN-06)").not.toContain("(p uuid)");
     });
   }, 30_000);
 });

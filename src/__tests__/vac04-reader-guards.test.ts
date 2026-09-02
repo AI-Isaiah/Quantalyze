@@ -305,6 +305,14 @@ describe("charset refusal ([VAC04-C4]) — a reader that cannot read the name mu
         r.stderr + r.stdout,
         `${argv[0]} echoed function body text into its diagnostic`,
       ).not.toContain(BODY_SENTINEL);
+      // IN-06 (164.3.1 review): the rule is "never the source line" as well
+      // (naive.mjs:302-303). `(p uuid)` is on the definition line and is the
+      // only fragment of it beyond the allowed `read 'public.f'` prefix.
+      expect(P10_SQL).toContain("(p uuid)");
+      expect(
+        r.stderr + r.stdout,
+        `${argv[0]} echoed the definition line into its diagnostic`,
+      ).not.toContain("(p uuid)");
     }
   }, 30_000);
 
