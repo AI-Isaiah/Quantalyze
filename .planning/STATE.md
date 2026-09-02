@@ -2,20 +2,20 @@
 gsd_state_version: 1.0
 milestone: v1.20
 milestone_name: Backlog Burndown (Phases 158+)
-current_phase: 164.3.1
-current_phase_name: SOUND-PRIMITIVES gap closure
-status: executing
-stopped_at: Completed 164.3.1-13-PLAN.md
-last_updated: "2026-09-02T09:03:11.042Z"
+current_phase: 159
+current_phase_name: RANK — Public-ranking integrity
+status: planning
+stopped_at: Phase 164.3.1 complete, ready to plan Phase 159
+last_updated: "2026-09-02T16:34:06.178Z"
 last_activity: 2026-09-02
-last_activity_desc: Phase 164.3.1 execution started
-state_head: dc47efd4e84cac1aad8358f42fa0d302fd2c5900
+last_activity_desc: Phase 164.3.1 complete, transitioned to Phase 159
+state_head: 8919dbfdde2e7beed8499129f191b36a6ef98594
 progress:
   total_phases: 14
-  completed_phases: 4
+  completed_phases: 5
   total_plans: 83
   completed_plans: 79
-  percent: 29
+  percent: 36
 ---
 
 # Project State — Quantalyze
@@ -113,10 +113,10 @@ zero unclassified) and `161-VALIDATION.md` (Nyquist strategy, 4 Wave-0 gaps, ant
 
 ## Current Position
 
-Phase: 164.3.1 (SOUND-PRIMITIVES gap closure) — EXECUTING
-Plan: 1 of 13
-Status: Executing Phase 164.3.1
-Last activity: 2026-09-02 — Phase 164.3.1 execution started
+Phase: 159 — RANK — Public-ranking integrity
+Plan: Not started
+Status: Ready to plan
+Last activity: 2026-09-02 — Phase 164.3.1 complete, transitioned to Phase 159
 
 ⚠️ Phase 160 remains OPEN on its human gate — see `## Deferred Verification`. Advancing this
 pointer to 161 does NOT close it; resume it only via `/gsd-verify-work 160`.
@@ -1550,7 +1550,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 ## Session
 
 **Last Date:** 2026-09-02T09:03:10.308Z
-**Stopped At:** Completed 164.3.1-13-PLAN.md
+**Stopped At:** Phase 164.3.1 complete, ready to plan Phase 159
 **Last Date:** 2026-08-25T22:26:01.687Z
 **Stopped At:** Completed 162-03-PLAN.md
 **Last Date:** 2026-08-25T22:28:04.096Z
