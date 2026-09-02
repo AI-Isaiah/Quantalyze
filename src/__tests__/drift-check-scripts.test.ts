@@ -1646,6 +1646,237 @@ describe("VAC-08 — scripts/test-ledger-drift-check.sh", () => {
     });
   });
 
+  // ── VAC08-JOIN (164.3.1-12, SC-1) ─────────────────────────────────────────
+  // The join key was validated on 12 rows, applied to 262, and wrong for 253.
+  // The fix is FOUR conventions OR-ed together in `default_ledger_query`
+  // (test-ledger-drift-check.sh :36-60 records how each was found). Nothing
+  // above exercises those clauses: every arm stubs the query, so a clause could
+  // be deleted and this file would stay green while CI resurrected the false
+  // 253. This block reads the clauses OUT OF THE SCRIPT at run time, builds one
+  // ledger row per convention, and asks the real gate for its verdict.
+  //
+  // ⚠️ HONEST BOUNDARY. The stub cannot run SQL. The predicate is evaluated in
+  // JS by an interpreter that knows exactly the four documented clause shapes
+  // and REFUSES any other (fail-by-text, never a silent pass) — so a fifth
+  // convention widens this arm's required coverage by making it red until the
+  // interpreter and a fixture row exist for it. What the gate is driven with is
+  // therefore the JS reading of the script's own clause list, and what is
+  // proven is that the gate's VERDICT follows that list: remove a load-bearing
+  // clause from the script and the row that only it matched is reported
+  // missing, by name (164.3.1-12-CORPUS-PROOFS.md, cycle 1).
+  describe("VAC08-JOIN — the join key is the union of every ledger naming convention", () => {
+    type LedgerRow = { version: string; name: string };
+    type JoinConvention = {
+      id: string;
+      /** The clause EXACTLY as the gate's SQL spells it, whitespace-collapsed. */
+      clause: string;
+      /** The same predicate, in JS. */
+      matches: (m: LedgerRow, fname: string) => boolean;
+      /** A ledger row shaped the way the ledger REALLY stores this convention. */
+      rowFor: (fname: string) => LedgerRow;
+    };
+    const tsOf = (f: string) => f.slice(0, f.indexOf("_"));
+    const descOf = (f: string) => f.slice(f.indexOf("_") + 1);
+
+    // One entry per convention the script's header documents (:39-51). The row
+    // shapes are the MEASURED ones from those lines, not invented: an old row
+    // carries version=<ts> name=<desc>; a recent row carries a re-stamped
+    // version and the whole basename in name; a bare-ts row carries the
+    // timestamp alone; a desc-only row carries the description alone.
+    const JOIN_CONVENTIONS: readonly JoinConvention[] = [
+      {
+        id: "name-only",
+        clause: "m.name = r.fname",
+        matches: (m, f) => m.name === f,
+        rowFor: (f) => ({ version: "20260828061901", name: f }),
+      },
+      {
+        id: "version_name",
+        clause: "(m.version || '_' || m.name) = r.fname",
+        matches: (m, f) => `${m.version}_${m.name}` === f,
+        rowFor: (f) => ({ version: tsOf(f), name: descOf(f) }),
+      },
+      {
+        id: "bare-ts",
+        clause: "m.name = split_part(r.fname, '_', 1)",
+        matches: (m, f) => m.name === f.split("_")[0],
+        rowFor: (f) => ({ version: "20260826084633", name: tsOf(f) }),
+      },
+      {
+        id: "desc-only",
+        clause: "m.name = substr(r.fname, strpos(r.fname, '_') + 1)",
+        matches: (m, f) => m.name === descOf(f),
+        rowFor: (f) => ({ version: "20260826210044", name: descOf(f) }),
+      },
+    ];
+
+    /**
+     * The OR-clauses of the EXISTS predicate for one direction, read off the
+     * script's bytes. Anchored on the `case` label and the `WHERE NOT EXISTS (`
+     * marker the script itself carries; whitespace-collapsed so an indentation
+     * change is not a clause change.
+     */
+    function readJoinClauses(script: string, direction: "missing" | "extra"): string[] {
+      const label = `\n    ${direction})\n`;
+      const start = script.indexOf(label);
+      expect(start, `the '${direction})' case label is not where default_ledger_query keeps it`).toBeGreaterThan(-1);
+      const end = script.indexOf("\n      ;;", start);
+      expect(end, `the '${direction})' case has no ';;' terminator`).toBeGreaterThan(start);
+      const block = script.slice(start, end);
+      // `missing` spells it `WHERE NOT EXISTS (`, `extra` spells it `AND NOT EXISTS (`.
+      const m = /(?:WHERE|AND) NOT EXISTS \(\s*SELECT 1 FROM [^\n]*\n\s*WHERE ([\s\S]*?)\);"/.exec(block);
+      expect(m, `the '${direction}' query no longer carries a 'NOT EXISTS ( SELECT 1 FROM … WHERE …);' predicate`).not.toBeNull();
+      return (m as RegExpExecArray)[1]
+        .split(/\n\s*OR\s+/)
+        .map((c) => c.replace(/\s+/g, " ").trim())
+        .filter((c) => c.length > 0);
+    }
+
+    /** The interpreter: every clause the script carries MUST be one it knows. */
+    function conventionsOf(clauses: string[]): JoinConvention[] {
+      return clauses.map((clause) => {
+        const known = JOIN_CONVENTIONS.find((c) => c.clause === clause);
+        expect(
+          known,
+          `the gate carries a join clause this arm cannot evaluate: \`${clause}\`. Teach JOIN_CONVENTIONS its JS reading AND the ledger row shape that matches only under it — do not delete the clause and do not skip it here; an unevaluated clause is a convention the corpus does not cover`,
+        ).toBeDefined();
+        return known as JoinConvention;
+      });
+    }
+
+    const isMissing = (conv: JoinConvention[], ledger: LedgerRow[], fname: string) =>
+      !ledger.some((m) => conv.some((c) => c.matches(m, fname)));
+
+    function scaffoldJoinCase(dir: string, names: string[], ledger: LedgerRow[], conv: JoinConvention[]) {
+      mkdirSync(join(dir, "snapshot"), { recursive: true });
+      mkdirSync(join(dir, "live"), { recursive: true });
+      mkdirSync(join(dir, "migrations"), { recursive: true });
+      for (const n of names) writeFileSync(join(dir, "migrations", `${n}.sql`), COMMITTED_BODY);
+      writeFileSync(join(dir, "snapshot", "demo_fn.sql"), COMMITTED_BODY);
+      writeFileSync(join(dir, "live", "demo_fn.sql"), PROD_BODY_EQUIVALENT);
+      const emptyBaseline = join(dir, "baseline.empty.txt");
+      writeFileSync(emptyBaseline, "# intentionally empty\n");
+      const missing = names.filter((f) => isMissing(conv, ledger, f));
+      const extra = ledger
+        .filter((m) => !names.some((f) => conv.some((c) => c.matches(m, f))))
+        .map((m) => m.name);
+      return {
+        LEDGER_BASELINE_FILE: emptyBaseline,
+        TEST_SUPABASE_DB_URL: "stub-dsn-never-used",
+        LEDGER_QUERY_CMD: `bash ${writeStubLedger(dir, missing, extra, String(ledger.length))}`,
+        BODY_FETCH_CMD: `bash ${writeStubFetcher(dir)}`,
+        MIGRATIONS_DIR: join(dir, "migrations"),
+        SNAPSHOT_DIR: join(dir, "snapshot"),
+        BODY_CHECK_FUNCTIONS: "demo_fn",
+      };
+    }
+
+    /** One repo basename per convention, distinct so a verdict names its row. */
+    const FIXTURE_NAMES: Record<string, string> = {
+      "name-only": "20260101000000_join_name_only",
+      version_name: "20260102000000_join_version_name",
+      "bare-ts": "20260103000000_join_bare_ts",
+      "desc-only": "20260104000000_join_desc_only",
+    };
+
+    it("VAC08-JOIN: a ledger row matching under EACH convention is not reported missing; one matching under NONE still is, by name", () => {
+      const script = readFileSync(LEDGER_GATE, "utf8");
+      const clauses = readJoinClauses(script, "missing");
+      expect(clauses.length, "the missing-direction predicate parsed to ZERO clauses — the read broke, not the join").toBeGreaterThanOrEqual(1);
+      const conv = conventionsOf(clauses);
+
+      // ── ROWS come from the FIXED convention table, never from the script ──
+      // The predicate is the script's; the rows are not. MEASURED 2026-09-02
+      // while proving this arm: a first draft built rows from the clauses it
+      // had just read, so deleting a clause deleted its row and the arm stayed
+      // GREEN under the exact neuter it exists to catch (CORPUS-PROOFS cycle 1).
+      const rows: Array<{ id: string; fname: string; row: LedgerRow }> = JOIN_CONVENTIONS.map((c) => ({
+        id: c.id,
+        fname: FIXTURE_NAMES[c.id],
+        row: c.rowFor(FIXTURE_NAMES[c.id]),
+      }));
+      for (const r of rows) {
+        expect(r.fname, `no fixture basename for convention ${r.id}`).toBeDefined();
+        const own = JOIN_CONVENTIONS.find((c) => c.id === r.id) as JoinConvention;
+        expect(own.matches(r.row, r.fname), `the ${r.id} row does not even match its own clause — the fixture is wrong, not the gate`).toBe(true);
+      }
+
+      // ── DRIVEN, direction 1: every convention's row is FOUND ─────────────
+      withTempDir((dir) => {
+        const env = scaffoldJoinCase(
+          dir,
+          rows.map((r) => r.fname),
+          rows.map((r) => r.row),
+          conv,
+        );
+        const { status, out } = run(LEDGER_GATE, env);
+        expect(
+          status,
+          `the gate reported a migration MISSING although a ledger row matches it under one of its own conventions — a clause was removed and the false-253 path is open again:\n${out}`,
+        ).toBe(0);
+        expect(out).toContain("ledger presence: 0 absent");
+        for (const r of rows) expect(out, `${r.id}'s row (${r.fname}) was named as absent`).not.toContain(r.fname);
+      });
+
+      // ── DRIVEN, direction 2 (contrast): a row matching under NONE is still
+      // reported missing, and NAMED — the union is not so wide that it
+      // matches everything.
+      withTempDir((dir) => {
+        const stray = "20260105000000_join_no_match";
+        const strayRow: LedgerRow = { version: "20260105999999", name: "unrelated_row" };
+        for (const c of conv) expect(c.matches(strayRow, stray), `the stray row matches under ${c.id}; it must match under nothing`).toBe(false);
+        const env = scaffoldJoinCase(
+          dir,
+          [...rows.map((r) => r.fname), stray],
+          [...rows.map((r) => r.row), strayRow],
+          conv,
+        );
+        const { status, out } = run(LEDGER_GATE, env);
+        expect(status, `a row matching under no convention must still be drift:\n${out}`).toBe(1);
+        expect(out).toContain("not present in the TEST ledger");
+        expect(out).toContain(stray);
+        for (const r of rows) expect(out, `${r.fname} matched and must not be named as absent`).not.toContain(r.fname);
+      });
+
+      // ── SPECIFICITY, MEASURED: which of the script's clauses does each row
+      // satisfy? A row that also matches under ANOTHER clause cannot detect
+      // that clause's removal at runtime. Pinned exactly so the record cannot
+      // rot: at HEAD (2026-09-02, four clauses) the `version_name` row
+      // {version=<ts>, name=<desc>} ALSO satisfies `desc-only` — m.name IS the
+      // description — so clause 2 is SUBSUMED by clause 4 for every
+      // underscore-free version and its removal is unobservable here (MEASURED
+      // in CORPUS-PROOFS cycle 1b: arm stays green). The other three rows
+      // match under exactly one clause each. The script header's ":44-47 BOTH
+      // clauses are required; neither is redundant" predates clauses 3 and 4
+      // and is stale for clause 2 — recorded in 164.3.1-12-SUMMARY.md, not
+      // patched here (the script is edited by no plan in this phase).
+      const specificity = Object.fromEntries(
+        rows.map((r) => [r.id, conv.filter((c) => c.matches(r.row, r.fname)).map((c) => c.id).sort()]),
+      );
+      const EXPECTED_SPECIFICITY: Record<string, string[]> = {
+        "name-only": ["name-only"],
+        version_name: ["desc-only", "version_name"],
+        "bare-ts": ["bare-ts"],
+        "desc-only": ["desc-only"],
+      };
+      expect(
+        specificity,
+        "the clause-subsumption structure changed. If a clause became load-bearing (or stopped being), update EXPECTED_SPECIFICITY WITH the measurement — do not loosen this to `toBeTruthy`",
+      ).toEqual(EXPECTED_SPECIFICITY);
+    });
+
+    it("the ADVISORY extra direction uses the SAME clause set as the missing direction — one predicate, two readings (:62-67)", () => {
+      const script = readFileSync(LEDGER_GATE, "utf8");
+      const missing = readJoinClauses(script, "missing");
+      const extra = readJoinClauses(script, "extra");
+      expect(missing.length, "zero clauses parsed out of the missing direction").toBeGreaterThanOrEqual(1);
+      expect(
+        extra,
+        "the two directions disagree BY CONSTRUCTION again — before 2026-08-30 the advisory direction joined on `name` alone and reported 224 phantom extras while the missing direction used all the clauses",
+      ).toEqual(missing);
+    });
+  });
+
   it("RED: a repo migration with no matching schema_migrations.name row exits 1 and names it", () => {
     withTempDir((dir) => {
       const env = scaffoldLedgerCase(dir, { missing: ["20260829120000_demo"] });
