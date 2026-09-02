@@ -558,7 +558,7 @@ Plans:
 8. The absurdity floor exists on VAC-04 and on the mutation runner as well as VAC-08, each proven able to fire AND proven silent on a legitimate finding — a two-directional neuter, because a floor that fires unconditionally also passes its own RED arm. Every threshold records the measurement that set it and the separation it achieves.
 9. Every gate whose key, threshold or join rests on a measurement carries that measurement's SAMPLE SIZE and COVERAGE beside it, plus an arm asserting the key against the full corpus. Verified by grepping the family for justifying measurements and finding no bare ones.
 
-**Plans:** 13/13 plans executed (5 waves + 1 gap-closure plan for SC-4)
+**Plans:** 13/13 plans complete
 
 Plans:
 **Wave 1**
