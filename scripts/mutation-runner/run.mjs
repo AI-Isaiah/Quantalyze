@@ -1288,8 +1288,10 @@ export function failureBranches(text) {
     //
     // BOUNDED so a raise with no enclosing branch cannot swallow the file. If
     // no head is found inside the bound the block is the raise statement alone,
-    // which is the narrow direction; that is safe here only because the nonce
-    // (not this function) is what closes the injection half of the class.
+    // which is the narrow direction; that is safe here only because
+    // source-location attribution (`attributeIdentities`, GRAMMAR rule 3c —
+    // not this function) is what closes the injection half of the class. The
+    // identity nonce that used to close it was deleted in plan 05 (IN-01).
     let headLine = stmt.startLine;
     for (
       let k = prevSiblingIndex(statements, idx, stmt.depth);
