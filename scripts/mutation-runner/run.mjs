@@ -1714,19 +1714,19 @@ function materialize(slotDir, relPaths) {
 /**
  * @param {object} opts
  * @param {string} opts.scopeDir         directory whose *.sql files form the corpus
- * @param {string|null} opts.onlyFile    repo-relative gate path to narrow to
- * @param {string|null} opts.onlyArm     arm ID to narrow to
- * @param {number} opts.filesFloor       ratchet; overridable ONLY by --self-test
- * @param {number} opts.armsFloor
- * @param {number} opts.waivedCeiling    ceiling on waived arms; overridable ONLY by --self-test
- * @param {typeof runLane} opts.laneRunner
+ * @param {string|null} [opts.onlyFile]  repo-relative gate path to narrow to
+ * @param {string|null} [opts.onlyArm]   arm ID to narrow to
+ * @param {number} [opts.filesFloor]     ratchet; overridable ONLY by --self-test
+ * @param {number} [opts.armsFloor]
+ * @param {number} [opts.waivedCeiling]  ceiling on waived arms; overridable ONLY by --self-test
+ * @param {(o: {workdir:string, applyAbs:string[], postApplyAbs:string[], gateAbs:string, leg:string}) => {status:number|null, output:string, seconds:number, measureFail:string|null, invoked:boolean}} [opts.laneRunner]
  *        INJECTABLE lane runner, default the real `runLane`. Exists so the
  *        absurdity floor's FIRE direction and the lane-unrunnable MEASURE_FAIL
  *        can be driven through THIS function's real verdict loop and summary
  *        block without a cluster (a stub that never touches `laneTally`
  *        produces executed=N / lane-invocations=0 by construction). ⚠️ Only
  *        `--self-test` and vitest pass it; the CLI never does.
- * @param {(s:string)=>void} opts.log
+ * @param {(s:string)=>void} [opts.log]
  */
 export function runCorpus({
   scopeDir,
