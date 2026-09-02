@@ -1838,7 +1838,13 @@ describe("[VAC04-C4] GATE-LEVEL — the charset refusal driven THROUGH THE REAL 
         `the neutered readers still refused — the calibration copies are not the pre-fix shape\n${out}`,
       ).toBe(0);
       expect(out).toContain(READERS_RAN);
-      expect(out, "the truncated name `f` must be what the gate looked up").toContain("f: measured absent");
+      // IN-07 (164.3.1 review): pinned as the EXACT line the gate prints
+      // (two-space indent, :718), not a suffix — `xf: measured absent` would
+      // satisfy "f: measured absent" and READERS_RAN's `: 1` only bounds it
+      // to one name ending in f.
+      expect(out, "the truncated name `f` — exactly `f` — must be what the gate looked up").toContain(
+        "\n  f: measured absent",
+      );
       expect(out).toContain(SUCCESS_NOTICE);
       expect(out, "no refusal may fire with both refusals disabled").not.toContain(OFFENDING_CODEPOINT);
     });
