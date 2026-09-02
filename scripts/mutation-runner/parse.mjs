@@ -490,8 +490,18 @@ const BARE_HEADS = new Set(["BEGIN", "DECLARE", "ELSE"]);
  */
 const THEN_OPENERS = new Set(["IF", "ELSIF", "ELSEIF", "WHEN", "EXCEPTION"]);
 
-/** Segment-opening keywords after which a `LOOP` closes a branch head. */
-const LOOP_OPENERS = new Set(["FOR", "FOREACH", "WHILE", "LOOP", "END"]);
+/**
+ * Segment-opening keywords after which a `LOOP` closes a branch head.
+ *
+ * ⛔ `END` is deliberately NOT here. It was, and `END LOOP;` came out as a head
+ * (`[head: true, terminated: false, "END LOOP"]`) while `END IF;` was an
+ * ordinary terminated statement. Both consumers of `head` read it as "the head
+ * of the enclosing branch": the neuter walk in `run.mjs` stopped on the closer
+ * and ACCEPTED a neuter that left `SET ROLE postgres;` live behind a multi-line
+ * loop (the measured RESET ROLE class), and `failureBranches` anchored the
+ * branch on it, hiding guard negation (GRAMMAR § 3b). A closer is a statement.
+ */
+const LOOP_OPENERS = new Set(["FOR", "FOREACH", "WHILE", "LOOP"]);
 
 /**
  * Every keyword that can constitute or terminate a branch-head unit.

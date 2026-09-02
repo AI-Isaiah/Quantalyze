@@ -1192,6 +1192,76 @@ export function armIdentitiesInOrder(text) {
  */
 const FAILURE_BRANCH_LOOKBACK = 40;
 
+/**
+ * A block CLOSER — `END LOOP;`, `END IF;`, `END CASE;`, `END;` — and its kind,
+ * or null. A closed block sitting between a raise and its guard is ONE
+ * compound statement OF the branch, not the branch's head, so the walk in
+ * `failureBranches` steps OVER it to the statement that opened it and keeps
+ * walking.
+ *
+ * CR-01 (164.3.1 review), MEASURED 2026-09-02 on `IF NOT ok THEN <block>
+ * RAISE …`: with the loop closer tokenized as a head the branch was anchored
+ * on `END LOOP;`; with it a plain statement the anchor only moved to the loop's
+ * own `FOR … LOOP` head — and a nested `IF … END IF;` or `BEGIN … END;`
+ * anchored on ITS opener the same way. In every shape `IF NOT ok THEN` →
+ * `IF TRUE THEN` behind the block returned null: guard negation, invisible
+ * (GRAMMAR § 3b, R3-C02 secondary). Read in the masking projection, so a
+ * closer inside a literal or a comment is not one.
+ */
+const BLOCK_CLOSER_RE = /^END(?:\s+(LOOP|IF|CASE))?\s*;$/i;
+function blockCloserKind(statement) {
+  const m = BLOCK_CLOSER_RE.exec(statement.executableText.trim());
+  return m === null ? null : (m[1] ?? "BLOCK").toUpperCase();
+}
+
+/**
+ * Does `statement` OPEN a block of `kind`? `IF`/`LOOP`/`BEGIN` openers are the
+ * tokenizer's own heads; a `CASE` statement's opener is the plain statement
+ * that begins with the word (its `WHEN … THEN` is swallowed by the tokenizer's
+ * case-depth rule), so that one is keyed on the first word alone.
+ */
+function opensBlock(statement, kind) {
+  const words = statement.executableText.trim().split(/\s+/);
+  const first = words[0].toUpperCase();
+  const last = words[words.length - 1].toUpperCase();
+  switch (kind) {
+    case "LOOP":
+      return isBranchHead(statement) && last === "LOOP";
+    case "IF":
+      return isBranchHead(statement) && first === "IF" && last === "THEN";
+    case "BLOCK":
+      return isBranchHead(statement) && words.length === 1 && first === "BEGIN";
+    case "CASE":
+      return first === "CASE";
+    default:
+      return false;
+  }
+}
+
+/**
+ * Index of the sibling that opens the block `closerIdx` closes, nesting-aware,
+ * or -1 when no opener sits among the siblings (malformed, or opened above the
+ * enclosing body — the lane refuses such a file either way).
+ */
+function blockOpenerIndex(statements, closerIdx, depth, kind) {
+  let nest = 0;
+  for (
+    let k = prevSiblingIndex(statements, closerIdx, depth);
+    k !== -1;
+    k = prevSiblingIndex(statements, k, depth)
+  ) {
+    if (blockCloserKind(statements[k]) === kind) {
+      nest += 1;
+      continue;
+    }
+    if (opensBlock(statements[k], kind)) {
+      if (nest === 0) return k;
+      nest -= 1;
+    }
+  }
+  return -1;
+}
+
 export function failureBranches(text) {
   const lines = text.split("\n");
   const statements = tokenizeStatements(text);
@@ -1226,6 +1296,15 @@ export function failureBranches(text) {
       k !== -1 && stmt.startLine - statements[k].startLine <= FAILURE_BRANCH_LOOKBACK;
       k = prevSiblingIndex(statements, k, stmt.depth)
     ) {
+      const closer = blockCloserKind(statements[k]);
+      if (closer !== null) {
+        // A closed block is walked OVER, never anchored on: its opener heads
+        // the block, not the branch (CR-01). An unmatched closer ends the walk
+        // at the raise alone — the narrow direction, same as the bound above.
+        k = blockOpenerIndex(statements, k, stmt.depth, closer);
+        if (k === -1) break;
+        continue;
+      }
       if (isBranchHead(statements[k])) {
         headLine = statements[k].startLine;
         break;
