@@ -212,6 +212,23 @@ describe("branch-head units", () => {
     }
   });
 
+  it("a block CLOSER is not a head — END LOOP; tokenizes exactly like END IF;, END CASE; and END;", () => {
+    // CR-01 (164.3.1 review). `END` sat in the tokenizer's LOOP_OPENERS, so
+    // `END LOOP;` came out `[head: true, terminated: false, "END LOOP"]` while
+    // `END IF;` was an ordinary terminated statement. Two consumers read `head`
+    // as "the head of the enclosing branch": the neuter walk stopped on the
+    // closer and accepted a neuter with `SET ROLE postgres;` left live behind a
+    // multi-line loop, and `failureBranches` anchored the branch on it and lost
+    // the guard. The opener spellings above never asserted the closers.
+    for (const closer of ["END LOOP;", "END IF;", "END CASE;", "END;"]) {
+      const statements = tokenize(closer);
+      expect(
+        statements.map((s) => [s.head, s.terminated, s.text]),
+        `${closer} must be one terminated, non-head statement`,
+      ).toEqual([[false, true, closer]]);
+    }
+  });
+
   it("a CASE expression's THEN and ELSE are not heads", () => {
     // Otherwise `v := CASE WHEN a THEN 1 ELSE 2 END;` would split into four
     // units and the backward scan would terminate inside an expression.

@@ -670,6 +670,51 @@ describe("R2-W04 / GRAMMAR rule 3b — a mutation may not REWRITE an arm identit
     );
   });
 
+  it.each([
+    {
+      block: "a closed LOOP",
+      lines: ["    FOR r IN SELECT 1 LOOP", "      NULL;", "    END LOOP;"],
+    },
+    {
+      block: "a nested IF … END IF;",
+      lines: ["    IF x THEN", "      NULL;", "    END IF;"],
+    },
+    {
+      block: "a BEGIN … END; block",
+      lines: ["    BEGIN", "      NULL;", "    END;"],
+    },
+  ])("R3-C02 secondary behind $block: the guard is still part of the branch, so its negation is refused", ({ lines }) => {
+    // CR-01 (164.3.1 review), MEASURED 2026-09-02 pre-fix on all three shapes:
+    // `failureBranches` anchored the branch on the closer (`END LOOP;`, then a
+    // tokenizer head) or on the block's OWN opener (`IF x THEN`, `BEGIN`), so
+    // the branch text began below the guard and `identityRewriteDetail`
+    // returned null for `IF NOT ok THEN` → `IF TRUE THEN` — the R3-C02
+    // secondary defect, reopened for every arm with a closed block between
+    // its guard and its raise. A closed block is a statement OF the branch;
+    // the walk must step over it to the head that opened it.
+    const before = [
+      "  IF NOT ok THEN",
+      ...lines,
+      "    RAISE EXCEPTION 'TEST FAILED (ARM BLOCK): x';",
+      "  END IF;",
+    ].join("\n");
+    const after = before.replace("IF NOT ok THEN", "IF TRUE THEN");
+    expect(after, "the fixture's guard was not negated — the arm proves nothing").not.toBe(before);
+
+    // Independent oracle, as in the plain-shape arm above: the identities are
+    // untouched, so nothing stated over identities alone can see this.
+    expect(armIdentities(after)).toEqual(armIdentities(before));
+
+    const branches = failureBranches(before);
+    expect(branches.map((b) => b.id)).toEqual(["ARM BLOCK"]);
+    expect(
+      branches[0].text.split("\n")[0],
+      "the branch must begin at the GUARD, not at the block's closer or opener",
+    ).toBe("  IF NOT ok THEN");
+
+    expect(identityRewriteDetail(before, after, "f.sql")).toMatch(/REWRITES a failure branch/);
+  });
+
   it("REAL GATE FILE: failure branches are found, small, and well inside the lookback bound", () => {
     // Non-vacuity for the two arms above: if `failureBranches` returned an
     // empty list, every comparison would be trivially equal and the whole rule

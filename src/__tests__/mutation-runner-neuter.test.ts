@@ -151,6 +151,34 @@ describe("WR-07 — an abort-path statement it cannot classify is REFUSED, not l
     });
   }
 
+  it("CR-01: SET ROLE above a closed multi-line loop is REFUSED, not accepted past END LOOP;", () => {
+    // MEASURED 2026-09-02 pre-fix (parse.mjs LOOP_OPENERS carried "END"):
+    // `END LOOP;` tokenized as a head that began its own line, the backward
+    // walk broke on it, and the neuter was ACCEPTED — `found: true` with
+    // `SET ROLE postgres;` still executable. The RESET ROLE class of this
+    // file's header, reached through a keyword-set entry instead of a regex.
+    // The one-line spelling (`… LOOP NULL; END LOOP;`) was refused only by
+    // coincidence — `NULL;` shared the closer's line — so this is the shape
+    // that leaked.
+    const text = [
+      "  IF NOT raised THEN",
+      "    SET ROLE postgres;",
+      "    FOR r IN SELECT 1 LOOP",
+      "      NULL;",
+      "    END LOOP;",
+      "    RAISE EXCEPTION 'TEST FAILED (ARM L): it did not bite';",
+      "  END IF;",
+    ].join("\n");
+    const result = neuterArm(text, "ARM L");
+    expect(
+      result.found,
+      "neuterArm ACCEPTED a neuter that leaves \"SET ROLE postgres;\" executing behind a closed loop",
+    ).toBe(false);
+    expect(result.reason).toContain("unrecognised statement before its RAISE");
+    expect(result.reason, "the refusal must name the closer it stopped on").toContain("END LOOP;");
+    expect(result.text).toBe(text);
+  });
+
   it("still accepts the one shape it is allowed to absorb, and only that one", () => {
     // Pinned so widening the absorbed set is a visible edit to an exported
     // constant, reviewed on its own terms, rather than a regex tweak.

@@ -189,6 +189,11 @@ two measured ways, both found in round 3:
   cleanly and passed the multiset compare — while the owner-coherence
   `WITH CHECK` the arm claims to test was never evaluated. The guard is part of
   the branch, so it is part of the invariant.
+- **a closed block between the guard and the raise.** A `FOR … END LOOP;`, a
+  nested `IF … END IF;` or a `BEGIN … END;` above the raise is a statement OF
+  the branch, not its head. The backward walk steps over a closer to the
+  statement that opened it and keeps walking, so the guard stays inside the
+  unit (CR-01, 164.3.1 review — measured blind on all three shapes before).
 
 ⚠️ Neuters are deliberately exempt — neutering an arm removes its identity on
 purpose. The comparison is taken across a mutation step only, with the
