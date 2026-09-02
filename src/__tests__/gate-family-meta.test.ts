@@ -558,16 +558,32 @@ const DATE_STAMP = /\b20\d\d-\d\d-\d\d\b/;
  * lines never produce a site.
  *
  * ⚠️ The name class covers BOTH directions deliberately. It was `FLOOR|MIN`
- * only until 2026-09-02, which let `WAIVED_CEILING = 0` (run.mjs:226) escape
+ * only until 2026-09-02, which let `WAIVED_CEILING = 0` (run.mjs:228) escape
  * the SC-9 no-bare-thresholds arm — a bound that fails when the corpus carries
  * MORE than was measured is exactly as capable of being picked by taste as a
  * lower bound, and this phase's whole thesis is that a control scoped to the
- * spellings that happen to exist today is unsound by construction. MEASURED at
- * the widening, across all six THRESHOLD_BEARING_FILES: 7 sites under
- * `FLOOR|MIN`, 8 under `FLOOR|MIN|CEILING|MAX|LIMIT` — the one added site is
- * run.mjs:226, and it is justified, so the arm stays green on a real gain
- * rather than on an unchanged set. The RED fixture below carries a CEILING
- * case so a regression of this name class fails by fixture, not by audit.
+ * spellings that happen to exist today is unsound by construction.
+ *
+ * ⛔ TWO COUNTING CONVENTIONS, NAMED — they were conflated here until
+ * 2026-09-02 and produced three different integers for one list. `shCmp` above
+ * matches a shell literal comparison and is NOT gated by the name class, so
+ * widening the class moves the NAME-CLASS count and the TOTAL-SITE count by the
+ * same one, from different bases:
+ *
+ *   RE-MEASURED 2026-09-02 at HEAD, by running the two name classes over all
+ *   six THRESHOLD_BEARING_FILES (a node scan reproducing this function):
+ *     `FLOOR|MIN`                     → 7 name-class constants + 1 shell
+ *                                       comparison = 8 TOTAL sites
+ *     `FLOOR|MIN|CEILING|MAX|LIMIT`   → 8 name-class constants + 1 shell
+ *                                       comparison = 9 TOTAL sites
+ *
+ * The one added site is `WAIVED_CEILING=0` at run.mjs:228, and it is justified,
+ * so the arm stays green on a real gain rather than on an unchanged set. TOTAL
+ * SITES is the convention the arm's own diagnostic prints (`META
+ * bare-measurement: N threshold site(s) over 6 file(s)` — 9 today) and the
+ * convention KNOWN_THRESHOLD_SITES is counted in. The RED fixture below carries
+ * a CEILING case so a regression of this name class fails by fixture, not by
+ * audit.
  */
 export function findThresholdSites(file: string, src: string): ThresholdSite[] {
   const lines = src.split("\n");
@@ -823,11 +839,20 @@ describe("164.3.1-12 — META-ARM diagnostic-first over the family's shell gates
  * measurement look identical to a reader who did not check.
  */
 export const KNOWN_THRESHOLD_SITES: readonly string[] = [
+  // ⚠️ EVERY COUNT HERE IS A **TOTAL SITE** COUNT — name-class constants PLUS
+  // the shell literal comparisons, which the name class does not gate. That is
+  // the convention this list is length-checked in and the one the arm's
+  // diagnostic prints; the 7-vs-8 pair in findThresholdSites' doc-comment is the
+  // NAME-CLASS convention and counts a different thing.
+  //
   // MEASURED 2026-09-02 at 03585b88 by running this arm with the list EMPTY:
   // 6 threshold sites over the 5 threshold-bearing files, all 6 justified
   // (token + date within the window). Re-measured 2026-09-02 at 8969513e with
-  // this file added: 8 sites over 6 files, NEEDLE_MIN_LENGTH was BARE (no
-  // date) until its measurement was recorded. The known count IS the non-vacuity
+  // this file added: 8 sites over 6 files, NEEDLE_MIN_LENGTH was BARE (no date)
+  // until its measurement was recorded. RE-MEASURED 2026-09-02 at HEAD after
+  // the name class widened past `FLOOR|MIN`: 9 sites over the same 6 files
+  // (8 name-class constants + 1 shell literal comparison), all 9 justified —
+  // the entries below, one per site. The known count IS the non-vacuity
   // floor: an exact set both directions is strictly stronger than `>= 6`, and
   // a threshold leaving this family is a decision worth a red, not churn.
   "scripts/test-ledger-drift-check.sh :: ledger_rows -ge 50", //  VAC-08 absurdity floor: 'scored' + 2026-08-29
@@ -836,9 +861,10 @@ export const KNOWN_THRESHOLD_SITES: readonly string[] = [
   "scripts/mutation-runner/run.mjs :: ARMS_FLOOR=30", //            biting ratchet: MEASURED + 2026-09-01 (re-derived)
   // The family's only UPPER bound. Invisible to this arm until the name class
   // widened past FLOOR|MIN on 2026-09-02 — registered here on the run that
-  // first saw it, with its measurement at run.mjs:199-225 (MEASURED + a dated
-  // --parse-only run at 8969513e scoring 0 waivers, cross-checked by an
-  // independent fs scan).
+  // first saw it, with its measurement at run.mjs:201-227 and the constant
+  // itself at run.mjs:228 (MEASURED + a dated --parse-only run at 8969513e
+  // scoring 0 waivers, cross-checked by an independent fs scan). Both anchors
+  // RE-MEASURED at HEAD 2026-09-02; they had shifted by two lines.
   "scripts/mutation-runner/run.mjs :: WAIVED_CEILING=0", //          waiver ceiling: MEASURED + 2026-09-02
   "src/__tests__/lint-sql-gates.test.ts :: RESULT_LOOP_CONDITION_FLOOR=8", // [MUT-W02] parse floor: 'measured' + 2026-09-01
   "src/__tests__/self-referential-oracle.test.ts :: CORPUS_FLOOR=100", //    SRO corpus-walk floor: MEASURED + 2026-09-01
