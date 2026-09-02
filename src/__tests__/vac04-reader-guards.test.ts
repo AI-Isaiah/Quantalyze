@@ -42,7 +42,7 @@
 
 import { describe, it, expect } from "vitest";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, symlinkSync, cpSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, symlinkSync, cpSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -60,6 +60,16 @@ const MEMBERS = [
 
 const NAIVE = "scripts/sql-function-names-naive.mjs";
 
+/** A temp dir that is removed when `fn` returns or throws (mirrors drift-check-scripts.test.ts). */
+function withTempDir<T>(prefix: string, fn: (dir: string) => T): T {
+  const dir = mkdtempSync(join(tmpdir(), prefix));
+  try {
+    return fn(dir);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
 describe("main-module guard ([VAC04-C2]) — every invocation shape must actually RUN the reader", () => {
   for (const { script, okMarker } of MEMBERS) {
     it(`${script}: CONTROL — a plain direct invocation runs main() and prints its self-test line`, () => {
@@ -75,15 +85,16 @@ describe("main-module guard ([VAC04-C2]) — every invocation shape must actuall
     it(`${script}: through a SYMLINK, main() still runs`, () => {
       // realpath(argv[1]) !== fileURLToPath(import.meta.url) under the old
       // URL-string guard, so this exited 0 printing nothing — pre-fix RED.
-      const dir = mkdtempSync(join(tmpdir(), "vac04-guard-"));
-      const link = join(dir, "link.mjs");
-      symlinkSync(resolve(script), link);
-      const r = spawnSync("node", [link, "--self-test"], { encoding: "utf8" });
-      expect(r.status, r.stderr).toBe(0);
-      expect(
-        r.stdout,
-        "a symlinked invocation that prints NOTHING is a reader that read nothing while reporting success",
-      ).toContain(okMarker);
+      withTempDir("vac04-guard-", (dir) => {
+        const link = join(dir, "link.mjs");
+        symlinkSync(resolve(script), link);
+        const r = spawnSync("node", [link, "--self-test"], { encoding: "utf8" });
+        expect(r.status, r.stderr).toBe(0);
+        expect(
+          r.stdout,
+          "a symlinked invocation that prints NOTHING is a reader that read nothing while reporting success",
+        ).toContain(okMarker);
+      });
     }, 30_000);
 
     it(`${script}: from a path containing a SPACE, main() still runs`, () => {
@@ -92,12 +103,13 @@ describe("main-module guard ([VAC04-C2]) — every invocation shape must actuall
       // concatenation does not, so the strings differ even with no symlink
       // involved. Both scripts import only node: builtins, so a copy runs
       // from anywhere.
-      const dir = mkdtempSync(join(tmpdir(), "vac04 guard sp-"));
-      const copy = join(dir, "reader.mjs");
-      cpSync(resolve(script), copy);
-      const r = spawnSync("node", [copy, "--self-test"], { encoding: "utf8" });
-      expect(r.status, r.stderr).toBe(0);
-      expect(r.stdout).toContain(okMarker);
+      withTempDir("vac04 guard sp-", (dir) => {
+        const copy = join(dir, "reader.mjs");
+        cpSync(resolve(script), copy);
+        const r = spawnSync("node", [copy, "--self-test"], { encoding: "utf8" });
+        expect(r.status, r.stderr).toBe(0);
+        expect(r.stdout).toContain(okMarker);
+      });
     }, 30_000);
   }
 
@@ -106,12 +118,13 @@ describe("main-module guard ([VAC04-C2]) — every invocation shape must actuall
     // it by the status: the no-args usage error is exit 2, and a skipped
     // main() is exit 0. A gate that shells out and checks only `$?` would see
     // the skip as a pass, which is precisely the failure mode.
-    const dir = mkdtempSync(join(tmpdir(), "vac04-guard-noargs-"));
-    const link = join(dir, "link.mjs");
-    symlinkSync(resolve(NAIVE), link);
-    const r = spawnSync("node", [link], { encoding: "utf8" });
-    expect(r.status, `stdout=${r.stdout} stderr=${r.stderr}`).toBe(2);
-    expect(r.stderr).toContain("at least one file is required");
+    withTempDir("vac04-guard-noargs-", (dir) => {
+      const link = join(dir, "link.mjs");
+      symlinkSync(resolve(NAIVE), link);
+      const r = spawnSync("node", [link], { encoding: "utf8" });
+      expect(r.status, `stdout=${r.stdout} stderr=${r.stderr}`).toBe(2);
+      expect(r.stderr).toContain("at least one file is required");
+    });
   }, 30_000);
 });
 
@@ -183,12 +196,28 @@ describe("charset refusal ([VAC04-C4]) — a reader that cannot read the name mu
     "CREATE OR REPLACE FUNCTION public.sanitize_user$v2(p uuid) RETURNS void " +
     "LANGUAGE plpgsql AS $fn$ BEGIN END; $fn$;\n";
 
-  /** Write `sql` into a fresh temp dir and return its path. */
-  function fixture(sql: string): string {
-    const dir = mkdtempSync(join(tmpdir(), "vac04-charset-"));
-    const file = join(dir, "in.sql");
-    writeFileSync(file, sql, "utf8");
-    return file;
+  /** Write `sql` into a fresh temp dir (removed afterwards) and hand `fn` its path. */
+  function withFixture<T>(sql: string, fn: (file: string) => T): T {
+    return withTempDir("vac04-charset-", (dir) => {
+      const file = join(dir, "in.sql");
+      writeFileSync(file, sql, "utf8");
+      return fn(file);
+    });
+  }
+
+  /**
+   * Two fixtures side by side, for `--diff-bodies`: `a.sql` and `b.sql` in
+   * ONE temp dir, so the refusal's file attribution is distinguishable by
+   * basename rather than by which temp dir happened to be created first.
+   */
+  function withFixturePair<T>(a: string, b: string, fn: (fileA: string, fileB: string) => T): T {
+    return withTempDir("vac04-charset-pair-", (dir) => {
+      const fileA = join(dir, "a.sql");
+      const fileB = join(dir, "b.sql");
+      writeFileSync(fileA, a, "utf8");
+      writeFileSync(fileB, b, "utf8");
+      return fn(fileA, fileB);
+    });
   }
 
   const CHARSET_PHRASE = "identifier leaves the unquoted charset";
@@ -196,30 +225,32 @@ describe("charset refusal ([VAC04-C4]) — a reader that cannot read the name mu
   const CODEPOINT = "U+00FA";
 
   it("naive: the P10 input EXITS 1 naming what it saw, instead of printing the truncated `f`", () => {
-    const file = fixture(P10_SQL);
-    const r = spawnSync("node", ["scripts/sql-function-names-naive.mjs", file], {
-      encoding: "utf8",
+    withFixture(P10_SQL, (file) => {
+      const r = spawnSync("node", ["scripts/sql-function-names-naive.mjs", file], {
+        encoding: "utf8",
+      });
+      expect(r.status, `stdout=${r.stdout} stderr=${r.stderr}`).toBe(1);
+      expect(r.stderr).toContain(CHARSET_PHRASE);
+      expect(r.stderr, "the diagnostic must name the OFFENDING CHARACTER, not just a conclusion").toContain(CODEPOINT);
+      expect(r.stderr, "…and the file it was reading").toContain(file);
+      expect(r.stderr, "…and the 1-based line, which is line 2 here").toContain(":2:");
+      expect(r.stderr, "…and the identifier prefix it actually read").toContain("public.f");
+      expect(r.stdout, "a refusal must print no name at all — `f` is a DIFFERENT function").toBe("");
     });
-    expect(r.status, `stdout=${r.stdout} stderr=${r.stderr}`).toBe(1);
-    expect(r.stderr).toContain(CHARSET_PHRASE);
-    expect(r.stderr, "the diagnostic must name the OFFENDING CHARACTER, not just a conclusion").toContain(CODEPOINT);
-    expect(r.stderr, "…and the file it was reading").toContain(file);
-    expect(r.stderr, "…and the 1-based line, which is line 2 here").toContain(":2:");
-    expect(r.stderr, "…and the identifier prefix it actually read").toContain("public.f");
-    expect(r.stdout, "a refusal must print no name at all — `f` is a DIFFERENT function").toBe("");
   }, 30_000);
 
   it("normalizer --function-names: the P10 input EXITS 1 instead of silently dropping the definition", () => {
-    const file = fixture(P10_SQL);
-    const r = spawnSync("node", [NORMALIZER, "--function-names", file], {
-      encoding: "utf8",
+    withFixture(P10_SQL, (file) => {
+      const r = spawnSync("node", [NORMALIZER, "--function-names", file], {
+        encoding: "utf8",
+      });
+      expect(r.status, `stdout=${r.stdout} stderr=${r.stderr}`).toBe(1);
+      expect(r.stderr).toContain(CHARSET_PHRASE);
+      expect(r.stderr).toContain(CODEPOINT);
+      expect(r.stderr).toContain(file);
+      expect(r.stderr).toContain(":2:");
+      expect(r.stdout).toBe("");
     });
-    expect(r.status, `stdout=${r.stdout} stderr=${r.stderr}`).toBe(1);
-    expect(r.stderr).toContain(CHARSET_PHRASE);
-    expect(r.stderr).toContain(CODEPOINT);
-    expect(r.stderr).toContain(file);
-    expect(r.stderr).toContain(":2:");
-    expect(r.stdout).toBe("");
   }, 30_000);
 
   it("normalizer --function-qualified-names: the mode VAC-04's SCHEMA check drives refuses too", () => {
@@ -227,12 +258,13 @@ describe("charset refusal ([VAC04-C4]) — a reader that cannot read the name mu
     // `--schema public` dump, so the qualified mode is what decides "this
     // definition targets another schema". A silent narrowing there is the same
     // wrong-subject bug wearing a different hat.
-    const file = fixture(P10_SQL);
-    const r = spawnSync("node", [NORMALIZER, "--function-qualified-names", file], {
-      encoding: "utf8",
+    withFixture(P10_SQL, (file) => {
+      const r = spawnSync("node", [NORMALIZER, "--function-qualified-names", file], {
+        encoding: "utf8",
+      });
+      expect(r.status, `stdout=${r.stdout} stderr=${r.stderr}`).toBe(1);
+      expect(r.stderr).toContain(CHARSET_PHRASE);
     });
-    expect(r.status, `stdout=${r.stdout} stderr=${r.stderr}`).toBe(1);
-    expect(r.stderr).toContain(CHARSET_PHRASE);
   }, 30_000);
 
   it("a LEADING non-ASCII identifier is caught by the normalizer — the union covering the naive reader's blind spot", () => {
@@ -240,34 +272,36 @@ describe("charset refusal ([VAC04-C4]) — a reader that cannot read the name mu
     // FUNCTION, so the naive reader cannot see this line AT ALL. That is the
     // documented miss, asserted rather than assumed — and it is exactly why
     // the other member's refusal has to exist.
-    const file = fixture(LEADING_SQL);
-    const lexer = spawnSync("node", [NORMALIZER, "--function-names", file], {
-      encoding: "utf8",
-    });
-    expect(lexer.status, `stdout=${lexer.stdout} stderr=${lexer.stderr}`).toBe(1);
-    expect(lexer.stderr).toContain(CHARSET_PHRASE);
-    expect(lexer.stderr).toContain(CODEPOINT);
+    withFixture(LEADING_SQL, (file) => {
+      const lexer = spawnSync("node", [NORMALIZER, "--function-names", file], {
+        encoding: "utf8",
+      });
+      expect(lexer.status, `stdout=${lexer.stdout} stderr=${lexer.stderr}`).toBe(1);
+      expect(lexer.stderr).toContain(CHARSET_PHRASE);
+      expect(lexer.stderr).toContain(CODEPOINT);
 
-    const naive = spawnSync("node", ["scripts/sql-function-names-naive.mjs", file], {
-      encoding: "utf8",
+      const naive = spawnSync("node", ["scripts/sql-function-names-naive.mjs", file], {
+        encoding: "utf8",
+      });
+      expect(naive.status, "the naive reader's documented miss: it sees no definition here").toBe(0);
+      expect(naive.stdout).toBe("");
     });
-    expect(naive.status, "the naive reader's documented miss: it sees no definition here").toBe(0);
-    expect(naive.stdout).toBe("");
   }, 30_000);
 
   it("QUOTED identifiers may still contain any character — the refusal concerns only UNQUOTED ones", () => {
-    const file = fixture(QUOTED_SQL);
-    const naive = spawnSync("node", ["scripts/sql-function-names-naive.mjs", file], {
-      encoding: "utf8",
-    });
-    expect(naive.status, naive.stderr).toBe(0);
-    expect(naive.stdout).toContain("fúnc");
+    withFixture(QUOTED_SQL, (file) => {
+      const naive = spawnSync("node", ["scripts/sql-function-names-naive.mjs", file], {
+        encoding: "utf8",
+      });
+      expect(naive.status, naive.stderr).toBe(0);
+      expect(naive.stdout).toContain("fúnc");
 
-    const lexer = spawnSync("node", [NORMALIZER, "--function-names", file], {
-      encoding: "utf8",
+      const lexer = spawnSync("node", [NORMALIZER, "--function-names", file], {
+        encoding: "utf8",
+      });
+      expect(lexer.status, lexer.stderr).toBe(0);
+      expect(lexer.stdout).toContain("fúnc");
     });
-    expect(lexer.status, lexer.stderr).toBe(0);
-    expect(lexer.stdout).toContain("fúnc");
   }, 30_000);
 
   it("the `$` identifier is still DROPPED by the normalizer and SEEN by the naive reader — the union's designed disagreement survives", () => {
@@ -276,44 +310,133 @@ describe("charset refusal ([VAC04-C4]) — a reader that cannot read the name mu
     // normalizer's blindness to it is a measured limitation covered by the
     // OTHER member, which is the whole architecture. Refusing it would turn a
     // working cross-check into a wedged gate.
-    const file = fixture(DOLLAR_SQL);
-    const naive = spawnSync("node", ["scripts/sql-function-names-naive.mjs", file], {
-      encoding: "utf8",
-    });
-    expect(naive.status, naive.stderr).toBe(0);
-    expect(naive.stdout.trim()).toBe("sanitize_user$v2");
+    withFixture(DOLLAR_SQL, (file) => {
+      const naive = spawnSync("node", ["scripts/sql-function-names-naive.mjs", file], {
+        encoding: "utf8",
+      });
+      expect(naive.status, naive.stderr).toBe(0);
+      expect(naive.stdout.trim()).toBe("sanitize_user$v2");
 
-    const lexer = spawnSync("node", [NORMALIZER, "--function-names", file], {
-      encoding: "utf8",
+      const lexer = spawnSync("node", [NORMALIZER, "--function-names", file], {
+        encoding: "utf8",
+      });
+      expect(lexer.status, `a $ identifier must be DROPPED, never refused: ${lexer.stderr}`).toBe(0);
+      expect(lexer.stdout.trim()).toBe("");
     });
-    expect(lexer.status, `a $ identifier must be DROPPED, never refused: ${lexer.stderr}`).toBe(0);
-    expect(lexer.stdout.trim()).toBe("");
   }, 30_000);
 
   it("refusal diagnostics leak NO body text — the normalizer's index run reads a PROD dump into a public CI log", () => {
-    const file = fixture(P10_SQL);
-    for (const argv of [
-      ["scripts/sql-function-names-naive.mjs", file],
-      [NORMALIZER, "--function-names", file],
-    ]) {
-      const r = spawnSync("node", argv, { encoding: "utf8" });
-      expect(r.status).toBe(1);
-      // Calibration: the sentinel really is in the input we just fed it, so a
-      // "not found" below cannot mean the fixture lost its body.
-      expect(P10_SQL).toContain(BODY_SENTINEL);
-      expect(
-        r.stderr + r.stdout,
-        `${argv[0]} echoed function body text into its diagnostic`,
-      ).not.toContain(BODY_SENTINEL);
-      // IN-06 (164.3.1 review): the rule is "never the source line" as well
-      // (naive.mjs:302-303). `(p uuid)` is on the definition line and is the
-      // only fragment of it beyond the allowed `read 'public.f'` prefix.
-      expect(P10_SQL).toContain("(p uuid)");
-      expect(
-        r.stderr + r.stdout,
-        `${argv[0]} echoed the definition line into its diagnostic`,
-      ).not.toContain("(p uuid)");
+    withFixture(P10_SQL, (file) => {
+      for (const argv of [
+        ["scripts/sql-function-names-naive.mjs", file],
+        [NORMALIZER, "--function-names", file],
+      ]) {
+        const r = spawnSync("node", argv, { encoding: "utf8" });
+        expect(r.status).toBe(1);
+        // Calibration: the sentinel really is in the input we just fed it, so a
+        // "not found" below cannot mean the fixture lost its body.
+        expect(P10_SQL).toContain(BODY_SENTINEL);
+        expect(
+          r.stderr + r.stdout,
+          `${argv[0]} echoed function body text into its diagnostic`,
+        ).not.toContain(BODY_SENTINEL);
+        // IN-06 (164.3.1 review): the rule is "never the source line" as well
+        // (naive.mjs:302-303). `(p uuid)` is on the definition line and is the
+        // only fragment of it beyond the allowed `read 'public.f'` prefix.
+        expect(P10_SQL).toContain("(p uuid)");
+        expect(
+          r.stderr + r.stdout,
+          `${argv[0]} echoed the definition line into its diagnostic`,
+        ).not.toContain("(p uuid)");
+      }
+    });
+  }, 30_000);
+
+  it("naive: prose in a block comment that ENDS a name with punctuation is 'no definition', not a charset refusal — and a real charset byte still refuses", () => {
+    // MEASURED 2026-09-02 (pre-fix): `CREATE OR REPLACE FUNCTION public.foo,
+    // which we replaced` on its own line inside `/* … */` made the naive reader
+    // exit 1 with "hit ',' (U+002C)". The gate then failed hunting a non-ASCII
+    // identifier that does not exist. `,` `.` `;` `)` cannot continue an
+    // unquoted identifier, so a chain they follow was read COMPLETELY; it is
+    // simply not a definition. Bytes that CUT a token (`ú`, `-`) still refuse.
+    // The continuation sits on the NEXT line on purpose: DEF_RE tolerates
+    // whitespace around a dot, so `public.foo. which` on one line would lex as
+    // the chain `public.foo.which` and test the dot-spacing rule, not the
+    // terminator.
+    const prose = (follower: string) =>
+      `/*\nCREATE OR REPLACE FUNCTION public.foo${follower}\nwhich we replaced\n*/\nSELECT 1;\n`;
+
+    for (const follower of [",", ".", ";", ")"]) {
+      withFixture(prose(follower), (file) => {
+        const naive = spawnSync("node", [NAIVE, file], { encoding: "utf8" });
+        expect(naive.status, `follower '${follower}': stderr=${naive.stderr}`).toBe(0);
+        expect(naive.stdout, `follower '${follower}' must yield NO name, not a truncated 'foo'`).toBe("");
+        expect(naive.stderr, `follower '${follower}' is not a charset violation`).not.toContain(CHARSET_PHRASE);
+        // The lexer sees the block comment for what it is — the two readers agree: nothing here.
+        const lexer = spawnSync("node", [NORMALIZER, "--function-names", file], { encoding: "utf8" });
+        expect(lexer.status, lexer.stderr).toBe(0);
+        expect(lexer.stdout).toBe("");
+      });
     }
+
+    // Calibration in the OTHER direction: the exemption is the terminator
+    // set and nothing wider. A follower that cuts a token mid-name — the real
+    // charset case — still refuses, naming its codepoint.
+    for (const [follower, codepoint] of [
+      ["ú", CODEPOINT],
+      ["-", "U+002D"],
+    ]) {
+      withFixture(prose(follower), (file) => {
+        const naive = spawnSync("node", [NAIVE, file], { encoding: "utf8" });
+        expect(naive.status, `follower '${follower}' must still REFUSE: stdout=${naive.stdout}`).toBe(1);
+        expect(naive.stderr).toContain(CHARSET_PHRASE);
+        expect(naive.stderr).toContain(codepoint);
+        expect(naive.stdout).toBe("");
+      });
+    }
+  }, 30_000);
+
+  it("normalizer --extract-fn: the body FETCH refuses on P10 too — exit 1 naming U+00FA and file:line, with EMPTY stdout", () => {
+    // The index modes above are what decide "present in PROD"; this is the
+    // mode that then goes and READS the body. A fetch that swallowed the
+    // refusal and printed nothing would look exactly like "no body under that
+    // name" to the gate — the same absent-therefore-new hole from the fetch side.
+    withFixture(P10_SQL, (file) => {
+      const r = spawnSync("node", [NORMALIZER, "--extract-fn", file, "f"], { encoding: "utf8" });
+      expect(r.status, `stdout=${r.stdout} stderr=${r.stderr}`).toBe(1);
+      expect(r.stderr).toContain(CHARSET_PHRASE);
+      expect(r.stderr).toContain(CODEPOINT);
+      expect(r.stderr).toContain(`${file}:2:`);
+      expect(r.stdout, "a refusal prints NO body — an empty fetch and a refused fetch must not look alike on stdout AND agree on exit").toBe("");
+      expect(r.stderr + r.stdout).not.toContain(BODY_SENTINEL);
+    });
+  }, 30_000);
+
+  it("normalizer --diff-bodies: a refusal is attributed to the FILE that threw — live named when live offends, snapshot named when snapshot offends", () => {
+    // `diffFunctionBodies` parses both sides in one call, so the throw alone
+    // says "one of these two". The mode re-parses the snapshot to decide which
+    // — pinned from both sides so the attribution cannot be a constant.
+    const CLEAN =
+      "CREATE OR REPLACE FUNCTION public.f(a int) RETURNS int LANGUAGE plpgsql AS $$ BEGIN RETURN 1; END $$;\n";
+
+    withFixturePair(CLEAN, P10_SQL, (snap, live) => {
+      const r = spawnSync("node", [NORMALIZER, "--diff-bodies", snap, live], { encoding: "utf8" });
+      expect(r.status, `stdout=${r.stdout} stderr=${r.stderr}`).toBe(1);
+      expect(r.stderr).toContain(CHARSET_PHRASE);
+      expect(r.stderr).toContain(CODEPOINT);
+      expect(r.stderr, "the offender is in the LIVE file").toContain(`${live}:2:`);
+      expect(r.stderr, "…and the clean snapshot must NOT be blamed").not.toContain(snap);
+      expect(r.stdout, "no diff rows on a refusal").toBe("");
+    });
+
+    withFixturePair(P10_SQL, CLEAN, (snap, live) => {
+      const r = spawnSync("node", [NORMALIZER, "--diff-bodies", snap, live], { encoding: "utf8" });
+      expect(r.status, `stdout=${r.stdout} stderr=${r.stderr}`).toBe(1);
+      expect(r.stderr).toContain(CHARSET_PHRASE);
+      expect(r.stderr, "the offender is in the SNAPSHOT file").toContain(`${snap}:2:`);
+      expect(r.stderr, "…and the clean live file must NOT be blamed").not.toContain(live);
+      expect(r.stdout).toBe("");
+    });
   }, 30_000);
 
   it("both LIBRARY functions throw — no import path can receive a truncated or dropped name", async () => {
