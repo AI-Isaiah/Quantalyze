@@ -558,7 +558,7 @@ Plans:
 8. The absurdity floor exists on VAC-04 and on the mutation runner as well as VAC-08, each proven able to fire AND proven silent on a legitimate finding — a two-directional neuter, because a floor that fires unconditionally also passes its own RED arm. Every threshold records the measurement that set it and the separation it achieves.
 9. Every gate whose key, threshold or join rests on a measurement carries that measurement's SAMPLE SIZE and COVERAGE beside it, plus an arm asserting the key against the full corpus. Verified by grepping the family for justifying measurements and finding no bare ones.
 
-**Plans:** 12/13 plans executed (5 waves + 1 gap-closure plan for SC-4)
+**Plans:** 13/13 plans executed (5 waves + 1 gap-closure plan for SC-4)
 
 Plans:
 **Wave 1**
@@ -567,7 +567,7 @@ Plans:
 - [x] 164.3.1-02-PLAN.md — Primitive-D AST rule REPORT-ONLY + calibration at HEAD on lint-sql-gates.test.ts:182-186 (Wave 1) [SC-5]
 - [x] 164.3.1-03-PLAN.md — [AUDCOV-01] before-state calibration: A/B/C = []/[5]/[3] via extracted real bytes (Wave 1) [SC-5]
 - [x] 164.3.1-04-PLAN.md — VAC-04 union readers hardened: realpath guards (C2) + charset refusal (C4) (Wave 1) [SC-4, SC-7]
-- [ ] 164.3.1-13-PLAN.md — GAP CLOSURE: [VAC04-C2]/[VAC04-C4] driven THROUGH THE REAL GATE (symlink/space reader paths; `fúnc_é` refusal), standing calibration legs + recorded neuters, registry `also:` gate-level bindings (Wave 1, gap_closure) [SC-4]
+- [x] 164.3.1-13-PLAN.md — GAP CLOSURE: [VAC04-C2]/[VAC04-C4] driven THROUGH THE REAL GATE (symlink/space reader paths; `fúnc_é` refusal), standing calibration legs + recorded neuters, registry `also:` gate-level bindings (Wave 1, gap_closure) [SC-4]
 
 **Wave 2** *(blocked on Wave 1 completion)*
 
