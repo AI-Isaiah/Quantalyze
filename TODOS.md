@@ -2463,6 +2463,24 @@ governs by CONTENT TYPE, and their content is prose/forms — rung 1.
 - **VCR cassette over-redaction** — misses token/hmac/digest/nonce (and over-matches
   signal/signedAt/pubkey); replace with per-broker allowlist.
 
+### Phase 164.3.1 review-fix — bounded residuals, deliberately NOT fixed (added 2026-09-02)
+- [ ] **`scripts/prod-body-drift-check.sh` — three remaining bare-`grep` sites, all OFF the verdict path.**
+      The review-fix pass (`164.3.1-REVIEW-FIX.md`, WR-04, commit `d958e54e`) closed every grep/find
+      exit-status site that DECIDES a verdict: the zero-path hit-list test (`textual-hits.txt`), the
+      snapshot walk (`find … | grep -c`, now two measurements), and the fetched-body test (`*.live.sql`).
+      Three `grep -aqE '[^[:space:]]'` calls keep the bare `if grep`/`grep && … || …` idiom because an
+      exit >= 2 at each cannot produce a PASS:
+      1. the naive-only names `::warning::` block (`names.naive-only.txt`) — a grep error silences a
+         WARNING; the names are already unioned into the index every per-name decision reads;
+      2. the two evidence printers inside the [VAC04-C1] BLIND-ZERO `::error::` block
+         (`grep … names.lexer.txt && sed … || echo "(none)"`, same for `names.naive.txt`) — the block
+         exits 1 regardless; an error there prints `(none)` in place of the list;
+      3. `PROD_NAME_COUNT="$(grep -ac … prod-names.txt || true)"` — the file was asserted non-empty by
+         the two `|| fail` guards immediately above it, and an empty count fails the absurdity floor
+         CLOSED (`0 * 2 < snapshot population`), never open.
+      Worth the `set +e; grep; _rc=$?; set -e` idiom for uniformity the next time the file is touched;
+      not a fail-open today, so not blocking (stopping rule: blocks only on user-facing / data-integrity).
+
 ### CI / test-infra ratchet
 - **CI speed/flake (founder 2026-08-05, watched python at 20min/12%) — 4TH MECHANISM FOUND: a WEDGED PostgREST pool.** All-day 504s on TEST (every CI cluster: 07:45, ~11:00, 18:0x, 19:2x) were PGRST003 while Postgres sat at 14/60 connections nearly idle and the same DELETE ran instantly via direct SQL — PostgREST's own pool slots were leaked/wedged after the morning's 2,144-job backlog connection storm, and the state persists until PostgREST's connections are recycled. REMEDY (proven 2026-08-05): `select pg_terminate_backend(pid) from pg_stat_activity where application_name='postgrest' and backend_type='client backend'` → PostgREST rebuilds the pool → instant 200s. Contributing causes booked: python + e2e-seeded run CONCURRENTLY (workflow `needs:` sequencing fix); daily backlog (purged 2,144 `derive-dailies-%` pending, cron untouched). Real fix (Phase 144, owner): per-run isolated DB. Also: e2e-seeded's seed should FAIL FAST with a "PostgREST wedged?" hint on PGRST003 rather than burning the run.
 - 44 live-DB vitest files + ~112 python tests are green-skipped in CI while migrations
