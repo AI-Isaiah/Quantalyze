@@ -34,6 +34,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { ABSORBABLE_CLEANUP, BRANCH_HEAD_WORDS, neuterArm } from "../../scripts/mutation-runner/run.mjs";
+import { BRANCH_HEAD_BARE_CODE } from "./helpers/branch-head-bare-code";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 
@@ -277,18 +278,11 @@ describe("WR-07 — an abort-path statement it cannot classify is REFUSED, not l
    * The BARE-CODE spelling of each keyword: the line that genuinely IS a
    * branch head, and on which the scan MUST terminate. Keyed by the same list
    * the implementation exports, so a keyword added there without a bare-code
-   * spelling here fails the completeness assertion below rather than silently
-   * dropping out of the cross-product.
+   * spelling fails the completeness assertion below rather than silently
+   * dropping out of the cross-product. SHARED with the tokenizer's head pin
+   * (IN-04): one table, read by both oracles.
    */
-  const BARE_CODE: Record<string, string> = {
-    THEN: "IF NOT raised THEN",
-    BEGIN: "BEGIN",
-    ELSE: "ELSE",
-    ELSIF: "ELSIF raised THEN",
-    LOOP: "FOR r IN SELECT 1 LOOP",
-    DECLARE: "DECLARE",
-    EXCEPTION: "EXCEPTION WHEN others THEN",
-  };
+  const BARE_CODE = BRANCH_HEAD_BARE_CODE;
 
   it("the cross-product is generated from the implementation's own keyword list", () => {
     // Non-vacuity guard. If BRANCH_HEAD_WORDS were empty, or a keyword had no

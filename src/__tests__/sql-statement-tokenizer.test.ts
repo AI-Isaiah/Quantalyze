@@ -46,6 +46,7 @@ import {
   tokenizeStatements,
 } from "../../scripts/mutation-runner/parse.mjs";
 import { scanSql } from "../../scripts/sql-body-normalize.mjs";
+import { BLOCK_CLOSERS, BRANCH_HEAD_BARE_CODE } from "./helpers/branch-head-bare-code";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 
@@ -195,15 +196,9 @@ describe("branch-head units", () => {
     // The list is exported so the neuter test's cross-product can generate from
     // it. That only means anything if each entry really produces a head, so the
     // list is checked against the tokenizer rather than against a second list.
-    const BARE: Record<string, string> = {
-      THEN: "IF NOT raised THEN",
-      BEGIN: "BEGIN",
-      ELSE: "ELSE",
-      ELSIF: "ELSIF raised THEN",
-      LOOP: "FOR r IN SELECT 1 LOOP",
-      DECLARE: "DECLARE",
-      EXCEPTION: "EXCEPTION WHEN others THEN",
-    };
+    // The bare-code table is SHARED with that test (IN-04): one table, two
+    // oracles, and a keyword without a spelling fails by name in both.
+    const BARE = BRANCH_HEAD_BARE_CODE;
     expect((BRANCH_HEAD_KEYWORDS as string[]).length).toBeGreaterThan(0);
     expect(Object.keys(BARE).sort()).toEqual([...(BRANCH_HEAD_KEYWORDS as string[])].sort());
     for (const [keyword, source] of Object.entries(BARE)) {
@@ -221,7 +216,10 @@ describe("branch-head units", () => {
     // closer and accepted a neuter with `SET ROLE postgres;` left live behind a
     // multi-line loop, and `failureBranches` anchored the branch on it and lost
     // the guard. The opener spellings above never asserted the closers.
-    for (const closer of ["END LOOP;", "END IF;", "END CASE;", "END;"]) {
+    // Non-vacuity on the shared closer table: one closer per kind the runner's
+    // block matcher recognises (LOOP, IF, CASE, and the bare BEGIN…END).
+    expect([...BLOCK_CLOSERS].sort()).toEqual(["END CASE;", "END IF;", "END LOOP;", "END;"]);
+    for (const closer of BLOCK_CLOSERS) {
       const statements = tokenize(closer);
       expect(
         statements.map((s) => [s.head, s.terminated, s.text]),
