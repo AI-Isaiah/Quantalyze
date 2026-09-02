@@ -523,6 +523,14 @@ export const BRANCH_HEAD_KEYWORDS = [
 
 const isWordStart = (ch) => ch !== undefined && /[A-Za-z_]/.test(ch);
 const isWordChar = (ch) => ch !== undefined && /[A-Za-z0-9_]/.test(ch);
+/**
+ * The NORMALIZER's identifier class (`isIdentChar` in sql-body-normalize.mjs,
+ * `$` included), used here ONLY to decide whether an `E` before a quote is the
+ * escape prefix or the tail of an identifier — the two readers must share
+ * that one rule (WR-01), so it is spelled identically rather than reusing
+ * `isWordChar` above.
+ */
+const isEscapePrefixBlocker = (ch) => ch !== undefined && /[A-Za-z0-9_$]/.test(ch);
 
 /** 1-based line number lookup over precomputed line-start offsets. */
 function makeLineOf(text) {
@@ -664,11 +672,30 @@ function scanRegion(text, from, to, depth, lineOf, out) {
     }
 
     // ── single-quoted literal, `''` escape, carried ACROSS lines ────────────
+    //
+    // An `E'…'` literal ALSO honours `\x` escapes — the same rule, spelled the
+    // same way, as `scanSql` in scripts/sql-body-normalize.mjs. WR-01 (164.3.1
+    // review), MEASURED on `RAISE EXCEPTION E'it\'s x'; SELECT 1;`: this
+    // scanner closed the literal at `\'`, the tail `s x'` opened a NEW literal
+    // that ran to the next apostrophe or EOF, and the raise came out as ONE
+    // unterminated statement swallowing `SELECT 1;` — while the normalizer
+    // read the same bytes correctly. Two readers with different blind spots
+    // over one text is the composing shape [VAC04-C1] this primitive exists
+    // to remove; their agreement over the corpus is pinned in
+    // sql-statement-tokenizer.test.ts.
     if (ch === "'") {
       if (stmtStart === -1) stmtStart = i;
+      const escaped =
+        i > 0 &&
+        (text[i - 1] === "E" || text[i - 1] === "e") &&
+        !(i > 1 && isEscapePrefixBlocker(text[i - 2]));
       let j = i + 1;
       let closed = false;
       while (j < to) {
+        if (escaped && text[j] === "\\") {
+          j = Math.min(j + 2, to);
+          continue;
+        }
         if (text[j] !== "'") {
           j += 1;
           continue;

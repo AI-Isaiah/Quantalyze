@@ -36,7 +36,7 @@
  */
 import { describe, expect, it } from "vitest";
 
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -45,6 +45,7 @@ import {
   maskNonCode,
   tokenizeStatements,
 } from "../../scripts/mutation-runner/parse.mjs";
+import { scanSql } from "../../scripts/sql-body-normalize.mjs";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 
@@ -238,6 +239,34 @@ describe("branch-head units", () => {
     ]);
   });
 
+  it("WR-01: an E'…' literal honours backslash escapes, so the statement after it survives", () => {
+    // MEASURED 2026-09-02 pre-fix: `[[false, "RAISE EXCEPTION E'it\'s x'; SELECT 1;"]]`
+    // — ONE unterminated statement. The scanner closed the literal at `\'`, the
+    // tail opened a second literal that ran to EOF, and `SELECT 1;` was
+    // swallowed into the raise's span. The normalizer read the same bytes
+    // correctly, so the two definitions of "what is code" disagreed.
+    const statements = tokenize("RAISE EXCEPTION E'it\\'s x'; SELECT 1;");
+    expect(statements.map((s) => [s.terminated, s.text])).toEqual([
+      [true, "RAISE EXCEPTION E'it\\'s x';"],
+      [true, "SELECT 1;"],
+    ]);
+    // The literal's interior is DATA: nothing inside it may reach the
+    // projection a consumer classifies on.
+    expect(statements[0].executableText).not.toContain("s x");
+    expect(statements[0].executableText).toMatch(/^RAISE EXCEPTION E' +';$/);
+  });
+
+  it("WR-01: an ordinary literal whose PRECEDING identifier ends in E is not an escape literal", () => {
+    // The prefix rule is `E` NOT preceded by an identifier character — the
+    // normalizer's exact condition. `CASE'a\'` would otherwise read `\'` as an
+    // escape and swallow the terminator the other way round.
+    const statements = tokenize("SELECT CASE'a\\'; SELECT 2;");
+    expect(statements.map((s) => [s.terminated, s.text])).toEqual([
+      [true, "SELECT CASE'a\\';"],
+      [true, "SELECT 2;"],
+    ]);
+  });
+
   it("an unterminated statement is marked, never silently shortened", () => {
     const statements = tokenize("RAISE EXCEPTION 'TEST FAILED (X 1): x'");
     expect(statements.length).toBe(1);
@@ -264,5 +293,68 @@ describe("the masking projection preserves offsets", () => {
     // IDENTIFIER is code and is deliberately kept.
     expect(masked).toContain('"quoted THEN"');
     expect(masked.replace(/"quoted THEN"/, "").includes("THEN")).toBe(false);
+  });
+});
+
+describe("WR-01 — the tokenizer and the normalizer agree on WHAT IS CODE", () => {
+  // Two readers with different blind spots over one text compose into a silent
+  // hole — [VAC04-C1], this phase's own thesis. `maskNonCode` (this tokenizer)
+  // and `scanSql(…).masked` (scripts/sql-body-normalize.mjs) are the two
+  // definitions of "non-code" the repo carries. Their ONE structural
+  // difference is deliberate: the tokenizer blanks a dollar-quote's tags with
+  // its body, the normalizer keeps the tags — so the normalizer's mask is
+  // compared with its tags blanked. Everything else (comment bodies AND
+  // delimiters, literal interiors, quoted identifiers kept) must agree
+  // byte-for-byte. MEASURED 2026-09-02: 71/71 corpus files agree.
+  const normalizerProjection = (text: string): string => {
+    const scanned = scanSql(text);
+    const chars = scanned.masked.split("");
+    for (const r of scanned.dollarRegions) {
+      for (let k = r.start; k < r.contentStart; k += 1) if (text[k] !== "\n") chars[k] = " ";
+      for (let k = r.contentEnd; k < r.end; k += 1) if (text[k] !== "\n") chars[k] = " ";
+    }
+    return chars.join("");
+  };
+
+  /** The MEASURED pre-fix disagreement: a backslash-escaped apostrophe. */
+  const ESCAPE_FIXTURE = "RAISE EXCEPTION E'it\\'s x'; SELECT 1;";
+
+  it("CALIBRATION: both readers blank the escape fixture's literal to the same shape", () => {
+    // Pinned as the SHAPE both must reach, not as "equal to each other": two
+    // identity functions are equal too. Pre-fix the tokenizer produced
+    // `RAISE EXCEPTION E'   's x'           ` here — the second apostrophe
+    // opened a literal that ran to EOF and blanked the terminator.
+    const shape = /^RAISE EXCEPTION E' {7}'; SELECT 1;$/;
+    expect(maskNonCode(ESCAPE_FIXTURE)).toMatch(shape);
+    expect(normalizerProjection(ESCAPE_FIXTURE)).toMatch(shape);
+  });
+
+  it("agree byte-for-byte on EVERY gate file in the corpus and on the escape fixture", () => {
+    const dir = join(REPO_ROOT, "supabase", "tests");
+    const files = readdirSync(dir)
+      .filter((f) => f.endsWith(".sql"))
+      .sort();
+    expect(files.length, "an empty corpus agrees with anything").toBeGreaterThan(0);
+
+    const members: Array<[string, string]> = [
+      ...files.map((f): [string, string] => [f, readFileSync(join(dir, f), "utf8")]),
+      ["<escape fixture>", ESCAPE_FIXTURE],
+    ];
+    const disagreements: string[] = [];
+    for (const [name, text] of members) {
+      const fromTokenizer = maskNonCode(text);
+      const fromNormalizer = normalizerProjection(text);
+      if (fromTokenizer === fromNormalizer) continue;
+      let at = 0;
+      while (at < fromTokenizer.length && fromTokenizer[at] === fromNormalizer[at]) at += 1;
+      const around = (s: string) => JSON.stringify(s.slice(Math.max(0, at - 12), at + 12));
+      disagreements.push(`${name} @${at}: tokenizer ${around(fromTokenizer)} vs normalizer ${around(fromNormalizer)}`);
+    }
+    expect(
+      disagreements,
+      "the two definitions of 'what is code' diverged — bytes one reader classifies on and the other treats as data are a silent hole",
+    ).toEqual([]);
+    // Non-vacuity: the corpus AND the fixture were compared.
+    expect(members.length).toBe(files.length + 1);
   });
 });
