@@ -1063,6 +1063,42 @@ true for 146 and half of 142–145, and **false for 141**.
 
 ## 🟡 FIX MID-TERM
 
+- [ ] **`[REDUNDER-PGCRON]` Three Phase-164.4 idiom gate files can NEVER reach a GREEN pg-lane baseline — the lane has no `pg_cron` (measured 2026-09-02, Plan 164.4-00).**
+      `scripts/pg-lane/run.sh` boots a vanilla `initdb` cluster. Measured on it: `pg_available_extensions`
+      has **0 rows** for `pg_cron`, and `CREATE EXTENSION pg_cron` fails `0A000 … Could not open extension
+      control file ".../postgresql@16/share/postgresql@16/extension/pg_cron.control"`.
+      Four gate files open with `IF NOT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'pg_cron')
+      THEN RAISE EXCEPTION` — deliberately, as their anti-green-skip contract. Their baseline is therefore
+      RED for a reason NO apply list can change, and `run.mjs:1836` never judges an arm in a red-baseline
+      file. **`test_reconcile_dropped_enqueue_sweep.sql` (39 sections, rank 1),
+      `test_retention_orphaned_running.sql` (25, rank 4) and `test_derive_allocator_keys_fanout.sql`
+      (7, rank 18) = 71 of the corpus's 355 idiom sections (20%) are un-annotatable on today's lane.**
+      `test_retention_crons_safe.sql` is affected too but is a non-idiom file (out of scope under (c)).
+      Separately, `test_strategy_analytics_stuck_computing_reaper.sql` (29, rank 3) BASELINES green but
+      `RAISE NOTICE 'SKIP Part 2/3'; RETURN;`, so its arms behind those skips are UNFALSIFIABLE on the
+      lane — a mutation there reports as non-biting.
+      **Not fixable inside a batch plan.** Hosting `pg_cron` needs a package on BOTH hosts (`brew search
+      pg_cron` finds the formula; it is NOT installed here — ubuntu needs its own `postgresql-<v>-cron`)
+      AND `shared_preload_libraries=pg_cron` + `cron.database_name` on `run.sh`'s `pg_ctl -o` line, i.e.
+      the lane substrate whose CLI contract `scripts/pg-lane/README.md:10` calls costly to change.
+      ⛔ Faking a `pg_extension` row is NOT the fix: it would make arm `1/JOB-04` unfalsifiable while
+      reporting it as covered (threat T-164.4-01).
+      **Needed before any batch containing those files.** Evidence:
+      `.planning/phases/164.4-.../164.4-00-FIXTURE-STRATEGY.md` § "The largest idiom file cannot be
+      baselined".
+
+- [ ] **`[REDUNDER-SAVEPOINT]` `20260416201929_audit_log_hardening.sql` cannot apply to a vanilla PostgreSQL 16 at all (measured 2026-09-02, Plan 164.4-00).**
+      Its final `DO $$ … $$;` block issues `SAVEPOINT audit_log_probe;` and `ROLLBACK TO SAVEPOINT
+      audit_log_probe;` (`:239-267`) **inside a PL/pgSQL body**. PL/pgSQL has no savepoint statements, so
+      the body fails to PARSE: `42601 syntax error at or near "TO"` at `plpgsql_yyerror`
+      (`pl_scanner.c:542`), before a single statement in the block runs. Reproduced in isolation from an
+      8-line DO body on an empty cluster (probe M1 in the Plan 00 record). It is what killed the stubbed
+      real-migration-chain candidate at migration 51 of 262.
+      **Either the deployed body differs from the repo body (repo-vs-PROD drift — VAC-04's own subject),
+      or this migration never applied as written.** Resolve by DIFFING the deployed
+      `audit_log`/`log_audit_event` state against this file before editing anything. Phase 164.4 may not
+      touch `supabase/migrations/`, so it is booked, not fixed.
+
 - [ ] **`[REDUNDER-NONIDIOM]` The 27 non-idiom SQL gate files are excluded from Phase 164.4 and need their own phase (logged 2026-09-02, founder scope decision).**
       Phase 164.4's criterion 1 was NARROWED to the 44 `TEST FAILED (` idiom files. The other **27
       files / 334 `RAISE EXCEPTION` sites** assert through their own message prefixes
