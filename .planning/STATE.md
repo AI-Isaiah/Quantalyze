@@ -3,18 +3,18 @@ gsd_state_version: 1.0
 milestone: v1.20
 milestone_name: Backlog Burndown (Phases 158+)
 current_phase: 164.3.1
-current_phase_name: sound-primitives-the-neuter-scan-and-the-mutation-identity-c
+current_phase_name: SOUND-PRIMITIVES gap closure
 status: executing
-stopped_at: Completed 164.3.1-12-PLAN.md
-last_updated: "2026-09-02T08:07:14.563Z"
-last_activity: 2026-09-01
-last_activity_desc: Phase 164.3.1 execution resumed (wave continue)
-state_head: 2a5d051ef1b91d5fc33235b37b3fe3b71ba5d10c
+stopped_at: Completed 164.3.1-13-PLAN.md
+last_updated: "2026-09-02T09:03:11.042Z"
+last_activity: 2026-09-02
+last_activity_desc: Phase 164.3.1 execution started
+state_head: dc47efd4e84cac1aad8358f42fa0d302fd2c5900
 progress:
   total_phases: 14
   completed_phases: 4
   total_plans: 83
-  completed_plans: 78
+  completed_plans: 79
   percent: 29
 ---
 
@@ -113,10 +113,10 @@ zero unclassified) and `161-VALIDATION.md` (Nyquist strategy, 4 Wave-0 gaps, ant
 
 ## Current Position
 
-Phase: 164.3.1 (sound-primitives-the-neuter-scan-and-the-mutation-identity-c) — READY TO EXECUTE
-Plan: 1 of 12
-Status: Ready to execute
-Last activity: 2026-09-01 — Phase 164.3.1 execution resumed (wave continue)
+Phase: 164.3.1 (SOUND-PRIMITIVES gap closure) — EXECUTING
+Plan: 1 of 13
+Status: Executing Phase 164.3.1
+Last activity: 2026-09-02 — Phase 164.3.1 execution started
 
 ⚠️ Phase 160 remains OPEN on its human gate — see `## Deferred Verification`. Advancing this
 pointer to 161 does NOT close it; resume it only via `/gsd-verify-work 160`.
@@ -652,6 +652,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 | Phase 164.3.1 P10 | 22 min | 3 tasks | 3 files |
 | Phase 164.3.1 P11 | 8h 31m | 3 tasks | 8 files |
 | Phase 164.3.1 P12 | 26 min | 3 tasks | 3 files |
+| Phase 164.3.1 P13 | 16 min | 3 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -845,6 +846,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - [Phase 164.3.1]: 164.3.1-12: VAC08-JOIN evaluates the gate's clauses via a JS interpreter of the four documented shapes that REFUSES unknown clauses; rows from a fixed table, predicate from the script (a first draft that built rows from the script stayed green under the neuter)
 - [Phase 164.3.1]: 164.3.1-12: join clause 2 (version||'_'||name) measured SUBSUMED by clause 4 (desc-only); pinned as EXPECTED_SPECIFICITY, script header :44-47 reported stale not patched
 - [Phase 164.3.1]: 164.3.1-12: meta-arm allowlists classified BEFORE keys were transcribed (17 of 68 emissions, four classes); KNOWN_THRESHOLD_SITES exact set of 6; ${GATE} excluded from what counts as a runtime value
+- [Phase 164.3.1]: 164.3.1-13: gate-level arms assert the wiring's positive evidence line (readers-ran) as the pass condition, never the D-13 refusal; per-reader-visible fixtures make each VAC-04 union member individually load-bearing; scratch neuters proven by ABSENCE so standing calibration legs stay green under a recorded real-source neuter
 
 ### Decisions (execution-time, Phase 140.2)
 
@@ -1547,8 +1549,8 @@ Load-bearing sequencing (real dependencies, do not reorder):
 
 ## Session
 
-**Last Date:** 2026-09-02T06:41:43.302Z
-**Stopped At:** Completed 164.3.1-12-PLAN.md
+**Last Date:** 2026-09-02T09:03:10.308Z
+**Stopped At:** Completed 164.3.1-13-PLAN.md
 **Last Date:** 2026-08-25T22:26:01.687Z
 **Stopped At:** Completed 162-03-PLAN.md
 **Last Date:** 2026-08-25T22:28:04.096Z
