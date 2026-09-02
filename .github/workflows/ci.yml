@@ -1081,6 +1081,42 @@ jobs:
             exit 1
           fi
 
+          # 164.4-01 — THE EXCLUSION MUST BE NAMED (criterion 1 as amended by the
+          # founder, 2026-09-02). `coverage: files N/71` is a ratio over every
+          # `.sql` in the scope dir, and this phase's end state deliberately
+          # leaves a subset uncovered: files that raise outside the runner's
+          # identity idiom, which it can never attribute an arm in. A reader of
+          # the ratio alone cannot tell that subset from work nobody has done
+          # yet. So the runner derives and PRINTS the excluded set by name, and
+          # a silent exclusion fails HERE exactly as a missing annotation does.
+          #
+          # Two arms, in the discipline every assertion above uses:
+          #   (1) the line is ABSENT -> MEASURE_FAIL with its own message. A
+          #       runner that stopped classifying its corpus has retired the
+          #       amendment, and an absent line is never a zero.
+          #   (2) the count it CLAIMS must equal the number of `*.sql` names it
+          #       PRINTS. Evidence before verdict (SC-7): a count with no names
+          #       is a number nobody can check, and names with a wrong count is
+          #       the shape a hand-maintained list decays into.
+          # No literal count is restated here — the successor phase shrinks this
+          # set and the runner derives it. Both sides come from the run output.
+          unreachable_line=$(grep -a -m1 -E '^unreachable: [0-9]+ file\(s\) ' "$RUNNER_LOG" || true)
+          if [ -z "$unreachable_line" ]; then
+            echo "::error::MEASURE_FAIL: the run printed NO 'unreachable: N file(s) …' line, so which gate files this run deliberately did NOT cover is unknown. Criterion 1 (as amended 2026-09-02) requires the exclusion to be named on every run: a silent exclusion fails this gate exactly as a missing annotation does."
+            exit 1
+          fi
+          echo "$unreachable_line"
+          unreachable_claimed=$(echo "$unreachable_line" | sed -E 's|^unreachable: ([0-9]+) file\(s\) .*|\1|')
+          case "$unreachable_claimed" in ''|*[!0-9]*)
+            echo "::error::MEASURE_FAIL: could not read the excluded-file count out of '$unreachable_line'."; exit 1;; esac
+          unreachable_named=$(echo "$unreachable_line" | grep -a -o -E '[A-Za-z0-9_]+\.sql' | wc -l | tr -d '[:space:]')
+          case "$unreachable_named" in ''|*[!0-9]*)
+            echo "::error::MEASURE_FAIL: could not count the file names on '$unreachable_line'."; exit 1;; esac
+          if [ "$unreachable_claimed" -ne "$unreachable_named" ]; then
+            echo "::error::MEASURE_FAIL: the run CLAIMS $unreachable_claimed excluded file(s) but NAMES $unreachable_named. The count and the names come from the same derivation in one run and cannot disagree; a claim the log's own evidence contradicts is not a measurement."
+            exit 1
+          fi
+
           arms_line=$(grep -a -m1 -E '^arms: [0-9]+/[0-9]+/[0-9]+ ' "$RUNNER_LOG" || true)
           if [ -z "$arms_line" ]; then
             echo "::error::MEASURE_FAIL: the run printed NO 'arms: E/A/W' line, so the number of arms actually EXECUTED is unknown. Unknown is not zero and it is not fine."

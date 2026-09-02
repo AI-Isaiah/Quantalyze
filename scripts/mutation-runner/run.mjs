@@ -93,6 +93,7 @@ import { fileURLToPath } from "node:url";
 
 import {
   BRANCH_HEAD_KEYWORDS,
+  RAISE_EXCEPTION_RE,
   maskNonCode,
   parseFile,
   scanCorpus,
@@ -419,8 +420,10 @@ export const executableText = (source) => maskNonCode(source);
  */
 export const isBranchHead = (statement) => statement != null && statement.head === true;
 
-/** A `RAISE EXCEPTION`, read in the masking projection so a mention in a literal is not one. */
-const RAISE_EXCEPTION_RE = /\bRAISE\s+EXCEPTION\b/i;
+// ⭐ `RAISE_EXCEPTION_RE` used to be declared here. It is IMPORTED from
+// `parse.mjs` since 2026-09-02, because `scanCorpus` needs the identical notion
+// of "an executable raise" to classify the unannotated corpus. One definition,
+// two readers — never a second spelling.
 
 /**
  * The index of the previous SIBLING statement — same nesting depth, same
@@ -1690,6 +1693,63 @@ export function absurdityViolations({ armsExecuted, laneInvocations, biting }) {
   return out;
 }
 
+// ===========================================================================
+// 164.4-01 — THE EXCLUSION IS PRINTED, BY NAME, ON EVERY RUN (criterion 1 as
+// amended; threat T-164.4-04)
+// ===========================================================================
+//
+// ⛔ THE DEFECT THIS CLOSES. `coverage: files 1/71` is a ratio over EVERY `.sql`
+// in the scope dir, and the phase's own end state is `files 44/71` — because 27
+// of those 71 raise outside the runner's identity idiom and no arm of theirs
+// can be attributed at all. A reader of `44/71` cannot tell "17 files nobody
+// got to yet" from "27 files this gate can never judge, deliberately". That is
+// the repudiation shape: a subset covered, reported as if it were the whole.
+//
+// The founder's scope amendment (2026-09-02, ROADMAP § SCOPE AMENDMENT) makes
+// the exclusion explicit and makes PRINTING it a merge condition: *"the 27
+// non-idiom files are OUT of scope and the runner names them in its output
+// every run; a silent exclusion fails this criterion just as a missing
+// annotation does."* So the runner DERIVES the classification (never a
+// hand-maintained list, which would be one more claim nobody compares) and the
+// `sql-mutation` count-recheck step MEASURE_FAILs when the line is absent or
+// when the count it claims disagrees with the names it prints.
+//
+// ⭐ EVIDENCE, NOT VERDICT (SC-7). The line carries the COUNT and the NAMES.
+// A count alone would be a number nobody could check; the cross-check in
+// ci.yml is only possible because both are printed.
+//
+// MEASURED 2026-09-02 over `supabase/tests/`: 1 annotated / 43 pending /
+// 27 unreachable / 0 inert = 71. The 27 match RESEARCH § Option (a)'s table
+// exactly, derived independently by `classifyGateIdiom`.
+//
+// ⛔ FORMAT CONSTRAINT (PATTERNS § P6). `ci.yml` parses the aggregate by
+// line-start prefix, first match only, and the coverage grep is `$`-ANCHORED.
+// So `unreachable:` is a NEW, distinct column-0 prefix (it collides with none
+// of the four existing greps) and every other new line is INDENTED.
+
+/**
+ * Print the corpus classification: the excluded files by name, then the idiom
+ * files still awaiting annotation. Called at BOTH coverage print sites, so the
+ * static mode and the gate say the same thing about the same corpus.
+ */
+export function logCorpusClassification(corpus, log) {
+  const { unreachableFiles = [], pendingFiles = [], inertFiles = [] } = corpus;
+  log(
+    `unreachable: ${unreachableFiles.length} file(s) raise outside the runner's identity idiom — ` +
+      `${unreachableFiles.join(" ")} (TODOS [REDUNDER-NONIDIOM])`,
+  );
+  log(`  pending: ${pendingFiles.length} idiom file(s) without RED-UNDER — ${pendingFiles.join(" ")}`);
+  // Zero today. A gate with no executable raise at all cannot fail, which is a
+  // FINDING about that gate, not a coverage class — so it is printed only when
+  // it exists, and it is printed loudly enough to be chased.
+  if (inertFiles.length > 0) {
+    log(
+      `  inert: ${inertFiles.length} file(s) carry NO code-level RAISE EXCEPTION — ` +
+        `${inertFiles.join(" ")} (a gate that cannot fail is a finding, not coverage)`,
+    );
+  }
+}
+
 /**
  * Copy the corpus into a scratch slot, PRESERVING repo-relative structure so an
  * annotation's `file` maps to its copy by path alone.
@@ -2154,6 +2214,7 @@ export function runCorpus({
   // -----------------------------------------------------------------------
   log("");
   log(`coverage: files ${corpus.filesAnnotated}/${corpus.filesTotal}`);
+  logCorpusClassification(corpus, log);
   log(`arms: ${armsExecuted}/${armsAnnotated}/${armsWaived}   (executed/annotated/waived)`);
   // IN-05: the number ARMS_FLOOR is actually compared against, printed under
   // its own name.
@@ -2434,6 +2495,7 @@ export function parseOnlyCorpus({ scopeDir, log = (s) => console.log(s) }) {
 
   log("");
   log(`coverage: files ${corpus.filesAnnotated}/${corpus.filesTotal}`);
+  logCorpusClassification(corpus, log);
   log(`arms: 0/${armsAnnotated}/${armsWaived}   (executed/annotated/waived)`);
   for (const w of waivers) log(`  waived: ${w.arm} — ${w.reason}`);
   log("");
