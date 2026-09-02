@@ -97,6 +97,14 @@ const DEF_RE =
  */
 const SEGMENT_RE = /"(?:[^"]|"")*"|[A-Za-z0-9_$]+/g;
 
+/**
+ * Bytes that END an unquoted identifier chain in SQL. A chain followed by one
+ * of these was read completely — it is just not a function definition (a
+ * definition's name is followed by `(` or whitespace). See the follower check
+ * in `naiveFunctionDefs`.
+ */
+const NAME_TERMINATORS = new Set([",", ".", ";", ")"]);
+
 /** Strip one layer of double quotes from an identifier segment. */
 function unquote(segment) {
   return segment.startsWith('"') && segment.endsWith('"') && segment.length >= 2
@@ -167,8 +175,20 @@ export function naiveFunctionDefs(sql) {
     // Evidence it costs nothing today: drift-check-scripts.test.ts's 380-file
     // corpus-parity arm — every one of the 362 real definitions is followed
     // by `(` (measured 2026-09-01), so this fires zero times on the corpus.
+    //
+    // ⚠️ One class of follower is NOT a cut token: SQL punctuation that ENDS a
+    // name — `,` `.` `;` `)`. No unquoted identifier can continue through
+    // those bytes, so a chain they follow is complete, and a complete chain
+    // with no `(` is not a function definition at all. MEASURED 2026-09-02:
+    // the sentence `CREATE OR REPLACE FUNCTION public.foo, which we replaced`
+    // inside a block comment (which this line-anchored view cannot see as a
+    // comment) threw "hit ',' (U+002C)" — a wrong-reason refusal that sent the
+    // gate hunting a non-existent non-ASCII identifier. Those fall through to
+    // "no definition" instead. Everything else outside the charset — `ú`, `/`,
+    // `-` — still refuses, because there the chain really was cut mid-token.
     const follower = line[m[0].length];
     if (follower !== undefined && !/\s/.test(follower) && follower !== "(") {
+      if (NAME_TERMINATORS.has(follower)) continue;
       const { char, label } = codepointAt(line, m[0].length);
       throw charsetRefusal({
         line: ln + 1,
@@ -268,6 +288,14 @@ function selfTest() {
   assert(
     refusedNonAscii,
     "an UNQUOTED identifier leaving [A-Za-z0-9_$] must be REFUSED, not truncated to `f` — a truncated name makes VAC-04 compare a different function's body and report MATCH for it ([VAC04-C4])",
+  );
+
+  // The refusal's LOWER bound: prose in a block comment that happens to start
+  // a line with CREATE … FUNCTION <name>, — the name is complete, the `,` ends
+  // it, and there is no definition here. This threw "hit ','" before.
+  assert(
+    names("/*\nCREATE OR REPLACE FUNCTION public.foo, which we replaced\n*/\n").length === 0,
+    "a name-terminating punctuation byte (`,` `.` `;` `)`) after a complete chain is NOT a charset violation — it is 'no definition', never a refusal",
   );
 
   const failed = checks.filter((c) => !c.cond);

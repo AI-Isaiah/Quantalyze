@@ -572,6 +572,21 @@ function reportCharsetRefusal(err, file) {
   return 1; // 2 stays reserved for usage errors.
 }
 
+/**
+ * Read `file` and extract its definitions for a reporting mode. Returns
+ * `{ defs }` on success, or `{ exit }` carrying `reportCharsetRefusal`'s exit
+ * code when the charset refusal fired — and, through that function, RETHROWS
+ * anything without the marker. The three index/fetch modes below share this
+ * shell so the marker-checked rethrow is spelled once.
+ */
+function defsOrExit(file) {
+  try {
+    return { defs: extractFunctionDefs(readFileSync(file, "utf8")) };
+  } catch (err) {
+    return { exit: reportCharsetRefusal(err, file) };
+  }
+}
+
 function selfTest() {
   const checks = [];
   const assert = (cond, msg) => checks.push({ cond: Boolean(cond), msg });
@@ -652,12 +667,9 @@ function main(argv) {
       }
       const names = new Set();
       for (const f of files) {
-        try {
-          for (const d of extractFunctionDefs(readFileSync(f, "utf8")))
-            names.add(d.name);
-        } catch (err) {
-          return reportCharsetRefusal(err, f);
-        }
+        const r = defsOrExit(f);
+        if (r.exit !== undefined) return r.exit;
+        for (const d of r.defs) names.add(d.name);
       }
       for (const nm of [...names].sort()) process.stdout.write(nm + "\n");
       return 0;
@@ -675,12 +687,9 @@ function main(argv) {
       }
       const seen = new Set();
       for (const f of files) {
-        try {
-          for (const d of extractFunctionDefs(readFileSync(f, "utf8")))
-            seen.add(`${d.schema}\t${d.name}`);
-        } catch (err) {
-          return reportCharsetRefusal(err, f);
-        }
+        const r = defsOrExit(f);
+        if (r.exit !== undefined) return r.exit;
+        for (const d of r.defs) seen.add(`${d.schema}\t${d.name}`);
       }
       for (const row of [...seen].sort()) process.stdout.write(row + "\n");
       return 0;
@@ -691,15 +700,10 @@ function main(argv) {
         console.error("::error::--extract-fn requires <file> <function-name>");
         return 2;
       }
-      let defs;
-      try {
-        defs = extractFunctionDefs(readFileSync(file, "utf8")).filter(
-          (d) => d.name === name,
-        );
-      } catch (err) {
-        return reportCharsetRefusal(err, file);
-      }
-      for (const d of defs) process.stdout.write(d.text.trimEnd() + "\n");
+      const r = defsOrExit(file);
+      if (r.exit !== undefined) return r.exit;
+      for (const d of r.defs.filter((d) => d.name === name))
+        process.stdout.write(d.text.trimEnd() + "\n");
       return 0;
     }
     case "--diff-bodies": {
