@@ -591,10 +591,12 @@ Plans:
 
 ### Phase 164.4: REDUNDER-BACKFILL — every SQL gate arm gets a RED-UNDER annotation that a machine PROVES bites (INSERTED)
 
-**Goal**: Every arm in `supabase/tests/*.sql` carries a `RED-UNDER` annotation naming the exact
-mutation that makes it fail, and the Phase 164.3 mutation runner PROVES each one bites — red under
-its own mutation, green when restored. Coverage moves from 1 file to all of them, behind a floor
-that cannot regress.
+**Goal**: Every arm in the **44 `TEST FAILED (` idiom files** of `supabase/tests/*.sql` carries a
+`RED-UNDER` annotation naming the exact mutation that makes it fail, and the Phase 164.3 mutation
+runner PROVES each one bites — red under its own mutation, green when restored. Coverage moves from
+1 file to 44, behind a floor that cannot regress, with the **27 excluded non-idiom files printed by
+name on every run**. (Scope narrowed from "all of them" by founder decision 2026-09-02 — see the
+SCOPE AMENDMENT below; the rename of the 27 is booked as `[REDUNDER-NONIDIOM]` in `TODOS.md`.)
 **Depends on:** ⛔ **Phase 164.3 — HARD, not ordering.** 164.3 builds the mutation runner, and the
 runner is the only thing that makes this phase safe to do at all.
 **Requirements**: TBD (run `/gsd-discuss-phase 164.4`)
@@ -618,9 +620,46 @@ mechanisms (`TENANT`, `TRIGGER`, `SANITIZE`, `STEP 2`, `N1`) live in the already
 so 164.3's criterion 6 is reachable with the 33 annotations that exist today. This phase closes the
 corpus gap; it is not a prerequisite for 164.3 being real.
 
+⚖️ **SCOPE AMENDMENT — founder decision 2026-09-02, criterion 1 NARROWED. Read this before
+planning.** Criterion 1 below originally read "every arm in `supabase/tests/*.sql`". MEASURED at
+HEAD (164.4-RESEARCH.md): the corpus holds **1398 `RAISE EXCEPTION` sites across all 71 files —
+zero files have none** — but only **890** use the `TEST FAILED (<arm>)` idiom the runner keys on
+(`run.mjs:544`, the one identity definition at `run.mjs:947`). **27 files / 334 raises assert
+through their own message prefixes** (`'MT5SRC-03 (1a): …'`, `'FLIPRETRY-02: …'`) and are
+structurally unreachable by the runner.
+
+Three options were measured and put to the founder. **Option (c) was chosen:** scope this phase to
+the **44 idiom files**, and have the runner **PRINT the 27 excluded files BY NAME on every run** so
+the gap is emitted by the gate itself rather than asserted in a ledger. Rejected: **(a)** renaming
+the 27 files into the idiom — not an assertion edit (nothing external reads those strings; the
+sentinel gate counts `RAISE EXCEPTION` lines at `ci.yml:2360` and `sql-tests` uses `ON_ERROR_STOP`)
+but genuine *authoring*, since the 321 no-idiom raises carry only **139 distinct prefixes** (`B5b:`
+heads 28) so identities must be INVENTED, not transformed; **(b)** generalising the runner's
+identity grammar to a declared per-file prefix — the literal is spelled in ~150 places, it weakens
+primitives 3a/3b that Phase 164.3.1 just closed, and it buys no precision because prefixes are
+SHARED across arms.
+
+⚠️ **Why this is not the v1.17 trap.** The v1.17 refusal was of a reduction that would have left
+every ledger reading "usable end-to-end" while untrue. Here the exclusion is PRINTED by the gate on
+every run, so no ledger can drift from what is measured. The successor rename is booked in
+`TODOS.md` as `[REDUNDER-NONIDIOM]`.
+
+⚠️ **The arm unit is the SECTION** (founder decision 2026-09-02): one `RED-UNDER-M` per NAMED
+assertion group (`"arm":"NAME"`), NOT one per raise. Under option (c) that is **355 sections /
+~365 twins** across the 44 idiom files (the identity unit would have been 516 and would have pushed
+CI past the 20-minute split threshold).
+
+⚠️ **The reference file does NOT meet criterion 1 today.** `test_strategy_shares_rls.sql` is one
+2,602-line `DO $$` block holding 103 identities in **35 sections with only 30 twins — 15 sections
+have no twin.** The "1 file fully annotated" baseline was never true. Closing those 15 is part of
+this phase, not a precondition of it.
+
 **Success Criteria** (what must be TRUE):
 
-  1. **Every arm carries a `RED-UNDER`** naming the exact mutation that makes it fail.
+  1. **Every arm in the 44 IDIOM files carries a `RED-UNDER`** naming the exact mutation that makes
+     it fail — arm = section, per the amendment above. The 27 non-idiom files are OUT of scope and
+     **the runner names them in its output every run**; a silent exclusion fails this criterion just
+     as a missing annotation does.
   2. **The 164.3 runner executes ALL of them** — each demonstrated RED under its own mutation and
      GREEN when restored. An annotation that never reddens its arm is a FAILURE, not a pass.
 
@@ -924,7 +963,7 @@ Plans:
 | 164.1 HARDEN-GUARDS (spine gates, OPS-08-TS/F2, PYAPI-06) | 0/? | Queued 2nd (deduped 2026-08-28) | - |
 | 164.2 CURATED-COPY (+ WIZFORM-02, WR-06-UTC, HONEST-08-RESIDUAL) | 0/? | Queued 3rd (deduped 2026-08-28) | - |
 | 164.3 VACUITY (+ SKIP-01, DRIFT-01, OPS-08-F9/F8, H-0001) | 0/? | ◆ RUNS FIRST (resequenced 2026-08-28) | - |
-| 164.4 REDUNDER-BACKFILL (1/71 files annotated today) | 0/? | Queued after 164.3 (HARD dep) | - |
+| 164.4 REDUNDER-BACKFILL (1/44 idiom files annotated today; scope narrowed to the idiom corpus 2026-09-02, 27 non-idiom files printed-and-excluded) | 0/? | Ready to plan — 164.3.1 HARD dep CLOSED 2026-09-02 (verification passed 9/9) | - |
 | 165. DEPS dependabot campaign | 0/? | Not started | - |
 
 ### Requirement Coverage (v1.20)

@@ -1063,6 +1063,42 @@ true for 146 and half of 142–145, and **false for 141**.
 
 ## 🟡 FIX MID-TERM
 
+- [ ] **`[REDUNDER-NONIDIOM]` The 27 non-idiom SQL gate files are excluded from Phase 164.4 and need their own phase (logged 2026-09-02, founder scope decision).**
+      Phase 164.4's criterion 1 was NARROWED to the 44 `TEST FAILED (` idiom files. The other **27
+      files / 334 `RAISE EXCEPTION` sites** assert through their own message prefixes
+      (`'MT5SRC-03 (1a): api_keys did not admit exchange=mt5'`,
+      `'FLIPRETRY-02: include predicate present % time(s)'`) and are structurally invisible to the
+      mutation runner, whose identity needle is the literal `TEST FAILED (<arm>)` (`run.mjs:544`,
+      defined once at `run.mjs:947`). They are therefore UNPROVEN — nothing machine-checks that
+      those 334 assertions can fail.
+      **This is a real coverage gap, deliberately accepted and made loud, not closed.** Phase 164.4
+      requires the runner to PRINT these 27 files by name on every run, so the exclusion is emitted
+      by the gate rather than asserted in a ledger.
+      **The successor work is a message-only rename** into the idiom. Measured and NOT free: the
+      321 no-idiom raises carry only **139 distinct prefixes** (`B5b:` heads 28), so unique arm
+      identities must be INVENTED per arm, not mechanically transformed — authoring judgement
+      across 27 files. It is safe from the "no assertion edits" angle: nothing external reads those
+      strings (the sentinel gate counts `RAISE EXCEPTION` lines at `ci.yml:2360`; `sql-tests` uses
+      `ON_ERROR_STOP`), so a rename changes message text only, never what an assertion asserts.
+      ⛔ Do NOT fold this into 164.4. It has a different risk profile — 164.4 annotates what exists,
+      this one authors new identities — and mixing them is how a backfill turns into 334 fresh
+      unverified claims.
+      ⚠️ Also carries the 174 non-idiom raises that sit INSIDE the 44 idiom files (unreachable and
+      un-neuterable there); seven "mixed" files are the concentration, e.g.
+      `test_api_keys_exchange_not_user_writable.sql` at 38 non-idiom vs 9 idiom.
+
+- [ ] **`[WINDOWS-STALE]` `.planning/WINDOWS.md` entries 25, 26 and 28 read `open` but have all executed (logged 2026-09-02).**
+      `CLAUDE.md:53` already claims entry 28 is closed while `.planning/WINDOWS.md:45` still records
+      it `open` — the repo contradicts itself in two tracked files. All three have now run:
+      **28** (`sql-mutation` first ubuntu execution) closed by run 33620169220 and re-bound to run
+      33643046061 at `60b0722d`, self-test 15/15; **25** (VAC-04 first real-PROD-credential run) and
+      **26** (VAC-08 first real-TEST run) both executed on ship PR #730.
+      ⚠️ Close 25 PARTIALLY, not fully: VAC-04 ran against the real credential but took the earliest
+      short-circuit (`prod-body-drift-check.sh:198`, "no migration files"), so its LEGITIMATE-ZERO
+      branch (`:448`), normal compare verdict and absurdity floor (`:608+`) are still unobserved —
+      that residue is `[VAC04-ARMS-UNRUN]` below. Update the ledger to match the measurement rather
+      than deleting the entries.
+
 - [ ] **`[VAC08-SELFTEST-CI]` VAC-08's five-arm self-test never runs in CI (logged 2026-09-02, Phase 164.3.1 UAT test 2).**
       `ci.yml:2051` invokes `bash scripts/test-ledger-drift-check.sh` with no argument, which the
       script's `case` dispatches to `check` — the `--self-test` mode at
