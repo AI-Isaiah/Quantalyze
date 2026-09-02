@@ -142,15 +142,16 @@ BEGIN
 END $$;
 
 -- ---------------------------------------------------------------------------
--- BEHIND ODD — INSERT must not be among authenticated's table privileges, read
--- a second time.
+-- BEHIND ODD — INSERT must not be among the table privileges of authenticated,
+-- read a second time. (No apostrophe may appear in prose from here to EOF —
+-- see the header; a quote-only walker must run out of file, not find a `;`.)
 -- ---------------------------------------------------------------------------
   -- RED-UNDER: `GRANT INSERT ON mini_widget TO authenticated` on the live
   --            database. ⚠️ PARITY ODD fires first, so this arm is only
-  --            reachable with PARITY ODD neutered — and PARITY ODD's raise is
-  --            the P4 shape. A reader that tracks apostrophes alone refuses that
-  --            neuter as `could not find the end of the RAISE statement`; the
-  --            shipped reader accepts it and this arm scores RED (identity ok).
+  --            reachable with PARITY ODD neutered — and the raise of PARITY ODD
+  --            is the P4 shape. A reader that tracks apostrophes alone refuses
+  --            that neuter as `could not find the end of the RAISE statement`,
+  --            the shipped reader accepts it and this arm scores RED (identity ok).
   -- RED-UNDER-M: {"arm":"BEHIND ODD","apply":[{"kind":"sql","stmt":"GRANT INSERT ON mini_widget TO authenticated"}],"neuter":[{"arm":"PARITY ODD"}]}
 DO $$
 DECLARE
