@@ -508,6 +508,55 @@ describe("WR-03 / GRAMMAR rule 3 — a mutation may not INJECT the detector's ow
     expect(result.errors).toEqual([]);
     expect(result.structured).toHaveLength(30);
   });
+
+  // ── 164.4 authoring rule (threat T-164.4-01): NO TWIN MAY TARGET A STAND-IN ─
+  // A mutation to `scripts/pg-lane/fixtures/**` reddens the gate and would be
+  // counted as biting, but what it proved is that the FIXTURE AUTHOR'S GUESS
+  // can be broken — the production object the arm defends was never touched.
+  // Both polarities, because a rule that refuses everything is no better than
+  // one that refuses nothing.
+  it("ACCEPTS a step targeting a real migration — the rule refuses a directory, not mutation", () => {
+    const sql = [
+      "  -- RED-UNDER: prose",
+      `  -- RED-UNDER-M: {"arm":"X","apply":[{"kind":"edit","file":"supabase/migrations/20260827120000_strategy_shares_generation_model.sql","find":"generation  BIGINT","replace":"generation  INTEGER","occurrences":1}]}`,
+    ].join("\n");
+    const result = parseAnnotations(sql, { file: "g.sql" });
+    expect(result.errors).toEqual([]);
+    expect(result.structured).toHaveLength(1);
+  });
+
+  it("REFUSES a step targeting a pg-lane stand-in fixture, naming the rule and the prefix", () => {
+    for (const target of [
+      "scripts/pg-lane/fixtures/01-fixture-core.sql",
+      "scripts/pg-lane/fixtures/03-fixture-compute-jobs.sql",
+      // The obvious spelling evasion: the same path with a `./` prefix.
+      "./scripts/pg-lane/fixtures/01-fixture-core.sql",
+    ]) {
+      const sql = [
+        "  -- RED-UNDER: prose",
+        `  -- RED-UNDER-M: {"arm":"X","apply":[{"kind":"edit","file":"${target}","find":"a","replace":"b","occurrences":1}]}`,
+      ].join("\n");
+      const err = soleError(parseAnnotations(sql, { file: "g.sql" }));
+      expect(err, `not refused: ${target}`).toMatch(/targets a pg-lane stand-in fixture/);
+      // Evidence, not verdict: the message must say what to do instead.
+      expect(err).toMatch(/supabase\/migrations/);
+      expect(err).toMatch(/sql step/);
+    }
+  });
+
+  it("the REAL corpus contains no twin this rule refuses either — it forbids nothing that exists", () => {
+    // MEASURED 2026-09-02 before shipping the rule: 0 of 30 twins in the only
+    // annotated file, and `grep -a -c 'RED-UNDER-M:.*"file":"scripts/pg-lane/
+    // fixtures/' supabase/tests/*.sql` -> 0 in all 71. Pinned so the backfill
+    // cannot quietly introduce the shape and then be "fixed" by relaxing it.
+    const result = parseFile(
+      join(REPO_ROOT, "supabase", "tests", "test_strategy_shares_rls.sql"),
+    );
+    expect(result.errors).toEqual([]);
+    expect(
+      result.structured.flatMap((a) => a.apply).filter((s) => s.kind !== "sql"),
+    ).not.toContainEqual(expect.objectContaining({ file: expect.stringContaining("pg-lane") }));
+  });
 });
 
 describe("R2-W04 / GRAMMAR rule 3b — a mutation may not REWRITE an arm identity", () => {

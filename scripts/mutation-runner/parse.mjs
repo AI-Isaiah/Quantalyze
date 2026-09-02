@@ -175,6 +175,46 @@ function refuseRetargetingFailureLiteral(at, field, targeted) {
   );
 }
 
+/**
+ * The pg-lane stand-in fixtures. `scripts/pg-lane/run.sh:44-51` states what
+ * they do and do not prove: they carry only the columns the real migrations'
+ * FKs, policies and function bodies name — they are the author's model of the
+ * schema, not the schema.
+ */
+const PG_LANE_FIXTURE_DIR = "scripts/pg-lane/fixtures/";
+
+/**
+ * ⭐ AUTHORING RULE, phase 164.4 (threat T-164.4-01). NO TWIN MAY TARGET A
+ * STAND-IN.
+ *
+ * A `RED-UNDER-M` proves an arm can fail by mutating the thing under test and
+ * requiring the gate to redden on that arm. Mutate a stand-in instead and the
+ * RED proves only that the FIXTURE AUTHOR'S GUESS can be broken — the
+ * production object the arm exists to defend was never touched, and the arm is
+ * counted as biting anyway. That is a vacuous pass manufactured inside the
+ * vacuity detector, which is the one class this whole gate family exists to
+ * refuse.
+ *
+ * PARSE TIME is the right seam, the same as rule 3a: a refused annotation is
+ * MALFORMED, so it is never counted as a twin, the file's prose/twin parity
+ * reds too, and the refusal fires in `--parse-only` on a database-less
+ * platform. A runtime check would let the annotation count first.
+ *
+ * MEASURED at HEAD 2026-09-02:
+ * `grep -a -c 'RED-UNDER-M:.*"file":"scripts/pg-lane/fixtures/' supabase/tests/*.sql`
+ * -> 0 in all 71 files. The rule refuses nothing that exists, which is the
+ * standing this repo requires of 3a and 3b.
+ *
+ * ⚠️ It keys on the TWIN'S TARGET, never on a fixture's POSITION in the
+ * `RED-UNDER-SETUP` apply list. Plan 164.4-00 measured a legitimate stand-in
+ * sitting BETWEEN two migrations (`04-fixture-compute-jobs-targets.sql`), so
+ * "stand-ins first" is a default, not an invariant, and a position-keyed rule
+ * would refuse a correct setup.
+ */
+function targetsPgLaneFixture(p) {
+  return p.replace(/\\/g, "/").replace(/^(?:\.\/)+/, "").startsWith(PG_LANE_FIXTURE_DIR);
+}
+
 /** Validate one `apply` step. Returns the normalised step, or throws a message string. */
 function validateStep(step, index) {
   const at = `apply step ${index + 1}`;
@@ -196,6 +236,13 @@ function validateStep(step, index) {
 
   if (!isRepoRelativePath(step.file)) {
     throw `${at}: "file" must be a repo-relative path (no leading "/" and no ".." segment)`;
+  }
+  if (targetsPgLaneFixture(step.file)) {
+    throw (
+      `${at}: "file" targets a pg-lane stand-in fixture (${PG_LANE_FIXTURE_DIR}**) — a mutation ` +
+      `to a stand-in proves the fixture author's guess, not production; target a ` +
+      `supabase/migrations/** file, the gate itself, or use a sql step`
+    );
   }
   // `occurrences` is the annotator's MEASUREMENT of how many times the needle
   // appears in the file today. It is required precisely because plan 01's
