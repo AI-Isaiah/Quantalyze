@@ -201,11 +201,21 @@ export const INSTANCE_ARM_REGISTRY: ReadonlyArray<RegistryEntry> = [
   {
     instance: "VAC04-C2",
     primitive: "C",
+    // READER-LEVEL (plan 04): the two reader CLIs driven through a symlink and a space path.
     file: "src/__tests__/vac04-reader-guards.test.ts",
     armNeedle: "main-module guard ([VAC04-C2]) — every invocation shape must actually RUN the reader",
+    // GATE-LEVEL (plan 13, SC-4 "driven through the real gate"): the same guard
+    // reached through scripts/prod-body-drift-check.sh via its injected reader paths.
+    also: [
+      {
+        file: "src/__tests__/drift-check-scripts.test.ts",
+        needle: "[VAC04-C2] GATE-LEVEL — the realpath guard driven THROUGH THE REAL GATE",
+      },
+    ],
     // Plan 04: the realpath guard in both union members; pre-fix RED recorded
     // verbatim (symlinked invocation exits 0 having run nothing).
-    citation: "164.3.1-04 task 1; proof: 164.3.1-04-SUMMARY.md § Pre-fix RED / [VAC04-C2]",
+    citation:
+      "164.3.1-04 task 1; proof: 164.3.1-04-SUMMARY.md § Pre-fix RED / [VAC04-C2] + 164.3.1-13 task 1 (gate-level arm through scripts/prod-body-drift-check.sh); proof: 164.3.1-13-SUMMARY.md § cycles C2-N1/C2-N2",
   },
   {
     instance: "VAC04-C3",
@@ -219,11 +229,21 @@ export const INSTANCE_ARM_REGISTRY: ReadonlyArray<RegistryEntry> = [
   {
     instance: "VAC04-C4",
     primitive: "C",
+    // READER-LEVEL (plan 04): the two reader CLIs on the P10 non-ASCII identifier.
     file: "src/__tests__/vac04-reader-guards.test.ts",
     armNeedle: "charset refusal ([VAC04-C4]) — a reader that cannot read the name must REFUSE, never narrow it",
+    // GATE-LEVEL (plan 13, SC-4 "driven through the real gate"): the same input
+    // through scripts/prod-body-drift-check.sh — exit 1 naming U+00FA, no body text.
+    also: [
+      {
+        file: "src/__tests__/drift-check-scripts.test.ts",
+        needle: "[VAC04-C4] GATE-LEVEL — the charset refusal driven THROUGH THE REAL GATE",
+      },
+    ],
     // Plan 04: the P10 non-ASCII input, pre-fix truncate-or-drop in two
     // directions, post-fix refusal in both members.
-    citation: "164.3.1-04 task 2; proof: 164.3.1-04-SUMMARY.md § Pre-fix RED / [VAC04-C4]",
+    citation:
+      "164.3.1-04 task 2; proof: 164.3.1-04-SUMMARY.md § Pre-fix RED / [VAC04-C4] + 164.3.1-13 task 2 (gate-level arm through scripts/prod-body-drift-check.sh); proof: 164.3.1-13-SUMMARY.md § cycle C4-N1",
   },
   {
     instance: "VAC08-253",
