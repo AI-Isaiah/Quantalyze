@@ -2,19 +2,19 @@
 gsd_state_version: 1.0
 milestone: v1.20
 milestone_name: Backlog Burndown (Phases 158+)
-current_phase: 159
-current_phase_name: RANK — Public-ranking integrity
-status: planning
+current_phase: 164.4
+current_phase_name: REDUNDER-BACKFILL
+status: executing
 stopped_at: Phase 164.3.1 complete, ready to plan Phase 159
-last_updated: "2026-09-02T16:34:06.178Z"
+last_updated: "2026-09-02T19:07:46.817Z"
 last_activity: 2026-09-02
-last_activity_desc: Phase 164.3.1 complete, transitioned to Phase 159
-state_head: 8919dbfdde2e7beed8499129f191b36a6ef98594
+last_activity_desc: Phase 164.4 execution started
+state_head: d70a5f741c013c12256ca6e19f11bcb14f63c02a
 progress:
   total_phases: 14
   completed_phases: 5
   total_plans: 83
-  completed_plans: 79
+  completed_plans: 66
   percent: 36
 ---
 
@@ -134,10 +134,10 @@ zero unclassified) and `161-VALIDATION.md` (Nyquist strategy, 4 Wave-0 gaps, ant
 
 ## Current Position
 
-Phase: 159 — RANK — Public-ranking integrity
-Plan: Not started
-Status: Ready to plan
-Last activity: 2026-09-02 — Phase 164.3.1 complete, transitioned to Phase 159
+Phase: 164.4 (REDUNDER-BACKFILL) — EXECUTING
+Plan: 1 of 13
+Status: Executing Phase 164.4
+Last activity: 2026-09-02 — Phase 164.4 execution started
 
 ⚠️ Phase 160 remains OPEN on its human gate — see `## Deferred Verification`. Advancing this
 pointer to 161 does NOT close it; resume it only via `/gsd-verify-work 160`.
