@@ -440,7 +440,7 @@ describe("SP-C02 — the runner's `--self-test` is WIRED into CI, before the cor
     const uncovered = DEFECT_KINDS.filter((k: string) => !exercised.has(k)).sort();
     // ⚠️ EXACT SET, so this list cannot grow silently. Each entry is a kind the
     // self-test does not construct, and each has a reason:
-    //   parse / parity / bad-file-ref — static, and covered by --parse-only and
+    //   parity / bad-file-ref — static, and covered by --parse-only and
     //     by the parser's own vitest file;
     //   baseline / restore / dirty-checkout — each needs a corpus deliberately
     //     broken in a way that would also break the fixture corpus for every
@@ -458,17 +458,25 @@ describe("SP-C02 — the runner's `--self-test` is WIRED into CI, before the cor
     //     permanent, cluster-free scenario rather than a one-off neuter
     //     recorded in a SUMMARY. `lane-unrunnable` (scenario 15) is exercised
     //     the same way.
+    //   parse LEFT this list in 164.4-01: scenario 16 drives
+    //     fixtures/selftest/fixture-target-gate.sql, whose twin targets a
+    //     pg-lane stand-in, and asserts the `parse` defect naming the stand-in.
+    //     ⚠️ That scenario's NEGATIVE assertion about the apply-list kind is
+    //     deliberately spelled through the kind LIST rather than an equality,
+    //     because this extractor scans SOURCE — comments included — and would
+    //     read the absence-assertion as coverage: a kind credited as exercised
+    //     by an arm that only proves it did not appear.
     expect(uncovered).toEqual([
       "bad-file-ref",
       "baseline",
       "dirty-checkout",
       "parity",
-      "parse",
       "restore",
     ]);
     // The six kinds SP-C02 names as the self-test's whole purpose, plus
-    // neuter-missed (164.3.1-11, scenario 9), absurdity (scenario 14) and
-    // lane-unrunnable (scenario 15) — see the list above.
+    // neuter-missed (164.3.1-11, scenario 9), absurdity (scenario 14),
+    // lane-unrunnable (scenario 15) and parse (164.4-01, scenario 16) — see the
+    // list above.
     expect([...exercised].sort()).toEqual([
       "absurdity",
       "floor",
@@ -477,6 +485,7 @@ describe("SP-C02 — the runner's `--self-test` is WIRED into CI, before the cor
       "neuter-missed",
       "no-red",
       "occurrence-mismatch",
+      "parse",
       "synthesised-identity",
       "wrong-first-failure",
     ]);

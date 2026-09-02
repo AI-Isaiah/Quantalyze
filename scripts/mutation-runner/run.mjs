@@ -2738,7 +2738,7 @@ function selfTest() {
   // 6 outright, so each states the floor appropriate to ITS corpus. Check 5 is
   // where an ARMS_FLOOR regression is proven to fire — the mode that could not
   // be proven at all while the floor was 0.
-  console.log("=== SELF-TEST 1/15: a non-biting annotation must exit 1 with `no-red` ===");
+  console.log("=== SELF-TEST 1/16: a non-biting annotation must exit 1 with `no-red` ===");
   const a = runCorpus({ scopeDir: SELFTEST_DIR, onlyFile: "nonbiting-gate.sql", armsFloor: 0, log: quiet });
   pass =
     expect(a.exitCode === 1, `exit code is 1 (got ${a.exitCode})`) &&
@@ -2748,7 +2748,7 @@ function selfTest() {
     ) &&
     pass;
 
-  console.log("=== SELF-TEST 2/15: a FILES_FLOOR regression must exit 1 with `floor` ===");
+  console.log("=== SELF-TEST 2/16: a FILES_FLOOR regression must exit 1 with `floor` ===");
   // ⚠️ The fixture corpus carries ONE waiver (MINI 3), so every whole-corpus
   // scenario states `waivedCeiling: 1` — its own measured number — exactly as
   // it states its own armsFloor. Scenario 5 is where the ceiling is proven to
@@ -2762,7 +2762,7 @@ function selfTest() {
     ) &&
     pass;
 
-  console.log("=== SELF-TEST 3/15: reddening the WRONG arm must exit 1 with `wrong-first-failure` ===");
+  console.log("=== SELF-TEST 3/16: reddening the WRONG arm must exit 1 with `wrong-first-failure` ===");
   const c = runCorpus({ scopeDir: SELFTEST_DIR, onlyFile: "wrong-identity-gate.sql", armsFloor: 0, log: quiet });
   pass =
     expect(c.exitCode === 1, `exit code is 1 (got ${c.exitCode})`) &&
@@ -2774,7 +2774,7 @@ function selfTest() {
     ) &&
     pass;
 
-  console.log("=== SELF-TEST 4/15: a wrong `occurrences` must exit 1 with MEASURE_FAIL, NOT `no-red` ===");
+  console.log("=== SELF-TEST 4/16: a wrong `occurrences` must exit 1 with MEASURE_FAIL, NOT `no-red` ===");
   const d = runCorpus({ scopeDir: SELFTEST_DIR, onlyFile: "occurrence-mismatch-gate.sql", armsFloor: 0, log: quiet });
   pass =
     expect(d.exitCode === 1, `exit code is 1 (got ${d.exitCode})`) &&
@@ -2794,7 +2794,7 @@ function selfTest() {
   // this check exists, and it is what stops the pinned floor from decaying back
   // into a constant nobody compares to anything.
   console.log(
-    "=== SELF-TEST 5/15: an ARMS_FLOOR regression must exit 1 with `floor`, and so must a WAIVED_CEILING excess ===",
+    "=== SELF-TEST 5/16: an ARMS_FLOOR regression must exit 1 with `floor`, and so must a WAIVED_CEILING excess ===",
   );
   // waivedCeiling 0 against a corpus carrying 1 waiver: the ceiling's FIRE
   // direction, in the same run as the ARMS_FLOOR one. Both are `floor` defects
@@ -2816,7 +2816,7 @@ function selfTest() {
     ) &&
     pass;
 
-  console.log("=== SELF-TEST 6/15: the green fixture corpus must exit 0 ===");
+  console.log("=== SELF-TEST 6/16: the green fixture corpus must exit 0 ===");
   const e = runCorpus({ scopeDir: FIXTURE_CORPUS, armsFloor: 2, waivedCeiling: 1, log: quiet });
   pass =
     expect(e.exitCode === 0, `exit code is 0 (got ${e.exitCode}; defects: ${JSON.stringify(e.defects)})`) &&
@@ -2838,7 +2838,7 @@ function selfTest() {
   // fixture's annotation deliberately carries no failure literal in either its
   // needle or its replacement, so this check can only pass on the CONTENT
   // invariant (`identityRewriteDetail`) and not on the spelling rule.
-  console.log("=== SELF-TEST 7/15: rewriting an arm IDENTITY must exit 1 with `identity-rewrite` ===");
+  console.log("=== SELF-TEST 7/16: rewriting an arm IDENTITY must exit 1 with `identity-rewrite` ===");
   const g = runCorpus({ scopeDir: SELFTEST_DIR, onlyFile: "identity-rewrite-gate.sql", armsFloor: 0, log: quiet });
   pass =
     expect(g.exitCode === 1, `exit code is 1 (got ${g.exitCode})`) &&
@@ -2857,7 +2857,7 @@ function selfTest() {
     pass;
 
   console.log("");
-  console.log("=== SELF-TEST 8/15: SYNTHESISING an identity must exit 1 with `synthesised-identity` ===");
+  console.log("=== SELF-TEST 8/16: SYNTHESISING an identity must exit 1 with `synthesised-identity` ===");
   const h = runCorpus({
     scopeDir: SELFTEST_DIR,
     onlyFile: "synthesised-identity-gate.sql",
@@ -2888,7 +2888,7 @@ function selfTest() {
   // itself a Primitive-D instance, so the proof is part of the entry.
   console.log("");
   console.log(
-    "=== SELF-TEST 9/15: [R4-C01] the P3 compound HEAD must be REFUSED as `neuter-missed` naming `SET ROLE postgres;`, beside an ACCEPTED P1-shape neuter ===",
+    "=== SELF-TEST 9/16: [R4-C01] the P3 compound HEAD must be REFUSED as `neuter-missed` naming `SET ROLE postgres;`, beside an ACCEPTED P1-shape neuter ===",
   );
   // armsFloor 1 states the corpus's own number: exactly ONE arm can bite — the
   // control BEHIND P1 — because the refused arm never lanes. ⚠️ It is INERT
@@ -2925,7 +2925,7 @@ function selfTest() {
 
   console.log("");
   console.log(
-    "=== SELF-TEST 10/15: [MUT-I01] an apostrophe in a `--` comment inside a RAISE must neither refuse the neuter (P4) nor over-neuter the statement after it (P5) ===",
+    "=== SELF-TEST 10/16: [MUT-I01] an apostrophe in a `--` comment inside a RAISE must neither refuse the neuter (P4) nor over-neuter the statement after it (P5) ===",
   );
   // armsFloor 2 states the corpus's own number: both annotated arms must bite.
   // ⚠️ INERT in a narrowed run (no floor is enforced) — the count is asserted
@@ -2967,7 +2967,7 @@ function selfTest() {
   // Both fixtures are promoted VERBATIM from 164.3.1-05-ATTRIBUTION.md § 3.
   console.log("");
   console.log(
-    "=== SELF-TEST 11/15: [R4-C02] a current_query() trigger re-raising the identity must be SYNTHESISED, with the genuine arm RED (identity ok) beside it ===",
+    "=== SELF-TEST 11/16: [R4-C02] a current_query() trigger re-raising the identity must be SYNTHESISED, with the genuine arm RED (identity ok) beside it ===",
   );
   // armsFloor 1 states the corpus's own number: only the genuine control can
   // bite. INERT in a narrowed run — the control is asserted on bitingArms.
@@ -2995,7 +2995,7 @@ function selfTest() {
 
   console.log("");
   console.log(
-    "=== SELF-TEST 12/15: the nested-EXECUTE DO forgery AIMED at the genuine raise line must be SYNTHESISED by chain LENGTH alone, with the genuine arm RED (identity ok) beside it ===",
+    "=== SELF-TEST 12/16: the nested-EXECUTE DO forgery AIMED at the genuine raise line must be SYNTHESISED by chain LENGTH alone, with the genuine arm RED (identity ok) beside it ===",
   );
   // armsFloor 1: as in 11/15 — stated, inert here, asserted on bitingArms.
   const l = runCorpus({ scopeDir: SELFTEST_DIR, onlyFile: "nested-execute-forge-gate.sql", armsFloor: 1, log: quiet });
@@ -3056,7 +3056,7 @@ function selfTest() {
   // which a chain-length refusal would also satisfy.
   console.log("");
   console.log(
-    "=== SELF-TEST 13/15: [F1] a RAISE whose MESSAGE embeds a forged CONTEXT + LOCATION pair must be SYNTHESISED by field DUPLICATION, with the genuine arm RED (identity ok) beside it ===",
+    "=== SELF-TEST 13/16: [F1] a RAISE whose MESSAGE embeds a forged CONTEXT + LOCATION pair must be SYNTHESISED by field DUPLICATION, with the genuine arm RED (identity ok) beside it ===",
   );
   // armsFloor 1: as in 11/15 — stated, inert here, asserted on bitingArms.
   const m = runCorpus({ scopeDir: SELFTEST_DIR, onlyFile: "message-embedded-forge-gate.sql", armsFloor: 1, log: quiet });
@@ -3102,7 +3102,7 @@ function selfTest() {
   // cluster is needed, so this scenario cannot flake on one.
   console.log("");
   console.log(
-    "=== SELF-TEST 14/15: a lane runner that never spawns (the severed tally) must exit 1 with `absurdity` naming executed=N lane-invocations=0 ===",
+    "=== SELF-TEST 14/16: a lane runner that never spawns (the severed tally) must exit 1 with `absurdity` naming executed=N lane-invocations=0 ===",
   );
   const stubLane = () => ({ status: 0, output: "", seconds: 0, measureFail: null, invoked: true });
   const n = runCorpus({ scopeDir: SELFTEST_DIR, onlyFile: "nonbiting-gate.sql", armsFloor: 0, laneRunner: stubLane, log: quiet });
@@ -3132,7 +3132,7 @@ function selfTest() {
   // the exact shape `runLane` returns for ENOENT.
   console.log("");
   console.log(
-    "=== SELF-TEST 15/15: a lane that could not be RUN (ENOENT) must exit 1 with `lane-unrunnable` saying the arm was NOT judged — never `wrong-first-failure`, never biting ===",
+    "=== SELF-TEST 15/16: a lane that could not be RUN (ENOENT) must exit 1 with `lane-unrunnable` saying the arm was NOT judged — never `wrong-first-failure`, never biting ===",
   );
   const deadLane = ({ leg }) =>
     leg === "arm"
@@ -3156,10 +3156,61 @@ function selfTest() {
     ) &&
     pass;
 
+  // ⭐ 2026-09-02 (164.4-01, threat T-164.4-01) — a twin that mutates a pg-lane
+  // STAND-IN proves the fixture author's guess, not production, and would be
+  // counted as biting anyway. Refused at PARSE time, like rule 3a, so the
+  // annotation never becomes a twin.
+  //
+  // The fixture deliberately LISTS the stand-in in its own `RED-UNDER-SETUP`,
+  // so `bad-file-ref` — which refuses a step naming a file outside the apply
+  // list — cannot be what fires. That is asserted below: without it the
+  // scenario could pass on the wrong rule. No cluster is needed; the refusal is
+  // static and the file is `continue`d long before a lane.
+  console.log("");
+  console.log(
+    "=== SELF-TEST 16/16: a twin targeting a pg-lane STAND-IN FIXTURE must be refused at parse time with `parse` naming the stand-in — never `no-red`, never `bad-file-ref` ===",
+  );
+  const q = runCorpus({
+    scopeDir: SELFTEST_DIR,
+    onlyFile: "fixture-target-gate.sql",
+    armsFloor: 0,
+    log: quiet,
+  });
+  const refused = q.defects.find((x) => x.kind === "parse" && /stand-in fixture/.test(x.detail));
+  pass =
+    expect(q.exitCode === 1, `exit code is 1 (got ${q.exitCode})`) &&
+    expect(
+      refused !== undefined,
+      `a "parse" defect names the stand-in (got ${JSON.stringify(q.defects.map((x) => x.kind))})`,
+    ) &&
+    expect(
+      refused !== undefined && /scripts\/pg-lane\/fixtures/.test(refused.detail),
+      "the refusal PRINTS the forbidden prefix rather than a bare verdict",
+    ) &&
+    expect(
+      !q.defects.some((x) => x.kind === "no-red"),
+      'no "no-red" defect — a refused annotation is malformed, not a non-biting arm',
+    ) &&
+    expect(
+      // ⚠️ Spelled via the kind LIST rather than an equality on `x.kind`, on
+      // purpose. The coverage extractor in mutation-runner-floors.test.ts scans
+      // this function's SOURCE — comments included — for equality comparisons
+      // against a kind, and treats each one as a kind the self-test EXERCISES.
+      // This is a negative assertion: it proves the kind did NOT appear.
+      // Crediting it as coverage would be a vacuity inside the vacuity gate.
+      !q.defects.map((x) => x.kind).includes("bad-file-ref"),
+      "no `bad-file-ref` — the stand-in IS in this gate's apply list, so the target rule is what fired, not the apply-list rule",
+    ) &&
+    expect(
+      q.armsAnnotated === 0 && q.armsExecuted === 0,
+      `the refused annotation was never counted as a twin (annotated ${q.armsAnnotated}, executed ${q.armsExecuted})`,
+    ) &&
+    pass;
+
   console.log("");
   if (pass) {
     console.log(
-      "=== SELF-TEST PASSED: both floor modes, the waiver ceiling, the wrong-identity mode, MEASURE_FAIL, the absurdity floor and the 164.3.1-11 regression corpus all fire ===",
+      "=== SELF-TEST PASSED: both floor modes, the waiver ceiling, the wrong-identity mode, MEASURE_FAIL, the absurdity floor, the stand-in target refusal and the 164.3.1-11 regression corpus all fire ===",
     );
     return 0;
   }

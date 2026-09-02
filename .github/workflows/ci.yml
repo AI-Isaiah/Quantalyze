@@ -992,7 +992,9 @@ jobs:
         # 164.3.1-11 added the Primitive-A and -B regression corpus (2026-09-01);
         # 15/15 after the 164.3.1 review added the F1 message-embedded forgery,
         # the injected-lane absurdity FIRE scenario and the `lane-unrunnable`
-        # MEASURE_FAIL (2026-09-02).
+        # MEASURE_FAIL (2026-09-02); 16/16 after 164.4-01 added the parse-time
+        # refusal of a twin targeting a pg-lane stand-in fixture — GRAMMAR rule
+        # 4, threat T-164.4-01 (2026-09-02).
         #
         # ⛔ MODE IDENTITY: the bare command from the script's own header, no
         # wrapper. Pinned from vitest by src/__tests__/mutation-runner-floors.test.ts.

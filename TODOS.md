@@ -1072,6 +1072,15 @@ true for 146 and half of 142–145, and **false for 141**.
       **Consequence: the broken-windows ledger is WRITE-BLOCKED** — Plan 164.4-00 could not record its
       two findings there and recorded them here instead. Decide which representation is canonical, then
       reconcile the frontmatter. Do not "fix" it by editing the counts blind.
+      **⚠️ A SECOND transition is now blocked behind this (2026-09-02, Plan 164.4-01): entry 28
+      (`sql-mutation`'s first ubuntu execution) is PROVABLY CLOSED** — `workflow_dispatch` run
+      **33620169220** at **`89cbef8b`**, self-test 12/12, `arms: 30/30/0`, tallies agree. Recorded in
+      `CLAUDE.md:51-53` and now in `GRAMMAR.md`'s 3c honest-residual paragraph, which previously still
+      claimed the job "has never executed on its ubuntu host". `gsd-tools windows fixed 28` refuses
+      with the same counts error, so the row still reads `open`. **When the ledger is reconciled, close
+      28 with that run id and SHA.** Not hand-edited here: the frontmatter is already wrong, so flipping
+      one row's status would make the ledger agree with itself while still being wrong — the exact move
+      Plan 164.4-00 refused.
 
 - [ ] **`[REDUNDER-PGCRON]` Three Phase-164.4 idiom gate files can NEVER reach a GREEN pg-lane baseline — the lane has no `pg_cron` (measured 2026-09-02, Plan 164.4-00).**
       `scripts/pg-lane/run.sh` boots a vanilla `initdb` cluster. Measured on it: `pg_available_extensions`

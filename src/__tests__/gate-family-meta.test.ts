@@ -123,7 +123,7 @@ export const INSTANCE_ARM_REGISTRY: ReadonlyArray<RegistryEntry> = [
     instance: "R4-C01/P3",
     primitive: "A",
     file: "scripts/mutation-runner/run.mjs",
-    armNeedle: "SELF-TEST 9/15: [R4-C01] the P3 compound HEAD must be REFUSED",
+    armNeedle: "SELF-TEST 9/16: [R4-C01] the P3 compound HEAD must be REFUSED",
     also: [
       {
         file: "src/__tests__/mutation-runner-neuter.test.ts",
@@ -172,7 +172,7 @@ export const INSTANCE_ARM_REGISTRY: ReadonlyArray<RegistryEntry> = [
     instance: "R4-C02",
     primitive: "B",
     file: "scripts/mutation-runner/run.mjs",
-    armNeedle: "SELF-TEST 11/15: [R4-C02] a current_query() trigger",
+    armNeedle: "SELF-TEST 11/16: [R4-C02] a current_query() trigger",
     fixture: "scripts/mutation-runner/fixtures/selftest/current-query-forge-gate.sql",
     // Plan 05's FORGE 1 / CTRL 1 promoted verbatim by plan 11; RED under the
     // attribution neuter N3 in 164.3.1-11-CORPUS-PROOFS.md §4.
@@ -182,7 +182,7 @@ export const INSTANCE_ARM_REGISTRY: ReadonlyArray<RegistryEntry> = [
     instance: "NESTED-EXECUTE",
     primitive: "B",
     file: "scripts/mutation-runner/run.mjs",
-    armNeedle: "SELF-TEST 12/15: the nested-EXECUTE DO forgery",
+    armNeedle: "SELF-TEST 12/16: the nested-EXECUTE DO forgery",
     fixture: "scripts/mutation-runner/fixtures/selftest/nested-execute-forge-gate.sql",
     // FORGE 2 + echo-free FORGE 3; RED under the chain-length-only neuter N4
     // while scenario 11 stayed green — 164.3.1-11-CORPUS-PROOFS.md §5.
