@@ -362,3 +362,210 @@ describe("164.3.1-12 — instance → arm registry (SC-1 corpus completeness, me
     expect([...covered].sort()).toEqual(["A", "B", "C", "D"]);
   });
 });
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 2. DIAGNOSTIC-FIRST meta-arm (SC-7, D-12)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * The family's SHELL gates — the members whose ONLY interface is their output.
+ * INCLUSION RULE: a bash gate this phase made sound, run by CI with its stdout
+ * and exit code as the whole verdict. A new shell gate in this family goes
+ * here; the meta-arm then reads its every failure emission.
+ */
+export const FAMILY_SHELL_GATES: readonly string[] = [
+  "scripts/test-ledger-drift-check.sh",
+  "scripts/prod-body-drift-check.sh",
+];
+
+export type Emission = {
+  file: string;
+  /** 1-based line of the emission's first line. */
+  line: number;
+  kind: "fail-call" | "error-block";
+  /** The emitted text — the `fail` argument, or the joined block. */
+  text: string;
+};
+
+/**
+ * Every failure emission in a shell gate: each `fail "…"` call site, and each
+ * contiguous `echo "::error::…"` block (evidence pipes, `if/else/fi` control
+ * lines and comments inside the block are part of it; a blank line or any
+ * other statement ends it).
+ */
+export function findFailureEmissions(file: string, src: string): Emission[] {
+  const lines = src.split("\n");
+  const out: Emission[] = [];
+  const isErrorEcho = (l: string) => /^\s*echo "::error::/.test(l);
+  const continues = (l: string) =>
+    isErrorEcho(l) || /^\s*(sed |head |run_ledger_query |if .*\bthen\b|else\b|fi\b|&&|\|\||#)/.test(l);
+
+  let i = 0;
+  while (i < lines.length) {
+    const l = lines[i];
+    if (isErrorEcho(l)) {
+      let j = i;
+      const buf: string[] = [];
+      while (j < lines.length && continues(lines[j])) {
+        buf.push(lines[j]);
+        j++;
+      }
+      out.push({ file, line: i + 1, kind: "error-block", text: buf.join("\n") });
+      i = j;
+      continue;
+    }
+    // A `fail "…"` call site. The helper's own definition (`fail() {`) is not
+    // an emission; a comment line is not either.
+    if (!/^\s*#/.test(l) && !/^\s*fail\(\)/.test(l)) {
+      const m = /\bfail "(.*)$/.exec(l);
+      if (m !== null) out.push({ file, line: i + 1, kind: "fail-call", text: m[1] });
+    }
+    i++;
+  }
+  return out;
+}
+
+/**
+ * Does the emitted text carry at least one RUNTIME-interpolated value?
+ * `${GATE}` is the gate's constant name and is excluded — with it counted the
+ * rule would be satisfied by every line in the family and bind nothing.
+ * `$*` / `$@` / `$0` / `$(…)` / `${x}` / `$x` all count.
+ */
+export function carriesRuntimeValue(text: string): boolean {
+  const stripped = text.split("${GATE}").join("");
+  return /\$\{[A-Za-z_#@*!?0-9]|\$\(|\$[A-Za-z_][A-Za-z0-9_]*|\$[#@*?0-9]/.test(stripped);
+}
+
+/** The emissions that ship a BARE conclusion. */
+export function diagnosticFirstViolations(file: string, src: string): Emission[] {
+  void file;
+  void src;
+  return []; // TDD RED: not yet implemented
+}
+
+/** A short, stable identity for an emission: file :: kind :: first 48 chars. */
+export function emissionKey(e: Emission): string {
+  return `${e.file} :: ${e.kind} :: ${e.text.replace(/\s+/g, " ").trim().slice(0, 48)}`;
+}
+
+// ── FIXTURES (SP-L02: same predicate, mutilated input) ──────────────────────
+// These strings are INPUTS to the predicates under test, never assertion
+// subjects — the assertions below read the predicates' RESULTS. That is why
+// they are not the same-block-const shape the SRO rule flags.
+const DIAGNOSTIC_RED_FIXTURE = [
+  "#!/usr/bin/env bash",
+  "GATE=\"fixture gate\"",
+  "if [ \"$count\" -lt 3 ]; then",
+  "  echo \"::error::${GATE}: the check failed.\"",
+  "  echo \"::error::Something was wrong with the input. Fix it and re-run.\"",
+  "  exit 1",
+  "fi",
+  "[ -f \"$f\" ] || fail \"the file is missing.\"",
+  "",
+].join("\n");
+
+const DIAGNOSTIC_GREEN_FIXTURE = [
+  "#!/usr/bin/env bash",
+  "GATE=\"fixture gate\"",
+  "if [ \"$count\" -lt 3 ]; then",
+  "  echo \"::error::${GATE}: MEASURE_FAIL — only ${count} row(s) read, floor is 3.\"",
+  "  echo \"::error::  first rows actually read:\"",
+  "  head -n 3 \"$rows\" | sed 's|^|::error::    |'",
+  "  exit 1",
+  "fi",
+  "[ -f \"$f\" ] || fail \"the file is missing at ${f}.\"",
+  "",
+].join("\n");
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 3. BARE-MEASUREMENT audit meta-arm (SC-9, D-10)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * The threshold-bearing members of the family. INCLUSION RULE: every file in
+ * this family that declares a numeric FLOOR/MIN threshold or compares against
+ * a literal inside an absurdity block — the two shell gates, the mutation
+ * runner, and the two vitest gates that carry non-vacuity floors. A new
+ * threshold anywhere in these files must carry its measurement AND be
+ * registered in KNOWN_THRESHOLD_SITES below.
+ */
+export const THRESHOLD_BEARING_FILES: readonly string[] = [
+  ...FAMILY_SHELL_GATES,
+  "scripts/mutation-runner/run.mjs",
+  "src/__tests__/lint-sql-gates.test.ts",
+  "src/__tests__/self-referential-oracle.test.ts",
+];
+
+export type ThresholdSite = {
+  file: string;
+  /** 1-based line of the threshold. */
+  line: number;
+  /** `NAME=<n>` for a constant, `<lhs> <op> <n>` for a literal comparison. */
+  label: string;
+  /** Whether a measurement token AND a date sit within JUSTIFICATION_WINDOW lines above. */
+  justified: boolean;
+  /** What justified it — for the diagnostic print. */
+  evidence: string;
+};
+
+/** Lines above a threshold within which its measurement must be recorded. */
+export const JUSTIFICATION_WINDOW = 80;
+
+/** Every threshold site in a family file, each with its justification verdict. */
+export function findThresholdSites(file: string, src: string): ThresholdSite[] {
+  void file;
+  void src;
+  return []; // TDD RED: not yet implemented
+}
+
+// ── FIXTURES ────────────────────────────────────────────────────────────────
+const THRESHOLD_RED_FIXTURE = [
+  "#!/usr/bin/env bash",
+  "# Refuse tiny inputs.",
+  "ROWS_FLOOR=7",
+  "if [ \"$rows\" -lt \"$ROWS_FLOOR\" ]; then exit 1; fi",
+  "if [ \"$other\" -ge 25 ]; then exit 1; fi",
+  "",
+].join("\n");
+
+const THRESHOLD_GREEN_FIXTURE = [
+  "#!/usr/bin/env bash",
+  "# MEASURED 2026-09-02 over the whole fixture corpus: legitimate runs score",
+  "# 40-60 rows, the broken reader scores 0; the floor sits an order of",
+  "# magnitude under the silent shape (sample size 12 runs).",
+  "ROWS_FLOOR=7",
+  "if [ \"$rows\" -lt \"$ROWS_FLOOR\" ]; then exit 1; fi",
+  "",
+].join("\n");
+
+describe("164.3.1-12 — META-ARM fixtures: both rules can fire (SP-L02, same predicate as the family scan)", () => {
+  it("diagnostic-first: the RED fixture's bare-conclusion block AND bare fail are flagged; the GREEN fixture is clean and really read", () => {
+    const red = diagnosticFirstViolations("fixture.red.sh", DIAGNOSTIC_RED_FIXTURE);
+    expect(
+      red.map((e) => e.kind).sort(),
+      `the rule must flag the fixture's bare ::error:: block and its bare fail call; findings were ${JSON.stringify(red)}`,
+    ).toEqual(["error-block", "fail-call"]);
+
+    // Vacuity fence: the green fixture must PARSE to emissions before its
+    // emptiness means anything (an absence is satisfied perfectly by rubble).
+    const greenEmissions = findFailureEmissions("fixture.green.sh", DIAGNOSTIC_GREEN_FIXTURE);
+    expect(greenEmissions.map((e) => e.kind).sort()).toEqual(["error-block", "fail-call"]);
+    expect(
+      diagnosticFirstViolations("fixture.green.sh", DIAGNOSTIC_GREEN_FIXTURE),
+      "an emission that interpolates its quantity must not be flagged",
+    ).toEqual([]);
+  });
+
+  it("bare-measurement: the RED fixture's unjustified floor and literal comparison are flagged; the GREEN fixture's measured floor is not", () => {
+    const red = findThresholdSites("fixture.red.sh", THRESHOLD_RED_FIXTURE);
+    expect(
+      red.map((s) => s.label).sort(),
+      `the scan must find both the ROWS_FLOOR constant and the literal \`-ge 25\` comparison; sites were ${JSON.stringify(red)}`,
+    ).toEqual(["ROWS_FLOOR=7", "other -ge 25"]);
+    expect(red.every((s) => !s.justified), "neither site carries a measurement, so both must be UNJUSTIFIED").toBe(true);
+
+    const green = findThresholdSites("fixture.green.sh", THRESHOLD_GREEN_FIXTURE);
+    expect(green.map((s) => s.label)).toEqual(["ROWS_FLOOR=7"]);
+    expect(green[0]?.justified, `the measured floor must be justified; evidence was ${green[0]?.evidence}`).toBe(true);
+  });
+});
