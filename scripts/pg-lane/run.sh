@@ -40,14 +40,14 @@
 # ⛔ It never touches TEST or PROD. It initdb's a fresh cluster and listens on
 # 127.0.0.1 only.
 #
-# ⚠️ WHAT IT DOES AND DOES NOT PROVE. fixtures/01-fixture-core.sql and
-# fixtures/02-fixture-sanitize-tables.sql are STAND-INS: they carry only the
-# columns the migrations' FKs, policies, RPCs and sanitize_user body actually
-# name. The objects under test — strategy_shares, its trigger, its grants, its
-# policies, both RPCs — are the REAL ones from the real migration files. So this
-# proves the DDL applies, the self-verification blocks bite, and the gate's arms
-# pass and can fail. It does NOT prove behaviour against the real schema's own
-# RLS, constraints or triggers. That still belongs to the TEST hand-apply.
+# ⚠️ WHAT IT DOES AND DOES NOT PROVE. EVERY file under fixtures/ is a STAND-IN —
+# the DIRECTORY, not a fixed list, so a fixture added later is covered on the day
+# it lands. Stand-ins carry only the columns the migrations' FKs, policies, RPCs
+# and function bodies actually name. The objects under test — strategy_shares,
+# its trigger, its grants, its policies, both RPCs — are the REAL ones from the
+# real migrations. So this proves the DDL applies, the self-verification blocks
+# bite, and the gate's arms pass and can fail. It does NOT prove behaviour
+# against the real schema's own RLS/constraints/triggers — the TEST hand-apply.
 set -euo pipefail
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)

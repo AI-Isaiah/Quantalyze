@@ -353,10 +353,11 @@ a guarantee about the next.
 > Target a `supabase/migrations/**` file, the gate file itself, or use a `sql`
 > step.
 
-`scripts/pg-lane/run.sh:44-51` states plainly what the stand-ins do and do not
-prove: they carry only the columns the real migrations' FKs, policies and
-function bodies name. They are the fixture author's MODEL of the schema, not the
-schema.
+`scripts/pg-lane/run.sh:43-50` states plainly what the stand-ins do and do not
+prove — and states it over the whole `fixtures/` DIRECTORY, which is the same
+scope this rule refuses: they carry only the columns the real migrations' FKs,
+policies and function bodies name. They are the fixture author's MODEL of the
+schema, not the schema.
 
 So a twin that mutates one reddens the gate, and the arm is counted as biting —
 but what was proven is that the model can be broken. The production object the
