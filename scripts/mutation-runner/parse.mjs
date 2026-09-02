@@ -398,29 +398,6 @@ export function parseFile(path) {
   return parseAnnotations(readFileSync(path, "utf8"), { file: path });
 }
 
-/**
- * Scan a directory of `.sql` gate files for the coverage numerator/denominator
- * (D-01). "Annotated" means at least one LINE-START marker of EITHER kind — a
- * prose `RED-UNDER:` or a structured `RED-UNDER-M:` twin. Both use the same
- * line-start anchor the parity gate uses, so coverage still cannot be inflated
- * by a file that merely documents the syntax.
- *
- * ⛔ IN-01: this used to require `prose.length > 0`, and `runCorpus` /
- * `parseOnlyCorpus` iterate ONLY this list. A file carrying five
- * `RED-UNDER-M` twins and zero prose markers was therefore never parsed, never
- * parity-checked, its arms never executed, and it counted toward neither the
- * numerator nor a defect — the runner reported clean having not looked at it.
- * The per-file parity gate cannot catch that: it only runs for files already
- * in this list. The hole was covered only from OUTSIDE the gate, by a vitest
- * file that walks every file itself, so a developer running
- * `node scripts/mutation-runner/run.mjs` locally saw green regardless.
- *
- * With `||`, a structured-only file enters the list and the runner's own
- * parity check fires on it (`prose 0 !== structured 5`).
- *
- * MEASURED 2026-08-29: no file in `supabase/tests/` is structured-only, so
- * `filesAnnotated` is unchanged at 1 of 71 and the FILES_FLOOR does not move.
- */
 // ===========================================================================
 // tokenizeStatements — THE SINGLE DEFINITION OF "WHAT IS CODE" (PRIMITIVE A)
 // ===========================================================================
@@ -548,6 +525,36 @@ function makeLineOf(text) {
   };
 }
 
+/**
+ * Skip the NESTING block comment opening at `i` (`text[i] === "/"` and
+ * `text[i + 1] === "*"`, both inside `[i, to)`). Returns the index just after
+ * the `*\/` that closes the outermost level, or `to` when the comment is
+ * unterminated within the region. PostgreSQL semantics (RESEARCH A4); the ONE
+ * copy `scanRegion` and `peekNextWord` share, so a bounds rule fixed here is
+ * fixed for both readers.
+ *
+ * Every two-character look is bounds-checked against `to`, not against the end
+ * of `text`: a region is a dollar-quoted BODY, and the byte at `to` belongs to
+ * the enclosing statement, not to the comment. Those checks are the ONLY thing
+ * keeping the result at or below `to` — no clamp, so the tokenizer test's
+ * bounds pin goes RED the moment one is dropped (MEASURED 2026-09-02).
+ */
+export function skipBlockComment(text, i, to) {
+  let j = i;
+  let nest = 0;
+  while (j < to) {
+    if (text[j] === "/" && j + 1 < to && text[j + 1] === "*") {
+      nest += 1;
+      j += 2;
+    } else if (text[j] === "*" && j + 1 < to && text[j + 1] === "/") {
+      nest -= 1;
+      j += 2;
+      if (nest === 0) break;
+    } else j += 1;
+  }
+  return j;
+}
+
 /** The next word after `from`, skipping whitespace and comments. Read-only. */
 function peekNextWord(text, from, to) {
   let i = from;
@@ -558,17 +565,7 @@ function peekNextWord(text, from, to) {
       continue;
     }
     if (i < to - 1 && text[i] === "/" && text[i + 1] === "*") {
-      let nest = 0;
-      while (i < to) {
-        if (text[i] === "/" && text[i + 1] === "*") {
-          nest += 1;
-          i += 2;
-        } else if (text[i] === "*" && text[i + 1] === "/") {
-          nest -= 1;
-          i += 2;
-          if (nest === 0) break;
-        } else i += 1;
-      }
+      i = skipBlockComment(text, i, to);
       continue;
     }
     break;
@@ -654,18 +651,7 @@ function scanRegion(text, from, to, depth, lineOf, out) {
 
     // ── block comment: NESTING (PostgreSQL semantics — RESEARCH A4) ─────────
     if (ch === "/" && i + 1 < to && text[i + 1] === "*") {
-      let j = i;
-      let nest = 0;
-      while (j < to) {
-        if (text[j] === "/" && j + 1 < to && text[j + 1] === "*") {
-          nest += 1;
-          j += 2;
-        } else if (text[j] === "*" && j + 1 < to && text[j + 1] === "/") {
-          nest -= 1;
-          j += 2;
-          if (nest === 0) break;
-        } else j += 1;
-      }
+      const j = skipBlockComment(text, i, to);
       blank(i, j);
       i = j;
       continue;
@@ -849,7 +835,8 @@ function scanRegion(text, from, to, depth, lineOf, out) {
  * `startLine`/`endLine` are 1-based and INCLUSIVE (the plan-05 contract above).
  * `head` marks a branch-head unit — a bare `BEGIN`/`DECLARE`/`ELSE`, an
  * `EXCEPTION [WHEN … THEN]` clause, or a segment opening with `IF`/`ELSIF`/
- * `WHEN`/`FOR`/`WHILE`/`LOOP`/`END` and closing on `THEN`/`LOOP`. Head units
+ * `WHEN`/`FOR`/`FOREACH`/`WHILE`/`LOOP` and closing on `THEN`/`LOOP` (`END`
+ * is a closer, never an opener — see `LOOP_OPENERS`). Head units
  * carry no semicolon, which is exactly why a compound line decomposes: the head
  * ends where the keyword ends and the statements sharing its line follow it.
  * `depth` is dollar-quote nesting: a `DO $$ … $$;` block is ONE depth-0
@@ -871,6 +858,29 @@ export function maskNonCode(text) {
   return scanRegion(text, 0, text.length, 0, makeLineOf(text), null);
 }
 
+/**
+ * Scan a directory of `.sql` gate files for the coverage numerator/denominator
+ * (D-01). "Annotated" means at least one LINE-START marker of EITHER kind — a
+ * prose `RED-UNDER:` or a structured `RED-UNDER-M:` twin. Both use the same
+ * line-start anchor the parity gate uses, so coverage still cannot be inflated
+ * by a file that merely documents the syntax.
+ *
+ * ⛔ IN-01: this used to require `prose.length > 0`, and `runCorpus` /
+ * `parseOnlyCorpus` iterate ONLY this list. A file carrying five
+ * `RED-UNDER-M` twins and zero prose markers was therefore never parsed, never
+ * parity-checked, its arms never executed, and it counted toward neither the
+ * numerator nor a defect — the runner reported clean having not looked at it.
+ * The per-file parity gate cannot catch that: it only runs for files already
+ * in this list. The hole was covered only from OUTSIDE the gate, by a vitest
+ * file that walks every file itself, so a developer running
+ * `node scripts/mutation-runner/run.mjs` locally saw green regardless.
+ *
+ * With `||`, a structured-only file enters the list and the runner's own
+ * parity check fires on it (`prose 0 !== structured 5`).
+ *
+ * MEASURED 2026-08-29: no file in `supabase/tests/` is structured-only, so
+ * `filesAnnotated` is unchanged at 1 of 71 and the FILES_FLOOR does not move.
+ */
 export function scanCorpus(dir) {
   const files = readdirSync(dir)
     .filter((f) => f.endsWith(".sql"))

@@ -43,6 +43,7 @@ import { fileURLToPath } from "node:url";
 import {
   BRANCH_HEAD_KEYWORDS,
   maskNonCode,
+  skipBlockComment,
   tokenizeStatements,
 } from "../../scripts/mutation-runner/parse.mjs";
 import { scanSql } from "../../scripts/sql-body-normalize.mjs";
@@ -113,6 +114,46 @@ describe("span contract: 1-based inclusive line spans", () => {
     // removed, so the trailing text IS code — proving the input is not inert.
     const statements = tokenize(["/* inner */ still_comment();", "SELECT 1;"].join("\n"));
     expect(statements.map((s) => s.text)).toEqual(["still_comment();", "SELECT 1;"]);
+  });
+});
+
+describe("block-comment skipping is ONE helper, bounded by the REGION", () => {
+  // `scanRegion` and `peekNextWord` each carried their own nesting `/* … */`
+  // walk, and the peek copy read `text[i + 1]` without checking `i + 1 < to`.
+  // A region is a dollar-quoted BODY, so the byte at `to` belongs to the
+  // enclosing statement, not to the comment — a two-character look must never
+  // cross it. Both sites now call `skipBlockComment`; this pins the bound.
+  const skip = (text: string, to: number): number => skipBlockComment(text, 0, to) as number;
+
+  it("an unterminated `/*` stops at `to`, never past it", () => {
+    // `/* */` cut at 4: the `*` is the last byte IN the region, the `/` is
+    // the first byte OUTSIDE it. The un-bounded copy paired them, closed the
+    // comment and returned 5 — an index past the region. MEASURED RED with
+    // the `j + 1 < to` checks removed (the old peek copy): 5 and 4 vs 4 and 3.
+    expect(skip("/* */", 4)).toBe(4);
+    expect(skip("/*/*", 3)).toBe(3); // a straddling `/*` is not a nested open either
+    expect(skip("/* x", 4)).toBe(4);
+  });
+
+  it("a terminated comment returns the index after its OUTERMOST close (non-vacuity)", () => {
+    // The same helper, the same bytes with the region wide enough: the bound
+    // above only proves something if the closer is honoured when it is inside.
+    expect(skip("/* */", 5)).toBe(5);
+    expect(skip("/* a /* b */ c */ SELECT", 24)).toBe(17);
+  });
+
+  it("reached through the EXCEPTION peek: an unterminated `/*` at the end of a body yields a bare EXCEPTION head", () => {
+    // The peek looks past `EXCEPTION` for `WHEN`; the comment runs to the end
+    // of the `$$` body, so the peek finds nothing and the head is `EXCEPTION`
+    // alone. Documented limit: the byte at `to` is always the closing `$`, so
+    // this path cannot OBSERVE the bound — the two `skip` cases above are what
+    // fail without it; this pins that the shared path stays sane at the edge.
+    const statements = tokenize("DO $$ BEGIN NULL; EXCEPTION /* $$; WHEN OTHERS THEN NULL;");
+    expect(statements.filter((s) => s.depth === 1).map((s) => [s.head, s.text])).toEqual([
+      [true, "BEGIN"],
+      [false, "NULL;"],
+      [true, "EXCEPTION"],
+    ]);
   });
 });
 
