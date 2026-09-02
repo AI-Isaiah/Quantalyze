@@ -5,7 +5,7 @@
 --
 -- A `RED-UNDER-M` proves an arm can fail by mutating the thing under test. The
 -- twin below mutates `scripts/pg-lane/fixtures/01-fixture-core.sql` instead —
--- the lane's stand-in schema, which `scripts/pg-lane/run.sh:44-51` states
+-- the lane's stand-in schema, which `scripts/pg-lane/run.sh:43-50` states
 -- carries only the columns the real migrations name. Breaking it reddens the
 -- gate, so the arm would be counted as biting; but what was proven is that the
 -- FIXTURE AUTHOR'S GUESS can be broken, not that the production object the arm
