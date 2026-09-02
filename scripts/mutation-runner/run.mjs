@@ -88,7 +88,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, relative } from "node:path";
+import { dirname, isAbsolute, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import {
@@ -2022,6 +2022,17 @@ export function runCorpus({
 }
 
 // ---------------------------------------------------------------------------
+/**
+ * The directory a `--file <gate>` run is scoped to. IN-02 (164.3.1 review):
+ * an ABSOLUTE gate path used to be joined onto cwd (`<cwd>/<abs>`), so the
+ * scope pointed nowhere and the run reported "--file names a gate with no
+ * line-start RED-UNDER markers" — loud (exit 1), but for the wrong reason.
+ */
+export function scopeDirForFile(onlyFile, cwd = process.cwd()) {
+  const abs = isAbsolute(onlyFile) ? onlyFile : join(cwd, onlyFile);
+  return join(REPO_ROOT, dirname(relative(REPO_ROOT, abs)));
+}
+
 // --parse-only: the STATIC half of the gate. No cluster, no mutation.
 // ---------------------------------------------------------------------------
 //
@@ -2525,7 +2536,7 @@ function main(argv) {
         console.error("ERROR: --file needs a gate path");
         return 3;
       }
-      scopeDir = join(REPO_ROOT, dirname(relative(REPO_ROOT, join(process.cwd(), onlyFile))));
+      scopeDir = scopeDirForFile(onlyFile);
     } else if (arg === "--arm") {
       onlyArm = argv[++i];
       if (!onlyArm) {

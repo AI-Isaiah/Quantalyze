@@ -36,6 +36,7 @@ import {
   FILES_FLOOR,
   absurdityViolations,
   runCorpus,
+  scopeDirForFile,
 } from "../../scripts/mutation-runner/run.mjs";
 import { parseFile, scanCorpus } from "../../scripts/mutation-runner/parse.mjs";
 
@@ -833,5 +834,21 @@ describe("parity invariant", () => {
         `${file.name}: ${file.prose} prose RED-UNDER marker(s) but ${file.twins} RED-UNDER-M twin(s). Every prose claim needs an executable twin (a waiver counts).`,
       ).toBe(file.prose);
     }
+  });
+});
+
+describe("IN-02 — `--file` scope derivation", () => {
+  it("an ABSOLUTE gate path scopes the run to the gate's own directory, exactly as the relative spelling does", () => {
+    // MEASURED pre-fix: `join(cwd, "/abs/…")` yields `<cwd>/abs/…`, so the
+    // scope was `<cwd>/<REPO_ROOT>/supabase/tests` and `--file` found no gate
+    // there — exit 1 with "no line-start RED-UNDER markers", for a gate that
+    // carries thirty.
+    const rel = "supabase/tests/test_strategy_shares_rls.sql";
+    const expected = join(REPO_ROOT, "supabase", "tests");
+    expect(scopeDirForFile(rel, REPO_ROOT)).toBe(expected);
+    expect(scopeDirForFile(join(REPO_ROOT, rel), REPO_ROOT)).toBe(expected);
+    // Independent of where the command is typed from.
+    expect(scopeDirForFile(join(REPO_ROOT, rel), join(REPO_ROOT, "scripts"))).toBe(expected);
+    expect(scopeDirForFile(join(REPO_ROOT, rel), "/somewhere/unrelated")).toBe(expected);
   });
 });
