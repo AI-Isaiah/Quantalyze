@@ -5,11 +5,11 @@ milestone_name: Backlog Burndown (Phases 158+)
 current_phase: 164.4
 current_phase_name: REDUNDER-BACKFILL
 status: executing
-stopped_at: Phase 164.3.1 complete, ready to plan Phase 159
-last_updated: "2026-09-02T19:07:46.817Z"
+stopped_at: Completed 164.4-00-PLAN.md
+last_updated: "2026-09-02T19:30:49.974Z"
 last_activity: 2026-09-02
 last_activity_desc: Phase 164.4 execution started
-state_head: d70a5f741c013c12256ca6e19f11bcb14f63c02a
+state_head: b0df78f0fc79f83b60c0a067e0e7af6fb21ed83f
 progress:
   total_phases: 14
   completed_phases: 5
@@ -516,7 +516,7 @@ Prior-phase 141.1 close-out detail (retained; NOT about 142.1):
         2 WARNING gaps, no BLOCKER. See `140.1-VERIFICATION.md`. Not transitioned (`--no-transition`).
 Last activity: 2026-08-02 -- Phase 142 execution started
 
-Progress: [███░░░░░░░] 29%
+Progress: [████░░░░░░] 36%
 
 ### Phase 140.1 close-out — open items (do NOT lose these)
 
@@ -674,6 +674,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 | Phase 164.3.1 P11 | 8h 31m | 3 tasks | 8 files |
 | Phase 164.3.1 P12 | 26 min | 3 tasks | 3 files |
 | Phase 164.3.1 P13 | 16 min | 3 tasks | 2 files |
+| Phase 164.4 P00 | 19 min | 3 tasks | 4 files |
 
 ## Accumulated Context
 
@@ -868,6 +869,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - [Phase 164.3.1]: 164.3.1-12: join clause 2 (version||'_'||name) measured SUBSUMED by clause 4 (desc-only); pinned as EXPECTED_SPECIFICITY, script header :44-47 reported stale not patched
 - [Phase 164.3.1]: 164.3.1-12: meta-arm allowlists classified BEFORE keys were transcribed (17 of 68 emissions, four classes); KNOWN_THRESHOLD_SITES exact set of 6; ${GATE} excluded from what counts as a runtime value
 - [Phase 164.3.1]: 164.3.1-13: gate-level arms assert the wiring's positive evidence line (readers-ran) as the pass condition, never the D-13 refusal; per-reader-visible fixtures make each VAC-04 union member individually load-bearing; scratch neuters proven by ABSENCE so standing calibration legs stay green under a recorded real-source neuter
+- [Phase 164.4]: Fixture strategy for Phase 164.4 RED-UNDER-SETUP lists: STAND-INS, not a stubbed real migration chain — Decided by the rule fixed before any probe ran. The stubbed chain failed rule (i) terminally at stub iteration 3 of 8, reaching 51 of 262 migrations, on a PL/pgSQL SAVEPOINT that cannot parse; it never reached a baseline to time. The stand-in candidate is GREEN at a 1.01 s/lane mean over three runs, projecting ~5.9 min for the 453-lane end state.
 
 ### Decisions (execution-time, Phase 140.2)
 
@@ -1570,8 +1572,8 @@ Load-bearing sequencing (real dependencies, do not reorder):
 
 ## Session
 
-**Last Date:** 2026-09-02T09:03:10.308Z
-**Stopped At:** Phase 164.3.1 complete, ready to plan Phase 159
+**Last Date:** 2026-09-02T19:30:49.711Z
+**Stopped At:** Completed 164.4-00-PLAN.md
 **Last Date:** 2026-08-25T22:26:01.687Z
 **Stopped At:** Completed 162-03-PLAN.md
 **Last Date:** 2026-08-25T22:28:04.096Z
@@ -1630,6 +1632,7 @@ pre-merge `e0493913`. Fix is PR #669. Supabase migrations and the Vercel fronten
 - 161.1-04 (wave 4, 2026-08-25): the composite arm LANDED DORMANT — `enqueue_ledger_composite_refresh` (migration `20260825140000`), 8-arm SQL gate, static gates 10-11, and the D-15 non-destructive guard EXTENDED to `run_stitch_composite_job._stamp_failed` (a second destructive stamp plan 02's guard never covered; found by measurement, fixed under Rule 2). ⛔ **Task 3 is a BLOCKING founder LIVE op and is NOT done:** one manual `stitch_composite` enqueue for the one live PROD composite must be observed to completion (`last_return_date` advancing in the staleness view, NOT a job going green) before the composite schedule is documented as activatable. The runbook's composite section is deliberately UNWRITTEN until then. TODOS 0.3 stays OPEN — half of its close condition (the arm exists) is met, half (a composite observed to refresh) is not.
 - 164-05 MEASURED: the phase-148 guard does NOT catch a second unstable_cache call site outside factsheet/[id]/v2/page.tsx (12/12 green under NEUTER-D). 164-07's closure guard does not close it either — the page imports the builder, not the reverse. Closed for the token route by src/app/factsheet-share/[token]/page.no-cache-reach.test.ts; the general repo-wide call-site pin is still unowned.
 - `state.advance-plan` REFUSES on this STATE.md (measured 2026-09-01 by 164.3.1-09): the `## Current Position` section carries a **second** `Phase:` line — line 129, inside the retained `### Retained — Phase 156 close-out` block — so the verb returns `ambiguous_position_phase` and will not advance rather than silently picking the first. Left UNRESOLVED on purpose: that block is marked *do NOT lose this*, and restructuring a retained ledger is outside a measure-only plan's scope. ⚠️ Consequence: the `Plan: 1 of 12` line under Current Position is **STALE** (9 of 12 plans now have SUMMARYs on disk). Read the frontmatter `progress` block or count `.planning/phases/164.3.1-*/`, never that line. Fix = move the Phase-156 retained block out of `## Current Position` into its own top-level section, or teach the verb to ignore `###`-nested entries.
+- [REDUNDER-PGCRON] 3 idiom gate files (71 of 355 sections, incl. Phase 164.4 rank 1) can never reach a GREEN pg-lane baseline: the lane has no pg_cron and those files RAISE on its absence. Blocks any batch containing them; needs a lane-substrate plan. Booked in TODOS.md.
 
 ## ⛔ Standing constraint from Phase 164.3.1 — do not lose this between sessions
 
