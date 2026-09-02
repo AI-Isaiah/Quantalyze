@@ -139,9 +139,12 @@ failure message in *either* direction changes what the identity check reads
 instead of what the arm does. Measured: **0 of the 49** file steps in the real
 corpus target this literal.
 
-⭐ That needle rule also load-bears for 3c: because no needle may name the
-literal, the runner can stamp every identity in the gate copy **before** the
-mutation steps run, without disturbing a single `find` or occurrence count.
+⭐ That needle rule load-bore for 3c while 3c was the identity NONCE (until
+2026-09-01): because no needle may name the literal, the runner could stamp every
+identity in the gate copy **before** the mutation steps ran, without disturbing a
+single `find` or occurrence count. Source-location attribution rewrites the gate
+copy not at all, so 3c no longer depends on it — the needle rule now stands on 3b
+alone, which is where it always belonged.
 
 ⚠️ **3a is not the closure and must never be cited as one.** Concatenation
 collapsing closes one more spelling; `format('TEST FA%sED (X)', 'IL')`,
@@ -175,6 +178,13 @@ statement. The ordered list of failure branches must survive a mutation
 `identity-rewrite`, raised **before** the lane runs, in both the full run and
 `--parse-only`.
 
+Both modes apply a multi-step `apply` **in order, to the same per-file buffer**:
+step N sees step N−1's output (Shape 3), and both stop at the first step that
+cannot be applied. `--parse-only` used to count every step against the pristine
+repo file, so a layered annotation could be a `MEASURE_FAIL` in the static mode
+and clean in the real run (WR-02, 164.3.1 review);
+`fixtures/selftest/layered-apply-gate.sql` pins the identity.
+
 ⚠️ The unit used to be a **sorted multiset of identities**, and that was blind in
 two measured ways, both found in round 3:
 
@@ -186,6 +196,11 @@ two measured ways, both found in round 3:
   cleanly and passed the multiset compare — while the owner-coherence
   `WITH CHECK` the arm claims to test was never evaluated. The guard is part of
   the branch, so it is part of the invariant.
+- **a closed block between the guard and the raise.** A `FOR … END LOOP;`, a
+  nested `IF … END IF;` or a `BEGIN … END;` above the raise is a statement OF
+  the branch, not its head. The backward walk steps over a closer to the
+  statement that opened it and keeps walking, so the guard stays inside the
+  unit (CR-01, 164.3.1 review — measured blind on all three shapes before).
 
 ⚠️ Neuters are deliberately exempt — neutering an arm removes its identity on
 purpose. The comparison is taken across a mutation step only, with the
@@ -199,7 +214,7 @@ exists.
 is not recognised as a failure branch, so it appears in neither list. That half
 belongs to 3c.
 
-#### 3c — the identity the detector reads must be one the RUNNER wrote (refused at RUN time, by NONCE)
+#### 3c — an identity is READ only where the RUNNER's gate RAISED it (refused at RUN time, by SOURCE LOCATION)
 
 ⛔ The measured shape that defeated both halves above, and which no text rule can
 reach:
@@ -216,28 +231,112 @@ touched.** A `sql` step is not a file edit, so it was never subject to 3b at
 all; and its spelling can always be changed, so 3a can always be evaded.
 
 So the runner stops asking what the annotation *says* and asserts over what the
-database *printed*. Before each arm's lane runs, it rewrites the **scratch copy
-of the pristine gate**, stamping a fresh random nonce into every identity:
+database *printed* — and, since 2026-09-01, over **where the database printed it
+from**.
+
+##### THE RULE
+
+Each lane runs `psql` with `VERBOSITY=verbose`. An identity is **ATTRIBUTED** to
+an arm only when **all three** of these hold — measured on PostgreSQL 16.13:
+
+| Leg | Assertion |
+|---|---|
+| **(a)** | the `psql:<file>:<line>:` prefix names **this lane's gate scratch file**, at the failing statement's LAST line |
+| **(b)** | the error's CONTEXT chain is **EXACTLY ONE** frame, `PL/pgSQL function inline_code_block line N at RAISE`, bounded by verbose's `LOCATION:` sentinel |
+| **(c)** | `stmtStartLine + N − 1` equals the arm's raise line, resolved through the statement tokenizer's spans |
+
+The genuine shape, and the two things that make it decidable:
+
+```
+psql:<gate scratch>:9: ERROR:  P0001: TEST FAILED (X 1): demo arm
+CONTEXT:  PL/pgSQL function inline_code_block line 5 at RAISE
+LOCATION:  exec_stmt_raise, pl_exec.c:3911        ← chain ended: exactly 1 frame
+```
+
+Anything else — extra frames, a named function, `at EXECUTE`, a non-gate prefix,
+a severity other than `ERROR`, a SQLSTATE other than `P0001`, an identity
+carried by a CONTEXT/DETAIL **field** rather than by the message, or a block in
+which a diagnostic field name **repeats** or LOCATION is **not the final field**
+(F1 below) — scores
+`SYNTHESISED` or `NO-IDENTITY`, and the arm is **not counted as biting**. Output
+whose grammar the parser cannot read at all is a loud `MEASURE_FAIL`, never a
+silent pass.
+
+##### SUPERSEDED, kept as the lineage this design is built on: the identity NONCE
+
+Until 2026-09-01, 3c stamped a fresh random nonce into the scratch copy of the
+gate before each lane and read only stamped identities:
 
 ```
 TEST FAILED (ANON 1a)   ->   TEST FAILED (7f3c9a1e|ANON 1a)
 ```
 
-and the first-failure check then reads **only stamped identities**. An
-annotation cannot produce a stamped identity, because the nonce is generated per
-arm run, after parsing. Any `TEST FAILED (` the lane emits **without** the stamp
-is by construction text the runner did not put in the gate file: the defect kind
-`synthesised-identity`, and the arm is **not counted as biting**.
+⛔ **[R4-C02] measured that dead.** The nonce was a *secret transmitted to the
+attacker*: the stamped text sits in the query text of the statement the gate is
+running, and PostgreSQL hands query text to server-side code. A trigger
+installed by a `sql` step — no file read, no superuser — read it back:
 
-Order is load-bearing: neuters run first (their needle is the unstamped
-literal), then the stamp, then the mutation steps. Stamping *after* the mutation
-would stamp whatever the mutation injected — the thing being refused.
+```sql
+RAISE EXCEPTION '%', substring(current_query() from 'TEST FAILED \([^)]*\)');
+```
 
-⚠️ **Honest residual.** The stamp is unforgeable to an annotation that only
-writes SQL. It is not unforgeable to SQL that reads the stamped gate file back
-off disk (`pg_read_file` as superuser) and echoes it. Nothing in the corpus does
-that, and such an annotation would be obviously hostile in review, but that is
-the boundary of this control and it is stated rather than implied.
+and an arm whose own raise was guarded by `IF FALSE` scored `RED (identity ok)`
+with `biting: 1`. Source location is not a secret at all, so there is nothing to
+transmit and nothing to steal.
+
+##### ⭐ AUTHORING RULE for 164.4 (and every annotation after it)
+
+> **An arm's `TEST FAILED (…)` raise MUST sit DIRECTLY in a `DO $$ … $$;` body.**
+>
+> A raise nested inside `EXECUTE`, inside a helper function, or inside a trigger
+> is refused `NO-IDENTITY` — **by design, and loudly**. It is not a bug to
+> report; it is the control working.
+
+Why the rule has to be this strict: the innermost CONTEXT frame **alone is
+forgeable**. A trigger running
+
+```sql
+EXECUTE 'DO $d$' || repeat(E'\n', k) || 'BEGIN RAISE EXCEPTION ''…''; END $d$'
+```
+
+produces an `inline_code_block line N at RAISE` frame whose **name and line are
+both attacker-chosen**, under the gate file's own `psql:` prefix — legs (a) and
+(c) both pass. MEASURED 2026-09-01: with `k = 4` the forgery landed on the
+genuine arm's exact resolved line. What an attacker cannot *remove* is the rest
+of the chain, so the chain's **length** is one control, and
+`164.3.1-05-ATTRIBUTION.md` records it flipping to a false `RED (identity ok)`
+when neutered to first-frame-only.
+
+⛔ **Length alone is not enough — F1 (164.3.1 adversarial review, measured live
+2026-09-02).** The attacker cannot *remove* frames, but they can *prepend* to the
+**message**, and psql prints a multi-line message raw. A trigger raising
+
+```sql
+RAISE EXCEPTION E'TEST FAILED (X)\nCONTEXT:  PL/pgSQL function inline_code_block line 5 at RAISE\nLOCATION:  exec_stmt_raise, pl_exec.c:3911';
+```
+
+from inside the gate's DO prints a forged single-frame CONTEXT + LOCATION pair
+*before* the real chain, so a reader that takes the first CONTEXT and the first
+LOCATION after it passes all three legs. What libpq cannot help doing is printing
+the **real** fields afterwards, each of DETAIL / HINT / QUERY / CONTEXT / the
+five verbose `… NAME` fields / LOCATION **at most once, in a fixed order,
+LOCATION last**. So the runner refuses any block in which a field name repeats
+or LOCATION is not the final field — `duplicated diagnostic field —
+message-embedded forgery` — and the self-test keeps that refusal lane-driven
+(`fixtures/selftest/message-embedded-forge-gate.sql`, scenario 13). Corollary
+for 164.4 authors: a RAISE message must not contain a line that *looks like* a
+psql field (`CONTEXT:  …`, `LOCATION:  …`); such an arm is refused, loudly.
+
+All 104 identities in today's corpus are single-frame direct DO-body raises, so
+this rule refuses nothing that exists. It is written down here so a 164.4 author
+meets it as a **contract** rather than as a surprise from the runner.
+
+⚠️ **Honest residual.** A hostile annotation can still make the database print
+arbitrary text; what it can no longer do is make that text *attributable*, and a
+hostile annotation remains visibly hostile in review. The psql CONTEXT grammar is
+measured on macOS / PostgreSQL 16.13 only — the `sql-mutation` CI job has never
+executed on its ubuntu host (WINDOWS.md 28), so the parse rides an unobserved
+host and answers that with `MEASURE_FAIL`, not with a fallback.
 
 ---
 
@@ -288,7 +387,7 @@ and *before* the gate. This is not a file edit; it is routed through the lane's
 | Key | Type | Required | Meaning |
 |---|---|---|---|
 | `kind` | `"sql"` | yes | |
-| `stmt` | string | yes | Non-empty. **May not contain a `TEST FAILED (` literal, directly or by concatenation — rule 3a.** ⚠️ A `sql` step is not a file edit, so rule **3b cannot apply to it**; what bounds it is rule **3c**, the run-time identity nonce. |
+| `stmt` | string | yes | Non-empty. **May not contain a `TEST FAILED (` literal, directly or by concatenation — rule 3a.** ⚠️ A `sql` step is not a file edit, so rule **3b cannot apply to it**; what bounds it is rule **3c**, run-time source-location attribution. |
 
 ### `RED-UNDER-SETUP` — the in-file apply list
 
@@ -467,7 +566,7 @@ raising is never silently swallowed.
 | `wrong-first-failure` | The gate went red, but the FIRST `TEST FAILED (…)` names a different arm. Red-anywhere is not success. |
 | `neuter-missed` | A neutered arm still appeared in the output. |
 | `identity-rewrite` | **MEASURE_FAIL.** The step changed the ordered list of FAILURE BRANCHES in the file — an identity, an identity swap, an injected raise, or the guard the raise sits behind (rule 3b). The mutation was NOT applied and the arm never reached a lane. |
-| `synthesised-identity` | **MEASURE_FAIL.** The lane emitted a `TEST FAILED (…)` the runner did not stamp (rule 3c). The mutation SYNTHESISED the identity the detector reads instead of exercising the arm. The arm ran, and is NOT counted as biting. |
+| `synthesised-identity` | **MEASURE_FAIL.** The lane emitted a `TEST FAILED (…)` that is not ATTRIBUTABLE to a raise in the runner's own gate copy (rule 3c: wrong file, a CONTEXT chain that is not exactly one `inline_code_block … at RAISE` frame, a line that does not resolve, a NOTICE, or an identity carried by a field rather than a message). The mutation SYNTHESISED the identity the detector reads instead of exercising the arm. The arm ran, and is NOT counted as biting. Also raised when the output grammar itself is unreadable — an unparseable format is a measurement failure, not a clean "no identity". |
 | `baseline` | Pristine copies did not go GREEN before any mutation — a broken corpus. |
 | `restore` | Pristine copies did not go GREEN after the arm runs. |
 | `dirty-checkout` | `git status --porcelain` was non-empty after the run. Mutations must only ever touch scratch copies. |

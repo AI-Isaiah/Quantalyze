@@ -244,15 +244,220 @@ if grep -aqE '[^[:space:]]' "$TMP/names.naive-only.txt"; then
 fi
 
 NAME_COUNT="${#NAMES[@]}"
+_lexer_n="$(grep -ac '[^[:space:]]' "$TMP/names.lexer.txt" || true)"
+_naive_n="$(grep -ac '[^[:space:]]' "$TMP/names.naive.txt" || true)"
+
+# ── VAC04-ZERO-PATH-FAILS-CLOSED ─────────────────────────────────────────────
+#
+# ⛔ [VAC04-C1]. The zero path used to be a one-line `::notice::` and `exit 0`:
+#     "this PR's migrations define no functions — nothing to compare.
+#      (Two independent readings agree; see SP-C05.)"
+# and the parenthesis was doing work it cannot do. TWO READINGS AGREEING IS
+# NOT A MEASUREMENT WHEN THEIR BLIND SPOTS OVERLAP — that is one absence
+# observed twice, not two observations of absence. SP-C05 bought INDEPENDENCE
+# (the two readers do not share an implementation); independence is not
+# COVERAGE.
+#
+# MEASURED 2026-09-01 at bab02576 on the P8 composing shape — one line, two
+# statements, a `$` in the identifier:
+#     SELECT 1; CREATE OR REPLACE FUNCTION public.fn$v2(p uuid) …
+# The line-anchored reader never starts (the line does not BEGIN with
+# `CREATE`); the lexer's `readQualifiedName` stops at the `$`. Both print
+# NOTHING and exit 0, and this gate printed:
+#     "Migrations changed by this PR: 1"
+#     "::notice::… define no functions — nothing to compare. (Two independent
+#      readings agree; see SP-C05.)"                                  exit 0
+# A gate over PRODUCTION function bodies, green, having compared nothing.
+# That is Primitive C's canonical case: a VERDICT not bounded by what was
+# MEASURED. So this path REFUSES — and prints its evidence FIRST, because a
+# gate that ships a bare conclusion is the same defect one level down
+# (D-12 / SC-7).
+#
+# ⚠️ WHAT THIS COSTS, AND WHO PAYS IT — AMENDED 2026-09-01 (D-13, second
+# refinement). The first fail-closed version refused EVERY migration PR whose
+# changed migrations define no function, not only the exotic composing shape.
+# MEASURED at HEAD over all 262 migrations in this repo: 111 define no
+# function that either structural reader can see, so that version permanently
+# blocked roughly two migration PRs in five — `ALTER TABLE`, `INSERT`, policy
+# and index changes — from a gate whose subject is FUNCTION BODY drift. That
+# satisfies the criterion's letter while making the gate a NUISANCE on
+# legitimate work, and a nuisance gate acquires an escape hatch from whoever
+# is on call at 2am. That is a slower version of the failure this gate exists
+# to prevent. So the tripwire SEPARATES two states that look identical to the
+# two structural readers:
+#
+#   (a) LEGITIMATE zero — the changed migrations genuinely contain no
+#       function definition at all. PASSES, with a notice naming what was
+#       scanned and why the zero is trustworthy.
+#   (b) BLIND definition — a definition IS present and both readers missed it.
+#       REFUSES, with the full evidence block.
+#
+# SC-4 is preserved in letter AND in intent: never exit 0 having compared
+# nothing WHEN THERE WAS SOMETHING TO COMPARE.
+#
+# ── VAC04-ZERO-PATH-TRIPWIRE — the discriminator, and why it stays CRUDE ───
+#
+# ⛔ DO NOT "IMPROVE" THIS INTO A PARSER. Its crudeness is the entire reason
+# it is admissible here. It is a THIRD reading, and its BLIND SPOTS DO NOT OVERLAP
+# the other two precisely because it understands neither statements
+# nor identifiers: it sees the non-line-start shape the line-anchored reader
+# misses, and the `$`-identifier the lexer's `readQualifiedName` misses. Give
+# it structure and it starts sharing their assumptions — and a tripwire that
+# shares the blind spots of the instruments it is checking turns "two
+# independent readings agree" into one absence observed three times, which is
+# the exact defect ([VAC04-C1]) this branch was written to close.
+#
+# ── AMENDED (164.3.1 fix round, F2) — UNCONDITIONAL, PER FILE, COMMENTS MASKED
+# The first tripwire had two holes of its own, both MEASURED at 8969513e:
+#   (a) it ran ONLY when the readers found ZERO names. A file defining one
+#       function both readers see AND one both miss reached the comparison
+#       loop with the visible one alone, compared it, and exited 0.
+#   (b) it was comment-blind in the WRONG direction. `CREATE /*c*/ OR REPLACE
+#       FUNCTION` gives lexer 0, naive 0 and tripwire 0 (the regex wants the
+#       keywords separated by whitespace only) — three instruments agreeing
+#       on zero, and the run took the LEGITIMATE-ZERO exit 0.
+# So the scan now runs over EVERY changed file, unconditionally, and compares
+# per file: the number of DISTINCT textual definition tokens it sees, after
+# masking `/* … */` and `-- …` comments, against the number of names the two
+# structural readers' UNION found in that same file. Textual > structural is a
+# refusal naming the file. The direction of every imprecision is stated:
+#   - A `CREATE FUNCTION` inside a dollar-quoted string (dynamic SQL, a body
+#     that `EXECUTE`s a definition) OVER-counts → block. Fail-safe, rare.
+#   - The same name defined once qualified and once bare over-counts → block.
+#     MEASURED at 8969513e over all 262 migrations: 0 files block; the one
+#     file that defines a name twice does so spelled identically and passes.
+#   - An unterminated `/*` or a `--` inside a string on the same line as a
+#     definition UNDER-counts. Harmless: the structural readers already saw
+#     whatever the mask hid, and the comparison loop below compares it.
+# Distinct TOKENS, not identifiers: the token is "whatever follows FUNCTION up
+# to whitespace or `(`", lowercased. That is still no parser — it does not
+# know what an identifier is, which is exactly why it sees `fn$v2`. Masking
+# comments shares an assumption with the lexer, but the lexer's measured blind
+# spot is the identifier charset and the naive reader's is line anchoring;
+# neither is a comment blind spot, so the three still do not overlap.
+#
+# MASKING is done by node (`fs` reads past the NUL byte this repo measured;
+# shell grep is silently blind past it) and the COUNT by grep with the
+# `grep_rc` idiom from scripts/test-ledger-drift-check.sh:311-318 — grep exits
+# 0 on a match, 1 on none, and >= 2 on an ERROR, and an UNREADABLE migration
+# must never be counted as a migration with no function in it.
+#
+# ⛔ MIGRATION PRs ARE STILL HELD UNTIL PHASE 164.3.1 AND PHASE 164.4 HAVE
+#    BOTH LANDED. This refinement narrows WHICH PRs are held; it does not
+#    retire the sequencing (founder decision, amended D-07, 2026-09-01). If
+#    you are reading this because your PR is blocked here, the gate is
+#    WORKING. Route the ordering, not the gate. Do NOT revert this branch to
+#    an unconditional `exit 0`, and do NOT add an acknowledgment pragma or
+#    any other human override to it: the tripwire is a MEASUREMENT, not a
+#    knob. The reopen pin in src/__tests__/drift-check-scripts.test.ts
+#    ("[VAC04-C1] — the zero path FAILS CLOSED") REDs by execution if you
+#    revert it, and by name if you delete the marker above.
+: > "$TMP/textual-hits.txt"
+TEXTUAL_TOTAL=0
+for _f in "${CHANGED_FILES[@]}"; do
+  # Mask block and line comments, then newline-FLATTEN so a `CREATE OR
+  # REPLACE` split across lines from its `FUNCTION` is still one token run.
+  node -e '
+const fs = require("node:fs");
+const src = fs.readFileSync(process.argv[1], "utf8");
+let out = "";
+for (let i = 0; i < src.length; ) {
+  if (src.startsWith("/*", i)) { const e = src.indexOf("*/", i + 2); i = e < 0 ? src.length : e + 2; out += " "; continue; }
+  if (src.startsWith("--", i)) { const e = src.indexOf("\n", i); i = e < 0 ? src.length : e; continue; }
+  out += src[i++];
+}
+process.stdout.write(out.replace(/\n/g, " ") + "\n");
+' "$_f" > "$TMP/masked.txt" \
+    || fail "MEASURE_FAIL: could not read ${_f} for the textual scan. An unreadable migration is not a migration without a function in it."
+  set +e
+  grep -aoiE 'CREATE[[:space:]]+(OR[[:space:]]+REPLACE[[:space:]]+)?FUNCTION[[:space:]]+[^[:space:](]+' "$TMP/masked.txt" > "$TMP/masked.hits.txt"
+  _tw_rc=$?
+  set -e
+  [ "$_tw_rc" -le 1 ] || fail "MEASURE_FAIL: the textual scan could not read ${_f} (grep exited ${_tw_rc}). An unscannable file is not a clean one."
+  _textual_n="$(sed 's/.*[[:space:]]//' "$TMP/masked.hits.txt" | tr '[:upper:]' '[:lower:]' | LC_ALL=C sort -u | sed '/^[[:space:]]*$/d' | wc -l | tr -d ' ')" \
+    || fail "MEASURE_FAIL: could not count the textual scan's hits for ${_f}."
+  node "$NORMALIZER" --function-names "$_f" > "$TMP/names.lexer.one.txt" \
+    || fail "could not extract function names from ${_f}."
+  node "$NAIVE_NAMES" "$_f" > "$TMP/names.naive.one.txt" \
+    || fail "the independent name reader failed on ${_f}."
+  _structural_n="$(LC_ALL=C sort -u "$TMP/names.lexer.one.txt" "$TMP/names.naive.one.txt" | sed '/^[[:space:]]*$/d' | wc -l | tr -d ' ')" \
+    || fail "MEASURE_FAIL: could not count the structural readers' names for ${_f}."
+  TEXTUAL_TOTAL=$(( TEXTUAL_TOTAL + _textual_n ))
+  if [ "$_textual_n" -gt "$_structural_n" ]; then
+    printf '%s: textual %s definition(s) vs structural %s\n' "$_f" "$_textual_n" "$_structural_n" >> "$TMP/textual-hits.txt"
+  fi
+done
+
+# WR-04 (164.3.1 review): the hit-list test is a grep too, and it carried the
+# bare idiom: an exit >= 2 (unreadable hit list, broken locale) fell into the
+# LEGITIMATE-ZERO branch below and the run exited 0 — a zero path this gate
+# could not read, reported as one it read and found clean. Captured and
+# branched with the [VAC04-C3] discipline; only a grep that RAN and found no
+# line may reach the pass.
+set +e
+grep -aqE '[^[:space:]]' "$TMP/textual-hits.txt"
+_hits_rc=$?
+set -e
+[ "$_hits_rc" -le 1 ] || fail "MEASURE_FAIL: could not read the textual scan's hit list at ${TMP}/textual-hits.txt (grep exited ${_hits_rc}). A hit list this gate could not read is not one that measured zero hits, so the legitimate-zero pass is not reachable from it."
+
+if [ "$_hits_rc" -eq 0 ]; then
+  # ── (b) BLIND DEFINITION ──────────────────────────────────────────────────
+  echo "::error::${GATE}: MEASURE_FAIL — a function definition is present that NEITHER reader can see."
+  echo "::error::"
+  echo "::error::WHAT THE TWO READERS SAW (evidence first — D-12/SC-7):"
+  echo "::error::  changed migration file(s): ${CHANGED_COUNT}"
+  sed 's|^|::error::    |' "$TMP/changed.txt"
+  echo "::error::  ${NORMALIZER} --function-names -> ${_lexer_n:-0} name(s)"
+  grep -aqE '[^[:space:]]' "$TMP/names.lexer.txt" \
+    && sed 's|^|::error::    |' "$TMP/names.lexer.txt" \
+    || echo "::error::    (none)"
+  echo "::error::  ${NAIVE_NAMES} -> ${_naive_n:-0} name(s)"
+  grep -aqE '[^[:space:]]' "$TMP/names.naive.txt" \
+    && sed 's|^|::error::    |' "$TMP/names.naive.txt" \
+    || echo "::error::    (none)"
+  echo "::error::  crude textual scan (comments masked) for 'CREATE [OR REPLACE] FUNCTION' -> MORE definitions than the readers' union in:"
+  sed 's|^|::error::    |' "$TMP/textual-hits.txt"
+  echo "::error::"
+  echo "::error::[VAC04-C1] Two independent readings agreeing is not evidence of absence when"
+  echo "::error::their blind spots OVERLAP — it is one absence observed twice. A THIRD reading,"
+  echo "::error::too crude to share either structural reader's blind spots, FOUND a definition"
+  echo "::error::in the file(s) above that neither reader returned a name for. Whatever the"
+  echo "::error::readers DID see would be compared; this one would not, and a gate cannot"
+  echo "::error::report a pass for a comparison it never made. A changed set whose textual"
+  echo "::error::count matches its structural count — including one with no function at all —"
+  echo "::error::passes here; this one did not."
+  echo "::error::MEASURED 2026-09-01: a mid-line definition carrying a '\$' in its identifier"
+  echo "::error::is invisible to BOTH readers, and this gate exited 0 on it having compared"
+  echo "::error::nothing at all, over PRODUCTION function bodies. So this path fails closed."
+  echo "::error::"
+  echo "::error::⛔ ORDERING, not a defect to route around: migration PRs are HELD until Phase"
+  echo "::error::164.3.1 AND Phase 164.4 have both landed (founder decision, amended D-07,"
+  echo "::error::2026-09-01). A block here is this gate WORKING."
+  echo "::error::To proceed on a PR that genuinely defines a function, make the definition"
+  echo "::error::visible to at least one reader — put 'CREATE OR REPLACE FUNCTION' at the"
+  echo "::error::start of its own line, with no comment inside the keywords — and re-run."
+  exit 1
+fi
+
 if [ "${NAME_COUNT:-0}" -eq 0 ]; then
-  # Now a TWO-READING zero: neither the lexer-based parser nor the line-anchored
-  # regex found a definition. ⚠️ Residual, stated rather than implied: a
-  # definition assembled at run time inside dynamic SQL (`EXECUTE 'CREATE
-  # FUNCTION …'`) is claimed by neither reading and still reaches this exit 0.
-  # A cruder token scan was MEASURED as the alternative and rejected: 7 of the
-  # 262 migrations in this repo mention `CREATE … FUNCTION` in prose while
-  # defining none, so it would red real PRs for reading a comment.
-  echo "::notice::${GATE}: this PR's migrations define no functions — nothing to compare. (Two independent readings agree; see SP-C05.)"
+  # ── (a) LEGITIMATE ZERO ─────────────────────────────────────────────────────
+  # Both readers returned nothing (that is what NAME_COUNT=0 means — names.txt
+  # is their union, so each is 0 by construction) AND the textual scan above
+  # found no file with more definitions than they did — with both at zero,
+  # that means it found no definition at all.
+  echo "::notice::${GATE}: no functions defined, and the zero is LEGITIMATE — nothing to compare."
+  echo "::notice::WHAT WAS SCANNED (evidence first — D-12/SC-7):"
+  echo "::notice::  changed migration file(s): ${CHANGED_COUNT}"
+  sed 's|^|::notice::    |' "$TMP/changed.txt"
+  echo "::notice::  ${NORMALIZER} --function-names -> 0 name(s)"
+  echo "::notice::  ${NAIVE_NAMES} -> 0 name(s)"
+  echo "::notice::  crude textual scan (comments masked) for 'CREATE [OR REPLACE] FUNCTION' -> ${TEXTUAL_TOTAL} definition(s) in ${CHANGED_COUNT} file(s)"
+  echo "::notice::A THIRD reading — deliberately crude, sharing neither structural reader's"
+  echo "::notice::blind spots — finds no such text ANYWHERE in the changed set once comments"
+  echo "::notice::are masked. So the two readers' zero is an absence of FUNCTIONS, not an"
+  echo "::notice::absence of VISION, and there was genuinely nothing here to compare against"
+  echo "::notice::PROD. Had that scan found a definition with both readers still empty, this"
+  echo "::notice::run would have REFUSED."
   exit 0
 fi
 
@@ -338,6 +543,106 @@ if [ "${XCHECK_ONLY_COUNT:-0}" -gt 0 ]; then
   echo "::warning::The primary index shares its parser with the body fetcher, so those names would"
   echo "::warning::previously have been reported 'absent from PROD — a NEW function (pass)'."
 fi
+
+# ── ABSURDITY FLOOR ──────────────────────────────────────────────────────────
+# MEASURED 2026-09-01 at 15ab417b, sample size and coverage stated below (SC-9).
+# Is this a PROD that genuinely holds almost no functions, or a BROKEN READER?
+# The empty-index guards above answer that only for EXACTLY zero. One name
+# through and they go quiet — and a near-empty index is the "every function is
+# new — pass" shape, because a name absent from a tiny index takes the
+# measured-absent pass on every iteration of the loop below. This is D-09's
+# VAC-04 half, templated on VAC-08's floor at
+# test-ledger-drift-check.sh:320-350 (structure, not numbers).
+#
+# ── THE RULE, AND WHY IT IS A RATIO AND NOT A LITERAL ───────────────────────
+# The floor is calibrated against a SECOND, INDEPENDENTLY PRODUCED population
+# the gate already holds: the committed snapshot directory. Those bodies are
+# generated FROM PROD by `npm run schema:functions`, so their count is a prior
+# measurement of PROD's public-schema function catalogue — not a number someone
+# chose. A hardcoded literal would rot the moment PROD's catalogue grew or
+# shrank, and D-10 is explicit that thresholds are set by MEASUREMENT, never by
+# taste. So: if the snapshot is substantially populated but PROD's index holds
+# fewer than HALF as many names, the READER is broken, not the database.
+#
+# ── SAMPLE SIZE AND COVERAGE (SC-9) ─────────────────────────────────────────
+#   Corpus      : 380 `.sql` files — 262 under supabase/migrations/ and 118
+#                 under supabase/schema/functions/.
+#   Definitions : 359 across that corpus; 122 DISTINCT function names in the
+#                 union of the two readers (0 disagreements).
+#   PROD proxy  : 118 committed bodies in supabase/schema/functions/, generated
+#                 from PROD (`npm run schema:functions`); the gate's own header
+#                 records the same 118 verified 2026-08-28.
+#   Measured    : 2026-09-01 at 15ab417b, with the SAME two readers this gate
+#                 unions, over the whole corpus (not a sample of it).
+#
+# ── WIDE SEPARATION, BOTH DIRECTIONS STATED WITH THEIR MEASURED VALUES ──────
+#   FIRES  : a broken reader scores 0 names. MEASURED 2026-09-01 (plan
+#            164.3.1-04's pre-fix probe): the [VAC04-C2] guard defect made BOTH
+#            readers print nothing and exit 0 on every symlinked invocation.
+#            0 * 2 = 0, far under 118 — fires.
+#   SILENT : the real index scores 118-122 names. 122 * 2 = 244, far over 118 —
+#            silent. Ordinary churn does not approach the halfway mark: PROD
+#            would have to lose ~60 functions in one PR to reach it.
+#   The two sides are an order of magnitude apart around the 59-name halfway
+#   point, so this is separation, not tuning.
+#
+# ── WHAT THIS DOES NOT COVER, stated rather than implied ────────────────────
+# When the snapshot population is under SNAPSHOT_MIN the ratio has no reliable
+# denominator and the floor goes INERT. That state is ANNOUNCED rather than
+# silent (the else branch below), because a control that quietly stops
+# controlling is the defect this phase exists to stop. It is also loud
+# elsewhere: with a depopulated snapshot, every compared function hits the
+# "PROD has it but the committed snapshot does not" failure above.
+SNAPSHOT_MIN=50
+# WR-04 (164.3.1 review): the WALK and the COUNT are two measurements, each
+# with its own exit status. They used to share one pipeline under `pipefail`,
+# where a `find` that fails mid-walk (permission, I/O) exits 1 — the status
+# `grep -c` returns for "counted, no rows" — so a failed walk read as a LOW
+# population, the floor went INERT with a `::warning::`, and the "every
+# function is new — pass" shape it exists to catch was unguarded for that run.
+# The `-d` check at the top bounds only the missing-directory case.
+set +e
+find "$SNAPSHOT_DIR" -maxdepth 1 -type f -name '*.sql' -print > "$TMP/snapshot-bodies.txt"
+_find_rc=$?
+set -e
+[ "$_find_rc" -eq 0 ] || fail "MEASURE_FAIL: could not enumerate the committed snapshot bodies under ${SNAPSHOT_DIR} (find exited ${_find_rc}). The absurdity floor calibrates against that population, and a walk that failed is not a population of whatever it managed to list."
+set +e
+SNAPSHOT_BODY_COUNT="$(grep -ac '[^[:space:]]' "$TMP/snapshot-bodies.txt")"
+_snap_rc=$?
+set -e
+# Same grep exit-code discipline as [VAC04-C3] and SP-M01: 0 = counted, 1 = no
+# rows, >= 2 = could not read. An uncountable population is not an empty one.
+[ "$_snap_rc" -le 1 ] || fail "MEASURE_FAIL: could not count the committed snapshot bodies under ${SNAPSHOT_DIR} (grep exited ${_snap_rc}). The absurdity floor calibrates against that population, and an uncountable denominator is not a denominator of zero."
+SNAPSHOT_BODY_COUNT="${SNAPSHOT_BODY_COUNT:-0}"
+if [ "${SNAPSHOT_BODY_COUNT:-0}" -ge "$SNAPSHOT_MIN" ]; then
+  if [ $(( ${PROD_NAME_COUNT:-0} * 2 )) -lt "$SNAPSHOT_BODY_COUNT" ]; then
+    echo "::error::${GATE}: MEASURE_FAIL — this is the GATE failing, not the database."
+    echo "::error::"
+    echo "::error::WHAT WAS READ (evidence first — D-12/SC-7):"
+    echo "::error::  PROD function-name index : ${PROD_NAME_COUNT:-0} name(s), union of two readings"
+    echo "::error::  committed snapshot bodies: ${SNAPSHOT_BODY_COUNT} under ${SNAPSHOT_DIR}"
+    echo "::error::  absurdity floor          : the index must hold at least half the snapshot"
+    echo "::error::                             population ($(( SNAPSHOT_BODY_COUNT / 2 )) name(s)) once that"
+    echo "::error::                             population is >= ${SNAPSHOT_MIN}"
+    echo "::error::  first names actually read:"
+    head -n 10 "$TMP/prod-names.txt" | sed 's|^|::error::    |'
+    echo "::error::"
+    echo "::error::Those snapshot bodies were generated FROM PROD, so the repository already"
+    echo "::error::knows PROD holds roughly that many functions. An index holding a small"
+    echo "::error::fraction of them is a reader that stopped matching, not a database that"
+    echo "::error::dropped its catalogue — and every name absent from a tiny index takes this"
+    echo "::error::gate's measured-absent pass, so the failure mode is 'every function is new"
+    echo "::error::— pass' with nothing compared at all."
+    echo "::error::Fix the index reader (or the dump it reads); do NOT widen this floor to"
+    echo "::error::make the run green."
+    exit 1
+  fi
+else
+  # Announced, never silent — see "WHAT THIS DOES NOT COVER" above.
+  echo "::warning::${GATE}: the absurdity floor is INERT this run — the committed snapshot"
+  echo "::warning::population under ${SNAPSHOT_DIR} is ${SNAPSHOT_BODY_COUNT}, below the ${SNAPSHOT_MIN} needed to"
+  echo "::warning::calibrate against it. A near-empty PROD name index would NOT be caught here."
+fi
 echo "Functions indexed in the PROD source: ${PROD_NAME_COUNT:-0} (union of two independent readings)"
 echo ""
 
@@ -420,9 +725,64 @@ for fname in "${NAMES[@]}"; do
     continue
   fi
 
-  if [ ! -s "$live" ] || ! grep -aqE '[^[:space:]]' "$live"; then
+  # WR-04 (164.3.1 review): the whitespace-only test on the fetched body is a
+  # grep too, and it carried the bare idiom [VAC04-C3] fixed just below: an
+  # exit >= 2 here (unreadable file, I/O failure, broken locale) was read as
+  # "empty body" and routed to the index lookup — fail-CLOSED when the name is
+  # in the index (an "extraction failure" with the wrong cause), but the
+  # measured-absent PASS when it is not, for a body this run FETCHED and then
+  # could not read. Captured and branched three ways.
+  set +e
+  grep -aqE '[^[:space:]]' "$live"
+  _live_rc=$?
+  set -e
+  if [ "$_live_rc" -ge 2 ]; then
+    echo "::error::${GATE}: MEASURE_FAIL — could not READ the body fetched from PROD for '${fname}'."
+    echo "::error::  body file   : ${live}"
+    echo "::error::  grep exited : ${_live_rc}   (0 = has content, 1 = empty or whitespace, >= 2 = ERROR)"
+    echo "::error::A body this gate could not read is neither a body it compared nor one it measured"
+    echo "::error::empty; reporting either would be a verdict over bytes this run never saw."
+    exit 1
+  fi
+  if [ ! -s "$live" ] || [ "$_live_rc" -eq 1 ]; then
     # WR-01: empty stdout is TWO different facts. Ask the index which one.
-    if grep -aqxF -- "$fname" "$TMP/prod-names.txt"; then
+    #
+    # ⛔ [VAC04-C3]. This was a BARE `if grep …; then … else … fi`, and `grep`
+    # exits 0 on a match, 1 on NO match, and >= 2 on an ERROR — an unreadable
+    # file, an I/O failure, a broken locale. Exit 1 and exit 2 both fell to the
+    # same `else`, which prints "measured absent … Treated as a NEW function
+    # (pass)". So an index this gate COULD NOT READ was reported as an index it
+    # read and found nothing in, turning WR-01's one fail-CLOSED arm ("absence
+    # is a MEASUREMENT") into a fail-OPEN one. Repeated across every name it is
+    # the whole gate green having compared nothing.
+    #
+    # MEASURED 2026-09-01 with a `grep` shimmed to exit 2 on this call alone:
+    #   "  demo_fn: measured absent — not in the PROD source's 1-name index.
+    #    Treated as a NEW function (pass)."
+    #   "::notice::… ZERO bodies compared … This is a measured zero, not an
+    #    unread one."                                                  exit 0
+    # The last sentence was the exact inversion of the truth.
+    #
+    # The status is CAPTURED and branched three ways, using VAC-08's discipline
+    # at test-ledger-drift-check.sh:311-318. `-aqxF` is kept verbatim: NUL-safe,
+    # fixed-string, whole-line — the reason for each flag is the house idiom.
+    set +e
+    grep -aqxF -- "$fname" "$TMP/prod-names.txt"
+    _idx_rc=$?
+    set -e
+    if [ "$_idx_rc" -ge 2 ]; then
+      echo "::error::${GATE}: MEASURE_FAIL — could not READ the PROD function-name index while"
+      echo "::error::deciding whether '${fname}' is absent from PROD."
+      echo "::error::  index file  : ${TMP}/prod-names.txt"
+      echo "::error::  searched for: ${fname}"
+      echo "::error::  grep exited : ${_idx_rc}   (0 = present, 1 = measured absent, >= 2 = ERROR)"
+      echo "::error::An index this gate could not read is not an index that measured absence."
+      echo "::error::Reporting '${fname}' as a NEW function here would be a pass for a name this"
+      echo "::error::run never looked up — and the same failure on every name is the whole gate"
+      echo "::error::green having compared nothing."
+      exit 1
+    fi
+    if [ "$_idx_rc" -eq 0 ]; then
       echo "::error::${GATE}: '${fname}' IS in the PROD source's function-name index, but the"
       echo "::error::fetcher extracted no body for it. That is an extraction failure, not a new"
       echo "::error::function. Reporting it as 'new — pass' would be a pass for something this"
@@ -431,6 +791,10 @@ for fname in "${NAMES[@]}"; do
       bad=1
       failed_names=$((failed_names + 1))
     else
+      # Exactly status 1 — the >= 2 leg exited above and 0 was taken by the
+      # branch above, so the three legs are exhaustive over grep's status. This
+      # is the ONE silent pass this gate has, and it is now reachable only from
+      # a grep that RAN and reported no match.
       echo "  ${fname}: measured absent — not in the PROD source's ${PROD_NAME_COUNT}-name index. Treated as a NEW function (pass)."
       absent=$((absent + 1))
     fi

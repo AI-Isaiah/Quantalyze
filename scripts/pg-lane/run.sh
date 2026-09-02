@@ -111,7 +111,30 @@ OWNED_WORKDIR=""
 cleanup() {
   status=$?
   if [ -n "$CREATED" ] && [ -n "$PGD" ] && [ -d "$PGD/data" ]; then
-    "$PGBIN/pg_ctl" -D "$PGD/data" stop -m immediate -w >/dev/null 2>&1 || true
+    # ⛔ A stop that FAILS is not `|| true`. It used to be: the status was
+    # discarded and the data dir removed regardless, so a postmaster that
+    # refused to stop kept running against a directory that no longer existed
+    # — the D-04 orphan this trap exists to prevent — with NOTHING printed.
+    # Now the failure is loud, the pid file (if any) is SIGKILLed before the
+    # rm, and the lane's own exit status is preserved either way.
+    if ! "$PGBIN/pg_ctl" -D "$PGD/data" stop -m immediate -w >/dev/null 2>&1; then
+      echo "WARNING: pg_ctl stop FAILED for the lane cluster on 127.0.0.1:${PORT:-unknown} at $PGD/data." >&2
+      if [ -f "$PGD/data/postmaster.pid" ]; then
+        _pm_pid=$(head -n 1 "$PGD/data/postmaster.pid" 2>/dev/null || true)
+        case "$_pm_pid" in
+          ''|*[!0-9]*)
+            echo "WARNING: $PGD/data/postmaster.pid holds no numeric pid ('${_pm_pid}'); a postmaster may be ORPHANED on port ${PORT:-unknown} (D-04). Check \`ps\` before trusting this box." >&2 ;;
+          *)
+            if kill -9 "$_pm_pid" 2>/dev/null; then
+              echo "WARNING: sent SIGKILL to postmaster pid ${_pm_pid} (from postmaster.pid) before removing $PGD." >&2
+            else
+              echo "WARNING: could not SIGKILL pid ${_pm_pid} from postmaster.pid (already gone, or not ours); removing $PGD anyway." >&2
+            fi ;;
+        esac
+      else
+        echo "WARNING: no postmaster.pid under $PGD/data, so there is no pid to SIGKILL; removing $PGD. If a postmaster is still bound to port ${PORT:-unknown}, it is ORPHANED (D-04)." >&2
+      fi
+    fi
     rm -rf "$PGD"
   fi
   if [ -n "$OWNED_WORKDIR" ] && [ -d "$OWNED_WORKDIR" ]; then
@@ -137,7 +160,20 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-psqlq() { psql -h 127.0.0.1 -p "$PORT" -U postgres -d postgres -v ON_ERROR_STOP=1 "$@"; }
+# `VERBOSITY=verbose` is set on EVERY leg, not only the gate leg (164.3.1-05,
+# RESEARCH Open Question 2 — a discretion call, recorded here rather than
+# implied). Verbose adds the inline SQLSTATE token (`P0001:` after `ERROR:`)
+# and a `LOCATION:` line after every ERROR *and* NOTICE. The runner's
+# source-location attribution needs both: `P0001` asserts the error really is
+# a `RAISE EXCEPTION`, and `LOCATION:` is the end-of-block sentinel that bounds
+# the CONTEXT chain it must count frames in.
+#
+# UNIFORM rather than gate-leg-only because uniformity means the runner has ONE
+# output grammar to parse instead of two — a second shape is a second parser,
+# and a second parser is where a silent divergence lives. The cost is bounded:
+# apply/post-apply legs run `-q`, so the extra noise is a `LOCATION:` line per
+# message they were already printing, and those legs emit nothing on success.
+psqlq() { psql -h 127.0.0.1 -p "$PORT" -U postgres -d postgres -v ON_ERROR_STOP=1 -v VERBOSITY=verbose "$@"; }
 
 # ---------------------------------------------------------------------------
 # run_lane <workdir> <gate> [--post <file>] -- <apply files...>

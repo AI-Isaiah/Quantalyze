@@ -32,9 +32,12 @@ a failure fails the aggregate rather than passing quietly:
 
 - **`sql-mutation`** — mutates every SQL gate arm carrying a `RED-UNDER`
   annotation, asserts the file goes RED with that arm named, restores, asserts
-  GREEN. Exits 1 on an annotation that does not bite, and on coverage below a
-  ratchet floor pinned at the measured value. Runs on its own throwaway
-  PostgreSQL cluster (`scripts/pg-lane/run.sh`), never against shared TEST.
+  GREEN. Exits 1 on an annotation that does not bite, on coverage below a
+  ratchet floor pinned at the measured value, on more waived arms than
+  `WAIVED_CEILING` (0) in `scripts/mutation-runner/run.mjs`, and when the
+  runner's two independent arm tallies (`arms:` vs `lane-invocations:`)
+  disagree (v0.77.1.0). Runs on its own throwaway PostgreSQL cluster
+  (`scripts/pg-lane/run.sh`), never against shared TEST.
 - **`sql-gate-lint`** — four static rules over `supabase/tests`, each shipped
   with a red and a green fixture proving the rule can fire.
 - **`plan-anchor-verify`** — re-resolves every `file:line` anchor and named
@@ -45,8 +48,11 @@ body diff) is a step in `migration-drift-check.yml` on migration PRs, and
 **VAC-08** (repo-vs-TEST ledger + body drift) runs in `sql-tests`. Both exit 1
 when their credential is absent — neither ever skips.
 
-⚠️ As of v0.77.0.0 none of these five has been observed on its real host or
-credential; see `.planning/WINDOWS.md` entries 25, 26 and 28.
+⚠️ `sql-mutation` and `sql-gate-lint` were first observed green on ubuntu on
+2026-09-02 (workflow_dispatch run 33620169220 at 89cbef8b, self-test 12/12,
+`arms: 30/30/0`, tallies agree — closes `.planning/WINDOWS.md` entry 28);
+`plan-anchor-verify` was skipped in that run. VAC-04 and VAC-08 have still
+not run against their real credential; see entries 25 and 26.
 
 ## Which database am I on? (ask FIRST, every time)
 

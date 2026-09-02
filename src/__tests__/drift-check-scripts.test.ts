@@ -27,9 +27,11 @@ import {
   existsSync,
   rmSync,
   chmodSync,
+  symlinkSync,
+  cpSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { basename, dirname, join } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 
 import { normalizeSql } from "../../scripts/sql-body-normalize.mjs";
 import { createHash } from "node:crypto";
@@ -60,6 +62,25 @@ function run(script: string, env: Record<string, string>) {
     env: { ...process.env, ...env },
   });
   return { status: res.status, out: `${res.stdout ?? ""}${res.stderr ?? ""}` };
+}
+
+/**
+ * A PATH shim for `tool` — the SP-M01 idiom. `bin/<tool>` runs `lines` with
+ * `$@` intact and `$REAL` bound to the real tool, so ONE call (keyed on its
+ * flags and its file) can be broken while every other call delegates. Returns
+ * the PATH value to run the gate under.
+ */
+function withPathShim(dir: string, tool: string, lines: string[]): string {
+  const bin = join(dir, "bin");
+  mkdirSync(bin, { recursive: true });
+  const real = spawnSync("bash", ["-c", `command -v ${tool}`], { encoding: "utf8" }).stdout.trim();
+  expect(real, `no real ${tool} on PATH to delegate to`).not.toBe("");
+  writeFileSync(
+    join(bin, tool),
+    ["#!/usr/bin/env bash", `REAL=${JSON.stringify(real)}`, ...lines, 'exec "$REAL" "$@"'].join("\n"),
+  );
+  chmodSync(join(bin, tool), 0o755);
+  return `${bin}:${process.env.PATH ?? ""}`;
 }
 
 /** A stub fetcher: `stub.sh <name>` cats live/<name>.sql, or emits nothing. */
@@ -121,6 +142,63 @@ function prodBodyHash(rendered: string): string {
   const m = /AS \$function\$([\s\S]*)\$function\$/.exec(rendered);
   if (!m) throw new Error("fixture is not shaped as expected");
   return createHash("sha256").update(normalizeSql(m[1]), "utf8").digest("hex");
+}
+
+/** The real readers, as migration-drift-check.yml wires them. */
+const REAL_NORMALIZER = "scripts/sql-body-normalize.mjs";
+const REAL_NAIVE = "scripts/sql-function-names-naive.mjs";
+
+/** What PROD holds in the gate-level scaffolds — a function the PR does not name, so the PR's own name is measured absent. */
+const SOME_OTHER_FN =
+  "CREATE OR REPLACE FUNCTION public.some_other_fn(a int)\n" +
+  "RETURNS int LANGUAGE sql AS $$ SELECT a $$;\n";
+
+/** Substring count — the same reading as `countOf` in gate-family-meta.test.ts. */
+function occurrences(haystack: string, needle: string): number {
+  return haystack.split(needle).length - 1;
+}
+
+/**
+ * The VAC-04 gate wired exactly as migration-drift-check.yml wires it, over a
+ * scratch PROD dump read by the REAL readers — with, optionally, injected
+ * left-hand readers (the C2 / C4 gate-level arms) and a committed snapshot for
+ * one name. ONE scaffold for the three gate-level describes (IN-08, 164.3.1
+ * review); each describe keeps its own fixtures, which are the load-bearing
+ * part. A fourth `BODY_*` command, or a change to the env contract, is now
+ * one edit.
+ */
+function gateScaffold(
+  dir: string,
+  opts: {
+    migrationBasename: string;
+    migrationBody: string;
+    dumpBody?: string;
+    snapshotFor?: string;
+    readers?: { normalizer: string; naive: string };
+  },
+): { env: Record<string, string>; migration: string } {
+  mkdirSync(join(dir, "snapshot"), { recursive: true });
+  const dump = join(dir, "prod-dump.sql");
+  const dumpBody = opts.dumpBody ?? SOME_OTHER_FN;
+  writeFileSync(dump, dumpBody);
+  const migration = join(dir, opts.migrationBasename);
+  writeFileSync(migration, opts.migrationBody);
+  if (opts.snapshotFor) {
+    writeFileSync(join(dir, "snapshot", `${opts.snapshotFor}.sql`), dumpBody);
+  }
+  const env: Record<string, string> = {
+    ...FAKE_CREDS,
+    BODY_FETCH_CMD: `node ${REAL_NORMALIZER} --extract-fn ${dump}`,
+    BODY_NAME_INDEX_CMD: `node ${REAL_NORMALIZER} --function-names ${dump}`,
+    BODY_NAME_INDEX_XCHECK_CMD: `node ${REAL_NAIVE} ${dump}`,
+    CHANGED_MIGRATIONS: migration,
+    SNAPSHOT_DIR: join(dir, "snapshot"),
+  };
+  if (opts.readers) {
+    env.NORMALIZER = opts.readers.normalizer;
+    env.NAIVE_NAMES = opts.readers.naive;
+  }
+  return { env, migration };
 }
 
 /** Lay out snapshot/, live/ and migrations/ and return the env for the gate. */
@@ -343,6 +421,133 @@ describe("VAC-04 — scripts/prod-body-drift-check.sh", () => {
       expect(status).toBe(1);
       expect(out).toContain("could not index PROD's function names");
       expect(out).not.toContain("postgresql://");
+    });
+  });
+
+  it("VAC04-C3 RED: a grep that ERRORS on the name index is a MEASURE_FAIL, not 'measured absent'", () => {
+    // ⛔ [VAC04-C3]. The membership test was a bare
+    //     if grep -aqxF -- "$fname" "$TMP/prod-names.txt"; then … else … fi
+    // and `grep` exits 0 on a match, 1 on NO match, and >= 2 on an ERROR
+    // (unreadable file, I/O failure, a broken locale). Exit 1 and exit 2 both
+    // fall to the SAME `else`, which prints
+    //     "measured absent — … Treated as a NEW function (pass)."
+    // So an index the gate COULD NOT READ was reported as an index it read and
+    // found nothing in — turning the one fail-CLOSED arm of this gate (WR-01's
+    // "absence is a MEASUREMENT") into a fail-OPEN one. Repeated across every
+    // name, it is the whole gate green having compared nothing.
+    //
+    // MEASURED at this plan's base 420b8fcb, this exact fixture:
+    //   "  demo_fn: measured absent — not in the PROD source's 1-name index.
+    //    Treated as a NEW function (pass)."
+    //   "::notice::…: ZERO bodies compared — all 1 function(s) … measured absent
+    //    … This is a measured zero, not an unread one."          exit 0
+    // …while the index read had failed outright.
+    //
+    // Driven with the SP-M01 idiom: a PATH-shim `grep` that delegates to the
+    // real one for everything EXCEPT this one call. Keyed on the FLAGS AND the
+    // file (`-aqxF` + `*prod-names.txt`) rather than the file alone, because
+    // `PROD_NAME_COUNT` counts the same file with `-ac` — targeting the file
+    // alone would redden the run one step earlier and prove the wrong branch.
+    withTempDir((dir) => {
+      const bin = join(dir, "bin");
+      mkdirSync(bin, { recursive: true });
+      const realGrep = spawnSync("bash", ["-c", "command -v grep"], {
+        encoding: "utf8",
+      }).stdout.trim();
+      expect(realGrep, "no real grep on PATH to delegate to").not.toBe("");
+      writeFileSync(
+        join(bin, "grep"),
+        [
+          "#!/usr/bin/env bash",
+          "flag=0; idx=0",
+          'for a in "$@"; do',
+          '  case "$a" in',
+          "    -aqxF) flag=1 ;;",
+          "    *prod-names.txt) idx=1 ;;",
+          "  esac",
+          "done",
+          '[ "$flag" = 1 ] && [ "$idx" = 1 ] && exit 2',
+          `exec ${realGrep} "$@"`,
+        ].join("\n"),
+      );
+      chmodSync(join(bin, "grep"), 0o755);
+
+      // No live/demo_fn.sql -> the fetcher returns empty; the index does not
+      // hold demo_fn -> the UNSHIMMED run takes the measured-absent pass. So
+      // the only thing that can change this run's verdict is the broken grep.
+      const env = scaffoldProdCase(dir, {});
+      const clean = run(PROD_GATE, env);
+      expect(clean.status, "the fixture must be GREEN before the grep is broken").toBe(0);
+      expect(clean.out).toContain("measured absent");
+
+      const { status, out } = run(PROD_GATE, {
+        ...env,
+        PATH: `${bin}:${process.env.PATH ?? ""}`,
+      });
+      expect(status, "an UNREADABLE index was reported as an index that measured absence").toBe(1);
+      expect(out).toContain("MEASURE_FAIL");
+      // Diagnostic-first (SC-7): it must name the file, the searched name and
+      // the exit code — a conclusion without its evidence is the thing this
+      // phase exists to stop.
+      expect(out).toContain("prod-names.txt");
+      expect(out).toContain("demo_fn");
+      expect(out).toMatch(/grep exited\s*:\s*2\b/);
+      // The fail-OPEN text must be GONE — the whole point of the branch.
+      expect(out).not.toContain("Treated as a NEW function (pass)");
+      expect(out).not.toContain("no unacknowledged repo-vs-PROD body drift");
+    });
+  });
+
+  it("VAC04-C3 CONTROL: exit 1 (genuinely not in a READABLE index) is still a measured-absent pass", () => {
+    // The other direction. A three-way branch that treats 1 like 2 fails every
+    // add-a-function PR; this arm is what stops the C3 fix from being a fix
+    // that breaks the gate's only legitimate silent pass. It is the standing
+    // arm at "GREEN: a function MEASURED absent…", restated here so the C3
+    // branching carries its own control beside it.
+    withTempDir((dir) => {
+      const env = scaffoldProdCase(dir, { indexNames: ["other_fn"] });
+      const { status, out } = run(PROD_GATE, env);
+      expect(status, out).toBe(0);
+      expect(out).toContain("Treated as a NEW function (pass)");
+      expect(out).not.toContain("MEASURE_FAIL");
+    });
+  });
+
+  it("WR-04 RED: a grep that ERRORS on the FETCHED BODY is a MEASURE_FAIL, not an empty body routed to 'measured absent'", () => {
+    // ⛔ WR-04 (164.3.1 review). The whitespace-only test on the fetched body,
+    //     if [ ! -s "$live" ] || ! grep -aqE '[^[:space:]]' "$live"; then
+    // carried the bare idiom [VAC04-C3] fixed twenty lines below it: a grep
+    // exit >= 2 was read as "empty body" and routed to the index lookup —
+    // fail-CLOSED when the name is in the index (an "extraction failure"
+    // with the wrong cause), but the measured-absent PASS when it is not,
+    // for a body this run FETCHED and then could not read.
+    //
+    // MEASURED at HEAD 89cbef8b with a `grep` shimmed to exit 2 on this call
+    // alone, live body present, name not in the index:
+    //   "  demo_fn: measured absent — not in the PROD source's 1-name index.
+    //    Treated as a NEW function (pass)."                          exit 0
+    //
+    // The live body must be NON-EMPTY: `[ ! -s "$live" ]` short-circuited
+    // before grep on an empty one, so the shim would never fire.
+    withTempDir((dir) => {
+      const env = scaffoldProdCase(dir, { prodBody: PROD_BODY_EQUIVALENT, indexNames: ["other_fn"] });
+      const clean = run(PROD_GATE, env);
+      expect(clean.status, "the fixture must be GREEN (1 match) before the grep is broken").toBe(0);
+      expect(clean.out).toContain("1 match");
+
+      const PATH = withPathShim(dir, "grep", [
+        "flag=0; hit=0",
+        'for a in "$@"; do case "$a" in -aqE) flag=1 ;; *.live.sql) hit=1 ;; esac; done',
+        '[ "$flag" = 1 ] && [ "$hit" = 1 ] && exit 2',
+      ]);
+      const { status, out } = run(PROD_GATE, { ...env, PATH });
+      expect(status, "a body the gate could not READ was reported as measured absent — the fail-open pass").toBe(1);
+      expect(out).toContain("MEASURE_FAIL");
+      expect(out).toContain("demo_fn");
+      expect(out).toContain(".live.sql");
+      expect(out).toMatch(/grep exited\s*:\s*2\b/);
+      expect(out).not.toContain("Treated as a NEW function (pass)");
+      expect(out).not.toContain("no unacknowledged repo-vs-PROD body drift");
     });
   });
 
@@ -868,6 +1073,1207 @@ describe("SP-C05 — 'absent from PROD' must be measured by an instrument that d
   });
 });
 
+// ── [VAC04-C1] ───────────────────────────────────────────────────────────────
+//
+// ⛔ THE DEFECT. SP-C05 above proves the two readings are independent. This
+// block is about what happens when they are independent AND BOTH BLIND — because
+// independence is not coverage. `prod-body-drift-check.sh`'s zero path read
+//
+//     "this PR's migrations define no functions — nothing to compare.
+//      (Two independent readings agree; see SP-C05.)"          exit 0
+//
+// and "two independent readings agree" was doing work it cannot do. Agreement
+// between two instruments whose blind spots OVERLAP is not evidence of absence;
+// it is one absence observed twice. MEASURED 2026-09-01 on the P8 composing
+// shape (RESEARCH § Pattern 3) — a mid-line `$`-identifier definition — both
+// readers print NOTHING and exit 0, so the gate reported success having compared
+// nothing at all, over PRODUCTION function bodies. That is Primitive C's
+// canonical case: a VERDICT not bounded by what was MEASURED.
+//
+// ── THE REOPEN PIN (amended D-08, 2026-09-01) ────────────────────────────────
+// The blast-radius decision that would have deferred the fail-closed flip to
+// Phase 164.4 was REVERSED the same day (CONTEXT.md § Amendment 2026-09-01,
+// D-07), so there is no future flip left to guarantee and the superseded
+// FILES_FLOOR flip-coupling design is retired. The arms below are a STANDING
+// REGRESSION PIN on the CLOSED state instead, failing in two independent ways:
+//
+//   (a) BY EXECUTION — the refusal arm drives the real gate on the real
+//       composing fixture and requires a NON-ZERO exit. Reverting the branch to
+//       `exit 0` flips that assertion.
+//   (b) BY NAME — the marker arm reads the gate's own bytes (node:fs, never
+//       shell grep: this repo carries a measured NUL-blind file) and requires
+//       the `VAC04-ZERO-PATH-FAILS-CLOSED` token. Deleting or rerouting the
+//       branch fails here even if some other path happens to exit non-zero.
+//
+// ⛔ ORDERING, carried here as well as in the gate script so it is not lost:
+// migration PRs are HELD until Phase 164.3.1 AND Phase 164.4 have both landed.
+// A block at this refusal is the gate WORKING — route the ordering, never the
+// gate.
+describe("[VAC04-C1] — the zero path FAILS CLOSED: both readers' evidence, THEN a refusal", () => {
+  /**
+   * P8's composing shape (RESEARCH § Pattern 3, MEASURED-TRUE). One line, two
+   * statements: the line-anchored reader never starts because the line does not
+   * BEGIN with `CREATE`, and the lexer's `readQualifiedName` stops at the `$`
+   * (SP-C05's measured limitation). Neither reading can see it.
+   */
+  const COMPOSING_FN =
+    "SELECT 1; CREATE OR REPLACE FUNCTION public.fn$v2(p uuid) RETURNS void " +
+    "LANGUAGE plpgsql AS $fn$ BEGIN NULL; END; $fn$;\n";
+
+  /** A definition BOTH readers see — the control's only difference from the above. */
+  const VISIBLE_FN =
+    "CREATE OR REPLACE FUNCTION public.some_other_fn(a int)\n" +
+    "RETURNS int LANGUAGE sql AS $$ SELECT a $$;\n";
+
+  const NORMALIZER = "scripts/sql-body-normalize.mjs";
+  const NAIVE = "scripts/sql-function-names-naive.mjs";
+
+  /** The gate wired exactly as `migration-drift-check.yml` wires it (`gateScaffold`, IN-08). */
+  function scaffold(
+    dir: string,
+    migrationBody: string,
+    opts: { dumpBody?: string; snapshotFor?: string } = {},
+  ): Record<string, string> {
+    return gateScaffold(dir, {
+      migrationBasename: "20260901120000_zero_path.sql",
+      migrationBody,
+      dumpBody: opts.dumpBody ?? VISIBLE_FN,
+      snapshotFor: opts.snapshotFor,
+    }).env;
+  }
+
+  // ── Calibration. Deliberately FIRST: if either reader can see the fixture,
+  // the refusal arm below is exercising an ordinary empty-input path and proves
+  // nothing about COMPOSING blindness. The fixture has to be the real thing.
+  it("CALIBRATION: the composing fixture is invisible to BOTH readers — and the control is visible to both", () => {
+    withTempDir((dir) => {
+      const blind = join(dir, "composing.sql");
+      writeFileSync(blind, COMPOSING_FN);
+      const seen = join(dir, "visible.sql");
+      writeFileSync(seen, VISIBLE_FN);
+
+      const blindLexer = spawnSync("node", [NORMALIZER, "--function-names", blind], {
+        encoding: "utf8",
+      });
+      const blindNaive = spawnSync("node", [NAIVE, blind], { encoding: "utf8" });
+      expect(blindLexer.status, "the lexer must EXIT 0 — dropping the definition silently is the defect").toBe(0);
+      expect(blindNaive.status).toBe(0);
+      expect(blindLexer.stdout.trim(), "the lexer reading must see NOTHING here").toBe("");
+      expect(blindNaive.stdout.trim(), "the line-anchored reading must see NOTHING here").toBe("");
+
+      // Without this half, "both saw nothing" could equally mean "both readers
+      // are broken", and the arm would pass for the wrong reason.
+      const seenLexer = spawnSync("node", [NORMALIZER, "--function-names", seen], {
+        encoding: "utf8",
+      });
+      const seenNaive = spawnSync("node", [NAIVE, seen], { encoding: "utf8" });
+      expect(seenLexer.stdout.trim()).toBe("some_other_fn");
+      expect(seenNaive.stdout.trim()).toBe("some_other_fn");
+    });
+  });
+
+  // ── (a) The reopen pin's EXECUTION direction ───────────────────────────────
+  it("REOPEN PIN: the composing zero path prints BOTH readers' evidence and then EXITS NON-ZERO", () => {
+    // MEASURED at this task's base bab02576, this exact fixture, before the fix:
+    //   "Migrations changed by this PR: 1"
+    //   "::notice::VAC-04 repo-vs-PROD function-body drift gate: this PR's
+    //    migrations define no functions — nothing to compare. (Two independent
+    //    readings agree; see SP-C05.)"                                  exit 0
+    // One line of conclusion, zero lines of evidence, for a run that compared
+    // nothing over PRODUCTION function bodies.
+    withTempDir((dir) => {
+      const env = scaffold(dir, COMPOSING_FN);
+      const { status, out } = run(PROD_GATE, env);
+
+      expect(
+        status,
+        "the gate exited 0 having compared NOTHING — the zero path has been reopened",
+      ).not.toBe(0);
+
+      // Evidence BEFORE the conclusion (D-12 / SC-7): a gate must never ship a
+      // bare verdict. The changed-file list and BOTH readers' outputs.
+      expect(out).toContain("20260901120000_zero_path.sql");
+      expect(out).toContain(NORMALIZER);
+      expect(out).toContain(NAIVE);
+      expect(out, "the evidence must state that BOTH readings returned zero names").toMatch(
+        /0 name\(s\)[\s\S]*0 name\(s\)/,
+      );
+      expect(out).toContain("MEASURE_FAIL");
+      // The reasoning, not just the refusal.
+      expect(out).toContain("blind spots");
+      // The ordering constraint must be readable AT the point of refusal.
+      expect(out).toContain("164.4");
+      // The old fail-open conclusion must be GONE — these two strings ARE what
+      // the exit-0 branch printed, quoted from bab02576. Pinned as the exact
+      // sentences rather than a loose phrase: the refusal's own prose argues
+      // ABOUT reader agreement, so a substring like "readings agree" would
+      // match the fix and make this assertion unfailable.
+      expect(out).not.toContain("define no functions — nothing to compare");
+      expect(out).not.toContain("(Two independent readings agree; see SP-C05.)");
+      expect(out).not.toContain("no unacknowledged repo-vs-PROD body drift");
+    });
+  });
+
+  // ── The PASSING CONTROL. Load-bearing: a gate that refuses EVERYTHING also
+  // passes its own refusal arm, so the refusal proves nothing without this.
+  it("CONTROL: a legitimate non-empty comparison still reaches its normal verdict", () => {
+    withTempDir((dir) => {
+      // Identical wiring; the ONLY difference from the arm above is that the
+      // migration's definition is one both readers can see.
+      const env = scaffold(dir, VISIBLE_FN, { snapshotFor: "some_other_fn" });
+      const { status, out } = run(PROD_GATE, env);
+      expect(status, out).toBe(0);
+      expect(out).toContain("Functions defined or replaced by this PR: 1");
+      expect(out).toContain("1 match");
+      expect(out).toContain("no unacknowledged repo-vs-PROD body drift");
+      expect(out, "the refusal must fire ONLY on the compared-nothing state").not.toContain(
+        "VAC04-ZERO-PATH-FAILS-CLOSED",
+      );
+    });
+  });
+
+  it("CONTROL: the OTHER zero path — a PR that changes no migration files at all — is still a quiet exit 0", () => {
+    // `:198-199` is a legitimate nothing-to-do: the merge base RESOLVED and the
+    // diff is genuinely empty. It is NOT the compared-nothing state, and the
+    // fail-closed change must not have swept it up.
+    withTempDir((dir) => {
+      const env = scaffold(dir, VISIBLE_FN, { snapshotFor: "some_other_fn" });
+      const { status, out } = run(PROD_GATE, {
+        ...env,
+        CHANGED_MIGRATIONS: "",
+        BASE_REF: "HEAD",
+      });
+      expect(status, out).toBe(0);
+      expect(out).toContain("changes no migration files");
+      expect(out).not.toContain("MEASURE_FAIL");
+    });
+  });
+
+  // ── THE THIRD DIRECTION (D-13, 2026-09-01) ─────────────────────────────────
+  //
+  // ⛔ WHY THIS EXISTS. The refusal above was UNCONDITIONAL: every changed set
+  // with no extractable function refused, not only the composing shape.
+  // MEASURED at HEAD over all 262 migrations in this repo — 111 define no
+  // function either structural reader can see — so it permanently blocked
+  // roughly two migration PRs in five from a gate whose subject is function
+  // BODY drift. A gate that reds on `ALTER TABLE` acquires an escape hatch from
+  // whoever is on call, which is a slower version of the failure this phase
+  // exists to prevent.
+  //
+  // So the zero path now discriminates with a deliberately CRUDE textual scan,
+  // used ONLY here and never as a reader. Three directions, all required, and
+  // all three are needed together: the refusal arm alone is passed by a gate
+  // that refuses everything, the pass arm alone by a gate that passes
+  // everything, and BOTH are passed by a tripwire wired to a constant. The two
+  // neuter directions were driven by hand and are recorded in
+  // `164.3.1-07-SUMMARY.md` § "Follow-up 2026-09-01".
+  const ALTER_ONLY =
+    "ALTER TABLE public.api_keys ADD COLUMN IF NOT EXISTS kek_version INTEGER NOT NULL DEFAULT 1;\n" +
+    "CREATE INDEX IF NOT EXISTS api_keys_kek_version_idx ON public.api_keys (kek_version);\n";
+
+  it("CALIBRATION: the ALTER-only fixture is invisible to both readers for the RIGHT reason — there is no function in it", () => {
+    // Deliberately paired with the composing calibration above. Both fixtures
+    // produce zero names from both readers; the ONLY thing separating them is
+    // whether a definition is actually there. If this fixture were visible to a
+    // reader, the pass arm below would be exercising the ordinary non-empty
+    // path and would prove nothing about the legitimate-zero branch.
+    withTempDir((dir) => {
+      const f = join(dir, "alter_only.sql");
+      writeFileSync(f, ALTER_ONLY);
+      const lexer = spawnSync("node", [NORMALIZER, "--function-names", f], { encoding: "utf8" });
+      const naive = spawnSync("node", [NAIVE, f], { encoding: "utf8" });
+      expect(lexer.status).toBe(0);
+      expect(naive.status).toBe(0);
+      expect(lexer.stdout.trim()).toBe("");
+      expect(naive.stdout.trim()).toBe("");
+    });
+  });
+
+  it("LEGITIMATE ZERO: an ALTER-only changed set PASSES, with a notice naming what was scanned", () => {
+    withTempDir((dir) => {
+      // Identical wiring to the refusal arm; the ONLY difference is that this
+      // changed set contains no function definition for anything to have missed.
+      const env = scaffold(dir, ALTER_ONLY);
+      const { status, out } = run(PROD_GATE, env);
+
+      expect(
+        status,
+        "a changed set with genuinely no function in it must PASS — refusing it makes " +
+          "a function-body gate a nuisance on 41% of migration PRs, and nuisance gates " +
+          "get escape hatches\n" + out,
+      ).toBe(0);
+
+      // The notice must be EVIDENCE, not a bare verdict (D-12/SC-7): what was
+      // changed, what each of the three readings returned.
+      expect(out).toContain("Migrations changed by this PR: 1");
+      expect(out).toContain("20260901120000_zero_path.sql");
+      expect(out, "the pass must SAY the third scan ran and found nothing").toMatch(
+        /crude textual scan[^\n]*-> 0 definition\(s\) in 1 file\(s\)/,
+      );
+      expect(out).toContain("LEGITIMATE");
+      // A legitimate zero is a measurement, not a measurement failure.
+      expect(out).not.toContain("MEASURE_FAIL");
+      // And it is not the old fail-open text returning by another door.
+      expect(out).not.toContain("(Two independent readings agree; see SP-C05.)");
+    });
+  });
+
+  it("WR-04 RED: a grep that ERRORS on the tripwire's HIT LIST is a MEASURE_FAIL, never the LEGITIMATE-ZERO exit 0", () => {
+    // ⛔ WR-04 (164.3.1 review), the same bare idiom on the zero path itself:
+    //     if ! grep -aqE '[^[:space:]]' "$TMP/textual-hits.txt"; then
+    // The hit list is pre-created, so exit 1 is "no hits" — but exit >= 2 fell
+    // into the SAME branch and the run exited 0 as a legitimate zero it had
+    // not read. MEASURED at HEAD 89cbef8b, ALTER-only changed set, grep
+    // shimmed to exit 2 on this call alone: "the zero is LEGITIMATE", exit 0.
+    withTempDir((dir) => {
+      const env = scaffold(dir, ALTER_ONLY);
+      const PATH = withPathShim(dir, "grep", [
+        "flag=0; hit=0",
+        'for a in "$@"; do case "$a" in -aqE) flag=1 ;; *textual-hits.txt) hit=1 ;; esac; done',
+        '[ "$flag" = 1 ] && [ "$hit" = 1 ] && exit 2',
+      ]);
+      const { status, out } = run(PROD_GATE, { ...env, PATH });
+      expect(status, "a hit list the gate could not READ was reported as a legitimate zero").toBe(1);
+      expect(out).toContain("MEASURE_FAIL");
+      expect(out).toContain("textual-hits.txt");
+      expect(out).toMatch(/grep exited 2\b/);
+      expect(out).not.toContain("the zero is LEGITIMATE");
+    });
+  });
+
+  it("CORPUS: on REAL repo migrations the masked tripwire passes an ALTER-only one, passes the three comment-only mentions, and passes the one double-definition file", () => {
+    // The measured separation, driven against the actual files rather than
+    // restated as a number. MEASURED at HEAD 8969513e across all 262
+    // migrations, comments masked, DISTINCT textual definition tokens vs the
+    // union of the two structural readers per file: 0 files have textual >
+    // structural. Before masking, 3 comment-only mentions BLOCKED (the old
+    // fail-safe imprecision, F2 (d)); after masking they are legitimate zeros.
+    // One file defines the same function TWICE (create, then replace) — the
+    // readers dedupe names, so the tripwire counts DISTINCT tokens too, and
+    // that file passes 1 vs 1 rather than blocking 2 vs 1.
+    const LEGIT = "supabase/migrations/20260405093827_kek_version.sql";
+    const COMMENT_ONLY = [
+      "supabase/migrations/20260515130001_enqueue_compute_job_internal_acl_remediation.sql",
+      "supabase/migrations/20260516170100_reset_stalled_portfolio_analytics_revoke_public.sql",
+      "supabase/migrations/20260517013200_notification_dispatches_recipient_email_lower_idx.sql",
+    ];
+    const DOUBLE_DEF = "supabase/migrations/20260716090000_retire_compute_analytics_kind_rpc_guard.sql";
+
+    withTempDir((dir) => {
+      const base = scaffold(dir, ALTER_ONLY);
+
+      const legit = run(PROD_GATE, { ...base, CHANGED_MIGRATIONS: LEGIT });
+      expect(
+        legit.status,
+        `a real ALTER-only migration must not be blocked by a function-body gate\n${legit.out}`,
+      ).toBe(0);
+      expect(legit.out).toContain("LEGITIMATE");
+
+      for (const f of COMMENT_ONLY) {
+        // CALIBRATION inside the arm: the mention really is there, so a pass
+        // is masking at work and not an empty file.
+        expect(readFileSync(f, "utf8")).toMatch(/CREATE\s+(OR\s+REPLACE\s+)?FUNCTION/i);
+        const res = run(PROD_GATE, { ...base, CHANGED_MIGRATIONS: f });
+        expect(
+          res.status,
+          `${f} mentions CREATE … FUNCTION only inside a comment — after masking that is a ` +
+            `LEGITIMATE zero, not a block\n${res.out}`,
+        ).toBe(0);
+        expect(res.out).toContain("LEGITIMATE");
+        expect(res.out).not.toContain("MEASURE_FAIL");
+      }
+
+      // The double definition: PROD (the scaffold's dump) does not hold it, so
+      // the normal verdict is "measured absent — new function", exit 0. The
+      // load-bearing part is that the tripwire did NOT refuse it.
+      const dbl = run(PROD_GATE, { ...base, CHANGED_MIGRATIONS: DOUBLE_DEF });
+      expect(dbl.status, `two definitions of ONE name must count as one\n${dbl.out}`).toBe(0);
+      expect(dbl.out).toContain("Functions defined or replaced by this PR: 1");
+      expect(dbl.out).not.toContain("MEASURE_FAIL");
+    });
+  });
+
+  // ── F2 (164.3.1 red team + adversarial review): TWO holes in the tripwire ──
+  //
+  // (a) It ran ONLY inside the `NAME_COUNT -eq 0` branch. A migration defining
+  //     one function both readers see AND one both miss reached the comparison
+  //     loop with only the visible one, compared it, and exited 0 — the
+  //     invisible definition was never looked at, on a gate over PRODUCTION
+  //     bodies. MEASURED at HEAD 8969513e on VISIBLE_FN + COMPOSING_FN in one
+  //     file: "Functions defined or replaced by this PR: 1 … 1 match", exit 0.
+  // (b) It was COMMENT-BLIND in the wrong direction: `CREATE /*c*/ OR REPLACE
+  //     FUNCTION` gives lexer 0, naive 0 AND tripwire 0 (the regex wants
+  //     `CREATE` and `OR` separated by whitespace only), so all three agreed on
+  //     zero and the run took the LEGITIMATE-ZERO exit 0. MEASURED at HEAD
+  //     8969513e: "the zero is LEGITIMATE", exit 0.
+  //
+  // The fix runs the scan UNCONDITIONALLY over every changed file, masks
+  // `/* … */` and `-- …` comments FIRST (so a prose mention no longer blocks,
+  // and a comment can no longer split the keywords), counts distinct textual
+  // definitions per file and refuses when that count EXCEEDS what the two
+  // structural readers found for the same file. Over-count errs toward the
+  // block; under-count is harmless because the readers already saw the rest.
+  const SPLIT_BY_COMMENT_FN =
+    "CREATE /*c*/ OR REPLACE FUNCTION public.fn$v2(p uuid) RETURNS void " +
+    "LANGUAGE plpgsql AS $fn$ BEGIN NULL; END; $fn$;\n";
+
+  it("F2 (a) RED: one definition BOTH readers see beside one BOTH miss is REFUSED, naming the file — not compared-one-and-passed", () => {
+    withTempDir((dir) => {
+      const env = scaffold(dir, VISIBLE_FN + COMPOSING_FN, { snapshotFor: "some_other_fn" });
+      const { status, out } = run(PROD_GATE, env);
+      expect(
+        status,
+        "a file with a definition NEITHER reader can see was compared on its visible one alone and passed\n" + out,
+      ).toBe(1);
+      expect(out).toContain("MEASURE_FAIL");
+      expect(out, "the refusal must NAME the file").toMatch(
+        /20260901120000_zero_path\.sql: textual 2 definition\(s\) vs structural 1/,
+      );
+      expect(out).toContain("blind spots");
+      expect(out).not.toContain("no unacknowledged repo-vs-PROD body drift");
+      expect(out).not.toContain("1 match");
+    });
+  });
+
+  it("F2 (b) CALIBRATION: the comment-split spelling is invisible to BOTH readers", () => {
+    withTempDir((dir) => {
+      const f = join(dir, "split.sql");
+      writeFileSync(f, SPLIT_BY_COMMENT_FN);
+      const lexer = spawnSync("node", [NORMALIZER, "--function-names", f], { encoding: "utf8" });
+      const naive = spawnSync("node", [NAIVE, f], { encoding: "utf8" });
+      expect(lexer.status).toBe(0);
+      expect(naive.status).toBe(0);
+      expect(lexer.stdout.trim(), "if the lexer sees it, the arm below exercises the ordinary path").toBe("");
+      expect(naive.stdout.trim()).toBe("");
+    });
+  });
+
+  it("F2 (b) RED: `CREATE /*c*/ OR REPLACE FUNCTION` with zero visible definitions is REFUSED, not passed as a legitimate zero", () => {
+    withTempDir((dir) => {
+      const env = scaffold(dir, SPLIT_BY_COMMENT_FN);
+      const { status, out } = run(PROD_GATE, env);
+      expect(
+        status,
+        "a comment between CREATE and OR REPLACE blinded all THREE readings and the run passed as a legitimate zero\n" + out,
+      ).toBe(1);
+      expect(out).toContain("MEASURE_FAIL");
+      expect(out).toMatch(/20260901120000_zero_path\.sql: textual 1 definition\(s\) vs structural 0/);
+      expect(out).not.toContain("the zero is LEGITIMATE");
+    });
+  });
+
+  it("F2 (c) CONTROL: textual == structural stays GREEN — a prose mention in a comment beside a real definition does not over-count", () => {
+    withTempDir((dir) => {
+      const env = scaffold(
+        dir,
+        "-- helper; see the CREATE OR REPLACE FUNCTION below\n" +
+          "/* an older CREATE FUNCTION public.some_other_fn lived here */\n" +
+          VISIBLE_FN,
+        { snapshotFor: "some_other_fn" },
+      );
+      const { status, out } = run(PROD_GATE, env);
+      expect(status, out).toBe(0);
+      expect(out).toContain("Functions defined or replaced by this PR: 1");
+      expect(out).toContain("1 match");
+      expect(out).not.toContain("MEASURE_FAIL");
+    });
+  });
+
+  it("F2 (d) CONTROL: a comment that merely MENTIONS `CREATE OR REPLACE FUNCTION` in an ALTER-only file is a LEGITIMATE zero after masking", () => {
+    withTempDir((dir) => {
+      const env = scaffold(
+        dir,
+        "-- deliberately no CREATE OR REPLACE FUNCTION in this migration\n" +
+          "/* nor a CREATE FUNCTION\n   split across lines */\n" +
+          ALTER_ONLY,
+      );
+      const { status, out } = run(PROD_GATE, env);
+      expect(
+        status,
+        "a comment MENTION was counted as a definition — masking is not applied\n" + out,
+      ).toBe(0);
+      expect(out).toContain("LEGITIMATE");
+      expect(out).toMatch(/crude textual scan[^\n]*-> 0 definition\(s\) in 1 file\(s\)/);
+      expect(out).not.toContain("MEASURE_FAIL");
+    });
+  });
+
+  it("COVERAGE RED: a grep that ERRORS on the per-file textual scan is a MEASURE_FAIL naming the file, never a scan that found nothing", () => {
+    // The `_tw_rc >= 2` arm — same PATH-shim technique as the WR-04 arms,
+    // keyed on this call's own flags (`-aoiE`) so every other grep delegates.
+    withTempDir((dir) => {
+      const env = scaffold(dir, ALTER_ONLY);
+      const PATH = withPathShim(dir, "grep", [
+        'for a in "$@"; do case "$a" in -aoiE) exit 2 ;; esac; done',
+      ]);
+      const { status, out } = run(PROD_GATE, { ...env, PATH });
+      expect(status, "an unscannable file was read as a clean one").toBe(1);
+      expect(out).toContain("MEASURE_FAIL");
+      expect(out).toContain("could not read");
+      expect(out).toContain("20260901120000_zero_path.sql");
+      expect(out).toMatch(/grep exited 2\b/);
+      expect(out).not.toContain("LEGITIMATE");
+    });
+  });
+
+  it("REOPEN PIN: the tripwire's crudeness is documented AS DELIBERATE, so it is not upgraded into a parser", () => {
+    // By name, node:fs, same reasoning as the marker arm below. The rationale is
+    // the load-bearing part: a later reader who "fixes" the scan into a real
+    // parser would give it the same blind spots as the two readers it exists to
+    // check, and the discriminator would silently stop discriminating.
+    const src = readFileSync(PROD_GATE, "utf8");
+    expect(src).toContain("VAC04-ZERO-PATH-TRIPWIRE");
+    expect(
+      src,
+      "the crudeness rationale was deleted — the next reader has nothing stopping them",
+    ).toContain('DO NOT "IMPROVE" THIS INTO A PARSER');
+    expect(src.toLowerCase()).toContain("blind spots do not overlap");
+    // No human override. The tripwire is a measurement, not a knob (D-13).
+    expect(src).toContain("the tripwire is a MEASUREMENT, not a");
+  });
+
+  // ── (b) The reopen pin's BY-NAME direction ─────────────────────────────────
+  it("REOPEN PIN: the gate script carries the VAC04-ZERO-PATH-FAILS-CLOSED marker and its ordering note", () => {
+    // node:fs, never shell grep — `src/lib/wizardErrors.test.ts` carries a
+    // measured NUL byte that makes grep exit 1 and read as "clean", and a pin
+    // that can be defeated by a byte is not a pin.
+    const src = readFileSync(PROD_GATE, "utf8");
+    expect(
+      src,
+      "the fail-closed branch was deleted or rerouted — [VAC04-C1] is reopened",
+    ).toContain("VAC04-ZERO-PATH-FAILS-CLOSED");
+    // The marker alone would let the branch be gutted to `exit 0` under an
+    // intact comment; the execution arm above covers that. What THIS arm adds is
+    // that the ordering constraint stays where a blocked reader will find it.
+    expect(src).toContain("164.4");
+    expect(src.toLowerCase()).toContain("hold");
+  });
+});
+
+// ── [VAC04-C2] GATE-LEVEL ────────────────────────────────────────────────────
+//
+// SC-4 says each of [VAC04-C1]..[VAC04-C4] is "driven end-to-end through the
+// real gate". [VAC04-C2] — the main-module guard that no-oped on a symlinked or
+// space-containing reader path, so main() never ran, stdout was empty and the
+// process exited 0 — was proven in vac04-reader-guards.test.ts on the two
+// reader CLIs only; the gate-level propagation rested on a code-read of the
+// `|| fail` wrappers (164.3.1-VERIFICATION.md gaps[0]). This block drives the
+// REAL gate, scripts/prod-body-drift-check.sh, with its env-injectable reader
+// paths (`NORMALIZER` / `NAIVE_NAMES`, :143-144) pointing at a symlink and at a
+// copy under a directory whose name carries a space.
+//
+// WHY THE FIXTURES ARE PER-READER-VISIBLE. MEASURED 2026-09-02 (164.3.1-13):
+// on a definition BOTH readers see, the gate's union masks a single reader's
+// silent zero — the other member still yields the name, the gate still prints
+// the readers-ran line, and a neuter of one guard cannot RED. So fixture A is
+// visible to the NAIVE reader only (a `$` in the identifier stops the lexer's
+// readQualifiedName) and fixture B to the NORMALIZER only (the definition does
+// not START its line — the naive reader's pinned LIMITATION 1). Each fixed-leg
+// case therefore has exactly ONE load-bearing union member, and that member is
+// the one reached through the unusual path.
+//
+// WHY THE PASS CONDITION IS THE READERS-RAN LINE, NOT THE TRIPWIRE (D-13).
+// Since D-13 a silent zero from a symlinked reader on a real definition is ALSO
+// caught by [VAC04-C1]'s textual tripwire — both readers `0 name(s)`, then
+// MEASURE_FAIL. A gate-level arm that expected THAT refusal would prove C1's
+// tripwire, not the guard fix. So the fixed leg asserts
+// `Functions defined or replaced by this PR: 1` (the reader RAN through the
+// injected path), and the refusal appears only in the calibration leg as the
+// NEUTERED outcome. VERIFICATION gaps[0] "Note for the fixer".
+//
+// STATED BOUND. The PROD-side commands (`BODY_FETCH_CMD`, `BODY_NAME_INDEX_CMD`,
+// `BODY_NAME_INDEX_XCHECK_CMD`) are word-split on IFS by the gate, so they are
+// never handed a space-containing path here; they stay on the canonical repo
+// reader paths, and only the left-hand readers take the injected shapes.
+describe("[VAC04-C2] GATE-LEVEL — the realpath guard driven THROUGH THE REAL GATE: a reader reached through a symlink or a space path must RUN", () => {
+  const NORMALIZER = "scripts/sql-body-normalize.mjs";
+  const NAIVE = "scripts/sql-function-names-naive.mjs";
+
+  /** Fixture A: seen by the NAIVE reader ONLY — the `$` stops the lexer. */
+  const NAIVE_ONLY_FN =
+    "CREATE OR REPLACE FUNCTION public.sanitize_user$v2(p uuid) RETURNS void " +
+    "LANGUAGE plpgsql AS $fn$ BEGIN END; $fn$;\n";
+  const NAIVE_ONLY_NAME = "sanitize_user$v2";
+
+  /** Fixture B: seen by the NORMALIZER ONLY — the line does not start with CREATE. */
+  const NORMALIZER_ONLY_FN =
+    "SELECT 1; CREATE OR REPLACE FUNCTION public.mid_fn(a int) RETURNS int " +
+    "LANGUAGE sql AS $$ SELECT a $$;\n";
+  const NORMALIZER_ONLY_NAME = "mid_fn";
+
+  /** The arm's PASS condition: the gate's name count, reached only if a reader RAN. */
+  const READERS_RAN = "Functions defined or replaced by this PR: 1";
+  /** Printed only when the naive reader saw a name the normalizer did not (:239). */
+  const NAIVE_ONLY_WARNING =
+    "the independent name reader found function definition(s) the normalizer's parser did not";
+
+  /** The fixed guard's idiom (naive.mjs:340 / normalize.mjs:767) and the pre-fix one it replaced. */
+  const REALPATH_IDIOM = "realpathSync(process.argv[1])";
+  const PRE_FIX_IDIOM = "import.meta.url === `file://${process.argv[1]}`";
+  const PRE_FIX_RETURN = "return import.meta.url === `file://${process.argv[1]}`;";
+  const FIXED_RETURN_REALPATH =
+    "return realpathSync(process.argv[1]) === fileURLToPath(import.meta.url);";
+  const FIXED_RETURN_FALLBACK =
+    "return resolve(process.argv[1]) === fileURLToPath(import.meta.url);";
+
+  type Shape = "symlink" | "space";
+
+  /**
+   * A reader reached through the given shape. Both shapes keep the script's own
+   * basename, so the two readers stay DISTINCT files — the gate refuses at :151
+   * when NORMALIZER and NAIVE_NAMES resolve to the same path, before either runs.
+   */
+  function readerPath(shape: Shape, script: string, dir: string): string {
+    if (shape === "symlink") {
+      mkdirSync(join(dir, "links"), { recursive: true });
+      const link = join(dir, "links", basename(script));
+      symlinkSync(resolve(script), link);
+      return link;
+    }
+    // The directory name carries the space; the copy runs from anywhere because
+    // both readers import node: builtins only.
+    mkdirSync(join(dir, "reader copies"), { recursive: true });
+    const copy = join(dir, "reader copies", basename(script));
+    cpSync(resolve(script), copy);
+    return copy;
+  }
+
+  /** The gate wired as migration-drift-check.yml wires it, plus the injected left-hand readers (`gateScaffold`, IN-08). */
+  function scaffold(
+    dir: string,
+    migrationBody: string,
+    readers: { normalizer: string; naive: string },
+  ): Record<string, string> {
+    return gateScaffold(dir, { migrationBasename: "20260902120000_gate_level_c2.sql", migrationBody, readers }).env;
+  }
+
+  // ── Calibration. Deliberately FIRST: if a fixture were visible to BOTH
+  // readers, "the gate reached 1" would hold with either reader silent, and
+  // the single-member neuter cycles (C2-N1 / C2-N2) could not RED.
+  it("CALIBRATION: fixture A is visible to the NAIVE reader only, fixture B to the NORMALIZER only — each case has ONE load-bearing member", () => {
+    withTempDir((dir) => {
+      const a = join(dir, "fixture_a.sql");
+      writeFileSync(a, NAIVE_ONLY_FN);
+      const b = join(dir, "fixture_b.sql");
+      writeFileSync(b, NORMALIZER_ONLY_FN);
+
+      const aLexer = spawnSync("node", [NORMALIZER, "--function-names", a], { encoding: "utf8" });
+      const aNaive = spawnSync("node", [NAIVE, a], { encoding: "utf8" });
+      expect(aLexer.status, aLexer.stderr).toBe(0);
+      expect(aNaive.status, aNaive.stderr).toBe(0);
+      expect(aLexer.stdout.trim(), "fixture A must be INVISIBLE to the lexer, or the naive member is not load-bearing").toBe("");
+      expect(aNaive.stdout.trim(), "fixture A must be seen by the naive reader").toBe(NAIVE_ONLY_NAME);
+
+      const bLexer = spawnSync("node", [NORMALIZER, "--function-names", b], { encoding: "utf8" });
+      const bNaive = spawnSync("node", [NAIVE, b], { encoding: "utf8" });
+      expect(bLexer.status, bLexer.stderr).toBe(0);
+      expect(bNaive.status, bNaive.stderr).toBe(0);
+      expect(bLexer.stdout.trim(), "fixture B must be seen by the lexer").toBe(NORMALIZER_ONLY_NAME);
+      expect(bNaive.stdout.trim(), "fixture B must be INVISIBLE to the naive reader, or the normalizer member is not load-bearing").toBe("");
+    });
+  }, 30_000);
+
+  // ── FIXED LEG: four cases, one `it` each, so a neuter's RED set names the
+  // reader and the shape it broke. Titles name the load-bearing reader FIRST.
+  const FIXED_CASES = [
+    {
+      name: "case 1: NAIVE reader load-bearing through a SPACE path (normalizer through a symlink) — fixture A",
+      naiveShape: "space" as Shape,
+      normalizerShape: "symlink" as Shape,
+      fixture: NAIVE_ONLY_FN,
+      fnName: NAIVE_ONLY_NAME,
+      naiveOnly: true,
+    },
+    {
+      name: "case 2: NAIVE reader load-bearing through a SYMLINK (normalizer through a space path) — fixture A",
+      naiveShape: "symlink" as Shape,
+      normalizerShape: "space" as Shape,
+      fixture: NAIVE_ONLY_FN,
+      fnName: NAIVE_ONLY_NAME,
+      naiveOnly: true,
+    },
+    {
+      name: "case 3: NORMALIZER load-bearing through a SYMLINK (naive through a space path) — fixture B",
+      naiveShape: "space" as Shape,
+      normalizerShape: "symlink" as Shape,
+      fixture: NORMALIZER_ONLY_FN,
+      fnName: NORMALIZER_ONLY_NAME,
+      naiveOnly: false,
+    },
+    {
+      name: "case 4: NORMALIZER load-bearing through a SPACE path (naive through a symlink) — fixture B",
+      naiveShape: "symlink" as Shape,
+      normalizerShape: "space" as Shape,
+      fixture: NORMALIZER_ONLY_FN,
+      fnName: NORMALIZER_ONLY_NAME,
+      naiveOnly: false,
+    },
+  ];
+
+  it.each(FIXED_CASES)("FIXED LEG $name: the real gate reaches the readers-ran line", (c) => {
+    // MEASURED 2026-09-02 with the fixed readers, both shapes, both fixtures:
+    //   "Functions defined or replaced by this PR: 1"
+    //   "  <name>: measured absent — not in the PROD source's 1-name index. Treated as a NEW function (pass)."
+    //   exit 0
+    withTempDir((dir) => {
+      const env = scaffold(dir, c.fixture, {
+        normalizer: readerPath(c.normalizerShape, NORMALIZER, dir),
+        naive: readerPath(c.naiveShape, NAIVE, dir),
+      });
+      const { status, out } = run(PROD_GATE, env);
+      expect(
+        status,
+        `the gate did not pass — a reader reached through a ${c.naiveShape}/${c.normalizerShape} path did not RUN\n${out}`,
+      ).toBe(0);
+      // The pass condition: the reader RAN through the injected path and the
+      // gate counted its name. Not the tripwire refusal (D-13 note).
+      expect(out).toContain(READERS_RAN);
+      expect(out).toContain(`${c.fnName}: measured absent`);
+      expect(out, "the D-13 refusal is the NEUTERED outcome, never the pass").not.toContain("MEASURE_FAIL");
+      if (c.naiveOnly) {
+        // Proof the NAIVE reader ran through ITS injected path: only it can
+        // have produced this name, and the gate says so.
+        expect(out).toContain(NAIVE_ONLY_WARNING);
+      }
+    });
+  }, 30_000);
+
+  // ── CALIBRATION LEG: the standing RED direction. Scratch copies of both
+  // readers carrying the pre-fix URL-string guard, reached through symlinks,
+  // turn the SAME gate wiring into zero names and the D-13 blind-zero refusal.
+  // This is what cycles C2-N1 / C2-N2 produce on the REAL readers (recorded in
+  // 164.3.1-13-SUMMARY.md); here it runs on every CI run so the fixed leg can
+  // never pass for a reason unrelated to the guard.
+  it("CALIBRATION LEG (standing RED direction): readers carrying the PRE-FIX guard, reached through symlinks AND through a space path, give ZERO names and the MEASURE_FAIL refusal — the readers-ran line never prints", () => {
+    // By-name pin on the REAL sources first: a real reader that lost its
+    // realpath guard reds HERE, by name, before any scratch copy is derived.
+    for (const script of [NAIVE, NORMALIZER]) {
+      expect(
+        occurrences(readFileSync(script, "utf8"), REALPATH_IDIOM),
+        `${script} no longer carries the realpath guard \`${REALPATH_IDIOM}\` — [VAC04-C2] is reopened in the real reader`,
+      ).toBeGreaterThanOrEqual(1);
+    }
+
+    withTempDir((dir) => {
+      mkdirSync(join(dir, "pre-fix"), { recursive: true });
+      mkdirSync(join(dir, "pre-fix-links"), { recursive: true });
+      // IN-05 (164.3.1 review): the fixed leg claims TWO shapes (cases 1 and 4
+      // are space-path load-bearing), so the standing RED direction shows both
+      // — the pre-fix copies are also written under a directory whose name
+      // carries a space and run through that path. Recorded cycles C2-N1/C2-N2
+      // showed it; this makes it run on every CI run.
+      mkdirSync(join(dir, "pre-fix copies"), { recursive: true });
+      const links: Record<string, string> = {};
+      const spaced: Record<string, string> = {};
+      for (const script of [NAIVE, NORMALIZER]) {
+        const neutered = readFileSync(script, "utf8")
+          .replace(FIXED_RETURN_REALPATH, PRE_FIX_RETURN)
+          .replace(FIXED_RETURN_FALLBACK, PRE_FIX_RETURN);
+        // A neuter not proven applied makes this leg vacuous: the copy must
+        // carry NO realpath idiom and at least one pre-fix idiom.
+        expect(occurrences(neutered, REALPATH_IDIOM), `${script}: the scratch copy still carries the fixed guard`).toBe(0);
+        expect(occurrences(neutered, PRE_FIX_IDIOM), `${script}: the scratch copy does not carry the pre-fix guard`).toBeGreaterThanOrEqual(1);
+        const copy = join(dir, "pre-fix", basename(script));
+        writeFileSync(copy, neutered);
+        const link = join(dir, "pre-fix-links", basename(script));
+        symlinkSync(copy, link);
+        links[script] = link;
+        const spacedCopy = join(dir, "pre-fix copies", basename(script));
+        writeFileSync(spacedCopy, neutered);
+        spaced[script] = spacedCopy;
+      }
+
+      // MEASURED 2026-09-02 (both fixtures, both shapes): both evidence lines
+      // `0 name(s)`, "MEASURE_FAIL — NOTHING WAS COMPARED.", exit 1.
+      for (const [shape, readers] of [
+        ["symlink", { normalizer: links[NORMALIZER], naive: links[NAIVE] }],
+        ["space", { normalizer: spaced[NORMALIZER], naive: spaced[NAIVE] }],
+      ] as const) {
+        for (const [label, fixture] of [
+          ["fixture-A", NAIVE_ONLY_FN],
+          ["fixture-B", NORMALIZER_ONLY_FN],
+        ] as const) {
+          // The scratch sub-dir name carries NO space: the `BODY_*_CMD`
+          // strings word-split over `${dump}` (describe comment above).
+          const sub = join(dir, `${shape}-${label}`);
+          mkdirSync(sub, { recursive: true });
+          const env = scaffold(sub, fixture, readers);
+          const { status, out } = run(PROD_GATE, env);
+          expect(
+            status,
+            `${shape}/${label}: the gate PASSED with readers whose guard cannot run through a ${shape} path — the fixed leg above proves nothing\n${out}`,
+          ).not.toBe(0);
+          expect(out).toContain("MEASURE_FAIL");
+          // Evidence lines (D-12/SC-7) naming the INJECTED paths, each at zero.
+          expect(out).toContain(`${readers.normalizer} --function-names -> 0 name(s)`);
+          expect(out).toContain(`${readers.naive} -> 0 name(s)`);
+          expect(out, `${shape}/${label}: the readers-ran line printed although neither reader ran`).not.toContain(READERS_RAN);
+        }
+      }
+    });
+  }, 30_000);
+});
+
+// ── [VAC04-C4] GATE-LEVEL ────────────────────────────────────────────────────
+//
+// MEASURED PRE-FIX GATE BEHAVIOUR (164.3.1-04, reproduced 2026-09-02 through
+// the real gate with both refusals disabled in scratch copies): on
+// `CREATE OR REPLACE FUNCTION public.fúnc_é(p uuid)` the naive reader
+// TRUNCATED the identifier to `f` (its charset regex stops at the first
+// non-ASCII byte) and the normalizer DROPPED the definition; the gate unioned
+// {f}, looked `f` up in PROD's index, reported
+//     "Functions defined or replaced by this PR: 1"
+//     "  f: measured absent — … Treated as a NEW function (pass)."
+//     "no unacknowledged repo-vs-PROD body drift"          exit 0
+// — a pass for a function nobody defined, over PRODUCTION bodies. The fix
+// (plan 04) makes both readers REFUSE with the offending codepoint. Plan 04
+// proved that on the reader CLIs; this block drives it THROUGH THE REAL GATE
+// (SC-4), on the same P10 input, and asserts the gate's own output.
+//
+// WHICH SITE THE INPUT REACHES. The normalizer's `--function-names` call at
+// prod-body-drift-check.sh:207 is the FIRST reader call and the ONLY site this
+// input reaches: its `|| fail` wraps the refusal into
+// "could not extract function names from the changed migrations." and exits 1.
+// The naive reader's call at :221 is never executed on this input — so the
+// naive refusal's reachability AT GATE LEVEL on THIS input is a STATED
+// NON-COVERAGE, not a claim. What IS shown (the stated-bound `it` below) is
+// that with ONLY the normalizer's refusal disabled the naive refusal still
+// reaches the verdict through :221's `|| fail`, which is why the recorded
+// neuter cycle C4-N1 (164.3.1-13-SUMMARY.md) disables BOTH members: a
+// single-member neuter cannot flip the gate's exit code.
+//
+// WHY BODY TEXT MUST NEVER APPEAR. The gate and its readers run in a PUBLIC CI
+// log, and the normalizer's index run reads a PROD dump. The refusal may name
+// the identifier prefix, the byte, the codepoint and the file:line — never a
+// slice of a body. Asserted here at gate level with a calibrated sentinel.
+describe("[VAC04-C4] GATE-LEVEL — the charset refusal driven THROUGH THE REAL GATE: a non-ASCII identifier must be REFUSED, never compared as a different function", () => {
+  const NORMALIZER = "scripts/sql-body-normalize.mjs";
+  const NAIVE = "scripts/sql-function-names-naive.mjs";
+
+  /** Appears ONLY inside the function body; the gate output must never carry it. */
+  const BODY_SENTINEL = "ZZ_VAC04_BODY_SENTINEL_ZZ";
+
+  /**
+   * The P10 input, verbatim from vac04-reader-guards.test.ts. The leading
+   * comment line puts the definition on line 2, so the diagnostic's 1-based
+   * line number is computed, not a hardcoded 1.
+   */
+  const P10_SQL =
+    "-- fixture header, so the definition is NOT on line 1\n" +
+    "CREATE OR REPLACE FUNCTION public.fúnc_é(p uuid)\n" +
+    "RETURNS void\nLANGUAGE plpgsql\nAS $$\nBEGIN\n" +
+    `  PERFORM 1; -- ${BODY_SENTINEL}\nEND;\n$$;\n`;
+
+  const MIGRATION_BASENAME = "20260902120000_gate_level_c4.sql";
+
+  /** The refusal diagnostic (normalize.mjs:568 / naive.mjs:305) and the gate's wrapper (:208). */
+  const CHARSET_DIAGNOSTIC = "leaves the unquoted charset";
+  const OFFENDING_CODEPOINT = "U+00FA";
+  const GATE_WRAPPER = "could not extract function names from the changed migrations";
+  const NAIVE_WRAPPER = "the independent name reader failed on the changed migrations";
+  const READERS_RAN = "Functions defined or replaced by this PR: 1";
+  const SUCCESS_NOTICE = "no unacknowledged repo-vs-PROD body drift";
+
+  /** The two refusal sites the scratch neuters disable (naive.mjs:171, normalize.mjs:369). */
+  const NAIVE_REFUSAL_CONDITION =
+    'follower !== undefined && !/\\s/.test(follower) && follower !== "("';
+  const NORMALIZER_REFUSAL_THROW = "throw charsetRefusal(sql, j,";
+
+  /** The gate wired as migration-drift-check.yml wires it, on the P10 migration (`gateScaffold`, IN-08). */
+  function scaffold(
+    dir: string,
+    readers: { normalizer: string; naive: string } = { normalizer: NORMALIZER, naive: NAIVE },
+  ): { env: Record<string, string>; migration: string } {
+    return gateScaffold(dir, { migrationBasename: MIGRATION_BASENAME, migrationBody: P10_SQL, readers });
+  }
+
+  /**
+   * Scratch copies with the refusal DISABLED — the pre-fix truncate/drop
+   * behaviour. Each copy keeps its script's basename (distinct basenames, so
+   * the gate's :151 same-file refusal does not fire before either reader runs).
+   *
+   * Proven neutered by ABSENCE only — the replaced refusal text is gone from
+   * the copy. Deliberately NOT a `source !== copy` check: under the recorded
+   * C4-N1 cycle the REAL sources are already neutered, the replacements no-op
+   * and the copies come out byte-identical, and a differs-from-source assertion
+   * would RED this leg for a reason unrelated to the gate. The leg's teeth are
+   * its gate-outcome assertions, which RED the moment a copy still refuses.
+   */
+  function neuteredCopies(dir: string): { normalizer: string; naive: string } {
+    mkdirSync(join(dir, "neutered"), { recursive: true });
+
+    const naiveCopy = readFileSync(NAIVE, "utf8").replace(NAIVE_REFUSAL_CONDITION, "false");
+    expect(naiveCopy, "the naive scratch copy still carries its follower-byte refusal").not.toContain(
+      NAIVE_REFUSAL_CONDITION,
+    );
+    const naivePath = join(dir, "neutered", basename(NAIVE));
+    writeFileSync(naivePath, naiveCopy);
+
+    const normalizerCopy = readFileSync(NORMALIZER, "utf8").replace(
+      /^[ \t]*throw charsetRefusal\(sql, j,.*$/m,
+      "      continue;",
+    );
+    expect(normalizerCopy, "the normalizer scratch copy still carries its charset throw").not.toContain(
+      NORMALIZER_REFUSAL_THROW,
+    );
+    const normalizerPath = join(dir, "neutered", basename(NORMALIZER));
+    writeFileSync(normalizerPath, normalizerCopy);
+
+    return { normalizer: normalizerPath, naive: naivePath };
+  }
+
+  /** 1-based line of the definition inside P10_SQL — computed, so the `:N:` assertion is not a hardcoded 2. */
+  function definitionLine(): number {
+    return P10_SQL.split("\n").findIndex((l) => l.startsWith("CREATE")) + 1;
+  }
+
+  // ── THE REFUSAL ARM: the real gate, the real readers, the P10 migration.
+  it("REFUSAL: the real gate exits 1 on `public.fúnc_é`, naming U+00FA and the file:line — and prints NO body text, no readers-ran line, no verdict", () => {
+    // MEASURED 2026-09-02 through the gate:
+    //   "::error::sql-body-normalize: <migration>:2: identifier leaves the unquoted
+    //    charset [A-Za-z0-9_$] — read 'public.f' then hit 'ú' (U+00FA). …"
+    //   "::error::VAC-04 …: could not extract function names from the changed migrations."
+    //   exit 1
+    withTempDir((dir) => {
+      const { env, migration } = scaffold(dir);
+      const { status, out } = run(PROD_GATE, env);
+      expect(status, `the gate did not refuse a non-ASCII identifier\n${out}`).toBe(1);
+
+      // Diagnostic-first (D-12 / SC-7): the evidence, not only the exit code.
+      expect(out).toContain(CHARSET_DIAGNOSTIC);
+      expect(out).toContain(OFFENDING_CODEPOINT);
+      expect(out, "the refusal must name the file and the 1-based line of the definition").toContain(
+        `${migration}:${definitionLine()}:`,
+      );
+      expect(out, "the refusal must say what prefix was read before the offending byte").toContain("read 'public.f'");
+      expect(out, "the gate's own wrapper must carry the reader's exit into the verdict").toContain(GATE_WRAPPER);
+
+      // Non-leakage. Calibration: the sentinel really is in the input.
+      expect(P10_SQL).toContain(BODY_SENTINEL);
+      expect(out, "function body text reached the gate output — a PUBLIC CI log").not.toContain(BODY_SENTINEL);
+      // IN-06 (164.3.1 review): the readers' rule is stronger than "no body"
+      // — never the SOURCE LINE either (naive.mjs:302-303). `(p uuid)` sits on
+      // the definition line and is the only line-2 fragment beyond the allowed
+      // `read 'public.f'` prefix. Calibrated against the line, then pinned.
+      expect(P10_SQL.split("\n")[definitionLine() - 1]).toContain("(p uuid)");
+      expect(out, "the refusal echoed the definition line").not.toContain("(p uuid)");
+
+      // No comparison happened, and the output must not pretend one did.
+      expect(out).not.toContain("Functions defined or replaced by this PR");
+      expect(out).not.toContain("measured absent");
+      expect(out).not.toContain(SUCCESS_NOTICE);
+    });
+  }, 30_000);
+
+  // ── CALIBRATION LEG: the standing RED direction. With BOTH refusals
+  // disabled the SAME wiring compares the WRONG subject and PASSES — the exact
+  // pre-fix behaviour, measured verbatim 2026-09-02. Runs on every CI run so the
+  // refusal arm above can never pass for a reason unrelated to the refusal.
+  it("CALIBRATION LEG (standing RED direction): with BOTH refusals disabled, the gate counts a truncated `f`, measures it absent and PASSES — the wrong-subject pass", () => {
+    withTempDir((dir) => {
+      const { env } = scaffold(dir, neuteredCopies(dir));
+      const { status, out } = run(PROD_GATE, env);
+      expect(
+        status,
+        `the neutered readers still refused — the calibration copies are not the pre-fix shape\n${out}`,
+      ).toBe(0);
+      expect(out).toContain(READERS_RAN);
+      // IN-07 (164.3.1 review): pinned as the EXACT line the gate prints
+      // (two-space indent, :718), not a suffix — `xf: measured absent` would
+      // satisfy "f: measured absent" and READERS_RAN's `: 1` only bounds it
+      // to one name ending in f.
+      expect(out, "the truncated name `f` — exactly `f` — must be what the gate looked up").toContain(
+        "\n  f: measured absent",
+      );
+      expect(out).toContain(SUCCESS_NOTICE);
+      expect(out, "no refusal may fire with both refusals disabled").not.toContain(OFFENDING_CODEPOINT);
+    });
+  }, 30_000);
+
+  // ── STATED BOUND, its OWN `it`: with ONLY the normalizer's refusal disabled
+  // the REAL naive reader still refuses through :221's `|| fail`. This depends
+  // on the real naive reader, which is why it REDs under the recorded C4-N1
+  // cycle (both real refusals disabled → the gate exits 0, no U+00FA) while
+  // the calibration leg above, built from copies only, stays green. Folding it
+  // into that leg would blur the RED set.
+  it("STATED BOUND: with only the normalizer's refusal disabled, the REAL naive reader's refusal still reaches the verdict through :221 — exit 1 naming U+00FA under its own prefix", () => {
+    withTempDir((dir) => {
+      const { normalizer } = neuteredCopies(dir);
+      const { env } = scaffold(dir, { normalizer, naive: NAIVE });
+      const { status, out } = run(PROD_GATE, env);
+      expect(status, `the naive refusal did not reach the gate's verdict\n${out}`).toBe(1);
+      expect(out).toMatch(/sql-function-names-naive: [^\n]*U\+00FA/);
+      expect(out).toContain(NAIVE_WRAPPER);
+      expect(out).not.toContain(READERS_RAN);
+      expect(out).not.toContain(BODY_SENTINEL);
+      expect(out, "the naive refusal echoed the definition line (IN-06)").not.toContain("(p uuid)");
+    });
+  }, 30_000);
+});
+
+// ── VAC-04 ABSURDITY FLOOR (D-09's VAC-04 half) ──────────────────────────────
+//
+// ⛔ THE DEFECT SHAPE. The empty-index guards answer "is the reader broken?"
+// only for EXACTLY zero names. One name through and they go quiet — and a
+// near-empty index is precisely the "every function is new — pass" state,
+// because a name absent from a tiny index takes the gate's measured-absent pass
+// on every iteration. So VAC-04 could report a clean run off a reader that had
+// stopped matching, which is Primitive C over PRODUCTION function bodies.
+//
+// The floor is calibrated against a SECOND, independently produced population
+// the gate already holds — the committed snapshot bodies, generated FROM PROD
+// by `npm run schema:functions`. It is a RATIO, not a literal, so it cannot rot
+// as PROD's catalogue changes (D-10: thresholds by MEASUREMENT, never taste).
+//
+// Proven TWO-DIRECTIONALLY below, because a floor that fires unconditionally
+// also passes its own RED arm (D-10, SC-8).
+describe("VAC-04 absurdity floor — a tiny PROD index is a broken reader, not an empty database", () => {
+  /** The REAL committed snapshot: 118 bodies, measured 2026-09-01 at 15ab417b. */
+  const REAL_SNAPSHOT_DIR = "supabase/schema/functions";
+
+  const FN_BODY =
+    "CREATE OR REPLACE FUNCTION public.demo_fn(p_id UUID)\nRETURNS UUID\n" +
+    "LANGUAGE plpgsql\nAS $$\nBEGIN\n  RETURN p_id;\nEND\n$$;";
+
+  /**
+   * The population the floor calibrates against, read the same way the gate
+   * reads it. Asserted rather than assumed: if this ever drops below the gate's
+   * SNAPSHOT_MIN the floor goes inert and BOTH arms below would pass for the
+   * wrong reason.
+   */
+  const snapshotBodyCount = () =>
+    readdirSync(REAL_SNAPSHOT_DIR).filter((f) => f.endsWith(".sql")).length;
+
+  it("CALIBRATION: the real snapshot population is large enough to calibrate against", () => {
+    // The gate's SNAPSHOT_MIN is 50. Read off the script rather than restated
+    // here, so the two cannot drift apart silently.
+    const src = readFileSync(PROD_GATE, "utf8");
+    const m = /^SNAPSHOT_MIN=(\d+)$/m.exec(src);
+    expect(m, "the gate must declare SNAPSHOT_MIN — the floor's precondition").not.toBeNull();
+    const min = Number((m as RegExpExecArray)[1]);
+    expect(snapshotBodyCount()).toBeGreaterThanOrEqual(min);
+    // And the measured record beside the rule must not go missing (SC-9).
+    expect(src).toContain("SAMPLE SIZE AND COVERAGE");
+    expect(src).toContain("WIDE SEPARATION");
+  });
+
+  it("FIRES: a plausible-but-TINY PROD index is a MEASURE_FAIL with evidence, never the all-new pass", () => {
+    withTempDir((dir) => {
+      mkdirSync(join(dir, "migrations"), { recursive: true });
+      const migration = join(dir, "migrations", "20260901120000_demo.sql");
+      writeFileSync(migration, `${FN_BODY}\n`);
+
+      // A handful of names — the shape a reader that has stopped matching
+      // produces. Non-empty on BOTH readings, so the existing empty-index
+      // guards stay quiet and this arm is exercising the FLOOR, not them.
+      const tiny = ["some_fn", "another_fn", "third_fn"];
+      const { status, out } = run(PROD_GATE, {
+        ...FAKE_CREDS,
+        BODY_FETCH_CMD: `bash ${writeStubFetcher(dir)}`,
+        BODY_NAME_INDEX_CMD: `bash ${writeStubNameIndex(dir, tiny)}`,
+        BODY_NAME_INDEX_XCHECK_CMD: `bash ${writeStubNameIndex(dir, tiny, "stub-index-xcheck.sh")}`,
+        CHANGED_MIGRATIONS: migration,
+        SNAPSHOT_DIR: REAL_SNAPSHOT_DIR,
+      });
+
+      expect(status, "a near-empty index was accepted as a measurement of PROD").toBe(1);
+      expect(out).toContain("MEASURE_FAIL");
+      expect(out).toContain("this is the GATE failing, not the database");
+      // Evidence, not just a verdict (SC-7): both counts and a sample of what
+      // WAS read.
+      expect(out).toMatch(/PROD function-name index\s*:\s*3 name\(s\)/);
+      expect(out).toMatch(
+        new RegExp(`committed snapshot bodies:\\s*${snapshotBodyCount()}\\b`),
+      );
+      expect(out).toContain("some_fn");
+      // The pass it must never reach.
+      expect(out).not.toContain("Treated as a NEW function (pass)");
+      expect(out).not.toContain("no unacknowledged repo-vs-PROD body drift");
+      expect(out).not.toContain("measured zero, not an unread one");
+    });
+  });
+
+  it("SILENT: a realistic index built from the repo corpus leaves the floor quiet and the run reaches its normal verdict", () => {
+    // The load-bearing direction. A floor that fires unconditionally would also
+    // pass the arm above, so without this one nothing is proven. Same real
+    // snapshot dir, same PR — the ONLY difference is a realistically sized
+    // index, generated from the repo's own corpus rather than hand-written.
+    withTempDir((dir) => {
+      mkdirSync(join(dir, "migrations"), { recursive: true });
+      const migration = join(dir, "migrations", "20260901120000_demo.sql");
+      writeFileSync(migration, `${FN_BODY}\n`);
+
+      const realistic = readdirSync(REAL_SNAPSHOT_DIR)
+        .filter((f) => f.endsWith(".sql"))
+        .map((f) => basename(f, ".sql"));
+      expect(
+        realistic.length,
+        "a short 'realistic' index would make this arm prove nothing",
+      ).toBeGreaterThan(100);
+      // `demo_fn` is deliberately NOT in it, so this run takes the gate's one
+      // silent pass — the measured-absent path the floor exists to protect.
+      // Proving the floor quiet HERE is stronger than proving it quiet on a
+      // drift comparison: this is the exact verdict a broken reader would fake.
+      expect(realistic).not.toContain("demo_fn");
+
+      const { status, out } = run(PROD_GATE, {
+        ...FAKE_CREDS,
+        BODY_FETCH_CMD: `bash ${writeStubFetcher(dir)}`,
+        BODY_NAME_INDEX_CMD: `bash ${writeStubNameIndex(dir, realistic)}`,
+        BODY_NAME_INDEX_XCHECK_CMD: `bash ${writeStubNameIndex(dir, realistic, "stub-index-xcheck.sh")}`,
+        CHANGED_MIGRATIONS: migration,
+        SNAPSHOT_DIR: REAL_SNAPSHOT_DIR,
+      });
+
+      expect(status, out).toBe(0);
+      expect(out).not.toContain("MEASURE_FAIL");
+      expect(out).not.toContain("this is the GATE failing");
+      expect(out).toContain("Treated as a NEW function (pass)");
+      expect(out).toContain("measured zero, not an unread one");
+    });
+  });
+
+  it("WR-04 RED: a `find` that FAILS mid-walk is a MEASURE_FAIL, not a small population that puts the floor to sleep", () => {
+    // ⛔ WR-04 (164.3.1 review). The denominator was ONE pipeline,
+    //     find "$SNAPSHOT_DIR" … -print | grep -ac '[^[:space:]]'
+    // under `pipefail`, and `[ "$_snap_rc" -le 1 ]` accepted status 1 as
+    // "counted, no rows". A `find` that fails mid-walk (permission, I/O)
+    // exits 1 too — so a failed walk read as a LOW population, the floor went
+    // INERT with a `::warning::`, and the "every function is new — pass"
+    // shape the floor exists to catch was unguarded for that run.
+    //
+    // MEASURED at HEAD 89cbef8b, realistic index, `find` shimmed to print
+    // three entries and exit 1: "absurdity floor is INERT this run", exit 0.
+    withTempDir((dir) => {
+      mkdirSync(join(dir, "migrations"), { recursive: true });
+      const migration = join(dir, "migrations", "20260901120000_demo.sql");
+      writeFileSync(migration, `${FN_BODY}\n`);
+      const realistic = readdirSync(REAL_SNAPSHOT_DIR)
+        .filter((f) => f.endsWith(".sql"))
+        .map((f) => basename(f, ".sql"));
+      expect(realistic.length).toBeGreaterThan(100);
+
+      const env = {
+        ...FAKE_CREDS,
+        BODY_FETCH_CMD: `bash ${writeStubFetcher(dir)}`,
+        BODY_NAME_INDEX_CMD: `bash ${writeStubNameIndex(dir, realistic)}`,
+        BODY_NAME_INDEX_XCHECK_CMD: `bash ${writeStubNameIndex(dir, realistic, "stub-index-xcheck.sh")}`,
+        CHANGED_MIGRATIONS: migration,
+        SNAPSHOT_DIR: REAL_SNAPSHOT_DIR,
+      };
+      const clean = run(PROD_GATE, env);
+      expect(clean.status, "the fixture must be GREEN before the walk is broken").toBe(0);
+      expect(clean.out).not.toContain("absurdity floor is INERT");
+
+      // A walk that lists three files and then dies: the shape of a mid-walk
+      // permission or I/O failure.
+      const PATH = withPathShim(dir, "find", [
+        'case " $* " in *" -name "*) "$REAL" "$@" | head -n 3; exit 1 ;; esac',
+      ]);
+      const { status, out } = run(PROD_GATE, { ...env, PATH });
+      expect(status, "a walk that FAILED was accepted as a small snapshot population").toBe(1);
+      expect(out).toContain("MEASURE_FAIL");
+      expect(out).toContain("could not enumerate");
+      expect(out).toMatch(/find exited 1\b/);
+      expect(out).not.toContain("absurdity floor is INERT");
+      expect(out).not.toContain("no unacknowledged repo-vs-PROD body drift");
+    });
+  });
+
+  it("COVERAGE RED: a grep that ERRORS while COUNTING the snapshot population is a MEASURE_FAIL, not a denominator of zero", () => {
+    // The `_snap_rc >= 2` arm — the walk succeeded, the COUNT could not be
+    // read. Same PATH-shim technique as the find arm above, keyed on this
+    // call's own flag (`-ac`) and file so every other grep delegates.
+    withTempDir((dir) => {
+      mkdirSync(join(dir, "migrations"), { recursive: true });
+      const migration = join(dir, "migrations", "20260901120000_demo.sql");
+      writeFileSync(migration, `${FN_BODY}\n`);
+      const realistic = readdirSync(REAL_SNAPSHOT_DIR)
+        .filter((f) => f.endsWith(".sql"))
+        .map((f) => basename(f, ".sql"));
+      expect(realistic.length).toBeGreaterThan(100);
+
+      const env = {
+        ...FAKE_CREDS,
+        BODY_FETCH_CMD: `bash ${writeStubFetcher(dir)}`,
+        BODY_NAME_INDEX_CMD: `bash ${writeStubNameIndex(dir, realistic)}`,
+        BODY_NAME_INDEX_XCHECK_CMD: `bash ${writeStubNameIndex(dir, realistic, "stub-index-xcheck.sh")}`,
+        CHANGED_MIGRATIONS: migration,
+        SNAPSHOT_DIR: REAL_SNAPSHOT_DIR,
+      };
+      const clean = run(PROD_GATE, env);
+      expect(clean.status, "the fixture must be GREEN before the count is broken").toBe(0);
+
+      const PATH = withPathShim(dir, "grep", [
+        "flag=0; hit=0",
+        'for a in "$@"; do case "$a" in -ac) flag=1 ;; *snapshot-bodies.txt) hit=1 ;; esac; done',
+        '[ "$flag" = 1 ] && [ "$hit" = 1 ] && exit 2',
+      ]);
+      const { status, out } = run(PROD_GATE, { ...env, PATH });
+      expect(status, "an uncountable snapshot population was accepted").toBe(1);
+      expect(out).toContain("MEASURE_FAIL");
+      expect(out).toContain("could not count the committed snapshot bodies");
+      expect(out).toMatch(/grep exited 2\b/);
+      expect(out).not.toContain("absurdity floor is INERT");
+      expect(out).not.toContain("no unacknowledged repo-vs-PROD body drift");
+    });
+  });
+
+  it("SILENT: ordinary DRIFT against a realistic index still reaches its drift verdict, not the floor", () => {
+    // The second silent direction: the floor must not PRE-EMPT a real finding.
+    // Driven on a REAL committed function against the REAL snapshot dir, so the
+    // floor is genuinely ACTIVE (118 bodies) rather than merely switched off by
+    // a scratch dir too small to calibrate against.
+    withTempDir((dir) => {
+      const FN = "_assert_owner";
+      const committed = readFileSync(join(REAL_SNAPSHOT_DIR, `${FN}.sql`), "utf8");
+      // split/join, never String.replace: `$&`, `$1`, "$`" and "$'" are special
+      // in a replacement string, and this body is full of `$$` and `$1`.
+      const drifted = committed.split("v_found := FOUND;").join("v_found := TRUE;");
+      expect(drifted, "the drift edit must actually change the body").not.toBe(committed);
+
+      mkdirSync(join(dir, "migrations"), { recursive: true });
+      mkdirSync(join(dir, "live"), { recursive: true });
+      const migration = join(dir, "migrations", "20260901120000_assert_owner.sql");
+      writeFileSync(migration, committed);
+      writeFileSync(join(dir, "live", `${FN}.sql`), drifted);
+
+      const realistic = readdirSync(REAL_SNAPSHOT_DIR)
+        .filter((f) => f.endsWith(".sql"))
+        .map((f) => basename(f, ".sql"));
+      expect(realistic).toContain(FN);
+
+      const { status, out } = run(PROD_GATE, {
+        ...FAKE_CREDS,
+        BODY_FETCH_CMD: `bash ${writeStubFetcher(dir)}`,
+        BODY_NAME_INDEX_CMD: `bash ${writeStubNameIndex(dir, realistic)}`,
+        BODY_NAME_INDEX_XCHECK_CMD: `bash ${writeStubNameIndex(dir, realistic, "stub-index-xcheck.sh")}`,
+        CHANGED_MIGRATIONS: migration,
+        SNAPSHOT_DIR: REAL_SNAPSHOT_DIR,
+      });
+
+      expect(status).toBe(1);
+      // Exit 1 for the RIGHT reason: drift, not the floor.
+      expect(out).toContain("PROD's live body is NOT the committed body");
+      expect(out).not.toContain("this is the GATE failing, not the database");
+      expect(out).not.toContain("absurdity floor is INERT");
+    });
+  });
+
+  it("the floor announces itself INERT rather than going quiet when it has no denominator", () => {
+    // RESEARCH anti-pattern 5: a control that stops controlling must SAY so.
+    // Every scaffolded arm in this file runs with a 0-1 body snapshot dir, so
+    // this is also the state the rest of the suite runs in — worth being loud.
+    withTempDir((dir) => {
+      const env = scaffoldProdCase(dir, { prodBody: PROD_BODY_EQUIVALENT });
+      const { status, out } = run(PROD_GATE, env);
+      expect(status, out).toBe(0);
+      expect(out).toContain("absurdity floor is INERT this run");
+      expect(out).not.toContain("MEASURE_FAIL");
+    });
+  });
+});
+
 // ── VAC-08 ───────────────────────────────────────────────────────────────────
 
 /** A stub ledger query: emits the names it was told are MISSING from the ledger. */
@@ -1051,6 +2457,237 @@ describe("VAC-08 — scripts/test-ledger-drift-check.sh", () => {
         expect(out).not.toContain("MEASURE_FAIL");
         expect(out).toContain("not present in the TEST ledger");
       });
+    });
+  });
+
+  // ── VAC08-JOIN (164.3.1-12, SC-1) ─────────────────────────────────────────
+  // The join key was validated on 12 rows, applied to 262, and wrong for 253.
+  // The fix is FOUR conventions OR-ed together in `default_ledger_query`
+  // (test-ledger-drift-check.sh :36-60 records how each was found). Nothing
+  // above exercises those clauses: every arm stubs the query, so a clause could
+  // be deleted and this file would stay green while CI resurrected the false
+  // 253. This block reads the clauses OUT OF THE SCRIPT at run time, builds one
+  // ledger row per convention, and asks the real gate for its verdict.
+  //
+  // ⚠️ HONEST BOUNDARY. The stub cannot run SQL. The predicate is evaluated in
+  // JS by an interpreter that knows exactly the four documented clause shapes
+  // and REFUSES any other (fail-by-text, never a silent pass) — so a fifth
+  // convention widens this arm's required coverage by making it red until the
+  // interpreter and a fixture row exist for it. What the gate is driven with is
+  // therefore the JS reading of the script's own clause list, and what is
+  // proven is that the gate's VERDICT follows that list: remove a load-bearing
+  // clause from the script and the row that only it matched is reported
+  // missing, by name (164.3.1-12-CORPUS-PROOFS.md, cycle 1).
+  describe("VAC08-JOIN — the join key is the union of every ledger naming convention", () => {
+    type LedgerRow = { version: string; name: string };
+    type JoinConvention = {
+      id: string;
+      /** The clause EXACTLY as the gate's SQL spells it, whitespace-collapsed. */
+      clause: string;
+      /** The same predicate, in JS. */
+      matches: (m: LedgerRow, fname: string) => boolean;
+      /** A ledger row shaped the way the ledger REALLY stores this convention. */
+      rowFor: (fname: string) => LedgerRow;
+    };
+    const tsOf = (f: string) => f.slice(0, f.indexOf("_"));
+    const descOf = (f: string) => f.slice(f.indexOf("_") + 1);
+
+    // One entry per convention the script's header documents (:39-51). The row
+    // shapes are the MEASURED ones from those lines, not invented: an old row
+    // carries version=<ts> name=<desc>; a recent row carries a re-stamped
+    // version and the whole basename in name; a bare-ts row carries the
+    // timestamp alone; a desc-only row carries the description alone.
+    const JOIN_CONVENTIONS: readonly JoinConvention[] = [
+      {
+        id: "name-only",
+        clause: "m.name = r.fname",
+        matches: (m, f) => m.name === f,
+        rowFor: (f) => ({ version: "20260828061901", name: f }),
+      },
+      {
+        id: "version_name",
+        clause: "(m.version || '_' || m.name) = r.fname",
+        matches: (m, f) => `${m.version}_${m.name}` === f,
+        rowFor: (f) => ({ version: tsOf(f), name: descOf(f) }),
+      },
+      {
+        id: "bare-ts",
+        clause: "m.name = split_part(r.fname, '_', 1)",
+        matches: (m, f) => m.name === f.split("_")[0],
+        rowFor: (f) => ({ version: "20260826084633", name: tsOf(f) }),
+      },
+      {
+        id: "desc-only",
+        clause: "m.name = substr(r.fname, strpos(r.fname, '_') + 1)",
+        matches: (m, f) => m.name === descOf(f),
+        rowFor: (f) => ({ version: "20260826210044", name: descOf(f) }),
+      },
+    ];
+
+    /**
+     * The OR-clauses of the EXISTS predicate for one direction, read off the
+     * script's bytes. Anchored on the `case` label and the `WHERE NOT EXISTS (`
+     * marker the script itself carries; whitespace-collapsed so an indentation
+     * change is not a clause change.
+     */
+    function readJoinClauses(script: string, direction: "missing" | "extra"): string[] {
+      const label = `\n    ${direction})\n`;
+      const start = script.indexOf(label);
+      expect(start, `the '${direction})' case label is not where default_ledger_query keeps it`).toBeGreaterThan(-1);
+      const end = script.indexOf("\n      ;;", start);
+      expect(end, `the '${direction})' case has no ';;' terminator`).toBeGreaterThan(start);
+      const block = script.slice(start, end);
+      // `missing` spells it `WHERE NOT EXISTS (`, `extra` spells it `AND NOT EXISTS (`.
+      const m = /(?:WHERE|AND) NOT EXISTS \(\s*SELECT 1 FROM [^\n]*\n\s*WHERE ([\s\S]*?)\);"/.exec(block);
+      expect(m, `the '${direction}' query no longer carries a 'NOT EXISTS ( SELECT 1 FROM … WHERE …);' predicate`).not.toBeNull();
+      return (m as RegExpExecArray)[1]
+        .split(/\n\s*OR\s+/)
+        .map((c) => c.replace(/\s+/g, " ").trim())
+        .filter((c) => c.length > 0);
+    }
+
+    /** The interpreter: every clause the script carries MUST be one it knows. */
+    function conventionsOf(clauses: string[]): JoinConvention[] {
+      return clauses.map((clause) => {
+        const known = JOIN_CONVENTIONS.find((c) => c.clause === clause);
+        expect(
+          known,
+          `the gate carries a join clause this arm cannot evaluate: \`${clause}\`. Teach JOIN_CONVENTIONS its JS reading AND the ledger row shape that matches only under it — do not delete the clause and do not skip it here; an unevaluated clause is a convention the corpus does not cover`,
+        ).toBeDefined();
+        return known as JoinConvention;
+      });
+    }
+
+    const isMissing = (conv: JoinConvention[], ledger: LedgerRow[], fname: string) =>
+      !ledger.some((m) => conv.some((c) => c.matches(m, fname)));
+
+    function scaffoldJoinCase(dir: string, names: string[], ledger: LedgerRow[], conv: JoinConvention[]) {
+      mkdirSync(join(dir, "snapshot"), { recursive: true });
+      mkdirSync(join(dir, "live"), { recursive: true });
+      mkdirSync(join(dir, "migrations"), { recursive: true });
+      for (const n of names) writeFileSync(join(dir, "migrations", `${n}.sql`), COMMITTED_BODY);
+      writeFileSync(join(dir, "snapshot", "demo_fn.sql"), COMMITTED_BODY);
+      writeFileSync(join(dir, "live", "demo_fn.sql"), PROD_BODY_EQUIVALENT);
+      const emptyBaseline = join(dir, "baseline.empty.txt");
+      writeFileSync(emptyBaseline, "# intentionally empty\n");
+      const missing = names.filter((f) => isMissing(conv, ledger, f));
+      const extra = ledger
+        .filter((m) => !names.some((f) => conv.some((c) => c.matches(m, f))))
+        .map((m) => m.name);
+      return {
+        LEDGER_BASELINE_FILE: emptyBaseline,
+        TEST_SUPABASE_DB_URL: "stub-dsn-never-used",
+        LEDGER_QUERY_CMD: `bash ${writeStubLedger(dir, missing, extra, String(ledger.length))}`,
+        BODY_FETCH_CMD: `bash ${writeStubFetcher(dir)}`,
+        MIGRATIONS_DIR: join(dir, "migrations"),
+        SNAPSHOT_DIR: join(dir, "snapshot"),
+        BODY_CHECK_FUNCTIONS: "demo_fn",
+      };
+    }
+
+    /** One repo basename per convention, distinct so a verdict names its row. */
+    const FIXTURE_NAMES: Record<string, string> = {
+      "name-only": "20260101000000_join_name_only",
+      version_name: "20260102000000_join_version_name",
+      "bare-ts": "20260103000000_join_bare_ts",
+      "desc-only": "20260104000000_join_desc_only",
+    };
+
+    it("VAC08-JOIN: a ledger row matching under EACH convention is not reported missing; one matching under NONE still is, by name", () => {
+      const script = readFileSync(LEDGER_GATE, "utf8");
+      const clauses = readJoinClauses(script, "missing");
+      expect(clauses.length, "the missing-direction predicate parsed to ZERO clauses — the read broke, not the join").toBeGreaterThanOrEqual(1);
+      const conv = conventionsOf(clauses);
+
+      // ── ROWS come from the FIXED convention table, never from the script ──
+      // The predicate is the script's; the rows are not. MEASURED 2026-09-02
+      // while proving this arm: a first draft built rows from the clauses it
+      // had just read, so deleting a clause deleted its row and the arm stayed
+      // GREEN under the exact neuter it exists to catch (CORPUS-PROOFS cycle 1).
+      const rows: Array<{ id: string; fname: string; row: LedgerRow }> = JOIN_CONVENTIONS.map((c) => ({
+        id: c.id,
+        fname: FIXTURE_NAMES[c.id],
+        row: c.rowFor(FIXTURE_NAMES[c.id]),
+      }));
+      for (const r of rows) {
+        expect(r.fname, `no fixture basename for convention ${r.id}`).toBeDefined();
+        const own = JOIN_CONVENTIONS.find((c) => c.id === r.id) as JoinConvention;
+        expect(own.matches(r.row, r.fname), `the ${r.id} row does not even match its own clause — the fixture is wrong, not the gate`).toBe(true);
+      }
+
+      // ── DRIVEN, direction 1: every convention's row is FOUND ─────────────
+      withTempDir((dir) => {
+        const env = scaffoldJoinCase(
+          dir,
+          rows.map((r) => r.fname),
+          rows.map((r) => r.row),
+          conv,
+        );
+        const { status, out } = run(LEDGER_GATE, env);
+        expect(
+          status,
+          `the gate reported a migration MISSING although a ledger row matches it under one of its own conventions — a clause was removed and the false-253 path is open again:\n${out}`,
+        ).toBe(0);
+        expect(out).toContain("ledger presence: 0 absent");
+        for (const r of rows) expect(out, `${r.id}'s row (${r.fname}) was named as absent`).not.toContain(r.fname);
+      });
+
+      // ── DRIVEN, direction 2 (contrast): a row matching under NONE is still
+      // reported missing, and NAMED — the union is not so wide that it
+      // matches everything.
+      withTempDir((dir) => {
+        const stray = "20260105000000_join_no_match";
+        const strayRow: LedgerRow = { version: "20260105999999", name: "unrelated_row" };
+        for (const c of conv) expect(c.matches(strayRow, stray), `the stray row matches under ${c.id}; it must match under nothing`).toBe(false);
+        const env = scaffoldJoinCase(
+          dir,
+          [...rows.map((r) => r.fname), stray],
+          [...rows.map((r) => r.row), strayRow],
+          conv,
+        );
+        const { status, out } = run(LEDGER_GATE, env);
+        expect(status, `a row matching under no convention must still be drift:\n${out}`).toBe(1);
+        expect(out).toContain("not present in the TEST ledger");
+        expect(out).toContain(stray);
+        for (const r of rows) expect(out, `${r.fname} matched and must not be named as absent`).not.toContain(r.fname);
+      });
+
+      // ── SPECIFICITY, MEASURED: which of the script's clauses does each row
+      // satisfy? A row that also matches under ANOTHER clause cannot detect
+      // that clause's removal at runtime. Pinned exactly so the record cannot
+      // rot: at HEAD (2026-09-02, four clauses) the `version_name` row
+      // {version=<ts>, name=<desc>} ALSO satisfies `desc-only` — m.name IS the
+      // description — so clause 2 is SUBSUMED by clause 4 for every
+      // underscore-free version and its removal is unobservable here (MEASURED
+      // in CORPUS-PROOFS cycle 1b: arm stays green). The other three rows
+      // match under exactly one clause each. The script header's ":44-47 BOTH
+      // clauses are required; neither is redundant" predates clauses 3 and 4
+      // and is stale for clause 2 — recorded in 164.3.1-12-SUMMARY.md, not
+      // patched here (the script is edited by no plan in this phase).
+      const specificity = Object.fromEntries(
+        rows.map((r) => [r.id, conv.filter((c) => c.matches(r.row, r.fname)).map((c) => c.id).sort()]),
+      );
+      const EXPECTED_SPECIFICITY: Record<string, string[]> = {
+        "name-only": ["name-only"],
+        version_name: ["desc-only", "version_name"],
+        "bare-ts": ["bare-ts"],
+        "desc-only": ["desc-only"],
+      };
+      expect(
+        specificity,
+        "the clause-subsumption structure changed. If a clause became load-bearing (or stopped being), update EXPECTED_SPECIFICITY WITH the measurement — do not loosen this to `toBeTruthy`",
+      ).toEqual(EXPECTED_SPECIFICITY);
+    });
+
+    it("the ADVISORY extra direction uses the SAME clause set as the missing direction — one predicate, two readings (:62-67)", () => {
+      const script = readFileSync(LEDGER_GATE, "utf8");
+      const missing = readJoinClauses(script, "missing");
+      const extra = readJoinClauses(script, "extra");
+      expect(missing.length, "zero clauses parsed out of the missing direction").toBeGreaterThanOrEqual(1);
+      expect(
+        extra,
+        "the two directions disagree BY CONSTRUCTION again — before 2026-08-30 the advisory direction joined on `name` alone and reported 224 phantom extras while the missing direction used all the clauses",
+      ).toEqual(missing);
     });
   });
 
@@ -1452,6 +3089,93 @@ describe("IN-04 — the scratch directory does not survive a fail() path", () =>
     } finally {
       rmSync(bin, { recursive: true, force: true });
     }
+  });
+
+  it("D-04 DRIVEN: a pg_ctl stop that FAILS in cleanup is WARNED loudly, the postmaster.pid is SIGKILLed, the data dir still goes, and the lane's exit status survives", () => {
+    // ⛔ silent-failure finding (164.3.1 fix round). `cleanup` ran
+    //     pg_ctl … stop … >/dev/null 2>&1 || true
+    //     rm -rf "$PGD"
+    // so a stop that failed left a postmaster running against a data dir that
+    // was then deleted out from under it — the D-04 orphan the trap exists to
+    // prevent — with NOTHING printed. Driven through PGBIN stubs, no
+    // PostgreSQL needed: initdb creates the data dir and plants a
+    // `postmaster.pid` naming a long-lived `sleep` (the stand-in postmaster);
+    // pg_ctl exits 1 on BOTH `start` (so the lane fails after CREATED=1) and
+    // `stop` (the defect's trigger). MEASURED at HEAD 8969513e: exit 1, no
+    // WARNING, the sleep still alive after the lane returned.
+    withTempDir((dir) => {
+      const bin = join(dir, "bin");
+      mkdirSync(bin, { recursive: true });
+      const pidSide = join(dir, "planted.pid");
+      writeFileSync(
+        join(bin, "pg_ctl"),
+        [
+          "#!/bin/sh",
+          'case " $* " in *" stop "*) echo "pg_ctl: stub stop failure" >&2; exit 1 ;; *" start "*) exit 1 ;; esac',
+          "exit 0",
+        ].join("\n"),
+      );
+      writeFileSync(
+        join(bin, "initdb"),
+        [
+          "#!/bin/sh",
+          'd=""; while [ $# -gt 0 ]; do case "$1" in -D) d="$2"; shift ;; esac; shift; done',
+          '[ -n "$d" ] || exit 9',
+          'mkdir -p "$d"',
+          "nohup sleep 300 >/dev/null 2>&1 </dev/null &",
+          'printf "%s\\n" "$!" > "$d/postmaster.pid"',
+          `printf "%s" "$!" > ${JSON.stringify(pidSide)}`,
+          "exit 0",
+        ].join("\n"),
+      );
+      chmodSync(join(bin, "pg_ctl"), 0o755);
+      chmodSync(join(bin, "initdb"), 0o755);
+      const apply = join(dir, "apply.sql");
+      const gate = join(dir, "gate.sql");
+      writeFileSync(apply, "SELECT 1;\n");
+      writeFileSync(gate, "SELECT 1;\n");
+      const workdir = join(dir, "work");
+      const port = String(56000 + Math.floor(Math.random() * 900));
+
+      let planted: number | undefined;
+      try {
+        const res = spawnSync(
+          "bash",
+          [join(process.cwd(), "scripts", "pg-lane", "run.sh"), "--workdir", workdir, "--apply", apply, "--gate", gate],
+          { cwd: process.cwd(), encoding: "utf8", env: { ...process.env, PGBIN: bin, PORT: port }, timeout: 120_000 },
+        );
+        expect(existsSync(pidSide), "the initdb stub never ran — nothing was driven\n" + res.stderr).toBe(true);
+        planted = Number(readFileSync(pidSide, "utf8"));
+        expect(planted).toBeGreaterThan(0);
+
+        // The lane's own status is the failing `pg_ctl start` (exit 1 under
+        // set -e), and cleanup must not replace it with its own.
+        expect(res.status, res.stderr).toBe(1);
+        expect(res.stderr, "a failed stop must be LOUD").toContain("WARNING");
+        expect(res.stderr, "the warning must name the port").toContain(port);
+        expect(res.stderr, "the warning must name the data dir").toContain(join(workdir, "pgd", "data"));
+        expect(res.stderr).toContain(`SIGKILL`);
+        expect(res.stderr).toContain(String(planted));
+
+        // The stand-in postmaster is dead, and the data dir is gone.
+        let alive = true;
+        try {
+          process.kill(planted, 0);
+        } catch {
+          alive = false;
+        }
+        expect(alive, `the orphan postmaster (pid ${planted}) survived cleanup — D-04 restored`).toBe(false);
+        expect(existsSync(join(workdir, "pgd")), "the data dir must still be removed").toBe(false);
+      } finally {
+        if (planted) {
+          try {
+            process.kill(planted, "SIGKILL");
+          } catch {
+            /* already dead — the fixed path */
+          }
+        }
+      }
+    });
   });
 
   it("pg-lane registers its cleanup trap BEFORE the first mktemp, not inside run_lane", () => {

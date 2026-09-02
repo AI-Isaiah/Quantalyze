@@ -988,7 +988,11 @@ jobs:
         # two steps that way: a clean scan means nothing unless the detector can
         # still fire. It needs no extra provisioning — it drives the same
         # throwaway `initdb` cluster `scripts/pg-lane/run.sh` creates for the
-        # corpus run. Measured 2026-08-29: 8/8, in seconds.
+        # corpus run. Measured 2026-08-29: 8/8, in seconds; 12/12 after
+        # 164.3.1-11 added the Primitive-A and -B regression corpus (2026-09-01);
+        # 15/15 after the 164.3.1 review added the F1 message-embedded forgery,
+        # the injected-lane absurdity FIRE scenario and the `lane-unrunnable`
+        # MEASURE_FAIL (2026-09-02).
         #
         # ⛔ MODE IDENTITY: the bare command from the script's own header, no
         # wrapper. Pinned from vitest by src/__tests__/mutation-runner-floors.test.ts.
@@ -1053,14 +1057,17 @@ jobs:
             exit 1
           fi
 
-          floors=$(node -e 'import("./scripts/mutation-runner/run.mjs").then(m => console.log(m.FILES_FLOOR, m.ARMS_FLOOR))')
+          floors=$(node -e 'import("./scripts/mutation-runner/run.mjs").then(m => console.log(m.FILES_FLOOR, m.ARMS_FLOOR, m.WAIVED_CEILING))')
           files_floor=$(echo "$floors" | cut -d" " -f1)
           arms_floor=$(echo "$floors" | cut -d" " -f2)
+          waived_ceiling=$(echo "$floors" | cut -d" " -f3)
           case "$files_floor" in ''|*[!0-9]*)
             echo "::error::MEASURE_FAIL: could not read FILES_FLOOR from scripts/mutation-runner/run.mjs (got '$files_floor')."; exit 1;; esac
           case "$arms_floor" in ''|*[!0-9]*)
             echo "::error::MEASURE_FAIL: could not read ARMS_FLOOR from scripts/mutation-runner/run.mjs (got '$arms_floor')."; exit 1;; esac
-          echo "floors from run.mjs: FILES_FLOOR=$files_floor ARMS_FLOOR=$arms_floor"
+          case "$waived_ceiling" in ''|*[!0-9]*)
+            echo "::error::MEASURE_FAIL: could not read WAIVED_CEILING from scripts/mutation-runner/run.mjs (got '$waived_ceiling')."; exit 1;; esac
+          echo "floors from run.mjs: FILES_FLOOR=$files_floor ARMS_FLOOR=$arms_floor WAIVED_CEILING=$waived_ceiling"
 
           coverage_line=$(grep -a -m1 -E '^coverage: files [0-9]+/[0-9]+$' "$RUNNER_LOG" || true)
           if [ -z "$coverage_line" ]; then
@@ -1083,6 +1090,18 @@ jobs:
           arms_executed=$(echo "$arms_line" | sed -E 's|^arms: ([0-9]+)/[0-9]+/[0-9]+ .*|\1|')
           if [ "$arms_executed" -eq 0 ]; then
             echo "::error::MEASURE_FAIL: ZERO arms executed. The gate cannot observe a non-biting annotation without running one. If the step above was changed to --parse-only, that is a static check, not this gate."
+            exit 1
+          fi
+          # WAIVED_CEILING (2026-09-02 red team): a waiver is a counted twin that
+          # never runs a lane, so NEW prose markers with waiver twins raise the
+          # annotated counts and lower nothing — every floor stays green while
+          # coverage is inflated with zero new arms. The W field is bounded from
+          # ABOVE, against the constant read out of run.mjs beside the floors.
+          arms_waived=$(echo "$arms_line" | sed -E 's|^arms: [0-9]+/[0-9]+/([0-9]+) .*|\1|')
+          case "$arms_waived" in ''|*[!0-9]*)
+            echo "::error::MEASURE_FAIL: could not read the waived count out of '$arms_line'."; exit 1;; esac
+          if [ "$arms_waived" -gt "$waived_ceiling" ]; then
+            echo "::error::WAIVED_CEILING exceeded: $arms_waived waived arm(s) > ceiling $waived_ceiling. A waiver is an arm this gate will never prove can fail; adding one is a reviewed edit to WAIVED_CEILING in scripts/mutation-runner/run.mjs, never a side effect of annotating."
             exit 1
           fi
           # IN-05: ARMS_FLOOR bounds BITING arms — executed minus those that did
@@ -1113,9 +1132,42 @@ jobs:
           # wrapper. This step's whole job is to read numbers out of a text
           # file it did not produce, so "these two cannot disagree" is worth
           # asserting about the FILE even though it is trivially true of the
-          # program. It is not evidence that the runner is consistent.
+          # program. It is not evidence that the runner is consistent. (Since
+          # 164.3.1-10 the runner asserts this same relation IN-PROCESS as
+          # part of its absurdity floor — `absurdityViolations` in run.mjs —
+          # so a violation here means the file, not the arithmetic.)
           if [ "$biting" -gt "$arms_executed" ]; then
             echo "::error::MEASURE_FAIL: biting ($biting) exceeds executed ($arms_executed). Those two numbers come from the same run and cannot disagree this way, so this log was not produced by one run of the gate."
+            exit 1
+          fi
+          # 164.3.1-10 — THE RUNNER'S ABSURDITY FLOOR, RE-ASSERTED OUT OF PROCESS.
+          # The runner now counts its arm lanes TWICE, independently: once in
+          # its verdict loop (the `arms: E/…` line above) and once INSIDE the
+          # lane runner at the spawn (`lane-invocations: N`). It fails itself
+          # when they disagree. This step re-reads both numbers out of the log
+          # and asserts the same relation, for the same reason every other arm
+          # here exists: a build of the runner that silently stopped printing
+          # the second tally — or a log assembled from something other than one
+          # honest run — must fail HERE rather than pass quietly. A missing line
+          # is a MEASURE_FAIL and never a zero (an empty variable satisfies a
+          # numeric test), checked BEFORE any comparison, like every line above.
+          # The relation is EXACT: the printed count IS the arm-leg count; the
+          # baseline and restore legs are printed in the same line's parenthesis
+          # as evidence and are not compared. No literal is restated here — both
+          # sides come from the run output, and the measured values behind the
+          # rule (30/30/30 at plan 164.3.1-09's re-derivation) live beside the
+          # rule in run.mjs, once.
+          lane_line=$(grep -a -m1 -E '^lane-invocations: [0-9]+ ' "$RUNNER_LOG" || true)
+          if [ -z "$lane_line" ]; then
+            echo "::error::MEASURE_FAIL: the run printed NO 'lane-invocations: N' line, so the runner's second, independent count of arm lanes is unknown and its own cross-check cannot be re-asserted. Either the runner stopped reporting it (164.3.1-10), or the step above was not the gate (--parse-only executes zero arms and prints no lane tally)."
+            exit 1
+          fi
+          echo "$lane_line"
+          lane_invocations=$(echo "$lane_line" | sed -E 's|^lane-invocations: ([0-9]+) .*|\1|')
+          case "$lane_invocations" in ''|*[!0-9]*)
+            echo "::error::MEASURE_FAIL: could not read the lane-invocation count out of '$lane_line'."; exit 1;; esac
+          if [ "$lane_invocations" -ne "$arms_executed" ]; then
+            echo "::error::MEASURE_FAIL — this is the GATE failing, not the corpus: the verdict loop reported $arms_executed executed arm(s) but the lane runner counted $lane_invocations arm lane(s) (executed=$arms_executed lane-invocations=$lane_invocations biting=$biting). Arms were claimed that no lane ran, or lanes ran that no verdict describes. The runner's own in-process floor exits 1 on this; a log reaching this step with these numbers was not produced by one honest run of the gate."
             exit 1
           fi
           if [ "$biting" -lt "$arms_floor" ]; then
@@ -1123,7 +1175,7 @@ jobs:
             exit 1
           fi
 
-          echo "Coverage print is present and both floors hold: files $files_annotated >= $files_floor, biting arms $biting >= $arms_floor (of $arms_executed executed)."
+          echo "Coverage print is present, both floors and the waiver ceiling hold and the runner's two tallies agree: files $files_annotated >= $files_floor, biting arms $biting >= $arms_floor (of $arms_executed executed, $lane_invocations arm lane(s) spawned), waived $arms_waived <= $waived_ceiling."
 
   plan-anchor-verify:
     # Phase 164.3 / VAC-05 — re-resolve every anchor and quote a PENDING plan

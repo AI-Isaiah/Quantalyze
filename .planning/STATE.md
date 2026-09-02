@@ -2,19 +2,19 @@
 gsd_state_version: 1.0
 milestone: v1.20
 milestone_name: Backlog Burndown (Phases 158+)
-current_phase: 164.3
-current_phase_name: VACUITY — a control that cannot fail must be caught by machine
+current_phase: 164.3.1
+current_phase_name: SOUND-PRIMITIVES gap closure
 status: executing
-stopped_at: "164.3 PLANNED — 10 plans in 5 waves, verified by gsd-plan-checker on iteration 3 of 3. Each of the first two iterations found an error-swallowing verify shape the previous had missed (|| fallback; then a `wc -l` tail and a printed-not-tested `grep -c`); all three removed. FIVE premises in this phase's own spec failed re-measurement: SKIP-01 (migrations DO reach TEST), OPS-08-F9 (floors already 8/166), criterion 4 (118 committed function bodies exist), the PROD-linked CI job (already exists, dissolving the phase's only human gate), and the corpus size (30 arm-anchored markers, not 33 — a grep counting its own documentation). NO founder-gated item remains."
-last_updated: "2026-09-01T13:55:35.543Z"
-last_activity: 2026-08-29
-last_activity_desc: Phase 164.3 execution started
-state_head: 9748313bf51adc10efb5c6d5da75d0c95d49aa8c
+stopped_at: Completed 164.3.1-13-PLAN.md
+last_updated: "2026-09-02T09:03:11.042Z"
+last_activity: 2026-09-02
+last_activity_desc: Phase 164.3.1 execution started
+state_head: dc47efd4e84cac1aad8358f42fa0d302fd2c5900
 progress:
   total_phases: 14
   completed_phases: 4
-  total_plans: 70
-  completed_plans: 66
+  total_plans: 83
+  completed_plans: 79
   percent: 29
 ---
 
@@ -113,10 +113,10 @@ zero unclassified) and `161-VALIDATION.md` (Nyquist strategy, 4 Wave-0 gaps, ant
 
 ## Current Position
 
-Phase: 164.3 (VACUITY — a control that cannot fail must be caught by machine) — EXECUTING
-Plan: 1 of 10
-Status: Executing Phase 164.3
-Last activity: 2026-08-29 — Phase 164.3 execution started
+Phase: 164.3.1 (SOUND-PRIMITIVES gap closure) — EXECUTING
+Plan: 1 of 13
+Status: Executing Phase 164.3.1
+Last activity: 2026-09-02 — Phase 164.3.1 execution started
 
 ⚠️ Phase 160 remains OPEN on its human gate — see `## Deferred Verification`. Advancing this
 pointer to 161 does NOT close it; resume it only via `/gsd-verify-work 160`.
@@ -495,7 +495,7 @@ Prior-phase 141.1 close-out detail (retained; NOT about 142.1):
         2 WARNING gaps, no BLOCKER. See `140.1-VERIFICATION.md`. Not transitioned (`--no-transition`).
 Last activity: 2026-08-02 -- Phase 142 execution started
 
-Progress: [█░░░░░░░░░] 8%
+Progress: [███░░░░░░░] 29%
 
 ### Phase 140.1 close-out — open items (do NOT lose these)
 
@@ -648,6 +648,11 @@ Load-bearing sequencing (real dependencies, do not reorder):
 | Phase 164 P07 | 12min | 2 tasks | 2 files |
 | Phase 164 P05 | 32min | 3 tasks | 13 files |
 | Phase 164 P03 | 21min | 2 tasks | 6 files |
+| Phase 164.3.1 P09 | 12 min | 2 tasks | 2 files |
+| Phase 164.3.1 P10 | 22 min | 3 tasks | 3 files |
+| Phase 164.3.1 P11 | 8h 31m | 3 tasks | 8 files |
+| Phase 164.3.1 P12 | 26 min | 3 tasks | 3 files |
+| Phase 164.3.1 P13 | 16 min | 3 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -833,6 +838,15 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - [Phase 163]: 164-05: per-route no-referrer is justified by the SAME-ORIGIN gap; the CONTEXT/PLAN claim that strict-origin-when-cross-origin 'never strips the path' is FALSE (cross-origin it sends origin only) and is recorded as false in code + test
 - [Phase 163]: 164-03: deriveShareToken takes THREE arguments (id, nonce, generation) — the mint route round-trips a minted url through verifyShareToken because a 43-char shape assertion passes for the stale two-argument pre-image too
 - [Phase 163]: 164-03: MEASURED — the audit-coverage mutating-RPC detector scans line-by-line, so a Prettier wrap between .rpc( and the name disarms it exactly as a method-cast does; both share routes cast the CLIENT and keep the call on one line (deferred-items D-164-C)
+- [Phase 164.3.1]: 164.3.1-09: ARMS_FLOOR=30 and FILES_FLOOR=1 RE-DERIVED under the sound primitives and HOLD — 30/30/0, biting 30, 0 of 30 arms moved; comments-only diff, floors test untouched per the lockstep rule. — The gate file blob is byte-identical at the phase base and HEAD (5ae6855f), so the input was fixed and only the mechanism moved — that is what makes no-movement a measurement rather than two different corpora agreeing by luck.
+- [Phase 164.3.1]: 164.3.1-09: biting 30 is the SAME integer over a STRICTLY SMALLER admissible set — plan 10 must carry that qualitative fact with the number when it sets absurdity-floor thresholds. — identity ok moved from a transmitted nonce (readable by the gate via current_query()) to a three-legged source-location rule, so a floor of 30 is harder to satisfy than it was pre-phase.
+- [Phase 164.3.1]: 164.3.1-10: dedicated 'absurdity' defect kind (instrument failing) kept distinct from 'floor' (corpus regression); lane tally arm-scoped, relation EXACT equality, counter monotonic and read as a snapshot delta
+- [Phase 164.3.1]: 164.3.1-10: vitest print-contract pin is cluster-free; the non-zero-through-real-lanes proof lives in --self-test scenario 6 so the unobserved-ubuntu risk (WINDOWS 28) stays out of the blocking vitest shards
+- [Phase 164.3.1]: 164.3.1-11: corpus entries pin the runner's VERDICT TABLE through real lanes, each with a passing control in the same run; P5's silent over-neuter is made loud inside the fixture (SURVIVOR LOST) rather than by exposing lane output; the two Primitive-B entries are proven to fail under DIFFERENT neuters (N3 whole attribution → {8,11,12}; N4 chain length only → {12})
+- [Phase 164.3.1]: 164.3.1-12: VAC08-JOIN evaluates the gate's clauses via a JS interpreter of the four documented shapes that REFUSES unknown clauses; rows from a fixed table, predicate from the script (a first draft that built rows from the script stayed green under the neuter)
+- [Phase 164.3.1]: 164.3.1-12: join clause 2 (version||'_'||name) measured SUBSUMED by clause 4 (desc-only); pinned as EXPECTED_SPECIFICITY, script header :44-47 reported stale not patched
+- [Phase 164.3.1]: 164.3.1-12: meta-arm allowlists classified BEFORE keys were transcribed (17 of 68 emissions, four classes); KNOWN_THRESHOLD_SITES exact set of 6; ${GATE} excluded from what counts as a runtime value
+- [Phase 164.3.1]: 164.3.1-13: gate-level arms assert the wiring's positive evidence line (readers-ran) as the pass condition, never the D-13 refusal; per-reader-visible fixtures make each VAC-04 union member individually load-bearing; scratch neuters proven by ABSENCE so standing calibration legs stay green under a recorded real-source neuter
 
 ### Decisions (execution-time, Phase 140.2)
 
@@ -1535,8 +1549,8 @@ Load-bearing sequencing (real dependencies, do not reorder):
 
 ## Session
 
-**Last Date:** 2026-08-28T08:31:50.147Z
-**Stopped At:** Completed 164-03 (wave 3); 164-06 at its blocking-human checkpoint
+**Last Date:** 2026-09-02T09:03:10.308Z
+**Stopped At:** Completed 164.3.1-13-PLAN.md
 **Last Date:** 2026-08-25T22:26:01.687Z
 **Stopped At:** Completed 162-03-PLAN.md
 **Last Date:** 2026-08-25T22:28:04.096Z
@@ -1594,3 +1608,22 @@ pre-merge `e0493913`. Fix is PR #669. Supabase migrations and the Vercel fronten
 - 161.1: OQ-3 still OPEN — closes only when a founder executes the runbook's step 1 and records whether the database-level or role-level app.* GUC form verified. Also: deribit has ZERO live refresh coverage until plan 04's stitch_composite arm lands (TODOS 0.3)
 - 161.1-04 (wave 4, 2026-08-25): the composite arm LANDED DORMANT — `enqueue_ledger_composite_refresh` (migration `20260825140000`), 8-arm SQL gate, static gates 10-11, and the D-15 non-destructive guard EXTENDED to `run_stitch_composite_job._stamp_failed` (a second destructive stamp plan 02's guard never covered; found by measurement, fixed under Rule 2). ⛔ **Task 3 is a BLOCKING founder LIVE op and is NOT done:** one manual `stitch_composite` enqueue for the one live PROD composite must be observed to completion (`last_return_date` advancing in the staleness view, NOT a job going green) before the composite schedule is documented as activatable. The runbook's composite section is deliberately UNWRITTEN until then. TODOS 0.3 stays OPEN — half of its close condition (the arm exists) is met, half (a composite observed to refresh) is not.
 - 164-05 MEASURED: the phase-148 guard does NOT catch a second unstable_cache call site outside factsheet/[id]/v2/page.tsx (12/12 green under NEUTER-D). 164-07's closure guard does not close it either — the page imports the builder, not the reverse. Closed for the token route by src/app/factsheet-share/[token]/page.no-cache-reach.test.ts; the general repo-wide call-site pin is still unowned.
+- `state.advance-plan` REFUSES on this STATE.md (measured 2026-09-01 by 164.3.1-09): the `## Current Position` section carries a **second** `Phase:` line — line 129, inside the retained `### Retained — Phase 156 close-out` block — so the verb returns `ambiguous_position_phase` and will not advance rather than silently picking the first. Left UNRESOLVED on purpose: that block is marked *do NOT lose this*, and restructuring a retained ledger is outside a measure-only plan's scope. ⚠️ Consequence: the `Plan: 1 of 12` line under Current Position is **STALE** (9 of 12 plans now have SUMMARYs on disk). Read the frontmatter `progress` block or count `.planning/phases/164.3.1-*/`, never that line. Fix = move the Phase-156 retained block out of `## Current Position` into its own top-level section, or teach the verb to ignore `###`-nested entries.
+
+## ⛔ Standing constraint from Phase 164.3.1 — do not lose this between sessions
+
+**Hold migration PRs until Phase 164.3.1 AND Phase 164.4 have BOTH landed.**
+
+VAC-04's zero path now fails closed (amended D-07, 2026-09-01, reversing a same-day call that
+would have deferred the flip to 164.4 and left success criterion 4 unmet). The wedge risk that
+deferral was meant to avoid is carried by ORDERING instead of by weakening the gate.
+
+D-13 narrows what is actually held: a changed set containing **no textual `CREATE … FUNCTION`
+anywhere** passes with a notice (measured: 108 of 262 migrations), so only a genuinely BLIND zero
+refuses. A block at `scripts/prod-body-drift-check.sh`'s zero path is the gate WORKING — route the
+ordering, never the gate. Do not add an ack-pragma; the reopen pin in
+`src/__tests__/drift-check-scripts.test.ts` REDs by execution if the path is reverted to `exit 0`,
+and by name if the `VAC04-ZERO-PATH-FAILS-CLOSED` marker is deleted.
+
+**SC-4 is MET, not PARTIAL.** Any artifact still saying PARTIAL is superseded — see
+`164.3.1-CONTEXT.md` § Amendment 2026-09-01.

@@ -149,15 +149,53 @@ const FROM_CALL_RE = /\.from\s*\(/;
  * quote state, so a `/*` inside a string, a char class or a template
  * literal cannot open a block. An unterminated real block would not
  * compile, so the blanking still cannot run away.
+ *
+ * ⛔ [AUDCOV-01] — SUPERSESSION (2026-09-01, Phase 164.3.1). The paragraph
+ * above is kept because it records what was measured at the time, but its
+ * last claim was too strong: the quote state it describes was
+ * FUNCTION-LOCAL and discarded at every newline, because
+ * `stripBlockComments` calls `unmatchedBlockOpen` once per line. So a
+ * `/*` inside a SINGLE-line string was correctly ignored (the shipped
+ * arms below test exactly that shape, which is why they stayed green),
+ * while a `/*` on a CONTINUATION line of a MULTI-line template literal
+ * was scanned with fresh state, read as unquoted, opened the very
+ * phantom block this header promised could not open, and blanked the
+ * rest of the file. The pre-SP-I01 line-leading restriction had found
+ * that site, so SP-I01 left the H-0001 gate BLINDER than it had been —
+ * a live regression on main, not a latent one.
+ *
+ * MEASURED before the fix, through this file's own extracted bytes
+ * (plan 164.3.1-03's committed calibration artifact, subject blob
+ * dff9d1a1): `AUDCOV-CAL A=[] B=[5] C=[3]` — case A, a real
+ * `supabase.from('trades').insert(batch)` sitting below a multi-line
+ * template whose continuation line carried a `/*`, returned NO sites.
+ *
+ * Closed by carrying quote state across lines (below), with the carried
+ * state forced to null for `'` and `"` — only a backtick can legally
+ * span a newline. Re-measured with the SAME unedited instrument after
+ * the fix: `AUDCOV-CAL A=[5] B=[5] C=[3]` — movement on exactly one row,
+ * with B as the calibration control. All three shapes now ship as arms
+ * in this file so the class reds by name if it returns.
  */
 
 /**
  * Index of a `/*` that opens a block and is NOT inside a string literal,
  * or -1. `stripLineComment` has already removed every `/* … *\/` pair
  * that opens and closes on this line, so any survivor is unmatched.
+ *
+ * [AUDCOV-01] (fixed 2026-09-01): quote state now ENTERS and EXITS this
+ * function instead of being function-local. `quoteIn` is the state
+ * carried from the end of the previous line; `quoteAtEnd` is this line's
+ * state, which the caller carries forward. Without that thread, a
+ * multi-line template literal was forgotten at the newline and a `/*` on
+ * one of its continuation lines opened a phantom block — see the
+ * supersession note in the header comment above.
  */
-function unmatchedBlockOpen(code: string): number {
-  let quote: string | null = null;
+function unmatchedBlockOpen(
+  code: string,
+  quoteIn: string | null = null,
+): { open: number; quoteAtEnd: string | null } {
+  let quote: string | null = quoteIn;
   for (let i = 0; i < code.length; i++) {
     const c = code[i];
     if (quote !== null) {
@@ -172,14 +210,20 @@ function unmatchedBlockOpen(code: string): number {
       quote = c;
       continue;
     }
-    if (c === "/" && code[i + 1] === "*") return i;
+    // A block opener can only be found outside a quote, so the state
+    // carried past it is `quote`, which is necessarily null here.
+    if (c === "/" && code[i + 1] === "*") return { open: i, quoteAtEnd: quote };
   }
-  return -1;
+  return { open: -1, quoteAtEnd: quote };
 }
 
 function stripBlockComments(lines: string[]): string[] {
   const out: string[] = [];
   let inBlock = false;
+  // [AUDCOV-01]: string state carried ACROSS lines. Previously each line
+  // was scanned with fresh state, so line N's open template literal was
+  // invisible to line N+1.
+  let quote: string | null = null;
   for (const raw of lines) {
     if (inBlock) {
       const end = raw.indexOf("*/");
@@ -188,16 +232,29 @@ function stripBlockComments(lines: string[]): string[] {
         continue;
       }
       inBlock = false;
+      // The tail after `*/` is not re-scanned for a further opener or for
+      // quote state — pre-existing scope, unchanged by [AUDCOV-01]. Reset
+      // rather than carry a stale value: no string can be open here,
+      // because a block comment cannot begin inside one.
+      quote = null;
       out.push(stripLineComment(raw.slice(end + 2)));
       continue;
     }
     const code = stripLineComment(raw);
-    const open = unmatchedBlockOpen(code);
-    if (open >= 0) {
+    const scan = unmatchedBlockOpen(code, quote);
+    // [AUDCOV-01]: force the carried state to null for `'` and `"`. Only a
+    // backtick template literal may legally span a newline in TS/JS — an
+    // unterminated `'` or `"` at end-of-line is a within-line artifact of
+    // this line-oriented scanner (e.g. an apostrophe in prose, or a quote
+    // truncated by stripLineComment), not an open span. Carrying it would
+    // swallow every following line's `/*` and re-introduce the blindness
+    // from the other direction.
+    quote = scan.quoteAtEnd === "`" ? "`" : null;
+    if (scan.open >= 0) {
       inBlock = true;
       // Whatever precedes the opener on this line IS code and is kept —
       // `await supabase.from('t').insert(x); /* note` must still be seen.
-      out.push(code.slice(0, open));
+      out.push(code.slice(0, scan.open));
       continue;
     }
     out.push(code);
@@ -428,6 +485,15 @@ function findRpcMutations(file: string, src: string): Mutation[] {
  * falsely satisfy coverage. A truly multi-line block comment spanning
  * a `logAuditEvent` mention is out of this per-line helper's scope;
  * if that ever matters, switch to a proper tokenizer.
+ *
+ * [AUDCOV-01] (2026-09-01): this helper keeps its own WITHIN-line quote
+ * tracking and stays per-line on purpose — that scope remains correct,
+ * because multi-line block state is resolved by `stripBlockComments`,
+ * which threads quote state across lines and calls this helper only for
+ * the pairs that open and close on the same line. Known residual, not
+ * introduced by [AUDCOV-01] and left in scope for a future tokenizer:
+ * a `//` sitting INSIDE a multi-line template literal is still
+ * truncated here before the block scan sees the line.
  */
 function stripLineComment(line: string): string {
   // JSX comment `{/* … */}` — strip wrapper braces too so brace-balance
@@ -1178,6 +1244,90 @@ describe("audit-coverage helpers — H-0004/H-0005 audit gap fixtures", () => {
       "a `/*` inside a string literal opened a phantom block and blanked the real write below it",
     ).toHaveLength(1);
     expect(found[0].line).toBe(5);
+  });
+
+  // ── [AUDCOV-01] ──────────────────────────────────────────────────────────
+  // The SP-I01 arm above is SINGLE-LINE: its backtick pair opens and closes on
+  // one line, so per-line quote state sufficed and the arm stayed green while
+  // the detector went blind. That is exactly why the shipped arms did not catch
+  // [AUDCOV-01] — the regression lives one shape over, in the MULTI-line
+  // template literal.
+  //
+  // MEASURED before the fix — plan 164.3.1-03's committed calibration artifact
+  // (`164.3.1-03-CALIBRATION-AUDCOV.md`), driven through this file's OWN
+  // extracted bytes at subject blob dff9d1a1:
+  //
+  //     AUDCOV-CAL A=[] B=[5] C=[3]
+  //
+  // Case A returned NO sites. `unmatchedBlockOpen`'s quote state was function-
+  // local and discarded at every newline, so line 3's `/*` — sitting INSIDE the
+  // template literal opened on line 2 — was scanned with fresh state, read as
+  // unquoted, opened a phantom block, and blanked lines 4-7 including the real
+  // write on line 5. The pre-SP-I01 code found that site: main was blinder than
+  // it had been.
+  //
+  // The three arms are a set, and the set is what makes the claim falsifiable.
+  // A is the pin. B is the CALIBRATION CONTROL and must not move — without it,
+  // "A now finds its site" proves nothing, because a stripper that returned
+  // every line unblanked would also make A pass. C fences the shipped
+  // single-line behavior against a fix that over-corrects. Movement on exactly
+  // one row is the acceptance; a change that also moves B or C is not the fix.
+  //
+  // Inputs are the plan-03 fixture arrays verbatim, so the in-gate arms and the
+  // calibration instrument measure the same bytes.
+  const AUDCOV_01_CASE_A = [
+    "export async function POST() {",
+    "  const tpl = `a multi-line template",
+    "   a glob like /* appears mid-template",
+    "   and it ends here`;",
+    "  const { error } = await supabase.from('trades').insert(batch);",
+    "  return Response.json({ ok: !error });",
+    "}",
+  ].join("\n");
+
+  const AUDCOV_01_CASE_B = [
+    "export async function POST() {",
+    "  const tpl = `a multi-line template",
+    "   a glob like appears mid-template",
+    "   and it ends here`;",
+    "  const { error } = await supabase.from('trades').insert(batch);",
+    "  return Response.json({ ok: !error });",
+    "}",
+  ].join("\n");
+
+  const AUDCOV_01_CASE_C = [
+    "export async function POST() {",
+    "  const tpl = `c /* d`;",
+    "  const { error } = await supabase.from('trades').insert(batch);",
+    "  return Response.json({ ok: !error });",
+    "}",
+  ].join("\n");
+
+  it("case A ([AUDCOV-01]): a `/*` inside a MULTI-LINE template no longer blanks the file", () => {
+    const found = findMutations("case-A.ts", AUDCOV_01_CASE_A);
+    expect(
+      found.map((m) => m.line),
+      "[AUDCOV-01]: the `/*` on continuation line 3 is INSIDE the template opened " +
+        "on line 2, but per-line quote state forgot the backtick, so it opened a " +
+        "phantom block and blanked the real write on line 5",
+    ).toEqual([5]);
+  });
+
+  it("case B (calibration control): the same input without the `/*` still finds its site", () => {
+    const found = findMutations("case-B.ts", AUDCOV_01_CASE_B);
+    expect(
+      found.map((m) => m.line),
+      "the control moved — the harness, the extraction or the detector changed, " +
+        "so case A's result is no longer evidence about the stripper",
+    ).toEqual([5]);
+  });
+
+  it("case C (shipped single-line behavior fenced): a `/*` inside a single-line template stays quoted", () => {
+    const found = findMutations("case-C.ts", AUDCOV_01_CASE_C);
+    expect(
+      found.map((m) => m.line),
+      "the shipped SP-I01 single-line-template behavior regressed",
+    ).toEqual([3]);
   });
 
   // H-0001 — intended behavior. LIVE since 2026-08-29 (Phase 164.3).

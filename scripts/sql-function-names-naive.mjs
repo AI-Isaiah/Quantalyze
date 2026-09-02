@@ -74,7 +74,9 @@
  * Reads with node `fs`, never `grep`: this repository contains a file with a
  * deliberate NUL byte, and grep silently reports a NUL-bearing file as clean.
  */
-import { readFileSync } from "node:fs";
+import { readFileSync, realpathSync } from "node:fs";
+import { resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 /**
  * `CREATE [OR REPLACE] FUNCTION <chain>` at the start of a line, followed by
@@ -95,6 +97,14 @@ const DEF_RE =
  */
 const SEGMENT_RE = /"(?:[^"]|"")*"|[A-Za-z0-9_$]+/g;
 
+/**
+ * Bytes that END an unquoted identifier chain in SQL. A chain followed by one
+ * of these was read completely — it is just not a function definition (a
+ * definition's name is followed by `(` or whitespace). See the follower check
+ * in `naiveFunctionDefs`.
+ */
+const NAME_TERMINATORS = new Set([",", ".", ";", ")"]);
+
 /** Strip one layer of double quotes from an identifier segment. */
 function unquote(segment) {
   return segment.startsWith('"') && segment.endsWith('"') && segment.length >= 2
@@ -102,17 +112,92 @@ function unquote(segment) {
     : segment;
 }
 
+/** `U+XXXX` for the code point at `index` — the diagnostic's precision. */
+function codepointAt(text, index) {
+  const cp = text.codePointAt(index);
+  return {
+    char: String.fromCodePoint(cp),
+    label: `U+${cp.toString(16).toUpperCase().padStart(4, "0")}`,
+  };
+}
+
+/**
+ * Refuse rather than truncate. [VAC04-C4]
+ *
+ * The thrown error carries a `charsetRefusal` marker so `main()` can format a
+ * diagnostic for THIS condition while any other error stays a loud crash — a
+ * blanket catch would turn an internal fault into a formatted pass, which is
+ * the same defect class from the other side.
+ */
+function charsetRefusal(detail) {
+  const err = new Error(
+    `identifier leaves the unquoted charset [A-Za-z0-9_$]: read '${detail.prefix}' then hit '${detail.offender}' (${detail.codepoint}) at line ${detail.line}`,
+  );
+  err.charsetRefusal = detail;
+  return err;
+}
+
 /**
  * Every function definition this reading can see in `sql`.
  * Returns `{ schema, name }`; `schema` is "" when the definition is
  * unqualified, matching sql-body-normalize.mjs's convention so the two name
  * sets are directly comparable.
+ *
+ * @throws when an UNQUOTED identifier leaves `[A-Za-z0-9_$]`. See the follower
+ * check below — silent truncation here is [VAC04-C4].
  */
 export function naiveFunctionDefs(sql) {
   const out = [];
-  for (const line of sql.split("\n")) {
+  const lines = sql.split("\n");
+  for (let ln = 0; ln < lines.length; ln++) {
+    const line = lines[ln];
     const m = DEF_RE.exec(line);
     if (m === null) continue;
+
+    // ⛔ REFUSE RATHER THAN TRUNCATE. DEF_RE's identifier chain stops at the
+    // first byte outside `[A-Za-z0-9_$]`/quotes, so it happily returns a
+    // PREFIX of the real name: MEASURED 2026-09-01, `public.fúnc_é(p uuid)`
+    // yielded `f`, exit 0. `f` is a DIFFERENT FUNCTION. VAC-04 looks a body up
+    // by that name in the PROD dump, so a truncated read makes the gate
+    // compare the wrong subject and it can report MATCH for it.
+    //
+    // The tell is the FOLLOWER byte. A chain that really ended is followed by
+    // end-of-line, whitespace, or `(`; anything else means the match was cut
+    // mid-token. `$` needs no exemption here — it is INSIDE this reader's
+    // charset, which is precisely how this member sees `sanitize_user$v2`
+    // where the normalizer cannot (SP-C05's designed disagreement).
+    //
+    // ⚠️ This over-refuses on legal-but-degenerate shapes the line-anchored
+    // view cannot resolve — e.g. a block comment butted against the name,
+    // `foo/*c*/(…)`, which the lexer-based member masks to a space and accepts.
+    // That is the ACCEPTED direction: a loud false refusal names its file,
+    // line, and byte, while a silent wrong-subject comparison reports a pass.
+    // Evidence it costs nothing today: drift-check-scripts.test.ts's 380-file
+    // corpus-parity arm — every one of the 362 real definitions is followed
+    // by `(` (measured 2026-09-01), so this fires zero times on the corpus.
+    //
+    // ⚠️ One class of follower is NOT a cut token: SQL punctuation that ENDS a
+    // name — `,` `.` `;` `)`. No unquoted identifier can continue through
+    // those bytes, so a chain they follow is complete, and a complete chain
+    // with no `(` is not a function definition at all. MEASURED 2026-09-02:
+    // the sentence `CREATE OR REPLACE FUNCTION public.foo, which we replaced`
+    // inside a block comment (which this line-anchored view cannot see as a
+    // comment) threw "hit ',' (U+002C)" — a wrong-reason refusal that sent the
+    // gate hunting a non-existent non-ASCII identifier. Those fall through to
+    // "no definition" instead. Everything else outside the charset — `ú`, `/`,
+    // `-` — still refuses, because there the chain really was cut mid-token.
+    const follower = line[m[0].length];
+    if (follower !== undefined && !/\s/.test(follower) && follower !== "(") {
+      if (NAME_TERMINATORS.has(follower)) continue;
+      const { char, label } = codepointAt(line, m[0].length);
+      throw charsetRefusal({
+        line: ln + 1,
+        prefix: m[1],
+        offender: char,
+        codepoint: label,
+      });
+    }
+
     const segments = (m[1].match(SEGMENT_RE) ?? [])
       .map((s) => unquote(s))
       .filter((s) => s !== "");
@@ -192,6 +277,26 @@ function selfTest() {
     names("SELECT 1;\nUPDATE t SET a = 1;\n").length === 0,
     "a file with no function definitions must return NO names (this reading can return empty)",
   );
+  // ⛔ [VAC04-C4] regression pin. This input returned the name `f` — a
+  // DIFFERENT FUNCTION — so the gate fetched and compared the wrong body.
+  let refusedNonAscii = false;
+  try {
+    naiveFunctionDefs("CREATE OR REPLACE FUNCTION public.fúnc_é(p uuid)\n");
+  } catch (err) {
+    refusedNonAscii = Boolean(err?.charsetRefusal);
+  }
+  assert(
+    refusedNonAscii,
+    "an UNQUOTED identifier leaving [A-Za-z0-9_$] must be REFUSED, not truncated to `f` — a truncated name makes VAC-04 compare a different function's body and report MATCH for it ([VAC04-C4])",
+  );
+
+  // The refusal's LOWER bound: prose in a block comment that happens to start
+  // a line with CREATE … FUNCTION <name>, — the name is complete, the `,` ends
+  // it, and there is no definition here. This threw "hit ','" before.
+  assert(
+    names("/*\nCREATE OR REPLACE FUNCTION public.foo, which we replaced\n*/\n").length === 0,
+    "a name-terminating punctuation byte (`,` `.` `;` `)`) after a complete chain is NOT a charset violation — it is 'no definition', never a refusal",
+  );
 
   const failed = checks.filter((c) => !c.cond);
   for (const f of failed) console.error(`SELF-TEST FAIL: ${f.msg}`);
@@ -213,15 +318,59 @@ function main(argv) {
     return 2;
   }
   const rows = new Set();
-  for (const f of files)
-    for (const d of naiveFunctionDefs(readFileSync(f, "utf8")))
-      rows.add(qualified ? `${d.schema}\t${d.name}` : d.name);
+  for (const f of files) {
+    let defs;
+    try {
+      defs = naiveFunctionDefs(readFileSync(f, "utf8"));
+    } catch (err) {
+      // Only the charset refusal is formatted. Anything else rethrows: an
+      // internal crash must stay a loud crash, never a tidy exit code.
+      if (!err?.charsetRefusal) throw err;
+      const r = err.charsetRefusal;
+      // ⛔ Identifier-and-position facts ONLY — never the source line, never
+      // any slice of a body. This runs in a PUBLIC CI log.
+      console.error(
+        `::error::sql-function-names-naive: ${f}:${r.line}: identifier leaves the unquoted charset [A-Za-z0-9_$] — read '${r.prefix}' then hit '${r.offender}' (${r.codepoint}). ` +
+          "Refusing rather than truncating: a truncated name makes VAC-04 fetch and compare a DIFFERENT function's body, and report MATCH for it. " +
+          'Quote the identifier ("...") if that character is intended.',
+      );
+      return 1; // 2 stays reserved for usage errors.
+    }
+    for (const d of defs) rows.add(qualified ? `${d.schema}\t${d.name}` : d.name);
+  }
   for (const row of [...rows].sort()) process.stdout.write(row + "\n");
   return 0;
 }
 
-const invokedDirectly =
-  process.argv[1] && import.meta.url === `file://${process.argv[1]}`;
-if (invokedDirectly) {
+// Run only when invoked directly, NOT when imported — drift-check-scripts.test.ts
+// imports `naiveFunctionDefs` from this module for the corpus-parity arm, and
+// importing must not trigger main's exit. Hence the `!process.argv[1]` guard.
+//
+// ⛔ Compare REALPATHS. The previous form compared `import.meta.url` to a raw
+// `file://` + argv[1] concatenation, and MEASURED 2026-09-01 that was false on
+// TWO ordinary invocation shapes: a symlinked path (import.meta.url is
+// realpath-resolved, argv[1] is not) and a path containing a space
+// (import.meta.url percent-encodes it, the concatenation does not). In both,
+// main() never ran, stdout was empty, and the process exited 0 — VAC-04 reading
+// NOTHING while reporting success. [VAC04-C2]
+//
+// This function is DUPLICATED verbatim in scripts/sql-body-normalize.mjs rather
+// than shared. That is deliberate: these two readers are VAC-04's two supposedly
+// independent derivations, and the defect above was one mechanism failing BOTH.
+// A shared guard module would rebuild that coupling — and would also break this
+// file's machine-pinned "node: builtins only" import contract.
+//
+// The catch falls back toward RUNNING the gate, never toward skipping it: an
+// unresolvable argv path must not be a silent pass.
+function invokedDirectly() {
+  if (!process.argv[1]) return false;
+  try {
+    return realpathSync(process.argv[1]) === fileURLToPath(import.meta.url);
+  } catch {
+    return resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+  }
+}
+
+if (invokedDirectly()) {
   process.exit(main(process.argv.slice(2)));
 }
