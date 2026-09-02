@@ -561,20 +561,33 @@ Plans:
 **Plans:** 12/13 plans executed (5 waves + 1 gap-closure plan for SC-4)
 
 Plans:
+**Wave 1**
 
 - [x] 164.3.1-01-PLAN.md — TRACER + Primitive A: statement tokenizer, neuter path routed through it (Wave 1) [SC-2]
 - [x] 164.3.1-02-PLAN.md — Primitive-D AST rule REPORT-ONLY + calibration at HEAD on lint-sql-gates.test.ts:182-186 (Wave 1) [SC-5]
 - [x] 164.3.1-03-PLAN.md — [AUDCOV-01] before-state calibration: A/B/C = []/[5]/[3] via extracted real bytes (Wave 1) [SC-5]
 - [x] 164.3.1-04-PLAN.md — VAC-04 union readers hardened: realpath guards (C2) + charset refusal (C4) (Wave 1) [SC-4, SC-7]
+- [ ] 164.3.1-13-PLAN.md — GAP CLOSURE: [VAC04-C2]/[VAC04-C4] driven THROUGH THE REAL GATE (symlink/space reader paths; `fúnc_é` refusal), standing calibration legs + recorded neuters, registry `also:` gate-level bindings (Wave 1, gap_closure) [SC-4]
+
+**Wave 2** *(blocked on Wave 1 completion)*
+
 - [x] 164.3.1-05-PLAN.md — Primitive B: source-location attribution replaces the nonce; single-frame chain rule; verbose pg-lane (Wave 2) [SC-3, SC-7]
 - [x] 164.3.1-06-PLAN.md — [AUDCOV-01] fix: cross-line quote state; A finds its site, B/C controls hold (Wave 2) [SC-5]
 - [x] 164.3.1-07-PLAN.md — VAC-04 gate: grep exit branching (C3), fail-closed zero path + reopen pin, absurdity floor (Wave 2) [SC-4 PARTIAL, SC-7, SC-8, SC-9]
 - [x] 164.3.1-08-PLAN.md — Primitive-D rule BLOCKING with measured allowlist; :182-186 fixed; [MUT-W02] structural parse (Wave 2) [SC-5, SC-9]
+
+**Wave 3** *(blocked on Wave 2 completion)*
+
 - [x] 164.3.1-09-PLAN.md — Measure-first: ARMS_FLOOR + biting re-derived under sound primitives, movement recorded (Wave 3) [SC-6, SC-9]
+
+**Wave 4** *(blocked on Wave 3 completion)*
+
 - [x] 164.3.1-10-PLAN.md — Mutation-runner absurdity floor: armsExecuted vs lane invocations, printed + CI-asserted (Wave 4) [SC-7, SC-8, SC-9]
+
+**Wave 5** *(blocked on Wave 4 completion)*
+
 - [x] 164.3.1-11-PLAN.md — Regression corpus A+B: four lane-driven selftest fixtures, recursive RED proofs (Wave 5) [SC-1]
 - [x] 164.3.1-12-PLAN.md — Regression corpus C+D + VAC-08 instances, instance→arm registry, SC-7/SC-9 meta-arms (Wave 5) [SC-1, SC-7, SC-9]
-- [ ] 164.3.1-13-PLAN.md — GAP CLOSURE: [VAC04-C2]/[VAC04-C4] driven THROUGH THE REAL GATE (symlink/space reader paths; `fúnc_é` refusal), standing calibration legs + recorded neuters, registry `also:` gate-level bindings (Wave 1, gap_closure) [SC-4]
 
 ### Phase 164.4: REDUNDER-BACKFILL — every SQL gate arm gets a RED-UNDER annotation that a machine PROVES bites (INSERTED)
 
