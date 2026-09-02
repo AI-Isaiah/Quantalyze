@@ -178,6 +178,13 @@ statement. The ordered list of failure branches must survive a mutation
 `identity-rewrite`, raised **before** the lane runs, in both the full run and
 `--parse-only`.
 
+Both modes apply a multi-step `apply` **in order, to the same per-file buffer**:
+step N sees step N−1's output (Shape 3), and both stop at the first step that
+cannot be applied. `--parse-only` used to count every step against the pristine
+repo file, so a layered annotation could be a `MEASURE_FAIL` in the static mode
+and clean in the real run (WR-02, 164.3.1 review);
+`fixtures/selftest/layered-apply-gate.sql` pins the identity.
+
 ⚠️ The unit used to be a **sorted multiset of identities**, and that was blind in
 two measured ways, both found in round 3:
 
