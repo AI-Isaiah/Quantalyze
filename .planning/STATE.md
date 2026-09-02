@@ -73,6 +73,27 @@ reproduce-first), 146 (RATE). **Resume at Phase 143 after v1.17.** All 29 phase 
 preserved (`phases.clear` skipped by founder call). Phase 142.3's scope (MT5-06..10) and MT5-14
 are re-homed into v1.17 (Phases 155 / 153); 142.3 will not run as a v1.16 phase.
 
+## Scope Amendments (in force)
+
+⚖️ **Phase 164.4 REDUNDER-BACKFILL — criterion 1 NARROWED, founder decision 2026-09-02.**
+Original: "every arm in `supabase/tests/*.sql` carries a `RED-UNDER`". Amended: **every arm in the
+44 `TEST FAILED (` idiom files**, with the **27 non-idiom files PRINTED BY NAME by the runner on
+every run**. Measured basis: 1398 `RAISE EXCEPTION` sites across all 71 files (zero files have
+none), of which only 890 use the idiom the runner keys on (`run.mjs:544`; identity defined once at
+`run.mjs:947`); 27 files / 334 raises assert through their own message prefixes and are
+structurally unreachable. Rejected alternatives, both measured: renaming the 27 into the idiom
+(authoring, not mechanical — 321 raises carry only 139 distinct prefixes, so identities must be
+INVENTED) and generalising the identity grammar to a per-file prefix (weakens primitives 3a/3b that
+164.3.1 just closed, and buys no precision since prefixes are SHARED across arms).
+**Arm unit = SECTION** (not per-raise, not per-identity): 355 sections / ~365 twins over the 44
+files. The identity unit would have been 516 and pushed CI past the 20-minute split threshold.
+⚠️ Recorded in FOUR places on purpose — `ROADMAP.md` § Phase 164.4 (goal, SCOPE AMENDMENT block,
+criterion 1, progress table), here, and `TODOS.md` `[REDUNDER-NONIDIOM]`. The v1.17 lesson is that
+an amendment landing in ONE file leaves the refused claim alive in the others.
+⚠️ Also measured: the reference file `test_strategy_shares_rls.sql` holds 103 identities in **35
+sections with only 30 twins — 15 sections have no twin**, so the "1 file fully annotated" baseline
+was never true. Closing those 15 is inside this phase, not a precondition of it.
+
 ## Deferred Verification
 
 Phases whose code is complete but whose verification is gated on a human action. Autonomous

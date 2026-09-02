@@ -53,7 +53,7 @@
     "gsd-advisor-researcher": "opus",
     "gsd-assumptions-analyzer": "opus",
     "gsd-plan-checker": "fable",
-    "gsd-verifier": "fable",
+    "gsd-verifier": "opus",
     "gsd-research-synthesizer": "opus",
     "gsd-codebase-mapper": "opus",
     "gsd-project-researcher": "opus",
@@ -67,6 +67,6 @@
     "gsd-doc-classifier": "opus",
     "gsd-phase-researcher": "fable",
     "gsd-executor": "opus",
-    "gsd-code-reviewer": "fable"
+    "gsd-code-reviewer": "opus"
   }
 }
