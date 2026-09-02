@@ -2464,6 +2464,7 @@ governs by CONTENT TYPE, and their content is prose/forms — rung 1.
   signal/signedAt/pubkey); replace with per-broker allowlist.
 
 ### Phase 164.3.1 review-fix — bounded residuals, deliberately NOT fixed (added 2026-09-02)
+- [ ] **`scripts/prod-body-drift-check.sh` — the seven `node "$READER" … || fail` reader sites do not capture the child's exit CODE** (VERIFICATION W1 / READER-STDERR class in `DIAGNOSTIC_FIRST_ALLOWLIST`, gate-family-meta.test.ts). The four READER-STDERR allowlist entries (`:207` `--function-names`, `:221` naive, `:428` `--function-qualified-names`, `:430` naive `--qualified`) plus the three body/qualifier reads are accepted because the child's own stderr reaches the log un-redirected — but the wrapper's `fail` text carries no exit status, so a reader killed by a signal or an OOM (exit 137) reads identically to a charset refusal (exit 1). Fix: the `grep_rc` idiom already used at `:689-704` — capture `rc=$?` and interpolate it into the `fail` message; then drop those four allowlist entries and let the diagnostic-first meta-arm assert it. Booked 2026-09-02 during 164.3.1 UAT item 3 (the allowlist reasons were read and hold; this follow-up was cited there as "recorded, not fixed" and had no tracker row).
 - [ ] **`scripts/prod-body-drift-check.sh` — three remaining bare-`grep` sites, all OFF the verdict path.**
       The review-fix pass (`164.3.1-REVIEW-FIX.md`, WR-04, commit `d958e54e`) closed every grep/find
       exit-status site that DECIDES a verdict: the zero-path hit-list test (`textual-hits.txt`), the
