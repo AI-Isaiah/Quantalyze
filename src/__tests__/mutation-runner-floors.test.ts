@@ -662,6 +662,64 @@ describe("164.3.1-10 — the runner's absurdity floor (D-09): two INDEPENDENT ta
     evidence(v[0], 30, 30, 31);
   });
 
+  // ── 164.4-01: the two PER-FILE cross-sums, both directions ──────────────
+  // The columns and the aggregate are two derivations over the same run — the
+  // aggregate subtracts the non-biting defect kinds globally, each column
+  // subtracts the ones naming its own file. A relation that cannot fire is not
+  // a floor, so each is proven SILENT on the real shape and FIRING on a drift
+  // of exactly one.
+  const REF_ROW = { name: "test_strategy_shares_rls.sql", annotated: 30, biting: 30 };
+
+  it("SILENT when the per-file rows sum to the aggregate — the measured 30/30 shape", () => {
+    expect(
+      absurdityViolations({ ...LEGIT, perFile: [REF_ROW], armsAnnotated: 30 }),
+    ).toEqual([]);
+    // And absent columns stay a no-op: the three-count callers above are
+    // unchanged by this addition.
+    expect(absurdityViolations(LEGIT)).toEqual([]);
+  });
+
+  it("FIRES when the per-file biting column does not sum to the aggregate", () => {
+    const v = absurdityViolations({
+      ...LEGIT,
+      perFile: [{ ...REF_ROW, biting: 29 }],
+      armsAnnotated: 30,
+    });
+    expect(v).toHaveLength(1);
+    evidence(v[0], 30, 30, 30);
+    expect(v[0]).toMatch(/sums to 29 biting arm\(s\) but the aggregate reports 30/);
+  });
+
+  it("FIRES when the per-file annotated column does not sum to armsAnnotated", () => {
+    const v = absurdityViolations({
+      ...LEGIT,
+      perFile: [{ ...REF_ROW, annotated: 29 }],
+      armsAnnotated: 30,
+    });
+    expect(v).toHaveLength(1);
+    evidence(v[0], 30, 30, 30);
+    expect(v[0]).toMatch(/sums to 29 annotated twin\(s\) but the aggregate reports 30/);
+  });
+
+  it("FIRES on an UNMEASURABLE per-file column — an absent column is not a column of zeroes", () => {
+    const v = absurdityViolations({
+      ...LEGIT,
+      perFile: [{ ...REF_ROW, biting: undefined } as never],
+      armsAnnotated: 30,
+    });
+    expect(v.length).toBeGreaterThan(0);
+    expect(v[0]).toMatch(/MEASURE_FAIL/);
+    expect(v[0]).toMatch(/not a non-negative integer/);
+  });
+
+  it("the runner WIRES the cross-sums in — not merely defines them", () => {
+    // A helper nothing calls is a control that cannot fire. Pinned on the
+    // source, in the shape the independence check below uses.
+    const src = readFileSync(RUNNER_PATH, "utf8");
+    expect(src).toMatch(/absurdityViolations\(\{[\s\S]{0,200}perFile: fileRows/);
+    expect(src).toMatch(/logPerFileRows\(fileRows, log\)/);
+  });
+
   it("FIRES on an UNMEASURABLE input — an absent number is a MEASURE_FAIL, never a silent pass", () => {
     for (const bad of [
       { armsExecuted: Number.NaN, laneInvocations: 30, biting: 30 },
@@ -901,6 +959,10 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     "arms: 30/30/0   (executed/annotated/waived)",
     "biting: 30   (executed arms that reddened their OWN arm first — the quantity ARMS_FLOOR bounds)",
     "lane-invocations: 30   (arm lanes actually spawned — tallied inside runLane, independent of the 30 the verdict loop counted; plus 1 baseline / 1 restore leg(s))",
+    // 164.4-01: the per-file breakdown. `annotated 30 / sections 35` is the
+    // reference file's real, measured shape — 30 twins over 35 sections until
+    // plan 164.4-02 closes the 15.
+    "  file test_strategy_shares_rls.sql: sections 35 / judged 30 / annotated 30 / waived 0 / biting 30",
     "per-arm lane time: mean 1.7s over 30 arm run(s)",
     "",
     "✅ No defects. Every annotated arm bit its own arm first.",
@@ -937,6 +999,44 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     expect(r.status, r.out).toBe(1);
     expect(r.out).toContain("MEASURE_FAIL");
     expect(r.out).toContain("CLAIMS 3 excluded file(s) but NAMES 2");
+    expect(r.out).not.toContain("two tallies agree");
+  });
+
+  // ── 164.4-01, threat T-164.4-05: a file that judged NOTHING still counts as
+  // coverage. `coverage: files N/71` cannot tell a red-baseline file from one
+  // whose every arm bit. The per-file rows can, and these three arms prove the
+  // CI step fails when the rows vanish, when they disagree with the coverage
+  // numerator, and when their `biting` column does not add up to the aggregate.
+  it("RED: NO per-file rows is a MEASURE_FAIL — a breakdown that stopped printing is not a clean one", () => {
+    const without = GREEN_LOG.replace(/^ {2}file .*\n/gm, "");
+    expect(without, "the deletion must actually change the log").not.toBe(GREEN_LOG);
+    const r = runCountRecheck(without);
+    expect(r.status, r.out).toBe(1);
+    expect(r.out).toContain("MEASURE_FAIL");
+    expect(r.out).toContain("NO '  file <name>: sections");
+    expect(r.out).not.toContain("two tallies agree");
+  });
+
+  it("RED: more per-file rows than the coverage numerator claims fails, naming both counts", () => {
+    const extra = GREEN_LOG.replace(
+      /^ {2}file test_strategy_shares_rls\.sql: .*$/m,
+      (line) =>
+        `${line}\n  file test_ledger_refresh_composite_arm.sql: sections 15 / judged 0 / annotated 0 / waived 0 / biting 0`,
+    );
+    expect(extra).not.toBe(GREEN_LOG);
+    const r = runCountRecheck(extra);
+    expect(r.status, r.out).toBe(1);
+    expect(r.out).toContain("printed 2 per-file row(s) but reported 1 annotated file(s)");
+    expect(r.out).not.toContain("two tallies agree");
+  });
+
+  it("RED: a per-file biting column that does not SUM to the aggregate fails, naming both sums", () => {
+    const short = GREEN_LOG.replace(/^( {2}file .*)biting 30$/m, "$1biting 29");
+    expect(short, "the mutation must actually change the log").not.toBe(GREEN_LOG);
+    const r = runCountRecheck(short);
+    expect(r.status, r.out).toBe(1);
+    expect(r.out).toContain("rows sum to 29 biting arm(s) but the aggregate");
+    expect(r.out).toContain("reports 30");
     expect(r.out).not.toContain("two tallies agree");
   });
 
