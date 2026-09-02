@@ -826,6 +826,13 @@ const SINGLE_DO_FRAME_RE = /^PL\/pgSQL function inline_code_block line (\d+) at 
 
 /** Every `TEST FAILED (<id>)` occurrence, with its identity. */
 const IDENTITY_RE = /TEST FAILED \(([^)]*)\)/g;
+/**
+ * A FRESH regex over the same grammar — the ONE definition (IN-03, 164.3.1
+ * review: this file spelled it five times). `matchAll` needs a global
+ * instance and `match` a non-global one; a fresh clone per call also keeps
+ * the shared IDENTITY_RE's `lastIndex` out of every reader.
+ */
+const identityRe = (flags = "") => new RegExp(IDENTITY_RE.source, flags);
 
 /**
  * Attribution records for every arm identity RAISED by `gateText`.
@@ -1166,12 +1173,12 @@ function judgeBlock(identity, block, ctx, seen) {
  * commented out is absent from both sides.
  */
 export function armIdentities(text) {
-  return [...text.matchAll(/TEST FAILED \(([^)]*)\)/g)].map((m) => m[1]).sort();
+  return [...text.matchAll(identityRe("g"))].map((m) => m[1]).sort();
 }
 
 /** Identities in FILE ORDER — position-sensitive, so a swap is visible. */
 export function armIdentitiesInOrder(text) {
-  return [...text.matchAll(/TEST FAILED \(([^)]*)\)/g)].map((m) => m[1]);
+  return [...text.matchAll(identityRe("g"))].map((m) => m[1]);
 }
 
 /**
@@ -1272,7 +1279,7 @@ export function failureBranches(text) {
     // reach here — the tokenizer's masking, not a `^--` line test, is what
     // excludes it.
     if (!RAISE_EXCEPTION_RE.test(stmt.executableText)) continue;
-    const m = stmt.text.match(/TEST FAILED \(([^)]*)\)/);
+    const m = stmt.text.match(identityRe());
     if (!m) continue;
 
     // Walk back to the NEAREST branch head. The guard is the load-bearing part
@@ -1669,7 +1676,7 @@ export function runCorpus({
           // pure diagnostic, telling a human which raise fired in a corpus
           // that was supposed to be green. Nothing downstream consumes it.
           `pristine corpus did not go GREEN (exit ${baseline.status}); first failure: ${
-            baseline.output.match(/TEST FAILED \(([^)]*)\)/)?.[1] ?? "none"
+            baseline.output.match(identityRe())?.[1] ?? "none"
           }`,
         );
         continue; // arms cannot be judged against a red baseline
