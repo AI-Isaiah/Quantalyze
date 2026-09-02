@@ -35,9 +35,11 @@ import {
   applyFileStep,
   armIdentities,
   attributeIdentities,
+  countOccurrences,
   failureBranches,
   gateAttributionRecords,
   identityRewriteDetail,
+  parseOnlyCorpus,
 } from "../../scripts/mutation-runner/run.mjs";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
@@ -1189,5 +1191,55 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
     expect(corpus.filesTotal).toBe(71);
     expect(corpus.filesAnnotated).toBe(1);
     expect(corpus.annotatedFiles).toEqual(["test_strategy_shares_rls.sql"]);
+  });
+});
+
+describe("WR-02 — mode identity: `--parse-only` threads a LAYERED annotation's steps forward, as the real run does", () => {
+  // `runCorpus` re-reads each target after writing a step, so step N sees
+  // step N-1's output. The static mode used to count every step against the
+  // PRISTINE repo file — a layered annotation (GRAMMAR Shape 3, the pattern
+  // 164.4 is documented to use) was therefore a MEASURE_FAIL in `--parse-only`
+  // and clean in the real run, while run.mjs's header states mode identity as
+  // a contract and `--parse-only` is what CI runs where no lane exists.
+  const SELFTEST_DIR = join(REPO_ROOT, "scripts", "mutation-runner", "fixtures", "selftest");
+  const MIGRATION = "scripts/mutation-runner/fixtures/mini-migration.sql";
+  const STEP_1_NEEDLE = "DEFAULT 'unset'";
+  const STEP_2_NEEDLE = "DEFAULT 'layered-step-1'";
+
+  it("CALIBRATION: the fixture's second needle exists ONLY in the first step's output", () => {
+    // If step 2 were satisfiable against the pristine file, the arm below
+    // would pass with or without threading and prove nothing.
+    const pristine = readFileSync(join(REPO_ROOT, MIGRATION), "utf8");
+    expect(countOccurrences(pristine, STEP_1_NEEDLE)).toBe(1);
+    expect(
+      countOccurrences(pristine, STEP_2_NEEDLE),
+      "step 2's needle must be ABSENT from the pristine migration, or the threading arm is vacuous",
+    ).toBe(0);
+    // And the fixture really declares that pair, in that order, on that file.
+    const gate = parseFile(join(SELFTEST_DIR, "layered-apply-gate.sql"));
+    expect(gate.errors).toEqual([]);
+    const ann = gate.structured.find((a: { arm: string }) => a.arm === "LAYERED 1");
+    expect(ann?.apply.map((s: { file: string; find?: string }) => [s.file, s.find])).toEqual([
+      [MIGRATION, STEP_1_NEEDLE],
+      [MIGRATION, STEP_2_NEEDLE],
+    ]);
+  });
+
+  it("the static mode reports NO defect for LAYERED 1 — the same annotation the real run applies in order", () => {
+    // MEASURED 2026-09-02 pre-fix, this fixture, `parseOnlyCorpus` over selftest/:
+    //   occurrence-mismatch | MEASURE_FAIL: "DEFAULT 'layered-step-1'" occurs 0x
+    //   in scripts/mutation-runner/fixtures/mini-migration.sql, annotation claims 1x
+    // — in the static mode ONLY.
+    const result = parseOnlyCorpus({ scopeDir: SELFTEST_DIR, log: () => {} });
+    const mine = result.defects.filter((d: { arm: string | null }) => d.arm === "LAYERED 1");
+    expect(mine, "the static mode disagrees with the real run on a layered annotation").toEqual([]);
+    // Non-vacuity: the directory WAS parsed, and the static mode is not simply
+    // silent on it — the deliberately-defective sibling fixture is still
+    // caught. An empty defect table is not a pass.
+    expect(result.armsAnnotated).toBeGreaterThan(0);
+    expect(
+      result.defects.some((d: { kind: string; arm: string | null }) => d.kind === "occurrence-mismatch" && d.arm === "OCCMISS 1"),
+      "occurrence-mismatch-gate.sql must still be reported — otherwise the mode found nothing at all",
+    ).toBe(true);
   });
 });

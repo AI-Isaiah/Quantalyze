@@ -2091,7 +2091,17 @@ export function parseOnlyCorpus({ scopeDir, log = (s) => console.log(s) }) {
     }
 
     const corpusRels = [...parsed.setup.apply, gateRel];
+    // WR-02 (164.3.1 review): MODE IDENTITY. `runCorpus` re-reads each target
+    // after writing a step, so step N sees step N-1's output. This mode used
+    // to count every step against the PRISTINE repo file, so a LAYERED
+    // annotation (GRAMMAR Shape 3) whose second needle exists only after the
+    // first was a MEASURE_FAIL here and clean in the real run. The text is
+    // threaded forward per file, per annotation, exactly as the real run and
+    // the REAL CORPUS arm in mutation-annotation-parser.test.ts do — and, as
+    // there, the first step that cannot be applied ends the annotation.
+    const buffers = new Map();
     for (const ann of parsed.structured) {
+      buffers.clear();
       for (const step of ann.apply) {
         if (step.kind === "sql") continue;
         if (!corpusRels.includes(step.file)) {
@@ -2109,7 +2119,8 @@ export function parseOnlyCorpus({ scopeDir, log = (s) => console.log(s) }) {
           continue;
         }
         const needle = step.kind === "edit" ? step.find : step.anchor;
-        const before = readFileSync(target, "utf8");
+        if (!buffers.has(step.file)) buffers.set(step.file, readFileSync(target, "utf8"));
+        const before = buffers.get(step.file);
         const actual = countOccurrences(before, needle);
         if (actual !== step.occurrences) {
           addDefect(
@@ -2118,17 +2129,20 @@ export function parseOnlyCorpus({ scopeDir, log = (s) => console.log(s) }) {
             gateRel,
             `MEASURE_FAIL: ${JSON.stringify(needle)} occurs ${actual}x in ${step.file}, annotation claims ${step.occurrences}x`,
           );
-          continue;
+          break;
         }
         // R2-W04: identity rewriting is decidable WITHOUT a lane, so refuse it
         // here too. `--parse-only` is what CI runs on platforms with no
         // database, and an annotation that re-points a raise must not have to
         // wait for a lane to be caught.
         const applied = applyFileStep(before, step);
-        if (applied.ok) {
-          const rewrite = identityRewriteDetail(before, applied.text, step.file);
-          if (rewrite !== null) addDefect("identity-rewrite", ann.arm, gateRel, rewrite);
+        if (!applied.ok) break;
+        const rewrite = identityRewriteDetail(before, applied.text, step.file);
+        if (rewrite !== null) {
+          addDefect("identity-rewrite", ann.arm, gateRel, rewrite);
+          break;
         }
+        buffers.set(step.file, applied.text);
       }
     }
   }
