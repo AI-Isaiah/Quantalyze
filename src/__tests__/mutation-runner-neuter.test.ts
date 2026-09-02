@@ -118,6 +118,16 @@ describe("WR-07 — an abort-path statement it cannot classify is REFUSED, not l
   // Refusing turns that leak into a NAMED `neuter-missed` defect. Louder is
   // the whole point: a leak makes downstream arms pass for the wrong reason,
   // which is a vacuous PASS inside the vacuity detector.
+  //
+  // ⭐ SCOPE — BOTH SIDES OF THE RAISE (2026-09-02). The refusal covers the
+  // statements BEFORE the RAISE (the backward walk to the branch head) AND the
+  // statements AFTER it up to the branch's closer or the next head. The
+  // post-RAISE side is the same class from behind: in the original file
+  // nothing after a `RAISE EXCEPTION` in its branch ever runs, so `IF NOT ok
+  // THEN RAISE …; SET ROLE postgres; END IF;` is dead code — until the RAISE
+  // is neutered, when `SET ROLE postgres;` runs for the rest of the file. That
+  // shape was ACCEPTED with the SET ROLE left live (measured pre-fix); it is
+  // refused now, and the cross-product below drives it for every embedding.
 
   const LEAKY = (cleanup: string) =>
     [
@@ -151,6 +161,63 @@ describe("WR-07 — an abort-path statement it cannot classify is REFUSED, not l
       expect(result.text).toBe(LEAKY(cleanup));
     });
   }
+
+  it("POST-RAISE: `IF NOT ok THEN RAISE …; SET ROLE postgres; END IF;` is REFUSED — the RESET ROLE class from behind", () => {
+    // MEASURED pre-fix: `found: true`, with `SET ROLE postgres;` still
+    // executable in the output — a superuser session handed to every later
+    // arm the moment the RAISE that used to abort before it was neutered.
+    const text = [
+      "  IF NOT ok THEN",
+      "    RAISE EXCEPTION 'TEST FAILED (Q 1): x';",
+      "    SET ROLE postgres;",
+      "  END IF;",
+      "  SELECT 1;",
+    ].join("\n");
+    const result = neuterArm(text, "Q 1");
+    const leaked = result.found && executableLines(result.text, /SET\s+ROLE/i).length > 0;
+    expect(
+      leaked,
+      'neuterArm ACCEPTED the neuter and left "SET ROLE postgres;" executing AFTER the neutered RAISE — ' +
+        "dead code in the original, live for the rest of the file once the RAISE is gone.",
+    ).toBe(false);
+    expect(result.found).toBe(false);
+    expect(result.reason).toContain("unrecognised statement after its RAISE");
+    expect(result.reason).toContain("SET ROLE postgres;");
+    expect(result.text, "a refusal must not mutate the text").toBe(text);
+  });
+
+  it("POST-RAISE, other direction: the closer, an ELSE arm, and code AFTER the closer are not refused", () => {
+    // Without this half the refusal could be "passed" by refusing every arm
+    // whose RAISE is followed by anything at all — which is every arm.
+    const closer = [
+      "  IF NOT ok THEN",
+      "    RAISE EXCEPTION 'TEST FAILED (Q 2): x';",
+      "  END IF;",
+      "  SET ROLE postgres;",
+    ].join("\n");
+    const r2 = neuterArm(closer, "Q 2");
+    expect(r2.found, `reason: ${JSON.stringify(r2.reason)}`).toBe(true);
+    // Outside the branch the statement is the file's own business and survives.
+    expect(executableLines(r2.text, /SET\s+ROLE/i)).toEqual(["  SET ROLE postgres;"]);
+
+    const elseArm = [
+      "  IF NOT ok THEN",
+      "    RAISE EXCEPTION 'TEST FAILED (Q 3): x';",
+      "  ELSE",
+      "    PERFORM must_survive();",
+      "  END IF;",
+    ].join("\n");
+    expect(neuterArm(elseArm, "Q 3").found).toBe(true);
+
+    const exceptionArm = [
+      "  BEGIN",
+      "    RAISE EXCEPTION 'TEST FAILED (Q 4): x';",
+      "  EXCEPTION WHEN OTHERS THEN",
+      "    v_raised := true;",
+      "  END;",
+    ].join("\n");
+    expect(neuterArm(exceptionArm, "Q 4").found).toBe(true);
+  });
 
   it("CR-01: SET ROLE above a closed multi-line loop is REFUSED, not accepted past END LOOP;", () => {
     // MEASURED 2026-09-02 pre-fix (parse.mjs LOOP_OPENERS carried "END"):
@@ -338,6 +405,33 @@ describe("WR-07 — an abort-path statement it cannot classify is REFUSED, not l
       });
     }
 
+    for (const [embedding, render] of Object.entries(EMBEDDINGS)) {
+      it(`ORACLE (post-RAISE): "${word}" in a ${embedding} after the RAISE must not read as the closer`, () => {
+        // The forward walk's twin of the arm above: a keyword embedded in
+        // non-code AFTER the RAISE must not be mistaken for the branch's closer
+        // or next head, so the `SET ROLE postgres;` behind it is still seen.
+        const line = render(word);
+        const text = [
+          "  IF NOT raised THEN",
+          "    RAISE EXCEPTION 'TEST FAILED (ARM F): it did not bite';",
+          `    ${line}`,
+          "    SET ROLE postgres;",
+          "  END IF;",
+          "  SELECT 1;",
+        ].join("\n");
+
+        const result = neuterArm(text, "ARM F");
+        const leaked = result.found && executableLines(result.text, /SET\s+ROLE/i).length > 0;
+        expect(
+          leaked,
+          `neuterArm ACCEPTED the neuter and left "SET ROLE postgres;" executing after the RAISE. ` +
+            `Between them was ${JSON.stringify(line)} — a ${embedding}, which is not code.`,
+        ).toBe(false);
+        expect(result.found).toBe(false);
+        expect(result.reason).toContain("unrecognised statement after its RAISE");
+      });
+    }
+
     for (const [embedding, render] of Object.entries(MULTILINE_EMBEDDINGS)) {
       it(`ORACLE (multi-line): "${word}" in a ${embedding} must not end the scan`, () => {
         const text = [
@@ -404,7 +498,9 @@ describe("WR-07 — an abort-path statement it cannot classify is REFUSED, not l
     expect(neuterArm(text, "ARM H").found).toBe(true);
   });
 
-  it("REAL CORPUS: it refuses the four SERVICE-ROLE arms whose branches REVOKE before raising, and nothing else", () => {
+  // 20 s: MEASURED 1.6–8.9 s across runs (104 full-file tokenizations of a
+  // 2600-line gate) against vitest's 5 s default — flaked 2 of 3 runs.
+  it("REAL CORPUS: it refuses the four SERVICE-ROLE arms whose branches REVOKE before raising, and nothing else", { timeout: 20_000 }, () => {
     // Measured, not asserted in the abstract. SERVICE-ROLE 2a-2d each drop two
     // `EXECUTE 'REVOKE EXECUTE ON FUNCTION … FROM service_role'` statements
     // before their RAISE. Neutering only the RAISE would revoke the grant that
@@ -665,14 +761,21 @@ describe("[MUT-I01]: comment state inside a RAISE's span, both parities", () => 
     // RESEARCH premise P5's measured shape: a second apostrophe restores parity
     // AFTER the real terminator has been swallowed, so the scan runs on and
     // ends on the NEXT statement's semicolon.
+    //
+    // ⚠️ RESHAPED 2026-09-02 (WR-07, post-RAISE side): the survivor used to
+    // sit INSIDE the branch after the RAISE, which `neuterArm` now refuses by
+    // design (see the WR-07 block — dead code that a neuter would bring to
+    // life). The statements after the terminator are therefore the branch's
+    // own `END IF;` closer and the PERFORM past it; a quote-only walker in
+    // even parity would swallow BOTH on its way to the PERFORM's `;`.
     const text = [
       "  IF NOT raised THEN",
       "    RAISE EXCEPTION 'TEST FAILED (ARM P5): it did not bite',",
       "      -- don't worry",
       "      some_var;",
-      "    -- it isn't optional",
-      "    PERFORM must_survive();",
       "  END IF;",
+      "  -- it isn't optional",
+      "  PERFORM must_survive();",
     ].join("\n");
 
     const result = neuterArm(text, "ARM P5");
@@ -684,7 +787,11 @@ describe("[MUT-I01]: comment state inside a RAISE's span, both parities", () => 
         `out with no signal whatsoever. This is the SILENT half of [MUT-I01]: the neuter reported ` +
         `success while rewriting what the arm does. A fix that closes only the loud P4 direction ` +
         `leaves this live.`,
-    ).toEqual(["    PERFORM must_survive();"]);
+    ).toEqual(["  PERFORM must_survive();"]);
+    expect(
+      executableLines(result.text, /END IF;/),
+      "the branch's own closer was swallowed with the RAISE — the block is no longer balanced",
+    ).toEqual(["  END IF;"]);
 
     // And it still did its job.
     expect(executableLines(result.text, /RAISE\s+EXCEPTION/i)).toEqual([]);

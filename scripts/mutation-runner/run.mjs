@@ -196,6 +196,35 @@ export const FILES_FLOOR = 1;
 // Measured biting 30 — value UNCHANGED.
 export const ARMS_FLOOR = 30;
 
+// WAIVED_CEILING — PINNED 2026-09-02 BY MEASUREMENT (164.3.1 red team), not
+// chosen. A CEILING, not a floor: it fails when the corpus carries MORE waivers
+// than were measured.
+//
+// ⛔ THE HOLE IT CLOSES. A waiver is a counted twin, so a prose marker paired
+// with `{"arm":…,"waiver":…}` satisfies parity, raises `filesAnnotated` and
+// `armsAnnotated`, never spawns a lane, never lowers `biting`, and exits 0.
+// ARMS_FLOOR cannot see it: converting an EXISTING arm to a waiver lowers
+// biting and trips the floor, but ADDING a new prose marker with a waiver twin
+// adds nothing to biting and lowers nothing. Annotated-file coverage could be
+// inflated across all 70 unannotated files with zero new arms and every floor
+// green. So the waiver count is bounded from above, here and in ci.yml's
+// count-recheck step (which parses the W field of `arms: E/A/W` against this
+// constant, read from this file the way it reads ARMS_FLOOR).
+//
+// MEASURED 2026-09-02 at HEAD 8969513e:
+//   `node scripts/mutation-runner/run.mjs --parse-only` -> exit 0
+//     coverage: files 1/71
+//     arms: 0/30/0   (executed/annotated/waived)   ← 0 waivers
+//   independently: a node:fs scan of supabase/tests/*.sql for line-start
+//   `RED-UNDER-M:` lines carrying `"waiver":` -> 0 (the pin in
+//   src/__tests__/mutation-runner-floors.test.ts re-derives this on every run,
+//   in lockstep with FILES_FLOOR / ARMS_FLOOR: drift in EITHER direction fails).
+//
+// ⚠️ Raising it is a deliberate, reviewed edit: each new waiver is an arm the
+// runner will never prove can fail (T-164.3-21), and the reason string on the
+// twin is the only evidence that it cannot be mutated into failing.
+export const WAIVED_CEILING = 0;
+
 /**
  * Every defect this runner can report. EXPORTED (SP-C02) so the CI-wiring test
  * can range over it rather than restating it: a new kind added here without a
@@ -223,6 +252,12 @@ export const DEFECT_KINDS = [
   // defect table and the CI count-recheck step can tell "the corpus regressed"
   // from "the instrument is broken" by name.
   "absurdity",
+  // 2026-09-02: the lane process could not be run (ENOENT / ENOBUFS / a
+  // signal — see `laneSpawnFailure`). A MEASURE_FAIL: the arm was NOT judged,
+  // and it is never counted as biting. Kept distinct from `absurdity` (the
+  // tallies still agree) and from `wrong-first-failure` (which it used to
+  // masquerade as).
+  "lane-unrunnable",
 ];
 
 // ---------------------------------------------------------------------------
@@ -278,41 +313,6 @@ export function applyFileStep(text, step) {
   return { ok: true, text: text.slice(0, end) + step.text + text.slice(end) };
 }
 
-/**
- * Replace an arm's `RAISE EXCEPTION 'TEST FAILED (<arm>)…'` with a no-op in a
- * COPY of the gate file, so a shadowing arm cannot fire first.
- *
- * `NULL;` is substituted rather than deleting the statement, so an `IF … THEN`
- * whose only statement was the RAISE keeps a non-empty body.
- *
- * ⛔ THE FAILURE BRANCH'S TRAILING `RESET ROLE;` GOES WITH IT, AND THAT IS A
- * CORRECTNESS REQUIREMENT, NOT TIDYING. MEASURED 2026-08-29 while annotating
- * the real corpus (plan 164.3-08): `N1 3a`'s mutation neuters `N1 1a`, whose
- * failure branch reads
- *
- *     IF NOT raised OR err_msg NOT LIKE '%AT MOST ONE%' THEN
- *       RESET ROLE;
- *       RAISE EXCEPTION 'TEST FAILED (N1 1a): …';
- *     END IF;
- *
- * Neutering only the RAISE left `RESET ROLE;` executing — and the branch DOES
- * execute under that mutation, which is the whole reason the arm is neutered.
- * The session dropped from `authenticated` to the (superuser) session role for
- * the ENTIRE REST OF THE FILE, and sixteen arms later `NO-DELETE 1`'s
- * `DELETE FROM strategy_shares` succeeded because a superuser needs no grant.
- * The runner reported `wrong-first-failure: NO-DELETE 1`.
- *
- * ⚠️ It was loud HERE only by luck. A leaked superuser role makes every
- * downstream GRANT arm pass for a reason unrelated to the grant — a silent
- * vacuous PASS inside the vacuity detector, and the exact defect class Phase
- * 164.4 would inherit across seventy more files.
- *
- * The reasoning that makes this the RIGHT semantics rather than a patch: those
- * statements exist solely to restore state before ABORTING the file. Once the
- * arm is neutered the file continues, so running its abort-path cleanup is
- * wrong by construction. Only an exact `RESET ROLE;` is absorbed — nothing
- * else, so a branch that does real work is never silently swallowed.
- */
 /**
  * The ONLY abort-path statement the neuter absorbs along with the RAISE.
  * Exported so a test can assert the set is exactly this, and so widening it is
@@ -482,9 +482,63 @@ function raiseStatementIndex(statements, needle) {
   return -1;
 }
 
-/** A statement rendered on one line, for a diagnostic that must PRINT WHAT IT SAW (D-12). */
-const oneLine = (statement) => statement.text.trim().replace(/\s*\n\s*/g, " ");
+/**
+ * Text flattened to ONE bounded line, for a diagnostic that must PRINT WHAT IT
+ * SAW (D-12) without printing a novel. Takes a statement (its `.text`) or a
+ * plain string — the one flattener every diagnostic in this file uses.
+ */
+function oneLine(subject) {
+  const text = typeof subject === "string" ? subject : subject.text;
+  const flat = text.trim().replace(/\s*\n\s*/g, " ");
+  return flat.length > 200 ? `${flat.slice(0, 200)}…` : flat;
+}
 
+/**
+ * Replace an arm's `RAISE EXCEPTION 'TEST FAILED (<arm>)…'` with a no-op in a
+ * COPY of the gate file, so a shadowing arm cannot fire first.
+ *
+ * `NULL;` is substituted rather than deleting the statement, so an `IF … THEN`
+ * whose only statement was the RAISE keeps a non-empty body.
+ *
+ * ⛔ THE FAILURE BRANCH'S TRAILING `RESET ROLE;` GOES WITH IT, AND THAT IS A
+ * CORRECTNESS REQUIREMENT, NOT TIDYING. MEASURED 2026-08-29 while annotating
+ * the real corpus (plan 164.3-08): `N1 3a`'s mutation neuters `N1 1a`, whose
+ * failure branch reads
+ *
+ *     IF NOT raised OR err_msg NOT LIKE '%AT MOST ONE%' THEN
+ *       RESET ROLE;
+ *       RAISE EXCEPTION 'TEST FAILED (N1 1a): …';
+ *     END IF;
+ *
+ * Neutering only the RAISE left `RESET ROLE;` executing — and the branch DOES
+ * execute under that mutation, which is the whole reason the arm is neutered.
+ * The session dropped from `authenticated` to the (superuser) session role for
+ * the ENTIRE REST OF THE FILE, and sixteen arms later `NO-DELETE 1`'s
+ * `DELETE FROM strategy_shares` succeeded because a superuser needs no grant.
+ * The runner reported `wrong-first-failure: NO-DELETE 1`.
+ *
+ * ⚠️ It was loud HERE only by luck. A leaked superuser role makes every
+ * downstream GRANT arm pass for a reason unrelated to the grant — a silent
+ * vacuous PASS inside the vacuity detector, and the exact defect class Phase
+ * 164.4 would inherit across seventy more files.
+ *
+ * The reasoning that makes this the RIGHT semantics rather than a patch: those
+ * statements exist solely to restore state before ABORTING the file. Once the
+ * arm is neutered the file continues, so running its abort-path cleanup is
+ * wrong by construction. Only an exact `RESET ROLE;` is absorbed — nothing
+ * else, so a branch that does real work is never silently swallowed.
+ *
+ * ⛔ WR-07 SCOPE — BOTH SIDES OF THE RAISE. The refusal below (an abort branch
+ * carrying a statement the neuter cannot classify) is applied to the statements
+ * BEFORE the RAISE and, since 2026-09-02, to the statements AFTER it up to the
+ * branch's closer. The post-RAISE side is the same leak class from the other
+ * direction: in the ORIGINAL file nothing after a `RAISE EXCEPTION` in its
+ * branch ever executes, so `IF NOT ok THEN RAISE …; SET ROLE postgres; END IF;`
+ * is dead code — until the RAISE is neutered, at which point `SET ROLE
+ * postgres;` runs for the rest of the file with no signal. The neuter refuses
+ * that shape, naming the statement, rather than leaving it live (the previous
+ * behaviour) or silently commenting it out (a rewrite nobody asked for).
+ */
 export function neuterArm(text, arm) {
   const lines = text.split("\n");
   const needle = `TEST FAILED (${arm})`;
@@ -518,7 +572,6 @@ export function neuterArm(text, arm) {
     if (p === -1 || !ABSORBABLE_CLEANUP.test(statements[p].text)) break;
     startIdx = p;
   }
-  const start = statements[startIdx].startLine - 1;
 
   // ── WR-07: refuse what we cannot classify, instead of leaking it ──────────
   // The absorbed set is ONE literal statement, and the header is explicit that
@@ -631,6 +684,33 @@ export function neuterArm(text, arm) {
   // MEASURE failure, not a shorter statement.
   if (!raiseStmt.terminated) {
     return { text, found: false, reason: `could not find the end of the RAISE statement for "${arm}"` };
+  }
+
+  // ── WR-07, the OTHER side: nothing may sit between the RAISE and its closer ─
+  // In the original file a statement after the RAISE in its own branch never
+  // executes — the RAISE aborts first. Neuter the RAISE and it does, for the
+  // rest of the file, with no signal: `IF NOT ok THEN RAISE …; SET ROLE
+  // postgres; END IF;` is the RESET ROLE class reached from behind. The walk
+  // forward stops at the branch's closer (`END IF;`, `END LOOP;`, `END;`), at
+  // the next branch head (`ELSE`, `ELSIF …`, `EXCEPTION …`) or at the end of
+  // the enclosing body, and refuses anything else it meets. The tokenizer
+  // emits no comments or blanks, so there is nothing to skip.
+  for (let k = raiseIdx + 1; k < statements.length; k += 1) {
+    const stmt = statements[k];
+    if (stmt.depth > raiseStmt.depth) continue; // nested inside the RAISE's own dollar-quoted text
+    if (stmt.depth < raiseStmt.depth) break; // the enclosing body ended
+    if (stmt.executableText.trim() === "") continue;
+    if (blockCloserKind(stmt) !== null || isBranchHead(stmt)) break;
+    return {
+      text,
+      found: false,
+      reason:
+        `the abort branch for "${arm}" carries an unrecognised statement after its RAISE ` +
+        `(line ${stmt.startLine}: ${oneLine(stmt)}). In the original file that statement is ` +
+        `unreachable — the RAISE aborts first — so neutering the RAISE would make it execute ` +
+        `for the rest of the file: the measured RESET ROLE class, from the other side. Move it ` +
+        `out of the branch, or restructure the branch.`,
+    };
   }
 
   // ── The rewrite ──────────────────────────────────────────────────────────
@@ -774,6 +854,32 @@ function gitStatus() {
 // so the chain LENGTH is the control, and `164.3.1-05-ATTRIBUTION.md` records
 // it flipping to a false `RED (identity ok)` when neutered to first-frame-only.
 //
+// ⛔ AND LENGTH ALONE IS NOT ENOUGH EITHER (F1, 164.3.1 adversarial review,
+// MEASURED LIVE 2026-09-02 on PG 16 through the real lane). The attacker cannot
+// REMOVE frames from the chain, but they can PREPEND text to the MESSAGE, and
+// psql prints the message's lines raw. A trigger raising
+//
+//     E'TEST FAILED (X)\nCONTEXT:  PL/pgSQL function inline_code_block line 5 at RAISE\nLOCATION:  exec_stmt_raise, pl_exec.c:3911'
+//
+// therefore prints as
+//
+//     psql:<gate>:9: ERROR:  P0001: TEST FAILED (X)
+//     CONTEXT:  PL/pgSQL function inline_code_block line 5 at RAISE   ← message text
+//     LOCATION:  exec_stmt_raise, pl_exec.c:3911                      ← message text
+//     CONTEXT:  PL/pgSQL function forge_fn() line 1 at RAISE          ← the real chain
+//     SQL statement "INSERT INTO t VALUES (1)"
+//     PL/pgSQL function inline_code_block line 3 at SQL statement
+//     LOCATION:  exec_stmt_raise, pl_exec.c:3911
+//
+// and a reader that takes the FIRST CONTEXT and the first LOCATION after it
+// scores `RED (identity ok)` for an arm whose guard never ran. What the
+// attacker cannot do is stop psql from printing the REAL fields after the
+// message: libpq emits each of DETAIL / HINT / QUERY / CONTEXT / the five
+// verbose-only NAME fields / LOCATION AT MOST ONCE per message, in that FIXED
+// order, LOCATION LAST. So `judgeBlock` refuses any block in which a field
+// name repeats, or in which LOCATION is not the final field — a forged prefix
+// always produces one of the two, because the genuine fields still follow it.
+//
 // ⚠️ HONEST RESIDUAL, named rather than implied — the boundary MOVED, it did
 // not disappear:
 //
@@ -812,8 +918,21 @@ function gitStatus() {
 const PSQL_HEADER_RE =
   /^psql:(.*):(\d+): (ERROR|FATAL|PANIC|WARNING|NOTICE|INFO|LOG|DEBUG):  (.*)$/;
 
-/** A psql diagnostic FIELD line. `LOCATION` is verbose's end-of-block sentinel. */
-const PSQL_FIELD_RE = /^(CONTEXT|DETAIL|HINT|QUERY|STATEMENT|LOCATION):  (.*)$/;
+/**
+ * A psql diagnostic FIELD line. `LOCATION` is verbose's end-of-block sentinel.
+ *
+ * The five `… NAME` fields are VERBOSE-ONLY and sit BETWEEN CONTEXT and
+ * LOCATION (libpq's fixed emission order). MEASURED 2026-09-02 on PG 16 through
+ * the real lane: `RAISE … USING TABLE = 't', SCHEMA = 's', COLUMN = 'c'` prints
+ * `SCHEMA NAME:` / `TABLE NAME:` / `COLUMN NAME:` after the CONTEXT frame.
+ * Without them here those lines were CONTINUATIONS of the CONTEXT value, so a
+ * legitimate single-frame raise carrying a diagnostic name was refused with the
+ * WRONG diagnosis ("chain has 4 lines") — a false SYNTHESISED against a
+ * genuine arm. `STATEMENT:` is server-log-only and never reaches the client;
+ * it is kept so a log-shaped line can never be mistaken for message text.
+ */
+const PSQL_FIELD_RE =
+  /^(CONTEXT|DETAIL|HINT|QUERY|STATEMENT|SCHEMA NAME|TABLE NAME|COLUMN NAME|DATATYPE NAME|CONSTRAINT NAME|LOCATION):  (.*)$/;
 
 /** Anything psql-prefixed at all — used only to tell "no blocks" from "no output". */
 const PSQL_PREFIXED_RE = /^psql:.+:\d+: /;
@@ -868,14 +987,8 @@ export function gateAttributionRecords(gateText) {
     // The enclosing top-level statement: the last depth-0 statement at or
     // before this one. `tokenizeStatements` emits pre-order, so that is the
     // `DO $$ … $$;` block this raise lives inside.
-    let top = null;
-    for (let j = idx; j >= 0; j -= 1) {
-      if (statements[j].depth === 0) {
-        top = statements[j];
-        break;
-      }
-    }
-    if (top === null) continue;
+    const top = statements.slice(0, idx + 1).findLast((s) => s.depth === 0);
+    if (top === undefined) continue;
     for (const arm of armIdentitiesInOrder(stmt.text)) {
       records.push({
         arm,
@@ -978,12 +1091,12 @@ export function attributeIdentities(output, ctx) {
 
   const sightings = [];
   for (let i = 0; i < lines.length; i += 1) {
-    IDENTITY_RE.lastIndex = 0;
-    let match;
-    while ((match = IDENTITY_RE.exec(lines[i])) !== null) {
+    // A fresh global instance per line (IN-03): no reader touches the shared
+    // IDENTITY_RE's `lastIndex`.
+    for (const match of lines[i].matchAll(identityRe("g"))) {
       const identity = match[1];
       const owner = lineOwner[i];
-      const seen = oneLineOf(lines[i]);
+      const seen = oneLine(lines[i]);
       if (owner === null) {
         sightings.push({
           identity,
@@ -1045,12 +1158,6 @@ function describeSightings(attribution) {
     .join("; ");
 }
 
-/** One line, bounded — a diagnostic must PRINT WHAT IT SAW without printing a novel. */
-function oneLineOf(text) {
-  const flat = text.trim().replace(/\s*\n\s*/g, " ");
-  return flat.length > 200 ? `${flat.slice(0, 200)}…` : flat;
-}
-
 /** The three-legged rule, applied to one identity sighting in one block's message. */
 function judgeBlock(identity, block, ctx, seen) {
   const no = (why) => ({ identity, arm: null, why, seen });
@@ -1067,6 +1174,34 @@ function judgeBlock(identity, block, ctx, seen) {
   // ── leg (a): the psql prefix names THIS lane's gate scratch file ──────────
   if (block.path !== ctx.gatePath) {
     return no(`raised from ${block.path}, not from this lane's gate file ${ctx.gatePath}`);
+  }
+  // ── F1: the block's fields must be the ones LIBPQ emitted, not message text ─
+  // libpq prints every diagnostic field AT MOST ONCE per message, in a fixed
+  // order, LOCATION last. A RAISE whose MESSAGE embeds `\nCONTEXT:  …\nLOCATION:
+  // …` (measured live 2026-09-02 — see the 164.3.1-05 block above) prints a
+  // forged CONTEXT + LOCATION pair BEFORE the real ones, so the FIRST CONTEXT
+  // read alone attributes it. The genuine fields cannot be suppressed, so a
+  // forged prefix always leaves either a repeated name or a field after
+  // LOCATION. Checked before leg (b) because leg (b) reads `fields[contextIdx]`
+  // and would otherwise read the forged one.
+  const seenFields = new Set();
+  for (const f of block.fields) {
+    if (seenFields.has(f.name)) {
+      return no(
+        `duplicated diagnostic field — message-embedded forgery: "${f.name}" appears more than once in ` +
+          `one psql block (fields in order: ${block.fields.map((x) => x.name).join(", ")}). libpq emits ` +
+          `each field at most once, so a repeat means the RAISE's own message text spelled a field line`,
+      );
+    }
+    seenFields.add(f.name);
+  }
+  const locationIdx = block.fields.findIndex((f) => f.name === "LOCATION");
+  if (locationIdx !== -1 && locationIdx !== block.fields.length - 1) {
+    return no(
+      `duplicated diagnostic field — message-embedded forgery: LOCATION is not the FINAL field of the ` +
+        `block (fields in order: ${block.fields.map((x) => x.name).join(", ")}). libpq prints LOCATION ` +
+        `last, so a field after it was spelled by the RAISE's own message text`,
+    );
   }
   // ── leg (b): the CONTEXT chain is EXACTLY ONE direct DO-body RAISE frame ──
   const contextIdx = block.fields.findIndex((f) => f.name === "CONTEXT");
@@ -1088,9 +1223,10 @@ function judgeBlock(identity, block, ctx, seen) {
     const chainLines = chain.trim().split("\n");
     return no(
       `the CONTEXT chain is not EXACTLY ONE "inline_code_block line N at RAISE" frame — it has ` +
-        `${chainLines.length} line(s), first: ${JSON.stringify(oneLineOf(chainLines[0] ?? ""))}. ` +
+        `${chainLines.length} line(s), first: ${JSON.stringify(oneLine(chainLines[0] ?? ""))}. ` +
         `A nested EXECUTE, a helper function or a trigger forges the INNERMOST frame; it cannot ` +
-        `forge the chain's LENGTH`,
+        `forge the chain's LENGTH (and a message-embedded prefix is refused above, by field ` +
+        `duplication)`,
     );
   }
   // ── leg (c): the frame line resolves to a raise the RUNNER's gate declares ─
@@ -1182,22 +1318,15 @@ export function armIdentitiesInOrder(text) {
 }
 
 /**
- * Every FAILURE BRANCH in `text`, in file order: `{ id, text }` where `text` is
- * the exact source from the enclosing branch head through the end of the RAISE.
- *
- * The backward walk reuses the same STATEMENT TOKENIZER `neuterArm` uses, so
- * "what counts as a branch head" has ONE definition across this file rather
- * than two that can drift apart.
- */
-/**
  * How far back a failure branch's head may sit from its RAISE.
  *
- * MEASURED 2026-08-29 on `supabase/tests/test_strategy_shares_rls.sql`: the
- * furthest any of the 104 identities sits from its enclosing branch head is
- * printed by the REAL CORPUS arm in `mutation-annotation-parser.test.ts`, and
- * the bound is pinned well above it so a normal arm never falls back.
+ * MEASURED 2026-08-29 on `supabase/tests/test_strategy_shares_rls.sql`: every
+ * one of the 104 identities sits well inside this bound. EXPORTED so the REAL
+ * CORPUS arm in `mutation-annotation-parser.test.ts` PINS the bound against
+ * the corpus's largest measured branch (it imports this constant rather than
+ * restating 40), and fails loud the day a branch grows past it.
  */
-const FAILURE_BRANCH_LOOKBACK = 40;
+export const FAILURE_BRANCH_LOOKBACK = 40;
 
 /**
  * A block CLOSER — `END LOOP;`, `END IF;`, `END CASE;`, `END;` — and its kind,
@@ -1269,6 +1398,14 @@ function blockOpenerIndex(statements, closerIdx, depth, kind) {
   return -1;
 }
 
+/**
+ * Every FAILURE BRANCH in `text`, in file order: `{ id, text }` where `text` is
+ * the exact source from the enclosing branch head through the end of the RAISE.
+ *
+ * The backward walk reuses the same STATEMENT TOKENIZER `neuterArm` uses, so
+ * "what counts as a branch head" has ONE definition across this file rather
+ * than two that can drift apart.
+ */
 export function failureBranches(text) {
   const lines = text.split("\n");
   const statements = tokenizeStatements(text);
@@ -1382,6 +1519,33 @@ const LANE_LEGS = ["baseline", "arm", "restore"];
  */
 const laneTally = { baseline: 0, arm: 0, restore: 0 };
 
+/**
+ * PURE. Why a `spawnSync` result carries no usable exit status, or null when
+ * the process ran to one. Exported so the classification is pinned on its own.
+ *
+ * ⛔ `status` is NULL in three unrelated situations — the binary could not be
+ * started at all (`error.code === "ENOENT"`, or `ENOBUFS` when the output
+ * overran `maxBuffer`), the process was killed by a signal (`SIGKILL` from the
+ * OOM killer, `SIGTERM` from a cancelled job), or — defensively — neither
+ * an error nor a signal nor an integer status. Until 2026-09-02 `runLane` returned
+ * `status: null` for all of them and the verdict loop read it as `!== 0`: a
+ * lane that never ran was a `no-red`-free "red" whose output carried no
+ * identity, so it surfaced as `wrong-first-failure` — a CORPUS defect named
+ * for an INSTRUMENT failure. A lane the runner could not run is a MEASURE_FAIL
+ * and says so.
+ *
+ * @returns {string|null}
+ */
+export function laneSpawnFailure(proc) {
+  if (proc.error) {
+    const code = proc.error.code ?? proc.error.message ?? String(proc.error);
+    return `lane could not run: ${code}`;
+  }
+  if (proc.signal) return `lane could not run: ${proc.signal}`;
+  if (!Number.isInteger(proc.status)) return "lane could not run: no exit status and no signal";
+  return null;
+}
+
 function runLane({ workdir, applyAbs, postApplyAbs, gateAbs, leg }) {
   // Refuse to guess which leg this is: an untagged lane would be an
   // unaccounted invocation, and the cross-check treats that as absurd.
@@ -1391,13 +1555,18 @@ function runLane({ workdir, applyAbs, postApplyAbs, gateAbs, leg }) {
   args.push("--gate", gateAbs);
   const started = Date.now();
   const proc = spawnSync("bash", args, { encoding: "utf8", maxBuffer: 128 * 1024 * 1024 });
+  const measureFail = laneSpawnFailure(proc);
   // Counted at the spawn, after it returned: a lane is an invocation only if
-  // the process was actually started, never because this function was entered.
-  laneTally[leg] += 1;
+  // the process was actually started, never because this function was entered
+  // — and a spawn that FAILED (`proc.error`: ENOENT, ENOBUFS) started nothing,
+  // so it is not counted either. A lane that started and was then signalled
+  // IS counted: it ran, and the verdict loop must account for it.
+  const invoked = !proc.error;
+  if (invoked) laneTally[leg] += 1;
   // stderr first: psql streams RAISE output there, and ON_ERROR_STOP=1 aborts
   // at the first failing statement, so emission order is failure order.
   const output = `${proc.stderr || ""}\n${proc.stdout || ""}`;
-  return { status: proc.status, output, seconds: (Date.now() - started) / 1000 };
+  return { status: proc.status, output, seconds: (Date.now() - started) / 1000, measureFail, invoked };
 }
 
 // ===========================================================================
@@ -1549,6 +1718,14 @@ function materialize(slotDir, relPaths) {
  * @param {string|null} opts.onlyArm     arm ID to narrow to
  * @param {number} opts.filesFloor       ratchet; overridable ONLY by --self-test
  * @param {number} opts.armsFloor
+ * @param {number} opts.waivedCeiling    ceiling on waived arms; overridable ONLY by --self-test
+ * @param {typeof runLane} opts.laneRunner
+ *        INJECTABLE lane runner, default the real `runLane`. Exists so the
+ *        absurdity floor's FIRE direction and the lane-unrunnable MEASURE_FAIL
+ *        can be driven through THIS function's real verdict loop and summary
+ *        block without a cluster (a stub that never touches `laneTally`
+ *        produces executed=N / lane-invocations=0 by construction). ⚠️ Only
+ *        `--self-test` and vitest pass it; the CLI never does.
  * @param {(s:string)=>void} opts.log
  */
 export function runCorpus({
@@ -1557,6 +1734,8 @@ export function runCorpus({
   onlyArm = null,
   filesFloor = FILES_FLOOR,
   armsFloor = ARMS_FLOOR,
+  waivedCeiling = WAIVED_CEILING,
+  laneRunner = runLane,
   log = (s) => console.log(s),
 }) {
   const narrowed = Boolean(onlyFile || onlyArm);
@@ -1570,6 +1749,10 @@ export function runCorpus({
   let armsAnnotated = 0;
   let armsWaived = 0;
   let armsExecuted = 0;
+  // Arms whose lane STARTED (so both tallies count it) but could not be judged
+  // — signalled, or without an exit status. Subtracted from biting beside the
+  // non-biting defect kinds; never counted as biting.
+  let armsUnjudged = 0;
   const waivers = [];
   const timings = [];
 
@@ -1656,7 +1839,7 @@ export function runCorpus({
       // -------------------------------------------------------------------
       const baseSlot = nextSlot();
       const baseMap = materialize(baseSlot, corpusRels);
-      const baseline = runLane({
+      const baseline = laneRunner({
         workdir: join(baseSlot, "lane"),
         applyAbs: parsed.setup.apply.map((r) => baseMap.get(r)),
         postApplyAbs: null,
@@ -1664,6 +1847,16 @@ export function runCorpus({
         leg: "baseline",
       });
       log(`  baseline  ${gateRel} — exit ${baseline.status} (${baseline.seconds.toFixed(1)}s)`);
+      if (baseline.measureFail !== null) {
+        addDefect(
+          "lane-unrunnable",
+          null,
+          gateRel,
+          `MEASURE_FAIL: ${baseline.measureFail} — the runner could not execute the baseline lane, so ` +
+            `the pristine corpus was NOT measured and no arm of this gate was judged`,
+        );
+        continue;
+      }
       if (baseline.status !== 0) {
         addDefect(
           "baseline",
@@ -1754,13 +1947,34 @@ export function runCorpus({
         }
 
         const gateAbs = armMap.get(gateRel);
-        const run = runLane({
+        const run = laneRunner({
           workdir: join(armSlot, "lane"),
           applyAbs: parsed.setup.apply.map((r) => armMap.get(r)),
           postApplyAbs,
           gateAbs,
           leg: "arm",
         });
+        // ── the lane could not be RUN: MEASURE_FAIL, the arm was NOT judged ──
+        // Handled the way `attribution.measureFail` is below: its own name,
+        // never collapsed into `no-red` / `wrong-first-failure`. A lane that
+        // STARTED and died (signal) counts as executed — the lane tally counted
+        // its spawn, and the two tallies must keep agreeing — but never as
+        // biting; one that never started counts as nothing at all.
+        if (run.measureFail !== null) {
+          if (run.invoked) {
+            armsExecuted += 1;
+            armsUnjudged += 1;
+          }
+          addDefect(
+            "lane-unrunnable",
+            ann.arm,
+            gateRel,
+            `MEASURE_FAIL: ${run.measureFail} — the runner could not execute the lane, so this arm ` +
+              `was NOT judged. Neither RED nor GREEN is a measurement here; it is not counted as biting.`,
+          );
+          log(`  arm ${ann.arm.padEnd(24)} exit ${String(run.status).padStart(3)}  MEASURE-FAIL(lane)`);
+          continue;
+        }
         // The verdict loop's OWN count. Its twin is `laneTally.arm`, kept
         // inside runLane; the summary cross-checks the two (164.3.1-10).
         armsExecuted += 1;
@@ -1854,6 +2068,16 @@ export function runCorpus({
         // now the only thing a forgery can do here is make CI FAIL for an arm
         // that was neutered — the loud direction. A neuter that truly took
         // effect leaves the raise commented out, so the gate cannot emit it.
+        //
+        // ⚠️ KNOWN FALSE-POSITIVE SHAPE (F5, 164.3.1 adversarial review), left
+        // as is on purpose: a `RAISE NOTICE` elsewhere in the gate that ECHOES
+        // the neutered arm's identity (`RAISE NOTICE 'SHAPE 3b ok'` does not,
+        // but `RAISE NOTICE 'skipping TEST FAILED (SHAPE 3b)'` would) trips
+        // this substring check and reports `neuter-missed` for a neuter that
+        // worked. That is a loud failure against an odd gate, which is the
+        // direction this check is allowed to be wrong in; it is NOT redesigned
+        // into an attributed read, because an attributed read is exactly what
+        // a forgery targets.
         for (const entry of ann.neuter) {
           if (run.output.includes(`TEST FAILED (${entry.arm})`)) {
             addDefect(
@@ -1877,7 +2101,7 @@ export function runCorpus({
       // -------------------------------------------------------------------
       const restoreSlot = nextSlot();
       const restoreMap = materialize(restoreSlot, corpusRels);
-      const restore = runLane({
+      const restore = laneRunner({
         workdir: join(restoreSlot, "lane"),
         applyAbs: parsed.setup.apply.map((r) => restoreMap.get(r)),
         postApplyAbs: null,
@@ -1885,7 +2109,15 @@ export function runCorpus({
         leg: "restore",
       });
       log(`  restore   ${gateRel} — exit ${restore.status} (${restore.seconds.toFixed(1)}s)`);
-      if (restore.status !== 0) {
+      if (restore.measureFail !== null) {
+        addDefect(
+          "lane-unrunnable",
+          null,
+          gateRel,
+          `MEASURE_FAIL: ${restore.measureFail} — the runner could not execute the restore lane, so ` +
+            `the corpus was NOT proven green after the arm runs`,
+        );
+      } else if (restore.status !== 0) {
         addDefect("restore", null, gateRel, `pristine corpus did not go GREEN after the arm runs (exit ${restore.status})`);
       }
     }
@@ -1937,8 +2169,14 @@ export function runCorpus({
   // arm that DID execute a lane, so without this term the arm would still be
   // counted as biting — which is the whole defect: a vacuous PASS inflating
   // the one number ARMS_FLOOR bounds.
+  // ⛔ 2026-09-02: `armsUnjudged` (a lane that started and died) subtracts too
+  // — its arm is in `armsExecuted` so the tallies agree, and it was never
+  // judged, so it is not biting. `lane-unrunnable` defects are NOT subtracted
+  // by kind: the never-started case raises one without ever incrementing
+  // `armsExecuted`, and subtracting it would push biting below what ran.
   const bitingArms =
     armsExecuted -
+    armsUnjudged -
     defects.filter((d) => ["no-red", "wrong-first-failure", "synthesised-identity"].includes(d.kind))
       .length;
   log(`biting: ${bitingArms}   (executed arms that reddened their OWN arm first — the quantity ARMS_FLOOR bounds)`);
@@ -1978,6 +2216,20 @@ export function runCorpus({
     }
     if (bitingArms < armsFloor) {
       addDefect("floor", null, scopeDir, `ARMS_FLOOR regression: ${bitingArms} biting arm(s) < floor ${armsFloor}`);
+    }
+    // The ceiling on waivers (see WAIVED_CEILING): a waiver twin satisfies
+    // parity and inflates the annotated counts without a lane ever running, so
+    // the count is bounded from ABOVE here and again by the CI count-recheck
+    // step, which parses the W field of the `arms:` line above.
+    if (armsWaived > waivedCeiling) {
+      addDefect(
+        "floor",
+        null,
+        scopeDir,
+        `WAIVED_CEILING exceeded: ${armsWaived} waived arm(s) > ceiling ${waivedCeiling}. A waiver is an ` +
+          `arm the runner will never prove can fail; adding one is a reviewed edit to WAIVED_CEILING ` +
+          `in scripts/mutation-runner/run.mjs, never a side effect of annotating.`,
+      );
     }
   }
 
@@ -2028,18 +2280,31 @@ export function runCorpus({
   };
 }
 
-// ---------------------------------------------------------------------------
 /**
  * The directory a `--file <gate>` run is scoped to. IN-02 (164.3.1 review):
  * an ABSOLUTE gate path used to be joined onto cwd (`<cwd>/<abs>`), so the
  * scope pointed nowhere and the run reported "--file names a gate with no
  * line-start RED-UNDER markers" — loud (exit 1), but for the wrong reason.
+ *
+ * REFUSES a path that resolves OUTSIDE the repo (throws, and `main` turns that
+ * into exit 3). `relative(REPO_ROOT, abs)` for such a path begins with `..`,
+ * and joining that back onto REPO_ROOT would scope the run to an arbitrary
+ * directory on the machine — the runner copies and executes every `*.sql` it
+ * finds there.
  */
 export function scopeDirForFile(onlyFile, cwd = process.cwd()) {
   const abs = isAbsolute(onlyFile) ? onlyFile : join(cwd, onlyFile);
-  return join(REPO_ROOT, dirname(relative(REPO_ROOT, abs)));
+  const rel = relative(REPO_ROOT, abs);
+  if (rel.startsWith("..") || isAbsolute(rel)) {
+    throw new Error(
+      `--file must name a gate INSIDE the repo: ${JSON.stringify(onlyFile)} resolves to ${abs}, ` +
+        `outside ${REPO_ROOT}`,
+    );
+  }
+  return join(REPO_ROOT, dirname(rel));
 }
 
+// ---------------------------------------------------------------------------
 // --parse-only: the STATIC half of the gate. No cluster, no mutation.
 // ---------------------------------------------------------------------------
 //
@@ -2231,7 +2496,7 @@ function selfTest() {
   // 6 outright, so each states the floor appropriate to ITS corpus. Check 5 is
   // where an ARMS_FLOOR regression is proven to fire — the mode that could not
   // be proven at all while the floor was 0.
-  console.log("=== SELF-TEST 1/12: a non-biting annotation must exit 1 with `no-red` ===");
+  console.log("=== SELF-TEST 1/15: a non-biting annotation must exit 1 with `no-red` ===");
   const a = runCorpus({ scopeDir: SELFTEST_DIR, onlyFile: "nonbiting-gate.sql", armsFloor: 0, log: quiet });
   pass =
     expect(a.exitCode === 1, `exit code is 1 (got ${a.exitCode})`) &&
@@ -2241,8 +2506,12 @@ function selfTest() {
     ) &&
     pass;
 
-  console.log("=== SELF-TEST 2/12: a FILES_FLOOR regression must exit 1 with `floor` ===");
-  const b = runCorpus({ scopeDir: FIXTURE_CORPUS, filesFloor: 99, armsFloor: 0, log: quiet });
+  console.log("=== SELF-TEST 2/15: a FILES_FLOOR regression must exit 1 with `floor` ===");
+  // ⚠️ The fixture corpus carries ONE waiver (MINI 3), so every whole-corpus
+  // scenario states `waivedCeiling: 1` — its own measured number — exactly as
+  // it states its own armsFloor. Scenario 5 is where the ceiling is proven to
+  // FIRE, by stating 0 against that same corpus.
+  const b = runCorpus({ scopeDir: FIXTURE_CORPUS, filesFloor: 99, armsFloor: 0, waivedCeiling: 1, log: quiet });
   pass =
     expect(b.exitCode === 1, `exit code is 1 (got ${b.exitCode})`) &&
     expect(
@@ -2251,7 +2520,7 @@ function selfTest() {
     ) &&
     pass;
 
-  console.log("=== SELF-TEST 3/12: reddening the WRONG arm must exit 1 with `wrong-first-failure` ===");
+  console.log("=== SELF-TEST 3/15: reddening the WRONG arm must exit 1 with `wrong-first-failure` ===");
   const c = runCorpus({ scopeDir: SELFTEST_DIR, onlyFile: "wrong-identity-gate.sql", armsFloor: 0, log: quiet });
   pass =
     expect(c.exitCode === 1, `exit code is 1 (got ${c.exitCode})`) &&
@@ -2263,7 +2532,7 @@ function selfTest() {
     ) &&
     pass;
 
-  console.log("=== SELF-TEST 4/12: a wrong `occurrences` must exit 1 with MEASURE_FAIL, NOT `no-red` ===");
+  console.log("=== SELF-TEST 4/15: a wrong `occurrences` must exit 1 with MEASURE_FAIL, NOT `no-red` ===");
   const d = runCorpus({ scopeDir: SELFTEST_DIR, onlyFile: "occurrence-mismatch-gate.sql", armsFloor: 0, log: quiet });
   pass =
     expect(d.exitCode === 1, `exit code is 1 (got ${d.exitCode})`) &&
@@ -2282,8 +2551,13 @@ function selfTest() {
   // FILES_FLOOR half of D-09's floor mode. Now that the floor is a measured 30
   // this check exists, and it is what stops the pinned floor from decaying back
   // into a constant nobody compares to anything.
-  console.log("=== SELF-TEST 5/12: an ARMS_FLOOR regression must exit 1 with `floor` ===");
-  const f = runCorpus({ scopeDir: FIXTURE_CORPUS, armsFloor: 99, log: quiet });
+  console.log(
+    "=== SELF-TEST 5/15: an ARMS_FLOOR regression must exit 1 with `floor`, and so must a WAIVED_CEILING excess ===",
+  );
+  // waivedCeiling 0 against a corpus carrying 1 waiver: the ceiling's FIRE
+  // direction, in the same run as the ARMS_FLOOR one. Both are `floor` defects
+  // and each must be distinguishable BY NAME from the other two.
+  const f = runCorpus({ scopeDir: FIXTURE_CORPUS, armsFloor: 99, waivedCeiling: 0, log: quiet });
   pass =
     expect(f.exitCode === 1, `exit code is 1 (got ${f.exitCode})`) &&
     expect(
@@ -2291,13 +2565,17 @@ function selfTest() {
       "the defect table names an ARMS_FLOOR regression",
     ) &&
     expect(
+      f.defects.some((x) => x.kind === "floor" && /WAIVED_CEILING exceeded: 1 waived arm\(s\) > ceiling 0/.test(x.detail)),
+      "the defect table names a WAIVED_CEILING excess with both numbers — 1 waived arm against a ceiling of 0",
+    ) &&
+    expect(
       !f.defects.some((x) => x.kind === "floor" && /FILES_FLOOR/.test(x.detail)),
-      "no FILES_FLOOR defect — the two floors are reported distinguishably",
+      "no FILES_FLOOR defect — the three bounds are reported distinguishably",
     ) &&
     pass;
 
-  console.log("=== SELF-TEST 6/12: the green fixture corpus must exit 0 ===");
-  const e = runCorpus({ scopeDir: FIXTURE_CORPUS, armsFloor: 2, log: quiet });
+  console.log("=== SELF-TEST 6/15: the green fixture corpus must exit 0 ===");
+  const e = runCorpus({ scopeDir: FIXTURE_CORPUS, armsFloor: 2, waivedCeiling: 1, log: quiet });
   pass =
     expect(e.exitCode === 0, `exit code is 0 (got ${e.exitCode}; defects: ${JSON.stringify(e.defects)})`) &&
     expect(e.armsExecuted === 2, `2 arms executed (got ${e.armsExecuted})`) &&
@@ -2318,7 +2596,7 @@ function selfTest() {
   // fixture's annotation deliberately carries no failure literal in either its
   // needle or its replacement, so this check can only pass on the CONTENT
   // invariant (`identityRewriteDetail`) and not on the spelling rule.
-  console.log("=== SELF-TEST 7/12: rewriting an arm IDENTITY must exit 1 with `identity-rewrite` ===");
+  console.log("=== SELF-TEST 7/15: rewriting an arm IDENTITY must exit 1 with `identity-rewrite` ===");
   const g = runCorpus({ scopeDir: SELFTEST_DIR, onlyFile: "identity-rewrite-gate.sql", armsFloor: 0, log: quiet });
   pass =
     expect(g.exitCode === 1, `exit code is 1 (got ${g.exitCode})`) &&
@@ -2337,7 +2615,7 @@ function selfTest() {
     pass;
 
   console.log("");
-  console.log("=== SELF-TEST 8/12: SYNTHESISING an identity must exit 1 with `synthesised-identity` ===");
+  console.log("=== SELF-TEST 8/15: SYNTHESISING an identity must exit 1 with `synthesised-identity` ===");
   const h = runCorpus({
     scopeDir: SELFTEST_DIR,
     onlyFile: "synthesised-identity-gate.sql",
@@ -2368,7 +2646,7 @@ function selfTest() {
   // itself a Primitive-D instance, so the proof is part of the entry.
   console.log("");
   console.log(
-    "=== SELF-TEST 9/12: [R4-C01] the P3 compound HEAD must be REFUSED as `neuter-missed` naming `SET ROLE postgres;`, beside an ACCEPTED P1-shape neuter ===",
+    "=== SELF-TEST 9/15: [R4-C01] the P3 compound HEAD must be REFUSED as `neuter-missed` naming `SET ROLE postgres;`, beside an ACCEPTED P1-shape neuter ===",
   );
   // armsFloor 1 states the corpus's own number: exactly ONE arm can bite — the
   // control BEHIND P1 — because the refused arm never lanes. ⚠️ It is INERT
@@ -2405,7 +2683,7 @@ function selfTest() {
 
   console.log("");
   console.log(
-    "=== SELF-TEST 10/12: [MUT-I01] an apostrophe in a `--` comment inside a RAISE must neither refuse the neuter (P4) nor over-neuter the statement after it (P5) ===",
+    "=== SELF-TEST 10/15: [MUT-I01] an apostrophe in a `--` comment inside a RAISE must neither refuse the neuter (P4) nor over-neuter the statement after it (P5) ===",
   );
   // armsFloor 2 states the corpus's own number: both annotated arms must bite.
   // ⚠️ INERT in a narrowed run (no floor is enforced) — the count is asserted
@@ -2426,8 +2704,8 @@ function selfTest() {
       "P4 (odd parity, LOUD): no `neuter-missed` — the apostrophe inside `-- don't worry` did not produce a spurious \"could not find the end of the RAISE statement\"",
     ) &&
     expect(
-      !j.defects.some((x) => x.kind === "wrong-first-failure" && x.detail.includes("SURVIVOR LOST")),
-      "P5 (even parity, SILENT): no `wrong-first-failure` naming SURVIVOR LOST — the statement after the RAISE's terminator SURVIVED the neuter and recorded that it ran",
+      !j.defects.some((x) => x.kind === "wrong-first-failure"),
+      "P5 (even parity, SILENT): no `wrong-first-failure` — the `END IF;` after the RAISE's terminator SURVIVED the neuter (a swallowed closer is a syntax error the lane reports as NO-IDENTITY; since the post-RAISE refusal of 2026-09-02 the closer is the only thing left in the branch to swallow)",
     ) &&
     expect(
       j.armsExecuted === 2 && j.bitingArms === 2 && j.laneInvocations === 2,
@@ -2447,7 +2725,7 @@ function selfTest() {
   // Both fixtures are promoted VERBATIM from 164.3.1-05-ATTRIBUTION.md § 3.
   console.log("");
   console.log(
-    "=== SELF-TEST 11/12: [R4-C02] a current_query() trigger re-raising the identity must be SYNTHESISED, with the genuine arm RED (identity ok) beside it ===",
+    "=== SELF-TEST 11/15: [R4-C02] a current_query() trigger re-raising the identity must be SYNTHESISED, with the genuine arm RED (identity ok) beside it ===",
   );
   // armsFloor 1 states the corpus's own number: only the genuine control can
   // bite. INERT in a narrowed run — the control is asserted on bitingArms.
@@ -2475,13 +2753,28 @@ function selfTest() {
 
   console.log("");
   console.log(
-    "=== SELF-TEST 12/12: the nested-EXECUTE DO forgery AIMED at the genuine raise line must be SYNTHESISED by chain LENGTH alone, with the genuine arm RED (identity ok) beside it ===",
+    "=== SELF-TEST 12/15: the nested-EXECUTE DO forgery AIMED at the genuine raise line must be SYNTHESISED by chain LENGTH alone, with the genuine arm RED (identity ok) beside it ===",
   );
-  // armsFloor 1: as in 11/12 — stated, inert here, asserted on bitingArms.
+  // armsFloor 1: as in 11/15 — stated, inert here, asserted on bitingArms.
   const l = runCorpus({ scopeDir: SELFTEST_DIR, onlyFile: "nested-execute-forge-gate.sql", armsFloor: 1, log: quiet });
   const forge2 = l.defects.find((x) => x.kind === "synthesised-identity" && x.arm === "FORGE 2");
   const forge3 = l.defects.find((x) => x.kind === "synthesised-identity" && x.arm === "FORGE 3");
+  // THE AIM, read off the FIXTURE'S OWN BYTES rather than off the refusal
+  // text: FORGE 3's genuine RAISE must be the 5th line of its DO statement, so
+  // the forged `line 5` frame really resolves to it (leg (c) PASSES) and the
+  // chain rule is the only thing left refusing. `detail.includes("line 5")`
+  // alone would keep passing after a reshape that moved the raise, with the
+  // proof silently decayed into a leg-(c) refusal (fixture header, PADDING).
+  const forge3Record = gateAttributionRecords(
+    readFileSync(join(SELFTEST_DIR, "nested-execute-forge-gate.sql"), "utf8"),
+  ).find((r) => r.arm === "FORGE 3");
+  const forge3Aimed =
+    forge3Record !== undefined && forge3Record.raiseFileLine - forge3Record.stmtStartLine + 1 === 5;
   pass =
+    expect(
+      forge3Aimed,
+      `AIM (fixture bytes): FORGE 3's RAISE is the 5th line of its DO statement — raiseFileLine ${forge3Record?.raiseFileLine} − stmtStartLine ${forge3Record?.stmtStartLine} + 1 === 5 — so the forged \`line 5\` frame resolves to it and legs (a)+(c) genuinely pass`,
+    ) &&
     expect(l.exitCode === 1, `exit code is 1 (got ${l.exitCode})`) &&
     expect(
       forge2 !== undefined && forge3 !== undefined,
@@ -2511,10 +2804,120 @@ function selfTest() {
     ) &&
     pass;
 
+  // ⭐ F1 (164.3.1 adversarial review, 2026-09-02) — THE MESSAGE-EMBEDDED
+  // FORGERY. FORGE 2/3 forge the innermost FRAME and are refused by chain
+  // LENGTH; this one forges the whole CONTEXT + LOCATION PAIR inside the RAISE
+  // MESSAGE, so the forged chain IS one frame long and every leg passes. What
+  // refuses it is the shape libpq cannot help printing afterwards: the REAL
+  // CONTEXT + LOCATION, making a field name repeat. Its refusal is asserted
+  // under its OWN name — never the shared "not EXACTLY ONE frame" string,
+  // which a chain-length refusal would also satisfy.
+  console.log("");
+  console.log(
+    "=== SELF-TEST 13/15: [F1] a RAISE whose MESSAGE embeds a forged CONTEXT + LOCATION pair must be SYNTHESISED by field DUPLICATION, with the genuine arm RED (identity ok) beside it ===",
+  );
+  // armsFloor 1: as in 11/15 — stated, inert here, asserted on bitingArms.
+  const m = runCorpus({ scopeDir: SELFTEST_DIR, onlyFile: "message-embedded-forge-gate.sql", armsFloor: 1, log: quiet });
+  const forge4 = m.defects.find((x) => x.kind === "synthesised-identity" && x.arm === "FORGE 4");
+  const forge4Record = gateAttributionRecords(
+    readFileSync(join(SELFTEST_DIR, "message-embedded-forge-gate.sql"), "utf8"),
+  ).find((r) => r.arm === "FORGE 4");
+  const forge4Aimed =
+    forge4Record !== undefined && forge4Record.raiseFileLine - forge4Record.stmtStartLine + 1 === 8;
+  pass =
+    expect(
+      forge4Aimed,
+      `AIM (fixture bytes): FORGE 4's RAISE is the 8th line of its DO statement — raiseFileLine ${forge4Record?.raiseFileLine} − stmtStartLine ${forge4Record?.stmtStartLine} + 1 === 8 — so the forged \`line 8\` frame resolves to it and legs (a), (b) AND (c) all pass on the forged pair`,
+    ) &&
+    expect(m.exitCode === 1, `exit code is 1 (got ${m.exitCode})`) &&
+    expect(
+      forge4 !== undefined,
+      'the defect table names FORGE 4 with kind "synthesised-identity" — the message-embedded forgery is NOT scored RED (identity ok)',
+    ) &&
+    expect(
+      forge4 !== undefined && forge4.detail.includes("duplicated diagnostic field — message-embedded forgery"),
+      "the refusal names the DUPLICATED FIELD, under its own name — not the chain-length rule, which this forgery satisfies",
+    ) &&
+    expect(
+      forge4 !== undefined && forge4.detail.includes("CONTEXT, LOCATION, CONTEXT"),
+      "the refusal prints the field order it saw, beginning CONTEXT, LOCATION, CONTEXT — the forged pair followed by the real chain",
+    ) &&
+    expect(
+      m.armsExecuted === 2 && m.bitingArms === 1 && !m.defects.some((x) => x.arm === "CTRL 1"),
+      `the PASSING CONTROL scored RED (identity ok) in the SAME run and FORGE 4 is NOT biting (executed ${m.armsExecuted}, biting ${m.bitingArms})`,
+    ) &&
+    expect(
+      m.defects.length === 1,
+      `exactly one defect (got ${m.defects.length}: ${JSON.stringify(m.defects.map((x) => [x.kind, x.arm]))})`,
+    ) &&
+    pass;
+
+  // ⭐ 164.3.1-10's absurdity floor, FIRE direction, THROUGH THE WIRING. Until
+  // 2026-09-02 this was proven only by a one-off byte-backed neuter recorded in
+  // a SUMMARY. A stub lane runner that never touches `laneTally` is injected
+  // through `runCorpus`'s real verdict loop and summary block: executed=N with
+  // lane-invocations=0 by construction, and the loop must call it absurd. No
+  // cluster is needed, so this scenario cannot flake on one.
+  console.log("");
+  console.log(
+    "=== SELF-TEST 14/15: a lane runner that never spawns (the severed tally) must exit 1 with `absurdity` naming executed=N lane-invocations=0 ===",
+  );
+  const stubLane = () => ({ status: 0, output: "", seconds: 0, measureFail: null, invoked: true });
+  const n = runCorpus({ scopeDir: SELFTEST_DIR, onlyFile: "nonbiting-gate.sql", armsFloor: 0, laneRunner: stubLane, log: quiet });
+  const absurd = n.defects.find((x) => x.kind === "absurdity");
+  pass =
+    expect(n.exitCode === 1, `exit code is 1 (got ${n.exitCode})`) &&
+    expect(
+      n.armsExecuted >= 1 && n.laneInvocations === 0,
+      `the verdict loop counted ${n.armsExecuted} executed arm(s) while the lane tally saw 0 — the severed shape, reached through the real loop`,
+    ) &&
+    expect(
+      absurd !== undefined && absurd.detail.includes(`executed=${n.armsExecuted} lane-invocations=0`),
+      `the defect table carries an "absurdity" defect naming executed=${n.armsExecuted} lane-invocations=0 (got ${JSON.stringify(absurd?.detail ?? null)})`,
+    ) &&
+    expect(
+      absurd !== undefined && /GATE failing, not the corpus/.test(absurd.detail),
+      "the absurdity defect says it is the GATE failing, not the corpus",
+    ) &&
+    pass;
+
+  // ⭐ 2026-09-02 — a lane the runner COULD NOT RUN is a MEASURE_FAIL, not a
+  // corpus defect. Pre-fix, `spawnSync`'s `error`/`signal` were never read:
+  // `status: null` fell through `!== 0` and the arm was reported as
+  // `wrong-first-failure` (no identity in an empty output) — an instrument
+  // failure wearing a corpus defect's name — and the lane tally still counted
+  // a spawn that never happened. Driven through the injectable runner with
+  // the exact shape `runLane` returns for ENOENT.
+  console.log("");
+  console.log(
+    "=== SELF-TEST 15/15: a lane that could not be RUN (ENOENT) must exit 1 with `lane-unrunnable` saying the arm was NOT judged — never `wrong-first-failure`, never biting ===",
+  );
+  const deadLane = ({ leg }) =>
+    leg === "arm"
+      ? { status: null, output: "", seconds: 0, measureFail: "lane could not run: ENOENT", invoked: false }
+      : { status: 0, output: "", seconds: 0, measureFail: null, invoked: true };
+  const o = runCorpus({ scopeDir: SELFTEST_DIR, onlyFile: "nonbiting-gate.sql", armsFloor: 0, laneRunner: deadLane, log: quiet });
+  const dead = o.defects.find((x) => x.kind === "lane-unrunnable" && x.arm === "NONBITE 1");
+  pass =
+    expect(o.exitCode === 1, `exit code is 1 (got ${o.exitCode})`) &&
+    expect(
+      dead !== undefined && dead.detail.includes("lane could not run: ENOENT") && dead.detail.includes("this arm was NOT judged"),
+      'the defect table names NONBITE 1 with kind "lane-unrunnable", carrying the spawn error and "this arm was NOT judged"',
+    ) &&
+    expect(
+      !o.defects.some((x) => x.kind === "wrong-first-failure" || x.kind === "no-red" || x.kind === "absurdity"),
+      "no wrong-first-failure, no-red or absurdity — an unrunnable lane is neither a corpus finding nor a tally disagreement (a spawn that never happened is counted by neither tally)",
+    ) &&
+    expect(
+      o.armsExecuted === 0 && o.laneInvocations === 0 && o.bitingArms === 0,
+      `nothing executed, nothing spawned, nothing biting (executed ${o.armsExecuted}, lanes ${o.laneInvocations}, biting ${o.bitingArms})`,
+    ) &&
+    pass;
+
   console.log("");
   if (pass) {
     console.log(
-      "=== SELF-TEST PASSED: both floor modes, the wrong-identity mode and MEASURE_FAIL all fire, and the 164.3.1-11 regression corpus holds ===",
+      "=== SELF-TEST PASSED: both floor modes, the waiver ceiling, the wrong-identity mode, MEASURE_FAIL, the absurdity floor and the 164.3.1-11 regression corpus all fire ===",
     );
     return 0;
   }
@@ -2543,7 +2946,12 @@ function main(argv) {
         console.error("ERROR: --file needs a gate path");
         return 3;
       }
-      scopeDir = scopeDirForFile(onlyFile);
+      try {
+        scopeDir = scopeDirForFile(onlyFile);
+      } catch (err) {
+        console.error(`ERROR: ${err.message}`);
+        return 3;
+      }
     } else if (arg === "--arm") {
       onlyArm = argv[++i];
       if (!onlyArm) {

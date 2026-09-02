@@ -34,7 +34,9 @@ import {
   ARMS_FLOOR,
   DEFECT_KINDS,
   FILES_FLOOR,
+  WAIVED_CEILING,
   absurdityViolations,
+  laneSpawnFailure,
   runCorpus,
   scopeDirForFile,
 } from "../../scripts/mutation-runner/run.mjs";
@@ -45,6 +47,7 @@ const GATE_DIR = join(REPO_ROOT, "supabase", "tests");
 const CI_PATH = join(REPO_ROOT, ".github", "workflows", "ci.yml");
 const RUNNER_PATH = join(REPO_ROOT, "scripts", "mutation-runner", "run.mjs");
 const SELFTEST_DIR = join(REPO_ROOT, "scripts", "mutation-runner", "fixtures", "selftest");
+const LANE_SH = join(REPO_ROOT, "scripts", "pg-lane", "run.sh");
 
 /**
  * Independent re-derivation. These regexes are written out again on purpose —
@@ -252,6 +255,43 @@ describe("ARMS_FLOOR ratchet", () => {
   });
 });
 
+describe("WAIVED_CEILING — the waiver count is bounded from ABOVE, in lockstep with the floors", () => {
+  // ⛔ THE HOLE (164.3.1 red team). A waiver is a counted twin: it satisfies
+  // parity, raises `filesAnnotated`/`armsAnnotated`, never spawns a lane and
+  // never lowers `biting`. ARMS_FLOOR catches an EXISTING arm converted to a
+  // waiver (biting drops) but not a NEW prose marker paired with a waiver twin
+  // — annotated coverage could be inflated across all 70 unannotated files
+  // with zero new arms and every floor green. So the count is pinned at its
+  // measured value and drift in EITHER direction fails, exactly as
+  // FILES_FLOOR / ARMS_FLOOR are pinned above.
+  it("is a non-negative integer", () => {
+    expect(Number.isInteger(WAIVED_CEILING)).toBe(true);
+    expect(WAIVED_CEILING).toBeGreaterThanOrEqual(0);
+  });
+
+  it("matches the measured corpus exactly — drift in EITHER direction fails", () => {
+    // Re-derived with this file's own regex, NOT read back from run.mjs.
+    const waivers = rederive().perFile.reduce((n, f) => n + f.waivers, 0);
+    expect(
+      WAIVED_CEILING,
+      waivers > WAIVED_CEILING
+        ? `WAIVER CREEP: the corpus declares ${waivers} waiver(s), above the pinned ceiling of ${WAIVED_CEILING}. Each waiver is an arm the runner will never prove can fail — raising WAIVED_CEILING in scripts/mutation-runner/run.mjs is a reviewed edit, never a side effect.`
+        : `CEILING STALE: the corpus declares ${waivers} waiver(s) but WAIVED_CEILING is ${WAIVED_CEILING}. Lower it to ${waivers} so a re-added waiver is caught.`,
+    ).toBe(waivers);
+  });
+
+  it("the runner compares armsWaived against it in the gate path, and ci.yml reads the same constant", () => {
+    const src = readFileSync(RUNNER_PATH, "utf8");
+    expect(src).toMatch(/if \(armsWaived > waivedCeiling\)/);
+    expect(src).toContain("WAIVED_CEILING exceeded:");
+    const ci = readFileSync(CI_PATH, "utf8");
+    expect(ci).toContain("m.FILES_FLOOR, m.ARMS_FLOOR, m.WAIVED_CEILING");
+    expect(ci).toContain('if [ "$arms_waived" -gt "$waived_ceiling" ]');
+    // No literal restated in the workflow.
+    expect(ci).not.toMatch(/waived_ceiling" -(eq|ne|lt|gt) "?[0-9]/);
+  });
+});
+
 describe("IN-05 — CI's floor and the runner's floor bound the SAME quantity", () => {
   // `run.mjs` compares ARMS_FLOOR to `biting` = executed minus (no-red +
   // wrong-first-failure). The ci.yml assertion parsed `arms: E/A/W` and
@@ -273,7 +313,8 @@ describe("IN-05 — CI's floor and the runner's floor bound the SAME quantity", 
     expect(src).not.toMatch(/if \(armsExecuted < armsFloor\)/);
   });
 
-  it("`--parse-only` deliberately does NOT print it — so CI's demand for it also catches a mode swap", () => {
+  // 30 s: a real-corpus spawn, matching the sibling spawn tests' budget.
+  it("`--parse-only` deliberately does NOT print it — so CI's demand for it also catches a mode swap", { timeout: 30_000 }, () => {
     const res = spawnSync("node", [RUNNER, "--parse-only"], {
       cwd: REPO_ROOT,
       encoding: "utf8",
@@ -401,16 +442,14 @@ describe("SP-C02 — the runner's `--self-test` is WIRED into CI, before the cor
     //     a neuter INSIDE its own file — the [R4-C01] `SET ROLE postgres; IF
     //     NOT ok THEN` shape — without touching the corpus every other scenario
     //     shares, so the kind is now exercised through a real lane.
-    //   absurdity (164.3.1-10) — the runner's OWN two tallies disagreeing. No
-    //     corpus can produce it, by construction: that is the point of an
-    //     internal cross-check. Its FIRE direction is proven twice elsewhere —
-    //     on the pure function by the pins in the `absurdity floor` describe
-    //     below, and on the REAL runner by the severed-tally neuter recorded in
-    //     164.3.1-10-SUMMARY.md (exit 1, `absurdity` naming 30/0/30). Its
-    //     SILENT direction is `--self-test` scenario 6 (2 arms, 2 lanes) and
-    //     every green full-corpus run.
+    //   absurdity (164.3.1-10) LEFT this list 2026-09-02: `runCorpus` takes an
+    //     injectable lane runner, and scenario 14 drives a stub that never
+    //     touches `laneTally` through the REAL verdict loop — executed=N with
+    //     lane-invocations=0 by construction — so the FIRE direction is now a
+    //     permanent, cluster-free scenario rather than a one-off neuter
+    //     recorded in a SUMMARY. `lane-unrunnable` (scenario 15) is exercised
+    //     the same way.
     expect(uncovered).toEqual([
-      "absurdity",
       "bad-file-ref",
       "baseline",
       "dirty-checkout",
@@ -419,10 +458,13 @@ describe("SP-C02 — the runner's `--self-test` is WIRED into CI, before the cor
       "restore",
     ]);
     // The six kinds SP-C02 names as the self-test's whole purpose, plus
-    // neuter-missed (164.3.1-11, scenario 9 — see the list above).
+    // neuter-missed (164.3.1-11, scenario 9), absurdity (scenario 14) and
+    // lane-unrunnable (scenario 15) — see the list above.
     expect([...exercised].sort()).toEqual([
+      "absurdity",
       "floor",
       "identity-rewrite",
+      "lane-unrunnable",
       "neuter-missed",
       "no-red",
       "occurrence-mismatch",
@@ -649,6 +691,83 @@ describe("164.3.1-10 — the runner's absurdity floor (D-09): two INDEPENDENT ta
     expect(runCorpusBody).not.toMatch(/laneTally(\[[^\]]*\]|\.\w+)\s*(\+=|=|\+\+|--)/);
   });
 
+  // ── FIRE direction THROUGH THE WIRING — an injected lane runner ────────
+  /** A lane runner that "succeeds" without ever spawning: `laneTally` is untouched. */
+  const severedLane = () => ({ status: 0, output: "", seconds: 0, measureFail: null, invoked: true });
+
+  it("FIRES through runCorpus's real verdict loop: a lane runner that never spawns → exit 1 with `absurdity` naming executed=N lane-invocations=0", () => {
+    // Until 2026-09-02 this direction was pinned only by a one-off byte-backed
+    // neuter of `laneTally[leg] += 1` recorded in 164.3.1-10-SUMMARY.md. The
+    // stub above reaches the same severed shape through the injectable
+    // `laneRunner`, so the loop → addDefect("absurdity") → exitCode 1 wiring
+    // is driven on every vitest run, with no cluster.
+    const r = runCorpus({
+      scopeDir: SELFTEST_DIR,
+      onlyFile: "nonbiting-gate.sql",
+      armsFloor: 0,
+      laneRunner: severedLane,
+      log: () => {},
+    });
+    expect(r.armsExecuted, "the stub must have been driven for at least one arm").toBeGreaterThanOrEqual(1);
+    expect(r.laneInvocations).toBe(0);
+    expect(r.exitCode).toBe(1);
+    const absurd = r.defects.filter((d: { kind: string }) => d.kind === "absurdity");
+    expect(absurd).toHaveLength(1);
+    evidence(absurd[0].detail, r.armsExecuted, 0, r.bitingArms);
+    expect(absurd[0].detail).toMatch(/CLAIMED/);
+  });
+
+  // ── `lane-unrunnable` — the lane the runner could not RUN ───────────────
+  it("laneSpawnFailure classifies ENOENT / ENOBUFS / a signal / a missing status as 'lane could not run', and a real exit status as null", () => {
+    expect(laneSpawnFailure({ error: { code: "ENOENT" }, status: null, signal: null })).toBe("lane could not run: ENOENT");
+    expect(laneSpawnFailure({ error: { code: "ENOBUFS" }, status: null, signal: null })).toBe("lane could not run: ENOBUFS");
+    expect(laneSpawnFailure({ status: null, signal: "SIGKILL" })).toBe("lane could not run: SIGKILL");
+    expect(laneSpawnFailure({ status: null, signal: null })).toMatch(/^lane could not run: no exit status/);
+    // The lane's own exit statuses are NOT spawn failures — 0 is green, 3 is
+    // the failing psql's status, both are measurements.
+    expect(laneSpawnFailure({ status: 0, signal: null })).toBeNull();
+    expect(laneSpawnFailure({ status: 3, signal: null })).toBeNull();
+  });
+
+  it("through the wiring: an arm lane that never STARTED (ENOENT) is a `lane-unrunnable` MEASURE_FAIL — not wrong-first-failure, not executed, not biting", () => {
+    // Pre-fix `status: null` fell through `!== 0`, the empty output carried
+    // no identity, and the arm was reported as `wrong-first-failure` — an
+    // instrument failure wearing a corpus defect's name.
+    const dead = ({ leg }: { leg: string }) =>
+      leg === "arm"
+        ? { status: null, output: "", seconds: 0, measureFail: "lane could not run: ENOENT", invoked: false }
+        : { status: 0, output: "", seconds: 0, measureFail: null, invoked: true };
+    const r = runCorpus({ scopeDir: SELFTEST_DIR, onlyFile: "nonbiting-gate.sql", armsFloor: 0, laneRunner: dead, log: () => {} });
+    expect(r.exitCode).toBe(1);
+    const mine = r.defects.filter((d: { kind: string; arm: string | null }) => d.kind === "lane-unrunnable" && d.arm === "NONBITE 1");
+    expect(mine).toHaveLength(1);
+    expect(mine[0].detail).toContain("lane could not run: ENOENT");
+    expect(mine[0].detail).toContain("this arm was NOT judged");
+    expect(r.defects.map((d: { kind: string }) => d.kind)).not.toContain("wrong-first-failure");
+    expect(r.defects.map((d: { kind: string }) => d.kind)).not.toContain("no-red");
+    // A spawn that never happened is counted by NEITHER tally, so the two
+    // still agree and no absurdity is reported for it.
+    expect(r.armsExecuted).toBe(0);
+    expect(r.laneInvocations).toBe(0);
+    expect(r.bitingArms).toBe(0);
+    expect(r.defects.map((d: { kind: string }) => d.kind)).not.toContain("absurdity");
+  });
+
+  it("through the wiring: an arm lane that STARTED and was signalled counts as executed but never as biting", () => {
+    const killed = ({ leg }: { leg: string }) =>
+      leg === "arm"
+        ? { status: null, output: "", seconds: 0, measureFail: "lane could not run: SIGKILL", invoked: true }
+        : { status: 0, output: "", seconds: 0, measureFail: null, invoked: true };
+    const r = runCorpus({ scopeDir: SELFTEST_DIR, onlyFile: "nonbiting-gate.sql", armsFloor: 0, laneRunner: killed, log: () => {} });
+    expect(r.exitCode).toBe(1);
+    expect(r.defects.some((d: { kind: string }) => d.kind === "lane-unrunnable")).toBe(true);
+    expect(r.armsExecuted).toBe(1);
+    // biting = executed − unjudged: an arm nobody judged cannot be biting.
+    expect(r.bitingArms).toBe(0);
+    // (The stub never touches `laneTally`, so the severed-tally absurdity
+    // also fires here — that is the stub's shape, not this arm's subject.)
+  });
+
   // ── PRINT CONTRACT — the wiring that prints, not a string constant ──────
   it("the runner PRINTS the lane tally beside coverage/arms/biting — driven through runCorpus's real summary block", () => {
     // A narrowed run whose --file matches no gate in the selftest corpus: no
@@ -808,6 +927,30 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     expect(r.out).toContain("executed=30 lane-invocations=31 biting=30");
   });
 
+  it("RED: a NON-NUMERIC lane-invocations count is a MEASURE_FAIL, never parsed as a number", () => {
+    const garbled = GREEN_LOG.replace(/^lane-invocations: 30 /m, "lane-invocations: abc ");
+    expect(garbled).not.toBe(GREEN_LOG);
+    const r = runCountRecheck(garbled);
+    expect(r.status, r.out).toBe(1);
+    expect(r.out).toContain("MEASURE_FAIL");
+    expect(r.out).toContain("NO 'lane-invocations: N' line");
+    expect(r.out).not.toContain("two tallies agree");
+  });
+
+  it("RED: a waived count above WAIVED_CEILING fails naming both numbers — the W field is read, not ignored", () => {
+    // The GREEN log carries `arms: 30/30/0`; one waiver against a ceiling read
+    // out of run.mjs (0 today) must fail. The executed and biting counts are
+    // untouched, so nothing else in the step can be what fired.
+    const waived = GREEN_LOG.replace(/^arms: 30\/30\/0 /m, `arms: 30/30/${WAIVED_CEILING + 1} `);
+    expect(waived).not.toBe(GREEN_LOG);
+    const r = runCountRecheck(waived);
+    expect(r.status, r.out).toBe(1);
+    expect(r.out).toContain(`WAIVED_CEILING exceeded: ${WAIVED_CEILING + 1} waived arm(s) > ceiling ${WAIVED_CEILING}`);
+    expect(r.out).not.toContain("two tallies agree");
+    // And the ceiling itself is printed beside the floors it was read with.
+    expect(r.out).toContain(`WAIVED_CEILING=${WAIVED_CEILING}`);
+  });
+
   it("the siblings still bite in the same extracted block — executed-is-zero and biting-above-executed", () => {
     // Calibration for the extract-and-run harness itself: if the extraction
     // returned an empty or truncated block, these established arms would not
@@ -850,6 +993,35 @@ describe("IN-02 — `--file` scope derivation", () => {
     // Independent of where the command is typed from.
     expect(scopeDirForFile(join(REPO_ROOT, rel), join(REPO_ROOT, "scripts"))).toBe(expected);
     expect(scopeDirForFile(join(REPO_ROOT, rel), "/somewhere/unrelated")).toBe(expected);
+  });
+});
+
+describe("`--file` outside the repo is REFUSED", () => {
+  it("throws for an absolute path and for a relative path that escapes REPO_ROOT, and still accepts an inside path", () => {
+    // `relative(REPO_ROOT, abs)` for an outside path begins with `..`; joined
+    // back onto REPO_ROOT that scoped the run to an ARBITRARY directory whose
+    // every *.sql the runner would copy and execute.
+    expect(() => scopeDirForFile("/etc/passwd", REPO_ROOT)).toThrow(/INSIDE the repo/);
+    expect(() => scopeDirForFile("../../outside/gate.sql", REPO_ROOT)).toThrow(/INSIDE the repo/);
+    expect(() => scopeDirForFile("gate.sql", "/somewhere/unrelated")).toThrow(/INSIDE the repo/);
+    expect(scopeDirForFile("supabase/tests/x.sql", REPO_ROOT)).toBe(join(REPO_ROOT, "supabase", "tests"));
+  });
+});
+
+describe("scripts/pg-lane/run.sh — the psql invocation the attribution grammar depends on (read-only pin)", () => {
+  it("passes `-v VERBOSITY=verbose` on the shared psql wrapper", () => {
+    // The runner refuses any ERROR block without a `LOCATION:` sentinel and
+    // without the `P0001:` SQLSTATE token, both of which ONLY verbose prints.
+    // Drop the flag and every arm MEASURE_FAILs — so the flag is pinned here
+    // on the script's bytes. run.sh itself is not edited by this pin.
+    const sh = readFileSync(LANE_SH, "utf8");
+    const psqlLines = sh.split("\n").filter((l) => /^\s*psqlq\(\)\s*\{/.test(l));
+    expect(psqlLines, "the psqlq() wrapper was renamed or removed").toHaveLength(1);
+    expect(psqlLines[0]).toContain("-v VERBOSITY=verbose");
+    expect(psqlLines[0]).toContain("-v ON_ERROR_STOP=1");
+    // Every leg goes through the wrapper, never a bare `psql`.
+    const bare = sh.split("\n").filter((l) => /^\s*psql\s/.test(l) && !/^\s*#/.test(l));
+    expect(bare).toEqual([]);
   });
 });
 

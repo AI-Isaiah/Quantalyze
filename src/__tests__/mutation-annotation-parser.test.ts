@@ -32,6 +32,7 @@ import {
   scanCorpus,
 } from "../../scripts/mutation-runner/parse.mjs";
 import {
+  FAILURE_BRANCH_LOOKBACK,
   applyFileStep,
   armIdentities,
   attributeIdentities,
@@ -725,10 +726,14 @@ describe("R2-W04 / GRAMMAR rule 3b — a mutation may not REWRITE an arm identit
     expect(branches.length).toBeGreaterThan(50);
     const sizes = branches.map((b) => b.text.split("\n").length);
     expect(Math.min(...sizes)).toBeGreaterThanOrEqual(1);
+    // The bound is the runner's OWN exported constant, PINNED here against the
+    // corpus's largest measured branch — not restated as a literal that could
+    // drift from the one `failureBranches` actually applies.
+    expect(FAILURE_BRANCH_LOOKBACK).toBeGreaterThan(0);
     expect(
       Math.max(...sizes),
-      "a failure branch grew past the 40-line lookback bound — the bound must be re-measured",
-    ).toBeLessThan(40);
+      `a failure branch grew past the ${FAILURE_BRANCH_LOOKBACK}-line lookback bound (FAILURE_BRANCH_LOOKBACK in run.mjs) — the bound must be re-measured`,
+    ).toBeLessThan(FAILURE_BRANCH_LOOKBACK);
   });
 });
 
@@ -1109,17 +1114,138 @@ describe("GRAMMAR rule 3c — an identity is READ only where the RUNNER's gate r
   it("REAL CORPUS: a genuine arm's measured output shape attributes against the real gate", () => {
     // The wiring, not the helper: the real gate's real bytes, the real
     // tokenizer, and the psql shape the lane really emits for that arm.
+    //
+    // ⛔ SELF-REFERENTIAL ORACLE, CLOSED (164.3.1 review, testing specialist).
+    // This used to build the psql output FROM `records[0]`'s own numbers
+    // (`rec.stmtEndLine`, `rec.raiseFileLine - rec.stmtStartLine + 1`), so it
+    // held for ANY values the tokenizer produced — a tokenizer off by one on
+    // every span would have passed it. The literals below were HAND-MEASURED
+    // 2026-09-02 by reading supabase/tests/test_strategy_shares_rls.sql: the
+    // file is ONE `DO $$` block opening at line 207 and closing `$$;` at line
+    // 2599, and the first raise inside it, `TEST FAILED (SHAPE 1)`, sits on
+    // line 380. So psql's prefix names :2599 and PL/pgSQL's CONTEXT line is
+    // 380 − 207 + 1 = 174. Proven to fail with any one literal moved by 1.
     const gate = readFileSync(join(REPO_ROOT, "supabase/tests/test_strategy_shares_rls.sql"), "utf8");
     const records = gateAttributionRecords(gate);
-    const rec = records[0];
-    const contextLine = rec.raiseFileLine - rec.stmtStartLine + 1;
+    const MEASURED = { arm: "SHAPE 1", raiseFileLine: 380, stmtStartLine: 207, stmtEndLine: 2599 };
+    expect(records[0]).toMatchObject(MEASURED);
+    // Calibration on the bytes themselves, so a corpus edit that moves the
+    // arm is reported HERE as a stale literal rather than as a tokenizer bug.
+    const lines = gate.split("\n");
+    expect(lines[MEASURED.stmtStartLine - 1]).toBe("DO $$");
+    expect(lines[MEASURED.raiseFileLine - 1]).toContain("RAISE EXCEPTION 'TEST FAILED (SHAPE 1)");
+    expect(lines[MEASURED.stmtEndLine - 1]).toBe("$$;");
     const output = [
-      `psql:${GATE_PATH}:${rec.stmtEndLine}: ERROR:  P0001: TEST FAILED (${rec.arm}): real`,
-      `CONTEXT:  PL/pgSQL function inline_code_block line ${contextLine} at RAISE`,
+      `psql:${GATE_PATH}:2599: ERROR:  P0001: TEST FAILED (SHAPE 1): real`,
+      "CONTEXT:  PL/pgSQL function inline_code_block line 174 at RAISE",
       LOCATION,
       "",
     ].join("\n");
-    expect(attributeIdentities(output, { gatePath: GATE_PATH, records }).firstAttributed).toBe(rec.arm);
+    expect(attributeIdentities(output, { gatePath: GATE_PATH, records }).firstAttributed).toBe("SHAPE 1");
+  });
+
+  // ── F1 — the MESSAGE-EMBEDDED forgery: fields the message spelled ────────
+  //
+  // MEASURED 2026-09-02 on PG 16 through the real lane (this checkout): a
+  // trigger raising `E'TEST FAILED (X)\nCONTEXT:  …\nLOCATION:  …'` from
+  // inside the gate's DO prints the forged pair BEFORE the real chain, and the
+  // real chain is what the attacker cannot suppress.
+
+  it("F1 MEASURED: a RAISE whose MESSAGE embeds a forged single-frame CONTEXT + LOCATION is UNATTRIBUTABLE, naming the duplicated field", () => {
+    // Verbatim shape from the lane, gate path substituted. The forged frame is
+    // AIMED: line 5 resolves to FORGERY_TARGET_GATE's real raise (2 + 5 − 1 =
+    // 6), the prefix names the block's end line 8, and the forged chain IS one
+    // frame — legs (a), (b) and (c) all pass on the forged pair. Pre-fix this
+    // attributed to "X 1".
+    const output = [
+      `psql:${GATE_PATH}:8: ERROR:  P0001: TEST FAILED (X 1): forged`,
+      "CONTEXT:  PL/pgSQL function inline_code_block line 5 at RAISE",
+      LOCATION,
+      "CONTEXT:  PL/pgSQL function forge_fn() line 1 at RAISE",
+      'SQL statement "INSERT INTO t VALUES (1)"',
+      "PL/pgSQL function inline_code_block line 3 at SQL statement",
+      LOCATION,
+      "",
+    ].join("\n");
+    const r = attribute(output, FORGERY_TARGET_GATE);
+    expect(r.measureFail).toBeNull();
+    expect(r.firstAttributed, "the message-embedded forgery must NOT attribute").toBeNull();
+    expect(r.unattributable.map((u) => u.identity)).toEqual(["X 1"]);
+    expect(r.unattributable[0].why).toMatch(/duplicated diagnostic field — message-embedded forgery/);
+    expect(r.unattributable[0].why).toContain("CONTEXT, LOCATION, CONTEXT, LOCATION");
+    // Non-vacuity: the forged pair alone WOULD attribute — it is the real
+    // chain's presence, not the forged frame's shape, that refuses it.
+    const forgedPairAlone = output.split("\n").slice(0, 3).concat("").join("\n");
+    expect(attribute(forgedPairAlone, FORGERY_TARGET_GATE).firstAttributed).toBe("X 1");
+  });
+
+  it("F1: a field AFTER the LOCATION sentinel is refused too — LOCATION is libpq's final field (synthetic belt shape)", () => {
+    // Not a measured shape: libpq never emits it, which is exactly why a block
+    // carrying it was spelled by a message. Pinned so the second half of the
+    // rule cannot be dropped as "unreachable".
+    const output = [
+      `psql:${GATE_PATH}:8: ERROR:  P0001: TEST FAILED (X 1): forged`,
+      "CONTEXT:  PL/pgSQL function inline_code_block line 5 at RAISE",
+      LOCATION,
+      "DETAIL:  spelled by the message",
+      "",
+    ].join("\n");
+    const r = attribute(output, FORGERY_TARGET_GATE);
+    expect(r.firstAttributed).toBeNull();
+    expect(r.unattributable[0].why).toMatch(/duplicated diagnostic field — message-embedded forgery/);
+    expect(r.unattributable[0].why).toMatch(/LOCATION is not the FINAL field/);
+  });
+
+  // ── The verbose-only NAME fields between CONTEXT and LOCATION ────────────
+
+  it("MEASURED: `RAISE … USING TABLE/SCHEMA/COLUMN` prints NAME fields between CONTEXT and LOCATION, and the raise still attributes as ONE frame", () => {
+    // Verbatim from the lane, 2026-09-02, PG 16: DETAIL and HINT come BEFORE
+    // CONTEXT, the three NAME fields AFTER it, LOCATION last. Pre-fix the NAME
+    // lines were read as CONTINUATIONS of the CONTEXT value, so a genuine
+    // single-frame raise was refused with the WRONG diagnosis — "not EXACTLY
+    // ONE frame — it has 4 line(s)" — a false SYNTHESISED against a real arm.
+    const output = [
+      `psql:${GATE_PATH}:9: ERROR:  P0001: TEST FAILED (X 1): with table field`,
+      "DETAIL:  a detail",
+      "HINT:  a hint",
+      "CONTEXT:  PL/pgSQL function inline_code_block line 5 at RAISE",
+      "SCHEMA NAME:  public",
+      "TABLE NAME:  mini_widget",
+      "COLUMN NAME:  id",
+      LOCATION,
+      "",
+    ].join("\n");
+    const r = attribute(output, GENUINE_GATE);
+    expect(r.measureFail).toBeNull();
+    expect(r.unattributable, "a genuine arm carrying diagnostic names was refused").toEqual([]);
+    expect(r.firstAttributed).toBe("X 1");
+  });
+
+  it("DETAIL / HINT beside the chain — and DATATYPE / CONSTRAINT names after it — do not change the frame count", () => {
+    // The other two NAME fields, plus the pre-CONTEXT pair, in libpq's order.
+    // One block, five extra fields, still exactly one frame and no duplicate.
+    const output = [
+      `psql:${GATE_PATH}:9: ERROR:  P0001: TEST FAILED (X 1): demo arm`,
+      "DETAIL:  a detail",
+      "HINT:  a hint",
+      "CONTEXT:  PL/pgSQL function inline_code_block line 5 at RAISE",
+      "DATATYPE NAME:  text",
+      "CONSTRAINT NAME:  mini_widget_pkey",
+      LOCATION,
+      "",
+    ].join("\n");
+    const r = attribute(output, GENUINE_GATE);
+    expect(r.firstAttributed).toBe("X 1");
+    expect(r.unattributable).toEqual([]);
+    // And the calibration the other way: the SAME block with a genuine second
+    // frame is still refused by chain length — the NAME fields did not widen
+    // what counts as one frame.
+    const twoFrames = output.replace(
+      "CONTEXT:  PL/pgSQL function inline_code_block line 5 at RAISE",
+      "CONTEXT:  PL/pgSQL function inline_code_block line 5 at RAISE\nPL/pgSQL function outer() line 2 at EXECUTE",
+    );
+    expect(attribute(twoFrames, GENUINE_GATE).firstAttributed).toBeNull();
+    expect(attribute(twoFrames, GENUINE_GATE).unattributable[0].why).toMatch(/EXACTLY ONE/);
   });
 
   it("no `find` or `anchor` in the REAL corpus names the literal — rule 3b's needle half", () => {

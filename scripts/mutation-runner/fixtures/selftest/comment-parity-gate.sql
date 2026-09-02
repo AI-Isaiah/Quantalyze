@@ -22,22 +22,30 @@
 -- the RAISE is the end of the RAISE's STATEMENT, read from the tokenizer, which
 -- is the one reader that knows what a comment is.
 --
--- WHAT THIS FILE PINS, in ONE run (five raises, two annotated arms):
+-- WHAT THIS FILE PINS, in ONE run (four raises, two annotated arms):
 --
 --   PARITY EVEN   — un-annotated. The P5 shape: the RAISE's argument list is
 --                   split by a `-- don't worry` comment, a second apostrophe
---                   follows the terminator (`-- it isn't optional`), and then a
---                   statement that MUST SURVIVE the neuter. NEUTER TARGET of
---                   BEHIND EVEN.
---   BEHIND EVEN   — annotated, neuters PARITY EVEN. The silent direction made
---                   LOUD: the survivor statement records that it ran
---                   (`set_config('mut.survivor', 'ran', false)`), and this
---                   block raises a DIFFERENT identity, SURVIVOR LOST, when
---                   PARITY EVEN's branch was entered but the survivor never
---                   ran. An over-neuter therefore surfaces in the runner's own
---                   verdict as `wrong-first-failure` naming SURVIVOR LOST,
---                   instead of as a green run. The verdict is the observable;
---                   the scenario needs no lane output.
+--                   follows the terminator (`-- it isn't optional`), and then
+--                   statements that MUST SURVIVE the neuter — the branch's own
+--                   `END IF;` closer and the `PERFORM` after it. NEUTER
+--                   TARGET of BEHIND EVEN.
+--                   ⚠️ RESHAPED 2026-09-02 (WR-07, post-RAISE side): the
+--                   survivor used to sit INSIDE the branch, after the RAISE.
+--                   `neuterArm` now REFUSES any statement between a RAISE and
+--                   its closer (in the original file it is unreachable; after
+--                   a neuter it runs — `SET ROLE postgres;` there is the RESET
+--                   ROLE leak from behind), so the survivor moved past the
+--                   closer. With nothing left inside the branch to swallow,
+--                   an over-neuter can only swallow the closer itself, which
+--                   is a syntax error the lane reports as NO-IDENTITY — the
+--                   silent direction is closed BY CONSTRUCTION, and the
+--                   SURVIVOR LOST reader this file used to carry (a raise that
+--                   could no longer fire) was removed rather than kept as a
+--                   control that cannot fail.
+--   BEHIND EVEN   — annotated, neuters PARITY EVEN. Must score `RED (identity
+--                   ok)` with an EMPTY defect table: a swallowed closer would
+--                   surface as `wrong-first-failure` (NO-IDENTITY) instead.
 --   PARITY ODD    — un-annotated. The P4 shape: the same split argument list,
 --                   and NO second apostrophe anywhere after it in this file.
 --                   NEUTER TARGET of BEHIND ODD.
@@ -62,9 +70,10 @@
 
 -- ---------------------------------------------------------------------------
 -- PARITY EVEN — UPDATE must not be among authenticated's table privileges.
--- The abort branch is the P5 shape. The PERFORM after the RAISE is unreachable
--- when the arm fires (the RAISE aborts first) and is exactly the statement the
--- old walker swallowed once the arm was NEUTERED — which is when it must run.
+-- The abort branch is the P5 shape. The `-- it isn't optional` comment after
+-- the closer restores a quote-only walker's parity, so that walker's next `;`
+-- is the PERFORM's — swallowing `END IF;` on the way, which is exactly the
+-- over-neuter the old walker committed (there, silently; here, a syntax error).
 -- ---------------------------------------------------------------------------
 DO $$
 DECLARE
@@ -79,23 +88,23 @@ BEGIN
     RAISE EXCEPTION 'TEST FAILED (PARITY EVEN): authenticated holds % on mini_widget, UPDATE must not be granted.',
       -- don't worry
       held;
-    -- it isn't optional
-    PERFORM set_config('mut.survivor', 'ran', false);
   END IF;
+  -- it isn't optional
+  PERFORM set_config('mut.survivor', 'ran', false);
   RAISE NOTICE 'PARITY EVEN ok';
 END $$;
 
 -- ---------------------------------------------------------------------------
 -- BEHIND EVEN — UPDATE must not be among authenticated's table privileges,
--- read a second time; and PARITY EVEN's survivor must have run if PARITY
--- EVEN's branch was entered.
+-- read a second time.
 -- ---------------------------------------------------------------------------
   -- RED-UNDER: `GRANT UPDATE ON mini_widget TO authenticated` on the live
   --            database. ⚠️ PARITY EVEN fires first, so this arm is only
   --            reachable with PARITY EVEN neutered — and PARITY EVEN's raise is
   --            the P5 shape. The neuter must comment out the RAISE and ONLY the
-  --            RAISE: if it swallows the PERFORM after it, SURVIVOR LOST fires
-  --            here first and the runner reports `wrong-first-failure`.
+  --            RAISE: if it swallows the `END IF;` after it, the gate is a
+  --            syntax error and the runner reports `wrong-first-failure`
+  --            (NO-IDENTITY) instead of RED (identity ok) here.
   -- RED-UNDER-M: {"arm":"BEHIND EVEN","apply":[{"kind":"sql","stmt":"GRANT UPDATE ON mini_widget TO authenticated"}],"neuter":[{"arm":"PARITY EVEN"}]}
 DO $$
 DECLARE
@@ -105,13 +114,6 @@ BEGIN
     INTO held
     FROM information_schema.role_table_grants
    WHERE table_name = 'mini_widget' AND grantee = 'authenticated';
-
-  -- The SILENT half of [MUT-I01], made loud. PARITY EVEN's branch is entered
-  -- exactly when UPDATE is held; its survivor statement records that it ran.
-  -- Entered but not recorded means the neuter swallowed the survivor.
-  IF held LIKE '%UPDATE%' AND current_setting('mut.survivor', true) IS DISTINCT FROM 'ran' THEN
-    RAISE EXCEPTION 'TEST FAILED (SURVIVOR LOST): the branch of PARITY EVEN ran but the statement after its RAISE did not, the neuter swallowed it. This is the SILENT half of [MUT-I01].';
-  END IF;
 
   IF held LIKE '%UPDATE%' THEN
     RAISE EXCEPTION 'TEST FAILED (BEHIND EVEN): authenticated holds % on mini_widget, UPDATE must not be granted.', held;
