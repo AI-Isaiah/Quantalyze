@@ -1063,6 +1063,44 @@ true for 146 and half of 142–145, and **false for 141**.
 
 ## 🟡 FIX MID-TERM
 
+- [ ] **`[VAC08-SELFTEST-CI]` VAC-08's five-arm self-test never runs in CI (logged 2026-09-02, Phase 164.3.1 UAT test 2).**
+      `ci.yml:2051` invokes `bash scripts/test-ledger-drift-check.sh` with no argument, which the
+      script's `case` dispatches to `check` — the `--self-test` mode at
+      `scripts/test-ledger-drift-check.sh:671` is therefore never exercised by any workflow. The
+      gate itself runs and produces a real verdict, so this is not a dead gate; what is missing is
+      the machine proof that its four RED modes still fire. That proof is exactly what
+      `feedback_every_test_must_be_able_to_fail` requires, and today it exists only when a human
+      runs the flag by hand (the orchestrator did so at HEAD on 2026-09-02: `self-test OK (5/5)`).
+      Fix: add a `--self-test` step to the `sql-tests` job ahead of the live check, mirroring how
+      `sql-mutation` already runs `run.mjs --self-test` before its corpus pass. Guard hygiene, not
+      user-facing — recorded rather than blocking, per the stopping rule.
+
+- [ ] **`[VAC04-ARMS-UNRUN]` VAC-04's three behavioural arms have still never executed in CI (logged 2026-09-02, Phase 164.3.1 UAT test 2).**
+      PR #730 closed the big unknown — `migration-drift-check` run 33643046189 ran on a real
+      `pull_request` with the real PROD credential (`::notice::Drift-check credentials present.`),
+      which retires the WINDOWS.md 25 "never run against its real credential" entry. But that PR
+      changed no `supabase/migrations/**` files (it matched the paths filter on VAC-04's own script
+      entries), so `scripts/prod-body-drift-check.sh` exited at its EARLIEST short-circuit, `:198`
+      *"this PR changes no migration files — nothing to compare against PROD."* Never reached, and
+      therefore still unproven on the real credential: the D-13 LEGITIMATE-ZERO branch (`:448`), the
+      normal compare verdict, and the absurdity floor (`:608+`, index ≥ half the 118-body snapshot).
+      These need a migration-bearing PR to fire. ⛔ Do NOT manufacture one to tick this off while
+      the 164.3.1→164.4 window is open — UAT test 2 carries a standing instruction not to merge a
+      migration PR in that window. Close it on the next genuine migration PR and record the run id.
+
+- [ ] **`[MUT-SELFTEST-UNREGISTERED]` Three of the mutation runner's 15 self-test modes are not bound by name (logged 2026-09-02, Phase 164.3.1 re-verification finding O-3).**
+      The ship-review pass took `scripts/mutation-runner/run.mjs --self-test` from 12 modes to 15
+      (the count is visible as `SELF-TEST n/15` in the script). The three added modes fire and pass,
+      but they were never registered in `INSTANCE_ARM_REGISTRY`
+      (`src/__tests__/gate-family-meta.test.ts:120`), which is what binds an instance to the arm
+      that proves it by NAME. Consequence, and it is narrow: renaming or deleting one of those
+      three would not fail by name — the count arm would still see 15 and the mode itself would
+      still run, so this is a naming-durability gap, not a coverage gap. Fix: add the three entries
+      with their needles, and re-derive the `21 needles` measurement recorded at
+      `gate-family-meta.test.ts:317` (it is stamped `MEASURED 2026-09-02 at 8969513e`, which
+      predates the additions). Not user-facing and not data-integrity, so recorded rather than
+      blocking, per the stopping rule.
+
 - [ ] **Two cosmetic verify-precision notes from Phase 164.3's plan gate (logged 2026-08-29).**
       Neither is user-facing nor data-integrity, so neither blocked the phase — recorded so they are
       not re-derived.

@@ -551,11 +551,23 @@ const DATE_STAMP = /\b20\d\d-\d\d-\d\d\b/;
 
 /**
  * Every threshold site in a family file, each with its justification verdict.
- * A site is (a) a FLOOR/MIN-named constant bound to a numeric literal (JS
- * `const`/`export const`, or a shell `NAME=<n>`), or (b) a shell numeric
- * comparison against a literal of two or more digits (`-ge 50`); single-digit
- * literals are exit codes and booleans, not thresholds. Comment lines never
- * produce a site.
+ * A site is (a) a FLOOR/MIN/CEILING/MAX/LIMIT-named constant bound to a numeric
+ * literal (JS `const`/`export const`, or a shell `NAME=<n>`), or (b) a shell
+ * numeric comparison against a literal of two or more digits (`-ge 50`);
+ * single-digit literals are exit codes and booleans, not thresholds. Comment
+ * lines never produce a site.
+ *
+ * ⚠️ The name class covers BOTH directions deliberately. It was `FLOOR|MIN`
+ * only until 2026-09-02, which let `WAIVED_CEILING = 0` (run.mjs:226) escape
+ * the SC-9 no-bare-thresholds arm — a bound that fails when the corpus carries
+ * MORE than was measured is exactly as capable of being picked by taste as a
+ * lower bound, and this phase's whole thesis is that a control scoped to the
+ * spellings that happen to exist today is unsound by construction. MEASURED at
+ * the widening, across all six THRESHOLD_BEARING_FILES: 7 sites under
+ * `FLOOR|MIN`, 8 under `FLOOR|MIN|CEILING|MAX|LIMIT` — the one added site is
+ * run.mjs:226, and it is justified, so the arm stays green on a real gain
+ * rather than on an unchanged set. The RED fixture below carries a CEILING
+ * case so a regression of this name class fails by fixture, not by audit.
  */
 export function findThresholdSites(file: string, src: string): ThresholdSite[] {
   const lines = src.split("\n");
@@ -563,8 +575,8 @@ export function findThresholdSites(file: string, src: string): ThresholdSite[] {
   lines.forEach((l, idx) => {
     if (/^\s*(#|\/\/|\*)/.test(l)) return;
     let label: string | null = null;
-    const jsConst = /^\s*(?:export\s+)?const\s+([A-Z][A-Z0-9_]*(?:FLOOR|MIN)[A-Z0-9_]*)\s*=\s*(\d+)\b/.exec(l);
-    const shConst = /^\s*([A-Z][A-Z0-9_]*(?:FLOOR|MIN)[A-Z0-9_]*)=(\d+)\b/.exec(l);
+    const jsConst = /^\s*(?:export\s+)?const\s+([A-Z][A-Z0-9_]*(?:FLOOR|MIN|CEILING|MAX|LIMIT)[A-Z0-9_]*)\s*=\s*(\d+)\b/.exec(l);
+    const shConst = /^\s*([A-Z][A-Z0-9_]*(?:FLOOR|MIN|CEILING|MAX|LIMIT)[A-Z0-9_]*)=(\d+)\b/.exec(l);
     const shCmp = /\[\s*"?\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?"?\s+-(ge|gt|lt|le)\s+(\d{2,})\s*\]/.exec(l);
     if (jsConst !== null) label = `${jsConst[1]}=${jsConst[2]}`;
     else if (shConst !== null) label = `${shConst[1]}=${shConst[2]}`;
@@ -595,6 +607,10 @@ const THRESHOLD_RED_FIXTURE = [
   "ROWS_FLOOR=7",
   "if [ \"$rows\" -lt \"$ROWS_FLOOR\" ]; then exit 1; fi",
   "if [ \"$other\" -ge 25 ]; then exit 1; fi",
+  // An UPPER bound, unjustified. Pins the CEILING/MAX/LIMIT half of the name
+  // class: if it ever narrows back to FLOOR|MIN this line stops being a site
+  // and the arm below goes RED on the missing label.
+  "WAIVERS_CEILING=3",
   "",
 ].join("\n");
 
@@ -630,9 +646,9 @@ describe("164.3.1-12 — META-ARM fixtures: both rules can fire (SP-L02, same pr
     const red = findThresholdSites("fixture.red.sh", THRESHOLD_RED_FIXTURE);
     expect(
       red.map((s) => s.label).sort(),
-      `the scan must find both the ROWS_FLOOR constant and the literal \`-ge 25\` comparison; sites were ${JSON.stringify(red)}`,
-    ).toEqual(["ROWS_FLOOR=7", "other -ge 25"]);
-    expect(red.every((s) => !s.justified), "neither site carries a measurement, so both must be UNJUSTIFIED").toBe(true);
+      `the scan must find the ROWS_FLOOR constant, the WAIVERS_CEILING upper bound and the literal \`-ge 25\` comparison; sites were ${JSON.stringify(red)}`,
+    ).toEqual(["ROWS_FLOOR=7", "WAIVERS_CEILING=3", "other -ge 25"]);
+    expect(red.every((s) => !s.justified), "no site carries a measurement, so all must be UNJUSTIFIED").toBe(true);
 
     const green = findThresholdSites("fixture.green.sh", THRESHOLD_GREEN_FIXTURE);
     expect(green.map((s) => s.label)).toEqual(["ROWS_FLOOR=7"]);
@@ -817,7 +833,13 @@ export const KNOWN_THRESHOLD_SITES: readonly string[] = [
   "scripts/test-ledger-drift-check.sh :: ledger_rows -ge 50", //  VAC-08 absurdity floor: 'scored' + 2026-08-29
   "scripts/prod-body-drift-check.sh :: SNAPSHOT_MIN=50", //         VAC-04 absurdity floor: 'measured' + 2026-09-01
   "scripts/mutation-runner/run.mjs :: FILES_FLOOR=1", //            coverage ratchet: MEASURED + 2026-08-29
-  "scripts/mutation-runner/run.mjs :: ARMS_FLOOR=30", //            biting ratchet: MEASURED + 2026-08-29 (re-derived 2026-09-01)
+  "scripts/mutation-runner/run.mjs :: ARMS_FLOOR=30", //            biting ratchet: MEASURED + 2026-09-01 (re-derived)
+  // The family's only UPPER bound. Invisible to this arm until the name class
+  // widened past FLOOR|MIN on 2026-09-02 — registered here on the run that
+  // first saw it, with its measurement at run.mjs:199-225 (MEASURED + a dated
+  // --parse-only run at 8969513e scoring 0 waivers, cross-checked by an
+  // independent fs scan).
+  "scripts/mutation-runner/run.mjs :: WAIVED_CEILING=0", //          waiver ceiling: MEASURED + 2026-09-02
   "src/__tests__/lint-sql-gates.test.ts :: RESULT_LOOP_CONDITION_FLOOR=8", // [MUT-W02] parse floor: 'measured' + 2026-09-01
   "src/__tests__/self-referential-oracle.test.ts :: CORPUS_FLOOR=100", //    SRO corpus-walk floor: MEASURED + 2026-09-01
   "src/__tests__/gate-family-meta.test.ts :: NEEDLE_MIN_LENGTH=16", //      registry needle floor: MEASURED + 2026-09-02
