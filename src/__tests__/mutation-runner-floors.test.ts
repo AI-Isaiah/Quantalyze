@@ -852,3 +852,21 @@ describe("IN-02 — `--file` scope derivation", () => {
     expect(scopeDirForFile(join(REPO_ROOT, rel), "/somewhere/unrelated")).toBe(expected);
   });
 });
+
+describe("IN-03 — ONE spelling of the arm-identity grammar", () => {
+  it("run.mjs spells the `TEST FAILED (<id>)` regex literal exactly once — every other reader derives from IDENTITY_RE.source", () => {
+    // MEASURED pre-fix: FIVE literal spellings (IDENTITY_RE, armIdentities,
+    // armIdentitiesInOrder, failureBranches, the baseline reader) in the file
+    // whose own header says a list restated in a second place is a second
+    // thing to drift. 164.4 widens the identity grammar; it must find ONE.
+    const src = readFileSync(RUNNER_PATH, "utf8");
+    const literal = "/TEST FAILED \\(([^)]*)\\)/";
+    const spellings = src.split(literal).length - 1;
+    expect(
+      spellings,
+      "a second literal spelling of the identity grammar is a second thing to drift — derive it from IDENTITY_RE.source",
+    ).toBe(1);
+    // Non-vacuity: the one spelling is the exported-by-name definition.
+    expect(src).toContain(`const IDENTITY_RE = ${literal}g;`);
+  });
+});
