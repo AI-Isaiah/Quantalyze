@@ -417,7 +417,9 @@ export function findFailureEmissions(file: string, src: string): Emission[] {
     // A `fail "…"` call site. The helper's own definition (`fail() {`) is not
     // an emission; a comment line is not either.
     if (!/^\s*#/.test(l) && !/^\s*fail\(\)/.test(l)) {
-      const m = /\bfail "(.*)$/.exec(l);
+      // The quoted argument (balanced double quotes); an unterminated quote
+      // falls back to the rest of the line rather than being skipped.
+      const m = /\bfail "((?:[^"\\]|\\.)*)"/.exec(l) ?? /\bfail "(.*)$/.exec(l);
       if (m !== null) out.push({ file, line: i + 1, kind: "fail-call", text: m[1] });
     }
     i++;
@@ -438,14 +440,12 @@ export function carriesRuntimeValue(text: string): boolean {
 
 /** The emissions that ship a BARE conclusion. */
 export function diagnosticFirstViolations(file: string, src: string): Emission[] {
-  void file;
-  void src;
-  return []; // TDD RED: not yet implemented
+  return findFailureEmissions(file, src).filter((e) => !carriesRuntimeValue(e.text));
 }
 
 /** A short, stable identity for an emission: file :: kind :: first 48 chars. */
 export function emissionKey(e: Emission): string {
-  return `${e.file} :: ${e.kind} :: ${e.text.replace(/\s+/g, " ").trim().slice(0, 48)}`;
+  return `${e.file} :: ${e.kind} :: ${e.text.replace(/\s+/g, " ").trim().slice(0, 48).trimEnd()}`;
 }
 
 // ── FIXTURES (SP-L02: same predicate, mutilated input) ──────────────────────
@@ -511,11 +511,51 @@ export type ThresholdSite = {
 /** Lines above a threshold within which its measurement must be recorded. */
 export const JUSTIFICATION_WINDOW = 80;
 
-/** Every threshold site in a family file, each with its justification verdict. */
+/**
+ * What counts as a measurement beside a threshold: one of these tokens AND a
+ * dated stamp. The vocabulary is the family's own — every measured comment in
+ * it says MEASURED, records what a shape SCORED, or states a SAMPLE SIZE.
+ */
+const MEASUREMENT_TOKEN = /MEASURED|measured|Measured|scored|SAMPLE SIZE|sample size/;
+const DATE_STAMP = /\b20\d\d-\d\d-\d\d\b/;
+
+/**
+ * Every threshold site in a family file, each with its justification verdict.
+ * A site is (a) a FLOOR/MIN-named constant bound to a numeric literal (JS
+ * `const`/`export const`, or a shell `NAME=<n>`), or (b) a shell numeric
+ * comparison against a literal of two or more digits (`-ge 50`); single-digit
+ * literals are exit codes and booleans, not thresholds. Comment lines never
+ * produce a site.
+ */
 export function findThresholdSites(file: string, src: string): ThresholdSite[] {
-  void file;
-  void src;
-  return []; // TDD RED: not yet implemented
+  const lines = src.split("\n");
+  const sites: ThresholdSite[] = [];
+  lines.forEach((l, idx) => {
+    if (/^\s*(#|\/\/|\*)/.test(l)) return;
+    let label: string | null = null;
+    const jsConst = /^\s*(?:export\s+)?const\s+([A-Z][A-Z0-9_]*(?:FLOOR|MIN)[A-Z0-9_]*)\s*=\s*(\d+)\b/.exec(l);
+    const shConst = /^\s*([A-Z][A-Z0-9_]*(?:FLOOR|MIN)[A-Z0-9_]*)=(\d+)\b/.exec(l);
+    const shCmp = /\[\s*"?\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?"?\s+-(ge|gt|lt|le)\s+(\d{2,})\s*\]/.exec(l);
+    if (jsConst !== null) label = `${jsConst[1]}=${jsConst[2]}`;
+    else if (shConst !== null) label = `${shConst[1]}=${shConst[2]}`;
+    else if (shCmp !== null) label = `${shCmp[1]} -${shCmp[2]} ${shCmp[3]}`;
+    if (label === null) return;
+
+    const window = lines.slice(Math.max(0, idx - JUSTIFICATION_WINDOW), idx + 1).join("\n");
+    const tok = MEASUREMENT_TOKEN.exec(window);
+    const date = DATE_STAMP.exec(window);
+    const justified = tok !== null && date !== null;
+    sites.push({
+      file,
+      line: idx + 1,
+      label,
+      justified,
+      evidence: justified
+        ? `"${(tok as RegExpExecArray)[0]}" + ${(date as RegExpExecArray)[0]} within ${JUSTIFICATION_WINDOW} lines`
+        : `missing ${tok === null ? "measurement token" : ""}${tok === null && date === null ? " and " : ""}${date === null ? "date stamp" : ""} within ${JUSTIFICATION_WINDOW} lines`,
+    });
+  });
+  return sites;
 }
 
 // ── FIXTURES ────────────────────────────────────────────────────────────────
@@ -567,5 +607,213 @@ describe("164.3.1-12 — META-ARM fixtures: both rules can fire (SP-L02, same pr
     const green = findThresholdSites("fixture.green.sh", THRESHOLD_GREEN_FIXTURE);
     expect(green.map((s) => s.label)).toEqual(["ROWS_FLOOR=7"]);
     expect(green[0]?.justified, `the measured floor must be justified; evidence was ${green[0]?.evidence}`).toBe(true);
+  });
+});
+
+// ── THE FAMILY SCANS ────────────────────────────────────────────────────────
+
+/**
+ * Justified exceptions to diagnostic-first — EXACT SET, keyed by emissionKey
+ * (file :: kind :: first 48 chars), never by line number. Every entry says
+ * why that emission legitimately carries no runtime quantity. A new bare
+ * emission fails below by key; a discharged entry fails too.
+ */
+export const DIAGNOSTIC_FIRST_ALLOWLIST: ReadonlyArray<{ key: string; reason: string }> = [
+  // MEASURED 2026-09-02 at 03585b88 by running this arm with the list EMPTY:
+  // 68 emissions over the two gates, 17 bare. Every one of the 17 falls into
+  // one of four classes, stated per entry. None was silenced by taste: the
+  // classes were decided BEFORE the keys were transcribed from the scan.
+  //
+  //   PRECONDITION  the failure is the ABSENCE of a tool or credential. There is
+  //                 no runtime quantity — the value is unset — and the text
+  //                 names the variable or binary, which IS the diagnostic.
+  //   REDACTED      the observable is withheld by the gates' public-log rule
+  //                 (NON-NEGOTIABLES: never a DSN, host, username or body text).
+  //   EMPTY-BY-COND the branch condition IS the measurement: the list/index
+  //                 was found empty, and the text says so. Printing an empty
+  //                 string would add nothing.
+  //   READER-STDERR the failure is a child reader's non-zero exit whose own
+  //                 stderr passes through UN-redirected on the lines above the
+  //                 `|| fail` (plan 164.3.1-04's refusals name file, line and
+  //                 byte). The wrapper adds only the conclusion; the diagnostic
+  //                 was already printed by the reader. The reader's exit CODE
+  //                 is not captured by the `|| fail` idiom — recorded as a
+  //                 follow-up in 164.3.1-12-SUMMARY.md, not fixed here (the
+  //                 gate scripts are edited by no plan in this phase).
+  //
+  // ── scripts/test-ledger-drift-check.sh ──────────────────────────────────
+  {
+    key: "scripts/test-ledger-drift-check.sh :: fail-call :: node is not on PATH; the shared normalizer canno",
+    reason: "PRECONDITION — `node` absent from PATH; the binary name is the diagnostic",
+  },
+  {
+    key: "scripts/test-ledger-drift-check.sh :: error-block :: echo \"::error::${GATE}: TEST_SUPABASE_DB_URL is",
+    reason: "PRECONDITION — the DSN is unset; the five-line block names the variable and the job contract, and the value must never be printed (REDACTED as well)",
+  },
+  {
+    key: "scripts/test-ledger-drift-check.sh :: fail-call :: psql is not on PATH.",
+    reason: "PRECONDITION — `psql` absent from PATH",
+  },
+  {
+    key: "scripts/test-ledger-drift-check.sh :: fail-call :: the ledger presence query failed (output withhel",
+    reason: "REDACTED — psql's output can carry connection detail; withheld by design. Exit code not captured (follow-up)",
+  },
+  {
+    key: "scripts/test-ledger-drift-check.sh :: fail-call :: BODY_CHECK_FUNCTIONS is empty or whitespace-only",
+    reason: "EMPTY-BY-COND — the list was measured empty/whitespace by the branch; there is nothing to interpolate",
+  },
+  // ── scripts/prod-body-drift-check.sh ────────────────────────────────────
+  {
+    key: "scripts/prod-body-drift-check.sh :: fail-call :: BODY_FETCH_CMD is unset — there is no way to rea",
+    reason: "PRECONDITION — injectable command unset; the variable name is the diagnostic",
+  },
+  {
+    key: "scripts/prod-body-drift-check.sh :: fail-call :: BODY_NAME_INDEX_CMD is unset — without PROD's fu",
+    reason: "PRECONDITION — injectable command unset",
+  },
+  {
+    key: "scripts/prod-body-drift-check.sh :: fail-call :: BODY_NAME_INDEX_XCHECK_CMD is unset — with ONE i",
+    reason: "PRECONDITION — injectable command unset",
+  },
+  {
+    key: "scripts/prod-body-drift-check.sh :: fail-call :: node is not on PATH; the shared normalizer canno",
+    reason: "PRECONDITION — `node` absent from PATH",
+  },
+  {
+    key: "scripts/prod-body-drift-check.sh :: fail-call :: could not extract function names from the change",
+    reason: "READER-STDERR — `node $NORMALIZER --function-names` (:207) exits non-zero with its stderr on the log; the refusal names file/line/byte",
+  },
+  {
+    key: "scripts/prod-body-drift-check.sh :: fail-call :: the independent name reader failed on the change",
+    reason: "READER-STDERR — `node $NAIVE_NAMES` (:221) exits non-zero with its stderr on the log",
+  },
+  {
+    key: "scripts/prod-body-drift-check.sh :: fail-call :: could not read the schema qualifiers of this PR'",
+    reason: "READER-STDERR — `node $NORMALIZER --function-qualified-names` (:428) exits non-zero with its stderr on the log",
+  },
+  {
+    key: "scripts/prod-body-drift-check.sh :: fail-call :: the independent name reader could not read the s",
+    reason: "READER-STDERR — `node $NAIVE_NAMES --qualified` (:430) exits non-zero with its stderr on the log",
+  },
+  {
+    key: "scripts/prod-body-drift-check.sh :: fail-call :: could not index PROD's function names (stderr wi",
+    reason: "REDACTED — the index command reads a PROD dump; its stderr is redirected to a file and withheld from the public log by design",
+  },
+  {
+    key: "scripts/prod-body-drift-check.sh :: fail-call :: could not build the INDEPENDENT cross-check inde",
+    reason: "REDACTED — same as the primary index; stderr withheld by design",
+  },
+  {
+    key: "scripts/prod-body-drift-check.sh :: fail-call :: PROD's function-name index came back EMPTY. A da",
+    reason: "EMPTY-BY-COND — `grep -q` on the primary index found no non-blank line; the quantity is zero and the text says so",
+  },
+  {
+    key: "scripts/prod-body-drift-check.sh :: fail-call :: the INDEPENDENT cross-check index of PROD's func",
+    reason: "EMPTY-BY-COND — same, for the cross-check index",
+  },
+];
+
+/**
+ * Non-vacuity floor on the emission walk. MEASURED 2026-09-02 at 03585b88:
+ * 68 emissions over the two gates (test-ledger 30, prod-body 38). The floor
+ * is 40, not 68 — pinned at the measurement it reds on every legitimate
+ * consolidation of an error block and gets raised by reflex (D-10, wide
+ * separation). A walker that stopped recognising `echo "::error::` or `fail "`
+ * scores a handful and reds here rather than reporting a clean family of
+ * nothing.
+ */
+const EMISSION_FLOOR = 40;
+
+describe("164.3.1-12 — META-ARM diagnostic-first over the family's shell gates (SC-7)", () => {
+  it("every failure emission prints a runtime value — exact against DIAGNOSTIC_FIRST_ALLOWLIST, both directions", () => {
+    const emissions: Emission[] = [];
+    const violations: Emission[] = [];
+    for (const rel of FAMILY_SHELL_GATES) {
+      const src = read(rel);
+      const found = findFailureEmissions(rel, src);
+      emissions.push(...found);
+      violations.push(...diagnosticFirstViolations(rel, src));
+    }
+
+    // DIAGNOSTIC-FIRST about itself (D-12): print what was seen. A raw
+    // process.stdout.write because vitest 4's default reporter swallows
+    // console output from passing tests.
+    process.stdout.write(
+      `META diagnostic-first: ${emissions.length} emission(s) over ${FAMILY_SHELL_GATES.length} gate(s), ` +
+        `${violations.length} bare, ${DIAGNOSTIC_FIRST_ALLOWLIST.length} allowlisted\n` +
+        violations.map((v) => `  bare ${emissionKey(v)} (line ${v.line})\n`).join(""),
+    );
+
+    expect(
+      emissions.length,
+      `the emission walk found ${emissions.length} site(s); a broken walk reports a clean family of nothing`,
+    ).toBeGreaterThanOrEqual(EMISSION_FLOOR);
+
+    const allow = new Set(DIAGNOSTIC_FIRST_ALLOWLIST.map((a) => a.key));
+    const found = new Set(violations.map(emissionKey));
+
+    const unexplained = violations.filter((v) => !allow.has(emissionKey(v)));
+    expect(
+      unexplained.map((v) => `${emissionKey(v)} (line ${v.line})`),
+      "a gate in this family ships a BARE CONCLUSION — a failure emission with no runtime-interpolated value. Print what the gate SAW (the count, the name, the exit code) before the verdict (D-12/SC-7). Do NOT add the site to DIAGNOSTIC_FIRST_ALLOWLIST to silence this; that list holds emissions that legitimately have no quantity, each with its reason",
+    ).toEqual([]);
+
+    const discharged = DIAGNOSTIC_FIRST_ALLOWLIST.filter((a) => !found.has(a.key));
+    expect(
+      discharged.map((a) => a.key),
+      "allowlist entr(y/ies) no longer match a bare emission — either the site now prints its quantity (delete the entry) or the walker stopped seeing it (a regression in this rule; re-run the fixture arm before touching the list)",
+    ).toEqual([]);
+  });
+});
+
+/**
+ * Every threshold the family carries, EXACT SET by `file :: label`. A new
+ * threshold anywhere in THRESHOLD_BEARING_FILES must be measured (the scan
+ * asserts that) AND registered here — a floor set by taste and a floor set by
+ * measurement look identical to a reader who did not check.
+ */
+export const KNOWN_THRESHOLD_SITES: readonly string[] = [
+  // MEASURED 2026-09-02 at 03585b88 by running this arm with the list EMPTY:
+  // 6 threshold sites over the 5 threshold-bearing files, all 6 justified
+  // (token + date within the window). The known count IS the non-vacuity
+  // floor: an exact set both directions is strictly stronger than `>= 6`, and
+  // a threshold leaving this family is a decision worth a red, not churn.
+  "scripts/test-ledger-drift-check.sh :: ledger_rows -ge 50", //  VAC-08 absurdity floor: 'scored' + 2026-08-29
+  "scripts/prod-body-drift-check.sh :: SNAPSHOT_MIN=50", //         VAC-04 absurdity floor: 'measured' + 2026-09-01
+  "scripts/mutation-runner/run.mjs :: FILES_FLOOR=1", //            coverage ratchet: MEASURED + 2026-08-29
+  "scripts/mutation-runner/run.mjs :: ARMS_FLOOR=30", //            biting ratchet: MEASURED + 2026-08-29 (re-derived 2026-09-01)
+  "src/__tests__/lint-sql-gates.test.ts :: RESULT_LOOP_CONDITION_FLOOR=8", // [MUT-W02] parse floor: 'measured' + 2026-09-01
+  "src/__tests__/self-referential-oracle.test.ts :: CORPUS_FLOOR=100", //    SRO corpus-walk floor: MEASURED + 2026-09-01
+];
+
+describe("164.3.1-12 — META-ARM bare-measurement audit over the family's thresholds (SC-9)", () => {
+  it("every threshold carries a measurement token and a date within the window, and the found set is exactly KNOWN_THRESHOLD_SITES", () => {
+    const sites: ThresholdSite[] = [];
+    for (const rel of THRESHOLD_BEARING_FILES) sites.push(...findThresholdSites(rel, read(rel)));
+
+    process.stdout.write(
+      `META bare-measurement: ${sites.length} threshold site(s) over ${THRESHOLD_BEARING_FILES.length} file(s)\n` +
+        sites.map((s) => `  ${s.justified ? "ok  " : "BARE"} ${s.file} :: ${s.label} (line ${s.line}) — ${s.evidence}\n`).join(""),
+    );
+
+    const keys = sites.map((s) => `${s.file} :: ${s.label}`);
+    expect(new Set(keys).size, "two threshold sites share a key — labels must be unique per file").toBe(keys.length);
+
+    const bare = sites.filter((s) => !s.justified);
+    expect(
+      bare.map((s) => `${s.file} :: ${s.label} (line ${s.line}) — ${s.evidence}`),
+      `a threshold in this family has NO measurement beside it. Record the measurement — the command, the date, the sample size and coverage, and both separation directions — within ${JUSTIFICATION_WINDOW} lines above the value (D-10/SC-9). Do not widen the window`,
+    ).toEqual([]);
+
+    const known = new Set(KNOWN_THRESHOLD_SITES);
+    const found = new Set(keys);
+    expect(
+      keys.filter((k) => !known.has(k)),
+      "a threshold site not in KNOWN_THRESHOLD_SITES — a new floor appeared in the family. Register it here WITH its measurement recorded beside it in the file; a threshold nobody registered is a threshold nobody reviewed",
+    ).toEqual([]);
+    expect(
+      KNOWN_THRESHOLD_SITES.filter((k) => !found.has(k)),
+      "a registered threshold site was not found — the floor was removed or renamed, or the scan stopped seeing it. Establish which before editing this list",
+    ).toEqual([]);
   });
 });
