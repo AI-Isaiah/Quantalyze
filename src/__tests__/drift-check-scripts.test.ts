@@ -27,9 +27,11 @@ import {
   existsSync,
   rmSync,
   chmodSync,
+  symlinkSync,
+  cpSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { basename, dirname, join } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 
 import { normalizeSql } from "../../scripts/sql-body-normalize.mjs";
 import { createHash } from "node:crypto";
@@ -1281,6 +1283,278 @@ describe("[VAC04-C1] — the zero path FAILS CLOSED: both readers' evidence, THE
     expect(src).toContain("164.4");
     expect(src.toLowerCase()).toContain("hold");
   });
+});
+
+// ── [VAC04-C2] GATE-LEVEL ────────────────────────────────────────────────────
+//
+// SC-4 says each of [VAC04-C1]..[VAC04-C4] is "driven end-to-end through the
+// real gate". [VAC04-C2] — the main-module guard that no-oped on a symlinked or
+// space-containing reader path, so main() never ran, stdout was empty and the
+// process exited 0 — was proven in vac04-reader-guards.test.ts on the two
+// reader CLIs only; the gate-level propagation rested on a code-read of the
+// `|| fail` wrappers (164.3.1-VERIFICATION.md gaps[0]). This block drives the
+// REAL gate, scripts/prod-body-drift-check.sh, with its env-injectable reader
+// paths (`NORMALIZER` / `NAIVE_NAMES`, :143-144) pointing at a symlink and at a
+// copy under a directory whose name carries a space.
+//
+// WHY THE FIXTURES ARE PER-READER-VISIBLE. MEASURED 2026-09-02 (164.3.1-13):
+// on a definition BOTH readers see, the gate's union masks a single reader's
+// silent zero — the other member still yields the name, the gate still prints
+// the readers-ran line, and a neuter of one guard cannot RED. So fixture A is
+// visible to the NAIVE reader only (a `$` in the identifier stops the lexer's
+// readQualifiedName) and fixture B to the NORMALIZER only (the definition does
+// not START its line — the naive reader's pinned LIMITATION 1). Each fixed-leg
+// case therefore has exactly ONE load-bearing union member, and that member is
+// the one reached through the unusual path.
+//
+// WHY THE PASS CONDITION IS THE READERS-RAN LINE, NOT THE TRIPWIRE (D-13).
+// Since D-13 a silent zero from a symlinked reader on a real definition is ALSO
+// caught by [VAC04-C1]'s textual tripwire — both readers `0 name(s)`, then
+// MEASURE_FAIL. A gate-level arm that expected THAT refusal would prove C1's
+// tripwire, not the guard fix. So the fixed leg asserts
+// `Functions defined or replaced by this PR: 1` (the reader RAN through the
+// injected path), and the refusal appears only in the calibration leg as the
+// NEUTERED outcome. VERIFICATION gaps[0] "Note for the fixer".
+//
+// STATED BOUND. The PROD-side commands (`BODY_FETCH_CMD`, `BODY_NAME_INDEX_CMD`,
+// `BODY_NAME_INDEX_XCHECK_CMD`) are word-split on IFS by the gate, so they are
+// never handed a space-containing path here; they stay on the canonical repo
+// reader paths, and only the left-hand readers take the injected shapes.
+describe("[VAC04-C2] GATE-LEVEL — the realpath guard driven THROUGH THE REAL GATE: a reader reached through a symlink or a space path must RUN", () => {
+  const NORMALIZER = "scripts/sql-body-normalize.mjs";
+  const NAIVE = "scripts/sql-function-names-naive.mjs";
+
+  /** Fixture A: seen by the NAIVE reader ONLY — the `$` stops the lexer. */
+  const NAIVE_ONLY_FN =
+    "CREATE OR REPLACE FUNCTION public.sanitize_user$v2(p uuid) RETURNS void " +
+    "LANGUAGE plpgsql AS $fn$ BEGIN END; $fn$;\n";
+  const NAIVE_ONLY_NAME = "sanitize_user$v2";
+
+  /** Fixture B: seen by the NORMALIZER ONLY — the line does not start with CREATE. */
+  const NORMALIZER_ONLY_FN =
+    "SELECT 1; CREATE OR REPLACE FUNCTION public.mid_fn(a int) RETURNS int " +
+    "LANGUAGE sql AS $$ SELECT a $$;\n";
+  const NORMALIZER_ONLY_NAME = "mid_fn";
+
+  /** What PROD holds — a different function, so the PR's name is measured absent. */
+  const PROD_FN =
+    "CREATE OR REPLACE FUNCTION public.some_other_fn(a int)\n" +
+    "RETURNS int LANGUAGE sql AS $$ SELECT a $$;\n";
+
+  /** The arm's PASS condition: the gate's name count, reached only if a reader RAN. */
+  const READERS_RAN = "Functions defined or replaced by this PR: 1";
+  /** Printed only when the naive reader saw a name the normalizer did not (:239). */
+  const NAIVE_ONLY_WARNING =
+    "the independent name reader found function definition(s) the normalizer's parser did not";
+
+  /** The fixed guard's idiom (naive.mjs:340 / normalize.mjs:767) and the pre-fix one it replaced. */
+  const REALPATH_IDIOM = "realpathSync(process.argv[1])";
+  const PRE_FIX_IDIOM = "import.meta.url === `file://${process.argv[1]}`";
+  const PRE_FIX_RETURN = "return import.meta.url === `file://${process.argv[1]}`;";
+  const FIXED_RETURN_REALPATH =
+    "return realpathSync(process.argv[1]) === fileURLToPath(import.meta.url);";
+  const FIXED_RETURN_FALLBACK =
+    "return resolve(process.argv[1]) === fileURLToPath(import.meta.url);";
+
+  type Shape = "symlink" | "space";
+
+  function occurrences(haystack: string, needle: string): number {
+    return haystack.split(needle).length - 1;
+  }
+
+  /**
+   * A reader reached through the given shape. Both shapes keep the script's own
+   * basename, so the two readers stay DISTINCT files — the gate refuses at :151
+   * when NORMALIZER and NAIVE_NAMES resolve to the same path, before either runs.
+   */
+  function readerPath(shape: Shape, script: string, dir: string): string {
+    if (shape === "symlink") {
+      mkdirSync(join(dir, "links"), { recursive: true });
+      const link = join(dir, "links", basename(script));
+      symlinkSync(resolve(script), link);
+      return link;
+    }
+    // The directory name carries the space; the copy runs from anywhere because
+    // both readers import node: builtins only.
+    mkdirSync(join(dir, "reader copies"), { recursive: true });
+    const copy = join(dir, "reader copies", basename(script));
+    cpSync(resolve(script), copy);
+    return copy;
+  }
+
+  /** The gate wired as migration-drift-check.yml wires it, plus the injected left-hand readers. */
+  function scaffold(
+    dir: string,
+    migrationBody: string,
+    readers: { normalizer: string; naive: string },
+  ): Record<string, string> {
+    mkdirSync(join(dir, "snapshot"), { recursive: true });
+    const dump = join(dir, "prod-dump.sql");
+    writeFileSync(dump, PROD_FN);
+    const migration = join(dir, "20260902120000_gate_level_c2.sql");
+    writeFileSync(migration, migrationBody);
+    return {
+      ...FAKE_CREDS,
+      BODY_FETCH_CMD: `node ${NORMALIZER} --extract-fn ${dump}`,
+      BODY_NAME_INDEX_CMD: `node ${NORMALIZER} --function-names ${dump}`,
+      BODY_NAME_INDEX_XCHECK_CMD: `node ${NAIVE} ${dump}`,
+      CHANGED_MIGRATIONS: migration,
+      SNAPSHOT_DIR: join(dir, "snapshot"),
+      NORMALIZER: readers.normalizer,
+      NAIVE_NAMES: readers.naive,
+    };
+  }
+
+  // ── Calibration. Deliberately FIRST: if a fixture were visible to BOTH
+  // readers, "the gate reached 1" would hold with either reader silent, and
+  // the single-member neuter cycles (C2-N1 / C2-N2) could not RED.
+  it("CALIBRATION: fixture A is visible to the NAIVE reader only, fixture B to the NORMALIZER only — each case has ONE load-bearing member", () => {
+    withTempDir((dir) => {
+      const a = join(dir, "fixture_a.sql");
+      writeFileSync(a, NAIVE_ONLY_FN);
+      const b = join(dir, "fixture_b.sql");
+      writeFileSync(b, NORMALIZER_ONLY_FN);
+
+      const aLexer = spawnSync("node", [NORMALIZER, "--function-names", a], { encoding: "utf8" });
+      const aNaive = spawnSync("node", [NAIVE, a], { encoding: "utf8" });
+      expect(aLexer.status, aLexer.stderr).toBe(0);
+      expect(aNaive.status, aNaive.stderr).toBe(0);
+      expect(aLexer.stdout.trim(), "fixture A must be INVISIBLE to the lexer, or the naive member is not load-bearing").toBe("");
+      expect(aNaive.stdout.trim(), "fixture A must be seen by the naive reader").toBe(NAIVE_ONLY_NAME);
+
+      const bLexer = spawnSync("node", [NORMALIZER, "--function-names", b], { encoding: "utf8" });
+      const bNaive = spawnSync("node", [NAIVE, b], { encoding: "utf8" });
+      expect(bLexer.status, bLexer.stderr).toBe(0);
+      expect(bNaive.status, bNaive.stderr).toBe(0);
+      expect(bLexer.stdout.trim(), "fixture B must be seen by the lexer").toBe(NORMALIZER_ONLY_NAME);
+      expect(bNaive.stdout.trim(), "fixture B must be INVISIBLE to the naive reader, or the normalizer member is not load-bearing").toBe("");
+    });
+  }, 30_000);
+
+  // ── FIXED LEG: four cases, one `it` each, so a neuter's RED set names the
+  // reader and the shape it broke. Titles name the load-bearing reader FIRST.
+  const FIXED_CASES = [
+    {
+      name: "case 1: NAIVE reader load-bearing through a SPACE path (normalizer through a symlink) — fixture A",
+      naiveShape: "space" as Shape,
+      normalizerShape: "symlink" as Shape,
+      fixture: NAIVE_ONLY_FN,
+      fnName: NAIVE_ONLY_NAME,
+      naiveOnly: true,
+    },
+    {
+      name: "case 2: NAIVE reader load-bearing through a SYMLINK (normalizer through a space path) — fixture A",
+      naiveShape: "symlink" as Shape,
+      normalizerShape: "space" as Shape,
+      fixture: NAIVE_ONLY_FN,
+      fnName: NAIVE_ONLY_NAME,
+      naiveOnly: true,
+    },
+    {
+      name: "case 3: NORMALIZER load-bearing through a SYMLINK (naive through a space path) — fixture B",
+      naiveShape: "space" as Shape,
+      normalizerShape: "symlink" as Shape,
+      fixture: NORMALIZER_ONLY_FN,
+      fnName: NORMALIZER_ONLY_NAME,
+      naiveOnly: false,
+    },
+    {
+      name: "case 4: NORMALIZER load-bearing through a SPACE path (naive through a symlink) — fixture B",
+      naiveShape: "symlink" as Shape,
+      normalizerShape: "space" as Shape,
+      fixture: NORMALIZER_ONLY_FN,
+      fnName: NORMALIZER_ONLY_NAME,
+      naiveOnly: false,
+    },
+  ];
+
+  it.each(FIXED_CASES)("FIXED LEG $name: the real gate reaches the readers-ran line", (c) => {
+    // MEASURED 2026-09-02 with the fixed readers, both shapes, both fixtures:
+    //   "Functions defined or replaced by this PR: 1"
+    //   "  <name>: measured absent — not in the PROD source's 1-name index. Treated as a NEW function (pass)."
+    //   exit 0
+    withTempDir((dir) => {
+      const env = scaffold(dir, c.fixture, {
+        normalizer: readerPath(c.normalizerShape, NORMALIZER, dir),
+        naive: readerPath(c.naiveShape, NAIVE, dir),
+      });
+      const { status, out } = run(PROD_GATE, env);
+      expect(
+        status,
+        `the gate did not pass — a reader reached through a ${c.naiveShape}/${c.normalizerShape} path did not RUN\n${out}`,
+      ).toBe(0);
+      // The pass condition: the reader RAN through the injected path and the
+      // gate counted its name. Not the tripwire refusal (D-13 note).
+      expect(out).toContain(READERS_RAN);
+      expect(out).toContain(`${c.fnName}: measured absent`);
+      expect(out, "the D-13 refusal is the NEUTERED outcome, never the pass").not.toContain("MEASURE_FAIL");
+      if (c.naiveOnly) {
+        // Proof the NAIVE reader ran through ITS injected path: only it can
+        // have produced this name, and the gate says so.
+        expect(out).toContain(NAIVE_ONLY_WARNING);
+      }
+    });
+  }, 30_000);
+
+  // ── CALIBRATION LEG: the standing RED direction. Scratch copies of both
+  // readers carrying the pre-fix URL-string guard, reached through symlinks,
+  // turn the SAME gate wiring into zero names and the D-13 blind-zero refusal.
+  // This is what cycles C2-N1 / C2-N2 produce on the REAL readers (recorded in
+  // 164.3.1-13-SUMMARY.md); here it runs on every CI run so the fixed leg can
+  // never pass for a reason unrelated to the guard.
+  it("CALIBRATION LEG (standing RED direction): readers carrying the PRE-FIX guard, reached through symlinks, give ZERO names and the MEASURE_FAIL refusal — the readers-ran line never prints", () => {
+    // By-name pin on the REAL sources first: a real reader that lost its
+    // realpath guard reds HERE, by name, before any scratch copy is derived.
+    for (const script of [NAIVE, NORMALIZER]) {
+      expect(
+        occurrences(readFileSync(script, "utf8"), REALPATH_IDIOM),
+        `${script} no longer carries the realpath guard \`${REALPATH_IDIOM}\` — [VAC04-C2] is reopened in the real reader`,
+      ).toBeGreaterThanOrEqual(1);
+    }
+
+    withTempDir((dir) => {
+      mkdirSync(join(dir, "pre-fix"), { recursive: true });
+      mkdirSync(join(dir, "pre-fix-links"), { recursive: true });
+      const links: Record<string, string> = {};
+      for (const script of [NAIVE, NORMALIZER]) {
+        const neutered = readFileSync(script, "utf8")
+          .replace(FIXED_RETURN_REALPATH, PRE_FIX_RETURN)
+          .replace(FIXED_RETURN_FALLBACK, PRE_FIX_RETURN);
+        // A neuter not proven applied makes this leg vacuous: the copy must
+        // carry NO realpath idiom and at least one pre-fix idiom.
+        expect(occurrences(neutered, REALPATH_IDIOM), `${script}: the scratch copy still carries the fixed guard`).toBe(0);
+        expect(occurrences(neutered, PRE_FIX_IDIOM), `${script}: the scratch copy does not carry the pre-fix guard`).toBeGreaterThanOrEqual(1);
+        const copy = join(dir, "pre-fix", basename(script));
+        writeFileSync(copy, neutered);
+        const link = join(dir, "pre-fix-links", basename(script));
+        symlinkSync(copy, link);
+        links[script] = link;
+      }
+      const normalizerLink = links[NORMALIZER];
+      const naiveLink = links[NAIVE];
+
+      // MEASURED 2026-09-02 (both fixtures): both evidence lines `0 name(s)`,
+      // "MEASURE_FAIL — NOTHING WAS COMPARED.", exit 1.
+      for (const [label, fixture] of [
+        ["fixture-A", NAIVE_ONLY_FN],
+        ["fixture-B", NORMALIZER_ONLY_FN],
+      ] as const) {
+        const sub = join(dir, label);
+        mkdirSync(sub, { recursive: true });
+        const env = scaffold(sub, fixture, { normalizer: normalizerLink, naive: naiveLink });
+        const { status, out } = run(PROD_GATE, env);
+        expect(
+          status,
+          `${label}: the gate PASSED with readers whose guard cannot run through a symlink — the fixed leg above proves nothing\n${out}`,
+        ).not.toBe(0);
+        expect(out).toContain("MEASURE_FAIL");
+        // Evidence lines (D-12/SC-7) naming the INJECTED paths, each at zero.
+        expect(out).toContain(`${normalizerLink} --function-names -> 0 name(s)`);
+        expect(out).toContain(`${naiveLink} -> 0 name(s)`);
+        expect(out, `${label}: the readers-ran line printed although neither reader ran`).not.toContain(READERS_RAN);
+      }
+    });
+  }, 30_000);
 });
 
 // ── VAC-04 ABSURDITY FLOOR (D-09's VAC-04 half) ──────────────────────────────
