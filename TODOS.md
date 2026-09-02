@@ -1081,6 +1081,13 @@ true for 146 and half of 142–145, and **false for 141**.
       28 with that run id and SHA.** Not hand-edited here: the frontmatter is already wrong, so flipping
       one row's status would make the ledger agree with itself while still being wrong — the exact move
       Plan 164.4-00 refused.
+      **And a THIRD write is blocked behind it (2026-09-02, Plan 164.4-01):** a `unrun-verify`
+      entry for `164.4-01-SUMMARY.md` — the plan's `<human-check>` is UNMET, so the PR number, the
+      merged head SHA and the SHA-bound `sql-mutation` ubuntu run id + wall clock read `PENDING`.
+      Plan 164.4-02's `<precondition>` is `gate="blocking-human"` and reads exactly those fields;
+      it WILL halt until 164.4-01 is landed (`/ship`, then `/gsd-pr-branch` + the CLAUDE.md
+      deletion guard) and its CI board read SHA-bound. `gsd-tools windows append` refuses with the
+      same counts error, so it is recorded here.
 
 - [ ] **`[REDUNDER-PGCRON]` Three Phase-164.4 idiom gate files can NEVER reach a GREEN pg-lane baseline — the lane has no `pg_cron` (measured 2026-09-02, Plan 164.4-00).**
       `scripts/pg-lane/run.sh` boots a vanilla `initdb` cluster. Measured on it: `pg_available_extensions`

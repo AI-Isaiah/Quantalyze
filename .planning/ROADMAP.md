@@ -673,12 +673,12 @@ this phase, not a precondition of it.
 **Explicitly OUT of scope:** writing new gate coverage. This phase annotates and proves what already
 exists; it does not add arms. New coverage is a different phase with a different risk profile.
 
-**Plans:** 0/13 plans executed
+**Plans:** 2/13 plans executed
 
 Plans:
 
-- [ ] 164.4-00-PLAN.md — Fixture-strategy spike: stand-ins vs stubbed real chain decided BY MEASUREMENT (timeboxed to 8 stub iterations, 4.0 s/lane rule); largest file's apply list proven GREEN; F1 residual closed
-- [ ] 164.4-01-PLAN.md — Wave 0 runner/CI: `unreachable:` line naming the 27 excluded files, per-file `judged/annotated/waived/biting` breakdown, ci.yml MEASURE_FAIL assertions, GREEN/RED log fixtures, parse-time refusal of fixture targets with red self-test fixture (arm unit = SECTION, 355 sections / ~365 twins stated on the record)
+- [x] 164.4-00-PLAN.md — Fixture-strategy spike: stand-ins vs stubbed real chain decided BY MEASUREMENT (timeboxed to 8 stub iterations, 4.0 s/lane rule); largest file's apply list proven GREEN; F1 residual closed
+- [x] 164.4-01-PLAN.md — Wave 0 runner/CI: `unreachable:` line naming the 27 excluded files, per-file `judged/annotated/waived/biting` breakdown, ci.yml MEASURE_FAIL assertions, GREEN/RED log fixtures, parse-time refusal of fixture targets with red self-test fixture (arm unit = SECTION, 355 sections / ~365 twins stated on the record)
 - [ ] 164.4-02-PLAN.md — Reference file: the 15 un-twinned sections of test_strategy_shares_rls.sql; ARMS_FLOOR 30 → measured (≈45); full lockstep-pin choreography rehearsed
 - [ ] 164.4-03-PLAN.md — Batch 1: test_reconcile_dropped_enqueue_sweep (39 sections); FILES_FLOOR 1 → 2
 - [ ] 164.4-04-PLAN.md — Batch 2: stuck_computing_reaper (29) + retention_orphaned_running (25); FILES_FLOOR → 4
