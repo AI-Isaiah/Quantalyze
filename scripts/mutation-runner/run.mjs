@@ -93,9 +93,10 @@ import { fileURLToPath } from "node:url";
 
 import {
   BRANCH_HEAD_KEYWORDS,
+  IDENTITY_CARRIER,
   RAISE_EXCEPTION_RE,
   maskNonCode,
-  parseFile,
+  parseAnnotations,
   scanCorpus,
   tokenizeStatements,
 } from "./parse.mjs";
@@ -544,7 +545,7 @@ function oneLine(subject) {
  */
 export function neuterArm(text, arm) {
   const lines = text.split("\n");
-  const needle = `TEST FAILED (${arm})`;
+  const needle = `${IDENTITY_CARRIER}${arm})`;
   const statements = tokenizeStatements(text);
 
   const raiseIdx = raiseStatementIndex(statements, needle);
@@ -981,7 +982,7 @@ const identityRe = (flags = "") => new RegExp(IDENTITY_RE.source, flags);
 export function gateAttributionRecords(gateText) {
   const statements = tokenizeStatements(gateText);
   const records = [];
-  for (const idx of innermostCarriers(statements, "TEST FAILED (")) {
+  for (const idx of innermostCarriers(statements, IDENTITY_CARRIER)) {
     const stmt = statements[idx];
     // A commented-out (already neutered) raise is not a statement at all, and a
     // bare `TEST FAILED (` literal is not a raise — the same narrowing
@@ -1452,7 +1453,7 @@ export function failureBranches(text) {
   const lines = text.split("\n");
   const statements = tokenizeStatements(text);
   const out = [];
-  for (const idx of innermostCarriers(statements, "TEST FAILED (")) {
+  for (const idx of innermostCarriers(statements, IDENTITY_CARRIER)) {
     const stmt = statements[idx];
     // A commented-out (neutered) raise is not a statement at all, so it cannot
     // reach here — the tokenizer's masking, not a `^--` line test, is what
@@ -1835,6 +1836,40 @@ export function absurdityViolations({
 const NON_BITING_DEFECT_KINDS = ["no-red", "wrong-first-failure", "synthesised-identity"];
 
 /**
+ * The OPEN shape of a per-file tally — the seven fields `perFileRows` derives
+ * from and `logPerFileRows` prints, in ONE place.
+ *
+ * ⛔ Both modes build this, and a column added to only one of them is how the
+ * two modes' identically-shaped lines come to mean different things. Hence one
+ * constructor rather than two literals.
+ *
+ * ⚠️ `annotated` and `waived` are PARAMETERS, not derived here, because the two
+ * modes legitimately seed them differently and unifying that would be a silent
+ * behaviour change:
+ *   - `runCorpus` opens the tally at 0/0 before the RED-UNDER-SETUP check and
+ *     fills it in only for a file that reaches the arm loop. A file the gate
+ *     `continue`s for a missing setup line therefore reads `annotated 0` — it
+ *     contributed no arm to this run, and the row must not claim otherwise.
+ *   - `parseOnlyCorpus` runs no lane, so its whole product IS the static count;
+ *     it seeds from `parsed.structured` immediately and reports the twins a
+ *     file carries even when the gate path could never run them.
+ *
+ * `sections` is computed from `gateText` the caller ALREADY read, so the row
+ * costs no extra `readFileSync` beyond the parse.
+ */
+function newPerFileTally({ name, gateRel, gateText, annotated, waived }) {
+  return {
+    name,
+    gateRel,
+    sections: gateSectionCount(gateText),
+    annotated,
+    waived,
+    executed: 0,
+    unjudged: 0,
+  };
+}
+
+/**
  * The per-file rows the report prints and the absurdity floor cross-sums.
  *
  * `judged` is what the file's arms actually reached a verdict on, and it is the
@@ -1869,7 +1904,23 @@ function logPerFileRows(rows, log) {
  * static mode and the gate say the same thing about the same corpus.
  */
 export function logCorpusClassification(corpus, log) {
-  const { unreachableFiles = [], pendingFiles = [], inertFiles = [] } = corpus;
+  // ⛔ NO DEFAULTS. `[]` here would print `unreachable: 0 file(s)` for a corpus
+  // whose derivation never ran — indistinguishable, to every reader, from a
+  // corpus with nothing to exclude. That is the exact "could not measure read
+  // as measured zero" shape invariant 2 of this file's header refuses, so a
+  // missing class is a MEASURE_FAIL and stops the run instead of narrating a
+  // full-coverage exclusion set the runner never computed.
+  const { unreachableFiles, pendingFiles, inertFiles } = corpus;
+  const missing = Object.entries({ unreachableFiles, pendingFiles, inertFiles })
+    .filter(([, v]) => !Array.isArray(v))
+    .map(([k, v]) => `${k}=${JSON.stringify(v)}`);
+  if (missing.length > 0) {
+    throw new Error(
+      `MEASURE_FAIL — this is the GATE failing, not the corpus: logCorpusClassification was handed a ` +
+        `corpus whose classification is not derivable (${missing.join(", ")}). An absent exclusion ` +
+        `class is not a class with zero files in it.`,
+    );
+  }
   log(
     `unreachable: ${unreachableFiles.length} file(s) raise outside the runner's identity idiom — ` +
       `${unreachableFiles.join(" ")} (TODOS [REDUNDER-NONIDIOM])`,
@@ -1990,18 +2041,14 @@ export function runCorpus({
     for (const name of targets) {
       const gateAbsRepo = join(scopeDir, name);
       const gateRel = relative(REPO_ROOT, gateAbsRepo);
-      const parsed = parseFile(gateAbsRepo);
+      // Read ONCE and threaded into both readers, rather than `parseFile`
+      // reading it and `gateSectionCount` reading it again.
+      const gateText = readFileSync(gateAbsRepo, "utf8");
+      const parsed = parseAnnotations(gateText, { file: gateAbsRepo });
       // Opened HERE, before any `continue` below, so a file that never reaches
-      // an arm still gets a printed row saying so.
-      const tally = {
-        name,
-        gateRel,
-        sections: gateSectionCount(readFileSync(gateAbsRepo, "utf8")),
-        annotated: 0,
-        waived: 0,
-        executed: 0,
-        unjudged: 0,
-      };
+      // an arm still gets a printed row saying so — and seeded at 0/0 for the
+      // reason `newPerFileTally` documents.
+      const tally = newPerFileTally({ name, gateRel, gateText, annotated: 0, waived: 0 });
       perFileTallies.push(tally);
 
       for (const err of parsed.errors) addDefect("parse", null, gateRel, err.message);
@@ -2298,7 +2345,7 @@ export function runCorpus({
         // into an attributed read, because an attributed read is exactly what
         // a forgery targets.
         for (const entry of ann.neuter) {
-          if (run.output.includes(`TEST FAILED (${entry.arm})`)) {
+          if (run.output.includes(`${IDENTITY_CARRIER}${entry.arm})`)) {
             addDefect(
               "neuter-missed",
               ann.arm,
@@ -2571,16 +2618,18 @@ export function parseOnlyCorpus({ scopeDir, log = (s) => console.log(s) }) {
   for (const name of corpus.annotatedFiles) {
     const gateAbsRepo = join(scopeDir, name);
     const gateRel = relative(REPO_ROOT, gateAbsRepo);
-    const parsed = parseFile(gateAbsRepo);
-    const tally = {
+    // Read ONCE and threaded into both readers, as in the gate path.
+    const gateText = readFileSync(gateAbsRepo, "utf8");
+    const parsed = parseAnnotations(gateText, { file: gateAbsRepo });
+    // Seeded from the static parse, not 0/0: this mode runs no lane, so the
+    // twins a file carries ARE its whole product. See `newPerFileTally`.
+    const tally = newPerFileTally({
       name,
       gateRel,
-      sections: gateSectionCount(readFileSync(gateAbsRepo, "utf8")),
+      gateText,
       annotated: parsed.structured.length,
       waived: parsed.structured.filter((a) => a.waiver).length,
-      executed: 0,
-      unjudged: 0,
-    };
+    });
     perFileTallies.push(tally);
 
     for (const err of parsed.errors) addDefect("parse", null, gateRel, err.message);
@@ -2727,6 +2776,26 @@ function expect(condition, message) {
   return true;
 }
 
+/**
+ * "no defect of these kinds" — the ONE spelling every ABSENCE assertion in
+ * `selfTest()` uses.
+ *
+ * ⛔ NEVER spell an absence as `!defects.some((x) => x.kind === "<k>")`. The
+ * coverage extractor in `src/__tests__/mutation-runner-floors.test.ts` scans
+ * `selfTest()`'s SOURCE — comments included — for `kind === "<k>"` and treats
+ * every match as a kind the self-test EXERCISES. An absence proves only that a
+ * kind did NOT appear, so crediting it would be a vacuity inside the vacuity
+ * gate: the kind would keep reading as covered after its one POSITIVE arm was
+ * renamed or deleted. Going through the kind LIST keeps the extractor honest by
+ * construction rather than by each author remembering.
+ *
+ * `where` narrows the absence further (a detail regex); it defaults to "any
+ * defect of that kind at all".
+ */
+function noDefectOfKind(defects, kinds, where = () => true) {
+  return !defects.some((x) => kinds.includes(x.kind) && where(x));
+}
+
 function selfTest() {
   const quiet = () => {};
   let pass = true;
@@ -2783,7 +2852,7 @@ function selfTest() {
       'the defect table names OCCMISS 1 with kind "occurrence-mismatch"',
     ) &&
     expect(
-      !d.defects.some((x) => x.kind === "no-red"),
+      noDefectOfKind(d.defects, ["no-red"]),
       'no "no-red" defect is reported — an unmeasurable mutation is not a non-biting arm',
     ) &&
     pass;
@@ -2811,7 +2880,7 @@ function selfTest() {
       "the defect table names a WAIVED_CEILING excess with both numbers — 1 waived arm against a ceiling of 0",
     ) &&
     expect(
-      !f.defects.some((x) => x.kind === "floor" && /FILES_FLOOR/.test(x.detail)),
+      noDefectOfKind(f.defects, ["floor"], (x) => /FILES_FLOOR/.test(x.detail)),
       "no FILES_FLOOR defect — the three bounds are reported distinguishably",
     ) &&
     pass;
@@ -2851,7 +2920,7 @@ function selfTest() {
       `the arm never reached a lane (executed ${g.armsExecuted}) — a rewritten identity is refused BEFORE it can be counted as biting`,
     ) &&
     expect(
-      !g.defects.some((x) => x.kind === "no-red" || x.kind === "wrong-first-failure"),
+      noDefectOfKind(g.defects, ["no-red", "wrong-first-failure"]),
       'no "no-red" or "wrong-first-failure" defect — a refused mutation is not a non-biting arm',
     ) &&
     pass;
@@ -2942,11 +3011,11 @@ function selfTest() {
       `narrowed run is GREEN: exit code 2 with an empty defect table (got ${j.exitCode}; defects: ${JSON.stringify(j.defects)})`,
     ) &&
     expect(
-      !j.defects.some((x) => x.kind === "neuter-missed"),
+      noDefectOfKind(j.defects, ["neuter-missed"]),
       "P4 (odd parity, LOUD): no `neuter-missed` — the apostrophe inside `-- don't worry` did not produce a spurious \"could not find the end of the RAISE statement\"",
     ) &&
     expect(
-      !j.defects.some((x) => x.kind === "wrong-first-failure"),
+      noDefectOfKind(j.defects, ["wrong-first-failure"]),
       "P5 (even parity, SILENT): no `wrong-first-failure` — the `END IF;` after the RAISE's terminator SURVIVED the neuter (a swallowed closer is a syntax error the lane reports as NO-IDENTITY; since the post-RAISE refusal of 2026-09-02 the closer is the only thing left in the branch to swallow)",
     ) &&
     expect(
@@ -2997,7 +3066,8 @@ function selfTest() {
   console.log(
     "=== SELF-TEST 12/16: the nested-EXECUTE DO forgery AIMED at the genuine raise line must be SYNTHESISED by chain LENGTH alone, with the genuine arm RED (identity ok) beside it ===",
   );
-  // armsFloor 1: as in 11/15 — stated, inert here, asserted on bitingArms.
+  // armsFloor 1: as in the current_query() re-raise scenario — stated,
+  // inert here, asserted on bitingArms.
   const l = runCorpus({ scopeDir: SELFTEST_DIR, onlyFile: "nested-execute-forge-gate.sql", armsFloor: 1, log: quiet });
   const forge2 = l.defects.find((x) => x.kind === "synthesised-identity" && x.arm === "FORGE 2");
   const forge3 = l.defects.find((x) => x.kind === "synthesised-identity" && x.arm === "FORGE 3");
@@ -3058,7 +3128,8 @@ function selfTest() {
   console.log(
     "=== SELF-TEST 13/16: [F1] a RAISE whose MESSAGE embeds a forged CONTEXT + LOCATION pair must be SYNTHESISED by field DUPLICATION, with the genuine arm RED (identity ok) beside it ===",
   );
-  // armsFloor 1: as in 11/15 — stated, inert here, asserted on bitingArms.
+  // armsFloor 1: as in the current_query() re-raise scenario — stated,
+  // inert here, asserted on bitingArms.
   const m = runCorpus({ scopeDir: SELFTEST_DIR, onlyFile: "message-embedded-forge-gate.sql", armsFloor: 1, log: quiet });
   const forge4 = m.defects.find((x) => x.kind === "synthesised-identity" && x.arm === "FORGE 4");
   const forge4Record = gateAttributionRecords(
@@ -3147,7 +3218,7 @@ function selfTest() {
       'the defect table names NONBITE 1 with kind "lane-unrunnable", carrying the spawn error and "this arm was NOT judged"',
     ) &&
     expect(
-      !o.defects.some((x) => x.kind === "wrong-first-failure" || x.kind === "no-red" || x.kind === "absurdity"),
+      noDefectOfKind(o.defects, ["wrong-first-failure", "no-red", "absurdity"]),
       "no wrong-first-failure, no-red or absurdity — an unrunnable lane is neither a corpus finding nor a tally disagreement (a spawn that never happened is counted by neither tally)",
     ) &&
     expect(
@@ -3188,17 +3259,14 @@ function selfTest() {
       "the refusal PRINTS the forbidden prefix rather than a bare verdict",
     ) &&
     expect(
-      !q.defects.some((x) => x.kind === "no-red"),
+      noDefectOfKind(q.defects, ["no-red"]),
       'no "no-red" defect — a refused annotation is malformed, not a non-biting arm',
     ) &&
     expect(
-      // ⚠️ Spelled via the kind LIST rather than an equality on `x.kind`, on
-      // purpose. The coverage extractor in mutation-runner-floors.test.ts scans
-      // this function's SOURCE — comments included — for equality comparisons
-      // against a kind, and treats each one as a kind the self-test EXERCISES.
-      // This is a negative assertion: it proves the kind did NOT appear.
-      // Crediting it as coverage would be a vacuity inside the vacuity gate.
-      !q.defects.map((x) => x.kind).includes("bad-file-ref"),
+      // ⚠️ Through the kind LIST rather than an equality on `x.kind`, on
+      // purpose — see `noDefectOfKind`, which every absence assertion in this
+      // function now goes through for the same reason.
+      noDefectOfKind(q.defects, ["bad-file-ref"]),
       "no `bad-file-ref` — the stand-in IS in this gate's apply list, so the target rule is what fired, not the apply-list rule",
     ) &&
     expect(
