@@ -1063,6 +1063,18 @@ true for 146 and half of 142–145, and **false for 141**.
 
 ## 🟡 FIX MID-TERM
 
+- [ ] **`[PGLANE-HELP-TRUNCATED]` `scripts/pg-lane/run.sh --help` cuts the stand-in disclaimer off mid-sentence (measured 2026-09-02, Phase 164.4 ship review).**
+      `run.sh:612` is `-h|--help) sed -n '2,45p' "$0"`, a hardcoded end line. The
+      ⚠️ WHAT IT DOES AND DOES NOT PROVE disclaimer occupies lines 43-50, so `--help`
+      renders only lines 43-45 — three of its eight lines, ending mid-sentence. This is
+      the disclaimer GRAMMAR rule 4 and `parse.mjs` both cite as the authority for what a
+      pg-lane stand-in does and does not prove, so the reader most likely to need it (someone
+      running the lane by hand) is the one who sees it truncated. Pre-existing; the 164.4 docs
+      pass rewrote the disclaimer in place at the same 8-line length and deliberately did not
+      touch executable shell. Fix: end the `sed` range at the last comment line before
+      `set -euo pipefail` rather than at a hardcoded 45 — e.g. derive it, or move the
+      disclaimer above the help range.
+
 - [ ] **`[WINDOWS-LEDGER-DRIFT]` `.planning/WINDOWS.md` refuses every append: its frontmatter counts and its entries disagree (logged 2026-09-02, Plan 164.4-00).**
       `gsd-tools windows append` exits with `Ledger counts disagree with entries: frontmatter
       open/waived/fixed/total=26/0/2/28 but entries yield 29/0/2/31`. Measured cause: the file carries
