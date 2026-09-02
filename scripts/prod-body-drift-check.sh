@@ -358,7 +358,18 @@ if [ "${NAME_COUNT:-0}" -eq 0 ]; then
     fi
   done
 
-  if ! grep -aqE '[^[:space:]]' "$TMP/textual-hits.txt"; then
+  # WR-04 (164.3.1 review): the hit-list test is a grep too, and it carried the
+  # bare idiom: an exit >= 2 (unreadable hit list, broken locale) fell into the
+  # LEGITIMATE-ZERO branch below and the run exited 0 — a zero path this gate
+  # could not read, reported as one it read and found clean. Captured and
+  # branched with the [VAC04-C3] discipline; only a grep that RAN and found no
+  # line may reach the pass.
+  set +e
+  grep -aqE '[^[:space:]]' "$TMP/textual-hits.txt"
+  _hits_rc=$?
+  set -e
+  [ "$_hits_rc" -le 1 ] || fail "MEASURE_FAIL: could not read the zero-path textual scan's hit list at ${TMP}/textual-hits.txt (grep exited ${_hits_rc}). A hit list this gate could not read is not one that measured zero hits, so the legitimate-zero pass is not reachable from it."
+  if [ "$_hits_rc" -eq 1 ]; then
     # ── (a) LEGITIMATE ZERO ───────────────────────────────────────────────────
     echo "::notice::${GATE}: no functions defined, and the zero is LEGITIMATE — nothing to compare."
     echo "::notice::WHAT WAS SCANNED (evidence first — D-12/SC-7):"
@@ -545,8 +556,20 @@ fi
 # elsewhere: with a depopulated snapshot, every compared function hits the
 # "PROD has it but the committed snapshot does not" failure above.
 SNAPSHOT_MIN=50
+# WR-04 (164.3.1 review): the WALK and the COUNT are two measurements, each
+# with its own exit status. They used to share one pipeline under `pipefail`,
+# where a `find` that fails mid-walk (permission, I/O) exits 1 — the status
+# `grep -c` returns for "counted, no rows" — so a failed walk read as a LOW
+# population, the floor went INERT with a `::warning::`, and the "every
+# function is new — pass" shape it exists to catch was unguarded for that run.
+# The `-d` check at the top bounds only the missing-directory case.
 set +e
-SNAPSHOT_BODY_COUNT="$(find "$SNAPSHOT_DIR" -maxdepth 1 -type f -name '*.sql' -print | grep -ac '[^[:space:]]')"
+find "$SNAPSHOT_DIR" -maxdepth 1 -type f -name '*.sql' -print > "$TMP/snapshot-bodies.txt"
+_find_rc=$?
+set -e
+[ "$_find_rc" -eq 0 ] || fail "MEASURE_FAIL: could not enumerate the committed snapshot bodies under ${SNAPSHOT_DIR} (find exited ${_find_rc}). The absurdity floor calibrates against that population, and a walk that failed is not a population of whatever it managed to list."
+set +e
+SNAPSHOT_BODY_COUNT="$(grep -ac '[^[:space:]]' "$TMP/snapshot-bodies.txt")"
 _snap_rc=$?
 set -e
 # Same grep exit-code discipline as [VAC04-C3] and SP-M01: 0 = counted, 1 = no
@@ -664,7 +687,26 @@ for fname in "${NAMES[@]}"; do
     continue
   fi
 
-  if [ ! -s "$live" ] || ! grep -aqE '[^[:space:]]' "$live"; then
+  # WR-04 (164.3.1 review): the whitespace-only test on the fetched body is a
+  # grep too, and it carried the bare idiom [VAC04-C3] fixed just below: an
+  # exit >= 2 here (unreadable file, I/O failure, broken locale) was read as
+  # "empty body" and routed to the index lookup — fail-CLOSED when the name is
+  # in the index (an "extraction failure" with the wrong cause), but the
+  # measured-absent PASS when it is not, for a body this run FETCHED and then
+  # could not read. Captured and branched three ways.
+  set +e
+  grep -aqE '[^[:space:]]' "$live"
+  _live_rc=$?
+  set -e
+  if [ "$_live_rc" -ge 2 ]; then
+    echo "::error::${GATE}: MEASURE_FAIL — could not READ the body fetched from PROD for '${fname}'."
+    echo "::error::  body file   : ${live}"
+    echo "::error::  grep exited : ${_live_rc}   (0 = has content, 1 = empty or whitespace, >= 2 = ERROR)"
+    echo "::error::A body this gate could not read is neither a body it compared nor one it measured"
+    echo "::error::empty; reporting either would be a verdict over bytes this run never saw."
+    exit 1
+  fi
+  if [ ! -s "$live" ] || [ "$_live_rc" -eq 1 ]; then
     # WR-01: empty stdout is TWO different facts. Ask the index which one.
     #
     # ⛔ [VAC04-C3]. This was a BARE `if grep …; then … else … fi`, and `grep`

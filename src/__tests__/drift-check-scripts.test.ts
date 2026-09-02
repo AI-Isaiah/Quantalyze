@@ -64,6 +64,25 @@ function run(script: string, env: Record<string, string>) {
   return { status: res.status, out: `${res.stdout ?? ""}${res.stderr ?? ""}` };
 }
 
+/**
+ * A PATH shim for `tool` — the SP-M01 idiom. `bin/<tool>` runs `lines` with
+ * `$@` intact and `$REAL` bound to the real tool, so ONE call (keyed on its
+ * flags and its file) can be broken while every other call delegates. Returns
+ * the PATH value to run the gate under.
+ */
+function withPathShim(dir: string, tool: string, lines: string[]): string {
+  const bin = join(dir, "bin");
+  mkdirSync(bin, { recursive: true });
+  const real = spawnSync("bash", ["-c", `command -v ${tool}`], { encoding: "utf8" }).stdout.trim();
+  expect(real, `no real ${tool} on PATH to delegate to`).not.toBe("");
+  writeFileSync(
+    join(bin, tool),
+    ["#!/usr/bin/env bash", `REAL=${JSON.stringify(real)}`, ...lines, 'exec "$REAL" "$@"'].join("\n"),
+  );
+  chmodSync(join(bin, tool), 0o755);
+  return `${bin}:${process.env.PATH ?? ""}`;
+}
+
 /** A stub fetcher: `stub.sh <name>` cats live/<name>.sql, or emits nothing. */
 function writeStubFetcher(dir: string): string {
   const p = join(dir, "stub-fetch.sh");
@@ -434,6 +453,44 @@ describe("VAC-04 — scripts/prod-body-drift-check.sh", () => {
       expect(status, out).toBe(0);
       expect(out).toContain("Treated as a NEW function (pass)");
       expect(out).not.toContain("MEASURE_FAIL");
+    });
+  });
+
+  it("WR-04 RED: a grep that ERRORS on the FETCHED BODY is a MEASURE_FAIL, not an empty body routed to 'measured absent'", () => {
+    // ⛔ WR-04 (164.3.1 review). The whitespace-only test on the fetched body,
+    //     if [ ! -s "$live" ] || ! grep -aqE '[^[:space:]]' "$live"; then
+    // carried the bare idiom [VAC04-C3] fixed twenty lines below it: a grep
+    // exit >= 2 was read as "empty body" and routed to the index lookup —
+    // fail-CLOSED when the name is in the index (an "extraction failure"
+    // with the wrong cause), but the measured-absent PASS when it is not,
+    // for a body this run FETCHED and then could not read.
+    //
+    // MEASURED at HEAD 89cbef8b with a `grep` shimmed to exit 2 on this call
+    // alone, live body present, name not in the index:
+    //   "  demo_fn: measured absent — not in the PROD source's 1-name index.
+    //    Treated as a NEW function (pass)."                          exit 0
+    //
+    // The live body must be NON-EMPTY: `[ ! -s "$live" ]` short-circuited
+    // before grep on an empty one, so the shim would never fire.
+    withTempDir((dir) => {
+      const env = scaffoldProdCase(dir, { prodBody: PROD_BODY_EQUIVALENT, indexNames: ["other_fn"] });
+      const clean = run(PROD_GATE, env);
+      expect(clean.status, "the fixture must be GREEN (1 match) before the grep is broken").toBe(0);
+      expect(clean.out).toContain("1 match");
+
+      const PATH = withPathShim(dir, "grep", [
+        "flag=0; hit=0",
+        'for a in "$@"; do case "$a" in -aqE) flag=1 ;; *.live.sql) hit=1 ;; esac; done',
+        '[ "$flag" = 1 ] && [ "$hit" = 1 ] && exit 2',
+      ]);
+      const { status, out } = run(PROD_GATE, { ...env, PATH });
+      expect(status, "a body the gate could not READ was reported as measured absent — the fail-open pass").toBe(1);
+      expect(out).toContain("MEASURE_FAIL");
+      expect(out).toContain("demo_fn");
+      expect(out).toContain(".live.sql");
+      expect(out).toMatch(/grep exited\s*:\s*2\b/);
+      expect(out).not.toContain("Treated as a NEW function (pass)");
+      expect(out).not.toContain("no unacknowledged repo-vs-PROD body drift");
     });
   });
 
@@ -1214,6 +1271,29 @@ describe("[VAC04-C1] — the zero path FAILS CLOSED: both readers' evidence, THE
     });
   });
 
+  it("WR-04 RED: a grep that ERRORS on the tripwire's HIT LIST is a MEASURE_FAIL, never the LEGITIMATE-ZERO exit 0", () => {
+    // ⛔ WR-04 (164.3.1 review), the same bare idiom on the zero path itself:
+    //     if ! grep -aqE '[^[:space:]]' "$TMP/textual-hits.txt"; then
+    // The hit list is pre-created, so exit 1 is "no hits" — but exit >= 2 fell
+    // into the SAME branch and the run exited 0 as a legitimate zero it had
+    // not read. MEASURED at HEAD 89cbef8b, ALTER-only changed set, grep
+    // shimmed to exit 2 on this call alone: "the zero is LEGITIMATE", exit 0.
+    withTempDir((dir) => {
+      const env = scaffold(dir, ALTER_ONLY);
+      const PATH = withPathShim(dir, "grep", [
+        "flag=0; hit=0",
+        'for a in "$@"; do case "$a" in -aqE) flag=1 ;; *textual-hits.txt) hit=1 ;; esac; done',
+        '[ "$flag" = 1 ] && [ "$hit" = 1 ] && exit 2',
+      ]);
+      const { status, out } = run(PROD_GATE, { ...env, PATH });
+      expect(status, "a hit list the gate could not READ was reported as a legitimate zero").toBe(1);
+      expect(out).toContain("MEASURE_FAIL");
+      expect(out).toContain("textual-hits.txt");
+      expect(out).toMatch(/grep exited 2\b/);
+      expect(out).not.toContain("the zero is LEGITIMATE");
+    });
+  });
+
   it("CORPUS: on REAL repo migrations the tripwire passes an ALTER-only one and BLOCKS a comment-only mention", () => {
     // The measured separation, driven against the actual files rather than
     // restated as a number. MEASURED at HEAD across all 262 migrations: 111 are
@@ -1882,6 +1962,53 @@ describe("VAC-04 absurdity floor — a tiny PROD index is a broken reader, not a
       expect(out).not.toContain("this is the GATE failing");
       expect(out).toContain("Treated as a NEW function (pass)");
       expect(out).toContain("measured zero, not an unread one");
+    });
+  });
+
+  it("WR-04 RED: a `find` that FAILS mid-walk is a MEASURE_FAIL, not a small population that puts the floor to sleep", () => {
+    // ⛔ WR-04 (164.3.1 review). The denominator was ONE pipeline,
+    //     find "$SNAPSHOT_DIR" … -print | grep -ac '[^[:space:]]'
+    // under `pipefail`, and `[ "$_snap_rc" -le 1 ]` accepted status 1 as
+    // "counted, no rows". A `find` that fails mid-walk (permission, I/O)
+    // exits 1 too — so a failed walk read as a LOW population, the floor went
+    // INERT with a `::warning::`, and the "every function is new — pass"
+    // shape the floor exists to catch was unguarded for that run.
+    //
+    // MEASURED at HEAD 89cbef8b, realistic index, `find` shimmed to print
+    // three entries and exit 1: "absurdity floor is INERT this run", exit 0.
+    withTempDir((dir) => {
+      mkdirSync(join(dir, "migrations"), { recursive: true });
+      const migration = join(dir, "migrations", "20260901120000_demo.sql");
+      writeFileSync(migration, `${FN_BODY}\n`);
+      const realistic = readdirSync(REAL_SNAPSHOT_DIR)
+        .filter((f) => f.endsWith(".sql"))
+        .map((f) => basename(f, ".sql"));
+      expect(realistic.length).toBeGreaterThan(100);
+
+      const env = {
+        ...FAKE_CREDS,
+        BODY_FETCH_CMD: `bash ${writeStubFetcher(dir)}`,
+        BODY_NAME_INDEX_CMD: `bash ${writeStubNameIndex(dir, realistic)}`,
+        BODY_NAME_INDEX_XCHECK_CMD: `bash ${writeStubNameIndex(dir, realistic, "stub-index-xcheck.sh")}`,
+        CHANGED_MIGRATIONS: migration,
+        SNAPSHOT_DIR: REAL_SNAPSHOT_DIR,
+      };
+      const clean = run(PROD_GATE, env);
+      expect(clean.status, "the fixture must be GREEN before the walk is broken").toBe(0);
+      expect(clean.out).not.toContain("absurdity floor is INERT");
+
+      // A walk that lists three files and then dies: the shape of a mid-walk
+      // permission or I/O failure.
+      const PATH = withPathShim(dir, "find", [
+        'case " $* " in *" -name "*) "$REAL" "$@" | head -n 3; exit 1 ;; esac',
+      ]);
+      const { status, out } = run(PROD_GATE, { ...env, PATH });
+      expect(status, "a walk that FAILED was accepted as a small snapshot population").toBe(1);
+      expect(out).toContain("MEASURE_FAIL");
+      expect(out).toContain("could not enumerate");
+      expect(out).toMatch(/find exited 1\b/);
+      expect(out).not.toContain("absurdity floor is INERT");
+      expect(out).not.toContain("no unacknowledged repo-vs-PROD body drift");
     });
   });
 
