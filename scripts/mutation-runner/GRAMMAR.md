@@ -254,8 +254,10 @@ LOCATION:  exec_stmt_raise, pl_exec.c:3911        ← chain ended: exactly 1 fra
 ```
 
 Anything else — extra frames, a named function, `at EXECUTE`, a non-gate prefix,
-a severity other than `ERROR`, a SQLSTATE other than `P0001`, or an identity
-carried by a CONTEXT/DETAIL **field** rather than by the message — scores
+a severity other than `ERROR`, a SQLSTATE other than `P0001`, an identity
+carried by a CONTEXT/DETAIL **field** rather than by the message, or a block in
+which a diagnostic field name **repeats** or LOCATION is **not the final field**
+(F1 below) — scores
 `SYNTHESISED` or `NO-IDENTITY`, and the arm is **not counted as biting**. Output
 whose grammar the parser cannot read at all is a loud `MEASURE_FAIL`, never a
 silent pass.
@@ -301,9 +303,29 @@ produces an `inline_code_block line N at RAISE` frame whose **name and line are
 both attacker-chosen**, under the gate file's own `psql:` prefix — legs (a) and
 (c) both pass. MEASURED 2026-09-01: with `k = 4` the forgery landed on the
 genuine arm's exact resolved line. What an attacker cannot *remove* is the rest
-of the chain, so the chain's **length** is the control, and
+of the chain, so the chain's **length** is one control, and
 `164.3.1-05-ATTRIBUTION.md` records it flipping to a false `RED (identity ok)`
 when neutered to first-frame-only.
+
+⛔ **Length alone is not enough — F1 (164.3.1 adversarial review, measured live
+2026-09-02).** The attacker cannot *remove* frames, but they can *prepend* to the
+**message**, and psql prints a multi-line message raw. A trigger raising
+
+```sql
+RAISE EXCEPTION E'TEST FAILED (X)\nCONTEXT:  PL/pgSQL function inline_code_block line 5 at RAISE\nLOCATION:  exec_stmt_raise, pl_exec.c:3911';
+```
+
+from inside the gate's DO prints a forged single-frame CONTEXT + LOCATION pair
+*before* the real chain, so a reader that takes the first CONTEXT and the first
+LOCATION after it passes all three legs. What libpq cannot help doing is printing
+the **real** fields afterwards, each of DETAIL / HINT / QUERY / CONTEXT / the
+five verbose `… NAME` fields / LOCATION **at most once, in a fixed order,
+LOCATION last**. So the runner refuses any block in which a field name repeats
+or LOCATION is not the final field — `duplicated diagnostic field —
+message-embedded forgery` — and the self-test keeps that refusal lane-driven
+(`fixtures/selftest/message-embedded-forge-gate.sql`, scenario 13). Corollary
+for 164.4 authors: a RAISE message must not contain a line that *looks like* a
+psql field (`CONTEXT:  …`, `LOCATION:  …`); such an arm is refused, loudly.
 
 All 104 identities in today's corpus are single-frame direct DO-body raises, so
 this rule refuses nothing that exists. It is written down here so a 164.4 author

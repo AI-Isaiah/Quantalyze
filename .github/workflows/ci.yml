@@ -989,7 +989,10 @@ jobs:
         # still fire. It needs no extra provisioning — it drives the same
         # throwaway `initdb` cluster `scripts/pg-lane/run.sh` creates for the
         # corpus run. Measured 2026-08-29: 8/8, in seconds; 12/12 after
-        # 164.3.1-11 added the Primitive-A and -B regression corpus (2026-09-01).
+        # 164.3.1-11 added the Primitive-A and -B regression corpus (2026-09-01);
+        # 15/15 after the 164.3.1 review added the F1 message-embedded forgery,
+        # the injected-lane absurdity FIRE scenario and the `lane-unrunnable`
+        # MEASURE_FAIL (2026-09-02).
         #
         # ⛔ MODE IDENTITY: the bare command from the script's own header, no
         # wrapper. Pinned from vitest by src/__tests__/mutation-runner-floors.test.ts.
@@ -1054,14 +1057,17 @@ jobs:
             exit 1
           fi
 
-          floors=$(node -e 'import("./scripts/mutation-runner/run.mjs").then(m => console.log(m.FILES_FLOOR, m.ARMS_FLOOR))')
+          floors=$(node -e 'import("./scripts/mutation-runner/run.mjs").then(m => console.log(m.FILES_FLOOR, m.ARMS_FLOOR, m.WAIVED_CEILING))')
           files_floor=$(echo "$floors" | cut -d" " -f1)
           arms_floor=$(echo "$floors" | cut -d" " -f2)
+          waived_ceiling=$(echo "$floors" | cut -d" " -f3)
           case "$files_floor" in ''|*[!0-9]*)
             echo "::error::MEASURE_FAIL: could not read FILES_FLOOR from scripts/mutation-runner/run.mjs (got '$files_floor')."; exit 1;; esac
           case "$arms_floor" in ''|*[!0-9]*)
             echo "::error::MEASURE_FAIL: could not read ARMS_FLOOR from scripts/mutation-runner/run.mjs (got '$arms_floor')."; exit 1;; esac
-          echo "floors from run.mjs: FILES_FLOOR=$files_floor ARMS_FLOOR=$arms_floor"
+          case "$waived_ceiling" in ''|*[!0-9]*)
+            echo "::error::MEASURE_FAIL: could not read WAIVED_CEILING from scripts/mutation-runner/run.mjs (got '$waived_ceiling')."; exit 1;; esac
+          echo "floors from run.mjs: FILES_FLOOR=$files_floor ARMS_FLOOR=$arms_floor WAIVED_CEILING=$waived_ceiling"
 
           coverage_line=$(grep -a -m1 -E '^coverage: files [0-9]+/[0-9]+$' "$RUNNER_LOG" || true)
           if [ -z "$coverage_line" ]; then
@@ -1084,6 +1090,18 @@ jobs:
           arms_executed=$(echo "$arms_line" | sed -E 's|^arms: ([0-9]+)/[0-9]+/[0-9]+ .*|\1|')
           if [ "$arms_executed" -eq 0 ]; then
             echo "::error::MEASURE_FAIL: ZERO arms executed. The gate cannot observe a non-biting annotation without running one. If the step above was changed to --parse-only, that is a static check, not this gate."
+            exit 1
+          fi
+          # WAIVED_CEILING (2026-09-02 red team): a waiver is a counted twin that
+          # never runs a lane, so NEW prose markers with waiver twins raise the
+          # annotated counts and lower nothing — every floor stays green while
+          # coverage is inflated with zero new arms. The W field is bounded from
+          # ABOVE, against the constant read out of run.mjs beside the floors.
+          arms_waived=$(echo "$arms_line" | sed -E 's|^arms: [0-9]+/[0-9]+/([0-9]+) .*|\1|')
+          case "$arms_waived" in ''|*[!0-9]*)
+            echo "::error::MEASURE_FAIL: could not read the waived count out of '$arms_line'."; exit 1;; esac
+          if [ "$arms_waived" -gt "$waived_ceiling" ]; then
+            echo "::error::WAIVED_CEILING exceeded: $arms_waived waived arm(s) > ceiling $waived_ceiling. A waiver is an arm this gate will never prove can fail; adding one is a reviewed edit to WAIVED_CEILING in scripts/mutation-runner/run.mjs, never a side effect of annotating."
             exit 1
           fi
           # IN-05: ARMS_FLOOR bounds BITING arms — executed minus those that did
@@ -1157,7 +1175,7 @@ jobs:
             exit 1
           fi
 
-          echo "Coverage print is present, both floors hold and the runner's two tallies agree: files $files_annotated >= $files_floor, biting arms $biting >= $arms_floor (of $arms_executed executed, $lane_invocations arm lane(s) spawned)."
+          echo "Coverage print is present, both floors and the waiver ceiling hold and the runner's two tallies agree: files $files_annotated >= $files_floor, biting arms $biting >= $arms_floor (of $arms_executed executed, $lane_invocations arm lane(s) spawned), waived $arms_waived <= $waived_ceiling."
 
   plan-anchor-verify:
     # Phase 164.3 / VAC-05 — re-resolve every anchor and quote a PENDING plan

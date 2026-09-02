@@ -123,7 +123,7 @@ export const INSTANCE_ARM_REGISTRY: ReadonlyArray<RegistryEntry> = [
     instance: "R4-C01/P3",
     primitive: "A",
     file: "scripts/mutation-runner/run.mjs",
-    armNeedle: "SELF-TEST 9/12: [R4-C01] the P3 compound HEAD must be REFUSED",
+    armNeedle: "SELF-TEST 9/15: [R4-C01] the P3 compound HEAD must be REFUSED",
     also: [
       {
         file: "src/__tests__/mutation-runner-neuter.test.ts",
@@ -172,7 +172,7 @@ export const INSTANCE_ARM_REGISTRY: ReadonlyArray<RegistryEntry> = [
     instance: "R4-C02",
     primitive: "B",
     file: "scripts/mutation-runner/run.mjs",
-    armNeedle: "SELF-TEST 11/12: [R4-C02] a current_query() trigger",
+    armNeedle: "SELF-TEST 11/15: [R4-C02] a current_query() trigger",
     fixture: "scripts/mutation-runner/fixtures/selftest/current-query-forge-gate.sql",
     // Plan 05's FORGE 1 / CTRL 1 promoted verbatim by plan 11; RED under the
     // attribution neuter N3 in 164.3.1-11-CORPUS-PROOFS.md §4.
@@ -182,7 +182,7 @@ export const INSTANCE_ARM_REGISTRY: ReadonlyArray<RegistryEntry> = [
     instance: "NESTED-EXECUTE",
     primitive: "B",
     file: "scripts/mutation-runner/run.mjs",
-    armNeedle: "SELF-TEST 12/12: the nested-EXECUTE DO forgery",
+    armNeedle: "SELF-TEST 12/15: the nested-EXECUTE DO forgery",
     fixture: "scripts/mutation-runner/fixtures/selftest/nested-execute-forge-gate.sql",
     // FORGE 2 + echo-free FORGE 3; RED under the chain-length-only neuter N4
     // while scenario 11 stayed green — 164.3.1-11-CORPUS-PROOFS.md §5.
@@ -312,7 +312,14 @@ export const INSTANCE_ARM_REGISTRY: ReadonlyArray<RegistryEntry> = [
   },
 ];
 
-/** A needle shorter than this binds too little to name an arm. */
+/**
+ * A needle shorter than this binds too little to name an arm.
+ * MEASURED 2026-09-02 at 8969513e over INSTANCE_ARM_REGISTRY: 21 needles,
+ * shortest 29 chars ("SRO-01 red fixture is flagged"), longest 94. The floor
+ * sits under the shortest real needle so a registry entry cut down to a bare
+ * word ("fixture", "RED:") reds here; it is not tuned to the corpus's exact
+ * minimum, which would red on every legitimate short title.
+ */
 const NEEDLE_MIN_LENGTH = 16;
 
 describe("164.3.1-12 — instance → arm registry (SC-1 corpus completeness, mechanical)", () => {
@@ -505,8 +512,10 @@ const DIAGNOSTIC_GREEN_FIXTURE = [
  * The threshold-bearing members of the family. INCLUSION RULE: every file in
  * this family that declares a numeric FLOOR/MIN threshold or compares against
  * a literal inside an absurdity block — the two shell gates, the mutation
- * runner, and the two vitest gates that carry non-vacuity floors. A new
- * threshold anywhere in these files must carry its measurement AND be
+ * runner, the two vitest gates that carry non-vacuity floors — and THIS FILE,
+ * whose own NEEDLE_MIN_LENGTH and EMISSION_FLOOR are thresholds the rule must
+ * not exempt (a meta-arm that skips itself is the D primitive it audits for).
+ * A new threshold anywhere in these files must carry its measurement AND be
  * registered in KNOWN_THRESHOLD_SITES below.
  */
 export const THRESHOLD_BEARING_FILES: readonly string[] = [
@@ -514,6 +523,7 @@ export const THRESHOLD_BEARING_FILES: readonly string[] = [
   "scripts/mutation-runner/run.mjs",
   "src/__tests__/lint-sql-gates.test.ts",
   "src/__tests__/self-referential-oracle.test.ts",
+  "src/__tests__/gate-family-meta.test.ts",
 ];
 
 export type ThresholdSite = {
@@ -658,8 +668,10 @@ export const DIAGNOSTIC_FIRST_ALLOWLIST: ReadonlyArray<{ key: string; reason: st
   //                 byte). The wrapper adds only the conclusion; the diagnostic
   //                 was already printed by the reader. The reader's exit CODE
   //                 is not captured by the `|| fail` idiom — recorded as a
-  //                 follow-up in 164.3.1-12-SUMMARY.md, not fixed here (the
-  //                 gate scripts are edited by no plan in this phase).
+  //                 follow-up in 164.3.1-12-SUMMARY.md and booked in TODOS.md
+  //                 (§ Phase 164.3.1 review-fix), not fixed here. Reasons name
+  //                 the reader MODE, never a line: the gate script is edited by
+  //                 later plans in this phase and line anchors go stale.
   //
   // ── scripts/test-ledger-drift-check.sh ──────────────────────────────────
   {
@@ -701,19 +713,19 @@ export const DIAGNOSTIC_FIRST_ALLOWLIST: ReadonlyArray<{ key: string; reason: st
   },
   {
     key: "scripts/prod-body-drift-check.sh :: fail-call :: could not extract function names from the change",
-    reason: "READER-STDERR — `node $NORMALIZER --function-names` (:207) exits non-zero with its stderr on the log; the refusal names file/line/byte",
+    reason: "READER-STDERR — `node $NORMALIZER --function-names` exits non-zero with its stderr on the log; the refusal names file/line/byte",
   },
   {
     key: "scripts/prod-body-drift-check.sh :: fail-call :: the independent name reader failed on the change",
-    reason: "READER-STDERR — `node $NAIVE_NAMES` (:221) exits non-zero with its stderr on the log",
+    reason: "READER-STDERR — `node $NAIVE_NAMES` (unqualified mode) exits non-zero with its stderr on the log",
   },
   {
     key: "scripts/prod-body-drift-check.sh :: fail-call :: could not read the schema qualifiers of this PR'",
-    reason: "READER-STDERR — `node $NORMALIZER --function-qualified-names` (:428) exits non-zero with its stderr on the log",
+    reason: "READER-STDERR — `node $NORMALIZER --function-qualified-names` exits non-zero with its stderr on the log",
   },
   {
     key: "scripts/prod-body-drift-check.sh :: fail-call :: the independent name reader could not read the s",
-    reason: "READER-STDERR — `node $NAIVE_NAMES --qualified` (:430) exits non-zero with its stderr on the log",
+    reason: "READER-STDERR — `node $NAIVE_NAMES --qualified` exits non-zero with its stderr on the log",
   },
   {
     key: "scripts/prod-body-drift-check.sh :: fail-call :: could not index PROD's function names (stderr wi",
@@ -735,7 +747,9 @@ export const DIAGNOSTIC_FIRST_ALLOWLIST: ReadonlyArray<{ key: string; reason: st
 
 /**
  * Non-vacuity floor on the emission walk. MEASURED 2026-09-02 at 03585b88:
- * 68 emissions over the two gates (test-ledger 30, prod-body 38). The floor
+ * 68 emissions over the two gates (test-ledger 30, prod-body 38); re-measured
+ * 2026-09-02 at 8969513e (review-fix branch, prod-body gate under edit): 71
+ * (test-ledger 27, prod-body 44). The floor
  * is 40, not 68 — pinned at the measurement it reds on every legitimate
  * consolidation of an error block and gets raised by reflex (D-10, wide
  * separation). A walker that stopped recognising `echo "::error::` or `fail "`
@@ -795,7 +809,9 @@ describe("164.3.1-12 — META-ARM diagnostic-first over the family's shell gates
 export const KNOWN_THRESHOLD_SITES: readonly string[] = [
   // MEASURED 2026-09-02 at 03585b88 by running this arm with the list EMPTY:
   // 6 threshold sites over the 5 threshold-bearing files, all 6 justified
-  // (token + date within the window). The known count IS the non-vacuity
+  // (token + date within the window). Re-measured 2026-09-02 at 8969513e with
+  // this file added: 8 sites over 6 files, NEEDLE_MIN_LENGTH was BARE (no
+  // date) until its measurement was recorded. The known count IS the non-vacuity
   // floor: an exact set both directions is strictly stronger than `>= 6`, and
   // a threshold leaving this family is a decision worth a red, not churn.
   "scripts/test-ledger-drift-check.sh :: ledger_rows -ge 50", //  VAC-08 absurdity floor: 'scored' + 2026-08-29
@@ -804,6 +820,8 @@ export const KNOWN_THRESHOLD_SITES: readonly string[] = [
   "scripts/mutation-runner/run.mjs :: ARMS_FLOOR=30", //            biting ratchet: MEASURED + 2026-08-29 (re-derived 2026-09-01)
   "src/__tests__/lint-sql-gates.test.ts :: RESULT_LOOP_CONDITION_FLOOR=8", // [MUT-W02] parse floor: 'measured' + 2026-09-01
   "src/__tests__/self-referential-oracle.test.ts :: CORPUS_FLOOR=100", //    SRO corpus-walk floor: MEASURED + 2026-09-01
+  "src/__tests__/gate-family-meta.test.ts :: NEEDLE_MIN_LENGTH=16", //      registry needle floor: MEASURED + 2026-09-02
+  "src/__tests__/gate-family-meta.test.ts :: EMISSION_FLOOR=40", //         emission-walk floor: MEASURED + 2026-09-02
 ];
 
 describe("164.3.1-12 — META-ARM bare-measurement audit over the family's thresholds (SC-9)", () => {
