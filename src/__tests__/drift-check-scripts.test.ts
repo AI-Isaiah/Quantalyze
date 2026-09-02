@@ -1308,7 +1308,7 @@ describe("[VAC04-C1] — the zero path FAILS CLOSED: both readers' evidence, THE
       expect(out).toContain("Migrations changed by this PR: 1");
       expect(out).toContain("20260901120000_zero_path.sql");
       expect(out, "the pass must SAY the third scan ran and found nothing").toMatch(
-        /crude textual scan[^\n]*-> 0 of 1 file\(s\)/,
+        /crude textual scan[^\n]*-> 0 definition\(s\) in 1 file\(s\)/,
       );
       expect(out).toContain("LEGITIMATE");
       // A legitimate zero is a measurement, not a measurement failure.
@@ -1341,19 +1341,23 @@ describe("[VAC04-C1] — the zero path FAILS CLOSED: both readers' evidence, THE
     });
   });
 
-  it("CORPUS: on REAL repo migrations the tripwire passes an ALTER-only one and BLOCKS a comment-only mention", () => {
+  it("CORPUS: on REAL repo migrations the masked tripwire passes an ALTER-only one, passes the three comment-only mentions, and passes the one double-definition file", () => {
     // The measured separation, driven against the actual files rather than
-    // restated as a number. MEASURED at HEAD across all 262 migrations: 111 are
-    // structural-zero, of which 108 carry no textual `CREATE … FUNCTION` (pass)
-    // and 3 mention one inside a COMMENT (block). Blocking on a comment is the
-    // tripwire's known imprecision and its FAIL-SAFE direction — 3 of 262, and
-    // erring toward the block is correct for a gate over PRODUCTION bodies.
+    // restated as a number. MEASURED at HEAD 8969513e across all 262
+    // migrations, comments masked, DISTINCT textual definition tokens vs the
+    // union of the two structural readers per file: 0 files have textual >
+    // structural. Before masking, 3 comment-only mentions BLOCKED (the old
+    // fail-safe imprecision, F2 (d)); after masking they are legitimate zeros.
+    // One file defines the same function TWICE (create, then replace) — the
+    // readers dedupe names, so the tripwire counts DISTINCT tokens too, and
+    // that file passes 1 vs 1 rather than blocking 2 vs 1.
     const LEGIT = "supabase/migrations/20260405093827_kek_version.sql";
     const COMMENT_ONLY = [
       "supabase/migrations/20260515130001_enqueue_compute_job_internal_acl_remediation.sql",
       "supabase/migrations/20260516170100_reset_stalled_portfolio_analytics_revoke_public.sql",
       "supabase/migrations/20260517013200_notification_dispatches_recipient_email_lower_idx.sql",
     ];
+    const DOUBLE_DEF = "supabase/migrations/20260716090000_retire_compute_analytics_kind_rpc_guard.sql";
 
     withTempDir((dir) => {
       const base = scaffold(dir, ALTER_ONLY);
@@ -1366,15 +1370,149 @@ describe("[VAC04-C1] — the zero path FAILS CLOSED: both readers' evidence, THE
       expect(legit.out).toContain("LEGITIMATE");
 
       for (const f of COMMENT_ONLY) {
+        // CALIBRATION inside the arm: the mention really is there, so a pass
+        // is masking at work and not an empty file.
+        expect(readFileSync(f, "utf8")).toMatch(/CREATE\s+(OR\s+REPLACE\s+)?FUNCTION/i);
         const res = run(PROD_GATE, { ...base, CHANGED_MIGRATIONS: f });
         expect(
           res.status,
-          `${f} mentions CREATE … FUNCTION in a comment while both readers see nothing — ` +
-            `the tripwire must fail SAFE and block\n${res.out}`,
-        ).not.toBe(0);
-        expect(res.out).toContain("MEASURE_FAIL");
-        expect(res.out, "the refusal must NAME the file the third scan hit in").toContain(f);
+          `${f} mentions CREATE … FUNCTION only inside a comment — after masking that is a ` +
+            `LEGITIMATE zero, not a block\n${res.out}`,
+        ).toBe(0);
+        expect(res.out).toContain("LEGITIMATE");
+        expect(res.out).not.toContain("MEASURE_FAIL");
       }
+
+      // The double definition: PROD (the scaffold's dump) does not hold it, so
+      // the normal verdict is "measured absent — new function", exit 0. The
+      // load-bearing part is that the tripwire did NOT refuse it.
+      const dbl = run(PROD_GATE, { ...base, CHANGED_MIGRATIONS: DOUBLE_DEF });
+      expect(dbl.status, `two definitions of ONE name must count as one\n${dbl.out}`).toBe(0);
+      expect(dbl.out).toContain("Functions defined or replaced by this PR: 1");
+      expect(dbl.out).not.toContain("MEASURE_FAIL");
+    });
+  });
+
+  // ── F2 (164.3.1 red team + adversarial review): TWO holes in the tripwire ──
+  //
+  // (a) It ran ONLY inside the `NAME_COUNT -eq 0` branch. A migration defining
+  //     one function both readers see AND one both miss reached the comparison
+  //     loop with only the visible one, compared it, and exited 0 — the
+  //     invisible definition was never looked at, on a gate over PRODUCTION
+  //     bodies. MEASURED at HEAD 8969513e on VISIBLE_FN + COMPOSING_FN in one
+  //     file: "Functions defined or replaced by this PR: 1 … 1 match", exit 0.
+  // (b) It was COMMENT-BLIND in the wrong direction: `CREATE /*c*/ OR REPLACE
+  //     FUNCTION` gives lexer 0, naive 0 AND tripwire 0 (the regex wants
+  //     `CREATE` and `OR` separated by whitespace only), so all three agreed on
+  //     zero and the run took the LEGITIMATE-ZERO exit 0. MEASURED at HEAD
+  //     8969513e: "the zero is LEGITIMATE", exit 0.
+  //
+  // The fix runs the scan UNCONDITIONALLY over every changed file, masks
+  // `/* … */` and `-- …` comments FIRST (so a prose mention no longer blocks,
+  // and a comment can no longer split the keywords), counts distinct textual
+  // definitions per file and refuses when that count EXCEEDS what the two
+  // structural readers found for the same file. Over-count errs toward the
+  // block; under-count is harmless because the readers already saw the rest.
+  const SPLIT_BY_COMMENT_FN =
+    "CREATE /*c*/ OR REPLACE FUNCTION public.fn$v2(p uuid) RETURNS void " +
+    "LANGUAGE plpgsql AS $fn$ BEGIN NULL; END; $fn$;\n";
+
+  it("F2 (a) RED: one definition BOTH readers see beside one BOTH miss is REFUSED, naming the file — not compared-one-and-passed", () => {
+    withTempDir((dir) => {
+      const env = scaffold(dir, VISIBLE_FN + COMPOSING_FN, { snapshotFor: "some_other_fn" });
+      const { status, out } = run(PROD_GATE, env);
+      expect(
+        status,
+        "a file with a definition NEITHER reader can see was compared on its visible one alone and passed\n" + out,
+      ).toBe(1);
+      expect(out).toContain("MEASURE_FAIL");
+      expect(out, "the refusal must NAME the file").toMatch(
+        /20260901120000_zero_path\.sql: textual 2 definition\(s\) vs structural 1/,
+      );
+      expect(out).toContain("blind spots");
+      expect(out).not.toContain("no unacknowledged repo-vs-PROD body drift");
+      expect(out).not.toContain("1 match");
+    });
+  });
+
+  it("F2 (b) CALIBRATION: the comment-split spelling is invisible to BOTH readers", () => {
+    withTempDir((dir) => {
+      const f = join(dir, "split.sql");
+      writeFileSync(f, SPLIT_BY_COMMENT_FN);
+      const lexer = spawnSync("node", [NORMALIZER, "--function-names", f], { encoding: "utf8" });
+      const naive = spawnSync("node", [NAIVE, f], { encoding: "utf8" });
+      expect(lexer.status).toBe(0);
+      expect(naive.status).toBe(0);
+      expect(lexer.stdout.trim(), "if the lexer sees it, the arm below exercises the ordinary path").toBe("");
+      expect(naive.stdout.trim()).toBe("");
+    });
+  });
+
+  it("F2 (b) RED: `CREATE /*c*/ OR REPLACE FUNCTION` with zero visible definitions is REFUSED, not passed as a legitimate zero", () => {
+    withTempDir((dir) => {
+      const env = scaffold(dir, SPLIT_BY_COMMENT_FN);
+      const { status, out } = run(PROD_GATE, env);
+      expect(
+        status,
+        "a comment between CREATE and OR REPLACE blinded all THREE readings and the run passed as a legitimate zero\n" + out,
+      ).toBe(1);
+      expect(out).toContain("MEASURE_FAIL");
+      expect(out).toMatch(/20260901120000_zero_path\.sql: textual 1 definition\(s\) vs structural 0/);
+      expect(out).not.toContain("the zero is LEGITIMATE");
+    });
+  });
+
+  it("F2 (c) CONTROL: textual == structural stays GREEN — a prose mention in a comment beside a real definition does not over-count", () => {
+    withTempDir((dir) => {
+      const env = scaffold(
+        dir,
+        "-- helper; see the CREATE OR REPLACE FUNCTION below\n" +
+          "/* an older CREATE FUNCTION public.some_other_fn lived here */\n" +
+          VISIBLE_FN,
+        { snapshotFor: "some_other_fn" },
+      );
+      const { status, out } = run(PROD_GATE, env);
+      expect(status, out).toBe(0);
+      expect(out).toContain("Functions defined or replaced by this PR: 1");
+      expect(out).toContain("1 match");
+      expect(out).not.toContain("MEASURE_FAIL");
+    });
+  });
+
+  it("F2 (d) CONTROL: a comment that merely MENTIONS `CREATE OR REPLACE FUNCTION` in an ALTER-only file is a LEGITIMATE zero after masking", () => {
+    withTempDir((dir) => {
+      const env = scaffold(
+        dir,
+        "-- deliberately no CREATE OR REPLACE FUNCTION in this migration\n" +
+          "/* nor a CREATE FUNCTION\n   split across lines */\n" +
+          ALTER_ONLY,
+      );
+      const { status, out } = run(PROD_GATE, env);
+      expect(
+        status,
+        "a comment MENTION was counted as a definition — masking is not applied\n" + out,
+      ).toBe(0);
+      expect(out).toContain("LEGITIMATE");
+      expect(out).toMatch(/crude textual scan[^\n]*-> 0 definition\(s\) in 1 file\(s\)/);
+      expect(out).not.toContain("MEASURE_FAIL");
+    });
+  });
+
+  it("COVERAGE RED: a grep that ERRORS on the per-file textual scan is a MEASURE_FAIL naming the file, never a scan that found nothing", () => {
+    // The `_tw_rc >= 2` arm — same PATH-shim technique as the WR-04 arms,
+    // keyed on this call's own flags (`-aoiE`) so every other grep delegates.
+    withTempDir((dir) => {
+      const env = scaffold(dir, ALTER_ONLY);
+      const PATH = withPathShim(dir, "grep", [
+        'for a in "$@"; do case "$a" in -aoiE) exit 2 ;; esac; done',
+      ]);
+      const { status, out } = run(PROD_GATE, { ...env, PATH });
+      expect(status, "an unscannable file was read as a clean one").toBe(1);
+      expect(out).toContain("MEASURE_FAIL");
+      expect(out).toContain("could not read");
+      expect(out).toContain("20260901120000_zero_path.sql");
+      expect(out).toMatch(/grep exited 2\b/);
+      expect(out).not.toContain("LEGITIMATE");
     });
   });
 
@@ -2037,6 +2175,45 @@ describe("VAC-04 absurdity floor — a tiny PROD index is a broken reader, not a
       expect(out).toContain("MEASURE_FAIL");
       expect(out).toContain("could not enumerate");
       expect(out).toMatch(/find exited 1\b/);
+      expect(out).not.toContain("absurdity floor is INERT");
+      expect(out).not.toContain("no unacknowledged repo-vs-PROD body drift");
+    });
+  });
+
+  it("COVERAGE RED: a grep that ERRORS while COUNTING the snapshot population is a MEASURE_FAIL, not a denominator of zero", () => {
+    // The `_snap_rc >= 2` arm — the walk succeeded, the COUNT could not be
+    // read. Same PATH-shim technique as the find arm above, keyed on this
+    // call's own flag (`-ac`) and file so every other grep delegates.
+    withTempDir((dir) => {
+      mkdirSync(join(dir, "migrations"), { recursive: true });
+      const migration = join(dir, "migrations", "20260901120000_demo.sql");
+      writeFileSync(migration, `${FN_BODY}\n`);
+      const realistic = readdirSync(REAL_SNAPSHOT_DIR)
+        .filter((f) => f.endsWith(".sql"))
+        .map((f) => basename(f, ".sql"));
+      expect(realistic.length).toBeGreaterThan(100);
+
+      const env = {
+        ...FAKE_CREDS,
+        BODY_FETCH_CMD: `bash ${writeStubFetcher(dir)}`,
+        BODY_NAME_INDEX_CMD: `bash ${writeStubNameIndex(dir, realistic)}`,
+        BODY_NAME_INDEX_XCHECK_CMD: `bash ${writeStubNameIndex(dir, realistic, "stub-index-xcheck.sh")}`,
+        CHANGED_MIGRATIONS: migration,
+        SNAPSHOT_DIR: REAL_SNAPSHOT_DIR,
+      };
+      const clean = run(PROD_GATE, env);
+      expect(clean.status, "the fixture must be GREEN before the count is broken").toBe(0);
+
+      const PATH = withPathShim(dir, "grep", [
+        "flag=0; hit=0",
+        'for a in "$@"; do case "$a" in -ac) flag=1 ;; *snapshot-bodies.txt) hit=1 ;; esac; done',
+        '[ "$flag" = 1 ] && [ "$hit" = 1 ] && exit 2',
+      ]);
+      const { status, out } = run(PROD_GATE, { ...env, PATH });
+      expect(status, "an uncountable snapshot population was accepted").toBe(1);
+      expect(out).toContain("MEASURE_FAIL");
+      expect(out).toContain("could not count the committed snapshot bodies");
+      expect(out).toMatch(/grep exited 2\b/);
       expect(out).not.toContain("absurdity floor is INERT");
       expect(out).not.toContain("no unacknowledged repo-vs-PROD body drift");
     });
@@ -2912,6 +3089,93 @@ describe("IN-04 — the scratch directory does not survive a fail() path", () =>
     } finally {
       rmSync(bin, { recursive: true, force: true });
     }
+  });
+
+  it("D-04 DRIVEN: a pg_ctl stop that FAILS in cleanup is WARNED loudly, the postmaster.pid is SIGKILLed, the data dir still goes, and the lane's exit status survives", () => {
+    // ⛔ silent-failure finding (164.3.1 fix round). `cleanup` ran
+    //     pg_ctl … stop … >/dev/null 2>&1 || true
+    //     rm -rf "$PGD"
+    // so a stop that failed left a postmaster running against a data dir that
+    // was then deleted out from under it — the D-04 orphan the trap exists to
+    // prevent — with NOTHING printed. Driven through PGBIN stubs, no
+    // PostgreSQL needed: initdb creates the data dir and plants a
+    // `postmaster.pid` naming a long-lived `sleep` (the stand-in postmaster);
+    // pg_ctl exits 1 on BOTH `start` (so the lane fails after CREATED=1) and
+    // `stop` (the defect's trigger). MEASURED at HEAD 8969513e: exit 1, no
+    // WARNING, the sleep still alive after the lane returned.
+    withTempDir((dir) => {
+      const bin = join(dir, "bin");
+      mkdirSync(bin, { recursive: true });
+      const pidSide = join(dir, "planted.pid");
+      writeFileSync(
+        join(bin, "pg_ctl"),
+        [
+          "#!/bin/sh",
+          'case " $* " in *" stop "*) echo "pg_ctl: stub stop failure" >&2; exit 1 ;; *" start "*) exit 1 ;; esac',
+          "exit 0",
+        ].join("\n"),
+      );
+      writeFileSync(
+        join(bin, "initdb"),
+        [
+          "#!/bin/sh",
+          'd=""; while [ $# -gt 0 ]; do case "$1" in -D) d="$2"; shift ;; esac; shift; done',
+          '[ -n "$d" ] || exit 9',
+          'mkdir -p "$d"',
+          "nohup sleep 300 >/dev/null 2>&1 </dev/null &",
+          'printf "%s\\n" "$!" > "$d/postmaster.pid"',
+          `printf "%s" "$!" > ${JSON.stringify(pidSide)}`,
+          "exit 0",
+        ].join("\n"),
+      );
+      chmodSync(join(bin, "pg_ctl"), 0o755);
+      chmodSync(join(bin, "initdb"), 0o755);
+      const apply = join(dir, "apply.sql");
+      const gate = join(dir, "gate.sql");
+      writeFileSync(apply, "SELECT 1;\n");
+      writeFileSync(gate, "SELECT 1;\n");
+      const workdir = join(dir, "work");
+      const port = String(56000 + Math.floor(Math.random() * 900));
+
+      let planted: number | undefined;
+      try {
+        const res = spawnSync(
+          "bash",
+          [join(process.cwd(), "scripts", "pg-lane", "run.sh"), "--workdir", workdir, "--apply", apply, "--gate", gate],
+          { cwd: process.cwd(), encoding: "utf8", env: { ...process.env, PGBIN: bin, PORT: port }, timeout: 120_000 },
+        );
+        expect(existsSync(pidSide), "the initdb stub never ran — nothing was driven\n" + res.stderr).toBe(true);
+        planted = Number(readFileSync(pidSide, "utf8"));
+        expect(planted).toBeGreaterThan(0);
+
+        // The lane's own status is the failing `pg_ctl start` (exit 1 under
+        // set -e), and cleanup must not replace it with its own.
+        expect(res.status, res.stderr).toBe(1);
+        expect(res.stderr, "a failed stop must be LOUD").toContain("WARNING");
+        expect(res.stderr, "the warning must name the port").toContain(port);
+        expect(res.stderr, "the warning must name the data dir").toContain(join(workdir, "pgd", "data"));
+        expect(res.stderr).toContain(`SIGKILL`);
+        expect(res.stderr).toContain(String(planted));
+
+        // The stand-in postmaster is dead, and the data dir is gone.
+        let alive = true;
+        try {
+          process.kill(planted, 0);
+        } catch {
+          alive = false;
+        }
+        expect(alive, `the orphan postmaster (pid ${planted}) survived cleanup — D-04 restored`).toBe(false);
+        expect(existsSync(join(workdir, "pgd")), "the data dir must still be removed").toBe(false);
+      } finally {
+        if (planted) {
+          try {
+            process.kill(planted, "SIGKILL");
+          } catch {
+            /* already dead — the fixed path */
+          }
+        }
+      }
+    });
   });
 
   it("pg-lane registers its cleanup trap BEFORE the first mktemp, not inside run_lane", () => {
