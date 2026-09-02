@@ -323,6 +323,15 @@ describe("IN-05 — CI's floor and the runner's floor bound the SAME quantity", 
     expect(res.status).toBe(0);
     expect(out).toMatch(/^arms: 0\//m);
     expect(out).not.toMatch(/^biting: /m);
+    // 164.4-01: the classification is printed in BOTH modes, so the static mode
+    // and the gate say the same thing about the same corpus. This is the arm
+    // that runs the REAL runner — the GREEN_LOG fixture below is synthetic, and
+    // a fixture alone would not notice the runner dropping the line.
+    const printed = out.match(/^unreachable: (\d+) file\(s\) .*$/m);
+    expect(printed, "`--parse-only` must print the `unreachable:` line too").not.toBeNull();
+    const named = (printed?.[0].match(/[A-Za-z0-9_]+\.sql/g) ?? []).length;
+    expect(named, "the line must NAME every file it counts").toBe(Number(printed?.[1]));
+    expect(out).toMatch(/^ {2}pending: \d+ idiom file\(s\) without RED-UNDER — /m);
   });
 
   it("ci.yml reads the `biting:` line and no longer compares ARMS_FLOOR to executed", () => {
@@ -884,6 +893,11 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     "  restore   supabase/tests/test_strategy_shares_rls.sql — exit 0 (1.8s)",
     "",
     "coverage: files 1/71",
+    // 164.4-01: the exclusion, named. Two synthetic basenames rather than the
+    // real 27 — the arms below mutate the COUNT against the NAMES, and a
+    // fixture carrying the live corpus would have to move on every batch.
+    "unreachable: 2 file(s) raise outside the runner's identity idiom — a.sql b.sql (TODOS [REDUNDER-NONIDIOM])",
+    "  pending: 1 idiom file(s) without RED-UNDER — c.sql",
     "arms: 30/30/0   (executed/annotated/waived)",
     "biting: 30   (executed arms that reddened their OWN arm first — the quantity ARMS_FLOOR bounds)",
     "lane-invocations: 30   (arm lanes actually spawned — tallied inside runLane, independent of the 30 the verdict loop counted; plus 1 baseline / 1 restore leg(s))",
@@ -898,6 +912,32 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     expect(r.status, r.out).toBe(0);
     expect(r.out).toContain("the runner's two tallies agree");
     expect(r.out).toContain("30 arm lane(s) spawned");
+  });
+
+  // ── 164.4-01, criterion 1 as amended: a SILENT EXCLUSION must fail here ──
+  // `coverage: files N/71` is a ratio over every `.sql` in the scope dir, and
+  // this phase's end state deliberately leaves the non-idiom files uncovered.
+  // The runner names them; these two arms prove the CI step can fail when it
+  // stops naming them, and when the count it claims contradicts the names it
+  // printed. Without them the assertion would be a line nothing tests.
+  it("RED: the unreachable line ABSENT is a MEASURE_FAIL — a silent exclusion fails like a missing annotation", () => {
+    const without = GREEN_LOG.replace(/^unreachable: .*\n/m, "");
+    expect(without, "the deletion must actually change the log").not.toBe(GREEN_LOG);
+    const r = runCountRecheck(without);
+    expect(r.status, r.out).toBe(1);
+    expect(r.out).toContain("MEASURE_FAIL");
+    expect(r.out).toContain("NO 'unreachable:");
+    expect(r.out).not.toContain("two tallies agree");
+  });
+
+  it("RED: a CLAIMED count that disagrees with the NAMES printed beside it fails, quoting both numbers", () => {
+    const lying = GREEN_LOG.replace(/^unreachable: 2 file\(s\) /m, "unreachable: 3 file(s) ");
+    expect(lying).not.toBe(GREEN_LOG);
+    const r = runCountRecheck(lying);
+    expect(r.status, r.out).toBe(1);
+    expect(r.out).toContain("MEASURE_FAIL");
+    expect(r.out).toContain("CLAIMS 3 excluded file(s) but NAMES 2");
+    expect(r.out).not.toContain("two tallies agree");
   });
 
   it("RED: the lane-invocations line ABSENT is a MEASURE_FAIL — the runner stopped reporting, or --parse-only was swapped in", () => {

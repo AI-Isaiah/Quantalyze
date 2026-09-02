@@ -1318,6 +1318,77 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
     expect(corpus.filesAnnotated).toBe(1);
     expect(corpus.annotatedFiles).toEqual(["test_strategy_shares_rls.sql"]);
   });
+
+  // ── 164.4-01: the EXCLUDED set, pinned by name ─────────────────────────────
+  // The founder's 2026-09-02 scope amendment makes 27 gate files out of scope
+  // because they raise outside the runner's identity idiom, and makes NAMING
+  // them a merge condition. A derivation that silently returned `[]` would make
+  // the runner print `unreachable: 0 file(s)` — indistinguishable, to every
+  // reader, from a corpus with nothing to exclude. That absent-vs-correct
+  // ambiguity is exactly what the amendment forbids, so the list is pinned
+  // EXACTLY rather than by count.
+  //
+  // MEASURED 2026-09-02 by `classifyGateIdiom` over `supabase/tests/` and
+  // cross-checked against RESEARCH § Option (a)'s independently-built table
+  // (27 files, 321 raises, 139 distinct prefixes): the two agree file for file.
+  const UNREACHABLE_27 = [
+    "test_anon_execute_current_user_has_app_role.sql",
+    "test_api_key_delete_atomicity.sql",
+    "test_claim_compute_jobs_dedupe_partition.sql",
+    "test_claim_kind_filter.sql",
+    "test_cleanup_orphaned_api_keys_sweep.sql",
+    "test_cleanup_wizard_drafts_race.sql",
+    "test_commit_scenario_batch_auth_input.sql",
+    "test_commit_scenario_batch_fingerprint_precondition.sql",
+    "test_commit_scenario_batch_p1956_range.sql",
+    "test_commit_scenario_batch_p1957_divested.sql",
+    "test_compute_analytics_kind_retired.sql",
+    "test_compute_jobs_rpc_error_clear_and_fanin.sql",
+    "test_cutover_strategy_metrics_keys_atomic.sql",
+    "test_data_deletion_requests_fk_set_null.sql",
+    "test_enqueue_internal_destrict.sql",
+    "test_get_latest_portfolio_analytics_for_user.sql",
+    "test_handle_new_user_role_allowlist.sql",
+    "test_log_audit_event_service_ceiling.sql",
+    "test_mt5_exchange_boundary.sql",
+    "test_portfolio_recompute_inflight_unique.sql",
+    "test_retention_crons_safe.sql",
+    "test_sanitize_user_hardening.sql",
+    "test_sfox_exchange_boundary.sql",
+    "test_staff_role_both_backfill.sql",
+    "test_sync_status_preserves_warnings.sql",
+    "test_sync_status_supersede_failed_per_kind.sql",
+    "test_upsert_strategy_analytics_series_batch_privilege.sql",
+  ];
+
+  it("scanCorpus names the 27 non-idiom files EXACTLY — an empty list would read as full coverage", () => {
+    const corpus = scanCorpus(join(REPO_ROOT, "supabase", "tests"));
+    expect(corpus.unreachableFiles).toEqual(UNREACHABLE_27);
+  });
+
+  it("the four classes PARTITION the corpus, so the pin never has to move as batches land", () => {
+    // The invariant, not the integers: as each batch annotates a `pending`
+    // file it moves into `annotatedFiles`, and this relation still holds. Only
+    // a file leaving the EXCLUDED set (the successor phase) moves the pin above.
+    const corpus = scanCorpus(join(REPO_ROOT, "supabase", "tests"));
+    expect(corpus.pendingFiles.length).toBe(
+      corpus.filesTotal -
+        corpus.filesAnnotated -
+        corpus.unreachableFiles.length -
+        corpus.inertFiles.length,
+    );
+    // A gate carrying no executable raise at all cannot fail. Zero today; a
+    // non-zero here is a finding about that gate, and the runner prints it.
+    expect(corpus.inertFiles).toEqual([]);
+    // Disjoint, not merely correctly-sized.
+    const all = [
+      ...corpus.annotatedFiles,
+      ...corpus.pendingFiles,
+      ...corpus.unreachableFiles,
+      ...corpus.inertFiles,
+    ];
+    expect(new Set(all).size).toBe(corpus.filesTotal);
+  });
 });
 
 describe("WR-02 — mode identity: `--parse-only` threads a LAYERED annotation's steps forward, as the real run does", () => {

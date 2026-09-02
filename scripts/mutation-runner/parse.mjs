@@ -859,6 +859,59 @@ export function maskNonCode(text) {
 }
 
 /**
+ * A `RAISE EXCEPTION`, read in a statement's MASKING PROJECTION so a mention
+ * inside a literal — or a commented-out (already neutered) raise — is not one.
+ *
+ * ⭐ ONE DEFINITION, 2026-09-02. This lived in `run.mjs` only, and `scanCorpus`
+ * below now needs the same notion of "does this file contain executable raise
+ * code". A second spelling of the same regex in a second file is exactly how
+ * two readers of "is this a raise" drift apart, so it moved HERE — the module
+ * that already owns the one definition of what is code — and `run.mjs` imports
+ * it. It is not duplicated anywhere.
+ */
+export const RAISE_EXCEPTION_RE = /\bRAISE\s+EXCEPTION\b/i;
+
+/**
+ * The literal every arm identity is carried in. Spelled once, beside the raise
+ * regex it is always read with (`run.mjs` spells it too, for the readers that
+ * predate this constant; nothing here re-derives it).
+ */
+export const IDENTITY_CARRIER = "TEST FAILED (";
+
+/**
+ * Which of three idiom classes an UNANNOTATED gate file falls in — the data
+ * behind the runner's `unreachable:` print (phase 164.4 criterion 1 as
+ * amended: the exclusion is NAMED on every run, because a silent exclusion
+ * fails that criterion exactly as a missing annotation does).
+ *
+ *   "pending"      code-level `RAISE EXCEPTION` carrying `TEST FAILED (` —
+ *                  the runner's identity idiom. Annotatable; not yet annotated.
+ *   "unreachable"  code-level `RAISE EXCEPTION`, none of them carrying the
+ *                  identity idiom. `attributeIdentities` has nothing to
+ *                  attribute, so no arm of this file can be judged today.
+ *   "inert"        no code-level `RAISE EXCEPTION` at all. MEASURED 2026-09-02:
+ *                  zero such files in `supabase/tests/`. If one ever appears it
+ *                  is a FINDING — a gate that cannot fail — and it is printed.
+ *
+ * ⛔ Both halves are read the way the runner reads them, not by grep. The raise
+ * test runs against `executableText` (so a raise inside a comment or a literal
+ * is not one); the carrier test runs against that same statement's RAW text,
+ * because the identity lives INSIDE the raise's message literal and the masking
+ * projection blanks literals. MEASURED 2026-09-02: reading the carrier off
+ * `executableText` classifies all 70 unannotated files `unreachable` — the
+ * absent-vs-correct ambiguity this classification exists to remove.
+ */
+export function classifyGateIdiom(text) {
+  let raises = false;
+  for (const stmt of tokenizeStatements(text)) {
+    if (!RAISE_EXCEPTION_RE.test(stmt.executableText)) continue;
+    raises = true;
+    if (stmt.text.includes(IDENTITY_CARRIER)) return "pending";
+  }
+  return raises ? "unreachable" : "inert";
+}
+
+/**
  * Scan a directory of `.sql` gate files for the coverage numerator/denominator
  * (D-01). "Annotated" means at least one LINE-START marker of EITHER kind — a
  * prose `RED-UNDER:` or a structured `RED-UNDER-M:` twin. Both use the same
@@ -880,25 +933,45 @@ export function maskNonCode(text) {
  *
  * MEASURED 2026-08-29: no file in `supabase/tests/` is structured-only, so
  * `filesAnnotated` is unchanged at 1 of 71 and the FILES_FLOOR does not move.
+ *
+ * ⭐ 2026-09-02, phase 164.4: the UNANNOTATED remainder is classified too, by
+ * `classifyGateIdiom` above, and returned as three sorted basename lists. The
+ * denominator stays every `.sql` in the directory (`filesTotal`) — the end
+ * state of the backfill is `files 44/71` with the other 27 PRINTED BY NAME,
+ * never `files 44/44` with the gap quietly redefined away. MEASURED at this
+ * commit over `supabase/tests/`: 1 annotated + 43 pending + 27 unreachable +
+ * 0 inert = 71.
  */
 export function scanCorpus(dir) {
   const files = readdirSync(dir)
     .filter((f) => f.endsWith(".sql"))
     .sort();
   const annotatedFiles = [];
+  const unreachableFiles = [];
+  const pendingFiles = [];
+  const inertFiles = [];
   const results = [];
   for (const name of files) {
-    const result = parseAnnotations(readFileSync(join(dir, name), "utf8"), {
-      file: join(dir, name),
-    });
+    const text = readFileSync(join(dir, name), "utf8");
+    const result = parseAnnotations(text, { file: join(dir, name) });
     results.push({ name, result });
-    if (result.prose.length > 0 || result.structured.length > 0) annotatedFiles.push(name);
+    if (result.prose.length > 0 || result.structured.length > 0) {
+      annotatedFiles.push(name);
+      continue;
+    }
+    const klass = classifyGateIdiom(text);
+    if (klass === "pending") pendingFiles.push(name);
+    else if (klass === "unreachable") unreachableFiles.push(name);
+    else inertFiles.push(name);
   }
   return {
     dir,
     filesTotal: files.length,
     filesAnnotated: annotatedFiles.length,
     annotatedFiles,
+    unreachableFiles,
+    pendingFiles,
+    inertFiles,
     results,
   };
 }
