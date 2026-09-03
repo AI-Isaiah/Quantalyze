@@ -1,5 +1,46 @@
 # Changelog
 
+## [0.77.5.0] - 2026-09-03
+
+### Phase 164.4 (wave 5) — the first FILE move: the ledger_refresh family is twinned, FILES_FLOOR 1 to 4
+
+No production source change, no schema change, no migration. The three gate files gain
+**comment twins only — zero non-comment lines added**, so no executable SQL changed and the
+arms annotated are exactly the arms that already existed. Batch 3 of 10.
+
+### Added
+
+- All 41 sections of the `ledger_refresh` family carry a `RED-UNDER-M` twin:
+  `test_ledger_refresh_composite_arm.sql` (15), `test_ledger_refresh_fanout.sql` (15),
+  `test_ledger_refresh_staleness.sql` (11). Every one measured RED under its own mutation,
+  identity ok, with every baseline and restore leg exiting 0.
+
+### Changed
+
+- `FILES_FLOOR` 1 to 4 and `ARMS_FLOOR` 45 to 86 — the phase's first FILE move, so both floors
+  move together and the `scanCorpus` exact pin now lists all four annotated files. Both
+  separation directions driven on real lanes: `filesFloor=4` silent / `5` fires,
+  `armsFloor=86` silent / `87` fires.
+- `WAIVED_CEILING` untouched at 0. No waiver candidate arose and no dead arm was found.
+
+### Fixed — two controls that had silently stopped being able to fire
+
+- `--self-test` scenarios 5 and 6 called `runCorpus` without `filesFloor`, so they inherited the
+  PRODUCTION `FILES_FLOOR`. They were green only because the old value happened to equal the
+  fixture corpus's own file count — a coincidence that would have broken the moment the floor
+  moved. Both now state `filesFloor: 1` explicitly, pinning the fixture's own expectation
+  instead of borrowing production config.
+- Seven `GREEN_LOG`-derived RED arms in `src/__tests__/mutation-runner-floors.test.ts` carry the
+  literal `45` inside their mutation regexes. PATTERNS §P4 item 10 claimed these "follow
+  automatically" from a floor change; measured, they do not. Corrected in lockstep and the
+  claim corrected at its source.
+
+### Measured
+
+  full run   exit 0 · coverage: files 4/71 · arms 86/86/0 · biting 86 · lane-invocations 86
+  per-arm    mean 1.0 s over 86 arm runs (+4 baseline / 4 restore legs)
+  self-test  17/17 scenarios · 75 assertions · 0 failures
+
 ## [0.77.4.0] - 2026-09-03
 
 ### Phase 164.4 (wave 4) — the deferral is derived, printed, probed, and can expire
