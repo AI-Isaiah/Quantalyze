@@ -1002,7 +1002,9 @@ jobs:
         # the injected-lane absurdity FIRE scenario and the `lane-unrunnable`
         # MEASURE_FAIL (2026-09-02); 16/16 after 164.4-01 added the parse-time
         # refusal of a twin targeting a pg-lane stand-in fixture — GRAMMAR rule
-        # 4, threat T-164.4-01 (2026-09-02).
+        # 4, threat T-164.4-01 (2026-09-02); 17/17 after 164.4-03 added the
+        # stale-deferral probe — a lane that CAN host pg_cron while idiom files
+        # are still classified lane-blocked, threat T-164.4-11 (2026-09-03).
         #
         # ⛔ MODE IDENTITY: the bare command from the script's own header, no
         # wrapper. Pinned from vitest by src/__tests__/mutation-runner-floors.test.ts.
@@ -1136,6 +1138,74 @@ jobs:
             echo "::error::MEASURE_FAIL: the run CLAIMS $unreachable_claimed excluded file(s) but NAMES $unreachable_named. The count and the names come from the same derivation in one run and cannot disagree; a claim the log's own evidence contradicts is not a measurement."
             exit 1
           fi
+
+          # 164.4-03 — THE DEFERRAL MUST BE NAMED TOO (criterion 4; SCOPE
+          # AMENDMENT #2, founder 2026-09-03). Four idiom gate files probe
+          # `pg_extension` for pg_cron, which the pg-lane has none of and
+          # deliberately will not get. Two of them RAISE on its absence (their
+          # baseline can never be GREEN, so no arm of theirs is ever judged) and
+          # two baseline GREEN but withhold whole Parts behind a
+          # pg_cron-conditional NOTICE (those arms are un-falsifiable on the
+          # lane). Criterion 4: an arm that cannot be given a falsifying
+          # mutation is RECORDED with its reason, never silently skipped — and
+          # sitting inside `  pending:` is exactly a silent skip, since at the
+          # phase's end that line reads as unfinished work rather than a
+          # reasoned exclusion.
+          #
+          # Same three arms as the `unreachable_line` block above, for the same
+          # reasons: absent is a MEASURE_FAIL and never a zero; an unreadable
+          # count is a MEASURE_FAIL; and the count CLAIMED must equal the
+          # `*.sql` names PRINTED beside it, because a count with no names is a
+          # number nobody can check. No literal count is restated here — the
+          # runner derives the set and both sides come from the run output, so
+          # the day the four are annotated this block needs no edit.
+          lane_blocked_line=$(grep -a -m1 -E '^lane-blocked: [0-9]+ file\(s\) ' "$RUNNER_LOG" || true)
+          if [ -z "$lane_blocked_line" ]; then
+            echo "::error::MEASURE_FAIL: the run printed NO 'lane-blocked: N file(s) …' line, so which gate files this run DEFERRED, and why, is unknown. Criterion 4 requires an arm that cannot be given a falsifying mutation to be RECORDED with its reason: a deferral absorbed silently into the pending set fails this gate exactly as a missing annotation does."
+            exit 1
+          fi
+          echo "$lane_blocked_line"
+          lane_blocked_claimed=$(echo "$lane_blocked_line" | sed -E 's|^lane-blocked: ([0-9]+) file\(s\) .*|\1|')
+          case "$lane_blocked_claimed" in ''|*[!0-9]*)
+            echo "::error::MEASURE_FAIL: could not read the deferred-file count out of '$lane_blocked_line'."; exit 1;; esac
+          # `|| true` for the reason spelled out on the `unreachable_named`
+          # pipeline above: under `set -euo pipefail` an EMPTY deferred set —
+          # `lane-blocked: 0 file(s) … — `, the state this phase's successor
+          # reaches by fixing [REDUNDER-PGCRON] — makes `grep -o` match nothing
+          # and exit 1, which would abort the step with no `::error::` at all
+          # and leave the numeric guard below unreachable.
+          lane_blocked_named=$(echo "$lane_blocked_line" | grep -a -o -E '[A-Za-z0-9_]+\.sql' | wc -l | tr -d '[:space:]' || true)
+          case "$lane_blocked_named" in ''|*[!0-9]*)
+            echo "::error::MEASURE_FAIL: could not count the file names on '$lane_blocked_line'."; exit 1;; esac
+          if [ "$lane_blocked_claimed" -ne "$lane_blocked_named" ]; then
+            echo "::error::MEASURE_FAIL: the run CLAIMS $lane_blocked_claimed deferred file(s) but NAMES $lane_blocked_named. The count and the names come from the same derivation in one run and cannot disagree; a claim the log's own evidence contradicts is not a measurement."
+            exit 1
+          fi
+
+          # 164.4-03 — AND THE REASON MUST HAVE BEEN MEASURED (threat
+          # T-164.4-11). "which the pg-lane cannot host" is a claim about the
+          # LANE, and the classification above never touches a lane. So the
+          # runner drives one extra lane leg per run asking
+          # `pg_available_extensions` for pg_cron and prints what it got. A
+          # reason that cannot expire is the control-that-cannot-fail this phase
+          # exists to remove: install pg_cron tomorrow and, without this, four
+          # files stay parked behind a line that still reads true.
+          #
+          # ONE arm here, deliberately. An AVAILABLE line is NOT asserted in
+          # this step — the runner already exits 1 on it through the
+          # `lane-blocked-stale` defect and the job fails on the runner's own
+          # exit status, so re-deciding it here would be a second judge of one
+          # question. CI's job is to notice the probe went MISSING, which is the
+          # one failure the runner cannot report about itself. The
+          # `(absent|AVAILABLE)` alternation is what makes the runner's third
+          # form — `lane-probe: UNREADABLE …`, printed when the probe lane
+          # returned no marker — fail here as well as in-process.
+          lane_probe_line=$(grep -a -m1 -E '^lane-probe: pg_cron (absent|AVAILABLE)' "$RUNNER_LOG" || true)
+          if [ -z "$lane_probe_line" ]; then
+            echo "::error::MEASURE_FAIL: the run printed NO 'lane-probe:' line — the lane was not measured for pg_cron, so the lane-blocked class is unverified. The deferral's stated reason is a fact about the LANE; a run that did not ask it is asserting the reason rather than measuring it."
+            exit 1
+          fi
+          echo "$lane_probe_line"
 
           arms_line=$(grep -a -m1 -E '^arms: [0-9]+/[0-9]+/[0-9]+ ' "$RUNNER_LOG" || true)
           if [ -z "$arms_line" ]; then

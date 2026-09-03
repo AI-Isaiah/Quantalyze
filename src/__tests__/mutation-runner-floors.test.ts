@@ -577,6 +577,11 @@ describe("SP-C02 — the runner's `--self-test` is WIRED into CI, before the cor
     //     because this extractor scans SOURCE — comments included — and would
     //     read the absence-assertion as coverage: a kind credited as exercised
     //     by an arm that only proves it did not appear.
+    //   lane-blocked-stale (164.4-03) was NEVER on this list: scenario 17
+    //     drives the lane-blocked fixture pair with an injected probe leg,
+    //     AVAILABLE against absent, and asserts the AVAILABLE arm exits 1 with
+    //     the defect naming the still-classified file while the absent arm
+    //     exits 0 with none. Same corpus, same stub, one marker apart.
     expect(uncovered).toEqual([
       "bad-file-ref",
       "baseline",
@@ -586,12 +591,13 @@ describe("SP-C02 — the runner's `--self-test` is WIRED into CI, before the cor
     ]);
     // The six kinds SP-C02 names as the self-test's whole purpose, plus
     // neuter-missed (164.3.1-11, scenario 9), absurdity (scenario 14),
-    // lane-unrunnable (scenario 15) and parse (164.4-01, scenario 16) — see the
-    // list above.
+    // lane-unrunnable (scenario 15), parse (164.4-01, scenario 16) and
+    // lane-blocked-stale (164.4-03, scenario 17) — see the list above.
     expect([...exercised].sort()).toEqual([
       "absurdity",
       "floor",
       "identity-rewrite",
+      "lane-blocked-stale",
       "lane-unrunnable",
       "neuter-missed",
       "no-red",
@@ -921,8 +927,20 @@ describe("164.3.1-10 — the runner's absurdity floor (D-09): two INDEPENDENT ta
   });
 
   // ── FIRE direction THROUGH THE WIRING — an injected lane runner ────────
+  // 164.4-03: the runner drives a `probe` leg once per lane-spawning run and
+  // reads a LANE-PROBE marker off its output. A stub that answers it with an
+  // empty string is reported as "the lane was NOT measured" — a MEASURE_FAIL by
+  // design, so a stub cannot quietly stop measuring the lane. Every stub below
+  // therefore answers the probe leg with what a real absent-pg_cron lane prints,
+  // and each arm asserts that no probe MEASURE_FAIL was raised, which is what
+  // keeps these three stubs honest rather than merely quiet.
+  const PROBE_ABSENT = { status: 0, output: "NOTICE:  LANE-PROBE: pg_cron absent", seconds: 0, measureFail: null, invoked: true };
+  const noProbeMeasureFail = (defects: { kind: string; detail: string }[]) =>
+    !defects.some((d) => d.kind === "lane-unrunnable" && d.detail.includes("LANE-PROBE"));
+
   /** A lane runner that "succeeds" without ever spawning: `laneTally` is untouched. */
-  const severedLane = () => ({ status: 0, output: "", seconds: 0, measureFail: null, invoked: true });
+  const severedLane = ({ leg }: { leg: string }) =>
+    leg === "probe" ? PROBE_ABSENT : { status: 0, output: "", seconds: 0, measureFail: null, invoked: true };
 
   it("FIRES through runCorpus's real verdict loop: a lane runner that never spawns → exit 1 with `absurdity` naming executed=N lane-invocations=0", () => {
     // Until 2026-09-02 this direction was pinned only by a one-off byte-backed
@@ -944,6 +962,7 @@ describe("164.3.1-10 — the runner's absurdity floor (D-09): two INDEPENDENT ta
     expect(absurd).toHaveLength(1);
     evidence(absurd[0].detail, r.armsExecuted, 0, r.bitingArms);
     expect(absurd[0].detail).toMatch(/CLAIMED/);
+    expect(noProbeMeasureFail(r.defects), "the stub must have ANSWERED the probe leg").toBe(true);
   });
 
   // ── `lane-unrunnable` — the lane the runner could not RUN ───────────────
@@ -962,14 +981,20 @@ describe("164.3.1-10 — the runner's absurdity floor (D-09): two INDEPENDENT ta
     // Pre-fix `status: null` fell through `!== 0`, the empty output carried
     // no identity, and the arm was reported as `wrong-first-failure` — an
     // instrument failure wearing a corpus defect's name.
-    const dead = ({ leg }: { leg: string }) =>
-      leg === "arm"
-        ? { status: null, output: "", seconds: 0, measureFail: "lane could not run: ENOENT", invoked: false }
-        : { status: 0, output: "", seconds: 0, measureFail: null, invoked: true };
+    const dead = ({ leg }: { leg: string }) => {
+      if (leg === "arm")
+        return { status: null, output: "", seconds: 0, measureFail: "lane could not run: ENOENT", invoked: false };
+      if (leg === "probe") return PROBE_ABSENT;
+      return { status: 0, output: "", seconds: 0, measureFail: null, invoked: true };
+    };
     const r = runCorpus({ scopeDir: SELFTEST_DIR, onlyFile: "nonbiting-gate.sql", armsFloor: 0, laneRunner: dead, log: () => {} });
     expect(r.exitCode).toBe(1);
     const mine = r.defects.filter((d: { kind: string; arm: string | null }) => d.kind === "lane-unrunnable" && d.arm === "NONBITE 1");
     expect(mine).toHaveLength(1);
+    // The ARM's lane is what could not run — not the probe. Without this the
+    // arm would still pass with a second, unrelated lane-unrunnable beside it.
+    expect(noProbeMeasureFail(r.defects), "the stub must have ANSWERED the probe leg").toBe(true);
+    expect(r.defects.filter((d: { kind: string }) => d.kind === "lane-unrunnable")).toHaveLength(1);
     expect(mine[0].detail).toContain("lane could not run: ENOENT");
     expect(mine[0].detail).toContain("this arm was NOT judged");
     expect(r.defects.map((d: { kind: string }) => d.kind)).not.toContain("wrong-first-failure");
@@ -983,13 +1008,16 @@ describe("164.3.1-10 — the runner's absurdity floor (D-09): two INDEPENDENT ta
   });
 
   it("through the wiring: an arm lane that STARTED and was signalled counts as executed but never as biting", () => {
-    const killed = ({ leg }: { leg: string }) =>
-      leg === "arm"
-        ? { status: null, output: "", seconds: 0, measureFail: "lane could not run: SIGKILL", invoked: true }
-        : { status: 0, output: "", seconds: 0, measureFail: null, invoked: true };
+    const killed = ({ leg }: { leg: string }) => {
+      if (leg === "arm")
+        return { status: null, output: "", seconds: 0, measureFail: "lane could not run: SIGKILL", invoked: true };
+      if (leg === "probe") return PROBE_ABSENT;
+      return { status: 0, output: "", seconds: 0, measureFail: null, invoked: true };
+    };
     const r = runCorpus({ scopeDir: SELFTEST_DIR, onlyFile: "nonbiting-gate.sql", armsFloor: 0, laneRunner: killed, log: () => {} });
     expect(r.exitCode).toBe(1);
     expect(r.defects.some((d: { kind: string }) => d.kind === "lane-unrunnable")).toBe(true);
+    expect(noProbeMeasureFail(r.defects), "the stub must have ANSWERED the probe leg").toBe(true);
     expect(r.armsExecuted).toBe(1);
     // biting = executed − unjudged: an arm nobody judged cannot be biting.
     expect(r.bitingArms).toBe(0);
@@ -1117,6 +1145,12 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // real 27 — the arms below mutate the COUNT against the NAMES, and a
     // fixture carrying the live corpus would have to move on every batch.
     "unreachable: 2 file(s) raise outside the runner's identity idiom — a.sql b.sql (TODOS [REDUNDER-NONIDIOM])",
+    // 164.4-03: the DEFERRAL, named, and what the lane itself said about the
+    // reason. Synthetic basenames for the same reason as the line above — the
+    // arms below mutate the COUNT against the NAMES, and a fixture carrying the
+    // live four would have to move the day [REDUNDER-PGCRON] is closed.
+    "lane-blocked: 2 file(s) probe pg_extension for pg_cron, which the pg-lane cannot host — d.sql e.sql (deferred 2026-09-03, TODOS [REDUNDER-PGCRON])",
+    "lane-probe: pg_cron absent — lane-blocked class is current",
     "  pending: 1 idiom file(s) without RED-UNDER — c.sql",
     "arms: 45/45/0   (executed/annotated/waived)",
     "biting: 45   (executed arms that reddened their OWN arm first — the quantity ARMS_FLOOR bounds)",
@@ -1162,6 +1196,66 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     expect(r.out).toContain("MEASURE_FAIL");
     expect(r.out).toContain("CLAIMS 3 excluded file(s) but NAMES 2");
     expect(r.out).not.toContain("two tallies agree");
+  });
+
+  // ── 164.4-03, criterion 4: a SILENT DEFERRAL must fail here too ─────────
+  // Four idiom files are deferred because the pg-lane cannot host pg_cron. Left
+  // inside `  pending:` they would read, at the phase's end, as work nobody got
+  // to — the repudiation shape criterion 4 exists to close. These two arms
+  // prove the CI step fails when the runner stops naming them, and when the
+  // count it claims contradicts the names it printed.
+  it("RED: the lane-blocked line ABSENT is a MEASURE_FAIL — a silent deferral fails like a missing annotation", () => {
+    const without = GREEN_LOG.replace(/^lane-blocked: .*\n/m, "");
+    expect(without, "the deletion must actually change the log").not.toBe(GREEN_LOG);
+    const r = runCountRecheck(without);
+    expect(r.status, r.out).toBe(1);
+    expect(r.out).toContain("MEASURE_FAIL");
+    expect(r.out).toContain("NO 'lane-blocked:");
+    expect(r.out).not.toContain("two tallies agree");
+  });
+
+  it("RED: a CLAIMED deferred count that disagrees with the NAMES printed beside it fails, quoting both numbers", () => {
+    const lying = GREEN_LOG.replace(/^lane-blocked: 2 file\(s\) /m, "lane-blocked: 3 file(s) ");
+    expect(lying).not.toBe(GREEN_LOG);
+    const r = runCountRecheck(lying);
+    expect(r.status, r.out).toBe(1);
+    expect(r.out).toContain("MEASURE_FAIL");
+    expect(r.out).toContain("CLAIMS 3 deferred file(s) but NAMES 2");
+    expect(r.out).not.toContain("two tallies agree");
+  });
+
+  // ── 164.4-03, threat T-164.4-11: the reason must have been MEASURED ─────
+  // The lane-blocked class is derived from the corpus; its printed reason is a
+  // claim about the LANE. A run that stopped probing would keep printing four
+  // deferred files with nothing able to contradict them. CI's job is to notice
+  // the probe went MISSING — the one failure the runner cannot report about
+  // itself, since a runner that never probed also never raises the defect.
+  it("RED: the lane-probe line ABSENT is a MEASURE_FAIL — an unmeasured deferral reason is not a measurement", () => {
+    const without = GREEN_LOG.replace(/^lane-probe: .*\n/m, "");
+    expect(without, "the deletion must actually change the log").not.toBe(GREEN_LOG);
+    const r = runCountRecheck(without);
+    expect(r.status, r.out).toBe(1);
+    expect(r.out).toContain("MEASURE_FAIL");
+    expect(r.out).toContain("NO 'lane-probe:");
+    expect(r.out).not.toContain("two tallies agree");
+  });
+
+  it("RED: the runner's UNREADABLE probe form does not satisfy the lane-probe assertion", () => {
+    // The runner prints `lane-probe: UNREADABLE …` when the probe lane returned
+    // no marker. That IS a printed lane-probe line, so a lazier grep (`^lane-probe:`)
+    // would accept it and the missing measurement would pass CI while the
+    // in-process MEASURE_FAIL carried the whole burden. The `(absent|AVAILABLE)`
+    // alternation is what refuses it, and this arm is what keeps that alternation.
+    const unreadable = GREEN_LOG.replace(
+      /^lane-probe: .*$/m,
+      "lane-probe: UNREADABLE — the probe lane printed no LANE-PROBE marker, so pg_cron availability was NOT measured and the lane-blocked class is unverified",
+    );
+    expect(unreadable, "the substitution must actually change the log").not.toBe(GREEN_LOG);
+    expect(unreadable, "the substituted line is still a lane-probe line").toMatch(/^lane-probe: /m);
+    const r = runCountRecheck(unreadable);
+    expect(r.status, r.out).toBe(1);
+    expect(r.out).toContain("MEASURE_FAIL");
+    expect(r.out).toContain("NO 'lane-probe:");
   });
 
   // ── The ZERO boundary, both directions ───────────────────────────────────

@@ -1101,20 +1101,34 @@ true for 146 and half of 142–145, and **false for 141**.
       deletion guard) and its CI board read SHA-bound. `gsd-tools windows append` refuses with the
       same counts error, so it is recorded here.
 
-- [ ] **`[REDUNDER-PGCRON]` Three Phase-164.4 idiom gate files can NEVER reach a GREEN pg-lane baseline — the lane has no `pg_cron` (measured 2026-09-02, Plan 164.4-00).**
+- [ ] **`[REDUNDER-PGCRON]` FOUR Phase-164.4 idiom gate files cannot be FALSIFIED on the pg-lane — the lane has no `pg_cron` (measured 2026-09-02, Plan 164.4-00; mechanism corrected and the set closed at four 2026-09-03, Plan 164.4-03).**
       `scripts/pg-lane/run.sh` boots a vanilla `initdb` cluster. Measured on it: `pg_available_extensions`
       has **0 rows** for `pg_cron`, and `CREATE EXTENSION pg_cron` fails `0A000 … Could not open extension
       control file ".../postgresql@16/share/postgresql@16/extension/pg_cron.control"`.
-      Four gate files open with `IF NOT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'pg_cron')
-      THEN RAISE EXCEPTION` — deliberately, as their anti-green-skip contract. Their baseline is therefore
-      RED for a reason NO apply list can change, and `run.mjs:1836` never judges an arm in a red-baseline
-      file. **`test_reconcile_dropped_enqueue_sweep.sql` (39 sections, rank 1),
-      `test_retention_orphaned_running.sql` (25, rank 4) and `test_derive_allocator_keys_fanout.sql`
-      (7, rank 18) = 71 of the corpus's 355 idiom sections (20%) are un-annotatable on today's lane.**
-      `test_retention_crons_safe.sql` is affected too but is a non-idiom file (out of scope under (c)).
-      Separately, `test_strategy_analytics_stuck_computing_reaper.sql` (29, rank 3) BASELINES green but
-      `RAISE NOTICE 'SKIP Part 2/3'; RETURN;`, so its arms behind those skips are UNFALSIFIABLE on the
-      lane — a mutation there reports as non-biting.
+      ⚠️ **THE MECHANISM IS NOT UNIFORM, and this entry used to say it was.** Re-measured at HEAD
+      2026-09-03, per file:
+      * `test_reconcile_dropped_enqueue_sweep.sql` (39 sections, rank 1) — `:268-269`
+        `IF NOT EXISTS (… extname = 'pg_cron') THEN RAISE EXCEPTION 'TEST FAILED (1/JOB-04) …'`;
+      * `test_retention_orphaned_running.sql` (25, rank 4) — `:212-213`, same shape, `1/JOB-05`.
+        For BOTH, the lane baseline can never be GREEN and `run.mjs` never judges an arm in a
+        red-baseline file. This is deliberate on their part: their anti-green-skip contract.
+      * `test_strategy_analytics_stuck_computing_reaper.sql` (29, rank 3) — BASELINES GREEN, then
+        `RAISE NOTICE 'SKIP …'` at `:282` (Part 1b + Parts 2-3), `:326` and `:483`, withholding
+        identities `1/JOB-02`, `1/JOB-03`, `2…` and `3…`;
+      * `test_derive_allocator_keys_fanout.sql` (7, rank 18) — BASELINES GREEN and does NOT raise:
+        `:159 IF EXISTS (… 'pg_cron') THEN` guards ASSERTION 6 (`TEST FAILED (6)`) and `:169` prints
+        `pg_cron not present — skipping cron assertion` otherwise. Its section `6` is un-falsifiable
+        for the same reason, which is why it joins the set rather than being annotated half-way.
+      **2 RAISE + 2 green-skip = 100 of the corpus's 355 idiom sections (28%), across 4 files.**
+      `test_retention_crons_safe.sql` probes pg_cron too but is a non-idiom file (out of scope under
+      (c), and the runner keeps printing it under `unreachable:`, not `lane-blocked:`).
+      **DEFERRED 2026-09-03 — pg_cron is NOT installed on the lane; the four files are printed by the
+      runner as `lane-blocked:` every run (Plan 164.4-03); 100 of 355 sections; the phase's end state
+      is `coverage: files 40/71`.** The deferral CAN expire and is not a parking space: every
+      lane-spawning run drives a `probe` leg asking `pg_available_extensions` for pg_cron and prints
+      the answer as `lane-probe:`; pg_cron AVAILABLE with a non-empty lane-blocked class is a
+      `lane-blocked-stale` MEASURE_FAIL that exits 1, so closing this item reddens the gate until the
+      four files are annotated. `sql-mutation` MEASURE_FAILs if either line goes missing.
       **Not fixable inside a batch plan.** Hosting `pg_cron` needs a package on BOTH hosts (`brew search
       pg_cron` finds the formula; it is NOT installed here — ubuntu needs its own `postgresql-<v>-cron`)
       AND `shared_preload_libraries=pg_cron` + `cron.database_name` on `run.sh`'s `pg_ctl -o` line, i.e.

@@ -1,5 +1,43 @@
 # Changelog
 
+## [0.77.4.0] - 2026-09-03
+
+### Phase 164.4 (wave 4) — the deferral is derived, printed, probed, and can expire
+
+No production source change, no schema change, no migration. SQL-gate tooling, its
+tests, CI assertions, and the planning record. Batch 2 of 10; it lands on its own so
+`sql-mutation` runs SHA-bound and green on ubuntu, which is the precondition wave 5 reads.
+
+### Added
+
+- `scanCorpus` derives a fifth corpus class, `lane-blocked`: gate files whose EXECUTABLE
+  text probes `pg_extension` for `pg_cron`, which the throwaway pg-lane cannot host. It is
+  printed in both full and `--parse-only` mode, by name, with the reason and the owning
+  TODO id, and those four files no longer sit silently inside `pending:`.
+- A lane probe. Every lane-spawning run drives a leg asking `pg_available_extensions` for
+  `pg_cron` and prints `lane-probe:`. The stated reason for the deferral is a fact about the
+  LANE, and no derivation over the corpus measures it — so the runner now asks.
+- `lane-blocked-stale`: pg_cron AVAILABLE while the lane-blocked class is non-empty exits 1.
+  The deferral therefore EXPIRES rather than parking 100 sections forever — closing
+  `[REDUNDER-PGCRON]` reddens the gate until those four files are annotated.
+- Two self-test fixtures and a stale-deferral scenario; the suite goes 16 to 17 scenarios.
+
+### Changed
+
+- CI `sql-mutation` MEASURE_FAILs on an absent `lane-blocked:` line, an unreadable count, a
+  claimed count that disagrees with the names printed beside it, or a missing `lane-probe:`.
+  A claim the log's own evidence contradicts is not a measurement.
+- `[REDUNDER-PGCRON]` corrected BY RE-MEASUREMENT: it was recorded as 3 files / 71 sections /
+  all RAISE. It is **4 files / 100 sections / 2 RAISE + 2 green-skip** —
+  `test_derive_allocator_keys_fanout.sql:159` and the stuck-computing reaper baseline GREEN
+  and skip behind a `RAISE NOTICE`, withholding identities rather than raising.
+- SCOPE AMENDMENT #2 written to every ledger site the verifier reads.
+
+### Unchanged, deliberately
+
+- `FILES_FLOOR` 1, `ARMS_FLOOR` 45, `WAIVED_CEILING` 0. This is a runner batch with no SQL
+  target; no arm was added, so no floor moves.
+
 ## [0.77.3.0] - 2026-09-03
 
 ### Phase 164.4 (wave 3) — the reference gate file is fully twinned, and ARMS_FLOOR ratchets 30 to 45

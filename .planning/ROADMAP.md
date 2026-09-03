@@ -591,12 +591,15 @@ Plans:
 
 ### Phase 164.4: REDUNDER-BACKFILL — every SQL gate arm gets a RED-UNDER annotation that a machine PROVES bites (INSERTED)
 
-**Goal**: Every arm in the **44 `TEST FAILED (` idiom files** of `supabase/tests/*.sql` carries a
-`RED-UNDER` annotation naming the exact mutation that makes it fail, and the Phase 164.3 mutation
-runner PROVES each one bites — red under its own mutation, green when restored. Coverage moves from
-1 file to 44, behind a floor that cannot regress, with the **27 excluded non-idiom files printed by
-name on every run**. (Scope narrowed from "all of them" by founder decision 2026-09-02 — see the
-SCOPE AMENDMENT below; the rename of the 27 is booked as `[REDUNDER-NONIDIOM]` in `TODOS.md`.)
+**Goal**: Every arm in **the 40 idiom files the pg-lane can reach** (4 more are printed by the
+runner as lane-blocked every run — SCOPE AMENDMENT #2, founder 2026-09-03, 100 sections owed to
+`[REDUNDER-PGCRON]`) of `supabase/tests/*.sql` carries a `RED-UNDER` annotation naming the exact
+mutation that makes it fail, and the Phase 164.3 mutation runner PROVES each one bites — red under
+its own mutation, green when restored. Coverage moves from 1 file to those 40 reachable files,
+behind a floor that cannot regress, with the **27 excluded non-idiom files and the 4 deferred
+lane-blocked files each printed by name on every run**. (Scope narrowed from "all of them" by
+founder decision 2026-09-02, and again 2026-09-03 — see both SCOPE AMENDMENTs below; the rename of
+the 27 is booked as `[REDUNDER-NONIDIOM]` and the 4 as `[REDUNDER-PGCRON]` in `TODOS.md`.)
 **Depends on:** ⛔ **Phase 164.3 — HARD, not ordering.** 164.3 builds the mutation runner, and the
 runner is the only thing that makes this phase safe to do at all.
 **Requirements**: SC-1, SC-2, SC-3, SC-4 — the four success criteria below stand in for requirement IDs (no `REQUIREMENTS.md` IDs exist for this inserted phase; RESEARCH § Phase Requirements). Discussed 2026-09-02 (`164.4-CONTEXT.md`).
@@ -629,8 +632,9 @@ through their own message prefixes** (`'MT5SRC-03 (1a): …'`, `'FLIPRETRY-02: �
 structurally unreachable by the runner.
 
 Three options were measured and put to the founder. **Option (c) was chosen:** scope this phase to
-the **44 idiom files**, and have the runner **PRINT the 27 excluded files BY NAME on every run** so
-the gap is emitted by the gate itself rather than asserted in a ledger. Rejected: **(a)** renaming
+the **40 idiom files the pg-lane can reach** (of 44 — 4 lane-blocked, SCOPE AMENDMENT #2, founder
+2026-09-03, `[REDUNDER-PGCRON]`), and have the runner **PRINT the 27 excluded files BY NAME on every
+run** so the gap is emitted by the gate itself rather than asserted in a ledger. Rejected: **(a)** renaming
 the 27 files into the idiom — not an assertion edit (nothing external reads those strings; the
 sentinel gate counts `RAISE EXCEPTION` lines at `ci.yml:2360` and `sql-tests` uses `ON_ERROR_STOP`)
 but genuine *authoring*, since the 321 no-idiom raises carry only **139 distinct prefixes** (`B5b:`
@@ -644,10 +648,32 @@ every ledger reading "usable end-to-end" while untrue. Here the exclusion is PRI
 every run, so no ledger can drift from what is measured. The successor rename is booked in
 `TODOS.md` as `[REDUNDER-NONIDIOM]`.
 
+⚖️ **SCOPE AMENDMENT #2 — founder decision 2026-09-03, criterion 1 NARROWED AGAIN (count, not
+standard).** Of the 44 idiom files, **4 probe `pg_extension` for pg_cron** and the pg-lane
+(`scripts/pg-lane/run.sh`) has none — the founder decided on 2026-09-03 NOT to install it there.
+MEASURED at HEAD, and this corrects the record: `test_reconcile_dropped_enqueue_sweep.sql:268` (39
+sections) and `test_retention_orphaned_running.sql:212` (25) **RAISE EXCEPTION** on the absent
+extension, so their lane baseline can never be GREEN and the runner judges no arm in a red-baseline
+file; `test_strategy_analytics_stuck_computing_reaper.sql:282/326/483` (29) and
+`test_derive_allocator_keys_fanout.sql:159/169` (7) baseline **GREEN** but withhold whole Parts
+behind a pg_cron-conditional `RAISE NOTICE`, so those arms are un-falsifiable on the lane. (The
+earlier record said all of them RAISE; two do not.) CONTEXT's batch rule — *each plan lands its
+files FULLY proven, no file left half-annotated* — defers all four together: **40 files / 255
+sections are reachable; 100 sections are owed to `[REDUNDER-PGCRON]`.**
+
+This is criterion 4 applied, not criterion 4 waived. The runner DERIVES the four from the corpus
+and prints them every run as `lane-blocked: 4 file(s) … (deferred 2026-09-03, TODOS
+[REDUNDER-PGCRON])`, `sql-mutation` MEASURE_FAILs when that line is absent or when its count
+disagrees with the names beside it, and — because "the pg-lane cannot host pg_cron" is a claim about
+the LANE that no derivation measures — **every lane-spawning run probes the lane itself** and exits
+1 with `lane-blocked-stale` the day pg_cron is available while the class is non-empty. The deferral
+can therefore expire; it cannot outlive its cause. (Plan 164.4-03.)
+
 ⚠️ **The arm unit is the SECTION** (founder decision 2026-09-02): one `RED-UNDER-M` per NAMED
-assertion group (`"arm":"NAME"`), NOT one per raise. Under option (c) that is **355 sections /
-~365 twins** across the 44 idiom files (the identity unit would have been 516 and would have pushed
-CI past the 20-minute split threshold).
+assertion group (`"arm":"NAME"`), NOT one per raise. Under option (c) as amended that is
+**255 sections / ~265 twins** across the 40 reachable idiom files; the 100 sections in the 4
+lane-blocked files are owed to `[REDUNDER-PGCRON]` (SCOPE AMENDMENT #2). The identity unit would
+have been 516 and would have pushed CI past the 20-minute split threshold.
 
 ⚠️ **The reference file does NOT meet criterion 1 today.** `test_strategy_shares_rls.sql` is one
 2,602-line `DO $$` block holding 103 identities in **35 sections with only 30 twins — 15 sections
@@ -656,10 +682,11 @@ this phase, not a precondition of it.
 
 **Success Criteria** (what must be TRUE):
 
-  1. **Every arm in the 44 IDIOM files carries a `RED-UNDER`** naming the exact mutation that makes
-     it fail — arm = section, per the amendment above. The 27 non-idiom files are OUT of scope and
-     **the runner names them in its output every run**; a silent exclusion fails this criterion just
-     as a missing annotation does.
+  1. **Every arm in the 40 REACHABLE idiom files carries a `RED-UNDER`** naming the exact mutation
+     that makes it fail — arm = section, per the amendments above. The 27 non-idiom files are OUT of
+     scope and the 4 lane-blocked files are DEFERRED (SCOPE AMENDMENT #2, 2026-09-03,
+     `[REDUNDER-PGCRON]`); **the runner names BOTH sets in its output every run**;
+     a silent exclusion fails this criterion just as a missing annotation does.
   2. **The 164.3 runner executes ALL of them** — each demonstrated RED under its own mutation and
      GREEN when restored. An annotation that never reddens its arm is a FAILURE, not a pass.
 
@@ -673,14 +700,14 @@ this phase, not a precondition of it.
 **Explicitly OUT of scope:** writing new gate coverage. This phase annotates and proves what already
 exists; it does not add arms. New coverage is a different phase with a different risk profile.
 
-**Plans:** 3/12 plans executed (REPLANNED 2026-09-03 after the Plan 00 spike: four pg_cron files DEFERRED by founder decision — see `[REDUNDER-PGCRON]`; end state on today's lane is 40 of 44 idiom files annotated + 4 printed as `lane-blocked:`)
+**Plans:** 4/12 plans executed (REPLANNED 2026-09-03 after the Plan 00 spike: four pg_cron files DEFERRED by founder decision — see `[REDUNDER-PGCRON]`; end state on today's lane is 40 of 44 idiom files annotated + 4 printed as `lane-blocked:`)
 
 Plans:
 
 - [x] 164.4-00-PLAN.md — Fixture-strategy spike: stand-ins vs stubbed real chain decided BY MEASUREMENT (timeboxed to 8 stub iterations, 4.0 s/lane rule); largest file's apply list proven GREEN; F1 residual closed
 - [x] 164.4-01-PLAN.md — Wave 0 runner/CI: `unreachable:` line naming the 27 excluded files, per-file `judged/annotated/waived/biting` breakdown, ci.yml MEASURE_FAIL assertions, GREEN/RED log fixtures, parse-time refusal of fixture targets with red self-test fixture (arm unit = SECTION, 355 sections / ~365 twins stated on the record)
 - [x] 164.4-02-PLAN.md — Reference file: the 15 un-twinned sections of test_strategy_shares_rls.sql; ARMS_FLOOR 30 → measured (≈45); full lockstep-pin choreography rehearsed
-- [ ] 164.4-03-PLAN.md — Runner: DERIVED `lane-blocked:` line naming the 4 deferred pg_cron files (reconcile 39, reaper 29, retention 25, derive 7 = 100 sections) with reason + TODO id every run, CI MEASURE_FAIL + exact-set pin; `[REDUNDER-PGCRON]` mechanism corrected per file; floors unchanged
+- [x] 164.4-03-PLAN.md — Runner: DERIVED `lane-blocked:` line naming the 4 deferred pg_cron files (reconcile 39, reaper 29, retention 25, derive 7 = 100 sections) with reason + TODO id every run, CI MEASURE_FAIL + exact-set pin; `[REDUNDER-PGCRON]` mechanism corrected per file; floors unchanged
 - [ ] 164.4-04-PLAN.md — Batch 1: the three ledger_refresh gates (15 + 15 + 11 = 41) starting from Plan 00's PROVEN apply list; FILES_FLOOR 1 → 4, ARMS_FLOOR → ≈86
 - [ ] 164.4-05-PLAN.md — Batch 2: wizard_composite_members, capital_ownership_allocation_guard, create_wizard_strategy_for_key, scenario_shares_rls, strategy_keys_rls (48); FILES_FLOOR → 9, ARMS_FLOOR → ≈134
 - [ ] 164.4-06-PLAN.md — Batch 3: strategies_private_owner_isolation, api_keys_venue_identity_uniq, capital_ownership_column, csv_daily_returns_perkey_rls (29); FILES_FLOOR → 13, ARMS_FLOOR → ≈163
@@ -1002,7 +1029,7 @@ Plans:
 | 164.1 HARDEN-GUARDS (spine gates, OPS-08-TS/F2, PYAPI-06) | 0/? | Queued 2nd (deduped 2026-08-28) | - |
 | 164.2 CURATED-COPY (+ WIZFORM-02, WR-06-UTC, HONEST-08-RESIDUAL) | 0/? | Queued 3rd (deduped 2026-08-28) | - |
 | 164.3 VACUITY (+ SKIP-01, DRIFT-01, OPS-08-F9/F8, H-0001) | 0/? | ◆ RUNS FIRST (resequenced 2026-08-28) | - |
-| 164.4 REDUNDER-BACKFILL (1/44 idiom files annotated today; scope narrowed to the idiom corpus 2026-09-02, 27 non-idiom files printed-and-excluded) | 0/13 | Planned 2026-09-02 — 13 plans (spike, Wave 0 runner/CI, reference file, 10 file-batches landed one PR at a time with sql-mutation GREEN on ubuntu between); 164.3.1 HARD dep CLOSED 2026-09-02 | - |
+| 164.4 REDUNDER-BACKFILL (40 reachable idiom files + 4 lane-blocked (SCOPE AMENDMENT #2); scope narrowed to the idiom corpus 2026-09-02, 27 non-idiom files printed-and-excluded) | 0/13 | Planned 2026-09-02 — 13 plans (spike, Wave 0 runner/CI, reference file, 10 file-batches landed one PR at a time with sql-mutation GREEN on ubuntu between); 164.3.1 HARD dep CLOSED 2026-09-02 | - |
 | 165. DEPS dependabot campaign | 0/? | Not started | - |
 
 ### Requirement Coverage (v1.20)
@@ -1020,6 +1047,75 @@ Plans:
 
 **50/50 v1.20 requirement IDs mapped, each to exactly one phase. No orphans, no duplicates.**
 (Per-requirement traceability: `.planning/REQUIREMENTS.md` § Traceability.)
+
+### Phase 166: QSTATS-TRUTH — every quantstats-derived number reflects the returns it was given
+
+**Goal:** No metric persisted to `metrics_json` or rendered in a chart is the output of quantstats'
+price-detection heuristic misreading a return series as prices. RANK-05 (Phase 159) closed that
+heuristic in `compute_all_metrics` only; this phase closes the rest of the surface and settles
+whether the library stays.
+
+**Depends on:** Phase 165 (ordering only — no code dependency). ⚠️ **RESEARCH-FIRST phase:** the
+shape of the work is not decidable from the codebase alone (see criterion 1), so `/gsd-plan-phase 166`
+must run its research step, and the discuss step must not be skipped.
+
+**Why this is a phase and not a TODO.** ⚠️ **Not hypothetical — measured.** `.planning/WINDOWS.md`
+entries 5 and 9 (both `open`) record wrong values already persisted: on the phase's own trigger
+fixture, a 60-day all-winning series whose `max_drawdown` correctly reads `0.0` wrote
+`ulcer_index=0.9947`, `common_sense_ratio=0.0`, `recovery_factor=2.0737`, `upi=2.9999`,
+`serenity_index=0.3204` into the same `metrics_json` Phase 159 was guarding. The residual is live in
+three places:
+
+- `compute_qstats_scalars` — 8 scalars (`analytics-service/services/metrics.py:1771`), dispatched
+  through `getattr(qs.stats, qs_attr)` at `:1826`;
+- `_rolling_alpha_beta`'s `rolling_greeks` call (`:2071`) — which **feeds rendered chart series**,
+  so this one reaches the user's eyes, not just the row;
+- the greeks benchmark leg.
+
+Four of the eight (`ulcer_index`, `ulcer_performance_index`, `probabilistic_ratio`, `serenity_index`)
+reach `_prepare_prices` **transitively** via `to_drawdown_series` and **cannot** be closed with
+`prepare_returns=False`. Measured at HEAD 2026-09-03: 30 `qs.stats.*` call sites in `metrics.py`,
+only 8 carrying a `prepare_returns=False` closure; quantstats is pinned at `0.0.81`.
+
+⛔ **The gate that should catch this is blind to it.** The RANK-05 region gate matches LINES, so it
+cannot see the `getattr(qs.stats, attr)` dispatch at `:1826` nor `_rolling_alpha_beta` at all — it
+reports clean over the exact surface that is still open. That is a Phase 164.3-class vacuity: a
+control that cannot fail. Fixing the metrics without fixing the gate leaves the next regression
+equally invisible.
+
+**Thesis inherited from Phase 162 (HONEST):** every number a user sees reflects the data underneath
+it. A wrong Sharpe is not an error surface — it is a confident lie, which is why 164.2 (error copy)
+is the wrong home for it.
+
+**Success Criteria** (what must be TRUE):
+
+1. **The upgrade-vs-mirror decision is made on evidence, not assumption.** Research establishes
+   whether `0.0.81` is still current, whether a maintained fork exists, and whether any newer release
+   fixes `_utils._prepare_returns`' price detection — and the phase picks its shape from that answer.
+   Hand-writing inline mirrors for the transitive four is a fallback, not the default.
+2. **Every one of the 30 `qs.stats.*` call sites is either closed or recorded as out of scope with a
+   reason** — the same printed-exclusion discipline Phase 164.4 established. A silent omission fails
+   this criterion exactly as a wrong value does.
+3. **The region gate AST-walks `qs.stats.*` calls** instead of matching lines, sees the `getattr`
+   dispatch shape and `_rolling_alpha_beta`, and is PROVEN able to fail: reintroduce an unclosed call
+   site, observe the gate go RED naming it, restore.
+4. **The measured wrong values are shown to be gone on the same fixture that produced them.**
+   The 60-day all-winning series with `max_drawdown == 0.0` yields defensible values for all five
+   named scalars — asserted against economic invariants, never against the implementation's own output.
+5. **No metric silently changes without being recorded.** Any persisted value this phase corrects is
+   named in the SUMMARY with its before and after, since these numbers are already in users' rows.
+
+**Requirements**: TBD — set at planning time from research. Carries `[159-SIMPLIFY-DEFER]` (TODOS 0f):
+extract `_downside_rms` / `_annualized_vol_sharpe` as module-level primitives BEFORE a third
+hand-copy is added, and derive `PERCENTILE_ANALYTICS_COLUMNS` + csv-finalize's
+`CLOCK_SAFETY_KPI_COLUMNS` from one exported KPI array. TODOS 0f explicitly says to do this extraction
+as part of the scalars closure, not before.
+
+**Plans:** 0 plans
+
+Plans:
+
+- [ ] TBD (run /gsd-plan-phase 166 to break down)
 
 ---
 
