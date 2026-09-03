@@ -59,14 +59,16 @@ when their credential is absent — neither ever skips.
 `arms: 30/30/0`, tallies agree — closes `.planning/WINDOWS.md` entry 28);
 `plan-anchor-verify` was skipped in that run. ⚠️ CURRENCY 2026-09-03: that
 `30/30/0` is the run-33620169220 quote and stays as lineage; so do plan 02's
-`45/45/0` and plan 04's `86/86/0`. Phase 164.4 plan 05 annotated the
-tenant-isolation batch (five NEW gate files — wizard composite membership,
-capital-ownership allocation, the use-existing-key wizard writer, scenario
-shares and strategy_keys — 11 + 10 + 9 + 9 + 9 = 48 sections), so the measured
-corpus is now `coverage: files 9/71`, `arms: 134/134/0`, `biting: 134`,
-`lane-invocations: 134`, tallies agree, `FILES_FLOOR` is pinned at 9 and
-`ARMS_FLOOR` at 134, with `pending: 31` idiom files still to go. Read the run's
-own `coverage:` and `arms:` lines rather than any number restated in prose.
+`45/45/0`, plan 04's `86/86/0` and plan 05's `134/134/0` (the last confirmed on
+ubuntu, run 33785233457 at PR #735 head `f0d19bf7`, 232 s). Phase 164.4 plan 06
+annotated four NEW gate files — private-by-default owner isolation, the
+api_keys venue-identity backstop, the capital-ownership column shape and the
+per-key csv_daily_returns RLS axis — 8 + 7 + 7 + 7 = 29 sections, so the
+measured corpus is now `coverage: files 13/71`, `arms: 163/163/0`,
+`biting: 163`, `lane-invocations: 163`, tallies agree, `FILES_FLOOR` is pinned
+at 13 and `ARMS_FLOOR` at 163, with `pending: 27` idiom files still to go. Read
+the run's own `coverage:` and `arms:` lines rather than any number restated in
+prose.
 VAC-04 and VAC-08 have still not run against their real credential; see entries
 25 and 26.
 

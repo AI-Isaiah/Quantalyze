@@ -335,9 +335,10 @@ psql field (`CONTEXT:  …`, `LOCATION:  …`); such an arm is refused, loudly.
 
 All 104 identities in the reference file were measured as single-frame direct
 DO-body raises (2026-08-29), so this rule refuses nothing that existed. ⚠️
-CURRENCY 2026-09-03: the annotated corpus is now NINE files carrying 322
-code-level identities (plan 164.4-05 added the tenant-isolation batch), and all
-134 of their arms scored `RED (identity ok)` on real lanes — i.e. the rule has
+CURRENCY 2026-09-03: the annotated corpus is now THIRTEEN files (plan 164.4-06
+added the private-by-default, venue-identity, capital-ownership-column and
+per-key-dailies gates on top of plan 164.4-05's tenant-isolation batch), and all
+163 of their arms scored `RED (identity ok)` on real lanes — i.e. the rule has
 still refused nothing that exists. Read the run's own `arms:`/`biting:` lines
 rather than either number restated here. It is written down so a 164.4 author
 meets it as a **contract** rather than as a surprise from the runner.

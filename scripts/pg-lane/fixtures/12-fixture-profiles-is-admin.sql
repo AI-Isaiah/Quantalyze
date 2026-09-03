@@ -1,0 +1,15 @@
+-- Additive stand-in: `profiles.is_admin`. 20260405061911_initial_schema.sql
+-- carries it in production; that migration is not in any apply list (it seeds a
+-- dozen unrelated subsystems and would pull the whole chain in), and
+-- 02-fixture-sanitize-tables.sql gives `profiles` only the columns
+-- `sanitize_user` writes.
+--
+-- Read by 20260522111839_csv_daily_returns.sql:88-90, whose
+-- `csv_daily_returns_admin_select` policy predicate is
+-- `EXISTS (SELECT 1 FROM profiles p WHERE p.id = auth.uid() AND p.is_admin)`.
+-- DEFAULT false on purpose: the per-key RLS gate seeds two ordinary allocators,
+-- and an admin-by-default profile would let the admin policy return every row
+-- and make every cross-tenant assertion in that file pass or fail for a reason
+-- unrelated to the policy under test. Never a second base: 01-fixture-core.sql
+-- remains the only destructive fixture.
+ALTER TABLE profiles ADD COLUMN IF NOT EXISTS is_admin BOOLEAN NOT NULL DEFAULT false;
