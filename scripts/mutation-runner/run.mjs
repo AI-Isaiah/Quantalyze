@@ -149,6 +149,12 @@ const PROBE_AVAILABLE_OUTPUT = `ERROR:  ${LANE_PROBE_AVAILABLE}`;
 // 30 -> 45 by closing the reference file's 15 un-twinned SECTIONS, and annotated
 // no NEW file, so the FILE count did not move. A batch that annotates a new file
 // moves this constant; a batch that deepens an existing one does not.
+// ⚠️ CURRENCY 2026-09-03 (plan 164.4-03): still 1, and the DENOMINATOR this
+// phase can reach on today's lane is **40 idiom files, not 44** — SCOPE
+// AMENDMENT #2, founder 2026-09-03. Four idiom files probe `pg_extension` for
+// pg_cron, which the pg-lane does not host and deliberately will not; they are
+// derived, printed as `lane-blocked:` and owed to TODOS [REDUNDER-PGCRON], so
+// the phase's end state is `coverage: files 40/71`. This plan edited no floor.
 export const FILES_FLOOR = 1;
 
 // ARMS_FLOOR — PINNED 2026-08-29 BY MEASUREMENT (plan 164.3-08), not chosen.

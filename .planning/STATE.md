@@ -85,14 +85,30 @@ structurally unreachable. Rejected alternatives, both measured: renaming the 27 
 (authoring, not mechanical — 321 raises carry only 139 distinct prefixes, so identities must be
 INVENTED) and generalising the identity grammar to a per-file prefix (weakens primitives 3a/3b that
 164.3.1 just closed, and buys no precision since prefixes are SHARED across arms).
-**Arm unit = SECTION** (not per-raise, not per-identity): 355 sections / ~365 twins over the 44
-files. The identity unit would have been 516 and pushed CI past the 20-minute split threshold.
+**Arm unit = SECTION** (not per-raise, not per-identity): 255 sections / ~265 twins over the 40
+reachable files; 100 sections in 4 lane-blocked files owed to `[REDUNDER-PGCRON]` (SCOPE AMENDMENT
+#2). The identity unit would have been 516 and pushed CI past the 20-minute split threshold.
 ⚠️ Recorded in FOUR places on purpose — `ROADMAP.md` § Phase 164.4 (goal, SCOPE AMENDMENT block,
 criterion 1, progress table), here, and `TODOS.md` `[REDUNDER-NONIDIOM]`. The v1.17 lesson is that
 an amendment landing in ONE file leaves the refused claim alive in the others.
 ⚠️ Also measured: the reference file `test_strategy_shares_rls.sql` holds 103 identities in **35
 sections with only 30 twins — 15 sections have no twin**, so the "1 file fully annotated" baseline
 was never true. Closing those 15 is inside this phase, not a precondition of it.
+
+⚖️ **SCOPE AMENDMENT #2** (founder 2026-09-03, Plan 164.4-03): of the 44 idiom files, 4 probe
+`pg_extension` for pg_cron and the pg-lane has no pg_cron — 40 files / 255 sections are reachable;
+the 4 (100 sections) are printed by the runner as `lane-blocked:` every run, probed against the lane
+every run, and owed to `[REDUNDER-PGCRON]`. Criterion 1's standard is unchanged. Measured mechanism,
+which CORRECTS the earlier all-files-RAISE record: `reconcile_dropped_enqueue_sweep.sql:268` (39
+sections) and `retention_orphaned_running.sql:212` (25) RAISE EXCEPTION on the absent extension, so
+their baseline can never be GREEN; `strategy_analytics_stuck_computing_reaper.sql:282/326/483` (29)
+and `derive_allocator_keys_fanout.sql:159/169` (7) baseline GREEN but withhold whole Parts behind a
+pg_cron-conditional `RAISE NOTICE`, so those arms are un-falsifiable on the lane. All four deferred
+together under CONTEXT's no-half-annotated-file rule.
+⚠️ Recorded in EIGHT places on purpose — `ROADMAP.md` (goal line, narrowing goal sentence,
+section-unit paragraph, criterion 1, progress table row, and its own amendment block), here (this
+paragraph and the arm-unit line above), and `TODOS.md` `[REDUNDER-PGCRON]`. Same v1.17 lesson: an
+amendment landing in ONE file leaves the refused claim alive in the others.
 
 ## Deferred Verification
 
@@ -1652,7 +1668,7 @@ pre-merge `e0493913`. Fix is PR #669. Supabase migrations and the Vercel fronten
 - 161.1-04 (wave 4, 2026-08-25): the composite arm LANDED DORMANT — `enqueue_ledger_composite_refresh` (migration `20260825140000`), 8-arm SQL gate, static gates 10-11, and the D-15 non-destructive guard EXTENDED to `run_stitch_composite_job._stamp_failed` (a second destructive stamp plan 02's guard never covered; found by measurement, fixed under Rule 2). ⛔ **Task 3 is a BLOCKING founder LIVE op and is NOT done:** one manual `stitch_composite` enqueue for the one live PROD composite must be observed to completion (`last_return_date` advancing in the staleness view, NOT a job going green) before the composite schedule is documented as activatable. The runbook's composite section is deliberately UNWRITTEN until then. TODOS 0.3 stays OPEN — half of its close condition (the arm exists) is met, half (a composite observed to refresh) is not.
 - 164-05 MEASURED: the phase-148 guard does NOT catch a second unstable_cache call site outside factsheet/[id]/v2/page.tsx (12/12 green under NEUTER-D). 164-07's closure guard does not close it either — the page imports the builder, not the reverse. Closed for the token route by src/app/factsheet-share/[token]/page.no-cache-reach.test.ts; the general repo-wide call-site pin is still unowned.
 - `state.advance-plan` REFUSES on this STATE.md (measured 2026-09-01 by 164.3.1-09): the `## Current Position` section carries a **second** `Phase:` line — line 129, inside the retained `### Retained — Phase 156 close-out` block — so the verb returns `ambiguous_position_phase` and will not advance rather than silently picking the first. Left UNRESOLVED on purpose: that block is marked *do NOT lose this*, and restructuring a retained ledger is outside a measure-only plan's scope. ⚠️ Consequence: the `Plan: 1 of 12` line under Current Position is **STALE** (9 of 12 plans now have SUMMARYs on disk). Read the frontmatter `progress` block or count `.planning/phases/164.3.1-*/`, never that line. Fix = move the Phase-156 retained block out of `## Current Position` into its own top-level section, or teach the verb to ignore `###`-nested entries.
-- [REDUNDER-PGCRON] 3 idiom gate files (71 of 355 sections, incl. Phase 164.4 rank 1) can never reach a GREEN pg-lane baseline: the lane has no pg_cron and those files RAISE on its absence. Blocks any batch containing them; needs a lane-substrate plan. Booked in TODOS.md.
+- [REDUNDER-PGCRON] **4** idiom gate files (**100** of 355 sections, incl. Phase 164.4 rank 1) cannot be falsified on the pg-lane, which has no pg_cron. Mechanism re-measured 2026-09-03 and it is **2 RAISE + 2 green-skip**, not the blanket all-files-RAISE this line used to claim: reconcile `:268` and retention `:212` RAISE EXCEPTION on the absent extension so their baseline is never GREEN; derive `:159` and the reaper `:282` baseline GREEN but withhold whole Parts behind a pg_cron-conditional NOTICE, so those arms are un-falsifiable. DEFERRED by founder decision 2026-09-03 (SCOPE AMENDMENT #2) and printed by the runner as `lane-blocked:` every run, with a per-run lane probe that reddens the gate (`lane-blocked-stale`) once pg_cron IS available. Needs a lane-substrate plan. Booked in TODOS.md.
 - 164.4-01 <human-check> UNMET: the PR number, merged head SHA and SHA-bound sql-mutation ubuntu run id + wall clock are PENDING in 164.4-01-SUMMARY.md. Plan 164.4-02's precondition is gate=blocking-human and reads exactly those fields — it WILL halt until 164.4-01 is landed (/ship, /gsd-pr-branch + the CLAUDE.md deletion guard) and its CI board read SHA-bound.
 - 164.4-02 <human-check> OPEN: the batch (b5fa08c2 / c850a790 / 9cffb584) was NOT pushed and no PR was opened, so there is no SHA-bound sql-mutation ubuntu green for it. Plan 03's precondition reads that run id / head SHA / wall clock out of 164.4-02-SUMMARY.md coverage D6, which is status: pending.
 

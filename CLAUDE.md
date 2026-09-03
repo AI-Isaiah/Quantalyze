@@ -37,7 +37,13 @@ a failure fails the aggregate rather than passing quietly:
   `WAIVED_CEILING` (0) in `scripts/mutation-runner/run.mjs`, and when the
   runner's two independent arm tallies (`arms:` vs `lane-invocations:`)
   disagree (v0.77.1.0). Runs on its own throwaway PostgreSQL cluster
-  (`scripts/pg-lane/run.sh`), never against shared TEST.
+  (`scripts/pg-lane/run.sh`), never against shared TEST. Since 2026-09-03 it
+  also prints, and MEASURE_FAILs on the absence of, a `lane-blocked:` line
+  naming the four idiom gate files that probe `pg_extension` for pg_cron — 100
+  sections DEFERRED by founder decision (`[REDUNDER-PGCRON]`, SCOPE AMENDMENT
+  #2) because the lane has no pg_cron — beside a `lane-probe:` line measured on
+  the lane itself, which is what lets the deferral expire: pg_cron AVAILABLE
+  with a non-empty lane-blocked class raises `lane-blocked-stale` and exits 1.
 - **`sql-gate-lint`** — four static rules over `supabase/tests`, each shipped
   with a red and a green fixture proving the rule can fire.
 - **`plan-anchor-verify`** — re-resolves every `file:line` anchor and named

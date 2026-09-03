@@ -591,12 +591,15 @@ Plans:
 
 ### Phase 164.4: REDUNDER-BACKFILL — every SQL gate arm gets a RED-UNDER annotation that a machine PROVES bites (INSERTED)
 
-**Goal**: Every arm in the **44 `TEST FAILED (` idiom files** of `supabase/tests/*.sql` carries a
-`RED-UNDER` annotation naming the exact mutation that makes it fail, and the Phase 164.3 mutation
-runner PROVES each one bites — red under its own mutation, green when restored. Coverage moves from
-1 file to 44, behind a floor that cannot regress, with the **27 excluded non-idiom files printed by
-name on every run**. (Scope narrowed from "all of them" by founder decision 2026-09-02 — see the
-SCOPE AMENDMENT below; the rename of the 27 is booked as `[REDUNDER-NONIDIOM]` in `TODOS.md`.)
+**Goal**: Every arm in **the 40 idiom files the pg-lane can reach** (4 more are printed by the
+runner as lane-blocked every run — SCOPE AMENDMENT #2, founder 2026-09-03, 100 sections owed to
+`[REDUNDER-PGCRON]`) of `supabase/tests/*.sql` carries a `RED-UNDER` annotation naming the exact
+mutation that makes it fail, and the Phase 164.3 mutation runner PROVES each one bites — red under
+its own mutation, green when restored. Coverage moves from 1 file to those 40 reachable files,
+behind a floor that cannot regress, with the **27 excluded non-idiom files and the 4 deferred
+lane-blocked files each printed by name on every run**. (Scope narrowed from "all of them" by
+founder decision 2026-09-02, and again 2026-09-03 — see both SCOPE AMENDMENTs below; the rename of
+the 27 is booked as `[REDUNDER-NONIDIOM]` and the 4 as `[REDUNDER-PGCRON]` in `TODOS.md`.)
 **Depends on:** ⛔ **Phase 164.3 — HARD, not ordering.** 164.3 builds the mutation runner, and the
 runner is the only thing that makes this phase safe to do at all.
 **Requirements**: SC-1, SC-2, SC-3, SC-4 — the four success criteria below stand in for requirement IDs (no `REQUIREMENTS.md` IDs exist for this inserted phase; RESEARCH § Phase Requirements). Discussed 2026-09-02 (`164.4-CONTEXT.md`).
@@ -629,8 +632,9 @@ through their own message prefixes** (`'MT5SRC-03 (1a): …'`, `'FLIPRETRY-02: �
 structurally unreachable by the runner.
 
 Three options were measured and put to the founder. **Option (c) was chosen:** scope this phase to
-the **44 idiom files**, and have the runner **PRINT the 27 excluded files BY NAME on every run** so
-the gap is emitted by the gate itself rather than asserted in a ledger. Rejected: **(a)** renaming
+the **40 idiom files the pg-lane can reach** (of 44 — 4 lane-blocked, SCOPE AMENDMENT #2, founder
+2026-09-03, `[REDUNDER-PGCRON]`), and have the runner **PRINT the 27 excluded files BY NAME on every
+run** so the gap is emitted by the gate itself rather than asserted in a ledger. Rejected: **(a)** renaming
 the 27 files into the idiom — not an assertion edit (nothing external reads those strings; the
 sentinel gate counts `RAISE EXCEPTION` lines at `ci.yml:2360` and `sql-tests` uses `ON_ERROR_STOP`)
 but genuine *authoring*, since the 321 no-idiom raises carry only **139 distinct prefixes** (`B5b:`
@@ -644,10 +648,32 @@ every ledger reading "usable end-to-end" while untrue. Here the exclusion is PRI
 every run, so no ledger can drift from what is measured. The successor rename is booked in
 `TODOS.md` as `[REDUNDER-NONIDIOM]`.
 
+⚖️ **SCOPE AMENDMENT #2 — founder decision 2026-09-03, criterion 1 NARROWED AGAIN (count, not
+standard).** Of the 44 idiom files, **4 probe `pg_extension` for pg_cron** and the pg-lane
+(`scripts/pg-lane/run.sh`) has none — the founder decided on 2026-09-03 NOT to install it there.
+MEASURED at HEAD, and this corrects the record: `test_reconcile_dropped_enqueue_sweep.sql:268` (39
+sections) and `test_retention_orphaned_running.sql:212` (25) **RAISE EXCEPTION** on the absent
+extension, so their lane baseline can never be GREEN and the runner judges no arm in a red-baseline
+file; `test_strategy_analytics_stuck_computing_reaper.sql:282/326/483` (29) and
+`test_derive_allocator_keys_fanout.sql:159/169` (7) baseline **GREEN** but withhold whole Parts
+behind a pg_cron-conditional `RAISE NOTICE`, so those arms are un-falsifiable on the lane. (The
+earlier record said all of them RAISE; two do not.) CONTEXT's batch rule — *each plan lands its
+files FULLY proven, no file left half-annotated* — defers all four together: **40 files / 255
+sections are reachable; 100 sections are owed to `[REDUNDER-PGCRON]`.**
+
+This is criterion 4 applied, not criterion 4 waived. The runner DERIVES the four from the corpus
+and prints them every run as `lane-blocked: 4 file(s) … (deferred 2026-09-03, TODOS
+[REDUNDER-PGCRON])`, `sql-mutation` MEASURE_FAILs when that line is absent or when its count
+disagrees with the names beside it, and — because "the pg-lane cannot host pg_cron" is a claim about
+the LANE that no derivation measures — **every lane-spawning run probes the lane itself** and exits
+1 with `lane-blocked-stale` the day pg_cron is available while the class is non-empty. The deferral
+can therefore expire; it cannot outlive its cause. (Plan 164.4-03.)
+
 ⚠️ **The arm unit is the SECTION** (founder decision 2026-09-02): one `RED-UNDER-M` per NAMED
-assertion group (`"arm":"NAME"`), NOT one per raise. Under option (c) that is **355 sections /
-~365 twins** across the 44 idiom files (the identity unit would have been 516 and would have pushed
-CI past the 20-minute split threshold).
+assertion group (`"arm":"NAME"`), NOT one per raise. Under option (c) as amended that is
+**255 sections / ~265 twins** across the 40 reachable idiom files; the 100 sections in the 4
+lane-blocked files are owed to `[REDUNDER-PGCRON]` (SCOPE AMENDMENT #2). The identity unit would
+have been 516 and would have pushed CI past the 20-minute split threshold.
 
 ⚠️ **The reference file does NOT meet criterion 1 today.** `test_strategy_shares_rls.sql` is one
 2,602-line `DO $$` block holding 103 identities in **35 sections with only 30 twins — 15 sections
@@ -656,10 +682,11 @@ this phase, not a precondition of it.
 
 **Success Criteria** (what must be TRUE):
 
-  1. **Every arm in the 44 IDIOM files carries a `RED-UNDER`** naming the exact mutation that makes
-     it fail — arm = section, per the amendment above. The 27 non-idiom files are OUT of scope and
-     **the runner names them in its output every run**; a silent exclusion fails this criterion just
-     as a missing annotation does.
+  1. **Every arm in the 40 REACHABLE idiom files carries a `RED-UNDER`** naming the exact mutation
+     that makes it fail — arm = section, per the amendments above. The 27 non-idiom files are OUT of
+     scope and the 4 lane-blocked files are DEFERRED (SCOPE AMENDMENT #2, 2026-09-03,
+     `[REDUNDER-PGCRON]`); **the runner names BOTH sets in its output every run**;
+     a silent exclusion fails this criterion just as a missing annotation does.
   2. **The 164.3 runner executes ALL of them** — each demonstrated RED under its own mutation and
      GREEN when restored. An annotation that never reddens its arm is a FAILURE, not a pass.
 
@@ -1002,7 +1029,7 @@ Plans:
 | 164.1 HARDEN-GUARDS (spine gates, OPS-08-TS/F2, PYAPI-06) | 0/? | Queued 2nd (deduped 2026-08-28) | - |
 | 164.2 CURATED-COPY (+ WIZFORM-02, WR-06-UTC, HONEST-08-RESIDUAL) | 0/? | Queued 3rd (deduped 2026-08-28) | - |
 | 164.3 VACUITY (+ SKIP-01, DRIFT-01, OPS-08-F9/F8, H-0001) | 0/? | ◆ RUNS FIRST (resequenced 2026-08-28) | - |
-| 164.4 REDUNDER-BACKFILL (1/44 idiom files annotated today; scope narrowed to the idiom corpus 2026-09-02, 27 non-idiom files printed-and-excluded) | 0/13 | Planned 2026-09-02 — 13 plans (spike, Wave 0 runner/CI, reference file, 10 file-batches landed one PR at a time with sql-mutation GREEN on ubuntu between); 164.3.1 HARD dep CLOSED 2026-09-02 | - |
+| 164.4 REDUNDER-BACKFILL (40 reachable idiom files + 4 lane-blocked (SCOPE AMENDMENT #2); scope narrowed to the idiom corpus 2026-09-02, 27 non-idiom files printed-and-excluded) | 0/13 | Planned 2026-09-02 — 13 plans (spike, Wave 0 runner/CI, reference file, 10 file-batches landed one PR at a time with sql-mutation GREEN on ubuntu between); 164.3.1 HARD dep CLOSED 2026-09-02 | - |
 | 165. DEPS dependabot campaign | 0/? | Not started | - |
 
 ### Requirement Coverage (v1.20)
