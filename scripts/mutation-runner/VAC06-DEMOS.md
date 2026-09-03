@@ -481,8 +481,11 @@ called `SANITIZE 1e` proven.
   ⚠️ CURRENCY 2026-09-02: both jobs were since observed GREEN on ubuntu
   (`workflow_dispatch` run 33620169220 at `89cbef8b`, self-test 12/12) — see `CLAUDE.md` § SQL gate
   integrity jobs. One green run is a measurement of one host, not a guarantee about the next.
-- **Coverage is `files 1/71`.** All five mechanisms live in the one annotated file, which is why
-  criterion 6 is reachable now; the remaining idiom files are Phase 164.4.
+- **Coverage is whatever the run log's own `coverage:` line says** — read it there, never from a
+  number restated in prose. All five mechanisms live in the reference file, which is why criterion 6
+  was reachable when this was written; the remaining idiom files land in Phase 164.4's batches, and
+  four of them are `lane-blocked:` (they probe `pg_extension` for pg_cron, which the pg-lane cannot
+  host — TODOS `[REDUNDER-PGCRON]`), so the reachable end state is below the 71 denominator.
 
 ---
 

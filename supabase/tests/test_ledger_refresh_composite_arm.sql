@@ -118,6 +118,17 @@
 -- from the file, not hard-coded: if you add or remove an arm you MUST update it,
 -- or the pin silently measures the wrong number of arms.
 --
+-- ⭐ MACHINE-EXECUTABLE TWINS (phase 164.4). Each prose RED-UNDER above an arm
+-- below carries an adjacent `RED-UNDER-M` object that scripts/mutation-runner
+-- executes on every push: it mutates COPIES, requires the FIRST `TEST FAILED (…)`
+-- to name that arm, and restores GREEN. The schema is scripts/mutation-runner/
+-- GRAMMAR.md. The line below declares what the lane applies before this gate. It
+-- was DISCOVERED, not guessed — plan 164.4-00 iterated it 8 times on a throwaway
+-- pg-lane cluster to `ALL 10 ARMS EXECUTED (A-J)`, mean 1.01 s/lane over 3 timed
+-- runs. ⚠️ 04-fixture-compute-jobs-targets.sql sits BETWEEN two migrations on
+-- purpose: it patches compute_jobs, which 20260411144407 creates.
+-- RED-UNDER-SETUP: {"apply":["scripts/pg-lane/fixtures/01-fixture-core.sql","scripts/pg-lane/fixtures/02-fixture-sanitize-tables.sql","scripts/pg-lane/fixtures/03-fixture-compute-jobs.sql","supabase/migrations/20260411144407_compute_jobs_queue.sql","scripts/pg-lane/fixtures/04-fixture-compute-jobs-targets.sql","supabase/migrations/20260710120000_strategy_keys.sql","supabase/migrations/20260710130000_stitch_composite_kind.sql","supabase/migrations/20260825120000_ledger_refresh_staleness_view.sql","supabase/migrations/20260825130000_ledger_refresh_fanout_dormant.sql","supabase/migrations/20260825140000_ledger_refresh_composite_arm.sql"]}
+--
 -- Usage:
 --   psql "$TEST_SUPABASE_DB_URL" -v ON_ERROR_STOP=1 -f \
 --     supabase/tests/test_ledger_refresh_composite_arm.sql
@@ -158,6 +169,13 @@ DECLARE
 BEGIN
   -- ----- applied-ness gate: ABSENCE IS A FAILURE, NOT A SKIP (WR-03) ------
   -- See the ⛔ block in this file's header for the measurement behind this.
+  -- RED-UNDER: DROP the function on the live lane after the migrations have
+  --            applied — cause (ii) of this arm's own message. It is a `sql`
+  --            step rather than a migration edit because renaming the CREATE in
+  --            20260825140000 aborts that migration's OWN verification block
+  --            ("enqueue_ledger_composite_refresh missing"), so the gate would
+  --            never run and no arm could be the first failure.
+  -- RED-UNDER-M: {"arm":"0","apply":[{"kind":"sql","stmt":"DROP FUNCTION public.enqueue_ledger_composite_refresh()"}]}
   IF NOT EXISTS (
     SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
      WHERE n.nspname = 'public'
@@ -324,6 +342,13 @@ BEGIN
   -- function must still do NOTHING. This is the arm that says "merging this
   -- migration changes no production behaviour".
   -- ======================================================================
+  -- RED-UNDER: neuter the fail-closed activation switch in 20260825140000 —
+  --            compare v_enabled against a word no setting ever holds, so the
+  --            unset case falls THROUGH to the fan-out instead of returning 0.
+  --            The dormancy claim is the whole "merging changes no production
+  --            behaviour" property, so this is the mutation that proves arm A
+  --            is what holds it.
+  -- RED-UNDER-M: {"arm":"A","apply":[{"kind":"edit","file":"supabase/migrations/20260825140000_ledger_refresh_composite_arm.sql","find":"IF v_enabled <> 'true' THEN","replace":"IF v_enabled = 'never-a-real-setting' THEN","occurrences":1}]}
   UPDATE strategies SET status = 'published' WHERE id = s_b;
 
   v_ret := public.enqueue_ledger_composite_refresh();
@@ -340,6 +365,13 @@ BEGIN
   PERFORM set_config('app.ledger_refresh_enabled', 'true', TRUE);
 
   -- ======================================================================
+  -- RED-UNDER: change the enqueued job's metadata `source` marker in
+  --            20260825140000 from the composite string to the SINGLE-KEY
+  --            arm's. The job still lands, so the count and target-shape
+  --            assertions stay green — what reddens is the byte-for-byte
+  --            marker the non-destructive failure guard in job_worker.py reads
+  --            back before it declines to un-publish a live composite.
+  -- RED-UNDER-M: {"arm":"B","apply":[{"kind":"edit","file":"supabase/migrations/20260825140000_ledger_refresh_composite_arm.sql","find":"'ledger-refresh-composite'","replace":"'ledger-refresh'","occurrences":1}]}
   -- ARM B — POSITIVE (LEDGER-01). Same seed, switch on.
   -- ======================================================================
   v_ret := public.enqueue_ledger_composite_refresh();
@@ -394,6 +426,14 @@ BEGIN
   END IF;
 
   -- ======================================================================
+  -- RED-UNDER: remove all three things that make a second tick a no-op, in one
+  --            LAYERED mutation of 20260825140000: the 20-hour attempt cooldown
+  --            (interval -> 0), the non-terminal in-flight guard (status set ->
+  --            a status nothing holds), and the INSERTIONS-not-CALLS counter
+  --            (v_existing = 0 dropped). All three are needed: leave any one in
+  --            place and the second tick still returns 0 for a different reason,
+  --            which would make a green here prove the wrong conjunct.
+  -- RED-UNDER-M: {"arm":"F","apply":[{"kind":"edit","file":"supabase/migrations/20260825140000_ledger_refresh_composite_arm.sql","find":"INTERVAL '20 hours'","replace":"INTERVAL '0 hours'","occurrences":1},{"kind":"edit","file":"supabase/migrations/20260825140000_ledger_refresh_composite_arm.sql","find":"AND cj2.status IN ('pending', 'running', 'done_pending_children', 'failed_retry')","replace":"AND cj2.status IN ('cancelled')","occurrences":1},{"kind":"edit","file":"supabase/migrations/20260825140000_ledger_refresh_composite_arm.sql","find":"IF v_existing = 0 AND v_job_id IS NOT NULL THEN","replace":"IF v_job_id IS NOT NULL THEN","occurrences":1}]}
   -- ARM F — DEDUPE. A second tick while the job is in flight adds nothing.
   -- ======================================================================
   v_ret := public.enqueue_ledger_composite_refresh();
@@ -412,6 +452,12 @@ BEGIN
   -- ARM C — NEGATIVE CONTROL. A FRESH composite is not enqueued. Without this arm
   -- a body that enqueues every composite passes arm B.
   -- ======================================================================
+  -- RED-UNDER: make the staleness conjunct in 20260825140000's candidate CTE
+  --            vacuous (`WHERE lrs.is_stale` -> `WHERE (lrs.is_stale OR TRUE)`).
+  --            Only s_c is published at this point, so no earlier arm's cohort
+  --            changes; the fresh composite becomes a candidate and every
+  --            composite would be stitched on every tick.
+  -- RED-UNDER-M: {"arm":"C","apply":[{"kind":"edit","file":"supabase/migrations/20260825140000_ledger_refresh_composite_arm.sql","find":"WHERE lrs.is_stale","replace":"WHERE (lrs.is_stale OR TRUE)","occurrences":1}]}
   UPDATE strategies SET status = 'published' WHERE id = s_c;
   v_ret := public.enqueue_ledger_composite_refresh();
   IF v_ret <> 0 THEN
@@ -436,6 +482,14 @@ BEGIN
   -- tables, not assumed from the seed. These are the predicate's INPUTS, not a
   -- re-implementation of the predicate.
   -- ======================================================================
+  -- RED-UNDER: make `is_composite` in the VIEW (20260825120000) unconditionally
+  --            true — drop the strategy_keys correlation from its EXISTS. The
+  --            precondition then reads is_composite=true for a member-less
+  --            single-key fixture, which is exactly the "the view or the seed
+  --            changed" case it exists to catch. The view's own STEP-3 drift
+  --            assertions cover deferred_venues and has_mt5_member, not this
+  --            expression, so the apply still succeeds.
+  -- RED-UNDER-M: {"arm":"D/precondition","apply":[{"kind":"edit","file":"supabase/migrations/20260825120000_ledger_refresh_staleness_view.sql","find":"SELECT 1 FROM public.strategy_keys sk WHERE sk.strategy_id = s.id","replace":"SELECT 1","occurrences":1}]}
   UPDATE strategies SET status = 'published' WHERE id = s_d;
 
   SELECT lrs.is_stale, lrs.is_composite, lrs.has_mt5_member
@@ -465,6 +519,13 @@ BEGIN
     RAISE EXCEPTION 'TEST FAILED (D/precondition): the single-key fixture already has % compute_jobs row(s), so a green exclusion below could be the COOLDOWN or the IN-FLIGHT conjunct talking, not is_composite', v_cnt;
   END IF;
 
+  -- RED-UNDER: neuter THE partitioning conjunct in 20260825140000 —
+  --            `AND lrs.is_composite = TRUE` -> `AND lrs.is_composite IS NOT NULL`.
+  --            The precondition above still measures the fixture as single-key,
+  --            so what this proves is that is_composite, and nothing else, is
+  --            what excludes it. This is the mandated is-composite neutering the
+  --            file's header requires to be able to fire.
+  -- RED-UNDER-M: {"arm":"D","apply":[{"kind":"edit","file":"supabase/migrations/20260825140000_ledger_refresh_composite_arm.sql","find":"AND lrs.is_composite = TRUE","replace":"AND lrs.is_composite IS NOT NULL","occurrences":1}]}
   -- Every other conjunct measured clear. Now the exclusion itself.
   v_ret := public.enqueue_ledger_composite_refresh();
   IF v_ret <> 0 THEN
@@ -492,6 +553,13 @@ BEGIN
   -- ======================================================================
   UPDATE strategies SET status = 'published' WHERE id IN (s_e_mixed, s_e_all);
 
+  -- RED-UNDER: point the VIEW's `deferred_venues` at a DIFFERENT ledger venue
+  --            (20260825120000). It stays inside the venue set and still reads
+  --            lv.deferred_venues, so both of that migration's own drift
+  --            assertions still pass and the apply succeeds — and yet
+  --            has_mt5_member reads FALSE for the mixed fixture, which is the
+  --            silent-stop-excluding drift the migration's comment describes.
+  -- RED-UNDER-M: {"arm":"E1/precondition","apply":[{"kind":"edit","file":"supabase/migrations/20260825120000_ledger_refresh_staleness_view.sql","find":"ARRAY['mt5']::TEXT[]                    AS deferred_venues","replace":"ARRAY['sfox']::TEXT[]                   AS deferred_venues","occurrences":1}]}
   -- E-precondition: both fixtures must be otherwise eligible, or the exclusion
   -- below is being performed by something else.
   SELECT lrs.is_stale, lrs.is_composite, lrs.has_mt5_member
@@ -502,14 +570,33 @@ BEGIN
     RAISE EXCEPTION 'TEST FAILED (E1/precondition): the MIXED fixture reads is_stale=% is_composite=% has_mt5_member=%, expected true/true/true. Anything else and the exclusion below is not the membership conjunct', COALESCE(v_stale::text, '<null>'), COALESCE(v_comp::text, '<null>'), COALESCE(v_defer::text, '<null>');
   END IF;
 
+  -- RED-UNDER: make the membership deferral vacuous in 20260825140000 —
+  --            `AND lrs.has_mt5_member = FALSE` -> `AND lrs.has_mt5_member IS NOT NULL`.
+  --            The view is untouched, so the precondition above still reads
+  --            true/true/true and the exclusion below is the membership
+  --            conjunct talking. Both E fixtures are published here, so the
+  --            tick returns 2.
+  -- RED-UNDER-M: {"arm":"E","apply":[{"kind":"edit","file":"supabase/migrations/20260825140000_ledger_refresh_composite_arm.sql","find":"AND lrs.has_mt5_member = FALSE","replace":"AND lrs.has_mt5_member IS NOT NULL","occurrences":1}]}
   v_ret := public.enqueue_ledger_composite_refresh();
   IF v_ret <> 0 THEN
     RAISE EXCEPTION 'TEST FAILED (E): composites with a member on the DEFERRED venue produced % enqueue(s), expected 0 — the founder deferral is scoped to that venue''s path and a mixed composite would drag its single shared terminal registry into the composite crawl (D-01 / D-13)', v_ret;
   END IF;
+  -- RED-UNDER: the same vacuous membership conjunct as arm E, with arm E's own
+  --            raise NEUTERED — arm E reads the RETURN value and fires first on
+  --            any enqueue at all, so it must be suppressed for the per-fixture
+  --            row count to be the first failure. The mixed composite (ONE
+  --            member on the deferred venue) then carries a job it must not have.
+  -- RED-UNDER-M: {"arm":"E1/mixed","apply":[{"kind":"edit","file":"supabase/migrations/20260825140000_ledger_refresh_composite_arm.sql","find":"AND lrs.has_mt5_member = FALSE","replace":"AND lrs.has_mt5_member IS NOT NULL","occurrences":1}],"neuter":[{"arm":"E"}]}
   SELECT count(*) INTO v_cnt FROM compute_jobs WHERE strategy_id = s_e_mixed;
   IF v_cnt <> 0 THEN
     RAISE EXCEPTION 'TEST FAILED (E1/mixed): a composite with ONE member on the deferred venue got % job(s), expected 0. Membership, not headline venue, is the rule', v_cnt;
   END IF;
+  -- RED-UNDER: as E1/mixed, with arm E and arm E1/mixed both neutered — they
+  --            read the return value and the sibling fixture's row count and
+  --            each fires earlier. The ALL-deferred composite then carries a job
+  --            it must not have, which is the headline-venue reading of the rule
+  --            this arm refuses.
+  -- RED-UNDER-M: {"arm":"E2/all","apply":[{"kind":"edit","file":"supabase/migrations/20260825140000_ledger_refresh_composite_arm.sql","find":"AND lrs.has_mt5_member = FALSE","replace":"AND lrs.has_mt5_member IS NOT NULL","occurrences":1}],"neuter":[{"arm":"E"},{"arm":"E1/mixed"}]}
   SELECT count(*) INTO v_cnt FROM compute_jobs WHERE strategy_id = s_e_all;
   IF v_cnt <> 0 THEN
     RAISE EXCEPTION 'TEST FAILED (E2/all): a composite whose members are ALL on the deferred venue got % job(s), expected 0', v_cnt;
@@ -522,6 +609,14 @@ BEGIN
   -- the outstanding backlog at the cohort size regardless of tick rate. Both
   -- edges, so the interval cannot drift silently.
   -- ======================================================================
+  -- RED-UNDER: narrow the ATTEMPT cooldown in 20260825140000 from 20 hours to
+  --            1 hour. The fixture's prior attempt is 2 hours old, so the
+  --            narrowed window no longer covers it and the composite is
+  --            re-enqueued — a permanently-failing composite would get a
+  --            20-minute job every tick. Arm F's second tick is unaffected: its
+  --            job is created inside this transaction, so it is still inside a
+  --            1-hour window.
+  -- RED-UNDER-M: {"arm":"G","apply":[{"kind":"edit","file":"supabase/migrations/20260825140000_ledger_refresh_composite_arm.sql","find":"INTERVAL '20 hours'","replace":"INTERVAL '1 hour'","occurrences":1}]}
   UPDATE strategies SET status = 'published' WHERE id = s_g;
   v_ret := public.enqueue_ledger_composite_refresh();
   IF v_ret <> 0 THEN
@@ -546,6 +641,11 @@ BEGIN
   -- Reading this arm as a throughput claim is what leads a future editor to raise
   -- the integer.
   -- ======================================================================
+  -- RED-UNDER: raise the per-tick burst cap in 20260825140000 from
+  --            `LIMIT 2` to `LIMIT 5`. Every earlier arm publishes at most two
+  --            fixtures at a time, so the cap is invisible to them; this cohort
+  --            of five is the only place the integer is measurable at all.
+  -- RED-UNDER-M: {"arm":"H","apply":[{"kind":"edit","file":"supabase/migrations/20260825140000_ledger_refresh_composite_arm.sql","find":"LIMIT 2","replace":"LIMIT 5","occurrences":1}]}
   UPDATE strategies SET status = 'published' WHERE id = ANY(h_set);
   v_ret := public.enqueue_ledger_composite_refresh();
   IF v_ret <> 2 THEN
@@ -579,6 +679,12 @@ BEGIN
   -- on a missing function rather than returning FALSE, so "no grants because there
   -- is nothing to grant on" reddens here instead of passing.
   -- ======================================================================
+  -- RED-UNDER: `GRANT EXECUTE … TO anon` on the live lane. It is a `sql` step
+  --            rather than an edit to the REVOKE in 20260825140000 because that
+  --            migration's own DO block asserts the same privilege and would
+  --            ABORT THE APPLY, so the gate would never run. The lane's
+  --            --post-apply hook exists for exactly this shape.
+  -- RED-UNDER-M: {"arm":"I","apply":[{"kind":"sql","stmt":"GRANT EXECUTE ON FUNCTION public.enqueue_ledger_composite_refresh() TO anon"}]}
   IF has_function_privilege('anon', 'public.enqueue_ledger_composite_refresh()', 'EXECUTE') THEN
     RAISE EXCEPTION 'TEST FAILED (I): role anon can EXECUTE enqueue_ledger_composite_refresh. This is a cross-tenant SECURITY DEFINER enqueue path and the REVOKE at 20260825140000 is the only thing bounding it';
   END IF;
@@ -630,6 +736,16 @@ BEGIN
   -- this file also reddens on absence; this guard exists so the arm does not lean
   -- on a check 400 lines away that a later edit could relax.
   -- ======================================================================
+  -- RED-UNDER: ownership drift on the live lane — `ALTER FUNCTION … OWNER TO` a
+  --            role that is exempt from row security by NEITHER route. Editing
+  --            20260825140000 cannot reach this arm: its own DO block asserts
+  --            the same disjunction and would abort the apply.
+  -- ⚠️ The three RLS-enabled tables move with the function DELIBERATELY. Left
+  --    behind, the new owner reads them under RLS and the fan-out returns 0 on
+  --    every tick — which is precisely the failure this arm's prose describes,
+  --    and it reddens arm B four hundred lines earlier instead. Moving them
+  --    isolates the ONE property under test: the owner's exemption.
+  -- RED-UNDER-M: {"arm":"J","apply":[{"kind":"sql","stmt":"CREATE ROLE lrc_owner_drift NOLOGIN"},{"kind":"sql","stmt":"GRANT USAGE ON SCHEMA public TO lrc_owner_drift"},{"kind":"sql","stmt":"GRANT SELECT ON ALL TABLES IN SCHEMA public TO lrc_owner_drift"},{"kind":"sql","stmt":"GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA public TO lrc_owner_drift"},{"kind":"sql","stmt":"ALTER TABLE public.strategies OWNER TO lrc_owner_drift"},{"kind":"sql","stmt":"ALTER TABLE public.strategy_keys OWNER TO lrc_owner_drift"},{"kind":"sql","stmt":"ALTER TABLE public.compute_jobs OWNER TO lrc_owner_drift"},{"kind":"sql","stmt":"ALTER FUNCTION public.enqueue_ledger_composite_refresh() OWNER TO lrc_owner_drift"}]}
   SELECT r.rolname, r.rolbypassrls, r.rolsuper
     INTO v_own_role, v_own_bypass, v_own_super
     FROM pg_proc p

@@ -1072,8 +1072,11 @@ export function classifyGateIdiom(text) {
  * With `||`, a structured-only file enters the list and the runner's own
  * parity check fires on it (`prose 0 !== structured 5`).
  *
- * MEASURED 2026-08-29: no file in `supabase/tests/` is structured-only, so
- * `filesAnnotated` is unchanged at 1 of 71 and the FILES_FLOOR does not move.
+ * MEASURED 2026-08-29: no file in `supabase/tests/` is structured-only, so this
+ * `||` moved `filesAnnotated` by ZERO — it refuses nothing the corpus already
+ * relies on. The count itself moves as Phase 164.4's batches land; the exact
+ * pin lives in the parser test (`scanCorpus reports N of 71 files annotated`),
+ * and the live floor is FILES_FLOOR in run.mjs. No integer is restated here.
  *
  * ⭐ 2026-09-02, phase 164.4: the UNANNOTATED remainder is classified too, by
  * `classifyGateIdiom` above, and returned as sorted basename lists. The

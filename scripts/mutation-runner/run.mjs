@@ -155,7 +155,42 @@ const PROBE_AVAILABLE_OUTPUT = `ERROR:  ${LANE_PROBE_AVAILABLE}`;
 // pg_cron, which the pg-lane does not host and deliberately will not; they are
 // derived, printed as `lane-blocked:` and owed to TODOS [REDUNDER-PGCRON], so
 // the phase's end state is `coverage: files 40/71`. This plan edited no floor.
-export const FILES_FLOOR = 1;
+//
+// ⭐ RE-DERIVED 2026-09-03 (plan 164.4-04) — THE PHASE'S FIRST *FILE* MOVE. The
+// blocks above STAY as lineage: 1 was the whole annotated corpus while it was
+// written. Three NEW gate files — the ledger_refresh family — were annotated to
+// completion, so for the first time the FILE count moves rather than the section
+// depth within one file.
+//
+//   VALUE        4 — read off the run's own `coverage:` line, not counted here.
+//   DATE         2026-09-03, at HEAD fd600efb.
+//   COMMAND      `node scripts/mutation-runner/run.mjs` -> exit 0
+//                  coverage: files 4/71
+//                  arms: 86/86/0   (executed/annotated/waived)
+//                  biting: 86
+//                  lane-invocations: 86
+//                  per-arm lane time: mean 1.0s over 86 arm run(s)
+//                  pending: 36 idiom file(s) without RED-UNDER
+//                96 s wall clock on the authoring box.
+//   COVERAGE     4 annotated gate files of 71 in supabase/tests/, namely
+//                supabase/tests/test_ledger_refresh_composite_arm.sql,
+//                supabase/tests/test_ledger_refresh_fanout.sql,
+//                supabase/tests/test_ledger_refresh_staleness.sql and
+//                supabase/tests/test_strategy_shares_rls.sql.
+//   SEPARATION   Both directions driven through the real verdict loop on real
+//                lanes (`runCorpus({filesFloor})`), 2026-09-03:
+//                  filesFloor=4  filesAnnotated=4  floor-defects=0  SILENT
+//                  filesFloor=5  filesAnnotated=4  floor-defects=1  FIRES ->
+//                    `FILES_FLOOR regression: 4 annotated file(s) < floor 5`
+//                So 4 is exactly the separation point, not a value below it.
+//   RECORD       .planning/phases/164.4-redunder-backfill-every-sql-gate-arm-
+//                gets-a-red-under-annota/164.4-04-SUMMARY.md
+//
+// CURRENCY, stated where the VALUE is: RE-DERIVED 2026-09-03 by measurement
+// (plan 164.4-04). Measured coverage 4 of 71 — value RAISED from 1. The phase's
+// end state on today's lane is 40 of 71 (SCOPE AMENDMENT #2 above); 36 idiom
+// files remain `pending:`.
+export const FILES_FLOOR = 4;
 
 // ARMS_FLOOR — PINNED 2026-08-29 BY MEASUREMENT (plan 164.3-08), not chosen.
 //
@@ -253,11 +288,51 @@ export const FILES_FLOOR = 1;
 //   RECORD       .planning/phases/164.4-redunder-backfill-every-sql-gate-arm-
 //                gets-a-red-under-annota/164.4-02-SUMMARY.md
 //
+// ⭐ RE-DERIVED 2026-09-03 (plan 164.4-04) — MEASURED on the full-corpus run at
+// HEAD fd600efb. The three pins above STAY as lineage. This move is a COVERAGE
+// move like 164.4-02's, but across FILES rather than within one: the
+// ledger_refresh family (15 + 15 + 11 = 41 sections) was annotated to
+// completion, so 45 + 41 = 86.
+//
+//   VALUE        86 — biting = 86 executed − 0 (no-red + wrong-first-failure +
+//                synthesised-identity) = 86 − 0 = 86.
+//   DATE         2026-09-03, at HEAD fd600efb.
+//   COMMAND      `node scripts/mutation-runner/run.mjs` -> exit 0
+//                  coverage: files 4/71
+//                  arms: 86/86/0   (executed/annotated/waived)
+//                  biting: 86
+//                  lane-invocations: 86
+//                  file test_ledger_refresh_composite_arm.sql: sections 15 /
+//                    judged 15 / annotated 15 / waived 0 / biting 15
+//                  file test_ledger_refresh_fanout.sql: sections 15 /
+//                    judged 15 / annotated 15 / waived 0 / biting 15
+//                  file test_ledger_refresh_staleness.sql: sections 11 /
+//                    judged 11 / annotated 11 / waived 0 / biting 11
+//                  file test_strategy_shares_rls.sql: sections 35 / judged 45 /
+//                    annotated 45 / waived 0 / biting 45
+//                  per-arm lane time: mean 1.0s over 86 arm run(s)
+//   SAMPLE SIZE  86 arms executed, all 86 `RED (identity ok)`, 0 defects of any
+//                kind. The two independent tallies AGREE: `arms:` executed 86
+//                and `lane-invocations:` 86. 96 s wall clock, 4 baseline and 4
+//                restore legs beside the 86 arm lanes.
+//   COVERAGE     4 annotated gate files of 71 (see the FILES_FLOOR block). 41
+//                of the 86 arms are new this batch and every one of them is a
+//                SECTION that had no twin before; 0 waivers were added, so
+//                WAIVED_CEILING is untouched at 0.
+//   SEPARATION   Both directions driven through the real verdict loop on real
+//                lanes (`runCorpus({armsFloor})`), 2026-09-03:
+//                  armsFloor=86  biting=86  floor-defects=0  SILENT
+//                  armsFloor=87  biting=86  floor-defects=1  FIRES ->
+//                    `ARMS_FLOOR regression: 86 biting arm(s) < floor 87`
+//                So 86 is exactly the separation point, not a value below it.
+//   RECORD       .planning/phases/164.4-redunder-backfill-every-sql-gate-arm-
+//                gets-a-red-under-annota/164.4-04-SUMMARY.md
+//
 // CURRENCY, stated where the VALUE is — derivation, sample size, coverage and
-// separation in the block immediately above; record in 164.4-02-SUMMARY.md:
-// RE-DERIVED 2026-09-03 by measurement (plan 164.4-02).
-// Measured biting 45 — value RAISED from 30.
-export const ARMS_FLOOR = 45;
+// separation in the block immediately above; record in 164.4-04-SUMMARY.md:
+// RE-DERIVED 2026-09-03 by measurement (plan 164.4-04).
+// Measured biting 86 — value RAISED from 45.
+export const ARMS_FLOOR = 86;
 
 // WAIVED_CEILING — PINNED 2026-09-02 BY MEASUREMENT (164.3.1 red team), not
 // chosen. A CEILING, not a floor: it fails when the corpus carries MORE waivers
@@ -464,8 +539,9 @@ export const executableText = (source) => maskNonCode(source);
  * ═══════════════════════════════════════════════════════════════════════════
  * RE-MEASURED 2026-09-01 (phase 164.3.1 plan 01 task 3), R3-C01 discipline.
  * ═══════════════════════════════════════════════════════════════════════════
- * SAMPLE: `supabase/tests/test_strategy_shares_rls.sql`, the only annotated
- * file in the corpus (1 of 71 — see FILES_FLOOR).
+ * SAMPLE: `supabase/tests/test_strategy_shares_rls.sql`, which AT THAT DATE was
+ * the only annotated file in the corpus (1 of 71). Phase 164.4 has since raised
+ * that count — read the live value off FILES_FLOOR, not off this sentence.
  * SAMPLE SIZE: 104 `TEST FAILED (` occurrences, 104 distinct identities, 103
  * backward scans performed (the 104th identity is the header's own syntax
  * documentation and carries no raise, so no scan runs for it).
@@ -1867,12 +1943,14 @@ export function absurdityViolations({
 // amended; threat T-164.4-04)
 // ===========================================================================
 //
-// ⛔ THE DEFECT THIS CLOSES. `coverage: files 1/71` is a ratio over EVERY `.sql`
-// in the scope dir, and the phase's own end state is `files 44/71` — because 27
-// of those 71 raise outside the runner's identity idiom and no arm of theirs
-// can be attributed at all. A reader of `44/71` cannot tell "17 files nobody
-// got to yet" from "27 files this gate can never judge, deliberately". That is
-// the repudiation shape: a subset covered, reported as if it were the whole.
+// ⛔ THE DEFECT THIS CLOSES. The printed `coverage: files N/71` is a ratio over
+// EVERY `.sql` in the scope dir, and the phase's own end state is BELOW 71 —
+// 27 of those files raise outside the runner's identity idiom and no arm of
+// theirs can be attributed at all (a further 4 are `lane-blocked:`, SCOPE
+// AMENDMENT #2, so the reachable end state is `files 40/71`). A reader of a
+// bare `40/71` cannot tell "31 files nobody got to yet" from "31 files this
+// gate can never judge today, deliberately". That is the repudiation shape: a
+// subset covered, reported as if it were the whole.
 //
 // The founder's scope amendment (2026-09-02, ROADMAP § SCOPE AMENDMENT) makes
 // the exclusion explicit and makes PRINTING it a merge condition: *"the 27
@@ -2995,11 +3073,21 @@ function selfTest() {
 
   // ⚠️ EVERY SCENARIO PASSES AN EXPLICIT `armsFloor`, and that is required for
   // the checks to measure what they name. The synthetic corpora carry 2 arms;
-  // the REAL ARMS_FLOOR is 45 (measured 2026-09-03). Inheriting the default
-  // would add a spurious `floor` defect to every scenario below and break check
-  // 6 outright, so each states the floor appropriate to ITS corpus. Check 5 is
-  // where an ARMS_FLOOR regression is proven to fire — the mode that could not
-  // be proven at all while the floor was 0.
+  // the REAL ARMS_FLOOR is 86 (measured 2026-09-03, plan 164.4-04). Inheriting
+  // the default would add a spurious `floor` defect to every scenario below and
+  // break check 6 outright, so each states the floor appropriate to ITS corpus.
+  // Check 5 is where an ARMS_FLOOR regression is proven to fire — the mode that
+  // could not be proven at all while the floor was 0.
+  //
+  // ⛔ THE SAME IS NOW TRUE OF `filesFloor`, AND IT BIT (plan 164.4-04). While
+  // the real FILES_FLOOR was 1 it happened to equal the fixture corpus's own
+  // annotated-file count, so scenarios 5 and 6 could inherit it and stay green
+  // by COINCIDENCE. The phase's first FILE move (1 -> 4) turned that coincidence
+  // into `FILES_FLOOR regression: 1 annotated file(s) < floor 4` in a scenario
+  // about ARMS_FLOOR and in the green-corpus scenario. Every whole-corpus
+  // scenario therefore states its OWN `filesFloor`, exactly as it states its own
+  // `armsFloor` and `waivedCeiling`; a self-test that moves when a production
+  // floor moves is measuring the constant, not the mechanism.
   console.log("=== SELF-TEST 1/17: a non-biting annotation must exit 1 with `no-red` ===");
   const a = runCorpus({ scopeDir: SELFTEST_DIR, onlyFile: "nonbiting-gate.sql", armsFloor: 0, log: quiet });
   pass =
@@ -3061,7 +3149,7 @@ function selfTest() {
   // waivedCeiling 0 against a corpus carrying 1 waiver: the ceiling's FIRE
   // direction, in the same run as the ARMS_FLOOR one. Both are `floor` defects
   // and each must be distinguishable BY NAME from the other two.
-  const f = runCorpus({ scopeDir: FIXTURE_CORPUS, armsFloor: 99, waivedCeiling: 0, log: quiet });
+  const f = runCorpus({ scopeDir: FIXTURE_CORPUS, filesFloor: 1, armsFloor: 99, waivedCeiling: 0, log: quiet });
   pass =
     expect(f.exitCode === 1, `exit code is 1 (got ${f.exitCode})`) &&
     expect(
@@ -3079,7 +3167,7 @@ function selfTest() {
     pass;
 
   console.log("=== SELF-TEST 6/17: the green fixture corpus must exit 0 ===");
-  const e = runCorpus({ scopeDir: FIXTURE_CORPUS, armsFloor: 2, waivedCeiling: 1, log: quiet });
+  const e = runCorpus({ scopeDir: FIXTURE_CORPUS, filesFloor: 1, armsFloor: 2, waivedCeiling: 1, log: quiet });
   pass =
     expect(e.exitCode === 0, `exit code is 0 (got ${e.exitCode}; defects: ${JSON.stringify(e.defects)})`) &&
     expect(e.armsExecuted === 2, `2 arms executed (got ${e.armsExecuted})`) &&

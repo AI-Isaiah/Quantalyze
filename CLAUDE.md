@@ -58,12 +58,14 @@ when their credential is absent — neither ever skips.
 2026-09-02 (workflow_dispatch run 33620169220 at 89cbef8b, self-test 12/12,
 `arms: 30/30/0`, tallies agree — closes `.planning/WINDOWS.md` entry 28);
 `plan-anchor-verify` was skipped in that run. ⚠️ CURRENCY 2026-09-03: that
-`30/30/0` is the run-33620169220 quote and stays as lineage. Phase 164.4 plan 02
-closed the reference file's 15 un-twinned sections, so the measured corpus is now
-`arms: 45/45/0`, `biting: 45`, `lane-invocations: 45`, tallies agree, and
-`ARMS_FLOOR` is pinned at 45. Read the run's own `arms:` line rather than any
-number restated in prose. VAC-04 and VAC-08 have still
-not run against their real credential; see entries 25 and 26.
+`30/30/0` is the run-33620169220 quote and stays as lineage; so does plan 02's
+`45/45/0`. Phase 164.4 plan 04 annotated the ledger_refresh family (three NEW
+gate files, 15 + 15 + 11 = 41 sections), so the measured corpus is now
+`coverage: files 4/71`, `arms: 86/86/0`, `biting: 86`, `lane-invocations: 86`,
+tallies agree, `FILES_FLOOR` is pinned at 4 and `ARMS_FLOOR` at 86, with
+`pending: 36` idiom files still to go. Read the run's own `coverage:` and
+`arms:` lines rather than any number restated in prose. VAC-04 and VAC-08 have
+still not run against their real credential; see entries 25 and 26.
 
 ## Which database am I on? (ask FIRST, every time)
 

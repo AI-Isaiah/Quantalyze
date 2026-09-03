@@ -333,8 +333,13 @@ message-embedded forgery` — and the self-test keeps that refusal lane-driven
 for 164.4 authors: a RAISE message must not contain a line that *looks like* a
 psql field (`CONTEXT:  …`, `LOCATION:  …`); such an arm is refused, loudly.
 
-All 104 identities in today's corpus are single-frame direct DO-body raises, so
-this rule refuses nothing that exists. It is written down here so a 164.4 author
+All 104 identities in the reference file were measured as single-frame direct
+DO-body raises (2026-08-29), so this rule refuses nothing that existed. ⚠️
+CURRENCY 2026-09-03: the annotated corpus is now FOUR files carrying 198
+code-level identities (plan 164.4-04 added the ledger_refresh family), and all
+86 of their arms scored `RED (identity ok)` on real lanes — i.e. the rule has
+still refused nothing that exists. Read the run's own `arms:`/`biting:` lines
+rather than either number restated here. It is written down so a 164.4 author
 meets it as a **contract** rather than as a surprise from the runner.
 
 ⚠️ **Honest residual.** A hostile annotation can still make the database print
@@ -520,8 +525,9 @@ edits land in one run.
 `test_strategy_shares_rls.sql` were given executable twins by plan 164.3-08 and
 all 30 bite (`arms: 30/30/0`, 2026-08-29). ⚠️ CURRENCY: that is the 2026-08-29
 measurement and it stands as lineage; the file carries more arms now (plan
-164.4-02 closed its un-twinned sections) and the corpus still has ZERO waivers
-— read the run's own `arms:` line for the live E/A/W. The form is documented
+164.4-02 closed its un-twinned sections), the annotated corpus is now four files
+(plan 164.4-04), and it still has ZERO waivers — `WAIVED_CEILING` has never
+moved off 0. Read the run's own `arms:` line for the live E/A/W. The form is documented
 for 164.4,
 which will meet arms this file does not have. This is an ILLUSTRATION, not a
 corpus quote:
