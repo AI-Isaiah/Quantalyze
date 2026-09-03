@@ -1,5 +1,61 @@
 # Changelog
 
+## [0.77.7.0] - 2026-09-03
+
+### Phase 164.4 (wave 7) — private-by-default and venue identity, and THREE arms that could not fail
+
+No production source change, no schema change, no migration. Four gate files gain
+**comment twins only — 277 added lines, 0 removed, 0 non-comment**. Batch 5 of 10.
+
+### Added
+
+- All 29 sections of the batch-3 four carry a `RED-UNDER-M` twin (8/7/7/7), every one
+  `RED (identity ok)` on the first attempt:
+  `test_strategies_private_owner_isolation.sql`, `test_api_keys_venue_identity_uniq.sql`,
+  `test_capital_ownership_column.sql`, `test_csv_daily_returns_perkey_rls.sql`.
+- `scripts/pg-lane/fixtures/10-fixture-strategies-rls-baseline.sql`.
+
+### Fixed — a stand-in NARROWER than production made three arms unfalsifiable while the gate printed ALL PASS
+
+This is the most serious vacuity mechanism the phase has found, and no green run could
+have revealed it. In `test_strategies_private_owner_isolation.sql`, run against
+`01-fixture-core.sql`'s stand-in policy:
+
+- **RLS 4 — "anon sees 0 rows for the private strategy" — passed because `anon` held no
+  SELECT grant at all** and could never see ANY row. The arm was unfalsifiable by any
+  mutation of the policy it names.
+- **GUARD 6 (UPDATE) and GUARD 7 (INSERT) were refused by the GRANT layer with 42501** —
+  the exact SQLSTATE those arms catch and read as proof that the
+  `guard_strategies_publish_transition` TRIGGER fired. Both passed for a reason having
+  nothing to do with the trigger under test.
+
+Root cause: the stand-in restricts `strategies_read` to `authenticated`, while production's
+`20260405061912_rls_policies.sql` carries NO role restriction, so production's `anon` IS
+covered by it. The lane was testing a different object than the gate asserts on. The new
+fixture drops the stand-in so the real migration defines the object, and reproduces
+Supabase's project-bootstrap default privileges — which are not retroactive to a table
+`01-fixture-core.sql` already created.
+
+### Changed
+
+- `FILES_FLOOR` 9 to 13 and `ARMS_FLOOR` 134 to 163, both equal to the run's own printed
+  coverage and biting. Both separation directions driven on real lanes.
+- `WAIVED_CEILING` untouched at 0.
+
+### Also measured
+
+- A runtime SKIP is an apply-list question. `test_api_keys_venue_identity_uniq.sql` carries
+  migration `20260814120000`; the baseline prints zero `SKIP (` notices and the
+  `PASS (structural)` variant, and section 4's twin drives the very assertion a skip would
+  have hidden.
+
+### Verified
+
+  full run   exit 0 — "No defects. Every annotated arm bit its own arm first."
+             coverage: files 13/71 · arms 163/163/0 · biting 163 · lane-invocations 163
+  self-test  17/17 scenarios · 75 assertions · exit 0
+  suite      838 files / 13890 tests · tsc exit 0 · lint-sql-gates 0 findings
+
 ## [0.77.6.0] - 2026-09-03
 
 ### Phase 164.4 (wave 6) — the tenant-isolation batch: capital ownership, shares, keys
