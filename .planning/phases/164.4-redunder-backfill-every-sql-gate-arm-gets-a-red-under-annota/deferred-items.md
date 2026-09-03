@@ -21,3 +21,31 @@ stronger than when that disagreement was first noted — `sql-mutation` has run 
 ubuntu four times (33620169220, 33751634051, 33774615747, 33785233457) — but the flip
 cannot be made through the tool until the counters are fixed. Book the reconciliation to
 `TODOS.md`, then close entry 28.
+
+## 2026-09-03 (plan 164.4-07) — `test_funding_fees_rls.sql` Assertion 2 cannot see its own conjunct
+
+MEASURED while authoring the twin. Dropping ONLY the `AND s.user_id = auth.uid()`
+conjunct from `funding_fees_read`'s USING predicate scores **NO-RED**: the policy's
+sub-select on `strategies` is itself subject to `strategies`' OWN RLS, which already
+hides tenant B's DRAFT strategy from tenant A. The conjunct is the binding constraint
+only for a strategy the reader can already see — i.e. a **PUBLISHED** one — and this
+gate seeds only `status='draft'` strategies, so it cannot distinguish "funding_fees_read
+is owner-scoped" from "strategies_read is owner-scoped".
+
+The twin therefore replaces the whole predicate with `true`, which the arm CAN observe.
+Out of scope here (the phase may not add arms): a seeded PUBLISHED strategy owned by
+tenant B would make the conjunct itself falsifiable. Book to `TODOS.md`.
+
+## 2026-09-03 (plan 164.4-07) — `test_user_notes_dashboard_scope.sql` Assertion 4 has a second, incidental fence
+
+MEASURED while authoring the twin. Opening `user_notes_insert_own`'s
+`WITH CHECK (user_id = auth.uid())` to `true` ALONE scores **NO-IDENTITY**: tenant B's
+forge targets tenant A's EXISTING `(user_id, scope_kind, scope_ref)` triple, so once the
+policy admits it the `user_notes_unique_multiscope` UNIQUE index refuses it with 23505 —
+a SQLSTATE the arm's handler (`insufficient_privilege OR check_violation`) does not
+catch, so the file dies outside every arm.
+
+So on THIS forge the unique index, not the INSERT policy, is the outer fence. The twin
+drops the UNIQUE in the same layered apply to make the policy observable. Out of scope
+here: a forge at a FRESH `scope_ref` would meet the policy alone and would make the arm
+self-contained. Book to `TODOS.md`.

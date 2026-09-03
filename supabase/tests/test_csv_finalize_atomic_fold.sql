@@ -349,6 +349,16 @@ BEGIN
   -- The exact SQLSTATE is the date-cast's (22007 invalid_datetime_format on
   -- PG16); pin the CLASS, not the code — a future PG major bumping the code
   -- within class 22 is not a regression of the guarantee under test.
+  -- RED-UNDER: invert GUARD 2's caller-identity comparison in migration
+  --            20260819151000 to `IS NOT DISTINCT FROM`, so a MATCHING
+  --            identity raises 42501 and the malformed-date payload never
+  --            reaches the ::DATE cast at all. The failure the oracle was
+  --            designed around (a class-22 datetime error) is replaced by one
+  --            that is not, which is exactly what this arm refuses. STEP 4's
+  --            own check (h3) pins the IS DISTINCT FROM spelling and would
+  --            abort the apply, so the layered second step relaxes that term
+  --            (GRAMMAR Shape 3).
+  -- RED-UNDER-M: {"arm":"Part 2b","apply":[{"kind":"edit","file":"supabase/migrations/20260819151000_csv_finalize_fold_guard1_null_safe.sql","find":"IF v_auth_uid IS DISTINCT FROM p_user_id THEN","replace":"IF v_auth_uid IS NOT DISTINCT FROM p_user_id THEN","occurrences":2,"nth":2},{"kind":"edit","file":"supabase/migrations/20260819151000_csv_finalize_fold_guard1_null_safe.sql","find":"v_auth_uid[[:space:]]+IS[[:space:]]+DISTINCT[[:space:]]+FROM","replace":"v_auth_uid[[:space:]]+IS","occurrences":1}]}
   IF err_state NOT LIKE '22%' THEN
     RAISE EXCEPTION 'TEST FAILED (Part 2b): the malformed-date call failed with SQLSTATE % (%) - expected a class-22 data exception from the ::DATE cast; a different failure means the fault injected is not the fault this oracle was designed around', err_state, err_msg;
   END IF;
@@ -423,6 +433,15 @@ BEGIN
   v_private := public.finalize_csv_strategy_with_returns(
     probe_user, session_pv, 'daily_returns', 'fold private probe', payload, 'private');
   SELECT status INTO v_status FROM public.strategies WHERE id = v_private;
+  -- RED-UNDER: replace `p_terminal_status` with the literal 'pending_review'
+  --            in the fold's strategies INSERT VALUES list (migration
+  --            20260819151000). The whitelist above still accepts 'private',
+  --            so the call succeeds and silently promotes a CONTRIB-02
+  --            private contribution into the admin publish queue — the exact
+  --            regression this arm names. STEP 4 pins the INSERT's
+  --            wizard_session_id columns, not the status VALUE, so one edit
+  --            applies clean.
+  -- RED-UNDER-M: {"arm":"Part 3a","apply":[{"kind":"edit","file":"supabase/migrations/20260819151000_csv_finalize_fold_guard1_null_safe.sql","find":"    p_user_id, p_strategy_name, p_terminal_status, 'csv',","replace":"    p_user_id, p_strategy_name, 'pending_review', 'csv',","occurrences":1}]}
   IF v_status IS DISTINCT FROM 'private' THEN
     RAISE EXCEPTION 'TEST FAILED (Part 3a): a p_terminal_status=''private'' call wrote strategies.status=% - expected ''private''. The argument is being ignored or forced, and every CONTRIB-02 private contribution now lands in the admin publish queue (D-08)', v_status;
   END IF;
@@ -643,6 +662,15 @@ BEGIN
   IF n_dl <> 0 THEN
     RAISE EXCEPTION 'TEST FAILED (Part 4): % dailies persisted for an EMPTY payload - the fold fabricated rows the user never submitted', n_dl;
   END IF;
+  -- RED-UNDER: delete the fold's strategy_verifications INSERT in migration
+  --            20260819151000 (replace the whole statement with a plpgsql
+  --            no-op). Every earlier part counts verifications only after a
+  --            REFUSED call and expects 0, so this is the FIRST arm that can
+  --            observe the missing write. ⚠️ The other two Part 4 arms cannot
+  --            take a mutation: this call is deliberately UNWRAPPED, so any
+  --            drift that makes the fold RAISE aborts the file outside any
+  --            arm and would score NO-IDENTITY (the wave-6 lesson).
+  -- RED-UNDER-M: {"arm":"Part 4","apply":[{"kind":"edit","file":"supabase/migrations/20260819151000_csv_finalize_fold_guard1_null_safe.sql","find":"  INSERT INTO strategy_verifications (\n    strategy_id, wizard_session_id, status, trust_tier, flow_type, source,\n    errors, correlation_id\n  ) VALUES (\n    v_strategy_id, p_wizard_session_id, 'validated', 'csv_uploaded', 'csv', 'csv',\n    NULL, NULL\n  );","replace":"  NULL;","occurrences":1}]}
   IF n_sv <> 1 THEN
     RAISE EXCEPTION 'TEST FAILED (Part 4): % verification rows for the trades-empty finalize, expected exactly 1', n_sv;
   END IF;
@@ -694,6 +722,14 @@ BEGIN
   IF NOT raised THEN
     RAISE EXCEPTION 'TEST FAILED (Part 5a): a 5001-row payload SUCCEEDED and returned % - the 5000-row cap (20260522111839:160-162) did not survive the fold; a direct RPC caller can insert an unbounded series (the route validator is bypassable by construction)', v_result;
   END IF;
+  -- RED-UNDER: change the cap guard's ERRCODE from 22023 to 22004 in migration
+  --            20260819151000. The cap still fires, so Part 5a stays green and
+  --            this arm is the first failure — which is the point: the route's
+  --            classifier keys on the CODE, and a cap that refuses with the
+  --            wrong one is a 500 where a legible 400 was promised. STEP 4(d)
+  --            pins the `> 5000` literal, not the ERRCODE, so one edit applies
+  --            clean.
+  -- RED-UNDER-M: {"arm":"Part 5b","apply":[{"kind":"edit","file":"supabase/migrations/20260819151000_csv_finalize_fold_guard1_null_safe.sql","find":"'finalize_csv_strategy_with_returns: p_rows exceeds 5000 rows (got %)', jsonb_array_length(p_rows)\n      USING ERRCODE = '22023';","replace":"'finalize_csv_strategy_with_returns: p_rows exceeds 5000 rows (got %)', jsonb_array_length(p_rows)\n      USING ERRCODE = '22004';","occurrences":1}]}
   IF err_state <> '22023' THEN
     RAISE EXCEPTION 'TEST FAILED (Part 5b): the 5001-row call failed with SQLSTATE % (%) - expected 22023 from the cap guard, BEFORE any write', err_state, err_msg;
   END IF;
@@ -766,6 +802,14 @@ BEGIN
     raised := TRUE;
     GET STACKED DIAGNOSTICS err_state = RETURNED_SQLSTATE, err_msg = MESSAGE_TEXT;
   END;
+  -- RED-UNDER: replace the body of GUARD 3 (the NULL p_rows refusal) in
+  --            migration 20260819151000 with a plpgsql no-op. Every rows guard
+  --            below it is three-valued logic a NULL argument PASSES, so the
+  --            call runs to completion and returns a strategy with zero
+  --            dailies — the state 146.1-RESEARCH measured before the guard
+  --            existed. STEP 4(i) pins the `IF p_rows IS NULL THEN` head,
+  --            which this edit leaves in place, so one edit applies clean.
+  -- RED-UNDER-M: {"arm":"Part 6a","apply":[{"kind":"edit","file":"supabase/migrations/20260819151000_csv_finalize_fold_guard1_null_safe.sql","find":"    RAISE EXCEPTION 'finalize_csv_strategy_with_returns: p_rows is required (got NULL)'\n      USING ERRCODE = '22023';","replace":"    NULL;","occurrences":1}]}
   IF NOT raised THEN
     RAISE EXCEPTION 'TEST FAILED (Part 6a): a NULL p_rows call SUCCEEDED and returned % - the NULL guard is gone. jsonb_typeof(NULL) is NULL, NULL <> ''array'' is NULL and plpgsql takes the ELSE branch, so a NULL argument walks past EVERY rows guard and commits a strategy with zero dailies that the Phase 143 sweep structurally cannot heal', v_result;
   END IF;
@@ -1229,6 +1273,13 @@ BEGIN
     raised := TRUE;
     GET STACKED DIAGNOSTICS err_state = RETURNED_SQLSTATE, err_msg = MESSAGE_TEXT;
   END;
+  -- RED-UNDER: widen GUARD 4's fmt whitelist in migration 20260819151000 to
+  --            admit 'nonsense'. The call then succeeds and a caller-supplied
+  --            format the fold cannot interpret reaches the writes. STEP 4(j)
+  --            pins the NULL-explicit SHAPE of the whitelist, not its member
+  --            list, so the widened list applies clean — which is precisely
+  --            why this behavioural arm has to exist.
+  -- RED-UNDER-M: {"arm":"Part 7a","apply":[{"kind":"edit","file":"supabase/migrations/20260819151000_csv_finalize_fold_guard1_null_safe.sql","find":"p_fmt NOT IN ('daily_returns','daily_nav','trades')","replace":"p_fmt NOT IN ('daily_returns','daily_nav','trades','nonsense')","occurrences":1}]}
   IF NOT raised THEN
     RAISE EXCEPTION 'TEST FAILED (Part 7a): fmt=''nonsense'' SUCCEEDED and returned % - the fmt whitelist is gone, and the series would be interpreted downstream by whichever reader guesses first (returns vs NAV vs trades are three different economic meanings for the same numbers)', v_result;
   END IF;

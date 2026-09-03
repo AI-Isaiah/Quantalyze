@@ -35,6 +35,25 @@
 -- Usage:
 --   psql "$TEST_SUPABASE_DB_URL" -v ON_ERROR_STOP=1 -f \
 --     supabase/tests/test_allocator_equity_derived_rls.sql
+--
+-- ⭐ MACHINE-EXECUTABLE TWINS (phase 164.4, REDUNDER-BACKFILL). Each prose
+-- RED-UNDER below carries an adjacent `RED-UNDER-M` object that
+-- scripts/mutation-runner executes on every push: it mutates COPIES on a
+-- throwaway pg-lane cluster, requires the FIRST `TEST FAILED (…)` to name that
+-- arm, and restores GREEN. Schema: scripts/mutation-runner/GRAMMAR.md.
+-- ⚠️ THE PRESENCE GATE ABOVE IS INERT ON THIS LANE, AND THAT IS PROVEN, NOT
+-- ASSUMED: 20260717233529 is IN the apply list, so `allocator_equity_derived`
+-- exists, the baseline prints ZERO `SKIP` notices, and the file's own closing
+-- NOTICE ('All allocator_equity_derived RLS + atomicity assertions passed') is
+-- reached — a run that took the skip would print neither. An arm behind a
+-- firing skip is unfalsifiable and annotating it would be the vacuity this
+-- phase exists to remove (T-164.4-05).
+-- ⚠️ 07-fixture-supabase-default-privileges.sql precedes the migration so the
+-- table arrives with production's bootstrap GRANT ALL for anon, authenticated
+-- and service_role. Assertion 4 accepts EITHER 0 rows or a 42501, so without
+-- that grant it would pass on the missing privilege rather than on the absent
+-- anon POLICY — and no mutation of the policy could ever redden it.
+-- RED-UNDER-SETUP: {"apply":["scripts/pg-lane/fixtures/01-fixture-core.sql","scripts/pg-lane/fixtures/15-fixture-auth-role.sql","scripts/pg-lane/fixtures/02-fixture-sanitize-tables.sql","scripts/pg-lane/fixtures/03-fixture-compute-jobs.sql","scripts/pg-lane/fixtures/07-fixture-supabase-default-privileges.sql","supabase/migrations/20260411144407_compute_jobs_queue.sql","scripts/pg-lane/fixtures/04-fixture-compute-jobs-targets.sql","supabase/migrations/20260710120000_strategy_keys.sql","supabase/migrations/20260710130000_stitch_composite_kind.sql","supabase/migrations/20260717233529_allocator_equity_derived_surface.sql"]}
 
 BEGIN;
 
@@ -79,6 +98,17 @@ BEGIN
 
   RAISE NOTICE 'Seed OK: A=% B=%', uid_a, uid_b;
 
+  -- RED-UNDER: re-scope allocator_equity_derived_owner_select from
+  --            `TO authenticated` to `TO service_role` on the live database
+  --            after the migration has applied. The policy still exists under
+  --            its own name, while the SSR owner client — which reads with the
+  --            AUTHENTICATED key, not the service key — silently sees an empty
+  --            dashboard. ⚠️ MEASURED: as a migration EDIT this scores
+  --            NO-IDENTITY, because 20260717233529's own STEP 6(c) asserts
+  --            `'authenticated' = ANY(roles)` and aborts the apply before the
+  --            gate runs. The drift this arm exists to catch is a LATER one, and
+  --            a post-apply `sql` step is exactly that.
+  -- RED-UNDER-M: {"arm":"1","apply":[{"kind":"sql","stmt":"ALTER POLICY allocator_equity_derived_owner_select ON public.allocator_equity_derived TO service_role"}]}
   -- ----- ASSERTION 1: A sees A's own row ---------------------------------
   PERFORM set_config('request.jwt.claims',
     json_build_object('sub', uid_a::text, 'role', 'authenticated')::text, true);
@@ -89,6 +119,11 @@ BEGIN
     RAISE EXCEPTION 'TEST FAILED (1): owner A sees % of its own rows, expected 1', row_cnt;
   END IF;
 
+  -- RED-UNDER: replace the owner predicate with `true` in migration
+  --            20260717233529. Assertion 1 still passes — A does see its own
+  --            row — which is exactly why a test that only asserts `a row came
+  --            back` is not proof, and why this arm reads the rows by CONTENT.
+  -- RED-UNDER-M: {"arm":"2","apply":[{"kind":"edit","file":"supabase/migrations/20260717233529_allocator_equity_derived_surface.sql","find":"  USING (allocator_id = auth.uid());","replace":"  USING (true);","occurrences":1}]}
   -- ----- ASSERTION 2: A does NOT see B's row (cross-tenant) ---------------
   SELECT count(*) INTO row_cnt FROM allocator_equity_derived WHERE allocator_id = uid_b;
   IF row_cnt <> 0 THEN
@@ -97,6 +132,13 @@ BEGIN
   END IF;
   RESET ROLE;
 
+  -- RED-UNDER: the same `USING (true)` leak as Assertion 2, with Assertion 2
+  --            neutered. Assertions 2 and 3b read the SAME property from
+  --            opposite tenants, so ONE predicate can only ever be observed by
+  --            whichever runs first; the second takes the first as a `neuter`
+  --            (the 164.4-06 rule). The mirror arm is not redundant: it is what
+  --            catches a predicate that leaks in one direction only.
+  -- RED-UNDER-M: {"arm":"3b","apply":[{"kind":"edit","file":"supabase/migrations/20260717233529_allocator_equity_derived_surface.sql","find":"  USING (allocator_id = auth.uid());","replace":"  USING (true);","occurrences":1}],"neuter":[{"arm":"2"}]}
   -- ----- ASSERTION 3: B sees B's own row, never A's ----------------------
   PERFORM set_config('request.jwt.claims',
     json_build_object('sub', uid_b::text, 'role', 'authenticated')::text, true);
@@ -114,6 +156,17 @@ BEGIN
   RESET ROLE;
   PERFORM set_config('request.jwt.claims', NULL, true);
 
+  -- RED-UNDER: add an anon SELECT policy to the live database after the
+  --            migration has applied — the drift this arm's own prose names
+  --            ('anon sees 0 rows (no anon policy)'). Nothing else moves: the
+  --            authenticated arms above keep their own policy and stay green, so
+  --            this arm is the first failure and its RED is also the proof that
+  --            anon HOLDS the table grant here, i.e. that a green Assertion 4 is
+  --            RLS and not a missing privilege. ⚠️ MEASURED: as a migration edit
+  --            this scores NO-IDENTITY — STEP 6(c) refuses ANY policy naming
+  --            anon and aborts the apply, which is the structural half of the
+  --            same claim; this arm is the behavioural half.
+  -- RED-UNDER-M: {"arm":"4","apply":[{"kind":"sql","stmt":"CREATE POLICY allocator_equity_derived_anon_select ON public.allocator_equity_derived FOR SELECT TO anon USING (true)"}]}
   -- ----- ASSERTION 4: anon sees 0 rows -----------------------------------
   -- No anon policy exists; anon either lacks the grant (42501) or RLS returns
   -- 0. Either way anon must not read derived money data. Treat 42501 as 0.
@@ -130,6 +183,12 @@ BEGIN
     RAISE EXCEPTION 'TEST FAILED (4): anon sees % rows, expected 0', row_cnt;
   END IF;
 
+  -- RED-UNDER: add an owner-write policy for `authenticated` to migration
+  --            20260717233529, i.e. let the reader of derived money data also
+  --            produce it. The INSERT then succeeds and 5a — the silent-accept
+  --            arm — is the first failure. The added policy is FOR ALL with the
+  --            owner predicate, so it changes nothing Assertions 1-4 observe.
+  -- RED-UNDER-M: {"arm":"5a","apply":[{"kind":"insert-after","file":"supabase/migrations/20260717233529_allocator_equity_derived_surface.sql","anchor":"CREATE POLICY allocator_equity_derived_owner_select ON allocator_equity_derived\n  FOR SELECT\n  TO authenticated\n  USING (allocator_id = auth.uid());","text":"\n\nCREATE POLICY allocator_equity_derived_owner_write ON allocator_equity_derived\n  FOR ALL\n  TO authenticated\n  USING (allocator_id = auth.uid())\n  WITH CHECK (allocator_id = auth.uid());","occurrences":1}]}
   -- ----- ASSERTION 5: authenticated CANNOT write (worker is sole writer) --
   -- Content-based: attempt INSERT/UPDATE/DELETE as authenticated A, swallow any
   -- error, then verify (as the bypass role) that A's table state is UNCHANGED.
@@ -186,6 +245,16 @@ BEGIN
     RAISE EXCEPTION 'TEST FAILED (5): an authenticated INSERT row persisted — write policy leaked';
   END IF;
 
+  -- RED-UNDER: attach a BEFORE UPDATE trigger to allocator_equity_derived on
+  --            the live database that returns NULL, so the upsert's DO UPDATE
+  --            leg is silently discarded and the stale payload survives. This
+  --            statement is an UNWRAPPED positive control in the bypass
+  --            context, so a drift that RAISES would abort outside every arm
+  --            and score NO-IDENTITY; the SILENT form is the one it can
+  --            observe (the 164.4-05 measured rule). Row count stays 1, so the
+  --            arm's payload branch is what bites — which is the branch that
+  --            distinguishes a REPLACE from a no-op.
+  -- RED-UNDER-M: {"arm":"6","apply":[{"kind":"sql","stmt":"CREATE FUNCTION public._drift_aed_swallow_update() RETURNS TRIGGER LANGUAGE plpgsql AS $q$ BEGIN RETURN NULL; END $q$; CREATE TRIGGER _drift_aed_swallow_update BEFORE UPDATE ON public.allocator_equity_derived FOR EACH ROW EXECUTE FUNCTION public._drift_aed_swallow_update()"}]}
   -- ----- ASSERTION 6: service-role upsert is atomic single-row replace ----
   -- Back in the bypass (service/superuser) context. A second upsert on the SAME
   -- (allocator_id, kind) REPLACES the row in place — never a second row.
