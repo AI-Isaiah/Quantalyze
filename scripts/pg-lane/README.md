@@ -163,5 +163,9 @@ The 103-arm `strategy_shares` gate needed nothing added to `01`/`02`; `03` and
 | `--tracer-proof` (two full lane runs + copy/mutate) | ~5 s |
 | `--self-test` (four checks, two of which wait on a signalled run) | ~39 s |
 
-Budgeting note for the corpus run: ~2 s per arm, so 30 arms ≈ 1 minute of lane
-time. Minutes, not hours.
+Budgeting note for the corpus run: the cost is one lane per annotated arm, so
+the total is (arms + 2) x the per-lane figure above — a baseline and a restore
+leg on top of the arms. No arm COUNT is restated here on purpose: the runner
+prints `per-arm lane time: mean <t>s over <n> arm run(s)` on every run and that
+line is the current measurement. Minutes, not hours — measured 0.9 s/arm over
+45 arms on 2026-09-03 (plan 164.4-02).

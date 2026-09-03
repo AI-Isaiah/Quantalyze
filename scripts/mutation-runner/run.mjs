@@ -127,7 +127,11 @@ const FIXTURE_CORPUS = join(REPO_ROOT, "scripts", "mutation-runner", "fixtures")
 // byte-identical at the phase base and at HEAD (5ae6855f). Command, sample size
 // and record are stated once in the ARMS_FLOOR block below. No value change.
 //
-// Phase 164.4 raises FILES_FLOOR as it backfills the other 70 files.
+// Phase 164.4 raises FILES_FLOOR as it backfills the remaining idiom files.
+// ⚠️ CURRENCY 2026-09-03 (plan 164.4-02): still 1. That plan raised ARMS_FLOOR
+// 30 -> 45 by closing the reference file's 15 un-twinned SECTIONS, and annotated
+// no NEW file, so the FILE count did not move. A batch that annotates a new file
+// moves this constant; a batch that deepens an existing one does not.
 export const FILES_FLOOR = 1;
 
 // ARMS_FLOOR — PINNED 2026-08-29 BY MEASUREMENT (plan 164.3-08), not chosen.
@@ -185,18 +189,52 @@ export const FILES_FLOOR = 1;
 // for a ratchet, and the fact plan 164.3.1-10 must carry with the integer.
 //
 // ⚠️ RATCHET, NOT A TARGET. It fails on REGRESSION only: an annotation that
-// stops biting, or one deleted outright, drops the biting count below 30 and
-// exits 1. It never demands more than the corpus declares. Phase 164.4 raises
-// it as it backfills the other 70 files.
+// stops biting, or one deleted outright, drops the biting count below the floor
+// and exits 1. It never demands more than the corpus declares. Phase 164.4
+// raises it as it backfills the remaining idiom files.
 // ⛔ Converting an arm to a `waiver` LOWERS the biting count and therefore trips
 // this floor. That is deliberate: waiver creep is how a non-biting arm hides
 // (T-164.3-21), so widening a waiver has to be an explicit, reviewed edit here.
 //
-// CURRENCY, stated where the VALUE is — derivation, sample size and coverage in
-// the block above; record in 164.3.1-09-REDERIVATION.md:
-// RE-DERIVED 2026-09-01 under the sound primitives (plan 164.3.1-09).
-// Measured biting 30 — value UNCHANGED.
-export const ARMS_FLOOR = 30;
+// ⭐ RE-DERIVED 2026-09-03 (plan 164.4-02) — MEASURED on the full-corpus run at
+// HEAD c850a790. The two pins above STAY as lineage: 30 was the whole corpus
+// when it was written. This move is a COVERAGE move, not a mechanism move —
+// the reference file's 15 un-twinned SECTIONS were closed, so the same file
+// now declares 45 arms where it declared 30.
+//
+//   VALUE        45 — biting = 45 executed − 0 (no-red + wrong-first-failure +
+//                synthesised-identity) = 45 − 0 = 45.
+//   DATE         2026-09-03, at HEAD c850a790.
+//   COMMAND      `node scripts/mutation-runner/run.mjs` -> exit 0
+//                  coverage: files 1/71
+//                  arms: 45/45/0   (executed/annotated/waived)
+//                  biting: 45
+//                  lane-invocations: 45
+//                  file test_strategy_shares_rls.sql: sections 35 / judged 45 /
+//                    annotated 45 / waived 0 / biting 45
+//                  per-arm lane time: mean 0.9s over 45 arm run(s)
+//   SAMPLE SIZE  45 arms executed, all 45 `RED (identity ok)`, 0 defects of any
+//                kind. The two independent tallies AGREE: `arms:` executed 45
+//                and `lane-invocations:` 45.
+//   COVERAGE     STILL 1 annotated gate file of 71 in supabase/tests/, namely
+//                supabase/tests/test_strategy_shares_rls.sql — no new FILE was
+//                annotated, which is why FILES_FLOOR does not move. What moved
+//                is SECTION coverage WITHIN that file: 20 of its 35 sections
+//                carried a twin before, 35 of 35 do now.
+//   SEPARATION   Both directions driven through the real verdict loop on real
+//                lanes (`runCorpus({armsFloor})`), 2026-09-03:
+//                  armsFloor=45  biting=45  floor-defects=0  SILENT
+//                  armsFloor=46  biting=45  floor-defects=1  FIRES ->
+//                    `ARMS_FLOOR regression: 45 biting arm(s) < floor 46`
+//                So 45 is exactly the separation point, not a value below it.
+//   RECORD       .planning/phases/164.4-redunder-backfill-every-sql-gate-arm-
+//                gets-a-red-under-annota/164.4-02-SUMMARY.md
+//
+// CURRENCY, stated where the VALUE is — derivation, sample size, coverage and
+// separation in the block immediately above; record in 164.4-02-SUMMARY.md:
+// RE-DERIVED 2026-09-03 by measurement (plan 164.4-02).
+// Measured biting 45 — value RAISED from 30.
+export const ARMS_FLOOR = 45;
 
 // WAIVED_CEILING — PINNED 2026-09-02 BY MEASUREMENT (164.3.1 red team), not
 // chosen. A CEILING, not a floor: it fails when the corpus carries MORE waivers
@@ -417,7 +455,7 @@ export const executableText = (source) => maskNonCode(source);
  * DIFFERENT file (`test_profiles_privileged_columns_locked.sql`, seven times).
  * The class is closed by CONSTRUCTION above, not by this number; the number
  * only proves the construction refuses nothing the corpus already relies on.
- * Phase 164.4 raises the coverage as it backfills the other 70 files.
+ * Phase 164.4 raises the coverage as it backfills the remaining idiom files.
  */
 export const isBranchHead = (statement) => statement != null && statement.head === true;
 
@@ -2802,7 +2840,7 @@ function selfTest() {
 
   // ⚠️ EVERY SCENARIO PASSES AN EXPLICIT `armsFloor`, and that is required for
   // the checks to measure what they name. The synthetic corpora carry 2 arms;
-  // the REAL ARMS_FLOOR is 30 (measured 2026-08-29). Inheriting the default
+  // the REAL ARMS_FLOOR is 45 (measured 2026-09-03). Inheriting the default
   // would add a spurious `floor` defect to every scenario below and break check
   // 6 outright, so each states the floor appropriate to ITS corpus. Check 5 is
   // where an ARMS_FLOOR regression is proven to fire — the mode that could not

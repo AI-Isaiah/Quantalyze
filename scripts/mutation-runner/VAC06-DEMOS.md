@@ -457,8 +457,8 @@ called `SANITIZE 1e` proven.
 ## Durability — what re-proves this without a human
 
 1. **The four demo arms live in the every-push corpus.** `TENANT 5b`, `N1 3a`, `SHAPE 5` and
-   `SANITIZE 1e` are four of the 30 arms the `sql-mutation` CI job executes on every push
-   (plan 08). If any of them stops biting, `ARMS_FLOOR` (pinned at the measured 30) drops and the
+   `SANITIZE 1e` are four of the arms the `sql-mutation` CI job executes on every push
+   (plan 08). If any of them stops biting, `ARMS_FLOOR` (pinned at the measured value) drops and the
    job exits 1. The demonstrations above are not a one-time recording — their subjects are
    continuously re-tested.
 2. **`src/__tests__/vac06-mechanism-arms.test.ts`** pins that each demo arm still carries a
@@ -475,11 +475,14 @@ called `SANITIZE 1e` proven.
   padded with a second control to make a table look complete.
 - **The `bigint out of range` string is not quoted for mechanism 3** — see that section's ⚠️. The
   overflow site is established by a two-run A/B, not by a captured psql line.
-- **Everything here was measured on macOS.** The `sql-mutation` and `sql-gate-lint` jobs have not
-  yet run on an ubuntu runner (plan 06 D5, plan 08's carried-forward gap). These demonstrations
-  prove the detectors bite; they do not prove the CI hosts execute them.
+- **Everything here was measured on macOS.** The `sql-mutation` and `sql-gate-lint` jobs had not
+  yet run on an ubuntu runner when this was written (plan 06 D5, plan 08's carried-forward gap).
+  These demonstrations prove the detectors bite; they do not prove the CI hosts execute them.
+  ⚠️ CURRENCY 2026-09-02: both jobs were since observed GREEN on ubuntu
+  (`workflow_dispatch` run 33620169220 at `89cbef8b`, self-test 12/12) — see `CLAUDE.md` § SQL gate
+  integrity jobs. One green run is a measurement of one host, not a guarantee about the next.
 - **Coverage is `files 1/71`.** All five mechanisms live in the one annotated file, which is why
-  criterion 6 is reachable now; the other 70 files are Phase 164.4.
+  criterion 6 is reachable now; the remaining idiom files are Phase 164.4.
 
 ---
 

@@ -430,6 +430,13 @@ BEGIN
   -- INVOKER is load-bearing: RLS is the ONLY cross-tenant wall on this surface
   -- (there is no SECURITY DEFINER reader in this design), so a DEFINER body
   -- would bypass the CR-01 owner-coherence WITH CHECK entirely.
+  -- RED-UNDER: `ALTER FUNCTION public.create_strategy_share(uuid) SECURITY
+  --            DEFINER` on the live database. A migration edit is not available
+  --            here: STEP 6 arm (iii) pins prosecdef at APPLY time and would
+  --            abort the apply, so the gate would never run. Post-apply is
+  --            also the faithful shape — the drift this arm exists to catch is
+  --            a later ALTER, not a rewritten migration.
+  -- RED-UNDER-M: {"arm":"SHAPE 2a","apply":[{"kind":"sql","stmt":"ALTER FUNCTION public.create_strategy_share(uuid) SECURITY DEFINER"}]}
   FOR v_secdef IN
     SELECT p.prosecdef
       FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
@@ -825,6 +832,14 @@ BEGIN
   -- auth.uid() holds, so ONLY the EXISTS clause can reject it. If that clause
   -- is ever dropped, this succeeds and A owns a working capability URL to B's
   -- private factsheet.
+  -- RED-UNDER: drop the CR-01 owner-coherence EXISTS half from the
+  --            strategy_shares_owner WITH CHECK — `ALTER POLICY
+  --            strategy_shares_owner ON strategy_shares USING (created_by =
+  --            auth.uid()) WITH CHECK (created_by = auth.uid())` — leaving the
+  --            created_by half in place so TENANT 3 is untouched. A policy
+  --            rewrite is a `sql` step, never a migration edit: CREATE POLICY
+  --            has already run by the time the gate executes.
+  -- RED-UNDER-M: {"arm":"TENANT 1a","apply":[{"kind":"sql","stmt":"ALTER POLICY strategy_shares_owner ON strategy_shares USING (created_by = auth.uid()) WITH CHECK (created_by = auth.uid())"}]}
   raised := FALSE;
   BEGIN
     PERFORM public.create_strategy_share(strat_b);
@@ -846,6 +861,14 @@ BEGIN
   -- Same rejection without the RPC in the way, so the arm pins the POLICY and
   -- not the function body. A future route that upserts the table directly
   -- (instead of calling the RPC) is covered by this arm and by nothing else.
+  -- RED-UNDER: the same dropped EXISTS half as TENANT 1a. ⚠️ TENANT 1a and 1b
+  --            fire first on it, so this arm was observed red with both
+  --            neutered; and because a neutered TENANT 1 lets A's cross-tenant
+  --            mint LAND, the UNIQUE(strategy_id) index would then pre-empt
+  --            this INSERT with 23505 and TENANT 2b would fire instead. The
+  --            mint above is therefore made a no-op in the same mutation — the
+  --            layering TENANT 5b already uses on the same statement.
+  -- RED-UNDER-M: {"arm":"TENANT 2a","apply":[{"kind":"sql","stmt":"ALTER POLICY strategy_shares_owner ON strategy_shares USING (created_by = auth.uid()) WITH CHECK (created_by = auth.uid())"},{"kind":"edit","file":"supabase/tests/test_strategy_shares_rls.sql","find":"    PERFORM public.create_strategy_share(strat_b);\n","replace":"    NULL;\n","occurrences":2,"nth":1}],"neuter":[{"arm":"TENANT 1a"},{"arm":"TENANT 1b"}]}
   raised := FALSE;
   BEGIN
     INSERT INTO strategy_shares (strategy_id, created_by) VALUES (strat_b, uid_a);
@@ -878,6 +901,18 @@ BEGIN
   -- 23505, and a bare `raised := TRUE` would swallow that as a pass. Postgres
   -- evaluates RLS WITH CHECK (ExecWithCheckOptions) BEFORE index insertion, so
   -- while the clause is present the error is RLS and this arm is exact.
+  -- RED-UNDER: drop the `created_by = auth.uid()` half of the
+  --            strategy_shares_owner WITH CHECK, keeping the EXISTS half —
+  --            `ALTER POLICY strategy_shares_owner ON strategy_shares USING
+  --            (created_by = auth.uid()) WITH CHECK (EXISTS (SELECT 1 FROM
+  --            public.strategies s WHERE s.id = strategy_shares.strategy_id AND
+  --            s.user_id = auth.uid()))`. TENANT 1/2 stay green (EXISTS still
+  --            refuses strat_b), and the arm that fires is TENANT 3b, not 3a —
+  --            exactly as the paragraph above predicts: with the created_by
+  --            half gone the INSERT reaches UNIQUE(strategy_id) and raises
+  --            23505, which is what 3b exists to distinguish from an RLS
+  --            rejection.
+  -- RED-UNDER-M: {"arm":"TENANT 3b","apply":[{"kind":"sql","stmt":"ALTER POLICY strategy_shares_owner ON strategy_shares USING (created_by = auth.uid()) WITH CHECK (EXISTS (SELECT 1 FROM public.strategies s WHERE s.id = strategy_shares.strategy_id AND s.user_id = auth.uid()))"}]}
   raised := FALSE;
   BEGIN
     INSERT INTO strategy_shares (strategy_id, created_by) VALUES (strat_a, uid_b);
@@ -1090,6 +1125,14 @@ BEGIN
   -- raises nothing at all, and catching WHEN OTHERS would let an unrelated
   -- error satisfy the arm. Why it matters: a delete discards the counter, the
   -- next mint inserts a fresh row at generation 1, and every token the owner
+  -- RED-UNDER: `GRANT DELETE ON strategy_shares TO authenticated` on the live
+  --            database. ⚠️ SHAPE 3's exact-set pin reads the TABLE-level ACL and
+  --            fires first on ANY table-level grant drift, so this arm was
+  --            observed red with SHAPE 3 neutered — at which point NO-DELETE 1 is
+  --            the FIRST failure and correctly names the absent DELETE grant as
+  --            the only layer that refused (the policy is FOR ALL, so RLS lets
+  --            the owner delete their own row).
+  -- RED-UNDER-M: {"arm":"NO-DELETE 1","apply":[{"kind":"sql","stmt":"GRANT DELETE ON strategy_shares TO authenticated"}],"neuter":[{"arm":"SHAPE 3"}]}
   -- explicitly REVOKED at generation 1 starts working again.
   raised := FALSE;
   BEGIN
@@ -1105,6 +1148,15 @@ BEGIN
   -- ======================================================================
   -- REVOKE 1: immediacy — revoked_at stamped AND generation +1, atomically
   -- ======================================================================
+  -- RED-UNDER: drop `revoked_at = now(),` from revoke_strategy_share's UPDATE
+  --            in migration 20260827120000 STEP 4, keeping the bump. The stamp
+  --            and the bump are ONE statement, so the half that is dropped
+  --            decides which arm speaks: without the stamp the row is still
+  --            live, REVOKE 1a still sees 1 affected row, and REVOKE 1b is the
+  --            first failure. ⚠️ Dropping the BUMP instead is not this arm's
+  --            mutation: the trigger's rule (2) refuses that statement outright,
+  --            so the RPC raises and no arm of this file is attributable.
+  -- RED-UNDER-M: {"arm":"REVOKE 1b","apply":[{"kind":"edit","file":"supabase/migrations/20260827120000_strategy_shares_generation_model.sql","find":"     SET revoked_at = now(),\n         generation = generation + 1\n","replace":"     SET generation = generation + 1\n","occurrences":1}]}
   SELECT public.revoke_strategy_share(strat_a) INTO affected;
   IF affected <> 1 THEN
     RESET ROLE;
@@ -1139,6 +1191,13 @@ BEGIN
   -- dead") is already satisfied. The route maps it to a 404 so it is not an
   -- existence oracle. And the counter must NOT keep inflating, or a retry loop
   -- would silently burn generations.
+  -- RED-UNDER: drop the `AND revoked_at IS NULL` predicate from
+  --            revoke_strategy_share's UPDATE in STEP 4, so a second revoke
+  --            matches the already-tombstoned row and affects 1 instead of 0.
+  --            ⚠️ LAYERED: STEP 6 arm (i-b) probes the body for that exact
+  --            predicate and would ABORT THE APPLY, so it is disabled in the
+  --            same mutation or this file never runs.
+  -- RED-UNDER-M: {"arm":"REVOKE 2a","apply":[{"kind":"edit","file":"supabase/migrations/20260827120000_strategy_shares_generation_model.sql","find":"     AND created_by = auth.uid()\n     AND revoked_at IS NULL;\n","replace":"     AND created_by = auth.uid();\n","occurrences":1},{"kind":"edit","file":"supabase/migrations/20260827120000_strategy_shares_generation_model.sql","find":"  IF v_revoke_s !~* 'revoked_at\\s+IS\\s+NULL' THEN\n","replace":"  IF FALSE THEN\n","occurrences":1}]}
   SELECT public.revoke_strategy_share(strat_a) INTO affected;
   IF affected <> 0 THEN
     RESET ROLE;
@@ -1225,6 +1284,13 @@ BEGIN
   -- Making every revocation advance the counter is what lets reactivation stay
   -- unconstrained — it guarantees no revoked row can ever be returned to a
   -- generation that was live before it.
+  -- RED-UNDER: weaken rule (2) of strategy_shares_enforce_monotonic_generation
+  --            in STEP 1b from `NEW.generation <= OLD.generation` to
+  --            `NEW.generation < OLD.generation`, which rule (1) has already
+  --            refused — so the rule survives as text and enforces nothing, and
+  --            a raw same-counter tombstone is accepted. ⚠️ LAYERED: STEP 6 arm
+  --            (v-b) probes for the `<=` spelling and would abort the apply.
+  -- RED-UNDER-M: {"arm":"TRIGGER 1a","apply":[{"kind":"edit","file":"supabase/migrations/20260827120000_strategy_shares_generation_model.sql","find":"  IF OLD.revoked_at IS NULL\n     AND NEW.revoked_at IS NOT NULL\n     AND NEW.generation <= OLD.generation THEN\n","replace":"  IF OLD.revoked_at IS NULL\n     AND NEW.revoked_at IS NOT NULL\n     AND NEW.generation < OLD.generation THEN\n","occurrences":1},{"kind":"edit","file":"supabase/migrations/20260827120000_strategy_shares_generation_model.sql","find":"  IF v_trigfn_s !~* 'OLD\\.revoked_at\\s+IS\\s+NULL'\n     OR v_trigfn_s !~* 'NEW\\.generation\\s*<=\\s*OLD\\.generation' THEN\n","replace":"  IF FALSE THEN\n","occurrences":1}]}
   raised := FALSE;
   BEGIN
     UPDATE strategy_shares SET revoked_at = now() WHERE strategy_id = strat_a;
@@ -1269,6 +1335,13 @@ BEGIN
   -- ======================================================================
   -- MONOTONICITY: generation never decreases across the whole cycle
   -- ======================================================================
+  -- RED-UNDER: the same weakened rule (2) as TRIGGER 1a. ⚠️ TRIGGER 1a and 1b
+  --            fire on it first, so this arm was observed red with both
+  --            neutered — at which point TRIGGER 1's raw tombstone LANDS, strat_a
+  --            is left revoked at an unmoved counter, and the revoke below matches
+  --            0 rows instead of 1. That is the downstream shape of a cosmetic
+  --            revocation and it is what MONOTONIC 1a reports.
+  -- RED-UNDER-M: {"arm":"MONOTONIC 1a","apply":[{"kind":"edit","file":"supabase/migrations/20260827120000_strategy_shares_generation_model.sql","find":"  IF OLD.revoked_at IS NULL\n     AND NEW.revoked_at IS NOT NULL\n     AND NEW.generation <= OLD.generation THEN\n","replace":"  IF OLD.revoked_at IS NULL\n     AND NEW.revoked_at IS NOT NULL\n     AND NEW.generation < OLD.generation THEN\n","occurrences":1},{"kind":"edit","file":"supabase/migrations/20260827120000_strategy_shares_generation_model.sql","find":"  IF v_trigfn_s !~* 'OLD\\.revoked_at\\s+IS\\s+NULL'\n     OR v_trigfn_s !~* 'NEW\\.generation\\s*<=\\s*OLD\\.generation' THEN\n","replace":"  IF FALSE THEN\n","occurrences":1}],"neuter":[{"arm":"TRIGGER 1a"},{"arm":"TRIGGER 1b"}]}
   SELECT public.revoke_strategy_share(strat_a) INTO affected;
   IF affected <> 1 THEN
     RESET ROLE;
@@ -1317,6 +1390,12 @@ BEGIN
   --
   -- ⚠️ The row is REVOKED at this point (MONOTONIC 1a), which is what makes the
   -- probe faithful: it is the state a revoked-link resurrection starts from.
+  -- RED-UNDER: delete rule (1) — the `IF NEW.generation < OLD.generation` block
+  --            — from strategy_shares_enforce_monotonic_generation() in STEP 1b,
+  --            so the owner's raw rewind is accepted. ⚠️ LAYERED: STEP 6 arm
+  --            (v-a) probes the body for that comparison and would abort the
+  --            apply, so its guard is disabled in the same mutation.
+  -- RED-UNDER-M: {"arm":"TRIGGER 2a","apply":[{"kind":"edit","file":"supabase/migrations/20260827120000_strategy_shares_generation_model.sql","find":"  IF NEW.generation < OLD.generation THEN\n    RAISE EXCEPTION 'strategy_shares: generation is monotonic — refusing to rewind it from % to % on strategy %. A rewind re-issues every share token minted at the lower generation, including ones that were explicitly REVOKED, as anonymous access to an unpublished factsheet.',\n      OLD.generation, NEW.generation, OLD.strategy_id\n      USING ERRCODE = 'check_violation';\n  END IF;\n","replace":"","occurrences":1},{"kind":"edit","file":"supabase/migrations/20260827120000_strategy_shares_generation_model.sql","find":"  IF v_trigfn_s !~* 'NEW\\.generation\\s*<\\s*OLD\\.generation' THEN\n","replace":"  IF FALSE THEN\n","occurrences":1}]}
   raised := FALSE;
   BEGIN
     UPDATE strategy_shares
@@ -1755,6 +1834,13 @@ BEGIN
   -- ======================================================================
   -- TENANT 4: B cannot SEE or REVOKE A's share
   -- ======================================================================
+  -- RED-UNDER: open the USING clause — `ALTER POLICY strategy_shares_owner ON
+  --            strategy_shares USING (true)` — leaving WITH CHECK intact so
+  --            every TENANT 1-3 write arm above stays green and this arm is the
+  --            FIRST failure. TENANT 4a is the file's only USING pin (see the
+  --            note above the ANON block on the raw-UPDATE arm that was deleted
+  --            for being unfailable).
+  -- RED-UNDER-M: {"arm":"TENANT 4a","apply":[{"kind":"sql","stmt":"ALTER POLICY strategy_shares_owner ON strategy_shares USING (true)"}]}
   PERFORM set_config('request.jwt.claims',
     json_build_object('sub', uid_b::text, 'role', 'authenticated')::text, true);
   SET LOCAL ROLE authenticated;
@@ -2006,6 +2092,13 @@ BEGIN
   -- ======================================================================
   -- ANON 1: blocked at the GRANT layer (42501)
   -- ======================================================================
+  -- RED-UNDER: `GRANT SELECT ON strategy_shares TO anon` on the live database —
+  --            the re-grant the migration's `REVOKE ALL ... FROM PUBLIC, anon`
+  --            exists to refuse, and the one pg_default_acl re-applies on any
+  --            DROP+CREATE. anon's read then raises no 42501 at all and ANON 1a
+  --            is the first failure. A `sql` step, not a migration edit: STEP 2b
+  --            pins the ACL at apply time.
+  -- RED-UNDER-M: {"arm":"ANON 1a","apply":[{"kind":"sql","stmt":"GRANT SELECT ON strategy_shares TO anon"}]}
   SET LOCAL ROLE anon;
   raised := FALSE;
   BEGIN
@@ -2112,6 +2205,13 @@ BEGIN
   -- because strategy_shares_owner is `TO authenticated` and there is no anon
   -- policy at all (default deny). The grant is reverted immediately below and
   -- the file's closing ROLLBACK is the backstop.
+  -- RED-UNDER: add an anon-readable policy — `CREATE POLICY zz_anon_read ON
+  --            strategy_shares FOR SELECT TO anon USING (true)` — which is
+  --            INVISIBLE to every other arm in this file (ANON 1a still sees a
+  --            42501 because the grant is still absent) and is exactly the
+  --            second layer this arm exists to prove. With the temporary SELECT
+  --            grant below in force, anon then reads rows and ANON 2 fires.
+  -- RED-UNDER-M: {"arm":"ANON 2","apply":[{"kind":"sql","stmt":"CREATE POLICY zz_anon_read ON strategy_shares FOR SELECT TO anon USING (true)"}]}
   EXECUTE 'GRANT SELECT ON public.strategy_shares TO anon';
   SET LOCAL ROLE anon;
   SELECT count(*) INTO row_cnt FROM strategy_shares;
@@ -2150,6 +2250,13 @@ BEGIN
   -- recipient lane ALREADY reads strategy_shares through an admin client — so
   -- an admin client is inside the blast radius by design, not hypothetically.
   -- Neither RPC is meant for it. Prove the grant layer first.
+  -- RED-UNDER: the same `GRANT EXECUTE ... TO service_role` as SERVICE-ROLE
+  --            0-acl, which fires first and is therefore neutered. The arm that
+  --            then speaks is SERVICE-ROLE 1-grant, not the bare SERVICE-ROLE 1:
+  --            with EXECUTE held, the call is refused by the body's
+  --            `auth.uid() IS NULL` guard instead of by the grant layer, which is
+  --            precisely the vacuity the paragraph below records as MEASURED.
+  -- RED-UNDER-M: {"arm":"SERVICE-ROLE 1-grant","apply":[{"kind":"sql","stmt":"GRANT EXECUTE ON FUNCTION public.revoke_strategy_share(uuid) TO service_role"}],"neuter":[{"arm":"SERVICE-ROLE 0-acl"}]}
   --
   -- ======================================================================
   -- SERVICE-ROLE 0-acl: the STANDING ACL grants service_role no EXECUTE
@@ -2171,6 +2278,12 @@ BEGIN
   -- ACLs): with the migration revoking only `FROM PUBLIC, anon`, this query
   -- returned 2 — service_role held EXECUTE on BOTH RPCs, because revoking
   -- PUBLIC does not touch a grant made to a NAMED role.
+  -- RED-UNDER: `GRANT EXECUTE ON FUNCTION public.revoke_strategy_share(uuid) TO
+  --            service_role` on the live database — byte-for-byte the
+  --            pg_default_acl regression this arm was written for, and the one
+  --            the paragraph above MEASURED at 2. A `sql` step because STEP 5's
+  --            REVOKE + _assert_no_public_execute run at apply time.
+  -- RED-UNDER-M: {"arm":"SERVICE-ROLE 0-acl","apply":[{"kind":"sql","stmt":"GRANT EXECUTE ON FUNCTION public.revoke_strategy_share(uuid) TO service_role"}]}
   SELECT count(*) INTO row_cnt
     FROM pg_proc p
     CROSS JOIN LATERAL aclexplode(p.proacl) AS acl

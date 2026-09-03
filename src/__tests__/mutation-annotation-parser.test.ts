@@ -44,6 +44,7 @@ import {
   gateAttributionRecords,
   identityRewriteDetail,
   parseOnlyCorpus,
+  sectionOfIdentity,
 } from "../../scripts/mutation-runner/run.mjs";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
@@ -502,14 +503,14 @@ describe("WR-03 / GRAMMAR rule 3 — a mutation may not INJECT the detector's ow
   });
 
   it("the REAL corpus contains no annotation this rule refuses", () => {
-    // Measured before shipping the rule: 0 of 30. Pinned so a future backfill
-    // (164.4, ~70 files) cannot quietly introduce the shape and then be
-    // "fixed" by relaxing the rule.
+    // Measured before shipping the rule: 0 of 30. RE-MEASURED 2026-09-03
+    // (plan 164.4-02): 0 of 45. Pinned so the remaining 164.4 backfill cannot
+    // quietly introduce the shape and then be "fixed" by relaxing the rule.
     const result = parseFile(
       join(REPO_ROOT, "supabase", "tests", "test_strategy_shares_rls.sql"),
     );
     expect(result.errors).toEqual([]);
-    expect(result.structured).toHaveLength(30);
+    expect(result.structured).toHaveLength(45);
   });
 
   // ── 164.4 authoring rule (threat T-164.4-01): NO TWIN MAY TARGET A STAND-IN ─
@@ -586,8 +587,9 @@ describe("WR-03 / GRAMMAR rule 3 — a mutation may not INJECT the detector's ow
   it("the REAL corpus contains no twin this rule refuses either — it forbids nothing that exists", () => {
     // MEASURED 2026-09-02 before shipping the rule: 0 of 30 twins in the only
     // annotated file, and `grep -a -c 'RED-UNDER-M:.*"file":"scripts/pg-lane/
-    // fixtures/' supabase/tests/*.sql` -> 0 in all 71. Pinned so the backfill
-    // cannot quietly introduce the shape and then be "fixed" by relaxing it.
+    // fixtures/' supabase/tests/*.sql` -> 0 in all 71. RE-MEASURED 2026-09-03
+    // (plan 164.4-02): still 0, now of 45 twins. Pinned so the backfill cannot
+    // quietly introduce the shape and then be "fixed" by relaxing it.
     const result = parseFile(
       join(REPO_ROOT, "supabase", "tests", "test_strategy_shares_rls.sql"),
     );
@@ -660,8 +662,10 @@ describe("R2-W04 / GRAMMAR rule 3b — a mutation may not REWRITE an arm identit
 
   it("REAL CORPUS: no annotation that exists today rewrites an identity", () => {
     // Measured before shipping the invariant: 30 arms, 49 file steps, 0
-    // violations. Pinned so 164.4's ~70-file backfill cannot introduce the
-    // shape and then be "fixed" by relaxing the rule.
+    // violations. RE-MEASURED 2026-09-03 (plan 164.4-02, the reference file's
+    // 15 un-twinned sections closed): 45 arms, 59 file steps, 0 violations.
+    // Pinned so 164.4's remaining backfill cannot introduce the shape and then
+    // be "fixed" by relaxing the rule.
     const scan = scanCorpus(join(REPO_ROOT, "supabase", "tests"));
     const buffers = new Map<string, string>();
     let armsSeen = 0;
@@ -693,8 +697,8 @@ describe("R2-W04 / GRAMMAR rule 3b — a mutation may not REWRITE an arm identit
 
     expect(violations).toEqual([]);
     // Non-vacuity: the walk must actually have walked something.
-    expect(armsSeen).toBe(30);
-    expect(stepsSeen).toBe(49);
+    expect(armsSeen).toBe(45);
+    expect(stepsSeen).toBe(59);
   });
 
   // ══════════════════════════════════════════════════════════════════════════
@@ -1210,12 +1214,16 @@ describe("GRAMMAR rule 3c — an identity is READ only where the RUNNER's gate r
     // every span would have passed it. The literals below were HAND-MEASURED
     // 2026-09-02 by reading supabase/tests/test_strategy_shares_rls.sql: the
     // file is ONE `DO $$` block opening at line 207 and closing `$$;` at line
-    // 2599, and the first raise inside it, `TEST FAILED (SHAPE 1)`, sits on
-    // line 380. So psql's prefix names :2599 and PL/pgSQL's CONTEXT line is
+    // 2712, and the first raise inside it, `TEST FAILED (SHAPE 1)`, sits on
+    // line 380. So psql's prefix names :2712 and PL/pgSQL's CONTEXT line is
     // 380 − 207 + 1 = 174. Proven to fail with any one literal moved by 1.
+    // ⚠️ RE-MEASURED 2026-09-03 (plan 164.4-02): the 15 new comment-only pairs
+    // sit BELOW the SHAPE 1 raise and ABOVE the block's closer, so 380/207/174
+    // are unmoved and only the end line travelled, 2599 -> 2712. The
+    // calibration below is what turns a stale literal into a named failure.
     const gate = readFileSync(join(REPO_ROOT, "supabase/tests/test_strategy_shares_rls.sql"), "utf8");
     const records = gateAttributionRecords(gate);
-    const MEASURED = { arm: "SHAPE 1", raiseFileLine: 380, stmtStartLine: 207, stmtEndLine: 2599 };
+    const MEASURED = { arm: "SHAPE 1", raiseFileLine: 380, stmtStartLine: 207, stmtEndLine: 2712 };
     expect(records[0]).toMatchObject(MEASURED);
     // Calibration on the bytes themselves, so a corpus edit that moves the
     // arm is reported HERE as a stale literal rather than as a tokenizer bug.
@@ -1224,7 +1232,7 @@ describe("GRAMMAR rule 3c — an identity is READ only where the RUNNER's gate r
     expect(lines[MEASURED.raiseFileLine - 1]).toContain("RAISE EXCEPTION 'TEST FAILED (SHAPE 1)");
     expect(lines[MEASURED.stmtEndLine - 1]).toBe("$$;");
     const output = [
-      `psql:${GATE_PATH}:2599: ERROR:  P0001: TEST FAILED (SHAPE 1): real`,
+      `psql:${GATE_PATH}:2712: ERROR:  P0001: TEST FAILED (SHAPE 1): real`,
       "CONTEXT:  PL/pgSQL function inline_code_block line 174 at RAISE",
       LOCATION,
       "",
@@ -1351,7 +1359,8 @@ describe("GRAMMAR rule 3c — an identity is READ only where the RUNNER's gate r
         }
       }
     }
-    expect(needles.length).toBe(49);
+    // MEASURED 2026-09-03 (plan 164.4-02): 59 needles across 45 arms.
+    expect(needles.length).toBe(59);
     expect(needles.filter((n) => /TEST\s+FAILED\s*\(/i.test(n))).toEqual([]);
   });
 });
@@ -1490,14 +1499,14 @@ describe("classifyGateIdiom — the exclusion decision, over HAND-BUILT texts", 
 describe("against the real corpus (reads via node:fs, never shell grep)", () => {
   const GATE = join(REPO_ROOT, "supabase", "tests", "test_strategy_shares_rls.sql");
 
-  it("finds exactly 30 line-start prose markers — NOT the 33 a naive substring count reports", () => {
+  it("finds exactly 45 line-start prose markers — NOT the 96 a naive substring count reports", () => {
     const result = parseFile(GATE);
-    expect(result.prose).toHaveLength(30);
+    expect(result.prose).toHaveLength(45);
 
-    // Prove the 33 is real and is what anchoring excludes: the naive count over
-    // the same bytes must be strictly larger, or this test is asserting nothing.
+    // Prove the naive count is real and is what anchoring excludes: it must be
+    // strictly larger over the same bytes, or this test is asserting nothing.
     const naive = readFileSync(GATE, "utf8").split("RED-UNDER").length - 1;
-    expect(naive).toBeGreaterThan(30);
+    expect(naive).toBeGreaterThan(45);
   });
 
   it("IN-01: scanCorpus counts a STRUCTURED-ONLY file as annotated, so the runner's own parity gate reaches it", () => {
@@ -1536,6 +1545,55 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
     expect(corpus.filesTotal).toBe(71);
     expect(corpus.filesAnnotated).toBe(1);
     expect(corpus.annotatedFiles).toEqual(["test_strategy_shares_rls.sql"]);
+  });
+
+  // ── 164.4-02: the DURABLE half-annotation control ──────────────────────────
+  // ⛔ NOT A COUNT. `annotated >= sections` is satisfied by a file carrying two
+  // twins on half its sections, which is EXACTLY the half-annotated file this
+  // pin exists to refuse — and, measured, exactly the shape the reference file
+  // was in until this plan: 30 twins over 20 of its 35 sections, `annotated 30
+  // >= sections 35` false but `annotated 45 >= sections 35` true either way you
+  // spell it. So the assertion is SET INCLUSION: the sections its twins name
+  // must CONTAIN every section its own `TEST FAILED (…)` identities name.
+  //
+  // ⚠️ It is the durable half of criterion 1. Each batch plan's own
+  // section-coverage one-liner runs only while that plan is executing; this
+  // runs on every push, so a file that later grows a 39th section and does not
+  // grow a twin for it fails the build.
+  //
+  // Both helpers are IMPORTED from run.mjs rather than re-implemented — a
+  // second copy of the suffix rule is a second thing to drift, and the rule is
+  // already pinned against its own table in mutation-runner-floors.test.ts.
+  it("164.4-02: every SECTION an annotated file raises for also carries a twin — set inclusion, not a count", () => {
+    const corpus = scanCorpus(join(REPO_ROOT, "supabase", "tests"));
+    // Non-vacuity: an empty annotated list would make the loop below assert
+    // nothing at all, which is the failure mode this whole family refuses.
+    expect(corpus.annotatedFiles.length).toBeGreaterThan(0);
+
+    const missingByFile: Record<string, string[]> = {};
+    let sectionsChecked = 0;
+
+    for (const name of corpus.annotatedFiles) {
+      const abs = join(REPO_ROOT, "supabase", "tests", name);
+      const text = readFileSync(abs, "utf8");
+      const parsed = parseAnnotations(text, { file: name });
+      expect(parsed.errors, `${name}: the corpus file must parse cleanly`).toEqual([]);
+
+      const have = new Set(parsed.structured.map((a) => sectionOfIdentity(a.arm)));
+      const need = new Set(gateAttributionRecords(text).map((r) => sectionOfIdentity(r.arm)));
+      sectionsChecked += need.size;
+
+      const missing = [...need].filter((s) => !have.has(s)).sort();
+      if (missing.length > 0) missingByFile[name] = missing;
+    }
+
+    // Calibration: the walk must actually have walked sections, or an empty
+    // `missingByFile` proves nothing.
+    expect(sectionsChecked).toBeGreaterThan(0);
+    expect(
+      missingByFile,
+      `SECTION coverage gap. Each listed file raises TEST FAILED (…) for a section that carries NO RED-UNDER-M twin, so that section's assertions are never proven able to fail: ${JSON.stringify(missingByFile)}`,
+    ).toEqual({});
   });
 
   // ── 164.4-01: the EXCLUDED set, pinned by name ─────────────────────────────

@@ -5,16 +5,16 @@ milestone_name: Backlog Burndown (Phases 158+)
 current_phase: 164.4
 current_phase_name: REDUNDER-BACKFILL
 status: executing
-stopped_at: Completed 164.4-01-PLAN.md
-last_updated: "2026-09-02T20:13:14.484Z"
-last_activity: 2026-09-02
+stopped_at: Completed 164.4-02-PLAN.md — awaiting the SHA-bound ubuntu sql-mutation green for the batch
+last_updated: "2026-09-03T10:09:42.256Z"
+last_activity: 2026-09-03
 last_activity_desc: Phase 164.4 execution started
-state_head: 9983d1a429d8617c7684da12d7ee27b94aad7bd0
+state_head: 9cffb5844598e23fa354d705a834cb45cb2e6d4c
 progress:
   total_phases: 14
   completed_phases: 5
-  total_plans: 83
-  completed_plans: 68
+  total_plans: 82
+  completed_plans: 69
   percent: 36
 ---
 
@@ -135,13 +135,17 @@ zero unclassified) and `161-VALIDATION.md` (Nyquist strategy, 4 Wave-0 gaps, ant
 ## Current Position
 
 Phase: 164.4 (REDUNDER-BACKFILL) — EXECUTING
-Plan: 2 of 13 complete (00 spike, 01 Wave-0 runner/CI) — hand-maintained; `state.advance-plan`
-      still REFUSES on this section (`ambiguous_position_phase`, see § Known Issues)
-Status: Executing Phase 164.4 — next is 164.4-02 (the reference file's 15 un-twinned sections)
-Last activity: 2026-09-02 — 164.4-01 landed on the branch: the `unreachable:` print, the per-file
-      breakdown and GRAMMAR rule 4. ⛔ 164.4-02's precondition is `blocking-human` and reads the
-      PR number / head SHA / SHA-bound `sql-mutation` ubuntu run id out of `164.4-01-SUMMARY.md`,
-      which are still **PENDING** — it will halt until this plan is landed and that CI board read.
+Plan: 3 of 13 complete (00 spike, 01 Wave-0 runner/CI, 02 the reference file) — hand-maintained;
+      `state.advance-plan` still REFUSES on this section (`ambiguous_position_phase`, see
+      § Known Issues)
+Status: Executing Phase 164.4 — next is 164.4-03
+Last activity: 2026-09-03 — 164.4-02 executed on the branch: the reference file's 15 un-twinned
+      SECTIONS closed (45 twins over 35/35 sections, `arms: 45/45/0`, `biting: 45`, tallies agree),
+      `ARMS_FLOOR` ratcheted 30 → 45 with both separation directions measured, and the durable
+      SET-INCLUSION section pin armed and watched to fail. ⛔ 164.4-02's `<human-check>` is OPEN:
+      nothing was pushed, so there is no SHA-bound `sql-mutation` ubuntu run for `b5fa08c2` /
+      `c850a790` / `9cffb584`. **164.4-03 must not start until this batch is landed and that run
+      id + head SHA + wall clock are written into `164.4-02-SUMMARY.md` § coverage D6.**
 
 ⚠️ Phase 160 remains OPEN on its human gate — see `## Deferred Verification`. Advancing this
 pointer to 161 does NOT close it; resume it only via `/gsd-verify-work 160`.
@@ -680,6 +684,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 | Phase 164.3.1 P13 | 16 min | 3 tasks | 2 files |
 | Phase 164.4 P00 | 19 min | 3 tasks | 4 files |
 | Phase 164.4 P01 | 34 min | 3 tasks | 9 files |
+| Phase 164.4 P02 | 46 min | 3 tasks | 10 files |
 
 ## Accumulated Context
 
@@ -706,6 +711,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - Phase 164.3.1 edited: scope widened from TWO primitives to FOUR (founder decision): adds PRIMITIVE C (VAC-04 reports PASS having compared nothing, WR-01 -> R2-W03 -> SP-C05 -> round 4) and PRIMITIVE D (a control whose own oracle or fixture agrees with it by construction); absorbs VAC04-C1..C4, AUDCOV-01, VAC-SELFREF-01, MUT-I01, MUT-W02; deliverables 4 -> 7; success criteria added. Only MUT-I02 and MUT-I03 remain in TODOS.
 - Phase 164.3.1 edited: added deliverables 8 (diagnostic-first) and 9 (VAC-08 regression instances + absurdity floor on VAC-04 and the mutation runner); widened PRIMITIVE C to both verdict directions after VAC-08's 253-of-262 mirror case; success criteria 7-9 added; sample-vs-corpus logged as a RULE, deliberately NOT a fifth primitive (one instance vs four reopenings for A-D)
 - Phase 164.1 edited: edited fields: goal, success_criteria — scope ADDED 2026-09-01: CRON-OBS-01, MT5-WEDGE-OBS-01 (production observability; routed here not to 164.3/164.3.1 which own gate integrity)
+- Phase 164.2 edited: added Success Criteria (6, was 0): pins WIZFORM-02 code:UNKNOWN to measurement-not-inspection after Phase 153 span verification failed 2026-08-13; also resolved the 164.1-vs-164.2 WIZFORM-02 ownership contradiction left by the 2026-08-28 dedup
 
 ### Decisions
 
@@ -878,6 +884,9 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - [Phase 164.4]: 164.4-01: the runner DERIVES and PRINTS the 27 excluded non-idiom gate files by name on every run, in both modes, and CI MEASURE_FAILs on absence or on a claimed count that disagrees with the names beside it. — Criterion 1 as amended (founder 2026-09-02) makes a silent exclusion fail exactly like a missing annotation. A hand-maintained list would be one more claim nobody compares, so scanCorpus classifies every unannotated .sql with the runner's own statement tokenizer. MEASURED: 1 annotated + 43 pending + 27 unreachable + 0 inert = 71, matching RESEARCH Option (a) file for file.
 - [Phase 164.4]: 164.4-01: the identity CARRIER is read off a statement's RAW text, never off its masking projection. — MEASURED: the masking projection blanks string literals and the identity lives inside the raise message, so reading the carrier from executableText classifies all 70 unannotated files as permanently out of scope (70 unreachable / 0 pending). The RAISE test still runs against executableText, so a raise in a comment or a literal is not one.
 - [Phase 164.4]: 164.4-01: GRAMMAR rule 4 — no RED-UNDER-M step may target scripts/pg-lane/fixtures/**. Refused at parse time, keyed on the twin's TARGET and never on a fixture's POSITION in the apply list. — A mutation to a stand-in proves the fixture author's guess, not production, and the arm is counted as biting anyway (threat T-164.4-01). Parse time is the 3a seam: a refused annotation is malformed, never counted as a twin, and the refusal fires in --parse-only with no database. MEASURED 2026-09-02: 0 twins in all 71 files target a fixture, so it refuses nothing that exists. Position-keying was rejected because plan 164.4-00 measured a legitimate stand-in sitting BETWEEN two migrations.
+- [Phase 164.4]: 164.4-02: the arm chosen for a section is the identity that ACTUALLY speaks under the mutation, not the section's first identity — TENANT 3b, SERVICE-ROLE 1-grant and REVOKE 1b were each predicted by the file's own prose and confirmed on the lane
+- [Phase 164.4]: 164.4-02: ARMS_FLOOR moved 30 -> 45 but FILES_FLOOR stayed 1 — no new FILE was annotated; SECTION coverage moved WITHIN the one annotated file (20/35 -> 35/35). The asymmetry is stated at both constants.
+- [Phase 164.4]: 164.4-02: the durable half-annotation control is SET INCLUSION, never a count — 'annotated >= sections' is satisfied by two twins on half the sections, which is exactly the shape the reference file was in until this plan
 
 ### Decisions (execution-time, Phase 140.2)
 
@@ -1580,8 +1589,8 @@ Load-bearing sequencing (real dependencies, do not reorder):
 
 ## Session
 
-**Last Date:** 2026-09-02T20:12:08.990Z
-**Stopped At:** Completed 164.4-01-PLAN.md
+**Last Date:** 2026-09-03T10:09:41.962Z
+**Stopped At:** Completed 164.4-02-PLAN.md — awaiting the SHA-bound ubuntu sql-mutation green for the batch
 **Last Date:** 2026-08-25T22:26:01.687Z
 **Stopped At:** Completed 162-03-PLAN.md
 **Last Date:** 2026-08-25T22:28:04.096Z
@@ -1642,6 +1651,7 @@ pre-merge `e0493913`. Fix is PR #669. Supabase migrations and the Vercel fronten
 - `state.advance-plan` REFUSES on this STATE.md (measured 2026-09-01 by 164.3.1-09): the `## Current Position` section carries a **second** `Phase:` line — line 129, inside the retained `### Retained — Phase 156 close-out` block — so the verb returns `ambiguous_position_phase` and will not advance rather than silently picking the first. Left UNRESOLVED on purpose: that block is marked *do NOT lose this*, and restructuring a retained ledger is outside a measure-only plan's scope. ⚠️ Consequence: the `Plan: 1 of 12` line under Current Position is **STALE** (9 of 12 plans now have SUMMARYs on disk). Read the frontmatter `progress` block or count `.planning/phases/164.3.1-*/`, never that line. Fix = move the Phase-156 retained block out of `## Current Position` into its own top-level section, or teach the verb to ignore `###`-nested entries.
 - [REDUNDER-PGCRON] 3 idiom gate files (71 of 355 sections, incl. Phase 164.4 rank 1) can never reach a GREEN pg-lane baseline: the lane has no pg_cron and those files RAISE on its absence. Blocks any batch containing them; needs a lane-substrate plan. Booked in TODOS.md.
 - 164.4-01 <human-check> UNMET: the PR number, merged head SHA and SHA-bound sql-mutation ubuntu run id + wall clock are PENDING in 164.4-01-SUMMARY.md. Plan 164.4-02's precondition is gate=blocking-human and reads exactly those fields — it WILL halt until 164.4-01 is landed (/ship, /gsd-pr-branch + the CLAUDE.md deletion guard) and its CI board read SHA-bound.
+- 164.4-02 <human-check> OPEN: the batch (b5fa08c2 / c850a790 / 9cffb584) was NOT pushed and no PR was opened, so there is no SHA-bound sql-mutation ubuntu green for it. Plan 03's precondition reads that run id / head SHA / wall clock out of 164.4-02-SUMMARY.md coverage D6, which is status: pending.
 
 ## ⛔ Standing constraint from Phase 164.3.1 — do not lose this between sessions
 
