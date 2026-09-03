@@ -5,7 +5,7 @@ milestone_name: Backlog Burndown (Phases 158+)
 current_phase: 164.4
 current_phase_name: REDUNDER-BACKFILL
 status: executing
-stopped_at: Completed 164.4-02-PLAN.md — awaiting the SHA-bound ubuntu sql-mutation green for the batch
+stopped_at: 164.4-02 LANDED (PR #732, run 33743816665 green on ubuntu) — 164.4-03 is unblocked and next
 last_updated: "2026-09-03T10:09:42.256Z"
 last_activity: 2026-09-03
 last_activity_desc: Phase 164.4 execution started
@@ -142,10 +142,13 @@ Status: Executing Phase 164.4 — next is 164.4-03
 Last activity: 2026-09-03 — 164.4-02 executed on the branch: the reference file's 15 un-twinned
       SECTIONS closed (45 twins over 35/35 sections, `arms: 45/45/0`, `biting: 45`, tallies agree),
       `ARMS_FLOOR` ratcheted 30 → 45 with both separation directions measured, and the durable
-      SET-INCLUSION section pin armed and watched to fail. ⛔ 164.4-02's `<human-check>` is OPEN:
-      nothing was pushed, so there is no SHA-bound `sql-mutation` ubuntu run for `b5fa08c2` /
-      `c850a790` / `9cffb584`. **164.4-03 must not start until this batch is landed and that run
-      id + head SHA + wall clock are written into `164.4-02-SUMMARY.md` § coverage D6.**
+      SET-INCLUSION section pin armed and watched to fail. ✅ 164.4-02's `<human-check>` is CLOSED:
+      landed as **PR #732** (head `b912e4f6`, squash-merged `465985b5`, v0.77.3.0); CI run
+      **33743816665** reports `sql-mutation` success on ubuntu in **102 s**, its own log reading
+      `arms: 45/45/0` / `lane-invocations: 45` / `tallies agree`. Run id + head SHA + wall clock
+      are recorded in `164.4-02-SUMMARY.md` § coverage D6, which is what 164.4-03's precondition
+      reads. The working branch is merged up to that commit, so the tree is at/after the merge
+      both by content and by ancestry. **164.4-03 is unblocked.**
 
 ⚠️ Phase 160 remains OPEN on its human gate — see `## Deferred Verification`. Advancing this
 pointer to 161 does NOT close it; resume it only via `/gsd-verify-work 160`.
@@ -1590,7 +1593,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 ## Session
 
 **Last Date:** 2026-09-03T10:09:41.962Z
-**Stopped At:** Completed 164.4-02-PLAN.md — awaiting the SHA-bound ubuntu sql-mutation green for the batch
+**Stopped At:** 164.4-02 LANDED (PR #732, run 33743816665 green on ubuntu) — 164.4-03 is unblocked and next
 **Last Date:** 2026-08-25T22:26:01.687Z
 **Stopped At:** Completed 162-03-PLAN.md
 **Last Date:** 2026-08-25T22:28:04.096Z
