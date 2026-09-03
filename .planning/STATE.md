@@ -5,16 +5,16 @@ milestone_name: Backlog Burndown (Phases 158+)
 current_phase: 164.4
 current_phase_name: REDUNDER-BACKFILL
 status: executing
-stopped_at: Completed 164.4-05-PLAN.md
-last_updated: "2026-09-03T17:23:25.036Z"
+stopped_at: Completed 164.4-06-PLAN.md
+last_updated: "2026-09-03T19:02:35.015Z"
 last_activity: 2026-09-03
 last_activity_desc: Phase 164.4 execution started
-state_head: b583551856ab2e95d6ce46849455b03faf324342
+state_head: 3c74a4553646ff915b713f25ac970acc232182e3
 progress:
   total_phases: 15
   completed_phases: 5
   total_plans: 82
-  completed_plans: 72
+  completed_plans: 73
   percent: 33
 ---
 
@@ -717,6 +717,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 | Phase 164.4 P03 | 35 min | 3 tasks | 13 files |
 | Phase 164.4 P04 | 84 min | 3 tasks | 12 files |
 | Phase 164.4 P05 | 85 min | 3 tasks | 17 files |
+| Phase 164.4 P06 | 58 min | 3 tasks | 15 files |
 
 ## Accumulated Context
 
@@ -925,6 +926,9 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - [Phase 164.4]: A non-idiom raise that makes the VIEW itself raise scores NO-IDENTITY, not 'the arm bit' — resolve by choosing a mutation the arm can OBSERVE, never by a waiver (WAIVED_CEILING stays 0)
 - [Phase 164.4]: gsd-core `neuter` is per-RAISE, not per-arm: naming an arm suppresses only its FIRST raise, so a section that raises twice cannot be fully suppressed
 - [Phase 164.4]: PATTERNS section P4's lockstep checklist is incomplete by at least 4 items — grep scripts/mutation-runner/ as well as src/__tests__/ for every literal a floor move touches
+- [Phase 164.4]: 164.4-06: a pg-lane stand-in NARROWER than production can make an arm structurally unfalsifiable while the gate prints ALL PASS — three arms of test_strategies_private_owner_isolation.sql were in that state — 01-fixture-core.sql scopes strategies_read TO authenticated and grants authenticated SELECT only. MEASURED: GUARD 6 and GUARD 7 were refused by the GRANT layer with the same 42501 their handlers read as trigger proof, and anon held no grant at all so RLS 4 could never be reddened by any policy mutation. 10-fixture-strategies-rls-baseline.sql DROPs the stand-in so the REAL 20260405061912_rls_policies.sql defines the object, and restores production's table grants.
+- [Phase 164.4]: 164.4-06: an arm behind a runtime SKIP is answered by the APPLY LIST, and the proof is read off the baseline's own state-aware summary line — test_api_keys_venue_identity_uniq.sql hides two assertions behind RAISE NOTICE 'SKIP (...)' unless migration 20260814120000 is applied. The list carries it and its prerequisites; the baseline prints ZERO 'SKIP (' notices and the PASS (structural) variant rather than PASS WITH 3 SKIPS. Section 4's twin drives the v_b_live-armed assertion itself, so its RED is a second independent proof the skip is inert.
+- [Phase 164.4]: 164.4-06: FILES_FLOOR 9 -> 13 and ARMS_FLOOR 134 -> 163, both separation directions driven on real lanes; WAIVED_CEILING stays 0 — Read off the run's own lines: coverage files 13/71, arms 163/163/0, biting 163, lane-invocations 163, tallies agree, 191 s wall, exit 0. runCorpus(13,163) SILENT; runCorpus(14,164) FIRES both regressions. ci.yml timeout-minutes stays 15 — a three-point ubuntu fit (1.27 s/arm job cost + ~62 s fixed) projects 163 arms at ~4.5 min.
 
 ### Decisions (execution-time, Phase 140.2)
 
@@ -1627,8 +1631,8 @@ Load-bearing sequencing (real dependencies, do not reorder):
 
 ## Session
 
-**Last Date:** 2026-09-03T17:23:24.725Z
-**Stopped At:** Completed 164.4-05-PLAN.md
+**Last Date:** 2026-09-03T19:01:43.042Z
+**Stopped At:** Completed 164.4-06-PLAN.md
 **Last Date:** 2026-08-25T22:26:01.687Z
 **Stopped At:** Completed 162-03-PLAN.md
 **Last Date:** 2026-08-25T22:28:04.096Z
@@ -1691,6 +1695,9 @@ pre-merge `e0493913`. Fix is PR #669. Supabase migrations and the Vercel fronten
 - 164.4-01 <human-check> UNMET: the PR number, merged head SHA and SHA-bound sql-mutation ubuntu run id + wall clock are PENDING in 164.4-01-SUMMARY.md. Plan 164.4-02's precondition is gate=blocking-human and reads exactly those fields — it WILL halt until 164.4-01 is landed (/ship, /gsd-pr-branch + the CLAUDE.md deletion guard) and its CI board read SHA-bound.
 - 164.4-02 <human-check> OPEN: the batch (b5fa08c2 / c850a790 / 9cffb584) was NOT pushed and no PR was opened, so there is no SHA-bound sql-mutation ubuntu green for it. Plan 03's precondition reads that run id / head SHA / wall clock out of 164.4-02-SUMMARY.md coverage D6, which is status: pending.
 - 164.4-04 human-check CLOSED 2026-09-03: landed as PR #734 (head 03fb3bc9, squash-merged 6644dd3b, v0.77.5.0). CI run 33774615747 reports sql-mutation success in 171 s, the ubuntu job's own log carrying `arms: 86/86/0`, `biting: 86`, `lane-invocations: 86`, `tallies agree`, `coverage: files 4/71`, `per-arm lane time: mean 1.0s` — IDENTICAL to the macOS measurement, so the two hosts agree on this batch and the identity attribution held on the ubuntu PostgreSQL build. Recorded in coverage D9 of 164.4-04-SUMMARY.md. Plan 164.4-05 is UNBLOCKED.
+- 164.4-05 human-check CLOSED 2026-09-03: landed as PR #735 (head f0d19bf7, squash-merged 5b97aadb, v0.77.6.0). CI run 33785233457 reports sql-mutation success in 232 s, the ubuntu job's own log carrying `arms: 134/134/0`, `biting: 134`, `lane-invocations: 134`, `tallies agree`, `coverage: files 9/71`, `per-arm lane time: mean 1.0s`, `No defects` — again identical to macOS. Recorded in coverage D11 of 164.4-05-SUMMARY.md. Plan 164.4-06 is UNBLOCKED.
+- ⏱️ THREE ubuntu timing points now exist for `sql-mutation`: 45 arms/119 s, 86/171 s, 134/232 s. Linear fit **1.27 s per arm of JOB cost + ~62 s fixed overhead** — larger than the runner's own `per-arm lane time: mean 1.0s`, which measures the LANE only. The ~265-arm end state projects to ~399 s ≈ 6.6 min, inside `timeout-minutes: 15` without a raise. Plan 164.4-08 still re-justifies the timeout against its OWN measured run.
+- ⛔ ORCHESTRATOR TRAP, measured wave 6: editing ANY tracked file while `run.mjs` is in flight fails the run with a `dirty-checkout` defect (a version bump did it), and `RUNNER_EXIT=1` then reads exactly like a broken batch. Read the defect KIND before concluding — `dirty-checkout` with no arm and no file named is the orchestrator's own hand, not the corpus. Serialise: clean tree -> run -> then bump.
 
 ## ⛔ Standing constraint from Phase 164.3.1 — do not lose this between sessions
 

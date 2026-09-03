@@ -1,0 +1,11 @@
+-- Additive stand-in: `api_keys.created_at`. 20260405061911_initial_schema.sql
+-- carries it in production; that migration is not in any apply list (it seeds a
+-- dozen unrelated subsystems and would pull the whole chain in), and
+-- 03-fixture-compute-jobs.sql gives `api_keys` only the columns the
+-- ledger-refresh view and the compute-jobs FKs name.
+--
+-- Read by 20260811210000_api_keys_attested_venue.sql's PROD census block
+-- (:660-674) and by its dated one-time backfill cutoff, neither of which is an
+-- object under test. Never a second base: 01-fixture-core.sql remains the only
+-- destructive fixture.
+ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT now();

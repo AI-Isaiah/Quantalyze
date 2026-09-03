@@ -37,6 +37,35 @@
 --
 -- Usage:
 --   psql "$DATABASE_URL" -f supabase/tests/test_api_keys_venue_identity_uniq.sql
+--
+-- ⭐ MACHINE-EXECUTABLE TWINS (phase 164.4). Each prose RED-UNDER below an arm
+-- carries an adjacent `RED-UNDER-M` object that scripts/mutation-runner executes:
+-- it mutates COPIES on a throwaway pg-lane cluster, requires the FIRST
+-- `TEST FAILED (…)` to name that arm, and restores GREEN. Schema:
+-- scripts/mutation-runner/GRAMMAR.md. The line below declares what the lane
+-- applies before this gate. DISCOVERED, not guessed — plan 164.4-06 iterated it
+-- over 3 lane runs to `PASS (structural)` + `PASS (behavioural)`, mean 1.08 s/lane
+-- over 3 timed GREEN runs (the longest apply list of that batch: 7 real
+-- migrations + 6 stand-ins).
+--
+-- ⭐ MIGRATION B IS IN THE APPLY LIST ON PURPOSE, AND IT WAS VERIFIED INERT.
+-- Sections 3c and 4 each hide behind a `RAISE NOTICE 'SKIP (…)'` when
+-- 20260814120000 is not applied. An arm behind a firing SKIP is UNFALSIFIABLE and
+-- must never be annotated as if it bit, so the list carries 20260814120000 and its
+-- prerequisites and the baseline lane was read for the proof: ZERO `SKIP (`
+-- notices, and the run prints the `PASS (structural)` variant — never
+-- `PASS WITH 3 SKIPS` — which is this file's own state-aware summary saying the
+-- auth.uid()-absence pair and the `authenticated` negative both RAN. Section 4's
+-- twin below drives exactly the assertion the SKIP would have hidden.
+--
+-- ⚠️ EVERY TWIN HERE IS A `sql` STEP, and that is the point rather than a
+-- workaround. 20260812083206's own post-verify re-asserts the column, the index
+-- (UNIQUE, partial, both predicate conjuncts, column order), the non-blank CHECK,
+-- the scrub trigger's attachment and its SECURITY INVOKER posture, and every
+-- create_wizard_strategy canary — so a migration EDIT aborts the apply instead of
+-- reaching the gate. The `sql` steps drift the LIVE object after apply, which is
+-- what this gate exists to catch: state that was correct once and is not now.
+-- RED-UNDER-SETUP: {"apply":["scripts/pg-lane/fixtures/01-fixture-core.sql","scripts/pg-lane/fixtures/02-fixture-sanitize-tables.sql","scripts/pg-lane/fixtures/03-fixture-compute-jobs.sql","scripts/pg-lane/fixtures/05-fixture-wizard-composite.sql","scripts/pg-lane/fixtures/07-fixture-supabase-default-privileges.sql","scripts/pg-lane/fixtures/11-fixture-api-keys-created-at.sql","supabase/migrations/20260602190000_f6_wizard_session_idempotency.sql","supabase/migrations/20260710120000_strategy_keys.sql","supabase/migrations/20260710180000_wizard_composite.sql","supabase/migrations/20260811210000_api_keys_attested_venue.sql","supabase/migrations/20260812083206_api_keys_venue_account_id.sql","supabase/migrations/20260813150106_wizard_rpcs_service_role_writer.sql","supabase/migrations/20260814120000_wizard_rpcs_revoke_authenticated.sql"]}
 
 DO $$
 DECLARE
@@ -78,6 +107,11 @@ DECLARE
   v_chk_def     TEXT;
 BEGIN
   -- ----- 1. api_keys.venue_account_id exists and is text --------------------
+  -- RED-UNDER: retype the LIVE api_keys.venue_account_id to varchar(64) — the
+  --            "it is still a string, what could it hurt" drift. A `sql` step, not
+  --            a migration edit: 20260812083206's post-verify re-reads this
+  --            column, so an edit aborts the apply before the gate ever runs.
+  -- RED-UNDER-M: {"arm":"1","apply":[{"kind":"sql","stmt":"ALTER TABLE public.api_keys ALTER COLUMN venue_account_id TYPE varchar(64)"}]}
   SELECT data_type INTO v_col_type
     FROM information_schema.columns
    WHERE table_schema = 'public'
@@ -91,6 +125,10 @@ BEGIN
   END IF;
 
   -- ----- 2. partial-UNIQUE on (user_id, exchange, venue_account_id) ---------
+  -- RED-UNDER: DROP the LIVE api_keys_user_exchange_venue_account_uniq index —
+  --            WIZCONT-02's whole DB backstop. `sql` step for the same reason as
+  --            section 1: the migration re-verifies this index at apply time.
+  -- RED-UNDER-M: {"arm":"2","apply":[{"kind":"sql","stmt":"DROP INDEX public.api_keys_user_exchange_venue_account_uniq"}]}
   SELECT indexdef INTO v_idx_def
     FROM pg_indexes
    WHERE schemaname = 'public'
@@ -203,6 +241,11 @@ BEGIN
   -- PGRST203, which breaks connect-a-key for every user. This is the assertion
   -- that catches a future `CREATE OR REPLACE` that tried to add a parameter
   -- (which cannot change a signature — it mints a sibling instead).
+  -- RED-UNDER: mint a SECOND create_wizard_strategy overload on the LIVE database
+  --            — exactly the sibling a `CREATE OR REPLACE` that tried to add a
+  --            parameter would leave behind, and the state PostgREST answers
+  --            PGRST203 to.
+  -- RED-UNDER-M: {"arm":"3","apply":[{"kind":"sql","stmt":"CREATE FUNCTION public.create_wizard_strategy(p_probe uuid) RETURNS void LANGUAGE sql AS $f$ SELECT NULL::void $f$"}]}
   SELECT count(*) INTO v_overloads
     FROM pg_proc p
     JOIN pg_namespace n ON n.oid = p.pronamespace
@@ -429,6 +472,13 @@ BEGIN
   -- BOTH `service_role` positives below stay UNCONDITIONAL — true under Migration
   -- A and Migration B alike — so section 4 can never go entirely inert, and
   -- section 3e has already reddened every incoherent state before this point.
+  -- RED-UNDER: re-GRANT EXECUTE on create_wizard_strategy to `authenticated` on the
+  --            LIVE database — the pg_default_acl re-grant this assertion is the
+  --            durable guard against. ⭐ THIS IS THE ARM THE `SKIP (4)` NOTICE
+  --            WOULD HIDE: it is reachable only while v_b_live, so its RED is
+  --            also the proof that migration 20260814120000 is live on the lane
+  --            and the skip is inert (see the header).
+  -- RED-UNDER-M: {"arm":"4","apply":[{"kind":"sql","stmt":"GRANT EXECUTE ON FUNCTION public.create_wizard_strategy(uuid,text,text,text,text,text,text,text,integer,text,uuid,text) TO authenticated"}]}
   IF v_b_live THEN
     IF v_auth_exec THEN
       RAISE EXCEPTION 'TEST FAILED (4): authenticated HOLDS EXECUTE on create_wizard_strategy — Phase 156 / CONNECT-01 withdrew it (migration 20260814120000). A re-GRANT re-opens the direct PostgREST door and a browser session can mint an attested_venue of its choosing, which is precisely the forgery this file''s venue-identity assertions assume is impossible. If no migration did this deliberately, a DROP + CREATE re-granted it silently via pg_default_acl — re-issue the REVOKE in that same migration.';
@@ -473,6 +523,11 @@ BEGIN
   -- client-supplied venue_account_id persists, and a caller evades the dedup for
   -- free by inventing an id. That is the prevent_profile_role_change bug
   -- (20260529150000) and it must not recur here.
+  -- RED-UNDER: flip the LIVE scrub trigger function to SECURITY DEFINER, which is
+  --            the prevent_profile_role_change silent-no-op bug (20260529150000)
+  --            reproduced here: current_user becomes the owner, the privileged
+  --            allowlist always passes, and the trigger scrubs nothing.
+  -- RED-UNDER-M: {"arm":"5","apply":[{"kind":"sql","stmt":"ALTER FUNCTION public.scrub_client_supplied_venue_account_id() SECURITY DEFINER"}]}
   SELECT p.prosecdef INTO v_trg_secdef
     FROM pg_trigger t
     JOIN pg_proc p ON p.oid = t.tgfoid
@@ -566,6 +621,14 @@ BEGIN
   -- NULL, the partial index never governs any of these rows, and cases 6a/6c/6d
   -- would all "pass" for entirely the wrong reason. Fail LOUD here instead of
   -- letting the whole section go vacuous.
+  -- RED-UNDER: replace the LIVE scrub body with one that drops the privileged-role
+  --            allowlist and NULLs venue_account_id for EVERY writer. Scoped
+  --            deliberately: the function stays attached and stays SECURITY
+  --            INVOKER, so section 5 still passes and this precondition — not
+  --            section 5 — is the first failure. It is the exact state that would
+  --            make 6a/6c/6d vacuous, which is why it is asserted rather than
+  --            assumed.
+  -- RED-UNDER-M: {"arm":"6.0","apply":[{"kind":"sql","stmt":"CREATE OR REPLACE FUNCTION public.scrub_client_supplied_venue_account_id() RETURNS TRIGGER LANGUAGE plpgsql SECURITY INVOKER SET search_path = public, pg_catalog AS $f$ BEGIN NEW.venue_account_id := NULL; RETURN NEW; END $f$"}]}
   INSERT INTO api_keys (id, user_id, exchange, label, api_key_encrypted, is_active, venue_account_id)
   VALUES (k_live, uid_a, 'mt5', 'wizcont02 live', 'enc', true, c_login);
 
@@ -645,6 +708,15 @@ BEGIN
   -- venue_account_id) alone would let one owner's INSERT collide with a
   -- DIFFERENT owner's row — which both leaks the existence of that row and
   -- denies service to the second owner.
+  -- RED-UNDER: add a SECOND unique index on the LIVE database scoped
+  --            (exchange, venue_account_id) with no user_id — the C-08
+  --            cross-tenant scoping error, added ALONGSIDE the correct index so
+  --            sections 1-5 still read exactly as intended and only the
+  --            behavioural half can see it. This arm is a positive control whose
+  --            23505 IS handled (`EXCEPTION WHEN unique_violation` re-raises as
+  --            TEST FAILED (6e)), so unlike an unwrapped positive control it can
+  --            take the literal drift rather than a silent one.
+  -- RED-UNDER-M: {"arm":"6e","apply":[{"kind":"sql","stmt":"CREATE UNIQUE INDEX api_keys_venue_account_global_uniq ON public.api_keys (exchange, venue_account_id) WHERE venue_account_id IS NOT NULL AND disconnected_at IS NULL"}]}
   BEGIN
     INSERT INTO api_keys (user_id, exchange, label, api_key_encrypted, is_active, venue_account_id)
     VALUES (uid_b, 'mt5', 'wizcont02 other tenant', 'enc', true, c_login);
