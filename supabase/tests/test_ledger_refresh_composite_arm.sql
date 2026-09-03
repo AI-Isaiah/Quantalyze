@@ -118,6 +118,17 @@
 -- from the file, not hard-coded: if you add or remove an arm you MUST update it,
 -- or the pin silently measures the wrong number of arms.
 --
+-- ⭐ MACHINE-EXECUTABLE TWINS (phase 164.4). Each prose RED-UNDER above an arm
+-- below carries an adjacent `RED-UNDER-M` object that scripts/mutation-runner
+-- executes on every push: it mutates COPIES, requires the FIRST `TEST FAILED (…)`
+-- to name that arm, and restores GREEN. The schema is scripts/mutation-runner/
+-- GRAMMAR.md. The line below declares what the lane applies before this gate. It
+-- was DISCOVERED, not guessed — plan 164.4-00 iterated it 8 times on a throwaway
+-- pg-lane cluster to `ALL 10 ARMS EXECUTED (A-J)`, mean 1.01 s/lane over 3 timed
+-- runs. ⚠️ 04-fixture-compute-jobs-targets.sql sits BETWEEN two migrations on
+-- purpose: it patches compute_jobs, which 20260411144407 creates.
+-- RED-UNDER-SETUP: {"apply":["scripts/pg-lane/fixtures/01-fixture-core.sql","scripts/pg-lane/fixtures/02-fixture-sanitize-tables.sql","scripts/pg-lane/fixtures/03-fixture-compute-jobs.sql","supabase/migrations/20260411144407_compute_jobs_queue.sql","scripts/pg-lane/fixtures/04-fixture-compute-jobs-targets.sql","supabase/migrations/20260710120000_strategy_keys.sql","supabase/migrations/20260710130000_stitch_composite_kind.sql","supabase/migrations/20260825120000_ledger_refresh_staleness_view.sql","supabase/migrations/20260825130000_ledger_refresh_fanout_dormant.sql","supabase/migrations/20260825140000_ledger_refresh_composite_arm.sql"]}
+--
 -- Usage:
 --   psql "$TEST_SUPABASE_DB_URL" -v ON_ERROR_STOP=1 -f \
 --     supabase/tests/test_ledger_refresh_composite_arm.sql
@@ -158,6 +169,13 @@ DECLARE
 BEGIN
   -- ----- applied-ness gate: ABSENCE IS A FAILURE, NOT A SKIP (WR-03) ------
   -- See the ⛔ block in this file's header for the measurement behind this.
+  -- RED-UNDER: DROP the function on the live lane after the migrations have
+  --            applied — cause (ii) of this arm's own message. It is a `sql`
+  --            step rather than a migration edit because renaming the CREATE in
+  --            20260825140000 aborts that migration's OWN verification block
+  --            ("enqueue_ledger_composite_refresh missing"), so the gate would
+  --            never run and no arm could be the first failure.
+  -- RED-UNDER-M: {"arm":"0","apply":[{"kind":"sql","stmt":"DROP FUNCTION public.enqueue_ledger_composite_refresh()"}]}
   IF NOT EXISTS (
     SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
      WHERE n.nspname = 'public'
