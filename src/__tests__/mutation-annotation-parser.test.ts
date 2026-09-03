@@ -703,8 +703,8 @@ describe("R2-W04 / GRAMMAR rule 3b — a mutation may not REWRITE an arm identit
 
     expect(violations).toEqual([]);
     // Non-vacuity: the walk must actually have walked something.
-    expect(armsSeen).toBe(86);
-    expect(stepsSeen).toBe(97);
+    expect(armsSeen).toBe(134);
+    expect(stepsSeen).toBe(132);
   });
 
   // ══════════════════════════════════════════════════════════════════════════
@@ -1370,7 +1370,11 @@ describe("GRAMMAR rule 3c — an identity is READ only where the RUNNER's gate r
     // needle count rises by less than the arm count because 15 of the new arms
     // are `sql` steps (grant / ownership / DROP drift on the live lane), which
     // carry no `find` or `anchor` at all — rule 3c is what bounds those.
-    expect(needles.length).toBe(97);
+    // RE-MEASURED 2026-09-03 (plan 164.4-05): 132 needles across 134 arms. The
+    // gap WIDENS on purpose — the tenant-isolation batch is grant, policy, ACL
+    // and DROP drift, so 48 new arms carried only 35 new needles and 63 of the
+    // corpus's steps are now `sql`.
+    expect(needles.length).toBe(132);
     expect(needles.filter((n) => /TEST\s+FAILED\s*\(/i.test(n))).toEqual([]);
   });
 });
@@ -1616,19 +1620,24 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
     }
   });
 
-  it("scanCorpus reports 4 of 71 files annotated", () => {
+  it("scanCorpus reports 9 of 71 files annotated", () => {
     const corpus = scanCorpus(join(REPO_ROOT, "supabase", "tests"));
     // ⛔ The DENOMINATOR stays 71 — every `.sql` in the directory. The phase's
     // end state is `files 40/71` with the other 31 PRINTED BY NAME
     // (`unreachable:` 27 + `lane-blocked:` 4), never `40/40` with the gap
     // quietly redefined away.
     expect(corpus.filesTotal).toBe(71);
-    expect(corpus.filesAnnotated).toBe(4);
+    expect(corpus.filesAnnotated).toBe(9);
     expect(corpus.annotatedFiles).toEqual([
+      "test_capital_ownership_allocation_guard.sql",
+      "test_create_wizard_strategy_for_key.sql",
       "test_ledger_refresh_composite_arm.sql",
       "test_ledger_refresh_fanout.sql",
       "test_ledger_refresh_staleness.sql",
+      "test_scenario_shares_rls.sql",
+      "test_strategy_keys_rls.sql",
       "test_strategy_shares_rls.sql",
+      "test_wizard_composite_members.sql",
     ]);
   });
 

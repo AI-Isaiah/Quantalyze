@@ -851,10 +851,15 @@ jobs:
     # line, which is the number to re-read rather than a figure restated here.
     # Measured 64s wall clock locally at 30 arms (2026-08-29) and 80s on this
     # ubuntu runner at 32 lanes (run 33620169220, 2026-09-02); measured again
-    # locally at 45 arms x ~0.9s (2026-09-03, plan 164.4-02) and at 86 arms x
+    # locally at 45 arms x ~0.9s (2026-09-03, plan 164.4-02), at 86 arms x
     # ~1.0s = 96s wall (2026-09-03, plan 164.4-04, plus 4 baseline and 4 restore
-    # legs). The ubuntu job took 119s at 45 arms (run 33751634051), so the
-    # per-lane cost — not the arm count alone — is what to project from. 15 minutes is an
+    # legs) and at 134 arms x ~1.0s = 151s wall (2026-09-03, plan 164.4-05, plus
+    # 9 baseline and 9 restore legs). The ubuntu job took 119s at 45 arms
+    # (run 33751634051) and 171s at 86 arms (run 33774615747, `per-arm lane
+    # time: mean 1.0s` — the SAME per-lane cost this box measures), so roughly
+    # 85s of it is fixed job overhead and the marginal cost is ~1s per arm:
+    # 134 arms projects to ~3.7 minutes on ubuntu. The per-lane cost — not the
+    # arm count alone — is what to project from. 15 minutes is an
     # order of magnitude of headroom for a slower runner while still bounding a
     # wedged cluster rather than burning the job's default 360. Raise it in the
     # batch whose MEASURED run first approaches ~10 minutes, not before.

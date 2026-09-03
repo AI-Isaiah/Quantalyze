@@ -125,6 +125,31 @@
 -- Usage:
 --   psql "$TEST_SUPABASE_DB_URL" -v ON_ERROR_STOP=1 -f \
 --     supabase/tests/test_capital_ownership_allocation_guard.sql
+--
+-- ⭐ MACHINE-EXECUTABLE TWINS (phase 164.4, VAC-01). Each prose RED-UNDER below
+-- carries an adjacent `RED-UNDER-M` object that scripts/mutation-runner executes
+-- on every push: it mutates COPIES, requires the FIRST `TEST FAILED (…)` to name
+-- that arm, and restores GREEN. The schema is scripts/mutation-runner/GRAMMAR.md.
+-- The line below declares what the lane applies before this gate. It was
+-- DISCOVERED, not guessed — plan 164.4-05 iterated it over 5 lane runs to
+-- `ALL PASS`, mean 0.99 s/lane over 3 timed GREEN runs. This file names NO
+-- migration stamp in its own header except the one under test, so the list was
+-- resolved by OBJECT NAME across supabase/migrations/.
+-- ⚠️ portfolio_strategies is a STAND-IN here (06-fixture-…): its real home,
+--    20260405061911_initial_schema.sql, cannot join this list — it re-CREATEs
+--    tables 01-fixture-core.sql already stands in for. Its grants, its owner RLS
+--    policy and the strategies write policies are mirrored VERBATIM from
+--    20260405061912 / 20260410225610 so no arm passes merely because the
+--    stand-in is unguarded. The objects UNDER TEST — both triggers, the
+--    mark-transition guard and the flip RPC — are the REAL ones from 20260806120000.
+-- ⭐ FOUR ARMS HERE ARE POSITIVE CONTROLS (1, 5, 6, 8a), and a positive control's
+--    literal drift RAISES rather than fails quietly — outside any handler, which
+--    aborts the file with no `TEST FAILED (…)` at all and is scored NO-IDENTITY,
+--    not the arm biting (MEASURED this batch on test_scenario_shares_rls.sql's
+--    Assertion 7). Each of their twins therefore uses the SILENT form of the same
+--    drift — a write that is dropped rather than refused — which is exactly what
+--    the arm's own assertion measures. Each says so at the arm.
+-- RED-UNDER-SETUP: {"apply":["scripts/pg-lane/fixtures/01-fixture-core.sql","scripts/pg-lane/fixtures/02-fixture-sanitize-tables.sql","scripts/pg-lane/fixtures/03-fixture-compute-jobs.sql","scripts/pg-lane/fixtures/05-fixture-wizard-composite.sql","scripts/pg-lane/fixtures/06-fixture-portfolio-strategies.sql","supabase/migrations/20260806120000_strategies_capital_ownership.sql"]}
 
 -- --------------------------------------------------------------------------
 -- Defensive pre-clean (a prior aborted run may have committed synthetic rows).
@@ -316,6 +341,14 @@ BEGIN
   -- ----- 1: SELF-OWNED + own_capital -> INSERT SUCCEEDS --------------------
   -- Positive control. Without it, every negative case below could pass simply
   -- because the trigger blocks EVERY insert.
+  -- RED-UNDER: make guard_allocation_requires_own_capital() in migration
+  --            20260806120000 `RETURN NULL` instead of `RETURN NEW` — a BEFORE row
+  --            trigger that returns NULL silently DROPS the write.
+  -- ⚠️ SILENT ON PURPOSE. Widening the predicate so this row is REFUSED makes the
+  --    unwrapped INSERT above raise, which aborts the file with no TEST FAILED at
+  --    all (NO-IDENTITY, not this arm). A dropped write is the observable form of
+  --    "the guard over-blocks", and it is what the row count below measures.
+  -- RED-UNDER-M: {"arm":"1","apply":[{"kind":"edit","file":"supabase/migrations/20260806120000_strategies_capital_ownership.sql","find":"            HINT = 'Mark the strategy as your own capital in My Strategies before allocating to it.';\n  END IF;\n\n  RETURN NEW;","replace":"            HINT = 'Mark the strategy as your own capital in My Strategies before allocating to it.';\n  END IF;\n\n  RETURN NULL;","occurrences":1}]}
   INSERT INTO portfolio_strategies (portfolio_id, strategy_id, allocated_amount)
   VALUES (port_a, strat_a_own, 120000);
   SELECT count(*) INTO row_cnt
@@ -328,6 +361,12 @@ BEGIN
   END IF;
 
   -- ----- 2a: SELF-OWNED + team_review -> RAISEs ----------------------------
+  -- RED-UNDER: delete the UNCONDITIONAL team_review arm from the D-03-A predicate
+  --            in migration 20260806120000, leaving only "self-owned and unmarked"
+  --            — the pre-SC-2b shape, in which a team_review mark blocks nothing.
+  -- ⚠️ Case 1 stays GREEN under it: an own_capital self-owned strategy is still
+  --    admitted, so the positive control does not shadow this arm.
+  -- RED-UNDER-M: {"arm":"2a","apply":[{"kind":"edit","file":"supabase/migrations/20260806120000_strategies_capital_ownership.sql","find":"  IF v_mark = 'team_review'\n     OR (v_strategy_owner = v_portfolio_owner AND v_mark IS DISTINCT FROM 'own_capital') THEN","replace":"  IF (v_strategy_owner = v_portfolio_owner AND v_mark IS NULL) THEN","occurrences":1}]}
   raised := FALSE;
   BEGIN
     INSERT INTO portfolio_strategies (portfolio_id, strategy_id, allocated_amount)
@@ -363,6 +402,15 @@ BEGIN
   -- so a SECURITY INVOKER trigger would read a NULL mark and wave this through.
   -- Prove first that A genuinely cannot see the row, THEN prove the guard still
   -- fires — otherwise this case could pass vacuously on a readable row.
+  -- RED-UNDER: widen the `strategies_read` policy on the live lane database to
+  --            `USING (true)`, so allocator A CAN read another owner's private
+  --            strategy and the SECURITY DEFINER probe below becomes vacuous.
+  -- ⚠️ `sql` steps, not a migration edit: the policy's real home is
+  --    20260405061912_rls_policies.sql, which is not in this apply list (it is a
+  --    whole-schema RLS migration). The mutation targets the LIVE policy — the
+  --    same object, by name — and the guard's own SECURITY DEFINER reads are
+  --    unaffected, so only the probe changes. That isolation is the point.
+  -- RED-UNDER-M: {"arm":"2c setup","apply":[{"kind":"sql","stmt":"DROP POLICY strategies_read ON public.strategies"},{"kind":"sql","stmt":"CREATE POLICY strategies_read ON public.strategies FOR SELECT TO authenticated USING (true)"}]}
   SELECT count(*) INTO row_cnt FROM strategies WHERE id = strat_b_team_priv;
   IF row_cnt <> 0 THEN
     RESET ROLE;
@@ -383,6 +431,10 @@ BEGIN
   END IF;
 
   -- ----- 3: SELF-OWNED + NULL (never asked) -> RAISEs ----------------------
+  -- RED-UNDER: exempt a NULL mark from the owner-scoped arm in migration
+  --            20260806120000 (`AND v_mark IS NOT NULL`), making silence consent —
+  --            the exact reading SC 3 refuses.
+  -- RED-UNDER-M: {"arm":"3","apply":[{"kind":"edit","file":"supabase/migrations/20260806120000_strategies_capital_ownership.sql","find":"AND v_mark IS DISTINCT FROM 'own_capital') THEN","replace":"AND v_mark IS DISTINCT FROM 'own_capital' AND v_mark IS NOT NULL) THEN","occurrences":1}]}
   raised := FALSE;
   BEGIN
     INSERT INTO portfolio_strategies (portfolio_id, strategy_id, allocated_amount)
@@ -400,6 +452,12 @@ BEGIN
   -- Postgres fires BEFORE INSERT row triggers on the ON CONFLICT insert
   -- ATTEMPT, before the conflict is detected. So an amount edit routed through
   -- an upsert also requires the mark. DELIBERATE — pinned so nobody "fixes" it.
+  -- RED-UNDER: the SAME `AND v_mark IS NOT NULL` exemption as case 3, with case 3's
+  --            own raise neutered so the upsert is the first failure.
+  -- ⚠️ SHADOWED BY DESIGN: case 3 exercises the identical predicate on a plain
+  --    INSERT three assertions earlier, so nothing that reaches the upsert path can
+  --    leave case 3 green. Case 3 raises exactly once, so ONE neuter entry suffices.
+  -- RED-UNDER-M: {"arm":"4","apply":[{"kind":"edit","file":"supabase/migrations/20260806120000_strategies_capital_ownership.sql","find":"AND v_mark IS DISTINCT FROM 'own_capital') THEN","replace":"AND v_mark IS DISTINCT FROM 'own_capital' AND v_mark IS NOT NULL) THEN","occurrences":1}],"neuter":[{"arm":"3"}]}
   raised := FALSE;
   BEGIN
     INSERT INTO portfolio_strategies (portfolio_id, strategy_id, allocated_amount)
@@ -430,6 +488,15 @@ BEGIN
   -- (api/portfolio-strategies/alias/route.ts:148) UPDATEs exactly this shape:
   -- a live position whose strategy is unmarked. If the trigger ever grows an
   -- UPDATE arm, this reddens — which is the entire point of the case.
+  -- RED-UNDER: add a RESTRICTIVE `FOR UPDATE USING (false)` policy to
+  --            portfolio_strategies on the live lane database, so the shipped alias
+  --            write matches zero rows and takes silently.
+  -- ⚠️ SILENT ON PURPOSE, for the reason in the header: the drift this arm NAMES —
+  --    the guard growing an UPDATE arm — RAISES, and this UPDATE is unwrapped, so
+  --    the file aborts with no TEST FAILED and the arm is never credited. What the
+  --    arm actually measures is `alias_now IS DISTINCT FROM 'my legacy sleeve'`,
+  --    and a write that is scoped out is precisely that.
+  -- RED-UNDER-M: {"arm":"5","apply":[{"kind":"sql","stmt":"CREATE POLICY portfolio_strategies_update_drift ON public.portfolio_strategies AS RESTRICTIVE FOR UPDATE USING (false)"}]}
   UPDATE portfolio_strategies SET alias = 'my legacy sleeve'
    WHERE portfolio_id = port_a AND strategy_id = strat_a_legacy;
   SELECT alias INTO alias_now
@@ -444,6 +511,17 @@ BEGIN
   -- ----- 6: duplicate-add is a PRIMARY KEY violation (D-13 / SC 4) ---------
   -- strat_a_own is own_capital, so it clears the trigger; the ONLY thing left
   -- to stop a second row is the composite PK. Structural, not a UI convention.
+  -- RED-UNDER: attach a BEFORE INSERT row trigger to portfolio_strategies on the
+  --            live lane database that RETURNs NULL when the (portfolio_id,
+  --            strategy_id) pair already exists — a second add that neither raises
+  --            nor lands.
+  -- ⚠️ DROPPING THE PRIMARY KEY, the drift this arm names, is NOT usable: case 4's
+  --    `ON CONFLICT (portfolio_id, strategy_id)` then fails inference with 42P10,
+  --    which is not a check_violation, is not caught by case 4's handler, and
+  --    aborts the file (NO-IDENTITY). The trigger name sorts AFTER
+  --    trg_portfolio_strategies_own_capital_only, so the real guard still fires
+  --    first everywhere it should — case 4 included.
+  -- RED-UNDER-M: {"arm":"6","apply":[{"kind":"sql","stmt":"CREATE OR REPLACE FUNCTION public._pk_drift_skip_duplicate() RETURNS TRIGGER\nLANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_catalog AS $t$\nBEGIN\n  IF EXISTS (SELECT 1 FROM portfolio_strategies ps\n              WHERE ps.portfolio_id = NEW.portfolio_id AND ps.strategy_id = NEW.strategy_id) THEN\n    RETURN NULL;\n  END IF;\n  RETURN NEW;\nEND $t$"},{"kind":"sql","stmt":"CREATE TRIGGER zz_pk_drift_skip_duplicate BEFORE INSERT ON public.portfolio_strategies\n  FOR EACH ROW EXECUTE FUNCTION public._pk_drift_skip_duplicate()"}]}
   raised := FALSE;
   BEGIN
     INSERT INTO portfolio_strategies (portfolio_id, strategy_id, allocated_amount)
@@ -466,6 +544,14 @@ BEGIN
   END IF;
 
   -- ----- 7a: flip RPC — ONE call flips the mark AND removes the position ---
+  -- RED-UNDER: make the flip RPC's mark UPDATE match nothing (`AND FALSE`) in
+  --            migration 20260806120000, so the atomic pair degrades to a DELETE
+  --            with no mark change — (1, 0) instead of (1, 1).
+  -- ⚠️ The DELETE is left alone deliberately: suppressing IT instead leaves the
+  --    owner's position live, and part 3b then refuses the UPDATE with an unhandled
+  --    23514 — an abort, not this arm. All three auth.uid() predicates survive, so
+  --    case 7c's structural pin is untouched.
+  -- RED-UNDER-M: {"arm":"7a","apply":[{"kind":"edit","file":"supabase/migrations/20260806120000_strategies_capital_ownership.sql","find":"  UPDATE public.strategies\n     SET capital_ownership = 'team_review'\n   WHERE id = p_strategy_id\n     AND user_id = auth.uid();\n  GET DIAGNOSTICS v_updated = ROW_COUNT;","replace":"  UPDATE public.strategies\n     SET capital_ownership = 'team_review'\n   WHERE id = p_strategy_id\n     AND user_id = auth.uid()\n     AND FALSE;\n  GET DIAGNOSTICS v_updated = ROW_COUNT;","occurrences":1}]}
   SELECT removed_positions, updated_strategies
     INTO v_removed, v_updated
     FROM flip_capital_ownership_to_team_review(strat_a_flip);
@@ -776,6 +862,19 @@ BEGIN
   -- Non-vacuity first: if the source row were missing or already moved, both
   -- UPDATEs below would match ZERO rows and the case would pass without ever
   -- reaching a trigger.
+  -- RED-UNDER: change THIS FILE's own seed of the repoint source position from
+  --            500000 to 500001, so the non-vacuity probe below finds no row at
+  --            the amount it asserts.
+  -- ⚠️ The only gate-file edit in this file, and the right target: this arm's
+  --    subject is the FIXTURE it stands on, not a production object — it exists
+  --    to refuse a vacuous pass when the source row is not where 7i expects it.
+  --    No failure branch is touched (rule 3b); the seed statement is.
+  -- ⚠️ The needle spans TWO lines on purpose. A single-line needle for a gate-file
+  --    edit is reproduced VERBATIM inside this annotation's own JSON, so the
+  --    measured `occurrences` becomes 1 before the twin is written and 2 after —
+  --    a self-inflicted MEASURE_FAIL (observed here). JSON encodes the newline as
+  --    \n, so a multi-line literal never appears in the file.
+  -- RED-UNDER-M: {"arm":"7i setup","apply":[{"kind":"edit","file":"supabase/tests/test_capital_ownership_allocation_guard.sql","find":"  INSERT INTO portfolio_strategies (portfolio_id, strategy_id, allocated_amount)\n  VALUES (port_a, strat_a_repoint, 500000);","replace":"  INSERT INTO portfolio_strategies (portfolio_id, strategy_id, allocated_amount)\n  VALUES (port_a, strat_a_repoint, 500001);","occurrences":1}]}
   SELECT count(*) INTO row_cnt
     FROM portfolio_strategies
    WHERE portfolio_id = port_a AND strategy_id = strat_a_repoint
@@ -865,6 +964,16 @@ BEGIN
   SET LOCAL ROLE authenticated;
 
   -- 8a: third-party, mark NULL (the overwhelmingly common shape today).
+  -- RED-UNDER: attach a BEFORE INSERT row trigger to portfolio_strategies on the
+  --            live lane database that RETURNs NULL for a THIRD-PARTY row whose
+  --            strategy is not marked own_capital — the blanket
+  --            `IS DISTINCT FROM 'own_capital'` predicate, in its silent form.
+  -- ⚠️ SILENT ON PURPOSE (header): the blanket predicate itself REFUSES this row,
+  --    and the INSERT above is unwrapped, so the file aborts with no TEST FAILED.
+  -- ⚠️ Scoped to `IS DISTINCT FROM 'own_capital'` so the seed's third-party
+  --    own_capital position (port_b, strat_a_shared) survives — 7d and 7e stand on
+  --    it, and dropping it would fire them first.
+  -- RED-UNDER-M: {"arm":"8a","apply":[{"kind":"sql","stmt":"CREATE OR REPLACE FUNCTION public._third_party_drift_skip() RETURNS TRIGGER\nLANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_catalog AS $t$\nDECLARE v_mark TEXT; v_strategy_owner UUID; v_portfolio_owner UUID;\nBEGIN\n  SELECT s.capital_ownership, s.user_id INTO v_mark, v_strategy_owner\n    FROM public.strategies s WHERE s.id = NEW.strategy_id;\n  SELECT p.user_id INTO v_portfolio_owner FROM portfolios p WHERE p.id = NEW.portfolio_id;\n  IF v_strategy_owner IS DISTINCT FROM v_portfolio_owner\n     AND v_mark IS DISTINCT FROM 'own_capital' THEN\n    RETURN NULL;\n  END IF;\n  RETURN NEW;\nEND $t$"},{"kind":"sql","stmt":"CREATE TRIGGER zz_third_party_drift_skip BEFORE INSERT ON public.portfolio_strategies\n  FOR EACH ROW EXECUTE FUNCTION public._third_party_drift_skip()"}]}
   INSERT INTO portfolio_strategies (portfolio_id, strategy_id)
   VALUES (port_a, strat_b_null);
   SELECT count(*) INTO row_cnt

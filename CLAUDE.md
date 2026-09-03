@@ -58,14 +58,17 @@ when their credential is absent — neither ever skips.
 2026-09-02 (workflow_dispatch run 33620169220 at 89cbef8b, self-test 12/12,
 `arms: 30/30/0`, tallies agree — closes `.planning/WINDOWS.md` entry 28);
 `plan-anchor-verify` was skipped in that run. ⚠️ CURRENCY 2026-09-03: that
-`30/30/0` is the run-33620169220 quote and stays as lineage; so does plan 02's
-`45/45/0`. Phase 164.4 plan 04 annotated the ledger_refresh family (three NEW
-gate files, 15 + 15 + 11 = 41 sections), so the measured corpus is now
-`coverage: files 4/71`, `arms: 86/86/0`, `biting: 86`, `lane-invocations: 86`,
-tallies agree, `FILES_FLOOR` is pinned at 4 and `ARMS_FLOOR` at 86, with
-`pending: 36` idiom files still to go. Read the run's own `coverage:` and
-`arms:` lines rather than any number restated in prose. VAC-04 and VAC-08 have
-still not run against their real credential; see entries 25 and 26.
+`30/30/0` is the run-33620169220 quote and stays as lineage; so do plan 02's
+`45/45/0` and plan 04's `86/86/0`. Phase 164.4 plan 05 annotated the
+tenant-isolation batch (five NEW gate files — wizard composite membership,
+capital-ownership allocation, the use-existing-key wizard writer, scenario
+shares and strategy_keys — 11 + 10 + 9 + 9 + 9 = 48 sections), so the measured
+corpus is now `coverage: files 9/71`, `arms: 134/134/0`, `biting: 134`,
+`lane-invocations: 134`, tallies agree, `FILES_FLOOR` is pinned at 9 and
+`ARMS_FLOOR` at 134, with `pending: 31` idiom files still to go. Read the run's
+own `coverage:` and `arms:` lines rather than any number restated in prose.
+VAC-04 and VAC-08 have still not run against their real credential; see entries
+25 and 26.
 
 ## Which database am I on? (ask FIRST, every time)
 
