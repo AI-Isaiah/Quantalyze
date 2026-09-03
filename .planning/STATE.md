@@ -5,11 +5,11 @@ milestone_name: Backlog Burndown (Phases 158+)
 current_phase: 164.4
 current_phase_name: REDUNDER-BACKFILL
 status: executing
-stopped_at: Completed 164.4-06-PLAN.md
-last_updated: "2026-09-03T19:02:35.015Z"
+stopped_at: Completed 164.4-07-PLAN.md
+last_updated: "2026-09-03T20:35:16.287Z"
 last_activity: 2026-09-03
 last_activity_desc: Phase 164.4 execution started
-state_head: 3c74a4553646ff915b713f25ac970acc232182e3
+state_head: e92d37a3467664e438d17ea9266c5a5c29fb29bf
 progress:
   total_phases: 15
   completed_phases: 5
@@ -718,6 +718,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 | Phase 164.4 P04 | 84 min | 3 tasks | 12 files |
 | Phase 164.4 P05 | 85 min | 3 tasks | 17 files |
 | Phase 164.4 P06 | 58 min | 3 tasks | 15 files |
+| Phase 164.4 P07 | 63 min | 3 tasks | 15 files |
 
 ## Accumulated Context
 
@@ -929,6 +930,9 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - [Phase 164.4]: 164.4-06: a pg-lane stand-in NARROWER than production can make an arm structurally unfalsifiable while the gate prints ALL PASS — three arms of test_strategies_private_owner_isolation.sql were in that state — 01-fixture-core.sql scopes strategies_read TO authenticated and grants authenticated SELECT only. MEASURED: GUARD 6 and GUARD 7 were refused by the GRANT layer with the same 42501 their handlers read as trigger proof, and anon held no grant at all so RLS 4 could never be reddened by any policy mutation. 10-fixture-strategies-rls-baseline.sql DROPs the stand-in so the REAL 20260405061912_rls_policies.sql defines the object, and restores production's table grants.
 - [Phase 164.4]: 164.4-06: an arm behind a runtime SKIP is answered by the APPLY LIST, and the proof is read off the baseline's own state-aware summary line — test_api_keys_venue_identity_uniq.sql hides two assertions behind RAISE NOTICE 'SKIP (...)' unless migration 20260814120000 is applied. The list carries it and its prerequisites; the baseline prints ZERO 'SKIP (' notices and the PASS (structural) variant rather than PASS WITH 3 SKIPS. Section 4's twin drives the v_b_live-armed assertion itself, so its RED is a second independent proof the skip is inert.
 - [Phase 164.4]: 164.4-06: FILES_FLOOR 9 -> 13 and ARMS_FLOOR 134 -> 163, both separation directions driven on real lanes; WAIVED_CEILING stays 0 — Read off the run's own lines: coverage files 13/71, arms 163/163/0, biting 163, lane-invocations 163, tallies agree, 191 s wall, exit 0. runCorpus(13,163) SILENT; runCorpus(14,164) FIRES both regressions. ci.yml timeout-minutes stays 15 — a three-point ubuntu fit (1.27 s/arm job cost + ~62 s fixed) projects 163 arms at ~4.5 min.
+- [Phase 164.4]: Batch 4 mutations are mostly MIGRATION-TEXT edits, not live-object drift: 24 of 26 new arms carry a find/anchor. Where a migration self-verify re-reads the object it just wrote (allocator_equity_derived STEP 6(c) role checks), the edit aborts the apply and the arm must take a post-apply sql step instead.
+- [Phase 164.4]: A stand-in NARROWER than production can pre-empt the REAL migration entirely: 02-fixture-sanitize-tables.sql one-column user_notes made 20260412094453 CREATE TABLE IF NOT EXISTS a no-op, so every object the gate asserts on would have been missing from a table that nonetheless existed. 16-fixture-user-notes-baseline.sql DROPs it.
+- [Phase 164.4]: ci.yml timeout-minutes stays 15. Four-point ubuntu fit (45/119s, 86/171s, 134/232s, 163/278s) = 1.35s per arm of JOB cost plus ~58s fixed, so 189 arms projects to ~5.2 min and the phase end state to ~6.9 min.
 
 ### Decisions (execution-time, Phase 140.2)
 
@@ -1631,8 +1635,8 @@ Load-bearing sequencing (real dependencies, do not reorder):
 
 ## Session
 
-**Last Date:** 2026-09-03T19:01:43.042Z
-**Stopped At:** Completed 164.4-06-PLAN.md
+**Last Date:** 2026-09-03T20:34:38.574Z
+**Stopped At:** Completed 164.4-07-PLAN.md
 **Last Date:** 2026-08-25T22:26:01.687Z
 **Stopped At:** Completed 162-03-PLAN.md
 **Last Date:** 2026-08-25T22:28:04.096Z
@@ -1697,6 +1701,8 @@ pre-merge `e0493913`. Fix is PR #669. Supabase migrations and the Vercel fronten
 - 164.4-04 human-check CLOSED 2026-09-03: landed as PR #734 (head 03fb3bc9, squash-merged 6644dd3b, v0.77.5.0). CI run 33774615747 reports sql-mutation success in 171 s, the ubuntu job's own log carrying `arms: 86/86/0`, `biting: 86`, `lane-invocations: 86`, `tallies agree`, `coverage: files 4/71`, `per-arm lane time: mean 1.0s` — IDENTICAL to the macOS measurement, so the two hosts agree on this batch and the identity attribution held on the ubuntu PostgreSQL build. Recorded in coverage D9 of 164.4-04-SUMMARY.md. Plan 164.4-05 is UNBLOCKED.
 - 164.4-05 human-check CLOSED 2026-09-03: landed as PR #735 (head f0d19bf7, squash-merged 5b97aadb, v0.77.6.0). CI run 33785233457 reports sql-mutation success in 232 s, the ubuntu job's own log carrying `arms: 134/134/0`, `biting: 134`, `lane-invocations: 134`, `tallies agree`, `coverage: files 9/71`, `per-arm lane time: mean 1.0s`, `No defects` — again identical to macOS. Recorded in coverage D11 of 164.4-05-SUMMARY.md. Plan 164.4-06 is UNBLOCKED.
 - ⏱️ THREE ubuntu timing points now exist for `sql-mutation`: 45 arms/119 s, 86/171 s, 134/232 s. Linear fit **1.27 s per arm of JOB cost + ~62 s fixed overhead** — larger than the runner's own `per-arm lane time: mean 1.0s`, which measures the LANE only. The ~265-arm end state projects to ~399 s ≈ 6.6 min, inside `timeout-minutes: 15` without a raise. Plan 164.4-08 still re-justifies the timeout against its OWN measured run.
+- 164.4-06 human-check CLOSED 2026-09-03: landed as PR #736 (head ba6fe1e2, squash-merged 6d6368ef, v0.77.7.0). CI run 33794810067 reports sql-mutation success in 278 s; the ubuntu job's own log carries `arms: 163/163/0`, `biting: 163`, `lane-invocations: 163`, `tallies agree`, `coverage: files 13/71`, `No defects` — identical to macOS for the fourth batch running. Recorded in coverage D10 of 164.4-06-SUMMARY.md. Plan 164.4-07 is UNBLOCKED.
+- ⏱️ FOUR ubuntu timing points: 45 arms/119 s, 86/171 s, 134/232 s, 163/278 s. Refit **1.35 s per arm of JOB cost + ~58 s fixed** (the runner's own `per-arm lane time: mean 1.0s` measures the LANE only). ~265-arm end state projects to ~416 s ≈ 6.9 min, inside `timeout-minutes: 15`. The 3-point fit predicted 269 s for this run and measured 278 — 3% over, so the model is slightly optimistic; plan 164.4-08 re-justifies the timeout against its own run.
 - ⛔ ORCHESTRATOR TRAP, measured wave 6: editing ANY tracked file while `run.mjs` is in flight fails the run with a `dirty-checkout` defect (a version bump did it), and `RUNNER_EXIT=1` then reads exactly like a broken batch. Read the defect KIND before concluding — `dirty-checkout` with no arm and no file named is the orchestrator's own hand, not the corpus. Serialise: clean tree -> run -> then bump.
 
 ## ⛔ Standing constraint from Phase 164.3.1 — do not lose this between sessions
