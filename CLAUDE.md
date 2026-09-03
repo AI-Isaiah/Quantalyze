@@ -59,16 +59,16 @@ when their credential is absent — neither ever skips.
 `arms: 30/30/0`, tallies agree — closes `.planning/WINDOWS.md` entry 28);
 `plan-anchor-verify` was skipped in that run. ⚠️ CURRENCY 2026-09-03: that
 `30/30/0` is the run-33620169220 quote and stays as lineage; so do plan 02's
-`45/45/0`, plan 04's `86/86/0` and plan 05's `134/134/0` (the last confirmed on
-ubuntu, run 33785233457 at PR #735 head `f0d19bf7`, 232 s). Phase 164.4 plan 06
-annotated four NEW gate files — private-by-default owner isolation, the
-api_keys venue-identity backstop, the capital-ownership column shape and the
-per-key csv_daily_returns RLS axis — 8 + 7 + 7 + 7 = 29 sections, so the
-measured corpus is now `coverage: files 13/71`, `arms: 163/163/0`,
-`biting: 163`, `lane-invocations: 163`, tallies agree, `FILES_FLOOR` is pinned
-at 13 and `ARMS_FLOOR` at 163, with `pending: 27` idiom files still to go. Read
-the run's own `coverage:` and `arms:` lines rather than any number restated in
-prose.
+`45/45/0`, plan 04's `86/86/0`, plan 05's `134/134/0` and plan 06's `163/163/0`
+(the last two both confirmed on ubuntu — run 33785233457 at PR #735 head
+`f0d19bf7`, 232 s, and run 33794810067 at PR #736 head `ba6fe1e2`, 278 s).
+Phase 164.4 plan 07 annotated four NEW gate files — the csv-finalize atomic
+fold, the funding_fees RLS stack, the allocator derived-equity surface and the
+user_notes dashboard scope — 7 + 7 + 6 + 6 = 26 sections, so the measured
+corpus is now `coverage: files 17/71`, `arms: 189/189/0`, `biting: 189`,
+`lane-invocations: 189`, tallies agree, `FILES_FLOOR` is pinned at 17 and
+`ARMS_FLOOR` at 189, with `pending: 23` idiom files still to go. Read the run's
+own `coverage:` and `arms:` lines rather than any number restated in prose.
 VAC-04 and VAC-08 have still not run against their real credential; see entries
 25 and 26.
 

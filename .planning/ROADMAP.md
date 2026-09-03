@@ -700,7 +700,7 @@ this phase, not a precondition of it.
 **Explicitly OUT of scope:** writing new gate coverage. This phase annotates and proves what already
 exists; it does not add arms. New coverage is a different phase with a different risk profile.
 
-**Plans:** 7/12 plans executed (REPLANNED 2026-09-03 after the Plan 00 spike: four pg_cron files DEFERRED by founder decision — see `[REDUNDER-PGCRON]`; end state on today's lane is 40 of 44 idiom files annotated + 4 printed as `lane-blocked:`)
+**Plans:** 8/12 plans executed (REPLANNED 2026-09-03 after the Plan 00 spike: four pg_cron files DEFERRED by founder decision — see `[REDUNDER-PGCRON]`; end state on today's lane is 40 of 44 idiom files annotated + 4 printed as `lane-blocked:`)
 
 Plans:
 
@@ -711,7 +711,7 @@ Plans:
 - [x] 164.4-04-PLAN.md — Batch 1: the three ledger_refresh gates (15 + 15 + 11 = 41) starting from Plan 00's PROVEN apply list; FILES_FLOOR 1 → 4, ARMS_FLOOR → ≈86
 - [x] 164.4-05-PLAN.md — Batch 2: wizard_composite_members, capital_ownership_allocation_guard, create_wizard_strategy_for_key, scenario_shares_rls, strategy_keys_rls (48); FILES_FLOOR → 9, ARMS_FLOOR → ≈134
 - [x] 164.4-06-PLAN.md — Batch 3: strategies_private_owner_isolation, api_keys_venue_identity_uniq, capital_ownership_column, csv_daily_returns_perkey_rls (29); FILES_FLOOR → 13, ARMS_FLOOR → ≈163
-- [ ] 164.4-07-PLAN.md — Batch 4: csv_finalize_atomic_fold, funding_fees_rls, allocator_equity_derived_rls, user_notes_dashboard_scope (26; derive_allocator_keys_fanout deferred); FILES_FLOOR → 17, ARMS_FLOOR → ≈189
+- [x] 164.4-07-PLAN.md — Batch 4: csv_finalize_atomic_fold, funding_fees_rls, allocator_equity_derived_rls, user_notes_dashboard_scope (26; derive_allocator_keys_fanout deferred); FILES_FLOOR → 17, ARMS_FLOOR → ≈189
 - [ ] 164.4-08-PLAN.md — Batch 5: six five-section files (30); FILES_FLOOR → 23, ARMS_FLOOR → ≈219; sql-mutation timeout re-justified from measured ubuntu wall clocks
 - [ ] 164.4-09-PLAN.md — Batch 6: six files (23); FILES_FLOOR → 29, ARMS_FLOOR → ≈242
 - [ ] 164.4-10-PLAN.md — Batch 7: the last four non-mixed files (8); FILES_FLOOR → 33, ARMS_FLOOR → ≈250; `pending:` names exactly the 7 mixed files

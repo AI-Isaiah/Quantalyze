@@ -1101,6 +1101,34 @@ true for 146 and half of 142–145, and **false for 141**.
       deletion guard) and its CI board read SHA-bound. `gsd-tools windows append` refuses with the
       same counts error, so it is recorded here.
 
+- [ ] **`[REDUNDER-COVGAP-01]` `test_funding_fees_rls.sql` Assertion 2 cannot falsify its OWN conjunct.**
+      MEASURED 2026-09-03 (plan 164.4-07) while authoring the twin. Dropping ONLY the
+      `AND s.user_id = auth.uid()` conjunct from `funding_fees_read`'s USING predicate scores
+      **NO-RED**: the policy's sub-select on `strategies` is itself subject to `strategies`' OWN RLS,
+      which already hides tenant B's DRAFT strategy from tenant A. The conjunct is the binding
+      constraint only for a strategy the reader can ALREADY see — i.e. a **PUBLISHED** one — and this
+      gate seeds only `status='draft'`, so it cannot distinguish "funding_fees_read is owner-scoped"
+      from "strategies_read is owner-scoped". The shipped twin replaces the whole predicate with
+      `true`, which the arm CAN observe, so the ARM is proven; the CONJUNCT is not.
+      **Fix:** seed a PUBLISHED strategy owned by tenant B, which makes the conjunct itself
+      falsifiable. Out of scope for 164.4 (the phase may not add arms).
+
+- [ ] **`[REDUNDER-COVGAP-02]` `test_user_notes_dashboard_scope.sql` Assertion 4 has a second,
+      incidental fence.** MEASURED 2026-09-03 (plan 164.4-07). Opening `user_notes_insert_own`'s
+      `WITH CHECK (user_id = auth.uid())` to `true` ALONE scores **NO-IDENTITY**: tenant B's forge
+      targets tenant A's EXISTING `(user_id, scope_kind, scope_ref)` triple, so once the policy admits
+      it the `user_notes_unique_multiscope` UNIQUE index refuses it with 23505 — a SQLSTATE the arm's
+      handler (`insufficient_privilege OR check_violation`) does not catch, so the file dies OUTSIDE
+      every arm. On this forge the unique index, not the INSERT policy, is the outer fence.
+      **Fix:** forge a triple that does not collide, so the INSERT policy is the only fence.
+
+- [ ] **`[REDUNDER-WINDOWS-01]` `.planning/WINDOWS.md` cannot be written at all.** MEASURED
+      2026-09-03 (plan 164.4-06). `gsd-tools windows fixed 28` refuses with
+      `Ledger counts disagree with entries: frontmatter open/waived/fixed/total=26/0/2/28 but entries
+      yield 29/0/2/31`. Pre-existing and unrelated to phase 164.4's files. ⚠️ CONSEQUENCE: `CLAUDE.md`
+      still says WINDOWS entry 28 is CLOSED while row 28 reads `open`, and no batch can correct it
+      until the frontmatter counters are reconciled with the rows.
+
 - [ ] **`[REDUNDER-PGCRON]` FOUR Phase-164.4 idiom gate files cannot be FALSIFIED on the pg-lane — the lane has no `pg_cron` (measured 2026-09-02, Plan 164.4-00; mechanism corrected and the set closed at four 2026-09-03, Plan 164.4-03).**
       `scripts/pg-lane/run.sh` boots a vanilla `initdb` cluster. Measured on it: `pg_available_extensions`
       has **0 rows** for `pg_cron`, and `CREATE EXTENSION pg_cron` fails `0A000 … Could not open extension

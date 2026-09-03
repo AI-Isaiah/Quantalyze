@@ -24,6 +24,24 @@
 --   psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f \
 --     supabase/tests/test_funding_fees_rls.sql
 --
+-- ⭐ MACHINE-EXECUTABLE TWINS (phase 164.4, REDUNDER-BACKFILL). Each prose
+-- RED-UNDER below carries an adjacent `RED-UNDER-M` object that
+-- scripts/mutation-runner executes on every push: it mutates COPIES on a
+-- throwaway pg-lane cluster, requires the FIRST `TEST FAILED (…)` to name that
+-- arm, and restores GREEN. Schema: scripts/mutation-runner/GRAMMAR.md.
+-- ⚠️ 07-fixture-supabase-default-privileges.sql is in the list and is NOT
+-- cosmetic here. It is applied BEFORE the migration creates `funding_fees`, so
+-- the table arrives carrying production's bootstrap GRANT ALL for anon,
+-- authenticated and service_role. Without it `authenticated` would hold no
+-- INSERT/UPDATE/DELETE privilege at all and Assertions 3, 4 and 5 would be
+-- refused by the GRANT layer with the same 42501 they read as proof that the
+-- deny POLICY fired — three vacuous passes, which is the exact defect plan
+-- 164.4-06 measured on test_strategies_private_owner_isolation.sql.
+-- ⚠️ Nothing this file names is stood in for: `funding_fees`, its four
+-- policies and `strategies.user_id` all come from the REAL migration, which is
+-- also the LAST definition of every one of them, so every twin targets it.
+-- RED-UNDER-SETUP: {"apply":["scripts/pg-lane/fixtures/01-fixture-core.sql","scripts/pg-lane/fixtures/02-fixture-sanitize-tables.sql","scripts/pg-lane/fixtures/03-fixture-compute-jobs.sql","scripts/pg-lane/fixtures/07-fixture-supabase-default-privileges.sql","scripts/pg-lane/fixtures/14-fixture-funding-fees.sql","supabase/migrations/20260416081039_funding_fees.sql"]}
+--
 -- The test seeds two synthetic tenants (A and B) end-to-end:
 --   auth.users -> profiles -> api_keys -> strategies -> funding_fees,
 -- then forges request.jwt.claims so auth.uid() resolves to each tenant
@@ -124,6 +142,15 @@ BEGIN
   RAISE NOTICE 'Seed OK: tenant A=% strat=% ff=%, tenant B=% strat=% ff=%',
     uid_a, sid_a, ff_a_id, uid_b, sid_b, ff_b_id;
 
+  -- RED-UNDER: attach a BEFORE INSERT trigger to funding_fees on the live
+  --            database that returns NULL for a POSITIVE amount, silently
+  --            dropping tenant B's +4.56 seed row. This arm is a plain
+  --            superuser count with no handler around the seed above it, so
+  --            a drift that RAISES would abort the file outside every arm and
+  --            score NO-IDENTITY (the wave-6 lesson); the SILENT form is the
+  --            only one it can observe. Scoped to the sign so the tenant A
+  --            row still lands and this arm is the FIRST failure.
+  -- RED-UNDER-M: {"arm":"sanity","apply":[{"kind":"sql","stmt":"CREATE FUNCTION public._drift_ff_drop_positive() RETURNS TRIGGER LANGUAGE plpgsql AS $q$ BEGIN IF NEW.amount > 0 THEN RETURN NULL; END IF; RETURN NEW; END $q$; CREATE TRIGGER _drift_ff_drop_positive BEFORE INSERT ON public.funding_fees FOR EACH ROW EXECUTE FUNCTION public._drift_ff_drop_positive()"}]}
   -- ----- ASSERTION 1: service role / superuser sees BOTH rows -----------
   -- Sanity check that we actually seeded what we think we seeded (and
   -- that the RLS scaffold is admin-bypass-compatible — `postgres` /
@@ -138,6 +165,19 @@ BEGIN
   END IF;
   RAISE NOTICE 'Assertion 1 OK: service-role sees both seeded funding_fees rows.';
 
+  -- RED-UNDER: replace funding_fees_read's whole USING predicate with `true`
+  --            in migration 20260416081039. The policy still EXISTS by name —
+  --            which is all the migration's own self-verify checks, and
+  --            precisely the gap G14-002 opened this file to close — so it
+  --            applies clean and every tenant reads every tenant's funding rows.
+  --            ⚠️ MEASURED, and it is why the surgical form does NOT work here:
+  --            dropping only the `AND s.user_id = auth.uid()` conjunct scores
+  --            NO-RED, because the policy's sub-select on `strategies` is itself
+  --            subject to `strategies`' OWN RLS, which already hides tenant B's
+  --            DRAFT strategy from tenant A. The conjunct is the binding
+  --            constraint only for a PUBLISHED strategy, and this gate seeds
+  --            none — booked as a coverage gap in the phase's deferred-items.md.
+  -- RED-UNDER-M: {"arm":"Assertion 2","apply":[{"kind":"edit","file":"supabase/migrations/20260416081039_funding_fees.sql","find":"CREATE POLICY funding_fees_read ON funding_fees FOR SELECT USING (\n  EXISTS (\n    SELECT 1 FROM strategies s\n    WHERE s.id = funding_fees.strategy_id\n      AND s.user_id = auth.uid()\n  )\n);","replace":"CREATE POLICY funding_fees_read ON funding_fees FOR SELECT USING (\n  true\n);","occurrences":1}]}
   -- ----- ASSERTION 2: tenant A SELECT returns own row only --------------
   -- Forge the JWT sub claim so auth.uid() resolves to uid_a for this
   -- transaction (same technique as test_guard_wizard_draft_updates).
@@ -172,6 +212,11 @@ BEGIN
 
   RAISE NOTICE 'Assertion 2 OK: tenant A sees own row, cannot see tenant B row.';
 
+  -- RED-UNDER: flip funding_fees_insert_deny's WITH CHECK from false to true
+  --            in migration 20260416081039. The INSERT then succeeds and a
+  --            manager can forge their own funding history — the write path
+  --            the worker is supposed to own exclusively.
+  -- RED-UNDER-M: {"arm":"Assertion 3","apply":[{"kind":"edit","file":"supabase/migrations/20260416081039_funding_fees.sql","find":"CREATE POLICY funding_fees_insert_deny ON funding_fees FOR INSERT\n  WITH CHECK (false);","replace":"CREATE POLICY funding_fees_insert_deny ON funding_fees FOR INSERT\n  WITH CHECK (true);","occurrences":1}]}
   -- ----- ASSERTION 3: authenticated INSERT is rejected ------------------
   -- The funding_fees_insert_deny policy has WITH CHECK (false) — any
   -- INSERT from the authenticated role must raise ERRCODE 42501.
@@ -201,6 +246,12 @@ BEGIN
   END IF;
   RAISE NOTICE 'Assertion 3 OK: authenticated INSERT rejected with ERRCODE 42501.';
 
+  -- RED-UNDER: flip funding_fees_update_deny's USING from false to true in
+  --            migration 20260416081039. Tenant A's UPDATE of its OWN row
+  --            then lands and amount becomes 0, which is the `silently
+  --            mutated` branch — the one that distinguishes a real deny from
+  --            a row RLS merely filtered out of view.
+  -- RED-UNDER-M: {"arm":"Assertion 4","apply":[{"kind":"edit","file":"supabase/migrations/20260416081039_funding_fees.sql","find":"CREATE POLICY funding_fees_update_deny ON funding_fees FOR UPDATE\n  USING (false);","replace":"CREATE POLICY funding_fees_update_deny ON funding_fees FOR UPDATE\n  USING (true);","occurrences":1}]}
   -- ----- ASSERTION 4: authenticated UPDATE is rejected ------------------
   -- The funding_fees_update_deny policy has USING (false). Under RLS
   -- semantics, a deny-USING UPDATE on a row the role can SELECT
@@ -250,6 +301,11 @@ BEGIN
     RAISE NOTICE 'Assertion 4 OK: authenticated UPDATE rejected with ERRCODE 42501.';
   END IF;
 
+  -- RED-UNDER: flip funding_fees_delete_deny's USING from false to true in
+  --            migration 20260416081039. Tenant A's own funding row is then
+  --            deletable from a browser session, i.e. a manager can erase the
+  --            costs that make their published returns look worse.
+  -- RED-UNDER-M: {"arm":"Assertion 5","apply":[{"kind":"edit","file":"supabase/migrations/20260416081039_funding_fees.sql","find":"CREATE POLICY funding_fees_delete_deny ON funding_fees FOR DELETE\n  USING (false);","replace":"CREATE POLICY funding_fees_delete_deny ON funding_fees FOR DELETE\n  USING (true);","occurrences":1}]}
   -- ----- ASSERTION 5: authenticated DELETE is rejected ------------------
   -- Re-impersonate tenant A and try to delete their own row. Like
   -- UPDATE above, USING (false) means the row either errors out or
@@ -287,6 +343,14 @@ BEGIN
     RAISE NOTICE 'Assertion 5 OK: authenticated DELETE rejected with ERRCODE 42501.';
   END IF;
 
+  -- RED-UNDER: attach a BEFORE INSERT trigger to funding_fees on the live
+  --            database that returns NULL for the SOLUSDT sentinel, so the
+  --            worker's write is silently discarded and RETURNING yields no
+  --            id. Like Assertion 1 this is an UNWRAPPED positive control, so
+  --            it needs the silent form; scoping to the sentinel symbol keeps
+  --            the BTCUSDT seeds intact so Assertions 1-5 still pass and this
+  --            arm is the FIRST failure.
+  -- RED-UNDER-M: {"arm":"Assertion 6","apply":[{"kind":"sql","stmt":"CREATE FUNCTION public._drift_ff_drop_sentinel() RETURNS TRIGGER LANGUAGE plpgsql AS $q$ BEGIN IF NEW.symbol = 'SOLUSDT' THEN RETURN NULL; END IF; RETURN NEW; END $q$; CREATE TRIGGER _drift_ff_drop_sentinel BEFORE INSERT ON public.funding_fees FOR EACH ROW EXECUTE FUNCTION public._drift_ff_drop_sentinel()"}]}
   -- ----- ASSERTION 6: service role can read/write all -------------------
   -- The migration header (funding_fees.sql:134-136) explicitly relies on
   -- service-role bypass for the worker UPSERT path. Pin this: a fresh
@@ -331,6 +395,14 @@ BEGIN
   END IF;
   RAISE NOTICE 'Assertion 6 OK: service-role INSERT/UPDATE/DELETE all succeed; both tenant rows still visible.';
 
+  -- RED-UNDER: re-route funding_fees_read's join through the api_key owner
+  --            instead of the strategy owner in migration 20260416081039 —
+  --            the denormalising refactor this arm's own comment names. Every
+  --            earlier arm still passes because tenant A owns both its key and
+  --            its strategy; only the REASSIGNMENT tells the two predicates
+  --            apart, and after it tenant B — who now owns the strategy but not
+  --            the key it was opened with — sees ONE seeded row instead of two.
+  -- RED-UNDER-M: {"arm":"Assertion 7","apply":[{"kind":"edit","file":"supabase/migrations/20260416081039_funding_fees.sql","find":"    SELECT 1 FROM strategies s\n    WHERE s.id = funding_fees.strategy_id\n      AND s.user_id = auth.uid()","replace":"    SELECT 1 FROM strategies s\n    JOIN api_keys k ON k.id = s.api_key_id\n    WHERE s.id = funding_fees.strategy_id\n      AND k.user_id = auth.uid()","occurrences":1}]}
   -- ----- ASSERTION 7: strategy reassignment retargets RLS visibility ----
   -- The funding_fees_read policy joins through strategies.user_id =
   -- auth.uid(). If a strategy is reassigned from tenant A to tenant B

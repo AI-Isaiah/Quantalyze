@@ -1,5 +1,60 @@
 # Changelog
 
+## [0.77.8.0] - 2026-09-03
+
+### Phase 164.4 (wave 8) — csv-finalize, funding fees, derived equity, user notes
+
+No production source change, no schema change, no migration. Four gate files gain
+**comment twins only — 288 added lines, 0 removed, 0 non-comment**. Batch 6 of 10.
+
+### Fixed — a same-named fixture BEATS the migration under `CREATE TABLE IF NOT EXISTS`
+
+`02-fixture-sanitize-tables.sql:30` declares `CREATE TABLE IF NOT EXISTS user_notes
+(user_id UUID)` — a one-column stand-in whose only job is to give `sanitize_user`
+something to delete from. The real table is created by `20260412094453` with the SAME
+idiom, so **with the stand-in present the real CREATE is a no-op**, and
+`test_user_notes_dashboard_scope.sql` asserted against a table that existed but carried
+none of the objects it tests: the `scope_kind` CHECK, the four owner policies, RLS itself.
+
+This is the same defect class wave 7 measured on `01-fixture-core.sql`'s narrower
+`strategies_read`, but worse: wave 7's object was under-specified, this one was ABSENT.
+`16-fixture-user-notes-baseline.sql` drops the stand-in so the real migrations define
+the objects the arms name.
+
+### Added
+
+- All 26 sections of the batch-4 four carry a `RED-UNDER-M` twin.
+- `15-fixture-auth-role.sql` provides `auth.role()` — every `*_service_all` policy-family
+  migration needs it in its apply list.
+
+### Changed
+
+- `FILES_FLOOR` 13 to 17, `ARMS_FLOOR` 163 to 189, both equal to the run's own printed
+  coverage and biting. `WAIVED_CEILING` untouched at 0.
+
+### Booked, not forced — two coverage gaps a mutation could not honestly close
+
+A `NO-RED` is a measurement, not a mutation to tune until something reddens.
+
+- `[REDUNDER-COVGAP-01]` `test_funding_fees_rls.sql` Assertion 2 cannot falsify its OWN
+  conjunct: `funding_fees_read`'s sub-select on `strategies` is itself subject to
+  `strategies`' RLS, which already hides tenant B's DRAFT strategy, and this gate seeds
+  only drafts. The shipped twin replaces the whole predicate with `true` — which the arm
+  CAN observe — so the ARM is proven and the CONJUNCT is not. Closing it needs a seeded
+  PUBLISHED strategy, which this phase may not add.
+- `[REDUNDER-COVGAP-02]` `test_user_notes_dashboard_scope.sql` Assertion 4 has a second,
+  incidental fence: the `user_notes_unique_multiscope` UNIQUE index refuses the forge with
+  23505 before the INSERT policy is reached.
+
+Both are now in root `TODOS.md`, not only in the phase's `deferred-items.md` — that file
+lives under `.planning/phases/**`, which every PR in this phase filters out.
+
+### Verified
+
+  full run   exit 0 — "No defects. Every annotated arm bit its own arm first."
+             coverage: files 17/71 · arms 189/189/0 · biting 189 · lane-invocations 189
+  self-test  17/17 scenarios · 75 assertions · exit 0
+
 ## [0.77.7.0] - 2026-09-03
 
 ### Phase 164.4 (wave 7) — private-by-default and venue identity, and THREE arms that could not fail
