@@ -5,16 +5,16 @@ milestone_name: Backlog Burndown (Phases 158+)
 current_phase: 164.4
 current_phase_name: REDUNDER-BACKFILL
 status: executing
-stopped_at: Completed 164.4-05-PLAN.md
-last_updated: "2026-09-03T17:23:25.036Z"
+stopped_at: Completed 164.4-06-PLAN.md
+last_updated: "2026-09-03T19:02:35.015Z"
 last_activity: 2026-09-03
 last_activity_desc: Phase 164.4 execution started
-state_head: b583551856ab2e95d6ce46849455b03faf324342
+state_head: 3c74a4553646ff915b713f25ac970acc232182e3
 progress:
   total_phases: 15
   completed_phases: 5
   total_plans: 82
-  completed_plans: 72
+  completed_plans: 73
   percent: 33
 ---
 
@@ -717,6 +717,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 | Phase 164.4 P03 | 35 min | 3 tasks | 13 files |
 | Phase 164.4 P04 | 84 min | 3 tasks | 12 files |
 | Phase 164.4 P05 | 85 min | 3 tasks | 17 files |
+| Phase 164.4 P06 | 58 min | 3 tasks | 15 files |
 
 ## Accumulated Context
 
@@ -925,6 +926,9 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - [Phase 164.4]: A non-idiom raise that makes the VIEW itself raise scores NO-IDENTITY, not 'the arm bit' — resolve by choosing a mutation the arm can OBSERVE, never by a waiver (WAIVED_CEILING stays 0)
 - [Phase 164.4]: gsd-core `neuter` is per-RAISE, not per-arm: naming an arm suppresses only its FIRST raise, so a section that raises twice cannot be fully suppressed
 - [Phase 164.4]: PATTERNS section P4's lockstep checklist is incomplete by at least 4 items — grep scripts/mutation-runner/ as well as src/__tests__/ for every literal a floor move touches
+- [Phase 164.4]: 164.4-06: a pg-lane stand-in NARROWER than production can make an arm structurally unfalsifiable while the gate prints ALL PASS — three arms of test_strategies_private_owner_isolation.sql were in that state — 01-fixture-core.sql scopes strategies_read TO authenticated and grants authenticated SELECT only. MEASURED: GUARD 6 and GUARD 7 were refused by the GRANT layer with the same 42501 their handlers read as trigger proof, and anon held no grant at all so RLS 4 could never be reddened by any policy mutation. 10-fixture-strategies-rls-baseline.sql DROPs the stand-in so the REAL 20260405061912_rls_policies.sql defines the object, and restores production's table grants.
+- [Phase 164.4]: 164.4-06: an arm behind a runtime SKIP is answered by the APPLY LIST, and the proof is read off the baseline's own state-aware summary line — test_api_keys_venue_identity_uniq.sql hides two assertions behind RAISE NOTICE 'SKIP (...)' unless migration 20260814120000 is applied. The list carries it and its prerequisites; the baseline prints ZERO 'SKIP (' notices and the PASS (structural) variant rather than PASS WITH 3 SKIPS. Section 4's twin drives the v_b_live-armed assertion itself, so its RED is a second independent proof the skip is inert.
+- [Phase 164.4]: 164.4-06: FILES_FLOOR 9 -> 13 and ARMS_FLOOR 134 -> 163, both separation directions driven on real lanes; WAIVED_CEILING stays 0 — Read off the run's own lines: coverage files 13/71, arms 163/163/0, biting 163, lane-invocations 163, tallies agree, 191 s wall, exit 0. runCorpus(13,163) SILENT; runCorpus(14,164) FIRES both regressions. ci.yml timeout-minutes stays 15 — a three-point ubuntu fit (1.27 s/arm job cost + ~62 s fixed) projects 163 arms at ~4.5 min.
 
 ### Decisions (execution-time, Phase 140.2)
 
@@ -1627,8 +1631,8 @@ Load-bearing sequencing (real dependencies, do not reorder):
 
 ## Session
 
-**Last Date:** 2026-09-03T17:23:24.725Z
-**Stopped At:** Completed 164.4-05-PLAN.md
+**Last Date:** 2026-09-03T19:01:43.042Z
+**Stopped At:** Completed 164.4-06-PLAN.md
 **Last Date:** 2026-08-25T22:26:01.687Z
 **Stopped At:** Completed 162-03-PLAN.md
 **Last Date:** 2026-08-25T22:28:04.096Z
