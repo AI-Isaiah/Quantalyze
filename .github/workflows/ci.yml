@@ -811,7 +811,7 @@ jobs:
     # three specialist reviews. All five vacuity mechanisms Phase 164's review
     # catalogued were GREEN in this very workflow. The only way to know an arm
     # can fail is to BREAK the thing it guards and watch it fail, so that is
-    # what this job does: for each of the 30 annotated arms it applies the
+    # what this job does: for each annotated arm it applies the
     # arm's declared mutation to COPIES, runs the gate, and requires that the
     # FIRST `TEST FAILED (…)` names THAT arm — red-anywhere is not success —
     # then restores and requires green. `sql-gate-lint` above catches the
@@ -846,10 +846,15 @@ jobs:
     # node builtins. An install this job does not need is an install that can
     # fail and flake the gate.
     #
-    # TIMEOUT (threat T-164.3-20): 30 arms x ~2.0s of lane time plus cluster
-    # boots measured at 64s wall clock locally (2026-08-29). 15 minutes is an
+    # TIMEOUT (threat T-164.3-20): the cost is one lane per annotated arm plus a
+    # baseline and a restore leg; the run PRINTS its own `per-arm lane time:`
+    # line, which is the number to re-read rather than a figure restated here.
+    # Measured 64s wall clock locally at 30 arms (2026-08-29) and 80s on this
+    # ubuntu runner at 32 lanes (run 33620169220, 2026-09-02); measured again
+    # locally at 45 arms x ~0.9s (2026-09-03, plan 164.4-02). 15 minutes is an
     # order of magnitude of headroom for a slower runner while still bounding a
-    # wedged cluster rather than burning the job's default 360.
+    # wedged cluster rather than burning the job's default 360. Raise it in the
+    # batch whose MEASURED run first approaches ~10 minutes, not before.
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -980,8 +985,8 @@ jobs:
         # It is the SOLE proof that the runner's six defect kinds — `no-red`,
         # `wrong-first-failure`, `occurrence-mismatch`, `identity-rewrite`,
         # `synthesised-identity`, `floor` — can still fire. The corpus run below
-        # is GREEN BY CONSTRUCTION at 30/30: a runner whose defect reporting was
-        # disabled would still print `arms: 30/30/0`, clear both floors and exit
+        # is GREEN BY CONSTRUCTION at E/E: a runner whose defect reporting was
+        # disabled would still print its `arms:` line, clear both floors and exit
         # 0. Vitest covers `neuterArm`, the floors and the identity helpers; it
         # never covers `runCorpus`'s defect REPORTING, because that needs a
         # cluster. So without this step, "0 defects" was a number nothing could

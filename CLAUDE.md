@@ -51,7 +51,12 @@ when their credential is absent — neither ever skips.
 ⚠️ `sql-mutation` and `sql-gate-lint` were first observed green on ubuntu on
 2026-09-02 (workflow_dispatch run 33620169220 at 89cbef8b, self-test 12/12,
 `arms: 30/30/0`, tallies agree — closes `.planning/WINDOWS.md` entry 28);
-`plan-anchor-verify` was skipped in that run. VAC-04 and VAC-08 have still
+`plan-anchor-verify` was skipped in that run. ⚠️ CURRENCY 2026-09-03: that
+`30/30/0` is the run-33620169220 quote and stays as lineage. Phase 164.4 plan 02
+closed the reference file's 15 un-twinned sections, so the measured corpus is now
+`arms: 45/45/0`, `biting: 45`, `lane-invocations: 45`, tallies agree, and
+`ARMS_FLOOR` is pinned at 45. Read the run's own `arms:` line rather than any
+number restated in prose. VAC-04 and VAC-08 have still
 not run against their real credential; see entries 25 and 26.
 
 ## Which database am I on? (ask FIRST, every time)

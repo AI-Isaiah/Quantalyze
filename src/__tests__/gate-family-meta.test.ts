@@ -858,7 +858,7 @@ export const KNOWN_THRESHOLD_SITES: readonly string[] = [
   "scripts/test-ledger-drift-check.sh :: ledger_rows -ge 50", //  VAC-08 absurdity floor: 'scored' + 2026-08-29
   "scripts/prod-body-drift-check.sh :: SNAPSHOT_MIN=50", //         VAC-04 absurdity floor: 'measured' + 2026-09-01
   "scripts/mutation-runner/run.mjs :: FILES_FLOOR=1", //            coverage ratchet: MEASURED + 2026-08-29
-  "scripts/mutation-runner/run.mjs :: ARMS_FLOOR=30", //            biting ratchet: MEASURED + 2026-09-01 (re-derived)
+  "scripts/mutation-runner/run.mjs :: ARMS_FLOOR=45", //            biting ratchet: MEASURED + 2026-09-03 (re-derived)
   // The family's only UPPER bound. Invisible to this arm until the name class
   // widened past FLOOR|MIN on 2026-09-02 — registered here on the run that
   // first saw it, with its measurement at run.mjs:201-227 and the constant
