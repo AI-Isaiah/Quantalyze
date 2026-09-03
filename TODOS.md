@@ -1125,6 +1125,24 @@ true for 146 and half of 142–145, and **false for 141**.
       `.planning/phases/164.4-.../164.4-00-FIXTURE-STRATEGY.md` § "The largest idiom file cannot be
       baselined".
 
+- [ ] **`[ANCHOR-QUOTE-01]` `verify-plan-anchors.mjs` binds a quote ACROSS an XML element boundary — false stales, masked only by element ORDER (booked 2026-09-03, Phase 164.4 plan-check iteration 3).**
+      `scripts/verify-plan-anchors.mjs:279-292` (`boundQuote`): when an anchor is the last on its line
+      and no backtick span follows it, the verifier binds the FIRST backtick span of the NEXT line as
+      that anchor's quote. It does not stop at a line that opens a new XML element. Measured in Phase
+      164.4: with `<read_first>` placed before `<precondition>` in Task 1 of every batch plan, a
+      `sql-mutation` span on the following `<precondition>` line was read as a quote against the last
+      `<read_first>` anchor and reported STALE. The plans were reordered (`<read_first>` after
+      `<precondition>`) to dodge it — correct today, fragile forever: any future edit that puts a
+      backtick span on the line after `</read_first>` re-triggers the false stale, and an executor
+      told "anchor stale" will loosen the anchor rather than suspect the verifier.
+      Fix: `boundQuote` must never bind across a line that opens a new XML element (`^\s*<[a-z_]+`)
+      or closes the current one (`^\s*</`); return `null` at that boundary. Ship with a red fixture
+      (anchor last on its line, next line opens `<precondition>` with a backtick span → must report
+      NO quote, not a stale) and a green one (same anchor, span on a plain continuation line → bound).
+      Verify with `node scripts/verify-plan-anchors.mjs --pending` on the 164.4 plans: claims count
+      unchanged, stale 0, with `<read_first>` moved BEFORE `<precondition>` in one batch plan as the
+      probe (then restored).
+
 - [ ] **`[REDUNDER-SAVEPOINT]` `20260416201929_audit_log_hardening.sql` cannot apply to a vanilla PostgreSQL 16 at all (measured 2026-09-02, Plan 164.4-00).**
       Its final `DO $$ … $$;` block issues `SAVEPOINT audit_log_probe;` and `ROLLBACK TO SAVEPOINT
       audit_log_probe;` (`:239-267`) **inside a PL/pgSQL body**. PL/pgSQL has no savepoint statements, so
