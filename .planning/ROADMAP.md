@@ -691,7 +691,7 @@ Plans:
 - [ ] 164.4-11-PLAN.md — Batch 9: the last four non-mixed files (8); FILES_FLOOR → 37; waiver tally stated for the mixed-file gate
 - [ ] 164.4-12-PLAN.md — Batch 10: the seven ⚠️ mixed files (15), waivers last-resort with reasons, >5 → STOP; end state FILES_FLOOR 44, ARMS_FLOOR ≈ 365, 27 files printed, final prose sweep
 
-### Phase 164.1: HARDEN-GUARDS — retire the frozen-spine gates that no longer bite, close the composite-stamp twin, put the advisory lock behind a real concurrency test, fix the PYAPI-06 blind spot that let a production service-key mismatch run silently, and close phase 161's deferred error-surface items including WIZFORM-02's code:UNKNOWN class, plus the Phase 163 carry-overs — headed by SKIP-01 (nothing applies migrations to TEST, so the OPS-08 SQL gate SKIPs permanently and the deployed body is tested nowhere), then OPS-08's un-written TypeScript retry half, the freshness UTC day-granularity residual, the TEST/PROD function-revision drift, the audit-coverage blind spot, and the tracked-PII decision (INSERTED)
+### Phase 164.1: HARDEN-GUARDS — retire the frozen-spine gates that no longer bite, close the composite-stamp twin, put the advisory lock behind a real concurrency test, fix the PYAPI-06 blind spot that let a production service-key mismatch run silently, and close phase 161's deferred error-surface items (WIZFORM-02's code:UNKNOWN class MOVED to 164.2 in the 2026-08-28 dedup), plus the Phase 163 carry-overs — headed by SKIP-01 (nothing applies migrations to TEST, so the OPS-08 SQL gate SKIPs permanently and the deployed body is tested nowhere), then OPS-08's un-written TypeScript retry half, the freshness UTC day-granularity residual, the TEST/PROD function-revision drift, the audit-coverage blind spot, and the tracked-PII decision (INSERTED)
 
 **Goal:** Every guard in this phase's scope either bites or is gone, and every silent production failure in it becomes loud. Two halves. (a) **Gate hygiene** — retire the frozen-spine gates that no longer bite, close the composite-stamp twin, put the advisory lock behind a real concurrency test, and land the Phase 163 carry-overs. (b) **Production observability** — one periodic prober covering the three places where production can be broken while every instrument reads green: PYAPI-06 (service-key mismatch), CRON-OBS-01 (`net._http_response`), MT5-WEDGE-OBS-01 (MT5 round-trip). A probe that SKIPs on an absent credential is the defect, not the fix.
 
@@ -929,10 +929,38 @@ it lived outside that fixer's files — named, not silently dropped:
    fresh session id when a preselect is supplied) or in the route (re-resolve on 23505). Phase 162
    shipped honest copy describing this dead end; it did not remove the dead end.
 
-⚠️ **Overlap to dedupe at planning time:** Phase 164.1 already claims "phase 161's deferred
-error-surface items including WIZFORM-02's `code: UNKNOWN` class". Items 1–3 above are wizard
-error-surface work and could equally live there. Decide ownership ONCE when the first of the two
-is planned — do not let both phases carry them.
+✅ **Overlap RESOLVED in the 2026-08-28 dedup — do NOT re-open at planning time:** WIZFORM-02's
+`code: UNKNOWN` class and items 1–3 above are wizard error-surface work and belong to THIS phase.
+164.1's title no longer claims them (amended 2026-09-03; the dedup had updated 164.1's DEDUP table
+and this section's Absorbed line, but left 164.1's title and this note contradicting both).
+
+**Success Criteria**:
+
+1. A computation failure shows the sentence its WRITER produced, on every path where a
+   `compute_jobs` row transitions — proven by a test that performs the transition and asserts the
+   curated sentence survives it. Inspection of the bridge is not evidence.
+
+2. `computation_error` carries writer/generation provenance and `sync_strategy_analytics_status`
+   respects it. A SQL-only fix is NOT accepted as closing this — the column cannot today tell a
+   curated sentence from a stale one, and that debt is recorded as owed in migration
+   `20260826120000`'s header.
+
+3. WIZFORM-02 is closed by MEASUREMENT, not inspection: for every server-classified error code the
+   wizard can surface, a test asserts the rendered surface shows THAT code and never
+   `code: UNKNOWN`. The test must be shown to fail when the classification is neutered. Phase 153's
+   span verification FAILED on 2026-08-13 — inspection is why this was believed closed once already.
+
+4. No refusal blames a party that did not cause the failure. `KEY_RATE_LIMIT` stops attributing
+   `userActionLimiter`'s 429 to the exchange, and `KEY_MISSING_REQUIRED_FIELD` stops wearing a
+   credential-shaped title on the preselect screen where there are no fields.
+
+5. `DRAFT_ALREADY_EXISTS`'s cause is SPLIT, not replaced — it stays true on the TOCTOU and
+   credential arms while telling the truth on the stale-session path, where the collision is on
+   `(user_id, wizard_session_id, source)` and not on the key.
+
+6. The stale-`wizardSessionId` dead end is REMOVED, not just described honestly: a preselect for
+   key B no longer inherits an abandoned draft's session id for key A. Phase 162 shipped accurate
+   copy for this dead end without removing it; accurate copy is not a fix.
 
 **Requirements**: TBD
 **Depends on:** Phase 164 (ordered AFTER 164.1 — no dependency between them, numeric order only)

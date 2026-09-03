@@ -6,10 +6,10 @@ current_phase: 164.4
 current_phase_name: REDUNDER-BACKFILL
 status: executing
 stopped_at: Completed 164.4-01-PLAN.md
-last_updated: "2026-09-02T20:13:14.484Z"
+last_updated: "2026-09-03T06:56:17.141Z"
 last_activity: 2026-09-02
 last_activity_desc: Phase 164.4 execution started
-state_head: 9983d1a429d8617c7684da12d7ee27b94aad7bd0
+state_head: 91e9b258616f63d63e4c1bdfadb0368c146ef78d
 progress:
   total_phases: 14
   completed_phases: 5
@@ -706,6 +706,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - Phase 164.3.1 edited: scope widened from TWO primitives to FOUR (founder decision): adds PRIMITIVE C (VAC-04 reports PASS having compared nothing, WR-01 -> R2-W03 -> SP-C05 -> round 4) and PRIMITIVE D (a control whose own oracle or fixture agrees with it by construction); absorbs VAC04-C1..C4, AUDCOV-01, VAC-SELFREF-01, MUT-I01, MUT-W02; deliverables 4 -> 7; success criteria added. Only MUT-I02 and MUT-I03 remain in TODOS.
 - Phase 164.3.1 edited: added deliverables 8 (diagnostic-first) and 9 (VAC-08 regression instances + absurdity floor on VAC-04 and the mutation runner); widened PRIMITIVE C to both verdict directions after VAC-08's 253-of-262 mirror case; success criteria 7-9 added; sample-vs-corpus logged as a RULE, deliberately NOT a fifth primitive (one instance vs four reopenings for A-D)
 - Phase 164.1 edited: edited fields: goal, success_criteria — scope ADDED 2026-09-01: CRON-OBS-01, MT5-WEDGE-OBS-01 (production observability; routed here not to 164.3/164.3.1 which own gate integrity)
+- Phase 164.2 edited: added Success Criteria (6, was 0): pins WIZFORM-02 code:UNKNOWN to measurement-not-inspection after Phase 153 span verification failed 2026-08-13; also resolved the 164.1-vs-164.2 WIZFORM-02 ownership contradiction left by the 2026-08-28 dedup
 
 ### Decisions
 
