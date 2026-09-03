@@ -670,6 +670,12 @@ describe("R2-W04 / GRAMMAR rule 3b — a mutation may not REWRITE an arm identit
     // are skipped by this walk, so the step count rises by less than the arm
     // count: 15 of the 41 new arms are grant/ownership/DROP drift on the live
     // lane, which is not a file edit and cannot rewrite an identity by 3b.
+    // RE-MEASURED 2026-09-03 (plan 164.4-07, the csv-finalize-fold /
+    // funding-fees / allocator-derived-equity / user-notes batch's 26 sections):
+    // 189 arms, 167 file steps, 0 violations. 24 of the 26 new arms are file
+    // edits — this batch's drift is mostly IN the migration text (policy
+    // predicates, guard bodies, a CHECK list), so the step count rises almost
+    // in step with the arm count for the first time in the phase.
     // Pinned so 164.4's remaining backfill cannot introduce the shape and then
     // be "fixed" by relaxing the rule.
     const scan = scanCorpus(join(REPO_ROOT, "supabase", "tests"));
@@ -703,8 +709,8 @@ describe("R2-W04 / GRAMMAR rule 3b — a mutation may not REWRITE an arm identit
 
     expect(violations).toEqual([]);
     // Non-vacuity: the walk must actually have walked something.
-    expect(armsSeen).toBe(163);
-    expect(stepsSeen).toBe(143);
+    expect(armsSeen).toBe(189);
+    expect(stepsSeen).toBe(167);
   });
 
   // ══════════════════════════════════════════════════════════════════════════
@@ -1379,7 +1385,12 @@ describe("GRAMMAR rule 3c — an identity is READ only where the RUNNER's gate r
     // three of the four files in that batch are re-read by their own migration's
     // post-verify, so an EDIT would abort the apply and the drift has to happen
     // on the LIVE object after it. 81 of the corpus's 224 steps are now `sql`.
-    expect(needles.length).toBe(143);
+    // RE-MEASURED 2026-09-03 (plan 164.4-07): 167 needles across 189 arms. The
+    // gap NARROWS this time — 26 new arms carried 24 new needles, because this
+    // batch's mutations are mostly migration-text edits (RLS predicates, guard
+    // bodies, a scope_kind CHECK list) rather than live-object drift. 87 of the
+    // corpus's 254 steps are now `sql`.
+    expect(needles.length).toBe(167);
     expect(needles.filter((n) => /TEST\s+FAILED\s*\(/i.test(n))).toEqual([]);
   });
 });
@@ -1625,20 +1636,23 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
     }
   });
 
-  it("scanCorpus reports 13 of 71 files annotated", () => {
+  it("scanCorpus reports 17 of 71 files annotated", () => {
     const corpus = scanCorpus(join(REPO_ROOT, "supabase", "tests"));
     // ⛔ The DENOMINATOR stays 71 — every `.sql` in the directory. The phase's
     // end state is `files 40/71` with the other 31 PRINTED BY NAME
     // (`unreachable:` 27 + `lane-blocked:` 4), never `40/40` with the gap
     // quietly redefined away.
     expect(corpus.filesTotal).toBe(71);
-    expect(corpus.filesAnnotated).toBe(13);
+    expect(corpus.filesAnnotated).toBe(17);
     expect(corpus.annotatedFiles).toEqual([
+      "test_allocator_equity_derived_rls.sql",
       "test_api_keys_venue_identity_uniq.sql",
       "test_capital_ownership_allocation_guard.sql",
       "test_capital_ownership_column.sql",
       "test_create_wizard_strategy_for_key.sql",
       "test_csv_daily_returns_perkey_rls.sql",
+      "test_csv_finalize_atomic_fold.sql",
+      "test_funding_fees_rls.sql",
       "test_ledger_refresh_composite_arm.sql",
       "test_ledger_refresh_fanout.sql",
       "test_ledger_refresh_staleness.sql",
@@ -1646,6 +1660,7 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
       "test_strategies_private_owner_isolation.sql",
       "test_strategy_keys_rls.sql",
       "test_strategy_shares_rls.sql",
+      "test_user_notes_dashboard_scope.sql",
       "test_wizard_composite_members.sql",
     ]);
   });
