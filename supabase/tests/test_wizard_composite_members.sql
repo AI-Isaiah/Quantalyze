@@ -46,6 +46,18 @@
 -- Usage:
 --   psql "$TEST_SUPABASE_DB_URL" -v ON_ERROR_STOP=1 -f \
 --     supabase/tests/test_wizard_composite_members.sql
+--
+-- ⭐ MACHINE-EXECUTABLE TWINS (phase 164.4, VAC-01). Each prose RED-UNDER
+-- below carries an adjacent `RED-UNDER-M` object that scripts/mutation-runner
+-- executes on every push: it mutates COPIES, requires the FIRST `TEST FAILED (…)`
+-- to name that arm, and restores GREEN. The schema is scripts/mutation-runner/
+-- GRAMMAR.md. The line below declares what the lane applies before this gate. It
+-- was DISCOVERED, not guessed — plan 164.4-05 iterated it over 5 lane runs on a
+-- throwaway pg-lane cluster to `ALL PASS`, mean 1.03 s/lane over 3 timed GREEN
+-- runs. ⚠️ 20260712120000 is the LAST-defining migration of
+-- set_wizard_composite_members (20260710180000 creates it first), so every twin
+-- here targets THAT one — the CREATE OR REPLACE re-base rule.
+-- RED-UNDER-SETUP: {"apply":["scripts/pg-lane/fixtures/01-fixture-core.sql","scripts/pg-lane/fixtures/02-fixture-sanitize-tables.sql","scripts/pg-lane/fixtures/03-fixture-compute-jobs.sql","scripts/pg-lane/fixtures/05-fixture-wizard-composite.sql","supabase/migrations/20260602190000_f6_wizard_session_idempotency.sql","supabase/migrations/20260710120000_strategy_keys.sql","supabase/migrations/20260710180000_wizard_composite.sql","supabase/migrations/20260712120000_wizard_composite_members_invalidate_analytics.sql"]}
 
 BEGIN;
 
@@ -118,6 +130,10 @@ BEGIN
   -- ======================================================================
   -- Submission order key2, key1, key3; window_starts 2025-06 / 2025-01 / 2025-09.
   -- Expected seq by window_start ASC: key1 -> 1, key2 -> 2, key3 -> 3.
+  -- RED-UNDER: flip the row_number() window of the wholesale INSERT in migration
+  --            20260712120000 from `window_start ASC` to `DESC`, so seq is
+  --            assigned by DESCENDING window_start and key1/key3 swap ordinals.
+  -- RED-UNDER-M: {"arm":"Part 1","apply":[{"kind":"edit","file":"supabase/migrations/20260712120000_wizard_composite_members_invalidate_analytics.sql","find":"ORDER BY (elem->>'window_start')::date ASC","replace":"ORDER BY (elem->>'window_start')::date DESC","occurrences":1}]}
   SELECT public.set_wizard_composite_members(
     uid_a, strat_comp,
     jsonb_build_array(
