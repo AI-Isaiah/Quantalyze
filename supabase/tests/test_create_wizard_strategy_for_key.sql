@@ -62,6 +62,27 @@
 -- report a green run that asserted nothing.
 --
 -- Run order: AFTER 20260826130000 has been applied.
+--
+-- ⭐ MACHINE-EXECUTABLE TWINS (phase 164.4, VAC-01). Each prose RED-UNDER below
+-- carries an adjacent `RED-UNDER-M` object that scripts/mutation-runner executes
+-- on every push: it mutates COPIES, requires the FIRST `TEST FAILED (…)` to name
+-- that arm, and restores GREEN. The schema is scripts/mutation-runner/GRAMMAR.md.
+-- The line below declares what the lane applies before this gate. It was
+-- DISCOVERED, not guessed — plan 164.4-05 iterated it over 7 lane runs (two of
+-- which explored, and abandoned, a 20260814120000 branch) to `ALL 9 ARMS
+-- EXECUTED`, mean 0.95 s/lane over 3 timed GREEN runs.
+-- ⚠️ 20260602190000 — NOT 20260814120000 — supplies arm H's positive control
+--    `create_wizard_strategy`. It is not that function's LAST definer, and that
+--    is deliberate: no twin here MUTATES create_wizard_strategy (arm H's twin is
+--    a `sql` DROP), so the CREATE-OR-REPLACE re-base rule does not bind, while
+--    20260814120000 drags in 20260811210000, whose census/ACL post-verify cannot
+--    pass on a cluster where these RPCs are created for the FIRST time.
+-- ⚠️ EVERY twin below is a `sql` step or a gate-file edit, never a migration edit:
+--    this migration's own post-verify (a)-(h) asserts nearly everything the gate
+--    asserts, so a migration edit ABORTS THE APPLY and the gate never runs. That
+--    is also the point of the gate — it re-reads the LIVE ACL and the LIVE body,
+--    catching drift the migration verified once at apply time and never again.
+-- RED-UNDER-SETUP: {"apply":["scripts/pg-lane/fixtures/01-fixture-core.sql","scripts/pg-lane/fixtures/02-fixture-sanitize-tables.sql","scripts/pg-lane/fixtures/03-fixture-compute-jobs.sql","scripts/pg-lane/fixtures/05-fixture-wizard-composite.sql","scripts/pg-lane/fixtures/09-fixture-migration-ledger.sql","supabase/migrations/20260602190000_f6_wizard_session_idempotency.sql","supabase/migrations/20260826130000_create_wizard_strategy_for_key.sql"]}
 
 BEGIN;
 
@@ -87,6 +108,11 @@ DECLARE
   v_sqlstate   TEXT;
 BEGIN
   -- ══ (A) APPLIED-NESS. ABSENCE IS A FAILURE, NOT A SKIP ══════════════════
+  -- RED-UNDER: DROP the function on the live lane database — cause (ii) the arm
+  --            names, a later migration dropping the writer after it applied.
+  -- ⚠️ A `sql` step: the ledger and the ACL are read from the LIVE database, so
+  --    there is nothing in the migration text to edit that would reach this arm.
+  -- RED-UNDER-M: {"arm":"A","apply":[{"kind":"sql","stmt":"DROP FUNCTION public.create_wizard_strategy_for_key(uuid, uuid, text, uuid)"}]}
   SELECT p.oid INTO v_oid
     FROM pg_proc p
     JOIN pg_namespace n ON n.oid = p.pronamespace
@@ -110,6 +136,11 @@ BEGIN
     FROM pg_proc p WHERE p.oid = v_oid;
 
   -- ══ (B) SECURITY DEFINER, WITH A PINNED search_path ═════════════════════
+  -- RED-UNDER: flip the deployed function to SECURITY INVOKER on the live lane
+  --            database.
+  -- ⚠️ A `sql` step: the migration's own post-verify asserts prosecdef, so editing
+  --    the migration aborts the apply and the gate never runs.
+  -- RED-UNDER-M: {"arm":"B","apply":[{"kind":"sql","stmt":"ALTER FUNCTION public.create_wizard_strategy_for_key(uuid, uuid, text, uuid) SECURITY INVOKER"}]}
   IF NOT v_secdef THEN
     RAISE EXCEPTION 'TEST FAILED (B): public.% is no longer SECURITY DEFINER. It would then run as the CALLER, so the strategies INSERT would be governed by that caller''s RLS instead of by the in-body ownership assertion — and service_role, the only role holding EXECUTE, bypasses RLS anyway, so the ownership check would be the only control left and the failure would be silent.', v_fn;
   END IF;
@@ -124,6 +155,10 @@ BEGIN
   -- silently re-grants both with nothing in the diff to read (it bit
   -- 20260812083206 for anon). This arm is the durable enforcement; the REVOKE
   -- in the migration is not self-enforcing.
+  -- RED-UNDER: re-GRANT EXECUTE to `authenticated` on the live lane database —
+  --            exactly the pg_default_acl re-grant the comment above describes,
+  --            which leaves nothing in any diff to read.
+  -- RED-UNDER-M: {"arm":"C","apply":[{"kind":"sql","stmt":"GRANT EXECUTE ON FUNCTION public.create_wizard_strategy_for_key(uuid, uuid, text, uuid) TO authenticated"}]}
   IF has_function_privilege('authenticated', v_oid, 'EXECUTE') THEN
     RAISE EXCEPTION 'TEST FAILED (C): `authenticated` holds EXECUTE on public.%. PostgREST exposes every public-schema function at /rest/v1/rpc/<name>, so a browser session could POST this writer directly — bypassing the route''s ownership re-selects, its orphan verification and its refusal copy. A later migration DROPped and re-CREATEd this function without re-issuing the REVOKE (see the migration header, ⛔ (v)).', v_fn;
   END IF;
@@ -143,6 +178,12 @@ BEGIN
   -- If it survives stripping, the stripper is broken or gone, and arms E, F and
   -- G below are all satisfiable by prose — which is precisely how a
   -- prose-satisfied anchor ships. This arm is what makes them measurements.
+  -- RED-UNDER: delete the comment stripper in THIS file — `v_bare := v_def` — so
+  --            the prose-only canary survives into v_bare.
+  -- ⚠️ The only twin in this batch that edits a GATE file, and it is the only place
+  --    the stripper exists: it is this file's own mechanism, not the migration's.
+  --    No failure branch is touched (rule 3b), only the assignment above.
+  -- RED-UNDER-M: {"arm":"D","apply":[{"kind":"edit","file":"supabase/tests/test_create_wizard_strategy_for_key.sql","find":"  v_bare := regexp_replace(v_def, '--[^\\n]*', '', 'g');","replace":"  v_bare := v_def;","occurrences":1}]}
   IF position('CANARY_162_05_PROSE_ONLY' IN v_bare) = 0
      AND position('CANARY_162_05_PROSE_ONLY' IN v_def) = 0 THEN
     RAISE EXCEPTION 'TEST FAILED (D): the prose-only canary CANARY_162_05_PROSE_ONLY is absent from the RAW definition of public.% too, so this arm cannot tell "the stripper worked" from "there was nothing to strip". Restore the canary comment in the function body (migration 20260826130000, header ⛔ (vii)) — without it, arms E, F and G lose the only evidence that they are reading CODE rather than COMMENTARY.', v_fn;
@@ -157,6 +198,13 @@ BEGIN
   -- database role holds EXECUTE: callers holding EXECUTE by OWNERSHIP
   -- (`postgres`, `supabase_admin`, migration sessions, this psql harness) sail
   -- straight past arm C's REVOKE and land here. Arm I proves it fires.
+  -- RED-UNDER: CREATE OR REPLACE the deployed function with a stub that keeps the
+  --            canary comment and the ownership predicate but has NO auth.role()
+  --            call — the in-body role gate deleted, nothing else.
+  -- ⚠️ A `sql` step, and it must keep arms A-D green or one of them fires first:
+  --    the stub stays SECURITY DEFINER with the pinned search_path (B), REPLACE
+  --    preserves the ACL (C), and the canary stays in a `--` comment (D).
+  -- RED-UNDER-M: {"arm":"E","apply":[{"kind":"sql","stmt":"CREATE OR REPLACE FUNCTION public.create_wizard_strategy_for_key(\n  p_user_id UUID,\n  p_api_key_id UUID,\n  p_placeholder_name TEXT,\n  p_wizard_session_id UUID\n)\nRETURNS TABLE(strategy_id UUID, api_key_id UUID)\nLANGUAGE plpgsql\nSECURITY DEFINER\nSET search_path = public, pg_catalog\nAS $stub$\nDECLARE\n  v_jwt_role TEXT;\n  v_exchange TEXT;\nBEGIN\n  -- CANARY_162_05_PROSE_ONLY \u2014 kept so arm D still proves the stripper ran.\n  SELECT k.exchange INTO v_exchange FROM api_keys k\n   WHERE k.id = p_api_key_id\n     AND k.user_id = p_user_id\n     AND k.disconnected_at IS NULL;\n  RETURN;\nEND\n$stub$"}]}
   IF v_bare NOT LIKE '%auth.role()%' THEN
     RAISE EXCEPTION 'TEST FAILED (E): the body of public.% contains no auth.role() call once comments are stripped. The in-body role gate is gone, so any caller holding EXECUTE by ownership rather than by grant now writes wizard drafts unchallenged. ⛔ Never "restore" this with current_user or session_user: inside a SECURITY DEFINER body current_user is the OWNER, so a gate written on it ALWAYS PASSES — the bug that made prevent_profile_role_change a no-op.', v_fn;
   END IF;
@@ -169,6 +217,10 @@ BEGIN
   -- route (the session-uid filter on the RLS-bypassing admin re-select, and the
   -- user-scoped RLS re-read) and are pinned by route.test.ts; this one is the
   -- only layer a route rewrite cannot remove.
+  -- RED-UNDER: CREATE OR REPLACE the deployed function with a stub carrying the
+  --            role gate but NOT the `k.user_id = p_user_id` ownership join — the
+  --            T-162-05-A cross-tenant-reuse regression, in isolation.
+  -- RED-UNDER-M: {"arm":"F","apply":[{"kind":"sql","stmt":"CREATE OR REPLACE FUNCTION public.create_wizard_strategy_for_key(\n  p_user_id UUID,\n  p_api_key_id UUID,\n  p_placeholder_name TEXT,\n  p_wizard_session_id UUID\n)\nRETURNS TABLE(strategy_id UUID, api_key_id UUID)\nLANGUAGE plpgsql\nSECURITY DEFINER\nSET search_path = public, pg_catalog\nAS $stub$\nDECLARE\n  v_jwt_role TEXT;\n  v_exchange TEXT;\nBEGIN\n  -- CANARY_162_05_PROSE_ONLY \u2014 kept so arm D still proves the stripper ran.\n  v_jwt_role := auth.role();\n  IF v_jwt_role IS DISTINCT FROM 'service_role' THEN\n    RAISE EXCEPTION 'stub: caller role (%) may not write wizard drafts', COALESCE(v_jwt_role, '<none>')\n      USING ERRCODE = 'insufficient_privilege';\n  END IF;\n  RETURN;\nEND\n$stub$"}]}
   IF v_bare !~* 'k\.user_id\s*=\s*p_user_id' THEN
     RAISE EXCEPTION 'TEST FAILED (F): the body of public.% no longer joins api_keys.user_id to p_user_id. The function will then mint a draft over ANY key id it is handed, which is cross-tenant reuse (T-162-05-A, high) — the one threat this writer was created with. ⚠️ A reformat produces this failure too (a renamed alias, added whitespace); if the deployed predicate is correct and merely re-spelled, re-cut this regex IN THE SAME COMMIT rather than deleting the arm.', v_fn;
   END IF;
@@ -177,6 +229,13 @@ BEGIN
   END IF;
 
   -- ══ (G) NO api_keys INSERT — THE STRUCTURAL PROPERTY ════════════════════
+  -- RED-UNDER: CREATE OR REPLACE the deployed function with a stub that keeps the
+  --            role gate AND the ownership join (so E and F stay green) and adds
+  --            an `INSERT INTO api_keys` — the one thing this writer may never do.
+  -- ⚠️ The INSERT sits under `IF FALSE`: arm G is a STRUCTURAL claim over the body
+  --    text, so reachability is beside the point and an unreachable one keeps the
+  --    stub callable for the arms that follow.
+  -- RED-UNDER-M: {"arm":"G","apply":[{"kind":"sql","stmt":"CREATE OR REPLACE FUNCTION public.create_wizard_strategy_for_key(\n  p_user_id UUID,\n  p_api_key_id UUID,\n  p_placeholder_name TEXT,\n  p_wizard_session_id UUID\n)\nRETURNS TABLE(strategy_id UUID, api_key_id UUID)\nLANGUAGE plpgsql\nSECURITY DEFINER\nSET search_path = public, pg_catalog\nAS $stub$\nDECLARE\n  v_jwt_role TEXT;\n  v_exchange TEXT;\nBEGIN\n  -- CANARY_162_05_PROSE_ONLY \u2014 kept so arm D still proves the stripper ran.\n  v_jwt_role := auth.role();\n  IF v_jwt_role IS DISTINCT FROM 'service_role' THEN\n    RAISE EXCEPTION 'stub: caller role (%) may not write wizard drafts', COALESCE(v_jwt_role, '<none>')\n      USING ERRCODE = 'insufficient_privilege';\n  END IF;\n  SELECT k.exchange INTO v_exchange FROM api_keys k\n   WHERE k.id = p_api_key_id\n     AND k.user_id = p_user_id\n     AND k.disconnected_at IS NULL;\n  IF FALSE THEN\n    INSERT INTO api_keys (user_id) VALUES (p_user_id);\n  END IF;\n  RETURN;\nEND\n$stub$"}]}
   IF v_bare ~* 'insert\s+into\s+(public\.)?api_keys' THEN
     RAISE EXCEPTION 'TEST FAILED (G): the body of public.% INSERTs into api_keys. That is the ONE thing this function may never do. An orphaned api_keys row with no strategy behind it is what the reuse path exists to RESOLVE; minting a second encrypted row for credentials we already hold reproduces that state and trips the venue-identity partial UNIQUE all over again (T-162-05-B). ⛔ If a reuse flow genuinely needs to write api_keys, that is a new decision and a new function — not an arm to relax here.', v_fn;
   END IF;
@@ -186,6 +245,9 @@ BEGIN
   -- So run the SAME pattern against the twin, which genuinely does INSERT INTO
   -- api_keys, and require a hit. This is what makes G a measurement rather than
   -- a spelling.
+  -- RED-UNDER: DROP the twin `create_wizard_strategy` on the live lane database,
+  --            removing the positive control arm G's negative regex stands on.
+  -- RED-UNDER-M: {"arm":"H","apply":[{"kind":"sql","stmt":"DROP FUNCTION public.create_wizard_strategy(uuid,text,text,text,text,text,text,text,integer,text,uuid)"}]}
   SELECT p.oid INTO v_twin_oid
     FROM pg_proc p
     JOIN pg_namespace n ON n.oid = p.pronamespace
@@ -204,6 +266,14 @@ BEGIN
   -- fall through to the ownership assertion and raise no_data_found (P0002)
   -- instead — which this arm rejects by asserting the SQLSTATE, not merely that
   -- "something raised".
+  -- RED-UNDER: CREATE OR REPLACE the deployed function with a stub that CONTAINS
+  --            every token arms D-G read — the canary, `auth.role()`,
+  --            `insufficient_privilege`, the ownership join — but never acts on
+  --            the role it read (`IF FALSE THEN RAISE …`).
+  -- ⚠️ This is the whole reason arm I exists, expressed as a mutation: a body that
+  --    OBSERVES AND PERMITS satisfies every text arm above and is refused only by
+  --    a caller that actually invokes it. All eight preceding arms stay green.
+  -- RED-UNDER-M: {"arm":"I","apply":[{"kind":"sql","stmt":"CREATE OR REPLACE FUNCTION public.create_wizard_strategy_for_key(\n  p_user_id UUID,\n  p_api_key_id UUID,\n  p_placeholder_name TEXT,\n  p_wizard_session_id UUID\n)\nRETURNS TABLE(strategy_id UUID, api_key_id UUID)\nLANGUAGE plpgsql\nSECURITY DEFINER\nSET search_path = public, pg_catalog\nAS $stub$\nDECLARE\n  v_jwt_role TEXT;\n  v_exchange TEXT;\nBEGIN\n  -- CANARY_162_05_PROSE_ONLY \u2014 kept so arm D still proves the stripper ran.\n  v_jwt_role := auth.role();\n  IF FALSE THEN\n    RAISE EXCEPTION 'stub observes the role and permits anyway'\n      USING ERRCODE = 'insufficient_privilege';\n  END IF;\n  SELECT k.exchange INTO v_exchange FROM api_keys k\n   WHERE k.id = p_api_key_id\n     AND k.user_id = p_user_id\n     AND k.disconnected_at IS NULL;\n  RETURN;\nEND\n$stub$"}]}
   PERFORM set_config('request.jwt.claims', '{"role":"authenticated"}', true);
   BEGIN
     PERFORM * FROM public.create_wizard_strategy_for_key(

@@ -160,6 +160,11 @@ BEGIN
   -- ======================================================================
   -- Part 2 — idempotent re-submit (same members, no 23505)
   -- ======================================================================
+  -- RED-UNDER: scope the wholesale DELETE in migration 20260712120000 to nothing
+  --            (`AND FALSE`), so the re-submit INSERTs a second copy of the same
+  --            three members and trips the (strategy_id, seq) unique index —
+  --            exactly the 23505 delete-then-insert exists to make impossible.
+  -- RED-UNDER-M: {"arm":"Part 2","apply":[{"kind":"edit","file":"supabase/migrations/20260712120000_wizard_composite_members_invalidate_analytics.sql","find":"  DELETE FROM strategy_keys WHERE strategy_id = p_strategy_id;","replace":"  DELETE FROM strategy_keys WHERE strategy_id = p_strategy_id AND FALSE;","occurrences":1}]}
   raised := FALSE;
   BEGIN
     SELECT public.set_wizard_composite_members(
@@ -194,6 +199,14 @@ BEGIN
   -- Swap key1 <-> key2 window_starts. New window_start ASC order: key2 (01) ->
   -- 1, key1 (06) -> 2, key3 (09) -> 3. An in-place UPDATE would transiently
   -- collide on (strategy_id, seq); delete-then-insert cannot.
+  -- RED-UNDER: the SAME `AND FALSE` DELETE mutation as Part 2, with Part 2's own
+  --            raise neutered so the reorder is the FIRST failure.
+  -- ⚠️ SHADOWED BY DESIGN: Part 2 re-submits the identical set one step earlier
+  --    and trips the same collision, so it fires first on any non-wholesale
+  --    write. Neutering Part 2 leaves it passing (the aborted call rolls back to
+  --    its EXCEPTION savepoint, so its count/seq re-checks still hold) and makes
+  --    Part 3's reorder the first observable failure — which is the L-4 claim.
+  -- RED-UNDER-M: {"arm":"Part 3","apply":[{"kind":"edit","file":"supabase/migrations/20260712120000_wizard_composite_members_invalidate_analytics.sql","find":"  DELETE FROM strategy_keys WHERE strategy_id = p_strategy_id;","replace":"  DELETE FROM strategy_keys WHERE strategy_id = p_strategy_id AND FALSE;","occurrences":1}],"neuter":[{"arm":"Part 2"}]}
   raised := FALSE;
   BEGIN
     SELECT public.set_wizard_composite_members(
@@ -222,6 +235,12 @@ BEGIN
   -- ======================================================================
   -- key_b belongs to tenant B; owner_id would be uid_a. The existing
   -- strategy_keys_owner_coherence trigger fires the '%must match%' arm.
+  -- RED-UNDER: drop the strategy_keys_owner_coherence trigger on the live lane
+  --            database, so the SECDEF wholesale write accepts a member whose
+  --            api_key belongs to another tenant.
+  -- ⚠️ A `sql` step, not a migration edit: 20260710120000's own self-check asserts
+  --    the trigger EXISTS and would abort the apply, so the gate would never run.
+  -- RED-UNDER-M: {"arm":"Part 4","apply":[{"kind":"sql","stmt":"DROP TRIGGER strategy_keys_owner_coherence ON strategy_keys"}]}
   raised := FALSE;
   BEGIN
     PERFORM public.set_wizard_composite_members(
@@ -253,6 +272,13 @@ BEGIN
   -- Part 5 — composite-only guard: a SINGLE-KEY strategy is rejected
   -- ======================================================================
   -- strat_single has api_key_id set; members must never attach to it.
+  -- RED-UNDER: neutralise the composite-only guard in migration 20260712120000 by
+  --            changing `IF v_api_key_id IS NOT NULL THEN` to `IF FALSE THEN`, so
+  --            a single-key strategy accepts members.
+  -- ⚠️ The RAISE text stays in the body on purpose — the migration's own
+  --    self-verify (c) greps for `single-key strategy` and would abort the apply
+  --    if the guard were deleted rather than short-circuited.
+  -- RED-UNDER-M: {"arm":"Part 5","apply":[{"kind":"edit","file":"supabase/migrations/20260712120000_wizard_composite_members_invalidate_analytics.sql","find":"  IF v_api_key_id IS NOT NULL THEN","replace":"  IF FALSE THEN","occurrences":1}]}
   raised := FALSE;
   BEGIN
     PERFORM public.set_wizard_composite_members(
@@ -281,6 +307,15 @@ BEGIN
   -- re-Continue (identical set) must leave the row 'complete' (WIZ-05 latency
   -- invariant). Establish a known 2-member baseline, then stamp a 'complete'
   -- composite analytics row and exercise the three cases.
+  -- RED-UNDER: make the RETURN of migration 20260712120000 misreport the member
+  --            count as `GREATEST(v_count, 3)`, so a write of FEWER than three
+  --            members reports three.
+  -- ⚠️ SHADOWED BY DESIGN: Part 1 and Part 2 assert the same return value at
+  --    THREE members, so any count-affecting mutation fires there first — and
+  --    both of Part 1's other raises (row count, seq order) would fire too, which
+  --    a single `neuter` cannot suppress. GREATEST is the mutation only this
+  --    two-member baseline write can observe.
+  -- RED-UNDER-M: {"arm":"Part 6 setup","apply":[{"kind":"edit","file":"supabase/migrations/20260712120000_wizard_composite_members_invalidate_analytics.sql","find":"  RETURN v_count;","replace":"  RETURN GREATEST(v_count, 3);","occurrences":1}]}
   SELECT public.set_wizard_composite_members(
     uid_a, strat_comp,
     jsonb_build_array(
@@ -299,6 +334,12 @@ BEGIN
     SET computation_status = 'complete', computation_error = NULL;
 
   -- Part 6 — NO-OP re-Continue (identical set): analytics stays 'complete'.
+  -- RED-UNDER: widen the change-detection gate in migration 20260712120000 to
+  --            `IS DISTINCT FROM v_incoming_sig OR TRUE`, so EVERY write
+  --            invalidates and a no-op re-Continue re-stitches.
+  -- ⚠️ `OR TRUE` rather than deleting the compare: the migration's self-verify (b)
+  --    greps for the literal `IS DISTINCT FROM` and would abort the apply.
+  -- RED-UNDER-M: {"arm":"Part 6","apply":[{"kind":"edit","file":"supabase/migrations/20260712120000_wizard_composite_members_invalidate_analytics.sql","find":"  IF v_existing_sig IS DISTINCT FROM v_incoming_sig THEN","replace":"  IF v_existing_sig IS DISTINCT FROM v_incoming_sig OR TRUE THEN","occurrences":1}]}
   PERFORM public.set_wizard_composite_members(
     uid_a, strat_comp,
     jsonb_build_array(
@@ -312,6 +353,12 @@ BEGIN
   END IF;
 
   -- Part 7 — CHANGED set (add key3): analytics invalidated to 'pending'.
+  -- RED-UNDER: close the change-detection gate in migration 20260712120000 with
+  --            `IS DISTINCT FROM v_incoming_sig AND FALSE`, so a genuinely changed
+  --            member set never invalidates the stale completed analytics row.
+  -- ⚠️ `AND FALSE` rather than deleting the compare, for the same self-verify (b)
+  --    reason as Part 6. Part 6 stays GREEN under it (nothing invalidates).
+  -- RED-UNDER-M: {"arm":"Part 7","apply":[{"kind":"edit","file":"supabase/migrations/20260712120000_wizard_composite_members_invalidate_analytics.sql","find":"  IF v_existing_sig IS DISTINCT FROM v_incoming_sig THEN","replace":"  IF v_existing_sig IS DISTINCT FROM v_incoming_sig AND FALSE THEN","occurrences":1}]}
   PERFORM public.set_wizard_composite_members(
     uid_a, strat_comp,
     jsonb_build_array(
@@ -327,6 +374,12 @@ BEGIN
 
   -- Part 8 — CHANGED window at the SAME count (edit key3 window_end): still
   -- invalidated. Proves the signature catches window edits, not just add/remove.
+  -- RED-UNDER: drop `window_end` from BOTH sides of the change signature in
+  --            migration 20260712120000, so an edit that only moves a window end
+  --            reads as an unchanged set.
+  -- ⚠️ LAYERED, and both steps are required: dropping it from one side only makes
+  --    every write look changed, which fires Part 6 five assertions earlier.
+  -- RED-UNDER-M: {"arm":"Part 8","apply":[{"kind":"edit","file":"supabase/migrations/20260712120000_wizard_composite_members_invalidate_analytics.sql","find":"             || COALESCE(sk.window_end::text, '')","replace":"             || ''","occurrences":1},{"kind":"edit","file":"supabase/migrations/20260712120000_wizard_composite_members_invalidate_analytics.sql","find":"             || COALESCE((elem->>'window_end')::date::text, '')","replace":"             || ''","occurrences":1}]}
   UPDATE public.strategy_analytics
      SET computation_status = 'complete', computation_error = NULL
    WHERE strategy_id = strat_comp;
@@ -351,6 +404,10 @@ BEGIN
   -- as "changed" — which would trigger an unnecessary re-stitch and defeat the
   -- WIZ-05 no-op latency win. Re-stamp 'complete', re-submit the Part-8 set
   -- verbatim but with UPPERCASED api_key_id strings, and assert it stays complete.
+  -- RED-UNDER: strip the `::uuid::text` canonicalisation from the INCOMING side of
+  --            the change signature in migration 20260712120000, so an uppercase
+  --            api_key_id no longer matches the persisted lowercase one.
+  -- RED-UNDER-M: {"arm":"Part 9","apply":[{"kind":"edit","file":"supabase/migrations/20260712120000_wizard_composite_members_invalidate_analytics.sql","find":"      SELECT (elem->>'api_key_id')::uuid::text || '|'","replace":"      SELECT (elem->>'api_key_id') || '|'","occurrences":1}]}
   UPDATE public.strategy_analytics
      SET computation_status = 'complete', computation_error = NULL
    WHERE strategy_id = strat_comp;
@@ -380,6 +437,12 @@ BEGIN
   -- oracle) and leave both strategy_keys and strategy_analytics untouched.
   -- Seed a published composite (api_key_id NULL, status='published') owned by
   -- uid_a with a COMPLETE analytics row.
+  -- RED-UNDER: widen the draft gate of migration 20260712120000's strategy lookup
+  --            to `AND (status = 'draft' OR TRUE)`, so a PUBLISHED composite owned
+  --            by the caller is accepted.
+  -- ⚠️ `OR TRUE` rather than removing the predicate: the migration's self-verify
+  --    (c) greps for the literal `status = 'draft'` and would abort the apply.
+  -- RED-UNDER-M: {"arm":"Part 10","apply":[{"kind":"edit","file":"supabase/migrations/20260712120000_wizard_composite_members_invalidate_analytics.sql","find":"     AND status = 'draft';","replace":"     AND (status = 'draft' OR TRUE);","occurrences":1}]}
   INSERT INTO strategies (user_id, name, status, source, strategy_types, subtypes, markets, supported_exchanges)
   VALUES (uid_a, 'wizcomp mem published', 'published', 'wizard', '{}', '{}', '{}', ARRAY['binance'])
   RETURNING id INTO strat_pub;
