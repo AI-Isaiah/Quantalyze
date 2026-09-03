@@ -5,16 +5,16 @@ milestone_name: Backlog Burndown (Phases 158+)
 current_phase: 164.4
 current_phase_name: REDUNDER-BACKFILL
 status: executing
-stopped_at: Completed 164.4-04-PLAN.md
-last_updated: "2026-09-03T13:06:15.058Z"
+stopped_at: Completed 164.4-05-PLAN.md
+last_updated: "2026-09-03T17:23:25.036Z"
 last_activity: 2026-09-03
 last_activity_desc: Phase 164.4 execution started
-state_head: 60261316cf25471332d9dab9a4f9b9885d10dc6a
+state_head: b583551856ab2e95d6ce46849455b03faf324342
 progress:
   total_phases: 15
   completed_phases: 5
   total_plans: 82
-  completed_plans: 71
+  completed_plans: 72
   percent: 33
 ---
 
@@ -716,6 +716,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 | Phase 164.4 P02 | 46 min | 3 tasks | 10 files |
 | Phase 164.4 P03 | 35 min | 3 tasks | 13 files |
 | Phase 164.4 P04 | 84 min | 3 tasks | 12 files |
+| Phase 164.4 P05 | 85 min | 3 tasks | 17 files |
 
 ## Accumulated Context
 
@@ -1626,8 +1627,8 @@ Load-bearing sequencing (real dependencies, do not reorder):
 
 ## Session
 
-**Last Date:** 2026-09-03T13:05:50.131Z
-**Stopped At:** Completed 164.4-04-PLAN.md
+**Last Date:** 2026-09-03T17:23:24.725Z
+**Stopped At:** Completed 164.4-05-PLAN.md
 **Last Date:** 2026-08-25T22:26:01.687Z
 **Stopped At:** Completed 162-03-PLAN.md
 **Last Date:** 2026-08-25T22:28:04.096Z
@@ -1689,7 +1690,7 @@ pre-merge `e0493913`. Fix is PR #669. Supabase migrations and the Vercel fronten
 - [REDUNDER-PGCRON] **4** idiom gate files (**100** of 355 sections, incl. Phase 164.4 rank 1) cannot be falsified on the pg-lane, which has no pg_cron. Mechanism re-measured 2026-09-03 and it is **2 RAISE + 2 green-skip**, not the blanket all-files-RAISE this line used to claim: reconcile `:268` and retention `:212` RAISE EXCEPTION on the absent extension so their baseline is never GREEN; derive `:159` and the reaper `:282` baseline GREEN but withhold whole Parts behind a pg_cron-conditional NOTICE, so those arms are un-falsifiable. DEFERRED by founder decision 2026-09-03 (SCOPE AMENDMENT #2) and printed by the runner as `lane-blocked:` every run, with a per-run lane probe that reddens the gate (`lane-blocked-stale`) once pg_cron IS available. Needs a lane-substrate plan. Booked in TODOS.md.
 - 164.4-01 <human-check> UNMET: the PR number, merged head SHA and SHA-bound sql-mutation ubuntu run id + wall clock are PENDING in 164.4-01-SUMMARY.md. Plan 164.4-02's precondition is gate=blocking-human and reads exactly those fields — it WILL halt until 164.4-01 is landed (/ship, /gsd-pr-branch + the CLAUDE.md deletion guard) and its CI board read SHA-bound.
 - 164.4-02 <human-check> OPEN: the batch (b5fa08c2 / c850a790 / 9cffb584) was NOT pushed and no PR was opened, so there is no SHA-bound sql-mutation ubuntu green for it. Plan 03's precondition reads that run id / head SHA / wall clock out of 164.4-02-SUMMARY.md coverage D6, which is status: pending.
-- 164.4-04 human-check OPEN: commits 5f912431 fd600efb b814fe6c 60261316 are NOT pushed and no PR is open. Plan 164.4-05's precondition needs a merged PR whose head SHA has an ubuntu sql-mutation run with conclusion success; record the run id, head SHA and job wall clock into coverage entry D9 of 164.4-04-SUMMARY.md.
+- 164.4-04 human-check CLOSED 2026-09-03: landed as PR #734 (head 03fb3bc9, squash-merged 6644dd3b, v0.77.5.0). CI run 33774615747 reports sql-mutation success in 171 s, the ubuntu job's own log carrying `arms: 86/86/0`, `biting: 86`, `lane-invocations: 86`, `tallies agree`, `coverage: files 4/71`, `per-arm lane time: mean 1.0s` — IDENTICAL to the macOS measurement, so the two hosts agree on this batch and the identity attribution held on the ubuntu PostgreSQL build. Recorded in coverage D9 of 164.4-04-SUMMARY.md. Plan 164.4-05 is UNBLOCKED.
 
 ## ⛔ Standing constraint from Phase 164.3.1 — do not lose this between sessions
 

@@ -1,5 +1,49 @@
 # Changelog
 
+## [0.77.6.0] - 2026-09-03
+
+### Phase 164.4 (wave 6) — the tenant-isolation batch: capital ownership, shares, keys
+
+No production source change, no schema change, no migration. Five gate files gain
+**comment twins only — 410 added lines, 0 removed, 0 non-comment** — so no executable
+SQL changed and the arms annotated are exactly the arms that already existed. Batch 4 of 10.
+
+### Added
+
+- All 48 sections of the batch-2 five carry a `RED-UNDER-M` twin, each observed
+  `RED (identity ok)` on a real throwaway pg-lane cluster:
+  `test_wizard_composite_members.sql` (11), `test_capital_ownership_allocation_guard.sql` (10),
+  `test_create_wizard_strategy_for_key.sql` (9), `test_scenario_shares_rls.sql` (9),
+  `test_strategy_keys_rls.sql` (9).
+
+### Changed
+
+- `FILES_FLOOR` 4 to 9 and `ARMS_FLOOR` 86 to 134, both equal to the run's own printed
+  coverage and biting. Both separation directions driven on real lanes.
+- `WAIVED_CEILING` untouched at 0. Zero waivers, zero dead arms.
+
+### Discovered — a positive-control arm cannot be reddened by a drift that RAISES
+
+Widening only `USING` on the `scenario_shares` policy admits the read, but the new row then
+fails `WITH CHECK`, so the lane dies on an unhandled 42501 **outside any arm**: no
+`TEST FAILED (…)` is ever printed and the arm scores `NO-IDENTITY`. The arm looks non-biting
+while the policy is in fact broken — the exact shape this phase exists to remove.
+
+The twin therefore widens **both** `USING` and `WITH CHECK` to `true`: a strictly larger break
+of the policy, and the one the assertion can actually observe. Four capital-ownership arms use
+the SILENT form of the same drift for the same reason, each marked `⚠️ SILENT ON PURPOSE` at
+the arm with its rationale. This is mutation design, not a waiver — the waived count stays 0.
+
+Two smaller corrections measured alongside: `neuter` accumulates one raise per *entry* rather
+than per arm, and a gate-file `find` needle must span two lines or it matches its own annotation.
+
+### Measured
+
+  full run   exit 0 · coverage: files 9/71 · arms 134/134/0 · biting 134
+             lane-invocations 134 (tallies agree) · +9 baseline / 9 restore legs
+  per-arm    mean 1.0 s over 134 arm runs
+  self-test  17/17 scenarios · 0 failures
+
 ## [0.77.5.0] - 2026-09-03
 
 ### Phase 164.4 (wave 5) — the first FILE move: the ledger_refresh family is twinned, FILES_FLOOR 1 to 4
