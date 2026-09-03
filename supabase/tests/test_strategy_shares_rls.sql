@@ -1090,6 +1090,14 @@ BEGIN
   -- raises nothing at all, and catching WHEN OTHERS would let an unrelated
   -- error satisfy the arm. Why it matters: a delete discards the counter, the
   -- next mint inserts a fresh row at generation 1, and every token the owner
+  -- RED-UNDER: `GRANT DELETE ON strategy_shares TO authenticated` on the live
+  --            database. ⚠️ SHAPE 3's exact-set pin reads the TABLE-level ACL and
+  --            fires first on ANY table-level grant drift, so this arm was
+  --            observed red with SHAPE 3 neutered — at which point NO-DELETE 1 is
+  --            the FIRST failure and correctly names the absent DELETE grant as
+  --            the only layer that refused (the policy is FOR ALL, so RLS lets
+  --            the owner delete their own row).
+  -- RED-UNDER-M: {"arm":"NO-DELETE 1","apply":[{"kind":"sql","stmt":"GRANT DELETE ON strategy_shares TO authenticated"}],"neuter":[{"arm":"SHAPE 3"}]}
   -- explicitly REVOKED at generation 1 starts working again.
   raised := FALSE;
   BEGIN
