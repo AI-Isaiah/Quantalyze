@@ -36,9 +36,11 @@ import {
   FILES_FLOOR,
   WAIVED_CEILING,
   absurdityViolations,
+  gateSectionCount,
   laneSpawnFailure,
   runCorpus,
   scopeDirForFile,
+  sectionOfIdentity,
 } from "../../scripts/mutation-runner/run.mjs";
 import { parseFile, scanCorpus } from "../../scripts/mutation-runner/parse.mjs";
 
@@ -87,6 +89,92 @@ function rederive(dir: string = GATE_DIR) {
     annotated: perFile.filter((f) => f.prose > 0 || f.twins > 0),
     perFile,
   };
+}
+
+/**
+ * A COMMENT-MASKED projection of JavaScript source.
+ *
+ * ⛔ WHY. Several pins below assert that run.mjs CALLS something. A `readFileSync`
+ * match sees comments too, so a pin written over raw source is satisfied by
+ * prose — the extractor-reads-comments class this very phase fixed in the
+ * defect-kind scan one describe block away. MEASURED 2026-09-02 at HEAD: run.mjs
+ * carries comment lines naming `perFile`, `fileRows`, `perFileRows` and
+ * `logPerFileRows`; none happened to match the call-site shapes, so the pins
+ * were sound and one comment edit away from unfalsifiable.
+ *
+ * Every `//` line comment and `/* … *\/` block becomes spaces (line structure
+ * preserved); string, template and regex literals are copied through, so a
+ * `//` inside `"https://…"` or inside `/^\s*\/\//` does not swallow the rest of
+ * the line. The `prev`-character rule is the standard regex-vs-divide
+ * heuristic: a `/` opens a literal only after an operator or an opening
+ * bracket.
+ */
+export function maskJsComments(src: string): string {
+  const out: string[] = [];
+  let i = 0;
+  let prev = "";
+  const copyDelimited = (close: (c: string) => boolean) => {
+    while (i < src.length) {
+      const ch = src[i];
+      if (ch === "\\") {
+        out.push(ch);
+        i++;
+        if (i < src.length) {
+          out.push(src[i]);
+          i++;
+        }
+        continue;
+      }
+      out.push(ch);
+      i++;
+      if (close(ch)) return;
+    }
+  };
+  while (i < src.length) {
+    const c = src[i];
+    const d = src[i + 1];
+    if (c === "/" && d === "/") {
+      while (i < src.length && src[i] !== "\n") {
+        out.push(" ");
+        i++;
+      }
+      continue;
+    }
+    if (c === "/" && d === "*") {
+      out.push("  ");
+      i += 2;
+      while (i < src.length && !(src[i] === "*" && src[i + 1] === "/")) {
+        out.push(src[i] === "\n" ? "\n" : " ");
+        i++;
+      }
+      out.push("  ");
+      i += 2;
+      continue;
+    }
+    if (c === '"' || c === "'" || c === "`") {
+      out.push(c);
+      i++;
+      copyDelimited((ch) => ch === c);
+      prev = c;
+      continue;
+    }
+    if (c === "/" && (prev === "" || /[(,=:[!&|?{};+\-*%~^<>]/.test(prev))) {
+      out.push(c);
+      i++;
+      let inClass = false;
+      copyDelimited((ch) => {
+        if (ch === "[") inClass = true;
+        else if (ch === "]") inClass = false;
+        return ch === "/" && !inClass;
+      });
+      prev = "/";
+      continue;
+    }
+    out.push(c);
+    if (!/\s/.test(c)) prev = c;
+    i++;
+  }
+  return out.join("");
 }
 
 describe("corpus re-derivation", () => {
@@ -323,6 +411,36 @@ describe("IN-05 — CI's floor and the runner's floor bound the SAME quantity", 
     expect(res.status).toBe(0);
     expect(out).toMatch(/^arms: 0\//m);
     expect(out).not.toMatch(/^biting: /m);
+    // 164.4-01: the classification is printed in BOTH modes, so the static mode
+    // and the gate say the same thing about the same corpus. This is the arm
+    // that runs the REAL runner — the GREEN_LOG fixture below is synthetic, and
+    // a fixture alone would not notice the runner dropping the line.
+    const printed = out.match(/^unreachable: (\d+) file\(s\) .*$/m);
+    expect(printed, "`--parse-only` must print the `unreachable:` line too").not.toBeNull();
+    const named = (printed?.[0].match(/[A-Za-z0-9_]+\.sql/g) ?? []).length;
+    expect(named, "the line must NAME every file it counts").toBe(Number(printed?.[1]));
+    expect(out).toMatch(/^ {2}pending: \d+ idiom file\(s\) without RED-UNDER — /m);
+
+    // 164.4-01: the PER-FILE ROW, on REAL runner output. Until 2026-09-02 that
+    // row was asserted only against the synthetic GREEN_LOG below, so a wording
+    // change in `logPerFileRows` stayed green in vitest and surfaced only as a
+    // CI MEASURE_FAIL from the count-recheck step. The regex is the shape
+    // ci.yml greps, re-spelled here deliberately (the two readers must agree
+    // about the same bytes without one being derived from the other).
+    const ROW_RE =
+      /^ {2}file .+: sections \d+ \/ judged \d+ \/ annotated \d+ \/ waived \d+ \/ biting \d+$/gm;
+    const rows = out.match(ROW_RE) ?? [];
+    expect(
+      rows.length,
+      `\`--parse-only\` must print the per-file row ci.yml greps; printed:\n${out}`,
+    ).toBeGreaterThan(0);
+    // The same cross-check ci.yml makes: one row per counted annotated file.
+    const cov = out.match(/^coverage: files (\d+)\/\d+$/m);
+    expect(cov, "`--parse-only` must print the coverage line").not.toBeNull();
+    expect(
+      rows.length,
+      "one row per annotated file — a file counted as coverage but not described (or the reverse)",
+    ).toBe(Number(cov?.[1]));
   });
 
   it("ci.yml reads the `biting:` line and no longer compares ARMS_FLOOR to executed", () => {
@@ -431,7 +549,7 @@ describe("SP-C02 — the runner's `--self-test` is WIRED into CI, before the cor
     const uncovered = DEFECT_KINDS.filter((k: string) => !exercised.has(k)).sort();
     // ⚠️ EXACT SET, so this list cannot grow silently. Each entry is a kind the
     // self-test does not construct, and each has a reason:
-    //   parse / parity / bad-file-ref — static, and covered by --parse-only and
+    //   parity / bad-file-ref — static, and covered by --parse-only and
     //     by the parser's own vitest file;
     //   baseline / restore / dirty-checkout — each needs a corpus deliberately
     //     broken in a way that would also break the fixture corpus for every
@@ -449,17 +567,25 @@ describe("SP-C02 — the runner's `--self-test` is WIRED into CI, before the cor
     //     permanent, cluster-free scenario rather than a one-off neuter
     //     recorded in a SUMMARY. `lane-unrunnable` (scenario 15) is exercised
     //     the same way.
+    //   parse LEFT this list in 164.4-01: scenario 16 drives
+    //     fixtures/selftest/fixture-target-gate.sql, whose twin targets a
+    //     pg-lane stand-in, and asserts the `parse` defect naming the stand-in.
+    //     ⚠️ That scenario's NEGATIVE assertion about the apply-list kind is
+    //     deliberately spelled through the kind LIST rather than an equality,
+    //     because this extractor scans SOURCE — comments included — and would
+    //     read the absence-assertion as coverage: a kind credited as exercised
+    //     by an arm that only proves it did not appear.
     expect(uncovered).toEqual([
       "bad-file-ref",
       "baseline",
       "dirty-checkout",
       "parity",
-      "parse",
       "restore",
     ]);
     // The six kinds SP-C02 names as the self-test's whole purpose, plus
-    // neuter-missed (164.3.1-11, scenario 9), absurdity (scenario 14) and
-    // lane-unrunnable (scenario 15) — see the list above.
+    // neuter-missed (164.3.1-11, scenario 9), absurdity (scenario 14),
+    // lane-unrunnable (scenario 15) and parse (164.4-01, scenario 16) — see the
+    // list above.
     expect([...exercised].sort()).toEqual([
       "absurdity",
       "floor",
@@ -468,6 +594,7 @@ describe("SP-C02 — the runner's `--self-test` is WIRED into CI, before the cor
       "neuter-missed",
       "no-red",
       "occurrence-mismatch",
+      "parse",
       "synthesised-identity",
       "wrong-first-failure",
     ]);
@@ -651,6 +778,106 @@ describe("164.3.1-10 — the runner's absurdity floor (D-09): two INDEPENDENT ta
     const v = absurdityViolations({ armsExecuted: 30, laneInvocations: 30, biting: 31 });
     expect(v).toHaveLength(1);
     evidence(v[0], 30, 30, 31);
+  });
+
+  // ── 164.4-01: the two PER-FILE cross-sums, both directions ──────────────
+  // The columns and the aggregate are two derivations over the same run — the
+  // aggregate subtracts the non-biting defect kinds globally, each column
+  // subtracts the ones naming its own file. A relation that cannot fire is not
+  // a floor, so each is proven SILENT on the real shape and FIRING on a drift
+  // of exactly one.
+  const REF_ROW = { name: "test_strategy_shares_rls.sql", annotated: 30, biting: 30 };
+
+  it("SILENT when the per-file rows sum to the aggregate — the measured 30/30 shape", () => {
+    expect(
+      absurdityViolations({ ...LEGIT, perFile: [REF_ROW], armsAnnotated: 30 }),
+    ).toEqual([]);
+    // And absent columns stay a no-op: the three-count callers above are
+    // unchanged by this addition.
+    expect(absurdityViolations(LEGIT)).toEqual([]);
+  });
+
+  it("FIRES when the per-file biting column does not sum to the aggregate", () => {
+    const v = absurdityViolations({
+      ...LEGIT,
+      perFile: [{ ...REF_ROW, biting: 29 }],
+      armsAnnotated: 30,
+    });
+    expect(v).toHaveLength(1);
+    evidence(v[0], 30, 30, 30);
+    expect(v[0]).toMatch(/sums to 29 biting arm\(s\) but the aggregate reports 30/);
+  });
+
+  it("FIRES when the per-file annotated column does not sum to armsAnnotated", () => {
+    const v = absurdityViolations({
+      ...LEGIT,
+      perFile: [{ ...REF_ROW, annotated: 29 }],
+      armsAnnotated: 30,
+    });
+    expect(v).toHaveLength(1);
+    evidence(v[0], 30, 30, 30);
+    expect(v[0]).toMatch(/sums to 29 annotated twin\(s\) but the aggregate reports 30/);
+  });
+
+  it("FIRES on an UNMEASURABLE per-file column — an absent column is not a column of zeroes", () => {
+    const v = absurdityViolations({
+      ...LEGIT,
+      perFile: [{ ...REF_ROW, biting: undefined } as never],
+      armsAnnotated: 30,
+    });
+    expect(v.length).toBeGreaterThan(0);
+    expect(v[0]).toMatch(/MEASURE_FAIL/);
+    expect(v[0]).toMatch(/not a non-negative integer/);
+  });
+
+  it("the runner WIRES the cross-sums in — not merely defines them — in BOTH modes, over a COMMENT-MASKED projection", () => {
+    // A helper nothing calls is a control that cannot fire. Pinned on the
+    // source, in the shape the independence check below uses — but on the
+    // COMMENT-MASKED source, because run.mjs carries prose naming every token
+    // below and a pin a comment can satisfy is not a pin.
+    const src = readFileSync(RUNNER_PATH, "utf8");
+    const code = maskJsComments(src);
+
+    // CALIBRATION (SP-L02: the same predicate, on mutilated input). Without it
+    // a masker that silently returned its input would leave every assertion
+    // below exactly as weak as the raw-source version it replaced.
+    expect(
+      maskJsComments("const x = 1; // logPerFileRows(fileRows, log);\n"),
+      "a trailing line comment must not survive the mask",
+    ).not.toContain("logPerFileRows");
+    expect(
+      maskJsComments("/**\n * logPerFileRows(fileRows, log);\n */\nlogPerFileRows(fileRows, log);\n"),
+      "the block comment must go and the CODE must stay",
+    ).toContain("logPerFileRows(fileRows, log);");
+    expect(
+      maskJsComments('const u = "https://example.test/x"; const v = 1;'),
+      "a `//` inside a string literal must not swallow the rest of the line",
+    ).toContain("const v = 1;");
+    expect(code.length, "the mask ate the file — it must remove comments, not code").toBeGreaterThan(
+      src.length / 2,
+    );
+
+    /** A function body from the MASKED source, header to its column-0 close. */
+    const fnBody = (header: string) => {
+      const at = code.indexOf(header);
+      expect(at, `${header} not found in the masked source`).toBeGreaterThan(-1);
+      const end = code.indexOf("\n}\n", at);
+      expect(end, `${header} has no column-0 closing brace`).toBeGreaterThan(at);
+      return code.slice(at, end + 2);
+    };
+
+    // ── The gate path. ──
+    const runCorpusBody = fnBody("export function runCorpus({");
+    expect(runCorpusBody).toMatch(/absurdityViolations\(\{[\s\S]{0,200}perFile: fileRows/);
+    expect(runCorpusBody).toMatch(/logPerFileRows\(fileRows, log\)/);
+
+    // ── The STATIC path, whose call site is spelled DIFFERENTLY and was
+    // therefore covered by nothing: `parseOnlyCorpus` builds its rows inline.
+    // `--parse-only` is what CI runs where there is no cluster, and it prints
+    // the same per-file row shape the count-recheck step greps, so a wiring
+    // deletion there is exactly as invisible as one in the gate path.
+    const parseOnlyBody = fnBody("export function parseOnlyCorpus({");
+    expect(parseOnlyBody).toMatch(/logPerFileRows\(perFileRows\(perFileTallies, defects\), log\)/);
   });
 
   it("FIRES on an UNMEASURABLE input — an absent number is a MEASURE_FAIL, never a silent pass", () => {
@@ -884,9 +1111,18 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     "  restore   supabase/tests/test_strategy_shares_rls.sql — exit 0 (1.8s)",
     "",
     "coverage: files 1/71",
+    // 164.4-01: the exclusion, named. Two synthetic basenames rather than the
+    // real 27 — the arms below mutate the COUNT against the NAMES, and a
+    // fixture carrying the live corpus would have to move on every batch.
+    "unreachable: 2 file(s) raise outside the runner's identity idiom — a.sql b.sql (TODOS [REDUNDER-NONIDIOM])",
+    "  pending: 1 idiom file(s) without RED-UNDER — c.sql",
     "arms: 30/30/0   (executed/annotated/waived)",
     "biting: 30   (executed arms that reddened their OWN arm first — the quantity ARMS_FLOOR bounds)",
     "lane-invocations: 30   (arm lanes actually spawned — tallied inside runLane, independent of the 30 the verdict loop counted; plus 1 baseline / 1 restore leg(s))",
+    // 164.4-01: the per-file breakdown. `annotated 30 / sections 35` is the
+    // reference file's real, measured shape — 30 twins over 35 sections until
+    // plan 164.4-02 closes the 15.
+    "  file test_strategy_shares_rls.sql: sections 35 / judged 30 / annotated 30 / waived 0 / biting 30",
     "per-arm lane time: mean 1.7s over 30 arm run(s)",
     "",
     "✅ No defects. Every annotated arm bit its own arm first.",
@@ -898,6 +1134,110 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     expect(r.status, r.out).toBe(0);
     expect(r.out).toContain("the runner's two tallies agree");
     expect(r.out).toContain("30 arm lane(s) spawned");
+  });
+
+  // ── 164.4-01, criterion 1 as amended: a SILENT EXCLUSION must fail here ──
+  // `coverage: files N/71` is a ratio over every `.sql` in the scope dir, and
+  // this phase's end state deliberately leaves the non-idiom files uncovered.
+  // The runner names them; these two arms prove the CI step can fail when it
+  // stops naming them, and when the count it claims contradicts the names it
+  // printed. Without them the assertion would be a line nothing tests.
+  it("RED: the unreachable line ABSENT is a MEASURE_FAIL — a silent exclusion fails like a missing annotation", () => {
+    const without = GREEN_LOG.replace(/^unreachable: .*\n/m, "");
+    expect(without, "the deletion must actually change the log").not.toBe(GREEN_LOG);
+    const r = runCountRecheck(without);
+    expect(r.status, r.out).toBe(1);
+    expect(r.out).toContain("MEASURE_FAIL");
+    expect(r.out).toContain("NO 'unreachable:");
+    expect(r.out).not.toContain("two tallies agree");
+  });
+
+  it("RED: a CLAIMED count that disagrees with the NAMES printed beside it fails, quoting both numbers", () => {
+    const lying = GREEN_LOG.replace(/^unreachable: 2 file\(s\) /m, "unreachable: 3 file(s) ");
+    expect(lying).not.toBe(GREEN_LOG);
+    const r = runCountRecheck(lying);
+    expect(r.status, r.out).toBe(1);
+    expect(r.out).toContain("MEASURE_FAIL");
+    expect(r.out).toContain("CLAIMS 3 excluded file(s) but NAMES 2");
+    expect(r.out).not.toContain("two tallies agree");
+  });
+
+  // ── The ZERO boundary, both directions ───────────────────────────────────
+  // GREEN_LOG always NAMES files, so until 2026-09-02 the empty excluded set —
+  // `unreachable: 0 file(s) … — `, which is the SUCCESSOR PHASE'S STATED END
+  // STATE — was untested on both sides. Under `set -euo pipefail` the name
+  // count's `grep -o` matched nothing, exited 1, pipefail propagated, and the
+  // step aborted with NO `::error::` line at all while the numeric guard beneath
+  // it was dead code. The `|| true` on that pipeline is the fix; these two arms
+  // are what make it, and the guard it revives, load-bearing.
+  const ZERO_EXCLUDED =
+    "unreachable: 0 file(s) raise outside the runner's identity idiom —  (TODOS [REDUNDER-NONIDIOM])";
+
+  it("GREEN: an EMPTY excluded set passes — the successor phase's end state is not an opaque abort", () => {
+    const none = GREEN_LOG.replace(/^unreachable: .*$/m, ZERO_EXCLUDED);
+    // Without this the arm goes vacuous the moment the runner's wording moves:
+    // a regex that stops matching leaves GREEN_LOG untouched and the assertion
+    // below would then be re-asserting the ALREADY-COVERED non-empty case.
+    expect(none, "the substitution must actually change the log").not.toBe(GREEN_LOG);
+    expect(none, "the substituted line must name NO file").not.toMatch(/^unreachable: .*\.sql/m);
+    const r = runCountRecheck(none);
+    expect(r.status, r.out).toBe(0);
+    expect(r.out).toContain("the runner's two tallies agree");
+  });
+
+  it("RED: zero NAMES under a NON-ZERO claim still fails — `|| true` must not have made the mismatch a pass-everything", () => {
+    // The paired direction. The fix suppresses grep's exit status, so the only
+    // thing left standing between a nameless exclusion claim and a green board
+    // is the `-ne` comparison the suppression revived. If someone ever swallows
+    // the comparison too, this arm — not CI — is what says so.
+    const nameless = GREEN_LOG.replace(
+      /^unreachable: .*$/m,
+      ZERO_EXCLUDED.replace("unreachable: 0 ", "unreachable: 2 "),
+    );
+    expect(nameless, "the substitution must actually change the log").not.toBe(GREEN_LOG);
+    const r = runCountRecheck(nameless);
+    expect(r.status, r.out).toBe(1);
+    expect(r.out).toContain("MEASURE_FAIL");
+    expect(r.out).toContain("CLAIMS 2 excluded file(s) but NAMES 0");
+    expect(r.out).not.toContain("two tallies agree");
+  });
+
+  // ── 164.4-01, threat T-164.4-05: a file that judged NOTHING still counts as
+  // coverage. `coverage: files N/71` cannot tell a red-baseline file from one
+  // whose every arm bit. The per-file rows can, and these three arms prove the
+  // CI step fails when the rows vanish, when they disagree with the coverage
+  // numerator, and when their `biting` column does not add up to the aggregate.
+  it("RED: NO per-file rows is a MEASURE_FAIL — a breakdown that stopped printing is not a clean one", () => {
+    const without = GREEN_LOG.replace(/^ {2}file .*\n/gm, "");
+    expect(without, "the deletion must actually change the log").not.toBe(GREEN_LOG);
+    const r = runCountRecheck(without);
+    expect(r.status, r.out).toBe(1);
+    expect(r.out).toContain("MEASURE_FAIL");
+    expect(r.out).toContain("NO '  file <name>: sections");
+    expect(r.out).not.toContain("two tallies agree");
+  });
+
+  it("RED: more per-file rows than the coverage numerator claims fails, naming both counts", () => {
+    const extra = GREEN_LOG.replace(
+      /^ {2}file test_strategy_shares_rls\.sql: .*$/m,
+      (line) =>
+        `${line}\n  file test_ledger_refresh_composite_arm.sql: sections 15 / judged 0 / annotated 0 / waived 0 / biting 0`,
+    );
+    expect(extra).not.toBe(GREEN_LOG);
+    const r = runCountRecheck(extra);
+    expect(r.status, r.out).toBe(1);
+    expect(r.out).toContain("printed 2 per-file row(s) but reported 1 annotated file(s)");
+    expect(r.out).not.toContain("two tallies agree");
+  });
+
+  it("RED: a per-file biting column that does not SUM to the aggregate fails, naming both sums", () => {
+    const short = GREEN_LOG.replace(/^( {2}file .*)biting 30$/m, "$1biting 29");
+    expect(short, "the mutation must actually change the log").not.toBe(GREEN_LOG);
+    const r = runCountRecheck(short);
+    expect(r.status, r.out).toBe(1);
+    expect(r.out).toContain("rows sum to 29 biting arm(s) but the aggregate");
+    expect(r.out).toContain("reports 30");
+    expect(r.out).not.toContain("two tallies agree");
   });
 
   it("RED: the lane-invocations line ABSENT is a MEASURE_FAIL — the runner stopped reporting, or --parse-only was swapped in", () => {
@@ -1022,6 +1362,62 @@ describe("scripts/pg-lane/run.sh — the psql invocation the attribution grammar
     // Every leg goes through the wrapper, never a bare `psql`.
     const bare = sh.split("\n").filter((l) => /^\s*psql\s/.test(l) && !/^\s*#/.test(l));
     expect(bare).toEqual([]);
+  });
+});
+
+describe("164.4-01 — the SECTION denominator: `sectionOfIdentity` / `gateSectionCount`", () => {
+  // ⛔ WHY THIS EXISTS. `sections` is the DENOMINATOR the per-file row prints,
+  // and CI's row regex only requires `sections [0-9]+` to EXIST — it never
+  // reads the value. A suffix rule that regressed to collapse every identity
+  // into one section would print `sections 1` on every run and nothing would
+  // notice. Plan 164.4-02 will pin `annotated >= sections`, which would then
+  // rest on an unverified denominator: a coverage claim measured against a
+  // number nobody compared to the corpus is this phase's whole subject.
+  //
+  // The reference file is `test_strategy_shares_rls.sql`, the one annotated
+  // gate. MEASURED 2026-09-02 at HEAD by `node scripts/mutation-runner/run.mjs
+  // --parse-only`, which prints `sections 35` for it, and independently by
+  // calling `gateSectionCount` on the file's bytes: 35, agreeing with the
+  // doc-comment claim beside the function in run.mjs.
+  const REFERENCE_GATE = "test_strategy_shares_rls.sql";
+
+  it.each([
+    // Documented shapes, quoted from the rule's own doc-comment in run.mjs.
+    ["SHAPE 2a", "SHAPE 2"],
+    ["TRIGGER 3d-i", "TRIGGER 3"],
+    ["ANON 1b-grant", "ANON 1"],
+    // No suffix — the identity IS its own section, unchanged.
+    ["SHAPE 2", "SHAPE 2"],
+    ["OWNER 7", "OWNER 7"],
+    // ⭐ MULTI-DIGIT. `SHAPE 10` must NOT become `SHAPE 1`: a rule that ate the
+    // trailing digit would silently merge section 10 into section 1 and shrink
+    // every denominator past nine sections — the direction that makes a
+    // half-annotated file read as complete.
+    ["SHAPE 10", "SHAPE 10"],
+    ["SHAPE 10b", "SHAPE 10"],
+    ["TRIGGER 12c-i", "TRIGGER 12"],
+  ])("sectionOfIdentity(%j) === %j", (id: string, section: string) => {
+    expect(sectionOfIdentity(id)).toBe(section);
+  });
+
+  it("is not the identity function, and not a constant — the two failure directions of a collapsed rule", () => {
+    // A rule that returned its input unchanged would over-count sections; one
+    // that collapsed everything would under-count. Both are pinned by shape
+    // here so a regression fails on the RULE, not only on the number below.
+    expect(sectionOfIdentity("SHAPE 2a")).not.toBe("SHAPE 2a");
+    expect(new Set(["SHAPE 1a", "SHAPE 2a", "SHAPE 10a"].map(sectionOfIdentity)).size).toBe(3);
+  });
+
+  it("gateSectionCount is PINNED on the reference gate at its MEASURED value", () => {
+    const text = readFileSync(join(GATE_DIR, REFERENCE_GATE), "utf8");
+    const sections = gateSectionCount(text);
+    expect(
+      sections,
+      `${REFERENCE_GATE}: gateSectionCount now reads ${sections}. It was MEASURED at 35 on 2026-09-02 (\`--parse-only\` prints \`sections 35\` for this file). If the gate genuinely gained or lost assertion groups, re-measure and move this pin deliberately; if it did not, the suffix rule or the attribution scan regressed and the printed denominator is now wrong for every file.`,
+    ).toBe(35);
+    // Non-vacuity in the collapse direction, stated separately from the pin:
+    // the whole risk is a denominator that quietly becomes 1.
+    expect(sections).toBeGreaterThan(1);
   });
 });
 

@@ -28,7 +28,7 @@ bash scripts/pg-lane/run.sh \
 | Flag | Meaning |
 |---|---|
 | `--workdir <dir>` | scratch dir. The cluster lives at `<dir>/pgd` and is removed on exit; **the workdir itself belongs to the caller** and is never removed. |
-| `--apply <f...>` | SQL files applied in order, quietly, before the gate. Fixtures first, then migrations. |
+| `--apply <f...>` | SQL files applied in order, quietly, before the gate — **the order given is the order applied**. Stand-in fixtures usually come first, then migrations, but that is a default and not an invariant: a stand-in that PATCHES a table a migration creates must follow that migration. Live example: `fixtures/04-fixture-compute-jobs-targets.sql` adds columns to `compute_jobs`, so it is applied *after* `20260411144407_compute_jobs_queue.sql`. |
 | `--post-apply <f>` | optional, runs after `--apply` and before `--gate`. This hook exists for the mutation runner's **live-DB `GRANT`-shape mutations** (D-14 shape 2), which are not file edits. |
 | `--gate <g>` | the file under test. Its psql output streams to stdout/stderr. |
 
@@ -131,19 +131,29 @@ blows the 103-byte path limit), and the fixture STAND-IN disclaimer below.
 
 ## ⚠️ What the fixtures do and do not prove
 
-`fixtures/01-fixture-core.sql` and `fixtures/02-fixture-sanitize-tables.sql` are
-**STAND-INS**: they carry only the columns the migrations' FKs, policies, RPCs and
-`sanitize_user` body actually name. The objects *under test* — `strategy_shares`,
-its trigger, its grants, its policies, both RPCs — are the **real** ones from the
-real migration files.
+**Every file under `fixtures/` is a STAND-IN** — the rule is scoped to the
+*directory*, not to a list of filenames, so a fixture added later is covered on
+the day it lands. Stand-ins carry only the columns the migrations' FKs, policies,
+RPCs and function bodies actually name. The objects *under test* —
+`strategy_shares`, its trigger, its grants, its policies, both RPCs — are the
+**real** ones from the real migration files.
 
 So the lane proves the DDL applies, the self-verification blocks bite, and the
 gate's arms pass and can fail. It does **not** prove behaviour against the real
 schema's own RLS, constraints or triggers. That still belongs to the TEST
 hand-apply.
 
-**Fixture extensions made for the gate file: none.** Both fixtures were promoted
-byte-identical from `pg-harness/`; the 103-arm gate needed nothing added.
+**The directory holds four fixtures** (measured on disk 2026-09-02):
+
+| Fixture | Provenance |
+|---|---|
+| `01-fixture-core.sql` | promoted **byte-identical** from `pg-harness/` (verified with `cmp`) |
+| `02-fixture-sanitize-tables.sql` | promoted **byte-identical** from `pg-harness/` (verified with `cmp`) |
+| `03-fixture-compute-jobs.sql` | authored for the **164.4 backfill** — additive stand-ins for the relations the compute-jobs queue migrations name as dependencies |
+| `04-fixture-compute-jobs-targets.sql` | authored for the **164.4 backfill** — additive `compute_jobs` TARGET columns; **applied after** the migration that creates the table (see the `--apply` row above) |
+
+The 103-arm `strategy_shares` gate needed nothing added to `01`/`02`; `03` and
+`04` exist only for the gates the 164.4 backfill annotates.
 
 ## Measured runtime (2026-08-29, macOS, postgresql@16)
 

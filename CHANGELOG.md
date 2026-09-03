@@ -1,5 +1,98 @@
 # Changelog
 
+## [0.77.2.0] - 2026-09-02
+
+### Phase 164.4 (waves 1-2) — the mutation runner reports what it did NOT cover, and its own controls are made falsifiable
+
+No production source change, no schema change, no migration. Everything here is
+SQL-gate tooling, its tests, the pg-lane fixtures and the planning record.
+Phase 164.4 is 2 of 13 waves; this release exists so `sql-mutation` runs
+SHA-bound and green on ubuntu, which is the precondition wave 3 reads.
+
+### Added
+
+- **The excluded set is NAMED, not just counted.** `coverage: files N/71` is a
+  ratio over every `.sql` in scope, and this phase deliberately leaves a subset
+  uncovered — files that raise outside the runner's identity idiom, which it can
+  never attribute an arm in. A reader of the ratio alone cannot tell that subset
+  from work nobody has done. The runner now derives and prints
+  `unreachable: N file(s) … <names>`, and CI fails when the line is absent or
+  when the count it CLAIMS differs from the number of names it PRINTS.
+- **A per-file breakdown, cross-summed twice.** `sections / judged / annotated /
+  waived / biting` per annotated file, so a file whose baseline went red — which
+  counts toward coverage while judging nothing — is visible rather than averaged
+  into a green aggregate. CI asserts one row per annotated file and that the
+  rows' `biting` column sums to the aggregate.
+- **GRAMMAR rule 4:** a mutation twin may not target a pg-lane stand-in fixture.
+  A twin that mutates the fixture author's guess proves nothing about the gate.
+- **Stand-in pg-lane fixtures** (`03-fixture-compute-jobs.sql`,
+  `04-fixture-compute-jobs-targets.sql`) for the batches that follow.
+
+### Fixed
+
+Found by the pre-landing review. Every one is a control that could not fail, in
+the tooling whose purpose is refusing controls that cannot fail.
+
+- **GRAMMAR rule 4 was defeated by a `.`, a `//`, or a capital letter.** The
+  refusal string-matched a prefix after normalising only backslashes and a
+  leading `./`. MEASURED: `scripts/pg-lane/./fixtures/…` and
+  `scripts/pg-lane//fixtures/…` both escaped it and resolved to the identical
+  stand-in through `join(REPO_ROOT, rel)`, and the arm was still COUNTED AS
+  BITING toward `ARMS_FLOOR`. `Scripts/PG-Lane/Fixtures/…` escaped it too on a
+  case-insensitive checkout. The path is now decomposed into segments the way
+  `join` decomposes it, and the test pins all three spellings plus a positive
+  control against sibling over-match.
+- **An empty excluded set killed the CI step with no message at all.** Under
+  `set -euo pipefail`, `grep -o` matching nothing exits 1 and aborts the step
+  before its own `MEASURE_FAIL` guard can run — so the guard was dead code, and
+  the failure would have fired precisely when the successor phase SUCCEEDS in
+  draining the exclusion set to zero. Both boundaries are now pinned: an empty
+  set passes, a non-zero claim naming zero files still fails loud.
+- **`logCorpusClassification` defaulted its three exclusion lists to `[]`**,
+  which renders "could not tell" as `unreachable: 0 file(s)` — the exact
+  absent-vs-zero ambiguity the surrounding comment says the line exists to
+  remove. It now fails loud instead of defaulting.
+- **Absence assertions were credited as coverage.** The defect-kind extractor
+  scans `selfTest()`'s source, comments included, for `kind === "<k>"`, so a
+  negative assertion proving a kind did NOT appear registered it as exercised.
+  Absences now route through one helper defined outside the scan window.
+- **`classifyGateIdiom` had no direct test** — the function that decides which
+  27 of 71 gate files leave this phase's scope. Its `inert` branch was never
+  proven reachable, so `expect(corpus.inertFiles).toEqual([])` could not fail,
+  and the `UNREACHABLE_27` pin was derived by the function it verifies.
+- **The corpus partition was a self-referential oracle.** MEASURED: with the 43
+  pending and 27 unreachable files deliberately filed into each other's buckets,
+  both assertions still passed — the arithmetic stays balanced and the set size
+  stays 71 by construction. Replaced with an independent re-derivation.
+- **The cross-sum wiring pin matched comments**, so it would have passed with the
+  call site deleted; and it covered only one of the two call sites. Now matched
+  against a comment-masked projection, both sites pinned.
+- **The per-file row was asserted only against a synthetic fixture**, so a
+  wording change would stay green in vitest and surface only as a CI failure.
+  Now also asserted against real runner output.
+- `sectionOfIdentity` / `gateSectionCount` gained tests, including the
+  multi-digit case (`SHAPE 10` must not become `SHAPE 1`), before plan 164.4-02
+  pins `annotated >= sections` on that denominator.
+- `files_annotated` gained the numeric guard every sibling extraction has.
+- Removed `cache: npm` from the `sql-mutation` job, which installs nothing.
+- Corrected stale anchors, counts and cross-references: the pg-lane disclaimer
+  now covers the fixtures DIRECTORY rather than a two-file list that rule 4 had
+  already outgrown, and the README no longer asserts a "fixtures first, then
+  migrations" ordering that this release's own fixture breaks by design.
+
+### Known gaps
+
+- `[REDUNDER-PGCRON]` — three idiom files (71 of 355 sections, 20%) cannot reach
+  a GREEN pg-lane baseline: they raise when `pg_extension` has no `pg_cron` row,
+  and the lane has no `pg_cron`. Criterion 1 cannot reach 100% until the lane
+  substrate gains it. Tracked in TODOS.md.
+- `[REDUNDER-SAVEPOINT]` — `20260416201929_audit_log_hardening.sql` cannot apply
+  to a vanilla PostgreSQL 16 at all (`SAVEPOINT` inside a PL/pgSQL `DO` body),
+  which is why the stubbed-migration-chain fixture strategy was rejected by
+  measurement. Suspected repo-vs-PROD drift; tracked in TODOS.md.
+- `[WINDOWS-LEDGER-DRIFT]` — `.planning/WINDOWS.md` refuses every append, so
+  three ledger entries from this phase live in TODOS.md instead.
+
 ## [0.77.1.0] - 2026-09-02
 
 ### Phase 164.3.1 — sound primitives: the SQL gate integrity checks can no longer be satisfied without doing the work

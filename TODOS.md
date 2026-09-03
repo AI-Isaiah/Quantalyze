@@ -1063,6 +1063,154 @@ true for 146 and half of 142–145, and **false for 141**.
 
 ## 🟡 FIX MID-TERM
 
+- [ ] **`[PGLANE-HELP-TRUNCATED]` `scripts/pg-lane/run.sh --help` cuts the stand-in disclaimer off mid-sentence (measured 2026-09-02, Phase 164.4 ship review).**
+      `run.sh:612` is `-h|--help) sed -n '2,45p' "$0"`, a hardcoded end line. The
+      ⚠️ WHAT IT DOES AND DOES NOT PROVE disclaimer occupies lines 43-50, so `--help`
+      renders only lines 43-45 — three of its eight lines, ending mid-sentence. This is
+      the disclaimer GRAMMAR rule 4 and `parse.mjs` both cite as the authority for what a
+      pg-lane stand-in does and does not prove, so the reader most likely to need it (someone
+      running the lane by hand) is the one who sees it truncated. Pre-existing; the 164.4 docs
+      pass rewrote the disclaimer in place at the same 8-line length and deliberately did not
+      touch executable shell. Fix: end the `sed` range at the last comment line before
+      `set -euo pipefail` rather than at a hardcoded 45 — e.g. derive it, or move the
+      disclaimer above the help range.
+
+- [ ] **`[WINDOWS-LEDGER-DRIFT]` `.planning/WINDOWS.md` refuses every append: its frontmatter counts and its entries disagree (logged 2026-09-02, Plan 164.4-00).**
+      `gsd-tools windows append` exits with `Ledger counts disagree with entries: frontmatter
+      open/waived/fixed/total=26/0/2/28 but entries yield 29/0/2/31`. Measured cause: the file carries
+      TWO representations — a markdown table with ids 1-28 (26 open / 2 fixed, which is what the
+      frontmatter counts) AND a JSON block further down holding 3 more entries (phases 164.3 / 164.3.1)
+      that the frontmatter never counted. Drift predates this plan (`last_updated: 2026-08-29`).
+      **Consequence: the broken-windows ledger is WRITE-BLOCKED** — Plan 164.4-00 could not record its
+      two findings there and recorded them here instead. Decide which representation is canonical, then
+      reconcile the frontmatter. Do not "fix" it by editing the counts blind.
+      **⚠️ A SECOND transition is now blocked behind this (2026-09-02, Plan 164.4-01): entry 28
+      (`sql-mutation`'s first ubuntu execution) is PROVABLY CLOSED** — `workflow_dispatch` run
+      **33620169220** at **`89cbef8b`**, self-test 12/12, `arms: 30/30/0`, tallies agree. Recorded in
+      `CLAUDE.md:51-53` and now in `GRAMMAR.md`'s 3c honest-residual paragraph, which previously still
+      claimed the job "has never executed on its ubuntu host". `gsd-tools windows fixed 28` refuses
+      with the same counts error, so the row still reads `open`. **When the ledger is reconciled, close
+      28 with that run id and SHA.** Not hand-edited here: the frontmatter is already wrong, so flipping
+      one row's status would make the ledger agree with itself while still being wrong — the exact move
+      Plan 164.4-00 refused.
+      **And a THIRD write is blocked behind it (2026-09-02, Plan 164.4-01):** a `unrun-verify`
+      entry for `164.4-01-SUMMARY.md` — the plan's `<human-check>` is UNMET, so the PR number, the
+      merged head SHA and the SHA-bound `sql-mutation` ubuntu run id + wall clock read `PENDING`.
+      Plan 164.4-02's `<precondition>` is `gate="blocking-human"` and reads exactly those fields;
+      it WILL halt until 164.4-01 is landed (`/ship`, then `/gsd-pr-branch` + the CLAUDE.md
+      deletion guard) and its CI board read SHA-bound. `gsd-tools windows append` refuses with the
+      same counts error, so it is recorded here.
+
+- [ ] **`[REDUNDER-PGCRON]` Three Phase-164.4 idiom gate files can NEVER reach a GREEN pg-lane baseline — the lane has no `pg_cron` (measured 2026-09-02, Plan 164.4-00).**
+      `scripts/pg-lane/run.sh` boots a vanilla `initdb` cluster. Measured on it: `pg_available_extensions`
+      has **0 rows** for `pg_cron`, and `CREATE EXTENSION pg_cron` fails `0A000 … Could not open extension
+      control file ".../postgresql@16/share/postgresql@16/extension/pg_cron.control"`.
+      Four gate files open with `IF NOT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'pg_cron')
+      THEN RAISE EXCEPTION` — deliberately, as their anti-green-skip contract. Their baseline is therefore
+      RED for a reason NO apply list can change, and `run.mjs:1836` never judges an arm in a red-baseline
+      file. **`test_reconcile_dropped_enqueue_sweep.sql` (39 sections, rank 1),
+      `test_retention_orphaned_running.sql` (25, rank 4) and `test_derive_allocator_keys_fanout.sql`
+      (7, rank 18) = 71 of the corpus's 355 idiom sections (20%) are un-annotatable on today's lane.**
+      `test_retention_crons_safe.sql` is affected too but is a non-idiom file (out of scope under (c)).
+      Separately, `test_strategy_analytics_stuck_computing_reaper.sql` (29, rank 3) BASELINES green but
+      `RAISE NOTICE 'SKIP Part 2/3'; RETURN;`, so its arms behind those skips are UNFALSIFIABLE on the
+      lane — a mutation there reports as non-biting.
+      **Not fixable inside a batch plan.** Hosting `pg_cron` needs a package on BOTH hosts (`brew search
+      pg_cron` finds the formula; it is NOT installed here — ubuntu needs its own `postgresql-<v>-cron`)
+      AND `shared_preload_libraries=pg_cron` + `cron.database_name` on `run.sh`'s `pg_ctl -o` line, i.e.
+      the lane substrate whose CLI contract `scripts/pg-lane/README.md:10` calls costly to change.
+      ⛔ Faking a `pg_extension` row is NOT the fix: it would make arm `1/JOB-04` unfalsifiable while
+      reporting it as covered (threat T-164.4-01).
+      **Needed before any batch containing those files.** Evidence:
+      `.planning/phases/164.4-.../164.4-00-FIXTURE-STRATEGY.md` § "The largest idiom file cannot be
+      baselined".
+
+- [ ] **`[REDUNDER-SAVEPOINT]` `20260416201929_audit_log_hardening.sql` cannot apply to a vanilla PostgreSQL 16 at all (measured 2026-09-02, Plan 164.4-00).**
+      Its final `DO $$ … $$;` block issues `SAVEPOINT audit_log_probe;` and `ROLLBACK TO SAVEPOINT
+      audit_log_probe;` (`:239-267`) **inside a PL/pgSQL body**. PL/pgSQL has no savepoint statements, so
+      the body fails to PARSE: `42601 syntax error at or near "TO"` at `plpgsql_yyerror`
+      (`pl_scanner.c:542`), before a single statement in the block runs. Reproduced in isolation from an
+      8-line DO body on an empty cluster (probe M1 in the Plan 00 record). It is what killed the stubbed
+      real-migration-chain candidate at migration 51 of 262.
+      **Either the deployed body differs from the repo body (repo-vs-PROD drift — VAC-04's own subject),
+      or this migration never applied as written.** Resolve by DIFFING the deployed
+      `audit_log`/`log_audit_event` state against this file before editing anything. Phase 164.4 may not
+      touch `supabase/migrations/`, so it is booked, not fixed.
+
+- [ ] **`[REDUNDER-NONIDIOM]` The 27 non-idiom SQL gate files are excluded from Phase 164.4 and need their own phase (logged 2026-09-02, founder scope decision).**
+      Phase 164.4's criterion 1 was NARROWED to the 44 `TEST FAILED (` idiom files. The other **27
+      files / 334 `RAISE EXCEPTION` sites** assert through their own message prefixes
+      (`'MT5SRC-03 (1a): api_keys did not admit exchange=mt5'`,
+      `'FLIPRETRY-02: include predicate present % time(s)'`) and are structurally invisible to the
+      mutation runner, whose identity needle is the literal `TEST FAILED (<arm>)` (`run.mjs:544`,
+      defined once at `run.mjs:947`). They are therefore UNPROVEN — nothing machine-checks that
+      those 334 assertions can fail.
+      **This is a real coverage gap, deliberately accepted and made loud, not closed.** Phase 164.4
+      requires the runner to PRINT these 27 files by name on every run, so the exclusion is emitted
+      by the gate rather than asserted in a ledger.
+      **The successor work is a message-only rename** into the idiom. Measured and NOT free: the
+      321 no-idiom raises carry only **139 distinct prefixes** (`B5b:` heads 28), so unique arm
+      identities must be INVENTED per arm, not mechanically transformed — authoring judgement
+      across 27 files. It is safe from the "no assertion edits" angle: nothing external reads those
+      strings (the sentinel gate counts `RAISE EXCEPTION` lines at `ci.yml:2360`; `sql-tests` uses
+      `ON_ERROR_STOP`), so a rename changes message text only, never what an assertion asserts.
+      ⛔ Do NOT fold this into 164.4. It has a different risk profile — 164.4 annotates what exists,
+      this one authors new identities — and mixing them is how a backfill turns into 334 fresh
+      unverified claims.
+      ⚠️ Also carries the 174 non-idiom raises that sit INSIDE the 44 idiom files (unreachable and
+      un-neuterable there); seven "mixed" files are the concentration, e.g.
+      `test_api_keys_exchange_not_user_writable.sql` at 38 non-idiom vs 9 idiom.
+
+- [ ] **`[WINDOWS-STALE]` `.planning/WINDOWS.md` entries 25, 26 and 28 read `open` but have all executed (logged 2026-09-02).**
+      `CLAUDE.md:53` already claims entry 28 is closed while `.planning/WINDOWS.md:45` still records
+      it `open` — the repo contradicts itself in two tracked files. All three have now run:
+      **28** (`sql-mutation` first ubuntu execution) closed by run 33620169220 and re-bound to run
+      33643046061 at `60b0722d`, self-test 15/15; **25** (VAC-04 first real-PROD-credential run) and
+      **26** (VAC-08 first real-TEST run) both executed on ship PR #730.
+      ⚠️ Close 25 PARTIALLY, not fully: VAC-04 ran against the real credential but took the earliest
+      short-circuit (`prod-body-drift-check.sh:198`, "no migration files"), so its LEGITIMATE-ZERO
+      branch (`:448`), normal compare verdict and absurdity floor (`:608+`) are still unobserved —
+      that residue is `[VAC04-ARMS-UNRUN]` below. Update the ledger to match the measurement rather
+      than deleting the entries.
+
+- [ ] **`[VAC08-SELFTEST-CI]` VAC-08's five-arm self-test never runs in CI (logged 2026-09-02, Phase 164.3.1 UAT test 2).**
+      `ci.yml:2051` invokes `bash scripts/test-ledger-drift-check.sh` with no argument, which the
+      script's `case` dispatches to `check` — the `--self-test` mode at
+      `scripts/test-ledger-drift-check.sh:671` is therefore never exercised by any workflow. The
+      gate itself runs and produces a real verdict, so this is not a dead gate; what is missing is
+      the machine proof that its four RED modes still fire. That proof is exactly what
+      `feedback_every_test_must_be_able_to_fail` requires, and today it exists only when a human
+      runs the flag by hand (the orchestrator did so at HEAD on 2026-09-02: `self-test OK (5/5)`).
+      Fix: add a `--self-test` step to the `sql-tests` job ahead of the live check, mirroring how
+      `sql-mutation` already runs `run.mjs --self-test` before its corpus pass. Guard hygiene, not
+      user-facing — recorded rather than blocking, per the stopping rule.
+
+- [ ] **`[VAC04-ARMS-UNRUN]` VAC-04's three behavioural arms have still never executed in CI (logged 2026-09-02, Phase 164.3.1 UAT test 2).**
+      PR #730 closed the big unknown — `migration-drift-check` run 33643046189 ran on a real
+      `pull_request` with the real PROD credential (`::notice::Drift-check credentials present.`),
+      which retires the WINDOWS.md 25 "never run against its real credential" entry. But that PR
+      changed no `supabase/migrations/**` files (it matched the paths filter on VAC-04's own script
+      entries), so `scripts/prod-body-drift-check.sh` exited at its EARLIEST short-circuit, `:198`
+      *"this PR changes no migration files — nothing to compare against PROD."* Never reached, and
+      therefore still unproven on the real credential: the D-13 LEGITIMATE-ZERO branch (`:448`), the
+      normal compare verdict, and the absurdity floor (`:608+`, index ≥ half the 118-body snapshot).
+      These need a migration-bearing PR to fire. ⛔ Do NOT manufacture one to tick this off while
+      the 164.3.1→164.4 window is open — UAT test 2 carries a standing instruction not to merge a
+      migration PR in that window. Close it on the next genuine migration PR and record the run id.
+
+- [ ] **`[MUT-SELFTEST-UNREGISTERED]` Three of the mutation runner's 15 self-test modes are not bound by name (logged 2026-09-02, Phase 164.3.1 re-verification finding O-3).**
+      The ship-review pass took `scripts/mutation-runner/run.mjs --self-test` from 12 modes to 15
+      (the count is visible as `SELF-TEST n/15` in the script). The three added modes fire and pass,
+      but they were never registered in `INSTANCE_ARM_REGISTRY`
+      (`src/__tests__/gate-family-meta.test.ts:120`), which is what binds an instance to the arm
+      that proves it by NAME. Consequence, and it is narrow: renaming or deleting one of those
+      three would not fail by name — the count arm would still see 15 and the mode itself would
+      still run, so this is a naming-durability gap, not a coverage gap. Fix: add the three entries
+      with their needles, and re-derive the `21 needles` measurement recorded at
+      `gate-family-meta.test.ts:317` (it is stamped `MEASURED 2026-09-02 at 8969513e`, which
+      predates the additions). Not user-facing and not data-integrity, so recorded rather than
+      blocking, per the stopping rule.
+
 - [ ] **Two cosmetic verify-precision notes from Phase 164.3's plan gate (logged 2026-08-29).**
       Neither is user-facing nor data-integrity, so neither blocked the phase — recorded so they are
       not re-derived.

@@ -858,8 +858,11 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6.4.0
         with:
+          # No `cache: npm` on purpose — see the job header above: this job runs
+          # no `npm ci` and no `npx`, so a restored `~/.npm` is a cache nothing
+          # reads, saved on every miss, inside the wall-clock budget this gate
+          # is measured against.
           node-version: 22
-          cache: npm
 
       - name: Probe - the runner image's PostgreSQL server binaries resolve
         # 164.3-RESEARCH assumption A1 ("ubuntu-latest ships PostgreSQL server
@@ -992,7 +995,9 @@ jobs:
         # 164.3.1-11 added the Primitive-A and -B regression corpus (2026-09-01);
         # 15/15 after the 164.3.1 review added the F1 message-embedded forgery,
         # the injected-lane absurdity FIRE scenario and the `lane-unrunnable`
-        # MEASURE_FAIL (2026-09-02).
+        # MEASURE_FAIL (2026-09-02); 16/16 after 164.4-01 added the parse-time
+        # refusal of a twin targeting a pg-lane stand-in fixture — GRAMMAR rule
+        # 4, threat T-164.4-01 (2026-09-02).
         #
         # ⛔ MODE IDENTITY: the bare command from the script's own header, no
         # wrapper. Pinned from vitest by src/__tests__/mutation-runner-floors.test.ts.
@@ -1076,8 +1081,54 @@ jobs:
           fi
           echo "$coverage_line"
           files_annotated=$(echo "$coverage_line" | sed -E 's|^coverage: files ([0-9]+)/[0-9]+$|\1|')
+          case "$files_annotated" in ''|*[!0-9]*)
+            echo "::error::MEASURE_FAIL: could not read the annotated-file count out of '$coverage_line'."; exit 1;; esac
           if [ "$files_annotated" -lt "$files_floor" ]; then
             echo "::error::FILES_FLOOR regression: $files_annotated annotated file(s) < floor $files_floor."
+            exit 1
+          fi
+
+          # 164.4-01 — THE EXCLUSION MUST BE NAMED (criterion 1 as amended by the
+          # founder, 2026-09-02). `coverage: files N/71` is a ratio over every
+          # `.sql` in the scope dir, and this phase's end state deliberately
+          # leaves a subset uncovered: files that raise outside the runner's
+          # identity idiom, which it can never attribute an arm in. A reader of
+          # the ratio alone cannot tell that subset from work nobody has done
+          # yet. So the runner derives and PRINTS the excluded set by name, and
+          # a silent exclusion fails HERE exactly as a missing annotation does.
+          #
+          # Two arms, in the discipline every assertion above uses:
+          #   (1) the line is ABSENT -> MEASURE_FAIL with its own message. A
+          #       runner that stopped classifying its corpus has retired the
+          #       amendment, and an absent line is never a zero.
+          #   (2) the count it CLAIMS must equal the number of `*.sql` names it
+          #       PRINTS. Evidence before verdict (SC-7): a count with no names
+          #       is a number nobody can check, and names with a wrong count is
+          #       the shape a hand-maintained list decays into.
+          # No literal count is restated here — the successor phase shrinks this
+          # set and the runner derives it. Both sides come from the run output.
+          unreachable_line=$(grep -a -m1 -E '^unreachable: [0-9]+ file\(s\) ' "$RUNNER_LOG" || true)
+          if [ -z "$unreachable_line" ]; then
+            echo "::error::MEASURE_FAIL: the run printed NO 'unreachable: N file(s) …' line, so which gate files this run deliberately did NOT cover is unknown. Criterion 1 (as amended 2026-09-02) requires the exclusion to be named on every run: a silent exclusion fails this gate exactly as a missing annotation does."
+            exit 1
+          fi
+          echo "$unreachable_line"
+          unreachable_claimed=$(echo "$unreachable_line" | sed -E 's|^unreachable: ([0-9]+) file\(s\) .*|\1|')
+          case "$unreachable_claimed" in ''|*[!0-9]*)
+            echo "::error::MEASURE_FAIL: could not read the excluded-file count out of '$unreachable_line'."; exit 1;; esac
+          # `|| true` matches the `file_rows` line below and is LOAD-BEARING, not
+          # tidiness: the step runs under `set -euo pipefail`, and the empty
+          # excluded set — `unreachable: 0 file(s) … — `, this phase's successor's
+          # stated end state — is exactly the case where `grep -o` matches
+          # nothing and exits 1. Without it, pipefail aborts the step here with
+          # no `::error::` at all and the numeric guard below is dead code that
+          # can never observe the empty value. With it, `wc -l` still prints 0,
+          # the guard stays LIVE, and the `-ne` comparison does the work.
+          unreachable_named=$(echo "$unreachable_line" | grep -a -o -E '[A-Za-z0-9_]+\.sql' | wc -l | tr -d '[:space:]' || true)
+          case "$unreachable_named" in ''|*[!0-9]*)
+            echo "::error::MEASURE_FAIL: could not count the file names on '$unreachable_line'."; exit 1;; esac
+          if [ "$unreachable_claimed" -ne "$unreachable_named" ]; then
+            echo "::error::MEASURE_FAIL: the run CLAIMS $unreachable_claimed excluded file(s) but NAMES $unreachable_named. The count and the names come from the same derivation in one run and cannot disagree; a claim the log's own evidence contradicts is not a measurement."
             exit 1
           fi
 
@@ -1170,6 +1221,54 @@ jobs:
             echo "::error::MEASURE_FAIL — this is the GATE failing, not the corpus: the verdict loop reported $arms_executed executed arm(s) but the lane runner counted $lane_invocations arm lane(s) (executed=$arms_executed lane-invocations=$lane_invocations biting=$biting). Arms were claimed that no lane ran, or lanes ran that no verdict describes. The runner's own in-process floor exits 1 on this; a log reaching this step with these numbers was not produced by one honest run of the gate."
             exit 1
           fi
+          # 164.4-01 — THE PER-FILE BREAKDOWN, CROSS-SUMMED (threat T-164.4-05).
+          # `coverage: files N/71` counts a file whose baseline went RED exactly
+          # like one whose 39 arms all bit: the arm loop is `continue`d and the
+          # file still reads as coverage. The runner now prints one row per
+          # annotated file — sections / judged / annotated / waived / biting —
+          # so a half-annotated or never-judged file is visible in the log.
+          #
+          # WHAT THESE ROWS ACTUALLY DEFEND AGAINST, stated precisely so a later
+          # reader does not weaken the arms on a bigger hole than the one that
+          # existed: a RED baseline is ALREADY fatal in-process — run.mjs calls
+          # `addDefect("baseline", …)` and the run exits 1 — so that case was
+          # never "averaged into a green aggregate". The rows are
+          # defense-in-depth over the LOG: this step's whole job is reading
+          # numbers out of a text file it did not produce, and a log that was
+          # spliced from two runs, hand-edited, or assembled by a wrapper can
+          # carry an aggregate its own breakdown does not account for.
+          #
+          # Three arms, same discipline as every assertion above:
+          #   (1) NO rows at all -> MEASURE_FAIL. The runner stopped reporting.
+          #   (2) one row per annotated file, cross-checked against the
+          #       `coverage:` numerator already read. Rows and coverage are two
+          #       readings of the same loop and cannot disagree.
+          #   (3) the rows' `biting` column must SUM to the aggregate `biting:`
+          #       already read. The runner asserts this in-process too
+          #       (`absurdityViolations`); asserting it here is the same
+          #       out-of-process re-read as the lane-invocations arm, for a step
+          #       whose whole job is reading numbers out of a file it did not
+          #       produce. No literal integer is restated — both sides come from
+          #       the run output.
+          file_rows=$(grep -a -E '^  file .+: sections [0-9]+ / judged [0-9]+ / annotated [0-9]+ / waived [0-9]+ / biting [0-9]+$' "$RUNNER_LOG" || true)
+          if [ -z "$file_rows" ]; then
+            echo "::error::MEASURE_FAIL: the run printed NO '  file <name>: sections … / judged … / biting …' row, so which annotated files actually reached a verdict is unknown. A file whose baseline went red counts toward coverage while judging nothing; without the per-file rows that gap is invisible."
+            exit 1
+          fi
+          printf '%s\n' "$file_rows"
+          file_rows_count=$(printf '%s\n' "$file_rows" | wc -l | tr -d '[:space:]')
+          if [ "$file_rows_count" -ne "$files_annotated" ]; then
+            echo "::error::MEASURE_FAIL: the run printed $file_rows_count per-file row(s) but reported $files_annotated annotated file(s) on its coverage line. Those are two readings of the same loop; a disagreement means a file was counted as coverage without being described, or described without being counted."
+            exit 1
+          fi
+          per_file_biting=$(printf '%s\n' "$file_rows" | awk '{ for (i = 1; i <= NF; i++) if ($i == "biting") s += $(i + 1) } END { print s + 0 }')
+          case "$per_file_biting" in ''|*[!0-9]*)
+            echo "::error::MEASURE_FAIL: could not sum the per-file biting column."; exit 1;; esac
+          if [ "$per_file_biting" -ne "$biting" ]; then
+            echo "::error::MEASURE_FAIL: the per-file rows sum to $per_file_biting biting arm(s) but the aggregate 'biting:' line reports $biting. ARMS_FLOOR is compared against the aggregate, so a breakdown that does not add up to it means the floor is bounding a number the report cannot account for."
+            exit 1
+          fi
+
           if [ "$biting" -lt "$arms_floor" ]; then
             echo "::error::ARMS_FLOOR regression: $biting biting arm(s) < floor $arms_floor. An annotation stopped biting, was deleted, or was converted to a waiver without lowering the floor in scripts/mutation-runner/run.mjs."
             exit 1

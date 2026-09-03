@@ -133,7 +133,7 @@ function refuseSelfSatisfying(at, field, injected) {
   const byConcat = INJECTS_FIRST_FAILURE_LITERAL.test(collapseSqlConcat(injected));
   if (!direct && !byConcat) return;
   throw (
-    `${at}: "${field}" injects a "TEST FAILED (" literal ` +
+    `${at}: "${field}" injects a "${IDENTITY_CARRIER}" literal ` +
     `(${direct ? "directly" : "by string concatenation"}). A mutation that WRITES the string ` +
     `the first-failure identity check looks for satisfies the DETECTOR instead of the arm — it ` +
     `would report RED (identity ok) and count as a biting arm without the arm's own logic ever ` +
@@ -169,10 +169,80 @@ function refuseRetargetingFailureLiteral(at, field, targeted) {
   if (typeof targeted !== "string") return;
   if (!INJECTS_FIRST_FAILURE_LITERAL.test(targeted)) return;
   throw (
-    `${at}: "${field}" TARGETS a "TEST FAILED (" literal. Rewriting a failure message — in ` +
+    `${at}: "${field}" TARGETS a "${IDENTITY_CARRIER}" literal. Rewriting a failure message — in ` +
     `either direction — changes what the first-failure identity check reads instead of what the ` +
     `arm does. Mutate the code under test, not the failure identity.`
   );
+}
+
+/**
+ * The pg-lane stand-in fixtures. `scripts/pg-lane/run.sh:43-50` states what
+ * they do and do not prove: they carry only the columns the real migrations'
+ * FKs, policies and function bodies name — they are the author's model of the
+ * schema, not the schema.
+ */
+const PG_LANE_FIXTURE_DIR = "scripts/pg-lane/fixtures/";
+
+/**
+ * A repo-relative path reduced to the segments that survive resolution: `\` is
+ * read as `/`, and empty (`//`) and `.` segments are dropped, because
+ * `join(REPO_ROOT, rel)` drops them too. Used to compare a path against a
+ * directory by what it OPENS rather than by how it is spelled.
+ */
+const normalizeRepoPath = (p) =>
+  p
+    .replace(/\\/g, "/")
+    .split("/")
+    .filter((seg) => seg !== "" && seg !== ".")
+    .join("/");
+
+/**
+ * ⭐ AUTHORING RULE, phase 164.4 (threat T-164.4-01). NO TWIN MAY TARGET A
+ * STAND-IN.
+ *
+ * A `RED-UNDER-M` proves an arm can fail by mutating the thing under test and
+ * requiring the gate to redden on that arm. Mutate a stand-in instead and the
+ * RED proves only that the FIXTURE AUTHOR'S GUESS can be broken — the
+ * production object the arm exists to defend was never touched, and the arm is
+ * counted as biting anyway. That is a vacuous pass manufactured inside the
+ * vacuity detector, which is the one class this whole gate family exists to
+ * refuse.
+ *
+ * PARSE TIME is the right seam, the same as rule 3a: a refused annotation is
+ * MALFORMED, so it is never counted as a twin, the file's prose/twin parity
+ * reds too, and the refusal fires in `--parse-only` on a database-less
+ * platform. A runtime check would let the annotation count first.
+ *
+ * MEASURED at HEAD 2026-09-02:
+ * `grep -a -c 'RED-UNDER-M:.*"file":"scripts/pg-lane/fixtures/' supabase/tests/*.sql`
+ * -> 0 in all 71 files. The rule refuses nothing that exists, which is the
+ * standing this repo requires of 3a and 3b.
+ *
+ * ⚠️ It keys on the TWIN'S TARGET, never on a fixture's POSITION in the
+ * `RED-UNDER-SETUP` apply list. Plan 164.4-00 measured a legitimate stand-in
+ * sitting BETWEEN two migrations (`04-fixture-compute-jobs-targets.sql`), so
+ * "stand-ins first" is a default, not an invariant, and a position-keyed rule
+ * would refuse a correct setup.
+ *
+ * ⛔ IT MUST NORMALISE, NOT STRING-PATCH. Measured 2026-09-02: a prefix test
+ * over the raw spelling refused `scripts/pg-lane/fixtures/03-…sql` and let
+ * `scripts/pg-lane/./fixtures/03-…sql` and `scripts/pg-lane//fixtures/03-…sql`
+ * straight through — both resolve to the IDENTICAL stand-in once `materialize`
+ * does `join(REPO_ROOT, rel)`, and `bad-file-ref` compares `step.file` to the
+ * corpus by exact string, so listing the same odd spelling in
+ * `RED-UNDER-SETUP` satisfies that check too. So the path is decomposed and
+ * degenerate segments (empty, `.`) are DROPPED before the prefix test, rather
+ * than two known spellings being patched away. `isRepoRelativePath` has
+ * already refused `..`, absolute paths and drive letters, so normalisation
+ * here cannot walk out of the checkout. The comparison is case-folded because
+ * on a case-insensitive checkout `Scripts/PG-Lane/Fixtures/…` opens the same
+ * stand-in; nothing legitimate differs from this directory by case alone.
+ */
+function targetsPgLaneFixture(p) {
+  // Trailing "/" so the directory itself matches and a sibling whose name
+  // merely STARTS with "fixtures" (e.g. `scripts/pg-lane/fixtures-extra/`)
+  // does not.
+  return `${normalizeRepoPath(p)}/`.toLowerCase().startsWith(PG_LANE_FIXTURE_DIR.toLowerCase());
 }
 
 /** Validate one `apply` step. Returns the normalised step, or throws a message string. */
@@ -196,6 +266,13 @@ function validateStep(step, index) {
 
   if (!isRepoRelativePath(step.file)) {
     throw `${at}: "file" must be a repo-relative path (no leading "/" and no ".." segment)`;
+  }
+  if (targetsPgLaneFixture(step.file)) {
+    throw (
+      `${at}: "file" targets a pg-lane stand-in fixture (${PG_LANE_FIXTURE_DIR}**) — a mutation ` +
+      `to a stand-in proves the fixture author's guess, not production; target a ` +
+      `supabase/migrations/** file, the gate itself, or use a sql step`
+    );
   }
   // `occurrences` is the annotator's MEASUREMENT of how many times the needle
   // appears in the file today. It is required precisely because plan 01's
@@ -859,6 +936,61 @@ export function maskNonCode(text) {
 }
 
 /**
+ * A `RAISE EXCEPTION`, read in a statement's MASKING PROJECTION so a mention
+ * inside a literal — or a commented-out (already neutered) raise — is not one.
+ *
+ * ⭐ ONE DEFINITION, 2026-09-02. This lived in `run.mjs` only, and `scanCorpus`
+ * below now needs the same notion of "does this file contain executable raise
+ * code". A second spelling of the same regex in a second file is exactly how
+ * two readers of "is this a raise" drift apart, so it moved HERE — the module
+ * that already owns the one definition of what is code — and `run.mjs` imports
+ * it. It is not duplicated anywhere.
+ */
+export const RAISE_EXCEPTION_RE = /\bRAISE\s+EXCEPTION\b/i;
+
+/**
+ * The literal every arm identity is carried in. Spelled ONCE, beside the raise
+ * regex it is always read with. Every reader imports it — this module's own
+ * refusal messages and `run.mjs` alike — and nothing re-spells or re-derives
+ * it, for the same reason `RAISE_EXCEPTION_RE` moved here: two spellings of
+ * one literal is how two readers of "is this an arm identity" drift apart.
+ */
+export const IDENTITY_CARRIER = "TEST FAILED (";
+
+/**
+ * Which of three idiom classes an UNANNOTATED gate file falls in — the data
+ * behind the runner's `unreachable:` print (phase 164.4 criterion 1 as
+ * amended: the exclusion is NAMED on every run, because a silent exclusion
+ * fails that criterion exactly as a missing annotation does).
+ *
+ *   "pending"      code-level `RAISE EXCEPTION` carrying `TEST FAILED (` —
+ *                  the runner's identity idiom. Annotatable; not yet annotated.
+ *   "unreachable"  code-level `RAISE EXCEPTION`, none of them carrying the
+ *                  identity idiom. `attributeIdentities` has nothing to
+ *                  attribute, so no arm of this file can be judged today.
+ *   "inert"        no code-level `RAISE EXCEPTION` at all. MEASURED 2026-09-02:
+ *                  zero such files in `supabase/tests/`. If one ever appears it
+ *                  is a FINDING — a gate that cannot fail — and it is printed.
+ *
+ * ⛔ Both halves are read the way the runner reads them, not by grep. The raise
+ * test runs against `executableText` (so a raise inside a comment or a literal
+ * is not one); the carrier test runs against that same statement's RAW text,
+ * because the identity lives INSIDE the raise's message literal and the masking
+ * projection blanks literals. MEASURED 2026-09-02: reading the carrier off
+ * `executableText` classifies all 70 unannotated files `unreachable` — the
+ * absent-vs-correct ambiguity this classification exists to remove.
+ */
+export function classifyGateIdiom(text) {
+  let raises = false;
+  for (const stmt of tokenizeStatements(text)) {
+    if (!RAISE_EXCEPTION_RE.test(stmt.executableText)) continue;
+    raises = true;
+    if (stmt.text.includes(IDENTITY_CARRIER)) return "pending";
+  }
+  return raises ? "unreachable" : "inert";
+}
+
+/**
  * Scan a directory of `.sql` gate files for the coverage numerator/denominator
  * (D-01). "Annotated" means at least one LINE-START marker of EITHER kind — a
  * prose `RED-UNDER:` or a structured `RED-UNDER-M:` twin. Both use the same
@@ -880,25 +1012,45 @@ export function maskNonCode(text) {
  *
  * MEASURED 2026-08-29: no file in `supabase/tests/` is structured-only, so
  * `filesAnnotated` is unchanged at 1 of 71 and the FILES_FLOOR does not move.
+ *
+ * ⭐ 2026-09-02, phase 164.4: the UNANNOTATED remainder is classified too, by
+ * `classifyGateIdiom` above, and returned as three sorted basename lists. The
+ * denominator stays every `.sql` in the directory (`filesTotal`) — the end
+ * state of the backfill is `files 44/71` with the other 27 PRINTED BY NAME,
+ * never `files 44/44` with the gap quietly redefined away. MEASURED at this
+ * commit over `supabase/tests/`: 1 annotated + 43 pending + 27 unreachable +
+ * 0 inert = 71.
  */
 export function scanCorpus(dir) {
   const files = readdirSync(dir)
     .filter((f) => f.endsWith(".sql"))
     .sort();
   const annotatedFiles = [];
+  const unreachableFiles = [];
+  const pendingFiles = [];
+  const inertFiles = [];
   const results = [];
   for (const name of files) {
-    const result = parseAnnotations(readFileSync(join(dir, name), "utf8"), {
-      file: join(dir, name),
-    });
+    const text = readFileSync(join(dir, name), "utf8");
+    const result = parseAnnotations(text, { file: join(dir, name) });
     results.push({ name, result });
-    if (result.prose.length > 0 || result.structured.length > 0) annotatedFiles.push(name);
+    if (result.prose.length > 0 || result.structured.length > 0) {
+      annotatedFiles.push(name);
+      continue;
+    }
+    const klass = classifyGateIdiom(text);
+    if (klass === "pending") pendingFiles.push(name);
+    else if (klass === "unreachable") unreachableFiles.push(name);
+    else inertFiles.push(name);
   }
   return {
     dir,
     filesTotal: files.length,
     filesAnnotated: annotatedFiles.length,
     annotatedFiles,
+    unreachableFiles,
+    pendingFiles,
+    inertFiles,
     results,
   };
 }

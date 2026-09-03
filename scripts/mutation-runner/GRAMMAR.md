@@ -1,7 +1,13 @@
 # `RED-UNDER-M` — the machine-executable annotation grammar
 
-⚠️ **Phase 164.4 backfills ~70 more gate files against this schema, and plan
-164.3-08 annotates the 30 existing arms with it.** Key names and semantics are a
+⚠️ **Phase 164.4 backfills 43 more idiom gate files against this schema, plus
+the 15 un-twinned sections of the reference file that plan 164.3-08 annotated 30
+arms of.** The remaining 27 of the 71 files in `supabase/tests/` are OUT of
+scope by founder decision (2026-09-02): they raise outside the runner's identity
+idiom, so no arm of theirs can be attributed. They are not silently dropped —
+the runner DERIVES that set and PRINTS it by name on every run
+(`unreachable: N file(s) …`), and CI fails when the line is missing or when its
+count disagrees with the names beside it. Key names and semantics are a
 COSTLY decision: changing them later re-touches every annotation written against
 them. This document is the contract.
 
@@ -28,7 +34,7 @@ kill.
 
 ---
 
-## The three annotation rules
+## The four annotation rules
 
 ### 1. Markers count only at comment line start
 
@@ -334,9 +340,48 @@ meets it as a **contract** rather than as a surprise from the runner.
 ⚠️ **Honest residual.** A hostile annotation can still make the database print
 arbitrary text; what it can no longer do is make that text *attributable*, and a
 hostile annotation remains visibly hostile in review. The psql CONTEXT grammar is
-measured on macOS / PostgreSQL 16.13 only — the `sql-mutation` CI job has never
-executed on its ubuntu host (WINDOWS.md 28), so the parse rides an unobserved
-host and answers that with `MEASURE_FAIL`, not with a fallback.
+measured on macOS / PostgreSQL 16.13 only. The `sql-mutation` job was first
+observed GREEN on its ubuntu host on 2026-09-02 (workflow_dispatch run
+33620169220 at `89cbef8b`, self-test 12/12, `arms: 30/30/0`), which closed
+WINDOWS.md 28; the parse still answers an unobserved host with `MEASURE_FAIL`
+rather than a fallback, because one green run is a measurement of one host, not
+a guarantee about the next.
+
+### 4. A mutation may not TARGET a pg-lane stand-in fixture (refused at parse time)
+
+> **No `apply` step's `"file"` may be under `scripts/pg-lane/fixtures/`.**
+> Target a `supabase/migrations/**` file, the gate file itself, or use a `sql`
+> step.
+
+`scripts/pg-lane/run.sh:43-50` states plainly what the stand-ins do and do not
+prove — and states it over the whole `fixtures/` DIRECTORY, which is the same
+scope this rule refuses: they carry only the columns the real migrations' FKs,
+policies and function bodies name. They are the fixture author's MODEL of the
+schema, not the schema.
+
+So a twin that mutates one reddens the gate, and the arm is counted as biting —
+but what was proven is that the model can be broken. The production object the
+arm exists to defend was never touched. That is a vacuous pass manufactured
+inside the vacuity detector, which is the class this whole family refuses.
+
+**Parse time, like 3a**, and for the same reasons: a refused annotation is
+MALFORMED, so it is never counted as a twin, the file's prose/twin parity reds
+as well, and the refusal fires in `--parse-only` on a database-less platform. A
+runtime check would let the annotation be counted first.
+
+⚠️ **It keys on the TWIN'S TARGET, never on a fixture's POSITION in the
+`RED-UNDER-SETUP` apply list.** Applying a stand-in is legitimate and every
+annotated gate does it. Plan 164.4-00 measured a legitimate stand-in sitting
+BETWEEN two migrations (`04-fixture-compute-jobs-targets.sql`), so
+"stand-ins first" is a default, not an invariant, and a position-keyed rule
+would refuse a correct setup.
+
+**MEASURED 2026-09-02:** `grep -a -c 'RED-UNDER-M:.*"file":"scripts/pg-lane/fixtures/' supabase/tests/*.sql`
+-> 0 in all 71 files. The rule refuses nothing that exists — the same standing
+this repo requires of 3a and 3b. It ships with a firing fixture
+(`fixtures/selftest/fixture-target-gate.sql`, `--self-test` scenario 16), which
+deliberately LISTS the stand-in in its own `RED-UNDER-SETUP` so `bad-file-ref`
+cannot be what fires; the scenario asserts that too.
 
 ---
 
@@ -363,7 +408,7 @@ neither.
 | Key | Type | Required | Meaning |
 |---|---|---|---|
 | `kind` | `"edit"` | yes | |
-| `file` | string | yes | Repo-relative. No leading `/`, no `..` segment. |
+| `file` | string | yes | Repo-relative. No leading `/`, no `..` segment. **May not be under `scripts/pg-lane/fixtures/` — rule 4.** |
 | `find` | string | yes | Byte-exact needle. Non-empty. **May not name a `TEST FAILED (` literal — rule 3a.** |
 | `replace` | string | yes | May be `""` to delete the needle. **May not contain a `TEST FAILED (` literal — rule 3a.** |
 | `occurrences` | positive int | **yes** | Measured total matches in the file. |
@@ -374,7 +419,7 @@ neither.
 | Key | Type | Required | Meaning |
 |---|---|---|---|
 | `kind` | `"insert-after"` | yes | |
-| `file` | string | yes | Repo-relative. |
+| `file` | string | yes | Repo-relative. **May not be under `scripts/pg-lane/fixtures/` — rule 4.** |
 | `anchor` | string | yes | Byte-exact text to insert after. **May not name a `TEST FAILED (` literal — rule 3a.** |
 | `text` | string | yes | Text inserted immediately after the anchor. **May not contain a `TEST FAILED (` literal — rule 3a.** |
 | `occurrences` | positive int | **yes** | Measured total anchor matches. |
@@ -409,7 +454,7 @@ gate → fixtures is a second place to drift. A gate file with annotations but n
 All four are drawn from `supabase/tests/test_strategy_shares_rls.sql`. The prose
 lines are verbatim from the corpus.
 
-### Shape 1 — migration-file edit (`:408-409`)
+### Shape 1 — migration-file edit (`:417-419`)
 
 ```sql
   -- RED-UNDER: change `generation BIGINT` back to `generation INTEGER` in the
@@ -420,7 +465,7 @@ lines are verbatim from the corpus.
 ⚠️ Note the twin's needle carries **two** spaces and the prose's carries one.
 The twin is what executes; see rule 2 above.
 
-### Shape 1b — insertion with no exact point in the prose (`:369-378`)
+### Shape 1b — insertion with no exact point in the prose (`:376-378`)
 
 ```sql
   -- RED-UNDER: add a `token_hash TEXT` column to the STEP 1 CREATE TABLE in
@@ -437,7 +482,7 @@ no arm could be the first failure. Re-baselining it in the same mutation is what
 makes `SHAPE 1` reachable — the LAYERED discipline below, applied to an arm whose
 prose does not mention layering at all.
 
-### Shape 2 — live-DB `GRANT` with a prerequisite neuter (`:1533-1577`)
+### Shape 2 — live-DB `GRANT` with a prerequisite neuter (`:1561-1577`)
 
 ```sql
   -- RED-UNDER: `GRANT UPDATE (nonce) ON strategy_shares TO authenticated` on
@@ -455,7 +500,7 @@ rather than preferred: the migration's STEP 2b pins `authenticated`'s privilege
 set EXACTLY and aborts the apply on any drift, so editing STEP 2 means the gate
 never runs. The lane's `--post-apply` hook exists for exactly this.
 
-### Shape 3 — LAYERED compound mutation (`:661-665`)
+### Shape 3 — LAYERED compound mutation (`:675-681`)
 
 ```sql
   -- RED-UNDER: change the CREATE TRIGGER in migration 20260827120000 STEP 1b to

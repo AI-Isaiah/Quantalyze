@@ -21,15 +21,18 @@
  *      this phase's thesis committed by this phase's own spec.
  */
 import { describe, expect, it } from "vitest";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import {
+  IDENTITY_CARRIER,
+  classifyGateIdiom,
   parseAnnotations,
   parseFile,
   scanCorpus,
+  tokenizeStatements,
 } from "../../scripts/mutation-runner/parse.mjs";
 import {
   FAILURE_BRANCH_LOOKBACK,
@@ -507,6 +510,91 @@ describe("WR-03 / GRAMMAR rule 3 — a mutation may not INJECT the detector's ow
     );
     expect(result.errors).toEqual([]);
     expect(result.structured).toHaveLength(30);
+  });
+
+  // ── 164.4 authoring rule (threat T-164.4-01): NO TWIN MAY TARGET A STAND-IN ─
+  // A mutation to `scripts/pg-lane/fixtures/**` reddens the gate and would be
+  // counted as biting, but what it proved is that the FIXTURE AUTHOR'S GUESS
+  // can be broken — the production object the arm defends was never touched.
+  // Both polarities, because a rule that refuses everything is no better than
+  // one that refuses nothing.
+  it("ACCEPTS a step targeting a real migration — the rule refuses a directory, not mutation", () => {
+    const sql = [
+      "  -- RED-UNDER: prose",
+      `  -- RED-UNDER-M: {"arm":"X","apply":[{"kind":"edit","file":"supabase/migrations/20260827120000_strategy_shares_generation_model.sql","find":"generation  BIGINT","replace":"generation  INTEGER","occurrences":1}]}`,
+    ].join("\n");
+    const result = parseAnnotations(sql, { file: "g.sql" });
+    expect(result.errors).toEqual([]);
+    expect(result.structured).toHaveLength(1);
+  });
+
+  it("REFUSES a step targeting a pg-lane stand-in fixture, naming the rule and the prefix", () => {
+    // ⛔ EVERY spelling below OPENS THE SAME FILE ON DISK once `materialize`
+    // does `join(REPO_ROOT, step.file)` — `scripts/pg-lane/fixtures/` really
+    // holds `01-fixture-core.sql` and `03-fixture-compute-jobs.sql`. The last
+    // four are not hypotheses: MEASURED 2026-09-02, a prefix test over the RAW
+    // spelling refused only the first two and let the rest straight through,
+    // and `bad-file-ref` compares `step.file` to the corpus by exact string, so
+    // listing the same odd spelling in RED-UNDER-SETUP satisfied that check
+    // too. Pinned BY FIXTURE so a future rewrite of `targetsPgLaneFixture`
+    // cannot silently narrow back to a string prefix. The case-folded spelling
+    // matters because this repo's checkout is case-insensitive (macOS), so
+    // `Scripts/PG-Lane/Fixtures/…` opens the identical stand-in.
+    for (const target of [
+      "scripts/pg-lane/fixtures/01-fixture-core.sql",
+      "scripts/pg-lane/fixtures/03-fixture-compute-jobs.sql",
+      // The obvious spelling evasion: the same path with a `./` prefix.
+      "./scripts/pg-lane/fixtures/01-fixture-core.sql",
+      // A `.` segment INSIDE the path — `join` drops it.
+      "scripts/pg-lane/./fixtures/03-fixture-compute-jobs.sql",
+      // An empty segment from a doubled separator — `join` drops it too.
+      "scripts/pg-lane//fixtures/03-fixture-compute-jobs.sql",
+      // Case folding: identical file on a case-insensitive filesystem.
+      "Scripts/PG-Lane/Fixtures/01-fixture-core.sql",
+    ]) {
+      const sql = [
+        "  -- RED-UNDER: prose",
+        `  -- RED-UNDER-M: {"arm":"X","apply":[{"kind":"edit","file":"${target}","find":"a","replace":"b","occurrences":1}]}`,
+      ].join("\n");
+      const err = soleError(parseAnnotations(sql, { file: "g.sql" }));
+      expect(err, `not refused: ${target}`).toMatch(/targets a pg-lane stand-in fixture/);
+      // Evidence, not verdict: the message must say what to do instead.
+      expect(err).toMatch(/supabase\/migrations/);
+      expect(err).toMatch(/sql step/);
+    }
+  });
+
+  it("does NOT over-match: a non-fixture path under the SAME directory, and a `fixtures`-prefixed sibling, are accepted", () => {
+    // A refusal that refuses everything is as useless as one that refuses
+    // nothing. Widening the rule to normalise (drop `.` and empty segments,
+    // case-fold) must not turn it into "anything mentioning pg-lane". Both
+    // targets are legitimate: `scripts/pg-lane/run.sh` is the lane driver
+    // itself (it exists on disk), and a `fixtures-extra/` sibling shares the
+    // prefix `fixtures` but is a DIFFERENT directory — the trailing "/" in
+    // `PG_LANE_FIXTURE_DIR` is the only thing separating them.
+    for (const target of ["scripts/pg-lane/run.sh", "scripts/pg-lane/fixtures-extra/x.sql"]) {
+      const sql = [
+        "  -- RED-UNDER: prose",
+        `  -- RED-UNDER-M: {"arm":"X","apply":[{"kind":"edit","file":"${target}","find":"a","replace":"b","occurrences":1}]}`,
+      ].join("\n");
+      const result = parseAnnotations(sql, { file: "g.sql" });
+      expect(result.errors, `wrongly refused: ${target}`).toEqual([]);
+      expect(result.structured).toHaveLength(1);
+    }
+  });
+
+  it("the REAL corpus contains no twin this rule refuses either — it forbids nothing that exists", () => {
+    // MEASURED 2026-09-02 before shipping the rule: 0 of 30 twins in the only
+    // annotated file, and `grep -a -c 'RED-UNDER-M:.*"file":"scripts/pg-lane/
+    // fixtures/' supabase/tests/*.sql` -> 0 in all 71. Pinned so the backfill
+    // cannot quietly introduce the shape and then be "fixed" by relaxing it.
+    const result = parseFile(
+      join(REPO_ROOT, "supabase", "tests", "test_strategy_shares_rls.sql"),
+    );
+    expect(result.errors).toEqual([]);
+    expect(
+      result.structured.flatMap((a) => a.apply).filter((s) => s.kind !== "sql"),
+    ).not.toContainEqual(expect.objectContaining({ file: expect.stringContaining("pg-lane") }));
   });
 });
 
@@ -1268,6 +1356,137 @@ describe("GRAMMAR rule 3c — an identity is READ only where the RUNNER's gate r
   });
 });
 
+describe("classifyGateIdiom — the exclusion decision, over HAND-BUILT texts", () => {
+  // ⛔ WHY THIS BLOCK EXISTS. `classifyGateIdiom` decides which of the 71 gate
+  // files are OUT OF SCOPE for the whole 164.4 backfill. Until this block it
+  // had no direct test at all: all three branches were reached only through
+  // `scanCorpus` over the live corpus, where the `inert` branch yields an
+  // EMPTY list — so `expect(corpus.inertFiles).toEqual([])` passed identically
+  // whether that branch worked or was dead code, and the `UNREACHABLE_27` pin
+  // below was itself DERIVED BY the classifier, making it a self-referential
+  // oracle for the classifier's own correctness. Hand-built texts break both
+  // loops: the inputs come from this file, the expected classes from the
+  // documented contract, and neither is read off the corpus.
+
+  /**
+   * The runner's identity idiom: a code-level raise whose MESSAGE carries
+   * `TEST FAILED (`. Deliberately shaped like the real corpus — the carrier
+   * lives INSIDE the message literal, which is the whole subtlety below.
+   */
+  const PENDING_SQL = [
+    "DO $$",
+    "BEGIN",
+    "  IF EXISTS (SELECT 1 FROM public.strategy_shares) THEN",
+    "    RAISE EXCEPTION 'TEST FAILED (ANON 1a): anon could read the row';",
+    "  END IF;",
+    "END $$;",
+  ].join("\n");
+
+  /** A code-level raise that carries no identity — nothing to attribute. */
+  const UNREACHABLE_SQL = [
+    "DO $$",
+    "BEGIN",
+    "  IF EXISTS (SELECT 1 FROM public.strategy_shares) THEN",
+    "    RAISE EXCEPTION 'anon could read the row';",
+    "  END IF;",
+    "END $$;",
+  ].join("\n");
+
+  /**
+   * Raises that are TEXT, never code: one in a `--` comment, one in a nesting
+   * `/* … *\/` block comment, one inside a string literal. A grep sees three
+   * `RAISE EXCEPTION`s here; the masking projection sees none.
+   */
+  const INERT_SQL = [
+    "-- RAISE EXCEPTION 'TEST FAILED (DOC 1): documented syntax, never executed';",
+    "/* RAISE EXCEPTION 'TEST FAILED (DOC 2): inside a block comment'; */",
+    "SELECT 'RAISE EXCEPTION ''TEST FAILED (DOC 3): inside a literal''' AS doc;",
+  ].join("\n");
+
+  it('(a) a code-level raise carrying the identity carrier is "pending"', () => {
+    expect(classifyGateIdiom(PENDING_SQL)).toBe("pending");
+  });
+
+  it('(b) a code-level raise with a non-idiom message is "unreachable", not "pending"', () => {
+    // The two fixtures differ ONLY in the message literal, so this pins the
+    // carrier test rather than the raise test.
+    expect(classifyGateIdiom(UNREACHABLE_SQL)).toBe("unreachable");
+    expect(UNREACHABLE_SQL.replace("anon could read the row", `${IDENTITY_CARRIER}A): x`)).toContain(
+      IDENTITY_CARRIER,
+    );
+    expect(
+      classifyGateIdiom(UNREACHABLE_SQL.replace("anon could read the row", `${IDENTITY_CARRIER}A): x`)),
+    ).toBe("pending");
+  });
+
+  it('(c) a file whose ONLY raises sit in comments and literals is "inert" — the branch is REACHABLE', () => {
+    // Retires the vacuity in `expect(corpus.inertFiles).toEqual([])`: that
+    // assertion now sits beside a fixture proving the branch it depends on
+    // actually runs and actually returns "inert".
+    expect(classifyGateIdiom(INERT_SQL)).toBe("inert");
+    // Non-vacuity of the fixture itself: the bytes DO contain the raise and
+    // the carrier, so "inert" is a masking decision, not an absent needle.
+    expect(INERT_SQL).toMatch(/RAISE EXCEPTION/);
+    expect(INERT_SQL).toContain(IDENTITY_CARRIER);
+    // And the masking is what does it: no statement's executable projection
+    // carries a raise, though the raw text of one does.
+    const stmts = tokenizeStatements(INERT_SQL);
+    expect(stmts.some((s) => /RAISE\s+EXCEPTION/i.test(s.executableText))).toBe(false);
+    expect(stmts.some((s) => /RAISE\s+EXCEPTION/i.test(s.text))).toBe(true);
+  });
+
+  it("uncommenting the raise flips (c) from inert to pending — the comment is the ONLY difference", () => {
+    // Calibration for (c). Without this, an `inert` verdict could come from
+    // any property of the fixture; with it, the verdict is attributable to the
+    // `--` that masks the raise.
+    const uncommented = INERT_SQL.replace(
+      "-- RAISE EXCEPTION 'TEST FAILED (DOC 1)",
+      "RAISE EXCEPTION 'TEST FAILED (DOC 1)",
+    );
+    expect(uncommented).not.toBe(INERT_SQL);
+    expect(classifyGateIdiom(uncommented)).toBe("pending");
+  });
+
+  it("⛔ the carrier is read off the RAW statement text, NOT off executableText", () => {
+    // The documented second subtlety, pinned so a "consistency" refactor that
+    // switches this read to `executableText` fails HERE by name instead of
+    // silently reclassifying all 70 unannotated files as `unreachable` — the
+    // absent-vs-correct ambiguity the classification exists to remove.
+    const raises = tokenizeStatements(PENDING_SQL).filter((s) =>
+      /RAISE\s+EXCEPTION/i.test(s.executableText),
+    );
+    expect(raises).toHaveLength(1);
+    // The identity lives in the message literal, which masking BLANKS...
+    expect(raises[0].executableText).not.toContain(IDENTITY_CARRIER);
+    // ...and survives only in the raw text. These two lines are the difference
+    // between "pending" and "unreachable" for the whole corpus.
+    expect(raises[0].text).toContain(IDENTITY_CARRIER);
+    expect(classifyGateIdiom(PENDING_SQL)).toBe("pending");
+  });
+
+  it("a raise INSIDE a literal cannot make a file pending — masking, not substring search", () => {
+    // The complement of the rule above: reading the RAISE off raw text would
+    // classify this `unreachable` (or `pending`), because the bytes are all
+    // there. Only the executable projection gets it right.
+    const literalOnly = [
+      "DO $$",
+      "BEGIN",
+      "  PERFORM 1;",
+      "END $$;",
+      "SELECT 'RAISE EXCEPTION ''TEST FAILED (X 1): forged''' AS not_code;",
+    ].join("\n");
+    expect(literalOnly).toMatch(/RAISE EXCEPTION/);
+    expect(literalOnly).toContain(IDENTITY_CARRIER);
+    expect(classifyGateIdiom(literalOnly)).toBe("inert");
+  });
+
+  it("the three classes are exhaustive over these inputs — no fourth value leaks out", () => {
+    for (const text of [PENDING_SQL, UNREACHABLE_SQL, INERT_SQL, "", "SELECT 1;"]) {
+      expect(["pending", "unreachable", "inert"]).toContain(classifyGateIdiom(text));
+    }
+  });
+});
+
 describe("against the real corpus (reads via node:fs, never shell grep)", () => {
   const GATE = join(REPO_ROOT, "supabase", "tests", "test_strategy_shares_rls.sql");
 
@@ -1317,6 +1536,117 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
     expect(corpus.filesTotal).toBe(71);
     expect(corpus.filesAnnotated).toBe(1);
     expect(corpus.annotatedFiles).toEqual(["test_strategy_shares_rls.sql"]);
+  });
+
+  // ── 164.4-01: the EXCLUDED set, pinned by name ─────────────────────────────
+  // The founder's 2026-09-02 scope amendment makes 27 gate files out of scope
+  // because they raise outside the runner's identity idiom, and makes NAMING
+  // them a merge condition. A derivation that silently returned `[]` would make
+  // the runner print `unreachable: 0 file(s)` — indistinguishable, to every
+  // reader, from a corpus with nothing to exclude. That absent-vs-correct
+  // ambiguity is exactly what the amendment forbids, so the list is pinned
+  // EXACTLY rather than by count.
+  //
+  // MEASURED 2026-09-02 by `classifyGateIdiom` over `supabase/tests/` and
+  // cross-checked against RESEARCH § Option (a)'s independently-built table
+  // (27 files, 321 raises, 139 distinct prefixes): the two agree file for file.
+  const UNREACHABLE_27 = [
+    "test_anon_execute_current_user_has_app_role.sql",
+    "test_api_key_delete_atomicity.sql",
+    "test_claim_compute_jobs_dedupe_partition.sql",
+    "test_claim_kind_filter.sql",
+    "test_cleanup_orphaned_api_keys_sweep.sql",
+    "test_cleanup_wizard_drafts_race.sql",
+    "test_commit_scenario_batch_auth_input.sql",
+    "test_commit_scenario_batch_fingerprint_precondition.sql",
+    "test_commit_scenario_batch_p1956_range.sql",
+    "test_commit_scenario_batch_p1957_divested.sql",
+    "test_compute_analytics_kind_retired.sql",
+    "test_compute_jobs_rpc_error_clear_and_fanin.sql",
+    "test_cutover_strategy_metrics_keys_atomic.sql",
+    "test_data_deletion_requests_fk_set_null.sql",
+    "test_enqueue_internal_destrict.sql",
+    "test_get_latest_portfolio_analytics_for_user.sql",
+    "test_handle_new_user_role_allowlist.sql",
+    "test_log_audit_event_service_ceiling.sql",
+    "test_mt5_exchange_boundary.sql",
+    "test_portfolio_recompute_inflight_unique.sql",
+    "test_retention_crons_safe.sql",
+    "test_sanitize_user_hardening.sql",
+    "test_sfox_exchange_boundary.sql",
+    "test_staff_role_both_backfill.sql",
+    "test_sync_status_preserves_warnings.sql",
+    "test_sync_status_supersede_failed_per_kind.sql",
+    "test_upsert_strategy_analytics_series_batch_privilege.sql",
+  ];
+
+  it("scanCorpus names the 27 non-idiom files EXACTLY — an empty list would read as full coverage", () => {
+    const corpus = scanCorpus(join(REPO_ROOT, "supabase", "tests"));
+    expect(corpus.unreachableFiles).toEqual(UNREACHABLE_27);
+  });
+
+  it("the four classes PARTITION the corpus, checked against a SECOND derivation", () => {
+    // ⛔ WHAT THIS USED TO BE, and why it changed. It asserted
+    //   pendingFiles.length === filesTotal − filesAnnotated − unreachable − inert
+    // and `new Set(all).size === filesTotal`. Both hold BY CONSTRUCTION of the
+    // code under test: `scanCorpus` pushes each file into exactly one array and
+    // `readdirSync` yields unique names. That is the implementation's own
+    // bookkeeping restated — a money-math-style self-referential oracle, which
+    // this repo forbids.
+    //
+    // MEASURED 2026-09-02, not asserted: swapping the two `push` targets in
+    // `scanCorpus` (43 pending files filed as `unreachable` and 27 unreachable
+    // filed as `pending`) leaves the arithmetic balanced — 27 === 71 − 1 − 43 − 0
+    // — and the set size at 71, so BOTH replaced lines returned `true` under a
+    // corpus that was completely misfiled.
+    //
+    // So the four sets are RE-DERIVED here, from `readdirSync` + the two
+    // primitives, and compared SET FOR SET. A misfiled name now fails against
+    // an independent derivation instead of against itself.
+    const dir = join(REPO_ROOT, "supabase", "tests");
+    const names = readdirSync(dir)
+      .filter((f) => f.endsWith(".sql"))
+      .sort();
+
+    const expected: Record<string, string[]> = {
+      annotated: [],
+      pending: [],
+      unreachable: [],
+      inert: [],
+    };
+    for (const name of names) {
+      const text = readFileSync(join(dir, name), "utf8");
+      const parsed = parseAnnotations(text, { file: name });
+      if (parsed.prose.length > 0 || parsed.structured.length > 0) expected.annotated.push(name);
+      else expected[classifyGateIdiom(text)].push(name);
+    }
+
+    const corpus = scanCorpus(dir);
+    expect(corpus.annotatedFiles).toEqual(expected.annotated);
+    expect(corpus.pendingFiles).toEqual(expected.pending);
+    expect(corpus.unreachableFiles).toEqual(expected.unreachable);
+    expect(corpus.inertFiles).toEqual(expected.inert);
+    // The scalars must agree with the same second derivation, not with the
+    // arrays they were computed alongside.
+    expect(corpus.filesTotal).toBe(names.length);
+    expect(corpus.filesAnnotated).toBe(expected.annotated.length);
+
+    // Covering and disjoint, measured against the DIRECTORY LISTING — the one
+    // ground truth outside `scanCorpus` — rather than against `filesTotal`.
+    const all = [
+      ...corpus.annotatedFiles,
+      ...corpus.pendingFiles,
+      ...corpus.unreachableFiles,
+      ...corpus.inertFiles,
+    ];
+    expect(all.length, "a file was filed twice or dropped").toBe(names.length);
+    expect([...all].sort()).toEqual(names);
+
+    // A gate carrying no executable raise at all cannot fail. Zero today; a
+    // non-zero here is a finding about that gate, and the runner prints it.
+    // This assertion has teeth only because the `inert` branch is proved
+    // REACHABLE by the hand-built fixture in the classifyGateIdiom block above.
+    expect(corpus.inertFiles).toEqual([]);
   });
 });
 

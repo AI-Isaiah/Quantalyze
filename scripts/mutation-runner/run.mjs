@@ -93,8 +93,10 @@ import { fileURLToPath } from "node:url";
 
 import {
   BRANCH_HEAD_KEYWORDS,
+  IDENTITY_CARRIER,
+  RAISE_EXCEPTION_RE,
   maskNonCode,
-  parseFile,
+  parseAnnotations,
   scanCorpus,
   tokenizeStatements,
 } from "./parse.mjs";
@@ -419,8 +421,10 @@ export const executableText = (source) => maskNonCode(source);
  */
 export const isBranchHead = (statement) => statement != null && statement.head === true;
 
-/** A `RAISE EXCEPTION`, read in the masking projection so a mention in a literal is not one. */
-const RAISE_EXCEPTION_RE = /\bRAISE\s+EXCEPTION\b/i;
+// ⭐ `RAISE_EXCEPTION_RE` used to be declared here. It is IMPORTED from
+// `parse.mjs` since 2026-09-02, because `scanCorpus` needs the identical notion
+// of "an executable raise" to classify the unannotated corpus. One definition,
+// two readers — never a second spelling.
 
 /**
  * The index of the previous SIBLING statement — same nesting depth, same
@@ -541,7 +545,7 @@ function oneLine(subject) {
  */
 export function neuterArm(text, arm) {
   const lines = text.split("\n");
-  const needle = `TEST FAILED (${arm})`;
+  const needle = `${IDENTITY_CARRIER}${arm})`;
   const statements = tokenizeStatements(text);
 
   const raiseIdx = raiseStatementIndex(statements, needle);
@@ -978,7 +982,7 @@ const identityRe = (flags = "") => new RegExp(IDENTITY_RE.source, flags);
 export function gateAttributionRecords(gateText) {
   const statements = tokenizeStatements(gateText);
   const records = [];
-  for (const idx of innermostCarriers(statements, "TEST FAILED (")) {
+  for (const idx of innermostCarriers(statements, IDENTITY_CARRIER)) {
     const stmt = statements[idx];
     // A commented-out (already neutered) raise is not a statement at all, and a
     // bare `TEST FAILED (` literal is not a raise — the same narrowing
@@ -999,6 +1003,45 @@ export function gateAttributionRecords(gateText) {
     }
   }
   return records;
+}
+
+/**
+ * An identity's SECTION — the coverage unit the founder locked on 2026-09-02
+ * (ROADMAP § SCOPE AMENDMENT: one `RED-UNDER-M` per named assertion group).
+ *
+ * ⛔ THE UNIT IS DERIVED FROM THE IDENTITIES, NEVER FROM THE `-- ====` BANNERS.
+ * MEASURED 2026-09-02: the banner convention is not uniform across the 44 idiom
+ * files — `test_reconcile_dropped_enqueue_sweep.sql`,
+ * `test_strategy_analytics_stuck_computing_reaper.sql` and
+ * `test_retention_orphaned_running.sql` carry 8 / 12 / 6 banners for 39 / 29 /
+ * 25 sections, because there they delimit coarse "Part 1 / Part 2" blocks. A
+ * count taken off banners UNDERCOUNTS, which would make a half-annotated file
+ * read as complete — the exact direction this column exists to expose.
+ *
+ * The rule strips a trailing sub-suffix: `SHAPE 2a` -> `SHAPE 2`,
+ * `TRIGGER 3d-i` -> `TRIGGER 3`, `ANON 1b-grant` -> `ANON 1`. An identity with
+ * no such suffix is its own section.
+ */
+export const sectionOfIdentity = (id) => id.replace(/(\d)[a-z]*(-[A-Za-z]+)?$/, "$1");
+
+/**
+ * How many SECTIONS a gate file has: distinct sections over the identities the
+ * runner can actually attribute.
+ *
+ * ⛔ Built on `gateAttributionRecords`, not on a raw scan of the file text.
+ * MEASURED 2026-09-02 on the reference file: a raw `TEST FAILED (…)` sweep of
+ * `test_strategy_shares_rls.sql` yields 104 identities / 36 sections, because
+ * the file's own HEADER documents the idiom; the attributable set is 103 / 35.
+ * The number printed beside `annotated` has to be the number an annotation
+ * could ever reach, or the gap it exposes would be an artefact of the counter.
+ *
+ * ⚠️ This plan PRINTS the field. It does NOT yet pin `annotated >= sections`:
+ * the reference file is 30 twins over 35 sections until plan 164.4-02 closes
+ * the 15, so the pin would fail on the very run this plan measures. Plan 02
+ * arms it.
+ */
+export function gateSectionCount(gateText) {
+  return new Set(gateAttributionRecords(gateText).map((r) => sectionOfIdentity(r.arm))).size;
 }
 
 /**
@@ -1410,7 +1453,7 @@ export function failureBranches(text) {
   const lines = text.split("\n");
   const statements = tokenizeStatements(text);
   const out = [];
-  for (const idx of innermostCarriers(statements, "TEST FAILED (")) {
+  for (const idx of innermostCarriers(statements, IDENTITY_CARRIER)) {
     const stmt = statements[idx];
     // A commented-out (neutered) raise is not a statement at all, so it cannot
     // reach here — the tokenizer's masking, not a `^--` line test, is what
@@ -1651,10 +1694,34 @@ function runLane({ workdir, applyAbs, postApplyAbs, gateAbs, leg }) {
  * numbers in a machine-readable tail and says it is the gate failing — a bare
  * conclusion is the repudiation shape SC-7 refuses.
  *
- * @param {{armsExecuted: number, laneInvocations: number, biting: number}} counts
+ * ⭐ 2026-09-02 (164.4-01) — TWO MORE RELATIONS, over the PER-FILE breakdown.
+ * `perFile` and `armsAnnotated` are OPTIONAL: a caller that passes neither gets
+ * exactly the three-count behaviour above, which is what the pure-arithmetic
+ * fixtures in `mutation-runner-floors.test.ts` exercise. When they ARE passed:
+ *
+ *   (3) sum(perFile.biting) === biting
+ *   (4) sum(perFile.annotated) === armsAnnotated
+ *
+ * These are not restatements of the aggregate. The aggregate subtracts the
+ * non-biting defect kinds GLOBALLY; the per-file column subtracts the ones that
+ * NAME that file. A non-biting defect attributed to no file — or to a file the
+ * loop never listed — deflates the aggregate and leaves the breakdown intact,
+ * so the two disagree and say so. That is the shape RESEARCH Pitfall 2 warns
+ * about in miniature: a number that moved for a reason nothing in the report
+ * accounts for.
+ *
+ * @param {{armsExecuted: number, laneInvocations: number, biting: number,
+ *          perFile?: Array<{name: string, annotated: number, biting: number}> | null,
+ *          armsAnnotated?: number | null}} counts
  * @returns {string[]}
  */
-export function absurdityViolations({ armsExecuted, laneInvocations, biting }) {
+export function absurdityViolations({
+  armsExecuted,
+  laneInvocations,
+  biting,
+  perFile = null,
+  armsAnnotated = null,
+}) {
   const tail = `(executed=${armsExecuted} lane-invocations=${laneInvocations} biting=${biting})`;
   const gate = "MEASURE_FAIL — this is the GATE failing, not the corpus:";
   const isCount = (n) => Number.isInteger(n) && n >= 0;
@@ -1687,7 +1754,187 @@ export function absurdityViolations({ armsExecuted, laneInvocations, biting }) {
         `either the counts were assembled from two runs or the arithmetic was tampered with.`,
     );
   }
+  if (perFile !== null) {
+    if (!perFile.every((r) => isCount(r.biting) && isCount(r.annotated))) {
+      out.push(
+        `${gate} the per-file breakdown carries a field that is not a non-negative integer ` +
+          `${tail}. An unmeasurable column is not a column of zeroes.`,
+      );
+      return out;
+    }
+    const sumBiting = perFile.reduce((a, r) => a + r.biting, 0);
+    if (sumBiting !== biting) {
+      out.push(
+        `${gate} the per-file breakdown sums to ${sumBiting} biting arm(s) but the aggregate ` +
+          `reports ${biting} ${tail}, across ${perFile.length} file(s). The two are derived from ` +
+          `the same run — the aggregate subtracts the non-biting defects globally, the columns ` +
+          `subtract the ones naming each file — so a disagreement means a defect belongs to no ` +
+          `file the loop listed, or a column was not kept.`,
+      );
+    }
+    if (armsAnnotated !== null) {
+      const sumAnnotated = perFile.reduce((a, r) => a + r.annotated, 0);
+      if (!isCount(armsAnnotated) || sumAnnotated !== armsAnnotated) {
+        out.push(
+          `${gate} the per-file breakdown sums to ${sumAnnotated} annotated twin(s) but the ` +
+            `aggregate reports ${armsAnnotated} ${tail}, across ${perFile.length} file(s). Every ` +
+            `twin belongs to exactly one gate file; a gap here means twins were counted for a ` +
+            `file the report does not describe.`,
+        );
+      }
+    }
+  }
   return out;
+}
+
+// ===========================================================================
+// 164.4-01 — THE EXCLUSION IS PRINTED, BY NAME, ON EVERY RUN (criterion 1 as
+// amended; threat T-164.4-04)
+// ===========================================================================
+//
+// ⛔ THE DEFECT THIS CLOSES. `coverage: files 1/71` is a ratio over EVERY `.sql`
+// in the scope dir, and the phase's own end state is `files 44/71` — because 27
+// of those 71 raise outside the runner's identity idiom and no arm of theirs
+// can be attributed at all. A reader of `44/71` cannot tell "17 files nobody
+// got to yet" from "27 files this gate can never judge, deliberately". That is
+// the repudiation shape: a subset covered, reported as if it were the whole.
+//
+// The founder's scope amendment (2026-09-02, ROADMAP § SCOPE AMENDMENT) makes
+// the exclusion explicit and makes PRINTING it a merge condition: *"the 27
+// non-idiom files are OUT of scope and the runner names them in its output
+// every run; a silent exclusion fails this criterion just as a missing
+// annotation does."* So the runner DERIVES the classification (never a
+// hand-maintained list, which would be one more claim nobody compares) and the
+// `sql-mutation` count-recheck step MEASURE_FAILs when the line is absent or
+// when the count it claims disagrees with the names it prints.
+//
+// ⭐ EVIDENCE, NOT VERDICT (SC-7). The line carries the COUNT and the NAMES.
+// A count alone would be a number nobody could check; the cross-check in
+// ci.yml is only possible because both are printed.
+//
+// MEASURED 2026-09-02 over `supabase/tests/`: 1 annotated / 43 pending /
+// 27 unreachable / 0 inert = 71. The 27 match RESEARCH § Option (a)'s table
+// exactly, derived independently by `classifyGateIdiom`.
+//
+// ⛔ FORMAT CONSTRAINT (PATTERNS § P6). `ci.yml` parses the aggregate by
+// line-start prefix, first match only, and the coverage grep is `$`-ANCHORED.
+// So `unreachable:` is a NEW, distinct column-0 prefix (it collides with none
+// of the four existing greps) and every other new line is INDENTED.
+
+/**
+ * The defect kinds that take an EXECUTED arm out of `biting`. Named once, so
+ * the aggregate `bitingArms` and the per-file `biting` column cannot come to
+ * mean two different things under one word.
+ *
+ * ⛔ `synthesised-identity` MUST be here: it is raised for an arm that DID run
+ * a lane, so omitting it counts a vacuous PASS as biting — the one number
+ * ARMS_FLOOR bounds. `lane-unrunnable` is NOT here: it is handled by
+ * `armsUnjudged`, because the never-started case raises it without ever
+ * incrementing `armsExecuted` and subtracting by kind would push biting below
+ * what ran.
+ */
+const NON_BITING_DEFECT_KINDS = ["no-red", "wrong-first-failure", "synthesised-identity"];
+
+/**
+ * The OPEN shape of a per-file tally — the seven fields `perFileRows` derives
+ * from and `logPerFileRows` prints, in ONE place.
+ *
+ * ⛔ Both modes build this, and a column added to only one of them is how the
+ * two modes' identically-shaped lines come to mean different things. Hence one
+ * constructor rather than two literals.
+ *
+ * ⚠️ `annotated` and `waived` are PARAMETERS, not derived here, because the two
+ * modes legitimately seed them differently and unifying that would be a silent
+ * behaviour change:
+ *   - `runCorpus` opens the tally at 0/0 before the RED-UNDER-SETUP check and
+ *     fills it in only for a file that reaches the arm loop. A file the gate
+ *     `continue`s for a missing setup line therefore reads `annotated 0` — it
+ *     contributed no arm to this run, and the row must not claim otherwise.
+ *   - `parseOnlyCorpus` runs no lane, so its whole product IS the static count;
+ *     it seeds from `parsed.structured` immediately and reports the twins a
+ *     file carries even when the gate path could never run them.
+ *
+ * `sections` is computed from `gateText` the caller ALREADY read, so the row
+ * costs no extra `readFileSync` beyond the parse.
+ */
+function newPerFileTally({ name, gateRel, gateText, annotated, waived }) {
+  return {
+    name,
+    gateRel,
+    sections: gateSectionCount(gateText),
+    annotated,
+    waived,
+    executed: 0,
+    unjudged: 0,
+  };
+}
+
+/**
+ * The per-file rows the report prints and the absurdity floor cross-sums.
+ *
+ * `judged` is what the file's arms actually reached a verdict on, and it is the
+ * column that makes threat T-164.4-05 visible: a file whose baseline went RED
+ * is `continue`d before any arm runs, so it shows `annotated 39 / judged 0` —
+ * 39 twins of coverage that measured nothing. `biting` subtracts, from that
+ * file's judged arms, the non-biting defects that NAME that file.
+ */
+function perFileRows(tallies, defects) {
+  return tallies.map((t) => {
+    const judged = t.executed - t.unjudged;
+    const nonBiting = defects.filter(
+      (d) => d.file === t.gateRel && NON_BITING_DEFECT_KINDS.includes(d.kind),
+    ).length;
+    return { ...t, judged, biting: judged - nonBiting };
+  });
+}
+
+/** One indented per-file line, in the per-item shape of the `  waived:` line. */
+function logPerFileRows(rows, log) {
+  for (const r of rows) {
+    log(
+      `  file ${r.name}: sections ${r.sections} / judged ${r.judged} / annotated ${r.annotated} / ` +
+        `waived ${r.waived} / biting ${r.biting}`,
+    );
+  }
+}
+
+/**
+ * Print the corpus classification: the excluded files by name, then the idiom
+ * files still awaiting annotation. Called at BOTH coverage print sites, so the
+ * static mode and the gate say the same thing about the same corpus.
+ */
+export function logCorpusClassification(corpus, log) {
+  // ⛔ NO DEFAULTS. `[]` here would print `unreachable: 0 file(s)` for a corpus
+  // whose derivation never ran — indistinguishable, to every reader, from a
+  // corpus with nothing to exclude. That is the exact "could not measure read
+  // as measured zero" shape invariant 2 of this file's header refuses, so a
+  // missing class is a MEASURE_FAIL and stops the run instead of narrating a
+  // full-coverage exclusion set the runner never computed.
+  const { unreachableFiles, pendingFiles, inertFiles } = corpus;
+  const missing = Object.entries({ unreachableFiles, pendingFiles, inertFiles })
+    .filter(([, v]) => !Array.isArray(v))
+    .map(([k, v]) => `${k}=${JSON.stringify(v)}`);
+  if (missing.length > 0) {
+    throw new Error(
+      `MEASURE_FAIL — this is the GATE failing, not the corpus: logCorpusClassification was handed a ` +
+        `corpus whose classification is not derivable (${missing.join(", ")}). An absent exclusion ` +
+        `class is not a class with zero files in it.`,
+    );
+  }
+  log(
+    `unreachable: ${unreachableFiles.length} file(s) raise outside the runner's identity idiom — ` +
+      `${unreachableFiles.join(" ")} (TODOS [REDUNDER-NONIDIOM])`,
+  );
+  log(`  pending: ${pendingFiles.length} idiom file(s) without RED-UNDER — ${pendingFiles.join(" ")}`);
+  // Zero today. A gate with no executable raise at all cannot fail, which is a
+  // FINDING about that gate, not a coverage class — so it is printed only when
+  // it exists, and it is printed loudly enough to be chased.
+  if (inertFiles.length > 0) {
+    log(
+      `  inert: ${inertFiles.length} file(s) carry NO code-level RAISE EXCEPTION — ` +
+        `${inertFiles.join(" ")} (a gate that cannot fail is a finding, not coverage)`,
+    );
+  }
 }
 
 /**
@@ -1755,6 +2002,12 @@ export function runCorpus({
   let armsUnjudged = 0;
   const waivers = [];
   const timings = [];
+  // 164.4-01 — the PER-FILE view (threat T-164.4-05). `filesAnnotated` counts a
+  // file whose baseline went RED exactly like one whose 39 arms all bit: the
+  // arm loop is `continue`d and the file still reads as coverage. So each
+  // target keeps its own tally and the report prints it. Ratchet on `biting`,
+  // never on `annotated`.
+  const perFileTallies = [];
 
   // 164.3.1-10: the lane runner's tally is read as a DELTA across this run —
   // snapshot now, subtract at the summary. Never reset: this function does not
@@ -1788,7 +2041,15 @@ export function runCorpus({
     for (const name of targets) {
       const gateAbsRepo = join(scopeDir, name);
       const gateRel = relative(REPO_ROOT, gateAbsRepo);
-      const parsed = parseFile(gateAbsRepo);
+      // Read ONCE and threaded into both readers, rather than `parseFile`
+      // reading it and `gateSectionCount` reading it again.
+      const gateText = readFileSync(gateAbsRepo, "utf8");
+      const parsed = parseAnnotations(gateText, { file: gateAbsRepo });
+      // Opened HERE, before any `continue` below, so a file that never reaches
+      // an arm still gets a printed row saying so — and seeded at 0/0 for the
+      // reason `newPerFileTally` documents.
+      const tally = newPerFileTally({ name, gateRel, gateText, annotated: 0, waived: 0 });
+      perFileTallies.push(tally);
 
       for (const err of parsed.errors) addDefect("parse", null, gateRel, err.message);
       if (!parsed.parity.ok) {
@@ -1825,9 +2086,11 @@ export function runCorpus({
       }
 
       armsAnnotated += annotations.length;
+      tally.annotated = annotations.length;
       for (const ann of annotations) {
         if (ann.waiver) {
           armsWaived += 1;
+          tally.waived += 1;
           waivers.push({ arm: ann.arm, file: gateRel, reason: ann.waiver });
         }
       }
@@ -1964,6 +2227,8 @@ export function runCorpus({
           if (run.invoked) {
             armsExecuted += 1;
             armsUnjudged += 1;
+            tally.executed += 1;
+            tally.unjudged += 1;
           }
           addDefect(
             "lane-unrunnable",
@@ -1978,6 +2243,7 @@ export function runCorpus({
         // The verdict loop's OWN count. Its twin is `laneTally.arm`, kept
         // inside runLane; the summary cross-checks the two (164.3.1-10).
         armsExecuted += 1;
+        tally.executed += 1;
         timings.push(run.seconds);
 
         // ── 164.3.1-05: attribute by SOURCE LOCATION ────────────────────────
@@ -2079,7 +2345,7 @@ export function runCorpus({
         // into an attributed read, because an attributed read is exactly what
         // a forgery targets.
         for (const entry of ann.neuter) {
-          if (run.output.includes(`TEST FAILED (${entry.arm})`)) {
+          if (run.output.includes(`${IDENTITY_CARRIER}${entry.arm})`)) {
             addDefect(
               "neuter-missed",
               ann.arm,
@@ -2154,6 +2420,7 @@ export function runCorpus({
   // -----------------------------------------------------------------------
   log("");
   log(`coverage: files ${corpus.filesAnnotated}/${corpus.filesTotal}`);
+  logCorpusClassification(corpus, log);
   log(`arms: ${armsExecuted}/${armsAnnotated}/${armsWaived}   (executed/annotated/waived)`);
   // IN-05: the number ARMS_FLOOR is actually compared against, printed under
   // its own name.
@@ -2175,10 +2442,7 @@ export function runCorpus({
   // by kind: the never-started case raises one without ever incrementing
   // `armsExecuted`, and subtracting it would push biting below what ran.
   const bitingArms =
-    armsExecuted -
-    armsUnjudged -
-    defects.filter((d) => ["no-red", "wrong-first-failure", "synthesised-identity"].includes(d.kind))
-      .length;
+    armsExecuted - armsUnjudged - defects.filter((d) => NON_BITING_DEFECT_KINDS.includes(d.kind)).length;
   log(`biting: ${bitingArms}   (executed arms that reddened their OWN arm first — the quantity ARMS_FLOOR bounds)`);
   // 164.3.1-10: the lane runner's OWN count of arm lanes, printed beside the
   // verdict loop's `arms:` so the two can be compared — here, and again by the
@@ -2195,6 +2459,8 @@ export function runCorpus({
       `independent of the ${armsExecuted} the verdict loop counted; plus ${laneLegs.baseline} ` +
       `baseline / ${laneLegs.restore} restore leg(s))`,
   );
+  const fileRows = perFileRows(perFileTallies, defects);
+  logPerFileRows(fileRows, log);
   for (const w of waivers) log(`  waived: ${w.arm} — ${w.reason}`);
   if (timings.length > 0) {
     const total = timings.reduce((a, b) => a + b, 0);
@@ -2238,7 +2504,13 @@ export function runCorpus({
   // Applied in EVERY mode, narrowed included — a diagnostic run that miscounts
   // is no more trustworthy than a full one. See absurdityViolations.
   // -----------------------------------------------------------------------
-  for (const violation of absurdityViolations({ armsExecuted, laneInvocations, biting: bitingArms })) {
+  for (const violation of absurdityViolations({
+    armsExecuted,
+    laneInvocations,
+    biting: bitingArms,
+    perFile: fileRows,
+    armsAnnotated,
+  })) {
     addDefect("absurdity", null, null, violation);
   }
 
@@ -2337,11 +2609,28 @@ export function parseOnlyCorpus({ scopeDir, log = (s) => console.log(s) }) {
   let armsAnnotated = 0;
   let armsWaived = 0;
   const waivers = [];
+  // Same per-file view as the gate path, with the two lane-dependent columns
+  // pinned at 0 — this mode runs no lane, so nothing is judged and nothing
+  // bites. Printing them as 0 rather than omitting the columns keeps the two
+  // modes' line shape identical, which is what lets one regex read both.
+  const perFileTallies = [];
 
   for (const name of corpus.annotatedFiles) {
     const gateAbsRepo = join(scopeDir, name);
     const gateRel = relative(REPO_ROOT, gateAbsRepo);
-    const parsed = parseFile(gateAbsRepo);
+    // Read ONCE and threaded into both readers, as in the gate path.
+    const gateText = readFileSync(gateAbsRepo, "utf8");
+    const parsed = parseAnnotations(gateText, { file: gateAbsRepo });
+    // Seeded from the static parse, not 0/0: this mode runs no lane, so the
+    // twins a file carries ARE its whole product. See `newPerFileTally`.
+    const tally = newPerFileTally({
+      name,
+      gateRel,
+      gateText,
+      annotated: parsed.structured.length,
+      waived: parsed.structured.filter((a) => a.waiver).length,
+    });
+    perFileTallies.push(tally);
 
     for (const err of parsed.errors) addDefect("parse", null, gateRel, err.message);
     if (!parsed.parity.ok) {
@@ -2434,7 +2723,9 @@ export function parseOnlyCorpus({ scopeDir, log = (s) => console.log(s) }) {
 
   log("");
   log(`coverage: files ${corpus.filesAnnotated}/${corpus.filesTotal}`);
+  logCorpusClassification(corpus, log);
   log(`arms: 0/${armsAnnotated}/${armsWaived}   (executed/annotated/waived)`);
+  logPerFileRows(perFileRows(perFileTallies, defects), log);
   for (const w of waivers) log(`  waived: ${w.arm} — ${w.reason}`);
   log("");
   log("⚠️ STATIC PARSE ONLY — ZERO arms executed. This is NOT the gate: it cannot");
@@ -2485,6 +2776,26 @@ function expect(condition, message) {
   return true;
 }
 
+/**
+ * "no defect of these kinds" — the ONE spelling every ABSENCE assertion in
+ * `selfTest()` uses.
+ *
+ * ⛔ NEVER spell an absence as `!defects.some((x) => x.kind === "<k>")`. The
+ * coverage extractor in `src/__tests__/mutation-runner-floors.test.ts` scans
+ * `selfTest()`'s SOURCE — comments included — for `kind === "<k>"` and treats
+ * every match as a kind the self-test EXERCISES. An absence proves only that a
+ * kind did NOT appear, so crediting it would be a vacuity inside the vacuity
+ * gate: the kind would keep reading as covered after its one POSITIVE arm was
+ * renamed or deleted. Going through the kind LIST keeps the extractor honest by
+ * construction rather than by each author remembering.
+ *
+ * `where` narrows the absence further (a detail regex); it defaults to "any
+ * defect of that kind at all".
+ */
+function noDefectOfKind(defects, kinds, where = () => true) {
+  return !defects.some((x) => kinds.includes(x.kind) && where(x));
+}
+
 function selfTest() {
   const quiet = () => {};
   let pass = true;
@@ -2496,7 +2807,7 @@ function selfTest() {
   // 6 outright, so each states the floor appropriate to ITS corpus. Check 5 is
   // where an ARMS_FLOOR regression is proven to fire — the mode that could not
   // be proven at all while the floor was 0.
-  console.log("=== SELF-TEST 1/15: a non-biting annotation must exit 1 with `no-red` ===");
+  console.log("=== SELF-TEST 1/16: a non-biting annotation must exit 1 with `no-red` ===");
   const a = runCorpus({ scopeDir: SELFTEST_DIR, onlyFile: "nonbiting-gate.sql", armsFloor: 0, log: quiet });
   pass =
     expect(a.exitCode === 1, `exit code is 1 (got ${a.exitCode})`) &&
@@ -2506,7 +2817,7 @@ function selfTest() {
     ) &&
     pass;
 
-  console.log("=== SELF-TEST 2/15: a FILES_FLOOR regression must exit 1 with `floor` ===");
+  console.log("=== SELF-TEST 2/16: a FILES_FLOOR regression must exit 1 with `floor` ===");
   // ⚠️ The fixture corpus carries ONE waiver (MINI 3), so every whole-corpus
   // scenario states `waivedCeiling: 1` — its own measured number — exactly as
   // it states its own armsFloor. Scenario 5 is where the ceiling is proven to
@@ -2520,7 +2831,7 @@ function selfTest() {
     ) &&
     pass;
 
-  console.log("=== SELF-TEST 3/15: reddening the WRONG arm must exit 1 with `wrong-first-failure` ===");
+  console.log("=== SELF-TEST 3/16: reddening the WRONG arm must exit 1 with `wrong-first-failure` ===");
   const c = runCorpus({ scopeDir: SELFTEST_DIR, onlyFile: "wrong-identity-gate.sql", armsFloor: 0, log: quiet });
   pass =
     expect(c.exitCode === 1, `exit code is 1 (got ${c.exitCode})`) &&
@@ -2532,7 +2843,7 @@ function selfTest() {
     ) &&
     pass;
 
-  console.log("=== SELF-TEST 4/15: a wrong `occurrences` must exit 1 with MEASURE_FAIL, NOT `no-red` ===");
+  console.log("=== SELF-TEST 4/16: a wrong `occurrences` must exit 1 with MEASURE_FAIL, NOT `no-red` ===");
   const d = runCorpus({ scopeDir: SELFTEST_DIR, onlyFile: "occurrence-mismatch-gate.sql", armsFloor: 0, log: quiet });
   pass =
     expect(d.exitCode === 1, `exit code is 1 (got ${d.exitCode})`) &&
@@ -2541,7 +2852,7 @@ function selfTest() {
       'the defect table names OCCMISS 1 with kind "occurrence-mismatch"',
     ) &&
     expect(
-      !d.defects.some((x) => x.kind === "no-red"),
+      noDefectOfKind(d.defects, ["no-red"]),
       'no "no-red" defect is reported — an unmeasurable mutation is not a non-biting arm',
     ) &&
     pass;
@@ -2552,7 +2863,7 @@ function selfTest() {
   // this check exists, and it is what stops the pinned floor from decaying back
   // into a constant nobody compares to anything.
   console.log(
-    "=== SELF-TEST 5/15: an ARMS_FLOOR regression must exit 1 with `floor`, and so must a WAIVED_CEILING excess ===",
+    "=== SELF-TEST 5/16: an ARMS_FLOOR regression must exit 1 with `floor`, and so must a WAIVED_CEILING excess ===",
   );
   // waivedCeiling 0 against a corpus carrying 1 waiver: the ceiling's FIRE
   // direction, in the same run as the ARMS_FLOOR one. Both are `floor` defects
@@ -2569,12 +2880,12 @@ function selfTest() {
       "the defect table names a WAIVED_CEILING excess with both numbers — 1 waived arm against a ceiling of 0",
     ) &&
     expect(
-      !f.defects.some((x) => x.kind === "floor" && /FILES_FLOOR/.test(x.detail)),
+      noDefectOfKind(f.defects, ["floor"], (x) => /FILES_FLOOR/.test(x.detail)),
       "no FILES_FLOOR defect — the three bounds are reported distinguishably",
     ) &&
     pass;
 
-  console.log("=== SELF-TEST 6/15: the green fixture corpus must exit 0 ===");
+  console.log("=== SELF-TEST 6/16: the green fixture corpus must exit 0 ===");
   const e = runCorpus({ scopeDir: FIXTURE_CORPUS, armsFloor: 2, waivedCeiling: 1, log: quiet });
   pass =
     expect(e.exitCode === 0, `exit code is 0 (got ${e.exitCode}; defects: ${JSON.stringify(e.defects)})`) &&
@@ -2596,7 +2907,7 @@ function selfTest() {
   // fixture's annotation deliberately carries no failure literal in either its
   // needle or its replacement, so this check can only pass on the CONTENT
   // invariant (`identityRewriteDetail`) and not on the spelling rule.
-  console.log("=== SELF-TEST 7/15: rewriting an arm IDENTITY must exit 1 with `identity-rewrite` ===");
+  console.log("=== SELF-TEST 7/16: rewriting an arm IDENTITY must exit 1 with `identity-rewrite` ===");
   const g = runCorpus({ scopeDir: SELFTEST_DIR, onlyFile: "identity-rewrite-gate.sql", armsFloor: 0, log: quiet });
   pass =
     expect(g.exitCode === 1, `exit code is 1 (got ${g.exitCode})`) &&
@@ -2609,13 +2920,13 @@ function selfTest() {
       `the arm never reached a lane (executed ${g.armsExecuted}) — a rewritten identity is refused BEFORE it can be counted as biting`,
     ) &&
     expect(
-      !g.defects.some((x) => x.kind === "no-red" || x.kind === "wrong-first-failure"),
+      noDefectOfKind(g.defects, ["no-red", "wrong-first-failure"]),
       'no "no-red" or "wrong-first-failure" defect — a refused mutation is not a non-biting arm',
     ) &&
     pass;
 
   console.log("");
-  console.log("=== SELF-TEST 8/15: SYNTHESISING an identity must exit 1 with `synthesised-identity` ===");
+  console.log("=== SELF-TEST 8/16: SYNTHESISING an identity must exit 1 with `synthesised-identity` ===");
   const h = runCorpus({
     scopeDir: SELFTEST_DIR,
     onlyFile: "synthesised-identity-gate.sql",
@@ -2646,7 +2957,7 @@ function selfTest() {
   // itself a Primitive-D instance, so the proof is part of the entry.
   console.log("");
   console.log(
-    "=== SELF-TEST 9/15: [R4-C01] the P3 compound HEAD must be REFUSED as `neuter-missed` naming `SET ROLE postgres;`, beside an ACCEPTED P1-shape neuter ===",
+    "=== SELF-TEST 9/16: [R4-C01] the P3 compound HEAD must be REFUSED as `neuter-missed` naming `SET ROLE postgres;`, beside an ACCEPTED P1-shape neuter ===",
   );
   // armsFloor 1 states the corpus's own number: exactly ONE arm can bite — the
   // control BEHIND P1 — because the refused arm never lanes. ⚠️ It is INERT
@@ -2683,7 +2994,7 @@ function selfTest() {
 
   console.log("");
   console.log(
-    "=== SELF-TEST 10/15: [MUT-I01] an apostrophe in a `--` comment inside a RAISE must neither refuse the neuter (P4) nor over-neuter the statement after it (P5) ===",
+    "=== SELF-TEST 10/16: [MUT-I01] an apostrophe in a `--` comment inside a RAISE must neither refuse the neuter (P4) nor over-neuter the statement after it (P5) ===",
   );
   // armsFloor 2 states the corpus's own number: both annotated arms must bite.
   // ⚠️ INERT in a narrowed run (no floor is enforced) — the count is asserted
@@ -2700,11 +3011,11 @@ function selfTest() {
       `narrowed run is GREEN: exit code 2 with an empty defect table (got ${j.exitCode}; defects: ${JSON.stringify(j.defects)})`,
     ) &&
     expect(
-      !j.defects.some((x) => x.kind === "neuter-missed"),
+      noDefectOfKind(j.defects, ["neuter-missed"]),
       "P4 (odd parity, LOUD): no `neuter-missed` — the apostrophe inside `-- don't worry` did not produce a spurious \"could not find the end of the RAISE statement\"",
     ) &&
     expect(
-      !j.defects.some((x) => x.kind === "wrong-first-failure"),
+      noDefectOfKind(j.defects, ["wrong-first-failure"]),
       "P5 (even parity, SILENT): no `wrong-first-failure` — the `END IF;` after the RAISE's terminator SURVIVED the neuter (a swallowed closer is a syntax error the lane reports as NO-IDENTITY; since the post-RAISE refusal of 2026-09-02 the closer is the only thing left in the branch to swallow)",
     ) &&
     expect(
@@ -2725,7 +3036,7 @@ function selfTest() {
   // Both fixtures are promoted VERBATIM from 164.3.1-05-ATTRIBUTION.md § 3.
   console.log("");
   console.log(
-    "=== SELF-TEST 11/15: [R4-C02] a current_query() trigger re-raising the identity must be SYNTHESISED, with the genuine arm RED (identity ok) beside it ===",
+    "=== SELF-TEST 11/16: [R4-C02] a current_query() trigger re-raising the identity must be SYNTHESISED, with the genuine arm RED (identity ok) beside it ===",
   );
   // armsFloor 1 states the corpus's own number: only the genuine control can
   // bite. INERT in a narrowed run — the control is asserted on bitingArms.
@@ -2753,9 +3064,10 @@ function selfTest() {
 
   console.log("");
   console.log(
-    "=== SELF-TEST 12/15: the nested-EXECUTE DO forgery AIMED at the genuine raise line must be SYNTHESISED by chain LENGTH alone, with the genuine arm RED (identity ok) beside it ===",
+    "=== SELF-TEST 12/16: the nested-EXECUTE DO forgery AIMED at the genuine raise line must be SYNTHESISED by chain LENGTH alone, with the genuine arm RED (identity ok) beside it ===",
   );
-  // armsFloor 1: as in 11/15 — stated, inert here, asserted on bitingArms.
+  // armsFloor 1: as in the current_query() re-raise scenario — stated,
+  // inert here, asserted on bitingArms.
   const l = runCorpus({ scopeDir: SELFTEST_DIR, onlyFile: "nested-execute-forge-gate.sql", armsFloor: 1, log: quiet });
   const forge2 = l.defects.find((x) => x.kind === "synthesised-identity" && x.arm === "FORGE 2");
   const forge3 = l.defects.find((x) => x.kind === "synthesised-identity" && x.arm === "FORGE 3");
@@ -2814,9 +3126,10 @@ function selfTest() {
   // which a chain-length refusal would also satisfy.
   console.log("");
   console.log(
-    "=== SELF-TEST 13/15: [F1] a RAISE whose MESSAGE embeds a forged CONTEXT + LOCATION pair must be SYNTHESISED by field DUPLICATION, with the genuine arm RED (identity ok) beside it ===",
+    "=== SELF-TEST 13/16: [F1] a RAISE whose MESSAGE embeds a forged CONTEXT + LOCATION pair must be SYNTHESISED by field DUPLICATION, with the genuine arm RED (identity ok) beside it ===",
   );
-  // armsFloor 1: as in 11/15 — stated, inert here, asserted on bitingArms.
+  // armsFloor 1: as in the current_query() re-raise scenario — stated,
+  // inert here, asserted on bitingArms.
   const m = runCorpus({ scopeDir: SELFTEST_DIR, onlyFile: "message-embedded-forge-gate.sql", armsFloor: 1, log: quiet });
   const forge4 = m.defects.find((x) => x.kind === "synthesised-identity" && x.arm === "FORGE 4");
   const forge4Record = gateAttributionRecords(
@@ -2860,7 +3173,7 @@ function selfTest() {
   // cluster is needed, so this scenario cannot flake on one.
   console.log("");
   console.log(
-    "=== SELF-TEST 14/15: a lane runner that never spawns (the severed tally) must exit 1 with `absurdity` naming executed=N lane-invocations=0 ===",
+    "=== SELF-TEST 14/16: a lane runner that never spawns (the severed tally) must exit 1 with `absurdity` naming executed=N lane-invocations=0 ===",
   );
   const stubLane = () => ({ status: 0, output: "", seconds: 0, measureFail: null, invoked: true });
   const n = runCorpus({ scopeDir: SELFTEST_DIR, onlyFile: "nonbiting-gate.sql", armsFloor: 0, laneRunner: stubLane, log: quiet });
@@ -2890,7 +3203,7 @@ function selfTest() {
   // the exact shape `runLane` returns for ENOENT.
   console.log("");
   console.log(
-    "=== SELF-TEST 15/15: a lane that could not be RUN (ENOENT) must exit 1 with `lane-unrunnable` saying the arm was NOT judged — never `wrong-first-failure`, never biting ===",
+    "=== SELF-TEST 15/16: a lane that could not be RUN (ENOENT) must exit 1 with `lane-unrunnable` saying the arm was NOT judged — never `wrong-first-failure`, never biting ===",
   );
   const deadLane = ({ leg }) =>
     leg === "arm"
@@ -2905,7 +3218,7 @@ function selfTest() {
       'the defect table names NONBITE 1 with kind "lane-unrunnable", carrying the spawn error and "this arm was NOT judged"',
     ) &&
     expect(
-      !o.defects.some((x) => x.kind === "wrong-first-failure" || x.kind === "no-red" || x.kind === "absurdity"),
+      noDefectOfKind(o.defects, ["wrong-first-failure", "no-red", "absurdity"]),
       "no wrong-first-failure, no-red or absurdity — an unrunnable lane is neither a corpus finding nor a tally disagreement (a spawn that never happened is counted by neither tally)",
     ) &&
     expect(
@@ -2914,10 +3227,58 @@ function selfTest() {
     ) &&
     pass;
 
+  // ⭐ 2026-09-02 (164.4-01, threat T-164.4-01) — a twin that mutates a pg-lane
+  // STAND-IN proves the fixture author's guess, not production, and would be
+  // counted as biting anyway. Refused at PARSE time, like rule 3a, so the
+  // annotation never becomes a twin.
+  //
+  // The fixture deliberately LISTS the stand-in in its own `RED-UNDER-SETUP`,
+  // so `bad-file-ref` — which refuses a step naming a file outside the apply
+  // list — cannot be what fires. That is asserted below: without it the
+  // scenario could pass on the wrong rule. No cluster is needed; the refusal is
+  // static and the file is `continue`d long before a lane.
+  console.log("");
+  console.log(
+    "=== SELF-TEST 16/16: a twin targeting a pg-lane STAND-IN FIXTURE must be refused at parse time with `parse` naming the stand-in — never `no-red`, never `bad-file-ref` ===",
+  );
+  const q = runCorpus({
+    scopeDir: SELFTEST_DIR,
+    onlyFile: "fixture-target-gate.sql",
+    armsFloor: 0,
+    log: quiet,
+  });
+  const refused = q.defects.find((x) => x.kind === "parse" && /stand-in fixture/.test(x.detail));
+  pass =
+    expect(q.exitCode === 1, `exit code is 1 (got ${q.exitCode})`) &&
+    expect(
+      refused !== undefined,
+      `a "parse" defect names the stand-in (got ${JSON.stringify(q.defects.map((x) => x.kind))})`,
+    ) &&
+    expect(
+      refused !== undefined && /scripts\/pg-lane\/fixtures/.test(refused.detail),
+      "the refusal PRINTS the forbidden prefix rather than a bare verdict",
+    ) &&
+    expect(
+      noDefectOfKind(q.defects, ["no-red"]),
+      'no "no-red" defect — a refused annotation is malformed, not a non-biting arm',
+    ) &&
+    expect(
+      // ⚠️ Through the kind LIST rather than an equality on `x.kind`, on
+      // purpose — see `noDefectOfKind`, which every absence assertion in this
+      // function now goes through for the same reason.
+      noDefectOfKind(q.defects, ["bad-file-ref"]),
+      "no `bad-file-ref` — the stand-in IS in this gate's apply list, so the target rule is what fired, not the apply-list rule",
+    ) &&
+    expect(
+      q.armsAnnotated === 0 && q.armsExecuted === 0,
+      `the refused annotation was never counted as a twin (annotated ${q.armsAnnotated}, executed ${q.armsExecuted})`,
+    ) &&
+    pass;
+
   console.log("");
   if (pass) {
     console.log(
-      "=== SELF-TEST PASSED: both floor modes, the waiver ceiling, the wrong-identity mode, MEASURE_FAIL, the absurdity floor and the 164.3.1-11 regression corpus all fire ===",
+      "=== SELF-TEST PASSED: both floor modes, the waiver ceiling, the wrong-identity mode, MEASURE_FAIL, the absurdity floor, the stand-in target refusal and the 164.3.1-11 regression corpus all fire ===",
     );
     return 0;
   }

@@ -2,20 +2,20 @@
 gsd_state_version: 1.0
 milestone: v1.20
 milestone_name: Backlog Burndown (Phases 158+)
-current_phase: 164.3.1
-current_phase_name: SOUND-PRIMITIVES gap closure
+current_phase: 164.4
+current_phase_name: REDUNDER-BACKFILL
 status: executing
-stopped_at: Completed 164.3.1-13-PLAN.md
-last_updated: "2026-09-02T09:03:11.042Z"
+stopped_at: Completed 164.4-01-PLAN.md
+last_updated: "2026-09-02T20:13:14.484Z"
 last_activity: 2026-09-02
-last_activity_desc: Phase 164.3.1 execution started
-state_head: dc47efd4e84cac1aad8358f42fa0d302fd2c5900
+last_activity_desc: Phase 164.4 execution started
+state_head: 9983d1a429d8617c7684da12d7ee27b94aad7bd0
 progress:
   total_phases: 14
-  completed_phases: 4
+  completed_phases: 5
   total_plans: 83
-  completed_plans: 79
-  percent: 29
+  completed_plans: 68
+  percent: 36
 ---
 
 # Project State — Quantalyze
@@ -73,6 +73,27 @@ reproduce-first), 146 (RATE). **Resume at Phase 143 after v1.17.** All 29 phase 
 preserved (`phases.clear` skipped by founder call). Phase 142.3's scope (MT5-06..10) and MT5-14
 are re-homed into v1.17 (Phases 155 / 153); 142.3 will not run as a v1.16 phase.
 
+## Scope Amendments (in force)
+
+⚖️ **Phase 164.4 REDUNDER-BACKFILL — criterion 1 NARROWED, founder decision 2026-09-02.**
+Original: "every arm in `supabase/tests/*.sql` carries a `RED-UNDER`". Amended: **every arm in the
+44 `TEST FAILED (` idiom files**, with the **27 non-idiom files PRINTED BY NAME by the runner on
+every run**. Measured basis: 1398 `RAISE EXCEPTION` sites across all 71 files (zero files have
+none), of which only 890 use the idiom the runner keys on (`run.mjs:544`; identity defined once at
+`run.mjs:947`); 27 files / 334 raises assert through their own message prefixes and are
+structurally unreachable. Rejected alternatives, both measured: renaming the 27 into the idiom
+(authoring, not mechanical — 321 raises carry only 139 distinct prefixes, so identities must be
+INVENTED) and generalising the identity grammar to a per-file prefix (weakens primitives 3a/3b that
+164.3.1 just closed, and buys no precision since prefixes are SHARED across arms).
+**Arm unit = SECTION** (not per-raise, not per-identity): 355 sections / ~365 twins over the 44
+files. The identity unit would have been 516 and pushed CI past the 20-minute split threshold.
+⚠️ Recorded in FOUR places on purpose — `ROADMAP.md` § Phase 164.4 (goal, SCOPE AMENDMENT block,
+criterion 1, progress table), here, and `TODOS.md` `[REDUNDER-NONIDIOM]`. The v1.17 lesson is that
+an amendment landing in ONE file leaves the refused claim alive in the others.
+⚠️ Also measured: the reference file `test_strategy_shares_rls.sql` holds 103 identities in **35
+sections with only 30 twins — 15 sections have no twin**, so the "1 file fully annotated" baseline
+was never true. Closing those 15 is inside this phase, not a precondition of it.
+
 ## Deferred Verification
 
 Phases whose code is complete but whose verification is gated on a human action. Autonomous
@@ -113,10 +134,14 @@ zero unclassified) and `161-VALIDATION.md` (Nyquist strategy, 4 Wave-0 gaps, ant
 
 ## Current Position
 
-Phase: 164.3.1 (SOUND-PRIMITIVES gap closure) — EXECUTING
-Plan: 1 of 13
-Status: Executing Phase 164.3.1
-Last activity: 2026-09-02 — Phase 164.3.1 execution started
+Phase: 164.4 (REDUNDER-BACKFILL) — EXECUTING
+Plan: 2 of 13 complete (00 spike, 01 Wave-0 runner/CI) — hand-maintained; `state.advance-plan`
+      still REFUSES on this section (`ambiguous_position_phase`, see § Known Issues)
+Status: Executing Phase 164.4 — next is 164.4-02 (the reference file's 15 un-twinned sections)
+Last activity: 2026-09-02 — 164.4-01 landed on the branch: the `unreachable:` print, the per-file
+      breakdown and GRAMMAR rule 4. ⛔ 164.4-02's precondition is `blocking-human` and reads the
+      PR number / head SHA / SHA-bound `sql-mutation` ubuntu run id out of `164.4-01-SUMMARY.md`,
+      which are still **PENDING** — it will halt until this plan is landed and that CI board read.
 
 ⚠️ Phase 160 remains OPEN on its human gate — see `## Deferred Verification`. Advancing this
 pointer to 161 does NOT close it; resume it only via `/gsd-verify-work 160`.
@@ -495,7 +520,7 @@ Prior-phase 141.1 close-out detail (retained; NOT about 142.1):
         2 WARNING gaps, no BLOCKER. See `140.1-VERIFICATION.md`. Not transitioned (`--no-transition`).
 Last activity: 2026-08-02 -- Phase 142 execution started
 
-Progress: [███░░░░░░░] 29%
+Progress: [████░░░░░░] 36%
 
 ### Phase 140.1 close-out — open items (do NOT lose these)
 
@@ -653,6 +678,8 @@ Load-bearing sequencing (real dependencies, do not reorder):
 | Phase 164.3.1 P11 | 8h 31m | 3 tasks | 8 files |
 | Phase 164.3.1 P12 | 26 min | 3 tasks | 3 files |
 | Phase 164.3.1 P13 | 16 min | 3 tasks | 2 files |
+| Phase 164.4 P00 | 19 min | 3 tasks | 4 files |
+| Phase 164.4 P01 | 34 min | 3 tasks | 9 files |
 
 ## Accumulated Context
 
@@ -847,6 +874,10 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - [Phase 164.3.1]: 164.3.1-12: join clause 2 (version||'_'||name) measured SUBSUMED by clause 4 (desc-only); pinned as EXPECTED_SPECIFICITY, script header :44-47 reported stale not patched
 - [Phase 164.3.1]: 164.3.1-12: meta-arm allowlists classified BEFORE keys were transcribed (17 of 68 emissions, four classes); KNOWN_THRESHOLD_SITES exact set of 6; ${GATE} excluded from what counts as a runtime value
 - [Phase 164.3.1]: 164.3.1-13: gate-level arms assert the wiring's positive evidence line (readers-ran) as the pass condition, never the D-13 refusal; per-reader-visible fixtures make each VAC-04 union member individually load-bearing; scratch neuters proven by ABSENCE so standing calibration legs stay green under a recorded real-source neuter
+- [Phase 164.4]: Fixture strategy for Phase 164.4 RED-UNDER-SETUP lists: STAND-INS, not a stubbed real migration chain — Decided by the rule fixed before any probe ran. The stubbed chain failed rule (i) terminally at stub iteration 3 of 8, reaching 51 of 262 migrations, on a PL/pgSQL SAVEPOINT that cannot parse; it never reached a baseline to time. The stand-in candidate is GREEN at a 1.01 s/lane mean over three runs, projecting ~5.9 min for the 453-lane end state.
+- [Phase 164.4]: 164.4-01: the runner DERIVES and PRINTS the 27 excluded non-idiom gate files by name on every run, in both modes, and CI MEASURE_FAILs on absence or on a claimed count that disagrees with the names beside it. — Criterion 1 as amended (founder 2026-09-02) makes a silent exclusion fail exactly like a missing annotation. A hand-maintained list would be one more claim nobody compares, so scanCorpus classifies every unannotated .sql with the runner's own statement tokenizer. MEASURED: 1 annotated + 43 pending + 27 unreachable + 0 inert = 71, matching RESEARCH Option (a) file for file.
+- [Phase 164.4]: 164.4-01: the identity CARRIER is read off a statement's RAW text, never off its masking projection. — MEASURED: the masking projection blanks string literals and the identity lives inside the raise message, so reading the carrier from executableText classifies all 70 unannotated files as permanently out of scope (70 unreachable / 0 pending). The RAISE test still runs against executableText, so a raise in a comment or a literal is not one.
+- [Phase 164.4]: 164.4-01: GRAMMAR rule 4 — no RED-UNDER-M step may target scripts/pg-lane/fixtures/**. Refused at parse time, keyed on the twin's TARGET and never on a fixture's POSITION in the apply list. — A mutation to a stand-in proves the fixture author's guess, not production, and the arm is counted as biting anyway (threat T-164.4-01). Parse time is the 3a seam: a refused annotation is malformed, never counted as a twin, and the refusal fires in --parse-only with no database. MEASURED 2026-09-02: 0 twins in all 71 files target a fixture, so it refuses nothing that exists. Position-keying was rejected because plan 164.4-00 measured a legitimate stand-in sitting BETWEEN two migrations.
 
 ### Decisions (execution-time, Phase 140.2)
 
@@ -1549,8 +1580,8 @@ Load-bearing sequencing (real dependencies, do not reorder):
 
 ## Session
 
-**Last Date:** 2026-09-02T09:03:10.308Z
-**Stopped At:** Completed 164.3.1-13-PLAN.md
+**Last Date:** 2026-09-02T20:12:08.990Z
+**Stopped At:** Completed 164.4-01-PLAN.md
 **Last Date:** 2026-08-25T22:26:01.687Z
 **Stopped At:** Completed 162-03-PLAN.md
 **Last Date:** 2026-08-25T22:28:04.096Z
@@ -1609,6 +1640,8 @@ pre-merge `e0493913`. Fix is PR #669. Supabase migrations and the Vercel fronten
 - 161.1-04 (wave 4, 2026-08-25): the composite arm LANDED DORMANT — `enqueue_ledger_composite_refresh` (migration `20260825140000`), 8-arm SQL gate, static gates 10-11, and the D-15 non-destructive guard EXTENDED to `run_stitch_composite_job._stamp_failed` (a second destructive stamp plan 02's guard never covered; found by measurement, fixed under Rule 2). ⛔ **Task 3 is a BLOCKING founder LIVE op and is NOT done:** one manual `stitch_composite` enqueue for the one live PROD composite must be observed to completion (`last_return_date` advancing in the staleness view, NOT a job going green) before the composite schedule is documented as activatable. The runbook's composite section is deliberately UNWRITTEN until then. TODOS 0.3 stays OPEN — half of its close condition (the arm exists) is met, half (a composite observed to refresh) is not.
 - 164-05 MEASURED: the phase-148 guard does NOT catch a second unstable_cache call site outside factsheet/[id]/v2/page.tsx (12/12 green under NEUTER-D). 164-07's closure guard does not close it either — the page imports the builder, not the reverse. Closed for the token route by src/app/factsheet-share/[token]/page.no-cache-reach.test.ts; the general repo-wide call-site pin is still unowned.
 - `state.advance-plan` REFUSES on this STATE.md (measured 2026-09-01 by 164.3.1-09): the `## Current Position` section carries a **second** `Phase:` line — line 129, inside the retained `### Retained — Phase 156 close-out` block — so the verb returns `ambiguous_position_phase` and will not advance rather than silently picking the first. Left UNRESOLVED on purpose: that block is marked *do NOT lose this*, and restructuring a retained ledger is outside a measure-only plan's scope. ⚠️ Consequence: the `Plan: 1 of 12` line under Current Position is **STALE** (9 of 12 plans now have SUMMARYs on disk). Read the frontmatter `progress` block or count `.planning/phases/164.3.1-*/`, never that line. Fix = move the Phase-156 retained block out of `## Current Position` into its own top-level section, or teach the verb to ignore `###`-nested entries.
+- [REDUNDER-PGCRON] 3 idiom gate files (71 of 355 sections, incl. Phase 164.4 rank 1) can never reach a GREEN pg-lane baseline: the lane has no pg_cron and those files RAISE on its absence. Blocks any batch containing them; needs a lane-substrate plan. Booked in TODOS.md.
+- 164.4-01 <human-check> UNMET: the PR number, merged head SHA and SHA-bound sql-mutation ubuntu run id + wall clock are PENDING in 164.4-01-SUMMARY.md. Plan 164.4-02's precondition is gate=blocking-human and reads exactly those fields — it WILL halt until 164.4-01 is landed (/ship, /gsd-pr-branch + the CLAUDE.md deletion guard) and its CI board read SHA-bound.
 
 ## ⛔ Standing constraint from Phase 164.3.1 — do not lose this between sessions
 
