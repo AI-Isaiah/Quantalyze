@@ -110,6 +110,18 @@
 -- from the file, not hard-coded: if you add or remove an arm you MUST update it,
 -- or the pin silently measures the wrong number of arms.
 --
+-- ⭐ MACHINE-EXECUTABLE TWINS (phase 164.4). Each prose RED-UNDER above an arm
+-- below carries an adjacent `RED-UNDER-M` object that scripts/mutation-runner
+-- executes on every push: it mutates COPIES, requires the FIRST `TEST FAILED (…)`
+-- to name that arm, and restores GREEN. The schema is scripts/mutation-runner/
+-- GRAMMAR.md. The line below declares what the lane applies before this gate. It
+-- was DISCOVERED, not guessed — plan 164.4-04 started from the sibling composite
+-- gate's proven 10-entry list and needed ONE more iteration: this gate enqueues
+-- `derive_broker_dailies`, whose kind row and admission CHECK come from
+-- 20260614120000, without which the seed trips compute_jobs_kind_fkey. Proven
+-- `ALL 10 ARMS EXECUTED (A-J)`, mean 1.06 s/lane over 3 timed runs.
+-- RED-UNDER-SETUP: {"apply":["scripts/pg-lane/fixtures/01-fixture-core.sql","scripts/pg-lane/fixtures/02-fixture-sanitize-tables.sql","scripts/pg-lane/fixtures/03-fixture-compute-jobs.sql","supabase/migrations/20260411144407_compute_jobs_queue.sql","scripts/pg-lane/fixtures/04-fixture-compute-jobs-targets.sql","supabase/migrations/20260614120000_derive_broker_dailies_kind.sql","supabase/migrations/20260710120000_strategy_keys.sql","supabase/migrations/20260710130000_stitch_composite_kind.sql","supabase/migrations/20260825120000_ledger_refresh_staleness_view.sql","supabase/migrations/20260825130000_ledger_refresh_fanout_dormant.sql","supabase/migrations/20260825140000_ledger_refresh_composite_arm.sql"]}
+--
 -- Usage:
 --   psql "$TEST_SUPABASE_DB_URL" -v ON_ERROR_STOP=1 -f \
 --     supabase/tests/test_ledger_refresh_fanout.sql
@@ -153,6 +165,13 @@ DECLARE
   v_own_bypass BOOLEAN;
 BEGIN
   -- ----- applied-ness gate: ABSENCE IS A FAILURE, NOT A SKIP (WR-03) ------
+  -- RED-UNDER: DROP the function on the live lane after the migrations have
+  --            applied — cause (ii) of this arm's own message. It is a `sql`
+  --            step rather than a migration edit because renaming the CREATE in
+  --            20260825130000 aborts that migration's OWN verification block
+  --            ("enqueue_ledger_refresh_for_strategies missing"), so the gate
+  --            would never run and no arm could be the first failure.
+  -- RED-UNDER-M: {"arm":"0","apply":[{"kind":"sql","stmt":"DROP FUNCTION public.enqueue_ledger_refresh_for_strategies()"}]}
   -- See the ⛔ block in this file's header for the measurement behind this.
   IF NOT EXISTS (
     SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
@@ -301,6 +320,13 @@ BEGIN
   -- the function must still do NOTHING. This is the arm that says "merging
   -- this migration changes no production behaviour".
   -- ======================================================================
+  -- RED-UNDER: neuter the fail-closed activation switch in 20260825130000 —
+  --            compare v_enabled against a word no setting ever holds, so the
+  --            unset case falls THROUGH to the fan-out instead of returning 0.
+  --            The dormancy claim is the whole "merging changes no production
+  --            behaviour" property, so this is the mutation that proves arm A
+  --            is what holds it.
+  -- RED-UNDER-M: {"arm":"A","apply":[{"kind":"edit","file":"supabase/migrations/20260825130000_ledger_refresh_fanout_dormant.sql","find":"IF v_enabled <> 'true' THEN","replace":"IF v_enabled = 'never-a-real-setting' THEN","occurrences":1}]}
   UPDATE strategies SET status = 'published' WHERE id = s_a;
 
   v_ret := public.enqueue_ledger_refresh_for_strategies();
@@ -317,6 +343,13 @@ BEGIN
   PERFORM set_config('app.ledger_refresh_enabled', 'true', TRUE);
 
   -- ======================================================================
+  -- RED-UNDER: change the enqueued job's metadata `source` marker in
+  --            20260825130000. The job still lands, so the count and
+  --            target-shape assertions stay green — what reddens is the
+  --            byte-for-byte marker the non-destructive failure guard in
+  --            job_worker.py reads back before it declines to downgrade a
+  --            published row.
+  -- RED-UNDER-M: {"arm":"B","apply":[{"kind":"edit","file":"supabase/migrations/20260825130000_ledger_refresh_fanout_dormant.sql","find":"'source', 'ledger-refresh',","replace":"'source', 'ledger-refresh-drifted',","occurrences":1}]}
   -- ARM B — POSITIVE (LEDGER-01). Same seed, switch on.
   -- ======================================================================
   v_ret := public.enqueue_ledger_refresh_for_strategies();
@@ -354,6 +387,14 @@ BEGIN
   END IF;
 
   -- ======================================================================
+  -- RED-UNDER: remove all three things that make a second tick a no-op, in one
+  --            LAYERED mutation of 20260825130000: the 20-hour attempt cooldown
+  --            (interval -> 0), the non-terminal in-flight guard (status set ->
+  --            a status nothing holds), and the INSERTIONS-not-CALLS counter
+  --            (v_existing = 0 dropped). All three are needed: leave any one in
+  --            place and the second tick still returns 0 for a different reason,
+  --            which would make a green here prove the wrong conjunct.
+  -- RED-UNDER-M: {"arm":"E","apply":[{"kind":"edit","file":"supabase/migrations/20260825130000_ledger_refresh_fanout_dormant.sql","find":"INTERVAL '20 hours'","replace":"INTERVAL '0 hours'","occurrences":1},{"kind":"edit","file":"supabase/migrations/20260825130000_ledger_refresh_fanout_dormant.sql","find":"AND cj2.status IN ('pending', 'running', 'done_pending_children', 'failed_retry')","replace":"AND cj2.status IN ('cancelled')","occurrences":1},{"kind":"edit","file":"supabase/migrations/20260825130000_ledger_refresh_fanout_dormant.sql","find":"IF v_existing = 0 AND v_job_id IS NOT NULL THEN","replace":"IF v_job_id IS NOT NULL THEN","occurrences":1}]}
   -- ARM E — DEDUPE. A second tick while the job is in flight adds nothing.
   -- ======================================================================
   v_ret := public.enqueue_ledger_refresh_for_strategies();
@@ -372,6 +413,12 @@ BEGIN
   -- ARM C — NEGATIVE CONTROL. A FRESH single-key strategy is not enqueued.
   -- Without this arm, a body that enqueues everything passes arm B.
   -- ======================================================================
+  -- RED-UNDER: make the staleness conjunct in 20260825130000's candidate CTE
+  --            vacuous (`WHERE lrs.is_stale` -> `WHERE (lrs.is_stale OR TRUE)`).
+  --            Only s_c is published at this point, so no earlier arm's cohort
+  --            changes; the fresh strategy becomes a candidate and every ledger
+  --            strategy would be refreshed on every tick.
+  -- RED-UNDER-M: {"arm":"C","apply":[{"kind":"edit","file":"supabase/migrations/20260825130000_ledger_refresh_fanout_dormant.sql","find":"WHERE lrs.is_stale","replace":"WHERE (lrs.is_stale OR TRUE)","occurrences":1}]}
   UPDATE strategies SET status = 'published' WHERE id = s_c;
   v_ret := public.enqueue_ledger_refresh_for_strategies();
   IF v_ret <> 0 THEN
@@ -397,6 +444,13 @@ BEGIN
   -- conjunct instead, the exclusion is unfalsifiable, and the predicate — not
   -- this arm — is what needs fixing.
   -- ======================================================================
+  -- RED-UNDER: delete the composite exclusion in 20260825130000 —
+  --            `AND lrs.is_composite = FALSE` -> `AND lrs.is_composite IS NOT NULL`.
+  --            This is the re-run this arm's own ⚠️ note demands before any
+  --            green here is trusted: the composite REACHES the conjunct (the
+  --            api_keys join is LEFT and the key conjuncts are NULL-tolerant),
+  --            so it is is_composite, and nothing else, that excludes it.
+  -- RED-UNDER-M: {"arm":"D","apply":[{"kind":"edit","file":"supabase/migrations/20260825130000_ledger_refresh_fanout_dormant.sql","find":"AND lrs.is_composite = FALSE","replace":"AND lrs.is_composite IS NOT NULL","occurrences":1}]}
   UPDATE strategies SET status = 'published' WHERE id = s_d;
   v_ret := public.enqueue_ledger_refresh_for_strategies();
   IF v_ret <> 0 THEN
@@ -420,6 +474,13 @@ BEGIN
   -- what caps the outstanding backlog at the cohort size regardless of tick
   -- rate. Both edges, so the interval cannot drift silently.
   -- ======================================================================
+  -- RED-UNDER: narrow the ATTEMPT cooldown in 20260825130000 from 20 hours to
+  --            1 hour. The fixture's prior attempt is 2 hours old, so the
+  --            narrowed window no longer covers it and the strategy is
+  --            re-enqueued — a permanently-failing strategy would get a job
+  --            every tick. Arm E's second tick is unaffected: its job is created
+  --            inside this transaction, so it is still inside a 1-hour window.
+  -- RED-UNDER-M: {"arm":"F","apply":[{"kind":"edit","file":"supabase/migrations/20260825130000_ledger_refresh_fanout_dormant.sql","find":"INTERVAL '20 hours'","replace":"INTERVAL '1 hour'","occurrences":1}]}
   UPDATE strategies SET status = 'published' WHERE id = s_f;
   v_ret := public.enqueue_ledger_refresh_for_strategies();
   IF v_ret <> 0 THEN
@@ -445,6 +506,14 @@ BEGIN
   -- ⚠️ Counts, never a duration or a rate. This arm pins the SHAPE of the
   -- bound. The safety argument is arm F's cooldown, NOT this LIMIT — see D-09.
   -- ======================================================================
+  -- RED-UNDER: widen the PER-VENUE cap in 20260825130000 from
+  --            `venue_rank <= 2` to `venue_rank <= 4`. The per-tick LIMIT is 4
+  --            and this cohort is 6 on ONE venue, so with the cap gone the
+  --            global LIMIT bounds the tick at 4 instead — exactly the "a venue
+  --            that serialises every job starves every other venue" result this
+  --            arm names, and the discrimination the LIMIT-strictly-greater-
+  --            than-cap rule exists to preserve.
+  -- RED-UNDER-M: {"arm":"G1","apply":[{"kind":"edit","file":"supabase/migrations/20260825130000_ledger_refresh_fanout_dormant.sql","find":"WHERE c.venue_rank <= 2","replace":"WHERE c.venue_rank <= 4","occurrences":1}]}
   UPDATE strategies SET status = 'published' WHERE id = ANY(g1_v1);
   v_ret := public.enqueue_ledger_refresh_for_strategies();
   IF v_ret <> 2 THEN
@@ -472,6 +541,12 @@ BEGIN
   -- LIMIT is at most 4 and strictly greater than the cap. Neither half is
   -- sufficient alone; together they pin the integer.
   -- ======================================================================
+  -- RED-UNDER: lower the per-tick LIMIT in 20260825130000 from 4 to 3. This is
+  --            the LOWER edge this arm's own note says it pins (the UPPER edge
+  --            is the static gate). The needle carries its indentation: the
+  --            unindented `LIMIT 4` at :194 is PROSE, and mutating a comment
+  --            would be a no-op reported as a non-biting arm.
+  -- RED-UNDER-M: {"arm":"G2","apply":[{"kind":"edit","file":"supabase/migrations/20260825130000_ledger_refresh_fanout_dormant.sql","find":"       LIMIT 4","replace":"       LIMIT 3","occurrences":1}]}
   UPDATE strategies SET status = 'published' WHERE id = ANY(g2_v1) OR id = ANY(g2_v2);
   v_ret := public.enqueue_ledger_refresh_for_strategies();
   IF v_ret <> 4 THEN
@@ -492,20 +567,42 @@ BEGIN
   -- keeps is_active = TRUE (rows persist for audit), so is_active alone does
   -- not cover the other two.
   -- ======================================================================
+  -- RED-UNDER: point the REVOKED-key conjunct in 20260825130000 at a status no
+  --            key ever holds, so a revoked key is admitted. The aggregate arm
+  --            reads the RETURN value, so any one of the three sub-cases
+  --            leaking is enough to redden it.
+  -- RED-UNDER-M: {"arm":"H","apply":[{"kind":"edit","file":"supabase/migrations/20260825130000_ledger_refresh_fanout_dormant.sql","find":"AND ak.sync_status IS DISTINCT FROM 'revoked'","replace":"AND ak.sync_status IS DISTINCT FROM 'never-a-real-status'","occurrences":1}]}
   UPDATE strategies SET status = 'published' WHERE id IN (s_h_inact, s_h_revoked, s_h_disc);
   v_ret := public.enqueue_ledger_refresh_for_strategies();
   IF v_ret <> 0 THEN
     RAISE EXCEPTION 'TEST FAILED (H): strategies whose keys are inactive / revoked / disconnected produced % enqueue(s), expected 0', v_ret;
   END IF;
 
+  -- RED-UNDER: make the is_active conjunct in 20260825130000 vacuous, with the
+  --            aggregate arm H NEUTERED — H reads the RETURN value and fires
+  --            first on any leak at all, so it must be suppressed for the
+  --            per-fixture row count to be the first failure. The other two
+  --            sub-case fixtures stay excluded by their own conjuncts, so this
+  --            names the INACTIVE case alone.
+  -- RED-UNDER-M: {"arm":"H/inactive","apply":[{"kind":"edit","file":"supabase/migrations/20260825130000_ledger_refresh_fanout_dormant.sql","find":"AND COALESCE(ak.is_active, TRUE)","replace":"AND (COALESCE(ak.is_active, TRUE) OR TRUE)","occurrences":1}],"neuter":[{"arm":"H"}]}
   SELECT count(*) INTO v_cnt FROM compute_jobs WHERE strategy_id = s_h_inact;
   IF v_cnt <> 0 THEN
     RAISE EXCEPTION 'TEST FAILED (H/inactive): an INACTIVE key produced % job(s), expected 0', v_cnt;
   END IF;
+  -- RED-UNDER: as H, with arm H neutered so the per-fixture count is the first
+  --            failure. A revoked key keeps is_active TRUE, so this sub-case is
+  --            reachable ONLY through the sync_status conjunct — which is the
+  --            claim the arm makes in its own message.
+  -- RED-UNDER-M: {"arm":"H/revoked","apply":[{"kind":"edit","file":"supabase/migrations/20260825130000_ledger_refresh_fanout_dormant.sql","find":"AND ak.sync_status IS DISTINCT FROM 'revoked'","replace":"AND ak.sync_status IS DISTINCT FROM 'never-a-real-status'","occurrences":1}],"neuter":[{"arm":"H"}]}
   SELECT count(*) INTO v_cnt FROM compute_jobs WHERE strategy_id = s_h_revoked;
   IF v_cnt <> 0 THEN
     RAISE EXCEPTION 'TEST FAILED (H/revoked): a REVOKED key produced % job(s), expected 0 — a revoked key keeps is_active TRUE, so the is_active conjunct alone does not cover this case', v_cnt;
   END IF;
+  -- RED-UNDER: make the soft-disconnect conjunct in 20260825130000 vacuous,
+  --            with arm H neutered. A soft-disconnected key also keeps
+  --            is_active TRUE and a non-revoked sync_status, so only this
+  --            conjunct can exclude it.
+  -- RED-UNDER-M: {"arm":"H/disconnected","apply":[{"kind":"edit","file":"supabase/migrations/20260825130000_ledger_refresh_fanout_dormant.sql","find":"AND ak.disconnected_at IS NULL","replace":"AND (ak.disconnected_at IS NULL OR TRUE)","occurrences":1}],"neuter":[{"arm":"H"}]}
   SELECT count(*) INTO v_cnt FROM compute_jobs WHERE strategy_id = s_h_disc;
   IF v_cnt <> 0 THEN
     RAISE EXCEPTION 'TEST FAILED (H/disconnected): a DISCONNECTED key produced % job(s), expected 0 — a soft-disconnected key also keeps is_active TRUE', v_cnt;
@@ -533,6 +630,12 @@ BEGIN
   -- on a missing function rather than returning FALSE, so "no grants because there
   -- is nothing to grant on" reddens here instead of passing.
   -- ======================================================================
+  -- RED-UNDER: `GRANT EXECUTE … TO anon` on the live lane. It is a `sql` step
+  --            rather than an edit to the REVOKE in 20260825130000 because that
+  --            migration's own DO block asserts the same privilege and would
+  --            ABORT THE APPLY, so the gate would never run. The lane's
+  --            --post-apply hook exists for exactly this shape.
+  -- RED-UNDER-M: {"arm":"I","apply":[{"kind":"sql","stmt":"GRANT EXECUTE ON FUNCTION public.enqueue_ledger_refresh_for_strategies() TO anon"}]}
   IF has_function_privilege('anon', 'public.enqueue_ledger_refresh_for_strategies()', 'EXECUTE') THEN
     RAISE EXCEPTION 'TEST FAILED (I): role anon can EXECUTE enqueue_ledger_refresh_for_strategies. This is a cross-tenant SECURITY DEFINER enqueue path and the REVOKE at 20260825130000 is the only thing bounding it';
   END IF;
@@ -577,6 +680,16 @@ BEGIN
   -- explicit v_owner IS NULL guard below is what turns "nothing to check" into
   -- its own named failure rather than a passing or mis-diagnosed one.
   -- ======================================================================
+  -- RED-UNDER: ownership drift on the live lane — `ALTER FUNCTION … OWNER TO` a
+  --            role that is exempt from row security by NEITHER route. Editing
+  --            20260825130000 cannot reach this arm: its own DO block asserts
+  --            the same disjunction and would abort the apply.
+  -- ⚠️ The three RLS-enabled tables move with the function DELIBERATELY. Left
+  --    behind, the new owner reads them under RLS and the fan-out returns 0 on
+  --    every tick — which is precisely the failure this arm's prose describes,
+  --    and it reddens arm B three hundred lines earlier instead. Moving them
+  --    isolates the ONE property under test: the owner's exemption.
+  -- RED-UNDER-M: {"arm":"J","apply":[{"kind":"sql","stmt":"CREATE ROLE lrf_owner_drift NOLOGIN"},{"kind":"sql","stmt":"GRANT USAGE ON SCHEMA public TO lrf_owner_drift"},{"kind":"sql","stmt":"GRANT SELECT ON ALL TABLES IN SCHEMA public TO lrf_owner_drift"},{"kind":"sql","stmt":"GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA public TO lrf_owner_drift"},{"kind":"sql","stmt":"ALTER TABLE public.strategies OWNER TO lrf_owner_drift"},{"kind":"sql","stmt":"ALTER TABLE public.strategy_keys OWNER TO lrf_owner_drift"},{"kind":"sql","stmt":"ALTER TABLE public.compute_jobs OWNER TO lrf_owner_drift"},{"kind":"sql","stmt":"ALTER FUNCTION public.enqueue_ledger_refresh_for_strategies() OWNER TO lrf_owner_drift"}]}
   SELECT r.rolname, r.rolsuper, r.rolbypassrls
     INTO v_owner, v_own_super, v_own_bypass
     FROM pg_proc p

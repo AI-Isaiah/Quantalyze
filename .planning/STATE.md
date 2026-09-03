@@ -5,17 +5,17 @@ milestone_name: Backlog Burndown (Phases 158+)
 current_phase: 164.4
 current_phase_name: REDUNDER-BACKFILL
 status: executing
-stopped_at: Completed 164.4-03-PLAN.md
-last_updated: "2026-09-03T11:29:50.457Z"
+stopped_at: Completed 164.4-04-PLAN.md
+last_updated: "2026-09-03T13:06:15.058Z"
 last_activity: 2026-09-03
 last_activity_desc: Phase 164.4 execution started
-state_head: 1611ece2a6de055ed31e83279b788c040e407ce6
+state_head: 60261316cf25471332d9dab9a4f9b9885d10dc6a
 progress:
-  total_phases: 14
+  total_phases: 15
   completed_phases: 5
   total_plans: 82
-  completed_plans: 69
-  percent: 36
+  completed_plans: 71
+  percent: 33
 ---
 
 # Project State — Quantalyze
@@ -553,7 +553,7 @@ Prior-phase 141.1 close-out detail (retained; NOT about 142.1):
         2 WARNING gaps, no BLOCKER. See `140.1-VERIFICATION.md`. Not transitioned (`--no-transition`).
 Last activity: 2026-08-02 -- Phase 142 execution started
 
-Progress: [████░░░░░░] 36%
+Progress: [███░░░░░░░] 33%
 
 ### Phase 140.1 close-out — open items (do NOT lose these)
 
@@ -715,6 +715,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 | Phase 164.4 P01 | 34 min | 3 tasks | 9 files |
 | Phase 164.4 P02 | 46 min | 3 tasks | 10 files |
 | Phase 164.4 P03 | 35 min | 3 tasks | 13 files |
+| Phase 164.4 P04 | 84 min | 3 tasks | 12 files |
 
 ## Accumulated Context
 
@@ -919,6 +920,10 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - [Phase 164.4]: 164.4-02: ARMS_FLOOR moved 30 -> 45 but FILES_FLOOR stayed 1 — no new FILE was annotated; SECTION coverage moved WITHIN the one annotated file (20/35 -> 35/35). The asymmetry is stated at both constants.
 - [Phase 164.4]: 164.4-02: the durable half-annotation control is SET INCLUSION, never a count — 'annotated >= sections' is satisfied by two twins on half the sections, which is exactly the shape the reference file was in until this plan
 - [Phase 164.4]: The lane-blocked deferral is PROBED against the lane every run, not just derived from the corpus — pg_cron AVAILABLE with a non-empty class is a lane-blocked-stale MEASURE_FAIL that exits 1 — A printed reason that cannot expire is the control-that-cannot-fail this phase exists to remove: the class is derived from the corpus, but 'the pg-lane cannot host pg_cron' is a fact about the LANE and no derivation measures it.
+- [Phase 164.4]: Arm J of a SECURITY DEFINER fan-out gate must move its RLS-enabled tables with the function: left behind, a non-exempt owner reads them empty and the positive arm fires hundreds of lines earlier
+- [Phase 164.4]: A non-idiom raise that makes the VIEW itself raise scores NO-IDENTITY, not 'the arm bit' — resolve by choosing a mutation the arm can OBSERVE, never by a waiver (WAIVED_CEILING stays 0)
+- [Phase 164.4]: gsd-core `neuter` is per-RAISE, not per-arm: naming an arm suppresses only its FIRST raise, so a section that raises twice cannot be fully suppressed
+- [Phase 164.4]: PATTERNS section P4's lockstep checklist is incomplete by at least 4 items — grep scripts/mutation-runner/ as well as src/__tests__/ for every literal a floor move touches
 
 ### Decisions (execution-time, Phase 140.2)
 
@@ -1621,8 +1626,8 @@ Load-bearing sequencing (real dependencies, do not reorder):
 
 ## Session
 
-**Last Date:** 2026-09-03T11:29:50.143Z
-**Stopped At:** Completed 164.4-03-PLAN.md
+**Last Date:** 2026-09-03T13:05:50.131Z
+**Stopped At:** Completed 164.4-04-PLAN.md
 **Last Date:** 2026-08-25T22:26:01.687Z
 **Stopped At:** Completed 162-03-PLAN.md
 **Last Date:** 2026-08-25T22:28:04.096Z
@@ -1684,6 +1689,7 @@ pre-merge `e0493913`. Fix is PR #669. Supabase migrations and the Vercel fronten
 - [REDUNDER-PGCRON] **4** idiom gate files (**100** of 355 sections, incl. Phase 164.4 rank 1) cannot be falsified on the pg-lane, which has no pg_cron. Mechanism re-measured 2026-09-03 and it is **2 RAISE + 2 green-skip**, not the blanket all-files-RAISE this line used to claim: reconcile `:268` and retention `:212` RAISE EXCEPTION on the absent extension so their baseline is never GREEN; derive `:159` and the reaper `:282` baseline GREEN but withhold whole Parts behind a pg_cron-conditional NOTICE, so those arms are un-falsifiable. DEFERRED by founder decision 2026-09-03 (SCOPE AMENDMENT #2) and printed by the runner as `lane-blocked:` every run, with a per-run lane probe that reddens the gate (`lane-blocked-stale`) once pg_cron IS available. Needs a lane-substrate plan. Booked in TODOS.md.
 - 164.4-01 <human-check> UNMET: the PR number, merged head SHA and SHA-bound sql-mutation ubuntu run id + wall clock are PENDING in 164.4-01-SUMMARY.md. Plan 164.4-02's precondition is gate=blocking-human and reads exactly those fields — it WILL halt until 164.4-01 is landed (/ship, /gsd-pr-branch + the CLAUDE.md deletion guard) and its CI board read SHA-bound.
 - 164.4-02 <human-check> OPEN: the batch (b5fa08c2 / c850a790 / 9cffb584) was NOT pushed and no PR was opened, so there is no SHA-bound sql-mutation ubuntu green for it. Plan 03's precondition reads that run id / head SHA / wall clock out of 164.4-02-SUMMARY.md coverage D6, which is status: pending.
+- 164.4-04 human-check OPEN: commits 5f912431 fd600efb b814fe6c 60261316 are NOT pushed and no PR is open. Plan 164.4-05's precondition needs a merged PR whose head SHA has an ubuntu sql-mutation run with conclusion success; record the run id, head SHA and job wall clock into coverage entry D9 of 164.4-04-SUMMARY.md.
 
 ## ⛔ Standing constraint from Phase 164.3.1 — do not lose this between sessions
 
