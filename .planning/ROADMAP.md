@@ -1048,6 +1048,75 @@ Plans:
 **50/50 v1.20 requirement IDs mapped, each to exactly one phase. No orphans, no duplicates.**
 (Per-requirement traceability: `.planning/REQUIREMENTS.md` § Traceability.)
 
+### Phase 166: QSTATS-TRUTH — every quantstats-derived number reflects the returns it was given
+
+**Goal:** No metric persisted to `metrics_json` or rendered in a chart is the output of quantstats'
+price-detection heuristic misreading a return series as prices. RANK-05 (Phase 159) closed that
+heuristic in `compute_all_metrics` only; this phase closes the rest of the surface and settles
+whether the library stays.
+
+**Depends on:** Phase 165 (ordering only — no code dependency). ⚠️ **RESEARCH-FIRST phase:** the
+shape of the work is not decidable from the codebase alone (see criterion 1), so `/gsd-plan-phase 166`
+must run its research step, and the discuss step must not be skipped.
+
+**Why this is a phase and not a TODO.** ⚠️ **Not hypothetical — measured.** `.planning/WINDOWS.md`
+entries 5 and 9 (both `open`) record wrong values already persisted: on the phase's own trigger
+fixture, a 60-day all-winning series whose `max_drawdown` correctly reads `0.0` wrote
+`ulcer_index=0.9947`, `common_sense_ratio=0.0`, `recovery_factor=2.0737`, `upi=2.9999`,
+`serenity_index=0.3204` into the same `metrics_json` Phase 159 was guarding. The residual is live in
+three places:
+
+- `compute_qstats_scalars` — 8 scalars (`analytics-service/services/metrics.py:1771`), dispatched
+  through `getattr(qs.stats, qs_attr)` at `:1826`;
+- `_rolling_alpha_beta`'s `rolling_greeks` call (`:2071`) — which **feeds rendered chart series**,
+  so this one reaches the user's eyes, not just the row;
+- the greeks benchmark leg.
+
+Four of the eight (`ulcer_index`, `ulcer_performance_index`, `probabilistic_ratio`, `serenity_index`)
+reach `_prepare_prices` **transitively** via `to_drawdown_series` and **cannot** be closed with
+`prepare_returns=False`. Measured at HEAD 2026-09-03: 30 `qs.stats.*` call sites in `metrics.py`,
+only 8 carrying a `prepare_returns=False` closure; quantstats is pinned at `0.0.81`.
+
+⛔ **The gate that should catch this is blind to it.** The RANK-05 region gate matches LINES, so it
+cannot see the `getattr(qs.stats, attr)` dispatch at `:1826` nor `_rolling_alpha_beta` at all — it
+reports clean over the exact surface that is still open. That is a Phase 164.3-class vacuity: a
+control that cannot fail. Fixing the metrics without fixing the gate leaves the next regression
+equally invisible.
+
+**Thesis inherited from Phase 162 (HONEST):** every number a user sees reflects the data underneath
+it. A wrong Sharpe is not an error surface — it is a confident lie, which is why 164.2 (error copy)
+is the wrong home for it.
+
+**Success Criteria** (what must be TRUE):
+
+1. **The upgrade-vs-mirror decision is made on evidence, not assumption.** Research establishes
+   whether `0.0.81` is still current, whether a maintained fork exists, and whether any newer release
+   fixes `_utils._prepare_returns`' price detection — and the phase picks its shape from that answer.
+   Hand-writing inline mirrors for the transitive four is a fallback, not the default.
+2. **Every one of the 30 `qs.stats.*` call sites is either closed or recorded as out of scope with a
+   reason** — the same printed-exclusion discipline Phase 164.4 established. A silent omission fails
+   this criterion exactly as a wrong value does.
+3. **The region gate AST-walks `qs.stats.*` calls** instead of matching lines, sees the `getattr`
+   dispatch shape and `_rolling_alpha_beta`, and is PROVEN able to fail: reintroduce an unclosed call
+   site, observe the gate go RED naming it, restore.
+4. **The measured wrong values are shown to be gone on the same fixture that produced them.**
+   The 60-day all-winning series with `max_drawdown == 0.0` yields defensible values for all five
+   named scalars — asserted against economic invariants, never against the implementation's own output.
+5. **No metric silently changes without being recorded.** Any persisted value this phase corrects is
+   named in the SUMMARY with its before and after, since these numbers are already in users' rows.
+
+**Requirements**: TBD — set at planning time from research. Carries `[159-SIMPLIFY-DEFER]` (TODOS 0f):
+extract `_downside_rms` / `_annualized_vol_sharpe` as module-level primitives BEFORE a third
+hand-copy is added, and derive `PERCENTILE_ANALYTICS_COLUMNS` + csv-finalize's
+`CLOCK_SAFETY_KPI_COLUMNS` from one exported KPI array. TODOS 0f explicitly says to do this extraction
+as part of the scalars closure, not before.
+
+**Plans:** 0 plans
+
+Plans:
+
+- [ ] TBD (run /gsd-plan-phase 166 to break down)
+
 ---
 
 ## Parked Milestone: v1.18 MT5-VERIFY & founder confirmations (Phases 155, 157) — founder-gated
