@@ -77,6 +77,17 @@
 -- from the file, not hard-coded: if you add or remove an arm you MUST update it,
 -- or the pin silently measures the wrong number of arms.
 --
+-- ⭐ MACHINE-EXECUTABLE TWINS (phase 164.4). Each prose RED-UNDER above an arm
+-- below carries an adjacent `RED-UNDER-M` object that scripts/mutation-runner
+-- executes on every push: it mutates COPIES, requires the FIRST `TEST FAILED (…)`
+-- to name that arm, and restores GREEN. The schema is scripts/mutation-runner/
+-- GRAMMAR.md. The line below declares what the lane applies before this gate. It
+-- was DISCOVERED, not guessed — plan 164.4-04 started from the sibling composite
+-- gate's proven 10-entry list and this gate was GREEN on the FIRST iteration (it
+-- exercises the view the other two read, so it names a strict subset of their
+-- objects). Proven `ALL 8 ARMS EXECUTED (A-H)`, mean 1.03 s/lane over 3 timed runs.
+-- RED-UNDER-SETUP: {"apply":["scripts/pg-lane/fixtures/01-fixture-core.sql","scripts/pg-lane/fixtures/02-fixture-sanitize-tables.sql","scripts/pg-lane/fixtures/03-fixture-compute-jobs.sql","supabase/migrations/20260411144407_compute_jobs_queue.sql","scripts/pg-lane/fixtures/04-fixture-compute-jobs-targets.sql","supabase/migrations/20260710120000_strategy_keys.sql","supabase/migrations/20260710130000_stitch_composite_kind.sql","supabase/migrations/20260825120000_ledger_refresh_staleness_view.sql","supabase/migrations/20260825130000_ledger_refresh_fanout_dormant.sql","supabase/migrations/20260825140000_ledger_refresh_composite_arm.sql"]}
+--
 -- Usage:
 --   psql "$TEST_SUPABASE_DB_URL" -v ON_ERROR_STOP=1 -f \
 --     supabase/tests/test_ledger_refresh_staleness.sql
@@ -114,6 +125,13 @@ DECLARE
   v_opts         TEXT[];
 BEGIN
   -- ----- applied-ness gate: ABSENCE IS A FAILURE, NOT A SKIP (WR-03) ------
+  -- RED-UNDER: DROP the view on the live lane after the migrations have applied
+  --            — cause (ii) of this arm's own message. It is a `sql` step
+  --            rather than a migration edit because renaming the CREATE in
+  --            20260825120000 aborts that migration's OWN check 2
+  --            ("ledger_refresh_staleness view missing"), so the gate would
+  --            never run and no arm could be the first failure.
+  -- RED-UNDER-M: {"arm":"0","apply":[{"kind":"sql","stmt":"DROP VIEW public.ledger_refresh_staleness"}]}
   -- See the ⛔ block in this file's header for the measurement behind this.
   IF NOT EXISTS (
     SELECT 1 FROM information_schema.views
@@ -200,6 +218,13 @@ BEGIN
   -- ======================================================================
   -- ARM A — the criterion-3 pin. THIS is the arm the phase exists for.
   -- ======================================================================
+  -- RED-UNDER: widen the freshness threshold in the VERDICT region of
+  --            20260825120000 from 4 days to 100, so a 21-day-old series reads
+  --            FRESH. Only the is_stale disjunct is touched (the stale_reason
+  --            CASE carries the same comparison and keeps its own copy), which
+  --            is what makes the verdict — not the label — the thing this arm
+  --            measures.
+  -- RED-UNDER-M: {"arm":"A","apply":[{"kind":"edit","file":"supabase/migrations/20260825120000_ledger_refresh_staleness_view.sql","find":"OR (CURRENT_DATE - lr.last_return_date) > 4","replace":"OR (CURRENT_DATE - lr.last_return_date) > 100","occurrences":1}]}
   SELECT is_stale, stale_reason, last_return_date, days_since_last_return, has_mt5_member
     INTO v_stale, v_reason, v_last, v_days, v_has_mt5
     FROM public.ledger_refresh_staleness WHERE strategy_id = s_a;
@@ -235,6 +260,13 @@ BEGIN
   -- ======================================================================
   -- ARM B — negative control. Without it, `is_stale => TRUE` passes Arm A.
   -- ======================================================================
+  -- RED-UNDER: invert the verdict's first disjunct in 20260825120000
+  --            (`sa.strategy_id IS NULL` -> `IS NOT NULL`), which is the
+  --            `is_stale => TRUE` degenerate predicate this negative control
+  --            exists to refuse. Arm A above still reads TRUE, so without this
+  --            arm the mutation would ship green — which is the whole argument
+  --            for keeping a negative control.
+  -- RED-UNDER-M: {"arm":"B","apply":[{"kind":"edit","file":"supabase/migrations/20260825120000_ledger_refresh_staleness_view.sql","find":"    sa.strategy_id IS NULL\n    OR sa.computation_status IS NULL","replace":"    sa.strategy_id IS NOT NULL\n    OR sa.computation_status IS NULL","occurrences":1}]}
   SELECT is_stale, stale_reason INTO v_stale, v_reason
     FROM public.ledger_refresh_staleness WHERE strategy_id = s_b;
   IF v_stale IS DISTINCT FROM FALSE THEN
@@ -247,6 +279,13 @@ BEGIN
   -- ======================================================================
   -- ARM C — D-04: the success set is a PAIR, and status is CONJOINED.
   -- ======================================================================
+  -- RED-UNDER: drop 'complete' from the success PAIR in the verdict region of
+  --            20260825120000, leaving only 'complete_with_warnings'. This is
+  --            D-04's failure in the other direction from the documented one: a
+  --            healthy strategy at status=complete is marked broken. The
+  --            stale_reason CASE keeps its own copy of the pair, so what reddens
+  --            is the verdict.
+  -- RED-UNDER-M: {"arm":"C","apply":[{"kind":"edit","file":"supabase/migrations/20260825120000_ledger_refresh_staleness_view.sql","find":"OR sa.computation_status NOT IN ('complete', 'complete_with_warnings')\n    OR lr.last_return_date IS NULL","replace":"OR sa.computation_status NOT IN ('complete_with_warnings')\n    OR lr.last_return_date IS NULL","occurrences":1}]}
   SELECT is_stale INTO v_stale FROM public.ledger_refresh_staleness WHERE strategy_id = s_c_complete;
   IF v_stale IS DISTINCT FROM FALSE THEN
     RAISE EXCEPTION 'TEST FAILED (C): fresh strategy at status=complete read is_stale=%, expected FALSE', v_stale;
@@ -276,6 +315,13 @@ BEGIN
   -- someone "simplifies" the view to a single-key join, which would make the
   -- ONLY live deribit strategy invisible in the surface built to observe it.
   -- ======================================================================
+  -- RED-UNDER: delete the strategy_keys branch of the venue UNION in
+  --            20260825120000 — the "simplify the view to a single-key join"
+  --            this arm names. A composite has api_key_id NULL, so its
+  --            `exchanges` collapses to the empty array, the terminal venue
+  --            conjunct drops it, and the ONLY live deribit strategy vanishes
+  --            from the surface built to observe it.
+  -- RED-UNDER-M: {"arm":"D","apply":[{"kind":"edit","file":"supabase/migrations/20260825120000_ledger_refresh_staleness_view.sql","find":"\n          UNION ALL\n          SELECT ak_m.exchange\n            FROM public.strategy_keys sk_m\n            JOIN public.api_keys ak_m ON ak_m.id = sk_m.api_key_id\n           WHERE sk_m.strategy_id = s.id","replace":"","occurrences":1}]}
   SELECT count(*) INTO v_cnt FROM public.ledger_refresh_staleness WHERE strategy_id = s_d;
   IF v_cnt <> 1 THEN
     RAISE EXCEPTION 'TEST FAILED (D): the deribit composite returned % rows, expected 1 — a view resolving venue only through strategies.api_key_id is blind to every composite', v_cnt;
@@ -302,6 +348,16 @@ BEGIN
   -- Reaching these assertions at all proves no exception was thrown: a raise
   -- inside the view would abort this block before the comparison.
   -- ======================================================================
+  -- RED-UNDER: drift the `no_return_date` label in the stale_reason CASE of
+  --            20260825120000. The verdict half of this arm (is_stale TRUE,
+  --            last_return_date NULL) is what guard 1 delivers and it stays
+  --            green; what reddens is the REASON, which is the only field that
+  --            tells an operator WHY a row with no parsable date is stale.
+  -- ⚠️ The obvious mutation — removing guard 1 so jsonb_array_elements meets a
+  --    bare object — makes the VIEW raise 22023. That aborts the gate with no
+  --    `TEST FAILED (…)` at all, which the runner scores NO-IDENTITY rather
+  --    than as this arm biting. Mutate what the arm can observe.
+  -- RED-UNDER-M: {"arm":"E1","apply":[{"kind":"edit","file":"supabase/migrations/20260825120000_ledger_refresh_staleness_view.sql","find":"THEN 'no_return_date'","replace":"THEN 'no_return_date_drifted'","occurrences":1}]}
   SELECT is_stale, stale_reason, last_return_date INTO v_stale, v_reason, v_last
     FROM public.ledger_refresh_staleness WHERE strategy_id = s_e_object;
   IF v_stale IS DISTINCT FROM TRUE OR v_last IS NOT NULL THEN
@@ -311,12 +367,28 @@ BEGIN
     RAISE EXCEPTION 'TEST FAILED (E1): expected stale_reason=no_return_date, got %', v_reason;
   END IF;
 
+  -- RED-UNDER: LAYERED on 20260825120000 — delete the regex pre-filter so a
+  --            non-date element reaches the parser, and make the parser's
+  --            trapped branch return CURRENT_DATE instead of NULL. Together
+  --            they are "the guards fail toward FRESH", which is the direction
+  --            T-161.1-04 forbids: 'not-a-date' then yields a last_return_date
+  --            of today. Arm E1's fixture is normalised to an empty array by
+  --            guard 1 and is untouched, so this arm is the first failure.
+  -- RED-UNDER-M: {"arm":"E2","apply":[{"kind":"edit","file":"supabase/migrations/20260825120000_ledger_refresh_staleness_view.sql","find":"\n     AND (e.elem ->> 'date') ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}$'","replace":"","occurrences":1},{"kind":"edit","file":"supabase/migrations/20260825120000_ledger_refresh_staleness_view.sql","find":"EXCEPTION\n  WHEN invalid_datetime_format OR datetime_field_overflow THEN\n    RETURN NULL;","replace":"EXCEPTION\n  WHEN invalid_datetime_format OR datetime_field_overflow THEN\n    RETURN CURRENT_DATE;","occurrences":1}]}
   SELECT is_stale, last_return_date INTO v_stale, v_last
     FROM public.ledger_refresh_staleness WHERE strategy_id = s_e_garbage;
   IF v_stale IS DISTINCT FROM TRUE OR v_last IS NOT NULL THEN
     RAISE EXCEPTION 'TEST FAILED (E2): a non-date element read is_stale=% last_return_date=%, expected TRUE/NULL', v_stale, v_last;
   END IF;
 
+  -- RED-UNDER: split the parser's trapped conditions in 20260825120000 so the
+  --            CALENDAR-OVERFLOW branch (22008) returns CURRENT_DATE while the
+  --            format branch still returns NULL. That isolates exactly the case
+  --            a regex-only guard does not cover: '2026-02-31' matches the
+  --            four-two-two pattern, reaches the cast, and its handling is the
+  --            only thing between it and a fresh-looking date. Arm E2's fixture
+  --            is still excluded by the regex, so this arm is the first failure.
+  -- RED-UNDER-M: {"arm":"E3","apply":[{"kind":"edit","file":"supabase/migrations/20260825120000_ledger_refresh_staleness_view.sql","find":"EXCEPTION\n  WHEN invalid_datetime_format OR datetime_field_overflow THEN\n    RETURN NULL;","replace":"EXCEPTION\n  WHEN invalid_datetime_format THEN\n    RETURN NULL;\n  WHEN datetime_field_overflow THEN\n    RETURN CURRENT_DATE;","occurrences":1}]}
   SELECT is_stale, last_return_date INTO v_stale, v_last
     FROM public.ledger_refresh_staleness WHERE strategy_id = s_e_impossible;
   IF v_stale IS DISTINCT FROM TRUE OR v_last IS NOT NULL THEN
@@ -327,6 +399,12 @@ BEGIN
   -- ARM F — threshold edges. Pins the 4-day constant on BOTH sides so it
   -- cannot drift silently, in either direction, in either comparison.
   -- ======================================================================
+  -- RED-UNDER: widen the threshold in the verdict region of 20260825120000
+  --            from 4 to 5 days. This is the arm's UPPER edge: the 4-day
+  --            fixture stays fresh (so the arm's first half still passes) and
+  --            the 5-day fixture stops reading stale, which is the drift past
+  --            the derivation the arm's own message names.
+  -- RED-UNDER-M: {"arm":"F","apply":[{"kind":"edit","file":"supabase/migrations/20260825120000_ledger_refresh_staleness_view.sql","find":"OR (CURRENT_DATE - lr.last_return_date) > 4","replace":"OR (CURRENT_DATE - lr.last_return_date) > 5","occurrences":1}]}
   SELECT is_stale, days_since_last_return INTO v_stale, v_days
     FROM public.ledger_refresh_staleness WHERE strategy_id = s_f4;
   IF v_days IS DISTINCT FROM 4 THEN
@@ -349,6 +427,13 @@ BEGIN
   -- ARM G — D-05: the cohort is scoped to ledger-backed venues. Without this,
   -- dropping the venue filter entirely would still pass every arm above.
   -- ======================================================================
+  -- RED-UNDER: delete the terminal venue conjunct in 20260825120000
+  --            (`WHERE sv.exchanges && lv.venues` -> `WHERE TRUE`), which is
+  --            the "dropping the venue filter entirely would still pass every
+  --            arm above" case this arm exists for. The venue ARRAYS are left
+  --            alone deliberately: check 6 of that migration asserts their
+  --            cardinality, so editing them would abort the apply instead.
+  -- RED-UNDER-M: {"arm":"G","apply":[{"kind":"edit","file":"supabase/migrations/20260825120000_ledger_refresh_staleness_view.sql","find":"WHERE sv.exchanges && lv.venues;","replace":"WHERE TRUE;","occurrences":1}]}
   SELECT count(*) INTO v_cnt FROM public.ledger_refresh_staleness WHERE strategy_id = s_g;
   IF v_cnt <> 0 THEN
     RAISE EXCEPTION 'TEST FAILED (G): an okx strategy appears in ledger_refresh_staleness (% rows) — the cohort must be scoped to the ledger-backed venue set', v_cnt;
@@ -379,6 +464,12 @@ BEGIN
   -- reddens here instead of passing. MEASURED, not assumed — see the RED runs
   -- recorded for this arm.
   -- ======================================================================
+  -- RED-UNDER: `GRANT SELECT … TO anon` on the live lane. It is a `sql` step
+  --            rather than an edit to the REVOKE in 20260825120000 because that
+  --            migration's own checks 4a/4b assert the same privilege and would
+  --            ABORT THE APPLY, so the gate would never run. The lane's
+  --            --post-apply hook exists for exactly this shape.
+  -- RED-UNDER-M: {"arm":"H","apply":[{"kind":"sql","stmt":"GRANT SELECT ON public.ledger_refresh_staleness TO anon"}]}
   IF has_table_privilege('anon', 'public.ledger_refresh_staleness', 'SELECT') THEN
     RAISE EXCEPTION 'TEST FAILED (H): role anon can SELECT ledger_refresh_staleness. This view joins strategies, api_keys and strategy_analytics across EVERY tenant, so a browser-reachable role holding SELECT is a cross-tenant disclosure (T-161.1-01)';
   END IF;
