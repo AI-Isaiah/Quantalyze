@@ -5,11 +5,11 @@ milestone_name: Backlog Burndown (Phases 158+)
 current_phase: 164.4
 current_phase_name: REDUNDER-BACKFILL
 status: executing
-stopped_at: 164.4-02 LANDED (PR #732, run 33743816665 green on ubuntu) — 164.4-03 is unblocked and next
-last_updated: "2026-09-03T10:09:42.256Z"
+stopped_at: Completed 164.4-03-PLAN.md
+last_updated: "2026-09-03T11:29:50.457Z"
 last_activity: 2026-09-03
 last_activity_desc: Phase 164.4 execution started
-state_head: 9cffb5844598e23fa354d705a834cb45cb2e6d4c
+state_head: 1611ece2a6de055ed31e83279b788c040e407ce6
 progress:
   total_phases: 14
   completed_phases: 5
@@ -151,10 +151,10 @@ zero unclassified) and `161-VALIDATION.md` (Nyquist strategy, 4 Wave-0 gaps, ant
 ## Current Position
 
 Phase: 164.4 (REDUNDER-BACKFILL) — EXECUTING
-Plan: 3 of 13 complete (00 spike, 01 Wave-0 runner/CI, 02 the reference file) — hand-maintained;
-      `state.advance-plan` still REFUSES on this section (`ambiguous_position_phase`, see
-      § Known Issues)
-Status: Executing Phase 164.4 — next is 164.4-03
+Plan: 4 of 12 complete (00 spike, 01 Wave-0 runner/CI, 02 the reference file, 03 the lane-blocked
+      class + lane probe + SCOPE AMENDMENT #2) — hand-maintained; `state.advance-plan` still REFUSES
+      on this section (`ambiguous_position_phase`, see § Known Issues)
+Status: Executing Phase 164.4 — next is 164.4-04
 Last activity: 2026-09-03 — 164.4-02 executed on the branch: the reference file's 15 un-twinned
       SECTIONS closed (45 twins over 35/35 sections, `arms: 45/45/0`, `biting: 45`, tallies agree),
       `ARMS_FLOOR` ratcheted 30 → 45 with both separation directions measured, and the durable
@@ -165,6 +165,16 @@ Last activity: 2026-09-03 — 164.4-02 executed on the branch: the reference fil
       are recorded in `164.4-02-SUMMARY.md` § coverage D6, which is what 164.4-03's precondition
       reads. The working branch is merged up to that commit, so the tree is at/after the merge
       both by content and by ancestry. **164.4-03 is unblocked.**
+      ⭐ 2026-09-03 — **164.4-03 executed** on the branch: the runner now DERIVES and prints a
+      `lane-blocked:` class (the 4 idiom files that probe `pg_extension` for pg_cron), PROBES the
+      pg-lane itself once per lane-spawning run (`lane-probe:`), and exits 1 with `lane-blocked-stale`
+      the day pg_cron is available while the class is non-empty — so the deferral can expire instead
+      of parking 100 sections behind a true-looking line. `sql-mutation` MEASURE_FAILs on either line
+      going missing or self-contradicting. SCOPE AMENDMENT #2 is written to all 6 ROADMAP sites and
+      all 3 STATE sites, with criterion 1's silent-exclusion sentence kept verbatim. Full run exit 0,
+      `coverage: files 1/71`, `arms: 45/45/0`, `biting: 45`, `lane-invocations: 45`, floors UNEDITED
+      (1 / 45 / 0); `--self-test` 17/17. ⚠️ Its `<human-check>` is OPEN — nothing pushed, no PR; the
+      ubuntu SHA-bound `sql-mutation` green is owed. Commits `0a9ed7ce`, `508847e9`, `1611ece2`.
 
 ⚠️ Phase 160 remains OPEN on its human gate — see `## Deferred Verification`. Advancing this
 pointer to 161 does NOT close it; resume it only via `/gsd-verify-work 160`.
@@ -704,6 +714,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 | Phase 164.4 P00 | 19 min | 3 tasks | 4 files |
 | Phase 164.4 P01 | 34 min | 3 tasks | 9 files |
 | Phase 164.4 P02 | 46 min | 3 tasks | 10 files |
+| Phase 164.4 P03 | 35 min | 3 tasks | 13 files |
 
 ## Accumulated Context
 
@@ -906,6 +917,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - [Phase 164.4]: 164.4-02: the arm chosen for a section is the identity that ACTUALLY speaks under the mutation, not the section's first identity — TENANT 3b, SERVICE-ROLE 1-grant and REVOKE 1b were each predicted by the file's own prose and confirmed on the lane
 - [Phase 164.4]: 164.4-02: ARMS_FLOOR moved 30 -> 45 but FILES_FLOOR stayed 1 — no new FILE was annotated; SECTION coverage moved WITHIN the one annotated file (20/35 -> 35/35). The asymmetry is stated at both constants.
 - [Phase 164.4]: 164.4-02: the durable half-annotation control is SET INCLUSION, never a count — 'annotated >= sections' is satisfied by two twins on half the sections, which is exactly the shape the reference file was in until this plan
+- [Phase 164.4]: The lane-blocked deferral is PROBED against the lane every run, not just derived from the corpus — pg_cron AVAILABLE with a non-empty class is a lane-blocked-stale MEASURE_FAIL that exits 1 — A printed reason that cannot expire is the control-that-cannot-fail this phase exists to remove: the class is derived from the corpus, but 'the pg-lane cannot host pg_cron' is a fact about the LANE and no derivation measures it.
 
 ### Decisions (execution-time, Phase 140.2)
 
@@ -1608,8 +1620,8 @@ Load-bearing sequencing (real dependencies, do not reorder):
 
 ## Session
 
-**Last Date:** 2026-09-03T10:09:41.962Z
-**Stopped At:** 164.4-02 LANDED (PR #732, run 33743816665 green on ubuntu) — 164.4-03 is unblocked and next
+**Last Date:** 2026-09-03T11:29:50.143Z
+**Stopped At:** Completed 164.4-03-PLAN.md
 **Last Date:** 2026-08-25T22:26:01.687Z
 **Stopped At:** Completed 162-03-PLAN.md
 **Last Date:** 2026-08-25T22:28:04.096Z

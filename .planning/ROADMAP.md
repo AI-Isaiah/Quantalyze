@@ -700,14 +700,14 @@ this phase, not a precondition of it.
 **Explicitly OUT of scope:** writing new gate coverage. This phase annotates and proves what already
 exists; it does not add arms. New coverage is a different phase with a different risk profile.
 
-**Plans:** 3/12 plans executed (REPLANNED 2026-09-03 after the Plan 00 spike: four pg_cron files DEFERRED by founder decision — see `[REDUNDER-PGCRON]`; end state on today's lane is 40 of 44 idiom files annotated + 4 printed as `lane-blocked:`)
+**Plans:** 4/12 plans executed (REPLANNED 2026-09-03 after the Plan 00 spike: four pg_cron files DEFERRED by founder decision — see `[REDUNDER-PGCRON]`; end state on today's lane is 40 of 44 idiom files annotated + 4 printed as `lane-blocked:`)
 
 Plans:
 
 - [x] 164.4-00-PLAN.md — Fixture-strategy spike: stand-ins vs stubbed real chain decided BY MEASUREMENT (timeboxed to 8 stub iterations, 4.0 s/lane rule); largest file's apply list proven GREEN; F1 residual closed
 - [x] 164.4-01-PLAN.md — Wave 0 runner/CI: `unreachable:` line naming the 27 excluded files, per-file `judged/annotated/waived/biting` breakdown, ci.yml MEASURE_FAIL assertions, GREEN/RED log fixtures, parse-time refusal of fixture targets with red self-test fixture (arm unit = SECTION, 355 sections / ~365 twins stated on the record)
 - [x] 164.4-02-PLAN.md — Reference file: the 15 un-twinned sections of test_strategy_shares_rls.sql; ARMS_FLOOR 30 → measured (≈45); full lockstep-pin choreography rehearsed
-- [ ] 164.4-03-PLAN.md — Runner: DERIVED `lane-blocked:` line naming the 4 deferred pg_cron files (reconcile 39, reaper 29, retention 25, derive 7 = 100 sections) with reason + TODO id every run, CI MEASURE_FAIL + exact-set pin; `[REDUNDER-PGCRON]` mechanism corrected per file; floors unchanged
+- [x] 164.4-03-PLAN.md — Runner: DERIVED `lane-blocked:` line naming the 4 deferred pg_cron files (reconcile 39, reaper 29, retention 25, derive 7 = 100 sections) with reason + TODO id every run, CI MEASURE_FAIL + exact-set pin; `[REDUNDER-PGCRON]` mechanism corrected per file; floors unchanged
 - [ ] 164.4-04-PLAN.md — Batch 1: the three ledger_refresh gates (15 + 15 + 11 = 41) starting from Plan 00's PROVEN apply list; FILES_FLOOR 1 → 4, ARMS_FLOOR → ≈86
 - [ ] 164.4-05-PLAN.md — Batch 2: wizard_composite_members, capital_ownership_allocation_guard, create_wizard_strategy_for_key, scenario_shares_rls, strategy_keys_rls (48); FILES_FLOOR → 9, ARMS_FLOOR → ≈134
 - [ ] 164.4-06-PLAN.md — Batch 3: strategies_private_owner_isolation, api_keys_venue_identity_uniq, capital_ownership_column, csv_daily_returns_perkey_rls (29); FILES_FLOOR → 13, ARMS_FLOOR → ≈163
