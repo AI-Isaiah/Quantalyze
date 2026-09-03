@@ -673,23 +673,22 @@ this phase, not a precondition of it.
 **Explicitly OUT of scope:** writing new gate coverage. This phase annotates and proves what already
 exists; it does not add arms. New coverage is a different phase with a different risk profile.
 
-**Plans:** 2/13 plans executed
+**Plans:** 2/12 plans executed (REPLANNED 2026-09-03 after the Plan 00 spike: four pg_cron files DEFERRED by founder decision — see `[REDUNDER-PGCRON]`; end state on today's lane is 40 of 44 idiom files annotated + 4 printed as `lane-blocked:`)
 
 Plans:
 
 - [x] 164.4-00-PLAN.md — Fixture-strategy spike: stand-ins vs stubbed real chain decided BY MEASUREMENT (timeboxed to 8 stub iterations, 4.0 s/lane rule); largest file's apply list proven GREEN; F1 residual closed
 - [x] 164.4-01-PLAN.md — Wave 0 runner/CI: `unreachable:` line naming the 27 excluded files, per-file `judged/annotated/waived/biting` breakdown, ci.yml MEASURE_FAIL assertions, GREEN/RED log fixtures, parse-time refusal of fixture targets with red self-test fixture (arm unit = SECTION, 355 sections / ~365 twins stated on the record)
 - [ ] 164.4-02-PLAN.md — Reference file: the 15 un-twinned sections of test_strategy_shares_rls.sql; ARMS_FLOOR 30 → measured (≈45); full lockstep-pin choreography rehearsed
-- [ ] 164.4-03-PLAN.md — Batch 1: test_reconcile_dropped_enqueue_sweep (39 sections); FILES_FLOOR 1 → 2
-- [ ] 164.4-04-PLAN.md — Batch 2: stuck_computing_reaper (29) + retention_orphaned_running (25); FILES_FLOOR → 4
-- [ ] 164.4-05-PLAN.md — Batch 3: the three ledger_refresh gates (15 + 15 + 11); FILES_FLOOR → 7
-- [ ] 164.4-06-PLAN.md — Batch 4: wizard_composite_members, capital_ownership_allocation_guard, create_wizard_strategy_for_key, scenario_shares_rls, strategy_keys_rls (48); FILES_FLOOR → 12
-- [ ] 164.4-07-PLAN.md — Batch 5: strategies_private_owner_isolation, api_keys_venue_identity_uniq, capital_ownership_column, csv_daily_returns_perkey_rls (29); FILES_FLOOR → 16
-- [ ] 164.4-08-PLAN.md — Batch 6: csv_finalize_atomic_fold, derive_allocator_keys_fanout, funding_fees_rls, allocator_equity_derived_rls, user_notes_dashboard_scope (33); FILES_FLOOR → 21
-- [ ] 164.4-09-PLAN.md — Batch 7: six five-section files (30); FILES_FLOOR → 27; sql-mutation timeout re-justified from measured wall clocks
-- [ ] 164.4-10-PLAN.md — Batch 8: six files (23); FILES_FLOOR → 33
-- [ ] 164.4-11-PLAN.md — Batch 9: the last four non-mixed files (8); FILES_FLOOR → 37; waiver tally stated for the mixed-file gate
-- [ ] 164.4-12-PLAN.md — Batch 10: the seven ⚠️ mixed files (15), waivers last-resort with reasons, >5 → STOP; end state FILES_FLOOR 44, ARMS_FLOOR ≈ 365, 27 files printed, final prose sweep
+- [ ] 164.4-03-PLAN.md — Runner: DERIVED `lane-blocked:` line naming the 4 deferred pg_cron files (reconcile 39, reaper 29, retention 25, derive 7 = 100 sections) with reason + TODO id every run, CI MEASURE_FAIL + exact-set pin; `[REDUNDER-PGCRON]` mechanism corrected per file; floors unchanged
+- [ ] 164.4-04-PLAN.md — Batch 1: the three ledger_refresh gates (15 + 15 + 11 = 41) starting from Plan 00's PROVEN apply list; FILES_FLOOR 1 → 4, ARMS_FLOOR → ≈86
+- [ ] 164.4-05-PLAN.md — Batch 2: wizard_composite_members, capital_ownership_allocation_guard, create_wizard_strategy_for_key, scenario_shares_rls, strategy_keys_rls (48); FILES_FLOOR → 9, ARMS_FLOOR → ≈134
+- [ ] 164.4-06-PLAN.md — Batch 3: strategies_private_owner_isolation, api_keys_venue_identity_uniq, capital_ownership_column, csv_daily_returns_perkey_rls (29); FILES_FLOOR → 13, ARMS_FLOOR → ≈163
+- [ ] 164.4-07-PLAN.md — Batch 4: csv_finalize_atomic_fold, funding_fees_rls, allocator_equity_derived_rls, user_notes_dashboard_scope (26; derive_allocator_keys_fanout deferred); FILES_FLOOR → 17, ARMS_FLOOR → ≈189
+- [ ] 164.4-08-PLAN.md — Batch 5: six five-section files (30); FILES_FLOOR → 23, ARMS_FLOOR → ≈219; sql-mutation timeout re-justified from measured ubuntu wall clocks
+- [ ] 164.4-09-PLAN.md — Batch 6: six files (23); FILES_FLOOR → 29, ARMS_FLOOR → ≈242
+- [ ] 164.4-10-PLAN.md — Batch 7: the last four non-mixed files (8); FILES_FLOOR → 33, ARMS_FLOOR → ≈250; `pending:` names exactly the 7 mixed files
+- [ ] 164.4-11-PLAN.md — Batch 8: the seven ⚠️ mixed files (15), waivers only via founder checkpoint; end state FILES_FLOOR 40, ARMS_FLOOR ≈ 265, 27 non-idiom + 4 lane-blocked files printed, final prose sweep
 
 ### Phase 164.1: HARDEN-GUARDS — retire the frozen-spine gates that no longer bite, close the composite-stamp twin, put the advisory lock behind a real concurrency test, fix the PYAPI-06 blind spot that let a production service-key mismatch run silently, and close phase 161's deferred error-surface items (WIZFORM-02's code:UNKNOWN class MOVED to 164.2 in the 2026-08-28 dedup), plus the Phase 163 carry-overs — headed by SKIP-01 (nothing applies migrations to TEST, so the OPS-08 SQL gate SKIPs permanently and the deployed body is tested nowhere), then OPS-08's un-written TypeScript retry half, the freshness UTC day-granularity residual, the TEST/PROD function-revision drift, the audit-coverage blind spot, and the tracked-PII decision (INSERTED)
 
