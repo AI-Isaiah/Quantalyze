@@ -220,11 +220,50 @@ const PROBE_AVAILABLE_OUTPUT = `ERROR:  ${LANE_PROBE_AVAILABLE}`;
 //   RECORD       .planning/phases/164.4-redunder-backfill-every-sql-gate-arm-
 //                gets-a-red-under-annota/164.4-05-SUMMARY.md
 //
+// ⭐ RE-DERIVED 2026-09-03 (plan 164.4-06) — THE THIRD FILE MOVE. The blocks
+// above STAY as lineage. Four NEW gate files — the private-by-default /
+// venue-identity / capital-ownership-column / per-key-dailies batch — were
+// annotated to completion.
+//
+//   VALUE        13 — read off the run's own `coverage:` line, not counted here.
+//   DATE         2026-09-03, at HEAD 65c4a13b.
+//   COMMAND      `node scripts/mutation-runner/run.mjs` -> exit 0
+//                  coverage: files 13/71
+//                  arms: 163/163/0   (executed/annotated/waived)
+//                  biting: 163
+//                  lane-invocations: 163
+//                  per-arm lane time: mean 1.0s over 163 arm run(s)
+//                  pending: 27 idiom file(s) without RED-UNDER
+//                197 s wall clock on the authoring box (163 arm lanes plus 13
+//                baseline and 13 restore legs).
+//   COVERAGE     13 annotated gate files of 71 in supabase/tests/, namely
+//                supabase/tests/test_api_keys_venue_identity_uniq.sql,
+//                supabase/tests/test_capital_ownership_allocation_guard.sql,
+//                supabase/tests/test_capital_ownership_column.sql,
+//                supabase/tests/test_create_wizard_strategy_for_key.sql,
+//                supabase/tests/test_csv_daily_returns_perkey_rls.sql,
+//                supabase/tests/test_ledger_refresh_composite_arm.sql,
+//                supabase/tests/test_ledger_refresh_fanout.sql,
+//                supabase/tests/test_ledger_refresh_staleness.sql,
+//                supabase/tests/test_scenario_shares_rls.sql,
+//                supabase/tests/test_strategies_private_owner_isolation.sql,
+//                supabase/tests/test_strategy_keys_rls.sql,
+//                supabase/tests/test_strategy_shares_rls.sql and
+//                supabase/tests/test_wizard_composite_members.sql.
+//   SEPARATION   Both directions driven through the real verdict loop on real
+//                lanes (`runCorpus({filesFloor})`), 2026-09-03:
+//                  filesFloor=13  filesAnnotated=13  floor-defects=0  SILENT
+//                  filesFloor=14  filesAnnotated=13  floor-defects=1  FIRES ->
+//                    `FILES_FLOOR regression: 13 annotated file(s) < floor 14`
+//                So 13 is exactly the separation point, not a value below it.
+//   RECORD       .planning/phases/164.4-redunder-backfill-every-sql-gate-arm-
+//                gets-a-red-under-annota/164.4-06-SUMMARY.md
+//
 // CURRENCY, stated where the VALUE is: RE-DERIVED 2026-09-03 by measurement
-// (plan 164.4-05). Measured coverage 9 of 71 — value RAISED from 4. The phase's
-// end state on today's lane is 40 of 71 (SCOPE AMENDMENT #2 above); 31 idiom
-// files remain `pending:`.
-export const FILES_FLOOR = 9;
+// (plan 164.4-06). Measured coverage 13 of 71 — value RAISED from 9. The
+// phase's end state on today's lane is 40 of 71 (SCOPE AMENDMENT #2 above); 27
+// idiom files remain `pending:`.
+export const FILES_FLOOR = 13;
 
 // ARMS_FLOOR — PINNED 2026-08-29 BY MEASUREMENT (plan 164.3-08), not chosen.
 //
@@ -403,11 +442,50 @@ export const FILES_FLOOR = 9;
 //   RECORD       .planning/phases/164.4-redunder-backfill-every-sql-gate-arm-
 //                gets-a-red-under-annota/164.4-05-SUMMARY.md
 //
+// ⭐ RE-DERIVED 2026-09-03 (plan 164.4-06) — MEASURED on the full-corpus run at
+// HEAD 65c4a13b. The five pins above STAY as lineage. Another COVERAGE move
+// across FILES: four NEW gate files (8 + 7 + 7 + 7 = 29 sections) were
+// annotated to completion, so 134 + 29 = 163.
+//
+//   VALUE        163 — biting = 163 executed − 0 (no-red + wrong-first-failure +
+//                synthesised-identity) = 163 − 0 = 163.
+//   DATE         2026-09-03, at HEAD 65c4a13b.
+//   COMMAND      `node scripts/mutation-runner/run.mjs` -> exit 0
+//                  coverage: files 13/71
+//                  arms: 163/163/0   (executed/annotated/waived)
+//                  biting: 163
+//                  lane-invocations: 163
+//                  file test_api_keys_venue_identity_uniq.sql: sections 7 /
+//                    judged 7 / annotated 7 / waived 0 / biting 7
+//                  file test_capital_ownership_column.sql: sections 7 /
+//                    judged 7 / annotated 7 / waived 0 / biting 7
+//                  file test_csv_daily_returns_perkey_rls.sql: sections 7 /
+//                    judged 7 / annotated 7 / waived 0 / biting 7
+//                  file test_strategies_private_owner_isolation.sql: sections 8
+//                    / judged 8 / annotated 8 / waived 0 / biting 8
+//                  per-arm lane time: mean 1.0s over 163 arm run(s)
+//   SAMPLE SIZE  163 arms executed, all 163 `RED (identity ok)`, 0 defects of
+//                any kind. The two independent tallies AGREE: `arms:` executed
+//                163 and `lane-invocations:` 163. 197 s wall clock, 13 baseline
+//                and 13 restore legs beside the 163 arm lanes.
+//   COVERAGE     13 annotated gate files of 71 (see the FILES_FLOOR block). 29
+//                of the 163 arms are new this batch and every one of them is a
+//                SECTION that had no twin before; 0 waivers were added, so
+//                WAIVED_CEILING is untouched at 0.
+//   SEPARATION   Both directions driven through the real verdict loop on real
+//                lanes (`runCorpus({armsFloor})`), 2026-09-03:
+//                  armsFloor=163  biting=163  floor-defects=0  SILENT
+//                  armsFloor=164  biting=163  floor-defects=1  FIRES ->
+//                    `ARMS_FLOOR regression: 163 biting arm(s) < floor 164`
+//                So 163 is exactly the separation point, not a value below it.
+//   RECORD       .planning/phases/164.4-redunder-backfill-every-sql-gate-arm-
+//                gets-a-red-under-annota/164.4-06-SUMMARY.md
+//
 // CURRENCY, stated where the VALUE is — derivation, sample size, coverage and
-// separation in the block immediately above; record in 164.4-05-SUMMARY.md:
-// RE-DERIVED 2026-09-03 by measurement (plan 164.4-05).
-// Measured biting 134 — value RAISED from 86.
-export const ARMS_FLOOR = 134;
+// separation in the block immediately above; record in 164.4-06-SUMMARY.md:
+// RE-DERIVED 2026-09-03 by measurement (plan 164.4-06).
+// Measured biting 163 — value RAISED from 134.
+export const ARMS_FLOOR = 163;
 
 // WAIVED_CEILING — PINNED 2026-09-02 BY MEASUREMENT (164.3.1 red team), not
 // chosen. A CEILING, not a floor: it fails when the corpus carries MORE waivers
@@ -2059,6 +2137,10 @@ export function absurdityViolations({
 // rather than silently sitting in `  pending:` reading as unfinished work.
 // RE-MEASURED 2026-09-03 over `supabase/tests/`: 1 annotated / 39 pending /
 // 27 unreachable / 0 inert / 4 lane-blocked = 71.
+// ⚠️ CURRENCY 2026-09-03 (plan 164.4-06): the classes are unchanged and the
+// end state is still 40/71; only the annotated/pending SPLIT has moved, to
+// 13 annotated / 27 pending / 27 unreachable / 0 inert / 4 lane-blocked = 71.
+// Read the run's own `coverage:` and `  pending:` lines, never this sentence.
 //
 // ⭐ AND THE REASON CAN EXPIRE. "which the pg-lane cannot host" is a claim
 // about the LANE, and nothing in the derivation measures the lane: fix
@@ -3148,7 +3230,7 @@ function selfTest() {
 
   // ⚠️ EVERY SCENARIO PASSES AN EXPLICIT `armsFloor`, and that is required for
   // the checks to measure what they name. The synthetic corpora carry 2 arms;
-  // the REAL ARMS_FLOOR is 134 (measured 2026-09-03, plan 164.4-05). Inheriting
+  // the REAL ARMS_FLOOR is 163 (measured 2026-09-03, plan 164.4-06). Inheriting
   // the default would add a spurious `floor` defect to every scenario below and
   // break check 6 outright, so each states the floor appropriate to ITS corpus.
   // Check 5 is where an ARMS_FLOOR regression is proven to fire — the mode that
