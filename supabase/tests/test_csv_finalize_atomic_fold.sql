@@ -105,6 +105,24 @@
 -- Usage:
 --   psql "$TEST_SUPABASE_DB_URL" -v ON_ERROR_STOP=1 -f \
 --     supabase/tests/test_csv_finalize_atomic_fold.sql
+--
+-- ⭐ MACHINE-EXECUTABLE TWINS (phase 164.4, REDUNDER-BACKFILL). Each prose
+-- RED-UNDER below an arm carries an adjacent `RED-UNDER-M` object that
+-- scripts/mutation-runner executes on every push: it mutates COPIES on a
+-- throwaway pg-lane cluster, requires the FIRST `TEST FAILED (…)` to name that
+-- arm, and restores GREEN. Schema: scripts/mutation-runner/GRAMMAR.md. The line
+-- below declares what the lane applies before this gate.
+-- ⚠️ THE OBJECT UNDER TEST IS THE REAL FOLD. All three migrations that define
+-- it are in the list — 20260819120000 creates it, 20260819130000 adds the input
+-- guards, and 20260819151000 is the LAST definition, so every twin that mutates
+-- the body targets THAT file. 20260728120000 is there because 20260819120000's
+-- STEP 0 refuses to apply unless the 5-arg parent it folds is present to DROP.
+-- 13-fixture-csv-finalize-fold.sql supplies only scaffold the gate's seeds and
+-- those pre-flights name — including a stand-in for production's
+-- `on_auth_user_created` signup trigger, without which every part would die
+-- 23503 on the strategies FK and Part 6's guards would "pass" on a foreign-key
+-- failure instead of on the guard.
+-- RED-UNDER-SETUP: {"apply":["scripts/pg-lane/fixtures/01-fixture-core.sql","scripts/pg-lane/fixtures/02-fixture-sanitize-tables.sql","scripts/pg-lane/fixtures/03-fixture-compute-jobs.sql","scripts/pg-lane/fixtures/07-fixture-supabase-default-privileges.sql","scripts/pg-lane/fixtures/12-fixture-profiles-is-admin.sql","scripts/pg-lane/fixtures/13-fixture-csv-finalize-fold.sql","supabase/migrations/20260522111839_csv_daily_returns.sql","supabase/migrations/20260624120000_csv_daily_returns_per_key_axis.sql","supabase/migrations/20260728120000_csv_finalize_double_submit_idempotency.sql","supabase/migrations/20260819120000_csv_finalize_atomic_fold.sql","supabase/migrations/20260819130000_csv_finalize_fold_input_guards.sql","supabase/migrations/20260819151000_csv_finalize_fold_guard1_null_safe.sql"]}
 
 -- ==========================================================================
 -- Part 1 — STRUCTURAL: the fold exists, SECDEF, one 6-arg overload, grants
@@ -185,6 +203,14 @@ BEGIN
     RAISE EXCEPTION 'TEST FAILED (Part 1b): finalize_csv_strategy_with_returns has lost its "SET search_path = public, pg_catalog" pin (proconfig=%) - a SECURITY DEFINER body without one resolves strategies/strategy_verifications/csv_daily_returns through the CALLER''s search_path, so any authenticated caller who can create a schema redirects every finalize write to attacker-owned shadow tables while the function still looks healthy. Re-issue the SET clause on the function; never relax this assertion', v_proconfig;
   END IF;
 
+  -- RED-UNDER: REVOKE EXECUTE on finalize_csv_strategy_with_returns from
+  --            `authenticated` on the live database after the migrations have
+  --            applied. The ACL is re-issued by 20260819151000 STEP 2 and
+  --            re-asserted by its own STEP 4(b), so an EDIT to that file aborts
+  --            the apply before this gate ever runs — the drift this arm exists
+  --            to catch is a LATER one (a DROP+CREATE, a role reshuffle, a
+  --            manual REVOKE), which is exactly what a post-apply `sql` step is.
+  -- RED-UNDER-M: {"arm":"Part 1","apply":[{"kind":"sql","stmt":"REVOKE EXECUTE ON FUNCTION public.finalize_csv_strategy_with_returns(UUID, UUID, TEXT, TEXT, JSONB, TEXT) FROM authenticated"}]}
   IF NOT has_function_privilege('authenticated',
         'public.finalize_csv_strategy_with_returns(uuid,uuid,text,text,jsonb,text)', 'EXECUTE') THEN
     RAISE EXCEPTION 'TEST FAILED (Part 1): authenticated holds no EXECUTE on finalize_csv_strategy_with_returns - every legitimate csv-finalize answers 42501 (the 20260522111839:200-208 outage class); re-GRANT to authenticated, never to service_role';
