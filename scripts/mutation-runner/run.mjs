@@ -106,6 +106,23 @@ const LANE = join(REPO_ROOT, "scripts", "pg-lane", "run.sh");
 const DEFAULT_CORPUS = join(REPO_ROOT, "supabase", "tests");
 const FIXTURE_CORPUS = join(REPO_ROOT, "scripts", "mutation-runner", "fixtures");
 
+// 164.4-03 — the lane probe. `run_lane` refuses a lane with no `--apply` file,
+// so the probe reuses the EXISTING core fixture rather than adding a stand-in
+// nobody else applies; the gate is a two-line `DO $$` block whose only job is
+// to print one marker. The markers are read off the lane's combined output, so
+// they are spelled ONCE, here, and imported by nothing that re-derives them.
+const LANE_PROBE_APPLY = join(REPO_ROOT, "scripts", "pg-lane", "fixtures", "01-fixture-core.sql");
+const LANE_PROBE_GATE = join(FIXTURE_CORPUS, "lane-probe", "pg-cron-probe.sql");
+const LANE_PROBE_AVAILABLE = "LANE-PROBE: pg_cron AVAILABLE";
+const LANE_PROBE_ABSENT = "LANE-PROBE: pg_cron absent";
+// The two shapes a REAL lane prints, DERIVED from the markers above rather than
+// retyped, so a `--self-test` stub cannot answer with a string the production
+// reader would reject (or, worse, keep answering one the reader stopped
+// accepting). `psql -v VERBOSITY=verbose` streams both channels to stderr,
+// which `runLane` concatenates ahead of stdout.
+const PROBE_ABSENT_OUTPUT = `NOTICE:  ${LANE_PROBE_ABSENT}`;
+const PROBE_AVAILABLE_OUTPUT = `ERROR:  ${LANE_PROBE_AVAILABLE}`;
+
 // ===========================================================================
 // COVERAGE RATCHET (D-01, D-09)
 // ===========================================================================
@@ -132,6 +149,12 @@ const FIXTURE_CORPUS = join(REPO_ROOT, "scripts", "mutation-runner", "fixtures")
 // 30 -> 45 by closing the reference file's 15 un-twinned SECTIONS, and annotated
 // no NEW file, so the FILE count did not move. A batch that annotates a new file
 // moves this constant; a batch that deepens an existing one does not.
+// ⚠️ CURRENCY 2026-09-03 (plan 164.4-03): still 1, and the DENOMINATOR this
+// phase can reach on today's lane is **40 idiom files, not 44** — SCOPE
+// AMENDMENT #2, founder 2026-09-03. Four idiom files probe `pg_extension` for
+// pg_cron, which the pg-lane does not host and deliberately will not; they are
+// derived, printed as `lane-blocked:` and owed to TODOS [REDUNDER-PGCRON], so
+// the phase's end state is `coverage: files 40/71`. This plan edited no floor.
 export const FILES_FLOOR = 1;
 
 // ARMS_FLOOR — PINNED 2026-08-29 BY MEASUREMENT (plan 164.3-08), not chosen.
@@ -292,6 +315,13 @@ export const DEFECT_KINDS = [
   // defect table and the CI count-recheck step can tell "the corpus regressed"
   // from "the instrument is broken" by name.
   "absurdity",
+  // 2026-09-03 (164.4-03): the lane CAN host pg_cron while idiom files are
+  // still classified `lane-blocked`. A GATE defect, like `absurdity` and for
+  // the same reason: the deferral's stated cause has expired, so the printed
+  // reason is no longer true and 100 sections would otherwise stay parked
+  // behind a line nothing measures. Never in NON_BITING_DEFECT_KINDS — it is a
+  // finding about the corpus's scope, not a verdict on any arm.
+  "lane-blocked-stale",
   // 2026-09-02: the lane process could not be run (ENOENT / ENOBUFS / a
   // signal — see `laneSpawnFailure`). A MEASURE_FAIL: the arm was NOT judged,
   // and it is never counted as biting. Kept distinct from `absurdity` (the
@@ -1577,11 +1607,18 @@ export function identityRewriteDetail(before, after, file) {
 // ---------------------------------------------------------------------------
 
 /**
- * The three legs a lane can be spawned for. `arm` is the only one the verdict
- * loop counts as executed; `baseline` and `restore` bracket a gate's arms and
- * are tallied separately so the cross-check below compares like with like.
+ * The four legs a lane can be spawned for. `arm` is the only one the verdict
+ * loop counts as executed; `baseline` and `restore` bracket a gate's arms, and
+ * `probe` (164.4-03) runs once per lane-spawning run to ask the lane itself
+ * whether it can host pg_cron. All three non-arm legs are tallied separately so
+ * the cross-check below compares like with like.
+ *
+ * ⛔ `probe` is NEVER compared to `arms:`. `laneInvocations` stays `laneLegs.arm`
+ * and the `lane-invocations:` line's text is unchanged, because ci.yml parses
+ * it: widening that line would be a silent redefinition of the one number the
+ * absurdity floor's exact equality is asserted on.
  */
-const LANE_LEGS = ["baseline", "arm", "restore"];
+const LANE_LEGS = ["baseline", "arm", "restore", "probe"];
 
 /**
  * 164.3.1-10 — THE LANE RUNNER'S OWN TALLY, one counter per leg.
@@ -1598,7 +1635,7 @@ const LANE_LEGS = ["baseline", "arm", "restore"];
  * exists to name. Monotonic on purpose: nothing resets it, so no caller can
  * zero it to make a run look consistent.
  */
-const laneTally = { baseline: 0, arm: 0, restore: 0 };
+const laneTally = { baseline: 0, arm: 0, restore: 0, probe: 0 };
 
 /**
  * PURE. Why a `spawnSync` result carries no usable exit status, or null when
@@ -1858,6 +1895,27 @@ export function absurdityViolations({
 // line-start prefix, first match only, and the coverage grep is `$`-ANCHORED.
 // So `unreachable:` is a NEW, distinct column-0 prefix (it collides with none
 // of the four existing greps) and every other new line is INDENTED.
+//
+// ─── CURRENCY 2026-09-03 (plan 164.4-03) ───────────────────────────────────
+// The block above is LINEAGE: its dated measurement and its argument both
+// stand. What moved is the end state it quotes. SCOPE AMENDMENT #2 (founder
+// 2026-09-03) defers 4 of those 43 pending files — they probe `pg_extension`
+// for pg_cron, which the pg-lane cannot host — so the phase's reachable end
+// state is `files 40/71`, not 44/71, and the deferred four are printed under
+// their OWN column-0 prefix `lane-blocked:` with their reason and TODO id
+// rather than silently sitting in `  pending:` reading as unfinished work.
+// RE-MEASURED 2026-09-03 over `supabase/tests/`: 1 annotated / 39 pending /
+// 27 unreachable / 0 inert / 4 lane-blocked = 71.
+//
+// ⭐ AND THE REASON CAN EXPIRE. "which the pg-lane cannot host" is a claim
+// about the LANE, and nothing in the derivation measures the lane: fix
+// [REDUNDER-PGCRON] tomorrow and a derived-only class would keep printing four
+// blocked files forever with nothing reddening — 100 sections parked behind a
+// true-looking line, which is the control-that-cannot-fail this phase exists to
+// remove. So every lane-spawning run drives ONE extra lane leg (`probe`)
+// through the real `laneRunner`, prints what it MEASURED on the lane as
+// `lane-probe:`, and raises `lane-blocked-stale` (exit 1) the day pg_cron is
+// available while the class is non-empty.
 
 /**
  * The defect kinds that take an EXECUTED arm out of `biting`. Named once, so
@@ -1937,19 +1995,27 @@ function logPerFileRows(rows, log) {
 }
 
 /**
- * Print the corpus classification: the excluded files by name, then the idiom
- * files still awaiting annotation. Called at BOTH coverage print sites, so the
- * static mode and the gate say the same thing about the same corpus.
+ * Print the corpus classification: the excluded files by name, the DEFERRED
+ * files by name with what the lane itself measured about their reason, then the
+ * idiom files still awaiting annotation. Called at BOTH coverage print sites,
+ * so the static mode and the gate say the same thing about the same corpus.
+ *
+ * `laneProbe` is `null` in every mode that spawns NO lane (`--parse-only`, and
+ * a narrowed run whose `--file` matches no annotated gate). It is deliberately
+ * not defaulted to "absent": a mode that measured nothing must print nothing
+ * rather than assert the reassuring answer, which is the same
+ * could-not-measure-is-not-measured-zero rule the NO-DEFAULTS check below
+ * applies to the classes themselves.
  */
-export function logCorpusClassification(corpus, log) {
+export function logCorpusClassification(corpus, log, laneProbe = null) {
   // ⛔ NO DEFAULTS. `[]` here would print `unreachable: 0 file(s)` for a corpus
   // whose derivation never ran — indistinguishable, to every reader, from a
   // corpus with nothing to exclude. That is the exact "could not measure read
   // as measured zero" shape invariant 2 of this file's header refuses, so a
   // missing class is a MEASURE_FAIL and stops the run instead of narrating a
   // full-coverage exclusion set the runner never computed.
-  const { unreachableFiles, pendingFiles, inertFiles } = corpus;
-  const missing = Object.entries({ unreachableFiles, pendingFiles, inertFiles })
+  const { unreachableFiles, pendingFiles, inertFiles, laneBlockedFiles } = corpus;
+  const missing = Object.entries({ unreachableFiles, pendingFiles, inertFiles, laneBlockedFiles })
     .filter(([, v]) => !Array.isArray(v))
     .map(([k, v]) => `${k}=${JSON.stringify(v)}`);
   if (missing.length > 0) {
@@ -1963,6 +2029,32 @@ export function logCorpusClassification(corpus, log) {
     `unreachable: ${unreachableFiles.length} file(s) raise outside the runner's identity idiom — ` +
       `${unreachableFiles.join(" ")} (TODOS [REDUNDER-NONIDIOM])`,
   );
+  // 164.4-03, criterion 4: an arm that cannot be given a falsifying mutation is
+  // RECORDED with its reason, never silently skipped. The names are SORTED and
+  // SINGLE-SPACE separated — a contract, not a style: ci.yml cross-checks the
+  // claimed count against the `*.sql` tokens on this line, and the parser pin
+  // asserts the exact set in this order.
+  log(
+    `lane-blocked: ${laneBlockedFiles.length} file(s) probe pg_extension for pg_cron, which the ` +
+      `pg-lane cannot host — ${laneBlockedFiles.join(" ")} (deferred 2026-09-03, TODOS [REDUNDER-PGCRON])`,
+  );
+  if (laneProbe !== null) {
+    // What the LANE said, not what the classification assumed. `available: null`
+    // is "the probe ran and printed no marker" — already a `lane-unrunnable`
+    // MEASURE_FAIL in-process, and printed here in a shape ci.yml's
+    // `^lane-probe: pg_cron (absent|AVAILABLE)` grep deliberately does NOT
+    // match, so the missing measurement fails there too.
+    if (laneProbe.available === true) {
+      log("lane-probe: pg_cron AVAILABLE — lane-blocked class is STALE");
+    } else if (laneProbe.available === false) {
+      log("lane-probe: pg_cron absent — lane-blocked class is current");
+    } else {
+      log(
+        "lane-probe: UNREADABLE — the probe lane printed no LANE-PROBE marker, so pg_cron availability " +
+          "was NOT measured and the lane-blocked class is unverified",
+      );
+    }
+  }
   log(`  pending: ${pendingFiles.length} idiom file(s) without RED-UNDER — ${pendingFiles.join(" ")}`);
   // Zero today. A gate with no executable raise at all cannot fail, which is a
   // FINDING about that gate, not a coverage class — so it is printed only when
@@ -2067,6 +2159,11 @@ export function runCorpus({
   // guard that always fires gets disabled, which is how controls die.
   const treeBefore = gitStatus();
 
+  // 164.4-03 — what the LANE says about pg_cron, measured once per run.
+  // `null` until measured, and it stays `null` in a run that spawns no lane at
+  // all; the print site treats that as "not measured", never as "absent".
+  let laneProbe = null;
+
   const scratchRoot = mkdtempSync(join(tmpdir(), "mutation-runner-"));
   try {
     let slot = 0;
@@ -2075,6 +2172,60 @@ export function runCorpus({
       mkdirSync(dir, { recursive: true });
       return dir;
     };
+
+    // -------------------------------------------------------------------
+    // THE LANE PROBE (164.4-03, threat T-164.4-11). The `lane-blocked:` class
+    // is DERIVED from the corpus, but its printed reason — "which the pg-lane
+    // cannot host" — is a claim about the LANE, and the derivation never
+    // measures the lane. Without this, fixing [REDUNDER-PGCRON] would leave
+    // four files parked behind a line that keeps reading true.
+    //
+    // ⚠️ WHEN. Every run that is going to spawn a lane anyway (`targets`
+    // non-empty) — which is every real gate run and every `--file/--arm`
+    // diagnostic — PLUS any run whose lane-blocked class is non-empty, because
+    // that class is the claim this probe exists to falsify and a run asserting
+    // it must measure it. A run that is neither spawns nothing: booting a
+    // throwaway cluster purely to probe would make cluster-free modes — the
+    // print-contract pins in mutation-runner-floors.test.ts among them — depend
+    // on a PostgreSQL install. `--parse-only` never reaches this function.
+    if (targets.length > 0 || corpus.laneBlockedFiles.length > 0) {
+      const probeSlot = nextSlot();
+      const probe = laneRunner({
+        workdir: join(probeSlot, "lane"),
+        applyAbs: [LANE_PROBE_APPLY],
+        postApplyAbs: null,
+        gateAbs: LANE_PROBE_GATE,
+        leg: "probe",
+      });
+      // The MARKER, not the exit status: the probe gate RAISEs on AVAILABLE (so
+      // the lane exits non-zero) and NOTICEs on absent (exit 0). Reading the
+      // status would conflate "pg_cron is here" with "the lane broke".
+      if (probe.output.includes(LANE_PROBE_AVAILABLE)) laneProbe = { available: true };
+      else if (probe.output.includes(LANE_PROBE_ABSENT)) laneProbe = { available: false };
+      else {
+        laneProbe = { available: null };
+        addDefect(
+          "lane-unrunnable",
+          null,
+          null,
+          `MEASURE_FAIL: the pg_cron probe printed no LANE-PROBE marker — the lane was NOT measured, so ` +
+            `the lane-blocked class is unverified${probe.measureFail ? ` (${probe.measureFail})` : ""}`,
+        );
+      }
+      // THE DEFERRAL EXPIRES HERE. A class derived from the corpus meeting a
+      // lane that can host pg_cron is a stale deferral, and it reddens the gate
+      // until the files are annotated — the opposite of parking them forever.
+      if (laneProbe.available === true && corpus.laneBlockedFiles.length > 0) {
+        addDefect(
+          "lane-blocked-stale",
+          null,
+          null,
+          `MEASURE_FAIL — the lane can host pg_cron but ${corpus.laneBlockedFiles.length} idiom file(s) are ` +
+            `still classified lane-blocked: ${corpus.laneBlockedFiles.join(" ")}; annotate them ` +
+            `(TODOS [REDUNDER-PGCRON]) — the deferral has expired`,
+        );
+      }
+    }
 
     for (const name of targets) {
       const gateAbsRepo = join(scopeDir, name);
@@ -2458,7 +2609,7 @@ export function runCorpus({
   // -----------------------------------------------------------------------
   log("");
   log(`coverage: files ${corpus.filesAnnotated}/${corpus.filesTotal}`);
-  logCorpusClassification(corpus, log);
+  logCorpusClassification(corpus, log, laneProbe);
   log(`arms: ${armsExecuted}/${armsAnnotated}/${armsWaived}   (executed/annotated/waived)`);
   // IN-05: the number ARMS_FLOOR is actually compared against, printed under
   // its own name.
@@ -2490,6 +2641,10 @@ export function runCorpus({
     baseline: laneTally.baseline - laneTallyBefore.baseline,
     arm: laneTally.arm - laneTallyBefore.arm,
     restore: laneTally.restore - laneTallyBefore.restore,
+    // 164.4-03: carried on the RESULT as evidence, deliberately NOT on the
+    // `lane-invocations:` line — ci.yml parses that line's text, and the
+    // absurdity floor's exact equality is asserted on `arm` alone.
+    probe: laneTally.probe - laneTallyBefore.probe,
   };
   const laneInvocations = laneLegs.arm;
   log(
@@ -2845,7 +3000,7 @@ function selfTest() {
   // 6 outright, so each states the floor appropriate to ITS corpus. Check 5 is
   // where an ARMS_FLOOR regression is proven to fire — the mode that could not
   // be proven at all while the floor was 0.
-  console.log("=== SELF-TEST 1/16: a non-biting annotation must exit 1 with `no-red` ===");
+  console.log("=== SELF-TEST 1/17: a non-biting annotation must exit 1 with `no-red` ===");
   const a = runCorpus({ scopeDir: SELFTEST_DIR, onlyFile: "nonbiting-gate.sql", armsFloor: 0, log: quiet });
   pass =
     expect(a.exitCode === 1, `exit code is 1 (got ${a.exitCode})`) &&
@@ -2855,7 +3010,7 @@ function selfTest() {
     ) &&
     pass;
 
-  console.log("=== SELF-TEST 2/16: a FILES_FLOOR regression must exit 1 with `floor` ===");
+  console.log("=== SELF-TEST 2/17: a FILES_FLOOR regression must exit 1 with `floor` ===");
   // ⚠️ The fixture corpus carries ONE waiver (MINI 3), so every whole-corpus
   // scenario states `waivedCeiling: 1` — its own measured number — exactly as
   // it states its own armsFloor. Scenario 5 is where the ceiling is proven to
@@ -2869,7 +3024,7 @@ function selfTest() {
     ) &&
     pass;
 
-  console.log("=== SELF-TEST 3/16: reddening the WRONG arm must exit 1 with `wrong-first-failure` ===");
+  console.log("=== SELF-TEST 3/17: reddening the WRONG arm must exit 1 with `wrong-first-failure` ===");
   const c = runCorpus({ scopeDir: SELFTEST_DIR, onlyFile: "wrong-identity-gate.sql", armsFloor: 0, log: quiet });
   pass =
     expect(c.exitCode === 1, `exit code is 1 (got ${c.exitCode})`) &&
@@ -2881,7 +3036,7 @@ function selfTest() {
     ) &&
     pass;
 
-  console.log("=== SELF-TEST 4/16: a wrong `occurrences` must exit 1 with MEASURE_FAIL, NOT `no-red` ===");
+  console.log("=== SELF-TEST 4/17: a wrong `occurrences` must exit 1 with MEASURE_FAIL, NOT `no-red` ===");
   const d = runCorpus({ scopeDir: SELFTEST_DIR, onlyFile: "occurrence-mismatch-gate.sql", armsFloor: 0, log: quiet });
   pass =
     expect(d.exitCode === 1, `exit code is 1 (got ${d.exitCode})`) &&
@@ -2901,7 +3056,7 @@ function selfTest() {
   // this check exists, and it is what stops the pinned floor from decaying back
   // into a constant nobody compares to anything.
   console.log(
-    "=== SELF-TEST 5/16: an ARMS_FLOOR regression must exit 1 with `floor`, and so must a WAIVED_CEILING excess ===",
+    "=== SELF-TEST 5/17: an ARMS_FLOOR regression must exit 1 with `floor`, and so must a WAIVED_CEILING excess ===",
   );
   // waivedCeiling 0 against a corpus carrying 1 waiver: the ceiling's FIRE
   // direction, in the same run as the ARMS_FLOOR one. Both are `floor` defects
@@ -2923,7 +3078,7 @@ function selfTest() {
     ) &&
     pass;
 
-  console.log("=== SELF-TEST 6/16: the green fixture corpus must exit 0 ===");
+  console.log("=== SELF-TEST 6/17: the green fixture corpus must exit 0 ===");
   const e = runCorpus({ scopeDir: FIXTURE_CORPUS, armsFloor: 2, waivedCeiling: 1, log: quiet });
   pass =
     expect(e.exitCode === 0, `exit code is 0 (got ${e.exitCode}; defects: ${JSON.stringify(e.defects)})`) &&
@@ -2945,7 +3100,7 @@ function selfTest() {
   // fixture's annotation deliberately carries no failure literal in either its
   // needle or its replacement, so this check can only pass on the CONTENT
   // invariant (`identityRewriteDetail`) and not on the spelling rule.
-  console.log("=== SELF-TEST 7/16: rewriting an arm IDENTITY must exit 1 with `identity-rewrite` ===");
+  console.log("=== SELF-TEST 7/17: rewriting an arm IDENTITY must exit 1 with `identity-rewrite` ===");
   const g = runCorpus({ scopeDir: SELFTEST_DIR, onlyFile: "identity-rewrite-gate.sql", armsFloor: 0, log: quiet });
   pass =
     expect(g.exitCode === 1, `exit code is 1 (got ${g.exitCode})`) &&
@@ -2964,7 +3119,7 @@ function selfTest() {
     pass;
 
   console.log("");
-  console.log("=== SELF-TEST 8/16: SYNTHESISING an identity must exit 1 with `synthesised-identity` ===");
+  console.log("=== SELF-TEST 8/17: SYNTHESISING an identity must exit 1 with `synthesised-identity` ===");
   const h = runCorpus({
     scopeDir: SELFTEST_DIR,
     onlyFile: "synthesised-identity-gate.sql",
@@ -2995,7 +3150,7 @@ function selfTest() {
   // itself a Primitive-D instance, so the proof is part of the entry.
   console.log("");
   console.log(
-    "=== SELF-TEST 9/16: [R4-C01] the P3 compound HEAD must be REFUSED as `neuter-missed` naming `SET ROLE postgres;`, beside an ACCEPTED P1-shape neuter ===",
+    "=== SELF-TEST 9/17: [R4-C01] the P3 compound HEAD must be REFUSED as `neuter-missed` naming `SET ROLE postgres;`, beside an ACCEPTED P1-shape neuter ===",
   );
   // armsFloor 1 states the corpus's own number: exactly ONE arm can bite — the
   // control BEHIND P1 — because the refused arm never lanes. ⚠️ It is INERT
@@ -3032,7 +3187,7 @@ function selfTest() {
 
   console.log("");
   console.log(
-    "=== SELF-TEST 10/16: [MUT-I01] an apostrophe in a `--` comment inside a RAISE must neither refuse the neuter (P4) nor over-neuter the statement after it (P5) ===",
+    "=== SELF-TEST 10/17: [MUT-I01] an apostrophe in a `--` comment inside a RAISE must neither refuse the neuter (P4) nor over-neuter the statement after it (P5) ===",
   );
   // armsFloor 2 states the corpus's own number: both annotated arms must bite.
   // ⚠️ INERT in a narrowed run (no floor is enforced) — the count is asserted
@@ -3074,7 +3229,7 @@ function selfTest() {
   // Both fixtures are promoted VERBATIM from 164.3.1-05-ATTRIBUTION.md § 3.
   console.log("");
   console.log(
-    "=== SELF-TEST 11/16: [R4-C02] a current_query() trigger re-raising the identity must be SYNTHESISED, with the genuine arm RED (identity ok) beside it ===",
+    "=== SELF-TEST 11/17: [R4-C02] a current_query() trigger re-raising the identity must be SYNTHESISED, with the genuine arm RED (identity ok) beside it ===",
   );
   // armsFloor 1 states the corpus's own number: only the genuine control can
   // bite. INERT in a narrowed run — the control is asserted on bitingArms.
@@ -3102,7 +3257,7 @@ function selfTest() {
 
   console.log("");
   console.log(
-    "=== SELF-TEST 12/16: the nested-EXECUTE DO forgery AIMED at the genuine raise line must be SYNTHESISED by chain LENGTH alone, with the genuine arm RED (identity ok) beside it ===",
+    "=== SELF-TEST 12/17: the nested-EXECUTE DO forgery AIMED at the genuine raise line must be SYNTHESISED by chain LENGTH alone, with the genuine arm RED (identity ok) beside it ===",
   );
   // armsFloor 1: as in the current_query() re-raise scenario — stated,
   // inert here, asserted on bitingArms.
@@ -3164,7 +3319,7 @@ function selfTest() {
   // which a chain-length refusal would also satisfy.
   console.log("");
   console.log(
-    "=== SELF-TEST 13/16: [F1] a RAISE whose MESSAGE embeds a forged CONTEXT + LOCATION pair must be SYNTHESISED by field DUPLICATION, with the genuine arm RED (identity ok) beside it ===",
+    "=== SELF-TEST 13/17: [F1] a RAISE whose MESSAGE embeds a forged CONTEXT + LOCATION pair must be SYNTHESISED by field DUPLICATION, with the genuine arm RED (identity ok) beside it ===",
   );
   // armsFloor 1: as in the current_query() re-raise scenario — stated,
   // inert here, asserted on bitingArms.
@@ -3211,9 +3366,15 @@ function selfTest() {
   // cluster is needed, so this scenario cannot flake on one.
   console.log("");
   console.log(
-    "=== SELF-TEST 14/16: a lane runner that never spawns (the severed tally) must exit 1 with `absurdity` naming executed=N lane-invocations=0 ===",
+    "=== SELF-TEST 14/17: a lane runner that never spawns (the severed tally) must exit 1 with `absurdity` naming executed=N lane-invocations=0 ===",
   );
-  const stubLane = () => ({ status: 0, output: "", seconds: 0, measureFail: null, invoked: true });
+  // 164.4-03: every injected lane runner must answer the `probe` leg, or the
+  // run reports the probe printed no marker — a MEASURE_FAIL by design, so a
+  // stub that silently stops measuring the lane cannot pass quietly.
+  const stubLane = ({ leg }) =>
+    leg === "probe"
+      ? { status: 0, output: PROBE_ABSENT_OUTPUT, seconds: 0, measureFail: null, invoked: true }
+      : { status: 0, output: "", seconds: 0, measureFail: null, invoked: true };
   const n = runCorpus({ scopeDir: SELFTEST_DIR, onlyFile: "nonbiting-gate.sql", armsFloor: 0, laneRunner: stubLane, log: quiet });
   const absurd = n.defects.find((x) => x.kind === "absurdity");
   pass =
@@ -3241,12 +3402,15 @@ function selfTest() {
   // the exact shape `runLane` returns for ENOENT.
   console.log("");
   console.log(
-    "=== SELF-TEST 15/16: a lane that could not be RUN (ENOENT) must exit 1 with `lane-unrunnable` saying the arm was NOT judged — never `wrong-first-failure`, never biting ===",
+    "=== SELF-TEST 15/17: a lane that could not be RUN (ENOENT) must exit 1 with `lane-unrunnable` saying the arm was NOT judged — never `wrong-first-failure`, never biting ===",
   );
-  const deadLane = ({ leg }) =>
-    leg === "arm"
-      ? { status: null, output: "", seconds: 0, measureFail: "lane could not run: ENOENT", invoked: false }
-      : { status: 0, output: "", seconds: 0, measureFail: null, invoked: true };
+  const deadLane = ({ leg }) => {
+    if (leg === "arm")
+      return { status: null, output: "", seconds: 0, measureFail: "lane could not run: ENOENT", invoked: false };
+    if (leg === "probe")
+      return { status: 0, output: PROBE_ABSENT_OUTPUT, seconds: 0, measureFail: null, invoked: true };
+    return { status: 0, output: "", seconds: 0, measureFail: null, invoked: true };
+  };
   const o = runCorpus({ scopeDir: SELFTEST_DIR, onlyFile: "nonbiting-gate.sql", armsFloor: 0, laneRunner: deadLane, log: quiet });
   const dead = o.defects.find((x) => x.kind === "lane-unrunnable" && x.arm === "NONBITE 1");
   pass =
@@ -3277,7 +3441,7 @@ function selfTest() {
   // static and the file is `continue`d long before a lane.
   console.log("");
   console.log(
-    "=== SELF-TEST 16/16: a twin targeting a pg-lane STAND-IN FIXTURE must be refused at parse time with `parse` naming the stand-in — never `no-red`, never `bad-file-ref` ===",
+    "=== SELF-TEST 16/17: a twin targeting a pg-lane STAND-IN FIXTURE must be refused at parse time with `parse` naming the stand-in — never `no-red`, never `bad-file-ref` ===",
   );
   const q = runCorpus({
     scopeDir: SELFTEST_DIR,
@@ -3313,10 +3477,84 @@ function selfTest() {
     ) &&
     pass;
 
+  // ⭐ 2026-09-03 (164.4-03, threat T-164.4-11) — THE DEFERRAL MUST BE ABLE TO
+  // EXPIRE. The `lane-blocked:` class is derived from the corpus, but its
+  // printed reason ("which the pg-lane cannot host") is a claim about the LANE.
+  // Fix [REDUNDER-PGCRON] and a derived-only class would keep printing four
+  // blocked files with nothing reddening — 100 sections parked behind a line
+  // that still reads true, which is precisely the control-that-cannot-fail this
+  // phase exists to remove.
+  //
+  // Driven as an A/B through the injectable lane runner: the SAME corpus, the
+  // SAME stub, and the probe leg's MARKER as the only difference. AVAILABLE →
+  // exit 1 with `lane-blocked-stale`; absent → exit 0 with no defect at all. No
+  // cluster is needed, so this cannot flake on one.
+  console.log("");
+  console.log(
+    "=== SELF-TEST 17/17: a lane that CAN host pg_cron while idiom files are still classified lane-blocked must exit 1 with `lane-blocked-stale` — and the same corpus with an absent probe must exit 0 ===",
+  );
+  const LANE_BLOCKED_DIR = join(SELFTEST_DIR, "lane-blocked");
+  const probeLane = (available) => ({ leg }) =>
+    leg === "probe"
+      ? {
+          status: available ? 3 : 0,
+          output: available ? PROBE_AVAILABLE_OUTPUT : PROBE_ABSENT_OUTPUT,
+          seconds: 0,
+          measureFail: null,
+          invoked: true,
+        }
+      : { status: 0, output: "", seconds: 0, measureFail: null, invoked: true };
+  // filesFloor 0: this corpus is DELIBERATELY all-unannotated (the pair exists
+  // to be classified, not executed), so the real FILES_FLOOR would add a
+  // spurious `floor` defect and mask the one defect under test.
+  const stale = runCorpus({
+    scopeDir: LANE_BLOCKED_DIR,
+    filesFloor: 0,
+    armsFloor: 0,
+    laneRunner: probeLane(true),
+    log: quiet,
+  });
+  const current = runCorpus({
+    scopeDir: LANE_BLOCKED_DIR,
+    filesFloor: 0,
+    armsFloor: 0,
+    laneRunner: probeLane(false),
+    log: quiet,
+  });
+  const expired = stale.defects.find((x) => x.kind === "lane-blocked-stale");
+  pass =
+    expect(
+      // AIM: without a non-empty lane-blocked class the rule cannot fire at
+      // all, and both arms would pass vacuously. Asserted from the fixture
+      // bytes before either verdict is read.
+      scanCorpus(LANE_BLOCKED_DIR).laneBlockedFiles.join(" ") === "lane-blocked-gate.sql",
+      `AIM (fixture bytes): the scenario corpus classifies exactly lane-blocked-gate.sql as lane-blocked (got ${JSON.stringify(scanCorpus(LANE_BLOCKED_DIR).laneBlockedFiles)})`,
+    ) &&
+    expect(stale.exitCode === 1, `AVAILABLE: exit code is 1 (got ${stale.exitCode})`) &&
+    expect(
+      expired !== undefined && expired.detail.includes("lane-blocked-gate.sql"),
+      `the defect table carries a "lane-blocked-stale" defect NAMING the still-classified file (got ${JSON.stringify(expired?.detail ?? null)})`,
+    ) &&
+    expect(
+      expired !== undefined && /the deferral has expired/.test(expired.detail),
+      "the defect says the DEFERRAL HAS EXPIRED and points at TODOS [REDUNDER-PGCRON], rather than reporting a bare count",
+    ) &&
+    expect(
+      stale.defects.length === 1,
+      `exactly one defect on the AVAILABLE arm (got ${stale.defects.length}: ${JSON.stringify(stale.defects.map((x) => x.kind))})`,
+    ) &&
+    expect(
+      // The CONTROL. Same corpus, same stub, only the probe marker differs —
+      // so the exit code is attributable to the measurement and nothing else.
+      current.exitCode === 0 && noDefectOfKind(current.defects, ["lane-blocked-stale"]),
+      `absent: the SAME corpus with an absent-marker probe exits 0 with no lane-blocked-stale defect (got exit ${current.exitCode}, defects ${JSON.stringify(current.defects.map((x) => x.kind))})`,
+    ) &&
+    pass;
+
   console.log("");
   if (pass) {
     console.log(
-      "=== SELF-TEST PASSED: both floor modes, the waiver ceiling, the wrong-identity mode, MEASURE_FAIL, the absurdity floor, the stand-in target refusal and the 164.3.1-11 regression corpus all fire ===",
+      "=== SELF-TEST PASSED: both floor modes, the waiver ceiling, the wrong-identity mode, MEASURE_FAIL, the absurdity floor, the stand-in target refusal, the stale-deferral probe and the 164.3.1-11 regression corpus all fire ===",
     );
     return 0;
   }
