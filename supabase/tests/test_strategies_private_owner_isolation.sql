@@ -49,6 +49,22 @@
 -- Usage:
 --   psql "$TEST_SUPABASE_DB_URL" -v ON_ERROR_STOP=1 -f \
 --     supabase/tests/test_strategies_private_owner_isolation.sql
+--
+-- ⭐ MACHINE-EXECUTABLE TWINS (phase 164.4). Each prose RED-UNDER below an arm
+-- carries an adjacent `RED-UNDER-M` object that scripts/mutation-runner executes:
+-- it mutates COPIES on a throwaway pg-lane cluster, requires the FIRST
+-- `TEST FAILED (…)` to name that arm, and restores GREEN. Schema:
+-- scripts/mutation-runner/GRAMMAR.md. The line below declares what the lane
+-- applies before this gate. DISCOVERED, not guessed — plan 164.4-06 iterated it
+-- over 2 lane runs to `ALL PASS`, mean 0.97 s/lane over 3 timed GREEN runs.
+-- ⚠️ 10-fixture-strategies-rls-baseline.sql is NOT padding. It DROPs
+-- 01-fixture-core.sql's stand-in `strategies_read` so the REAL
+-- 20260405061912_rls_policies.sql defines the policy RLS 1-4 assert on, and it
+-- restores the table privileges Supabase's bootstrap gives `strategies` in
+-- production. MEASURED without it: the file still printed ALL PASS while GUARD 6
+-- and GUARD 7 were refused by the GRANT layer with the same 42501 those arms read
+-- as trigger proof, and `anon` held no SELECT at all — three vacuous passes.
+-- RED-UNDER-SETUP: {"apply":["scripts/pg-lane/fixtures/01-fixture-core.sql","scripts/pg-lane/fixtures/02-fixture-sanitize-tables.sql","scripts/pg-lane/fixtures/03-fixture-compute-jobs.sql","scripts/pg-lane/fixtures/10-fixture-strategies-rls-baseline.sql","supabase/migrations/20260405061912_rls_policies.sql","supabase/migrations/20260716130000_strategies_status_private.sql","supabase/migrations/20260716130500_finalize_terminal_status_param.sql","supabase/migrations/20260716131000_guard_strategies_publish_transition.sql"]}
 
 -- --------------------------------------------------------------------------
 -- Defensive pre-clean (a prior aborted run may have committed synthetic rows).
@@ -119,6 +135,10 @@ BEGIN
     uid_a, strat_private, strat_pub, strat_draft, strat_pending, uid_b;
 
   -- ----- RLS 1: owner B sees 0 of owner A's PRIVATE row (isolation) ---------
+  -- RED-UNDER: widen `strategies_read` to `USING (TRUE)` in migration
+  --            20260405061912 — the "browse shows every row" drift that makes
+  --            owner A's private strategy visible to owner B.
+  -- RED-UNDER-M: {"arm":"RLS 1","apply":[{"kind":"edit","file":"supabase/migrations/20260405061912_rls_policies.sql","find":"  status = 'published' OR user_id = auth.uid()","replace":"  TRUE","occurrences":1}]}
   PERFORM set_config('request.jwt.claims',
     json_build_object('sub', uid_b::text, 'role', 'authenticated')::text, true);
   SET LOCAL ROLE authenticated;
