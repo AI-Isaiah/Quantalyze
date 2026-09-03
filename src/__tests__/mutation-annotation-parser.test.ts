@@ -665,6 +665,11 @@ describe("R2-W04 / GRAMMAR rule 3b — a mutation may not REWRITE an arm identit
     // Measured before shipping the invariant: 30 arms, 49 file steps, 0
     // violations. RE-MEASURED 2026-09-03 (plan 164.4-02, the reference file's
     // 15 un-twinned sections closed): 45 arms, 59 file steps, 0 violations.
+    // RE-MEASURED 2026-09-03 (plan 164.4-04, the ledger_refresh family's 41
+    // sections annotated): 86 arms, 97 file steps, 0 violations. `sql` steps
+    // are skipped by this walk, so the step count rises by less than the arm
+    // count: 15 of the 41 new arms are grant/ownership/DROP drift on the live
+    // lane, which is not a file edit and cannot rewrite an identity by 3b.
     // Pinned so 164.4's remaining backfill cannot introduce the shape and then
     // be "fixed" by relaxing the rule.
     const scan = scanCorpus(join(REPO_ROOT, "supabase", "tests"));
@@ -698,8 +703,8 @@ describe("R2-W04 / GRAMMAR rule 3b — a mutation may not REWRITE an arm identit
 
     expect(violations).toEqual([]);
     // Non-vacuity: the walk must actually have walked something.
-    expect(armsSeen).toBe(45);
-    expect(stepsSeen).toBe(59);
+    expect(armsSeen).toBe(86);
+    expect(stepsSeen).toBe(97);
   });
 
   // ══════════════════════════════════════════════════════════════════════════
@@ -1361,7 +1366,11 @@ describe("GRAMMAR rule 3c — an identity is READ only where the RUNNER's gate r
       }
     }
     // MEASURED 2026-09-03 (plan 164.4-02): 59 needles across 45 arms.
-    expect(needles.length).toBe(59);
+    // RE-MEASURED 2026-09-03 (plan 164.4-04): 97 needles across 86 arms. The
+    // needle count rises by less than the arm count because 15 of the new arms
+    // are `sql` steps (grant / ownership / DROP drift on the live lane), which
+    // carry no `find` or `anchor` at all — rule 3c is what bounds those.
+    expect(needles.length).toBe(97);
     expect(needles.filter((n) => /TEST\s+FAILED\s*\(/i.test(n))).toEqual([]);
   });
 });
@@ -1607,11 +1616,20 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
     }
   });
 
-  it("scanCorpus reports 1 of 71 files annotated", () => {
+  it("scanCorpus reports 4 of 71 files annotated", () => {
     const corpus = scanCorpus(join(REPO_ROOT, "supabase", "tests"));
+    // ⛔ The DENOMINATOR stays 71 — every `.sql` in the directory. The phase's
+    // end state is `files 40/71` with the other 31 PRINTED BY NAME
+    // (`unreachable:` 27 + `lane-blocked:` 4), never `40/40` with the gap
+    // quietly redefined away.
     expect(corpus.filesTotal).toBe(71);
-    expect(corpus.filesAnnotated).toBe(1);
-    expect(corpus.annotatedFiles).toEqual(["test_strategy_shares_rls.sql"]);
+    expect(corpus.filesAnnotated).toBe(4);
+    expect(corpus.annotatedFiles).toEqual([
+      "test_ledger_refresh_composite_arm.sql",
+      "test_ledger_refresh_fanout.sql",
+      "test_ledger_refresh_staleness.sql",
+      "test_strategy_shares_rls.sql",
+    ]);
   });
 
   // ── 164.4-02: the DURABLE half-annotation control ──────────────────────────
