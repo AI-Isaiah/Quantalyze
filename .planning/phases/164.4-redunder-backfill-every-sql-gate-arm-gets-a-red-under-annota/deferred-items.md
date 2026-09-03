@@ -2,6 +2,12 @@
 
 Out-of-scope discoveries logged during execution. NOT fixed here.
 
+> ⭐ **PROMOTED TO `TODOS.md` 2026-09-03 by the orchestrator.** Every item below now also carries a
+> root-`TODOS.md` entry — `[REDUNDER-COVGAP-01]`, `[REDUNDER-COVGAP-02]`, `[REDUNDER-WINDOWS-01]`.
+> This file is under `.planning/phases/**`, which EVERY PR in this phase filters out, so an item
+> booked only here does not reach `main` until milestone archival. `TODOS.md` is the single ground
+> truth and is not filtered. Book here for the phase's own narrative; book to `TODOS.md` to be found.
+
 ## 2026-09-03 (plan 164.4-06) — `.planning/WINDOWS.md` frontmatter counters disagree with its own rows
 
 `gsd-tools windows fixed 28` refuses with:
