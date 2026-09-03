@@ -1,8 +1,8 @@
 # `RED-UNDER-M` — the machine-executable annotation grammar
 
-⚠️ **Phase 164.4 backfills 43 more idiom gate files against this schema, plus
-the 15 un-twinned sections of the reference file that plan 164.3-08 annotated 30
-arms of.** The remaining 27 of the 71 files in `supabase/tests/` are OUT of
+⚠️ **Phase 164.4 backfills the remaining idiom gate files against this schema.
+The reference file's un-twinned sections were closed by plan 164.4-02 on
+2026-09-03, so it now carries a twin on every section it raises for.** The remaining 27 of the 71 files in `supabase/tests/` are OUT of
 scope by founder decision (2026-09-02): they raise outside the runner's identity
 idiom, so no arm of theirs can be attributed. They are not silently dropped —
 the runner DERIVES that set and PRINTS it by name on every run
@@ -482,7 +482,7 @@ no arm could be the first failure. Re-baselining it in the same mutation is what
 makes `SHAPE 1` reachable — the LAYERED discipline below, applied to an arm whose
 prose does not mention layering at all.
 
-### Shape 2 — live-DB `GRANT` with a prerequisite neuter (`:1561-1577`)
+### Shape 2 — live-DB `GRANT` with a prerequisite neuter (`:1640-1656`)
 
 ```sql
   -- RED-UNDER: `GRANT UPDATE (nonce) ON strategy_shares TO authenticated` on
@@ -500,7 +500,7 @@ rather than preferred: the migration's STEP 2b pins `authenticated`'s privilege
 set EXACTLY and aborts the apply on any drift, so editing STEP 2 means the gate
 never runs. The lane's `--post-apply` hook exists for exactly this.
 
-### Shape 3 — LAYERED compound mutation (`:675-681`)
+### Shape 3 — LAYERED compound mutation (`:682-688`)
 
 ```sql
   -- RED-UNDER: change the CREATE TRIGGER in migration 20260827120000 STEP 1b to
@@ -518,7 +518,11 @@ edits land in one run.
 
 ⚠️ **The real corpus has none.** All 30 arm-anchored prose markers in
 `test_strategy_shares_rls.sql` were given executable twins by plan 164.3-08 and
-all 30 bite (`arms: 30/30/0`, 2026-08-29). The form is documented for 164.4,
+all 30 bite (`arms: 30/30/0`, 2026-08-29). ⚠️ CURRENCY: that is the 2026-08-29
+measurement and it stands as lineage; the file carries more arms now (plan
+164.4-02 closed its un-twinned sections) and the corpus still has ZERO waivers
+— read the run's own `arms:` line for the live E/A/W. The form is documented
+for 164.4,
 which will meet arms this file does not have. This is an ILLUSTRATION, not a
 corpus quote:
 
