@@ -29,6 +29,7 @@ import { fileURLToPath } from "node:url";
 import {
   IDENTITY_CARRIER,
   classifyGateIdiom,
+  gateNeedsPgCron,
   parseAnnotations,
   parseFile,
   scanCorpus,
@@ -1489,10 +1490,76 @@ describe("classifyGateIdiom — the exclusion decision, over HAND-BUILT texts", 
     expect(classifyGateIdiom(literalOnly)).toBe("inert");
   });
 
-  it("the three classes are exhaustive over these inputs — no fourth value leaks out", () => {
+  it("the four classes are exhaustive over these inputs — no fifth value leaks out", () => {
     for (const text of [PENDING_SQL, UNREACHABLE_SQL, INERT_SQL, "", "SELECT 1;"]) {
-      expect(["pending", "unreachable", "inert"]).toContain(classifyGateIdiom(text));
+      expect(["pending", "unreachable", "inert", "lane-blocked"]).toContain(classifyGateIdiom(text));
     }
+  });
+
+  // ── 164.4-03: the `lane-blocked` class ─────────────────────────────────
+  // The pg-lane has no pg_cron and the founder decided 2026-09-03 not to give
+  // it any, so an idiom gate that PROBES for the extension cannot be falsified
+  // there. Criterion 4 says such an arm is RECORDED with its reason, never
+  // silently skipped — so the class is derived here and printed by the runner.
+  const LANE_BLOCKED_PAIR = join(
+    REPO_ROOT,
+    "scripts",
+    "mutation-runner",
+    "fixtures",
+    "selftest",
+    "lane-blocked",
+  );
+  const COMMENT_ONLY_SQL = readFileSync(
+    join(LANE_BLOCKED_PAIR, "lane-blocked-comment-only-gate.sql"),
+    "utf8",
+  );
+  const LIVE_GUARD_SQL = readFileSync(join(LANE_BLOCKED_PAIR, "lane-blocked-gate.sql"), "utf8");
+
+  it("the fixture PAIR differs ONLY in the three `--` markers on the pg_cron guard", () => {
+    // Calibration for the two verdicts below. Without this the flip could come
+    // from any property of two independently-authored files; with it, the
+    // difference in classification is attributable to the comment markers and
+    // nothing else — and the pair cannot drift apart later.
+    const uncommented = COMMENT_ONLY_SQL.replace(
+      "  -- IF NOT EXISTS (SELECT 1 FROM pg_extension",
+      "  IF NOT EXISTS (SELECT 1 FROM pg_extension",
+    )
+      .replace("  --   RAISE EXCEPTION 'TEST FAILED (LANEBLOCK 1)", "    RAISE EXCEPTION 'TEST FAILED (LANEBLOCK 1)")
+      .replace("  -- END IF;\n", "  END IF;\n");
+    expect(uncommented, "the substitution must actually change the text").not.toBe(COMMENT_ONLY_SQL);
+    expect(uncommented).toBe(LIVE_GUARD_SQL);
+  });
+
+  it("a pg_cron probe in a `--` COMMENT does not make a gate lane-blocked — the derivation reads code, not prose", () => {
+    // The negative control, and the whole reason this is not a `grep pg_cron`:
+    // the bytes ARE there.
+    expect(COMMENT_ONLY_SQL).toContain("pg_extension");
+    expect(COMMENT_ONLY_SQL).toContain("pg_cron");
+    expect(gateNeedsPgCron(COMMENT_ONLY_SQL)).toBe(false);
+    expect(classifyGateIdiom(COMMENT_ONLY_SQL)).toBe("pending");
+  });
+
+  it("uncommenting the same guard flips it from pending to lane-blocked", () => {
+    expect(gateNeedsPgCron(LIVE_GUARD_SQL)).toBe(true);
+    expect(classifyGateIdiom(LIVE_GUARD_SQL)).toBe("lane-blocked");
+  });
+
+  it("`unreachable` is decided BEFORE `lane-blocked` — a non-idiom file that probes pg_cron stays unreachable", () => {
+    // `test_retention_crons_safe.sql` in the real corpus is exactly this shape,
+    // and the ordering matters: the reason no arm of it can be judged is the
+    // IDIOM, not the lane, and a file cannot be deferred out of a class it was
+    // never in. Built by hand so the pin survives that file being annotated.
+    const nonIdiomProbe = [
+      "DO $$",
+      "BEGIN",
+      "  IF NOT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'pg_cron') THEN",
+      "    RAISE EXCEPTION 'CRONSAFE-01: pg_cron is not installed here';",
+      "  END IF;",
+      "END $$;",
+    ].join("\n");
+    expect(gateNeedsPgCron(nonIdiomProbe), "the probe IS live code in this fixture").toBe(true);
+    expect(nonIdiomProbe).not.toContain(IDENTITY_CARRIER);
+    expect(classifyGateIdiom(nonIdiomProbe)).toBe("unreachable");
   });
 });
 
@@ -1643,7 +1710,65 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
     expect(corpus.unreachableFiles).toEqual(UNREACHABLE_27);
   });
 
-  it("the four classes PARTITION the corpus, checked against a SECOND derivation", () => {
+  // ── 164.4-03: the DEFERRED four, pinned as a SET ────────────────────────
+  // MEASURED 2026-09-03 over `supabase/tests/` (71 files): 6 files mention
+  // `pg_cron` in raw bytes; 5 probe `pg_extension` for it in executable code;
+  // 4 of those 5 are idiom files and are deferred together, because CONTEXT's
+  // batch rule is "each plan lands its files FULLY proven — no file left
+  // half-annotated". The fifth, `test_retention_crons_safe.sql`, raises outside
+  // the identity idiom and stays `unreachable`; the sixth,
+  // `test_wizard_composite_fence.sql:698`, mentions pg_cron only in a `--`
+  // comment and stays `pending`.
+  //
+  // MECHANISM PER FILE, re-measured at HEAD, because "they all RAISE" was the
+  // pre-amendment record and it is false:
+  //   reconcile_dropped_enqueue_sweep.sql:268 and retention_orphaned_running
+  //     .sql:212 — RAISE EXCEPTION on the ABSENT extension, so their pg-lane
+  //     baseline can never be GREEN and `runCorpus` judges no arm in them;
+  //   strategy_analytics_stuck_computing_reaper.sql:282/326/483 and
+  //     derive_allocator_keys_fanout.sql:159/169 — baseline GREEN, but whole
+  //     Parts are withheld behind a pg_cron-conditional `RAISE NOTICE`, so
+  //     those arms are un-falsifiable on the lane.
+  //
+  // ⚠️ An EXACT SET, in the runner's own printed order (sorted, single-spaced),
+  // because that is what ci.yml cross-checks the claimed count against.
+  const LANE_BLOCKED_4 = [
+    "test_derive_allocator_keys_fanout.sql",
+    "test_reconcile_dropped_enqueue_sweep.sql",
+    "test_retention_orphaned_running.sql",
+    "test_strategy_analytics_stuck_computing_reaper.sql",
+  ];
+
+  it("scanCorpus names the 4 lane-blocked files EXACTLY — the deferral is a measured set, not a hand list", () => {
+    const corpus = scanCorpus(join(REPO_ROOT, "supabase", "tests"));
+    expect(corpus.laneBlockedFiles).toEqual(LANE_BLOCKED_4);
+    // Non-vacuity in the other direction: none of the four may ALSO be sitting
+    // in `pending`, which is what "the pending line no longer lists them" means.
+    for (const f of LANE_BLOCKED_4) expect(corpus.pendingFiles).not.toContain(f);
+    // And the negative controls stay where they were.
+    expect(corpus.unreachableFiles).toContain("test_retention_crons_safe.sql");
+    expect(corpus.pendingFiles).toContain("test_wizard_composite_fence.sql");
+  });
+
+  it("the FIVE classes sum to filesTotal — annotated + pending + unreachable + inert + lane-blocked", () => {
+    // The partition invariant as an arithmetic statement over the SCALARS the
+    // runner prints, beside the set-for-set derivation below. A class that
+    // stops being computed, or a file filed into two, fails here by count.
+    const corpus = scanCorpus(join(REPO_ROOT, "supabase", "tests"));
+    const sum =
+      corpus.annotatedFiles.length +
+      corpus.pendingFiles.length +
+      corpus.unreachableFiles.length +
+      corpus.inertFiles.length +
+      corpus.laneBlockedFiles.length;
+    expect(sum).toBe(corpus.filesTotal);
+    // MEASURED 2026-09-03 at this commit: 1 + 39 + 27 + 0 + 4 = 71. Stated so a
+    // reader can see WHICH way a future drift went, not only that it drifted.
+    expect(corpus.filesTotal).toBe(71);
+    expect(corpus.laneBlockedFiles).toHaveLength(4);
+  });
+
+  it("the five classes PARTITION the corpus, checked against a SECOND derivation", () => {
     // ⛔ WHAT THIS USED TO BE, and why it changed. It asserted
     //   pendingFiles.length === filesTotal − filesAnnotated − unreachable − inert
     // and `new Set(all).size === filesTotal`. Both hold BY CONSTRUCTION of the
@@ -1671,6 +1796,10 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
       pending: [],
       unreachable: [],
       inert: [],
+      // 164.4-03. Keyed by the classifier's OWN return value, so a class added
+      // to `classifyGateIdiom` without a home here throws on the push rather
+      // than being silently dropped from the comparison.
+      "lane-blocked": [],
     };
     for (const name of names) {
       const text = readFileSync(join(dir, name), "utf8");
@@ -1684,6 +1813,7 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
     expect(corpus.pendingFiles).toEqual(expected.pending);
     expect(corpus.unreachableFiles).toEqual(expected.unreachable);
     expect(corpus.inertFiles).toEqual(expected.inert);
+    expect(corpus.laneBlockedFiles).toEqual(expected["lane-blocked"]);
     // The scalars must agree with the same second derivation, not with the
     // arrays they were computed alongside.
     expect(corpus.filesTotal).toBe(names.length);
@@ -1696,6 +1826,7 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
       ...corpus.pendingFiles,
       ...corpus.unreachableFiles,
       ...corpus.inertFiles,
+      ...corpus.laneBlockedFiles,
     ];
     expect(all.length, "a file was filed twice or dropped").toBe(names.length);
     expect([...all].sort()).toEqual(names);

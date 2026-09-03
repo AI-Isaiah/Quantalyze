@@ -958,19 +958,75 @@ export const RAISE_EXCEPTION_RE = /\bRAISE\s+EXCEPTION\b/i;
 export const IDENTITY_CARRIER = "TEST FAILED (";
 
 /**
- * Which of three idiom classes an UNANNOTATED gate file falls in — the data
- * behind the runner's `unreachable:` print (phase 164.4 criterion 1 as
- * amended: the exclusion is NAMED on every run, because a silent exclusion
- * fails that criterion exactly as a missing annotation does).
+ * The catalog a gate reads to ask whether pg_cron is installed, and the
+ * extension name it asks about. Spelled ONCE, beside the raise regex and the
+ * identity carrier they are always read with, for the same reason those moved
+ * here: two spellings of one literal is how two readers of "does this gate
+ * need pg_cron" drift apart.
+ */
+export const PG_CRON_CATALOG_RE = /\bpg_extension\b/i;
+export const PG_CRON_EXTENSION = "pg_cron";
+
+/**
+ * Does this gate's EXECUTABLE text probe `pg_extension` for pg_cron?
+ *
+ * ⛔ 2026-09-03 (164.4-03). The pg-lane (`scripts/pg-lane/run.sh`) boots a bare
+ * throwaway cluster with no pg_cron, and the founder decided on 2026-09-03 NOT
+ * to install it there. A gate that probes for the extension therefore either
+ * RAISEs on the lane (its baseline can never be GREEN, and `runCorpus` judges
+ * no arm in a red-baseline file) or green-skips whole Parts behind a
+ * pg_cron-conditional `RAISE NOTICE`, leaving those arms un-falsifiable. Both
+ * shapes are recorded, per criterion 4, rather than silently absorbed into
+ * `pending`.
+ *
+ * ⛔ THE TWO HALVES ARE READ FROM DIFFERENT VIEWS, exactly as
+ * `classifyGateIdiom` reads its own two halves and for the same measured
+ * reason. `pg_extension` is a CATALOG REFERENCE — code — so it is read off
+ * `executableText`, which blanks comments: a commented-out probe is not a
+ * probe. `'pg_cron'` is a STRING LITERAL, and the masking projection blanks
+ * literals, so it is read off that same statement's RAW `.text` — the identity
+ * carrier's rule, applied to the other literal this file needs.
+ *
+ * MEASURED 2026-09-03 over `supabase/tests/` (71 files): 6 files mention
+ * `pg_cron` in raw bytes, 5 probe the catalog for it in executable code, and 4
+ * of those 5 are idiom files. `test_wizard_composite_fence.sql:698` mentions
+ * pg_cron only inside a `--` comment and is NOT a probe — the negative control
+ * that proves this reads code, not prose.
+ */
+export function gateNeedsPgCron(text) {
+  for (const stmt of tokenizeStatements(text)) {
+    if (!PG_CRON_CATALOG_RE.test(stmt.executableText)) continue;
+    if (stmt.text.includes(PG_CRON_EXTENSION)) return true;
+  }
+  return false;
+}
+
+/**
+ * Which of four idiom classes an UNANNOTATED gate file falls in — the data
+ * behind the runner's `unreachable:` and `lane-blocked:` prints (phase 164.4
+ * criterion 1 as amended: the exclusion is NAMED on every run, because a
+ * silent exclusion fails that criterion exactly as a missing annotation does).
  *
  *   "pending"      code-level `RAISE EXCEPTION` carrying `TEST FAILED (` —
  *                  the runner's identity idiom. Annotatable; not yet annotated.
+ *   "lane-blocked" an idiom file whose executable text probes `pg_extension`
+ *                  for pg_cron, which the pg-lane cannot host (see
+ *                  `gateNeedsPgCron`). Annotatable in principle; not
+ *                  falsifiable on today's lane, so DEFERRED with its reason
+ *                  printed — SCOPE AMENDMENT #2, founder 2026-09-03, TODOS
+ *                  [REDUNDER-PGCRON].
  *   "unreachable"  code-level `RAISE EXCEPTION`, none of them carrying the
  *                  identity idiom. `attributeIdentities` has nothing to
  *                  attribute, so no arm of this file can be judged today.
  *   "inert"        no code-level `RAISE EXCEPTION` at all. MEASURED 2026-09-02:
  *                  zero such files in `supabase/tests/`. If one ever appears it
  *                  is a FINDING — a gate that cannot fail — and it is printed.
+ *
+ * ⚠️ ORDER MATTERS and is asserted by the parser's own vitest file: `unreachable`
+ * is decided BEFORE `lane-blocked`. `test_retention_crons_safe.sql` probes
+ * pg_cron AND raises outside the identity idiom; it stays `unreachable`,
+ * because the reason no arm of it can be judged is the idiom, not the lane, and
+ * a file cannot be deferred out of a class it was never in.
  *
  * ⛔ Both halves are read the way the runner reads them, not by grep. The raise
  * test runs against `executableText` (so a raise inside a comment or a literal
@@ -982,12 +1038,18 @@ export const IDENTITY_CARRIER = "TEST FAILED (";
  */
 export function classifyGateIdiom(text) {
   let raises = false;
+  let idiom = false;
   for (const stmt of tokenizeStatements(text)) {
     if (!RAISE_EXCEPTION_RE.test(stmt.executableText)) continue;
     raises = true;
-    if (stmt.text.includes(IDENTITY_CARRIER)) return "pending";
+    if (stmt.text.includes(IDENTITY_CARRIER)) {
+      idiom = true;
+      break;
+    }
   }
-  return raises ? "unreachable" : "inert";
+  if (!raises) return "inert";
+  if (!idiom) return "unreachable";
+  return gateNeedsPgCron(text) ? "lane-blocked" : "pending";
 }
 
 /**
@@ -1014,12 +1076,17 @@ export function classifyGateIdiom(text) {
  * `filesAnnotated` is unchanged at 1 of 71 and the FILES_FLOOR does not move.
  *
  * ⭐ 2026-09-02, phase 164.4: the UNANNOTATED remainder is classified too, by
- * `classifyGateIdiom` above, and returned as three sorted basename lists. The
+ * `classifyGateIdiom` above, and returned as sorted basename lists. The
  * denominator stays every `.sql` in the directory (`filesTotal`) — the end
- * state of the backfill is `files 44/71` with the other 27 PRINTED BY NAME,
- * never `files 44/44` with the gap quietly redefined away. MEASURED at this
- * commit over `supabase/tests/`: 1 annotated + 43 pending + 27 unreachable +
- * 0 inert = 71.
+ * state of the backfill is `files 40/71` with the other 31 PRINTED BY NAME,
+ * never `files 40/40` with the gap quietly redefined away.
+ *
+ * ⭐ 2026-09-03, plan 164.4-03: a FIFTH partition class, `laneBlockedFiles`.
+ * The partition is `annotated + pending + unreachable + inert + lane-blocked
+ * = filesTotal`, and the parser's vitest file asserts that sum rather than any
+ * one member, so a class that stops being computed cannot hide inside another.
+ * RE-MEASURED 2026-09-03 at this commit over `supabase/tests/`: 1 annotated +
+ * 39 pending + 27 unreachable + 0 inert + 4 lane-blocked = 71.
  */
 export function scanCorpus(dir) {
   const files = readdirSync(dir)
@@ -1029,6 +1096,7 @@ export function scanCorpus(dir) {
   const unreachableFiles = [];
   const pendingFiles = [];
   const inertFiles = [];
+  const laneBlockedFiles = [];
   const results = [];
   for (const name of files) {
     const text = readFileSync(join(dir, name), "utf8");
@@ -1040,6 +1108,7 @@ export function scanCorpus(dir) {
     }
     const klass = classifyGateIdiom(text);
     if (klass === "pending") pendingFiles.push(name);
+    else if (klass === "lane-blocked") laneBlockedFiles.push(name);
     else if (klass === "unreachable") unreachableFiles.push(name);
     else inertFiles.push(name);
   }
@@ -1051,6 +1120,7 @@ export function scanCorpus(dir) {
     unreachableFiles,
     pendingFiles,
     inertFiles,
+    laneBlockedFiles,
     results,
   };
 }
