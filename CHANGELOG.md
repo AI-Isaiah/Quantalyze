@@ -1,5 +1,51 @@
 # Changelog
 
+## [0.77.3.0] - 2026-09-03
+
+### Phase 164.4 (wave 3) — the reference gate file is fully twinned, and ARMS_FLOOR ratchets 30 to 45
+
+No production source change, no schema change, no migration. SQL-gate tooling,
+its tests, one gate file's annotations, and the planning record. This is batch 1
+of 10; it lands on its own so `sql-mutation` runs SHA-bound and green on ubuntu,
+which is the precondition wave 4 reads.
+
+### Added
+
+- `supabase/tests/test_strategy_shares_rls.sql` — the remaining 15 sections carry a
+  `RED-UNDER-M` twin, so all 35 sections of the reference file are covered by 45 arms.
+  Every one was demonstrated RED under its own mutation and GREEN on restore; the full
+  run reports `arms: 45/45/0`, `biting: 45`, `lane-invocations: 45` with both independent
+  tallies agreeing.
+- A **SECTION-inclusion pin**: coverage is asserted as set inclusion over
+  `sectionOfIdentity(twin.arm)`, not as a twin-count inequality. A count pin was
+  satisfiable by two twins on half the sections; the set pin is not.
+
+### Changed
+
+- `ARMS_FLOOR` 30 -> 45 in `scripts/mutation-runner/run.mjs`, with the lockstep-pin
+  choreography (`KNOWN_THRESHOLD_SITES`, the `GREEN_LOG` fixture, `totalAnchored`, and the
+  live `ci.yml` step) moved in the same commit. Separation was driven on real lanes in
+  both directions: floor 45 silent, floor 46 fires.
+- `.github/workflows/ci.yml` — the `sql-mutation` job's arm-count prose and timeout
+  rationale are now count-free where they were currency claims, so later batches touch
+  fewer sites.
+
+### Fixed
+
+- Three stale claims in files already being edited: `VAC06-DEMOS.md` still said
+  `sql-mutation` had never run on ubuntu (it has, run 33683536312); `GRAMMAR.md:3` still
+  listed the reference file's 15 sections as outstanding; `run.mjs`'s self-test preamble
+  still called 30 "the REAL ARMS_FLOOR".
+
+### Known gaps
+
+- `[REDUNDER-PGCRON]` (TODOS.md) — four idiom gate files (100 of 355 sections) cannot be
+  soundly annotated on the pg-lane: two RAISE on absent `pg_cron`, two green-skip and so
+  withhold their arms. Deferred by founder decision 2026-09-03 and recorded per criterion
+  4; the runner will name them every run once wave 4 lands.
+- `[ANCHOR-QUOTE-01]` (TODOS.md) — `verify-plan-anchors.mjs` `boundQuote` binds a
+  line-final anchor to the next line's first backtick span.
+
 ## [0.77.2.0] - 2026-09-02
 
 ### Phase 164.4 (waves 1-2) — the mutation runner reports what it did NOT cover, and its own controls are made falsifiable
