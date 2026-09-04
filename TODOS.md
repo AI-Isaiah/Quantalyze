@@ -1122,8 +1122,32 @@ true for 146 and half of 142–145, and **false for 141**.
       every arm. On this forge the unique index, not the INSERT policy, is the outer fence.
       **Fix:** forge a triple that does not collide, so the INSERT policy is the only fence.
 
-- [ ] **`[REDUNDER-WAIVER-01]` ⛔ OPEN FOUNDER DECISION — `test_get_published_trust_signals.sql`
-      assertion 5 has NO first-failure mutation.** MEASURED 2026-09-04 (plan 164.4-08) on a
+- [x] **`[REDUNDER-WAIVER-01]` ✅ RESOLVED 2026-09-04 BY FOUNDER DECISION — the ROOT-CAUSE FIX
+      (reorder), NOT a waiver. `test_get_published_trust_signals.sql` assertion 5 is now
+      first-failure mutable and `WAIVED_CEILING` stays 0.**
+      **The decision.** Escalated with two branches (A accept-waiver / B refuse-and-leave-untwinned);
+      the founder took NEITHER and chose a third that removes the cause instead of recording it.
+      Assertion 5 proves the anon EXECUTE grant that assertions 1-3 *depend on to call the function
+      at all* — it is a PRECONDITION, and it was simply in the wrong place. It now runs BEFORE
+      `SET LOCAL ROLE anon;`, ahead of its dependents. `has_function_privilege` takes the role as an
+      argument, so it needs no anon context and is correct in that position.
+      **What changed, exactly.** The six executable lines of the assertion were RELOCATED
+      byte-identically (proved by diffing the removed against the added non-comment lines); the
+      `(5)` label and the `TEST FAILED (5): …` message text are UNCHANGED, because arm identities
+      are the mutation runner's addressing scheme and must stay stable across the sibling gate
+      files. Nothing was renumbered. This is the phase's one and only edit to executable SQL in a
+      gate file; every other file stayed comment-only.
+      **MEASURED after the fix,** same pg-lane recipe as the original measurement (that file's own
+      `RED-UNDER-SETUP` list + the `REVOKE EXECUTE … FROM anon` post-apply step): baseline exit 0
+      (`ALL PASS`); under the revoke the lane exits 3 and the FIRST and ONLY error is
+      `psql:…:223: ERROR: P0001: TEST FAILED (5): anon lacks EXECUTE …` with a single
+      `PL/pgSQL function inline_code_block line 63 at RAISE` CONTEXT frame and **zero occurrences of
+      42501** anywhere in the log; then restores GREEN. Runner verdict: `RED (identity ok)`.
+      **Cost:** `WAIVED_CEILING` unchanged at 0, `FILES_FLOOR` 23, `ARMS_FLOOR` 219 (218 + this now
+      mutable arm), run prints `arms: 219/219/0`. Neither branch A's ceiling raise nor branch B's
+      permanent coverage hole was taken.
+      **Superseded record (the original 2026-09-04 finding, kept because the measurement is the
+      reason the fix exists):** MEASURED on a
       throwaway pg-lane cluster carrying that file's own `RED-UNDER-SETUP` list plus a
       `REVOKE EXECUTE ON FUNCTION public.get_published_trust_signals(uuid[]) FROM anon`
       post-apply step. The ONLY change that reddens the arm is anon losing EXECUTE, and the run
@@ -1138,17 +1162,20 @@ true for 146 and half of 142–145, and **false for 141**.
       no first-failure mutation — and explicitly NOT a dead arm (`164.4-CONTEXT.md` § Waivers &
       un-falsifiable arms distinguishes the two). The four other sections of that file are twinned
       and biting.
-      **Why it is open and not closed here:** accepting a waiver raises `WAIVED_CEILING` (0 today),
-      which `164.4-CONTEXT.md` reserves to the founder (+1 per accepted waiver, reason pinned beside
-      the constant, >5 total ⇒ escalate). The 164.4-08 execution brief additionally states that a
-      waiver candidate is a STOP checkpoint, not an executor decision. So NO waiver twin was
-      authored and `WAIVED_CEILING` was not touched.
-      **The two branches, and what each costs.** `FILES_FLOOR` = 23 and `ARMS_FLOOR` = 218 EITHER
-      WAY (the file already counts as annotated, and a waiver twin spawns no lane and raises no
-      `biting`). What differs is only: (A) accept — author the Shape 4 twin, `WAIVED_CEILING` 0 -> 1
-      with this reason pinned, run prints `arms: 219/219/1`, `armsSeen` pin 219; (B) refuse — leave
-      the section untwinned, `WAIVED_CEILING` stays 0, run prints `arms: 218/218/0`, `armsSeen` 218,
-      and this entry stays open as the record.
+      **Why it was escalated rather than decided in-plan:** accepting a waiver raises
+      `WAIVED_CEILING` (0 then, 0 still), which `164.4-CONTEXT.md` reserves to the founder (+1 per
+      accepted waiver, reason pinned beside the constant, >5 total ⇒ escalate). The 164.4-08
+      execution brief additionally states that a waiver candidate is a STOP checkpoint, not an
+      executor decision. So no waiver twin was authored by the executor and `WAIVED_CEILING` was
+      never touched — correctly, as it turned out, since the accepted answer was neither branch.
+      **The two branches that were offered, and why both were rejected.** (A) accept — author the
+      Shape 4 twin, `WAIVED_CEILING` 0 -> 1, `arms: 219/219/1`: rejected because it books a
+      permanent exception for what is really a fixable ordering mistake, and the first waiver is
+      the one that makes the second easy. (B) refuse — leave the section untwinned, `arms:
+      218/218/0`: rejected because it leaves a real security arm (the anon-EXECUTE revoke footgun)
+      permanently unproven. ⭐ The generalisable lesson: **an arm that looks un-falsifiable because
+      an earlier assertion consumes its precondition is an ORDERING defect, not a grammar limit.**
+      Check assertion order before reaching for a waiver.
 
 - [ ] **`[REDUNDER-SWEEPCOPY]` `test_scenario_downgrade_sweep.sql` re-implements the sweep script
       it claims to prove, and nothing enforces they agree.** MEASURED 2026-09-04 (plan 164.4-08)

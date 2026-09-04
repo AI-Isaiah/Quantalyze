@@ -66,8 +66,13 @@
 -- `strategy_verifications.created_at`, the recency axis of the function's
 -- DISTINCT ON; the gate seeds one verification per strategy, so no arm here can
 -- be decided by it.
--- ⚠️ ASSERTION 5 CARRIES NO TWIN, and the reason is MEASURED, not an oversight
--- — see the note above it.
+-- ⚠️ ASSERTION 5 IS ORDERED FIRST, ahead of assertions 1-3, and the reason is
+-- structural: it proves the anon EXECUTE grant that 1-3 depend on to call the
+-- function at all. Behind them it was unmutatable — revoking the grant killed
+-- assertion 1 with a raw 42501 that named no arm (measured 2026-09-04). Ahead
+-- of them the same revoke reports as `TEST FAILED (5)`. The `(5)` label is
+-- deliberately NOT renumbered; source order and identity are separate things
+-- here, and the identities are the runner's addressing scheme.
 -- RED-UNDER-SETUP: {"apply":["scripts/pg-lane/fixtures/01-fixture-core.sql","scripts/pg-lane/fixtures/02-fixture-sanitize-tables.sql","scripts/pg-lane/fixtures/03-fixture-compute-jobs.sql","scripts/pg-lane/fixtures/07-fixture-supabase-default-privileges.sql","scripts/pg-lane/fixtures/13-fixture-csv-finalize-fold.sql","scripts/pg-lane/fixtures/18-fixture-trust-signals.sql","supabase/migrations/20260719140000_get_published_trust_signals.sql"]}
 
 -- --------------------------------------------------------------------------
@@ -114,6 +119,35 @@ BEGIN
     (strat_priv, gen_random_uuid(), 'validated', 'api_verified', 'csv', 'csv');
 
   RAISE NOTICE 'Seed OK: uid=% published=% private=%', uid, strat_pub, strat_priv;
+
+  -- (5) anon holds EXECUTE (the public signal stays readable)
+  -- ⭐ THIS CHECK RUNS FIRST BECAUSE ASSERTIONS 1-3 DEPEND ON IT. It is a
+  --    PRECONDITION, not a postscript: 1-3 call the function AS anon, so if
+  --    anon has lost EXECUTE they die at assertion 1 with a raw
+  --    `ERROR: 42501: permission denied for function …` that names no arm at
+  --    all. Ordering the precondition ahead of its dependents is what makes
+  --    the grant's loss report itself as `TEST FAILED (5)` — the identity of
+  --    the thing that actually broke. The `(5)` label and the message text are
+  --    UNCHANGED: arm identities are the mutation runner's addressing scheme
+  --    and must stay stable across the sibling gate files.
+  --    `has_function_privilege` takes the role as an argument, so this is
+  --    correct without `SET ROLE` and needs no anon context of its own.
+  -- RED-UNDER: revoke the public path's grant — `REVOKE EXECUTE ON FUNCTION
+  --            public.get_published_trust_signals(uuid[]) FROM anon`. That is
+  --            the anon-EXECUTE revoke footgun of
+  --            reference_secdef_public_policy_needs_anon_execute: a SECDEF
+  --            reachable only through a `{public}` policy silently returns
+  --            zero rows to SSR (clean console, dark badge) the moment anon
+  --            loses EXECUTE. A `sql` step, never a migration edit — mig 135's
+  --            STEP 2 pins the grantee list exactly, so editing it there would
+  --            change what the gate is asserting rather than break it.
+  -- RED-UNDER-M: {"arm":"5","apply":[{"kind":"sql","stmt":"REVOKE EXECUTE ON FUNCTION public.get_published_trust_signals(uuid[]) FROM anon"}]}
+  SELECT has_function_privilege('anon',
+           'public.get_published_trust_signals(uuid[])', 'EXECUTE')
+    INTO anon_can_exec;
+  IF NOT anon_can_exec THEN
+    RAISE EXCEPTION 'TEST FAILED (5): anon lacks EXECUTE on get_published_trust_signals — the public trust signal is unreadable (badge would vanish for anon)';
+  END IF;
 
   -- ----- Assertions run AS anon (the real public path) ---------------------
   -- SECURITY DEFINER means the function body runs as its owner regardless, but
@@ -182,32 +216,6 @@ BEGIN
       AND p.pronamespace = 'public'::regnamespace;
   IF result_sig IS DISTINCT FROM 'TABLE(strategy_id uuid, trust_tier text, status text)' THEN
     RAISE EXCEPTION 'TEST FAILED (4): get_published_trust_signals result signature is "%", expected "TABLE(strategy_id uuid, trust_tier text, status text)" — column allow-list widened (possible internal leak)', result_sig;
-  END IF;
-
-  -- (5) anon holds EXECUTE (the public signal stays readable)
-  -- ⛔ NO RED-UNDER TWIN — MEASURED UNMUTATABLE, 2026-09-04, pg-lane.
-  --    The ONLY change that reddens this arm is anon losing EXECUTE, and the
-  --    only way to observe it here is to revoke it. Measured on a throwaway
-  --    cluster with exactly this file's RED-UNDER-SETUP list plus a
-  --    `REVOKE EXECUTE ON FUNCTION public.get_published_trust_signals(uuid[])
-  --    FROM anon` post-apply step: the run dies at assertion 1 with
-  --    `ERROR: 42501: permission denied for function get_published_trust_signals`
-  --    and emits NO `TEST FAILED (…)` at all — assertions 1-3 call the function
-  --    AS anon, 90 lines before this one is reached.
-  --    It cannot be routed around. `neuter` suppresses a gate RAISE, not a
-  --    PostgreSQL privilege error; and `has_function_privilege` is definitionally
-  --    the same check the call performs, so no mutation can make it FALSE while
-  --    leaving the call callable (PUBLIC grants, role membership and superuser
-  --    are all counted by both).
-  --    ⚠️ This is a WAIVER CANDIDATE — an arm that DOES bite but has no
-  --    first-failure mutation (GRAMMAR Shape 4) — and NOT a dead arm. Accepting
-  --    a waiver raises WAIVED_CEILING, which is a founder decision, so no waiver
-  --    twin is authored here. Do not add one without that decision.
-  SELECT has_function_privilege('anon',
-           'public.get_published_trust_signals(uuid[])', 'EXECUTE')
-    INTO anon_can_exec;
-  IF NOT anon_can_exec THEN
-    RAISE EXCEPTION 'TEST FAILED (5): anon lacks EXECUTE on get_published_trust_signals — the public trust signal is unreadable (badge would vanish for anon)';
   END IF;
 
   RAISE NOTICE 'test_get_published_trust_signals: ALL PASS (published-gate holds, column allow-list intact, anon-readable).';
