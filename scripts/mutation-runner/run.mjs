@@ -355,11 +355,77 @@ const PROBE_AVAILABLE_OUTPUT = `ERROR:  ${LANE_PROBE_AVAILABLE}`;
 //   RECORD       .planning/phases/164.4-redunder-backfill-every-sql-gate-arm-
 //                gets-a-red-under-annota/164.4-08-SUMMARY.md
 //
+// ⭐ RE-DERIVED 2026-09-04 (plan 164.4-09) — THE SIXTH FILE MOVE, and a REDUCED
+// batch. The blocks above STAY as lineage. Five NEW gate files — the
+// wizard-session tenant-scope index, the wizard composite fence, the
+// weight-snapshot seed SECDEF trigger, the csv-finalize auth guard and the
+// resync-retry single-job substrate — were annotated to completion,
+// 5 + 5 + 4 + 3 + 3 = 20 sections.
+//
+// ⚠️ The plan projected SIX files / 23 sections. The sixth,
+// test_compute_jobs_error_kind_copy_parity.sql, is UN-BASELINEABLE on today's
+// lane: the only migration that widens compute_jobs_error_kind_check to admit
+// 'orphaned' hard-RAISEs when pg_cron is absent. It stays in `pending:` and is
+// deferred to the plan that hosts pg_cron on the lane ([REDUNDER-PGCRON]).
+// The floors below are therefore ratcheted to what the run PRINTED, not to the
+// plan's arithmetic.
+//
+//   VALUE        28 — read off the run's own `coverage:` line, not counted here.
+//   DATE         2026-09-04, at HEAD ff2a3f4a.
+//   COMMAND      `node scripts/mutation-runner/run.mjs` -> exit 0
+//                  coverage: files 28/71
+//                  arms: 239/239/0   (executed/annotated/waived)
+//                  biting: 239
+//                  lane-invocations: 239
+//                  per-arm lane time: mean 1.0s over 239 arm run(s)
+//                  pending: 12 idiom file(s) without RED-UNDER
+//                297 s wall clock on the authoring box (239 arm lanes plus 28
+//                baseline and 28 restore legs).
+//   COVERAGE     28 annotated gate files of 71 in supabase/tests/, namely
+//                supabase/tests/test_allocator_equity_derived_rls.sql,
+//                supabase/tests/test_api_keys_venue_identity_uniq.sql,
+//                supabase/tests/test_capital_ownership_allocation_guard.sql,
+//                supabase/tests/test_capital_ownership_column.sql,
+//                supabase/tests/test_create_wizard_strategy_for_key.sql,
+//                supabase/tests/test_csv_daily_returns_perkey_rls.sql,
+//                supabase/tests/test_csv_finalize_atomic_fold.sql,
+//                supabase/tests/test_csv_finalize_auth_guard.sql,
+//                supabase/tests/test_csv_finalize_double_submit.sql,
+//                supabase/tests/test_funding_fees_rls.sql,
+//                supabase/tests/test_get_published_trust_signals.sql,
+//                supabase/tests/test_get_verified_cohort_rank_gate.sql,
+//                supabase/tests/test_ledger_refresh_composite_arm.sql,
+//                supabase/tests/test_ledger_refresh_fanout.sql,
+//                supabase/tests/test_ledger_refresh_staleness.sql,
+//                supabase/tests/test_resync_retry_single_job.sql,
+//                supabase/tests/test_scenario_downgrade_sweep.sql,
+//                supabase/tests/test_scenario_shares_rls.sql,
+//                supabase/tests/test_scenarios_rls.sql,
+//                supabase/tests/test_strategies_private_owner_isolation.sql,
+//                supabase/tests/test_strategy_analytics_series_completeness.sql,
+//                supabase/tests/test_strategy_keys_rls.sql,
+//                supabase/tests/test_strategy_shares_rls.sql,
+//                supabase/tests/test_strategy_verifications_wizard_session_tenant_scope.sql,
+//                supabase/tests/test_user_notes_dashboard_scope.sql,
+//                supabase/tests/test_weight_snapshot_seed_secdef.sql,
+//                supabase/tests/test_wizard_composite_fence.sql and
+//                supabase/tests/test_wizard_composite_members.sql.
+//   SEPARATION   Both directions driven through the real verdict loop on real
+//                lanes (`runCorpus({filesFloor, armsFloor})`), 2026-09-04:
+//                  filesFloor=28 armsFloor=239  defects=0  SILENT   (298.7 s)
+//                  filesFloor=29 armsFloor=240  defects=2  FIRES ->
+//                    `FILES_FLOOR regression: 28 annotated file(s) < floor 29`
+//                    `ARMS_FLOOR regression: 239 biting arm(s) < floor 240`
+//                                                                   (295.8 s)
+//                So 28/239 is exactly the separation point, not a value below it.
+//   RECORD       .planning/phases/164.4-redunder-backfill-every-sql-gate-arm-
+//                gets-a-red-under-annota/164.4-09-SUMMARY.md
+//
 // CURRENCY, stated where the VALUE is: RE-DERIVED 2026-09-04 by measurement
-// (plan 164.4-08). Measured coverage 23 of 71 — value RAISED from 17. The
-// phase's end state on today's lane is 40 of 71 (SCOPE AMENDMENT #2 above); 17
+// (plan 164.4-09). Measured coverage 28 of 71 — value RAISED from 23. The
+// phase's end state on today's lane is 40 of 71 (SCOPE AMENDMENT #2 above); 12
 // idiom files remain `pending:`.
-export const FILES_FLOOR = 23;
+export const FILES_FLOOR = 28;
 
 // ARMS_FLOOR — PINNED 2026-08-29 BY MEASUREMENT (plan 164.3-08), not chosen.
 //
@@ -672,11 +738,67 @@ export const FILES_FLOOR = 23;
 //   RECORD       .planning/phases/164.4-redunder-backfill-every-sql-gate-arm-
 //                gets-a-red-under-annota/164.4-08-SUMMARY.md
 //
+// ⭐ RE-DERIVED 2026-09-04 (plan 164.4-09) — THE SIXTH ARMS MOVE. The blocks
+// above STAY as lineage. Twenty NEW arms across five NEW gate files, each one a
+// SECTION that had no twin before.
+//
+//   VALUE        239 — read off the run's own `biting:` line, not counted here.
+//   DATE         2026-09-04, at HEAD ff2a3f4a.
+//   COMMAND      `node scripts/mutation-runner/run.mjs` -> exit 0
+//                  coverage: files 28/71
+//                  arms: 239/239/0   (executed/annotated/waived)
+//                  biting: 239
+//                  lane-invocations: 239
+//                  file test_strategy_verifications_wizard_session_tenant_scope
+//                    .sql: sections 5 / judged 5 / annotated 5 / waived 0 /
+//                    biting 5
+//                  file test_wizard_composite_fence.sql: sections 5 /
+//                    judged 5 / annotated 5 / waived 0 / biting 5
+//                  file test_weight_snapshot_seed_secdef.sql: sections 4 /
+//                    judged 4 / annotated 4 / waived 0 / biting 4
+//                  file test_csv_finalize_auth_guard.sql: sections 3 /
+//                    judged 3 / annotated 3 / waived 0 / biting 3
+//                  file test_resync_retry_single_job.sql: sections 3 /
+//                    judged 3 / annotated 3 / waived 0 / biting 3
+//                  per-arm lane time: mean 1.0s over 239 arm run(s)
+//   SAMPLE SIZE  239 arms executed, all 239 `RED (identity ok)`, 0 defects of
+//                any kind. The two independent tallies AGREE: `arms:` executed
+//                239 and `lane-invocations:` 239. 297 s wall clock, 28 baseline
+//                and 28 restore legs beside the 239 arm lanes. The 28 per-file
+//                `biting` counts SUM to 239, the aggregate.
+//   COVERAGE     28 annotated gate files of 71 (see the FILES_FLOOR block). 20
+//                of the 239 arms are new this batch; 0 waivers were added, so
+//                WAIVED_CEILING is untouched at 0.
+//   ⭐ ONE OF THE 20 WAS UNLOCKED BY A GATE-STRUCTURE FIX, NOT BY A WAIVER —
+//                the same precedent as [REDUNDER-WAIVER-01] above.
+//                `test_resync_retry_single_job.sql` assertion (b) issued its
+//                two-row INSERT with no exception handler, so its only
+//                falsifying mutation — narrowing the SV unique index to
+//                (strategy_id) — aborted psql with a raw 23505 and MEASURED
+//                `occurrences of "TEST FAILED (" in the lane output: 0`. It was
+//                escalated as a waiver candidate. The founder chose the
+//                root-cause fix: the INSERT is now wrapped in the
+//                `BEGIN … EXCEPTION WHEN unique_violation` idiom THAT SAME FILE
+//                already uses at assertion (c), with no assertion, message or
+//                identity changed. The same narrowing now reports
+//                `TEST FAILED (b)` as the first failure, single-frame CONTEXT,
+//                LOCATION last. So this arm is counted in `biting`, and
+//                WAIVED_CEILING stayed 0 rather than rising to 1.
+//   SEPARATION   Both directions driven through the real verdict loop on real
+//                lanes (`runCorpus({filesFloor, armsFloor})`), 2026-09-04:
+//                  armsFloor=239  biting=239  defects=0  SILENT      (298.7 s)
+//                  armsFloor=240  biting=239  defects=2  FIRES ->
+//                    `ARMS_FLOOR regression: 239 biting arm(s) < floor 240`
+//                    (beside the paired FILES_FLOOR regression)      (295.8 s)
+//                So 239 is exactly the separation point, not a value below it.
+//   RECORD       .planning/phases/164.4-redunder-backfill-every-sql-gate-arm-
+//                gets-a-red-under-annota/164.4-09-SUMMARY.md
+//
 // CURRENCY, stated where the VALUE is — derivation, sample size, coverage and
-// separation in the block immediately above; record in 164.4-08-SUMMARY.md:
-// RE-DERIVED 2026-09-04 by measurement (plan 164.4-08).
-// Measured biting 219 — value RAISED from 189.
-export const ARMS_FLOOR = 219;
+// separation in the block immediately above; record in 164.4-09-SUMMARY.md:
+// RE-DERIVED 2026-09-04 by measurement (plan 164.4-09).
+// Measured biting 239 — value RAISED from 219.
+export const ARMS_FLOOR = 239;
 
 // WAIVED_CEILING — PINNED 2026-09-02 BY MEASUREMENT (164.3.1 red team), not
 // chosen. A CEILING, not a floor: it fails when the corpus carries MORE waivers
