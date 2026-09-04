@@ -51,6 +51,34 @@
 --     supabase/tests/test_resync_retry_single_job.sql
 -- Never run against PROD.
 
+-- ⭐ RED-UNDER ANNOTATIONS (Phase 164.4). Each assertion below carries a prose
+-- `RED-UNDER:` naming the smallest production change that makes it fail, and a
+-- machine-readable `RED-UNDER-M:` twin the mutation runner applies on a
+-- throwaway pg-lane cluster to PROVE it reds on its OWN arm, then restores
+-- GREEN. Schema: scripts/mutation-runner/GRAMMAR.md. The line below declares
+-- what the lane applies before this gate.
+--
+-- ⚠️ THIS GATE IS DEFENCE IN DEPTH, AND (a)'S TWIN HAS TO SAY SO. The header
+-- above names compute_jobs_one_inflight_per_kind_strategy as the dedup anchor.
+-- MEASURED 2026-09-04 on a real lane, and PROVED APPLIED by re-reading
+-- pg_indexes.indexdef: excluding `process_key_long` from that index ALONE
+-- leaves this gate at exit 0, because _enqueue_compute_job_internal's own
+-- optimistic select-existing already returns the live job. Removing that
+-- select-existing ALONE is equally a no-red, because the partial unique index
+-- then dedups via ON CONFLICT DO NOTHING and the lost-the-race re-read hands
+-- back the same id. (a) only reds when BOTH halves of the (strategy_id, kind)
+-- dedup go -- which is exactly what its own message says ("without the
+-- (strategy_id, kind) dedup a seam retry mints a second job") -- so its twin is
+-- LAYERED across the two migrations that last define them. A single-layer twin
+-- would be reported as "mutation applied, arm did not redden": a false defect.
+--
+-- ⚠️ 20260416125430 IS THE LAST-DEFINING MIGRATION FOR THE INFLIGHT INDEX (it
+-- DROPs the 20260411144407 version and recreates it with the
+-- compute_intro_snapshot carve-out), and 20260420073003 for
+-- _enqueue_compute_job_internal (20260515210300 replaces only the PUBLIC
+-- wrapper). Twins cut THERE, not at the migrations that first created them.
+-- RED-UNDER-SETUP: {"apply":["scripts/pg-lane/fixtures/01-fixture-core.sql","scripts/pg-lane/fixtures/02-fixture-sanitize-tables.sql","scripts/pg-lane/fixtures/03-fixture-compute-jobs.sql","scripts/pg-lane/fixtures/07-fixture-supabase-default-privileges.sql","scripts/pg-lane/fixtures/11-fixture-api-keys-created-at.sql","scripts/pg-lane/fixtures/15-fixture-auth-role.sql","scripts/pg-lane/fixtures/20-fixture-app-role-helper.sql","scripts/pg-lane/fixtures/21-fixture-api-keys-credential-columns.sql","scripts/pg-lane/fixtures/23-fixture-contact-requests.sql","scripts/pg-lane/fixtures/24-fixture-enqueue-compute-job-chain.sql","supabase/migrations/20260411144407_compute_jobs_queue.sql","scripts/pg-lane/fixtures/04-fixture-compute-jobs-targets.sql","supabase/migrations/20260416125430_contact_request_metadata.sql","supabase/migrations/20260418194206_scoring_weight_overrides.sql","supabase/migrations/20260420073003_allocator_holdings.sql","supabase/migrations/20260501055202_strategy_verifications.sql","supabase/migrations/20260501055213_strategy_verifications_rls_polish.sql","supabase/migrations/20260510172738_strategy_verifications_state_machine.sql","supabase/migrations/20260510175507_process_key_long_compute_job_kinds_repair.sql","supabase/migrations/20260515210300_scoring_weight_overrides_high_hardening.sql","supabase/migrations/20260717233529_allocator_equity_derived_surface.sql","supabase/migrations/20260726000225_strategy_verifications_tenant_scope_uniq.sql"]}
+
 -- --------------------------------------------------------------------------
 -- Defensive pre-clean (a prior aborted run may have committed synthetic rows).
 -- compute_jobs.strategy_id and strategy_verifications.strategy_id are ON DELETE
@@ -121,6 +149,18 @@ DECLARE
   second_id UUID;
   row_cnt   INTEGER;
 BEGIN
+  -- RED-UNDER: remove BOTH halves of the (strategy_id, kind) dedup this
+  --            assertion's own message names. Half one: delete the
+  --            strategy-branch optimistic select-existing from
+  --            _enqueue_compute_job_internal in migration 20260420073003, on
+  --            the reasonable-sounding ground that the partial unique index is
+  --            "the final arbiter" anyway. Half two: widen that index's
+  --            carve-out in migration 20260416125430 to skip `process_key_long`
+  --            as well as `compute_intro_snapshot`, the way a future
+  --            per-(allocator, strategy) kind would be added. EITHER change
+  --            alone is a measured NO-RED -- the other half still dedups --
+  --            which is precisely why the twin is layered.
+  -- RED-UNDER-M: {"arm":"a","apply":[{"kind":"edit","file":"supabase/migrations/20260420073003_allocator_holdings.sql","find":"  IF p_strategy_id IS NOT NULL THEN\n    SELECT id INTO v_existing_id\n      FROM compute_jobs\n     WHERE strategy_id = p_strategy_id\n       AND kind = p_kind\n       AND status IN ('pending', 'running', 'done_pending_children')\n     LIMIT 1;\n  ELSIF p_portfolio_id IS NOT NULL THEN\n","replace":"  IF FALSE THEN\n    NULL;\n  ELSIF p_portfolio_id IS NOT NULL THEN\n","occurrences":1},{"kind":"edit","file":"supabase/migrations/20260416125430_contact_request_metadata.sql","find":"    AND kind <> 'compute_intro_snapshot'\n","replace":"    AND kind NOT IN ('compute_intro_snapshot', 'process_key_long')\n","occurrences":1}]}
   first_id := enqueue_compute_job(
     p_strategy_id => strat_r,
     p_kind        => job_kind,
@@ -172,6 +212,26 @@ BEGIN
   -- aborts psql with a raw driver error before this arm can name itself, so the
   -- one production change this assertion exists to refuse would be
   -- indistinguishable from any other crash. Phase 164.4 measured exactly that.
+  -- RED-UNDER: narrow the onboard fence back to a SINGLE column -- change STEP
+  --            1 of migration 20260726000225 to build
+  --            strategy_verifications_strategy_wizard_session_uniq on
+  --            (strategy_id) alone, the shape a "one draft per strategy" reading
+  --            of the fence would produce. That migration SELF-VERIFIES its own
+  --            indexed column list from pg_index in STEP 3, so the narrowing
+  --            aborts the apply unless that check is re-based in the same edit
+  --            -- hence a LAYERED twin (GRAMMAR Shape 3), not a single step.
+  --            MEASURED: STEP 3 bites TWICE. Its check (a) compares the indexed
+  --            column list to {strategy_id,wizard_session_id}; its check (c)
+  --            counts the unique indexes covering wizard_session_id and demands
+  --            exactly 1, which a (strategy_id)-only index makes 0. Re-basing
+  --            only the first still aborts with 'PYAPI-01: expected exactly 1
+  --            unique index covering wizard_session_id, found 0' -- the lane
+  --            emits no TEST FAILED at all and the runner reports
+  --            wrong-first-failure, which is how the second layer was found.
+  --            NOTE the drop-only mutation is (c)'s, not this one: with NO
+  --            unique index at all, two distinct sessions still insert cleanly
+  --            and (b) stays GREEN.
+  -- RED-UNDER-M: {"arm":"b","apply":[{"kind":"edit","file":"supabase/migrations/20260726000225_strategy_verifications_tenant_scope_uniq.sql","find":"  ON strategy_verifications (strategy_id, wizard_session_id);\n","replace":"  ON strategy_verifications (strategy_id);\n","occurrences":1},{"kind":"edit","file":"supabase/migrations/20260726000225_strategy_verifications_tenant_scope_uniq.sql","find":"  IF v_cols IS DISTINCT FROM ARRAY['strategy_id', 'wizard_session_id']::TEXT[] THEN\n","replace":"  IF FALSE THEN\n","occurrences":1},{"kind":"edit","file":"supabase/migrations/20260726000225_strategy_verifications_tenant_scope_uniq.sql","find":"  IF v_uniq <> 1 THEN\n","replace":"  IF FALSE THEN\n","occurrences":1}]}
   BEGIN
     INSERT INTO strategy_verifications
       (strategy_id, wizard_session_id, status, trust_tier, flow_type, source)
@@ -208,6 +268,18 @@ DECLARE
   strat_r   UUID := '6d6d6d6d-0000-4000-8000-000000000041';
   session_1 UUID := '7e7e7e7e-0000-4000-8000-000000000001';
 BEGIN
+  -- RED-UNDER: drop strategy_verifications_strategy_wizard_session_uniq and put
+  --            NOTHING in its place -- the state the header's own "manual
+  --            rollback" recipe passes through, and the state a migration that
+  --            retires the fence as "redundant with the application pre-check"
+  --            would leave behind. A `sql` step, not a migration edit: STEP 3 of
+  --            20260726000225 asserts the index EXISTS and is VALID, so deleting
+  --            its CREATE aborts the apply instead of reaching this arm.
+  --            ⚠️ The header's FULL rollback -- which also rebuilds the
+  --            single-column (wizard_session_id) index -- is a NO-RED here: that
+  --            index still refuses the same-session reinsert, so (c) passes. It
+  --            is (a) of the tenant-scope gate that catches THAT change.
+  -- RED-UNDER-M: {"arm":"c","apply":[{"kind":"sql","stmt":"DROP INDEX public.strategy_verifications_strategy_wizard_session_uniq"}]}
   BEGIN
     INSERT INTO strategy_verifications
       (strategy_id, wizard_session_id, status, trust_tier, flow_type, source)
