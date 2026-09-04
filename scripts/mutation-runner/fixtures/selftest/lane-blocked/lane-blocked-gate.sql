@@ -1,6 +1,15 @@
 -- ===========================================================================
--- THE `lane-blocked` PAIR — this file and lane-blocked-gate.sql (164.4-03)
+-- THE `lane-blocked` PAIR — lane-blocked-gate.sql and
+-- lane-blocked-comment-only-gate.sql (164.4-03)
 -- ===========================================================================
+--
+-- ⚠️ This header is BYTE-IDENTICAL in both members, and must stay that way —
+-- the vitest arm below reconstructs one member from the other and compares
+-- whole files. So it can never say "this file": a shared header cannot
+-- resolve that deictically, and it read as "this file and this file" in
+-- lane-blocked-gate.sql (review IN-06, 2026-09-04). Each member is named
+-- explicitly instead, here and in every claim below, so the header states
+-- what EACH member demonstrates no matter which one you opened.
 --
 -- Two idiom gates — a `TEST FAILED (…)` RAISE directly in a `DO $$` body — that
 -- are BYTE-IDENTICAL except for the three `--` markers on the pg_cron guard

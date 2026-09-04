@@ -37,6 +37,30 @@
 --
 -- Run order: AFTER 20260529150000. Impersonation uses the same forged-JWT
 -- technique as test_funding_fees_rls.sql. Whole test rolls back.
+--
+-- ⭐ MACHINE-EXECUTABLE TWINS (phase 164.4, REDUNDER-BACKFILL). The prose
+-- RED-UNDER below carries an adjacent `RED-UNDER-M` object that
+-- scripts/mutation-runner executes on every push: it mutates COPIES on a
+-- throwaway pg-lane cluster, requires the FIRST `TEST FAILED (…)` to name that
+-- arm, and restores GREEN. Schema: scripts/mutation-runner/GRAMMAR.md.
+-- ⚠️ ONE SECTION, AND NOTHING IS NEUTERED HERE. Assertion 2's seven raises say
+-- `PRIVESC (2)`, not `TEST FAILED (…)`, so they are not identities; they also
+-- sit on COMPOUND heads (`IF NOT v_raised THEN RESET ROLE; RAISE EXCEPTION …`)
+-- which the runner's neuter tokenizer refuses by design (R4-C01, 164.3.1): a
+-- neuter there would have to drop the `RESET ROLE` with the raise and leave the
+-- rest of the file running as `authenticated`. The twin does not need one —
+-- assertion 1 is the FIRST thing this file asserts.
+-- ⚠️ THE APPLY LIST CLEARS THE `:88` SKIP. It carries 20260529150000, so
+-- `profiles_lock_privileged_cols` exists and assertion 2 runs instead of
+-- skipping (MEASURED 2026-09-04: baseline prints both OK notices, no SKIP).
+-- ⚠️ 20260405061912 IS IN THE LIST AND IT IS LOAD-BEARING, NOT SCAFFOLD. It is
+-- the ONLY thing that runs `ALTER TABLE profiles ENABLE ROW LEVEL SECURITY`
+-- (:2). MEASURED 2026-09-04: without it the baseline is still green and
+-- assertion 2 still passes on the column REVOKE — but `profiles_self_update` is
+-- INERT, so narrowing it changes nothing and the twin below came back NO-RED.
+-- A lane where the policy under test cannot bite is exactly the stand-in defect
+-- this phase refuses; the fix is the real migration, not a different mutation.
+-- RED-UNDER-SETUP: {"apply":["scripts/pg-lane/fixtures/01-fixture-core.sql","scripts/pg-lane/fixtures/02-fixture-sanitize-tables.sql","scripts/pg-lane/fixtures/03-fixture-compute-jobs.sql","scripts/pg-lane/fixtures/07-fixture-supabase-default-privileges.sql","scripts/pg-lane/fixtures/10-fixture-strategies-rls-baseline.sql","scripts/pg-lane/fixtures/12-fixture-profiles-is-admin.sql","scripts/pg-lane/fixtures/28-fixture-profiles-privileged-columns.sql","supabase/migrations/20260405061912_rls_policies.sql","scripts/pg-lane/fixtures/13-fixture-csv-finalize-fold.sql","supabase/migrations/20260512182319_profiles_rls_hardening.sql","supabase/migrations/20260529150000_lock_profile_privileged_columns.sql"]}
 
 BEGIN;
 
@@ -61,6 +85,19 @@ BEGIN
                      true);
 
   -- ---- (1) POSITIVE: an ordinary self-edit still works (always active) -------
+  -- RED-UNDER: narrow the `profiles_self_update` USING clause in migration
+  --            20260512182319 so the caller's own row stops matching, and the
+  --            ordinary self-edit silently writes nothing. ⚠️ It must be the
+  --            ROW filter, not the column GRANT this arm is written about: the
+  --            UPDATE below is unwrapped, so an over-broad REVOKE aborts it with
+  --            a bare `permission denied for table profiles`, which carries no
+  --            `TEST FAILED (…)` and scores NO-IDENTITY (MEASURED 2026-09-04).
+  --            RLS filters instead of raising, so the same broken ProfileForm
+  --            reaches this assertion as a value mismatch. ⚠️ `AND false` rather
+  --            than `USING (false)`: 20260512182319's own post-verify requires
+  --            the qual to still name `auth.uid()` and to carry no OR-true
+  --            escape, and both hold here.
+  -- RED-UNDER-M: {"arm":"1","apply":[{"kind":"edit","file":"supabase/migrations/20260512182319_profiles_rls_hardening.sql","find":"CREATE POLICY profiles_self_update ON profiles\n  FOR UPDATE\n  USING (auth.uid() = id)\n  WITH CHECK (auth.uid() = id);","replace":"CREATE POLICY profiles_self_update ON profiles\n  FOR UPDATE\n  USING (auth.uid() = id AND false)\n  WITH CHECK (auth.uid() = id);","occurrences":1}]}
   SET LOCAL ROLE authenticated;
   UPDATE public.profiles SET display_name = 'clsec-edit', company = 'acme' WHERE id = v_uid;
   RESET ROLE;

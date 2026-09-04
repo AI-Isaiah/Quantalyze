@@ -1,8 +1,13 @@
 # `RED-UNDER-M` — the machine-executable annotation grammar
 
-⚠️ **Phase 164.4 backfills the remaining idiom gate files against this schema.
-The reference file's un-twinned sections were closed by plan 164.4-02 on
-2026-09-03, so it now carries a twin on every section it raises for.** The remaining 27 of the 71 files in `supabase/tests/` are OUT of
+⚠️ **Phase 164.4 backfilled the remaining idiom gate files against this schema
+and FINISHED on 2026-09-04 (plan 164.4-11) at a measured `coverage: files
+39/71`, `arms: 262/262/0`, `biting: 262`, 0 waivers.** The reference file's
+un-twinned sections were closed by plan 164.4-02 on 2026-09-03, so it carries a
+twin on every section it raises for. Exactly ONE idiom file is still `pending:`
+— `test_compute_jobs_error_kind_copy_parity.sql`, which needs a migration that
+raises `0A000` without pg_cron and is owed to Phase 164.4.1 PGCRON-LANE by
+founder decision. The remaining 27 of the 71 files in `supabase/tests/` are OUT of
 scope by founder decision (2026-09-02): they raise outside the runner's identity
 idiom, so no arm of theirs can be attributed. They are not silently dropped —
 the runner DERIVES that set and PRINTS it by name on every run
@@ -335,11 +340,11 @@ psql field (`CONTEXT:  …`, `LOCATION:  …`); such an arm is refused, loudly.
 
 All 104 identities in the reference file were measured as single-frame direct
 DO-body raises (2026-08-29), so this rule refuses nothing that existed. ⚠️
-CURRENCY 2026-09-03: the annotated corpus is now THIRTEEN files (plan 164.4-06
-added the private-by-default, venue-identity, capital-ownership-column and
-per-key-dailies gates on top of plan 164.4-05's tenant-isolation batch), and all
-163 of their arms scored `RED (identity ok)` on real lanes — i.e. the rule has
-still refused nothing that exists. Read the run's own `arms:`/`biting:` lines
+CURRENCY 2026-09-04: the annotated corpus is now THIRTY-NINE files — the end
+state of Phase 164.4 (plan 164.4-11, the seven ⚠️ mixed files) — and all 262 of
+their arms scored `RED (identity ok)` on real lanes, so the rule has still
+refused nothing that exists. The 2026-09-03 THIRTEEN-file / 163-arm reading
+above stays as lineage. Read the run's own `arms:`/`biting:` lines
 rather than either number restated here. It is written down so a 164.4 author
 meets it as a **contract** rather than as a surprise from the runner.
 
@@ -522,13 +527,16 @@ edits land in one run.
 
 ### Shape 4 — waiver
 
-⚠️ **The real corpus has none.** All 30 arm-anchored prose markers in
+⚠️ **The real corpus STILL has none, and that is now a measurement over the
+whole backfill, not over one file.** All 30 arm-anchored prose markers in
 `test_strategy_shares_rls.sql` were given executable twins by plan 164.3-08 and
-all 30 bite (`arms: 30/30/0`, 2026-08-29). ⚠️ CURRENCY: that is the 2026-08-29
-measurement and it stands as lineage; the file carries more arms now (plan
-164.4-02 closed its un-twinned sections), the annotated corpus is now nine files
-(plan 164.4-05), and it still has ZERO waivers — `WAIVED_CEILING` has never
-moved off 0. Read the run's own `arms:` line for the live E/A/W. The form is documented
+all 30 bite (`arms: 30/30/0`, 2026-08-29). ⚠️ CURRENCY 2026-09-04: that is the
+2026-08-29 measurement and it stands as lineage. Phase 164.4 finished at
+THIRTY-NINE annotated files and `arms: 262/262/0` — W is still ZERO, and
+`WAIVED_CEILING` has never moved off 0 across all eight of the phase's arms
+moves. Two arms came close and both were closed by a root-cause fix rather than
+an exception (a REORDER in plan 08, and re-using the gate file's own exception
+idiom in plan 09). Read the run's own `arms:` line for the live E/A/W. The form is documented
 for 164.4,
 which will meet arms this file does not have. This is an ILLUSTRATION, not a
 corpus quote:

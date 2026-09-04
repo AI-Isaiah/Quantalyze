@@ -23,6 +23,31 @@
 -- "direct UPDATE is blocked" + "SECURITY DEFINER path passes" assertions.
 -- This SQL test pins the function-body invariants for environments where
 -- the JS suite is not run.
+--
+-- ⭐ MACHINE-EXECUTABLE TWINS (phase 164.4, REDUNDER-BACKFILL). The prose
+-- RED-UNDER below carries an adjacent `RED-UNDER-M` object that
+-- scripts/mutation-runner executes on every push: it mutates COPIES on a
+-- throwaway pg-lane cluster, requires the FIRST `TEST FAILED (…)` to name that
+-- arm, and restores GREEN. Schema: scripts/mutation-runner/GRAMMAR.md.
+-- ⚠️ ONLY `Finding 1` IS AN IDENTITY. The nine structural raises in the first DO
+-- block say `TEST FAILED:` with no parenthesised arm, so the runner's identity
+-- regex — `TEST FAILED \((…)\)` — does not see them: a mutation that trips one
+-- scores NO-IDENTITY, not RED. They also run FIRST, and three of them are
+-- BODY-TEXT checks (`%quantalyze.wizard_rpc_active%` absent, `%current_user%`
+-- present, no `set_config` on the GUC in either RPC). So the twin cannot
+-- re-introduce the GUC bypass the arm is named after — assertion 1 would claim
+-- the failure. It falsifies the current_user branch instead and leaves both
+-- literals in the body, which is the same observable: an authenticated session
+-- promotes a wizard draft it does not own the transition of.
+-- ⚠️ 20260411103316 is deliberately ABSENT — it needs `for_quants_leads`, which
+-- no fixture creates — and nothing is lost: 20260515114310 is the LAST of the
+-- four definitions of `guard_wizard_draft_updates` and re-issues
+-- `create_wizard_strategy` and `finalize_wizard_strategy` too, so assertions 1-5
+-- all read the same objects they read in production. `strategies.source` and
+-- `strategies.created_at` come from 13-fixture-csv-finalize-fold.sql, which is
+-- applied AFTER 20260405061912 because both create `on_auth_user_created` and
+-- only the fixture drops it first.
+-- RED-UNDER-SETUP: {"apply":["scripts/pg-lane/fixtures/01-fixture-core.sql","scripts/pg-lane/fixtures/02-fixture-sanitize-tables.sql","scripts/pg-lane/fixtures/03-fixture-compute-jobs.sql","scripts/pg-lane/fixtures/07-fixture-supabase-default-privileges.sql","scripts/pg-lane/fixtures/10-fixture-strategies-rls-baseline.sql","supabase/migrations/20260405061912_rls_policies.sql","scripts/pg-lane/fixtures/13-fixture-csv-finalize-fold.sql","supabase/migrations/20260515114310_redact_guc_bypass_use_current_user.sql"]}
 
 DO $$
 DECLARE
@@ -206,6 +231,17 @@ BEGIN
   );
   SET LOCAL ROLE authenticated;
 
+  -- RED-UNDER: falsify the current_user branch of `guard_wizard_draft_updates`
+  --            in migration 20260515114310 (its LAST definition of four), so
+  --            the trigger stops vetoing an authenticated-role promotion and
+  --            the set_config bypass below lands. ⚠️ Re-introducing the
+  --            `quantalyze.wizard_rpc_active` GUC — the regression this arm is
+  --            NAMED after — is not usable as the mutation: assertion 1 greps
+  --            the body for that literal and raises `TEST FAILED:` with no
+  --            parenthesised arm, which is NO-IDENTITY rather than RED. The
+  --            `current_user` literal is likewise left standing, because
+  --            assertion 1 requires its presence too.
+  -- RED-UNDER-M: {"arm":"Finding 1","apply":[{"kind":"edit","file":"supabase/migrations/20260515114310_redact_guc_bypass_use_current_user.sql","find":"  IF current_user = 'authenticated' THEN\n    RAISE EXCEPTION\n      'Direct update on wizard draft % blocked. Use finalize_wizard_strategy or delete the draft.',","replace":"  IF FALSE AND current_user = 'authenticated' THEN\n    RAISE EXCEPTION\n      'Direct update on wizard draft % blocked. Use finalize_wizard_strategy or delete the draft.',","occurrences":1}]}
   -- Attempt the bypass: smuggle the GUC then issue the promotion UPDATE.
   PERFORM set_config('quantalyze.wizard_rpc_active', 'on', true);
   BEGIN

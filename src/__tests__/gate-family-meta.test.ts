@@ -558,7 +558,9 @@ const DATE_STAMP = /\b20\d\d-\d\d-\d\d\b/;
  * lines never produce a site.
  *
  * ⚠️ The name class covers BOTH directions deliberately. It was `FLOOR|MIN`
- * only until 2026-09-02, which let `WAIVED_CEILING = 0` (run.mjs:228) escape
+ * only until 2026-09-02, which let `WAIVED_CEILING = 0` (run.mjs:228 AS MEASURED
+ * THAT DAY; the constant is at run.mjs:1047 at HEAD 2026-09-04 — the phase's
+ * annotations pushed it down, the value never moved) escape
  * the SC-9 no-bare-thresholds arm — a bound that fails when the corpus carries
  * MORE than was measured is exactly as capable of being picked by taste as a
  * lower bound, and this phase's whole thesis is that a control scoped to the
@@ -577,7 +579,8 @@ const DATE_STAMP = /\b20\d\d-\d\d-\d\d\b/;
  *     `FLOOR|MIN|CEILING|MAX|LIMIT`   → 8 name-class constants + 1 shell
  *                                       comparison = 9 TOTAL sites
  *
- * The one added site is `WAIVED_CEILING=0` at run.mjs:228, and it is justified,
+ * The one added site is `WAIVED_CEILING=0` at run.mjs:228 (2026-09-02 anchor;
+ * run.mjs:1047 at HEAD 2026-09-04), and it is justified,
  * so the arm stays green on a real gain rather than on an unchanged set. TOTAL
  * SITES is the convention the arm's own diagnostic prints (`META
  * bare-measurement: N threshold site(s) over 6 file(s)` — 9 today) and the
@@ -857,15 +860,21 @@ export const KNOWN_THRESHOLD_SITES: readonly string[] = [
   // a threshold leaving this family is a decision worth a red, not churn.
   "scripts/test-ledger-drift-check.sh :: ledger_rows -ge 50", //  VAC-08 absurdity floor: 'scored' + 2026-08-29
   "scripts/prod-body-drift-check.sh :: SNAPSHOT_MIN=50", //         VAC-04 absurdity floor: 'measured' + 2026-09-01
-  "scripts/mutation-runner/run.mjs :: FILES_FLOOR=32", //           coverage ratchet: MEASURED + 2026-09-04 (seventh FILE move, plan 164.4-10)
-  "scripts/mutation-runner/run.mjs :: ARMS_FLOOR=247", //           biting ratchet: MEASURED + 2026-09-04 (re-derived, plan 164.4-10)
+  "scripts/mutation-runner/run.mjs :: FILES_FLOOR=39", //           coverage ratchet: MEASURED + 2026-09-04 (eighth and FINAL FILE move, plan 164.4-11)
+  "scripts/mutation-runner/run.mjs :: ARMS_FLOOR=262", //           biting ratchet: MEASURED + 2026-09-04 (re-derived, plan 164.4-11)
   // The family's only UPPER bound. Invisible to this arm until the name class
   // widened past FLOOR|MIN on 2026-09-02 — registered here on the run that
   // first saw it, with its measurement at run.mjs:201-227 and the constant
   // itself at run.mjs:228 (MEASURED + a dated --parse-only run at 8969513e
   // scoring 0 waivers, cross-checked by an independent fs scan). Both anchors
   // RE-MEASURED at HEAD 2026-09-02; they had shifted by two lines.
-  "scripts/mutation-runner/run.mjs :: WAIVED_CEILING=0", //          waiver ceiling: MEASURED + 2026-09-02
+  // ⚠️ CURRENCY 2026-09-04 (Phase 164.4 close, review finding IN-02): the two
+  // line anchors above are the 2026-09-02 measurement and are kept as such. At
+  // HEAD the measurement block is at run.mjs:1020-1046 and the constant at
+  // run.mjs:1047 — twelve waves of annotation inserted above it. The VALUE is
+  // unmoved at 0 (`git log -L '/^export const WAIVED_CEILING/,+1'` returns one
+  // commit, the phase base), which is the property this row exists to record.
+  "scripts/mutation-runner/run.mjs :: WAIVED_CEILING=0", //          waiver ceiling: MEASURED + 2026-09-02 (unmoved through 2026-09-04, plan 164.4-11: 0 waivers over 262 arms)
   "src/__tests__/lint-sql-gates.test.ts :: RESULT_LOOP_CONDITION_FLOOR=8", // [MUT-W02] parse floor: 'measured' + 2026-09-01
   "src/__tests__/self-referential-oracle.test.ts :: CORPUS_FLOOR=100", //    SRO corpus-walk floor: MEASURED + 2026-09-01
   "src/__tests__/gate-family-meta.test.ts :: NEEDLE_MIN_LENGTH=16", //      registry needle floor: MEASURED + 2026-09-02

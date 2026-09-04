@@ -507,7 +507,7 @@ would have caught a token-resurrection bug.
      is on this phase's own list.
 
   2. **The throwaway-PostgreSQL lane is real** — `PROC-01`'s implementation. Today it is a script under `.planning/`, written mid-phase, whose own two defects (reusing another agent's cluster then `DROP SCHEMA public CASCADE`; RLS enabled on nothing but the table under test) were found by reviewers using it.
-  3. **A static linter rejects the four statically-decidable measured shapes** on new gate files (mechanisms 1, 2, 4 and a narrow 3), so a further mechanism of those kinds is a lint failure rather than a red-team finding. Mechanism 5 is **delegated** to the mutation runner's first-failure identity per D-16 — it is not decidable in SQL text, and a rule that cannot fire is the defect this phase exists to remove. Machine-pinned via the linter's `DELEGATED_MECHANISMS` export. *(Corrected 2026-08-29, gap G3 — this criterion said "five" after D-16 narrowed it; the plan line at :538 already said four.)*
+  3. **A static linter rejects the four statically-decidable measured shapes** on new gate files (mechanisms 1, 2, 4 and a narrow 3), so a further mechanism of those kinds is a lint failure rather than a red-team finding. Mechanism 5 is **delegated** to the mutation runner's first-failure identity per D-16 — it is not decidable in SQL text, and a rule that cannot fire is the defect this phase exists to remove. Machine-pinned via the linter's `DELEGATED_MECHANISMS` export. ⭐ **UPDATE 2026-09-04 (Phase 164.4, review finding WR-03):** the linter now ships **seven** rules, not four — R5/R6/R7 close a SIXTH mechanism (a pg-lane stand-in that SHADOWS the object under test) found by hand twice during the 164.4 backfill. ⛔ This does NOT touch the mechanism-5 delegation above, and R5/R6/R7 are not "a fifth rule to round the count up": mechanism 5 is still delegated to first-failure identity, and each new rule was proven to make live contact with the real corpus by DISABLING its repair escape and counting the reds (R5=1, R6=3, R7=5 real gate files), pinned as a per-rule floor. *(Corrected 2026-08-29, gap G3 — this criterion said "five" after D-16 narrowed it; the plan line at :538 already said four.)*
   4. **No whole-body `CREATE OR REPLACE` merges without a repo-vs-PROD diff** (`DRIFT-02b`). A function that has ever been surgically patched has no true body in the repo, and "re-base on the latest definition" is unsatisfiable from files alone.
   5. **A plan's claims about the codebase are verified, not trusted.** A PLAN.md asserts line
      anchors, function signatures and RPC return shapes — and NOTHING compares them to the tree.
@@ -591,11 +591,13 @@ Plans:
 
 ### Phase 164.4: REDUNDER-BACKFILL — every SQL gate arm gets a RED-UNDER annotation that a machine PROVES bites (INSERTED)
 
-**Goal**: Every arm in **the 40 idiom files the pg-lane can reach** (4 more are printed by the
-runner as lane-blocked every run — SCOPE AMENDMENT #2, founder 2026-09-03, 100 sections owed to
-`[REDUNDER-PGCRON]`) of `supabase/tests/*.sql` carries a `RED-UNDER` annotation naming the exact
-mutation that makes it fail, and the Phase 164.3 mutation runner PROVES each one bites — red under
-its own mutation, green when restored. Coverage moves from 1 file to those 40 reachable files,
+**Goal**: Every arm in **the 39 idiom files the pg-lane can reach** (4 more are printed by the
+runner as lane-blocked every run and a 5th under `pending:` — SCOPE AMENDMENT #2 and its 2026-09-04
+ARITHMETIC CORRECTION, 100 sections owed to `[REDUNDER-PGCRON]`) of `supabase/tests/*.sql` carries a
+`RED-UNDER` annotation naming the exact mutation that makes it fail, and the Phase 164.3 mutation
+runner PROVES each one bites — red under its own mutation, green when restored. ✅ ACHIEVED
+2026-09-04, MEASURED: `coverage: files 39/71`, `arms: 262/262/0`, `biting: 262`, 0 waivers, exit 0.
+Coverage moved from 1 file to those 39 reachable files,
 behind a floor that cannot regress, with the **27 excluded non-idiom files and the 4 deferred
 lane-blocked files each printed by name on every run**. (Scope narrowed from "all of them" by
 founder decision 2026-09-02, and again 2026-09-03 — see both SCOPE AMENDMENTs below; the rename of
@@ -632,8 +634,9 @@ through their own message prefixes** (`'MT5SRC-03 (1a): …'`, `'FLIPRETRY-02: �
 structurally unreachable by the runner.
 
 Three options were measured and put to the founder. **Option (c) was chosen:** scope this phase to
-the **40 idiom files the pg-lane can reach** (of 44 — 4 lane-blocked, SCOPE AMENDMENT #2, founder
-2026-09-03, `[REDUNDER-PGCRON]`), and have the runner **PRINT the 27 excluded files BY NAME on every
+the **39 idiom files the pg-lane can reach** (of 44 — 4 lane-blocked plus 1 `pending:`, SCOPE
+AMENDMENT #2 as corrected 2026-09-04, founder 2026-09-03, `[REDUNDER-PGCRON]`), and have the runner
+**PRINT the 27 excluded files BY NAME on every
 run** so the gap is emitted by the gate itself rather than asserted in a ledger. Rejected: **(a)** renaming
 the 27 files into the idiom — not an assertion edit (nothing external reads those strings; the
 sentinel gate counts `RAISE EXCEPTION` lines at `ci.yml:2360` and `sql-tests` uses `ON_ERROR_STOP`)
@@ -659,7 +662,9 @@ file; `test_strategy_analytics_stuck_computing_reaper.sql:282/326/483` (29) and
 behind a pg_cron-conditional `RAISE NOTICE`, so those arms are un-falsifiable on the lane. (The
 earlier record said all of them RAISE; two do not.) CONTEXT's batch rule — *each plan lands its
 files FULLY proven, no file left half-annotated* — defers all four together: **40 files / 255
-sections are reachable; 100 sections are owed to `[REDUNDER-PGCRON]`.**
+sections are reachable; 100 sections are owed to `[REDUNDER-PGCRON]`.** ⛔ That 40 / 255 is
+SUPERSEDED — see the ARITHMETIC CORRECTION below; the paragraph stays as the dated record of the
+amendment itself.
 
 This is criterion 4 applied, not criterion 4 waived. The runner DERIVES the four from the corpus
 and prints them every run as `lane-blocked: 4 file(s) … (deferred 2026-09-03, TODOS
@@ -669,10 +674,26 @@ the LANE that no derivation measures — **every lane-spawning run probes the la
 1 with `lane-blocked-stale` the day pg_cron is available while the class is non-empty. The deferral
 can therefore expire; it cannot outlive its cause. (Plan 164.4-03.)
 
+⚖️ **SCOPE AMENDMENT #2 — ARITHMETIC CORRECTION, 2026-09-04 (plan 164.4-11).** #2's count was
+**40 files / 255 sections reachable**. MEASURED at the phase's end state, it is **39 files / 252
+sections / 262 twins**. Its STANDARD is unchanged and no new decision is taken here: this records
+the arithmetic consequence of a founder decision already made in plan 09. A FIFTH idiom file,
+`test_compute_jobs_error_kind_copy_parity.sql`, is equally un-baselineable without pg_cron — its
+blocker is migration `20260826140000` in its APPLY LIST rather than its own text, so
+`gateNeedsPgCron` cannot see it and the runner prints it under `pending:` instead of
+`lane-blocked:` (TODOS `[REDUNDER-LANEBLOCKED-BLIND]`). The founder chose to retire
+`[REDUNDER-PGCRON]` by putting pg_cron ON the lane as its own phase (164.4.1 PGCRON-LANE) rather
+than work around it, so that file is owed there too. ⛔ The runner's `pending:` line therefore
+names exactly ONE file at the end of this phase and must NOT be read — or made — empty;
+`src/__tests__/mutation-annotation-parser.test.ts` pins it as a one-name SET for that reason.
+Measured 2026-09-04: `coverage: files 39/71`, `arms: 262/262/0`, `biting: 262`, 0 waivers, exit 0.
+
 ⚠️ **The arm unit is the SECTION** (founder decision 2026-09-02): one `RED-UNDER-M` per NAMED
 assertion group (`"arm":"NAME"`), NOT one per raise. Under option (c) as amended that is
-**255 sections / ~265 twins** across the 40 reachable idiom files; the 100 sections in the 4
-lane-blocked files are owed to `[REDUNDER-PGCRON]` (SCOPE AMENDMENT #2). The identity unit would
+**252 sections / 262 twins** across the 39 reachable idiom files (MEASURED at the phase's end
+state 2026-09-04; the projection was 255 / ~265 over 40 files); the 100 sections in the 4
+lane-blocked files, plus the sections of the 5th `pending:` file, are owed to `[REDUNDER-PGCRON]`
+(SCOPE AMENDMENT #2 as corrected 2026-09-04). The identity unit would
 have been 516 and would have pushed CI past the 20-minute split threshold.
 
 ⚠️ **The reference file does NOT meet criterion 1 today.** `test_strategy_shares_rls.sql` is one
@@ -682,10 +703,11 @@ this phase, not a precondition of it.
 
 **Success Criteria** (what must be TRUE):
 
-  1. **Every arm in the 40 REACHABLE idiom files carries a `RED-UNDER`** naming the exact mutation
+  1. **Every arm in the 39 REACHABLE idiom files carries a `RED-UNDER`** naming the exact mutation
      that makes it fail — arm = section, per the amendments above. The 27 non-idiom files are OUT of
-     scope and the 4 lane-blocked files are DEFERRED (SCOPE AMENDMENT #2, 2026-09-03,
-     `[REDUNDER-PGCRON]`); **the runner names BOTH sets in its output every run**;
+     scope, the 4 lane-blocked files are DEFERRED and a 5th is printed under `pending:` (SCOPE
+     AMENDMENT #2, 2026-09-03, as corrected 2026-09-04, `[REDUNDER-PGCRON]`); **the runner names ALL
+     THREE sets in its output every run**;
      a silent exclusion fails this criterion just as a missing annotation does.
   2. **The 164.3 runner executes ALL of them** — each demonstrated RED under its own mutation and
      GREEN when restored. An annotation that never reddens its arm is a FAILURE, not a pass.
@@ -700,7 +722,7 @@ this phase, not a precondition of it.
 **Explicitly OUT of scope:** writing new gate coverage. This phase annotates and proves what already
 exists; it does not add arms. New coverage is a different phase with a different risk profile.
 
-**Plans:** 11/12 plans executed (REPLANNED 2026-09-03 after the Plan 00 spike: four pg_cron files DEFERRED by founder decision — see `[REDUNDER-PGCRON]`; end state on today's lane is **39** of 44 idiom files annotated + 4 printed as `lane-blocked:`, the 40th having been deferred to Phase 164.4.1 in plan 09)
+**Plans:** 12/12 plans executed (REPLANNED 2026-09-03 after the Plan 00 spike: four pg_cron files DEFERRED by founder decision — see `[REDUNDER-PGCRON]`; end state on today's lane is **39** of 44 idiom files annotated + 4 printed as `lane-blocked:`, the 40th having been deferred to Phase 164.4.1 in plan 09)
 
 Plans:
 
@@ -714,8 +736,8 @@ Plans:
 - [x] 164.4-07-PLAN.md — Batch 4: csv_finalize_atomic_fold, funding_fees_rls, allocator_equity_derived_rls, user_notes_dashboard_scope (26; derive_allocator_keys_fanout deferred); FILES_FLOOR → 17, ARMS_FLOOR → ≈189
 - [x] 164.4-08-PLAN.md — Batch 5: six five-section files (30); FILES_FLOOR → 23, ARMS_FLOOR → ≈219; sql-mutation timeout re-justified from measured ubuntu wall clocks
 - [x] 164.4-09-PLAN.md — Batch 6: six files (23); FILES_FLOOR → 29, ARMS_FLOOR → ≈242
-- [x] 164.4-10-PLAN.md — Batch 7: the last four non-mixed files (8); FILES_FLOOR → **32**, ARMS_FLOOR → **247** (MEASURED 2026-09-04, exit 0, `arms: 247/247/0`, 0 waivers); `pending:` names **8** files — the 7 mixed ones plus test_compute_jobs_error_kind_copy_parity.sql, deferred to Phase 164.4.1. ⚠️ The 33 / ≈250 / 7 this row used to project came from an assumed six-file wave 10 that landed five.
-- [ ] 164.4-11-PLAN.md — Batch 8: the seven ⚠️ mixed files (15), waivers only via founder checkpoint; end state FILES_FLOOR **39**, ARMS_FLOOR ≈ **262**, `pending: 1`, 27 non-idiom + 4 lane-blocked files printed, final prose sweep. ⚠️ 39 / ≈262 / 1, NOT the 40 / ≈265 / 0 of SCOPE AMENDMENT #2 — that predates plan 09's founder-decided pg_cron deferral.
+- [x] 164.4-10-PLAN.md — Batch 7: the last four non-mixed files (8); FILES_FLOOR → **32**, ARMS_FLOOR → **247** (MEASURED 2026-09-04, exit 0, `arms: 247/247/0`, 0 waivers); `pending:` names **8** files — the 7 mixed ones plus test_compute_jobs_error_kind_copy_parity.sql, deferred to Phase 164.4.1. ⚠️ The 33 / ≈250 / 7 this row used to project came from an assumed six-file wave 10 that landed five. ✅ LANDED PR #742 → `75e58cb1` (v0.77.11.0), **23/23 SHA-bound green** at head `4591b17d`, `sql-mutation` run 33882082307 **464 s** on ubuntu. ⏱️ That wall clock confirms the LEGS model and not the arms model: 247 arms but 311 legs (247 + 32 baseline + 32 restore), so ≈334 s of lane time at ≈1.07 s/leg plus ≈130 s job overhead. Projected phase end — 262 arms / 340 legs ≈ **470 s ≈ 7.8 min**, inside `timeout-minutes: 15`. Plan 11 owes ci.yml the corrected formula (legs, not arms).
+- [x] 164.4-11-PLAN.md — Batch 8: the seven ⚠️ mixed files (15), waivers only via founder checkpoint; end state FILES_FLOOR **39**, ARMS_FLOOR **262** (MEASURED 2026-09-04, exit 0, `coverage: files 39/71`, `arms: 262/262/0`, `biting: 262`, tallies agree, **0 waivers** — cumulative 0 across all eight arms moves), `pending: 1` naming exactly test_compute_jobs_error_kind_copy_parity.sql, 27 non-idiom + 4 lane-blocked files printed by name, final prose sweep done. ⚠️ 39 / 262 / 1, NOT the 40 / ≈265 / 0 of SCOPE AMENDMENT #2 — that predates plan 09's founder-decided pg_cron deferral, and the amendment is now corrected in ROADMAP+STATE. ci.yml's timeout projection re-derived on a LEGS model (arms + 2 × files); `timeout-minutes` stays 15. ⏳ Not yet landed: PR + SHA-bound ubuntu `sql-mutation` green still owed.
 
 ### Phase 164.4.1: PGCRON-LANE — put pg_cron on the throwaway pg-lane and retire the REDUNDER-PGCRON deferral (INSERTED)
 
@@ -1094,7 +1116,7 @@ Plans:
 | 164.1 HARDEN-GUARDS (spine gates, OPS-08-TS/F2, PYAPI-06) | 0/? | Queued 2nd (deduped 2026-08-28) | - |
 | 164.2 CURATED-COPY (+ WIZFORM-02, WR-06-UTC, HONEST-08-RESIDUAL) | 0/? | Queued 3rd (deduped 2026-08-28) | - |
 | 164.3 VACUITY (+ SKIP-01, DRIFT-01, OPS-08-F9/F8, H-0001) | 0/? | ◆ RUNS FIRST (resequenced 2026-08-28) | - |
-| 164.4 REDUNDER-BACKFILL (40 reachable idiom files + 4 lane-blocked (SCOPE AMENDMENT #2); scope narrowed to the idiom corpus 2026-09-02, 27 non-idiom files printed-and-excluded) | 0/13 | Planned 2026-09-02 — 13 plans (spike, Wave 0 runner/CI, reference file, 10 file-batches landed one PR at a time with sql-mutation GREEN on ubuntu between); 164.3.1 HARD dep CLOSED 2026-09-02 | - |
+| 164.4 REDUNDER-BACKFILL (39 reachable idiom files + 4 lane-blocked + 1 pending (SCOPE AMENDMENT #2, ARITHMETIC CORRECTION 2026-09-04); scope narrowed to the idiom corpus 2026-09-02, 27 non-idiom files printed-and-excluded) | 0/13 | Planned 2026-09-02 — 13 plans (spike, Wave 0 runner/CI, reference file, 10 file-batches landed one PR at a time with sql-mutation GREEN on ubuntu between); 164.3.1 HARD dep CLOSED 2026-09-02 | - |
 | 165. DEPS dependabot campaign | 0/? | Not started | - |
 
 ### Requirement Coverage (v1.20)

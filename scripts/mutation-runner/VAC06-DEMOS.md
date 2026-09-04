@@ -486,6 +486,13 @@ called `SANITIZE 1e` proven.
   was reachable when this was written; the remaining idiom files land in Phase 164.4's batches, and
   four of them are `lane-blocked:` (they probe `pg_extension` for pg_cron, which the pg-lane cannot
   host — TODOS `[REDUNDER-PGCRON]`), so the reachable end state is below the 71 denominator.
+  ⚠️ CURRENCY 2026-09-04: those batches are DONE. Phase 164.4 finished at a measured
+  `coverage: files 39/71`, `arms: 262/262/0`, `biting: 262`, 0 waivers (plan 164.4-11). The
+  32 files outside that numerator are printed by name on every run — 27 `unreachable:`,
+  4 `lane-blocked:` and exactly 1 `pending:`
+  (`test_compute_jobs_error_kind_copy_parity.sql`, owed to Phase 164.4.1 PGCRON-LANE). The
+  captured run log at the top of this document — `coverage: files 1/71`, `arms: 30/30/0` — is a
+  2026-08-29 recording and stays as lineage; it is not a claim about today.
 
 ---
 

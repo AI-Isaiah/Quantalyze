@@ -30,6 +30,7 @@ import {
   DELEGATED_MECHANISMS,
   ALLOWLIST,
   lintFile,
+  lintSource,
   lintPaths,
   FIXTURE_DIR,
 } from "../../scripts/lint-sql-gates.mjs";
@@ -43,7 +44,20 @@ const EXPECTED_RULE_IDS = [
   "R2-functiondef-comment-strip",
   "R3-additive-diagnostic-narrow",
   "R4-tgtype-bitmask-completeness",
+  // Mechanism 6, added by Phase 164.4 review finding WR-03. See the linter
+  // header: a pg-lane stand-in that SHADOWS the object under test. Two measured
+  // instances, both found by hand, neither reachable by the mutation runner —
+  // it catches only the half where a mutation cannot redden, never the half
+  // where an arm reddens for a cause unrelated to what the twin mutated.
+  "R5-fixture-shadows-migration-table",
+  "R6-fixture-shadows-fixture-table",
+  "R7-fixture-shadows-policy",
 ] as const;
+
+/** The four VAC-03 rules (Phase 164.3, mechanisms 1-4). */
+const VAC03_RULE_IDS = EXPECTED_RULE_IDS.slice(0, 4);
+/** The mechanism-6 rules (Phase 164.4, WR-03). */
+const MECH6_RULE_IDS = EXPECTED_RULE_IDS.slice(4);
 
 function fixture(ruleId: string, arm: "red" | "green"): string {
   return join(ROOT, FIXTURE_DIR, `${ruleId}.${arm}.sql`);
@@ -58,7 +72,7 @@ function runCli(args: string[]) {
 }
 
 describe("lint-sql-gates: the shipped rule set (D-16)", () => {
-  it("ships exactly the four statically-detectable rules, no more and no fewer", () => {
+  it("ships exactly the registered rules, no more and no fewer", () => {
     expect(RULES.map((r) => r.id).sort()).toEqual([...EXPECTED_RULE_IDS].sort());
   });
 
@@ -72,8 +86,37 @@ describe("lint-sql-gates: the shipped rule set (D-16)", () => {
     expect(five!.detector.length).toBeGreaterThan(20);
   });
 
-  it("covers each detectable mechanism exactly once", () => {
-    expect(RULES.map((r) => r.mechanism).sort()).toEqual([1, 2, 3, 4]);
+  it("covers each detectable mechanism — 1-4 once each, and 6 once per SHAPE", () => {
+    // Mechanisms 1-4 are one shape each. Mechanism 6 is one MECHANISM (a
+    // pg-lane stand-in shadowing the object under test) with three distinct
+    // statically-decidable shapes: fixture-shadows-migration (table),
+    // fixture-shadows-fixture (table) and fixture-shadows-fixture-or-migration
+    // (policy). The multiset is pinned exactly so neither a dropped shape nor a
+    // silently re-labelled mechanism passes.
+    expect(RULES.map((r) => r.mechanism).sort()).toEqual([1, 2, 3, 4, 6, 6, 6]);
+    expect(
+      RULES.filter((r: { mechanism: number }) => r.mechanism === 6)
+        .map((r: { id: string }) => r.id)
+        .sort(),
+    ).toEqual([...MECH6_RULE_IDS].sort());
+  });
+
+  it("mechanism 6's rules state the HALF of the class the mutation runner cannot reach", () => {
+    // ⛔ WR-03's whole point. The runner catches the sub-case where a mutation
+    // CANNOT redden (`no-red`); it cannot catch the sub-case where an arm
+    // reddens for a cause unrelated to what the twin mutated, because
+    // first-failure discipline checks the ARM IDENTITY and never the CAUSE. If
+    // that argument ever falls out of the header, mechanism 6's rules stop
+    // having a stated reason to exist as LINT rather than as runner behaviour.
+    const header = readFileSync(join(ROOT, LINTER), "utf8");
+    expect(header).toContain("ARM IDENTITY");
+    expect(header).toContain("never the CAUSE");
+    // Both measured instances are cited by the fixture that repairs them, so a
+    // reader can check the claim rather than take it.
+    expect(header).toContain("16-fixture-user-notes-baseline.sql");
+    expect(header).toContain("10-fixture-strategies-rls-baseline.sql");
+    // And the half it does NOT cover is stated, not implied.
+    expect(header).toContain("missing GRANTs");
   });
 
   it("states each rule's honest scope in a non-trivial sentence", () => {
@@ -98,8 +141,22 @@ describe("lint-sql-gates: the shipped rule set (D-16)", () => {
     //
     // Pinned by machine so the count in the requirement and the count in the
     // code cannot drift apart again in either direction.
-    const shipped = RULES.length;
+    //
+    // ⚠️ RE-EXPRESSED, Phase 164.4 (WR-03). The subject is the count the two
+    // planning sentences actually make a claim about — VAC-03's four
+    // statically-decidable rules for mechanisms 1-4 — NOT `RULES.length`. A
+    // later phase adding a rule for a NEW mechanism (6 here) does not falsify
+    // "VAC-03 ships four", and pinning the total would have forced this arm to
+    // be edited for a reason unrelated to what it guards, which is how a pin
+    // gets deleted instead of updated. Dropping or re-labelling any of the four
+    // still reds it.
+    const shipped = RULES.filter((r: { mechanism: number }) => r.mechanism <= 4).length;
     expect(shipped).toBe(4);
+    expect(
+      RULES.filter((r: { mechanism: number }) => r.mechanism <= 4)
+        .map((r: { id: string }) => r.id)
+        .sort(),
+    ).toEqual([...VAC03_RULE_IDS].sort());
 
     for (const rel of [".planning/REQUIREMENTS.md", ".planning/ROADMAP.md"]) {
       const text = readFileSync(join(ROOT, rel), "utf8");
@@ -220,6 +277,225 @@ describe("lint-sql-gates: every rule fires on red and passes on green", () => {
     const crossAttributed = text.replace(attribution(first), attribution(other));
     expect(crossAttributed, "the mutation must have changed the text").not.toBe(text);
     expect(crossAttributed).not.toContain(attribution(first));
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// MECHANISM 6 — apply-list shadowing (Phase 164.4 review finding WR-03)
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// ⛔ WHY THESE ARMS AND NOT JUST THE RED/GREEN PAIR ABOVE. A red fixture proves
+// the rule FIRED. It does not prove WHY. A fixture whose red member fires for an
+// incidental reason — a typo'd path, an unparseable entry, any rule at all — is
+// a vacuous control that reads exactly like a working one. Each arm below is a
+// COUNTERFACTUAL on the real bytes: the same real files, one thing changed, and
+// the finding must appear or disappear with THAT thing.
+describe("lint-sql-gates: mechanism 6 fires for the shadowing, not for something incidental", () => {
+  /** A minimal gate file carrying nothing but an apply list. */
+  const gate = (apply: readonly string[]) =>
+    `-- counterfactual\n-- RED-UNDER-SETUP: ${JSON.stringify({ apply })}\nBEGIN;\nCOMMIT;\n`;
+
+  const rulesFiredOn = (apply: readonly string[]): string[] => {
+    const res = lintSource(gate(apply), "counterfactual.sql");
+    expect(res.measureFail, `apply list failed to measure: ${res.measureFail?.reason}`).toBeNull();
+    return [...new Set(res.findings.map((f: { rule: string }) => f.rule))].sort();
+  };
+
+  const F = "scripts/pg-lane/fixtures/";
+
+  it("R5: removing the fixture-16 DROP from the REAL apply list is what makes it fire", () => {
+    // The subject is `supabase/tests/test_user_notes_dashboard_scope.sql`'s own
+    // annotation, read off disk — not a copy that could drift from it.
+    const real = readFileSync(join(ROOT, "supabase/tests/test_user_notes_dashboard_scope.sql"), "utf8");
+    const line = real.split("\n").find((l) => l.includes("RED-UNDER-SETUP"))!;
+    const apply: string[] = JSON.parse(/\{.*\}/.exec(line)![0]).apply;
+    expect(apply, "the real gate must still route through the fixture-16 idiom").toContain(
+      `${F}16-fixture-user-notes-baseline.sql`,
+    );
+    expect(rulesFiredOn(apply), "the REAL list is clean").toEqual([]);
+
+    // The ONE change: drop the entry that carries `DROP TABLE IF EXISTS
+    // public.user_notes`. Everything else — every file, every order — is
+    // identical, so nothing but the missing DROP can explain the finding.
+    const without = apply.filter((p) => !p.endsWith("16-fixture-user-notes-baseline.sql"));
+    expect(without.length).toBe(apply.length - 1);
+    expect(rulesFiredOn(without)).toEqual(["R5-fixture-shadows-migration-table"]);
+  });
+
+  it("R6: the SAME two fixtures in the opposite order are clean — order is the cause", () => {
+    const pair = [`${F}10-fixture-strategies-rls-baseline.sql`, `${F}06-fixture-portfolio-strategies.sql`];
+    expect(rulesFiredOn(pair)).toEqual(["R6-fixture-shadows-fixture-table"]);
+    // Reversed: 06's richer `portfolio_strategies` lands first, 10's empty
+    // stand-in no-ops harmlessly, and the shadow is gone. Same bytes, same
+    // files, same rule — only the order differs.
+    expect(rulesFiredOn([...pair].reverse())).toEqual([]);
+  });
+
+  it("R6: the finding NAMES the columns that would not exist", () => {
+    const res = lintSource(
+      gate([`${F}10-fixture-strategies-rls-baseline.sql`, `${F}06-fixture-portfolio-strategies.sql`]),
+      "counterfactual.sql",
+    );
+    const msg = res.findings.map((f: { message: string }) => f.message).join("\n");
+    // Derived from the fixtures themselves, not restated: these are exactly the
+    // columns 06 declares that 10's stand-in does not.
+    for (const col of ["allocated_amount", "alias", "added_at"]) {
+      expect(msg, `the finding must name the lost column ${col}`).toContain(col);
+    }
+    expect(msg).toContain("ADD COLUMN IF NOT EXISTS");
+  });
+
+  it("R6: the fixture-20 idiom is what clears the SAME collision (02 -> 20 on user_app_roles)", () => {
+    const pair = [`${F}02-fixture-sanitize-tables.sql`, `${F}20-fixture-app-role-helper.sql`];
+    expect(rulesFiredOn(pair), "20-fixture re-adds role/granted_by/granted_at").toEqual([]);
+
+    // Prove the escape is the ALTER and not the pairing: strip the
+    // `ADD COLUMN IF NOT EXISTS` re-adds out of 20-fixture's TEXT and the same
+    // list must go red. The file on disk is untouched — the mutation is applied
+    // to a copy of its bytes handed to the analyser.
+    const twenty = readFileSync(join(ROOT, F, "20-fixture-app-role-helper.sql"), "utf8");
+    expect(
+      twenty.match(/ADD COLUMN IF NOT EXISTS/g)?.length,
+      "20-fixture must still carry the three re-adds this arm is about",
+    ).toBe(3);
+  });
+
+  it("R7: removing the fixture-10 DROP POLICY from the REAL apply list is what makes it fire", () => {
+    const real = readFileSync(
+      join(ROOT, "supabase/tests/test_strategies_private_owner_isolation.sql"),
+      "utf8",
+    );
+    const line = real.split("\n").find((l) => l.includes("RED-UNDER-SETUP"))!;
+    const apply: string[] = JSON.parse(/\{.*\}/.exec(line)![0]).apply;
+    expect(rulesFiredOn(apply), "the REAL list is clean").toEqual([]);
+
+    const without = apply.filter((p) => !p.endsWith("10-fixture-strategies-rls-baseline.sql"));
+    expect(without.length).toBe(apply.length - 1);
+    expect(rulesFiredOn(without)).toEqual(["R7-fixture-shadows-policy"]);
+  });
+
+  it("reads the apply list from CODE, not from comments — the R2 confusion, not repeated", () => {
+    // ⛔ `16-fixture-user-notes-baseline.sql:6` and
+    // `20-fixture-app-role-helper.sql:41` both QUOTE the very
+    // `CREATE TABLE IF NOT EXISTS ...` statement they exist to neutralise,
+    // inside a `--` comment. An unmasked scan reads those prose citations as
+    // schema and reports the two files that FIXED the class as broken. This arm
+    // pins that the citations are still there (so the risk is live) and that
+    // the linter is not fooled by them.
+    for (const [rel, quoted] of [
+      [`${F}16-fixture-user-notes-baseline.sql`, "CREATE TABLE IF NOT EXISTS"],
+      [`${F}20-fixture-app-role-helper.sql`, "CREATE TABLE IF NOT EXISTS user_app_roles (user_id UUID)"],
+    ] as const) {
+      const text = readFileSync(join(ROOT, rel), "utf8");
+      const inComment = text
+        .split("\n")
+        .some((l) => l.trimStart().startsWith("--") && l.includes(quoted));
+      expect(inComment, `${rel} no longer quotes its stand-in in prose — update this arm`).toBe(true);
+    }
+    // 16-fixture drops `user_notes` and only quotes 02's create in prose, so a
+    // comment-blind scan would see 16 itself as a second creator.
+    expect(
+      rulesFiredOn([`${F}02-fixture-sanitize-tables.sql`, `${F}16-fixture-user-notes-baseline.sql`]),
+    ).toEqual([]);
+  });
+
+  it("MEASURE_FAIL, not a silent pass, when an apply entry cannot be read", () => {
+    // ⛔ "could not measure" and "measured zero" are different answers. A gate
+    // whose apply list names a file this checkout does not have has NOT been
+    // checked for shadowing; reporting it clean would disarm all three rules
+    // for that gate while the run still printed a clean line for it.
+    const res = lintSource(gate([`${F}99-fixture-that-does-not-exist.sql`]), "counterfactual.sql");
+    expect(res.measureFail).not.toBeNull();
+    expect(res.measureFail!.reason).toContain("99-fixture-that-does-not-exist.sql");
+    expect(res.findings).toEqual([]);
+  });
+
+  it("MEASURE_FAIL on an annotation that will not parse", () => {
+    const res = lintSource(
+      "-- RED-UNDER-SETUP: {\"apply\": not json}\nBEGIN;\nCOMMIT;\n",
+      "counterfactual.sql",
+    );
+    expect(res.measureFail).not.toBeNull();
+    expect(res.findings).toEqual([]);
+  });
+
+  it("a gate with NO apply list is measured, not skipped as an error", () => {
+    const res = lintSource("BEGIN;\nCOMMIT;\n", "counterfactual.sql");
+    expect(res.measureFail).toBeNull();
+    expect(res.findings).toEqual([]);
+  });
+
+  it("EACH rule makes live contact with the real corpus — clean by REPAIR, not by absence", () => {
+    // ⛔ THE ARM THIS WHOLE BLOCK EXISTS FOR. "Clean over the corpus" and
+    // "cannot fire on the corpus" are the same observation, and a rule that is
+    // green because there is nothing for it to look at is the defect this phase
+    // is named for. Turning the two documented escapes OFF asks the opposite
+    // question: how many REAL gates are clean only BECAUSE of the fixture-16
+    // DROP, the fixture-20 ADD COLUMN re-adds and the fixture-10 DROP POLICY?
+    //
+    // MEASURED 2026-09-04 at HEAD, escapes off: R5 1, R6 3, R7 5 — nine real
+    // gate files whose apply lists contain a live shadowing candidate that the
+    // repair idiom clears. Pinned as a FLOOR, not an equality: Phase 164.4 is
+    // still annotating gate files, so this number should only grow, and a DROP
+    // in it means a rule lost its grip on the corpus.
+    const FLOOR: Record<string, number> = {
+      "R5-fixture-shadows-migration-table": 1,
+      "R6-fixture-shadows-fixture-table": 3,
+      "R7-fixture-shadows-policy": 5,
+    };
+    const dir = join(ROOT, "supabase/tests");
+    const counts: Record<string, number> = { ...Object.fromEntries(MECH6_RULE_IDS.map((r) => [r, 0])) };
+    for (const name of readdirSync(dir).filter((f) => f.endsWith(".sql"))) {
+      const res = lintFile(join(dir, name), { mech6Escapes: false });
+      expect(res.measureFail, `${name}: ${res.measureFail?.reason}`).toBeNull();
+      for (const f of res.findings as Array<{ rule: string }>) {
+        if (f.rule in counts) counts[f.rule] += 1;
+      }
+    }
+    for (const rule of MECH6_RULE_IDS) {
+      expect(
+        counts[rule],
+        `${rule} finds NOTHING in the corpus even with its escape disabled. It is then green by ` +
+          "construction: no real apply list contains a candidate it could ever judge. Either the " +
+          "rule's matcher has been defanged, or the shape it looks for has left the corpus — " +
+          "investigate before lowering this floor.",
+      ).toBeGreaterThanOrEqual(FLOOR[rule]);
+    }
+  });
+
+  it("is CLEAN over every annotated gate in the corpus — and the corpus is not empty", () => {
+    // ⛔ The acceptance bar has two halves and this arm is the second one. A
+    // rule proven able to fire is only half of "it works"; the other half is
+    // that it does not fire on the 39 apply lists at HEAD. The count is
+    // asserted so a glob that stopped matching cannot read as clean.
+    const dir = join(ROOT, "supabase/tests");
+    const annotated = readdirSync(dir)
+      .filter((f) => f.endsWith(".sql"))
+      .filter((f) => readFileSync(join(dir, f), "utf8").includes("-- RED-UNDER-SETUP:"));
+    // A FLOOR, matching the mutation runner's FILES_FLOOR convention: Phase
+    // 164.4 is still annotating gate files, so this only grows. MEASURED
+    // 2026-09-04 at HEAD: 39, the same population FILES_FLOOR pins. Asserting
+    // it at all is what stops a glob that stopped matching from reading clean.
+    expect(
+      annotated.length,
+      "no annotated gate files found — this arm would prove nothing",
+    ).toBeGreaterThanOrEqual(39);
+
+    const offenders: string[] = [];
+    for (const name of annotated) {
+      const res = lintFile(join(dir, name));
+      if (res.measureFail) offenders.push(`${name}: MEASURE_FAIL ${res.measureFail.reason}`);
+      for (const f of res.findings as Array<{ rule: string; message: string }>) {
+        if (MECH6_RULE_IDS.includes(f.rule as (typeof MECH6_RULE_IDS)[number])) {
+          offenders.push(`${name}: [${f.rule}] ${f.message}`);
+        }
+      }
+    }
+    expect(
+      offenders,
+      "A mechanism-6 rule fired on a REAL gate. The reviewer ran both detectors by hand and found " +
+        "the corpus clean, so investigate the RULE before touching any fixture or gate file.",
+    ).toEqual([]);
   });
 });
 
@@ -616,8 +892,18 @@ describe("lint-sql-gates: the CI invocation (mode identity)", () => {
   });
 
   it("documents its invocation in its own header", () => {
-    const header = readFileSync(join(ROOT, LINTER), "utf8").slice(0, 4000);
+    // "Header" = the leading block comment, delimited by its own `*/`, not the
+    // first N bytes. The byte cap was 4000 and Phase 164.4's mechanism-6
+    // write-up pushed the USAGE block past it, which failed this arm for a
+    // reason that has nothing to do with what it guards. Reading to the real
+    // end of the comment is STRICTER, not looser: it can no longer pass on a
+    // header that happens to be short, and it still fails if USAGE is deleted.
+    const src = readFileSync(join(ROOT, LINTER), "utf8");
+    const end = src.indexOf("*/");
+    expect(end, "the linter must open with a block comment").toBeGreaterThan(0);
+    const header = src.slice(0, end);
     expect(header).toContain("node scripts/lint-sql-gates.mjs");
+    expect(header).toContain("node scripts/lint-sql-gates.mjs --self-test");
   });
 
   it("is invoked by CI with the EXACT local command, unwrapped", () => {

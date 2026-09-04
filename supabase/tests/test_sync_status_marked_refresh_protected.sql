@@ -130,6 +130,30 @@
 -- Usage:
 --   psql "$TEST_SUPABASE_DB_URL" -v ON_ERROR_STOP=1 -f \
 --     supabase/tests/test_sync_status_marked_refresh_protected.sql
+--
+-- ⭐ MACHINE-EXECUTABLE TWINS (phase 164.4, REDUNDER-BACKFILL). Each prose
+-- RED-UNDER below carries an adjacent `RED-UNDER-M` object that
+-- scripts/mutation-runner executes on every push: it mutates COPIES on a
+-- throwaway pg-lane cluster, requires the FIRST `TEST FAILED (…)` to name that
+-- arm, and restores GREEN. Schema: scripts/mutation-runner/GRAMMAR.md.
+-- ⚠️ ONLY THE TWO APPLIED-NESS GATES USE THE `TEST FAILED (…)` IDIOM. All 16
+-- arms below say `ARM x FAILED` / `ARM x SETUP BROKEN`, so they are invisible to
+-- the runner's identity regex: a mutation that reddens an arm scores
+-- NO-IDENTITY, not RED. The single twinned section is therefore `0`, and its
+-- claim is the one the arms all rest on — that this file is running against a
+-- database carrying the protection at all.
+-- ⚠️ RE-BASE. The twin targets 20260826120000, NOT the 20260825150000 the arm
+-- names: that COMMENT is re-stamped by five prior migrations and last by
+-- 20260826120000:907, so a mutation of the earlier stamp is overwritten later in
+-- the same apply list and proves nothing. Both `20260825150000` occurrences
+-- inside the LAST stamp have to go, which is why the twin is two ordered steps.
+-- The comment is not returned by pg_get_functiondef, so that migration's own
+-- body post-verifies are untouched by it.
+-- ⚠️ 20260510173005 is deliberately ABSENT: it is one of the three booked
+-- [REDUNDER-SAVEPOINT] migrations and aborts any lane. Nothing is lost —
+-- 20260510175507 is the repair migration and registers `process_key_long` on
+-- its own.
+-- RED-UNDER-SETUP: {"apply":["scripts/pg-lane/fixtures/01-fixture-core.sql","scripts/pg-lane/fixtures/02-fixture-sanitize-tables.sql","scripts/pg-lane/fixtures/03-fixture-compute-jobs.sql","scripts/pg-lane/fixtures/27-fixture-strategy-analytics-computation-error.sql","supabase/migrations/20260411144407_compute_jobs_queue.sql","scripts/pg-lane/fixtures/04-fixture-compute-jobs-targets.sql","supabase/migrations/20260510175507_process_key_long_compute_job_kinds_repair.sql","supabase/migrations/20260515114555_compute_jobs_claim_token_fencing.sql","supabase/migrations/20260522111858_compute_analytics_from_csv_kind.sql","supabase/migrations/20260614120000_derive_broker_dailies_kind.sql","supabase/migrations/20260708120000_sync_status_failed_final_bounce.sql","supabase/migrations/20260710120000_strategy_keys.sql","supabase/migrations/20260710130000_stitch_composite_kind.sql","supabase/migrations/20260825150000_sync_status_protect_marked_refresh.sql","supabase/migrations/20260826120000_computation_error_curated_copy.sql"]}
 
 BEGIN;
 
@@ -193,6 +217,19 @@ BEGIN
   -- reason; this fourth one was missed. It is now a FAILURE, and it is still
   -- CONDITIONAL: a deployed function carrying the comment falls straight
   -- through to the arms.
+  -- RED-UNDER: strip the `20260825150000` id out of the function COMMENT that
+  --            migration 20260826120000 stamps — cause (ii) in the message
+  --            below, a later migration re-defining the bridge and dropping the
+  --            marker. ⚠️ LAYERED, and it must be: the id appears TWICE in that
+  --            one comment (the PROTECTED MARKED REFRESH heading and the
+  --            trailing `See migrations …` roll-call), and this gate's regex is
+  --            a substring test, so removing either alone leaves it satisfied
+  --            and the arm GREEN. ⚠️ And it targets 20260826120000, not the
+  --            20260825150000 the message names: six migrations stamp this
+  --            comment and that one is the LAST, so a mutation of the earlier
+  --            stamp is overwritten inside the same apply list (the re-base
+  --            hazard, MEASURED across this phase).
+  -- RED-UNDER-M: {"arm":"0a","apply":[{"kind":"edit","file":"supabase/migrations/20260826120000_computation_error_curated_copy.sql","find":"PROTECTED MARKED REFRESH (mig 20260825150000, Phase 161.1 CR-01)","replace":"PROTECTED MARKED REFRESH (Phase 161.1 CR-01)","occurrences":1},{"kind":"edit","file":"supabase/migrations/20260826120000_computation_error_curated_copy.sql","find":"+ 20260802120000 + 20260825150000 + 20260826120000.';","replace":"+ 20260802120000 + 20260826120000.';","occurrences":1}]}
   IF COALESCE(
        obj_description('sync_strategy_analytics_status(uuid)'::regprocedure, 'pg_proc'),
        ''

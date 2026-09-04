@@ -874,17 +874,41 @@ jobs:
     #   Decisive because it is LARGER and FASTER than the run that raised the
     #   question: 219 arms / 333s / 1.0s beats 189 arms / 458s / 1.7s. A real
     #   per-lane cost cannot be unpaid by a bigger corpus, so run 33804312706 is
-    #   an outlier and the linear-in-arms model holds at ~1.0s/lane + ~130s fixed.
-    #   phase end,  ~265 arms: 265 x 1.0 + 130 ~= 395s ~= 6.6 min  [PROJECTION]
+    #   an outlier and the model holds at ~1.0s/lane + ~130s fixed.
     # ⚠️ Keep BOTH observations above. If a future run measures ~1.7s again, the
     #   outlier reading is falsified and the 9.8-min worst case returns; that is
     #   the number to re-derive from, not this projection.
     #
-    # DECISION 2026-09-04 (plan 164.4-08): `timeout-minutes` STAYS 15, applying
-    # the rule literally — raise only when a MEASURED run reaches ~10 minutes.
-    # The largest MEASURED ubuntu run is 458s = 7.6 min, and even the worst-case
-    # projection for the PHASE END is 9.8 min. Both are under 10, so there is
-    # nothing to raise yet. 15 still leaves headroom for a slower runner while
+    # ⛔ CORRECTED 2026-09-04 (plan 164.4-11) — COUNT LEGS, NOT ARMS. The model
+    #   above multiplied the ARM count by the per-lane cost, and that UNDERCOUNTS
+    #   by construction: this job also runs a BASELINE leg and a RESTORE leg PER
+    #   FILE (the first line of this comment says so; the projection did not use
+    #   it). Every newly annotated FILE therefore adds two lanes that no arm
+    #   count sees. legs = arms + 2 x annotated files, and both quantities are
+    #   printed by the run itself — `lane-invocations: <arms> (… plus <F>
+    #   baseline / <F> restore leg(s))`.
+    #   Re-derived over the two most recent ubuntu runs, both SHA-bound and both
+    #   timed from the job's own started_at/completed_at:
+    #     239 arms / 28 files = 295 legs -> 369s   [run 33872399902, f9f455b6]
+    #     247 arms / 32 files = 311 legs -> 464s   [run 33882082307, 4591b17d]
+    #   The 16-leg step between them cost 95s, so these two do NOT determine a
+    #   line — the spread is host variance, exactly the class resolved above.
+    #   Project from the WORST per-leg observed, which is the discipline this
+    #   comment already used for per-lane: (464 - 130) / 311 = ~1.07 s/leg.
+    #   phase end, 262 arms / 39 files = 340 legs:
+    #     340 x 1.07 + 130 ~= 494s ~= 8.2 min                      [PROJECTION]
+    #   At the friendlier ~1.0 s/leg the same 340 legs project ~470s ~= 7.8 min.
+    #   Both are under 10, so the DECISION below is unchanged.
+    # ⚠️ This is the LAST projection Phase 164.4 needs — 39/71 is its end state.
+    #   Replace it with the MEASURED ubuntu wall clock of the plan-164.4-11 PR as
+    #   soon as that run exists, and re-derive from legs, never from arms.
+    #
+    # DECISION 2026-09-04 (plan 164.4-08, RE-AFFIRMED by plan 164.4-11 on the
+    # corrected legs model): `timeout-minutes` STAYS 15, applying the rule
+    # literally — raise only when a MEASURED run reaches ~10 minutes. The
+    # largest MEASURED ubuntu run is 464s = 7.7 min (run 33882082307), and the
+    # worst-case legs projection for the PHASE END is 8.2 min. Both are under
+    # 10, so there is nothing to raise yet. 15 still leaves headroom for a slower runner while
     # bounding a wedged cluster rather than burning the job's default 360.
     # ⛔ 20 minutes is a CEILING, not the next rung. If a MEASURED ubuntu run
     # reaches it, STOP — do not raise again. The locked decision

@@ -144,7 +144,10 @@ const PROBE_AVAILABLE_OUTPUT = `ERROR:  ${LANE_PROBE_AVAILABLE}`;
 // byte-identical at the phase base and at HEAD (5ae6855f). Command, sample size
 // and record are stated once in the ARMS_FLOOR block below. No value change.
 //
-// Phase 164.4 raises FILES_FLOOR as it backfills the remaining idiom files.
+// Phase 164.4 RAISED FILES_FLOOR as it backfilled the remaining idiom files;
+// it finished on 2026-09-04 at 39 of 71 (plan 164.4-11 — see the CURRENCY
+// paragraph beside the VALUE at the bottom of this chain). The blocks below are
+// that backfill's dated record, in order, and are lineage.
 // ⚠️ CURRENCY 2026-09-03 (plan 164.4-02): still 1. That plan raised ARMS_FLOOR
 // 30 -> 45 by closing the reference file's 15 un-twinned SECTIONS, and annotated
 // no NEW file, so the FILE count did not move. A batch that annotates a new file
@@ -155,6 +158,15 @@ const PROBE_AVAILABLE_OUTPUT = `ERROR:  ${LANE_PROBE_AVAILABLE}`;
 // pg_cron, which the pg-lane does not host and deliberately will not; they are
 // derived, printed as `lane-blocked:` and owed to TODOS [REDUNDER-PGCRON], so
 // the phase's end state is `coverage: files 40/71`. This plan edited no floor.
+// ⚠️ CORRECTION 2026-09-04 (plan 164.4-11, measured): that `40/71` was the best
+// figure available on 2026-09-03 and it is now FALSE. The reachable end state
+// is `coverage: files 39/71`. A FIFTH file, test_compute_jobs_error_kind_copy_
+// parity.sql, is equally un-baselineable without pg_cron — its blocker is a
+// migration in its APPLY LIST rather than its own text, so `gateNeedsPgCron`
+// cannot see it and it is printed under `pending:` instead of `lane-blocked:`
+// (TODOS [REDUNDER-LANEBLOCKED-BLIND]). Founder decision, plan 09: it is owed to
+// Phase 164.4.1 PGCRON-LANE rather than worked around. The paragraph above stays
+// as the dated record of the amendment; this line is its correction.
 //
 // ⭐ RE-DERIVED 2026-09-03 (plan 164.4-04) — THE PHASE'S FIRST *FILE* MOVE. The
 // blocks above STAY as lineage: 1 was the whole annotated corpus while it was
@@ -455,14 +467,55 @@ const PROBE_AVAILABLE_OUTPUT = `ERROR:  ${LANE_PROBE_AVAILABLE}`;
 //   RECORD       .planning/phases/164.4-redunder-backfill-every-sql-gate-arm-
 //                gets-a-red-under-annota/164.4-10-SUMMARY.md
 //
+// ⭐ RE-DERIVED 2026-09-04 (plan 164.4-11) — batch 8, the SEVEN ⚠️ mixed files
+// and the LAST file move of Phase 164.4. The blocks above STAY as lineage.
+//
+//   VALUE        39 — read off the run's own `coverage:` line, not counted here.
+//   DATE         2026-09-04, at HEAD 1aaba266.
+//   COMMAND      `node scripts/mutation-runner/run.mjs` -> exit 0
+//                  coverage: files 39/71
+//                  arms: 262/262/0   (executed/annotated/waived)
+//                  biting: 262
+//                  lane-invocations: 262
+//                  per-arm lane time: mean 1.0s over 262 arm run(s)
+//   SAMPLE SIZE  262 arms executed, all 262 `RED (identity ok)`, 0 defects.
+//                358 s wall clock, 39 baseline and 39 restore legs.
+//   COVERAGE     39 annotated gate files of 71. The seven added this batch are
+//                supabase/tests/test_api_keys_exchange_not_user_writable.sql,
+//                supabase/tests/test_api_keys_insert_not_client_writable.sql,
+//                supabase/tests/test_guard_wizard_draft_updates_auth_uid.sql,
+//                supabase/tests/test_profiles_privileged_columns_locked.sql,
+//                supabase/tests/test_strategy_keys_publish_integrity.sql,
+//                supabase/tests/test_sync_status_marked_refresh_protected.sql
+//                  and
+//                supabase/tests/test_wizard_session_idempotency.sql.
+//                The EXACT 39-name list is pinned in
+//                src/__tests__/mutation-annotation-parser.test.ts's scanCorpus
+//                assertion, which is where to read it rather than here.
+//   SEPARATION   Both directions driven through the real verdict loop on real
+//                lanes (`runCorpus({filesFloor, armsFloor})`), 2026-09-04:
+//                  filesFloor=39 armsFloor=262  defects=0  SILENT   (352.8 s)
+//                  filesFloor=40 armsFloor=263  defects=2  FIRES ->
+//                    `FILES_FLOOR regression: 39 annotated file(s) < floor 40`
+//                    `ARMS_FLOOR regression: 262 biting arm(s) < floor 263`
+//                                                                   (349.3 s)
+//                So 39/262 is exactly the separation point, not a value below it.
+//   RECORD       .planning/phases/164.4-redunder-backfill-every-sql-gate-arm-
+//                gets-a-red-under-annota/164.4-11-SUMMARY.md
+//
 // CURRENCY, stated where the VALUE is: RE-DERIVED 2026-09-04 by measurement
-// (plan 164.4-10). Measured coverage 32 of 71 — value RAISED from 28. Every
-// non-mixed, non-lane-blocked idiom file is now annotated. The phase's end
-// state on today's lane is 39 of 71, NOT the 40 of SCOPE AMENDMENT #2: one
-// further file, test_compute_jobs_error_kind_copy_parity.sql, was deferred to
-// Phase 164.4.1 PGCRON-LANE by founder decision in plan 09. 8 idiom files
-// remain `pending:` — the 7 mixed files plan 11 takes, plus that one.
-export const FILES_FLOOR = 32;
+// (plan 164.4-11). Measured coverage 39 of 71 — value RAISED from 32, and this
+// is the END STATE of Phase 164.4: every idiom gate file the pg-lane can reach
+// is annotated and proven. The remaining 32 of the 71 are NOT silently dropped
+// — the runner prints all of them by name on every run: 27 `unreachable:` (they
+// raise outside the identity idiom; out of scope by founder decision, TODOS
+// [REDUNDER-NONIDIOM]), 4 `lane-blocked:` (they probe pg_extension for pg_cron,
+// which this lane cannot host, TODOS [REDUNDER-PGCRON]), and exactly ONE
+// `pending:` — test_compute_jobs_error_kind_copy_parity.sql, which needs
+// migration 20260826140000 and is owed to Phase 164.4.1 PGCRON-LANE by founder
+// decision in plan 09. ⚠️ 39, NOT the 40 of SCOPE AMENDMENT #2: that amendment
+// predates the deferral.
+export const FILES_FLOOR = 39;
 
 // ARMS_FLOOR — PINNED 2026-08-29 BY MEASUREMENT (plan 164.3-08), not chosen.
 //
@@ -884,11 +937,73 @@ export const FILES_FLOOR = 32;
 //   RECORD       .planning/phases/164.4-redunder-backfill-every-sql-gate-arm-
 //                gets-a-red-under-annota/164.4-10-SUMMARY.md
 //
+// ⭐ RE-DERIVED 2026-09-04 (plan 164.4-11) — batch 8, the SEVEN ⚠️ mixed files
+// and the LAST arms move of Phase 164.4. The blocks above STAY as lineage.
+//
+//   VALUE        262 — read off the run's own `biting:` line, not counted here.
+//   DATE         2026-09-04, at HEAD 1aaba266.
+//   COMMAND      `node scripts/mutation-runner/run.mjs` -> exit 0
+//                  coverage: files 39/71
+//                  arms: 262/262/0   (executed/annotated/waived)
+//                  biting: 262
+//                  lane-invocations: 262
+//                  per-arm lane time: mean 1.0s over 262 arm run(s)
+//   SAMPLE SIZE  262 arms executed, all 262 `RED (identity ok)`, 0 defects of
+//                any kind. The two independent tallies AGREE: `arms:` executed
+//                262 and `lane-invocations:` 262. 358 s wall clock, 39 baseline
+//                and 39 restore legs beside the 262 arm lanes. The 39 per-file
+//                `biting` counts SUM to 262, the aggregate.
+//   COVERAGE     39 annotated gate files of 71 (see the FILES_FLOOR block). 15
+//                of the 262 arms are new this batch; 0 waivers were added, so
+//                WAIVED_CEILING is untouched at 0. Cumulative waivers across
+//                all EIGHT arms moves: 0.
+//   ⭐ THE MIXED FILES' SHADOW IS PRIVILEGE-SHAPED, and that decided every
+//                twin here. These seven gates make PRIVILEGE claims, and a
+//                withdrawn privilege aborts psql with `permission denied for
+//                table …` — text carrying no `TEST FAILED (…)` at all, which
+//                the runner scores NO-IDENTITY rather than RED. MEASURED per
+//                arm on the lane. The falsifier that works is the ROW filter
+//                (`api_keys_owner`, `profiles_self_update`): RLS returns zero
+//                rows instead of raising, so the same broken user-visible
+//                behaviour reaches the arm as a value mismatch it can name.
+//   ⭐ TWO OF THE 15 ARE LAYERED, each proven layered rather than assumed.
+//                `test_sync_status_marked_refresh_protected.sql` arm 0a: the
+//                applied-ness id it greps appears TWICE inside the ONE function
+//                COMMENT, so step 1 alone was run on the lane and measured
+//                GREEN (exit 0, `ALL 16 ARMS EXECUTED`). It also targets
+//                20260826120000, not the 20260825150000 its own message names —
+//                six migrations stamp that comment and 20260826120000 is the
+//                LAST, the re-base hazard this phase has now met five times.
+//                `test_wizard_session_idempotency.sql` arm 3f: step 1 alone was
+//                measured to ABORT the apply at that migration's own
+//                post-verify (e2), which greps the comment-stripped body for
+//                `v_auth_uid` exactly as the gate does; step 2 stands down (e2)
+//                and only (e2).
+//   ⭐ ONE ARM CAME BACK NO-RED AND THE APPLY LIST WAS THE DEFECT.
+//                `test_profiles_privileged_columns_locked.sql` arm 1 was first
+//                built without 20260405061912, which is the ONLY statement that
+//                ENABLEs RLS on profiles. `profiles_self_update` was therefore
+//                inert on the lane and narrowing it changed nothing. The fix
+//                was the real migration, not a different mutation: a lane where
+//                the object under test cannot bite is the stand-in defect this
+//                phase exists to refuse.
+//   SEPARATION   Both directions driven through the real verdict loop on real
+//                lanes (`runCorpus({filesFloor, armsFloor})`), 2026-09-04:
+//                  armsFloor=262  biting=262  defects=0  SILENT      (352.8 s)
+//                  armsFloor=263  biting=262  defects=2  FIRES ->
+//                    `ARMS_FLOOR regression: 262 biting arm(s) < floor 263`
+//                    (beside the paired FILES_FLOOR regression)      (349.3 s)
+//                So 262 is exactly the separation point, not a value below it.
+//   RECORD       .planning/phases/164.4-redunder-backfill-every-sql-gate-arm-
+//                gets-a-red-under-annota/164.4-11-SUMMARY.md
+//
 // CURRENCY, stated where the VALUE is — derivation, sample size, coverage and
-// separation in the block immediately above; record in 164.4-10-SUMMARY.md:
-// RE-DERIVED 2026-09-04 by measurement (plan 164.4-10).
-// Measured biting 247 — value RAISED from 239.
-export const ARMS_FLOOR = 247;
+// separation in the block immediately above; record in 164.4-11-SUMMARY.md:
+// RE-DERIVED 2026-09-04 by measurement (plan 164.4-11).
+// Measured biting 262 — value RAISED from 247. This is Phase 164.4's END STATE
+// on today's lane; the next move is Phase 164.4.1 PGCRON-LANE, which unblocks
+// the five pg_cron files.
+export const ARMS_FLOOR = 262;
 
 // WAIVED_CEILING — PINNED 2026-09-02 BY MEASUREMENT (164.3.1 red team), not
 // chosen. A CEILING, not a floor: it fails when the corpus carries MORE waivers
@@ -917,6 +1032,18 @@ export const ARMS_FLOOR = 247;
 // ⚠️ Raising it is a deliberate, reviewed edit: each new waiver is an arm the
 // runner will never prove can fail (T-164.3-21), and the reason string on the
 // twin is the only evidence that it cannot be mutated into failing.
+//
+// ⚠️ CURRENCY 2026-09-04 (plan 164.4-11, the LAST batch of Phase 164.4): still
+// 0, and the value is UNEDITED. The 2026-09-02 measurement above stays as the
+// dated record of a 30-arm corpus; the corpus is now 262 arms across 39 files
+// and the run's own `arms: 262/262/0` still reports W = 0. Cumulative waivers
+// across all EIGHT arms moves of this phase: 0. Two arms came close and BOTH
+// were resolved by a root-cause fix instead of an exception — plan 08's
+// trust-signal anon-EXECUTE assertion by REORDERING the precondition ahead of
+// its dependants (TODOS [REDUNDER-WAIVER-01]), and plan 09's resync-retry
+// assertion (b) by wrapping its INSERT in the exception idiom the same file
+// already used. Read the run's own `arms:` W field, never this constant, for
+// what the corpus actually carries.
 export const WAIVED_CEILING = 0;
 
 /**
@@ -1117,7 +1244,11 @@ export const executableText = (source) => maskNonCode(source);
  * DIFFERENT file (`test_profiles_privileged_columns_locked.sql`, seven times).
  * The class is closed by CONSTRUCTION above, not by this number; the number
  * only proves the construction refuses nothing the corpus already relies on.
- * Phase 164.4 raises the coverage as it backfills the remaining idiom files.
+ * ⚠️ CURRENCY 2026-09-04 (plan 164.4-11): Phase 164.4's backfill is COMPLETE
+ * at 39 of 71 files, and it annotated `test_profiles_privileged_columns_
+ * locked.sql` WITHOUT neutering any of those seven compound heads — the twin
+ * there is on the file's FIRST assertion, which needs no neuter. The
+ * tokenizer's refusal has still never been relaxed.
  */
 export const isBranchHead = (statement) => statement != null && statement.head === true;
 
@@ -1735,10 +1866,20 @@ export const sectionOfIdentity = (id) => id.replace(/(\d)[a-z]*(-[A-Za-z]+)?$/, 
  * The number printed beside `annotated` has to be the number an annotation
  * could ever reach, or the gap it exposes would be an artefact of the counter.
  *
- * ⚠️ This plan PRINTS the field. It does NOT yet pin `annotated >= sections`:
- * the reference file is 30 twins over 35 sections until plan 164.4-02 closes
- * the 15, so the pin would fail on the very run this plan measures. Plan 02
- * arms it.
+ * ⚠️ 2026-09-02 (plan 164.4-01), LINEAGE: "This plan PRINTS the field. It does
+ * NOT yet pin `annotated >= sections`: the reference file is 30 twins over 35
+ * sections until plan 164.4-02 closes the 15, so the pin would fail on the very
+ * run this plan measures."
+ *
+ * ⭐ ARMED 2026-09-03 (plan 164.4-02), and NOT where the line above sends you
+ * (review IN-03). The durable control is SET INCLUSION — "every SECTION an
+ * annotated file raises for also carries a twin" — in
+ * `src/__tests__/mutation-annotation-parser.test.ts`, NOT `annotated >=
+ * sections` in this runner, which a file carrying two twins on half its
+ * sections satisfies while leaving the other half unarmed. Nothing in `run.mjs`
+ * or in `ci.yml` compares this column to anything: it is the PRINTED EVIDENCE
+ * for that vitest arm, not the arm itself. A reader looking here for the
+ * arming will not find it, which is why this says so.
  */
 export function gateSectionCount(gateText) {
   return new Set(gateAttributionRecords(gateText).map((r) => sectionOfIdentity(r.arm))).size;
@@ -2270,6 +2411,31 @@ const LANE_LEGS = ["baseline", "arm", "restore", "probe"];
 const laneTally = { baseline: 0, arm: 0, restore: 0, probe: 0 };
 
 /**
+ * 164.4-12 (review WR-02) — THE SAME TALLY, BROKEN OUT PER GATE FILE.
+ *
+ * ⭐ WHY THIS EXISTS. The per-file `executed` column used to be
+ * `tally.executed += 1` on the line immediately after `armsExecuted += 1`. Both
+ * sides of the cross-sum therefore came from ONE increment, so
+ * `sum(perFile.biting) === biting` agreed with itself BY CONSTRUCTION — a
+ * relation modelled on the independent `armsExecuted === laneInvocations` check
+ * while having none of its independence. A control that cannot fail is the
+ * exact defect this phase exists to remove, so the column was moved to the
+ * lane side.
+ *
+ * Incremented in exactly one place — inside `runLane`, beside `laneTally`, at
+ * the `spawnSync` that actually starts an arm lane — and keyed by the gate's
+ * REPO-RELATIVE path, which the verdict loop hands in as `gateKey`. `runCorpus`
+ * reads it only as a snapshot delta and `perFileRows` derives `executed`,
+ * `judged` and `biting` from it. The per-file columns and the aggregate
+ * `bitingArms` now descend from DIFFERENT counters in DIFFERENT functions, so
+ * relation (3) is a second measurement rather than a restatement.
+ *
+ * Monotonic for the same reason `laneTally` is: nothing resets it, so no caller
+ * can zero it to make a run look consistent.
+ */
+const laneArmGateTally = new Map();
+
+/**
  * PURE. Why a `spawnSync` result carries no usable exit status, or null when
  * the process ran to one. Exported so the classification is pinned on its own.
  *
@@ -2296,10 +2462,16 @@ export function laneSpawnFailure(proc) {
   return null;
 }
 
-function runLane({ workdir, applyAbs, postApplyAbs, gateAbs, leg }) {
+function runLane({ workdir, applyAbs, postApplyAbs, gateAbs, leg, gateKey = null }) {
   // Refuse to guess which leg this is: an untagged lane would be an
   // unaccounted invocation, and the cross-check treats that as absurd.
   if (!LANE_LEGS.includes(leg)) throw new Error(`runLane: unknown leg ${JSON.stringify(leg)}`);
+  // Same refusal, one level finer: an ARM lane with no gate key is an
+  // invocation no file's column could ever account for, which would make the
+  // per-file cross-sum disagree for a reason that is the runner's own bug.
+  // The non-arm legs are not broken out per file, so they need no key.
+  if (leg === "arm" && typeof gateKey !== "string")
+    throw new Error("runLane: an arm lane needs a gateKey — an untagged arm lane is an invocation no per-file column can account for");
   const args = [LANE, "--workdir", workdir, "--apply", ...applyAbs];
   if (postApplyAbs) args.push("--post-apply", postApplyAbs);
   args.push("--gate", gateAbs);
@@ -2312,7 +2484,14 @@ function runLane({ workdir, applyAbs, postApplyAbs, gateAbs, leg }) {
   // so it is not counted either. A lane that started and was then signalled
   // IS counted: it ran, and the verdict loop must account for it.
   const invoked = !proc.error;
-  if (invoked) laneTally[leg] += 1;
+  if (invoked) {
+    laneTally[leg] += 1;
+    // The per-file half of the same measurement (WR-02). Keyed by the gate the
+    // verdict loop named, incremented under the SAME `invoked` condition, so
+    // the two tallies can never diverge for a reason other than the loop
+    // miscounting — which is the whole point of keeping them apart.
+    if (leg === "arm") laneArmGateTally.set(gateKey, (laneArmGateTally.get(gateKey) ?? 0) + 1);
+  }
   // stderr first: psql streams RAISE output there, and ON_ERROR_STOP=1 aborts
   // at the first failing statement, so emission order is failure order.
   const output = `${proc.stderr || ""}\n${proc.stdout || ""}`;
@@ -2409,13 +2588,32 @@ function runLane({ workdir, applyAbs, postApplyAbs, gateAbs, leg }) {
  *   (3) sum(perFile.biting) === biting
  *   (4) sum(perFile.annotated) === armsAnnotated
  *
- * These are not restatements of the aggregate. The aggregate subtracts the
- * non-biting defect kinds GLOBALLY; the per-file column subtracts the ones that
- * NAME that file. A non-biting defect attributed to no file — or to a file the
- * loop never listed — deflates the aggregate and leaves the breakdown intact,
- * so the two disagree and say so. That is the shape RESEARCH Pitfall 2 warns
- * about in miniature: a number that moved for a reason nothing in the report
- * accounts for.
+ * ⭐ 164.4-12 (review WR-02) — WHAT EACH ONE IS WORTH, stated separately,
+ * because until this plan the comment here claimed both were siblings of
+ * relation (1) and NEITHER was.
+ *
+ *   (3) IS a second measurement, since this plan. `perFile.biting` descends
+ *       from `laneArmGateTally` — incremented inside `runLane` at the spawn —
+ *       via `perFileRows`; the aggregate `biting` descends from `armsExecuted`
+ *       in the verdict loop. Two counters, two functions, exactly the
+ *       independence relation (1) has, now resolved per file: a loop that
+ *       counts an arm it never laned for disagrees HERE and names the file.
+ *       Until 2026-09-04 `tally.executed` was incremented on the line after
+ *       `armsExecuted`, so both sides came from one increment and this
+ *       relation could not fail — a control that cannot fail, in the phase
+ *       built to remove them.
+ *
+ *   (4) is NOT a second measurement, and this is not a defect to be fixed:
+ *       `annotated` is a PARSE-time property and no lane observes it, so there
+ *       is no independent counter to compare against. It catches a narrower
+ *       thing — a twin attributed to a file the report does not list — and
+ *       that is all it should be read as claiming.
+ *
+ * Both still catch the shape RESEARCH Pitfall 2 warns about in miniature: a
+ * number that moved for a reason nothing in the report accounts for. The
+ * aggregate subtracts the non-biting defect kinds GLOBALLY; the per-file column
+ * subtracts the ones that NAME that file, so a defect attributed to no listed
+ * file deflates one side only.
  *
  * @param {{armsExecuted: number, laneInvocations: number, biting: number,
  *          perFile?: Array<{name: string, annotated: number, biting: number}> | null,
@@ -2507,6 +2705,12 @@ export function absurdityViolations({
 // bare `40/71` cannot tell "31 files nobody got to yet" from "31 files this
 // gate can never judge today, deliberately". That is the repudiation shape: a
 // subset covered, reported as if it were the whole.
+// ⚠️ CORRECTION 2026-09-04 (plan 164.4-12, review WR-V2): the ARGUMENT above
+// stands unchanged; the figure it quotes does not. The reachable end state is
+// `files 39/71`, not 40/71 — a FIFTH file (test_compute_jobs_error_kind_copy_
+// parity.sql) is equally un-baselineable without pg_cron and prints under
+// `pending:`; see the correction at the head of this file. Substitute "32
+// files" for "31" in the sentence above and it reads correctly.
 //
 // The founder's scope amendment (2026-09-02, ROADMAP § SCOPE AMENDMENT) makes
 // the exclusion explicit and makes PRINTING it a merge condition: *"the 27
@@ -2543,6 +2747,14 @@ export function absurdityViolations({
 // ⚠️ CURRENCY 2026-09-03 (plan 164.4-07): the classes are unchanged and the
 // end state is still 40/71; only the annotated/pending SPLIT has moved, to
 // 17 annotated / 23 pending / 27 unreachable / 0 inert / 4 lane-blocked = 71.
+// ⚠️ CURRENCY 2026-09-04 (plan 164.4-12, review WR-V2) — SUPERSEDES the two
+// lines above as the current reading. They stay as lineage. The end state is
+// `files 39/71`, NOT 40/71: the classes are still five, but the fifth file
+// test_compute_jobs_error_kind_copy_parity.sql cannot be baselined without
+// pg_cron either and is owed to Phase 164.4.1 (founder decision, plan 09;
+// TODOS [REDUNDER-LANEBLOCKED-BLIND]). MEASURED at this commit over
+// `supabase/tests/` via `--parse-only`: 39 annotated / 1 pending /
+// 27 unreachable / 0 inert / 4 lane-blocked = 71.
 // Read the run's own `coverage:` and `  pending:` lines, never this sentence.
 //
 // ⭐ AND THE REASON CAN EXPIRE. "which the pg-lane cannot host" is a claim
@@ -2590,6 +2802,12 @@ const NON_BITING_DEFECT_KINDS = ["no-red", "wrong-first-failure", "synthesised-i
  *
  * `sections` is computed from `gateText` the caller ALREADY read, so the row
  * costs no extra `readFileSync` beyond the parse.
+ *
+ * ⚠️ 164.4-12 (WR-02): `executed` is seeded at 0 here and is OVERWRITTEN by
+ * `perFileRows` from the lane-side `laneArmGateTally`. Nothing in the verdict
+ * loop increments it any more — that is the independence relation (3) rests on.
+ * The field stays in the constructor so the row's shape is declared in one
+ * place, not because this value is ever reported.
  */
 function newPerFileTally({ name, gateRel, gateText, annotated, waived }) {
   return {
@@ -2611,14 +2829,29 @@ function newPerFileTally({ name, gateRel, gateText, annotated, waived }) {
  * is `continue`d before any arm runs, so it shows `annotated 39 / judged 0` —
  * 39 twins of coverage that measured nothing. `biting` subtracts, from that
  * file's judged arms, the non-biting defects that NAME that file.
+ *
+ * ⭐ 164.4-12 (review WR-02) — `executed` COMES FROM THE LANE, not from the
+ * verdict loop. `laneArmSpawns` is the per-gate delta of `laneArmGateTally`,
+ * incremented inside `runLane` beside the `spawnSync`. It deliberately
+ * OVERWRITES the `executed: 0` the tally was constructed with, so the value the
+ * caller could have influenced never survives into the row.
+ *
+ * That is what makes the absurdity floor's relation (3) real: `biting` here
+ * descends from the lane-side counter, while the aggregate `bitingArms`
+ * descends from `armsExecuted` in the verdict loop. Before this, both descended
+ * from one increment and the relation could not fail.
+ *
+ * Defaults to an empty Map for `--parse-only`, which spawns no lane and must
+ * report `judged 0` rather than borrow a count from a run that did not happen.
  */
-function perFileRows(tallies, defects) {
+function perFileRows(tallies, defects, laneArmSpawns = new Map()) {
   return tallies.map((t) => {
-    const judged = t.executed - t.unjudged;
+    const executed = laneArmSpawns.get(t.gateRel) ?? 0;
+    const judged = executed - t.unjudged;
     const nonBiting = defects.filter(
       (d) => d.file === t.gateRel && NON_BITING_DEFECT_KINDS.includes(d.kind),
     ).length;
-    return { ...t, judged, biting: judged - nonBiting };
+    return { ...t, executed, judged, biting: judged - nonBiting };
   });
 }
 
@@ -2781,6 +3014,10 @@ export function runCorpus({
   // snapshot now, subtract at the summary. Never reset: this function does not
   // write that counter, and must not, or the two tallies stop being two.
   const laneTallyBefore = { ...laneTally };
+  // WR-02: the same snapshot-delta discipline, per gate. Both tallies are
+  // monotonic across `runCorpus` calls (the self-test makes many), so the row
+  // has to describe THIS run.
+  const laneArmGateBefore = new Map(laneArmGateTally);
 
   let targets = corpus.annotatedFiles;
   if (onlyFile) {
@@ -3043,6 +3280,10 @@ export function runCorpus({
           postApplyAbs,
           gateAbs,
           leg: "arm",
+          // WR-02: the key the lane-side per-file tally counts under. `gateAbs`
+          // points into this arm's throwaway slot and changes every arm, so the
+          // stable repo-relative path is what the column has to be keyed by.
+          gateKey: gateRel,
         });
         // ── the lane could not be RUN: MEASURE_FAIL, the arm was NOT judged ──
         // Handled the way `attribution.measureFail` is below: its own name,
@@ -3054,7 +3295,10 @@ export function runCorpus({
           if (run.invoked) {
             armsExecuted += 1;
             armsUnjudged += 1;
-            tally.executed += 1;
+            // `tally.executed` is NOT incremented here (WR-02): the per-file
+            // column is measured on the lane side, in `runLane`, which already
+            // counted this spawn. `unjudged` stays a verdict-loop fact — only
+            // the loop knows the arm reached no verdict.
             tally.unjudged += 1;
           }
           addDefect(
@@ -3069,8 +3313,13 @@ export function runCorpus({
         }
         // The verdict loop's OWN count. Its twin is `laneTally.arm`, kept
         // inside runLane; the summary cross-checks the two (164.3.1-10).
+        //
+        // ⛔ WR-02: do NOT add `tally.executed += 1` back here. The per-file
+        // column is derived in `perFileRows` from `laneArmGateTally` — the
+        // lane-side counter — precisely so the per-file cross-sum is a SECOND
+        // measurement of this line rather than a copy of it. An increment here
+        // would restore the by-construction agreement the review named.
         armsExecuted += 1;
-        tally.executed += 1;
         timings.push(run.seconds);
 
         // ── 164.3.1-05: attribute by SOURCE LOCATION ────────────────────────
@@ -3290,7 +3539,12 @@ export function runCorpus({
       `independent of the ${armsExecuted} the verdict loop counted; plus ${laneLegs.baseline} ` +
       `baseline / ${laneLegs.restore} restore leg(s))`,
   );
-  const fileRows = perFileRows(perFileTallies, defects);
+  const laneArmSpawns = new Map();
+  for (const [gate, total] of laneArmGateTally) {
+    const delta = total - (laneArmGateBefore.get(gate) ?? 0);
+    if (delta > 0) laneArmSpawns.set(gate, delta);
+  }
+  const fileRows = perFileRows(perFileTallies, defects, laneArmSpawns);
   logPerFileRows(fileRows, log);
   for (const w of waivers) log(`  waived: ${w.arm} — ${w.reason}`);
   if (timings.length > 0) {

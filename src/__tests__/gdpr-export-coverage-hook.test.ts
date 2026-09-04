@@ -62,6 +62,31 @@ const HOOK_SCRIPT = join(REPO_ROOT, "scripts", "check-gdpr-export-coverage.ts");
  * point — do not "simplify" this back to a bare `tsx` or to `npx`.
  */
 const TSX_BIN = join(REPO_ROOT, "node_modules", ".bin", "tsx");
+
+/**
+ * FAIL LOUD if the pinned binary is absent (CLAUDE.md Rule 12; review IN-05).
+ *
+ * Without this guard a missing `node_modules` is MISATTRIBUTED: `spawnSync`
+ * returns `status: null` with an empty `stderr`, and the first thing a reader
+ * sees is `expect(result.stderr).toContain("H-0455/H-0457")` failing — which
+ * names the HOOK, sending them to debug `check-gdpr-export-coverage.ts` when
+ * the actual cause is that deps were never installed.
+ *
+ * ⛔ The fix for a red here is `npm ci`, NOT reintroducing `npx` — see the
+ * docblock above for why the `npx` fallback silently ran a different,
+ * network-fetched tsx.
+ */
+if (!existsSync(TSX_BIN)) {
+  throw new Error(
+    `MEASURE_FAIL: the repo's pinned tsx is absent at ${TSX_BIN} — run ` +
+      "`npm ci`. These arms spawn tsx by ABSOLUTE path on purpose (each " +
+      "spawn's cwd is a node_modules-less scratch repo); falling back to " +
+      "`npx tsx` would fetch a DIFFERENT tsx version from the registry and " +
+      "is not an acceptable workaround. If the binary exists under another " +
+      "name on this platform (e.g. a `tsx.cmd` shim), fix the resolution " +
+      "here rather than reverting to `npx`.",
+  );
+}
 // B13: USER_EXPORT_TABLES (and the redactors the hook's checks reference)
 // live in the server-only-free manifest MODULE, which the hook imports as
 // typed data. The mutation tests below therefore edit THIS file, not
