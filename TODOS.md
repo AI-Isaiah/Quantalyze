@@ -1330,7 +1330,7 @@ true for 146 and half of 142–145, and **false for 141**.
       unfalsifiable.
 
 - [ ] **`[REDUNDER-LANEBLOCKED-BLIND]` The `lane-blocked` classifier is APPLY-LIST-BLIND, so a gate deferred for `pg_cron` can be miscounted into `pending:` (measured 2026-09-04, Plan 164.4-09).**
-      `gateNeedsPgCron` (`scripts/mutation-runner/parse.mjs:996`) decides the class by scanning **the
+      `gateNeedsPgCron` (`scripts/mutation-runner/parse.mjs:1043`) decides the class by scanning **the
       gate file's own executable text** for a `pg_extension` probe. A gate whose OWN text never
       mentions `pg_cron`, but whose `RED-UNDER-SETUP` apply list contains a migration that hard-RAISEs
       without the extension, is equally un-baselineable on the lane — and is classified `pending`.
