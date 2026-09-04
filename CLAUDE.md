@@ -79,6 +79,20 @@ REDUCED from the six files it planned: `test_compute_jobs_error_kind_copy_parity
 chose to retire `[REDUNDER-PGCRON]` by putting pg_cron ON the lane as its own
 plan rather than work around it — so that file stays in `pending:` alongside the
 four already-deferred ones.
+⚠️ CURRENCY 2026-09-04: plan 10 then annotated the LAST FOUR non-mixed idiom
+files — the allocator pre-terminus equity flag, the enqueue_compute_job
+non-terminal dedupe, the metrics_json_by_basis write shape and the
+set_compute_job_progress claim fence — 2 + 2 + 2 + 2 = 8 sections, so the
+measured corpus is now `coverage: files 32/71`, `arms: 247/247/0`,
+`biting: 247`, `lane-invocations: 247`, tallies agree, `FILES_FLOOR` is pinned
+at 32 and `ARMS_FLOOR` at 247, with `pending: 8` idiom files still to go: the
+SEVEN ⚠️ mixed files plan 11 takes, plus the pg_cron-deferred one above.
+⚠️ The phase's end state is therefore `files 39/71`, NOT the `40/71` of SCOPE
+AMENDMENT #2 — that amendment predates plan 09's deferral. Note also that
+`lane-blocked:` still names only FOUR files: the deferred fifth is blocked by a
+migration in its APPLY LIST rather than by its own text, which `gateNeedsPgCron`
+cannot see (TODOS `[REDUNDER-LANEBLOCKED-BLIND]`), so it is reported under
+`pending:` and is pinned there as a tripwire.
 `WAIVED_CEILING` is still 0, now through TWO founder decisions that both took
 the root-cause fix over an exception: plan 08's trust-signal anon-EXECUTE
 assertion was resolved by a REORDER putting the precondition ahead of its
