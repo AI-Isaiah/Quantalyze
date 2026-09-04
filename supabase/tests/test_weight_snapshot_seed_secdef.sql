@@ -60,6 +60,34 @@
 -- Usage:
 --   psql "$TEST_SUPABASE_DB_URL" -v ON_ERROR_STOP=1 -f \
 --     supabase/tests/test_weight_snapshot_seed_secdef.sql
+--
+-- ⭐ RED-UNDER ANNOTATIONS (Phase 164.4). Each assertion below carries a prose
+-- `RED-UNDER:` naming the smallest production change that makes it fail, and a
+-- machine-readable `RED-UNDER-M:` twin the mutation runner applies on a
+-- throwaway pg-lane cluster to PROVE it reds on its OWN arm, then restores
+-- GREEN. Schema: scripts/mutation-runner/GRAMMAR.md. The line below declares
+-- what the lane applies before this gate.
+--
+-- ⚠️ 07-fixture-supabase-default-privileges.sql IS LOAD-BEARING. Assertion 2
+-- asserts that an `authenticated` INSERT into weight_snapshots is DENIED, and
+-- what must do the denying is `weight_snapshots_insert_deny`'s
+-- `WITH CHECK (false)` — a POLICY. On a vanilla cluster `authenticated` would
+-- never have held the table GRANT either, so the assertion's 42501 would arrive
+-- for a completely different reason and the policy could be deleted without the
+-- arm noticing. Granting Supabase's bootstrap defaults first is what makes
+-- assertion 2's twin (which adds a permissive INSERT policy and expects the
+-- write to LAND) falsifiable at all.
+--
+-- ⛔ THE TWO REAL MIGRATIONS THAT CREATE `portfolio_alerts` ARE NOT LISTED, so
+-- 22-fixture-portfolio-alerts.sql stands in for it. 20260416125431 — the
+-- migration that installs the two seed triggers under test — re-shapes that
+-- table in its STEPs 1-3 before reaching them, and its creators
+-- (20260405061911_initial_schema.sql, 20260407075303_portfolio_intelligence.sql)
+-- carry the whole Phase-031 schema; the latter was MEASURED unapplicable to a
+-- vanilla cluster by plan 164.4-00 (probe 1). No arm here asserts anything about
+-- portfolio_alerts — see that fixture's header for the column-by-column
+-- derivation off the lane's own failure.
+-- RED-UNDER-SETUP: {"apply":["scripts/pg-lane/fixtures/01-fixture-core.sql","scripts/pg-lane/fixtures/02-fixture-sanitize-tables.sql","scripts/pg-lane/fixtures/03-fixture-compute-jobs.sql","scripts/pg-lane/fixtures/06-fixture-portfolio-strategies.sql","scripts/pg-lane/fixtures/07-fixture-supabase-default-privileges.sql","scripts/pg-lane/fixtures/15-fixture-auth-role.sql","scripts/pg-lane/fixtures/22-fixture-portfolio-alerts.sql","supabase/migrations/20260412094451_weight_snapshots.sql","supabase/migrations/20260416125431_rebalance_drift_check_and_trigger.sql","supabase/migrations/20260806120000_strategies_capital_ownership.sql","supabase/migrations/20260806130000_seed_weight_snapshot_secdef.sql"]}
 
 -- Defensive pre-clean, scoped to this file's OWN sentinel email.
 DELETE FROM auth.users
@@ -113,6 +141,21 @@ BEGIN
   -- Without the SECURITY DEFINER repair this statement raises
   -- `42501 new row violates row-level security policy for table
   -- "weight_snapshots"` from inside seed_weight_snapshot_for_portfolio_strategy().
+  -- RED-UNDER: seed the companion row with ZERO weights instead of NULL —
+  --            `CURRENT_DATE, NULL, NULL` becomes `CURRENT_DATE, 0, 0` in
+  --            seed_weight_snapshot_for_portfolio_strategy()'s INSERT in
+  --            migration 20260806130000.
+  --            ⚠️ Chosen over the obvious "revert SECURITY DEFINER", and the
+  --            reason is the point: an INVOKER trigger raises 42501 from
+  --            inside the portfolio_strategies INSERT above, which this file
+  --            does NOT wrap in a handler — so psql aborts with a raw driver
+  --            error naming no arm, and assertion 1 would never get to speak.
+  --            The zero-weight seed keeps the write path alive and breaks only
+  --            what assertion 1 owns: the null-target ground truth the
+  --            rebalance_drift guard reads. A weight of 0 is not "no target",
+  --            it is a target of nothing — and the guard would start acting on
+  --            it. Assertion 3 covers the DEFINER clause separately.
+  -- RED-UNDER-M: {"arm":"1","apply":[{"kind":"edit","file":"supabase/migrations/20260806130000_seed_weight_snapshot_secdef.sql","find":"    NEW.portfolio_id, NEW.strategy_id, CURRENT_DATE, NULL, NULL\n","replace":"    NEW.portfolio_id, NEW.strategy_id, CURRENT_DATE, 0, 0\n","occurrences":1}]}
   INSERT INTO portfolio_strategies (portfolio_id, strategy_id, allocated_amount)
   VALUES (port_a, strat_a, 100000);
 
@@ -147,6 +190,18 @@ BEGIN
     json_build_object('sub', uid_a::text, 'role', 'authenticated')::text, true);
   SET LOCAL ROLE authenticated;
 
+  -- RED-UNDER: add the owner-scoped INSERT policy the header names as the
+  --            REJECTED alternative fix — `CREATE POLICY … ON weight_snapshots
+  --            FOR INSERT TO authenticated WITH CHECK (true)` on the live
+  --            database. RLS ORs permissive policies, so it does not remove
+  --            weight_snapshots_insert_deny; it simply makes it irrelevant, and
+  --            the direct client write LANDS. That is the whole failure mode
+  --            this arm exists for: assertion 1 goes on passing, because a
+  --            client-writable path satisfies the seed requirement too. A `sql`
+  --            step rather than a migration edit — 20260412094451 pins the deny
+  --            policies exactly and deleting one there would change what the
+  --            gate asserts instead of breaking it.
+  -- RED-UNDER-M: {"arm":"2","apply":[{"kind":"sql","stmt":"CREATE POLICY weight_snapshots_owner_insert ON public.weight_snapshots FOR INSERT TO authenticated WITH CHECK (true)"}]}
   denied := FALSE;
   BEGIN
     INSERT INTO weight_snapshots (portfolio_id, strategy_id, snapshot_date,
@@ -164,6 +219,20 @@ BEGIN
   END IF;
 
   -- ----- 3: both seed functions are SECURITY DEFINER + pinned search_path --
+  -- RED-UNDER: fix the INSTANCE and not the CLASS — drop the `SECURITY DEFINER`
+  --            line from the PORTFOLIO-LEVEL fan-out
+  --            seed_weight_snapshots_for_portfolio() in migration
+  --            20260806130000, leaving its per-row sibling repaired. This is
+  --            precisely the shape that migration's own header rejects, and it
+  --            is invisible to every behavioural arm: the fan-out is latent
+  --            today (the portfolio_strategies FK stops a child row pre-dating
+  --            its parent), so assertion 1 still passes and this structural arm
+  --            is the only witness. LAYERED: the migration re-asserts prosecdef
+  --            over BOTH names in its own STEP 3a and would abort the apply, so
+  --            the second edit narrows that loop to the one function still
+  --            repaired — which is exactly what a migration shipping the
+  --            instance-only fix would have done to its self-check.
+  -- RED-UNDER-M: {"arm":"3","apply":[{"kind":"edit","file":"supabase/migrations/20260806130000_seed_weight_snapshot_secdef.sql","find":"CREATE OR REPLACE FUNCTION public.seed_weight_snapshots_for_portfolio()\nRETURNS TRIGGER\nLANGUAGE plpgsql\nSECURITY DEFINER\n","replace":"CREATE OR REPLACE FUNCTION public.seed_weight_snapshots_for_portfolio()\nRETURNS TRIGGER\nLANGUAGE plpgsql\n","occurrences":1},{"kind":"edit","file":"supabase/migrations/20260806130000_seed_weight_snapshot_secdef.sql","find":"      'seed_weight_snapshot_for_portfolio_strategy',\n      'seed_weight_snapshots_for_portfolio'\n    ]) AS name","replace":"      'seed_weight_snapshot_for_portfolio_strategy'\n    ]) AS name","occurrences":1}]}
   FOR fn IN
     SELECT unnest(ARRAY[
       'seed_weight_snapshot_for_portfolio_strategy',
@@ -190,6 +259,22 @@ BEGIN
   END LOOP;
 
   -- ----- 4: the DEFINER context is genuinely exempt ------------------------
+  -- RED-UNDER: re-own the PORTFOLIO-LEVEL fan-out to a role that is neither
+  --            BYPASSRLS nor the owner of weight_snapshots — `ALTER FUNCTION
+  --            public.seed_weight_snapshots_for_portfolio() OWNER TO
+  --            authenticated` on the live database. SECURITY DEFINER buys
+  --            nothing when the definer is itself subject to the deny policy,
+  --            which is the gap between assertion 3 and this one: 3 sees the
+  --            clause, 4 sees whether the clause MEANS anything.
+  --            ⚠️ The other half of this arm — FORCE ROW LEVEL SECURITY — is
+  --            deliberately NOT the mutation. The header says why: FORCE-RLS
+  --            brings the 42501 back, so assertion 1 reddens first and this arm
+  --            never speaks. The fan-out is picked over its per-row sibling for
+  --            the same reason as assertion 3's twin: it is latent, so no
+  --            behavioural arm pre-empts this one. A `sql` step because no
+  --            migration sets the owner — ownership comes from whoever ran the
+  --            migration, which is not a byte in the repo.
+  -- RED-UNDER-M: {"arm":"4","apply":[{"kind":"sql","stmt":"ALTER FUNCTION public.seed_weight_snapshots_for_portfolio() OWNER TO authenticated"}]}
   SELECT c.relforcerowsecurity, c.relowner
     INTO v_force, v_owner
     FROM pg_class c
