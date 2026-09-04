@@ -2861,6 +2861,45 @@ governs by CONTENT TYPE, and their content is prose/forms — rung 1.
 
 ### CI / test-infra ratchet
 
+- **`[PGLANE-SELFTEST-COUNT-UNPINNED]` The pg-lane self-test's `N/6` denominator is a hand-typed
+  literal in NINE places and NOTHING pins it (raised 2026-09-04, Phase 164.4.1 plan 01 Task 3).**
+  `scripts/pg-lane/run.sh` spells its arm count at the SP-H01 history comment, the five
+  `=== SELF-TEST n/6:` captions, the SP-H01 denominator comment, the `$((6 - st_skipped))/6`
+  arithmetic and the final `PASSED (6/6)`. MEASURED at HEAD: adding arm 6 required editing all
+  nine by hand, and zero vitest arms read `run.sh`'s captions — so a seventh arm whose caption
+  said `7/7` while `PASSED (6/6)` stayed put would print a self-consistent-looking lie, and a
+  caption that silently drifted BELOW the real arm count would let a dropped arm read as a full
+  run. That is the same class SP-H01 itself was raised for; SP-H01 fixed the SKIP tally, not the
+  denominator.
+  ⚠️ Contrast `scripts/mutation-runner/run.mjs`, which also uses literal captions (`17/17`) but
+  whose coverage is DERIVED and enforced: `src/__tests__/mutation-runner-floors.test.ts:579-605`
+  ranges over `DEFECT_KINDS` and fails BY NAME on an unexercised kind. The `run.mjs` side is more
+  recent and more tested; the lane side is the laggard.
+  **Fix** = a vitest arm that counts the `=== SELF-TEST n/6:` captions in the lane script's bytes
+  and asserts the count equals the denominator in the `PASSED (N/N)` literal and in the
+  `$((N - st_skipped))/N` arithmetic — three independently-typed numbers forced to agree.
+  ⛔ Not fixed in 164.4.1 plan 01 ON PURPOSE (PATTERNS C2): the arm-6 edit follows the local
+  convention, and inventing a counting scheme mid-phase would mix a new mechanism into a substrate
+  change. Book it, then build it.
+
+- **`[PGLANE-SELFTEST-NOT-IN-CI]` No CI step runs the pg-lane's OWN self-test — its six arms are
+  proven only on the authoring box (raised 2026-09-04, Phase 164.4.1 plan 01 Task 3).**
+  MEASURED at HEAD: `.github/workflows/ci.yml`'s `sql-mutation` job runs the RUNNER's self-test
+  (`node scripts/mutation-runner/run.mjs --self-test`) before the corpus run, but ZERO steps in the
+  whole workflow invoke `bash scripts/pg-lane/run.sh --self-test`.
+  So the lane's collision guard (arms 1-2), its orphan-cleanup contract (arms 3-5, the D-04 defect
+  that cost 27 orphaned clusters and a disk-exhaustion incident) and now its pg_cron preload
+  (arm 6) are asserted on macOS and nowhere else — while every one of them is a property of the
+  substrate that CI's throwaway clusters depend on, and ubuntu is the host where the preload's
+  provisioning is newest and least measured.
+  ⚠️ The cost is real, not hypothetical: arm 6's control half spawns lanes, and arms 3-5 wait on
+  signalled runs (~39 s locally before arm 6). A CI step must carry its own measured wall clock
+  against the job's `timeout-minutes`, so this is a sized piece of work rather than a one-line add.
+  **Fix** = a step in `sql-mutation` (or a job of its own) running the lane self-test, with the
+  measured ubuntu wall clock recorded in the same comment. Not fixed in 164.4.1 plan 01: that plan
+  pins `timeout-minutes: 15` unchanged, and adding ~40 s of lanes to the job is exactly the kind of
+  unmeasured spend that pin exists to prevent.
+
 - **`[REDUNDER-PENDING-UNBOOKED]` The runner's `pending:` class is the only one of five printed
   without a TODO id or a CI assertion (raised 2026-09-04 by the Phase 164.4 verifier, WR-V3).**
   `unreachable:` cites `[REDUNDER-NONIDIOM]`, `lane-blocked:` cites `[REDUNDER-PGCRON]` and is
