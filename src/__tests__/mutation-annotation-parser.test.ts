@@ -714,8 +714,8 @@ describe("R2-W04 / GRAMMAR rule 3b — a mutation may not REWRITE an arm identit
 
     expect(violations).toEqual([]);
     // Non-vacuity: the walk must actually have walked something.
-    expect(armsSeen).toBe(219);
-    expect(stepsSeen).toBe(205);
+    expect(armsSeen).toBe(239);
+    expect(stepsSeen).toBe(226);
   });
 
   // ══════════════════════════════════════════════════════════════════════════
@@ -1402,7 +1402,15 @@ describe("GRAMMAR rule 3c — an identity is READ only where the RUNNER's gate r
     // corpus's 296 steps are now `sql`, among them the trust-signals
     // anon-EXECUTE revoke, which is a `sql` step by force: mig 135 STEP 2 pins
     // the grantee list exactly, so the drift has to happen on the LIVE object.
-    expect(needles.length).toBe(205);
+    // RE-MEASURED 2026-09-04 (plan 164.4-09): 226 needles across 239 arms. 20
+    // new arms carried 21 new needles — again slightly MORE needles than arms,
+    // and for the same reason: two of this batch's twins are LAYERED migration
+    // edits against SELF-VERIFYING migrations, where the mutation and the
+    // migration's own post-verify of it must move together or the apply aborts
+    // (the resync gate's (b) needs THREE steps, because 20260726000225 checks
+    // its own indexed column list AND counts the unique indexes covering
+    // wizard_session_id). 98 of the corpus's 324 steps are now `sql`.
+    expect(needles.length).toBe(226);
     expect(needles.filter((n) => /TEST\s+FAILED\s*\(/i.test(n))).toEqual([]);
   });
 });
@@ -1648,14 +1656,14 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
     }
   });
 
-  it("scanCorpus reports 23 of 71 files annotated", () => {
+  it("scanCorpus reports 28 of 71 files annotated", () => {
     const corpus = scanCorpus(join(REPO_ROOT, "supabase", "tests"));
     // ⛔ The DENOMINATOR stays 71 — every `.sql` in the directory. The phase's
     // end state is `files 40/71` with the other 31 PRINTED BY NAME
     // (`unreachable:` 27 + `lane-blocked:` 4), never `40/40` with the gap
     // quietly redefined away.
     expect(corpus.filesTotal).toBe(71);
-    expect(corpus.filesAnnotated).toBe(23);
+    expect(corpus.filesAnnotated).toBe(28);
     expect(corpus.annotatedFiles).toEqual([
       "test_allocator_equity_derived_rls.sql",
       "test_api_keys_venue_identity_uniq.sql",
@@ -1664,6 +1672,7 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
       "test_create_wizard_strategy_for_key.sql",
       "test_csv_daily_returns_perkey_rls.sql",
       "test_csv_finalize_atomic_fold.sql",
+      "test_csv_finalize_auth_guard.sql",
       "test_csv_finalize_double_submit.sql",
       "test_funding_fees_rls.sql",
       "test_get_published_trust_signals.sql",
@@ -1671,6 +1680,7 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
       "test_ledger_refresh_composite_arm.sql",
       "test_ledger_refresh_fanout.sql",
       "test_ledger_refresh_staleness.sql",
+      "test_resync_retry_single_job.sql",
       "test_scenario_downgrade_sweep.sql",
       "test_scenario_shares_rls.sql",
       "test_scenarios_rls.sql",
@@ -1678,7 +1688,10 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
       "test_strategy_analytics_series_completeness.sql",
       "test_strategy_keys_rls.sql",
       "test_strategy_shares_rls.sql",
+      "test_strategy_verifications_wizard_session_tenant_scope.sql",
       "test_user_notes_dashboard_scope.sql",
+      "test_weight_snapshot_seed_secdef.sql",
+      "test_wizard_composite_fence.sql",
       "test_wizard_composite_members.sql",
     ]);
   });
@@ -1816,7 +1829,23 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
     for (const f of LANE_BLOCKED_4) expect(corpus.pendingFiles).not.toContain(f);
     // And the negative controls stay where they were.
     expect(corpus.unreachableFiles).toContain("test_retention_crons_safe.sql");
-    expect(corpus.pendingFiles).toContain("test_wizard_composite_fence.sql");
+    // ⭐ test_wizard_composite_fence.sql mentions pg_cron at :698 in a COMMENT
+    // only, so it must never join the four above. Plan 164.4-09 ANNOTATED it,
+    // which moved it from `pending` to `annotated` — the control follows it
+    // rather than being dropped, because what it pins is the CLASSIFIER (a
+    // comment-only mention is not a lane block), not the file's coverage state.
+    expect(corpus.annotatedFiles).toContain("test_wizard_composite_fence.sql");
+    expect(corpus.laneBlockedFiles).not.toContain("test_wizard_composite_fence.sql");
+    // ⚠️ AND THE KNOWN HOLE, pinned so it cannot be forgotten (TODOS
+    // [REDUNDER-LANEBLOCKED-BLIND]). test_compute_jobs_error_kind_copy_parity
+    // .sql is equally un-baselineable for pg_cron — the ONLY migration widening
+    // compute_jobs_error_kind_check to admit 'orphaned' hard-RAISEs when the
+    // extension is absent — but `gateNeedsPgCron` scans the GATE's own
+    // executable text and is blind to its RED-UNDER-SETUP apply list, so it
+    // lands in `pending` rather than `lane-blocked`. This assertion is a
+    // TRIPWIRE, not an endorsement: it flips the day the classifier learns to
+    // read apply lists, or the day the lane can host pg_cron.
+    expect(corpus.pendingFiles).toContain("test_compute_jobs_error_kind_copy_parity.sql");
   });
 
   it("the FIVE classes sum to filesTotal — annotated + pending + unreachable + inert + lane-blocked", () => {

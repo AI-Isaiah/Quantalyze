@@ -857,8 +857,8 @@ export const KNOWN_THRESHOLD_SITES: readonly string[] = [
   // a threshold leaving this family is a decision worth a red, not churn.
   "scripts/test-ledger-drift-check.sh :: ledger_rows -ge 50", //  VAC-08 absurdity floor: 'scored' + 2026-08-29
   "scripts/prod-body-drift-check.sh :: SNAPSHOT_MIN=50", //         VAC-04 absurdity floor: 'measured' + 2026-09-01
-  "scripts/mutation-runner/run.mjs :: FILES_FLOOR=23", //           coverage ratchet: MEASURED + 2026-09-04 (fifth FILE move, plan 164.4-08)
-  "scripts/mutation-runner/run.mjs :: ARMS_FLOOR=219", //           biting ratchet: MEASURED + 2026-09-04 (re-derived, plan 164.4-08)
+  "scripts/mutation-runner/run.mjs :: FILES_FLOOR=28", //           coverage ratchet: MEASURED + 2026-09-04 (sixth FILE move, plan 164.4-09)
+  "scripts/mutation-runner/run.mjs :: ARMS_FLOOR=239", //           biting ratchet: MEASURED + 2026-09-04 (re-derived, plan 164.4-09)
   // The family's only UPPER bound. Invisible to this arm until the name class
   // widened past FLOOR|MIN on 2026-09-02 — registered here on the run that
   // first saw it, with its measurement at run.mjs:201-227 and the constant
