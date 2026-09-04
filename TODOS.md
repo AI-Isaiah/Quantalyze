@@ -1177,6 +1177,18 @@ true for 146 and half of 142–145, and **false for 141**.
       an earlier assertion consumes its precondition is an ORDERING defect, not a grammar limit.**
       Check assertion order before reaching for a waiver.
 
+- [ ] **`[PRBRANCH-STALEBASE-01]` ⚠️ CLAUDE.md's PR-branch deletion guard resolves its base to the
+      LOCAL `main`, which is routinely stale.** The documented line is
+      `BASE=$(git rev-parse --abbrev-ref origin/HEAD | sed 's|origin/||')` -> the string `main`, so
+      the guard then diffs against whatever the local `main` branch happens to point at. MEASURED
+      2026-09-04: local `main` sat at `c2251b6d` while `origin/main` was `f82d9c1b`, and the guard
+      reported **6 `.planning/` files** in a PR that actually touches **none**. The failure mode is
+      conservative (a stale base shows EXTRA files, so it can only false-STOP, never false-PASS),
+      which is why it has never caused damage — but it makes the guard cry wolf and trains the
+      reader to wave it through, which is exactly how a real deletion would get merged.
+      **Fix:** pin the guard to `origin/main` directly (or `git fetch` + `git rev-parse origin/HEAD`
+      as a SHA) in the CLAUDE.md snippet, so it is independent of the local branch's freshness.
+
 - [x] **`[CI-GDPR-TIMEOUT-01]` ✅ FIXED 2026-09-04 — `gdpr-export-coverage-hook.test.ts` spawned
       `npx tsx` from a scratch cwd with NO `node_modules`, so npx FETCHED tsx from the registry.** MEASURED 2026-09-04: failed on three
       consecutive runs of PR #738 (`Test timed out in 30000ms`), and **failed IDENTICALLY on a
