@@ -1,10 +1,6 @@
--- ⚠️ NOT YET REFERENCED BY ANY `RED-UNDER-SETUP` LINE. It was derived for
--- supabase/tests/test_resync_retry_single_job.sql, whose apply list is PROVEN
--- GREEN with it (exit 0, 2026-09-04) but whose annotation is BLOCKED on a
--- founder decision about assertion (b) — see 164.4-09-SUMMARY.md § Blockers.
--- Committed rather than discarded because the list it belongs to is measured,
--- and because every branch of that decision keeps the file. Delete it in the
--- same commit if the decision is to drop that gate from the phase.
+-- Referenced by supabase/tests/test_resync_retry_single_job.sql's
+-- `RED-UNDER-SETUP` apply list, which is PROVEN GREEN with it (exit 0) and
+-- whose three arms all scored `RED (identity ok)` on real lanes, 2026-09-04.
 --
 -- Additive stand-in for `contact_requests`. Apply AFTER 01-fixture-core.sql and
 -- BEFORE the migrations under test. Never a second base.
