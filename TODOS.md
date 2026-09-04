@@ -1295,7 +1295,7 @@ true for 146 and half of 142–145, and **false for 141**.
       unchanged, stale 0, with `<read_first>` moved BEFORE `<precondition>` in one batch plan as the
       probe (then restored).
 
-- [ ] **`[REDUNDER-SAVEPOINT]` `20260416201929_audit_log_hardening.sql` cannot apply to a vanilla PostgreSQL 16 at all (measured 2026-09-02, Plan 164.4-00).**
+- [ ] **`[REDUNDER-SAVEPOINT]` THREE migrations cannot apply to a vanilla PostgreSQL 16 at all — `SAVEPOINT` inside a PL/pgSQL body (first measured 2026-09-02, Plan 164.4-00; class closed at exactly 3 on 2026-09-04, Plan 164.4-09).**
       Its final `DO $$ … $$;` block issues `SAVEPOINT audit_log_probe;` and `ROLLBACK TO SAVEPOINT
       audit_log_probe;` (`:239-267`) **inside a PL/pgSQL body**. PL/pgSQL has no savepoint statements, so
       the body fails to PARSE: `42601 syntax error at or near "TO"` at `plpgsql_yyerror`
@@ -1306,6 +1306,41 @@ true for 146 and half of 142–145, and **false for 141**.
       or this migration never applied as written.** Resolve by DIFFING the deployed
       `audit_log`/`log_audit_event` state against this file before editing anything. Phase 164.4 may not
       touch `supabase/migrations/`, so it is booked, not fixed.
+      **⭐ THE CLASS IS EXACTLY THREE, not one (measured 2026-09-04, Plan 164.4-09).** Plan 09 hit two
+      more on real lanes while discovering apply lists, each failing identically with
+      `ERROR 42601 syntax error at or near "TO"`:
+      `20260417031851_user_app_roles.sql:433` and
+      `20260510173005_process_key_long_idempotency_drain.sql:397`.
+      An AST-level scan of every migration puts the class at **exactly 3** — these two plus the
+      audit-log one above. The same disjunction applies to all three: none has ever applied to a
+      vanilla cluster as written, so either the deployed bodies differ from the repo (VAC-04's
+      subject) or they never applied. Both were EXCLUDED from Plan 09's apply lists by measurement;
+      a scaffold fixture carrying the REAL helper body substitutes for the `user_app_roles` one,
+      because a hardcoded `RETURN FALSE` stub would make every admin-policy arm structurally
+      unfalsifiable.
+
+- [ ] **`[REDUNDER-LANEBLOCKED-BLIND]` The `lane-blocked` classifier is APPLY-LIST-BLIND, so a gate deferred for `pg_cron` can be miscounted into `pending:` (measured 2026-09-04, Plan 164.4-09).**
+      `gateNeedsPgCron` (`scripts/mutation-runner/parse.mjs:996`) decides the class by scanning **the
+      gate file's own executable text** for a `pg_extension` probe. A gate whose OWN text never
+      mentions `pg_cron`, but whose `RED-UNDER-SETUP` apply list contains a migration that hard-RAISEs
+      without the extension, is equally un-baselineable on the lane — and is classified `pending`.
+      **Measured instance:** `test_compute_jobs_error_kind_copy_parity.sql`. Its arms need
+      `compute_jobs_error_kind_check` to admit `'orphaned'`; the only migration that widens it,
+      `20260826140000_compute_jobs_error_kind_orphaned.sql:206-208`, RAISEs `0A000` when `pg_cron` is
+      absent. So the file can reach no GREEN baseline on today's lane under any apply list, yet the
+      run's `lane-blocked:` line — the print whose entire purpose is to NAME every exclusion — does
+      not name it. It sits in `pending: 12` instead, i.e. in the class of files a future batch is
+      supposed to be able to close.
+      **This is a runner defect, booked separately from `[REDUNDER-PGCRON]` (a substrate one).** Fix =
+      widen the classifier to consider a gate's `RED-UNDER-SETUP` apply list, shipped with the red/green
+      self-test fixture pair the house pattern requires (`lint-sql-gates.mjs:37-40`).
+      ⚠️ **Superseded in practice, but not repaired, if the pg_cron-on-lane plan lands** — hosting
+      `pg_cron` empties the `lane-blocked` class and this file becomes baselineable, so the miscount
+      stops mattering. The classifier is still wrong, and the next apply-list-only block would hit it
+      again. A tripwire is pinned meanwhile at
+      `src/__tests__/mutation-annotation-parser.test.ts` ("scanCorpus names the 4 lane-blocked files
+      EXACTLY"), which asserts this file IS in `pendingFiles` and therefore flips the day either half
+      is resolved.
 
 - [ ] **`[REDUNDER-NONIDIOM]` The 27 non-idiom SQL gate files are excluded from Phase 164.4 and need their own phase (logged 2026-09-02, founder scope decision).**
       Phase 164.4's criterion 1 was NARROWED to the 44 `TEST FAILED (` idiom files. The other **27

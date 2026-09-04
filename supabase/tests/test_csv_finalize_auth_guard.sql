@@ -76,6 +76,23 @@
 --
 -- Usage:
 --   psql "$TEST_SUPABASE_DB_URL" -v ON_ERROR_STOP=1 -f supabase/tests/test_csv_finalize_auth_guard.sql
+--
+-- ⭐ RED-UNDER ANNOTATIONS (Phase 164.4). Each assertion below carries a prose
+-- `RED-UNDER:` naming the smallest production change that makes it fail, and a
+-- machine-readable `RED-UNDER-M:` twin the mutation runner applies on a
+-- throwaway pg-lane cluster to PROVE it reds on its OWN arm, then restores
+-- GREEN. Schema: scripts/mutation-runner/GRAMMAR.md. The line below declares
+-- what the lane applies before this gate.
+--
+-- ⚠️ 20260819151000 IS WHERE THE TWINS CUT, NOT 20260819120000. Three
+-- migrations in this list define finalize_csv_strategy_with_returns in
+-- succession (…120000 creates it, …130000 and …151000 each CREATE OR REPLACE
+-- it), so the guard text the DATABASE runs is the one in the LAST of them. A
+-- twin pointed at the fold migration would mutate bytes the running function
+-- never sees and be reported as "mutation applied, arm did not redden" — a
+-- false defect. Same list as test_csv_finalize_double_submit.sql, which is
+-- deliberate: the two gates share a writer.
+-- RED-UNDER-SETUP: {"apply":["scripts/pg-lane/fixtures/01-fixture-core.sql","scripts/pg-lane/fixtures/02-fixture-sanitize-tables.sql","scripts/pg-lane/fixtures/03-fixture-compute-jobs.sql","scripts/pg-lane/fixtures/07-fixture-supabase-default-privileges.sql","scripts/pg-lane/fixtures/12-fixture-profiles-is-admin.sql","scripts/pg-lane/fixtures/13-fixture-csv-finalize-fold.sql","scripts/pg-lane/fixtures/15-fixture-auth-role.sql","scripts/pg-lane/fixtures/17-fixture-wizard-draft-writer.sql","supabase/migrations/20260522111839_csv_daily_returns.sql","supabase/migrations/20260624120000_csv_daily_returns_per_key_axis.sql","supabase/migrations/20260728120000_csv_finalize_double_submit_idempotency.sql","supabase/migrations/20260814120000_wizard_rpcs_revoke_authenticated.sql","supabase/migrations/20260819120000_csv_finalize_atomic_fold.sql","supabase/migrations/20260819130000_csv_finalize_fold_input_guards.sql","supabase/migrations/20260819151000_csv_finalize_fold_guard1_null_safe.sql"]}
 
 -- ==========================================================================
 -- Part A — no auth session: the 42501 no-session guard fires, exact message
@@ -92,6 +109,18 @@ DECLARE
   err_state     TEXT;
   err_msg       TEXT;
 BEGIN
+  -- RED-UNDER: delete GUARD 2's FIRST half — the `IF v_auth_uid IS NULL` arm —
+  --            from finalize_csv_strategy_with_returns in migration
+  --            20260819151000, on the reasonable-sounding ground that the
+  --            IS-DISTINCT-FROM arm immediately below already refuses a NULL
+  --            session. It does refuse it, and that is exactly the trap: the
+  --            call still raises 42501, so this Part's `raised` and SQLSTATE
+  --            checks BOTH still pass. What changes is the sentence the caller
+  --            reads — "p_user_id (…) does not match auth.uid (<NULL>)" instead
+  --            of "called without an auth session" — and the ONLY thing that
+  --            notices is the exact-message assertion this Part ends on, the
+  --            one whose own text says "do not loosen this assertion".
+  -- RED-UNDER-M: {"arm":"Part A","apply":[{"kind":"edit","file":"supabase/migrations/20260819151000_csv_finalize_fold_guard1_null_safe.sql","find":"  IF v_auth_uid IS NULL THEN\n    RAISE EXCEPTION 'finalize_csv_strategy_with_returns called without an auth session'\n      USING ERRCODE = '42501';\n  END IF;\n","replace":"","occurrences":1}]}
   -- Clear any session context: auth.uid() must resolve NULL for this call.
   PERFORM set_config('request.jwt.claims', NULL, true);
 
@@ -139,6 +168,28 @@ DECLARE
   err_state     TEXT;
   err_msg       TEXT;
 BEGIN
+  -- RED-UNDER: delete GUARD 2's SECOND half — the `IF v_auth_uid IS DISTINCT
+  --            FROM p_user_id` arm — from finalize_csv_strategy_with_returns in
+  --            migration 20260819151000. That is the deletion the header calls
+  --            the whole point of this file: a SECURITY DEFINER writer that no
+  --            longer checks the caller acts for itself, so an authenticated
+  --            session can write strategies rows AND their dailies under
+  --            another user's id. Nothing else in the function refuses it —
+  --            GUARDS 3-10 read only p_rows / p_fmt / p_strategy_name — so the
+  --            call reaches the writes and this Part is the first failure,
+  --            either on its did-not-raise check or on its 42501 check when the
+  --            schema refuses the foreign user later for a reason that is not
+  --            authorization at all.
+  --            ⚠️ LAYERED, and MEASURED to be necessary. 20260819151000's own
+  --            STEP verification greps the comment-stripped deployed body for
+  --            `v_auth_uid IS DISTINCT FROM` and RAISEs if it is gone, so the
+  --            single-step version of this mutation ABORTS THE APPLY: the gate
+  --            never runs, the lane emits no `TEST FAILED (…)` at all, and the
+  --            runner correctly reported `NO-IDENTITY` / `wrong-first-failure`
+  --            rather than a pass. The second edit removes that self-check in
+  --            the same mutation — the migration's own verification term,
+  --            exactly the layering GRAMMAR Shape 3 exists for.
+  -- RED-UNDER-M: {"arm":"Part B","apply":[{"kind":"edit","file":"supabase/migrations/20260819151000_csv_finalize_fold_guard1_null_safe.sql","find":"  IF v_auth_uid IS DISTINCT FROM p_user_id THEN\n    RAISE EXCEPTION 'finalize_csv_strategy_with_returns: p_user_id (%) does not match auth.uid (%)',\n      p_user_id, v_auth_uid\n      USING ERRCODE = '42501';\n  END IF;\n","replace":"","occurrences":1},{"kind":"edit","file":"supabase/migrations/20260819151000_csv_finalize_fold_guard1_null_safe.sql","find":"  IF v_code !~ 'v_auth_uid[[:space:]]+IS[[:space:]]+DISTINCT[[:space:]]+FROM' THEN\n","replace":"  IF FALSE THEN\n","occurrences":1}]}
   -- Seed the JWT identity so the fixture mirrors a real session (the guard
   -- itself never reads auth.users; the row rolls back with this transaction).
   INSERT INTO auth.users (id, instance_id, email, created_at, updated_at)
@@ -189,6 +240,17 @@ DECLARE
   v_cnt   INT;
   v_names TEXT;
 BEGIN
+  -- RED-UNDER: bring a parent back — `CREATE FUNCTION
+  --            public.persist_csv_daily_returns(uuid, jsonb) …` on the live
+  --            database. This is literally the scenario the failure message
+  --            names ("if a migration recreated one helpfully"): a SECOND
+  --            csv-finalize writer, which re-opens the two-transaction orphan
+  --            window the fold dissolved. A `sql` step rather than a migration
+  --            edit, because the thing under test is a DROP — there is no byte
+  --            in 20260819120000 whose absence recreates a function, and this
+  --            arm is a structural receipt, deliberately arity-blind, so the
+  --            stand-in signature is not what it checks.
+  -- RED-UNDER-M: {"arm":"Part C","apply":[{"kind":"sql","stmt":"CREATE FUNCTION public.persist_csv_daily_returns(p_strategy_id uuid, p_rows jsonb) RETURNS integer LANGUAGE sql AS 'SELECT 0'"}]}
   SELECT count(*), string_agg(p.proname || '(' || p.pronargs || ' args)', ', ')
     INTO v_cnt, v_names
     FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace

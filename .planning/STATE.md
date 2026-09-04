@@ -5,16 +5,16 @@ milestone_name: Backlog Burndown (Phases 158+)
 current_phase: 164.4
 current_phase_name: REDUNDER-BACKFILL
 status: executing
-stopped_at: Completed 164.4-08-PLAN.md
-last_updated: "2026-09-04T07:36:23.977Z"
-last_activity: 2026-09-03
+stopped_at: "Completed 164.4-09-PLAN.md (reduced batch: 5 of 6 files; floors 28/239)"
+last_updated: "2026-09-04T12:12:57.817Z"
+last_activity: 2026-09-04
 last_activity_desc: Phase 164.4 execution started
-state_head: 9cfee1d47b93fd1f162994ebd168450dc0b36465
+state_head: 34e500aace5328dddd7194b2011911d618b54b23
 progress:
   total_phases: 15
   completed_phases: 5
   total_plans: 82
-  completed_plans: 75
+  completed_plans: 76
   percent: 33
 ---
 
@@ -151,11 +151,35 @@ zero unclassified) and `161-VALIDATION.md` (Nyquist strategy, 4 Wave-0 gaps, ant
 ## Current Position
 
 Phase: 164.4 (REDUNDER-BACKFILL) — EXECUTING
-Plan: 4 of 12 complete (00 spike, 01 Wave-0 runner/CI, 02 the reference file, 03 the lane-blocked
-      class + lane probe + SCOPE AMENDMENT #2) — hand-maintained; `state.advance-plan` still REFUSES
-      on this section (`ambiguous_position_phase`, see § Known Issues)
-Status: Executing Phase 164.4 — next is 164.4-04
-Last activity: 2026-09-03 — 164.4-02 executed on the branch: the reference file's 15 un-twinned
+Plan: 10 of 12 complete (00 spike, 01 Wave-0 runner/CI, 02 the reference file, 03 the lane-blocked
+      class + lane probe + SCOPE AMENDMENT #2, 04-09 the six annotation batches) — hand-maintained;
+      `state.advance-plan` still REFUSES on this section (`ambiguous_position_phase`, see § Known
+      Issues)
+Status: Executing Phase 164.4 — next is 164.4-10
+Last activity: 2026-09-04 — 164.4-09 executed on the branch as a REDUCED batch (5 of 6 planned
+      files; 20 sections). Both blockers the previous session escalated are DECIDED and discharged.
+      Blocker 2 (`test_resync_retry_single_job.sql` assertion (b), a measured waiver candidate) was
+      resolved by the ROOT-CAUSE FIX, following the founder's own wave-9 `[REDUNDER-WAIVER-01]`
+      precedent: its INSERT is wrapped in the `BEGIN … EXCEPTION WHEN unique_violation` idiom the
+      SAME FILE already used at assertion (c), so a narrowed SV index now reports `TEST FAILED (b)`
+      (single-frame CONTEXT, LOCATION last) instead of a raw 23505 naming no arm. **`WAIVED_CEILING`
+      stays 0** — the second arm this phase has rescued structurally rather than by exception.
+      Blocker 1 (`test_compute_jobs_error_kind_copy_parity.sql`, un-baselineable without pg_cron) is
+      DEFERRED by founder decision to a dedicated plan that puts pg_cron ON the pg-lane, retiring
+      `[REDUNDER-PGCRON]` and unblocking that file plus the four already-deferred ones (~100
+      sections); nothing in `scripts/pg-lane/` or the classifier was touched here.
+      Full corpus run **exit 0**: `coverage: files 28/71`, `arms: 239/239/0`, `biting: 239`,
+      `lane-invocations: 239` (tallies agree), `mean 1.0s over 239 arm run(s)`, 0 defects, 297 s
+      local; the 28 per-file `biting` counts SUM to 239. `FILES_FLOOR` 23 → **28** and `ARMS_FLOOR`
+      219 → **239**, both ratcheted to the run's OWN printed values (NOT the plan's projected
+      29 / 242, which assumed six files) with both separation directions driven on real lanes
+      — (28, 239) silent, (29, 240) fires both regressions. Every lockstep pin moved in the same
+      commit. `.github/workflows/ci.yml` untouched. Two findings booked to TODOS.md:
+      `[REDUNDER-LANEBLOCKED-BLIND]` (the classifier is apply-list-blind, so a pg_cron-blocked gate
+      is miscounted into `pending:`; a tripwire test pins it) and `[REDUNDER-SAVEPOINT]` extended to
+      a class of exactly THREE migrations. ⏳ `164.4-09`'s `<human-check>` is OPEN: not yet landed,
+      so `sql-mutation` has not been observed on ubuntu at a PR head SHA.
+Prior activity: 2026-09-03 — 164.4-02 executed on the branch: the reference file's 15 un-twinned
       SECTIONS closed (45 twins over 35/35 sections, `arms: 45/45/0`, `biting: 45`, tallies agree),
       `ARMS_FLOOR` ratcheted 30 → 45 with both separation directions measured, and the durable
       SET-INCLUSION section pin armed and watched to fail. ✅ 164.4-02's `<human-check>` is CLOSED:
@@ -720,6 +744,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 | Phase 164.4 P06 | 58 min | 3 tasks | 15 files |
 | Phase 164.4 P07 | 63 min | 3 tasks | 15 files |
 | Phase 164.4 P08 | ~75m | 3 tasks | 8 files |
+| Phase 164.4 P09 | resumed session | 3 tasks | 9 files |
 
 ## Accumulated Context
 
@@ -936,6 +961,9 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - [Phase 164.4]: ci.yml timeout-minutes stays 15. Four-point ubuntu fit (45/119s, 86/171s, 134/232s, 163/278s) = 1.35s per arm of JOB cost plus ~58s fixed, so 189 arms projects to ~5.2 min and the phase end state to ~6.9 min.
 - [Phase 164.4]: 164.4-08: [REDUNDER-WAIVER-01] resolved by founder decision with the ROOT-CAUSE FIX (reorder the anon-EXECUTE precondition ahead of its dependents), not a waiver — WAIVED_CEILING stays 0 and the arm is first-failure mutable
 - [Phase 164.4]: 164.4-08: sql-mutation timeout-minutes STAYS 15 — largest MEASURED ubuntu run is 458 s (7.6 min) and the worst-case phase-end projection is 9.8 min, both under the 10-min raise rule; the falsified arm-count linear fit was replaced by a per-lane model citing 1.0s and 1.7s, dated
+- [Phase 164.4]: 164.4-09: assertion (b)'s un-twinnable arm resolved by the ROOT-CAUSE FIX (wrap its INSERT in the file's own unique_violation handler), not a waiver — WAIVED_CEILING stays 0
+- [Phase 164.4]: 164.4-09: pg_cron goes ON the pg-lane as its own plan, retiring [REDUNDER-PGCRON] — test_compute_jobs_error_kind_copy_parity.sql stays pending rather than being worked around
+- [Phase 164.4]: 164.4-09: floors ratcheted to the RUN's printed 28/239, not the plan's projected 29/242 — a five-file batch may not inherit a six-file number
 
 ### Decisions (execution-time, Phase 140.2)
 
@@ -1638,8 +1666,8 @@ Load-bearing sequencing (real dependencies, do not reorder):
 
 ## Session
 
-**Last Date:** 2026-09-04T07:36:12.321Z
-**Stopped At:** Completed 164.4-08-PLAN.md
+**Last Date:** 2026-09-04T12:12:45.339Z
+**Stopped At:** Completed 164.4-09-PLAN.md (reduced batch: 5 of 6 files; floors 28/239)
 **Last Date:** 2026-08-25T22:26:01.687Z
 **Stopped At:** Completed 162-03-PLAN.md
 **Last Date:** 2026-08-25T22:28:04.096Z
@@ -1707,6 +1735,12 @@ pre-merge `e0493913`. Fix is PR #669. Supabase migrations and the Vercel fronten
 - 164.4-06 human-check CLOSED 2026-09-03: landed as PR #736 (head ba6fe1e2, squash-merged 6d6368ef, v0.77.7.0). CI run 33794810067 reports sql-mutation success in 278 s; the ubuntu job's own log carries `arms: 163/163/0`, `biting: 163`, `lane-invocations: 163`, `tallies agree`, `coverage: files 13/71`, `No defects` — identical to macOS for the fourth batch running. Recorded in coverage D10 of 164.4-06-SUMMARY.md. Plan 164.4-07 is UNBLOCKED.
 - ⏱️ FOUR ubuntu timing points: 45 arms/119 s, 86/171 s, 134/232 s, 163/278 s. Refit **1.35 s per arm of JOB cost + ~58 s fixed** (the runner's own `per-arm lane time: mean 1.0s` measures the LANE only). ~265-arm end state projects to ~416 s ≈ 6.9 min, inside `timeout-minutes: 15`. The 3-point fit predicted 269 s for this run and measured 278 — 3% over, so the model is slightly optimistic; plan 164.4-08 re-justifies the timeout against its own run.
 - 164.4-07 human-check CLOSED 2026-09-03: landed as PR #737 (head 4a9f33da, squash-merged 214184d7, v0.77.8.0). CI run 33804312706, sql-mutation success, 23/23 checks. Corpus identical to macOS (`arms: 189/189/0`, `biting: 189`, `lane-invocations: 189`, `coverage: files 17/71`, `No defects`). Recorded in coverage D10 of 164.4-07-SUMMARY.md. Plan 164.4-08 is UNBLOCKED.
+- ✅ 164.4-08 human-check CLOSED 2026-09-04: landed as PR #738 (head 33e5a8c6, squash-merged f82d9c1b, v0.77.9.0). `sql-mutation` SUCCESS on ubuntu, run 33854344121: `coverage: files 23/71`, `arms: 219/219/0`, `biting: 219`, `lane-invocations: 219`, tallies agree, `No defects`. FILES_FLOOR 23, ARMS_FLOOR 219, WAIVED_CEILING still 0 — the phase has taken ZERO waivers. Plan 164.4-09 is UNBLOCKED.
+- ⭐⏱️ **THE WAVE-8 TIMING SCARE IS RESOLVED: IT WAS HOST VARIANCE.** Wave 9 measured **333 s for 219 arms at `mean 1.0s`/lane** against wave 8's **458 s for 189 arms at 1.7s**. LARGER AND FASTER — a real per-lane cost cannot be unpaid by a bigger corpus, so run 33804312706 is an outlier. The linear model holds at ~1.0 s/lane + ~130 s fixed, putting the ~265-arm phase end near **6.6 min** against `timeout-minutes: 15`. ci.yml now records both observations and says which reading a future 1.7 s would falsify.
+- ⚖️ FOUNDER CALL 2026-09-04 on `[REDUNDER-WAIVER-01]`: **reorder, do not waive.** `test_get_published_trust_signals.sql` assertion 5 proves the anon EXECUTE grant that assertions 1-3 need in order to call the function at all, so it is a PRECONDITION that belonged ahead of them; `REVOKE EXECUTE` used to abort at assertion 1 with a raw 42501 naming no arm. Now it fails as `TEST FAILED (5)`, first and only error, zero 42501 in the log. Byte-identical relocation (6 non-comment lines out, the same 6 in) and the phase's ONE authorised executable-SQL edit to a gate file.
+- ⚖️ FOUNDER CALL 2026-09-04 on the Phase 29 frozen-spine collision: **tighten the pin, do not retire it.** `test_scenarios_rls.sql` was pinned by FILENAME-absence from the phase delta, which a comment trips. It now compares the file's NON-COMMENT lines against the baseline and requires them byte-identical — stricter than the Phase 59 precedent (which retired the sibling pin in favour of a guard-regex presence check) and stricter than the filename proxy it replaces. Proven falsifiable: executable line changed -> RED naming the file; whole-line comment appended -> GREEN; restored -> 7/7.
+- ⚠️ CI IS ADVISORY-RED ON MAIN AND IT IS NOT THIS PHASE'S DOING — `[CI-GDPR-TIMEOUT-01]`. `gdpr-export-coverage-hook.test.ts` B10 #8 times out at 30 s on slow runners; PROVEN pre-existing by control PR #739 (empty commit, main's tree unchanged) failing identically, run 33856182272. Runner spread measured at 2x (714 s vs 356 s for the same shard). ⛔ FIX IT BEFORE WAVE 10 so the remaining waves land on a clean board and no real failure hides in the noise.
+- ⚠️ TOOLING TRAP measured 2026-09-04: `gh run view --log` TRUNCATES — it cut the two minutes holding the `Failed Tests` block, so a clean assertion failure read as a HANG with no summary for three investigations. Use `gh api repos/<owner>/<repo>/actions/jobs/<id>/logs`.
 - ⛔⏱️ THE TIMING MODEL BROKE ON WAVE 8 AND THE TIMEOUT MARGIN IS NO LONGER COMFORTABLE. Run 33804312706 took **458 s** against a 313 s projection (46% over). The cause is in the job's OWN log: `per-arm lane time: mean 1.7s over 189 arm run(s)`. Every earlier ubuntu run reported **1.0s**, and the orchestrator's LOCAL run of the identical corpus also measured 1.0s — so this is NOT arm count and NOT the batch's content; the ubuntu lanes ran ~70% slower. One observation cannot separate CI-host variance from a real per-lane cost this batch's longer apply lists impose only on the ubuntu build. ⚠️ At the WORST observed 1.7 s/arm the ~265-arm end state projects to roughly **11 minutes** against `timeout-minutes: 15`. The earlier 6.9-min projection assumed 1.0 s and is now superseded. **Plan 164.4-08 must re-justify the timeout against the WORST observed per-lane cost, not the mean, and should treat raising it as the likely correct answer** — the trigger its own ci.yml comment names is 'a measured run approaching ~10 minutes'.
 - ⛔ ORCHESTRATOR TRAP, measured wave 6: editing ANY tracked file while `run.mjs` is in flight fails the run with a `dirty-checkout` defect (a version bump did it), and `RUNNER_EXIT=1` then reads exactly like a broken batch. Read the defect KIND before concluding — `dirty-checkout` with no arm and no file named is the orchestrator's own hand, not the corpus. Serialise: clean tree -> run -> then bump.
 

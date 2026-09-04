@@ -65,20 +65,28 @@ when their credential is absent — neither ever skips.
 Plan 07's `189/189/0` at `files 17/71` also stays as lineage — and so does its
 ubuntu wall clock, run 33804312706 at PR #737 head `4a9f33da`, **458 s**, which
 is the one run that reported `per-arm lane time: mean 1.7s` where every other
-ubuntu run and every local run measured 1.0 s. Phase 164.4 plan 08 then
-annotated six NEW gate files — the csv double-submit fold, the published
-trust-signal SECDEF, the verified-cohort rank gate, the F-4 memberKeyIds
-downgrade sweep, the scenarios owner-RLS stack and the strategy_analytics
-series-completeness carrier — 5 sections each, 30 in total, so the measured
-corpus is now `coverage: files 23/71`, `arms: 219/219/0`, `biting: 219`,
-`lane-invocations: 219`, tallies agree, `FILES_FLOOR` is pinned at 23 and
-`ARMS_FLOOR` at 219, with `pending: 17` idiom files still to go.
-`WAIVED_CEILING` is still 0: plan 08's one waiver candidate — that trust-signal
-gate's anon-EXECUTE assertion — was resolved by founder decision with a
-REORDER, putting the precondition ahead of the assertions that depend on it,
-rather than by booking an exception (TODOS `[REDUNDER-WAIVER-01]`). Read the
-run's own `coverage:` and `arms:` lines rather than any number restated in
-prose.
+ubuntu run and every local run measured 1.0 s. Plan 08's `219/219/0` at
+`files 23/71` stays as lineage too. ⚠️ CURRENCY 2026-09-04: Phase 164.4 plan 09
+then annotated five NEW gate files — the wizard-session tenant-scope index, the
+wizard composite fence, the weight-snapshot seed SECDEF trigger, the
+csv-finalize auth guard and the resync-retry single-job substrate —
+5 + 5 + 4 + 3 + 3 = 20 sections, so the measured corpus is now
+`coverage: files 28/71`, `arms: 239/239/0`, `biting: 239`,
+`lane-invocations: 239`, tallies agree, `FILES_FLOOR` is pinned at 28 and
+`ARMS_FLOOR` at 239, with `pending: 12` idiom files still to go. That batch was
+REDUCED from the six files it planned: `test_compute_jobs_error_kind_copy_parity
+.sql` is un-baselineable until the pg-lane can host pg_cron, and the founder
+chose to retire `[REDUNDER-PGCRON]` by putting pg_cron ON the lane as its own
+plan rather than work around it — so that file stays in `pending:` alongside the
+four already-deferred ones.
+`WAIVED_CEILING` is still 0, now through TWO founder decisions that both took
+the root-cause fix over an exception: plan 08's trust-signal anon-EXECUTE
+assertion was resolved by a REORDER putting the precondition ahead of its
+dependants (TODOS `[REDUNDER-WAIVER-01]`), and plan 09's resync-retry assertion
+(b) by wrapping its INSERT in the exception idiom the SAME FILE already used, so
+that a narrowed unique index reports `TEST FAILED (b)` instead of a raw 23505
+naming no arm. Read the run's own `coverage:` and `arms:` lines rather than any
+number restated in prose.
 VAC-04 and VAC-08 have still not run against their real credential; see entries
 25 and 26.
 
