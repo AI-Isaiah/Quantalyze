@@ -2,13 +2,13 @@
 gsd_state_version: 1.0
 milestone: v1.20
 milestone_name: Backlog Burndown (Phases 158+)
-current_phase: 164.4
-current_phase_name: REDUNDER-BACKFILL
-status: complete
-stopped_at: Phase 164.4 CLOSED — all 12 plans executed and landed. Final wave PR #743 merged to main as 3ed6919e (v0.77.12.0), 24/24 SHA-bound green. End state: FILES_FLOOR 39, ARMS_FLOOR 262, 0 waivers, pending: 1 (test_compute_jobs_error_kind_copy_parity.sql, owed to 164.4.1 PGCRON-LANE).
+current_phase: 164.4.1
+current_phase_name: PGCRON-LANE
+status: planned
+stopped_at: Phase 164.4.1 PLANNED — 6 sequential plans at 03462da8, plan-checker gate passed after one revision (2 blockers + 7 warnings all fixed). Awaiting founder go-ahead before /gsd-execute-phase 164.4.1. Phase 164.4 CLOSED and landed (PR #743 -> 3ed6919e, v0.77.12.0).
 last_updated: "2026-09-04T17:38:02.554Z"
 last_activity: 2026-09-04
-last_activity_desc: Phase 164.4 execution started
+last_activity_desc: Phase 164.4.1 planning complete, execution paused by founder
 state_head: aad356e9a5bcbb3560ca68328250c6701bb6c5d9
 progress:
   total_phases: 16
