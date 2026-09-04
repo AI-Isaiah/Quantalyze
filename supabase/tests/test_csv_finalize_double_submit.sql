@@ -98,6 +98,22 @@
 -- Usage:
 --   psql "$TEST_SUPABASE_DB_URL" -v ON_ERROR_STOP=1 -f \
 --     supabase/tests/test_csv_finalize_double_submit.sql
+--
+-- ⭐ RED-UNDER ANNOTATIONS (Phase 164.4). Each assertion below carries a prose
+-- `RED-UNDER:` naming the smallest production change that makes it fail, and a
+-- machine-readable `RED-UNDER-M:` twin the mutation runner applies on a
+-- throwaway pg-lane cluster to PROVE it reds on its own arm, then restores
+-- GREEN. Schema: scripts/mutation-runner/GRAMMAR.md. The line below declares
+-- what the lane applies before this gate.
+-- ⚠️ THE OBJECTS UNDER TEST ARE REAL. The fold is the same three-migration
+-- chain test_csv_finalize_atomic_fold.sql pins (20260819120000 -> 130000 ->
+-- 151000, the LAST of which every fold twin mutates); the fence index and the
+-- 5-arg parent's re-base come from 20260728120000; and Part 4's API-path writer
+-- is the REAL `create_wizard_strategy` from 20260814120000, the migration whose
+-- Phase 156 narrowing is why Part 4's claim is service_role-shaped.
+-- 17-fixture-wizard-draft-writer.sql supplies only the api_keys secret-material
+-- columns that writer's INSERT names — no arm in this file reads any of them.
+-- RED-UNDER-SETUP: {"apply":["scripts/pg-lane/fixtures/01-fixture-core.sql","scripts/pg-lane/fixtures/02-fixture-sanitize-tables.sql","scripts/pg-lane/fixtures/03-fixture-compute-jobs.sql","scripts/pg-lane/fixtures/07-fixture-supabase-default-privileges.sql","scripts/pg-lane/fixtures/12-fixture-profiles-is-admin.sql","scripts/pg-lane/fixtures/13-fixture-csv-finalize-fold.sql","scripts/pg-lane/fixtures/15-fixture-auth-role.sql","scripts/pg-lane/fixtures/17-fixture-wizard-draft-writer.sql","supabase/migrations/20260522111839_csv_daily_returns.sql","supabase/migrations/20260624120000_csv_daily_returns_per_key_axis.sql","supabase/migrations/20260728120000_csv_finalize_double_submit_idempotency.sql","supabase/migrations/20260814120000_wizard_rpcs_revoke_authenticated.sql","supabase/migrations/20260819120000_csv_finalize_atomic_fold.sql","supabase/migrations/20260819130000_csv_finalize_fold_input_guards.sql","supabase/migrations/20260819151000_csv_finalize_fold_guard1_null_safe.sql"]}
 
 BEGIN;
 
@@ -167,6 +183,15 @@ BEGIN
   -- `WHERE wizard_session_id IS NOT NULL`, so a NULL here silently removes the
   -- row from the index and the double-submit below would succeed. This is
   -- finding C-2 stated as an assertion.
+  -- RED-UNDER: stop the fold writing the session id — replace
+  --            `p_wizard_session_id` with NULL in the strategies INSERT's
+  --            VALUES in 20260819151000 (the LAST definition of the fold).
+  --            Every CSV row then sits OUTSIDE the partial index and the
+  --            double-submit fence is silently gone — finding C-2 itself.
+  --            LAYERED: that migration's own post-verify (c) refuses the
+  --            apply first, so the twin's second step removes THAT term
+  --            and nothing else — the gate, not the migration, must red.
+  -- RED-UNDER-M: {"arm":"Part 1c","apply":[{"kind":"edit","file":"supabase/migrations/20260819151000_csv_finalize_fold_guard1_null_safe.sql","find":"    '{}', '{}', '{}', '{}'::text[],\n    p_wizard_session_id\n  )","replace":"    '{}', '{}', '{}', '{}'::text[],\n    NULL\n  )","occurrences":1},{"kind":"edit","file":"supabase/migrations/20260819151000_csv_finalize_fold_guard1_null_safe.sql","find":"  IF v_ins_frag !~ '\\mp_wizard_session_id\\M' THEN","replace":"  IF FALSE THEN","occurrences":1}]}
   IF v_wsid IS DISTINCT FROM session_a THEN
     RAISE EXCEPTION 'TEST FAILED (Part 1c): the finalized strategy carries wizard_session_id=% , expected % - the fold is not writing the column, so every CSV row sits OUTSIDE the partial unique index (review finding C-2)', v_wsid, session_a;
   END IF;
