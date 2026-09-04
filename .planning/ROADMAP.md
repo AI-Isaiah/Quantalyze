@@ -717,6 +717,71 @@ Plans:
 - [ ] 164.4-10-PLAN.md — Batch 7: the last four non-mixed files (8); FILES_FLOOR → 33, ARMS_FLOOR → ≈250; `pending:` names exactly the 7 mixed files
 - [ ] 164.4-11-PLAN.md — Batch 8: the seven ⚠️ mixed files (15), waivers only via founder checkpoint; end state FILES_FLOOR 40, ARMS_FLOOR ≈ 265, 27 non-idiom + 4 lane-blocked files printed, final prose sweep
 
+### Phase 164.4.1: PGCRON-LANE — put pg_cron on the throwaway pg-lane and retire the REDUNDER-PGCRON deferral (INSERTED)
+
+**Goal:** The pg-lane can host pg_cron, so the `[REDUNDER-PGCRON]` deferral is RETIRED
+rather than grown — five gate files and ~100 sections become provable, and the runner's
+`lane-blocked:` class goes to 0.
+
+**Requirements**: TBD (run /gsd-plan-phase 164.4.1)
+**Depends on:** Phase 164.4 (must COMPLETE first — 164.4's floors ratchet sequentially
+across its remaining waves, and pg_cron changes lane startup cost for EVERY arm)
+**Mode:** RESEARCH-FIRST
+**Plans:** 0 plans
+
+### Why this is a phase and not a plan inside 164.4
+
+Phase 164.4 **SCOPE AMENDMENT #2** (founder) deferred 4 idiom gate files / 100 sections
+because `scripts/pg-lane/run.sh` spins throwaway PostgreSQL clusters that cannot host
+pg_cron: `test_derive_allocator_keys_fanout.sql`, `test_reconcile_dropped_enqueue_sweep.sql`,
+`test_retention_orphaned_running.sql`, `test_strategy_analytics_stuck_computing_reaper.sql`.
+
+Wave 10 then hit a **FIFTH** file blocked by the same substrate for a different reason.
+`test_compute_jobs_error_kind_copy_parity.sql` can only be baselined with migration
+`20260826140000` — the sole migration widening `compute_jobs_error_kind_check` to admit
+`'orphaned'` — and that migration **hard-RAISEs `0A000` at lines 206-208** when
+`pg_extension` has no pg_cron. Founder decision 2026-09-04: retire the deferral, do not
+grow it.
+
+Retiring a recorded founder scope amendment is a phase-level act, not a plan-level one;
+adding it to 164.4 would silently reverse an amendment that is true as written. It also
+needs its own research (below) and perturbs a timing model that was only just stabilised.
+
+### Success criteria
+
+1. The pg-lane loads pg_cron on **BOTH** macOS (authoring box, PostgreSQL 16.13) and
+   ubuntu CI. If the two disagree, the CI job and the authoring box measure different
+   corpora — which is the failure this whole phase family exists to prevent.
+2. The 5 unblocked gate files are annotated and machine-proven; `FILES_FLOOR` and
+   `ARMS_FLOOR` ratchet to the MEASURED values.
+3. `lane-blocked:` reaches **0**, and the runner's `lane-blocked-stale` tripwire is
+   EXERCISED, not merely left green. That probe MEASURE_FAILs when pg_cron is AVAILABLE
+   while files remain classified — so making pg_cron available is exactly the condition
+   that must be shown to fire and then be cleared.
+4. `[REDUNDER-LANEBLOCKED-BLIND]` is closed deliberately. `gateNeedsPgCron`
+   (`scripts/mutation-runner/parse.mjs:996`) reads a gate file's executable text and is
+   blind to its `RED-UNDER-SETUP` apply list. The defect stops MATTERING once nothing is
+   lane-blocked, but the classifier is still wrong; its tripwire test must be resolved on
+   purpose rather than allowed to lapse.
+5. The lane stays a throwaway cluster under a scratch `--workdir`. ⛔ It must NEVER point
+   at a Supabase database.
+
+### Research first (do not plan from assumption)
+
+- pg_cron requires `shared_preload_libraries`, which requires a cluster restart, and the
+  extension must match the server major version. Availability differs between the macOS
+  box and `ubuntu-latest`.
+- **Measure per-lane cost before and after.** The timing model was only just stabilised at
+  `mean 1.0s/lane` (ubuntu run 33854344121: 219 arms in 333 s). Every arm pays lane
+  startup, so any preload cost multiplies across ~265+ arms against `timeout-minutes: 15`.
+- If the measured cost is prohibitive, the fallback is a pg_cron **SHIM** providing only
+  the `cron` schema and the catalog rows these five gates actually probe. Decide that from
+  measurement, not assumption.
+
+Plans:
+
+- [ ] TBD (run /gsd-plan-phase 164.4.1 to break down)
+
 ### Phase 164.1: HARDEN-GUARDS — retire the frozen-spine gates that no longer bite, close the composite-stamp twin, put the advisory lock behind a real concurrency test, fix the PYAPI-06 blind spot that let a production service-key mismatch run silently, and close phase 161's deferred error-surface items (WIZFORM-02's code:UNKNOWN class MOVED to 164.2 in the 2026-08-28 dedup), plus the Phase 163 carry-overs — headed by SKIP-01 (nothing applies migrations to TEST, so the OPS-08 SQL gate SKIPs permanently and the deployed body is tested nowhere), then OPS-08's un-written TypeScript retry half, the freshness UTC day-granularity residual, the TEST/PROD function-revision drift, the audit-coverage blind spot, and the tracked-PII decision (INSERTED)
 
 **Goal:** Every guard in this phase's scope either bites or is gone, and every silent production failure in it becomes loud. Two halves. (a) **Gate hygiene** — retire the frozen-spine gates that no longer bite, close the composite-stamp twin, put the advisory lock behind a real concurrency test, and land the Phase 163 carry-overs. (b) **Production observability** — one periodic prober covering the three places where production can be broken while every instrument reads green: PYAPI-06 (service-key mismatch), CRON-OBS-01 (`net._http_response`), MT5-WEDGE-OBS-01 (MT5 round-trip). A probe that SKIPs on an absent credential is the defect, not the fix.
