@@ -781,7 +781,7 @@ needs its own research (below) and perturbs a timing model that was only just st
    while files remain classified — so making pg_cron available is exactly the condition
    that must be shown to fire and then be cleared.
 4. `[REDUNDER-LANEBLOCKED-BLIND]` is closed deliberately. `gateNeedsPgCron`
-   (`scripts/mutation-runner/parse.mjs:996`) reads a gate file's executable text and is
+   (`scripts/mutation-runner/parse.mjs:1043`) reads a gate file's executable text and is
    blind to its `RED-UNDER-SETUP` apply list. The defect stops MATTERING once nothing is
    lane-blocked, but the classifier is still wrong; its tripwire test must be resolved on
    purpose rather than allowed to lapse.
