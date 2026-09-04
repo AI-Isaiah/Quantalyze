@@ -81,7 +81,7 @@ than a prose locator.
 
 ### `--self-test`
 
-Four checks, in order. It exists because a control that cannot fail is worse than
+Six arms, in order. It exists because a control that cannot fail is worse than
 no control:
 
 1. **occupied-port refusal** — stands up a real cluster, then points a second
@@ -93,7 +93,23 @@ no control:
    check that discharges D-04's *"including on failure and on interrupt"*;
 3. **failure-path cleanup** — a deliberately failing gate: non-zero exit **and**
    full cleanup;
-4. **success-path cleanup** — a passing gate: exit 0 **and** full cleanup.
+4. **success-path cleanup** — a passing gate: exit 0 **and** full cleanup;
+5. **the pg_cron preload took effect** (arm 6, Phase 164.4.1) — a lane applying
+   `20260513094906_enable_pg_cron.sql` must read an `extversion` out of
+   `pg_extension`, and `cron.schedule` must write a `cron.job` row whose
+   `command` is the body it was handed. **Paired with its own control**: the
+   SAME gate bytes with one identifier changed to an extension that is not
+   installed must go RED *naming `SELF-TEST 6`* — a non-zero exit carrying a raw
+   driver error is scored a failure, not a pass, because that would prove the
+   lane broke rather than that the assertion bit.
+
+⚠️ The numbering above lists five items for six arms because arm 3 runs **two**
+kill checks (`SIGTERM` and `SIGINT`). The script's own captions are the
+authority; read `SELF-TEST PASSED (N/N)` from a run rather than counting here.
+⚠️ **Nothing in CI runs this self-test** — measured at HEAD, zero `ci.yml` steps
+invoke it, so all six arms are proven on the authoring box only (`TODOS.md`
+`[PGLANE-SELFTEST-NOT-IN-CI]`). The `N/6` denominator is likewise a hand-typed
+literal in nine places that nothing pins (`[PGLANE-SELFTEST-COUNT-UNPINNED]`).
 
 **Anti-vacuity evidence (2026-08-29).** The trap registration was neutered in a
 scratch copy of the script and the copy's self-test was observed **RED**:
@@ -246,7 +262,7 @@ table, before projecting a CI wall clock.
 |---|---|
 | one full lane run (boot + 2 fixtures + 2 migrations + 103-arm gate) | **~2 s** |
 | `--tracer-proof` (two full lane runs + copy/mutate) | ~5 s |
-| `--self-test` (four checks, two of which wait on a signalled run) | ~39 s |
+| `--self-test` (six arms, two of which wait on a signalled run) | ~39 s at five arms (2026-08-29); arm 6 adds two more lanes — read the wall clock of a run, not this cell |
 
 Budgeting note for the corpus run: the cost is one lane per annotated arm, so
 the total is (arms + 2) x the per-lane figure above — a baseline and a restore

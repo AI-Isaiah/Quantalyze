@@ -553,7 +553,10 @@ self_test() {
 
   # ⛔ SP-H01. Arm 2 says "Not a pass" when its prerequisite is missing and then
   # NOTHING ACTS ON IT: the arm was silently dropped from the count and the run
-  # still printed "SELF-TEST PASSED (5/5)" and exited 0. The dropped arm is
+  # still printed a PASSED caption naming the FULL arm count and exited 0. (That
+  # caption is quoted by shape rather than by digits on purpose: the denominator
+  # is a hand-maintained literal — TODOS [PGLANE-SELFTEST-COUNT-UNPINNED] — and a
+  # dated history line that restates it goes stale on the next arm.) The dropped arm is
   # precisely the one proving the collision guard is as WIDE as its message
   # (IN-07) — so a `node`-less machine reported the broad property proven while
   # only the narrow one had been checked. That is the SKIP-01 shape this branch
@@ -563,7 +566,7 @@ self_test() {
   local st_skipped=0
   local st_skips=""
 
-  echo "=== SELF-TEST 1/5: occupied-port refusal (the collision guard bites) ==="
+  echo "=== SELF-TEST 1/6: occupied-port refusal (the collision guard bites) ==="
   # The squatter is a REAL cluster held by a first lane run — the measured
   # scenario (two agents on one fixed port), not a stand-in TCP listener that
   # pg_isready would never recognise.
@@ -604,7 +607,7 @@ self_test() {
   rm -rf "$squat_wd"
   echo "  ok  refused an occupied port with exit 2 (against a real cluster)"
 
-  echo "=== SELF-TEST 2/5: refusal against a NON-postgres listener (IN-07) ==="
+  echo "=== SELF-TEST 2/6: refusal against a NON-postgres listener (IN-07) ==="
   # IN-07: the same refusal against a NON-postgres listener. The old
   # `pg_isready` guard could not see this at all — it exits non-zero for
   # anything that is not a PostgreSQL server accepting connections — while the
@@ -653,11 +656,11 @@ self_test() {
     st_skips="${st_skips}${st_skips:+, }arm 2 (non-postgres listener): node absent"
   fi
 
-  echo "=== SELF-TEST 3/5: kill mid-run leaves NO orphan (D-04: on interrupt) ==="
+  echo "=== SELF-TEST 3/6: kill mid-run leaves NO orphan (D-04: on interrupt) ==="
   kill_check TERM "SIGTERM mid-run"
   kill_check INT  "SIGINT mid-run"
 
-  echo "=== SELF-TEST 4/5: failure-path cleanup ==="
+  echo "=== SELF-TEST 4/6: failure-path cleanup ==="
   wd=$(mktemp -d)
   gate="$wd/failing-gate.sql"
   printf "DO \$\$ BEGIN RAISE EXCEPTION 'TEST FAILED (SELF-TEST): deliberate'; END \$\$;\n" >"$gate"
@@ -672,7 +675,7 @@ self_test() {
   rm -rf "$wd"
   echo "  ok  failing gate exited $rc and cleaned up"
 
-  echo "=== SELF-TEST 5/5: success-path cleanup ==="
+  echo "=== SELF-TEST 5/6: success-path cleanup ==="
   wd=$(mktemp -d)
   gate="$wd/passing-gate.sql"
   printf 'SELECT 1;\n' >"$gate"
@@ -687,16 +690,81 @@ self_test() {
   rm -rf "$wd"
   echo "  ok  passing gate exited 0 and cleaned up"
 
-  # ⛔ SP-H01: "5/5" must be a COUNT, not a caption. An arm that did not run is
+  echo "=== SELF-TEST 6/6: the preload took effect — CREATE EXTENSION pg_cron succeeds, cron.schedule writes a cron.job row, and the SAME gate is RED when it asks for an extension that is not there ==="
+  # ⛔ TWO HALVES, and the second is what makes the first mean anything. A gate
+  # that only asserts pg_cron IS present passes on every lane where it is — it
+  # cannot tell "the preload took effect" apart from "this gate cannot fail".
+  # The control below is the SAME gate bytes with ONE identifier changed, so its
+  # RED is a RED from this arm's own machinery, not from a different program.
+  #
+  # ⚠️ The control asserts the FAILURE TEXT, not merely a non-zero exit. A lane
+  # that died of anything else — a port collision, a broken apply — also exits
+  # non-zero, and accepting that would let this arm report the assertion bit
+  # when the lane merely broke.
+  local cron_mig gate2 port2 rc2 ver
+  cron_mig="$REPO/supabase/migrations/20260513094906_enable_pg_cron.sql"
+  # A missing migration is a FIXTURE failure, and this arm must not report a
+  # guard failure for it (the R2-I04 lesson from arm 2 above).
+  [ -f "$cron_mig" ] || st_fail "the pg_cron enabling migration is not at $cron_mig, so no lane could CREATE the extension. That is a FIXTURE failure: this arm has proven NOTHING about the preload and must not report that it has."
+  wd=$(mktemp -d)
+  gate="$wd/pgcron-gate.sql"
+  # A heredoc rather than the one-line printf arms 4 and 5 use: this gate is multi-line,
+  # DO block, and the quoted delimiter keeps every $ and % verbatim.
+  cat >"$gate" <<'SQL'
+DO $$
+DECLARE v_id bigint; v_cmd text; v_ver text;
+BEGIN
+  SELECT extversion INTO v_ver FROM pg_extension WHERE extname = 'pg_cron';
+  IF v_ver IS NULL THEN
+    RAISE EXCEPTION 'TEST FAILED (SELF-TEST 6): pg_extension has no pg_cron row after the apply list ran 20260513094906_enable_pg_cron.sql. Either the postmaster did not preload pg_cron, or CREATE EXTENSION could not find its control file.';
+  END IF;
+  SELECT cron.schedule('selftest-6', '35 * * * *', 'SELECT 1') INTO v_id;
+  SELECT command INTO v_cmd FROM cron.job WHERE jobname = 'selftest-6';
+  IF v_cmd IS DISTINCT FROM 'SELECT 1' THEN
+    RAISE EXCEPTION 'TEST FAILED (SELF-TEST 6): cron.job holds command % for jobname selftest-6, expected SELECT 1. Three gate files read cron.job.command as an ORACLE, so a cron.schedule that does not persist the body verbatim would make those arms assert against a value nothing wrote.', COALESCE(v_cmd, '<no row at all>');
+  END IF;
+  RAISE NOTICE 'SELF-TEST 6 OK: pg_cron % loaded, cron.job row written (jobid %)', v_ver, v_id;
+END $$;
+SQL
+  port=$(alloc_port)
+  set +e
+  PORT="$port" bash "$0" --workdir "$wd" \
+    --apply "$FIXTURES/01-fixture-core.sql" "$cron_mig" --gate "$gate" >"$wd/out" 2>&1
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || { cat "$wd/out" >&2; st_fail "the pg_cron gate exited $rc — the preload did not take effect, or CREATE EXTENSION / cron.schedule failed"; }
+  grep -a -q 'SELF-TEST 6 OK' "$wd/out" || { cat "$wd/out" >&2; st_fail "the pg_cron gate exited 0 but printed no 'SELF-TEST 6 OK' line — an exit status without the marker is not a measurement"; }
+  no_orphan "$port" "$wd/pgd" "pg_cron preload"
+  ver=$(sed -n 's/.*SELF-TEST 6 OK: pg_cron \([^ ]*\) loaded.*/\1/p' "$wd/out" | head -1)
+  echo "  ok  pg_cron ${ver:-<version unread>} loaded on a real lane; CREATE EXTENSION succeeded and cron.job holds the scheduled row"
+
+  gate2="$wd/pgcron-gate-control.sql"
+  sed "s/extname = 'pg_cron'/extname = 'pg_cron_not_installed_here'/" "$gate" >"$gate2"
+  grep -a -q "pg_cron_not_installed_here" "$gate2" \
+    || st_fail "the CONTROL gate was not produced (the sed target moved). That is a FIXTURE failure — the shown-to-fail half has not run, so the half above is unproven."
+  port2=$(alloc_port)
+  set +e
+  PORT="$port2" bash "$0" --workdir "$wd/control" \
+    --apply "$FIXTURES/01-fixture-core.sql" "$cron_mig" --gate "$gate2" >"$wd/out2" 2>&1
+  rc2=$?
+  set -e
+  [ "$rc2" -ne 0 ] || { cat "$wd/out2" >&2; st_fail "the CONTROL gate — the same bytes asking for an extension that is NOT installed — exited 0. This arm cannot fail, which makes the success half above worth nothing"; }
+  grep -a -q 'TEST FAILED (SELF-TEST 6)' "$wd/out2" \
+    || { cat "$wd/out2" >&2; st_fail "the CONTROL gate exited $rc2 but printed no 'TEST FAILED (SELF-TEST 6)' line. A non-zero exit carrying a raw driver error proves the LANE broke, not that this arm's assertion bit."; }
+  no_orphan "$port2" "$wd/control/pgd" "pg_cron preload control"
+  rm -rf "$wd"
+  echo "  ok  the same gate went RED naming SELF-TEST 6 against an absent extension — the half above is shown to be able to fail"
+
+  # ⛔ SP-H01: the denominator must be a COUNT, not a caption. An arm that did not run is
   # subtracted, named, and turned into exit 1 — "could not check" and "checked,
   # no problem" do not share an exit code here.
   if [ "$st_skipped" -ne 0 ]; then
-    echo "=== SELF-TEST INCOMPLETE ($((5 - st_skipped))/5 run, ${st_skipped} skipped: ${st_skips}) ===" >&2
+    echo "=== SELF-TEST INCOMPLETE ($((6 - st_skipped))/6 run, ${st_skipped} skipped: ${st_skips}) ===" >&2
     echo "A self-test that could not run an arm has not proven that arm. Install the" >&2
     echo "missing prerequisite and re-run; this is a hard failure, not a pass." >&2
     exit 1
   fi
-  echo "=== SELF-TEST PASSED (5/5) ==="
+  echo "=== SELF-TEST PASSED (6/6) ==="
 }
 
 # ---------------------------------------------------------------------------
