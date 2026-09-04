@@ -676,6 +676,11 @@ describe("R2-W04 / GRAMMAR rule 3b — a mutation may not REWRITE an arm identit
     // edits — this batch's drift is mostly IN the migration text (policy
     // predicates, guard bodies, a CHECK list), so the step count rises almost
     // in step with the arm count for the first time in the phase.
+    // RE-MEASURED 2026-09-04 (plan 164.4-08, the csv-double-submit /
+    // trust-signals / verified-cohort-rank / downgrade-sweep / scenarios-RLS /
+    // series-completeness batch's 30 sections): 219 arms, 205 file steps, 0
+    // violations. The step count rises FASTER than the arm count here (38 steps
+    // for 30 arms) because several twins are layered migration edits.
     // Pinned so 164.4's remaining backfill cannot introduce the shape and then
     // be "fixed" by relaxing the rule.
     const scan = scanCorpus(join(REPO_ROOT, "supabase", "tests"));
@@ -709,8 +714,8 @@ describe("R2-W04 / GRAMMAR rule 3b — a mutation may not REWRITE an arm identit
 
     expect(violations).toEqual([]);
     // Non-vacuity: the walk must actually have walked something.
-    expect(armsSeen).toBe(189);
-    expect(stepsSeen).toBe(167);
+    expect(armsSeen).toBe(219);
+    expect(stepsSeen).toBe(205);
   });
 
   // ══════════════════════════════════════════════════════════════════════════
@@ -1390,7 +1395,14 @@ describe("GRAMMAR rule 3c — an identity is READ only where the RUNNER's gate r
     // batch's mutations are mostly migration-text edits (RLS predicates, guard
     // bodies, a scope_kind CHECK list) rather than live-object drift. 87 of the
     // corpus's 254 steps are now `sql`.
-    expect(needles.length).toBe(167);
+    // RE-MEASURED 2026-09-04 (plan 164.4-08): 205 needles across 219 arms. 30
+    // new arms carried 38 new needles — MORE needles than arms, because several
+    // of this batch's twins are LAYERED migration edits (a RETURNS TABLE and
+    // its SELECT list must agree, so one arm spends two file steps). 91 of the
+    // corpus's 296 steps are now `sql`, among them the trust-signals
+    // anon-EXECUTE revoke, which is a `sql` step by force: mig 135 STEP 2 pins
+    // the grantee list exactly, so the drift has to happen on the LIVE object.
+    expect(needles.length).toBe(205);
     expect(needles.filter((n) => /TEST\s+FAILED\s*\(/i.test(n))).toEqual([]);
   });
 });
@@ -1636,14 +1648,14 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
     }
   });
 
-  it("scanCorpus reports 17 of 71 files annotated", () => {
+  it("scanCorpus reports 23 of 71 files annotated", () => {
     const corpus = scanCorpus(join(REPO_ROOT, "supabase", "tests"));
     // ⛔ The DENOMINATOR stays 71 — every `.sql` in the directory. The phase's
     // end state is `files 40/71` with the other 31 PRINTED BY NAME
     // (`unreachable:` 27 + `lane-blocked:` 4), never `40/40` with the gap
     // quietly redefined away.
     expect(corpus.filesTotal).toBe(71);
-    expect(corpus.filesAnnotated).toBe(17);
+    expect(corpus.filesAnnotated).toBe(23);
     expect(corpus.annotatedFiles).toEqual([
       "test_allocator_equity_derived_rls.sql",
       "test_api_keys_venue_identity_uniq.sql",
@@ -1652,12 +1664,18 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
       "test_create_wizard_strategy_for_key.sql",
       "test_csv_daily_returns_perkey_rls.sql",
       "test_csv_finalize_atomic_fold.sql",
+      "test_csv_finalize_double_submit.sql",
       "test_funding_fees_rls.sql",
+      "test_get_published_trust_signals.sql",
+      "test_get_verified_cohort_rank_gate.sql",
       "test_ledger_refresh_composite_arm.sql",
       "test_ledger_refresh_fanout.sql",
       "test_ledger_refresh_staleness.sql",
+      "test_scenario_downgrade_sweep.sql",
       "test_scenario_shares_rls.sql",
+      "test_scenarios_rls.sql",
       "test_strategies_private_owner_isolation.sql",
+      "test_strategy_analytics_series_completeness.sql",
       "test_strategy_keys_rls.sql",
       "test_strategy_shares_rls.sql",
       "test_user_notes_dashboard_scope.sql",
