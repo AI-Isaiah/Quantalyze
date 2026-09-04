@@ -745,11 +745,11 @@ Plans:
 rather than grown — five gate files and ~100 sections become provable, and the runner's
 `lane-blocked:` class goes to 0.
 
-**Requirements**: TBD (run /gsd-plan-phase 164.4.1)
+**Requirements**: SC-1, SC-2, SC-3, SC-4, SC-5 — the five success criteria below stand in for requirement IDs (no `REQUIREMENTS.md` IDs exist for this inserted phase, same convention as 164.4). Planned 2026-09-04 (`164.4.1-CONTEXT.md`, `164.4.1-RESEARCH.md`, `164.4.1-PATTERNS.md`).
 **Depends on:** Phase 164.4 (must COMPLETE first — 164.4's floors ratchet sequentially
 across its remaining waves, and pg_cron changes lane startup cost for EVERY arm)
 **Mode:** RESEARCH-FIRST
-**Plans:** 0 plans
+**Plans:** 6 plans
 
 ### Why this is a phase and not a plan inside 164.4
 
@@ -802,7 +802,14 @@ needs its own research (below) and perturbs a timing model that was only just st
 
 Plans:
 
-- [ ] TBD (run /gsd-plan-phase 164.4.1 to break down)
+- [ ] 164.4.1-01-PLAN.md — Substrate: pg_cron preloaded on the lane's single `pg_ctl -o` start (+ `cron.max_running_jobs=0`), fail-loud when absent, scripted macOS build, ubuntu apt provisioning step, `--self-test` 6/6, and the `lane-blocked-stale` tripwire OBSERVED firing on the real corpus (committed log)
+- [ ] 164.4.1-02-PLAN.md — File move 1: `test_compute_jobs_error_kind_copy_parity.sql` (3) + `test_derive_allocator_keys_fanout.sql` (7) annotated and proven; floors ratcheted to the printed values; the one-name `pending:` pin re-measured as its own task
+- [ ] 164.4.1-03-PLAN.md — File move 2: `test_retention_orphaned_running.sql` (25); floors; lane-blocked pinned at 2
+- [ ] 164.4.1-04-PLAN.md — File move 3: `test_strategy_analytics_stuck_computing_reaper.sql` (29, NOTICE-skip shape — zero skip lines measured); floors; lane-blocked pinned at 1
+- [ ] 164.4.1-05-PLAN.md — File move 4: `test_reconcile_dropped_enqueue_sweep.sql` (39); `lane-blocked: 0`, tripwire CLEARED (full run exit 0 with probe AVAILABLE); end-state floors; empty sets pinned with AIMs
+- [ ] 164.4.1-06-PLAN.md — Closure: `[REDUNDER-LANEBLOCKED-BLIND]` closed deliberately (text-only classifier documented + calibrated), honest runner prints, ubuntu measurement via `workflow_dispatch` (apt source, version, wall clock), ci.yml DECISION block updated by the MEASURED rule, docs currency
+
+⚠️ Execution shape (planner, 2026-09-04): plans run strictly sequentially (one wave each — the floors ratchet). Between plan 01's commit and plan 05's, every full runner invocation on a pg_cron-equipped host exits 1 with exactly one defect, `lane-blocked-stale` — that IS success criterion 3's tripwire firing, each such commit carries a `TRIPWIRE-RED:` line, and the branch must not be pushed or shipped until plan 05 lands (main only receives the squash-merged PR head). `CREATE EXTENSION pg_cron` comes from the real migration `20260513094906_enable_pg_cron.sql` in each gate's apply list, never from a fixture or a lane bootstrap. Section counts above are the runner's own derivation (103 total); every floor is written from the run's printed lines, never from these numbers.
 
 ### Phase 164.1: HARDEN-GUARDS — retire the frozen-spine gates that no longer bite, close the composite-stamp twin, put the advisory lock behind a real concurrency test, fix the PYAPI-06 blind spot that let a production service-key mismatch run silently, and close phase 161's deferred error-surface items (WIZFORM-02's code:UNKNOWN class MOVED to 164.2 in the 2026-08-28 dedup), plus the Phase 163 carry-overs — headed by SKIP-01 (nothing applies migrations to TEST, so the OPS-08 SQL gate SKIPs permanently and the deployed body is tested nowhere), then OPS-08's un-written TypeScript retry half, the freshness UTC day-granularity residual, the TEST/PROD function-revision drift, the audit-coverage blind spot, and the tracked-PII decision (INSERTED)
 
