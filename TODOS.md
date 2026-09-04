@@ -1122,6 +1122,48 @@ true for 146 and half of 142–145, and **false for 141**.
       every arm. On this forge the unique index, not the INSERT policy, is the outer fence.
       **Fix:** forge a triple that does not collide, so the INSERT policy is the only fence.
 
+- [ ] **`[REDUNDER-WAIVER-01]` ⛔ OPEN FOUNDER DECISION — `test_get_published_trust_signals.sql`
+      assertion 5 has NO first-failure mutation.** MEASURED 2026-09-04 (plan 164.4-08) on a
+      throwaway pg-lane cluster carrying that file's own `RED-UNDER-SETUP` list plus a
+      `REVOKE EXECUTE ON FUNCTION public.get_published_trust_signals(uuid[]) FROM anon`
+      post-apply step. The ONLY change that reddens the arm is anon losing EXECUTE, and the run
+      then dies at **assertion 1** with `ERROR: 42501: permission denied for function
+      get_published_trust_signals`, emitting **no `TEST FAILED (…)` at all** — assertions 1-3 call
+      the function AS anon, ~90 lines before assertion 5 is reached.
+      It cannot be routed around: `neuter` suppresses a gate RAISE, not a PostgreSQL privilege
+      error; and `has_function_privilege` performs the SAME check the call performs, so no mutation
+      can make it FALSE while leaving the call callable (PUBLIC grants, role membership and
+      superuser status are all counted by both).
+      **Classification:** a WAIVER candidate under GRAMMAR "Shape 4" — an arm that DOES bite but has
+      no first-failure mutation — and explicitly NOT a dead arm (`164.4-CONTEXT.md` § Waivers &
+      un-falsifiable arms distinguishes the two). The four other sections of that file are twinned
+      and biting.
+      **Why it is open and not closed here:** accepting a waiver raises `WAIVED_CEILING` (0 today),
+      which `164.4-CONTEXT.md` reserves to the founder (+1 per accepted waiver, reason pinned beside
+      the constant, >5 total ⇒ escalate). The 164.4-08 execution brief additionally states that a
+      waiver candidate is a STOP checkpoint, not an executor decision. So NO waiver twin was
+      authored and `WAIVED_CEILING` was not touched.
+      **The two branches, and what each costs.** `FILES_FLOOR` = 23 and `ARMS_FLOOR` = 218 EITHER
+      WAY (the file already counts as annotated, and a waiver twin spawns no lane and raises no
+      `biting`). What differs is only: (A) accept — author the Shape 4 twin, `WAIVED_CEILING` 0 -> 1
+      with this reason pinned, run prints `arms: 219/219/1`, `armsSeen` pin 219; (B) refuse — leave
+      the section untwinned, `WAIVED_CEILING` stays 0, run prints `arms: 218/218/0`, `armsSeen` 218,
+      and this entry stays open as the record.
+
+- [ ] **`[REDUNDER-SWEEPCOPY]` `test_scenario_downgrade_sweep.sql` re-implements the sweep script
+      it claims to prove, and nothing enforces they agree.** MEASURED 2026-09-04 (plan 164.4-08)
+      while authoring its twins. The artifact under test is
+      `scripts/sweeps/f4-memberkeyids-restamp.sql`; the gate does NOT execute it, it carries the
+      discriminator and the `jsonb_set` transform **copied verbatim** (`:5-10`). The copy is
+      asserted to be verbatim in PROSE only — no test, lint rule or CI step compares the bytes — so
+      the sweep script can drift and every arm in that file stays green. That is the
+      two-registries drift class this repo deletes elsewhere.
+      **Consequence for 164.4:** every twin in that file necessarily targets the gate's own copy
+      (a legal target, `run.mjs:1806`, precedent in `test_create_wizard_strategy_for_key.sql`), so
+      the arms are proven falsifiable but the mutation cannot reach production.
+      **Fix:** either have the gate `\i` the sweep script, or add a lint rule that diffs the copied
+      block against the script. Out of scope for 164.4 (the phase may not change what a gate does).
+
 - [ ] **`[REDUNDER-WINDOWS-01]` `.planning/WINDOWS.md` cannot be written at all.** MEASURED
       2026-09-03 (plan 164.4-06). `gsd-tools windows fixed 28` refuses with
       `Ledger counts disagree with entries: frontmatter open/waived/fixed/total=26/0/2/28 but entries
