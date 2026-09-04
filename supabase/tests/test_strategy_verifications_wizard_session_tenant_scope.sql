@@ -247,6 +247,18 @@ BEGIN
   -- always correct. It is here because the leak has TWO layers and this file
   -- must pin the one that is right, or a future policy edit could open it.)
   -- ======================================================================
+  -- RED-UNDER: drop the JOIN PREDICATE from strategy_verifications_owner_select
+  --            in migration 20260501055213 — `WHERE s.id =
+  --            strategy_verifications.strategy_id AND s.user_id = auth.uid()`
+  --            becomes `WHERE s.user_id = auth.uid()`. The policy still LOOKS
+  --            tenant-scoped and still mentions auth.uid(); it has simply
+  --            stopped correlating the strategy to the row, so it evaluates
+  --            TRUE for EVERY verification as soon as the reader owns any
+  --            strategy at all. This is the exact brittleness the migration's
+  --            own header worries about, and it is SILENT: no error, no log.
+  --            The migration's STEP 3 self-check only COUNTS the policy by
+  --            name, so it does not abort — no layering needed.
+  -- RED-UNDER-M: {"arm":"A2","apply":[{"kind":"edit","file":"supabase/migrations/20260501055213_strategy_verifications_rls_polish.sql","find":"      WHERE s.id = strategy_verifications.strategy_id\n        AND s.user_id = auth.uid()","replace":"      WHERE s.user_id = auth.uid()","occurrences":1}]}
   PERFORM set_config('request.jwt.claims',
     json_build_object('sub', uid_b::text, 'role', 'authenticated')::text, true);
   SET LOCAL ROLE authenticated;
@@ -262,6 +274,17 @@ BEGIN
   -- this, A2's zero could simply mean the session switch is broken and B sees
   -- nothing at all.
   -- ======================================================================
+  -- RED-UNDER: point strategy_verifications_owner_select at a user id nobody
+  --            holds — `AND s.user_id = auth.uid()` becomes `AND s.user_id =
+  --            '00000000-0000-0000-0000-000000000000'::uuid` in migration
+  --            20260501055213. The policy then matches NOTHING, so B sees zero
+  --            of its own rows. ⚠️ Note which arm this reddens and which it
+  --            does not: A2 above still passes (its expected value IS zero), so
+  --            a total owner-read outage is invisible to A2 and this positive
+  --            control is the ONLY arm that catches it. That asymmetry is
+  --            exactly why A3 exists, and the mutation proves it rather than
+  --            asserting it.
+  -- RED-UNDER-M: {"arm":"A3","apply":[{"kind":"edit","file":"supabase/migrations/20260501055213_strategy_verifications_rls_polish.sql","find":"        AND s.user_id = auth.uid()","replace":"        AND s.user_id = '00000000-0000-0000-0000-000000000000'::uuid","occurrences":1}]}
   SELECT count(*) INTO row_cnt FROM strategy_verifications WHERE id = sv_b;
   IF row_cnt <> 1 THEN
     RESET ROLE;
@@ -283,6 +306,15 @@ BEGIN
   -- query returns more than one row and a PL/pgSQL SELECT INTO would silently
   -- read whichever came first.
   -- ======================================================================
+  -- RED-UNDER: SWAP the composite index's column order in STEP 1 of migration
+  --            20260726000225 — `(strategy_id, wizard_session_id)` becomes
+  --            `(wizard_session_id, strategy_id)`. Chosen deliberately over
+  --            re-narrowing the index: a swap leaves uniqueness tenant-scoped,
+  --            so A1 still PASSES and this drift-pin is the first failure,
+  --            which is what proves A4 is not merely riding on A1. LAYERED for
+  --            the same reason A1 is — STEP 3(a) pins the same list against a
+  --            literal and would abort the apply.
+  -- RED-UNDER-M: {"arm":"A4","apply":[{"kind":"edit","file":"supabase/migrations/20260726000225_strategy_verifications_tenant_scope_uniq.sql","find":"  ON strategy_verifications (strategy_id, wizard_session_id);","replace":"  ON strategy_verifications (wizard_session_id, strategy_id);","occurrences":1},{"kind":"edit","file":"supabase/migrations/20260726000225_strategy_verifications_tenant_scope_uniq.sql","find":"ARRAY['strategy_id', 'wizard_session_id']::TEXT[]","replace":"ARRAY['wizard_session_id', 'strategy_id']::TEXT[]","occurrences":1}]}
   SELECT count(*) INTO uniq_cnt
     FROM pg_index i
     JOIN pg_class c  ON c.oid = i.indrelid
@@ -323,6 +355,22 @@ BEGIN
   -- migration that creates the composite index but forgets to drop the old
   -- one under a name A4's column check would not distinguish.
   -- ======================================================================
+  -- RED-UNDER: bring an index back under the old NAME on the live database —
+  --            `CREATE INDEX strategy_verifications_wizard_session_id_unique_idx
+  --            ON public.strategy_verifications (wizard_session_id)`.
+  --            ⚠️ Read why this is a `sql` step and NOT "neuter STEP 2's DROP".
+  --            Neutering the DROP requires the old index to exist, which on the
+  --            pg-lane it never does: the migration that creates it,
+  --            20260510173005, cannot apply here at all (see the header's
+  --            [REDUNDER-SAVEPOINT] note), so STEP 2's `DROP INDEX IF EXISTS`
+  --            no-ops. And the FAITHFUL old index — UNIQUE on
+  --            (wizard_session_id) — would redden A1 with 23505 long before
+  --            reaching here, so it could never be A5's own first failure. A
+  --            NON-unique index under the old name is precisely what A5
+  --            asserts about and nothing more: A1 sees no collision, A4's two
+  --            queries both filter on `i.indisunique` and still count 1, and
+  --            A5's pg_indexes NAME lookup is the first thing that fails.
+  -- RED-UNDER-M: {"arm":"A5","apply":[{"kind":"sql","stmt":"CREATE INDEX strategy_verifications_wizard_session_id_unique_idx ON public.strategy_verifications (wizard_session_id)"}]}
   SELECT count(*) INTO row_cnt FROM pg_indexes
    WHERE schemaname = 'public'
      AND tablename  = 'strategy_verifications'
