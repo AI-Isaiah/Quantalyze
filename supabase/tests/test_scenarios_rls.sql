@@ -23,6 +23,23 @@
 --   psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f \
 --     supabase/tests/test_scenarios_rls.sql
 --
+-- ⭐ RED-UNDER ANNOTATIONS (Phase 164.4). Each assertion below carries a prose
+-- `RED-UNDER:` naming the smallest production change that makes it fail, and a
+-- machine-readable `RED-UNDER-M:` twin the mutation runner applies on a
+-- throwaway pg-lane cluster to PROVE it reds on its own arm, then restores
+-- GREEN. Schema: scripts/mutation-runner/GRAMMAR.md. The line below declares
+-- what the lane applies before this gate.
+-- ⚠️ 07-fixture-supabase-default-privileges.sql IS LOAD-BEARING, NOT PADDING.
+-- It reproduces Supabase's `ALTER DEFAULT PRIVILEGES … GRANT ALL … TO anon,
+-- authenticated`, which is the very grant the migration's `REVOKE ALL ON
+-- scenarios FROM anon` exists to take away. WITHOUT it, assertion 5's 42501
+-- would be produced by anon never having HELD the grant — the same SQLSTATE for
+-- a completely different reason, i.e. an arm that reports the REVOKE is
+-- enforced on a lane where the REVOKE does nothing. Measured 2026-09-04: with
+-- the fixture removed the file dies at assertion 2 with `permission denied for
+-- table scenarios`, so the provisioning is checked, not assumed.
+-- RED-UNDER-SETUP: {"apply":["scripts/pg-lane/fixtures/01-fixture-core.sql","scripts/pg-lane/fixtures/02-fixture-sanitize-tables.sql","scripts/pg-lane/fixtures/07-fixture-supabase-default-privileges.sql","scripts/pg-lane/fixtures/13-fixture-csv-finalize-fold.sql","supabase/migrations/20260621120000_scenarios_table_and_rls.sql"]}
+--
 -- The test seeds two synthetic tenants (A and B) end-to-end:
 --   auth.users -> profiles -> scenarios
 -- (no api_keys/strategies needed — scenarios references profiles directly via
@@ -96,6 +113,16 @@ BEGIN
 
   -- ----- ASSERTION 1: service role / superuser sees BOTH rows -----------
   -- Sanity check that we seeded what we think we seeded.
+  -- RED-UNDER: stop tenant B's scenario landing — replace its seed INSERT with
+  --            `scen_b_id := NULL;`. Every assertion below is a statement ABOUT
+  --            tenant B's row (A cannot see it, cannot write it, and it survives
+  --            A's own-row writes), so a B row that was never created would make
+  --            assertions 2, 3 and 4 pass while proving nothing. Refusing that
+  --            is this arm's entire job, and it is the only arm that can.
+  --            (Seed-targeting twin, same shape as `7i setup` in
+  --            test_capital_ownership_allocation_guard.sql. No assertion,
+  --            failure branch or identity is touched — GRAMMAR 3a/3b bind.)
+  -- RED-UNDER-M: {"arm":"sanity","apply":[{"kind":"edit","file":"supabase/tests/test_scenarios_rls.sql","find":"  INSERT INTO scenarios (allocator_id, name, draft, schema_version)\n  VALUES (uid_b, 'tenant b scenario', '{\"k\":\"b\"}'::jsonb, 1)\n  RETURNING id INTO scen_b_id;\n","replace":"  scen_b_id := NULL;\n","occurrences":1}]}
   SELECT COUNT(*) INTO visible_cnt FROM scenarios
     WHERE id IN (scen_a_id, scen_b_id);
   IF visible_cnt <> 2 THEN
@@ -114,6 +141,13 @@ BEGIN
   );
   SET LOCAL ROLE authenticated;
 
+  -- RED-UNDER: open the owner predicate — `USING (allocator_id = auth.uid())`
+  --            becomes `USING (true)` in migration 20260621120000. RLS FAILS
+  --            SILENTLY: no error, no log, every allocator's scenario drafts
+  --            readable by every other. Only a cross-tenant CONTENT assertion
+  --            like this one notices, which is why the header refuses a
+  --            pg_policies presence check.
+  -- RED-UNDER-M: {"arm":"Assertion 2","apply":[{"kind":"edit","file":"supabase/migrations/20260621120000_scenarios_table_and_rls.sql","find":"  USING (allocator_id = auth.uid())\n  WITH CHECK (allocator_id = auth.uid());","replace":"  USING (true)\n  WITH CHECK (allocator_id = auth.uid());","occurrences":1}]}
   -- Tenant A must see exactly its own row over the seeded set, not 2.
   SELECT COUNT(*) INTO visible_cnt FROM scenarios
     WHERE id IN (scen_a_id, scen_b_id);
@@ -141,6 +175,28 @@ BEGIN
   -- UPDATE / DELETE targeting scen_b_id from tenant A's session affects 0 rows
   -- (no error — RLS silently scopes the write). Assert 0 rows affected, then
   -- (after RESET ROLE) verify B's row is byte-for-byte unchanged BY ROW ID.
+  -- RED-UNDER: open the owner predicate — `USING (allocator_id = auth.uid())`
+  --            becomes `USING (true)` in migration 20260621120000, and its
+  --            WITH CHECK with it — MEASURED: leaving the WITH CHECK owner-
+  --            scoped makes A's UPDATE of B's row raise 42501 `new row
+  --            violates row-level security policy`, a raw error carrying no
+  --            arm identity at all (`NO-IDENTITY` on the lane). A can then
+  --            UPDATE and DELETE tenant B's row, which is the cross-tenant
+  --            WRITE this arm exists to refuse.
+  --            NEUTERS Assertion 2 (all three of its raises) — required, and
+  --            the reason is a MEASURED property of PostgreSQL, not a
+  --            convenience: an UPDATE or DELETE carrying a WHERE clause needs
+  --            SELECT privileges, so the SELECT policies are applied to it too.
+  --            A predicate loose enough for A to WRITE B's row is therefore
+  --            necessarily loose enough for A to READ it, and assertion 2 fires
+  --            first. MEASURED 2026-09-04: a write-only `FOR UPDATE USING
+  --            (true)` policy added BESIDE the owner one leaves this arm GREEN
+  --            (`NO-RED` on the lane) for exactly that reason — the read
+  --            predicate, not the write one, is what selects the row.
+  --            So this arm is defence in depth BEHIND assertion 2, and the
+  --            neuter is what lets it say so out loud rather than look
+  --            unfalsifiable.
+  -- RED-UNDER-M: {"arm":"Assertion 3","apply":[{"kind":"edit","file":"supabase/migrations/20260621120000_scenarios_table_and_rls.sql","find":"  USING (allocator_id = auth.uid())\n  WITH CHECK (allocator_id = auth.uid());","replace":"  USING (true)\n  WITH CHECK (true);","occurrences":1}],"neuter":[{"arm":"Assertion 2"},{"arm":"Assertion 2"},{"arm":"Assertion 2"}]}
   UPDATE scenarios SET name = 'hijacked' WHERE id = scen_b_id;
   GET DIAGNOSTICS affected = ROW_COUNT;
   IF affected <> 0 THEN
@@ -181,6 +237,14 @@ BEGIN
   );
   SET LOCAL ROLE authenticated;
 
+  -- RED-UNDER: narrow the owner policy to reads — `FOR ALL` becomes
+  --            `FOR SELECT` (and its WITH CHECK goes, which FOR SELECT does not
+  --            accept) in migration 20260621120000. Every NEGATIVE assertion
+  --            above still passes: A still sees only its own row, and A's writes
+  --            to B's row still affect 0 rows — MORE tightly than before. An
+  --            over-tight policy is invisible to a leak test, and silently
+  --            breaks every legitimate owner edit in the product.
+  -- RED-UNDER-M: {"arm":"Assertion 4","apply":[{"kind":"edit","file":"supabase/migrations/20260621120000_scenarios_table_and_rls.sql","find":"  FOR ALL\n  TO authenticated\n  USING (allocator_id = auth.uid())\n  WITH CHECK (allocator_id = auth.uid());","replace":"  FOR SELECT\n  TO authenticated\n  USING (allocator_id = auth.uid());","occurrences":1}]}
   UPDATE scenarios SET name = 'tenant a renamed' WHERE id = scen_a_id;
   GET DIAGNOSTICS affected = ROW_COUNT;
   IF affected <> 1 THEN
@@ -225,6 +289,16 @@ BEGIN
   PERFORM set_config('request.jwt.claims', NULL, true);
   SET LOCAL ROLE anon;
 
+  -- RED-UNDER: grant anon SELECT back on the table. Expressed as a live `sql`
+  --            step rather than an edit because the migration's own
+  --            `REVOKE ALL ON scenarios FROM anon` is the pinned posture — the
+  --            drift being modelled is a LATER migration (or a Supabase default
+  --            ACL) re-granting it, not this file changing.
+  --            anon then reaches the RLS layer instead of the grant layer, where
+  --            the owner policy is `TO authenticated` and simply returns zero
+  --            rows — no error at all. `raised` stays FALSE and this arm reds,
+  --            which is precisely the both-layers claim it is here to make.
+  -- RED-UNDER-M: {"arm":"Assertion 5","apply":[{"kind":"sql","stmt":"GRANT SELECT ON public.scenarios TO anon"}]}
   raised := FALSE;
   BEGIN
     -- A bare existence check is enough to trip the table-level grant gate.

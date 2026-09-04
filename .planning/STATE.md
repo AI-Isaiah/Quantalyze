@@ -5,16 +5,16 @@ milestone_name: Backlog Burndown (Phases 158+)
 current_phase: 164.4
 current_phase_name: REDUNDER-BACKFILL
 status: executing
-stopped_at: Completed 164.4-07-PLAN.md
-last_updated: "2026-09-03T20:35:16.287Z"
+stopped_at: Completed 164.4-08-PLAN.md
+last_updated: "2026-09-04T07:36:23.977Z"
 last_activity: 2026-09-03
 last_activity_desc: Phase 164.4 execution started
-state_head: e92d37a3467664e438d17ea9266c5a5c29fb29bf
+state_head: 9cfee1d47b93fd1f162994ebd168450dc0b36465
 progress:
   total_phases: 15
   completed_phases: 5
   total_plans: 82
-  completed_plans: 73
+  completed_plans: 75
   percent: 33
 ---
 
@@ -719,6 +719,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 | Phase 164.4 P05 | 85 min | 3 tasks | 17 files |
 | Phase 164.4 P06 | 58 min | 3 tasks | 15 files |
 | Phase 164.4 P07 | 63 min | 3 tasks | 15 files |
+| Phase 164.4 P08 | ~75m | 3 tasks | 8 files |
 
 ## Accumulated Context
 
@@ -933,6 +934,8 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - [Phase 164.4]: Batch 4 mutations are mostly MIGRATION-TEXT edits, not live-object drift: 24 of 26 new arms carry a find/anchor. Where a migration self-verify re-reads the object it just wrote (allocator_equity_derived STEP 6(c) role checks), the edit aborts the apply and the arm must take a post-apply sql step instead.
 - [Phase 164.4]: A stand-in NARROWER than production can pre-empt the REAL migration entirely: 02-fixture-sanitize-tables.sql one-column user_notes made 20260412094453 CREATE TABLE IF NOT EXISTS a no-op, so every object the gate asserts on would have been missing from a table that nonetheless existed. 16-fixture-user-notes-baseline.sql DROPs it.
 - [Phase 164.4]: ci.yml timeout-minutes stays 15. Four-point ubuntu fit (45/119s, 86/171s, 134/232s, 163/278s) = 1.35s per arm of JOB cost plus ~58s fixed, so 189 arms projects to ~5.2 min and the phase end state to ~6.9 min.
+- [Phase 164.4]: 164.4-08: [REDUNDER-WAIVER-01] resolved by founder decision with the ROOT-CAUSE FIX (reorder the anon-EXECUTE precondition ahead of its dependents), not a waiver — WAIVED_CEILING stays 0 and the arm is first-failure mutable
+- [Phase 164.4]: 164.4-08: sql-mutation timeout-minutes STAYS 15 — largest MEASURED ubuntu run is 458 s (7.6 min) and the worst-case phase-end projection is 9.8 min, both under the 10-min raise rule; the falsified arm-count linear fit was replaced by a per-lane model citing 1.0s and 1.7s, dated
 
 ### Decisions (execution-time, Phase 140.2)
 
@@ -1635,8 +1638,8 @@ Load-bearing sequencing (real dependencies, do not reorder):
 
 ## Session
 
-**Last Date:** 2026-09-03T20:34:38.574Z
-**Stopped At:** Completed 164.4-07-PLAN.md
+**Last Date:** 2026-09-04T07:36:12.321Z
+**Stopped At:** Completed 164.4-08-PLAN.md
 **Last Date:** 2026-08-25T22:26:01.687Z
 **Stopped At:** Completed 162-03-PLAN.md
 **Last Date:** 2026-08-25T22:28:04.096Z
@@ -1703,6 +1706,8 @@ pre-merge `e0493913`. Fix is PR #669. Supabase migrations and the Vercel fronten
 - ⏱️ THREE ubuntu timing points now exist for `sql-mutation`: 45 arms/119 s, 86/171 s, 134/232 s. Linear fit **1.27 s per arm of JOB cost + ~62 s fixed overhead** — larger than the runner's own `per-arm lane time: mean 1.0s`, which measures the LANE only. The ~265-arm end state projects to ~399 s ≈ 6.6 min, inside `timeout-minutes: 15` without a raise. Plan 164.4-08 still re-justifies the timeout against its OWN measured run.
 - 164.4-06 human-check CLOSED 2026-09-03: landed as PR #736 (head ba6fe1e2, squash-merged 6d6368ef, v0.77.7.0). CI run 33794810067 reports sql-mutation success in 278 s; the ubuntu job's own log carries `arms: 163/163/0`, `biting: 163`, `lane-invocations: 163`, `tallies agree`, `coverage: files 13/71`, `No defects` — identical to macOS for the fourth batch running. Recorded in coverage D10 of 164.4-06-SUMMARY.md. Plan 164.4-07 is UNBLOCKED.
 - ⏱️ FOUR ubuntu timing points: 45 arms/119 s, 86/171 s, 134/232 s, 163/278 s. Refit **1.35 s per arm of JOB cost + ~58 s fixed** (the runner's own `per-arm lane time: mean 1.0s` measures the LANE only). ~265-arm end state projects to ~416 s ≈ 6.9 min, inside `timeout-minutes: 15`. The 3-point fit predicted 269 s for this run and measured 278 — 3% over, so the model is slightly optimistic; plan 164.4-08 re-justifies the timeout against its own run.
+- 164.4-07 human-check CLOSED 2026-09-03: landed as PR #737 (head 4a9f33da, squash-merged 214184d7, v0.77.8.0). CI run 33804312706, sql-mutation success, 23/23 checks. Corpus identical to macOS (`arms: 189/189/0`, `biting: 189`, `lane-invocations: 189`, `coverage: files 17/71`, `No defects`). Recorded in coverage D10 of 164.4-07-SUMMARY.md. Plan 164.4-08 is UNBLOCKED.
+- ⛔⏱️ THE TIMING MODEL BROKE ON WAVE 8 AND THE TIMEOUT MARGIN IS NO LONGER COMFORTABLE. Run 33804312706 took **458 s** against a 313 s projection (46% over). The cause is in the job's OWN log: `per-arm lane time: mean 1.7s over 189 arm run(s)`. Every earlier ubuntu run reported **1.0s**, and the orchestrator's LOCAL run of the identical corpus also measured 1.0s — so this is NOT arm count and NOT the batch's content; the ubuntu lanes ran ~70% slower. One observation cannot separate CI-host variance from a real per-lane cost this batch's longer apply lists impose only on the ubuntu build. ⚠️ At the WORST observed 1.7 s/arm the ~265-arm end state projects to roughly **11 minutes** against `timeout-minutes: 15`. The earlier 6.9-min projection assumed 1.0 s and is now superseded. **Plan 164.4-08 must re-justify the timeout against the WORST observed per-lane cost, not the mean, and should treat raising it as the likely correct answer** — the trigger its own ci.yml comment names is 'a measured run approaching ~10 minutes'.
 - ⛔ ORCHESTRATOR TRAP, measured wave 6: editing ANY tracked file while `run.mjs` is in flight fails the run with a `dirty-checkout` defect (a version bump did it), and `RUNNER_EXIT=1` then reads exactly like a broken batch. Read the defect KIND before concluding — `dirty-checkout` with no arm and no file named is the orchestrator's own hand, not the corpus. Serialise: clean tree -> run -> then bump.
 
 ## ⛔ Standing constraint from Phase 164.3.1 — do not lose this between sessions

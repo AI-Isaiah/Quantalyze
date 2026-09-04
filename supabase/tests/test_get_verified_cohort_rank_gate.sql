@@ -105,6 +105,21 @@
 -- Usage:
 --   psql "$TEST_SUPABASE_DB_URL" -v ON_ERROR_STOP=1 -f \
 --     supabase/tests/test_get_verified_cohort_rank_gate.sql
+--
+-- ⭐ RED-UNDER ANNOTATIONS (Phase 164.4). Each assertion below carries a prose
+-- `RED-UNDER:` naming the smallest production change that makes it fail, and a
+-- machine-readable `RED-UNDER-M:` twin the mutation runner applies on a
+-- throwaway pg-lane cluster to PROVE it reds on its own arm, then restores
+-- GREEN. Schema: scripts/mutation-runner/GRAMMAR.md. The line below declares
+-- what the lane applies before this gate.
+-- ⚠️ THE OBJECT UNDER TEST IS THE REAL SECDEF from 20260821120000, and that
+-- migration SELF-VERIFIES its own identity args, its SECDEF flag and its gate
+-- occurrence count at apply time. Three twins are therefore LAYERED: the second
+-- step removes the migration's own verification term so the GATE reds rather
+-- than the apply — never to widen the mutation, only to let it reach the gate.
+-- 19-fixture-cohort-rank-metrics.sql adds only sharpe/sortino/max_drawdown,
+-- whose values come entirely from this file's own seeds.
+-- RED-UNDER-SETUP: {"apply":["scripts/pg-lane/fixtures/01-fixture-core.sql","scripts/pg-lane/fixtures/02-fixture-sanitize-tables.sql","scripts/pg-lane/fixtures/03-fixture-compute-jobs.sql","scripts/pg-lane/fixtures/07-fixture-supabase-default-privileges.sql","scripts/pg-lane/fixtures/09-fixture-migration-ledger.sql","scripts/pg-lane/fixtures/13-fixture-csv-finalize-fold.sql","scripts/pg-lane/fixtures/15-fixture-auth-role.sql","scripts/pg-lane/fixtures/19-fixture-cohort-rank-metrics.sql","supabase/migrations/20260821120000_get_verified_cohort_rank_computed_gate.sql"]}
 
 -- --------------------------------------------------------------------------
 -- Defensive pre-clean (a prior aborted run may have committed synthetic rows).
@@ -147,6 +162,15 @@ DECLARE
   v_migration   CONSTANT TEXT := '20260821120000';
 BEGIN
   -- ----- Resolve the function (absence = hard failure, not a skip) ----------
+  -- RED-UNDER: rename the third parameter — `p_max_dd` becomes `p_maxdd` in
+  --            20260821120000's CREATE (and at its one use in the max_dd
+  --            percentile filter). PostgREST callers pass this RPC's arguments
+  --            BY NAME, so a rename is a live break, and this probe pins the
+  --            identity args rather than the bare name for exactly that reason.
+  --            LAYERED: the migration's own post-verify (a) compares the same
+  --            identity-args string, so the third step re-cuts THAT string and
+  --            nothing else.
+  -- RED-UNDER-M: {"arm":"0","apply":[{"kind":"edit","file":"supabase/migrations/20260821120000_get_verified_cohort_rank_computed_gate.sql","find":"  p_max_dd   DOUBLE PRECISION   -- the MAGNITUDE (abs) of the blend's max_dd","replace":"  p_maxdd    DOUBLE PRECISION   -- the MAGNITUDE (abs) of the blend's max_dd","occurrences":1},{"kind":"edit","file":"supabase/migrations/20260821120000_get_verified_cohort_rank_computed_gate.sql","find":"abs(a.max_drawdown) <= p_max_dd)","replace":"abs(a.max_drawdown) <= p_maxdd)","occurrences":1},{"kind":"edit","file":"supabase/migrations/20260821120000_get_verified_cohort_rank_computed_gate.sql","find":"          'p_sharpe double precision, p_sortino double precision, p_max_dd double precision';","replace":"          'p_sharpe double precision, p_sortino double precision, p_maxdd double precision';","occurrences":1}]}
   SELECT p.oid INTO v_fn_oid
     FROM pg_proc p
     WHERE p.proname = 'get_verified_cohort_rank'
@@ -174,6 +198,13 @@ BEGIN
   -- and reviewers grep for. Execution order changed; the labels did not.
 
   -- (2) SECURITY DEFINER + pinned search_path are intact
+  -- RED-UNDER: drop `SECURITY DEFINER` from 20260821120000's CREATE. Without
+  --            it the cross-tenant verified read runs as the CALLER, so
+  --            strategy_verifications RLS silently narrows the cohort to the
+  --            caller's own strategies — a wrong ranking, not an error.
+  --            LAYERED: the migration's post-verify (b) asserts the flag, so the
+  --            second step removes THAT term only.
+  -- RED-UNDER-M: {"arm":"2a","apply":[{"kind":"edit","file":"supabase/migrations/20260821120000_get_verified_cohort_rank_computed_gate.sql","find":"LANGUAGE plpgsql\nSECURITY DEFINER\nSET search_path = public, pg_catalog","replace":"LANGUAGE plpgsql\nSET search_path = public, pg_catalog","occurrences":1},{"kind":"edit","file":"supabase/migrations/20260821120000_get_verified_cohort_rank_computed_gate.sql","find":"  IF NOT COALESCE(v_secdef, false) THEN","replace":"  IF FALSE THEN","occurrences":1}]}
   SELECT prosecdef, proconfig INTO v_secdef, v_config
     FROM pg_proc WHERE oid = v_fn_oid;
   IF NOT COALESCE(v_secdef, false) THEN
@@ -184,6 +215,13 @@ BEGIN
   END IF;
 
   -- (3) anon must NOT hold EXECUTE (probe-oracle containment, T-42-02)
+  -- RED-UNDER: grant anon EXECUTE back. Expressed as a live `sql` step rather
+  --            than an edit BECAUSE 20260821120000 pins the posture exactly (its
+  --            post-verify (c)/(d) assert the PUBLIC and anon revokes), so
+  --            editing the migration's REVOKE would abort the apply and prove
+  --            nothing about the gate. This is the drift that re-opens the
+  --            percentile probe oracle to unauthenticated callers.
+  -- RED-UNDER-M: {"arm":"3","apply":[{"kind":"sql","stmt":"GRANT EXECUTE ON FUNCTION public.get_verified_cohort_rank(DOUBLE PRECISION, DOUBLE PRECISION, DOUBLE PRECISION) TO anon"}]}
   v_anon_exec := has_function_privilege('anon', v_fn_oid, 'EXECUTE');
   IF v_anon_exec THEN
     RAISE EXCEPTION 'TEST FAILED (3): anon holds EXECUTE on get_verified_cohort_rank. This SECDEF bypasses RLS over the whole verified universe; anon access re-opens the percentile probe oracle the min-N floor and decile quantization exist to contain.';
@@ -226,6 +264,13 @@ BEGIN
   -- ============ ARMED FROM HERE (gate-dependent assertions) ===============
 
   -- (1) ⭐ the gate is in BOTH cohort predicates, not just one
+  -- RED-UNDER: delete the RANK-01 gate from the RANK query only, leaving the
+  --            COUNT query's copy in place — the asymmetric drift, which is the
+  --            whole reason this arm counts OCCURRENCES instead of checking
+  --            presence. min-N would then count rows the percentiles do not.
+  --            LAYERED: the migration's post-verify (e) makes the same count, so
+  --            the second step removes THAT term only.
+  -- RED-UNDER-M: {"arm":"1","apply":[{"kind":"edit","file":"supabase/migrations/20260821120000_get_verified_cohort_rank_computed_gate.sql","find":"    (round( (100 - round(100.0 * count(*) FILTER (WHERE abs(a.max_drawdown) <= p_max_dd) / v_n)) / 10.0 ) * 10)::INT\n  FROM strategies s\n  JOIN strategy_analytics a ON a.strategy_id = s.id\n  WHERE s.status = 'published'\n    AND a.computation_status IN ('complete', 'complete_with_warnings')\n","replace":"    (round( (100 - round(100.0 * count(*) FILTER (WHERE abs(a.max_drawdown) <= p_max_dd) / v_n)) / 10.0 ) * 10)::INT\n  FROM strategies s\n  JOIN strategy_analytics a ON a.strategy_id = s.id\n  WHERE s.status = 'published'\n","occurrences":1},{"kind":"edit","file":"supabase/migrations/20260821120000_get_verified_cohort_rank_computed_gate.sql","find":"  IF v_gate_hits < 2 THEN","replace":"  IF FALSE THEN","occurrences":1}]}
   v_gate_hits := (length(v_def) - length(replace(v_def, v_gate_pred, '')))
                  / length(v_gate_pred);
   IF v_gate_hits < 2 THEN
@@ -233,6 +278,14 @@ BEGIN
   END IF;
 
   -- ----- (4) BEHAVIOURAL: seed a synthetic cohort --------------------------
+  -- RED-UNDER: re-point the VERIFIED half of the cohort at a status no
+  --            verification row reaches — `v.status = 'published'` becomes
+  --            `'verified'` in BOTH cohort predicates of 20260821120000. The
+  --            RANK-01 gate text is untouched, so assertion 1 still passes and
+  --            only the behavioural delta notices that the cohort went empty.
+  --            The header records why that spelling is load-bearing: an earlier
+  --            draft keyed on trust_tier IS NOT NULL, a tautology.
+  -- RED-UNDER-M: {"arm":"4a","apply":[{"kind":"edit","file":"supabase/migrations/20260821120000_get_verified_cohort_rank_computed_gate.sql","find":"      WHERE v.strategy_id = s.id AND v.status = 'published'","replace":"      WHERE v.strategy_id = s.id AND v.status = 'verified'","occurrences":2}]}
   INSERT INTO auth.users (id, instance_id, email, created_at, updated_at)
   VALUES (uid, '00000000-0000-0000-0000-000000000000',
           'test-mig159-cohort-gate@quantalyze.test', now(), now());

@@ -98,6 +98,22 @@
 -- Usage:
 --   psql "$TEST_SUPABASE_DB_URL" -v ON_ERROR_STOP=1 -f \
 --     supabase/tests/test_csv_finalize_double_submit.sql
+--
+-- ⭐ RED-UNDER ANNOTATIONS (Phase 164.4). Each assertion below carries a prose
+-- `RED-UNDER:` naming the smallest production change that makes it fail, and a
+-- machine-readable `RED-UNDER-M:` twin the mutation runner applies on a
+-- throwaway pg-lane cluster to PROVE it reds on its own arm, then restores
+-- GREEN. Schema: scripts/mutation-runner/GRAMMAR.md. The line below declares
+-- what the lane applies before this gate.
+-- ⚠️ THE OBJECTS UNDER TEST ARE REAL. The fold is the same three-migration
+-- chain test_csv_finalize_atomic_fold.sql pins (20260819120000 -> 130000 ->
+-- 151000, the LAST of which every fold twin mutates); the fence index and the
+-- 5-arg parent's re-base come from 20260728120000; and Part 4's API-path writer
+-- is the REAL `create_wizard_strategy` from 20260814120000, the migration whose
+-- Phase 156 narrowing is why Part 4's claim is service_role-shaped.
+-- 17-fixture-wizard-draft-writer.sql supplies only the api_keys secret-material
+-- columns that writer's INSERT names — no arm in this file reads any of them.
+-- RED-UNDER-SETUP: {"apply":["scripts/pg-lane/fixtures/01-fixture-core.sql","scripts/pg-lane/fixtures/02-fixture-sanitize-tables.sql","scripts/pg-lane/fixtures/03-fixture-compute-jobs.sql","scripts/pg-lane/fixtures/07-fixture-supabase-default-privileges.sql","scripts/pg-lane/fixtures/12-fixture-profiles-is-admin.sql","scripts/pg-lane/fixtures/13-fixture-csv-finalize-fold.sql","scripts/pg-lane/fixtures/15-fixture-auth-role.sql","scripts/pg-lane/fixtures/17-fixture-wizard-draft-writer.sql","supabase/migrations/20260522111839_csv_daily_returns.sql","supabase/migrations/20260624120000_csv_daily_returns_per_key_axis.sql","supabase/migrations/20260728120000_csv_finalize_double_submit_idempotency.sql","supabase/migrations/20260814120000_wizard_rpcs_revoke_authenticated.sql","supabase/migrations/20260819120000_csv_finalize_atomic_fold.sql","supabase/migrations/20260819130000_csv_finalize_fold_input_guards.sql","supabase/migrations/20260819151000_csv_finalize_fold_guard1_null_safe.sql"]}
 
 BEGIN;
 
@@ -167,6 +183,15 @@ BEGIN
   -- `WHERE wizard_session_id IS NOT NULL`, so a NULL here silently removes the
   -- row from the index and the double-submit below would succeed. This is
   -- finding C-2 stated as an assertion.
+  -- RED-UNDER: stop the fold writing the session id — replace
+  --            `p_wizard_session_id` with NULL in the strategies INSERT's
+  --            VALUES in 20260819151000 (the LAST definition of the fold).
+  --            Every CSV row then sits OUTSIDE the partial index and the
+  --            double-submit fence is silently gone — finding C-2 itself.
+  --            LAYERED: that migration's own post-verify (c) refuses the
+  --            apply first, so the twin's second step removes THAT term
+  --            and nothing else — the gate, not the migration, must red.
+  -- RED-UNDER-M: {"arm":"Part 1c","apply":[{"kind":"edit","file":"supabase/migrations/20260819151000_csv_finalize_fold_guard1_null_safe.sql","find":"    '{}', '{}', '{}', '{}'::text[],\n    p_wizard_session_id\n  )","replace":"    '{}', '{}', '{}', '{}'::text[],\n    NULL\n  )","occurrences":1},{"kind":"edit","file":"supabase/migrations/20260819151000_csv_finalize_fold_guard1_null_safe.sql","find":"  IF v_ins_frag !~ '\\mp_wizard_session_id\\M' THEN","replace":"  IF FALSE THEN","occurrences":1}]}
   IF v_wsid IS DISTINCT FROM session_a THEN
     RAISE EXCEPTION 'TEST FAILED (Part 1c): the finalized strategy carries wizard_session_id=% , expected % - the fold is not writing the column, so every CSV row sits OUTSIDE the partial unique index (review finding C-2)', v_wsid, session_a;
   END IF;
@@ -199,6 +224,14 @@ BEGIN
   -- `WHEN unique_violation`: if the call fails for some OTHER reason (42501
   -- auth, 22023 validation) we must report THAT, not silently accept any
   -- failure as proof of the fence.
+  -- RED-UNDER: narrow STEP 1's partial predicate in 20260728120000 to
+  --            `WHERE wizard_session_id IS NOT NULL AND source IS NULL`, so no
+  --            finalized row is covered and the fence stops biting. The
+  --            migration's own STEP 4 still passes — (a) sees the same three
+  --            columns, (a2) still finds `wizard_session_id IS NOT NULL` in the
+  --            indexdef — which is why a PREDICATE drift is the shape worth
+  --            pinning behaviourally here rather than structurally.
+  -- RED-UNDER-M: {"arm":"Part 2a","apply":[{"kind":"edit","file":"supabase/migrations/20260728120000_csv_finalize_double_submit_idempotency.sql","find":"  ON public.strategies (user_id, wizard_session_id, source)\n  WHERE wizard_session_id IS NOT NULL;","replace":"  ON public.strategies (user_id, wizard_session_id, source)\n  WHERE wizard_session_id IS NOT NULL AND source IS NULL;","occurrences":1}]}
   raised := FALSE;
   BEGIN
     v_strat_csv2 := public.finalize_csv_strategy_with_returns(
@@ -272,6 +305,12 @@ BEGIN
     RAISE EXCEPTION 'TEST FAILED (Part 3a): % strategies rows for (uid_a, session_a) after the rejected double submit, expected exactly 1', row_cnt;
   END IF;
 
+  -- RED-UNDER: stop the fold stamping the session on its SECOND write —
+  --            replace `p_wizard_session_id` with NULL in the
+  --            strategy_verifications INSERT's VALUES in 20260819151000. The
+  --            strategies row is untouched, so Part 3a still passes and only
+  --            the verification half of the rollback claim goes dark.
+  -- RED-UNDER-M: {"arm":"Part 3b","apply":[{"kind":"edit","file":"supabase/migrations/20260819151000_csv_finalize_fold_guard1_null_safe.sql","find":"    v_strategy_id, p_wizard_session_id, 'validated', 'csv_uploaded', 'csv', 'csv',","replace":"    v_strategy_id, NULL, 'validated', 'csv_uploaded', 'csv', 'csv',","occurrences":1}]}
   SELECT count(*) INTO sv_cnt
     FROM public.strategy_verifications sv
     JOIN public.strategies s ON s.id = sv.strategy_id
@@ -336,6 +375,13 @@ BEGIN
   -- reason that has nothing to do with the `source` column, and this control
   -- would report agreement forever. Assert the precondition before relying on
   -- it.
+  -- RED-UNDER: make the REAL API writer stop labelling its draft — change
+  --            `'draft', 'wizard',` to `'draft', 'api',` in
+  --            create_wizard_strategy's strategies INSERT (20260814120000, the
+  --            LAST definition). That is precisely the drift this fence exists
+  --            to catch: without it the cross-source control below would
+  --            succeed for a reason unrelated to the `source` column.
+  -- RED-UNDER-M: {"arm":"Part 4a, vacuity fence","apply":[{"kind":"edit","file":"supabase/migrations/20260814120000_wizard_rpcs_revoke_authenticated.sql","find":"    p_user_id, v_key_id, p_placeholder_name, 'draft', 'wizard',","replace":"    p_user_id, v_key_id, p_placeholder_name, 'draft', 'api',","occurrences":1}]}
   SELECT wizard_session_id, source INTO v_wsid, v_source
     FROM public.strategies WHERE id = v_strat_api;
   IF v_source IS DISTINCT FROM 'wizard' THEN
@@ -369,6 +415,17 @@ BEGIN
   -- Exactly two rows for (uid_b, session_b): one per source, each
   -- independently fenced. This is the positive statement of what the
   -- three-column key buys.
+  -- RED-UNDER: change the fold's ingestion label — `'csv'` to `'csv_import'`
+  --            in the strategies INSERT's VALUES in 20260819151000. The
+  --            double-submit fence still bites (both submits carry the SAME new
+  --            label, so Parts 2 and 3 stay green) and the two rows for
+  --            (uid_b, session_b) are still two — but neither is identifiable
+  --            as the CSV one, which is the second half of what the
+  --            three-column key buys.
+  --            NEUTERS Part 1b: that arm reads the same label directly and
+  --            would red first. Neutering it is what makes THIS arm the first
+  --            failure; it is not a claim that Part 1b is redundant.
+  -- RED-UNDER-M: {"arm":"Part 4c","apply":[{"kind":"edit","file":"supabase/migrations/20260819151000_csv_finalize_fold_guard1_null_safe.sql","find":"    p_user_id, p_strategy_name, p_terminal_status, 'csv',","replace":"    p_user_id, p_strategy_name, p_terminal_status, 'csv_import',","occurrences":1}],"neuter":[{"arm":"Part 1b"}]}
   SELECT count(*) INTO row_cnt
     FROM public.strategies
    WHERE user_id = uid_b AND wizard_session_id = session_b;
