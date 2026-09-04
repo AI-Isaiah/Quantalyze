@@ -165,11 +165,26 @@ DECLARE
   session_2 UUID := '7e7e7e7e-0000-4000-8000-000000000002';
   row_cnt   INTEGER;
 BEGIN
-  INSERT INTO strategy_verifications
-    (strategy_id, wizard_session_id, status, trust_tier, flow_type, source)
-  VALUES
-    (strat_r, session_1, 'draft', 'api_verified', 'resync', 'binance'),
-    (strat_r, session_2, 'draft', 'api_verified', 'resync', 'binance');
+  -- The INSERT is wrapped in the SAME `BEGIN ... EXCEPTION WHEN unique_violation`
+  -- idiom assertion (c) below already uses, for the MIRROR-IMAGE reason. (c)
+  -- needs the handler because the collision it describes is the PASS; (b) needs
+  -- it because the collision is the FAILURE -- and an UNHANDLED 23505 here
+  -- aborts psql with a raw driver error before this arm can name itself, so the
+  -- one production change this assertion exists to refuse would be
+  -- indistinguishable from any other crash. Phase 164.4 measured exactly that.
+  BEGIN
+    INSERT INTO strategy_verifications
+      (strategy_id, wizard_session_id, status, trust_tier, flow_type, source)
+    VALUES
+      (strat_r, session_1, 'draft', 'api_verified', 'resync', 'binance'),
+      (strat_r, session_2, 'draft', 'api_verified', 'resync', 'binance');
+  EXCEPTION
+    WHEN unique_violation THEN
+      RESET ROLE;
+      RAISE EXCEPTION
+        'TEST FAILED (b): two draft strategy_verifications rows for strategy % with DISTINCT wizard_session_ids (%, %) collided on a unique violation, but distinct sessions must insert cleanly. The onboard fence has to stay tenant-scoped as (strategy_id, wizard_session_id) -- narrowed to (strategy_id) alone, two DISTINCT wizard sessions can no longer both hold a draft, which is exactly the property that lets a fresh-uuid4 resync retry mint a duplicate DRAFT and therefore exactly the property the Python resync pre-check is load-bearing against.',
+        strat_r, session_1, session_2;
+  END;
 
   SELECT count(*) INTO row_cnt
     FROM strategy_verifications
