@@ -82,6 +82,37 @@
 -- Usage:
 --   psql "$TEST_SUPABASE_DB_URL" -v ON_ERROR_STOP=1 -f \
 --     supabase/tests/test_strategy_verifications_wizard_session_tenant_scope.sql
+--
+-- ⭐ RED-UNDER ANNOTATIONS (Phase 164.4). Each assertion below carries a prose
+-- `RED-UNDER:` naming the smallest production change that makes it fail, and a
+-- machine-readable `RED-UNDER-M:` twin the mutation runner applies on a
+-- throwaway pg-lane cluster to PROVE it reds on its OWN arm, then restores
+-- GREEN. Schema: scripts/mutation-runner/GRAMMAR.md. The line below declares
+-- what the lane applies before this gate.
+--
+-- ⛔ TWO MIGRATIONS THIS FILE'S OWN HEADER NAMES ARE ABSENT FROM THE APPLY LIST,
+-- and NOT by choice. Both die on a vanilla PostgreSQL 16 cluster before they
+-- reach a single statement, because both put `SAVEPOINT` / `ROLLBACK TO
+-- SAVEPOINT` inside a PL/pgSQL `DO $$ … $$;` body — a construct PL/pgSQL has no
+-- grammar for, so the body fails to PARSE. MEASURED on the lane 2026-09-04:
+--   20260417031851_user_app_roles.sql:433  ERROR 42601 syntax error at or near "TO"
+--   20260510173005_process_key_long_idempotency_drain.sql:397   (same error)
+-- They are the second and third members of the class plan 164.4-00 booked as
+-- `[REDUNDER-SAVEPOINT]` (the first is 20260416201929_audit_log_hardening.sql).
+-- Editing a migration to work around it is forbidden — a migration is
+-- production — so the lane substitutes for what each provided:
+--   * 20260417031851 defines `public.current_user_has_app_role(TEXT[])`, which
+--     the strategy_verifications_admin_select policy at 20260501055202:128 calls.
+--     20-fixture-app-role-helper.sql carries the real body, not a `RETURN FALSE`
+--     stub, precisely so the admin policy stays falsifiable — see that file.
+--   * 20260510173005 creates the OLD single-column index. Its absence is the one
+--     honest weakening this list carries: STEP 2 of 20260726000225
+--     (`DROP INDEX IF EXISTS strategy_verifications_wizard_session_id_unique_idx`)
+--     no-ops on the lane, so A5's baseline zero is "never created" rather than
+--     "created then dropped". A5's twin therefore CREATES an index under that
+--     name rather than neutering the DROP, and the arm is proven falsifiable
+--     either way. Recorded, not papered over.
+-- RED-UNDER-SETUP: {"apply":["scripts/pg-lane/fixtures/01-fixture-core.sql","scripts/pg-lane/fixtures/07-fixture-supabase-default-privileges.sql","scripts/pg-lane/fixtures/15-fixture-auth-role.sql","scripts/pg-lane/fixtures/20-fixture-app-role-helper.sql","supabase/migrations/20260501055202_strategy_verifications.sql","supabase/migrations/20260501055213_strategy_verifications_rls_polish.sql","supabase/migrations/20260510172738_strategy_verifications_state_machine.sql","supabase/migrations/20260726000225_strategy_verifications_tenant_scope_uniq.sql"]}
 
 -- --------------------------------------------------------------------------
 -- Defensive pre-clean (a prior aborted run may have committed synthetic rows).
@@ -166,6 +197,16 @@ BEGIN
   -- which bypasses RLS. Uniqueness is enforced by an INDEX, not by RLS, so the
   -- role cannot mask or manufacture the result either way - it is set here only
   -- so the test mirrors the real caller.
+  -- RED-UNDER: re-narrow STEP 1 of migration 20260726000225 to the single
+  --            column it superseded — `ON strategy_verifications
+  --            (wizard_session_id)`. That is literally the pre-PYAPI-01 shape,
+  --            and it makes tenant B's insert raise 23505 on a value B never
+  --            chose. LAYERED: the migration's own STEP 3(a) pins the column
+  --            list against a literal array and would ABORT THE APPLY before
+  --            the gate ran, so the second edit re-baselines that pin. It is
+  --            the honest layering — a migration that shipped the narrow index
+  --            would have shipped the matching assertion too.
+  -- RED-UNDER-M: {"arm":"A1","apply":[{"kind":"edit","file":"supabase/migrations/20260726000225_strategy_verifications_tenant_scope_uniq.sql","find":"  ON strategy_verifications (strategy_id, wizard_session_id);","replace":"  ON strategy_verifications (wizard_session_id);","occurrences":1},{"kind":"edit","file":"supabase/migrations/20260726000225_strategy_verifications_tenant_scope_uniq.sql","find":"ARRAY['strategy_id', 'wizard_session_id']::TEXT[]","replace":"ARRAY['wizard_session_id']::TEXT[]","occurrences":1}]}
   SET LOCAL ROLE service_role;
 
   INSERT INTO strategy_verifications
