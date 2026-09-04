@@ -39,6 +39,29 @@ import { USER_EXPORT_TABLES } from "@/lib/gdpr-export-manifest";
 
 const REPO_ROOT = process.cwd();
 const HOOK_SCRIPT = join(REPO_ROOT, "scripts", "check-gdpr-export-coverage.ts");
+
+/**
+ * The REPO'S OWN pinned tsx, by absolute path — never `npx tsx`.
+ *
+ * ⛔ Every spawn below runs with `cwd` set to a `mkdtemp` scratch repo that has
+ * NO `node_modules`. `npx` resolves a binary by walking up from cwd, so from a
+ * temp dir it finds nothing local and falls back to FETCHING tsx from the
+ * registry. MEASURED 2026-09-04 ([CI-GDPR-TIMEOUT-01]): from such a cwd
+ * `npx tsx --version` took 0.96s and reported **v4.23.13**, while this binary
+ * took 0.082s and reported **v4.23.0** — the version package.json actually
+ * pins. So the old form was both ~12x slower and exercising a DIFFERENT,
+ * network-fetched tsx than the one this repo depends on.
+ *
+ * The cost is unbounded rather than merely large: on a CI runner the
+ * `~/.npm/_npx` cache is cold, so the fallback is a real network install. That
+ * is what pushed these tests past their 30s deadline on slow runners and
+ * reddened `frontend-test` -> `frontend` intermittently, on main as well as on
+ * branches (proven by control PR #739 on main's unchanged tree).
+ *
+ * An absolute path keeps resolution independent of `cwd`, which is the whole
+ * point — do not "simplify" this back to a bare `tsx` or to `npx`.
+ */
+const TSX_BIN = join(REPO_ROOT, "node_modules", ".bin", "tsx");
 // B13: USER_EXPORT_TABLES (and the redactors the hook's checks reference)
 // live in the server-only-free manifest MODULE, which the hook imports as
 // typed data. The mutation tests below therefore edit THIS file, not
@@ -145,7 +168,7 @@ function setupScratchRepo(
 
 describe("scripts/check-gdpr-export-coverage.ts", () => {
   it("exits 0 against the current checked-in manifest", () => {
-    const result = spawnSync("npx", ["tsx", HOOK_SCRIPT], {
+    const result = spawnSync(TSX_BIN, [HOOK_SCRIPT], {
       encoding: "utf8",
       cwd: REPO_ROOT,
     });
@@ -180,8 +203,8 @@ describe("scripts/check-gdpr-export-coverage.ts", () => {
       hook: mutatedHook,
     });
     const result = spawnSync(
-      "npx",
-      ["tsx", "scripts/check-gdpr-export-coverage.ts"],
+      TSX_BIN,
+      ["scripts/check-gdpr-export-coverage.ts"],
       { encoding: "utf8", cwd: scratch },
     );
     expect(result.status).toBe(1);
@@ -209,10 +232,14 @@ describe("scripts/check-gdpr-export-coverage.ts", () => {
       manifestModule: mutated,
     });
 
-    const result = spawnSync("npx", ["tsx", "scripts/check-gdpr-export-coverage.ts"], {
-      encoding: "utf8",
-      cwd: scratch,
-    });
+    const result = spawnSync(
+      TSX_BIN,
+      ["scripts/check-gdpr-export-coverage.ts"],
+      {
+        encoding: "utf8",
+        cwd: scratch,
+      },
+    );
     expect(result.status).toBe(1);
     expect(result.stderr).toContain("H-0455/H-0457");
     expect(result.stderr).toContain("xxx_orphan_table");
@@ -254,15 +281,17 @@ describe("scripts/check-gdpr-export-coverage.ts", () => {
     });
 
     const result = spawnSync(
-      "npx",
-      ["tsx", "scripts/check-gdpr-export-coverage.ts"],
+      TSX_BIN,
+      ["scripts/check-gdpr-export-coverage.ts"],
       { encoding: "utf8", cwd: scratch },
     );
     expect(result.status).toBe(1);
     // Either the H-0455/H-0457 check OR the red-team #9 sub-check
     // surfaces this. The injected entry's source_table is missing
     // from every matrix; both checks ought to point at it.
-    expect(result.stderr).toMatch(/xxx_renamed_source|xxx_synthetic_projection/);
+    expect(result.stderr).toMatch(
+      /xxx_renamed_source|xxx_synthetic_projection/,
+    );
   }, 30_000);
 
   it("red-team #9: exits 1 when SANITIZE_PARITY_ALLOWLIST has a stale entry", () => {
@@ -286,8 +315,8 @@ describe("scripts/check-gdpr-export-coverage.ts", () => {
     const scratch = setupScratchRepo("gdpr-rt9-stale-", { hook: mutatedHook });
 
     const result = spawnSync(
-      "npx",
-      ["tsx", "scripts/check-gdpr-export-coverage.ts"],
+      TSX_BIN,
+      ["scripts/check-gdpr-export-coverage.ts"],
       { encoding: "utf8", cwd: scratch },
     );
     expect(result.status).toBe(1);
@@ -328,8 +357,8 @@ describe("scripts/check-gdpr-export-coverage.ts", () => {
     );
 
     const result = spawnSync(
-      "npx",
-      ["tsx", "scripts/check-gdpr-export-coverage.ts"],
+      TSX_BIN,
+      ["scripts/check-gdpr-export-coverage.ts"],
       { encoding: "utf8", cwd: scratch },
     );
 
@@ -355,10 +384,14 @@ describe("scripts/check-gdpr-export-coverage.ts", () => {
       manifestModule: mutated,
     });
 
-    const result = spawnSync("npx", ["tsx", "scripts/check-gdpr-export-coverage.ts"], {
-      encoding: "utf8",
-      cwd: scratch,
-    });
+    const result = spawnSync(
+      TSX_BIN,
+      ["scripts/check-gdpr-export-coverage.ts"],
+      {
+        encoding: "utf8",
+        cwd: scratch,
+      },
+    );
 
     expect(result.status).toBe(1);
     expect(result.stderr).toContain("user_notes");
@@ -383,7 +416,9 @@ describe("scripts/check-gdpr-export-coverage.ts", () => {
       /create\s+table\s+(?:if\s+not\s+exists\s+)?(?:public\.)?user_notes\b/i;
     const declaringMigrations = readdirSync(migDir)
       .filter((f) => f.endsWith(".sql"))
-      .filter((f) => createUserNotesRe.test(readFileSync(join(migDir, f), "utf8")));
+      .filter((f) =>
+        createUserNotesRe.test(readFileSync(join(migDir, f), "utf8")),
+      );
     // Exactly one migration should declare the table; if zero, the WHY of this
     // test (and the hardcoded sibling) is moot and we want a loud failure.
     expect(declaringMigrations.length).toBeGreaterThanOrEqual(1);
@@ -400,8 +435,8 @@ describe("scripts/check-gdpr-export-coverage.ts", () => {
     });
 
     const result = spawnSync(
-      "npx",
-      ["tsx", "scripts/check-gdpr-export-coverage.ts"],
+      TSX_BIN,
+      ["scripts/check-gdpr-export-coverage.ts"],
       { encoding: "utf8", cwd: scratch },
     );
     expect(result.status).toBe(1);
@@ -419,51 +454,45 @@ describe("scripts/check-gdpr-export-coverage.ts", () => {
   // behaviour; both currently FAIL against the buggy regex, so they are
   // `it.fails` SURFACE markers pending a production-code fix.
 
-  it(
-    "H-1019: a table whose ONLY `user_id ... REFERENCES auth.users` text is in a SQL COMMENT must NOT be flagged user-owned",
-    () => {
-      // `userColumnRe.test(body)` runs against the ENTIRE CREATE TABLE
-      // body as a single string, so a `-- comment` line that copies a
-      // reference phrase (e.g. documenting a sibling table's FK) makes
-      // the regex match even though the table has no real user column.
-      // Effect: a sister table with no user FK is falsely demanded in
-      // USER_EXPORT_TABLES (a phantom coverage gap), and the parser's
-      // signal is no longer trustworthy. CORRECT: comment text must not
-      // count — this table has no real user-id column.
-      const sql = [
-        "CREATE TABLE sister_table (",
-        "  id UUID PRIMARY KEY,",
-        "  -- mirrors the user_id UUID REFERENCES auth.users(id) column on the parent",
-        "  parent_ref UUID NOT NULL REFERENCES other_table(id)",
-        ");",
-        "",
-      ].join("\n");
-      const out = extractUserTablesFromMigration(sql, "20260601_comment.sql");
-      expect(out.has("sister_table")).toBe(false);
-    },
-  );
+  it("H-1019: a table whose ONLY `user_id ... REFERENCES auth.users` text is in a SQL COMMENT must NOT be flagged user-owned", () => {
+    // `userColumnRe.test(body)` runs against the ENTIRE CREATE TABLE
+    // body as a single string, so a `-- comment` line that copies a
+    // reference phrase (e.g. documenting a sibling table's FK) makes
+    // the regex match even though the table has no real user column.
+    // Effect: a sister table with no user FK is falsely demanded in
+    // USER_EXPORT_TABLES (a phantom coverage gap), and the parser's
+    // signal is no longer trustworthy. CORRECT: comment text must not
+    // count — this table has no real user-id column.
+    const sql = [
+      "CREATE TABLE sister_table (",
+      "  id UUID PRIMARY KEY,",
+      "  -- mirrors the user_id UUID REFERENCES auth.users(id) column on the parent",
+      "  parent_ref UUID NOT NULL REFERENCES other_table(id)",
+      ");",
+      "",
+    ].join("\n");
+    const out = extractUserTablesFromMigration(sql, "20260601_comment.sql");
+    expect(out.has("sister_table")).toBe(false);
+  });
 
-  it(
-    "H-1019 (also-flagged security): a user_id FK added via ALTER TABLE ADD COLUMN must be discovered",
-    () => {
-      // The scan only inspects CREATE TABLE bodies. A migration that
-      // turns an existing table into user-owned data via
-      // `ALTER TABLE ... ADD COLUMN user_id UUID REFERENCES auth.users`
-      // is invisible to it — so the GDPR manifest gap goes undetected
-      // and the Art. 15 export silently omits the table's rows. CORRECT:
-      // the late-added user column makes `late_added` user-owned and the
-      // scan must surface it.
-      const sql = [
-        "CREATE TABLE late_added (",
-        "  id UUID PRIMARY KEY",
-        ");",
-        "ALTER TABLE late_added ADD COLUMN user_id UUID NOT NULL REFERENCES auth.users(id);",
-        "",
-      ].join("\n");
-      const out = extractUserTablesFromMigration(sql, "20260602_alter.sql");
-      expect(out.has("late_added")).toBe(true);
-    },
-  );
+  it("H-1019 (also-flagged security): a user_id FK added via ALTER TABLE ADD COLUMN must be discovered", () => {
+    // The scan only inspects CREATE TABLE bodies. A migration that
+    // turns an existing table into user-owned data via
+    // `ALTER TABLE ... ADD COLUMN user_id UUID REFERENCES auth.users`
+    // is invisible to it — so the GDPR manifest gap goes undetected
+    // and the Art. 15 export silently omits the table's rows. CORRECT:
+    // the late-added user column makes `late_added` user-owned and the
+    // scan must surface it.
+    const sql = [
+      "CREATE TABLE late_added (",
+      "  id UUID PRIMARY KEY",
+      ");",
+      "ALTER TABLE late_added ADD COLUMN user_id UUID NOT NULL REFERENCES auth.users(id);",
+      "",
+    ].join("\n");
+    const out = extractUserTablesFromMigration(sql, "20260602_alter.sql");
+    expect(out.has("late_added")).toBe(true);
+  });
 
   // H-1020 — double-quoted-identifier escape vector. The CREATE/ALTER
   // table-name regexes matched only a bare `([a-z0-9_]+)`, which does
@@ -474,84 +503,81 @@ describe("scripts/check-gdpr-export-coverage.ts", () => {
   // pure helper directly and assert the quoted table is now DETECTED as
   // user-owned. They FAIL against the pre-fix bare-identifier regex.
 
-  it(
-    "H-1020: a CREATE TABLE with a DOUBLE-QUOTED identifier whose body has a user_id FK must be discovered",
-    () => {
-      // `CREATE TABLE "quoted_user_tbl" (...)` is valid DDL. The bare
-      // `([a-z0-9_]+)` table-name capture could not match the quoted
-      // form, so the table silently dodged the coverage gate. CORRECT:
-      // the quoted table has a real user_id FK to auth.users and must be
-      // flagged (keyed unquoted, lowercase, to match the rest of the
-      // script).
-      const sql = [
-        'CREATE TABLE "quoted_user_tbl" (',
-        "  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),",
-        "  user_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,",
-        "  note TEXT",
-        ");",
-        "",
-      ].join("\n");
-      const out = extractUserTablesFromMigration(sql, "20260603_quoted_create.sql");
-      // Keyed by the UNQUOTED name (no embedded quote chars).
-      expect(out.has("quoted_user_tbl")).toBe(true);
-    },
-  );
+  it("H-1020: a CREATE TABLE with a DOUBLE-QUOTED identifier whose body has a user_id FK must be discovered", () => {
+    // `CREATE TABLE "quoted_user_tbl" (...)` is valid DDL. The bare
+    // `([a-z0-9_]+)` table-name capture could not match the quoted
+    // form, so the table silently dodged the coverage gate. CORRECT:
+    // the quoted table has a real user_id FK to auth.users and must be
+    // flagged (keyed unquoted, lowercase, to match the rest of the
+    // script).
+    const sql = [
+      'CREATE TABLE "quoted_user_tbl" (',
+      "  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),",
+      "  user_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,",
+      "  note TEXT",
+      ");",
+      "",
+    ].join("\n");
+    const out = extractUserTablesFromMigration(
+      sql,
+      "20260603_quoted_create.sql",
+    );
+    // Keyed by the UNQUOTED name (no embedded quote chars).
+    expect(out.has("quoted_user_tbl")).toBe(true);
+  });
 
-  it(
-    "H-1020: a user_id FK added via ALTER TABLE on a DOUBLE-QUOTED identifier must be discovered",
-    () => {
-      // Same escape vector on the H-1019 ALTER ... ADD COLUMN path:
-      // `ALTER TABLE "quoted_late" ADD COLUMN user_id UUID REFERENCES
-      // auth.users(id)`. The bare table-name capture missed the quoted
-      // form, so a late-added user column on a quoted table escaped the
-      // gate. CORRECT: the table is now flagged user-owned, keyed
-      // unquoted.
-      const sql = [
-        'CREATE TABLE "quoted_late" (',
-        "  id UUID PRIMARY KEY",
-        ");",
-        'ALTER TABLE "quoted_late" ADD COLUMN user_id UUID NOT NULL REFERENCES auth.users(id);',
-        "",
-      ].join("\n");
-      const out = extractUserTablesFromMigration(sql, "20260604_quoted_alter.sql");
-      expect(out.has("quoted_late")).toBe(true);
-    },
-  );
+  it("H-1020: a user_id FK added via ALTER TABLE on a DOUBLE-QUOTED identifier must be discovered", () => {
+    // Same escape vector on the H-1019 ALTER ... ADD COLUMN path:
+    // `ALTER TABLE "quoted_late" ADD COLUMN user_id UUID REFERENCES
+    // auth.users(id)`. The bare table-name capture missed the quoted
+    // form, so a late-added user column on a quoted table escaped the
+    // gate. CORRECT: the table is now flagged user-owned, keyed
+    // unquoted.
+    const sql = [
+      'CREATE TABLE "quoted_late" (',
+      "  id UUID PRIMARY KEY",
+      ");",
+      'ALTER TABLE "quoted_late" ADD COLUMN user_id UUID NOT NULL REFERENCES auth.users(id);',
+      "",
+    ].join("\n");
+    const out = extractUserTablesFromMigration(
+      sql,
+      "20260604_quoted_alter.sql",
+    );
+    expect(out.has("quoted_late")).toBe(true);
+  });
 
-  it(
-    "H-1020: UNquoted-identifier behavior is unchanged after the group-index shift",
-    () => {
-      // Guard against the capture-index shift (group 1 → group 2 for the
-      // bare name; body/columnSpec shifted to group 3) regressing the
-      // common UNquoted path. Both a bare CREATE and a bare ALTER must
-      // still be detected exactly as before.
-      const createSql = [
-        "CREATE TABLE bare_create_tbl (",
-        "  id UUID PRIMARY KEY,",
-        "  user_id UUID NOT NULL REFERENCES auth.users(id)",
-        ");",
-        "",
-      ].join("\n");
-      const createOut = extractUserTablesFromMigration(
-        createSql,
-        "20260605_bare_create.sql",
-      );
-      expect(createOut.has("bare_create_tbl")).toBe(true);
+  it("H-1020: UNquoted-identifier behavior is unchanged after the group-index shift", () => {
+    // Guard against the capture-index shift (group 1 → group 2 for the
+    // bare name; body/columnSpec shifted to group 3) regressing the
+    // common UNquoted path. Both a bare CREATE and a bare ALTER must
+    // still be detected exactly as before.
+    const createSql = [
+      "CREATE TABLE bare_create_tbl (",
+      "  id UUID PRIMARY KEY,",
+      "  user_id UUID NOT NULL REFERENCES auth.users(id)",
+      ");",
+      "",
+    ].join("\n");
+    const createOut = extractUserTablesFromMigration(
+      createSql,
+      "20260605_bare_create.sql",
+    );
+    expect(createOut.has("bare_create_tbl")).toBe(true);
 
-      const alterSql = [
-        "CREATE TABLE bare_alter_tbl (",
-        "  id UUID PRIMARY KEY",
-        ");",
-        "ALTER TABLE bare_alter_tbl ADD COLUMN user_id UUID NOT NULL REFERENCES auth.users(id);",
-        "",
-      ].join("\n");
-      const alterOut = extractUserTablesFromMigration(
-        alterSql,
-        "20260606_bare_alter.sql",
-      );
-      expect(alterOut.has("bare_alter_tbl")).toBe(true);
-    },
-  );
+    const alterSql = [
+      "CREATE TABLE bare_alter_tbl (",
+      "  id UUID PRIMARY KEY",
+      ");",
+      "ALTER TABLE bare_alter_tbl ADD COLUMN user_id UUID NOT NULL REFERENCES auth.users(id);",
+      "",
+    ].join("\n");
+    const alterOut = extractUserTablesFromMigration(
+      alterSql,
+      "20260606_bare_alter.sql",
+    );
+    expect(alterOut.has("bare_alter_tbl")).toBe(true);
+  });
 
   // Finding 4 (red-team, 2026-05-25) — quoted-AND-schema-qualified escape
   // vector. The H-1020 fix added quoted-bare-identifier support, but a
@@ -564,84 +590,72 @@ describe("scripts/check-gdpr-export-coverage.ts", () => {
   // is keyed unqualified + unquoted. These drive the exported pure helper
   // directly and FAIL against the pre-Finding-4 regex.
 
-  it(
-    "Finding 4: a CREATE TABLE with a quoted-AND-schema-qualified name (\"public\".\"x\") and a user_id FK must be discovered",
-    () => {
-      const sql = [
-        'CREATE TABLE "public"."secret_data" (',
-        "  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),",
-        "  user_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,",
-        "  note TEXT",
-        ");",
-        "",
-      ].join("\n");
-      const out = extractUserTablesFromMigration(
-        sql,
-        "20260607_quoted_qualified_create.sql",
-      );
-      // Keyed by the UNQUALIFIED, UNQUOTED table name.
-      expect(out.has("secret_data")).toBe(true);
-      // The schema name must NOT leak in as a table key.
-      expect(out.has("public")).toBe(false);
-    },
-  );
+  it('Finding 4: a CREATE TABLE with a quoted-AND-schema-qualified name ("public"."x") and a user_id FK must be discovered', () => {
+    const sql = [
+      'CREATE TABLE "public"."secret_data" (',
+      "  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),",
+      "  user_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,",
+      "  note TEXT",
+      ");",
+      "",
+    ].join("\n");
+    const out = extractUserTablesFromMigration(
+      sql,
+      "20260607_quoted_qualified_create.sql",
+    );
+    // Keyed by the UNQUALIFIED, UNQUOTED table name.
+    expect(out.has("secret_data")).toBe(true);
+    // The schema name must NOT leak in as a table key.
+    expect(out.has("public")).toBe(false);
+  });
 
-  it(
-    "Finding 4: a CREATE TABLE with a bare-schema + quoted-table name (app.\"x\") and a user_id FK must be discovered",
-    () => {
-      const sql = [
-        'CREATE TABLE app."secret5" (',
-        "  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),",
-        "  user_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE",
-        ");",
-        "",
-      ].join("\n");
-      const out = extractUserTablesFromMigration(
-        sql,
-        "20260608_bareschema_quoted_create.sql",
-      );
-      expect(out.has("secret5")).toBe(true);
-      expect(out.has("app")).toBe(false);
-    },
-  );
+  it('Finding 4: a CREATE TABLE with a bare-schema + quoted-table name (app."x") and a user_id FK must be discovered', () => {
+    const sql = [
+      'CREATE TABLE app."secret5" (',
+      "  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),",
+      "  user_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE",
+      ");",
+      "",
+    ].join("\n");
+    const out = extractUserTablesFromMigration(
+      sql,
+      "20260608_bareschema_quoted_create.sql",
+    );
+    expect(out.has("secret5")).toBe(true);
+    expect(out.has("app")).toBe(false);
+  });
 
-  it(
-    "Finding 4: ALTER TABLE on a quoted-AND-schema-qualified name (\"public\".\"x\") adding a user_id FK must be discovered",
-    () => {
-      const sql = [
-        'CREATE TABLE "public"."secret_late" (',
-        "  id UUID PRIMARY KEY",
-        ");",
-        'ALTER TABLE "public"."secret_late" ADD COLUMN user_id UUID NOT NULL REFERENCES auth.users(id);',
-        "",
-      ].join("\n");
-      const out = extractUserTablesFromMigration(
-        sql,
-        "20260609_quoted_qualified_alter.sql",
-      );
-      expect(out.has("secret_late")).toBe(true);
-      expect(out.has("public")).toBe(false);
-    },
-  );
+  it('Finding 4: ALTER TABLE on a quoted-AND-schema-qualified name ("public"."x") adding a user_id FK must be discovered', () => {
+    const sql = [
+      'CREATE TABLE "public"."secret_late" (',
+      "  id UUID PRIMARY KEY",
+      ");",
+      'ALTER TABLE "public"."secret_late" ADD COLUMN user_id UUID NOT NULL REFERENCES auth.users(id);',
+      "",
+    ].join("\n");
+    const out = extractUserTablesFromMigration(
+      sql,
+      "20260609_quoted_qualified_alter.sql",
+    );
+    expect(out.has("secret_late")).toBe(true);
+    expect(out.has("public")).toBe(false);
+  });
 
-  it(
-    "Finding 4: ALTER TABLE on a bare-schema + quoted-table name (app.\"x\") adding a user_id FK must be discovered",
-    () => {
-      const sql = [
-        'CREATE TABLE app."secret_late5" (',
-        "  id UUID PRIMARY KEY",
-        ");",
-        'ALTER TABLE app."secret_late5" ADD COLUMN user_id UUID NOT NULL REFERENCES auth.users(id);',
-        "",
-      ].join("\n");
-      const out = extractUserTablesFromMigration(
-        sql,
-        "20260610_bareschema_quoted_alter.sql",
-      );
-      expect(out.has("secret_late5")).toBe(true);
-      expect(out.has("app")).toBe(false);
-    },
-  );
+  it('Finding 4: ALTER TABLE on a bare-schema + quoted-table name (app."x") adding a user_id FK must be discovered', () => {
+    const sql = [
+      'CREATE TABLE app."secret_late5" (',
+      "  id UUID PRIMARY KEY",
+      ");",
+      'ALTER TABLE app."secret_late5" ADD COLUMN user_id UUID NOT NULL REFERENCES auth.users(id);',
+      "",
+    ].join("\n");
+    const out = extractUserTablesFromMigration(
+      sql,
+      "20260610_bareschema_quoted_alter.sql",
+    );
+    expect(out.has("secret_late5")).toBe(true);
+    expect(out.has("app")).toBe(false);
+  });
 });
 
 /**
@@ -919,9 +933,9 @@ describe("B3: EXCLUDED_TABLES cannot silence a user-owned table", () => {
       const owned = CASCADE_OWNED.get(table);
       if (!owned) continue;
       if (
-        (CLASSES_INCOMPATIBLE_WITH_DIRECT_OWNERSHIP as readonly string[]).includes(
-          meta.class,
-        )
+        (
+          CLASSES_INCOMPATIBLE_WITH_DIRECT_OWNERSHIP as readonly string[]
+        ).includes(meta.class)
       ) {
         offenders.push(
           `${table} (class="${meta.class}", owner column "${owned.ownerColumn}" ` +
@@ -959,7 +973,8 @@ describe("B3: EXCLUDED_TABLES cannot silence a user-owned table", () => {
         "its rows ARE exported via a parent — but the manifest does not list " +
         "them. The rationale is therefore false and the rows are exported " +
         "nowhere. Either add the manifest entry the class claims exists, or pick " +
-        "the class that is actually true. Unbacked: " + unbacked.join(", "),
+        "the class that is actually true. Unbacked: " +
+        unbacked.join(", "),
     ).toEqual([]);
     // Guard the guard: `scoped` must be a class in live use, or the loop above
     // is vacuous and would stay green if the check were deleted.

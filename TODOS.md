@@ -1177,6 +1177,35 @@ true for 146 and half of 142–145, and **false for 141**.
       an earlier assertion consumes its precondition is an ORDERING defect, not a grammar limit.**
       Check assertion order before reaching for a waiver.
 
+- [x] **`[CI-GDPR-TIMEOUT-01]` ✅ FIXED 2026-09-04 — `gdpr-export-coverage-hook.test.ts` spawned
+      `npx tsx` from a scratch cwd with NO `node_modules`, so npx FETCHED tsx from the registry.** MEASURED 2026-09-04: failed on three
+      consecutive runs of PR #738 (`Test timed out in 30000ms`), and **failed IDENTICALLY on a
+      CONTROL PR (#739) carrying main's tree UNCHANGED via an empty commit** (run 33856182272). So
+      it is NOT a regression from any branch — it is runner-speed dependence. The control's
+      `frontend-test (1)` shard took **714 s** where the same shard on PR #738 took **356 s**: a 2x
+      spread on identical work. The test (`src/__tests__/gdpr-export-coverage-hook.test.ts:256`)
+      `spawnSync`s `npx tsx scripts/check-gdpr-export-coverage.ts` inside a scratch repo, twice,
+      under a `30_000` ms timeout; on a slow runner the spawn alone eats it.
+      ⛔ It reddened `frontend-test` and therefore the `frontend` aggregator, so **main itself was in
+      this state** — every subsequent PR inherited an advisory-red board where a real failure could
+      hide behind the noise.
+      ⭐ **ROOT CAUSE, and it was not slowness.** All 8 spawns ran with `cwd` set to a `mkdtemp`
+      scratch repo containing no `node_modules`. `npx` resolves by walking up from cwd, finds
+      nothing, and falls back to FETCHING tsx from the registry. MEASURED from such a cwd:
+      `npx tsx --version` = **0.96 s reporting v4.23.13**, the repo's own
+      `node_modules/.bin/tsx` = **0.082 s reporting v4.23.0** — the version package.json pins. So
+      the test was ~12x slower per spawn AND exercising a different, unpinned, network-fetched tsx.
+      On CI the `~/.npm/_npx` cache is cold, making that fallback a real network install: unbounded,
+      not merely slow. **Same mechanism as the worktree trap in memory — npx silently downloads a
+      DIFFERENT version instead of failing.**
+      ✅ **Fixed** by spawning `TSX_BIN` (an absolute path to the repo's pinned binary, resolution
+      independent of cwd) in all 8 sites; the 30 s deadlines were left untouched because they were
+      never the defect. Measured A/B on the same 36 assertions: **tests 8.12 s -> 1.93 s** (4.2x),
+      and that is with a WARM npx cache — the CI win is larger.
+      ⚠️ Diagnostic trap worth keeping: `gh run view --log` **truncates** and cut the two minutes
+      containing the `Failed Tests` block, so the first three investigations read this as a HANG
+      with no summary. Use `gh api repos/<owner>/<repo>/actions/jobs/<id>/logs` for the full text.
+
 - [ ] **`[REDUNDER-SWEEPCOPY]` `test_scenario_downgrade_sweep.sql` re-implements the sweep script
       it claims to prove, and nothing enforces they agree.** MEASURED 2026-09-04 (plan 164.4-08)
       while authoring its twins. The artifact under test is
