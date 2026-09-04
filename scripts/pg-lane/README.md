@@ -155,6 +155,91 @@ hand-apply.
 The 103-arm `strategy_shares` gate needed nothing added to `01`/`02`; `03` and
 `04` exist only for the gates the 164.4 backfill annotates.
 
+## pg_cron on the lane (Phase 164.4.1)
+
+Every lane preloads `pg_cron`. This is substrate, not an option: `pg_cron`
+refuses to load outside `shared_preload_libraries`, and that GUC can only be set
+at postmaster start — which the lane performs exactly once per invocation.
+
+**Why the lane needs it at all.** Five idiom gate files probe `pg_extension` for
+`pg_cron`, and **three of them read `cron.job.command` as an ORACLE** for the
+deployed job body. Without the extension those files cannot be falsified at all;
+they were parked as `lane-blocked:` for exactly that reason (`[REDUNDER-PGCRON]`)
+until this phase retired the deferral. A shim providing just a `cron` schema was
+costed and rejected **by measurement**: to satisfy those oracles it would have to
+reimplement `cron.schedule()` faithfully enough to persist a command body
+verbatim — an oracle written by the same hand as the claim — while the real
+extension costs nothing measurable (below).
+
+**The three GUCs on the single `pg_ctl -o` string**, each with its measured
+reason:
+
+| Setting | Why |
+|---|---|
+| `shared_preload_libraries=pg_cron` | the only way pg_cron loads; the lane starts its postmaster once, so `-o` needs no restart and no `postgresql.conf` edit |
+| `cron.database_name=postgres` | the lane's database IS `postgres`, which is also pg_cron's current default — **stated rather than defaulted**, so an upstream default change cannot move the worker's target with nothing here to notice |
+| `cron.max_running_jobs=0` | the GUC's minimum is `0` in pg_cron 1.6.7 and at `0` the launcher never starts a job. Without it, a lane whose apply list schedules a `*/15 * * * *` reaper and happens to straddle `:00/:15/:30/:45` would run that job body concurrently with the gate. The gates read `cron.job` **rows**; no gate needs a tick |
+
+**⛔ The lane does NOT run `CREATE EXTENSION`.** A gate declares that need itself
+by listing `supabase/migrations/20260513094906_enable_pg_cron.sql` in its
+`RED-UNDER-SETUP` apply list — the corpus discipline is that a gate declares what
+it needs, and the repo already carries the platform's real enabling migration, so
+a fixture standing in for it would be a stand-in for something real. The preload
+is the one half that *cannot* live in an apply list, so it is the only half that
+is substrate. Both halves are required: preload without `CREATE EXTENSION` leaves
+`pg_extension` empty and the gates still RAISE; `CREATE EXTENSION` without the
+preload fails outright.
+
+**What "absent" looks like.** The lane FAILS; it never degrades and never
+installs anything itself. Two layers produce one message — a pre-start check
+(where `pg_config` is available) that refuses before `initdb`, and a read of the
+postmaster's own `could not access file "pg_cron"` out of `pg.log` (the path an
+ubuntu runner with no `pg_config` takes):
+
+```
+ERROR: pg_cron is NOT available to the PostgreSQL server binaries this lane booted.
+  missing:         /opt/homebrew/opt/postgresql@16/lib/postgresql/pg_cron.so (and pg_cron.dylib) — neither exists
+  server binaries: /opt/homebrew/opt/postgresql@16/bin
+  ...
+  ubuntu: sudo apt-get install -y postgresql-$(pg_config --version | awk '{print $2}' | cut -d. -f1)-cron   # 16 on ubuntu-latest
+  macOS:  bash scripts/pg-lane/install-pg-cron-macos.sh
+```
+
+**Provisioning is the host's job, and it has two routes:**
+
+| Host | Route | Version |
+|---|---|---|
+| macOS | `bash scripts/pg-lane/install-pg-cron-macos.sh` — builds the pinned upstream tag `v1.6.7` from source against the `postgresql@16` keg, sha256-verified before `make` | read it from the script's own `default_version:` print |
+| ubuntu CI | the `Provision pg_cron for the lane's PostgreSQL (Phase 164.4.1)` step in `.github/workflows/ci.yml` — `sudo apt-get install -y --no-install-recommends postgresql-16-cron` | read it from that step's `dpkg -s … Version:` print |
+
+⚠️ **A MINOR-version skew between the two hosts is expected** (macOS builds
+1.6.7 from source; ubuntu takes whatever apt serves for PG16). Both provide
+`cron.job`, `cron.schedule`, `cron.unschedule` and the `pg_extension` row, which
+is everything the gates read, and both are PostgreSQL major **16** — the property
+that matters. ⭐ Read each version from its own print above; neither is restated
+here, because a version in prose is a dated claim and these two move
+independently.
+
+⛔ Homebrew's `pg_cron` formula is not a route: it declares `postgresql@17` and
+`postgresql@18` only, so it emits no `@16` artifact, and a library built for
+another server major fails to load with a message byte-identical to "not
+installed at all".
+
+**Measured preload cost (2026-09-04, this box, macOS 16.13, `run.sh` end to end,
+3 samples each side):**
+
+| Arm | Samples (s) | Mean |
+|---|---|---|
+| BEFORE the preload | 0.98 / 0.84 / 0.93 | **0.917** |
+| AFTER the preload | 0.98 / 0.94 / 0.88 | **0.933** |
+
+**+0.016 s/lane with fully overlapping ranges**, and no AFTER sample above the
+slowest BEFORE — indistinguishable from noise, and consistent with the isolated
+5×2 A/B that measured +0.009 s. ⚠️ These are macOS numbers. The preload delta is
+a property of the postmaster and should transfer, but the ubuntu figure is the
+`per-arm lane time:` line the corpus run prints on CI — read that, not this
+table, before projecting a CI wall clock.
+
 ## Measured runtime (2026-08-29, macOS, postgresql@16)
 
 | Run | Wall clock |
