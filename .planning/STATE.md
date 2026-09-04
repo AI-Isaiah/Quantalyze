@@ -5,17 +5,17 @@ milestone_name: Backlog Burndown (Phases 158+)
 current_phase: 164.4
 current_phase_name: REDUNDER-BACKFILL
 status: executing
-stopped_at: "Completed 164.4-09-PLAN.md (reduced batch: 5 of 6 files; floors 28/239)"
-last_updated: "2026-09-04T12:12:57.817Z"
+stopped_at: Completed 164.4-10-PLAN.md
+last_updated: "2026-09-04T13:56:20.697Z"
 last_activity: 2026-09-04
 last_activity_desc: Phase 164.4 execution started
-state_head: 34e500aace5328dddd7194b2011911d618b54b23
+state_head: 727bfb20a09ea904ef52f225a3fd0208c083411b
 progress:
-  total_phases: 15
+  total_phases: 16
   completed_phases: 5
   total_plans: 82
-  completed_plans: 76
-  percent: 33
+  completed_plans: 77
+  percent: 31
 ---
 
 # Project State — Quantalyze
@@ -577,7 +577,7 @@ Prior-phase 141.1 close-out detail (retained; NOT about 142.1):
         2 WARNING gaps, no BLOCKER. See `140.1-VERIFICATION.md`. Not transitioned (`--no-transition`).
 Last activity: 2026-08-02 -- Phase 142 execution started
 
-Progress: [███░░░░░░░] 33%
+Progress: [███░░░░░░░] 31%
 
 ### Phase 140.1 close-out — open items (do NOT lose these)
 
@@ -745,6 +745,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 | Phase 164.4 P07 | 63 min | 3 tasks | 15 files |
 | Phase 164.4 P08 | ~75m | 3 tasks | 8 files |
 | Phase 164.4 P09 | resumed session | 3 tasks | 9 files |
+| Phase 164.4 P10 | ~3h | 3 tasks | 9 files |
 
 ## Accumulated Context
 
@@ -964,6 +965,8 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - [Phase 164.4]: 164.4-09: assertion (b)'s un-twinnable arm resolved by the ROOT-CAUSE FIX (wrap its INSERT in the file's own unique_violation handler), not a waiver — WAIVED_CEILING stays 0
 - [Phase 164.4]: 164.4-09: pg_cron goes ON the pg-lane as its own plan, retiring [REDUNDER-PGCRON] — test_compute_jobs_error_kind_copy_parity.sql stays pending rather than being worked around
 - [Phase 164.4]: 164.4-09: floors ratcheted to the RUN's printed 28/239, not the plan's projected 29/242 — a five-file batch may not inherit a six-file number
+- [Phase 164.4]: Phase 164.4-10: floors ratcheted to the RUN's printed 32/247, not the plan's projected 33/250 — the plan assumed a six-file wave 10 that landed five
+- [Phase 164.4]: Phase 164.4-10: arm B1's twin is LAYERED because the single-step mutation was measured GREEN on a real lane — enqueue dedupe has two independent arbiters (RPC look-up + partial unique index)
 
 ### Decisions (execution-time, Phase 140.2)
 
@@ -1666,8 +1669,8 @@ Load-bearing sequencing (real dependencies, do not reorder):
 
 ## Session
 
-**Last Date:** 2026-09-04T12:12:45.339Z
-**Stopped At:** Completed 164.4-09-PLAN.md (reduced batch: 5 of 6 files; floors 28/239)
+**Last Date:** 2026-09-04T13:56:10.588Z
+**Stopped At:** Completed 164.4-10-PLAN.md
 **Last Date:** 2026-08-25T22:26:01.687Z
 **Stopped At:** Completed 162-03-PLAN.md
 **Last Date:** 2026-08-25T22:28:04.096Z
@@ -1735,6 +1738,11 @@ pre-merge `e0493913`. Fix is PR #669. Supabase migrations and the Vercel fronten
 - 164.4-06 human-check CLOSED 2026-09-03: landed as PR #736 (head ba6fe1e2, squash-merged 6d6368ef, v0.77.7.0). CI run 33794810067 reports sql-mutation success in 278 s; the ubuntu job's own log carries `arms: 163/163/0`, `biting: 163`, `lane-invocations: 163`, `tallies agree`, `coverage: files 13/71`, `No defects` — identical to macOS for the fourth batch running. Recorded in coverage D10 of 164.4-06-SUMMARY.md. Plan 164.4-07 is UNBLOCKED.
 - ⏱️ FOUR ubuntu timing points: 45 arms/119 s, 86/171 s, 134/232 s, 163/278 s. Refit **1.35 s per arm of JOB cost + ~58 s fixed** (the runner's own `per-arm lane time: mean 1.0s` measures the LANE only). ~265-arm end state projects to ~416 s ≈ 6.9 min, inside `timeout-minutes: 15`. The 3-point fit predicted 269 s for this run and measured 278 — 3% over, so the model is slightly optimistic; plan 164.4-08 re-justifies the timeout against its own run.
 - 164.4-07 human-check CLOSED 2026-09-03: landed as PR #737 (head 4a9f33da, squash-merged 214184d7, v0.77.8.0). CI run 33804312706, sql-mutation success, 23/23 checks. Corpus identical to macOS (`arms: 189/189/0`, `biting: 189`, `lane-invocations: 189`, `coverage: files 17/71`, `No defects`). Recorded in coverage D10 of 164.4-07-SUMMARY.md. Plan 164.4-08 is UNBLOCKED.
+- ✅ 164.4-09 human-check CLOSED 2026-09-04: landed as PR #741 (head f9f455b6, squash-merged a55ff918, v0.77.10.0), **24/24 green**. `sql-mutation` run 33872399902, 369 s: `coverage: files 28/71`, `arms: 239/239/0`, `biting: 239`, `lane-invocations: 239`, `mean 1.0s`, `No defects`. FILES_FLOOR 28, ARMS_FLOOR 239, WAIVED_CEILING still 0. Batch 6 landed REDUCED — 5 files, not 6.
+- ⚖️ FOUNDER CALL 2026-09-04 on the pg_cron blocker: **retire the deferral, do not grow it.** A FIFTH file (`test_compute_jobs_error_kind_copy_parity.sql`) turned out to be un-baselineable because its apply list needs `20260826140000`, the only migration widening `compute_jobs_error_kind_check` to admit `'orphaned'`, and that migration hard-RAISEs `0A000` at :206-208 without pg_cron. Rather than defer a fifth file, pg_cron goes ON the lane. Inserted as **Phase 164.4.1 PGCRON-LANE** (`gsd-tools phase next-decimal` resolved the number; precedent 164.3 → 164.3.1). ⚠️ It is a PHASE, not a plan in 164.4: adding it inside 164.4 would silently reverse SCOPE AMENDMENT #2, and pg_cron changes lane startup for EVERY arm while 164.4's floors are still ratcheting sequentially. STATE's `current_phase` pointer was deliberately NOT advanced to it — 164.4 has waves 11 and 12 left.
+- ⚖️ ORCHESTRATOR CALL 2026-09-04 (by precedent, not re-escalated): `test_resync_retry_single_job.sql` assertion (b) was the SAME shape as `[REDUNDER-WAIVER-01]` — arm bites, no first-failure mutation — which the founder had already resolved one wave earlier as *fix, not waive*. (b)'s INSERT now uses the `EXCEPTION WHEN unique_violation` idiom assertion (c) already uses ten lines below it in the same file. Measured: `TEST FAILED (` occurrences 0 before, exactly 1 after, and it is (b). `WAIVED_CEILING` stays 0; the phase has taken ZERO waivers across ten waves.
+- ⚠️ TWO CHECKS WERE WEAKER THAN THEY CLAIMED, both found by MEASURING rather than reading. (1) `test_resync_retry_single_job.sql`'s header credited assertion (a)'s dedup to `compute_jobs_one_inflight_per_kind_strategy`; excluding `process_key_long` from it — proved applied by re-reading `pg_indexes.indexdef` — left the gate at exit 0, and so did deleting the RPC's select-existing ALONE (the index dedups via `ON CONFLICT DO NOTHING` and the lost-race re-read returns the same id). (a)'s twin had to be LAYERED; a single-anchor twin would have shipped looking correct and proving nothing. (2) Plan 09 claimed the RED-arm fixtures "derive from GREEN_LOG and follow automatically" — false, 15 literal integers live in their own regexes.
+- ⚠️ THE ci.yml TIMING PROJECTION UNDERCOUNTS: it multiplies ARMS by per-lane time, but the job also runs a baseline AND a restore leg per FILE (the runner prints `plus 28 baseline / 28 restore leg(s)` — those are lanes too). Measured wave 9 → 10: +20 arms cost +36 s, because 5 new files added 10 further legs. Phase end is ~7.9 min, not the 6.6 min the comment projects. Inside `timeout-minutes: 15` either way, so it is a MODEL correction, not a budget problem — fix the formula to count LEGS, not arms, in the next batch that touches the comment.
 - ✅ 164.4-08 human-check CLOSED 2026-09-04: landed as PR #738 (head 33e5a8c6, squash-merged f82d9c1b, v0.77.9.0). `sql-mutation` SUCCESS on ubuntu, run 33854344121: `coverage: files 23/71`, `arms: 219/219/0`, `biting: 219`, `lane-invocations: 219`, tallies agree, `No defects`. FILES_FLOOR 23, ARMS_FLOOR 219, WAIVED_CEILING still 0 — the phase has taken ZERO waivers. Plan 164.4-09 is UNBLOCKED.
 - ⭐⏱️ **THE WAVE-8 TIMING SCARE IS RESOLVED: IT WAS HOST VARIANCE.** Wave 9 measured **333 s for 219 arms at `mean 1.0s`/lane** against wave 8's **458 s for 189 arms at 1.7s**. LARGER AND FASTER — a real per-lane cost cannot be unpaid by a bigger corpus, so run 33804312706 is an outlier. The linear model holds at ~1.0 s/lane + ~130 s fixed, putting the ~265-arm phase end near **6.6 min** against `timeout-minutes: 15`. ci.yml now records both observations and says which reading a future 1.7 s would falsify.
 - ⚖️ FOUNDER CALL 2026-09-04 on `[REDUNDER-WAIVER-01]`: **reorder, do not waive.** `test_get_published_trust_signals.sql` assertion 5 proves the anon EXECUTE grant that assertions 1-3 need in order to call the function at all, so it is a PRECONDITION that belonged ahead of them; `REVOKE EXECUTE` used to abort at assertion 1 with a raw 42501 naming no arm. Now it fails as `TEST FAILED (5)`, first and only error, zero 42501 in the log. Byte-identical relocation (6 non-comment lines out, the same 6 in) and the phase's ONE authorised executable-SQL edit to a gate file.

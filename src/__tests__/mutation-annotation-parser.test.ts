@@ -714,8 +714,8 @@ describe("R2-W04 / GRAMMAR rule 3b — a mutation may not REWRITE an arm identit
 
     expect(violations).toEqual([]);
     // Non-vacuity: the walk must actually have walked something.
-    expect(armsSeen).toBe(239);
-    expect(stepsSeen).toBe(226);
+    expect(armsSeen).toBe(247);
+    expect(stepsSeen).toBe(236);
   });
 
   // ══════════════════════════════════════════════════════════════════════════
@@ -1410,7 +1410,17 @@ describe("GRAMMAR rule 3c — an identity is READ only where the RUNNER's gate r
     // (the resync gate's (b) needs THREE steps, because 20260726000225 checks
     // its own indexed column list AND counts the unique indexes covering
     // wizard_session_id). 98 of the corpus's 324 steps are now `sql`.
-    expect(needles.length).toBe(226);
+    // RE-MEASURED 2026-09-04 (plan 164.4-10): 236 needles across 247 arms. The
+    // 8 new arms carried 10 new needles — MORE needles than arms again, and the
+    // reason is the same class as above but reached differently: this batch's
+    // extra two steps are not self-verify layers but a DOUBLE-ARBITER layer.
+    // The enqueue-dedupe gate's B1 must defeat BOTH the RPC's optimistic
+    // look-up and the partial unique index that independently dedupes behind
+    // it, and the allocator gate's arm 1 must neuter the migration's own
+    // NOT NULL post-verify beside the column change. 98 of the corpus's 334
+    // steps are `sql` — the count is unchanged because this batch added no
+    // live-DB grant/policy drift arm.
+    expect(needles.length).toBe(236);
     expect(needles.filter((n) => /TEST\s+FAILED\s*\(/i.test(n))).toEqual([]);
   });
 });
@@ -1656,16 +1666,19 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
     }
   });
 
-  it("scanCorpus reports 28 of 71 files annotated", () => {
+  it("scanCorpus reports 32 of 71 files annotated", () => {
     const corpus = scanCorpus(join(REPO_ROOT, "supabase", "tests"));
     // ⛔ The DENOMINATOR stays 71 — every `.sql` in the directory. The phase's
-    // end state is `files 40/71` with the other 31 PRINTED BY NAME
-    // (`unreachable:` 27 + `lane-blocked:` 4), never `40/40` with the gap
-    // quietly redefined away.
+    // end state is `files 39/71` with the other 32 PRINTED BY NAME
+    // (`unreachable:` 27 + `lane-blocked:` 4 + the pg_cron-deferred
+    // test_compute_jobs_error_kind_copy_parity.sql, which Phase 164.4.1 takes),
+    // never `39/39` with the gap quietly redefined away. ⚠️ 39, not the 40 of
+    // SCOPE AMENDMENT #2: plan 09 deferred that one file by founder decision.
     expect(corpus.filesTotal).toBe(71);
-    expect(corpus.filesAnnotated).toBe(28);
+    expect(corpus.filesAnnotated).toBe(32);
     expect(corpus.annotatedFiles).toEqual([
       "test_allocator_equity_derived_rls.sql",
+      "test_allocator_equity_pre_terminus_flag.sql",
       "test_api_keys_venue_identity_uniq.sql",
       "test_capital_ownership_allocation_guard.sql",
       "test_capital_ownership_column.sql",
@@ -1674,16 +1687,19 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
       "test_csv_finalize_atomic_fold.sql",
       "test_csv_finalize_auth_guard.sql",
       "test_csv_finalize_double_submit.sql",
+      "test_enqueue_compute_job_dedupe_non_terminal.sql",
       "test_funding_fees_rls.sql",
       "test_get_published_trust_signals.sql",
       "test_get_verified_cohort_rank_gate.sql",
       "test_ledger_refresh_composite_arm.sql",
       "test_ledger_refresh_fanout.sql",
       "test_ledger_refresh_staleness.sql",
+      "test_metrics_by_basis_write.sql",
       "test_resync_retry_single_job.sql",
       "test_scenario_downgrade_sweep.sql",
       "test_scenario_shares_rls.sql",
       "test_scenarios_rls.sql",
+      "test_set_compute_job_progress.sql",
       "test_strategies_private_owner_isolation.sql",
       "test_strategy_analytics_series_completeness.sql",
       "test_strategy_keys_rls.sql",
@@ -1846,6 +1862,26 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
     // TRIPWIRE, not an endorsement: it flips the day the classifier learns to
     // read apply lists, or the day the lane can host pg_cron.
     expect(corpus.pendingFiles).toContain("test_compute_jobs_error_kind_copy_parity.sql");
+    // ⭐ 164.4-10: the EXACT remaining-work set, not merely a `toContain`.
+    // Batch 7 annotated the last non-mixed idiom files, so what is left is
+    // EIGHT names — the SEVEN ⚠️ mixed files plan 11 takes, plus the pg_cron
+    // tripwire above. ⚠️ EIGHT, not the seven plan 164.4-10 was written
+    // against: that plan predated plan 09's founder-decided deferral of
+    // test_compute_jobs_error_kind_copy_parity.sql to Phase 164.4.1
+    // PGCRON-LANE. This is the phase's own statement of what remains, so it is
+    // pinned as a set: a file silently skipped by plan 11, or one that quietly
+    // stops being `pending`, fails HERE by name rather than by a count nobody
+    // reads.
+    expect(corpus.pendingFiles).toEqual([
+      "test_api_keys_exchange_not_user_writable.sql",
+      "test_api_keys_insert_not_client_writable.sql",
+      "test_compute_jobs_error_kind_copy_parity.sql",
+      "test_guard_wizard_draft_updates_auth_uid.sql",
+      "test_profiles_privileged_columns_locked.sql",
+      "test_strategy_keys_publish_integrity.sql",
+      "test_sync_status_marked_refresh_protected.sql",
+      "test_wizard_session_idempotency.sql",
+    ]);
   });
 
   it("the FIVE classes sum to filesTotal — annotated + pending + unreachable + inert + lane-blocked", () => {
@@ -1862,6 +1898,9 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
     expect(sum).toBe(corpus.filesTotal);
     // MEASURED 2026-09-03 at this commit: 1 + 39 + 27 + 0 + 4 = 71. Stated so a
     // reader can see WHICH way a future drift went, not only that it drifted.
+    // ⚠️ CURRENCY 2026-09-04 (plan 164.4-10): 32 + 8 + 27 + 0 + 4 = 71. The
+    // 2026-09-03 figures above STAY as lineage — they record a run that
+    // happened, and rewriting a dated measurement is the worse defect.
     expect(corpus.filesTotal).toBe(71);
     expect(corpus.laneBlockedFiles).toHaveLength(4);
   });

@@ -59,6 +59,35 @@
 -- Usage:
 --   psql "$TEST_SUPABASE_DB_URL" -v ON_ERROR_STOP=1 -f \
 --     supabase/tests/test_enqueue_compute_job_dedupe_non_terminal.sql
+--
+-- ⭐ MACHINE-EXECUTABLE TWINS (phase 164.4, REDUNDER-BACKFILL). Each prose
+-- RED-UNDER below carries an adjacent `RED-UNDER-M` object that
+-- scripts/mutation-runner executes on every push: it mutates COPIES on a
+-- throwaway pg-lane cluster, requires the FIRST `TEST FAILED (…)` to name that
+-- arm, and restores GREEN. Schema: scripts/mutation-runner/GRAMMAR.md.
+-- ⚠️ THIS FILE NAMES NO MIGRATION STAMP, so the apply list below was derived by
+-- object-name lookup, and each twin targets whichever migration LAST defines
+-- the object it mutates. The header cites 20260716090000 for the dedupe, but
+-- 20260826150000 re-issues _enqueue_compute_job_internal in full and is the
+-- newest definition — mutating the 20260716090000 copy would be overwritten
+-- later in the apply list and prove nothing.
+-- ⛔ B1's dedupe is LAYERED — TWO independent mechanisms, and a twin that
+-- removes only one is a twin that proves nothing. Measured on the lane:
+-- neutering the RPC's optimistic look-up alone leaves the partial unique index
+-- compute_jobs_one_inflight_per_kind_strategy as the arbiter, so the second
+-- INSERT hits `ON CONFLICT DO NOTHING`, the lost-race re-read hands back the
+-- SAME id, and the file still passes — one row, one id, green. B1's twin
+-- therefore mutates BOTH: the look-up in 20260826150000 AND the index in
+-- 20260416125430 (its last definition). B2 needs only the look-up, because a
+-- terminal row is outside the index's own partial predicate.
+-- ⚠️ 20260510173005 is deliberately ABSENT from the apply list: it issues
+-- `ROLLBACK TO SAVEPOINT` inside a `DO $$ … $$` body, which PL/pgSQL cannot
+-- parse, so it aborts on a vanilla cluster (TODOS [REDUNDER-SAVEPOINT], the
+-- same class Plan 00 booked against 20260416201929). Nothing is lost: it is
+-- not the last definition of anything this file touches — 20260525074649
+-- re-issues compute_jobs_kind_check with a DROP/ADD, and 20260717233529 is the
+-- last definition of both that CHECK and the coherence CHECK.
+-- RED-UNDER-SETUP: {"apply":["scripts/pg-lane/fixtures/01-fixture-core.sql","scripts/pg-lane/fixtures/02-fixture-sanitize-tables.sql","scripts/pg-lane/fixtures/03-fixture-compute-jobs.sql","scripts/pg-lane/fixtures/07-fixture-supabase-default-privileges.sql","scripts/pg-lane/fixtures/11-fixture-api-keys-created-at.sql","scripts/pg-lane/fixtures/15-fixture-auth-role.sql","scripts/pg-lane/fixtures/20-fixture-app-role-helper.sql","scripts/pg-lane/fixtures/21-fixture-api-keys-credential-columns.sql","scripts/pg-lane/fixtures/23-fixture-contact-requests.sql","scripts/pg-lane/fixtures/24-fixture-enqueue-compute-job-chain.sql","supabase/migrations/20260411144407_compute_jobs_queue.sql","scripts/pg-lane/fixtures/04-fixture-compute-jobs-targets.sql","supabase/migrations/20260416125430_contact_request_metadata.sql","supabase/migrations/20260418194206_scoring_weight_overrides.sql","supabase/migrations/20260420073003_allocator_holdings.sql","supabase/migrations/20260510175507_process_key_long_compute_job_kinds_repair.sql","supabase/migrations/20260515210300_scoring_weight_overrides_high_hardening.sql","supabase/migrations/20260522111858_compute_analytics_from_csv_kind.sql","supabase/migrations/20260525074649_compute_jobs_kind_check_extend_csv.sql","supabase/migrations/20260614120000_derive_broker_dailies_kind.sql","supabase/migrations/20260710130000_stitch_composite_kind.sql","supabase/migrations/20260716090000_retire_compute_analytics_kind_rpc_guard.sql","supabase/migrations/20260717233529_allocator_equity_derived_surface.sql","supabase/migrations/20260826150000_destrict_enqueue_internal_10param.sql"]}
 
 -- --------------------------------------------------------------------------
 -- Defensive pre-clean (a prior aborted run may have committed synthetic rows).
@@ -127,6 +156,22 @@ BEGIN
   -- flight" case: process_key.py re-calls the RPC on EVERY idempotent hit, so
   -- a regression here would mint a job per page refresh.
   -- ======================================================================
+  -- RED-UNDER: narrow the strategy-scoped optimistic look-up in migration
+  --            20260826150000 from the three non-terminal statuses to
+  --            `status IN ('running')`, AND exclude process_key_long from the
+  --            partial unique index in migration 20260416125430. The first job
+  --            is 'pending', so the look-up no longer sees it and the INSERT no
+  --            longer conflicts: a second row is minted and B1 reads 2 rows.
+  --            This is the C-19 regression exactly — /process-key re-calls the
+  --            RPC on every WIZARD_DUPLICATE hit, so a page refresh would mint
+  --            a job each time.
+  -- ⚠️ LAYERED, and the layering is the whole point: the dedupe has TWO
+  --    independent arbiters. Mutating the look-up ALONE was measured NON-BITING
+  --    on the lane — the index still rejects the second INSERT, `ON CONFLICT DO
+  --    NOTHING` swallows it, and the lost-race re-read returns the SAME id, so
+  --    the file stays green while the RPC's own dedupe is gone. A single-step
+  --    twin here would have shipped looking correct and proving nothing.
+  -- RED-UNDER-M: {"arm":"B1","apply":[{"kind":"edit","file":"supabase/migrations/20260826150000_destrict_enqueue_internal_10param.sql","find":"    SELECT id INTO v_existing_id\n      FROM compute_jobs\n     WHERE strategy_id = p_strategy_id\n       AND kind = p_kind\n       AND status IN ('pending', 'running', 'done_pending_children')","replace":"    SELECT id INTO v_existing_id\n      FROM compute_jobs\n     WHERE strategy_id = p_strategy_id\n       AND kind = p_kind\n       AND status IN ('running')","occurrences":1},{"kind":"edit","file":"supabase/migrations/20260416125430_contact_request_metadata.sql","find":"    AND kind <> 'compute_intro_snapshot'","replace":"    AND kind NOT IN ('compute_intro_snapshot', 'process_key_long')","occurrences":1}]}
   first_id := enqueue_compute_job(
     p_strategy_id => strat_c,
     p_kind        => job_kind,
@@ -168,6 +213,19 @@ BEGIN
   -- being 'draft': without that gate, a replay of a COMPLETED session would
   -- land here and silently re-sync it.
   -- ======================================================================
+  -- RED-UNDER: widen the SAME strategy-scoped look-up in migration
+  --            20260826150000 to `status IN ('pending', 'running',
+  --            'done_pending_children', 'done')`. The dedupe then MATCHES the
+  --            terminal row this arm just created, so the third call hands back
+  --            the finished job's id instead of enqueueing a new one and B2
+  --            reads 1 row where it demands 2. That is the failure mode the
+  --            Python side's `draft` gate exists to make safe: if a completed
+  --            job blocked re-enqueue, a strategy could never be re-synced at
+  --            all. One step suffices here — unlike B1, the partial unique
+  --            index cannot mask this, because its own WHERE clause covers
+  --            only the three non-terminal statuses and so ignores a 'done'
+  --            row entirely.
+  -- RED-UNDER-M: {"arm":"B2","apply":[{"kind":"edit","file":"supabase/migrations/20260826150000_destrict_enqueue_internal_10param.sql","find":"    SELECT id INTO v_existing_id\n      FROM compute_jobs\n     WHERE strategy_id = p_strategy_id\n       AND kind = p_kind\n       AND status IN ('pending', 'running', 'done_pending_children')","replace":"    SELECT id INTO v_existing_id\n      FROM compute_jobs\n     WHERE strategy_id = p_strategy_id\n       AND kind = p_kind\n       AND status IN ('pending', 'running', 'done_pending_children', 'done')","occurrences":1}]}
   UPDATE compute_jobs
      SET status = 'done'
    WHERE id = first_id;

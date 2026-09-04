@@ -421,11 +421,48 @@ const PROBE_AVAILABLE_OUTPUT = `ERROR:  ${LANE_PROBE_AVAILABLE}`;
 //   RECORD       .planning/phases/164.4-redunder-backfill-every-sql-gate-arm-
 //                gets-a-red-under-annota/164.4-09-SUMMARY.md
 //
+// ⭐ RE-DERIVED 2026-09-04 (plan 164.4-10) — batch 7, the LAST non-mixed files.
+// The blocks above STAY as lineage. Four NEW gate files, 2 sections each.
+//
+//   VALUE        32 — read off the run's own `coverage:` line, not counted here.
+//   DATE         2026-09-04, at HEAD 3a81a284. (Measured at ccc4f51e; the only
+//                commit between them, 3a81a284, touches TODOS.md alone —
+//                nothing the runner reads, verified with `git diff --name-only
+//                ccc4f51e..HEAD -- scripts/ supabase/ src/ .github/ CLAUDE.md`
+//                returning empty.)
+//   COMMAND      `node scripts/mutation-runner/run.mjs` -> exit 0
+//                  coverage: files 32/71
+//                  arms: 247/247/0   (executed/annotated/waived)
+//                  biting: 247
+//                  lane-invocations: 247
+//                  per-arm lane time: mean 1.0s over 247 arm run(s)
+//   SAMPLE SIZE  247 arms executed, all 247 `RED (identity ok)`, 0 defects.
+//                316 s wall clock, 32 baseline and 32 restore legs.
+//   COVERAGE     32 annotated gate files of 71. The four added this batch are
+//                supabase/tests/test_allocator_equity_pre_terminus_flag.sql,
+//                supabase/tests/test_enqueue_compute_job_dedupe_non_terminal
+//                  .sql,
+//                supabase/tests/test_metrics_by_basis_write.sql and
+//                supabase/tests/test_set_compute_job_progress.sql.
+//   SEPARATION   Both directions driven through the real verdict loop on real
+//                lanes (`runCorpus({filesFloor, armsFloor})`), 2026-09-04:
+//                  filesFloor=32 armsFloor=247  defects=0  SILENT   (320.7 s)
+//                  filesFloor=33 armsFloor=248  defects=2  FIRES ->
+//                    `FILES_FLOOR regression: 32 annotated file(s) < floor 33`
+//                    `ARMS_FLOOR regression: 247 biting arm(s) < floor 248`
+//                                                                   (324.0 s)
+//                So 32/247 is exactly the separation point, not a value below it.
+//   RECORD       .planning/phases/164.4-redunder-backfill-every-sql-gate-arm-
+//                gets-a-red-under-annota/164.4-10-SUMMARY.md
+//
 // CURRENCY, stated where the VALUE is: RE-DERIVED 2026-09-04 by measurement
-// (plan 164.4-09). Measured coverage 28 of 71 — value RAISED from 23. The
-// phase's end state on today's lane is 40 of 71 (SCOPE AMENDMENT #2 above); 12
-// idiom files remain `pending:`.
-export const FILES_FLOOR = 28;
+// (plan 164.4-10). Measured coverage 32 of 71 — value RAISED from 28. Every
+// non-mixed, non-lane-blocked idiom file is now annotated. The phase's end
+// state on today's lane is 39 of 71, NOT the 40 of SCOPE AMENDMENT #2: one
+// further file, test_compute_jobs_error_kind_copy_parity.sql, was deferred to
+// Phase 164.4.1 PGCRON-LANE by founder decision in plan 09. 8 idiom files
+// remain `pending:` — the 7 mixed files plan 11 takes, plus that one.
+export const FILES_FLOOR = 32;
 
 // ARMS_FLOOR — PINNED 2026-08-29 BY MEASUREMENT (plan 164.3-08), not chosen.
 //
@@ -794,11 +831,64 @@ export const FILES_FLOOR = 28;
 //   RECORD       .planning/phases/164.4-redunder-backfill-every-sql-gate-arm-
 //                gets-a-red-under-annota/164.4-09-SUMMARY.md
 //
+// ⭐ RE-DERIVED 2026-09-04 (plan 164.4-10) — THE SEVENTH ARMS MOVE. The blocks
+// above STAY as lineage. Eight NEW arms across four NEW gate files, each one a
+// SECTION that had no twin before.
+//
+//   VALUE        247 — read off the run's own `biting:` line, not counted here.
+//   DATE         2026-09-04, at HEAD 3a81a284 (see the FILES_FLOOR block's DATE
+//                note on the intervening TODOS.md-only commit).
+//   COMMAND      `node scripts/mutation-runner/run.mjs` -> exit 0
+//                  coverage: files 32/71
+//                  arms: 247/247/0   (executed/annotated/waived)
+//                  biting: 247
+//                  lane-invocations: 247
+//                  file test_allocator_equity_pre_terminus_flag.sql: sections 2
+//                    / judged 2 / annotated 2 / waived 0 / biting 2
+//                  file test_enqueue_compute_job_dedupe_non_terminal.sql:
+//                    sections 2 / judged 2 / annotated 2 / waived 0 / biting 2
+//                  file test_metrics_by_basis_write.sql: sections 2 /
+//                    judged 2 / annotated 2 / waived 0 / biting 2
+//                  file test_set_compute_job_progress.sql: sections 2 /
+//                    judged 2 / annotated 2 / waived 0 / biting 2
+//                  per-arm lane time: mean 1.0s over 247 arm run(s)
+//   SAMPLE SIZE  247 arms executed, all 247 `RED (identity ok)`, 0 defects of
+//                any kind. The two independent tallies AGREE: `arms:` executed
+//                247 and `lane-invocations:` 247. 316 s wall clock, 32 baseline
+//                and 32 restore legs beside the 247 arm lanes. The 32 per-file
+//                `biting` counts SUM to 247, the aggregate.
+//   COVERAGE     32 annotated gate files of 71 (see the FILES_FLOOR block). 8
+//                of the 247 arms are new this batch; 0 waivers were added, so
+//                WAIVED_CEILING is untouched at 0. Cumulative waivers across
+//                all seven arms moves: 0.
+//   ⭐ ONE OF THE 8 IS LAYERED BECAUSE THE DEDUPE IT TESTS IS LAYERED, and that
+//                was MEASURED, not assumed. `test_enqueue_compute_job_dedupe_
+//                non_terminal.sql` arm B1 is fenced by TWO independent
+//                arbiters: the RPC's optimistic look-up in 20260826150000 AND
+//                the partial unique index compute_jobs_one_inflight_per_kind_
+//                strategy in 20260416125430. Mutating the look-up ALONE was run
+//                on the lane and measured NON-BITING — the index rejects the
+//                second INSERT, `ON CONFLICT DO NOTHING` swallows it, the
+//                lost-race re-read returns the SAME id, and the gate prints
+//                `B1 OK: 2 calls -> 1 row` and exits 0. A single-step twin would
+//                have shipped looking correct and proving nothing. B1's twin
+//                therefore carries both steps. Same class as the wave-10
+//                finding; second independent instance.
+//   SEPARATION   Both directions driven through the real verdict loop on real
+//                lanes (`runCorpus({filesFloor, armsFloor})`), 2026-09-04:
+//                  armsFloor=247  biting=247  defects=0  SILENT      (320.7 s)
+//                  armsFloor=248  biting=247  defects=2  FIRES ->
+//                    `ARMS_FLOOR regression: 247 biting arm(s) < floor 248`
+//                    (beside the paired FILES_FLOOR regression)      (324.0 s)
+//                So 247 is exactly the separation point, not a value below it.
+//   RECORD       .planning/phases/164.4-redunder-backfill-every-sql-gate-arm-
+//                gets-a-red-under-annota/164.4-10-SUMMARY.md
+//
 // CURRENCY, stated where the VALUE is — derivation, sample size, coverage and
-// separation in the block immediately above; record in 164.4-09-SUMMARY.md:
-// RE-DERIVED 2026-09-04 by measurement (plan 164.4-09).
-// Measured biting 239 — value RAISED from 219.
-export const ARMS_FLOOR = 239;
+// separation in the block immediately above; record in 164.4-10-SUMMARY.md:
+// RE-DERIVED 2026-09-04 by measurement (plan 164.4-10).
+// Measured biting 247 — value RAISED from 239.
+export const ARMS_FLOOR = 247;
 
 // WAIVED_CEILING — PINNED 2026-09-02 BY MEASUREMENT (164.3.1 red team), not
 // chosen. A CEILING, not a floor: it fails when the corpus carries MORE waivers

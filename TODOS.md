@@ -2953,6 +2953,23 @@ governs by CONTENT TYPE, and their content is prose/forms — rung 1.
   ⚠️ Note the adjacent risk: an MCP surface is a **new public read boundary**. Every hardening
   lesson already paid for on the public factsheet path applies to it from day one, not later.
 
+- **⭐ `[TURNOVER-01]` Account turnover calculation — wanted in the NEXT MILESTONE
+  (founder-requested 2026-09-04).** Compute and expose how much an account trades relative to its
+  own size over a stated window, as a first-class metric alongside the existing risk/return set —
+  not a one-off panel. Four things need deciding before it can be planned:
+  - **Definition — pick ONE and pin it.** (a) notional traded / average equity, or (b)
+    `min(buys, sells) / average equity` (the fund-industry convention, which strips pure
+    inflow/outflow). These differ by roughly 2x on a directional book, so it is a product call,
+    not an implementation detail.
+  - **Source.** ⛔ NOT the `trades` table — it is a partly-redundant representation only some
+    venues populate (Phase 142.2 / D-16), so a turnover built on it would read ~0 for every venue
+    that does not fill it. Derive from position deltas on the canonical daily series, per the
+    standing "dailies are canonical → derive everything" rule.
+  - **Window + annualisation.** Turnover is a RETURN-family quantity, so it annualises on the
+    CALENDAR (365) per #597 — NOT on trading frequency the way the risk metrics do.
+  - **Leverage.** Notional turnover is *not* leverage-invariant (unlike Sharpe and Calmar), so the
+    spec must say whether it is measured before or after the allocator's leverage scaling.
+
 ### Tech-debt / maintainability (opportunistic, don't force)
 
 - **The two wizard connect surfaces keep TWO hand-maintained `EXCHANGES` rosters (added 2026-08-11,
