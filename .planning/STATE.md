@@ -5,16 +5,16 @@ milestone_name: Backlog Burndown (Phases 158+)
 current_phase: 164.4
 current_phase_name: REDUNDER-BACKFILL
 status: executing
-stopped_at: Completed 164.4-10-PLAN.md
-last_updated: "2026-09-04T13:56:20.697Z"
+stopped_at: Completed 164.4-11-PLAN.md (batch 8 — the seven mixed files; FILES_FLOOR 39, ARMS_FLOOR 262, 0 waivers). PR + SHA-bound ubuntu sql-mutation green still owed.
+last_updated: "2026-09-04T17:38:02.554Z"
 last_activity: 2026-09-04
 last_activity_desc: Phase 164.4 execution started
-state_head: 727bfb20a09ea904ef52f225a3fd0208c083411b
+state_head: aad356e9a5bcbb3560ca68328250c6701bb6c5d9
 progress:
   total_phases: 16
   completed_phases: 5
   total_plans: 82
-  completed_plans: 77
+  completed_plans: 78
   percent: 31
 ---
 
@@ -85,9 +85,13 @@ structurally unreachable. Rejected alternatives, both measured: renaming the 27 
 (authoring, not mechanical — 321 raises carry only 139 distinct prefixes, so identities must be
 INVENTED) and generalising the identity grammar to a per-file prefix (weakens primitives 3a/3b that
 164.3.1 just closed, and buys no precision since prefixes are SHARED across arms).
-**Arm unit = SECTION** (not per-raise, not per-identity): 255 sections / ~265 twins over the 40
-reachable files; 100 sections in 4 lane-blocked files owed to `[REDUNDER-PGCRON]` (SCOPE AMENDMENT
-#2). The identity unit would have been 516 and pushed CI past the 20-minute split threshold.
+**Arm unit = SECTION** (not per-raise, not per-identity): **252 sections / 262 twins over the 39
+reachable files** (MEASURED at the phase end state 2026-09-04: `coverage: files 39/71`,
+`arms: 262/262/0`, 0 waivers, exit 0); 100 sections in 4 lane-blocked files owed to
+`[REDUNDER-PGCRON]`, plus a 5th file under `pending:` owed to Phase 164.4.1. ⛔ The `255 sections /
+~265 twins over the 40 reachable files` this sentence carried until 2026-09-04 is SUPERSEDED by the
+ARITHMETIC CORRECTION below — it predates plan 09's founder-decided deferral. Kept here as lineage,
+not as a live claim. The identity unit would have been 516 and pushed CI past the 20-minute split threshold.
 ⚠️ Recorded in FOUR places on purpose — `ROADMAP.md` § Phase 164.4 (goal, SCOPE AMENDMENT block,
 criterion 1, progress table), here, and `TODOS.md` `[REDUNDER-NONIDIOM]`. The v1.17 lesson is that
 an amendment landing in ONE file leaves the refused claim alive in the others.
@@ -95,8 +99,20 @@ an amendment landing in ONE file leaves the refused claim alive in the others.
 sections with only 30 twins — 15 sections have no twin**, so the "1 file fully annotated" baseline
 was never true. Closing those 15 is inside this phase, not a precondition of it.
 
+⚖️ **SCOPE AMENDMENT #2 — ARITHMETIC CORRECTION, 2026-09-04 (Plan 164.4-11).** #2's count below
+was 40 files / 255 sections reachable. MEASURED at the phase's end state it is **39 files / 252
+sections / 262 twins** (`coverage: files 39/71`, `arms: 262/262/0`, `biting: 262`, 0 waivers, exit
+0). No new decision: this is the arithmetic consequence of the founder decision already taken in
+Plan 09. A FIFTH idiom file, `test_compute_jobs_error_kind_copy_parity.sql`, is equally
+un-baselineable without pg_cron — its blocker is migration `20260826140000` in its APPLY LIST rather
+than its own text, so `gateNeedsPgCron` cannot see it and the runner prints it under `pending:`
+rather than `lane-blocked:` (TODOS `[REDUNDER-LANEBLOCKED-BLIND]`). It is owed to Phase 164.4.1
+PGCRON-LANE with the other four. ⛔ The runner's `pending:` line names exactly ONE file at the end
+of this phase and must not be read — or made — empty; the parser test pins it as a one-name SET.
+
 ⚖️ **SCOPE AMENDMENT #2** (founder 2026-09-03, Plan 164.4-03): of the 44 idiom files, 4 probe
-`pg_extension` for pg_cron and the pg-lane has no pg_cron — 40 files / 255 sections are reachable;
+`pg_extension` for pg_cron and the pg-lane has no pg_cron — 40 files / 255 sections are reachable
+(⛔ SUPERSEDED by the ARITHMETIC CORRECTION above; this paragraph stays as the dated record);
 the 4 (100 sections) are printed by the runner as `lane-blocked:` every run, probed against the lane
 every run, and owed to `[REDUNDER-PGCRON]`. Criterion 1's standard is unchanged. Measured mechanism,
 which CORRECTS the earlier all-files-RAISE record: `reconcile_dropped_enqueue_sweep.sql:268` (39
@@ -151,12 +167,39 @@ zero unclassified) and `161-VALIDATION.md` (Nyquist strategy, 4 Wave-0 gaps, ant
 ## Current Position
 
 Phase: 164.4 (REDUNDER-BACKFILL) — EXECUTING
-Plan: 10 of 12 complete (00 spike, 01 Wave-0 runner/CI, 02 the reference file, 03 the lane-blocked
-      class + lane probe + SCOPE AMENDMENT #2, 04-09 the six annotation batches) — hand-maintained;
-      `state.advance-plan` still REFUSES on this section (`ambiguous_position_phase`, see § Known
-      Issues)
-Status: Executing Phase 164.4 — next is 164.4-10
-Last activity: 2026-09-04 — 164.4-09 executed on the branch as a REDUCED batch (5 of 6 planned
+Plan: 1 of 12
+      class + lane probe + SCOPE AMENDMENT #2, 04-11 the eight annotation batches) —
+      hand-maintained; `state.advance-plan` still REFUSES on this section
+      (`ambiguous_position_phase`, see § Known Issues)
+Status: Executing Phase 164.4
+      `arms: 262/262/0`, `biting: 262`, 0 waivers, exit 0. Next: land 164.4-11 as its own PR with
+      `sql-mutation` GREEN on ubuntu SHA-bound to the head, then `/gsd-verify-work 164.4`.
+      ⏳ Phase 164.4.1 PGCRON-LANE is still owed the 4 lane-blocked files plus the 1 `pending:`
+      file (`test_compute_jobs_error_kind_copy_parity.sql`, ~100 sections).
+Last activity: 2026-09-04 — Phase 164.4 execution started
+      all twinned and proven on real pg-lanes with **ZERO waivers** (cumulative 0 across all eight
+      arms moves; `WAIVED_CEILING` unedited). Full corpus **exit 0**: `coverage: files 39/71`,
+      `arms: 262/262/0`, `biting: 262`, `lane-invocations: 262` (tallies agree), `mean 1.0s`, 0
+      defects, 347 s local; the 39 per-file `biting` counts SUM to 262 and the `sections` counts to
+      252. `FILES_FLOOR` 32 → **39**, `ARMS_FLOOR` 247 → **262**, both separation directions driven
+      on real lanes — (39, 262) silent, (40, 263) fires both regressions. Every lockstep pin moved,
+      including `pendingFiles` pinned as a ONE-NAME SET so an empty `pending:` line cannot be
+      shipped as an attestation of completeness. The measured shadow in these files is
+      PRIVILEGE-shaped: a withdrawn privilege aborts with `permission denied for table …`, which
+      carries no `TEST FAILED (…)` and scores NO-IDENTITY — five twins use the RLS ROW filter
+      instead. Two LAYERED arms, each proven layered by running the single-step version (one GREEN,
+      one aborting the apply at its own post-verify). One arm scored NO-RED and the APPLY LIST was
+      the defect: `profiles_self_update` was inert without 20260405061912, the only statement that
+      ENABLEs RLS on profiles. Four new additive stand-ins (25 e2e census seed — 20260823120000
+      refuses to apply on an unidentified database; 26 strategies.api_key_id FK; 27
+      strategy_analytics.computation_error; 28 five privileged profiles columns). `ci.yml`'s
+      sql-mutation timeout projection corrected from an ARMS model to a LEGS model
+      (legs = arms + 2 × annotated files); `timeout-minutes` STAYS 15. SCOPE AMENDMENT #2's
+      40 / 255 recorded as SUPERSEDED and corrected to **39 / 252 / 262** in all seven ledger sites.
+      ⏳ `164.4-11`'s `<human-check>` is OPEN: not landed, so `sql-mutation` has not been observed on
+      ubuntu at a PR head SHA, and the ci.yml legs PROJECTION has not yet been replaced by that
+      run's measurement.
+Prior activity: 2026-09-04 — 164.4-09 executed on the branch as a REDUCED batch (5 of 6 planned
       files; 20 sections). Both blockers the previous session escalated are DECIDED and discharged.
       Blocker 2 (`test_resync_retry_single_job.sql` assertion (b), a measured waiver candidate) was
       resolved by the ROOT-CAUSE FIX, following the founder's own wave-9 `[REDUNDER-WAIVER-01]`
@@ -746,6 +789,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 | Phase 164.4 P08 | ~75m | 3 tasks | 8 files |
 | Phase 164.4 P09 | resumed session | 3 tasks | 9 files |
 | Phase 164.4 P10 | ~3h | 3 tasks | 9 files |
+| Phase 164.4 P11 | ~3h | 3 tasks | 23 files |
 
 ## Accumulated Context
 
@@ -967,6 +1011,10 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - [Phase 164.4]: 164.4-09: floors ratcheted to the RUN's printed 28/239, not the plan's projected 29/242 — a five-file batch may not inherit a six-file number
 - [Phase 164.4]: Phase 164.4-10: floors ratcheted to the RUN's printed 32/247, not the plan's projected 33/250 — the plan assumed a six-file wave 10 that landed five
 - [Phase 164.4]: Phase 164.4-10: arm B1's twin is LAYERED because the single-step mutation was measured GREEN on a real lane — enqueue dedupe has two independent arbiters (RPC look-up + partial unique index)
+- [Phase 164.4]: 164.4-11: the mixed files' shadow is PRIVILEGE-shaped — a withdrawn privilege aborts with 'permission denied for table …', which carries no TEST FAILED (…) and scores NO-IDENTITY. The falsifier that works is the RLS ROW filter, which returns zero rows instead of raising (MEASURED, 5 of 15 twins).
+- [Phase 164.4]: 164.4-11: SCOPE AMENDMENT #2's 40 files / 255 sections is SUPERSEDED — measured end state 39 / 252 / 262 twins. Corrected in all seven ledger sites as an ARITHMETIC CORRECTION, not a new decision; it follows from plan 09's founder-decided pg_cron deferral.
+- [Phase 164.4]: 164.4-11: WAIVED_CEILING stays 0 — Phase 164.4 finished with ZERO waivers across all eight arms moves. Every shadowed arm was reached by mutating a layer its shadow does not observe.
+- [Phase 164.4]: 164.4-11: ci.yml's sql-mutation timeout projection counts LEGS (arms + 2 × annotated files), not arms — the job runs a baseline and a restore leg per FILE. Phase end 340 legs ≈ 494 s ≈ 8.2 min; timeout-minutes stays 15.
 
 ### Decisions (execution-time, Phase 140.2)
 
@@ -1669,8 +1717,8 @@ Load-bearing sequencing (real dependencies, do not reorder):
 
 ## Session
 
-**Last Date:** 2026-09-04T13:56:10.588Z
-**Stopped At:** Completed 164.4-10-PLAN.md
+**Last Date:** 2026-09-04T15:52:47.408Z
+**Stopped At:** Completed 164.4-11-PLAN.md (batch 8 — the seven mixed files; FILES_FLOOR 39, ARMS_FLOOR 262, 0 waivers). PR + SHA-bound ubuntu sql-mutation green still owed.
 **Last Date:** 2026-08-25T22:26:01.687Z
 **Stopped At:** Completed 162-03-PLAN.md
 **Last Date:** 2026-08-25T22:28:04.096Z

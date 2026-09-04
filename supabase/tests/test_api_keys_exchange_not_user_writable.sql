@@ -127,6 +127,36 @@
 -- `psql -v ON_ERROR_STOP=1`. CI auto-discovers supabase/tests/test_*.sql.
 --
 -- Run order: AFTER 20260810120000. The whole test rolls back.
+--
+-- ⭐ MACHINE-EXECUTABLE TWINS (phase 164.4, REDUNDER-BACKFILL). Each prose
+-- RED-UNDER below carries an adjacent `RED-UNDER-M` object that
+-- scripts/mutation-runner executes on every push: it mutates COPIES on a
+-- throwaway pg-lane cluster, requires the FIRST `TEST FAILED (…)` to name that
+-- arm, and restores GREEN. Schema: scripts/mutation-runner/GRAMMAR.md.
+-- ⚠️ THE APPLY LIST BELOW IS SIZED BY THE FOUR `SKIP` NOTICES, NOT BY THE
+-- HEADER. A section behind a still-firing SKIP is un-falsifiable, so the list
+-- must carry every migration those skips key on — 20260810120000 (SKIP 2,3),
+-- 20260811210000 (SKIP 5), 20260814120000 (SKIP 5d/5f/5g) and, for `5h`, the
+-- body-read that the same migration satisfies. MEASURED 2026-09-04 on the lane:
+-- with this list the baseline prints ZERO `SKIP` lines and every assertion from
+-- 1 through 5h runs.
+-- ⚠️ 20260823120000 IS IN THE LIST AND IT NEEDS A DATA SIGNATURE. The `5c scrub
+-- half` block exists only inside `IF v_insert_revoked`, so without that
+-- migration that whole section is unreachable. Its pre-flight census REFUSES to
+-- apply on an unidentified database, and the evidence it accepts for a non-PROD
+-- one is an `api_keys` row labelled `e2e-%` — hence the seed stand-in
+-- 25-fixture-api-keys-e2e-census-seed.sql, applied between 20260814120000 and
+-- it. Nothing under test changes: the REVOKE, the marker and every structural
+-- post-verify run identically on both census branches.
+-- ⚠️ 20260405061912 IS IN THE LIST because `api_keys_owner` is the object that
+-- makes assertions 1 and 4 falsifiable AT ALL. Their negation is "the owner
+-- cannot reach its own row", and on this table that can only come from the ROW
+-- filter: withdrawing the SELECT or DELETE privilege instead raises a bare
+-- `permission denied for table api_keys`, which carries no `TEST FAILED (…)`
+-- and is scored NO-IDENTITY rather than RED (MEASURED 2026-09-04). It needs
+-- 10-fixture-strategies-rls-baseline.sql ahead of it for the three empty
+-- relations it writes policies for.
+-- RED-UNDER-SETUP: {"apply":["scripts/pg-lane/fixtures/01-fixture-core.sql","scripts/pg-lane/fixtures/07-fixture-supabase-default-privileges.sql","scripts/pg-lane/fixtures/02-fixture-sanitize-tables.sql","scripts/pg-lane/fixtures/03-fixture-compute-jobs.sql","scripts/pg-lane/fixtures/05-fixture-wizard-composite.sql","scripts/pg-lane/fixtures/10-fixture-strategies-rls-baseline.sql","scripts/pg-lane/fixtures/11-fixture-api-keys-created-at.sql","scripts/pg-lane/fixtures/15-fixture-auth-role.sql","scripts/pg-lane/fixtures/21-fixture-api-keys-credential-columns.sql","supabase/migrations/20260405061912_rls_policies.sql","supabase/migrations/20260602190000_f6_wizard_session_idempotency.sql","supabase/migrations/20260710120000_strategy_keys.sql","supabase/migrations/20260710180000_wizard_composite.sql","supabase/migrations/20260810120000_lock_api_keys_exchange_column.sql","supabase/migrations/20260811210000_api_keys_attested_venue.sql","supabase/migrations/20260812083206_api_keys_venue_account_id.sql","supabase/migrations/20260813150106_wizard_rpcs_service_role_writer.sql","supabase/migrations/20260814120000_wizard_rpcs_revoke_authenticated.sql","scripts/pg-lane/fixtures/25-fixture-api-keys-e2e-census-seed.sql","supabase/migrations/20260823120000_revoke_api_keys_insert.sql"]}
 
 BEGIN;
 
@@ -196,6 +226,14 @@ BEGIN
                      true);
 
   -- ---- (1) POSITIVE: the owner's session really can see its own row ---------
+  -- RED-UNDER: narrow `api_keys_owner`'s USING clause in migration
+  --            20260405061912 so the owner's own row stops matching — the row
+  --            filter, not the privilege. ⚠️ Withdrawing SELECT instead raises
+  --            a bare `permission denied for table api_keys`, which carries no
+  --            `TEST FAILED (…)` at all and is scored NO-IDENTITY rather than
+  --            RED (MEASURED 2026-09-04); RLS returns zero rows instead, which
+  --            is what this anti-vacuity control is written to catch.
+  -- RED-UNDER-M: {"arm":"1","apply":[{"kind":"edit","file":"supabase/migrations/20260405061912_rls_policies.sql","find":"CREATE POLICY api_keys_owner ON api_keys FOR ALL USING (user_id = auth.uid()) WITH CHECK (user_id = auth.uid());","replace":"CREATE POLICY api_keys_owner ON api_keys FOR ALL USING (false) WITH CHECK (user_id = auth.uid());","occurrences":1}]}
   SET LOCAL ROLE authenticated;
   SELECT exchange INTO v_seen FROM public.api_keys WHERE id = v_key;
   RESET ROLE;
@@ -278,6 +316,17 @@ BEGIN
   -- row), so an over-broad REVOKE is caught whether or not those were gated out.
   -- Assertion 5 below runs later still, but on its OWN row and behind its own
   -- gate, so it cannot make this canary conditional.
+  -- RED-UNDER: narrow `api_keys_owner` from `FOR ALL` to `FOR SELECT` in
+  --            migration 20260405061912, so the owner keeps its read but the
+  --            row filter no longer admits its own DELETE. ⚠️ The regression
+  --            this arm NAMES — an over-broad REVOKE taking DELETE with it —
+  --            cannot be the mutation: a missing DELETE privilege aborts with
+  --            a bare `permission denied for table api_keys` and no
+  --            `TEST FAILED (…)` (MEASURED 2026-09-04, NO-IDENTITY). Narrowing
+  --            the policy is the same observable — `v_deleted = 0`, the
+  --            delete-a-key flow broken — reached through the one layer that
+  --            filters instead of raising.
+  -- RED-UNDER-M: {"arm":"4","apply":[{"kind":"edit","file":"supabase/migrations/20260405061912_rls_policies.sql","find":"CREATE POLICY api_keys_owner ON api_keys FOR ALL USING (user_id = auth.uid()) WITH CHECK (user_id = auth.uid());","replace":"CREATE POLICY api_keys_owner ON api_keys FOR SELECT USING (user_id = auth.uid());","occurrences":1}]}
   SET LOCAL ROLE authenticated;
   DELETE FROM public.api_keys WHERE id = v_key;
   GET DIAGNOSTICS v_deleted = ROW_COUNT;
@@ -431,6 +480,17 @@ BEGIN
     -- branch applies and the value must survive. Without this, "the client's
     -- value was scrubbed" is indistinguishable from "this column never stores
     -- anything", and 5c would pass vacuously.
+    -- RED-UNDER: make `scrub_client_supplied_attested_venue` scrub the
+    --            PRIVILEGED writer too — dead-code its early `RETURN NEW` in
+    --            migration 20260811210000 — so the owner-role INSERT below
+    --            lands NULL instead of 'binance'.
+    --            ⚠️ The three role literals must SURVIVE the mutation: that
+    --            migration's own post-verify re-reads the body with
+    --            `pg_get_functiondef` and aborts the apply if any of
+    --            'postgres' / 'service_role' / 'supabase_admin' is missing, so
+    --            deleting the condition (rather than falsifying it) never
+    --            reaches a lane at all.
+    -- RED-UNDER-M: {"arm":"5b","apply":[{"kind":"edit","file":"supabase/migrations/20260811210000_api_keys_attested_venue.sql","find":"  IF current_user IN ('postgres', 'service_role', 'supabase_admin') THEN","replace":"  IF FALSE AND current_user IN ('postgres', 'service_role', 'supabase_admin') THEN","occurrences":1}]}
     INSERT INTO public.api_keys (id, user_id, exchange, label, api_key_encrypted, attested_venue)
     VALUES (v_key5, v_uid, 'binance', 'cr01-roundtrip', 'x', 'binance');
 
@@ -527,6 +587,23 @@ BEGIN
     -- whole file runs inside `BEGIN; … ROLLBACK;`, so a GRANT here never
     -- outlives the test, and it is immediately withdrawn again either way. This
     -- keeps the trigger under a real client-role INSERT in BOTH states.
+    -- RED-UNDER: point the withdrawal below at the wrong role — `REVOKE INSERT
+    --            … FROM anon` instead of `FROM authenticated` — so the
+    --            temporary grant this block mints outlives the probe.
+    --            ⚠️ The mutation is in THIS file rather than a migration, and
+    --            that is the honest target: the arm's whole claim is that the
+    --            gate withdrew the door IT opened, and the only statement that
+    --            can falsify it is the gate's own REVOKE. Nothing a migration
+    --            can do reaches it — every route that leaves `authenticated`
+    --            holding INSERT here also leaves it holding INSERT thirty
+    --            lines earlier, where `TEST FAILED (5c)` fires first
+    --            (MEASURED 2026-09-04).
+    --            ⚠️ The needle spans the preceding `RESET ROLE;` ON PURPOSE. A
+    --            single-line needle also matches THIS twin's own JSON, so the
+    --            runner measured it 2x and refused the mutation
+    --            (`occurrence-mismatch`, MEASURED 2026-09-04); a `\n` inside
+    --            the needle cannot appear in a one-line comment.
+    -- RED-UNDER-M: {"arm":"5c scrub half","apply":[{"kind":"edit","file":"supabase/tests/test_api_keys_exchange_not_user_writable.sql","find":"      RESET ROLE;\n      EXECUTE 'REVOKE INSERT ON public.api_keys FROM authenticated';","replace":"      RESET ROLE;\n      EXECUTE 'REVOKE INSERT ON public.api_keys FROM anon';","occurrences":1}]}
     IF v_insert_revoked THEN
       EXECUTE 'GRANT INSERT ON public.api_keys TO authenticated';
       SET LOCAL ROLE authenticated;

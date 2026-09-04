@@ -93,6 +93,21 @@ AMENDMENT #2 — that amendment predates plan 09's deferral. Note also that
 migration in its APPLY LIST rather than by its own text, which `gateNeedsPgCron`
 cannot see (TODOS `[REDUNDER-LANEBLOCKED-BLIND]`), so it is reported under
 `pending:` and is pinned there as a tripwire.
+⚠️ CURRENCY 2026-09-04: plan 11 then annotated the SEVEN ⚠️ mixed files — the
+api_keys exchange lock, the strategy-keys publish-integrity delete guard, the
+api_keys client-INSERT revoke, the sync-status protected marked refresh, the
+wizard-draft update guard, the profiles privileged-column lock and the
+wizard-session idempotency fence — 4 + 4 + 3 + 1 + 1 + 1 + 1 = 15 sections, so
+the measured corpus is `coverage: files 39/71`, `arms: 262/262/0`,
+`biting: 262`, `lane-invocations: 262`, tallies agree, `FILES_FLOOR` pinned at
+39 and `ARMS_FLOOR` at 262, with **`pending: 1`** — exactly
+`test_compute_jobs_error_kind_copy_parity.sql`, owed to Phase 164.4.1
+PGCRON-LANE. That is Phase 164.4's END STATE on today's lane: every idiom gate
+file the pg-lane can reach is annotated and proven, and the 32 files outside it
+are printed by name on every run (27 `unreachable:` + 4 `lane-blocked:` +
+that 1 `pending:`). ⛔ `pending:` is NOT empty and must not be made to look
+empty — the parser test pins it as a one-name SET so an attestation of
+completeness cannot be shipped ahead of 164.4.1.
 `WAIVED_CEILING` is still 0, now through TWO founder decisions that both took
 the root-cause fix over an exception: plan 08's trust-signal anon-EXECUTE
 assertion was resolved by a REORDER putting the precondition ahead of its

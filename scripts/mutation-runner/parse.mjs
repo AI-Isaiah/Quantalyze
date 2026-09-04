@@ -662,11 +662,36 @@ function peekNextWord(text, from, to) {
  * ONE state machine. `maskNonCode` and `tokenizeStatements` are two views of
  * this single scan, never two readers — that duality is the defect this file
  * exists to remove, not a shape to reproduce.
+ *
+ * ⭐ 2026-09-04 (164.4 review WR-01). The scan now carries TWO masks, not one,
+ * because there are two distinct questions and only one of them is "is this
+ * code". `mask` is the executable projection (comments AND literal interiors
+ * blanked). `litMask` blanks comments ONLY and keeps literal interiors — the
+ * projection a reader needs when the thing it is looking for IS a literal
+ * (`'pg_cron'`), and which previously had no spelling at all, so
+ * `gateNeedsPgCron` fell back to RAW `.text` and could be fooled by prose.
+ * Both masks are written by the SAME scan; this is still one state machine
+ * with N views, never two readers.
  */
 function scanRegion(text, from, to, depth, lineOf, out) {
   const mask = text.slice(from, to).split("");
-  /** Blank `[a, b)` in the mask, preserving newlines. */
+  const litMask = mask.slice();
+  /**
+   * Blank `[a, b)` in BOTH projections, preserving newlines. Used for regions
+   * that are neither code nor literal in either view: comments, and the
+   * dollar-quoted body (whose own comments and literals are masked by the
+   * recursive scan of that body, at its own depth).
+   */
   const blank = (a, b) => {
+    for (let k = Math.max(a, from); k < Math.min(b, to); k += 1) {
+      if (text[k] !== "\n") {
+        mask[k - from] = " ";
+        litMask[k - from] = " ";
+      }
+    }
+  };
+  /** Blank `[a, b)` in the EXECUTABLE projection only — literal interiors. */
+  const blankCode = (a, b) => {
     for (let k = Math.max(a, from); k < Math.min(b, to); k += 1) {
       if (text[k] !== "\n") mask[k - from] = " ";
     }
@@ -700,6 +725,7 @@ function scanRegion(text, from, to, depth, lineOf, out) {
         endLine: lineOf(end - 1),
         text: text.slice(stmtStart, end),
         executableText: mask.slice(stmtStart - from, end - from).join(""),
+        commentMaskedText: litMask.slice(stmtStart - from, end - from).join(""),
         head,
         terminated,
         depth,
@@ -773,7 +799,9 @@ function scanRegion(text, from, to, depth, lineOf, out) {
       }
       // Blank the INTERIOR only: the delimiters stay so the projection still
       // reads as `'…'` and a keyword inside a literal can never be code.
-      blank(i + 1, closed ? j - 1 : j);
+      // EXECUTABLE projection only — `litMask` keeps the interior verbatim,
+      // which is the whole point of the second view (WR-01).
+      blankCode(i + 1, closed ? j - 1 : j);
       i = j;
       continue;
     }
@@ -906,8 +934,15 @@ function scanRegion(text, from, to, depth, lineOf, out) {
  * @param {string} text
  * @returns {Array<{
  *   startLine: number, endLine: number, text: string, executableText: string,
- *   head: boolean, terminated: boolean, depth: number, start: number, end: number
+ *   commentMaskedText: string, head: boolean, terminated: boolean,
+ *   depth: number, start: number, end: number
  * }>}
+ *
+ * `executableText` blanks comments AND literal interiors — "what is code".
+ * `commentMaskedText` blanks comments ONLY and keeps literal interiors — "what
+ * the author actually wrote, minus the prose". Both are the same length as
+ * `text` with newlines preserved. Read the second one when the thing you are
+ * looking for IS a literal; read the first for everything else.
  *
  * `startLine`/`endLine` are 1-based and INCLUSIVE (the plan-05 contract above).
  * `head` marks a branch-head unit — a bare `BEGIN`/`DECLARE`/`ELSE`, an
@@ -982,10 +1017,22 @@ export const PG_CRON_EXTENSION = "pg_cron";
  * ⛔ THE TWO HALVES ARE READ FROM DIFFERENT VIEWS, exactly as
  * `classifyGateIdiom` reads its own two halves and for the same measured
  * reason. `pg_extension` is a CATALOG REFERENCE — code — so it is read off
- * `executableText`, which blanks comments: a commented-out probe is not a
- * probe. `'pg_cron'` is a STRING LITERAL, and the masking projection blanks
- * literals, so it is read off that same statement's RAW `.text` — the identity
- * carrier's rule, applied to the other literal this file needs.
+ * `executableText`, which blanks comments AND literals: a commented-out probe
+ * is not a probe. `'pg_cron'` is a STRING LITERAL, which `executableText`
+ * blanks, so it is read off `commentMaskedText` — the SAME statement with
+ * comments blanked but literals kept.
+ *
+ * ⭐ 2026-09-04, review WR-01: this second read used to be against the RAW
+ * `.text`, because no comments-only projection existed. That made the two
+ * halves asymmetric in a way that could only ever ADD files to the deferral
+ * class: a gate with a LIVE `pg_extension` probe for some OTHER extension,
+ * whose surrounding prose merely mentions pg_cron, classified `lane-blocked`
+ * and silently left `pending:` — deferred forever, since nothing annotates a
+ * deferred file. `commentMaskedText` closes that path, and the comparison is
+ * now case-INSENSITIVE on both halves (`PG_CRON_CATALOG_RE` always was; the
+ * `.includes` was not). The calibration arm for the closed path lives in
+ * `mutation-annotation-parser.test.ts` — live probe for `'pgcrypto'`, pg_cron
+ * in a neighbouring comment, expected `false`.
  *
  * MEASURED 2026-09-03 over `supabase/tests/` (71 files): 6 files mention
  * `pg_cron` in raw bytes, 5 probe the catalog for it in executable code, and 4
@@ -996,7 +1043,7 @@ export const PG_CRON_EXTENSION = "pg_cron";
 export function gateNeedsPgCron(text) {
   for (const stmt of tokenizeStatements(text)) {
     if (!PG_CRON_CATALOG_RE.test(stmt.executableText)) continue;
-    if (stmt.text.includes(PG_CRON_EXTENSION)) return true;
+    if (stmt.commentMaskedText.toLowerCase().includes(PG_CRON_EXTENSION)) return true;
   }
   return false;
 }
@@ -1081,8 +1128,14 @@ export function classifyGateIdiom(text) {
  * ⭐ 2026-09-02, phase 164.4: the UNANNOTATED remainder is classified too, by
  * `classifyGateIdiom` above, and returned as sorted basename lists. The
  * denominator stays every `.sql` in the directory (`filesTotal`) — the end
- * state of the backfill is `files 40/71` with the other 31 PRINTED BY NAME,
- * never `files 40/40` with the gap quietly redefined away.
+ * state of the backfill is `files 39/71` with the other 32 PRINTED BY NAME,
+ * never `files 39/39` with the gap quietly redefined away.
+ * ⚠️ CURRENCY 2026-09-04 (plan 164.4-11, measured): 39/32, not the 40/31 this
+ * sentence carried until then. That figure came from SCOPE AMENDMENT #2 on
+ * 2026-09-03 and predates plan 09's founder-decided deferral of
+ * test_compute_jobs_error_kind_copy_parity.sql to Phase 164.4.1 PGCRON-LANE.
+ * The backfill reached 39/71 and the run prints the other 32 as 27
+ * `unreachable:` + 4 `lane-blocked:` + 1 `pending:`.
  *
  * ⭐ 2026-09-03, plan 164.4-03: a FIFTH partition class, `laneBlockedFiles`.
  * The partition is `annotated + pending + unreachable + inert + lane-blocked

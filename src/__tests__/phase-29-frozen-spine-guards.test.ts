@@ -369,10 +369,38 @@ describe("Phase 29 frozen-spine exit-gate guards", () => {
   // may move. This is the same filter the phase's own audit runs each wave
   // (added non-comment lines across `supabase/tests/` must be 0).
   //
-  // ⚠️ The filter drops a line only when its FIRST non-whitespace characters
-  // are `--`, and keeps every other line WHOLE. It never strips mid-line, so a
-  // `--` inside a string literal (`RAISE EXCEPTION 'a -- b'`) is untouched and
-  // cannot be used to smuggle an executable change past the comparison.
+  // ⚠️ WHAT THE FILTER ACTUALLY DOES, stated exactly (review IN-04, 2026-09-04
+  // — the previous wording claimed less than the filter does, which read as a
+  // stronger safety property than the filter delivers):
+  //
+  //   It drops a line when, and only when, its FIRST non-whitespace characters
+  //   are `--`. Every other line is kept WHOLE. It is a per-line test with no
+  //   SQL lexer behind it, so it knows nothing about quoting context.
+  //
+  // Two consequences, one benign and one a real (today theoretical) gap:
+  //
+  //   ✅ It never strips MID-line. A `--` inside a string literal on an
+  //      otherwise executable line (`RAISE EXCEPTION 'a -- b'`) is untouched,
+  //      so that line still compares in full and cannot be used to smuggle an
+  //      executable change past the comparison.
+  //   ⚠️ It DOES drop a continuation line whose first non-whitespace
+  //      characters are `--` even when that line sits INSIDE a multi-line
+  //      single-quoted literal, where those characters are literal text rather
+  //      than a comment. Such a line is invisible to the comparison in BOTH
+  //      directions, so its content could change unseen.
+  //      MEASURED 2026-09-04 on `test_scenarios_rls.sql`: the file contains
+  //      ZERO multi-line single-quoted literals, hence zero such lines. (A
+  //      dollar-quoted `DO $$ ... $$` body is CODE, not a literal — a `--`
+  //      there is a genuine comment and dropping it is correct. That
+  //      distinction is why the naive count of 99 line-initial `--` lines
+  //      "inside quotes" is not the number that matters.)
+  //      The gap is therefore not reachable in this file today. If a future
+  //      edit introduces a multi-line single-quoted literal here, replace this
+  //      per-line filter with a literal-aware masker before trusting the gate.
+  //      ⛔ Do NOT close it by importing `maskNonCode` from
+  //      `scripts/mutation-runner/parse.mjs`: that would make a frozen-spine
+  //      exit gate depend on the mutation runner's parser, so an unrelated
+  //      refactor there could break this gate. Inline a masker instead.
   it("exit gate (scenarios RLS untouched): test_scenarios_rls.sql is byte-unchanged in every NON-COMMENT line", () => {
     // Trailing whitespace is normalised on BOTH sides before splitting: the
     // `git()` helper trims its output, while `readFileSync` keeps the file's

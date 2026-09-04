@@ -56,6 +56,25 @@
 -- Usage:
 --   psql "$TEST_SUPABASE_DB_URL" -v ON_ERROR_STOP=1 -f \
 --     supabase/tests/test_strategy_keys_publish_integrity.sql
+--
+-- ⭐ MACHINE-EXECUTABLE TWINS (phase 164.4, REDUNDER-BACKFILL). Each prose
+-- RED-UNDER below carries an adjacent `RED-UNDER-M` object that
+-- scripts/mutation-runner executes on every push: it mutates COPIES on a
+-- throwaway pg-lane cluster, requires the FIRST `TEST FAILED (…)` to name that
+-- arm, and restores GREEN. Schema: scripts/mutation-runner/GRAMMAR.md.
+-- ⚠️ PART 1 IS A WALL OF NON-IDIOM RAISES AND IT RUNS FIRST. Its ten structural
+-- checks say `publish-integrity: …`, not `TEST FAILED (…)`, so any mutation
+-- that removes the trigger, the SECDEF flag, the baked search_path, the
+-- `status = 'published'` literal or the `sanitize_in_progress` literal aborts
+-- there with no identity at all and is scored NO-IDENTITY, not RED. Both
+-- literals are ALSO re-read by 20260710160000's own self-check at apply time
+-- (:156, :163), so dropping either never even reaches a lane. Every twin below
+-- therefore FALSIFIES the guard's predicate while leaving both literals in the
+-- body — measured, not assumed.
+-- ⚠️ 26-fixture-strategies-api-key-fk.sql is in the list because Part 4 asserts
+-- the pre-existing `ON DELETE SET NULL` action on `strategies.api_key_id`, and
+-- 03-fixture-compute-jobs.sql declares that column without it.
+-- RED-UNDER-SETUP: {"apply":["scripts/pg-lane/fixtures/01-fixture-core.sql","scripts/pg-lane/fixtures/02-fixture-sanitize-tables.sql","scripts/pg-lane/fixtures/03-fixture-compute-jobs.sql","scripts/pg-lane/fixtures/07-fixture-supabase-default-privileges.sql","scripts/pg-lane/fixtures/26-fixture-strategies-api-key-fk.sql","supabase/migrations/20260710120000_strategy_keys.sql","supabase/migrations/20260710160000_api_keys_published_composite_delete_guard.sql"]}
 
 -- ==========================================================================
 -- Part 1 — structural: the guard trigger + its SECDEF function are present and
@@ -200,6 +219,14 @@ BEGIN
   -- ----- Part 2: published-member delete BLOCKED (fail-loud) -----------------
   -- A REAL DELETE FROM public.api_keys (event-driven). Pre-migration the ON DELETE
   -- CASCADE would silently remove the strategy_keys member and the api_key with no
+  -- RED-UNDER: dead-code the guard's EXISTS in migration 20260710160000 —
+  --            append `AND FALSE` to the published-membership predicate — so
+  --            the BEFORE DELETE trigger stops vetoing anything and the
+  --            composite is holed silently. ⚠️ The `s.status = 'published'`
+  --            literal is left standing on purpose: Part 1(c) and the
+  --            migration's own self-check (:156) both regex the body for it,
+  --            and removing it aborts at apply with a non-idiom raise.
+  -- RED-UNDER-M: {"arm":"Part 2","apply":[{"kind":"edit","file":"supabase/migrations/20260710160000_api_keys_published_composite_delete_guard.sql","find":"  IF EXISTS (\n    SELECT 1\n      FROM public.strategy_keys sk\n      JOIN public.strategies s ON s.id = sk.strategy_id\n     WHERE sk.api_key_id = OLD.id\n       AND s.status = 'published'\n  ) THEN","replace":"  IF EXISTS (\n    SELECT 1\n      FROM public.strategy_keys sk\n      JOIN public.strategies s ON s.id = sk.strategy_id\n     WHERE sk.api_key_id = OLD.id\n       AND s.status = 'published'\n       AND FALSE\n  ) THEN","occurrences":1}]}
   -- exception → raised stays FALSE → this arm reddens.
   raised := FALSE;
   BEGIN
@@ -230,6 +257,13 @@ BEGIN
   END IF;
 
   -- ----- Part 3: draft-member delete ALLOWED (published-scoped guard) ---------
+  -- RED-UNDER: broaden the guard's scope in migration 20260710160000 from
+  --            `s.status = 'published'` to `(s.status = 'published' OR
+  --            s.status = 'draft')`, so a DRAFT composite's member key can no
+  --            longer be deleted and the Phase 88 wizard iterate-delete-retry
+  --            loop is broken. The `= 'published'` literal survives, so both
+  --            scope regexes still pass and this is the FIRST failure.
+  -- RED-UNDER-M: {"arm":"Part 3","apply":[{"kind":"edit","file":"supabase/migrations/20260710160000_api_keys_published_composite_delete_guard.sql","find":"  IF EXISTS (\n    SELECT 1\n      FROM public.strategy_keys sk\n      JOIN public.strategies s ON s.id = sk.strategy_id\n     WHERE sk.api_key_id = OLD.id\n       AND s.status = 'published'\n  ) THEN","replace":"  IF EXISTS (\n    SELECT 1\n      FROM public.strategy_keys sk\n      JOIN public.strategies s ON s.id = sk.strategy_id\n     WHERE sk.api_key_id = OLD.id\n       AND (s.status = 'published' OR s.status = 'draft')\n  ) THEN","occurrences":1}]}
   -- Identical chain, status='draft'. The DELETE succeeds; the member cascades away.
   raised := FALSE;
   BEGIN
@@ -252,6 +286,13 @@ BEGIN
   -- ----- Part 4: SC-4 single-key delete ALLOWED (strategies.api_key_id link) --
   -- A PUBLISHED single-key strategy links via strategies.api_key_id ONLY (no
   -- strategy_keys row), so the guard's EXISTS never matches. The DELETE succeeds
+  -- RED-UNDER: re-point the guard's EXISTS in migration 20260710160000 at
+  --            `strategies.api_key_id` as well as `strategy_keys`, so it fires
+  --            for a PUBLISHED SINGLE-KEY link too. Parts 2 and 3 are
+  --            unaffected — the published member still raises, the draft member
+  --            still does not — so SC-4 is the first thing to break, which is
+  --            exactly the regression this arm exists to catch.
+  -- RED-UNDER-M: {"arm":"Part 4","apply":[{"kind":"edit","file":"supabase/migrations/20260710160000_api_keys_published_composite_delete_guard.sql","find":"  IF EXISTS (\n    SELECT 1\n      FROM public.strategy_keys sk\n      JOIN public.strategies s ON s.id = sk.strategy_id\n     WHERE sk.api_key_id = OLD.id\n       AND s.status = 'published'\n  ) THEN","replace":"  IF EXISTS (\n    SELECT 1\n      FROM public.strategies s\n     WHERE (s.id IN (SELECT sk.strategy_id FROM public.strategy_keys sk\n                      WHERE sk.api_key_id = OLD.id)\n            OR s.api_key_id = OLD.id)\n       AND s.status = 'published'\n  ) THEN","occurrences":1}]}
   -- and the existing ON DELETE SET NULL FK nulls strategies.api_key_id.
   raised := FALSE;
   BEGIN
@@ -327,6 +368,14 @@ BEGIN
 
   -- ----- Part 5a: sanitize path ALLOWED --------------------------------------
   -- Signal the sanitize path exactly as sanitize_user does (SET LOCAL, txn-local).
+  -- RED-UNDER: dead-code the GDPR exemption in migration 20260710160000 —
+  --            falsify the `sanitize_in_progress` branch condition — so
+  --            sanitize_user's own key delete is blocked and Art. 17 account
+  --            deletion aborts. ⚠️ The `sanitize_in_progress` LITERAL must
+  --            survive: that migration's self-check (:163) reads the body back
+  --            with pg_get_functiondef and aborts the apply if the exemption's
+  --            name is gone, so deleting the branch never reaches a lane.
+  -- RED-UNDER-M: {"arm":"Part 5a","apply":[{"kind":"edit","file":"supabase/migrations/20260710160000_api_keys_published_composite_delete_guard.sql","find":"  IF current_setting('quantalyze.sanitize_in_progress', true) = 'on' THEN","replace":"  IF FALSE AND current_setting('quantalyze.sanitize_in_progress', true) = 'on' THEN","occurrences":1}]}
   PERFORM set_config('quantalyze.sanitize_in_progress', 'on', true);
   raised := FALSE;
   BEGIN

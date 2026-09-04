@@ -300,13 +300,22 @@ describe("corpus re-derivation", () => {
       // the 8 still `pending:` are the 7 mixed ones plan 11 takes plus
       // test_compute_jobs_error_kind_copy_parity.sql, still deferred to
       // Phase 164.4.1 PGCRON-LANE.
+      // RE-MEASURED 2026-09-04 (plan 164.4-11, the SEVEN ⚠️ mixed files —
+      // api_keys-exchange / strategy-keys-publish-integrity /
+      // api_keys-insert / sync-status-marked-refresh / guard-wizard-draft /
+      // profiles-privileged-columns / wizard-session-idempotency,
+      // 4 + 4 + 3 + 1 + 1 + 1 + 1 sections — the EIGHTH and FINAL file move):
+      // 262 anchored, across THIRTY-NINE annotated files. That is the end state
+      // of Phase 164.4 on today's lane: exactly ONE idiom file is still
+      // `pending:`, test_compute_jobs_error_kind_copy_parity.sql, owed to
+      // Phase 164.4.1 PGCRON-LANE.
       expect(
         naive,
         `${file.name}: the naive substring count (${naive}) is not STRICTLY above the parser's anchored count (${parsed}). Either the parser stopped anchoring, or this file no longer carries the inflated shapes the anchor exists to exclude.`,
       ).toBeGreaterThan(parsed);
     }
     const totalAnchored = annotated.reduce((n, f) => n + f.prose, 0);
-    expect(totalAnchored).toBe(247);
+    expect(totalAnchored).toBe(262);
   });
 });
 
@@ -896,6 +905,30 @@ describe("164.3.1-10 — the runner's absurdity floor (D-09): two INDEPENDENT ta
       maskJsComments('const u = "https://example.test/x"; const v = 1;'),
       "a `//` inside a string literal must not swallow the rest of the line",
     ).toContain("const v = 1;");
+    // ⭐ 164.4-12 (review WR-05) — the two HAND-WRITTEN branches that the three
+    // arms above never reach. Both were measured benign at HEAD (0 surviving
+    // `//` comment lines over run.mjs and parse.mjs, byte-length parity), so
+    // these are the MISSING CONTROLS for a correct masker, not a live defect —
+    // but every pin in this file that consumes the mask is only as strong as
+    // the mask, so an uncalibrated branch is a pin that could quietly become
+    // satisfiable BY A COMMENT.
+    // ⛔ NOT the review's literal input. WR-05 proposed
+    // `maskJsComments("const RE = /a\\/\\/b/; …")`, and MEASURED 2026-09-04 that
+    // arm is VACUOUS: at runtime the slashes are backslash-ESCAPED, so no
+    // adjacent `//` ever exists and the default copy path reproduces the
+    // literal byte-for-byte. It passes with the regex branch DISABLED
+    // (`if (false && c === "/" …)`) — a calibration arm that cannot fail, which
+    // is the one thing this phase exists to delete. A `//` inside a CHARACTER
+    // CLASS is the shape that actually reaches the branch: unescaped and
+    // adjacent, held open only by `inClass`.
+    expect(
+      maskJsComments("const RE = /[a//b]/; const v = 1; // logPerFileRows(x)"),
+      "a `//` inside a regex literal must not be treated as a comment opener",
+    ).toContain("const v = 1;");
+    expect(
+      maskJsComments('const s = `a${c ? ` (b) ` : ""}d`;\n// logPerFileRows(x)\n'),
+      "a nested template must not desync the mask past its own statement",
+    ).not.toContain("logPerFileRows");
     expect(code.length, "the mask ate the file — it must remove comments, not code").toBeGreaterThan(
       src.length / 2,
     );
@@ -961,6 +994,55 @@ describe("164.3.1-10 — the runner's absurdity floor (D-09): two INDEPENDENT ta
     expect(runCorpusBody).not.toMatch(/laneTally(\[[^\]]*\]|\.\w+)\s*(\+=|=|\+\+|--)/);
   });
 
+  // ── INDEPENDENCE, PER FILE — review WR-02 ───────────────────────────────
+  it("the PER-FILE executed column is measured on the lane side too: runLane keeps it, the verdict loop never increments it", () => {
+    // ⭐ THE DEFECT THIS CLOSES (164.4 review WR-02). The cross-sum relations
+    // (3)/(4) were documented as siblings of `armsExecuted === laneInvocations`,
+    // whose whole worth is that its two counters live in different functions.
+    // The per-file columns had no such independence: `tally.executed += 1` sat
+    // on the line immediately after `armsExecuted += 1`, so both sides of
+    // `sum(perFile.biting) === biting` descended from ONE increment and the
+    // relation was UNFIREABLE — a control that cannot fail, inside the phase
+    // built to delete controls that cannot fail.
+    //
+    // The column now descends from `laneArmGateTally`, incremented inside
+    // `runLane` at the spawn. This pin is what stops a future refactor quietly
+    // putting `tally.executed += 1` back and re-collapsing the two sides.
+    // MEASURED 2026-09-04: with the lane-side increment severed, the green
+    // fixture corpus raises "the per-file breakdown sums to 0 biting arm(s) but
+    // the aggregate reports 2 (executed=2 lane-invocations=2 biting=2)" — note
+    // executed EQUALS lane-invocations there, so relation (1) is satisfied and
+    // only relation (3) catches it.
+    // ⛔ Sliced from the COMMENT-MASKED source. `run.mjs` carries a "do NOT add
+    // `tally.executed += 1` back here" warning INSIDE runCorpus, and an unmasked
+    // pin matches that prose — i.e. it would be satisfiable, and falsifiable, by
+    // a comment. That is the exact class the masker above exists to close, so
+    // this pin consumes it rather than re-deriving a weaker filter.
+    const src = maskJsComments(readFileSync(RUNNER_PATH, "utf8"));
+    const fnBody = (header: string) => {
+      const at = src.indexOf(header);
+      expect(at, `${header} not found`).toBeGreaterThan(-1);
+      const end = src.indexOf("\n}\n", at);
+      expect(end, `${header} has no column-0 closing brace`).toBeGreaterThan(at);
+      return src.slice(at, end + 2);
+    };
+    const runLaneBody = fnBody("function runLane(");
+    const runCorpusBody = fnBody("export function runCorpus(");
+    const perFileRowsBody = fnBody("function perFileRows(");
+
+    // The lane side KEEPS the per-gate count, beside the per-leg one.
+    expect(runLaneBody).toMatch(/laneArmGateTally\.set\(/);
+    // The verdict loop must never write it, and must no longer keep a
+    // per-file executed counter of its own.
+    expect(runCorpusBody).not.toMatch(/laneArmGateTally\.set\(/);
+    expect(
+      runCorpusBody,
+      "`tally.executed += 1` in the verdict loop is exactly the by-construction agreement WR-02 removed",
+    ).not.toMatch(/tally\.executed\s*(\+=|=|\+\+)/);
+    // …and the reported column is DERIVED from the lane-side map.
+    expect(perFileRowsBody).toMatch(/laneArmSpawns\.get\(t\.gateRel\)/);
+  });
+
   // ── FIRE direction THROUGH THE WIRING — an injected lane runner ────────
   // 164.4-03: the runner drives a `probe` leg once per lane-spawning run and
   // reads a LANE-PROBE marker off its output. A stub that answers it with an
@@ -994,9 +1076,23 @@ describe("164.3.1-10 — the runner's absurdity floor (D-09): two INDEPENDENT ta
     expect(r.laneInvocations).toBe(0);
     expect(r.exitCode).toBe(1);
     const absurd = r.defects.filter((d: { kind: string }) => d.kind === "absurdity");
-    expect(absurd).toHaveLength(1);
+    // ⭐ 164.4-12 (review WR-02) — TWO violations now, not one, and the second
+    // is the point of that review finding. Since the per-file `executed` column
+    // is measured on the LANE side (`laneArmGateTally`, inside `runLane`), a
+    // stub that never spawns leaves the columns at 0 while the verdict loop
+    // still raises a `no-red` naming the file — so the file's `biting` derives
+    // to a NEGATIVE and the breakdown reports itself unmeasurable. Before that
+    // change `tally.executed` was incremented beside `armsExecuted` and the
+    // per-file relations agreed with the aggregate BY CONSTRUCTION, i.e. could
+    // not fail. Asserting BOTH here is what keeps that independence pinned:
+    // drop the lane-side tally and this arm goes red on the length.
+    expect(absurd).toHaveLength(2);
     evidence(absurd[0].detail, r.armsExecuted, 0, r.bitingArms);
     expect(absurd[0].detail).toMatch(/CLAIMED/);
+    expect(
+      absurd[1].detail,
+      "the per-file breakdown must report ITSELF unmeasurable under a severed lane tally — the independent second measurement",
+    ).toMatch(/per-file breakdown carries a field that is not a non-negative integer/);
     expect(noProbeMeasureFail(r.defects), "the stub must have ANSWERED the probe leg").toBe(true);
   });
 
@@ -1175,7 +1271,7 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     "  arm SHAPE 1                  exit   3  RED (identity ok)  (1.7s)",
     "  restore   supabase/tests/test_strategy_shares_rls.sql — exit 0 (1.8s)",
     "",
-    "coverage: files 32/71",
+    "coverage: files 39/71",
     // 164.4-01: the exclusion, named. Two synthetic basenames rather than the
     // real 27 — the arms below mutate the COUNT against the NAMES, and a
     // fixture carrying the live corpus would have to move on every batch.
@@ -1193,18 +1289,21 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // claiming 36 while naming one file would be internally inconsistent for
     // no gain — and would have to move on every batch.
     "  pending: 1 idiom file(s) without RED-UNDER — c.sql",
-    "arms: 247/247/0   (executed/annotated/waived)",
-    "biting: 247   (executed arms that reddened their OWN arm first — the quantity ARMS_FLOOR bounds)",
-    "lane-invocations: 247   (arm lanes actually spawned — tallied inside runLane, independent of the 247 the verdict loop counted; plus 32 baseline / 32 restore leg(s))",
-    // 164.4-01: the per-file breakdown. These THIRTY-TWO rows are the real,
-    // measured shape at plan 164.4-10, which annotated the last four non-mixed
-    // idiom files (allocator-equity-pre-terminus / enqueue-dedupe /
-    // metrics-by-basis / set-compute-job-progress, 2 sections each): their
-    // `biting` column must SUM to the aggregate `biting:` above (6 + 2 + 7 + 10 + 7 + 9 + 7 + 7 + 3 + 5 + 2 + 7 + 5 + 5 + 15 + 15 + 11 + 2 + 3 + 5 + 9 + 5 + 2 + 8 + 5 + 9 + 45 + 5 + 6 + 4 + 5 + 11 =
-    // 247) and their COUNT must equal the `coverage:` numerator (32), both of
+    "arms: 262/262/0   (executed/annotated/waived)",
+    "biting: 262   (executed arms that reddened their OWN arm first — the quantity ARMS_FLOOR bounds)",
+    "lane-invocations: 262   (arm lanes actually spawned — tallied inside runLane, independent of the 262 the verdict loop counted; plus 39 baseline / 39 restore leg(s))",
+    // 164.4-01: the per-file breakdown. These THIRTY-NINE rows are the real,
+    // measured shape at plan 164.4-11, which annotated the SEVEN ⚠️ mixed files
+    // (api_keys-exchange 4 / strategy-keys-publish-integrity 4 /
+    // api_keys-insert 3 / sync-status-marked-refresh 1 / guard-wizard-draft 1 /
+    // profiles-privileged-columns 1 / wizard-session-idempotency 1): their
+    // `biting` column must SUM to the aggregate `biting:` above (6 + 2 + 4 + 3 + 7 + 10 + 7 + 9 + 7 + 7 + 3 + 5 + 2 + 7 + 5 + 5 + 1 + 15 + 15 + 11 + 2 + 1 + 3 + 5 + 9 + 5 + 2 + 8 + 5 + 4 + 9 + 45 + 5 + 1 + 6 + 4 + 5 + 11 + 1 =
+    // 262) and their COUNT must equal the `coverage:` numerator (39), both of
     // which the count-recheck step asserts.
     "  file test_allocator_equity_derived_rls.sql: sections 6 / judged 6 / annotated 6 / waived 0 / biting 6",
     "  file test_allocator_equity_pre_terminus_flag.sql: sections 2 / judged 2 / annotated 2 / waived 0 / biting 2",
+    "  file test_api_keys_exchange_not_user_writable.sql: sections 4 / judged 4 / annotated 4 / waived 0 / biting 4",
+    "  file test_api_keys_insert_not_client_writable.sql: sections 3 / judged 3 / annotated 3 / waived 0 / biting 3",
     "  file test_api_keys_venue_identity_uniq.sql: sections 7 / judged 7 / annotated 7 / waived 0 / biting 7",
     "  file test_capital_ownership_allocation_guard.sql: sections 10 / judged 10 / annotated 10 / waived 0 / biting 10",
     "  file test_capital_ownership_column.sql: sections 7 / judged 7 / annotated 7 / waived 0 / biting 7",
@@ -1217,10 +1316,12 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     "  file test_funding_fees_rls.sql: sections 7 / judged 7 / annotated 7 / waived 0 / biting 7",
     "  file test_get_published_trust_signals.sql: sections 5 / judged 5 / annotated 5 / waived 0 / biting 5",
     "  file test_get_verified_cohort_rank_gate.sql: sections 5 / judged 5 / annotated 5 / waived 0 / biting 5",
+    "  file test_guard_wizard_draft_updates_auth_uid.sql: sections 1 / judged 1 / annotated 1 / waived 0 / biting 1",
     "  file test_ledger_refresh_composite_arm.sql: sections 15 / judged 15 / annotated 15 / waived 0 / biting 15",
     "  file test_ledger_refresh_fanout.sql: sections 15 / judged 15 / annotated 15 / waived 0 / biting 15",
     "  file test_ledger_refresh_staleness.sql: sections 11 / judged 11 / annotated 11 / waived 0 / biting 11",
     "  file test_metrics_by_basis_write.sql: sections 2 / judged 2 / annotated 2 / waived 0 / biting 2",
+    "  file test_profiles_privileged_columns_locked.sql: sections 1 / judged 1 / annotated 1 / waived 0 / biting 1",
     "  file test_resync_retry_single_job.sql: sections 3 / judged 3 / annotated 3 / waived 0 / biting 3",
     "  file test_scenario_downgrade_sweep.sql: sections 5 / judged 5 / annotated 5 / waived 0 / biting 5",
     "  file test_scenario_shares_rls.sql: sections 9 / judged 9 / annotated 9 / waived 0 / biting 9",
@@ -1228,14 +1329,17 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     "  file test_set_compute_job_progress.sql: sections 2 / judged 2 / annotated 2 / waived 0 / biting 2",
     "  file test_strategies_private_owner_isolation.sql: sections 8 / judged 8 / annotated 8 / waived 0 / biting 8",
     "  file test_strategy_analytics_series_completeness.sql: sections 5 / judged 5 / annotated 5 / waived 0 / biting 5",
+    "  file test_strategy_keys_publish_integrity.sql: sections 4 / judged 4 / annotated 4 / waived 0 / biting 4",
     "  file test_strategy_keys_rls.sql: sections 9 / judged 9 / annotated 9 / waived 0 / biting 9",
     "  file test_strategy_shares_rls.sql: sections 35 / judged 45 / annotated 45 / waived 0 / biting 45",
     "  file test_strategy_verifications_wizard_session_tenant_scope.sql: sections 5 / judged 5 / annotated 5 / waived 0 / biting 5",
+    "  file test_sync_status_marked_refresh_protected.sql: sections 1 / judged 1 / annotated 1 / waived 0 / biting 1",
     "  file test_user_notes_dashboard_scope.sql: sections 6 / judged 6 / annotated 6 / waived 0 / biting 6",
     "  file test_weight_snapshot_seed_secdef.sql: sections 4 / judged 4 / annotated 4 / waived 0 / biting 4",
     "  file test_wizard_composite_fence.sql: sections 5 / judged 5 / annotated 5 / waived 0 / biting 5",
     "  file test_wizard_composite_members.sql: sections 11 / judged 11 / annotated 11 / waived 0 / biting 11",
-    "per-arm lane time: mean 1.0s over 247 arm run(s)",
+    "  file test_wizard_session_idempotency.sql: sections 1 / judged 1 / annotated 1 / waived 0 / biting 1",
+    "per-arm lane time: mean 1.0s over 262 arm run(s)",
     "",
     "✅ No defects. Every annotated arm bit its own arm first.",
     "",
@@ -1245,7 +1349,7 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     const r = runCountRecheck(GREEN_LOG);
     expect(r.status, r.out).toBe(0);
     expect(r.out).toContain("the runner's two tallies agree");
-    expect(r.out).toContain("247 arm lane(s) spawned");
+    expect(r.out).toContain("262 arm lane(s) spawned");
   });
 
   // ── 164.4-01, criterion 1 as amended: a SILENT EXCLUSION must fail here ──
@@ -1393,12 +1497,12 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     const extra = GREEN_LOG.replace(
       /^ {2}file test_strategy_shares_rls\.sql: .*$/m,
       (line) =>
-        `${line}\n  file test_a_thirty_third_annotated_gate.sql: sections 15 / judged 0 / annotated 0 / waived 0 / biting 0`,
+        `${line}\n  file test_a_fortieth_annotated_gate.sql: sections 15 / judged 0 / annotated 0 / waived 0 / biting 0`,
     );
     expect(extra).not.toBe(GREEN_LOG);
     const r = runCountRecheck(extra);
     expect(r.status, r.out).toBe(1);
-    expect(r.out).toContain("printed 33 per-file row(s) but reported 32 annotated file(s)");
+    expect(r.out).toContain("printed 40 per-file row(s) but reported 39 annotated file(s)");
     expect(r.out).not.toContain("two tallies agree");
   });
 
@@ -1407,8 +1511,8 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     expect(short, "the mutation must actually change the log").not.toBe(GREEN_LOG);
     const r = runCountRecheck(short);
     expect(r.status, r.out).toBe(1);
-    expect(r.out).toContain("rows sum to 246 biting arm(s) but the aggregate");
-    expect(r.out).toContain("reports 247");
+    expect(r.out).toContain("rows sum to 261 biting arm(s) but the aggregate");
+    expect(r.out).toContain("reports 262");
     expect(r.out).not.toContain("two tallies agree");
   });
 
@@ -1422,25 +1526,25 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     expect(r.out).not.toContain("two tallies agree");
   });
 
-  it("RED: the parse-only shape — 247 executed claimed, 0 lanes counted — fails naming all three numbers", () => {
-    const severed = GREEN_LOG.replace(/^lane-invocations: 247 /m, "lane-invocations: 0 ");
+  it("RED: the parse-only shape — 262 executed claimed, 0 lanes counted — fails naming all three numbers", () => {
+    const severed = GREEN_LOG.replace(/^lane-invocations: 262 /m, "lane-invocations: 0 ");
     expect(severed).not.toBe(GREEN_LOG);
     const r = runCountRecheck(severed);
     expect(r.status, r.out).toBe(1);
     expect(r.out).toContain("GATE failing, not the corpus");
-    expect(r.out).toContain("executed=247 lane-invocations=0 biting=247");
+    expect(r.out).toContain("executed=262 lane-invocations=0 biting=262");
     expect(r.out).not.toContain("two tallies agree");
   });
 
   it("RED: a single unaccounted lane also fails — the relation is exact", () => {
-    const extra = GREEN_LOG.replace(/^lane-invocations: 247 /m, "lane-invocations: 248 ");
+    const extra = GREEN_LOG.replace(/^lane-invocations: 262 /m, "lane-invocations: 263 ");
     const r = runCountRecheck(extra);
     expect(r.status, r.out).toBe(1);
-    expect(r.out).toContain("executed=247 lane-invocations=248 biting=247");
+    expect(r.out).toContain("executed=262 lane-invocations=263 biting=262");
   });
 
   it("RED: a NON-NUMERIC lane-invocations count is a MEASURE_FAIL, never parsed as a number", () => {
-    const garbled = GREEN_LOG.replace(/^lane-invocations: 247 /m, "lane-invocations: abc ");
+    const garbled = GREEN_LOG.replace(/^lane-invocations: 262 /m, "lane-invocations: abc ");
     expect(garbled).not.toBe(GREEN_LOG);
     const r = runCountRecheck(garbled);
     expect(r.status, r.out).toBe(1);
@@ -1450,10 +1554,10 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
   });
 
   it("RED: a waived count above WAIVED_CEILING fails naming both numbers — the W field is read, not ignored", () => {
-    // The GREEN log carries `arms: 247/247/0`; one waiver against a ceiling read
+    // The GREEN log carries `arms: 262/262/0`; one waiver against a ceiling read
     // out of run.mjs (0 today) must fail. The executed and biting counts are
     // untouched, so nothing else in the step can be what fired.
-    const waived = GREEN_LOG.replace(/^arms: 247\/247\/0 /m, `arms: 247/247/${WAIVED_CEILING + 1} `);
+    const waived = GREEN_LOG.replace(/^arms: 262\/262\/0 /m, `arms: 262/262/${WAIVED_CEILING + 1} `);
     expect(waived).not.toBe(GREEN_LOG);
     const r = runCountRecheck(waived);
     expect(r.status, r.out).toBe(1);
@@ -1467,14 +1571,14 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // Calibration for the extract-and-run harness itself: if the extraction
     // returned an empty or truncated block, these established arms would not
     // fire either, and the GREEN arm above would be passing on nothing.
-    const zero = GREEN_LOG.replace(/^arms: 247\/247\/0 /m, "arms: 0/247/0 ");
+    const zero = GREEN_LOG.replace(/^arms: 262\/262\/0 /m, "arms: 0/262/0 ");
     const z = runCountRecheck(zero);
     expect(z.status, z.out).toBe(1);
     expect(z.out).toContain("ZERO arms executed");
-    const spliced = GREEN_LOG.replace(/^biting: 247 /m, "biting: 248 ");
+    const spliced = GREEN_LOG.replace(/^biting: 262 /m, "biting: 263 ");
     const s = runCountRecheck(spliced);
     expect(s.status, s.out).toBe(1);
-    expect(s.out).toContain("biting (248) exceeds executed (247)");
+    expect(s.out).toContain("biting (263) exceeds executed (262)");
   });
 });
 

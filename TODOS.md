@@ -1273,6 +1273,16 @@ true for 146 and half of 142–145, and **false for 141**.
       the lane substrate whose CLI contract `scripts/pg-lane/README.md:10` calls costly to change.
       ⛔ Faking a `pg_extension` row is NOT the fix: it would make arm `1/JOB-04` unfalsifiable while
       reporting it as covered (threat T-164.4-01).
+      ⚠️ **164.4 closed 2026-09-04 with the 4 files lane-blocked and printed every run; 100 sections
+      are owed to this item.** ⛔ CORRECTION to the sentence above: the phase's end state is
+      `coverage: files 39/71`, NOT the `40/71` written on 2026-09-03. A FIFTH file,
+      `test_compute_jobs_error_kind_copy_parity.sql`, is equally un-baselineable without pg_cron —
+      its blocker is migration `20260826140000` in its apply list rather than its own text, so
+      `gateNeedsPgCron` cannot see it and it is printed under `pending:` (that miscount is
+      `[REDUNDER-LANEBLOCKED-BLIND]` above). So this item owes 100 sections across 4 lane-blocked
+      files PLUS that fifth file, and `src/__tests__/mutation-annotation-parser.test.ts` pins
+      `pendingFiles` as the exact one-name set so an empty `pending:` line cannot be shipped as an
+      attestation of completeness before Phase 164.4.1 lands.
       **Needed before any batch containing those files.** Evidence:
       `.planning/phases/164.4-.../164.4-00-FIXTURE-STRATEGY.md` § "The largest idiom file cannot be
       baselined".
@@ -1365,6 +1375,15 @@ true for 146 and half of 142–145, and **false for 141**.
       ⚠️ Also carries the 174 non-idiom raises that sit INSIDE the 44 idiom files (unreachable and
       un-neuterable there); seven "mixed" files are the concentration, e.g.
       `test_api_keys_exchange_not_user_writable.sql` at 38 non-idiom vs 9 idiom.
+      ⚠️ **164.4 closed 2026-09-04: 39/71 files, 262 arms biting, 0 waived; the runner prints these
+      27 by name every run** (`unreachable:`), and `sql-mutation` MEASURE_FAILs if that line goes
+      missing or if its count disagrees with the names beside it. The seven mixed files ARE now
+      annotated — plan 164.4-11 twinned all 15 of their idiom sections — so what this item still
+      owes is unchanged: the 27 whole files, plus those files' own non-idiom raises, which stayed
+      invisible to the runner throughout. Measured while annotating them: the shadowing raise is
+      typically a PRIVILEGE abort (`permission denied for table …`), which carries no
+      `TEST FAILED (…)` and scores NO-IDENTITY — concrete evidence for the rename this item
+      proposes.
 
 - [ ] **`[WINDOWS-STALE]` `.planning/WINDOWS.md` entries 25, 26 and 28 read `open` but have all executed (logged 2026-09-02).**
       `CLAUDE.md:53` already claims entry 28 is closed while `.planning/WINDOWS.md:45` still records
@@ -2841,6 +2860,38 @@ governs by CONTENT TYPE, and their content is prose/forms — rung 1.
 - [ ] **MAINTAINABILITY (deferred) — three copies of the same substring counter** (2026-09-02 /ship review): `occurrences()` in `src/__tests__/drift-check-scripts.test.ts`, `countOf` in `src/__tests__/gate-family-meta.test.ts` and `countOccurrences` in `scripts/mutation-runner/run.mjs`. Collapse to one helper under `src/__tests__/helpers/` (run.mjs is ESM outside vitest — either import the same module or leave its copy with a pointer).
 
 ### CI / test-infra ratchet
+
+- **`[REDUNDER-PENDING-UNBOOKED]` The runner's `pending:` class is the only one of five printed
+  without a TODO id or a CI assertion (raised 2026-09-04 by the Phase 164.4 verifier, WR-V3).**
+  `unreachable:` cites `[REDUNDER-NONIDIOM]`, `lane-blocked:` cites `[REDUNDER-PGCRON]` and is
+  MEASURE_FAILed in `.github/workflows/ci.yml` if absent; `pending:` cites nothing and CI asserts
+  nothing about it. Today the class holds exactly one file
+  (`test_compute_jobs_error_kind_copy_parity.sql`, owed to Phase 164.4.1) and its shape IS pinned
+  against real runner output by a vitest arm on every push, so this is bounded, not open.
+  ⚠️ **Do NOT close it by hardcoding a TODO id into the line.** `pending:` is a GENERIC class —
+  "idiom files that carry no RED-UNDER yet" — so a fixed id would be a lie the moment a second,
+  unrelated file lands in it. The honest fix is a gate asserting that every file the runner names
+  as pending is accounted for somewhere in `TODOS.md`, which is a new mechanism and was not worth
+  building at phase close. Deliberately deferred, not overlooked.
+
+
+- **`[VITEST-CORPUS-TIMEOUT-01]` A corpus test passes only on an idle box — 5 s budget, ~4 s of work
+  (measured 2026-09-04, Phase 164.4 close).** `src/__tests__/drift-check-scripts.test.ts` — the
+  `[VAC04-C1] … CORPUS` case scans all 262 `supabase/migrations/**` files against two structural
+  readers inside vitest's **default 5000 ms** timeout. MEASURED, same tree, same commit, twice each:
+  loaded box ⇒ `Error: Test timed out in 5000ms`, full suite **193.9 s**, 1 failed / 13905 passed;
+  quiet box ⇒ **102.7 s**, 13906 passed, exit 0. Isolated, the file is 333/333 green but takes
+  42.1 s, so this one case sits close to the budget even with nothing else running.
+  ⚠️ It is NOT a flake in the "ignore it" sense — the budget is genuinely too small for the work,
+  and the corpus only grows with each migration, so the margin shrinks monotonically. CI has not
+  hit it because the vitest shards spread the load, which means the first symptom will be a
+  mysterious red shard, not a clear one.
+  **Fix = an explicit per-test timeout carrying the measurement** (`it(..., { timeout: 30_000 })`
+  with a comment recording 42 s/333 tests and the 262-file denominator), NOT a global
+  `testTimeout` bump, which would hide every other near-budget test. Not blocking: unrelated to
+  Phase 164.4's subject (its corpus is `supabase/migrations/**`, which the phase does not touch),
+  and both the full suite and CI are green.
+
 - **CI speed/flake (founder 2026-08-05, watched python at 20min/12%) — 4TH MECHANISM FOUND: a WEDGED PostgREST pool.** All-day 504s on TEST (every CI cluster: 07:45, ~11:00, 18:0x, 19:2x) were PGRST003 while Postgres sat at 14/60 connections nearly idle and the same DELETE ran instantly via direct SQL — PostgREST's own pool slots were leaked/wedged after the morning's 2,144-job backlog connection storm, and the state persists until PostgREST's connections are recycled. REMEDY (proven 2026-08-05): `select pg_terminate_backend(pid) from pg_stat_activity where application_name='postgrest' and backend_type='client backend'` → PostgREST rebuilds the pool → instant 200s. Contributing causes booked: python + e2e-seeded run CONCURRENTLY (workflow `needs:` sequencing fix); daily backlog (purged 2,144 `derive-dailies-%` pending, cron untouched). Real fix (Phase 144, owner): per-run isolated DB. Also: e2e-seeded's seed should FAIL FAST with a "PostgREST wedged?" hint on PGRST003 rather than burning the run.
 - 44 live-DB vitest files + ~112 python tests are green-skipped in CI while migrations
   auto-apply to prod.

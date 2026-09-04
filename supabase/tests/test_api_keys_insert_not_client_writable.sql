@@ -109,6 +109,25 @@
 --
 -- Run order: AFTER 20260811210000 (the attested_venue column + scrub trigger).
 -- The whole test rolls back.
+--
+-- ⭐ MACHINE-EXECUTABLE TWINS (phase 164.4, REDUNDER-BACKFILL). Each prose
+-- RED-UNDER below carries an adjacent `RED-UNDER-M` object that
+-- scripts/mutation-runner executes on every push: it mutates COPIES on a
+-- throwaway pg-lane cluster, requires the FIRST `TEST FAILED (…)` to name that
+-- arm, and restores GREEN. Schema: scripts/mutation-runner/GRAMMAR.md.
+-- ⚠️ THE APPLY LIST IS SIZED BY THE `SKIP (5,6)` NOTICE. It carries
+-- 20260823120000, the REVOKE this file arms on, so nothing skips — MEASURED
+-- 2026-09-04, the baseline prints zero SKIP lines and assertions 1, 3, 2, 5, 6
+-- and 4 all run. That migration's pre-flight census refuses to apply on an
+-- unidentified database, hence the seed stand-in
+-- 25-fixture-api-keys-e2e-census-seed.sql just ahead of it.
+-- ⚠️ 20260405061912 is in the list because assertions 1 and 4 are ROW-filter
+-- claims: `api_keys_owner` is what can make the owner's own row unreachable
+-- without raising. Withdrawing SELECT or DELETE instead aborts with a bare
+-- `permission denied for table api_keys` — no `TEST FAILED (…)`, scored
+-- NO-IDENTITY (and assertion 1 wraps that case in its own OUTAGE raise, which
+-- is non-idiom too).
+-- RED-UNDER-SETUP: {"apply":["scripts/pg-lane/fixtures/01-fixture-core.sql","scripts/pg-lane/fixtures/07-fixture-supabase-default-privileges.sql","scripts/pg-lane/fixtures/02-fixture-sanitize-tables.sql","scripts/pg-lane/fixtures/03-fixture-compute-jobs.sql","scripts/pg-lane/fixtures/05-fixture-wizard-composite.sql","scripts/pg-lane/fixtures/10-fixture-strategies-rls-baseline.sql","scripts/pg-lane/fixtures/11-fixture-api-keys-created-at.sql","scripts/pg-lane/fixtures/15-fixture-auth-role.sql","scripts/pg-lane/fixtures/21-fixture-api-keys-credential-columns.sql","supabase/migrations/20260405061912_rls_policies.sql","supabase/migrations/20260602190000_f6_wizard_session_idempotency.sql","supabase/migrations/20260710120000_strategy_keys.sql","supabase/migrations/20260710180000_wizard_composite.sql","supabase/migrations/20260810120000_lock_api_keys_exchange_column.sql","supabase/migrations/20260811210000_api_keys_attested_venue.sql","supabase/migrations/20260812083206_api_keys_venue_account_id.sql","supabase/migrations/20260813150106_wizard_rpcs_service_role_writer.sql","supabase/migrations/20260814120000_wizard_rpcs_revoke_authenticated.sql","scripts/pg-lane/fixtures/25-fixture-api-keys-e2e-census-seed.sql","supabase/migrations/20260823120000_revoke_api_keys_insert.sql"]}
 
 BEGIN;
 
@@ -163,6 +182,13 @@ BEGIN
   -- REVOKE that took SELECT as well kills this statement as a raw
   -- `permission denied`, with no diagnosis. The two failures are distinct —
   -- the grant is gone, versus the grant is intact but RLS hides the row — and
+  -- RED-UNDER: narrow `api_keys_owner`'s USING clause in migration
+  --            20260405061912 so the owner's own row stops matching. ⚠️ It has
+  --            to be the ROW filter: this assertion's own OUTAGE branch catches
+  --            a withdrawn SELECT grant first, and that branch is NOT in the
+  --            `TEST FAILED (…)` idiom, so a grant-shaped mutation scores
+  --            NO-IDENTITY (MEASURED 2026-09-04).
+  -- RED-UNDER-M: {"arm":"1","apply":[{"kind":"edit","file":"supabase/migrations/20260405061912_rls_policies.sql","find":"CREATE POLICY api_keys_owner ON api_keys FOR ALL USING (user_id = auth.uid()) WITH CHECK (user_id = auth.uid());","replace":"CREATE POLICY api_keys_owner ON api_keys FOR ALL USING (false) WITH CHECK (user_id = auth.uid());","occurrences":1}]}
   -- an operator needs to be told which.
   SET LOCAL ROLE authenticated;
   v_err := NULL;
@@ -188,6 +214,15 @@ BEGIN
   -- Deliberately ordered ahead of the A1 positive: it is the control that makes
   -- assertion 2 mean something, and a control that runs after the thing it
   -- controls invites the reader to treat it as an afterthought.
+  -- RED-UNDER: flip `scrub_client_supplied_attested_venue` to SECURITY DEFINER
+  --            in migration 20260811210000 — the exact trap that migration's
+  --            own header documents at :519-524. Under DEFINER `current_user`
+  --            is the function's owner, the privileged-caller branch always
+  --            wins, and the trigger becomes a silent no-op that leaves
+  --            assertion 2 passing for every writer including the browser.
+  --            ⚠️ The needle spans the two lines above the modifier because the
+  --            bare token `SECURITY INVOKER` occurs 7x in that migration.
+  -- RED-UNDER-M: {"arm":"3","apply":[{"kind":"edit","file":"supabase/migrations/20260811210000_api_keys_attested_venue.sql","find":"-- (20260810120000:110-116). Do not change this line.\nSECURITY INVOKER\nSET search_path = public, pg_catalog","replace":"-- (20260810120000:110-116). Do not change this line.\nSECURITY DEFINER\nSET search_path = public, pg_catalog","occurrences":1}]}
   SELECT t.tgenabled::text, p.prosecdef
     INTO v_trigger_enabled, v_trigger_secdef
     FROM pg_trigger t
@@ -354,6 +389,17 @@ BEGIN
   -- Runs UNCONDITIONALLY and last, because it removes the fixture row: an
   -- over-broad REVOKE is caught whether or not the negatives above were gated
   -- out. This is D-05's canary and it must be green in BOTH states.
+  -- RED-UNDER: narrow `api_keys_owner` from `FOR ALL` to `FOR SELECT` in
+  --            migration 20260405061912, so the owner keeps its read while the
+  --            row filter stops admitting its own DELETE and the
+  --            disconnect-a-key flow breaks. ⚠️ The over-broad REVOKE this arm
+  --            NAMES cannot be the mutation: a withdrawn DELETE privilege
+  --            aborts with a bare `permission denied for table api_keys` and no
+  --            identity (MEASURED 2026-09-04, NO-IDENTITY), and assertion 6's
+  --            own `OUTAGE (6)` branch would claim it first anyway. Assertions
+  --            5 and 6 are unaffected — INSERT is still revoked and the ACL
+  --            class is unchanged — so this is the FIRST failure.
+  -- RED-UNDER-M: {"arm":"4","apply":[{"kind":"edit","file":"supabase/migrations/20260405061912_rls_policies.sql","find":"CREATE POLICY api_keys_owner ON api_keys FOR ALL USING (user_id = auth.uid()) WITH CHECK (user_id = auth.uid());","replace":"CREATE POLICY api_keys_owner ON api_keys FOR SELECT USING (user_id = auth.uid());","occurrences":1}]}
   SET LOCAL ROLE authenticated;
   DELETE FROM public.api_keys WHERE id = v_key;
   GET DIAGNOSTICS v_deleted = ROW_COUNT;

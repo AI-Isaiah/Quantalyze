@@ -1,5 +1,213 @@
 # Changelog
 
+## [0.77.12.0] - 2026-09-04
+
+### Phase 164.4 close — batch 8, and every review and verification finding
+
+No production source change, no schema change, no migration: across the whole phase,
+**0 non-test `src/` files, 0 migrations, 0 `analytics-service` files**. The seven mixed
+gate files gain **comment twins only** — 308 added lines, 0 removed, 0 non-comment.
+Final batch of 8.
+
+```
+coverage: files 39/71
+arms: 262/262/0   biting: 262   lane-invocations: 262   (tallies agree)
+lane-blocked: 4   lane-probe: pg_cron absent   pending: 1
+```
+
+### Fixed — three controls that could not fail, inside the phase built to delete them
+
+- **The per-file cross-sum was not the independent control it claimed.** `run.mjs`
+  documented `sum(perFile.biting) === biting` as a sibling of `armsExecuted ===
+  laneInvocations`, whose value is that its two counters live in different functions.
+  But `tally.executed += 1` sat on the line immediately after `armsExecuted += 1`, so
+  both sides derived from the same increment and the relation was unfireable. The
+  per-file `executed` column is now measured on the lane side. Proven by severing the
+  lane increment: the run reports `executed=2 lane-invocations=2 biting=2` while the
+  breakdown sums to 0 — a state the FIRST relation satisfies, so only the new one
+  catches it. The old code could not reach that state at all.
+- **A test named for independence had none.** `it("the five classes PARTITION the
+  corpus, checked against a SECOND derivation")` was `scanCorpus`'s body retyped. The
+  second reader is now line-oriented, sharing no regex, primitive or masking logic.
+  Under a neutered classifier the new test reds naming the four files while the OLD
+  derivation stays green, agreeing with the broken parser.
+- **A self-referential oracle introduced by that very fix.**
+  `expect(commentedOut).toContain("RAISE EXCEPTION")` read a `const` bound to a literal
+  three lines above. The repo's own primitive-D detector caught it. Removed at the
+  source — not allowlisted, because allowlisting is how this class survives.
+
+### Fixed — `gateNeedsPgCron` could defer a gate forever on a COMMENT
+
+It tested `pg_extension` against comment-masked text but the extension name against RAW
+text, so a gate with a live probe for another extension, mentioning pg_cron only in
+neighbouring prose, joined the deferred `lane-blocked` class silently. Fixed with a
+second projection on the same scan (comments masked, literals preserved), read
+case-insensitively to match the regex it pairs with.
+
+### Added — `sql-gate-lint` mechanism 6: a stand-in that SHADOWS the object under test
+
+Three rules, not the two specified. Fixture 10's instance is a **policy** collision —
+`CREATE POLICY` has no `IF NOT EXISTS`, so the second raises 42710 and is skipped,
+leaving the narrower stand-in in force — which neither table rule detects. Measured, not
+assumed.
+
+- `R5-fixture-shadows-migration-table` — escape: `DROP TABLE IF EXISTS` (fixture-16 idiom)
+- `R6-fixture-shadows-fixture-table` — escape: `ADD COLUMN IF NOT EXISTS` (fixture-20 idiom)
+- `R7-fixture-shadows-policy` — escape: `DROP POLICY IF EXISTS` (fixture-10 idiom)
+
+Each is proven to make live contact with the real corpus by **disabling its repair escape
+and counting the reds: R5=1, R6=3, R7=5** real gate files. The corpus is clean because
+the fixtures repair the defect, not because the rules have nothing to judge, and that
+floor is pinned as an arm. Apply lists are read through `maskSql`: an unmasked scan
+produces **10 false findings** and flags the two files that FIXED the class as broken,
+because they quote the `CREATE TABLE IF NOT EXISTS` they exist to neutralise.
+
+### Changed
+
+- `FILES_FLOOR` 32 to 39, `ARMS_FLOOR` 247 to 262, both equal to the run's own printed
+  values. **`WAIVED_CEILING` untouched at 0** — `git log -L` on the declaration returns
+  exactly one commit across all twelve plans, the phase base.
+- `maskJsComments` gains two calibration arms. One is the review's verbatim; the other
+  was **replaced after measuring the review's own input as vacuous** — in `/a\/\/b/`
+  the slashes are backslash-escaped, so no adjacent `//` exists and the arm passed even
+  with the branch neutered. A character-class version fires.
+- Stale end-state claims corrected in `run.mjs`, `STATE.md`, `REQUIREMENTS.md` and
+  `ROADMAP.md`. Dated line anchors were given currency notes rather than rewritten —
+  overwriting a dated measurement falsifies the record it exists to keep.
+
+### Scope — the phase ends at 39 of 44, and says so on every run
+
+`pending:` names exactly one file, `test_compute_jobs_error_kind_copy_parity.sql`, whose
+apply list needs migration `20260826140000` — and that migration raises `0A000` on a lane
+without pg_cron. It and the four `lane-blocked:` files are owed to **Phase 164.4.1
+PGCRON-LANE**. Five files excluded, all five printed by name with a reason every run,
+none defined away.
+
+### Booked, not forced
+
+- `[REDUNDER-PENDING-UNBOOKED]` — `pending:` is the only class line without a TODO id or
+  CI assertion. Deliberately NOT closed by hardcoding an id: the class is generic, so a
+  fixed id becomes false the moment an unrelated second file enters it.
+- `[VITEST-CORPUS-TIMEOUT-01]` — `drift-check-scripts.test.ts` scans 262 migrations inside
+  vitest's default 5000 ms budget. Measured twice each on identical bytes: loaded box
+  times out (suite 193.9 s), quiet box passes (102.7 s). The margin shrinks with every
+  migration added.
+
+## [0.77.11.0] - 2026-09-04
+
+### Phase 164.4 (wave 11) — the last four non-mixed idiom files
+
+Comment twins only: 185 added lines, 0 removed, 0 non-comment. Batch 7 of 8.
+`arms: 247/247/0`, `biting: 247`, tallies agree, 0 waivers.
+
+### Fixed — the layered-anchor trap, measured rather than assumed
+
+The dedupe gate's B1 single-step mutation was built, proven applied by diff, run on a
+real lane — and came back **GREEN**. The index dedupes behind the RPC and the lost-race
+re-read returns the same id, so no single mutation falsifies the anchor. B1's twin
+carries both steps. A mutation that goes green is a finding about the anchor, not a
+mistake to retry.
+
+### Fixed — the re-base hazard hit three of four files
+
+A function's header named one migration while it was last defined in another:
+`replace_allocator_equity_snapshots` in `20260602183000` (not `20260529160000`),
+`compute_jobs_kind_target_coherence` in `20260717233529` (not `20260710130000`).
+
+### Changed
+
+- `FILES_FLOOR` 28 to 32, `ARMS_FLOOR` 239 to 247. `WAIVED_CEILING` untouched at 0.
+- **The `sql-mutation` timing model is LEGS, not arms.** SHA-bound on ubuntu: 239 arms /
+  28 files = 295 legs in 369 s; 247 arms / 32 files = 311 legs in 464 s. An arms-only
+  model cannot explain +8 arms costing +95 s — the job also runs a baseline and a restore
+  leg per FILE. Phase end projects to 340 legs, well inside `timeout-minutes: 15`.
+
+### Known
+
+`pending:` names EIGHT files, not the seven this batch projected. The eighth is the
+pg_cron-blocked parity file, so the phase's end state is 39/71 with `pending: 1`, not
+40/71 with 0.
+
+## [0.77.10.0] - 2026-09-04
+
+### Phase 164.4 (wave 10) — five gate files, REDUCED from six
+
+Comment twins only. Five files, 20 sections: the wizard-session tenant-scope index, the
+wizard composite fence, the weight-snapshot seed SECDEF trigger, the csv-finalize auth
+guard, the resync-retry single-job substrate. `arms: 239/239/0`, 0 waivers.
+
+### Fixed — an assertion that aborted on a raw 23505 naming no arm
+
+`test_resync_retry_single_job.sql` assertion (b) inserted two draft rows with distinct
+wizard_session_ids. Under a narrowed unique index the INSERT raised a bare 23505, which
+names no arm, so the gate could not report WHICH claim failed. Wrapped in the exception
+idiom **the same file already used ten lines below**, so it now reports
+`TEST FAILED (b)`. The second founder decision this phase to take the root-cause fix over
+a waiver — `WAIVED_CEILING` stays 0.
+
+### Fixed — `[CI-GDPR-TIMEOUT-01]`: the tests were downloading a different tsx
+
+`gdpr-export-coverage-hook.test.ts` spawned `npx tsx` from a `mkdtemp` cwd with no
+`node_modules`. Measured: `npx tsx --version` took 0.96 s and reported **v4.23.13**, while
+`node_modules/.bin/tsx` took 0.082 s and reported **v4.23.0** — the pinned version. So the
+suite was both slow AND running an unpinned binary. Now spawns the pinned path; the file
+went 8.12 s to 1.93 s. Raising the deadline, the obvious fix, would have hidden the
+correctness half permanently.
+
+### Changed
+
+- `FILES_FLOOR` 23 to 28, `ARMS_FLOOR` 219 to 239.
+- The Phase 29 frozen-spine exit gate now pins `test_scenarios_rls.sql` byte-for-byte on
+  every NON-COMMENT line, replacing a `not.toContain` on the changed-file list that
+  collided with this phase's comment-only annotations (founder decision). Proven
+  falsifiable: an executable-line change reds naming the file, an appended comment does
+  not.
+
+### Deferred by founder decision
+
+A sixth file, `test_compute_jobs_error_kind_copy_parity.sql`, is un-baselineable until the
+pg-lane can host pg_cron — its apply list needs `20260826140000`, which hard-raises
+`0A000` without the extension. Rather than grow `[REDUNDER-PGCRON]` to a fifth file, the
+founder chose to retire the deferral by putting pg_cron ON the lane as its own phase:
+**164.4.1 PGCRON-LANE**.
+
+## [0.77.9.0] - 2026-09-04
+
+### Phase 164.4 (wave 9) — six five-section gate files
+
+Comment twins only. 30 sections across six files, `arms: 219/219/0`, 0 waivers.
+
+### Fixed — `[REDUNDER-WAIVER-01]`, by REORDER rather than by waiver
+
+`test_get_published_trust_signals.sql` assertion 5 asserts
+`has_function_privilege('anon', …, 'EXECUTE')` but sat ~90 lines BEHIND assertions 1-3,
+which call that function AS anon. Revoking the grant therefore reddened assertion 1 with a
+raw 42501 before assertion 5 ever ran, so 5 looked un-falsifiable and was headed for the
+phase's first waiver.
+
+Resolved by a byte-identical relocation — 6 non-comment lines removed, the same 6 added,
+label and message unchanged — putting the precondition ahead of its dependants. Under
+`REVOKE EXECUTE … FROM anon` the file now exits 3 with
+`TEST FAILED (5): anon lacks EXECUTE` as the FIRST and only error, and **zero occurrences
+of 42501**.
+
+⭐ The lesson, recorded in `TODOS.md` with both rejected branches: *an arm that looks
+un-falsifiable because an earlier assertion consumes its precondition is an ORDERING
+defect, not a grammar limit.*
+
+### Changed
+
+- `FILES_FLOOR` 17 to 23, `ARMS_FLOOR` 189 to 219. `WAIVED_CEILING` untouched at 0.
+- The `sql-mutation` timeout re-justified from measured ubuntu wall clocks rather than
+  from an assumed per-arm cost.
+
+### Booked, not forced
+
+`[REDUNDER-SWEEPCOPY]` — `test_scenario_downgrade_sweep.sql` re-implements
+`scripts/sweeps/f4-memberkeyids-restamp.sql` by verbatim copy. Its arms are proven
+falsifiable but target the gate's OWN copy, so no mutation of it can reach production.
+Out of scope for 164.4.
+
 ## [0.77.8.0] - 2026-09-03
 
 ### Phase 164.4 (wave 8) — csv-finalize, funding fees, derived equity, user notes

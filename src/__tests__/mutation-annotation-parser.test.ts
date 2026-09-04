@@ -28,6 +28,7 @@ import { fileURLToPath } from "node:url";
 
 import {
   IDENTITY_CARRIER,
+  PG_CRON_EXTENSION,
   classifyGateIdiom,
   gateNeedsPgCron,
   parseAnnotations,
@@ -714,8 +715,8 @@ describe("R2-W04 / GRAMMAR rule 3b — a mutation may not REWRITE an arm identit
 
     expect(violations).toEqual([]);
     // Non-vacuity: the walk must actually have walked something.
-    expect(armsSeen).toBe(247);
-    expect(stepsSeen).toBe(236);
+    expect(armsSeen).toBe(262);
+    expect(stepsSeen).toBe(253);
   });
 
   // ══════════════════════════════════════════════════════════════════════════
@@ -1420,7 +1421,18 @@ describe("GRAMMAR rule 3c — an identity is READ only where the RUNNER's gate r
     // NOT NULL post-verify beside the column change. 98 of the corpus's 334
     // steps are `sql` — the count is unchanged because this batch added no
     // live-DB grant/policy drift arm.
-    expect(needles.length).toBe(236);
+    // RE-MEASURED 2026-09-04 (plan 164.4-11, the FINAL batch): 253 needles
+    // across 262 arms. The 15 new arms carried 17 new needles, the same
+    // more-needles-than-arms shape once more, and again from TWO layered arms:
+    // sync-status `0a` must strip the applied-ness id from BOTH places it
+    // occurs inside ONE function COMMENT, and wizard-session `3f` must stand
+    // down its own migration's post-verify (e2) beside the body edit it makes.
+    // ⛔ `needles.length` is a SEPARATE pin from `stepsSeen` above and has its
+    // own stale integer every batch — plan 164.4-10 recorded that trap and it
+    // reproduced here. Both were RUN, not reasoned about. 98 of the corpus's
+    // 351 steps are `sql`, unchanged: this batch added no live-DB grant/policy
+    // drift arm either.
+    expect(needles.length).toBe(253);
     expect(needles.filter((n) => /TEST\s+FAILED\s*\(/i.test(n))).toEqual([]);
   });
 });
@@ -1603,6 +1615,72 @@ describe("classifyGateIdiom — the exclusion decision, over HAND-BUILT texts", 
     expect(classifyGateIdiom(LIVE_GUARD_SQL)).toBe("lane-blocked");
   });
 
+  it("WR-01: a LIVE probe for ANOTHER extension, with pg_cron only in neighbouring prose, is NOT lane-blocked", () => {
+    // The third member of the pair, and the direction the pair could not
+    // reach. The two fixtures above both vary the `pg_extension` half and hold
+    // the `pg_cron` half live; this one does the opposite — the CATALOG probe
+    // is live code and the only `pg_cron` bytes in the file are inside `--`
+    // comments.
+    //
+    // ⛔ Why this direction is the dangerous one: `lane-blocked` is a DEFERRAL
+    // class. A file wrongly filed there leaves `pending:`, stops being counted
+    // as work outstanding, and nothing will ever annotate it — the miss is
+    // silent and permanent. The pre-2026-09-04 implementation read the pg_cron
+    // half off RAW `.text` and returned `true` here.
+    // ⚠️ The `-- pg_cron` comment sits INSIDE the `IF … THEN` head unit, not
+    // above it. That placement is load-bearing: a comment on its own line
+    // before the statement never enters `stmt.text` at all (the scanner sets
+    // `stmtStart` at the first code character), so an outside comment could
+    // not have exercised the old read. This is the shape a real gate produces
+    // — a note explaining WHY the neighbouring extension is not the one being
+    // probed, written where the probe is.
+    const otherExtensionProbe = [
+      "DO $$",
+      "BEGIN",
+      "  IF NOT EXISTS (",
+      "    -- pg_cron is irrelevant to this assertion; scheduling is covered elsewhere.",
+      "    SELECT 1 FROM pg_extension WHERE extname = 'pgcrypto'",
+      "  ) THEN",
+      "    RAISE EXCEPTION 'TEST FAILED (OTHEREXT 1): pgcrypto is not installed';",
+      "  END IF;",
+      "END $$;",
+    ].join("\n");
+
+    // Calibration: both halves of the classifier's input really are present in
+    // the bytes, AND in the SAME statement — or this arm proves nothing about
+    // the asymmetry it exists to close.
+    const probeStmt = tokenizeStatements(otherExtensionProbe).find((s) =>
+      /\bpg_extension\b/i.test(s.executableText),
+    );
+    expect(probeStmt, "a statement must probe pg_extension in EXECUTABLE text").toBeDefined();
+    expect(probeStmt!.text, "and pg_cron must fall inside that same statement's RAW text").toContain(
+      "pg_cron",
+    );
+    expect(otherExtensionProbe).toContain(IDENTITY_CARRIER);
+
+    expect(gateNeedsPgCron(otherExtensionProbe)).toBe(false);
+    expect(classifyGateIdiom(otherExtensionProbe)).toBe("pending");
+  });
+
+  it("WR-01: the pg_cron half is read case-INSENSITIVELY, matching the catalog half", () => {
+    // `PG_CRON_CATALOG_RE` carries `/i`; the literal read used `.includes`,
+    // which does not. A gate spelling the extension `'PG_CRON'` — legal SQL,
+    // `extname` is just text — was a live probe the classifier called prose.
+    const shoutedProbe = [
+      "DO $$",
+      "BEGIN",
+      "  IF NOT EXISTS (SELECT 1 FROM PG_EXTENSION WHERE extname = 'PG_CRON') THEN",
+      "    RAISE EXCEPTION 'TEST FAILED (SHOUTED 1): pg_cron is not installed';",
+      "  END IF;",
+      "END $$;",
+    ].join("\n");
+    expect(shoutedProbe, "the literal must be upper-case, or this arm is a duplicate").not.toContain(
+      "'pg_cron'",
+    );
+    expect(gateNeedsPgCron(shoutedProbe)).toBe(true);
+    expect(classifyGateIdiom(shoutedProbe)).toBe("lane-blocked");
+  });
+
   it("`unreachable` is decided BEFORE `lane-blocked` — a non-idiom file that probes pg_cron stays unreachable", () => {
     // `test_retention_crons_safe.sql` in the real corpus is exactly this shape,
     // and the ordering matters: the reason no arm of it can be judged is the
@@ -1620,7 +1698,151 @@ describe("classifyGateIdiom — the exclusion decision, over HAND-BUILT texts", 
     expect(nonIdiomProbe).not.toContain(IDENTITY_CARRIER);
     expect(classifyGateIdiom(nonIdiomProbe)).toBe("unreachable");
   });
+
+  describe("WR-04: the SECOND reader is a real reader — calibrated before it is trusted", () => {
+    // ⛔ An oracle nobody calibrated is not an oracle. If `naiveClassify` were
+    // stuck on one verdict, or blind to comments, the corpus partition test
+    // further down would pass for the wrong reason. These arms drive it to all
+    // five of its outcomes over the SAME hand-built texts and fixtures the
+    // tokenizer is pinned against above, so the two readers are known to be
+    // reading — not merely known to agree.
+    it("reaches annotated / pending / unreachable without touching parse.mjs", () => {
+      expect(naiveClassify(PENDING_SQL)).toBe("pending");
+      expect(naiveClassify(UNREACHABLE_SQL)).toBe("unreachable");
+      expect(naiveClassify("-- RED-UNDER: something\nSELECT 1;\n")).toBe("annotated");
+    });
+
+    it("strips `--` comments, so a commented-out raise is not a raise to it either", () => {
+      const commentedOut = "DO $$\nBEGIN\n  -- RAISE EXCEPTION 'TEST FAILED (X 1)';\nEND $$;";
+      // ⛔ The obvious first line here — `expect(commentedOut).toContain("RAISE
+      // EXCEPTION")` — was written and REMOVED 2026-09-04: it reads a const bound
+      // to a literal three lines up and asserts a substring of that same literal,
+      // so it cannot fail for any change to `naiveClassify`. The repo's own
+      // primitive-D detector (`self-referential-oracle.test.ts`) caught it. The
+      // point it was making is preserved where it belongs — in the message of the
+      // assertion that CAN fail, contrasting the reader against a plain grep.
+      expect(
+        naiveClassify(commentedOut),
+        "a grep for `RAISE EXCEPTION` WOULD match these bytes — the reader must not, because the only raise is behind a `--`",
+      ).toBe("inert");
+    });
+
+    it("⛔ and it is BLIND to block comments and to literals — the divergence, pinned", () => {
+      // ⭐ FOUND BY THIS CALIBRATION, 2026-09-04, not predicted by it.
+      // `INERT_SQL`'s three lines are a `--` raise, a `/* … */` raise and a
+      // raise spelled inside a single-quoted literal. The tokenizer sees zero
+      // executable raises and says `inert`. The naive reader strips only `--`,
+      // so lines 2 and 3 read to it as live code carrying the identity carrier,
+      // and it says `pending`.
+      //
+      // This is asserted rather than repaired ON PURPOSE. Teaching the second
+      // reader about block comments and cross-line literals would make it a
+      // second copy of `scanRegion`, which is precisely the duality this suite
+      // exists to remove — and a second copy would agree with the first for the
+      // reason a photocopy agrees with its original. A weaker-but-independent
+      // oracle whose weakness is NAMED is worth more than a faithful clone.
+      //
+      // ⚠️ The consequence is bounded and must stay bounded: it means the
+      // corpus partition test below can only be trusted while the two readers
+      // agree over the REAL corpus, which is measured there at zero
+      // disagreements. It is not a licence to add exceptions to that test.
+      expect(classifyGateIdiom(INERT_SQL)).toBe("inert");
+      expect(naiveClassify(INERT_SQL)).toBe("pending");
+      expect(INERT_SQL, "the divergence is driven by these two masking rules").toContain("/*");
+      expect(INERT_SQL).toContain("''TEST FAILED (DOC 3)");
+    });
+
+    it("reproduces the lane-blocked fixture PAIR's flip on its own", () => {
+      expect(naiveClassify(COMMENT_ONLY_SQL)).toBe("pending");
+      expect(naiveClassify(LIVE_GUARD_SQL)).toBe("lane-blocked");
+    });
+  });
 });
+
+// ═════════════════════════════════════════════════════════════════════════
+// THE SECOND READER (review WR-04, 2026-09-04)
+// ═════════════════════════════════════════════════════════════════════════
+//
+// A gate-file classifier that reaches `scanCorpus`'s five verdicts WITHOUT
+// touching `parse.mjs`. It shares no regex, no primitive and no import with
+// the code under test: the corpus partition test below compares the two set
+// for set, and a control that calls the functions it is checking is not a
+// control (that is exactly what the previous version of that test did).
+//
+// ⚠️ IT IS DELIBERATELY WEAKER, in ways worth naming because they are where a
+// future disagreement will come from:
+//   • `--` is stripped to end of line by a quote-parity heuristic, not by the
+//     tokenizer's state machine. Block comments (`/* … */`) are not handled at
+//     all, and a `'` inside a `--` comment throws the parity off for that line.
+//   • the identity carrier is read out of a `grep -A`-style window running from
+//     the RAISE line to the first line carrying a `;` (40 lines max), not out
+//     of a tokenized statement. A raise whose message literal contains a `;`
+//     before the carrier would truncate the window.
+//   • dollar-quoted bodies, nested `$tag$` and cross-line literals are invisible.
+//
+// Those weaknesses are REAL and are pinned as assertions, not left as prose:
+// over the adversarial hand-built `INERT_SQL` the two readers DISAGREE
+// (`inert` vs `pending`), and that disagreement is asserted in the calibration
+// block above. MEASURED 2026-09-04 over all 71 files in `supabase/tests/`:
+// ZERO disagreements. So the two readers are demonstrably different machines
+// that happen to agree on the corpus — which is the only shape in which their
+// agreement means anything.
+//
+// ⚠️ It DOES share two things with `parse.mjs`, deliberately: the needles
+// `IDENTITY_CARRIER` and `PG_CRON_EXTENSION`. Those are the target strings,
+// not the reading of them — the disagreement this oracle hunts is in HOW a
+// file is scanned, and a second spelling of the needle would only ever raise a
+// false alarm about a typo. Every regex, every masking decision and every
+// notion of "statement" below is its own.
+const NAIVE_ANNOTATION_RE = /^[ \t]*--[ \t]*RED-UNDER(-M)?:/;
+const NAIVE_RAISE_RE = /\bRAISE\s+EXCEPTION\b/i;
+const NAIVE_PG_EXTENSION_RE = /\bpg_extension\b/i;
+
+/** `line` with any `--` comment lopped off, by naive quote parity. */
+function naiveCodeOf(line: string): string {
+  let quotes = 0;
+  for (let i = 0; i < line.length; i += 1) {
+    if (line[i] === "'") quotes += 1;
+    else if (line[i] === "-" && line[i + 1] === "-" && quotes % 2 === 0) return line.slice(0, i);
+  }
+  return line;
+}
+
+/** `grep -A`: RAW lines from `i` to the first one carrying a `;`, capped. */
+function naiveWindow(lines: string[], i: number): string {
+  let acc = "";
+  for (let j = i; j < lines.length && j < i + 40; j += 1) {
+    acc += lines[j] + "\n";
+    if (lines[j].includes(";")) break;
+  }
+  return acc;
+}
+
+function naiveClassify(
+  text: string,
+): "annotated" | "pending" | "unreachable" | "inert" | "lane-blocked" {
+  const lines = text.split("\n");
+  if (lines.some((l) => NAIVE_ANNOTATION_RE.test(l))) return "annotated";
+  let raises = false;
+  let idiom = false;
+  let needsPgCron = false;
+  for (let i = 0; i < lines.length; i += 1) {
+    const code = naiveCodeOf(lines[i]);
+    if (NAIVE_RAISE_RE.test(code)) {
+      raises = true;
+      if (naiveWindow(lines, i).includes(IDENTITY_CARRIER)) idiom = true;
+    }
+    if (
+      NAIVE_PG_EXTENSION_RE.test(code) &&
+      naiveWindow(lines, i).toLowerCase().includes(PG_CRON_EXTENSION)
+    ) {
+      needsPgCron = true;
+    }
+  }
+  if (!raises) return "inert";
+  if (!idiom) return "unreachable";
+  return needsPgCron ? "lane-blocked" : "pending";
+}
 
 describe("against the real corpus (reads via node:fs, never shell grep)", () => {
   const GATE = join(REPO_ROOT, "supabase", "tests", "test_strategy_shares_rls.sql");
@@ -1666,19 +1888,22 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
     }
   });
 
-  it("scanCorpus reports 32 of 71 files annotated", () => {
+  it("scanCorpus reports 39 of 71 files annotated", () => {
     const corpus = scanCorpus(join(REPO_ROOT, "supabase", "tests"));
-    // ⛔ The DENOMINATOR stays 71 — every `.sql` in the directory. The phase's
-    // end state is `files 39/71` with the other 32 PRINTED BY NAME
-    // (`unreachable:` 27 + `lane-blocked:` 4 + the pg_cron-deferred
-    // test_compute_jobs_error_kind_copy_parity.sql, which Phase 164.4.1 takes),
-    // never `39/39` with the gap quietly redefined away. ⚠️ 39, not the 40 of
-    // SCOPE AMENDMENT #2: plan 09 deferred that one file by founder decision.
+    // ⛔ The DENOMINATOR stays 71 — every `.sql` in the directory. The phase
+    // REACHED its end state here (plan 164.4-11, 2026-09-04): `files 39/71`
+    // with the other 32 PRINTED BY NAME (`unreachable:` 27 + `lane-blocked:` 4
+    // + the pg_cron-deferred test_compute_jobs_error_kind_copy_parity.sql,
+    // which Phase 164.4.1 takes), never `39/39` with the gap quietly redefined
+    // away. ⚠️ 39, not the 40 of SCOPE AMENDMENT #2: plan 09 deferred that one
+    // file by founder decision.
     expect(corpus.filesTotal).toBe(71);
-    expect(corpus.filesAnnotated).toBe(32);
+    expect(corpus.filesAnnotated).toBe(39);
     expect(corpus.annotatedFiles).toEqual([
       "test_allocator_equity_derived_rls.sql",
       "test_allocator_equity_pre_terminus_flag.sql",
+      "test_api_keys_exchange_not_user_writable.sql",
+      "test_api_keys_insert_not_client_writable.sql",
       "test_api_keys_venue_identity_uniq.sql",
       "test_capital_ownership_allocation_guard.sql",
       "test_capital_ownership_column.sql",
@@ -1691,10 +1916,12 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
       "test_funding_fees_rls.sql",
       "test_get_published_trust_signals.sql",
       "test_get_verified_cohort_rank_gate.sql",
+      "test_guard_wizard_draft_updates_auth_uid.sql",
       "test_ledger_refresh_composite_arm.sql",
       "test_ledger_refresh_fanout.sql",
       "test_ledger_refresh_staleness.sql",
       "test_metrics_by_basis_write.sql",
+      "test_profiles_privileged_columns_locked.sql",
       "test_resync_retry_single_job.sql",
       "test_scenario_downgrade_sweep.sql",
       "test_scenario_shares_rls.sql",
@@ -1702,13 +1929,16 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
       "test_set_compute_job_progress.sql",
       "test_strategies_private_owner_isolation.sql",
       "test_strategy_analytics_series_completeness.sql",
+      "test_strategy_keys_publish_integrity.sql",
       "test_strategy_keys_rls.sql",
       "test_strategy_shares_rls.sql",
       "test_strategy_verifications_wizard_session_tenant_scope.sql",
+      "test_sync_status_marked_refresh_protected.sql",
       "test_user_notes_dashboard_scope.sql",
       "test_weight_snapshot_seed_secdef.sql",
       "test_wizard_composite_fence.sql",
       "test_wizard_composite_members.sql",
+      "test_wizard_session_idempotency.sql",
     ]);
   });
 
@@ -1862,26 +2092,15 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
     // TRIPWIRE, not an endorsement: it flips the day the classifier learns to
     // read apply lists, or the day the lane can host pg_cron.
     expect(corpus.pendingFiles).toContain("test_compute_jobs_error_kind_copy_parity.sql");
-    // ⭐ 164.4-10: the EXACT remaining-work set, not merely a `toContain`.
-    // Batch 7 annotated the last non-mixed idiom files, so what is left is
-    // EIGHT names — the SEVEN ⚠️ mixed files plan 11 takes, plus the pg_cron
-    // tripwire above. ⚠️ EIGHT, not the seven plan 164.4-10 was written
-    // against: that plan predated plan 09's founder-decided deferral of
-    // test_compute_jobs_error_kind_copy_parity.sql to Phase 164.4.1
-    // PGCRON-LANE. This is the phase's own statement of what remains, so it is
-    // pinned as a set: a file silently skipped by plan 11, or one that quietly
-    // stops being `pending`, fails HERE by name rather than by a count nobody
-    // reads.
-    expect(corpus.pendingFiles).toEqual([
-      "test_api_keys_exchange_not_user_writable.sql",
-      "test_api_keys_insert_not_client_writable.sql",
-      "test_compute_jobs_error_kind_copy_parity.sql",
-      "test_guard_wizard_draft_updates_auth_uid.sql",
-      "test_profiles_privileged_columns_locked.sql",
-      "test_strategy_keys_publish_integrity.sql",
-      "test_sync_status_marked_refresh_protected.sql",
-      "test_wizard_session_idempotency.sql",
-    ]);
+    // ⭐ 164.4-11: the EXACT remaining-work set, and it is now a SINGLETON.
+    // Batch 8 annotated the seven ⚠️ mixed files, so all that is left is the
+    // pg_cron tripwire above — one name, owed to Phase 164.4.1 PGCRON-LANE by
+    // founder decision in plan 09. ⛔ This assertion is what makes an empty
+    // `pending:` line impossible to ship as an attestation of completeness: the
+    // phase did NOT reach 40/71, and pinning the set rather than a count is
+    // what stops that being papered over. A file silently skipped, or one that
+    // quietly stops being `pending`, fails HERE by name.
+    expect(corpus.pendingFiles).toEqual(["test_compute_jobs_error_kind_copy_parity.sql"]);
   });
 
   it("the FIVE classes sum to filesTotal — annotated + pending + unreachable + inert + lane-blocked", () => {
@@ -1905,24 +2124,43 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
     expect(corpus.laneBlockedFiles).toHaveLength(4);
   });
 
-  it("the five classes PARTITION the corpus, checked against a SECOND derivation", () => {
-    // ⛔ WHAT THIS USED TO BE, and why it changed. It asserted
+  it("the five classes PARTITION the corpus, checked against an INDEPENDENT derivation", () => {
+    // ⛔ WHAT THIS USED TO BE, in two steps, and why each changed.
+    //
+    // (1) 2026-09-02. It asserted
     //   pendingFiles.length === filesTotal − filesAnnotated − unreachable − inert
     // and `new Set(all).size === filesTotal`. Both hold BY CONSTRUCTION of the
     // code under test: `scanCorpus` pushes each file into exactly one array and
-    // `readdirSync` yields unique names. That is the implementation's own
-    // bookkeeping restated — a money-math-style self-referential oracle, which
-    // this repo forbids.
+    // `readdirSync` yields unique names. MEASURED, not asserted: swapping the
+    // two `push` targets in `scanCorpus` (43 pending files filed as
+    // `unreachable` and 27 unreachable filed as `pending`) leaves the
+    // arithmetic balanced — 27 === 71 − 1 − 43 − 0 — and the set size at 71, so
+    // BOTH replaced lines returned `true` under a corpus that was completely
+    // misfiled. It was replaced by a set-for-set comparison.
     //
-    // MEASURED 2026-09-02, not asserted: swapping the two `push` targets in
-    // `scanCorpus` (43 pending files filed as `unreachable` and 27 unreachable
-    // filed as `pending`) leaves the arithmetic balanced — 27 === 71 − 1 − 43 − 0
-    // — and the set size at 71, so BOTH replaced lines returned `true` under a
-    // corpus that was completely misfiled.
+    // (2) 2026-09-04, review WR-04. That set-for-set comparison called
+    // `parseAnnotations` and `classifyGateIdiom` — the SAME two functions
+    // `scanCorpus` calls, in the same order, under the same predicate. It was
+    // `scanCorpus`'s body retyped, and could disagree only on `readdirSync`
+    // parity or if `classifyGateIdiom` grew a sixth return value. In a phase
+    // whose thesis is "a control that agrees by construction proves nothing",
+    // a control NAMED for independence and not having any is the defect this
+    // suite exists to find.
     //
-    // So the four sets are RE-DERIVED here, from `readdirSync` + the two
-    // primitives, and compared SET FOR SET. A misfiled name now fails against
-    // an independent derivation instead of against itself.
+    // ⭐ So the second derivation now shares NO CODE with `parse.mjs` at all.
+    // `naiveClassify` above is a line-oriented, grep-shaped reader: strip `--`
+    // to end of line, match `RAISE EXCEPTION` on what is left, read the
+    // carrier out of a `grep -A`-style window. It is deliberately WEAKER than
+    // the tokenizer (see its own header) and reaches the same five verdicts by
+    // an entirely different route.
+    //
+    // MEASURED 2026-09-04 over all 71 files in `supabase/tests/`: the two
+    // readers agree on EVERY file — zero disagreements — which is why this is
+    // asserted as exact set equality rather than "modulo a known divergence
+    // list". ⚠️ A future disagreement is a FINDING about one of the two
+    // readers and must be investigated at the file named; it must NOT be
+    // absorbed by adding that file to an exception list, which would restore
+    // exactly the agree-by-construction property this rewrite removed.
     const dir = join(REPO_ROOT, "supabase", "tests");
     const names = readdirSync(dir)
       .filter((f) => f.endsWith(".sql"))
@@ -1933,16 +2171,12 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
       pending: [],
       unreachable: [],
       inert: [],
-      // 164.4-03. Keyed by the classifier's OWN return value, so a class added
-      // to `classifyGateIdiom` without a home here throws on the push rather
-      // than being silently dropped from the comparison.
       "lane-blocked": [],
     };
     for (const name of names) {
-      const text = readFileSync(join(dir, name), "utf8");
-      const parsed = parseAnnotations(text, { file: name });
-      if (parsed.prose.length > 0 || parsed.structured.length > 0) expected.annotated.push(name);
-      else expected[classifyGateIdiom(text)].push(name);
+      // Keyed by the naive reader's OWN verdict, so a class the two readers
+      // do not share throws on the push rather than being silently dropped.
+      expected[naiveClassify(readFileSync(join(dir, name), "utf8"))].push(name);
     }
 
     const corpus = scanCorpus(dir);

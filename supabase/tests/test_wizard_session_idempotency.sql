@@ -18,6 +18,19 @@
 --
 -- Usage:
 --   psql "$DATABASE_URL" -f supabase/tests/test_wizard_session_idempotency.sql
+--
+-- ⭐ MACHINE-EXECUTABLE TWINS (phase 164.4, REDUNDER-BACKFILL). The prose
+-- RED-UNDER below carries an adjacent `RED-UNDER-M` object that
+-- scripts/mutation-runner executes on every push: it mutates COPIES on a
+-- throwaway pg-lane cluster, requires the FIRST `TEST FAILED (…)` to name that
+-- arm, and restores GREEN. Schema: scripts/mutation-runner/GRAMMAR.md.
+-- ⚠️ ONE SECTION. Fifteen of this file's sixteen raises are `TEST FAILED:` or
+-- `TEST BLOCKED (0)` — no parenthesised arm, or an arm the identity regex does
+-- not read as one — so `3f` is the only identity here and the only section.
+-- ⚠️ THE APPLY LIST CLEARS THE `:274` SKIP: it carries 20260814120000, so the
+-- baseline prints `Section 4 OK` and `PASS: … ALL assertions armed`, never the
+-- one-skip variant (MEASURED 2026-09-04).
+-- RED-UNDER-SETUP: {"apply":["scripts/pg-lane/fixtures/01-fixture-core.sql","scripts/pg-lane/fixtures/02-fixture-sanitize-tables.sql","scripts/pg-lane/fixtures/03-fixture-compute-jobs.sql","scripts/pg-lane/fixtures/05-fixture-wizard-composite.sql","scripts/pg-lane/fixtures/07-fixture-supabase-default-privileges.sql","scripts/pg-lane/fixtures/11-fixture-api-keys-created-at.sql","scripts/pg-lane/fixtures/13-fixture-csv-finalize-fold.sql","supabase/migrations/20260602190000_f6_wizard_session_idempotency.sql","supabase/migrations/20260710120000_strategy_keys.sql","supabase/migrations/20260710180000_wizard_composite.sql","supabase/migrations/20260728120000_csv_finalize_double_submit_idempotency.sql","supabase/migrations/20260811210000_api_keys_attested_venue.sql","supabase/migrations/20260812083206_api_keys_venue_account_id.sql","supabase/migrations/20260813150106_wizard_rpcs_service_role_writer.sql","supabase/migrations/20260814120000_wizard_rpcs_revoke_authenticated.sql"]}
 
 DO $$
 DECLARE
@@ -218,6 +231,19 @@ BEGIN
   --       claims. Left unchecked it is a silent green: something applied §3 of
   --       Migration B without §1/§2, or a later migration re-based the body onto
   --       a stale source, and the file reports a clean skip either way.
+  -- RED-UNDER: put migration 20260814120000's create_wizard_strategy back into
+  --            the incoherent half-state (ii) this arm exists for — §3's REVOKE
+  --            applied, but the body re-based onto Migration A's DECLARE block —
+  --            by re-declaring `v_auth_uid` as CODE in that body.
+  --            ⚠️ LAYERED, and it has to be: that same migration's post-verify
+  --            (e2) greps its own comment-STRIPPED body for the identifier with
+  --            the identical `regexp_replace(…, '--[^\n]*', '')` this file uses,
+  --            so step 1 alone aborts the apply and the arm never reaches a lane
+  --            (MEASURED 2026-09-04). Step 2 stands (e2) down, and only (e2):
+  --            (e)'s `auth.uid()` check, the ACL checks and the SECURITY DEFINER
+  --            checks all still run, so the state the lane reaches is the real
+  --            half-state and not a migration with its verification switched off.
+  -- RED-UNDER-M: {"arm":"3f","apply":[{"kind":"edit","file":"supabase/migrations/20260814120000_wizard_rpcs_revoke_authenticated.sql","find":"DECLARE\n  v_jwt_role TEXT;\n  v_key_id UUID;\n  v_strategy_id UUID;\nBEGIN\n  -- ⭐ FINAL GATE (Phase 156 Migration B). Migration A's `authenticated` arm is","replace":"DECLARE\n  v_jwt_role TEXT;\n  v_auth_uid UUID;\n  v_key_id UUID;\n  v_strategy_id UUID;\nBEGIN\n  -- ⭐ FINAL GATE (Phase 156 Migration B). Migration A's `authenticated` arm is","occurrences":1},{"kind":"edit","file":"supabase/migrations/20260814120000_wizard_rpcs_revoke_authenticated.sql","find":"  IF strpos(v_create_code, 'v_auth_uid') > 0 THEN","replace":"  IF FALSE THEN","occurrences":1}]}
   IF v_auth_exec IS FALSE AND NOT v_b_live THEN
     RAISE EXCEPTION 'TEST FAILED (3f): INCOHERENT HALF-STATE. `authenticated` holds no EXECUTE on create_wizard_strategy — so migration 20260814120000 §3 ran here — but the body still declares v_auth_uid, i.e. it is still the Migration A (20260813150106) two-arm body. Either §1/§2 of that migration did not apply, or a later migration re-based the body onto a stale source. This is not a state any deployment should be in, and it must not be reported as a skip.';
   END IF;
