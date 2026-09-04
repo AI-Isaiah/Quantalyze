@@ -4,8 +4,8 @@ milestone: v1.20
 milestone_name: Backlog Burndown (Phases 158+)
 current_phase: 164.4
 current_phase_name: REDUNDER-BACKFILL
-status: executing
-stopped_at: Completed 164.4-11-PLAN.md (batch 8 — the seven mixed files; FILES_FLOOR 39, ARMS_FLOOR 262, 0 waivers). PR + SHA-bound ubuntu sql-mutation green still owed.
+status: complete
+stopped_at: Phase 164.4 CLOSED — all 12 plans executed and landed. Final wave PR #743 merged to main as 3ed6919e (v0.77.12.0), 24/24 SHA-bound green. End state: FILES_FLOOR 39, ARMS_FLOOR 262, 0 waivers, pending: 1 (test_compute_jobs_error_kind_copy_parity.sql, owed to 164.4.1 PGCRON-LANE).
 last_updated: "2026-09-04T17:38:02.554Z"
 last_activity: 2026-09-04
 last_activity_desc: Phase 164.4 execution started
